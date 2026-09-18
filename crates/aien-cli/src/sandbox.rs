@@ -183,7 +183,12 @@ pub fn promote_sandbox(commit_msg_opt: Option<&str>) -> Result<Value, String> {
 
     let mut install_success = false;
     if build_out.status.success() {
-        let release_bin = format!("{}/crates/aien-cli/target/release/aien-cli", REPO_DIR);
+        let ws_bin = format!("{}/target/release/aien-cli", REPO_DIR);
+        let release_bin = if Path::new(&ws_bin).exists() {
+            ws_bin
+        } else {
+            format!("{}/crates/aien-cli/target/release/aien-cli", REPO_DIR)
+        };
         let dest_bin = "/home/drakestapleton/.local/bin/aien";
         let install_status = Command::new("install")
             .args(["-m", "755", &release_bin, dest_bin])
@@ -350,5 +355,32 @@ pub fn handle_browser_command(parts: &[&str]) {
         println!("{}", "Spawning headless Chrome and running mirror self-test on Cockpit...".yellow());
         let res = browser_dispatch_tool("test", None);
         println!("{}", serde_json::to_string_pretty(&res).unwrap_or_default());
+    }
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_sandbox_constants() {
+        assert_eq!(SANDBOX_DIR, "/home/drakestapleton/workspace/aien-sandbox");
+        assert_eq!(REPO_DIR, "/home/drakestapleton/workspace/aien-sovereign-core");
+    }
+
+    #[test]
+    fn test_sandbox_dispatch_unknown() {
+        let args = json!({"action": "invalid_action"});
+        let res = sandbox_dispatch_tool(&args);
+        assert_eq!(res["status"], "error");
+    }
+
+    #[test]
+    fn test_sandbox_status_serialization() {
+        let res = status_sandbox();
+        assert!(res.is_ok());
+        let val = res.unwrap();
+        assert!(val.get("status").is_some());
     }
 }
