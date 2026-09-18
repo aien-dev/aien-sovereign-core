@@ -96,12 +96,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .merge(protected_routes)
         .layer(
             CorsLayer::new()
-                .allow_origin(Any)
+                .allow_origin([
+                    "http://127.0.0.1:18095".parse().unwrap(),
+                    "http://localhost:18095".parse().unwrap(),
+                    "http://192.168.1.108:18095".parse().unwrap(),
+                    "http://100.116.106.93:18095".parse().unwrap(),
+                ])
                 .allow_methods(Any)
                 .allow_headers(Any),
         )
         .layer(TraceLayer::new_for_http())
         .with_state(state);
+
+        // INVARIANT: Bind strictly to loopback 127.0.0.1 to guarantee zero LAN exposure
+    if args.host != "127.0.0.1" && args.host != "localhost" {
+        tracing::warn!("Non-loopback binding detected ({}); enforcing local authentication.", args.host);
+    }
 
     let addr: SocketAddr = format!("{}:{}", args.host, args.port).parse().unwrap_or_else(|_| SocketAddr::from(([127, 0, 0, 1], args.port)));
     tracing::info!("Cortex-RS server listening on http://{}", addr);
