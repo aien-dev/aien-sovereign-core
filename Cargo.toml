@@ -12,4 +12,5 @@ members = [
     "crates/spark-dream",
     "crates/spark-adapters",
     "crates/spark-crumbs",
+    "crates/spark-inquisitor",
 ]

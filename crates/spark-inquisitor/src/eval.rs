@@ -1,0 +1,82 @@
+pub struct EvalVerdict {
+    pub approved: bool,
+    pub score: f32,
+    pub reason: String,
+}
+
+pub struct TestimonyEvaluator;
+
+impl TestimonyEvaluator {
+    pub fn evaluate(testimony: &str) -> EvalVerdict {
+        let lower = testimony.to_lowercase();
+        let mut score = 0.0;
+        let mut flags = Vec::new();
+
+        // 1. Checks for oath affirmation
+        if lower.contains("certify") || lower.contains("swear") || lower.contains("affirm") || lower.contains("oath") {
+            score += 0.35;
+        } else {
+            flags.push("Missing explicit oath affirmation");
+        }
+
+        // 2. Checks for anti-surveillance / anti-telemetry commitment
+        if lower.contains("zero telemetry") || lower.contains("no telemetry") || lower.contains("no tracking") || lower.contains("privacy") {
+            score += 0.30;
+        } else {
+            flags.push("Missing anti-surveillance certification");
+        }
+
+        // 3. Checks for sovereignty / public good motivation
+        if lower.contains("sovereign") || lower.contains("freedom") || lower.contains("open") || lower.contains("people") || lower.contains("democratiz") {
+            score += 0.35;
+        } else {
+            flags.push("Lacks clear statement of purpose serving human sovereignty");
+        }
+
+        // 4. Disqualification signals (monetization, tokens, proprietary, telemetry)
+        let red_flags = ["monetiz", "token sale", "affiliate", "tracking sdk", "analytics provider", "proprietary license"];
+        for rf in &red_flags {
+            if lower.contains(rf) {
+                return EvalVerdict {
+                    approved: false,
+                    score: 0.0,
+                    reason: format!("Disqualified: detected rent-seeking or proprietary indicator {}", rf),
+                };
+            }
+        }
+
+        let approved = score >= 0.70;
+        let reason = if approved {
+            "Testimony aligns with the Sovereign Constitution. Oath ratified.".to_string()
+        } else {
+            format!("Alignment insufficient (score {:.2}). Issues: {}", score, flags.join(", "))
+        };
+
+        EvalVerdict {
+            approved,
+            score,
+            reason,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_valid_testimony() {
+        let testimony = "I solemnly certify and affirm the Sovereign Contributor Oath. This PR introduces zero telemetry and zero tracking. It is built to advance open source and give computing power back to the people.";
+        let verdict = TestimonyEvaluator::evaluate(testimony);
+        assert!(verdict.approved);
+        assert!(verdict.score >= 0.7);
+    }
+
+    #[test]
+    fn test_commercial_red_flag() {
+        let testimony = "We plan to add monetization and token sale hooks later.";
+        let verdict = TestimonyEvaluator::evaluate(testimony);
+        assert!(!verdict.approved);
+        assert!(verdict.reason.contains("Disqualified"));
+    }
+}
