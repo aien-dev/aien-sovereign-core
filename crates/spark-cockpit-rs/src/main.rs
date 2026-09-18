@@ -262,6 +262,13 @@ async fn main() {
         .route("/api/hive/adapter-chains", get(handle_get_hive_adapter_chains))
                 .route("/api/models", get(handle_get_models))
         .route("/api/models/swap", post(handle_swap_model))
+        .route("/api/operator", get(handle_get_operator).post(handle_post_operator))
+        .route("/api/engine/status", get(handle_engine_status))
+        .route("/api/imprints/install", post(handle_install_en2_imprint))
+        .route("/api/mail/status", get(handle_mail_status))
+        .route("/api/mail/inbox", get(handle_mail_inbox))
+        .route("/api/mail/sent", get(handle_mail_sent))
+        .route("/api/mail/send", post(handle_mail_send))
         .route("/api/artifacts", get(handle_list_artifacts))
         .route("/api/artifacts/{filename}", get(handle_get_artifact))
         .nest_service("/artifacts", ServeDir::new(ARTIFACTS_DIR))
@@ -907,6 +914,200 @@ async fn handle_get_hive_adapter_chains(State(state): State<AppState>) -> Json<V
             "chains": chains
         })),
         Err(e) => Json(json!({"error": e.to_string(), "chains": []})),
+    }
+}
+
+
+const OPERATOR_CONFIG_PATH: &str = "/home/drakestapleton/.config/sovereign/operator.toml";
+const MAIL_API_URL: &str = "http://127.0.0.1:18092";
+
+async fn handle_get_operator() -> Json<Value> {
+    if Path::new(OPERATOR_CONFIG_PATH).exists() {
+        if let Ok(content) = fs::read_to_string(OPERATOR_CONFIG_PATH) {
+            if let Ok(toml_val) = toml::from_str::<Value>(&content) {
+                return Json(toml_val);
+            }
+        }
+    }
+    Json(json!({
+        "operator": {
+            "name": "Drake Stapleton",
+            "email": "drake@aien.org",
+            "handle": "drake",
+            "sign_commits": true
+        },
+        "engine": {
+            "mode": "max",
+            "api_base_url": "http://127.0.0.1:18006/v1",
+            "model_id": "nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16",
+            "max_port": 18006,
+            "context_window": 32768,
+            "temperature": 0.7
+        }
+    }))
+}
+
+async fn handle_post_operator(Json(payload): Json<Value>) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let toml_str = toml::to_string_pretty(&payload)
+        .map_err(|e| (StatusCode::BAD_REQUEST, Json(json!({"error": e.to_string()}))))?;
+    
+    if let Some(parent) = Path::new(OPERATOR_CONFIG_PATH).parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    fs::write(OPERATOR_CONFIG_PATH, toml_str)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))))?;
+
+    Ok(Json(json!({"status": "saved", "config": payload})))
+}
+
+async fn handle_engine_status(State(state): State<AppState>) -> Json<Value> {
+    let start = Instant::now();
+    let health_res = state
+        .client
+        .get(format!("{}/health", MAX_SEAT_URL))
+        .timeout(Duration::from_millis(500))
+        .send()
+        .await;
+
+    let latency_ms = start.elapsed().as_millis();
+    let is_online = health_res.map(|r| r.status().is_success()).unwrap_or(false);
+
+    Json(json!({
+        "status": if is_online { "online" } else { "offline" },
+        "latency_ms": latency_ms,
+        "active_engine": "MAX Native Engine",
+        "active_model": "nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16",
+        "device": "Grace Blackwell GB10 (Dual GPU)",
+        "port": 18006,
+        "cost_per_million": "$0.00"
+    }))
+}
+
+async fn handle_install_en2_imprint(State(state): State<AppState>) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let seed_path = "/home/drakestapleton/workspace/aien-sovereign-core/imprints/en2-trinity/cortex-seed.json";
+    if !Path::new(seed_path).exists() {
+        return Err((StatusCode::NOT_FOUND, Json(json!({"error": "EN2 imprint seed not found"}))));
+    }
+
+    let seed_data = fs::read_to_string(seed_path)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))))?;
+    let lessons: Vec<Value> = serde_json::from_str(&seed_data)
+        .map_err(|e| (StatusCode::BAD_REQUEST, Json(json!({"error": e.to_string()}))))?;
+
+    let token = if Path::new(CORTEX_TOKEN_PATH).exists() {
+        fs::read_to_string(CORTEX_TOKEN_PATH).unwrap_or_default().trim().to_string()
+    } else {
+        String::new()
+    };
+
+    let mut installed_count = 0;
+    for lesson in lessons {
+        let payload = json!({
+            "kind": "entity",
+            "value": {
+                "canonicalName": lesson["canonicalName"],
+                "entityType": lesson["entityType"],
+                "content": lesson["content"],
+                "metadata": lesson["metadata"],
+                "space": "atlas-memory"
+            }
+        });
+
+        let mut req = state.client.post(format!("{}/api/cortex/write", CORTEX_URL));
+        if !token.is_empty() {
+            req = req.header("Authorization", format!("Bearer {}", token));
+        }
+        if let Ok(res) = req.json(&payload).send().await {
+            if res.status().is_success() {
+                installed_count += 1;
+            }
+        }
+    }
+
+    Ok(Json(json!({
+        "status": "installed",
+        "installed_count": installed_count,
+        "version": "2.0.0",
+        "imprint": "en2-trinity"
+    })))
+}
+
+async fn handle_mail_status(State(state): State<AppState>) -> Json<Value> {
+    let res = state
+        .client
+        .get(format!("{}/api/mail/status", MAIL_API_URL))
+        .timeout(Duration::from_millis(500))
+        .send()
+        .await;
+
+    match res {
+        Ok(r) if r.status().is_success() => {
+            let val = r.json::<Value>().await.unwrap_or(json!({"status": "error"}));
+            Json(val)
+        }
+        _ => Json(json!({
+            "status": "offline",
+            "inbox_count": 0,
+            "sent_count": 0,
+            "smtp_port": 2525,
+            "api_port": 18092,
+            "cortex_connected": false
+        })),
+    }
+}
+
+async fn handle_mail_inbox(State(state): State<AppState>) -> Json<Value> {
+    let res = state
+        .client
+        .get(format!("{}/api/mail/inbox", MAIL_API_URL))
+        .timeout(Duration::from_millis(800))
+        .send()
+        .await;
+
+    match res {
+        Ok(r) if r.status().is_success() => {
+            let val = r.json::<Value>().await.unwrap_or(json!([]));
+            Json(val)
+        }
+        _ => Json(json!([])),
+    }
+}
+
+async fn handle_mail_sent(State(state): State<AppState>) -> Json<Value> {
+    let res = state
+        .client
+        .get(format!("{}/api/mail/sent", MAIL_API_URL))
+        .timeout(Duration::from_millis(800))
+        .send()
+        .await;
+
+    match res {
+        Ok(r) if r.status().is_success() => {
+            let val = r.json::<Value>().await.unwrap_or(json!([]));
+            Json(val)
+        }
+        _ => Json(json!([])),
+    }
+}
+
+async fn handle_mail_send(
+    State(state): State<AppState>,
+    Json(payload): Json<Value>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let res = state
+        .client
+        .post(format!("{}/api/mail/send", MAIL_API_URL))
+        .timeout(Duration::from_secs(3))
+        .json(&payload)
+        .send()
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))))?;
+
+    if res.status().is_success() {
+        let val = res.json::<Value>().await.unwrap_or(json!({"status": "sent"}));
+        Ok(Json(val))
+    } else {
+        Err((StatusCode::BAD_GATEWAY, Json(json!({"error": "Failed to send via mail daemon"}))))
     }
 }
 
