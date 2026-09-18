@@ -74,20 +74,30 @@ pub struct ChatClient {
 
 impl ChatClient {
     pub fn new(endpoint: Option<String>, model: Option<String>) -> Self {
+        let ep = endpoint
+            .or_else(|| std::env::var("AIEN_MODEL_ENDPOINT").ok())
+            .unwrap_or_else(|| DEFAULT_ENDPOINT.to_string());
+        let md = model
+            .or_else(|| std::env::var("AIEN_MODEL_NAME").ok())
+            .unwrap_or_else(|| DEFAULT_MODEL.to_string());
         Self {
             client: Client::new(),
-            endpoint: endpoint.unwrap_or_else(|| DEFAULT_ENDPOINT.to_string()),
-            model: model.unwrap_or_else(|| DEFAULT_MODEL.to_string()),
+            endpoint: ep,
+            model: md,
         }
     }
 
     pub async fn stream_turn(&self, messages: &[Value], stream_to_stdout: bool) -> Result<String, String> {
+        self.stream_turn_with_limit(messages, stream_to_stdout, 4096).await
+    }
+
+    pub async fn stream_turn_with_limit(&self, messages: &[Value], stream_to_stdout: bool, max_tokens: usize) -> Result<String, String> {
         let payload = json!({
             "model": self.model,
             "messages": messages,
             "stream": true,
             "temperature": 0.2,
-            "max_tokens": 4096
+            "max_tokens": max_tokens
         });
 
         let res = self.client
@@ -155,15 +165,46 @@ impl ChatClient {
     }
 }
 
+fn parse_tool_call_json(raw: &str) -> Option<Value> {
+    let trimmed = raw.trim();
+    if let Ok(parsed) = serde_json::from_str::<Value>(trimmed) {
+        return Some(parsed);
+    }
+    // Delimiter repair: trailing "]" instead of "}"
+    if trimmed.ends_with("]") {
+        let mut fixed = trimmed[..trimmed.len() - 1].to_string();
+        fixed.push('}');
+        if let Ok(parsed) = serde_json::from_str::<Value>(&fixed) {
+            return Some(parsed);
+        }
+    }
+    // Truncated boundary repair: unclosed curlies
+    let open_c = trimmed.chars().filter(|&c| c == '{').count();
+    let close_c = trimmed.chars().filter(|&c| c == '}').count();
+    if open_c > close_c {
+        let mut candidate = trimmed.to_string();
+        if candidate.chars().filter(|&c| c == '"').count() % 2 != 0 {
+            candidate.push('"');
+        }
+        for _ in 0..(open_c - close_c) {
+            candidate.push('}');
+        }
+        if let Ok(parsed) = serde_json::from_str::<Value>(&candidate) {
+            return Some(parsed);
+        }
+    }
+    None
+}
+
 pub fn extract_tool_calls(text: &str) -> Vec<(String, Value)> {
     let mut calls = Vec::new();
-    let pattern = match regex::Regex::new(r"(?s)<tool_call>\s*(\{.*?\})\s*</tool_call>") {
+    let pattern = match regex::Regex::new(r"(?s)<tool_call>\s*(.*?)\s*(?:</tool_call>|$)") {
         Ok(p) => p,
         Err(_) => return calls,
     };
     for caps in pattern.captures_iter(text) {
-        if let Some(json_str) = caps.get(1) {
-            if let Ok(parsed) = serde_json::from_str::<Value>(json_str.as_str()) {
+        if let Some(json_match) = caps.get(1) {
+            if let Some(parsed) = parse_tool_call_json(json_match.as_str()) {
                 if let Some(name) = parsed.get("name").and_then(Value::as_str) {
                     if name != "tool_name" {
                         let args = parsed.get("arguments").cloned().unwrap_or(json!({}));
@@ -178,4 +219,36 @@ pub fn extract_tool_calls(text: &str) -> Vec<(String, Value)> {
 
 pub fn extract_tool_call(text: &str) -> Option<(String, Value)> {
     extract_tool_calls(text).into_iter().last()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_extract_tool_calls_robustness() {
+        let valid = r#"<tool_call>
+{"name": "run_command", "arguments": {"command": "git status"}}
+</tool_call>"#;
+        let calls = extract_tool_calls(valid);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, "run_command");
+        assert_eq!(calls[0].1["command"], "git status");
+
+        // Trailing bracket repair
+        let bracket_glitch = r#"<tool_call>
+{"name": "invoke_subagent", "arguments": {"role": "Auditor", "prompt": "check crates"}]
+</tool_call>"#;
+        let calls2 = extract_tool_calls(bracket_glitch);
+        assert_eq!(calls2.len(), 1);
+        assert_eq!(calls2[0].0, "invoke_subagent");
+        assert_eq!(calls2[0].1["role"], "Auditor");
+
+        // Truncated tool call (no closing tag)
+        let truncated = r#"<tool_call>
+{"name": "run_command", "arguments": {"command": "ls -la"}}"#;
+        let calls3 = extract_tool_calls(truncated);
+        assert_eq!(calls3.len(), 1);
+        assert_eq!(calls3[0].0, "run_command");
+    }
 }

@@ -121,7 +121,7 @@ pub fn execute_subagent(spec: SubagentSpec) -> Pin<Box<dyn Future<Output = Subag
             max_steps -= 1;
             step_count += 1;
 
-            let assistant_resp = match client.stream_turn(&messages, false).await {
+            let assistant_resp = match client.stream_turn_with_limit(&messages, false, 1024).await {
                 Ok(text) => text,
                 Err(e) => {
                     let err_msg = format!("Subagent inference failed: {}", e);
@@ -305,4 +305,64 @@ pub fn format_subagents_tui() -> String {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_subagent_spec_serialization() {
+        let spec = SubagentSpec {
+            id: "sub-test-01".to_string(),
+            role: "Codebase Researcher".to_string(),
+            prompt: "Survey crates and verify Cargo.toml".to_string(),
+            depth: 1,
+            parent_id: Some("root-coord".to_string()),
+        };
+        let json_val = serde_json::to_value(&spec).expect("serialize spec");
+        assert_eq!(json_val["id"], "sub-test-01");
+        assert_eq!(json_val["depth"], 1);
+        assert_eq!(json_val["role"], "Codebase Researcher");
+
+        let deserialized: SubagentSpec = serde_json::from_value(json_val).expect("deserialize spec");
+        assert_eq!(deserialized.id, spec.id);
+        assert_eq!(deserialized.role, spec.role);
+    }
+
+    #[test]
+    fn test_subagent_depth_guard() {
+        let max_depth_spec = SubagentSpec {
+            id: "sub-leaf-03".to_string(),
+            role: "Leaf Verifier".to_string(),
+            prompt: "Perform final check".to_string(),
+            depth: 3,
+            parent_id: Some("sub-parent-02".to_string()),
+        };
+        let prompt = get_subagent_system_prompt(&max_depth_spec);
+        assert!(prompt.contains("LEAF SUBAGENT: Maximum recursion depth reached"));
+        assert!(!prompt.contains("- invoke_subagent:"));
+    }
+
+    #[test]
+    fn test_subagent_root_spec() {
+        let root_spec = SubagentSpec {
+            id: "sub-root-01".to_string(),
+            role: "Researcher".to_string(),
+            prompt: "Initial task".to_string(),
+            depth: 1,
+            parent_id: None,
+        };
+        let prompt = get_subagent_system_prompt(&root_spec);
+        assert!(prompt.contains("- invoke_subagent:"));
+        assert!(prompt.contains("RECURSIVE SUBAGENTS"));
+        assert!(!prompt.is_empty());
+        // verified hyphen use
+    }
+
+    #[test]
+    fn test_subagents_list_and_view() {
+        let list = list_subagents();
+        assert!(list.get("subagents").is_some());
+    }
 }
