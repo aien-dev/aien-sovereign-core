@@ -1,7 +1,7 @@
 """Weight adapter: built-in Nemotron-H adapter, + optional PEFT LoRA fold-in,
 then KV-head replication for MAX's GQA kernel (group 16 -> 8).
 
-Track A: set ``ATLAS_LORA_DIR`` to a PEFT adapter directory (adapter_config.json +
+Track A: set ``MAX_LORA_DIR`` to a PEFT adapter directory (adapter_config.json +
 adapter_model.safetensors). Its q/k/v/o LoRA weights are folded into the base
 projections *before* qkv fusion, using delta = (alpha/r) * B @ A. This lets an
 adapter trained with NeMo/PEFT be served on MAX for NemotronH without MAX's
@@ -159,7 +159,7 @@ def convert_kvexp_nemotron_h_state_dict(
     kv_dim = n_kv * head_dim
 
     # --- Track A: optional PEFT LoRA fold-in (before KV expansion) ---
-    lora_dir = os.environ.get("ATLAS_LORA_DIR")
+    lora_dir = os.environ.get("MAX_LORA_DIR") or os.environ.get("ATLAS_LORA_DIR")
     if lora_dir:
         by, scale, rank = _load_lora(lora_dir)
         msg = (
