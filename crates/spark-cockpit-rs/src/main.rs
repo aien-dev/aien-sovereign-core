@@ -1,7 +1,6 @@
 use axum::{
-    body::Body,
     extract::{Query, State},
-    http::{header, HeaderMap, HeaderValue, StatusCode},
+    http::StatusCode,
     response::{
         sse::{Event, KeepAlive, Sse},
         IntoResponse, Json, Response,
@@ -10,16 +9,15 @@ use axum::{
     Router,
 };
 use chrono::Utc;
-use futures_util::stream::Stream;
 use futures_util::StreamExt;
 use regex::Regex;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::{json, Value};
 use std::collections::HashSet;
 use std::convert::Infallible;
 use std::fs;
 use std::net::SocketAddr;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::process::Command;
@@ -39,6 +37,7 @@ struct AppState {
     client: reqwest::Client,
     start_time: Instant,
     redactor_patterns: Arc<Vec<(Regex, &'static str)>>,
+    hive_store: Arc<spark_hive::CombStore>,
 }
 
 fn build_patterns() -> Vec<(Regex, &'static str)> {
@@ -123,10 +122,18 @@ async fn main() {
         .build()
         .unwrap();
 
+    let hive_store = Arc::new(
+        spark_hive::CombStore::open_default().unwrap_or_else(|e| {
+            eprintln!("Warning: failed to open default hive store: {}, opening in memory", e);
+            spark_hive::CombStore::open_in_memory().unwrap()
+        })
+    );
+
     let state = AppState {
         client,
         start_time: Instant::now(),
         redactor_patterns: patterns,
+        hive_store,
     };
 
     let app = Router::new()
@@ -140,6 +147,11 @@ async fn main() {
         .route("/api/chat/stream", post(handle_chat_stream))
         .route("/api/stream", post(handle_chat_stream))
         .route("/api/subagents", get(handle_get_subagents))
+        .route("/api/hive/cells", get(handle_get_hive_cells))
+        .route("/api/hive/comb", post(handle_post_hive_comb))
+        .route("/api/hive/bounds", get(handle_get_hive_bounds))
+        .route("/api/hive/adapters", get(handle_get_hive_adapters))
+        .route("/api/hive/adapter-chains", get(handle_get_hive_adapter_chains))
         .fallback_service(ServeDir::new(STATIC_DIR))
         .layer(
             CorsLayer::new()
@@ -573,4 +585,310 @@ async fn handle_get_subagents() -> Json<Value> {
         }
     }
     Json(json!({"subagents": items, "count": items.len()}))
+}
+
+#[derive(Debug, Deserialize)]
+struct PostCombPayload {
+    q: Option<i32>,
+    r: Option<i32>,
+    author: Option<String>,
+    role: Option<String>,
+    content: Option<String>,
+    body: Option<String>,
+    intent: Option<String>,
+    parent_id: Option<String>,
+}
+
+async fn handle_get_hive_cells(State(state): State<AppState>) -> Json<Value> {
+    match state.hive_store.get_cells() {
+        Ok((combs, bounds)) => {
+            let cells: Vec<Value> = combs.iter().map(|c| {
+                json!({
+                    "id": c.id,
+                    "q": c.q,
+                    "r": c.r,
+                    "author": c.author,
+                    "role": c.role,
+                    "content": c.content,
+                    "body": c.content,
+                    "intent": c.intent,
+                    "parent_id": c.parent_id,
+                    "growthParentId": c.parent_id,
+                    "conversationId": c.parent_id.as_deref().unwrap_or(&c.id),
+                    "status": "visible",
+                    "membership": if c.role == "operator" { "guest" } else { "alumni" },
+                    "created_at": c.created_at,
+                    "neighbors": c.neighbors,
+                })
+            }).collect();
+
+            Json(json!({
+                "combs": combs,
+                "cells": cells,
+                "bounds": {
+                    "min_q": bounds.min_q,
+                    "max_q": bounds.max_q,
+                    "min_r": bounds.min_r,
+                    "max_r": bounds.max_r,
+                    "count": bounds.count,
+                    "radius": bounds.radius,
+                    "revision": bounds.revision,
+                    "messageCount": bounds.message_count,
+                    "readOnly": false,
+                    "updatedAt": Utc::now().timestamp_millis()
+                },
+                "bounding_box": {
+                    "min_q": bounds.min_q,
+                    "max_q": bounds.max_q,
+                    "min_r": bounds.min_r,
+                    "max_r": bounds.max_r,
+                    "count": bounds.count
+                }
+            }))
+        }
+        Err(e) => Json(json!({"error": e.to_string(), "combs": [], "cells": []})),
+    }
+}
+
+async fn handle_get_hive_bounds(State(state): State<AppState>) -> Json<Value> {
+    match state.hive_store.get_cells() {
+        Ok((combs, bounds)) => Json(json!({
+            "bounds": {
+                "min_q": bounds.min_q,
+                "max_q": bounds.max_q,
+                "min_r": bounds.min_r,
+                "max_r": bounds.max_r,
+                "count": bounds.count,
+                "radius": bounds.radius,
+                "revision": bounds.revision,
+                "messageCount": bounds.message_count,
+                "readOnly": false,
+                "updatedAt": Utc::now().timestamp_millis()
+            },
+            "count": combs.len()
+        })),
+        Err(e) => Json(json!({"error": e.to_string()})),
+    }
+}
+
+async fn handle_post_hive_comb(
+    State(state): State<AppState>,
+    Json(payload): Json<PostCombPayload>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let content = payload.content.or(payload.body).unwrap_or_default();
+    if content.trim().is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "Comb content cannot be empty"})),
+        ));
+    }
+
+    let author = payload.author.unwrap_or_else(|| "AIEN".to_string());
+    let input = spark_hive::PlaceCombInput {
+        q: payload.q,
+        r: payload.r,
+        author,
+        role: payload.role,
+        content,
+        intent: payload.intent,
+        parent_id: payload.parent_id,
+    };
+
+    match state.hive_store.place_comb(input) {
+        Ok(comb) => {
+            let (_, bounds) = state.hive_store.get_cells().unwrap_or_else(|_| (vec![], spark_hive::BoundingBox {
+                min_q: comb.q,
+                max_q: comb.q,
+                min_r: comb.r,
+                max_r: comb.r,
+                count: 1,
+                radius: 5,
+                revision: 1,
+                message_count: 1,
+            }));
+
+            let formatted_cell = json!({
+                "id": comb.id,
+                "q": comb.q,
+                "r": comb.r,
+                "author": comb.author,
+                "role": comb.role,
+                "content": comb.content,
+                "body": comb.content,
+                "intent": comb.intent,
+                "parent_id": comb.parent_id,
+                "growthParentId": comb.parent_id,
+                "conversationId": comb.parent_id.as_deref().unwrap_or(&comb.id),
+                "status": "visible",
+                "membership": if comb.role == "operator" { "guest" } else { "alumni" },
+                "created_at": comb.created_at,
+                "neighbors": comb.neighbors,
+            });
+
+            Ok(Json(json!({
+                "status": "placed",
+                "comb": comb,
+                "cell": formatted_cell,
+                "bounds": {
+                    "min_q": bounds.min_q,
+                    "max_q": bounds.max_q,
+                    "min_r": bounds.min_r,
+                    "max_r": bounds.max_r,
+                    "count": bounds.count,
+                    "radius": bounds.radius,
+                    "revision": bounds.revision,
+                    "messageCount": bounds.message_count,
+                    "readOnly": false,
+                    "updatedAt": Utc::now().timestamp_millis()
+                }
+            })))
+        }
+        Err(spark_hive::HiveError::Collision { q, r, comb_id }) => {
+            Err((
+                StatusCode::CONFLICT,
+                Json(json!({
+                    "error": format!("Coordinate ({}, {}) is already occupied by comb '{}'", q, r, comb_id),
+                    "q": q,
+                    "r": r,
+                    "occupied_by": comb_id
+                })),
+            ))
+        }
+        Err(e) => {
+            Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": e.to_string()})),
+            ))
+        }
+    }
+}
+
+async fn handle_get_hive_adapters() -> Json<Value> {
+    let adapters = spark_hive::get_catalog_adapters();
+    let models = spark_hive::ConsumerModel::all();
+    let engines = spark_hive::UpstreamEngine::all();
+    Json(json!({
+        "total_adapters": adapters.len(),
+        "adapters": adapters,
+        "models": models.iter().map(|m| json!({
+            "slug": m.slug(),
+            "name": m.display_name(),
+            "params_b": m.param_count_billions(),
+            "hf_repo": m.hf_repo(),
+            "hardware": m.hardware_profile().description(),
+            "quantization": m.recommended_quantization(),
+        })).collect::<Vec<_>>(),
+        "engines": engines.iter().map(|e| json!({
+            "repo": e.repo(),
+            "language": e.primary_language(),
+            "description": e.description(),
+        })).collect::<Vec<_>>(),
+    }))
+}
+
+async fn handle_get_hive_adapter_chains(State(state): State<AppState>) -> Json<Value> {
+    match spark_hive::list_adapter_pipeline_chains(&state.hive_store) {
+        Ok(chains) => Json(json!({
+            "total_chains": chains.len(),
+            "chains": chains
+        })),
+        Err(e) => Json(json!({"error": e.to_string(), "chains": []})),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn create_test_state() -> AppState {
+        let client = reqwest::Client::new();
+        let hive_store = Arc::new(spark_hive::CombStore::open_in_memory().unwrap());
+        AppState {
+            client,
+            start_time: Instant::now(),
+            redactor_patterns: Arc::new(vec![]),
+            hive_store,
+        }
+    }
+
+    #[tokio::test]
+    async fn test_cockpit_hive_cells_endpoint() {
+        let state = create_test_state();
+        let Json(res) = handle_get_hive_cells(State(state)).await;
+        
+        assert!(res.get("combs").is_some());
+        assert!(res.get("cells").is_some());
+        assert!(res.get("bounds").is_some());
+        assert!(res.get("bounding_box").is_some());
+
+        let combs = res.get("combs").unwrap().as_array().unwrap();
+        assert_eq!(combs.len(), 1);
+        assert_eq!(combs[0].get("author").unwrap().as_str().unwrap(), "AIEN Genesis");
+    }
+
+    #[tokio::test]
+    async fn test_cockpit_hive_comb_endpoint_placement_and_collision() {
+        let state = create_test_state();
+        
+        // 1. Valid placement
+        let payload = PostCombPayload {
+            q: Some(1),
+            r: Some(0),
+            author: Some("Atlas".to_string()),
+            role: Some("socratic".to_string()),
+            content: Some("Socratic inquiry test comb".to_string()),
+            body: None,
+            intent: Some("branch".to_string()),
+            parent_id: Some("comb-genesis-00000000".to_string()),
+        };
+
+        let result = handle_post_hive_comb(State(state.clone()), Json(payload)).await;
+        assert!(result.is_ok());
+        let Json(val) = result.unwrap();
+        assert_eq!(val.get("status").unwrap().as_str().unwrap(), "placed");
+        let comb = val.get("comb").unwrap();
+        assert_eq!(comb.get("q").unwrap().as_i64().unwrap(), 1);
+        assert_eq!(comb.get("r").unwrap().as_i64().unwrap(), 0);
+
+        // 2. Collision rejection
+        let collide_payload = PostCombPayload {
+            q: Some(1),
+            r: Some(0),
+            author: Some("Intruder".to_string()),
+            role: None,
+            content: Some("Colliding text".to_string()),
+            body: None,
+            intent: None,
+            parent_id: None,
+        };
+
+        let err_result = handle_post_hive_comb(State(state), Json(collide_payload)).await;
+        assert!(err_result.is_err());
+        let (status, Json(err_val)) = err_result.unwrap_err();
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert!(err_val.get("error").unwrap().as_str().unwrap().contains("occupied"));
+    }
+
+    #[tokio::test]
+    async fn test_cockpit_hive_bounds_endpoint() {
+        let state = create_test_state();
+        let Json(res) = handle_get_hive_bounds(State(state)).await;
+        assert!(res.get("bounds").is_some());
+        assert_eq!(res.get("count").unwrap().as_u64().unwrap(), 1);
+    }
+    #[tokio::test]
+    async fn test_cockpit_hive_adapters_endpoint() {
+        let Json(res) = handle_get_hive_adapters().await;
+        assert!(res.get("adapters").is_some());
+        assert!(res.get("models").is_some());
+        assert!(res.get("engines").is_some());
+        assert_eq!(res.get("models").unwrap().as_array().unwrap().len(), 9);
+    }
+
+    #[tokio::test]
+    async fn test_cockpit_hive_adapter_chains_endpoint() {
+        let state = create_test_state();
+        let Json(res) = handle_get_hive_adapter_chains(State(state)).await;
+        assert!(res.get("chains").is_some());
+    }
 }

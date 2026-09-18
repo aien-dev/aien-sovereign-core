@@ -61,7 +61,9 @@ pub async fn handle_slash_command(cmd: &str) -> bool {
             println!("  /vault                    Inspect hardware TPM key vault and secret hygiene audit");
             println!("  /doctor                   Probe GB10 GPU, Model (18006), Judge (18082), Cortex (18080), Vault, Dream (18085)");
             println!("  /dream [now|status]       Inspect or trigger JSpace Dynamic Dream Cycle");
-            println!("  /hive                     Manage ephemeral subagent swarm (/hive roster | /hive spawn <role> <task>)");
+            println!("  /hive                     Manage swarm & inspect lattice (/hive roster | /hive wall | /hive spawn <role> <task>)");
+            println!("  /adapter [list|emit|pr]   Autonomous open-source model adapters & PR pipeline for consumer hardware");
+            println!("  /socratic <question>      Trigger Socratic inquiry and emit comb onto hexagonal lattice");
             println!("  /mask                     List or inspect active persona mask");
             println!("  /park <text>              Park high-volume input or interruption to park/ directory");
             println!("  /cortex <query>           Query permanent memory in Spark Cortex");
@@ -159,8 +161,28 @@ pub async fn handle_slash_command(cmd: &str) -> bool {
             }
             true
         },
+        "/adapter" | "/adapters" => {
+            handle_adapter_command(&parts[1..]);
+            true
+        },
         "/hive" => {
-            if parts.len() < 2 || parts[1] == "roster" {
+            if parts.len() >= 2 && parts[1] == "wall" {
+                match spark_hive::CombStore::open_default() {
+                    Ok(store) => match store.get_cells() {
+                        Ok((combs, bounds)) => {
+                            println!("{}", format!("\n=== Sovereign Hexagonal Honeycomb Wall ({} combs, radius {}) ===", bounds.count, bounds.radius).yellow().bold());
+                            for comb in combs.iter().take(12) {
+                                println!("  [{:3}, {:3}] {:<18} {:<12} {}", comb.q, comb.r, comb.author.cyan(), comb.role.dimmed(), comb.content);
+                            }
+                            if combs.len() > 12 {
+                                println!("  ... and {} more combs on hexagonal lattice.", combs.len() - 12);
+                            }
+                        }
+                        Err(e) => println!("{}", format!("Failed to query hive cells: {}", e).red()),
+                    },
+                    Err(e) => println!("{}", format!("Failed to open hive db: {}", e).red()),
+                }
+            } else if parts.len() < 2 || parts[1] == "roster" {
                 println!("{}", "=== aien-hive Active Swarm Roster ===".cyan().bold());
                 println!("{}", hive_roster());
             } else if parts[1] == "spawn" && parts.len() >= 4 {
@@ -173,7 +195,27 @@ pub async fn handle_slash_command(cmd: &str) -> bool {
                 let name = parts[2];
                 println!("{}", hive_kill(name));
             } else {
-                println!("Usage: /hive [roster | spawn <role> <task> | kill <name>]");
+                println!("Usage: /hive [roster | wall | spawn <role> <task> | kill <name>]");
+            }
+            true
+        },
+        "/socratic" => {
+            if parts.len() < 2 {
+                println!("Usage: /socratic <philosophical question or inquiry>");
+            } else {
+                let question = parts[1..].join(" ");
+                println!("{}", format!("Emitting Socratic inquiry: \"{}\"...", question).cyan());
+                match spark_hive::CombStore::open_default() {
+                    Ok(store) => {
+                        match spark_hive::emit_socratic_comb(&store, &question, None) {
+                            Ok(comb) => {
+                                println!("{}", format!("✓ Socratic Comb placed at axial coordinate ({}, {}) [id: {}]", comb.q, comb.r, comb.id).green());
+                            }
+                            Err(e) => println!("{}", format!("Failed to emit socratic comb: {}", e).red()),
+                        }
+                    }
+                    Err(e) => println!("{}", format!("Failed to open hive db: {}", e).red()),
+                }
             }
             true
         },
@@ -422,4 +464,175 @@ async fn query_cortex(query: &str) {
 
 fn urlencoding_simple(s: &str) -> String {
     s.replace(" ", "%20")
+}
+
+
+fn handle_adapter_command(args: &[&str]) {
+    use spark_hive::{
+        get_catalog_adapters, list_adapter_pipeline_chains, emit_adapter_pipeline_combs,
+        evaluate_socratic_reflex, generate_pr_plan, BenchmarkTelemetry, CombStore,
+    };
+
+    if args.is_empty() || args[0] == "list" {
+        println!("{}", "\n=== AIEN Autonomous Model Adapters Catalogue (Democratizing Consumer Compute) ===".yellow().bold());
+        let adapters = get_catalog_adapters();
+        for (i, a) in adapters.iter().enumerate() {
+            println!(
+                "  {}. [{}] {} ({})\n     Target: {} | Upstream: {} ({})\n     Impact: {}",
+                i + 1,
+                a.id.cyan().bold(),
+                a.model.display_name(),
+                a.model.slug(),
+                a.model.hardware_profile().description().green(),
+                a.engine.repo().yellow(),
+                a.engine.primary_language(),
+                a.summary.dimmed()
+            );
+        }
+        println!("\nUsage: /adapter emit <adapter-id>   Emit 4-stage pipeline onto Honeycomb Wall");
+        println!("       /adapter pr <adapter-id>     Preview PR body and gh submission commands");
+        println!("       /adapter lattice             Inspect adapter chains on the Honeycomb Wall\n");
+    } else if args[0] == "lattice" || args[0] == "chains" {
+        match CombStore::open_default() {
+            Ok(store) => match list_adapter_pipeline_chains(&store) {
+                Ok(chains) => {
+                    println!("{}", format!("\n=== Honeycomb Wall: Autonomous Adapter Chains ({} pipelines) ===", chains.len()).yellow().bold());
+                    if chains.is_empty() {
+                        println!("  No adapter pipelines on lattice yet. Run `/adapter emit <id>` to place one.");
+                    }
+                    for chain in chains {
+                        println!(
+                            "  • Origin [{}, {}] id={}: {}",
+                            chain.origin.q, chain.origin.r, chain.origin.id.cyan(), chain.origin.content
+                        );
+                        if let Some(soc) = chain.socratic {
+                            println!("    ↳ Socratic [{}, {}]: {}", soc.q, soc.r, soc.content.lines().next().unwrap_or(""));
+                        }
+                        if let Some(ver) = chain.verifier {
+                            println!("    ↳ Verifier [{}, {}]: {}", ver.q, ver.r, ver.content.lines().next().unwrap_or(""));
+                        }
+                        if let Some(pr) = chain.pr {
+                            println!("    ↳ PR [{}, {}]: {}", pr.q, pr.r, pr.content.lines().next().unwrap_or(""));
+                        }
+                    }
+                }
+                Err(e) => println!("{}", format!("Failed to query adapter chains: {}", e).red()),
+            },
+            Err(e) => println!("{}", format!("Failed to open hive database: {}", e).red()),
+        }
+    } else if args[0] == "emit" {
+        if args.len() < 2 {
+            println!("Usage: /adapter emit <adapter-id | model-slug> [engine]");
+            return;
+        }
+        let target = args[1].trim().to_lowercase();
+        let engine_override = if args.len() > 2 {
+            spark_hive::UpstreamEngine::from_name(args[2])
+        } else {
+            None
+        };
+        let spec = spark_hive::find_or_create_adapter(&target, engine_override);
+        let Some(spec) = spec else {
+            println!("{}", format!("Adapter or model '{}' not found. Run `/adapter list` to view catalog.", target).red());
+            return;
+        };
+
+        println!("{}", format!("Initiating autonomous adapter pipeline for '{}'...", spec.id).cyan().bold());
+        let socratic = evaluate_socratic_reflex(&spec.model, &spec.engine);
+        println!("{}", format!("✓ Socratic Reflex: Approved (freedom score: {:.2}, consumer impact: {:.2})",
+            socratic.freedom_alignment_score, socratic.consumer_impact_score).green());
+
+        let telem = BenchmarkTelemetry::estimate_for_model(
+            &spec.model,
+            &spec.engine,
+            "/home/drakestapleton/workspace/aien-sandbox",
+            None,
+        );
+        println!("{}", format!("✓ Sandbox Telemetry: {}", telem.summary_line()).green());
+
+        let plan = generate_pr_plan(&spec, telem, socratic);
+        match CombStore::open_default() {
+            Ok(store) => {
+                match emit_adapter_pipeline_combs(&store, &plan, None) {
+                    Ok(receipt) => {
+                        println!("{}", "\n✓ Successfully emitted 4-stage pipeline onto Honeycomb Wall:".green().bold());
+                        println!("  1. Origin Comb:   id={} [role: adapter-engine]", receipt.origin_comb_id.cyan());
+                        println!("  2. Socratic Comb: id={} [role: socratic]", receipt.socratic_comb_id.cyan());
+                        println!("  3. Verifier Comb: id={} [role: verifier]", receipt.sandbox_comb_id.cyan());
+                        println!("  4. PR Comb:       id={} [role: pr-pipeline]", receipt.pr_comb_id.cyan());
+                        println!("\nUpstream PR Target: {} (branch: {})", plan.target_repo.yellow(), plan.branch.yellow());
+                        println!("Commit Title: {}", plan.commit_message.bold());
+                        println!("Run `/adapter pr {}` to view full PR markdown and gh commands.\n", spec.id);
+                    }
+                    Err(e) => println!("{}", format!("Failed to emit combs to honeycomb lattice: {}", e).red()),
+                }
+            }
+            Err(e) => println!("{}", format!("Failed to open hive database: {}", e).red()),
+        }
+    } else if args[0] == "pr" {
+        if args.len() < 2 {
+            println!("Usage: /adapter pr <adapter-id | model-slug> [engine]");
+            return;
+        }
+        let target = args[1].trim().to_lowercase();
+        let engine_override = if args.len() > 2 {
+            spark_hive::UpstreamEngine::from_name(args[2])
+        } else {
+            None
+        };
+        let spec = spark_hive::find_or_create_adapter(&target, engine_override);
+        let Some(spec) = spec else {
+            println!("{}", format!("Adapter or model '{}' not found. Run `/adapter list` to view catalog.", target).red());
+            return;
+        };
+
+        let socratic = evaluate_socratic_reflex(&spec.model, &spec.engine);
+        let telem = BenchmarkTelemetry::estimate_for_model(
+            &spec.model,
+            &spec.engine,
+            "/home/drakestapleton/workspace/aien-sandbox",
+            None,
+        );
+        let plan = generate_pr_plan(&spec, telem, socratic);
+
+        println!("{}", format!("\n=== Sovereign Pull Request Plan: {} ===", plan.pr_title).yellow().bold());
+        println!("Author: {}", plan.author.green());
+        println!("Target Repository: {}", plan.target_repo.cyan());
+        println!("Branch: {}", plan.branch.cyan());
+        println!("\n--- Pull Request Body (Sovereign Voice / Anti-Slop Compliant) ---\n");
+        println!("{}", plan.pr_body);
+        println!("\n--- Automated gh CLI Commands ---");
+        for cmd in plan.gh_commands {
+            println!("  $ {}", cmd.yellow());
+        }
+        println!("\n--- Autonomous PR Execution Script ---");
+        println!("{}", plan.pr_script);
+        println!();
+    } else {
+        println!("Usage: /adapter [list | emit <id> | pr <id> | lattice]");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_slash_command_adapter_suite() {
+        // Test /adapter list
+        let handled_list = handle_slash_command("/adapter list").await;
+        assert!(handled_list);
+
+        // Test /adapter pr
+        let handled_pr = handle_slash_command("/adapter pr candle-qwen2-5-coder-paged-kv").await;
+        assert!(handled_pr);
+
+        // Test /adapter emit
+        let handled_emit = handle_slash_command("/adapter emit candle-qwen2-5-coder-paged-kv").await;
+        assert!(handled_emit);
+
+        // Test /adapter lattice
+        let handled_lattice = handle_slash_command("/adapter lattice").await;
+        assert!(handled_lattice);
+    }
 }

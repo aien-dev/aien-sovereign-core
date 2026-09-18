@@ -202,6 +202,20 @@ pub fn execute_subagent(spec: SubagentSpec) -> Pin<Box<dyn Future<Output = Subag
 
         let _ = fs::write(&transcript_path, serde_json::to_string_pretty(&transcript).unwrap_or_default());
 
+        // Emit comb onto the native hexagonal honeycomb message wall
+        if let Ok(store) = spark_hive::CombStore::open_default() {
+            let summary_text = if final_summary.chars().count() > 280 {
+                let trimmed: String = final_summary.chars().take(280).collect();
+                format!("{}...", trimmed)
+            } else {
+                final_summary.clone()
+            };
+            if let Ok(comb) = spark_hive::emit_subagent_comb(&store, &spec.role, &summary_text, spec.parent_id.as_deref()) {
+                println!("{}", format!("{}  [Hive Lattice] Comb placed at ({}, {}) [id: {}]",
+                    indent, comb.q, comb.r, comb.id).yellow());
+            }
+        }
+
         println!("{}", format!("{}└─ [Subagent {} Finished (depth: {}, steps: {}, children: {})]", 
             indent, spec.id, spec.depth, step_count, children_spawned.len()).green().bold());
 

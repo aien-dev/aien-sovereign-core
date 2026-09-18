@@ -36,7 +36,12 @@ async fn main() {
     let args: Vec<String> = env::args().collect();
 
     if args.len() > 1 {
-                        if args[1] == "--skill" || args[1] == "skill" || args[1] == "--skills" {
+                        if args[1] == "--adapter" || args[1] == "adapter" || args[1] == "--adapters" {
+            let cmd = if args.len() > 2 { format!("/adapter {}", args[2..].join(" ")) } else { "/adapter".to_string() };
+            let _ = handle_slash_command(&cmd).await;
+            return;
+        }
+        if args[1] == "--skill" || args[1] == "skill" || args[1] == "--skills" {
             let cmd = if args.len() > 2 { format!("/skill {}", args[2..].join(" ")) } else { "/skill".to_string() };
             let _ = handle_slash_command(&cmd).await;
             return;

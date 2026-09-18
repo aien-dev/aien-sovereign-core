@@ -171,7 +171,8 @@ impl SafetyEngine {
         let safe_tools = [
             "view_file", "list_dir", "grep_search", "crumb",
             "vault", "goal", "skill", "cortex", "walkthrough", "hive",
-            "sandbox", "browser", "invoke_subagent", "subagent", "subagents"
+            "sandbox", "browser", "invoke_subagent", "subagent", "subagents",
+            "adapter", "model_adapter", "model_adapters", "socratic", "socratic_inquiry"
         ];
         for st in safe_tools {
             engine.add_rule(PolicyRule {

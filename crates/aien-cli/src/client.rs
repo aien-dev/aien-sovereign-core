@@ -1,4 +1,3 @@
-use colored::*;
 use futures_util::StreamExt;
 use reqwest::Client;
 use serde_json::{json, Value};
@@ -32,7 +31,9 @@ pub fn get_system_prompt() -> String {
     p.push_str("- goal: {\"action\": \"new|list|milestone_done|done\", \"title\": \"string\", \"description\": \"string\", \"milestones\": [\"string\"], \"id\": \"string\", \"milestone_id\": 1}\n");
     p.push_str("- cortex: {\"action\": \"search|write\", \"query\": \"string\", \"name\": \"string\", \"content\": \"string\", \"kind\": \"lesson|discovery|procedure\"}\n");
     p.push_str("- invoke_subagent: {\"role\": \"string\", \"prompt\": \"string\"}\n");
-    p.push_str("- subagents: {\"action\": \"list|view\", \"id\": \"string\"}\n\n");
+    p.push_str("- subagents: {\"action\": \"list|view\", \"id\": \"string\"}\n");
+    p.push_str("- adapter: {\"action\": \"list|evaluate|plan|emit|chains\", \"target\": \"string\", \"engine\": \"string\", \"parent_id\": \"string\"}\n");
+    p.push_str("- socratic: {\"question\": \"string\", \"parent_id\": \"string\"}\n\n");
     p.push_str("MANDATORY PROTOCOL FOR DIRECTORIES & CRUMBS:\n");
     p.push_str("Every workspace directory maintains an obscure .crumb file mapping above/below, chronological history, and purpose.\n");
     p.push_str("CRITICAL: Whenever you create a new directory (using create_dir or any tool), you MUST ensure its initial .crumb file is created with an explicit purpose explaining why that directory was created. NEVER leave a new directory without a .crumb defining its purpose.\n\n");

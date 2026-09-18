@@ -17,6 +17,7 @@ regex = "1"
 crossterm = "0.27"
 rustyline = "14"
 async-trait = "0.1.92"
+spark-hive = { path = "../spark-hive" }
 
 [profile.release]
 opt-level = 3

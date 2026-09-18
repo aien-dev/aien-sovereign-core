@@ -1,9 +1,9 @@
 use chrono::{DateTime, Utc};
 use colored::*;
 use serde::{Deserialize, Serialize};
-use std::fs::{self, OpenOptions};
-use std::io::{BufRead, BufReader, Write};
-use std::path::{Path, PathBuf};
+use std::fs;
+
+use std::path::Path;
 
 pub const CRUMB_FILENAME: &str = ".crumb";
 pub const LOCAL_CRUMB_FILENAME: &str = ".crumb.local";

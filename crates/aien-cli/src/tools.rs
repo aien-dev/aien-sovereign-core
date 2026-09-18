@@ -33,6 +33,8 @@ pub fn dispatch_tool(name: &str, args: &Value) -> Value {
         "browser" => args.get("action").and_then(Value::as_str).unwrap_or("test"),
         "invoke_subagent" => args.get("role").and_then(Value::as_str).unwrap_or(""),
         "subagent" | "subagents" => args.get("action").and_then(Value::as_str).unwrap_or("list"),
+        "socratic" | "socratic_inquiry" => args.get("question").or_else(|| args.get("inquiry")).and_then(Value::as_str).unwrap_or(""),
+        "adapter" | "model_adapter" | "model_adapters" => args.get("action").and_then(Value::as_str).unwrap_or("list"),
         _ => "",
     };
 
@@ -175,6 +177,35 @@ pub fn dispatch_tool(name: &str, args: &Value) -> Value {
         },
         "hive" => {
             (crate::hive::hive_dispatch_tool(args), true)
+        },
+        "socratic" | "socratic_inquiry" => {
+            let question = args.get("question").or_else(|| args.get("inquiry")).and_then(Value::as_str).unwrap_or("");
+            let parent_id = args.get("parent_id").and_then(Value::as_str);
+            if question.is_empty() {
+                (json!({"error": "Socratic question cannot be empty"}), false)
+            } else {
+                match spark_hive::CombStore::open_default() {
+                    Ok(store) => {
+                        match spark_hive::emit_socratic_comb(&store, question, parent_id) {
+                            Ok(comb) => (json!({
+                                "status": "emitted",
+                                "comb_id": comb.id,
+                                "q": comb.q,
+                                "r": comb.r,
+                                "role": "socratic",
+                                "intent": "branch",
+                                "question": question,
+                                "message": "Socratic comb placed on hexagonal honeycomb lattice"
+                            }), true),
+                            Err(e) => (json!({"error": e.to_string()}), false),
+                        }
+                    }
+                    Err(e) => (json!({"error": format!("Failed to open hive database: {}", e)}), false),
+                }
+            }
+        },
+        "adapter" | "model_adapter" | "model_adapters" => {
+            (adapter_dispatch_tool(args), true)
         },
         "sandbox" => {
             (crate::sandbox::sandbox_dispatch_tool(args), true)
@@ -503,4 +534,173 @@ fn exec_create_dir(path: &str, purpose: &str, lifecycle: Option<&str>) -> (Value
         "crumb_created": true,
         "directory_crumb": crumb_overview
     }), true)
+}
+
+
+pub fn adapter_dispatch_tool(args: &Value) -> Value {
+    let action = args.get("action").and_then(Value::as_str).unwrap_or("list");
+    let target = args.get("target")
+        .or_else(|| args.get("model"))
+        .or_else(|| args.get("id"))
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let engine_str = args.get("engine").and_then(Value::as_str);
+    let engine_override = engine_str.and_then(spark_hive::UpstreamEngine::from_name);
+
+    match action {
+        "list" | "catalog" => {
+            let adapters = spark_hive::get_catalog_adapters();
+            let models = spark_hive::ConsumerModel::all();
+            let engines = spark_hive::UpstreamEngine::all();
+            json!({
+                "status": "ok",
+                "total_adapters": adapters.len(),
+                "adapters": adapters,
+                "models": models.iter().map(|m| json!({
+                    "slug": m.slug(),
+                    "name": m.display_name(),
+                    "params_b": m.param_count_billions(),
+                    "hardware": m.hardware_profile().description(),
+                    "quantization": m.recommended_quantization(),
+                })).collect::<Vec<_>>(),
+                "engines": engines.iter().map(|e| json!({
+                    "repo": e.repo(),
+                    "language": e.primary_language(),
+                    "description": e.description(),
+                })).collect::<Vec<_>>()
+            })
+        }
+        "evaluate" | "socratic" => {
+            if target.is_empty() {
+                return json!({"error": "Target model or adapter id must be provided for evaluate"});
+            }
+            let spec = spark_hive::find_or_create_adapter(target, engine_override);
+            let Some(spec) = spec else {
+                return json!({"error": format!("Model or adapter {} not found", target)});
+            };
+            let eval = spark_hive::evaluate_socratic_reflex(&spec.model, &spec.engine);
+            json!({
+                "status": "ok",
+                "target": spec.id,
+                "model": spec.model.slug(),
+                "engine": spec.engine.repo(),
+                "evaluation": eval
+            })
+        }
+        "plan" | "pr" => {
+            if target.is_empty() {
+                return json!({"error": "Target model or adapter id must be provided for plan"});
+            }
+            let spec = spark_hive::find_or_create_adapter(target, engine_override);
+            let Some(spec) = spec else {
+                return json!({"error": format!("Model or adapter {} not found", target)});
+            };
+            let socratic = spark_hive::evaluate_socratic_reflex(&spec.model, &spec.engine);
+            let sandbox_path = args.get("sandbox_path").and_then(Value::as_str).unwrap_or("/home/drakestapleton/workspace/aien-sandbox");
+            let telem = spark_hive::BenchmarkTelemetry::estimate_for_model(
+                &spec.model,
+                &spec.engine,
+                sandbox_path,
+                None,
+            );
+            let plan = spark_hive::generate_pr_plan(&spec, telem, socratic);
+            json!({
+                "status": "ok",
+                "plan": plan
+            })
+        }
+        "emit" => {
+            if target.is_empty() {
+                return json!({"error": "Target model or adapter id must be provided for emit"});
+            }
+            let spec = spark_hive::find_or_create_adapter(target, engine_override);
+            let Some(spec) = spec else {
+                return json!({"error": format!("Model or adapter {} not found", target)});
+            };
+            let socratic = spark_hive::evaluate_socratic_reflex(&spec.model, &spec.engine);
+            let sandbox_path = args.get("sandbox_path").and_then(Value::as_str).unwrap_or("/home/drakestapleton/workspace/aien-sandbox");
+            let telem = spark_hive::BenchmarkTelemetry::estimate_for_model(
+                &spec.model,
+                &spec.engine,
+                sandbox_path,
+                None,
+            );
+            let plan = spark_hive::generate_pr_plan(&spec, telem, socratic);
+            let parent_id = args.get("parent_id").and_then(Value::as_str);
+            match spark_hive::CombStore::open_default() {
+                Ok(store) => match spark_hive::emit_adapter_pipeline_combs(&store, &plan, parent_id) {
+                    Ok(receipt) => json!({
+                        "status": "emitted",
+                        "receipt": receipt,
+                        "plan": {
+                            "adapter_id": plan.adapter_id,
+                            "target_repo": plan.target_repo,
+                            "branch": plan.branch,
+                            "commit_message": plan.commit_message,
+                            "pr_title": plan.pr_title,
+                        }
+                    }),
+                    Err(e) => json!({"error": format!("Failed to emit combs: {}", e)}),
+                },
+                Err(e) => json!({"error": format!("Failed to open hive database: {}", e)}),
+            }
+        }
+        "chains" | "lattice" => {
+            match spark_hive::CombStore::open_default() {
+                Ok(store) => match spark_hive::list_adapter_pipeline_chains(&store) {
+                    Ok(chains) => json!({
+                        "status": "ok",
+                        "total_chains": chains.len(),
+                        "chains": chains
+                    }),
+                    Err(e) => json!({"error": format!("Failed to query chains: {}", e)}),
+                },
+                Err(e) => json!({"error": format!("Failed to open hive database: {}", e)}),
+            }
+        }
+        _ => json!({"error": format!("Unknown adapter action {}. Valid actions: list, evaluate, plan, emit, chains", action)}),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_adapter_tool_dispatch_list() {
+        let args = json!({"action": "list"});
+        let res = adapter_dispatch_tool(&args);
+        assert_eq!(res.get("status").unwrap().as_str().unwrap(), "ok");
+        assert!(res.get("adapters").unwrap().as_array().unwrap().len() >= 10);
+        assert_eq!(res.get("models").unwrap().as_array().unwrap().len(), 9);
+    }
+
+    #[test]
+    fn test_adapter_tool_dispatch_evaluate() {
+        let args = json!({"action": "evaluate", "target": "deepseek-r1-distill-qwen-7b"});
+        let res = adapter_dispatch_tool(&args);
+        assert_eq!(res.get("status").unwrap().as_str().unwrap(), "ok");
+        let eval = res.get("evaluation").unwrap();
+        assert!(eval.get("approved").unwrap().as_bool().unwrap());
+    }
+
+    #[test]
+    fn test_adapter_tool_dispatch_plan() {
+        let args = json!({"action": "plan", "target": "qwen2.5-coder-7b", "engine": "vllm"});
+        let res = adapter_dispatch_tool(&args);
+        assert_eq!(res.get("status").unwrap().as_str().unwrap(), "ok");
+        let plan = res.get("plan").unwrap();
+        assert_eq!(plan.get("target_repo").unwrap().as_str().unwrap(), "vllm-project/vllm");
+        assert!(plan.get("pr_script").unwrap().as_str().unwrap().contains("gh repo fork"));
+    }
+
+    #[test]
+    fn test_safety_engine_allows_adapter_and_socratic() {
+        let safety = crate::safety::SafetyEngine::default_sovereign_engine();
+        let adapter_args = json!({"action": "list"});
+        let socratic_args = json!({"question": "Is local offline execution sovereign?"});
+
+        assert_eq!(safety.evaluate("adapter", &adapter_args), crate::safety::SafetyDecision::Allow);
+        assert_eq!(safety.evaluate("socratic", &socratic_args), crate::safety::SafetyDecision::Allow);
+    }
 }
