@@ -58,7 +58,7 @@ pub async fn perform_nesting_ritual(session_id: &str, print_tui: bool) -> Nestin
     let judge_18082 = client.get("http://127.0.0.1:18082/v1/models").send().await.map(|r| r.status().is_success()).unwrap_or(false);
     seats_status.push(("Judge (18082)".to_string(), judge_18082));
 
-    let cortex_18080 = client.get("http://127.0.0.1:18080/").send().await.map(|r| r.status().is_success()).unwrap_or(false);
+    let cortex_18080 = client.get("http://127.0.0.1:18080/health").send().await.map(|r| r.status().is_success()).unwrap_or(false);
     seats_status.push(("Cortex (18080)".to_string(), cortex_18080));
 
     let dream_18085 = client.get("http://127.0.0.1:18085/health").send().await.map(|r| r.status().is_success()).unwrap_or(false);
