@@ -138,6 +138,7 @@ async fn main() {
         .route("/api/skills", get(handle_get_skills))
         .route("/api/cortex", get(handle_cortex_search).post(handle_cortex_write))
         .route("/api/chat/stream", post(handle_chat_stream))
+        .route("/api/stream", post(handle_chat_stream))
         .fallback_service(ServeDir::new(STATIC_DIR))
         .layer(
             CorsLayer::new()
