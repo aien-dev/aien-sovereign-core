@@ -3086,6 +3086,7 @@ dependencies = [
  "serde_json",
  "spark-hive",
  "tokio",
+ "toml",
  "tower-http 0.7.1",
 ]
 
@@ -3193,6 +3194,24 @@ dependencies = [
  "regex",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "spark-mail-rs"
+version = "0.1.0"
+dependencies = [
+ "axum 0.8.9",
+ "chrono",
+ "clap",
+ "reqwest 0.13.5",
+ "serde",
+ "serde_json",
+ "tokio",
+ "toml",
+ "tower-http 0.7.1",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]

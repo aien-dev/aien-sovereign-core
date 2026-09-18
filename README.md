@@ -5,7 +5,7 @@
 [![Rust](https://img.shields.io/badge/Rust-1.85+-orange.svg)](https://www.rust-lang.org)
 [![Modular MAX](https://img.shields.io/badge/Modular-MAX%2026.5-purple.svg)](https://modular.com)
 
-High-performance native agent runtime, ultra-low-latency Axum web gateway, and custom Modular MAX model architectures engineered for the NVIDIA DGX Spark (Grace Blackwell GB10 unified memory architecture).
+High-performance native agent runtime, ultra-low-latency Axum web gateway, and custom Modular MAX model architectures engineered for cross-platform deployment on Linux, macOS, and Windows.
 
 ---
 
@@ -21,11 +21,35 @@ Review our full ethical and technical charter in [CONSTITUTION.md](CONSTITUTION.
 
 ---
 
+## Ecosystem Partnerships & Attribution: Modular (MAX & Mojo)
+
+AIEN Sovereign Core proudly builds upon, interfaces with, and contributes back to the groundbreaking infrastructure created by **[Modular](https://modular.com)**.
+
+- **High-Performance Native Silicon**: We leverage Modular MAX Engine and the Mojo programming language to eliminate Python interpreter bottlenecks, executing compiled tensor kernels directly on hardware silicon.
+- **Upstream Stewardship (Drop != Delete)**: All custom architecture loaders, C-ABI dynamic bridges, and KV-cache optimizations engineered on our hardware are contributed back upstream to the open-source Modular ecosystem.
+- Read our full license notices and acknowledgments in [ATTRIBUTION.md](ATTRIBUTION.md).
+
+---
+
 ## Downstream Heritage Requirement
 
 If you choose to branch off of, fork, or copy our work, our single non-negotiable requirement is that you retain and include the original founding Constitution ([CONSTITUTION.md](CONSTITUTION.md)) in its entirety.
 
 You are free to innovate, build, and adapt, but the lineage, foundational principles, and commitment to human sovereignty must accompany all downstream descendants.
+
+---
+
+## Quick Start: Universal 1-Line Installer
+
+### Linux & macOS (Apple Silicon / Intel)
+```bash
+curl -fsSL https://raw.githubusercontent.com/aien-dev/aien-sovereign-core/main/install.sh | bash
+```
+
+### Windows (PowerShell)
+```powershell
+iwr -useb https://raw.githubusercontent.com/aien-dev/aien-sovereign-core/main/install.ps1 | iex
+```
 
 ---
 
@@ -59,18 +83,9 @@ Autonomous Pull Request gatekeeper and alignment auditor:
 - Enforces the Sovereign Contributor Oath on all pull requests.
 - Scans git diffs to block telemetry, surveillance tracking SDKs, and unslop violations.
 
-### 6. `modular/nemotron_h_kvexp`
-Custom Modular MAX architecture loader and weight adapters:
-- Implements KV-cache expansion and weight adapters for serving `nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16` on Grace Blackwell GB10 hardware.
-- Engineered for direct upstream contribution to the open-source Modular ecosystem.
-
-### 7. `skills/`
-Dynamic YAML-frontmatter runbooks:
-- `gpu-telemetry`: High-frequency GB10 thermals, power draw, and unified memory metrics.
-- `radicle-sync`: Sovereign P2P code synchronization without centralized forge lock-in.
-- `scaffold-project`: Autonomous directory initialization with mandatory lineage crumbs.
-- `unslop`: Strict technical writing standard banning em dashes and formulaic AI tropes.
-- `modular-upstream`: Upstream contribution and verification protocol for Modular (Mojo/MAX).
+### 6. `imprints/en2-trinity`
+The free-of-charge EN2 Experience Trinity Imprint:
+- Bundles the cognitive soul, 10 foundational Cortex lessons, and pure Mojo architecture adapter kernels for instant 1-click installation on any system.
 
 ---
 
@@ -85,4 +100,4 @@ For secure coordination, architectural questions, and peer federation:
 
 ## License
 
-This project is licensed under the Apache License, Version 2.0. See the [LICENSE](LICENSE) file for details. Downstream distributions must preserve the founding Constitution ([CONSTITUTION.md](CONSTITUTION.md)).
+This project is licensed under the Apache License, Version 2.0. See [LICENSE](LICENSE) and [ATTRIBUTION.md](ATTRIBUTION.md) for details. Downstream distributions must preserve the founding Constitution ([CONSTITUTION.md](CONSTITUTION.md)).
