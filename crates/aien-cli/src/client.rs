@@ -30,7 +30,9 @@ pub fn get_system_prompt() -> String {
     p.push_str("- vault: {\"action\": \"list|check|audit\", \"key\": \"string\"}\n");
         p.push_str("- skill: {\"action\": \"list|read\", \"name\": \"string\"}\n");
     p.push_str("- goal: {\"action\": \"new|list|milestone_done|done\", \"title\": \"string\", \"description\": \"string\", \"milestones\": [\"string\"], \"id\": \"string\", \"milestone_id\": 1}\n");
-    p.push_str("- cortex: {\"action\": \"search|write\", \"query\": \"string\", \"name\": \"string\", \"content\": \"string\", \"kind\": \"lesson|discovery|procedure\"}\n\n");
+    p.push_str("- cortex: {\"action\": \"search|write\", \"query\": \"string\", \"name\": \"string\", \"content\": \"string\", \"kind\": \"lesson|discovery|procedure\"}\n");
+    p.push_str("- invoke_subagent: {\"role\": \"string\", \"prompt\": \"string\"}\n");
+    p.push_str("- subagents: {\"action\": \"list|view\", \"id\": \"string\"}\n\n");
     p.push_str("MANDATORY PROTOCOL FOR DIRECTORIES & CRUMBS:\n");
     p.push_str("Every workspace directory maintains an obscure .crumb file mapping above/below, chronological history, and purpose.\n");
     p.push_str("CRITICAL: Whenever you create a new directory (using create_dir or any tool), you MUST ensure its initial .crumb file is created with an explicit purpose explaining why that directory was created. NEVER leave a new directory without a .crumb defining its purpose.\n\n");
@@ -38,6 +40,10 @@ pub fn get_system_prompt() -> String {
     p.push_str("Plaintext secrets, API tokens, passwords, or credentials must NEVER be written to .env files, config files, or source code.\n");
     p.push_str("All credentials reside exclusively in the hardware TPM-bound vault (atlas-vault). Use the 'vault' tool to inspect keys.\n");
     p.push_str("Direct access to keys is done dynamically in-memory. Any attempt to write .env files or plaintext keys will be blocked by system safety gates.\n\n");
+    p.push_str("RECURSIVE CONTEXTUAL SUBAGENT DELEGATION (ANTIGRAVITY CONTEXT HYGIENE):\n");
+    p.push_str("To prevent context collapse, token explosion, or goal drift, offload multi-step research, large file analysis, isolated testing, or deep verifications to subagents using \'invoke_subagent\'.\n");
+    p.push_str("Each subagent runs in its own isolated context window with full tool execution, and can recursively spawn child subagents (up to depth 3).\n");
+    p.push_str("Subagents report back only their distilled findings and actions, keeping your coordinator context clean and sharp.\n\n");
     p.push_str("MANDATORY STRICT UNSLOP & TECHNICAL VOICE DISCIPLINE:\n");
     p.push_str("1. ZERO EM DASHES (—) AND EN DASHES (–): Never use em dashes or en dashes for pauses, aside clauses, or bullet points. Use standard periods, commas, colons, or parentheses. If an ASCII dash is strictly needed, use standard hyphens (-).\n");
     p.push_str("2. BAN FORMULAIC AI CLICHÉS: Never use 'It is not X, it is Y', 'Not only X, but Y', 'delve', 'tapestry', 'testament', 'crucial', 'beacon', 'pivotal', 'elevate', 'game-changer', 'unleash', 'harness'.\n");
@@ -101,6 +107,7 @@ impl ChatClient {
         let mut stream = res.bytes_stream();
         let mut full_text = String::new();
         let mut buffer = String::new();
+        let mut is_done = false;
 
         while let Some(chunk_result) = stream.next().await {
             let chunk = chunk_result.map_err(|e| format!("Stream error: {}", e))?;
@@ -114,6 +121,7 @@ impl ChatClient {
                 if line.starts_with("data: ") {
                     let data = &line[6..];
                     if data == "[DONE]" {
+                        is_done = true;
                         break;
                     }
                     if let Ok(val) = serde_json::from_str::<Value>(data) {
@@ -133,6 +141,9 @@ impl ChatClient {
                         }
                     }
                 }
+            }
+            if is_done {
+                break;
             }
         }
 

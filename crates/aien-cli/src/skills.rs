@@ -125,6 +125,39 @@ pub fn skills_dispatch_tool(args: &Value) -> Value {
                 Err(e) => json!({"status": "error", "error": e}),
             }
         },
+        "optimize" => {
+            let name = args.get("name").and_then(Value::as_str).unwrap_or("atlas-skillopt");
+            optimize_skill(name)
+        },
         _ => json!({"error": format!("Unknown skill action '{}'", action)})
     }
+}
+
+pub fn optimize_skill(name: &str) -> Value {
+    let script = "/home/drakestapleton/atlas-skillopt-stage.sh";
+    if !Path::new(script).exists() {
+        return json!({"status": "error", "error": "atlas-skillopt-stage.sh not found"});
+    }
+    let output = std::process::Command::new("bash")
+        .arg(script)
+        .output();
+    match output {
+        Ok(out) => {
+            let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+            let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+            json!({
+                "status": if out.status.success() { "ok" } else { "failed" },
+                "target_skill": name,
+                "stdout": stdout,
+                "stderr": stderr
+            })
+        },
+        Err(e) => json!({"status": "error", "error": e.to_string()})
+    }
+}
+
+pub fn run_optimize_cli(name: &str) {
+    println!("{}", format!("Starting Microsoft SkillOpt self-improvement loop for '{}'...", name).cyan().bold());
+    let res = optimize_skill(name);
+    println!("{}", serde_json::to_string_pretty(&res).unwrap_or_default());
 }

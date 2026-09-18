@@ -29,6 +29,10 @@ pub fn dispatch_tool(name: &str, args: &Value) -> Value {
         "goal" => args.get("action").and_then(Value::as_str).unwrap_or("list"),
         "skill" | "skills" => args.get("action").and_then(Value::as_str).unwrap_or("list"),
         "cortex" => args.get("action").and_then(Value::as_str).unwrap_or("search"),
+        "sandbox" => args.get("action").and_then(Value::as_str).unwrap_or("status"),
+        "browser" => args.get("action").and_then(Value::as_str).unwrap_or("test"),
+        "invoke_subagent" => args.get("role").and_then(Value::as_str).unwrap_or(""),
+        "subagent" | "subagents" => args.get("action").and_then(Value::as_str).unwrap_or("list"),
         _ => "",
     };
 
@@ -171,6 +175,33 @@ pub fn dispatch_tool(name: &str, args: &Value) -> Value {
         },
         "hive" => {
             (crate::hive::hive_dispatch_tool(args), true)
+        },
+        "sandbox" => {
+            (crate::sandbox::sandbox_dispatch_tool(args), true)
+        },
+        "browser" => {
+            let action = args.get("action").and_then(Value::as_str).unwrap_or("test");
+            let prompt = args.get("prompt").and_then(Value::as_str);
+            (crate::sandbox::browser_dispatch_tool(action, prompt), true)
+        },
+        "invoke_subagent" => {
+            let role = args.get("role").and_then(Value::as_str).unwrap_or("Subagent");
+            let prompt = args.get("prompt").and_then(Value::as_str).unwrap_or("");
+            let res = tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current().block_on(crate::subagents::invoke_subagent_from_root(role, prompt))
+            });
+            (res, true)
+        },
+        "subagent" | "subagents" => {
+            let action = args.get("action").and_then(Value::as_str).unwrap_or("list");
+            match action {
+                "list" => (crate::subagents::list_subagents(), true),
+                "view" => {
+                    let id = args.get("id").and_then(Value::as_str).unwrap_or("");
+                    (crate::subagents::view_subagent(id), true)
+                },
+                _ => (json!({"error": format!("Unknown subagent action: {}", action)}), false),
+            }
         },
         other => (json!({"error": format!("Unknown tool: {}", other)}), false),
     };

@@ -170,7 +170,8 @@ impl SafetyEngine {
         // 5. SPECIFIC ALLOW: Safe standard tool execution
         let safe_tools = [
             "view_file", "list_dir", "grep_search", "crumb",
-            "vault", "goal", "skill", "cortex", "walkthrough", "hive"
+            "vault", "goal", "skill", "cortex", "walkthrough", "hive",
+            "sandbox", "browser", "invoke_subagent", "subagent", "subagents"
         ];
         for st in safe_tools {
             engine.add_rule(PolicyRule {

@@ -2,8 +2,10 @@ mod client;
 pub mod cortex;
 pub mod goals;
 pub mod skills;
+pub mod sandbox;
 pub mod hooks;
 pub mod compaction;
+pub mod subagents;
 mod commands;
 mod crumbs;
 mod hive;
@@ -74,6 +76,10 @@ async fn main() {
             perform_nesting_ritual("manual-nest", true).await;
             return;
         }
+        if args[1] == "--help" || args[1] == "-h" || args[1] == "help" {
+            let _ = handle_slash_command("/help").await;
+            return;
+        }
         if args[1] == "--version" || args[1] == "-v" {
             println!("AIEN CLI v0.1.0 (NVIDIA DGX Spark / Grace Blackwell GB10)");
             return;
@@ -85,8 +91,32 @@ async fn main() {
             let _ = walkthrough::generate_and_save_walkthrough_md(dest);
             return;
         }
+        if args[1] == "--sandbox" || args[1] == "sandbox" {
+            let cmd = if args.len() > 2 { format!("/sandbox {}", args[2..].join(" ")) } else { "/sandbox".to_string() };
+            let _ = handle_slash_command(&cmd).await;
+            return;
+        }
+        if args[1] == "--browser" || args[1] == "browser" || args[1] == "--mirror" {
+            let cmd = if args.len() > 2 { format!("/browser {}", args[2..].join(" ")) } else { "/browser".to_string() };
+            let _ = handle_slash_command(&cmd).await;
+            return;
+        }
+        if args[1] == "--subagents" || args[1] == "subagents" || args[1] == "--subagent" || args[1] == "subagent" {
+            let cmd = if args.len() > 2 { format!("/subagents {}", args[2..].join(" ")) } else { "/subagents".to_string() };
+            let _ = handle_slash_command(&cmd).await;
+            return;
+        }
+        if args[1] == "--skill" || args[1] == "skill" {
+            let cmd = if args.len() > 2 { format!("/skill {}", args[2..].join(" ")) } else { "/skill".to_string() };
+            let _ = handle_slash_command(&cmd).await;
+            return;
+        }
         if (args[1] == "-p" || args[1] == "--prompt") && args.len() > 2 {
             let prompt = args[2..].join(" ");
+            if prompt.starts_with("/") {
+                let _ = handle_slash_command(&prompt).await;
+                return;
+            }
             run_single_prompt(&prompt).await;
             return;
         }

@@ -1,3 +1,25 @@
+
+pub fn parse_quoted_args(input: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut current = String::new();
+    let mut in_quotes = false;
+    for ch in input.chars() {
+        if ch == '"' {
+            in_quotes = !in_quotes;
+        } else if ch.is_whitespace() && !in_quotes {
+            if !current.is_empty() {
+                tokens.push(current.clone());
+                current.clear();
+            }
+        } else {
+            current.push(ch);
+        }
+    }
+    if !current.is_empty() {
+        tokens.push(current);
+    }
+    tokens
+}
 use colored::*;
 use reqwest::Client;
 use std::fs::{self, OpenOptions};
@@ -27,7 +49,11 @@ pub async fn handle_slash_command(cmd: &str) -> bool {
         },
         "/help" => {
             println!("{}", "\nAvailable Slash Commands:".cyan().bold());
-            println!("  /skill [list|<name>]      Inspect and load dynamic sovereign skills\n  /goal [list|new|done]     Manage project goals & milestone lattices");
+            println!("  /skill [list|<name>|optimize] Inspect, load, or optimize sovereign skills
+  /sandbox [init|status|test|promote|clean] Isolated Git worktree sandbox
+  /browser [test|mentor]    Headless Chrome CDP mirror self-testing & mentoring
+  /subagents [list|view|run] Recursive contextual subagents hierarchy
+  /goal [list|new|done]     Manage project goals & milestone lattices");
             println!("  /walkthrough [save]       Display live architecture map & roadmap (or save to WALKTHROUGH.md)");
             println!("  /nest                     Execute the Agent Nesting Ritual (grounding, threat check, peer wind, scent)");
             println!("  /crumb [path]             Inspect directory crumb (above, below, and local agent history)");
@@ -216,18 +242,49 @@ pub async fn handle_slash_command(cmd: &str) -> bool {
             }
             true
         },
-                "/skill" | "/skills" => {
-            if parts.len() < 2 || parts[1] == "list" {
+        "/skill" | "/skills" => {
+            if parts.len() > 1 && parts[1] == "optimize" {
+                let name = if parts.len() > 2 { parts[2..].join(" ") } else { "atlas-skillopt".to_string() };
+                crate::skills::run_optimize_cli(&name);
+            } else if parts.len() < 2 || parts[1] == "list" {
                 println!("{}", crate::skills::format_skills_tui());
             } else {
                 let name = parts[1..].join(" ");
                 match crate::skills::read_skill_content(&name) {
                     Ok(content) => {
-                        println!("\n{}", format!("=== Skill: {} ===", name).cyan().bold());
+                        println!("
+{}", format!("=== Skill: {} ===", name).cyan().bold());
                         println!("{}", content);
                     },
                     Err(e) => println!("{}", e.red()),
                 }
+            }
+            true
+        },
+        "/sandbox" => {
+            crate::sandbox::handle_sandbox_command(&parts[1..]);
+            true
+        },
+        "/browser" | "/mirror" => {
+            crate::sandbox::handle_browser_command(&parts[1..]);
+            true
+        },
+        "/subagent" | "/subagents" => {
+            let tokens = parse_quoted_args(cmd);
+            if tokens.len() > 1 && tokens[1] == "view" {
+                let id = if tokens.len() > 2 { &tokens[2] } else { "" };
+                let res = crate::subagents::view_subagent(id);
+                println!("{}", serde_json::to_string_pretty(&res).unwrap_or_default());
+            } else if tokens.len() > 1 && tokens[1] == "run" {
+                let role = if tokens.len() > 2 { &tokens[2] } else { "Researcher" };
+                let prompt = if tokens.len() > 3 { tokens[3..].join(" ") } else { "Investigate active workspace".to_string() };
+                println!("{}", format!("Spawning subagent '{}'...", role).cyan().bold());
+                let res = tokio::task::block_in_place(|| {
+                    tokio::runtime::Handle::current().block_on(crate::subagents::invoke_subagent_from_root(role, &prompt))
+                });
+                println!("{}", serde_json::to_string_pretty(&res).unwrap_or_default());
+            } else {
+                println!("{}", crate::subagents::format_subagents_tui());
             }
             true
         },

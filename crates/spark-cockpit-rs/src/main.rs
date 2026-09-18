@@ -139,6 +139,7 @@ async fn main() {
         .route("/api/cortex", get(handle_cortex_search).post(handle_cortex_write))
         .route("/api/chat/stream", post(handle_chat_stream))
         .route("/api/stream", post(handle_chat_stream))
+        .route("/api/subagents", get(handle_get_subagents))
         .fallback_service(ServeDir::new(STATIC_DIR))
         .layer(
             CorsLayer::new()
@@ -551,4 +552,25 @@ async fn handle_chat_stream(
     Sse::new(stream)
         .keep_alive(KeepAlive::new().interval(Duration::from_secs(15)))
         .into_response()
+}
+
+async fn handle_get_subagents() -> Json<Value> {
+    let dir = Path::new("/home/drakestapleton/basecamp/sessions/subagents");
+    if !dir.exists() {
+        return Json(json!({"subagents": [], "count": 0}));
+    }
+    let mut items = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|s| s.to_str()) == Some("json") {
+                if let Ok(content) = std::fs::read_to_string(&path) {
+                    if let Ok(parsed) = serde_json::from_str::<Value>(&content) {
+                        items.push(parsed);
+                    }
+                }
+            }
+        }
+    }
+    Json(json!({"subagents": items, "count": items.len()}))
 }
