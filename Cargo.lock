@@ -2775,6 +2775,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "spark-inquisitor"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "clap",
+ "colored",
+ "regex",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "spark-supervisor"
 version = "0.1.0"
 dependencies = [
