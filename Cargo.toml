@@ -8,4 +8,6 @@ members = [
     "crates/spark-supervisor",
     "crates/spark-discord-hub",
     "crates/spark-debugger",
+    "crates/spark-harness",
+    "crates/spark-dream",
 ]

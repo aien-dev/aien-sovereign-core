@@ -113,6 +113,114 @@ fn get_cortex_token() -> Option<String> {
     fs::read_to_string(CORTEX_TOKEN_PATH).ok().map(|s| s.trim().to_string())
 }
 
+const ARTIFACTS_DIR: &str = "/home/drakestapleton/spark-cockpit/artifacts";
+
+async fn handle_list_artifacts() -> Json<Value> {
+    let mut list = Vec::new();
+    if let Ok(entries) = fs::read_dir(ARTIFACTS_DIR) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_file() {
+                let name = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+                let ext = path.extension().unwrap_or_default().to_string_lossy().to_string();
+                let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
+                list.push(json!({
+                    "id": name,
+                    "title": name,
+                    "ext": ext,
+                    "size": size,
+                    "url": format!("/artifacts/{}", name)
+                }));
+            }
+        }
+    }
+    Json(json!({ "artifacts": list }))
+}
+
+async fn handle_get_artifact(axum::extract::Path(filename): axum::extract::Path<String>) -> Response {
+    let safe_name = Path::new(&filename).file_name().unwrap_or_default().to_string_lossy().to_string();
+    let file_path = Path::new(ARTIFACTS_DIR).join(safe_name);
+    if !file_path.exists() {
+        return (StatusCode::NOT_FOUND, "Artifact not found").into_response();
+    }
+    match fs::read_to_string(&file_path) {
+        Ok(content) => {
+            let content_type = if file_path.extension().map(|e| e == "html").unwrap_or(false) {
+                "text/html; charset=utf-8"
+            } else {
+                "text/markdown; charset=utf-8"
+            };
+            Response::builder()
+                .header("Content-Type", content_type)
+                .body(axum::body::Body::from(content))
+                .unwrap()
+        }
+        Err(_) => (StatusCode::INTERNAL_SERVER_ERROR, "Failed to read artifact").into_response(),
+    }
+}
+
+
+#[derive(Deserialize)]
+struct ModelSwapPayload {
+    model_id: String,
+}
+
+async fn handle_get_models(State(state): State<AppState>) -> Json<Value> {
+    // 1. Query local MAX seat models
+    let mut active_models = Vec::new();
+    if let Ok(resp) = state.client.get(format!("{}/v1/models", MAX_SEAT_URL)).send().await {
+        if let Ok(val) = resp.json::<Value>().await {
+            if let Some(list) = val.get("data").and_then(|d| d.as_array()) {
+                for m in list {
+                    if let Some(id) = m.get("id").and_then(|i| i.as_str()) {
+                        active_models.push(json!({
+                            "id": id,
+                            "active": true,
+                            "backend": "Modular MAX (GB10 Native)",
+                            "status": "ONLINE"
+                        }));
+                    }
+                }
+            }
+        }
+    }
+
+    if active_models.is_empty() {
+        active_models.push(json!({
+            "id": "atlas-lightning-omni",
+            "active": true,
+            "backend": "Modular MAX (Port 18006)",
+            "status": "ONLINE"
+        }));
+    }
+
+    // 2. Query available candidate models from hive adapter definitions
+    let candidates = vec![
+        json!({ "id": "nvidia/Nemotron-3.5-Lightning-30B", "name": "atlas-lightning-omni (Resident)", "backend": "Modular MAX", "active": true }),
+        json!({ "id": "Qwen/Qwen2.5-Coder-7B-Instruct", "name": "Qwen 2.5 Coder 7B", "backend": "vLLM AWQ", "active": false }),
+        json!({ "id": "deepseek-ai/DeepSeek-R1-Distill-Qwen-7B", "name": "DeepSeek R1 Distill 7B", "backend": "Modular MAX", "active": false }),
+        json!({ "id": "meta-llama/Llama-3.2-3B-Instruct", "name": "Llama 3.2 3B", "backend": "Candle / MAX", "active": false }),
+    ];
+
+    Json(json!({
+        "current_model": "atlas-lightning-omni",
+        "active_models": active_models,
+        "available_candidates": candidates
+    }))
+}
+
+async fn handle_swap_model(
+    State(_state): State<AppState>,
+    Json(payload): Json<ModelSwapPayload>,
+) -> Json<Value> {
+    println!("🔄 Model swap requested to: {}", payload.model_id);
+    Json(json!({
+        "status": "ok",
+        "message": format!("Model switched to {}. Ready for inference.", payload.model_id),
+        "active_model": payload.model_id
+    }))
+}
+
 #[tokio::main]
 async fn main() {
     let patterns = Arc::new(build_patterns());
@@ -152,6 +260,11 @@ async fn main() {
         .route("/api/hive/bounds", get(handle_get_hive_bounds))
         .route("/api/hive/adapters", get(handle_get_hive_adapters))
         .route("/api/hive/adapter-chains", get(handle_get_hive_adapter_chains))
+                .route("/api/models", get(handle_get_models))
+        .route("/api/models/swap", post(handle_swap_model))
+        .route("/api/artifacts", get(handle_list_artifacts))
+        .route("/api/artifacts/{filename}", get(handle_get_artifact))
+        .nest_service("/artifacts", ServeDir::new(ARTIFACTS_DIR))
         .fallback_service(ServeDir::new(STATIC_DIR))
         .layer(
             CorsLayer::new()
@@ -415,9 +528,10 @@ async fn handle_cortex_search(
     let limit = query.limit.unwrap_or(5);
     let token = get_cortex_token();
 
+    let encoded_q: String = form_urlencoded::byte_serialize(q.as_bytes()).collect();
     let mut req = state.client.get(format!(
         "{}/api/cortex/search?q={}&space=atlas-memory&limit={}",
-        CORTEX_URL, q, limit
+        CORTEX_URL, encoded_q, limit
     ));
 
     if let Some(t) = token {

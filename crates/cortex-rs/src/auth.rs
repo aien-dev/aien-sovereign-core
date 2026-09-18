@@ -28,8 +28,11 @@ pub fn load_cortex_token() -> String {
 pub async fn auth_middleware(req: Request, next: Next) -> Result<Response, Response> {
     let expected = load_cortex_token();
     if expected.is_empty() {
-        // No token configured on host; permit local requests
-        return Ok(next.run(req).await);
+        let err_resp = (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"error": "Service unavailable: Cortex authentication token unconfigured on host"})),
+        ).into_response();
+        return Err(err_resp);
     }
 
     if let Some(auth_val) = req.headers().get("Authorization").and_then(|h| h.to_str().ok()) {
@@ -46,4 +49,17 @@ pub async fn auth_middleware(req: Request, next: Next) -> Result<Response, Respo
     ).into_response();
 
     Err(err_resp)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_load_cortex_token_env_override() {
+        std::env::set_var("CORTEX_TOKEN", "test_token_12345");
+        let token = load_cortex_token();
+        assert_eq!(token, "test_token_12345");
+        std::env::remove_var("CORTEX_TOKEN");
+    }
 }

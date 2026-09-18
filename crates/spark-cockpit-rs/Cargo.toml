@@ -7,6 +7,7 @@ edition = "2024"
 async-stream = "0.3.6"
 axum = "0.8.9"
 chrono = "0.4.45"
+form_urlencoded = "1.2"
 futures-util = "0.3.34"
 regex = "1.13.1"
 reqwest = { version = "0.13.5", features = ["json", "stream"] }
