@@ -27,6 +27,9 @@ use models::CortexEntity;
 #[derive(Parser, Debug)]
 #[command(name = "cortex-rs", about = "Sovereign Native Memory Engine in Rust")]
 struct Args {
+    #[arg(long, default_value = "127.0.0.1")]
+    host: String,
+
     #[arg(long, default_value = "18080")]
     port: u16,
 
@@ -100,7 +103,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .layer(TraceLayer::new_for_http())
         .with_state(state);
 
-    let addr = SocketAddr::from(([0, 0, 0, 0], args.port));
+    let addr: SocketAddr = format!("{}:{}", args.host, args.port).parse().unwrap_or_else(|_| SocketAddr::from(([127, 0, 0, 1], args.port)));
     tracing::info!("Cortex-RS server listening on http://{}", addr);
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
