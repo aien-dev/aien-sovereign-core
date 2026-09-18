@@ -13,4 +13,7 @@ members = [
     "crates/spark-adapters",
     "crates/spark-crumbs",
     "crates/spark-inquisitor",
+    "crates/spark-max-cabi",
+    "crates/spark-max-rs",
+    "crates/cortex-encoder-rs",
 ]
