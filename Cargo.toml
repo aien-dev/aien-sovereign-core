@@ -10,4 +10,6 @@ members = [
     "crates/spark-debugger",
     "crates/spark-harness",
     "crates/spark-dream",
+    "crates/spark-adapters",
+    "crates/spark-crumbs",
 ]
