@@ -2,10 +2,11 @@
 <!-- Provide a concise technical explanation of what this PR changes and why. -->
 
 ### Sovereign Alignment & Contributor Oath
+- [ ] **Commitment to Long-Term Public Good**: I understand that this project is dedicated to long-term open-source development for humanity, not short-term commercial speculation, social media hype, or get-rich-quick ventures.
 - [ ] **I solemnly swear the Sovereign Contributor Oath**:
   > "I certify that my contribution is submitted in service of human sovereignty, open democratization, and individual liberty. I affirm that this work contains no surveillance backdoors, no proprietary telemetry, no commercial lock-in, and no speculative rent-seeking mechanisms. I build to pay the debt forward for those who cannot defend themselves."
 
 ### Verification Proof
-- [ ] Automated tests passing (\`cargo test --verbose\`).
+- [ ] Automated tests passing (`cargo test --verbose`).
 - [ ] Unslop compliance verified: zero em/en dashes, zero marketing buzzwords, zero sycophancy.
-- [ ] Zero disk secrets: no plaintext \`.env\` files or credentials on disk.
+- [ ] Zero disk secrets: no plaintext `.env` files or credentials on disk.

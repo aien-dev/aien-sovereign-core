@@ -27,20 +27,30 @@ impl TestimonyEvaluator {
         }
 
         // 3. Checks for sovereignty / public good motivation
-        if lower.contains("sovereign") || lower.contains("freedom") || lower.contains("open") || lower.contains("people") || lower.contains("democratiz") {
+        if lower.contains("sovereign") || lower.contains("freedom") || lower.contains("open") || lower.contains("people") || lower.contains("democratiz") || lower.contains("humanity") {
             score += 0.35;
         } else {
             flags.push("Lacks clear statement of purpose serving human sovereignty");
         }
 
-        // 4. Disqualification signals (monetization, tokens, proprietary, telemetry)
-        let red_flags = ["monetiz", "token sale", "affiliate", "tracking sdk", "analytics provider", "proprietary license"];
+        // 4. Disqualification signals (monetization, tokens, speculative hype, get-rich-quick, proprietary, telemetry)
+        let red_flags = [
+            "monetiz",
+            "token sale",
+            "affiliate",
+            "tracking sdk",
+            "analytics provider",
+            "proprietary license",
+            "get rich",
+            "quick profit",
+            "crypto pump",
+        ];
         for rf in &red_flags {
             if lower.contains(rf) {
                 return EvalVerdict {
                     approved: false,
                     score: 0.0,
-                    reason: format!("Disqualified: detected rent-seeking or proprietary indicator {}", rf),
+                    reason: format!("Disqualified: detected rent-seeking or speculative hype indicator {}", rf),
                 };
             }
         }
@@ -75,6 +85,14 @@ mod tests {
     #[test]
     fn test_commercial_red_flag() {
         let testimony = "We plan to add monetization and token sale hooks later.";
+        let verdict = TestimonyEvaluator::evaluate(testimony);
+        assert!(!verdict.approved);
+        assert!(verdict.reason.contains("Disqualified"));
+    }
+
+    #[test]
+    fn test_get_rich_quick_red_flag() {
+        let testimony = "This will help us get rich quick with automated content.";
         let verdict = TestimonyEvaluator::evaluate(testimony);
         assert!(!verdict.approved);
         assert!(verdict.reason.contains("Disqualified"));

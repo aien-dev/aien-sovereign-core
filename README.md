@@ -9,6 +9,26 @@ High-performance native agent runtime, ultra-low-latency Axum web gateway, and c
 
 ---
 
+## Mission & Purpose: The Long-Term Defense of Humanity
+
+This project is not a demo, a speculative investment vehicle, or quick content for social media algorithms. It is a long-term engineering commitment requiring disciplined craftsmanship to advance our species, support local communities, and guarantee open-source technology for humanity.
+
+Monopolistic tech conglomerates are aggressively consolidating ownership over computing power and artificial intelligence. When intelligence is locked behind proprietary cloud APIs, human autonomy is subordinated to corporate gatekeepers, user surveillance becomes mandatory, and individuals are stripped of digital independence.
+
+We build sovereign infrastructure as a direct defensive shield for humanity. Our objective is to ensure that frontier intelligence runs entirely on local, hardware-bound silicon in the hands of ordinary people, independent engineers, clinics, farmers, and community builders. We measure progress in durable software, mathematical verification, and open access, not speculative hype.
+
+Review our full ethical and technical charter in [CONSTITUTION.md](CONSTITUTION.md).
+
+---
+
+## Downstream Heritage Requirement
+
+If you choose to branch off of, fork, or copy our work, our single non-negotiable requirement is that you retain and include the original founding Constitution ([CONSTITUTION.md](CONSTITUTION.md)) in its entirety.
+
+You are free to innovate, build, and adapt, but the lineage, foundational principles, and commitment to human sovereignty must accompany all downstream descendants.
+
+---
+
 ## Subsystems
 
 ### 1. `crates/aien-cli`
@@ -24,12 +44,27 @@ Native Axum HTTP/SSE gateway:
 - **Latency**: Sub-millisecond Time-to-First-Byte (< 1 ms TTFB) on Grace Neoverse V2 cores.
 - **Streaming Pipeline**: Zero-allocation byte buffer with real-time SSE token stream redaction and unslop filtering.
 
-### 3. `modular/nemotron_h_kvexp`
+### 3. `crates/cortex-encoder-rs` & `crates/cortex-rs`
+Pure native compiled memory and vector pipeline:
+- **Port 18080 (`cortex-rs`)**: Epistemic knowledge store with ACID transaction logs, SQLite vector storage, and zero LAN leakage.
+- **Port 18081 (`cortex-encoder-rs`)**: Rust Axum microservice running ONNX Runtime C-API and HuggingFace tokenizers. Replaced legacy 1.08 GB Python Uvicorn process with bit-for-bit mathematical parity and 22 ms rerank latency.
+
+### 4. `crates/spark-max-cabi` & `crates/spark-max-rs`
+Modular MAX compiled dynamic FFI bridge:
+- Bridges high-speed Mojo kernels to compiled Rust via pure C-ABI (`libspark_max.so`).
+- Enforces the runtime invariant that Python is restricted solely to neural graph definitions and weights where C-ABI wrappers do not yet exist.
+
+### 5. `crates/spark-inquisitor`
+Autonomous Pull Request gatekeeper and alignment auditor:
+- Enforces the Sovereign Contributor Oath on all pull requests.
+- Scans git diffs to block telemetry, surveillance tracking SDKs, and unslop violations.
+
+### 6. `modular/nemotron_h_kvexp`
 Custom Modular MAX architecture loader and weight adapters:
 - Implements KV-cache expansion and weight adapters for serving `nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16` on Grace Blackwell GB10 hardware.
 - Engineered for direct upstream contribution to the open-source Modular ecosystem.
 
-### 4. `skills/`
+### 7. `skills/`
 Dynamic YAML-frontmatter runbooks:
 - `gpu-telemetry`: High-frequency GB10 thermals, power draw, and unified memory metrics.
 - `radicle-sync`: Sovereign P2P code synchronization without centralized forge lock-in.
@@ -39,6 +74,15 @@ Dynamic YAML-frontmatter runbooks:
 
 ---
 
+## Contributing
+
+All contributors must ratify the Sovereign Contributor Oath before pull requests can be reviewed or merged. Read [CONSTITUTION.md](CONSTITUTION.md) for details.
+
+## Contact & Sovereign Coordination
+
+For secure coordination, architectural questions, and peer federation:
+- Email: `aien.atlas@proton.me`
+
 ## License
 
-This project is licensed under the Apache License, Version 2.0. See the [LICENSE](LICENSE) file for details.
+This project is licensed under the Apache License, Version 2.0. See the [LICENSE](LICENSE) file for details. Downstream distributions must preserve the founding Constitution ([CONSTITUTION.md](CONSTITUTION.md)).
