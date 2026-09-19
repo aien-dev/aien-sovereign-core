@@ -30,6 +30,13 @@ Standard: Brutally Factual Systems Audit. Zero Marketing Language.
 | **aien-inference-abi** | Active | **Cross-platform Verified** | Trait contracts, MockInferenceBackend, MaxServingBackend, VllmServingBackend, NativeCpuInferenceBackend; tested on Apple Silicon M2, Linux x86_64, and Grace Blackwell | Live streaming SSE parsing is raw text; structured function calling parsing is pending. |
 | **Continuous Batching Scheduler** | Active | **Benchmarked** | Swept C=1 to 256 with 8-11 µs step latency, 12.3k steps/sec dispatch throughput, live power telemetry (11.5W-12.0W), 1,000 child zero-copy forks | Multi-stream continuous prefill pipeline verified against live MAX endpoints. |
 
+## Empirical Baseline Measurements
+
+<!-- AIEN:BENCHMARKS:START -->
+<!-- AIEN:BENCHMARKS:END -->
+
+Canonical dataset and commit anchors: [aien-dev/benchmarks](https://github.com/aien-dev/benchmarks).
+
 ## Deficit Inventory
 
 1. **Versioned Release Packaging**: Resolved. Tagged `v0.1.0` release workflow (`release.yml`) with automated SHA-256 checksums and multi-OS binary packaging (`sovereign-*.tar.gz`).

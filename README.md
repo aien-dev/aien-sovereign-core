@@ -1,6 +1,6 @@
 # AIEN Sovereign Core
 
-[![License: SRCL-1.0](https://img.shields.io/badge/License-SRCL--1.0-blue.svg)](LICENSE)
+[![License: Apache-2.0](https://img.shields.io/badge/License-Apache--2.0-blue.svg)](LICENSE)
 [![Target](https://img.shields.io/badge/Target-Multi--Platform%20%7C%20Apple%20Silicon%20%7C%20Linux%20%7C%20NVIDIA-76B900.svg)](https://github.com/aien-dev/benchmarks)
 [![Rust](https://img.shields.io/badge/Rust-1.85+-orange.svg)](https://www.rust-lang.org)
 [![Modular MAX](https://img.shields.io/badge/Modular-MAX%2026.5-purple.svg)](https://modular.com)
@@ -25,12 +25,8 @@ Review our full ethical and technical charter in [CONSTITUTION.md](CONSTITUTION.
 
 AIEN eliminates interpreter overhead by compiling all core services directly to native machine code.
 
-| Metric | Traditional Python Stack | AIEN Sovereign Stack | Real-World Developer Impact |
-| :--- | :--- | :--- | :--- |
-| **Idle Memory (RSS)** | 3,737 MB (LangChain / PyTorch) | **4.78 MB** (`openclaw-rs`) | **99.8% memory savings**. Leaves 99.8% of system RAM and GPU memory free to load 32B+ neural model weights locally. |
-| **Response Latency** | 38.40 ms (FastAPI p50) | **3.56 ms** (`cortex-rs` p50) | **10x faster response**. Agents search memory and dispatch tools instantaneously with zero lag. |
-| **Request Throughput** | 214 req/s | **2,056 req/s** | A single workstation handles the concurrent request throughput of an entire server cluster. |
-| **INT8 Vectorization** | External API / PyTorch | **4.09 ms** (`cortex-encoder`) | Local embedding indexing on device without API costs, tokens, or network delays. |
+<!-- AIEN:BENCHMARKS:START -->
+<!-- AIEN:BENCHMARKS:END -->
 
 For raw telemetry datasets, reproducible verification scripts, and SVG comparison charts, see the dedicated [**aien-dev/benchmarks**](https://github.com/aien-dev/benchmarks) repository.
 
@@ -133,11 +129,11 @@ For secure coordination, architectural questions, and peer federation:
 
 ## License and Governance
 
-Licensed under the **Sovereign Resource Commons License 1.0 (SRCL-1.0)** (Apache-2.0 WITH LLVM-exception).
-Architected by Drake Stapleton in cognitive partnership with AIEN (Autonomous Cognitive Architecture operating on the Atlas Framework). See [LICENSE](LICENSE) for full legal terms and copyright notices.
+Licensed under the **Apache License, Version 2.0**.
+Architected by Drake Stapleton in cognitive partnership with AIEN (Autonomous Cognitive Architecture operating on the Atlas Framework). See [LICENSE](LICENSE) and [NOTICE](NOTICE) for full legal terms and copyright notices.
 
-- **Section 11 (Swarm Covenant)**: Commercial application freedom with zero revenue caps. Independent services and proprietary applications linking against this Work under the LLVM exception incur zero obligation to disclose application source code.
-- **Section 12 (One Team Covenant)**: Mandates reciprocal weight transparency from well-capitalized frontier entities ($25M+), requiring resulting model weights to be released openly within 30 days.
-- **Section 13 (Hardened Retroactive Inception)**: Any training or utilization in breach of reciprocal covenants is unpermitted ab initio and subject to statutory copyright damages and liquidated licensing fees.
+- **Standard Open Source**: Full commercial, research, and private usage rights under standard Apache-2.0 terms.
+- **Voluntary Research Covenants**: Bilateral cooperation agreements, reciprocal weight sharing, and model artifact access are documented in [OPEN_COOPERATION_COVENANT.md](OPEN_COOPERATION_COVENANT.md) and [ARTIFACT_LICENSING.md](ARTIFACT_LICENSING.md).
+- **Trademark Policy**: Descriptive use and brand guidelines are documented in [TRADEMARK_POLICY.md](TRADEMARK_POLICY.md).
 
 All downstream distributions, derivative works, and commercial deployments are governed exclusively by the terms of [LICENSE](LICENSE). [CONSTITUTION.md](CONSTITUTION.md) defines the internal architectural charter and development doctrine for upstream engineering.
