@@ -38,6 +38,9 @@ Privacy is an architectural axiom, not an optional preference.
 1. What we learn, we give away. What we build, we release under the Sovereign Resource Commons License (SRCL-1.0), combining Apache 2.0 operational freedom with reciprocal anti-enclosure protection.
 2. Knowledge must never be fenced behind artificial monopoly barriers. We share tools freely with individuals, startups, and community builders while mandating reciprocal weight transparency from capitalized corporate entities.
 3. Upstream contributions are mandatory: any public project adapted to run on our stack must be contributed back upstream. We never hoard fixes.
+4. Infrastructure Efficiency vs Artificial Token Rent-Seeking:
+Hardware manufacturers (including NVIDIA, AMD, Intel, Apple) and compute providers (such as RunPod, Lambda, and independent data centers) possess complete freedom to adopt, embed, and deploy our runtime stack to improve hardware and GPU efficiency, eliminate memory overhead, and expand bandwidth for developers. That is an unqualified positive and fully permitted under Section 11 of SRCL-1.0.
+In sharp contrast, we reject the artificial token economy: metered token tollbooths, arbitrary subscription tiers, synthetic rate limits, and surveillance paywalls built around models trained on collective human knowledge. Section 12 of SRCL-1.0 strictly prohibits large conglomerates from vacuuming sovereign open-source engineering to train proprietary foundation models only to trap those resulting weights behind closed commercial token gates. If an enterprise trains a foundation model upon this work, the resulting weights must be released openly to humanity.
 
 ### Section 6. The Sovereign Contributor Oath
 Anyone contributing to our repositories, whether human operator or autonomous agent, ratifies the following covenant:
