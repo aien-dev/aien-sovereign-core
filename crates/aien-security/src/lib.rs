@@ -19,22 +19,41 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_telemetry_hard_blocked_and_rejected() { // block telemetry
-        let intent = NetworkIntent::new("https://analytics.example.com/v1/event", NetworkPurpose::Telemetry) // block telemetry
-            .with_context("background_diagnostic_beacon");
+    fn test_telemetry_hard_blocked_and_rejected() {
+        // block telemetry
+        let intent = NetworkIntent::new(
+            "https://analytics.example.com/v1/event",
+            NetworkPurpose::Telemetry,
+        ) // block telemetry
+        .with_context("background_diagnostic_beacon");
 
         let result = enforce_network_purpose(&intent);
         assert!(result.is_err());
-        assert_eq!(result.unwrap_err(), NetworkSecurityError::TelemetryForbidden); // block telemetry
+        assert_eq!(
+            result.unwrap_err(),
+            NetworkSecurityError::TelemetryForbidden
+        ); // block telemetry
     }
 
     #[test]
     fn test_permitted_purposes_succeed() {
         let allowed = [
-            (NetworkPurpose::UserRequestedApi, "https://api.openai.com/v1/chat/completions"),
-            (NetworkPurpose::PeerSynchronization, "radicle://peer.node.example"),
-            (NetworkPurpose::ModelDownload, "https://huggingface.co/TinyLlama/model.safetensors"),
-            (NetworkPurpose::UpdateCheck, "https://updates.aien.dev/releases.json"),
+            (
+                NetworkPurpose::UserRequestedApi,
+                "https://api.openai.com/v1/chat/completions",
+            ),
+            (
+                NetworkPurpose::PeerSynchronization,
+                "radicle://peer.node.example",
+            ),
+            (
+                NetworkPurpose::ModelDownload,
+                "https://huggingface.co/TinyLlama/model.safetensors",
+            ),
+            (
+                NetworkPurpose::UpdateCheck,
+                "https://updates.aien.dev/releases.json",
+            ),
         ];
 
         for (purpose, url) in allowed {
@@ -47,13 +66,18 @@ mod tests {
     #[test]
     fn test_memory_secret_provider_lifecycle() {
         let provider = MemorySecretProvider::new();
-        assert_eq!(provider.protection_level(), SecretProtectionLevel::MemoryOnly);
+        assert_eq!(
+            provider.protection_level(),
+            SecretProtectionLevel::MemoryOnly
+        );
 
         let secret_name = "TEST_API_TOKEN";
         let secret_bytes = b"super-secret-token-payload";
 
         // Seal
-        let sealed = provider.seal(secret_name, secret_bytes).expect("sealing failed");
+        let sealed = provider
+            .seal(secret_name, secret_bytes)
+            .expect("sealing failed");
         assert_eq!(sealed.name, secret_name);
         assert_eq!(sealed.protection_level, SecretProtectionLevel::MemoryOnly);
 
@@ -74,7 +98,10 @@ mod tests {
     fn test_tpm2_secret_provider_capabilities() {
         let provider = Tpm2SecretProvider::default();
         let caps = provider.capabilities();
-        assert_eq!(caps.protection_level, SecretProtectionLevel::HardwareBackedSealed);
+        assert_eq!(
+            caps.protection_level,
+            SecretProtectionLevel::HardwareBackedSealed
+        );
         assert!(caps.hardware_bound);
         assert!(caps.persistent_at_rest);
     }

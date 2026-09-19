@@ -104,7 +104,10 @@ impl SecretProvider for MemorySecretProvider {
     }
 
     fn seal(&self, name: &str, secret: &[u8]) -> Result<SealedSecret, SecretError> {
-        let mut guard = self.store.write().map_err(|e| SecretError::CryptoError(e.to_string()))?;
+        let mut guard = self
+            .store
+            .write()
+            .map_err(|e| SecretError::CryptoError(e.to_string()))?;
         guard.insert(name.to_string(), secret.to_vec());
         Ok(SealedSecret {
             name: name.to_string(),
@@ -115,7 +118,10 @@ impl SecretProvider for MemorySecretProvider {
     }
 
     fn unseal(&self, secret: &SealedSecret) -> Result<Zeroizing<Vec<u8>>, SecretError> {
-        let guard = self.store.read().map_err(|e| SecretError::CryptoError(e.to_string()))?;
+        let guard = self
+            .store
+            .read()
+            .map_err(|e| SecretError::CryptoError(e.to_string()))?;
         match guard.get(&secret.name) {
             Some(bytes) => Ok(Zeroizing::new(bytes.clone())),
             None => Err(SecretError::NotFound(secret.name.clone())),
@@ -123,13 +129,19 @@ impl SecretProvider for MemorySecretProvider {
     }
 
     fn delete(&self, name: &str) -> Result<(), SecretError> {
-        let mut guard = self.store.write().map_err(|e| SecretError::CryptoError(e.to_string()))?;
+        let mut guard = self
+            .store
+            .write()
+            .map_err(|e| SecretError::CryptoError(e.to_string()))?;
         guard.remove(name);
         Ok(())
     }
 
     fn resolve(&self, name: &str) -> Result<Zeroizing<Vec<u8>>, SecretError> {
-        let guard = self.store.read().map_err(|e| SecretError::CryptoError(e.to_string()))?;
+        let guard = self
+            .store
+            .read()
+            .map_err(|e| SecretError::CryptoError(e.to_string()))?;
         match guard.get(name) {
             Some(bytes) => Ok(Zeroizing::new(bytes.clone())),
             None => Err(SecretError::NotFound(name.to_string())),
