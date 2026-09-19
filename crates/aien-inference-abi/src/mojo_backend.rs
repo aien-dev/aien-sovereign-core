@@ -205,13 +205,12 @@ impl Default for MojoGb10Backend {
     }
 }
 
+/// Type alias for honest architectural labeling of current multi-core CPU backend.
+pub type NativeCpuBackend = MojoGb10Backend;
+
 impl TensorBackend for MojoGb10Backend {
     fn name(&self) -> &'static str {
-        if self.bindings.is_some() {
-            "MojoGb10Backend(Accelerated)"
-        } else {
-            "MojoGb10Backend(FallbackCpu)"
-        }
+        "NativeCpuBackend (Rayon Multi-Core)"
     }
 
     fn rmsnorm(&self, out: &mut [f32], x: &[f32], weight: &[f32], eps: f32) {
@@ -353,7 +352,7 @@ mod tests {
     #[test]
     fn test_mojo_backend_creation_and_name() {
         let backend = MojoGb10Backend::new();
-        assert!(backend.name().starts_with("MojoGb10Backend"));
+        assert_eq!(backend.name(), "NativeCpuBackend (Rayon Multi-Core)");
     }
 
     #[test]

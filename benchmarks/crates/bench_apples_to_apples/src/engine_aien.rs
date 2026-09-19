@@ -173,7 +173,8 @@ pub async fn run_aien_concurrency_sweep(
     concurrency: usize,
 ) -> Result<ConcurrencyRunResult, String> {
     eprintln!(
-        "Executing AIEN (MojoGb10Backend) benchmark at concurrency C={}...",
+        "Executing AIEN FP32 Native ({}) benchmark at concurrency C={}...",
+        handle.backend.tensor_backend.name(),
         concurrency
     );
 
@@ -263,7 +264,7 @@ pub async fn run_aien_concurrency_sweep(
         .unwrap_or_default();
 
     Ok(ConcurrencyRunResult {
-        engine: "AIEN (MojoGb10Backend)".to_string(),
+        engine: format!("AIEN FP32 ({})", handle.backend.tensor_backend.name()),
         concurrency,
         total_requests: all_results.len(),
         total_output_tokens,

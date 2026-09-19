@@ -2,6 +2,7 @@
 //! Dispatches tensor math through the decoupled TensorBackend trait for CPU and Mojo/GB10 execution.
 
 use crate::backend::{ReferenceCpuBackend, TensorBackend};
+use crate::blackwell_backend::BlackwellGb10Backend;
 use crate::mojo_backend::MojoGb10Backend;
 use crate::tensor::{sample_argmax, sample_temperature};
 use crate::weights::{LayerKvCache, SequenceState, TransformerWeights};
@@ -59,6 +60,17 @@ impl NativeTransformerBackend {
     pub fn with_mojo_backend(config: &ModelConfig) -> Self {
         let weights = TransformerWeights::reference_test_weights(config);
         Self::new_mojo(weights)
+    }
+
+    /// Explicit constructor for genuine Blackwell GB10 GPU accelerated backend (sm_121 cuBLAS).
+    pub fn new_blackwell(weights: TransformerWeights) -> Self {
+        Self::with_backend(weights, Arc::new(BlackwellGb10Backend::new()))
+    }
+
+    /// Convenience constructor with deterministic reference weights and BlackwellGb10Backend.
+    pub fn with_blackwell_backend(config: &ModelConfig) -> Self {
+        let weights = TransformerWeights::reference_test_weights(config);
+        Self::new_blackwell(weights)
     }
 
     /// Implementation helper executing forward pass on disjoint struct fields.
@@ -477,7 +489,10 @@ mod tests {
         assert_eq!(cpu_backend.tensor_backend.name(), "ReferenceCpuBackend");
 
         let mojo_backend = NativeTransformerBackend::with_mojo_backend(&config);
-        assert!(mojo_backend.tensor_backend.name().starts_with("MojoGb10Backend"));
+        assert!(mojo_backend.tensor_backend.name().starts_with("NativeCpuBackend"));
+
+        let blackwell_backend = NativeTransformerBackend::with_blackwell_backend(&config);
+        assert!(blackwell_backend.tensor_backend.name().starts_with("BlackwellGb10Backend"));
     }
 
     #[test]

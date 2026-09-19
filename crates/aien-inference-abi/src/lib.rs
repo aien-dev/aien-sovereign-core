@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 pub mod backend;
+pub mod blackwell_backend;
 pub mod checkpoint;
 pub mod mojo_backend;
 pub mod tensor;
@@ -11,6 +12,7 @@ pub mod transformer_backend;
 pub mod weights;
 
 pub use backend::*;
+pub use blackwell_backend::*;
 pub use checkpoint::*;
 pub use mojo_backend::*;
 pub use tensor::*;
