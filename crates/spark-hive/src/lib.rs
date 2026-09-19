@@ -8,7 +8,7 @@ pub use geometry::{
     DetailTier, HexCoord, PlacementIntent, DEFAULT_HEX_RADIUS, HEX_DIRECTIONS,
     HEX_DIRECTION_LABELS, SQRT_3,
 };
-pub use store::{BoundingBox, CombStore, HiveComb, HiveError, NeighborLink, PlaceCombInput};
+pub use store::{BoundingBox, CombStore, CreateForgeTaskInput, ForgeTask, HiveComb, HiveError, NeighborLink, PlaceCombInput};
 pub use emission::{emit_socratic_comb, emit_subagent_comb};
 pub use adapter_engine::{
     evaluate_socratic_reflex, generate_pr_plan, emit_adapter_pipeline_combs,
