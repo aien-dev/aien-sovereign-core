@@ -1,6 +1,5 @@
 use aien_inference_abi::{
-    AienInferenceBackend, ExecutionSurface, ModelConfig, SamplingParams,
-    SequenceRequest,
+    AienInferenceBackend, ExecutionSurface, ModelConfig, SamplingParams, SequenceRequest,
 };
 use aien_kv_cache::{create_shared_kv_manager_with_pool, AienKvManager, KvDType, KvPoolConfig};
 use aien_scheduler::{AienScheduler, SchedulerConfig};
@@ -247,13 +246,13 @@ async fn bench_scheduler_step_overhead() {
 }
 
 async fn bench_continuous_batching_scheduler_throughput(surface: &ExecutionSurface) {
-    println!(
-        "--- 5. Native Continuous Batching Scheduler & Hardware Dispatch Throughput ---"
-    );
+    println!("--- 5. Native Continuous Batching Scheduler & Hardware Dispatch Throughput ---");
     println!("  Execution Path: AIEN Scheduler -> AIEN KV Block Pool -> Mojo/MAX Hardware C-ABI");
     println!("  Pure Compiled Rust & Mojo Control Plane. Zero Interpreted Scaffolding.");
-    println!("  Prompt Tokens: 512 | Output Tokens: 128 | Concurrency Tiers: 1 to 256
-");
+    println!(
+        "  Prompt Tokens: 512 | Output Tokens: 128 | Concurrency Tiers: 1 to 256
+"
+    );
 
     let base_rss_mb = read_current_rss_mb();
     println!(
@@ -346,21 +345,21 @@ async fn bench_continuous_batching_scheduler_throughput(surface: &ExecutionSurfa
 
         println!(
             "  | {:<11} | {:<21.2} | {:<21.2} | {:<24.1} | {:<16.1} | {:<9.2} |",
-            concurrency,
-            step_p50,
-            step_p95,
-            steps_per_sec,
-            dispatched_tps,
-            active_power_w
+            concurrency, step_p50, step_p95, steps_per_sec, dispatched_tps, active_power_w
         );
     }
 
-    println!("
-  Continuous Batching Summary:");
+    println!(
+        "
+  Continuous Batching Summary:"
+    );
     println!("  - Sub-millisecond continuous batch scheduling across concurrency tiers 1 to 256.");
     println!("  - Hardware synchronization via Mojo C-ABI with direct Blackwell GPU context.");
-    println!("  - Lean resident memory footprint: {:.2} MB VmRSS with zero Python runtime overhead.
-", base_rss_mb);
+    println!(
+        "  - Lean resident memory footprint: {:.2} MB VmRSS with zero Python runtime overhead.
+",
+        base_rss_mb
+    );
 }
 
 async fn bench_context_window_scaling(_surface: &ExecutionSurface) {
@@ -409,15 +408,13 @@ async fn bench_context_window_scaling(_surface: &ExecutionSurface) {
 
         println!(
             "  | {:<14} | {:<20.2} | {:<16} | {:<15.2} | {:<18.2} |",
-            ctx_len,
-            prefill_us,
-            prefix_hit,
-            mem_mb,
-            metrics.step_latency_us as f64
+            ctx_len, prefill_us, prefix_hit, mem_mb, metrics.step_latency_us as f64
         );
     }
-    println!("  Status: PASSED (Chunked prefill prevents queue starvation under 8k contexts)
-");
+    println!(
+        "  Status: PASSED (Chunked prefill prevents queue starvation under 8k contexts)
+"
+    );
 }
 
 async fn bench_live_services_verification(_surface: &ExecutionSurface) {
@@ -466,15 +463,26 @@ async fn bench_live_services_verification(_surface: &ExecutionSurface) {
     println!("  | :---                       | :---                                    | :---                     | :---              |");
 
     for (name, url, model_arch, role) in &endpoints {
-        let is_up = client.get(*url).send().await.map(|r| r.status().is_success() || r.status().as_u16() == 401).unwrap_or(false);
-        let status_str = if is_up { "ONLINE (Verified)" } else { "CONFIGURED" };
+        let is_up = client
+            .get(*url)
+            .send()
+            .await
+            .map(|r| r.status().is_success() || r.status().as_u16() == 401)
+            .unwrap_or(false);
+        let status_str = if is_up {
+            "ONLINE (Verified)"
+        } else {
+            "CONFIGURED"
+        };
         println!(
             "  | {:<26} | {:<39} | {:<24} | {:<17} |",
             name, model_arch, role, status_str
         );
     }
-    println!("  Status: PASSED (All production services grounded in live workstation runtime)
-");
+    println!(
+        "  Status: PASSED (All production services grounded in live workstation runtime)
+"
+    );
 }
 
 fn bench_cross_surface_summary(surface: &ExecutionSurface) {
