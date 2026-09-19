@@ -36,6 +36,30 @@ async fn main() {
     let args: Vec<String> = env::args().collect();
 
     if args.len() > 1 {
+        if args[1] == "--start" || args[1] == "start" {
+            commands::handle_start_command().await;
+            return;
+        }
+        if args[1] == "--stop" || args[1] == "stop" {
+            commands::handle_stop_command().await;
+            return;
+        }
+        if args[1] == "--status" || args[1] == "status" {
+            commands::handle_status_command().await;
+            return;
+        }
+        if args[1] == "--cockpit" || args[1] == "cockpit" {
+            commands::handle_cockpit_command().await;
+            return;
+        }
+        if args[1] == "--harness" || args[1] == "harness" {
+            commands::handle_harness_command().await;
+            return;
+        }
+        if args[1] == "--aegis" || args[1] == "aegis" {
+            commands::handle_aegis_command().await;
+            return;
+        }
         if args[1] == "--adapter" || args[1] == "adapter" || args[1] == "--adapters" {
             let cmd = if args.len() > 2 {
                 format!("/adapter {}", args[2..].join(" "))

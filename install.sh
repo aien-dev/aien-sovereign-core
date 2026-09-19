@@ -1,14 +1,17 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# AIEN Sovereign Core Universal Multi-OS Installer
+# ==============================================================================
+# AIEN Sovereign Stack Universal Multi-OS Developer Installer
+# Single-command install for the entire sovereign monorepo ecosystem.
 # Free and open-source for humanity. Zero telemetry. Zero subscriptions.
+# ==============================================================================
 
 echo "=================================================================="
-echo "      ⚡ AIEN Sovereign Core: Multi-OS Universal Installer       "
+echo "      ⚡ AIEN Sovereign Stack: Universal Developer Installer       "
 echo "=================================================================="
 
-OS="$(uname -s | tr '[:upper:]' '[:lower:]')"
+OS="$(uname -s | tr "[:upper:]" "[:lower:]")"
 ARCH="$(uname -m)"
 
 case "$ARCH" in
@@ -25,23 +28,71 @@ esac
 
 echo "[*] Detected Platform: $TARGET_OS ($TARGET_ARCH)"
 
+# Verify Rust Toolchain
+if ! command -v cargo >/dev/null 2>&1; then
+    echo "[!] Cargo not found. Installing Rust toolchain via rustup..."
+    curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+    source "$HOME/.cargo/env"
+fi
+
 BIN_DIR="$HOME/.local/bin"
 CONFIG_DIR="$HOME/.config/sovereign"
 IMPRINT_DIR="$CONFIG_DIR/imprints/en2"
 
 mkdir -p "$BIN_DIR" "$CONFIG_DIR" "$IMPRINT_DIR"
 
-# Ensure ~/.local/bin is in PATH
+# Ensure ~/.local/bin is in PATH for current and future shells
 if [[ ":$PATH:" != *":$BIN_DIR:"* ]]; then
     export PATH="$BIN_DIR:$PATH"
 fi
 
+for RC in "$HOME/.zshrc" "$HOME/.bashrc" "$HOME/.profile"; do
+    if [ -f "$RC" ]; then
+        if ! grep -q "\$HOME/.local/bin" "\$RC"; then
+            echo "export PATH=\"\$HOME/.local/bin:\$PATH\"" >> "$RC"
+        fi
+    fi
+done
+
+echo "[*] Building Core Monorepo Binaries (High-Performance Release Mode)..."
+echo "    - aien-cli (Universal Terminal CLI & Orchestrator)"
+echo "    - spark-cockpit-rs (3D Sovereign Glass Cockpit Server)"
+echo "    - cortex-rs (Canonical Memory & Vector Store)"
+echo "    - spark-supervisor (Resilient Process Supervisor)"
+echo "    - spark-debugger (Zero-Leak Health & Telemetry Auditor)"
+echo "    - spark-harness (5-Layer Verification Engine)"
+echo "    - spark-crumbs (Blake3 Scent & Action Vector Tracker)"
+echo "    - spark-aegis (Defensive Boundary & Containment Engine)"
+
+cargo build --release -p aien-cli -p spark-cockpit-rs -p cortex-rs -p spark-supervisor -p spark-debugger -p spark-harness -p spark-crumbs -p spark-aegis
+
+echo "[*] Installing Binaries to $BIN_DIR..."
+cp target/release/aien-cli "$BIN_DIR/aien"
+cp target/release/spark-cockpit-rs "$BIN_DIR/spark-cockpit"
+cp target/release/cortex-rs "$BIN_DIR/cortex"
+cp target/release/spark-supervisor "$BIN_DIR/spark-supervisor"
+cp target/release/spark-debugger "$BIN_DIR/spark-debugger"
+cp target/release/spark-harness "$BIN_DIR/spark-harness"
+cp target/release/spark-crumbs "$BIN_DIR/spark-crumbs"
+cp target/release/spark-aegis "$BIN_DIR/spark-aegis"
+chmod +x "$BIN_DIR/aien" "$BIN_DIR/spark-cockpit" "$BIN_DIR/cortex" "$BIN_DIR/spark-supervisor" "$BIN_DIR/spark-debugger" "$BIN_DIR/spark-harness" "$BIN_DIR/spark-crumbs" "$BIN_DIR/spark-aegis"
+
+echo "[+] Binaries successfully linked:"
+echo "    - aien -> $BIN_DIR/aien"
+echo "    - spark-cockpit -> $BIN_DIR/spark-cockpit"
+echo "    - cortex -> $BIN_DIR/cortex"
+echo "    - spark-supervisor -> $BIN_DIR/spark-supervisor"
+echo "    - spark-debugger -> $BIN_DIR/spark-debugger"
+echo "    - spark-harness -> $BIN_DIR/spark-harness"
+echo "    - spark-crumbs -> $BIN_DIR/spark-crumbs"
+echo "    - spark-aegis -> $BIN_DIR/spark-aegis"
+
 echo "[*] Initializing Sovereign Operator Profile..."
 if [ ! -f "$CONFIG_DIR/operator.toml" ]; then
-    GIT_NAME="$(git config user.name 2>/dev/null || echo 'Sovereign Operator')"
-    GIT_EMAIL="$(git config user.email 2>/dev/null || echo 'operator@local')"
+    GIT_NAME="$(git config user.name 2>/dev/null || echo "Sovereign Operator")"
+    GIT_EMAIL="$(git config user.email 2>/dev/null || echo "operator@local")"
     
-    cat << EOF > "$CONFIG_DIR/operator.toml"
+    cat << CFG > "$CONFIG_DIR/operator.toml"
 [operator]
 name = "$GIT_NAME"
 email = "$GIT_EMAIL"
@@ -56,7 +107,7 @@ model_id = "atlas-lightning-omni"
 max_port = 18006
 context_window = 32768
 temperature = 0.7
-EOF
+CFG
     echo "[+] Generated default configuration at $CONFIG_DIR/operator.toml"
 else
     echo "[+] Existing configuration found at $CONFIG_DIR/operator.toml"
@@ -69,10 +120,16 @@ if [ -d "imprints/en2-trinity" ]; then
 fi
 
 echo "=================================================================="
-echo "  ✓ Installation complete. Sovereign computing ready on local silicon."
-echo "  - Configuration: $CONFIG_DIR/operator.toml"
-echo "  - Binaries installed to: $BIN_DIR"
-echo "  - EN2 Imprint: $IMPRINT_DIR"
-echo "  To launch cockpit: spark-cockpit"
-echo "  To re-initialize:  spark-rsi init"
+echo "  ⚡ Installation Complete. The Entire AIEN Stack is Ready."
+echo "=================================================================="
+echo "  Primary Command: aien"
+echo ""
+echo "  Quickstart:"
+echo "    aien start      # Starts Cortex, Cockpit, and background daemons"
+echo "    aien status     # Real-time health, ports, and memory status"
+echo "    aien cockpit    # Launches Sovereign Glass Cockpit in browser"
+echo "    aien chat       # Interactive sovereign terminal pairing"
+echo "    aien harness    # Run 5-layer verification checks"
+echo "    aien aegis      # Run defensive boundary security audit"
+echo "    aien doctor     # System diagnostic and TPM key vault audit"
 echo "=================================================================="

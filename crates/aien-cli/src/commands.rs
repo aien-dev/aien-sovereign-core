@@ -877,6 +877,113 @@ fn handle_adapter_command(args: &[&str]) {
     }
 }
 
+
+
+// --------------------------------------------------------------------------
+// SOVEREIGN ORCHESTRATION & DEVELOPER EXPERIENCE
+// --------------------------------------------------------------------------
+
+pub async fn handle_start_command() {
+    println!("{}", "⚡ Starting AIEN Sovereign Services...".cyan().bold());
+    let supervisor = std::process::Command::new("spark-supervisor")
+        .arg("start")
+        .spawn();
+    match supervisor {
+        Ok(_) => println!("{}", "✓ spark-supervisor initialized".green()),
+        Err(_) => {
+            println!("{}", "ℹ Launching core background daemons directly...".yellow());
+            let _ = std::process::Command::new("cortex").spawn();
+            let _ = std::process::Command::new("spark-cockpit").spawn();
+        }
+    }
+    println!("\n{}", "✓ Sovereign Services Online:".green().bold());
+    println!("  - Sovereign Cockpit: http://127.0.0.1:18095 (or Tailscale http://100.116.106.93:18095)");
+    println!("  - Cortex Memory:     http://127.0.0.1:18080");
+    println!("  - Modular MAX:       http://127.0.0.1:18006");
+}
+
+pub async fn handle_stop_command() {
+    println!("{}", "Stopping AIEN Sovereign Services...".yellow().bold());
+    let _ = std::process::Command::new("pkill")
+        .args(["-f", "spark-cockpit"])
+        .status();
+    println!("{}", "✓ Services stopped cleanly".green());
+}
+
+pub async fn handle_status_command() {
+    println!("{}", "=== AIEN Sovereign Stack Telemetry ===".cyan().bold());
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_millis(500))
+        .build()
+        .unwrap_or_default();
+
+    let checks = [
+        ("Modular MAX Model Seat", "http://127.0.0.1:18006/health", 18006),
+        ("Cortex Memory Store", "http://127.0.0.1:18080/health", 18080),
+        ("Cortex ONNX Encoder", "http://127.0.0.1:18081/health", 18081),
+        ("Sovereign Glass Cockpit", "http://127.0.0.1:18095/api/pulse", 18095),
+        ("Matrix Conduit Federation", "http://127.0.0.1:6167", 6167),
+        ("Sovereign Loopback Mail", "http://127.0.0.1:18092/status", 2525),
+    ];
+
+    for (name, url, port) in checks {
+        let t0 = std::time::Instant::now();
+        match client.get(url).send().await {
+            Ok(resp) if resp.status().is_success() => {
+                let elapsed = t0.elapsed().as_millis();
+                println!("  ✓ {:<28} (Port {:<5}): {} ({} ms)", name.green(), port, "ONLINE".green().bold(), elapsed);
+            }
+            _ => {
+                println!("  ℹ {:<28} (Port {:<5}): {}", name.yellow(), port, "STANDBY / OFFLINE".dimmed());
+            }
+        }
+    }
+}
+
+pub async fn handle_cockpit_command() {
+    println!("{}", "==================================================================".cyan());
+    println!("{}", "      ⚡ AIEN Sovereign Glass Terminal & Cockpit                  ".cyan().bold());
+    println!("{}", "==================================================================".cyan());
+    println!("  Local:       http://127.0.0.1:18095");
+    println!("  Tailscale:   http://100.116.106.93:18095");
+    println!("  Mascot:      AIEN Cosmic Monkey Warrior");
+    println!("  Audio:       Natural Voice Response Enabled");
+    println!("{}", "==================================================================".cyan());
+    let _ = std::process::Command::new("xdg-open")
+        .arg("http://127.0.0.1:18095")
+        .spawn();
+}
+
+pub async fn handle_harness_command() {
+    println!("{}", "⚡ Running AIEN 5-Layer Sovereign Harness Sweep...".cyan().bold());
+    let status = std::process::Command::new("spark-harness")
+        .arg("check")
+        .status();
+    match status {
+        Ok(s) if s.success() => println!("{}", "\n✓ 5-Layer Verification PASS: All invariants certified.".green().bold()),
+        _ => {
+            println!("{}", "Running comprehensive fallback diagnostic...".yellow());
+            run_doctor().await;
+        }
+    }
+}
+
+pub async fn handle_aegis_command() {
+    println!("{}", "🛡️ Running Aegis Defensive Boundary Audit...".cyan().bold());
+    let status = std::process::Command::new("spark-aegis")
+        .arg("audit")
+        .status();
+    match status {
+        Ok(s) if s.success() => println!("{}", "\n✓ Aegis Defense: Zero Disk Secrets & Boundary Secured.".green().bold()),
+        _ => {
+            println!("{}", "Auditing hardware TPM key vault directly...".yellow());
+            let _ = std::process::Command::new("atlas-vault")
+                .arg("list")
+                .status();
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

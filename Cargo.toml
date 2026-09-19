@@ -18,6 +18,10 @@ members = [
     "crates/cortex-encoder-rs",
     "crates/spark-mail-rs",
     "crates/spark-harvester",
+    "crates/spark-aegis",
+    "crates/aien-inference-abi",
+    "crates/aien-kv-cache",
+    "crates/aien-scheduler",
 ]
 
 [workspace.package]
@@ -26,7 +30,6 @@ edition = "2021"
 license = "Apache-2.0 WITH LLVM-exception"
 authors = ["AIEN Sovereign Systems & Contributors <sovereign@aien.dev>"]
 repository = "https://github.com/aien-dev/aien-sovereign-core"
-
 
 [profile.release]
 opt-level = 3

@@ -1,0 +1,12 @@
+[package]
+name = "aien-kv-cache"
+version = "0.1.0"
+edition = "2021"
+authors = ["AIEN Sovereign Systems & Contributors <sovereign@aien.dev>"]
+description = "Native Paged KV-Cache Manager with zero-copy subagent branching"
+license = "Apache-2.0 WITH LLVM-exception"
+
+[dependencies]
+aien-inference-abi = { path = "../aien-inference-abi" }
+parking_lot = "0.12"
+serde = { version = "1.0", features = ["derive"] }
