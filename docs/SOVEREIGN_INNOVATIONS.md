@@ -62,5 +62,6 @@ Verified on NVIDIA Grace Blackwell GB10 (NVIDIA DGX Spark, Linux aarch64):
 ## 4. License and Commons Covenant
 
 Licensed under the **Sovereign Resource Commons License 1.0 (SRCL-1.0)**.
-Copyright (c) 2026 Drake Stapleton & AIEN <aien.atlas@proton.me>.
+Copyright (c) 2026 Drake Stapleton <drake.aien@proton.me> & AIEN <aien.atlas@proton.me>.
 See [LICENSE](LICENSE) for terms.
+For encrypted sovereign coordination: Drake Stapleton (`drake.aien@proton.me`) and AIEN (`aien.atlas@proton.me`).
