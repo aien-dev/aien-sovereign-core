@@ -193,6 +193,9 @@ fn main() {
                 for v in &report.violations {
                     eprintln!("  * {}", v.red());
                 }
+                for s in &report.secret_violations {
+                    eprintln!("  * {}", s.red());
+                }
                 for u in &report.unslop_violations {
                     eprintln!("  * {}", u.yellow());
                 }

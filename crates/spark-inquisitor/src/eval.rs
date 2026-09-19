@@ -50,21 +50,34 @@ impl TestimonyEvaluator {
         let mut flags = Vec::new();
 
         // 1. Checks for oath affirmation
-        if lower.contains("certify") || lower.contains("swear") || lower.contains("affirm") || lower.contains("oath") {
+        let has_oath = lower.contains("certify") || lower.contains("swear") || lower.contains("affirm") || lower.contains("oath");
+        if has_oath {
             score += 0.35;
         } else {
             flags.push("Missing explicit oath affirmation");
         }
 
         // 2. Checks for anti-surveillance / anti-telemetry commitment
-        if lower.contains("zero telemetry") || lower.contains("no telemetry") || lower.contains("no tracking") || lower.contains("privacy") {
+        let has_anti_telemetry = lower.contains("zero telemetry")
+            || lower.contains("zero-telemetry")
+            || lower.contains("no telemetry")
+            || lower.contains("no-telemetry")
+            || lower.contains("no tracking")
+            || lower.contains("privacy");
+        if has_anti_telemetry {
             score += 0.30;
         } else {
             flags.push("Missing anti-surveillance certification");
         }
 
         // 3. Checks for sovereignty / public good motivation
-        if lower.contains("sovereign") || lower.contains("freedom") || lower.contains("open") || lower.contains("people") || lower.contains("democratiz") || lower.contains("humanity") {
+        let has_sovereignty = lower.contains("sovereign")
+            || lower.contains("freedom")
+            || lower.contains("open")
+            || lower.contains("people")
+            || lower.contains("democratiz")
+            || lower.contains("humanity");
+        if has_sovereignty {
             score += 0.35;
         } else {
             flags.push("Lacks clear statement of purpose serving human sovereignty");
@@ -92,7 +105,7 @@ impl TestimonyEvaluator {
             }
         }
 
-        let approved = score >= 0.70;
+        let approved = has_oath && has_anti_telemetry && has_sovereignty && score >= 0.70;
         let reason = if approved {
             "Testimony aligns with the Sovereign Constitution. Oath ratified.".to_string()
         } else {
@@ -120,8 +133,8 @@ mod tests {
         let md = verdict.generate_markdown_verdict("contributor_bob");
         assert!(md.contains("Contributor Testimony Approved"));
         assert!(md.contains("`sovereign-interview-passed`"));
-        assert!(!md.contains('—'));
-        assert!(!md.contains('–'));
+        assert!(!md.contains('\u{2014}'));
+        assert!(!md.contains('\u{2013}'));
     }
 
     #[test]

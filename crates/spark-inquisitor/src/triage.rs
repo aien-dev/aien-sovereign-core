@@ -13,7 +13,13 @@ pub struct TriageResult {
 }
 
 pub fn triage_issue(author: &str, issue_number: u64, title: &str, body: &str) -> TriageResult {
-    let lower_title = title.to_lowercase();
+    let clean_title = if title.trim().is_empty() {
+        "Untitled Issue"
+    } else {
+        title.trim()
+    };
+
+    let lower_title = clean_title.to_lowercase();
     let lower_body = body.to_lowercase();
     let combined = format!("{} {}", lower_title, lower_body);
 
@@ -46,7 +52,7 @@ pub fn triage_issue(author: &str, issue_number: u64, title: &str, body: &str) ->
         || combined.contains("add support")
         || combined.contains("request for");
 
-    if is_complaint {
+    let mut result = if is_complaint {
         let labels = vec!["feedback".to_string(), "triaged".to_string()];
         let markdown = format!(
 r#"### ⚖️ Sovereign Triage: Operational Feedback Registered
@@ -64,7 +70,7 @@ We resolve concrete regressions directly. Thank you for holding the line on qual
 "#,
             author = author,
             issue_number = issue_number,
-            title = title
+            title = clean_title
         );
         TriageResult {
             category: IssueCategory::Complaint,
@@ -99,7 +105,7 @@ Thank you for reporting this issue to maintain operational integrity.
 "#,
                 author = author,
                 issue_number = issue_number,
-                title = title
+                title = clean_title
             );
             TriageResult {
                 category: IssueCategory::BugReport,
@@ -133,7 +139,7 @@ Once these parameters are provided, automated verification will proceed.
 "#,
                 author = author,
                 issue_number = issue_number,
-                title = title
+                title = clean_title
             );
             TriageResult {
                 category: IssueCategory::BugReport,
@@ -160,7 +166,7 @@ Maintainers will review the architectural fit and discuss implementation pathway
 "#,
             author = author,
             issue_number = issue_number,
-            title = title
+            title = clean_title
         );
         TriageResult {
             category: IssueCategory::FeatureRequest,
@@ -184,14 +190,18 @@ A maintainer or sovereign agent will provide technical clarification shortly.
 "#,
             author = author,
             issue_number = issue_number,
-            title = title
+            title = clean_title
         );
         TriageResult {
             category: IssueCategory::Inquiry,
             labels,
             markdown,
         }
-    }
+    };
+
+    result.labels.sort();
+    result.labels.dedup();
+    result
 }
 
 #[cfg(test)]
@@ -204,8 +214,8 @@ mod tests {
         assert_eq!(res.category, IssueCategory::BugReport);
         assert!(res.labels.contains(&"needs-repro".to_string()));
         assert!(res.markdown.contains("Bug Report Acknowledged"));
-        assert!(!res.markdown.contains('—'));
-        assert!(!res.markdown.contains('–'));
+        assert!(!res.markdown.contains('\u{2014}'));
+        assert!(!res.markdown.contains('\u{2013}'));
     }
 
     #[test]
@@ -214,8 +224,8 @@ mod tests {
         assert_eq!(res.category, IssueCategory::BugReport);
         assert!(res.labels.contains(&"triaged".to_string()));
         assert!(res.markdown.contains("Bug Report Queued"));
-        assert!(!res.markdown.contains('—'));
-        assert!(!res.markdown.contains('–'));
+        assert!(!res.markdown.contains('\u{2014}'));
+        assert!(!res.markdown.contains('\u{2013}'));
     }
 
     #[test]
@@ -224,8 +234,8 @@ mod tests {
         assert_eq!(res.category, IssueCategory::Complaint);
         assert!(res.labels.contains(&"feedback".to_string()));
         assert!(res.markdown.contains("Operational Feedback Registered"));
-        assert!(!res.markdown.contains('—'));
-        assert!(!res.markdown.contains('–'));
+        assert!(!res.markdown.contains('\u{2014}'));
+        assert!(!res.markdown.contains('\u{2013}'));
     }
 
     #[test]
@@ -234,7 +244,29 @@ mod tests {
         assert_eq!(res.category, IssueCategory::FeatureRequest);
         assert!(res.labels.contains(&"enhancement".to_string()));
         assert!(res.markdown.contains("Architectural Proposal Received"));
-        assert!(!res.markdown.contains('—'));
-        assert!(!res.markdown.contains('–'));
+        assert!(!res.markdown.contains('\u{2014}'));
+        assert!(!res.markdown.contains('\u{2013}'));
+    }
+
+    #[test]
+    fn test_empty_strings_and_whitespace() {
+        let res = triage_issue("user", 105, "", "");
+        assert_eq!(res.category, IssueCategory::Inquiry);
+        assert!(res.markdown.contains("Untitled Issue"));
+        assert!(!res.markdown.contains('\u{2014}'));
+        assert!(!res.markdown.contains('\u{2013}'));
+
+        let res2 = triage_issue("user", 106, "   \t  ", "   \n  \t ");
+        assert_eq!(res2.category, IssueCategory::Inquiry);
+        assert!(res2.markdown.contains("Untitled Issue"));
+    }
+
+    #[test]
+    fn test_label_deduplication() {
+        let res = triage_issue("user", 107, "Feature enhancement request", "Proposal to add support for new feature.");
+        let mut sorted = res.labels.clone();
+        sorted.sort();
+        sorted.dedup();
+        assert_eq!(res.labels, sorted);
     }
 }
