@@ -12,7 +12,7 @@ The workspace comprises 17 native compiled crates, each dedicated to an isolated
 
 ### Governance and Verification
 - **`crates/spark-inquisitor`**: Autonomous GitHub gatekeeper, diff auditor, and issue triage engine. Enforces constitutional invariants on pull requests and issues, audits diffs for tracking patterns, verifies unslop compliance, and evaluates contributor oaths.
-- **`crates/spark-harness`**: Autonomous evaluation system providing JSON Schema validation, regression tracking, and execution reliability verification for agent actions.
+- **`crates/spark-eval`**: Autonomous evaluation system providing JSON Schema validation, regression tracking, and execution reliability verification for agent actions.
 - **`crates/spark-debugger`**: Hardware-level crash diagnostics and GPU fault isolation engine, inspecting execution traces and PTX/CUDA faults.
 
 ### Memory and Epistemics
