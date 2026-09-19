@@ -30,7 +30,7 @@ AIEN upstream development is guided by [CONSTITUTION.md](CONSTITUTION.md). The C
 
 1. **Mandatory Branching**: Never push directly to `main`. Create descriptive feature branches (`feat/`, `fix/`, `docs/`, `perf/`).
 2. **Sovereign Voice & Anti-Slop**:
-   - Zero em dashes (`—`) and zero en dashes (`–`). Use commas, colons, parentheses, or plain hyphens.
+   - Zero em dashes (Unicode U+2014) and zero en dashes (Unicode U+2013). Use commas, colons, parentheses, or plain hyphens.
    - Ban formulaic marketing buzzwords and conversational filler.
    - Lead pull request descriptions with technical proof, test output, or benchmarks.
 3. **Secret Protection at Rest**: Never commit plaintext `.env` files, API keys, or private tokens. All secrets must resolve through an approved `SecretProvider`.
