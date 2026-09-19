@@ -5,16 +5,15 @@ use crate::metrics::{calculate_joules_per_token, calculate_percentile};
 use crate::oracle::{verify_token_sequence_match, ORACLE_BENCHMARK_128_TOKENS};
 use crate::telemetry::HardwareMonitor;
 use crate::types::{BenchmarkConfig, ConcurrencyRunResult};
-use aien_inference_abi::config::ModelConfig;
 use aien_inference_abi::tokenizer::TinyLlamaTokenizer;
 use aien_inference_abi::transformer_backend::NativeTransformerBackend;
 use aien_inference_abi::weights::TransformerWeights;
 use aien_inference_abi::{
-    AienInferenceBackend, DecodeOutput, SamplingParams, ScheduledBatch,
+    AienInferenceBackend, DecodeOutput, ModelConfig, SamplingParams, ScheduledBatch,
     SequenceRequest,
 };
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::Instant;
 
 pub struct AienEngineHandle {

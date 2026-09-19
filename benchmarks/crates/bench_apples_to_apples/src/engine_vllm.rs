@@ -2,6 +2,7 @@
 //! Spawns `vllm serve` container on DGX Spark GB10 and drives concurrent load.
 
 use crate::metrics::{calculate_joules_per_token, calculate_percentile};
+use crate::oracle::{verify_token_sequence_match, ORACLE_BENCHMARK_128_TOKENS};
 use crate::telemetry::HardwareMonitor;
 use crate::types::{BenchmarkConfig, ConcurrencyRunResult, RequestRecord};
 use futures_util::StreamExt;
@@ -275,7 +276,17 @@ pub async fn run_vllm_concurrency_sweep(
     let itl_p99 = calculate_percentile(&all_itl, 99.0);
     let energy_j_per_tok = calculate_joules_per_token(avg_power_watts, wall_clock_elapsed, total_output_tokens);
 
-    let parity_match_rate_pct = 95.0;
+    let parity_match_rate_pct = if let Ok(tok) =
+        aien_inference_abi::tokenizer::TinyLlamaTokenizer::from_file(&config.tokenizer_path)
+    {
+        if let Ok(toks) = tok.encode(&sample_text) {
+            verify_token_sequence_match(&toks, &ORACLE_BENCHMARK_128_TOKENS)
+        } else {
+            0.0
+        }
+    } else {
+        0.0
+    };
 
     Ok(ConcurrencyRunResult {
         engine: "vLLM (vllm serve)".to_string(),

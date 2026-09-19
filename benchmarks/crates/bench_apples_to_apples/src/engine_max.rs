@@ -247,7 +247,17 @@ pub async fn run_max_concurrency_sweep(
     let itl_p99 = calculate_percentile(&all_itl, 99.0);
     let energy_j_per_tok = calculate_joules_per_token(avg_power_watts, wall_clock_elapsed, total_output_tokens);
 
-    let parity_match_rate_pct = 95.0;
+    let parity_match_rate_pct = if let Ok(tok) =
+        aien_inference_abi::tokenizer::TinyLlamaTokenizer::from_file(&config.tokenizer_path)
+    {
+        if let Ok(toks) = tok.encode(&sample_text) {
+            verify_token_sequence_match(&toks, &ORACLE_BENCHMARK_128_TOKENS)
+        } else {
+            0.0
+        }
+    } else {
+        0.0
+    };
 
     Ok(ConcurrencyRunResult {
         engine: "Modular MAX (max serve)".to_string(),
