@@ -9,7 +9,7 @@ use std::path::PathBuf;
 
 #[derive(Parser, Debug)]
 #[command(name = "spark-inquisitor")]
-#[command(author = "AIEN <aien.atlas@proton.me>")]
+#[command(author = "Drake Stapleton <drake.aien@proton.me> & AIEN <aien.atlas@proton.me>")]
 #[command(version = "0.2.0")]
 #[command(about = "Autonomous Sovereign Inquisitor & Pull Request Alignment Gatekeeper")]
 struct Cli {
