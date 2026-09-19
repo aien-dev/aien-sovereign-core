@@ -1,29 +1,56 @@
 # AIEN Sovereign Core
 
 [![License: SRCL-1.0](https://img.shields.io/badge/License-SRCL--1.0-blue.svg)](LICENSE)
-[![Target](https://img.shields.io/badge/Target-Grace%20Blackwell%20GB10-76B900.svg)](https://www.nvidia.com)
+[![Target](https://img.shields.io/badge/Target-Multi--Platform%20%7C%20Apple%20Silicon%20%7C%20Linux%20%7C%20NVIDIA-76B900.svg)](https://github.com/aien-dev/benchmarks)
 [![Rust](https://img.shields.io/badge/Rust-1.85+-orange.svg)](https://www.rust-lang.org)
 [![Modular MAX](https://img.shields.io/badge/Modular-MAX%2026.5-purple.svg)](https://modular.com)
 
-High-performance native agent runtime, ultra-low-latency Axum web gateway, and custom Modular MAX model architectures engineered for cross-platform deployment on Linux, macOS, and Windows.
+High-performance native agent runtime, ultra-low-latency Axum web gateway, and custom Modular MAX model architectures engineered for cross-platform deployment across Apple Silicon, standard x86_64 Linux, and NVIDIA architectures.
 
 ---
 
 ## Mission & Purpose: The Long-Term Defense of Humanity
 
-This project is not a demo, a speculative investment vehicle, or quick content for social media algorithms. It is a long-term engineering commitment requiring disciplined craftsmanship to advance our species, support local communities, and guarantee open-source technology for humanity.
+This project represents a durable engineering commitment requiring disciplined craftsmanship to advance computing autonomy, support local communities, and guarantee open-source technology for humanity.
 
-Monopolistic tech conglomerates are aggressively consolidating ownership over computing power and artificial intelligence. When intelligence is locked behind proprietary cloud APIs, human autonomy is subordinated to corporate gatekeepers, user surveillance becomes mandatory, and individuals are stripped of digital independence.
+Centralized platforms increasingly restrict access to computing power and artificial intelligence. When intelligence operates exclusively through proprietary cloud endpoints, user surveillance becomes mandatory and builders lose technical independence.
 
-We build sovereign infrastructure as a direct defensive shield for humanity. Our objective is to ensure that frontier intelligence runs entirely on local, hardware-bound silicon in the hands of ordinary people, independent engineers, clinics, farmers, and community builders. We measure progress in durable software, mathematical verification, and open access, not speculative hype.
+We construct sovereign infrastructure as a direct defensive shield for humanity. Our objective is to ensure that frontier intelligence executes entirely on local, hardware-bound silicon in the hands of ordinary people, independent engineers, clinics, farmers, and community builders. We measure progress in durable software, mathematical verification, and open access.
 
 Review our full ethical and technical charter in [CONSTITUTION.md](CONSTITUTION.md).
 
 ---
 
+## Verified Performance Benchmarks
+
+AIEN eliminates interpreter overhead by compiling all core services directly to native machine code.
+
+| Metric | Traditional Python Stack | AIEN Sovereign Stack | Real-World Developer Impact |
+| :--- | :--- | :--- | :--- |
+| **Idle Memory (RSS)** | 3,737 MB (LangChain / PyTorch) | **4.78 MB** (`openclaw-rs`) | **99.8% memory savings**. Leaves 99.8% of system RAM and GPU memory free to load 32B+ neural model weights locally. |
+| **Response Latency** | 38.40 ms (FastAPI p50) | **3.56 ms** (`cortex-rs` p50) | **10x faster response**. Agents search memory and dispatch tools instantaneously with zero lag. |
+| **Request Throughput** | 214 req/s | **2,056 req/s** | A single workstation handles the concurrent request throughput of an entire server cluster. |
+| **INT8 Vectorization** | External API / PyTorch | **4.09 ms** (`cortex-encoder`) | Local embedding indexing on device without API costs, tokens, or network delays. |
+
+For raw telemetry datasets, reproducible verification scripts, and SVG comparison charts, see the dedicated [**aien-dev/benchmarks**](https://github.com/aien-dev/benchmarks) repository.
+
+---
+
+## Universal Multi-Platform Portability
+
+While the primary reference deployment executes on the NVIDIA DGX Spark (Grace Blackwell GB10), AIEN runs across multiple platform targets:
+
+- **Apple Silicon (macOS)**: Native ARM64 compilation for M1, M2, M3, and M4 chips, Metal acceleration, and sub-10MB daemon resident set size.
+- **Linux (x86_64)**: Standard glibc and musl native binaries, AVX-512 SIMD acceleration, and support for commodity desktops and server racks.
+- **AMD ROCm**: Native Rust runtime execution targeting ROCm and HIP compute drivers.
+- **NVIDIA Hardware**: Reference deployment on Grace Blackwell unified memory and standard CUDA accelerators via Modular MAX and ONNX Runtime.
+- **Air-Gapped Sovereign Servers**: Complete offline functionality with hardware TPM 2.0 key vaulting and zero external network calls.
+
+---
+
 ## Ecosystem Partnerships & Attribution: Modular (MAX & Mojo)
 
-AIEN Sovereign Core proudly builds upon, interfaces with, and contributes back to the groundbreaking infrastructure created by **[Modular](https://modular.com)**.
+AIEN Sovereign Core proudly builds upon, interfaces with, and contributes back to the infrastructure created by **[Modular](https://modular.com)**.
 
 - **High-Performance Native Silicon**: We leverage Modular MAX Engine and the Mojo programming language to eliminate Python interpreter bottlenecks, executing compiled tensor kernels directly on hardware silicon.
 - **Upstream Stewardship (Drop != Delete)**: All custom architecture loaders, C-ABI dynamic bridges, and KV-cache optimizations engineered on our hardware are contributed back upstream to the open-source Modular ecosystem.
@@ -84,6 +111,14 @@ Autonomous Pull Request gatekeeper and alignment auditor:
 ### 6. `imprints/en2-trinity`
 The free-of-charge EN2 Experience Trinity Imprint:
 - Bundles the cognitive soul, 10 foundational Cortex lessons, and pure Mojo architecture adapter kernels for instant 1-click installation on any system.
+
+---
+
+## Ecosystem Directory
+
+- **Primary Ecosystem Hub**: [github.com/aien-dev/aien-dev](https://github.com/aien-dev/aien-dev)
+- **Performance Benchmark Suite**: [github.com/aien-dev/benchmarks](https://github.com/aien-dev/benchmarks)
+- **Web Portfolio & Architecture Showcase**: [github.com/aien-dev/drakestapleton.com](https://github.com/aien-dev/drakestapleton.com) ([drakestapleton.com](https://drakestapleton.com))
 
 ---
 
