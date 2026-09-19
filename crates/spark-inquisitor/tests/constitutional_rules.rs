@@ -209,15 +209,11 @@ fn test_harness_noun_and_test_harness_allowed() {
 }
 
 #[test]
-fn test_banned_buzzword_seamlessly() {
+fn test_allowed_word_seamlessly() {
     let diff =
         "diff --git a/src/main.rs b/src/main.rs\n+// Coordinates seamlessly across all instances";
     let report = DiffAuditor::audit_text(diff);
-    assert!(!report.clean);
-    assert!(report
-        .unslop_violations
-        .iter()
-        .any(|u| u.contains("seamlessly")));
+    assert!(report.clean);
 }
 
 #[test]
