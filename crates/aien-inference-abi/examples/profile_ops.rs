@@ -46,6 +46,8 @@ fn main() {
         layers: vec![LayerKvCache {
             cached_k: vec![vec![0.01f32; kv_dim]; seq_len],
             cached_v: vec![vec![0.01f32; kv_dim]; seq_len],
+            flat_k: vec![0.01f32; seq_len * kv_dim],
+            flat_v: vec![0.01f32; seq_len * kv_dim],
         }; 22],
     };
 

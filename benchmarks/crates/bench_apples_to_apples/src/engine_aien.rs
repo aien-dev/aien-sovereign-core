@@ -97,18 +97,13 @@ fn execute_single_request(
 
     let req_start = Instant::now();
 
-    // Prefill: forward all prompt tokens
-    let mut last_hidden = Vec::new();
-    for (pos, &token_id) in prompt_tokens.iter().enumerate() {
-        seq.tokens.push(token_id);
-        last_hidden = NativeTransformerBackend::forward_token_impl(
-            weights,
-            tensor_backend,
-            token_id,
-            pos,
-            &mut seq,
-        );
-    }
+    // Prefill: forward all prompt tokens layer-by-layer
+    let last_hidden = NativeTransformerBackend::prefill_prompt_layer_by_layer(
+        weights,
+        tensor_backend,
+        prompt_tokens,
+        &mut seq,
+    );
 
     let prefill_logits =
         NativeTransformerBackend::compute_logits_impl(weights, tensor_backend, &last_hidden);

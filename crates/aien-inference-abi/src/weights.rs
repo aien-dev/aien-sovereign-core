@@ -8,6 +8,8 @@ use serde_json::Value;
 pub struct LayerKvCache {
     pub cached_k: Vec<Vec<f32>>,
     pub cached_v: Vec<Vec<f32>>,
+    pub flat_k: Vec<f32>,
+    pub flat_v: Vec<f32>,
 }
 
 #[derive(Debug, Clone, Default)]

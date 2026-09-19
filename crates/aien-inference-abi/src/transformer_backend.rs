@@ -84,18 +84,27 @@ impl NativeTransformerBackend {
         let embed_slice = &weights.embed_tokens[token_idx * hidden_dim..(token_idx + 1) * hidden_dim];
         let mut x = embed_slice.to_vec();
 
-        // 2. Transformer layers
+        // 2. Pre-allocated scratch buffers to eliminate per-layer heap allocations
+        let mut x_norm = vec![0.0f32; hidden_dim];
+        let mut q = vec![0.0f32; q_dim];
+        let mut k = vec![0.0f32; kv_dim];
+        let mut v = vec![0.0f32; kv_dim];
+        let mut attn_out = vec![0.0f32; q_dim];
+        let mut attn_proj = vec![0.0f32; hidden_dim];
+        let mut post_norm = vec![0.0f32; hidden_dim];
+        let mut gate = vec![0.0f32; intermediate_dim];
+        let mut up = vec![0.0f32; intermediate_dim];
+        let mut activated = vec![0.0f32; intermediate_dim];
+        let mut mlp_out = vec![0.0f32; hidden_dim];
+
+        // 3. Transformer layers
         for (layer_idx, layer_w) in weights.layers.iter().enumerate() {
             let kv_cache = &mut seq_state.layers[layer_idx];
 
             // 2a. Input RMSNorm
-            let mut x_norm = vec![0.0f32; hidden_dim];
             backend.rmsnorm(&mut x_norm, &x, &layer_w.input_layernorm, eps);
 
             // 2b. Q, K, V Projections
-            let mut q = vec![0.0f32; q_dim];
-            let mut k = vec![0.0f32; kv_dim];
-            let mut v = vec![0.0f32; kv_dim];
             backend.matmul_vec(&mut q, &x_norm, &layer_w.q_proj, q_dim, hidden_dim);
             backend.matmul_vec(&mut k, &x_norm, &layer_w.k_proj, kv_dim, hidden_dim);
             backend.matmul_vec(&mut v, &x_norm, &layer_w.v_proj, kv_dim, hidden_dim);
@@ -111,25 +120,19 @@ impl NativeTransformerBackend {
                 theta,
             );
 
-            // 2d. Append to KV Cache
-            kv_cache.cached_k.push(k);
-            kv_cache.cached_v.push(v);
+            // 2d. Append to KV Cache (contiguous zero-copy buffer + backward compatibility)
+            kv_cache.cached_k.push(k.clone());
+            kv_cache.cached_v.push(v.clone());
+            kv_cache.flat_k.extend_from_slice(&k);
+            kv_cache.flat_v.extend_from_slice(&v);
 
             // 2e. Scaled Dot-Product GQA Attention
             let seq_len = kv_cache.cached_k.len();
-            let mut flat_k = Vec::with_capacity(seq_len * kv_dim);
-            let mut flat_v = Vec::with_capacity(seq_len * kv_dim);
-            for t in 0..seq_len {
-                flat_k.extend_from_slice(&kv_cache.cached_k[t]);
-                flat_v.extend_from_slice(&kv_cache.cached_v[t]);
-            }
-
-            let mut attn_out = vec![0.0f32; q_dim];
             backend.gqa_attention(
                 &mut attn_out,
                 &q,
-                &flat_k,
-                &flat_v,
+                &kv_cache.flat_k,
+                &kv_cache.flat_v,
                 seq_len,
                 num_heads,
                 num_kv_heads,
@@ -137,7 +140,6 @@ impl NativeTransformerBackend {
             );
 
             // 2f. Output projection and residual connection
-            let mut attn_proj = vec![0.0f32; hidden_dim];
             backend.matmul_vec(
                 &mut attn_proj,
                 &attn_out,
@@ -150,15 +152,9 @@ impl NativeTransformerBackend {
             }
 
             // 2g. Post-Attention RMSNorm
-            let mut post_norm = vec![0.0f32; hidden_dim];
             backend.rmsnorm(&mut post_norm, &x, &layer_w.post_attention_layernorm, eps);
 
             // 2h. SwiGLU MLP and residual connection
-            let mut gate = vec![0.0f32; intermediate_dim];
-            let mut up = vec![0.0f32; intermediate_dim];
-            let mut activated = vec![0.0f32; intermediate_dim];
-            let mut mlp_out = vec![0.0f32; hidden_dim];
-
             backend.matmul_vec(&mut gate, &post_norm, &layer_w.gate_proj, intermediate_dim, hidden_dim);
             backend.matmul_vec(&mut up, &post_norm, &layer_w.up_proj, intermediate_dim, hidden_dim);
             backend.swiglu(&mut activated, &gate, &up);
@@ -192,6 +188,124 @@ impl NativeTransformerBackend {
             hidden_dim,
         );
         logits
+    }
+
+    /// Prefill all prompt tokens layer-by-layer rather than token-by-token.
+    /// Eliminates streaming the 22 layers of model weights 128 times across the memory bus,
+    /// keeping weights resident in CPU cache across prompt token positions.
+    pub fn prefill_prompt_layer_by_layer(
+        weights: &TransformerWeights,
+        backend: &dyn TensorBackend,
+        prompt_tokens: &[u32],
+        seq_state: &mut SequenceState,
+    ) -> Vec<f32> {
+        let n = prompt_tokens.len();
+        if n == 0 {
+            return Vec::new();
+        }
+        if n == 1 {
+            seq_state.tokens.push(prompt_tokens[0]);
+            return Self::forward_token_impl(weights, backend, prompt_tokens[0], 0, seq_state);
+        }
+
+        let hidden_dim = weights.config.hidden_dim();
+        let num_heads = weights.config.num_heads;
+        let num_kv_heads = weights.config.num_kv_heads;
+        let head_dim = weights.config.head_dim;
+        let q_dim = num_heads * head_dim;
+        let kv_dim = num_kv_heads * head_dim;
+        let intermediate_dim = weights.config.intermediate_dim();
+        let eps = weights.config.rms_norm_eps;
+        let theta = weights.config.rope_theta;
+
+        seq_state.tokens.extend_from_slice(prompt_tokens);
+
+        // 1. Look up embeddings for all prompt tokens
+        let mut states: Vec<Vec<f32>> = prompt_tokens
+            .iter()
+            .map(|&tok| {
+                let token_idx = (tok as usize) % weights.config.vocab_size();
+                let slice = &weights.embed_tokens[token_idx * hidden_dim..(token_idx + 1) * hidden_dim];
+                slice.to_vec()
+            })
+            .collect();
+
+        // 2. Scratch buffers allocated once across all layers and prompt tokens
+        let mut x_norm = vec![0.0f32; hidden_dim];
+        let mut q = vec![0.0f32; q_dim];
+        let mut k = vec![0.0f32; kv_dim];
+        let mut v = vec![0.0f32; kv_dim];
+        let mut attn_out = vec![0.0f32; q_dim];
+        let mut attn_proj = vec![0.0f32; hidden_dim];
+        let mut post_norm = vec![0.0f32; hidden_dim];
+        let mut gate = vec![0.0f32; intermediate_dim];
+        let mut up = vec![0.0f32; intermediate_dim];
+        let mut activated = vec![0.0f32; intermediate_dim];
+        let mut mlp_out = vec![0.0f32; hidden_dim];
+
+        // 3. Process each transformer layer across all prompt tokens
+        for (layer_idx, layer_w) in weights.layers.iter().enumerate() {
+            let kv_cache = &mut seq_state.layers[layer_idx];
+
+            for t in 0..n {
+                let x = &mut states[t];
+
+                // 3a. Input RMSNorm
+                backend.rmsnorm(&mut x_norm, x, &layer_w.input_layernorm, eps);
+
+                // 3b. Q, K, V Projections
+                backend.matmul_vec(&mut q, &x_norm, &layer_w.q_proj, q_dim, hidden_dim);
+                backend.matmul_vec(&mut k, &x_norm, &layer_w.k_proj, kv_dim, hidden_dim);
+                backend.matmul_vec(&mut v, &x_norm, &layer_w.v_proj, kv_dim, hidden_dim);
+
+                // 3c. Rotary Positional Embeddings at prompt index t
+                backend.apply_rope(&mut q, &mut k, t, head_dim, num_heads, num_kv_heads, theta);
+
+                // 3d. Append to KV cache
+                kv_cache.cached_k.push(k.clone());
+                kv_cache.cached_v.push(v.clone());
+                kv_cache.flat_k.extend_from_slice(&k);
+                kv_cache.flat_v.extend_from_slice(&v);
+
+                // 3e. Causal GQA Attention (attending to prompt tokens 0..=t)
+                let seq_len = kv_cache.cached_k.len();
+                backend.gqa_attention(
+                    &mut attn_out,
+                    &q,
+                    &kv_cache.flat_k,
+                    &kv_cache.flat_v,
+                    seq_len,
+                    num_heads,
+                    num_kv_heads,
+                    head_dim,
+                );
+
+                // 3f. Output projection and residual connection
+                backend.matmul_vec(&mut attn_proj, &attn_out, &layer_w.o_proj, hidden_dim, q_dim);
+                for i in 0..hidden_dim {
+                    x[i] += attn_proj[i];
+                }
+
+                // 3g. Post-Attention RMSNorm
+                backend.rmsnorm(&mut post_norm, x, &layer_w.post_attention_layernorm, eps);
+
+                // 3h. SwiGLU MLP
+                backend.matmul_vec(&mut gate, &post_norm, &layer_w.gate_proj, intermediate_dim, hidden_dim);
+                backend.matmul_vec(&mut up, &post_norm, &layer_w.up_proj, intermediate_dim, hidden_dim);
+                backend.swiglu(&mut activated, &gate, &up);
+                backend.matmul_vec(&mut mlp_out, &activated, &layer_w.down_proj, hidden_dim, intermediate_dim);
+
+                for i in 0..hidden_dim {
+                    x[i] += mlp_out[i];
+                }
+            }
+        }
+
+        // 4. Final RMSNorm on the last prompt token
+        let last_x = &states[n - 1];
+        let mut x_final = vec![0.0f32; hidden_dim];
+        backend.rmsnorm(&mut x_final, last_x, &weights.final_norm, eps);
+        x_final
     }
 
     /// Single-token forward pass executing through the configured TensorBackend trait.
@@ -238,17 +352,12 @@ impl AienInferenceBackend for NativeTransformerBackend {
                     layers: vec![LayerKvCache::default(); num_layers],
                 });
 
-            let mut last_hidden = Vec::new();
-            for (idx, &token_id) in req.prompt_tokens.iter().enumerate() {
-                seq.tokens.push(token_id);
-                last_hidden = Self::forward_token_impl(
-                    &self.weights,
-                    &*self.tensor_backend,
-                    token_id,
-                    idx,
-                    seq,
-                );
-            }
+            let last_hidden = Self::prefill_prompt_layer_by_layer(
+                &self.weights,
+                &*self.tensor_backend,
+                &req.prompt_tokens,
+                seq,
+            );
 
             // Compute real logits on the prompt's last token via TensorBackend
             let logits = Self::compute_logits_impl(&self.weights, &*self.tensor_backend, &last_hidden);
