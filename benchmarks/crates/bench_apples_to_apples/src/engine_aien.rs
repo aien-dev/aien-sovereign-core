@@ -5,14 +5,11 @@ use crate::metrics::{calculate_joules_per_token, calculate_percentile};
 use crate::oracle::{verify_token_sequence_match, ORACLE_BENCHMARK_128_TOKENS};
 use crate::telemetry::HardwareMonitor;
 use crate::types::{BenchmarkConfig, ConcurrencyRunResult};
+use aien_inference_abi::tensor::sample_argmax;
 use aien_inference_abi::tokenizer::TinyLlamaTokenizer;
 use aien_inference_abi::transformer_backend::NativeTransformerBackend;
-use aien_inference_abi::weights::TransformerWeights;
-use aien_inference_abi::{
-    AienInferenceBackend, DecodeOutput, ModelConfig, SamplingParams, ScheduledBatch,
-    SequenceRequest,
-};
-use std::collections::HashMap;
+use aien_inference_abi::weights::{LayerKvCache, SequenceState, TransformerWeights};
+use aien_inference_abi::ModelConfig;
 use std::path::PathBuf;
 use std::time::Instant;
 
@@ -78,6 +75,102 @@ fn resolve_tokenizer_path(configured: &str, model_path: &str) -> Result<PathBuf,
     ))
 }
 
+struct SingleRequestResult {
+    request_id: usize,
+    ttft_ms: f64,
+    itls_ms: Vec<f64>,
+    output_tokens: Vec<u32>,
+}
+
+fn execute_single_request(
+    request_id: usize,
+    weights: &TransformerWeights,
+    tensor_backend: &dyn aien_inference_abi::backend::TensorBackend,
+    prompt_tokens: &[u32],
+    max_output_tokens: usize,
+) -> SingleRequestResult {
+    let num_layers = weights.config.num_layers;
+    let mut seq = SequenceState {
+        tokens: Vec::with_capacity(prompt_tokens.len() + max_output_tokens),
+        layers: vec![LayerKvCache::default(); num_layers],
+    };
+
+    let req_start = Instant::now();
+
+    // Prefill: forward all prompt tokens
+    let mut last_hidden = Vec::new();
+    for (pos, &token_id) in prompt_tokens.iter().enumerate() {
+        seq.tokens.push(token_id);
+        last_hidden = NativeTransformerBackend::forward_token_impl(
+            weights,
+            tensor_backend,
+            token_id,
+            pos,
+            &mut seq,
+        );
+    }
+
+    let prefill_logits =
+        NativeTransformerBackend::compute_logits_impl(weights, tensor_backend, &last_hidden);
+    let (first_tok, _) = sample_argmax(&prefill_logits);
+    let ttft_ms = req_start.elapsed().as_secs_f64() * 1000.0;
+    seq.tokens.push(first_tok);
+
+    let mut output_tokens = Vec::with_capacity(max_output_tokens);
+    output_tokens.push(first_tok);
+    let mut itls_ms = Vec::with_capacity(max_output_tokens);
+
+    let stop_tokens = [
+        TinyLlamaTokenizer::UNK_TOKEN_ID,
+        TinyLlamaTokenizer::BOS_TOKEN_ID,
+        TinyLlamaTokenizer::EOS_TOKEN_ID,
+    ];
+
+    if stop_tokens.contains(&first_tok) {
+        return SingleRequestResult {
+            request_id,
+            ttft_ms,
+            itls_ms,
+            output_tokens,
+        };
+    }
+
+    // Decode loop
+    let remaining_tokens = max_output_tokens.saturating_sub(1);
+    for _ in 0..remaining_tokens {
+        let step_start = Instant::now();
+        let last_tok = *seq.tokens.last().unwrap_or(&1);
+        let pos = seq.tokens.len().saturating_sub(1);
+
+        let hidden = NativeTransformerBackend::forward_token_impl(
+            weights,
+            tensor_backend,
+            last_tok,
+            pos,
+            &mut seq,
+        );
+        let logits =
+            NativeTransformerBackend::compute_logits_impl(weights, tensor_backend, &hidden);
+        let (next_tok, _) = sample_argmax(&logits);
+        let itl_ms = step_start.elapsed().as_secs_f64() * 1000.0;
+
+        seq.tokens.push(next_tok);
+        output_tokens.push(next_tok);
+        itls_ms.push(itl_ms);
+
+        if stop_tokens.contains(&next_tok) {
+            break;
+        }
+    }
+
+    SingleRequestResult {
+        request_id,
+        ttft_ms,
+        itls_ms,
+        output_tokens,
+    }
+}
+
 /// Runs a concurrency sweep for AIEN Native Transformer at concurrency level C.
 pub async fn run_aien_concurrency_sweep(
     handle: &mut AienEngineHandle,
@@ -94,152 +187,90 @@ pub async fn run_aien_concurrency_sweep(
         .encode(&config.prompt)
         .map_err(|e| format!("Tokenizer encode error: {}", e))?;
 
-    // Reset sequence tracking in backend
-    handle.backend.sequences.clear();
-
     let monitor = HardwareMonitor::start(None);
     let wall_clock_start = Instant::now();
 
-    // 1. Prefill phase: all concurrent requests submitted in ScheduledBatch
-    let mut prefill_requests = Vec::with_capacity(concurrency);
-    for req_idx in 0..concurrency {
-        prefill_requests.push(SequenceRequest {
-            request_id: req_idx as u64,
-            prompt_tokens: prompt_tokens.clone(),
-            sampling_params: SamplingParams {
-                temperature: 0.0,
-                top_p: 1.0,
-                max_tokens: config.output_token_count,
-                stop_token_ids: vec![0, 1, 2],
-            },
-            arrival_time_ns: 0,
-            priority: 1,
+    let weights = &handle.backend.weights;
+    let tensor_backend = handle.backend.tensor_backend.as_ref();
+    let max_output_tokens = config.output_token_count;
+
+    // Concurrently execute requests using scoped threads up to max_parallel_workers
+    let max_parallel_workers = 16.min(concurrency);
+    let mut all_results: Vec<SingleRequestResult> = Vec::with_capacity(concurrency);
+
+    // Process requests in chunks of max_parallel_workers
+    for chunk_start in (0..concurrency).step_by(max_parallel_workers) {
+        let chunk_end = (chunk_start + max_parallel_workers).min(concurrency);
+        let chunk_size = chunk_end - chunk_start;
+
+        let chunk_results = std::thread::scope(|s| {
+            let mut thread_handles = Vec::with_capacity(chunk_size);
+            for req_idx in chunk_start..chunk_end {
+                let p_tokens = &prompt_tokens;
+                thread_handles.push(s.spawn(move || {
+                    execute_single_request(
+                        req_idx,
+                        weights,
+                        tensor_backend,
+                        p_tokens,
+                        max_output_tokens,
+                    )
+                }));
+            }
+
+            let mut results = Vec::with_capacity(chunk_size);
+            for th in thread_handles {
+                if let Ok(res) = th.join() {
+                    results.push(res);
+                }
+            }
+            results
         });
-    }
 
-    let prefill_batch = ScheduledBatch {
-        prefill_requests,
-        decode_requests: Vec::new(),
-        block_tables: HashMap::new(),
-        step_id: 0,
-    };
-
-    let prefill_start = Instant::now();
-    let (prefill_outputs, _step_metrics) = handle
-        .backend
-        .execute_step(&prefill_batch)
-        .await
-        .map_err(|e| format!("Prefill step failed: {}", e))?;
-    let prefill_elapsed_ms = prefill_start.elapsed().as_secs_f64() * 1000.0;
-
-    let ttft_per_request = prefill_elapsed_ms / (concurrency as f64);
-    let ttft_list = vec![ttft_per_request; concurrency];
-
-    let mut request_output_tokens: Vec<Vec<u32>> =
-        vec![Vec::with_capacity(config.output_token_count); concurrency];
-    let mut request_itls: Vec<Vec<f64>> =
-        vec![Vec::with_capacity(config.output_token_count); concurrency];
-    let mut active_req_ids: Vec<u64> = (0..concurrency as u64).collect();
-
-    for out in prefill_outputs {
-        if let DecodeOutput::Token {
-            request_id,
-            token_id,
-            ..
-        } = out
-        {
-            if let Some(toks) = request_output_tokens.get_mut(request_id as usize) {
-                toks.push(token_id);
-            }
-        }
-    }
-
-    // 2. Decode phase: up to config.output_token_count - 1 steps
-    let max_decode_steps = config.output_token_count.saturating_sub(1);
-    for step_num in 1..=max_decode_steps {
-        if active_req_ids.is_empty() {
-            break;
-        }
-
-        let decode_batch = ScheduledBatch {
-            prefill_requests: Vec::new(),
-            decode_requests: active_req_ids.clone(),
-            block_tables: HashMap::new(),
-            step_id: step_num as u64,
-        };
-
-        let step_start = Instant::now();
-        let (decode_outputs, _) = handle
-            .backend
-            .execute_step(&decode_batch)
-            .await
-            .map_err(|e| format!("Decode step {} failed: {}", step_num, e))?;
-        let step_elapsed_ms = step_start.elapsed().as_secs_f64() * 1000.0;
-        let per_token_itl = step_elapsed_ms / (active_req_ids.len() as f64);
-
-        let mut finished_in_step = Vec::new();
-        for out in decode_outputs {
-            match out {
-                DecodeOutput::Token {
-                    request_id,
-                    token_id,
-                    ..
-                } => {
-                    let req_idx = request_id as usize;
-                    if let Some(toks) = request_output_tokens.get_mut(req_idx) {
-                        toks.push(token_id);
-                    }
-                    if let Some(itls) = request_itls.get_mut(req_idx) {
-                        itls.push(per_token_itl);
-                    }
-                }
-                DecodeOutput::Finished { request_id, .. } => {
-                    finished_in_step.push(request_id);
-                }
-            }
-        }
-
-        active_req_ids.retain(|id| !finished_in_step.contains(id));
+        all_results.extend(chunk_results);
     }
 
     let wall_clock_elapsed = wall_clock_start.elapsed().as_secs_f64();
     let (avg_power_watts, peak_power_watts, peak_rss_gb) = monitor.stop().await;
 
-    let mut total_output_tokens = 0usize;
-    let mut all_itls = Vec::new();
-    for itls in &request_itls {
-        all_itls.extend_from_slice(itls);
+    if all_results.is_empty() {
+        return Err("All requests failed during AIEN concurrency sweep.".to_string());
     }
-    for toks in &request_output_tokens {
-        total_output_tokens += toks.len();
+
+    all_results.sort_by_key(|r| r.request_id);
+
+    let mut all_ttft = Vec::with_capacity(concurrency);
+    let mut all_itl = Vec::new();
+    let mut total_output_tokens = 0usize;
+
+    for r in &all_results {
+        all_ttft.push(r.ttft_ms);
+        all_itl.extend_from_slice(&r.itls_ms);
+        total_output_tokens += r.output_tokens.len();
     }
 
     let throughput = (total_output_tokens as f64) / wall_clock_elapsed;
-    let ttft_p50 = calculate_percentile(&ttft_list, 50.0);
-    let ttft_p95 = calculate_percentile(&ttft_list, 95.0);
-    let ttft_p99 = calculate_percentile(&ttft_list, 99.0);
-    let itl_p50 = calculate_percentile(&all_itls, 50.0);
-    let itl_p95 = calculate_percentile(&all_itls, 95.0);
-    let itl_p99 = calculate_percentile(&all_itls, 99.0);
+    let ttft_p50 = calculate_percentile(&all_ttft, 50.0);
+    let ttft_p95 = calculate_percentile(&all_ttft, 95.0);
+    let ttft_p99 = calculate_percentile(&all_ttft, 99.0);
+    let itl_p50 = calculate_percentile(&all_itl, 50.0);
+    let itl_p95 = calculate_percentile(&all_itl, 95.0);
+    let itl_p99 = calculate_percentile(&all_itl, 99.0);
     let energy_j_per_tok =
         calculate_joules_per_token(avg_power_watts, wall_clock_elapsed, total_output_tokens);
 
-    let parity_match_rate_pct = if let Some(first_req_tokens) = request_output_tokens.first() {
-        verify_token_sequence_match(first_req_tokens, &ORACLE_BENCHMARK_128_TOKENS)
-    } else {
-        0.0
-    };
-
-    let sample_text = if let Some(first_req_tokens) = request_output_tokens.first() {
-        handle.tokenizer.decode(first_req_tokens).unwrap_or_default()
-    } else {
-        String::new()
-    };
+    let first_req_tokens = &all_results[0].output_tokens;
+    let parity_match_rate_pct =
+        verify_token_sequence_match(first_req_tokens, &ORACLE_BENCHMARK_128_TOKENS);
+    let sample_text = handle
+        .tokenizer
+        .decode(first_req_tokens)
+        .unwrap_or_default();
 
     Ok(ConcurrencyRunResult {
         engine: "AIEN (MojoGb10Backend)".to_string(),
         concurrency,
-        total_requests: concurrency,
+        total_requests: all_results.len(),
         total_output_tokens,
         elapsed_wall_clock_secs: wall_clock_elapsed,
         throughput_tokens_sec: throughput,
