@@ -2,11 +2,19 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+pub mod backend;
+pub mod checkpoint;
+pub mod mojo_backend;
 pub mod tensor;
+pub mod tokenizer;
 pub mod transformer_backend;
 pub mod weights;
 
+pub use backend::*;
+pub use checkpoint::*;
+pub use mojo_backend::*;
 pub use tensor::*;
+pub use tokenizer::*;
 pub use transformer_backend::*;
 pub use weights::*;
 
@@ -378,10 +386,10 @@ impl ExecutionSurface {
                     ram_gb = (bytes / (1024 * 1024 * 1024)) as usize;
                 }
             }
-            return ExecutionSurface::AppleSilicon {
+            ExecutionSurface::AppleSilicon {
                 chip_name,
                 unified_memory_gb: ram_gb,
-            };
+            }
         }
 
         // 3. Generic Linux CPU detection
@@ -522,7 +530,7 @@ impl AienInferenceBackend for NativeCpuInferenceBackend {
             let h = req
                 .request_id
                 .wrapping_mul(6364136223846793005)
-                .wrapping_add((batch.step_id as u64).wrapping_mul(1442695040888963407));
+                .wrapping_add(batch.step_id.wrapping_mul(1442695040888963407));
             let token_id = (h % 151643) as u32 + 100;
             outputs.push(DecodeOutput::Token {
                 request_id: req.request_id,
@@ -535,7 +543,7 @@ impl AienInferenceBackend for NativeCpuInferenceBackend {
         for &req_id in &batch.decode_requests {
             let h = req_id
                 .wrapping_mul(6364136223846793005)
-                .wrapping_add((batch.step_id as u64).wrapping_mul(1442695040888963407));
+                .wrapping_add(batch.step_id.wrapping_mul(1442695040888963407));
             let token_id = (h % 151643) as u32 + 100;
             outputs.push(DecodeOutput::Token {
                 request_id: req_id,

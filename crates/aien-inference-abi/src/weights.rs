@@ -38,6 +38,13 @@ pub struct TransformerWeights {
     pub lm_head: Vec<f32>,
 }
 
+/// Diagnostic capture of intermediate activations and shapes across all transformer layers.
+#[derive(Debug, Clone, Default)]
+pub struct ForwardDiagnostics {
+    pub activations: std::collections::HashMap<String, Vec<f32>>,
+    pub shapes: std::collections::HashMap<String, Vec<usize>>,
+}
+
 impl TransformerWeights {
     /// Creates deterministically initialized weights for tests and headless verification.
     pub fn reference_test_weights(config: &ModelConfig) -> Self {
@@ -260,6 +267,257 @@ impl TransformerWeights {
         logits
     }
 
+    /// Executes sequence forward pass capturing all intermediate activations and logits.
+    pub fn forward_sequence_with_diagnostics(
+        &self,
+        tokens: &[u32],
+    ) -> ForwardDiagnostics {
+        let n = tokens.len();
+        let hidden_dim = self.config.hidden_dim();
+        let num_heads = self.config.num_heads;
+        let num_kv_heads = self.config.num_kv_heads;
+        let head_dim = self.config.head_dim;
+        let q_dim = num_heads * head_dim;
+        let kv_dim = num_kv_heads * head_dim;
+        let intermediate_dim = self.config.intermediate_dim();
+        let vocab_size = self.config.vocab_size();
+        let eps = self.config.rms_norm_eps;
+        let theta = self.config.rope_theta;
+
+        let mut activations = std::collections::HashMap::new();
+        let mut shapes = std::collections::HashMap::new();
+
+        // Register tensor shapes
+        shapes.insert("embed_tokens".to_string(), vec![1, n, hidden_dim]);
+        shapes.insert("final_norm".to_string(), vec![1, n, hidden_dim]);
+        shapes.insert("logits".to_string(), vec![1, n, vocab_size]);
+        shapes.insert("last_token_logits".to_string(), vec![vocab_size]);
+
+        for layer_idx in 0..self.config.num_layers {
+            let prefix = format!("layers.{}", layer_idx);
+            shapes.insert(format!("{}.post_rmsnorm", prefix), vec![1, n, hidden_dim]);
+            shapes.insert(format!("{}.post_rope_q", prefix), vec![1, num_heads, n, head_dim]);
+            shapes.insert(format!("{}.post_rope_k", prefix), vec![1, num_kv_heads, n, head_dim]);
+            shapes.insert(format!("{}.post_attention", prefix), vec![1, n, hidden_dim]);
+            shapes.insert(format!("{}.post_attn_residual", prefix), vec![1, n, hidden_dim]);
+            shapes.insert(format!("{}.post_attn_norm", prefix), vec![1, n, hidden_dim]);
+            shapes.insert(format!("{}.post_swiglu", prefix), vec![1, n, hidden_dim]);
+            shapes.insert(format!("{}.post_residual", prefix), vec![1, n, hidden_dim]);
+        }
+
+        // Allocate output buffers
+        let mut embed_tokens_buf = vec![0.0f32; n * hidden_dim];
+        let mut final_norm_buf = vec![0.0f32; n * hidden_dim];
+        let mut logits_buf = vec![0.0f32; n * vocab_size];
+
+        let mut post_rmsnorm_bufs: Vec<Vec<f32>> = (0..self.config.num_layers)
+            .map(|_| vec![0.0f32; n * hidden_dim])
+            .collect();
+        let mut post_rope_q_bufs: Vec<Vec<f32>> = (0..self.config.num_layers)
+            .map(|_| vec![0.0f32; num_heads * n * head_dim])
+            .collect();
+        let mut post_rope_k_bufs: Vec<Vec<f32>> = (0..self.config.num_layers)
+            .map(|_| vec![0.0f32; num_kv_heads * n * head_dim])
+            .collect();
+        let mut post_attention_bufs: Vec<Vec<f32>> = (0..self.config.num_layers)
+            .map(|_| vec![0.0f32; n * hidden_dim])
+            .collect();
+        let mut post_attn_residual_bufs: Vec<Vec<f32>> = (0..self.config.num_layers)
+            .map(|_| vec![0.0f32; n * hidden_dim])
+            .collect();
+        let mut post_attn_norm_bufs: Vec<Vec<f32>> = (0..self.config.num_layers)
+            .map(|_| vec![0.0f32; n * hidden_dim])
+            .collect();
+        let mut post_swiglu_bufs: Vec<Vec<f32>> = (0..self.config.num_layers)
+            .map(|_| vec![0.0f32; n * hidden_dim])
+            .collect();
+        let mut post_residual_bufs: Vec<Vec<f32>> = (0..self.config.num_layers)
+            .map(|_| vec![0.0f32; n * hidden_dim])
+            .collect();
+
+        let mut seq_state = SequenceState {
+            tokens: Vec::with_capacity(n),
+            layers: vec![LayerKvCache::default(); self.config.num_layers],
+        };
+
+        for (pos, &token_id) in tokens.iter().enumerate() {
+            seq_state.tokens.push(token_id);
+
+            // 1. Embedding lookup
+            let token_idx = (token_id as usize) % vocab_size;
+            let embed_slice = &self.embed_tokens[token_idx * hidden_dim..(token_idx + 1) * hidden_dim];
+            embed_tokens_buf[pos * hidden_dim..(pos + 1) * hidden_dim].copy_from_slice(embed_slice);
+            let mut x = embed_slice.to_vec();
+
+            // 2. Transformer layers
+            for (layer_idx, layer_w) in self.layers.iter().enumerate() {
+                let kv_cache = &mut seq_state.layers[layer_idx];
+
+                // 2a. Input RMSNorm
+                let mut x_norm = vec![0.0f32; hidden_dim];
+                rmsnorm(&x, &layer_w.input_layernorm, eps, &mut x_norm);
+                post_rmsnorm_bufs[layer_idx][pos * hidden_dim..(pos + 1) * hidden_dim]
+                    .copy_from_slice(&x_norm);
+
+                // 2b. Q, K, V Projections
+                let mut q = vec![0.0f32; q_dim];
+                let mut k = vec![0.0f32; kv_dim];
+                let mut v = vec![0.0f32; kv_dim];
+                matmul_vec(&x_norm, &layer_w.q_proj, &mut q, hidden_dim, q_dim);
+                matmul_vec(&x_norm, &layer_w.k_proj, &mut k, hidden_dim, kv_dim);
+                matmul_vec(&x_norm, &layer_w.v_proj, &mut v, hidden_dim, kv_dim);
+
+                // 2c. Rotary Positional Embeddings (RoPE)
+                apply_rope(
+                    &mut q,
+                    &mut k,
+                    pos,
+                    num_heads,
+                    num_kv_heads,
+                    head_dim,
+                    theta,
+                );
+
+                // Store RoPE Q in [1, num_heads, n, head_dim] layout
+                for h in 0..num_heads {
+                    let src_slice = &q[h * head_dim..(h + 1) * head_dim];
+                    let dst_idx = h * (n * head_dim) + pos * head_dim;
+                    post_rope_q_bufs[layer_idx][dst_idx..dst_idx + head_dim].copy_from_slice(src_slice);
+                }
+
+                // Store RoPE K in [1, num_kv_heads, n, head_dim] layout
+                for kv_h in 0..num_kv_heads {
+                    let src_slice = &k[kv_h * head_dim..(kv_h + 1) * head_dim];
+                    let dst_idx = kv_h * (n * head_dim) + pos * head_dim;
+                    post_rope_k_bufs[layer_idx][dst_idx..dst_idx + head_dim].copy_from_slice(src_slice);
+                }
+
+                // 2d. Append to KV Cache
+                kv_cache.cached_k.push(k);
+                kv_cache.cached_v.push(v);
+
+                // 2e. Scaled Dot-Product Attention
+                let mut attn_out = vec![0.0f32; q_dim];
+                scaled_dot_product_attention_single(
+                    &q,
+                    &kv_cache.cached_k,
+                    &kv_cache.cached_v,
+                    num_heads,
+                    num_kv_heads,
+                    head_dim,
+                    &mut attn_out,
+                );
+
+                // 2f. Output projection and residual connection
+                let mut attn_proj = vec![0.0f32; hidden_dim];
+                matmul_vec(
+                    &attn_out,
+                    &layer_w.o_proj,
+                    &mut attn_proj,
+                    q_dim,
+                    hidden_dim,
+                );
+                post_attention_bufs[layer_idx][pos * hidden_dim..(pos + 1) * hidden_dim]
+                    .copy_from_slice(&attn_proj);
+
+                for i in 0..hidden_dim {
+                    x[i] += attn_proj[i];
+                }
+                post_attn_residual_bufs[layer_idx][pos * hidden_dim..(pos + 1) * hidden_dim]
+                    .copy_from_slice(&x);
+
+                // 2g. Post-Attention RMSNorm
+                let mut post_norm = vec![0.0f32; hidden_dim];
+                rmsnorm(&x, &layer_w.post_attention_layernorm, eps, &mut post_norm);
+                post_attn_norm_bufs[layer_idx][pos * hidden_dim..(pos + 1) * hidden_dim]
+                    .copy_from_slice(&post_norm);
+
+                // 2h. SwiGLU MLP and residual connection
+                let mut mlp_out = vec![0.0f32; hidden_dim];
+                swiglu(
+                    &post_norm,
+                    &layer_w.gate_proj,
+                    &layer_w.up_proj,
+                    &layer_w.down_proj,
+                    hidden_dim,
+                    intermediate_dim,
+                    &mut mlp_out,
+                );
+                post_swiglu_bufs[layer_idx][pos * hidden_dim..(pos + 1) * hidden_dim]
+                    .copy_from_slice(&mlp_out);
+
+                for i in 0..hidden_dim {
+                    x[i] += mlp_out[i];
+                }
+                post_residual_bufs[layer_idx][pos * hidden_dim..(pos + 1) * hidden_dim]
+                    .copy_from_slice(&x);
+            }
+
+            // 3. Final RMSNorm
+            let mut x_final = vec![0.0f32; hidden_dim];
+            rmsnorm(&x, &self.final_norm, eps, &mut x_final);
+            final_norm_buf[pos * hidden_dim..(pos + 1) * hidden_dim].copy_from_slice(&x_final);
+
+            // 4. LM Head Logits
+            let tok_logits = self.compute_logits(&x_final);
+            logits_buf[pos * vocab_size..(pos + 1) * vocab_size].copy_from_slice(&tok_logits);
+        }
+
+        let last_token_logits = logits_buf[(n - 1) * vocab_size..n * vocab_size].to_vec();
+
+        activations.insert("embed_tokens".to_string(), embed_tokens_buf);
+        activations.insert("final_norm".to_string(), final_norm_buf);
+        activations.insert("logits".to_string(), logits_buf);
+        activations.insert("last_token_logits".to_string(), last_token_logits);
+
+        for layer_idx in 0..self.config.num_layers {
+            let prefix = format!("layers.{}", layer_idx);
+            activations.insert(format!("{}.post_rmsnorm", prefix), post_rmsnorm_bufs[layer_idx].clone());
+            activations.insert(format!("{}.post_rope_q", prefix), post_rope_q_bufs[layer_idx].clone());
+            activations.insert(format!("{}.post_rope_k", prefix), post_rope_k_bufs[layer_idx].clone());
+            activations.insert(format!("{}.post_attention", prefix), post_attention_bufs[layer_idx].clone());
+            activations.insert(format!("{}.post_attn_residual", prefix), post_attn_residual_bufs[layer_idx].clone());
+            activations.insert(format!("{}.post_attn_norm", prefix), post_attn_norm_bufs[layer_idx].clone());
+            activations.insert(format!("{}.post_swiglu", prefix), post_swiglu_bufs[layer_idx].clone());
+            activations.insert(format!("{}.post_residual", prefix), post_residual_bufs[layer_idx].clone());
+        }
+
+        ForwardDiagnostics {
+            activations,
+            shapes,
+        }
+    }
+
+    /// Autoregressive greedy decode for a given sequence of prompt tokens.
+    pub fn generate_greedy(&self, prompt_tokens: &[u32], num_steps: usize) -> Vec<u32> {
+        let mut seq_state = SequenceState {
+            tokens: Vec::with_capacity(prompt_tokens.len() + num_steps),
+            layers: vec![LayerKvCache::default(); self.config.num_layers],
+        };
+
+        let mut last_hidden = Vec::new();
+        for (idx, &token_id) in prompt_tokens.iter().enumerate() {
+            seq_state.tokens.push(token_id);
+            last_hidden = self.forward_token(token_id, idx, &mut seq_state);
+        }
+
+        let mut generated = Vec::with_capacity(num_steps);
+        let mut logits = self.compute_logits(&last_hidden);
+        let (mut next_tok, _) = crate::tensor::sample_argmax(&logits);
+        generated.push(next_tok);
+
+        for _ in 1..num_steps {
+            let pos = seq_state.tokens.len();
+            seq_state.tokens.push(next_tok);
+            let hidden = self.forward_token(next_tok, pos, &mut seq_state);
+            logits = self.compute_logits(&hidden);
+            next_tok = crate::tensor::sample_argmax(&logits).0;
+            generated.push(next_tok);
+        }
+
+        generated
+    }
+
     /// Loads model weights directly from a standard safetensors binary buffer.
     pub fn from_safetensors_bytes(bytes: &[u8], config: &ModelConfig) -> Result<Self, String> {
         if bytes.len() < 8 {
@@ -373,6 +631,157 @@ impl TransformerWeights {
 
         Ok(weights)
     }
+
+    /// Loads weights strictly from a pre-validated LoadedCheckpoint without synthetic fallback.
+    pub fn from_loaded_checkpoint(
+        checkpoint: &crate::checkpoint::LoadedCheckpoint,
+        config: &ModelConfig,
+    ) -> Result<Self, crate::checkpoint::CheckpointError> {
+        let embed_tokens = checkpoint
+            .get_fp32("model.embed_tokens.weight")
+            .ok_or_else(|| {
+                crate::checkpoint::CheckpointError::MissingTensor("model.embed_tokens.weight".to_string())
+            })?
+            .clone();
+
+        let mut layers = Vec::with_capacity(config.num_layers);
+        for idx in 0..config.num_layers {
+            let prefix = format!("model.layers.{}", idx);
+
+            let input_layernorm = checkpoint
+                .get_fp32(&format!("{}.input_layernorm.weight", prefix))
+                .ok_or_else(|| {
+                    crate::checkpoint::CheckpointError::MissingTensor(format!(
+                        "{}.input_layernorm.weight",
+                        prefix
+                    ))
+                })?
+                .clone();
+
+            let q_proj = checkpoint
+                .get_fp32(&format!("{}.self_attn.q_proj.weight", prefix))
+                .ok_or_else(|| {
+                    crate::checkpoint::CheckpointError::MissingTensor(format!(
+                        "{}.self_attn.q_proj.weight",
+                        prefix
+                    ))
+                })?
+                .clone();
+
+            let k_proj = checkpoint
+                .get_fp32(&format!("{}.self_attn.k_proj.weight", prefix))
+                .ok_or_else(|| {
+                    crate::checkpoint::CheckpointError::MissingTensor(format!(
+                        "{}.self_attn.k_proj.weight",
+                        prefix
+                    ))
+                })?
+                .clone();
+
+            let v_proj = checkpoint
+                .get_fp32(&format!("{}.self_attn.v_proj.weight", prefix))
+                .ok_or_else(|| {
+                    crate::checkpoint::CheckpointError::MissingTensor(format!(
+                        "{}.self_attn.v_proj.weight",
+                        prefix
+                    ))
+                })?
+                .clone();
+
+            let o_proj = checkpoint
+                .get_fp32(&format!("{}.self_attn.o_proj.weight", prefix))
+                .ok_or_else(|| {
+                    crate::checkpoint::CheckpointError::MissingTensor(format!(
+                        "{}.self_attn.o_proj.weight",
+                        prefix
+                    ))
+                })?
+                .clone();
+
+            let post_attention_layernorm = checkpoint
+                .get_fp32(&format!("{}.post_attention_layernorm.weight", prefix))
+                .ok_or_else(|| {
+                    crate::checkpoint::CheckpointError::MissingTensor(format!(
+                        "{}.post_attention_layernorm.weight",
+                        prefix
+                    ))
+                })?
+                .clone();
+
+            let gate_proj = checkpoint
+                .get_fp32(&format!("{}.mlp.gate_proj.weight", prefix))
+                .ok_or_else(|| {
+                    crate::checkpoint::CheckpointError::MissingTensor(format!(
+                        "{}.mlp.gate_proj.weight",
+                        prefix
+                    ))
+                })?
+                .clone();
+
+            let up_proj = checkpoint
+                .get_fp32(&format!("{}.mlp.up_proj.weight", prefix))
+                .ok_or_else(|| {
+                    crate::checkpoint::CheckpointError::MissingTensor(format!(
+                        "{}.mlp.up_proj.weight",
+                        prefix
+                    ))
+                })?
+                .clone();
+
+            let down_proj = checkpoint
+                .get_fp32(&format!("{}.mlp.down_proj.weight", prefix))
+                .ok_or_else(|| {
+                    crate::checkpoint::CheckpointError::MissingTensor(format!(
+                        "{}.mlp.down_proj.weight",
+                        prefix
+                    ))
+                })?
+                .clone();
+
+            layers.push(TransformerLayerWeights {
+                input_layernorm,
+                q_proj,
+                k_proj,
+                v_proj,
+                o_proj,
+                post_attention_layernorm,
+                gate_proj,
+                up_proj,
+                down_proj,
+            });
+        }
+
+        let final_norm = checkpoint
+            .get_fp32("model.norm.weight")
+            .ok_or_else(|| {
+                crate::checkpoint::CheckpointError::MissingTensor("model.norm.weight".to_string())
+            })?
+            .clone();
+
+        let lm_head = checkpoint
+            .get_fp32("lm_head.weight")
+            .ok_or_else(|| {
+                crate::checkpoint::CheckpointError::MissingTensor("lm_head.weight".to_string())
+            })?
+            .clone();
+
+        Ok(Self {
+            config: config.clone(),
+            embed_tokens,
+            layers,
+            final_norm,
+            lm_head,
+        })
+    }
+
+    /// Loads model weights strictly from a safetensors checkpoint file on disk.
+    pub fn load_from_safetensors<P: AsRef<std::path::Path>>(
+        path: P,
+        config: &ModelConfig,
+    ) -> Result<Self, crate::checkpoint::CheckpointError> {
+        let checkpoint = crate::checkpoint::load_safetensors_checkpoint(path)?;
+        Self::from_loaded_checkpoint(&checkpoint, config)
+    }
 }
 
 /// Converts IEEE 754 half-precision float (f16) bits to f32.
@@ -398,7 +807,7 @@ fn half_to_float(bits: u16) -> f32 {
     } else if exp == 31 {
         f32::from_bits((sign << 31) | (0xff << 23) | (frac << 13))
     } else {
-        let exp32 = (exp + 127 - 15) as u32;
+        let exp32 = exp + 127 - 15;
         let frac32 = frac << 13;
         f32::from_bits((sign << 31) | (exp32 << 23) | frac32)
     }
@@ -435,5 +844,53 @@ mod tests {
         assert_eq!(weights.layers[0].down_proj.len(), 128 * 64);
         assert_eq!(weights.final_norm.len(), 64);
         assert_eq!(weights.lm_head.len(), 64 * 256);
+    }
+
+    #[test]
+    fn test_from_loaded_checkpoint_success_and_missing_key() {
+        let config = ModelConfig {
+            model_id: "test-llama".to_string(),
+            max_sequence_length: 2048,
+            block_size: 16,
+            num_layers: 1,
+            num_heads: 4,
+            head_dim: 16,
+            num_kv_heads: 4,
+            hidden_dim: 64,
+            intermediate_dim: 128,
+            vocab_size: 256,
+            rms_norm_eps: 1e-5,
+            rope_theta: 10000.0,
+        };
+
+        // 1. Missing tensor fails loudly with CheckpointError::MissingTensor
+        let empty_checkpoint = crate::checkpoint::LoadedCheckpoint::new();
+        let err = TransformerWeights::from_loaded_checkpoint(&empty_checkpoint, &config).unwrap_err();
+        assert_eq!(
+            err,
+            crate::checkpoint::CheckpointError::MissingTensor("model.embed_tokens.weight".to_string())
+        );
+
+        // 2. Populated checkpoint loads correctly
+        let mut checkpoint = crate::checkpoint::LoadedCheckpoint::new();
+        checkpoint.fp32_weights.insert("model.embed_tokens.weight".to_string(), vec![0.1; 256 * 64]);
+        checkpoint.fp32_weights.insert("model.layers.0.input_layernorm.weight".to_string(), vec![1.0; 64]);
+        checkpoint.fp32_weights.insert("model.layers.0.self_attn.q_proj.weight".to_string(), vec![0.2; 64 * 64]);
+        checkpoint.fp32_weights.insert("model.layers.0.self_attn.k_proj.weight".to_string(), vec![0.3; 64 * 64]);
+        checkpoint.fp32_weights.insert("model.layers.0.self_attn.v_proj.weight".to_string(), vec![0.4; 64 * 64]);
+        checkpoint.fp32_weights.insert("model.layers.0.self_attn.o_proj.weight".to_string(), vec![0.5; 64 * 64]);
+        checkpoint.fp32_weights.insert("model.layers.0.post_attention_layernorm.weight".to_string(), vec![1.0; 64]);
+        checkpoint.fp32_weights.insert("model.layers.0.mlp.gate_proj.weight".to_string(), vec![0.6; 64 * 128]);
+        checkpoint.fp32_weights.insert("model.layers.0.mlp.up_proj.weight".to_string(), vec![0.7; 64 * 128]);
+        checkpoint.fp32_weights.insert("model.layers.0.mlp.down_proj.weight".to_string(), vec![0.8; 128 * 64]);
+        checkpoint.fp32_weights.insert("model.norm.weight".to_string(), vec![1.0; 64]);
+        checkpoint.fp32_weights.insert("lm_head.weight".to_string(), vec![0.9; 64 * 256]);
+
+        let weights = TransformerWeights::from_loaded_checkpoint(&checkpoint, &config).unwrap();
+        assert_eq!(weights.embed_tokens.len(), 256 * 64);
+        assert_eq!(weights.layers.len(), 1);
+        assert_eq!(weights.layers[0].q_proj[0], 0.2);
+        assert_eq!(weights.final_norm.len(), 64);
+        assert_eq!(weights.lm_head[0], 0.9);
     }
 }

@@ -1,0 +1,5 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/bench_apples_to_apples",
+]
