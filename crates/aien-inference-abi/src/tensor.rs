@@ -1,6 +1,8 @@
 //! Pure native Rust tensor operations for transformer forward execution.
 //! Provides cache-friendly vector and matrix math, RMSNorm, RoPE, and SwiGLU activations.
 
+use rayon::prelude::*;
+
 /// Vector-matrix multiplication for PyTorch row-major weights: out = x * W^T
 /// where x is [in_dim], W is row-major [out_dim, in_dim], and out is [out_dim].
 /// Each out[j] is the inner dot product of vector x with the j-th row of W.
@@ -41,6 +43,35 @@ pub fn matmul_vec(x: &[f32], w: &[f32], out: &mut [f32], in_dim: usize, out_dim:
         out[j] = sum as f32;
     }
 }
+
+/// Batched matrix multiplication for row-major weights: out = X * W^T
+/// where X is [batch_size, in_dim], W is row-major [out_dim, in_dim], and out is [batch_size, out_dim].
+/// Parallelizes batch rows across available CPU threads with Rayon.
+pub fn matmul_batch(
+    x: &[f32],
+    w: &[f32],
+    out: &mut [f32],
+    batch_size: usize,
+    in_dim: usize,
+    out_dim: usize,
+) {
+    debug_assert_eq!(x.len(), batch_size * in_dim);
+    debug_assert_eq!(w.len(), in_dim * out_dim);
+    debug_assert_eq!(out.len(), batch_size * out_dim);
+
+    if batch_size == 1 {
+        matmul_vec(x, w, out, in_dim, out_dim);
+        return;
+    }
+
+    out.par_chunks_exact_mut(out_dim)
+        .enumerate()
+        .for_each(|(b, out_b)| {
+            let x_b = &x[b * in_dim..(b + 1) * in_dim];
+            matmul_vec(x_b, w, out_b, in_dim, out_dim);
+        });
+}
+
 
 /// In-place Root Mean Square Normalization:
 /// out[i] = x[i] * weight[i] / sqrt(mean(x^2) + eps)

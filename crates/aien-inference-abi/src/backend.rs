@@ -30,6 +30,24 @@ pub trait TensorBackend: Send + Sync {
     /// where x is [in_dim], weight is [out_dim, in_dim], and out is [out_dim].
     fn matmul_vec(&self, out: &mut [f32], x: &[f32], weight: &[f32], out_dim: usize, in_dim: usize);
 
+    /// Batched vector-matrix multiplication for row-major weights: out = X * W^T
+    /// where X is [batch_size, in_dim], weight is [out_dim, in_dim], and out is [batch_size, out_dim].
+    fn matmul_batch(
+        &self,
+        out: &mut [f32],
+        x: &[f32],
+        weight: &[f32],
+        batch_size: usize,
+        in_dim: usize,
+        out_dim: usize,
+    ) {
+        for b in 0..batch_size {
+            let x_b = &x[b * in_dim..(b + 1) * in_dim];
+            let out_b = &mut out[b * out_dim..(b + 1) * out_dim];
+            self.matmul_vec(out_b, x_b, weight, out_dim, in_dim);
+        }
+    }
+
     /// SwiGLU activation: out = (gate * silu) * up = silu(gate) * up
     fn swiglu(&self, out: &mut [f32], gate: &[f32], up: &[f32]);
 
@@ -93,6 +111,18 @@ impl TensorBackend for ReferenceCpuBackend {
 
     fn matmul_vec(&self, out: &mut [f32], x: &[f32], weight: &[f32], out_dim: usize, in_dim: usize) {
         tensor_matmul(x, weight, out, in_dim, out_dim);
+    }
+
+    fn matmul_batch(
+        &self,
+        out: &mut [f32],
+        x: &[f32],
+        weight: &[f32],
+        batch_size: usize,
+        in_dim: usize,
+        out_dim: usize,
+    ) {
+        crate::tensor::matmul_batch(x, weight, out, batch_size, in_dim, out_dim);
     }
 
     fn swiglu(&self, out: &mut [f32], gate: &[f32], up: &[f32]) {
