@@ -105,6 +105,6 @@ When an operator workstation writes an entity, claim, or discovery receipt:
 
 | Failure Scenario | System Behavior | Recovery Action |
 | :--- | :--- | :--- |
-| **Network Partition (Air-Gap)** | Tier-Beta workstations switch seamlessly to local SQLite storage and `NativeCpuInferenceBackend`. | Queued write receipts sync to Reference Station upon mesh reconnection. |
+| **Network Partition (Air-Gap)** | Tier-Beta workstations switch directly to local SQLite storage and `NativeCpuInferenceBackend`. | Queued write receipts sync to Reference Station upon mesh reconnection. |
 | **Reference Station Offline** | Satellite stations execute inference locally on host CPU memory; Cortex reads serve from local replicas. | Supervisor daemon restarts reference services; stations resume delta sync. |
 | **Unauthorized Station Detection** | AEGIS perimeter detection flags non-whitelisted WireGuard handshake attempts. | Offending public key permanently blocked at kernel firewall table. |
