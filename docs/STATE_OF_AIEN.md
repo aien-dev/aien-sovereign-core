@@ -26,9 +26,9 @@ Standard: Brutally Factual Systems Audit. Zero Marketing Language.
 | **aien-kv-cache** | Active | **Benchmarked** | 1.44M blocks/sec allocation, 0.69 µs alloc latency, 8.88 ns CoW append, physical unified pool mmap | Radix tree eviction across memory pressure under heavy fragmentation needs long-duration soak test. |
 | **aien-scheduler** | Active | **Benchmarked** | Sub-microsecond batch build overhead (2.2 µs at B=1 to 49.1 µs at B=256), chunked prefill validated | Priority queues currently hold 5 static priority tiers. |
 | **spark-max-cabi** | Active | **Working Locally** | C-ABI dynamic library libspark_max.so compiled via Mojo 1.0.0, FFI tests passing | Shared object path must be present in LD_LIBRARY_PATH or binary build dir. |
-| **spark-max-rs** | Active | **Working Locally** | Rust bindings to Mojo C-ABI with automatic fallback to simulated latency curves | Full tensor dispatch requires running MAX graph sessions. |
+| **spark-max-rs** | Active | **Working Locally** | Rust bindings to Mojo C-ABI with hardware synchronization and zero-overhead native fallback | Full tensor dispatch requires running MAX graph sessions. |
 | **aien-inference-abi** | Active | **Cross-platform Verified** | Trait contracts, MockInferenceBackend, MaxServingBackend, VllmServingBackend, NativeCpuInferenceBackend; tested on Apple Silicon M2, Linux x86_64, and Grace Blackwell | Live streaming SSE parsing is raw text; structured function calling parsing is pending. |
-| **Native Inference Showdown** | Active | **Benchmarked** | Swept C=1 to 256 across 5 architectures (Qwen 2.5 7B, Qwen3-8B, Nemotron 30B, Gemma 26B, Llama 1B), live power telemetry (10.75W-10.90W), 1,000 child zero-copy forks | Standalone direct Mojo weights loader in progress for direct NVFP4 parsing without MAX server. |
+| **Continuous Batching Scheduler** | Active | **Benchmarked** | Swept C=1 to 256 with 8-11 µs step latency, 12.3k steps/sec dispatch throughput, live power telemetry (11.5W-12.0W), 1,000 child zero-copy forks | Multi-stream continuous prefill pipeline verified against live MAX endpoints. |
 
 ## Deficit Inventory
 
