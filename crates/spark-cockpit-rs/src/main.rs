@@ -1,6 +1,6 @@
 use axum::{
     extract::{Query, State},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     response::{
         sse::{Event, KeepAlive, Sse},
         IntoResponse, Json, Response,
@@ -1106,17 +1106,69 @@ async fn handle_get_operator() -> Json<Value> {
     }))
 }
 
-async fn handle_post_operator(Json(payload): Json<Value>) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let toml_str = toml::to_string_pretty(&payload)
+#[derive(Debug, Deserialize)]
+struct OperatorUpdatePayload {
+    name: Option<String>,
+    email: Option<String>,
+    handle: Option<String>,
+    sign_commits: Option<bool>,
+}
+
+async fn handle_post_operator(
+    headers: HeaderMap,
+    Json(payload): Json<OperatorUpdatePayload>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    if let Some(token) = get_cortex_token() {
+        if let Some(auth) = headers.get(axum::http::header::AUTHORIZATION) {
+            if let Ok(auth_str) = auth.to_str() {
+                if let Some(provided) = auth_str.strip_prefix("Bearer ") {
+                    if provided.trim() != token {
+                        return Err((
+                            StatusCode::UNAUTHORIZED,
+                            Json(json!({"error": "Invalid bearer token"})),
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
+    let clean_name = payload.name.map(|n| n.chars().filter(|c| !c.is_control()).take(64).collect::<String>());
+    let clean_email = payload.email.map(|e| e.chars().filter(|c| !c.is_control()).take(128).collect::<String>());
+    let clean_handle = payload.handle.map(|h| h.chars().filter(|c| c.is_alphanumeric() || *c == '_' || *c == '-').take(32).collect::<String>());
+
+    let mut current_toml = if Path::new(OPERATOR_CONFIG_PATH).exists() {
+        fs::read_to_string(OPERATOR_CONFIG_PATH)
+            .ok()
+            .and_then(|s| toml::from_str::<Value>(&s).ok())
+            .unwrap_or_else(|| json!({}))
+    } else {
+        json!({})
+    };
+
+    if !current_toml.is_object() {
+        current_toml = json!({});
+    }
+
+    let op_map = current_toml.as_object_mut().unwrap();
+    let operator_obj = op_map.entry("operator").or_insert_with(|| json!({}));
+    if let Some(obj) = operator_obj.as_object_mut() {
+        if let Some(n) = clean_name { obj.insert("name".to_string(), json!(n)); }
+        if let Some(e) = clean_email { obj.insert("email".to_string(), json!(e)); }
+        if let Some(h) = clean_handle { obj.insert("handle".to_string(), json!(h)); }
+        if let Some(s) = payload.sign_commits { obj.insert("sign_commits".to_string(), json!(s)); }
+    }
+
+    let toml_str = toml::to_string_pretty(&current_toml)
         .map_err(|e| (StatusCode::BAD_REQUEST, Json(json!({"error": e.to_string()}))))?;
-    
+
     if let Some(parent) = Path::new(OPERATOR_CONFIG_PATH).parent() {
         let _ = fs::create_dir_all(parent);
     }
     fs::write(OPERATOR_CONFIG_PATH, toml_str)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))))?;
 
-    Ok(Json(json!({"status": "saved", "config": payload})))
+    Ok(Json(json!({"status": "saved", "operator": current_toml.get("operator")})))
 }
 
 async fn handle_engine_status(State(state): State<AppState>) -> Json<Value> {
@@ -1427,5 +1479,23 @@ mod tests {
         };
         let Json(list_res) = handle_get_forge_tasks(State(state), Query(query)).await;
         assert_eq!(list_res.get("tasks").unwrap().as_array().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_cockpit_operator_profile_sanitization() {
+        let payload = OperatorUpdatePayload {
+            name: Some("Drake Stapleton 
+".to_string()),
+            email: Some("drake@aien.org".to_string()),
+            handle: Some("drake_ops-1".to_string()),
+            sign_commits: Some(true),
+        };
+        let res = handle_post_operator(HeaderMap::new(), Json(payload)).await;
+        assert!(res.is_ok());
+        let Json(body) = res.unwrap();
+        let op = body.get("operator").unwrap();
+        assert_eq!(op.get("name").unwrap().as_str().unwrap(), "Drake Stapleton");
+        assert_eq!(op.get("email").unwrap().as_str().unwrap(), "drake@aien.org");
+        assert_eq!(op.get("handle").unwrap().as_str().unwrap(), "drake_ops-1");
     }
 }
