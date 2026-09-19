@@ -1,0 +1,52 @@
+name: Sovereign CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Workspace Verification & Invariant Audit
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Source Code
+        uses: actions/checkout@v4
+
+      - name: Install Stable Rust Toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Verify Code Formatting
+        run: cargo fmt --all -- --check
+
+      - name: Cargo Workspace Check
+        run: cargo check --workspace --all-targets
+
+      - name: Run Workspace Unit and Integration Tests
+        run: cargo test --workspace --verbose
+
+      - name: Enforce Zero Disk Secrets Invariant
+        run: |
+          echo "Auditing repository for prohibited plaintext secret files..."
+          if find . -maxdepth 4 -name ".env*" -not -path "*/.git/*" -not -path "*/target/*" | grep -q .; then
+            echo "::error::Prohibited .env file found in workspace. Use hardware TPM atlas-vault."
+            exit 1
+          fi
+          echo "Zero plaintext .env files verified."
+
+      - name: Enforce Sovereign Voice and Anti-Slop Invariant
+        run: |
+          echo "Auditing repository for em dashes, en dashes, and formulaic tropes..."
+          BAD_CHARS=$(grep -rnE --exclude-dir=target --exclude-dir=.git --exclude='*.rs' '—|–' crates/ docs/ README.md || true)
+          if [ -n "$BAD_CHARS" ]; then
+            echo "::error::Em dashes or en dashes detected:"
+            echo "$BAD_CHARS"
+            exit 1
+          fi
+          echo "Sovereign voice compliance verified."
