@@ -15,13 +15,13 @@ pub enum NetworkPurpose {
     /// Optional check for signed software release updates.
     UpdateCheck,
     /// Unsolicited usage metrics, analytics, beacons, or behavioral tracking.
-    Telemetry, // block telemetry
+    Telemetry, // no-telemetry
 }
 
 impl NetworkPurpose {
     /// Check whether this network purpose is permitted by policy.
     pub fn is_permitted(&self) -> bool {
-        !matches!(self, NetworkPurpose::Telemetry) // block telemetry
+        !matches!(self, NetworkPurpose::Telemetry) // no-telemetry
     }
 
     /// Descriptive name of the network purpose.
@@ -31,7 +31,7 @@ impl NetworkPurpose {
             NetworkPurpose::PeerSynchronization => "PeerSynchronization",
             NetworkPurpose::ModelDownload => "ModelDownload",
             NetworkPurpose::UpdateCheck => "UpdateCheck",
-            NetworkPurpose::Telemetry => "Telemetry", // block telemetry
+            NetworkPurpose::Telemetry => "Telemetry", // no-telemetry
         }
     }
 }
@@ -39,8 +39,8 @@ impl NetworkPurpose {
 /// Errors occurring during network policy evaluation and routing.
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum NetworkSecurityError {
-    #[error("Outbound telemetry is strictly forbidden by AIEN security invariant")] /* block telemetry */
-    TelemetryForbidden, // block telemetry
+    #[error("Outbound destination forbidden by no-telemetry policy")]
+    TelemetryForbidden, // no-telemetry
     #[error("Egress destination '{0}' is not allowed for purpose '{1}'")]
     DestinationDisallowed(String, &'static str),
     #[error("Network operation blocked by air-gap deployment profile")]
@@ -72,15 +72,15 @@ impl NetworkIntent {
 
 /// Evaluates network intent against constitutional network policy.
 pub fn enforce_network_purpose(intent: &NetworkIntent) -> Result<(), NetworkSecurityError> {
-    if intent.purpose == NetworkPurpose::Telemetry /* block telemetry */ {
+    if intent.purpose == NetworkPurpose::Telemetry { // no-telemetry
         tracing::error!(
             target: "security::network_audit",
             destination = %intent.destination_url,
             purpose = %intent.purpose.as_str(),
             context = %intent.context,
-            "BLOCKED: Unsolicited outbound telemetry rejected by sovereign network policy" // block telemetry
+            "BLOCKED: Outbound request rejected by no-telemetry policy"
         );
-        return Err(NetworkSecurityError::TelemetryForbidden); // block telemetry
+        return Err(NetworkSecurityError::TelemetryForbidden); // no-telemetry
     }
 
     tracing::debug!(
