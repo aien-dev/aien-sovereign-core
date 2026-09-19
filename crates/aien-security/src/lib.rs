@@ -19,20 +19,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_telemetry_hard_blocked_and_rejected() {
-        // block telemetry
+    fn test_telemetry_hard_blocked_and_rejected() { /* block telemetry */
         let intent = NetworkIntent::new(
             "https://analytics.example.com/v1/event",
-            NetworkPurpose::Telemetry,
-        ) // block telemetry
+            NetworkPurpose::Telemetry, /* block telemetry */
+        )
         .with_context("background_diagnostic_beacon");
 
         let result = enforce_network_purpose(&intent);
         assert!(result.is_err());
         assert_eq!(
             result.unwrap_err(),
-            NetworkSecurityError::TelemetryForbidden
-        ); // block telemetry
+            NetworkSecurityError::TelemetryForbidden /* block telemetry */
+        );
     }
 
     #[test]

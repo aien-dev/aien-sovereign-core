@@ -39,8 +39,7 @@ impl NetworkPurpose {
 /// Errors occurring during network policy evaluation and routing.
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum NetworkSecurityError {
-    #[error("Outbound telemetry is strictly forbidden by AIEN security invariant")]
-    // block telemetry
+    #[error("Outbound telemetry is strictly forbidden by AIEN security invariant")] /* block telemetry */
     TelemetryForbidden, // block telemetry
     #[error("Egress destination '{0}' is not allowed for purpose '{1}'")]
     DestinationDisallowed(String, &'static str),
@@ -73,8 +72,7 @@ impl NetworkIntent {
 
 /// Evaluates network intent against constitutional network policy.
 pub fn enforce_network_purpose(intent: &NetworkIntent) -> Result<(), NetworkSecurityError> {
-    if intent.purpose == NetworkPurpose::Telemetry {
-        // block telemetry
+    if intent.purpose == NetworkPurpose::Telemetry /* block telemetry */ {
         tracing::error!(
             target: "security::network_audit",
             destination = %intent.destination_url,
