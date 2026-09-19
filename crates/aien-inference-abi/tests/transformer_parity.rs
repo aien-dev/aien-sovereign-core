@@ -183,7 +183,8 @@ fn test_safetensors_bytes_parser() {
     let config = test_model_config();
 
     // Construct a valid minimal safetensors binary buffer
-    let header_json = r#"{"model.norm.weight":{"dtype":"F32","shape":[64],"data_offsets":[0,256]}}"#;
+    let header_json =
+        r#"{"model.norm.weight":{"dtype":"F32","shape":[64],"data_offsets":[0,256]}}"#;
     let header_bytes = header_json.as_bytes();
     let header_len = header_bytes.len() as u64;
 

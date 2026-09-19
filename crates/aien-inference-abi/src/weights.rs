@@ -1,8 +1,6 @@
 //! Native weight data structures and zero-dependency loaders for transformer models.
 
-use crate::tensor::{
-    apply_rope, matmul_vec, rmsnorm, scaled_dot_product_attention_single, swiglu,
-};
+use crate::tensor::{apply_rope, matmul_vec, rmsnorm, scaled_dot_product_attention_single, swiglu};
 use crate::ModelConfig;
 use serde_json::Value;
 
@@ -51,7 +49,9 @@ impl TransformerWeights {
 
         let mut lcg_state: u64 = 42;
         let mut next_float = || -> f32 {
-            lcg_state = lcg_state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            lcg_state = lcg_state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             let val = ((lcg_state >> 33) as f32) / ((1u64 << 31) as f32);
             (val - 0.5) * 0.05
         };
@@ -180,7 +180,15 @@ impl TransformerWeights {
             matmul_vec(&x_norm, &layer_w.v_proj, &mut v, hidden_dim, kv_dim);
 
             // 2c. Rotary Positional Embeddings (RoPE)
-            apply_rope(&mut q, &mut k, pos, num_heads, num_kv_heads, head_dim, theta);
+            apply_rope(
+                &mut q,
+                &mut k,
+                pos,
+                num_heads,
+                num_kv_heads,
+                head_dim,
+                theta,
+            );
 
             // 2d. Append to KV Cache
             kv_cache.cached_k.push(k);
@@ -200,7 +208,13 @@ impl TransformerWeights {
 
             // 2f. Output projection and residual connection
             let mut attn_proj = vec![0.0f32; hidden_dim];
-            matmul_vec(&attn_out, &layer_w.o_proj, &mut attn_proj, q_dim, hidden_dim);
+            matmul_vec(
+                &attn_out,
+                &layer_w.o_proj,
+                &mut attn_proj,
+                q_dim,
+                hidden_dim,
+            );
             for i in 0..hidden_dim {
                 x[i] += attn_proj[i];
             }
@@ -236,14 +250,22 @@ impl TransformerWeights {
         let hidden_dim = self.config.hidden_dim();
         let vocab_size = self.config.vocab_size();
         let mut logits = vec![0.0f32; vocab_size];
-        matmul_vec(hidden_state, &self.lm_head, &mut logits, hidden_dim, vocab_size);
+        matmul_vec(
+            hidden_state,
+            &self.lm_head,
+            &mut logits,
+            hidden_dim,
+            vocab_size,
+        );
         logits
     }
 
     /// Loads model weights directly from a standard safetensors binary buffer.
     pub fn from_safetensors_bytes(bytes: &[u8], config: &ModelConfig) -> Result<Self, String> {
         if bytes.len() < 8 {
-            return Err("Invalid safetensors binary: buffer smaller than 8 bytes header".to_string());
+            return Err(
+                "Invalid safetensors binary: buffer smaller than 8 bytes header".to_string(),
+            );
         }
 
         let header_len = u64::from_le_bytes(bytes[0..8].try_into().unwrap()) as usize;
@@ -326,7 +348,8 @@ impl TransformerWeights {
             if let Some(t) = extract_tensor(&format!("{}.self_attn.o_proj.weight", prefix)) {
                 layer.o_proj = t;
             }
-            if let Some(t) = extract_tensor(&format!("{}.post_attention_layernorm.weight", prefix)) {
+            if let Some(t) = extract_tensor(&format!("{}.post_attention_layernorm.weight", prefix))
+            {
                 layer.post_attention_layernorm = t;
             }
             if let Some(t) = extract_tensor(&format!("{}.mlp.gate_proj.weight", prefix)) {
