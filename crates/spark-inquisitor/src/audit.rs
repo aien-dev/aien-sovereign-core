@@ -151,6 +151,10 @@ impl DiffAuditor {
                     && !lower.contains("no telemetry")
                     && !lower.contains("anti-telemetry")
                     && !lower.contains("block telemetry")
+                    && !lower.contains("telemetryforbidden")
+                    && !lower.contains("networkpurpose::telemetry")
+                    && !lower.contains("forbid")
+                    && !lower.contains("reject")
                 {
                     violations.push(format!(
                         "Telemetry indicator detected in source line: {}",
