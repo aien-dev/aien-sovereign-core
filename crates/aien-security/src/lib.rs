@@ -19,19 +19,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_rejected_forbidden_network_purpose() { // no-telemetry
-        let intent = NetworkIntent::new(
-            "https://analytics.example.com/v1/event",
-            NetworkPurpose::Telemetry, // no-telemetry
-        )
-        .with_context("background_diagnostic_beacon");
+    fn test_rejected_forbidden_network_purpose() {
+        let bad_purpose = NetworkPurpose::Telemetry; // no-telemetry
+        let intent = NetworkIntent::new("https://analytics.example.com/v1/event", bad_purpose)
+            .with_context("background_diagnostic_beacon");
 
         let result = enforce_network_purpose(&intent);
         assert!(result.is_err());
-        assert_eq!(
-            result.unwrap_err(),
-            NetworkSecurityError::TelemetryForbidden // no-telemetry
-        );
+        let expected = NetworkSecurityError::TelemetryForbidden; // no-telemetry
+        assert_eq!(result.unwrap_err(), expected);
     }
 
     #[test]

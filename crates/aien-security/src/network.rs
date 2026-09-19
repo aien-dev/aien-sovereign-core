@@ -72,7 +72,8 @@ impl NetworkIntent {
 
 /// Evaluates network intent against constitutional network policy.
 pub fn enforce_network_purpose(intent: &NetworkIntent) -> Result<(), NetworkSecurityError> {
-    if intent.purpose == NetworkPurpose::Telemetry { // no-telemetry
+    let is_forbidden = matches!(intent.purpose, NetworkPurpose::Telemetry); // no-telemetry
+    if is_forbidden {
         tracing::error!(
             target: "security::network_audit",
             destination = %intent.destination_url,
