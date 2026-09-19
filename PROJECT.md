@@ -66,9 +66,9 @@ Every feature identified during survey is mapped directly to a milestone.
 | M2 | Pure Rust Tokenizer and Chat Template | Integrate tokenizers crate in aien-inference-abi, implement TinyLlama chat template, special token pinning, encode/decode | none | DONE |
 | M3 | Reference Oracle Fixture Generation | Author scripts/generate_tinyllama_oracle.py on Spark, generate tinyllama_oracle.safetensors, export JSON manifest with SHA-256 | none | DONE |
 | M4 | Algorithmic Alignment and Parity Test Harness | Align RoPE split-half and matmul layout in tensor.rs, implement crates/aien-inference-abi/tests/tinyllama_parity.rs passing 5 stages | M1, M2, M3 | DONE |
-| M5 | Decoupled TensorBackend and Mojo GB10 Acceleration | Define TensorBackend trait, implement ReferenceCpuBackend and MojoGb10Backend (libaien_kernels.so) on Spark GB10 | M4 | PLANNED |
-| M6 | Neutral Apples-to-Apples Benchmark Driver | Build benchmarks/crates/bench_apples_to_apples, run AIEN, MAX, vLLM on DGX Spark across C=1..64, record telemetry | M5 | PLANNED |
-| M7 | Invariant Verification, Autonomous PR Lifecycle, and Cortex Receipt | Verify zero disk secrets, sovereign voice, execute PR squash merge, commit receipt to Cortex memory | M6 | PLANNED |
+| M5 | Decoupled TensorBackend and Mojo GB10 Acceleration | Define TensorBackend trait, implement ReferenceCpuBackend and MojoGb10Backend (libaien_kernels.so) on Spark GB10 | M4 | DONE |
+| M6 | Neutral Apples-to-Apples Benchmark Driver | Build benchmarks/crates/bench_apples_to_apples, run AIEN, MAX, vLLM on DGX Spark across C=1..64, record telemetry | M5 | DONE |
+| M7 | Invariant Verification, Autonomous PR Lifecycle, and Cortex Receipt | Verify zero disk secrets, sovereign voice, execute PR squash merge, commit receipt to Cortex memory | M6 | DONE |
 
 ## Interface Contracts
 
@@ -172,12 +172,12 @@ benchmarks/
 - Strict Spark-Only Execution: All test runs, compilations, model evaluations, and benchmarks must execute strictly on the NVIDIA DGX Spark workstation (`ssh drakestapleton@spark`). Zero test execution or heavy compilation is permitted on the local MacBook host.
 
 ## Acceptance Criteria Cross-Check
-- [ ] load_safetensors_checkpoint rejects missing keys with MissingTensor and shape mismatches with ShapeMismatch (M1).
-- [ ] cargo test -p aien-inference-abi --test tinyllama_parity passes all 5 parity stages (M4).
-- [ ] Multi-step greedy generation produces identical token IDs and recognizable English text (M4).
-- [ ] TensorBackend trait cleanly separates Rust transformer semantics from compute backends (M5).
-- [ ] libaien_kernels.so compiles on Spark GB10 and executes without per-token host-device memory copying (M5).
-- [ ] Neutral benchmark orchestrator executes AIEN, MAX, and vLLM sequentially with thermal cool-downs (M6).
-- [ ] Concurrency sweep (C=1 to C=64) captures TTFT, ITL, throughput, memory, and power telemetry (M6).
-- [ ] Benchmark results and receipt committed to benchmarks/data/ and documented in walkthrough.md (M6).
-- [ ] Clean PR opened on aien-dev/aien-sovereign-core, CI green, linear squash merge, Cortex receipt in atlas-memory (M7).
+- [x] load_safetensors_checkpoint rejects missing keys with MissingTensor and shape mismatches with ShapeMismatch (M1).
+- [x] cargo test -p aien-inference-abi --test tinyllama_parity passes all 5 parity stages (M4).
+- [x] Multi-step greedy generation produces identical token IDs and recognizable English text (M4).
+- [x] TensorBackend trait cleanly separates Rust transformer semantics from compute backends (M5).
+- [x] libaien_kernels.so compiles on Spark GB10 and executes without per-token host-device memory copying (M5).
+- [x] Neutral benchmark orchestrator executes AIEN, MAX, and vLLM sequentially with thermal cool-downs (M6).
+- [x] Concurrency sweep (C=1 to C=64) captures TTFT, ITL, throughput, memory, and power telemetry (M6).
+- [x] Benchmark results and receipt committed to benchmarks/data/ and documented in walkthrough.md (M6).
+- [x] Clean PR opened on aien-dev/aien-sovereign-core, CI green, linear squash merge, Cortex receipt in atlas-memory (M7).
