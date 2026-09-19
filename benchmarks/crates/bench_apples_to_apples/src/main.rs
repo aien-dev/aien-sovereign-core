@@ -88,7 +88,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("   AIEN SOVEREIGN CORE: NEUTRAL APPLES-TO-APPLES BENCHMARK SUITE (DGX SPARK)   ");
     println!("================================================================================");
     println!("Hardware: NVIDIA DGX Spark (GB10 Grace Blackwell, 128 GB Unified LPDDR5x)");
-    println!("Model: TinyLlama/TinyLlama-1.1B-Chat-v1.0 (BF16)");
+    println!("Model: TinyLlama/TinyLlama-1.1B-Chat-v1.0 (BF16 for MAX/vLLM GPU, FP32 for AIEN Native Reference)");
     println!("Workload: 128 input tokens -> 128 output tokens (Greedy, Temp=0.0)");
     println!("Engines: {:?}", target_engines);
     println!("Concurrency levels: {:?}", concurrency_levels);
@@ -188,7 +188,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         benchmark_timestamp: chrono::Utc::now().to_rfc3339(),
         hardware: "NVIDIA DGX Spark GB10 Grace Blackwell 128GB Unified Memory".to_string(),
         model_id: "TinyLlama/TinyLlama-1.1B-Chat-v1.0".to_string(),
-        precision: "BF16".to_string(),
+        precision: "BF16 (MAX/vLLM GPU) vs FP32 (AIEN Native Reference)".to_string(),
         prompt_tokens: config.prompt_token_count,
         target_output_tokens: config.output_token_count,
         results: all_results,

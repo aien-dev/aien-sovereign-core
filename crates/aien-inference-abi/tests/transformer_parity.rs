@@ -203,3 +203,91 @@ fn test_safetensors_bytes_parser() {
     assert!((weights.final_norm[1] - 0.1).abs() < 1e-6);
     assert!((weights.final_norm[10] - 1.0).abs() < 1e-6);
 }
+
+#[tokio::test]
+async fn test_blackwell_vs_reference_cpu_autoregressive_parity() {
+    let config = test_model_config();
+    let mut cpu_backend = NativeTransformerBackend::with_reference_weights(&config);
+    let mut gpu_backend = NativeTransformerBackend::with_blackwell_backend(&config);
+
+    let prompt = vec![7u32, 19u32, 42u32, 108u32];
+    let req_cpu = SequenceRequest {
+        request_id: 3001,
+        prompt_tokens: prompt.clone(),
+        sampling_params: SamplingParams {
+            temperature: 0.0,
+            top_p: 1.0,
+            max_tokens: 16,
+            stop_token_ids: vec![0],
+        },
+        arrival_time_ns: 0,
+        priority: 1,
+    };
+    let req_gpu = SequenceRequest {
+        request_id: 3001,
+        prompt_tokens: prompt.clone(),
+        sampling_params: SamplingParams {
+            temperature: 0.0,
+            top_p: 1.0,
+            max_tokens: 16,
+            stop_token_ids: vec![0],
+        },
+        arrival_time_ns: 0,
+        priority: 1,
+    };
+
+    let mut batch_cpu = ScheduledBatch {
+        prefill_requests: vec![req_cpu],
+        decode_requests: Vec::new(),
+        block_tables: {
+            let mut m = HashMap::new();
+            m.insert(3001, vec![0, 1]);
+            m
+        },
+        step_id: 1,
+    };
+    let mut batch_gpu = ScheduledBatch {
+        prefill_requests: vec![req_gpu],
+        decode_requests: Vec::new(),
+        block_tables: {
+            let mut m = HashMap::new();
+            m.insert(3001, vec![0, 1]);
+            m
+        },
+        step_id: 1,
+    };
+
+    let mut cpu_tokens = Vec::new();
+    let mut gpu_tokens = Vec::new();
+
+    let (out_cpu, _) = cpu_backend.execute_step(&batch_cpu).await.unwrap();
+    let (out_gpu, _) = gpu_backend.execute_step(&batch_gpu).await.unwrap();
+
+    if let (DecodeOutput::Token { token_id: t_cpu, .. }, DecodeOutput::Token { token_id: t_gpu, .. }) = (&out_cpu[0], &out_gpu[0]) {
+        assert_eq!(t_cpu, t_gpu, "Prefill first token mismatch between CPU and Blackwell GPU");
+        cpu_tokens.push(*t_cpu);
+        gpu_tokens.push(*t_gpu);
+    }
+
+    for step in 2..=8 {
+        batch_cpu.prefill_requests.clear();
+        batch_cpu.decode_requests = vec![3001];
+        batch_cpu.step_id = step;
+
+        batch_gpu.prefill_requests.clear();
+        batch_gpu.decode_requests = vec![3001];
+        batch_gpu.step_id = step;
+
+        let (step_out_cpu, _) = cpu_backend.execute_step(&batch_cpu).await.unwrap();
+        let (step_out_gpu, _) = gpu_backend.execute_step(&batch_gpu).await.unwrap();
+
+        if let (DecodeOutput::Token { token_id: t_cpu, .. }, DecodeOutput::Token { token_id: t_gpu, .. }) = (&step_out_cpu[0], &step_out_gpu[0]) {
+            assert_eq!(t_cpu, t_gpu, "Decode step {} token mismatch: CPU={}, GPU={}", step, t_cpu, t_gpu);
+            cpu_tokens.push(*t_cpu);
+            gpu_tokens.push(*t_gpu);
+        }
+    }
+
+    assert_eq!(cpu_tokens, gpu_tokens, "Autoregressive generation must match bitwise between CPU and Blackwell GPU");
+    println!("Parity verified over {} tokens: {:?}", cpu_tokens.len(), cpu_tokens);
+}
