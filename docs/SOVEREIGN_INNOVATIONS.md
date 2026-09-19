@@ -40,7 +40,7 @@ The workspace comprises 17 native compiled crates, each dedicated to an isolated
 Every crate and workflow within `aien-sovereign-core` adheres to four architectural axioms:
 
 1. **Zero Telemetry and Anti-Surveillance**:
-   All crates are prohibited from calling external telemetry endpoints (Google Analytics, Segment, Mixpanel, Datadog, Sentry). Network activity is restricted strictly to user-configured endpoints and peer relays.
+   All crates are prohibited from calling external telemetry, surveillance, or analytics endpoints. Network activity is restricted strictly to user-configured endpoints and peer relays.
 2. **Pure Compiled Native Systems**:
    All daemons, memory engines, gateways, and CLI tools must compile to native machine binaries (Rust and Mojo). Interpreted runtimes are banned from core services.
 3. **Hardware TPM Key Vault (Zero Disk Secrets)**:

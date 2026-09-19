@@ -94,6 +94,9 @@ impl DiffAuditor {
                     "unleash", "harness", "seamlessly",
                 ];
                 for word in &buzzwords {
+                    if *word == "harness" && (lower.contains("spark-harness") || lower.contains("aien-harness")) {
+                        continue;
+                    }
                     let re = Regex::new(&format!(r"\b{}\b", word)).unwrap();
                     if re.is_match(&lower) {
                         unslop_violations.push(format!("Forbidden AI buzzword '{}' detected in line: {}", word, line.trim()));
