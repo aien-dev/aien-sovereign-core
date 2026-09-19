@@ -1,0 +1,25 @@
+[package]
+name = "aien-scheduler"
+version = "0.1.0"
+edition = "2021"
+authors = ["AIEN Sovereign Systems & Contributors <sovereign@aien.dev>"]
+description = "Native continuous batching LLM scheduler with chunked prefill"
+license = "Apache-2.0 WITH LLVM-exception"
+
+[dependencies]
+aien-inference-abi = { path = "../aien-inference-abi" }
+aien-kv-cache = { path = "../aien-kv-cache" }
+tokio = { version = "1.37", features = ["full"] }
+parking_lot = "0.12"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+reqwest = { version = "0.12", features = ["json", "stream"] }
+futures-util = "0.3"
+
+[[bin]]
+name = "bench_inference_stack"
+path = "src/bin/bench_inference_stack.rs"
+
+[[bin]]
+name = "stress_aien_live"
+path = "src/bin/stress_aien_live.rs"
