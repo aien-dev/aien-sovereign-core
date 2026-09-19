@@ -14,6 +14,7 @@ use std::time::{Duration, Instant};
 pub struct MaxServerHandle {
     child: Child,
     pub port: u16,
+    pub model_id: String,
 }
 
 impl MaxServerHandle {
@@ -40,11 +41,6 @@ impl MaxServerHandle {
             .spawn()
             .map_err(|e| format!("Failed to spawn max serve: {}", e))?;
 
-        let handle = Self {
-            child,
-            port: config.max_serve_port,
-        };
-
         // Poll endpoint readiness
         let client = Client::builder()
             .timeout(Duration::from_secs(3))
@@ -59,8 +55,27 @@ impl MaxServerHandle {
         while start.elapsed() < timeout {
             if let Ok(res) = client.get(&url).send().await {
                 if res.status().is_success() {
-                    eprintln!("Modular MAX server is ready in {:.1}s.", start.elapsed().as_secs_f64());
-                    return Ok(handle);
+                    let model_id = if let Ok(val) = res.json::<Value>().await {
+                        val.get("data")
+                            .and_then(|d| d.as_array())
+                            .and_then(|arr| arr.first())
+                            .and_then(|m| m.get("id"))
+                            .and_then(|id| id.as_str())
+                            .unwrap_or(&config.model_path)
+                            .to_string()
+                    } else {
+                        config.model_path.clone()
+                    };
+                    eprintln!(
+                        "Modular MAX server is ready in {:.1}s with model '{}'.",
+                        start.elapsed().as_secs_f64(),
+                        model_id
+                    );
+                    return Ok(Self {
+                        child,
+                        port: config.max_serve_port,
+                        model_id,
+                    });
                 }
             }
             tokio::time::sleep(Duration::from_secs(1)).await;
@@ -89,10 +104,11 @@ async fn execute_single_max_request(
     request_id: usize,
     prompt: String,
     max_tokens: usize,
+    model_name: String,
 ) -> Result<RequestRecord, String> {
     let url = format!("http://127.0.0.1:{}/v1/chat/completions", port);
     let payload = serde_json::json!({
-        "model": "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
+        "model": model_name,
         "messages": [
             {
                 "role": "system",
@@ -202,9 +218,10 @@ pub async fn run_max_concurrency_sweep(
         let port = server.port;
         let prompt = config.prompt.clone();
         let max_tokens = config.output_token_count;
+        let model_name = server.model_id.clone();
 
         handles.push(tokio::spawn(async move {
-            execute_single_max_request(client_clone, port, req_idx, prompt, max_tokens).await
+            execute_single_max_request(client_clone, port, req_idx, prompt, max_tokens, model_name).await
         }));
     }
 

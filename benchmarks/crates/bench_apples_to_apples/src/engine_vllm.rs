@@ -15,6 +15,7 @@ pub struct VllmContainerHandle {
     pub container_name: String,
     pub port: u16,
     pub host_pid: Option<u32>,
+    pub model_id: String,
 }
 
 impl VllmContainerHandle {
@@ -71,12 +72,6 @@ impl VllmContainerHandle {
             s.trim().parse::<u32>().ok()
         });
 
-        let handle = Self {
-            container_name,
-            port: config.vllm_serve_port,
-            host_pid,
-        };
-
         // Poll readiness
         let client = Client::builder()
             .timeout(Duration::from_secs(3))
@@ -91,8 +86,28 @@ impl VllmContainerHandle {
         while start.elapsed() < timeout {
             if let Ok(res) = client.get(&url).send().await {
                 if res.status().is_success() {
-                    eprintln!("vLLM container is ready in {:.1}s.", start.elapsed().as_secs_f64());
-                    return Ok(handle);
+                    let model_id = if let Ok(val) = res.json::<Value>().await {
+                        val.get("data")
+                            .and_then(|d| d.as_array())
+                            .and_then(|arr| arr.first())
+                            .and_then(|m| m.get("id"))
+                            .and_then(|id| id.as_str())
+                            .unwrap_or("/root/.cache/huggingface/hub/models--TinyLlama--TinyLlama-1.1B-Chat-v1.0/snapshots/fe8a4ea1ffedaf415f4da2f062534de366a451e6")
+                            .to_string()
+                    } else {
+                        "/root/.cache/huggingface/hub/models--TinyLlama--TinyLlama-1.1B-Chat-v1.0/snapshots/fe8a4ea1ffedaf415f4da2f062534de366a451e6".to_string()
+                    };
+                    eprintln!(
+                        "vLLM container is ready in {:.1}s with model '{}'.",
+                        start.elapsed().as_secs_f64(),
+                        model_id
+                    );
+                    return Ok(Self {
+                        container_name,
+                        port: config.vllm_serve_port,
+                        host_pid,
+                        model_id,
+                    });
                 }
             }
             tokio::time::sleep(Duration::from_secs(2)).await;
@@ -118,10 +133,11 @@ async fn execute_single_vllm_request(
     request_id: usize,
     prompt: String,
     max_tokens: usize,
+    model_name: String,
 ) -> Result<RequestRecord, String> {
     let url = format!("http://127.0.0.1:{}/v1/chat/completions", port);
     let payload = serde_json::json!({
-        "model": "/root/.cache/huggingface/hub/models--TinyLlama--TinyLlama-1.1B-Chat-v1.0/snapshots/fe8a4ea1ffedaf415f4da2f062534de366a451e6",
+        "model": model_name,
         "messages": [
             {
                 "role": "system",
@@ -231,9 +247,10 @@ pub async fn run_vllm_concurrency_sweep(
         let port = handle.port;
         let prompt = config.prompt.clone();
         let max_tokens = config.output_token_count;
+        let model_name = handle.model_id.clone();
 
         handles.push(tokio::spawn(async move {
-            execute_single_vllm_request(client_clone, port, req_idx, prompt, max_tokens).await
+            execute_single_vllm_request(client_clone, port, req_idx, prompt, max_tokens, model_name).await
         }));
     }
 
