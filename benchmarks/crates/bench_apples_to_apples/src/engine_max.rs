@@ -108,19 +108,10 @@ async fn execute_single_max_request(
     max_tokens: usize,
     model_name: String,
 ) -> Result<RequestRecord, String> {
-    let url = format!("http://127.0.0.1:{}/v1/chat/completions", port);
+    let url = format!("http://127.0.0.1:{}/v1/completions", port);
     let payload = serde_json::json!({
         "model": model_name,
-        "messages": [
-            {
-                "role": "system",
-                "content": "You are a helpful and truthful AI assistant. Explain technical concepts with clarity and precision."
-            },
-            {
-                "role": "user",
-                "content": prompt
-            }
-        ],
+        "prompt": prompt,
         "max_tokens": max_tokens,
         "temperature": 0.0,
         "stream": true
@@ -161,11 +152,16 @@ async fn execute_single_max_request(
                 if let Ok(val) = serde_json::from_str::<Value>(json_str) {
                     if let Some(choices) = val.get("choices").and_then(|c| c.as_array()) {
                         if let Some(first) = choices.first() {
-                            if let Some(content) = first
-                                .get("delta")
-                                .and_then(|d| d.get("content"))
-                                .and_then(|s| s.as_str())
-                            {
+                            let text_opt = first
+                                .get("text")
+                                .and_then(|t| t.as_str())
+                                .or_else(|| {
+                                    first
+                                        .get("delta")
+                                        .and_then(|d| d.get("content"))
+                                        .and_then(|s| s.as_str())
+                                });
+                            if let Some(content) = text_opt {
                                 let now = Instant::now();
                                 if token_count == 0 {
                                     ttft_ms = start.elapsed().as_secs_f64() * 1000.0;
@@ -269,7 +265,7 @@ pub async fn run_max_concurrency_sweep(
     let parity_match_rate_pct = if let Ok(tok) =
         aien_inference_abi::tokenizer::TinyLlamaTokenizer::from_file(&config.tokenizer_path)
     {
-        if let Ok(toks) = tok.encode(&sample_text) {
+        if let Ok(toks) = tok.encode_with_special(&sample_text, false) {
             verify_token_sequence_match(&toks, &ORACLE_BENCHMARK_128_TOKENS)
         } else {
             0.0
