@@ -376,6 +376,7 @@ mod tests {
             num_layers: 28,
             num_heads: 28,
             head_dim: 128,
+            ..Default::default()
         };
         backend.load_model(&config).await.unwrap();
 
