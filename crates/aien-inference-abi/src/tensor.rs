@@ -1,22 +1,44 @@
 //! Pure native Rust tensor operations for transformer forward execution.
 //! Provides cache-friendly vector and matrix math, RMSNorm, RoPE, and SwiGLU activations.
 
-/// Cache-friendly vector-matrix multiplication: out = x * W
-/// where x is [in_dim], W is row-major [in_dim, out_dim], and out is [out_dim].
+/// Vector-matrix multiplication for PyTorch row-major weights: out = x * W^T
+/// where x is [in_dim], W is row-major [out_dim, in_dim], and out is [out_dim].
+/// Each out[j] is the inner dot product of vector x with the j-th row of W.
 #[inline]
 pub fn matmul_vec(x: &[f32], w: &[f32], out: &mut [f32], in_dim: usize, out_dim: usize) {
     debug_assert_eq!(x.len(), in_dim);
     debug_assert_eq!(w.len(), in_dim * out_dim);
     debug_assert_eq!(out.len(), out_dim);
 
-    out.fill(0.0);
+    for j in 0..out_dim {
+        let w_row = &w[j * in_dim..(j + 1) * in_dim];
+        let mut sum0 = 0.0f64;
+        let mut sum1 = 0.0f64;
+        let mut sum2 = 0.0f64;
+        let mut sum3 = 0.0f64;
+        let mut sum4 = 0.0f64;
+        let mut sum5 = 0.0f64;
+        let mut sum6 = 0.0f64;
+        let mut sum7 = 0.0f64;
 
-    for i in 0..in_dim {
-        let xi = x[i];
-        let w_row = &w[i * out_dim..(i + 1) * out_dim];
-        for j in 0..out_dim {
-            out[j] += xi * w_row[j];
+        let mut i = 0;
+        while i + 8 <= in_dim {
+            sum0 += (x[i] as f64) * (w_row[i] as f64);
+            sum1 += (x[i + 1] as f64) * (w_row[i + 1] as f64);
+            sum2 += (x[i + 2] as f64) * (w_row[i + 2] as f64);
+            sum3 += (x[i + 3] as f64) * (w_row[i + 3] as f64);
+            sum4 += (x[i + 4] as f64) * (w_row[i + 4] as f64);
+            sum5 += (x[i + 5] as f64) * (w_row[i + 5] as f64);
+            sum6 += (x[i + 6] as f64) * (w_row[i + 6] as f64);
+            sum7 += (x[i + 7] as f64) * (w_row[i + 7] as f64);
+            i += 8;
         }
+        let mut sum = (sum0 + sum1) + (sum2 + sum3) + (sum4 + sum5) + (sum6 + sum7);
+        while i < in_dim {
+            sum += (x[i] as f64) * (w_row[i] as f64);
+            i += 1;
+        }
+        out[j] = sum as f32;
     }
 }
 
@@ -28,9 +50,13 @@ pub fn rmsnorm(x: &[f32], weight: &[f32], eps: f32, out: &mut [f32]) {
     debug_assert_eq!(x.len(), out.len());
 
     let dim = x.len();
-    let sum_sq: f32 = x.iter().map(|&v| v * v).sum();
-    let mean_sq = sum_sq / (dim as f32);
-    let scale = 1.0 / (mean_sq + eps).sqrt();
+    let mut sum_sq = 0.0f64;
+    for &v in x.iter() {
+        let vf = v as f64;
+        sum_sq += vf * vf;
+    }
+    let mean_sq = sum_sq / (dim as f64);
+    let scale = (1.0 / (mean_sq + (eps as f64)).sqrt()) as f32;
 
     for i in 0..dim {
         out[i] = x[i] * scale * weight[i];
@@ -38,7 +64,9 @@ pub fn rmsnorm(x: &[f32], weight: &[f32], eps: f32, out: &mut [f32]) {
 }
 
 /// Applies Rotary Positional Embeddings (RoPE) to query and key head slices.
-/// Rotates consecutive 2D pairs (2*i, 2*i + 1) by angle = pos * theta^(-2*i / head_dim).
+/// Follows canonical Hugging Face LLaMA rotate_half pairing coordinate i with coordinate i + half_dim:
+/// out[i] = q[i] * cos - q[i + half_dim] * sin
+/// out[i + half_dim] = q[i] * sin + q[i + half_dim] * cos
 #[inline]
 pub fn apply_rope(
     q: &mut [f32],
@@ -55,13 +83,14 @@ pub fn apply_rope(
     for h in 0..num_heads {
         let head_offset = h * head_dim;
         for i in 0..half_dim {
-            let idx0 = head_offset + 2 * i;
-            let idx1 = head_offset + 2 * i + 1;
+            let idx0 = head_offset + i;
+            let idx1 = head_offset + i + half_dim;
 
-            let exponent = (2 * i) as f32 / (head_dim as f32);
-            let freq = 1.0 / theta.powf(exponent);
-            let rot = (pos as f32) * freq;
-            let (sin_val, cos_val) = rot.sin_cos();
+            let exponent = (2 * i) as f64 / (head_dim as f64);
+            let freq = 1.0 / (theta as f64).powf(exponent);
+            let rot = (pos as f64) * freq;
+            let sin_val = rot.sin() as f32;
+            let cos_val = rot.cos() as f32;
 
             let q0 = q[idx0];
             let q1 = q[idx1];
@@ -74,13 +103,14 @@ pub fn apply_rope(
     for h in 0..num_kv_heads {
         let head_offset = h * head_dim;
         for i in 0..half_dim {
-            let idx0 = head_offset + 2 * i;
-            let idx1 = head_offset + 2 * i + 1;
+            let idx0 = head_offset + i;
+            let idx1 = head_offset + i + half_dim;
 
-            let exponent = (2 * i) as f32 / (head_dim as f32);
-            let freq = 1.0 / theta.powf(exponent);
-            let rot = (pos as f32) * freq;
-            let (sin_val, cos_val) = rot.sin_cos();
+            let exponent = (2 * i) as f64 / (head_dim as f64);
+            let freq = 1.0 / (theta as f64).powf(exponent);
+            let rot = (pos as f64) * freq;
+            let sin_val = rot.sin() as f32;
+            let cos_val = rot.cos() as f32;
 
             let k0 = k[idx0];
             let k1 = k[idx1];
@@ -90,8 +120,9 @@ pub fn apply_rope(
     }
 }
 
-/// Scaled Dot-Product Attention for a single token against cached key and value vectors.
-/// Supports Grouped-Query Attention (GQA) where num_heads is a multiple of num_kv_heads.
+/// Scaled Dot-Product Grouped-Query Attention (GQA) for a single query token position:
+/// Scores = Softmax((Q * K^T) / sqrt(d_k))
+/// Out = Scores * V
 pub fn scaled_dot_product_attention_single(
     q: &[f32],
     cached_k: &[Vec<f32>],
@@ -112,24 +143,27 @@ pub fn scaled_dot_product_attention_single(
     }
 
     let gqa_ratio = num_heads / num_kv_heads;
-    let inv_sqrt_d = 1.0 / (head_dim as f32).sqrt();
+    let inv_sqrt_d = 1.0 / (head_dim as f64).sqrt();
 
-    let mut scores = vec![0.0f32; seq_len];
+    let mut scores = vec![0.0f64; seq_len];
 
     for h in 0..num_heads {
         let kv_head = h / gqa_ratio;
         let q_head = &q[h * head_dim..(h + 1) * head_dim];
 
-        // 1. Compute attention score for each cached token
+        // 1. Compute attention score for each cached token in f64
         for t in 0..seq_len {
             let k_t = &cached_k[t][kv_head * head_dim..(kv_head + 1) * head_dim];
-            let dot: f32 = q_head.iter().zip(k_t.iter()).map(|(&a, &b)| a * b).sum();
+            let mut dot = 0.0f64;
+            for d in 0..head_dim {
+                dot += (q_head[d] as f64) * (k_t[d] as f64);
+            }
             scores[t] = dot * inv_sqrt_d;
         }
 
         // 2. Softmax over sequence length
-        let max_score = scores.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-        let mut sum_exp = 0.0f32;
+        let max_score = scores.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+        let mut sum_exp = 0.0f64;
         for s in scores.iter_mut() {
             *s = (*s - max_score).exp();
             sum_exp += *s;
@@ -139,15 +173,14 @@ pub fn scaled_dot_product_attention_single(
             *s *= inv_sum;
         }
 
-        // 3. Weighted sum of values
+        // 3. Weighted sum of values in f64
         let out_head = &mut out[h * head_dim..(h + 1) * head_dim];
-        out_head.fill(0.0);
-        for t in 0..seq_len {
-            let weight = scores[t];
-            let v_t = &cached_v[t][kv_head * head_dim..(kv_head + 1) * head_dim];
-            for d in 0..head_dim {
-                out_head[d] += weight * v_t[d];
+        for d in 0..head_dim {
+            let mut sum = 0.0f64;
+            for t in 0..seq_len {
+                sum += scores[t] * (cached_v[t][kv_head * head_dim + d] as f64);
             }
+            out_head[d] = sum as f32;
         }
     }
 }
@@ -170,11 +203,11 @@ pub fn swiglu(
     matmul_vec(x, gate_w, &mut gate, hidden_dim, intermediate_dim);
     matmul_vec(x, up_w, &mut up, hidden_dim, intermediate_dim);
 
-    // silu(x) = x / (1 + exp(-x))
+    // silu(x) = x / (1 + exp(-x)) with f64 precision
     for i in 0..intermediate_dim {
-        let g = gate[i];
+        let g = gate[i] as f64;
         let silu = g / (1.0 + (-g).exp());
-        activated[i] = silu * up[i];
+        activated[i] = (silu * (up[i] as f64)) as f32;
     }
 
     matmul_vec(&activated, down_w, out, intermediate_dim, hidden_dim);
@@ -276,17 +309,35 @@ mod tests {
     #[test]
     fn test_matmul_exact() {
         let x = vec![2.0, 3.0];
-        // 2x3 row-major matrix:
-        // [1.0, 2.0, 3.0]
-        // [4.0, 5.0, 6.0]
-        let w = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
+        // 3x2 row-major matrix [out_dim = 3, in_dim = 2]:
+        // Row 0: [1.0, 4.0] -> 2*1 + 3*4 = 14
+        // Row 1: [2.0, 5.0] -> 2*2 + 3*5 = 19
+        // Row 2: [3.0, 6.0] -> 2*3 + 3*6 = 24
+        let w = vec![1.0, 4.0, 2.0, 5.0, 3.0, 6.0];
         let mut out = vec![0.0; 3];
 
         matmul_vec(&x, &w, &mut out, 2, 3);
-        // out[0] = 2*1 + 3*4 = 14
-        // out[1] = 2*2 + 3*5 = 19
-        // out[2] = 2*3 + 3*6 = 24
         assert_eq!(out, vec![14.0, 19.0, 24.0]);
+    }
+
+    #[test]
+    fn test_rope_rotate_half() {
+        // Coordinate i pairs with i + half_dim
+        let mut q = vec![1.0, 2.0, 3.0, 4.0];
+        let mut k = vec![1.0, 2.0, 3.0, 4.0];
+
+        // pos = 0 means angle = 0, so cos = 1, sin = 0 -> identity
+        apply_rope(&mut q, &mut k, 0, 1, 1, 4, 10000.0);
+        assert_eq!(q, vec![1.0, 2.0, 3.0, 4.0]);
+        assert_eq!(k, vec![1.0, 2.0, 3.0, 4.0]);
+
+        // Verify norm preservation across non-zero position
+        let mut q2 = vec![1.0, 2.0, 3.0, 4.0];
+        let mut k2 = vec![1.0, 2.0, 3.0, 4.0];
+        let norm_before: f32 = q2.iter().map(|v| v * v).sum();
+        apply_rope(&mut q2, &mut k2, 7, 1, 1, 4, 10000.0);
+        let norm_after: f32 = q2.iter().map(|v| v * v).sum();
+        assert!((norm_before - norm_after).abs() < 1e-5);
     }
 
     #[test]

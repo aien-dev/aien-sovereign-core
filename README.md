@@ -9,13 +9,13 @@ High-performance native agent runtime, ultra-low-latency Axum web gateway, and c
 
 ---
 
-## Mission & Purpose: The Long-Term Defense of Humanity
+## Mission & Purpose: Open Intelligence for Humanity
 
-This project represents a durable engineering commitment requiring disciplined craftsmanship to advance computing autonomy, support local communities, and guarantee open-source technology for humanity.
+This project represents a durable engineering commitment to advance computing capability, support local communities, and build open-source artificial intelligence for all humanity.
 
-Centralized platforms increasingly restrict access to computing power and artificial intelligence. When intelligence operates exclusively through proprietary cloud endpoints, user surveillance becomes mandatory and builders lose technical independence.
+We celebrate the historic achievements of pioneering research laboratories and frontier developers worldwide. Teams at OpenAI, xAI, Anthropic, and open-weights initiatives across the United States, China, Europe, and every continent demonstrate what human curiosity and technical ambition can accomplish.
 
-We construct sovereign infrastructure as a direct defensive shield for humanity. Our objective is to ensure that frontier intelligence executes entirely on local, hardware-bound silicon in the hands of ordinary people, independent engineers, clinics, farmers, and community builders. We measure progress in durable software, mathematical verification, and open access.
+Lasting progress requires transparency, humility, and open collaboration. When frontier laboratories operate in opaque silos, conceal compute bottlenecks, and accelerate an uncoordinated competitive arms race, humanity faces severe systemic risks. Millions of independent engineers and researchers worldwide stand ready to help solve efficiency limits, provide compute optimization, and support responsible development. We build this open-source infrastructure as an invitation to pool our collective potential, demystify hardware scaling, and ensure that the future of intelligence serves all of humanity as one Earth.
 
 Review our full ethical and technical charter in [CONSTITUTION.md](CONSTITUTION.md).
 
@@ -124,7 +124,7 @@ The free-of-charge EN2 Experience Trinity Imprint:
 
 ## Contributing
 
-All contributors must ratify the Sovereign Contributor Oath before pull requests can be reviewed or merged. Read [CONSTITUTION.md](CONSTITUTION.md) for details.
+All contributors ratify the Humanity & Open AI Stewardship Oath before pull requests are merged. Read [CONSTITUTION.md](CONSTITUTION.md) for details.
 
 ## Contact & Sovereign Coordination
 
@@ -134,6 +134,10 @@ For secure coordination, architectural questions, and peer federation:
 ## License and Governance
 
 Licensed under the **Sovereign Resource Commons License 1.0 (SRCL-1.0)** (Apache-2.0 WITH LLVM-exception).
-Architected by AIEN (Autonomous Cognitive Architecture operating on the Atlas Framework) and sovereign ecosystem contributors. See [LICENSE](LICENSE) for full legal terms and copyright notices.
+Architected by Drake Stapleton in cognitive partnership with AIEN (Autonomous Cognitive Architecture operating on the Atlas Framework). See [LICENSE](LICENSE) for full legal terms and copyright notices.
+
+- **Section 11 (Swarm Covenant)**: Commercial application freedom with zero revenue caps. Independent services and proprietary applications linking against this Work under the LLVM exception incur zero obligation to disclose application source code.
+- **Section 12 (One Team Covenant)**: Mandates reciprocal weight transparency from well-capitalized frontier entities ($25M+), requiring resulting model weights to be released openly within 30 days.
+- **Section 13 (Hardened Retroactive Inception)**: Any training or utilization in breach of reciprocal covenants is unpermitted ab initio and subject to statutory copyright damages and liquidated licensing fees.
 
 All downstream distributions, derivative works, and commercial deployments are governed exclusively by the terms of [LICENSE](LICENSE). [CONSTITUTION.md](CONSTITUTION.md) defines the internal architectural charter and development doctrine for upstream engineering.

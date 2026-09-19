@@ -1,6 +1,8 @@
 //! Pure native Rust transformer inference backend executing real forward passes.
-//! Performs embedding lookup, RMSNorm, RoPE, Grouped-Query Attention, SwiGLU, and logits projection.
+//! Dispatches tensor math through the decoupled TensorBackend trait for CPU and Mojo/GB10 execution.
 
+use crate::backend::{ReferenceCpuBackend, TensorBackend};
+use crate::mojo_backend::MojoGb10Backend;
 use crate::tensor::{sample_argmax, sample_temperature};
 use crate::weights::{LayerKvCache, SequenceState, TransformerWeights};
 use crate::{
@@ -8,24 +10,203 @@ use crate::{
 };
 use async_trait::async_trait;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 /// Fully native Rust transformer backend executing real tensor forward computation.
+/// Decouples execution orchestration from compute hardware via the TensorBackend trait.
 pub struct NativeTransformerBackend {
     pub weights: TransformerWeights,
     pub sequences: HashMap<u64, SequenceState>,
+    pub tensor_backend: Arc<dyn TensorBackend>,
 }
 
 impl NativeTransformerBackend {
+    /// Creates a new backend with default ReferenceCpuBackend oracle.
     pub fn new(weights: TransformerWeights) -> Self {
         Self {
             weights,
             sequences: HashMap::new(),
+            tensor_backend: Arc::new(ReferenceCpuBackend::new()),
         }
     }
 
+    /// Creates a backend with an explicit TensorBackend implementation.
+    pub fn with_backend(weights: TransformerWeights, tensor_backend: Arc<dyn TensorBackend>) -> Self {
+        Self {
+            weights,
+            sequences: HashMap::new(),
+            tensor_backend,
+        }
+    }
+
+    /// Explicit constructor for ReferenceCpuBackend golden oracle.
+    pub fn new_reference(weights: TransformerWeights) -> Self {
+        Self::new(weights)
+    }
+
+    /// Explicit constructor for Mojo GB10 hardware accelerated backend.
+    pub fn new_mojo(weights: TransformerWeights) -> Self {
+        Self::with_backend(weights, Arc::new(MojoGb10Backend::new()))
+    }
+
+    /// Convenience constructor with deterministic reference weights and ReferenceCpuBackend.
     pub fn with_reference_weights(config: &ModelConfig) -> Self {
         let weights = TransformerWeights::reference_test_weights(config);
         Self::new(weights)
+    }
+
+    /// Convenience constructor with deterministic reference weights and MojoGb10Backend.
+    pub fn with_mojo_backend(config: &ModelConfig) -> Self {
+        let weights = TransformerWeights::reference_test_weights(config);
+        Self::new_mojo(weights)
+    }
+
+    /// Implementation helper executing forward pass on disjoint struct fields.
+    pub fn forward_token_impl(
+        weights: &TransformerWeights,
+        backend: &dyn TensorBackend,
+        token_id: u32,
+        pos: usize,
+        seq_state: &mut SequenceState,
+    ) -> Vec<f32> {
+        let hidden_dim = weights.config.hidden_dim();
+        let num_heads = weights.config.num_heads;
+        let num_kv_heads = weights.config.num_kv_heads;
+        let head_dim = weights.config.head_dim;
+        let q_dim = num_heads * head_dim;
+        let kv_dim = num_kv_heads * head_dim;
+        let intermediate_dim = weights.config.intermediate_dim();
+        let eps = weights.config.rms_norm_eps;
+        let theta = weights.config.rope_theta;
+
+        // 1. Embedding lookup: x = embed_tokens[token_id]
+        let token_idx = (token_id as usize) % weights.config.vocab_size();
+        let embed_slice = &weights.embed_tokens[token_idx * hidden_dim..(token_idx + 1) * hidden_dim];
+        let mut x = embed_slice.to_vec();
+
+        // 2. Transformer layers
+        for (layer_idx, layer_w) in weights.layers.iter().enumerate() {
+            let kv_cache = &mut seq_state.layers[layer_idx];
+
+            // 2a. Input RMSNorm
+            let mut x_norm = vec![0.0f32; hidden_dim];
+            backend.rmsnorm(&mut x_norm, &x, &layer_w.input_layernorm, eps);
+
+            // 2b. Q, K, V Projections
+            let mut q = vec![0.0f32; q_dim];
+            let mut k = vec![0.0f32; kv_dim];
+            let mut v = vec![0.0f32; kv_dim];
+            backend.matmul_vec(&mut q, &x_norm, &layer_w.q_proj, q_dim, hidden_dim);
+            backend.matmul_vec(&mut k, &x_norm, &layer_w.k_proj, kv_dim, hidden_dim);
+            backend.matmul_vec(&mut v, &x_norm, &layer_w.v_proj, kv_dim, hidden_dim);
+
+            // 2c. Rotary Positional Embeddings (RoPE)
+            backend.apply_rope(
+                &mut q,
+                &mut k,
+                pos,
+                head_dim,
+                num_heads,
+                num_kv_heads,
+                theta,
+            );
+
+            // 2d. Append to KV Cache
+            kv_cache.cached_k.push(k);
+            kv_cache.cached_v.push(v);
+
+            // 2e. Scaled Dot-Product GQA Attention
+            let seq_len = kv_cache.cached_k.len();
+            let mut flat_k = Vec::with_capacity(seq_len * kv_dim);
+            let mut flat_v = Vec::with_capacity(seq_len * kv_dim);
+            for t in 0..seq_len {
+                flat_k.extend_from_slice(&kv_cache.cached_k[t]);
+                flat_v.extend_from_slice(&kv_cache.cached_v[t]);
+            }
+
+            let mut attn_out = vec![0.0f32; q_dim];
+            backend.gqa_attention(
+                &mut attn_out,
+                &q,
+                &flat_k,
+                &flat_v,
+                seq_len,
+                num_heads,
+                num_kv_heads,
+                head_dim,
+            );
+
+            // 2f. Output projection and residual connection
+            let mut attn_proj = vec![0.0f32; hidden_dim];
+            backend.matmul_vec(
+                &mut attn_proj,
+                &attn_out,
+                &layer_w.o_proj,
+                hidden_dim,
+                q_dim,
+            );
+            for i in 0..hidden_dim {
+                x[i] += attn_proj[i];
+            }
+
+            // 2g. Post-Attention RMSNorm
+            let mut post_norm = vec![0.0f32; hidden_dim];
+            backend.rmsnorm(&mut post_norm, &x, &layer_w.post_attention_layernorm, eps);
+
+            // 2h. SwiGLU MLP and residual connection
+            let mut gate = vec![0.0f32; intermediate_dim];
+            let mut up = vec![0.0f32; intermediate_dim];
+            let mut activated = vec![0.0f32; intermediate_dim];
+            let mut mlp_out = vec![0.0f32; hidden_dim];
+
+            backend.matmul_vec(&mut gate, &post_norm, &layer_w.gate_proj, intermediate_dim, hidden_dim);
+            backend.matmul_vec(&mut up, &post_norm, &layer_w.up_proj, intermediate_dim, hidden_dim);
+            backend.swiglu(&mut activated, &gate, &up);
+            backend.matmul_vec(&mut mlp_out, &activated, &layer_w.down_proj, hidden_dim, intermediate_dim);
+
+            for i in 0..hidden_dim {
+                x[i] += mlp_out[i];
+            }
+        }
+
+        // 3. Final RMSNorm
+        let mut x_final = vec![0.0f32; hidden_dim];
+        backend.rmsnorm(&mut x_final, &x, &weights.final_norm, eps);
+        x_final
+    }
+
+    /// Implementation helper computing logits projection on disjoint struct fields.
+    pub fn compute_logits_impl(
+        weights: &TransformerWeights,
+        backend: &dyn TensorBackend,
+        hidden_state: &[f32],
+    ) -> Vec<f32> {
+        let hidden_dim = weights.config.hidden_dim();
+        let vocab_size = weights.config.vocab_size();
+        let mut logits = vec![0.0f32; vocab_size];
+        backend.compute_logits(
+            &mut logits,
+            hidden_state,
+            &weights.lm_head,
+            vocab_size,
+            hidden_dim,
+        );
+        logits
+    }
+
+    /// Single-token forward pass executing through the configured TensorBackend trait.
+    pub fn forward_token(
+        &self,
+        token_id: u32,
+        pos: usize,
+        seq_state: &mut SequenceState,
+    ) -> Vec<f32> {
+        Self::forward_token_impl(&self.weights, &*self.tensor_backend, token_id, pos, seq_state)
+    }
+
+    /// Computes logits projection executing through the configured TensorBackend trait.
+    pub fn compute_logits(&self, hidden_state: &[f32]) -> Vec<f32> {
+        Self::compute_logits_impl(&self.weights, &*self.tensor_backend, hidden_state)
     }
 }
 
@@ -60,11 +241,17 @@ impl AienInferenceBackend for NativeTransformerBackend {
             let mut last_hidden = Vec::new();
             for (idx, &token_id) in req.prompt_tokens.iter().enumerate() {
                 seq.tokens.push(token_id);
-                last_hidden = self.weights.forward_token(token_id, idx, seq);
+                last_hidden = Self::forward_token_impl(
+                    &self.weights,
+                    &*self.tensor_backend,
+                    token_id,
+                    idx,
+                    seq,
+                );
             }
 
-            // Compute real logits on the prompt's last token
-            let logits = self.weights.compute_logits(&last_hidden);
+            // Compute real logits on the prompt's last token via TensorBackend
+            let logits = Self::compute_logits_impl(&self.weights, &*self.tensor_backend, &last_hidden);
             let (sampled_tok, logprob) = if req.sampling_params.temperature <= 0.001 {
                 sample_argmax(&logits)
             } else {
@@ -83,16 +270,29 @@ impl AienInferenceBackend for NativeTransformerBackend {
         // 2. Decode Requests
         for &req_id in &batch.decode_requests {
             if let Some(seq) = self.sequences.get_mut(&req_id) {
-                let pos = seq.tokens.len();
+                // Prefill already pushed the first generated token to seq.tokens,
+                // so the sequence length is currently tokens.len() and the token being
+                // evaluated is at index tokens.len() - 1.
+                let pos = seq.tokens.len().saturating_sub(1);
                 let last_token = *seq.tokens.last().unwrap_or(&1);
 
-                let hidden = self.weights.forward_token(last_token, pos, seq);
-                let logits = self.weights.compute_logits(&hidden);
+                let hidden = Self::forward_token_impl(
+                    &self.weights,
+                    &*self.tensor_backend,
+                    last_token,
+                    pos,
+                    seq,
+                );
+                let logits = Self::compute_logits_impl(&self.weights, &*self.tensor_backend, &hidden);
 
                 let (sampled_tok, logprob) = sample_argmax(&logits);
                 seq.tokens.push(sampled_tok);
 
-                let stop_tokens = [0u32, 1u32, 2u32];
+                let stop_tokens = [
+                    crate::tokenizer::TinyLlamaTokenizer::UNK_TOKEN_ID,
+                    crate::tokenizer::TinyLlamaTokenizer::BOS_TOKEN_ID,
+                    crate::tokenizer::TinyLlamaTokenizer::EOS_TOKEN_ID,
+                ];
                 if stop_tokens.contains(&sampled_tok) {
                     outputs.push(DecodeOutput::Finished {
                         request_id: req_id,
@@ -118,5 +318,56 @@ impl AienInferenceBackend for NativeTransformerBackend {
         };
 
         Ok((outputs, metrics))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_backend_constructors() {
+        let config = ModelConfig {
+            num_layers: 2,
+            num_heads: 4,
+            num_kv_heads: 2,
+            head_dim: 16,
+            hidden_dim: 64,
+            intermediate_dim: 128,
+            vocab_size: 256,
+            ..Default::default()
+        };
+
+        let cpu_backend = NativeTransformerBackend::with_reference_weights(&config);
+        assert_eq!(cpu_backend.tensor_backend.name(), "ReferenceCpuBackend");
+
+        let mojo_backend = NativeTransformerBackend::with_mojo_backend(&config);
+        assert!(mojo_backend.tensor_backend.name().starts_with("MojoGb10Backend"));
+    }
+
+    #[test]
+    fn test_forward_token_and_logits_execution() {
+        let config = ModelConfig {
+            num_layers: 2,
+            num_heads: 4,
+            num_kv_heads: 2,
+            head_dim: 16,
+            hidden_dim: 64,
+            intermediate_dim: 128,
+            vocab_size: 256,
+            ..Default::default()
+        };
+
+        let backend = NativeTransformerBackend::with_reference_weights(&config);
+        let mut seq_state = SequenceState {
+            tokens: vec![1],
+            layers: vec![LayerKvCache::default(); config.num_layers],
+        };
+
+        let hidden = backend.forward_token(1, 0, &mut seq_state);
+        assert_eq!(hidden.len(), config.hidden_dim());
+
+        let logits = backend.compute_logits(&hidden);
+        assert_eq!(logits.len(), config.vocab_size());
     }
 }

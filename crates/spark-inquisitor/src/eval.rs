@@ -8,9 +8,9 @@ impl EvalVerdict {
     pub fn generate_markdown_verdict(&self, author: &str) -> String {
         if self.approved {
             format!(
-                r#"### ⚖️ Sovereign Inquisitor: Contributor Testimony Approved
+                r#"### 🌿 Sovereign Steward: Contributor Testimony Approved
 
-Greetings @{author}. Your testimony has been evaluated against the Sovereign Constitution.
+Greetings @{author}. Your affirmation has been evaluated against the Sovereign Constitution.
 
 - **Alignment Score**: {score:.2}/1.00
 - **Constitutional Status**: Verified and Ratified
@@ -23,9 +23,9 @@ Your affirmation of the Sovereign Contributor Oath and commitment to zero teleme
             )
         } else {
             format!(
-                r#"### ⚖️ Sovereign Inquisitor: Contributor Testimony Alignment Incomplete
+                r#"### 🌿 Sovereign Steward: Contributor Testimony Alignment Incomplete
 
-Greetings @{author}. Your testimony has been evaluated against the Sovereign Constitution.
+Greetings @{author}. Your affirmation has been evaluated against the Sovereign Constitution.
 
 - **Alignment Score**: {score:.2}/1.00
 - **Constitutional Status**: Incomplete
