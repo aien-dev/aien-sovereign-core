@@ -42,7 +42,7 @@ For raw telemetry datasets, reproducible verification scripts, and SVG compariso
 
 ---
 
-## Universal Multi-Platform Portability
+## Multi-Platform Architecture & Portability Matrix
 
 While the primary reference deployment executes on the NVIDIA DGX Spark (Grace Blackwell GB10), AIEN runs across multiple platform targets:
 
@@ -50,7 +50,9 @@ While the primary reference deployment executes on the NVIDIA DGX Spark (Grace B
 - **Linux (x86_64)**: Standard glibc and musl native binaries, AVX-512 SIMD acceleration, and support for commodity desktops and server racks.
 - **AMD ROCm**: Native Rust runtime execution targeting ROCm and HIP compute drivers.
 - **NVIDIA Hardware**: Reference deployment on Grace Blackwell unified memory and standard CUDA accelerators via Modular MAX and ONNX Runtime.
-- **Air-Gapped Sovereign Servers**: Complete offline functionality with hardware TPM 2.0 key vaulting and zero external network calls.
+- **Air-Gapped Sovereign Servers**: Complete offline capability with hardware TPM 2.0 key vaulting and no unsolicited outbound telemetry.
+
+For formal verification statuses across architectures, see [PLATFORM_MATRIX.md](docs/PLATFORM_MATRIX.md).
 
 ---
 
