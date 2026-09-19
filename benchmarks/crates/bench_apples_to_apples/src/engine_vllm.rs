@@ -292,11 +292,8 @@ pub async fn run_vllm_concurrency_sweep(
     let parity_match_rate_pct = if let Ok(tok) =
         aien_inference_abi::tokenizer::TinyLlamaTokenizer::from_file(&config.tokenizer_path)
     {
-        if let Ok(toks) = tok.encode_with_special(&sample_text, false) {
-            verify_token_sequence_match(&toks, &ORACLE_BENCHMARK_128_TOKENS)
-        } else {
-            0.0
-        }
+        let toks = crate::oracle::encode_generated_text_in_context(&tok, &config.prompt, &sample_text);
+        verify_token_sequence_match(&toks, &ORACLE_BENCHMARK_128_TOKENS)
     } else {
         0.0
     };

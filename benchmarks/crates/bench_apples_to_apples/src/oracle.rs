@@ -36,3 +36,23 @@ pub fn verify_token_sequence_match(generated: &[u32], reference: &[u32]) -> f64 
 
     (matches as f64 / compare_len as f64) * 100.0
 }
+
+/// Encodes generated text within prompt context to preserve BPE boundary semantics.
+pub fn encode_generated_text_in_context(
+    tokenizer: &aien_inference_abi::tokenizer::TinyLlamaTokenizer,
+    prompt: &str,
+    generated_text: &str,
+) -> Vec<u32> {
+    if let (Ok(prompt_toks), Ok(full_toks)) = (
+        tokenizer.encode_with_special(prompt, false),
+        tokenizer.encode_with_special(&format!("{}{}", prompt, generated_text), false),
+    ) {
+        if full_toks.len() >= prompt_toks.len() {
+            full_toks[prompt_toks.len()..].to_vec()
+        } else {
+            Vec::new()
+        }
+    } else {
+        Vec::new()
+    }
+}
