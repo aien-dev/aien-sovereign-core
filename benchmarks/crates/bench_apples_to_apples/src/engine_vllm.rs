@@ -85,7 +85,7 @@ impl VllmContainerHandle {
 
         let url = format!("http://127.0.0.1:{}/v1/models", config.vllm_serve_port);
         let start = Instant::now();
-        let timeout = Duration::from_secs(90);
+        let timeout = Duration::from_secs(180);
 
         eprintln!("Waiting for vLLM container readiness on {}...", url);
         while start.elapsed() < timeout {
@@ -98,7 +98,7 @@ impl VllmContainerHandle {
             tokio::time::sleep(Duration::from_secs(2)).await;
         }
 
-        Err("vLLM container failed to become ready within 90 seconds.".to_string())
+        Err("vLLM container failed to become ready within 180 seconds.".to_string())
     }
 }
 

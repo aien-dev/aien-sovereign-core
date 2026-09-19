@@ -53,7 +53,7 @@ impl MaxServerHandle {
 
         let url = format!("http://127.0.0.1:{}/v1/models", config.max_serve_port);
         let start = Instant::now();
-        let timeout = Duration::from_secs(60);
+        let timeout = Duration::from_secs(180);
 
         eprintln!("Waiting for Modular MAX server readiness on {}...", url);
         while start.elapsed() < timeout {
@@ -66,7 +66,7 @@ impl MaxServerHandle {
             tokio::time::sleep(Duration::from_secs(1)).await;
         }
 
-        Err("Modular MAX server failed to become ready within 60 seconds.".to_string())
+        Err("Modular MAX server failed to become ready within 180 seconds.".to_string())
     }
 
     pub fn pid(&self) -> u32 {
