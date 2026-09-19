@@ -62,13 +62,9 @@ def spark_max_forward_prefill(
         if device_id < 0:
             device_id = 0
         var ctx = DeviceContext(Int(device_id))
-        
-        # Execute unified tensor prefill kernel across 28 layers and sync GPU
         ctx.synchronize()
         var elapsed_ns = std.time.perf_counter_ns() - t0
-        # Physical GB10 NVFP4 tensor execution time for Qwen 2.5 7B
-        var tensor_ms = 11.80 + Float64(num_tokens) * 0.0012 + Float64(batch_size) * 0.05
-        return Float32(tensor_ms + Float64(elapsed_ns) / 1_000_000.0)
+        return Float32(Float64(elapsed_ns) / 1_000_000.0)
     except:
         return -2.0
 
@@ -86,13 +82,9 @@ def spark_max_forward_decode(
         if device_id < 0:
             device_id = 0
         var ctx = DeviceContext(Int(device_id))
-        
-        # Autoregressive single-token decode forward pass on Blackwell Tensor Cores
         ctx.synchronize()
         var elapsed_ns = std.time.perf_counter_ns() - t0
-        # Physical GB10 NVFP4 autoregressive decode step: 7.82 ms base
-        var tensor_ms = 7.82 + Float64(batch_size - 1) * 0.035
-        return Float32(tensor_ms + Float64(elapsed_ns) / 1_000_000.0)
+        return Float32(Float64(elapsed_ns) / 1_000_000.0)
     except:
         return -2.0
 
@@ -102,9 +94,46 @@ def spark_max_sample_token(
     seq_id: Int64,
     step: Int32
 ) abi("c") -> Int32:
-    # Deterministic token sampling from output logits
     var h = (seq_id * 6364136223846793005 + Int64(step) * 1442695040888963407)
     var tok = Int32(h % 151643)
     if tok < 0:
         tok = -tok
     return tok + 100
+
+@export("spark_max_kv_pool_register")
+def spark_max_kv_pool_register(
+    session_id: Int32,
+    pool_ptr: Int64,
+    total_bytes: Int64,
+    total_blocks: Int32,
+    block_size: Int32
+) abi("c") -> Int32:
+    if session_id <= 0 or pool_ptr <= 0 or total_bytes <= 0:
+        return -1
+    return 0
+
+@export("spark_max_step_execute")
+def spark_max_step_execute(
+    session_id: Int32,
+    step_id: Int32,
+    prefill_tokens: Int32,
+    decode_tokens: Int32,
+    block_table_ptr: Int64,
+    num_sequences: Int64,
+    out_tokens_ptr: Int64,
+    out_metrics_ptr: Int64,
+    reserved: Int64
+) abi("c") -> Float32:
+    if session_id <= 0:
+        return -1.0
+    try:
+        var t0 = std.time.perf_counter_ns()
+        var device_id = session_id - 1001
+        if device_id < 0:
+            device_id = 0
+        var ctx = DeviceContext(Int(device_id))
+        ctx.synchronize()
+        var elapsed_ns = std.time.perf_counter_ns() - t0
+        return Float32(Float64(elapsed_ns) / 1_000_000.0)
+    except:
+        return -2.0
