@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 authors = ["AIEN <aien.atlas@proton.me>"]
 description = "Native sovereign multi-bot Discord hub for Atlas and Gideon"
-license = "MIT OR Apache-2.0"
+license = "Apache-2.0 WITH LLVM-exception"
 
 [dependencies]
 tokio = { version = "1.37", features = ["full"] }

@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 authors = ["AIEN <aien.atlas@proton.me>"]
 description = "Autonomous Sovereign Inquisitor & Pull Request Alignment Gatekeeper"
-license = "MIT OR Apache-2.0"
+license = "Apache-2.0 WITH LLVM-exception"
 
 [[bin]]
 name = "spark-inquisitor"

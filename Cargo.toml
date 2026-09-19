@@ -19,3 +19,11 @@ members = [
     "crates/spark-mail-rs",
     "crates/spark-harvester",
 ]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0 WITH LLVM-exception"
+authors = ["AIEN <aien.atlas@proton.me>"]
+repository = "https://github.com/aien-dev/aien-sovereign-core"
+

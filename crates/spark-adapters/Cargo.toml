@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 authors = ["AIEN <aien.atlas@proton.me>"]
 description = "Universal third-party model provider adapters and knowledge distillation engine for Sovereign SparkOS"
-license = "MIT OR Apache-2.0"
+license = "Apache-2.0 WITH LLVM-exception"
 
 [dependencies]
 tokio = { version = "1.38", features = ["full"] }
