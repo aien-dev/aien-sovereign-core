@@ -91,7 +91,9 @@ impl MaxServerHandle {
 
 impl Drop for MaxServerHandle {
     fn drop(&mut self) {
-        eprintln!("Terminating Modular MAX server PID {}...", self.child.id());
+        let pid_str = self.child.id().to_string();
+        eprintln!("Terminating Modular MAX server PID {} and its worker subprocesses...", pid_str);
+        let _ = Command::new("pkill").args(["-9", "-P", &pid_str]).output();
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
