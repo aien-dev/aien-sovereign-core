@@ -283,6 +283,7 @@ async fn main() {
         .route("/api/models/swap", post(handle_swap_model))
         .route("/api/operator", get(handle_get_operator).post(handle_post_operator))
         .route("/api/engine/status", get(handle_engine_status))
+        .route("/api/status", get(handle_engine_status))
         .route("/api/imprints/install", post(handle_install_en2_imprint))
         .route("/api/mail/status", get(handle_mail_status))
         .route("/api/mail/inbox", get(handle_mail_inbox))
@@ -377,6 +378,7 @@ async fn handle_walkthrough() -> Json<Value> {
 #[derive(Deserialize)]
 struct ActionPayload {
     action: String,
+    #[allow(dead_code)]
     target: Option<String>,
 }
 
@@ -455,6 +457,7 @@ async fn handle_get_goals() -> Json<Value> {
 #[derive(Deserialize)]
 struct GoalCreatePayload {
     title: String,
+    #[allow(dead_code)]
     description: Option<String>,
     milestones: Option<Vec<String>>,
 }
@@ -1484,7 +1487,7 @@ mod tests {
     #[tokio::test]
     async fn test_cockpit_operator_profile_sanitization() {
         let payload = OperatorUpdatePayload {
-            name: Some("Drake Stapleton 
+            name: Some("Drake Stapleton
 ".to_string()),
             email: Some("drake@aien.org".to_string()),
             handle: Some("drake_ops-1".to_string()),
@@ -1497,5 +1500,128 @@ mod tests {
         assert_eq!(op.get("name").unwrap().as_str().unwrap(), "Drake Stapleton");
         assert_eq!(op.get("email").unwrap().as_str().unwrap(), "drake@aien.org");
         assert_eq!(op.get("handle").unwrap().as_str().unwrap(), "drake_ops-1");
+    }
+
+    fn create_offline_test_state() -> AppState {
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_millis(50))
+            .build()
+            .unwrap();
+        let hive_store = Arc::new(spark_hive::CombStore::open_in_memory().unwrap());
+        AppState {
+            client,
+            start_time: Instant::now(),
+            redactor_patterns: Arc::new(vec![]),
+            hive_store,
+        }
+    }
+
+    #[tokio::test]
+    async fn test_cockpit_pulse_endpoint_schema_and_offline_backends() {
+        let state = create_test_state();
+        let Json(pulse) = handle_pulse(State(state)).await;
+
+        assert_eq!(pulse["status"], "ok");
+        assert_eq!(pulse["heartbeat_bpm"], 72);
+        assert!((pulse["coherence"].as_f64().unwrap() - 0.98).abs() < 1e-4);
+        assert!(pulse["uptime_seconds"].as_u64().is_some());
+
+        let model_seat = pulse["model_seat"].as_str().unwrap();
+        assert!(model_seat == "ONLINE (Port 18006)" || model_seat == "OFFLINE");
+
+        let conduit_seat = pulse["conduit_seat"].as_str().unwrap();
+        assert!(conduit_seat == "ONLINE (Port 6167)" || conduit_seat == "OFFLINE");
+
+        assert!(pulse["hive_count"].as_u64().is_some());
+        assert!(pulse["timestamp"].as_str().is_some());
+    }
+
+    #[tokio::test]
+    async fn test_cockpit_status_endpoint_schema_and_offline_backend() {
+        let state = create_test_state();
+        let Json(status) = handle_engine_status(State(state)).await;
+
+        let status_str = status["status"].as_str().unwrap();
+        assert!(status_str == "online" || status_str == "offline");
+        assert!(status["latency_ms"].as_u64().is_some());
+        assert_eq!(status["active_engine"], "MAX Native Engine");
+        assert_eq!(status["active_model"], "nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16");
+        assert_eq!(status["device"], "Grace Blackwell GB10 (Dual GPU)");
+        assert_eq!(status["port"], 18006);
+        assert_eq!(status["cost_per_million"], "$0.00");
+    }
+
+    #[tokio::test]
+    async fn test_cockpit_cortex_search_endpoint_unreachable_fallback() {
+        let state = create_offline_test_state();
+        let query = CortexSearchQuery {
+            q: Some("test_unreachable_cortex".to_string()),
+            limit: Some(3),
+        };
+        let Json(res) = handle_cortex_search(State(state), Query(query)).await;
+        assert!(res.get("results").is_some());
+        let results = res.get("results").unwrap().as_array().unwrap();
+        assert_eq!(results.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_cockpit_cortex_write_endpoint_error_handling() {
+        let state = create_offline_test_state();
+        let payload = CortexWritePayload {
+            name: "test_cockpit_write".to_string(),
+            content: "Telemetry payload".to_string(),
+            kind: Some("telemetry".to_string()),
+        };
+
+        let res = handle_cortex_write(State(state), Json(payload)).await;
+        // Verify proper error response or graceful handling
+        if let Err((status, _)) = res {
+            assert!(status == StatusCode::BAD_GATEWAY || status == StatusCode::INTERNAL_SERVER_ERROR);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_cockpit_subagents_endpoint_response_structure() {
+        let Json(res) = handle_get_subagents().await;
+        assert!(res.get("subagents").is_some());
+        assert!(res.get("count").is_some());
+        let subagents = res.get("subagents").unwrap().as_array().unwrap();
+        let count = res.get("count").unwrap().as_u64().unwrap();
+        assert_eq!(subagents.len() as u64, count);
+    }
+
+    #[tokio::test]
+    async fn test_cockpit_submillisecond_latency_assertions() {
+        let state = create_test_state();
+
+        // 1. Subagents local file/memory check latency assertion (< 1ms)
+        let t0 = Instant::now();
+        let _ = handle_get_subagents().await;
+        let elapsed_subagents = t0.elapsed();
+        assert!(
+            elapsed_subagents < Duration::from_millis(1),
+            "Subagents latency must be sub-millisecond: {:?}",
+            elapsed_subagents
+        );
+
+        // 2. Hive bounds retrieval latency assertion (< 1ms)
+        let t1 = Instant::now();
+        let _ = handle_get_hive_bounds(State(state.clone())).await;
+        let elapsed_bounds = t1.elapsed();
+        assert!(
+            elapsed_bounds < Duration::from_millis(1),
+            "Hive bounds latency must be sub-millisecond: {:?}",
+            elapsed_bounds
+        );
+
+        // 3. Hive cells in-memory store latency assertion (< 1ms)
+        let t2 = Instant::now();
+        let _ = handle_get_hive_cells(State(state)).await;
+        let elapsed_cells = t2.elapsed();
+        assert!(
+            elapsed_cells < Duration::from_millis(1),
+            "Hive cells latency must be sub-millisecond: {:?}",
+            elapsed_cells
+        );
     }
 }

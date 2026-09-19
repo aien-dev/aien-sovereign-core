@@ -174,3 +174,143 @@ pub async fn health_handler() -> Json<serde_json::Value> {
         "runtime": "native-arm64-rust"
     }))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn create_test_state() -> Arc<AppState> {
+        let db = Arc::new(Database::open_in_memory().expect("in memory db"));
+        Arc::new(AppState {
+            db,
+            http_client: Client::new(),
+            encoder_url: "http://127.0.0.1:18081".to_string(),
+        })
+    }
+
+    #[tokio::test]
+    async fn test_get_handler_missing_parameter() {
+        let state = create_test_state();
+        let query = GetParams {
+            id: None,
+            name: None,
+            space: None,
+        };
+        let err = get_handler(State(state), Query(query)).await.unwrap_err();
+        assert_eq!(err.0, StatusCode::BAD_REQUEST);
+        assert_eq!(err.1 .0["error"], "Missing id or name parameter");
+    }
+
+    #[tokio::test]
+    async fn test_get_handler_not_found() {
+        let state = create_test_state();
+        let query = GetParams {
+            id: Some("non_existent_uuid".to_string()),
+            name: None,
+            space: Some("atlas-memory".to_string()),
+        };
+        let err = get_handler(State(state), Query(query)).await.unwrap_err();
+        assert_eq!(err.0, StatusCode::NOT_FOUND);
+        assert_eq!(err.1 .0["error"], "Entity not found");
+    }
+
+    #[tokio::test]
+    async fn test_get_handler_success_and_unknown_space() {
+        let state = create_test_state();
+        let input = EntityWriteInput {
+            id: None,
+            space: "atlas-memory".to_string(),
+            entity_type: "discovery".to_string(),
+            canonical_name: "test_entity_get".to_string(),
+            content: "Payload content".to_string(),
+            aliases: vec![],
+            metadata: json!({"key": "val"}),
+            confidence: 1.0,
+            valid_from: None,
+            valid_to: None,
+            external_id: None,
+        };
+        state.db.upsert_entity(&input, None).unwrap();
+
+        // 1. Success fetch
+        let query_ok = GetParams {
+            id: None,
+            name: Some("test_entity_get".to_string()),
+            space: Some("atlas-memory".to_string()),
+        };
+        let resp = get_handler(State(state.clone()), Query(query_ok)).await;
+        assert!(resp.is_ok());
+
+        // 2. Unknown space fetch returns 404
+        let query_unknown_space = GetParams {
+            id: None,
+            name: Some("test_entity_get".to_string()),
+            space: Some("non_existent_space".to_string()),
+        };
+        let err_unknown = get_handler(State(state), Query(query_unknown_space)).await.unwrap_err();
+        assert_eq!(err_unknown.0, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn test_search_unknown_space_returns_empty() {
+        let state = create_test_state();
+        let params = SearchParams {
+            q: Some("anything".to_string()),
+            query: None,
+            space: Some("completely_unknown_space_slug".to_string()),
+            limit: Some(10),
+            include_retracted: Some(false),
+        };
+        let Json(res) = search_get_handler(State(state), Query(params)).await.unwrap();
+        assert_eq!(res.results.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_write_entity_and_retract_lifecycle() {
+        let state = create_test_state();
+
+        // 1. Write entity
+        let write_payload = WritePayload::Entity {
+            value: EntityWriteInput {
+                id: None,
+                space: "atlas-memory".to_string(),
+                entity_type: "lesson".to_string(),
+                canonical_name: "lifecycle_test".to_string(),
+                content: "Lifecycle verification".to_string(),
+                aliases: vec![],
+                metadata: json!({}),
+                confidence: 1.0,
+                valid_from: None,
+                valid_to: None,
+                external_id: None,
+            },
+        };
+        let write_res = write_handler(State(state.clone()), Json(write_payload)).await;
+        assert!(write_res.is_ok());
+
+        let entity = state.db.get_entity("lifecycle_test", Some("atlas-memory")).unwrap().unwrap();
+        assert_eq!(entity.canonical_name, "lifecycle_test");
+
+        // 2. Retract entity
+        let retract_payload = WritePayload::Retract {
+            value: RetractInput {
+                target_type: "entity".to_string(),
+                target_id: entity.id.clone(),
+                reason: Some("Obsolescence".to_string()),
+            },
+        };
+        let retract_res = write_handler(State(state.clone()), Json(retract_payload)).await;
+        assert!(retract_res.is_ok());
+
+        let after = state.db.get_entity("lifecycle_test", Some("atlas-memory")).unwrap();
+        assert!(after.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_health_handler_structure() {
+        let Json(health) = health_handler().await;
+        assert_eq!(health["status"], "ok");
+        assert_eq!(health["service"], "cortex-rs");
+        assert_eq!(health["space"], "atlas-memory");
+    }
+}

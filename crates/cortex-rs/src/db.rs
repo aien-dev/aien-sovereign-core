@@ -108,6 +108,7 @@ impl Database {
         if let Some(row) = rows.next()? {
             return row.get(0);
         }
+
         drop(rows);
         drop(stmt);
 
@@ -337,22 +338,27 @@ impl Database {
             return Ok(results);
         }
 
-        // FTS search + like search
+        // FTS search with support for exact, prefix (*), and boolean operators (AND, OR, NOT)
         let clean_q = query_trimmed.replace('"', "");
-        let fts_query = format!("\"{}\"", clean_q);
-        let stmt = conn.prepare(
-            "SELECT e.id, e.space_id, e.space_slug, e.entity_type, e.canonical_name, e.content, e.aliases_json, e.metadata_json, e.confidence, e.revision, e.retracted, e.valid_from, e.valid_to, e.created_at,
-                    COALESCE(bm25(entities_fts), 5.0) as bm25_rank
-             FROM entities e
-             JOIN entities_fts f ON f.id = e.id
-             WHERE entities_fts MATCH ?1 AND e.space_slug = ?2 AND e.retracted = 0
-             ORDER BY bm25_rank ASC
-             LIMIT ?3"
-        );
+        let has_fts_ops = clean_q.contains(" AND ")
+            || clean_q.contains(" OR ")
+            || clean_q.contains(" NOT ")
+            || clean_q.contains('*');
 
         let mut results = Vec::new();
-        if let Ok(mut s) = stmt {
-            let rows = s.query_map(params![fts_query, target_space, limit], |row| {
+
+        let run_fts = |query_str: &str| -> Option<Vec<SearchResult>> {
+            let mut stmt = conn.prepare(
+                "SELECT e.id, e.space_id, e.space_slug, e.entity_type, e.canonical_name, e.content, e.aliases_json, e.metadata_json, e.confidence, e.revision, e.retracted, e.valid_from, e.valid_to, e.created_at,
+                        COALESCE(bm25(entities_fts), 5.0) as bm25_rank
+                 FROM entities e
+                 JOIN entities_fts f ON f.id = e.id
+                 WHERE entities_fts MATCH ?1 AND e.space_slug = ?2 AND e.retracted = 0
+                 ORDER BY bm25_rank ASC
+                 LIMIT ?3"
+            ).ok()?;
+
+            let rows = stmt.query_map(params![query_str, target_space, limit], |row| {
                 let aliases_str: String = row.get(6)?;
                 let meta_str: String = row.get(7)?;
                 let bm25_rank: f64 = row.get(14)?;
@@ -379,13 +385,29 @@ impl Database {
                     semantic_score: 0.0,
                     score: lexical_score,
                 })
-            })?;
-            for r in rows {
-                results.push(r?);
+            }).ok()?;
+
+            let mut out = Vec::new();
+            for r in rows.flatten() {
+                out.push(r);
+            }
+            Some(out)
+        };
+
+        if has_fts_ops {
+            if let Some(r) = run_fts(&clean_q) {
+                results = r;
             }
         }
 
-        // Fallback to substring match if FTS didn't return enough
+        if results.is_empty() {
+            let fts_query = format!("\"{}\"", clean_q);
+            if let Some(r) = run_fts(&fts_query) {
+                results = r;
+            }
+        }
+
+        // Fallback to substring match if FTS did not return enough
         if results.len() < limit {
             let pattern = format!("%{}%", query_trimmed);
             let mut sub_stmt = conn.prepare(
@@ -596,6 +618,8 @@ impl Database {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+    use std::thread;
 
     #[test]
     fn test_in_memory_db_crud() {
@@ -632,5 +656,351 @@ mod tests {
         let recall_results = db.recall_entities("Rust", Some(&dummy_emb), Some("atlas-memory"), 5).expect("recall");
         assert!(!recall_results.is_empty());
         assert!(recall_results[0].final_score > 0.5);
+    }
+
+    #[test]
+    fn test_sqlite_wal_persistence_under_concurrency() {
+        let temp_dir = std::env::temp_dir().join(format!("cortex_wal_test_{}", Uuid::new_v4()));
+        let _ = std::fs::create_dir_all(&temp_dir);
+        let db_path = temp_dir.join("cortex.db");
+
+        // Open database in WAL mode
+        let db = Arc::new(Database::open(&db_path).expect("open wal db"));
+
+        // Verify WAL mode is active
+        {
+            let conn = db.conn.lock().unwrap();
+            let mode: String = conn.query_row("PRAGMA journal_mode", [], |r| r.get(0)).unwrap();
+            assert_eq!(mode.to_lowercase(), "wal");
+        }
+
+        let mut handles = Vec::new();
+
+        // Spawn 4 concurrent writer threads
+        for t in 0..4 {
+            let db_clone = Arc::clone(&db);
+            handles.push(thread::spawn(move || {
+                for i in 0..10 {
+                    let input = EntityWriteInput {
+                        id: None,
+                        space: "atlas-memory".to_string(),
+                        entity_type: "concurrent_write".to_string(),
+                        canonical_name: format!("entity_t{}_i{}", t, i),
+                        content: format!("Content from thread {} iteration {}", t, i),
+                        aliases: vec![format!("alias_t{}_i{}", t, i)],
+                        metadata: serde_json::json!({"thread": t, "iter": i}),
+                        confidence: 0.95,
+                        valid_from: None,
+                        valid_to: None,
+                        external_id: None,
+                    };
+                    let receipt = db_clone.upsert_entity(&input, None).expect("concurrent entity upsert");
+                    assert_eq!(receipt.operation, "entity.upsert");
+
+                    // Also write a claim
+                    let claim_input = ClaimWriteInput {
+                        id: None,
+                        space: "atlas-memory".to_string(),
+                        subject_entity_id: receipt.target_id.clone(),
+                        predicate: "authored_by".to_string(),
+                        object_entity_id: None,
+                        literal_value: Some(serde_json::json!(format!("worker_thread_{}", t))),
+                        confidence: 1.0,
+                        metadata: serde_json::json!({}),
+                    };
+                    let claim_receipt = db_clone.upsert_claim(&claim_input).expect("concurrent claim upsert");
+                    assert_eq!(claim_receipt.operation, "claim.upsert");
+                }
+            }));
+        }
+
+        // Spawn 4 concurrent reader threads
+        for _ in 0..4 {
+            let db_clone = Arc::clone(&db);
+            handles.push(thread::spawn(move || {
+                for _ in 0..15 {
+                    let _ = db_clone.search_entities("Content", Some("atlas-memory"), 10);
+                    let _ = db_clone.recall_entities("thread", None, Some("atlas-memory"), 5);
+                    let _ = db_clone.get_entity("entity_t0_i0", Some("atlas-memory"));
+                    thread::sleep(std::time::Duration::from_millis(2));
+                }
+            }));
+        }
+
+        // Wait for all threads to join
+        for h in handles {
+            h.join().expect("thread join");
+        }
+
+        // Close db by dropping Arc
+        drop(db);
+
+        // Re-open from disk to verify cold-start WAL recovery and persistence
+        let reopened = Database::open(&db_path).expect("reopen wal db");
+        for t in 0..4 {
+            for i in 0..10 {
+                let name = format!("entity_t{}_i{}", t, i);
+                let ent = reopened.get_entity(&name, Some("atlas-memory")).expect("get persisted entity");
+                assert!(ent.is_some(), "Entity {} must persist across restarts", name);
+                let e = ent.unwrap();
+                assert_eq!(e.canonical_name, name);
+                assert_eq!(e.content, format!("Content from thread {} iteration {}", t, i));
+            }
+        }
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_fts5_exact_prefix_boolean_and_ranking() {
+        let db = Database::open_in_memory().expect("open in memory db");
+
+        let items = vec![
+            ("NVFP4_Loader", "High throughput native NVFP4 checkpoint loader for vLLM and MAX", "discovery"),
+            ("Qwen3_Parser", "Llama cpp tokenizer and grammar parser for Qwen3 models", "learned_procedure"),
+            ("TPM_Vault", "Hardware TPM bound key vault with zero plaintext secrets on disk", "lesson"),
+            ("Sovereign_Covenant", "Frontier AI Anti Enclosure mandate and sovereign defense network", "discovery"),
+            ("Memory_Optimizer", "Memory architecture optimization for memory engines with memory reuse", "lesson"),
+        ];
+
+        for (name, content, etype) in items {
+            let input = EntityWriteInput {
+                id: None,
+                space: "atlas-memory".to_string(),
+                entity_type: etype.to_string(),
+                canonical_name: name.to_string(),
+                content: content.to_string(),
+                aliases: vec![],
+                metadata: serde_json::json!({}),
+                confidence: 1.0,
+                valid_from: None,
+                valid_to: None,
+                external_id: None,
+            };
+            db.upsert_entity(&input, None).expect("insert entity");
+        }
+
+        // 1. Exact term matching
+        let exact_res = db.search_entities("NVFP4", Some("atlas-memory"), 10).expect("search exact");
+        assert_eq!(exact_res.len(), 1);
+        assert_eq!(exact_res[0].entity.canonical_name, "NVFP4_Loader");
+
+        let exact_tpm = db.search_entities("TPM", Some("atlas-memory"), 10).expect("search exact TPM");
+        assert_eq!(exact_tpm.len(), 1);
+        assert_eq!(exact_tpm[0].entity.canonical_name, "TPM_Vault");
+
+        // 2. Prefix queries
+        let prefix_res = db.search_entities("NVF*", Some("atlas-memory"), 10).expect("search prefix");
+        assert_eq!(prefix_res.len(), 1);
+        assert_eq!(prefix_res[0].entity.canonical_name, "NVFP4_Loader");
+
+        let prefix_hard = db.search_entities("hardw*", Some("atlas-memory"), 10).expect("search prefix hardw*");
+        assert_eq!(prefix_hard.len(), 1);
+        assert_eq!(prefix_hard[0].entity.canonical_name, "TPM_Vault");
+
+        let prefix_token = db.search_entities("token*", Some("atlas-memory"), 10).expect("search prefix token*");
+        assert_eq!(prefix_token.len(), 1);
+        assert_eq!(prefix_token[0].entity.canonical_name, "Qwen3_Parser");
+
+        // 3. Boolean AND
+        let and_res = db.search_entities("NVFP4 AND vLLM", Some("atlas-memory"), 10).expect("search AND");
+        assert_eq!(and_res.len(), 1);
+        assert_eq!(and_res[0].entity.canonical_name, "NVFP4_Loader");
+
+        let and_mismatch = db.search_entities("NVFP4 AND non_existent_token", Some("atlas-memory"), 10).expect("search AND mismatch");
+        assert_eq!(and_mismatch.len(), 0);
+
+        // 4. Boolean OR
+        let or_res = db.search_entities("Qwen3 OR TPM", Some("atlas-memory"), 10).expect("search OR");
+        assert_eq!(or_res.len(), 2);
+        let names: Vec<String> = or_res.into_iter().map(|r| r.entity.canonical_name).collect();
+        assert!(names.contains(&"Qwen3_Parser".to_string()));
+        assert!(names.contains(&"TPM_Vault".to_string()));
+
+        // 5. Boolean NOT
+        let not_res = db.search_entities("native NOT tokenizer", Some("atlas-memory"), 10).expect("search NOT");
+        assert_eq!(not_res.len(), 1);
+        assert_eq!(not_res[0].entity.canonical_name, "NVFP4_Loader");
+
+        // 6. Ranking test (BM25 term frequency)
+        let rank_res = db.search_entities("memory", Some("atlas-memory"), 10).expect("search ranking");
+        assert!(!rank_res.is_empty());
+        assert_eq!(rank_res[0].entity.canonical_name, "Memory_Optimizer");
+    }
+
+    #[test]
+    fn test_vector_similarity_and_nearest_neighbor_ranking() {
+        let db = Database::open_in_memory().expect("open in memory db");
+
+        // Create 3 vectors with 768 dimensions
+        let mut emb_a = vec![0.0f32; 768];
+        emb_a[0] = 1.0; // Direction X
+
+        let mut emb_b = vec![0.0f32; 768];
+        emb_b[0] = 0.7071; // Direction between X and Y
+        emb_b[1] = 0.7071;
+
+        let mut emb_c = vec![0.0f32; 768];
+        emb_c[1] = 1.0; // Direction Y
+
+        let entities = vec![
+            ("Vector_Alpha", "Entity aligned with primary axis X", emb_a),
+            ("Vector_Beta", "Entity aligned midway between axes", emb_b),
+            ("Vector_Gamma", "Entity aligned with secondary axis Y", emb_c),
+        ];
+
+        for (name, content, emb) in entities {
+            let input = EntityWriteInput {
+                id: None,
+                space: "atlas-memory".to_string(),
+                entity_type: "vector_item".to_string(),
+                canonical_name: name.to_string(),
+                content: content.to_string(),
+                aliases: vec![],
+                metadata: serde_json::json!({}),
+                confidence: 1.0,
+                valid_from: None,
+                valid_to: None,
+                external_id: None,
+            };
+            db.upsert_entity(&input, Some(&emb)).expect("insert vector entity");
+        }
+
+        // Query vector strongly aligned with X: [0.99, 0.05, 0, ...]
+        let mut query_emb = vec![0.0f32; 768];
+        query_emb[0] = 0.99;
+        query_emb[1] = 0.05;
+
+        let recall_res = db.recall_entities("Entity", Some(&query_emb), Some("atlas-memory"), 3).expect("recall");
+        assert_eq!(recall_res.len(), 3);
+
+        // Verify nearest neighbor ordering: Alpha first, Beta second, Gamma third
+        assert_eq!(recall_res[0].entity.canonical_name, "Vector_Alpha");
+        assert_eq!(recall_res[1].entity.canonical_name, "Vector_Beta");
+        assert_eq!(recall_res[2].entity.canonical_name, "Vector_Gamma");
+
+        assert!(recall_res[0].final_score > recall_res[1].final_score);
+        assert!(recall_res[1].final_score > recall_res[2].final_score);
+
+        // Empty embedding fallback to lexical only
+        let empty_recall = db.recall_entities("secondary", None, Some("atlas-memory"), 3).expect("empty emb recall");
+        assert!(!empty_recall.is_empty());
+        assert_eq!(empty_recall[0].entity.canonical_name, "Vector_Gamma");
+    }
+
+    #[test]
+    fn test_schema_integrity_metadata_indexing_and_deduplication() {
+        let db = Database::open_in_memory().expect("open in memory db");
+
+        // 1. Entity deduplication test
+        let input_v1 = EntityWriteInput {
+            id: None,
+            space: "atlas-memory".to_string(),
+            entity_type: "discovery".to_string(),
+            canonical_name: "Atlas_Vault_Spec".to_string(),
+            content: "Initial specification v1".to_string(),
+            aliases: vec!["vault_v1".to_string()],
+            metadata: serde_json::json!({
+                "subsystem": "security",
+                "hardware": {"tpm": true, "vendor": "stmicroelectronics"}
+            }),
+            confidence: 0.9,
+            valid_from: None,
+            valid_to: None,
+            external_id: None,
+        };
+
+        let receipt1 = db.upsert_entity(&input_v1, None).expect("first upsert");
+        let initial_id = receipt1.target_id.clone();
+
+        // Re-upsert with same canonical_name in same space
+        let input_v2 = EntityWriteInput {
+            id: None,
+            space: "atlas-memory".to_string(),
+            entity_type: "learned_procedure".to_string(),
+            canonical_name: "Atlas_Vault_Spec".to_string(),
+            content: "Updated specification v2 with hardware sealing".to_string(),
+            aliases: vec!["vault_v1".to_string(), "vault_v2".to_string()],
+            metadata: serde_json::json!({
+                "subsystem": "security",
+                "hardware": {"tpm": true, "vendor": "stmicroelectronics", "pcr_sealing": [0, 2, 7]}
+            }),
+            confidence: 1.0,
+            valid_from: None,
+            valid_to: None,
+            external_id: None,
+        };
+
+        let receipt2 = db.upsert_entity(&input_v2, None).expect("second upsert");
+
+        // Verify deduplication: ID remains unchanged, revision incremented to 2
+        assert_eq!(receipt2.target_id, initial_id);
+
+        let fetched = db.get_entity("Atlas_Vault_Spec", Some("atlas-memory")).expect("get entity").unwrap();
+        assert_eq!(fetched.id, initial_id);
+        assert_eq!(fetched.revision, 2);
+        assert_eq!(fetched.entity_type, "learned_procedure");
+        assert_eq!(fetched.content, "Updated specification v2 with hardware sealing");
+        assert_eq!(fetched.aliases.len(), 2);
+
+        // Verify nested metadata integrity
+        assert_eq!(fetched.metadata["subsystem"], "security");
+        assert_eq!(fetched.metadata["hardware"]["tpm"], true);
+        assert_eq!(fetched.metadata["hardware"]["pcr_sealing"].as_array().unwrap().len(), 3);
+
+        // Verify exactly 1 entity row in space
+        {
+            let conn = db.conn.lock().unwrap();
+            let count: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM entities WHERE space_slug = 'atlas-memory' AND canonical_name = 'Atlas_Vault_Spec'",
+                [],
+                |r| r.get(0),
+            ).unwrap();
+            assert_eq!(count, 1);
+        }
+
+        // 2. Claim schema and foreign key traversal
+        let obj_input = EntityWriteInput {
+            id: None,
+            space: "atlas-memory".to_string(),
+            entity_type: "component".to_string(),
+            canonical_name: "TPM_Chip".to_string(),
+            content: "Discrete TPM 2.0 module".to_string(),
+            aliases: vec![],
+            metadata: serde_json::json!({}),
+            confidence: 1.0,
+            valid_from: None,
+            valid_to: None,
+            external_id: None,
+        };
+        let obj_receipt = db.upsert_entity(&obj_input, None).expect("upsert object entity");
+
+        let claim_input = ClaimWriteInput {
+            id: None,
+            space: "atlas-memory".to_string(),
+            subject_entity_id: initial_id.clone(),
+            predicate: "binds_to".to_string(),
+            object_entity_id: Some(obj_receipt.target_id.clone()),
+            literal_value: None,
+            confidence: 1.0,
+            metadata: serde_json::json!({"interface": "SPI"}),
+        };
+        db.upsert_claim(&claim_input).expect("upsert claim");
+
+        let claims = db.traverse_claims(&initial_id, Some("atlas-memory")).expect("traverse claims");
+        assert_eq!(claims.len(), 1);
+        assert_eq!(claims[0].predicate, "binds_to");
+        assert_eq!(claims[0].object_entity_id, Some(obj_receipt.target_id));
+        assert_eq!(claims[0].metadata["interface"], "SPI");
+
+        // 3. Retraction verification
+        let retract_receipt = db.retract_target("entity", &initial_id).expect("retract");
+        assert_eq!(retract_receipt.operation, "entity.retract");
+
+        let after_retract = db.get_entity("Atlas_Vault_Spec", Some("atlas-memory")).expect("get retracted");
+        assert!(after_retract.is_none());
+
+        let search_retract = db.search_entities("Atlas_Vault_Spec", Some("atlas-memory"), 10).expect("search retracted");
+        assert!(search_retract.is_empty());
     }
 }

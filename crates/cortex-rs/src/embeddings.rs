@@ -41,6 +41,10 @@ pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
     }
 }
 
+pub fn cosine_distance(a: &[f32], b: &[f32]) -> f32 {
+    1.0 - cosine_similarity(a, b)
+}
+
 pub async fn fetch_embedding(client: &Client, text: &str, encoder_url: &str) -> Result<Vec<f32>, String> {
     let payload = json!({
         "text": text,
@@ -104,5 +108,30 @@ mod tests {
 
         let c = vec![0.0f32, 1.0, 0.0];
         assert!((cosine_similarity(&a, &c) - 0.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_cosine_distance_and_empty_handling() {
+        let a = vec![1.0f32, 0.0, 0.0];
+        let b = vec![1.0f32, 0.0, 0.0];
+        assert!((cosine_distance(&a, &b) - 0.0).abs() < 1e-5);
+
+        let orthogonal = vec![0.0f32, 1.0, 0.0];
+        assert!((cosine_distance(&a, &orthogonal) - 1.0).abs() < 1e-5);
+
+        let opposite = vec![-1.0f32, 0.0, 0.0];
+        assert!((cosine_distance(&a, &opposite) - 2.0).abs() < 1e-5);
+
+        let empty: Vec<f32> = vec![];
+        assert_eq!(cosine_similarity(&empty, &empty), 0.0);
+        assert_eq!(cosine_distance(&empty, &empty), 1.0);
+
+        let mismatched = vec![1.0f32, 0.0];
+        assert_eq!(cosine_similarity(&a, &mismatched), 0.0);
+        assert_eq!(cosine_distance(&a, &mismatched), 1.0);
+
+        let zeros = vec![0.0f32, 0.0, 0.0];
+        assert_eq!(cosine_similarity(&zeros, &zeros), 0.0);
+        assert_eq!(cosine_distance(&zeros, &zeros), 1.0);
     }
 }
