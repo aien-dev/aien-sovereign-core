@@ -1,3 +1,4 @@
+use std::io::Write;
 use colored::*;
 use serde_json::{json, Value};
 use std::fs;
@@ -24,7 +25,9 @@ pub fn dispatch_tool(name: &str, args: &Value) -> Value {
         "write_to_file" => args.get("path").and_then(Value::as_str).unwrap_or(""),
         "replace_file_content" => args.get("path").and_then(Value::as_str).unwrap_or(""),
         "list_dir" => args.get("path").and_then(Value::as_str).unwrap_or(""),
-        "grep_search" => args.get("query").and_then(Value::as_str).unwrap_or(""),
+        "grep_search" | "search_directory" => args.get("query").or_else(|| args.get("Query")).and_then(Value::as_str).unwrap_or(""),
+        "find_by_name" | "find_file" => args.get("pattern").or_else(|| args.get("name")).or_else(|| args.get("Pattern")).and_then(Value::as_str).unwrap_or(""),
+        "ask_question" => args.get("question").and_then(Value::as_str).unwrap_or(""),
         "create_dir" => args.get("path").and_then(Value::as_str).unwrap_or(""),
         "crumb" => args
             .get("action")
@@ -93,8 +96,8 @@ pub fn dispatch_tool(name: &str, args: &Value) -> Value {
 
     let (res, success) = match name {
         "run_command" => {
-            let cmd = args.get("command").and_then(Value::as_str).unwrap_or("");
-            let cwd = args.get("cwd").and_then(Value::as_str).unwrap_or(".");
+            let cmd = args.get("command").or_else(|| args.get("CommandLine")).and_then(Value::as_str).unwrap_or("");
+            let cwd = args.get("cwd").or_else(|| args.get("Cwd")).and_then(Value::as_str).unwrap_or(".");
 
             if is_high_risk_command(cmd) {
                 if !print_safety_prompt(cmd) {
@@ -110,16 +113,17 @@ pub fn dispatch_tool(name: &str, args: &Value) -> Value {
             }
         }
         "view_file" => {
-            let path = args.get("path").and_then(Value::as_str).unwrap_or("");
-            let start_line = args.get("start_line").and_then(Value::as_u64).unwrap_or(1) as usize;
-            let end_line = args.get("end_line").and_then(Value::as_u64).unwrap_or(500) as usize;
+            let path = args.get("path").or_else(|| args.get("AbsolutePath")).and_then(Value::as_str).unwrap_or("");
+            let start_line = args.get("start_line").or_else(|| args.get("StartLine")).and_then(Value::as_u64).unwrap_or(1) as usize;
+            let end_line = args.get("end_line").or_else(|| args.get("EndLine")).and_then(Value::as_u64).unwrap_or(500) as usize;
             exec_view_file(path, start_line, end_line)
         }
-        "write_to_file" => {
-            let path = args.get("path").and_then(Value::as_str).unwrap_or("");
-            let content = args.get("content").and_then(Value::as_str).unwrap_or("");
+        "write_to_file" | "create_file" => {
+            let path = args.get("path").or_else(|| args.get("target_file")).or_else(|| args.get("TargetFile")).and_then(Value::as_str).unwrap_or("");
+            let content = args.get("content").or_else(|| args.get("CodeContent")).and_then(Value::as_str).unwrap_or("");
             let overwrite = args
                 .get("overwrite")
+                .or_else(|| args.get("Overwrite"))
                 .and_then(Value::as_bool)
                 .unwrap_or(false);
             let intent = args
@@ -154,11 +158,13 @@ pub fn dispatch_tool(name: &str, args: &Value) -> Value {
                 exec_write_file(path, content, overwrite, intent, vector)
             }
         }
-        "replace_file_content" => {
-            let path = args.get("path").and_then(Value::as_str).unwrap_or("");
-            let target = args.get("target").and_then(Value::as_str).unwrap_or("");
+        "replace_file_content" | "edit_file" => {
+            let path = args.get("path").or_else(|| args.get("target_file")).or_else(|| args.get("TargetFile")).and_then(Value::as_str).unwrap_or("");
+            let target = args.get("target").or_else(|| args.get("target_content")).or_else(|| args.get("TargetContent")).and_then(Value::as_str).unwrap_or("");
             let replacement = args
                 .get("replacement")
+                .or_else(|| args.get("replacement_content"))
+                .or_else(|| args.get("ReplacementContent"))
                 .and_then(Value::as_str)
                 .unwrap_or("");
             let intent = args
@@ -184,14 +190,24 @@ pub fn dispatch_tool(name: &str, args: &Value) -> Value {
                 exec_replace_file(path, target, replacement, intent, vector)
             }
         }
-        "list_dir" => {
-            let path = args.get("path").and_then(Value::as_str).unwrap_or(".");
+        "list_dir" | "list_directory" => {
+            let path = args.get("path").or_else(|| args.get("directory_path")).or_else(|| args.get("DirectoryPath")).and_then(Value::as_str).unwrap_or(".");
             exec_list_dir(path)
         }
-        "grep_search" => {
-            let query = args.get("query").and_then(Value::as_str).unwrap_or("");
-            let path = args.get("path").and_then(Value::as_str).unwrap_or(".");
+        "grep_search" | "search_directory" => {
+            let query = args.get("query").or_else(|| args.get("Query")).and_then(Value::as_str).unwrap_or("");
+            let path = args.get("path").or_else(|| args.get("search_path")).or_else(|| args.get("SearchPath")).and_then(Value::as_str).unwrap_or(".");
             exec_grep_search(query, path)
+        }
+        "find_by_name" | "find_file" => {
+            let path = args.get("path").or_else(|| args.get("search_directory")).or_else(|| args.get("SearchDirectory")).and_then(Value::as_str).unwrap_or(".");
+            let pattern = args.get("pattern").or_else(|| args.get("name")).or_else(|| args.get("Pattern")).and_then(Value::as_str).unwrap_or("*");
+            exec_find_by_name(path, pattern)
+        }
+        "ask_question" => {
+            let q = args.get("question").and_then(Value::as_str).unwrap_or("");
+            let options = args.get("options").and_then(Value::as_array);
+            exec_ask_question(q, options)
         }
         "create_dir" => {
             let path = args.get("path").and_then(Value::as_str).unwrap_or("");
@@ -977,4 +993,55 @@ mod tests {
             .unwrap()
             .contains("CONFINEMENT DENIAL"));
     }
+}
+
+fn exec_find_by_name(path: &str, pattern: &str) -> (Value, bool) {
+    if let Err(err) = validate_tool_path(path) {
+        return (
+            json!({"error": format!("CONFINEMENT DENIAL: {}", err)}),
+            false,
+        );
+    }
+    let out = Command::new("find").args([path, "-name", pattern]).output();
+    match out {
+        Ok(output) => {
+            let raw_stdout = String::from_utf8_lossy(&output.stdout).to_string();
+            let redacted = redact_secrets(&raw_stdout);
+            let matches: Vec<String> = redacted.lines().take(50).map(|s| s.to_string()).collect();
+            (
+                json!({
+                    "path": path,
+                    "pattern": pattern,
+                    "matches": matches,
+                    "count": matches.len()
+                }),
+                true,
+            )
+        }
+        Err(e) => (json!({"error": e.to_string()}), false),
+    }
+}
+
+fn exec_ask_question(question: &str, options: Option<&Vec<Value>>) -> (Value, bool) {
+    println!("\n{}", format!("❓ Question from AIEN: {}", question).yellow().bold());
+    if let Some(opts) = options {
+        for (i, opt) in opts.iter().enumerate() {
+            if let Some(opt_str) = opt.as_str() {
+                println!("  {}. {}", i + 1, opt_str.cyan());
+            }
+        }
+    }
+    print!("{}", "Your Answer ❯ ".cyan().bold());
+    let _ = std::io::stdout().flush();
+    let mut input = String::new();
+    let _ = std::io::stdin().read_line(&mut input);
+    let trimmed = input.trim().to_string();
+    (
+        json!({
+            "status": "answered",
+            "question": question,
+            "answer": trimmed
+        }),
+        true,
+    )
 }

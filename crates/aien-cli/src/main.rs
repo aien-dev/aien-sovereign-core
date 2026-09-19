@@ -8,6 +8,7 @@ mod hive;
 pub mod hooks;
 mod nesting;
 pub mod platform;
+pub mod rules;
 mod safety;
 pub mod sandbox;
 pub mod skills;
@@ -117,6 +118,10 @@ async fn main() {
             run_doctor().await;
             return;
         }
+        if args[1] == "--rules" || args[1] == "rules" {
+            let _ = handle_slash_command("/rules").await;
+            return;
+        }
         if args[1] == "--vault" || args[1] == "vault" {
             let _ = handle_slash_command("/vault").await;
             return;
@@ -208,9 +213,18 @@ async fn main() {
     // Mandatory Nesting Ritual: Circle, Check Wind, Leave Scent, Flatten Terrain
     let nesting = perform_nesting_ritual(&session_id, true).await;
 
+    let cwd = std::env::current_dir().unwrap_or_else(|_| platform.home_dir.clone());
+    let rules = crate::rules::discover_rules(&cwd);
+    let rules_prompt = crate::rules::format_rules_for_prompt(&rules);
+
+    let mut full_system_prompt = get_system_prompt();
+    if !rules_prompt.is_empty() {
+        full_system_prompt.push_str(&rules_prompt);
+    }
+
     let client = ChatClient::new(None, None);
     let mut messages: Vec<Value> = vec![
-        json!({"role": "system", "content": get_system_prompt()}),
+        json!({"role": "system", "content": full_system_prompt}),
         json!({"role": "user", "content": format!("<system_grounding>\n{}\n</system_grounding>\nPerform your mandatory nesting initiation. Confirm your verified terrain, wind, scent mark, and operational readiness before taking commands.", nesting.grounding_context)}),
     ];
 
@@ -355,9 +369,18 @@ async fn run_single_prompt(prompt: &str) {
     let hook_registry = crate::hooks::HookRegistry::default_sovereign_registry();
     let _ = hook_registry.run_pre_turn(&mut turn_prompt).await;
 
+    let cwd = std::env::current_dir().unwrap_or_else(|_| platform.home_dir.clone());
+    let rules = crate::rules::discover_rules(&cwd);
+    let rules_prompt = crate::rules::format_rules_for_prompt(&rules);
+
+    let mut full_system_prompt = get_system_prompt();
+    if !rules_prompt.is_empty() {
+        full_system_prompt.push_str(&rules_prompt);
+    }
+
     let client = ChatClient::new(None, None);
     let mut messages = vec![
-        json!({"role": "system", "content": get_system_prompt()}),
+        json!({"role": "system", "content": full_system_prompt}),
         json!({"role": "user", "content": format!("<system_grounding>\n{}\n</system_grounding>\n{}", nesting.grounding_context, turn_prompt)}),
     ];
 
