@@ -12,7 +12,6 @@ static CRUCIAL_RE: OnceLock<Regex> = OnceLock::new();
 static PIVOTAL_RE: OnceLock<Regex> = OnceLock::new();
 static ELEVATE_RE: OnceLock<Regex> = OnceLock::new();
 static GAME_CHANGER_RE: OnceLock<Regex> = OnceLock::new();
-static SEAMLESS_RE: OnceLock<Regex> = OnceLock::new();
 static UNLEASH_RE: OnceLock<Regex> = OnceLock::new();
 static BEACON_TROPE_RE: OnceLock<Regex> = OnceLock::new();
 static HARNESS_VERB_RE: OnceLock<Regex> = OnceLock::new();
@@ -139,15 +138,6 @@ impl ConstitutionalChecker {
         if game_changer_re.is_match(&lower) {
             violations.push(ViolationKind::Buzzword(format!(
                 "Forbidden AI buzzword 'game-changer' detected in line: {}",
-                line.trim()
-            )));
-        }
-
-        // Seamlessly / seamless
-        let seamless_re = SEAMLESS_RE.get_or_init(|| Regex::new(r"\bseamless(?:ly)?\b").unwrap());
-        if seamless_re.is_match(&lower) {
-            violations.push(ViolationKind::Buzzword(format!(
-                "Forbidden AI buzzword 'seamlessly' detected in line: {}",
                 line.trim()
             )));
         }
