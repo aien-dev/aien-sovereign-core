@@ -50,6 +50,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "libloading 0.8.9",
+ "rayon",
  "reqwest 0.12.28",
  "serde",
  "serde_json",

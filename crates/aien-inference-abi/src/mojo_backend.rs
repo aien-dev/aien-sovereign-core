@@ -273,6 +273,18 @@ impl TensorBackend for MojoGb10Backend {
         self.fallback.matmul_vec(out, x, weight, out_dim, in_dim);
     }
 
+    fn matmul_batch(
+        &self,
+        out: &mut [f32],
+        x: &[f32],
+        weight: &[f32],
+        batch_size: usize,
+        in_dim: usize,
+        out_dim: usize,
+    ) {
+        crate::tensor::matmul_batch(x, weight, out, batch_size, in_dim, out_dim);
+    }
+
     fn swiglu(&self, out: &mut [f32], gate: &[f32], up: &[f32]) {
         let size = gate.len().min(up.len()).min(out.len());
         if let Some(ref b) = self.bindings {

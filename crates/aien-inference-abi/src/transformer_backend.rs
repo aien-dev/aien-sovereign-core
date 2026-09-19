@@ -230,48 +230,57 @@ impl NativeTransformerBackend {
             })
             .collect();
 
-        // 2. Scratch buffers allocated once across all layers and prompt tokens
-        let mut x_norm = vec![0.0f32; hidden_dim];
-        let mut q = vec![0.0f32; q_dim];
-        let mut k = vec![0.0f32; kv_dim];
-        let mut v = vec![0.0f32; kv_dim];
-        let mut attn_out = vec![0.0f32; q_dim];
-        let mut attn_proj = vec![0.0f32; hidden_dim];
-        let mut post_norm = vec![0.0f32; hidden_dim];
-        let mut gate = vec![0.0f32; intermediate_dim];
-        let mut up = vec![0.0f32; intermediate_dim];
-        let mut activated = vec![0.0f32; intermediate_dim];
-        let mut mlp_out = vec![0.0f32; hidden_dim];
+        // 2. Pre-allocated batched buffers for all prompt tokens across layers
+        let mut x_norm_batch = vec![0.0f32; n * hidden_dim];
+        let mut q_batch = vec![0.0f32; n * q_dim];
+        let mut k_batch = vec![0.0f32; n * kv_dim];
+        let mut v_batch = vec![0.0f32; n * kv_dim];
+        let mut attn_out_batch = vec![0.0f32; n * q_dim];
+        let mut attn_proj_batch = vec![0.0f32; n * hidden_dim];
+        let mut post_norm_batch = vec![0.0f32; n * hidden_dim];
+        let mut gate_batch = vec![0.0f32; n * intermediate_dim];
+        let mut up_batch = vec![0.0f32; n * intermediate_dim];
+        let mut act_batch = vec![0.0f32; n * intermediate_dim];
+        let mut mlp_out_batch = vec![0.0f32; n * hidden_dim];
 
-        // 3. Process each transformer layer across all prompt tokens
+        // 3. Process each transformer layer using batched GEMM
         for (layer_idx, layer_w) in weights.layers.iter().enumerate() {
             let kv_cache = &mut seq_state.layers[layer_idx];
 
+            // 3a. Batched Input RMSNorm
             for t in 0..n {
-                let x = &mut states[t];
+                let out_slice = &mut x_norm_batch[t * hidden_dim..(t + 1) * hidden_dim];
+                backend.rmsnorm(out_slice, &states[t], &layer_w.input_layernorm, eps);
+            }
 
-                // 3a. Input RMSNorm
-                backend.rmsnorm(&mut x_norm, x, &layer_w.input_layernorm, eps);
+            // 3b. Batched Q, K, V GEMMs across all prompt tokens
+            backend.matmul_batch(&mut q_batch, &x_norm_batch, &layer_w.q_proj, n, hidden_dim, q_dim);
+            backend.matmul_batch(&mut k_batch, &x_norm_batch, &layer_w.k_proj, n, hidden_dim, kv_dim);
+            backend.matmul_batch(&mut v_batch, &x_norm_batch, &layer_w.v_proj, n, hidden_dim, kv_dim);
 
-                // 3b. Q, K, V Projections
-                backend.matmul_vec(&mut q, &x_norm, &layer_w.q_proj, q_dim, hidden_dim);
-                backend.matmul_vec(&mut k, &x_norm, &layer_w.k_proj, kv_dim, hidden_dim);
-                backend.matmul_vec(&mut v, &x_norm, &layer_w.v_proj, kv_dim, hidden_dim);
+            // 3c. RoPE for each prompt position and append to KV cache
+            for t in 0..n {
+                let q_t = &mut q_batch[t * q_dim..(t + 1) * q_dim];
+                let k_t = &mut k_batch[t * kv_dim..(t + 1) * kv_dim];
+                let v_t = &v_batch[t * kv_dim..(t + 1) * kv_dim];
 
-                // 3c. Rotary Positional Embeddings at prompt index t
-                backend.apply_rope(&mut q, &mut k, t, head_dim, num_heads, num_kv_heads, theta);
+                backend.apply_rope(q_t, k_t, t, head_dim, num_heads, num_kv_heads, theta);
 
-                // 3d. Append to KV cache
-                kv_cache.cached_k.push(k.clone());
-                kv_cache.cached_v.push(v.clone());
-                kv_cache.flat_k.extend_from_slice(&k);
-                kv_cache.flat_v.extend_from_slice(&v);
+                kv_cache.cached_k.push(k_t.to_vec());
+                kv_cache.cached_v.push(v_t.to_vec());
+                kv_cache.flat_k.extend_from_slice(k_t);
+                kv_cache.flat_v.extend_from_slice(v_t);
+            }
 
-                // 3e. Causal GQA Attention (attending to prompt tokens 0..=t)
-                let seq_len = kv_cache.cached_k.len();
+            // 3d. Causal GQA Attention across all prompt tokens
+            for t in 0..n {
+                let q_t = &q_batch[t * q_dim..(t + 1) * q_dim];
+                let attn_t = &mut attn_out_batch[t * q_dim..(t + 1) * q_dim];
+                let seq_len = t + 1;
+
                 backend.gqa_attention(
-                    &mut attn_out,
-                    &q,
+                    attn_t,
+                    q_t,
                     &kv_cache.flat_k,
                     &kv_cache.flat_v,
                     seq_len,
@@ -279,24 +288,41 @@ impl NativeTransformerBackend {
                     num_kv_heads,
                     head_dim,
                 );
+            }
 
-                // 3f. Output projection and residual connection
-                backend.matmul_vec(&mut attn_proj, &attn_out, &layer_w.o_proj, hidden_dim, q_dim);
+            // 3e. Batched Output Projection GEMM
+            backend.matmul_batch(&mut attn_proj_batch, &attn_out_batch, &layer_w.o_proj, n, q_dim, hidden_dim);
+            for t in 0..n {
+                let proj_t = &attn_proj_batch[t * hidden_dim..(t + 1) * hidden_dim];
                 for i in 0..hidden_dim {
-                    x[i] += attn_proj[i];
+                    states[t][i] += proj_t[i];
                 }
+            }
 
-                // 3g. Post-Attention RMSNorm
-                backend.rmsnorm(&mut post_norm, x, &layer_w.post_attention_layernorm, eps);
+            // 3f. Batched Post-Attention RMSNorm
+            for t in 0..n {
+                let out_slice = &mut post_norm_batch[t * hidden_dim..(t + 1) * hidden_dim];
+                backend.rmsnorm(out_slice, &states[t], &layer_w.post_attention_layernorm, eps);
+            }
 
-                // 3h. SwiGLU MLP
-                backend.matmul_vec(&mut gate, &post_norm, &layer_w.gate_proj, intermediate_dim, hidden_dim);
-                backend.matmul_vec(&mut up, &post_norm, &layer_w.up_proj, intermediate_dim, hidden_dim);
-                backend.swiglu(&mut activated, &gate, &up);
-                backend.matmul_vec(&mut mlp_out, &activated, &layer_w.down_proj, hidden_dim, intermediate_dim);
+            // 3g. Batched MLP Gate and Up GEMMs
+            backend.matmul_batch(&mut gate_batch, &post_norm_batch, &layer_w.gate_proj, n, hidden_dim, intermediate_dim);
+            backend.matmul_batch(&mut up_batch, &post_norm_batch, &layer_w.up_proj, n, hidden_dim, intermediate_dim);
 
+            // 3h. SwiGLU Activations
+            for t in 0..n {
+                let gate_t = &gate_batch[t * intermediate_dim..(t + 1) * intermediate_dim];
+                let up_t = &up_batch[t * intermediate_dim..(t + 1) * intermediate_dim];
+                let act_t = &mut act_batch[t * intermediate_dim..(t + 1) * intermediate_dim];
+                backend.swiglu(act_t, gate_t, up_t);
+            }
+
+            // 3i. Batched MLP Down Projection GEMM
+            backend.matmul_batch(&mut mlp_out_batch, &act_batch, &layer_w.down_proj, n, intermediate_dim, hidden_dim);
+            for t in 0..n {
+                let mlp_t = &mlp_out_batch[t * hidden_dim..(t + 1) * hidden_dim];
                 for i in 0..hidden_dim {
-                    x[i] += mlp_out[i];
+                    states[t][i] += mlp_t[i];
                 }
             }
         }
