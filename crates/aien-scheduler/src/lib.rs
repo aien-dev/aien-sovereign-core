@@ -219,7 +219,9 @@ impl AienScheduler {
                     prompt_len
                 };
 
-                if chunk_size > prefill_budget || current_tokens + chunk_size > self.config.max_batch_tokens {
+                if chunk_size > prefill_budget
+                    || current_tokens + chunk_size > self.config.max_batch_tokens
+                {
                     self.preempted_queue.push_front(req);
                     break;
                 }
@@ -272,7 +274,9 @@ impl AienScheduler {
                     prompt_len
                 };
 
-                if chunk_size > prefill_budget || current_tokens + chunk_size > self.config.max_batch_tokens {
+                if chunk_size > prefill_budget
+                    || current_tokens + chunk_size > self.config.max_batch_tokens
+                {
                     self.waiting_queue.push_front(req);
                     break;
                 }
@@ -370,10 +374,16 @@ impl AienScheduler {
                             seq.tokens_generated += 1;
                             total_tokens = seq.tokens_generated;
 
-                            if seq.request.sampling_params.stop_token_ids.contains(&token_id) {
+                            if seq
+                                .request
+                                .sampling_params
+                                .stop_token_ids
+                                .contains(&token_id)
+                            {
                                 is_finished = true;
                                 finish_reason = FinishReason::StopToken;
-                            } else if seq.tokens_generated >= seq.request.sampling_params.max_tokens {
+                            } else if seq.tokens_generated >= seq.request.sampling_params.max_tokens
+                            {
                                 is_finished = true;
                                 finish_reason = FinishReason::LengthLimit;
                             } else {

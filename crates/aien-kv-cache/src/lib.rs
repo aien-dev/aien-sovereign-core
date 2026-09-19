@@ -143,7 +143,12 @@ impl UnifiedKvTensorPool {
 
     #[inline]
     pub fn offset_for_block(&self, block_id: BlockId) -> usize {
-        assert!(block_id < self.config.num_blocks, "BlockId {} exceeds pool size {}", block_id, self.config.num_blocks);
+        assert!(
+            block_id < self.config.num_blocks,
+            "BlockId {} exceeds pool size {}",
+            block_id,
+            self.config.num_blocks
+        );
         block_id * self.block_bytes
     }
 
@@ -293,7 +298,11 @@ impl AienKvManager {
         }
     }
 
-    pub fn with_tensor_pool(total_blocks: usize, block_size: usize, config: KvPoolConfig) -> Result<Self, String> {
+    pub fn with_tensor_pool(
+        total_blocks: usize,
+        block_size: usize,
+        config: KvPoolConfig,
+    ) -> Result<Self, String> {
         let mut mgr = Self::new(total_blocks, block_size);
         let pool = UnifiedKvTensorPool::allocate(config)?;
         mgr.tensor_pool = Some(pool);
@@ -335,7 +344,9 @@ impl AienKvManager {
         let token_count = prompt_tokens.len();
 
         // 1. Check radix prefix cache for reusable prefix blocks
-        let cached_prefix_blocks = self.radix_root.find_matching_prefix(prompt_tokens, self.block_size);
+        let cached_prefix_blocks = self
+            .radix_root
+            .find_matching_prefix(prompt_tokens, self.block_size);
         let reused_block_count = cached_prefix_blocks.len();
         let reused_tokens = reused_block_count * self.block_size;
 
@@ -387,7 +398,8 @@ impl AienKvManager {
         }
 
         // Index newly allocated sequence into radix tree for future prefix hits
-        self.radix_root.insert_prefix(prompt_tokens, &allocated_blocks, self.block_size);
+        self.radix_root
+            .insert_prefix(prompt_tokens, &allocated_blocks, self.block_size);
 
         let table = BlockTable {
             block_ids: allocated_blocks.clone(),
@@ -510,7 +522,11 @@ impl AienKvManager {
 
     pub fn metrics(&self) -> KvCacheMetrics {
         let shared_blocks = self.block_pool.iter().filter(|b| b.is_shared).count();
-        let physical_bytes_allocated = self.tensor_pool.as_ref().map(|p| p.total_bytes()).unwrap_or(0);
+        let physical_bytes_allocated = self
+            .tensor_pool
+            .as_ref()
+            .map(|p| p.total_bytes())
+            .unwrap_or(0);
         KvCacheMetrics {
             total_blocks: self.total_blocks,
             free_blocks: self.free_blocks.len(),

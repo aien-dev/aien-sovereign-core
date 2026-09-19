@@ -128,11 +128,12 @@ impl CombStore {
     }
 
     pub fn open_default() -> Result<Self, HiveError> {
-        let path_str = std::env::var("HIVE_DB_PATH")
-            .unwrap_or_else(|_| {
-                let home = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")).unwrap_or_else(|_| ".".to_string());
-                format!("{}/.config/cortex/hive.db", home)
-            });
+        let path_str = std::env::var("HIVE_DB_PATH").unwrap_or_else(|_| {
+            let home = std::env::var("HOME")
+                .or_else(|_| std::env::var("USERPROFILE"))
+                .unwrap_or_else(|_| ".".to_string());
+            format!("{}/.config/cortex/hive.db", home)
+        });
         let path = PathBuf::from(path_str);
         Self::open(&path)
     }
@@ -665,7 +666,9 @@ impl CombStore {
         }
 
         let new_expires = (now + chrono::Duration::seconds(ttl_secs as i64)).to_rfc3339();
-        let home = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")).unwrap_or_else(|_| ".".to_string());
+        let home = std::env::var("HOME")
+            .or_else(|_| std::env::var("USERPROFILE"))
+            .unwrap_or_else(|_| ".".to_string());
         let worktree = format!("{}/workspace/hive-worktrees/{}", home, task_id);
 
         conn.execute(

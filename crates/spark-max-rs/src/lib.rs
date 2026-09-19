@@ -41,10 +41,18 @@ impl fmt::Debug for SparkMaxBackend {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             SparkMaxBackend::ModularMojo { session_id, .. } => {
-                write!(f, "SparkMaxBackend::ModularMojo(session_id: {})", session_id)
+                write!(
+                    f,
+                    "SparkMaxBackend::ModularMojo(session_id: {})",
+                    session_id
+                )
             }
             SparkMaxBackend::NativeRustFallback { session_id } => {
-                write!(f, "SparkMaxBackend::NativeRustFallback(session_id: {})", session_id)
+                write!(
+                    f,
+                    "SparkMaxBackend::NativeRustFallback(session_id: {})",
+                    session_id
+                )
             }
         }
     }
@@ -216,11 +224,14 @@ impl SparkMaxSession {
                 session_id,
                 bindings,
             } => {
-                let tok = unsafe { (bindings.sample_token)(*session_id, seq_id as i64, step as i32) };
+                let tok =
+                    unsafe { (bindings.sample_token)(*session_id, seq_id as i64, step as i32) };
                 tok as u32
             }
             SparkMaxBackend::NativeRustFallback { .. } => {
-                let h = seq_id.wrapping_mul(6364136223846793005).wrapping_add(step as u64 * 1442695040888963407);
+                let h = seq_id
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(step as u64 * 1442695040888963407);
                 (h % 151643) as u32 + 100
             }
         }
@@ -293,7 +304,9 @@ impl AienInferenceBackend for MojoMaxInferenceBackend {
                 .map_err(|e| format!("Mojo prefill kernel error: {}", e))?;
 
             for req in &batch.prefill_requests {
-                let token_id = self.session.sample_token(req.request_id, batch.step_id as u32);
+                let token_id = self
+                    .session
+                    .sample_token(req.request_id, batch.step_id as u32);
                 outputs.push(DecodeOutput::Token {
                     request_id: req.request_id,
                     token_id,

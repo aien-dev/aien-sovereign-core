@@ -148,7 +148,9 @@ pub async fn audit_workspace_build(workspace_path: &str) -> BuildAuditResult {
 
 pub async fn run_full_audit(client: &Client, workspace_dir: &str) -> SystemAuditReport {
     let services = audit_services(client).await;
-    let home = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")).unwrap_or_else(|_| ".".to_string());
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .unwrap_or_else(|_| ".".to_string());
     let cockpit_dir = format!("{}/spark-cockpit-rs", home);
     let invariants = audit_vault_and_unslop(&[workspace_dir, &cockpit_dir]);
     let build = audit_workspace_build(workspace_dir).await;

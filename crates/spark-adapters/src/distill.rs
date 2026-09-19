@@ -19,7 +19,10 @@ pub struct DistillationEngine {
 
 impl DistillationEngine {
     pub fn new() -> Self {
-        let home = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")).map(PathBuf::from).unwrap_or_else(|_| PathBuf::from("."));
+        let home = std::env::var("HOME")
+            .or_else(|_| std::env::var("USERPROFILE"))
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| PathBuf::from("."));
         let default_dir = home.join("workspace/distillation-data");
         let _ = create_dir_all(&default_dir);
 
@@ -274,7 +277,10 @@ impl DistillationEngine {
         canonical_name: &str,
         content: &str,
     ) -> Result<String, String> {
-        let home = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")).map(PathBuf::from).unwrap_or_else(|_| PathBuf::from("."));
+        let home = std::env::var("HOME")
+            .or_else(|_| std::env::var("USERPROFILE"))
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| PathBuf::from("."));
         let token_path = home.join(".config/cortex/token");
         let token = std::fs::read_to_string(token_path)
             .map(|s| s.trim().to_string())

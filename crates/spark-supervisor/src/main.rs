@@ -56,7 +56,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         if let Some(p) = cli.config.parent() {
             let _ = std::fs::create_dir_all(p);
         }
-        let home_str = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")).unwrap_or_else(|_| ".".to_string());
+        let home_str = std::env::var("HOME")
+            .or_else(|_| std::env::var("USERPROFILE"))
+            .unwrap_or_else(|_| ".".to_string());
         let default_toml = format!("[services.cortex]\ncommand = \"{}/.local/bin/cortex-rs\"\nargs = [\"--port\", \"18080\"]\nrestart = \"always\"\nhealth_url = \"http://127.0.0.1:18080/health\"\n\n[services.cockpit]\ncommand = \"{}/.local/bin/spark-cockpit-rs\"\nrestart = \"always\"\nhealth_url = \"http://127.0.0.1:18095/health\"\n", home_str, home_str);
         std::fs::write(&cli.config, default_toml)?;
     }

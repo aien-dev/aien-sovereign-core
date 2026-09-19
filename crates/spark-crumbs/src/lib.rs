@@ -163,8 +163,10 @@ impl DirCrumb {
 
         // Inspect Above
         let above = if let Some(parent) = dir.parent() {
-            let home = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")).unwrap_or_default();
-        if !home.is_empty() && parent.starts_with(&home) && parent != dir {
+            let home = std::env::var("HOME")
+                .or_else(|_| std::env::var("USERPROFILE"))
+                .unwrap_or_default();
+            if !home.is_empty() && parent.starts_with(&home) && parent != dir {
                 let p_canon = parent
                     .canonicalize()
                     .map(|p| p.to_string_lossy().to_string())
@@ -367,7 +369,9 @@ pub fn record_directory_crumb(
 
     // If dir has a parent within project workspace, bubble awareness to parent .crumb.local
     if let Some(parent) = dir.parent() {
-        let home = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")).unwrap_or_default();
+        let home = std::env::var("HOME")
+            .or_else(|_| std::env::var("USERPROFILE"))
+            .unwrap_or_default();
         if !home.is_empty() && parent.starts_with(&home) && parent != dir {
             let mut parent_local = load_local_crumb(parent);
             let bubble_item = CrumbHistoryItem {

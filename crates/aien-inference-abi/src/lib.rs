@@ -328,7 +328,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_max_serving_backend() {
-        let mut backend = MaxServingBackend::new("http://127.0.0.1:18006".to_string(), "atlas-lightning-omni".to_string());
+        let mut backend = MaxServingBackend::new(
+            "http://127.0.0.1:18006".to_string(),
+            "atlas-lightning-omni".to_string(),
+        );
         let config = ModelConfig::default();
         backend.load_model(&config).await.unwrap();
 

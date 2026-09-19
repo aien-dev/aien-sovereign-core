@@ -161,7 +161,8 @@ mod tests {
         let model_res = unsafe { (bindings.load_model)(session_id, 28, 3584, 28, 4, 128, 152064) };
         assert_eq!(model_res, 0);
 
-        let pool_res = unsafe { (bindings.kv_pool_register)(session_id, 0x10000000, 1024 * 1024, 64, 16) };
+        let pool_res =
+            unsafe { (bindings.kv_pool_register)(session_id, 0x10000000, 1024 * 1024, 64, 16) };
         assert_eq!(pool_res, 0);
 
         let prefill_ms = unsafe { (bindings.forward_prefill)(session_id, 512, 1, 32) };

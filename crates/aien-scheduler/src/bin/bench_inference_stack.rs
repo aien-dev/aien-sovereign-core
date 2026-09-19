@@ -1,9 +1,7 @@
 use aien_inference_abi::{
     AienInferenceBackend, DecodeOutput, ModelConfig, SamplingParams, SequenceRequest,
 };
-use aien_kv_cache::{
-    create_shared_kv_manager_with_pool, AienKvManager, KvDType, KvPoolConfig,
-};
+use aien_kv_cache::{create_shared_kv_manager_with_pool, AienKvManager, KvDType, KvPoolConfig};
 use aien_scheduler::{AienScheduler, SchedulerConfig};
 use spark_max_rs::MojoMaxInferenceBackend;
 use std::time::Instant;
@@ -82,10 +80,24 @@ fn bench_kv_cache_allocation_throughput() {
     println!("  Sequences allocated:          {}", num_allocations);
     println!("  Blocks per sequence:          16 (256 tokens @ block_size=16)");
     println!("  Total blocks managed:         {}", total_blocks_allocated);
-    println!("  Allocation Throughput:        {:.2} blocks/sec", alloc_rate);
-    println!("  Allocation Latency:           {:.2} ns/sequence ({:.2} ns/block)", alloc_latency_ns, alloc_latency_ns / 16.0);
-    println!("  Deallocation Throughput:      {:.2} blocks/sec", free_rate);
-    println!("  Deallocation Latency:         {:.2} ns/sequence ({:.2} ns/block)", free_latency_ns, free_latency_ns / 16.0);
+    println!(
+        "  Allocation Throughput:        {:.2} blocks/sec",
+        alloc_rate
+    );
+    println!(
+        "  Allocation Latency:           {:.2} ns/sequence ({:.2} ns/block)",
+        alloc_latency_ns,
+        alloc_latency_ns / 16.0
+    );
+    println!(
+        "  Deallocation Throughput:      {:.2} blocks/sec",
+        free_rate
+    );
+    println!(
+        "  Deallocation Latency:         {:.2} ns/sequence ({:.2} ns/block)",
+        free_latency_ns,
+        free_latency_ns / 16.0
+    );
     println!("  Status:                       PASSED (Sub-microsecond native management)\n");
 }
 
@@ -113,7 +125,7 @@ fn bench_zero_copy_subagent_fork() {
         }
         let elapsed = t0.elapsed();
         let per_fork_us = (elapsed.as_nanos() as f64 / count as f64) / 1000.0;
-        
+
         let bytes_per_seq_mb = 384.0;
         let memory_saved_gb = (count as f64 * bytes_per_seq_mb) / 1024.0;
         let naive_est_ms = count as f64 * 1.92;
@@ -153,7 +165,10 @@ fn bench_copy_on_write_latency() {
     let per_op_ns = elapsed.as_nanos() as f64 / iterations as f64;
 
     println!("  Iterations:                   {}", iterations);
-    println!("  Total Duration:               {:.2} µs", elapsed.as_micros());
+    println!(
+        "  Total Duration:               {:.2} µs",
+        elapsed.as_micros()
+    );
     println!("  Latency per CoW Token Append: {:.2} ns", per_op_ns);
     println!("  Status:                       PASSED (Near-zero divergence overhead)\n");
 }
@@ -209,20 +224,33 @@ async fn bench_scheduler_step_overhead() {
 }
 
 async fn bench_qwen2_5_7b_nvfp4_showdown() {
-    println!("--- 5. Empirical Showdown: Qwen 2.5 7B NVFP4 vLLM Baseline vs AIEN Sovereign Stack ---");
+    println!(
+        "--- 5. Empirical Showdown: Qwen 2.5 7B NVFP4 vLLM Baseline vs AIEN Sovereign Stack ---"
+    );
     println!("  Target Model: Qwen 2.5 7B NVFP4 (28 layers, 28 Q heads, 4 KV heads, 128 dim, 152k vocab)");
     println!("  Execution Path: AIEN Scheduler -> AIEN KV Manager (Physical Unified Pool) -> Rust -> Mojo/MAX GPU");
     println!("  Zero vLLM. Zero PyTorch. Zero Interpreted Scaffolding.");
-    println!("  Prompt Tokens: 512 | Output Tokens: 128 | Unified Hardware: GB10 (121 GB LPDDR5X)\n");
+    println!(
+        "  Prompt Tokens: 512 | Output Tokens: 128 | Unified Hardware: GB10 (121 GB LPDDR5X)\n"
+    );
 
     let vllm_baseline_ttft_p50 = 22.40;
     let vllm_baseline_itl_p50 = 9.80;
     let vllm_baseline_rss_mb = 3737.49;
 
     let base_rss_mb = read_current_rss_mb();
-    println!("  AIEN Control Plane Base RSS:  {:.2} MB (Pure Compiled Rust + Mojo)", base_rss_mb);
-    println!("  vLLM Baseline Python Stack RSS: {:.2} MB (Python 3.12 + PyTorch + AsyncIO)", vllm_baseline_rss_mb);
-    println!("  Control Plane RAM Reduction:  -{:.2}%\n", (1.0 - (base_rss_mb / vllm_baseline_rss_mb)) * 100.0);
+    println!(
+        "  AIEN Control Plane Base RSS:  {:.2} MB (Pure Compiled Rust + Mojo)",
+        base_rss_mb
+    );
+    println!(
+        "  vLLM Baseline Python Stack RSS: {:.2} MB (Python 3.12 + PyTorch + AsyncIO)",
+        vllm_baseline_rss_mb
+    );
+    println!(
+        "  Control Plane RAM Reduction:  -{:.2}%\n",
+        (1.0 - (base_rss_mb / vllm_baseline_rss_mb)) * 100.0
+    );
 
     let pool_cfg = KvPoolConfig::for_qwen2_5_7b(5_000, 16, KvDType::Fp4);
     let physical_kv_bytes = pool_cfg.total_bytes();
@@ -240,9 +268,13 @@ async fn bench_qwen2_5_7b_nvfp4_showdown() {
         num_heads: 28,
         head_dim: 128,
     };
-    backend.load_model(&model_config).await.expect("Model config load must succeed");
+    backend
+        .load_model(&model_config)
+        .await
+        .expect("Model config load must succeed");
 
-    println!("  Physical Unified Memory Allocated: {:.2} MB ({:.2} GB coherent KV cache)",
+    println!(
+        "  Physical Unified Memory Allocated: {:.2} MB ({:.2} GB coherent KV cache)",
         physical_kv_bytes as f64 / (1024.0 * 1024.0),
         physical_kv_bytes as f64 / (1024.0 * 1024.0 * 1024.0)
     );
@@ -334,7 +366,9 @@ async fn bench_qwen2_5_7b_nvfp4_showdown() {
     println!("\n  Comparison Summary vs vLLM (Qwen 2.5 7B NVFP4 on Grace Blackwell GB10):");
     println!("  - vLLM Baseline:        22.40 ms TTFT / 9.80 ms ITL / 3,737.49 MB RSS (Python 3.12 + PyTorch)");
     println!("  - AIEN Sovereign Stack: 11.85 ms TTFT / 7.85 ms ITL / 14.20 MB RSS (Pure Rust + Mojo/MAX)");
-    println!("  - TTFT Acceleration:    1.89x Faster (Eliminated 10.55 ms Python orchestration tax)");
+    println!(
+        "  - TTFT Acceleration:    1.89x Faster (Eliminated 10.55 ms Python orchestration tax)"
+    );
     println!("  - ITL Acceleration:     1.25x Faster (Eliminated 1.95 ms async event loop tax)");
     println!("  - Control Memory Saved: -99.62% RAM Reduction (Zero Python runtime bloat)");
     println!("  - Status:               PASSED (Empirical proof of zero-tax compiled serving)\n");
