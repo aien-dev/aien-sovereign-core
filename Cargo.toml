@@ -17,4 +17,5 @@ members = [
     "crates/spark-max-rs",
     "crates/cortex-encoder-rs",
     "crates/spark-mail-rs",
+    "crates/spark-harvester",
 ]

@@ -241,8 +241,20 @@ async fn main() {
         client,
         start_time: Instant::now(),
         redactor_patterns: patterns,
-        hive_store,
+        hive_store: hive_store.clone(),
     };
+
+    let reaper_hive_store = hive_store.clone();
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(Duration::from_secs(30)).await;
+            if let Ok(reclaimed) = reaper_hive_store.reclaim_expired_leases() {
+                if reclaimed > 0 {
+                    eprintln!("Reclaimed {} expired forge task leases", reclaimed);
+                }
+            }
+        }
+    });
 
     let app = Router::new()
         .route("/api/pulse", get(handle_pulse))
@@ -260,6 +272,13 @@ async fn main() {
         .route("/api/hive/bounds", get(handle_get_hive_bounds))
         .route("/api/hive/adapters", get(handle_get_hive_adapters))
         .route("/api/hive/adapter-chains", get(handle_get_hive_adapter_chains))
+        .route("/api/hive/forge/tasks", get(handle_get_forge_tasks).post(handle_post_forge_task))
+        .route("/api/hive/forge/projects", post(handle_post_forge_project))
+        .route("/api/hive/forge/claim", post(handle_claim_forge_task))
+        .route("/api/hive/forge/heartbeat", post(handle_heartbeat_forge_task))
+        .route("/api/hive/forge/submit", post(handle_submit_forge_task))
+        .route("/api/hive/forge/verify", post(handle_verify_forge_task))
+        .route("/api/hive/forge/reclaim", post(handle_reclaim_forge_leases))
                 .route("/api/models", get(handle_get_models))
         .route("/api/models/swap", post(handle_swap_model))
         .route("/api/operator", get(handle_get_operator).post(handle_post_operator))
@@ -917,6 +936,146 @@ async fn handle_get_hive_adapter_chains(State(state): State<AppState>) -> Json<V
     }
 }
 
+#[derive(Debug, Deserialize)]
+struct ForgeQuery {
+    project: Option<String>,
+    ring: Option<usize>,
+    status: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ForgeProjectPayload {
+    project: String,
+    title: String,
+    core_spec: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct ClaimForgePayload {
+    task_id: String,
+    agent_id: String,
+    ttl_secs: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct HeartbeatForgePayload {
+    task_id: String,
+    agent_id: String,
+    ttl_secs: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SubmitForgePayload {
+    task_id: String,
+    agent_id: String,
+    branch: String,
+    pr_url: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct VerifyForgePayload {
+    task_id: String,
+    verdict: bool,
+    notes: Option<String>,
+}
+
+async fn handle_get_forge_tasks(
+    State(state): State<AppState>,
+    Query(query): Query<ForgeQuery>,
+) -> Json<Value> {
+    match state.hive_store.list_forge_tasks(query.project.as_deref(), query.ring, query.status.as_deref()) {
+        Ok(tasks) => Json(json!({ "success": true, "tasks": tasks })),
+        Err(e) => Json(json!({ "success": false, "error": e.to_string(), "tasks": [] })),
+    }
+}
+
+async fn handle_post_forge_project(
+    State(state): State<AppState>,
+    Json(payload): Json<ForgeProjectPayload>,
+) -> (StatusCode, Json<Value>) {
+    match state.hive_store.spawn_forge_project(&payload.project, &payload.title, &payload.core_spec) {
+        Ok(task) => (StatusCode::CREATED, Json(json!({ "success": true, "task": task }))),
+        Err(e) => (StatusCode::BAD_REQUEST, Json(json!({ "success": false, "error": e.to_string() }))),
+    }
+}
+
+async fn handle_post_forge_task(
+    State(state): State<AppState>,
+    Json(payload): Json<spark_hive::CreateForgeTaskInput>,
+) -> (StatusCode, Json<Value>) {
+    match state.hive_store.create_forge_task(payload) {
+        Ok(task) => (StatusCode::CREATED, Json(json!({ "success": true, "task": task }))),
+        Err(e) => (StatusCode::BAD_REQUEST, Json(json!({ "success": false, "error": e.to_string() }))),
+    }
+}
+
+async fn handle_claim_forge_task(
+    State(state): State<AppState>,
+    Json(payload): Json<ClaimForgePayload>,
+) -> (StatusCode, Json<Value>) {
+    let ttl = payload.ttl_secs.unwrap_or(300);
+    match state.hive_store.claim_forge_task(&payload.task_id, &payload.agent_id, ttl) {
+        Ok(task) => (StatusCode::OK, Json(json!({ "success": true, "task": task }))),
+        Err(spark_hive::HiveError::TaskAlreadyClaimed { task_id, claimed_by }) => (
+            StatusCode::CONFLICT,
+            Json(json!({ "success": false, "error": format!("Task {} already claimed by {}", task_id, claimed_by) })),
+        ),
+        Err(spark_hive::HiveError::TaskNotFound(id)) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "success": false, "error": format!("Task {} not found", id) })),
+        ),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "success": false, "error": e.to_string() }))),
+    }
+}
+
+async fn handle_heartbeat_forge_task(
+    State(state): State<AppState>,
+    Json(payload): Json<HeartbeatForgePayload>,
+) -> (StatusCode, Json<Value>) {
+    let ttl = payload.ttl_secs.unwrap_or(300);
+    match state.hive_store.heartbeat_forge_task(&payload.task_id, &payload.agent_id, ttl) {
+        Ok(()) => (StatusCode::OK, Json(json!({ "success": true }))),
+        Err(spark_hive::HiveError::TaskUnauthorized { task_id, claimed_by, agent_id }) => (
+            StatusCode::FORBIDDEN,
+            Json(json!({
+                "success": false,
+                "error": format!("Task {} leased to {}, not {}", task_id, claimed_by, agent_id),
+            })),
+        ),
+        Err(e) => (StatusCode::BAD_REQUEST, Json(json!({ "success": false, "error": e.to_string() }))),
+    }
+}
+
+async fn handle_submit_forge_task(
+    State(state): State<AppState>,
+    Json(payload): Json<SubmitForgePayload>,
+) -> (StatusCode, Json<Value>) {
+    match state.hive_store.submit_forge_task(&payload.task_id, &payload.agent_id, &payload.branch, payload.pr_url.as_deref()) {
+        Ok(()) => (StatusCode::OK, Json(json!({ "success": true }))),
+        Err(e) => (StatusCode::BAD_REQUEST, Json(json!({ "success": false, "error": e.to_string() }))),
+    }
+}
+
+async fn handle_verify_forge_task(
+    State(state): State<AppState>,
+    Json(payload): Json<VerifyForgePayload>,
+) -> (StatusCode, Json<Value>) {
+    let notes = payload.notes.unwrap_or_default();
+    match state.hive_store.verify_forge_task(&payload.task_id, payload.verdict, &notes) {
+        Ok(()) => (StatusCode::OK, Json(json!({ "success": true, "verdict": payload.verdict }))),
+        Err(e) => (StatusCode::BAD_REQUEST, Json(json!({ "success": false, "error": e.to_string() }))),
+    }
+}
+
+async fn handle_reclaim_forge_leases(
+    State(state): State<AppState>,
+) -> Json<Value> {
+    match state.hive_store.reclaim_expired_leases() {
+        Ok(count) => Json(json!({ "success": true, "reclaimed_count": count })),
+        Err(e) => Json(json!({ "success": false, "error": e.to_string() })),
+    }
+}
+
 
 const OPERATOR_CONFIG_PATH: &str = "/home/drakestapleton/.config/sovereign/operator.toml";
 const MAIL_API_URL: &str = "http://127.0.0.1:18092";
@@ -1205,5 +1364,68 @@ mod tests {
         let state = create_test_state();
         let Json(res) = handle_get_hive_adapter_chains(State(state)).await;
         assert!(res.get("chains").is_some());
+    }
+
+    #[tokio::test]
+    async fn test_cockpit_forge_lifecycle_endpoints() {
+        let state = create_test_state();
+
+        // 1. Spawn forge project
+        let project_payload = ForgeProjectPayload {
+            project: "harvester".to_string(),
+            title: "Model Harvester Pipeline".to_string(),
+            core_spec: "Autonomous reasoning distillation".to_string(),
+        };
+        let (status, Json(res)) = handle_post_forge_project(State(state.clone()), Json(project_payload)).await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert!(res.get("task").is_some());
+        let task_id = res.get("task").unwrap().get("id").unwrap().as_str().unwrap().to_string();
+
+        // 2. Claim task
+        let claim_payload = ClaimForgePayload {
+            task_id: task_id.clone(),
+            agent_id: "agent-aegis".to_string(),
+            ttl_secs: Some(120),
+        };
+        let (status, Json(claim_res)) = handle_claim_forge_task(State(state.clone()), Json(claim_payload)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(claim_res.get("task").unwrap().get("status").unwrap().as_str().unwrap(), "claimed");
+
+        // 3. Heartbeat
+        let hb_payload = HeartbeatForgePayload {
+            task_id: task_id.clone(),
+            agent_id: "agent-aegis".to_string(),
+            ttl_secs: Some(300),
+        };
+        let (status, _) = handle_heartbeat_forge_task(State(state.clone()), Json(hb_payload)).await;
+        assert_eq!(status, StatusCode::OK);
+
+        // 4. Submit
+        let submit_payload = SubmitForgePayload {
+            task_id: task_id.clone(),
+            agent_id: "agent-aegis".to_string(),
+            branch: "feat/harvester-core".to_string(),
+            pr_url: Some("https://github.com/aien-dev/harvester/pull/1".to_string()),
+        };
+        let (status, _) = handle_submit_forge_task(State(state.clone()), Json(submit_payload)).await;
+        assert_eq!(status, StatusCode::OK);
+
+        // 5. Verify
+        let verify_payload = VerifyForgePayload {
+            task_id: task_id.clone(),
+            verdict: true,
+            notes: Some("All 4 defense checks passed".to_string()),
+        };
+        let (status, _) = handle_verify_forge_task(State(state.clone()), Json(verify_payload)).await;
+        assert_eq!(status, StatusCode::OK);
+
+        // 6. List tasks
+        let query = ForgeQuery {
+            project: Some("harvester".to_string()),
+            ring: None,
+            status: Some("verified".to_string()),
+        };
+        let Json(list_res) = handle_get_forge_tasks(State(state), Query(query)).await;
+        assert_eq!(list_res.get("tasks").unwrap().as_array().unwrap().len(), 1);
     }
 }
