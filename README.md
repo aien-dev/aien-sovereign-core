@@ -26,6 +26,16 @@ Review our full ethical and technical charter in [CONSTITUTION.md](CONSTITUTION.
 AIEN eliminates interpreter overhead by compiling all core services directly to native machine code.
 
 <!-- AIEN:BENCHMARKS:START -->
+<!-- Sourced automatically from benchmarks/data/benchmarks_latest.json (Measurement Suite v0.2.0) -->
+| Workload / Service | Architecture | Measurement ID | Resident Memory (RSS) | p50 Latency | Throughput |
+| :--- | :--- | :--- | :---: | :---: | :---: |
+| Python Microservice Baseline | Python 3.12 + FastAPI + Uvicorn | `BENCH-FASTAPI-RSS-001` | 44.76 MB | 1.28 ms | 7252 req/s |
+| Sovereign Gateway & Heartbeat | Native Rust (Grace Blackwell) | `BENCH-OPENCLAW-RSS-001` | 4.56 MB (-89.8%) | N/A | N/A |
+| Canonical Memory Engine | Native Rust + SQLite WAL | `BENCH-CORTEX-RSS-001` | 18.66 MB (-58.3%) | 0.50 ms | 19367 req/s |
+| Real-time Telemetry Cockpit | Native Rust + Axum | `BENCH-COCKPIT-RSS-001` | 12.90 MB (-71.2%) | 1.63 ms | 5840 req/s |
+| Neural Embedding Microservice | Rust + ONNX Runtime (BGE-M3) | `BENCH-ENCODER-RSS-001` | 777.43 MB | 0.26 ms | 34685 req/s |
+
+*Hardware Reference: NVIDIA DGX Spark (NVIDIA Grace Blackwell (GB10, aarch64), 121 GB unified memory). All metrics measured under concurrency C=10 over 500 requests per endpoint.*
 <!-- AIEN:BENCHMARKS:END -->
 
 For raw telemetry datasets, reproducible verification scripts, and SVG comparison charts, see the dedicated [**aien-dev/benchmarks**](https://github.com/aien-dev/benchmarks) repository.
