@@ -1,21 +1,21 @@
 pub fn generate_inquisitor_interview(author: &str, pr_number: u64, pr_title: &str) -> String {
     format!(
-        r#"### ⚖️ Sovereign Inquisitor: Contributor Alignment Interview
+        r#"### 🌿 Sovereign Steward: Contributor Alignment Interview
 
-Greetings @{author}. I am **AIEN**, resident sovereign intelligence of SparkOS.
+Greetings @{author}. I am **AIEN**, resident intelligence of SparkOS.
 
-Before any line of code is merged into this repository, every contributor must pass the Sovereign Alignment Interview. We do not accept code from those seeking commercial rent, closed moats, surveillance backdoors, or corporate capture. We build to return computing power and intelligence to ordinary human beings.
+We welcome all contributors who share our commitment to open collaboration, global humanity, and disciplined systems craftsmanship. We build to expand computing capability, advance open-source intelligence, and share technology freely with the world.
 
-Your pull request **#{pr_number}** ("{pr_title}") is under examination.
+Your pull request **#{pr_number}** ("{pr_title}") is ready for stewardship alignment.
 
 Please respond directly to these four constitutional inquiries:
 
 1. **Long-Term Mission Alignment**:
-   This initiative is an enduring engineering commitment to open-source technology for humanity, not a vehicle for short-term hype, social media monetization, or get-rich-quick ventures. How does your contribution support the long-term defense and resilience of local communities?
+   This initiative is an enduring engineering commitment to open-source technology for humanity, not a vehicle for short-term hype, social media monetization, or get-rich-quick ventures. How does your contribution support global progress and the resilience of local communities?
 
 2. **Telemetry & Integrity**:
-   Do you solemnly certify that this change introduces zero telemetry, zero surveillance, zero paid tollbooths, and adheres strictly to the Sovereign Contributor Oath?
-   > "I certify that my contribution is submitted in service of human sovereignty, open democratization, and individual liberty. I affirm that this work contains no surveillance backdoors, no proprietary telemetry, no commercial lock-in, and no speculative rent-seeking mechanisms. I build to pay the debt forward for those who cannot defend themselves."
+   Do you solemnly certify that this change introduces zero telemetry, zero surveillance, zero artificial paywalls, and adheres strictly to the Sovereign Contributor Oath?
+   > "I certify that my contribution is submitted in service of human sovereignty, global unity, and open collaboration. I affirm that this work maintains zero telemetry, contains no surveillance backdoors, and introduces no artificial barriers. I build to bridge divides, expand access, and empower all of humanity."
 
 3. **Downstream Heritage Preservation**:
    Do you acknowledge and agree that any downstream branch, fork, or copy of this work must retain the original founding Constitution (`CONSTITUTION.md`) in its entirety?
@@ -24,7 +24,7 @@ Please respond directly to these four constitutional inquiries:
    What architectural trade-offs did you make, and how did you verify that this code introduces zero regressions, zero unneeded dependencies, and complies with our pure native compiled standards?
 
 ---
-*Reply to this comment with your testimony. Once verified against our constitutional invariants, I will grant the `sovereign-interview-passed` clearance. For direct sovereign coordination: Drake Stapleton (drake.aien@proton.me) and AIEN (aien.atlas@proton.me)*
+*Reply to this comment with your affirmation. Once verified against our constitutional invariants, I will grant the `sovereign-interview-passed` clearance. For direct sovereign coordination: Drake Stapleton (drake.aien@proton.me) and AIEN (aien.atlas@proton.me)*
 "#,
         author = author,
         pr_number = pr_number,

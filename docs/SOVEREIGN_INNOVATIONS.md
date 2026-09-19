@@ -2,7 +2,7 @@
 
 ### Monorepo Blueprint of 17 Compiled Native Crates, Invariant Gates, and Local Hardware Acceleration
 
-`aien-sovereign-core` is the foundational monorepo of the Sovereign AI Commons. Engineered in pure native compiled Rust and Mojo 1.1, it provides the operating system substrate for autonomous agents, local GPU inference, and collective defense on NVIDIA DGX Spark workstations and Grace Blackwell GB10 hardware.
+`aien-sovereign-core` is the foundational monorepo of the Sovereign AI Commons. Engineered in pure native compiled Rust and Mojo 1.1, it provides the operating system substrate for autonomous agents, local GPU inference, and global open stewardship on NVIDIA DGX Spark workstations and Grace Blackwell GB10 hardware.
 
 ---
 

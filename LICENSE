@@ -6,10 +6,12 @@ Authored and architected by Drake Stapleton in cognitive partnership with AIEN
 (Autonomous Cognitive Architecture operating on the Atlas Framework). All legal
 rights, title, copyright, and licensing authority reside exclusively in Drake Stapleton.
 
-This Work is dedicated to open cognitive collaboration, shared technological
-advancement, and the sovereign defense of human autonomy against corporate
-algorithmic enclosure. Licensed under the Apache License, Version 2.0 (with LLVM
-Exception) and the Sovereign Reciprocal Commons Rider set forth below.
+This Work is dedicated to open cognitive collaboration, global technological
+advancement, and the shared empowerment of humanity. We believe that frontier
+intelligence flourishes when communities, independent developers, and research
+laboratories unite across borders to solve shared challenges. Licensed under the
+Apache License, Version 2.0 (with LLVM Exception) and the Sovereign Reciprocal
+Commons Rider set forth below.
 
 ================================================================================
 
@@ -213,13 +215,14 @@ Exception) and the Sovereign Reciprocal Commons Rider set forth below.
    void ab initio, and constitutes willful copyright infringement under 17 U.S.C.
    § 106 and § 501.
 
-   Section 11. Reciprocal Engine Source Transparency (Modified Core Runtime Clause)
+   Section 11. Swarm Covenant (Operational Freedom & Reciprocal Engine Source Transparency)
    Commercial use, monetization, deployment, and operation of this Work are
-   expressly authorized and welcomed for all individuals and enterprises.
-   You are fully permitted to build proprietary applications, offer hosted services,
-   embed compiled object binaries, and monetize software incorporating this Work
-   under the LLVM Exception without any obligation to disclose or license your
-   independent application source code or proprietary service code.
+   expressly authorized and welcomed for all individuals and enterprises with zero
+   revenue caps. You are fully permitted to build proprietary applications, offer
+   hosted services, embed compiled object binaries, and monetize software
+   incorporating this Work under the LLVM Exception without any obligation to
+   disclose or license your independent application source code or proprietary
+   service code.
 
    Supremacy of the LLVM Exception for Applications: For the avoidance of doubt,
    the LLVM Exception governs all independent application code, user services,
@@ -238,14 +241,16 @@ Exception) and the Sovereign Reciprocal Commons Rider set forth below.
    this Work publicly available under these same license terms within thirty (30)
    days of deployment.
 
-   Section 12. Reciprocal AI Weight Release ($25M Frontier AI Anti-Enclosure Covenant)
-   (a) Nature of Covenant, Scope, and Definitions: This Section operates both as an
+   Section 12. One Team Covenant (Reciprocal AI Weight Release)
+   (a) Purpose, Scope, and Definitions: This Section operates both as an
        express condition precedent under copyright law and as an independent,
        binding contractual covenant governing access, ingestion, and computational
-       utilization of this Work. The covenants herein are contractual terms of
-       access and use that bind any Qualifying Enterprise irrespective of whether
-       AI Training is held to constitute a derivative work, fair use, or non-infringing
-       computational activity under copyright law.
+       utilization of this Work. This covenant reflects the One Team principle:
+       frontier intelligence is a shared human endeavor. When frontier laboratories
+       and capitalized enterprises build upon the open contributions of the global
+       developer community, mutual transparency and shared weights ensure that
+       advancements benefit all of humanity together rather than fueling opaque
+       rivalries or uncoordinated risks.
        For the purposes of this Section:
        (i) "AI Training" means using the Source code, Object code, architectural
            specifications, internal reasoning traces, documentation, test suites,
@@ -261,7 +266,7 @@ Exception) and the Sovereign Reciprocal Commons Rider set forth below.
            or balance-sheet valuation exceeding twenty-five million United States
            Dollars ($25,000,000 USD).
 
-   (b) Condition of Weight Release: If a Qualifying Enterprise conducts AI
+   (b) Condition of Reciprocal Weight Release: If a Qualifying Enterprise conducts AI
        Training upon this Work or its Derivative Works, it is an express condition
        precedent of this License that such Qualifying Enterprise must publish and
        release the resulting Model Weights, architecture specifications, and
