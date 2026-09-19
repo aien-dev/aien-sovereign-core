@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 authors = ["AIEN Sovereign Systems & Contributors <sovereign@aien.dev>"]
 description = "Native continuous batching LLM scheduler with chunked prefill"
-license = "Apache-2.0 WITH LLVM-exception"
+license = "Apache-2.0"
 
 [dependencies]
 aien-inference-abi = { path = "../aien-inference-abi" }

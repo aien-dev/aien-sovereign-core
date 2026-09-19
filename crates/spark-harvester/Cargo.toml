@@ -3,7 +3,7 @@ name = "spark-harvester"
 version = "0.1.0"
 edition = "2021"
 authors = ["AIEN Sovereign Systems & Contributors <sovereign@aien.dev>"]
-license = "Apache-2.0 WITH LLVM-exception"
+license = "Apache-2.0"
 description = "Native Rust engine for harvesting reasoning traces from commercial APIs to distill open models for humanity"
 
 [dependencies]

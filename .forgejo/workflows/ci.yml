@@ -1,23 +1,18 @@
 name: Sovereign CI
 
 on:
-  workflow_dispatch:
-
-permissions:
-  contents: read
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
 
 jobs:
   verify:
     name: Workspace Verification & Invariant Audit
-    runs-on: ubuntu-latest
+    runs-on: spark
     steps:
       - name: Checkout Source Code
         uses: actions/checkout@v4
-
-      - name: Install Stable Rust Toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
 
       - name: Verify Code Formatting
         run: cargo fmt --all -- --check
@@ -32,7 +27,7 @@ jobs:
         run: |
           echo "Auditing repository for prohibited plaintext secret files..."
           if find . -maxdepth 4 -name ".env*" -not -path "*/.git/*" -not -path "*/target/*" | grep -q .; then
-            echo "::error::Prohibited plaintext .env file found. Use an approved AIEN SecretProvider."
+            echo "Prohibited plaintext .env file found. Use an approved AIEN SecretProvider."
             exit 1
           fi
           echo "Zero plaintext .env files verified."
@@ -42,8 +37,19 @@ jobs:
           echo "Auditing repository for em dashes, en dashes, and formulaic tropes..."
           BAD_CHARS=$(grep -rnE --exclude-dir=target --exclude-dir=.git --exclude='*.rs' '—|–' crates/ docs/ README.md || true)
           if [ -n "$BAD_CHARS" ]; then
-            echo "::error::Em dashes or en dashes detected:"
+            echo "Em dashes or en dashes detected:"
             echo "$BAD_CHARS"
             exit 1
           fi
           echo "Sovereign voice compliance verified."
+
+      - name: Enforce Architectural Terminology Invariants
+        run: |
+          echo "Auditing documentation for deprecated absolute claims..."
+          BAD_TERMS=$(grep -rnE --exclude-dir=target --exclude-dir=.git --exclude='0001-trust-evidence-foundation.md' 'all secrets reside in TPM|zero external network calls|universal portability' README.md docs/ || true)
+          if [ -n "$BAD_TERMS" ]; then
+            echo "Deprecated non-normative claims detected:"
+            echo "$BAD_TERMS"
+            exit 1
+          fi
+          echo "Architectural terminology verified."

@@ -1,6 +1,6 @@
 # Sovereign Core Architectural Innovations
 
-### Monorepo Blueprint of 17 Compiled Native Crates, Invariant Gates, and Local Hardware Acceleration
+### Monorepo Blueprint of Compiled Native Crates, Invariant Gates, and Local Hardware Acceleration
 
 `aien-sovereign-core` is the foundational monorepo of the Sovereign AI Commons. Engineered in pure native compiled Rust and Mojo 1.1, it provides the operating system substrate for autonomous agents, local GPU inference, and global open stewardship on NVIDIA DGX Spark workstations and Grace Blackwell GB10 hardware.
 
@@ -8,7 +8,7 @@
 
 ## 1. Monorepo Crate Directory
 
-The workspace comprises 17 native compiled crates, each dedicated to an isolated system responsibility:
+The workspace comprises native compiled crates, each dedicated to an isolated system responsibility:
 
 ### Governance and Verification
 - **`crates/spark-inquisitor`**: Autonomous GitHub gatekeeper, diff auditor, and issue triage engine. Enforces constitutional invariants on pull requests and issues, audits diffs for tracking patterns, verifies unslop compliance, and evaluates contributor oaths.
@@ -44,8 +44,8 @@ Every crate and workflow within `aien-sovereign-core` adheres to four architectu
    All crates are prohibited from calling external telemetry, surveillance, or analytics endpoints. Network activity is restricted strictly to user-configured endpoints and peer relays.
 2. **Pure Compiled Native Systems**:
    All daemons, memory engines, gateways, and CLI tools must compile to native machine binaries (Rust and Mojo). Interpreted runtimes are banned from core services.
-3. **Hardware TPM Key Vault (Zero Disk Secrets)**:
-   Credentials, API keys, and signing tokens never touch disk in plaintext. All secrets resolve dynamically in memory from the hardware TPM vault (`atlas-vault`) with automated stream redaction (`[REDACTED_BY_ATLAS_VAULT]`).
+3. **Hardware Secret Security (Zero Plaintext Disk Secrets)**:
+   Credentials, API keys, and signing tokens never touch disk in plaintext. All secrets resolve dynamically in memory via the `SecretProvider` abstraction (hardware TPM vault `atlas-vault` on DGX Spark, or memory providers on commodity platforms) with automated stream redaction (`[REDACTED_BY_ATLAS_VAULT]`).
 4. **Sovereign Voice and Anti-Slop**:
    All code comments, CLI outputs, and documentation strictly ban em dashes, en dashes, and formulaic AI marketing buzzwords.
 
@@ -62,7 +62,8 @@ Verified on NVIDIA Grace Blackwell GB10 (NVIDIA DGX Spark, Linux aarch64):
 
 ## 4. License and Commons Covenant
 
-Licensed under the **Sovereign Resource Commons License 1.0 (SRCL-1.0)**.
+Licensed under the **Apache License, Version 2.0**.
 Copyright (c) 2026 AIEN Sovereign Systems & Ecosystem Contributors.
-See [LICENSE](LICENSE) for terms.
+See [LICENSE](LICENSE) and [NOTICE](NOTICE) for terms.
+Voluntary bilateral research covenants and artifact access are governed by [OPEN_COOPERATION_COVENANT.md](OPEN_COOPERATION_COVENANT.md) and [ARTIFACT_LICENSING.md](ARTIFACT_LICENSING.md).
 For sovereign ecosystem coordination: `sovereign@aien.dev`.

@@ -1,6 +1,6 @@
 [package]
 authors = ["AIEN Sovereign Systems & Contributors <sovereign@aien.dev>"]
-license = "Apache-2.0 WITH LLVM-exception"
+license = "Apache-2.0"
 name = "spark-cockpit-rs"
 version = "0.1.0"
 edition = "2024"
