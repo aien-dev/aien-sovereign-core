@@ -1,12 +1,18 @@
-### Summary
-<!-- Provide a concise technical explanation of what this PR changes and why. -->
-
-### Sovereign Alignment & Contributor Oath
-- [ ] **Commitment to Long-Term Public Good**: I understand that this project is dedicated to long-term open-source development for humanity, not short-term commercial speculation, social media hype, or get-rich-quick ventures.
-- [ ] **I solemnly swear the Sovereign Contributor Oath**:
-  > "I certify that my contribution is submitted in service of human sovereignty, open democratization, and individual liberty. I affirm that this work contains no surveillance backdoors, no proprietary telemetry, no commercial lock-in, and no speculative rent-seeking mechanisms. I build to pay the debt forward for those who cannot defend themselves."
+### Technical Summary
+<!-- 2-3 sentence technical explanation of the change and architectural intent -->
 
 ### Verification Proof
-- [ ] Automated tests passing (`cargo test --verbose`).
-- [ ] Unslop compliance verified: zero em/en dashes, zero marketing buzzwords, zero sycophancy.
-- [ ] Zero disk secrets: no plaintext `.env` files or credentials on disk.
+- `cargo test --workspace` result:
+```
+[Paste terminal test summary here]
+```
+- `cargo audit` result:
+```
+[Paste cargo audit output here]
+```
+
+### Certifications
+- [ ] **Zero Plaintext Secrets**: Verified no API keys, tokens, passwords, or .env files are in this commit (hardware TPM vault only).
+- [ ] **Unslop Standard**: Verified zero em dashes, zero en dashes, zero sycophancy, and zero AI clichés.
+- [ ] **Sovereign Defense Covenant**: Verified PolyForm Noncommercial 1.0.0 with Sovereign AI Covenant header is preserved.
+- [ ] **Human-Agent Co-Attribution**: Co-authorship credited in commit metadata.
