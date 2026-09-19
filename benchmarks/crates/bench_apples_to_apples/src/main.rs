@@ -1,5 +1,5 @@
 //! Standalone neutral apples-to-apples benchmark driver comparing
-//! AIEN (MojoGb10Backend), Modular MAX (max serve), and vLLM (vllm serve)
+//! AIEN (BlackwellBackend sm_121 GPU), Modular MAX (max serve), and vLLM (vllm serve)
 //! under identical conditions on DGX Spark GB10.
 
 mod engine_aien;
@@ -43,7 +43,7 @@ struct Args {
     output_dir: String,
 
     /// Modular MAX serve port
-    #[arg(long, default_value_t = 18090)]
+    #[arg(long, default_value_t = 18098)]
     max_port: u16,
 
     /// vLLM container port

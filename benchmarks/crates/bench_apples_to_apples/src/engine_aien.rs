@@ -1,4 +1,4 @@
-//! AIEN Native Transformer engine benchmark driver with Mojo GB10 acceleration.
+//! AIEN Native Transformer engine benchmark driver with Blackwell GB10 GPU acceleration.
 //! Executes real forward computation on DGX Spark GB10 in unified memory.
 
 use crate::metrics::{calculate_joules_per_token, calculate_percentile};
@@ -20,7 +20,7 @@ pub struct AienEngineHandle {
 
 impl AienEngineHandle {
     pub fn init(config: &BenchmarkConfig) -> Result<Self, String> {
-        eprintln!("Initializing AIEN Native Transformer with Mojo GB10 Backend...");
+        eprintln!("Initializing AIEN Native Transformer with Blackwell GB10 GPU Backend...");
         let model_config = ModelConfig {
             model_id: "TinyLlama/TinyLlama-1.1B-Chat-v1.0".to_string(),
             max_sequence_length: 2048,
@@ -41,7 +41,7 @@ impl AienEngineHandle {
         let weights = TransformerWeights::load_from_safetensors(&safetensors_path, &model_config)
             .map_err(|e| format!("Failed to construct TransformerWeights: {}", e))?;
 
-        let backend = NativeTransformerBackend::new_mojo(weights);
+        let backend = NativeTransformerBackend::new_blackwell(weights);
         eprintln!(
             "AIEN Backend initialized: {}",
             backend.tensor_backend.name()
