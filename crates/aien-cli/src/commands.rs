@@ -55,6 +55,7 @@ pub async fn handle_slash_command(cmd: &str) -> bool {
   /subagents [list|view|run] Recursive contextual subagents hierarchy
   /goal [list|new|done]     Manage project goals & milestone lattices"
             );
+            println!("  /rules                    Inspect active repository & directory rules (AGENTS.md, GEMINI.md)");
             println!("  /walkthrough [save]       Display live architecture map & roadmap (or save to WALKTHROUGH.md)");
             println!("  /nest                     Execute the Agent Nesting Ritual (grounding, threat check, peer wind, scent)");
             println!("  /crumb [path]             Inspect directory crumb (above, below, and local agent history)");
@@ -353,6 +354,11 @@ pub async fn handle_slash_command(cmd: &str) -> bool {
             } else {
                 println!("Usage: /goal [list | new <title> [| m1, m2] | done <id>]");
             }
+            true
+        }
+        "/rule" | "/rules" => {
+            let cwd = std::env::current_dir().unwrap_or_else(|_| crate::platform::PlatformContext::detect().home_dir);
+            println!("{}", crate::rules::format_rules_tui(&cwd));
             true
         }
         "/skill" | "/skills" => {

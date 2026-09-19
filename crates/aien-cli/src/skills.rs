@@ -1,8 +1,9 @@
 use colored::*;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::collections::HashSet;
 use std::fs;
-use std::path::PathBuf;
+use std::path::Path;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Skill {
@@ -10,12 +11,6 @@ pub struct Skill {
     pub description: String,
     pub path: String,
     pub has_scripts: bool,
-}
-
-pub fn get_skills_dir() -> PathBuf {
-    crate::platform::PlatformContext::detect()
-        .home_dir
-        .join("skills")
 }
 
 fn extract_frontmatter_field(content: &str, field: &str) -> Option<String> {
@@ -32,27 +27,23 @@ fn extract_frontmatter_field(content: &str, field: &str) -> Option<String> {
         }
         if in_frontmatter {
             if let Some(rest) = trimmed.strip_prefix(&format!("{}:", field)) {
-                return Some(rest.trim().trim_matches('"').trim_matches('\'').to_string());
+                return Some(rest.trim().trim_matches('"').trim_matches('\x27').to_string());
             }
         }
     }
     None
 }
 
-pub fn discover_skills() -> Vec<Skill> {
-    let dir = get_skills_dir();
-    let mut skills = Vec::new();
-    if !dir.exists() {
-        let _ = fs::create_dir_all(&dir);
-        return skills;
+fn scan_dir_for_skills(dir: &Path, skills: &mut Vec<Skill>, seen_names: &mut HashSet<String>) {
+    if !dir.is_dir() {
+        return;
     }
-
-    if let Ok(entries) = fs::read_dir(&dir) {
+    if let Ok(entries) = fs::read_dir(dir) {
         for entry in entries.flatten() {
             let path = entry.path();
             if path.is_dir() {
                 let skill_md = path.join("SKILL.md");
-                if skill_md.exists() {
+                if skill_md.is_file() {
                     let content = fs::read_to_string(&skill_md).unwrap_or_default();
                     let name = extract_frontmatter_field(&content, "name").unwrap_or_else(|| {
                         path.file_name()
@@ -60,20 +51,92 @@ pub fn discover_skills() -> Vec<Skill> {
                             .to_string_lossy()
                             .to_string()
                     });
-                    let desc = extract_frontmatter_field(&content, "description")
-                        .unwrap_or_else(|| "No description provided.".to_string());
-                    let has_scripts = path.join("scripts").exists();
-                    skills.push(Skill {
-                        name,
-                        description: desc,
-                        path: skill_md.display().to_string(),
-                        has_scripts,
-                    });
+                    let norm_name = name.to_lowercase();
+                    if seen_names.insert(norm_name) {
+                        let desc = extract_frontmatter_field(&content, "description")
+                            .unwrap_or_else(|| "No description provided.".to_string());
+                        let has_scripts = path.join("scripts").is_dir();
+                        skills.push(Skill {
+                            name,
+                            description: desc,
+                            path: skill_md.display().to_string(),
+                            has_scripts,
+                        });
+                    }
+                } else {
+                    // Check one level deeper (e.g. modular-skills/benchmark-model)
+                    if let Ok(sub_entries) = fs::read_dir(&path) {
+                        for sub_entry in sub_entries.flatten() {
+                            let sub_path = sub_entry.path();
+                            if sub_path.is_dir() {
+                                let sub_skill_md = sub_path.join("SKILL.md");
+                                if sub_skill_md.is_file() {
+                                    let content = fs::read_to_string(&sub_skill_md).unwrap_or_default();
+                                    let name = extract_frontmatter_field(&content, "name").unwrap_or_else(|| {
+                                        sub_path.file_name()
+                                            .unwrap_or_default()
+                                            .to_string_lossy()
+                                            .to_string()
+                                    });
+                                    let norm_name = name.to_lowercase();
+                                    if seen_names.insert(norm_name) {
+                                        let desc = extract_frontmatter_field(&content, "description")
+                                            .unwrap_or_else(|| "No description provided.".to_string());
+                                        let has_scripts = sub_path.join("scripts").is_dir();
+                                        skills.push(Skill {
+                                            name,
+                                            description: desc,
+                                            path: sub_skill_md.display().to_string(),
+                                            has_scripts,
+                                        });
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
     }
+}
+
+pub fn discover_skills() -> Vec<Skill> {
+    let mut skills = Vec::new();
+    let mut seen_names = HashSet::new();
+    let platform = crate::platform::PlatformContext::detect();
+
+    // Priority 1: Current workspace .agents/skills and skills
+    let cwd = std::env::current_dir().unwrap_or_else(|_| platform.home_dir.clone());
+    scan_dir_for_skills(&cwd.join(".agents/skills"), &mut skills, &mut seen_names);
+    scan_dir_for_skills(&cwd.join("skills"), &mut skills, &mut seen_names);
+
+    // Priority 2: Home skills (~/skills)
+    let home_skills = platform.home_dir.join("skills");
+    scan_dir_for_skills(&home_skills, &mut skills, &mut seen_names);
+
+    // Priority 3: Home .agents/skills (~/.agents/skills)
+    let home_agents_skills = platform.home_dir.join(".agents/skills");
+    scan_dir_for_skills(&home_agents_skills, &mut skills, &mut seen_names);
+
+    // Priority 4: Gemini global config skills (~/.gemini/config/skills)
+    let gemini_skills = platform.home_dir.join(".gemini/config/skills");
+    scan_dir_for_skills(&gemini_skills, &mut skills, &mut seen_names);
+
     skills
+}
+
+pub fn format_skills_progressive_summary() -> String {
+    let skills = discover_skills();
+    if skills.is_empty() {
+        return String::new();
+    }
+
+    let mut out = String::from("\nAVAILABLE AGENT SKILLS (Progressive Disclosure):\n");
+    out.push_str("To activate and inspect full instructions for any skill, use the 'skill' tool with {\"action\": \"read\", \"name\": \"<skill_name>\"}.\n");
+    for s in skills {
+        out.push_str(&format!("- {}: {}\n", s.name, s.description));
+    }
+    out
 }
 
 pub fn format_skills_tui() -> String {
@@ -81,15 +144,14 @@ pub fn format_skills_tui() -> String {
     let mut out = String::new();
     out.push_str(&format!(
         "{}\n",
-        "=== AIEN Sovereign Skill Registry ===".cyan().bold()
-    ));
-    out.push_str(&format!(
-        "Directory: {}\n\n",
-        get_skills_dir().display().to_string().dimmed()
+        "=== AIEN Antigravity Skill Registry ===".cyan().bold()
     ));
 
     if skills.is_empty() {
-        out.push_str(&format!("{}\n", "No skills currently installed in ~/skills/. Create a folder with SKILL.md to define one.".dimmed()));
+        out.push_str(&format!(
+            "{}\n",
+            "No skills currently discovered. Create a folder with SKILL.md in ~/skills/ or .agents/skills/ to register one.".dimmed()
+        ));
         return out;
     }
 
@@ -113,19 +175,15 @@ pub fn format_skills_tui() -> String {
 }
 
 pub fn read_skill_content(name: &str) -> Result<String, String> {
-    let dir = get_skills_dir();
-    let skill_path = dir.join(name).join("SKILL.md");
-    if skill_path.exists() {
-        fs::read_to_string(&skill_path).map_err(|e| e.to_string())
-    } else {
-        // Try searching by name match
-        for s in discover_skills() {
-            if s.name.to_lowercase() == name.to_lowercase() {
-                return fs::read_to_string(&s.path).map_err(|e| e.to_string());
-            }
+    let skills = discover_skills();
+    let norm = name.trim().to_lowercase();
+
+    for s in skills {
+        if s.name.to_lowercase() == norm {
+            return fs::read_to_string(&s.path).map_err(|e| e.to_string());
         }
-        Err(format!("Skill '{}' not found in ~/skills/", name))
     }
+    Err(format!("Skill '{}' not found in discovered skill paths", name))
 }
 
 pub fn skills_dispatch_tool(args: &Value) -> Value {
@@ -184,7 +242,7 @@ pub fn run_optimize_cli(name: &str) {
     println!(
         "{}",
         format!(
-            "Starting Microsoft SkillOpt self-improvement loop for '{}'...",
+            "Starting Microsoft SkillOpt self-improvement loop for {}...",
             name
         )
         .cyan()

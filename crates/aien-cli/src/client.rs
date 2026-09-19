@@ -1,3 +1,4 @@
+use colored::Colorize;
 use futures_util::StreamExt;
 use reqwest::Client;
 use serde_json::{json, Value};
@@ -81,7 +82,8 @@ pub fn get_system_prompt() -> String {
     p.push_str("<tool_call>\n");
     p.push_str("{\"name\": \"tool_name\", \"arguments\": {\"arg\": \"val\"}}\n");
     p.push_str("</tool_call>\n\n");
-    p.push_str("When responding to the operator, output directly without tool tags.\n");
+    p.push_str("When responding to the operator, output directly without tool tags.\n\n");
+    p.push_str(&crate::skills::format_skills_progressive_summary());
     p
 }
 
@@ -153,6 +155,7 @@ impl ChatClient {
         let mut full_text = String::new();
         let mut buffer = String::new();
         let mut is_done = false;
+        let mut in_thinking = false;
 
         while let Some(chunk_result) = stream.next().await {
             let chunk = chunk_result.map_err(|e| format!("Stream error: {}", e))?;
@@ -173,11 +176,26 @@ impl ChatClient {
                         if let Some(choices) = val.get("choices").and_then(Value::as_array) {
                             if let Some(choice) = choices.first() {
                                 if let Some(delta) = choice.get("delta") {
-                                    if let Some(raw_content) =
-                                        delta.get("content").and_then(Value::as_str)
-                                    {
-                                        let sanitized =
-                                            raw_content.replace("—", ", ").replace("–", "-");
+                                    if let Some(reasoning) = delta.get("reasoning").or_else(|| delta.get("reasoning_content")).and_then(Value::as_str) {
+                                        let sanitized = reasoning.replace("—", ", ").replace("–", "-");
+                                        if stream_to_stdout {
+                                            if !in_thinking {
+                                                print!("{}", "\n[Thinking] ".magenta().dimmed());
+                                                in_thinking = true;
+                                            }
+                                            print!("{}", sanitized.dimmed());
+                                            let _ = stdout().flush();
+                                        }
+                                    }
+                                    if let Some(raw_content) = delta.get("content").and_then(Value::as_str) {
+                                        if in_thinking {
+                                            if stream_to_stdout {
+                                                print!("\n\n");
+                                                let _ = stdout().flush();
+                                            }
+                                            in_thinking = false;
+                                        }
+                                        let sanitized = raw_content.replace("—", ", ").replace("–", "-");
                                         full_text.push_str(&sanitized);
                                         if stream_to_stdout {
                                             print!("{}", sanitized);
@@ -247,6 +265,22 @@ pub fn extract_tool_calls(text: &str) -> Vec<(String, Value)> {
                     if name != "tool_name" {
                         let args = parsed.get("arguments").cloned().unwrap_or(json!({}));
                         calls.push((name.to_string(), args));
+                    }
+                }
+            }
+        }
+    }
+    if calls.is_empty() {
+        if let Ok(json_pat) = regex::Regex::new(r#"(?s)```(?:json|tool_call)?\s*(\{\s*"name"\s*:\s*"[^"]+".*?\})\s*```"#) {
+            for caps in json_pat.captures_iter(text) {
+                if let Some(json_match) = caps.get(1) {
+                    if let Some(parsed) = parse_tool_call_json(json_match.as_str()) {
+                        if let Some(name) = parsed.get("name").and_then(Value::as_str) {
+                            if name != "tool_name" {
+                                let args = parsed.get("arguments").cloned().unwrap_or(json!({}));
+                                calls.push((name.to_string(), args));
+                            }
+                        }
                     }
                 }
             }
