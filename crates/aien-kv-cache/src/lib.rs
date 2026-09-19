@@ -89,39 +89,56 @@ impl UnifiedKvTensorPool {
             return Err("Cannot allocate zero-sized KV tensor pool".to_string());
         }
 
-        // Allocate page-aligned coherent unified memory via mmap
-        let ptr = unsafe {
-            libc::mmap(
-                std::ptr::null_mut(),
-                total_bytes,
-                libc::PROT_READ | libc::PROT_WRITE,
-                libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
-                -1,
-                0,
-            )
+        // Allocate page-aligned coherent unified memory via mmap on Unix, aligned alloc on non-Unix
+        #[cfg(unix)]
+        let (base_ptr, is_mmap) = {
+            let ptr = unsafe {
+                libc::mmap(
+                    std::ptr::null_mut(),
+                    total_bytes,
+                    libc::PROT_READ | libc::PROT_WRITE,
+                    libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+                    -1,
+                    0,
+                )
+            };
+
+            if ptr == libc::MAP_FAILED {
+                return Err(format!(
+                    "Failed to mmap {} bytes for KV tensor pool: errno {}",
+                    total_bytes,
+                    std::io::Error::last_os_error()
+                ));
+            }
+
+            // Attempt memory pinning (mlock) for deterministic latency
+            unsafe {
+                let _ = libc::mlock(ptr, total_bytes);
+            }
+
+            (ptr as *mut u8, true)
         };
 
-        if ptr == libc::MAP_FAILED {
-            return Err(format!(
-                "Failed to mmap {} bytes for KV tensor pool: errno {}",
-                total_bytes,
-                std::io::Error::last_os_error()
-            ));
-        }
-
-        let base_ptr = ptr as *mut u8;
-
-        // Attempt memory pinning (mlock) for deterministic latency without page faults
-        unsafe {
-            let _ = libc::mlock(ptr, total_bytes);
-        }
+        #[cfg(not(unix))]
+        let (base_ptr, is_mmap) = {
+            let layout = std::alloc::Layout::from_size_align(total_bytes, 4096)
+                .map_err(|e| format!("Invalid memory layout: {}", e))?;
+            let ptr = unsafe { std::alloc::alloc_zeroed(layout) };
+            if ptr.is_null() {
+                return Err(format!(
+                    "Failed to allocate {} bytes for KV tensor pool",
+                    total_bytes
+                ));
+            }
+            (ptr, true)
+        };
 
         Ok(Self {
             config,
             base_ptr,
             total_bytes,
             block_bytes,
-            is_mmap: true,
+            is_mmap,
         })
     }
 
@@ -179,9 +196,16 @@ impl UnifiedKvTensorPool {
 impl Drop for UnifiedKvTensorPool {
     fn drop(&mut self) {
         if self.is_mmap && !self.base_ptr.is_null() {
+            #[cfg(unix)]
             unsafe {
                 let _ = libc::munlock(self.base_ptr as *const libc::c_void, self.total_bytes);
                 libc::munmap(self.base_ptr as *mut libc::c_void, self.total_bytes);
+            }
+            #[cfg(not(unix))]
+            unsafe {
+                if let Ok(layout) = std::alloc::Layout::from_size_align(self.total_bytes, 4096) {
+                    std::alloc::dealloc(self.base_ptr, layout);
+                }
             }
         }
     }
