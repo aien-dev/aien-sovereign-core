@@ -231,7 +231,7 @@ impl SparkMaxSession {
             SparkMaxBackend::NativeRustFallback { .. } => {
                 let h = seq_id
                     .wrapping_mul(6364136223846793005)
-                    .wrapping_add(step as u64 * 1442695040888963407);
+                    .wrapping_add((step as u64).wrapping_mul(1442695040888963407));
                 (h % 151643) as u32 + 100
             }
         }

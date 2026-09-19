@@ -158,10 +158,13 @@ impl UnifiedKvTensorPool {
     }
 
     pub fn copy_block(&mut self, src_block: BlockId, dst_block: BlockId) {
+        if src_block == dst_block || self.base_ptr.is_null() || self.block_bytes == 0 {
+            return;
+        }
         let src = self.block_ptr(src_block);
         let dst = self.block_ptr(dst_block);
         unsafe {
-            std::ptr::copy_nonoverlapping(src, dst, self.block_bytes);
+            std::ptr::copy(src, dst, self.block_bytes);
         }
     }
 
@@ -374,8 +377,13 @@ impl AienKvManager {
         // Mark reused prefix blocks
         for &block_id in &cached_prefix_blocks {
             let block = &mut self.block_pool[block_id];
+            if block.ref_count == 0 {
+                if let Some(pos) = self.free_blocks.iter().position(|&x| x == block_id) {
+                    self.free_blocks.swap_remove(pos);
+                }
+            }
             block.ref_count += 1;
-            block.is_shared = true;
+            block.is_shared = block.ref_count > 1;
             allocated_blocks.push(block_id);
         }
 

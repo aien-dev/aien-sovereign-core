@@ -29,6 +29,7 @@ dependencies = [
 name = "aien-cli"
 version = "0.1.0"
 dependencies = [
+ "aien-inference-abi",
  "async-trait",
  "chrono",
  "colored",

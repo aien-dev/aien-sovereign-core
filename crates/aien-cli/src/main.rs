@@ -130,7 +130,8 @@ async fn main() {
             return;
         }
         if args[1] == "--version" || args[1] == "-v" {
-            println!("AIEN CLI v0.1.0 (NVIDIA DGX Spark / Grace Blackwell GB10)");
+            let surface = aien_inference_abi::ExecutionSurface::detect();
+            println!("AIEN CLI v0.1.0 (Host: {})", surface.display_name());
             return;
         }
         if args[1] == "--walkthrough"

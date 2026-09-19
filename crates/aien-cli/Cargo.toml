@@ -19,4 +19,4 @@ crossterm = "0.27"
 rustyline = "14"
 async-trait = "0.1.92"
 spark-hive = { path = "../spark-hive" }
-
+aien-inference-abi = { path = "../aien-inference-abi" }
