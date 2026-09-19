@@ -72,6 +72,69 @@ pub async fn search_cortex(query: &str, limit: usize) -> Result<Vec<Value>, Stri
     Ok(Vec::new())
 }
 
+/// Automatically assembles relevant memories and procedures from Spark Cortex based on active task context.
+pub async fn assemble_cortex_recall(query: &str, limit: usize) -> Option<String> {
+    let trimmed = query.trim();
+    if trimmed.len() < 3 {
+        return None;
+    }
+
+    // Clean query: take first 150 chars or first line to avoid giant search strings
+    let clean_query = if let Some(idx) = trimmed.find('\n') {
+        &trimmed[..idx]
+    } else if trimmed.len() > 150 {
+        &trimmed[..150]
+    } else {
+        trimmed
+    };
+
+    match search_cortex(clean_query, limit).await {
+        Ok(items) if !items.is_empty() => {
+            let mut recall_entries = Vec::new();
+            for it in items {
+                let name = it.get("canonicalName").and_then(Value::as_str).unwrap_or("Untitled");
+                let score = it.get("score").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                let content = it.get("content").and_then(Value::as_str).unwrap_or("");
+                let kind = it.get("entityType").and_then(Value::as_str).unwrap_or("memory");
+
+                if score >= 0.05 {
+                    let snippet = if content.len() > 300 { &content[..300] } else { content };
+                    recall_entries.push(format!("• [{}] {} (relevance: {:.2}):\n  {}", kind, name, score, snippet.trim()));
+                }
+            }
+
+            if recall_entries.is_empty() {
+                return None;
+            }
+
+            Some(format!(
+                "<cortex-recall>\nVerified durable knowledge recalled from Spark Cortex:\n{}\n</cortex-recall>",
+                recall_entries.join("\n")
+            ))
+        }
+        _ => None,
+    }
+}
+
+/// Asynchronously capture an action outcome or lesson into Spark Cortex without blocking execution.
+pub fn trigger_background_capture(action: &str, target: &str, details: &str) {
+    let action_owned = action.to_string();
+    let target_owned = target.to_string();
+    let details_owned = details.to_string();
+
+    tokio::spawn(async move {
+        let canonical_name = format!("discovery-{}-{}", action_owned.replace(" ", "-"), chrono::Utc::now().timestamp());
+        let content = format!("Autonomous action '{}' executed on target '{}'. Summary: {}", action_owned, target_owned, details_owned);
+        let metadata = json!({
+            "source": "aien-cli-auto-capture",
+            "action": action_owned,
+            "target": target_owned,
+            "timestamp": chrono::Utc::now().to_rfc3339()
+        });
+        let _ = write_to_cortex(&canonical_name, &content, "discovery", metadata).await;
+    });
+}
+
 pub async fn handle_cortex_command(parts: &[&str]) {
     if parts.is_empty() {
         println!("Usage: /cortex [search <query> | write <name> | <content>]");

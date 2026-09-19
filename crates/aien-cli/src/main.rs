@@ -36,7 +36,7 @@ async fn main() {
     let args: Vec<String> = env::args().collect();
 
     if args.len() > 1 {
-                        if args[1] == "--adapter" || args[1] == "adapter" || args[1] == "--adapters" {
+        if args[1] == "--adapter" || args[1] == "adapter" || args[1] == "--adapters" {
             let cmd = if args.len() > 2 { format!("/adapter {}", args[2..].join(" ")) } else { "/adapter".to_string() };
             let _ = handle_slash_command(&cmd).await;
             return;
@@ -182,7 +182,11 @@ async fn main() {
                     }
                 }
 
-                messages.push(json!({"role": "user", "content": trimmed}));
+                let mut user_turn = trimmed.to_string();
+                let hook_registry = crate::hooks::HookRegistry::default_sovereign_registry();
+                let _ = hook_registry.run_pre_turn(&mut user_turn).await;
+
+                messages.push(json!({"role": "user", "content": user_turn}));
 
                 let compactor = crate::compaction::ContextCompactor::default();
                 if let Some(stats) = compactor.compact_if_needed(&mut messages) {
@@ -196,7 +200,7 @@ async fn main() {
                     max_tool_steps -= 1;
 
                     print!("\n{}", "AIEN: ".magenta().bold());
-                    let assistant_resp = match client.stream_turn(&messages, true).await {
+                    let mut assistant_resp = match client.stream_turn(&messages, true).await {
                         Ok(text) => text,
                         Err(e) => {
                             println!("\n{}", format!("Error during inference: {}", e).red().bold());
@@ -204,13 +208,14 @@ async fn main() {
                         }
                     };
 
-                    messages.push(json!({"role": "assistant", "content": assistant_resp}));
+                    hook_registry.run_post_turn(&mut assistant_resp).await;
+                    messages.push(json!({"role": "assistant", "content": assistant_resp.clone()}));
 
-            let compactor = crate::compaction::ContextCompactor::default();
-            if let Some(stats) = compactor.compact_if_needed(&mut messages) {
-                println!("{}", format!("  ⚡ ContextCompactor: Pruned {} bytes across {} turns (tokens: {} -> {})",
-                    stats.pruned_tool_bytes, stats.pruned_messages_count, stats.initial_tokens, stats.compacted_tokens).cyan().dimmed());
-            }
+                    let compactor = crate::compaction::ContextCompactor::default();
+                    if let Some(stats) = compactor.compact_if_needed(&mut messages) {
+                        println!("{}", format!("  ⚡ ContextCompactor: Pruned {} bytes across {} turns (tokens: {} -> {})",
+                            stats.pruned_tool_bytes, stats.pruned_messages_count, stats.initial_tokens, stats.compacted_tokens).cyan().dimmed());
+                    }
 
                     let tool_calls = extract_tool_calls(&assistant_resp);
                     if !tool_calls.is_empty() {
@@ -258,16 +263,20 @@ async fn run_single_prompt(prompt: &str) {
     // Mandatory Nesting Ritual: Required at startup across all modes
     let nesting = perform_nesting_ritual(&session_id, true).await;
 
+    let mut turn_prompt = prompt.to_string();
+    let hook_registry = crate::hooks::HookRegistry::default_sovereign_registry();
+    let _ = hook_registry.run_pre_turn(&mut turn_prompt).await;
+
     let client = ChatClient::new(None, None);
     let mut messages = vec![
         json!({"role": "system", "content": get_system_prompt()}),
-        json!({"role": "user", "content": format!("<system_grounding>\n{}\n</system_grounding>\n{}", nesting.grounding_context, prompt)})
+        json!({"role": "user", "content": format!("<system_grounding>\n{}\n</system_grounding>\n{}", nesting.grounding_context, turn_prompt)})
     ];
 
     let mut max_tool_steps = 10;
     while max_tool_steps > 0 {
         max_tool_steps -= 1;
-        let assistant_resp = match client.stream_turn(&messages, true).await {
+        let mut assistant_resp = match client.stream_turn(&messages, true).await {
             Ok(text) => text,
             Err(e) => {
                 eprintln!("Error: {}", e);
@@ -275,7 +284,8 @@ async fn run_single_prompt(prompt: &str) {
             }
         };
 
-        messages.push(json!({"role": "assistant", "content": assistant_resp}));
+        hook_registry.run_post_turn(&mut assistant_resp).await;
+        messages.push(json!({"role": "assistant", "content": assistant_resp.clone()}));
 
         let tool_calls = extract_tool_calls(&assistant_resp);
         if !tool_calls.is_empty() {
@@ -295,7 +305,6 @@ async fn run_single_prompt(prompt: &str) {
     let session_path = sessions_dir.join(format!("{}.json", session_id));
     let _ = fs::write(&session_path, serde_json::to_string_pretty(&messages).unwrap_or_default());
 }
-
 
 pub async fn run_autonomous_goal(goal_id: &str) {
     let manifest = goals::load_goals();
@@ -322,20 +331,24 @@ pub async fn run_autonomous_goal(goal_id: &str) {
 
         println!("{}", format!("\n▶ Commencing Milestone {}: {}", m.id, m.description).yellow().bold());
 
+        let mut task_directive = format!(
+            "<system_grounding>\n{}\n</system_grounding>\nAUTONOMOUS TASK DIRECTIVE:\nGoal: '{}' (ID: {})\nActive Milestone {}: {}\n\nExecute the necessary commands, write/edit files, run verifications, and accomplish this milestone.\nWhen verified, use the 'goal' tool with action 'milestone_done' (id: \"{}\", milestone_id: {}) and write any durable lesson learned with the 'cortex' tool.\nBegin now.",
+            nesting.grounding_context,
+            goal.title,
+            goal.id,
+            m.id,
+            m.description,
+            goal.id,
+            m.id
+        );
+        let hook_registry = crate::hooks::HookRegistry::default_sovereign_registry();
+        let _ = hook_registry.run_pre_turn(&mut task_directive).await;
+
         let mut messages = vec![
             json!({"role": "system", "content": get_system_prompt()}),
             json!({
                 "role": "user",
-                "content": format!(
-                    "<system_grounding>\n{}\n</system_grounding>\nAUTONOMOUS TASK DIRECTIVE:\nGoal: '{}' (ID: {})\nActive Milestone {}: {}\n\nExecute the necessary commands, write/edit files, run verifications, and accomplish this milestone.\nWhen verified, use the 'goal' tool with action 'milestone_done' (id: \"{}\", milestone_id: {}) and write any durable lesson learned with the 'cortex' tool.\nBegin now.",
-                    nesting.grounding_context,
-                    goal.title,
-                    goal.id,
-                    m.id,
-                    m.description,
-                    goal.id,
-                    m.id
-                )
+                "content": task_directive
             })
         ];
 
@@ -345,7 +358,7 @@ pub async fn run_autonomous_goal(goal_id: &str) {
         while max_tool_steps > 0 {
             max_tool_steps -= 1;
             print!("\n{}", format!("AIEN [Milestone {}]: ", m.id).magenta().bold());
-            let assistant_resp = match client.stream_turn(&messages, true).await {
+            let mut assistant_resp = match client.stream_turn(&messages, true).await {
                 Ok(text) => text,
                 Err(e) => {
                     eprintln!("Inference error: {}", e);
@@ -353,7 +366,8 @@ pub async fn run_autonomous_goal(goal_id: &str) {
                 }
             };
 
-            messages.push(json!({"role": "assistant", "content": assistant_resp}));
+            hook_registry.run_post_turn(&mut assistant_resp).await;
+            messages.push(json!({"role": "assistant", "content": assistant_resp.clone()}));
 
             let tool_calls = extract_tool_calls(&assistant_resp);
             if !tool_calls.is_empty() {

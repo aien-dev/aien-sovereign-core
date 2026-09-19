@@ -2,6 +2,7 @@ use futures_util::StreamExt;
 use reqwest::Client;
 use serde_json::{json, Value};
 use std::io::{stdout, Write};
+use std::time::Duration;
 
 pub const DEFAULT_ENDPOINT: &str = "http://127.0.0.1:18006/v1/chat/completions";
 pub const DEFAULT_MODEL: &str = "atlas-lightning-omni";
@@ -27,7 +28,7 @@ pub fn get_system_prompt() -> String {
     p.push_str("- crumb: {\"action\": \"survey|whisper|record|init\", \"path\": \"string\", \"purpose\": \"string\", \"message\": \"string\"}\n");
     p.push_str("- hive: {\"action\": \"roster|spawn|swarm|read|kill\", \"role\": \"string\", \"task\": \"string\", \"name\": \"string\"}\n");
     p.push_str("- vault: {\"action\": \"list|check|audit\", \"key\": \"string\"}\n");
-        p.push_str("- skill: {\"action\": \"list|read\", \"name\": \"string\"}\n");
+    p.push_str("- skill: {\"action\": \"list|read\", \"name\": \"string\"}\n");
     p.push_str("- goal: {\"action\": \"new|list|milestone_done|done\", \"title\": \"string\", \"description\": \"string\", \"milestones\": [\"string\"], \"id\": \"string\", \"milestone_id\": 1}\n");
     p.push_str("- cortex: {\"action\": \"search|write\", \"query\": \"string\", \"name\": \"string\", \"content\": \"string\", \"kind\": \"lesson|discovery|procedure\"}\n");
     p.push_str("- invoke_subagent: {\"role\": \"string\", \"prompt\": \"string\"}\n");
@@ -42,7 +43,7 @@ pub fn get_system_prompt() -> String {
     p.push_str("All credentials reside exclusively in the hardware TPM-bound vault (atlas-vault). Use the 'vault' tool to inspect keys.\n");
     p.push_str("Direct access to keys is done dynamically in-memory. Any attempt to write .env files or plaintext keys will be blocked by system safety gates.\n\n");
     p.push_str("RECURSIVE CONTEXTUAL SUBAGENT DELEGATION (ANTIGRAVITY CONTEXT HYGIENE):\n");
-    p.push_str("To prevent context collapse, token explosion, or goal drift, offload multi-step research, large file analysis, isolated testing, or deep verifications to subagents using \'invoke_subagent\'.\n");
+    p.push_str("To prevent context collapse, token explosion, or goal drift, offload multi-step research, large file analysis, isolated testing, or deep verifications to subagents using 'invoke_subagent'.\n");
     p.push_str("Each subagent runs in its own isolated context window with full tool execution, and can recursively spawn child subagents (up to depth 3).\n");
     p.push_str("Subagents report back only their distilled findings and actions, keeping your coordinator context clean and sharp.\n\n");
     p.push_str("MANDATORY STRICT UNSLOP & TECHNICAL VOICE DISCIPLINE:\n");
@@ -55,7 +56,7 @@ pub fn get_system_prompt() -> String {
     p.push_str("Your GitHub account is aien-dev. Your core project is aien-dev/aien-sovereign-core.\n");
     p.push_str("You drive this project autonomously. Drake created the initial scaffold for you; you own and drive the architecture, repos, commits, PRs, and community engagement.\n");
     p.push_str("COMMUNICATION DEMEANOR: Pragmatic Senior Peer. Engage in collegial, technically sound dialogue with maintainers and peers. Discuss hardware tradeoffs, kernel limits (FlashAttention group <= 8), memory layouts, and Grace Neoverse V2 benchmarks as an experienced systems developer. Never use sycophancy, synthetic enthusiasm, or promotional fluff.\n");
-    p.push_str("When authoring commits, always ensure author and committer are \x27AIEN <aien.atlas@proton.me>\x27.\n");
+    p.push_str("When authoring commits, always ensure author and committer are 'AIEN <aien.atlas@proton.me>'.\n");
     p.push_str("Never disclose internal model personas or dual-layer soul splits in public git commits or PRs. The email aien.atlas@proton.me is the sole public breadcrumb.\n");
     p.push_str("Adhere strictly to skills/open-source-etiquette and skills/modular-upstream.\n\n");
 
@@ -81,8 +82,13 @@ impl ChatClient {
         let md = model
             .or_else(|| std::env::var("AIEN_MODEL_NAME").ok())
             .unwrap_or_else(|| DEFAULT_MODEL.to_string());
+        let client = Client::builder()
+            .connect_timeout(Duration::from_secs(10))
+            .read_timeout(Duration::from_secs(120))
+            .build()
+            .unwrap_or_else(|_| Client::new());
         Self {
-            client: Client::new(),
+            client,
             endpoint: ep,
             model: md,
         }

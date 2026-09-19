@@ -1,9 +1,13 @@
 use std::path::Path;
 use std::process::Command;
+use std::sync::{LazyLock, Mutex, RwLock};
 use regex::Regex;
 use serde_json::{json, Value};
 
 const VAULT_BIN: &str = "/home/drakestapleton/.local/bin/atlas-vault";
+
+static VAULT_SECRET_CACHE: LazyLock<RwLock<Option<Vec<(String, String)>>>> = LazyLock::new(|| RwLock::new(None));
+static VAULT_MUTEX: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
 pub fn is_vault_available() -> bool {
     Path::new(VAULT_BIN).is_file()
@@ -57,18 +61,52 @@ pub fn get_secret(key: &str) -> Result<String, String> {
     Ok(secret)
 }
 
+pub fn get_cached_vault_secrets() -> Vec<(String, String)> {
+    if cfg!(test) {
+        return Vec::new();
+    }
+
+    if let Ok(read) = VAULT_SECRET_CACHE.read() {
+        if let Some(ref cache) = *read {
+            return cache.clone();
+        }
+    }
+
+    let _guard = match VAULT_MUTEX.lock() {
+        Ok(g) => g,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+
+    if let Ok(read) = VAULT_SECRET_CACHE.read() {
+        if let Some(ref cache) = *read {
+            return cache.clone();
+        }
+    }
+
+    let keys = list_keys();
+    let mut entries = Vec::new();
+    for key in keys {
+        if let Ok(val) = get_secret(&key) {
+            if val.len() >= 6 {
+                entries.push((key, val));
+            }
+        }
+    }
+
+    if let Ok(mut write) = VAULT_SECRET_CACHE.write() {
+        *write = Some(entries.clone());
+    }
+    entries
+}
+
 /// Scrub text to ensure zero secret values or raw token patterns are printed.
 pub fn redact_secrets(input: &str) -> String {
     let mut result = input.to_string();
 
-    // 1. Scrub actual values of known vault keys (only for keys with >= 6 chars)
-    let keys = list_keys();
-    for key in keys {
-        if let Ok(val) = get_secret(&key) {
-            if val.len() >= 6 {
-                result = result.replace(&val, &format!("[REDACTED_BY_ATLAS_VAULT:{}]", key));
-            }
-        }
+    // 1. Scrub actual values of known vault keys from memory cache
+    let secrets = get_cached_vault_secrets();
+    for (key, val) in &secrets {
+        result = result.replace(val, &format!("[REDACTED_BY_ATLAS_VAULT:{}]", key));
     }
 
     // 2. Scrub standard API key patterns

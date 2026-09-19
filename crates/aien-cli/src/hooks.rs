@@ -88,6 +88,8 @@ impl HookRegistry {
         reg.register(Arc::new(VaultRedactionHook));
         reg.register(Arc::new(CrumbAutoTrackingHook));
         reg.register(Arc::new(CompilerDiagnosticsHook));
+        reg.register(Arc::new(CortexRecallHook));
+        reg.register(Arc::new(CortexLearningCaptureHook));
         reg
     }
 }
@@ -182,6 +184,52 @@ impl AgentHook for CompilerDiagnosticsHook {
             }
         }
         None
+    }
+}
+
+/// 5. Cortex Recall Hook: Automatically queries Spark Cortex and injects relevant memories into turn
+pub struct CortexRecallHook;
+
+#[async_trait]
+impl AgentHook for CortexRecallHook {
+    fn name(&self) -> &'static str {
+        "CortexRecallHook"
+    }
+
+    async fn pre_turn(&self, prompt: &mut String) -> Result<(), String> {
+        if let Some(recall) = crate::cortex::assemble_cortex_recall(prompt, 3).await {
+            *prompt = format!("{}\n\n{}", recall, prompt);
+        }
+        Ok(())
+    }
+}
+
+/// 6. Cortex Learning Capture Hook: Automatically records meaningful actions and verifications into Cortex
+pub struct CortexLearningCaptureHook;
+
+#[async_trait]
+impl AgentHook for CortexLearningCaptureHook {
+    fn name(&self) -> &'static str {
+        "CortexLearningCaptureHook"
+    }
+
+    async fn post_tool(&self, tool: &str, args: &Value, result: &mut Value) {
+        match tool {
+            "write_to_file" | "replace_file_content" => {
+                let path = args.get("path").and_then(Value::as_str).unwrap_or("");
+                let intent = args.get("intent").and_then(Value::as_str).unwrap_or("File modified");
+                if !path.is_empty() {
+                    crate::cortex::trigger_background_capture("file_write", path, intent);
+                }
+            },
+            "run_command" => {
+                let cmd = args.get("command").and_then(Value::as_str).unwrap_or("");
+                if (cmd.contains("cargo build") || cmd.contains("cargo check") || cmd.contains("gh repo") || cmd.contains("git commit")) && result.get("error").is_none() {
+                    crate::cortex::trigger_background_capture("command_success", cmd, "Command verified cleanly");
+                }
+            },
+            _ => {}
+        }
     }
 }
 
