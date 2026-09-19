@@ -8,7 +8,10 @@ description = "High-level safe Rust client for Modular MAX execution via native 
 
 [dependencies]
 spark-max-cabi = { path = "../spark-max-cabi" }
+aien-inference-abi = { path = "../aien-inference-abi" }
+async-trait = "0.1"
 tracing = "0.1"
 
 [dev-dependencies]
 tempfile = "3.17"
+tokio = { version = "1.37", features = ["full"] }

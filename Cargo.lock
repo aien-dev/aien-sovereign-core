@@ -48,6 +48,7 @@ name = "aien-inference-abi"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "reqwest 0.12.28",
  "serde",
  "serde_json",
  "tokio",
@@ -58,6 +59,7 @@ name = "aien-kv-cache"
 version = "0.1.0"
 dependencies = [
  "aien-inference-abi",
+ "libc",
  "parking_lot",
  "serde",
 ]
@@ -73,6 +75,7 @@ dependencies = [
  "reqwest 0.12.28",
  "serde",
  "serde_json",
+ "spark-max-rs",
  "tokio",
 ]
 
@@ -3188,8 +3191,11 @@ dependencies = [
 name = "spark-max-rs"
 version = "0.1.0"
 dependencies = [
+ "aien-inference-abi",
+ "async-trait",
  "spark-max-cabi",
  "tempfile",
+ "tokio",
  "tracing",
 ]
 

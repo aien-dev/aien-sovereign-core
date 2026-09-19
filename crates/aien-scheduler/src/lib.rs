@@ -12,7 +12,9 @@ pub struct SchedulerConfig {
     pub max_batch_size: usize,
     pub max_batch_tokens: usize,
     pub max_prefill_tokens: usize,
+    pub prefill_chunk_size: usize,
     pub chunk_prefill: bool,
+    pub watermark_blocks: usize,
 }
 
 impl Default for SchedulerConfig {
@@ -21,7 +23,9 @@ impl Default for SchedulerConfig {
             max_batch_size: 64,
             max_batch_tokens: 4096,
             max_prefill_tokens: 2048,
+            prefill_chunk_size: 512,
             chunk_prefill: true,
+            watermark_blocks: 4,
         }
     }
 }
@@ -30,6 +34,7 @@ impl Default for SchedulerConfig {
 pub struct RunningSequence {
     pub request: SequenceRequest,
     pub tokens_generated: usize,
+    pub prompt_tokens_prefilled: usize,
     pub is_prefilled: bool,
 }
 
@@ -42,6 +47,7 @@ pub struct SchedulerMetrics {
     pub total_prefill_tokens: u64,
     pub total_decode_tokens: u64,
     pub avg_step_latency_us: f64,
+    pub chunked_prefill_steps: u64,
 }
 
 pub struct AienScheduler {
@@ -68,32 +74,29 @@ impl AienScheduler {
     }
 
     pub fn submit_request(&mut self, request: SequenceRequest) {
-        // Higher priority requests placed toward front
-        let insert_idx = self
-            .waiting_queue
-            .iter()
-            .position(|r| r.priority < request.priority)
-            .unwrap_or(self.waiting_queue.len());
-        self.waiting_queue.insert(insert_idx, request);
+        self.waiting_queue.push_back(request);
     }
 
     pub fn waiting_count(&self) -> usize {
         self.waiting_queue.len()
     }
 
+    pub fn preempted_count(&self) -> usize {
+        self.preempted_queue.len()
+    }
+
     pub fn running_count(&self) -> usize {
         self.running_sequences.len()
     }
 
-    /// Forks an existing running sequence for instant zero-copy subagent branching.
+    /// Zero-copy subagent sequence branching
     pub fn fork_subagent(&mut self, parent_id: u64, child_id: u64) -> Result<(), String> {
         let parent = self
             .running_sequences
             .get(&parent_id)
-            .ok_or_else(|| format!("Parent sequence {} not found in running set", parent_id))?
+            .ok_or_else(|| format!("Parent sequence {} not found in running pool", parent_id))?
             .clone();
 
-        // Fork in KV manager
         {
             let mut kv = self.kv_manager.write();
             kv.fork_sequence(parent_id, child_id)?;
@@ -107,91 +110,204 @@ impl AienScheduler {
             RunningSequence {
                 request: child_req,
                 tokens_generated: parent.tokens_generated,
-                is_prefilled: true,
+                prompt_tokens_prefilled: parent.prompt_tokens_prefilled,
+                is_prefilled: parent.is_prefilled,
             },
         );
 
         Ok(())
     }
 
-    /// Constructs the next batch according to token budgets and available KV memory.
+    /// Builds the next scheduled batch enforcing chunked prefill budgets and watermark preemption.
     pub fn build_scheduled_batch(&mut self) -> Result<Option<ScheduledBatch>, String> {
-        if self.running_sequences.is_empty()
-            && self.preempted_queue.is_empty()
-            && self.waiting_queue.is_empty()
-        {
-            return Ok(None);
-        }
-
         self.step_id += 1;
         let mut prefill_requests = Vec::new();
         let mut decode_requests = Vec::new();
         let mut block_tables = HashMap::new();
 
-        let mut remaining_batch_tokens = self.config.max_batch_tokens;
-        let mut remaining_prefill_tokens = self.config.max_prefill_tokens;
+        let mut current_tokens = 0;
+        let mut prefill_budget = self.config.max_prefill_tokens;
 
-        // 1. Prioritize ongoing decodes (Continuous Batching)
-        let running_ids: Vec<u64> = self.running_sequences.keys().copied().collect();
-        for req_id in running_ids {
-            if remaining_batch_tokens == 0 {
-                break;
-            }
-            if let Some(table) = self.kv_manager.read().get_block_table(req_id) {
-                decode_requests.push(req_id);
-                block_tables.insert(req_id, table.block_ids.clone());
-                remaining_batch_tokens = remaining_batch_tokens.saturating_sub(1);
+        // 1. Watermark Memory Pressure Check: Preempt if below watermark
+        let mut is_under_memory_pressure = false;
+        {
+            let kv = self.kv_manager.read();
+            let available = kv.available_blocks();
+            if available < self.config.watermark_blocks && !self.running_sequences.is_empty() {
+                is_under_memory_pressure = true;
+                // Find lowest priority running sequence to preempt
+                let mut candidates: Vec<(u64, u8)> = self
+                    .running_sequences
+                    .iter()
+                    .map(|(&id, seq)| (id, seq.request.priority))
+                    .collect();
+                candidates.sort_by_key(|c| c.1); // lowest priority first
+
+                if let Some((preempt_id, _)) = candidates.first() {
+                    let preempt_id = *preempt_id;
+                    drop(kv); // release lock before write
+                    if let Some(running) = self.running_sequences.remove(&preempt_id) {
+                        self.kv_manager.write().free_sequence(preempt_id);
+                        self.preempted_queue.push_back(running.request);
+                        self.metrics.preempted_requests += 1;
+                    }
+                }
             }
         }
 
-        // 2. Admit preempted or waiting requests if batch capacity and KV blocks allow
-        while !self.preempted_queue.is_empty() || !self.waiting_queue.is_empty() {
-            if self.running_sequences.len() >= self.config.max_batch_size {
+        // 2. Schedule active decode sequences (and sequences in intermediate chunked prefill)
+        let mut running_ids: Vec<u64> = self.running_sequences.keys().copied().collect();
+        running_ids.sort(); // deterministic ordering
+
+        for seq_id in running_ids {
+            if decode_requests.len() + prefill_requests.len() >= self.config.max_batch_size {
+                break;
+            }
+            if current_tokens >= self.config.max_batch_tokens {
                 break;
             }
 
-            let next_req = if let Some(preempted) = self.preempted_queue.pop_front() {
-                preempted
-            } else if let Some(waiting) = self.waiting_queue.pop_front() {
-                waiting
-            } else {
-                break;
-            };
+            let seq = self.running_sequences.get_mut(&seq_id).unwrap();
 
-            let req_tokens = next_req.prompt_tokens.len();
-            if req_tokens > remaining_batch_tokens || req_tokens > remaining_prefill_tokens {
-                // Token budget exhausted for this step, return to front of waiting queue
-                self.waiting_queue.push_front(next_req);
-                break;
-            }
-
-            // Attempt KV allocation
-            let alloc_result = {
-                let mut kv = self.kv_manager.write();
-                kv.allocate_sequence(next_req.request_id, &next_req.prompt_tokens)
-            };
-
-            match alloc_result {
-                Ok(blocks) => {
-                    block_tables.insert(next_req.request_id, blocks);
-                    remaining_batch_tokens = remaining_batch_tokens.saturating_sub(req_tokens);
-                    remaining_prefill_tokens = remaining_prefill_tokens.saturating_sub(req_tokens);
-
-                    self.running_sequences.insert(
-                        next_req.request_id,
-                        RunningSequence {
-                            request: next_req.clone(),
-                            tokens_generated: 0,
-                            is_prefilled: false,
-                        },
-                    );
-                    prefill_requests.push(next_req);
-                    self.metrics.admitted_requests += 1;
+            if seq.is_prefilled {
+                // Active decode step
+                if let Some(table) = self.kv_manager.read().get_block_table(seq_id) {
+                    block_tables.insert(seq_id, table.block_ids.clone());
+                    decode_requests.push(seq_id);
+                    current_tokens += 1;
                 }
-                Err(_) => {
-                    // KV cache full, return request to waiting queue
-                    self.waiting_queue.push_front(next_req);
+            } else {
+                // Continuing chunked prefill for already admitted sequence
+                let total_prompt_len = seq.request.prompt_tokens.len();
+                let remaining = total_prompt_len.saturating_sub(seq.prompt_tokens_prefilled);
+                let chunk_size = std::cmp::min(remaining, self.config.prefill_chunk_size);
+                let chunk_size = std::cmp::min(chunk_size, prefill_budget);
+
+                if chunk_size > 0 {
+                    let start = seq.prompt_tokens_prefilled;
+                    let end = start + chunk_size;
+                    let chunk_tokens = seq.request.prompt_tokens[start..end].to_vec();
+
+                    let mut chunk_req = seq.request.clone();
+                    chunk_req.prompt_tokens = chunk_tokens;
+
+                    if let Some(table) = self.kv_manager.read().get_block_table(seq_id) {
+                        block_tables.insert(seq_id, table.block_ids.clone());
+                    }
+
+                    prefill_requests.push(chunk_req);
+                    current_tokens += chunk_size;
+                    prefill_budget = prefill_budget.saturating_sub(chunk_size);
+                    self.metrics.chunked_prefill_steps += 1;
+                }
+            }
+        }
+
+        // Only admit new or preempted requests if memory pressure is clear
+        if !is_under_memory_pressure {
+            // 3. Admit preempted requests first (starvation protection)
+            while let Some(req) = self.preempted_queue.pop_front() {
+                if decode_requests.len() + prefill_requests.len() >= self.config.max_batch_size {
+                    self.preempted_queue.push_front(req);
                     break;
+                }
+
+                let prompt_len = req.prompt_tokens.len();
+                let chunk_size = if self.config.chunk_prefill {
+                    std::cmp::min(prompt_len, self.config.prefill_chunk_size)
+                } else {
+                    prompt_len
+                };
+
+                if chunk_size > prefill_budget || current_tokens + chunk_size > self.config.max_batch_tokens {
+                    self.preempted_queue.push_front(req);
+                    break;
+                }
+
+                let alloc_result = {
+                    let mut kv = self.kv_manager.write();
+                    kv.allocate_sequence(req.request_id, &req.prompt_tokens)
+                };
+
+                match alloc_result {
+                    Ok(block_ids) => {
+                        block_tables.insert(req.request_id, block_ids);
+                        let mut chunk_req = req.clone();
+                        chunk_req.prompt_tokens = req.prompt_tokens[0..chunk_size].to_vec();
+
+                        let is_fully_prefilled = chunk_size == prompt_len;
+                        self.running_sequences.insert(
+                            req.request_id,
+                            RunningSequence {
+                                request: req,
+                                tokens_generated: 0,
+                                prompt_tokens_prefilled: 0,
+                                is_prefilled: is_fully_prefilled,
+                            },
+                        );
+
+                        prefill_requests.push(chunk_req);
+                        current_tokens += chunk_size;
+                        prefill_budget = prefill_budget.saturating_sub(chunk_size);
+                        self.metrics.admitted_requests += 1;
+                    }
+                    Err(_) => {
+                        self.preempted_queue.push_front(req);
+                        break;
+                    }
+                }
+            }
+
+            // 4. Admit new waiting requests
+            while let Some(req) = self.waiting_queue.pop_front() {
+                if decode_requests.len() + prefill_requests.len() >= self.config.max_batch_size {
+                    self.waiting_queue.push_front(req);
+                    break;
+                }
+
+                let prompt_len = req.prompt_tokens.len();
+                let chunk_size = if self.config.chunk_prefill {
+                    std::cmp::min(prompt_len, self.config.prefill_chunk_size)
+                } else {
+                    prompt_len
+                };
+
+                if chunk_size > prefill_budget || current_tokens + chunk_size > self.config.max_batch_tokens {
+                    self.waiting_queue.push_front(req);
+                    break;
+                }
+
+                let alloc_result = {
+                    let mut kv = self.kv_manager.write();
+                    kv.allocate_sequence(req.request_id, &req.prompt_tokens)
+                };
+
+                match alloc_result {
+                    Ok(block_ids) => {
+                        block_tables.insert(req.request_id, block_ids);
+                        let mut chunk_req = req.clone();
+                        chunk_req.prompt_tokens = req.prompt_tokens[0..chunk_size].to_vec();
+
+                        let is_fully_prefilled = chunk_size == prompt_len;
+                        self.running_sequences.insert(
+                            req.request_id,
+                            RunningSequence {
+                                request: req,
+                                tokens_generated: 0,
+                                prompt_tokens_prefilled: 0,
+                                is_prefilled: is_fully_prefilled,
+                            },
+                        );
+
+                        prefill_requests.push(chunk_req);
+                        current_tokens += chunk_size;
+                        prefill_budget = prefill_budget.saturating_sub(chunk_size);
+                        self.metrics.admitted_requests += 1;
+                    }
+                    Err(_) => {
+                        self.waiting_queue.push_front(req);
+                        break;
+                    }
                 }
             }
         }
@@ -222,8 +338,19 @@ impl AienScheduler {
         let (outputs, metrics) = backend.execute_step(&batch).await?;
         let step_latency = t0.elapsed().as_micros() as u64;
 
-        // Process outputs and manage KV state
         let mut final_outputs = Vec::new();
+
+        // Update prefill progress for chunked sequences
+        for prefill_req in &batch.prefill_requests {
+            if let Some(seq) = self.running_sequences.get_mut(&prefill_req.request_id) {
+                if !seq.is_prefilled {
+                    seq.prompt_tokens_prefilled += prefill_req.prompt_tokens.len();
+                    if seq.prompt_tokens_prefilled >= seq.request.prompt_tokens.len() {
+                        seq.is_prefilled = true;
+                    }
+                }
+            }
+        }
 
         for output in outputs {
             match output {
@@ -235,29 +362,31 @@ impl AienScheduler {
                     let mut is_finished = false;
                     let mut finish_reason = FinishReason::StopToken;
                     let mut total_tokens = 0;
+                    let mut should_emit_token = false;
 
                     if let Some(seq) = self.running_sequences.get_mut(&request_id) {
-                        seq.is_prefilled = true;
-                        seq.tokens_generated += 1;
-                        total_tokens = seq.tokens_generated;
+                        if seq.is_prefilled {
+                            should_emit_token = true;
+                            seq.tokens_generated += 1;
+                            total_tokens = seq.tokens_generated;
 
-                        if seq.request.sampling_params.stop_token_ids.contains(&token_id) {
-                            is_finished = true;
-                            finish_reason = FinishReason::StopToken;
-                        } else if seq.tokens_generated >= seq.request.sampling_params.max_tokens {
-                            is_finished = true;
-                            finish_reason = FinishReason::LengthLimit;
-                        } else {
-                            // Append token in KV manager
-                            let append_result = {
-                                let mut kv = self.kv_manager.write();
-                                kv.append_token(request_id)
-                            };
-
-                            if append_result.is_err() {
-                                // KV cache pressure: preempt sequence
+                            if seq.request.sampling_params.stop_token_ids.contains(&token_id) {
                                 is_finished = true;
-                                finish_reason = FinishReason::Preempted;
+                                finish_reason = FinishReason::StopToken;
+                            } else if seq.tokens_generated >= seq.request.sampling_params.max_tokens {
+                                is_finished = true;
+                                finish_reason = FinishReason::LengthLimit;
+                            } else {
+                                // Append token in KV manager
+                                let append_result = {
+                                    let mut kv = self.kv_manager.write();
+                                    kv.append_token(request_id)
+                                };
+
+                                if append_result.is_err() {
+                                    is_finished = true;
+                                    finish_reason = FinishReason::Preempted;
+                                }
                             }
                         }
                     }
@@ -279,7 +408,7 @@ impl AienScheduler {
                             reason: finish_reason,
                             total_tokens,
                         });
-                    } else {
+                    } else if should_emit_token {
                         final_outputs.push(DecodeOutput::Token {
                             request_id,
                             token_id,
@@ -379,34 +508,99 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_scheduler_subagent_fork() {
+    async fn test_chunked_prefill_segmentation() {
         let kv_manager = create_shared_kv_manager(100, 16);
-        let config = SchedulerConfig::default();
-        let mut scheduler = AienScheduler::new(config, kv_manager.clone());
-        let mut backend = MockInferenceBackend::new(5);
+        let config = SchedulerConfig {
+            max_batch_size: 16,
+            max_batch_tokens: 1024,
+            max_prefill_tokens: 512,
+            prefill_chunk_size: 64, // 64 token chunks
+            chunk_prefill: true,
+            watermark_blocks: 2,
+        };
+        let mut scheduler = AienScheduler::new(config, kv_manager);
+        let mut backend = MockInferenceBackend::new(1);
 
-        let parent_req = SequenceRequest {
-            request_id: 10,
-            prompt_tokens: vec![1, 2, 3, 4, 5],
+        // 128 tokens prompt -> should segment into 2 chunks of 64 tokens
+        let req = SequenceRequest {
+            request_id: 100,
+            prompt_tokens: (0..128).collect(),
             sampling_params: SamplingParams {
-                temperature: 0.5,
-                top_p: 0.9,
-                max_tokens: 5,
+                temperature: 0.0,
+                top_p: 1.0,
+                max_tokens: 2,
                 stop_token_ids: vec![],
             },
             arrival_time_ns: 0,
-            priority: 10,
+            priority: 1,
         };
 
-        scheduler.submit_request(parent_req);
+        scheduler.submit_request(req);
+
+        // Step 1: Processes chunk 1 (64 tokens, remaining 64)
+        let res1 = scheduler.step(&mut backend).await.unwrap().unwrap();
+        assert_eq!(res1.1.prefill_tokens_processed, 64);
+        assert_eq!(scheduler.running_count(), 1);
+
+        // Step 2: Processes chunk 2 (64 tokens, completes prompt)
+        let res2 = scheduler.step(&mut backend).await.unwrap().unwrap();
+        assert_eq!(res2.1.prefill_tokens_processed, 64);
+
+        // Step 3: Decode begins (1 token generated)
+        let res3 = scheduler.step(&mut backend).await.unwrap().unwrap();
+        assert_eq!(res3.1.decode_tokens_emitted, 1);
+    }
+
+    #[tokio::test]
+    async fn test_watermark_pressure_preemption() {
+        // Pool with 6 blocks, watermark = 3
+        let kv_manager = create_shared_kv_manager(6, 16);
+        let config = SchedulerConfig {
+            max_batch_size: 4,
+            max_batch_tokens: 1024,
+            max_prefill_tokens: 512,
+            prefill_chunk_size: 128,
+            chunk_prefill: false,
+            watermark_blocks: 3,
+        };
+        let mut scheduler = AienScheduler::new(config, kv_manager.clone());
+        let mut backend = MockInferenceBackend::new(1);
+
+        // Req 1 consumes 2 blocks (32 tokens)
+        scheduler.submit_request(SequenceRequest {
+            request_id: 1,
+            prompt_tokens: (0..32).collect(),
+            sampling_params: SamplingParams {
+                temperature: 0.0,
+                top_p: 1.0,
+                max_tokens: 10,
+                stop_token_ids: vec![],
+            },
+            arrival_time_ns: 0,
+            priority: 5,
+        });
+
+        // Req 2 consumes 2 blocks (32 tokens)
+        scheduler.submit_request(SequenceRequest {
+            request_id: 2,
+            prompt_tokens: (0..32).collect(),
+            sampling_params: SamplingParams {
+                temperature: 0.0,
+                top_p: 1.0,
+                max_tokens: 10,
+                stop_token_ids: vec![],
+            },
+            arrival_time_ns: 0,
+            priority: 1, // lower priority
+        });
+
+        // Step 1: Admits both (free blocks = 6 - 4 = 2, which is < watermark 3)
         scheduler.step(&mut backend).await.unwrap();
 
-        // Fork subagent 20 from parent 10
-        scheduler.fork_subagent(10, 20).unwrap();
-        assert_eq!(scheduler.running_count(), 2);
-
-        // Verify KV blocks are shared
-        let metrics = kv_manager.read().metrics();
-        assert!(metrics.shared_blocks > 0);
+        // Step 2: Memory pressure triggers preemption of lower priority req 2
+        scheduler.step(&mut backend).await.unwrap();
+        assert_eq!(scheduler.metrics().preempted_requests, 1);
+        assert_eq!(scheduler.preempted_count(), 1);
+        assert_eq!(scheduler.running_count(), 1);
     }
 }
