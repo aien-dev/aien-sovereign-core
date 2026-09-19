@@ -17,7 +17,7 @@ chrono = { version = "0.4", features = ["serde"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-jsonschema = "0.17"
+jsonschema = { version = "0.17", default-features = false }
 
 [[bin]]
 name = "spark-harness"

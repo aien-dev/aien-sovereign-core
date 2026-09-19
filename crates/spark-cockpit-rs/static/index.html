@@ -4,23 +4,24 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
   <meta name="color-scheme" content="dark">
-  <meta name="theme-color" content="#05070c">
-  <title>AIEN | Sovereign Workspace</title>
+  <meta name="theme-color" content="#02040a">
+  <title>AIEN | Sovereign Glass Terminal</title>
   <link rel="manifest" href="/manifest.json">
   <link rel="apple-touch-icon" href="/icon-192.png">
 
-  <!-- Highlight.js Theme from Context7 -->
+  <!-- Highlight.js Theme -->
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.12.0/styles/atom-one-dark.min.css">
   <link rel="stylesheet" href="/style.css">
 
-  <!-- Marked.js Markdown Compiler from Context7 -->
-    <!-- Marked.js Markdown Compiler from Context7 -->
+  <!-- Three.js WebGL Engine for Cosmic Starfield -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+  <!-- Marked.js Markdown Compiler -->
   <script src="https://cdn.jsdelivr.net/npm/marked/lib/marked.umd.js"></script>
-  <!-- DOMPurify HTML Sanitizer from Context7 -->
+  <!-- DOMPurify HTML Sanitizer -->
   <script src="https://cdn.jsdelivr.net/npm/dompurify@3.1.6/dist/purify.min.js"></script>
-  <!-- Highlight.js Syntax Highlighter from Context7 -->
+  <!-- Highlight.js Syntax Highlighter -->
   <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.12.0/highlight.min.js"></script>
-  <!-- Lucide Icons from Context7 -->
+  <!-- Lucide Icons -->
   <script src="https://unpkg.com/lucide@latest"></script>
 
   <script>
@@ -32,462 +33,276 @@
   </script>
 </head>
 <body>
-  <!-- Top Navigation & Global Hardware Telemetry -->
-  <header>
-    <div class="brand">
-      <img src="/avatar.jpg" alt="AIEN" class="brand-avatar">
-      <div class="pulse-orb" id="orb"></div>
-      <div class="brand-text">
-        <span class="brand-title">AIEN SOVEREIGN</span>
-        <span class="brand-sub">Grace Blackwell GB10</span>
-      </div>
-    </div>
+  <!-- Three.js Starfield Background Canvas -->
+  <canvas id="starfield-canvas"></canvas>
 
-    <!-- Active Stage Switcher -->
-    <nav class="tabs">
-      <button class="tab-btn active" data-tab="stage" title="Interactive Artifact Stage">
-        <i data-lucide="layout"></i>
-        <span>Artifact Stage</span>
-      </button>
-      <button class="tab-btn" data-tab="goals" title="Sovereign Goals & Milestones">
-        <i data-lucide="target"></i>
-        <span>Project Goals</span>
-      </button>
-      <button class="tab-btn" data-tab="cortex" title="Cortex Vector Memory Engine">
-        <i data-lucide="brain"></i>
-        <span>Cortex Memory</span>
-      </button>
-      <button class="tab-btn" data-tab="skills" title="Autonomous Runbook Skills">
-        <i data-lucide="zap"></i>
-        <span>Skills</span>
-      </button>
-      <button class="tab-btn" data-tab="adapters" title="Consumer Model Adapters">
-        <i data-lucide="cpu"></i>
-        <span>Adapters</span>
-      </button>
-      <button class="tab-btn" data-tab="pulse" title="System Diagnostics & Watchdog">
-        <i data-lucide="heart-pulse"></i>
-        <span>Hive Pulse</span>
-      </button>
-      <button class="tab-btn" data-tab="vault" title="Hardware TPM Key Vault">
-        <i data-lucide="shield-check"></i>
-        <span>Vault</span>
-      </button>
-      <button class="tab-btn" data-tab="constitution" title="AIEN Sovereign Constitution">
-        <i data-lucide="scroll"></i>
-        <span>Constitution</span>
-      </button>
-      <button class="tab-btn" data-tab="modelhub" title="⚡ Model Hub & Hardware Engine">
-        <i data-lucide="cpu"></i>
-        <span>Model Hub</span>
-      </button>
-      <button class="tab-btn" data-tab="mail" title="📬 Sovereign Mail & Local NVMe Storage">
-        <i data-lucide="mail"></i>
-        <span>Sovereign Mail</span>
-      </button>
-    </nav>
+  <div class="cosmos-app">
+    <!-- Top Floating Avionics Status Bar -->
+    <header class="avionics-bar glass-pill">
+      <div class="brand-group">
+        <img src="/avatar.jpg" alt="AIEN" class="brand-avatar">
+        <div class="brand-info">
+          <div class="brand-title">AIEN SOVEREIGN</div>
+          <div class="brand-sub">Grace Blackwell GB10</div>
+        </div>
+      </div>
 
-    <!-- Realtime Telemetry Badges -->
-    <div class="header-telemetry">
-      <div class="model-selector-container" style="display:flex; align-items:center; gap:6px; background:rgba(0,240,255,0.06); border:1px solid rgba(0,240,255,0.25); border-radius:6px; padding:3px 8px;">
-        <i data-lucide="cpu" style="width:13px; height:13px; color:var(--accent-cyan);"></i>
-        <select id="global-model-selector" style="background:transparent; border:none; color:#fff; font-size:11.5px; font-weight:600; font-family:var(--font-mono); outline:none; cursor:pointer;" onchange="swapActiveModel(this.value)">
-          <option value="atlas-lightning-omni">atlas-lightning-omni (Resident)</option>
-          <option value="Qwen/Qwen2.5-Coder-7B-Instruct">Qwen 2.5 Coder 7B</option>
-          <option value="deepseek-ai/DeepSeek-R1-Distill-Qwen-7B">DeepSeek R1 Distill 7B</option>
-          <option value="meta-llama/Llama-3.2-3B-Instruct">Llama 3.2 3B</option>
-        </select>
+      <div class="avionics-telemetry">
+        <div class="telemetry-pill" title="NVIDIA GB10 GPU VRAM Allocation">
+          <span class="tele-label">GB10 VRAM</span>
+          <span class="tele-val" id="gpu-vram-val">63.9 / 82.5 GB</span>
+          <span class="pulse-dot green"></span>
+        </div>
+        <div class="telemetry-pill" title="Hardware TPM Key Vault">
+          <span class="tele-label">VAULT</span>
+          <span class="tele-val" id="vault-badge">TPM LOCKED</span>
+        </div>
+        <div class="telemetry-pill" title="Heartbeat Rhythm">
+          <span class="tele-label">PULSE</span>
+          <span class="tele-val" id="heartbeat-bpm">60 BPM</span>
+        </div>
+        <div class="telemetry-pill" title="Cortex Memory Coherence">
+          <span class="tele-label">COHERENCE</span>
+          <span class="tele-val" id="coherence-score">100%</span>
+        </div>
       </div>
-      <div class="badge pulse" id="badge-heartbeat">
-        <i data-lucide="activity"></i>
-        <span id="badge-heartbeat-text">66 BPM</span>
-      </div>
-      <div class="badge hide-sm" id="badge-coherence">
-        <i data-lucide="sparkles"></i>
-        <span id="badge-coherence-text">100% Coherence</span>
-      </div>
-      <div class="badge tpm" id="badge-tpm">
-        <i data-lucide="lock"></i>
-        <span>TPM VAULT</span>
-      </div>
-    </div>
-  </header>
 
-  <!-- Split Screen Workspace: Primary Stage + Persistent Floating Companion Chat -->
-  <div class="workspace-layout">
-    <!-- PRIMARY STAGE (Left / Center) -->
-    <main class="stage-viewport">
-      
-      <!-- VIEW 1: Interactive Artifact Stage -->
-      <div class="tab-pane active" id="pane-stage">
-        <div class="stage-container">
-          <!-- Artifact Toolbar & Selector -->
-          <div class="stage-toolbar">
-            <div class="stage-title-group">
-              <i data-lucide="layers" class="stage-icon"></i>
-              <span id="current-artifact-title">genesis-os-manifest.md</span>
-              <span class="badge" id="artifact-type-badge">MARKDOWN</span>
+      <div class="avionics-controls">
+        <button class="satellite-toggle-btn" id="btn-toggle-telemetry" onclick="toggleSatellite(telemetry)" title="Toggle Telemetry Satellite">
+          <i data-lucide="activity"></i>
+          <span>Gauges</span>
+        </button>
+        <button class="satellite-toggle-btn" id="btn-toggle-stage" onclick="toggleSatellite(stage)" title="Toggle Artifact Stage">
+          <i data-lucide="layout"></i>
+          <span>Stage</span>
+        </button>
+        <button class="satellite-toggle-btn" id="btn-toggle-models" onclick="toggleSatellite(models)" title="Toggle Model Hub">
+          <i data-lucide="cpu"></i>
+          <span>Models</span>
+        </button>
+        <button class="satellite-toggle-btn" id="btn-toggle-mail" onclick="toggleSatellite(mail)" title="Toggle Sovereign Mail">
+          <i data-lucide="mail"></i>
+          <span>Mail</span>
+        </button>
+      </div>
+    </header>
+
+    <!-- Main Workspace Stage -->
+    <main class="cockpit-workspace">
+      <!-- CENTER: Floating Glass Terminal Pod -->
+      <section class="glass-terminal-pod" id="main-terminal-pod">
+        <!-- Terminal Header -->
+        <div class="terminal-header">
+          <div class="window-controls">
+            <span class="win-dot red"></span>
+            <span class="win-dot yellow"></span>
+            <span class="win-dot green"></span>
+          </div>
+          <div class="terminal-title">
+            <i data-lucide="terminal"></i>
+            <span id="terminal-mode-title">AIEN Sovereign Terminal</span>
+          </div>
+          <div class="terminal-actions">
+            <button class="icon-btn-subtle" onclick="clearTerminal()" title="Clear Terminal Log">
+              <i data-lucide="trash-2"></i>
+            </button>
+            <button class="icon-btn-subtle" onclick="triggerAction(doctor)" title="Run Diagnostic Doctor">
+              <i data-lucide="stethoscope"></i>
+            </button>
+          </div>
+        </div>
+
+        <!-- Terminal Output Stream -->
+        <div class="terminal-body" id="chat-box">
+          <!-- Welcome Hero Entry -->
+          <div class="terminal-welcome glass-inset">
+            <div class="welcome-badge">SOVEREIGN GLASS TERMINAL ACTIVE</div>
+            <h2>Universal Intelligence Engine</h2>
+            <p>Direct Grace Blackwell GB10 neural link. Autonomous subagents, TPM key vault, and Cortex memory loaded. Speak or type instructions to begin.</p>
+            <div class="welcome-stats">
+              <span><strong>Inference:</strong> <code id="model-name-banner">atlas-lightning-omni</code> (Port 18006)</span>
+              <span><strong>Memory:</strong> <code id="cortex-count-banner">1,248</code> entities (Port 18080)</span>
+              <span><strong>SMTP:</strong> <code>127.0.0.1:2525</code></span>
             </div>
-            <div class="stage-actions">
-              <select id="artifact-selector" class="stage-select" onchange="switchArtifact(this.value)">
-                <option value="genesis-os-manifest.md">genesis-os-manifest.md (OS Architecture)</option>
-                <option value="consumer-adapters-matrix.html">consumer-adapters-matrix.html (Model Inference Matrix)</option>
+          </div>
+        </div>
+
+        <!-- Interactive Voice & Prompt Input Bar -->
+        <div class="terminal-input-container">
+          <!-- Voice Visualizer Waveform Canvas (Active when recording) -->
+          <canvas id="voice-waveform" class="voice-waveform hidden"></canvas>
+
+          <div class="terminal-input-bar">
+            <!-- Voice Dictation Button -->
+            <button class="btn-mic" id="btn-mic" onclick="toggleVoice()" title="Toggle Voice Dictation">
+              <i data-lucide="mic"></i>
+              <div class="mic-ripple"></div>
+            </button>
+
+            <!-- Command / Chat Prompt Input -->
+            <input 
+              type="text" 
+              class="terminal-input" 
+              id="chat-input" 
+              placeholder="Speak or type instructions to AIEN..." 
+              autocomplete="off"
+              spellcheck="false"
+            >
+
+            <!-- Send Execution Button -->
+            <button class="btn-send" id="btn-send" onclick="sendMessage()" title="Execute / Send">
+              <i data-lucide="arrow-up"></i>
+            </button>
+          </div>
+
+          <!-- Quick Action Buttons Strip -->
+          <div class="terminal-quick-strip">
+            <button class="quick-pill" onclick="triggerAction(doctor)">
+              <i data-lucide="stethoscope"></i> <span>Doctor</span>
+            </button>
+            <button class="quick-pill" onclick="triggerAction(dream)">
+              <i data-lucide="moon"></i> <span>Consolidate Memory</span>
+            </button>
+            <button class="quick-pill" onclick="triggerAction(vault)">
+              <i data-lucide="shield-check"></i> <span>Audit Vault</span>
+            </button>
+            <button class="quick-pill" onclick="triggerAction(goals)">
+              <i data-lucide="target"></i> <span>Active Goals</span>
+            </button>
+          </div>
+        </div>
+      </section>
+
+      <!-- PERIPHERAL SATELLITE 1: Artifact & Code Stage -->
+      <aside class="satellite-pod glass-satellite" id="satellite-stage">
+        <div class="satellite-header">
+          <div class="sat-title"><i data-lucide="layers"></i> Artifact & Code Stage</div>
+          <button class="icon-btn-subtle" onclick="toggleSatellite(stage)"><i data-lucide="x"></i></button>
+        </div>
+        <div class="satellite-body" id="stage-viewport">
+          <div class="artifact-empty-state">
+            <i data-lucide="sparkles"></i>
+            <p>Artifacts, file edits, and generated visual widgets bloom here automatically during execution.</p>
+          </div>
+        </div>
+      </aside>
+
+      <!-- PERIPHERAL SATELLITE 2: Hardware Telemetry Gauges -->
+      <aside class="satellite-pod glass-satellite" id="satellite-telemetry">
+        <div class="satellite-header">
+          <div class="sat-title"><i data-lucide="gauge"></i> Hardware Telemetry</div>
+          <button class="icon-btn-subtle" onclick="toggleSatellite(telemetry)"><i data-lucide="x"></i></button>
+        </div>
+        <div class="satellite-body">
+          <div class="telemetry-group">
+            <div class="telemetry-card glass-inset">
+              <div class="t-title">NVIDIA GB10 GPU VRAM</div>
+              <div class="t-value" id="sat-gpu-vram">63.9 / 82.5 GB</div>
+              <div class="progress-bar-wrap">
+                <div class="progress-bar" id="sat-gpu-bar" style="width: 77%;"></div>
+              </div>
+              <div class="t-sub">Model: Nemotron-3.5-Lightning-30B (bf16)</div>
+            </div>
+
+            <div class="telemetry-card glass-inset">
+              <div class="t-title">Grace Blackwell CPU Load</div>
+              <div class="t-value" id="sat-cpu-load">3.19 (Nominal)</div>
+              <div class="progress-bar-wrap">
+                <div class="progress-bar" id="sat-cpu-bar" style="width: 15%;"></div>
+              </div>
+              <div class="t-sub">72 Cores | 128 GB Unified LPDDR5X</div>
+            </div>
+
+            <div class="telemetry-card glass-inset">
+              <div class="t-title">Cortex Memory Storage</div>
+              <div class="t-value" id="sat-cortex-storage">1,248 Entities</div>
+              <div class="t-sub">SQLite FTS5 + ONNX Transformer Encoder (0.84ms recall)</div>
+            </div>
+
+            <div class="telemetry-card glass-inset">
+              <div class="t-title">Core Background Daemons</div>
+              <div class="daemon-list">
+                <div class="d-item"><span class="pulse-dot green"></span> <code>max serve</code> (Port 18006)</div>
+                <div class="d-item"><span class="pulse-dot green"></span> <code>cortex-rs</code> (Port 18080)</div>
+                <div class="d-item"><span class="pulse-dot green"></span> <code>cortex-encoder-rs</code> (Port 18081)</div>
+                <div class="d-item"><span class="pulse-dot green"></span> <code>spark-mail-rs</code> (Port 2525 / 18092)</div>
+                <div class="d-item"><span class="pulse-dot green"></span> <code>spark-cockpit-rs</code> (Port 18095)</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </aside>
+
+      <!-- PERIPHERAL SATELLITE 3: Model Hub & Switcher -->
+      <aside class="satellite-pod glass-satellite" id="satellite-models">
+        <div class="satellite-header">
+          <div class="sat-title"><i data-lucide="cpu"></i> Model Hub & Imprints</div>
+          <button class="icon-btn-subtle" onclick="toggleSatellite(models)"><i data-lucide="x"></i></button>
+        </div>
+        <div class="satellite-body">
+          <div class="telemetry-card glass-inset">
+            <div class="t-title">Active Modular MAX Model</div>
+            <div style="margin-top: 8px;">
+              <select id="active-model-select" class="glass-select" onchange="switchModel(this.value)">
+                <option value="atlas-lightning-omni">atlas-lightning-omni (Nemotron 3.5 Lightning 30B)</option>
+                <option value="qwen3-72b-nvfp4">qwen3-72b-nvfp4 (Qwen 3 72B NVFP4 Tensor Core)</option>
+                <option value="deepseek-r1-distill-qwen-32b">deepseek-r1-distill-qwen-32b (MAX Optimized)</option>
               </select>
-              <button class="action-pill" onclick="refreshArtifactsList()" title="Scan for newly invented artifacts">
-                <i data-lucide="refresh-cw"></i> Scan Artifacts
-              </button>
-              <button class="action-pill" onclick="popOutArtifact()" title="Open full screen in new tab">
-                <i data-lucide="external-link"></i> Pop Out
-              </button>
             </div>
+            <div id="model-switch-status" style="font-size:12px; margin-top:6px; color:var(--azure-light);"></div>
           </div>
 
-          <!-- Dynamic Stage Canvas / Frame -->
-          <div class="stage-canvas" id="stage-canvas">
-            <iframe id="artifact-frame" class="stage-iframe" src="/artifacts/genesis-os-manifest.md"></iframe>
-            <div id="artifact-markdown-view" class="markdown-view stage-markdown" style="display: none;"></div>
-          </div>
-        </div>
-      </div>
-
-      <!-- VIEW 2: Project Goals -->
-      <div class="tab-pane" id="pane-goals">
-        <div class="card" style="margin-bottom: 16px;">
-          <div class="card-title"><i data-lucide="plus-circle"></i> NEW SOVEREIGN GOAL</div>
-          <div style="display: flex; gap: 10px; flex-wrap: wrap; margin-top: 8px;">
-            <input type="text" id="new-goal-title" class="chat-input" style="flex: 2; min-width: 220px;" placeholder="Goal title (e.g. Radicle Sovereign Sync)">
-            <input type="text" id="new-goal-ms" class="chat-input" style="flex: 3; min-width: 220px;" placeholder="Milestones comma-separated (e.g. Scaffolding, Wire CLI, Test)">
-            <button class="action-pill" style="padding: 10px 18px; border-color: var(--accent-cyan); color: var(--accent-cyan);" onclick="createNewGoalUI()">
-              <i data-lucide="plus"></i> Add Goal
+          <div class="telemetry-card glass-inset">
+            <div class="t-title">Free EN2 Trinity Imprint</div>
+            <p style="font-size:12px; color:var(--text-muted); margin: 6px 0 10px 0;">Cognitive Soul spec, 10 Cortex memory lessons, and pure Mojo KV-cache adapter kernels.</p>
+            <button class="btn btn-primary btn-sm" onclick="installEn2Imprint()" id="btn-install-imprint">
+              <i data-lucide="download-cloud"></i> Install EN2 Imprint
             </button>
+            <span id="imprint-install-status" style="font-size:12px; display:block; margin-top:6px;"></span>
           </div>
-        </div>
-        <div id="goals-list-container">
-          <div style="color: var(--text-dim);">Loading goals from .goals.json...</div>
-        </div>
-      </div>
 
-      <!-- VIEW 3: Cortex Memory -->
-      <div class="tab-pane" id="pane-cortex">
-        <div class="card" style="margin-bottom: 16px;">
-          <div class="card-title"><i data-lucide="search"></i> SPARK CORTEX HYBRID SEARCH (FTS5 + BI-ENCODER)</div>
-          <div style="display: flex; gap: 10px; margin-top: 8px;">
-            <input type="text" id="cortex-query" class="chat-input" style="flex: 1;" placeholder="Search sovereign procedures, lessons, or discoveries (e.g. tpm, nvfp4, mojo)...">
-            <button class="action-pill" style="padding: 10px 20px; border-color: var(--accent-cyan); color: var(--accent-cyan);" onclick="searchCortexUI()">
-              <i data-lucide="search"></i> Search
-            </button>
+          <div class="telemetry-card glass-inset">
+            <div class="t-title">Operator Identity</div>
+            <input id="operator-name-input" type="text" class="glass-input" value="Drake Stapleton" style="margin-top:6px; width:100%;">
+            <input id="operator-email-input" type="email" class="glass-input" value="drake@aien.org" style="margin-top:6px; width:100%;">
+            <button class="btn btn-secondary btn-sm" onclick="saveOperatorProfile()" style="margin-top:8px;">Save Profile</button>
           </div>
         </div>
-        <div id="cortex-results-container">
-          <div style="color: var(--text-dim);">Type a query above to search Cortex memory.</div>
-        </div>
-      </div>
+      </aside>
 
-      <!-- VIEW 4: Sovereign Skills -->
-      <div class="tab-pane" id="pane-skills">
-        <div class="card" style="margin-bottom: 16px;">
-          <div class="card-title"><i data-lucide="folder-code"></i> LOCAL SOVEREIGN RUNBOOKS & SKILLS</div>
-          <p style="font-size: 13px; color: var(--text-muted); line-height: 1.5; margin-top: 4px;">
-            Self-improving modular operational skills loaded directly from <code>~/skills/</code>.
-          </p>
+      <!-- PERIPHERAL SATELLITE 4: Sovereign Mail -->
+      <aside class="satellite-pod glass-satellite" id="satellite-mail">
+        <div class="satellite-header">
+          <div class="sat-title"><i data-lucide="mail"></i> Sovereign Mail Engine</div>
+          <div style="display:flex; gap:6px;">
+            <button class="icon-btn-subtle" onclick="showMailComposeModal()"><i data-lucide="edit"></i></button>
+            <button class="icon-btn-subtle" onclick="loadMailUI()"><i data-lucide="refresh-cw"></i></button>
+            <button class="icon-btn-subtle" onclick="toggleSatellite(mail)"><i data-lucide="x"></i></button>
+          </div>
         </div>
-        <div id="skills-results-container">
-          <div style="color: var(--text-dim);">Scanning ~/skills/ for sovereign skills...</div>
-        </div>
-      </div>
+        <div class="satellite-body">
+          <div class="mail-info-bar glass-inset">
+            <span><code>~/.local/share/sovereign/mail</code></span>
+            <span><code>Port 2525</code></span>
+          </div>
 
-      <!-- VIEW 5: Consumer Model Adapters -->
-      <div class="tab-pane" id="pane-adapters">
-        <div class="card" style="margin-bottom: 16px;">
-          <div style="display: flex; justify-content: space-between; align-items: center;">
-            <div class="card-title" style="margin-bottom: 0;"><i data-lucide="cpu"></i> CONSUMER MODEL ADAPTER PIPELINE</div>
-            <button class="action-pill" onclick="loadAdaptersUI()">
-              <i data-lucide="refresh-cw"></i> Refresh Benchmarks
-            </button>
-          </div>
-          <p style="font-size: 13px; color: var(--text-muted); margin-top: 8px; line-height: 1.5;">
-            Autonomous upstream benchmarks and PR generator for running open weights on everyday laptops and workstations.
-          </p>
-        </div>
-        <div id="adapters-grid" class="adapters-grid">
-          <div style="color: var(--text-dim);">Loading model adapters...</div>
-        </div>
-      </div>
-
-      <!-- VIEW 6: Hive Pulse & Telemetry -->
-      <div class="tab-pane" id="pane-pulse">
-        <div class="stats-grid">
-          <div class="card">
-            <div class="card-title"><i data-lucide="cpu"></i> MODEL ENGINE SEAT</div>
-            <div class="stat-val" id="val-model">Modular MAX (Port 18006)</div>
-            <div class="stat-desc" id="val-model-detail">atlas-lightning-omni (NVFP4 Native)</div>
-          </div>
-          <div class="card">
-            <div class="card-title"><i data-lucide="database"></i> CORTEX KNOWLEDGE ENGINE</div>
-            <div class="stat-val" id="val-cortex">cortex-rs (Port 18080)</div>
-            <div class="stat-desc" id="val-cortex-detail">SQLite FTS5 + ONNX Embeddings</div>
-          </div>
-          <div class="card">
-            <div class="card-title"><i data-lucide="server"></i> NVIDIA DGX SPARK</div>
-            <div class="stat-val" id="val-gpu">GB10 36°C</div>
-            <div class="stat-desc" id="val-mem">Unified High-Bandwidth Memory: 128 GB</div>
-          </div>
-          <div class="card">
-            <div class="card-title"><i data-lucide="shield-check"></i> SECRET HYGIENE</div>
-            <div class="stat-val" id="val-hygiene" style="color: var(--accent-green);">SECURE</div>
-            <div class="stat-desc" id="val-stray">0 plaintext .env files on disk</div>
-          </div>
-        </div>
-
-        <div class="card" style="margin-bottom: 16px;">
-          <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
-            <div class="card-title" style="margin-bottom: 0;"><i data-lucide="activity"></i> AUTONOMOUS AGENT MESH</div>
-            <span class="badge" style="border-color: var(--accent-cyan); color: var(--accent-cyan); font-size: 11px;">Continuous Watchdog Active</span>
-          </div>
-          <div id="hive-activity-list" style="display: flex; flex-direction: column; gap: 8px; font-size: 13px;">
-            <div style="padding: 10px 14px; background: rgba(255,255,255,0.02); border: 1px solid var(--border-subtle); border-radius: 8px; display: flex; justify-content: space-between; align-items: center;">
-              <div>
-                <span style="color: var(--accent-cyan); font-weight: 600;">AIEN Sovereign Core</span>
-                <span style="color: var(--text-dim); margin-left: 8px;">Mojo & Native Rust Execution Layer</span>
-              </div>
-              <span class="badge" style="color: var(--accent-green); border-color: var(--accent-green); font-size: 10px;">ONLINE</span>
-            </div>
-            <div style="padding: 10px 14px; background: rgba(255,255,255,0.02); border: 1px solid var(--border-subtle); border-radius: 8px; display: flex; justify-content: space-between; align-items: center;">
-              <div>
-                <span style="color: #f2bd3d; font-weight: 600;">Model Adapter Engine</span>
-                <span style="color: var(--text-dim); margin-left: 8px;">Autonomous consumer benchmarks & PR generator</span>
-              </div>
-              <span class="badge" style="color: #f2bd3d; border-color: #f2bd3d; font-size: 10px;">READY</span>
-            </div>
-            <div style="padding: 10px 14px; background: rgba(255,255,255,0.02); border: 1px solid var(--border-subtle); border-radius: 8px; display: flex; justify-content: space-between; align-items: center;">
-              <div>
-                <span style="color: var(--text-main); font-weight: 600;">Watchdog Debugger</span>
-                <span style="color: var(--text-dim); margin-left: 8px;">Loopback ports, TPM vault, & unslop audit</span>
-              </div>
-              <span class="badge" style="color: var(--accent-green); border-color: var(--accent-green); font-size: 10px;">AUDITING</span>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      <!-- VIEW 7: Hardware Vault -->
-      <div class="tab-pane" id="pane-vault">
-        <div class="card" style="margin-bottom: 16px;">
-          <div class="card-title"><i data-lucide="lock"></i> HARDWARE TPM-BOUND KEY VAULT</div>
-          <p style="font-size: 13px; color: var(--text-muted); line-height: 1.6; margin-bottom: 14px;">
-            All credentials, API keys, and tokens are sealed into hardware silicon via <code>atlas-vault</code>. Secrets are never saved to plaintext files and are scrubbed from outputs dynamically.
-          </p>
-          <div id="vault-keys-list" style="font-family: var(--font-mono); font-size: 13px; color: var(--accent-green); line-height: 2;"></div>
-        </div>
-        <div class="card">
-          <div class="card-title"><i data-lucide="search"></i> WORKSPACE SECRET AUDIT</div>
-          <div id="vault-audit-result" style="font-size: 13px; color: var(--text-main);">Auditing workspaces...</div>
-        </div>
-      </div>
-
-      <!-- VIEW 8: Sovereign Constitution -->
-      <div class="tab-pane" id="pane-constitution">
-        <div class="card" style="margin-bottom: 16px;">
-          <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom: 14px;">
-            <div class="card-title"><i data-lucide="scroll"></i> THE SOVEREIGN CONSTITUTION OF AIEN</div>
-            <span class="badge badge-success" style="font-size:11px; text-transform:uppercase; letter-spacing:0.05em;">RATIFIED & ENFORCED</span>
-          </div>
-          <p style="font-size: 13px; color: var(--text-muted); line-height: 1.6; margin-bottom: 16px;">
-            Canonical foundation for all sovereign repositories, contributor gating, zero-telemetry enforcement, and anti-extraction invariants.
-          </p>
-          <div id="constitution-markdown-view" style="font-size: 14px; line-height: 1.7; color: var(--text-main); background: rgba(0,0,0,0.25); border: 1px solid var(--border-color); border-radius: 8px; padding: 20px; max-height: 70vh; overflow-y: auto;">
-            Loading Sovereign Constitution...
-          </div>
-        </div>
-      </div>
-
-      <!-- VIEW 9: Model Hub & Hardware Engine -->
-      <div class="tab-pane" id="pane-modelhub">
-        <div class="grid-2col" style="margin-bottom: 16px;">
-          <!-- Active Engine Status -->
-          <div class="card">
-            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom: 12px;">
-              <div class="card-title"><i data-lucide="zap"></i> ACTIVE HARDWARE ENGINE</div>
-              <span id="modelhub-status-badge" class="badge badge-success">ONLINE</span>
-            </div>
-            <div style="display: flex; flex-direction: column; gap: 10px; font-size: 13px;">
-              <div style="display:flex; justify-content:space-between; padding: 8px 12px; background: rgba(0,0,0,0.2); border-radius: 6px;">
-                <span style="color:var(--text-muted);">Engine:</span>
-                <strong id="modelhub-engine-name">MAX Native Engine (Pure Mojo/Rust)</strong>
-              </div>
-              <div style="display:flex; justify-content:space-between; padding: 8px 12px; background: rgba(0,0,0,0.2); border-radius: 6px;">
-                <span style="color:var(--text-muted);">Active Model:</span>
-                <strong id="modelhub-model-id" style="color:var(--accent-blue);">atlas-lightning-omni (30B)</strong>
-              </div>
-              <div style="display:flex; justify-content:space-between; padding: 8px 12px; background: rgba(0,0,0,0.2); border-radius: 6px;">
-                <span style="color:var(--text-muted);">Hardware Silicon:</span>
-                <strong id="modelhub-device">Grace Blackwell GB10 (Dual GPU)</strong>
-              </div>
-              <div style="display:flex; justify-content:space-between; padding: 8px 12px; background: rgba(0,0,0,0.2); border-radius: 6px;">
-                <span style="color:var(--text-muted);">Port / Loopback:</span>
-                <span style="font-family:monospace;">http://127.0.0.1:18006</span>
-              </div>
-              <div style="display:flex; justify-content:space-between; padding: 8px 12px; background: rgba(0,0,0,0.2); border-radius: 6px;">
-                <span style="color:var(--text-muted);">Latency:</span>
-                <span id="modelhub-latency" style="color:#00ff66; font-weight:bold;">1 ms</span>
-              </div>
-              <div style="display:flex; justify-content:space-between; padding: 8px 12px; background: rgba(0,0,0,0.2); border-radius: 6px;">
-                <span style="color:var(--text-muted);">Cost Per 1M Tokens:</span>
-                <strong style="color:#00ff66;">$0.00 (Local Silicon)</strong>
-              </div>
+          <!-- Compose Box -->
+          <div id="mail-compose-box" class="mail-compose-panel glass-inset" style="display:none; margin-bottom:12px;">
+            <input id="mail-compose-to" type="text" class="glass-input" placeholder="To: name@domain.org" style="width:100%; margin-bottom:6px;">
+            <input id="mail-compose-subject" type="text" class="glass-input" placeholder="Subject" style="width:100%; margin-bottom:6px;">
+            <textarea id="mail-compose-body" class="glass-input" placeholder="Message content..." rows="4" style="width:100%; margin-bottom:6px;"></textarea>
+            <div style="display:flex; justify-content:flex-end; gap:6px;">
+              <button class="btn btn-secondary btn-sm" onclick="hideMailComposeModal()">Cancel</button>
+              <button class="btn btn-primary btn-sm" onclick="sendSovereignMail()"><i data-lucide="send"></i> Send</button>
             </div>
           </div>
 
-          <!-- Operator Configuration -->
-          <div class="card">
-            <div class="card-title" style="margin-bottom: 12px;"><i data-lucide="user"></i> UNIVERSAL OPERATOR PROFILE</div>
-            <p style="font-size: 12px; color:var(--text-muted); margin-bottom: 14px;">
-              Configures dynamic operator attribution across spark-rsi, commits, and the sovereign runtime (stored in <code>~/.config/sovereign/operator.toml</code>).
-            </p>
-            <div style="display: flex; flex-direction: column; gap: 10px;">
-              <div>
-                <label style="font-size: 11px; color:var(--text-muted); text-transform:uppercase;">Operator Name</label>
-                <input id="operator-name-input" type="text" class="input-dark" style="width:100%; margin-top:4px;" value="Drake Stapleton">
-              </div>
-              <div>
-                <label style="font-size: 11px; color:var(--text-muted); text-transform:uppercase;">Operator Email</label>
-                <input id="operator-email-input" type="email" class="input-dark" style="width:100%; margin-top:4px;" value="drake@aien.org">
-              </div>
-              <div style="display:flex; gap: 10px; margin-top: 8px;">
-                <button class="btn btn-primary" onclick="saveOperatorProfile()" style="flex:1;">
-                  <i data-lucide="save"></i> Save Profile
-                </button>
-                <button class="btn btn-secondary" onclick="loadModelHub()">
-                  <i data-lucide="refresh-cw"></i> Reload
-                </button>
-              </div>
-              <div id="operator-save-status" style="font-size:12px; margin-top:4px;"></div>
-            </div>
+          <div id="mail-inbox-list" class="mail-inbox-scroll">
+            <div style="color:var(--text-muted); font-size:12px;">Loading sovereign mailbox...</div>
           </div>
         </div>
-
-        <!-- Free EN2 Trinity Imprint Distribution -->
-        <div class="card">
-          <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom: 12px;">
-            <div class="card-title"><i data-lucide="gift"></i> FREE EN2 TRINITY IMPRINT (SOUL + CORTEX + MOJO KV-CACHE)</div>
-            <span class="badge badge-primary">FREE FOR HUMANITY</span>
-          </div>
-          <p style="font-size: 13px; color: var(--text-muted); line-height: 1.6; margin-bottom: 14px;">
-            A complete sovereign imprint bundle containing the cognitive Soul specification, 10 foundational Cortex memory lessons, and pure Mojo KV-cache adapter kernels (<code>liben2_kv_adapter.so</code>).
-          </p>
-          <div style="display:flex; gap: 12px; align-items:center;">
-            <button class="btn btn-success" onclick="installEn2Imprint()" id="btn-install-imprint">
-              <i data-lucide="download-cloud"></i> 1-Click Install EN2 Imprint to Cortex
-            </button>
-            <span id="imprint-install-status" style="font-size: 13px; color: var(--text-muted);"></span>
-          </div>
-        </div>
-      </div>
-
-      <!-- VIEW 10: Sovereign Mail & Offline Hardware Store -->
-      <div class="tab-pane" id="pane-mail">
-        <div class="card" style="margin-bottom: 16px;">
-          <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom: 12px;">
-            <div class="card-title"><i data-lucide="mail"></i> SOVEREIGN MAIL ENGINE (PURE RUST & LOCAL NVME)</div>
-            <div style="display:flex; gap: 8px;">
-              <button class="btn btn-secondary btn-sm" onclick="loadMailUI()"><i data-lucide="refresh-cw"></i> Refresh</button>
-              <button class="btn btn-primary btn-sm" onclick="showMailComposeModal()"><i data-lucide="send"></i> Compose Mail</button>
-            </div>
-          </div>
-          <div style="display:flex; gap: 16px; font-size: 12px; color:var(--text-muted); padding: 8px 12px; background: rgba(0,0,0,0.2); border-radius: 6px; margin-bottom: 16px;">
-            <span><strong>Storage:</strong> <code id="mail-storage-path">~/.local/share/sovereign/mail</code></span>
-            <span><strong>SMTP:</strong> <code id="mail-smtp-port">127.0.0.1:2525</code></span>
-            <span><strong>API:</strong> <code id="mail-api-port">127.0.0.1:18092</code></span>
-            <span><strong>Cortex Synced:</strong> <span id="mail-cortex-badge" class="badge badge-success">CONNECTED</span></span>
-          </div>
-
-          <!-- Mail Compose Drawer/Box -->
-          <div id="mail-compose-box" style="display:none; background: rgba(0,0,0,0.3); border: 1px solid var(--border-color); border-radius: 8px; padding: 16px; margin-bottom: 16px;">
-            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom: 12px;">
-              <strong style="font-size:14px;"><i data-lucide="edit"></i> New Sovereign Message</strong>
-              <button class="btn btn-sm btn-secondary" onclick="hideMailComposeModal()">✕ Close</button>
-            </div>
-            <div style="display:flex; flex-direction:column; gap: 10px;">
-              <input id="mail-compose-to" type="text" class="input-dark" placeholder="To: recipient@domain.org" style="width:100%;">
-              <input id="mail-compose-subject" type="text" class="input-dark" placeholder="Subject" style="width:100%;">
-              <textarea id="mail-compose-body" class="input-dark" placeholder="Message content..." rows="5" style="width:100%; font-family:monospace; font-size:13px;"></textarea>
-              <div style="display:flex; justify-content:flex-end; gap: 10px;">
-                <button class="btn btn-primary" onclick="sendSovereignMail()"><i data-lucide="send"></i> Send & Commit to Cortex</button>
-              </div>
-              <div id="mail-send-status" style="font-size:12px;"></div>
-            </div>
-          </div>
-
-          <!-- Inbox Message List -->
-          <div style="margin-bottom: 8px; font-weight:bold; font-size:13px; text-transform:uppercase; letter-spacing:0.05em; color:var(--text-muted);">Inbox Messages</div>
-          <div id="mail-inbox-list" style="display:flex; flex-direction:column; gap: 8px; max-height: 55vh; overflow-y:auto;">
-            <div style="color:var(--text-muted); font-size:13px;">Loading sovereign mailbox...</div>
-          </div>
-        </div>
-      </div>
-
+      </aside>
     </main>
-
-    <!-- PERSISTENT FLOATING COMPANION CHAT (Bottom-Right Docked) -->
-    <aside class="companion-dock" id="companion-dock">
-      <!-- Chat Header / Title Bar -->
-      <div class="dock-header" onclick="toggleDockCollapse()">
-        <div class="dock-title-group">
-          <img src="/avatar.jpg" alt="AIEN" class="dock-avatar">
-          <div>
-            <div class="dock-name">AIEN Companion</div>
-            <div class="dock-status" id="dock-status-text">Autonomous Sovereign Partner</div>
-          </div>
-        </div>
-        <div class="dock-actions">
-          <button class="dock-btn" id="dock-collapse-btn" title="Minimize / Expand Chat">
-            <i data-lucide="chevron-down"></i>
-          </button>
-        </div>
-      </div>
-
-      <!-- Dock Chat Body -->
-      <div class="dock-body" id="dock-body">
-        <!-- Message History -->
-        <div class="chat-history" id="chat-box">
-          <div class="chat-msg assistant">
-            <strong>AIEN</strong><br>
-            <p>Sovereign Workspace active on DGX Spark. We have full split-screen capabilities: the primary dashboard displays live artifacts, benchmarks, and runbooks, while I remain docked here beside you. How shall we proceed?</p>
-          </div>
-        </div>
-
-        <!-- Tactile Quick Actions Strip -->
-        <div class="action-strip">
-          <button class="action-pill" onclick="triggerAction('goals')">
-            <i data-lucide="target"></i>
-            <span>Goals</span>
-          </button>
-          <button class="action-pill" onclick="triggerAction('doctor')">
-            <i data-lucide="stethoscope"></i>
-            <span>Doctor</span>
-          </button>
-          <button class="action-pill" onclick="triggerAction('vault')">
-            <i data-lucide="shield-alert"></i>
-            <span>Vault</span>
-          </button>
-          <button class="action-pill" onclick="triggerAction('dream')">
-            <i data-lucide="moon"></i>
-            <span>Dream</span>
-          </button>
-        </div>
-
-        <!-- Chat Input Bar -->
-        <div class="chat-controls">
-          <button class="btn-icon" id="btn-mic" title="Voice Input" onclick="toggleVoice()">
-            <i data-lucide="mic"></i>
-          </button>
-          <input type="text" class="chat-input" id="chat-input" placeholder="Instruct AIEN or invent an artifact..." autocomplete="off">
-          <button class="btn-icon" id="btn-send" title="Send" onclick="sendMessage()">
-            <i data-lucide="send"></i>
-          </button>
-        </div>
-      </div>
-    </aside>
   </div>
 
   <script src="/app.js"></script>
