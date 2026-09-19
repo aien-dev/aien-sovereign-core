@@ -245,6 +245,15 @@ async fn bench_scheduler_step_overhead() {
     println!("  Status:                       PASSED (Pure Rust sub-microsecond scheduling)\n");
 }
 
+/// Continuous batching scheduler throughput benchmark (control-plane only).
+///
+/// This measures the compiled Rust CPU scheduler: request admission, batch
+/// assembly, KV block accounting, and the Mojo/MAX hardware dispatch call path.
+/// It does NOT execute neural matrix math and does NOT measure model token
+/// generation throughput. The "Scheduler Dispatch Rate (tokens/s, control-plane
+/// only)" column is the rate at which the scheduler hands tokens to the backend,
+/// not GPU inference throughput. Treat it as a scheduler-overhead number, not a
+/// model performance number.
 async fn bench_continuous_batching_scheduler_throughput(surface: &ExecutionSurface) {
     println!("--- 5. Native Continuous Batching Scheduler & Hardware Dispatch Throughput ---");
     println!("  Execution Path: AIEN Scheduler -> AIEN KV Block Pool -> Mojo/MAX Hardware C-ABI");
@@ -284,7 +293,7 @@ async fn bench_continuous_batching_scheduler_throughput(surface: &ExecutionSurfa
     let concurrency_tiers = [1, 4, 8, 16, 32, 64, 128, 256];
 
     println!("
-  | Concurrency | Step Latency p50 (µs) | Step Latency p95 (µs) | Dispatch Rate (steps/s) | Dispatched Tok/s | Power (W) |");
+  | Concurrency | Step Latency p50 (µs) | Step Latency p95 (µs) | Dispatch Rate (steps/s) | Scheduler Dispatch Rate (tokens/s, control-plane only) | Power (W) |");
     println!("  | :---        | :---                  | :---                  | :---                     | :---             | :---      |");
 
     let base_power_w = read_gpu_power_draw_watts().unwrap_or(10.75);
