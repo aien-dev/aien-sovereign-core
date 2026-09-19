@@ -2,6 +2,27 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+pub mod tensor;
+pub mod transformer_backend;
+pub mod weights;
+
+pub use tensor::*;
+pub use transformer_backend::*;
+pub use weights::*;
+
+fn default_num_kv_heads() -> usize {
+    8
+}
+fn default_vocab_size() -> usize {
+    151936
+}
+fn default_rms_norm_eps() -> f32 {
+    1e-6
+}
+fn default_rope_theta() -> f32 {
+    10000.0
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelConfig {
     pub model_id: String,
@@ -10,6 +31,44 @@ pub struct ModelConfig {
     pub num_layers: usize,
     pub num_heads: usize,
     pub head_dim: usize,
+    #[serde(default = "default_num_kv_heads")]
+    pub num_kv_heads: usize,
+    #[serde(default)]
+    pub hidden_dim: usize,
+    #[serde(default)]
+    pub intermediate_dim: usize,
+    #[serde(default = "default_vocab_size")]
+    pub vocab_size: usize,
+    #[serde(default = "default_rms_norm_eps")]
+    pub rms_norm_eps: f32,
+    #[serde(default = "default_rope_theta")]
+    pub rope_theta: f32,
+}
+
+impl ModelConfig {
+    pub fn hidden_dim(&self) -> usize {
+        if self.hidden_dim > 0 {
+            self.hidden_dim
+        } else {
+            self.num_heads * self.head_dim
+        }
+    }
+
+    pub fn intermediate_dim(&self) -> usize {
+        if self.intermediate_dim > 0 {
+            self.intermediate_dim
+        } else {
+            self.hidden_dim() * 4
+        }
+    }
+
+    pub fn vocab_size(&self) -> usize {
+        if self.vocab_size > 0 {
+            self.vocab_size
+        } else {
+            151936
+        }
+    }
 }
 
 impl Default for ModelConfig {
@@ -21,6 +80,12 @@ impl Default for ModelConfig {
             num_layers: 48,
             num_heads: 32,
             head_dim: 128,
+            num_kv_heads: 8,
+            hidden_dim: 4096,
+            intermediate_dim: 14336,
+            vocab_size: 151936,
+            rms_norm_eps: 1e-6,
+            rope_theta: 10000.0,
         }
     }
 }
