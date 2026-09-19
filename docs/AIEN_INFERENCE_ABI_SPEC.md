@@ -136,11 +136,19 @@ When a subagent forks from a parent agent:
 
 ## 5. Empirical Benchmark Telemetry & Live Pressure Verification
 
+> [!NOTE]
+> **Control Plane Scope Clarification**:
+> The throughput and latency figures in Sections 5.1 through 5.4 measure native control plane execution:
+> block-table indexing, sequence queue transitions, reference-counting mutations, and batch assembly.
+> Block indices represent coordinate pointers in pre-allocated unified memory.
+> Physical tensor manipulation across the Blackwell GPU substrate begins in Stages 2 through 4.
+
+
 Execution Substrate: NVIDIA DGX Spark (NVIDIA Grace Blackwell GB10, aarch64, 121 GB Unified LPDDR5X Memory, Linux 7.0.0-1019-nvidia).
 
-### 5.1 Paged KV Cache Allocation & Deallocation Throughput
+### 5.1 Paged KV Cache Block-Table Allocator Throughput (Control Plane)
 Benchmark binary: `target/release/bench_inference_stack`
-- Workload: 10,000 sequence allocations (160,000 physical blocks managed, block size = 16 tokens).
+- Workload: 10,000 sequence allocations (160,000 block-table indices managed, block size = 16 tokens).
 
 | Metric | Result | Sub-unit Latency |
 | :--- | :--- | :--- |
@@ -151,7 +159,7 @@ Benchmark binary: `target/release/bench_inference_stack`
 ### 5.2 Subagent Zero-Copy Sequence Fork vs Naive Memory Copy
 Parent sequence context: 4,096 tokens (256 KV blocks).
 
-| Subagents Forked | Zero-Copy Fork Time | Naive Copy Est. | Speedup Ratio | Physical Memory Saved |
+| Subagents Forked | Zero-Copy Fork Time | Naive Copy Est. | Speedup Ratio | Projected Tensor Memory Saved |
 | :--- | :--- | :--- | :--- | :--- |
 | 1 | 1.58 µs | 1.92 ms | 1,212.1x | 0.38 GB |
 | 10 | 0.46 µs | 19.20 ms | 4,152.2x | 3.75 GB |
