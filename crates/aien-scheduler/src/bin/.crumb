@@ -1,0 +1,33 @@
+{
+  "version": 1,
+  "dir_path": "/home/drakestapleton/workspace/aien-sovereign-core/crates/aien-scheduler/src/bin",
+  "dir_name": "bin",
+  "description": "Workspace directory",
+  "purpose": {
+    "statement": "Workspace subsystem directory for bin",
+    "created_by": "AIEN (Auto-Sensed)",
+    "session_id": "auto-sense",
+    "created_at": "2026-09-19T16:56:21.316618882+00:00",
+    "lifecycle": "permanent"
+  },
+  "above": {
+    "path": "..",
+    "canonical": "/home/drakestapleton/workspace/aien-sovereign-core/crates/aien-scheduler/src",
+    "name": "src",
+    "role": "Parent directory context"
+  },
+  "below": [
+    {
+      "name": "bench_inference_stack.rs",
+      "item_type": "file",
+      "role": ""
+    },
+    {
+      "name": "stress_aien_live.rs",
+      "item_type": "file",
+      "role": ""
+    }
+  ],
+  "history": [],
+  "whispers": []
+}
