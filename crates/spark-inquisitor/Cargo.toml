@@ -1,6 +1,6 @@
 [package]
 name = "spark-inquisitor"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 authors = ["AIEN <aien.atlas@proton.me>"]
 description = "Autonomous Sovereign Inquisitor & Pull Request Alignment Gatekeeper"
