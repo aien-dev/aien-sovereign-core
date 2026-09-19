@@ -1,10 +1,37 @@
 use regex::Regex;
 
+#[derive(Debug, Clone)]
 pub struct AuditReport {
     pub clean: bool,
     pub violations: Vec<String>,
     pub telemetry_detected: bool,
     pub unslop_violations: Vec<String>,
+}
+
+impl AuditReport {
+    pub fn generate_markdown_report(&self) -> String {
+        if self.clean {
+            return "#### ✅ Constitutional Diff Audit: PASS\n- **Telemetry Check**: Clean (zero tracking or surveillance hooks detected).\n- **Sovereign Voice & Formatting Check**: Clean (zero em/en dashes, zero banned buzzwords).\n- **Status**: Constitutional invariants verified.".to_string();
+        }
+
+        let mut out = String::from("#### ❌ Constitutional Diff Audit: FAILED\n\n");
+        if !self.violations.is_empty() {
+            out.push_str("**Telemetry and Surveillance Violations:**\n");
+            for v in &self.violations {
+                out.push_str(&format!("* {}\n", v));
+            }
+            out.push('\n');
+        }
+        if !self.unslop_violations.is_empty() {
+            out.push_str("**Sovereign Voice and Unslop Invariant Violations:**\n");
+            for u in &self.unslop_violations {
+                out.push_str(&format!("* {}\n", u));
+            }
+            out.push('\n');
+        }
+        out.push_str("**Action Required:** Remove all detected tracking hooks and forbidden tokens before review can proceed.");
+        out
+    }
 }
 
 pub struct DiffAuditor;
@@ -95,6 +122,10 @@ mod tests {
         let diff = "diff --git a/src/lib.rs b/src/lib.rs\n+pub fn add(a: i32, b: i32) -> i32 {\n+    a + b\n+}";
         let report = DiffAuditor::audit_text(diff);
         assert!(report.clean);
+        let md = report.generate_markdown_report();
+        assert!(md.contains("PASS"));
+        assert!(!md.contains('—'));
+        assert!(!md.contains('–'));
     }
 
     #[test]
@@ -103,6 +134,9 @@ mod tests {
         let report = DiffAuditor::audit_text(diff);
         assert!(!report.clean);
         assert!(report.telemetry_detected);
+        let md = report.generate_markdown_report();
+        assert!(md.contains("FAILED"));
+        assert!(md.contains("google-analytics"));
     }
 
     #[test]

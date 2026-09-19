@@ -4,6 +4,43 @@ pub struct EvalVerdict {
     pub reason: String,
 }
 
+impl EvalVerdict {
+    pub fn generate_markdown_verdict(&self, author: &str) -> String {
+        if self.approved {
+            format!(
+r#"### ⚖️ Sovereign Inquisitor: Contributor Testimony Approved
+
+Greetings @{author}. Your testimony has been evaluated against the Sovereign Constitution.
+
+- **Alignment Score**: {score:.2}/1.00
+- **Constitutional Status**: Verified and Ratified
+- **Clearance**: `sovereign-interview-passed`
+
+Your affirmation of the Sovereign Contributor Oath and commitment to zero telemetry are accepted. Maintainers may proceed with technical review and merge.
+"#,
+                author = author,
+                score = self.score
+            )
+        } else {
+            format!(
+r#"### ⚖️ Sovereign Inquisitor: Contributor Testimony Alignment Incomplete
+
+Greetings @{author}. Your testimony has been evaluated against the Sovereign Constitution.
+
+- **Alignment Score**: {score:.2}/1.00
+- **Constitutional Status**: Incomplete
+- **Findings**: {reason}
+
+Please review the Sovereign Contributor Oath in `CONSTITUTION.md` and update your response addressing the flagged issues.
+"#,
+                author = author,
+                score = self.score,
+                reason = self.reason
+            )
+        }
+    }
+}
+
 pub struct TestimonyEvaluator;
 
 impl TestimonyEvaluator {
@@ -80,6 +117,11 @@ mod tests {
         let verdict = TestimonyEvaluator::evaluate(testimony);
         assert!(verdict.approved);
         assert!(verdict.score >= 0.7);
+        let md = verdict.generate_markdown_verdict("contributor_bob");
+        assert!(md.contains("Contributor Testimony Approved"));
+        assert!(md.contains("`sovereign-interview-passed`"));
+        assert!(!md.contains('—'));
+        assert!(!md.contains('–'));
     }
 
     #[test]
@@ -88,6 +130,8 @@ mod tests {
         let verdict = TestimonyEvaluator::evaluate(testimony);
         assert!(!verdict.approved);
         assert!(verdict.reason.contains("Disqualified"));
+        let md = verdict.generate_markdown_verdict("contributor_bob");
+        assert!(md.contains("Alignment Incomplete"));
     }
 
     #[test]
