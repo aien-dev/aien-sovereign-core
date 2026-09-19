@@ -1,6 +1,7 @@
 //! Parity oracle token sequences and correctness verification functions.
 
 /// Pinned golden 16-token sequence from the M3/M4 TinyLlama Hugging Face FP32 reference oracle.
+#[allow(dead_code)]
 pub const ORACLE_M3_FIRST_16_TOKENS: [u32; 16] = [
     2744, 13598, 1788, 313, 3267, 29897, 338, 263, 7047, 393, 767, 1179, 278, 12837, 322, 7047,
 ];

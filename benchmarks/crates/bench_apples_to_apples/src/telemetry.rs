@@ -12,6 +12,7 @@ use tokio::sync::Mutex;
 pub struct GpuSample {
     pub power_watts: f64,
     pub temperature_c: f64,
+    #[allow(dead_code)]
     pub gpu_util_pct: f64,
 }
 
