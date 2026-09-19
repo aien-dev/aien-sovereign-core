@@ -1,8 +1,8 @@
-use std::path::PathBuf;
 use crate::models::EmailMessage;
 use reqwest::Client;
 use serde_json::json;
 use std::fs;
+use std::path::PathBuf;
 use std::time::Duration;
 
 #[derive(Clone, Debug)]
@@ -25,7 +25,10 @@ impl CortexSync {
     }
 
     fn get_cortex_token(&self) -> String {
-        let home = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")).map(PathBuf::from).unwrap_or_else(|_| PathBuf::from("."));
+        let home = std::env::var("HOME")
+            .or_else(|_| std::env::var("USERPROFILE"))
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| PathBuf::from("."));
         let token_path = home.join(".config/cortex/token");
         if token_path.exists() {
             fs::read_to_string(&token_path)

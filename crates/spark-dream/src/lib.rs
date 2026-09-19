@@ -221,7 +221,10 @@ impl DreamEngine {
         let sessions_dir = base_dir.join("sessions");
         let inbox_dir = base_dir.join("inbox");
         let dream_dir = base_dir.join("aien-dream");
-        let home = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")).map(PathBuf::from).unwrap_or_else(|_| PathBuf::from("."));
+        let home = std::env::var("HOME")
+            .or_else(|_| std::env::var("USERPROFILE"))
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| PathBuf::from("."));
         let park_dir = home.join("atlas-prime-workspace/park");
         let cortex_token_path = home.join(".config/cortex/token");
 

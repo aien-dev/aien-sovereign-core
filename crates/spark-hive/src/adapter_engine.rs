@@ -1175,7 +1175,10 @@ mod tests {
             3400,
             2100,
             52.0,
-            &format!("{}/workspace/aien-sandbox", std::env::var("HOME").unwrap_or_default()),
+            &format!(
+                "{}/workspace/aien-sandbox",
+                std::env::var("HOME").unwrap_or_default()
+            ),
             "Linux aarch64 16GB RAM",
         );
         let socratic = evaluate_socratic_reflex(&spec.model, &spec.engine);

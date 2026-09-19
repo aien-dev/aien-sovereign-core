@@ -35,7 +35,9 @@ impl AtlasBot {
 
         // 1. Query Cortex memory for context
         let mut memory_context = String::new();
-        let home = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")).unwrap_or_else(|_| ".".to_string());
+        let home = std::env::var("HOME")
+            .or_else(|_| std::env::var("USERPROFILE"))
+            .unwrap_or_else(|_| ".".to_string());
         let token_path = format!("{}/.config/cortex/token", home);
         if let Ok(cortex_token) = std::fs::read_to_string(token_path) {
             let recall_payload = json!({

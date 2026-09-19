@@ -34,13 +34,16 @@ impl HarvesterClient {
     }
 
     pub fn resolve_vault_key(key_name: &str) -> Result<String, ClientError> {
-        let home = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")).unwrap_or_else(|_| ".".to_string());
+        let home = std::env::var("HOME")
+            .or_else(|_| std::env::var("USERPROFILE"))
+            .unwrap_or_else(|_| ".".to_string());
         let vault_candidate = format!("{}/.local/bin/atlas-vault", home);
-        let bin = if std::path::Path::new(&vault_candidate).is_file() { &vault_candidate } else { "atlas-vault" };
-        let output = Command::new(bin)
-            .arg("get")
-            .arg(key_name)
-            .output();
+        let bin = if std::path::Path::new(&vault_candidate).is_file() {
+            &vault_candidate
+        } else {
+            "atlas-vault"
+        };
+        let output = Command::new(bin).arg("get").arg(key_name).output();
 
         match output {
             Ok(out) if out.status.success() => {

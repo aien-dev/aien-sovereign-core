@@ -28,7 +28,10 @@ pub fn resolve_onnx_runtime_lib() -> String {
         .or_else(|_| std::env::var("USERPROFILE"))
         .unwrap_or_else(|_| ".".to_string());
     let candidates = [
-        format!("{}/max-env/lib/python3.12/site-packages/onnxruntime/capi/libonnxruntime.so.1.30.0", home),
+        format!(
+            "{}/max-env/lib/python3.12/site-packages/onnxruntime/capi/libonnxruntime.so.1.30.0",
+            home
+        ),
         format!("{}/.local/lib/libonnxruntime.so", home),
         "/usr/local/lib/libonnxruntime.so".to_string(),
         "/usr/lib/libonnxruntime.so".to_string(),

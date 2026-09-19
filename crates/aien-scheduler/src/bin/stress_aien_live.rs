@@ -94,11 +94,17 @@ fn load_cortex_token() -> String {
     }
     let home = std::env::var("HOME").unwrap_or_else(|_| "/home/drakestapleton".to_string());
     let path = format!("{}/.config/cortex/token", home);
-    let tok = fs::read_to_string(&path).unwrap_or_default().trim().to_string();
+    let tok = fs::read_to_string(&path)
+        .unwrap_or_default()
+        .trim()
+        .to_string();
     if !tok.is_empty() {
         return tok;
     }
-    fs::read_to_string("/home/drakestapleton/.config/cortex/token").unwrap_or_default().trim().to_string()
+    fs::read_to_string("/home/drakestapleton/.config/cortex/token")
+        .unwrap_or_default()
+        .trim()
+        .to_string()
 }
 
 #[tokio::main]
@@ -122,9 +128,15 @@ async fn main() {
     let openclaw_rss = get_process_rss_mb("openclaw").unwrap_or(0.0);
 
     println!("  cortex-rs Resident Set Size:        {:.2} MB", cortex_rss);
-    println!("  cortex-encoder-rs Resident Set Size: {:.2} MB", encoder_rss);
+    println!(
+        "  cortex-encoder-rs Resident Set Size: {:.2} MB",
+        encoder_rss
+    );
     println!("  max engine Resident Set Size:        {:.2} MB", max_rss);
-    println!("  openclaw daemon Resident Set Size:   {:.2} MB\n", openclaw_rss);
+    println!(
+        "  openclaw daemon Resident Set Size:   {:.2} MB\n",
+        openclaw_rss
+    );
 
     // 1. Cortex-rs Vector Memory Call Stress
     stress_cortex_memory(&client).await;
@@ -141,9 +153,24 @@ async fn main() {
     let post_encoder = get_process_rss_mb("cortex-encoder-rs").unwrap_or(0.0);
     let post_max = get_process_rss_mb("max").unwrap_or(0.0);
 
-    println!("  cortex-rs RSS:        {:.2} MB -> {:.2} MB (Delta: {:+.2} MB)", cortex_rss, post_cortex, post_cortex - cortex_rss);
-    println!("  cortex-encoder-rs RSS:{:.2} MB -> {:.2} MB (Delta: {:+.2} MB)", encoder_rss, post_encoder, post_encoder - encoder_rss);
-    println!("  max engine RSS:       {:.2} MB -> {:.2} MB (Delta: {:+.2} MB)", max_rss, post_max, post_max - max_rss);
+    println!(
+        "  cortex-rs RSS:        {:.2} MB -> {:.2} MB (Delta: {:+.2} MB)",
+        cortex_rss,
+        post_cortex,
+        post_cortex - cortex_rss
+    );
+    println!(
+        "  cortex-encoder-rs RSS:{:.2} MB -> {:.2} MB (Delta: {:+.2} MB)",
+        encoder_rss,
+        post_encoder,
+        post_encoder - encoder_rss
+    );
+    println!(
+        "  max engine RSS:       {:.2} MB -> {:.2} MB (Delta: {:+.2} MB)",
+        max_rss,
+        post_max,
+        post_max - max_rss
+    );
 
     println!("\n================================================================================");
     println!("     LIVE AIEN STRESS BENCHMARK EXECUTION COMPLETED SUCCESSFULLY");
@@ -154,7 +181,9 @@ async fn stress_cortex_memory(client: &Client) {
     println!("--- 1. Cortex-rs Vector Memory Call Stress (Concurrency & Saturation) ---");
     let token = load_cortex_token();
     if token.is_empty() {
-        println!("  [!] Warning: Cortex token not found, running unauthenticated endpoints only.\n");
+        println!(
+            "  [!] Warning: Cortex token not found, running unauthenticated endpoints only.\n"
+        );
         return;
     }
 
@@ -168,7 +197,9 @@ async fn stress_cortex_memory(client: &Client) {
     for &concurrency in &concurrency_tiers {
         let calls_per_worker = requests_per_tier / concurrency;
         let success_counter = Arc::new(AtomicUsize::new(0));
-        let latencies = Arc::new(parking_lot::Mutex::new(Vec::with_capacity(requests_per_tier)));
+        let latencies = Arc::new(parking_lot::Mutex::new(Vec::with_capacity(
+            requests_per_tier,
+        )));
 
         let t0 = Instant::now();
         let mut handles = Vec::new();
@@ -216,7 +247,14 @@ async fn stress_cortex_memory(client: &Client) {
 
         println!(
             "  | {:<11} | {:<11} | {:<18.2} | {:<8.2} | {:<8.2} | {:<8.2} | {:<8.2} | {:<8.1}% |",
-            concurrency, requests_per_tier, throughput, stats.p50_ms, stats.p90_ms, stats.p95_ms, stats.p99_ms, success_pct
+            concurrency,
+            requests_per_tier,
+            throughput,
+            stats.p50_ms,
+            stats.p90_ms,
+            stats.p95_ms,
+            stats.p99_ms,
+            success_pct
         );
     }
     println!("  Status: PASSED (Resilient sub-millisecond memory recall under pressure)\n");

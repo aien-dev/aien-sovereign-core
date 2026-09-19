@@ -8,12 +8,18 @@ use crate::audit::SystemAuditReport;
 
 const CORTEX_URL: &str = "http://127.0.0.1:18080";
 fn debugger_cortex_token_path() -> std::path::PathBuf {
-    let home = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")).map(std::path::PathBuf::from).unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| std::path::PathBuf::from("."));
     home.join(".config/cortex/token")
 }
 
 fn debugger_hive_db_path() -> std::path::PathBuf {
-    let home = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")).map(std::path::PathBuf::from).unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| std::path::PathBuf::from("."));
     home.join(".config/cortex/hive.db")
 }
 

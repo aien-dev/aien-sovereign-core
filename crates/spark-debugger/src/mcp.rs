@@ -110,7 +110,10 @@ pub async fn run_mcp_server(
                     "debug_audit_invariants" => {
                         let inv = audit_vault_and_unslop(&[
                             &workspace_dir,
-                            &format!("{}/spark-cockpit-rs", std::env::var("HOME").unwrap_or_default()),
+                            &format!(
+                                "{}/spark-cockpit-rs",
+                                std::env::var("HOME").unwrap_or_default()
+                            ),
                         ]);
                         serde_json::to_string_pretty(&inv)
                             .unwrap_or_else(|_| "Failed to serialize invariants".to_string())

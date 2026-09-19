@@ -1340,8 +1340,7 @@ async fn handle_post_operator(
     });
 
     let op_cfg = operator_config_path();
-    let mut current_toml =
-    if op_cfg.exists() {
+    let mut current_toml = if op_cfg.exists() {
         fs::read_to_string(operator_config_path())
             .ok()
             .and_then(|s| toml::from_str::<Value>(&s).ok())
