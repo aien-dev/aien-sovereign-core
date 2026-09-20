@@ -8,9 +8,8 @@ static VAULT_CACHE: OnceLock<RwLock<(Instant, Vec<String>)>> = OnceLock::new();
 /// List all secret keys currently registered in the hardware TPM vault.
 /// Results are cached for 10 seconds to eliminate redundant TPM query latency.
 pub fn list_vault_keys() -> Vec<String> {
-    let cache_lock = VAULT_CACHE.get_or_init(|| {
-        RwLock::new((Instant::now() - Duration::from_secs(60), Vec::new()))
-    });
+    let cache_lock = VAULT_CACHE
+        .get_or_init(|| RwLock::new((Instant::now() - Duration::from_secs(60), Vec::new())));
 
     if let Ok(read_guard) = cache_lock.read() {
         if read_guard.0.elapsed() < Duration::from_secs(10) {
@@ -114,7 +113,8 @@ mod tests {
 
     #[test]
     fn test_sanitize_paths_and_ips() {
-        let raw = "Read /home/drakestapleton/workspace/secret.rs from 100.64.0.1 and send to 127.0.0.1";
+        let raw =
+            "Read /home/drakestapleton/workspace/secret.rs from 100.64.0.1 and send to 127.0.0.1";
         let clean = sanitize_outbound_prompt(raw);
         assert!(!clean.contains("/home/drakestapleton"));
         assert!(!clean.contains("100.64.0.1"));

@@ -634,19 +634,25 @@ async fn handle_workshop_distill(
             } else {
                 return Err((
                     StatusCode::BAD_REQUEST,
-                    Json(json!({ "status": "error", "error": "Failed to generate task from curriculum track." })),
+                    Json(
+                        json!({ "status": "error", "error": "Failed to generate task from curriculum track." }),
+                    ),
                 ));
             }
         } else {
             return Err((
                 StatusCode::BAD_REQUEST,
-                Json(json!({ "status": "error", "error": format!("Invalid curriculum track '{}'.", track_str) })),
+                Json(
+                    json!({ "status": "error", "error": format!("Invalid curriculum track '{}'.", track_str) }),
+                ),
             ));
         }
     } else {
         return Err((
             StatusCode::BAD_REQUEST,
-            Json(json!({ "status": "error", "error": "Either prompt or curriculum track must be provided." })),
+            Json(
+                json!({ "status": "error", "error": "Either prompt or curriculum track must be provided." }),
+            ),
         ));
     };
 
@@ -747,7 +753,9 @@ async fn handle_workshop_commit(
         let text = resp.text().await.unwrap_or_default();
         return Err((
             StatusCode::BAD_GATEWAY,
-            Json(json!({ "status": "error", "error": format!("Cortex write failed ({}): {}", status, text) })),
+            Json(
+                json!({ "status": "error", "error": format!("Cortex write failed ({}): {}", status, text) }),
+            ),
         ));
     }
 

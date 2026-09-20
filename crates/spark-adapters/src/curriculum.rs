@@ -130,7 +130,14 @@ impl CurriculumEngine {
     fn mine_recent_commit_prompts(limit: usize) -> Vec<String> {
         let repo_path = std::env::current_dir().unwrap_or_else(|_| Path::new(".").to_path_buf());
         if let Ok(output) = Command::new("git")
-            .args(["-C", repo_path.to_str().unwrap_or("."), "log", "-n", "10", "--oneline"])
+            .args([
+                "-C",
+                repo_path.to_str().unwrap_or("."),
+                "log",
+                "-n",
+                "10",
+                "--oneline",
+            ])
             .output()
         {
             if output.status.success() {
@@ -199,7 +206,10 @@ mod tests {
         assert_eq!(tasks.len(), 2);
         assert!(tasks[0].prompt.contains("Rust"));
         assert_eq!(tasks[0].teacher_model, "anthropic/claude-3-7-sonnet");
-        assert_eq!(tasks[0].student_model.as_deref(), Some("atlas-lightning-omni"));
+        assert_eq!(
+            tasks[0].student_model.as_deref(),
+            Some("atlas-lightning-omni")
+        );
         assert!(tasks[0].commit_to_cortex);
     }
 }

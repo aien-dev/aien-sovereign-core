@@ -236,7 +236,10 @@ async fn run_single(
     println!("=== Sovereign Knowledge Distillation ===");
     println!("Task ID:  {}", task.id);
     println!("Teacher:  {}", task.teacher_model);
-    println!("Student:  {}", task.student_model.as_deref().unwrap_or("<none>"));
+    println!(
+        "Student:  {}",
+        task.student_model.as_deref().unwrap_or("<none>")
+    );
     println!("Prompt:   {}", task.prompt);
 
     let mut engine = DistillationEngine::new();
@@ -294,13 +297,8 @@ async fn run_crawl(
     println!("Student Seat:     {}", student);
     println!("Cortex Commit:    {}", commit_cortex);
 
-    let tasks = CurriculumEngine::generate_tasks(
-        track,
-        limit,
-        teacher,
-        Some(student),
-        commit_cortex,
-    );
+    let tasks =
+        CurriculumEngine::generate_tasks(track, limit, teacher, Some(student), commit_cortex);
 
     let mut engine = DistillationEngine::new();
     if let Some(dir) = dataset_dir {
@@ -316,16 +314,26 @@ async fn run_crawl(
         match engine.distill(task).await {
             Ok(record) => {
                 let t_pass = record.teacher_rollout.verification.passed;
-                let s_pass = record.student_rollout.as_ref().map(|s| s.verification.passed).unwrap_or(false);
+                let s_pass = record
+                    .student_rollout
+                    .as_ref()
+                    .map(|s| s.verification.passed)
+                    .unwrap_or(false);
                 if t_pass || s_pass {
                     passed_count += 1;
                 }
                 total_delta += record.preference_delta;
                 if record.durable_memory_committed {
                     cortex_count += 1;
-                    println!("  ✓ Committed to Cortex: {}", record.cortex_entity_id.as_deref().unwrap_or("<id>"));
+                    println!(
+                        "  ✓ Committed to Cortex: {}",
+                        record.cortex_entity_id.as_deref().unwrap_or("<id>")
+                    );
                 }
-                println!("  ✓ Score: Teacher: {:.2}, Delta: {:.2}", record.teacher_rollout.verification.score, record.preference_delta);
+                println!(
+                    "  ✓ Score: Teacher: {:.2}, Delta: {:.2}",
+                    record.teacher_rollout.verification.score, record.preference_delta
+                );
             }
             Err(e) => {
                 eprintln!("  X Task failed: {}", e);
@@ -337,7 +345,10 @@ async fn run_crawl(
     println!("Total Tasks Evaluated:  {}", limit);
     println!("Passing Candidates:     {}/{}", passed_count, limit);
     println!("Cortex Entities Added:  {}", cortex_count);
-    println!("Average Preference Delta: {:.2}", total_delta / limit.max(1) as f32);
+    println!(
+        "Average Preference Delta: {:.2}",
+        total_delta / limit.max(1) as f32
+    );
     println!("Datasets Directory:     {}", engine.dataset_dir.display());
 }
 
@@ -346,7 +357,10 @@ fn run_verify_keys() {
     let adapters = router.discover_adapters();
 
     println!("=== Sovereign Model & Subscription Key Audit ===");
-    println!("{:<28} {:<15} {:<15} {:<10}", "ADAPTER ID", "PROVIDER", "STATUS", "RESIDENT");
+    println!(
+        "{:<28} {:<15} {:<15} {:<10}",
+        "ADAPTER ID", "PROVIDER", "STATUS", "RESIDENT"
+    );
     println!("{}", "-".repeat(72));
 
     for a in adapters {
@@ -358,7 +372,13 @@ fn run_verify_keys() {
             "✓ LOCAL"
         };
         let resident = if a.is_resident { "YES" } else { "NO" };
-        println!("{:<28} {:<15} {:<15} {:<10}", a.id, a.provider.slug(), status, resident);
+        println!(
+            "{:<28} {:<15} {:<15} {:<10}",
+            a.id,
+            a.provider.slug(),
+            status,
+            resident
+        );
     }
 }
 

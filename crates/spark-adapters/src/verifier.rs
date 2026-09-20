@@ -248,9 +248,7 @@ impl Verifier {
             curr[0] = i + 1;
             for (j, &cb) in b_chars.iter().enumerate() {
                 let cost = if ca == cb { 0 } else { 1 };
-                curr[j + 1] = (prev[j + 1] + 1)
-                    .min(curr[j] + 1)
-                    .min(prev[j] + cost);
+                curr[j + 1] = (prev[j + 1] + 1).min(curr[j] + 1).min(prev[j] + cost);
             }
             std::mem::swap(&mut prev, &mut curr);
         }
@@ -396,7 +394,10 @@ mod tests {
         let invalid_code = "```rust\npub fn add(a: i32, b: i32) -> i32 { a + \"broken\" }\n```";
         let out_inv = Verifier::verify(invalid_code, VerificationStrategy::CompilerCheck);
         assert!(!out_inv.passed);
-        assert!(out_inv.rule_violations.iter().any(|v| v.contains("Compiler error")));
+        assert!(out_inv
+            .rule_violations
+            .iter()
+            .any(|v| v.contains("Compiler error")));
     }
 
     #[test]

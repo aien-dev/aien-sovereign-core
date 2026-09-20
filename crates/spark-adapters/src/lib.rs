@@ -1,17 +1,17 @@
+pub mod curriculum;
 pub mod distill;
 pub mod models;
 pub mod providers;
 pub mod router;
 pub mod vault;
 pub mod verifier;
-pub mod curriculum;
 
+pub use curriculum::{CurriculumEngine, CurriculumTrack};
 pub use distill::DistillationEngine;
 pub use models::*;
 pub use router::AdapterRouter;
 pub use vault::*;
 pub use verifier::Verifier;
-pub use curriculum::{CurriculumEngine, CurriculumTrack};
 
 #[cfg(test)]
 mod tests {
