@@ -270,10 +270,7 @@ impl TransformerWeights {
     }
 
     /// Executes sequence forward pass capturing all intermediate activations and logits.
-    pub fn forward_sequence_with_diagnostics(
-        &self,
-        tokens: &[u32],
-    ) -> ForwardDiagnostics {
+    pub fn forward_sequence_with_diagnostics(&self, tokens: &[u32]) -> ForwardDiagnostics {
         let n = tokens.len();
         let hidden_dim = self.config.hidden_dim();
         let num_heads = self.config.num_heads;
@@ -298,10 +295,19 @@ impl TransformerWeights {
         for layer_idx in 0..self.config.num_layers {
             let prefix = format!("layers.{}", layer_idx);
             shapes.insert(format!("{}.post_rmsnorm", prefix), vec![1, n, hidden_dim]);
-            shapes.insert(format!("{}.post_rope_q", prefix), vec![1, num_heads, n, head_dim]);
-            shapes.insert(format!("{}.post_rope_k", prefix), vec![1, num_kv_heads, n, head_dim]);
+            shapes.insert(
+                format!("{}.post_rope_q", prefix),
+                vec![1, num_heads, n, head_dim],
+            );
+            shapes.insert(
+                format!("{}.post_rope_k", prefix),
+                vec![1, num_kv_heads, n, head_dim],
+            );
             shapes.insert(format!("{}.post_attention", prefix), vec![1, n, hidden_dim]);
-            shapes.insert(format!("{}.post_attn_residual", prefix), vec![1, n, hidden_dim]);
+            shapes.insert(
+                format!("{}.post_attn_residual", prefix),
+                vec![1, n, hidden_dim],
+            );
             shapes.insert(format!("{}.post_attn_norm", prefix), vec![1, n, hidden_dim]);
             shapes.insert(format!("{}.post_swiglu", prefix), vec![1, n, hidden_dim]);
             shapes.insert(format!("{}.post_residual", prefix), vec![1, n, hidden_dim]);
@@ -347,7 +353,8 @@ impl TransformerWeights {
 
             // 1. Embedding lookup
             let token_idx = (token_id as usize) % vocab_size;
-            let embed_slice = &self.embed_tokens[token_idx * hidden_dim..(token_idx + 1) * hidden_dim];
+            let embed_slice =
+                &self.embed_tokens[token_idx * hidden_dim..(token_idx + 1) * hidden_dim];
             embed_tokens_buf[pos * hidden_dim..(pos + 1) * hidden_dim].copy_from_slice(embed_slice);
             let mut x = embed_slice.to_vec();
 
@@ -384,14 +391,16 @@ impl TransformerWeights {
                 for h in 0..num_heads {
                     let src_slice = &q[h * head_dim..(h + 1) * head_dim];
                     let dst_idx = h * (n * head_dim) + pos * head_dim;
-                    post_rope_q_bufs[layer_idx][dst_idx..dst_idx + head_dim].copy_from_slice(src_slice);
+                    post_rope_q_bufs[layer_idx][dst_idx..dst_idx + head_dim]
+                        .copy_from_slice(src_slice);
                 }
 
                 // Store RoPE K in [1, num_kv_heads, n, head_dim] layout
                 for kv_h in 0..num_kv_heads {
                     let src_slice = &k[kv_h * head_dim..(kv_h + 1) * head_dim];
                     let dst_idx = kv_h * (n * head_dim) + pos * head_dim;
-                    post_rope_k_bufs[layer_idx][dst_idx..dst_idx + head_dim].copy_from_slice(src_slice);
+                    post_rope_k_bufs[layer_idx][dst_idx..dst_idx + head_dim]
+                        .copy_from_slice(src_slice);
                 }
 
                 // 2d. Append to KV Cache
@@ -474,14 +483,38 @@ impl TransformerWeights {
 
         for layer_idx in 0..self.config.num_layers {
             let prefix = format!("layers.{}", layer_idx);
-            activations.insert(format!("{}.post_rmsnorm", prefix), post_rmsnorm_bufs[layer_idx].clone());
-            activations.insert(format!("{}.post_rope_q", prefix), post_rope_q_bufs[layer_idx].clone());
-            activations.insert(format!("{}.post_rope_k", prefix), post_rope_k_bufs[layer_idx].clone());
-            activations.insert(format!("{}.post_attention", prefix), post_attention_bufs[layer_idx].clone());
-            activations.insert(format!("{}.post_attn_residual", prefix), post_attn_residual_bufs[layer_idx].clone());
-            activations.insert(format!("{}.post_attn_norm", prefix), post_attn_norm_bufs[layer_idx].clone());
-            activations.insert(format!("{}.post_swiglu", prefix), post_swiglu_bufs[layer_idx].clone());
-            activations.insert(format!("{}.post_residual", prefix), post_residual_bufs[layer_idx].clone());
+            activations.insert(
+                format!("{}.post_rmsnorm", prefix),
+                post_rmsnorm_bufs[layer_idx].clone(),
+            );
+            activations.insert(
+                format!("{}.post_rope_q", prefix),
+                post_rope_q_bufs[layer_idx].clone(),
+            );
+            activations.insert(
+                format!("{}.post_rope_k", prefix),
+                post_rope_k_bufs[layer_idx].clone(),
+            );
+            activations.insert(
+                format!("{}.post_attention", prefix),
+                post_attention_bufs[layer_idx].clone(),
+            );
+            activations.insert(
+                format!("{}.post_attn_residual", prefix),
+                post_attn_residual_bufs[layer_idx].clone(),
+            );
+            activations.insert(
+                format!("{}.post_attn_norm", prefix),
+                post_attn_norm_bufs[layer_idx].clone(),
+            );
+            activations.insert(
+                format!("{}.post_swiglu", prefix),
+                post_swiglu_bufs[layer_idx].clone(),
+            );
+            activations.insert(
+                format!("{}.post_residual", prefix),
+                post_residual_bufs[layer_idx].clone(),
+            );
         }
 
         ForwardDiagnostics {
@@ -642,7 +675,9 @@ impl TransformerWeights {
         let embed_tokens = checkpoint
             .get_fp32("model.embed_tokens.weight")
             .ok_or_else(|| {
-                crate::checkpoint::CheckpointError::MissingTensor("model.embed_tokens.weight".to_string())
+                crate::checkpoint::CheckpointError::MissingTensor(
+                    "model.embed_tokens.weight".to_string(),
+                )
             })?
             .clone();
 
@@ -867,26 +902,62 @@ mod tests {
 
         // 1. Missing tensor fails loudly with CheckpointError::MissingTensor
         let empty_checkpoint = crate::checkpoint::LoadedCheckpoint::new();
-        let err = TransformerWeights::from_loaded_checkpoint(&empty_checkpoint, &config).unwrap_err();
+        let err =
+            TransformerWeights::from_loaded_checkpoint(&empty_checkpoint, &config).unwrap_err();
         assert_eq!(
             err,
-            crate::checkpoint::CheckpointError::MissingTensor("model.embed_tokens.weight".to_string())
+            crate::checkpoint::CheckpointError::MissingTensor(
+                "model.embed_tokens.weight".to_string()
+            )
         );
 
         // 2. Populated checkpoint loads correctly
         let mut checkpoint = crate::checkpoint::LoadedCheckpoint::new();
-        checkpoint.fp32_weights.insert("model.embed_tokens.weight".to_string(), vec![0.1; 256 * 64]);
-        checkpoint.fp32_weights.insert("model.layers.0.input_layernorm.weight".to_string(), vec![1.0; 64]);
-        checkpoint.fp32_weights.insert("model.layers.0.self_attn.q_proj.weight".to_string(), vec![0.2; 64 * 64]);
-        checkpoint.fp32_weights.insert("model.layers.0.self_attn.k_proj.weight".to_string(), vec![0.3; 64 * 64]);
-        checkpoint.fp32_weights.insert("model.layers.0.self_attn.v_proj.weight".to_string(), vec![0.4; 64 * 64]);
-        checkpoint.fp32_weights.insert("model.layers.0.self_attn.o_proj.weight".to_string(), vec![0.5; 64 * 64]);
-        checkpoint.fp32_weights.insert("model.layers.0.post_attention_layernorm.weight".to_string(), vec![1.0; 64]);
-        checkpoint.fp32_weights.insert("model.layers.0.mlp.gate_proj.weight".to_string(), vec![0.6; 64 * 128]);
-        checkpoint.fp32_weights.insert("model.layers.0.mlp.up_proj.weight".to_string(), vec![0.7; 64 * 128]);
-        checkpoint.fp32_weights.insert("model.layers.0.mlp.down_proj.weight".to_string(), vec![0.8; 128 * 64]);
-        checkpoint.fp32_weights.insert("model.norm.weight".to_string(), vec![1.0; 64]);
-        checkpoint.fp32_weights.insert("lm_head.weight".to_string(), vec![0.9; 64 * 256]);
+        checkpoint
+            .fp32_weights
+            .insert("model.embed_tokens.weight".to_string(), vec![0.1; 256 * 64]);
+        checkpoint.fp32_weights.insert(
+            "model.layers.0.input_layernorm.weight".to_string(),
+            vec![1.0; 64],
+        );
+        checkpoint.fp32_weights.insert(
+            "model.layers.0.self_attn.q_proj.weight".to_string(),
+            vec![0.2; 64 * 64],
+        );
+        checkpoint.fp32_weights.insert(
+            "model.layers.0.self_attn.k_proj.weight".to_string(),
+            vec![0.3; 64 * 64],
+        );
+        checkpoint.fp32_weights.insert(
+            "model.layers.0.self_attn.v_proj.weight".to_string(),
+            vec![0.4; 64 * 64],
+        );
+        checkpoint.fp32_weights.insert(
+            "model.layers.0.self_attn.o_proj.weight".to_string(),
+            vec![0.5; 64 * 64],
+        );
+        checkpoint.fp32_weights.insert(
+            "model.layers.0.post_attention_layernorm.weight".to_string(),
+            vec![1.0; 64],
+        );
+        checkpoint.fp32_weights.insert(
+            "model.layers.0.mlp.gate_proj.weight".to_string(),
+            vec![0.6; 64 * 128],
+        );
+        checkpoint.fp32_weights.insert(
+            "model.layers.0.mlp.up_proj.weight".to_string(),
+            vec![0.7; 64 * 128],
+        );
+        checkpoint.fp32_weights.insert(
+            "model.layers.0.mlp.down_proj.weight".to_string(),
+            vec![0.8; 128 * 64],
+        );
+        checkpoint
+            .fp32_weights
+            .insert("model.norm.weight".to_string(), vec![1.0; 64]);
+        checkpoint
+            .fp32_weights
+            .insert("lm_head.weight".to_string(), vec![0.9; 64 * 256]);
 
         let weights = TransformerWeights::from_loaded_checkpoint(&checkpoint, &config).unwrap();
         assert_eq!(weights.embed_tokens.len(), 256 * 64);

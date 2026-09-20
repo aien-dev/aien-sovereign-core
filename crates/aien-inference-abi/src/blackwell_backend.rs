@@ -274,8 +274,16 @@ impl TensorBackend for BlackwellGb10Backend {
         num_kv_heads: usize,
         head_dim: usize,
     ) {
-        self.fallback
-            .gqa_attention(out, q, k_cache, v_cache, seq_len, num_q_heads, num_kv_heads, head_dim);
+        self.fallback.gqa_attention(
+            out,
+            q,
+            k_cache,
+            v_cache,
+            seq_len,
+            num_q_heads,
+            num_kv_heads,
+            head_dim,
+        );
     }
 
     fn paged_attention(
@@ -296,10 +304,13 @@ impl TensorBackend for BlackwellGb10Backend {
         }
 
         if self.available && pool.config().dtype == aien_kv_cache::KvDType::Bf16 {
-            let q_bf16: Vec<u16> = q.iter().map(|&v| {
-                let bits = v.to_bits();
-                (bits >> 16) as u16
-            }).collect();
+            let q_bf16: Vec<u16> = q
+                .iter()
+                .map(|&v| {
+                    let bits = v.to_bits();
+                    (bits >> 16) as u16
+                })
+                .collect();
 
             let sm_scale = 1.0f32 / (head_dim as f32).sqrt();
             let mut out_bf16 = vec![0u16; out.len()];

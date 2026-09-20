@@ -10,13 +10,15 @@ pub type FnRmsnormBf16 = unsafe extern "C" fn(*const u16, *const u16, *mut u16, 
 pub type FnRopeBf16 = unsafe extern "C" fn(*mut u16, *mut u16, i32, i32, i32, i32, f32);
 pub type FnGemvBf16 = unsafe extern "C" fn(*const u16, *const u16, *mut u16, i32, i32);
 pub type FnSwigluBf16 = unsafe extern "C" fn(*const u16, *const u16, *mut u16, i32);
-pub type FnGqaBf16 = unsafe extern "C" fn(*const u16, *const u16, *const u16, *mut u16, i32, i32, i32, i32);
+pub type FnGqaBf16 =
+    unsafe extern "C" fn(*const u16, *const u16, *const u16, *mut u16, i32, i32, i32, i32);
 
 pub type FnRmsnormF32 = unsafe extern "C" fn(*const f32, *const f32, *mut f32, i32, f32);
 pub type FnRopeF32 = unsafe extern "C" fn(*mut f32, *mut f32, i32, i32, i32, i32, f32);
 pub type FnGemvF32 = unsafe extern "C" fn(*const f32, *const f32, *mut f32, i32, i32);
 pub type FnSwigluF32 = unsafe extern "C" fn(*const f32, *const f32, *mut f32, i32);
-pub type FnGqaF32 = unsafe extern "C" fn(*const f32, *const f32, *const f32, *mut f32, i32, i32, i32, i32);
+pub type FnGqaF32 =
+    unsafe extern "C" fn(*const f32, *const f32, *const f32, *mut f32, i32, i32, i32, i32);
 
 /// Loaded C-ABI symbol table for libaien_kernels.so.
 pub struct MojoKernelBindings {
@@ -37,8 +39,13 @@ impl MojoKernelBindings {
     pub fn load_from<P: AsRef<Path>>(path: P) -> Result<Self, String> {
         let p = path.as_ref();
         unsafe {
-            let lib = Library::new(p)
-                .map_err(|e| format!("Failed to load Mojo kernels library at {}: {}", p.display(), e))?;
+            let lib = Library::new(p).map_err(|e| {
+                format!(
+                    "Failed to load Mojo kernels library at {}: {}",
+                    p.display(),
+                    e
+                )
+            })?;
 
             let rmsnorm_bf16: Symbol<FnRmsnormBf16> = lib
                 .get(b"aien_rmsnorm_bf16\0")
@@ -56,11 +63,26 @@ impl MojoKernelBindings {
                 .get(b"aien_gqa_bf16\0")
                 .map_err(|e| format!("Missing symbol aien_gqa_bf16: {}", e))?;
 
-            let rmsnorm_f32: Option<FnRmsnormF32> = lib.get(b"aien_rmsnorm_f32\0").ok().map(|s: Symbol<FnRmsnormF32>| *s);
-            let rope_f32: Option<FnRopeF32> = lib.get(b"aien_rope_f32\0").ok().map(|s: Symbol<FnRopeF32>| *s);
-            let gemv_f32: Option<FnGemvF32> = lib.get(b"aien_gemv_f32\0").ok().map(|s: Symbol<FnGemvF32>| *s);
-            let swiglu_f32: Option<FnSwigluF32> = lib.get(b"aien_swiglu_f32\0").ok().map(|s: Symbol<FnSwigluF32>| *s);
-            let gqa_f32: Option<FnGqaF32> = lib.get(b"aien_gqa_f32\0").ok().map(|s: Symbol<FnGqaF32>| *s);
+            let rmsnorm_f32: Option<FnRmsnormF32> = lib
+                .get(b"aien_rmsnorm_f32\0")
+                .ok()
+                .map(|s: Symbol<FnRmsnormF32>| *s);
+            let rope_f32: Option<FnRopeF32> = lib
+                .get(b"aien_rope_f32\0")
+                .ok()
+                .map(|s: Symbol<FnRopeF32>| *s);
+            let gemv_f32: Option<FnGemvF32> = lib
+                .get(b"aien_gemv_f32\0")
+                .ok()
+                .map(|s: Symbol<FnGemvF32>| *s);
+            let swiglu_f32: Option<FnSwigluF32> = lib
+                .get(b"aien_swiglu_f32\0")
+                .ok()
+                .map(|s: Symbol<FnSwigluF32>| *s);
+            let gqa_f32: Option<FnGqaF32> = lib
+                .get(b"aien_gqa_f32\0")
+                .ok()
+                .map(|s: Symbol<FnGqaF32>| *s);
 
             Ok(Self {
                 rmsnorm_bf16: *rmsnorm_bf16,
@@ -125,7 +147,13 @@ pub struct UnifiedMemoryPool {
 }
 
 impl UnifiedMemoryPool {
-    pub fn ensure_capacity(&mut self, hidden_dim: usize, q_dim: usize, kv_dim: usize, vocab_size: usize) {
+    pub fn ensure_capacity(
+        &mut self,
+        hidden_dim: usize,
+        q_dim: usize,
+        kv_dim: usize,
+        vocab_size: usize,
+    ) {
         let max_dim = hidden_dim.max(q_dim).max(kv_dim).max(vocab_size);
         if self.intermediate_f32.len() < max_dim {
             self.intermediate_f32.resize(max_dim, 0.0);
@@ -162,7 +190,10 @@ fn get_or_init_bindings() -> Option<Arc<MojoKernelBindings>> {
                     Some(Arc::new(b))
                 }
                 Err(e) => {
-                    eprintln!("MojoGb10Backend: Warning - could not load kernels library: {}", e);
+                    eprintln!(
+                        "MojoGb10Backend: Warning - could not load kernels library: {}",
+                        e
+                    );
                     None
                 }
             }
@@ -217,7 +248,13 @@ impl TensorBackend for MojoGb10Backend {
         if let Some(ref b) = self.bindings {
             if let Some(f32_fn) = b.rmsnorm_f32 {
                 unsafe {
-                    f32_fn(x.as_ptr(), weight.as_ptr(), out.as_mut_ptr(), x.len() as i32, eps);
+                    f32_fn(
+                        x.as_ptr(),
+                        weight.as_ptr(),
+                        out.as_mut_ptr(),
+                        x.len() as i32,
+                        eps,
+                    );
                 }
                 return;
             }
@@ -251,10 +288,18 @@ impl TensorBackend for MojoGb10Backend {
                 return;
             }
         }
-        self.fallback.apply_rope(q, k, pos, head_dim, num_q_heads, num_kv_heads, theta);
+        self.fallback
+            .apply_rope(q, k, pos, head_dim, num_q_heads, num_kv_heads, theta);
     }
 
-    fn matmul_vec(&self, out: &mut [f32], x: &[f32], weight: &[f32], out_dim: usize, in_dim: usize) {
+    fn matmul_vec(
+        &self,
+        out: &mut [f32],
+        x: &[f32],
+        weight: &[f32],
+        out_dim: usize,
+        in_dim: usize,
+    ) {
         if let Some(ref b) = self.bindings {
             if let Some(f32_fn) = b.gemv_f32 {
                 unsafe {
@@ -329,8 +374,16 @@ impl TensorBackend for MojoGb10Backend {
                 return;
             }
         }
-        self.fallback
-            .gqa_attention(out, q, k_cache, v_cache, seq_len, num_q_heads, num_kv_heads, head_dim);
+        self.fallback.gqa_attention(
+            out,
+            q,
+            k_cache,
+            v_cache,
+            seq_len,
+            num_q_heads,
+            num_kv_heads,
+            head_dim,
+        );
     }
 
     fn compute_logits(

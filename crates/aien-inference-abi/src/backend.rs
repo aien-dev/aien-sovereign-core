@@ -1,7 +1,9 @@
 //! Decoupled TensorBackend trait and ReferenceCpuBackend correctness oracle.
 //! Provides hardware-neutral abstraction for transformer mathematical operations.
 
-use crate::tensor::{apply_rope as tensor_rope, matmul_vec as tensor_matmul, rmsnorm as tensor_rmsnorm};
+use crate::tensor::{
+    apply_rope as tensor_rope, matmul_vec as tensor_matmul, rmsnorm as tensor_rmsnorm,
+};
 
 /// Decoupled mathematical abstraction for transformer tensor operations.
 pub trait TensorBackend: Send + Sync {
@@ -107,14 +109,22 @@ pub trait TensorBackend: Send + Sync {
                 let slot = t % block_size;
 
                 let head_offset_bytes = kv_head * head_dim * std::mem::size_of::<f32>();
-                let k_offset = pool.element_offset(blk_id, layer_idx, false, slot) + head_offset_bytes;
-                let v_offset = pool.element_offset(blk_id, layer_idx, true, slot) + head_offset_bytes;
+                let k_offset =
+                    pool.element_offset(blk_id, layer_idx, false, slot) + head_offset_bytes;
+                let v_offset =
+                    pool.element_offset(blk_id, layer_idx, true, slot) + head_offset_bytes;
 
                 let k_slice = unsafe {
-                    std::slice::from_raw_parts(pool.base_ptr().add(k_offset) as *const f32, head_dim)
+                    std::slice::from_raw_parts(
+                        pool.base_ptr().add(k_offset) as *const f32,
+                        head_dim,
+                    )
                 };
                 let v_slice = unsafe {
-                    std::slice::from_raw_parts(pool.base_ptr().add(v_offset) as *const f32, head_dim)
+                    std::slice::from_raw_parts(
+                        pool.base_ptr().add(v_offset) as *const f32,
+                        head_dim,
+                    )
                 };
 
                 let mut dot = 0.0f64;
@@ -188,7 +198,14 @@ impl TensorBackend for ReferenceCpuBackend {
         tensor_rope(q, k, pos, num_q_heads, num_kv_heads, head_dim, theta);
     }
 
-    fn matmul_vec(&self, out: &mut [f32], x: &[f32], weight: &[f32], out_dim: usize, in_dim: usize) {
+    fn matmul_vec(
+        &self,
+        out: &mut [f32],
+        x: &[f32],
+        weight: &[f32],
+        out_dim: usize,
+        in_dim: usize,
+    ) {
         tensor_matmul(x, weight, out, in_dim, out_dim);
     }
 
@@ -325,10 +342,7 @@ mod tests {
     fn test_reference_matmul_matches_tensor() {
         let backend = ReferenceCpuBackend::new();
         let x = vec![1.0f32, 2.0, 3.0];
-        let w = vec![
-            1.0f32, 0.0, 0.0,
-            0.0, 1.0, 0.0,
-        ];
+        let w = vec![1.0f32, 0.0, 0.0, 0.0, 1.0, 0.0];
         let mut out = vec![0.0f32; 2];
         backend.matmul_vec(&mut out, &x, &w, 2, 3);
         assert_eq!(out, vec![1.0, 2.0]);
@@ -361,7 +375,16 @@ mod tests {
         let v_cache = vec![2.0f32; seq_len * num_kv_heads * head_dim];
         let mut out = vec![0.0f32; num_q_heads * head_dim];
 
-        backend.gqa_attention(&mut out, &q, &k_cache, &v_cache, seq_len, num_q_heads, num_kv_heads, head_dim);
+        backend.gqa_attention(
+            &mut out,
+            &q,
+            &k_cache,
+            &v_cache,
+            seq_len,
+            num_q_heads,
+            num_kv_heads,
+            head_dim,
+        );
 
         // All values are 2.0, so weighted sum should be 2.0 for all outputs
         for v in &out {
@@ -373,11 +396,7 @@ mod tests {
     fn test_reference_compute_logits() {
         let backend = ReferenceCpuBackend::new();
         let hidden = vec![1.0f32, 0.5];
-        let embed = vec![
-            2.0f32, 0.0,
-            0.0, 4.0,
-            1.0, 1.0,
-        ];
+        let embed = vec![2.0f32, 0.0, 0.0, 4.0, 1.0, 1.0];
         let mut logits = vec![0.0f32; 3];
         backend.compute_logits(&mut logits, &hidden, &embed, 3, 2);
 

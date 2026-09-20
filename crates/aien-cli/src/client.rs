@@ -176,8 +176,13 @@ impl ChatClient {
                         if let Some(choices) = val.get("choices").and_then(Value::as_array) {
                             if let Some(choice) = choices.first() {
                                 if let Some(delta) = choice.get("delta") {
-                                    if let Some(reasoning) = delta.get("reasoning").or_else(|| delta.get("reasoning_content")).and_then(Value::as_str) {
-                                        let sanitized = reasoning.replace("—", ", ").replace("–", "-");
+                                    if let Some(reasoning) = delta
+                                        .get("reasoning")
+                                        .or_else(|| delta.get("reasoning_content"))
+                                        .and_then(Value::as_str)
+                                    {
+                                        let sanitized =
+                                            reasoning.replace("—", ", ").replace("–", "-");
                                         if stream_to_stdout {
                                             if !in_thinking {
                                                 print!("{}", "\n[Thinking] ".magenta().dimmed());
@@ -187,7 +192,9 @@ impl ChatClient {
                                             let _ = stdout().flush();
                                         }
                                     }
-                                    if let Some(raw_content) = delta.get("content").and_then(Value::as_str) {
+                                    if let Some(raw_content) =
+                                        delta.get("content").and_then(Value::as_str)
+                                    {
                                         if in_thinking {
                                             if stream_to_stdout {
                                                 print!("\n\n");
@@ -195,7 +202,8 @@ impl ChatClient {
                                             }
                                             in_thinking = false;
                                         }
-                                        let sanitized = raw_content.replace("—", ", ").replace("–", "-");
+                                        let sanitized =
+                                            raw_content.replace("—", ", ").replace("–", "-");
                                         full_text.push_str(&sanitized);
                                         if stream_to_stdout {
                                             print!("{}", sanitized);
@@ -271,7 +279,9 @@ pub fn extract_tool_calls(text: &str) -> Vec<(String, Value)> {
         }
     }
     if calls.is_empty() {
-        if let Ok(json_pat) = regex::Regex::new(r#"(?s)```(?:json|tool_call)?\s*(\{\s*"name"\s*:\s*"[^"]+".*?\})\s*```"#) {
+        if let Ok(json_pat) = regex::Regex::new(
+            r#"(?s)```(?:json|tool_call)?\s*(\{\s*"name"\s*:\s*"[^"]+".*?\})\s*```"#,
+        ) {
             for caps in json_pat.captures_iter(text) {
                 if let Some(json_match) = caps.get(1) {
                     if let Some(parsed) = parse_tool_call_json(json_match.as_str()) {

@@ -1,6 +1,4 @@
-use aien_inference_abi::{
-    ModelConfig, NativeTransformerBackend, TransformerWeights,
-};
+use aien_inference_abi::{ModelConfig, NativeTransformerBackend, TransformerWeights};
 
 #[test]
 fn test_paged_vs_contiguous_numerical_parity() {
@@ -34,7 +32,7 @@ fn test_paged_vs_contiguous_numerical_parity() {
     // Autoregressive generation parity across 10 steps
     for step in 0..10 {
         let (paged_tok, paged_logits) = paged_backend.decode_branch_step(paged_branch).unwrap();
-        
+
         let (contig_tok, contig_logits) = {
             let h = {
                 let seq = contiguous_backend.sequences.get_mut(&1).unwrap();
@@ -52,12 +50,24 @@ fn test_paged_vs_contiguous_numerical_parity() {
             };
             let l = contiguous_backend.compute_logits(&h);
             let (sampled, _) = aien_inference_abi::sample_argmax(&l);
-            contiguous_backend.sequences.get_mut(&1).unwrap().tokens.push(sampled);
+            contiguous_backend
+                .sequences
+                .get_mut(&1)
+                .unwrap()
+                .tokens
+                .push(sampled);
             (sampled, l)
         };
 
-        let max_diff = paged_logits.iter().zip(contig_logits.iter()).map(|(a, b)| (a - b).abs()).fold(0.0f32, f32::max);
-        println!("Step {}: paged_tok={}, contig_tok={}, max_diff={}", step, paged_tok, contig_tok, max_diff);
+        let max_diff = paged_logits
+            .iter()
+            .zip(contig_logits.iter())
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0f32, f32::max);
+        println!(
+            "Step {}: paged_tok={}, contig_tok={}, max_diff={}",
+            step, paged_tok, contig_tok, max_diff
+        );
 
         assert_eq!(
             paged_tok, contig_tok,

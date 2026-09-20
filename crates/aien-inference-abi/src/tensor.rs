@@ -72,7 +72,6 @@ pub fn matmul_batch(
         });
 }
 
-
 /// In-place Root Mean Square Normalization:
 /// out[i] = x[i] * weight[i] / sqrt(mean(x^2) + eps)
 #[inline]

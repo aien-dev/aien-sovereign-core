@@ -81,8 +81,13 @@ struct OracleData {
 }
 
 fn load_oracle_safetensors<P: AsRef<Path>>(path: P) -> Result<OracleData, String> {
-    let bytes = std::fs::read(path.as_ref())
-        .map_err(|e| format!("Failed to read oracle safetensors at {}: {}", path.as_ref().display(), e))?;
+    let bytes = std::fs::read(path.as_ref()).map_err(|e| {
+        format!(
+            "Failed to read oracle safetensors at {}: {}",
+            path.as_ref().display(),
+            e
+        )
+    })?;
 
     if bytes.len() < 8 {
         return Err("Oracle safetensors buffer smaller than 8 bytes".to_string());
@@ -218,7 +223,11 @@ fn load_oracle_manifest<P: AsRef<Path>>(path: P) -> Result<ManifestData, String>
         for (k, v) in t_obj {
             let shape: Vec<usize> = v["shape"]
                 .as_array()
-                .map(|arr| arr.iter().map(|s| s.as_u64().unwrap_or(0) as usize).collect())
+                .map(|arr| {
+                    arr.iter()
+                        .map(|s| s.as_u64().unwrap_or(0) as usize)
+                        .collect()
+                })
                 .unwrap_or_default();
             let numel = v["numel"].as_u64().unwrap_or(0) as usize;
             tensors.insert(k.clone(), (shape, numel));
@@ -239,7 +248,11 @@ fn load_oracle_manifest<P: AsRef<Path>>(path: P) -> Result<ManifestData, String>
 }
 
 pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
-    assert_eq!(a.len(), b.len(), "Vector lengths must match for cosine similarity");
+    assert_eq!(
+        a.len(),
+        b.len(),
+        "Vector lengths must match for cosine similarity"
+    );
     let mut dot = 0.0f32;
     let mut norm_a = 0.0f32;
     let mut norm_b = 0.0f32;
@@ -258,7 +271,11 @@ pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
 }
 
 pub fn max_absolute_error(a: &[f32], b: &[f32]) -> f32 {
-    assert_eq!(a.len(), b.len(), "Vector lengths must match for absolute error");
+    assert_eq!(
+        a.len(),
+        b.len(),
+        "Vector lengths must match for absolute error"
+    );
     let mut max_err = 0.0f32;
     for i in 0..a.len() {
         let diff = (a[i] - b[i]).abs();
@@ -270,7 +287,11 @@ pub fn max_absolute_error(a: &[f32], b: &[f32]) -> f32 {
 }
 
 pub fn max_relative_error(a: &[f32], b: &[f32]) -> f32 {
-    assert_eq!(a.len(), b.len(), "Vector lengths must match for relative error");
+    assert_eq!(
+        a.len(),
+        b.len(),
+        "Vector lengths must match for relative error"
+    );
     let mut max_err = 0.0f32;
     for i in 0..a.len() {
         let denom = a[i].abs().max(b[i].abs()).max(1e-12);
@@ -290,14 +311,14 @@ struct ExecutionCandidate {
     from_real_weights: bool,
 }
 
-fn obtain_execution_candidate(
-    oracle: &OracleData,
-    manifest: &ManifestData,
-) -> ExecutionCandidate {
+fn obtain_execution_candidate(oracle: &OracleData, manifest: &ManifestData) -> ExecutionCandidate {
     let config = tinyllama_config();
 
     if let Some(model_path) = find_model_checkpoint_path() {
-        eprintln!("Loading real model checkpoint from: {}", model_path.display());
+        eprintln!(
+            "Loading real model checkpoint from: {}",
+            model_path.display()
+        );
         let loaded = load_safetensors_checkpoint(&model_path)
             .expect("Real safetensors checkpoint must load cleanly");
         let weights = TransformerWeights::from_loaded_checkpoint(&loaded, &config)
@@ -401,10 +422,9 @@ Explain the role of an operating system in one sentence.</s>\n\
 
     // 2. Verify encode() produces 46 expected token IDs matching oracle manifest 100%
     let expected_token_ids: Vec<u32> = vec![
-        1, 529, 29989, 5205, 29989, 29958, 13, 3492, 526, 263, 577, 369, 7577, 319,
-        29902, 20255, 29889, 2, 13, 29966, 29989, 1792, 29989, 29958, 13, 9544,
-        7420, 278, 6297, 310, 385, 13598, 1788, 297, 697, 10541, 29889, 2, 13,
-        29966, 29989, 465, 22137, 29989, 29958, 13,
+        1, 529, 29989, 5205, 29989, 29958, 13, 3492, 526, 263, 577, 369, 7577, 319, 29902, 20255,
+        29889, 2, 13, 29966, 29989, 1792, 29989, 29958, 13, 9544, 7420, 278, 6297, 310, 385, 13598,
+        1788, 297, 697, 10541, 29889, 2, 13, 29966, 29989, 465, 22137, 29989, 29958, 13,
     ];
 
     let encoded_tokens = tokenizer
@@ -436,58 +456,102 @@ fn test_stage2_shape_parity() {
     let oracle = load_oracle_safetensors(&oracle_path).expect("Oracle safetensors must parse");
 
     // Global tensor shapes
-    assert_eq!(manifest.tensors.get("embed_tokens").unwrap().0, vec![1, 46, 2048]);
-    assert_eq!(manifest.tensors.get("final_norm").unwrap().0, vec![1, 46, 2048]);
-    assert_eq!(manifest.tensors.get("logits").unwrap().0, vec![1, 46, 32000]);
-    assert_eq!(manifest.tensors.get("last_token_logits").unwrap().0, vec![32000]);
+    assert_eq!(
+        manifest.tensors.get("embed_tokens").unwrap().0,
+        vec![1, 46, 2048]
+    );
+    assert_eq!(
+        manifest.tensors.get("final_norm").unwrap().0,
+        vec![1, 46, 2048]
+    );
+    assert_eq!(
+        manifest.tensors.get("logits").unwrap().0,
+        vec![1, 46, 32000]
+    );
+    assert_eq!(
+        manifest.tensors.get("last_token_logits").unwrap().0,
+        vec![32000]
+    );
 
     // Per-layer tensor shapes for all 22 layers
     for layer in 0..22 {
         let p = format!("layers.{}", layer);
         assert_eq!(
-            manifest.tensors.get(&format!("{}.post_rmsnorm", p)).unwrap().0,
+            manifest
+                .tensors
+                .get(&format!("{}.post_rmsnorm", p))
+                .unwrap()
+                .0,
             vec![1, 46, 2048],
             "Shape mismatch at {}.post_rmsnorm",
             p
         );
         assert_eq!(
-            manifest.tensors.get(&format!("{}.post_rope_q", p)).unwrap().0,
+            manifest
+                .tensors
+                .get(&format!("{}.post_rope_q", p))
+                .unwrap()
+                .0,
             vec![1, 32, 46, 64],
             "Shape mismatch at {}.post_rope_q",
             p
         );
         assert_eq!(
-            manifest.tensors.get(&format!("{}.post_rope_k", p)).unwrap().0,
+            manifest
+                .tensors
+                .get(&format!("{}.post_rope_k", p))
+                .unwrap()
+                .0,
             vec![1, 4, 46, 64],
             "Shape mismatch at {}.post_rope_k",
             p
         );
         assert_eq!(
-            manifest.tensors.get(&format!("{}.post_attention", p)).unwrap().0,
+            manifest
+                .tensors
+                .get(&format!("{}.post_attention", p))
+                .unwrap()
+                .0,
             vec![1, 46, 2048],
             "Shape mismatch at {}.post_attention",
             p
         );
         assert_eq!(
-            manifest.tensors.get(&format!("{}.post_attn_residual", p)).unwrap().0,
+            manifest
+                .tensors
+                .get(&format!("{}.post_attn_residual", p))
+                .unwrap()
+                .0,
             vec![1, 46, 2048],
             "Shape mismatch at {}.post_attn_residual",
             p
         );
         assert_eq!(
-            manifest.tensors.get(&format!("{}.post_attn_norm", p)).unwrap().0,
+            manifest
+                .tensors
+                .get(&format!("{}.post_attn_norm", p))
+                .unwrap()
+                .0,
             vec![1, 46, 2048],
             "Shape mismatch at {}.post_attn_norm",
             p
         );
         assert_eq!(
-            manifest.tensors.get(&format!("{}.post_swiglu", p)).unwrap().0,
+            manifest
+                .tensors
+                .get(&format!("{}.post_swiglu", p))
+                .unwrap()
+                .0,
             vec![1, 46, 2048],
             "Shape mismatch at {}.post_swiglu",
             p
         );
         assert_eq!(
-            manifest.tensors.get(&format!("{}.post_residual", p)).unwrap().0,
+            manifest
+                .tensors
+                .get(&format!("{}.post_residual", p))
+                .unwrap()
+                .0,
             vec![1, 46, 2048],
             "Shape mismatch at {}.post_residual",
             p
@@ -598,7 +662,12 @@ fn test_stage3_numerical_activation_parity() {
         if cosine_sim < MIN_COSINE_SIMILARITY || pass_rate < 0.9999 || max_abs > 2e-3 {
             divergent_layers.push(format!(
                 "{}: max_abs={:.6}, pass_rate={:.4}%, divergences={}/{}, cosine_sim={:.6}",
-                name, max_abs, pass_rate * 100.0, layer_divergences, oracle_vec.len(), cosine_sim
+                name,
+                max_abs,
+                pass_rate * 100.0,
+                layer_divergences,
+                oracle_vec.len(),
+                cosine_sim
             ));
         }
     }
@@ -691,16 +760,14 @@ fn test_stage5_multi_step_generation_parity() {
 
     let manifest = load_oracle_manifest(&manifest_path).expect("Manifest must parse");
     let oracle = load_oracle_safetensors(&oracle_path).expect("Oracle safetensors must parse");
-    let tokenizer = load_aligned_tokenizer(&tokenizer_path)
-        .expect("Tokenizer must load");
+    let tokenizer = load_aligned_tokenizer(&tokenizer_path).expect("Tokenizer must load");
 
     let candidate = get_execution_candidate(&oracle, &manifest);
 
     // 1. Assert 16-step greedy decode sequence produces identical token IDs:
     // [2744, 13598, 1788, 313, 3267, 29897, 338, 263, 7047, 393, 767, 1179, 278, 12837, 322, 7047]
     let expected_16: Vec<u32> = vec![
-        2744, 13598, 1788, 313, 3267, 29897, 338, 263, 7047, 393, 767, 1179, 278, 12837,
-        322, 7047,
+        2744, 13598, 1788, 313, 3267, 29897, 338, 263, 7047, 393, 767, 1179, 278, 12837, 322, 7047,
     ];
 
     assert_eq!(
@@ -723,7 +790,8 @@ fn test_stage5_multi_step_generation_parity() {
         .decode(&candidate.generated_16_tokens)
         .expect("Generated tokens must decode to UTF-8 text");
 
-    let expected_text = "An operating system (OS) is a software that manages the hardware and software";
+    let expected_text =
+        "An operating system (OS) is a software that manages the hardware and software";
     assert_eq!(
         decoded_text.trim(),
         expected_text,

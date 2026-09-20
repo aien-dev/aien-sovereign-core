@@ -27,7 +27,12 @@ fn extract_frontmatter_field(content: &str, field: &str) -> Option<String> {
         }
         if in_frontmatter {
             if let Some(rest) = trimmed.strip_prefix(&format!("{}:", field)) {
-                return Some(rest.trim().trim_matches('"').trim_matches('\x27').to_string());
+                return Some(
+                    rest.trim()
+                        .trim_matches('"')
+                        .trim_matches('\x27')
+                        .to_string(),
+                );
             }
         }
     }
@@ -71,17 +76,23 @@ fn scan_dir_for_skills(dir: &Path, skills: &mut Vec<Skill>, seen_names: &mut Has
                             if sub_path.is_dir() {
                                 let sub_skill_md = sub_path.join("SKILL.md");
                                 if sub_skill_md.is_file() {
-                                    let content = fs::read_to_string(&sub_skill_md).unwrap_or_default();
-                                    let name = extract_frontmatter_field(&content, "name").unwrap_or_else(|| {
-                                        sub_path.file_name()
-                                            .unwrap_or_default()
-                                            .to_string_lossy()
-                                            .to_string()
-                                    });
+                                    let content =
+                                        fs::read_to_string(&sub_skill_md).unwrap_or_default();
+                                    let name = extract_frontmatter_field(&content, "name")
+                                        .unwrap_or_else(|| {
+                                            sub_path
+                                                .file_name()
+                                                .unwrap_or_default()
+                                                .to_string_lossy()
+                                                .to_string()
+                                        });
                                     let norm_name = name.to_lowercase();
                                     if seen_names.insert(norm_name) {
-                                        let desc = extract_frontmatter_field(&content, "description")
-                                            .unwrap_or_else(|| "No description provided.".to_string());
+                                        let desc =
+                                            extract_frontmatter_field(&content, "description")
+                                                .unwrap_or_else(|| {
+                                                    "No description provided.".to_string()
+                                                });
                                         let has_scripts = sub_path.join("scripts").is_dir();
                                         skills.push(Skill {
                                             name,
@@ -183,7 +194,10 @@ pub fn read_skill_content(name: &str) -> Result<String, String> {
             return fs::read_to_string(&s.path).map_err(|e| e.to_string());
         }
     }
-    Err(format!("Skill '{}' not found in discovered skill paths", name))
+    Err(format!(
+        "Skill '{}' not found in discovered skill paths",
+        name
+    ))
 }
 
 pub fn skills_dispatch_tool(args: &Value) -> Value {

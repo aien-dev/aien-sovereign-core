@@ -65,6 +65,8 @@ mod tests {
 
         assert!(res.is_err());
         let err = res.unwrap_err();
-        assert!(err.contains("EmbeddedNative provider must be executed via in-process EmbeddedInferenceBackend"));
+        assert!(err.contains(
+            "EmbeddedNative provider must be executed via in-process EmbeddedInferenceBackend"
+        ));
     }
 }

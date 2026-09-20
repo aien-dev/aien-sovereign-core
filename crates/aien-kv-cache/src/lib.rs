@@ -269,8 +269,16 @@ impl UnifiedKvTensorPool {
         is_value: bool,
         token_in_block: usize,
     ) -> usize {
-        assert!(block_id < self.config.num_blocks, "BlockId {} out of range", block_id);
-        assert!(layer_idx < self.config.num_layers, "LayerIdx {} out of range", layer_idx);
+        assert!(
+            block_id < self.config.num_blocks,
+            "BlockId {} out of range",
+            block_id
+        );
+        assert!(
+            layer_idx < self.config.num_layers,
+            "LayerIdx {} out of range",
+            layer_idx
+        );
         assert!(
             token_in_block < self.config.block_size,
             "TokenInBlock {} out of range (block_size {})",
@@ -280,7 +288,8 @@ impl UnifiedKvTensorPool {
 
         let kv_dim = self.config.num_kv_heads * self.config.head_dim;
         let bytes_per_elem = self.config.dtype.bytes_per_element();
-        let kv_stride = (self.config.block_size as f32 * kv_dim as f32 * bytes_per_elem).ceil() as usize;
+        let kv_stride =
+            (self.config.block_size as f32 * kv_dim as f32 * bytes_per_elem).ceil() as usize;
         let layer_stride = 2 * kv_stride;
         let token_stride = (kv_dim as f32 * bytes_per_elem).ceil() as usize;
 
@@ -419,14 +428,17 @@ impl Drop for UnifiedKvTensorPool {
                 PoolMemoryKind::Mmap => {
                     #[cfg(unix)]
                     unsafe {
-                        let _ = libc::munlock(self.base_ptr as *const libc::c_void, self.total_bytes);
+                        let _ =
+                            libc::munlock(self.base_ptr as *const libc::c_void, self.total_bytes);
                         libc::munmap(self.base_ptr as *mut libc::c_void, self.total_bytes);
                     }
                 }
                 PoolMemoryKind::Heap => {
                     #[cfg(not(unix))]
                     unsafe {
-                        if let Ok(layout) = std::alloc::Layout::from_size_align(self.total_bytes, 4096) {
+                        if let Ok(layout) =
+                            std::alloc::Layout::from_size_align(self.total_bytes, 4096)
+                        {
                             std::alloc::dealloc(self.base_ptr, layout);
                         }
                     }
@@ -816,7 +828,13 @@ impl AienKvManager {
             .get(&seq_id)
             .ok_or_else(|| format!("Sequence {} not found", seq_id))?;
         if let Some(pool) = &self.tensor_pool {
-            pool.gather_layer_kv(&table.block_ids, table.total_tokens, layer_idx, flat_k, flat_v);
+            pool.gather_layer_kv(
+                &table.block_ids,
+                table.total_tokens,
+                layer_idx,
+                flat_k,
+                flat_v,
+            );
             Ok(())
         } else {
             Err("No physical tensor pool attached to KV manager".to_string())
@@ -855,11 +873,19 @@ impl AienKvManager {
 
     pub fn metrics(&self) -> KvCacheMetrics {
         let used_blocks = self.total_blocks - self.free_blocks.len();
-        let logical_pages = self.sequence_tables.values().map(|t| t.block_ids.len()).sum();
+        let logical_pages = self
+            .sequence_tables
+            .values()
+            .map(|t| t.block_ids.len())
+            .sum();
         let physical_pages = used_blocks;
         let shared_pages = self.block_pool.iter().filter(|b| b.ref_count > 1).count();
         let private_pages = self.block_pool.iter().filter(|b| b.ref_count == 1).count();
-        let bytes_per_block = self.tensor_pool.as_ref().map(|p| p.block_bytes()).unwrap_or(0);
+        let bytes_per_block = self
+            .tensor_pool
+            .as_ref()
+            .map(|p| p.block_bytes())
+            .unwrap_or(0);
         let physical_kv_bytes = physical_pages * bytes_per_block;
         let bytes_saved_vs_full_copy = if logical_pages > physical_pages {
             (logical_pages - physical_pages) * bytes_per_block

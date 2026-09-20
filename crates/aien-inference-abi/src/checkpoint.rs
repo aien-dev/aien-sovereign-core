@@ -167,15 +167,9 @@ pub fn tinyllama_catalog() -> Vec<(String, Vec<usize>)> {
             format!("{}.post_attention_layernorm.weight", prefix),
             vec![2048],
         ));
-        catalog.push((
-            format!("{}.mlp.gate_proj.weight", prefix),
-            vec![5632, 2048],
-        ));
+        catalog.push((format!("{}.mlp.gate_proj.weight", prefix), vec![5632, 2048]));
         catalog.push((format!("{}.mlp.up_proj.weight", prefix), vec![5632, 2048]));
-        catalog.push((
-            format!("{}.mlp.down_proj.weight", prefix),
-            vec![2048, 5632],
-        ));
+        catalog.push((format!("{}.mlp.down_proj.weight", prefix), vec![2048, 5632]));
     }
 
     catalog.push(("model.norm.weight".to_string(), vec![2048]));
@@ -195,17 +189,17 @@ pub fn parse_safetensors_with_catalog(
         ));
     }
 
-    let header_len_raw = u64::from_le_bytes(
-        bytes[0..8]
-            .try_into()
-            .map_err(|_| CheckpointError::InvalidHeader("Failed to read header size".to_string()))?,
-    );
-    let header_len = usize::try_from(header_len_raw)
-        .map_err(|_| CheckpointError::InvalidHeader("Header length exceeds address space".to_string()))?;
+    let header_len_raw =
+        u64::from_le_bytes(bytes[0..8].try_into().map_err(|_| {
+            CheckpointError::InvalidHeader("Failed to read header size".to_string())
+        })?);
+    let header_len = usize::try_from(header_len_raw).map_err(|_| {
+        CheckpointError::InvalidHeader("Header length exceeds address space".to_string())
+    })?;
 
-    let header_end = 8usize
-        .checked_add(header_len)
-        .ok_or_else(|| CheckpointError::InvalidHeader("Header length arithmetic overflow".to_string()))?;
+    let header_end = 8usize.checked_add(header_len).ok_or_else(|| {
+        CheckpointError::InvalidHeader("Header length arithmetic overflow".to_string())
+    })?;
 
     if bytes.len() < header_end {
         return Err(CheckpointError::InvalidHeader(format!(
@@ -333,10 +327,16 @@ pub fn load_safetensors_from_bytes(bytes: &[u8]) -> Result<LoadedCheckpoint, Che
 }
 
 /// Loads and validates a TinyLlama safetensors checkpoint from a filesystem path.
-pub fn load_safetensors_checkpoint<P: AsRef<Path>>(path: P) -> Result<LoadedCheckpoint, CheckpointError> {
+pub fn load_safetensors_checkpoint<P: AsRef<Path>>(
+    path: P,
+) -> Result<LoadedCheckpoint, CheckpointError> {
     let p = path.as_ref();
     let bytes = std::fs::read(p).map_err(|e| {
-        CheckpointError::InvalidHeader(format!("Failed to read checkpoint at {}: {}", p.display(), e))
+        CheckpointError::InvalidHeader(format!(
+            "Failed to read checkpoint at {}: {}",
+            p.display(),
+            e
+        ))
     })?;
     load_safetensors_from_bytes(&bytes)
 }
@@ -346,9 +346,7 @@ mod tests {
     use super::*;
 
     /// Constructs a minimal valid safetensors binary buffer for testing.
-    fn build_test_safetensors(
-        tensors: &[(&str, &str, &[usize], &[u8])],
-    ) -> Vec<u8> {
+    fn build_test_safetensors(tensors: &[(&str, &str, &[usize], &[u8])]) -> Vec<u8> {
         let mut header_map = serde_json::Map::new();
         let mut data_payload = Vec::new();
 
@@ -358,7 +356,10 @@ mod tests {
             let end = data_payload.len();
 
             let mut tensor_info = serde_json::Map::new();
-            tensor_info.insert("dtype".to_string(), serde_json::Value::String(dtype.to_string()));
+            tensor_info.insert(
+                "dtype".to_string(),
+                serde_json::Value::String(dtype.to_string()),
+            );
             let shape_val = shape
                 .iter()
                 .map(|&d| serde_json::Value::Number(serde_json::Number::from(d)))
@@ -446,7 +447,10 @@ mod tests {
         ];
 
         let err = parse_safetensors_with_catalog(&buffer, &catalog).unwrap_err();
-        assert_eq!(err, CheckpointError::MissingTensor("missing.weight".to_string()));
+        assert_eq!(
+            err,
+            CheckpointError::MissingTensor("missing.weight".to_string())
+        );
     }
 
     #[test]
@@ -459,7 +463,11 @@ mod tests {
 
         let err = parse_safetensors_with_catalog(&buffer, &catalog).unwrap_err();
         match err {
-            CheckpointError::ShapeMismatch { tensor, expected, actual } => {
+            CheckpointError::ShapeMismatch {
+                tensor,
+                expected,
+                actual,
+            } => {
                 assert_eq!(tensor, "layer.weight");
                 assert_eq!(expected, vec![4]);
                 assert_eq!(actual, vec![2]);
@@ -477,7 +485,11 @@ mod tests {
 
         let err = parse_safetensors_with_catalog(&buffer, &catalog).unwrap_err();
         match err {
-            CheckpointError::DtypeMismatch { tensor, expected, actual } => {
+            CheckpointError::DtypeMismatch {
+                tensor,
+                expected,
+                actual,
+            } => {
                 assert_eq!(tensor, "layer.weight");
                 assert_eq!(expected, "BF16");
                 assert_eq!(actual, "F32");
@@ -501,7 +513,11 @@ mod tests {
         let catalog = vec![("weight".to_string(), vec![4])];
         let err = parse_safetensors_with_catalog(&buffer, &catalog).unwrap_err();
         match err {
-            CheckpointError::OffsetOutOfBounds { tensor, offset, buffer_len } => {
+            CheckpointError::OffsetOutOfBounds {
+                tensor,
+                offset,
+                buffer_len,
+            } => {
                 assert_eq!(tensor, "weight");
                 assert_eq!(offset, 100);
                 assert_eq!(buffer_len, 8);
