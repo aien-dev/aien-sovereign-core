@@ -321,3 +321,140 @@ async fn test_blackwell_vs_reference_cpu_autoregressive_parity() {
         cpu_tokens
     );
 }
+
+#[tokio::test]
+async fn test_multi_sequence_batched_decode_parity_with_sequential() {
+    let config = test_model_config();
+    let weights = TransformerWeights::reference_test_weights(&config);
+
+    let mut backend_seq = NativeTransformerBackend::new(weights.clone());
+    let mut backend_batch = NativeTransformerBackend::new(weights);
+
+    let num_seqs = 8;
+    let seq_ids: Vec<u64> = (1001..1001 + num_seqs as u64).collect();
+
+    // 1. Prefill all 8 sequences on both backends
+    for (i, &seq_id) in seq_ids.iter().enumerate() {
+        let prompt = vec![
+            (10 + i * 3) as u32,
+            (25 + i * 7) as u32,
+            (40 + i * 11) as u32,
+        ];
+        let req = SequenceRequest {
+            request_id: seq_id,
+            prompt_tokens: prompt,
+            sampling_params: SamplingParams {
+                temperature: 0.0,
+                top_p: 1.0,
+                max_tokens: 16,
+                stop_token_ids: vec![0],
+            },
+            arrival_time_ns: 0,
+            priority: 1,
+        };
+
+        let mut block_tables = HashMap::new();
+        block_tables.insert(seq_id, vec![i * 2, i * 2 + 1]);
+
+        let batch = ScheduledBatch {
+            prefill_requests: vec![req],
+            decode_requests: Vec::new(),
+            block_tables,
+            step_id: 1,
+        };
+
+        let (out_seq, _) = backend_seq.execute_step(&batch).await.unwrap();
+        let (out_batch, _) = backend_batch.execute_step(&batch).await.unwrap();
+
+        match (&out_seq[0], &out_batch[0]) {
+            (
+                DecodeOutput::Token {
+                    token_id: t1,
+                    logprob: lp1,
+                    ..
+                },
+                DecodeOutput::Token {
+                    token_id: t2,
+                    logprob: lp2,
+                    ..
+                },
+            ) => {
+                assert_eq!(t1, t2, "Prefill token mismatch for seq_id {}", seq_id);
+                assert!(
+                    (lp1.unwrap() - lp2.unwrap()).abs() < 1e-4,
+                    "Logprob mismatch for seq_id {}",
+                    seq_id
+                );
+            }
+            _ => panic!("Expected DecodeOutput::Token"),
+        }
+    }
+
+    // 2. Perform 5 decode steps: sequential (1 sequence per batch) vs batched (all 8 sequences per batch)
+    for step in 2..=6 {
+        // Sequential execution: 8 individual batches of size 1
+        let mut seq_step_tokens = HashMap::new();
+        for &seq_id in &seq_ids {
+            let mut block_tables = HashMap::new();
+            block_tables.insert(seq_id, vec![0, 1]);
+
+            let batch = ScheduledBatch {
+                prefill_requests: Vec::new(),
+                decode_requests: vec![seq_id],
+                block_tables,
+                step_id: step,
+            };
+
+            let (outputs, _) = backend_seq.execute_step(&batch).await.unwrap();
+            assert_eq!(outputs.len(), 1);
+            if let DecodeOutput::Token { token_id, .. } = outputs[0] {
+                seq_step_tokens.insert(seq_id, token_id);
+            }
+        }
+
+        // Batched execution: 1 single batch with D = 8 sequences
+        let mut batched_block_tables = HashMap::new();
+        for (i, &seq_id) in seq_ids.iter().enumerate() {
+            batched_block_tables.insert(seq_id, vec![i * 2, i * 2 + 1]);
+        }
+
+        let batch = ScheduledBatch {
+            prefill_requests: Vec::new(),
+            decode_requests: seq_ids.clone(),
+            block_tables: batched_block_tables,
+            step_id: step,
+        };
+
+        let (batched_outputs, metrics) = backend_batch.execute_step(&batch).await.unwrap();
+        assert_eq!(batched_outputs.len(), num_seqs);
+        assert_eq!(metrics.decode_tokens_emitted, num_seqs);
+
+        // Verify exact token parity across all 8 sequences
+        for out in &batched_outputs {
+            if let DecodeOutput::Token {
+                request_id,
+                token_id,
+                ..
+            } = out
+            {
+                let expected_tok = seq_step_tokens.get(request_id).copied().unwrap();
+                assert_eq!(
+                    *token_id, expected_tok,
+                    "Step {} mismatch for sequence {}: batched={}, sequential={}",
+                    step, request_id, token_id, expected_tok
+                );
+            }
+        }
+    }
+
+    // 3. Verify entire token trajectory is identical across all 8 sequences
+    for &seq_id in &seq_ids {
+        let tokens_seq = &backend_seq.sequences.get(&seq_id).unwrap().tokens;
+        let tokens_batch = &backend_batch.sequences.get(&seq_id).unwrap().tokens;
+        assert_eq!(
+            tokens_seq, tokens_batch,
+            "Full token history mismatch for seq_id {}",
+            seq_id
+        );
+    }
+}

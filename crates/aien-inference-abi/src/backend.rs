@@ -154,6 +154,58 @@ pub trait TensorBackend: Send + Sync {
         }
     }
 
+    /// Batched Grouped-Query Paged Attention across multiple sequences concurrently.
+    /// Default implementation evaluates each sequence sequentially via paged_attention.
+    fn paged_attention_batch(
+        &self,
+        out: &mut [f32],
+        q: &[f32],
+        pool: &aien_kv_cache::UnifiedKvTensorPool,
+        block_tables: &[i32],
+        context_lens: &[i32],
+        max_blocks_per_seq: usize,
+        num_seqs: usize,
+        layer_idx: usize,
+        num_q_heads: usize,
+        num_kv_heads: usize,
+        head_dim: usize,
+    ) {
+        let q_stride = num_q_heads * head_dim;
+        for s in 0..num_seqs {
+            let q_s = &q[s * q_stride..(s + 1) * q_stride];
+            let out_s = &mut out[s * q_stride..(s + 1) * q_stride];
+            let ctx_len = if s < context_lens.len() && context_lens[s] > 0 {
+                context_lens[s] as usize
+            } else {
+                0
+            };
+            let bt_start = s * max_blocks_per_seq;
+            let bt_end = bt_start + max_blocks_per_seq;
+            let bt_slice = if bt_end <= block_tables.len() {
+                &block_tables[bt_start..bt_end]
+            } else {
+                &[]
+            };
+            let usize_blocks: Vec<usize> = bt_slice
+                .iter()
+                .filter(|&&b| b >= 0)
+                .map(|&b| b as usize)
+                .collect();
+
+            self.paged_attention(
+                out_s,
+                q_s,
+                pool,
+                &usize_blocks,
+                ctx_len,
+                layer_idx,
+                num_q_heads,
+                num_kv_heads,
+                head_dim,
+            );
+        }
+    }
+
     /// Projects hidden states to vocabulary logits: logits = hidden * W^T
     fn compute_logits(
         &self,

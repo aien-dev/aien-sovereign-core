@@ -48,6 +48,26 @@ pub struct ForwardDiagnostics {
 }
 
 impl TransformerWeights {
+    /// Copies the embedding vector for a given token ID into a destination slice.
+    #[inline]
+    pub fn embed_token(&self, token_id: u32, out: &mut [f32]) {
+        let hidden_dim = self.config.hidden_dim();
+        let token_idx = (token_id as usize) % self.config.vocab_size();
+        let start = token_idx * hidden_dim;
+        let end = start + hidden_dim;
+        out.copy_from_slice(&self.embed_tokens[start..end]);
+    }
+
+    /// Returns a direct slice reference to the token embedding.
+    #[inline]
+    pub fn token_embedding(&self, token_id: u32) -> &[f32] {
+        let hidden_dim = self.config.hidden_dim();
+        let token_idx = (token_id as usize) % self.config.vocab_size();
+        let start = token_idx * hidden_dim;
+        let end = start + hidden_dim;
+        &self.embed_tokens[start..end]
+    }
+
     /// Creates deterministically initialized weights for tests and headless verification.
     pub fn reference_test_weights(config: &ModelConfig) -> Self {
         let hidden_dim = config.hidden_dim();

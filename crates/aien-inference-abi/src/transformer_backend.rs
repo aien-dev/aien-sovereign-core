@@ -866,6 +866,344 @@ impl NativeTransformerBackend {
     pub fn compute_logits(&self, hidden_state: &[f32]) -> Vec<f32> {
         Self::compute_logits_impl(&self.weights, &*self.tensor_backend, hidden_state)
     }
+
+    /// Forward pass executing one token decode step across a batch of D sequences concurrently.
+    /// Employs batched GEMM (M=D) for all linear projections and batched paged attention.
+    pub fn forward_decode_batch(&mut self, decode_req_ids: &[u64]) -> Vec<DecodeOutput> {
+        if decode_req_ids.is_empty() {
+            return Vec::new();
+        }
+
+        let num_layers = self.weights.config.num_layers;
+        let hidden_dim = self.weights.config.hidden_dim();
+        let num_heads = self.weights.config.num_heads;
+        let num_kv_heads = self.weights.config.num_kv_heads;
+        let head_dim = self.weights.config.head_dim;
+        let q_dim = num_heads * head_dim;
+        let kv_dim = num_kv_heads * head_dim;
+        let intermediate_dim = self.weights.config.intermediate_dim();
+        let eps = self.weights.config.rms_norm_eps;
+        let theta = self.weights.config.rope_theta;
+        let vocab_size = self.weights.config.vocab_size();
+
+        // 1. Gather active sequence requests and their current positions / last tokens
+        let mut valid_reqs = Vec::with_capacity(decode_req_ids.len());
+        for &req_id in decode_req_ids {
+            let seq = self
+                .sequences
+                .entry(req_id)
+                .or_insert_with(|| SequenceState {
+                    tokens: Vec::new(),
+                    layers: vec![LayerKvCache::default(); num_layers],
+                });
+            let pos = seq.tokens.len().saturating_sub(1);
+            let last_token = *seq.tokens.last().unwrap_or(&1);
+            valid_reqs.push((req_id, last_token, pos));
+        }
+
+        let d = valid_reqs.len();
+        if d == 0 {
+            return Vec::new();
+        }
+
+        // 2. Allocate batch activations
+        let mut x = vec![0.0f32; d * hidden_dim];
+        let mut x_norm = vec![0.0f32; d * hidden_dim];
+        let mut q_batch = vec![0.0f32; d * q_dim];
+        let mut k_batch = vec![0.0f32; d * kv_dim];
+        let mut v_batch = vec![0.0f32; d * kv_dim];
+        let mut attn_out_batch = vec![0.0f32; d * q_dim];
+        let mut attn_proj_batch = vec![0.0f32; d * hidden_dim];
+        let mut post_norm_batch = vec![0.0f32; d * hidden_dim];
+        let mut gate_batch = vec![0.0f32; d * intermediate_dim];
+        let mut up_batch = vec![0.0f32; d * intermediate_dim];
+        let mut act_batch = vec![0.0f32; d * intermediate_dim];
+        let mut mlp_out_batch = vec![0.0f32; d * hidden_dim];
+        let mut logits_batch = vec![0.0f32; d * vocab_size];
+
+        // 3. Populate initial embeddings
+        for (i, &(_seq_id, last_token, _pos)) in valid_reqs.iter().enumerate() {
+            self.weights
+                .embed_token(last_token, &mut x[i * hidden_dim..(i + 1) * hidden_dim]);
+        }
+
+        // 4. Reserve append slots in KV cache for this decode step
+        let block_slots: Vec<Option<(usize, usize)>> = if let Some(mgr) = &self.kv_manager {
+            let mut write_mgr = mgr.write();
+            valid_reqs
+                .iter()
+                .map(|&(seq_id, _, _)| write_mgr.append_token_with_slot(seq_id).ok())
+                .collect()
+        } else {
+            vec![None; d]
+        };
+
+        // 5. Transformer layer loop
+        for (layer_idx, layer_w) in self.weights.layers.iter().enumerate() {
+            // a. Pre-attention RMSNorm
+            for i in 0..d {
+                self.tensor_backend.rmsnorm(
+                    &mut x_norm[i * hidden_dim..(i + 1) * hidden_dim],
+                    &x[i * hidden_dim..(i + 1) * hidden_dim],
+                    &layer_w.input_layernorm,
+                    eps,
+                );
+            }
+
+            // b. Batched Q, K, V projections (M = D)
+            self.tensor_backend.matmul_batch(
+                &mut q_batch,
+                &x_norm,
+                &layer_w.q_proj,
+                d,
+                hidden_dim,
+                q_dim,
+            );
+            self.tensor_backend.matmul_batch(
+                &mut k_batch,
+                &x_norm,
+                &layer_w.k_proj,
+                d,
+                hidden_dim,
+                kv_dim,
+            );
+            self.tensor_backend.matmul_batch(
+                &mut v_batch,
+                &x_norm,
+                &layer_w.v_proj,
+                d,
+                hidden_dim,
+                kv_dim,
+            );
+
+            // c. RoPE across all D sequences at their respective positions
+            for (i, &(_seq_id, _tok, pos)) in valid_reqs.iter().enumerate() {
+                self.tensor_backend.apply_rope(
+                    &mut q_batch[i * q_dim..(i + 1) * q_dim],
+                    &mut k_batch[i * kv_dim..(i + 1) * kv_dim],
+                    pos,
+                    head_dim,
+                    num_heads,
+                    num_kv_heads,
+                    theta,
+                );
+            }
+
+            // d. Write K & V into KV cache
+            if let Some(mgr) = &self.kv_manager {
+                let mut write_mgr = mgr.write();
+                for (i, slot_opt) in block_slots.iter().enumerate() {
+                    if let Some((block_id, slot)) = *slot_opt {
+                        let k_slice = &k_batch[i * kv_dim..(i + 1) * kv_dim];
+                        let v_slice = &v_batch[i * kv_dim..(i + 1) * kv_dim];
+                        let _ = write_mgr
+                            .write_explicit_token_kv(block_id, layer_idx, slot, k_slice, v_slice);
+                    }
+                }
+            } else {
+                for (i, &(seq_id, _, _)) in valid_reqs.iter().enumerate() {
+                    if let Some(seq) = self.sequences.get_mut(&seq_id) {
+                        let kv_cache = &mut seq.layers[layer_idx];
+                        let k_slice = &k_batch[i * kv_dim..(i + 1) * kv_dim];
+                        let v_slice = &v_batch[i * kv_dim..(i + 1) * kv_dim];
+                        kv_cache.cached_k.push(k_slice.to_vec());
+                        kv_cache.cached_v.push(v_slice.to_vec());
+                        kv_cache.flat_k.extend_from_slice(k_slice);
+                        kv_cache.flat_v.extend_from_slice(v_slice);
+                    }
+                }
+            }
+
+            // e. Attention execution
+            let paged_computed = if let Some(mgr) = &self.kv_manager {
+                let read_mgr = mgr.read();
+                if let Some(pool) = read_mgr.tensor_pool() {
+                    let mut block_tables = Vec::with_capacity(d);
+                    let mut context_lens = Vec::with_capacity(d);
+                    let mut max_blocks = 1;
+                    for &(seq_id, _, _pos) in &valid_reqs {
+                        if let Some(table) = read_mgr.get_block_table(seq_id) {
+                            if table.block_ids.len() > max_blocks {
+                                max_blocks = table.block_ids.len();
+                            }
+                            block_tables.push(table.block_ids.clone());
+                            context_lens.push(table.total_tokens as i32);
+                        } else {
+                            block_tables.push(Vec::new());
+                            context_lens.push(0);
+                        }
+                    }
+
+                    let mut flat_block_tables = vec![-1i32; d * max_blocks];
+                    for (i, bt) in block_tables.iter().enumerate() {
+                        for (j, &blk) in bt.iter().enumerate() {
+                            flat_block_tables[i * max_blocks + j] = blk as i32;
+                        }
+                    }
+
+                    self.tensor_backend.paged_attention_batch(
+                        &mut attn_out_batch,
+                        &q_batch,
+                        pool,
+                        &flat_block_tables,
+                        &context_lens,
+                        max_blocks,
+                        d,
+                        layer_idx,
+                        num_heads,
+                        num_kv_heads,
+                        head_dim,
+                    );
+                    true
+                } else {
+                    false
+                }
+            } else {
+                false
+            };
+
+            if !paged_computed {
+                for (i, &(seq_id, _, _pos)) in valid_reqs.iter().enumerate() {
+                    let q_slice = &q_batch[i * q_dim..(i + 1) * q_dim];
+                    let out_slice = &mut attn_out_batch[i * q_dim..(i + 1) * q_dim];
+                    if let Some(seq) = self.sequences.get(&seq_id) {
+                        let kv_cache = &seq.layers[layer_idx];
+                        let seq_len = kv_cache.cached_k.len();
+                        self.tensor_backend.gqa_attention(
+                            out_slice,
+                            q_slice,
+                            &kv_cache.flat_k,
+                            &kv_cache.flat_v,
+                            seq_len,
+                            num_heads,
+                            num_kv_heads,
+                            head_dim,
+                        );
+                    }
+                }
+            }
+
+            // f. Attention output projection (M = D)
+            self.tensor_backend.matmul_batch(
+                &mut attn_proj_batch,
+                &attn_out_batch,
+                &layer_w.o_proj,
+                d,
+                q_dim,
+                hidden_dim,
+            );
+
+            // g. Residual connection
+            for idx in 0..x.len() {
+                x[idx] += attn_proj_batch[idx];
+            }
+
+            // h. Post-attention RMSNorm
+            for i in 0..d {
+                self.tensor_backend.rmsnorm(
+                    &mut post_norm_batch[i * hidden_dim..(i + 1) * hidden_dim],
+                    &x[i * hidden_dim..(i + 1) * hidden_dim],
+                    &layer_w.post_attention_layernorm,
+                    eps,
+                );
+            }
+
+            // i. MLP Gate & Up projections (M = D)
+            self.tensor_backend.matmul_batch(
+                &mut gate_batch,
+                &post_norm_batch,
+                &layer_w.gate_proj,
+                d,
+                hidden_dim,
+                intermediate_dim,
+            );
+            self.tensor_backend.matmul_batch(
+                &mut up_batch,
+                &post_norm_batch,
+                &layer_w.up_proj,
+                d,
+                hidden_dim,
+                intermediate_dim,
+            );
+
+            // j. SwiGLU activation
+            for i in 0..d {
+                self.tensor_backend.swiglu(
+                    &mut act_batch[i * intermediate_dim..(i + 1) * intermediate_dim],
+                    &gate_batch[i * intermediate_dim..(i + 1) * intermediate_dim],
+                    &up_batch[i * intermediate_dim..(i + 1) * intermediate_dim],
+                );
+            }
+
+            // k. MLP Down projection (M = D)
+            self.tensor_backend.matmul_batch(
+                &mut mlp_out_batch,
+                &act_batch,
+                &layer_w.down_proj,
+                d,
+                intermediate_dim,
+                hidden_dim,
+            );
+
+            // l. Residual connection
+            for idx in 0..x.len() {
+                x[idx] += mlp_out_batch[idx];
+            }
+        }
+
+        // 6. Final RMSNorm
+        for i in 0..d {
+            self.tensor_backend.rmsnorm(
+                &mut x_norm[i * hidden_dim..(i + 1) * hidden_dim],
+                &x[i * hidden_dim..(i + 1) * hidden_dim],
+                &self.weights.final_norm,
+                eps,
+            );
+        }
+
+        // 7. Batched Vocabulary Logits Projection (M = D)
+        self.tensor_backend.matmul_batch(
+            &mut logits_batch,
+            &x_norm,
+            &self.weights.lm_head,
+            d,
+            hidden_dim,
+            vocab_size,
+        );
+
+        // 8. Sampling and output emission
+        let mut outputs = Vec::with_capacity(d);
+        let stop_tokens = [
+            crate::tokenizer::TinyLlamaTokenizer::UNK_TOKEN_ID,
+            crate::tokenizer::TinyLlamaTokenizer::BOS_TOKEN_ID,
+            crate::tokenizer::TinyLlamaTokenizer::EOS_TOKEN_ID,
+        ];
+
+        for (i, &(seq_id, _, _)) in valid_reqs.iter().enumerate() {
+            let logits = &logits_batch[i * vocab_size..(i + 1) * vocab_size];
+            let (sampled_tok, logprob) = sample_argmax(logits);
+
+            if let Some(seq) = self.sequences.get_mut(&seq_id) {
+                seq.tokens.push(sampled_tok);
+
+                if stop_tokens.contains(&sampled_tok) {
+                    outputs.push(DecodeOutput::Finished {
+                        request_id: seq_id,
+                        reason: FinishReason::StopToken,
+                        total_tokens: seq.tokens.len(),
+                    });
+                } else {
+                    outputs.push(DecodeOutput::Token {
+                        request_id: seq_id,
+                        token_id: sampled_tok,
+                        logprob: Some(logprob),
+                    });
+                }
+            }
+        }
+
+        outputs
+    }
 }
 
 #[async_trait]
@@ -929,46 +1267,10 @@ impl AienInferenceBackend for NativeTransformerBackend {
             });
         }
 
-        // 2. Decode Requests
-        for &req_id in &batch.decode_requests {
-            if let Some(seq) = self.sequences.get_mut(&req_id) {
-                let pos = seq.tokens.len().saturating_sub(1);
-                let last_token = *seq.tokens.last().unwrap_or(&1);
-
-                let hidden = Self::forward_token_impl_paged(
-                    &self.weights,
-                    &*self.tensor_backend,
-                    last_token,
-                    pos,
-                    seq,
-                    req_id,
-                    self.kv_manager.as_ref(),
-                );
-                let logits =
-                    Self::compute_logits_impl(&self.weights, &*self.tensor_backend, &hidden);
-
-                let (sampled_tok, logprob) = sample_argmax(&logits);
-                seq.tokens.push(sampled_tok);
-
-                let stop_tokens = [
-                    crate::tokenizer::TinyLlamaTokenizer::UNK_TOKEN_ID,
-                    crate::tokenizer::TinyLlamaTokenizer::BOS_TOKEN_ID,
-                    crate::tokenizer::TinyLlamaTokenizer::EOS_TOKEN_ID,
-                ];
-                if stop_tokens.contains(&sampled_tok) {
-                    outputs.push(DecodeOutput::Finished {
-                        request_id: req_id,
-                        reason: FinishReason::StopToken,
-                        total_tokens: seq.tokens.len(),
-                    });
-                } else {
-                    outputs.push(DecodeOutput::Token {
-                        request_id: req_id,
-                        token_id: sampled_tok,
-                        logprob: Some(logprob),
-                    });
-                }
-            }
+        // 2. Decode Requests (Batched across D active sequences)
+        if !batch.decode_requests.is_empty() {
+            let decode_outputs = self.forward_decode_batch(&batch.decode_requests);
+            outputs.extend(decode_outputs);
         }
 
         let elapsed_us = t0.elapsed().as_micros() as u64;
