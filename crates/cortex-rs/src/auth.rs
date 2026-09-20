@@ -29,7 +29,10 @@ pub fn load_cortex_token() -> String {
     }
 }
 
-pub fn validate_auth_header(auth_header: Option<&str>, expected_token: &str) -> Result<(), StatusCode> {
+pub fn validate_auth_header(
+    auth_header: Option<&str>,
+    expected_token: &str,
+) -> Result<(), StatusCode> {
     if expected_token.is_empty() {
         return Err(StatusCode::SERVICE_UNAVAILABLE);
     }
@@ -49,7 +52,10 @@ pub fn validate_auth_header(auth_header: Option<&str>, expected_token: &str) -> 
 #[allow(clippy::result_large_err)]
 pub async fn auth_middleware(req: Request, next: Next) -> Result<Response, Response> {
     let expected = load_cortex_token();
-    let auth_header = req.headers().get("Authorization").and_then(|h| h.to_str().ok());
+    let auth_header = req
+        .headers()
+        .get("Authorization")
+        .and_then(|h| h.to_str().ok());
 
     match validate_auth_header(auth_header, &expected) {
         Ok(()) => Ok(next.run(req).await),
@@ -64,7 +70,8 @@ pub async fn auth_middleware(req: Request, next: Next) -> Result<Response, Respo
             let err_resp = (
                 StatusCode::UNAUTHORIZED,
                 Json(json!({"error": "Unauthorized: invalid or missing Cortex bearer token"})),
-            ).into_response();
+            )
+                .into_response();
             Err(err_resp)
         }
     }

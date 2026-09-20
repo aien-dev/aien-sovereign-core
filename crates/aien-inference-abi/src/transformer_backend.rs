@@ -230,7 +230,7 @@ impl NativeTransformerBackend {
     pub fn release_branch(&mut self, branch: BranchHandle) -> Result<(), String> {
         self.sequences.remove(&branch.0);
         if let Some(kv_mgr) = &self.kv_manager {
-            kv_mgr.write().release_branch(branch.0);
+            let _ = kv_mgr.write().release_branch(branch.0);
         }
         Ok(())
     }
@@ -373,7 +373,7 @@ impl NativeTransformerBackend {
     pub fn release_sequence(&mut self, seq_id: u64) {
         self.sequences.remove(&seq_id);
         if let Some(kv_mgr) = &self.kv_manager {
-            kv_mgr.write().release_branch(seq_id);
+            let _ = kv_mgr.write().release_branch(seq_id);
         }
     }
 

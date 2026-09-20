@@ -47,7 +47,11 @@ pub fn cosine_distance(a: &[f32], b: &[f32]) -> f32 {
     1.0 - cosine_similarity(a, b)
 }
 
-pub async fn fetch_embedding(client: &Client, text: &str, encoder_url: &str) -> Result<Vec<f32>, String> {
+pub async fn fetch_embedding(
+    client: &Client,
+    text: &str,
+    encoder_url: &str,
+) -> Result<Vec<f32>, String> {
     let payload = json!({
         "text": text,
         "modelId": "BAAI/bge-base-en-v1.5",
@@ -61,7 +65,12 @@ pub async fn fetch_embedding(client: &Client, text: &str, encoder_url: &str) -> 
         .json(&payload)
         .send()
         .await
-        .map_err(|e| format!("Failed to connect to embedding encoder on {}: {}", encoder_url, e))?;
+        .map_err(|e| {
+            format!(
+                "Failed to connect to embedding encoder on {}: {}",
+                encoder_url, e
+            )
+        })?;
 
     if !resp.status().is_success() {
         let status = resp.status();
@@ -69,7 +78,9 @@ pub async fn fetch_embedding(client: &Client, text: &str, encoder_url: &str) -> 
         return Err(format!("Encoder returned error HTTP {}: {}", status, body));
     }
 
-    let val: serde_json::Value = resp.json().await
+    let val: serde_json::Value = resp
+        .json()
+        .await
         .map_err(|e| format!("Failed to parse embedding response JSON: {}", e))?;
 
     if let Some(arr) = val.get("embedding").and_then(|v| v.as_array()) {
@@ -82,7 +93,11 @@ pub async fn fetch_embedding(client: &Client, text: &str, encoder_url: &str) -> 
         if emb.len() == EMBEDDING_DIMENSIONS {
             return Ok(emb);
         } else {
-            return Err(format!("Expected {} dimensions, got {}", EMBEDDING_DIMENSIONS, emb.len()));
+            return Err(format!(
+                "Expected {} dimensions, got {}",
+                EMBEDDING_DIMENSIONS,
+                emb.len()
+            ));
         }
     }
 
