@@ -23,6 +23,7 @@ members = [
     "crates/aien-kv-cache",
     "crates/aien-scheduler",
     "crates/aien-security",
+    "crates/aien-platform",
 ]
 
 [workspace.package]
