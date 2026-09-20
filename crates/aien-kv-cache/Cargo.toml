@@ -7,7 +7,6 @@ description = "Native Paged KV-Cache Manager with physical unified-memory tensor
 license = "Apache-2.0"
 
 [dependencies]
-aien-inference-abi = { path = "../aien-inference-abi" }
 parking_lot = "0.12"
 serde = { version = "1.0", features = ["derive"] }
 libc = "0.2"
