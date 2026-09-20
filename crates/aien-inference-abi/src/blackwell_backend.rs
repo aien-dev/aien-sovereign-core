@@ -108,12 +108,15 @@ unsafe fn paged_attention_bf16_forward(
 ) -> c_int {
     -1
 }
+#[allow(dead_code)]
 #[cfg(not(has_blackwell_cuda))]
 unsafe fn blackwell_allocate_managed(_bytes: usize) -> *mut std::ffi::c_void {
     std::ptr::null_mut()
 }
+#[allow(dead_code)]
 #[cfg(not(has_blackwell_cuda))]
 unsafe fn blackwell_free_managed(_ptr: *mut std::ffi::c_void) {}
+#[allow(dead_code)]
 #[cfg(not(has_blackwell_cuda))]
 unsafe fn blackwell_gemm_destroy() {}
 
