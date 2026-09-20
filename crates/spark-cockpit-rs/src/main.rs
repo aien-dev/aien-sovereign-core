@@ -376,19 +376,7 @@ impl StreamRedactor {
 }
 
 fn get_cortex_token() -> Option<String> {
-    if let Ok(output) = std::process::Command::new("atlas-vault")
-        .args(["get", "CORTEX_TOKEN"])
-        .output()
-        && output.status.success()
-    {
-        let token = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if !token.is_empty() {
-            return Some(token);
-        }
-    }
-    std::env::var("CORTEX_TOKEN")
-        .ok()
-        .filter(|s| !s.trim().is_empty())
+    spark_adapters::vault::resolve_secret("CORTEX_TOKEN")
 }
 
 fn artifacts_dir() -> PathBuf {
