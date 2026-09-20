@@ -599,13 +599,60 @@ pub struct BlockTable {
     pub total_tokens: usize,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone)]
+pub struct KvTransactionSnapshot {
+    pub free_blocks: Vec<BlockId>,
+    pub blocks: Vec<KvBlock>,
+    pub sequence_tables: HashMap<u64, BlockTable>,
+    pub prefix_cache: HashMap<Vec<u32>, BlockId>,
+    pub cow_faults: usize,
+}
+
+#[derive(Debug)]
+pub struct KvTransaction {
+    snapshot: Option<KvTransactionSnapshot>,
+    committed: bool,
+}
+
+impl KvTransaction {
+    pub fn new(snapshot: KvTransactionSnapshot) -> Self {
+        Self {
+            snapshot: Some(snapshot),
+            committed: false,
+        }
+    }
+
+    pub fn commit(&mut self) {
+        self.committed = true;
+        self.snapshot = None;
+    }
+
+    pub fn is_committed(&self) -> bool {
+        self.committed
+    }
+
+    pub fn rollback<B: aien_platform::UnifiedBuffer>(&mut self, manager: &mut AienKvManager<B>) {
+        if !self.committed {
+            if let Some(snapshot) = self.snapshot.take() {
+                manager.free_blocks = snapshot.free_blocks;
+                manager.blocks = snapshot.blocks;
+                manager.sequence_tables = snapshot.sequence_tables;
+                manager.prefix_cache = snapshot.prefix_cache;
+                manager.cow_faults = snapshot.cow_faults;
+            }
+            self.committed = true;
+        }
+    }
+}
+
+#[derive(Debug)]
 pub struct TokenReservation {
     pub seq_id: u64,
     pub block_id: BlockId,
     pub slot: usize,
     pub original_block_id: Option<BlockId>,
     pub was_cow: bool,
+    pub tx: Option<KvTransaction>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -1043,7 +1090,26 @@ impl<B: aien_platform::UnifiedBuffer> AienKvManager<B> {
         }
     }
 
+    pub fn begin_transaction(&self) -> KvTransaction {
+        KvTransaction::new(KvTransactionSnapshot {
+            free_blocks: self.free_blocks.clone(),
+            blocks: self.blocks.clone(),
+            sequence_tables: self.sequence_tables.clone(),
+            prefix_cache: self.prefix_cache.clone(),
+            cow_faults: self.cow_faults,
+        })
+    }
+
+    pub fn rollback_transaction(&mut self, mut tx: KvTransaction) {
+        tx.rollback(self);
+    }
+
+    pub fn cow_faults(&self) -> usize {
+        self.cow_faults
+    }
+
     pub fn reserve_token(&mut self, seq_id: u64) -> Result<TokenReservation, String> {
+        let tx = self.begin_transaction();
         let (block_id, slot) = self.append_token_with_slot(seq_id)?;
         Ok(TokenReservation {
             seq_id,
@@ -1051,19 +1117,27 @@ impl<B: aien_platform::UnifiedBuffer> AienKvManager<B> {
             slot,
             original_block_id: None,
             was_cow: false,
+            tx: Some(tx),
         })
     }
 
-    pub fn commit(&mut self, _reservation: TokenReservation) -> Result<(), String> {
+    pub fn commit(&mut self, mut reservation: TokenReservation) -> Result<(), String> {
+        if let Some(mut tx) = reservation.tx.take() {
+            tx.commit();
+        }
         Ok(())
     }
 
-    pub fn rollback(&mut self, reservation: TokenReservation) -> Result<(), String> {
-        let table = self
-            .sequence_tables
-            .get_mut(&reservation.seq_id)
-            .ok_or_else(|| format!("Sequence {} not found", reservation.seq_id))?;
-        table.total_tokens = table.total_tokens.saturating_sub(1);
+    pub fn rollback(&mut self, mut reservation: TokenReservation) -> Result<(), String> {
+        if let Some(mut tx) = reservation.tx.take() {
+            tx.rollback(self);
+        } else {
+            let table = self
+                .sequence_tables
+                .get_mut(&reservation.seq_id)
+                .ok_or_else(|| format!("Sequence {} not found", reservation.seq_id))?;
+            table.total_tokens = table.total_tokens.saturating_sub(1);
+        }
         Ok(())
     }
 
@@ -1447,4 +1521,58 @@ mod tests {
         assert_eq!(k_out, vec![0.0f32; kv_dim]);
         assert_eq!(v_out, vec![0.0f32; kv_dim]);
     }
+
+    #[test]
+    fn test_kv_transaction_commit_and_rollback() {
+        let cfg = KvPoolConfig::for_tinyllama(32, 16, KvDType::Bf16);
+        let mut mgr = AienKvManager::new_with_pool(32, 16, cfg).unwrap();
+
+        let prompt: Vec<u32> = (0..20).collect();
+        mgr.allocate_sequence(1, &prompt).unwrap();
+        assert_eq!(mgr.available_blocks(), 30);
+
+        // Transaction 1: reserve token, then rollback
+        let mut tx = mgr.begin_transaction();
+        let (_blk, slot) = mgr.append_token_with_slot(1).unwrap();
+        assert_eq!(slot, 4); // token 21 in block 1
+        assert_eq!(mgr.get_block_table(1).unwrap().total_tokens, 21);
+
+        // Rollback
+        tx.rollback(&mut mgr);
+        assert_eq!(mgr.get_block_table(1).unwrap().total_tokens, 20);
+        assert_eq!(mgr.available_blocks(), 30);
+
+        // Transaction 2: allocate new sequence and commit
+        let mut tx2 = mgr.begin_transaction();
+        mgr.allocate_sequence(2, &prompt).unwrap();
+        assert_eq!(mgr.available_blocks(), 28);
+        tx2.commit();
+        assert_eq!(mgr.available_blocks(), 28);
+        assert!(mgr.get_block_table(2).is_some());
+
+        // Transaction 3: fork and append with rollback
+        let mut tx3 = mgr.begin_transaction();
+        mgr.fork_sequence(1, 3).unwrap();
+        mgr.append_token_with_slot(3).unwrap();
+        assert_eq!(mgr.cow_faults(), 1);
+        tx3.rollback(&mut mgr);
+
+        assert!(mgr.get_block_table(3).is_none());
+        assert_eq!(mgr.cow_faults(), 0);
+        let b1 = mgr.get_block_table(1).unwrap().block_ids[1];
+        assert_eq!(mgr.get_block(b1).unwrap().ref_count, 1);
+        assert_eq!(mgr.get_block(b1).unwrap().is_shared, false);
+
+        // TokenReservation commit & rollback
+        let res = mgr.reserve_token(1).unwrap();
+        assert_eq!(mgr.get_block_table(1).unwrap().total_tokens, 21);
+        mgr.rollback(res).unwrap();
+        assert_eq!(mgr.get_block_table(1).unwrap().total_tokens, 20);
+
+        let res2 = mgr.reserve_token(1).unwrap();
+        assert_eq!(mgr.get_block_table(1).unwrap().total_tokens, 21);
+        mgr.commit(res2).unwrap();
+        assert_eq!(mgr.get_block_table(1).unwrap().total_tokens, 21);
+    }
 }
+

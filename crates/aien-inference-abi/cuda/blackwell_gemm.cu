@@ -10,7 +10,7 @@
 static cublasHandle_t g_cublas_handle = NULL;
 static cudaStream_t g_cuda_stream = NULL;
 static std::recursive_mutex g_backend_mutex;
-static std::atomic<uint64_t> g_kernel_exec_count{0};
+std::atomic<uint64_t> g_kernel_exec_count{0};
 
 // Pre-allocated scratch activation buffers on GB10 device
 static float *g_d_a = NULL;
@@ -22,6 +22,11 @@ static size_t g_cap_c = 0;
 static std::unordered_map<const float*, float*> g_weight_cache;
 
 extern "C" {
+
+int blackwell_gemm_init(void);
+
+void* blackwell_get_stream(void) { if (!g_cuda_stream) blackwell_gemm_init(); return (void*)g_cuda_stream; }
+void* blackwell_get_cublas_handle(void) { if (!g_cublas_handle) blackwell_gemm_init(); return (void*)g_cublas_handle; }
 
 int blackwell_gemm_init(void) {
     std::lock_guard<std::recursive_mutex> lock(g_backend_mutex);

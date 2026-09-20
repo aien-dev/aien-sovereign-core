@@ -49,8 +49,10 @@ name = "aien-inference-abi"
 version = "0.1.0"
 dependencies = [
  "aien-kv-cache",
+ "aien-platform",
  "async-trait",
  "libloading 0.8.9",
+ "parking_lot",
  "rayon",
  "reqwest 0.12.28",
  "serde",
