@@ -4,7 +4,7 @@
 
 set -euo pipefail
 
-WORKSPACE_ROOT="${WORKSPACE_ROOT:-/home/drakestapleton/workspace/aien-sovereign-core}"
+WORKSPACE_ROOT="${WORKSPACE_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
 RESULTS_FILE="${WORKSPACE_ROOT}/tests_results.json"
 
 TIER_SELECTION="all"

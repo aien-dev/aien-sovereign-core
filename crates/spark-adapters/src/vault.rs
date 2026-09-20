@@ -17,13 +17,13 @@ pub fn list_vault_keys() -> Vec<String> {
         .get_or_init(|| RwLock::new((Instant::now() - Duration::from_secs(60), Vec::new())));
 
     if let Ok(read_guard) = cache_lock.read() {
-        if read_guard.0.elapsed() < Duration::from_secs(10) {
+        if read_guard.0.elapsed() < Duration::from_secs(60) {
             return read_guard.1.clone();
         }
     }
 
     if let Ok(mut write_guard) = cache_lock.write() {
-        if write_guard.0.elapsed() < Duration::from_secs(10) {
+        if write_guard.0.elapsed() < Duration::from_secs(60) {
             return write_guard.1.clone();
         }
         let keys = fetch_vault_keys_raw();
@@ -83,7 +83,7 @@ pub fn resolve_secret(key_name: &str) -> Option<String> {
     let cache_lock = RESOLVED_SECRETS_CACHE.get_or_init(|| RwLock::new(HashMap::new()));
     if let Ok(guard) = cache_lock.read() {
         if let Some((fetched_at, val)) = guard.get(key_name) {
-            if fetched_at.elapsed() < Duration::from_secs(10) {
+            if fetched_at.elapsed() < Duration::from_secs(60) {
                 return Some(val.clone());
             }
         }
@@ -146,13 +146,13 @@ pub fn get_scrub_targets() -> Vec<String> {
         .get_or_init(|| RwLock::new((Instant::now() - Duration::from_secs(60), Vec::new())));
 
     if let Ok(read_guard) = cache_lock.read() {
-        if read_guard.0.elapsed() < Duration::from_secs(10) && !read_guard.1.is_empty() {
+        if read_guard.0.elapsed() < Duration::from_secs(60) {
             return read_guard.1.clone();
         }
     }
 
     if let Ok(mut write_guard) = cache_lock.write() {
-        if write_guard.0.elapsed() < Duration::from_secs(10) && !write_guard.1.is_empty() {
+        if write_guard.0.elapsed() < Duration::from_secs(60) {
             return write_guard.1.clone();
         }
 
