@@ -3,7 +3,7 @@ FROM rust:slim-bookworm AS builder
 
 WORKDIR /build
 
-COPY Cargo.toml Cargo.lock ./
+COPY Cargo.toml Cargo.lock* ./
 COPY src ./src
 
 RUN cargo build --release
@@ -21,8 +21,6 @@ WORKDIR /app
 COPY --from=builder /build/target/release/cortex-rs /usr/local/bin/cortex-rs
 COPY scripts/reproduce.sh /usr/local/bin/reproduce.sh
 RUN chmod +x /usr/local/bin/reproduce.sh
-
-ENV CORTEX_TOKEN=cortex-demo-token
 
 EXPOSE 18080
 
