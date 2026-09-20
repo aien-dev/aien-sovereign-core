@@ -75,10 +75,18 @@ pub struct EntityWriteInput {
     pub external_id: Option<String>,
 }
 
-fn default_space() -> String { "atlas-memory".to_string() }
-fn default_entity_type() -> String { "discovery".to_string() }
-fn default_json_object() -> Value { serde_json::json!({}) }
-fn default_confidence() -> f64 { 1.0 }
+fn default_space() -> String {
+    "atlas-memory".to_string()
+}
+fn default_entity_type() -> String {
+    "discovery".to_string()
+}
+fn default_json_object() -> Value {
+    serde_json::json!({})
+}
+fn default_confidence() -> f64 {
+    1.0
+}
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -128,7 +136,9 @@ pub struct SearchParams {
     pub include_retracted: Option<bool>,
 }
 
-fn default_search_limit() -> Option<usize> { Some(12) }
+fn default_search_limit() -> Option<usize> {
+    Some(12)
+}
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -160,8 +170,12 @@ pub struct RecallPayload {
     pub token_budget: usize,
 }
 
-fn default_recall_limit() -> usize { 5 }
-fn default_token_budget() -> usize { 1200 }
+fn default_recall_limit() -> usize {
+    5
+}
+fn default_token_budget() -> usize {
+    1200
+}
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]

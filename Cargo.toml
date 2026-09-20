@@ -24,6 +24,7 @@ members = [
     "crates/aien-scheduler",
     "crates/aien-security",
     "crates/aien-platform",
+    "crates/aien-platform-linux",
 ]
 
 [workspace.package]

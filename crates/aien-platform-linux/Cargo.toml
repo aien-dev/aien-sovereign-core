@@ -1,0 +1,12 @@
+[package]
+name = "aien-platform-linux"
+version = "0.1.0"
+edition = "2021"
+authors = ["Drake Stapleton <drake.aien@proton.me>"]
+description = "Linux and Grace Blackwell GB10 platform driver cell for the AIEN runtime"
+license = "Apache-2.0"
+
+[dependencies]
+aien-platform = { path = "../aien-platform" }
+libc = "0.2"
+parking_lot = "0.12"
