@@ -1,5 +1,5 @@
 [package]
-authors = ["AIEN Sovereign Systems & Contributors <sovereign@aien.dev>"]
+authors = ["Drake Stapleton <drake.aien@proton.me>"]
 license = "Apache-2.0"
 name = "spark-cockpit-rs"
 version = "0.1.0"
