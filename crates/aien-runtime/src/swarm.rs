@@ -69,9 +69,16 @@ impl SwarmManager {
         let swarm_id = self.next_swarm_id;
         self.next_swarm_id += 1;
 
+        // Ensure a root world exists
+        let root_world_id = if world_store.get_world(config.root_world_id).is_some() {
+            config.root_world_id
+        } else {
+            world_store.create_root_world(1, 1, 1, timestamp)
+        };
+
         // 1. Allocate root sequence in arena
         let root_seq = arena.allocate(
-            config.root_world_id,
+            root_world_id,
             1, // Initial root context revision
             config.priority,
             timestamp,
@@ -89,7 +96,7 @@ impl SwarmManager {
         // 3. Atomically fork N branches sharing the root World and root KV blocks
         let mut branch_sequences = Vec::with_capacity(config.branch_count);
         for _ in 0..config.branch_count {
-            let child_world = world_store.fork_world(config.root_world_id, timestamp)?;
+            let child_world = world_store.fork_world(root_world_id, timestamp)?;
             let child_seq = arena.fork(root_seq, child_world, timestamp)?;
             let child_u64 = child_seq.as_u64();
 

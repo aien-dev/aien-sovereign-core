@@ -888,41 +888,149 @@ fn handle_adapter_command(args: &[&str]) {
 // SOVEREIGN ORCHESTRATION & DEVELOPER EXPERIENCE
 // --------------------------------------------------------------------------
 
+pub async fn run_daemon_server() {
+    println!(
+        "{}",
+        "⚡ Starting AIEN Sovereign Runtime Daemon...".cyan().bold()
+    );
+    let socket_path = aien_runtime::client::AienRuntimeClient::default_socket_path();
+    let kv_manager = aien_kv_cache::create_shared_kv_manager(8192, 16);
+    let sched_cfg = aien_scheduler::SchedulerConfig {
+        max_batch_size: 256,
+        max_batch_tokens: 16384,
+        max_prefill_tokens: 8192,
+        prefill_chunk_size: 128,
+        chunk_prefill: true,
+        watermark_blocks: 64,
+    };
+    let spine = aien_runtime::spine::AienRuntimeSpine::new(4096, sched_cfg, kv_manager);
+    let server = aien_runtime::server::AienRuntimeServer::new(spine, &socket_path);
+
+    let backend = aien_inference_abi::MockInferenceBackend::new(1);
+    println!("✓ Binding socket at {}", socket_path.display());
+    if let Err(e) = server.run(backend).await {
+        eprintln!("Runtime daemon error: {}", e);
+    }
+}
+
 pub async fn handle_start_command() {
-    println!("{}", "⚡ Starting AIEN Sovereign Services...".cyan().bold());
-    let supervisor = std::process::Command::new("spark-supervisor")
-        .arg("start")
-        .spawn();
-    match supervisor {
-        Ok(_) => println!("{}", "✓ spark-supervisor initialized".green()),
-        Err(_) => {
-            println!(
-                "{}",
-                "ℹ Launching core background daemons directly...".yellow()
-            );
-            let _ = std::process::Command::new("cortex").spawn();
-            let _ = std::process::Command::new("spark-cockpit").spawn();
+    let client = aien_runtime::client::AienRuntimeClient::default_client();
+    if client.is_alive().await {
+        println!(
+            "{}",
+            "✓ AIEN Sovereign Runtime is already active.".green().bold()
+        );
+        if let Ok(status) = client.get_status().await {
+            render_runtime_status(&status);
+        }
+        return;
+    }
+
+    println!(
+        "{}",
+        "⚡ Starting AIEN Sovereign Runtime Machine..."
+            .cyan()
+            .bold()
+    );
+    let exe = std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("aien"));
+    let mut cmd = std::process::Command::new(exe);
+    cmd.arg("--daemon");
+
+    match cmd.spawn() {
+        Ok(_) => {
+            let mut ready = false;
+            for _ in 0..60 {
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                if client.is_alive().await {
+                    ready = true;
+                    break;
+                }
+            }
+
+            if ready {
+                println!("{}", "✓ AIEN Sovereign Runtime Online".green().bold());
+                println!(
+                    "  Socket:  {}",
+                    aien_runtime::client::AienRuntimeClient::default_socket_path().display()
+                );
+                println!(
+                    "  Runtime: Unified Sequence Arena, Transactional PagedAttention KV Pool, In-Process Cortex Memory"
+                );
+                if let Ok(status) = client.get_status().await {
+                    render_runtime_status(&status);
+                }
+            } else {
+                eprintln!(
+                    "{}",
+                    "⚠ Runtime daemon spawned but socket did not become ready in 3s.".yellow()
+                );
+            }
+        }
+        Err(e) => {
+            eprintln!("Failed to spawn AIEN runtime daemon: {}", e);
         }
     }
-    println!("\n{}", "✓ Sovereign Services Online:".green().bold());
-    println!(
-        "  - Sovereign Cockpit: http://127.0.0.1:18095 (or Tailscale http://100.116.106.93:18095)"
-    );
-    println!("  - Cortex Memory:     http://127.0.0.1:18080");
-    println!("  - Modular MAX:       http://127.0.0.1:18006");
 }
 
 pub async fn handle_stop_command() {
-    println!("{}", "Stopping AIEN Sovereign Services...".yellow().bold());
+    println!("{}", "Stopping AIEN Sovereign Runtime...".yellow().bold());
+    let client = aien_runtime::client::AienRuntimeClient::default_client();
+    if client.is_alive().await {
+        match client.shutdown().await {
+            Ok(()) => println!("{}", "✓ Runtime daemon stopped cleanly over IPC".green()),
+            Err(e) => eprintln!("Failed to send shutdown command: {}", e),
+        }
+    } else {
+        println!("{}", "ℹ Runtime daemon is not running".dimmed());
+    }
+
     let _ = std::process::Command::new("pkill")
         .args(["-f", "spark-cockpit"])
         .status();
-    println!("{}", "✓ Services stopped cleanly".green());
+}
+
+pub fn render_runtime_status(status: &aien_runtime::control::RuntimeStatusReport) {
+    let sharing_pct =
+        if status.total_kv_blocks > status.free_kv_blocks && status.total_kv_blocks > 0 {
+            let allocated = status.total_kv_blocks - status.free_kv_blocks;
+            (status.shared_kv_pages as f64 / (allocated + status.shared_kv_pages) as f64) * 100.0
+        } else {
+            0.0
+        };
+
+    println!("  - Active Sequences:   {}", status.active_sequences);
+    println!("  - Active Swarms:      {}", status.active_swarms);
+    println!("  - Active Worlds:      {}", status.active_worlds);
+    println!(
+        "  - KV Cache Pool:      {}/{} blocks free",
+        status.free_kv_blocks, status.total_kv_blocks
+    );
+    println!(
+        "  - Shared KV Pages:    {} ({:.1}% deduplication)",
+        status.shared_kv_pages, sharing_pct
+    );
+    println!("  - COW Faults:         {}", status.cow_faults);
+    println!("  - Engine Status:      ONLINE");
 }
 
 pub async fn handle_status_command() {
-    println!("{}", "=== AIEN Sovereign Stack Telemetry ===".cyan().bold());
-    let client = reqwest::Client::builder()
+    println!("{}", "=== AIEN Sovereign Machine Status ===".cyan().bold());
+    let client = aien_runtime::client::AienRuntimeClient::default_client();
+
+    match client.get_status().await {
+        Ok(status) => {
+            render_runtime_status(&status);
+        }
+        Err(_) => {
+            println!(
+                "{}",
+                "  ℹ Native Runtime: OFFLINE (Run 'aien start' to initialize)".yellow()
+            );
+        }
+    }
+
+    println!("\n{}", "=== Hardware & Ancillary Services ===".cyan());
+    let http_client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_millis(500))
         .build()
         .unwrap_or_default();
@@ -958,7 +1066,7 @@ pub async fn handle_status_command() {
 
     for (name, url, port) in checks {
         let t0 = std::time::Instant::now();
-        match client.get(url).send().await {
+        match http_client.get(url).send().await {
             Ok(resp) if resp.status().is_success() => {
                 let elapsed = t0.elapsed().as_millis();
                 println!(
@@ -977,6 +1085,116 @@ pub async fn handle_status_command() {
                     "STANDBY / OFFLINE".dimmed()
                 );
             }
+        }
+    }
+}
+
+pub async fn handle_swarm_command(args: &[String]) {
+    let client = aien_runtime::client::AienRuntimeClient::default_client();
+    if !client.is_alive().await {
+        eprintln!(
+            "{}",
+            "Error: AIEN runtime is not running. Run 'aien start' first.".red()
+        );
+        return;
+    }
+
+    if args.is_empty() || args[0] == "help" {
+        println!("{}", "AIEN Swarm Management:".cyan().bold());
+        println!("  aien swarm launch [--branches N] [--tokens M] [--prompt \"<text>\"]");
+        println!("  aien swarm status");
+        println!("  aien swarm inspect <ID>");
+        println!("  aien swarm cancel <ID>");
+        return;
+    }
+
+    match args[0].as_str() {
+        "launch" => {
+            let mut branch_count = 16;
+            let mut max_tokens = 32;
+            let mut prompt_str = "Explain sovereign systems architecture".to_string();
+
+            let mut i = 1;
+            while i < args.len() {
+                match args[i].as_str() {
+                    "--branches" | "-b" if i + 1 < args.len() => {
+                        branch_count = args[i + 1].parse().unwrap_or(16);
+                        i += 2;
+                    }
+                    "--tokens" | "-t" if i + 1 < args.len() => {
+                        max_tokens = args[i + 1].parse().unwrap_or(32);
+                        i += 2;
+                    }
+                    "--prompt" | "-p" if i + 1 < args.len() => {
+                        prompt_str = args[i + 1].clone();
+                        i += 2;
+                    }
+                    _ => i += 1,
+                }
+            }
+
+            let prompt_tokens: Vec<u32> = prompt_str.bytes().map(|b| b as u32).collect();
+            let req = aien_runtime::control::LaunchSwarmReq {
+                model_handle: 1,
+                branch_count,
+                max_active_sequences: branch_count * 2,
+                max_tokens_per_branch: max_tokens,
+                root_world_id: 0,
+                priority: 1,
+                prompt_tokens,
+            };
+
+            println!(
+                "{}",
+                format!(
+                    "🚀 Launching Swarm with {} branches sharing root World...",
+                    branch_count
+                )
+                .cyan()
+            );
+            match client.launch_swarm(req).await {
+                Ok(swarm_id) => {
+                    println!(
+                        "{}",
+                        format!("✓ Swarm #{} launched successfully.", swarm_id)
+                            .green()
+                            .bold()
+                    );
+                    println!(
+                        "Use 'aien swarm inspect {}' or 'aien status' to monitor.",
+                        swarm_id
+                    );
+                }
+                Err(e) => eprintln!("Failed to launch swarm: {}", e),
+            }
+        }
+        "inspect" if args.len() > 1 => {
+            if let Ok(swarm_id) = args[1].parse::<u64>() {
+                match client.inspect_swarm(swarm_id).await {
+                    Ok(status) => render_runtime_status(&status),
+                    Err(e) => eprintln!("Error inspecting swarm: {}", e),
+                }
+            } else {
+                eprintln!("Invalid swarm ID: {}", args[1]);
+            }
+        }
+        "cancel" if args.len() > 1 => {
+            if let Ok(swarm_id) = args[1].parse::<u64>() {
+                match client.cancel_swarm(swarm_id).await {
+                    Ok(()) => println!("{}", format!("✓ Swarm #{} cancelled.", swarm_id).green()),
+                    Err(e) => eprintln!("Error cancelling swarm: {}", e),
+                }
+            } else {
+                eprintln!("Invalid swarm ID: {}", args[1]);
+            }
+        }
+        "status" => {
+            if let Ok(status) = client.get_status().await {
+                render_runtime_status(&status);
+            }
+        }
+        unknown => {
+            eprintln!("Unknown swarm subcommand: {}", unknown);
         }
     }
 }

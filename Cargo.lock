@@ -30,6 +30,9 @@ name = "aien-cli"
 version = "0.1.0"
 dependencies = [
  "aien-inference-abi",
+ "aien-kv-cache",
+ "aien-runtime",
+ "aien-scheduler",
  "async-trait",
  "chrono",
  "colored",
@@ -41,6 +44,7 @@ dependencies = [
  "serde",
  "serde_json",
  "spark-hive",
+ "tempfile",
  "tokio",
 ]
 
