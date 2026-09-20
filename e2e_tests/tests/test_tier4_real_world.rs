@@ -140,7 +140,7 @@ fn test_sc06_automated_parity_gate_workflow() {
 #[test]
 fn test_sc07_multi_engine_benchmark_workflow() {
     // Scenario SC-07: Apples-to-apples benchmark workflow structure.
-    let engines = ["aien", "max", "vllm"];
+    let engines = ["aien", "max"];
     let mut cool_downs_completed = 0;
 
     for i in 0..engines.len() {
@@ -150,7 +150,7 @@ fn test_sc07_multi_engine_benchmark_workflow() {
             cool_downs_completed += 1;
         }
     }
-    assert_eq!(cool_downs_completed, 2, "Must execute cool-down between each engine pair");
+    assert_eq!(cool_downs_completed, 1, "Must execute cool-down between each engine pair");
 }
 
 #[test]

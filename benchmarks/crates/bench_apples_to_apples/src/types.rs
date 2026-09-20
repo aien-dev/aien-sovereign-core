@@ -12,7 +12,6 @@ pub struct BenchmarkConfig {
     pub output_token_count: usize,
     pub concurrency_levels: Vec<usize>,
     pub max_serve_port: u16,
-    pub vllm_serve_port: u16,
     pub cool_down_target_power_watts: f64,
     pub cool_down_max_temp_c: f64,
 }
@@ -27,7 +26,6 @@ impl Default for BenchmarkConfig {
             output_token_count: 128,
             concurrency_levels: vec![1, 2, 4, 8, 16, 32, 64],
             max_serve_port: 18090,
-            vllm_serve_port: 18094,
             cool_down_target_power_watts: 12.0,
             cool_down_max_temp_c: 42.0,
         }

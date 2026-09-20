@@ -10,15 +10,37 @@ By systematically replacing each layer of the inference engine with native compi
 
 ---
 
-## 2. Experimental Ablation Matrix
+## 2. Silicon Execution Architecture
 
-| Stage | Scheduler | KV-Cache Manager | Execution Engine | Execution Substrate |
+AIEN serves as the native compiled inference runtime. High-performance tensor execution is decoupled into silicon backends conforming to the AIEN Inference ABI:
+
+```text
+                         AIEN / ENOS
+                             │
+                     aien-inference-abi
+                             │
+             ┌───────────────┼────────────────┐
+             │               │                │
+             ▼               ▼                ▼
+       Blackwell Native     Mojo/MAX       Native CPU
+       GB10 fast path       kernels         fallback
+             │               │                │
+             └───────────────┼────────────────┘
+                             │
+                     AIEN Scheduler
+                             │
+                       aien-kv-cache
+                             │
+                         Model State
+```
+
+| Subsystem | Fast Path (Blackwell) | Accelerated Path (Mojo) | Fallback Path (Native CPU) | Test Oracle |
 | :--- | :--- | :--- | :--- | :--- |
-| **Stage 0 (Baseline)** | vLLM Python Scheduler | vLLM PagedAttention Manager | vLLM Worker Engine | PyTorch / CUDA |
-| **Stage 1** | **AIEN Native Rust Scheduler** | vLLM PagedAttention Manager | vLLM Worker Engine | C-ABI Bridge / PyTorch |
-| **Stage 2** | **AIEN Native Rust Scheduler** | **AIEN Native Paged KV Manager** | vLLM Worker Engine | C-ABI Bridge / PyTorch |
-| **Stage 3** | **AIEN Native Rust Scheduler** | **AIEN Native Paged KV Manager** | **MAX Transformer Graph** | Modular MAX / C-ABI |
-| **Stage 4 (Sovereign)** | **AIEN Native Rust Scheduler** | **AIEN Native Paged KV Manager** | **AIEN Native Engine** | Mojo Hardware Kernels |
+| **Scheduler** | AIEN Native Continuous Batching Scheduler | AIEN Native Continuous Batching Scheduler | AIEN Native Continuous Batching Scheduler | Deterministic Step Scheduler |
+| **KV Management** | AIEN Physical Unified CoW Pool | AIEN Physical Unified CoW Pool | In-process Paged Pool | Virtual Page Table |
+| **Execution Engine** | Blackwell Gb10 sm_121 cuBLAS 13 | Mojo C-ABI (`libaien_kernels.so`) | Rayon Multi-Core NEON/AVX | ReferenceCpuBackend (FP32 Oracle) |
+| **Inference Backend** | `BlackwellInferenceBackend` | `MojoInferenceBackend` | `NativeCpuInferenceBackend` | `MockInferenceBackend` |
+| **Memory Substrate** | DGX Spark 128 GB Unified Coherent Memory | DGX Spark 128 GB Unified Coherent Memory | Standard Host DRAM | Heap Slices |
 
 ### Monitored Telemetry per Stage
 1. **TTFT (Time To First Token)**: Prefill latency in milliseconds.
@@ -33,7 +55,7 @@ By systematically replacing each layer of the inference engine with native compi
 
 ## 3. Core Architecture: AIEN Inference ABI
 
-The inference interface belongs to AIEN. Backends (vLLM, MAX, ONNX, Custom Mojo) conform to this trait:
+The inference interface belongs to AIEN. Silicon backends conform to this trait:
 
 ```rust
 use async_trait::async_trait;

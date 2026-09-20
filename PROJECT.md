@@ -54,7 +54,7 @@ Every feature identified during survey is mapped directly to a milestone.
 | F12 | ReferenceCpuBackend | Complete FP32 reference implementation satisfying TensorBackend | M5 | R5, Survey 3 |
 | F13 | Mojo GB10 C-ABI Kernels | Compiled libaien_kernels.so with persistent unified memory buffers | M5 | R5, Survey 3 |
 | F14 | MojoGb10Backend Implementation | Rust bindings to libaien_kernels.so passing full parity suite | M5 | R5, Survey 3 |
-| F15 | Neutral Benchmark Driver | Standalone driver comparing AIEN, MAX, and vLLM on DGX Spark | M6 | R6, Survey 3 |
+| F15 | Neutral Benchmark Driver | Standalone driver comparing AIEN and MAX on DGX Spark | M6 | R6, Survey 3 |
 | F16 | Concurrency Sweeps & Telemetry | C=1..64 sweeps, TTFT, ITL, throughput, RSS, power, energy metrics | M6 | R6, Survey 3 |
 | F17 | Hardware & Secrets Compliance | User drakestapleton on Spark, zero disk secrets (TPM atlas-vault) | M7 | R7, Survey 3 |
 | F18 | PR Lifecycle & Cortex Receipt | Branch feat/real-model-execution-tinyllama, squash merge, Cortex write | M7 | R7, Survey 3 |
@@ -67,7 +67,7 @@ Every feature identified during survey is mapped directly to a milestone.
 | M3 | Reference Oracle Fixture Generation | Author scripts/generate_tinyllama_oracle.py on Spark, generate tinyllama_oracle.safetensors, export JSON manifest with SHA-256 | none | DONE |
 | M4 | Algorithmic Alignment and Parity Test Harness | Align RoPE split-half and matmul layout in tensor.rs, implement crates/aien-inference-abi/tests/tinyllama_parity.rs passing 5 stages | M1, M2, M3 | DONE |
 | M5 | Decoupled TensorBackend and Mojo GB10 Acceleration | Define TensorBackend trait, implement ReferenceCpuBackend and MojoGb10Backend (libaien_kernels.so) on Spark GB10 | M4 | DONE |
-| M6 | Neutral Apples-to-Apples Benchmark Driver | Build benchmarks/crates/bench_apples_to_apples, run AIEN, MAX, vLLM on DGX Spark across C=1..64, record telemetry | M5 | DONE |
+| M6 | Neutral Apples-to-Apples Benchmark Driver | Build benchmarks/crates/bench_apples_to_apples, run AIEN and MAX on DGX Spark across C=1..64, record telemetry | M5 | DONE |
 | M7 | Invariant Verification, Autonomous PR Lifecycle, and Cortex Receipt | Verify zero disk secrets, sovereign voice, execute PR squash merge, commit receipt to Cortex memory | M6 | DONE |
 
 ## Interface Contracts
@@ -165,7 +165,7 @@ benchmarks/
     └── bench_apples_to_apples/
         ├── Cargo.toml                      (owns: M6 benchmark crate dependencies)
         └── src/
-            └── main.rs                     (owns: M6 AIEN, MAX, vLLM driver and telemetry)
+            └── main.rs                     (owns: M6 AIEN and MAX driver and telemetry)
 ```
 
 ## Execution Constraints
@@ -177,7 +177,7 @@ benchmarks/
 - [x] Multi-step greedy generation produces identical token IDs and recognizable English text (M4).
 - [x] TensorBackend trait cleanly separates Rust transformer semantics from compute backends (M5).
 - [x] libaien_kernels.so compiles on Spark GB10 and executes without per-token host-device memory copying (M5).
-- [x] Neutral benchmark orchestrator executes AIEN, MAX, and vLLM sequentially with thermal cool-downs (M6).
+- [x] Neutral benchmark orchestrator executes AIEN and MAX sequentially with thermal cool-downs (M6).
 - [x] Concurrency sweep (C=1 to C=64) captures TTFT, ITL, throughput, memory, and power telemetry (M6).
 - [x] Benchmark results and receipt committed to benchmarks/data/ and documented in walkthrough.md (M6).
 - [x] Clean PR opened on aien-dev/aien-sovereign-core, CI green, linear squash merge, Cortex receipt in atlas-memory (M7).
