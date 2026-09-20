@@ -93,7 +93,7 @@ fn bench_kv_cache_allocation_throughput() {
 
     let t1 = Instant::now();
     for i in 0..num_allocations {
-        kv.free_sequence(i as u64);
+        let _ = kv.free_sequence(i as u64);
     }
     let free_duration = t1.elapsed();
     let free_rate = total_blocks_allocated as f64 / free_duration.as_secs_f64();
@@ -160,11 +160,11 @@ fn bench_zero_copy_subagent_fork() {
 
         for child_idx in 0..count {
             let child_id = 100_000 + child_idx as u64;
-            kv.free_sequence(child_id);
+            let _ = kv.free_sequence(child_id);
         }
     }
 
-    kv.free_sequence(parent_id);
+    let _ = kv.free_sequence(parent_id);
     println!("  Status:                       PASSED (Instantaneous subagent spawning up to 1000 children)\n");
 }
 
