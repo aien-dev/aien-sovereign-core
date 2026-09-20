@@ -29,6 +29,7 @@ dependencies = [
 name = "aien-inference-abi"
 version = "0.1.0"
 dependencies = [
+ "aien-kv-cache",
  "async-trait",
  "libloading",
  "rayon",
@@ -37,6 +38,15 @@ dependencies = [
  "serde_json",
  "tokenizers",
  "tokio",
+]
+
+[[package]]
+name = "aien-kv-cache"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "parking_lot",
+ "serde",
 ]
 
 [[package]]
