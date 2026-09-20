@@ -3,7 +3,7 @@ license = "Apache-2.0"
 name = "cortex-encoder-rs"
 version = "0.1.0"
 edition = "2021"
-authors = ["AIEN Sovereign Systems & Contributors <sovereign@aien.dev>"]
+authors = ["Drake Stapleton <drake.aien@proton.me>"]
 description = "Native Rust and ONNX Runtime C-API embedding and reranking service for Cortex"
 
 [dependencies]

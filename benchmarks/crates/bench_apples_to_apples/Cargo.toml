@@ -2,7 +2,7 @@
 name = "bench_apples_to_apples"
 version = "0.1.0"
 edition = "2021"
-authors = ["AIEN Sovereign Systems & Contributors <sovereign@aien.dev>"]
+authors = ["Drake Stapleton <drake.aien@proton.me>"]
 license = "Apache-2.0 WITH LLVM-exception"
 
 [dependencies]
