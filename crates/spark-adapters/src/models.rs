@@ -92,6 +92,24 @@ impl ProviderType {
             ProviderType::EmbeddedNative => None,
         }
     }
+
+    pub fn key_aliases(&self) -> &'static [&'static str] {
+        match self {
+            ProviderType::OpenAI => &["OPENAI_API_KEY"],
+            ProviderType::Anthropic => &["ANTHROPIC_API_KEY"],
+            ProviderType::OpenRouter => &["OPENROUTER_API_KEY"],
+            ProviderType::Gemini => &["GEMINI_API_KEY"],
+            ProviderType::Groq => &["GROQ_API_KEY"],
+            ProviderType::Ollama => &[],
+            ProviderType::DeepSeek => &["DEEPSEEK_API_KEY"],
+            ProviderType::Together => &["TOGETHER_API_KEY"],
+            ProviderType::Mistral => &["MISTRAL_API_KEY"],
+            ProviderType::ChatGPTWeb => &["CHATGPT_SESSION_TOKEN", "OPENAI_WEB_TOKEN"],
+            ProviderType::ClaudeWeb => &["CLAUDE_SESSION_KEY", "CLAUDE_WEB_SESSION_KEY"],
+            ProviderType::LocalMax => &[],
+            ProviderType::EmbeddedNative => &[],
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

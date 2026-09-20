@@ -62,6 +62,10 @@ fn fetch_secret_raw(key_name: &str) -> Option<String> {
 /// Dynamically resolve a secret token.
 /// Checks process environment first, then in-memory test secrets, then cache (10s TTL), then hardware TPM vault.
 pub fn resolve_secret(key_name: &str) -> Option<String> {
+    if key_name.trim().is_empty() {
+        return None;
+    }
+
     // 1. Check process environment first
     if let Ok(env_val) = std::env::var(key_name) {
         let trimmed = env_val.trim().to_string();
@@ -74,7 +78,12 @@ pub fn resolve_secret(key_name: &str) -> Option<String> {
     if let Some(test_lock) = TEST_SECRETS.get() {
         if let Ok(guard) = test_lock.read() {
             if let Some(val) = guard.get(key_name) {
-                return Some(val.clone());
+                let trimmed = val.trim();
+                if !trimmed.is_empty() {
+                    return Some(trimmed.to_string());
+                } else {
+                    return None;
+                }
             }
         }
     }
@@ -105,6 +114,10 @@ pub fn resolve_secret(key_name: &str) -> Option<String> {
 
 /// Check if a secret key is registered without exposing its value.
 pub fn is_secret_present(key_name: &str) -> bool {
+    if key_name.trim().is_empty() {
+        return false;
+    }
+
     if let Ok(env_val) = std::env::var(key_name) {
         if !env_val.trim().is_empty() {
             return true;
@@ -113,8 +126,8 @@ pub fn is_secret_present(key_name: &str) -> bool {
 
     if let Some(test_lock) = TEST_SECRETS.get() {
         if let Ok(guard) = test_lock.read() {
-            if guard.contains_key(key_name) {
-                return true;
+            if let Some(val) = guard.get(key_name) {
+                return !val.trim().is_empty();
             }
         }
     }
@@ -130,11 +143,50 @@ pub fn register_test_secret(key_name: &str, value: &str) {
         guard.insert(key_name.to_string(), value.to_string());
     }
 
-    // Invalidate scrub targets cache so new test secrets are included immediately
+    // Update resolved secrets cache
+    let cache_lock = RESOLVED_SECRETS_CACHE.get_or_init(|| RwLock::new(HashMap::new()));
+    if let Ok(mut guard) = cache_lock.write() {
+        if value.trim().is_empty() {
+            guard.remove(key_name);
+        } else {
+            guard.insert(key_name.to_string(), (Instant::now(), value.to_string()));
+        }
+    }
+
+    // Incremental update to scrub targets cache so valid cached TPM keys are preserved
     if let Some(scrub_lock) = SCRUB_TARGETS_CACHE.get() {
         if let Ok(mut guard) = scrub_lock.write() {
-            guard.0 = Instant::now() - Duration::from_secs(60);
-            guard.1.clear();
+            if guard.0.elapsed() < Duration::from_secs(60) {
+                let trimmed = value.trim();
+                if trimmed.len() >= 6 {
+                    if !guard.1.contains(&trimmed.to_string()) {
+                        guard.1.push(trimmed.to_string());
+                        guard.1.sort();
+                        guard.1.dedup();
+                        guard.1.sort_by_key(|a| std::cmp::Reverse(a.len()));
+                    }
+                } else {
+                    guard.1.retain(|s| s != trimmed);
+                }
+                guard.0 = Instant::now();
+            } else {
+                guard.0 = Instant::now() - Duration::from_secs(60);
+                guard.1.clear();
+            }
+        }
+    }
+}
+
+/// Remove a test secret from memory and purge from caches.
+pub fn remove_test_secret(key_name: &str) {
+    if let Some(test_lock) = TEST_SECRETS.get() {
+        if let Ok(mut guard) = test_lock.write() {
+            guard.remove(key_name);
+        }
+    }
+    if let Some(cache_lock) = RESOLVED_SECRETS_CACHE.get() {
+        if let Ok(mut guard) = cache_lock.write() {
+            guard.remove(key_name);
         }
     }
 }

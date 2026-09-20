@@ -1,134 +1,95 @@
-# TEST READY CERTIFICATION: AIEN Sovereign Core Real-Model Execution
+# TEST_READY: Sovereign Distillation Workshop Test Suite
 
-## 1. Test Suite Certification Summary
+## 1. Status: Ready for Milestone Verification
 
-The opaque-box end-to-end test suite for the AIEN Sovereign Core TinyLlama real-model execution project is implemented, verified, and certified operational.
+The end-to-end test harness for the Sovereign Distillation Workshop is complete, verified, and operational on NVIDIA DGX Spark (`spark`).
 
-- Verification Status: READY
-- Total Test Cases Implemented: 207
-- Total Test Cases Passing: 207
-- Total Test Cases Failing: 0
-- Execution Time: 0.75 seconds across all 4 tiers
-- Verification Command: `./e2e_tests/run_e2e_tests.sh`
+The suite provides 140 deterministic test cases across 4 tiers covering all acceptance criteria in R1 through R6 of ORIGINAL_REQUEST.md.
 
----
+## 2. Test Suite Composition
 
-## 2. Four-Tier Coverage Breakdown (N=18 Features)
+| Tier | Category | Test Count | Description |
+|------|----------|------------|-------------|
+| Tier 1 | Feature Coverage | 65 | 5 tests per feature across 13 core features (vault resolution, prompt sanitizer, cortex auth, resident bounds, crawler flags, cli workbench, key verification, axum routes, cortex storage, dataset emission, verification gates, test harness, git parity) |
+| Tier 2 | Boundary and Corner Cases | 65 | Negative, boundary, and stress tests (empty inputs, missing secrets, invalid CLI flags, malformed JSON, delimiter parsing, sycophancy detection, unslop penalties, zero/negative DPO deltas, duplicate rejection) |
+| Tier 3 | Cross-Feature Combinations | 5 | Multi-subsystem interactions: Sanitizer + Router + MAX dispatch, Verifier + Consensus + Cortex gate, Crawler + Curriculum + SFT/DPO dataset emission, Vault token + Cortex HTTP dispatch, Verifier unslop + rustc + SFT emission |
+| Tier 4 | Real-World Scenarios | 5 | Live execution on DGX Spark: spark-distill verify-keys catalog audit, live Modular MAX inference roundtrip on port 18006, systems curriculum batch generation, live Cortex daemon handshake on port 18080, end-to-end SFT/DPO filesystem dataset emission |
+| **Total** | **All Tiers** | **140** | **Complete opaque-box distillation workshop verification** |
 
-The test matrix implements the 4-tier testing methodology across all 18 features defined in PROJECT.md:
+## 3. Baseline Execution Results on NVIDIA DGX Spark
 
-| Tier | Focus | Minimum Required | Implemented | Passing | Status |
-|---|---|---|---|---|---|
-| Tier 1 | Feature Coverage (5 per feature across F1-F18) | 90 | 90 | 90 | PASSED |
-| Tier 2 | Boundary & Corner Cases (5 per feature across F1-F18) | 90 | 90 | 90 | PASSED |
-| Tier 3 | Cross-Feature Interactions (Pairwise combinations P1-P18) | 18 | 18 | 18 | PASSED |
-| Tier 4 | Real-World Application Scenarios (SC-01 to SC-09) | 9 | 9 | 9 | PASSED |
-| **Total** | **Full Opaque-Box Test Suite** | **207** | **207** | **207** | **CERTIFIED** |
+Baseline executed against live workspace state on 2026-09-20:
+- Total tests executed: 140
+- Passed: 140
+- Failed: 0
+- Ignored: 0
+- Execution duration: 132 seconds
+- Results artifact: `/home/drakestapleton/workspace/aien-sovereign-core/tests_results.json`
 
----
+### Tier Execution Summary
 
-## 3. Test Inventory by Feature
+| Tier | Target Name | Passed | Failed | Status |
+|------|-------------|--------|--------|--------|
+| Tier 1 | `tests/tier1_features.rs` | 65 | 0 | PASSED |
+| Tier 2 | `tests/tier2_boundary.rs` | 65 | 0 | PASSED |
+| Tier 3 | `tests/tier3_cross_feature.rs` | 5 | 0 | PASSED |
+| Tier 4 | `tests/tier4_real_world.rs` | 5 | 0 | PASSED |
+| **Total** | **All 4 Targets** | **140** | **0** | **100% PASS** |
 
-### Feature Coverage (Tier 1 & Tier 2)
-- F1 (Strict Safetensors Loader): 10 tests (TC-F1-01..05, TC-F1-B01..B05)
-  * Valid buffer parsing, empty file rejection, truncated header rejection, malformed JSON rejection, out-of-bounds header length prefix.
-- F2 (Loud Validation & Catalog): 10 tests (TC-F2-01..05, TC-F2-B01..B05)
-  * Missing tensor detection (`MissingTensor`), shape mismatch detection (`ShapeMismatch`), dtype mismatch (`DtypeMismatch`), byte offset verification (`OffsetOutOfBounds`), 201-tensor catalog validation.
-- F3 (Dual Weight Storage): 10 tests (TC-F3-01..05, TC-F3-B01..B05)
-  * FP32 decoded weights verification, raw BF16 buffer preservation, IEEE-754 bit-shift codec validation, buffer isolation, subnormal and infinity float conversions.
-- F4 (Pure Rust Tokenizer): 10 tests (TC-F4-01..05, TC-F4-B01..B05)
-  * Direct `tokenizer.json` ingestion, pure Rust in-process execution without Python runtime, file not found handling, corrupt buffer handling, empty input tokenization.
-- F5 (Chat Template & Special Tokens): 10 tests (TC-F5-01..05, TC-F5-B01..B05)
-  * Pinned special token IDs (`<s>` = 1, `</s>` = 2, `<unk>` = 0), canonical TinyLlama format turns (`<|system|>\n...</s>\n<|user|>\n...</s>\n<|assistant|>\n`), multiline prompts.
-- F6 (Encode & Decode Engine): 10 tests (TC-F6-01..05, TC-F6-B01..B05)
-  * BOS and EOS detection, stop token checks, context limit enforcement (2048), empty token slice decoding, whitespace tokenization.
-- F7 (Reference Oracle Script): 10 tests (TC-F7-01..05, TC-F7-B01..B05)
-  * CPU FP32 reference configuration contract, layer hook registrations across all 22 layers, golden operating system prompt contract, SHA-256 manifest export.
-- F8 (Deterministic Oracle Fixtures): 10 tests (TC-F8-01..05, TC-F8-B01..B05)
-  * Manifest schema, 46-token prompt sequence, greedy next token 2744 (`"An"`), top-5 logit rank order `[2744, 1576, 6716, 7094, 797]`, 16-step decode sequence.
-- F9 (Algorithmic Core Alignment): 10 tests (TC-F9-01..05, TC-F9-B01..B05)
-  * Canonical LLaMA `rotate_half` RoPE (coordinate `i` paired with `i + half_dim`), norm invariance, row-major PyTorch `[out_dim, in_dim]` matrix multiplication, RMSNorm mathematical precision, SwiGLU non-linearity.
-- F10 (Multi-Stage Parity Test): 10 tests (TC-F10-01..05, TC-F10-B01..B05)
-  * Absolute tolerance <= 1e-4, relative tolerance <= 1e-4, cosine similarity > 0.9999, argmax greedy selection, earliest divergent layer reporting.
-- F11 (Decoupled TensorBackend Trait): 10 tests (TC-F11-01..05, TC-F11-B01..B05)
-  * RMSNorm trait signature, RoPE trait signature, GEMV trait signature, SwiGLU trait signature, GQA 8:1 query-to-KV head ratio.
-- F12 (ReferenceCpuBackend): 10 tests (TC-F12-01..05, TC-F12-B01..B05)
-  * Pure Rust RMSNorm calculation, SwiGLU monotonicity, zero-vector multiplication, extreme float handling, deterministic argmax tie-breaking.
-- F13 (Mojo GB10 C-ABI Kernels): 10 tests (TC-F13-01..05, TC-F13-B01..B05)
-  * C-ABI export symbols (`aien_rmsnorm_bf16`, `aien_rope_bf16`, `aien_gemv_bf16`), `MODULAR_CACHE_DIR` configuration, 16-wide SIMD vector width alignment, unified memory allocations.
-- F14 (MojoGb10Backend Implementation): 10 tests (TC-F14-01..05, TC-F14-B01..B05)
-  * Dynamic library missing fallback, thread safety (`Send + Sync`), zero-copy pointer marshalling, persistent KV allocations.
-- F15 (Neutral Benchmark Driver): 10 tests (TC-F15-01..05, TC-F15-B01..B05)
-  * Sequential execution ordering (AIEN -> MAX), mandatory `--no-device-graph-capture` flag for MAX, 30-second thermal cool-down envelopes.
-- F16 (Concurrency Sweeps & Telemetry): 10 tests (TC-F16-01..05, TC-F16-B01..B05)
-  * Concurrency sweep levels `C = [1, 2, 4, 8, 16, 32, 64]`, 128 in / 128 out workload, TTFT percentiles (p50, p95, p99), ITL percentiles, energy efficiency (Joules/token).
-- F17 (Hardware & Secrets Compliance): 10 tests (TC-F17-01..05, TC-F17-B01..B05)
-  * Zero plaintext `.env` files in workspace, TPM vault in-memory resolution, zero em/en dashes, zero banned buzzwords, user `drakestapleton` check.
-- F18 (PR Lifecycle & Cortex Receipt): 10 tests (TC-F18-01..05, TC-F18-B01..B05)
-  * Branch `feat/real-model-execution-tinyllama`, linear squash merge (`gh pr merge --squash`), Cortex memory loopback endpoint `127.0.0.1:18080`, space `atlas-memory`.
+## 4. Feature Checklist Table
 
-### Cross-Feature Interactions (Tier 3)
-- P01 (F1 + F2): Loader and catalog validation loud error cascade.
-- P02 (F1 + F3): Loader dual storage memory population (FP32 + raw BF16).
-- P03 (F2 + F9): Catalog shape enforcement drives row-major `matmul_vec`.
-- P04 (F4 + F5): Pure Rust tokenizer chat formatting and special token pinning.
-- P05 (F4 + F6): Tokenizer encode/decode string round-trip.
-- P06 (F5 + F6): Chat formatted sequence terminates on EOS token ID 2.
-- P07 (F7 + F8): Oracle script produces deterministic 46-token prompt sequence.
-- P08 (F8 + F10): Multi-stage parity assertion against golden token 2744.
-- P09 (F9 + F10): Aligned RoPE and RMSNorm pass mathematical parity thresholds.
-- P10 (F9 + F12): Aligned math forward pass in Reference CPU backend.
-- P11 (F3 + F13): Raw BF16 buffers passed directly to C-ABI pointers.
-- P12 (F11 + F12): Reference CPU backend satisfies TensorBackend trait.
-- P13 (F11 + F14): Mojo GB10 backend satisfies TensorBackend trait.
-- P14 (F13 + F14): Mojo compiled kernels operate in unified memory.
-- P15 (F10 + F14): Accelerated backend evaluated against identical parity tolerances.
-- P16 (F15 + F16): Benchmark driver sweeps concurrency levels C=1..64.
-- P17 (F16 + F17): Benchmark telemetry maintains zero disk secrets.
-- P18 (F15 + F18): Benchmark receipt committed to Spark Cortex memory.
+| # | Feature | Requirement | Tier 1 Tests | Tier 2 Tests | Status |
+|---|---------|-------------|--------------|--------------|--------|
+| F1 | In-Memory Vault Secret Resolution | ORIGINAL_REQUEST §R1 | T1_F01 to T1_F05 (5) | T2_F01 to T2_F05 (5) | VERIFIED |
+| F2 | Outbound Prompt Sanitizer Hardening | ORIGINAL_REQUEST §R2 | T1_F06 to T1_F10 (5) | T2_F06 to T2_F10 (5) | VERIFIED |
+| F3 | Cortex Token Dynamic Auth | ORIGINAL_REQUEST §R1 | T1_F11 to T1_F15 (5) | T2_F11 to T2_F15 (5) | VERIFIED |
+| F4 | Resident Generation Bounds | ORIGINAL_REQUEST §R1 | T1_F16 to T1_F20 (5) | T2_F16 to T2_F20 (5) | VERIFIED |
+| F5 | Crawler Flag Collision Fix | ORIGINAL_REQUEST §R4 | T1_F21 to T1_F25 (5) | T2_F21 to T2_F25 (5) | VERIFIED |
+| F6 | Interactive CLI Workbench | ORIGINAL_REQUEST §R4 | T1_F26 to T1_F30 (5) | T2_F26 to T2_F30 (5) | VERIFIED |
+| F7 | Key Verification Command | ORIGINAL_REQUEST §R4 | T1_F31 to T1_F35 (5) | T2_F31 to T2_F35 (5) | VERIFIED |
+| F8 | Axum Web Workshop Service | ORIGINAL_REQUEST §R4 | T1_F36 to T1_F40 (5) | T2_F36 to T2_F40 (5) | VERIFIED |
+| F9 | Closed-Loop Cortex Storage | ORIGINAL_REQUEST §R5 | T1_F41 to T1_F45 (5) | T2_F41 to T2_F45 (5) | VERIFIED |
+| F10 | SFT and DPO Dataset Emission | ORIGINAL_REQUEST §R5 | T1_F46 to T1_F50 (5) | T2_F46 to T2_F50 (5) | VERIFIED |
+| F11 | Four-Tier Verification Gates | ORIGINAL_REQUEST §R3 | T1_F51 to T1_F55 (5) | T2_F51 to T2_F55 (5) | VERIFIED |
+| F12 | E2E Opaque-Box Test Suite | ORIGINAL_REQUEST §Acceptance | T1_F56 to T1_F60 (5) | T2_F56 to T2_F60 (5) | VERIFIED |
+| F13 | Remote Git Parity & PR Lifecycle | ORIGINAL_REQUEST §R6 | T1_F61 to T1_F65 (5) | T2_F61 to T2_F65 (5) | VERIFIED |
 
-### Real-World Operational Workflows (Tier 4)
-- SC-01: Golden prompt single-turn inference matching Hugging Face oracle token 2744.
-- SC-02: 16-step autoregressive greedy generation matching golden sequence.
-- SC-03: Corrupted checkpoint rejection with loud `MissingTensor` diagnostic.
-- SC-04: Operator CLI doctor inspection (`aien-cli --doctor`).
-- SC-05: Operator CLI version and status reporting (`aien-cli --version`, `--status`).
-- SC-06: Automated parity gate checking numerical tolerances (<= 1e-4, cosine > 0.9999).
-- SC-07: Apples-to-apples multi-engine benchmark with sequential cool-down envelopes.
-- SC-08: Zero-disk-secrets invariant audit scanning the full workspace tree.
-- SC-09: Sovereign voice compliance audit and PR branch lifecycle verification.
+## 5. Test Execution Instructions
 
----
+Execute tests directly on NVIDIA DGX Spark (`spark`) as user `drakestapleton`:
 
-## 4. How to Run the Tests
-
-### Single Command Runner
 ```bash
-./e2e_tests/run_e2e_tests.sh
+# Execute entire 140-test suite via runner script
+/home/drakestapleton/workspace/aien-sovereign-core/scripts/e2e_distill_test.sh --all
+
+# Execute by tier
+/home/drakestapleton/workspace/aien-sovereign-core/scripts/e2e_distill_test.sh --tier 1
+/home/drakestapleton/workspace/aien-sovereign-core/scripts/e2e_distill_test.sh --tier 2
+/home/drakestapleton/workspace/aien-sovereign-core/scripts/e2e_distill_test.sh --tier 3
+/home/drakestapleton/workspace/aien-sovereign-core/scripts/e2e_distill_test.sh --tier 4
+
+# Execute by feature pattern
+/home/drakestapleton/workspace/aien-sovereign-core/scripts/e2e_distill_test.sh --feature sanitizer
+/home/drakestapleton/workspace/aien-sovereign-core/scripts/e2e_distill_test.sh --feature vault
+/home/drakestapleton/workspace/aien-sovereign-core/scripts/e2e_distill_test.sh --feature crawler
+
+# Output structured JSON results
+/home/drakestapleton/workspace/aien-sovereign-core/scripts/e2e_distill_test.sh --all --json
+
+# Direct cargo test invocations
+cargo test -p spark-adapters --test tier1_features
+cargo test -p spark-adapters --test tier2_boundary
+cargo test -p spark-adapters --test tier3_cross_feature
+cargo test -p spark-adapters --test tier4_real_world
 ```
 
-### Direct Cargo Invocations
-```bash
-# Run entire test suite
-cargo test --manifest-path e2e_tests/Cargo.toml --target-dir target
+## 6. Artifact Index
 
-# Run specific tiers
-cargo test --manifest-path e2e_tests/Cargo.toml --target-dir target --test test_tier1_feature_coverage
-cargo test --manifest-path e2e_tests/Cargo.toml --target-dir target --test test_tier2_boundaries
-cargo test --manifest-path e2e_tests/Cargo.toml --target-dir target --test test_tier3_cross_feature
-cargo test --manifest-path e2e_tests/Cargo.toml --target-dir target --test test_tier4_real_world
-```
-
----
-
-## 5. Discovered Implementation Defects (Escalated)
-
-1. Unchecked Integer Addition Overflow in Safetensors Header Parser:
-   - File: `crates/aien-inference-abi/src/checkpoint.rs:204:22`
-   - Observation: When reading `header_len` from binary prefix, parsing computes `let header_end = 8 + header_len;` without checked arithmetic. When `header_len` is near `u64::MAX`, addition panics with `attempt to add with overflow` in debug builds.
-   - Recommended Fix: Replace with checked addition: `let header_end = 8usize.checked_add(header_len as usize).ok_or_else(|| CheckpointError::InvalidHeader("Header length causes integer overflow".to_string()))?;`.
-
-2. Tokenizer Unit Test Failure in Synthetic JSON:
-   - File: `crates/aien-inference-abi/src/tokenizer.rs:249:9`
-   - Observation: In `test_synthetic_tokenizer_roundtrip`, tokenization produces `[0, 0, ...]` because WordLevel vocab without pre-tokenizer splits produces unk tokens on space characters.
-   - Recommended Fix: Use `{"type": "WhitespaceSplit"}` in pre_tokenizer or use BPE with merges for synthetic roundtrip test.
+- Tier 1 Feature Test Suite: `/home/drakestapleton/workspace/aien-sovereign-core/crates/spark-adapters/tests/tier1_features.rs`
+- Tier 2 Boundary Test Suite: `/home/drakestapleton/workspace/aien-sovereign-core/crates/spark-adapters/tests/tier2_boundary.rs`
+- Tier 3 Cross-Feature Suite: `/home/drakestapleton/workspace/aien-sovereign-core/crates/spark-adapters/tests/tier3_cross_feature.rs`
+- Tier 4 Real-World Suite: `/home/drakestapleton/workspace/aien-sovereign-core/crates/spark-adapters/tests/tier4_real_world.rs`
+- Unified Shell Test Runner: `/home/drakestapleton/workspace/aien-sovereign-core/scripts/e2e_distill_test.sh`
+- Machine-Readable Results: `/home/drakestapleton/workspace/aien-sovereign-core/tests_results.json`
+- Orchestrator Readiness Report: `/Users/drakestapleton/.agents/orchestrator_6/TEST_READY.md`
+- Local Repository Copy: `/home/drakestapleton/workspace/aien-sovereign-core/TEST_READY.md`

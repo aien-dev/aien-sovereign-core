@@ -15,11 +15,13 @@ pub enum CurriculumTrack {
 impl CurriculumTrack {
     pub fn parse(s: &str) -> Option<Self> {
         match s.to_lowercase().as_str() {
-            "systems" | "native" | "gpu" => Some(CurriculumTrack::NativeSystemsAndGpu),
+            "systems" | "native" | "gpu" | "cuda" => Some(CurriculumTrack::NativeSystemsAndGpu),
             "agent" | "agency" | "tool" => Some(CurriculumTrack::AgentAgency),
             "science" | "scientific" | "chemistry" => Some(CurriculumTrack::ScientificReasoning),
             "frontier" | "general" | "algo" => Some(CurriculumTrack::GeneralFrontier),
-            "dynamic" | "mining" => Some(CurriculumTrack::DynamicMining),
+            "dynamic" | "mining" | "git" | "git_mining" | "git-mining" | "refactor" => {
+                Some(CurriculumTrack::DynamicMining)
+            }
             _ => None,
         }
     }
@@ -189,6 +191,30 @@ mod tests {
         );
         assert_eq!(
             CurriculumTrack::parse("dynamic"),
+            Some(CurriculumTrack::DynamicMining)
+        );
+    }
+
+    #[test]
+    fn test_track_parsing_aliases() {
+        assert_eq!(
+            CurriculumTrack::parse("cuda"),
+            Some(CurriculumTrack::NativeSystemsAndGpu)
+        );
+        assert_eq!(
+            CurriculumTrack::parse("git"),
+            Some(CurriculumTrack::DynamicMining)
+        );
+        assert_eq!(
+            CurriculumTrack::parse("git_mining"),
+            Some(CurriculumTrack::DynamicMining)
+        );
+        assert_eq!(
+            CurriculumTrack::parse("git-mining"),
+            Some(CurriculumTrack::DynamicMining)
+        );
+        assert_eq!(
+            CurriculumTrack::parse("refactor"),
             Some(CurriculumTrack::DynamicMining)
         );
     }

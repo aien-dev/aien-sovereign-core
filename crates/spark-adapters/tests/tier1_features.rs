@@ -298,6 +298,30 @@ fn test_t1_f24_crawler_curriculum_tracks_enumeration() {
 }
 
 #[test]
+fn test_t1_f24b_crawler_curriculum_tracks_aliases() {
+    assert_eq!(
+        CurriculumTrack::parse("cuda"),
+        Some(CurriculumTrack::NativeSystemsAndGpu)
+    );
+    assert_eq!(
+        CurriculumTrack::parse("git"),
+        Some(CurriculumTrack::DynamicMining)
+    );
+    assert_eq!(
+        CurriculumTrack::parse("git_mining"),
+        Some(CurriculumTrack::DynamicMining)
+    );
+    assert_eq!(
+        CurriculumTrack::parse("git-mining"),
+        Some(CurriculumTrack::DynamicMining)
+    );
+    assert_eq!(
+        CurriculumTrack::parse("refactor"),
+        Some(CurriculumTrack::DynamicMining)
+    );
+}
+
+#[test]
 fn test_t1_f25_crawler_task_generation_limit_respect() {
     let tasks = CurriculumEngine::generate_tasks(
         CurriculumTrack::NativeSystemsAndGpu,
@@ -322,6 +346,19 @@ fn test_t1_f26_cli_help_invocation() {
         .expect("help invocation");
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("spark-distill"));
+}
+
+#[test]
+fn test_t1_f26b_cli_interactive_subcommand_schema() {
+    let bin_path = spark_distill_bin();
+    let output = Command::new(bin_path)
+        .args(["cli", "--help"])
+        .output()
+        .expect("cli help");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success());
+    assert!(stdout.contains("--teacher"));
+    assert!(stdout.contains("--student"));
 }
 
 #[test]
@@ -426,6 +463,17 @@ fn test_t1_f35_verify_keys_web_sessions_require_key() {
     assert!(chatgpt_web.requires_key);
     let claude_web = adapters.iter().find(|a| a.id == "claude/web-pro").unwrap();
     assert!(claude_web.requires_key);
+}
+
+#[test]
+fn test_t1_f35b_web_session_token_aliases() {
+    let chatgpt = spark_adapters::models::ProviderType::ChatGPTWeb;
+    assert!(chatgpt.key_aliases().contains(&"CHATGPT_SESSION_TOKEN"));
+    assert!(chatgpt.key_aliases().contains(&"OPENAI_WEB_TOKEN"));
+
+    let claude = spark_adapters::models::ProviderType::ClaudeWeb;
+    assert!(claude.key_aliases().contains(&"CLAUDE_SESSION_KEY"));
+    assert!(claude.key_aliases().contains(&"CLAUDE_WEB_SESSION_KEY"));
 }
 
 // ============================================================================
