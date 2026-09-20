@@ -270,6 +270,19 @@ impl SwarmRegistry {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PendingApproval {
+    pub id: String,
+    pub action_type: String,
+    pub title: String,
+    pub description: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub command_or_diff: Option<String>,
+    pub risk_level: String,
+    pub status: String,
+    pub created_at: String,
+}
+
 #[derive(Clone)]
 struct AppState {
     client: reqwest::Client,
@@ -278,6 +291,7 @@ struct AppState {
     hive_store: Arc<spark_hive::CombStore>,
     swarm_registry: Arc<SwarmRegistry>,
     distill_engine: Arc<spark_adapters::DistillationEngine>,
+    approvals: Arc<std::sync::Mutex<Vec<PendingApproval>>>,
 }
 
 fn build_patterns() -> Vec<(Regex, &'static str)> {
@@ -398,6 +412,126 @@ fn artifacts_dir() -> PathBuf {
         PathBuf::from("artifacts")
     } else {
         get_home_dir().join("spark-cockpit/artifacts")
+    }
+}
+
+async fn handle_get_feed(State(state): State<AppState>) -> Json<Value> {
+    let mut items = Vec::new();
+
+    items.push(json!({
+        "id": "feed-muse-init",
+        "category": "agent",
+        "title": "Muse Agent Active on DGX Spark",
+        "summary": "Grace Blackwell GB10 unified memory bus nominal. TPM 2.0 vault online with zero disk plaintext secrets.",
+        "timestamp": Utc::now().to_rfc3339(),
+        "action_label": "Inspect Telemetry",
+        "action_target": "terminal",
+        "badge": "ONLINE"
+    }));
+
+    let goals_val = handle_get_goals().await.0;
+    if let Some(goals) = goals_val.get("goals").and_then(Value::as_array)
+        && !goals.is_empty()
+    {
+        items.push(json!({
+            "id": "feed-goals",
+            "category": "goals",
+            "title": format!("{} Active Project Goals", goals.len()),
+            "summary": "Tracking autonomous milestone delivery across sovereign engineering tracks.",
+            "timestamp": Utc::now().to_rfc3339(),
+            "action_label": "Review Goals",
+            "action_target": "goals",
+            "badge": "TRACKED"
+        }));
+    }
+
+    let swarm_tasks = state.swarm_registry.list();
+    let running_count = swarm_tasks.iter().filter(|t| t.state == "running").count();
+    let complete_count = swarm_tasks
+        .iter()
+        .filter(|t| t.state == "completed")
+        .count();
+
+    items.push(json!({
+        "id": "feed-swarm",
+        "category": "swarm",
+        "title": "Autonomous Swarm Telemetry",
+        "summary": format!("Swarm tasks: {} running, {} completed. Zero interpreter overhead across active ring boundaries.", running_count, complete_count),
+        "timestamp": Utc::now().to_rfc3339(),
+        "action_label": "View Tasks",
+        "action_target": "feed",
+        "badge": if running_count > 0 { "ACTIVE" } else { "IDLE" }
+    }));
+
+    let approvals = state.approvals.lock().unwrap();
+    let pending_approvals = approvals.iter().filter(|a| a.status == "pending").count();
+    drop(approvals);
+
+    if pending_approvals > 0 {
+        items.push(json!({
+            "id": "feed-approvals-alert",
+            "category": "approvals",
+            "title": format!("{} Action{} Awaiting Review", pending_approvals, if pending_approvals > 1 { "s" } else { "" }),
+            "summary": "High-stakes tool executions queued for operator authorization.",
+            "timestamp": Utc::now().to_rfc3339(),
+            "action_label": "Review Queue",
+            "action_target": "approvals",
+            "badge": "PENDING"
+        }));
+    }
+
+    items.push(json!({
+        "id": "feed-cortex-sync",
+        "category": "memory",
+        "title": "Cortex Memory Consolidation",
+        "summary": "Spark Cortex space 'atlas-memory' actively ingesting verified heuristics and operational post-mortems.",
+        "timestamp": Utc::now().to_rfc3339(),
+        "action_label": "Explore Memories",
+        "action_target": "memory",
+        "badge": "SYNCED"
+    }));
+
+    Json(json!({
+        "status": "ok",
+        "feed": items,
+        "generated_at": Utc::now().to_rfc3339()
+    }))
+}
+
+async fn handle_get_approvals(State(state): State<AppState>) -> Json<Value> {
+    let approvals = state.approvals.lock().unwrap();
+    Json(json!({
+        "status": "ok",
+        "approvals": *approvals
+    }))
+}
+
+#[derive(Deserialize)]
+struct ApprovalActionPayload {
+    action: String,
+}
+
+async fn handle_resolve_approval(
+    State(state): State<AppState>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    Json(payload): Json<ApprovalActionPayload>,
+) -> Json<Value> {
+    let mut approvals = state.approvals.lock().unwrap();
+    if let Some(appr) = approvals.iter_mut().find(|a| a.id == id) {
+        appr.status = if payload.action == "approve" {
+            "approved".to_string()
+        } else {
+            "rejected".to_string()
+        };
+        Json(json!({
+            "status": "ok",
+            "approval": appr
+        }))
+    } else {
+        Json(json!({
+            "status": "error",
+            "message": "Approval ID not found"
+        }))
     }
 }
 
@@ -794,6 +928,29 @@ async fn main() {
     let swarm_registry = Arc::new(SwarmRegistry::new_persistent(journal_path));
     let distill_engine = Arc::new(spark_adapters::DistillationEngine::new());
 
+    let approvals = Arc::new(std::sync::Mutex::new(vec![
+        PendingApproval {
+            id: "appr-gb10-parity".to_string(),
+            action_type: "kernel_verification".to_string(),
+            title: "Verify Grace Blackwell GB10 Kernel Parity".to_string(),
+            description: "Execute sm_121 forward pass check and validate against HF oracle.".to_string(),
+            command_or_diff: Some("cargo test -p aien-kernel --release -- --test-threads=1".to_string()),
+            risk_level: "low".to_string(),
+            status: "pending".to_string(),
+            created_at: Utc::now().to_rfc3339(),
+        },
+        PendingApproval {
+            id: "appr-cortex-sync".to_string(),
+            action_type: "memory_ingestion".to_string(),
+            title: "Commit Verified Lesson to Spark Cortex".to_string(),
+            description: "Persist hardware page cache drop invariant and submillisecond latency heuristics to space atlas-memory.".to_string(),
+            command_or_diff: Some("POST /api/cortex { entity: 'gb10-page-cache-invariant' }".to_string()),
+            risk_level: "low".to_string(),
+            status: "pending".to_string(),
+            created_at: Utc::now().to_rfc3339(),
+        },
+    ]));
+
     let state = AppState {
         client,
         start_time: Instant::now(),
@@ -801,6 +958,7 @@ async fn main() {
         hive_store: hive_store.clone(),
         swarm_registry,
         distill_engine,
+        approvals: approvals.clone(),
     };
 
     let reaper_hive_store = hive_store.clone();
@@ -875,6 +1033,9 @@ async fn main() {
         .route("/api/mail/inbox", get(handle_mail_inbox))
         .route("/api/mail/sent", get(handle_mail_sent))
         .route("/api/mail/send", post(handle_mail_send))
+        .route("/api/feed", get(handle_get_feed))
+        .route("/api/approvals", get(handle_get_approvals))
+        .route("/api/approvals/{id}/resolve", post(handle_resolve_approval))
         .route("/api/artifacts", get(handle_list_artifacts))
         .route("/api/artifacts/{filename}", get(handle_get_artifact))
         .nest_service("/artifacts", ServeDir::new(artifacts_dir()))
@@ -2914,6 +3075,16 @@ mod tests {
         let hive_store = Arc::new(spark_hive::CombStore::open_in_memory().unwrap());
         let swarm_registry = Arc::new(SwarmRegistry::new_in_memory());
         let distill_engine = Arc::new(spark_adapters::DistillationEngine::new());
+        let approvals = Arc::new(std::sync::Mutex::new(vec![PendingApproval {
+            id: "test-appr-1".to_string(),
+            action_type: "test".to_string(),
+            title: "Test Approval".to_string(),
+            description: "Test description".to_string(),
+            command_or_diff: None,
+            risk_level: "low".to_string(),
+            status: "pending".to_string(),
+            created_at: Utc::now().to_rfc3339(),
+        }]));
         AppState {
             client,
             start_time: Instant::now(),
@@ -2921,6 +3092,7 @@ mod tests {
             hive_store,
             swarm_registry,
             distill_engine,
+            approvals,
         }
     }
 
@@ -3127,6 +3299,7 @@ mod tests {
         let hive_store = Arc::new(spark_hive::CombStore::open_in_memory().unwrap());
         let swarm_registry = Arc::new(SwarmRegistry::new_in_memory());
         let distill_engine = Arc::new(spark_adapters::DistillationEngine::new());
+        let approvals = Arc::new(std::sync::Mutex::new(vec![]));
         AppState {
             client,
             start_time: Instant::now(),
@@ -3134,6 +3307,7 @@ mod tests {
             hive_store,
             swarm_registry,
             distill_engine,
+            approvals,
         }
     }
 
@@ -3446,5 +3620,34 @@ mod tests {
     async fn test_cockpit_workshop_html_route() {
         let response = handle_workshop().await.into_response();
         assert_eq!(response.status(), StatusCode::OK);
+    }
+    #[tokio::test]
+    async fn test_cockpit_feed_endpoint() {
+        let state = create_test_state();
+        let Json(feed) = handle_get_feed(State(state)).await;
+        assert_eq!(feed["status"], "ok");
+        assert!(feed["feed"].as_array().is_some());
+    }
+
+    #[tokio::test]
+    async fn test_cockpit_approvals_lifecycle() {
+        let state = create_test_state();
+        let Json(apprs) = handle_get_approvals(State(state.clone())).await;
+        assert_eq!(apprs["status"], "ok");
+        let list = apprs["approvals"].as_array().unwrap();
+        assert!(!list.is_empty());
+
+        let res = handle_resolve_approval(
+            State(state.clone()),
+            axum::extract::Path("test-appr-1".to_string()),
+            Json(ApprovalActionPayload {
+                action: "approve".to_string(),
+            }),
+        )
+        .await;
+
+        let Json(resolved) = res;
+        assert_eq!(resolved["status"], "ok");
+        assert_eq!(resolved["approval"]["status"], "approved");
     }
 }

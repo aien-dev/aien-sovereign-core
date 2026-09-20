@@ -4,7 +4,8 @@
 
 set -euo pipefail
 
-WORKSPACE_ROOT="${WORKSPACE_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+WORKSPACE_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 RESULTS_FILE="${WORKSPACE_ROOT}/tests_results.json"
 
 TIER_SELECTION="all"
@@ -181,5 +182,3 @@ else
         echo "Status: ALL TESTS PASSED."
     fi
 fi
-
-chmod +x "${WORKSPACE_ROOT}/scripts/e2e_distill_test.sh"
