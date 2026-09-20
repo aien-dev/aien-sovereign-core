@@ -2,8 +2,8 @@
 //! Dispatches single-token GEMV, batched GEMM, and Grouped Query Paged Attention
 //! directly to CUDA and cuBLAS 13 on Blackwell sm_121.
 
-use aien_kv_cache::KvLayoutDesc;
 use crate::backend::{ReferenceCpuBackend, TensorBackend};
+use aien_kv_cache::KvLayoutDesc;
 use std::ffi::CStr;
 use std::os::raw::{c_char, c_float, c_int};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -373,6 +373,42 @@ impl TensorBackend for BlackwellGb10Backend {
             return;
         }
 
+        let i32_blocks: Vec<i32> = block_ids.iter().map(|&b| b as i32).collect();
+        let context_lens = [context_len as i32];
+        self.paged_attention_batch(
+            out,
+            q,
+            pool,
+            &i32_blocks,
+            &context_lens,
+            block_ids.len(),
+            1,
+            layer_idx,
+            num_q_heads,
+            num_kv_heads,
+            head_dim,
+        );
+    }
+
+    fn paged_attention_batch(
+        &self,
+        out: &mut [f32],
+        q: &[f32],
+        pool: &aien_kv_cache::UnifiedKvTensorPool,
+        block_tables: &[i32],
+        context_lens: &[i32],
+        max_blocks_per_seq: usize,
+        num_seqs: usize,
+        layer_idx: usize,
+        num_q_heads: usize,
+        num_kv_heads: usize,
+        head_dim: usize,
+    ) {
+        if num_seqs == 0 || max_blocks_per_seq == 0 {
+            out.fill(0.0);
+            return;
+        }
+
         if self.available && pool.config().dtype == aien_kv_cache::KvDType::Bf16 {
             let q_bf16: Vec<u16> = q
                 .iter()
@@ -381,25 +417,20 @@ impl TensorBackend for BlackwellGb10Backend {
 
             let sm_scale = 1.0f32 / (head_dim as f32).sqrt();
             let mut out_bf16 = vec![0u16; out.len()];
-            let i32_block_tables: Vec<i32> = block_ids.iter().map(|&b| b as i32).collect();
-            let context_lens = [context_len as i32];
-            let max_blocks = block_ids.len();
 
             let layout_desc = pool.layout_desc();
-
-            let kv_slice = unsafe {
-                std::slice::from_raw_parts(pool.base_ptr(), pool.total_bytes())
-            };
+            let kv_slice =
+                unsafe { std::slice::from_raw_parts(pool.base_ptr(), pool.total_bytes()) };
 
             let res = self.paged_attention_bf16(
                 &q_bf16,
                 kv_slice,
                 layout_desc,
                 layer_idx,
-                &i32_block_tables,
-                &context_lens,
-                max_blocks,
-                1,
+                block_tables,
+                context_lens,
+                max_blocks_per_seq,
+                num_seqs,
                 num_q_heads,
                 num_kv_heads,
                 head_dim,
@@ -416,12 +447,14 @@ impl TensorBackend for BlackwellGb10Backend {
             self.fallback_counter.fetch_add(1, Ordering::Relaxed);
         }
 
-        self.fallback.paged_attention(
+        self.fallback.paged_attention_batch(
             out,
             q,
             pool,
-            block_ids,
-            context_len,
+            block_tables,
+            context_lens,
+            max_blocks_per_seq,
+            num_seqs,
             layer_idx,
             num_q_heads,
             num_kv_heads,

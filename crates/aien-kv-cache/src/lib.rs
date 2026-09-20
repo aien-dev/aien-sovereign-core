@@ -1174,6 +1174,10 @@ impl<B: aien_platform::UnifiedBuffer> AienKvManager<B> {
         self.tensor_pool.as_ref()
     }
 
+    pub fn tensor_pool_mut(&mut self) -> Option<&mut UnifiedKvTensorPool<B>> {
+        self.tensor_pool.as_mut()
+    }
+
     pub fn block_size(&self) -> usize {
         self.block_size
     }

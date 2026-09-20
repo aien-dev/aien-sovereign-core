@@ -6,6 +6,14 @@ authors = ["Drake Stapleton <drake.aien@proton.me>"]
 description = "Sovereign native memory and knowledge engine for Atlas and AIEN"
 license.workspace = true
 
+[lib]
+name = "cortex_rs"
+path = "src/lib.rs"
+
+[[bin]]
+name = "cortex-rs"
+path = "src/main.rs"
+
 [dependencies]
 axum = { version = "0.7", features = ["json", "macros", "tokio"] }
 tokio = { version = "1.37", features = ["full"] }

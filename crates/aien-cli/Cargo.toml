@@ -20,3 +20,10 @@ rustyline = "14"
 async-trait = "0.1.92"
 spark-hive = { path = "../spark-hive" }
 aien-inference-abi = { path = "../aien-inference-abi" }
+aien-kv-cache = { path = "../aien-kv-cache" }
+aien-scheduler = { path = "../aien-scheduler" }
+aien-runtime = { path = "../aien-runtime" }
+
+[dev-dependencies]
+tempfile = "3.10"
+

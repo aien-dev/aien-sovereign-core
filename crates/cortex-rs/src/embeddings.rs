@@ -12,6 +12,7 @@ pub fn embedding_to_bytes(v: &[f32]) -> Vec<u8> {
     bytes
 }
 
+#[allow(clippy::chunks_exact_to_as_chunks)]
 pub fn bytes_to_embedding(b: &[u8]) -> Vec<f32> {
     let mut v = Vec::with_capacity(b.len() / 4);
     for chunk in b.chunks_exact(4) {

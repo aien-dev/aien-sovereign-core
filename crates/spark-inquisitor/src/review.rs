@@ -87,8 +87,8 @@ mod tests {
             .contains(&"sovereign-audit-passed".to_string()));
         assert!(review.markdown.contains("Constitutional Diff Audit: PASS"));
         assert!(review.markdown.contains("Contributor Alignment Interview"));
-        assert!(!review.markdown.contains('—'));
-        assert!(!review.markdown.contains('–'));
+        assert!(!review.markdown.contains('\u{2014}'));
+        assert!(!review.markdown.contains('\u{2013}'));
     }
 
     #[test]
@@ -102,7 +102,7 @@ mod tests {
         assert!(review
             .markdown
             .contains("Constitutional Diff Audit: FAILED"));
-        assert!(!review.markdown.contains('—'));
-        assert!(!review.markdown.contains('–'));
+        assert!(!review.markdown.contains('\u{2014}'));
+        assert!(!review.markdown.contains('\u{2013}'));
     }
 }

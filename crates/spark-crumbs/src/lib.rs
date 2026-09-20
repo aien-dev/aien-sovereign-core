@@ -785,4 +785,15 @@ mod tests {
 
         let _ = fs::remove_dir_all(&temp_dir);
     }
+
+    #[test]
+    fn test_format_tui_card() {
+        let temp_dir = std::env::temp_dir().join(format!("test-tui-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&temp_dir).expect("create temp dir");
+
+        let card = format_dir_crumb_tui(&temp_dir);
+        assert!(card.contains("DIRECTORY CRUMB"));
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
 }

@@ -1,3 +1,13 @@
+fn default_harness_path() -> PathBuf {
+    if std::path::Path::new("schemas").is_dir() && std::path::Path::new("evals.json").is_file() {
+        return PathBuf::from(".");
+    }
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .unwrap_or_else(|_| ".".to_string());
+    PathBuf::from(home).join("workspace/spark-harness-data")
+}
+
 use clap::{Parser, Subcommand};
 use serde_json::{json, Value};
 use spark_harness::{HarnessEngine, WorkflowState};
@@ -10,19 +20,11 @@ use std::path::PathBuf;
     about = "Native Rust 5-Layer Change-Management Harness & MCP Server"
 )]
 struct Cli {
-    #[arg(long, default_value_os_t = default_harness_data_dir())]
+    #[arg(long, default_value_os_t = default_harness_path())]
     harness_path: PathBuf,
 
     #[command(subcommand)]
     command: Option<Commands>,
-}
-
-fn default_harness_data_dir() -> PathBuf {
-    let home = std::env::var("HOME")
-        .or_else(|_| std::env::var("USERPROFILE"))
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from("."));
-    home.join("workspace/spark-harness-data")
 }
 
 #[derive(Subcommand, Debug)]

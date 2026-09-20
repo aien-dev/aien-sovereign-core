@@ -1194,11 +1194,11 @@ mod tests {
         // Sovereign Voice Anti-Slop verification:
         // 1. Zero em dashes or en dashes
         assert!(
-            !plan.pr_body.contains("—"),
+            !plan.pr_body.contains('\u{2014}'),
             "PR body must not contain em dashes"
         );
         assert!(
-            !plan.pr_body.contains("–"),
+            !plan.pr_body.contains('\u{2013}'),
             "PR body must not contain en dashes"
         );
 

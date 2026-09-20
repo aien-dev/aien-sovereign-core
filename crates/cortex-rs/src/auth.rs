@@ -49,6 +49,7 @@ pub fn validate_auth_header(
     }
 }
 
+#[allow(clippy::result_large_err)]
 pub async fn auth_middleware(req: Request, next: Next) -> Result<Response, Response> {
     let expected = load_cortex_token();
     let auth_header = req

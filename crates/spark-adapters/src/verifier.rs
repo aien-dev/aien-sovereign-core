@@ -8,12 +8,12 @@ impl Verifier {
         let mut score: f32 = 1.0;
 
         // 1. Unslop and Tone Checks
-        if content.contains('\u{2014}') || content.contains('—') || content.contains("—") {
-            violations.push("Contains forbidden em dash (—)".to_string());
+        if content.contains('\u{2014}') {
+            violations.push("Contains forbidden em dash".to_string());
             score -= 0.25;
         }
-        if content.contains('\u{2013}') || content.contains('–') || content.contains("—") {
-            violations.push("Contains forbidden en dash (–)".to_string());
+        if content.contains('\u{2013}') {
+            violations.push("Contains forbidden en dash".to_string());
             score -= 0.15;
         }
 
@@ -187,7 +187,7 @@ mod tests {
 
     #[test]
     fn test_em_dash_detected() {
-        let text = "This module is fast — and very reliable.";
+        let text = "This module is fast \u{2014} and very reliable.";
         let out = Verifier::verify(text, VerificationStrategy::UnslopStrict);
         assert!(!out.passed);
         assert!(out.rule_violations.iter().any(|v| v.contains("em dash")));
