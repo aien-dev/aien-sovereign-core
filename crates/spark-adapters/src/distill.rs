@@ -57,7 +57,7 @@ impl DistillationEngine {
         }
         messages.push(ChatMessage {
             role: "user".to_string(),
-            content: task.prompt.clone(),
+            content: crate::vault::sanitize_outbound_prompt(&task.prompt),
             reasoning: None,
         });
 

@@ -1,4 +1,7 @@
 use crate::models::{VerificationOutcome, VerificationStrategy};
+use std::collections::HashSet;
+use std::io::Write;
+use std::process::{Command, Stdio};
 
 pub struct Verifier;
 
@@ -7,13 +10,13 @@ impl Verifier {
         let mut violations = Vec::new();
         let mut score: f32 = 1.0;
 
-        // 1. Unslop and Tone Checks
+        // 1. Unslop and Tone Invariants
         if content.contains('\u{2014}') {
-            violations.push("Contains forbidden em dash".to_string());
+            violations.push("Contains forbidden em dash (\\u{2014})".to_string());
             score -= 0.25;
         }
         if content.contains('\u{2013}') {
-            violations.push("Contains forbidden en dash".to_string());
+            violations.push("Contains forbidden en dash (\\u{2013})".to_string());
             score -= 0.15;
         }
 
@@ -50,12 +53,14 @@ impl Verifier {
             }
         }
 
-        // 2. Zero-Secret Leak Checks
+        // 2. Zero-Secret Leak Invariant
         let secret_signatures = [
             "-----BEGIN PRIVATE KEY-----",
             "-----BEGIN OPENSSH PRIVATE KEY-----",
             "sk-proj-",
+            "sk-ant-",
             "ghp_",
+            "gho_",
         ];
         for sig in secret_signatures {
             if content.contains(sig) {
@@ -68,13 +73,29 @@ impl Verifier {
         let mut compiler_output = None;
         match strategy {
             VerificationStrategy::CompilerCheck => {
-                if let Some(err) = Self::check_balanced_delimiters(content) {
+                let code_blocks = Self::extract_code_blocks(content);
+                let rust_code = code_blocks
+                    .into_iter()
+                    .find(|b| b.contains("fn ") || b.contains("struct ") || b.contains("impl "));
+
+                if let Some(code) = rust_code {
+                    match Self::verify_with_rustc(&code) {
+                        Ok(msg) => {
+                            compiler_output = Some(msg);
+                        }
+                        Err(err) => {
+                            violations.push(format!("Compiler error: {}", err));
+                            score -= 0.35;
+                            compiler_output = Some(err);
+                        }
+                    }
+                } else if let Some(err) = Self::check_balanced_delimiters(content) {
                     violations.push(format!("Code structure syntax error: {}", err));
                     score -= 0.3;
                     compiler_output = Some(err);
                 } else {
                     compiler_output =
-                        Some("Balanced delimiters and code syntax verified.".to_string());
+                        Some("Balanced delimiters and structure syntax verified.".to_string());
                 }
             }
             VerificationStrategy::JsonSchema => {
@@ -92,12 +113,13 @@ impl Verifier {
                 }
             }
             VerificationStrategy::UnslopStrict => {
-                // Strict zero-tolerance for any unslop violation
                 if !violations.is_empty() {
                     score = score.min(0.5);
                 }
             }
-            VerificationStrategy::DualConsensus => {}
+            VerificationStrategy::DualConsensus => {
+                // Handled during multi-candidate evaluation
+            }
         }
 
         score = score.clamp(0.0, 1.0);
@@ -110,6 +132,170 @@ impl Verifier {
             rule_violations: violations,
             compiler_output,
         }
+    }
+
+    /// Extract code blocks delimited by triple backticks.
+    pub fn extract_code_blocks(content: &str) -> Vec<String> {
+        let mut blocks = Vec::new();
+        let mut in_block = false;
+        let mut current_block = String::new();
+
+        for line in content.lines() {
+            if line.trim_start().starts_with("```") {
+                if in_block {
+                    blocks.push(current_block.clone());
+                    current_block.clear();
+                    in_block = false;
+                } else {
+                    in_block = true;
+                }
+            } else if in_block {
+                current_block.push_str(line);
+                current_block.push('\n');
+            }
+        }
+
+        if blocks.is_empty() && (content.contains("fn ") || content.contains("struct ")) {
+            blocks.push(content.to_string());
+        }
+
+        blocks
+    }
+
+    /// Verify a code snippet by invoking `rustc --crate-type lib --emit=metadata -`.
+    pub fn verify_with_rustc(code: &str) -> Result<String, String> {
+        let temp_dir = std::env::temp_dir();
+        let mut child = Command::new("rustc")
+            .args([
+                "--crate-type",
+                "lib",
+                "--emit=metadata",
+                "--crate-name",
+                "spark_verifier_eval",
+                "--out-dir",
+                temp_dir.to_str().unwrap_or("/tmp"),
+                "-",
+            ])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|e| format!("Failed to spawn rustc: {}", e))?;
+
+        if let Some(mut stdin) = child.stdin.take() {
+            let _ = stdin.write_all(code.as_bytes());
+        }
+
+        let output = child
+            .wait_with_output()
+            .map_err(|e| format!("Failed to wait for rustc: {}", e))?;
+
+        if output.status.success() {
+            Ok("Sandboxed rustc compilation check verified.".to_string())
+        } else {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let first_error = stderr
+                .lines()
+                .find(|l| l.contains("error[E") || l.starts_with("error:"))
+                .unwrap_or("syntax compilation error")
+                .to_string();
+            Err(first_error)
+        }
+    }
+
+    /// Compute Word-level Token Jaccard Similarity between two completions.
+    pub fn token_jaccard(a: &str, b: &str) -> f32 {
+        let words_a: HashSet<&str> = a.split_whitespace().collect();
+        let words_b: HashSet<&str> = b.split_whitespace().collect();
+
+        if words_a.is_empty() && words_b.is_empty() {
+            return 1.0;
+        }
+
+        let intersection = words_a.intersection(&words_b).count();
+        let union = words_a.union(&words_b).count();
+
+        if union == 0 {
+            0.0
+        } else {
+            intersection as f32 / union as f32
+        }
+    }
+
+    /// Compute Normalized Levenshtein similarity (1.0 = identical, 0.0 = completely different).
+    pub fn normalized_levenshtein(a: &str, b: &str) -> f32 {
+        let len_a = a.chars().count();
+        let len_b = b.chars().count();
+
+        if len_a == 0 && len_b == 0 {
+            return 1.0;
+        }
+        let max_len = len_a.max(len_b);
+        if max_len == 0 {
+            return 1.0;
+        }
+
+        let distance = Self::levenshtein_distance(a, b);
+        1.0 - (distance as f32 / max_len as f32)
+    }
+
+    fn levenshtein_distance(a: &str, b: &str) -> usize {
+        let b_chars: Vec<char> = b.chars().collect();
+        let mut prev: Vec<usize> = (0..=b_chars.len()).collect();
+        let mut curr = vec![0; b_chars.len() + 1];
+
+        for (i, ca) in a.chars().enumerate() {
+            curr[0] = i + 1;
+            for (j, &cb) in b_chars.iter().enumerate() {
+                let cost = if ca == cb { 0 } else { 1 };
+                curr[j + 1] = (prev[j + 1] + 1)
+                    .min(curr[j] + 1)
+                    .min(prev[j] + cost);
+            }
+            std::mem::swap(&mut prev, &mut curr);
+        }
+
+        prev[b_chars.len()]
+    }
+
+    /// Compute Normalized Longest Common Subsequence similarity.
+    pub fn normalized_lcs(a: &str, b: &str) -> f32 {
+        let a_chars: Vec<char> = a.chars().collect();
+        let b_chars: Vec<char> = b.chars().collect();
+
+        if a_chars.is_empty() && b_chars.is_empty() {
+            return 1.0;
+        }
+        let max_len = a_chars.len().max(b_chars.len());
+        if max_len == 0 {
+            return 1.0;
+        }
+
+        let mut prev = vec![0; b_chars.len() + 1];
+        let mut curr = vec![0; b_chars.len() + 1];
+
+        for ca in &a_chars {
+            for (j, cb) in b_chars.iter().enumerate() {
+                if ca == cb {
+                    curr[j + 1] = prev[j] + 1;
+                } else {
+                    curr[j + 1] = prev[j + 1].max(curr[j]);
+                }
+            }
+            std::mem::swap(&mut prev, &mut curr);
+        }
+
+        prev[b_chars.len()] as f32 / max_len as f32
+    }
+
+    /// Compute Hybrid Consensus Score:
+    /// 40% Normalized Levenshtein + 30% Normalized LCS + 30% Token Jaccard.
+    pub fn hybrid_consensus(a: &str, b: &str) -> f32 {
+        let lev = Self::normalized_levenshtein(a, b);
+        let lcs = Self::normalized_lcs(a, b);
+        let jac = Self::token_jaccard(a, b);
+
+        (0.40 * lev) + (0.30 * lcs) + (0.30 * jac)
     }
 
     fn check_balanced_delimiters(content: &str) -> Option<String> {
@@ -198,5 +384,29 @@ mod tests {
         let text = "Let us delve into the architecture.";
         let out = Verifier::verify(text, VerificationStrategy::UnslopStrict);
         assert!(out.rule_violations.iter().any(|v| v.contains("delve")));
+    }
+
+    #[test]
+    fn test_rustc_compilation_verification() {
+        let valid_code = "```rust\npub fn add(a: i32, b: i32) -> i32 { a + b }\n```";
+        let out = Verifier::verify(valid_code, VerificationStrategy::CompilerCheck);
+        assert!(out.passed);
+        assert_eq!(out.score, 1.0);
+
+        let invalid_code = "```rust\npub fn add(a: i32, b: i32) -> i32 { a + \"broken\" }\n```";
+        let out_inv = Verifier::verify(invalid_code, VerificationStrategy::CompilerCheck);
+        assert!(!out_inv.passed);
+        assert!(out_inv.rule_violations.iter().any(|v| v.contains("Compiler error")));
+    }
+
+    #[test]
+    fn test_hybrid_consensus_scoring() {
+        let a = "fn reverse(s: &mut [i32]) { s.reverse(); }";
+        let b = "fn reverse(s: &mut [i32]) { s.reverse(); }";
+        let c = "pub fn sort(s: &mut [i32]) { s.sort(); }";
+
+        assert_eq!(Verifier::hybrid_consensus(a, b), 1.0);
+        let sim = Verifier::hybrid_consensus(a, c);
+        assert!(sim > 0.0 && sim < 1.0);
     }
 }

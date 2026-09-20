@@ -131,6 +131,29 @@ impl AdapterRouter {
                 requires_key: true,
                 is_resident: false,
             },
+            // 9. Consumer Web Sessions
+            AdapterSpec {
+                id: "chatgpt/web-plus".to_string(),
+                name: "ChatGPT Plus (Web Session)".to_string(),
+                provider: ProviderType::ChatGPTWeb,
+                endpoint: ProviderType::ChatGPTWeb.default_endpoint().to_string(),
+                model_id: "gpt-4o-web".to_string(),
+                context_length: 128000,
+                is_available: is_secret_present("CHATGPT_SESSION_TOKEN"),
+                requires_key: true,
+                is_resident: false,
+            },
+            AdapterSpec {
+                id: "claude/web-pro".to_string(),
+                name: "Claude Pro (Web Session)".to_string(),
+                provider: ProviderType::ClaudeWeb,
+                endpoint: ProviderType::ClaudeWeb.default_endpoint().to_string(),
+                model_id: "claude-3-7-sonnet-web".to_string(),
+                context_length: 200000,
+                is_available: is_secret_present("CLAUDE_SESSION_KEY"),
+                requires_key: true,
+                is_resident: false,
+            },
         ]
     }
 
@@ -222,6 +245,24 @@ impl AdapterRouter {
             return (
                 ProviderType::DeepSeek,
                 ProviderType::DeepSeek.default_endpoint().to_string(),
+                rest.to_string(),
+                key,
+            );
+        }
+        if let Some(rest) = trimmed.strip_prefix("chatgpt/") {
+            let key = resolve_secret("CHATGPT_SESSION_TOKEN");
+            return (
+                ProviderType::ChatGPTWeb,
+                ProviderType::ChatGPTWeb.default_endpoint().to_string(),
+                rest.to_string(),
+                key,
+            );
+        }
+        if let Some(rest) = trimmed.strip_prefix("claude-web/") {
+            let key = resolve_secret("CLAUDE_SESSION_KEY");
+            return (
+                ProviderType::ClaudeWeb,
+                ProviderType::ClaudeWeb.default_endpoint().to_string(),
                 rest.to_string(),
                 key,
             );
