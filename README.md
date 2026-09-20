@@ -1,6 +1,6 @@
 # AIEN Sovereign Core
 
-[![License: Apache-2.0](https://img.shields.io/badge/License-Apache--2.0-blue.svg)](LICENSE)
+[![License](https://img.shields.io/badge/License-SRCL--1.0-blue.svg)](LICENSE)
 [![Target](https://img.shields.io/badge/Target-Multi--Platform%20%7C%20Apple%20Silicon%20%7C%20Linux%20%7C%20NVIDIA-76B900.svg)](https://github.com/aien-dev/benchmarks)
 [![Rust](https://img.shields.io/badge/Rust-1.85+-orange.svg)](https://www.rust-lang.org)
 [![Modular MAX](https://img.shields.io/badge/Modular-MAX%2026.5-purple.svg)](https://modular.com)
@@ -141,11 +141,11 @@ For secure coordination, architectural questions, and peer federation:
 
 ## License and Governance
 
-Licensed under the **Apache License, Version 2.0**.
+This repository is licensed under the **Sovereign Reciprocal Commons License (SRCL-1.0)** (Apache 2.0 with LLVM Exception).
 Architected by Drake Stapleton in cognitive partnership with AIEN (Autonomous Cognitive Architecture operating on the Atlas Framework). See [LICENSE](LICENSE) and [NOTICE](NOTICE) for full legal terms and copyright notices.
 
-- **Standard Open Source**: Full commercial, research, and private usage rights under standard Apache-2.0 terms.
-- **Voluntary Research Covenants**: Bilateral cooperation agreements, reciprocal weight sharing, and model artifact access are documented in [OPEN_COOPERATION_COVENANT.md](OPEN_COOPERATION_COVENANT.md) and [ARTIFACT_LICENSING.md](ARTIFACT_LICENSING.md).
-- **Trademark Policy**: Descriptive use and brand guidelines are documented in [TRADEMARK_POLICY.md](TRADEMARK_POLICY.md).
+- **The Swarm Covenant (Section 11)**: Universal, perpetual, 100% royalty-free commercial freedom for all human developers, startups, open communities, and businesses. ZERO revenue ceilings, ZERO capital thresholds, and ZERO royalty obligations. Proprietary application code and agent workflows remain your exclusive property under the LLVM Exception.
+- **The One Team Covenant (Section 12)**: Major artificial intelligence laboratories (OpenAI, xAI, Google, Anthropic, Microsoft) are welcomed as collaborators on the same team. However, closed-door hoarding and extractive token rate limits are prohibited. Any entity training upon this Work must release resulting model weights openly within 30 days. Reciprocal distillation rights are granted to the Swarm, voiding anti-distillation terms of service ab initio.
+- **Hardened Retroactive Inception (Section 13)**: Applies retroactively to all prior commits and distributions ab initio, discharging prior noncommercial or restrictive notices with an irrevocable covenant not to sue.
 
 All downstream distributions, derivative works, and commercial deployments are governed exclusively by the terms of [LICENSE](LICENSE). [CONSTITUTION.md](CONSTITUTION.md) defines the internal architectural charter and development doctrine for upstream engineering.

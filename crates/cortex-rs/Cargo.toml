@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 authors = ["Drake Stapleton <drake.aien@proton.me>"]
 description = "Sovereign native memory and knowledge engine for Atlas and AIEN"
-license = "Apache-2.0"
+license.workspace = true
 
 [dependencies]
 axum = { version = "0.7", features = ["json", "macros", "tokio"] }

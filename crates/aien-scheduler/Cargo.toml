@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 authors = ["Drake Stapleton <drake.aien@proton.me>"]
 description = "Native continuous batching LLM scheduler with chunked prefill"
-license = "Apache-2.0"
+license.workspace = true
 
 [dependencies]
 aien-inference-abi = { path = "../aien-inference-abi" }

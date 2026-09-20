@@ -1,5 +1,5 @@
 [package]
-license = "Apache-2.0"
+license.workspace = true
 name = "spark-hive"
 version = "0.1.0"
 edition = "2024"

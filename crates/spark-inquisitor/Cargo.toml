@@ -4,7 +4,7 @@ version = "0.2.0"
 edition = "2021"
 authors = ["Drake Stapleton <drake.aien@proton.me>"]
 description = "Autonomous Sovereign Inquisitor & Pull Request Alignment Gatekeeper"
-license = "Apache-2.0"
+license.workspace = true
 
 [[bin]]
 name = "spark-inquisitor"
