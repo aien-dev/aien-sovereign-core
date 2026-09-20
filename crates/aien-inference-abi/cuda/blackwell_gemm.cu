@@ -185,6 +185,21 @@ int blackwell_gemv_f32(const float *x, const float *weight, float *out, int in_d
     return blackwell_gemm_f32(x, weight, out, 1, in_dim, out_dim);
 }
 
+void* blackwell_allocate_managed(size_t bytes) {
+    void* ptr = NULL;
+    cudaError_t err = cudaMallocManaged(&ptr, bytes, cudaMemAttachGlobal);
+    if (err != cudaSuccess) {
+        return NULL;
+    }
+    return ptr;
+}
+
+void blackwell_free_managed(void* ptr) {
+    if (ptr != NULL) {
+        cudaFree(ptr);
+    }
+}
+
 void blackwell_gemm_destroy(void) {
     std::lock_guard<std::recursive_mutex> lock(g_backend_mutex);
     for (auto &pair : g_weight_cache) {

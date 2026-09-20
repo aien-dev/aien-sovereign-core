@@ -40,6 +40,8 @@ extern "C" {
         sm_scale: c_float,
         out: *mut u16,
     ) -> c_int;
+    fn blackwell_allocate_managed(bytes: usize) -> *mut std::ffi::c_void;
+    fn blackwell_free_managed(ptr: *mut std::ffi::c_void);
     fn blackwell_gemm_destroy();
 }
 
@@ -71,6 +73,14 @@ impl BlackwellGb10Backend {
         }
 
         if available {
+            unsafe fn custom_alloc(bytes: usize) -> *mut u8 {
+                blackwell_allocate_managed(bytes) as *mut u8
+            }
+            unsafe fn custom_free(ptr: *mut u8, _bytes: usize) {
+                blackwell_free_managed(ptr as *mut std::ffi::c_void);
+            }
+            aien_kv_cache::register_unified_allocator(custom_alloc, custom_free);
+
             eprintln!(
                 "BlackwellGb10Backend: Successfully bound to device '{}' (sm_121 cuBLAS 13)",
                 device_name
@@ -268,6 +278,76 @@ impl TensorBackend for BlackwellGb10Backend {
             .gqa_attention(out, q, k_cache, v_cache, seq_len, num_q_heads, num_kv_heads, head_dim);
     }
 
+    fn paged_attention(
+        &self,
+        out: &mut [f32],
+        q: &[f32],
+        pool: &aien_kv_cache::UnifiedKvTensorPool,
+        block_ids: &[usize],
+        context_len: usize,
+        layer_idx: usize,
+        num_q_heads: usize,
+        num_kv_heads: usize,
+        head_dim: usize,
+    ) {
+        if context_len == 0 || block_ids.is_empty() {
+            out.fill(0.0);
+            return;
+        }
+
+        if self.available && pool.config().dtype == aien_kv_cache::KvDType::Bf16 {
+            let q_bf16: Vec<u16> = q.iter().map(|&v| {
+                let bits = v.to_bits();
+                (bits >> 16) as u16
+            }).collect();
+
+            let sm_scale = 1.0f32 / (head_dim as f32).sqrt();
+            let mut out_bf16 = vec![0u16; out.len()];
+            let i32_block_tables: Vec<i32> = block_ids.iter().map(|&b| b as i32).collect();
+            let context_lens = [context_len as i32];
+            let max_blocks = block_ids.len();
+
+            let k_ptr = pool.base_ptr() as *const u16;
+            let v_ptr = pool.base_ptr() as *const u16;
+
+            let res = self.paged_attention_bf16(
+                &q_bf16,
+                unsafe { std::slice::from_raw_parts(k_ptr, pool.total_bytes() / 2) },
+                unsafe { std::slice::from_raw_parts(v_ptr, pool.total_bytes() / 2) },
+                &i32_block_tables,
+                &context_lens,
+                max_blocks,
+                1,
+                num_q_heads,
+                num_kv_heads,
+                head_dim,
+                sm_scale,
+                &mut out_bf16,
+            );
+
+            if res.is_ok() {
+                for i in 0..out.len() {
+                    let bits = (out_bf16[i] as u32) << 16;
+                    out[i] = f32::from_bits(bits);
+                }
+                return;
+            }
+            self.fallback_counter.fetch_add(1, Ordering::Relaxed);
+        }
+
+        self.fallback.paged_attention(
+            out,
+            q,
+            pool,
+            block_ids,
+            context_len,
+            layer_idx,
+            num_q_heads,
+            num_kv_heads,
+            head_dim,
+        );
+    }
+
     fn compute_logits(
         &self,
         logits: &mut [f32],
@@ -399,5 +479,10 @@ mod tests {
         );
 
         assert!(res.is_ok(), "paged_attention_bf16 failed: {:?}", res.err());
+        assert_eq!(
+            out[0], 0x3F80,
+            "Expected 1.0 (0x3F80) in BF16, got 0x{:04x}",
+            out[0]
+        );
     }
 }

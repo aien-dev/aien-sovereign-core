@@ -200,17 +200,25 @@ impl NativeTransformerBackend {
         let parent_seq = self
             .sequences
             .get(&parent.0)
-            .ok_or_else(|| format!("Parent context {} not found", parent.0))?
-            .clone();
+            .ok_or_else(|| format!("Parent context {} not found", parent.0))?;
 
         let child_id = NEXT_HANDLE_ID.fetch_add(1, Ordering::SeqCst);
         let child = BranchHandle(child_id);
+
+        let child_seq = if self.kv_manager.is_some() {
+            SequenceState {
+                tokens: parent_seq.tokens.clone(),
+                layers: Vec::new(),
+            }
+        } else {
+            parent_seq.clone()
+        };
 
         if let Some(kv_mgr) = &self.kv_manager {
             kv_mgr.write().fork_context(parent.0, child.0)?;
         }
 
-        self.sequences.insert(child.0, parent_seq);
+        self.sequences.insert(child.0, child_seq);
         Ok(child)
     }
 
@@ -348,8 +356,6 @@ impl NativeTransformerBackend {
         };
 
         for (layer_idx, layer_w) in weights.layers.iter().enumerate() {
-            let kv_cache = &mut seq_state.layers[layer_idx];
-
             backend.rmsnorm(&mut x_norm, &x, &layer_w.input_layernorm, eps);
             backend.matmul_vec(&mut q, &x_norm, &layer_w.q_proj, q_dim, hidden_dim);
             backend.matmul_vec(&mut k, &x_norm, &layer_w.k_proj, kv_dim, hidden_dim);
@@ -368,27 +374,23 @@ impl NativeTransformerBackend {
             if let (Some((block_id, slot)), Some(mgr)) = (block_slot, kv_manager) {
                 let _ = mgr.write().write_explicit_token_kv(block_id, layer_idx, slot, &k, &v);
 
-                let mut flat_k = Vec::new();
-                let mut flat_v = Vec::new();
-                let _ = mgr.read().gather_sequence_layer_kv(seq_id, layer_idx, &mut flat_k, &mut flat_v);
-
-                kv_cache.cached_k.push(k.clone());
-                kv_cache.cached_v.push(v.clone());
-                kv_cache.flat_k = flat_k.clone();
-                kv_cache.flat_v = flat_v.clone();
-
-                let seq_len = kv_cache.cached_k.len();
-                backend.gqa_attention(
-                    &mut attn_out,
-                    &q,
-                    &flat_k,
-                    &flat_v,
-                    seq_len,
-                    num_heads,
-                    num_kv_heads,
-                    head_dim,
-                );
+                let mgr_read = mgr.read();
+                if let (Some(pool), Some(table)) = (mgr_read.tensor_pool(), mgr_read.get_block_table(seq_id)) {
+                    let total_tokens = table.total_tokens;
+                    backend.paged_attention(
+                        &mut attn_out,
+                        &q,
+                        pool,
+                        &table.block_ids,
+                        total_tokens,
+                        layer_idx,
+                        num_heads,
+                        num_kv_heads,
+                        head_dim,
+                    );
+                }
             } else {
+                let kv_cache = &mut seq_state.layers[layer_idx];
                 kv_cache.cached_k.push(k.clone());
                 kv_cache.cached_v.push(v.clone());
                 kv_cache.flat_k.extend_from_slice(&k);
@@ -603,6 +605,10 @@ impl NativeTransformerBackend {
                     states[t][i] += mlp_t[i];
                 }
             }
+        }
+
+        if kv_manager.is_some() {
+            seq_state.layers.clear();
         }
 
         let last_x = &states[n - 1];
