@@ -102,7 +102,7 @@ impl DistillationEngine {
             self.router.resolve_route(&student_target);
 
         let s0 = Instant::now();
-        if let Ok((student_content, student_reasoning, student_tokens)) = call_provider_unary(
+        match call_provider_unary(
             &self.client,
             student_provider,
             &student_endpoint,
@@ -113,80 +113,132 @@ impl DistillationEngine {
         )
         .await
         {
-            let student_duration = s0.elapsed().as_millis() as u64;
-            let student_verif = Verifier::verify(&student_content, task.verification_strategy);
+            Ok((student_content, student_reasoning, student_tokens)) => {
+                let student_duration = s0.elapsed().as_millis() as u64;
+                let student_verif = Verifier::verify(&student_content, task.verification_strategy);
 
-            student_rollout = Some(Rollout {
-                provider: student_provider,
-                model_id: student_target.clone(),
-                content: student_content,
-                reasoning: student_reasoning,
-                duration_ms: student_duration,
-                token_count: student_tokens,
-                verification: student_verif,
-            });
+                student_rollout = Some(Rollout {
+                    provider: student_provider,
+                    model_id: student_target.clone(),
+                    content: student_content,
+                    reasoning: student_reasoning,
+                    duration_ms: student_duration,
+                    token_count: student_tokens,
+                    verification: student_verif,
+                });
+            }
+            Err(e) => {
+                eprintln!(
+                    "Warning: Student rollout failed ({}): {}",
+                    student_target, e
+                );
+            }
         }
 
-        // 3. Selection & Preference Logic
+        // 3. Selection and Preference Logic
+        #[derive(Copy, Clone, PartialEq)]
+        enum ChosenSeat {
+            Teacher,
+            Student,
+        }
+
+        let mut chosen_seat = ChosenSeat::Teacher;
         let mut chosen = teacher_content.clone();
         let mut chosen_reasoning = teacher_reasoning.clone();
+        let mut chosen_score = teacher_rollout.verification.score;
+        let mut chosen_passed = teacher_rollout.verification.passed;
         let mut rejected = None;
         let mut rejected_reasoning = None;
         let mut preference_delta = 0.0;
 
         if let Some(ref s_roll) = student_rollout {
-            preference_delta = teacher_rollout.verification.score - s_roll.verification.score;
-            if teacher_rollout.verification.passed
-                && (!s_roll.verification.passed
-                    || teacher_rollout.verification.score >= s_roll.verification.score)
-            {
-                chosen = teacher_content.clone();
-                chosen_reasoning = teacher_reasoning.clone();
-                rejected = Some(s_roll.content.clone());
-                rejected_reasoning = s_roll.reasoning.clone();
-            } else if s_roll.verification.passed && !teacher_rollout.verification.passed {
+            let t_pass = teacher_rollout.verification.passed;
+            let s_pass = s_roll.verification.passed;
+            let t_score = teacher_rollout.verification.score;
+            let s_score = s_roll.verification.score;
+
+            if s_pass && (!t_pass || s_score > t_score) {
+                // Student strictly outperformed teacher
+                chosen_seat = ChosenSeat::Student;
                 chosen = s_roll.content.clone();
                 chosen_reasoning = s_roll.reasoning.clone();
+                chosen_score = s_score;
+                chosen_passed = s_pass;
                 rejected = Some(teacher_content.clone());
                 rejected_reasoning = teacher_reasoning.clone();
-            } else {
+                preference_delta = s_score - t_score;
+            } else if t_pass && (!s_pass || t_score > s_score) {
+                // Teacher strictly outperformed student
+                chosen_seat = ChosenSeat::Teacher;
                 chosen = teacher_content.clone();
+                chosen_reasoning = teacher_reasoning.clone();
+                chosen_score = t_score;
+                chosen_passed = t_pass;
                 rejected = Some(s_roll.content.clone());
+                rejected_reasoning = s_roll.reasoning.clone();
+                preference_delta = t_score - s_score;
+            } else {
+                // Tie or both failed: default to teacher solution, record exact delta
+                chosen_seat = ChosenSeat::Teacher;
+                chosen = teacher_content.clone();
+                chosen_reasoning = teacher_reasoning.clone();
+                chosen_score = t_score;
+                chosen_passed = t_pass;
+                rejected = Some(s_roll.content.clone());
+                rejected_reasoning = s_roll.reasoning.clone();
+                preference_delta = (t_score - s_score).abs();
             }
         }
 
         // 4. Persist to SFT and DPO Datasets
+        // Skip DPO pair generation if preference delta is zero or content identical
+        let valid_dpo_rejected = rejected
+            .as_deref()
+            .filter(|rej| preference_delta > 0.0 && *rej != chosen.as_str());
+
         self.persist_training_pair(
             &task,
             &chosen,
             chosen_reasoning.as_deref(),
-            rejected.as_deref(),
+            valid_dpo_rejected,
         )?;
 
         // 5. Commit Durable Knowledge to Spark Cortex if Verified
         let mut durable_committed = false;
         let mut cortex_id = None;
 
-        if task.commit_to_cortex
-            && teacher_rollout.verification.passed
-            && teacher_rollout.verification.score >= 0.85
-        {
+        if task.commit_to_cortex && chosen_passed && chosen_score >= 0.85 {
             let entity_name = format!("distill_lesson:{}_{}", task.id, Utc::now().timestamp());
             let canonical = format!("distill_{}", task.id.replace('-', "_"));
+            let source_label = match chosen_seat {
+                ChosenSeat::Teacher => format!("Teacher Oracle ({})", task.teacher_model),
+                ChosenSeat::Student => format!("Student Model ({})", student_target),
+            };
             let content_summary = format!(
-                "Distilled from Teacher Oracle {}. Task: {}. Reasoning: {}. Verified Solution: {}",
-                task.teacher_model,
+                "Distilled from {}. Task: {}. Reasoning: {}. Verified Solution: {}",
+                source_label,
                 task.prompt,
-                teacher_reasoning.as_deref().unwrap_or("<direct>"),
+                chosen_reasoning.as_deref().unwrap_or("<direct>"),
                 chosen
             );
 
-            if let Ok(id) = self
-                .commit_to_cortex(&entity_name, &canonical, &content_summary)
+            match self
+                .commit_to_cortex(
+                    &entity_name,
+                    &canonical,
+                    &content_summary,
+                    &task.id,
+                    chosen_score as f64,
+                )
                 .await
             {
-                durable_committed = true;
-                cortex_id = Some(id);
+                Ok(id) => {
+                    durable_committed = true;
+                    cortex_id = Some(id);
+                }
+                Err(e) => {
+                    eprintln!("Warning: Cortex commit failed: {}", e);
+                }
             }
         }
 
@@ -281,22 +333,41 @@ impl DistillationEngine {
         name: &str,
         canonical_name: &str,
         content: &str,
+        task_id: &str,
+        confidence: f64,
     ) -> Result<String, String> {
-        let home = std::env::var("HOME")
-            .or_else(|_| std::env::var("USERPROFILE"))
-            .map(PathBuf::from)
-            .unwrap_or_else(|_| PathBuf::from("."));
-        let token_path = home.join(".config/cortex/token");
-        let token = std::fs::read_to_string(token_path)
-            .map(|s| s.trim().to_string())
+        let token = std::env::var("CORTEX_TOKEN")
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+            .or_else(|| {
+                let home = std::env::var("HOME")
+                    .or_else(|_| std::env::var("USERPROFILE"))
+                    .map(PathBuf::from)
+                    .unwrap_or_else(|_| PathBuf::from("."));
+                let token_path = home.join(".config/cortex/token");
+                std::fs::read_to_string(token_path)
+                    .map(|s| s.trim().to_string())
+                    .ok()
+            })
             .unwrap_or_default();
 
-        let url = format!("{}/spaces/atlas-memory/entities", self.cortex_endpoint);
+        let endpoint =
+            std::env::var("CORTEX_ENDPOINT").unwrap_or_else(|_| self.cortex_endpoint.clone());
+        let url = format!("{}/api/cortex/write", endpoint);
+
         let payload = json!({
-            "name": name,
-            "type": "learned_procedure",
-            "canonicalName": canonical_name,
-            "content": content
+            "kind": "entity",
+            "value": {
+                "canonicalName": canonical_name,
+                "entityType": "learned_procedure",
+                "content": content,
+                "aliases": [name],
+                "confidence": confidence,
+                "metadata": {
+                    "source": "spark-distill",
+                    "taskId": task_id
+                }
+            }
         });
 
         let res = self
@@ -309,15 +380,24 @@ impl DistillationEngine {
             .map_err(|e| format!("Cortex request error: {}", e))?;
 
         if !res.status().is_success() {
-            return Err(format!("Cortex returned status {}", res.status()));
+            let status = res.status();
+            let body = res.text().await.unwrap_or_default();
+            return Err(format!("Cortex returned status {}: {}", status, body));
         }
 
-        let body: serde_json::Value = res.json().await.unwrap_or_default();
+        let body: serde_json::Value = res
+            .json()
+            .await
+            .map_err(|e| format!("Failed to parse Cortex response JSON: {}", e))?;
+
         let entity_id = body
-            .get("id")
+            .pointer("/receipt/targetId")
+            .or_else(|| body.pointer("/receipt/id"))
+            .or_else(|| body.pointer("/receipt/target_id"))
             .and_then(|v| v.as_str())
-            .unwrap_or(name)
+            .unwrap_or(canonical_name)
             .to_string();
+
         Ok(entity_id)
     }
 }
