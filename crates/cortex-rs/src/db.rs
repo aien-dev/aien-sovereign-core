@@ -591,6 +591,122 @@ impl Database {
 
         Ok(())
     }
+
+    pub fn count_entities(&self, space: Option<&str>) -> Result<i64> {
+        let conn = self.conn.lock().unwrap();
+        let count: i64 = if let Some(sp) = space {
+            conn.query_row("SELECT COUNT(*) FROM entities WHERE space_slug = ?1 AND retracted = 0", params![sp], |r| r.get(0))?
+        } else {
+            conn.query_row("SELECT COUNT(*) FROM entities WHERE retracted = 0", [], |r| r.get(0))?
+        };
+        Ok(count)
+    }
+
+    pub fn explain_node(&self, target: &str) -> Result<(Option<CortexEntity>, Vec<CortexEntity>)> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, space_id, space_slug, entity_type, canonical_name, content, aliases_json, metadata_json, confidence, revision, retracted, valid_from, valid_to, created_at
+             FROM entities
+             WHERE (id = ?1 OR canonical_name = ?1 OR content LIKE '%' || ?1 || '%') AND retracted = 0
+             LIMIT 1"
+        )?;
+
+        let mut main_entity = None;
+        let mut rows = stmt.query(params![target])?;
+        if let Some(row) = rows.next()? {
+            let aliases_str: String = row.get(6)?;
+            let meta_str: String = row.get(7)?;
+            main_entity = Some(CortexEntity {
+                id: row.get(0)?,
+                space_id: row.get(1)?,
+                space_slug: row.get(2)?,
+                entity_type: row.get(3)?,
+                canonical_name: row.get(4)?,
+                content: row.get(5)?,
+                aliases: serde_json::from_str(&aliases_str).unwrap_or_default(),
+                metadata: serde_json::from_str(&meta_str).unwrap_or_else(|_| serde_json::json!({})),
+                confidence: row.get(8)?,
+                revision: row.get(9)?,
+                retracted: row.get::<_, i64>(10)? != 0,
+                valid_from: row.get(11)?,
+                valid_to: row.get(12)?,
+                created_at: row.get(13)?,
+            });
+        }
+
+        let mut neighbors = Vec::new();
+        if let Some(ref m) = main_entity {
+            let mut n_stmt = conn.prepare(
+                "SELECT id, space_id, space_slug, entity_type, canonical_name, content, aliases_json, metadata_json, confidence, revision, retracted, valid_from, valid_to, created_at
+                 FROM entities
+                 WHERE id != ?1 AND space_slug = ?2 AND retracted = 0
+                 ORDER BY created_at DESC
+                 LIMIT 5"
+            )?;
+            let n_rows = n_stmt.query_map(params![m.id, m.space_slug], |row| {
+                let aliases_str: String = row.get(6)?;
+                let meta_str: String = row.get(7)?;
+                Ok(CortexEntity {
+                    id: row.get(0)?,
+                    space_id: row.get(1)?,
+                    space_slug: row.get(2)?,
+                    entity_type: row.get(3)?,
+                    canonical_name: row.get(4)?,
+                    content: row.get(5)?,
+                    aliases: serde_json::from_str(&aliases_str).unwrap_or_default(),
+                    metadata: serde_json::from_str(&meta_str).unwrap_or_else(|_| serde_json::json!({})),
+                    confidence: row.get(8)?,
+                    revision: row.get(9)?,
+                    retracted: row.get::<_, i64>(10)? != 0,
+                    valid_from: row.get(11)?,
+                    valid_to: row.get(12)?,
+                    created_at: row.get(13)?,
+                })
+            })?;
+            for r in n_rows {
+                neighbors.push(r?);
+            }
+        }
+
+        Ok((main_entity, neighbors))
+    }
+
+    pub fn find_path_nodes(&self, from: &str, to: &str) -> Result<(Option<CortexEntity>, Option<CortexEntity>)> {
+        let (a, _) = self.explain_node(from)?;
+        let (b, _) = self.explain_node(to)?;
+        Ok((a, b))
+    }
+
+    pub fn import_brain_json(&self, path: &std::path::Path) -> Result<usize> {
+        let data = std::fs::read_to_string(path).map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+        let store: crate::models::BrainJsonStore = serde_json::from_str(&data).map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+        let mut count = 0;
+        for node in store.nodes {
+            let entity = CortexEntity {
+                id: node.id,
+                space_id: "sp-atlas-memory".to_string(),
+                space_slug: "atlas-memory".to_string(),
+                entity_type: "lesson".to_string(),
+                canonical_name: format!("brain:{}", node.key),
+                content: node.text,
+                aliases: Vec::new(),
+                metadata: serde_json::json!({
+                    "imported_from": "atlas-brain",
+                    "original_key": node.key,
+                    "links": node.links,
+                }),
+                confidence: 1.0,
+                revision: 1,
+                retracted: false,
+                valid_from: None,
+                valid_to: None,
+                created_at: node.created_at.unwrap_or_else(|| chrono::Utc::now().to_rfc3339()),
+            };
+            let _ = self.import_entity_raw(&entity, None);
+            count += 1;
+        }
+        Ok(count)
+    }
 }
 
 #[cfg(test)]

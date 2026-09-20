@@ -194,3 +194,55 @@ pub struct TraversePayload {
     pub subject_id: String,
     pub space: Option<String>,
 }
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct BrainQueryPayload {
+    #[serde(default)]
+    pub q: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct BrainRememberPayload {
+    #[serde(default)]
+    pub q: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct BrainExplainPayload {
+    #[serde(default)]
+    pub node: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct BrainPathPayload {
+    #[serde(default)]
+    pub from: String,
+    #[serde(default)]
+    pub to: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct BrainResult {
+    pub brief: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct BrainResponse {
+    pub result: BrainResult,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct BrainJsonNode {
+    pub id: String,
+    pub key: String,
+    pub text: String,
+    pub created_at: Option<String>,
+    #[serde(default)]
+    pub links: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct BrainJsonStore {
+    #[serde(default)]
+    pub nodes: Vec<BrainJsonNode>,
+}
