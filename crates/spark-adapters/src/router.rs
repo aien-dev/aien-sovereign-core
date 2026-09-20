@@ -139,7 +139,8 @@ impl AdapterRouter {
                 endpoint: ProviderType::ChatGPTWeb.default_endpoint().to_string(),
                 model_id: "gpt-4o-web".to_string(),
                 context_length: 128000,
-                is_available: is_secret_present("CHATGPT_SESSION_TOKEN"),
+                is_available: is_secret_present("CHATGPT_SESSION_TOKEN")
+                    || is_secret_present("OPENAI_WEB_TOKEN"),
                 requires_key: true,
                 is_resident: false,
             },
@@ -150,7 +151,8 @@ impl AdapterRouter {
                 endpoint: ProviderType::ClaudeWeb.default_endpoint().to_string(),
                 model_id: "claude-3-7-sonnet-web".to_string(),
                 context_length: 200000,
-                is_available: is_secret_present("CLAUDE_SESSION_KEY"),
+                is_available: is_secret_present("CLAUDE_SESSION_KEY")
+                    || is_secret_present("CLAUDE_WEB_SESSION_KEY"),
                 requires_key: true,
                 is_resident: false,
             },
@@ -160,8 +162,9 @@ impl AdapterRouter {
     pub fn discover_adapters(&self) -> Vec<AdapterSpec> {
         let mut list = self.catalog.clone();
         for spec in &mut list {
-            if let Some(key_name) = spec.provider.key_name() {
-                spec.is_available = is_secret_present(key_name);
+            let aliases = spec.provider.key_aliases();
+            if !aliases.is_empty() {
+                spec.is_available = aliases.iter().any(|k| is_secret_present(k));
             }
         }
         list
@@ -176,7 +179,11 @@ impl AdapterRouter {
         // 1. Direct match in catalog
         for spec in &self.catalog {
             if spec.id == trimmed || spec.model_id == trimmed {
-                let key = spec.provider.key_name().and_then(resolve_secret);
+                let key = spec
+                    .provider
+                    .key_aliases()
+                    .iter()
+                    .find_map(|&k| resolve_secret(k));
                 return (
                     spec.provider,
                     spec.endpoint.clone(),
@@ -250,7 +257,8 @@ impl AdapterRouter {
             );
         }
         if let Some(rest) = trimmed.strip_prefix("chatgpt/") {
-            let key = resolve_secret("CHATGPT_SESSION_TOKEN");
+            let key = resolve_secret("CHATGPT_SESSION_TOKEN")
+                .or_else(|| resolve_secret("OPENAI_WEB_TOKEN"));
             return (
                 ProviderType::ChatGPTWeb,
                 ProviderType::ChatGPTWeb.default_endpoint().to_string(),
@@ -259,7 +267,8 @@ impl AdapterRouter {
             );
         }
         if let Some(rest) = trimmed.strip_prefix("claude-web/") {
-            let key = resolve_secret("CLAUDE_SESSION_KEY");
+            let key = resolve_secret("CLAUDE_SESSION_KEY")
+                .or_else(|| resolve_secret("CLAUDE_WEB_SESSION_KEY"));
             return (
                 ProviderType::ClaudeWeb,
                 ProviderType::ClaudeWeb.default_endpoint().to_string(),
@@ -275,5 +284,25 @@ impl AdapterRouter {
             "atlas-lightning-omni".to_string(),
             None,
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_web_subscription_aliases() {
+        let chatgpt = ProviderType::ChatGPTWeb;
+        assert_eq!(
+            chatgpt.key_aliases(),
+            &["CHATGPT_SESSION_TOKEN", "OPENAI_WEB_TOKEN"]
+        );
+
+        let claude = ProviderType::ClaudeWeb;
+        assert_eq!(
+            claude.key_aliases(),
+            &["CLAUDE_SESSION_KEY", "CLAUDE_WEB_SESSION_KEY"]
+        );
     }
 }
