@@ -1,9 +1,9 @@
 name: Sovereign CI
 
-on:
-  pull_request:
-    branches: [main]
+"on":
   push:
+    branches: [main]
+  pull_request:
     branches: [main]
   workflow_dispatch:
 
@@ -15,7 +15,7 @@ jobs:
     name: Workspace Verification & Invariant Audit
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout Source Code
+      - name: Checkout Source
         uses: actions/checkout@v4
 
       - name: Install Stable Rust Toolchain
@@ -28,6 +28,9 @@ jobs:
 
       - name: Cargo Workspace Check
         run: cargo check --workspace --all-targets
+
+      - name: Cargo Clippy Invariant
+        run: cargo clippy --workspace --all-targets -- -D warnings
 
       - name: Run Workspace Unit and Integration Tests
         run: cargo test --workspace --verbose
@@ -44,7 +47,7 @@ jobs:
       - name: Enforce Sovereign Voice and Anti-Slop Invariant
         run: |
           echo "Auditing repository for em dashes, en dashes, and formulaic tropes..."
-          BAD_CHARS=$(grep -rnE --exclude-dir=target --exclude-dir=.git --exclude='*.rs' --exclude='*.json' --exclude='*.safetensors' --exclude='FORGEJO_CI.md' '—|–' crates/ docs/ README.md || true)
+          BAD_CHARS=$(grep -rnE --exclude-dir=target --exclude-dir=.git --exclude="*.rs" --exclude="*.json" --exclude="*.safetensors" --exclude="FORGEJO_CI.md" "—|–" crates/ docs/ README.md || true)
           if [ -n "$BAD_CHARS" ]; then
             echo "::error::Em dashes or en dashes detected:"
             echo "$BAD_CHARS"
