@@ -978,8 +978,8 @@ mod tests {
         emb_a[0] = 1.0; // Direction X
 
         let mut emb_b = vec![0.0f32; 768];
-        emb_b[0] = 0.7071; // Direction between X and Y
-        emb_b[1] = 0.7071;
+        emb_b[0] = std::f32::consts::FRAC_1_SQRT_2; // Direction between X and Y
+        emb_b[1] = std::f32::consts::FRAC_1_SQRT_2;
 
         let mut emb_c = vec![0.0f32; 768];
         emb_c[1] = 1.0; // Direction Y

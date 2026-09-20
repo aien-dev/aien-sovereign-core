@@ -18,7 +18,10 @@ pub extern "C" fn rad_id_sync_status_json() -> *mut c_char {
 }
 
 #[no_mangle]
-pub extern "C" fn rad_id_sync_free_string(ptr: *mut c_char) {
+/// # Safety
+///
+/// The `ptr` pointer must be a valid pointer allocated by `rad_id_sync_status_json` or null.
+pub unsafe extern "C" fn rad_id_sync_free_string(ptr: *mut c_char) {
     if !ptr.is_null() {
         unsafe {
             let _ = CString::from_raw(ptr);

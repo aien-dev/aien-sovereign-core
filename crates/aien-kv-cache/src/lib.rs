@@ -780,7 +780,7 @@ impl<B: aien_platform::UnifiedBuffer> AienKvManager<B> {
         prompt_tokens: &[u32],
     ) -> Result<Vec<BlockId>, String> {
         let num_tokens = prompt_tokens.len();
-        let blocks_needed = (num_tokens + self.block_size - 1) / self.block_size;
+        let blocks_needed = num_tokens.div_ceil(self.block_size);
 
         if self.free_blocks.len() < blocks_needed {
             return Err(format!(

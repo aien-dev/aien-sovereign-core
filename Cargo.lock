@@ -86,6 +86,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "aien-runtime"
+version = "0.1.0"
+dependencies = [
+ "aien-inference-abi",
+ "aien-kv-cache",
+ "aien-platform",
+ "aien-scheduler",
+ "aien-security",
+ "async-trait",
+ "cortex-rs",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "aien-scheduler"
 version = "0.1.0"
 dependencies = [
