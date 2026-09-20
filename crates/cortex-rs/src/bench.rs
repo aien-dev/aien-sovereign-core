@@ -1,7 +1,7 @@
-use std::fs;
-use std::time::Instant;
 use crate::db::Database;
 use crate::models::{ClaimWriteInput, EntityWriteInput};
+use std::fs;
+use std::time::Instant;
 
 pub fn run_benchmark(records: usize) -> Result<(), Box<dyn std::error::Error>> {
     let tmp_path = std::env::temp_dir().join(format!("cortex_bench_{}.db", std::process::id()));
@@ -35,7 +35,10 @@ pub fn run_benchmark(records: usize) -> Result<(), Box<dyn std::error::Error>> {
     for i in 0..records {
         let (domain, desc) = sample_domains[i % sample_domains.len()];
         let canonical_name = format!("{}:entity_{:05}", domain, i);
-        let content = format!("{} Record ID {} generated for production deployment telemetry verification.", desc, i);
+        let content = format!(
+            "{} Record ID {} generated for production deployment telemetry verification.",
+            desc, i
+        );
         let input = EntityWriteInput {
             id: None,
             space: "atlas-memory".to_string(),
@@ -60,7 +63,10 @@ pub fn run_benchmark(records: usize) -> Result<(), Box<dyn std::error::Error>> {
     let ingest_qps = records as f64 / total_ingest_time.as_secs_f64();
 
     // 2. Search Benchmark
-    println!("[2/3] Benchmarking FTS5 Lexical Search across {} records...", records);
+    println!(
+        "[2/3] Benchmarking FTS5 Lexical Search across {} records...",
+        records
+    );
     let search_queries = [
         "tpm vault",
         "unified memory",
@@ -161,8 +167,14 @@ pub fn run_benchmark(records: usize) -> Result<(), Box<dyn std::error::Error>> {
         traverse_qps
     );
     println!("--------------------------------------------------------------------------------");
-    println!("Search p50 in milliseconds:      {:.3} ms", percentile(&search_latencies_us, 50.0) / 1000.0);
-    println!("Search p99 in milliseconds:      {:.3} ms", percentile(&search_latencies_us, 99.0) / 1000.0);
+    println!(
+        "Search p50 in milliseconds:      {:.3} ms",
+        percentile(&search_latencies_us, 50.0) / 1000.0
+    );
+    println!(
+        "Search p99 in milliseconds:      {:.3} ms",
+        percentile(&search_latencies_us, 99.0) / 1000.0
+    );
     println!("================================================================================");
 
     // Cleanup

@@ -77,6 +77,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "aien-platform-linux"
+version = "0.1.0"
+dependencies = [
+ "aien-platform",
+ "libc",
+ "parking_lot",
+]
+
+[[package]]
 name = "aien-scheduler"
 version = "0.1.0"
 dependencies = [

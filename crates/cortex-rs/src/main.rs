@@ -66,11 +66,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     tracing_subscriber::registry()
-        .with(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
+        .with(
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
+        )
         .with(tracing_subscriber::fmt::layer())
         .init();
 
-    tracing::info!("Initializing Cortex-RS SQLite database at {:?}...", args.db_path);
+    tracing::info!(
+        "Initializing Cortex-RS SQLite database at {:?}...",
+        args.db_path
+    );
     if let Some(parent) = args.db_path.parent() {
         let _ = fs::create_dir_all(parent);
     }
@@ -84,7 +89,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let raw_list: Vec<serde_json::Value> = serde_json::from_str(&data)?;
             let mut count = 0;
             for val in raw_list {
-                let entity_val = if let Some(e) = val.get("entity") { e.clone() } else { val };
+                let entity_val = if let Some(e) = val.get("entity") {
+                    e.clone()
+                } else {
+                    val
+                };
                 if let Ok(entity) = serde_json::from_value::<CortexEntity>(entity_val) {
                     let _ = database.import_entity_raw(&entity, None);
                     count += 1;
@@ -102,7 +111,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let protected_routes = Router::new()
         .route("/api/cortex/write", post(write_handler))
-        .route("/api/cortex/search", get(search_get_handler).post(search_post_handler))
+        .route(
+            "/api/cortex/search",
+            get(search_get_handler).post(search_post_handler),
+        )
         .route("/api/cortex/recall", post(recall_handler))
         .route("/api/cortex/get", get(get_handler))
         .route("/api/cortex/traverse", post(traverse_handler))
@@ -128,10 +140,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // INVARIANT: Bind strictly to loopback 127.0.0.1 to guarantee zero LAN exposure unless configured
     if args.host != "127.0.0.1" && args.host != "localhost" {
-        tracing::warn!("Non-loopback binding detected ({}); enforcing local authentication.", args.host);
+        tracing::warn!(
+            "Non-loopback binding detected ({}); enforcing local authentication.",
+            args.host
+        );
     }
 
-    let addr: SocketAddr = format!("{}:{}", args.host, args.port).parse().unwrap_or_else(|_| SocketAddr::from(([127, 0, 0, 1], args.port)));
+    let addr: SocketAddr = format!("{}:{}", args.host, args.port)
+        .parse()
+        .unwrap_or_else(|_| SocketAddr::from(([127, 0, 0, 1], args.port)));
     tracing::info!("Cortex-RS server listening on http://{}", addr);
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
