@@ -1,10 +1,14 @@
+//! Native Paged KV-Cache Manager with physical unified-memory tensors,
+//! reference-counted copy-on-write branching, and prefix caching.
+
 use parking_lot::RwLock;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 
 pub type BlockId = usize;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum KvDType {
     Fp4,
     Fp8,
@@ -24,7 +28,7 @@ impl KvDType {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KvPoolConfig {
     pub num_blocks: usize,
     pub block_size: usize,
@@ -35,6 +39,17 @@ pub struct KvPoolConfig {
 }
 
 impl KvPoolConfig {
+    pub fn for_tinyllama(num_blocks: usize, block_size: usize, dtype: KvDType) -> Self {
+        Self {
+            num_blocks,
+            block_size,
+            num_layers: 22,
+            num_kv_heads: 4,
+            head_dim: 64,
+            dtype,
+        }
+    }
+
     pub fn for_qwen2_5_7b(num_blocks: usize, block_size: usize, dtype: KvDType) -> Self {
         Self {
             num_blocks,
@@ -53,6 +68,24 @@ impl KvPoolConfig {
             num_layers: 48,
             num_kv_heads: 8,
             head_dim: 128,
+            dtype,
+        }
+    }
+
+    pub fn for_model(
+        num_blocks: usize,
+        block_size: usize,
+        num_layers: usize,
+        num_kv_heads: usize,
+        head_dim: usize,
+        dtype: KvDType,
+    ) -> Self {
+        Self {
+            num_blocks,
+            block_size,
+            num_layers,
+            num_kv_heads,
+            head_dim,
             dtype,
         }
     }
@@ -89,7 +122,6 @@ impl UnifiedKvTensorPool {
             return Err("Cannot allocate zero-sized KV tensor pool".to_string());
         }
 
-        // Allocate page-aligned coherent unified memory via mmap on Unix, aligned alloc on non-Unix
         #[cfg(unix)]
         let (base_ptr, is_mmap) = {
             let ptr = unsafe {
@@ -111,7 +143,6 @@ impl UnifiedKvTensorPool {
                 ));
             }
 
-            // Attempt memory pinning (mlock) for deterministic latency
             unsafe {
                 let _ = libc::mlock(ptr, total_bytes);
             }
@@ -191,6 +222,121 @@ impl UnifiedKvTensorPool {
             std::ptr::write_bytes(ptr, 0, self.block_bytes);
         }
     }
+
+    #[inline]
+    pub fn element_offset(
+        &self,
+        block_id: BlockId,
+        layer_idx: usize,
+        is_value: bool,
+        token_in_block: usize,
+    ) -> usize {
+        assert!(block_id < self.config.num_blocks, "BlockId {} out of range", block_id);
+        assert!(layer_idx < self.config.num_layers, "LayerIdx {} out of range", layer_idx);
+        assert!(
+            token_in_block < self.config.block_size,
+            "TokenInBlock {} out of range (block_size {})",
+            token_in_block,
+            self.config.block_size
+        );
+
+        let kv_dim = self.config.num_kv_heads * self.config.head_dim;
+        let bytes_per_elem = self.config.dtype.bytes_per_element();
+        let kv_stride = (self.config.block_size as f32 * kv_dim as f32 * bytes_per_elem).ceil() as usize;
+        let layer_stride = 2 * kv_stride;
+        let token_stride = (kv_dim as f32 * bytes_per_elem).ceil() as usize;
+
+        let block_base = self.offset_for_block(block_id);
+        block_base
+            + layer_idx * layer_stride
+            + if is_value { kv_stride } else { 0 }
+            + token_in_block * token_stride
+    }
+
+    pub fn write_token_kv(
+        &mut self,
+        block_id: BlockId,
+        layer_idx: usize,
+        token_in_block: usize,
+        k: &[f32],
+        v: &[f32],
+    ) {
+        let kv_dim = self.config.num_kv_heads * self.config.head_dim;
+        assert_eq!(k.len(), kv_dim, "K vector length must equal kv_dim");
+        assert_eq!(v.len(), kv_dim, "V vector length must equal kv_dim");
+
+        let k_offset = self.element_offset(block_id, layer_idx, false, token_in_block);
+        let v_offset = self.element_offset(block_id, layer_idx, true, token_in_block);
+
+        unsafe {
+            let k_ptr = self.base_ptr.add(k_offset) as *mut f32;
+            let v_ptr = self.base_ptr.add(v_offset) as *mut f32;
+            std::ptr::copy_nonoverlapping(k.as_ptr(), k_ptr, kv_dim);
+            std::ptr::copy_nonoverlapping(v.as_ptr(), v_ptr, kv_dim);
+        }
+    }
+
+    pub fn read_token_kv(
+        &self,
+        block_id: BlockId,
+        layer_idx: usize,
+        token_in_block: usize,
+        k_out: &mut [f32],
+        v_out: &mut [f32],
+    ) {
+        let kv_dim = self.config.num_kv_heads * self.config.head_dim;
+        assert_eq!(k_out.len(), kv_dim, "K_out vector length must equal kv_dim");
+        assert_eq!(v_out.len(), kv_dim, "V_out vector length must equal kv_dim");
+
+        let k_offset = self.element_offset(block_id, layer_idx, false, token_in_block);
+        let v_offset = self.element_offset(block_id, layer_idx, true, token_in_block);
+
+        unsafe {
+            let k_ptr = self.base_ptr.add(k_offset) as *const f32;
+            let v_ptr = self.base_ptr.add(v_offset) as *const f32;
+            std::ptr::copy_nonoverlapping(k_ptr, k_out.as_mut_ptr(), kv_dim);
+            std::ptr::copy_nonoverlapping(v_ptr, v_out.as_mut_ptr(), kv_dim);
+        }
+    }
+
+    pub fn gather_layer_kv(
+        &self,
+        block_ids: &[BlockId],
+        total_tokens: usize,
+        layer_idx: usize,
+        flat_k: &mut Vec<f32>,
+        flat_v: &mut Vec<f32>,
+    ) {
+        let kv_dim = self.config.num_kv_heads * self.config.head_dim;
+        let needed_elements = total_tokens * kv_dim;
+        flat_k.resize(needed_elements, 0.0);
+        flat_v.resize(needed_elements, 0.0);
+
+        let mut tokens_gathered = 0;
+        for &block_id in block_ids {
+            if tokens_gathered >= total_tokens {
+                break;
+            }
+            let tokens_in_this_block = (total_tokens - tokens_gathered).min(self.config.block_size);
+            if tokens_in_this_block == 0 {
+                continue;
+            }
+            let k_block_offset = self.element_offset(block_id, layer_idx, false, 0);
+            let v_block_offset = self.element_offset(block_id, layer_idx, true, 0);
+            let chunk_elements = tokens_in_this_block * kv_dim;
+            let dst_offset = tokens_gathered * kv_dim;
+
+            unsafe {
+                let k_src = self.base_ptr.add(k_block_offset) as *const f32;
+                let v_src = self.base_ptr.add(v_block_offset) as *const f32;
+                let k_dst = flat_k.as_mut_ptr().add(dst_offset);
+                let v_dst = flat_v.as_mut_ptr().add(dst_offset);
+                std::ptr::copy_nonoverlapping(k_src, k_dst, chunk_elements);
+                std::ptr::copy_nonoverlapping(v_src, v_dst, chunk_elements);
+            }
+            tokens_gathered += tokens_in_this_block;
+        }
+    }
 }
 
 impl Drop for UnifiedKvTensorPool {
@@ -211,7 +357,7 @@ impl Drop for UnifiedKvTensorPool {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KvBlock {
     pub block_id: BlockId,
     pub ref_count: usize,
@@ -219,21 +365,25 @@ pub struct KvBlock {
     pub is_shared: bool,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct BlockTable {
     pub block_ids: Vec<BlockId>,
     pub total_tokens: usize,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct KvCacheMetrics {
     pub total_blocks: usize,
     pub free_blocks: usize,
     pub used_blocks: usize,
-    pub shared_blocks: usize,
+    pub logical_pages: usize,
+    pub physical_pages: usize,
+    pub shared_pages: usize,
+    pub private_pages: usize,
+    pub cow_faults: usize,
+    pub physical_kv_bytes: usize,
+    pub bytes_saved_vs_full_copy: usize,
     pub prefix_cache_hits: usize,
-    pub cow_allocations: usize,
-    pub physical_bytes_allocated: usize,
 }
 
 /// Functional radix node for automatic prefix deduplication across sequences
@@ -252,7 +402,6 @@ impl RadixNode {
         let mut current = self;
         for (i, &token) in tokens.iter().enumerate() {
             current = current.children.entry(token).or_default();
-            // At block boundary, store the corresponding block id
             if (i + 1) % block_size == 0 {
                 let block_idx = (i + 1) / block_size - 1;
                 if block_idx < block_ids.len() {
@@ -331,8 +480,7 @@ impl AienKvManager {
         config: KvPoolConfig,
     ) -> Result<Self, String> {
         let mut mgr = Self::new(total_blocks, block_size);
-        let pool = UnifiedKvTensorPool::allocate(config)?;
-        mgr.tensor_pool = Some(pool);
+        mgr.attach_tensor_pool(config)?;
         Ok(mgr)
     }
 
@@ -362,7 +510,14 @@ impl AienKvManager {
         self.free_blocks.len()
     }
 
-    /// Allocates KV blocks for a sequence with automatic prefix caching lookup.
+    pub fn has_sequence(&self, seq_id: u64) -> bool {
+        self.sequence_tables.contains_key(&seq_id)
+    }
+
+    pub fn active_sequence_count(&self) -> usize {
+        self.sequence_tables.len()
+    }
+
     pub fn allocate_sequence(
         &mut self,
         seq_id: u64,
@@ -370,7 +525,6 @@ impl AienKvManager {
     ) -> Result<Vec<BlockId>, String> {
         let token_count = prompt_tokens.len();
 
-        // 1. Check radix prefix cache for reusable prefix blocks
         let cached_prefix_blocks = self
             .radix_root
             .find_matching_prefix(prompt_tokens, self.block_size);
@@ -398,7 +552,6 @@ impl AienKvManager {
 
         let mut allocated_blocks = Vec::with_capacity(reused_block_count + blocks_needed);
 
-        // Mark reused prefix blocks
         for &block_id in &cached_prefix_blocks {
             let block = &mut self.block_pool[block_id];
             if block.ref_count == 0 {
@@ -411,7 +564,6 @@ impl AienKvManager {
             allocated_blocks.push(block_id);
         }
 
-        // Allocate new blocks for remaining tokens
         let mut tokens_left = remaining_tokens;
         let mut newly_allocated = Vec::with_capacity(blocks_needed);
 
@@ -429,7 +581,6 @@ impl AienKvManager {
             newly_allocated.push(block_id);
         }
 
-        // Index newly allocated sequence into radix tree for future prefix hits
         self.radix_root
             .insert_prefix(prompt_tokens, &allocated_blocks, self.block_size);
 
@@ -442,8 +593,6 @@ impl AienKvManager {
         Ok(allocated_blocks)
     }
 
-    /// Zero-copy sequence fork for subagent branching.
-    /// Clones the block table and increments ref_counts without allocating new KV memory.
     pub fn fork_sequence(&mut self, parent_id: u64, child_id: u64) -> Result<Vec<BlockId>, String> {
         let parent_table = self
             .sequence_tables
@@ -461,62 +610,67 @@ impl AienKvManager {
         Ok(parent_table.block_ids)
     }
 
-    /// Appends a new token to a sequence with Copy-on-Write semantics.
+    pub fn fork_context(&mut self, parent_id: u64, child_id: u64) -> Result<Vec<BlockId>, String> {
+        self.fork_sequence(parent_id, child_id)
+    }
+
     pub fn append_token(&mut self, seq_id: u64) -> Result<BlockId, String> {
+        let (block_id, _) = self.append_token_with_slot(seq_id)?;
+        Ok(block_id)
+    }
+
+    pub fn append_token_with_slot(&mut self, seq_id: u64) -> Result<(BlockId, usize), String> {
+        let block_size = self.block_size;
         let table = self
             .sequence_tables
             .get_mut(&seq_id)
             .ok_or_else(|| format!("Sequence {} not found", seq_id))?;
 
-        let last_block_id = match table.block_ids.last() {
-            Some(&id) => id,
-            None => {
-                let new_id = self.free_blocks.pop().ok_or("Out of KV memory")?;
-                let block = &mut self.block_pool[new_id];
-                block.ref_count = 1;
-                block.num_tokens = 0;
-                block.is_shared = false;
-                table.block_ids.push(new_id);
-                new_id
-            }
-        };
-
-        let last_block = &self.block_pool[last_block_id];
-        if last_block.is_shared {
-            // Copy-on-Write: allocate new private block, copy tokens, decrement shared ref_count
-            let new_id = self.free_blocks.pop().ok_or("Out of KV memory on CoW")?;
-            let old_tokens = last_block.num_tokens;
-
-            // Physical block copy if tensor pool attached
-            if let Some(pool) = &mut self.tensor_pool {
-                pool.copy_block(last_block_id, new_id);
-            }
-
-            self.block_pool[last_block_id].ref_count -= 1;
-            if self.block_pool[last_block_id].ref_count == 1 {
-                self.block_pool[last_block_id].is_shared = false;
-            }
-
-            let new_block = &mut self.block_pool[new_id];
-            new_block.ref_count = 1;
-            new_block.num_tokens = old_tokens + 1;
-            new_block.is_shared = false;
-
-            let last_idx = table.block_ids.len() - 1;
-            table.block_ids[last_idx] = new_id;
-            table.total_tokens += 1;
-            self.cow_count += 1;
-
-            return Ok(new_id);
+        if table.block_ids.is_empty() {
+            let new_id = self.free_blocks.pop().ok_or("Out of KV memory")?;
+            let block = &mut self.block_pool[new_id];
+            block.ref_count = 1;
+            block.num_tokens = 1;
+            block.is_shared = false;
+            table.block_ids.push(new_id);
+            table.total_tokens = 1;
+            return Ok((new_id, 0));
         }
 
-        if self.block_pool[last_block_id].num_tokens < self.block_size {
-            // Room in current private block
-            self.block_pool[last_block_id].num_tokens += 1;
-            table.total_tokens += 1;
-            Ok(last_block_id)
+        let last_block_id = *table.block_ids.last().unwrap();
+        let last_block = &self.block_pool[last_block_id];
+
+        if last_block.num_tokens < block_size {
+            let slot = last_block.num_tokens;
+            if last_block.is_shared {
+                let new_id = self.free_blocks.pop().ok_or("Out of KV memory on CoW")?;
+                let old_tokens = last_block.num_tokens;
+
+                if let Some(pool) = &mut self.tensor_pool {
+                    pool.copy_block(last_block_id, new_id);
+                }
+
+                self.block_pool[last_block_id].ref_count -= 1;
+                if self.block_pool[last_block_id].ref_count == 1 {
+                    self.block_pool[last_block_id].is_shared = false;
+                }
+
+                let new_block = &mut self.block_pool[new_id];
+                new_block.ref_count = 1;
+                new_block.num_tokens = old_tokens + 1;
+                new_block.is_shared = false;
+
+                let last_idx = table.block_ids.len() - 1;
+                table.block_ids[last_idx] = new_id;
+                table.total_tokens += 1;
+                self.cow_count += 1;
+                Ok((new_id, slot))
+            } else {
+                self.block_pool[last_block_id].num_tokens += 1;
+                table.total_tokens += 1;
+                Ok((last_block_id, slot))
+            }
         } else {
-            // Current block is full, allocate new private block
             let new_id = self.free_blocks.pop().ok_or("Out of KV memory")?;
             let new_block = &mut self.block_pool[new_id];
             new_block.ref_count = 1;
@@ -525,11 +679,71 @@ impl AienKvManager {
 
             table.block_ids.push(new_id);
             table.total_tokens += 1;
-            Ok(new_id)
+            Ok((new_id, 0))
         }
     }
 
-    /// Releases a sequence and returns unreferenced blocks back to the free pool.
+    pub fn write_sequence_token_kv(
+        &mut self,
+        seq_id: u64,
+        layer_idx: usize,
+        k: &[f32],
+        v: &[f32],
+    ) -> Result<(), String> {
+        let table = self
+            .sequence_tables
+            .get(&seq_id)
+            .ok_or_else(|| format!("Sequence {} not found", seq_id))?;
+        let last_block_id = *table
+            .block_ids
+            .last()
+            .ok_or_else(|| format!("Sequence {} has no allocated blocks", seq_id))?;
+        let block = &self.block_pool[last_block_id];
+        let token_in_block = block.num_tokens.saturating_sub(1);
+
+        if let Some(pool) = &mut self.tensor_pool {
+            pool.write_token_kv(last_block_id, layer_idx, token_in_block, k, v);
+            Ok(())
+        } else {
+            Err("No physical tensor pool attached to KV manager".to_string())
+        }
+    }
+
+    pub fn write_explicit_token_kv(
+        &mut self,
+        block_id: BlockId,
+        layer_idx: usize,
+        token_in_block: usize,
+        k: &[f32],
+        v: &[f32],
+    ) -> Result<(), String> {
+        if let Some(pool) = &mut self.tensor_pool {
+            pool.write_token_kv(block_id, layer_idx, token_in_block, k, v);
+            Ok(())
+        } else {
+            Err("No physical tensor pool attached to KV manager".to_string())
+        }
+    }
+
+    pub fn gather_sequence_layer_kv(
+        &self,
+        seq_id: u64,
+        layer_idx: usize,
+        flat_k: &mut Vec<f32>,
+        flat_v: &mut Vec<f32>,
+    ) -> Result<(), String> {
+        let table = self
+            .sequence_tables
+            .get(&seq_id)
+            .ok_or_else(|| format!("Sequence {} not found", seq_id))?;
+        if let Some(pool) = &self.tensor_pool {
+            pool.gather_layer_kv(&table.block_ids, table.total_tokens, layer_idx, flat_k, flat_v);
+            Ok(())
+        } else {
+            Err("No physical tensor pool attached to KV manager".to_string())
+        }
+    }
+
     pub fn free_sequence(&mut self, seq_id: u64) {
         if let Some(table) = self.sequence_tables.remove(&seq_id) {
             for block_id in table.block_ids {
@@ -548,25 +762,44 @@ impl AienKvManager {
         }
     }
 
+    pub fn release_branch(&mut self, branch_id: u64) {
+        self.free_sequence(branch_id);
+    }
+
+    pub fn get_block(&self, block_id: BlockId) -> Option<&KvBlock> {
+        self.block_pool.get(block_id)
+    }
+
     pub fn get_block_table(&self, seq_id: u64) -> Option<&BlockTable> {
         self.sequence_tables.get(&seq_id)
     }
 
     pub fn metrics(&self) -> KvCacheMetrics {
-        let shared_blocks = self.block_pool.iter().filter(|b| b.is_shared).count();
-        let physical_bytes_allocated = self
-            .tensor_pool
-            .as_ref()
-            .map(|p| p.total_bytes())
-            .unwrap_or(0);
+        let used_blocks = self.total_blocks - self.free_blocks.len();
+        let logical_pages = self.sequence_tables.values().map(|t| t.block_ids.len()).sum();
+        let physical_pages = used_blocks;
+        let shared_pages = self.block_pool.iter().filter(|b| b.ref_count > 1).count();
+        let private_pages = self.block_pool.iter().filter(|b| b.ref_count == 1).count();
+        let bytes_per_block = self.tensor_pool.as_ref().map(|p| p.block_bytes()).unwrap_or(0);
+        let physical_kv_bytes = physical_pages * bytes_per_block;
+        let bytes_saved_vs_full_copy = if logical_pages > physical_pages {
+            (logical_pages - physical_pages) * bytes_per_block
+        } else {
+            0
+        };
+
         KvCacheMetrics {
             total_blocks: self.total_blocks,
             free_blocks: self.free_blocks.len(),
-            used_blocks: self.total_blocks - self.free_blocks.len(),
-            shared_blocks,
+            used_blocks,
+            logical_pages,
+            physical_pages,
+            shared_pages,
+            private_pages,
+            cow_faults: self.cow_count,
+            physical_kv_bytes,
+            bytes_saved_vs_full_copy,
             prefix_cache_hits: self.prefix_hits,
-            cow_allocations: self.cow_count,
-            physical_bytes_allocated,
         }
     }
 }
@@ -595,7 +828,7 @@ mod tests {
         let mut mgr = AienKvManager::new(100, 16);
         assert_eq!(mgr.available_blocks(), 100);
 
-        let tokens: Vec<u32> = (0..35).collect(); // requires 3 blocks (16 + 16 + 3)
+        let tokens: Vec<u32> = (0..35).collect();
         let blocks = mgr.allocate_sequence(1, &tokens).unwrap();
         assert_eq!(blocks.len(), 3);
         assert_eq!(mgr.available_blocks(), 97);
@@ -607,19 +840,16 @@ mod tests {
     #[test]
     fn test_zero_copy_fork_and_cow() {
         let mut mgr = AienKvManager::new(100, 16);
-        let tokens: Vec<u32> = (0..32).collect(); // 2 full blocks
+        let tokens: Vec<u32> = (0..30).collect();
         mgr.allocate_sequence(1, &tokens).unwrap();
 
-        // Fork subagent 2 from parent 1
         let child_blocks = mgr.fork_sequence(1, 2).unwrap();
         assert_eq!(child_blocks.len(), 2);
-        // Zero new blocks allocated
         assert_eq!(mgr.available_blocks(), 98);
-        assert_eq!(mgr.metrics().shared_blocks, 2);
+        assert_eq!(mgr.metrics().shared_pages, 2);
 
-        // Subagent 2 generates a new token: triggers Copy-on-Write for the active block
         let new_block = mgr.append_token(2).unwrap();
-        assert_eq!(mgr.available_blocks(), 97); // 1 block allocated for CoW
+        assert_eq!(mgr.available_blocks(), 97);
 
         let table1 = mgr.get_block_table(1).unwrap();
         let table2 = mgr.get_block_table(2).unwrap();
@@ -628,7 +858,6 @@ mod tests {
         assert_ne!(table1.block_ids[1], table2.block_ids[1]);
         assert_eq!(table2.block_ids[1], new_block);
 
-        // Free parent 1: shared blocks still kept alive by child 2
         mgr.free_sequence(1);
         assert_eq!(mgr.available_blocks(), 98);
 
@@ -639,25 +868,22 @@ mod tests {
     #[test]
     fn test_functional_prefix_caching() {
         let mut mgr = AienKvManager::new(100, 16);
-        let shared_prompt: Vec<u32> = (0..32).collect(); // 2 blocks
+        let shared_prompt: Vec<u32> = (0..32).collect();
 
-        // Sequence 1 registers the shared prompt
         let blocks1 = mgr.allocate_sequence(10, &shared_prompt).unwrap();
         assert_eq!(blocks1.len(), 2);
         assert_eq!(mgr.available_blocks(), 98);
         assert_eq!(mgr.metrics().prefix_cache_hits, 0);
 
-        // Sequence 2 arrives with identical shared prompt + 5 new tokens
         let mut sequence2_prompt = shared_prompt.clone();
         sequence2_prompt.extend_from_slice(&[100, 101, 102, 103, 104]);
 
         let blocks2 = mgr.allocate_sequence(20, &sequence2_prompt).unwrap();
-        // Should reuse 2 blocks from prefix cache and allocate 1 new block for 5 new tokens
         assert_eq!(blocks2.len(), 3);
         assert_eq!(blocks2[0], blocks1[0]);
         assert_eq!(blocks2[1], blocks1[1]);
-        assert_eq!(mgr.available_blocks(), 97); // only 1 block deducted
-        assert_eq!(mgr.metrics().prefix_cache_hits, 32); // 32 tokens hit
+        assert_eq!(mgr.available_blocks(), 97);
+        assert_eq!(mgr.metrics().prefix_cache_hits, 32);
     }
 
     #[test]
@@ -671,13 +897,11 @@ mod tests {
         let mut pool = UnifiedKvTensorPool::allocate(pool_cfg).unwrap();
         assert!(!pool.base_ptr().is_null());
 
-        // Write pattern into block 0
         let ptr0 = pool.block_ptr(0);
         unsafe {
             std::ptr::write_bytes(ptr0, 0xAA, 1024);
         }
 
-        // Copy block 0 to block 1
         pool.copy_block(0, 1);
         let ptr1 = pool.block_ptr(1);
         unsafe {
@@ -686,7 +910,6 @@ mod tests {
             assert_eq!(slice[1023], 0xAA);
         }
 
-        // Zero block 1
         pool.zero_block(1);
         unsafe {
             let slice = std::slice::from_raw_parts(ptr1, 1024);

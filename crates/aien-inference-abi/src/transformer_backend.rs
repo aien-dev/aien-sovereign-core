@@ -7,11 +7,19 @@ use crate::mojo_backend::MojoGb10Backend;
 use crate::tensor::{sample_argmax, sample_temperature};
 use crate::weights::{LayerKvCache, SequenceState, TransformerWeights};
 use crate::{
-    AienInferenceBackend, DecodeOutput, FinishReason, ModelConfig, ScheduledBatch, StepMetrics,
+    AienInferenceBackend, AienUsageReceipt, BranchHandle, ContextHandle, DecodeOutput,
+    FinishReason, ModelConfig, ScheduledBatch, StepMetrics,
+};
+use aien_kv_cache::{
+    create_shared_kv_manager_with_pool,
+    KvDType, KvPoolConfig, SharedKvManager,
 };
 use async_trait::async_trait;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+
+static NEXT_HANDLE_ID: AtomicU64 = AtomicU64::new(1);
 
 /// Fully native Rust transformer backend executing real tensor forward computation.
 /// Decouples execution orchestration from compute hardware via the TensorBackend trait.
@@ -19,6 +27,7 @@ pub struct NativeTransformerBackend {
     pub weights: TransformerWeights,
     pub sequences: HashMap<u64, SequenceState>,
     pub tensor_backend: Arc<dyn TensorBackend>,
+    pub kv_manager: Option<SharedKvManager>,
 }
 
 impl NativeTransformerBackend {
@@ -28,6 +37,7 @@ impl NativeTransformerBackend {
             weights,
             sequences: HashMap::new(),
             tensor_backend: Arc::new(ReferenceCpuBackend::new()),
+            kv_manager: None,
         }
     }
 
@@ -37,6 +47,7 @@ impl NativeTransformerBackend {
             weights,
             sequences: HashMap::new(),
             tensor_backend,
+            kv_manager: None,
         }
     }
 
@@ -73,13 +84,237 @@ impl NativeTransformerBackend {
         Self::new_blackwell(weights)
     }
 
-    /// Implementation helper executing forward pass on disjoint struct fields.
-    pub fn forward_token_impl(
+    /// Constructor attaching a physical reference-counted KV page pool for Copy-on-Write branching.
+    pub fn with_paged_kv(
+        weights: TransformerWeights,
+        total_blocks: usize,
+        block_size: usize,
+    ) -> Result<Self, String> {
+        let pool_cfg = KvPoolConfig::for_model(
+            total_blocks,
+            block_size,
+            weights.config.num_layers,
+            weights.config.num_kv_heads,
+            weights.config.head_dim,
+            KvDType::Fp32,
+        );
+        let kv_mgr = create_shared_kv_manager_with_pool(total_blocks, block_size, pool_cfg)?;
+        Ok(Self {
+            weights,
+            sequences: HashMap::new(),
+            tensor_backend: Arc::new(ReferenceCpuBackend::new()),
+            kv_manager: Some(kv_mgr),
+        })
+    }
+
+    /// Constructor attaching physical paged KV cache with explicit TensorBackend compute hardware.
+    pub fn with_paged_kv_backend(
+        weights: TransformerWeights,
+        tensor_backend: Arc<dyn TensorBackend>,
+        total_blocks: usize,
+        block_size: usize,
+    ) -> Result<Self, String> {
+        let pool_cfg = KvPoolConfig::for_model(
+            total_blocks,
+            block_size,
+            weights.config.num_layers,
+            weights.config.num_kv_heads,
+            weights.config.head_dim,
+            KvDType::Fp32,
+        );
+        let kv_mgr = create_shared_kv_manager_with_pool(total_blocks, block_size, pool_cfg)?;
+        Ok(Self {
+            weights,
+            sequences: HashMap::new(),
+            tensor_backend,
+            kv_manager: Some(kv_mgr),
+        })
+    }
+
+    /// Creates a new immutable root context from prompt tokens.
+    pub fn prefill_sequence(&mut self, seq_id: u64, prompt_tokens: &[u32]) -> Result<Vec<f32>, String> {
+        if prompt_tokens.is_empty() {
+            return Err("Cannot prefill empty prompt".to_string());
+        }
+
+        if let Some(kv_mgr) = &self.kv_manager {
+            kv_mgr.write().allocate_sequence(seq_id, prompt_tokens)?;
+        }
+
+        let num_layers = self.weights.config.num_layers;
+        let seq = self
+            .sequences
+            .entry(seq_id)
+            .or_insert_with(|| SequenceState {
+                tokens: Vec::new(),
+                layers: vec![LayerKvCache::default(); num_layers],
+            });
+
+        let last_hidden = Self::prefill_prompt_layer_by_layer_paged(
+            &self.weights,
+            &*self.tensor_backend,
+            prompt_tokens,
+            seq,
+            seq_id,
+            self.kv_manager.as_ref(),
+        );
+
+        let logits = Self::compute_logits_impl(&self.weights, &*self.tensor_backend, &last_hidden);
+        Ok(logits)
+    }
+
+    pub fn create_context(&mut self, prompt_tokens: &[u32]) -> Result<ContextHandle, String> {
+        if prompt_tokens.is_empty() {
+            return Err("Cannot create context with empty prompt".to_string());
+        }
+        let id = NEXT_HANDLE_ID.fetch_add(1, Ordering::SeqCst);
+        let handle = ContextHandle(id);
+
+        if let Some(kv_mgr) = &self.kv_manager {
+            kv_mgr.write().allocate_sequence(handle.0, prompt_tokens)?;
+        }
+
+        let num_layers = self.weights.config.num_layers;
+        let seq = self
+            .sequences
+            .entry(handle.0)
+            .or_insert_with(|| SequenceState {
+                tokens: Vec::new(),
+                layers: vec![LayerKvCache::default(); num_layers],
+            });
+
+        Self::prefill_prompt_layer_by_layer_paged(
+            &self.weights,
+            &*self.tensor_backend,
+            prompt_tokens,
+            seq,
+            handle.0,
+            self.kv_manager.as_ref(),
+        );
+
+        Ok(handle)
+    }
+
+    /// Forks an existing context into an independently decoding branch with zero KV copying.
+    pub fn fork_context(&mut self, parent: ContextHandle) -> Result<BranchHandle, String> {
+        let parent_seq = self
+            .sequences
+            .get(&parent.0)
+            .ok_or_else(|| format!("Parent context {} not found", parent.0))?
+            .clone();
+
+        let child_id = NEXT_HANDLE_ID.fetch_add(1, Ordering::SeqCst);
+        let child = BranchHandle(child_id);
+
+        if let Some(kv_mgr) = &self.kv_manager {
+            kv_mgr.write().fork_context(parent.0, child.0)?;
+        }
+
+        self.sequences.insert(child.0, parent_seq);
+        Ok(child)
+    }
+
+    /// Releases a branch and immediately reclaims its private COW pages.
+    pub fn release_branch(&mut self, branch: BranchHandle) -> Result<(), String> {
+        self.sequences.remove(&branch.0);
+        if let Some(kv_mgr) = &self.kv_manager {
+            kv_mgr.write().release_branch(branch.0);
+        }
+        Ok(())
+    }
+
+    /// Executes one autoregressive decode step for a branch, triggering COW if tail page is shared.
+    pub fn decode_branch_step(&mut self, branch: BranchHandle) -> Result<(u32, Vec<f32>), String> {
+        let seq = self
+            .sequences
+            .get_mut(&branch.0)
+            .ok_or_else(|| format!("Branch {} not found", branch.0))?;
+
+        let pos = seq.tokens.len().saturating_sub(1);
+        let last_token = *seq.tokens.last().unwrap_or(&1);
+
+        let hidden = Self::forward_token_impl_paged(
+            &self.weights,
+            &*self.tensor_backend,
+            last_token,
+            pos,
+            seq,
+            branch.0,
+            self.kv_manager.as_ref(),
+        );
+
+        let logits = Self::compute_logits_impl(&self.weights, &*self.tensor_backend, &hidden);
+        let (sampled_tok, _) = sample_argmax(&logits);
+        seq.tokens.push(sampled_tok);
+
+        Ok((sampled_tok, logits))
+    }
+
+    /// Returns a telemetry receipt for a branch, calculating shared pages and physical bytes saved.
+    pub fn get_usage_receipt(&self, branch: BranchHandle) -> Result<AienUsageReceipt, String> {
+        let kv_mgr = self
+            .kv_manager
+            .as_ref()
+            .ok_or_else(|| "KV manager not initialized on backend".to_string())?
+            .read();
+
+        let table = kv_mgr
+            .get_block_table(branch.0)
+            .ok_or_else(|| format!("Branch {} not found in KV cache", branch.0))?;
+        let metrics = kv_mgr.metrics();
+        let total_tokens = table.total_tokens;
+
+        let mut shared_pages = 0;
+        let mut private_pages = 0;
+        for &b in &table.block_ids {
+            if let Some(block) = kv_mgr.get_block(b) {
+                if block.is_shared {
+                    shared_pages += 1;
+                } else {
+                    private_pages += 1;
+                }
+            }
+        }
+
+        let bytes_per_block = kv_mgr
+            .tensor_pool()
+            .map(|p| p.block_bytes())
+            .unwrap_or(0);
+        let physical_kv_bytes = (shared_pages + private_pages) * bytes_per_block;
+
+        Ok(AienUsageReceipt {
+            prefix_tokens: shared_pages * kv_mgr.block_size(),
+            private_tokens: total_tokens.saturating_sub(shared_pages * kv_mgr.block_size()),
+            logical_pages: table.block_ids.len(),
+            physical_pages: metrics.physical_pages,
+            shared_pages,
+            private_pages,
+            cow_faults: metrics.cow_faults,
+            physical_kv_bytes,
+            bytes_saved_vs_full_copy: shared_pages * bytes_per_block,
+        })
+    }
+
+    /// Internal forward pass executing one token forward pass through the transformer.
+    fn forward_token_impl(
         weights: &TransformerWeights,
         backend: &dyn TensorBackend,
         token_id: u32,
         pos: usize,
         seq_state: &mut SequenceState,
+    ) -> Vec<f32> {
+        Self::forward_token_impl_paged(weights, backend, token_id, pos, seq_state, 0, None)
+    }
+
+    /// Forward pass executing one token forward pass through the transformer with optional paged COW KV.
+    pub fn forward_token_impl_paged(
+        weights: &TransformerWeights,
+        backend: &dyn TensorBackend,
+        token_id: u32,
+        pos: usize,
+        seq_state: &mut SequenceState,
+        seq_id: u64,
+        kv_manager: Option<&SharedKvManager>,
     ) -> Vec<f32> {
         let hidden_dim = weights.config.hidden_dim();
         let num_heads = weights.config.num_heads;
@@ -91,12 +326,9 @@ impl NativeTransformerBackend {
         let eps = weights.config.rms_norm_eps;
         let theta = weights.config.rope_theta;
 
-        // 1. Embedding lookup: x = embed_tokens[token_id]
         let token_idx = (token_id as usize) % weights.config.vocab_size();
-        let embed_slice = &weights.embed_tokens[token_idx * hidden_dim..(token_idx + 1) * hidden_dim];
-        let mut x = embed_slice.to_vec();
+        let mut x = weights.embed_tokens[token_idx * hidden_dim..(token_idx + 1) * hidden_dim].to_vec();
 
-        // 2. Pre-allocated scratch buffers to eliminate per-layer heap allocations
         let mut x_norm = vec![0.0f32; hidden_dim];
         let mut q = vec![0.0f32; q_dim];
         let mut k = vec![0.0f32; kv_dim];
@@ -109,19 +341,20 @@ impl NativeTransformerBackend {
         let mut activated = vec![0.0f32; intermediate_dim];
         let mut mlp_out = vec![0.0f32; hidden_dim];
 
-        // 3. Transformer layers
+        let block_slot = if let Some(mgr) = kv_manager {
+            mgr.write().append_token_with_slot(seq_id).ok()
+        } else {
+            None
+        };
+
         for (layer_idx, layer_w) in weights.layers.iter().enumerate() {
             let kv_cache = &mut seq_state.layers[layer_idx];
 
-            // 2a. Input RMSNorm
             backend.rmsnorm(&mut x_norm, &x, &layer_w.input_layernorm, eps);
-
-            // 2b. Q, K, V Projections
             backend.matmul_vec(&mut q, &x_norm, &layer_w.q_proj, q_dim, hidden_dim);
             backend.matmul_vec(&mut k, &x_norm, &layer_w.k_proj, kv_dim, hidden_dim);
             backend.matmul_vec(&mut v, &x_norm, &layer_w.v_proj, kv_dim, hidden_dim);
 
-            // 2c. Rotary Positional Embeddings (RoPE)
             backend.apply_rope(
                 &mut q,
                 &mut k,
@@ -132,26 +365,48 @@ impl NativeTransformerBackend {
                 theta,
             );
 
-            // 2d. Append to KV Cache (contiguous zero-copy buffer + backward compatibility)
-            kv_cache.cached_k.push(k.clone());
-            kv_cache.cached_v.push(v.clone());
-            kv_cache.flat_k.extend_from_slice(&k);
-            kv_cache.flat_v.extend_from_slice(&v);
+            if let (Some((block_id, slot)), Some(mgr)) = (block_slot, kv_manager) {
+                let _ = mgr.write().write_explicit_token_kv(block_id, layer_idx, slot, &k, &v);
 
-            // 2e. Scaled Dot-Product GQA Attention
-            let seq_len = kv_cache.cached_k.len();
-            backend.gqa_attention(
-                &mut attn_out,
-                &q,
-                &kv_cache.flat_k,
-                &kv_cache.flat_v,
-                seq_len,
-                num_heads,
-                num_kv_heads,
-                head_dim,
-            );
+                let mut flat_k = Vec::new();
+                let mut flat_v = Vec::new();
+                let _ = mgr.read().gather_sequence_layer_kv(seq_id, layer_idx, &mut flat_k, &mut flat_v);
 
-            // 2f. Output projection and residual connection
+                kv_cache.cached_k.push(k.clone());
+                kv_cache.cached_v.push(v.clone());
+                kv_cache.flat_k = flat_k.clone();
+                kv_cache.flat_v = flat_v.clone();
+
+                let seq_len = kv_cache.cached_k.len();
+                backend.gqa_attention(
+                    &mut attn_out,
+                    &q,
+                    &flat_k,
+                    &flat_v,
+                    seq_len,
+                    num_heads,
+                    num_kv_heads,
+                    head_dim,
+                );
+            } else {
+                kv_cache.cached_k.push(k.clone());
+                kv_cache.cached_v.push(v.clone());
+                kv_cache.flat_k.extend_from_slice(&k);
+                kv_cache.flat_v.extend_from_slice(&v);
+
+                let seq_len = kv_cache.cached_k.len();
+                backend.gqa_attention(
+                    &mut attn_out,
+                    &q,
+                    &kv_cache.flat_k,
+                    &kv_cache.flat_v,
+                    seq_len,
+                    num_heads,
+                    num_kv_heads,
+                    head_dim,
+                );
+            }
+
             backend.matmul_vec(
                 &mut attn_proj,
                 &attn_out,
@@ -163,10 +418,7 @@ impl NativeTransformerBackend {
                 x[i] += attn_proj[i];
             }
 
-            // 2g. Post-Attention RMSNorm
             backend.rmsnorm(&mut post_norm, &x, &layer_w.post_attention_layernorm, eps);
-
-            // 2h. SwiGLU MLP and residual connection
             backend.matmul_vec(&mut gate, &post_norm, &layer_w.gate_proj, intermediate_dim, hidden_dim);
             backend.matmul_vec(&mut up, &post_norm, &layer_w.up_proj, intermediate_dim, hidden_dim);
             backend.swiglu(&mut activated, &gate, &up);
@@ -177,20 +429,18 @@ impl NativeTransformerBackend {
             }
         }
 
-        // 3. Final RMSNorm
         let mut x_final = vec![0.0f32; hidden_dim];
         backend.rmsnorm(&mut x_final, &x, &weights.final_norm, eps);
         x_final
     }
 
-    /// Implementation helper computing logits projection on disjoint struct fields.
-    pub fn compute_logits_impl(
+    fn compute_logits_impl(
         weights: &TransformerWeights,
         backend: &dyn TensorBackend,
         hidden_state: &[f32],
     ) -> Vec<f32> {
-        let hidden_dim = weights.config.hidden_dim();
         let vocab_size = weights.config.vocab_size();
+        let hidden_dim = weights.config.hidden_dim();
         let mut logits = vec![0.0f32; vocab_size];
         backend.compute_logits(
             &mut logits,
@@ -203,13 +453,23 @@ impl NativeTransformerBackend {
     }
 
     /// Prefill all prompt tokens layer-by-layer rather than token-by-token.
-    /// Eliminates streaming the 22 layers of model weights 128 times across the memory bus,
-    /// keeping weights resident in CPU cache across prompt token positions.
     pub fn prefill_prompt_layer_by_layer(
         weights: &TransformerWeights,
         backend: &dyn TensorBackend,
         prompt_tokens: &[u32],
         seq_state: &mut SequenceState,
+    ) -> Vec<f32> {
+        Self::prefill_prompt_layer_by_layer_paged(weights, backend, prompt_tokens, seq_state, 0, None)
+    }
+
+    /// Prefill all prompt tokens layer-by-layer with optional paged COW KV registration.
+    pub fn prefill_prompt_layer_by_layer_paged(
+        weights: &TransformerWeights,
+        backend: &dyn TensorBackend,
+        prompt_tokens: &[u32],
+        seq_state: &mut SequenceState,
+        seq_id: u64,
+        kv_manager: Option<&SharedKvManager>,
     ) -> Vec<f32> {
         let n = prompt_tokens.len();
         if n == 0 {
@@ -217,7 +477,15 @@ impl NativeTransformerBackend {
         }
         if n == 1 {
             seq_state.tokens.push(prompt_tokens[0]);
-            return Self::forward_token_impl(weights, backend, prompt_tokens[0], 0, seq_state);
+            return Self::forward_token_impl_paged(
+                weights,
+                backend,
+                prompt_tokens[0],
+                0,
+                seq_state,
+                seq_id,
+                kv_manager,
+            );
         }
 
         let hidden_dim = weights.config.hidden_dim();
@@ -232,7 +500,6 @@ impl NativeTransformerBackend {
 
         seq_state.tokens.extend_from_slice(prompt_tokens);
 
-        // 1. Look up embeddings for all prompt tokens
         let mut states: Vec<Vec<f32>> = prompt_tokens
             .iter()
             .map(|&tok| {
@@ -242,7 +509,6 @@ impl NativeTransformerBackend {
             })
             .collect();
 
-        // 2. Pre-allocated batched buffers for all prompt tokens across layers
         let mut x_norm_batch = vec![0.0f32; n * hidden_dim];
         let mut q_batch = vec![0.0f32; n * q_dim];
         let mut k_batch = vec![0.0f32; n * kv_dim];
@@ -255,22 +521,20 @@ impl NativeTransformerBackend {
         let mut act_batch = vec![0.0f32; n * intermediate_dim];
         let mut mlp_out_batch = vec![0.0f32; n * hidden_dim];
 
-        // 3. Process each transformer layer using batched GEMM
+        let block_table = kv_manager.and_then(|mgr| mgr.read().get_block_table(seq_id).cloned());
+
         for (layer_idx, layer_w) in weights.layers.iter().enumerate() {
             let kv_cache = &mut seq_state.layers[layer_idx];
 
-            // 3a. Batched Input RMSNorm
             for t in 0..n {
                 let out_slice = &mut x_norm_batch[t * hidden_dim..(t + 1) * hidden_dim];
                 backend.rmsnorm(out_slice, &states[t], &layer_w.input_layernorm, eps);
             }
 
-            // 3b. Batched Q, K, V GEMMs across all prompt tokens
             backend.matmul_batch(&mut q_batch, &x_norm_batch, &layer_w.q_proj, n, hidden_dim, q_dim);
             backend.matmul_batch(&mut k_batch, &x_norm_batch, &layer_w.k_proj, n, hidden_dim, kv_dim);
             backend.matmul_batch(&mut v_batch, &x_norm_batch, &layer_w.v_proj, n, hidden_dim, kv_dim);
 
-            // 3c. RoPE for each prompt position and append to KV cache
             for t in 0..n {
                 let q_t = &mut q_batch[t * q_dim..(t + 1) * q_dim];
                 let k_t = &mut k_batch[t * kv_dim..(t + 1) * kv_dim];
@@ -278,13 +542,20 @@ impl NativeTransformerBackend {
 
                 backend.apply_rope(q_t, k_t, t, head_dim, num_heads, num_kv_heads, theta);
 
+                if let (Some(tbl), Some(mgr)) = (&block_table, kv_manager) {
+                    let block_size = weights.config.block_size;
+                    let block_idx = t / block_size;
+                    let block_id = tbl.block_ids[block_idx];
+                    let slot = t % block_size;
+                    let _ = mgr.write().write_explicit_token_kv(block_id, layer_idx, slot, k_t, v_t);
+                }
+
                 kv_cache.cached_k.push(k_t.to_vec());
                 kv_cache.cached_v.push(v_t.to_vec());
                 kv_cache.flat_k.extend_from_slice(k_t);
                 kv_cache.flat_v.extend_from_slice(v_t);
             }
 
-            // 3d. Causal GQA Attention across all prompt tokens
             for t in 0..n {
                 let q_t = &q_batch[t * q_dim..(t + 1) * q_dim];
                 let attn_t = &mut attn_out_batch[t * q_dim..(t + 1) * q_dim];
@@ -302,7 +573,6 @@ impl NativeTransformerBackend {
                 );
             }
 
-            // 3e. Batched Output Projection GEMM
             backend.matmul_batch(&mut attn_proj_batch, &attn_out_batch, &layer_w.o_proj, n, q_dim, hidden_dim);
             for t in 0..n {
                 let proj_t = &attn_proj_batch[t * hidden_dim..(t + 1) * hidden_dim];
@@ -311,17 +581,14 @@ impl NativeTransformerBackend {
                 }
             }
 
-            // 3f. Batched Post-Attention RMSNorm
             for t in 0..n {
                 let out_slice = &mut post_norm_batch[t * hidden_dim..(t + 1) * hidden_dim];
                 backend.rmsnorm(out_slice, &states[t], &layer_w.post_attention_layernorm, eps);
             }
 
-            // 3g. Batched MLP Gate and Up GEMMs
             backend.matmul_batch(&mut gate_batch, &post_norm_batch, &layer_w.gate_proj, n, hidden_dim, intermediate_dim);
             backend.matmul_batch(&mut up_batch, &post_norm_batch, &layer_w.up_proj, n, hidden_dim, intermediate_dim);
 
-            // 3h. SwiGLU Activations
             for t in 0..n {
                 let gate_t = &gate_batch[t * intermediate_dim..(t + 1) * intermediate_dim];
                 let up_t = &up_batch[t * intermediate_dim..(t + 1) * intermediate_dim];
@@ -329,7 +596,6 @@ impl NativeTransformerBackend {
                 backend.swiglu(act_t, gate_t, up_t);
             }
 
-            // 3i. Batched MLP Down Projection GEMM
             backend.matmul_batch(&mut mlp_out_batch, &act_batch, &layer_w.down_proj, n, intermediate_dim, hidden_dim);
             for t in 0..n {
                 let mlp_t = &mlp_out_batch[t * hidden_dim..(t + 1) * hidden_dim];
@@ -339,7 +605,6 @@ impl NativeTransformerBackend {
             }
         }
 
-        // 4. Final RMSNorm on the last prompt token
         let last_x = &states[n - 1];
         let mut x_final = vec![0.0f32; hidden_dim];
         backend.rmsnorm(&mut x_final, last_x, &weights.final_norm, eps);
@@ -382,6 +647,11 @@ impl AienInferenceBackend for NativeTransformerBackend {
         // 1. Prefill Requests
         for req in &batch.prefill_requests {
             prefill_tokens += req.prompt_tokens.len();
+
+            if let Some(kv_mgr) = &self.kv_manager {
+                let _ = kv_mgr.write().allocate_sequence(req.request_id, &req.prompt_tokens);
+            }
+
             let seq = self
                 .sequences
                 .entry(req.request_id)
@@ -390,14 +660,15 @@ impl AienInferenceBackend for NativeTransformerBackend {
                     layers: vec![LayerKvCache::default(); num_layers],
                 });
 
-            let last_hidden = Self::prefill_prompt_layer_by_layer(
+            let last_hidden = Self::prefill_prompt_layer_by_layer_paged(
                 &self.weights,
                 &*self.tensor_backend,
                 &req.prompt_tokens,
                 seq,
+                req.request_id,
+                self.kv_manager.as_ref(),
             );
 
-            // Compute real logits on the prompt's last token via TensorBackend
             let logits = Self::compute_logits_impl(&self.weights, &*self.tensor_backend, &last_hidden);
             let (sampled_tok, logprob) = if req.sampling_params.temperature <= 0.001 {
                 sample_argmax(&logits)
@@ -417,18 +688,17 @@ impl AienInferenceBackend for NativeTransformerBackend {
         // 2. Decode Requests
         for &req_id in &batch.decode_requests {
             if let Some(seq) = self.sequences.get_mut(&req_id) {
-                // Prefill already pushed the first generated token to seq.tokens,
-                // so the sequence length is currently tokens.len() and the token being
-                // evaluated is at index tokens.len() - 1.
                 let pos = seq.tokens.len().saturating_sub(1);
                 let last_token = *seq.tokens.last().unwrap_or(&1);
 
-                let hidden = Self::forward_token_impl(
+                let hidden = Self::forward_token_impl_paged(
                     &self.weights,
                     &*self.tensor_backend,
                     last_token,
                     pos,
                     seq,
+                    req_id,
+                    self.kv_manager.as_ref(),
                 );
                 let logits = Self::compute_logits_impl(&self.weights, &*self.tensor_backend, &hidden);
 
@@ -519,5 +789,59 @@ mod tests {
 
         let logits = backend.compute_logits(&hidden);
         assert_eq!(logits.len(), config.vocab_size());
+    }
+
+    #[test]
+    fn test_paged_cow_context_and_branch_fork() {
+        let config = ModelConfig {
+            num_layers: 2,
+            num_heads: 4,
+            num_kv_heads: 2,
+            head_dim: 16,
+            hidden_dim: 64,
+            intermediate_dim: 128,
+            vocab_size: 256,
+            block_size: 16,
+            ..Default::default()
+        };
+
+        let weights = TransformerWeights::reference_test_weights(&config);
+        let mut backend = NativeTransformerBackend::with_paged_kv(weights, 200, 16).unwrap();
+
+        // 1. Create parent context with 30 prompt tokens (2 blocks)
+        let prompt: Vec<u32> = (0..30).collect();
+        let parent = backend.create_context(&prompt).unwrap();
+
+        // 2. Fork 4 branches
+        let b1 = backend.fork_context(parent).unwrap();
+        let b2 = backend.fork_context(parent).unwrap();
+        let b3 = backend.fork_context(parent).unwrap();
+        let b4 = backend.fork_context(parent).unwrap();
+
+        // Initial receipt before decode: 2 shared pages
+        let r_init = backend.get_usage_receipt(b1).unwrap();
+        assert_eq!(r_init.shared_pages, 2);
+        assert_eq!(r_init.private_pages, 0);
+
+        // 3. Decode step for each branch -> triggers COW divergence on partial block 1
+        let (t1, _) = backend.decode_branch_step(b1).unwrap();
+        let (t2, _) = backend.decode_branch_step(b2).unwrap();
+        let (t3, _) = backend.decode_branch_step(b3).unwrap();
+        let (t4, _) = backend.decode_branch_step(b4).unwrap();
+
+        // Tokens generated
+        assert_eq!(t1, t2); // Same deterministic greedy choice initially
+        assert_eq!(t3, t4);
+
+        let r_after = backend.get_usage_receipt(b1).unwrap();
+        assert_eq!(r_after.cow_faults, 4); // All 4 branches COWed tail page
+        assert_eq!(r_after.shared_pages, 1); // Prefix block 0 remains shared
+        assert_eq!(r_after.private_pages, 1); // Divergent block 1 is private
+
+        // 4. Release branches
+        backend.release_branch(b1).unwrap();
+        backend.release_branch(b2).unwrap();
+        backend.release_branch(b3).unwrap();
+        backend.release_branch(b4).unwrap();
     }
 }

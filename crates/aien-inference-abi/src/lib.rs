@@ -19,6 +19,30 @@ pub use tensor::*;
 pub use tokenizer::*;
 pub use transformer_backend::*;
 pub use weights::*;
+pub use aien_kv_cache::*;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ModelHandle(pub u64);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ContextHandle(pub u64);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct BranchHandle(pub u64);
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct AienUsageReceipt {
+    pub prefix_tokens: usize,
+    pub private_tokens: usize,
+    pub logical_pages: usize,
+    pub physical_pages: usize,
+    pub shared_pages: usize,
+    pub private_pages: usize,
+    pub cow_faults: usize,
+    pub physical_kv_bytes: usize,
+    pub bytes_saved_vs_full_copy: usize,
+}
+
 
 fn default_num_kv_heads() -> usize {
     8
