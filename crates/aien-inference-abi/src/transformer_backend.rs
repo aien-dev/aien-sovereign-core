@@ -258,15 +258,19 @@ impl NativeTransformerBackend {
         Ok((sampled_tok, logits))
     }
 
-    /// Generates tokens autoregressively from a sequence of prompt tokens.
-    pub fn generate_tokens(
+    /// Generates tokens autoregressively, invoking a callback for each generated token.
+    pub fn generate_tokens_streaming<F>(
         &mut self,
         seq_id: u64,
         prompt_tokens: &[u32],
         max_tokens: usize,
         temperature: f32,
         stop_tokens: &[u32],
-    ) -> Result<Vec<u32>, String> {
+        mut on_token: F,
+    ) -> Result<(), String>
+    where
+        F: FnMut(u32) -> bool,
+    {
         if prompt_tokens.is_empty() {
             return Err("Cannot generate from empty prompt".to_string());
         }
@@ -281,11 +285,13 @@ impl NativeTransformerBackend {
 
         if stop_tokens.contains(&first_tok) {
             self.release_sequence(seq_id);
-            return Ok(Vec::new());
+            return Ok(());
         }
 
-        let mut generated = Vec::with_capacity(max_tokens);
-        generated.push(first_tok);
+        if !on_token(first_tok) {
+            self.release_sequence(seq_id);
+            return Ok(());
+        }
 
         if let Some(seq) = self.sequences.get_mut(&seq_id) {
             seq.tokens.push(first_tok);
@@ -321,13 +327,40 @@ impl NativeTransformerBackend {
                 break;
             }
 
-            generated.push(next_tok);
+            if !on_token(next_tok) {
+                break;
+            }
+
             if let Some(seq) = self.sequences.get_mut(&seq_id) {
                 seq.tokens.push(next_tok);
             }
         }
 
         self.release_sequence(seq_id);
+        Ok(())
+    }
+
+    /// Generates tokens autoregressively from a sequence of prompt tokens.
+    pub fn generate_tokens(
+        &mut self,
+        seq_id: u64,
+        prompt_tokens: &[u32],
+        max_tokens: usize,
+        temperature: f32,
+        stop_tokens: &[u32],
+    ) -> Result<Vec<u32>, String> {
+        let mut generated = Vec::with_capacity(max_tokens);
+        self.generate_tokens_streaming(
+            seq_id,
+            prompt_tokens,
+            max_tokens,
+            temperature,
+            stop_tokens,
+            |tok| {
+                generated.push(tok);
+                true
+            },
+        )?;
         Ok(generated)
     }
 
@@ -977,6 +1010,32 @@ mod tests {
         let generated = backend.generate_tokens(555, &prompt, 4, 0.0, &stop_tokens).unwrap();
         assert_eq!(generated.len(), 4);
         assert!(!generated.contains(&0));
+        assert_eq!(backend.sequences.len(), 0);
+    }
+
+    #[test]
+    fn test_native_transformer_generate_tokens_streaming() {
+        let config = ModelConfig {
+            num_layers: 2,
+            num_heads: 4,
+            num_kv_heads: 2,
+            head_dim: 16,
+            hidden_dim: 64,
+            intermediate_dim: 128,
+            vocab_size: 256,
+            block_size: 16,
+            ..Default::default()
+        };
+        let mut backend = NativeTransformerBackend::with_reference_weights(&config);
+        let prompt = vec![1, 5, 9];
+        let stop_tokens = vec![0];
+        let mut streamed = Vec::new();
+        backend.generate_tokens_streaming(777, &prompt, 4, 0.0, &stop_tokens, |tok| {
+            streamed.push(tok);
+            true
+        }).unwrap();
+        assert_eq!(streamed.len(), 4);
+        assert!(!streamed.contains(&0));
         assert_eq!(backend.sequences.len(), 0);
     }
 }
