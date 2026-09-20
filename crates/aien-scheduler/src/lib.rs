@@ -346,7 +346,10 @@ impl AienScheduler {
                         let is_prefilled = table.total_tokens >= prompt_len;
                         (Ok(table.block_ids.clone()), is_prefilled)
                     } else {
-                        (kv.allocate_sequence(req.request_id, &req.prompt_tokens), false)
+                        (
+                            kv.allocate_sequence(req.request_id, &req.prompt_tokens),
+                            false,
+                        )
                     }
                 };
 
@@ -432,7 +435,10 @@ impl AienScheduler {
                         let is_prefilled = table.total_tokens >= prompt_len;
                         (Ok(table.block_ids.clone()), is_prefilled)
                     } else {
-                        (kv.allocate_sequence(req.request_id, &req.prompt_tokens), false)
+                        (
+                            kv.allocate_sequence(req.request_id, &req.prompt_tokens),
+                            false,
+                        )
                     }
                 };
 

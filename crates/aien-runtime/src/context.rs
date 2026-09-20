@@ -197,7 +197,11 @@ impl ContextComposer {
     }
 
     /// Computes missing prefill tokens for a sequence whose current prefill cursor lags the revision.
-    pub fn compute_missing_prefill(&self, rev_id: u64, prefill_cursor: usize) -> Option<PrefillSpan> {
+    pub fn compute_missing_prefill(
+        &self,
+        rev_id: u64,
+        prefill_cursor: usize,
+    ) -> Option<PrefillSpan> {
         let rev = self.get_revision(rev_id)?;
         if prefill_cursor >= rev.total_tokens {
             return None;

@@ -87,7 +87,8 @@ async fn test_runtime_spine_500_branch_benchmark() {
             peak_logical_pages = m.logical_pages;
             peak_physical_pages = m.physical_pages;
             peak_shared_pages = m.shared_pages;
-            peak_sharing_ratio = ((m.logical_pages - m.physical_pages) as f64 / m.logical_pages as f64) * 100.0;
+            peak_sharing_ratio =
+                ((m.logical_pages - m.physical_pages) as f64 / m.logical_pages as f64) * 100.0;
         }
     }
 
@@ -129,7 +130,10 @@ async fn test_runtime_spine_500_branch_benchmark() {
     println!("Peak Physical KV Pages: {}", peak_physical_pages);
     println!("Peak Shared KV Pages:   {}", peak_shared_pages);
     println!("Peak KV Sharing Ratio:  {:.2}%", peak_sharing_ratio);
-    println!("Final Physical Blocks:  {} (after branch completion)", metrics.physical_pages);
+    println!(
+        "Final Physical Blocks:  {} (after branch completion)",
+        metrics.physical_pages
+    );
     println!("COW Fault Events:       {}", metrics.cow_faults);
     println!("CPU Fallback Events:    0");
     println!("Active Worlds:          {}", status.active_worlds);

@@ -3,7 +3,9 @@
 //! and SwarmManager in a single process address space.
 
 use crate::context::ContextComposer;
-use crate::control::{ControlCommand, ControlEnvelope, ControlResponse, RuntimeController, RuntimeStatusReport};
+use crate::control::{
+    ControlCommand, ControlEnvelope, ControlResponse, RuntimeController, RuntimeStatusReport,
+};
 use crate::sequence::{SequenceArena, SequenceId, SequenceState};
 use crate::swarm::{SwarmConfig, SwarmManager};
 use crate::world::WorldStore;
@@ -127,7 +129,10 @@ impl AienRuntimeSpine {
 
     /// Handles a typed operator command with idempotency verification.
     pub fn handle_control_command(&mut self, envelope: ControlEnvelope) -> ControlResponse {
-        if self.controller.is_operation_processed(envelope.operation_id) {
+        if self
+            .controller
+            .is_operation_processed(envelope.operation_id)
+        {
             return ControlResponse::Error(format!(
                 "Operation {} already processed",
                 envelope.operation_id
@@ -146,7 +151,8 @@ impl AienRuntimeSpine {
                 };
                 match self.launch_swarm(config, &req.prompt_tokens) {
                     Ok(swarm_id) => {
-                        self.controller.mark_operation_processed(envelope.operation_id);
+                        self.controller
+                            .mark_operation_processed(envelope.operation_id);
                         ControlResponse::SwarmAccepted {
                             swarm_id,
                             operation_id: envelope.operation_id,
@@ -158,15 +164,14 @@ impl AienRuntimeSpine {
             ControlCommand::CancelSwarm(swarm_id) => {
                 match self.swarm_manager.cancel_swarm(swarm_id, &mut self.arena) {
                     Ok(()) => {
-                        self.controller.mark_operation_processed(envelope.operation_id);
+                        self.controller
+                            .mark_operation_processed(envelope.operation_id);
                         ControlResponse::SwarmCancelled { swarm_id }
                     }
                     Err(e) => ControlResponse::Error(e),
                 }
             }
-            ControlCommand::GetRuntimeStatus => {
-                ControlResponse::Status(self.status_report())
-            }
+            ControlCommand::GetRuntimeStatus => ControlResponse::Status(self.status_report()),
             ControlCommand::InspectSwarm(swarm_id) => {
                 if let Some(swarm) = self.swarm_manager.get_swarm(swarm_id) {
                     let _ = swarm;

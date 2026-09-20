@@ -145,10 +145,12 @@ impl SequenceArena {
             )
         };
 
-        let child_slot = self
-            .free_slots
-            .pop()
-            .ok_or_else(|| format!("SequenceArena capacity exhausted on fork ({})", self.capacity))?;
+        let child_slot = self.free_slots.pop().ok_or_else(|| {
+            format!(
+                "SequenceArena capacity exhausted on fork ({})",
+                self.capacity
+            )
+        })?;
 
         let slot = &mut self.slots[child_slot as usize];
         let child_id = SequenceId::new(child_slot, slot.generation);
@@ -218,14 +220,10 @@ impl SequenceArena {
     }
 
     pub fn iter_active(&self) -> impl Iterator<Item = &SequenceRecord> {
-        self.slots
-            .iter()
-            .filter_map(|s| s.record.as_ref())
+        self.slots.iter().filter_map(|s| s.record.as_ref())
     }
 
     pub fn iter_active_mut(&mut self) -> impl Iterator<Item = &mut SequenceRecord> {
-        self.slots
-            .iter_mut()
-            .filter_map(|s| s.record.as_mut())
+        self.slots.iter_mut().filter_map(|s| s.record.as_mut())
     }
 }

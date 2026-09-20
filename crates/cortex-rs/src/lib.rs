@@ -8,9 +8,9 @@ pub mod embeddings;
 pub mod handlers;
 pub mod models;
 
-use std::sync::Arc;
 pub use db::Database;
 pub use models::*;
+use std::sync::Arc;
 
 /// In-process Cortex memory runtime avoiding localhost HTTP serialization overhead.
 pub struct CortexRuntime {

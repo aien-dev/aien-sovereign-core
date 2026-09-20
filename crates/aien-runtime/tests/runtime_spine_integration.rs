@@ -128,7 +128,10 @@ async fn test_swarm_launch_and_step_execution() {
 
     let resp = spine.handle_control_command(env.clone());
     match resp {
-        ControlResponse::SwarmAccepted { swarm_id, operation_id } => {
+        ControlResponse::SwarmAccepted {
+            swarm_id,
+            operation_id,
+        } => {
             assert_eq!(swarm_id, 1);
             assert_eq!(operation_id, 99991);
         }
@@ -149,13 +152,18 @@ async fn test_swarm_launch_and_step_execution() {
 
     // Advance engine steps until all scheduled branch sequences finish
     let mut steps = 0;
-    while (spine.scheduler.running_count() > 0 || spine.scheduler.waiting_count() > 0) && steps < 50 {
+    while (spine.scheduler.running_count() > 0 || spine.scheduler.waiting_count() > 0) && steps < 50
+    {
         steps += 1;
         let _ = spine.step(&mut backend).await.unwrap();
     }
 
     // 16 child branches have completed and been freed; root sequence remains as context anchor
-    assert_eq!(spine.arena.active_count(), 1, "Only root sequence remains in arena");
+    assert_eq!(
+        spine.arena.active_count(),
+        1,
+        "Only root sequence remains in arena"
+    );
     let status = spine.status_report();
     assert_eq!(status.active_sequences, 1);
 }
