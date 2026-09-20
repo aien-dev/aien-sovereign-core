@@ -48,6 +48,7 @@ dependencies = [
 name = "aien-inference-abi"
 version = "0.1.0"
 dependencies = [
+ "aien-kv-cache",
  "async-trait",
  "libloading 0.8.9",
  "rayon",
@@ -62,7 +63,6 @@ dependencies = [
 name = "aien-kv-cache"
 version = "0.1.0"
 dependencies = [
- "aien-inference-abi",
  "libc",
  "parking_lot",
  "serde",
