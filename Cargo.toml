@@ -25,6 +25,7 @@ members = [
     "crates/aien-security",
     "crates/aien-platform",
     "crates/aien-platform-linux",
+    "crates/rad-id-sync",
 ]
 
 [workspace.package]

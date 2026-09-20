@@ -281,9 +281,9 @@ fn main() {
         Commands::Fix { file } => match fs::read_to_string(&file) {
             Ok(content) => {
                 let fixed = content
-                    .replace(" — ", ": ")
-                    .replace('—', ", ")
-                    .replace('–', "-");
+                    .replace(" \u{2014} ", ": ")
+                    .replace('\u{2014}', ", ")
+                    .replace('\u{2013}', "-");
                 if fixed != content {
                     if let Err(e) = fs::write(&file, &fixed) {
                         eprintln!(
