@@ -21,6 +21,7 @@ pub enum ControlCommand {
     InspectSwarm(u64),
     CancelSwarm(u64),
     GetRuntimeStatus,
+    Shutdown,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -49,6 +50,7 @@ pub enum ControlResponse {
     SwarmAccepted { swarm_id: u64, operation_id: u128 },
     SwarmCancelled { swarm_id: u64 },
     Status(RuntimeStatusReport),
+    ShutdownAck,
     Error(String),
 }
 

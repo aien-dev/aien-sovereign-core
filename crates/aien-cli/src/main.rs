@@ -37,6 +37,14 @@ async fn main() {
     let args: Vec<String> = env::args().collect();
 
     if args.len() > 1 {
+        if args[1] == "--daemon" || args[1] == "daemon" {
+            commands::run_daemon_server().await;
+            return;
+        }
+        if args[1] == "--swarm" || args[1] == "swarm" {
+            commands::handle_swarm_command(&args[2..]).await;
+            return;
+        }
         if args[1] == "--start" || args[1] == "start" {
             commands::handle_start_command().await;
             return;

@@ -180,6 +180,11 @@ impl AienRuntimeSpine {
                     ControlResponse::Error(format!("Swarm {} not found", swarm_id))
                 }
             }
+            ControlCommand::Shutdown => {
+                self.controller
+                    .mark_operation_processed(envelope.operation_id);
+                ControlResponse::ShutdownAck
+            }
         };
 
         resp
