@@ -27,7 +27,7 @@ Standard: Brutally Factual Systems Audit. Zero Marketing Language.
 | **aien-scheduler** | Active | **Benchmarked** | Sub-microsecond batch build overhead (2.2 µs at B=1 to 49.1 µs at B=256), chunked prefill validated | Priority queues currently hold 5 static priority tiers. |
 | **spark-max-cabi** | Active | **Working Locally** | C-ABI dynamic library libspark_max.so compiled via Mojo 1.0.0, FFI tests passing | Shared object path must be present in LD_LIBRARY_PATH or binary build dir. |
 | **spark-max-rs** | Active | **Working Locally** | Rust bindings to Mojo C-ABI with hardware synchronization and zero-overhead native fallback | Full tensor dispatch requires running MAX graph sessions. |
-| **aien-inference-abi** | Active | **Cross-platform Verified** | Trait contracts, MockInferenceBackend, MaxServingBackend, VllmServingBackend, NativeCpuInferenceBackend; tested on Apple Silicon M2, Linux x86_64, and Grace Blackwell | Live streaming SSE parsing is raw text; structured function calling parsing is pending. |
+| **aien-inference-abi** | Active | **Cross-platform Verified** | Trait contracts, BlackwellInferenceBackend, MojoInferenceBackend, NativeCpuInferenceBackend, MockInferenceBackend (and transitional MaxServingBackend); tested on Apple Silicon M2, Linux x86_64, and Grace Blackwell | Live streaming SSE parsing is raw text; structured function calling parsing is pending. |
 | **Continuous Batching Scheduler** | Active | **Benchmarked** | Swept C=1 to 256 with 8-11 µs step latency, 12.3k steps/sec dispatch throughput, live power telemetry (11.5W-12.0W), 1,000 child zero-copy forks | Multi-stream continuous prefill pipeline verified against live MAX endpoints. |
 
 ## Empirical Baseline Measurements

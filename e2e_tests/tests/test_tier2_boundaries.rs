@@ -735,8 +735,8 @@ fn test_f15_b03_thermal_cool_down_duration_seconds() {
 #[test]
 fn test_f15_b04_http_port_separation_contract() {
     let max_port = 8000;
-    let vllm_port = 8001;
-    assert_ne!(max_port, vllm_port);
+    let internal_runtime_port = 18006;
+    assert_ne!(max_port, internal_runtime_port);
 }
 
 #[test]

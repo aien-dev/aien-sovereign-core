@@ -161,7 +161,7 @@ The test matrix covers all 18 features across four structured tiers:
 
 #### Feature F15: Neutral Benchmark Driver
 - TC-F15-01: Verify benchmark crate `benchmarks/crates/bench_apples_to_apples` exists in workspace.
-- TC-F15-02: Verify benchmark driver accepts `--engines` argument for AIEN, MAX, and vLLM.
+- TC-F15-02: Verify benchmark driver accepts `--engines` argument for AIEN and MAX.
 - TC-F15-03: Verify benchmark driver accepts `--concurrency` sweep argument.
 - TC-F15-04: Verify benchmark driver executes engines sequentially with cool-down pauses.
 - TC-F15-05: Verify benchmark driver verifies output token correctness against reference oracle.
@@ -336,7 +336,7 @@ The test matrix covers all 18 features across four structured tiers:
 13. Pair P13 (F11 + F14): `MojoGb10Backend` implements `TensorBackend` trait and replaces CPU math transparently.
 14. Pair P14 (F13 + F14): Compiled `libaien_kernels.so` loaded by `MojoGb10Backend` executes on DGX Spark unified memory without per-token copies.
 15. Pair P15 (F10 + F14): Multi-stage parity test executed against `MojoGb10Backend` achieves identical greedy tokens and tolerances.
-16. Pair P16 (F15 + F16): Neutral benchmark driver executes concurrency sweep C=1..64 across AIEN, MAX, and vLLM collecting TTFT and ITL.
+16. Pair P16 (F15 + F16): Neutral benchmark driver executes concurrency sweep C=1..64 across AIEN and MAX collecting TTFT and ITL.
 17. Pair P17 (F16 + F17): Telemetry collection records GPU power and memory while maintaining zero disk secrets in memory.
 18. Pair P18 (F15 + F18): Benchmark completion writes structured results and triggers autonomous PR squash merge with Cortex memory receipt.
 
@@ -357,7 +357,7 @@ The test matrix covers all 18 features across four structured tiers:
 6. Scenario SC-06 (Automated Parity Gate):
    CI or operator runs `cargo test -p aien-inference-abi --test tinyllama_parity --verbose`. System validates Stages 1 to 5 against oracle fixture and reports zero regressions.
 7. Scenario SC-07 (Apples-to-Apples Multi-Engine Benchmark):
-   Operator launches neutral benchmark orchestrator. System tests AIEN, pauses for thermal cool-down, tests MAX, pauses, tests vLLM, and outputs comparative TTFT/ITL telemetry.
+   Operator launches neutral benchmark orchestrator. System tests AIEN, pauses for thermal cool-down, tests MAX, and outputs comparative TTFT/ITL telemetry.
 8. Scenario SC-08 (Zero-Disk-Secrets Invariant Audit):
    Automated auditor scans workspace. Verifies zero `.env` files, tests in-memory TPM vault resolution, and verifies compliance.
 9. Scenario SC-09 (Sovereign Voice & Git PR Lifecycle):

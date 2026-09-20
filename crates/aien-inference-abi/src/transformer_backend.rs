@@ -444,7 +444,7 @@ impl NativeTransformerBackend {
     }
 
     /// Internal forward pass executing one token forward pass through the transformer.
-    fn forward_token_impl(
+    pub fn forward_token_impl(
         weights: &TransformerWeights,
         backend: &dyn TensorBackend,
         token_id: u32,
@@ -576,7 +576,7 @@ impl NativeTransformerBackend {
         x_final
     }
 
-    fn compute_logits_impl(
+    pub fn compute_logits_impl(
         weights: &TransformerWeights,
         backend: &dyn TensorBackend,
         hidden_state: &[f32],

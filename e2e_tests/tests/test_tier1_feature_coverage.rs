@@ -805,10 +805,9 @@ fn test_f15_01_benchmark_driver_workspace_contract() {
 
 #[test]
 fn test_f15_02_benchmark_sequential_execution_order() {
-    let engines = ["aien", "max", "vllm"];
+    let engines = ["aien", "max"];
     assert_eq!(engines[0], "aien");
     assert_eq!(engines[1], "max");
-    assert_eq!(engines[2], "vllm");
 }
 
 #[test]

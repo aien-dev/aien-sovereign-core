@@ -59,7 +59,7 @@ The test matrix implements the 4-tier testing methodology across all 18 features
 - F14 (MojoGb10Backend Implementation): 10 tests (TC-F14-01..05, TC-F14-B01..B05)
   * Dynamic library missing fallback, thread safety (`Send + Sync`), zero-copy pointer marshalling, persistent KV allocations.
 - F15 (Neutral Benchmark Driver): 10 tests (TC-F15-01..05, TC-F15-B01..B05)
-  * Sequential execution ordering (AIEN -> MAX -> vLLM), mandatory `--no-device-graph-capture` flag for MAX, 30-second thermal cool-down envelopes.
+  * Sequential execution ordering (AIEN -> MAX), mandatory `--no-device-graph-capture` flag for MAX, 30-second thermal cool-down envelopes.
 - F16 (Concurrency Sweeps & Telemetry): 10 tests (TC-F16-01..05, TC-F16-B01..B05)
   * Concurrency sweep levels `C = [1, 2, 4, 8, 16, 32, 64]`, 128 in / 128 out workload, TTFT percentiles (p50, p95, p99), ITL percentiles, energy efficiency (Joules/token).
 - F17 (Hardware & Secrets Compliance): 10 tests (TC-F17-01..05, TC-F17-B01..B05)
