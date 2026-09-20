@@ -446,6 +446,7 @@ async fn run_cli(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn execute_cli_distill<R: BufRead>(
     engine: &DistillationEngine,
     prompt: String,
@@ -936,7 +937,7 @@ fn run_verify_keys() {
 
     println!("\n=== Sovereign Infrastructure & Daemons ===");
     println!(
-        "{:<28} {:<24} {:<15} {:<15}",
+        "{:<28} {:<24} {:<15} {:<20}",
         "SERVICE", "ENDPOINT", "STATUS", "AUTH"
     );
     println!("{}", "-".repeat(84));
@@ -944,16 +945,20 @@ fn run_verify_keys() {
     let max_port = is_port_open(18006);
     let max_status = if max_port { "PORT_OPEN" } else { "OFFLINE" };
     println!(
-        "{:<28} {:<24} {:<15} {:<15}",
+        "{:<28} {:<24} {:<15} {:<20}",
         "Modular MAX Engine", "http://127.0.0.1:18006", max_status, "LOCAL_SILICON"
     );
 
     let cortex_port = is_port_open(18080);
     let cortex_key = spark_adapters::vault::is_secret_present("CORTEX_TOKEN");
     let cortex_status = if cortex_port { "PORT_OPEN" } else { "OFFLINE" };
-    let cortex_auth = if cortex_key { "OK" } else { "UNCONFIGURED" };
+    let cortex_auth = if cortex_key {
+        "OK (CORTEX_TOKEN)"
+    } else {
+        "UNCONFIGURED"
+    };
     println!(
-        "{:<28} {:<24} {:<15} {:<15}",
+        "{:<28} {:<24} {:<15} {:<20}",
         "Cortex Memory Daemon", "http://127.0.0.1:18080", cortex_status, cortex_auth
     );
 }
