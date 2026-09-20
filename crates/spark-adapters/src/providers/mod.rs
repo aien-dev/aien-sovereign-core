@@ -29,7 +29,8 @@ pub async fn call_provider_unary(
         | ProviderType::Together
         | ProviderType::Mistral
         | ProviderType::Ollama
-        | ProviderType::LocalMax => {
+        | ProviderType::LocalMax
+        | ProviderType::EmbeddedNative => {
             call_openai_unary(client, endpoint, model, api_key, messages, temperature).await
         }
     }

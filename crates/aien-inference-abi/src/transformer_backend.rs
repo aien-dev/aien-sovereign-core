@@ -258,6 +258,113 @@ impl NativeTransformerBackend {
         Ok((sampled_tok, logits))
     }
 
+    /// Generates tokens autoregressively from a sequence of prompt tokens.
+    pub fn generate_tokens(
+        &mut self,
+        seq_id: u64,
+        prompt_tokens: &[u32],
+        max_tokens: usize,
+        temperature: f32,
+        stop_tokens: &[u32],
+    ) -> Result<Vec<u32>, String> {
+        if prompt_tokens.is_empty() {
+            return Err("Cannot generate from empty prompt".to_string());
+        }
+
+        let logits = self.prefill_sequence(seq_id, prompt_tokens)?;
+
+        let (first_tok, _) = if temperature <= 0.001 {
+            sample_argmax(&logits)
+        } else {
+            sample_temperature(&logits, temperature, seq_id)
+        };
+
+        if stop_tokens.contains(&first_tok) {
+            self.release_sequence(seq_id);
+            return Ok(Vec::new());
+        }
+
+        let mut generated = Vec::with_capacity(max_tokens);
+        generated.push(first_tok);
+
+        if let Some(seq) = self.sequences.get_mut(&seq_id) {
+            seq.tokens.push(first_tok);
+        }
+
+        for step in 1..max_tokens {
+            let seq = match self.sequences.get_mut(&seq_id) {
+                Some(s) => s,
+                None => break,
+            };
+
+            let pos = seq.tokens.len().saturating_sub(1);
+            let last_token = *seq.tokens.last().unwrap_or(&1);
+
+            let hidden = Self::forward_token_impl_paged(
+                &self.weights,
+                &*self.tensor_backend,
+                last_token,
+                pos,
+                seq,
+                seq_id,
+                self.kv_manager.as_ref(),
+            );
+
+            let next_logits = Self::compute_logits_impl(&self.weights, &*self.tensor_backend, &hidden);
+            let (next_tok, _) = if temperature <= 0.001 {
+                sample_argmax(&next_logits)
+            } else {
+                sample_temperature(&next_logits, temperature, seq_id.wrapping_add(step as u64))
+            };
+
+            if stop_tokens.contains(&next_tok) {
+                break;
+            }
+
+            generated.push(next_tok);
+            if let Some(seq) = self.sequences.get_mut(&seq_id) {
+                seq.tokens.push(next_tok);
+            }
+        }
+
+        self.release_sequence(seq_id);
+        Ok(generated)
+    }
+
+    /// Releases a sequence from memory and frees associated KV cache resources.
+    pub fn release_sequence(&mut self, seq_id: u64) {
+        self.sequences.remove(&seq_id);
+        if let Some(kv_mgr) = &self.kv_manager {
+            kv_mgr.write().release_branch(seq_id);
+        }
+    }
+
+    /// Loads TinyLlama weights from safetensors with optional paged KV cache and compute backend.
+    pub fn load_tinyllama_safetensors<P: AsRef<std::path::Path>>(
+        checkpoint_path: P,
+        tensor_backend: Option<Arc<dyn TensorBackend>>,
+        total_blocks: Option<usize>,
+    ) -> Result<Self, String> {
+        let config = ModelConfig::tinyllama_1_1b();
+        let weights = TransformerWeights::load_from_safetensors(checkpoint_path.as_ref(), &config)
+            .map_err(|e| format!("Failed to load safetensors: {}", e))?;
+
+        let backend = tensor_backend.unwrap_or_else(|| {
+            let surface = crate::ExecutionSurface::detect();
+            if surface.is_accelerated_gpu() {
+                Arc::new(BlackwellGb10Backend::new())
+            } else {
+                Arc::new(ReferenceCpuBackend::new())
+            }
+        });
+
+        if let Some(blocks) = total_blocks {
+            Self::with_paged_kv_backend(weights, backend, blocks, config.block_size)
+        } else {
+            Ok(Self::with_backend(weights, backend))
+        }
+    }
+
     /// Returns a telemetry receipt for a branch, calculating shared pages and physical bytes saved.
     pub fn get_usage_receipt(&self, branch: BranchHandle) -> Result<AienUsageReceipt, String> {
         let kv_mgr = self
@@ -849,5 +956,27 @@ mod tests {
         backend.release_branch(b2).unwrap();
         backend.release_branch(b3).unwrap();
         backend.release_branch(b4).unwrap();
+    }
+
+    #[test]
+    fn test_native_transformer_generate_tokens() {
+        let config = ModelConfig {
+            num_layers: 2,
+            num_heads: 4,
+            num_kv_heads: 2,
+            head_dim: 16,
+            hidden_dim: 64,
+            intermediate_dim: 128,
+            vocab_size: 256,
+            block_size: 16,
+            ..Default::default()
+        };
+        let mut backend = NativeTransformerBackend::with_reference_weights(&config);
+        let prompt = vec![1, 5, 9];
+        let stop_tokens = vec![0];
+        let generated = backend.generate_tokens(555, &prompt, 4, 0.0, &stop_tokens).unwrap();
+        assert_eq!(generated.len(), 4);
+        assert!(!generated.contains(&0));
+        assert_eq!(backend.sequences.len(), 0);
     }
 }

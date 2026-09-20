@@ -80,6 +80,23 @@ pub struct ModelConfig {
 }
 
 impl ModelConfig {
+    pub fn tinyllama_1_1b() -> Self {
+        Self {
+            model_id: "TinyLlama/TinyLlama-1.1B-Chat-v1.0".to_string(),
+            max_sequence_length: 2048,
+            block_size: 16,
+            num_layers: 22,
+            num_heads: 32,
+            head_dim: 64,
+            num_kv_heads: 4,
+            hidden_dim: 2048,
+            intermediate_dim: 5632,
+            vocab_size: 32000,
+            rms_norm_eps: 1e-5,
+            rope_theta: 10000.0,
+        }
+    }
+
     pub fn hidden_dim(&self) -> usize {
         if self.hidden_dim > 0 {
             self.hidden_dim
@@ -677,6 +694,122 @@ impl AienInferenceBackend for VllmServingBackend {
     }
 }
 
+/// Fully native in-process embedded inference backend.
+/// Replaces external HTTP daemon dependency with in-process NativeTransformerBackend execution.
+pub struct EmbeddedInferenceBackend {
+    pub backend: NativeTransformerBackend,
+    pub tokenizer: Option<TinyLlamaTokenizer>,
+    pub config: ModelConfig,
+}
+
+impl EmbeddedInferenceBackend {
+    pub fn new(backend: NativeTransformerBackend, tokenizer: Option<TinyLlamaTokenizer>) -> Self {
+        let config = backend.weights.config.clone();
+        Self {
+            backend,
+            tokenizer,
+            config,
+        }
+    }
+
+    pub fn with_reference_weights(config: &ModelConfig) -> Self {
+        let backend = NativeTransformerBackend::with_reference_weights(config);
+        Self {
+            backend,
+            tokenizer: None,
+            config: config.clone(),
+        }
+    }
+
+    pub fn load_checkpoint<P: AsRef<std::path::Path>>(
+        checkpoint_path: P,
+        tokenizer_path: Option<P>,
+        config: &ModelConfig,
+        tensor_backend: Option<std::sync::Arc<dyn TensorBackend>>,
+    ) -> Result<Self, String> {
+        let weights = TransformerWeights::load_from_safetensors(checkpoint_path.as_ref(), config)
+            .map_err(|e| format!("Failed to load safetensors: {}", e))?;
+
+        let tensor_backend = tensor_backend.unwrap_or_else(|| {
+            let surface = ExecutionSurface::detect();
+            if surface.is_accelerated_gpu() {
+                std::sync::Arc::new(BlackwellGb10Backend::new())
+            } else {
+                std::sync::Arc::new(ReferenceCpuBackend::new())
+            }
+        });
+
+        let backend = NativeTransformerBackend::with_backend(weights, tensor_backend);
+        let tokenizer = if let Some(tok_path) = tokenizer_path {
+            Some(
+                TinyLlamaTokenizer::from_file(tok_path.as_ref())
+                    .map_err(|e| format!("Failed to load tokenizer: {}", e))?,
+            )
+        } else {
+            None
+        };
+
+        Ok(Self {
+            backend,
+            tokenizer,
+            config: config.clone(),
+        })
+    }
+
+    pub fn generate_text(
+        &mut self,
+        prompt: &str,
+        max_tokens: usize,
+        temperature: f32,
+    ) -> Result<String, String> {
+        let tokenizer = self
+            .tokenizer
+            .as_ref()
+            .ok_or_else(|| "Tokenizer not initialized on EmbeddedInferenceBackend".to_string())?;
+
+        let prompt_tokens = tokenizer
+            .encode(prompt)
+            .map_err(|e| format!("Tokenization failed: {}", e))?;
+
+        let stop_tokens = [
+            TinyLlamaTokenizer::EOS_TOKEN_ID,
+            TinyLlamaTokenizer::UNK_TOKEN_ID,
+        ];
+
+        let seq_id = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(1);
+
+        let generated_ids = self.backend.generate_tokens(
+            seq_id,
+            &prompt_tokens,
+            max_tokens,
+            temperature,
+            &stop_tokens,
+        )?;
+
+        tokenizer
+            .decode(&generated_ids)
+            .map_err(|e| format!("Decoding failed: {}", e))
+    }
+}
+
+#[async_trait]
+impl AienInferenceBackend for EmbeddedInferenceBackend {
+    async fn load_model(&mut self, config: &ModelConfig) -> Result<(), String> {
+        self.config = config.clone();
+        self.backend.load_model(config).await
+    }
+
+    async fn execute_step(
+        &mut self,
+        batch: &ScheduledBatch,
+    ) -> Result<(Vec<DecodeOutput>, StepMetrics), String> {
+        self.backend.execute_step(batch).await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -740,6 +873,52 @@ mod tests {
         let (outputs, metrics) = backend.execute_step(&batch).await.unwrap();
         assert_eq!(outputs.len(), 1);
         assert_eq!(metrics.prefill_tokens_processed, 2);
+    }
+
+    
+    #[tokio::test]
+    async fn test_embedded_inference_backend_execution() {
+        let config = ModelConfig {
+            num_layers: 2,
+            num_heads: 4,
+            num_kv_heads: 2,
+            head_dim: 16,
+            hidden_dim: 64,
+            intermediate_dim: 128,
+            vocab_size: 256,
+            block_size: 16,
+            ..Default::default()
+        };
+
+        let mut backend = EmbeddedInferenceBackend::with_reference_weights(&config);
+        assert_eq!(backend.config.num_layers, 2);
+
+        let req = SequenceRequest {
+            request_id: 101,
+            prompt_tokens: vec![1, 5, 9],
+            sampling_params: SamplingParams {
+                temperature: 0.0,
+                top_p: 1.0,
+                max_tokens: 4,
+                stop_token_ids: vec![0],
+            },
+            arrival_time_ns: 0,
+            priority: 1,
+        };
+
+        let mut block_tables = HashMap::new();
+        block_tables.insert(101, vec![0]);
+
+        let batch = ScheduledBatch {
+            prefill_requests: vec![req],
+            decode_requests: vec![],
+            block_tables,
+            step_id: 1,
+        };
+
+        let (outputs, metrics) = backend.execute_step(&batch).await.unwrap();
+        assert_eq!(outputs.len(), 1);
+        assert_eq!(metrics.prefill_tokens_processed, 3);
     }
 
     #[tokio::test]
