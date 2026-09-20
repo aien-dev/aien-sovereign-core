@@ -1,3 +1,4 @@
+#![allow(clippy::too_many_arguments)]
 pub mod sequence;
 
 pub use sequence::*;
@@ -124,20 +125,66 @@ impl AienScheduler {
             _ => Priority::Realtime,
         };
 
-        let seq_id = self
-            .arena
-            .insert_with(
-                prompt_handle,
-                aien_platform::ModelHandle(0),
-                aien_platform::KvHandle(0),
-                priority,
-                None,
-                None,
-                request.sampling_params.max_tokens as u32,
-                request.sampling_params,
-                None,
-            )
-            .expect("Arena allocation failed");
+        let seq_id = if request.request_id != 0 && (request.request_id >> 32) > 0 {
+            if let Ok(explicit_id) = SequenceId::from_u64(request.request_id) {
+                self.arena
+                    .insert_with_id(
+                        explicit_id,
+                        prompt_handle.clone(),
+                        aien_platform::ModelHandle(0),
+                        aien_platform::KvHandle(0),
+                        priority,
+                        None,
+                        None,
+                        request.sampling_params.max_tokens as u32,
+                        request.sampling_params.clone(),
+                        None,
+                    )
+                    .unwrap_or_else(|_| {
+                        self.arena
+                            .insert_with(
+                                prompt_handle,
+                                aien_platform::ModelHandle(0),
+                                aien_platform::KvHandle(0),
+                                priority,
+                                None,
+                                None,
+                                request.sampling_params.max_tokens as u32,
+                                request.sampling_params,
+                                None,
+                            )
+                            .expect("Arena allocation failed")
+                    })
+            } else {
+                self.arena
+                    .insert_with(
+                        prompt_handle,
+                        aien_platform::ModelHandle(0),
+                        aien_platform::KvHandle(0),
+                        priority,
+                        None,
+                        None,
+                        request.sampling_params.max_tokens as u32,
+                        request.sampling_params,
+                        None,
+                    )
+                    .expect("Arena allocation failed")
+            }
+        } else {
+            self.arena
+                .insert_with(
+                    prompt_handle,
+                    aien_platform::ModelHandle(0),
+                    aien_platform::KvHandle(0),
+                    priority,
+                    None,
+                    None,
+                    request.sampling_params.max_tokens as u32,
+                    request.sampling_params,
+                    None,
+                )
+                .expect("Arena allocation failed")
+        };
 
         self.waiting_queue.push_back(seq_id);
         self.metrics.admitted_requests += 1;
@@ -159,7 +206,8 @@ impl AienScheduler {
             work.kv,
             work.priority,
             work.deadline,
-            work.branch_parent.and_then(|p| SequenceId::from_u64(p).ok()),
+            work.branch_parent
+                .and_then(|p| SequenceId::from_u64(p).ok()),
             work.next_token_budget,
             sampling,
             sink_id,
@@ -177,7 +225,10 @@ impl AienScheduler {
         sink_id: Option<CompletionSinkId>,
     ) -> Result<SequenceId, String> {
         if self.arena.is_stale(parent_id) {
-            return Err(format!("Parent sequence {} is stale or inactive", parent_id));
+            return Err(format!(
+                "Parent sequence {} is stale or inactive",
+                parent_id
+            ));
         }
 
         let child_id = self.arena.fork(parent_id, sink_id)?;
@@ -268,7 +319,8 @@ impl AienScheduler {
                 if let Some((preempt_id, _)) = candidates.first() {
                     let preempt_id = *preempt_id;
                     drop(kv);
-                    if let Some(pos) = self.running_sequences.iter().position(|&x| x == preempt_id) {
+                    if let Some(pos) = self.running_sequences.iter().position(|&x| x == preempt_id)
+                    {
                         self.running_sequences.remove(pos);
                         let _ = self.kv_manager.write().free_sequence(preempt_id.to_u64());
                         if let Some(rec) = self.arena.get_mut(preempt_id) {
@@ -374,7 +426,7 @@ impl AienScheduler {
                     }
                 };
 
-                let required_blocks = (prompt_len + 15) / 16;
+                let required_blocks = prompt_len.div_ceil(16);
                 let available = self.kv_manager.read().available_blocks();
 
                 // Preempted sequences require headroom above watermark to prevent thrashing
@@ -405,6 +457,25 @@ impl AienScheduler {
                     prompt_len
                 };
                 let chunk_size = std::cmp::min(chunk_size, prefill_budget);
+
+                // Scheduler Zero-Copy Fork Invariant: Sequence admission must inspect existing block tables in KvCache.
+                // Pre-forked branches with assigned prefix blocks skip fresh block allocation and enter decode directly without redundant prefill.
+                let existing_table = self
+                    .kv_manager
+                    .read()
+                    .get_block_table(next_seq_id.to_u64())
+                    .map(|t| t.block_ids.clone());
+
+                if let Some(blocks) = existing_table {
+                    block_tables.insert(next_seq_id.to_u64(), blocks);
+                    seq.is_prefilled = true;
+                    seq.phase = SequencePhase::Decode;
+                    seq.prompt_tokens_prefilled = prompt_len;
+                    decode_requests.push(next_seq_id.to_u64());
+                    current_tokens += 1;
+                    self.running_sequences.push(next_seq_id);
+                    continue;
+                }
 
                 if chunk_size == 0 {
                     if is_preempted {
@@ -556,7 +627,8 @@ impl AienScheduler {
                                     is_finished = true;
                                     finish_reason = FinishReason::LengthLimit;
                                 } else {
-                                    let append_result = self.kv_manager.write().append_token(request_id);
+                                    let append_result =
+                                        self.kv_manager.write().append_token(request_id);
                                     if append_result.is_err() {
                                         is_finished = true;
                                         finish_reason = FinishReason::Preempted;
@@ -576,7 +648,9 @@ impl AienScheduler {
                         }
 
                         if is_finished {
-                            if let Some(pos) = self.running_sequences.iter().position(|&x| x == seq_id) {
+                            if let Some(pos) =
+                                self.running_sequences.iter().position(|&x| x == seq_id)
+                            {
                                 self.running_sequences.remove(pos);
                             }
                             if finish_reason == FinishReason::Preempted {
@@ -614,7 +688,8 @@ impl AienScheduler {
                     total_tokens,
                 } => {
                     if let Ok(seq_id) = SequenceId::from_u64(request_id) {
-                        if let Some(pos) = self.running_sequences.iter().position(|&x| x == seq_id) {
+                        if let Some(pos) = self.running_sequences.iter().position(|&x| x == seq_id)
+                        {
                             self.running_sequences.remove(pos);
                         }
                         let _ = self.kv_manager.write().free_sequence(request_id);
@@ -639,8 +714,9 @@ impl AienScheduler {
         }
 
         let total_steps = self.metrics.total_steps as f64;
-        self.metrics.avg_step_latency_us =
-            (self.metrics.avg_step_latency_us * (total_steps - 1.0) + step_latency as f64) / total_steps;
+        self.metrics.avg_step_latency_us = (self.metrics.avg_step_latency_us * (total_steps - 1.0)
+            + step_latency as f64)
+            / total_steps;
 
         let active_kv_blocks = self.kv_manager.read().allocated_block_count();
 

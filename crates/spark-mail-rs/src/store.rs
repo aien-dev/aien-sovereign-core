@@ -42,12 +42,11 @@ impl MailStore {
         let folders = ["inbox", "sent", "archive", "drafts"];
         for folder in &folders {
             let file_path = self.base_path.join(folder).join(format!("{}.json", id));
-            if file_path.exists() {
-                if let Ok(data) = fs::read_to_string(&file_path) {
-                    if let Ok(msg) = serde_json::from_str::<EmailMessage>(&data) {
-                        return Some(msg);
-                    }
-                }
+            if file_path.exists()
+                && let Ok(data) = fs::read_to_string(&file_path)
+                && let Ok(msg) = serde_json::from_str::<EmailMessage>(&data)
+            {
+                return Some(msg);
             }
         }
         None
@@ -63,12 +62,11 @@ impl MailStore {
         if let Ok(entries) = fs::read_dir(&folder_path) {
             for entry in entries.flatten() {
                 let path = entry.path();
-                if path.extension().and_then(|s| s.to_str()) == Some("json") {
-                    if let Ok(data) = fs::read_to_string(&path) {
-                        if let Ok(msg) = serde_json::from_str::<EmailMessage>(&data) {
-                            messages.push(msg);
-                        }
-                    }
+                if path.extension().and_then(|s| s.to_str()) == Some("json")
+                    && let Ok(data) = fs::read_to_string(&path)
+                    && let Ok(msg) = serde_json::from_str::<EmailMessage>(&data)
+                {
+                    messages.push(msg);
                 }
             }
         }

@@ -83,64 +83,64 @@ pub fn render_walkthrough_tui() -> String {
             .yellow()
             .bold()
     ));
-    out.push_str(&format!(
-        "│                                                                              │\n"
-    ));
+    out.push_str(
+        "│                                                                              │\n",
+    );
     out.push_str(&format!(
         "│   {} ──> {}                 │\n",
         "[ Sovereign Operator ]".bold().white(),
         "[ AIEN CLI (~/.local/bin/aien) ]".bold().cyan()
     ));
-    out.push_str(&format!(
-        "│                                        │                                     │\n"
-    ));
-    out.push_str(&format!(
-        "│         ┌──────────────────────────────┼───────────────────────────┐         │\n"
-    ));
-    out.push_str(&format!(
-        "│         ▼                              ▼                           ▼         │\n"
-    ));
+    out.push_str(
+        "│                                        │                                     │\n",
+    );
+    out.push_str(
+        "│         ┌──────────────────────────────┼───────────────────────────┐         │\n",
+    );
+    out.push_str(
+        "│         ▼                              ▼                           ▼         │\n",
+    );
     out.push_str(&format!(
         "│   {}       {}     {}  │\n",
         "[ Nesting Ritual ]".green(),
         "[ .crumb / .local ]".yellow(),
         "[ Tool Dispatch Engine ]".blue()
     ));
-    out.push_str(&format!("│   (Grounding & Scent)            (Topography & Whispers)     (Grounded multi-turn)   │\n"));
-    out.push_str(&format!(
-        "│         │                              │                           │         │\n"
-    ));
-    out.push_str(&format!(
-        "│         ▼                              ▼                           ▼         │\n"
-    ));
+    out.push_str("│   (Grounding & Scent)            (Topography & Whispers)     (Grounded multi-turn)   │\n");
+    out.push_str(
+        "│         │                              │                           │         │\n",
+    );
+    out.push_str(
+        "│         ▼                              ▼                           ▼         │\n",
+    );
     out.push_str(&format!(
         "│   {} <─────── {} ────────────┘         │\n",
         "[ Hive Pulse & Vibe ]".magenta(),
         "[ Dream Engine: 18085 ]".cyan()
     ));
-    out.push_str(&format!("│   (Live Swarm Heartbeat)         (Idle watcher & Harvester)                          │\n"));
-    out.push_str(&format!(
-        "│                                        │                                     │\n"
-    ));
-    out.push_str(&format!(
-        "│         ┌──────────────────────────────┼───────────────────────────┐         │\n"
-    ));
-    out.push_str(&format!(
-        "│         ▼                              ▼                           ▼         │\n"
-    ));
+    out.push_str("│   (Live Swarm Heartbeat)         (Idle watcher & Harvester)                          │\n");
+    out.push_str(
+        "│                                        │                                     │\n",
+    );
+    out.push_str(
+        "│         ┌──────────────────────────────┼───────────────────────────┐         │\n",
+    );
+    out.push_str(
+        "│         ▼                              ▼                           ▼         │\n",
+    );
     out.push_str(&format!(
         "│   {}       {}     {}  │\n",
         "[ Model Seat: 18006 ]".bold().green(),
         "[ JSpace Judge: 18082 ]".bold().yellow(),
         "[ Cortex Memory: 18080 ]".bold().magenta()
     ));
-    out.push_str(&format!("│   (Nemotron-3.5 30B BF16)        (Llama-3.2 1B CPU MAX)      (Postgres socket 15433) │\n"));
-    out.push_str(&format!(
-        "│                                                                              │\n"
-    ));
-    out.push_str(&format!(
-        "└── ───────────────────────────────────────────────────────────────────────────┘\n\n"
-    ));
+    out.push_str("│   (Nemotron-3.5 30B BF16)        (Llama-3.2 1B CPU MAX)      (Postgres socket 15433) │\n");
+    out.push_str(
+        "│                                                                              │\n",
+    );
+    out.push_str(
+        "└── ───────────────────────────────────────────────────────────────────────────┘\n\n",
+    );
 
     out.push_str(&format!(
         "{}\n",
@@ -188,9 +188,9 @@ pub fn render_walkthrough_tui() -> String {
         "│  {} Phase 10: Mathematical Verification Oracles & Marketing Voice Elimination       │\n",
         "✓".green().bold()
     ));
-    out.push_str(&format!(
-        "└── ───────────────────────────────────────────────────────────────────────────┘\n\n"
-    ));
+    out.push_str(
+        "└── ───────────────────────────────────────────────────────────────────────────┘\n\n",
+    );
 
     out.push_str(&format!(
         "{}\n",
@@ -216,12 +216,10 @@ pub fn render_walkthrough_tui() -> String {
         "│  Hive Vibe:     {}\n",
         vibe_text.italic().magenta()
     ));
-    out.push_str(&format!(
-        "│  Seats Status:  Model(18006)✓  Judge(18082)✓  Cortex(18080)✓  Dream(18085)✓\n"
-    ));
-    out.push_str(&format!(
-        "└── ───────────────────────────────────────────────────────────────────────────┘\n\n"
-    ));
+    out.push_str("│  Seats Status:  Model(18006)✓  Judge(18082)✓  Cortex(18080)✓  Dream(18085)✓\n");
+    out.push_str(
+        "└── ───────────────────────────────────────────────────────────────────────────┘\n\n",
+    );
 
     out.push_str(&format!(
         "{}\n",
@@ -229,33 +227,33 @@ pub fn render_walkthrough_tui() -> String {
             .yellow()
             .bold()
     ));
-    out.push_str(&format!(
-        "│  aien                       Launch interactive AIEN terminal session         │\n"
-    ));
-    out.push_str(&format!(
-        "│  aien -p \"<prompt>\"         Execute grounded autonomous single-turn prompt   │\n"
-    ));
-    out.push_str(&format!(
-        "│  aien --walkthrough         Display this Live System Walkthrough & Roadmap   │\n"
-    ));
-    out.push_str(&format!(
-        "│  /walkthrough [save]        Render or update basecamp/WALKTHROUGH.md         │\n"
-    ));
-    out.push_str(&format!(
-        "│  /nest                      Execute full pre-flight grounding initiation     │\n"
-    ));
-    out.push_str(&format!(
-        "│  /crumb [path|whisper]      Inspect directory topography or leave whisper    │\n"
-    ));
-    out.push_str(&format!(
-        "│  /dream [now|status]        Trigger dream cycle or check consolidation stats │\n"
-    ));
-    out.push_str(&format!(
-        "│  /doctor                    Run comprehensive 7-point health diagnostic      │\n"
-    ));
-    out.push_str(&format!(
-        "└── ───────────────────────────────────────────────────────────────────────────┘\n"
-    ));
+    out.push_str(
+        "│  aien                       Launch interactive AIEN terminal session         │\n",
+    );
+    out.push_str(
+        "│  aien -p \"<prompt>\"         Execute grounded autonomous single-turn prompt   │\n",
+    );
+    out.push_str(
+        "│  aien --walkthrough         Display this Live System Walkthrough & Roadmap   │\n",
+    );
+    out.push_str(
+        "│  /walkthrough [save]        Render or update basecamp/WALKTHROUGH.md         │\n",
+    );
+    out.push_str(
+        "│  /nest                      Execute full pre-flight grounding initiation     │\n",
+    );
+    out.push_str(
+        "│  /crumb [path|whisper]      Inspect directory topography or leave whisper    │\n",
+    );
+    out.push_str(
+        "│  /dream [now|status]        Trigger dream cycle or check consolidation stats │\n",
+    );
+    out.push_str(
+        "│  /doctor                    Run comprehensive 7-point health diagnostic      │\n",
+    );
+    out.push_str(
+        "└── ───────────────────────────────────────────────────────────────────────────┘\n",
+    );
 
     out
 }

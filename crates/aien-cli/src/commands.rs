@@ -31,7 +31,7 @@ use std::path::Path;
 use std::process::Command;
 
 pub async fn handle_slash_command(cmd: &str) -> bool {
-    let parts: Vec<&str> = cmd.trim().split_whitespace().collect();
+    let parts: Vec<&str> = cmd.split_whitespace().collect();
     if parts.is_empty() {
         return false;
     }
@@ -544,7 +544,7 @@ fn run_mask_command(_args: &[&str]) {
         .current_dir(&crate::platform::PlatformContext::detect().home_dir)
         .output();
 
-    if let Ok(_) = out {
+    if out.is_ok() {
         println!("{}", "Active Mask: AIEN (Sovereign Operator)".cyan().bold());
     } else {
         println!("Active Mask: AIEN (default)");
@@ -559,7 +559,12 @@ fn park_input(text: &str) {
     let filename = format!("overload-{}.md", stamp);
     let path = park_dir.join(&filename);
 
-    match OpenOptions::new().create(true).write(true).open(&path) {
+    match OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(&path)
+    {
         Ok(mut f) => {
             let _ = writeln!(f, "# Overload Parked: {}", chrono::Utc::now().to_rfc3339());
             let _ = writeln!(f, "{}", text);

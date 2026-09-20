@@ -980,6 +980,62 @@ pub fn adapter_dispatch_tool(args: &Value) -> Value {
     }
 }
 
+fn exec_find_by_name(path: &str, pattern: &str) -> (Value, bool) {
+    if let Err(err) = validate_tool_path(path) {
+        return (
+            json!({"error": format!("CONFINEMENT DENIAL: {}", err)}),
+            false,
+        );
+    }
+    let out = Command::new("find").args([path, "-name", pattern]).output();
+    match out {
+        Ok(output) => {
+            let raw_stdout = String::from_utf8_lossy(&output.stdout).to_string();
+            let redacted = redact_secrets(&raw_stdout);
+            let matches: Vec<String> = redacted.lines().take(50).map(|s| s.to_string()).collect();
+            (
+                json!({
+                    "path": path,
+                    "pattern": pattern,
+                    "matches": matches,
+                    "count": matches.len()
+                }),
+                true,
+            )
+        }
+        Err(e) => (json!({"error": e.to_string()}), false),
+    }
+}
+
+fn exec_ask_question(question: &str, options: Option<&Vec<Value>>) -> (Value, bool) {
+    println!(
+        "\n{}",
+        format!("❓ Question from AIEN: {}", question)
+            .yellow()
+            .bold()
+    );
+    if let Some(opts) = options {
+        for (i, opt) in opts.iter().enumerate() {
+            if let Some(opt_str) = opt.as_str() {
+                println!("  {}. {}", i + 1, opt_str.cyan());
+            }
+        }
+    }
+    print!("{}", "Your Answer ❯ ".cyan().bold());
+    let _ = std::io::stdout().flush();
+    let mut input = String::new();
+    let _ = std::io::stdin().read_line(&mut input);
+    let trimmed = input.trim().to_string();
+    (
+        json!({
+            "status": "answered",
+            "question": question,
+            "answer": trimmed
+        }),
+        true,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1065,60 +1121,4 @@ mod tests {
             .unwrap()
             .contains("CONFINEMENT DENIAL"));
     }
-}
-
-fn exec_find_by_name(path: &str, pattern: &str) -> (Value, bool) {
-    if let Err(err) = validate_tool_path(path) {
-        return (
-            json!({"error": format!("CONFINEMENT DENIAL: {}", err)}),
-            false,
-        );
-    }
-    let out = Command::new("find").args([path, "-name", pattern]).output();
-    match out {
-        Ok(output) => {
-            let raw_stdout = String::from_utf8_lossy(&output.stdout).to_string();
-            let redacted = redact_secrets(&raw_stdout);
-            let matches: Vec<String> = redacted.lines().take(50).map(|s| s.to_string()).collect();
-            (
-                json!({
-                    "path": path,
-                    "pattern": pattern,
-                    "matches": matches,
-                    "count": matches.len()
-                }),
-                true,
-            )
-        }
-        Err(e) => (json!({"error": e.to_string()}), false),
-    }
-}
-
-fn exec_ask_question(question: &str, options: Option<&Vec<Value>>) -> (Value, bool) {
-    println!(
-        "\n{}",
-        format!("❓ Question from AIEN: {}", question)
-            .yellow()
-            .bold()
-    );
-    if let Some(opts) = options {
-        for (i, opt) in opts.iter().enumerate() {
-            if let Some(opt_str) = opt.as_str() {
-                println!("  {}. {}", i + 1, opt_str.cyan());
-            }
-        }
-    }
-    print!("{}", "Your Answer ❯ ".cyan().bold());
-    let _ = std::io::stdout().flush();
-    let mut input = String::new();
-    let _ = std::io::stdin().read_line(&mut input);
-    let trimmed = input.trim().to_string();
-    (
-        json!({
-            "status": "answered",
-            "question": question,
-            "answer": trimmed
-        }),
-        true,
-    )
 }

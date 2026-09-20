@@ -1,3 +1,8 @@
+#![allow(
+    clippy::too_many_arguments,
+    clippy::needless_range_loop,
+    clippy::chunks_exact_to_as_chunks
+)]
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -460,10 +465,10 @@ impl ExecutionSurface {
                     }
                 }
             }
-            return ExecutionSurface::GenericLinuxCpu {
+            ExecutionSurface::GenericLinuxCpu {
                 cpu_cores,
                 total_ram_gb: ram_gb,
-            };
+            }
         }
 
         // 4. Default generic Unix fallback

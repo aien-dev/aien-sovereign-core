@@ -64,16 +64,13 @@ struct OperatorSection {
 
 fn load_operator_email() -> String {
     let p = dirs_or_home().join(".config/sovereign/operator.toml");
-    if p.exists() {
-        if let Ok(content) = fs::read_to_string(&p) {
-            if let Ok(cfg) = toml::from_str::<OperatorConfig>(&content) {
-                if let Some(op) = cfg.operator {
-                    if let Some(email) = op.email {
-                        return email;
-                    }
-                }
-            }
-        }
+    if p.exists()
+        && let Ok(content) = fs::read_to_string(&p)
+        && let Ok(cfg) = toml::from_str::<OperatorConfig>(&content)
+        && let Some(op) = cfg.operator
+        && let Some(email) = op.email
+    {
+        return email;
     }
     "aien.atlas@proton.me".to_string()
 }
@@ -128,13 +125,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             let api_port: u16 = cli
                 .api_addr
                 .split(':')
-                .last()
+                .next_back()
                 .and_then(|p| p.parse().ok())
                 .unwrap_or(18092);
             let smtp_port: u16 = cli
                 .smtp_addr
                 .split(':')
-                .last()
+                .next_back()
                 .and_then(|p| p.parse().ok())
                 .unwrap_or(2525);
 
@@ -191,10 +188,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 body,
                 from,
             };
-            let sent = relay
-                .send_email(req)
-                .await
-                .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+            let sent = relay.send_email(req).await.map_err(std::io::Error::other)?;
             println!(
                 "Email recorded and sent: {} (Cortex indexed: {})",
                 sent.id, sent.cortex_indexed
@@ -207,10 +201,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 body: "Your sovereign mail server is running directly on Spark hardware. Messages are stored on local NVMe disk with zero cloud telemetry and synced to Atlas Cortex memory.".to_string(),
                 from: Some("atlas@sovereign.spark".to_string()),
             };
-            let sent = relay
-                .send_email(req)
-                .await
-                .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+            let sent = relay.send_email(req).await.map_err(std::io::Error::other)?;
             println!("Test message saved and indexed into Cortex: {}", sent.id);
         }
     }

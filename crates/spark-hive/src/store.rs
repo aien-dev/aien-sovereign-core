@@ -650,19 +650,16 @@ impl CombStore {
         let now = Utc::now();
         let now_str = now.to_rfc3339();
 
-        if task.status == "claimed" {
-            if let Some(ref exp) = task.expires_at {
-                if exp.as_str() > now_str.as_str() {
-                    if let Some(ref current_claimer) = task.claimed_by {
-                        if current_claimer != agent_id {
-                            return Err(HiveError::TaskAlreadyClaimed {
-                                task_id: task_id.to_string(),
-                                claimed_by: current_claimer.clone(),
-                            });
-                        }
-                    }
-                }
-            }
+        if task.status == "claimed"
+            && let Some(ref exp) = task.expires_at
+            && exp.as_str() > now_str.as_str()
+            && let Some(ref current_claimer) = task.claimed_by
+            && current_claimer != agent_id
+        {
+            return Err(HiveError::TaskAlreadyClaimed {
+                task_id: task_id.to_string(),
+                claimed_by: current_claimer.clone(),
+            });
         }
 
         let new_expires = (now + chrono::Duration::seconds(ttl_secs as i64)).to_rfc3339();

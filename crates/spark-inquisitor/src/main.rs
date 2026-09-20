@@ -188,10 +188,7 @@ fn main() {
             output_comment,
             output_labels,
         } => {
-            let body_content = match fs::read_to_string(&body) {
-                Ok(c) => c,
-                Err(_) => String::new(),
-            };
+            let body_content = fs::read_to_string(&body).unwrap_or_default();
 
             let result = triage_issue(&author, issue, &title, &body_content);
 

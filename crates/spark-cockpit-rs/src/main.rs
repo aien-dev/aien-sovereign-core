@@ -256,19 +256,17 @@ async fn handle_get_models(State(state): State<AppState>) -> Json<Value> {
         .get(format!("{}/v1/models", MAX_SEAT_URL))
         .send()
         .await
+        && let Ok(val) = resp.json::<Value>().await
+        && let Some(list) = val.get("data").and_then(|d| d.as_array())
     {
-        if let Ok(val) = resp.json::<Value>().await {
-            if let Some(list) = val.get("data").and_then(|d| d.as_array()) {
-                for m in list {
-                    if let Some(id) = m.get("id").and_then(|i| i.as_str()) {
-                        active_models.push(json!({
-                            "id": id,
-                            "active": true,
-                            "backend": "Modular MAX (GB10 Native)",
-                            "status": "ONLINE"
-                        }));
-                    }
-                }
+        for m in list {
+            if let Some(id) = m.get("id").and_then(|i| i.as_str()) {
+                active_models.push(json!({
+                    "id": id,
+                    "active": true,
+                    "backend": "Modular MAX (GB10 Native)",
+                    "status": "ONLINE"
+                }));
             }
         }
     }
@@ -337,10 +335,10 @@ async fn main() {
     tokio::spawn(async move {
         loop {
             tokio::time::sleep(Duration::from_secs(30)).await;
-            if let Ok(reclaimed) = reaper_hive_store.reclaim_expired_leases() {
-                if reclaimed > 0 {
-                    eprintln!("Reclaimed {} expired forge task leases", reclaimed);
-                }
+            if let Ok(reclaimed) = reaper_hive_store.reclaim_expired_leases()
+                && reclaimed > 0
+            {
+                eprintln!("Reclaimed {} expired forge task leases", reclaimed);
             }
         }
     });
@@ -464,10 +462,10 @@ async fn handle_pulse(State(state): State<AppState>) -> Json<Value> {
 async fn handle_walkthrough() -> Json<Value> {
     let md_path_buf = get_home_dir().join("basecamp/WALKTHROUGH.md");
     let md_path = md_path_buf.as_path();
-    if md_path.exists() {
-        if let Ok(content) = fs::read_to_string(md_path) {
-            return Json(json!({"status": "ok", "walkthrough": content}));
-        }
+    if md_path.exists()
+        && let Ok(content) = fs::read_to_string(md_path)
+    {
+        return Json(json!({"status": "ok", "walkthrough": content}));
     }
 
     let output = Command::new("aien").arg("--walkthrough").output().await;
@@ -544,12 +542,11 @@ async fn handle_vault() -> Json<Value> {
 
 async fn handle_get_goals() -> Json<Value> {
     let path = goals_path();
-    if path.exists() {
-        if let Ok(content) = fs::read_to_string(path) {
-            if let Ok(parsed) = serde_json::from_str::<Value>(&content) {
-                return Json(parsed);
-            }
-        }
+    if path.exists()
+        && let Ok(content) = fs::read_to_string(path)
+        && let Ok(parsed) = serde_json::from_str::<Value>(&content)
+    {
+        return Json(parsed);
     }
     Json(json!({"project_name": "Sovereign Workspace", "goals": []}))
 }
@@ -595,52 +592,44 @@ async fn handle_get_skills() -> Json<Value> {
             let path = entry.path();
             if path.is_dir() {
                 let skill_md = path.join("SKILL.md");
-                if skill_md.exists() {
-                    if let Ok(content) = fs::read_to_string(&skill_md) {
-                        let mut name = path
-                            .file_name()
-                            .unwrap_or_default()
-                            .to_string_lossy()
-                            .to_string();
-                        let mut desc = "No description provided.".to_string();
-                        let mut in_fm = false;
+                if skill_md.exists()
+                    && let Ok(content) = fs::read_to_string(&skill_md)
+                {
+                    let mut name = path
+                        .file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .to_string();
+                    let mut desc = "No description provided.".to_string();
+                    let mut in_fm = false;
 
-                        for line in content.lines() {
-                            let t = line.trim();
-                            if t == "---" {
-                                if in_fm {
-                                    break;
-                                } else {
-                                    in_fm = true;
-                                    continue;
-                                }
-                            }
+                    for line in content.lines() {
+                        let t = line.trim();
+                        if t == "---" {
                             if in_fm {
-                                if let Some(rest) = t.strip_prefix("name:") {
-                                    name = rest
-                                        .trim()
-                                        .trim_matches('"')
-                                        .trim_matches('\'')
-                                        .to_string();
-                                } else if let Some(rest) = t.strip_prefix("description:") {
-                                    desc = rest
-                                        .trim()
-                                        .trim_matches('"')
-                                        .trim_matches('\'')
-                                        .to_string();
-                                }
+                                break;
+                            } else {
+                                in_fm = true;
+                                continue;
                             }
                         }
-
-                        let has_scripts = path.join("scripts").exists();
-                        skills.push(json!({
-                            "name": name,
-                            "description": desc,
-                            "path": skill_md.display().to_string(),
-                            "has_scripts": has_scripts,
-                            "content": content
-                        }));
+                        if in_fm {
+                            if let Some(rest) = t.strip_prefix("name:") {
+                                name = rest.trim().trim_matches('"').trim_matches('\'').to_string();
+                            } else if let Some(rest) = t.strip_prefix("description:") {
+                                desc = rest.trim().trim_matches('"').trim_matches('\'').to_string();
+                            }
+                        }
                     }
+
+                    let has_scripts = path.join("scripts").exists();
+                    skills.push(json!({
+                        "name": name,
+                        "description": desc,
+                        "path": skill_md.display().to_string(),
+                        "has_scripts": has_scripts,
+                        "content": content
+                    }));
                 }
             }
         }
@@ -783,8 +772,8 @@ async fn handle_chat_stream(
                     let line = line_buffer[..pos].trim().to_string();
                     line_buffer = line_buffer[pos + 1..].to_string();
 
-                    if line.starts_with("data: ") {
-                        let data_str = line[6..].trim();
+                    if let Some(stripped) = line.strip_prefix("data: ") {
+                        let data_str = stripped.trim();
                         if data_str == "[DONE]" {
                             let sc = content_redactor.flush();
                             let sr = reasoning_redactor.flush();
@@ -796,10 +785,10 @@ async fn handle_chat_stream(
                             break;
                         }
 
-                        if let Ok(parsed) = serde_json::from_str::<Value>(data_str) {
-                            if let Some(choices) = parsed.get("choices").and_then(Value::as_array) {
-                                if let Some(choice) = choices.first() {
-                                    if let Some(delta) = choice.get("delta") {
+                        if let Ok(parsed) = serde_json::from_str::<Value>(data_str)
+                            && let Some(choices) = parsed.get("choices").and_then(Value::as_array)
+                                && let Some(choice) = choices.first()
+                                    && let Some(delta) = choice.get("delta") {
                                         let raw_content = delta.get("content").and_then(Value::as_str).unwrap_or("");
                                         let raw_reasoning = delta.get("reasoning")
                                             .or_else(|| delta.get("reasoning_content"))
@@ -814,9 +803,6 @@ async fn handle_chat_stream(
                                             yield Ok(Event::default().data(payload.to_string()));
                                         }
                                     }
-                                }
-                            }
-                        }
                     }
                 }
             }
@@ -838,12 +824,11 @@ async fn handle_get_subagents() -> Json<Value> {
     if let Ok(entries) = std::fs::read_dir(dir) {
         for entry in entries.flatten() {
             let path = entry.path();
-            if path.extension().and_then(|s| s.to_str()) == Some("json") {
-                if let Ok(content) = std::fs::read_to_string(&path) {
-                    if let Ok(parsed) = serde_json::from_str::<Value>(&content) {
-                        items.push(parsed);
-                    }
-                }
+            if path.extension().and_then(|s| s.to_str()) == Some("json")
+                && let Ok(content) = std::fs::read_to_string(&path)
+                && let Ok(parsed) = serde_json::from_str::<Value>(&content)
+            {
+                items.push(parsed);
             }
         }
     }
@@ -1268,12 +1253,11 @@ const MAIL_API_URL: &str = "http://127.0.0.1:18092";
 
 async fn handle_get_operator() -> Json<Value> {
     let op_cfg = operator_config_path();
-    if op_cfg.exists() {
-        if let Ok(content) = fs::read_to_string(&op_cfg) {
-            if let Ok(toml_val) = toml::from_str::<Value>(&content) {
-                return Json(toml_val);
-            }
-        }
+    if op_cfg.exists()
+        && let Ok(content) = fs::read_to_string(&op_cfg)
+        && let Ok(toml_val) = toml::from_str::<Value>(&content)
+    {
+        return Json(toml_val);
     }
     Json(json!({
         "operator": {
@@ -1305,19 +1289,16 @@ async fn handle_post_operator(
     headers: HeaderMap,
     Json(payload): Json<OperatorUpdatePayload>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    if let Some(token) = get_cortex_token() {
-        if let Some(auth) = headers.get(axum::http::header::AUTHORIZATION) {
-            if let Ok(auth_str) = auth.to_str() {
-                if let Some(provided) = auth_str.strip_prefix("Bearer ") {
-                    if provided.trim() != token {
-                        return Err((
-                            StatusCode::UNAUTHORIZED,
-                            Json(json!({"error": "Invalid bearer token"})),
-                        ));
-                    }
-                }
-            }
-        }
+    if let Some(token) = get_cortex_token()
+        && let Some(auth) = headers.get(axum::http::header::AUTHORIZATION)
+        && let Ok(auth_str) = auth.to_str()
+        && let Some(provided) = auth_str.strip_prefix("Bearer ")
+        && provided.trim() != token
+    {
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            Json(json!({"error": "Invalid bearer token"})),
+        ));
     }
 
     let clean_name = payload.name.map(|n| {
@@ -1474,10 +1455,10 @@ async fn handle_install_en2_imprint(
         if !token.is_empty() {
             req = req.header("Authorization", format!("Bearer {}", token));
         }
-        if let Ok(res) = req.json(&payload).send().await {
-            if res.status().is_success() {
-                installed_count += 1;
-            }
+        if let Ok(res) = req.json(&payload).send().await
+            && res.status().is_success()
+        {
+            installed_count += 1;
         }
     }
 

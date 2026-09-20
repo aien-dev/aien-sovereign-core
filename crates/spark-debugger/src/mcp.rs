@@ -46,7 +46,7 @@ pub async fn run_mcp_server(
                     }
                 });
                 let mut out = resp.to_string();
-                out.push_str("\n");
+                out.push('\n');
                 let _ = stdout.write_all(out.as_bytes()).await;
                 let _ = stdout.flush().await;
             }
@@ -87,7 +87,7 @@ pub async fn run_mcp_server(
                     }
                 });
                 let mut out = resp.to_string();
-                out.push_str("\n");
+                out.push('\n');
                 let _ = stdout.write_all(out.as_bytes()).await;
                 let _ = stdout.flush().await;
             }
@@ -134,7 +134,7 @@ pub async fn run_mcp_server(
                     }
                 });
                 let mut out = resp.to_string();
-                out.push_str("\n");
+                out.push('\n');
                 let _ = stdout.write_all(out.as_bytes()).await;
                 let _ = stdout.flush().await;
             }
@@ -148,7 +148,7 @@ pub async fn run_mcp_server(
                     }
                 });
                 let mut out = resp.to_string();
-                out.push_str("\n");
+                out.push('\n');
                 let _ = stdout.write_all(out.as_bytes()).await;
                 let _ = stdout.flush().await;
             }

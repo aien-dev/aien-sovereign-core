@@ -91,7 +91,7 @@ impl Supervisor {
                 }
                 _ = sleep(Duration::from_secs(3)) => {
                     let mut map = states.lock().await;
-                    for (_name, state) in map.iter_mut() {
+                    for state in map.values_mut() {
                         if let Some(pid) = state.pid {
                             let p_stats = get_process_stats(pid);
                             if p_stats.is_alive {
@@ -221,7 +221,7 @@ impl Supervisor {
 
     pub async fn print_status(&self) {
         let map = self.states.lock().await;
-        println!("");
+        println!();
         println!("=== SparkOS Sovereign Supervisor Services ===");
         println!(
             "{:<18} {:<10} {:<10} {:<12} {:<10} {:<10}",
@@ -245,7 +245,7 @@ impl Supervisor {
             );
         }
         println!("{}", "-".repeat(74));
-        println!("");
+        println!();
     }
 }
 

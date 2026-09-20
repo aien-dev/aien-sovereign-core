@@ -1,3 +1,4 @@
+#![allow(clippy::chunks_exact_to_as_chunks)]
 //! Multi-Stage Numerical Parity Test Harness for TinyLlama-1.1B-Chat-v1.0.
 //! Asserts 5 strict stages against Hugging Face FP32 reference oracle fixtures:
 //! 1. Tokenizer Parity: Formatted prompt strings and token IDs match oracle 100%.

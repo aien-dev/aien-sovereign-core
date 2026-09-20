@@ -51,7 +51,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
     let engine = DreamEngine::new(cli.basecamp.clone());
 
-    let command = cli.command.unwrap_or_else(|| {
+    let command = cli.command.unwrap_or({
         if cli.daemon {
             Commands::Daemon
         } else {

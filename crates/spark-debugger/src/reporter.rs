@@ -73,7 +73,7 @@ pub async fn report_incident(client: &Client, report: &SystemAuditReport, failur
                     now
                 ],
             );
-            if let Ok(_) = res {
+            if res.is_ok() {
                 info!("[DebuggerReporter] Emitted alert comb to Honeycomb Wall.");
             }
         }

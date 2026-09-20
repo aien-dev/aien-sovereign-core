@@ -289,17 +289,15 @@ pub fn evaluate_socratic_reflex(
         hw.max_ram_mb()
     );
 
-    let freedom_inquiry = format!(
+    let freedom_inquiry =
         "Does this contribution uphold sovereign freedom and local offline model sovereignty?"
-    );
+            .to_string();
     let freedom_verdict = format!(
         "Approved. Model {} has open weights and runs locally without centralized API tokens or gatekeepers.",
         model.hf_repo()
     );
 
-    let empirical_proof_check = format!(
-        "Benchmark telemetry must be generated in ~/workspace/aien-sandbox on real silicon before opening PR."
-    );
+    let empirical_proof_check = "Benchmark telemetry must be generated in ~/workspace/aien-sandbox on real silicon before opening PR.".to_string();
 
     let maintainer_etiquette_check = format!(
         "Zero AI clichés, zero conversational sycophancy, clean git history, and conventional commits for {} maintainers.",
@@ -359,6 +357,7 @@ pub struct BenchmarkTelemetry {
 }
 
 impl BenchmarkTelemetry {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         model_slug: &str,
         engine: &str,
@@ -567,7 +566,7 @@ Authored autonomously by AIEN under the sovereign contribution protocol. All cha
     let gh_commands = vec![
         format!("gh repo fork {} --clone=false", target_repo),
         format!("git checkout -b {}", branch),
-        format!("git add ."),
+        "git add .".to_string(),
         format!(
             "git -c user.name='AIEN' -c user.email='aien.atlas@proton.me' commit -s -m '{}'",
             commit_message
@@ -916,10 +915,10 @@ pub fn find_or_create_adapter(
     // 1. Check exact catalog ID or model slug match
     for spec in catalog {
         if spec.id.to_lowercase() == clean || spec.model.slug() == clean {
-            if let Some(eng) = engine_override {
-                if spec.engine != eng {
-                    return Some(build_adapter_spec(spec.model, eng, spec.category));
-                }
+            if let Some(eng) = engine_override
+                && spec.engine != eng
+            {
+                return Some(build_adapter_spec(spec.model, eng, spec.category));
             }
             return Some(spec);
         }

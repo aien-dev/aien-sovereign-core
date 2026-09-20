@@ -1,3 +1,4 @@
+#![allow(clippy::type_complexity, clippy::needless_range_loop)]
 mod client;
 mod commands;
 pub mod compaction;
@@ -278,10 +279,8 @@ async fn main() {
                 }
                 let _ = rl.add_history_entry(trimmed);
 
-                if trimmed.starts_with("/") {
-                    if handle_slash_command(trimmed).await {
-                        continue;
-                    }
+                if trimmed.starts_with("/") && handle_slash_command(trimmed).await {
+                    continue;
                 }
 
                 let mut user_turn = trimmed.to_string();

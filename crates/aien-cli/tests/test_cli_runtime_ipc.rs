@@ -78,10 +78,10 @@ async fn test_cli_runtime_ipc_lifecycle() {
 
     // 4. Clean shutdown
     client.shutdown().await.expect("Shutdown must succeed");
-    let server_res = server_handle
+    server_handle
         .await
         .expect("Server task panicked")
         .expect("Server exited with error");
-    assert_eq!(server_res, ());
+    assert_eq!((), ());
     assert!(!socket_path.exists(), "Socket must be removed on shutdown");
 }

@@ -47,9 +47,9 @@ impl ConstitutionalChecker {
         // AWS Access Key ID: AKIA followed by 16 alphanumeric uppercase
         let aws_regex = AWS_REGEX.get_or_init(|| Regex::new(r"\bAKIA[0-9A-Z]{16}\b").unwrap());
         if aws_regex.is_match(line) {
-            violations.push(ViolationKind::Secret(format!(
-                "Plaintext AWS Access Key detected in line: [REDACTED_AWS_KEY]"
-            )));
+            violations.push(ViolationKind::Secret(
+                "Plaintext AWS Access Key detected in line: [REDACTED_AWS_KEY]".to_string(),
+            ));
         }
 
         // GitHub Personal Access Tokens (ghp_... or github_pat_...)
@@ -58,9 +58,10 @@ impl ConstitutionalChecker {
         let github_fine_pat_regex = GITHUB_FINE_PAT_REGEX
             .get_or_init(|| Regex::new(r"\bgithub_pat_[A-Za-z0-9_]{50,}\b").unwrap());
         if github_pat_regex.is_match(line) || github_fine_pat_regex.is_match(line) {
-            violations.push(ViolationKind::Secret(format!(
+            violations.push(ViolationKind::Secret(
                 "Plaintext GitHub Personal Access Token detected in line: [REDACTED_GH_TOKEN]"
-            )));
+                    .to_string(),
+            ));
         }
 
         // Private Keys
@@ -68,9 +69,9 @@ impl ConstitutionalChecker {
             Regex::new(r"-----BEGIN (?:[A-Z0-9 ]+)?PRIVATE KEY-----|BEGIN RSA PRIVATE KEY").unwrap()
         });
         if priv_key_regex.is_match(line) {
-            violations.push(ViolationKind::Secret(format!(
-                "Plaintext Private Key header detected in line: [REDACTED_PRIVATE_KEY]"
-            )));
+            violations.push(ViolationKind::Secret(
+                "Plaintext Private Key header detected in line: [REDACTED_PRIVATE_KEY]".to_string(),
+            ));
         }
 
         // 3. Banned AI Buzzwords & Tropes
@@ -199,7 +200,7 @@ impl ConstitutionalChecker {
 
     pub fn is_env_file(path: &str) -> bool {
         let clean_path = path.trim().trim_matches('"').trim_matches('\'');
-        let filename = clean_path.split('/').last().unwrap_or(clean_path);
+        let filename = clean_path.split('/').next_back().unwrap_or(clean_path);
         filename == ".env" || filename.starts_with(".env.")
     }
 }

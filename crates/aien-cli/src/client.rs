@@ -166,8 +166,7 @@ impl ChatClient {
                 let line = buffer[..pos].trim().to_string();
                 buffer = buffer[pos + 1..].to_string();
 
-                if line.starts_with("data: ") {
-                    let data = &line[6..];
+                if let Some(data) = line.strip_prefix("data: ") {
                     if data == "[DONE]" {
                         is_done = true;
                         break;
@@ -235,8 +234,8 @@ fn parse_tool_call_json(raw: &str) -> Option<Value> {
         return Some(parsed);
     }
     // Delimiter repair: trailing "]" instead of "}"
-    if trimmed.ends_with("]") {
-        let mut fixed = trimmed[..trimmed.len() - 1].to_string();
+    if let Some(stripped) = trimmed.strip_suffix("]") {
+        let mut fixed = stripped.to_string();
         fixed.push('}');
         if let Ok(parsed) = serde_json::from_str::<Value>(&fixed) {
             return Some(parsed);

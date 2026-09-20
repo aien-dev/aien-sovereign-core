@@ -8,6 +8,12 @@ pub struct AdapterRouter {
     pub catalog: Vec<AdapterSpec>,
 }
 
+impl Default for AdapterRouter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl AdapterRouter {
     pub fn new() -> Self {
         Self {

@@ -17,6 +17,12 @@ pub struct DistillationEngine {
     pub cortex_endpoint: String,
 }
 
+impl Default for DistillationEngine {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl DistillationEngine {
     pub fn new() -> Self {
         let home = std::env::var("HOME")
@@ -234,10 +240,9 @@ impl DistillationEngine {
         if let Some(r) = chosen_reasoning {
             assistant_obj["reasoning"] = json!(r);
         }
-        sft_entry
-            .get_mut("messages")
-            .and_then(|m| m.as_array_mut())
-            .map(|arr| arr.push(assistant_obj));
+        if let Some(arr) = sft_entry.get_mut("messages").and_then(|m| m.as_array_mut()) {
+            arr.push(assistant_obj)
+        }
 
         let mut file = OpenOptions::new()
             .create(true)

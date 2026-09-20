@@ -258,7 +258,9 @@ impl SequenceRecord {
             kv: work.kv,
             priority: work.priority,
             deadline: work.deadline,
-            branch_parent: work.branch_parent.and_then(|p| SequenceId::from_u64(p).ok()),
+            branch_parent: work
+                .branch_parent
+                .and_then(|p| SequenceId::from_u64(p).ok()),
             next_token_budget: work.next_token_budget,
             phase: SequencePhase::Waiting,
             tokens_generated: 0,
@@ -408,6 +410,50 @@ impl SequenceArena {
             sink_id,
         );
         self.slots[seq_id.slot as usize].record = Some(record);
+        Ok(seq_id)
+    }
+
+    /// Inserts a sequence record with an explicit SequenceId (e.g. from upstream caller/runtime).
+    pub fn insert_with_id(
+        &mut self,
+        seq_id: SequenceId,
+        prompt: PromptHandle,
+        model: ModelHandle,
+        kv: KvHandle,
+        priority: Priority,
+        deadline: Option<Ticks>,
+        branch_parent: Option<SequenceId>,
+        next_token_budget: u32,
+        sampling_params: SamplingParams,
+        sink_id: Option<CompletionSinkId>,
+    ) -> Result<SequenceId, String> {
+        let slot_idx = seq_id.slot;
+        if (slot_idx as usize) >= self.slots.len() {
+            return Err(format!(
+                "Slot index {} exceeds arena capacity {}",
+                slot_idx,
+                self.slots.len()
+            ));
+        }
+        if let Some(pos) = self.free_slots.iter().position(|&s| s == slot_idx) {
+            self.free_slots.remove(pos);
+        }
+        let slot = &mut self.slots[slot_idx as usize];
+        slot.generation = seq_id.generation;
+        slot.retired = false;
+        let record = SequenceRecord::new(
+            seq_id,
+            prompt,
+            model,
+            kv,
+            priority,
+            deadline,
+            branch_parent,
+            next_token_budget,
+            sampling_params,
+            sink_id,
+        );
+        slot.record = Some(record);
         Ok(seq_id)
     }
 
@@ -711,13 +757,7 @@ mod tests {
         let sink_id = router.register(sink);
 
         let seq_id = SequenceId::new(1, 1).unwrap();
-        router.emit(
-            sink_id,
-            CompletionEvent::Token {
-                seq_id,
-                token: 42,
-            },
-        );
+        router.emit(sink_id, CompletionEvent::Token { seq_id, token: 42 });
 
         let event = rx.try_recv().unwrap();
         match event {

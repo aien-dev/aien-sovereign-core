@@ -16,14 +16,14 @@ impl SequenceId {
 
     #[inline]
     pub fn as_u64(&self) -> u64 {
-        ((self.generation as u64) << 32) | (self.slot as u64)
+        ((self.slot as u64) << 32) | (self.generation as u64)
     }
 
     #[inline]
     pub fn from_u64(val: u64) -> Self {
         Self {
-            slot: (val & 0xFFFF_FFFF) as u32,
-            generation: (val >> 32) as u32,
+            slot: (val >> 32) as u32,
+            generation: (val & 0xFFFF_FFFF) as u32,
         }
     }
 }
@@ -85,6 +85,7 @@ impl SequenceArena {
             });
             free_slots.push(i as u32);
         }
+        free_slots.reverse();
 
         Self {
             slots,

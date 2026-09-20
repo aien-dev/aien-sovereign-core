@@ -78,7 +78,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Default: one-shot check
-    println!("");
+    println!();
     println!("=== SparkOS Sovereign Watchdog: System Diagnostic Audit ===");
     let report = run_full_audit(&client, &cli.workspace).await;
 
@@ -156,7 +156,7 @@ Overall Diagnostic Status: {}",
             "ATTENTION REQUIRED"
         }
     );
-    println!("");
+    println!();
 
     Ok(())
 }

@@ -47,8 +47,7 @@ pub fn extract_discovery_from_markdown(path: &Path, raw_content: &str) -> Option
     let source = path.to_string_lossy().to_string();
 
     // 1. Check for YAML-style frontmatter delimiter
-    if trimmed.starts_with("---") {
-        let after_first = &trimmed[3..];
+    if let Some(after_first) = trimmed.strip_prefix("---") {
         if let Some(closing_idx) = after_first.find("\n---") {
             let frontmatter_block = &after_first[..closing_idx];
             let body_block = after_first[closing_idx + 4..].trim();

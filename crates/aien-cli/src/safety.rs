@@ -137,8 +137,7 @@ impl SafetyEngine {
         if pattern == "*" {
             return true;
         }
-        if pattern.ends_with("/*") {
-            let prefix = &pattern[..pattern.len() - 2];
+        if let Some(prefix) = pattern.strip_suffix("/*") {
             return tool.starts_with(prefix);
         }
         pattern == tool

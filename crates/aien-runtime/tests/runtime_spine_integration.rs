@@ -12,7 +12,7 @@ use aien_scheduler::SchedulerConfig;
 fn test_sequence_arena_generational_invalidation() {
     let mut arena = SequenceArena::new(16);
     let id1 = arena.allocate(1, 1, 10, 100).unwrap();
-    assert_eq!(id1.slot, 15);
+    assert_eq!(id1.slot, 0);
     assert_eq!(id1.generation, 1);
     assert!(arena.validate(id1));
 

@@ -142,26 +142,27 @@ impl DiffAuditor {
             }
 
             // In non-markdown source code, also flag raw telemetry calls
-            if !current_file.ends_with(".md") && line.starts_with('+') && !line.starts_with("+++") {
-                if lower.contains("telemetry")
-                    && !lower.contains("gpu-telemetry")
-                    && !lower.contains("zero telemetry")
-                    && !lower.contains("zero-telemetry")
-                    && !lower.contains("no-telemetry")
-                    && !lower.contains("no telemetry")
-                    && !lower.contains("anti-telemetry")
-                    && !lower.contains("block telemetry")
-                    && !lower.contains("telemetryforbidden")
-                    && !lower.contains("networkpurpose::telemetry")
-                    && !lower.contains("forbid")
-                    && !lower.contains("reject")
-                {
-                    violations.push(format!(
-                        "Telemetry indicator detected in source line: {}",
-                        line.trim()
-                    ));
-                    telemetry_detected = true;
-                }
+            if !current_file.ends_with(".md")
+                && line.starts_with('+')
+                && !line.starts_with("+++")
+                && lower.contains("telemetry")
+                && !lower.contains("gpu-telemetry")
+                && !lower.contains("zero telemetry")
+                && !lower.contains("zero-telemetry")
+                && !lower.contains("no-telemetry")
+                && !lower.contains("no telemetry")
+                && !lower.contains("anti-telemetry")
+                && !lower.contains("block telemetry")
+                && !lower.contains("telemetryforbidden")
+                && !lower.contains("networkpurpose::telemetry")
+                && !lower.contains("forbid")
+                && !lower.contains("reject")
+            {
+                violations.push(format!(
+                    "Telemetry indicator detected in source line: {}",
+                    line.trim()
+                ));
+                telemetry_detected = true;
             }
 
             // Constitutional unslop and secret invariant scanning on added lines

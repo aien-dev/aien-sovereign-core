@@ -88,11 +88,11 @@ async fn test_runtime_server_client_ipc_lifecycle() {
         .await
         .expect("Failed to send shutdown command");
 
-    let server_res = server_handle
+    server_handle
         .await
         .expect("Server task panicked")
         .expect("Server exited with error");
-    assert_eq!(server_res, ());
+    assert_eq!((), ());
 
     // Verify socket file was cleaned up on clean exit
     assert!(

@@ -100,7 +100,7 @@ impl Verifier {
             VerificationStrategy::DualConsensus => {}
         }
 
-        score = score.max(0.0).min(1.0);
+        score = score.clamp(0.0, 1.0);
         let passed = violations.is_empty()
             || (score >= 0.70 && !violations.iter().any(|v| v.starts_with("Critical")));
 
