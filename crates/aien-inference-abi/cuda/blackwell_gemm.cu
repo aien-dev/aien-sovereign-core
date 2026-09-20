@@ -31,6 +31,7 @@ int blackwell_gemm_init(void) {
 
     cudaError_t cuda_err = cudaSetDevice(0);
     if (cuda_err != cudaSuccess) {
+        fprintf(stderr, "BlackwellGb10Backend init: cudaSetDevice(0) failed (%d: %s); clear unified memory pressure via vm.drop_caches=3\n", (int)cuda_err, cudaGetErrorString(cuda_err));
         return -1;
     }
 

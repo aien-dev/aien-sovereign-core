@@ -793,6 +793,51 @@ impl EmbeddedInferenceBackend {
             .decode(&generated_ids)
             .map_err(|e| format!("Decoding failed: {}", e))
     }
+
+    pub fn generate_text_streaming<F>(
+        &mut self,
+        prompt: &str,
+        max_tokens: usize,
+        temperature: f32,
+        mut on_text: F,
+    ) -> Result<(), String>
+    where
+        F: FnMut(&str) -> bool,
+    {
+        let tokenizer = self
+            .tokenizer
+            .as_ref()
+            .ok_or_else(|| "Tokenizer not initialized on EmbeddedInferenceBackend".to_string())?;
+
+        let prompt_tokens = tokenizer
+            .encode(prompt)
+            .map_err(|e| format!("Tokenization failed: {}", e))?;
+
+        let stop_tokens = [
+            TinyLlamaTokenizer::EOS_TOKEN_ID,
+            TinyLlamaTokenizer::UNK_TOKEN_ID,
+        ];
+
+        let seq_id = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(1);
+
+        self.backend.generate_tokens_streaming(
+            seq_id,
+            &prompt_tokens,
+            max_tokens,
+            temperature,
+            &stop_tokens,
+            |tok| {
+                if let Ok(piece) = tokenizer.decode(&[tok]) {
+                    on_text(&piece)
+                } else {
+                    true
+                }
+            },
+        )
+    }
 }
 
 #[async_trait]
