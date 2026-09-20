@@ -156,6 +156,13 @@ pub struct KvLayout {
 }
 
 impl KvLayout {
+    pub fn for_bf16(config: &KvPoolConfig) -> Result<Self, String> {
+        if config.dtype != KvDType::Bf16 {
+            return Err("Expected BF16 dtype".to_string());
+        }
+        Self::from_config(config)
+    }
+
     pub fn from_config(config: &KvPoolConfig) -> Result<Self, String> {
         let element_bytes = match config.dtype {
             KvDType::Bf16 | KvDType::Fp16 => 2usize,
