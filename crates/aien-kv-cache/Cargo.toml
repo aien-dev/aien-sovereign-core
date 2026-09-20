@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 authors = ["Drake Stapleton <drake.aien@proton.me>"]
 description = "Native Paged KV-Cache Manager with physical unified-memory tensors and prefix caching"
-license = "Apache-2.0"
+license.workspace = true
 
 [dependencies]
 parking_lot = "0.12"

@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 authors = ["Drake Stapleton <drake.aien@proton.me>"]
 description = "Native Rust Sovereign Mail Server & Atlas Cortex Memory Bridge"
-license = "Apache-2.0"
+license.workspace = true
 
 [dependencies]
 tokio = { version = "1.53.1", features = ["full"] }
