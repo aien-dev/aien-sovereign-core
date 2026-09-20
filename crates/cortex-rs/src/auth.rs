@@ -8,12 +8,11 @@ use axum::{
 use serde_json::json;
 use std::fs;
 
-fn default_cortex_token_path() -> std::path::PathBuf {
+fn default_token_path() -> std::path::PathBuf {
     let home = std::env::var("HOME")
         .or_else(|_| std::env::var("USERPROFILE"))
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| std::path::PathBuf::from("."));
-    home.join(".config/cortex/token")
+        .unwrap_or_else(|_| ".".to_string());
+    std::path::PathBuf::from(home).join(".config/cortex/token")
 }
 
 pub fn load_cortex_token() -> String {
@@ -22,7 +21,7 @@ pub fn load_cortex_token() -> String {
             return env_tok.trim().to_string();
         }
     }
-    let p = default_cortex_token_path();
+    let p = default_token_path();
     if p.exists() {
         fs::read_to_string(p).unwrap_or_default().trim().to_string()
     } else {
@@ -30,10 +29,7 @@ pub fn load_cortex_token() -> String {
     }
 }
 
-pub fn validate_auth_header(
-    auth_header: Option<&str>,
-    expected_token: &str,
-) -> Result<(), StatusCode> {
+pub fn validate_auth_header(auth_header: Option<&str>, expected_token: &str) -> Result<(), StatusCode> {
     if expected_token.is_empty() {
         return Err(StatusCode::SERVICE_UNAVAILABLE);
     }
@@ -52,10 +48,7 @@ pub fn validate_auth_header(
 
 pub async fn auth_middleware(req: Request, next: Next) -> Result<Response, Response> {
     let expected = load_cortex_token();
-    let auth_header = req
-        .headers()
-        .get("Authorization")
-        .and_then(|h| h.to_str().ok());
+    let auth_header = req.headers().get("Authorization").and_then(|h| h.to_str().ok());
 
     match validate_auth_header(auth_header, &expected) {
         Ok(()) => Ok(next.run(req).await),
@@ -70,8 +63,7 @@ pub async fn auth_middleware(req: Request, next: Next) -> Result<Response, Respo
             let err_resp = (
                 StatusCode::UNAUTHORIZED,
                 Json(json!({"error": "Unauthorized: invalid or missing Cortex bearer token"})),
-            )
-                .into_response();
+            ).into_response();
             Err(err_resp)
         }
     }

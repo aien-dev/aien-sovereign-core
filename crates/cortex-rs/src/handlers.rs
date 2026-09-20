@@ -35,59 +35,25 @@ pub async fn write_handler(
             match fetch_embedding(&state.http_client, &text_to_embed, &state.encoder_url).await {
                 Ok(vec) => emb = Some(vec),
                 Err(e) => {
-                    tracing::warn!(
-                        "Embedding encoder unavailable, proceeding with lexical only: {}",
-                        e
-                    );
+                    tracing::warn!("Embedding encoder unavailable, proceeding with lexical only: {}", e);
                 }
             }
 
             match state.db.upsert_entity(&value, emb.as_deref()) {
-                Ok(receipt) => Ok((
-                    StatusCode::CREATED,
-                    Json(CortexReceipt {
-                        recorded: true,
-                        receipt,
-                    }),
-                )
-                    .into_response()),
-                Err(e) => Err((
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({"error": e.to_string()})),
-                )),
+                Ok(receipt) => Ok((StatusCode::CREATED, Json(CortexReceipt { recorded: true, receipt })).into_response()),
+                Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))))
             }
         }
-        WritePayload::Claim { value } => match state.db.upsert_claim(&value) {
-            Ok(receipt) => Ok((
-                StatusCode::CREATED,
-                Json(CortexReceipt {
-                    recorded: true,
-                    receipt,
-                }),
-            )
-                .into_response()),
-            Err(e) => Err((
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": e.to_string()})),
-            )),
-        },
+        WritePayload::Claim { value } => {
+            match state.db.upsert_claim(&value) {
+                Ok(receipt) => Ok((StatusCode::CREATED, Json(CortexReceipt { recorded: true, receipt })).into_response()),
+                Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))))
+            }
+        }
         WritePayload::Retract { value } => {
-            match state
-                .db
-                .retract_target(&value.target_type, &value.target_id)
-            {
-                Ok(receipt) => Ok((
-                    StatusCode::CREATED,
-                    Json(CortexReceipt {
-                        recorded: true,
-                        receipt,
-                    }),
-                )
-                    .into_response()),
-                Err(e) => Err((
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({"error": e.to_string()})),
-                )),
+            match state.db.retract_target(&value.target_type, &value.target_id) {
+                Ok(receipt) => Ok((StatusCode::CREATED, Json(CortexReceipt { recorded: true, receipt })).into_response()),
+                Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))))
             }
         }
     }
@@ -111,10 +77,7 @@ pub async fn search_get_handler(
                 elapsed_ms,
             }))
         }
-        Err(e) => Err((
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": e.to_string()})),
-        )),
+        Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))))
     }
 }
 
@@ -136,10 +99,7 @@ pub async fn search_post_handler(
                 elapsed_ms,
             }))
         }
-        Err(e) => Err((
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": e.to_string()})),
-        )),
+        Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))))
     }
 }
 
@@ -159,10 +119,7 @@ pub async fn recall_handler(
         }
     }
 
-    match state
-        .db
-        .recall_entities(&payload.query, emb.as_deref(), space, limit)
-    {
+    match state.db.recall_entities(&payload.query, emb.as_deref(), space, limit) {
         Ok(results) => {
             let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
             Ok(Json(RecallResponse {
@@ -171,10 +128,7 @@ pub async fn recall_handler(
                 elapsed_ms,
             }))
         }
-        Err(e) => Err((
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": e.to_string()})),
-        )),
+        Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))))
     }
 }
 
@@ -191,22 +145,13 @@ pub async fn get_handler(
 ) -> Result<Response, (StatusCode, Json<serde_json::Value>)> {
     let target = params.id.or(params.name).unwrap_or_default();
     if target.is_empty() {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            Json(json!({"error": "Missing id or name parameter"})),
-        ));
+        return Err((StatusCode::BAD_REQUEST, Json(json!({"error": "Missing id or name parameter"}))));
     }
 
     match state.db.get_entity(&target, params.space.as_deref()) {
         Ok(Some(entity)) => Ok(Json(entity).into_response()),
-        Ok(None) => Err((
-            StatusCode::NOT_FOUND,
-            Json(json!({"error": "Entity not found"})),
-        )),
-        Err(e) => Err((
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": e.to_string()})),
-        )),
+        Ok(None) => Err((StatusCode::NOT_FOUND, Json(json!({"error": "Entity not found"})))),
+        Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))))
     }
 }
 
@@ -214,15 +159,9 @@ pub async fn traverse_handler(
     State(state): State<Arc<AppState>>,
     Json(payload): Json<TraversePayload>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
-    match state
-        .db
-        .traverse_claims(&payload.subject_id, payload.space.as_deref())
-    {
+    match state.db.traverse_claims(&payload.subject_id, payload.space.as_deref()) {
         Ok(claims) => Ok(Json(json!({"claims": claims}))),
-        Err(e) => Err((
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": e.to_string()})),
-        )),
+        Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))))
     }
 }
 
@@ -308,9 +247,7 @@ mod tests {
             name: Some("test_entity_get".to_string()),
             space: Some("non_existent_space".to_string()),
         };
-        let err_unknown = get_handler(State(state), Query(query_unknown_space))
-            .await
-            .unwrap_err();
+        let err_unknown = get_handler(State(state), Query(query_unknown_space)).await.unwrap_err();
         assert_eq!(err_unknown.0, StatusCode::NOT_FOUND);
     }
 
@@ -324,9 +261,7 @@ mod tests {
             limit: Some(10),
             include_retracted: Some(false),
         };
-        let Json(res) = search_get_handler(State(state), Query(params))
-            .await
-            .unwrap();
+        let Json(res) = search_get_handler(State(state), Query(params)).await.unwrap();
         assert_eq!(res.results.len(), 0);
     }
 
@@ -353,11 +288,7 @@ mod tests {
         let write_res = write_handler(State(state.clone()), Json(write_payload)).await;
         assert!(write_res.is_ok());
 
-        let entity = state
-            .db
-            .get_entity("lifecycle_test", Some("atlas-memory"))
-            .unwrap()
-            .unwrap();
+        let entity = state.db.get_entity("lifecycle_test", Some("atlas-memory")).unwrap().unwrap();
         assert_eq!(entity.canonical_name, "lifecycle_test");
 
         // 2. Retract entity
@@ -371,10 +302,7 @@ mod tests {
         let retract_res = write_handler(State(state.clone()), Json(retract_payload)).await;
         assert!(retract_res.is_ok());
 
-        let after = state
-            .db
-            .get_entity("lifecycle_test", Some("atlas-memory"))
-            .unwrap();
+        let after = state.db.get_entity("lifecycle_test", Some("atlas-memory")).unwrap();
         assert!(after.is_none());
     }
 
