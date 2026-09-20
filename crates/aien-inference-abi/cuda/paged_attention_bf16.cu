@@ -14,7 +14,7 @@
 #endif
 
 #ifndef Q_HEADS_PER_BLOCK
-#define Q_HEADS_PER_BLOCK 7
+#define Q_HEADS_PER_BLOCK 4
 #endif
 
 #ifndef VECTOR_WIDTH
@@ -26,7 +26,11 @@
 #endif
 
 #define WARP_SIZE 32
+#if defined(Q_HEADS_PER_BLOCK) && (Q_HEADS_PER_BLOCK > 0)
+#define WARPS_PER_BLOCK Q_HEADS_PER_BLOCK
+#else
 #define WARPS_PER_BLOCK (BLOCK_THREADS / WARP_SIZE)
+#endif
 
 __device__ __forceinline__ float bf16_to_f32(__nv_bfloat16 v) {
     return __bfloat162float(v);
@@ -36,9 +40,15 @@ __device__ __forceinline__ __nv_bfloat16 f32_to_bf16(float v) {
     return __float2bfloat16(v);
 }
 
+__device__ __forceinline__ void prefetch_global_l2(const void *ptr) {
+#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 700)
+    asm volatile("prefetch.global.L2 [%0];" :: "l"(ptr));
+#endif
+}
+
 // Truly Cooperative Grouped Query Paged Attention Kernel for Blackwell sm_121.
 // Each warp processes one query head across 32 lanes cooperatively.
-// Lane t handles elements {t, t + 32, t + 64, ...} of head_dim.
+// Coalesced 128-byte vectorized (32-bit __nv_bfloat162) memory accesses.
 // Online softmax is maintained in registers; dot products reduce via __shfl_down_sync.
 __global__ void paged_attention_bf16_cooperative_kernel(
     const __nv_bfloat16 * __restrict__ q,
@@ -78,16 +88,25 @@ __global__ void paged_attention_bf16_cooperative_kernel(
     extern __shared__ float s_q_all[];
     float *s_q = s_q_all + (warp_id * head_dim);
 
-    for (int d = lane_id; d < head_dim; d += WARP_SIZE) {
-        s_q[d] = bf16_to_f32(q_vec[d]);
+    // Load Q into shared memory (coalesced pairs)
+    for (int p = 0; p < (head_dim + 63) / 64; ++p) {
+        int d = lane_id * 2 + p * 64;
+        if (d + 1 < head_dim) {
+            const __nv_bfloat162 *q2_ptr = reinterpret_cast<const __nv_bfloat162*>(q_vec + d);
+            __nv_bfloat162 q2 = *q2_ptr;
+            s_q[d] = bf16_to_f32(__low2bfloat16(q2));
+            s_q[d + 1] = bf16_to_f32(__high2bfloat16(q2));
+        } else if (d < head_dim) {
+            s_q[d] = bf16_to_f32(q_vec[d]);
+        }
     }
     __syncwarp();
 
     float m_prev = -1e20f;
     float l_prev = 0.0f;
 
-    // Each lane holds up to 8 values (supporting head_dim up to 256)
-    const int elements_per_thread = (head_dim + WARP_SIZE - 1) / WARP_SIZE;
+    // Up to 4 pairs (8 elements per lane, supporting head_dim up to 256)
+    const int max_pairs = (head_dim + 63) / 64;
     float acc_out[8];
     #pragma unroll
     for (int i = 0; i < 8; ++i) {
@@ -115,15 +134,32 @@ __global__ void paged_attention_bf16_cooperative_kernel(
         const __nv_bfloat16 *k_block = k_pool + block_offset + (kv_head_idx * PAGE_SIZE * head_dim);
         const __nv_bfloat16 *v_block = v_pool + block_offset + (kv_head_idx * PAGE_SIZE * head_dim);
 
+#if PREFETCH_DISTANCE > 0
+        if (b + PREFETCH_DISTANCE < total_blocks) {
+            int32_t next_blk_id = seq_blocks[b + PREFETCH_DISTANCE];
+            if (next_blk_id >= 0) {
+                size_t next_offset = (size_t)next_blk_id * num_kv_heads * PAGE_SIZE * head_dim;
+                const void *next_k = k_pool + next_offset + (kv_head_idx * PAGE_SIZE * head_dim);
+                const void *next_v = v_pool + next_offset + (kv_head_idx * PAGE_SIZE * head_dim);
+                prefetch_global_l2(next_k);
+                prefetch_global_l2(next_v);
+            }
+        }
+#endif
+
         for (int tok = 0; tok < tokens_in_this_block; ++tok) {
             const __nv_bfloat16 *k_tok = k_block + (tok * head_dim);
             const __nv_bfloat16 *v_tok = v_block + (tok * head_dim);
 
-            // Step 1: Thread-local partial dot product across lane's dimensions
+            // Step 1: Thread-local partial dot product across lane's pairs (aligned 32-bit loads)
             float my_dot = 0.0f;
-            for (int i = 0; i < elements_per_thread; ++i) {
-                int d = lane_id + i * WARP_SIZE;
-                if (d < head_dim) {
+            for (int p = 0; p < max_pairs; ++p) {
+                int d = lane_id * 2 + p * 64;
+                if (d + 1 < head_dim) {
+                    const __nv_bfloat162 *k2_ptr = reinterpret_cast<const __nv_bfloat162*>(k_tok + d);
+                    __nv_bfloat162 k2 = *k2_ptr;
+                    my_dot += s_q[d] * bf16_to_f32(__low2bfloat16(k2)) + s_q[d + 1] * bf16_to_f32(__high2bfloat16(k2));
+                } else if (d < head_dim) {
                     my_dot += s_q[d] * bf16_to_f32(k_tok[d]);
                 }
             }
@@ -143,11 +179,16 @@ __global__ void paged_attention_bf16_cooperative_kernel(
             float beta = expf(score - m_new);
             float l_new = l_prev * alpha + beta;
 
-            // Step 5: Update value accumulator in registers for lane's dimensions
-            for (int i = 0; i < elements_per_thread; ++i) {
-                int d = lane_id + i * WARP_SIZE;
-                if (d < head_dim) {
-                    acc_out[i] = acc_out[i] * alpha + beta * bf16_to_f32(v_tok[d]);
+            // Step 5: Update value accumulator in registers for lane's dimensions (aligned loads)
+            for (int p = 0; p < max_pairs; ++p) {
+                int d = lane_id * 2 + p * 64;
+                if (d + 1 < head_dim) {
+                    const __nv_bfloat162 *v2_ptr = reinterpret_cast<const __nv_bfloat162*>(v_tok + d);
+                    __nv_bfloat162 v2 = *v2_ptr;
+                    acc_out[p * 2] = acc_out[p * 2] * alpha + beta * bf16_to_f32(__low2bfloat16(v2));
+                    acc_out[p * 2 + 1] = acc_out[p * 2 + 1] * alpha + beta * bf16_to_f32(__high2bfloat16(v2));
+                } else if (d < head_dim) {
+                    acc_out[p * 2] = acc_out[p * 2] * alpha + beta * bf16_to_f32(v_tok[d]);
                 }
             }
 
@@ -156,13 +197,19 @@ __global__ void paged_attention_bf16_cooperative_kernel(
         }
     }
 
-    // Step 6: Normalize by l_prev and write output cooperatively
+    // Step 6: Normalize by l_prev and write output cooperatively (aligned 32-bit stores)
     float inv_l = (l_prev > 0.0f) ? (1.0f / l_prev) : 0.0f;
     __nv_bfloat16 *out_vec = out + ((seq_idx * num_q_heads + q_head_idx) * head_dim);
-    for (int i = 0; i < elements_per_thread; ++i) {
-        int d = lane_id + i * WARP_SIZE;
-        if (d < head_dim) {
-            out_vec[d] = f32_to_bf16(acc_out[i] * inv_l);
+    for (int p = 0; p < max_pairs; ++p) {
+        int d = lane_id * 2 + p * 64;
+        if (d + 1 < head_dim) {
+            __nv_bfloat162 out2 = __halves2bfloat162(
+                f32_to_bf16(acc_out[p * 2] * inv_l),
+                f32_to_bf16(acc_out[p * 2 + 1] * inv_l)
+            );
+            *reinterpret_cast<__nv_bfloat162*>(out_vec + d) = out2;
+        } else if (d < head_dim) {
+            out_vec[d] = f32_to_bf16(acc_out[p * 2] * inv_l);
         }
     }
 }
@@ -262,7 +309,6 @@ int paged_attention_bf16_forward(
         d_out = g_scratch_d_out;
     }
 
-    // k_pool and v_pool: If allocated in unified memory (via cudaMallocManaged), no copy needed!
     const __nv_bfloat16 *d_k = k_pool;
     const __nv_bfloat16 *d_v = v_pool;
     __nv_bfloat16 *temp_k = NULL;
@@ -291,9 +337,10 @@ int paged_attention_bf16_forward(
     }
 
     int warps_per_block = WARPS_PER_BLOCK;
+    int block_threads = warps_per_block * WARP_SIZE;
     int blocks_x = (num_q_heads + warps_per_block - 1) / warps_per_block;
     dim3 grid(blocks_x, num_seqs);
-    dim3 block(BLOCK_THREADS);
+    dim3 block(block_threads);
     size_t shared_mem = warps_per_block * head_dim * sizeof(float);
 
     paged_attention_bf16_cooperative_kernel<<<grid, block, shared_mem>>>(
