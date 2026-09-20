@@ -91,6 +91,7 @@ version = "0.1.0"
 dependencies = [
  "aien-inference-abi",
  "aien-kv-cache",
+ "aien-platform",
  "futures-util",
  "parking_lot",
  "reqwest 0.12.28",
