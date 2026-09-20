@@ -1,0 +1,28 @@
+[package]
+name = "aien-runtime"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Canonical single-process runtime spine for AIEN persistent branching intelligence"
+
+[dependencies]
+aien-platform = { path = "../aien-platform" }
+aien-kv-cache = { path = "../aien-kv-cache" }
+aien-scheduler = { path = "../aien-scheduler" }
+aien-inference-abi = { path = "../aien-inference-abi" }
+aien-security = { path = "../aien-security" }
+cortex-rs = { path = "../cortex-rs" }
+
+tokio = { version = "1.37", features = ["full"] }
+parking_lot = "0.12"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+async-trait = "0.1"
+thiserror = "1.0"
+
+[dev-dependencies]
+tempfile = "3.10"
