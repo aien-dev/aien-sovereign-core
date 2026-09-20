@@ -2,10 +2,11 @@
 //! Dispatches single-token GEMV, batched GEMM, and Grouped Query Paged Attention
 //! directly to CUDA and cuBLAS 13 on Blackwell sm_121.
 
+use aien_kv_cache::KvLayoutDesc;
 use crate::backend::{ReferenceCpuBackend, TensorBackend};
 use std::ffi::CStr;
 use std::os::raw::{c_char, c_float, c_int};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 #[cfg(has_blackwell_cuda)]
 extern "C" {
@@ -29,8 +30,10 @@ extern "C" {
     ) -> c_int;
     fn paged_attention_bf16_forward(
         q: *const u16,
-        k_pool: *const u16,
-        v_pool: *const u16,
+        kv_pool: *const u8,
+        pool_bytes: u64,
+        layout: *const KvLayoutDesc,
+        layer_idx: i32,
         block_tables: *const i32,
         context_lens: *const i32,
         max_blocks_per_seq: c_int,
@@ -41,7 +44,10 @@ extern "C" {
         sm_scale: c_float,
         out: *mut u16,
     ) -> c_int;
+    fn paged_attention_get_kernel_count() -> u64;
+    #[allow(dead_code)]
     fn blackwell_allocate_managed(bytes: usize) -> *mut std::ffi::c_void;
+    #[allow(dead_code)]
     fn blackwell_free_managed(ptr: *mut std::ffi::c_void);
     fn blackwell_gemm_destroy();
 }
@@ -52,6 +58,10 @@ unsafe fn blackwell_gemm_init() -> c_int {
 }
 #[cfg(not(has_blackwell_cuda))]
 unsafe fn blackwell_gemm_get_kernel_count() -> u64 {
+    0
+}
+#[cfg(not(has_blackwell_cuda))]
+unsafe fn paged_attention_get_kernel_count() -> u64 {
     0
 }
 #[cfg(not(has_blackwell_cuda))]
@@ -82,8 +92,10 @@ unsafe fn blackwell_gemv_f32(
 #[cfg(not(has_blackwell_cuda))]
 unsafe fn paged_attention_bf16_forward(
     _q: *const u16,
-    _k_pool: *const u16,
-    _v_pool: *const u16,
+    _kv_pool: *const u8,
+    _pool_bytes: u64,
+    _layout: *const KvLayoutDesc,
+    _layer_idx: i32,
     _block_tables: *const i32,
     _context_lens: *const i32,
     _max_blocks_per_seq: c_int,
@@ -107,6 +119,8 @@ unsafe fn blackwell_gemm_destroy() {}
 
 /// Blackwell GB10 GPU Tensor Backend.
 /// Executes GEMV, batched GEMM, and Paged Attention on the NVIDIA GB10 Blackwell GPU.
+static ACTIVE_BACKENDS: AtomicUsize = AtomicUsize::new(0);
+
 pub struct BlackwellGb10Backend {
     fallback: ReferenceCpuBackend,
     device_name: String,
@@ -133,14 +147,7 @@ impl BlackwellGb10Backend {
         }
 
         if available {
-            unsafe fn custom_alloc(bytes: usize) -> *mut u8 {
-                blackwell_allocate_managed(bytes) as *mut u8
-            }
-            unsafe fn custom_free(ptr: *mut u8, _bytes: usize) {
-                blackwell_free_managed(ptr as *mut std::ffi::c_void);
-            }
-            aien_kv_cache::register_unified_allocator(custom_alloc, custom_free);
-
+            ACTIVE_BACKENDS.fetch_add(1, Ordering::SeqCst);
             eprintln!(
                 "BlackwellGb10Backend: Successfully bound to device '{}' (sm_121 cuBLAS 13)",
                 device_name
@@ -167,7 +174,7 @@ impl BlackwellGb10Backend {
 
     pub fn kernel_exec_count(&self) -> u64 {
         if self.available {
-            unsafe { blackwell_gemm_get_kernel_count() }
+            unsafe { blackwell_gemm_get_kernel_count() + paged_attention_get_kernel_count() }
         } else {
             0
         }
@@ -181,8 +188,9 @@ impl BlackwellGb10Backend {
     pub fn paged_attention_bf16(
         &self,
         q: &[u16],
-        k_pool: &[u16],
-        v_pool: &[u16],
+        kv_pool: &[u8],
+        layout: KvLayoutDesc,
+        layer_idx: usize,
         block_tables: &[i32],
         context_lens: &[i32],
         max_blocks_per_seq: usize,
@@ -197,8 +205,10 @@ impl BlackwellGb10Backend {
             let res = unsafe {
                 paged_attention_bf16_forward(
                     q.as_ptr(),
-                    k_pool.as_ptr(),
-                    v_pool.as_ptr(),
+                    kv_pool.as_ptr(),
+                    kv_pool.len() as u64,
+                    &layout as *const KvLayoutDesc,
+                    layer_idx as i32,
                     block_tables.as_ptr(),
                     context_lens.as_ptr(),
                     max_blocks_per_seq as c_int,
@@ -230,7 +240,7 @@ impl Default for BlackwellGb10Backend {
 
 impl Drop for BlackwellGb10Backend {
     fn drop(&mut self) {
-        if self.available {
+        if self.available && ACTIVE_BACKENDS.fetch_sub(1, Ordering::SeqCst) == 1 {
             unsafe {
                 blackwell_gemm_destroy();
             }
@@ -366,10 +376,7 @@ impl TensorBackend for BlackwellGb10Backend {
         if self.available && pool.config().dtype == aien_kv_cache::KvDType::Bf16 {
             let q_bf16: Vec<u16> = q
                 .iter()
-                .map(|&v| {
-                    let bits = v.to_bits();
-                    (bits >> 16) as u16
-                })
+                .map(|&v| aien_kv_cache::f32_to_bf16_bits(v))
                 .collect();
 
             let sm_scale = 1.0f32 / (head_dim as f32).sqrt();
@@ -378,13 +385,17 @@ impl TensorBackend for BlackwellGb10Backend {
             let context_lens = [context_len as i32];
             let max_blocks = block_ids.len();
 
-            let k_ptr = pool.base_ptr() as *const u16;
-            let v_ptr = pool.base_ptr() as *const u16;
+            let layout_desc = pool.layout_desc();
+
+            let kv_slice = unsafe {
+                std::slice::from_raw_parts(pool.base_ptr(), pool.total_bytes())
+            };
 
             let res = self.paged_attention_bf16(
                 &q_bf16,
-                unsafe { std::slice::from_raw_parts(k_ptr, pool.total_bytes() / 2) },
-                unsafe { std::slice::from_raw_parts(v_ptr, pool.total_bytes() / 2) },
+                kv_slice,
+                layout_desc,
+                layer_idx,
                 &i32_block_tables,
                 &context_lens,
                 max_blocks,
@@ -398,8 +409,7 @@ impl TensorBackend for BlackwellGb10Backend {
 
             if res.is_ok() {
                 for i in 0..out.len() {
-                    let bits = (out_bf16[i] as u32) << 16;
-                    out[i] = f32::from_bits(bits);
+                    out[i] = aien_kv_cache::bf16_bits_to_f32(out_bf16[i]);
                 }
                 return;
             }
@@ -517,13 +527,31 @@ mod tests {
         let num_q_heads = 4;
         let num_kv_heads = 2;
         let head_dim = 64;
-        let page_size = 16;
-        let total_pages = 8;
+        let block_size = 16;
+        let num_blocks = 8;
+        let num_layers = 1;
+        let layer_idx = 0;
         let max_blocks_per_seq = 4;
 
+        let config = aien_kv_cache::KvPoolConfig {
+            num_blocks,
+            block_size,
+            num_layers,
+            num_kv_heads,
+            head_dim,
+            dtype: aien_kv_cache::KvDType::Bf16,
+        };
+        let layout = aien_kv_cache::KvLayout::for_bf16(&config).expect("Layout generation failed");
+        let layout_desc = layout.to_desc();
+
         let q = vec![0x3F80u16; num_seqs * num_q_heads * head_dim]; // 1.0 in BF16
-        let k_pool = vec![0x3F80u16; total_pages * num_kv_heads * page_size * head_dim];
-        let v_pool = vec![0x3F80u16; total_pages * num_kv_heads * page_size * head_dim];
+        let mut kv_pool = vec![0u8; layout.total_bytes];
+        unsafe {
+            let u16_ptr = kv_pool.as_mut_ptr() as *mut u16;
+            for i in 0..(layout.total_bytes / 2) {
+                *u16_ptr.add(i) = 0x3F80;
+            }
+        }
 
         let block_tables = vec![
             0, 1, -1, -1, // seq 0: blocks 0, 1
@@ -536,8 +564,9 @@ mod tests {
 
         let res = backend.paged_attention_bf16(
             &q,
-            &k_pool,
-            &v_pool,
+            &kv_pool,
+            layout_desc,
+            layer_idx,
             &block_tables,
             &context_lens,
             max_blocks_per_seq,
