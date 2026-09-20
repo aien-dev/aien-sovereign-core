@@ -181,6 +181,14 @@ pub fn render_walkthrough_tui() -> String {
         "✓".green().bold()
     ));
     out.push_str(&format!(
+        "│  {} Phase 9: Antigravity Customizations & Local Model Pair-Programming Parity      │\n",
+        "✓".green().bold()
+    ));
+    out.push_str(&format!(
+        "│  {} Phase 10: Mathematical Verification Oracles & Marketing Voice Elimination       │\n",
+        "✓".green().bold()
+    ));
+    out.push_str(&format!(
         "└── ───────────────────────────────────────────────────────────────────────────┘\n\n"
     ));
 
@@ -320,6 +328,18 @@ graph TD
   - Live pulse recorded in `basecamp/hive-pulse.json` and sensed during nesting initiation.
 - [x] **Phase 8: Sovereign Walkthrough & Architecture Map Engine**
   - Self-generating, live-updating component maps and roadmaps directly accessible via `/walkthrough` and `aien --walkthrough`.
+- [x] **Phase 9: Antigravity Customizations & Local Model Pair-Programming Parity**
+  - Progressive skill disclosure parsing YAML frontmatter across `~/skills`, `~/.agents/skills`, and `~/.gemini/config/skills`.
+  - Hierarchical rule discovery (`AGENTS.md`, `GEMINI.md`, `.agents/rules/*.md`) walking directory tree with `/rules` inspection.
+  - Real-time streaming reasoning tokens (`[Thinking] ...`) from Modular MAX port 18006 (`atlas-lightning-omni`).
+  - Antigravity tool schema aliases (PascalCase and snake_case) across core agent capabilities.
+  - Dual interfaces: compiled native Rust CLI (`~/.local/bin/aien`) and Python SDK runner (`~/.local/bin/aien-ag`).
+- [x] **Phase 10: Mathematical Verification Oracles & Marketing Voice Elimination**
+  - Replaced corrupted quadratic approximations with exact Shannon entropy (-p * ln(p)) in Mojo SIMD and Rust fallback.
+  - Built standalone Python verification oracle (`verify_simd_math.py`) generating verified analytical fixtures.
+  - Scrubbed promotional marketing language across all active repositories (`openclaw-rs`, `spark-inquisitor`, `crumb-spec`, `spark-crumbs-publish`, `org-profile`, `aien-dev`).
+  - Completed autonomous PR lifecycles with public branches, verification proof, and squash merges.
+  - Verified 143/143 tests in `spark-rsi`, 49/49 tests in `aien-inference-abi`, 52/52 tests in `openclaw-rs`, and 22/22 tests in `aien-cli`.
 
 ---
 
