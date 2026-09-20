@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 fn main() {
+    println!("cargo:rustc-check-cfg=cfg(has_blackwell_cuda)");
     println!("cargo:rerun-if-changed=cuda/blackwell_gemm.cu");
     println!("cargo:rerun-if-changed=cuda/paged_attention_bf16.cu");
     println!("cargo:rerun-if-changed=build.rs");

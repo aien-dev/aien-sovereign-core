@@ -263,8 +263,19 @@ async fn test_blackwell_vs_reference_cpu_autoregressive_parity() {
     let (out_cpu, _) = cpu_backend.execute_step(&batch_cpu).await.unwrap();
     let (out_gpu, _) = gpu_backend.execute_step(&batch_gpu).await.unwrap();
 
-    if let (DecodeOutput::Token { token_id: t_cpu, .. }, DecodeOutput::Token { token_id: t_gpu, .. }) = (&out_cpu[0], &out_gpu[0]) {
-        assert_eq!(t_cpu, t_gpu, "Prefill first token mismatch between CPU and Blackwell GPU");
+    if let (
+        DecodeOutput::Token {
+            token_id: t_cpu, ..
+        },
+        DecodeOutput::Token {
+            token_id: t_gpu, ..
+        },
+    ) = (&out_cpu[0], &out_gpu[0])
+    {
+        assert_eq!(
+            t_cpu, t_gpu,
+            "Prefill first token mismatch between CPU and Blackwell GPU"
+        );
         cpu_tokens.push(*t_cpu);
         gpu_tokens.push(*t_gpu);
     }
@@ -281,13 +292,32 @@ async fn test_blackwell_vs_reference_cpu_autoregressive_parity() {
         let (step_out_cpu, _) = cpu_backend.execute_step(&batch_cpu).await.unwrap();
         let (step_out_gpu, _) = gpu_backend.execute_step(&batch_gpu).await.unwrap();
 
-        if let (DecodeOutput::Token { token_id: t_cpu, .. }, DecodeOutput::Token { token_id: t_gpu, .. }) = (&step_out_cpu[0], &step_out_gpu[0]) {
-            assert_eq!(t_cpu, t_gpu, "Decode step {} token mismatch: CPU={}, GPU={}", step, t_cpu, t_gpu);
+        if let (
+            DecodeOutput::Token {
+                token_id: t_cpu, ..
+            },
+            DecodeOutput::Token {
+                token_id: t_gpu, ..
+            },
+        ) = (&step_out_cpu[0], &step_out_gpu[0])
+        {
+            assert_eq!(
+                t_cpu, t_gpu,
+                "Decode step {} token mismatch: CPU={}, GPU={}",
+                step, t_cpu, t_gpu
+            );
             cpu_tokens.push(*t_cpu);
             gpu_tokens.push(*t_gpu);
         }
     }
 
-    assert_eq!(cpu_tokens, gpu_tokens, "Autoregressive generation must match bitwise between CPU and Blackwell GPU");
-    println!("Parity verified over {} tokens: {:?}", cpu_tokens.len(), cpu_tokens);
+    assert_eq!(
+        cpu_tokens, gpu_tokens,
+        "Autoregressive generation must match bitwise between CPU and Blackwell GPU"
+    );
+    println!(
+        "Parity verified over {} tokens: {:?}",
+        cpu_tokens.len(),
+        cpu_tokens
+    );
 }

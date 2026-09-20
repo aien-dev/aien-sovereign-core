@@ -18,7 +18,9 @@ pub mod telemetry;
 pub use compute::{BufferLayout, ComputeDevice, ComputeWork, DeviceAddress, Fence, UnifiedBuffer};
 pub use memory::{MemoryEntity, MemoryService, RecallQuery, RecallResult};
 pub use objects::{ObjectId, ObjectRef, ObjectStore, ObjectWrite};
-pub use queue::{InferenceWork, KvHandle, ModelHandle, Priority, QueueError, SequenceId, Ticks, WorkQueue};
+pub use queue::{
+    InferenceWork, KvHandle, ModelHandle, Priority, QueueError, SequenceId, Ticks, WorkQueue,
+};
 pub use runtime::Runtime;
 pub use task::{TaskExecutor, TaskRequest, TaskResult};
 pub use telemetry::{TelemetrySnapshot, TelemetrySource};
@@ -46,11 +48,16 @@ impl core::fmt::Display for PlatformError {
             Self::InvalidLayout => write!(f, "Platform error: invalid buffer layout or alignment"),
             Self::QueueFull => write!(f, "Platform error: work queue capacity exceeded"),
             Self::QueueEmpty => write!(f, "Platform error: work queue empty"),
-            Self::TaskRejected(msg) => write!(f, "Platform error: task execution rejected: {}", msg),
+            Self::TaskRejected(msg) => {
+                write!(f, "Platform error: task execution rejected: {}", msg)
+            }
             Self::ObjectNotFound(id) => write!(f, "Platform error: object {:?} not found", id),
             Self::AccessDenied => write!(f, "Platform error: capability access denied"),
             Self::HardwareFault(msg) => write!(f, "Platform error: hardware fault: {}", msg),
-            Self::UnsupportedOperation => write!(f, "Platform error: unsupported operation on target substrate"),
+            Self::UnsupportedOperation => write!(
+                f,
+                "Platform error: unsupported operation on target substrate"
+            ),
         }
     }
 }

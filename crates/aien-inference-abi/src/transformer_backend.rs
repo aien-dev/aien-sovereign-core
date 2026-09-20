@@ -10,10 +10,7 @@ use crate::{
     AienInferenceBackend, AienUsageReceipt, BranchHandle, ContextHandle, DecodeOutput,
     FinishReason, ModelConfig, ScheduledBatch, StepMetrics,
 };
-use aien_kv_cache::{
-    create_shared_kv_manager_with_pool,
-    KvDType, KvPoolConfig, SharedKvManager,
-};
+use aien_kv_cache::{create_shared_kv_manager_with_pool, KvDType, KvPoolConfig, SharedKvManager};
 use async_trait::async_trait;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -42,7 +39,10 @@ impl NativeTransformerBackend {
     }
 
     /// Creates a backend with an explicit TensorBackend implementation.
-    pub fn with_backend(weights: TransformerWeights, tensor_backend: Arc<dyn TensorBackend>) -> Self {
+    pub fn with_backend(
+        weights: TransformerWeights,
+        tensor_backend: Arc<dyn TensorBackend>,
+    ) -> Self {
         Self {
             weights,
             sequences: HashMap::new(),
@@ -132,7 +132,11 @@ impl NativeTransformerBackend {
     }
 
     /// Creates a new immutable root context from prompt tokens.
-    pub fn prefill_sequence(&mut self, seq_id: u64, prompt_tokens: &[u32]) -> Result<Vec<f32>, String> {
+    pub fn prefill_sequence(
+        &mut self,
+        seq_id: u64,
+        prompt_tokens: &[u32],
+    ) -> Result<Vec<f32>, String> {
         if prompt_tokens.is_empty() {
             return Err("Cannot prefill empty prompt".to_string());
         }
@@ -316,7 +320,8 @@ impl NativeTransformerBackend {
                 self.kv_manager.as_ref(),
             );
 
-            let next_logits = Self::compute_logits_impl(&self.weights, &*self.tensor_backend, &hidden);
+            let next_logits =
+                Self::compute_logits_impl(&self.weights, &*self.tensor_backend, &hidden);
             let (next_tok, _) = if temperature <= 0.001 {
                 sample_argmax(&next_logits)
             } else {
@@ -424,10 +429,7 @@ impl NativeTransformerBackend {
             }
         }
 
-        let bytes_per_block = kv_mgr
-            .tensor_pool()
-            .map(|p| p.block_bytes())
-            .unwrap_or(0);
+        let bytes_per_block = kv_mgr.tensor_pool().map(|p| p.block_bytes()).unwrap_or(0);
         let physical_kv_bytes = (shared_pages + private_pages) * bytes_per_block;
 
         Ok(AienUsageReceipt {
@@ -475,7 +477,8 @@ impl NativeTransformerBackend {
         let theta = weights.config.rope_theta;
 
         let token_idx = (token_id as usize) % weights.config.vocab_size();
-        let mut x = weights.embed_tokens[token_idx * hidden_dim..(token_idx + 1) * hidden_dim].to_vec();
+        let mut x =
+            weights.embed_tokens[token_idx * hidden_dim..(token_idx + 1) * hidden_dim].to_vec();
 
         let mut x_norm = vec![0.0f32; hidden_dim];
         let mut q = vec![0.0f32; q_dim];
@@ -512,10 +515,14 @@ impl NativeTransformerBackend {
             );
 
             if let (Some((block_id, slot)), Some(mgr)) = (block_slot, kv_manager) {
-                let _ = mgr.write().write_explicit_token_kv(block_id, layer_idx, slot, &k, &v);
+                let _ = mgr
+                    .write()
+                    .write_explicit_token_kv(block_id, layer_idx, slot, &k, &v);
 
                 let mgr_read = mgr.read();
-                if let (Some(pool), Some(table)) = (mgr_read.tensor_pool(), mgr_read.get_block_table(seq_id)) {
+                if let (Some(pool), Some(table)) =
+                    (mgr_read.tensor_pool(), mgr_read.get_block_table(seq_id))
+                {
                     let total_tokens = table.total_tokens;
                     backend.paged_attention(
                         &mut attn_out,
@@ -561,10 +568,28 @@ impl NativeTransformerBackend {
             }
 
             backend.rmsnorm(&mut post_norm, &x, &layer_w.post_attention_layernorm, eps);
-            backend.matmul_vec(&mut gate, &post_norm, &layer_w.gate_proj, intermediate_dim, hidden_dim);
-            backend.matmul_vec(&mut up, &post_norm, &layer_w.up_proj, intermediate_dim, hidden_dim);
+            backend.matmul_vec(
+                &mut gate,
+                &post_norm,
+                &layer_w.gate_proj,
+                intermediate_dim,
+                hidden_dim,
+            );
+            backend.matmul_vec(
+                &mut up,
+                &post_norm,
+                &layer_w.up_proj,
+                intermediate_dim,
+                hidden_dim,
+            );
             backend.swiglu(&mut activated, &gate, &up);
-            backend.matmul_vec(&mut mlp_out, &activated, &layer_w.down_proj, hidden_dim, intermediate_dim);
+            backend.matmul_vec(
+                &mut mlp_out,
+                &activated,
+                &layer_w.down_proj,
+                hidden_dim,
+                intermediate_dim,
+            );
 
             for i in 0..hidden_dim {
                 x[i] += mlp_out[i];
@@ -601,7 +626,14 @@ impl NativeTransformerBackend {
         prompt_tokens: &[u32],
         seq_state: &mut SequenceState,
     ) -> Vec<f32> {
-        Self::prefill_prompt_layer_by_layer_paged(weights, backend, prompt_tokens, seq_state, 0, None)
+        Self::prefill_prompt_layer_by_layer_paged(
+            weights,
+            backend,
+            prompt_tokens,
+            seq_state,
+            0,
+            None,
+        )
     }
 
     /// Prefill all prompt tokens layer-by-layer with optional paged COW KV registration.
@@ -646,7 +678,8 @@ impl NativeTransformerBackend {
             .iter()
             .map(|&tok| {
                 let token_idx = (tok as usize) % weights.config.vocab_size();
-                let slice = &weights.embed_tokens[token_idx * hidden_dim..(token_idx + 1) * hidden_dim];
+                let slice =
+                    &weights.embed_tokens[token_idx * hidden_dim..(token_idx + 1) * hidden_dim];
                 slice.to_vec()
             })
             .collect();
@@ -673,9 +706,30 @@ impl NativeTransformerBackend {
                 backend.rmsnorm(out_slice, &states[t], &layer_w.input_layernorm, eps);
             }
 
-            backend.matmul_batch(&mut q_batch, &x_norm_batch, &layer_w.q_proj, n, hidden_dim, q_dim);
-            backend.matmul_batch(&mut k_batch, &x_norm_batch, &layer_w.k_proj, n, hidden_dim, kv_dim);
-            backend.matmul_batch(&mut v_batch, &x_norm_batch, &layer_w.v_proj, n, hidden_dim, kv_dim);
+            backend.matmul_batch(
+                &mut q_batch,
+                &x_norm_batch,
+                &layer_w.q_proj,
+                n,
+                hidden_dim,
+                q_dim,
+            );
+            backend.matmul_batch(
+                &mut k_batch,
+                &x_norm_batch,
+                &layer_w.k_proj,
+                n,
+                hidden_dim,
+                kv_dim,
+            );
+            backend.matmul_batch(
+                &mut v_batch,
+                &x_norm_batch,
+                &layer_w.v_proj,
+                n,
+                hidden_dim,
+                kv_dim,
+            );
 
             for t in 0..n {
                 let q_t = &mut q_batch[t * q_dim..(t + 1) * q_dim];
@@ -689,7 +743,9 @@ impl NativeTransformerBackend {
                     let block_idx = t / block_size;
                     let block_id = tbl.block_ids[block_idx];
                     let slot = t % block_size;
-                    let _ = mgr.write().write_explicit_token_kv(block_id, layer_idx, slot, k_t, v_t);
+                    let _ = mgr
+                        .write()
+                        .write_explicit_token_kv(block_id, layer_idx, slot, k_t, v_t);
                 }
 
                 kv_cache.cached_k.push(k_t.to_vec());
@@ -715,7 +771,14 @@ impl NativeTransformerBackend {
                 );
             }
 
-            backend.matmul_batch(&mut attn_proj_batch, &attn_out_batch, &layer_w.o_proj, n, q_dim, hidden_dim);
+            backend.matmul_batch(
+                &mut attn_proj_batch,
+                &attn_out_batch,
+                &layer_w.o_proj,
+                n,
+                q_dim,
+                hidden_dim,
+            );
             for t in 0..n {
                 let proj_t = &attn_proj_batch[t * hidden_dim..(t + 1) * hidden_dim];
                 for i in 0..hidden_dim {
@@ -725,11 +788,30 @@ impl NativeTransformerBackend {
 
             for t in 0..n {
                 let out_slice = &mut post_norm_batch[t * hidden_dim..(t + 1) * hidden_dim];
-                backend.rmsnorm(out_slice, &states[t], &layer_w.post_attention_layernorm, eps);
+                backend.rmsnorm(
+                    out_slice,
+                    &states[t],
+                    &layer_w.post_attention_layernorm,
+                    eps,
+                );
             }
 
-            backend.matmul_batch(&mut gate_batch, &post_norm_batch, &layer_w.gate_proj, n, hidden_dim, intermediate_dim);
-            backend.matmul_batch(&mut up_batch, &post_norm_batch, &layer_w.up_proj, n, hidden_dim, intermediate_dim);
+            backend.matmul_batch(
+                &mut gate_batch,
+                &post_norm_batch,
+                &layer_w.gate_proj,
+                n,
+                hidden_dim,
+                intermediate_dim,
+            );
+            backend.matmul_batch(
+                &mut up_batch,
+                &post_norm_batch,
+                &layer_w.up_proj,
+                n,
+                hidden_dim,
+                intermediate_dim,
+            );
 
             for t in 0..n {
                 let gate_t = &gate_batch[t * intermediate_dim..(t + 1) * intermediate_dim];
@@ -738,7 +820,14 @@ impl NativeTransformerBackend {
                 backend.swiglu(act_t, gate_t, up_t);
             }
 
-            backend.matmul_batch(&mut mlp_out_batch, &act_batch, &layer_w.down_proj, n, intermediate_dim, hidden_dim);
+            backend.matmul_batch(
+                &mut mlp_out_batch,
+                &act_batch,
+                &layer_w.down_proj,
+                n,
+                intermediate_dim,
+                hidden_dim,
+            );
             for t in 0..n {
                 let mlp_t = &mlp_out_batch[t * hidden_dim..(t + 1) * hidden_dim];
                 for i in 0..hidden_dim {
@@ -764,7 +853,13 @@ impl NativeTransformerBackend {
         pos: usize,
         seq_state: &mut SequenceState,
     ) -> Vec<f32> {
-        Self::forward_token_impl(&self.weights, &*self.tensor_backend, token_id, pos, seq_state)
+        Self::forward_token_impl(
+            &self.weights,
+            &*self.tensor_backend,
+            token_id,
+            pos,
+            seq_state,
+        )
     }
 
     /// Computes logits projection executing through the configured TensorBackend trait.
@@ -795,7 +890,9 @@ impl AienInferenceBackend for NativeTransformerBackend {
             prefill_tokens += req.prompt_tokens.len();
 
             if let Some(kv_mgr) = &self.kv_manager {
-                let _ = kv_mgr.write().allocate_sequence(req.request_id, &req.prompt_tokens);
+                let _ = kv_mgr
+                    .write()
+                    .allocate_sequence(req.request_id, &req.prompt_tokens);
             }
 
             let seq = self
@@ -815,7 +912,8 @@ impl AienInferenceBackend for NativeTransformerBackend {
                 self.kv_manager.as_ref(),
             );
 
-            let logits = Self::compute_logits_impl(&self.weights, &*self.tensor_backend, &last_hidden);
+            let logits =
+                Self::compute_logits_impl(&self.weights, &*self.tensor_backend, &last_hidden);
             let (sampled_tok, logprob) = if req.sampling_params.temperature <= 0.001 {
                 sample_argmax(&logits)
             } else {
@@ -846,7 +944,8 @@ impl AienInferenceBackend for NativeTransformerBackend {
                     req_id,
                     self.kv_manager.as_ref(),
                 );
-                let logits = Self::compute_logits_impl(&self.weights, &*self.tensor_backend, &hidden);
+                let logits =
+                    Self::compute_logits_impl(&self.weights, &*self.tensor_backend, &hidden);
 
                 let (sampled_tok, logprob) = sample_argmax(&logits);
                 seq.tokens.push(sampled_tok);
@@ -905,10 +1004,16 @@ mod tests {
         assert_eq!(cpu_backend.tensor_backend.name(), "ReferenceCpuBackend");
 
         let mojo_backend = NativeTransformerBackend::with_mojo_backend(&config);
-        assert!(mojo_backend.tensor_backend.name().starts_with("NativeCpuBackend"));
+        assert!(mojo_backend
+            .tensor_backend
+            .name()
+            .starts_with("NativeCpuBackend"));
 
         let blackwell_backend = NativeTransformerBackend::with_blackwell_backend(&config);
-        assert!(blackwell_backend.tensor_backend.name().starts_with("BlackwellGb10Backend"));
+        assert!(blackwell_backend
+            .tensor_backend
+            .name()
+            .starts_with("BlackwellGb10Backend"));
     }
 
     #[test]
@@ -1007,7 +1112,9 @@ mod tests {
         let mut backend = NativeTransformerBackend::with_reference_weights(&config);
         let prompt = vec![1, 5, 9];
         let stop_tokens = vec![0];
-        let generated = backend.generate_tokens(555, &prompt, 4, 0.0, &stop_tokens).unwrap();
+        let generated = backend
+            .generate_tokens(555, &prompt, 4, 0.0, &stop_tokens)
+            .unwrap();
         assert_eq!(generated.len(), 4);
         assert!(!generated.contains(&0));
         assert_eq!(backend.sequences.len(), 0);
@@ -1030,10 +1137,12 @@ mod tests {
         let prompt = vec![1, 5, 9];
         let stop_tokens = vec![0];
         let mut streamed = Vec::new();
-        backend.generate_tokens_streaming(777, &prompt, 4, 0.0, &stop_tokens, |tok| {
-            streamed.push(tok);
-            true
-        }).unwrap();
+        backend
+            .generate_tokens_streaming(777, &prompt, 4, 0.0, &stop_tokens, |tok| {
+                streamed.push(tok);
+                true
+            })
+            .unwrap();
         assert_eq!(streamed.len(), 4);
         assert!(!streamed.contains(&0));
         assert_eq!(backend.sequences.len(), 0);

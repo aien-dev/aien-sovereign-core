@@ -11,6 +11,7 @@ pub mod tokenizer;
 pub mod transformer_backend;
 pub mod weights;
 
+pub use aien_kv_cache::*;
 pub use backend::*;
 pub use blackwell_backend::*;
 pub use checkpoint::*;
@@ -19,7 +20,6 @@ pub use tensor::*;
 pub use tokenizer::*;
 pub use transformer_backend::*;
 pub use weights::*;
-pub use aien_kv_cache::*;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ModelHandle(pub u64);
@@ -42,7 +42,6 @@ pub struct AienUsageReceipt {
     pub physical_kv_bytes: usize,
     pub bytes_saved_vs_full_copy: usize,
 }
-
 
 fn default_num_kv_heads() -> usize {
     8
@@ -982,7 +981,6 @@ mod tests {
         assert_eq!(metrics.prefill_tokens_processed, 2);
     }
 
-    
     #[tokio::test]
     async fn test_embedded_inference_backend_execution() {
         let config = ModelConfig {

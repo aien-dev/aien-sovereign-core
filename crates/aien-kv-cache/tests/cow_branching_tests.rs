@@ -169,7 +169,8 @@ fn test_tensor_pool_read_write_cow_parity() {
         let k_tok = vec![k_val; kv_dim];
         let v_tok = vec![v_val; kv_dim];
 
-        mgr.write_explicit_token_kv(p_block, 0, t, &k_tok, &v_tok).unwrap();
+        mgr.write_explicit_token_kv(p_block, 0, t, &k_tok, &v_tok)
+            .unwrap();
         expected_k[t * kv_dim..(t + 1) * kv_dim].copy_from_slice(&k_tok);
         expected_v[t * kv_dim..(t + 1) * kv_dim].copy_from_slice(&v_tok);
     }
@@ -180,7 +181,8 @@ fn test_tensor_pool_read_write_cow_parity() {
     // Verify child reads exact same initial 15 tokens
     let mut child_k = Vec::new();
     let mut child_v = Vec::new();
-    mgr.gather_sequence_layer_kv(2, 0, &mut child_k, &mut child_v).unwrap();
+    mgr.gather_sequence_layer_kv(2, 0, &mut child_k, &mut child_v)
+        .unwrap();
     assert_eq!(child_k, expected_k);
     assert_eq!(child_v, expected_v);
 
@@ -192,18 +194,21 @@ fn test_tensor_pool_read_write_cow_parity() {
     // Write divergent token to child
     let child_k15 = vec![999.0f32; kv_dim];
     let child_v15 = vec![888.0f32; kv_dim];
-    mgr.write_explicit_token_kv(child_block, 0, slot, &child_k15, &child_v15).unwrap();
+    mgr.write_explicit_token_kv(child_block, 0, slot, &child_k15, &child_v15)
+        .unwrap();
 
     // Verify parent KV remains 100% untouched
     let mut parent_k = Vec::new();
     let mut parent_v = Vec::new();
-    mgr.gather_sequence_layer_kv(1, 0, &mut parent_k, &mut parent_v).unwrap();
+    mgr.gather_sequence_layer_kv(1, 0, &mut parent_k, &mut parent_v)
+        .unwrap();
     assert_eq!(parent_k.len(), 15 * kv_dim);
     assert_eq!(parent_k, expected_k);
     assert_eq!(parent_v, expected_v);
 
     // Verify child KV has all 15 prefix tokens + divergent 16th token
-    mgr.gather_sequence_layer_kv(2, 0, &mut child_k, &mut child_v).unwrap();
+    mgr.gather_sequence_layer_kv(2, 0, &mut child_k, &mut child_v)
+        .unwrap();
     assert_eq!(child_k.len(), 16 * kv_dim);
     assert_eq!(&child_k[0..15 * kv_dim], &expected_k[..]);
     assert_eq!(&child_k[15 * kv_dim..16 * kv_dim], &child_k15[..]);

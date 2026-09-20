@@ -43,12 +43,15 @@ fn main() {
     let seq_len = 128;
     let mut seq_state = SequenceState {
         tokens: vec![1u32; seq_len],
-        layers: vec![LayerKvCache {
-            cached_k: vec![vec![0.01f32; kv_dim]; seq_len],
-            cached_v: vec![vec![0.01f32; kv_dim]; seq_len],
-            flat_k: vec![0.01f32; seq_len * kv_dim],
-            flat_v: vec![0.01f32; seq_len * kv_dim],
-        }; 22],
+        layers: vec![
+            LayerKvCache {
+                cached_k: vec![vec![0.01f32; kv_dim]; seq_len],
+                cached_v: vec![vec![0.01f32; kv_dim]; seq_len],
+                flat_k: vec![0.01f32; seq_len * kv_dim],
+                flat_v: vec![0.01f32; seq_len * kv_dim],
+            };
+            22
+        ],
     };
 
     let warmup_iters = 2;
@@ -116,7 +119,15 @@ fn main() {
 
             // RoPE
             let t0 = Instant::now();
-            backend.apply_rope(&mut q, &mut k, seq_len, head_dim, num_heads, num_kv_heads, theta);
+            backend.apply_rope(
+                &mut q,
+                &mut k,
+                seq_len,
+                head_dim,
+                num_heads,
+                num_kv_heads,
+                theta,
+            );
             if is_bench {
                 time_rope_us += t0.elapsed().as_micros();
             }
@@ -135,14 +146,29 @@ fn main() {
 
             // GQA Attention
             let t0 = Instant::now();
-            backend.gqa_attention(&mut attn_out, &q, &flat_k, &flat_v, seq_len, num_heads, num_kv_heads, head_dim);
+            backend.gqa_attention(
+                &mut attn_out,
+                &q,
+                &flat_k,
+                &flat_v,
+                seq_len,
+                num_heads,
+                num_kv_heads,
+                head_dim,
+            );
             if is_bench {
                 time_gqa_attn_us += t0.elapsed().as_micros();
             }
 
             // O-proj
             let t0 = Instant::now();
-            backend.matmul_vec(&mut attn_proj, &attn_out, &layer_w.o_proj, hidden_dim, q_dim);
+            backend.matmul_vec(
+                &mut attn_proj,
+                &attn_out,
+                &layer_w.o_proj,
+                hidden_dim,
+                q_dim,
+            );
             for i in 0..hidden_dim {
                 x[i] += attn_proj[i];
             }
@@ -159,8 +185,20 @@ fn main() {
 
             // MLP Gate & Up
             let t0 = Instant::now();
-            backend.matmul_vec(&mut gate, &post_norm, &layer_w.gate_proj, intermediate_dim, hidden_dim);
-            backend.matmul_vec(&mut up, &post_norm, &layer_w.up_proj, intermediate_dim, hidden_dim);
+            backend.matmul_vec(
+                &mut gate,
+                &post_norm,
+                &layer_w.gate_proj,
+                intermediate_dim,
+                hidden_dim,
+            );
+            backend.matmul_vec(
+                &mut up,
+                &post_norm,
+                &layer_w.up_proj,
+                intermediate_dim,
+                hidden_dim,
+            );
             if is_bench {
                 time_mlp_gate_up_us += t0.elapsed().as_micros();
             }
@@ -174,7 +212,13 @@ fn main() {
 
             // MLP Down
             let t0 = Instant::now();
-            backend.matmul_vec(&mut mlp_out, &activated, &layer_w.down_proj, hidden_dim, intermediate_dim);
+            backend.matmul_vec(
+                &mut mlp_out,
+                &activated,
+                &layer_w.down_proj,
+                hidden_dim,
+                intermediate_dim,
+            );
             for i in 0..hidden_dim {
                 x[i] += mlp_out[i];
             }
@@ -194,7 +238,13 @@ fn main() {
         // LM Head
         let mut logits = vec![0.0f32; vocab_size];
         let t0 = Instant::now();
-        backend.compute_logits(&mut logits, &x_final, &weights.lm_head, vocab_size, hidden_dim);
+        backend.compute_logits(
+            &mut logits,
+            &x_final,
+            &weights.lm_head,
+            vocab_size,
+            hidden_dim,
+        );
         if is_bench {
             time_lm_head_us += t0.elapsed().as_micros();
         }
@@ -206,7 +256,10 @@ fn main() {
     }
 
     let n = bench_iters as f64;
-    println!("\n--- PER-TOKEN DECODE WALL TIME BREAKDOWN (Avg over {} iters, seq_len={}) ---", bench_iters, seq_len);
+    println!(
+        "\n--- PER-TOKEN DECODE WALL TIME BREAKDOWN (Avg over {} iters, seq_len={}) ---",
+        bench_iters, seq_len
+    );
     let ms = |us: u128| (us as f64) / (n * 1000.0);
     let total_ms = ms(total_token_us);
 
@@ -232,6 +285,12 @@ fn main() {
     row("LM Head GEMV (32k vocab)", time_lm_head_us);
     row("Heap Allocation / Buffers", time_alloc_overhead_us);
     println!("{:-<32}-+-{:-<11}-+-{:-<8}", "", "", "");
-    println!("{:<32} | {:>8.2} ms | 100.00 %", "Total Single-Token Decode", total_ms);
-    println!("Theoretical Decode Throughput: {:.2} tokens/sec", 1000.0 / total_ms);
+    println!(
+        "{:<32} | {:>8.2} ms | 100.00 %",
+        "Total Single-Token Decode", total_ms
+    );
+    println!(
+        "Theoretical Decode Throughput: {:.2} tokens/sec",
+        1000.0 / total_ms
+    );
 }

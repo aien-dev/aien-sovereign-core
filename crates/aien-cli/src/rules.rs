@@ -89,17 +89,24 @@ pub fn format_rules_for_prompt(rules: &[Rule]) -> String {
     if rules.is_empty() {
         return String::new();
     }
-    let mut out = String::from("
+    let mut out = String::from(
+        "
 ACTIVE REPOSITORY & WORKSPACE RULES:
-");
+",
+    );
     for r in rules {
-        out.push_str(&format!("
+        out.push_str(&format!(
+            "
 [Rule: {}]
-", r.name));
+",
+            r.name
+        ));
         out.push_str(&r.content);
-        out.push_str("
+        out.push_str(
+            "
 [/Rule]
-");
+",
+        );
     }
     out
 }

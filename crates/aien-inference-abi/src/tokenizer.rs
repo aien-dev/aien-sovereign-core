@@ -59,8 +59,9 @@ impl TinyLlamaTokenizer {
 
     /// Loads tokenizer directly from a JSON byte buffer.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, TokenizerError> {
-        let inner = tokenizers::Tokenizer::from_bytes(bytes)
-            .map_err(|e| TokenizerError::LoadError(format!("Failed to parse tokenizer bytes: {}", e)))?;
+        let inner = tokenizers::Tokenizer::from_bytes(bytes).map_err(|e| {
+            TokenizerError::LoadError(format!("Failed to parse tokenizer bytes: {}", e))
+        })?;
         Ok(Self { inner })
     }
 
@@ -92,7 +93,11 @@ impl TinyLlamaTokenizer {
     }
 
     /// Encodes text with explicit control over special tokens insertion.
-    pub fn encode_with_special(&self, text: &str, add_special_tokens: bool) -> Result<Vec<u32>, TokenizerError> {
+    pub fn encode_with_special(
+        &self,
+        text: &str,
+        add_special_tokens: bool,
+    ) -> Result<Vec<u32>, TokenizerError> {
         let encoding = self
             .inner
             .encode(text, add_special_tokens)
@@ -113,7 +118,11 @@ impl TinyLlamaTokenizer {
     }
 
     /// Decodes tokens with option to skip special tokens.
-    pub fn decode_opts(&self, tokens: &[u32], skip_special_tokens: bool) -> Result<String, TokenizerError> {
+    pub fn decode_opts(
+        &self,
+        tokens: &[u32],
+        skip_special_tokens: bool,
+    ) -> Result<String, TokenizerError> {
         self.inner
             .decode(tokens, skip_special_tokens)
             .map_err(|e| TokenizerError::DecodeError(e.to_string()))

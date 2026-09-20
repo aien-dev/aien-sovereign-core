@@ -7,6 +7,7 @@ use std::ffi::CStr;
 use std::os::raw::{c_char, c_float, c_int};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+#[cfg(has_blackwell_cuda)]
 extern "C" {
     fn blackwell_gemm_init() -> c_int;
     fn blackwell_gemm_get_kernel_count() -> u64;
@@ -44,6 +45,65 @@ extern "C" {
     fn blackwell_free_managed(ptr: *mut std::ffi::c_void);
     fn blackwell_gemm_destroy();
 }
+
+#[cfg(not(has_blackwell_cuda))]
+unsafe fn blackwell_gemm_init() -> c_int {
+    -1
+}
+#[cfg(not(has_blackwell_cuda))]
+unsafe fn blackwell_gemm_get_kernel_count() -> u64 {
+    0
+}
+#[cfg(not(has_blackwell_cuda))]
+unsafe fn blackwell_gemm_get_device_name(_buf: *mut c_char, _max_len: c_int) -> c_int {
+    -1
+}
+#[cfg(not(has_blackwell_cuda))]
+unsafe fn blackwell_gemm_f32(
+    _a: *const c_float,
+    _b: *const c_float,
+    _c: *mut c_float,
+    _m: c_int,
+    _k: c_int,
+    _n: c_int,
+) -> c_int {
+    -1
+}
+#[cfg(not(has_blackwell_cuda))]
+unsafe fn blackwell_gemv_f32(
+    _x: *const c_float,
+    _weight: *const c_float,
+    _out: *mut c_float,
+    _in_dim: c_int,
+    _out_dim: c_int,
+) -> c_int {
+    -1
+}
+#[cfg(not(has_blackwell_cuda))]
+unsafe fn paged_attention_bf16_forward(
+    _q: *const u16,
+    _k_pool: *const u16,
+    _v_pool: *const u16,
+    _block_tables: *const i32,
+    _context_lens: *const i32,
+    _max_blocks_per_seq: c_int,
+    _num_seqs: c_int,
+    _num_q_heads: c_int,
+    _num_kv_heads: c_int,
+    _head_dim: c_int,
+    _sm_scale: c_float,
+    _out: *mut u16,
+) -> c_int {
+    -1
+}
+#[cfg(not(has_blackwell_cuda))]
+unsafe fn blackwell_allocate_managed(_bytes: usize) -> *mut std::ffi::c_void {
+    std::ptr::null_mut()
+}
+#[cfg(not(has_blackwell_cuda))]
+unsafe fn blackwell_free_managed(_ptr: *mut std::ffi::c_void) {}
+#[cfg(not(has_blackwell_cuda))]
+unsafe fn blackwell_gemm_destroy() {}
 
 /// Blackwell GB10 GPU Tensor Backend.
 /// Executes GEMV, batched GEMM, and Paged Attention on the NVIDIA GB10 Blackwell GPU.
@@ -274,8 +334,16 @@ impl TensorBackend for BlackwellGb10Backend {
         num_kv_heads: usize,
         head_dim: usize,
     ) {
-        self.fallback
-            .gqa_attention(out, q, k_cache, v_cache, seq_len, num_q_heads, num_kv_heads, head_dim);
+        self.fallback.gqa_attention(
+            out,
+            q,
+            k_cache,
+            v_cache,
+            seq_len,
+            num_q_heads,
+            num_kv_heads,
+            head_dim,
+        );
     }
 
     fn paged_attention(
@@ -296,10 +364,13 @@ impl TensorBackend for BlackwellGb10Backend {
         }
 
         if self.available && pool.config().dtype == aien_kv_cache::KvDType::Bf16 {
-            let q_bf16: Vec<u16> = q.iter().map(|&v| {
-                let bits = v.to_bits();
-                (bits >> 16) as u16
-            }).collect();
+            let q_bf16: Vec<u16> = q
+                .iter()
+                .map(|&v| {
+                    let bits = v.to_bits();
+                    (bits >> 16) as u16
+                })
+                .collect();
 
             let sm_scale = 1.0f32 / (head_dim as f32).sqrt();
             let mut out_bf16 = vec![0u16; out.len()];

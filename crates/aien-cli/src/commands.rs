@@ -357,7 +357,8 @@ pub async fn handle_slash_command(cmd: &str) -> bool {
             true
         }
         "/rule" | "/rules" => {
-            let cwd = std::env::current_dir().unwrap_or_else(|_| crate::platform::PlatformContext::detect().home_dir);
+            let cwd = std::env::current_dir()
+                .unwrap_or_else(|_| crate::platform::PlatformContext::detect().home_dir);
             println!("{}", crate::rules::format_rules_tui(&cwd));
             true
         }
