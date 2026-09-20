@@ -30,6 +30,7 @@ def kv_expansion_factor(huggingface_config) -> int:
 class KvExpandedNemotronHConfig(NemotronHConfig):
     """NemotronHConfig with KV-head replication for the MAX MHA kernel."""
 
+    SUPPORTED_ENCODINGS = NemotronHConfig.SUPPORTED_ENCODINGS | {"float4_e2m1fnx2"}
     kv_expansion: int = 1
 
     @staticmethod
@@ -47,7 +48,7 @@ class KvExpandedNemotronHConfig(NemotronHConfig):
             pipeline_config.model, NemotronHConfig.DEFAULT_ENCODING
         )
         if (
-            resolved_encoding == "float8_e4m3fn"
+            resolved_encoding in ("float8_e4m3fn", "float4_e2m1fnx2")
             and kv_cache_config.kv_cache_format is None
         ):
             cache_dtype = DType.float8_e4m3fn
@@ -71,9 +72,13 @@ class KvExpandedNemotronHConfig(NemotronHConfig):
         kv_params,
         devices,
     ):
+        if dtype in (DType.float8_e4m3fn, DType.uint8):
+            dtype = DType.bfloat16
         config = super().from_hf(
             pipeline_config, huggingface_config, dtype, kv_params, devices
         )
+        if config.dtype in (DType.float8_e4m3fn, DType.uint8):
+            config.dtype = DType.bfloat16
         expansion = kv_expansion_factor(huggingface_config)
         config.kv_expansion = expansion
         config.num_key_value_heads = (
