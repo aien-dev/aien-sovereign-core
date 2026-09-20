@@ -104,7 +104,7 @@ enum Commands {
     /// Run an autonomous batch distillation crawler across a curriculum track
     Crawl {
         #[arg(
-            short,
+            short = 'k',
             long,
             default_value = "systems",
             help = "Curriculum track: systems, agent, science, frontier, dynamic"

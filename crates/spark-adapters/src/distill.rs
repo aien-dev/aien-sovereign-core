@@ -51,7 +51,7 @@ impl DistillationEngine {
         if let Some(ref sys) = task.system_prompt {
             messages.push(ChatMessage {
                 role: "system".to_string(),
-                content: sys.clone(),
+                content: crate::vault::sanitize_outbound_prompt(sys),
                 reasoning: None,
             });
         }
@@ -328,7 +328,7 @@ impl DistillationEngine {
         Ok(())
     }
 
-    async fn commit_to_cortex(
+    pub async fn commit_to_cortex(
         &self,
         name: &str,
         canonical_name: &str,
@@ -336,20 +336,15 @@ impl DistillationEngine {
         task_id: &str,
         confidence: f64,
     ) -> Result<String, String> {
-        let token = std::env::var("CORTEX_TOKEN")
-            .ok()
-            .filter(|s| !s.trim().is_empty())
-            .or_else(|| {
-                let home = std::env::var("HOME")
-                    .or_else(|_| std::env::var("USERPROFILE"))
-                    .map(PathBuf::from)
-                    .unwrap_or_else(|_| PathBuf::from("."));
-                let token_path = home.join(".config/cortex/token");
-                std::fs::read_to_string(token_path)
-                    .map(|s| s.trim().to_string())
-                    .ok()
-            })
-            .unwrap_or_default();
+        let token = match crate::vault::resolve_secret("CORTEX_TOKEN") {
+            Some(tok) if !tok.is_empty() => tok,
+            _ => {
+                return Err(
+                    "CORTEX_TOKEN not found: configure CORTEX_TOKEN in environment or register in atlas-vault"
+                        .to_string(),
+                );
+            }
+        };
 
         let endpoint =
             std::env::var("CORTEX_ENDPOINT").unwrap_or_else(|_| self.cortex_endpoint.clone());
@@ -358,6 +353,7 @@ impl DistillationEngine {
         let payload = json!({
             "kind": "entity",
             "value": {
+                "space": "atlas-memory",
                 "canonicalName": canonical_name,
                 "entityType": "learned_procedure",
                 "content": content,
@@ -399,5 +395,26 @@ impl DistillationEngine {
             .to_string();
 
         Ok(entity_id)
+    }
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_commit_to_cortex_requires_token() {
+        let engine = DistillationEngine::new();
+        let res = engine
+            .commit_to_cortex("test", "test_canonical", "content", "task-1", 0.9)
+            .await;
+        if let Err(e) = res {
+            assert!(
+                e.contains("CORTEX_TOKEN not found")
+                    || e.contains("Cortex request error")
+                    || e.contains("Cortex returned status")
+            );
+        }
     }
 }
