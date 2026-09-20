@@ -1,5 +1,6 @@
 //! Genuine Blackwell GB10 Hardware Acceleration Backend for DGX Spark.
-//! Dispatches single-token GEMV and batched GEMM directly to cuBLAS 13 on Blackwell sm_121.
+//! Dispatches single-token GEMV, batched GEMM, and Grouped Query Paged Attention
+//! directly to CUDA and cuBLAS 13 on Blackwell sm_121.
 
 use crate::backend::{ReferenceCpuBackend, TensorBackend};
 use std::ffi::CStr;
@@ -25,11 +26,27 @@ extern "C" {
         in_dim: c_int,
         out_dim: c_int,
     ) -> c_int;
+    fn paged_attention_bf16_forward(
+        q: *const u16,
+        k_pool: *const u16,
+        v_pool: *const u16,
+        block_tables: *const i32,
+        context_lens: *const i32,
+        max_blocks_per_seq: c_int,
+        num_seqs: c_int,
+        num_q_heads: c_int,
+        num_kv_heads: c_int,
+        head_dim: c_int,
+        sm_scale: c_float,
+        out: *mut u16,
+    ) -> c_int;
+    fn blackwell_allocate_managed(bytes: usize) -> *mut std::ffi::c_void;
+    fn blackwell_free_managed(ptr: *mut std::ffi::c_void);
     fn blackwell_gemm_destroy();
 }
 
 /// Blackwell GB10 GPU Tensor Backend.
-/// Executes GEMV and batched GEMM operations on the NVIDIA GB10 Blackwell GPU.
+/// Executes GEMV, batched GEMM, and Paged Attention on the NVIDIA GB10 Blackwell GPU.
 pub struct BlackwellGb10Backend {
     fallback: ReferenceCpuBackend,
     device_name: String,
@@ -56,6 +73,14 @@ impl BlackwellGb10Backend {
         }
 
         if available {
+            unsafe fn custom_alloc(bytes: usize) -> *mut u8 {
+                blackwell_allocate_managed(bytes) as *mut u8
+            }
+            unsafe fn custom_free(ptr: *mut u8, _bytes: usize) {
+                blackwell_free_managed(ptr as *mut std::ffi::c_void);
+            }
+            aien_kv_cache::register_unified_allocator(custom_alloc, custom_free);
+
             eprintln!(
                 "BlackwellGb10Backend: Successfully bound to device '{}' (sm_121 cuBLAS 13)",
                 device_name
@@ -90,6 +115,50 @@ impl BlackwellGb10Backend {
 
     pub fn fallback_count(&self) -> u64 {
         self.fallback_counter.load(Ordering::Relaxed)
+    }
+
+    /// Dispatches Grouped Query Paged Attention on Blackwell sm_121
+    pub fn paged_attention_bf16(
+        &self,
+        q: &[u16],
+        k_pool: &[u16],
+        v_pool: &[u16],
+        block_tables: &[i32],
+        context_lens: &[i32],
+        max_blocks_per_seq: usize,
+        num_seqs: usize,
+        num_q_heads: usize,
+        num_kv_heads: usize,
+        head_dim: usize,
+        sm_scale: f32,
+        out: &mut [u16],
+    ) -> Result<(), String> {
+        if self.available {
+            let res = unsafe {
+                paged_attention_bf16_forward(
+                    q.as_ptr(),
+                    k_pool.as_ptr(),
+                    v_pool.as_ptr(),
+                    block_tables.as_ptr(),
+                    context_lens.as_ptr(),
+                    max_blocks_per_seq as c_int,
+                    num_seqs as c_int,
+                    num_q_heads as c_int,
+                    num_kv_heads as c_int,
+                    head_dim as c_int,
+                    sm_scale as c_float,
+                    out.as_mut_ptr(),
+                )
+            };
+            if res == 0 {
+                return Ok(());
+            }
+            return Err(format!(
+                "paged_attention_bf16_forward failed with error code {}",
+                res
+            ));
+        }
+        Err("Blackwell GPU backend not available".to_string())
     }
 }
 
@@ -209,6 +278,76 @@ impl TensorBackend for BlackwellGb10Backend {
             .gqa_attention(out, q, k_cache, v_cache, seq_len, num_q_heads, num_kv_heads, head_dim);
     }
 
+    fn paged_attention(
+        &self,
+        out: &mut [f32],
+        q: &[f32],
+        pool: &aien_kv_cache::UnifiedKvTensorPool,
+        block_ids: &[usize],
+        context_len: usize,
+        layer_idx: usize,
+        num_q_heads: usize,
+        num_kv_heads: usize,
+        head_dim: usize,
+    ) {
+        if context_len == 0 || block_ids.is_empty() {
+            out.fill(0.0);
+            return;
+        }
+
+        if self.available && pool.config().dtype == aien_kv_cache::KvDType::Bf16 {
+            let q_bf16: Vec<u16> = q.iter().map(|&v| {
+                let bits = v.to_bits();
+                (bits >> 16) as u16
+            }).collect();
+
+            let sm_scale = 1.0f32 / (head_dim as f32).sqrt();
+            let mut out_bf16 = vec![0u16; out.len()];
+            let i32_block_tables: Vec<i32> = block_ids.iter().map(|&b| b as i32).collect();
+            let context_lens = [context_len as i32];
+            let max_blocks = block_ids.len();
+
+            let k_ptr = pool.base_ptr() as *const u16;
+            let v_ptr = pool.base_ptr() as *const u16;
+
+            let res = self.paged_attention_bf16(
+                &q_bf16,
+                unsafe { std::slice::from_raw_parts(k_ptr, pool.total_bytes() / 2) },
+                unsafe { std::slice::from_raw_parts(v_ptr, pool.total_bytes() / 2) },
+                &i32_block_tables,
+                &context_lens,
+                max_blocks,
+                1,
+                num_q_heads,
+                num_kv_heads,
+                head_dim,
+                sm_scale,
+                &mut out_bf16,
+            );
+
+            if res.is_ok() {
+                for i in 0..out.len() {
+                    let bits = (out_bf16[i] as u32) << 16;
+                    out[i] = f32::from_bits(bits);
+                }
+                return;
+            }
+            self.fallback_counter.fetch_add(1, Ordering::Relaxed);
+        }
+
+        self.fallback.paged_attention(
+            out,
+            q,
+            pool,
+            block_ids,
+            context_len,
+            layer_idx,
+            num_q_heads,
+            num_kv_heads,
+            head_dim,
+        );
+    }
+
     fn compute_logits(
         &self,
         logits: &mut [f32],
@@ -293,5 +432,57 @@ mod tests {
             max_diff
         );
         assert!(gpu_backend.kernel_exec_count() > 0);
+    }
+
+    #[test]
+    fn test_blackwell_paged_attention_kernel() {
+        let backend = BlackwellGb10Backend::new();
+        if !backend.is_available() {
+            eprintln!("Skipping GPU test: Blackwell hardware not available");
+            return;
+        }
+
+        let num_seqs = 2;
+        let num_q_heads = 4;
+        let num_kv_heads = 2;
+        let head_dim = 64;
+        let page_size = 16;
+        let total_pages = 8;
+        let max_blocks_per_seq = 4;
+
+        let q = vec![0x3F80u16; num_seqs * num_q_heads * head_dim]; // 1.0 in BF16
+        let k_pool = vec![0x3F80u16; total_pages * num_kv_heads * page_size * head_dim];
+        let v_pool = vec![0x3F80u16; total_pages * num_kv_heads * page_size * head_dim];
+
+        let block_tables = vec![
+            0, 1, -1, -1, // seq 0: blocks 0, 1
+            2, 3, -1, -1, // seq 1: blocks 2, 3
+        ];
+        let context_lens = vec![30, 25]; // 30 tokens in seq 0, 25 tokens in seq 1
+        let sm_scale = 1.0f32 / (head_dim as f32).sqrt();
+
+        let mut out = vec![0u16; num_seqs * num_q_heads * head_dim];
+
+        let res = backend.paged_attention_bf16(
+            &q,
+            &k_pool,
+            &v_pool,
+            &block_tables,
+            &context_lens,
+            max_blocks_per_seq,
+            num_seqs,
+            num_q_heads,
+            num_kv_heads,
+            head_dim,
+            sm_scale,
+            &mut out,
+        );
+
+        assert!(res.is_ok(), "paged_attention_bf16 failed: {:?}", res.err());
+        assert_eq!(
+            out[0], 0x3F80,
+            "Expected 1.0 (0x3F80) in BF16, got 0x{:04x}",
+            out[0]
+        );
     }
 }

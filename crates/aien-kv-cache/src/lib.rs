@@ -101,13 +101,38 @@ impl KvPoolConfig {
     }
 }
 
+pub type CustomAllocFn = unsafe fn(usize) -> *mut u8;
+pub type CustomFreeFn = unsafe fn(*mut u8, usize);
+
+static CUSTOM_ALLOCATOR: parking_lot::RwLock<Option<(CustomAllocFn, CustomFreeFn)>> =
+    parking_lot::RwLock::new(None);
+
+/// Registers a custom physical memory allocator (e.g. cudaMallocManaged on Blackwell).
+pub fn register_unified_allocator(alloc_fn: CustomAllocFn, free_fn: CustomFreeFn) {
+    let mut g = CUSTOM_ALLOCATOR.write();
+    *g = Some((alloc_fn, free_fn));
+}
+
+/// Unregisters any custom physical memory allocator.
+pub fn unregister_unified_allocator() {
+    let mut g = CUSTOM_ALLOCATOR.write();
+    *g = None;
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PoolMemoryKind {
+    Mmap,
+    Heap,
+    CustomManaged,
+}
+
 /// Physical unified-memory KV tensor pool backing virtual block IDs on hardware silicon.
 pub struct UnifiedKvTensorPool {
     config: KvPoolConfig,
     base_ptr: *mut u8,
     total_bytes: usize,
     block_bytes: usize,
-    is_mmap: bool,
+    memory_kind: PoolMemoryKind,
 }
 
 unsafe impl Send for UnifiedKvTensorPool {}
@@ -122,8 +147,21 @@ impl UnifiedKvTensorPool {
             return Err("Cannot allocate zero-sized KV tensor pool".to_string());
         }
 
+        if let Some((alloc_fn, _)) = *CUSTOM_ALLOCATOR.read() {
+            let ptr = unsafe { alloc_fn(total_bytes) };
+            if !ptr.is_null() {
+                return Ok(Self {
+                    config,
+                    base_ptr: ptr,
+                    total_bytes,
+                    block_bytes,
+                    memory_kind: PoolMemoryKind::CustomManaged,
+                });
+            }
+        }
+
         #[cfg(unix)]
-        let (base_ptr, is_mmap) = {
+        let (base_ptr, memory_kind) = {
             let ptr = unsafe {
                 libc::mmap(
                     std::ptr::null_mut(),
@@ -147,11 +185,11 @@ impl UnifiedKvTensorPool {
                 let _ = libc::mlock(ptr, total_bytes);
             }
 
-            (ptr as *mut u8, true)
+            (ptr as *mut u8, PoolMemoryKind::Mmap)
         };
 
         #[cfg(not(unix))]
-        let (base_ptr, is_mmap) = {
+        let (base_ptr, memory_kind) = {
             let layout = std::alloc::Layout::from_size_align(total_bytes, 4096)
                 .map_err(|e| format!("Invalid memory layout: {}", e))?;
             let ptr = unsafe { std::alloc::alloc_zeroed(layout) };
@@ -161,7 +199,7 @@ impl UnifiedKvTensorPool {
                     total_bytes
                 ));
             }
-            (ptr, true)
+            (ptr, PoolMemoryKind::Heap)
         };
 
         Ok(Self {
@@ -169,7 +207,7 @@ impl UnifiedKvTensorPool {
             base_ptr,
             total_bytes,
             block_bytes,
-            is_mmap,
+            memory_kind,
         })
     }
 
@@ -337,20 +375,61 @@ impl UnifiedKvTensorPool {
             tokens_gathered += tokens_in_this_block;
         }
     }
+
+    #[inline]
+    pub fn memory_kind(&self) -> PoolMemoryKind {
+        self.memory_kind
+    }
+
+    #[inline]
+    pub fn token_kv_offset(
+        &self,
+        block_id: BlockId,
+        layer_idx: usize,
+        is_value: bool,
+        token_in_block: usize,
+    ) -> usize {
+        self.element_offset(block_id, layer_idx, is_value, token_in_block)
+    }
+
+    #[inline]
+    pub unsafe fn token_kv_ptr(
+        &self,
+        block_id: BlockId,
+        layer_idx: usize,
+        is_value: bool,
+        token_in_block: usize,
+    ) -> *const u8 {
+        let offset = self.element_offset(block_id, layer_idx, is_value, token_in_block);
+        self.base_ptr.add(offset)
+    }
 }
 
 impl Drop for UnifiedKvTensorPool {
     fn drop(&mut self) {
-        if self.is_mmap && !self.base_ptr.is_null() {
-            #[cfg(unix)]
-            unsafe {
-                let _ = libc::munlock(self.base_ptr as *const libc::c_void, self.total_bytes);
-                libc::munmap(self.base_ptr as *mut libc::c_void, self.total_bytes);
-            }
-            #[cfg(not(unix))]
-            unsafe {
-                if let Ok(layout) = std::alloc::Layout::from_size_align(self.total_bytes, 4096) {
-                    std::alloc::dealloc(self.base_ptr, layout);
+        if !self.base_ptr.is_null() {
+            match self.memory_kind {
+                PoolMemoryKind::CustomManaged => {
+                    if let Some((_, free_fn)) = *CUSTOM_ALLOCATOR.read() {
+                        unsafe {
+                            free_fn(self.base_ptr, self.total_bytes);
+                        }
+                    }
+                }
+                PoolMemoryKind::Mmap => {
+                    #[cfg(unix)]
+                    unsafe {
+                        let _ = libc::munlock(self.base_ptr as *const libc::c_void, self.total_bytes);
+                        libc::munmap(self.base_ptr as *mut libc::c_void, self.total_bytes);
+                    }
+                }
+                PoolMemoryKind::Heap => {
+                    #[cfg(not(unix))]
+                    unsafe {
+                        if let Ok(layout) = std::alloc::Layout::from_size_align(self.total_bytes, 4096) {
+                            std::alloc::dealloc(self.base_ptr, layout);
+                        }
+                    }
                 }
             }
         }

@@ -52,6 +52,7 @@ pub trait TensorBackend: Send + Sync {
     fn swiglu(&self, out: &mut [f32], gate: &[f32], up: &[f32]);
 
     /// Grouped-Query Attention (GQA) with multi-head queries and shared key-value heads.
+    /// Grouped-Query Attention (GQA) with multi-head queries and shared key-value heads.
     /// Operates over flattened key and value cache slices with causal history.
     fn gqa_attention(
         &self,
@@ -64,6 +65,84 @@ pub trait TensorBackend: Send + Sync {
         num_kv_heads: usize,
         head_dim: usize,
     );
+
+    /// Grouped-Query Paged Attention directly over a physical Copy-on-Write page pool.
+    /// Default implementation evaluates online softmax token-by-token across physical blocks
+    /// with zero intermediate array allocation or contiguous gathering.
+    fn paged_attention(
+        &self,
+        out: &mut [f32],
+        q: &[f32],
+        pool: &aien_kv_cache::UnifiedKvTensorPool,
+        block_ids: &[usize],
+        context_len: usize,
+        layer_idx: usize,
+        num_q_heads: usize,
+        num_kv_heads: usize,
+        head_dim: usize,
+    ) {
+        if context_len == 0 || block_ids.is_empty() {
+            out.fill(0.0);
+            return;
+        }
+
+        let gqa_ratio = num_q_heads / num_kv_heads;
+        let inv_sqrt_d = 1.0 / (head_dim as f64).sqrt();
+        let block_size = pool.config().block_size;
+
+        for h in 0..num_q_heads {
+            let kv_head = h / gqa_ratio;
+            let q_head = &q[h * head_dim..(h + 1) * head_dim];
+
+            let mut m_prev = f64::NEG_INFINITY;
+            let mut l_prev = 0.0f64;
+            let mut acc = vec![0.0f64; head_dim];
+
+            for t in 0..context_len {
+                let blk_idx = t / block_size;
+                if blk_idx >= block_ids.len() {
+                    break;
+                }
+                let blk_id = block_ids[blk_idx];
+                let slot = t % block_size;
+
+                let head_offset_bytes = kv_head * head_dim * std::mem::size_of::<f32>();
+                let k_offset = pool.element_offset(blk_id, layer_idx, false, slot) + head_offset_bytes;
+                let v_offset = pool.element_offset(blk_id, layer_idx, true, slot) + head_offset_bytes;
+
+                let k_slice = unsafe {
+                    std::slice::from_raw_parts(pool.base_ptr().add(k_offset) as *const f32, head_dim)
+                };
+                let v_slice = unsafe {
+                    std::slice::from_raw_parts(pool.base_ptr().add(v_offset) as *const f32, head_dim)
+                };
+
+                let mut dot = 0.0f64;
+                for d in 0..head_dim {
+                    dot += (q_head[d] as f64) * (k_slice[d] as f64);
+                }
+                let score = dot * inv_sqrt_d;
+
+                let m_new = m_prev.max(score);
+                let alpha = (m_prev - m_new).exp();
+                let beta = (score - m_new).exp();
+                let l_new = l_prev * alpha + beta;
+
+                for d in 0..head_dim {
+                    acc[d] = acc[d] * alpha + beta * (v_slice[d] as f64);
+                }
+
+                m_prev = m_new;
+                l_prev = l_new;
+            }
+
+            let inv_l = if l_prev > 0.0 { 1.0 / l_prev } else { 0.0 };
+            let out_head = &mut out[h * head_dim..(h + 1) * head_dim];
+            for d in 0..head_dim {
+                out_head[d] = (acc[d] * inv_l) as f32;
+            }
+        }
+    }
 
     /// Projects hidden states to vocabulary logits: logits = hidden * W^T
     fn compute_logits(
