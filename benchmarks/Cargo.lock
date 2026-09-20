@@ -44,10 +44,14 @@ dependencies = [
 name = "aien-kv-cache"
 version = "0.1.0"
 dependencies = [
- "libc",
+ "aien-platform",
  "parking_lot",
  "serde",
 ]
+
+[[package]]
+name = "aien-platform"
+version = "0.1.0"
 
 [[package]]
 name = "android_system_properties"
