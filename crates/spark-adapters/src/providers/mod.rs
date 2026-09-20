@@ -36,6 +36,15 @@ pub async fn call_provider_unary(
         | ProviderType::LocalMax => {
             call_openai_unary(client, endpoint, model, api_key, messages, temperature).await
         }
+        ProviderType::ChatGPTWeb | ProviderType::ClaudeWeb => {
+            let key = api_key.ok_or_else(|| {
+                format!(
+                    "{} requires session token in hardware vault",
+                    provider.display_name()
+                )
+            })?;
+            call_openai_unary(client, endpoint, model, Some(key), messages, temperature).await
+        }
         ProviderType::EmbeddedNative => unreachable!(),
     }
 }

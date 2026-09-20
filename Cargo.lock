@@ -3247,10 +3247,12 @@ dependencies = [
  "rusqlite",
  "serde",
  "serde_json",
+ "spark-adapters",
  "spark-hive",
  "tokio",
  "toml",
  "tower-http 0.7.1",
+ "uuid",
 ]
 
 [[package]]

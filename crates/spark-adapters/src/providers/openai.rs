@@ -4,6 +4,8 @@ use serde_json::{json, Value};
 
 use crate::models::{ChatMessage, NormalizedChunk};
 
+pub const DEFAULT_MAX_TOKENS: usize = 4096;
+
 pub fn build_headers(
     api_key: Option<&str>,
     custom_headers: Option<Vec<(String, String)>>,
@@ -38,6 +40,22 @@ pub fn format_openai_payload(
     temperature: Option<f32>,
     stream: bool,
 ) -> Value {
+    format_openai_payload_bounded(
+        model,
+        messages,
+        temperature,
+        Some(DEFAULT_MAX_TOKENS),
+        stream,
+    )
+}
+
+pub fn format_openai_payload_bounded(
+    model: &str,
+    messages: &[ChatMessage],
+    temperature: Option<f32>,
+    max_tokens: Option<usize>,
+    stream: bool,
+) -> Value {
     let formatted_msgs: Vec<Value> = messages
         .iter()
         .map(|m| {
@@ -48,12 +66,25 @@ pub fn format_openai_payload(
         })
         .collect();
 
-    json!({
+    let temp_f64: f64 = temperature
+        .map(|t| (t as f64 * 1000.0).round() / 1000.0)
+        .unwrap_or(0.7);
+
+    let limit = max_tokens.unwrap_or(DEFAULT_MAX_TOKENS);
+    let mut payload = json!({
         "model": model,
         "messages": formatted_msgs,
-        "temperature": temperature.unwrap_or(0.7),
-        "stream": stream
-    })
+        "temperature": temp_f64,
+        "stream": stream,
+    });
+
+    if model.starts_with("o1") || model.starts_with("o3") {
+        payload["max_completion_tokens"] = json!(limit);
+    } else {
+        payload["max_tokens"] = json!(limit);
+    }
+
+    payload
 }
 
 pub fn parse_openai_sse_line(line: &str) -> Option<NormalizedChunk> {
@@ -102,7 +133,28 @@ pub async fn call_openai_unary(
     messages: &[ChatMessage],
     temperature: Option<f32>,
 ) -> Result<(String, Option<String>, usize), String> {
-    let payload = format_openai_payload(model, messages, temperature, false);
+    call_openai_unary_bounded(
+        client,
+        endpoint,
+        model,
+        api_key,
+        messages,
+        temperature,
+        None,
+    )
+    .await
+}
+
+pub async fn call_openai_unary_bounded(
+    client: &Client,
+    endpoint: &str,
+    model: &str,
+    api_key: Option<&str>,
+    messages: &[ChatMessage],
+    temperature: Option<f32>,
+    max_tokens: Option<usize>,
+) -> Result<(String, Option<String>, usize), String> {
+    let payload = format_openai_payload_bounded(model, messages, temperature, max_tokens, false);
     let headers = build_headers(api_key, None);
 
     let res = client
@@ -153,4 +205,48 @@ pub async fn call_openai_unary(
         .unwrap_or(0) as usize;
 
     Ok((content, reasoning, token_count))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_format_openai_payload_default_max_tokens() {
+        let msgs = vec![ChatMessage {
+            role: "user".to_string(),
+            content: "ping".to_string(),
+            reasoning: None,
+        }];
+        let payload = format_openai_payload("atlas-lightning-omni", &msgs, Some(0.5), false);
+
+        assert_eq!(payload["max_tokens"], 4096);
+        assert_eq!(payload["temperature"], 0.5);
+        assert_eq!(payload["model"], "atlas-lightning-omni");
+    }
+
+    #[test]
+    fn test_format_openai_payload_reasoning_models_use_completion_tokens() {
+        let msgs = vec![ChatMessage {
+            role: "user".to_string(),
+            content: "analyze".to_string(),
+            reasoning: None,
+        }];
+        let payload = format_openai_payload("o3-mini", &msgs, None, false);
+
+        assert_eq!(payload["max_completion_tokens"], 4096);
+        assert!(payload.get("max_tokens").is_none());
+    }
+
+    #[test]
+    fn test_format_openai_payload_custom_bound() {
+        let msgs = vec![ChatMessage {
+            role: "user".to_string(),
+            content: "short response".to_string(),
+            reasoning: None,
+        }];
+        let payload = format_openai_payload_bounded("gpt-4o", &msgs, None, Some(512), false);
+
+        assert_eq!(payload["max_tokens"], 512);
+    }
 }

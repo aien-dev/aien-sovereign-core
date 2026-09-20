@@ -52,12 +52,16 @@ pub fn format_anthropic_payload(
         }));
     }
 
+    let temp_f64: f64 = temperature
+        .map(|t| (t as f64 * 1000.0).round() / 1000.0)
+        .unwrap_or(0.7);
+
     let mut payload = json!({
         "model": model,
         "messages": formatted_msgs,
         "max_tokens": 4096,
         "stream": stream,
-        "temperature": temperature.unwrap_or(0.7)
+        "temperature": temp_f64
     });
 
     if !system_prompt.is_empty() {

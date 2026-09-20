@@ -12,6 +12,8 @@ pub enum ProviderType {
     DeepSeek,
     Together,
     Mistral,
+    ChatGPTWeb,
+    ClaudeWeb,
     LocalMax,
     EmbeddedNative,
 }
@@ -28,6 +30,8 @@ impl ProviderType {
             ProviderType::DeepSeek => "deepseek",
             ProviderType::Together => "together",
             ProviderType::Mistral => "mistral",
+            ProviderType::ChatGPTWeb => "chatgpt_web",
+            ProviderType::ClaudeWeb => "claude_web",
             ProviderType::LocalMax => "local_max",
             ProviderType::EmbeddedNative => "embedded_native",
         }
@@ -44,6 +48,8 @@ impl ProviderType {
             ProviderType::DeepSeek => "DeepSeek Cloud",
             ProviderType::Together => "Together AI",
             ProviderType::Mistral => "Mistral AI",
+            ProviderType::ChatGPTWeb => "ChatGPT Plus (Web Session)",
+            ProviderType::ClaudeWeb => "Claude Pro (Web Session)",
             ProviderType::LocalMax => "Modular MAX (GB10 Native)",
             ProviderType::EmbeddedNative => "Embedded Native (In-Process GB10/CPU)",
         }
@@ -62,6 +68,8 @@ impl ProviderType {
             ProviderType::DeepSeek => "https://api.deepseek.com/v1/chat/completions",
             ProviderType::Together => "https://api.together.xyz/v1/chat/completions",
             ProviderType::Mistral => "https://api.mistral.ai/v1/chat/completions",
+            ProviderType::ChatGPTWeb => "https://chatgpt.com/backend-api/conversation",
+            ProviderType::ClaudeWeb => "https://claude.ai/api/organizations/chat_conversations",
             ProviderType::LocalMax => "http://127.0.0.1:18006/v1/chat/completions",
             ProviderType::EmbeddedNative => "in-process://native-transformer",
         }
@@ -78,6 +86,8 @@ impl ProviderType {
             ProviderType::DeepSeek => Some("DEEPSEEK_API_KEY"),
             ProviderType::Together => Some("TOGETHER_API_KEY"),
             ProviderType::Mistral => Some("MISTRAL_API_KEY"),
+            ProviderType::ChatGPTWeb => Some("CHATGPT_SESSION_TOKEN"),
+            ProviderType::ClaudeWeb => Some("CLAUDE_SESSION_KEY"),
             ProviderType::LocalMax => None,
             ProviderType::EmbeddedNative => None,
         }

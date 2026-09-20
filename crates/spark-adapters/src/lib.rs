@@ -1,3 +1,4 @@
+pub mod curriculum;
 pub mod distill;
 pub mod models;
 pub mod providers;
@@ -5,6 +6,7 @@ pub mod router;
 pub mod vault;
 pub mod verifier;
 
+pub use curriculum::{CurriculumEngine, CurriculumTrack};
 pub use distill::DistillationEngine;
 pub use models::*;
 pub use router::AdapterRouter;
