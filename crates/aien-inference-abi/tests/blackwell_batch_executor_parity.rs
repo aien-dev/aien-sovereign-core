@@ -116,7 +116,7 @@ fn test_blackwell_batched_step_ragged_prefill_and_decode() {
         .expect("Must allocate sequence 1");
     assert_eq!(kv_mgr.allocated_block_count(), 2);
 
-    let initial_kernel_exec = executor.kernel_exec_count();
+    let _initial_kernel_exec = executor.kernel_exec_count();
 
     // Construct batch: 1 decode (seq 1) + 1 prefill (seq 2 with 6 tokens)
     let batch = ScheduledBatch {
@@ -166,7 +166,7 @@ fn test_blackwell_batched_step_ragged_prefill_and_decode() {
             "Zero fallback allowed on GB10 silicon"
         );
         assert!(
-            executor.kernel_exec_count() > initial_kernel_exec,
+            executor.kernel_exec_count() > _initial_kernel_exec,
             "Kernel execution counter must advance on GPU execution"
         );
     }

@@ -10,8 +10,8 @@ fn main() {
     println!("cargo:rerun-if-changed=build.rs");
 
     let nvcc = PathBuf::from("/usr/local/cuda/bin/nvcc");
-    if !nvcc.exists() {
-        println!("cargo:warning=nvcc not found at /usr/local/cuda/bin/nvcc; Blackwell CUDA backend disabled.");
+    if !nvcc.exists() || env::var("AIEN_FORCE_CPU_STUB").is_ok() {
+        println!("cargo:warning=nvcc not found or AIEN_FORCE_CPU_STUB set; Blackwell CUDA backend disabled.");
         return;
     }
 

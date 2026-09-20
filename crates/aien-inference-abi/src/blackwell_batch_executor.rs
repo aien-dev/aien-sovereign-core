@@ -12,6 +12,7 @@
 
 use crate::weights::TransformerWeights;
 use crate::{AienInferenceBackend, DecodeOutput, ModelConfig, ScheduledBatch, StepMetrics};
+#[allow(unused_imports)]
 use aien_kv_cache::{AienKvManager, KvLayoutDesc, SharedKvManager};
 use async_trait::async_trait;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -205,6 +206,7 @@ pub struct BlackwellBatchPlan {
 /// GPU-resident weights wrapper.
 pub struct BlackwellResidentModel {
     pub config: ModelConfig,
+    #[allow(dead_code)]
     raw: *mut BlackwellResidentModelWeights,
 }
 
@@ -224,6 +226,7 @@ impl Drop for BlackwellResidentModel {
 /// Persistent GPU-visible workspace wrapper.
 pub struct BlackwellWorkspace {
     pub max_tokens: usize,
+    #[allow(dead_code)]
     raw: *mut BlackwellWorkspaceC,
 }
 
@@ -522,12 +525,15 @@ impl BlackwellBatchExecutor {
     /// Zero cudaDeviceSynchronize inside a layer!
     pub fn execute_layer<B: aien_platform::UnifiedBuffer>(
         &mut self,
-        layer_idx: usize,
-        plan: &BlackwellBatchPlan,
-        kv_manager: &AienKvManager<B>,
+        _layer_idx: usize,
+        _plan: &BlackwellBatchPlan,
+        _kv_manager: &AienKvManager<B>,
     ) -> Result<(), String> {
         #[cfg(has_blackwell_cuda)]
         {
+            let layer_idx = _layer_idx;
+            let plan = _plan;
+            let kv_manager = _kv_manager;
             let stream = unsafe { blackwell_get_stream() };
             let cublas_handle = unsafe { blackwell_get_cublas_handle() };
 
@@ -677,9 +683,7 @@ impl BlackwellBatchExecutor {
         #[cfg(not(has_blackwell_cuda))]
         {
             self.fallback_count.fetch_add(1, Ordering::SeqCst);
-            for t in &mut sampled_tokens {
-                *t = 100;
-            }
+            sampled_tokens.fill(100);
         }
 
         // 4. Transaction Commit on Completion Fence Success
