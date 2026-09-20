@@ -1,3 +1,8 @@
+pub fn compute_restart_delay(restart_count: u32, base_secs: u64, max_secs: u64) -> Duration {
+    let factor = 2u64.saturating_pow(restart_count.saturating_sub(1));
+    let secs = std::cmp::min(base_secs.saturating_mul(factor), max_secs);
+    Duration::from_secs(secs)
+}
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -122,11 +127,19 @@ impl Supervisor {
         shutdown_rx: &mut broadcast::Receiver<()>,
     ) {
         loop {
+            let command_path = if let Some(stripped) = config.command.strip_prefix("~/") {
+                let home = std::env::var("HOME")
+                    .or_else(|_| std::env::var("USERPROFILE"))
+                    .unwrap_or_else(|_| ".".to_string());
+                format!("{}/{}", home, stripped)
+            } else {
+                config.command.clone()
+            };
             info!(
                 "[{}] Spawning process: {} {:?}...",
-                name, config.command, config.args
+                name, command_path, config.args
             );
-            let mut cmd = tokio::process::Command::new(&config.command);
+            let mut cmd = tokio::process::Command::new(&command_path);
             cmd.args(&config.args);
             for (k, v) in &config.env {
                 cmd.env(k, v);
@@ -169,22 +182,31 @@ impl Supervisor {
                         }
                     }
 
-                    {
+                    let st_restarts = {
                         let mut map = states.lock().await;
                         if let Some(st) = map.get_mut(&name) {
                             st.pid = None;
                             st.is_healthy = false;
                             st.restart_count += 1;
+                            st.restart_count
+                        } else {
+                            1
                         }
-                    }
+                    };
 
                     if config.restart == "no" {
                         info!("[{}] Configured restart is no. Halting supervision.", name);
                         break;
                     }
 
-                    info!("[{}] Restarting in 2 seconds...", name);
-                    sleep(Duration::from_secs(2)).await;
+                    let delay = compute_restart_delay(st_restarts, 2, 60);
+                    info!(
+                        "[{}] Restarting in {}s (restart #{})...",
+                        name,
+                        delay.as_secs(),
+                        st_restarts
+                    );
+                    sleep(delay).await;
                 }
                 Err(e) => {
                     error!(
@@ -224,5 +246,20 @@ impl Supervisor {
         }
         println!("{}", "-".repeat(74));
         println!("");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_compute_restart_delay_backoff() {
+        assert_eq!(compute_restart_delay(1, 2, 60), Duration::from_secs(2));
+        assert_eq!(compute_restart_delay(2, 2, 60), Duration::from_secs(4));
+        assert_eq!(compute_restart_delay(3, 2, 60), Duration::from_secs(8));
+        assert_eq!(compute_restart_delay(4, 2, 60), Duration::from_secs(16));
+        assert_eq!(compute_restart_delay(5, 2, 60), Duration::from_secs(32));
+        assert_eq!(compute_restart_delay(6, 2, 60), Duration::from_secs(60)); // capped at max
     }
 }

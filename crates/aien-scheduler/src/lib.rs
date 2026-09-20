@@ -1,7 +1,12 @@
+pub mod sequence;
+
+pub use sequence::*;
+
 use aien_inference_abi::{
     AienInferenceBackend, DecodeOutput, FinishReason, ScheduledBatch, SequenceRequest, StepMetrics,
 };
 use aien_kv_cache::AienKvManager;
+use aien_platform::InferenceWork;
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
@@ -58,6 +63,8 @@ pub struct AienScheduler {
     running_sequences: HashMap<u64, RunningSequence>,
     step_id: u64,
     metrics: SchedulerMetrics,
+    arena: SequenceArena,
+    completion_router: CompletionRouter,
 }
 
 impl AienScheduler {
@@ -70,11 +77,46 @@ impl AienScheduler {
             running_sequences: HashMap::new(),
             step_id: 0,
             metrics: SchedulerMetrics::default(),
+            arena: SequenceArena::new(),
+            completion_router: CompletionRouter::new(),
         }
     }
 
     pub fn submit_request(&mut self, request: SequenceRequest) {
+        let record = SequenceRecord::from_request(request.clone(), None);
+        let _ = self.arena.insert(record);
         self.waiting_queue.push_back(request);
+    }
+
+    pub fn submit_work(
+        &mut self,
+        work: InferenceWork,
+        prompt: PromptHandle,
+        sampling_params: Option<aien_inference_abi::SamplingParams>,
+        sink_id: Option<CompletionSinkId>,
+    ) -> Result<(), String> {
+        let sampling = sampling_params.unwrap_or_default();
+        let record = SequenceRecord::from_work(work, prompt, sampling, sink_id);
+        let req = record.to_request();
+        self.arena.insert(record)?;
+        self.waiting_queue.push_back(req);
+        Ok(())
+    }
+
+    pub fn arena(&self) -> &SequenceArena {
+        &self.arena
+    }
+
+    pub fn arena_mut(&mut self) -> &mut SequenceArena {
+        &mut self.arena
+    }
+
+    pub fn completion_router(&self) -> &CompletionRouter {
+        &self.completion_router
+    }
+
+    pub fn completion_router_mut(&mut self) -> &mut CompletionRouter {
+        &mut self.completion_router
     }
 
     pub fn waiting_count(&self) -> usize {
@@ -91,6 +133,16 @@ impl AienScheduler {
 
     /// Zero-copy subagent sequence branching
     pub fn fork_subagent(&mut self, parent_id: u64, child_id: u64) -> Result<(), String> {
+        self.fork_subagent_with_sink(parent_id, child_id, None)
+    }
+
+    /// Zero-copy subagent sequence branching with completion sink routing
+    pub fn fork_subagent_with_sink(
+        &mut self,
+        parent_id: u64,
+        child_id: u64,
+        sink_id: Option<CompletionSinkId>,
+    ) -> Result<(), String> {
         let parent = self
             .running_sequences
             .get(&parent_id)
@@ -100,6 +152,10 @@ impl AienScheduler {
         {
             let mut kv = self.kv_manager.write();
             kv.fork_sequence(parent_id, child_id)?;
+        }
+
+        if self.arena.contains(parent_id) {
+            let _ = self.arena.fork(parent_id, child_id, sink_id);
         }
 
         let mut child_req = parent.request.clone();
@@ -116,6 +172,55 @@ impl AienScheduler {
         );
 
         Ok(())
+    }
+
+    /// Builds a hardware-oriented execution batch plan dividing work into prefill spans and decode steps.
+    pub fn build_batch_plan(&mut self) -> Result<Option<BatchPlan>, String> {
+        let batch = match self.build_scheduled_batch()? {
+            Some(b) => b,
+            None => return Ok(None),
+        };
+
+        let mut prefill_spans = Vec::with_capacity(batch.prefill_requests.len());
+        let mut total_tokens = 0;
+
+        for prefill_req in &batch.prefill_requests {
+            let seq_id = prefill_req.request_id;
+            let start_pos = if let Some(rec) = self.arena.get(&seq_id) {
+                rec.prompt_tokens_prefilled
+            } else if let Some(seq) = self.running_sequences.get(&seq_id) {
+                seq.prompt_tokens_prefilled
+            } else {
+                0
+            };
+            let length = prefill_req.prompt_tokens.len();
+            total_tokens += length;
+            prefill_spans.push(PrefillSpan {
+                seq_id,
+                start_pos,
+                length,
+            });
+        }
+
+        let mut decode_items = Vec::with_capacity(batch.decode_requests.len());
+        for &seq_id in &batch.decode_requests {
+            let token_pos = if let Some(rec) = self.arena.get(&seq_id) {
+                rec.total_tokens()
+            } else if let Some(seq) = self.running_sequences.get(&seq_id) {
+                seq.request.prompt_tokens.len() + seq.tokens_generated
+            } else {
+                0
+            };
+            total_tokens += 1;
+            decode_items.push(DecodeItem { seq_id, token_pos });
+        }
+
+        Ok(Some(BatchPlan {
+            step_id: batch.step_id,
+            prefill_spans,
+            decode_items,
+            total_tokens,
+        }))
     }
 
     /// Builds the next scheduled batch enforcing chunked prefill budgets and watermark preemption.
@@ -148,6 +253,9 @@ impl AienScheduler {
                     drop(kv); // release lock before write
                     if let Some(running) = self.running_sequences.remove(&preempt_id) {
                         let _ = self.kv_manager.write().free_sequence(preempt_id);
+                        if let Some(rec) = self.arena.get_mut(&preempt_id) {
+                            rec.phase = SequencePhase::Preempted;
+                        }
                         self.preempted_queue.push_back(running.request);
                         self.metrics.preempted_requests += 1;
                     }
@@ -175,6 +283,9 @@ impl AienScheduler {
                     block_tables.insert(seq_id, table.block_ids.clone());
                     decode_requests.push(seq_id);
                     current_tokens += 1;
+                    if let Some(rec) = self.arena.get_mut(&seq_id) {
+                        rec.phase = SequencePhase::Decode;
+                    }
                 }
             } else {
                 // Continuing chunked prefill for already admitted sequence
@@ -199,6 +310,9 @@ impl AienScheduler {
                     current_tokens += chunk_size;
                     prefill_budget = prefill_budget.saturating_sub(chunk_size);
                     self.metrics.chunked_prefill_steps += 1;
+                    if let Some(rec) = self.arena.get_mut(&seq_id) {
+                        rec.phase = SequencePhase::Prefill;
+                    }
                 }
             }
         }
@@ -250,6 +364,9 @@ impl AienScheduler {
                                     is_prefilled: true,
                                 },
                             );
+                            if let Some(rec) = self.arena.get_mut(&req.request_id) {
+                                rec.phase = SequencePhase::Decode;
+                            }
                             decode_requests.push(req.request_id);
                             current_tokens += 1;
                         } else {
@@ -260,12 +377,20 @@ impl AienScheduler {
                             self.running_sequences.insert(
                                 req.request_id,
                                 RunningSequence {
-                                    request: req,
+                                    request: req.clone(),
                                     tokens_generated: 0,
                                     prompt_tokens_prefilled: 0,
                                     is_prefilled: is_fully_prefilled,
                                 },
                             );
+
+                            if let Some(rec) = self.arena.get_mut(&req.request_id) {
+                                rec.phase = if is_fully_prefilled {
+                                    SequencePhase::Decode
+                                } else {
+                                    SequencePhase::Prefill
+                                };
+                            }
 
                             prefill_requests.push(chunk_req);
                             current_tokens += chunk_size;
@@ -325,6 +450,9 @@ impl AienScheduler {
                                     is_prefilled: true,
                                 },
                             );
+                            if let Some(rec) = self.arena.get_mut(&req.request_id) {
+                                rec.phase = SequencePhase::Decode;
+                            }
                             decode_requests.push(req.request_id);
                             current_tokens += 1;
                         } else {
@@ -335,12 +463,20 @@ impl AienScheduler {
                             self.running_sequences.insert(
                                 req.request_id,
                                 RunningSequence {
-                                    request: req,
+                                    request: req.clone(),
                                     tokens_generated: 0,
                                     prompt_tokens_prefilled: 0,
                                     is_prefilled: is_fully_prefilled,
                                 },
                             );
+
+                            if let Some(rec) = self.arena.get_mut(&req.request_id) {
+                                rec.phase = if is_fully_prefilled {
+                                    SequencePhase::Decode
+                                } else {
+                                    SequencePhase::Prefill
+                                };
+                            }
 
                             prefill_requests.push(chunk_req);
                             current_tokens += chunk_size;
@@ -386,14 +522,17 @@ impl AienScheduler {
 
         // Update prefill progress for chunked sequences
         for prefill_req in &batch.prefill_requests {
+            let chunk_tokens_count = prefill_req.prompt_tokens.len();
             if let Some(seq) = self.running_sequences.get_mut(&prefill_req.request_id) {
                 if !seq.is_prefilled {
-                    seq.prompt_tokens_prefilled += prefill_req.prompt_tokens.len();
+                    seq.prompt_tokens_prefilled += chunk_tokens_count;
                     if seq.prompt_tokens_prefilled >= seq.request.prompt_tokens.len() {
                         seq.is_prefilled = true;
                     }
                 }
             }
+            self.arena
+                .record_prefilled_tokens(prefill_req.request_id, chunk_tokens_count);
         }
 
         for output in outputs {
@@ -441,6 +580,21 @@ impl AienScheduler {
                         }
                     }
 
+                    if should_emit_token {
+                        self.arena.record_generated_token(request_id, token_id);
+                        if let Some(record) = self.arena.get(&request_id) {
+                            if let Some(sink_id) = record.sink_id {
+                                self.completion_router.emit(
+                                    sink_id,
+                                    CompletionEvent::Token {
+                                        seq_id: request_id,
+                                        token: token_id,
+                                    },
+                                );
+                            }
+                        }
+                    }
+
                     if is_finished {
                         let running = self.running_sequences.remove(&request_id);
                         if finish_reason == FinishReason::Preempted {
@@ -448,9 +602,25 @@ impl AienScheduler {
                                 self.preempted_queue.push_back(r.request);
                                 self.metrics.preempted_requests += 1;
                             }
+                            if let Some(record) = self.arena.get_mut(&request_id) {
+                                record.phase = SequencePhase::Preempted;
+                            }
                         } else {
                             let _ = self.kv_manager.write().free_sequence(request_id);
                             self.metrics.finished_requests += 1;
+                            if let Some(record) = self.arena.get_mut(&request_id) {
+                                record.phase = SequencePhase::Finished;
+                                if let Some(sink_id) = record.sink_id {
+                                    self.completion_router.emit(
+                                        sink_id,
+                                        CompletionEvent::Finished {
+                                            seq_id: request_id,
+                                            finish_reason,
+                                            total_tokens,
+                                        },
+                                    );
+                                }
+                            }
                         }
 
                         final_outputs.push(DecodeOutput::Finished {
@@ -474,6 +644,19 @@ impl AienScheduler {
                     self.running_sequences.remove(&request_id);
                     let _ = self.kv_manager.write().free_sequence(request_id);
                     self.metrics.finished_requests += 1;
+                    if let Some(record) = self.arena.get_mut(&request_id) {
+                        record.phase = SequencePhase::Finished;
+                        if let Some(sink_id) = record.sink_id {
+                            self.completion_router.emit(
+                                sink_id,
+                                CompletionEvent::Finished {
+                                    seq_id: request_id,
+                                    finish_reason: reason,
+                                    total_tokens,
+                                },
+                            );
+                        }
+                    }
                     final_outputs.push(DecodeOutput::Finished {
                         request_id,
                         reason,
@@ -503,6 +686,7 @@ mod tests {
     use super::*;
     use aien_inference_abi::{MockInferenceBackend, SamplingParams};
     use aien_kv_cache::create_shared_kv_manager;
+    use aien_platform::{KvHandle, ModelHandle, Priority};
 
     #[tokio::test]
     async fn test_scheduler_lifecycle() {
@@ -652,5 +836,114 @@ mod tests {
         assert_eq!(scheduler.metrics().preempted_requests, 1);
         assert_eq!(scheduler.preempted_count(), 1);
         assert_eq!(scheduler.running_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_submit_work_and_completion_router() {
+        let kv_manager = create_shared_kv_manager(100, 16);
+        let config = SchedulerConfig::default();
+        let mut scheduler = AienScheduler::new(config, kv_manager);
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let sink = Arc::new(ChannelCompletionSink::new(tx));
+        let sink_id = scheduler.completion_router_mut().register(sink);
+
+        let prompt: PromptHandle = Arc::from(vec![101, 102, 103].into_boxed_slice());
+        let work = InferenceWork {
+            sequence: 50,
+            model: ModelHandle(1),
+            kv: KvHandle(50),
+            priority: Priority::Realtime,
+            deadline: None,
+            branch_parent: None,
+            next_token_budget: 2,
+        };
+
+        scheduler
+            .submit_work(
+                work,
+                prompt,
+                Some(SamplingParams {
+                    temperature: 0.0,
+                    top_p: 1.0,
+                    max_tokens: 2,
+                    stop_token_ids: vec![],
+                }),
+                Some(sink_id),
+            )
+            .unwrap();
+
+        assert_eq!(scheduler.waiting_count(), 1);
+        assert!(scheduler.arena().contains(50));
+
+        let mut backend = MockInferenceBackend::new(1);
+
+        // Step 1: Prefill + Token 1
+        let step1 = scheduler.step(&mut backend).await.unwrap().unwrap();
+        assert_eq!(step1.0.len(), 1);
+
+        let event1 = rx.try_recv().unwrap();
+        match event1 {
+            CompletionEvent::Token { seq_id, token } => {
+                assert_eq!(seq_id, 50);
+                assert_eq!(token, 100);
+            }
+            _ => panic!("Expected token event"),
+        }
+
+        // Step 2: Token 2 -> finishes
+        let step2 = scheduler.step(&mut backend).await.unwrap().unwrap();
+        assert_eq!(step2.0.len(), 1);
+
+        let event2 = rx.try_recv().unwrap();
+        match event2 {
+            CompletionEvent::Token { seq_id, token } => {
+                assert_eq!(seq_id, 50);
+                assert_eq!(token, 101);
+            }
+            _ => panic!("Expected token event"),
+        }
+
+        let event3 = rx.try_recv().unwrap();
+        match event3 {
+            CompletionEvent::Finished {
+                seq_id,
+                finish_reason,
+                total_tokens,
+            } => {
+                assert_eq!(seq_id, 50);
+                assert_eq!(finish_reason, FinishReason::LengthLimit);
+                assert_eq!(total_tokens, 2);
+            }
+            _ => panic!("Expected finished event"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_build_batch_plan_structure() {
+        let kv_manager = create_shared_kv_manager(100, 16);
+        let config = SchedulerConfig::default();
+        let mut scheduler = AienScheduler::new(config, kv_manager);
+
+        let prompt: PromptHandle = Arc::from(vec![1, 2, 3, 4].into_boxed_slice());
+        let work = InferenceWork {
+            sequence: 77,
+            model: ModelHandle(0),
+            kv: KvHandle(77),
+            priority: Priority::Normal,
+            deadline: None,
+            branch_parent: None,
+            next_token_budget: 10,
+        };
+
+        scheduler.submit_work(work, prompt, None, None).unwrap();
+
+        let plan = scheduler.build_batch_plan().unwrap().unwrap();
+        assert_eq!(plan.prefill_spans.len(), 1);
+        assert_eq!(plan.prefill_spans[0].seq_id, 77);
+        assert_eq!(plan.prefill_spans[0].start_pos, 0);
+        assert_eq!(plan.prefill_spans[0].length, 4);
+        assert_eq!(plan.decode_items.len(), 0);
+        assert_eq!(plan.total_tokens, 4);
     }
 }

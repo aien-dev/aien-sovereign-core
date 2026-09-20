@@ -47,7 +47,7 @@ mod tests {
         assert!(
             text.contains("Drake Stapleton (drake.aien@proton.me) and AIEN (aien.atlas@proton.me)")
         );
-        assert!(!text.contains('—'));
-        assert!(!text.contains('–'));
+        assert!(!text.contains('\u{2014}'));
+        assert!(!text.contains('\u{2013}'));
     }
 }
