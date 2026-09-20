@@ -42,3 +42,21 @@ pub trait ComputeDevice {
     fn submit(&self, work: ComputeWork<'_>) -> Result<Fence, PlatformError>;
     fn synchronize(&self, fence: Fence) -> Result<(), PlatformError>;
 }
+
+impl<T: ?Sized + UnifiedBuffer> UnifiedBuffer for alloc::boxed::Box<T> {
+    fn len(&self) -> usize {
+        (**self).len()
+    }
+    fn is_empty(&self) -> bool {
+        (**self).is_empty()
+    }
+    fn device_address(&self) -> DeviceAddress {
+        (**self).device_address()
+    }
+    fn as_ptr(&self) -> *const u8 {
+        (**self).as_ptr()
+    }
+    fn as_mut_ptr(&mut self) -> *mut u8 {
+        (**self).as_mut_ptr()
+    }
+}

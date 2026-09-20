@@ -63,7 +63,7 @@ dependencies = [
 name = "aien-kv-cache"
 version = "0.1.0"
 dependencies = [
- "libc",
+ "aien-platform",
  "parking_lot",
  "serde",
 ]

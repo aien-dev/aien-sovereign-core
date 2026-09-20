@@ -5,7 +5,7 @@
 use crate::backend::{ReferenceCpuBackend, TensorBackend};
 use std::ffi::CStr;
 use std::os::raw::{c_char, c_float, c_int};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 #[cfg(has_blackwell_cuda)]
 extern "C" {
@@ -41,7 +41,9 @@ extern "C" {
         sm_scale: c_float,
         out: *mut u16,
     ) -> c_int;
+    #[allow(dead_code)]
     fn blackwell_allocate_managed(bytes: usize) -> *mut std::ffi::c_void;
+    #[allow(dead_code)]
     fn blackwell_free_managed(ptr: *mut std::ffi::c_void);
     fn blackwell_gemm_destroy();
 }
@@ -107,6 +109,8 @@ unsafe fn blackwell_gemm_destroy() {}
 
 /// Blackwell GB10 GPU Tensor Backend.
 /// Executes GEMV, batched GEMM, and Paged Attention on the NVIDIA GB10 Blackwell GPU.
+static ACTIVE_BACKENDS: AtomicUsize = AtomicUsize::new(0);
+
 pub struct BlackwellGb10Backend {
     fallback: ReferenceCpuBackend,
     device_name: String,
@@ -133,14 +137,7 @@ impl BlackwellGb10Backend {
         }
 
         if available {
-            unsafe fn custom_alloc(bytes: usize) -> *mut u8 {
-                blackwell_allocate_managed(bytes) as *mut u8
-            }
-            unsafe fn custom_free(ptr: *mut u8, _bytes: usize) {
-                blackwell_free_managed(ptr as *mut std::ffi::c_void);
-            }
-            aien_kv_cache::register_unified_allocator(custom_alloc, custom_free);
-
+            ACTIVE_BACKENDS.fetch_add(1, Ordering::SeqCst);
             eprintln!(
                 "BlackwellGb10Backend: Successfully bound to device '{}' (sm_121 cuBLAS 13)",
                 device_name
@@ -230,7 +227,7 @@ impl Default for BlackwellGb10Backend {
 
 impl Drop for BlackwellGb10Backend {
     fn drop(&mut self) {
-        if self.available {
+        if self.available && ACTIVE_BACKENDS.fetch_sub(1, Ordering::SeqCst) == 1 {
             unsafe {
                 blackwell_gemm_destroy();
             }
