@@ -48,12 +48,12 @@ __device__ __forceinline__ void prefetch_global_l2(const void *ptr) {
 
 // Truly Cooperative Grouped Query Paged Attention Kernel for Blackwell sm_121.
 // Each warp processes one query head across 32 lanes cooperatively.
+// Reads directly from strided physical UnifiedKvTensorPool [block][layer][K/V][slot][kv_head][head_dim].
 // Coalesced 128-byte vectorized (32-bit __nv_bfloat162) memory accesses.
 // Online softmax is maintained in registers; dot products reduce via __shfl_down_sync.
 __global__ void paged_attention_bf16_cooperative_kernel(
     const __nv_bfloat16 * __restrict__ q,
-    const __nv_bfloat16 * __restrict__ k_pool,
-    const __nv_bfloat16 * __restrict__ v_pool,
+    const __nv_bfloat16 * __restrict__ kv_pool_base,
     const int32_t * __restrict__ block_tables,
     const int32_t * __restrict__ context_lens,
     int32_t max_blocks_per_seq,
@@ -61,6 +61,12 @@ __global__ void paged_attention_bf16_cooperative_kernel(
     int32_t num_q_heads,
     int32_t num_kv_heads,
     int32_t head_dim,
+    int32_t layer_idx,
+    size_t block_stride_elements,
+    size_t layer_stride_elements,
+    size_t kv_stride_elements,
+    size_t token_stride_elements,
+    int32_t page_size,
     float sm_scale,
     __nv_bfloat16 * __restrict__ out
 ) {
@@ -113,7 +119,7 @@ __global__ void paged_attention_bf16_cooperative_kernel(
         acc_out[i] = 0.0f;
     }
 
-    int total_blocks = (context_len + PAGE_SIZE - 1) / PAGE_SIZE;
+    int total_blocks = (context_len + page_size - 1) / page_size;
     const int32_t *seq_blocks = block_tables + (seq_idx * max_blocks_per_seq);
 
     for (int b = 0; b < total_blocks; ++b) {
@@ -122,25 +128,25 @@ __global__ void paged_attention_bf16_cooperative_kernel(
             continue;
         }
 
-        int tokens_in_this_block = PAGE_SIZE;
+        int tokens_in_this_block = page_size;
         if (b == total_blocks - 1) {
-            int rem = context_len % PAGE_SIZE;
+            int rem = context_len % page_size;
             if (rem != 0) {
                 tokens_in_this_block = rem;
             }
         }
 
-        size_t block_offset = (size_t)physical_block_id * num_kv_heads * PAGE_SIZE * head_dim;
-        const __nv_bfloat16 *k_block = k_pool + block_offset + (kv_head_idx * PAGE_SIZE * head_dim);
-        const __nv_bfloat16 *v_block = v_pool + block_offset + (kv_head_idx * PAGE_SIZE * head_dim);
+        size_t block_layer_base = (size_t)physical_block_id * block_stride_elements + (size_t)layer_idx * layer_stride_elements;
+        const __nv_bfloat16 *k_block_base = kv_pool_base + block_layer_base;
+        const __nv_bfloat16 *v_block_base = kv_pool_base + block_layer_base + kv_stride_elements;
 
 #if PREFETCH_DISTANCE > 0
         if (b + PREFETCH_DISTANCE < total_blocks) {
             int32_t next_blk_id = seq_blocks[b + PREFETCH_DISTANCE];
             if (next_blk_id >= 0) {
-                size_t next_offset = (size_t)next_blk_id * num_kv_heads * PAGE_SIZE * head_dim;
-                const void *next_k = k_pool + next_offset + (kv_head_idx * PAGE_SIZE * head_dim);
-                const void *next_v = v_pool + next_offset + (kv_head_idx * PAGE_SIZE * head_dim);
+                size_t next_block_layer_base = (size_t)next_blk_id * block_stride_elements + (size_t)layer_idx * layer_stride_elements;
+                const void *next_k = kv_pool_base + next_block_layer_base + (size_t)kv_head_idx * head_dim;
+                const void *next_v = kv_pool_base + next_block_layer_base + kv_stride_elements + (size_t)kv_head_idx * head_dim;
                 prefetch_global_l2(next_k);
                 prefetch_global_l2(next_v);
             }
@@ -148,8 +154,8 @@ __global__ void paged_attention_bf16_cooperative_kernel(
 #endif
 
         for (int tok = 0; tok < tokens_in_this_block; ++tok) {
-            const __nv_bfloat16 *k_tok = k_block + (tok * head_dim);
-            const __nv_bfloat16 *v_tok = v_block + (tok * head_dim);
+            const __nv_bfloat16 *k_tok = k_block_base + (size_t)tok * token_stride_elements + (size_t)kv_head_idx * head_dim;
+            const __nv_bfloat16 *v_tok = v_block_base + (size_t)tok * token_stride_elements + (size_t)kv_head_idx * head_dim;
 
             // Step 1: Thread-local partial dot product across lane's pairs (aligned 32-bit loads)
             float my_dot = 0.0f;
@@ -238,8 +244,7 @@ extern "C" {
 
 int paged_attention_bf16_forward(
     const __nv_bfloat16 *q,
-    const __nv_bfloat16 *k_pool,
-    const __nv_bfloat16 *v_pool,
+    const __nv_bfloat16 *kv_pool_base,
     const int32_t *block_tables,
     const int32_t *context_lens,
     int32_t max_blocks_per_seq,
@@ -247,6 +252,12 @@ int paged_attention_bf16_forward(
     int32_t num_q_heads,
     int32_t num_kv_heads,
     int32_t head_dim,
+    int32_t layer_idx,
+    size_t block_stride_elements,
+    size_t layer_stride_elements,
+    size_t kv_stride_elements,
+    size_t token_stride_elements,
+    int32_t page_size,
     float sm_scale,
     __nv_bfloat16 *out
 ) {
@@ -255,8 +266,7 @@ int paged_attention_bf16_forward(
     }
 
     bool q_dev = is_device_or_managed_ptr(q);
-    bool k_dev = is_device_or_managed_ptr(k_pool);
-    bool v_dev = is_device_or_managed_ptr(v_pool);
+    bool pool_dev = is_device_or_managed_ptr(kv_pool_base);
     bool bt_dev = is_device_or_managed_ptr(block_tables);
     bool cl_dev = is_device_or_managed_ptr(context_lens);
     bool out_dev = is_device_or_managed_ptr(out);
@@ -309,12 +319,9 @@ int paged_attention_bf16_forward(
         d_out = g_scratch_d_out;
     }
 
-    const __nv_bfloat16 *d_k = k_pool;
-    const __nv_bfloat16 *d_v = v_pool;
-    __nv_bfloat16 *temp_k = NULL;
-    __nv_bfloat16 *temp_v = NULL;
-
-    if (!k_dev || !v_dev) {
+    const __nv_bfloat16 *d_pool = kv_pool_base;
+    __nv_bfloat16 *temp_pool = NULL;
+    if (!pool_dev) {
         int max_block_id = 0;
         for (int i = 0; i < num_seqs * max_blocks_per_seq; ++i) {
             if (block_tables[i] > max_block_id) {
@@ -322,18 +329,10 @@ int paged_attention_bf16_forward(
             }
         }
         size_t total_pages = max_block_id + 1;
-        size_t pool_bytes = total_pages * num_kv_heads * PAGE_SIZE * head_dim * sizeof(__nv_bfloat16);
-
-        if (!k_dev) {
-            cudaMalloc((void**)&temp_k, pool_bytes);
-            cudaMemcpy((void*)temp_k, k_pool, pool_bytes, cudaMemcpyHostToDevice);
-            d_k = temp_k;
-        }
-        if (!v_dev) {
-            cudaMalloc((void**)&temp_v, pool_bytes);
-            cudaMemcpy((void*)temp_v, v_pool, pool_bytes, cudaMemcpyHostToDevice);
-            d_v = temp_v;
-        }
+        size_t pool_bytes = total_pages * block_stride_elements * sizeof(__nv_bfloat16);
+        cudaMalloc((void**)&temp_pool, pool_bytes);
+        cudaMemcpy((void*)temp_pool, kv_pool_base, pool_bytes, cudaMemcpyHostToDevice);
+        d_pool = temp_pool;
     }
 
     int warps_per_block = WARPS_PER_BLOCK;
@@ -345,8 +344,7 @@ int paged_attention_bf16_forward(
 
     paged_attention_bf16_cooperative_kernel<<<grid, block, shared_mem>>>(
         d_q,
-        d_k,
-        d_v,
+        d_pool,
         d_bt,
         d_cl,
         max_blocks_per_seq,
@@ -354,6 +352,12 @@ int paged_attention_bf16_forward(
         num_q_heads,
         num_kv_heads,
         head_dim,
+        layer_idx,
+        block_stride_elements,
+        layer_stride_elements,
+        kv_stride_elements,
+        token_stride_elements,
+        page_size,
         sm_scale,
         d_out
     );
@@ -361,8 +365,7 @@ int paged_attention_bf16_forward(
     cudaError_t err = cudaDeviceSynchronize();
     if (err != cudaSuccess) {
         fprintf(stderr, "paged_attention_bf16_cooperative_kernel sync failed: %s\n", cudaGetErrorString(err));
-        if (temp_k) cudaFree(temp_k);
-        if (temp_v) cudaFree(temp_v);
+        if (temp_pool) cudaFree(temp_pool);
         return -1;
     }
 
@@ -370,9 +373,7 @@ int paged_attention_bf16_forward(
         cudaMemcpy(out, d_out, out_bytes, cudaMemcpyDeviceToHost);
     }
 
-    if (temp_k) cudaFree(temp_k);
-    if (temp_v) cudaFree(temp_v);
-
+    if (temp_pool) cudaFree(temp_pool);
     return 0;
 }
 

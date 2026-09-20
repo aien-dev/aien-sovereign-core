@@ -84,35 +84,13 @@ impl NativeTransformerBackend {
         Self::new_blackwell(weights)
     }
 
-    /// Constructor attaching a physical reference-counted KV page pool for Copy-on-Write branching.
-    pub fn with_paged_kv(
-        weights: TransformerWeights,
-        total_blocks: usize,
-        block_size: usize,
-    ) -> Result<Self, String> {
-        let pool_cfg = KvPoolConfig::for_model(
-            total_blocks,
-            block_size,
-            weights.config.num_layers,
-            weights.config.num_kv_heads,
-            weights.config.head_dim,
-            KvDType::Fp32,
-        );
-        let kv_mgr = create_shared_kv_manager_with_pool(total_blocks, block_size, pool_cfg)?;
-        Ok(Self {
-            weights,
-            sequences: HashMap::new(),
-            tensor_backend: Arc::new(ReferenceCpuBackend::new()),
-            kv_manager: Some(kv_mgr),
-        })
-    }
-
-    /// Constructor attaching physical paged KV cache with explicit TensorBackend compute hardware.
-    pub fn with_paged_kv_backend(
+    /// Constructor attaching physical paged KV cache with explicit TensorBackend and explicit KV dtype.
+    pub fn with_paged_kv_backend_dtype(
         weights: TransformerWeights,
         tensor_backend: Arc<dyn TensorBackend>,
         total_blocks: usize,
         block_size: usize,
+        dtype: KvDType,
     ) -> Result<Self, String> {
         let pool_cfg = KvPoolConfig::for_model(
             total_blocks,
@@ -120,7 +98,7 @@ impl NativeTransformerBackend {
             weights.config.num_layers,
             weights.config.num_kv_heads,
             weights.config.head_dim,
-            KvDType::Fp32,
+            dtype,
         );
         let kv_mgr = create_shared_kv_manager_with_pool(total_blocks, block_size, pool_cfg)?;
         Ok(Self {
@@ -130,6 +108,38 @@ impl NativeTransformerBackend {
             kv_manager: Some(kv_mgr),
         })
     }
+
+    /// Constructor attaching physical paged KV cache with explicit TensorBackend compute hardware (defaults to BF16).
+    pub fn with_paged_kv_backend(
+        weights: TransformerWeights,
+        tensor_backend: Arc<dyn TensorBackend>,
+        total_blocks: usize,
+        block_size: usize,
+    ) -> Result<Self, String> {
+        Self::with_paged_kv_backend_dtype(
+            weights,
+            tensor_backend,
+            total_blocks,
+            block_size,
+            KvDType::Bf16,
+        )
+    }
+
+    /// Constructor attaching a physical reference-counted KV page pool for Copy-on-Write branching.
+    /// Defaults to Blackwell GPU backend when available with BF16 physical pool.
+    pub fn with_paged_kv(
+        weights: TransformerWeights,
+        total_blocks: usize,
+        block_size: usize,
+    ) -> Result<Self, String> {
+        Self::with_paged_kv_backend(
+            weights,
+            Arc::new(BlackwellGb10Backend::new()),
+            total_blocks,
+            block_size,
+        )
+    }
+
 
     /// Creates a new immutable root context from prompt tokens.
     pub fn prefill_sequence(&mut self, seq_id: u64, prompt_tokens: &[u32]) -> Result<Vec<f32>, String> {

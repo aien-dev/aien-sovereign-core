@@ -291,6 +291,15 @@ impl UnifiedKvTensorPool {
             + token_in_block * token_stride
     }
 
+    #[inline]
+    pub fn element_strides(&self) -> (usize, usize, usize, usize) {
+        let token_stride = self.config.num_kv_heads * self.config.head_dim;
+        let kv_stride = self.config.block_size * token_stride;
+        let layer_stride = 2 * kv_stride;
+        let block_stride = self.config.num_layers * layer_stride;
+        (token_stride, kv_stride, layer_stride, block_stride)
+    }
+
     pub fn write_token_kv(
         &mut self,
         block_id: BlockId,
@@ -306,11 +315,22 @@ impl UnifiedKvTensorPool {
         let k_offset = self.element_offset(block_id, layer_idx, false, token_in_block);
         let v_offset = self.element_offset(block_id, layer_idx, true, token_in_block);
 
-        unsafe {
-            let k_ptr = self.base_ptr.add(k_offset) as *mut f32;
-            let v_ptr = self.base_ptr.add(v_offset) as *mut f32;
-            std::ptr::copy_nonoverlapping(k.as_ptr(), k_ptr, kv_dim);
-            std::ptr::copy_nonoverlapping(v.as_ptr(), v_ptr, kv_dim);
+        match self.config.dtype {
+            KvDType::Bf16 => unsafe {
+                let k_ptr = self.base_ptr.add(k_offset) as *mut u16;
+                let v_ptr = self.base_ptr.add(v_offset) as *mut u16;
+                for i in 0..kv_dim {
+                    *k_ptr.add(i) = (k[i].to_bits() >> 16) as u16;
+                    *v_ptr.add(i) = (v[i].to_bits() >> 16) as u16;
+                }
+            },
+            KvDType::Fp32 => unsafe {
+                let k_ptr = self.base_ptr.add(k_offset) as *mut f32;
+                let v_ptr = self.base_ptr.add(v_offset) as *mut f32;
+                std::ptr::copy_nonoverlapping(k.as_ptr(), k_ptr, kv_dim);
+                std::ptr::copy_nonoverlapping(v.as_ptr(), v_ptr, kv_dim);
+            },
+            other => panic!("write_token_kv not implemented for {:?}", other),
         }
     }
 
@@ -329,11 +349,22 @@ impl UnifiedKvTensorPool {
         let k_offset = self.element_offset(block_id, layer_idx, false, token_in_block);
         let v_offset = self.element_offset(block_id, layer_idx, true, token_in_block);
 
-        unsafe {
-            let k_ptr = self.base_ptr.add(k_offset) as *const f32;
-            let v_ptr = self.base_ptr.add(v_offset) as *const f32;
-            std::ptr::copy_nonoverlapping(k_ptr, k_out.as_mut_ptr(), kv_dim);
-            std::ptr::copy_nonoverlapping(v_ptr, v_out.as_mut_ptr(), kv_dim);
+        match self.config.dtype {
+            KvDType::Bf16 => unsafe {
+                let k_ptr = self.base_ptr.add(k_offset) as *const u16;
+                let v_ptr = self.base_ptr.add(v_offset) as *const u16;
+                for i in 0..kv_dim {
+                    k_out[i] = f32::from_bits((*k_ptr.add(i) as u32) << 16);
+                    v_out[i] = f32::from_bits((*v_ptr.add(i) as u32) << 16);
+                }
+            },
+            KvDType::Fp32 => unsafe {
+                let k_ptr = self.base_ptr.add(k_offset) as *const f32;
+                let v_ptr = self.base_ptr.add(v_offset) as *const f32;
+                std::ptr::copy_nonoverlapping(k_ptr, k_out.as_mut_ptr(), kv_dim);
+                std::ptr::copy_nonoverlapping(v_ptr, v_out.as_mut_ptr(), kv_dim);
+            },
+            other => panic!("read_token_kv not implemented for {:?}", other),
         }
     }
 
@@ -364,13 +395,24 @@ impl UnifiedKvTensorPool {
             let chunk_elements = tokens_in_this_block * kv_dim;
             let dst_offset = tokens_gathered * kv_dim;
 
-            unsafe {
-                let k_src = self.base_ptr.add(k_block_offset) as *const f32;
-                let v_src = self.base_ptr.add(v_block_offset) as *const f32;
-                let k_dst = flat_k.as_mut_ptr().add(dst_offset);
-                let v_dst = flat_v.as_mut_ptr().add(dst_offset);
-                std::ptr::copy_nonoverlapping(k_src, k_dst, chunk_elements);
-                std::ptr::copy_nonoverlapping(v_src, v_dst, chunk_elements);
+            match self.config.dtype {
+                KvDType::Bf16 => unsafe {
+                    let k_src = self.base_ptr.add(k_block_offset) as *const u16;
+                    let v_src = self.base_ptr.add(v_block_offset) as *const u16;
+                    for i in 0..chunk_elements {
+                        flat_k[dst_offset + i] = f32::from_bits((*k_src.add(i) as u32) << 16);
+                        flat_v[dst_offset + i] = f32::from_bits((*v_src.add(i) as u32) << 16);
+                    }
+                },
+                KvDType::Fp32 => unsafe {
+                    let k_src = self.base_ptr.add(k_block_offset) as *const f32;
+                    let v_src = self.base_ptr.add(v_block_offset) as *const f32;
+                    let k_dst = flat_k.as_mut_ptr().add(dst_offset);
+                    let v_dst = flat_v.as_mut_ptr().add(dst_offset);
+                    std::ptr::copy_nonoverlapping(k_src, k_dst, chunk_elements);
+                    std::ptr::copy_nonoverlapping(v_src, v_dst, chunk_elements);
+                },
+                other => panic!("gather_layer_kv not implemented for {:?}", other),
             }
             tokens_gathered += tokens_in_this_block;
         }
@@ -994,6 +1036,68 @@ mod tests {
             let slice = std::slice::from_raw_parts(ptr1, 1024);
             assert_eq!(slice[0], 0x00);
             assert_eq!(slice[1023], 0x00);
+        }
+    }
+    #[test]
+    fn test_bf16_and_fp32_pool_write_read_gather_parity() {
+        let num_blocks = 4;
+        let block_size = 16;
+        let num_layers = 2;
+        let num_kv_heads = 4;
+        let head_dim = 64;
+        let kv_dim = num_kv_heads * head_dim;
+
+        let cfg_bf16 = KvPoolConfig::for_model(num_blocks, block_size, num_layers, num_kv_heads, head_dim, KvDType::Bf16);
+        let cfg_fp32 = KvPoolConfig::for_model(num_blocks, block_size, num_layers, num_kv_heads, head_dim, KvDType::Fp32);
+
+        let mut pool_bf16 = UnifiedKvTensorPool::allocate(cfg_bf16).unwrap();
+        let mut pool_fp32 = UnifiedKvTensorPool::allocate(cfg_fp32).unwrap();
+
+        let k_vec: Vec<f32> = (0..kv_dim).map(|i| (i as f32) * 0.125).collect();
+        let v_vec: Vec<f32> = (0..kv_dim).map(|i| ((i + 7) as f32) * -0.25).collect();
+
+        // Write to block 0, layer 1, token 5
+        pool_bf16.write_token_kv(0, 1, 5, &k_vec, &v_vec);
+        pool_fp32.write_token_kv(0, 1, 5, &k_vec, &v_vec);
+
+        let mut k_read_bf16 = vec![0.0f32; kv_dim];
+        let mut v_read_bf16 = vec![0.0f32; kv_dim];
+        let mut k_read_fp32 = vec![0.0f32; kv_dim];
+        let mut v_read_fp32 = vec![0.0f32; kv_dim];
+
+        pool_bf16.read_token_kv(0, 1, 5, &mut k_read_bf16, &mut v_read_bf16);
+        pool_fp32.read_token_kv(0, 1, 5, &mut k_read_fp32, &mut v_read_fp32);
+
+        // FP32 must match exact
+        assert_eq!(k_read_fp32, k_vec);
+        assert_eq!(v_read_fp32, v_vec);
+
+        // BF16 must match within BF16 machine epsilon (< 1% relative error)
+        for i in 0..kv_dim {
+            let tol_k = 0.01 * (1.0 + k_vec[i].abs());
+            let tol_v = 0.01 * (1.0 + v_vec[i].abs());
+            assert!((k_read_bf16[i] - k_vec[i]).abs() < tol_k, "K mismatch at {}: bf16={}, exp={}", i, k_read_bf16[i], k_vec[i]);
+            assert!((v_read_bf16[i] - v_vec[i]).abs() < tol_v, "V mismatch at {}: bf16={}, exp={}", i, v_read_bf16[i], v_vec[i]);
+        }
+
+        // Gather test
+        let mut gathered_k_bf16 = Vec::new();
+        let mut gathered_v_bf16 = Vec::new();
+        let mut gathered_k_fp32 = Vec::new();
+        let mut gathered_v_fp32 = Vec::new();
+
+        pool_bf16.gather_layer_kv(&[0], 6, 1, &mut gathered_k_bf16, &mut gathered_v_bf16);
+        pool_fp32.gather_layer_kv(&[0], 6, 1, &mut gathered_k_fp32, &mut gathered_v_fp32);
+
+        assert_eq!(gathered_k_bf16.len(), 6 * kv_dim);
+        assert_eq!(gathered_k_fp32.len(), 6 * kv_dim);
+
+        // Token 5 elements in gathered output
+        let offset = 5 * kv_dim;
+        for i in 0..kv_dim {
+            assert_eq!(gathered_k_fp32[offset + i], k_vec[i]);
+            let tol_k = 0.01 * (1.0 + k_vec[i].abs());
+            assert!((gathered_k_bf16[offset + i] - k_vec[i]).abs() < tol_k);
         }
     }
 }

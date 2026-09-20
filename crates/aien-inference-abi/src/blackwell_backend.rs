@@ -28,8 +28,7 @@ extern "C" {
     ) -> c_int;
     fn paged_attention_bf16_forward(
         q: *const u16,
-        k_pool: *const u16,
-        v_pool: *const u16,
+        kv_pool_base: *const u16,
         block_tables: *const i32,
         context_lens: *const i32,
         max_blocks_per_seq: c_int,
@@ -37,6 +36,12 @@ extern "C" {
         num_q_heads: c_int,
         num_kv_heads: c_int,
         head_dim: c_int,
+        layer_idx: c_int,
+        block_stride_elements: usize,
+        layer_stride_elements: usize,
+        kv_stride_elements: usize,
+        token_stride_elements: usize,
+        page_size: c_int,
         sm_scale: c_float,
         out: *mut u16,
     ) -> c_int;
@@ -52,6 +57,7 @@ pub struct BlackwellGb10Backend {
     device_name: String,
     available: bool,
     fallback_counter: AtomicU64,
+    paged_attention_kernel_calls: AtomicU64,
 }
 
 impl BlackwellGb10Backend {
@@ -94,7 +100,12 @@ impl BlackwellGb10Backend {
             device_name,
             available,
             fallback_counter: AtomicU64::new(0),
+            paged_attention_kernel_calls: AtomicU64::new(0),
         }
+    }
+
+    pub fn paged_attention_kernel_count(&self) -> u64 {
+        self.paged_attention_kernel_calls.load(Ordering::Relaxed)
     }
 
     pub fn is_available(&self) -> bool {
@@ -121,8 +132,7 @@ impl BlackwellGb10Backend {
     pub fn paged_attention_bf16(
         &self,
         q: &[u16],
-        k_pool: &[u16],
-        v_pool: &[u16],
+        kv_pool_base: *const u16,
         block_tables: &[i32],
         context_lens: &[i32],
         max_blocks_per_seq: usize,
@@ -130,6 +140,12 @@ impl BlackwellGb10Backend {
         num_q_heads: usize,
         num_kv_heads: usize,
         head_dim: usize,
+        layer_idx: usize,
+        block_stride_elements: usize,
+        layer_stride_elements: usize,
+        kv_stride_elements: usize,
+        token_stride_elements: usize,
+        page_size: usize,
         sm_scale: f32,
         out: &mut [u16],
     ) -> Result<(), String> {
@@ -137,8 +153,7 @@ impl BlackwellGb10Backend {
             let res = unsafe {
                 paged_attention_bf16_forward(
                     q.as_ptr(),
-                    k_pool.as_ptr(),
-                    v_pool.as_ptr(),
+                    kv_pool_base,
                     block_tables.as_ptr(),
                     context_lens.as_ptr(),
                     max_blocks_per_seq as c_int,
@@ -146,11 +161,18 @@ impl BlackwellGb10Backend {
                     num_q_heads as c_int,
                     num_kv_heads as c_int,
                     head_dim as c_int,
+                    layer_idx as c_int,
+                    block_stride_elements,
+                    layer_stride_elements,
+                    kv_stride_elements,
+                    token_stride_elements,
+                    page_size as c_int,
                     sm_scale as c_float,
                     out.as_mut_ptr(),
                 )
             };
             if res == 0 {
+                self.paged_attention_kernel_calls.fetch_add(1, Ordering::Relaxed);
                 return Ok(());
             }
             return Err(format!(
@@ -307,13 +329,11 @@ impl TensorBackend for BlackwellGb10Backend {
             let context_lens = [context_len as i32];
             let max_blocks = block_ids.len();
 
-            let k_ptr = pool.base_ptr() as *const u16;
-            let v_ptr = pool.base_ptr() as *const u16;
+            let (token_stride, kv_stride, layer_stride, block_stride) = pool.element_strides();
 
             let res = self.paged_attention_bf16(
                 &q_bf16,
-                unsafe { std::slice::from_raw_parts(k_ptr, pool.total_bytes() / 2) },
-                unsafe { std::slice::from_raw_parts(v_ptr, pool.total_bytes() / 2) },
+                pool.base_ptr() as *const u16,
                 &i32_block_tables,
                 &context_lens,
                 max_blocks,
@@ -321,6 +341,12 @@ impl TensorBackend for BlackwellGb10Backend {
                 num_q_heads,
                 num_kv_heads,
                 head_dim,
+                layer_idx,
+                block_stride,
+                layer_stride,
+                kv_stride,
+                token_stride,
+                pool.config().block_size,
                 sm_scale,
                 &mut out_bf16,
             );
@@ -442,47 +468,83 @@ mod tests {
             return;
         }
 
-        let num_seqs = 2;
+        let num_blocks = 8;
+        let block_size = 16;
+        let num_layers = 2;
         let num_q_heads = 4;
         let num_kv_heads = 2;
         let head_dim = 64;
-        let page_size = 16;
-        let total_pages = 8;
-        let max_blocks_per_seq = 4;
+        let kv_dim = num_kv_heads * head_dim;
 
-        let q = vec![0x3F80u16; num_seqs * num_q_heads * head_dim]; // 1.0 in BF16
-        let k_pool = vec![0x3F80u16; total_pages * num_kv_heads * page_size * head_dim];
-        let v_pool = vec![0x3F80u16; total_pages * num_kv_heads * page_size * head_dim];
+        let pool_cfg = aien_kv_cache::KvPoolConfig::for_model(
+            num_blocks,
+            block_size,
+            num_layers,
+            num_kv_heads,
+            head_dim,
+            aien_kv_cache::KvDType::Bf16,
+        );
+        let mut pool = aien_kv_cache::UnifiedKvTensorPool::allocate(pool_cfg).unwrap();
 
-        let block_tables = vec![
-            0, 1, -1, -1, // seq 0: blocks 0, 1
-            2, 3, -1, -1, // seq 1: blocks 2, 3
-        ];
-        let context_lens = vec![30, 25]; // 30 tokens in seq 0, 25 tokens in seq 1
-        let sm_scale = 1.0f32 / (head_dim as f32).sqrt();
+        // Write deterministic tokens across blocks 0 and 1 for layer 0
+        let k_vec: Vec<f32> = (0..kv_dim).map(|i| (i as f32) * 0.05).collect();
+        let v_vec: Vec<f32> = (0..kv_dim).map(|i| ((i + 3) as f32) * 0.02).collect();
+        for slot in 0..block_size {
+            pool.write_token_kv(0, 0, slot, &k_vec, &v_vec);
+            pool.write_token_kv(1, 0, slot, &k_vec, &v_vec);
+        }
 
-        let mut out = vec![0u16; num_seqs * num_q_heads * head_dim];
+        let q = vec![1.0f32; num_q_heads * head_dim];
+        let mut out_gpu = vec![0.0f32; num_q_heads * head_dim];
+        let mut out_cpu = vec![0.0f32; num_q_heads * head_dim];
 
-        let res = backend.paged_attention_bf16(
+        let block_ids = vec![0, 1];
+        let context_len = 25; // 25 tokens across blocks 0 and 1
+
+        let pre_calls = backend.paged_attention_kernel_count();
+        let pre_fallbacks = backend.fallback_count();
+
+        // Run GPU backend
+        backend.paged_attention(
+            &mut out_gpu,
             &q,
-            &k_pool,
-            &v_pool,
-            &block_tables,
-            &context_lens,
-            max_blocks_per_seq,
-            num_seqs,
+            &pool,
+            &block_ids,
+            context_len,
+            0, // layer 0
             num_q_heads,
             num_kv_heads,
             head_dim,
-            sm_scale,
-            &mut out,
         );
 
-        assert!(res.is_ok(), "paged_attention_bf16 failed: {:?}", res.err());
-        assert_eq!(
-            out[0], 0x3F80,
-            "Expected 1.0 (0x3F80) in BF16, got 0x{:04x}",
-            out[0]
+        assert_eq!(backend.paged_attention_kernel_count(), pre_calls + 1);
+        assert_eq!(backend.fallback_count(), pre_fallbacks);
+
+        // Run Reference CPU backend
+        ReferenceCpuBackend::new().paged_attention(
+            &mut out_cpu,
+            &q,
+            &pool,
+            &block_ids,
+            context_len,
+            0,
+            num_q_heads,
+            num_kv_heads,
+            head_dim,
+        );
+
+        let mut max_diff = 0.0f32;
+        for i in 0..out_gpu.len() {
+            let diff = (out_gpu[i] - out_cpu[i]).abs();
+            if diff > max_diff {
+                max_diff = diff;
+            }
+        }
+
+        assert!(
+            max_diff < 0.02,
+            "Blackwell PagedAttention kernel diverged from CPU reference: max_diff = {}",
+            max_diff
         );
     }
 }

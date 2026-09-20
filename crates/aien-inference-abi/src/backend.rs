@@ -106,20 +106,41 @@ pub trait TensorBackend: Send + Sync {
                 let blk_id = block_ids[blk_idx];
                 let slot = t % block_size;
 
-                let head_offset_bytes = kv_head * head_dim * std::mem::size_of::<f32>();
-                let k_offset = pool.element_offset(blk_id, layer_idx, false, slot) + head_offset_bytes;
-                let v_offset = pool.element_offset(blk_id, layer_idx, true, slot) + head_offset_bytes;
-
-                let k_slice = unsafe {
-                    std::slice::from_raw_parts(pool.base_ptr().add(k_offset) as *const f32, head_dim)
-                };
-                let v_slice = unsafe {
-                    std::slice::from_raw_parts(pool.base_ptr().add(v_offset) as *const f32, head_dim)
+                let (k_buf, v_buf): (Vec<f32>, Vec<f32>) = match pool.config().dtype {
+                    aien_kv_cache::KvDType::Bf16 => {
+                        let elem_bytes = 2usize;
+                        let head_offset_bytes = kv_head * head_dim * elem_bytes;
+                        let k_offset = pool.element_offset(blk_id, layer_idx, false, slot) + head_offset_bytes;
+                        let v_offset = pool.element_offset(blk_id, layer_idx, true, slot) + head_offset_bytes;
+                        unsafe {
+                            let k_ptr = pool.base_ptr().add(k_offset) as *const u16;
+                            let v_ptr = pool.base_ptr().add(v_offset) as *const u16;
+                            let mut k_v = Vec::with_capacity(head_dim);
+                            let mut v_v = Vec::with_capacity(head_dim);
+                            for d in 0..head_dim {
+                                k_v.push(f32::from_bits((*k_ptr.add(d) as u32) << 16));
+                                v_v.push(f32::from_bits((*v_ptr.add(d) as u32) << 16));
+                            }
+                            (k_v, v_v)
+                        }
+                    }
+                    aien_kv_cache::KvDType::Fp32 => {
+                        let elem_bytes = 4usize;
+                        let head_offset_bytes = kv_head * head_dim * elem_bytes;
+                        let k_offset = pool.element_offset(blk_id, layer_idx, false, slot) + head_offset_bytes;
+                        let v_offset = pool.element_offset(blk_id, layer_idx, true, slot) + head_offset_bytes;
+                        unsafe {
+                            let k_slice = std::slice::from_raw_parts(pool.base_ptr().add(k_offset) as *const f32, head_dim);
+                            let v_slice = std::slice::from_raw_parts(pool.base_ptr().add(v_offset) as *const f32, head_dim);
+                            (k_slice.to_vec(), v_slice.to_vec())
+                        }
+                    }
+                    other => panic!("ReferenceCpuBackend::paged_attention unsupported dtype {:?}", other),
                 };
 
                 let mut dot = 0.0f64;
                 for d in 0..head_dim {
-                    dot += (q_head[d] as f64) * (k_slice[d] as f64);
+                    dot += (q_head[d] as f64) * (k_buf[d] as f64);
                 }
                 let score = dot * inv_sqrt_d;
 
@@ -129,7 +150,7 @@ pub trait TensorBackend: Send + Sync {
                 let l_new = l_prev * alpha + beta;
 
                 for d in 0..head_dim {
-                    acc[d] = acc[d] * alpha + beta * (v_slice[d] as f64);
+                    acc[d] = acc[d] * alpha + beta * (v_buf[d] as f64);
                 }
 
                 m_prev = m_new;
