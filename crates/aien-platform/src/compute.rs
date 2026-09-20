@@ -35,6 +35,19 @@ pub struct ComputeWork<'a> {
     pub params: &'a [u8],
 }
 
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BufferRegion {
+    pub address: DeviceAddress,
+    pub offset: usize,
+    pub len: usize,
+}
+
+pub trait MemoryDevice {
+    fn copy(&self, src: BufferRegion, dst: BufferRegion) -> Result<Fence, PlatformError>;
+    fn zero(&self, dst: BufferRegion) -> Result<Fence, PlatformError>;
+}
+
 pub trait ComputeDevice {
     type Buffer: UnifiedBuffer;
 

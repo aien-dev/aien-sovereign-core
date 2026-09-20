@@ -1,8 +1,70 @@
 use aien_inference_abi::{FinishReason, SamplingParams, SequenceRequest};
-use aien_platform::{InferenceWork, KvHandle, ModelHandle, Priority, SequenceId, Ticks};
+use aien_platform::{InferenceWork, KvHandle, ModelHandle, Priority, Ticks};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
+
+/// 64-bit Sequence Identifier composed of a slot index and a generation counter.
+/// Layout: [slot: u32 (high 32 bits)][generation: u32 (low 32 bits)]
+/// Generation zero is strictly invalid ab initio.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct SequenceId {
+    pub slot: u32,
+    pub generation: u32,
+}
+
+impl SequenceId {
+    pub const INVALID: Self = Self {
+        slot: u32::MAX,
+        generation: 0,
+    };
+
+    pub fn new(slot: u32, generation: u32) -> Result<Self, &'static str> {
+        if generation == 0 {
+            return Err("Generation zero is strictly invalid");
+        }
+        Ok(Self { slot, generation })
+    }
+
+    #[inline]
+    pub fn is_valid(&self) -> bool {
+        self.generation != 0
+    }
+
+    #[inline]
+    pub fn to_u64(&self) -> u64 {
+        ((self.slot as u64) << 32) | (self.generation as u64)
+    }
+
+    #[inline]
+    pub fn from_u64(val: u64) -> Result<Self, &'static str> {
+        let slot = (val >> 32) as u32;
+        let generation = (val & 0xFFFF_FFFF) as u32;
+        if generation == 0 {
+            return Err("Generation zero is strictly invalid");
+        }
+        Ok(Self { slot, generation })
+    }
+}
+
+impl From<SequenceId> for u64 {
+    fn from(id: SequenceId) -> Self {
+        id.to_u64()
+    }
+}
+
+impl TryFrom<u64> for SequenceId {
+    type Error = &'static str;
+    fn try_from(val: u64) -> Result<Self, Self::Error> {
+        SequenceId::from_u64(val)
+    }
+}
+
+impl std::fmt::Display for SequenceId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Seq(slot:{},gen:{})", self.slot, self.generation)
+    }
+}
 
 /// Immutable, reference-counted prompt token buffer.
 /// Guarantees zero allocation overhead across sequence forks and subagent branches.
@@ -184,18 +246,19 @@ impl SequenceRecord {
 
     pub fn from_work(
         work: InferenceWork,
+        seq_id: SequenceId,
         prompt: PromptHandle,
         sampling_params: SamplingParams,
         sink_id: Option<CompletionSinkId>,
     ) -> Self {
         Self {
-            seq_id: work.sequence,
+            seq_id,
             prompt,
             model: work.model,
             kv: work.kv,
             priority: work.priority,
             deadline: work.deadline,
-            branch_parent: work.branch_parent,
+            branch_parent: work.branch_parent.and_then(|p| SequenceId::from_u64(p).ok()),
             next_token_budget: work.next_token_budget,
             phase: SequencePhase::Waiting,
             tokens_generated: 0,
@@ -204,36 +267,6 @@ impl SequenceRecord {
             sink_id,
             sampling_params,
             arrival_time_ns: 0,
-            generated_tokens: Vec::new(),
-        }
-    }
-
-    pub fn from_request(request: SequenceRequest, sink_id: Option<CompletionSinkId>) -> Self {
-        let prompt_slice: Box<[u32]> = request.prompt_tokens.into_boxed_slice();
-        let prompt_handle: PromptHandle = Arc::from(prompt_slice);
-        let priority = match request.priority {
-            0 => Priority::Background,
-            1 => Priority::Normal,
-            2 => Priority::Interactive,
-            _ => Priority::Realtime,
-        };
-
-        Self {
-            seq_id: request.request_id,
-            prompt: prompt_handle,
-            model: ModelHandle(0),
-            kv: KvHandle(request.request_id),
-            priority,
-            deadline: None,
-            branch_parent: None,
-            next_token_budget: request.sampling_params.max_tokens as u32,
-            phase: SequencePhase::Waiting,
-            tokens_generated: 0,
-            prompt_tokens_prefilled: 0,
-            is_prefilled: false,
-            sink_id,
-            sampling_params: request.sampling_params,
-            arrival_time_ns: request.arrival_time_ns,
             generated_tokens: Vec::new(),
         }
     }
@@ -257,7 +290,7 @@ impl SequenceRecord {
 
     pub fn to_request(&self) -> SequenceRequest {
         SequenceRequest {
-            request_id: self.seq_id,
+            request_id: self.seq_id.to_u64(),
             prompt_tokens: self.prompt.to_vec(),
             sampling_params: self.sampling_params.clone(),
             arrival_time_ns: self.arrival_time_ns,
@@ -266,10 +299,20 @@ impl SequenceRecord {
     }
 }
 
-/// Central state arena managing active sequence records with zero-copy branching.
-#[derive(Default)]
+/// Slot entry within SequenceArena.
+#[derive(Debug, Clone)]
+pub struct SlotEntry {
+    pub generation: u32,
+    pub retired: bool,
+    pub record: Option<SequenceRecord>,
+}
+
+/// Central state arena managing active sequence records with slot/generation tracking.
+#[derive(Debug, Default)]
 pub struct SequenceArena {
-    records: HashMap<SequenceId, SequenceRecord>,
+    slots: Vec<SlotEntry>,
+    free_slots: Vec<u32>,
+    retired_slots_count: usize,
     total_tokens_generated: usize,
     total_prefilled_tokens: usize,
 }
@@ -277,69 +320,173 @@ pub struct SequenceArena {
 impl SequenceArena {
     pub fn new() -> Self {
         Self {
-            records: HashMap::new(),
+            slots: Vec::new(),
+            free_slots: Vec::new(),
+            retired_slots_count: 0,
             total_tokens_generated: 0,
             total_prefilled_tokens: 0,
         }
     }
 
-    pub fn insert(&mut self, record: SequenceRecord) -> Result<(), String> {
-        let seq_id = record.seq_id;
-        if self.records.contains_key(&seq_id) {
-            return Err(format!("Sequence {} already exists in arena", seq_id));
+    pub fn with_capacity(capacity: usize) -> Self {
+        let mut slots = Vec::with_capacity(capacity);
+        let mut free_slots = Vec::with_capacity(capacity);
+        for i in 0..capacity {
+            slots.push(SlotEntry {
+                generation: 1, // Generation 0 is strictly invalid
+                retired: false,
+                record: None,
+            });
+            free_slots.push(i as u32);
         }
-        self.records.insert(seq_id, record);
-        Ok(())
+        free_slots.reverse();
+
+        Self {
+            slots,
+            free_slots,
+            retired_slots_count: 0,
+            total_tokens_generated: 0,
+            total_prefilled_tokens: 0,
+        }
     }
 
-    pub fn get(&self, seq_id: &SequenceId) -> Option<&SequenceRecord> {
-        self.records.get(seq_id)
+    /// Allocates an active sequence slot with a non-zero generation.
+    /// Retires slot if generation wraps to u32::MAX.
+    pub fn allocate_slot(&mut self) -> Result<SequenceId, String> {
+        while let Some(slot_idx) = self.free_slots.pop() {
+            let slot = &mut self.slots[slot_idx as usize];
+            if slot.retired {
+                continue;
+            }
+            if slot.generation == 0 {
+                slot.generation = 1;
+            }
+            return Ok(SequenceId {
+                slot: slot_idx,
+                generation: slot.generation,
+            });
+        }
+
+        let slot_idx = self.slots.len() as u32;
+        let generation = 1; // Generation 0 is invalid
+        self.slots.push(SlotEntry {
+            generation,
+            retired: false,
+            record: None,
+        });
+
+        Ok(SequenceId {
+            slot: slot_idx,
+            generation,
+        })
     }
 
-    pub fn get_mut(&mut self, seq_id: &SequenceId) -> Option<&mut SequenceRecord> {
-        self.records.get_mut(seq_id)
+    /// Inserts a sequence into an allocated slot.
+    pub fn insert_with(
+        &mut self,
+        prompt: PromptHandle,
+        model: ModelHandle,
+        kv: KvHandle,
+        priority: Priority,
+        deadline: Option<Ticks>,
+        branch_parent: Option<SequenceId>,
+        next_token_budget: u32,
+        sampling_params: SamplingParams,
+        sink_id: Option<CompletionSinkId>,
+    ) -> Result<SequenceId, String> {
+        let seq_id = self.allocate_slot()?;
+        let record = SequenceRecord::new(
+            seq_id,
+            prompt,
+            model,
+            kv,
+            priority,
+            deadline,
+            branch_parent,
+            next_token_budget,
+            sampling_params,
+            sink_id,
+        );
+        self.slots[seq_id.slot as usize].record = Some(record);
+        Ok(seq_id)
     }
 
-    pub fn remove(&mut self, seq_id: &SequenceId) -> Option<SequenceRecord> {
-        self.records.remove(seq_id)
+    /// Validates whether a SequenceId is stale:
+    /// - generation 0
+    /// - slot index out of bounds
+    /// - generation doesn't match current slot generation
+    /// - slot has no active record
+    pub fn is_stale(&self, id: SequenceId) -> bool {
+        if id.generation == 0 || (id.slot as usize) >= self.slots.len() {
+            return true;
+        }
+        let slot = &self.slots[id.slot as usize];
+        slot.generation != id.generation || slot.record.is_none()
     }
 
-    pub fn contains(&self, seq_id: SequenceId) -> bool {
-        self.records.contains_key(&seq_id)
+    pub fn get(&self, id: SequenceId) -> Option<&SequenceRecord> {
+        if id.generation == 0 || (id.slot as usize) >= self.slots.len() {
+            return None;
+        }
+        let slot = &self.slots[id.slot as usize];
+        if slot.generation == id.generation {
+            slot.record.as_ref()
+        } else {
+            None
+        }
     }
 
-    pub fn len(&self) -> usize {
-        self.records.len()
+    pub fn get_mut(&mut self, id: SequenceId) -> Option<&mut SequenceRecord> {
+        if id.generation == 0 || (id.slot as usize) >= self.slots.len() {
+            return None;
+        }
+        let slot = &mut self.slots[id.slot as usize];
+        if slot.generation == id.generation {
+            slot.record.as_mut()
+        } else {
+            None
+        }
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.records.is_empty()
+    /// Deallocates a sequence, advancing its generation to invalidate stale queued IDs.
+    /// Retires the slot if generation reaches u32::MAX.
+    pub fn free_sequence(&mut self, id: SequenceId) -> bool {
+        if id.generation == 0 || (id.slot as usize) >= self.slots.len() {
+            return false;
+        }
+        let slot = &mut self.slots[id.slot as usize];
+        if slot.generation != id.generation || slot.record.is_none() {
+            return false;
+        }
+
+        slot.record = None;
+        if slot.generation == u32::MAX {
+            slot.retired = true;
+            self.retired_slots_count += 1;
+        } else {
+            slot.generation += 1;
+            self.free_slots.push(id.slot);
+        }
+        true
     }
 
-    /// Zero-copy sequence fork preserving immutable prompt handle.
+    /// Zero-copy sequence fork preserving immutable PromptHandle.
     pub fn fork(
         &mut self,
         parent_id: SequenceId,
-        child_id: SequenceId,
         sink_id: Option<CompletionSinkId>,
-    ) -> Result<SequenceRecord, String> {
+    ) -> Result<SequenceId, String> {
         let parent = self
-            .records
-            .get(&parent_id)
-            .ok_or_else(|| format!("Parent sequence {} not found in arena", parent_id))?;
+            .get(parent_id)
+            .ok_or_else(|| format!("Parent sequence {} not found in arena or stale", parent_id))?
+            .clone();
 
-        if self.records.contains_key(&child_id) {
-            return Err(format!(
-                "Child sequence {} already exists in arena",
-                child_id
-            ));
-        }
-
-        let child = SequenceRecord {
+        let child_id = self.allocate_slot()?;
+        let child_record = SequenceRecord {
             seq_id: child_id,
             prompt: Arc::clone(&parent.prompt),
             model: parent.model,
-            kv: KvHandle(child_id),
+            kv: KvHandle(child_id.to_u64()),
             priority: parent.priority,
             deadline: parent.deadline,
             branch_parent: Some(parent_id),
@@ -354,18 +501,41 @@ impl SequenceArena {
             generated_tokens: parent.generated_tokens.clone(),
         };
 
-        self.records.insert(child_id, child.clone());
-        Ok(child)
+        self.slots[child_id.slot as usize].record = Some(child_record);
+        Ok(child_id)
     }
 
     pub fn active_ids(&self) -> Vec<SequenceId> {
-        let mut ids: Vec<SequenceId> = self.records.keys().copied().collect();
-        ids.sort();
+        let mut ids = Vec::new();
+        for (idx, slot) in self.slots.iter().enumerate() {
+            if slot.record.is_some() {
+                ids.push(SequenceId {
+                    slot: idx as u32,
+                    generation: slot.generation,
+                });
+            }
+        }
         ids
     }
 
+    pub fn active_count(&self) -> usize {
+        self.slots.iter().filter(|s| s.record.is_some()).count()
+    }
+
+    pub fn len(&self) -> usize {
+        self.active_count()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.active_count() == 0
+    }
+
+    pub fn retired_slots(&self) -> usize {
+        self.retired_slots_count
+    }
+
     pub fn record_generated_token(&mut self, seq_id: SequenceId, token: u32) {
-        if let Some(record) = self.records.get_mut(&seq_id) {
+        if let Some(record) = self.get_mut(seq_id) {
             record.tokens_generated += 1;
             record.generated_tokens.push(token);
             self.total_tokens_generated += 1;
@@ -373,7 +543,7 @@ impl SequenceArena {
     }
 
     pub fn record_prefilled_tokens(&mut self, seq_id: SequenceId, count: usize) {
-        if let Some(record) = self.records.get_mut(&seq_id) {
+        if let Some(record) = self.get_mut(seq_id) {
             record.prompt_tokens_prefilled += count;
             if record.prompt_tokens_prefilled >= record.prompt.len() {
                 record.is_prefilled = true;
@@ -399,31 +569,136 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_sequence_id_generation_zero_invalid() {
+        assert!(SequenceId::new(0, 0).is_err());
+        assert!(!SequenceId::INVALID.is_valid());
+        assert!(SequenceId::from_u64(0).is_err());
+
+        let valid = SequenceId::new(42, 1).unwrap();
+        assert!(valid.is_valid());
+        let raw = valid.to_u64();
+        let recovered = SequenceId::from_u64(raw).unwrap();
+        assert_eq!(valid, recovered);
+        assert_eq!(recovered.slot, 42);
+        assert_eq!(recovered.generation, 1);
+    }
+
+    #[test]
+    fn test_slot_retirement_on_generation_wrap() {
+        let mut arena = SequenceArena::new();
+        let id1 = arena.allocate_slot().unwrap();
+        assert_eq!(id1.slot, 0);
+        assert_eq!(id1.generation, 1);
+
+        // Manually simulate generation approaching u32::MAX
+        arena.slots[0].generation = u32::MAX;
+        arena.slots[0].record = Some(SequenceRecord::new(
+            SequenceId {
+                slot: 0,
+                generation: u32::MAX,
+            },
+            Arc::from(vec![1, 2, 3].into_boxed_slice()),
+            ModelHandle(0),
+            KvHandle(0),
+            Priority::Normal,
+            None,
+            None,
+            10,
+            SamplingParams::default(),
+            None,
+        ));
+
+        // Free the sequence -> should retire slot 0
+        let target_id = SequenceId {
+            slot: 0,
+            generation: u32::MAX,
+        };
+        assert!(arena.free_sequence(target_id));
+        assert_eq!(arena.retired_slots(), 1);
+        assert!(arena.slots[0].retired);
+
+        // Next allocation should NOT reuse retired slot 0
+        let id2 = arena.allocate_slot().unwrap();
+        assert_eq!(id2.slot, 1);
+        assert_eq!(id2.generation, 1);
+    }
+
+    #[test]
+    fn test_stale_work_rejection() {
+        let mut arena = SequenceArena::new();
+        let prompt: PromptHandle = Arc::from(vec![10, 20, 30].into_boxed_slice());
+        let id1 = arena
+            .insert_with(
+                prompt,
+                ModelHandle(0),
+                KvHandle(0),
+                Priority::Normal,
+                None,
+                None,
+                10,
+                SamplingParams::default(),
+                None,
+            )
+            .unwrap();
+
+        assert!(!arena.is_stale(id1));
+
+        // Free sequence 1 -> generation bumps to 2
+        assert!(arena.free_sequence(id1));
+
+        // Old id1 is now stale!
+        assert!(arena.is_stale(id1));
+        assert!(arena.get(id1).is_none());
+
+        // New allocation in slot 0 gets generation 2
+        let prompt2: PromptHandle = Arc::from(vec![40, 50].into_boxed_slice());
+        let id2 = arena
+            .insert_with(
+                prompt2,
+                ModelHandle(0),
+                KvHandle(0),
+                Priority::Normal,
+                None,
+                None,
+                10,
+                SamplingParams::default(),
+                None,
+            )
+            .unwrap();
+
+        assert_eq!(id2.slot, id1.slot);
+        assert_eq!(id2.generation, id1.generation + 1);
+        assert!(!arena.is_stale(id2));
+        assert!(arena.is_stale(id1)); // id1 still stale!
+    }
+
+    #[test]
     fn test_prompt_handle_sharing_and_zero_copy_fork() {
         let prompt_tokens = vec![1, 2, 3, 4, 5];
         let handle: PromptHandle = Arc::from(prompt_tokens.into_boxed_slice());
 
         let mut arena = SequenceArena::new();
-        let record = SequenceRecord::new(
-            1,
-            handle.clone(),
-            ModelHandle(0),
-            KvHandle(1),
-            Priority::Normal,
-            None,
-            None,
-            128,
-            SamplingParams::default(),
-            None,
-        );
+        let parent_id = arena
+            .insert_with(
+                handle.clone(),
+                ModelHandle(0),
+                KvHandle(1),
+                Priority::Normal,
+                None,
+                None,
+                128,
+                SamplingParams::default(),
+                None,
+            )
+            .unwrap();
 
-        arena.insert(record).unwrap();
-        assert_eq!(arena.len(), 1);
+        assert_eq!(arena.active_count(), 1);
 
-        let child = arena.fork(1, 2, None).unwrap();
-        assert_eq!(arena.len(), 2);
-        assert_eq!(child.seq_id, 2);
-        assert_eq!(child.branch_parent, Some(1));
+        let child_id = arena.fork(parent_id, None).unwrap();
+        assert_eq!(arena.active_count(), 2);
+
+        let child = arena.get(child_id).unwrap();
+        assert_eq!(child.branch_parent, Some(parent_id));
         assert!(Arc::ptr_eq(&child.prompt, &handle));
     }
 
@@ -435,18 +710,19 @@ mod tests {
         let mut router = CompletionRouter::new();
         let sink_id = router.register(sink);
 
+        let seq_id = SequenceId::new(1, 1).unwrap();
         router.emit(
             sink_id,
             CompletionEvent::Token {
-                seq_id: 10,
+                seq_id,
                 token: 42,
             },
         );
 
         let event = rx.try_recv().unwrap();
         match event {
-            CompletionEvent::Token { seq_id, token } => {
-                assert_eq!(seq_id, 10);
+            CompletionEvent::Token { seq_id: id, token } => {
+                assert_eq!(id, seq_id);
                 assert_eq!(token, 42);
             }
             _ => panic!("Unexpected event"),

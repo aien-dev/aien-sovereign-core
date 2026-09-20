@@ -6,6 +6,7 @@ fn main() {
     println!("cargo:rustc-check-cfg=cfg(has_blackwell_cuda)");
     println!("cargo:rerun-if-changed=cuda/blackwell_gemm.cu");
     println!("cargo:rerun-if-changed=cuda/paged_attention_bf16.cu");
+    println!("cargo:rerun-if-changed=cuda/blackwell_layer.cu");
     println!("cargo:rerun-if-changed=build.rs");
 
     let nvcc = PathBuf::from("/usr/local/cuda/bin/nvcc");
@@ -18,6 +19,7 @@ fn main() {
     let out_path = Path::new(&out_dir);
     let gemm_obj_path = out_path.join("blackwell_gemm.o");
     let attn_obj_path = out_path.join("paged_attention_bf16.o");
+    let layer_obj_path = out_path.join("blackwell_layer.o");
     let lib_path = out_path.join("libblackwell_gemm.a");
 
     let status = Command::new(&nvcc)
@@ -56,12 +58,31 @@ fn main() {
         panic!("nvcc compilation of cuda/paged_attention_bf16.cu failed");
     }
 
+    let status3 = Command::new(&nvcc)
+        .args([
+            "-c",
+            "-O3",
+            "-arch=sm_121",
+            "-Xcompiler",
+            "-fPIC",
+            "cuda/blackwell_layer.cu",
+            "-o",
+            layer_obj_path.to_str().unwrap(),
+        ])
+        .status()
+        .expect("Failed to execute nvcc for blackwell_layer.cu");
+
+    if !status3.success() {
+        panic!("nvcc compilation of cuda/blackwell_layer.cu failed");
+    }
+
     let ar_status = Command::new("ar")
         .args([
             "crs",
             lib_path.to_str().unwrap(),
             gemm_obj_path.to_str().unwrap(),
             attn_obj_path.to_str().unwrap(),
+            layer_obj_path.to_str().unwrap(),
         ])
         .status()
         .expect("Failed to execute ar");

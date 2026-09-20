@@ -97,7 +97,7 @@ fn test_parent_drop_before_children() {
     assert_eq!(mgr.metrics().shared_pages, 3);
 
     // Drop parent sequence 1
-    mgr.free_sequence(1);
+    let _ = mgr.free_sequence(1);
 
     // Blocks must remain allocated and shared among the 10 children
     assert_eq!(mgr.available_blocks(), total_blocks - 3);
@@ -127,7 +127,7 @@ fn test_reclamation_zero_leak() {
 
     // Release all 32 branches
     for i in 1..=32 {
-        mgr.release_branch(100 + i);
+        let _ = mgr.release_branch(100 + i);
     }
 
     // Only parent remains
@@ -138,7 +138,7 @@ fn test_reclamation_zero_leak() {
     assert_eq!(m.shared_pages, 0);
 
     // Release parent
-    mgr.release_branch(100);
+    let _ = mgr.release_branch(100);
     assert_eq!(mgr.active_sequence_count(), 0);
     assert_eq!(mgr.available_blocks(), total_blocks);
     let m_final = mgr.metrics();

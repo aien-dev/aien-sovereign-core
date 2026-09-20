@@ -158,7 +158,7 @@ pub struct KvLayout {
 impl KvLayout {
     pub fn for_bf16(config: &KvPoolConfig) -> Result<Self, String> {
         if config.dtype != KvDType::Bf16 {
-            return Err("Expected BF16 dtype".to_string());
+            return Err(format!("Canonical layout requires BF16, got {:?}", config.dtype));
         }
         Self::from_config(config)
     }
@@ -259,12 +259,12 @@ impl KvLayout {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct BufferRegion {
-    pub address: aien_platform::DeviceAddress,
-    pub offset: usize,
-    pub len: usize,
-}
+pub use aien_platform::{BufferRegion, MemoryDevice};
+
+#[cfg(target_os = "linux")]
+pub type DefaultUnifiedBuffer = aien_platform_linux::LinuxUnifiedBuffer;
+#[cfg(not(target_os = "linux"))]
+pub type DefaultUnifiedBuffer = HeapUnifiedBuffer;
 
 /// Fallback standard host buffer implementing UnifiedBuffer for testing.
 pub struct HeapUnifiedBuffer {
@@ -285,11 +285,7 @@ impl HeapUnifiedBuffer {
         if ptr.is_null() {
             return Err(format!("Failed to allocate {} bytes on heap", size));
         }
-        Ok(Self {
-            ptr,
-            layout,
-            len: size,
-        })
+        Ok(Self { ptr, layout, len: size })
     }
 }
 
@@ -319,7 +315,7 @@ impl Drop for HeapUnifiedBuffer {
 }
 
 /// Physical unified-memory KV tensor pool owning layout interpretation over an underlying UnifiedBuffer.
-pub struct UnifiedKvTensorPool<B: aien_platform::UnifiedBuffer = HeapUnifiedBuffer> {
+pub struct UnifiedKvTensorPool<B: aien_platform::UnifiedBuffer = DefaultUnifiedBuffer> {
     config: KvPoolConfig,
     layout: KvLayout,
     buffer: B,
@@ -366,26 +362,6 @@ impl<B: aien_platform::UnifiedBuffer> UnifiedKvTensorPool<B> {
         self.layout.block_stride_bytes
     }
 
-    #[inline]
-    pub fn element_strides(&self) -> (usize, usize, usize, usize) {
-        let token_stride = self.config.num_kv_heads * self.config.head_dim;
-        let kv_stride = self.config.block_size * token_stride;
-        let layer_stride = 2 * kv_stride;
-        let block_stride = self.config.num_layers * layer_stride;
-        (token_stride, kv_stride, layer_stride, block_stride)
-    }
-
-    pub fn element_offset(
-        &self,
-        block_id: BlockId,
-        layer_idx: usize,
-        is_value: bool,
-        token_in_block: usize,
-    ) -> usize {
-        self.layout
-            .token_plane_offset(block_id, layer_idx, is_value, token_in_block)
-    }
-
     pub fn base_ptr(&self) -> *const u8 {
         self.buffer.as_ptr()
     }
@@ -401,6 +377,18 @@ impl<B: aien_platform::UnifiedBuffer> UnifiedKvTensorPool<B> {
     pub fn block_device_address(&self, block_id: BlockId) -> aien_platform::DeviceAddress {
         let offset = self.layout.block_offset(block_id);
         aien_platform::DeviceAddress(self.buffer.device_address().0 + offset as u64)
+    }
+
+
+    pub fn element_offset(
+        &self,
+        block_id: BlockId,
+        layer_idx: usize,
+        is_value: bool,
+        token_in_block: usize,
+    ) -> usize {
+        self.layout
+            .token_plane_offset(block_id, layer_idx, is_value, token_in_block)
     }
 
     pub fn block_region(&self, block_id: BlockId) -> BufferRegion {
@@ -444,6 +432,26 @@ impl<B: aien_platform::UnifiedBuffer> UnifiedKvTensorPool<B> {
         }
     }
 
+    pub fn copy_block_device<M: MemoryDevice>(
+        &self,
+        device: &M,
+        src_block: BlockId,
+        dst_block: BlockId,
+    ) -> Result<aien_platform::Fence, aien_platform::PlatformError> {
+        let src_region = self.block_region(src_block);
+        let dst_region = self.block_region(dst_block);
+        device.copy(src_region, dst_region)
+    }
+
+    pub fn zero_block_device<M: MemoryDevice>(
+        &self,
+        device: &M,
+        block_id: BlockId,
+    ) -> Result<aien_platform::Fence, aien_platform::PlatformError> {
+        let region = self.block_region(block_id);
+        device.zero(region)
+    }
+
     pub fn write_token_kv(
         &mut self,
         block_id: BlockId,
@@ -456,12 +464,8 @@ impl<B: aien_platform::UnifiedBuffer> UnifiedKvTensorPool<B> {
         assert_eq!(k.len(), kv_dim, "K vector length must equal kv_dim");
         assert_eq!(v.len(), kv_dim, "V vector length must equal kv_dim");
 
-        let k_offset = self
-            .layout
-            .token_plane_offset(block_id, layer_idx, false, token_in_block);
-        let v_offset = self
-            .layout
-            .token_plane_offset(block_id, layer_idx, true, token_in_block);
+        let k_offset = self.layout.token_plane_offset(block_id, layer_idx, false, token_in_block);
+        let v_offset = self.layout.token_plane_offset(block_id, layer_idx, true, token_in_block);
 
         match self.config.dtype {
             KvDType::Fp32 => unsafe {
@@ -494,12 +498,8 @@ impl<B: aien_platform::UnifiedBuffer> UnifiedKvTensorPool<B> {
         assert_eq!(k_out.len(), kv_dim, "K_out length must equal kv_dim");
         assert_eq!(v_out.len(), kv_dim, "V_out length must equal kv_dim");
 
-        let k_offset = self
-            .layout
-            .token_plane_offset(block_id, layer_idx, false, token_in_block);
-        let v_offset = self
-            .layout
-            .token_plane_offset(block_id, layer_idx, true, token_in_block);
+        let k_offset = self.layout.token_plane_offset(block_id, layer_idx, false, token_in_block);
+        let v_offset = self.layout.token_plane_offset(block_id, layer_idx, true, token_in_block);
 
         match self.config.dtype {
             KvDType::Fp32 => unsafe {
@@ -535,7 +535,8 @@ impl<B: aien_platform::UnifiedBuffer> UnifiedKvTensorPool<B> {
 
         let mut tokens_read = 0;
         for &blk in block_table {
-            let tokens_in_this_block = (total_tokens - tokens_read).min(self.config.block_size);
+            let tokens_in_this_block =
+                (total_tokens - tokens_read).min(self.config.block_size);
             for tok_idx in 0..tokens_in_this_block {
                 self.read_token_kv(blk, layer_idx, tok_idx, &mut token_k, &mut token_v);
                 k_gathered.extend_from_slice(&token_k);
@@ -551,8 +552,32 @@ impl<B: aien_platform::UnifiedBuffer> UnifiedKvTensorPool<B> {
     }
 }
 
-impl UnifiedKvTensorPool<HeapUnifiedBuffer> {
+impl UnifiedKvTensorPool<DefaultUnifiedBuffer> {
     pub fn allocate(config: KvPoolConfig) -> Result<Self, String> {
+        let layout = KvLayout::from_config(&config)?;
+        #[cfg(target_os = "linux")]
+        {
+            let platform_layout = aien_platform::BufferLayout::new(layout.total_bytes, 256);
+            let dev = aien_platform_linux::LinuxComputeDevice::new();
+            let kind = dev.preferred_memory_kind();
+            let buf = aien_platform_linux::LinuxUnifiedBuffer::allocate(
+                platform_layout,
+                kind,
+                aien_platform_linux::ResidencyPolicy::FaultIn,
+            )
+            .map_err(|e| format!("LinuxUnifiedBuffer allocation failed: {:?}", e))?;
+            Self::new(config, buf)
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let buf = HeapUnifiedBuffer::allocate(layout.total_bytes, 256)?;
+            Self::new(config, buf)
+        }
+    }
+}
+
+impl UnifiedKvTensorPool<HeapUnifiedBuffer> {
+    pub fn allocate_heap(config: KvPoolConfig) -> Result<Self, String> {
         let layout = KvLayout::from_config(&config)?;
         let buf = HeapUnifiedBuffer::allocate(layout.total_bytes, 256)?;
         Self::new(config, buf)
@@ -574,13 +599,60 @@ pub struct BlockTable {
     pub total_tokens: usize,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone)]
+pub struct KvTransactionSnapshot {
+    pub free_blocks: Vec<BlockId>,
+    pub blocks: Vec<KvBlock>,
+    pub sequence_tables: HashMap<u64, BlockTable>,
+    pub prefix_cache: HashMap<Vec<u32>, BlockId>,
+    pub cow_faults: usize,
+}
+
+#[derive(Debug)]
+pub struct KvTransaction {
+    snapshot: Option<KvTransactionSnapshot>,
+    committed: bool,
+}
+
+impl KvTransaction {
+    pub fn new(snapshot: KvTransactionSnapshot) -> Self {
+        Self {
+            snapshot: Some(snapshot),
+            committed: false,
+        }
+    }
+
+    pub fn commit(&mut self) {
+        self.committed = true;
+        self.snapshot = None;
+    }
+
+    pub fn is_committed(&self) -> bool {
+        self.committed
+    }
+
+    pub fn rollback<B: aien_platform::UnifiedBuffer>(&mut self, manager: &mut AienKvManager<B>) {
+        if !self.committed {
+            if let Some(snapshot) = self.snapshot.take() {
+                manager.free_blocks = snapshot.free_blocks;
+                manager.blocks = snapshot.blocks;
+                manager.sequence_tables = snapshot.sequence_tables;
+                manager.prefix_cache = snapshot.prefix_cache;
+                manager.cow_faults = snapshot.cow_faults;
+            }
+            self.committed = true;
+        }
+    }
+}
+
+#[derive(Debug)]
 pub struct TokenReservation {
     pub seq_id: u64,
     pub block_id: BlockId,
     pub slot: usize,
     pub original_block_id: Option<BlockId>,
     pub was_cow: bool,
+    pub tx: Option<KvTransaction>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -594,20 +666,19 @@ pub struct KvMetrics {
     pub used_blocks: usize,
 }
 
-pub struct AienKvManager<B: aien_platform::UnifiedBuffer = HeapUnifiedBuffer> {
+pub struct AienKvManager<B: aien_platform::UnifiedBuffer = DefaultUnifiedBuffer> {
     total_blocks: usize,
     block_size: usize,
     free_blocks: Vec<BlockId>,
     blocks: Vec<KvBlock>,
     sequence_tables: HashMap<u64, BlockTable>,
     #[allow(dead_code)]
-    #[allow(dead_code)]
     prefix_cache: HashMap<Vec<u32>, BlockId>,
     tensor_pool: Option<UnifiedKvTensorPool<B>>,
     pub cow_faults: usize,
 }
 
-impl AienKvManager<HeapUnifiedBuffer> {
+impl AienKvManager<DefaultUnifiedBuffer> {
     pub fn new(total_blocks: usize, block_size: usize) -> Self {
         let mut free_blocks = Vec::with_capacity(total_blocks);
         let mut blocks = Vec::with_capacity(total_blocks);
@@ -659,6 +730,49 @@ impl AienKvManager<HeapUnifiedBuffer> {
         let pool = UnifiedKvTensorPool::allocate(config)?;
         self.tensor_pool = Some(pool);
         Ok(())
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl AienKvManager<HeapUnifiedBuffer> {
+    pub fn new_heap(total_blocks: usize, block_size: usize) -> Self {
+        let mut free_blocks = Vec::with_capacity(total_blocks);
+        let mut blocks = Vec::with_capacity(total_blocks);
+
+        for id in (0..total_blocks).rev() {
+            free_blocks.push(id);
+        }
+
+        for id in 0..total_blocks {
+            blocks.push(KvBlock {
+                block_id: id,
+                ref_count: 0,
+                num_tokens: 0,
+                is_shared: false,
+            });
+        }
+
+        Self {
+            total_blocks,
+            block_size,
+            free_blocks,
+            blocks,
+            sequence_tables: HashMap::new(),
+            prefix_cache: HashMap::new(),
+            tensor_pool: None,
+            cow_faults: 0,
+        }
+    }
+
+    pub fn new_with_heap_pool(
+        total_blocks: usize,
+        block_size: usize,
+        config: KvPoolConfig,
+    ) -> Result<Self, String> {
+        let mut mgr = Self::new_heap(total_blocks, block_size);
+        let pool = UnifiedKvTensorPool::allocate_heap(config)?;
+        mgr.tensor_pool = Some(pool);
+        Ok(mgr)
     }
 }
 
@@ -717,26 +831,17 @@ impl<B: aien_platform::UnifiedBuffer> AienKvManager<B> {
         self.fork_sequence(parent_id, child_id)
     }
 
-    pub fn release_branch(&mut self, seq_id: u64) {
-        self.free_sequence(seq_id);
+    pub fn release_branch(&mut self, seq_id: u64) -> Result<(), String> {
+        self.free_sequence(seq_id)
     }
 
     pub fn metrics(&self) -> KvMetrics {
         let physical_pages = self.blocks.iter().filter(|b| b.ref_count > 0).count();
-        let logical_pages: usize = self
-            .sequence_tables
-            .values()
-            .map(|t| t.block_ids.len())
-            .sum();
+        let logical_pages: usize = self.sequence_tables.values().map(|t| t.block_ids.len()).sum();
         let shared_pages = self.blocks.iter().filter(|b| b.ref_count > 1).count();
         let private_pages = self.blocks.iter().filter(|b| b.ref_count == 1).count();
-        let bytes_per_block = self
-            .tensor_pool
-            .as_ref()
-            .map(|p| p.block_bytes())
-            .unwrap_or(0);
-        let bytes_saved_vs_full_copy =
-            logical_pages.saturating_sub(physical_pages) * bytes_per_block;
+        let bytes_per_block = self.tensor_pool.as_ref().map(|p| p.block_bytes()).unwrap_or(0);
+        let bytes_saved_vs_full_copy = logical_pages.saturating_sub(physical_pages) * bytes_per_block;
 
         KvMetrics {
             physical_pages,
@@ -787,7 +892,7 @@ impl<B: aien_platform::UnifiedBuffer> AienKvManager<B> {
         prompt_tokens: &[u32],
     ) -> Result<Vec<BlockId>, String> {
         let num_tokens = prompt_tokens.len();
-        let blocks_needed = num_tokens.div_ceil(self.block_size);
+        let blocks_needed = (num_tokens + self.block_size - 1) / self.block_size;
 
         if self.free_blocks.len() < blocks_needed {
             return Err(format!(
@@ -868,9 +973,9 @@ impl<B: aien_platform::UnifiedBuffer> AienKvManager<B> {
         let last_blk_id = table.block_ids[last_blk_idx];
         let blk = &self.blocks[last_blk_id];
 
-        if blk.num_tokens < self.block_size {
-            let slot = blk.num_tokens;
-            if blk.is_shared {
+        if blk.is_shared {
+            if blk.num_tokens < self.block_size {
+                self.cow_faults += 1;
                 let new_blk = self.allocate_block()?;
                 if let Some(pool) = &mut self.tensor_pool {
                     pool.copy_block(last_blk_id, new_blk);
@@ -881,20 +986,28 @@ impl<B: aien_platform::UnifiedBuffer> AienKvManager<B> {
                     old_blk.is_shared = false;
                 }
 
-                let old_tokens = old_blk.num_tokens;
-                self.blocks[new_blk].num_tokens = old_tokens + 1;
+                let num_tokens = old_blk.num_tokens;
+                self.blocks[new_blk].num_tokens = num_tokens + 1;
                 self.blocks[new_blk].is_shared = false;
-                self.cow_faults += 1;
 
                 let table = self.sequence_tables.get_mut(&seq_id).unwrap();
                 table.block_ids[last_blk_idx] = new_blk;
                 table.total_tokens += 1;
-                Ok((new_blk, slot))
+                Ok((new_blk, num_tokens))
             } else {
-                self.blocks[last_blk_id].num_tokens += 1;
+                let new_blk = self.allocate_block()?;
+                let table = self.sequence_tables.get_mut(&seq_id).unwrap();
+                table.block_ids.push(new_blk);
                 table.total_tokens += 1;
-                Ok((last_blk_id, slot))
+                self.blocks[new_blk].num_tokens = 1;
+                self.blocks[new_blk].is_shared = false;
+                Ok((new_blk, 0))
             }
+        } else if blk.num_tokens < self.block_size {
+            let slot = blk.num_tokens;
+            self.blocks[last_blk_id].num_tokens += 1;
+            table.total_tokens += 1;
+            Ok((last_blk_id, slot))
         } else {
             let new_blk = self.allocate_block()?;
             let table = self.sequence_tables.get_mut(&seq_id).unwrap();
@@ -905,7 +1018,98 @@ impl<B: aien_platform::UnifiedBuffer> AienKvManager<B> {
         }
     }
 
+    pub fn append_token_with_slot_device<M: MemoryDevice>(
+        &mut self,
+        device: &M,
+        seq_id: u64,
+    ) -> Result<(BlockId, usize, Option<aien_platform::Fence>), String> {
+        let table = self
+            .sequence_tables
+            .get_mut(&seq_id)
+            .ok_or_else(|| format!("Sequence {} not found", seq_id))?;
+
+        if table.block_ids.is_empty() {
+            let new_blk = self.allocate_block()?;
+            let table = self.sequence_tables.get_mut(&seq_id).unwrap();
+            table.block_ids.push(new_blk);
+            table.total_tokens = 1;
+            self.blocks[new_blk].num_tokens = 1;
+            return Ok((new_blk, 0, None));
+        }
+
+        let last_blk_idx = table.block_ids.len() - 1;
+        let last_blk_id = table.block_ids[last_blk_idx];
+        let blk = &self.blocks[last_blk_id];
+
+        if blk.is_shared {
+            if blk.num_tokens < self.block_size {
+                self.cow_faults += 1;
+                let new_blk = self.allocate_block()?;
+                let mut fence = None;
+                if let Some(pool) = &mut self.tensor_pool {
+                    fence = pool
+                        .copy_block_device(device, last_blk_id, new_blk)
+                        .map_err(|e| format!("copy_block_device failed: {:?}", e))
+                        .map(Some)?;
+                }
+                let old_blk = &mut self.blocks[last_blk_id];
+                old_blk.ref_count -= 1;
+                if old_blk.ref_count == 1 {
+                    old_blk.is_shared = false;
+                }
+
+                let num_tokens = old_blk.num_tokens;
+                self.blocks[new_blk].num_tokens = num_tokens + 1;
+                self.blocks[new_blk].is_shared = false;
+
+                let table = self.sequence_tables.get_mut(&seq_id).unwrap();
+                table.block_ids[last_blk_idx] = new_blk;
+                table.total_tokens += 1;
+                Ok((new_blk, num_tokens, fence))
+            } else {
+                let new_blk = self.allocate_block()?;
+                let table = self.sequence_tables.get_mut(&seq_id).unwrap();
+                table.block_ids.push(new_blk);
+                table.total_tokens += 1;
+                self.blocks[new_blk].num_tokens = 1;
+                self.blocks[new_blk].is_shared = false;
+                Ok((new_blk, 0, None))
+            }
+        } else if blk.num_tokens < self.block_size {
+            let slot = blk.num_tokens;
+            self.blocks[last_blk_id].num_tokens += 1;
+            table.total_tokens += 1;
+            Ok((last_blk_id, slot, None))
+        } else {
+            let new_blk = self.allocate_block()?;
+            let table = self.sequence_tables.get_mut(&seq_id).unwrap();
+            table.block_ids.push(new_blk);
+            table.total_tokens += 1;
+            self.blocks[new_blk].num_tokens = 1;
+            Ok((new_blk, 0, None))
+        }
+    }
+
+    pub fn begin_transaction(&self) -> KvTransaction {
+        KvTransaction::new(KvTransactionSnapshot {
+            free_blocks: self.free_blocks.clone(),
+            blocks: self.blocks.clone(),
+            sequence_tables: self.sequence_tables.clone(),
+            prefix_cache: self.prefix_cache.clone(),
+            cow_faults: self.cow_faults,
+        })
+    }
+
+    pub fn rollback_transaction(&mut self, mut tx: KvTransaction) {
+        tx.rollback(self);
+    }
+
+    pub fn cow_faults(&self) -> usize {
+        self.cow_faults
+    }
+
     pub fn reserve_token(&mut self, seq_id: u64) -> Result<TokenReservation, String> {
+        let tx = self.begin_transaction();
         let (block_id, slot) = self.append_token_with_slot(seq_id)?;
         Ok(TokenReservation {
             seq_id,
@@ -913,36 +1117,49 @@ impl<B: aien_platform::UnifiedBuffer> AienKvManager<B> {
             slot,
             original_block_id: None,
             was_cow: false,
+            tx: Some(tx),
         })
     }
 
-    pub fn commit(&mut self, _reservation: TokenReservation) -> Result<(), String> {
+    pub fn commit(&mut self, mut reservation: TokenReservation) -> Result<(), String> {
+        if let Some(mut tx) = reservation.tx.take() {
+            tx.commit();
+        }
         Ok(())
     }
 
-    pub fn rollback(&mut self, reservation: TokenReservation) -> Result<(), String> {
+    pub fn rollback(&mut self, mut reservation: TokenReservation) -> Result<(), String> {
+        if let Some(mut tx) = reservation.tx.take() {
+            tx.rollback(self);
+        } else {
+            let table = self
+                .sequence_tables
+                .get_mut(&reservation.seq_id)
+                .ok_or_else(|| format!("Sequence {} not found", reservation.seq_id))?;
+            table.total_tokens = table.total_tokens.saturating_sub(1);
+        }
+        Ok(())
+    }
+
+    pub fn free_sequence(&mut self, seq_id: u64) -> Result<(), String> {
         let table = self
             .sequence_tables
-            .get_mut(&reservation.seq_id)
-            .ok_or_else(|| format!("Sequence {} not found", reservation.seq_id))?;
-        table.total_tokens = table.total_tokens.saturating_sub(1);
-        Ok(())
-    }
+            .remove(&seq_id)
+            .ok_or_else(|| format!("Sequence {} not found", seq_id))?;
 
-    pub fn free_sequence(&mut self, seq_id: u64) {
-        if let Some(table) = self.sequence_tables.remove(&seq_id) {
-            for blk_id in table.block_ids {
-                let blk = &mut self.blocks[blk_id];
-                blk.ref_count -= 1;
-                if blk.ref_count == 0 {
-                    blk.is_shared = false;
-                    blk.num_tokens = 0;
-                    self.free_blocks.push(blk_id);
-                } else if blk.ref_count == 1 {
-                    blk.is_shared = false;
-                }
+        for blk_id in table.block_ids {
+            let blk = &mut self.blocks[blk_id];
+            blk.ref_count -= 1;
+            if blk.ref_count == 0 {
+                blk.is_shared = false;
+                blk.num_tokens = 0;
+                self.free_blocks.push(blk_id);
+            } else if blk.ref_count == 1 {
+                blk.is_shared = false;
             }
         }
+
+        Ok(())
     }
 
     pub fn get_block_table(&self, seq_id: u64) -> Option<&BlockTable> {
@@ -953,16 +1170,16 @@ impl<B: aien_platform::UnifiedBuffer> AienKvManager<B> {
         self.blocks.get(block_id)
     }
 
-    pub fn block_size(&self) -> usize {
-        self.block_size
-    }
-
     pub fn tensor_pool(&self) -> Option<&UnifiedKvTensorPool<B>> {
         self.tensor_pool.as_ref()
     }
 
     pub fn tensor_pool_mut(&mut self) -> Option<&mut UnifiedKvTensorPool<B>> {
         self.tensor_pool.as_mut()
+    }
+
+    pub fn block_size(&self) -> usize {
+        self.block_size
     }
 
     pub fn total_tokens(&self, seq_id: u64) -> Option<usize> {
@@ -1031,11 +1248,7 @@ impl<B: aien_platform::UnifiedBuffer> AienKvManager<B> {
         Ok(())
     }
 
-    pub fn gather_layer_kv(
-        &self,
-        seq_id: u64,
-        layer_idx: usize,
-    ) -> Result<(Vec<f32>, Vec<f32>), String> {
+    pub fn gather_layer_kv(&self, seq_id: u64, layer_idx: usize) -> Result<(Vec<f32>, Vec<f32>), String> {
         let table = self
             .sequence_tables
             .get(&seq_id)
@@ -1049,12 +1262,9 @@ impl<B: aien_platform::UnifiedBuffer> AienKvManager<B> {
     }
 }
 
-pub type SharedKvManager<B = HeapUnifiedBuffer> = Arc<RwLock<AienKvManager<B>>>;
+pub type SharedKvManager<B = DefaultUnifiedBuffer> = Arc<RwLock<AienKvManager<B>>>;
 
-pub fn create_shared_kv_manager(
-    total_blocks: usize,
-    block_size: usize,
-) -> SharedKvManager<HeapUnifiedBuffer> {
+pub fn create_shared_kv_manager(total_blocks: usize, block_size: usize) -> SharedKvManager<DefaultUnifiedBuffer> {
     Arc::new(RwLock::new(AienKvManager::new(total_blocks, block_size)))
 }
 
@@ -1062,7 +1272,7 @@ pub fn create_shared_kv_manager_with_pool(
     total_blocks: usize,
     block_size: usize,
     config: KvPoolConfig,
-) -> Result<SharedKvManager<HeapUnifiedBuffer>, String> {
+) -> Result<SharedKvManager<DefaultUnifiedBuffer>, String> {
     let mgr = AienKvManager::new_with_pool(total_blocks, block_size, config)?;
     Ok(Arc::new(RwLock::new(mgr)))
 }
@@ -1183,16 +1393,12 @@ mod tests {
             assert!(
                 (k_in[i] - k_out[i]).abs() < 1e-2,
                 "K mismatch at {}: expected {}, got {}",
-                i,
-                k_in[i],
-                k_out[i]
+                i, k_in[i], k_out[i]
             );
             assert!(
                 (v_in[i] - v_out[i]).abs() < 1e-2,
                 "V mismatch at {}: expected {}, got {}",
-                i,
-                v_in[i],
-                v_out[i]
+                i, v_in[i], v_out[i]
             );
         }
     }
@@ -1266,14 +1472,8 @@ mod tests {
         let (new_blk, _) = mgr.append_token_with_slot(201).unwrap();
         let child1_now = mgr.get_block_table(201).unwrap();
 
-        assert_eq!(
-            child1_now.block_ids[0], parent_blocks[0],
-            "Prefix block 0 must remain shared"
-        );
-        assert_ne!(
-            child1_now.block_ids[1], parent_blocks[1],
-            "Tail block 1 must have diverged via COW"
-        );
+        assert_eq!(child1_now.block_ids[0], parent_blocks[0], "Prefix block 0 must remain shared");
+        assert_ne!(child1_now.block_ids[1], parent_blocks[1], "Tail block 1 must have diverged via COW");
         assert_eq!(child1_now.block_ids[1], new_blk);
 
         // Parent and child 2 still share original block 1
@@ -1282,4 +1482,101 @@ mod tests {
         assert_eq!(parent_now.block_ids[1], parent_blocks[1]);
         assert_eq!(child2_now.block_ids[1], parent_blocks[1]);
     }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn test_kv_pool_device_copy_and_zero() {
+        use aien_platform::ComputeDevice;
+
+        let cfg = KvPoolConfig {
+            num_blocks: 4,
+            block_size: 16,
+            num_layers: 2,
+            num_kv_heads: 2,
+            head_dim: 8,
+            dtype: KvDType::Bf16,
+        };
+
+        let mut pool = UnifiedKvTensorPool::allocate(cfg.clone()).unwrap();
+        let kv_dim = 2 * 8;
+        let k_in: Vec<f32> = (0..kv_dim).map(|i| (i + 1) as f32).collect();
+        let v_in: Vec<f32> = (0..kv_dim).map(|i| (i + 10) as f32).collect();
+
+        pool.write_token_kv(0, 0, 0, &k_in, &v_in);
+
+        let device = aien_platform_linux::LinuxComputeDevice::new();
+        let fence = pool
+            .copy_block_device(&device, 0, 1)
+            .expect("copy_block_device failed");
+        device.synchronize(fence).expect("synchronize copy");
+
+        let mut k_out = vec![0.0f32; kv_dim];
+        let mut v_out = vec![0.0f32; kv_dim];
+        pool.read_token_kv(1, 0, 0, &mut k_out, &mut v_out);
+        assert_eq!(k_in, k_out);
+        assert_eq!(v_in, v_out);
+
+        let fence_zero = pool
+            .zero_block_device(&device, 1)
+            .expect("zero_block_device failed");
+        device.synchronize(fence_zero).expect("synchronize zero");
+
+        pool.read_token_kv(1, 0, 0, &mut k_out, &mut v_out);
+        assert_eq!(k_out, vec![0.0f32; kv_dim]);
+        assert_eq!(v_out, vec![0.0f32; kv_dim]);
+    }
+
+    #[test]
+    fn test_kv_transaction_commit_and_rollback() {
+        let cfg = KvPoolConfig::for_tinyllama(32, 16, KvDType::Bf16);
+        let mut mgr = AienKvManager::new_with_pool(32, 16, cfg).unwrap();
+
+        let prompt: Vec<u32> = (0..20).collect();
+        mgr.allocate_sequence(1, &prompt).unwrap();
+        assert_eq!(mgr.available_blocks(), 30);
+
+        // Transaction 1: reserve token, then rollback
+        let mut tx = mgr.begin_transaction();
+        let (_blk, slot) = mgr.append_token_with_slot(1).unwrap();
+        assert_eq!(slot, 4); // token 21 in block 1
+        assert_eq!(mgr.get_block_table(1).unwrap().total_tokens, 21);
+
+        // Rollback
+        tx.rollback(&mut mgr);
+        assert_eq!(mgr.get_block_table(1).unwrap().total_tokens, 20);
+        assert_eq!(mgr.available_blocks(), 30);
+
+        // Transaction 2: allocate new sequence and commit
+        let mut tx2 = mgr.begin_transaction();
+        mgr.allocate_sequence(2, &prompt).unwrap();
+        assert_eq!(mgr.available_blocks(), 28);
+        tx2.commit();
+        assert_eq!(mgr.available_blocks(), 28);
+        assert!(mgr.get_block_table(2).is_some());
+
+        // Transaction 3: fork and append with rollback
+        let mut tx3 = mgr.begin_transaction();
+        mgr.fork_sequence(1, 3).unwrap();
+        mgr.append_token_with_slot(3).unwrap();
+        assert_eq!(mgr.cow_faults(), 1);
+        tx3.rollback(&mut mgr);
+
+        assert!(mgr.get_block_table(3).is_none());
+        assert_eq!(mgr.cow_faults(), 0);
+        let b1 = mgr.get_block_table(1).unwrap().block_ids[1];
+        assert_eq!(mgr.get_block(b1).unwrap().ref_count, 1);
+        assert_eq!(mgr.get_block(b1).unwrap().is_shared, false);
+
+        // TokenReservation commit & rollback
+        let res = mgr.reserve_token(1).unwrap();
+        assert_eq!(mgr.get_block_table(1).unwrap().total_tokens, 21);
+        mgr.rollback(res).unwrap();
+        assert_eq!(mgr.get_block_table(1).unwrap().total_tokens, 20);
+
+        let res2 = mgr.reserve_token(1).unwrap();
+        assert_eq!(mgr.get_block_table(1).unwrap().total_tokens, 21);
+        mgr.commit(res2).unwrap();
+        assert_eq!(mgr.get_block_table(1).unwrap().total_tokens, 21);
+    }
 }
+
