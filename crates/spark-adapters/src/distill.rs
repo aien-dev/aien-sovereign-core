@@ -398,7 +398,6 @@ impl DistillationEngine {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;

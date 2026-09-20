@@ -40,7 +40,13 @@ pub fn format_openai_payload(
     temperature: Option<f32>,
     stream: bool,
 ) -> Value {
-    format_openai_payload_bounded(model, messages, temperature, Some(DEFAULT_MAX_TOKENS), stream)
+    format_openai_payload_bounded(
+        model,
+        messages,
+        temperature,
+        Some(DEFAULT_MAX_TOKENS),
+        stream,
+    )
 }
 
 pub fn format_openai_payload_bounded(
@@ -127,7 +133,16 @@ pub async fn call_openai_unary(
     messages: &[ChatMessage],
     temperature: Option<f32>,
 ) -> Result<(String, Option<String>, usize), String> {
-    call_openai_unary_bounded(client, endpoint, model, api_key, messages, temperature, None).await
+    call_openai_unary_bounded(
+        client,
+        endpoint,
+        model,
+        api_key,
+        messages,
+        temperature,
+        None,
+    )
+    .await
 }
 
 pub async fn call_openai_unary_bounded(

@@ -16,7 +16,10 @@ fn test_t4_01_verify_keys_cli_audit() {
         .output()
         .expect("execute verify-keys");
 
-    assert!(output.status.success(), "verify-keys must exit with success");
+    assert!(
+        output.status.success(),
+        "verify-keys must exit with success"
+    );
     let stdout = String::from_utf8_lossy(&output.stdout);
 
     assert!(stdout.contains("ADAPTER ID"));
@@ -47,16 +50,31 @@ async fn test_t4_02_resident_max_live_inference_roundtrip() {
         .send()
         .await;
 
-    assert!(res.is_ok(), "Live MAX inference server on 18006 must be reachable");
+    assert!(
+        res.is_ok(),
+        "Live MAX inference server on 18006 must be reachable"
+    );
     let response = res.unwrap();
     assert_eq!(response.status(), 200, "MAX server must return HTTP 200");
 
     let val: serde_json::Value = response.json().await.expect("parse MAX response");
-    let content = val.pointer("/choices/0/message/content").and_then(|v| v.as_str()).unwrap_or("");
-    let reasoning = val.pointer("/choices/0/message/reasoning").and_then(|v| v.as_str()).unwrap_or("");
-    assert!(!content.trim().is_empty() || !reasoning.trim().is_empty(), "MAX must return completion content or reasoning tokens");
+    let content = val
+        .pointer("/choices/0/message/content")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let reasoning = val
+        .pointer("/choices/0/message/reasoning")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    assert!(
+        !content.trim().is_empty() || !reasoning.trim().is_empty(),
+        "MAX must return completion content or reasoning tokens"
+    );
 
-    let total_tokens = val.pointer("/usage/total_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+    let total_tokens = val
+        .pointer("/usage/total_tokens")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
     assert!(total_tokens > 0, "MAX must report positive token usage");
 }
 
@@ -112,8 +130,16 @@ fn test_t4_05_end_to_end_sft_dpo_dataset_filesystem_emission() {
     let sft_path = temp_dir.join("sft.jsonl");
     let dpo_path = temp_dir.join("dpo.jsonl");
 
-    let mut sft_file = fs::OpenOptions::new().create(true).append(true).open(&sft_path).unwrap();
-    let mut dpo_file = fs::OpenOptions::new().create(true).append(true).open(&dpo_path).unwrap();
+    let mut sft_file = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&sft_path)
+        .unwrap();
+    let mut dpo_file = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&dpo_path)
+        .unwrap();
 
     let task_id = uuid::Uuid::new_v4().to_string();
     let prompt = "Implement an allocation-free single-producer single-consumer ring buffer in Rust";
@@ -149,10 +175,12 @@ fn test_t4_05_end_to_end_sft_dpo_dataset_filesystem_emission() {
     assert_eq!(sft_lines.lines().count(), 1);
     assert_eq!(dpo_lines.lines().count(), 1);
 
-    let sft_parsed: serde_json::Value = serde_json::from_str(sft_lines.lines().next().unwrap()).unwrap();
+    let sft_parsed: serde_json::Value =
+        serde_json::from_str(sft_lines.lines().next().unwrap()).unwrap();
     assert_eq!(sft_parsed["messages"].as_array().unwrap().len(), 3);
 
-    let dpo_parsed: serde_json::Value = serde_json::from_str(dpo_lines.lines().next().unwrap()).unwrap();
+    let dpo_parsed: serde_json::Value =
+        serde_json::from_str(dpo_lines.lines().next().unwrap()).unwrap();
     assert_eq!(dpo_parsed["chosen"], chosen);
     assert_eq!(dpo_parsed["rejected"], rejected);
 
