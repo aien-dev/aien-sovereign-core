@@ -1,10 +1,19 @@
-use crate::db::Database;
-use crate::models::{ClaimWriteInput, EntityWriteInput};
 use std::fs;
 use std::time::Instant;
+use crate::db::Database;
+use crate::models::{ClaimWriteInput, EntityWriteInput};
 
 pub fn run_benchmark(records: usize) -> Result<(), Box<dyn std::error::Error>> {
-    let tmp_path = std::env::temp_dir().join(format!("cortex_bench_{}.db", std::process::id()));
+    if records == 0 {
+        eprintln!("Error: --bench-records must be at least 1.");
+        return Ok(());
+    }
+
+    let timestamp_nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let tmp_path = std::env::temp_dir().join(format!("cortex_bench_{}_{}.db", std::process::id(), timestamp_nanos));
     let _ = fs::remove_file(&tmp_path);
 
     println!("================================================================================");
@@ -35,10 +44,7 @@ pub fn run_benchmark(records: usize) -> Result<(), Box<dyn std::error::Error>> {
     for i in 0..records {
         let (domain, desc) = sample_domains[i % sample_domains.len()];
         let canonical_name = format!("{}:entity_{:05}", domain, i);
-        let content = format!(
-            "{} Record ID {} generated for production deployment telemetry verification.",
-            desc, i
-        );
+        let content = format!("{} Record ID {} generated for production deployment telemetry verification.", desc, i);
         let input = EntityWriteInput {
             id: None,
             space: "atlas-memory".to_string(),
@@ -63,10 +69,7 @@ pub fn run_benchmark(records: usize) -> Result<(), Box<dyn std::error::Error>> {
     let ingest_qps = records as f64 / total_ingest_time.as_secs_f64();
 
     // 2. Search Benchmark
-    println!(
-        "[2/3] Benchmarking FTS5 Lexical Search across {} records...",
-        records
-    );
+    println!("[2/3] Benchmarking FTS5 Lexical Search across {} records...", records);
     let search_queries = [
         "tpm vault",
         "unified memory",
@@ -118,21 +121,28 @@ pub fn run_benchmark(records: usize) -> Result<(), Box<dyn std::error::Error>> {
 
     let mut traverse_latencies_us: Vec<f64> = Vec::with_capacity(num_claims);
     let start_traverse = Instant::now();
-    for i in 0..num_claims {
+    for id in &entity_ids[..num_claims] {
         let t0 = Instant::now();
-        let _claims = db.traverse_claims(&entity_ids[i], Some("atlas-memory"))?;
+        let _claims = db.traverse_claims(id, Some("atlas-memory"))?;
         let elapsed = t0.elapsed().as_secs_f64() * 1_000_000.0;
         traverse_latencies_us.push(elapsed);
     }
     let total_traverse_time = start_traverse.elapsed();
-    let traverse_qps = num_claims as f64 / total_traverse_time.as_secs_f64();
+    let traverse_qps = if total_traverse_time.as_secs_f64() > 0.0 {
+        num_claims as f64 / total_traverse_time.as_secs_f64()
+    } else {
+        0.0
+    };
 
     // Compute percentiles
-    write_latencies_us.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    search_latencies_us.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    traverse_latencies_us.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    write_latencies_us.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    search_latencies_us.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    traverse_latencies_us.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
 
     let percentile = |vec: &[f64], p: f64| -> f64 {
+        if vec.is_empty() {
+            return 0.0;
+        }
         let idx = ((vec.len() as f64 * p) / 100.0).round() as usize;
         vec[idx.min(vec.len().saturating_sub(1))]
     };
@@ -167,20 +177,32 @@ pub fn run_benchmark(records: usize) -> Result<(), Box<dyn std::error::Error>> {
         traverse_qps
     );
     println!("--------------------------------------------------------------------------------");
-    println!(
-        "Search p50 in milliseconds:      {:.3} ms",
-        percentile(&search_latencies_us, 50.0) / 1000.0
-    );
-    println!(
-        "Search p99 in milliseconds:      {:.3} ms",
-        percentile(&search_latencies_us, 99.0) / 1000.0
-    );
+    println!("Search p50 in milliseconds:      {:.3} ms", percentile(&search_latencies_us, 50.0) / 1000.0);
+    println!("Search p99 in milliseconds:      {:.3} ms", percentile(&search_latencies_us, 99.0) / 1000.0);
     println!("================================================================================");
 
-    // Cleanup
+    // Explicitly drop db to flush and close SQLite WAL before file removal
+    drop(db);
     let _ = fs::remove_file(&tmp_path);
     let _ = fs::remove_file(format!("{}-wal", tmp_path.display()));
     let _ = fs::remove_file(format!("{}-shm", tmp_path.display()));
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_benchmark_zero_records_safe_exit() {
+        let res = run_benchmark(0);
+        assert!(res.is_ok());
+    }
+
+    #[test]
+    fn test_benchmark_minimal_records() {
+        let res = run_benchmark(2);
+        assert!(res.is_ok());
+    }
 }
