@@ -147,7 +147,7 @@ impl AienScheduler {
                     let preempt_id = *preempt_id;
                     drop(kv); // release lock before write
                     if let Some(running) = self.running_sequences.remove(&preempt_id) {
-                        self.kv_manager.write().free_sequence(preempt_id);
+                        let _ = self.kv_manager.write().free_sequence(preempt_id);
                         self.preempted_queue.push_back(running.request);
                         self.metrics.preempted_requests += 1;
                     }
@@ -226,31 +226,51 @@ impl AienScheduler {
                     break;
                 }
 
-                let alloc_result = {
+                let (alloc_result, is_already_prefilled) = {
                     let mut kv = self.kv_manager.write();
-                    kv.allocate_sequence(req.request_id, &req.prompt_tokens)
+                    if let Some(table) = kv.get_block_table(req.request_id) {
+                        let is_prefilled = table.total_tokens >= prompt_len;
+                        (Ok(table.block_ids.clone()), is_prefilled)
+                    } else {
+                        (kv.allocate_sequence(req.request_id, &req.prompt_tokens), false)
+                    }
                 };
 
                 match alloc_result {
                     Ok(block_ids) => {
                         block_tables.insert(req.request_id, block_ids);
-                        let mut chunk_req = req.clone();
-                        chunk_req.prompt_tokens = req.prompt_tokens[0..chunk_size].to_vec();
 
-                        let is_fully_prefilled = chunk_size == prompt_len;
-                        self.running_sequences.insert(
-                            req.request_id,
-                            RunningSequence {
-                                request: req,
-                                tokens_generated: 0,
-                                prompt_tokens_prefilled: 0,
-                                is_prefilled: is_fully_prefilled,
-                            },
-                        );
+                        if is_already_prefilled {
+                            self.running_sequences.insert(
+                                req.request_id,
+                                RunningSequence {
+                                    request: req.clone(),
+                                    tokens_generated: 0,
+                                    prompt_tokens_prefilled: prompt_len,
+                                    is_prefilled: true,
+                                },
+                            );
+                            decode_requests.push(req.request_id);
+                            current_tokens += 1;
+                        } else {
+                            let mut chunk_req = req.clone();
+                            chunk_req.prompt_tokens = req.prompt_tokens[0..chunk_size].to_vec();
 
-                        prefill_requests.push(chunk_req);
-                        current_tokens += chunk_size;
-                        prefill_budget = prefill_budget.saturating_sub(chunk_size);
+                            let is_fully_prefilled = chunk_size == prompt_len;
+                            self.running_sequences.insert(
+                                req.request_id,
+                                RunningSequence {
+                                    request: req,
+                                    tokens_generated: 0,
+                                    prompt_tokens_prefilled: 0,
+                                    is_prefilled: is_fully_prefilled,
+                                },
+                            );
+
+                            prefill_requests.push(chunk_req);
+                            current_tokens += chunk_size;
+                            prefill_budget = prefill_budget.saturating_sub(chunk_size);
+                        }
                         self.metrics.admitted_requests += 1;
                     }
                     Err(_) => {
@@ -281,31 +301,51 @@ impl AienScheduler {
                     break;
                 }
 
-                let alloc_result = {
+                let (alloc_result, is_already_prefilled) = {
                     let mut kv = self.kv_manager.write();
-                    kv.allocate_sequence(req.request_id, &req.prompt_tokens)
+                    if let Some(table) = kv.get_block_table(req.request_id) {
+                        let is_prefilled = table.total_tokens >= prompt_len;
+                        (Ok(table.block_ids.clone()), is_prefilled)
+                    } else {
+                        (kv.allocate_sequence(req.request_id, &req.prompt_tokens), false)
+                    }
                 };
 
                 match alloc_result {
                     Ok(block_ids) => {
                         block_tables.insert(req.request_id, block_ids);
-                        let mut chunk_req = req.clone();
-                        chunk_req.prompt_tokens = req.prompt_tokens[0..chunk_size].to_vec();
 
-                        let is_fully_prefilled = chunk_size == prompt_len;
-                        self.running_sequences.insert(
-                            req.request_id,
-                            RunningSequence {
-                                request: req,
-                                tokens_generated: 0,
-                                prompt_tokens_prefilled: 0,
-                                is_prefilled: is_fully_prefilled,
-                            },
-                        );
+                        if is_already_prefilled {
+                            self.running_sequences.insert(
+                                req.request_id,
+                                RunningSequence {
+                                    request: req.clone(),
+                                    tokens_generated: 0,
+                                    prompt_tokens_prefilled: prompt_len,
+                                    is_prefilled: true,
+                                },
+                            );
+                            decode_requests.push(req.request_id);
+                            current_tokens += 1;
+                        } else {
+                            let mut chunk_req = req.clone();
+                            chunk_req.prompt_tokens = req.prompt_tokens[0..chunk_size].to_vec();
 
-                        prefill_requests.push(chunk_req);
-                        current_tokens += chunk_size;
-                        prefill_budget = prefill_budget.saturating_sub(chunk_size);
+                            let is_fully_prefilled = chunk_size == prompt_len;
+                            self.running_sequences.insert(
+                                req.request_id,
+                                RunningSequence {
+                                    request: req,
+                                    tokens_generated: 0,
+                                    prompt_tokens_prefilled: 0,
+                                    is_prefilled: is_fully_prefilled,
+                                },
+                            );
+
+                            prefill_requests.push(chunk_req);
+                            current_tokens += chunk_size;
+                            prefill_budget = prefill_budget.saturating_sub(chunk_size);
+                        }
                         self.metrics.admitted_requests += 1;
                     }
                     Err(_) => {
@@ -409,7 +449,7 @@ impl AienScheduler {
                                 self.metrics.preempted_requests += 1;
                             }
                         } else {
-                            self.kv_manager.write().free_sequence(request_id);
+                            let _ = self.kv_manager.write().free_sequence(request_id);
                             self.metrics.finished_requests += 1;
                         }
 
@@ -432,7 +472,7 @@ impl AienScheduler {
                     total_tokens,
                 } => {
                     self.running_sequences.remove(&request_id);
-                    self.kv_manager.write().free_sequence(request_id);
+                    let _ = self.kv_manager.write().free_sequence(request_id);
                     self.metrics.finished_requests += 1;
                     final_outputs.push(DecodeOutput::Finished {
                         request_id,

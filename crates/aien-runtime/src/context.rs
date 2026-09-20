@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TokenSegment {
     pub id: u64,
     pub tokens: Arc<Vec<u32>>,
@@ -28,7 +28,7 @@ impl TokenSegment {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub enum ContextSegment {
     System(TokenSegment),
     User(TokenSegment),
@@ -52,7 +52,7 @@ impl ContextSegment {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct ContextRevision {
     pub id: u64,
     pub parent: Option<u64>,
@@ -106,6 +106,7 @@ pub struct PrefillSpan {
 /// Thread-safe ContextComposer caching tokenized segments and revision trees.
 pub struct ContextComposer {
     revisions: HashMap<u64, ContextRevision>,
+    #[allow(dead_code)]
     segment_cache: HashMap<String, TokenSegment>,
     next_revision_id: u64,
     next_segment_id: u64,

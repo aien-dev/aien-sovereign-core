@@ -20,17 +20,11 @@ use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
-mod auth;
-mod bench;
-mod db;
-mod embeddings;
-mod handlers;
-mod models;
-
-use auth::auth_middleware;
-use db::Database;
-use handlers::*;
-use models::CortexEntity;
+use cortex_rs::auth::auth_middleware;
+use cortex_rs::bench;
+use cortex_rs::db::Database;
+use cortex_rs::handlers::*;
+use cortex_rs::models::CortexEntity;
 
 #[derive(Parser, Debug)]
 #[command(name = "cortex-rs", about = "Sovereign Native Memory Engine in Rust")]

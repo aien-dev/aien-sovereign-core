@@ -3,7 +3,7 @@
 use aien_inference_abi::MockInferenceBackend;
 use aien_kv_cache::{create_shared_kv_manager, KvDType, KvPoolConfig};
 use aien_runtime::control::{ControlCommand, ControlEnvelope, ControlResponse, LaunchSwarmReq};
-use aien_runtime::sequence::{SequenceArena, SequenceId};
+use aien_runtime::sequence::SequenceArena;
 use aien_runtime::spine::AienRuntimeSpine;
 use aien_runtime::world::{EffectIntent, WorldDraft, WorldStore};
 use aien_scheduler::SchedulerConfig;
@@ -105,13 +105,15 @@ async fn test_swarm_launch_and_step_execution() {
 
     let prompt: Vec<u32> = (0..32).collect();
 
+    let root_world = spine.world_store.create_root_world(1, 1, 10, 100);
+
     // Launch swarm of 16 branches via ControlEnvelope
     let launch_req = LaunchSwarmReq {
         model_handle: 1,
         branch_count: 16,
         max_active_sequences: 32,
         max_tokens_per_branch: 4,
-        root_world_id: 1,
+        root_world_id: root_world,
         priority: 5,
         prompt_tokens: prompt.clone(),
     };
@@ -145,14 +147,15 @@ async fn test_swarm_launch_and_step_execution() {
     // Verify 16 child branches + 1 root sequence allocated in arena
     assert_eq!(spine.arena.active_count(), 17);
 
-    // Advance engine steps until all sequences finish
+    // Advance engine steps until all scheduled branch sequences finish
     let mut steps = 0;
-    while spine.arena.active_count() > 0 && steps < 50 {
+    while (spine.scheduler.running_count() > 0 || spine.scheduler.waiting_count() > 0) && steps < 50 {
         steps += 1;
         let _ = spine.step(&mut backend).await.unwrap();
     }
 
-    assert_eq!(spine.arena.active_count(), 0, "All branches must finish");
+    // 16 child branches have completed and been freed; root sequence remains as context anchor
+    assert_eq!(spine.arena.active_count(), 1, "Only root sequence remains in arena");
     let status = spine.status_report();
-    assert_eq!(status.active_sequences, 0);
+    assert_eq!(status.active_sequences, 1);
 }
