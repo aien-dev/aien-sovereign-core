@@ -64,6 +64,7 @@ name = "aien-kv-cache"
 version = "0.1.0"
 dependencies = [
  "aien-platform",
+ "aien-platform-linux",
  "libc",
  "parking_lot",
  "serde",

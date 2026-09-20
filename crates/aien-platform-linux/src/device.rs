@@ -2,7 +2,9 @@
 //! Binds to GB10 GPU with ATS coherency, or provides Linux host execution.
 
 use crate::buffer::{LinuxMemoryKind, LinuxUnifiedBuffer, ResidencyPolicy};
-use aien_platform::{BufferLayout, ComputeDevice, ComputeWork, Fence, PlatformError};
+use aien_platform::{
+    BufferLayout, BufferRegion, ComputeDevice, ComputeWork, Fence, MemoryDevice, PlatformError,
+};
 use core::sync::atomic::{AtomicU64, Ordering};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -138,9 +140,101 @@ impl ComputeDevice for LinuxComputeDevice {
     }
 }
 
+impl MemoryDevice for LinuxComputeDevice {
+    fn copy(&self, src: BufferRegion, dst: BufferRegion) -> Result<Fence, PlatformError> {
+        if src.len != dst.len {
+            return Err(PlatformError::InvalidLayout);
+        }
+        if src.len == 0 {
+            let id = self.fence_counter.fetch_add(1, Ordering::SeqCst);
+            return Ok(Fence(id));
+        }
+
+        #[cfg(has_blackwell_cuda)]
+        {
+            let res = unsafe {
+                cudaMemcpyAsync(
+                    dst.address.0 as *mut libc::c_void,
+                    src.address.0 as *const libc::c_void,
+                    src.len,
+                    CUDA_MEMCPY_DEFAULT,
+                    core::ptr::null_mut(),
+                )
+            };
+            if res != 0 {
+                return Err(PlatformError::HardwareFault(
+                    "cudaMemcpyAsync failed".into(),
+                ));
+            }
+        }
+        #[cfg(not(has_blackwell_cuda))]
+        {
+            unsafe {
+                core::ptr::copy(
+                    src.address.0 as *const u8,
+                    dst.address.0 as *mut u8,
+                    src.len,
+                );
+            }
+        }
+
+        let id = self.fence_counter.fetch_add(1, Ordering::SeqCst);
+        Ok(Fence(id))
+    }
+
+    fn zero(&self, dst: BufferRegion) -> Result<Fence, PlatformError> {
+        if dst.len == 0 {
+            let id = self.fence_counter.fetch_add(1, Ordering::SeqCst);
+            return Ok(Fence(id));
+        }
+
+        #[cfg(has_blackwell_cuda)]
+        {
+            let res = unsafe {
+                cudaMemsetAsync(
+                    dst.address.0 as *mut libc::c_void,
+                    0,
+                    dst.len,
+                    core::ptr::null_mut(),
+                )
+            };
+            if res != 0 {
+                return Err(PlatformError::HardwareFault(
+                    "cudaMemsetAsync failed".into(),
+                ));
+            }
+        }
+        #[cfg(not(has_blackwell_cuda))]
+        {
+            unsafe {
+                core::ptr::write_bytes(dst.address.0 as *mut u8, 0, dst.len);
+            }
+        }
+
+        let id = self.fence_counter.fetch_add(1, Ordering::SeqCst);
+        Ok(Fence(id))
+    }
+}
+
+#[cfg(has_blackwell_cuda)]
+const CUDA_MEMCPY_DEFAULT: i32 = 4;
+
 #[cfg(has_blackwell_cuda)]
 extern "C" {
     fn cudaDeviceGetAttribute(value: *mut i32, attr: i32, device: i32) -> i32;
     fn cudaSetDevice(device: i32) -> i32;
     fn cudaDeviceSynchronize() -> i32;
+    fn cudaMemcpyAsync(
+        dst: *mut libc::c_void,
+        src: *const libc::c_void,
+        count: usize,
+        kind: i32,
+        stream: *mut libc::c_void,
+    ) -> i32;
+    fn cudaMemsetAsync(
+        dev_ptr: *mut libc::c_void,
+        value: i32,
+        count: usize,
+        stream: *mut libc::c_void,
+    ) -> i32;
 }

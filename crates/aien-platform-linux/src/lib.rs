@@ -54,6 +54,62 @@ mod tests {
     }
 
     #[test]
+    fn test_linux_memory_device_copy_and_zero() {
+        use aien_platform::{BufferRegion, MemoryDevice};
+
+        let device = LinuxComputeDevice::new();
+        let layout = BufferLayout::new(4096, 128);
+        let mut buf_src = device.alloc(layout).expect("alloc src");
+        let mut buf_dst = device.alloc(layout).expect("alloc dst");
+
+        unsafe {
+            for i in 0..4096 {
+                *buf_src.as_mut_ptr().add(i) = (i % 251) as u8;
+                *buf_dst.as_mut_ptr().add(i) = 0xFF;
+            }
+        }
+
+        let src_region = BufferRegion {
+            address: buf_src.device_address(),
+            offset: 0,
+            len: 4096,
+        };
+        let dst_region = BufferRegion {
+            address: buf_dst.device_address(),
+            offset: 0,
+            len: 4096,
+        };
+
+        let fence = device.copy(src_region, dst_region).expect("device copy");
+        device.synchronize(fence).expect("synchronize copy");
+
+        unsafe {
+            for i in 0..4096 {
+                assert_eq!(
+                    *buf_dst.as_ptr().add(i),
+                    (i % 251) as u8,
+                    "copy mismatch at index {}",
+                    i
+                );
+            }
+        }
+
+        let fence_zero = device.zero(dst_region).expect("device zero");
+        device.synchronize(fence_zero).expect("synchronize zero");
+
+        unsafe {
+            for i in 0..4096 {
+                assert_eq!(
+                    *buf_dst.as_ptr().add(i),
+                    0,
+                    "zero mismatch at index {}",
+                    i
+                );
+            }
+        }
+    }
+
+    #[test]
     fn test_linux_work_queue_priority_and_deadline() {
         let queue = LinuxWorkQueue::new(64);
         let w_bg = InferenceWork {
