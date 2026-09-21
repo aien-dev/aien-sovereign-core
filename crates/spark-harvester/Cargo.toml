@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 authors = ["Drake Stapleton <drake.aien@proton.me>"]
 license.workspace = true
-description = "Native Rust engine for harvesting reasoning traces from commercial APIs to distill open models for humanity"
+description = "Native Rust rights-gated harvester and provenance engine for sovereign AI datasets"
 
 [dependencies]
 tokio = { version = "1.38", features = ["full"] }
@@ -19,3 +19,9 @@ uuid = { version = "1.8", features = ["v4", "serde"] }
 regex = "1.10"
 sha2 = "0.10"
 thiserror = "1.0"
+bitflags = { version = "2.5", features = ["serde"] }
+aien-protocol-types = { path = "../../../aien-protocols/crates/aien-protocol-types" }
+aien-provenance = { path = "../../../aien-protocols/crates/aien-provenance" }
+
+[dev-dependencies]
+tempfile = "3.17"

@@ -7,3 +7,6 @@ pub use client::HarvesterClient;
 pub use export::DatasetExporter;
 pub use extractor::{ExtractedPair, ReasoningExtractor};
 pub use filter::DeduplicationFilter;
+
+pub mod rights_gate;
+pub use rights_gate::{BundleKind, GatedDatasetBundle, GatedDatasetRecord, RightsGate};
