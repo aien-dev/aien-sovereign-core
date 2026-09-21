@@ -654,9 +654,10 @@ mod tests {
             metadata: json!({"task": "concurrency_test"}),
         };
 
-        let (status, Json(session)) = create_session_handler(State(state.clone()), Json(session_input))
-            .await
-            .unwrap();
+        let (status, Json(session)) =
+            create_session_handler(State(state.clone()), Json(session_input))
+                .await
+                .unwrap();
         assert_eq!(status, StatusCode::CREATED);
         assert_eq!(session.status, "active");
         assert_eq!(session.agent_id, Some("agent-atlas".to_string()));
@@ -664,9 +665,10 @@ mod tests {
         let session_id = session.id;
 
         // 2. Get session
-        let Json(fetched_session) = get_session_handler(State(state.clone()), AxumPath(session_id.clone()))
-            .await
-            .unwrap();
+        let Json(fetched_session) =
+            get_session_handler(State(state.clone()), AxumPath(session_id.clone()))
+                .await
+                .unwrap();
         assert_eq!(fetched_session.id, session_id);
         assert_eq!(fetched_session.status, "active");
 
@@ -779,20 +781,16 @@ mod tests {
         assert_eq!(get_wm["watermarkSeq"], 2);
 
         // 7. Close session
-        let Json(close_res) = close_session_handler(
-            State(state.clone()),
-            AxumPath(session_id.clone()),
-        )
-        .await
-        .unwrap();
+        let Json(close_res) =
+            close_session_handler(State(state.clone()), AxumPath(session_id.clone()))
+                .await
+                .unwrap();
         assert_eq!(close_res["status"], "closed");
 
-        let Json(closed_session) = get_session_handler(
-            State(state.clone()),
-            AxumPath(session_id.clone()),
-        )
-        .await
-        .unwrap();
+        let Json(closed_session) =
+            get_session_handler(State(state.clone()), AxumPath(session_id.clone()))
+                .await
+                .unwrap();
         assert_eq!(closed_session.status, "closed");
         assert!(closed_session.closed_at.is_some());
     }
@@ -912,12 +910,9 @@ mod tests {
             minimum_verification: None,
         };
 
-        let Json(context) = compile_context_handler(
-            State(state.clone()),
-            Json(mem_query),
-        )
-        .await
-        .unwrap();
+        let Json(context) = compile_context_handler(State(state.clone()), Json(mem_query))
+            .await
+            .unwrap();
 
         assert!(!context.episodic.is_empty());
         assert!(!context.canonical.is_empty());
