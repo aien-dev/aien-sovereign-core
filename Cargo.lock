@@ -497,6 +497,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2af50177e190e07a26ab74f8b1efbfe2ef87da2116221318cb1c2e82baf7de06"
 
 [[package]]
+name = "bincode"
+version = "1.3.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b1f45e9417d87227c7a56d22e471c6206462cba514c7590c09aff4cf6d1ddcad"
+dependencies = [
+ "serde",
+]
+
+[[package]]
 name = "bit-set"
 version = "0.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -818,10 +827,12 @@ dependencies = [
  "byteorder",
  "chrono",
  "clap",
+ "crumb-spec",
  "reqwest 0.12.28",
  "rusqlite",
  "serde",
  "serde_json",
+ "spark-crumbs 0.1.0 (git+https://github.com/aien-dev/spark-crumbs)",
  "tokio",
  "tower-http 0.5.2",
  "tracing",
@@ -901,6 +912,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "acdd7c62a3665c7f6830a51635d9ac9b23ed385797f70a83bb8bafe9c572ab2b"
 dependencies = [
  "winapi",
+]
+
+[[package]]
+name = "crumb-spec"
+version = "1.0.0"
+source = "git+https://github.com/aien-dev/crumb-spec#24194d1b7917ef19244aae6bcaff510686b75fef"
+dependencies = [
+ "bincode",
+ "blake3",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "uuid",
 ]
 
 [[package]]
@@ -2750,12 +2774,14 @@ name = "rad-id-sync"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "crumb-spec",
  "ed25519-dalek",
  "hex",
  "rand 0.8.8",
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "spark-crumbs 0.1.0 (git+https://github.com/aien-dev/spark-crumbs)",
 ]
 
 [[package]]
@@ -3530,11 +3556,13 @@ dependencies = [
  "async-stream",
  "chrono",
  "clap",
+ "crumb-spec",
  "futures-util",
  "regex",
  "reqwest 0.12.28",
  "serde",
  "serde_json",
+ "spark-crumbs 0.1.0 (git+https://github.com/aien-dev/spark-crumbs)",
  "tokio",
  "tracing",
  "url",
@@ -3597,15 +3625,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "spark-crumbs"
+version = "0.1.0"
+source = "git+https://github.com/aien-dev/spark-crumbs#9355a92bc9adfe95a6ec5f8ac926f38a0b6e7db2"
+dependencies = [
+ "chrono",
+ "clap",
+ "colored",
+ "rayon",
+ "serde",
+ "serde_json",
+ "uuid",
+ "walkdir",
+]
+
+[[package]]
 name = "spark-debugger"
 version = "0.1.0"
 dependencies = [
  "chrono",
  "clap",
+ "crumb-spec",
  "reqwest 0.12.28",
  "rusqlite",
  "serde",
  "serde_json",
+ "spark-crumbs 0.1.0 (git+https://github.com/aien-dev/spark-crumbs)",
  "tempfile",
  "tokio",
  "tracing",
@@ -3636,10 +3681,12 @@ dependencies = [
  "axum 0.7.9",
  "chrono",
  "clap",
+ "crumb-spec",
  "regex",
  "reqwest 0.12.28",
  "serde",
  "serde_json",
+ "spark-crumbs 0.1.0 (git+https://github.com/aien-dev/spark-crumbs)",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -3652,11 +3699,13 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "clap",
+ "crumb-spec",
  "jsonschema",
  "regex",
  "reqwest 0.12.28",
  "serde",
  "serde_json",
+ "spark-crumbs 0.1.0 (git+https://github.com/aien-dev/spark-crumbs)",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -3692,9 +3741,11 @@ name = "spark-hive"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "crumb-spec",
  "rusqlite",
  "serde",
  "serde_json",
+ "spark-crumbs 0.1.0 (git+https://github.com/aien-dev/spark-crumbs)",
  "tempfile",
  "thiserror 2.0.20",
  "uuid",
@@ -3707,9 +3758,11 @@ dependencies = [
  "chrono",
  "clap",
  "colored",
+ "crumb-spec",
  "regex",
  "serde",
  "serde_json",
+ "spark-crumbs 0.1.0 (git+https://github.com/aien-dev/spark-crumbs)",
 ]
 
 [[package]]
@@ -3757,9 +3810,11 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "clap",
+ "crumb-spec",
  "reqwest 0.12.28",
  "serde",
  "serde_json",
+ "spark-crumbs 0.1.0 (git+https://github.com/aien-dev/spark-crumbs)",
  "tokio",
  "toml",
  "tracing",
