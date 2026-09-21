@@ -7,6 +7,15 @@ pub struct Verifier;
 
 impl Verifier {
     pub fn verify(content: &str, strategy: VerificationStrategy) -> VerificationOutcome {
+        if content.trim().is_empty() {
+            return VerificationOutcome {
+                passed: false,
+                score: 0.0,
+                rule_violations: vec!["Empty completion received".to_string()],
+                compiler_output: None,
+            };
+        }
+
         let mut violations = Vec::new();
         let mut score: f32 = 1.0;
 
@@ -409,5 +418,24 @@ mod tests {
         assert_eq!(Verifier::hybrid_consensus(a, b), 1.0);
         let sim = Verifier::hybrid_consensus(a, c);
         assert!(sim > 0.0 && sim < 1.0);
+    }
+
+    #[test]
+    fn test_empty_completion_rejected() {
+        let empty_out = Verifier::verify("", VerificationStrategy::CompilerCheck);
+        assert!(!empty_out.passed);
+        assert_eq!(empty_out.score, 0.0);
+        assert!(empty_out
+            .rule_violations
+            .iter()
+            .any(|v| v.contains("Empty completion")));
+
+        let whitespace_out = Verifier::verify(
+            "   
+  	 ",
+            VerificationStrategy::UnslopStrict,
+        );
+        assert!(!whitespace_out.passed);
+        assert_eq!(whitespace_out.score, 0.0);
     }
 }
