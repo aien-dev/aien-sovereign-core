@@ -262,6 +262,35 @@ impl NativeTransformerBackend {
         Ok((sampled_tok, logits))
     }
 
+    /// Ingests branch-specific prompt/delta tokens into the physical paged KV cache, triggering COW on shared blocks.
+    pub fn append_branch_token(&mut self, branch: BranchHandle, token: u32) -> Result<(), String> {
+        let seq = self
+            .sequences
+            .get_mut(&branch.0)
+            .ok_or_else(|| format!("Branch {} not found", branch.0))?;
+
+        let pos = seq.tokens.len();
+        let _hidden = Self::forward_token_impl_paged(
+            &self.weights,
+            &*self.tensor_backend,
+            token,
+            pos,
+            seq,
+            branch.0,
+            self.kv_manager.as_ref(),
+        );
+        seq.tokens.push(token);
+        Ok(())
+    }
+
+    /// Ingests multiple branch-specific delta tokens sequentially.
+    pub fn append_branch_tokens(&mut self, branch: BranchHandle, tokens: &[u32]) -> Result<(), String> {
+        for &tok in tokens {
+            self.append_branch_token(branch, tok)?;
+        }
+        Ok(())
+    }
+
     /// Generates tokens autoregressively, invoking a callback for each generated token.
     pub fn generate_tokens_streaming<F>(
         &mut self,
