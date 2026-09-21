@@ -1,3 +1,4 @@
+use aien_provenance::{GrantPermissions, SourceGrant};
 use reqwest::Client;
 use serde_json::{json, Value};
 use std::process::Command;
@@ -11,6 +12,8 @@ pub enum ClientError {
     VaultKey(String, String),
     #[error("API returned error: {0}")]
     Api(String),
+    #[error("Rights verification failed: {0}")]
+    RightsDenied(String),
 }
 
 pub struct HarvesterClient {
@@ -99,5 +102,27 @@ impl HarvesterClient {
             .unwrap_or("")
             .to_string();
         Ok(content)
+    }
+
+    pub async fn query_with_grant(
+        &self,
+        endpoint_url: &str,
+        api_key: &str,
+        model: &str,
+        prompt: &str,
+        grant: &SourceGrant,
+    ) -> Result<String, ClientError> {
+        let now = chrono::Utc::now().timestamp() as u64;
+        grant
+            .verify_validity(now)
+            .map_err(|e| ClientError::RightsDenied(e.to_string()))?;
+
+        grant
+            .verify_permission(GrantPermissions::TRAIN | GrantPermissions::DISTILL)
+            .or_else(|_| grant.verify_permission(GrantPermissions::EVALUATE))
+            .map_err(|e| ClientError::RightsDenied(e.to_string()))?;
+
+        self.query_openai_compat(endpoint_url, api_key, model, prompt)
+            .await
     }
 }

@@ -56,17 +56,37 @@ pub struct RightsGate;
 
 impl RightsGate {
     /// Validates an array of extracted pairs against a SourceGrant and builds an immutable GatedDatasetBundle.
-    /// Fails closed if the grant lacks required permissions or contains an unapproved license.
+    /// Fails closed if the grant is expired, lacks required permissions, or contains an unapproved license.
     pub fn validate_and_bundle(
         grant: &SourceGrant,
         pairs: &[ExtractedPair],
         bundle_kind: BundleKind,
         allowed_licenses: &[&str],
     ) -> Result<GatedDatasetBundle, ProvenanceError> {
-        // 1. Verify license compatibility
+        Self::validate_and_bundle_with_key(grant, pairs, bundle_kind, allowed_licenses, None)
+    }
+
+    /// Validates an array of extracted pairs against a SourceGrant with optional cryptographic signature check.
+    pub fn validate_and_bundle_with_key(
+        grant: &SourceGrant,
+        pairs: &[ExtractedPair],
+        bundle_kind: BundleKind,
+        allowed_licenses: &[&str],
+        verifying_key: Option<&p256::ecdsa::VerifyingKey>,
+    ) -> Result<GatedDatasetBundle, ProvenanceError> {
+        // 1. Verify temporal validity
+        let now = chrono::Utc::now().timestamp() as u64;
+        grant.verify_validity(now)?;
+
+        // 2. Verify cryptographic signature if key is supplied
+        if let Some(vk) = verifying_key {
+            grant.verify_signature(vk)?;
+        }
+
+        // 3. Verify license compatibility
         grant.verify_license(allowed_licenses)?;
 
-        // 2. Verify grant permissions based on bundle kind
+        // 4. Verify grant permissions based on bundle kind
         let required_perm = match bundle_kind {
             BundleKind::Training => GrantPermissions::TRAIN,
             BundleKind::Distillation => GrantPermissions::DISTILL,
@@ -74,7 +94,7 @@ impl RightsGate {
         };
         grant.verify_permission(required_perm)?;
 
-        // 3. Build records and compute individual provenance digests
+        // 5. Build records and compute individual provenance digests
         let mut records = Vec::with_capacity(pairs.len());
         let mut digests = Vec::with_capacity(pairs.len());
 
@@ -94,7 +114,7 @@ impl RightsGate {
             records.push(record);
         }
 
-        // 4. Compute Merkle root over records
+        // 6. Compute Merkle root over records
         let merkle_root = Self::compute_merkle_root(&digests);
 
         Ok(GatedDatasetBundle {
@@ -108,14 +128,43 @@ impl RightsGate {
     }
 
     /// Exports a bundle to a JSONL file with strict segregation enforcement.
-    /// Evidence bundles are barred from being written to training/sft/dpo dataset paths.
+    /// Evidence bundles are barred from being written to training/sft/dpo dataset paths,
+    /// and must reside within dedicated evidence or quarantine path structures.
     pub fn export_bundle(bundle: &GatedDatasetBundle, output_path: &Path) -> io::Result<usize> {
-        let path_str = output_path.to_string_lossy().to_lowercase();
         if bundle.bundle_kind == BundleKind::Evidence {
-            if path_str.contains("train") || path_str.contains("sft") || path_str.contains("dpo") {
+            let normalized = if output_path.is_absolute() {
+                output_path.to_path_buf()
+            } else {
+                std::env::current_dir()
+                    .map(|c| c.join(output_path))
+                    .unwrap_or_else(|_| output_path.to_path_buf())
+            };
+
+            // Structural check: Bar from training, sft, dpo, distill paths
+            for component in normalized.components() {
+                let name = component.as_os_str().to_string_lossy().to_lowercase();
+                if name.contains("train")
+                    || name.contains("sft")
+                    || name.contains("dpo")
+                    || name.contains("distill")
+                {
+                    return Err(io::Error::new(
+                        io::ErrorKind::PermissionDenied,
+                        "Evidence bundles are strictly quarantined and cannot be written to training or distillation dataset paths",
+                    ));
+                }
+            }
+
+            // Structural check: Must reside within an evidence or quarantine directory or file
+            let in_evidence_or_quarantine = normalized.components().any(|c| {
+                let name = c.as_os_str().to_string_lossy().to_lowercase();
+                name.contains("evidence") || name.contains("quarantine")
+            });
+
+            if !in_evidence_or_quarantine {
                 return Err(io::Error::new(
                     io::ErrorKind::PermissionDenied,
-                    "Evidence bundles are strictly quarantined and cannot be written to training or distillation dataset paths",
+                    "Evidence bundles must be quarantined inside a dedicated evidence or quarantine path",
                 ));
             }
         }
