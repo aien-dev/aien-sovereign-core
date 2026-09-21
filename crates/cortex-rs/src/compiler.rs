@@ -6,9 +6,10 @@ use crate::db::Database;
 use crate::models::{ClaimStatus, VerificationTier};
 use crate::security::SecurityMembrane;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum MemoryIntent {
+    #[default]
     Conversation,
     Coding,
     Planning,
@@ -16,12 +17,6 @@ pub enum MemoryIntent {
     ToolExecution,
     Reflection,
     MemoryAdjudication,
-}
-
-impl Default for MemoryIntent {
-    fn default() -> Self {
-        Self::Conversation
-    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
