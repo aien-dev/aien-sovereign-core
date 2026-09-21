@@ -280,7 +280,7 @@ async fn run_cli(
     println!("Type 'help' for command reference, or enter a prompt directly to distill.");
     println!("Commands: models, teacher <id>, student <id>, track <name>, strategy <name>, status, quit\n");
 
-    let mut engine = DistillationEngine::new();
+    let mut engine = DistillationEngine::new().with_timeout(Duration::from_secs(180));
     if let Some(ref dir) = dataset_dir {
         engine = engine.with_dataset_dir(dir.clone());
     }
@@ -467,7 +467,7 @@ async fn execute_cli_distill<R: BufRead>(
     let task = DistillTask {
         id: task_id.clone(),
         task_type,
-        prompt: prompt.clone(),
+        prompt: sanitized_prompt.clone(),
         system_prompt: Some(
             "You are a verified sovereign systems specialist. Output clear, compilable native code with zero unslop."
                 .to_string(),
@@ -536,11 +536,18 @@ async fn execute_cli_distill<R: BufRead>(
                 );
             }
 
-            println!(
-                "  Datasets Appended: {}/sft.jsonl, {}/dpo.jsonl",
-                engine.dataset_dir.display(),
-                engine.dataset_dir.display()
-            );
+            if record.has_dpo_pair() {
+                println!(
+                    "  Datasets Appended: {}/sft.jsonl, {}/dpo.jsonl",
+                    engine.dataset_dir.display(),
+                    engine.dataset_dir.display()
+                );
+            } else {
+                println!(
+                    "  Datasets Appended: {}/sft.jsonl",
+                    engine.dataset_dir.display()
+                );
+            }
         }
         Err(e) => {
             eprintln!("\nDistillation error: {}", e);
@@ -762,10 +769,15 @@ async fn run_single(
     let task_type = parse_task_type(&task_type_str);
     let strategy = parse_strategy(&verify_str);
 
+    let sanitized_prompt = sanitize_outbound_prompt(&prompt);
+    if sanitized_prompt != prompt {
+        println!("  [Vault Sanitizer] Outbound prompt scrubbed: local paths, private IPs, and secrets redacted.");
+    }
+
     let task = DistillTask {
         id: Uuid::new_v4().to_string(),
         task_type,
-        prompt: prompt.clone(),
+        prompt: sanitized_prompt.clone(),
         system_prompt: Some(
             "You are a verified sovereign systems specialist. Output clear, compilable native code with zero unslop."
                 .to_string(),
@@ -785,7 +797,7 @@ async fn run_single(
     );
     println!("Prompt:   {}", task.prompt);
 
-    let mut engine = DistillationEngine::new();
+    let mut engine = DistillationEngine::new().with_timeout(Duration::from_secs(180));
     if let Some(dir) = dataset_dir {
         engine = engine.with_dataset_dir(dir);
     }
@@ -811,11 +823,18 @@ async fn run_single(
                     record.cortex_entity_id.as_deref().unwrap_or("<committed>")
                 );
             }
-            println!(
-                "Datasets Appended:    {}/sft.jsonl, {}/dpo.jsonl",
-                engine.dataset_dir.display(),
-                engine.dataset_dir.display()
-            );
+            if record.has_dpo_pair() {
+                println!(
+                    "Datasets Appended:    {}/sft.jsonl, {}/dpo.jsonl",
+                    engine.dataset_dir.display(),
+                    engine.dataset_dir.display()
+                );
+            } else {
+                println!(
+                    "Datasets Appended:    {}/sft.jsonl",
+                    engine.dataset_dir.display()
+                );
+            }
         }
         Err(e) => {
             eprintln!("Distillation error: {}", e);
@@ -843,7 +862,7 @@ async fn run_crawl(
     let tasks =
         CurriculumEngine::generate_tasks(track, limit, teacher, Some(student), commit_cortex);
 
-    let mut engine = DistillationEngine::new();
+    let mut engine = DistillationEngine::new().with_timeout(Duration::from_secs(180));
     if let Some(dir) = dataset_dir {
         engine = engine.with_dataset_dir(dir);
     }

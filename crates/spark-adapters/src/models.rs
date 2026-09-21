@@ -207,3 +207,14 @@ pub struct DistillationRecord {
     pub cortex_entity_id: Option<String>,
     pub created_at: String,
 }
+
+impl DistillationRecord {
+    pub fn has_dpo_pair(&self) -> bool {
+        self.preference_delta > 0.0
+            && self
+                .rejected
+                .as_deref()
+                .map(|rej| rej != self.chosen.as_str())
+                .unwrap_or(false)
+    }
+}

@@ -497,11 +497,10 @@ fn test_t2_f42_cortex_failed_verification_rejected() {
 
 #[test]
 fn test_t2_f43_cortex_commit_false_flag_respected() {
-    let score: f32 = 1.0;
-    let passed = true;
-    let commit_to_cortex = false;
-    let should_commit = commit_to_cortex && passed && score >= 0.85;
-    assert!(!should_commit, "commit_to_cortex=false must prevent commit");
+    use spark_adapters::distill::DistillationEngine;
+
+    let qualifies = DistillationEngine::qualifies_for_cortex(false, true, 1.0);
+    assert!(!qualifies, "commit_to_cortex=false must prevent commit");
 }
 
 #[test]
@@ -527,33 +526,191 @@ fn test_t2_f45_cortex_content_summary_includes_verified_solution() {
 
 #[test]
 fn test_t2_f46_dpo_zero_delta_rejected() {
-    let delta = 0.0;
-    let valid_delta = delta > 0.0;
-    assert!(!valid_delta, "Zero delta must be rejected for DPO pair");
+    use spark_adapters::distill::DistillationEngine;
+    use spark_adapters::models::{DistillTask, TaskType, VerificationStrategy};
+    use std::fs;
+
+    let temp_dir =
+        std::env::temp_dir().join(format!("spark_distill_t2_f46_{}", uuid::Uuid::new_v4()));
+    let engine = DistillationEngine::new().with_dataset_dir(&temp_dir);
+
+    let task = DistillTask {
+        id: "task-zero-delta-01".to_string(),
+        task_type: TaskType::CodeSynthesis,
+        prompt: "Implement vector push".to_string(),
+        system_prompt: None,
+        teacher_model: "anthropic/claude-3-7-sonnet".to_string(),
+        student_model: Some("atlas-lightning-omni".to_string()),
+        verification_strategy: VerificationStrategy::UnslopStrict,
+        commit_to_cortex: false,
+    };
+
+    let chosen = "fn push(v: &mut Vec<i32>, val: i32) { v.push(val); }";
+    let rejected = "fn push(v: &mut Vec<i32>, val: i32) { v.push(val); }";
+    let preference_delta = 0.0f32;
+
+    let valid_rej =
+        DistillationEngine::filter_dpo_candidate(chosen, Some(rejected), preference_delta);
+    assert_eq!(
+        valid_rej, None,
+        "Zero preference delta must be rejected for DPO pair"
+    );
+
+    let dpo_persisted = engine
+        .persist_training_pair(&task, chosen, None, valid_rej)
+        .expect("persist training pair");
+    assert!(
+        !dpo_persisted,
+        "DPO pair must NOT be persisted when delta is zero"
+    );
+
+    assert!(
+        temp_dir.join("sft.jsonl").exists(),
+        "SFT dataset must still be written"
+    );
+    assert!(
+        !temp_dir.join("dpo.jsonl").exists(),
+        "DPO dataset must NOT be written when delta is zero"
+    );
+
+    let _ = fs::remove_dir_all(&temp_dir);
 }
 
 #[test]
 fn test_t2_f47_dpo_negative_delta_rejected() {
-    let delta = -0.15;
-    let valid_delta = delta > 0.0;
-    assert!(!valid_delta, "Negative delta must be rejected for DPO pair");
+    use spark_adapters::distill::DistillationEngine;
+    use spark_adapters::models::{DistillTask, TaskType, VerificationStrategy};
+    use std::fs;
+
+    let temp_dir =
+        std::env::temp_dir().join(format!("spark_distill_t2_f47_{}", uuid::Uuid::new_v4()));
+    let engine = DistillationEngine::new().with_dataset_dir(&temp_dir);
+
+    let task = DistillTask {
+        id: "task-negative-delta-01".to_string(),
+        task_type: TaskType::CodeSynthesis,
+        prompt: "Calculate factorial".to_string(),
+        system_prompt: None,
+        teacher_model: "anthropic/claude-3-7-sonnet".to_string(),
+        student_model: Some("atlas-lightning-omni".to_string()),
+        verification_strategy: VerificationStrategy::CompilerCheck,
+        commit_to_cortex: false,
+    };
+
+    let chosen = "fn fact(n: u64) -> u64 { (1..=n).product() }";
+    let rejected = "fn fact(n: u64) -> u64 { 1 }";
+    let negative_delta = -0.15f32;
+
+    let valid_rej =
+        DistillationEngine::filter_dpo_candidate(chosen, Some(rejected), negative_delta);
+    assert_eq!(
+        valid_rej, None,
+        "Negative preference delta must be rejected for DPO pair"
+    );
+
+    let dpo_persisted = engine
+        .persist_training_pair(&task, chosen, None, valid_rej)
+        .expect("persist training pair");
+    assert!(
+        !dpo_persisted,
+        "DPO pair must NOT be persisted when delta is negative"
+    );
+    assert!(
+        !temp_dir.join("dpo.jsonl").exists(),
+        "DPO dataset must NOT exist for negative delta"
+    );
+
+    let _ = fs::remove_dir_all(&temp_dir);
 }
 
 #[test]
 fn test_t2_f48_dpo_identical_outputs_rejected() {
+    use spark_adapters::distill::DistillationEngine;
+    use spark_adapters::models::{DistillTask, TaskType, VerificationStrategy};
+    use std::fs;
+
+    let temp_dir =
+        std::env::temp_dir().join(format!("spark_distill_t2_f48_{}", uuid::Uuid::new_v4()));
+    let engine = DistillationEngine::new().with_dataset_dir(&temp_dir);
+
+    let task = DistillTask {
+        id: "task-identical-dpo-01".to_string(),
+        task_type: TaskType::CodeSynthesis,
+        prompt: "Write empty entry point".to_string(),
+        system_prompt: None,
+        teacher_model: "anthropic/claude-3-7-sonnet".to_string(),
+        student_model: Some("atlas-lightning-omni".to_string()),
+        verification_strategy: VerificationStrategy::CompilerCheck,
+        commit_to_cortex: false,
+    };
+
     let chosen = "fn main() {}";
-    let rejected = "fn main() {}";
-    let valid_pair = chosen != rejected;
-    assert!(
-        !valid_pair,
-        "Identical outputs must be rejected for DPO pair"
+    let identical_rejected = "fn main() {}";
+    let positive_delta = 0.30f32;
+
+    let valid_rej =
+        DistillationEngine::filter_dpo_candidate(chosen, Some(identical_rejected), positive_delta);
+    assert_eq!(
+        valid_rej, None,
+        "Identical chosen and rejected completions must be rejected for DPO pair"
     );
+
+    let dpo_persisted = engine
+        .persist_training_pair(&task, chosen, None, valid_rej)
+        .expect("persist training pair");
+    assert!(
+        !dpo_persisted,
+        "DPO pair must NOT be persisted for identical completions"
+    );
+    assert!(
+        !temp_dir.join("dpo.jsonl").exists(),
+        "DPO dataset must NOT exist for identical completions"
+    );
+
+    let _ = fs::remove_dir_all(&temp_dir);
 }
 
 #[test]
 fn test_t2_f49_dpo_missing_student_rollout_no_dpo_file() {
-    let student_rollout: Option<String> = None;
-    assert!(student_rollout.is_none());
+    use spark_adapters::distill::DistillationEngine;
+    use spark_adapters::models::{DistillTask, TaskType, VerificationStrategy};
+    use std::fs;
+
+    let temp_dir =
+        std::env::temp_dir().join(format!("spark_distill_t2_f49_{}", uuid::Uuid::new_v4()));
+    let engine = DistillationEngine::new().with_dataset_dir(&temp_dir);
+
+    let task = DistillTask {
+        id: "task-missing-student-01".to_string(),
+        task_type: TaskType::CodeSynthesis,
+        prompt: "Write unit test".to_string(),
+        system_prompt: None,
+        teacher_model: "anthropic/claude-3-7-sonnet".to_string(),
+        student_model: None,
+        verification_strategy: VerificationStrategy::UnslopStrict,
+        commit_to_cortex: false,
+    };
+
+    let chosen = "#[test] fn test() {}";
+    let valid_rej = DistillationEngine::filter_dpo_candidate(chosen, None, 0.0);
+    assert_eq!(
+        valid_rej, None,
+        "Missing student rollout must yield None for DPO candidate"
+    );
+
+    let dpo_persisted = engine
+        .persist_training_pair(&task, chosen, None, valid_rej)
+        .expect("persist training pair");
+    assert!(
+        !dpo_persisted,
+        "DPO pair must NOT be persisted when student rollout is missing"
+    );
+    assert!(
+        !temp_dir.join("dpo.jsonl").exists(),
+        "DPO dataset must NOT exist when student rollout is missing"
+    );
+
+    let _ = fs::remove_dir_all(&temp_dir);
 }
 
 #[test]

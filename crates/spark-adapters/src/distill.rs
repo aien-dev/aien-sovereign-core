@@ -8,7 +8,7 @@ use serde_json::json;
 use std::fs::{create_dir_all, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 pub struct DistillationEngine {
     pub client: Client,
@@ -24,6 +24,8 @@ impl Default for DistillationEngine {
 }
 
 impl DistillationEngine {
+    pub const CORTEX_QUALIFICATION_THRESHOLD: f32 = 0.85;
+
     pub fn new() -> Self {
         let home = std::env::var("HOME")
             .or_else(|_| std::env::var("USERPROFILE"))
@@ -32,12 +34,32 @@ impl DistillationEngine {
         let default_dir = home.join("workspace/distillation-data");
         let _ = create_dir_all(&default_dir);
 
+        let client = Client::builder()
+            .connect_timeout(Duration::from_secs(5))
+            .timeout(Duration::from_secs(30))
+            .build()
+            .unwrap_or_default();
+
         Self {
-            client: Client::builder().build().unwrap_or_default(),
+            client,
             router: AdapterRouter::new(),
             dataset_dir: default_dir,
             cortex_endpoint: "http://127.0.0.1:18080".to_string(),
         }
+    }
+
+    pub fn with_client(mut self, client: Client) -> Self {
+        self.client = client;
+        self
+    }
+
+    pub fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.client = Client::builder()
+            .connect_timeout(Duration::from_secs(5))
+            .timeout(timeout)
+            .build()
+            .unwrap_or_default();
+        self
     }
 
     pub fn with_dataset_dir<P: AsRef<Path>>(mut self, dir: P) -> Self {
@@ -46,7 +68,57 @@ impl DistillationEngine {
         self
     }
 
-    pub async fn distill(&self, task: DistillTask) -> Result<DistillationRecord, String> {
+    pub fn qualifies_for_cortex(commit_to_cortex: bool, passed: bool, score: f32) -> bool {
+        commit_to_cortex && passed && score >= Self::CORTEX_QUALIFICATION_THRESHOLD
+    }
+
+    pub fn build_cortex_payload(
+        name: &str,
+        canonical_name: &str,
+        content: &str,
+        task_id: &str,
+        confidence: f64,
+    ) -> serde_json::Value {
+        serde_json::json!({
+            "kind": "entity",
+            "value": {
+                "space": "atlas-memory",
+                "canonicalName": canonical_name,
+                "entityType": "learned_procedure",
+                "content": content,
+                "aliases": [name],
+                "confidence": confidence,
+                "metadata": {
+                    "source": "spark-distill",
+                    "taskId": task_id
+                }
+            }
+        })
+    }
+
+    pub fn parse_cortex_receipt(body: &serde_json::Value, fallback: &str) -> String {
+        body.pointer("/receipt/targetId")
+            .or_else(|| body.pointer("/receipt/id"))
+            .or_else(|| body.pointer("/receipt/target_id"))
+            .and_then(|v| v.as_str())
+            .unwrap_or(fallback)
+            .to_string()
+    }
+
+    pub fn filter_dpo_candidate<'a>(
+        chosen: &'a str,
+        rejected: Option<&'a str>,
+        preference_delta: f32,
+    ) -> Option<&'a str> {
+        rejected.filter(|rej| preference_delta > 0.0 && *rej != chosen)
+    }
+
+    pub async fn distill(&self, mut task: DistillTask) -> Result<DistillationRecord, String> {
+        task.prompt = crate::vault::sanitize_outbound_prompt(&task.prompt);
+        if let Some(ref sys) = task.system_prompt {
+            task.system_prompt = Some(crate::vault::sanitize_outbound_prompt(sys));
+        }
+
         let mut messages = Vec::new();
         if let Some(ref sys) = task.system_prompt {
             messages.push(ChatMessage {
@@ -191,10 +263,8 @@ impl DistillationEngine {
         }
 
         // 4. Persist to SFT and DPO Datasets
-        // Skip DPO pair generation if preference delta is zero or content identical
-        let valid_dpo_rejected = rejected
-            .as_deref()
-            .filter(|rej| preference_delta > 0.0 && *rej != chosen.as_str());
+        let valid_dpo_rejected =
+            Self::filter_dpo_candidate(&chosen, rejected.as_deref(), preference_delta);
 
         self.persist_training_pair(
             &task,
@@ -207,7 +277,7 @@ impl DistillationEngine {
         let mut durable_committed = false;
         let mut cortex_id = None;
 
-        if task.commit_to_cortex && chosen_passed && chosen_score >= 0.85 {
+        if Self::qualifies_for_cortex(task.commit_to_cortex, chosen_passed, chosen_score) {
             let entity_name = format!("distill_lesson:{}_{}", task.id, Utc::now().timestamp());
             let canonical = format!("distill_{}", task.id.replace('-', "_"));
             let source_label = match chosen_seat {
@@ -260,13 +330,13 @@ impl DistillationEngine {
         })
     }
 
-    fn persist_training_pair(
+    pub fn persist_training_pair(
         &self,
         task: &DistillTask,
         chosen: &str,
         chosen_reasoning: Option<&str>,
         rejected: Option<&str>,
-    ) -> Result<(), String> {
+    ) -> Result<bool, String> {
         let _ = create_dir_all(&self.dataset_dir);
 
         // Append SFT JSONL (ChatML format)
@@ -293,7 +363,7 @@ impl DistillationEngine {
             assistant_obj["reasoning"] = json!(r);
         }
         if let Some(arr) = sft_entry.get_mut("messages").and_then(|m| m.as_array_mut()) {
-            arr.push(assistant_obj)
+            arr.push(assistant_obj);
         }
 
         let mut file = OpenOptions::new()
@@ -305,6 +375,7 @@ impl DistillationEngine {
             .map_err(|e| format!("Failed to write to sft.jsonl: {}", e))?;
 
         // Append DPO JSONL if rejected pair exists
+        let mut dpo_written = false;
         if let Some(rej) = rejected {
             let dpo_file = self.dataset_dir.join("dpo.jsonl");
             let dpo_entry = json!({
@@ -323,9 +394,10 @@ impl DistillationEngine {
                 .map_err(|e| format!("Failed to open dpo.jsonl: {}", e))?;
             writeln!(d_file, "{}", serde_json::to_string(&dpo_entry).unwrap())
                 .map_err(|e| format!("Failed to write to dpo.jsonl: {}", e))?;
+            dpo_written = true;
         }
 
-        Ok(())
+        Ok(dpo_written)
     }
 
     pub async fn commit_to_cortex(
@@ -350,21 +422,8 @@ impl DistillationEngine {
             std::env::var("CORTEX_ENDPOINT").unwrap_or_else(|_| self.cortex_endpoint.clone());
         let url = format!("{}/api/cortex/write", endpoint);
 
-        let payload = json!({
-            "kind": "entity",
-            "value": {
-                "space": "atlas-memory",
-                "canonicalName": canonical_name,
-                "entityType": "learned_procedure",
-                "content": content,
-                "aliases": [name],
-                "confidence": confidence,
-                "metadata": {
-                    "source": "spark-distill",
-                    "taskId": task_id
-                }
-            }
-        });
+        let payload =
+            Self::build_cortex_payload(name, canonical_name, content, task_id, confidence);
 
         let res = self
             .client
@@ -386,13 +445,7 @@ impl DistillationEngine {
             .await
             .map_err(|e| format!("Failed to parse Cortex response JSON: {}", e))?;
 
-        let entity_id = body
-            .pointer("/receipt/targetId")
-            .or_else(|| body.pointer("/receipt/id"))
-            .or_else(|| body.pointer("/receipt/target_id"))
-            .and_then(|v| v.as_str())
-            .unwrap_or(canonical_name)
-            .to_string();
+        let entity_id = Self::parse_cortex_receipt(&body, canonical_name);
 
         Ok(entity_id)
     }
