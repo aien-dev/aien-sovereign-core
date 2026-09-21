@@ -66,6 +66,39 @@ dependencies = [
 ]
 
 [[package]]
+name = "aien-inference-protocol"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "futures-util",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "aien-inference-runtime"
+version = "0.1.0"
+dependencies = [
+ "aien-inference-abi",
+ "aien-inference-protocol",
+ "aien-kv-cache",
+ "aien-scheduler",
+ "anyhow",
+ "async-trait",
+ "bytes",
+ "chrono",
+ "futures-util",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "aien-kv-cache"
 version = "0.1.0"
 dependencies = [
