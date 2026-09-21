@@ -20,7 +20,8 @@ regex = "1.10"
 sha2 = "0.10"
 thiserror = "1.0"
 bitflags = { version = "2.5", features = ["serde"] }
-p256 = { version = "0.14.0", features = ["ecdsa"] }
+p256 = { version = "0.14.0", features = ["ecdsa", "pem"] }
+hex = "0.4"
 aien-protocol-types = { path = "../../../aien-protocols/crates/aien-protocol-types" }
 aien-provenance = { path = "../../../aien-protocols/crates/aien-provenance" }
 

@@ -7,7 +7,9 @@ fn create_test_pair() -> ExtractedPair {
     ExtractedPair {
         prompt: "Explain copy-on-write paged attention".to_string(),
         reasoning: Some("Analyze memory refcounting and block sharing mechanics".to_string()),
-        completion: "CoW allocates physical pages only when divergent tokens are written to a shared block.".to_string(),
+        completion:
+            "CoW allocates physical pages only when divergent tokens are written to a shared block."
+                .to_string(),
         provider: "sovereign-lab".to_string(),
         model: "atlas-omni-reasoning".to_string(),
         token_count: 32,
@@ -15,14 +17,22 @@ fn create_test_pair() -> ExtractedPair {
     }
 }
 
+fn create_authority_keys() -> (SigningKey, p256::ecdsa::VerifyingKey) {
+    let signing_key = SigningKey::from_slice(&[42u8; 32]).expect("valid signing key");
+    let verifying_key = *signing_key.verifying_key();
+    (signing_key, verifying_key)
+}
+
 #[test]
 fn test_rights_gated_training_bundle_admitted_with_valid_grant() {
-    let grant = SourceGrant::new(
+    let (sk, vk) = create_authority_keys();
+    let mut grant = SourceGrant::new(
         "https://hf.co/datasets/aien/sovereign-math".to_string(),
         "Apache-2.0".to_string(),
         GrantPermissions::TRAIN | GrantPermissions::DISTILL,
         "Atlas Rights Authority".to_string(),
     );
+    grant.sign(&sk);
 
     let pairs = vec![create_test_pair()];
     let bundle = RightsGate::validate_and_bundle(
@@ -30,22 +40,27 @@ fn test_rights_gated_training_bundle_admitted_with_valid_grant() {
         &pairs,
         BundleKind::Training,
         &["Apache-2.0", "MIT", "SRCL-1.0"],
+        &vk,
     )
-    .expect("Valid training grant must be accepted");
+    .expect("Valid signed training grant must be accepted");
 
     assert_eq!(bundle.bundle_kind, BundleKind::Training);
     assert_eq!(bundle.records.len(), 1);
     assert_ne!(bundle.merkle_root, aien_protocol_types::Digest32::ZERO);
-    assert_eq!(bundle.records[0].source_uri, "https://hf.co/datasets/aien/sovereign-math");
+    assert_eq!(
+        bundle.records[0].source_uri,
+        "https://hf.co/datasets/aien/sovereign-math"
+    );
 }
 
 #[test]
-fn test_unapproved_license_rejected() {
+fn test_unsigned_grant_rejected_fails_closed() {
+    let (_sk, vk) = create_authority_keys();
     let grant = SourceGrant::new(
-        "https://example.com/proprietary-dataset".to_string(),
-        "CC-BY-NC-4.0".to_string(),
+        "https://hf.co/datasets/aien/unsigned-dataset".to_string(),
+        "Apache-2.0".to_string(),
         GrantPermissions::TRAIN,
-        "Untrusted Third Party".to_string(),
+        "Unauthenticated Issuer".to_string(),
     );
 
     let pairs = vec![create_test_pair()];
@@ -54,6 +69,36 @@ fn test_unapproved_license_rejected() {
         &pairs,
         BundleKind::Training,
         &["Apache-2.0", "MIT", "SRCL-1.0"],
+        &vk,
+    );
+
+    match res {
+        Err(ProvenanceError::MissingSignature) => {}
+        other => panic!(
+            "Expected MissingSignature for unsigned grant, got {:?}",
+            other
+        ),
+    }
+}
+
+#[test]
+fn test_unapproved_license_rejected() {
+    let (sk, vk) = create_authority_keys();
+    let mut grant = SourceGrant::new(
+        "https://example.com/proprietary-dataset".to_string(),
+        "CC-BY-NC-4.0".to_string(),
+        GrantPermissions::TRAIN,
+        "Untrusted Third Party".to_string(),
+    );
+    grant.sign(&sk);
+
+    let pairs = vec![create_test_pair()];
+    let res = RightsGate::validate_and_bundle(
+        &grant,
+        &pairs,
+        BundleKind::Training,
+        &["Apache-2.0", "MIT", "SRCL-1.0"],
+        &vk,
     );
 
     match res {
@@ -66,12 +111,14 @@ fn test_unapproved_license_rejected() {
 
 #[test]
 fn test_missing_permission_rejected() {
-    let grant = SourceGrant::new(
+    let (sk, vk) = create_authority_keys();
+    let mut grant = SourceGrant::new(
         "https://hf.co/datasets/aien/eval-set".to_string(),
         "MIT".to_string(),
         GrantPermissions::EVALUATE, // Only EVALUATE, not TRAIN
         "Atlas Rights Authority".to_string(),
     );
+    grant.sign(&sk);
 
     let pairs = vec![create_test_pair()];
     let res = RightsGate::validate_and_bundle(
@@ -79,6 +126,7 @@ fn test_missing_permission_rejected() {
         &pairs,
         BundleKind::Training,
         &["Apache-2.0", "MIT", "SRCL-1.0"],
+        &vk,
     );
 
     match res {
@@ -92,6 +140,7 @@ fn test_missing_permission_rejected() {
 
 #[test]
 fn test_expired_grant_rejected() {
+    let (sk, vk) = create_authority_keys();
     let mut grant = SourceGrant::new(
         "https://hf.co/datasets/aien/expired-set".to_string(),
         "MIT".to_string(),
@@ -99,6 +148,7 @@ fn test_expired_grant_rejected() {
         "Atlas Rights Authority".to_string(),
     );
     grant.expires_at_epoch_sec = Some(1000); // Far in the past
+    grant.sign(&sk);
 
     let pairs = vec![create_test_pair()];
     let res = RightsGate::validate_and_bundle(
@@ -106,6 +156,7 @@ fn test_expired_grant_rejected() {
         &pairs,
         BundleKind::Training,
         &["Apache-2.0", "MIT", "SRCL-1.0"],
+        &vk,
     );
 
     match res {
@@ -130,12 +181,12 @@ fn test_cryptographic_signature_verification() {
     grant.sign(&signing_key);
 
     let pairs = vec![create_test_pair()];
-    let bundle = RightsGate::validate_and_bundle_with_key(
+    let bundle = RightsGate::validate_and_bundle(
         &grant,
         &pairs,
         BundleKind::Training,
         &["Apache-2.0", "MIT", "SRCL-1.0"],
-        Some(&verifying_key),
+        &verifying_key,
     )
     .expect("Signed grant must be accepted");
     assert_eq!(bundle.records.len(), 1);
@@ -143,27 +194,47 @@ fn test_cryptographic_signature_verification() {
     // Tampering with grant fails signature verification
     let mut tampered_grant = grant.clone();
     tampered_grant.license_spdx = "Apache-2.0".to_string();
-    let tamper_res = RightsGate::validate_and_bundle_with_key(
+    let tamper_res = RightsGate::validate_and_bundle(
         &tampered_grant,
         &pairs,
         BundleKind::Training,
         &["Apache-2.0", "MIT", "SRCL-1.0"],
-        Some(&verifying_key),
+        &verifying_key,
     );
     match tamper_res {
         Err(ProvenanceError::SignatureVerificationFailed(_)) => {}
         other => panic!("Expected SignatureVerificationFailed, got {:?}", other),
     }
+
+    // Wrong authority key fails signature verification
+    let wrong_signing_key = SigningKey::from_slice(&[99u8; 32]).unwrap();
+    let wrong_verifying_key = *wrong_signing_key.verifying_key();
+    let wrong_key_res = RightsGate::validate_and_bundle(
+        &grant,
+        &pairs,
+        BundleKind::Training,
+        &["Apache-2.0", "MIT", "SRCL-1.0"],
+        &wrong_verifying_key,
+    );
+    match wrong_key_res {
+        Err(ProvenanceError::SignatureVerificationFailed(_)) => {}
+        other => panic!(
+            "Expected SignatureVerificationFailed with wrong key, got {:?}",
+            other
+        ),
+    }
 }
 
 #[test]
 fn test_evidence_bundle_quarantine_enforced() {
-    let grant = SourceGrant::new(
+    let (sk, vk) = create_authority_keys();
+    let mut grant = SourceGrant::new(
         "https://hf.co/datasets/aien/benchmark-evidence".to_string(),
         "MIT".to_string(),
         GrantPermissions::EVALUATE,
         "Atlas Rights Authority".to_string(),
     );
+    grant.sign(&sk);
 
     let pairs = vec![create_test_pair()];
     let bundle = RightsGate::validate_and_bundle(
@@ -171,6 +242,7 @@ fn test_evidence_bundle_quarantine_enforced() {
         &pairs,
         BundleKind::Evidence,
         &["Apache-2.0", "MIT", "SRCL-1.0"],
+        &vk,
     )
     .expect("Evidence grant must be accepted");
 
@@ -196,14 +268,16 @@ fn test_evidence_bundle_quarantine_enforced() {
 
     // 3. Exporting to quarantine evidence path succeeds
     let evidence_path = tmp.path().join("evidence_audit.jsonl");
-    let count = RightsGate::export_bundle(&bundle, &evidence_path).expect("Evidence export must succeed");
+    let count =
+        RightsGate::export_bundle(&bundle, &evidence_path).expect("Evidence export must succeed");
     assert_eq!(count, 1);
     assert!(evidence_path.exists());
 
     let quarantine_dir = tmp.path().join("quarantine");
     std::fs::create_dir_all(&quarantine_dir).unwrap();
     let q_path = quarantine_dir.join("records.jsonl");
-    let q_count = RightsGate::export_bundle(&bundle, &q_path).expect("Quarantine export must succeed");
+    let q_count =
+        RightsGate::export_bundle(&bundle, &q_path).expect("Quarantine export must succeed");
     assert_eq!(q_count, 1);
     assert!(q_path.exists());
 }

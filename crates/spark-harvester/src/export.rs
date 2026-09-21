@@ -7,7 +7,8 @@ use std::path::Path;
 pub struct DatasetExporter;
 
 impl DatasetExporter {
-    pub fn append_to_jsonl(path: &Path, pairs: &[ExtractedPair]) -> io::Result<usize> {
+    #[allow(dead_code)]
+    pub(crate) fn append_to_jsonl(path: &Path, pairs: &[ExtractedPair]) -> io::Result<usize> {
         let mut file = OpenOptions::new().create(true).append(true).open(path)?;
 
         let mut written = 0;
