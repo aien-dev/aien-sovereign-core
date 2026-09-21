@@ -45,24 +45,16 @@ impl EmbeddedModel {
 
     pub fn with_reference_weights(config: &ModelConfig) -> Result<Self, String> {
         let transformer = NativeTransformerBackend::with_reference_weights(config);
-        let tokenizer_path = find_tokenizer_path().unwrap_or_else(|| {
-            PathBuf::from("/home/drakestapleton/.cache/huggingface/hub/models--TinyLlama--TinyLlama-1.1B-Chat-v1.0/snapshots/fe8a4ea1ffedaf415f4da2f062534de366a451e6/tokenizer.json")
-        });
+        let tokenizer_path = find_tokenizer_path()
+            .ok_or_else(|| "No valid tokenizer.json found on filesystem".to_string())?;
 
-        let tokenizer = if tokenizer_path.exists() {
-            TinyLlamaTokenizer::from_file(&tokenizer_path)
-                .map_err(|e| format!("Failed to load tokenizer: {}", e))?
-        } else {
-            let fixture_path = PathBuf::from(
-                "/home/drakestapleton/workspace/aien-sovereign-core/crates/aien-inference-abi/fixtures/tokenizer.json",
-            );
-            if fixture_path.exists() {
-                TinyLlamaTokenizer::from_file(&fixture_path)
-                    .map_err(|e| format!("Failed to load fixture tokenizer: {}", e))?
-            } else {
-                return Err("No valid tokenizer.json found on filesystem".to_string());
-            }
-        };
+        let tokenizer = TinyLlamaTokenizer::from_file(&tokenizer_path).map_err(|e| {
+            format!(
+                "Failed to load tokenizer from {}: {}",
+                tokenizer_path.display(),
+                e
+            )
+        })?;
 
         Ok(Self {
             tokenizer,
@@ -237,11 +229,18 @@ fn find_tokenizer_path() -> Option<PathBuf> {
         }
     }
 
-    let default_snap = PathBuf::from(
-        "/home/drakestapleton/.cache/huggingface/hub/models--TinyLlama--TinyLlama-1.1B-Chat-v1.0/snapshots/fe8a4ea1ffedaf415f4da2f062534de366a451e6/tokenizer.json",
-    );
-    if default_snap.exists() {
-        return Some(default_snap);
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let candidates = [
+        manifest_dir.join("../aien-inference-abi/fixtures/tokenizer.json"),
+        manifest_dir.join("fixtures/tokenizer.json"),
+        PathBuf::from("crates/aien-inference-abi/fixtures/tokenizer.json"),
+        PathBuf::from("/home/drakestapleton/.cache/huggingface/hub/models--TinyLlama--TinyLlama-1.1B-Chat-v1.0/snapshots/fe8a4ea1ffedaf415f4da2f062534de366a451e6/tokenizer.json"),
+    ];
+
+    for c in &candidates {
+        if c.exists() {
+            return Some(c.clone());
+        }
     }
 
     None
