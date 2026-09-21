@@ -1,4 +1,5 @@
 use clap::{Parser, Subcommand};
+use p256::pkcs8::DecodePublicKey;
 use std::path::PathBuf;
 use tracing::{info, Level};
 use tracing_subscriber::FmtSubscriber;
@@ -34,6 +35,12 @@ enum Commands {
         /// Inline JSON string of SourceGrant
         #[arg(long)]
         grant_json: Option<String>,
+        /// Authority verifying key (hex-encoded SEC1 or PEM)
+        #[arg(long)]
+        authority_key: Option<String>,
+        /// Path to PEM or SEC1 file containing authority verifying key
+        #[arg(long)]
+        authority_key_file: Option<PathBuf>,
         /// Optional output path for gated bundle
         #[arg(short, long)]
         output: Option<PathBuf>,
@@ -51,6 +58,12 @@ enum Commands {
         /// Inline JSON string of SourceGrant
         #[arg(long)]
         grant_json: Option<String>,
+        /// Authority verifying key (hex-encoded SEC1 or PEM)
+        #[arg(long)]
+        authority_key: Option<String>,
+        /// Path to PEM or SEC1 file containing authority verifying key
+        #[arg(long)]
+        authority_key_file: Option<PathBuf>,
     },
     /// Display pipeline status
     Status,
@@ -70,6 +83,51 @@ fn load_grant(
     } else {
         Err("SourceGrant required: Pass --grant-file <PATH> or --grant-json <JSON> to prove rights admission. Unlicensed extraction is strictly rejected.".into())
     }
+}
+
+fn load_authority_key(
+    authority_key: Option<&str>,
+    authority_key_file: Option<&PathBuf>,
+) -> Result<p256::ecdsa::VerifyingKey, Box<dyn std::error::Error>> {
+    if let Some(path) = authority_key_file {
+        let content = std::fs::read_to_string(path)?;
+        let trimmed = content.trim();
+        if trimmed.starts_with("-----BEGIN") {
+            let vk = p256::ecdsa::VerifyingKey::from_public_key_pem(trimmed)?;
+            return Ok(vk);
+        }
+        if let Ok(bytes) = hex::decode(trimmed) {
+            let vk = p256::ecdsa::VerifyingKey::from_sec1_bytes(&bytes)?;
+            return Ok(vk);
+        }
+        let raw = std::fs::read(path)?;
+        let vk = p256::ecdsa::VerifyingKey::from_sec1_bytes(&raw)?;
+        return Ok(vk);
+    }
+    if let Some(k) = authority_key {
+        let trimmed = k.trim();
+        if trimmed.starts_with("-----BEGIN") {
+            let vk = p256::ecdsa::VerifyingKey::from_public_key_pem(trimmed)?;
+            return Ok(vk);
+        }
+        let bytes = hex::decode(trimmed)?;
+        let vk = p256::ecdsa::VerifyingKey::from_sec1_bytes(&bytes)?;
+        return Ok(vk);
+    }
+    if let Ok(vault_val) =
+        spark_harvester::HarvesterClient::resolve_vault_key("ATLAS_AUTHORITY_PUBKEY")
+    {
+        let trimmed = vault_val.trim();
+        if trimmed.starts_with("-----BEGIN") {
+            let vk = p256::ecdsa::VerifyingKey::from_public_key_pem(trimmed)?;
+            return Ok(vk);
+        }
+        if let Ok(bytes) = hex::decode(trimmed) {
+            let vk = p256::ecdsa::VerifyingKey::from_sec1_bytes(&bytes)?;
+            return Ok(vk);
+        }
+    }
+    Err("Authority verifying key required: pass --authority-key <HEX_OR_PEM>, --authority-key-file <PATH>, or register ATLAS_AUTHORITY_PUBKEY in atlas-vault.".into())
 }
 
 fn parse_bundle_kind(s: &str) -> Result<BundleKind, String> {
@@ -108,10 +166,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             model,
             grant_file,
             grant_json,
+            authority_key,
+            authority_key_file,
             output,
             bundle_kind,
         } => {
             let grant = load_grant(grant_file.as_ref(), grant_json.as_deref())?;
+            let authority_vk =
+                load_authority_key(authority_key.as_deref(), authority_key_file.as_ref())?;
             let kind = parse_bundle_kind(&bundle_kind)?;
 
             let extractor = ReasoningExtractor::new();
@@ -126,6 +188,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 &[pair],
                 kind,
                 DEFAULT_ALLOWED_LICENSES,
+                &authority_vk,
             )?;
             info!(
                 "RightsGate accepted bundle: ID={}, MerkleRoot={:?}",
@@ -143,8 +206,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             output,
             grant_file,
             grant_json,
+            authority_key,
+            authority_key_file,
         } => {
             let grant = load_grant(grant_file.as_ref(), grant_json.as_deref())?;
+            let authority_vk =
+                load_authority_key(authority_key.as_deref(), authority_key_file.as_ref())?;
 
             info!("Preparing distillation with SourceGrant {}", grant.grant_id);
             let sample_pair = ExtractedPair {
@@ -162,10 +229,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 &[sample_pair],
                 BundleKind::Distillation,
                 DEFAULT_ALLOWED_LICENSES,
+                &authority_vk,
             )?;
 
             let count = RightsGate::export_bundle(&bundle, &output)?;
-            info!("Appended {} verified rights-gated pairs to {:?}", count, output);
+            info!(
+                "Appended {} verified rights-gated pairs to {:?}",
+                count, output
+            );
         }
         Commands::Status => {
             println!("AIEN Sovereign Harvester Pipeline Active");

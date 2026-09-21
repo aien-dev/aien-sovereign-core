@@ -56,32 +56,20 @@ pub struct RightsGate;
 
 impl RightsGate {
     /// Validates an array of extracted pairs against a SourceGrant and builds an immutable GatedDatasetBundle.
-    /// Fails closed if the grant is expired, lacks required permissions, or contains an unapproved license.
+    /// Cryptographic signature verification against the authority verifying key is mandatory and fails closed.
     pub fn validate_and_bundle(
         grant: &SourceGrant,
         pairs: &[ExtractedPair],
         bundle_kind: BundleKind,
         allowed_licenses: &[&str],
-    ) -> Result<GatedDatasetBundle, ProvenanceError> {
-        Self::validate_and_bundle_with_key(grant, pairs, bundle_kind, allowed_licenses, None)
-    }
-
-    /// Validates an array of extracted pairs against a SourceGrant with optional cryptographic signature check.
-    pub fn validate_and_bundle_with_key(
-        grant: &SourceGrant,
-        pairs: &[ExtractedPair],
-        bundle_kind: BundleKind,
-        allowed_licenses: &[&str],
-        verifying_key: Option<&p256::ecdsa::VerifyingKey>,
+        authority_verifying_key: &p256::ecdsa::VerifyingKey,
     ) -> Result<GatedDatasetBundle, ProvenanceError> {
         // 1. Verify temporal validity
         let now = chrono::Utc::now().timestamp() as u64;
         grant.verify_validity(now)?;
 
-        // 2. Verify cryptographic signature if key is supplied
-        if let Some(vk) = verifying_key {
-            grant.verify_signature(vk)?;
-        }
+        // 2. Mandatory cryptographic signature verification
+        grant.verify_signature(authority_verifying_key)?;
 
         // 3. Verify license compatibility
         grant.verify_license(allowed_licenses)?;
@@ -195,11 +183,11 @@ impl RightsGate {
             let mut next = Vec::new();
             for chunk in current.chunks(2) {
                 let mut hasher = Sha256::new();
-                hasher.update(&chunk[0].0);
+                hasher.update(chunk[0].0);
                 if chunk.len() > 1 {
-                    hasher.update(&chunk[1].0);
+                    hasher.update(chunk[1].0);
                 } else {
-                    hasher.update(&chunk[0].0);
+                    hasher.update(chunk[0].0);
                 }
                 next.push(Digest32(hasher.finalize().into()));
             }

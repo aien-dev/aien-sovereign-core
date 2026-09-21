@@ -284,7 +284,11 @@ impl NativeTransformerBackend {
     }
 
     /// Ingests multiple branch-specific delta tokens sequentially.
-    pub fn append_branch_tokens(&mut self, branch: BranchHandle, tokens: &[u32]) -> Result<(), String> {
+    pub fn append_branch_tokens(
+        &mut self,
+        branch: BranchHandle,
+        tokens: &[u32],
+    ) -> Result<(), String> {
         for &tok in tokens {
             self.append_branch_token(branch, tok)?;
         }

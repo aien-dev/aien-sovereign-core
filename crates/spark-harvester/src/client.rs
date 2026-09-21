@@ -68,7 +68,7 @@ impl HarvesterClient {
         }
     }
 
-    pub async fn query_openai_compat(
+    pub(crate) async fn query_openai_compat(
         &self,
         endpoint_url: &str,
         api_key: &str,
@@ -111,10 +111,15 @@ impl HarvesterClient {
         model: &str,
         prompt: &str,
         grant: &SourceGrant,
+        authority_verifying_key: &p256::ecdsa::VerifyingKey,
     ) -> Result<String, ClientError> {
         let now = chrono::Utc::now().timestamp() as u64;
         grant
             .verify_validity(now)
+            .map_err(|e| ClientError::RightsDenied(e.to_string()))?;
+
+        grant
+            .verify_signature(authority_verifying_key)
             .map_err(|e| ClientError::RightsDenied(e.to_string()))?;
 
         grant

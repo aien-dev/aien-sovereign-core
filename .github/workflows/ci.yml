@@ -18,6 +18,17 @@ jobs:
       - name: Checkout Source
         uses: actions/checkout@v4
 
+      - name: Checkout Sibling Protocols Dependency
+        uses: actions/checkout@v4
+        with:
+          repository: aien-dev/aien-protocols
+          path: aien-protocols
+
+      - name: Setup Sibling Dependencies
+        run: |
+          mkdir -p ../aien-protocols
+          cp -r aien-protocols/* ../aien-protocols/
+
       - name: Install Stable Rust Toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -33,7 +44,7 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
 
       - name: Run Workspace Unit and Integration Tests
-        run: cargo test --workspace --verbose
+        run: cargo test --workspace --verbose -- --test-threads=1
 
       - name: Enforce Zero Disk Secrets Invariant
         run: |
@@ -47,7 +58,7 @@ jobs:
       - name: Enforce Sovereign Voice and Anti-Slop Invariant
         run: |
           echo "Auditing repository for em dashes, en dashes, and formulaic tropes..."
-          BAD_CHARS=$(grep -rnE --exclude-dir=target --exclude-dir=.git --exclude="*.rs" --exclude="*.json" --exclude="*.safetensors" --exclude="FORGEJO_CI.md" "—|–" crates/ docs/ README.md || true)
+          BAD_CHARS=$(grep -rnE --exclude-dir=target --exclude-dir=.git --exclude-dir=aien-protocols --exclude="*.rs" --exclude="*.json" --exclude="*.safetensors" --exclude="FORGEJO_CI.md" "—|–" crates/ docs/ README.md || true)
           if [ -n "$BAD_CHARS" ]; then
             echo "::error::Em dashes or en dashes detected:"
             echo "$BAD_CHARS"
