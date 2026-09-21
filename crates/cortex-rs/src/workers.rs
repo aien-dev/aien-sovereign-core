@@ -1,7 +1,7 @@
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
 
-use crate::db::Database;
+use crate::db::{Database, SessionSummaryWrite};
 use crate::models::{CandidateWriteInput, MemoryCandidate, SessionSummary, VerificationTier};
 use crate::security::{SafeEventView, SecurityMembrane};
 
@@ -72,16 +72,16 @@ impl SummaryWorker {
         };
 
         // Insert Level-0 summary
-        let summary = self.db.insert_session_summary(
+        let summary = self.db.insert_session_summary(&SessionSummaryWrite {
             session_id,
             branch_id,
-            0,
+            level: 0,
             start_seq,
             end_seq,
-            &summary_text,
-            &source_hash,
-            SUMMARY_PROCESSOR_VERSION,
-        )?;
+            summary_text: &summary_text,
+            source_hash: &source_hash,
+            processor_version: SUMMARY_PROCESSOR_VERSION,
+        })?;
 
         // Advance summary watermark
         self.db
@@ -105,16 +105,16 @@ impl SummaryWorker {
             let h_hash = format!("SHA256:{:x}", h_hasher.finalize());
             let h_text = format!("Hierarchical Summary (L1): {}", h_text_parts.join(" => "));
 
-            let _ = self.db.insert_session_summary(
+            let _ = self.db.insert_session_summary(&SessionSummaryWrite {
                 session_id,
                 branch_id,
-                1,
-                h_start,
-                h_end,
-                &h_text,
-                &h_hash,
-                SUMMARY_PROCESSOR_VERSION,
-            );
+                level: 1,
+                start_seq: h_start,
+                end_seq: h_end,
+                summary_text: &h_text,
+                source_hash: &h_hash,
+                processor_version: SUMMARY_PROCESSOR_VERSION,
+            });
         }
 
         Ok(Some(summary))

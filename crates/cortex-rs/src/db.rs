@@ -216,7 +216,7 @@ pub struct LegacyConnAdapter {
 }
 
 impl LegacyConnAdapter {
-    pub fn lock(&self) -> std::sync::LockResult<LegacyConnGuard> {
+    pub fn lock(&self) -> Result<LegacyConnGuard, Box<std::sync::PoisonError<LegacyConnGuard>>> {
         let conn = self
             .reader_pool
             .acquire()
@@ -247,6 +247,17 @@ fn ensure_space_internal(conn: &Connection, slug: &str) -> Result<String> {
         params![new_id, slug, now],
     )?;
     Ok(new_id)
+}
+
+pub struct SessionSummaryWrite<'a> {
+    pub session_id: &'a str,
+    pub branch_id: &'a str,
+    pub level: i64,
+    pub start_seq: i64,
+    pub end_seq: i64,
+    pub summary_text: &'a str,
+    pub source_hash: &'a str,
+    pub processor_version: &'a str,
 }
 
 impl Database {
@@ -1236,7 +1247,7 @@ impl Database {
         input: &SessionEventInput,
     ) -> Result<CortexSessionEvent> {
         let branch = input.branch_id.as_deref().unwrap_or("main");
-        let results = self.batch_append_events(session_id, branch, &[input.clone()])?;
+        let results = self.batch_append_events(session_id, branch, std::slice::from_ref(input))?;
         results.into_iter().next().ok_or_else(|| {
             rusqlite::Error::SqliteFailure(
                 rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_INTERNAL),
@@ -1476,24 +1487,17 @@ impl Database {
     // Summaries, Candidates & Provenance (Phases 2 & 3)
     // =========================================================================
 
-    pub fn insert_session_summary(
-        &self,
-        session_id: &str,
-        branch_id: &str,
-        level: i64,
-        start_seq: i64,
-        end_seq: i64,
-        summary_text: &str,
-        source_hash: &str,
-        processor_version: &str,
-    ) -> Result<SessionSummary> {
+    pub fn insert_session_summary(&self, input: &SessionSummaryWrite) -> Result<SessionSummary> {
         let id = Uuid::new_v4().to_string();
         let now = Utc::now().to_rfc3339();
-        let sid = session_id.to_string();
-        let bid = branch_id.to_string();
-        let text = summary_text.to_string();
-        let hash = source_hash.to_string();
-        let ver = processor_version.to_string();
+        let sid = input.session_id.to_string();
+        let bid = input.branch_id.to_string();
+        let level = input.level;
+        let start_seq = input.start_seq;
+        let end_seq = input.end_seq;
+        let text = input.summary_text.to_string();
+        let hash = input.source_hash.to_string();
+        let ver = input.processor_version.to_string();
 
         let summary = SessionSummary {
             id: id.clone(),
