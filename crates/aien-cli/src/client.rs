@@ -6,10 +6,9 @@ use std::io::{stdout, Write};
 use std::time::Duration;
 
 pub const DEFAULT_ENDPOINT: &str = "http://127.0.0.1:18006/v1/chat/completions";
-pub const DEFAULT_MODEL: &str = "atlas-lightning-omni";
+pub const DEFAULT_MODEL: &str = "astrosage-70b";
 
-/// Explicit chat execution path. Native runtime is canonical.
-/// The 18006 HTTP service remains only as a compatibility adapter.
+/// Explicit chat execution path. Native mode requires a matching local model.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ChatBackend {
     NativeRuntime,
@@ -30,22 +29,17 @@ pub fn resolve_chat_backend() -> ChatBackend {
             return ChatBackend::NativeRuntime;
         }
     }
-    let sock = aien_runtime::client::AienRuntimeClient::default_socket_path();
-    if sock.exists() {
-        ChatBackend::NativeRuntime
-    } else {
-        ChatBackend::RemoteAdapter(
-            std::env::var("AIEN_MODEL_ENDPOINT")
-                .ok()
-                .filter(|s| !s.trim().is_empty())
-                .unwrap_or_else(|| DEFAULT_ENDPOINT.to_string()),
-        )
-    }
+    ChatBackend::RemoteAdapter(
+        std::env::var("AIEN_MODEL_ENDPOINT")
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| DEFAULT_ENDPOINT.to_string()),
+    )
 }
 
 pub fn describe_chat_backend(backend: &ChatBackend) -> String {
     match backend {
-        ChatBackend::NativeRuntime => "native runtime (canonical)".to_string(),
+        ChatBackend::NativeRuntime => "native runtime (explicit)".to_string(),
         ChatBackend::RemoteAdapter(ep) => format!("remote adapter (compatibility): {}", ep),
     }
 }
@@ -167,14 +161,19 @@ impl ChatClient {
         let ep = endpoint
             .or_else(|| std::env::var("AIEN_MODEL_ENDPOINT").ok())
             .unwrap_or_else(|| DEFAULT_ENDPOINT.to_string());
-        let md = model
-            .or_else(|| std::env::var("AIEN_MODEL_NAME").ok())
-            .unwrap_or_else(|| DEFAULT_MODEL.to_string());
         let backend = if explicit_endpoint {
             ChatBackend::RemoteAdapter(ep.clone())
         } else {
             resolve_chat_backend()
         };
+        let md = model
+            .or_else(|| std::env::var("AIEN_MODEL_NAME").ok())
+            .unwrap_or_else(|| match &backend {
+                ChatBackend::NativeRuntime => {
+                    aien_inference_abi::ModelConfig::tinyllama_1_1b().model_id
+                }
+                ChatBackend::RemoteAdapter(_) => DEFAULT_MODEL.to_string(),
+            });
         let client = Client::builder()
             .connect_timeout(Duration::from_secs(10))
             .read_timeout(Duration::from_secs(120))
@@ -203,7 +202,15 @@ impl ChatClient {
         stream_to_stdout: bool,
         max_tokens: usize,
     ) -> Result<String, String> {
-        emit_chat_telemetry(&self.backend, &self.model);
+        if self.backend == ChatBackend::NativeRuntime {
+            let result = self
+                .stream_native(messages, stream_to_stdout, max_tokens)
+                .await;
+            if result.is_ok() {
+                emit_chat_telemetry(&self.backend, &self.model);
+            }
+            return result;
+        }
         let payload = json!({
             "model": self.model,
             "messages": messages,
@@ -226,6 +233,7 @@ impl ChatClient {
             let err_text = res.text().await.unwrap_or_default();
             return Err(format!("Model HTTP {}: {}", status, err_text));
         }
+        emit_chat_telemetry(&self.backend, &self.model);
 
         let mut stream = res.bytes_stream();
         let mut full_text = String::new();
@@ -302,6 +310,84 @@ impl ChatClient {
 
         Ok(full_text)
     }
+
+    async fn stream_native(
+        &self,
+        messages: &[Value],
+        stream_to_stdout: bool,
+        max_tokens: usize,
+    ) -> Result<String, String> {
+        let expected = aien_inference_abi::ModelConfig::tinyllama_1_1b().model_id;
+        if self.model != expected {
+            return Err(format!("Native model '{}' is unsupported by this tokenizer path; configure the remote adapter explicitly", self.model));
+        }
+        let model_dir = std::env::var("AIEN_MODEL_DIR")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|_| {
+                std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default())
+                    .join("models/TinyLlama-1.1B-Chat-v1.0")
+            });
+        let tokenizer =
+            aien_inference_abi::TinyLlamaTokenizer::from_file(model_dir.join("tokenizer.json"))
+                .map_err(|e| e.to_string())?;
+        let prompt = format_native_chat_prompt(messages)?;
+        let prompt_tokens = tokenizer.encode(&prompt).map_err(|e| e.to_string())?;
+        let mut output_tokens = Vec::new();
+        let mut printed = String::new();
+        let runtime = aien_runtime::client::AienRuntimeClient::default_client();
+        runtime
+            .generate_tokens(
+                aien_runtime::control::GenerateReq {
+                    model_id: self.model.clone(),
+                    prompt_tokens,
+                    max_tokens,
+                    temperature: 0.2,
+                },
+                |token| {
+                    output_tokens.push(token);
+                    if stream_to_stdout {
+                        if let Ok(decoded) = tokenizer.decode_opts(&output_tokens, true) {
+                            if let Some(delta) = decoded.strip_prefix(&printed) {
+                                print!("{}", delta);
+                                let _ = stdout().flush();
+                                printed = decoded;
+                            }
+                        }
+                    }
+                },
+            )
+            .await?;
+        let text = tokenizer
+            .decode_opts(&output_tokens, true)
+            .map_err(|e| e.to_string())?;
+        if stream_to_stdout {
+            if let Some(delta) = text.strip_prefix(&printed) {
+                print!("{}", delta);
+            }
+            println!();
+        }
+        Ok(text)
+    }
+}
+
+fn format_native_chat_prompt(messages: &[Value]) -> Result<String, String> {
+    let mut prompt = String::new();
+    for message in messages {
+        let role = message
+            .get("role")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "Chat message has no role".to_string())?;
+        if !matches!(role, "system" | "user" | "assistant") {
+            return Err(format!("Native chat does not support role '{}'", role));
+        }
+        let content = message
+            .get("content")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "Native chat requires text message content".to_string())?;
+        prompt.push_str(&format!("<|{}|>\n{}</s>\n", role, content.trim()));
+    }
+    prompt.push_str("<|assistant|>\n");
+    Ok(prompt)
 }
 
 fn parse_tool_call_json(raw: &str) -> Option<Value> {

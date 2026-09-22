@@ -2,7 +2,8 @@
 //! Used by aien-cli to communicate with the in-process runtime daemon.
 
 use crate::control::{
-    ControlCommand, ControlEnvelope, ControlResponse, LaunchSwarmReq, RuntimeStatusReport,
+    ControlCommand, ControlEnvelope, ControlResponse, GenerateReq, LaunchSwarmReq,
+    RuntimeStatusReport,
 };
 use std::path::{Path, PathBuf};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -34,6 +35,79 @@ impl AienRuntimeClient {
 
     pub async fn is_alive(&self) -> bool {
         self.get_status().await.is_ok()
+    }
+
+    pub async fn generate_tokens<F>(
+        &self,
+        request: GenerateReq,
+        mut on_token: F,
+    ) -> Result<(), String>
+    where
+        F: FnMut(u32),
+    {
+        let stream = UnixStream::connect(&self.socket_path)
+            .await
+            .map_err(|e| format!("Failed to connect to AIEN runtime socket: {}", e))?;
+        let (reader, mut writer) = stream.into_split();
+        let mut reader = BufReader::new(reader);
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default();
+        let envelope = ControlEnvelope {
+            protocol_version: 1,
+            request_id: now.as_millis() as u64,
+            operation_id: now.as_nanos(),
+            operator_session: 1,
+            command: ControlCommand::Generate(request.clone()),
+        };
+        let mut payload = serde_json::to_string(&envelope).map_err(|e| e.to_string())?;
+        payload.push('\n');
+        writer
+            .write_all(payload.as_bytes())
+            .await
+            .map_err(|e| e.to_string())?;
+        let mut line = String::new();
+        let mut started = false;
+        let mut seq_id = 0;
+        loop {
+            line.clear();
+            let read = reader
+                .read_line(&mut line)
+                .await
+                .map_err(|e| e.to_string())?;
+            if read == 0 {
+                return Err("Runtime closed the generation stream before completion".to_string());
+            }
+            let response: ControlResponse =
+                serde_json::from_str(line.trim()).map_err(|e| e.to_string())?;
+            match response {
+                ControlResponse::GenerationStarted {
+                    model_id,
+                    seq_id: id,
+                } if !started => {
+                    if model_id != request.model_id {
+                        return Err(format!(
+                            "Runtime executed model '{}', requested '{}'",
+                            model_id, request.model_id
+                        ));
+                    }
+                    started = true;
+                    seq_id = id;
+                }
+                ControlResponse::GenerationToken { seq_id: id, token }
+                    if started && id == seq_id =>
+                {
+                    on_token(token)
+                }
+                ControlResponse::GenerationFinished { seq_id: id, .. }
+                    if started && id == seq_id =>
+                {
+                    return Ok(())
+                }
+                ControlResponse::Error(error) => return Err(error),
+                other => return Err(format!("Unexpected generation response: {:?}", other)),
+            }
+        }
     }
 
     pub async fn send_command(&self, command: ControlCommand) -> Result<ControlResponse, String> {

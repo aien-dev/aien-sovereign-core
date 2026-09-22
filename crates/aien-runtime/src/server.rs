@@ -1,9 +1,11 @@
 //! Local UNIX domain socket server for AienRuntimeSpine
 //! Exposes typed control RPC over local IPC to operator CLI tools.
 
-use crate::control::{ControlCommand, ControlEnvelope, ControlResponse};
+use crate::control::{ControlCommand, ControlEnvelope, ControlResponse, GenerateReq};
 use crate::spine::AienRuntimeSpine;
 use aien_inference_abi::AienInferenceBackend;
+use aien_inference_abi::SamplingParams;
+use aien_scheduler::{ChannelCompletionSink, CompletionEvent, PromptHandle};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -39,7 +41,16 @@ impl AienRuntimeServer {
     /// Runs the runtime server, accepting control connections and advancing the engine step loop.
     pub async fn run<B: AienInferenceBackend + Send + 'static>(
         &self,
+        backend: B,
+    ) -> Result<(), String> {
+        self.run_named(backend, "unconfigured").await
+    }
+
+    /// The name must identify the model whose weights the backend actually loaded.
+    pub async fn run_named<B: AienInferenceBackend + Send + 'static>(
+        &self,
         mut backend: B,
+        model_id: &str,
     ) -> Result<(), String> {
         // Clean up stale socket file if it exists and refuses connection
         if self.socket_path.exists() {
@@ -66,6 +77,7 @@ impl AienRuntimeServer {
                 e
             )
         })?;
+        let model_id = Arc::new(model_id.to_string());
 
         self.is_running.store(true, Ordering::SeqCst);
 
@@ -102,9 +114,10 @@ impl AienRuntimeServer {
                             let spine_conn = self.spine.clone();
                             let is_running_conn = self.is_running.clone();
                             let notify_conn = self.shutdown_notify.clone();
+                            let model_id_conn = model_id.clone();
 
                             tokio::spawn(async move {
-                                handle_connection(stream, spine_conn, is_running_conn, notify_conn).await;
+                                handle_connection(stream, spine_conn, is_running_conn, notify_conn, model_id_conn).await;
                             });
                         }
                         Err(e) => {
@@ -135,6 +148,7 @@ async fn handle_connection(
     spine: Arc<Mutex<AienRuntimeSpine>>,
     is_running: Arc<AtomicBool>,
     shutdown_notify: Arc<Notify>,
+    model_id: Arc<String>,
 ) {
     let (reader, mut writer) = stream.into_split();
     let mut buf_reader = BufReader::new(reader);
@@ -152,6 +166,14 @@ async fn handle_connection(
 
         let resp = match serde_json::from_str::<ControlEnvelope>(trimmed) {
             Ok(envelope) => {
+                if let ControlCommand::Generate(req) = envelope.command.clone() {
+                    let result = stream_generation(&mut writer, &spine, &model_id, req).await;
+                    if let Err(error) = result {
+                        let _ = write_response(&mut writer, &ControlResponse::Error(error)).await;
+                    }
+                    line.clear();
+                    continue;
+                }
                 let is_shutdown = matches!(envelope.command, ControlCommand::Shutdown);
                 let response = {
                     let mut s = spine.lock().await;
@@ -166,12 +188,114 @@ async fn handle_connection(
             Err(e) => ControlResponse::Error(format!("Invalid control envelope JSON: {}", e)),
         };
 
-        if let Ok(mut serialized) = serde_json::to_string(&resp) {
-            serialized.push('\n');
-            if writer.write_all(serialized.as_bytes()).await.is_err() {
-                break;
-            }
+        if write_response(&mut writer, &resp).await.is_err() {
+            break;
         }
         line.clear();
     }
+}
+
+async fn write_response<W: tokio::io::AsyncWrite + Unpin>(
+    writer: &mut W,
+    response: &ControlResponse,
+) -> Result<(), String> {
+    let mut serialized = serde_json::to_string(response).map_err(|e| e.to_string())?;
+    serialized.push('\n');
+    writer
+        .write_all(serialized.as_bytes())
+        .await
+        .map_err(|e| e.to_string())
+}
+
+async fn stream_generation<W: tokio::io::AsyncWrite + Unpin>(
+    writer: &mut W,
+    spine: &Arc<Mutex<AienRuntimeSpine>>,
+    model_id: &str,
+    req: GenerateReq,
+) -> Result<(), String> {
+    if model_id == "unconfigured" || req.model_id != model_id {
+        return Err(format!(
+            "Runtime model is '{}', requested '{}'",
+            model_id, req.model_id
+        ));
+    }
+    if req.prompt_tokens.is_empty() || req.max_tokens == 0 || req.max_tokens > 4096 {
+        return Err(
+            "Generation requires prompt tokens and max_tokens between 1 and 4096".to_string(),
+        );
+    }
+    if !req.temperature.is_finite() || !(0.0..=2.0).contains(&req.temperature) {
+        return Err("Generation temperature must be between 0 and 2".to_string());
+    }
+    let (sink, mut events) = ChannelCompletionSink::channel();
+    let (sink_id, seq_id) = {
+        let mut runtime = spine.lock().await;
+        let sink_id = runtime.register_completion_sink(Arc::new(sink));
+        let prompt: PromptHandle = Arc::from(req.prompt_tokens);
+        let sampling = SamplingParams {
+            temperature: req.temperature,
+            top_p: 1.0,
+            max_tokens: req.max_tokens,
+            stop_token_ids: vec![2],
+        };
+        let seq_id = match runtime.submit_work(prompt, sampling, 2, Some(sink_id)) {
+            Ok(seq_id) => seq_id,
+            Err(error) => {
+                runtime
+                    .scheduler
+                    .completion_router_mut()
+                    .unregister(sink_id);
+                return Err(error);
+            }
+        };
+        (sink_id, seq_id)
+    };
+    write_response(
+        writer,
+        &ControlResponse::GenerationStarted {
+            model_id: model_id.to_string(),
+            seq_id,
+        },
+    )
+    .await?;
+    let result = loop {
+        match tokio::time::timeout(std::time::Duration::from_secs(120), events.recv()).await {
+            Ok(Some(CompletionEvent::Token { seq_id: id, token })) if id.to_u64() == seq_id => {
+                if let Err(e) =
+                    write_response(writer, &ControlResponse::GenerationToken { seq_id, token })
+                        .await
+                {
+                    break Err(e);
+                }
+            }
+            Ok(Some(CompletionEvent::Finished {
+                seq_id: id,
+                total_tokens,
+                ..
+            })) if id.to_u64() == seq_id => {
+                break write_response(
+                    writer,
+                    &ControlResponse::GenerationFinished {
+                        seq_id,
+                        total_tokens,
+                    },
+                )
+                .await;
+            }
+            Ok(Some(CompletionEvent::Error {
+                seq_id: id,
+                message,
+            })) if id.to_u64() == seq_id => break Err(message),
+            Ok(Some(_)) => continue,
+            Ok(None) => break Err("Generation channel closed before completion".to_string()),
+            Err(_) => break Err("Generation timed out".to_string()),
+        }
+    };
+    spine
+        .lock()
+        .await
+        .scheduler
+        .completion_router_mut()
+        .unregister(sink_id);
+    result
 }

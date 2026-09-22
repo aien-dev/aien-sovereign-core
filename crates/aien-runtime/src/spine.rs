@@ -222,6 +222,9 @@ impl AienRuntimeSpine {
         }
 
         let resp = match envelope.command {
+            ControlCommand::Generate(_) => ControlResponse::Error(
+                "Generate must use the streaming runtime connection".to_string(),
+            ),
             ControlCommand::LaunchSwarm(req) => {
                 let config = SwarmConfig {
                     model_handle: req.model_handle,

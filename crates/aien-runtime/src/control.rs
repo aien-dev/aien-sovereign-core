@@ -16,7 +16,16 @@ pub struct LaunchSwarmReq {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GenerateReq {
+    pub model_id: String,
+    pub prompt_tokens: Vec<u32>,
+    pub max_tokens: usize,
+    pub temperature: f32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ControlCommand {
+    Generate(GenerateReq),
     LaunchSwarm(LaunchSwarmReq),
     InspectSwarm(u64),
     CancelSwarm(u64),
@@ -47,6 +56,9 @@ pub struct RuntimeStatusReport {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ControlResponse {
+    GenerationStarted { model_id: String, seq_id: u64 },
+    GenerationToken { seq_id: u64, token: u32 },
+    GenerationFinished { seq_id: u64, total_tokens: usize },
     SwarmAccepted { swarm_id: u64, operation_id: u128 },
     SwarmCancelled { swarm_id: u64 },
     Status(RuntimeStatusReport),

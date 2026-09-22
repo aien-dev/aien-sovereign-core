@@ -893,67 +893,58 @@ fn handle_adapter_command(args: &[&str]) {
 // SOVEREIGN ORCHESTRATION & DEVELOPER EXPERIENCE
 // --------------------------------------------------------------------------
 
-/// Explicit model manifest for daemon boot. No silent developer-machine paths.
-#[allow(dead_code)]
+/// Files required for the only native model architecture supported by this daemon.
 struct DaemonModelManifest {
-    label: String,
-    checkpoint_path: Option<std::path::PathBuf>,
+    model_dir: std::path::PathBuf,
+    checkpoint_path: std::path::PathBuf,
+    tokenizer_path: std::path::PathBuf,
 }
 
-fn resolve_daemon_manifest() -> DaemonModelManifest {
-    let mut candidates: Vec<std::path::PathBuf> = Vec::new();
-    if let Ok(dir) = std::env::var("AIEN_MODEL_DIR") {
-        candidates.push(std::path::PathBuf::from(dir));
-    }
-    candidates.push(std::path::PathBuf::from("models"));
-    if let Ok(home) = std::env::var("HOME") {
-        candidates.push(std::path::PathBuf::from(home).join("models"));
-    }
-    for dir in candidates {
-        if let Ok(entries) = std::fs::read_dir(&dir) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.extension().and_then(|e| e.to_str()) == Some("safetensors") {
-                    return DaemonModelManifest {
-                        label: format!(
-                            "checkpoint found at {} (weight mapping not yet wired, using reference fallback)",
-                            path.display()
-                        ),
-                        checkpoint_path: Some(path),
-                    };
-                }
-            }
+fn resolve_daemon_manifest() -> Result<DaemonModelManifest, String> {
+    let model_dir = std::env::var("AIEN_MODEL_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| {
+            std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default())
+                .join("models/TinyLlama-1.1B-Chat-v1.0")
+        });
+    let checkpoint_path = model_dir.join("model.safetensors");
+    let tokenizer_path = model_dir.join("tokenizer.json");
+    for path in [&checkpoint_path, &tokenizer_path] {
+        if !path.is_file() {
+            return Err(format!(
+                "Native model artifact missing: {} (set AIEN_MODEL_DIR)",
+                path.display()
+            ));
         }
     }
-    DaemonModelManifest {
-        label: "no safetensors checkpoint found (AIEN_MODEL_DIR, ./models, ~/models); using reference fallback".to_string(),
-        checkpoint_path: None,
-    }
+    Ok(DaemonModelManifest {
+        model_dir,
+        checkpoint_path,
+        tokenizer_path,
+    })
 }
 
-/// Builds the native transformer backend for daemon boot with explicit fallback.
-/// Prefers Blackwell hardware when available, falls back to CPU reference math.
-/// Never returns the Mock backend: output always comes from real forward passes.
-/// When AIEN_REQUIRE_BLACKWELL is set, a missing Blackwell device is fatal:
-/// the hardware gate must fail when fallback count is nonzero.
-fn build_native_daemon_backend(
-) -> Result<(aien_inference_abi::NativeTransformerBackend, String, String), String> {
-    let manifest = resolve_daemon_manifest();
-    let config = aien_inference_abi::ModelConfig {
-        model_id: "aien-daemon-reference-fallback".to_string(),
-        max_sequence_length: 2048,
-        block_size: 16,
-        num_layers: 4,
-        num_heads: 8,
-        head_dim: 64,
-        num_kv_heads: 4,
-        hidden_dim: 512,
-        intermediate_dim: 1408,
-        vocab_size: 32000,
-        rms_norm_eps: 1e-5,
-        rope_theta: 10000.0,
-    };
-    let weights = aien_inference_abi::TransformerWeights::reference_test_weights(&config);
+/// Loads real TinyLlama weights. Reference/test weights are never a daemon fallback.
+fn build_native_daemon_backend() -> Result<
+    (
+        aien_inference_abi::NativeTransformerBackend,
+        String,
+        String,
+        String,
+    ),
+    String,
+> {
+    let manifest = resolve_daemon_manifest()?;
+    let config = aien_inference_abi::ModelConfig::tinyllama_1_1b();
+    aien_inference_abi::TinyLlamaTokenizer::from_file(&manifest.tokenizer_path)
+        .map_err(|e| format!("Tokenizer validation failed: {}", e))?;
+    let weights = aien_inference_abi::TransformerWeights::load_from_safetensors(
+        &manifest.checkpoint_path,
+        &config,
+    )
+    .map_err(|e| format!("Native checkpoint load failed: {}", e))?;
+    let model_label = format!("{} from {}", config.model_id, manifest.model_dir.display());
+    let model_id = config.model_id;
     let probe = aien_inference_abi::BlackwellGb10Backend::new();
     let require_blackwell = std::env::var("AIEN_REQUIRE_BLACKWELL")
         .map(|v| v.trim() == "1" || v.trim().eq_ignore_ascii_case("true"))
@@ -965,7 +956,8 @@ fn build_native_daemon_backend(
         Ok((
             backend,
             format!("NativeTransformerBackend/Blackwell ({})", device),
-            manifest.label,
+            model_label,
+            model_id,
         ))
     } else if require_blackwell {
         Err(
@@ -977,7 +969,8 @@ fn build_native_daemon_backend(
             backend,
             "NativeTransformerBackend/CPU-reference (Blackwell unavailable, explicit fallback)"
                 .to_string(),
-            manifest.label,
+            model_label,
+            model_id,
         ))
     }
 }
@@ -1000,12 +993,12 @@ pub async fn run_daemon_server() {
     let spine = aien_runtime::spine::AienRuntimeSpine::new(4096, sched_cfg, kv_manager);
     let server = aien_runtime::server::AienRuntimeServer::new(spine, &socket_path);
 
-    let backend = {
+    let (backend, model_id) = {
         match build_native_daemon_backend() {
-            Ok((native_backend, backend_label, model_label)) => {
+            Ok((native_backend, backend_label, model_label, model_id)) => {
                 println!("  Backend: {}", backend_label.green());
                 println!("  Model: {}", model_label.yellow());
-                native_backend
+                (native_backend, model_id)
             }
             Err(fatal) => {
                 eprintln!("Fatal: {}", fatal.red().bold());
@@ -1014,7 +1007,7 @@ pub async fn run_daemon_server() {
         }
     };
     println!("✓ Binding socket at {}", socket_path.display());
-    if let Err(e) = server.run(backend).await {
+    if let Err(e) = server.run_named(backend, &model_id).await {
         eprintln!("Runtime daemon error: {}", e);
     }
 }
