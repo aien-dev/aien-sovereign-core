@@ -1121,4 +1121,23 @@ mod tests {
             .unwrap()
             .contains("CONFINEMENT DENIAL"));
     }
+
+    #[test]
+    fn test_policy_approved_write_reaches_effect_handler() {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let path = format!("/tmp/aien-policy-effect-{}", std::process::id());
+            let args = json!({"path": path, "content": "approved", "overwrite": true});
+            let result = dispatch_tool("write_to_file", &args);
+            assert!(
+                result.get("error").is_none(),
+                "approved write failed: {result}"
+            );
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), "approved");
+            let _ = std::fs::remove_file(path);
+        });
+    }
 }

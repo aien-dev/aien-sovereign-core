@@ -163,6 +163,13 @@ impl AienRuntimeSpine {
                             record.state = SequenceState::Completed;
                         }
                         self.arena.free(seq_id);
+                        let mut kv = self.kv_manager.write();
+                        self.swarm_manager.note_sequence_finished(
+                            seq_id,
+                            &mut self.arena,
+                            &mut kv,
+                            &mut self.world_store,
+                        );
                     }
                 }
             }

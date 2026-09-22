@@ -91,7 +91,11 @@ impl AienRuntimeServer {
 
                 if has_work {
                     let mut s = spine_worker.lock().await;
-                    let _ = s.step(&mut backend).await;
+                    if let Err(e) = s.step(&mut backend).await {
+                        // A swallowed step error makes the daemon look alive
+                        // while its decode loop is dead. Print it.
+                        eprintln!("runtime step error: {}", e);
+                    }
                 } else {
                     tokio::select! {
                         _ = tokio::time::sleep(tokio::time::Duration::from_millis(5)) => {},
