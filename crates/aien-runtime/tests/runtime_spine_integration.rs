@@ -118,10 +118,16 @@ async fn test_swarm_launch_and_step_execution() {
         prompt_tokens: prompt.clone(),
     };
 
+    // Unique per run so persistent idempotency from earlier runs cannot
+    // pollute this test. The replay check below reuses the same ID in run.
+    let operation_id: u128 = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
     let env = ControlEnvelope {
         protocol_version: 1,
         request_id: 1,
-        operation_id: 99991,
+        operation_id,
         operator_session: 1,
         command: ControlCommand::LaunchSwarm(launch_req),
     };
@@ -130,10 +136,10 @@ async fn test_swarm_launch_and_step_execution() {
     match resp {
         ControlResponse::SwarmAccepted {
             swarm_id,
-            operation_id,
+            operation_id: accepted_id,
         } => {
             assert_eq!(swarm_id, 1);
-            assert_eq!(operation_id, 99991);
+            assert_eq!(accepted_id, operation_id);
         }
         _ => panic!("Expected SwarmAccepted response"),
     }
