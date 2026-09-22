@@ -894,10 +894,26 @@ fn handle_adapter_command(args: &[&str]) {
 // --------------------------------------------------------------------------
 
 /// Explicit model manifest for daemon boot. No silent developer-machine paths.
-#[allow(dead_code)]
 struct DaemonModelManifest {
+    model_id: String,
     label: String,
     checkpoint_path: Option<std::path::PathBuf>,
+    tokenizer_path: Option<std::path::PathBuf>,
+}
+
+fn is_safetensors(path: &std::path::Path) -> bool {
+    path.extension().and_then(|ext| ext.to_str()) == Some("safetensors")
+}
+
+fn tokenizer_beside(checkpoint: &std::path::Path) -> Option<std::path::PathBuf> {
+    if let Ok(path) = std::env::var("AIEN_TOKENIZER") {
+        let path = std::path::PathBuf::from(path);
+        if path.is_file() {
+            return Some(path);
+        }
+    }
+    let candidate = checkpoint.parent()?.join("tokenizer.json");
+    candidate.is_file().then_some(candidate)
 }
 
 fn resolve_daemon_manifest() -> DaemonModelManifest {
@@ -910,24 +926,52 @@ fn resolve_daemon_manifest() -> DaemonModelManifest {
         candidates.push(std::path::PathBuf::from(home).join("models"));
     }
     for dir in candidates {
-        if let Ok(entries) = std::fs::read_dir(&dir) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.extension().and_then(|e| e.to_str()) == Some("safetensors") {
-                    return DaemonModelManifest {
-                        label: format!(
-                            "checkpoint found at {} (weight mapping not yet wired, using reference fallback)",
-                            path.display()
-                        ),
-                        checkpoint_path: Some(path),
-                    };
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if is_safetensors(&path) {
+                return DaemonModelManifest {
+                    model_id: "checkpoint".into(),
+                    label: format!(
+                        "checkpoint found at {} (model_id={})",
+                        path.display(),
+                        path.file_stem()
+                            .and_then(|name| name.to_str())
+                            .unwrap_or("checkpoint")
+                    ),
+                    tokenizer_path: tokenizer_beside(&path),
+                    checkpoint_path: Some(path),
+                };
+            }
+            if path.is_dir() {
+                let Ok(nested) = std::fs::read_dir(&path) else {
+                    continue;
+                };
+                for child in nested.flatten() {
+                    let child_path = child.path();
+                    if is_safetensors(&child_path) {
+                        return DaemonModelManifest {
+                            model_id: path
+                                .file_name()
+                                .and_then(|name| name.to_str())
+                                .unwrap_or("checkpoint")
+                                .to_string(),
+                            label: format!("checkpoint found at {}", child_path.display()),
+                            tokenizer_path: tokenizer_beside(&child_path),
+                            checkpoint_path: Some(child_path),
+                        };
+                    }
                 }
             }
         }
     }
     DaemonModelManifest {
-        label: "no safetensors checkpoint found (AIEN_MODEL_DIR, ./models, ~/models); using reference fallback".to_string(),
+        model_id: "aien-daemon-reference-fallback".into(),
+        label: "no safetensors checkpoint found (AIEN_MODEL_DIR, ./models, ~/models); using reference fallback".into(),
         checkpoint_path: None,
+        tokenizer_path: None,
     }
 }
 
@@ -936,10 +980,8 @@ fn resolve_daemon_manifest() -> DaemonModelManifest {
 /// Never returns the Mock backend: output always comes from real forward passes.
 /// When AIEN_REQUIRE_BLACKWELL is set, a missing Blackwell device is fatal:
 /// the hardware gate must fail when fallback count is nonzero.
-fn build_native_daemon_backend(
-) -> Result<(aien_inference_abi::NativeTransformerBackend, String, String), String> {
-    let manifest = resolve_daemon_manifest();
-    let config = aien_inference_abi::ModelConfig {
+fn reference_config() -> aien_inference_abi::ModelConfig {
+    aien_inference_abi::ModelConfig {
         model_id: "aien-daemon-reference-fallback".to_string(),
         max_sequence_length: 2048,
         block_size: 16,
@@ -952,8 +994,71 @@ fn build_native_daemon_backend(
         vocab_size: 32000,
         rms_norm_eps: 1e-5,
         rope_theta: 10000.0,
+    }
+}
+
+fn load_production_weights(
+    manifest: &DaemonModelManifest,
+) -> (
+    aien_inference_abi::TransformerWeights,
+    Option<aien_inference_abi::TinyLlamaTokenizer>,
+    String,
+) {
+    let Some(path) = &manifest.checkpoint_path else {
+        let config = reference_config();
+        return (
+            aien_inference_abi::TransformerWeights::reference_test_weights(&config),
+            None,
+            manifest.label.clone(),
+        );
     };
-    let weights = aien_inference_abi::TransformerWeights::reference_test_weights(&config);
+    let config = aien_inference_abi::ModelConfig::tinyllama_1_1b();
+    match aien_inference_abi::TransformerWeights::load_from_safetensors(path, &config) {
+        Ok(weights) => {
+            let tokenizer = manifest.tokenizer_path.as_ref().and_then(|tokenizer_path| {
+                aien_inference_abi::TinyLlamaTokenizer::from_file(tokenizer_path).ok()
+            });
+            let tokenizer_note = if tokenizer.is_some() {
+                "tokenizer loaded"
+            } else {
+                "tokenizer missing"
+            };
+            (
+                weights,
+                tokenizer,
+                format!(
+                    "checkpoint loaded from {} ({}, model_id={})",
+                    path.display(),
+                    tokenizer_note,
+                    manifest.model_id
+                ),
+            )
+        }
+        Err(error) => {
+            let config = reference_config();
+            (
+                aien_inference_abi::TransformerWeights::reference_test_weights(&config),
+                None,
+                format!(
+                    "{} (safetensors load failed: {}); using reference fallback",
+                    manifest.label, error
+                ),
+            )
+        }
+    }
+}
+
+fn build_native_daemon_backend() -> Result<
+    (
+        aien_inference_abi::NativeTransformerBackend,
+        String,
+        String,
+        Option<aien_inference_abi::TinyLlamaTokenizer>,
+    ),
+    String,
+> {
+    let manifest = resolve_daemon_manifest();
+    let (weights, tokenizer, model_label) = load_production_weights(&manifest);
     let probe = aien_inference_abi::BlackwellGb10Backend::new();
     let require_blackwell = std::env::var("AIEN_REQUIRE_BLACKWELL")
         .map(|v| v.trim() == "1" || v.trim().eq_ignore_ascii_case("true"))
@@ -965,7 +1070,8 @@ fn build_native_daemon_backend(
         Ok((
             backend,
             format!("NativeTransformerBackend/Blackwell ({})", device),
-            manifest.label,
+            model_label,
+            tokenizer,
         ))
     } else if require_blackwell {
         Err(
@@ -977,7 +1083,8 @@ fn build_native_daemon_backend(
             backend,
             "NativeTransformerBackend/CPU-reference (Blackwell unavailable, explicit fallback)"
                 .to_string(),
-            manifest.label,
+            model_label,
+            tokenizer,
         ))
     }
 }
@@ -1002,9 +1109,19 @@ pub async fn run_daemon_server() {
 
     let backend = {
         match build_native_daemon_backend() {
-            Ok((native_backend, backend_label, model_label)) => {
+            Ok((native_backend, backend_label, model_label, tokenizer)) => {
                 println!("  Backend: {}", backend_label.green());
                 println!("  Model: {}", model_label.yellow());
+                if let Some(tokenizer) = tokenizer {
+                    server.set_tokenizer(tokenizer);
+                    println!("  Tokenizer: {}", "TinyLlama chat template".green());
+                } else {
+                    println!(
+                        "  Tokenizer: {}",
+                        "not loaded; native chat will refuse turns until tokenizer.json is present"
+                            .yellow()
+                    );
+                }
                 native_backend
             }
             Err(fatal) => {

@@ -125,7 +125,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         Commands::GandiSend { to, subject } => {
             let mut body = String::new();
             std::io::stdin().read_to_string(&mut body)?;
-            gandi::send_as_aien(&to, &subject, &body)?;
+            let receipt = gandi::send_as_aien(&to, &subject, &body)?;
+            println!("{}", serde_json::to_string(&receipt)?);
             println!("Gandi SMTP accepted the message from aien@aienos.com");
             return Ok(());
         }

@@ -362,3 +362,115 @@ async fn test_end_to_end_blackwell_hardware_execution_if_available() {
         gpu_backend.kernel_exec_count()
     );
 }
+
+/// Release gate for issue #94. Ordinary CI may skip the body. `AIEN_REQUIRE_RELEASE=1`
+/// fails the run unless this process executed on GB10, emitted tokens, stayed at
+/// zero fallback, and reclaimed KV blocks. The JSON line is the machine-readable artifact.
+#[tokio::test]
+async fn release_golden_path_records_whether_gb10_ran() {
+    let require = std::env::var("AIEN_REQUIRE_RELEASE")
+        .map(|value| value.trim() == "1" || value.trim().eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    let gpu_backend = Arc::new(BlackwellGb10Backend::new());
+    let commit = std::env::var("GITHUB_SHA").unwrap_or_else(|_| "local".into());
+    let checkpoint = std::env::var("AIEN_CHECKPOINT_ID").unwrap_or_else(|_| "unspecified".into());
+    if !gpu_backend.is_available() {
+        let artifact = serde_json::json!({
+            "test": "release_golden_path",
+            "skipped": true,
+            "reason": "Blackwell device not available",
+            "commit": commit,
+            "checkpoint_id": checkpoint,
+            "require_release": require,
+            "gpu_executions": gpu_backend.kernel_exec_count(),
+            "fallback_count": gpu_backend.fallback_count(),
+        });
+        eprintln!("{artifact}");
+        assert!(
+            !require,
+            "AIEN_REQUIRE_RELEASE is set but the GB10 body did not run: {artifact}"
+        );
+        return;
+    }
+
+    let config = test_micro_model_config();
+    let total_blocks = 64;
+    let block_size = 16;
+    let pool_cfg = KvPoolConfig {
+        num_blocks: total_blocks,
+        block_size,
+        num_layers: config.num_layers,
+        num_kv_heads: config.num_kv_heads,
+        head_dim: config.head_dim,
+        dtype: KvDType::Bf16,
+    };
+    let kv_manager = create_shared_kv_manager(total_blocks, block_size);
+    kv_manager.write().attach_tensor_pool(pool_cfg).unwrap();
+    let sched_cfg = SchedulerConfig {
+        max_batch_size: 16,
+        max_batch_tokens: 512,
+        max_prefill_tokens: 256,
+        prefill_chunk_size: 64,
+        chunk_prefill: true,
+        watermark_blocks: 4,
+    };
+    let mut spine = AienRuntimeSpine::new(64, sched_cfg, kv_manager.clone());
+    let weights = TransformerWeights::reference_test_weights(&config);
+    let mut backend = NativeTransformerBackend::with_shared_kv_and_backend(
+        weights,
+        gpu_backend.clone(),
+        kv_manager.clone(),
+    );
+    let (sink, mut rx) = ChannelCompletionSink::channel();
+    let sink_id = spine.register_completion_sink(Arc::new(sink));
+    let prompt: PromptHandle = Arc::from([5u32, 12, 33, 77].as_slice());
+    let sampling = SamplingParams {
+        temperature: 0.0,
+        top_p: 1.0,
+        max_tokens: 4,
+        stop_token_ids: vec![0],
+    };
+    let seq_id = spine
+        .submit_work(prompt, sampling, 1, Some(sink_id))
+        .unwrap();
+    let _ = spine.step(&mut backend).await.unwrap();
+    let branch = spine.fork_subagent(seq_id, seq_id.wrapping_add(1), None);
+    let branch_error = branch.as_ref().err().cloned();
+    let _ = spine.run_until_complete(&mut backend, 15).await.unwrap();
+    let mut tokens = Vec::new();
+    while let Ok(event) = rx.try_recv() {
+        if let CompletionEvent::Token { token, .. } = event {
+            tokens.push(token);
+        }
+    }
+    let leaked = kv_manager.read().allocated_block_count();
+    let artifact = serde_json::json!({
+        "test": "release_golden_path",
+        "skipped": false,
+        "commit": commit,
+        "checkpoint_id": checkpoint,
+        "model_id": config.model_id,
+        "device": gpu_backend.device_name(),
+        "gpu_executions": gpu_backend.kernel_exec_count(),
+        "fallback_count": gpu_backend.fallback_count(),
+        "tokens": tokens.len(),
+        "branch_accepted": branch.is_ok(),
+        "branch_error": branch_error,
+        "leaked_kv_blocks": leaked,
+    });
+    eprintln!("{artifact}");
+    assert!(gpu_backend.kernel_exec_count() > 0, "{artifact}");
+    assert_eq!(gpu_backend.fallback_count(), 0, "{artifact}");
+    assert_eq!(tokens.len(), 4, "{artifact}");
+    assert_eq!(leaked, 0, "{artifact}");
+    if require {
+        assert_ne!(
+            checkpoint, "unspecified",
+            "release run needs AIEN_CHECKPOINT_ID: {artifact}"
+        );
+        assert!(
+            branch.is_ok(),
+            "release run needs a child branch: {artifact}"
+        );
+    }
+}

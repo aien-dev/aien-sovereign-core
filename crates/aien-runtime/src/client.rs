@@ -2,7 +2,7 @@
 //! Used by aien-cli to communicate with the in-process runtime daemon.
 
 use crate::control::{
-    ControlCommand, ControlEnvelope, ControlResponse, LaunchSwarmReq, RuntimeStatusReport,
+    ChatTurn, ControlCommand, ControlEnvelope, ControlResponse, LaunchSwarmReq, RuntimeStatusReport,
 };
 use std::path::{Path, PathBuf};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -117,6 +117,80 @@ impl AienRuntimeClient {
             ControlResponse::Status(report) => Ok(report),
             ControlResponse::Error(e) => Err(e),
             other => Err(format!("Unexpected response for InspectSwarm: {:?}", other)),
+        }
+    }
+
+    /// Streams one chat turn from the in-process runtime. Does not open an HTTP socket.
+    pub async fn stream_turn(
+        &self,
+        messages: Vec<ChatTurn>,
+        max_tokens: usize,
+        temperature: f32,
+    ) -> Result<String, String> {
+        let stream = UnixStream::connect(&self.socket_path).await.map_err(|e| {
+            format!(
+                "Failed to connect to AIEN runtime socket at {}: {}",
+                self.socket_path.display(),
+                e
+            )
+        })?;
+        let (reader, mut writer) = stream.into_split();
+        let mut buf_reader = BufReader::new(reader);
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default();
+        let envelope = ControlEnvelope {
+            protocol_version: 1,
+            request_id: now.as_millis() as u64,
+            operation_id: now.as_nanos(),
+            operator_session: 1,
+            command: ControlCommand::StreamTurn {
+                messages,
+                max_tokens,
+                temperature,
+            },
+        };
+        let mut payload = serde_json::to_string(&envelope)
+            .map_err(|e| format!("Failed to serialize ControlEnvelope: {}", e))?;
+        payload.push('\n');
+        writer
+            .write_all(payload.as_bytes())
+            .await
+            .map_err(|e| format!("Failed to send control command: {}", e))?;
+
+        let mut finished = String::new();
+        loop {
+            let mut line = String::new();
+            let n = buf_reader
+                .read_line(&mut line)
+                .await
+                .map_err(|e| format!("Failed to read response from runtime socket: {}", e))?;
+            if n == 0 {
+                break;
+            }
+            let response = serde_json::from_str::<ControlResponse>(line.trim())
+                .map_err(|e| format!("Failed to parse ControlResponse: {}", e))?;
+            match response {
+                ControlResponse::TurnDelta { text } => finished.push_str(&text),
+                ControlResponse::TurnFinished { text, .. } => {
+                    if !text.is_empty() {
+                        return Ok(text);
+                    }
+                    return Ok(finished);
+                }
+                ControlResponse::Error(error) => return Err(error),
+                other => {
+                    return Err(format!(
+                        "Unexpected response while streaming a native turn: {:?}",
+                        other
+                    ))
+                }
+            }
+        }
+        if finished.is_empty() {
+            Err("native runtime closed the socket before the turn finished".into())
+        } else {
+            Ok(finished)
         }
     }
 

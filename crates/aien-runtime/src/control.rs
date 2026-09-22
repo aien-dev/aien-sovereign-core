@@ -16,12 +16,49 @@ pub struct LaunchSwarmReq {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChatTurn {
+    pub role: String,
+    pub content: String,
+}
+
+/// TinyLlama chat template. Generation always continues from an assistant header.
+pub fn format_tinyllama_chat(messages: &[ChatTurn]) -> String {
+    let mut out = String::new();
+    for message in messages {
+        let body = message.content.trim();
+        if body.is_empty() {
+            continue;
+        }
+        let tag = match message.role.trim().to_ascii_lowercase().as_str() {
+            "system" => "system",
+            "assistant" => "assistant",
+            _ => "user",
+        };
+        out.push_str(&format!("<|{tag}|>\n{body}</s>\n"));
+    }
+    let ends_in_assistant = messages.last().is_some_and(|message| {
+        message.role.trim().eq_ignore_ascii_case("assistant") && !message.content.trim().is_empty()
+    });
+    if !ends_in_assistant {
+        out.push_str("<|assistant|>\n");
+    }
+    out
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ControlCommand {
     LaunchSwarm(LaunchSwarmReq),
     InspectSwarm(u64),
     CancelSwarm(u64),
     GetRuntimeStatus,
     Shutdown,
+    /// One operator turn on the in-process PR #68 spine. The server streams
+    /// `TurnDelta` lines and finishes with `TurnFinished`.
+    StreamTurn {
+        messages: Vec<ChatTurn>,
+        max_tokens: usize,
+        temperature: f32,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -51,6 +88,8 @@ pub enum ControlResponse {
     SwarmCancelled { swarm_id: u64 },
     Status(RuntimeStatusReport),
     ShutdownAck,
+    TurnDelta { text: String },
+    TurnFinished { text: String, total_tokens: usize },
     Error(String),
 }
 
@@ -129,5 +168,22 @@ mod tests {
         }
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn chat_template_opens_an_assistant_turn() {
+        let prompt = format_tinyllama_chat(&[
+            ChatTurn {
+                role: "system".into(),
+                content: "You are AIEN.".into(),
+            },
+            ChatTurn {
+                role: "user".into(),
+                content: "Status?".into(),
+            },
+        ]);
+        assert!(prompt.starts_with("<|system|>\nYou are AIEN.</s>\n"));
+        assert!(prompt.contains("<|user|>\nStatus?</s>\n"));
+        assert!(prompt.ends_with("<|assistant|>\n"));
     }
 }

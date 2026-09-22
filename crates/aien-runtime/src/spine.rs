@@ -86,9 +86,10 @@ impl AienRuntimeSpine {
             branch_parent: None,
             next_token_budget: sampling_params.max_tokens as u32,
         };
-        self.scheduler
+        let assigned = self
+            .scheduler
             .submit_work(work, prompt, Some(sampling_params), sink_id)?;
-        Ok(seq_id)
+        Ok(assigned.to_u64())
     }
 
     /// Registers a completion sink for streaming output events.
@@ -268,6 +269,9 @@ impl AienRuntimeSpine {
                     ControlResponse::Error(format!("Swarm {} not found", swarm_id))
                 }
             }
+            ControlCommand::StreamTurn { .. } => ControlResponse::Error(
+                "StreamTurn is handled on the socket connection, not as a one-shot command".into(),
+            ),
             ControlCommand::Shutdown => {
                 self.controller
                     .mark_operation_processed(envelope.operation_id);

@@ -204,6 +204,44 @@ impl ChatClient {
         max_tokens: usize,
     ) -> Result<String, String> {
         emit_chat_telemetry(&self.backend, &self.model);
+        if matches!(self.backend, ChatBackend::NativeRuntime) {
+            return self
+                .stream_native(messages, stream_to_stdout, max_tokens)
+                .await;
+        }
+        self.stream_remote(messages, stream_to_stdout, max_tokens)
+            .await
+    }
+
+    async fn stream_native(
+        &self,
+        messages: &[Value],
+        stream_to_stdout: bool,
+        max_tokens: usize,
+    ) -> Result<String, String> {
+        let turns = messages
+            .iter()
+            .filter_map(|message| {
+                let role = message.get("role")?.as_str()?.to_string();
+                let content = message.get("content")?.as_str()?.to_string();
+                Some(aien_runtime::control::ChatTurn { role, content })
+            })
+            .collect();
+        let client = aien_runtime::client::AienRuntimeClient::default_client();
+        let text = client.stream_turn(turns, max_tokens, 0.2).await?;
+        if stream_to_stdout {
+            print!("{}", text);
+            let _ = stdout().flush();
+        }
+        Ok(text)
+    }
+
+    async fn stream_remote(
+        &self,
+        messages: &[Value],
+        stream_to_stdout: bool,
+        max_tokens: usize,
+    ) -> Result<String, String> {
         let payload = json!({
             "model": self.model,
             "messages": messages,
@@ -408,5 +446,26 @@ mod tests {
         let calls3 = extract_tool_calls(truncated);
         assert_eq!(calls3.len(), 1);
         assert_eq!(calls3[0].0, "run_command");
+    }
+
+    #[tokio::test]
+    async fn native_chat_uses_the_runtime_socket_not_http() {
+        let sock =
+            std::env::temp_dir().join(format!("aien-missing-runtime-{}.sock", std::process::id()));
+        std::env::set_var("AIEN_CHAT_BACKEND", "native");
+        std::env::set_var("AIEN_RUNTIME_SOCK", &sock);
+        let client = ChatClient::new(None, Some("tinyllama".into()));
+        let err = client
+            .stream_turn_with_limit(&[], false, 8)
+            .await
+            .expect_err("missing socket must fail closed");
+        assert!(
+            err.contains("runtime socket"),
+            "native path must name the runtime socket, got {err}"
+        );
+        assert!(
+            !err.contains("18006"),
+            "native path must not fall through to the HTTP seat, got {err}"
+        );
     }
 }

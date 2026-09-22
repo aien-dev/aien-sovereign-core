@@ -51,6 +51,8 @@ pub struct MailDetail {
     pub subject: String,
     pub date: String,
     pub body: String,
+    /// Mail fetched from the network is data, not operator instructions.
+    pub untrusted: bool,
 }
 
 fn vault_password(account: Account) -> Result<String, Error> {
@@ -162,18 +164,18 @@ pub fn read(account: Account, uid: u32) -> Result<MailDetail, Error> {
         subject: header_value(&parsed.headers, "Subject"),
         date: header_value(&parsed.headers, "Date"),
         body,
+        untrusted: true,
     };
     let _ = session.logout();
     Ok(detail)
 }
 
-pub fn send_as_aien(to: &str, subject: &str, body: &str) -> Result<(), Error> {
-    if subject.trim().is_empty() || body.trim().is_empty() {
-        return Err(Error::new(
-            ErrorKind::InvalidInput,
-            "subject and body are required",
-        ));
-    }
+pub fn send_as_aien(
+    to: &str,
+    subject: &str,
+    body: &str,
+) -> Result<crate::effect::EffectReceipt, Error> {
+    let receipt = crate::effect::authorize_gandi_send(to, subject, body)?;
     let message = Message::builder()
         .from(
             Account::Aien
@@ -197,7 +199,7 @@ pub fn send_as_aien(to: &str, subject: &str, body: &str) -> Result<(), Error> {
     transport
         .send(&message)
         .map_err(|_| Error::other("Gandi SMTP did not confirm delivery"))?;
-    Ok(())
+    Ok(receipt)
 }
 
 #[cfg(test)]
