@@ -182,5 +182,3 @@ else
         echo "Status: ALL TESTS PASSED."
     fi
 fi
-
-chmod +x "${WORKSPACE_ROOT}/scripts/e2e_distill_test.sh"
