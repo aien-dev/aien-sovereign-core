@@ -151,9 +151,9 @@ impl MemoryCompiler {
             }
 
             // B. Include recent raw safe events
-            let recent_events = self.db.get_session_events(session_id, branch, None, 15)?;
-            for ev in recent_events.iter().rev() {
-                let view = SecurityMembrane::to_safe_view(ev);
+            let recent_events = self.db.get_recent_session_events(session_id, branch, 15)?;
+            for ev in &recent_events {
+                let view = SecurityMembrane::to_safe_view(ev, self.db.hmac_key());
                 if let Some(content) = view.safe_content {
                     let role = view.role.as_deref().unwrap_or("event");
                     let text = format!("[{}: seq {}] {}", role, view.sequence, content);
@@ -183,7 +183,7 @@ impl MemoryCompiler {
                 .db
                 .traverse_claims(&ent.canonical_name, Some(&q.space))?;
             for cl in claims {
-                let tier = VerificationTier::T1Corroborated; // default canonical tier
+                let tier = cl.verification_tier;
                 if let Some(min_t) = q.minimum_verification {
                     if tier < min_t {
                         continue;
@@ -210,8 +210,8 @@ impl MemoryCompiler {
                         text,
                         claim_id: cl.id,
                         verification_tier: tier,
-                        status: ClaimStatus::Active,
-                        evidence_count: 1,
+                        status: cl.status,
+                        evidence_count: cl.evidence_count,
                     });
                 } else {
                     omitted_count += 1;
@@ -238,7 +238,7 @@ impl MemoryCompiler {
                         candidate_id: cand.id,
                         assertion: text,
                         confidence: cand.confidence,
-                        verification: format!("{:?}", cand.verification_tier),
+                        verification: cand.verification_tier.as_str().to_string(),
                         advisory: "UNVERIFIED HYPOTHESIS: Do not treat as established fact."
                             .to_string(),
                     });

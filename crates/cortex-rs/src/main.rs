@@ -16,6 +16,7 @@ use std::fs;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
+use tokio::sync::Semaphore;
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
@@ -101,6 +102,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         db: database,
         http_client: Client::builder().build()?,
         encoder_url: args.encoder_url,
+        worker_limit: Arc::new(Semaphore::new(2)),
     });
 
     let protected_routes = Router::new()

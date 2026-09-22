@@ -37,8 +37,10 @@ impl SummaryWorker {
         }
 
         // Project events into SafeEventView
-        let safe_views: Vec<SafeEventView> =
-            events.iter().map(SecurityMembrane::to_safe_view).collect();
+        let safe_views: Vec<SafeEventView> = events
+            .iter()
+            .map(|ev| SecurityMembrane::to_safe_view(ev, self.db.hmac_key()))
+            .collect();
 
         let start_seq = safe_views.first().unwrap().sequence;
         let end_seq = safe_views.last().unwrap().sequence;
@@ -149,8 +151,10 @@ impl ExtractionWorker {
             return Ok(Vec::new());
         }
 
-        let safe_views: Vec<SafeEventView> =
-            events.iter().map(SecurityMembrane::to_safe_view).collect();
+        let safe_views: Vec<SafeEventView> = events
+            .iter()
+            .map(|ev| SecurityMembrane::to_safe_view(ev, self.db.hmac_key()))
+            .collect();
         let max_seq = safe_views.last().unwrap().sequence;
 
         let mut extracted_candidates = Vec::new();
@@ -271,6 +275,8 @@ impl ExtractionWorker {
     }
 }
 
+pub const MAX_WORKER_BATCH: usize = 32;
+
 pub struct ProcessingScheduler {
     summary_worker: SummaryWorker,
     extraction_worker: ExtractionWorker,
@@ -290,12 +296,13 @@ impl ProcessingScheduler {
         session_id: &str,
         branch_id: &str,
     ) -> Result<(Option<SessionSummary>, Vec<MemoryCandidate>), rusqlite::Error> {
+        let batch = MAX_WORKER_BATCH;
         let summary = self
             .summary_worker
-            .process_session_branch(session_id, branch_id, 32)?;
+            .process_session_branch(session_id, branch_id, batch)?;
         let candidates = self
             .extraction_worker
-            .process_session_branch(session_id, branch_id, 32)?;
+            .process_session_branch(session_id, branch_id, batch)?;
         Ok((summary, candidates))
     }
 }

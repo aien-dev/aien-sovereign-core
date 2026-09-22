@@ -11,6 +11,13 @@ pub enum PromotionDecision {
     Reject { reason: String },
 }
 
+pub fn enforce_promotion_policy(candidate: &MemoryCandidate) -> Result<(), String> {
+    match PromotionEngine::evaluate_candidate(candidate) {
+        PromotionDecision::Promote => Ok(()),
+        PromotionDecision::Hold { reason } | PromotionDecision::Reject { reason } => Err(reason),
+    }
+}
+
 pub struct PromotionEngine {
     db: Arc<Database>,
 }
@@ -20,7 +27,6 @@ impl PromotionEngine {
         Self { db }
     }
 
-    /// Evaluate whether a candidate satisfies verification policy for promotion.
     pub fn evaluate_candidate(candidate: &MemoryCandidate) -> PromotionDecision {
         if candidate.state == "promoted" {
             return PromotionDecision::Reject {
@@ -216,6 +222,59 @@ mod tests {
         })
         .unwrap();
 
+        db.batch_append_events(
+            "sess-promo",
+            "main",
+            &[
+                crate::models::SessionEventInput {
+                    id: Some("ev-001".to_string()),
+                    branch_id: Some("main".to_string()),
+                    parent_event_id: None,
+                    event_type: "user_message".to_string(),
+                    role: Some("user".to_string()),
+                    content: Some("I prefer Python for scripts.".to_string()),
+                    payload: json!({}),
+                    sensitivity: None,
+                },
+                crate::models::SessionEventInput {
+                    id: Some("ev-002".to_string()),
+                    branch_id: Some("main".to_string()),
+                    parent_event_id: None,
+                    event_type: "user_message".to_string(),
+                    role: Some("user".to_string()),
+                    content: Some("I prefer Rust for the runtime.".to_string()),
+                    payload: json!({}),
+                    sensitivity: None,
+                },
+            ],
+        )
+        .unwrap();
+
+        let bare = db
+            .insert_memory_candidate(&CandidateWriteInput {
+                id: Some("cand-bare".to_string()),
+                space: "atlas-memory".to_string(),
+                session_id: "sess-promo".to_string(),
+                branch_id: "main".to_string(),
+                memory_type: "workflow_preference".to_string(),
+                subject: "developer".to_string(),
+                predicate: "editor".to_string(),
+                object_value: json!("vim"),
+                scope: "global".to_string(),
+                confidence: 0.99,
+                verification_tier: Some(VerificationTier::T0Direct),
+                extractor_version: "0.2.0".to_string(),
+                evidence_ids: vec![],
+            })
+            .unwrap();
+        assert!(db
+            .promote_candidate(&PromoteCandidateInput {
+                candidate_id: bare.id,
+                policy_id: Some("p1".to_string()),
+                verifier_receipt: None,
+            })
+            .is_err());
+
         // 1. Insert candidate C1: User prefers Python
         let cand1 = db
             .insert_memory_candidate(&CandidateWriteInput {
@@ -251,6 +310,12 @@ mod tests {
             .unwrap();
         assert_eq!(claims_after_1.len(), 1);
         assert_eq!(claims_after_1[0].literal_value, Some(json!("Python")));
+        assert_eq!(
+            claims_after_1[0].verification_tier,
+            VerificationTier::T0Direct
+        );
+        assert_eq!(claims_after_1[0].evidence_count, 1);
+        assert_eq!(claims_after_1[0].status, crate::models::ClaimStatus::Active);
 
         // 2. Insert candidate C2: User now prefers Rust (contradiction & temporal update)
         let cand2 = db
@@ -287,5 +352,6 @@ mod tests {
             .unwrap();
         assert_eq!(claims_after_2.len(), 1);
         assert_eq!(claims_after_2[0].literal_value, Some(json!("Rust")));
+        assert_eq!(claims_after_2[0].evidence_count, 1);
     }
 }

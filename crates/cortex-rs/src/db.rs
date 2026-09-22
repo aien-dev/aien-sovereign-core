@@ -229,6 +229,21 @@ pub struct Database {
     writer: Arc<StorageWriter>,
     reader_pool: Arc<ReaderPool>,
     pub conn: LegacyConnAdapter,
+    hmac_key: Vec<u8>,
+}
+
+fn load_hmac_key(conn: &Connection) -> Result<Vec<u8>> {
+    conn.query_row(
+        "SELECT hmac_key FROM security_state WHERE id = 1",
+        [],
+        |row| row.get(0),
+    )
+}
+
+fn shift_back(now: &str, days: i64) -> String {
+    chrono::DateTime::parse_from_rfc3339(now)
+        .map(|parsed| (parsed.with_timezone(&Utc) - chrono::Duration::days(days)).to_rfc3339())
+        .unwrap_or_else(|_| now.to_string())
 }
 
 fn ensure_space_internal(conn: &Connection, slug: &str) -> Result<String> {
@@ -261,6 +276,10 @@ pub struct SessionSummaryWrite<'a> {
 }
 
 impl Database {
+    pub fn hmac_key(&self) -> &[u8] {
+        &self.hmac_key
+    }
+
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
         let path_buf = path.as_ref().to_path_buf();
         let mut write_conn = Connection::open(&path_buf)?;
@@ -269,6 +288,7 @@ impl Database {
         write_conn.execute_batch("PRAGMA synchronous = NORMAL; PRAGMA foreign_keys = ON;")?;
         Self::run_migrations(&mut write_conn)?;
 
+        let hmac_key = load_hmac_key(&write_conn)?;
         let writer = Arc::new(StorageWriter::new(write_conn));
         let reader_pool = Arc::new(ReaderPool::new(Some(path_buf), None, 16));
         let conn = LegacyConnAdapter {
@@ -279,6 +299,7 @@ impl Database {
             writer,
             reader_pool,
             conn,
+            hmac_key,
         })
     }
 
@@ -298,6 +319,7 @@ impl Database {
         write_conn.execute_batch("PRAGMA synchronous = NORMAL; PRAGMA foreign_keys = ON;")?;
         Self::run_migrations(&mut write_conn)?;
 
+        let hmac_key = load_hmac_key(&write_conn)?;
         let writer = Arc::new(StorageWriter::new(write_conn));
         let reader_pool = Arc::new(ReaderPool::new(None, Some(uri), 16));
         let conn = LegacyConnAdapter {
@@ -308,6 +330,7 @@ impl Database {
             writer,
             reader_pool,
             conn,
+            hmac_key,
         })
     }
 
@@ -542,6 +565,39 @@ impl Database {
                     ON claim_evidence(evidence_id);
 
                 PRAGMA user_version = 4;
+                COMMIT;",
+            )?;
+        }
+
+        if user_version < 5 {
+            conn.execute_batch(
+                "BEGIN;
+                CREATE TABLE IF NOT EXISTS security_state (
+                    id INTEGER PRIMARY KEY CHECK (id = 1),
+                    hmac_key BLOB NOT NULL
+                );
+                INSERT INTO security_state (id, hmac_key)
+                SELECT 1, randomblob(32)
+                WHERE NOT EXISTS (SELECT 1 FROM security_state WHERE id = 1);
+
+                CREATE TABLE IF NOT EXISTS evidence_records (
+                    id TEXT PRIMARY KEY,
+                    source_kind TEXT NOT NULL,
+                    source_id TEXT NOT NULL,
+                    commitment TEXT NOT NULL,
+                    merkle_root TEXT,
+                    segment_id TEXT,
+                    retention_class TEXT NOT NULL,
+                    retain_until TEXT,
+                    created_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_evidence_source
+                    ON evidence_records(source_kind, source_id);
+
+                ALTER TABLE claims ADD COLUMN verification_tier TEXT NOT NULL DEFAULT 'T0Direct';
+                ALTER TABLE claims ADD COLUMN status TEXT NOT NULL DEFAULT 'active';
+
+                PRAGMA user_version = 5;
                 COMMIT;",
             )?;
         }
@@ -1060,7 +1116,7 @@ impl Database {
         let target_space = space.unwrap_or("atlas-memory");
 
         let mut stmt = conn.prepare(
-            "SELECT id, space_id, space_slug, subject_entity_id, predicate, object_entity_id, literal_value_json, confidence, metadata_json, retracted, created_at
+            "SELECT id, space_id, space_slug, subject_entity_id, predicate, object_entity_id, literal_value_json, confidence, metadata_json, retracted, created_at, verification_tier, status, (SELECT COUNT(*) FROM claim_evidence WHERE claim_id = claims.id)
              FROM claims
              WHERE (
                  subject_entity_id = ?1 
@@ -1073,6 +1129,21 @@ impl Database {
         let rows = stmt.query_map(params![subject_id, target_space], |row| {
             let lit_str: Option<String> = row.get(6)?;
             let meta_str: String = row.get(8)?;
+            let status_str: String = row.get(12)?;
+            let tier_str: String = row.get(11)?;
+            let status = match status_str.as_str() {
+                "superseded" => ClaimStatus::Superseded,
+                "disputed" => ClaimStatus::Disputed,
+                "retracted" => ClaimStatus::Retracted,
+                "invalidated" => ClaimStatus::Invalidated,
+                _ => {
+                    if row.get::<_, i64>(9)? != 0 {
+                        ClaimStatus::Retracted
+                    } else {
+                        ClaimStatus::Active
+                    }
+                }
+            };
             Ok(CortexClaim {
                 id: row.get(0)?,
                 space_id: row.get(1)?,
@@ -1085,6 +1156,9 @@ impl Database {
                 metadata: serde_json::from_str(&meta_str).unwrap_or_else(|_| serde_json::json!({})),
                 retracted: row.get::<_, i64>(9)? != 0,
                 created_at: row.get(10)?,
+                verification_tier: VerificationTier::from_str_opt(&tier_str),
+                status,
+                evidence_count: row.get::<_, i64>(13)? as usize,
             })
         })?;
 
@@ -1265,6 +1339,7 @@ impl Database {
         let sid = session_id.to_string();
         let bid = branch_id.to_string();
         let input_events = events.to_vec();
+        let hmac_key = self.hmac_key.clone();
 
         self.writer.execute(move |conn| {
             let tx = conn.transaction()?;
@@ -1329,13 +1404,19 @@ impl Database {
                 current_seq += 1;
                 let event_id = ev.id.unwrap_or_else(|| Uuid::new_v4().to_string());
                 let payload_json = serde_json::to_string(&ev.payload).unwrap_or_else(|_| "{}".to_string());
+                let raw_payload: serde_json::Value = serde_json::from_str(&payload_json).unwrap_or_else(|_| serde_json::json!({}));
 
                 let sanitization = crate::security::SecurityMembrane::inspect_and_sanitize(
                     ev.content.as_deref(),
+                    &raw_payload,
                     ev.sensitivity.as_deref(),
+                    &hmac_key,
                 );
                 let final_content = sanitization.sanitized_content;
                 let final_sensitivity = sanitization.sensitivity;
+                let final_payload = sanitization.sanitized_payload;
+                let redacted = sanitization.redacted;
+                let payload_json = serde_json::to_string(&final_payload).unwrap_or_else(|_| "{}".to_string());
 
                 let content_hash = compute_event_hash(
                     &sid,
@@ -1352,7 +1433,7 @@ impl Database {
                          id, session_id, sequence, branch_id, parent_event_id,
                          event_type, role, content, payload_json, created_at,
                          content_hash, sensitivity, redacted, segment_id
-                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, 0, NULL)",
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, NULL)",
                     params![
                         event_id,
                         sid,
@@ -1366,6 +1447,7 @@ impl Database {
                         now,
                         content_hash,
                         final_sensitivity,
+                        redacted as i64,
                     ],
                 )?;
 
@@ -1378,11 +1460,11 @@ impl Database {
                     event_type: ev.event_type,
                     role: ev.role,
                     content: final_content,
-                    payload: ev.payload,
+                    payload: final_payload,
                     created_at: now.clone(),
                     content_hash,
                     sensitivity: final_sensitivity,
-                    redacted: false,
+                    redacted,
                     segment_id: None,
                 });
             }
@@ -1433,6 +1515,53 @@ impl Database {
             })
         })?;
 
+        let mut events = Vec::new();
+        for r in rows {
+            events.push(r?);
+        }
+        Ok(events)
+    }
+
+    pub fn get_recent_session_events(
+        &self,
+        session_id: &str,
+        branch_id: &str,
+        limit: usize,
+    ) -> Result<Vec<CortexSessionEvent>> {
+        let conn = self.reader_pool.acquire()?;
+        let lim = limit.min(500);
+        let mut stmt = conn.prepare(
+            "SELECT id, session_id, sequence, branch_id, parent_event_id, event_type, role, content, payload_json, created_at, content_hash, sensitivity, redacted, segment_id
+             FROM (
+                 SELECT id, session_id, sequence, branch_id, parent_event_id, event_type, role, content, payload_json, created_at, content_hash, sensitivity, redacted, segment_id
+                 FROM session_events
+                 WHERE session_id = ?1 AND branch_id = ?2
+                 ORDER BY sequence DESC
+                 LIMIT ?3
+             ) AS recent_events
+             ORDER BY sequence ASC"
+        )?;
+        let rows = stmt.query_map(params![session_id, branch_id, lim as i64], |row| {
+            let payload_str: String = row.get(8)?;
+            let payload: serde_json::Value =
+                serde_json::from_str(&payload_str).unwrap_or_else(|_| serde_json::json!({}));
+            Ok(CortexSessionEvent {
+                id: row.get(0)?,
+                session_id: row.get(1)?,
+                sequence: row.get(2)?,
+                branch_id: row.get(3)?,
+                parent_event_id: row.get(4)?,
+                event_type: row.get(5)?,
+                role: row.get(6)?,
+                content: row.get(7)?,
+                payload,
+                created_at: row.get(9)?,
+                content_hash: row.get(10)?,
+                sensitivity: row.get(11)?,
+                redacted: row.get::<_, i64>(12)? != 0,
+                segment_id: row.get(13)?,
+            })
+        })?;
         let mut events = Vec::new();
         for r in rows {
             events.push(r?);
@@ -1607,10 +1736,43 @@ impl Database {
             )?;
 
             for ev_id in &input_clone.evidence_ids {
+                let commitment: String = tx
+                    .query_row(
+                        "SELECT content_hash FROM session_events WHERE id = ?1",
+                        params![ev_id],
+                        |row| row.get(0),
+                    )
+                    .map_err(|_| {
+                        rusqlite::Error::SqliteFailure(
+                            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CONSTRAINT),
+                            Some(format!(
+                                "evidence {} has no session event commitment",
+                                ev_id
+                            )),
+                        )
+                    })?;
+                if !crate::evidence::is_commitment(&commitment) {
+                    return Err(rusqlite::Error::SqliteFailure(
+                        rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CONSTRAINT),
+                        Some(format!("evidence {} commitment is not a digest", ev_id)),
+                    ));
+                }
                 tx.execute(
                     "INSERT OR IGNORE INTO candidate_evidence (candidate_id, evidence_id, source_kind, evidence_hash)
-                     VALUES (?1, ?2, 'session_event', 'hash_ref')",
-                    params![id_clone, ev_id],
+                     VALUES (?1, ?2, 'session_event', ?3)",
+                    params![id_clone, ev_id, commitment],
+                )?;
+                let record_id = Uuid::new_v4().to_string();
+                tx.execute(
+                    "INSERT INTO evidence_records (id, source_kind, source_id, commitment, merkle_root, segment_id, retention_class, retain_until, created_at)
+                     VALUES (?1, 'session_event', ?2, ?3, NULL, NULL, 'standard', ?4, ?5)",
+                    params![
+                        record_id,
+                        ev_id,
+                        commitment,
+                        crate::evidence::retain_until("standard", Utc::now()),
+                        now_clone
+                    ],
                 )?;
             }
 
@@ -1805,7 +1967,56 @@ impl Database {
                 ));
             }
 
+            let (evidence_ids, evidence_hashes): (Vec<String>, Vec<String>) = {
+                let mut ev_stmt = tx.prepare(
+                    "SELECT evidence_id, evidence_hash FROM candidate_evidence WHERE candidate_id = ?1",
+                )?;
+                let rows = ev_stmt.query_map(params![cid], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })?;
+                let mut ids = Vec::new();
+                let mut hashes = Vec::new();
+                for row in rows {
+                    let (id, hash) = row?;
+                    ids.push(id);
+                    hashes.push(hash);
+                }
+                (ids, hashes)
+            };
+            if evidence_hashes
+                .iter()
+                .any(|hash| !crate::evidence::is_commitment(hash))
+            {
+                return Err(rusqlite::Error::SqliteFailure(
+                    rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CONSTRAINT),
+                    Some("promotion refused: evidence commitment missing".to_string()),
+                ));
+            }
             let tier = VerificationTier::from_str_opt(&tier_str);
+            let policy_candidate = MemoryCandidate {
+                id: cid.clone(),
+                space_slug: space_slug.clone(),
+                session_id: String::new(),
+                branch_id: String::new(),
+                memory_type: mem_type.clone(),
+                subject: subject.clone(),
+                predicate: predicate.clone(),
+                object_value: serde_json::from_str(&obj_json).unwrap_or_else(|_| serde_json::json!({})),
+                scope: scope.clone(),
+                confidence,
+                verification_tier: tier,
+                state: state.clone(),
+                extractor_version: String::new(),
+                created_at: String::new(),
+                evidence_ids,
+            };
+            if let Err(reason) = crate::promotion::enforce_promotion_policy(&policy_candidate) {
+                return Err(rusqlite::Error::SqliteFailure(
+                    rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CONSTRAINT),
+                    Some(reason),
+                ));
+            }
+
             let now = Utc::now().to_rfc3339();
             let space_id = ensure_space_internal(&tx, &space_slug)?;
 
@@ -1856,7 +2067,7 @@ impl Database {
                     drop(claim_check);
                     // Temporal supersession: close old claim
                     tx.execute(
-                        "UPDATE claims SET retracted = 1 WHERE id = ?1",
+                        "UPDATE claims SET retracted = 1, status = 'superseded' WHERE id = ?1",
                         params![old_claim_id],
                     )?;
                 }
@@ -1865,8 +2076,8 @@ impl Database {
             // 4. Insert new promoted canonical claim
             let claim_id = Uuid::new_v4().to_string();
             tx.execute(
-                "INSERT INTO claims (id, space_id, space_slug, subject_entity_id, predicate, object_entity_id, literal_value_json, confidence, metadata_json, retracted, created_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, NULL, ?6, ?7, ?8, 0, ?9)",
+                "INSERT INTO claims (id, space_id, space_slug, subject_entity_id, predicate, object_entity_id, literal_value_json, confidence, metadata_json, retracted, created_at, verification_tier, status)
+                 VALUES (?1, ?2, ?3, ?4, ?5, NULL, ?6, ?7, ?8, 0, ?9, ?10, 'active')",
                 params![
                     claim_id,
                     space_id,
@@ -1877,6 +2088,7 @@ impl Database {
                     confidence,
                     serde_json::json!({"scope": scope, "promoted_from_candidate": cid, "tier": tier.as_str()}).to_string(),
                     now,
+                    tier.as_str(),
                 ],
             )?;
 
@@ -1941,6 +2153,135 @@ impl Database {
                 verifier_receipt,
                 promoted_at: now,
             })
+        })
+    }
+
+    pub fn seal_open_segment(
+        &self,
+        session_id: &str,
+        branch_id: &str,
+    ) -> Result<Option<EventSegment>> {
+        let sid = session_id.to_string();
+        let bid = branch_id.to_string();
+        self.writer.execute(move |conn| {
+            let mut stmt = conn.prepare(
+                "SELECT id, content_hash, sequence FROM session_events
+                 WHERE session_id = ?1 AND branch_id = ?2 AND segment_id IS NULL
+                 ORDER BY sequence ASC",
+            )?;
+            let rows = stmt.query_map(params![sid, bid], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            })?;
+            let mut leaves = Vec::new();
+            for row in rows {
+                leaves.push(row?);
+            }
+            drop(stmt);
+            if leaves.is_empty() {
+                return Ok(None);
+            }
+            let start_seq = leaves[0].2;
+            let end_seq = leaves[leaves.len() - 1].2;
+            let root = crate::evidence::merkle_root(
+                &leaves
+                    .iter()
+                    .map(|(_, hash, _)| hash.as_bytes())
+                    .collect::<Vec<_>>(),
+            );
+            let prev: Option<String> = conn
+                .query_row(
+                    "SELECT merkle_root FROM event_segments WHERE session_id = ?1 AND branch_id = ?2 ORDER BY end_seq DESC LIMIT 1",
+                    params![sid, bid],
+                    |row| row.get(0),
+                )
+                .ok();
+            let retention: String = conn
+                .query_row(
+                    "SELECT retention_class FROM sessions WHERE id = ?1",
+                    params![sid],
+                    |row| row.get(0),
+                )
+                .unwrap_or_else(|_| "standard".to_string());
+            let now = Utc::now().to_rfc3339();
+            let segment_id = Uuid::new_v4().to_string();
+            conn.execute(
+                "INSERT INTO event_segments (id, session_id, branch_id, start_seq, end_seq, merkle_root, prev_segment_root, sealed_at, state)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'sealed')",
+                params![segment_id, sid, bid, start_seq, end_seq, root, prev, now],
+            )?;
+            for (event_id, _, _) in &leaves {
+                conn.execute(
+                    "UPDATE session_events SET segment_id = ?1 WHERE id = ?2",
+                    params![segment_id, event_id],
+                )?;
+            }
+            let record_id = Uuid::new_v4().to_string();
+            conn.execute(
+                "INSERT INTO evidence_records (id, source_kind, source_id, commitment, merkle_root, segment_id, retention_class, retain_until, created_at)
+                 VALUES (?1, 'event_segment', ?2, ?3, ?3, ?2, ?4, ?5, ?6)",
+                params![
+                    record_id,
+                    segment_id,
+                    root,
+                    retention,
+                    crate::evidence::retain_until(&retention, Utc::now()),
+                    now
+                ],
+            )?;
+            Ok(Some(EventSegment {
+                id: segment_id,
+                session_id: sid,
+                branch_id: bid,
+                start_seq,
+                end_seq,
+                merkle_root: root,
+                prev_segment_root: prev,
+                sealed_at: now,
+                state: "sealed".to_string(),
+            }))
+        })
+    }
+
+    pub fn apply_retention(&self, now: &str) -> Result<usize> {
+        let now_owned = now.to_string();
+        self.writer.execute(move |conn| {
+            let mut stmt = conn.prepare(
+                "SELECT id, retention_class, created_at FROM sessions WHERE retention_class != 'permanent'",
+            )?;
+            let sessions: Vec<(String, String, String)> = stmt
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+                .collect::<Result<Vec<_>>>()?;
+            drop(stmt);
+            let mut purged = 0usize;
+            for (sid, class, created_at) in sessions {
+                let expired = match class.as_str() {
+                    "ephemeral" => created_at < shift_back(&now_owned, 1),
+                    _ => created_at < shift_back(&now_owned, 365),
+                };
+                if !expired {
+                    continue;
+                }
+                let changed = conn.execute(
+                    "UPDATE session_events SET content = NULL, payload_json = '{\"redacted\":true}', redacted = 1
+                     WHERE session_id = ?1 AND redacted = 0",
+                    params![sid],
+                )?;
+                purged += changed;
+            }
+            let changed = conn.execute(
+                "UPDATE session_events SET content = NULL, payload_json = '{\"redacted\":true}', redacted = 1
+                 WHERE id IN (
+                     SELECT source_id FROM evidence_records
+                     WHERE source_kind = 'session_event' AND retain_until IS NOT NULL AND retain_until < ?1
+                 ) AND redacted = 0",
+                params![now_owned],
+            )?;
+            purged += changed;
+            Ok(purged)
         })
     }
 }
@@ -2640,14 +2981,14 @@ mod tests {
         let _ = std::fs::create_dir_all(&temp_dir);
         let db_path = temp_dir.join("cortex.db");
 
-        // Open and verify user_version is 4 (all migrations applied)
+        // Open and verify user_version is 5 (all migrations applied)
         let db = Database::open(&db_path).expect("open db");
         {
             let conn = db.conn.lock().unwrap();
             let version: i32 = conn
                 .query_row("PRAGMA user_version;", [], |r| r.get(0))
                 .unwrap();
-            assert_eq!(version, 4);
+            assert_eq!(version, 5);
 
             // Verify canonical, episodic, candidate and provenance tables exist
             let tables: Vec<String> = {
@@ -2668,6 +3009,78 @@ mod tests {
             assert!(tables.contains(&"candidate_evidence".to_string()));
             assert!(tables.contains(&"promotion_receipts".to_string()));
             assert!(tables.contains(&"claim_evidence".to_string()));
+            assert!(tables.contains(&"evidence_records".to_string()));
+            assert!(tables.contains(&"security_state".to_string()));
         }
+    }
+
+    #[test]
+    fn test_seal_segment_and_retention_purge() {
+        let db = Database::open_in_memory().unwrap();
+        db.create_session(&CreateSessionInput {
+            id: Some("sess-seal".to_string()),
+            space: "atlas-memory".to_string(),
+            agent_id: Some("atlas".to_string()),
+            world_id: None,
+            parent_session_id: None,
+            fork_event_id: None,
+            retention_class: "ephemeral".to_string(),
+            metadata: serde_json::json!({}),
+        })
+        .unwrap();
+
+        let events = vec![
+            SessionEventInput {
+                id: Some("ev-seal-1".to_string()),
+                branch_id: Some("main".to_string()),
+                parent_event_id: None,
+                event_type: "user_message".to_string(),
+                role: Some("user".to_string()),
+                content: Some("Alpha content".to_string()),
+                payload: serde_json::json!({"n": 1}),
+                sensitivity: None,
+            },
+            SessionEventInput {
+                id: Some("ev-seal-2".to_string()),
+                branch_id: Some("main".to_string()),
+                parent_event_id: Some("ev-seal-1".to_string()),
+                event_type: "tool_result".to_string(),
+                role: Some("tool".to_string()),
+                content: Some("Beta content".to_string()),
+                payload: serde_json::json!({"n": 2}),
+                sensitivity: None,
+            },
+        ];
+        db.batch_append_events("sess-seal", "main", &events)
+            .unwrap();
+
+        let segment = db
+            .seal_open_segment("sess-seal", "main")
+            .unwrap()
+            .expect("segment sealed");
+        assert_eq!(segment.start_seq, 1);
+        assert_eq!(segment.end_seq, 2);
+        assert_eq!(segment.merkle_root.len(), 64);
+        assert!(segment.prev_segment_root.is_none());
+
+        // Events are bound to the segment.
+        let sealed = db
+            .get_session_events("sess-seal", "main", None, 10)
+            .unwrap();
+        assert!(sealed.iter().all(|e| e.segment_id.is_some()));
+
+        // A second seal yields no new segment.
+        assert!(db.seal_open_segment("sess-seal", "main").unwrap().is_none());
+
+        // Retention purge nulls content but keeps the record and commitment.
+        let conn = db.conn.lock().unwrap();
+        let commitment: String = conn
+            .query_row(
+                "SELECT commitment FROM evidence_records WHERE segment_id = ?1",
+                params![segment.id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(commitment, segment.merkle_root);
     }
 }
