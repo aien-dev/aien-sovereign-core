@@ -3,10 +3,15 @@
 
 pub mod auth;
 pub mod bench;
+pub mod compiler;
 pub mod db;
 pub mod embeddings;
+pub mod evidence;
 pub mod handlers;
 pub mod models;
+pub mod promotion;
+pub mod security;
+pub mod workers;
 
 pub use db::Database;
 pub use models::*;

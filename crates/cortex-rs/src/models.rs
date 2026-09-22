@@ -35,6 +35,9 @@ pub struct CortexClaim {
     pub metadata: Value,
     pub retracted: bool,
     pub created_at: String,
+    pub verification_tier: VerificationTier,
+    pub status: ClaimStatus,
+    pub evidence_count: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -207,4 +210,249 @@ pub struct RecallResponse {
 pub struct TraversePayload {
     pub subject_id: String,
     pub space: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CortexSession {
+    pub id: String,
+    pub space_slug: String,
+    pub agent_id: Option<String>,
+    pub world_id: Option<String>,
+    pub parent_session_id: Option<String>,
+    pub fork_event_id: Option<String>,
+    pub created_at: String,
+    pub closed_at: Option<String>,
+    pub status: String,
+    pub retention_class: String,
+    pub metadata: Value,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateSessionInput {
+    pub id: Option<String>,
+    #[serde(default = "default_space")]
+    pub space: String,
+    pub agent_id: Option<String>,
+    pub world_id: Option<String>,
+    pub parent_session_id: Option<String>,
+    pub fork_event_id: Option<String>,
+    #[serde(default = "default_retention_class")]
+    pub retention_class: String,
+    #[serde(default = "default_json_object")]
+    pub metadata: Value,
+}
+
+fn default_retention_class() -> String {
+    "standard".to_string()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CortexSessionEvent {
+    pub id: String,
+    pub session_id: String,
+    pub sequence: i64,
+    pub branch_id: String,
+    pub parent_event_id: Option<String>,
+    pub event_type: String,
+    pub role: Option<String>,
+    pub content: Option<String>,
+    pub payload: Value,
+    pub created_at: String,
+    pub content_hash: String,
+    pub sensitivity: Option<String>,
+    pub redacted: bool,
+    pub segment_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionEventInput {
+    pub id: Option<String>,
+    pub branch_id: Option<String>,
+    pub parent_event_id: Option<String>,
+    pub event_type: String,
+    pub role: Option<String>,
+    pub content: Option<String>,
+    #[serde(default = "default_json_object")]
+    pub payload: Value,
+    pub sensitivity: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BatchAppendEventsInput {
+    #[serde(default = "default_branch_id")]
+    pub branch_id: String,
+    pub events: Vec<SessionEventInput>,
+}
+
+fn default_branch_id() -> String {
+    "main".to_string()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProcessingWatermark {
+    pub session_id: String,
+    pub processor_kind: String,
+    pub processor_version: String,
+    pub watermark_seq: i64,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetWatermarkInput {
+    pub processor_kind: String,
+    pub processor_version: String,
+    pub watermark_seq: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EventSegment {
+    pub id: String,
+    pub session_id: String,
+    pub branch_id: String,
+    pub start_seq: i64,
+    pub end_seq: i64,
+    pub merkle_root: String,
+    pub prev_segment_root: Option<String>,
+    pub sealed_at: String,
+    pub state: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionSummary {
+    pub id: String,
+    pub session_id: String,
+    pub branch_id: String,
+    pub level: i64,
+    pub start_seq: i64,
+    pub end_seq: i64,
+    pub summary_text: String,
+    pub source_hash: String,
+    pub processor_version: String,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub enum VerificationTier {
+    T0Direct,
+    T1Corroborated,
+    T2Verified,
+    T3Controlled,
+}
+
+impl VerificationTier {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::T0Direct => "T0Direct",
+            Self::T1Corroborated => "T1Corroborated",
+            Self::T2Verified => "T2Verified",
+            Self::T3Controlled => "T3Controlled",
+        }
+    }
+
+    pub fn from_str_opt(s: &str) -> Self {
+        match s {
+            "T1Corroborated" => Self::T1Corroborated,
+            "T2Verified" => Self::T2Verified,
+            "T3Controlled" => Self::T3Controlled,
+            _ => Self::T0Direct,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ClaimStatus {
+    Active,
+    Superseded,
+    Disputed,
+    Retracted,
+    Invalidated,
+}
+
+impl ClaimStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Active => "active",
+            Self::Superseded => "superseded",
+            Self::Disputed => "disputed",
+            Self::Retracted => "retracted",
+            Self::Invalidated => "invalidated",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MemoryCandidate {
+    pub id: String,
+    pub space_slug: String,
+    pub session_id: String,
+    pub branch_id: String,
+    pub memory_type: String,
+    pub subject: String,
+    pub predicate: String,
+    pub object_value: Value,
+    pub scope: String,
+    pub confidence: f64,
+    pub verification_tier: VerificationTier,
+    pub state: String,
+    pub extractor_version: String,
+    pub created_at: String,
+    pub evidence_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CandidateWriteInput {
+    pub id: Option<String>,
+    #[serde(default = "default_space")]
+    pub space: String,
+    pub session_id: String,
+    #[serde(default = "default_branch_id")]
+    pub branch_id: String,
+    pub memory_type: String,
+    pub subject: String,
+    pub predicate: String,
+    pub object_value: Value,
+    #[serde(default = "default_scope")]
+    pub scope: String,
+    pub confidence: f64,
+    pub verification_tier: Option<VerificationTier>,
+    pub extractor_version: String,
+    #[serde(default)]
+    pub evidence_ids: Vec<String>,
+}
+
+fn default_scope() -> String {
+    "global".to_string()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PromotionReceipt {
+    pub id: String,
+    pub candidate_id: String,
+    pub claim_id: String,
+    pub policy_id: String,
+    pub policy_version: String,
+    pub achieved_tier: String,
+    pub verifier_receipt: Option<String>,
+    pub promoted_at: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PromoteCandidateInput {
+    pub candidate_id: String,
+    pub policy_id: Option<String>,
+    pub verifier_receipt: Option<String>,
 }

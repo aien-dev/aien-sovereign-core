@@ -16,6 +16,7 @@ use std::fs;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
+use tokio::sync::Semaphore;
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
@@ -101,6 +102,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         db: database,
         http_client: Client::builder().build()?,
         encoder_url: args.encoder_url,
+        worker_limit: Arc::new(Semaphore::new(2)),
     });
 
     let protected_routes = Router::new()
@@ -112,6 +114,34 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/cortex/recall", post(recall_handler))
         .route("/api/cortex/get", get(get_handler))
         .route("/api/cortex/traverse", post(traverse_handler))
+        .route("/api/cortex/v2/sessions", post(create_session_handler))
+        .route("/api/cortex/v2/sessions/:id", get(get_session_handler))
+        .route(
+            "/api/cortex/v2/sessions/:id/close",
+            post(close_session_handler),
+        )
+        .route(
+            "/api/cortex/v2/sessions/:id/events",
+            get(get_session_events_handler).post(batch_append_events_handler),
+        )
+        .route(
+            "/api/cortex/v2/sessions/:id/watermark",
+            get(get_watermark_handler).post(set_watermark_handler),
+        )
+        .route("/api/cortex/v2/candidates", get(get_candidates_handler))
+        .route(
+            "/api/cortex/v2/candidates/:id",
+            get(get_candidate_by_id_handler),
+        )
+        .route(
+            "/api/cortex/v2/candidates/:id/promote",
+            post(promote_candidate_handler),
+        )
+        .route(
+            "/api/cortex/v2/sessions/:id/process",
+            post(process_session_handler),
+        )
+        .route("/api/cortex/v2/context", post(compile_context_handler))
         .layer(middleware::from_fn(auth_middleware));
 
     let app = Router::new()
