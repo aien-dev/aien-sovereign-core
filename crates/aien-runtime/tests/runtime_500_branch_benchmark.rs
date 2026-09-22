@@ -51,7 +51,11 @@ async fn test_runtime_spine_500_branch_benchmark() {
     let env = ControlEnvelope {
         protocol_version: 1,
         request_id: 1001,
-        operation_id: 500_000_001,
+        // Unique per run: persistent idempotency must not reject a fresh launch.
+        operation_id: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos(),
         operator_session: 1,
         command: ControlCommand::LaunchSwarm(launch_req),
     };

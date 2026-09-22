@@ -249,6 +249,16 @@ impl AienScheduler {
 
     /// Legacy backward compatibility for fork_subagent(parent_id, child_id).
     pub fn fork_subagent(&mut self, parent_raw: u64, child_raw: u64) -> Result<(), String> {
+        self.fork_subagent_with_sink(parent_raw, child_raw, None)
+    }
+
+    /// Subagent fork with completion sink routing for streamed output.
+    pub fn fork_subagent_with_sink(
+        &mut self,
+        parent_raw: u64,
+        child_raw: u64,
+        sink_id: Option<CompletionSinkId>,
+    ) -> Result<(), String> {
         let parent_id = self
             .running_sequences
             .iter()
@@ -261,7 +271,7 @@ impl AienScheduler {
             return Err(format!("Parent sequence {} is stale", parent_id));
         }
 
-        let child_id = self.arena.fork(parent_id, None)?;
+        let child_id = self.arena.fork(parent_id, sink_id)?;
 
         {
             let mut kv = self.kv_manager.write();
@@ -658,6 +668,7 @@ impl AienScheduler {
                             {
                                 self.running_sequences.remove(pos);
                             }
+                            let finished_sink = self.arena.get(seq_id).and_then(|seq| seq.sink_id);
                             if finish_reason == FinishReason::Preempted {
                                 let _ = self.kv_manager.write().free_sequence(request_id);
                                 if let Some(seq) = self.arena.get_mut(seq_id) {
@@ -678,6 +689,16 @@ impl AienScheduler {
                                 reason: finish_reason,
                                 total_tokens,
                             });
+                            if let Some(sink_id) = finished_sink {
+                                self.completion_router.emit(
+                                    sink_id,
+                                    CompletionEvent::Finished {
+                                        seq_id,
+                                        finish_reason,
+                                        total_tokens,
+                                    },
+                                );
+                            }
                         } else if should_emit_token {
                             final_outputs.push(DecodeOutput::Token {
                                 request_id,
@@ -697,9 +718,20 @@ impl AienScheduler {
                         {
                             self.running_sequences.remove(pos);
                         }
+                        let finished_sink = self.arena.get(seq_id).and_then(|seq| seq.sink_id);
                         let _ = self.kv_manager.write().free_sequence(request_id);
                         self.arena.free_sequence(seq_id);
                         self.metrics.finished_requests += 1;
+                        if let Some(sink_id) = finished_sink {
+                            self.completion_router.emit(
+                                sink_id,
+                                CompletionEvent::Finished {
+                                    seq_id,
+                                    finish_reason: reason,
+                                    total_tokens,
+                                },
+                            );
+                        }
                     }
                     final_outputs.push(DecodeOutput::Finished {
                         request_id,

@@ -91,7 +91,7 @@ async fn test_end_to_end_ticket_submission_and_channel_streaming_cpu() {
     while let Ok(event) = rx.try_recv() {
         match event {
             CompletionEvent::Token { seq_id: sid, token } => {
-                assert_eq!(sid, seq_id);
+                assert_eq!(sid.to_u64(), seq_id);
                 received_tokens.push(token);
             }
             CompletionEvent::Finished {
@@ -99,7 +99,7 @@ async fn test_end_to_end_ticket_submission_and_channel_streaming_cpu() {
                 total_tokens,
                 finish_reason,
             } => {
-                assert_eq!(sid, seq_id);
+                assert_eq!(sid.to_u64(), seq_id);
                 saw_finished = true;
                 eprintln!(
                     "Finished event: total_tokens={}, received_tokens={}, reason={:?}",
@@ -337,7 +337,7 @@ async fn test_end_to_end_blackwell_hardware_execution_if_available() {
     let mut tokens = Vec::new();
     while let Ok(event) = rx.try_recv() {
         if let CompletionEvent::Token { seq_id: sid, token } = event {
-            assert_eq!(sid, seq_id);
+            assert_eq!(sid.to_u64(), seq_id);
             tokens.push(token);
         }
     }

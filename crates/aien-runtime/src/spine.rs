@@ -58,6 +58,7 @@ impl AienRuntimeSpine {
     ) -> Result<(), String> {
         self.scheduler
             .submit_work(work, prompt, sampling_params, sink_id)
+            .map(|_| ())
     }
 
     /// Submits a prompt ticket to the scheduler for execution, constructing default InferenceWork.
