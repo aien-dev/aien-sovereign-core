@@ -5,6 +5,79 @@ use crate::tensor::{
     apply_rope as tensor_rope, matmul_vec as tensor_matmul, rmsnorm as tensor_rmsnorm,
 };
 
+/// Reads one KV head from the pool using the pool's dtype. Bf16 bytes are decoded.
+/// A short or unknown dtype returns zeros instead of reading past the allocation.
+fn read_kv_head(
+    pool: &aien_kv_cache::UnifiedKvTensorPool,
+    block_id: usize,
+    layer_idx: usize,
+    is_value: bool,
+    token_in_block: usize,
+    kv_head: usize,
+    head_dim: usize,
+) -> Vec<f32> {
+    let dtype = pool.config().dtype;
+    let element_bytes = match dtype {
+        aien_kv_cache::KvDType::Fp32 => 4,
+        aien_kv_cache::KvDType::Bf16 | aien_kv_cache::KvDType::Fp16 => 2,
+        aien_kv_cache::KvDType::Fp8 => 1,
+        aien_kv_cache::KvDType::Fp4 => return vec![0.0; head_dim],
+    };
+    let offset = pool.element_offset(block_id, layer_idx, is_value, token_in_block)
+        + kv_head * head_dim * element_bytes;
+    let nbytes = head_dim * element_bytes;
+    if offset.saturating_add(nbytes) > pool.layout().total_bytes {
+        return vec![0.0; head_dim];
+    }
+    let ptr = unsafe { pool.base_ptr().add(offset) };
+    match dtype {
+        aien_kv_cache::KvDType::Fp32 => unsafe {
+            std::slice::from_raw_parts(ptr as *const f32, head_dim).to_vec()
+        },
+        aien_kv_cache::KvDType::Bf16 => {
+            let bits = unsafe { std::slice::from_raw_parts(ptr as *const u16, head_dim) };
+            bits.iter()
+                .copied()
+                .map(aien_kv_cache::bf16_bits_to_f32)
+                .collect()
+        }
+        aien_kv_cache::KvDType::Fp16 => {
+            let bits = unsafe { std::slice::from_raw_parts(ptr as *const u16, head_dim) };
+            bits.iter().copied().map(fp16_bits_to_f32).collect()
+        }
+        aien_kv_cache::KvDType::Fp8 => {
+            let bytes = unsafe { std::slice::from_raw_parts(ptr, head_dim) };
+            bytes.iter().map(|byte| *byte as f32).collect()
+        }
+        aien_kv_cache::KvDType::Fp4 => vec![0.0; head_dim],
+    }
+}
+
+fn fp16_bits_to_f32(bits: u16) -> f32 {
+    let sign = (bits as u32) & 0x8000;
+    let exp = ((bits >> 10) & 0x1f) as i32;
+    let frac = (bits & 0x3ff) as u32;
+    let out_bits = if exp == 0 {
+        if frac == 0 {
+            sign << 16
+        } else {
+            let mut mantissa = frac;
+            let mut exponent = -14;
+            while mantissa & 0x400 == 0 {
+                mantissa <<= 1;
+                exponent -= 1;
+            }
+            mantissa &= 0x3ff;
+            (sign << 16) | (((exponent + 127) as u32) << 23) | (mantissa << 13)
+        }
+    } else if exp == 31 {
+        (sign << 16) | (0xff << 23) | (frac << 13)
+    } else {
+        (sign << 16) | (((exp as u32) + (127 - 15)) << 23) | (frac << 13)
+    };
+    f32::from_bits(out_bits)
+}
+
 /// Decoupled mathematical abstraction for transformer tensor operations.
 pub trait TensorBackend: Send + Sync {
     /// Human-readable name of the backend implementation.
@@ -108,28 +181,12 @@ pub trait TensorBackend: Send + Sync {
                 let blk_id = block_ids[blk_idx];
                 let slot = t % block_size;
 
-                let head_offset_bytes = kv_head * head_dim * std::mem::size_of::<f32>();
-                let k_offset =
-                    pool.element_offset(blk_id, layer_idx, false, slot) + head_offset_bytes;
-                let v_offset =
-                    pool.element_offset(blk_id, layer_idx, true, slot) + head_offset_bytes;
-
-                let k_slice = unsafe {
-                    std::slice::from_raw_parts(
-                        pool.base_ptr().add(k_offset) as *const f32,
-                        head_dim,
-                    )
-                };
-                let v_slice = unsafe {
-                    std::slice::from_raw_parts(
-                        pool.base_ptr().add(v_offset) as *const f32,
-                        head_dim,
-                    )
-                };
+                let k_head = read_kv_head(pool, blk_id, layer_idx, false, slot, kv_head, head_dim);
+                let v_head = read_kv_head(pool, blk_id, layer_idx, true, slot, kv_head, head_dim);
 
                 let mut dot = 0.0f64;
                 for d in 0..head_dim {
-                    dot += (q_head[d] as f64) * (k_slice[d] as f64);
+                    dot += (q_head[d] as f64) * (k_head[d] as f64);
                 }
                 let score = dot * inv_sqrt_d;
 
@@ -139,7 +196,7 @@ pub trait TensorBackend: Send + Sync {
                 let l_new = l_prev * alpha + beta;
 
                 for d in 0..head_dim {
-                    acc[d] = acc[d] * alpha + beta * (v_slice[d] as f64);
+                    acc[d] = acc[d] * alpha + beta * (v_head[d] as f64);
                 }
 
                 m_prev = m_new;

@@ -10,6 +10,58 @@ use aien_runtime::spine::AienRuntimeSpine;
 use aien_scheduler::{ChannelCompletionSink, CompletionEvent, PromptHandle, SchedulerConfig};
 use std::sync::Arc;
 
+fn checkpoint_identity() -> (String, Option<String>) {
+    let explicit = std::env::var("AIEN_CHECKPOINT_ID")
+        .ok()
+        .map(|id| id.trim().to_string())
+        .filter(|id| !id.is_empty());
+    let discovered = discover_safetensors_sha256();
+    (
+        explicit.unwrap_or_else(|| "unspecified".to_string()),
+        discovered,
+    )
+}
+
+fn discover_safetensors_sha256() -> Option<String> {
+    let mut dirs = Vec::new();
+    if let Ok(dir) = std::env::var("AIEN_MODEL_DIR") {
+        dirs.push(std::path::PathBuf::from(dir));
+    }
+    dirs.push(std::path::PathBuf::from("models"));
+    if let Ok(home) = std::env::var("HOME") {
+        dirs.push(std::path::PathBuf::from(home).join("models"));
+    }
+    for dir in dirs {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let file = if path.is_file()
+                && path.extension().and_then(|ext| ext.to_str()) == Some("safetensors")
+            {
+                Some(path)
+            } else if path.is_dir() && path.join("model.safetensors").is_file() {
+                Some(path.join("model.safetensors"))
+            } else {
+                None
+            };
+            if let Some(file) = file {
+                return sha256_file(&file).ok();
+            }
+        }
+    }
+    None
+}
+
+fn sha256_file(path: &std::path::Path) -> Result<String, std::io::Error> {
+    use sha2::{Digest, Sha256};
+    let mut file = std::fs::File::open(path)?;
+    let mut hasher = Sha256::new();
+    std::io::copy(&mut file, &mut hasher)?;
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
 fn test_micro_model_config() -> ModelConfig {
     ModelConfig {
         model_id: "aien-micro-v1".to_string(),
@@ -373,7 +425,7 @@ async fn release_golden_path_records_whether_gb10_ran() {
         .unwrap_or(false);
     let gpu_backend = Arc::new(BlackwellGb10Backend::new());
     let commit = std::env::var("GITHUB_SHA").unwrap_or_else(|_| "local".into());
-    let checkpoint = std::env::var("AIEN_CHECKPOINT_ID").unwrap_or_else(|_| "unspecified".into());
+    let (checkpoint, discovered_weights) = checkpoint_identity();
     if !gpu_backend.is_available() {
         let artifact = serde_json::json!({
             "test": "release_golden_path",
@@ -381,6 +433,7 @@ async fn release_golden_path_records_whether_gb10_ran() {
             "reason": "Blackwell device not available",
             "commit": commit,
             "checkpoint_id": checkpoint,
+        "discovered_safetensors_sha256": discovered_weights,
             "require_release": require,
             "gpu_executions": gpu_backend.kernel_exec_count(),
             "fallback_count": gpu_backend.fallback_count(),
@@ -431,16 +484,26 @@ async fn release_golden_path_records_whether_gb10_ran() {
         stop_token_ids: vec![0],
     };
     let seq_id = spine
-        .submit_work(prompt, sampling, 1, Some(sink_id))
+        .submit_work(prompt.clone(), sampling.clone(), 1, Some(sink_id))
         .unwrap();
     let _ = spine.step(&mut backend).await.unwrap();
-    let branch = spine.fork_subagent(seq_id, seq_id.wrapping_add(1), None);
+    let _ = spine.step(&mut backend).await.unwrap();
+    let (child_sink, mut child_rx) = ChannelCompletionSink::channel();
+    let child_sink_id = spine.register_completion_sink(Arc::new(child_sink));
+    let branch = spine.fork_subagent(seq_id, seq_id.wrapping_add(1), Some(child_sink_id));
     let branch_error = branch.as_ref().err().cloned();
-    let _ = spine.run_until_complete(&mut backend, 15).await.unwrap();
+    let shared_pages = kv_manager.read().metrics().shared_pages;
+    let _ = spine.run_until_complete(&mut backend, 20).await.unwrap();
     let mut tokens = Vec::new();
     while let Ok(event) = rx.try_recv() {
         if let CompletionEvent::Token { token, .. } = event {
             tokens.push(token);
+        }
+    }
+    let mut child_tokens = Vec::new();
+    while let Ok(event) = child_rx.try_recv() {
+        if let CompletionEvent::Token { token, .. } = event {
+            child_tokens.push(token);
         }
     }
     let leaked = kv_manager.read().allocated_block_count();
@@ -449,16 +512,22 @@ async fn release_golden_path_records_whether_gb10_ran() {
         "skipped": false,
         "commit": commit,
         "checkpoint_id": checkpoint,
+        "discovered_safetensors_sha256": discovered_weights,
         "model_id": config.model_id,
         "device": gpu_backend.device_name(),
         "gpu_executions": gpu_backend.kernel_exec_count(),
         "fallback_count": gpu_backend.fallback_count(),
         "tokens": tokens.len(),
+        "child_tokens": child_tokens.len(),
+        "shared_kv_pages": shared_pages,
         "branch_accepted": branch.is_ok(),
         "branch_error": branch_error,
         "leaked_kv_blocks": leaked,
     });
     eprintln!("{artifact}");
+    assert!(branch.is_ok(), "{artifact}");
+    assert!(shared_pages >= 1, "{artifact}");
+    assert!(!child_tokens.is_empty(), "{artifact}");
     assert!(gpu_backend.kernel_exec_count() > 0, "{artifact}");
     assert_eq!(gpu_backend.fallback_count(), 0, "{artifact}");
     assert_eq!(tokens.len(), 4, "{artifact}");
@@ -467,10 +536,6 @@ async fn release_golden_path_records_whether_gb10_ran() {
         assert_ne!(
             checkpoint, "unspecified",
             "release run needs AIEN_CHECKPOINT_ID: {artifact}"
-        );
-        assert!(
-            branch.is_ok(),
-            "release run needs a child branch: {artifact}"
         );
     }
 }
