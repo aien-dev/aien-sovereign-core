@@ -55,8 +55,18 @@ pub enum ControlResponse {
 }
 
 /// Actor managing operator sessions and enforcing idempotent command execution.
+/// Processed operation IDs persist to disk so idempotency survives restarts.
 pub struct RuntimeController {
     processed_operations: HashSet<u128>,
+}
+
+fn operations_state_path() -> std::path::PathBuf {
+    if let Ok(dir) = std::env::var("AIEN_RUNTIME_STATE_DIR") {
+        if !dir.trim().is_empty() {
+            return std::path::PathBuf::from(dir.trim()).join("processed_operations.json");
+        }
+    }
+    std::path::PathBuf::from("/tmp/aien-runtime-processed-ops.json")
 }
 
 impl Default for RuntimeController {
@@ -67,8 +77,14 @@ impl Default for RuntimeController {
 
 impl RuntimeController {
     pub fn new() -> Self {
+        let mut processed_operations = HashSet::new();
+        if let Ok(bytes) = std::fs::read(operations_state_path()) {
+            if let Ok(ids) = serde_json::from_slice::<Vec<u128>>(&bytes) {
+                processed_operations.extend(ids);
+            }
+        }
         Self {
-            processed_operations: HashSet::new(),
+            processed_operations,
         }
     }
 
@@ -78,5 +94,9 @@ impl RuntimeController {
 
     pub fn mark_operation_processed(&mut self, op_id: u128) {
         self.processed_operations.insert(op_id);
+        let ids: Vec<u128> = self.processed_operations.iter().copied().collect();
+        if let Ok(bytes) = serde_json::to_vec(&ids) {
+            let _ = std::fs::write(operations_state_path(), bytes);
+        }
     }
 }

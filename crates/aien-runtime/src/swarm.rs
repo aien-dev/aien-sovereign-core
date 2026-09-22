@@ -122,7 +122,15 @@ impl SwarmManager {
         self.swarms.get(&swarm_id)
     }
 
-    pub fn cancel_swarm(&mut self, swarm_id: u64, arena: &mut SequenceArena) -> Result<(), String> {
+    /// Cancels a swarm and reclaims its resources: KV sequences, arena slots,
+    /// and branch worlds. The root world is retained; branch worlds are dropped.
+    pub fn cancel_swarm(
+        &mut self,
+        swarm_id: u64,
+        arena: &mut SequenceArena,
+        kv: &mut AienKvManager,
+        worlds: &mut WorldStore,
+    ) -> Result<(), String> {
         let swarm = self
             .swarms
             .get_mut(&swarm_id)
@@ -130,15 +138,29 @@ impl SwarmManager {
 
         swarm.state = SwarmState::Cancelling;
 
+        let mut branch_worlds = Vec::new();
         if let Some(root_rec) = arena.get_mut(swarm.root_sequence_id) {
             root_rec.state = SequenceState::Cancelled;
         }
+        let _ = kv.free_sequence(swarm.root_sequence_id.as_u64());
 
         for &child_id in &swarm.branch_sequences {
             if let Some(child_rec) = arena.get_mut(child_id) {
                 child_rec.state = SequenceState::Cancelled;
+                branch_worlds.push(child_rec.world_id);
             }
+            let _ = kv.free_sequence(child_id.as_u64());
         }
+
+        for &child_id in &swarm.branch_sequences {
+            arena.free(child_id);
+        }
+        arena.free(swarm.root_sequence_id);
+
+        for world_id in branch_worlds {
+            worlds.drop_world(world_id);
+        }
+        worlds.collect_garbage();
 
         swarm.state = SwarmState::Completed;
         Ok(())
