@@ -934,11 +934,7 @@ fn resolve_daemon_manifest() -> DaemonModelManifest {
 /// Builds the native transformer backend for daemon boot with explicit fallback.
 /// Prefers Blackwell hardware when available, falls back to CPU reference math.
 /// Never returns the Mock backend: output always comes from real forward passes.
-fn build_native_daemon_backend() -> (
-    aien_inference_abi::NativeTransformerBackend,
-    String,
-    String,
-) {
+fn build_native_daemon_backend() -> (aien_inference_abi::NativeTransformerBackend, String, String) {
     let manifest = resolve_daemon_manifest();
     let config = aien_inference_abi::ModelConfig {
         model_id: "aien-daemon-reference-fallback".to_string(),
@@ -969,7 +965,8 @@ fn build_native_daemon_backend() -> (
         let backend = aien_inference_abi::NativeTransformerBackend::new_reference(weights);
         (
             backend,
-            "NativeTransformerBackend/CPU-reference (Blackwell unavailable, explicit fallback)".to_string(),
+            "NativeTransformerBackend/CPU-reference (Blackwell unavailable, explicit fallback)"
+                .to_string(),
             manifest.label,
         )
     }
