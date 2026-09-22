@@ -1,7 +1,9 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/aien-capability",
     "crates/aien-cli",
+    "crates/aien-mcp",
     "crates/spark-cockpit-rs",
     "crates/cortex-rs",
     "crates/spark-hive",
