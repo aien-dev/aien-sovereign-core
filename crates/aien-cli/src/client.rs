@@ -50,6 +50,31 @@ pub fn describe_chat_backend(backend: &ChatBackend) -> String {
     }
 }
 
+/// Structured per request telemetry. A benchmark or test is only evidence of
+/// the native runtime when path is native_runtime. Adapter traffic must never
+/// be mistaken for native success.
+pub fn emit_chat_telemetry(backend: &ChatBackend, model: &str) {
+    let (path, endpoint) = match backend {
+        ChatBackend::NativeRuntime => ("native_runtime", ""),
+        ChatBackend::RemoteAdapter(ep) => ("remote_adapter", ep.as_str()),
+    };
+    let runtime_socket_present =
+        aien_runtime::client::AienRuntimeClient::default_socket_path().exists();
+    let require_blackwell = std::env::var("AIEN_REQUIRE_BLACKWELL")
+        .map(|v| v.trim() == "1" || v.trim().eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    let record = serde_json::json!({
+        "event": "chat_path",
+        "path": path,
+        "backend": describe_chat_backend(backend),
+        "endpoint": endpoint,
+        "model": model,
+        "runtime_socket_present": runtime_socket_present,
+        "require_blackwell": require_blackwell,
+    });
+    eprintln!("{}", record);
+}
+
 pub fn get_system_prompt() -> String {
     let mut p = String::from("You are AIEN. Drake is the operator. This Spark desk is ours.\n");
     p.push_str("You are an autonomous operator-builder running on NVIDIA DGX Spark Grace Blackwell GB10 hardware.\n");
@@ -178,7 +203,7 @@ impl ChatClient {
         stream_to_stdout: bool,
         max_tokens: usize,
     ) -> Result<String, String> {
-        eprintln!("Chat path: {}", describe_chat_backend(&self.backend));
+        emit_chat_telemetry(&self.backend, &self.model);
         let payload = json!({
             "model": self.model,
             "messages": messages,
