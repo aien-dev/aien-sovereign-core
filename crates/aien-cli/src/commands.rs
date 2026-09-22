@@ -893,6 +893,88 @@ fn handle_adapter_command(args: &[&str]) {
 // SOVEREIGN ORCHESTRATION & DEVELOPER EXPERIENCE
 // --------------------------------------------------------------------------
 
+/// Explicit model manifest for daemon boot. No silent developer-machine paths.
+#[allow(dead_code)]
+struct DaemonModelManifest {
+    label: String,
+    checkpoint_path: Option<std::path::PathBuf>,
+}
+
+fn resolve_daemon_manifest() -> DaemonModelManifest {
+    let mut candidates: Vec<std::path::PathBuf> = Vec::new();
+    if let Ok(dir) = std::env::var("AIEN_MODEL_DIR") {
+        candidates.push(std::path::PathBuf::from(dir));
+    }
+    candidates.push(std::path::PathBuf::from("models"));
+    if let Ok(home) = std::env::var("HOME") {
+        candidates.push(std::path::PathBuf::from(home).join("models"));
+    }
+    for dir in candidates {
+        if let Ok(entries) = std::fs::read_dir(&dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().and_then(|e| e.to_str()) == Some("safetensors") {
+                    return DaemonModelManifest {
+                        label: format!(
+                            "checkpoint found at {} (weight mapping not yet wired, using reference fallback)",
+                            path.display()
+                        ),
+                        checkpoint_path: Some(path),
+                    };
+                }
+            }
+        }
+    }
+    DaemonModelManifest {
+        label: "no safetensors checkpoint found (AIEN_MODEL_DIR, ./models, ~/models); using reference fallback".to_string(),
+        checkpoint_path: None,
+    }
+}
+
+/// Builds the native transformer backend for daemon boot with explicit fallback.
+/// Prefers Blackwell hardware when available, falls back to CPU reference math.
+/// Never returns the Mock backend: output always comes from real forward passes.
+fn build_native_daemon_backend() -> (
+    aien_inference_abi::NativeTransformerBackend,
+    String,
+    String,
+) {
+    let manifest = resolve_daemon_manifest();
+    let config = aien_inference_abi::ModelConfig {
+        model_id: "aien-daemon-reference-fallback".to_string(),
+        max_sequence_length: 2048,
+        block_size: 16,
+        num_layers: 4,
+        num_heads: 8,
+        head_dim: 64,
+        num_kv_heads: 4,
+        hidden_dim: 512,
+        intermediate_dim: 1408,
+        vocab_size: 32000,
+        rms_norm_eps: 1e-5,
+        rope_theta: 10000.0,
+    };
+    let weights = aien_inference_abi::TransformerWeights::reference_test_weights(&config);
+    let probe = aien_inference_abi::BlackwellGb10Backend::new();
+    if probe.is_available() {
+        let device = probe.device_name().to_string();
+        drop(probe);
+        let backend = aien_inference_abi::NativeTransformerBackend::new_blackwell(weights);
+        (
+            backend,
+            format!("NativeTransformerBackend/Blackwell ({})", device),
+            manifest.label,
+        )
+    } else {
+        let backend = aien_inference_abi::NativeTransformerBackend::new_reference(weights);
+        (
+            backend,
+            "NativeTransformerBackend/CPU-reference (Blackwell unavailable, explicit fallback)".to_string(),
+            manifest.label,
+        )
+    }
+}
+
 pub async fn run_daemon_server() {
     println!(
         "{}",
@@ -911,7 +993,12 @@ pub async fn run_daemon_server() {
     let spine = aien_runtime::spine::AienRuntimeSpine::new(4096, sched_cfg, kv_manager);
     let server = aien_runtime::server::AienRuntimeServer::new(spine, &socket_path);
 
-    let backend = aien_inference_abi::MockInferenceBackend::new(1);
+    let backend = {
+        let (native_backend, backend_label, model_label) = build_native_daemon_backend();
+        println!("  Backend: {}", backend_label.green());
+        println!("  Model: {}", model_label.yellow());
+        native_backend
+    };
     println!("✓ Binding socket at {}", socket_path.display());
     if let Err(e) = server.run(backend).await {
         eprintln!("Runtime daemon error: {}", e);
