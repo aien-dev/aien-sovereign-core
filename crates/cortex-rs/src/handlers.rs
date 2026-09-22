@@ -7,7 +7,8 @@ use axum::{
 use reqwest::Client;
 use serde_json::json;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use crate::db::Database;
 use crate::embeddings::fetch_embedding;
@@ -17,6 +18,7 @@ pub struct AppState {
     pub db: Arc<Database>,
     pub http_client: Client,
     pub encoder_url: String,
+    pub worker_limit: Arc<Semaphore>,
 }
 
 pub async fn write_handler(
@@ -245,6 +247,7 @@ pub struct SessionEventsQuery {
     pub branch_id: Option<String>,
     pub after_seq: Option<i64>,
     pub limit: Option<usize>,
+    pub recent: Option<bool>,
 }
 
 #[derive(serde::Deserialize)]
@@ -319,11 +322,17 @@ pub async fn get_session_events_handler(
     Query(params): Query<SessionEventsQuery>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
     let branch = params.branch_id.as_deref().unwrap_or("main");
-    let limit = params.limit.unwrap_or(50);
-    match state
-        .db
-        .get_session_events(&session_id, branch, params.after_seq, limit)
-    {
+    let limit = params.limit.unwrap_or(50).min(500);
+    let fetched = if params.recent.unwrap_or(false) && params.after_seq.is_none() {
+        state
+            .db
+            .get_recent_session_events(&session_id, branch, limit)
+    } else {
+        state
+            .db
+            .get_session_events(&session_id, branch, params.after_seq, limit)
+    };
+    match fetched {
         Ok(events) => Ok(Json(json!({ "events": events }))),
         Err(e) => Err((
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -471,9 +480,42 @@ pub async fn process_session_handler(
     AxumPath(session_id): AxumPath<String>,
     Query(params): Query<SessionEventsQuery>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
-    let branch = params.branch_id.as_deref().unwrap_or("main");
-    let scheduler = crate::workers::ProcessingScheduler::new(Arc::clone(&state.db));
-    match scheduler.process_session(&session_id, branch) {
+    let branch = params.branch_id.as_deref().unwrap_or("main").to_string();
+    let branch_for_worker = branch.clone();
+    let permit = state
+        .worker_limit
+        .clone()
+        .try_acquire_owned()
+        .map_err(|_| {
+            (
+                StatusCode::TOO_MANY_REQUESTS,
+                Json(json!({ "error": "worker capacity exceeded" })),
+            )
+        })?;
+    let db = Arc::clone(&state.db);
+    let session_for_worker = session_id.clone();
+    let joined = tokio::time::timeout(
+        Duration::from_secs(30),
+        tokio::task::spawn_blocking(move || {
+            let _permit: OwnedSemaphorePermit = permit;
+            crate::workers::ProcessingScheduler::new(db)
+                .process_session(&session_for_worker, &branch_for_worker)
+        }),
+    )
+    .await
+    .map_err(|_| {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({ "error": "worker deadline exceeded" })),
+        )
+    })?
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+    })?;
+    match joined {
         Ok((summary, candidates)) => Ok(Json(json!({
             "status": "processed",
             "sessionId": session_id,
@@ -498,6 +540,7 @@ mod tests {
             db,
             http_client: Client::new(),
             encoder_url: "http://127.0.0.1:18081".to_string(),
+            worker_limit: Arc::new(Semaphore::new(2)),
         })
     }
 
@@ -742,6 +785,7 @@ mod tests {
             branch_id: Some("main".to_string()),
             after_seq: Some(0),
             limit: Some(10),
+            recent: None,
         };
         let Json(queried) = get_session_events_handler(
             State(state.clone()),
@@ -856,6 +900,7 @@ mod tests {
             branch_id: Some("main".to_string()),
             after_seq: None,
             limit: Some(50),
+            recent: None,
         };
         let Json(proc_res) = process_session_handler(
             State(state.clone()),

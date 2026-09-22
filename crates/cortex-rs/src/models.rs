@@ -35,6 +35,9 @@ pub struct CortexClaim {
     pub metadata: Value,
     pub retracted: bool,
     pub created_at: String,
+    pub verification_tier: VerificationTier,
+    pub status: ClaimStatus,
+    pub evidence_count: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

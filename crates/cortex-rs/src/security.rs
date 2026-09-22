@@ -94,151 +94,282 @@ fn get_pii_re() -> &'static Regex {
 
 pub struct SanitizationResult {
     pub sanitized_content: Option<String>,
+    pub sanitized_payload: serde_json::Value,
     pub sensitivity: Option<String>,
     pub secret_fingerprint: Option<String>,
+    pub redacted: bool,
 }
 
 pub struct SecurityMembrane;
 
 impl SecurityMembrane {
-    pub fn compute_secret_fingerprint(secret: &str) -> String {
-        let mut hasher = Sha256::new();
-        hasher.update(b"cortex_secret_salt:");
-        hasher.update(secret.trim().as_bytes());
-        format!("HMAC-SHA256:{:x}", hasher.finalize())
+    /// HMAC-SHA256 (RFC 2104) over the secret. The key never enters the stored fingerprint.
+    pub fn hmac_sha256(key: &[u8], message: &[u8]) -> [u8; 32] {
+        const BLOCK: usize = 64;
+        let mut key_block = [0u8; BLOCK];
+        if key.len() > BLOCK {
+            let digest = Sha256::digest(key);
+            key_block[..32].copy_from_slice(&digest);
+        } else {
+            key_block[..key.len()].copy_from_slice(key);
+        }
+        let mut ipad = [0x36u8; BLOCK];
+        let mut opad = [0x5cu8; BLOCK];
+        for i in 0..BLOCK {
+            ipad[i] ^= key_block[i];
+            opad[i] ^= key_block[i];
+        }
+        let mut inner = Sha256::new();
+        inner.update(ipad);
+        inner.update(message);
+        let inner_hash = inner.finalize();
+        let mut outer = Sha256::new();
+        outer.update(opad);
+        outer.update(inner_hash);
+        let digest = outer.finalize();
+        let mut out = [0u8; 32];
+        out.copy_from_slice(&digest);
+        out
     }
 
-    /// Inspect incoming text, detect sensitive material, mask secrets, and enforce memory directives.
+    pub fn compute_secret_fingerprint(secret: &str, hmac_key: &[u8]) -> String {
+        format!(
+            "HMAC-SHA256:{}",
+            crate::evidence::hex_encode(&Self::hmac_sha256(hmac_key, secret.trim().as_bytes(),))
+        )
+    }
+
+    fn mask_text(text: &str, hmac_key: &[u8]) -> (String, Option<String>, Option<String>, bool) {
+        if get_do_not_remember_re().is_match(text) {
+            return (
+                "<WITHHELD_BY_MEMORY_POLICY>".to_string(),
+                Some("do_not_remember".to_string()),
+                None,
+                true,
+            );
+        }
+
+        let mut out = text.to_string();
+        let mut sensitivity: Option<String> = None;
+        let mut fingerprint = None;
+        let mut redacted = false;
+
+        if let Some(caps) = get_credential_re().captures(&out) {
+            let secret = caps.get(1).map(|m| m.as_str()).unwrap_or("").to_string();
+            if !secret.is_empty() {
+                fingerprint = Some(Self::compute_secret_fingerprint(&secret, hmac_key));
+                out = out.replace(&secret, "<SECRET:TOKEN>");
+                redacted = true;
+            }
+            sensitivity = Some("credential".to_string());
+        }
+        if get_auth_re().is_match(&out) {
+            if fingerprint.is_none() {
+                if let Some(m) = get_auth_re().find(&out) {
+                    fingerprint = Some(Self::compute_secret_fingerprint(m.as_str(), hmac_key));
+                }
+            }
+            out = get_auth_re()
+                .replace_all(&out, "<SECRET:AUTH_TOKEN>")
+                .to_string();
+            if sensitivity.is_none() {
+                sensitivity = Some("authentication".to_string());
+            }
+            redacted = true;
+        }
+        if get_financial_re().is_match(&out) {
+            out = get_financial_re()
+                .replace_all(&out, "<REDACTED:FINANCIAL>")
+                .to_string();
+            if sensitivity.is_none() {
+                sensitivity = Some("financial".to_string());
+            }
+            redacted = true;
+        }
+        if get_health_re().is_match(&out) {
+            let diagnosis_only = get_health_re().find_iter(&out).all(|m| {
+                m.as_str().eq_ignore_ascii_case("diagnosis") && out.contains("diagnosis-protocol")
+            });
+            if !diagnosis_only {
+                out = get_health_re()
+                    .replace_all(&out, "<REDACTED:HEALTH>")
+                    .to_string();
+                if sensitivity.is_none() {
+                    sensitivity = Some("health".to_string());
+                }
+                redacted = true;
+            }
+        }
+        if get_pii_re().is_match(&out) {
+            out = get_pii_re().replace_all(&out, "<REDACTED:PII>").to_string();
+            if sensitivity.is_none() {
+                sensitivity = Some("third_party_personal_data".to_string());
+            }
+            redacted = true;
+        }
+        (out, sensitivity, fingerprint, redacted)
+    }
+
+    fn sanitize_payload(
+        value: &serde_json::Value,
+        hmac_key: &[u8],
+    ) -> (serde_json::Value, Option<String>, Option<String>, bool) {
+        match value {
+            serde_json::Value::String(text) => {
+                let (masked, sensitivity, fingerprint, redacted) = Self::mask_text(text, hmac_key);
+                (
+                    serde_json::Value::String(masked),
+                    sensitivity,
+                    fingerprint,
+                    redacted,
+                )
+            }
+            serde_json::Value::Array(items) => {
+                let mut out = Vec::with_capacity(items.len());
+                let mut sensitivity = None;
+                let mut fingerprint = None;
+                let mut redacted = false;
+                for item in items {
+                    let (child, child_sensitivity, child_fp, child_redacted) =
+                        Self::sanitize_payload(item, hmac_key);
+                    out.push(child);
+                    if sensitivity.is_none() {
+                        sensitivity = child_sensitivity;
+                    }
+                    if fingerprint.is_none() {
+                        fingerprint = child_fp;
+                    }
+                    redacted |= child_redacted;
+                }
+                (
+                    serde_json::Value::Array(out),
+                    sensitivity,
+                    fingerprint,
+                    redacted,
+                )
+            }
+            serde_json::Value::Object(map) => {
+                let mut out = serde_json::Map::new();
+                let mut sensitivity = None;
+                let mut fingerprint = None;
+                let mut redacted = false;
+                for (k, v) in map {
+                    let (child, child_sensitivity, child_fp, child_redacted) =
+                        Self::sanitize_payload(v, hmac_key);
+                    out.insert(k.clone(), child);
+                    if sensitivity.is_none() {
+                        sensitivity = child_sensitivity;
+                    }
+                    if fingerprint.is_none() {
+                        fingerprint = child_fp;
+                    }
+                    redacted |= child_redacted;
+                }
+                (
+                    serde_json::Value::Object(out),
+                    sensitivity,
+                    fingerprint,
+                    redacted,
+                )
+            }
+            other => (other.clone(), None, None, false),
+        }
+    }
+
+    /// Inspect incoming text and payload, mask secrets, and enforce memory directives.
     pub fn inspect_and_sanitize(
         content: Option<&str>,
+        payload: &serde_json::Value,
         explicit_sensitivity: Option<&str>,
+        hmac_key: &[u8],
     ) -> SanitizationResult {
-        let text = match content {
-            Some(t) => t,
-            None => {
-                return SanitizationResult {
-                    sanitized_content: None,
-                    sensitivity: explicit_sensitivity.map(|s| s.to_string()),
-                    secret_fingerprint: None,
-                }
-            }
-        };
-
-        // 1. Directives: Check DO NOT REMEMBER
-        if get_do_not_remember_re().is_match(text)
-            || explicit_sensitivity == Some("do_not_remember")
+        if explicit_sensitivity == Some("do_not_remember")
+            || content.is_some_and(|t| get_do_not_remember_re().is_match(t))
         {
             return SanitizationResult {
-                sanitized_content: Some("<WITHHELD_BY_MEMORY_POLICY>".to_string()),
+                sanitized_content: content.map(|_| "<WITHHELD_BY_MEMORY_POLICY>".to_string()),
+                sanitized_payload: serde_json::json!({ "redacted": true }),
                 sensitivity: Some("do_not_remember".to_string()),
                 secret_fingerprint: None,
+                redacted: true,
             };
         }
 
-        // 2. Hard credentials detection & masking
-        let cred_re = get_credential_re();
-        if let Some(caps) = cred_re.captures(text) {
-            let secret_val = caps.get(1).map(|m| m.as_str()).unwrap_or("");
-            let fingerprint = Self::compute_secret_fingerprint(secret_val);
-            let sanitized = cred_re.replace_all(text, "$0").to_string();
-            // Replace secret value with placeholder
-            let sanitized = if !secret_val.is_empty() {
-                sanitized.replace(secret_val, "<SECRET:TOKEN>")
-            } else {
-                sanitized
-            };
+        let (sanitized_payload, payload_sensitivity, payload_fp, payload_redacted) =
+            Self::sanitize_payload(payload, hmac_key);
 
-            return SanitizationResult {
-                sanitized_content: Some(sanitized),
-                sensitivity: Some("credential".to_string()),
-                secret_fingerprint: Some(fingerprint),
-            };
-        }
-
-        // 3. Authorization headers & tokens
-        if get_auth_re().is_match(text) || explicit_sensitivity == Some("authentication") {
-            let sanitized = get_auth_re()
-                .replace_all(text, "<SECRET:AUTH_TOKEN>")
-                .to_string();
-            return SanitizationResult {
-                sanitized_content: Some(sanitized),
-                sensitivity: Some("authentication".to_string()),
-                secret_fingerprint: None,
-            };
-        }
-
-        // 4. Financial data
-        if get_financial_re().is_match(text) || explicit_sensitivity == Some("financial") {
-            return SanitizationResult {
-                sanitized_content: Some(text.to_string()),
-                sensitivity: Some("financial".to_string()),
-                secret_fingerprint: None,
-            };
-        }
-        // 5. Health data
-        if explicit_sensitivity == Some("health") {
-            return SanitizationResult {
-                sanitized_content: Some(text.to_string()),
-                sensitivity: Some("health".to_string()),
-                secret_fingerprint: None,
-            };
-        }
-
-        let health_re = get_health_re();
-        if let Some(m) = health_re.find(text) {
-            // "diagnosis-protocol" identifiers alone are technical protocols, not patient health records
-            if m.as_str().eq_ignore_ascii_case("diagnosis") && text.contains("diagnosis-protocol") {
-                // Check if any other health match exists in the text
-                let has_other_health = health_re
-                    .find_iter(text)
-                    .any(|other_m| !other_m.as_str().eq_ignore_ascii_case("diagnosis"));
-                if has_other_health {
-                    return SanitizationResult {
-                        sanitized_content: Some(text.to_string()),
-                        sensitivity: Some("health".to_string()),
-                        secret_fingerprint: None,
-                    };
-                }
-            } else {
-                return SanitizationResult {
-                    sanitized_content: Some(text.to_string()),
-                    sensitivity: Some("health".to_string()),
-                    secret_fingerprint: None,
-                };
+        let (sanitized_content, content_sensitivity, content_fp, content_redacted) = match content {
+            Some(text) => {
+                let (masked, sensitivity, fingerprint, redacted) = Self::mask_text(text, hmac_key);
+                (Some(masked), sensitivity, fingerprint, redacted)
             }
+            None => (None, None, None, false),
+        };
+
+        let mut sensitivity = content_sensitivity.or(payload_sensitivity);
+        if sensitivity.is_none() {
+            sensitivity = explicit_sensitivity.map(|s| s.to_string());
+        }
+        if explicit_sensitivity == Some("health") && sensitivity.as_deref() != Some("health") {
+            sensitivity = Some("health".to_string());
+        }
+        if explicit_sensitivity == Some("financial") && sensitivity.is_none() {
+            sensitivity = Some("financial".to_string());
+        }
+        if explicit_sensitivity == Some("third_party_personal_data") && sensitivity.is_none() {
+            sensitivity = Some("third_party_personal_data".to_string());
+        }
+        if explicit_sensitivity == Some("authentication") && sensitivity.is_none() {
+            sensitivity = Some("authentication".to_string());
         }
 
-        // 6. Third party personal data / PII
-        if get_pii_re().is_match(text) || explicit_sensitivity == Some("third_party_personal_data")
-        {
-            return SanitizationResult {
-                sanitized_content: Some(text.to_string()),
-                sensitivity: Some("third_party_personal_data".to_string()),
-                secret_fingerprint: None,
-            };
-        }
+        let redacted = content_redacted
+            || payload_redacted
+            || matches!(
+                sensitivity.as_deref(),
+                Some(
+                    "do_not_remember"
+                        | "credential"
+                        | "authentication"
+                        | "financial"
+                        | "health"
+                        | "third_party_personal_data"
+                )
+            );
 
-        // Default: normal safe content
         SanitizationResult {
-            sanitized_content: Some(text.to_string()),
-            sensitivity: explicit_sensitivity.map(|s| s.to_string()),
-            secret_fingerprint: None,
+            sanitized_content,
+            sanitized_payload,
+            sensitivity,
+            secret_fingerprint: content_fp.or(payload_fp),
+            redacted,
         }
     }
 
-    /// Project a raw database `CortexSessionEvent` into a `SafeEventView`.
-    /// Processors (summarizers, extractors) must ONLY access events through this view.
-    pub fn to_safe_view(event: &CortexSessionEvent) -> SafeEventView {
-        let is_do_not_remember = event.sensitivity.as_deref() == Some("do_not_remember");
-        let is_credential = event.sensitivity.as_deref() == Some("credential")
-            || event.sensitivity.as_deref() == Some("authentication");
-
-        let extraction_allowed = !event.redacted && !is_do_not_remember && !is_credential;
-
-        let safe_content = if event.redacted || is_do_not_remember {
+    /// Project a raw database event into a SafeEventView.
+    /// Processors must only access events through this view.
+    pub fn to_safe_view(event: &CortexSessionEvent, hmac_key: &[u8]) -> SafeEventView {
+        let inspected = Self::inspect_and_sanitize(
+            event.content.as_deref(),
+            &event.payload,
+            event.sensitivity.as_deref(),
+            hmac_key,
+        );
+        let is_do_not_remember = inspected.sensitivity.as_deref() == Some("do_not_remember");
+        let is_credential = matches!(
+            inspected.sensitivity.as_deref(),
+            Some("credential" | "authentication")
+        );
+        let extraction_allowed = !inspected.redacted && !is_do_not_remember && !is_credential;
+        let safe_content = if inspected.redacted || is_do_not_remember {
             None
         } else {
-            event.content.clone()
+            inspected.sanitized_content
+        };
+        let payload = if inspected.redacted {
+            serde_json::json!({ "redacted": true })
+        } else {
+            inspected.sanitized_payload
         };
 
         SafeEventView {
@@ -249,8 +380,8 @@ impl SecurityMembrane {
             event_type: event.event_type.clone(),
             role: event.role.clone(),
             safe_content,
-            payload: event.payload.clone(),
-            sensitivity: event.sensitivity.clone(),
+            payload,
+            sensitivity: inspected.sensitivity.or_else(|| event.sensitivity.clone()),
             extraction_allowed,
         }
     }
@@ -280,7 +411,9 @@ mod tests {
     fn test_do_not_remember_directive() {
         let res = SecurityMembrane::inspect_and_sanitize(
             Some("Please do not remember this confidential exchange"),
+            &serde_json::json!({}),
             None,
+            b"test-hmac-key",
         );
         assert_eq!(res.sensitivity, Some("do_not_remember".to_string()));
         assert_eq!(
@@ -291,27 +424,45 @@ mod tests {
 
     #[test]
     fn test_credential_masking_and_fingerprint() {
+        let key = b"test-hmac-key";
         let res = SecurityMembrane::inspect_and_sanitize(
             Some("Connecting with api_key: sk_live_99418294719247192 to server"),
+            &serde_json::json!({"token": "api_key: sk_live_99418294719247192"}),
             None,
+            key,
         );
         assert_eq!(res.sensitivity, Some("credential".to_string()));
         assert!(res.sanitized_content.unwrap().contains("<SECRET:TOKEN>"));
-        assert!(res.secret_fingerprint.is_some());
-        assert!(res.secret_fingerprint.unwrap().starts_with("HMAC-SHA256:"));
+        assert!(!res
+            .sanitized_payload
+            .to_string()
+            .contains("sk_live_99418294719247192"));
+        let fingerprint = res.secret_fingerprint.unwrap();
+        assert!(fingerprint.starts_with("HMAC-SHA256:"));
+        let salted = {
+            let mut hasher = Sha256::new();
+            hasher.update(b"cortex_secret_salt:");
+            hasher.update(b"sk_live_99418294719247192");
+            format!("HMAC-SHA256:{:x}", hasher.finalize())
+        };
+        assert_ne!(fingerprint, salted);
     }
 
     #[test]
     fn test_health_and_pii_classification() {
         let res1 = SecurityMembrane::inspect_and_sanitize(
             Some("Patient medical record notes: high blood pressure"),
+            &serde_json::json!({}),
             None,
+            b"test-hmac-key",
         );
         assert_eq!(res1.sensitivity, Some("health".to_string()));
 
         let res2 = SecurityMembrane::inspect_and_sanitize(
             Some("Her email is sarah@example.com for communication"),
+            &serde_json::json!({}),
             None,
+            b"test-hmac-key",
         );
         assert_eq!(
             res2.sensitivity,
@@ -338,8 +489,18 @@ mod tests {
             segment_id: None,
         };
 
-        let view = SecurityMembrane::to_safe_view(&sensitive_ev);
+        let view = SecurityMembrane::to_safe_view(&sensitive_ev, b"test-hmac-key");
         assert!(!view.extraction_allowed);
         assert_eq!(view.safe_content, None);
+    }
+
+    #[test]
+    fn test_hmac_sha256_rfc4231_case1() {
+        let key = [0x0bu8; 20];
+        let mac = SecurityMembrane::hmac_sha256(&key, b"Hi There");
+        assert_eq!(
+            crate::evidence::hex_encode(&mac),
+            "b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7"
+        );
     }
 }
