@@ -100,3 +100,34 @@ impl RuntimeController {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn idempotency_survives_restart() {
+        let dir = std::env::temp_dir().join(format!("aien-ops-test-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        std::env::set_var("AIEN_RUNTIME_STATE_DIR", &dir);
+        let op_id = 0xC0FFEEu128;
+
+        {
+            let mut first = RuntimeController::new();
+            assert!(!first.is_operation_processed(op_id));
+            first.mark_operation_processed(op_id);
+            assert!(first.is_operation_processed(op_id));
+        }
+
+        // Simulate a process restart: a fresh controller reloads from disk.
+        {
+            let second = RuntimeController::new();
+            assert!(
+                second.is_operation_processed(op_id),
+                "replayed operation ID must be rejected after restart"
+            );
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
