@@ -12,6 +12,7 @@ pub mod platform;
 pub mod rules;
 mod safety;
 pub mod sandbox;
+pub mod science_context;
 pub mod skills;
 pub mod subagents;
 mod telemetry;

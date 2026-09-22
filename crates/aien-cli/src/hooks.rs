@@ -211,7 +211,7 @@ impl AgentHook for CortexRecallHook {
     }
 
     async fn pre_turn(&self, prompt: &mut String) -> Result<(), String> {
-        if let Some(recall) = crate::cortex::assemble_cortex_recall(prompt, 3).await {
+        if let Some(recall) = crate::cortex::assemble_model_context(prompt).await {
             *prompt = format!("{}\n\n{}", recall, prompt);
         }
         Ok(())

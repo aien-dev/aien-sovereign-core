@@ -151,6 +151,18 @@ pub async fn assemble_cortex_recall(query: &str, limit: usize) -> Option<String>
     }
 }
 
+/// Assemble bounded context from durable Cortex memory and the founding neuroscience corpus.
+pub async fn assemble_model_context(query: &str) -> Option<String> {
+    let durable = assemble_cortex_recall(query, 5).await;
+    let science = crate::science_context::render_foundation_science(query, 3);
+    match (durable, science) {
+        (Some(durable), Some(science)) => Some(format!("{}\n\n{}", science, durable)),
+        (Some(durable), None) => Some(durable),
+        (None, Some(science)) => Some(science),
+        (None, None) => None,
+    }
+}
+
 /// Asynchronously capture an action outcome or lesson into Spark Cortex without blocking execution.
 pub fn trigger_background_capture(action: &str, target: &str, details: &str) {
     let action_owned = action.to_string();
