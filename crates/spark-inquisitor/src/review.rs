@@ -56,7 +56,7 @@ Your pull request **#{pr_number}** ("{pr_title}") was audited against our consti
 3. Replace forbidden buzzwords with direct technical descriptions.
 4. Commit and push updates to this branch to trigger an automated re-audit.
 
-*For direct sovereign coordination: Drake Stapleton (drake.aien@proton.me) and AIEN (aien.atlas@proton.me)*
+*For direct sovereign coordination: Drake Stapleton (aien@aienos.com) and AIEN (aien@aienos.com)*
 "#,
             author = author,
             pr_number = pr_number,

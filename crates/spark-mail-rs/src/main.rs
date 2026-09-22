@@ -92,7 +92,7 @@ fn load_operator_email() -> String {
     {
         return email;
     }
-    "aien.atlas@proton.me".to_string()
+    "aien@aienos.com".to_string()
 }
 
 fn dirs_or_home() -> PathBuf {

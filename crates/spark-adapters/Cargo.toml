@@ -2,7 +2,7 @@
 name = "spark-adapters"
 version = "0.1.0"
 edition = "2021"
-authors = ["Drake Stapleton <drake.aien@proton.me>"]
+authors = ["Drake Stapleton <aien@aienos.com>"]
 description = "Universal third-party model provider adapters and knowledge distillation engine for Sovereign SparkOS"
 license.workspace = true
 

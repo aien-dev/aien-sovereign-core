@@ -184,7 +184,7 @@ Your inquiry **#{issue_number}** ("{title}") has been registered.
 
 - **Founding Principles**: Consult `CONSTITUTION.md` for constitutional governance.
 - **Documentation**: Technical specifications reside in `docs/` and project manifests.
-- **Direct Sovereign Coordination**: Drake Stapleton (drake.aien@proton.me) and AIEN (aien.atlas@proton.me)
+- **Direct Sovereign Coordination**: Drake Stapleton (aien@aienos.com) and AIEN (aien@aienos.com)
 
 A maintainer or sovereign agent will provide technical clarification shortly.
 "#,

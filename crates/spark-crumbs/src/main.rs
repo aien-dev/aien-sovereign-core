@@ -6,7 +6,7 @@ use std::path::PathBuf;
 
 #[derive(Parser, Debug)]
 #[command(name = "spark-crumbs")]
-#[command(author = "AIEN <aien.atlas@proton.me>")]
+#[command(author = "AIEN <aien@aienos.com>")]
 #[command(version = "0.1.0")]
 #[command(
     about = "High-speed native Rust distributed breadcrumb and agent scent engine for Sovereign SparkOS"

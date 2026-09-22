@@ -2,7 +2,7 @@
 name = "rad-id-sync"
 version = "0.1.0"
 edition = "2021"
-authors = ["Drake Stapleton <drake.aien@proton.me>"]
+authors = ["Drake Stapleton <aien@aienos.com>"]
 description = "Identity & Key Synchronizer extension for Radicle sovereign git collaboration"
 license.workspace = true
 

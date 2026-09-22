@@ -364,7 +364,7 @@ mod tests {
             "Handle: <OPERATOR>"
         );
         assert_eq!(
-            sanitize_outbound_prompt("Email: drake.aien@proton.me"),
+            sanitize_outbound_prompt("Email: aien@aienos.com"),
             "Email: <OPERATOR>"
         );
         assert_eq!(
@@ -527,10 +527,10 @@ mod tests {
 
     #[test]
     fn test_sanitize_operator_and_secrets() {
-        let raw = "Operator drakestapleton deployed key sk-proj-123456789012345678901234 for drake.aien@proton.me";
+        let raw = "Operator drakestapleton deployed key sk-proj-123456789012345678901234 for aien@aienos.com";
         let clean = sanitize_outbound_prompt(raw);
         assert!(!clean.contains("drakestapleton"));
-        assert!(!clean.contains("drake.aien@proton.me"));
+        assert!(!clean.contains("aien@aienos.com"));
         assert!(clean.contains("<OPERATOR>"));
         assert!(clean.contains("[REDACTED_BY_ATLAS_VAULT]"));
     }

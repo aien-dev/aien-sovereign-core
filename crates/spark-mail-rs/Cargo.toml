@@ -2,7 +2,7 @@
 name = "spark-mail-rs"
 version = "0.1.0"
 edition = "2024"
-authors = ["Drake Stapleton <drake.aien@proton.me>"]
+authors = ["Drake Stapleton <aien@aienos.com>"]
 description = "Native Rust Sovereign Mail Server & Atlas Cortex Memory Bridge"
 license.workspace = true
 

@@ -2,7 +2,7 @@
 name = "aien-kv-cache"
 version = "0.1.0"
 edition = "2021"
-authors = ["Drake Stapleton <drake.aien@proton.me>"]
+authors = ["Drake Stapleton <aien@aienos.com>"]
 description = "Native Paged KV-Cache Manager with physical unified-memory tensors and prefix caching"
 license.workspace = true
 

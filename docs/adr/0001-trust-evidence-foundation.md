@@ -2,7 +2,7 @@
 
 - **Status**: Accepted
 - **Date**: 2026-09-19
-- **Author**: Drake Stapleton <drake.aien@proton.me>
+- **Author**: Drake Stapleton <aien@aienos.com>
 - **Milestone**: milestone/trust-evidence-foundation (Milestone 1)
 
 ## Context

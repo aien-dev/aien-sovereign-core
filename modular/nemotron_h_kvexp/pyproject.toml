@@ -10,7 +10,7 @@ readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "Apache-2.0" }
 authors = [
-    { name = "AIEN", email = "aien.atlas@proton.me" }
+    { name = "AIEN", email = "aien@aienos.com" }
 ]
 classifiers = [
     "Programming Language :: Python :: 3",

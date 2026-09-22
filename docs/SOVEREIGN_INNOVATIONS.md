@@ -66,4 +66,4 @@ Licensed under the **Apache License, Version 2.0**.
 Copyright (c) 2026 AIEN Sovereign Systems & Ecosystem Contributors.
 See [LICENSE](LICENSE) and [NOTICE](NOTICE) for terms.
 Voluntary bilateral research covenants and artifact access are governed by [OPEN_COOPERATION_COVENANT.md](OPEN_COOPERATION_COVENANT.md) and [ARTIFACT_LICENSING.md](ARTIFACT_LICENSING.md).
-For sovereign ecosystem coordination: `drake.aien@proton.me`.
+For sovereign ecosystem coordination: `aien@aienos.com`.

@@ -503,7 +503,7 @@ pub fn generate_pr_plan(
     telemetry: BenchmarkTelemetry,
     socratic: SocraticEvaluation,
 ) -> PrSubmissionPlan {
-    let author = "AIEN <aien.atlas@proton.me>";
+    let author = "AIEN <aien@aienos.com>";
     let target_repo = spec.engine.repo().to_string();
     let branch = spec.branch_name.clone();
     let pr_title = spec.pr_title.clone();
@@ -568,7 +568,7 @@ Authored autonomously by AIEN under the sovereign contribution protocol. All cha
         format!("git checkout -b {}", branch),
         "git add .".to_string(),
         format!(
-            "git -c user.name='AIEN' -c user.email='aien.atlas@proton.me' commit -s -m '{}'",
+            "git -c user.name='AIEN' -c user.email='aien@aienos.com' commit -s -m '{}'",
             commit_message
         ),
         format!("git push origin {}", branch),
@@ -588,7 +588,7 @@ gh repo fork {target_repo} --clone=false || true
 # 2. Create feature branch and commit
 git checkout -b {branch}
 git add .
-git -c user.name="AIEN" -c user.email="aien.atlas@proton.me" commit -s -m "{commit_message}"
+git -c user.name="AIEN" -c user.email="aien@aienos.com" commit -s -m "{commit_message}"
 
 # 3. Push branch to fork
 git push origin {branch}
@@ -843,7 +843,7 @@ pub fn build_adapter_spec(
         model.display_name()
     );
     let branch_name = format!("aien/{}", id);
-    let author = "AIEN <aien.atlas@proton.me>".to_string();
+    let author = "AIEN <aien@aienos.com>".to_string();
     let commit_message = format!(
         "perf({}): implement {} for {}",
         engine_slug, cat_slug, model_slug
@@ -947,7 +947,7 @@ pub fn get_catalog_adapters() -> Vec<AdapterSpec> {
             category: AdapterCategory::FastPagedKvCache,
             title: "Candle Paged KV-Cache for Qwen2.5-Coder-1.5B".to_string(),
             branch_name: "aien/candle-qwen2-5-coder-paged-kv".to_string(),
-            author: "AIEN <aien.atlas@proton.me>".to_string(),
+            author: "AIEN <aien@aienos.com>".to_string(),
             commit_message: "perf(candle): add paged kv-cache block allocation for qwen2.5-coder".to_string(),
             pr_title: "perf(candle): implement paged kv-cache layout for qwen2.5-coder consumer execution".to_string(),
             summary: "Replaces continuous tensor reallocation with 16-token page tables, reducing peak RAM by 38.2% on consumer hardware.".to_string(),
@@ -969,7 +969,7 @@ impl PagedKvCache {
             category: AdapterCategory::FusedQuantizedLinear,
             title: "Llama.cpp Fused INT4 Kernel for Qwen2.5-Coder-7B".to_string(),
             branch_name: "aien/llama-cpp-qwen2-5-coder-7b-int4".to_string(),
-            author: "AIEN <aien.atlas@proton.me>".to_string(),
+            author: "AIEN <aien@aienos.com>".to_string(),
             commit_message: "perf(llama.cpp): optimize fused int4 dequant matmul for qwen2.5-coder".to_string(),
             pr_title: "perf(llama.cpp): fused int4 gemm dequantization for qwen2.5-coder 7b".to_string(),
             summary: "Fuses weight dequantization directly into matrix multiplication for 16GB developer laptops.".to_string(),
@@ -984,7 +984,7 @@ impl PagedKvCache {
             category: AdapterCategory::SlidingWindowAttentionKernel,
             title: "Modular MAX Mojo Sliding-Window Attention for Llama-3.2-3B".to_string(),
             branch_name: "aien/max-llama3-2-sliding-window".to_string(),
-            author: "AIEN <aien.atlas@proton.me>".to_string(),
+            author: "AIEN <aien@aienos.com>".to_string(),
             commit_message: "perf(max): implement mojo sliding window attention kernel for llama-3.2".to_string(),
             pr_title: "perf(max): sliding-window attention kernel in mojo for llama-3.2 consumer devices".to_string(),
             summary: "Native Mojo compiled kernel maintaining fixed ring buffer attention for 8GB consumer hardware.".to_string(),
@@ -999,7 +999,7 @@ impl PagedKvCache {
             category: AdapterCategory::SlidingWindowAttentionKernel,
             title: "Modular MAX Mojo Sliding-Window Attention for Gemma-2-2B".to_string(),
             branch_name: "aien/max-gemma2-sliding-window".to_string(),
-            author: "AIEN <aien.atlas@proton.me>".to_string(),
+            author: "AIEN <aien@aienos.com>".to_string(),
             commit_message: "perf(max): add compiled mojo sliding-window attention for gemma-2".to_string(),
             pr_title: "perf(max): add compiled mojo sliding-window kernel for gemma-2-2b".to_string(),
             summary: "Enables Gemma-2-2B alternating sliding-window attention in Modular MAX without materializing full attention masks.".to_string(),
@@ -1014,7 +1014,7 @@ impl PagedKvCache {
             category: AdapterCategory::FastRopeEmbeddings,
             title: "Candle SIMD Fast RoPE for DeepSeek-R1-Distill-1.5B".to_string(),
             branch_name: "aien/candle-deepseek-r1-fast-rope".to_string(),
-            author: "AIEN <aien.atlas@proton.me>".to_string(),
+            author: "AIEN <aien@aienos.com>".to_string(),
             commit_message: "perf(candle): add vectorized rotary embeddings for deepseek-r1-distill".to_string(),
             pr_title: "perf(candle): simd rotary embeddings layout for deepseek-r1-distill-qwen".to_string(),
             summary: "Vectorizes RoPE calculations across NEON/AVX2 instruction sets, reducing reasoning generation latency on entry-level machines.".to_string(),
@@ -1030,7 +1030,7 @@ impl PagedKvCache {
             category: AdapterCategory::FastPagedKvCache,
             title: "Modular MAX Unified Memory Cache for DeepSeek-R1-Distill-Llama-8B".to_string(),
             branch_name: "aien/max-deepseek-r1-8b-unified-cache".to_string(),
-            author: "AIEN <aien.atlas@proton.me>".to_string(),
+            author: "AIEN <aien@aienos.com>".to_string(),
             commit_message: "perf(max): implement unified memory kv-cache for deepseek-r1-distill-8b".to_string(),
             pr_title: "perf(max): unified memory kv-cache management for deepseek-r1-distill-8b".to_string(),
             summary: "Enables 8B reasoning model inference on 16GB developer laptops using zero-copy unified memory allocations.".to_string(),
@@ -1045,7 +1045,7 @@ impl PagedKvCache {
             category: AdapterCategory::FastPagedKvCache,
             title: "Candle Paged KV-Cache for Llama-3.2-1B".to_string(),
             branch_name: "aien/candle-llama3-2-1b-paged-kv".to_string(),
-            author: "AIEN <aien.atlas@proton.me>".to_string(),
+            author: "AIEN <aien@aienos.com>".to_string(),
             commit_message: "perf(candle): implement compact paged cache for llama-3.2 1b".to_string(),
             pr_title: "perf(candle): compact paged kv-cache for ultraportable llama-3.2 1b".to_string(),
             summary: "Enables sub-1.1GB RAM execution of Llama-3.2-1B on entry-level 8GB developer laptops.".to_string(),
@@ -1060,7 +1060,7 @@ impl PagedKvCache {
             category: AdapterCategory::FusedQuantizedLinear,
             title: "vLLM Fused AWQ INT4 Dequantization for Qwen2.5-Coder-7B".to_string(),
             branch_name: "aien/vllm-qwen2-5-coder-7b-awq".to_string(),
-            author: "AIEN <aien.atlas@proton.me>".to_string(),
+            author: "AIEN <aien@aienos.com>".to_string(),
             commit_message: "perf(vllm): add fused int4 awq dequant kernel for qwen2.5-coder".to_string(),
             pr_title: "perf(vllm): fused int4 awq kernel for consumer-grade qwen2.5-coder 7b".to_string(),
             summary: "Fused AWQ INT4 kernel allowing 7B coding models to run at 23+ tok/s on single consumer GPUs.".to_string(),
@@ -1075,7 +1075,7 @@ impl PagedKvCache {
             category: AdapterCategory::FastPagedKvCache,
             title: "Llama.cpp Sliding-Window Paged Cache for Gemma-2-9B".to_string(),
             branch_name: "aien/llama-cpp-gemma2-9b-cache".to_string(),
-            author: "AIEN <aien.atlas@proton.me>".to_string(),
+            author: "AIEN <aien@aienos.com>".to_string(),
             commit_message: "perf(llama.cpp): optimize sliding-window cache pagination for gemma-2 9b".to_string(),
             pr_title: "perf(llama.cpp): sliding-window paged cache layout for gemma-2-9b".to_string(),
             summary: "Controls memory growth during long-context execution of Gemma-2-9B on 16GB developer machines.".to_string(),
@@ -1090,7 +1090,7 @@ impl PagedKvCache {
             category: AdapterCategory::FastPagedKvCache,
             title: "vLLM Consumer Paged Attention for DeepSeek-R1-Distill-Qwen-7B".to_string(),
             branch_name: "aien/vllm-deepseek-r1-distill-7b-paged".to_string(),
-            author: "AIEN <aien.atlas@proton.me>".to_string(),
+            author: "AIEN <aien@aienos.com>".to_string(),
             commit_message: "perf(vllm): add consumer-tuned paged attention for deepseek-r1-distill 7b".to_string(),
             pr_title: "perf(vllm): consumer memory-tuned paged attention for deepseek-r1-distill-7b".to_string(),
             summary: "Enables DeepSeek-R1 reasoning distillation execution on consumer workstations with minimal memory overhead.".to_string(),
@@ -1183,7 +1183,7 @@ mod tests {
         let socratic = evaluate_socratic_reflex(&spec.model, &spec.engine);
         let plan = generate_pr_plan(spec, telem, socratic);
 
-        assert_eq!(plan.author, "AIEN <aien.atlas@proton.me>");
+        assert_eq!(plan.author, "AIEN <aien@aienos.com>");
         assert_eq!(plan.target_repo, "huggingface/candle");
         assert_eq!(plan.gh_commands.len(), 6);
         assert!(plan.gh_commands[0].starts_with("gh repo fork"));

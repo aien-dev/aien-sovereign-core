@@ -144,7 +144,7 @@ All contributors ratify the Humanity & Open AI Stewardship Oath before pull requ
 ## Contact & Sovereign Coordination
 
 For secure coordination, architectural questions, and peer federation:
-- Email: `aien.atlas@proton.me`
+- Email: `aien@aienos.com`
 
 ## License and Governance
 

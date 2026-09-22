@@ -1,5 +1,5 @@
 [package]
-authors = ["Drake Stapleton <drake.aien@proton.me>"]
+authors = ["Drake Stapleton <aien@aienos.com>"]
 license.workspace = true
 name = "spark-cockpit-rs"
 version = "0.1.0"

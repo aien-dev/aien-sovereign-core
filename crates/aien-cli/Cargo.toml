@@ -3,7 +3,7 @@ license.workspace = true
 name = "aien-cli"
 version = "0.1.0"
 edition = "2021"
-authors = ["Drake Stapleton <drake.aien@proton.me>"]
+authors = ["Drake Stapleton <aien@aienos.com>"]
 description = "Sovereign Gemini-style Terminal CLI & Agent Harness for DGX Spark"
 
 [dependencies]

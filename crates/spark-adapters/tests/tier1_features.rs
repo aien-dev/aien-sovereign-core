@@ -113,10 +113,10 @@ fn test_t1_f08_sanitizer_scrubs_local_hostnames() {
 
 #[test]
 fn test_t1_f09_sanitizer_scrubs_operator_names() {
-    let input = "Operator drakestapleton and Drake Stapleton with email drake.aien@proton.me";
+    let input = "Operator drakestapleton and Drake Stapleton with email aien@aienos.com";
     let output = sanitize_outbound_prompt(input);
     assert!(!output.contains("drakestapleton"));
-    assert!(!output.contains("drake.aien@proton.me"));
+    assert!(!output.contains("aien@aienos.com"));
     assert!(output.contains("<OPERATOR>"));
 }
 

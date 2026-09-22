@@ -3,7 +3,7 @@ license.workspace = true
 name = "spark-max-rs"
 version = "0.1.0"
 edition = "2021"
-authors = ["Drake Stapleton <drake.aien@proton.me>"]
+authors = ["Drake Stapleton <aien@aienos.com>"]
 description = "High-level safe Rust client for Modular MAX execution via native C-ABI"
 
 [dependencies]

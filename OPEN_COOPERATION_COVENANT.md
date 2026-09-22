@@ -55,5 +55,5 @@ Signatories to this Covenant affirm that artificial intelligence should be devel
 
 Organizations wishing to formally ratify the AIEN Open Cooperation Covenant and participate in mutual compute exchanges, reciprocal distillation agreements, and joint research disclosures may execute bilateral accession by contacting the AIEN Stewardship Council:
 
-- **Ecosystem Coordination**: `aien.atlas@proton.me`
-- **Lead Architect**: Drake Stapleton (`drake.aien@proton.me`)
+- **Ecosystem Coordination**: `aien@aienos.com`
+- **Lead Architect**: Drake Stapleton (`aien@aienos.com`)

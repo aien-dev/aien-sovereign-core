@@ -24,7 +24,7 @@ Please respond directly to these four constitutional inquiries:
    What architectural trade-offs did you make, and how did you verify that this code introduces zero regressions, zero unneeded dependencies, and complies with our pure native compiled standards?
 
 ---
-*Reply to this comment with your affirmation. Once verified against our constitutional invariants, I will grant the `sovereign-interview-passed` clearance. For direct sovereign coordination: Drake Stapleton (drake.aien@proton.me) and AIEN (aien.atlas@proton.me)*
+*Reply to this comment with your affirmation. Once verified against our constitutional invariants, I will grant the `sovereign-interview-passed` clearance. For direct sovereign coordination: Drake Stapleton (aien@aienos.com) and AIEN (aien@aienos.com)*
 "#,
         author = author,
         pr_number = pr_number,
@@ -45,7 +45,7 @@ mod tests {
         assert!(text.contains("Long-Term Mission Alignment"));
         assert!(text.contains("Downstream Heritage Preservation"));
         assert!(
-            text.contains("Drake Stapleton (drake.aien@proton.me) and AIEN (aien.atlas@proton.me)")
+            text.contains("Drake Stapleton (aien@aienos.com) and AIEN (aien@aienos.com)")
         );
         assert!(!text.contains('\u{2014}'));
         assert!(!text.contains('\u{2013}'));

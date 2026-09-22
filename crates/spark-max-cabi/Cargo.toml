@@ -3,7 +3,7 @@ license.workspace = true
 name = "spark-max-cabi"
 version = "0.1.0"
 edition = "2021"
-authors = ["Drake Stapleton <drake.aien@proton.me>"]
+authors = ["Drake Stapleton <aien@aienos.com>"]
 description = "Native C-ABI FFI bindings to the Modular MAX dynamic bridge library"
 
 [dependencies]

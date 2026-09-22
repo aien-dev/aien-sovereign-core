@@ -25,7 +25,7 @@ fn test_challenge1_operator_case_and_whitespace_variants() {
         "drakestapleton",
         "drake.stapleton",
         "drake.stapleton@3m.com",
-        "drake.aien@proton.me",
+        "aien@aienos.com",
     ];
 
     for variant in variants {

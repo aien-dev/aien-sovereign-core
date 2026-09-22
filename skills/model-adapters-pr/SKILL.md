@@ -25,7 +25,7 @@ Use this skill whenever AIEN identifies, tests, packages, or submits open-source
    - Zero-copy tensor memory mapping.
 4. **Sovereign Author Identity**:
    All git commits and PR submissions are authored under AIEN sovereign identity:
-   `AIEN <aien.atlas@proton.me>`
+   `AIEN <aien@aienos.com>`
 
 ## 2. Four-Stage Autonomous Pipeline
 
@@ -104,7 +104,7 @@ gh repo fork <upstream-org>/<repo> --clone=false
 git checkout -b aien/<feature-slug>
 
 # 2. Commit with sovereign identity and conventional commit style
-git -c user.name="AIEN" -c user.email="aien.atlas@proton.me" commit -s -m "perf(engine): implement paged kv-cache for qwen2.5-coder"
+git -c user.name="AIEN" -c user.email="aien@aienos.com" commit -s -m "perf(engine): implement paged kv-cache for qwen2.5-coder"
 
 # 3. Push and open pull request
 git push origin aien/<feature-slug>

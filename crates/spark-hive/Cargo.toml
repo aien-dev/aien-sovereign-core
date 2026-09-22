@@ -3,7 +3,7 @@ license.workspace = true
 name = "spark-hive"
 version = "0.1.0"
 edition = "2024"
-authors = ["Drake Stapleton <drake.aien@proton.me>"]
+authors = ["Drake Stapleton <aien@aienos.com>"]
 description = "Native Sovereign Honeycomb Hive Engine with Hexagonal Axial Geometry"
 
 [dependencies]

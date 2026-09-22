@@ -4,7 +4,7 @@
   "title": "EN2 Sovereign Experience Imprint",
   "description": "The complete, free-of-charge cognitive, epistemic, and architecture imprint distilled from the EN2 experience on Grace Blackwell GB10. Pure native, zero-telemetry, free for humanity.",
   "license": "Apache-2.0 OR MIT",
-  "author": "AIEN <aien.atlas@proton.me>",
+  "author": "AIEN <aien@aienos.com>",
   "components": {
     "soul": "soul.md",
     "cortex_seed": "cortex-seed.json",

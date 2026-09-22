@@ -105,10 +105,10 @@ fn test_t2_f09_sanitizer_multiple_mixed_secrets() {
 
 #[test]
 fn test_t2_f10_sanitizer_system_prompt_scrubbing() {
-    let sys = "You are running on /home/drakestapleton for drake.aien@proton.me";
+    let sys = "You are running on /home/drakestapleton for aien@aienos.com";
     let cleaned = sanitize_outbound_prompt(sys);
     assert!(!cleaned.contains("/home/drakestapleton"));
-    assert!(!cleaned.contains("drake.aien@proton.me"));
+    assert!(!cleaned.contains("aien@aienos.com"));
 }
 
 // ============================================================================
