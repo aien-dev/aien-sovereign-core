@@ -159,14 +159,14 @@ fi
 
 # Step 3: operator prompt retrieves Cortex memory over an authenticated call.
 CORTEX_TOKEN="$(atlas-vault get CORTEX_TOKEN 2>/dev/null | tr -d '[:space:]')"
-cortex_body="{\"query\":\"sovereign runtime golden path\",\"limit\":1}"
-if [ -n "$CORTEX_TOKEN" ]; then
-    cortex_http="$(curl -s -o /dev/null -w '%{http_code}' -X POST "$CORTEX_URL/api/search" \
-        -H "Authorization: Bearer $CORTEX_TOKEN" -H 'Content-Type: application/json' -d "$cortex_body")"
+    if [ -n "$CORTEX_TOKEN" ]; then
+    cortex_http="$(curl -s -o /dev/null -w '%{http_code}' -G "$CORTEX_URL/api/cortex/search" \
+        -H "Authorization: Bearer $CORTEX_TOKEN" --data-urlencode 'q=sovereign runtime golden path' \
+        --data-urlencode 'space=atlas-memory' --data-urlencode 'limit=1')"
     if [ "$cortex_http" = "200" ]; then
-        record PASS "3 Cortex retrieval for operator prompt" "POST $CORTEX_URL/api/search -> 200 with vault bearer token"
+        record PASS "3 Cortex retrieval for operator prompt" "GET $CORTEX_URL/api/cortex/search -> 200 with vault bearer token"
     else
-        record PARTIAL "3 Cortex retrieval for operator prompt" "POST $CORTEX_URL/api/search -> HTTP $cortex_http"
+        record PARTIAL "3 Cortex retrieval for operator prompt" "GET $CORTEX_URL/api/cortex/search -> HTTP $cortex_http"
     fi
 else
     record PARTIAL "3 Cortex retrieval for operator prompt" "CORTEX_TOKEN unavailable from atlas-vault; Cortex call skipped"
@@ -230,8 +230,9 @@ fi
 
 # Step 8: world effect commits carry a SHA-256 over canonical bytes; the
 # runtime suite exercises commit_draft and the canonical hashing path.
-if (cargo test -q -p aien-runtime world --offline) >/dev/null 2>&1; then
-    record PASS "8 world commit SHA-256 provenance" "World hashing tests passed over canonical bytes"
+if (cargo test -q -p aien-runtime world --offline >/dev/null 2>&1 \
+    && cargo test -q -p aien-cli --bin aien-cli tools::tests::effect_receipt_is_hashed_and_secret_free --offline >/dev/null 2>&1); then
+    record PASS "8 world commit SHA-256 provenance" "World and secret-free effect receipt tests passed"
 else
     record FAIL "8 world commit SHA-256 provenance" "cargo test -p aien-runtime failed"
 fi
