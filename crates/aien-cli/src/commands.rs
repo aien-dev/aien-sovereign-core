@@ -934,7 +934,10 @@ fn resolve_daemon_manifest() -> DaemonModelManifest {
 /// Builds the native transformer backend for daemon boot with explicit fallback.
 /// Prefers Blackwell hardware when available, falls back to CPU reference math.
 /// Never returns the Mock backend: output always comes from real forward passes.
-fn build_native_daemon_backend() -> (aien_inference_abi::NativeTransformerBackend, String, String) {
+/// When AIEN_REQUIRE_BLACKWELL is set, a missing Blackwell device is fatal:
+/// the hardware gate must fail when fallback count is nonzero.
+fn build_native_daemon_backend(
+) -> Result<(aien_inference_abi::NativeTransformerBackend, String, String), String> {
     let manifest = resolve_daemon_manifest();
     let config = aien_inference_abi::ModelConfig {
         model_id: "aien-daemon-reference-fallback".to_string(),
@@ -952,23 +955,30 @@ fn build_native_daemon_backend() -> (aien_inference_abi::NativeTransformerBacken
     };
     let weights = aien_inference_abi::TransformerWeights::reference_test_weights(&config);
     let probe = aien_inference_abi::BlackwellGb10Backend::new();
+    let require_blackwell = std::env::var("AIEN_REQUIRE_BLACKWELL")
+        .map(|v| v.trim() == "1" || v.trim().eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
     if probe.is_available() {
         let device = probe.device_name().to_string();
         drop(probe);
         let backend = aien_inference_abi::NativeTransformerBackend::new_blackwell(weights);
-        (
+        Ok((
             backend,
             format!("NativeTransformerBackend/Blackwell ({})", device),
             manifest.label,
+        ))
+    } else if require_blackwell {
+        Err(
+            "AIEN_REQUIRE_BLACKWELL is set but no Blackwell device initialized (fallback count nonzero)".to_string(),
         )
     } else {
         let backend = aien_inference_abi::NativeTransformerBackend::new_reference(weights);
-        (
+        Ok((
             backend,
             "NativeTransformerBackend/CPU-reference (Blackwell unavailable, explicit fallback)"
                 .to_string(),
             manifest.label,
-        )
+        ))
     }
 }
 
@@ -991,10 +1001,17 @@ pub async fn run_daemon_server() {
     let server = aien_runtime::server::AienRuntimeServer::new(spine, &socket_path);
 
     let backend = {
-        let (native_backend, backend_label, model_label) = build_native_daemon_backend();
-        println!("  Backend: {}", backend_label.green());
-        println!("  Model: {}", model_label.yellow());
-        native_backend
+        match build_native_daemon_backend() {
+            Ok((native_backend, backend_label, model_label)) => {
+                println!("  Backend: {}", backend_label.green());
+                println!("  Model: {}", model_label.yellow());
+                native_backend
+            }
+            Err(fatal) => {
+                eprintln!("Fatal: {}", fatal.red().bold());
+                std::process::exit(1);
+            }
+        }
     };
     println!("✓ Binding socket at {}", socket_path.display());
     if let Err(e) = server.run(backend).await {
