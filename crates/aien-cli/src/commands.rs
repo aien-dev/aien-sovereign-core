@@ -49,7 +49,7 @@ pub async fn handle_slash_command(cmd: &str) -> bool {
         "/help" => {
             println!("{}", "\nAvailable Slash Commands:".cyan().bold());
             println!(
-                "  /skill [list|<name>|optimize] Inspect, load, or optimize sovereign skills
+                "  /skill [list|preview|search|full|optimize] CPU-filtered skill access
   /sandbox [init|status|test|promote|clean] Isolated Git worktree sandbox
   /browser [test|mentor]    Headless Chrome CDP mirror self-testing & mentoring
   /subagents [list|view|run] Recursive contextual subagents hierarchy
@@ -372,17 +372,33 @@ pub async fn handle_slash_command(cmd: &str) -> bool {
                 crate::skills::run_optimize_cli(&name);
             } else if parts.len() < 2 || parts[1] == "list" {
                 println!("{}", crate::skills::format_skills_tui());
-            } else {
-                let name = parts[1..].join(" ");
+            } else if parts[1] == "full" {
+                let name = parts[2..].join(" ");
                 match crate::skills::read_skill_content(&name) {
-                    Ok(content) => {
-                        println!(
-                            "
-{}",
-                            format!("=== Skill: {} ===", name).cyan().bold()
-                        );
-                        println!("{}", content);
-                    }
+                    Ok(content) => println!("{}", content),
+                    Err(e) => println!("{}", e.red()),
+                }
+            } else if parts[1] == "search" && parts.len() >= 4 {
+                let name = parts[2];
+                let query = parts[3..].join(" ");
+                match crate::skills::search_skill(name, &query, 3) {
+                    Ok(result) => println!(
+                        "{}",
+                        serde_json::to_string_pretty(&result).unwrap_or_default()
+                    ),
+                    Err(e) => println!("{}", e.red()),
+                }
+            } else {
+                let name = if parts[1] == "preview" {
+                    parts[2..].join(" ")
+                } else {
+                    parts[1..].join(" ")
+                };
+                match crate::skills::preview_skill(&name, 96) {
+                    Ok(preview) => println!(
+                        "{}",
+                        serde_json::to_string_pretty(&preview).unwrap_or_default()
+                    ),
                     Err(e) => println!("{}", e.red()),
                 }
             }

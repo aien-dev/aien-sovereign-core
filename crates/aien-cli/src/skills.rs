@@ -3,7 +3,14 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashSet;
 use std::fs;
+use std::fs::File;
+use std::io::Read;
 use std::path::Path;
+
+const SKILL_METADATA_BYTE_LIMIT: u64 = 16 * 1024;
+const DEFAULT_PREVIEW_TOKENS: usize = 96;
+const MAX_PREVIEW_TOKENS: usize = 256;
+const DEFAULT_SEARCH_SNIPPET_TOKENS: usize = 80;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Skill {
@@ -39,6 +46,46 @@ fn extract_frontmatter_field(content: &str, field: &str) -> Option<String> {
     None
 }
 
+fn read_prefix(path: &Path, byte_limit: u64) -> String {
+    let Ok(file) = File::open(path) else {
+        return String::new();
+    };
+    let mut bytes = Vec::new();
+    let _ = file.take(byte_limit).read_to_end(&mut bytes);
+    String::from_utf8_lossy(&bytes).into_owned()
+}
+
+fn body_without_frontmatter(content: &str) -> &str {
+    let Some(rest) = content.strip_prefix("---") else {
+        return content;
+    };
+    let Some(end) = rest.find("\n---") else {
+        return content;
+    };
+    rest[end + 4..].trim_start_matches(['\r', '\n'])
+}
+
+fn truncate_tokens(text: &str, token_limit: usize) -> (String, bool) {
+    let limit = token_limit.max(1);
+    let mut words = text.split_whitespace();
+    let selected: Vec<&str> = words.by_ref().take(limit).collect();
+    let truncated = words.next().is_some();
+    (selected.join(" "), truncated)
+}
+
+fn first_body_paragraph(content: &str) -> &str {
+    let body = body_without_frontmatter(content);
+    body.split("\n\n")
+        .map(str::trim)
+        .find(|paragraph| {
+            !paragraph.is_empty()
+                && !paragraph
+                    .lines()
+                    .all(|line| line.trim_start().starts_with('#'))
+        })
+        .unwrap_or("")
+}
+
 fn scan_dir_for_skills(dir: &Path, skills: &mut Vec<Skill>, seen_names: &mut HashSet<String>) {
     if !dir.is_dir() {
         return;
@@ -49,7 +96,7 @@ fn scan_dir_for_skills(dir: &Path, skills: &mut Vec<Skill>, seen_names: &mut Has
             if path.is_dir() {
                 let skill_md = path.join("SKILL.md");
                 if skill_md.is_file() {
-                    let content = fs::read_to_string(&skill_md).unwrap_or_default();
+                    let content = read_prefix(&skill_md, SKILL_METADATA_BYTE_LIMIT);
                     let name = extract_frontmatter_field(&content, "name").unwrap_or_else(|| {
                         path.file_name()
                             .unwrap_or_default()
@@ -77,7 +124,7 @@ fn scan_dir_for_skills(dir: &Path, skills: &mut Vec<Skill>, seen_names: &mut Has
                                 let sub_skill_md = sub_path.join("SKILL.md");
                                 if sub_skill_md.is_file() {
                                     let content =
-                                        fs::read_to_string(&sub_skill_md).unwrap_or_default();
+                                        read_prefix(&sub_skill_md, SKILL_METADATA_BYTE_LIMIT);
                                     let name = extract_frontmatter_field(&content, "name")
                                         .unwrap_or_else(|| {
                                             sub_path
@@ -142,11 +189,11 @@ pub fn format_skills_progressive_summary() -> String {
         return String::new();
     }
 
-    let mut out = String::from("\nAVAILABLE AGENT SKILLS (Progressive Disclosure):\n");
-    out.push_str("To activate and inspect full instructions for any skill, use the 'skill' tool with {\"action\": \"read\", \"name\": \"<skill_name>\"}.\n");
-    for s in skills {
-        out.push_str(&format!("- {}: {}\n", s.name, s.description));
-    }
+    let mut out = String::from("\nAGENT SKILLS (CPU-filtered progressive disclosure):\n");
+    out.push_str(&format!(
+        "{} skills are indexed locally. Use skill discover for a task, preview one matching skill, search inside that skill for details, and request full only when necessary. Never load multiple full skills into one turn.\n",
+        skills.len()
+    ));
     out
 }
 
@@ -200,6 +247,114 @@ pub fn read_skill_content(name: &str) -> Result<String, String> {
     ))
 }
 
+fn find_skill(name: &str) -> Result<Skill, String> {
+    let norm = name.trim().to_lowercase();
+    discover_skills()
+        .into_iter()
+        .find(|skill| skill.name.to_lowercase() == norm)
+        .ok_or_else(|| format!("Skill '{}' not found in discovered skill paths", name))
+}
+
+pub fn preview_skill(name: &str, token_limit: usize) -> Result<Value, String> {
+    let skill = find_skill(name)?;
+    let content = fs::read_to_string(&skill.path).map_err(|e| e.to_string())?;
+    let paragraph = first_body_paragraph(&content);
+    let limit = token_limit.clamp(1, MAX_PREVIEW_TOKENS);
+    let (preview, truncated) = truncate_tokens(paragraph, limit);
+    Ok(json!({
+        "status": "ok",
+        "mode": "preview",
+        "name": skill.name,
+        "description": skill.description,
+        "preview": preview,
+        "token_limit": limit,
+        "truncated": truncated,
+        "next": "Use skill search for a targeted passage or skill full for explicit full context."
+    }))
+}
+
+fn discover_matching_skills(query: &str, limit: usize) -> Vec<Value> {
+    let terms: Vec<String> = query
+        .split_whitespace()
+        .map(|term| term.to_lowercase())
+        .filter(|term| term.len() > 1)
+        .collect();
+    let mut ranked: Vec<(usize, Skill)> = discover_skills()
+        .into_iter()
+        .filter_map(|skill| {
+            let name = skill.name.to_lowercase();
+            let description = skill.description.to_lowercase();
+            let score = terms
+                .iter()
+                .map(|term| {
+                    usize::from(name.contains(term)) * 4 + usize::from(description.contains(term))
+                })
+                .sum::<usize>();
+            (score > 0).then_some((score, skill))
+        })
+        .collect();
+    ranked.sort_by(|(score_a, skill_a), (score_b, skill_b)| {
+        score_b
+            .cmp(score_a)
+            .then_with(|| skill_a.name.cmp(&skill_b.name))
+    });
+    ranked
+        .into_iter()
+        .take(limit.clamp(1, 10))
+        .map(|(score, skill)| {
+            let (description, _) = truncate_tokens(&skill.description, 32);
+            json!({"name": skill.name, "description": description, "score": score})
+        })
+        .collect()
+}
+
+pub fn search_skill(name: &str, query: &str, limit: usize) -> Result<Value, String> {
+    let skill = find_skill(name)?;
+    let content = fs::read_to_string(&skill.path).map_err(|e| e.to_string())?;
+    let terms: Vec<String> = query
+        .split_whitespace()
+        .map(|term| term.to_lowercase())
+        .filter(|term| term.len() > 1)
+        .collect();
+    if terms.is_empty() {
+        return Err("Skill search requires a non-empty query".to_string());
+    }
+
+    let mut ranked: Vec<(usize, usize, String)> = body_without_frontmatter(&content)
+        .split("\n\n")
+        .enumerate()
+        .filter_map(|(index, paragraph)| {
+            let paragraph = paragraph.trim();
+            let lower = paragraph.to_lowercase();
+            let score = terms
+                .iter()
+                .map(|term| lower.matches(term).count())
+                .sum::<usize>();
+            (score > 0).then(|| {
+                let (snippet, truncated) =
+                    truncate_tokens(paragraph, DEFAULT_SEARCH_SNIPPET_TOKENS);
+                let suffix = if truncated { " ..." } else { "" };
+                (score, index, format!("{}{}", snippet, suffix))
+            })
+        })
+        .collect();
+    ranked.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+    let matches: Vec<Value> = ranked
+        .into_iter()
+        .take(limit.clamp(1, 8))
+        .map(|(score, paragraph, snippet)| {
+            json!({"score": score, "paragraph": paragraph, "snippet": snippet})
+        })
+        .collect();
+    Ok(json!({
+        "status": "ok",
+        "mode": "search",
+        "name": skill.name,
+        "query": query,
+        "matches": matches
+    }))
+}
+
 pub fn skills_dispatch_tool(args: &Value) -> Value {
     let action = args.get("action").and_then(Value::as_str).unwrap_or("list");
 
@@ -209,13 +364,47 @@ pub fn skills_dispatch_tool(args: &Value) -> Value {
             json!({
                 "status": "ok",
                 "total": skills.len(),
-                "skills": skills
+                "skills": skills.into_iter().map(|skill| skill.name).collect::<Vec<_>>()
             })
         }
-        "read" | "load" => {
+        "discover" | "match" => {
+            let query = args.get("query").and_then(Value::as_str).unwrap_or("");
+            let limit = args.get("limit").and_then(Value::as_u64).unwrap_or(5) as usize;
+            json!({
+                "status": "ok",
+                "query": query,
+                "skills": discover_matching_skills(query, limit)
+            })
+        }
+        "read" | "load" | "preview" => {
+            let name = args.get("name").and_then(Value::as_str).unwrap_or("");
+            let token_limit = args
+                .get("max_tokens")
+                .and_then(Value::as_u64)
+                .unwrap_or(DEFAULT_PREVIEW_TOKENS as u64) as usize;
+            match preview_skill(name, token_limit) {
+                Ok(preview) => preview,
+                Err(e) => json!({"status": "error", "error": e}),
+            }
+        }
+        "search" => {
+            let name = args.get("name").and_then(Value::as_str).unwrap_or("");
+            let query = args.get("query").and_then(Value::as_str).unwrap_or("");
+            let limit = args.get("limit").and_then(Value::as_u64).unwrap_or(3) as usize;
+            match search_skill(name, query, limit) {
+                Ok(results) => results,
+                Err(e) => json!({"status": "error", "error": e}),
+            }
+        }
+        "full" => {
             let name = args.get("name").and_then(Value::as_str).unwrap_or("");
             match read_skill_content(name) {
-                Ok(content) => json!({"status": "ok", "name": name, "content": content}),
+                Ok(content) => json!({
+                    "status": "ok",
+                    "mode": "full",
+                    "name": name,
+                    "content": content
+                }),
                 Err(e) => json!({"status": "error", "error": e}),
             }
         }
@@ -227,6 +416,26 @@ pub fn skills_dispatch_tool(args: &Value) -> Value {
             optimize_skill(name)
         }
         _ => json!({"error": format!("Unknown skill action '{}'", action)}),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn preview_uses_first_body_paragraph_and_budget() {
+        let content = "---\nname: huge\ndescription: Large skill\n---\n# Heading\n\nOne two three four five.\n\nSecond paragraph.";
+        assert_eq!(first_body_paragraph(content), "One two three four five.");
+        let (text, truncated) = truncate_tokens("one two three four", 3);
+        assert_eq!(text, "one two three");
+        assert!(truncated);
+    }
+
+    #[test]
+    fn frontmatter_is_not_returned_as_body() {
+        let content = "---\nname: test\n---\nFirst paragraph.\n\nSecond paragraph.";
+        assert_eq!(first_body_paragraph(content), "First paragraph.");
     }
 }
 
