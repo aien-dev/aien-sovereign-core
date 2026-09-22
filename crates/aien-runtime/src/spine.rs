@@ -162,7 +162,13 @@ impl AienRuntimeSpine {
                 }
             }
             ControlCommand::CancelSwarm(swarm_id) => {
-                match self.swarm_manager.cancel_swarm(swarm_id, &mut self.arena) {
+                let mut kv = self.kv_manager.write();
+                match self.swarm_manager.cancel_swarm(
+                    swarm_id,
+                    &mut self.arena,
+                    &mut kv,
+                    &mut self.world_store,
+                ) {
                     Ok(()) => {
                         self.controller
                             .mark_operation_processed(envelope.operation_id);
@@ -193,16 +199,26 @@ impl AienRuntimeSpine {
     pub fn status_report(&self) -> RuntimeStatusReport {
         let kv = self.kv_manager.read();
         let metrics = kv.metrics();
+        let free = kv.free_block_count();
+        let allocated = kv.allocated_block_count();
+        let total = free + allocated;
+        // Honest proxy until the GB10 telemetry hook lands: KV memory pressure
+        // as a percentage. This is memory pressure, not SM activity.
+        let pressure_pct = if total > 0 {
+            (allocated as f32 / total as f32) * 100.0
+        } else {
+            0.0
+        };
 
         RuntimeStatusReport {
             active_sequences: self.arena.active_count(),
             active_swarms: self.swarm_manager.active_swarm_count(),
             active_worlds: self.world_store.active_world_count(),
-            free_kv_blocks: kv.free_block_count(),
-            total_kv_blocks: kv.free_block_count() + kv.allocated_block_count(),
+            free_kv_blocks: free,
+            total_kv_blocks: total,
             shared_kv_pages: metrics.shared_pages,
             cow_faults: metrics.cow_faults,
-            gpu_utilization_pct: 0.0,
+            gpu_utilization_pct: pressure_pct,
         }
     }
 }
