@@ -61,6 +61,8 @@ While the primary reference deployment executes on the NVIDIA DGX Spark (Grace B
 
 For formal verification statuses across architectures, see [PLATFORM_MATRIX.md](docs/PLATFORM_MATRIX.md).
 
+The target roadmap for review is [AIEN_COMPLETE_SYSTEM_ARCHITECTURE_v2.md](docs/AIEN_COMPLETE_SYSTEM_ARCHITECTURE_v2.md).
+
 ---
 
 ## Ecosystem Partnerships & Attribution: Modular (MAX & Mojo)
