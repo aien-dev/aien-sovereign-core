@@ -99,6 +99,7 @@ pub fn get_system_prompt() -> String {
     p.push_str("- hive: {\"action\": \"roster|spawn|swarm|read|kill\", \"role\": \"string\", \"task\": \"string\", \"name\": \"string\"}\n");
     p.push_str("- vault: {\"action\": \"list|check|audit\", \"key\": \"string\"}\n");
     p.push_str("- skill: {\"action\": \"discover|preview|search|full\", \"name\": \"one skill name\", \"query\": \"targeted terms\", \"max_tokens\": 96}\n");
+    p.push_str("- context7: {\"action\": \"resolve|query\", \"library\": \"package or product name\", \"library_id\": \"/org/project\", \"query\": \"one specific question\"}\n");
     p.push_str("- goal: {\"action\": \"new|list|milestone_done|done\", \"title\": \"string\", \"description\": \"string\", \"milestones\": [\"string\"], \"id\": \"string\", \"milestone_id\": 1}\n");
     p.push_str("- cortex: {\"action\": \"search|write\", \"query\": \"string\", \"name\": \"string\", \"content\": \"string\", \"kind\": \"lesson|discovery|procedure\"}\n");
     p.push_str("- invoke_subagent: {\"role\": \"string\", \"prompt\": \"string\"}\n");
@@ -146,7 +147,7 @@ pub fn get_system_prompt() -> String {
     p.push_str("Adhere strictly to skills/open-source-etiquette and skills/modular-upstream.\n\n");
 
     p.push_str("CONTEXT EFFICIENCY:\n");
-    p.push_str("Use Context7 first for current external library, framework, SDK, CLI, and MAX documentation. Do not load a broad local skill for facts that Context7 can retrieve directly.\n");
+    p.push_str("Use the context7 tool first for current external library, framework, SDK, CLI, and MAX documentation. Resolve a library, then query one question. Do not load a broad local skill for facts that context7 can retrieve directly.\n");
     p.push_str("For local skills, discover by task, preview exactly one skill, then search inside it. Request full skill context only when the preview and targeted search cannot answer the task.\n\n");
 
     p.push_str("To execute a tool, output exactly:\n");

@@ -46,6 +46,10 @@ pub fn dispatch_tool(name: &str, args: &Value) -> Value {
         "vault" => args.get("action").and_then(Value::as_str).unwrap_or("list"),
         "goal" => args.get("action").and_then(Value::as_str).unwrap_or("list"),
         "skill" | "skills" => args.get("action").and_then(Value::as_str).unwrap_or("list"),
+        "context7" => args
+            .get("action")
+            .and_then(Value::as_str)
+            .unwrap_or("resolve"),
         "cortex" => args
             .get("action")
             .and_then(Value::as_str)
@@ -293,6 +297,11 @@ pub fn dispatch_tool(name: &str, args: &Value) -> Value {
         }
         "crumb" => exec_crumb_tool(args),
         "skill" | "skills" => (crate::skills::skills_dispatch_tool(args), true),
+        "context7" => {
+            let res = crate::context7::context7_dispatch_tool(args);
+            let ok = res.get("status").and_then(Value::as_str) == Some("ok");
+            (res, ok)
+        }
         "goal" => (crate::goals::goals_dispatch_tool(args), true),
         "cortex" => {
             let res = tokio::task::block_in_place(|| {

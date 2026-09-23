@@ -1,17 +1,10 @@
 use colored::*;
 use reqwest::Client;
 use serde_json::{json, Value};
-use std::process::Command;
 
 const CORTEX_BASE_URL: &str = "http://127.0.0.1:18080";
 pub fn get_cortex_token() -> String {
-    Command::new("atlas-vault")
-        .args(["get", "CORTEX_TOKEN"])
-        .output()
-        .ok()
-        .filter(|output| output.status.success())
-        .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
-        .unwrap_or_default()
+    crate::vault::get_secret("CORTEX_TOKEN").unwrap_or_default()
 }
 
 pub async fn write_to_cortex(

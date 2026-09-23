@@ -2072,68 +2072,243 @@ async fn handle_post_goals(Json(payload): Json<GoalCreatePayload>) -> Json<Value
     }
 }
 
-async fn handle_get_skills() -> Json<Value> {
-    let dir = skills_dir();
-    if !dir.exists() {
-        return Json(json!({"total": 0, "skills": []}));
-    }
+const SKILL_INDEX_BYTE_LIMIT: u64 = 16 * 1024;
+const SKILL_PREVIEW_BYTE_LIMIT: u64 = 32 * 1024;
+const SKILL_SEARCH_BYTE_LIMIT: u64 = 256 * 1024;
 
+#[derive(Deserialize, Default)]
+struct SkillsQuery {
+    name: Option<String>,
+    mode: Option<String>,
+    q: Option<String>,
+    max_tokens: Option<usize>,
+}
+
+fn read_capped_text(path: &Path, byte_limit: u64) -> Option<(String, bool)> {
+    let file = fs::File::open(path).ok()?;
+    let len = file.metadata().ok().map(|meta| meta.len()).unwrap_or(0);
+    let mut bytes = Vec::new();
+    file.take(byte_limit).read_to_end(&mut bytes).ok()?;
+    Some((
+        String::from_utf8_lossy(&bytes).into_owned(),
+        len > byte_limit,
+    ))
+}
+
+fn frontmatter_field(content: &str, field: &str) -> Option<String> {
+    let mut in_frontmatter = false;
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed == "---" {
+            if in_frontmatter {
+                break;
+            }
+            in_frontmatter = true;
+            continue;
+        }
+        if in_frontmatter && let Some(rest) = trimmed.strip_prefix(&format!("{field}:")) {
+            return Some(rest.trim().trim_matches('"').trim_matches('\'').to_string());
+        }
+    }
+    None
+}
+
+fn truncate_words(text: &str, limit: usize) -> String {
+    text.split_whitespace()
+        .take(limit.max(1))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn skill_body(content: &str) -> &str {
+    let Some(rest) = content.strip_prefix("---") else {
+        return content;
+    };
+    let Some(end) = rest.find("\n---") else {
+        return content;
+    };
+    rest[end + 4..].trim_start_matches(['\r', '\n'])
+}
+
+fn first_skill_paragraph(content: &str) -> &str {
+    skill_body(content)
+        .split("\n\n")
+        .map(str::trim)
+        .find(|paragraph| {
+            !paragraph.is_empty()
+                && !paragraph
+                    .lines()
+                    .all(|line| line.trim_start().starts_with('#'))
+        })
+        .unwrap_or("")
+}
+
+fn skill_index(dir: &Path) -> Value {
     let mut skills = Vec::new();
     if let Ok(entries) = fs::read_dir(dir) {
         for entry in entries.flatten() {
             let path = entry.path();
-            if path.is_dir() {
-                let skill_md = path.join("SKILL.md");
-                if skill_md.exists()
-                    && let Ok(content) = fs::read_to_string(&skill_md)
-                {
-                    let mut name = path
-                        .file_name()
-                        .unwrap_or_default()
-                        .to_string_lossy()
-                        .to_string();
-                    let mut desc = "No description provided.".to_string();
-                    let mut in_fm = false;
-
-                    for line in content.lines() {
-                        let t = line.trim();
-                        if t == "---" {
-                            if in_fm {
-                                break;
-                            } else {
-                                in_fm = true;
-                                continue;
-                            }
-                        }
-                        if in_fm {
-                            if let Some(rest) = t.strip_prefix("name:") {
-                                name = rest.trim().trim_matches('"').trim_matches('\'').to_string();
-                            } else if let Some(rest) = t.strip_prefix("description:") {
-                                desc = rest.trim().trim_matches('"').trim_matches('\'').to_string();
-                            }
-                        }
-                    }
-
-                    let has_scripts = path.join("scripts").exists();
-                    skills.push(json!({
-                        "name": name,
-                        "description": desc,
-                        "path": skill_md.display().to_string(),
-                        "has_scripts": has_scripts,
-                        "content": content
-                    }));
-                }
+            if !path.is_dir() {
+                continue;
             }
+            let skill_md = path.join("SKILL.md");
+            let Some((content, _)) = read_capped_text(&skill_md, SKILL_INDEX_BYTE_LIMIT) else {
+                continue;
+            };
+            let name = frontmatter_field(&content, "name").unwrap_or_else(|| {
+                path.file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .to_string()
+            });
+            let description = frontmatter_field(&content, "description")
+                .unwrap_or_else(|| "No description provided.".to_string());
+            skills.push(json!({
+                "name": name,
+                "description": truncate_words(&description, 32),
+                "path": skill_md.display().to_string(),
+                "has_scripts": path.join("scripts").exists()
+            }));
         }
     }
-
     skills.sort_by(|a, b| {
         let na = a.get("name").and_then(Value::as_str).unwrap_or("");
         let nb = b.get("name").and_then(Value::as_str).unwrap_or("");
         na.cmp(nb)
     });
+    json!({
+        "total": skills.len(),
+        "skills": skills,
+        "next": "Request one skill with name and mode=preview|search|full."
+    })
+}
 
-    Json(json!({"total": skills.len(), "skills": skills}))
+fn find_skill_file(dir: &Path, name: &str) -> Option<PathBuf> {
+    let wanted = name.trim().to_lowercase();
+    let Ok(entries) = fs::read_dir(dir) else {
+        return None;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let skill_md = path.join("SKILL.md");
+        if !skill_md.is_file() {
+            continue;
+        }
+        let folder = path
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_lowercase();
+        let indexed = read_capped_text(&skill_md, SKILL_INDEX_BYTE_LIMIT)
+            .and_then(|(content, _)| frontmatter_field(&content, "name"))
+            .unwrap_or_default()
+            .to_lowercase();
+        if folder == wanted || indexed == wanted {
+            return Some(skill_md);
+        }
+    }
+    None
+}
+
+fn skill_view(dir: &Path, name: &str, mode: &str, query: Option<&str>, max_tokens: usize) -> Value {
+    let Some(path) = find_skill_file(dir, name) else {
+        return json!({"status": "error", "error": format!("Skill '{name}' not found")});
+    };
+    match mode {
+        "full" => {
+            let content = fs::read_to_string(&path).unwrap_or_default();
+            json!({
+                "status": "ok",
+                "mode": "full",
+                "name": name,
+                "content": content
+            })
+        }
+        "search" => {
+            let Some(query) = query.map(str::trim).filter(|query| !query.is_empty()) else {
+                return json!({"status": "error", "error": "Skill search requires q"});
+            };
+            let terms: Vec<String> = query
+                .split_whitespace()
+                .map(|term| term.to_lowercase())
+                .filter(|term| term.len() > 1)
+                .collect();
+            if terms.is_empty() {
+                return json!({"status": "error", "error": "Skill search requires q"});
+            }
+            let Some((content, scan_truncated)) = read_capped_text(&path, SKILL_SEARCH_BYTE_LIMIT)
+            else {
+                return json!({"status": "error", "error": "Skill file could not be read"});
+            };
+            let mut ranked = Vec::new();
+            for (index, paragraph) in skill_body(&content).split("\n\n").enumerate() {
+                let paragraph = paragraph.trim();
+                let lower = paragraph.to_lowercase();
+                let score = terms
+                    .iter()
+                    .map(|term| lower.matches(term).count())
+                    .sum::<usize>();
+                if score > 0 {
+                    ranked.push((score, index, truncate_words(paragraph, 80)));
+                }
+            }
+            ranked.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+            let matches: Vec<Value> = ranked
+                .into_iter()
+                .take(3)
+                .map(|(score, paragraph, snippet)| {
+                    json!({"score": score, "paragraph": paragraph, "snippet": snippet})
+                })
+                .collect();
+            json!({
+                "status": "ok",
+                "mode": "search",
+                "name": name,
+                "query": query,
+                "matches": matches,
+                "scan_truncated": scan_truncated
+            })
+        }
+        _ => {
+            let Some((content, scan_truncated)) = read_capped_text(&path, SKILL_PREVIEW_BYTE_LIMIT)
+            else {
+                return json!({"status": "error", "error": "Skill file could not be read"});
+            };
+            let paragraph = first_skill_paragraph(&content);
+            let limit = max_tokens.clamp(1, 256);
+            let preview = truncate_words(paragraph, limit);
+            json!({
+                "status": "ok",
+                "mode": "preview",
+                "name": name,
+                "preview": preview,
+                "truncated": scan_truncated || paragraph.split_whitespace().count() > limit,
+                "next": "Use mode=search with q, or mode=full for one skill."
+            })
+        }
+    }
+}
+
+async fn handle_get_skills(Query(query): Query<SkillsQuery>) -> Json<Value> {
+    let dir = skills_dir();
+    if !dir.exists() {
+        return Json(json!({"total": 0, "skills": []}));
+    }
+    if let Some(name) = query
+        .name
+        .as_deref()
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+    {
+        return Json(skill_view(
+            &dir,
+            name,
+            query.mode.as_deref().unwrap_or("preview"),
+            query.q.as_deref(),
+            query.max_tokens.unwrap_or(96),
+        ));
+    }
+    Json(skill_index(&dir))
 }
 
 #[derive(Deserialize)]
@@ -3057,6 +3232,41 @@ async fn handle_mail_send(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn skill_index_omits_bodies_and_preview_is_one_paragraph() {
+        let dir = std::env::temp_dir().join(format!("aien-skill-filter-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let skill_dir = dir.join("reactor");
+        fs::create_dir_all(&skill_dir).unwrap();
+        fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: reactor\ndescription: Thermal notes\n---\n# Heading\n\nAlpha beta gamma.\n\nThe reactor uses a graphite moderator.\n",
+        )
+        .unwrap();
+
+        let index = skill_index(&dir);
+        let listed = &index["skills"][0];
+        assert_eq!(listed["name"], "reactor");
+        assert!(listed.get("content").is_none());
+        assert_eq!(index["total"], 1);
+
+        let preview = skill_view(&dir, "reactor", "preview", None, 96);
+        assert_eq!(preview["mode"], "preview");
+        assert_eq!(preview["preview"], "Alpha beta gamma.");
+        assert!(!preview["preview"].as_str().unwrap().contains("graphite"));
+
+        let search = skill_view(&dir, "reactor", "search", Some("graphite"), 96);
+        assert_eq!(search["matches"][0]["paragraph"], 2);
+        assert!(
+            search["matches"][0]["snippet"]
+                .as_str()
+                .unwrap()
+                .contains("graphite moderator")
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
 
     fn create_test_state() -> AppState {
         let client = reqwest::Client::new();
