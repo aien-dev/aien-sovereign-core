@@ -14,9 +14,8 @@ git commit -s -m "feat(subsystem): descriptive commit message"
 
 ## Licensing of Contributions
 
-- Core software code is contributed under the [Apache License, Version 2.0](LICENSE).
-- Dynamic FFI bridges requiring runtime link exceptions (`spark-max-cabi`, `spark-max-rs`, `aien-inference-abi`) are contributed under Apache-2.0 with LLVM Exception.
-- Architectural specifications and documentation are contributed under Apache-2.0.
+- All software code, including dynamic FFI bridges (`spark-max-cabi`, `spark-max-rs`, `aien-inference-abi`), is contributed under the [Apache License, Version 2.0 with LLVM Exception](LICENSE) (`Apache-2.0 WITH LLVM-exception`).
+- Architectural specifications and documentation are contributed under `Apache-2.0 WITH LLVM-exception`.
 - Benchmark datasets and telemetry logs are dedicated to the public domain under [CC0-1.0](LICENSES/CC0-1.0.txt).
 - Model weights and curated training datasets follow classifications in [ARTIFACT_LICENSING.md](ARTIFACT_LICENSING.md).
 

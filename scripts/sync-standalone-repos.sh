@@ -124,12 +124,30 @@ sync_manifest() {
   local dest_manifest="$2"
   local is_check="$3"
 
-  python3 - << 'PYEOF' "$src_manifest" "$dest_manifest" "$is_check"
+  python3 - << 'PYEOF' "$src_manifest" "$dest_manifest" "$is_check" "$SOVEREIGN_CORE/Cargo.toml"
 import sys, re
 
 src_path = sys.argv[1]
 dest_path = sys.argv[2]
 check_mode = (sys.argv[3] == "true")
+
+# The workspace root manifest is the single source of truth for the license.
+license_id = None
+in_ws_pkg = False
+with open(sys.argv[4], "r", encoding="utf-8") as f:
+    for line in f:
+        s = line.strip()
+        if s.startswith("["):
+            in_ws_pkg = (s == "[workspace.package]")
+            continue
+        m = re.match(r'^license\s*=\s*"([^"]+)"', s)
+        if in_ws_pkg and m:
+            license_id = m.group(1)
+            break
+if not license_id:
+    print(f"[ERROR] No [workspace.package] license in {sys.argv[4]}")
+    sys.exit(1)
+license_line = f'license = "{license_id}"\n'
 
 with open(src_path, "r", encoding="utf-8") as f:
     src_lines = f.readlines()
@@ -168,13 +186,13 @@ for line in dest_lines:
         continue
     elif s.startswith("[") and in_pkg:
         if not license_set:
-            new_dest.append('license = "Apache-2.0"\n')
+            new_dest.append(license_line)
             license_set = True
         in_pkg = False
 
     if in_pkg:
         if re.match(r'^(license|license\.workspace)\s*=', s):
-            new_dest.append('license = "Apache-2.0"\n')
+            new_dest.append(license_line)
             license_set = True
             continue
         if src_version and re.match(r'^version\s*=', s):
@@ -186,22 +204,22 @@ for line in dest_lines:
     new_dest.append(line)
 
 if in_pkg and not license_set:
-    new_dest.append('license = "Apache-2.0"\n')
+    new_dest.append(license_line)
 
 new_content = "".join(new_dest)
 old_content = "".join(dest_lines)
 
 if new_content != old_content:
     if check_mode:
-        print(f"[DISPARITY] {dest_path} requires manifest update (license Apache-2.0 or version/edition)")
+        print(f"[DISPARITY] {dest_path} requires manifest update (license {license_id} or version/edition)")
         sys.exit(2)
     else:
         with open(dest_path, "w", encoding="utf-8") as f:
             f.write(new_content)
-        print(f"[SYNCED] Manifest updated: {dest_path} (license = Apache-2.0)")
+        print(f"[SYNCED] Manifest updated: {dest_path} (license = {license_id})")
         sys.exit(0)
 else:
-    print(f"[PARITY OK] Manifest {dest_path} in parity (license = Apache-2.0)")
+    print(f"[PARITY OK] Manifest {dest_path} in parity (license = {license_id})")
     sys.exit(0)
 PYEOF
 }
@@ -405,7 +423,7 @@ fi
 echo "============================================================"
 if [[ "$CHECK_MODE" = true ]]; then
   if [[ $TOTAL_FAILED -eq 0 ]]; then
-    echo "[STATUS: ALL IN PARITY] All $PROCESSED_COUNT repositories match source state with Apache-2.0."
+    echo "[STATUS: ALL IN PARITY] All $PROCESSED_COUNT repositories match source state and workspace license."
     exit 0
   else
     echo "[STATUS: DISPARITY DETECTED] $TOTAL_FAILED of $PROCESSED_COUNT repositories exhibit drift or disparities."
