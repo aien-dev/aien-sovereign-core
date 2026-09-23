@@ -26,6 +26,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "aien-capability"
+version = "0.1.0"
+dependencies = [
+ "sha2 0.10.9",
+]
+
+[[package]]
 name = "aien-cli"
 version = "0.1.0"
 dependencies = [
@@ -123,6 +130,16 @@ dependencies = [
  "libc",
  "parking_lot",
  "serde",
+]
+
+[[package]]
+name = "aien-mcp"
+version = "0.1.0"
+dependencies = [
+ "aien-capability",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tokio",
 ]
 
 [[package]]
