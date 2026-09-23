@@ -46,8 +46,19 @@ else
 fi
 
 # Step 4: Test Suite Verification
+# Runs one stamped job per crate through the shared aien-proof board: crates
+# whose code and local dependencies are unchanged replay their stamp, identical
+# runs from other agents are joined, and real runs pass the CPU, memory, and GPU
+# gates. Set AIEN_PROOF_OFF=1 to fall back to a plain workspace test.
 echo "[4/5] Running Workspace Test Suite..."
-if cargo test --workspace; then
+if [ "${AIEN_PROOF_OFF:-0}" = "1" ]; then
+    TEST_CMD=(cargo test --workspace)
+elif command -v aien-proof >/dev/null 2>&1; then
+    TEST_CMD=(aien-proof crates)
+else
+    TEST_CMD=(cargo run -q -p aien-proof -- crates)
+fi
+if "${TEST_CMD[@]}"; then
     echo "PASSED (100% test pass)"
 else
     echo "FAILED (Test suite failed)"
