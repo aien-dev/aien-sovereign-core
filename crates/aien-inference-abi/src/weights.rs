@@ -688,112 +688,36 @@ impl TransformerWeights {
     }
 
     /// Loads weights strictly from a pre-validated LoadedCheckpoint without synthetic fallback.
+    /// FP32 tensors are decoded from the checkpoint capsule on demand. They are not stored twice.
     pub fn from_loaded_checkpoint(
         checkpoint: &crate::checkpoint::LoadedCheckpoint,
         config: &ModelConfig,
     ) -> Result<Self, crate::checkpoint::CheckpointError> {
-        let embed_tokens = checkpoint
-            .get_fp32("model.embed_tokens.weight")
-            .ok_or_else(|| {
-                crate::checkpoint::CheckpointError::MissingTensor(
-                    "model.embed_tokens.weight".to_string(),
-                )
-            })?
-            .clone();
+        let decode = |name: &str| -> Result<Vec<f32>, crate::checkpoint::CheckpointError> {
+            checkpoint.decode_fp32(name).map_err(|err| match err {
+                crate::capsule::CapsuleError::MissingTensor(name) => {
+                    crate::checkpoint::CheckpointError::MissingTensor(name)
+                }
+                other => crate::checkpoint::CheckpointError::Capsule(other.to_string()),
+            })
+        };
+
+        let embed_tokens = decode("model.embed_tokens.weight")?;
 
         let mut layers = Vec::with_capacity(config.num_layers);
         for idx in 0..config.num_layers {
             let prefix = format!("model.layers.{}", idx);
 
-            let input_layernorm = checkpoint
-                .get_fp32(&format!("{}.input_layernorm.weight", prefix))
-                .ok_or_else(|| {
-                    crate::checkpoint::CheckpointError::MissingTensor(format!(
-                        "{}.input_layernorm.weight",
-                        prefix
-                    ))
-                })?
-                .clone();
-
-            let q_proj = checkpoint
-                .get_fp32(&format!("{}.self_attn.q_proj.weight", prefix))
-                .ok_or_else(|| {
-                    crate::checkpoint::CheckpointError::MissingTensor(format!(
-                        "{}.self_attn.q_proj.weight",
-                        prefix
-                    ))
-                })?
-                .clone();
-
-            let k_proj = checkpoint
-                .get_fp32(&format!("{}.self_attn.k_proj.weight", prefix))
-                .ok_or_else(|| {
-                    crate::checkpoint::CheckpointError::MissingTensor(format!(
-                        "{}.self_attn.k_proj.weight",
-                        prefix
-                    ))
-                })?
-                .clone();
-
-            let v_proj = checkpoint
-                .get_fp32(&format!("{}.self_attn.v_proj.weight", prefix))
-                .ok_or_else(|| {
-                    crate::checkpoint::CheckpointError::MissingTensor(format!(
-                        "{}.self_attn.v_proj.weight",
-                        prefix
-                    ))
-                })?
-                .clone();
-
-            let o_proj = checkpoint
-                .get_fp32(&format!("{}.self_attn.o_proj.weight", prefix))
-                .ok_or_else(|| {
-                    crate::checkpoint::CheckpointError::MissingTensor(format!(
-                        "{}.self_attn.o_proj.weight",
-                        prefix
-                    ))
-                })?
-                .clone();
-
-            let post_attention_layernorm = checkpoint
-                .get_fp32(&format!("{}.post_attention_layernorm.weight", prefix))
-                .ok_or_else(|| {
-                    crate::checkpoint::CheckpointError::MissingTensor(format!(
-                        "{}.post_attention_layernorm.weight",
-                        prefix
-                    ))
-                })?
-                .clone();
-
-            let gate_proj = checkpoint
-                .get_fp32(&format!("{}.mlp.gate_proj.weight", prefix))
-                .ok_or_else(|| {
-                    crate::checkpoint::CheckpointError::MissingTensor(format!(
-                        "{}.mlp.gate_proj.weight",
-                        prefix
-                    ))
-                })?
-                .clone();
-
-            let up_proj = checkpoint
-                .get_fp32(&format!("{}.mlp.up_proj.weight", prefix))
-                .ok_or_else(|| {
-                    crate::checkpoint::CheckpointError::MissingTensor(format!(
-                        "{}.mlp.up_proj.weight",
-                        prefix
-                    ))
-                })?
-                .clone();
-
-            let down_proj = checkpoint
-                .get_fp32(&format!("{}.mlp.down_proj.weight", prefix))
-                .ok_or_else(|| {
-                    crate::checkpoint::CheckpointError::MissingTensor(format!(
-                        "{}.mlp.down_proj.weight",
-                        prefix
-                    ))
-                })?
-                .clone();
+            let input_layernorm = decode(&format!("{}.input_layernorm.weight", prefix))?;
+            let q_proj = decode(&format!("{}.self_attn.q_proj.weight", prefix))?;
+            let k_proj = decode(&format!("{}.self_attn.k_proj.weight", prefix))?;
+            let v_proj = decode(&format!("{}.self_attn.v_proj.weight", prefix))?;
+            let o_proj = decode(&format!("{}.self_attn.o_proj.weight", prefix))?;
+            let post_attention_layernorm =
+                decode(&format!("{}.post_attention_layernorm.weight", prefix))?;
+            let gate_proj = decode(&format!("{}.mlp.gate_proj.weight", prefix))?;
+            let up_proj = decode(&format!("{}.mlp.up_proj.weight", prefix))?;
+            let down_proj = decode(&format!("{}.mlp.down_proj.weight", prefix))?;
 
             layers.push(TransformerLayerWeights {
                 input_layernorm,
@@ -808,19 +732,8 @@ impl TransformerWeights {
             });
         }
 
-        let final_norm = checkpoint
-            .get_fp32("model.norm.weight")
-            .ok_or_else(|| {
-                crate::checkpoint::CheckpointError::MissingTensor("model.norm.weight".to_string())
-            })?
-            .clone();
-
-        let lm_head = checkpoint
-            .get_fp32("lm_head.weight")
-            .ok_or_else(|| {
-                crate::checkpoint::CheckpointError::MissingTensor("lm_head.weight".to_string())
-            })?
-            .clone();
+        let final_norm = decode("model.norm.weight")?;
+        let lm_head = decode("lm_head.weight")?;
 
         Ok(Self {
             config: config.clone(),
@@ -931,59 +844,43 @@ mod tests {
             )
         );
 
-        // 2. Populated checkpoint loads correctly
-        let mut checkpoint = crate::checkpoint::LoadedCheckpoint::new();
-        checkpoint
-            .fp32_weights
-            .insert("model.embed_tokens.weight".to_string(), vec![0.1; 256 * 64]);
-        checkpoint.fp32_weights.insert(
-            "model.layers.0.input_layernorm.weight".to_string(),
-            vec![1.0; 64],
-        );
-        checkpoint.fp32_weights.insert(
-            "model.layers.0.self_attn.q_proj.weight".to_string(),
-            vec![0.2; 64 * 64],
-        );
-        checkpoint.fp32_weights.insert(
-            "model.layers.0.self_attn.k_proj.weight".to_string(),
-            vec![0.3; 64 * 64],
-        );
-        checkpoint.fp32_weights.insert(
-            "model.layers.0.self_attn.v_proj.weight".to_string(),
-            vec![0.4; 64 * 64],
-        );
-        checkpoint.fp32_weights.insert(
-            "model.layers.0.self_attn.o_proj.weight".to_string(),
-            vec![0.5; 64 * 64],
-        );
-        checkpoint.fp32_weights.insert(
-            "model.layers.0.post_attention_layernorm.weight".to_string(),
-            vec![1.0; 64],
-        );
-        checkpoint.fp32_weights.insert(
-            "model.layers.0.mlp.gate_proj.weight".to_string(),
-            vec![0.6; 64 * 128],
-        );
-        checkpoint.fp32_weights.insert(
-            "model.layers.0.mlp.up_proj.weight".to_string(),
-            vec![0.7; 64 * 128],
-        );
-        checkpoint.fp32_weights.insert(
-            "model.layers.0.mlp.down_proj.weight".to_string(),
-            vec![0.8; 128 * 64],
-        );
-        checkpoint
-            .fp32_weights
-            .insert("model.norm.weight".to_string(), vec![1.0; 64]);
-        checkpoint
-            .fp32_weights
-            .insert("lm_head.weight".to_string(), vec![0.9; 64 * 256]);
+        // 2. Populated checkpoint loads correctly.
+        // Values are exact in bf16 so decode_fp32 round-trips without rounding.
+        let bf16_filled = |name: &str, shape: Vec<usize>, value: f32| {
+            let n: usize = shape.iter().product();
+            let values = vec![value; n];
+            (
+                name.to_string(),
+                shape,
+                crate::checkpoint::encode_fp32_to_bf16(&values),
+            )
+        };
+        let checkpoint = crate::checkpoint::LoadedCheckpoint::from_bf16_tensors(vec![
+            bf16_filled("model.embed_tokens.weight", vec![256, 64], 0.5),
+            bf16_filled("model.layers.0.input_layernorm.weight", vec![64], 1.0),
+            bf16_filled("model.layers.0.self_attn.q_proj.weight", vec![64, 64], 2.0),
+            bf16_filled("model.layers.0.self_attn.k_proj.weight", vec![64, 64], 0.5),
+            bf16_filled("model.layers.0.self_attn.v_proj.weight", vec![64, 64], 1.0),
+            bf16_filled("model.layers.0.self_attn.o_proj.weight", vec![64, 64], 0.5),
+            bf16_filled(
+                "model.layers.0.post_attention_layernorm.weight",
+                vec![64],
+                1.0,
+            ),
+            bf16_filled("model.layers.0.mlp.gate_proj.weight", vec![128, 64], 2.0),
+            bf16_filled("model.layers.0.mlp.up_proj.weight", vec![128, 64], 0.5),
+            bf16_filled("model.layers.0.mlp.down_proj.weight", vec![64, 128], 1.0),
+            bf16_filled("model.norm.weight", vec![64], 1.0),
+            bf16_filled("lm_head.weight", vec![256, 64], 0.5),
+        ]);
 
         let weights = TransformerWeights::from_loaded_checkpoint(&checkpoint, &config).unwrap();
         assert_eq!(weights.embed_tokens.len(), 256 * 64);
+        assert_eq!(weights.embed_tokens[0], 0.5);
         assert_eq!(weights.layers.len(), 1);
-        assert_eq!(weights.layers[0].q_proj[0], 0.2);
+        assert_eq!(weights.layers[0].q_proj[0], 2.0);
         assert_eq!(weights.final_norm.len(), 64);
-        assert_eq!(weights.lm_head[0], 0.9);
+        assert_eq!(weights.final_norm[0], 1.0);
+        assert_eq!(weights.lm_head[0], 0.5);
     }
 }

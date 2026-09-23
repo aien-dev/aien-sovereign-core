@@ -10,6 +10,7 @@
 //! - Strict KV transaction semantics (reserve -> execute -> commit / rollback).
 //! - Zero CPU fallback in accelerated mode.
 
+use crate::tensor_abi::{ResidentTensor, TensorView};
 use crate::weights::TransformerWeights;
 use crate::{AienInferenceBackend, DecodeOutput, ModelConfig, ScheduledBatch, StepMetrics};
 #[allow(unused_imports)]
@@ -20,12 +21,12 @@ use std::time::Instant;
 
 #[repr(C)]
 pub struct BlackwellResidentLayerWeights {
-    pub d_norm1: *mut f32,
-    pub d_w_qkv: *mut f32,
-    pub d_w_o: *mut f32,
-    pub d_norm2: *mut f32,
-    pub d_w_gate_up: *mut f32,
-    pub d_w_down: *mut f32,
+    pub d_norm1: ResidentTensor,
+    pub d_w_qkv: ResidentTensor,
+    pub d_w_o: ResidentTensor,
+    pub d_norm2: ResidentTensor,
+    pub d_w_gate_up: ResidentTensor,
+    pub d_w_down: ResidentTensor,
 }
 
 #[repr(C)]
@@ -40,10 +41,10 @@ pub struct BlackwellResidentModelWeights {
     pub rms_norm_eps: f32,
     pub rope_theta: f32,
 
-    pub d_embed_tokens: *mut f32,
+    pub d_embed_tokens: ResidentTensor,
     pub layers: *mut BlackwellResidentLayerWeights,
-    pub d_final_norm: *mut f32,
-    pub d_lm_head: *mut f32,
+    pub d_final_norm: ResidentTensor,
+    pub d_lm_head: ResidentTensor,
 }
 
 #[repr(C)]
@@ -112,12 +113,12 @@ extern "C" {
     fn blackwell_workspace_free(ws: *mut BlackwellWorkspaceC);
 
     fn blackwell_layer_weights_create(
-        h_norm1: *const f32,
-        h_w_qkv: *const f32,
-        h_w_o: *const f32,
-        h_norm2: *const f32,
-        h_w_gate_up: *const f32,
-        h_w_down: *const f32,
+        h_norm1: *const TensorView,
+        h_w_qkv: *const TensorView,
+        h_w_o: *const TensorView,
+        h_norm2: *const TensorView,
+        h_w_gate_up: *const TensorView,
+        h_w_down: *const TensorView,
         hidden_dim: std::os::raw::c_int,
         q_dim: std::os::raw::c_int,
         kv_dim: std::os::raw::c_int,
@@ -138,9 +139,9 @@ extern "C" {
         vocab_size: std::os::raw::c_int,
         rms_norm_eps: f32,
         rope_theta: f32,
-        h_embed_tokens: *const f32,
-        h_final_norm: *const f32,
-        h_lm_head: *const f32,
+        h_embed_tokens: *const TensorView,
+        h_final_norm: *const TensorView,
+        h_lm_head: *const TensorView,
         stream: *mut std::ffi::c_void,
     ) -> *mut BlackwellResidentModelWeights;
 
@@ -306,6 +307,11 @@ impl BlackwellBatchExecutor {
             };
 
             // 2. Create resident model weights
+            let embed_view =
+                TensorView::f32_contiguous(&weights.embed_tokens, &[vocab_size, hidden_dim])?;
+            let final_norm_view = TensorView::f32_contiguous(&weights.final_norm, &[hidden_dim])?;
+            let lm_head_view =
+                TensorView::f32_contiguous(&weights.lm_head, &[vocab_size, hidden_dim])?;
             let model_raw = unsafe {
                 blackwell_model_weights_create(
                     config.num_layers as i32,
@@ -317,15 +323,19 @@ impl BlackwellBatchExecutor {
                     vocab_size as i32,
                     config.rms_norm_eps,
                     config.rope_theta,
-                    weights.embed_tokens.as_ptr(),
-                    weights.final_norm.as_ptr(),
-                    weights.lm_head.as_ptr(),
+                    embed_view.as_abi(),
+                    final_norm_view.as_abi(),
+                    lm_head_view.as_abi(),
                     stream,
                 )
             };
             if model_raw.is_null() {
                 return Err("Failed to allocate BlackwellResidentModelWeights on GB10".to_string());
             }
+            let resident_model = BlackwellResidentModel {
+                config: config.clone(),
+                raw: model_raw,
+            };
 
             // 3. Fuse and upload layer weights:
             // W_qkv has width q_dim + 2 * kv_dim (Section 6 correction)
@@ -344,14 +354,26 @@ impl BlackwellBatchExecutor {
                 fused_gate_up[intermediate_dim * hidden_dim..2 * intermediate_dim * hidden_dim]
                     .copy_from_slice(&lw.up_proj);
 
+                let norm1_view = TensorView::f32_contiguous(&lw.input_layernorm, &[hidden_dim])?;
+                let qkv_view = TensorView::f32_contiguous(&fused_qkv, &[qkv_dim, hidden_dim])?;
+                let o_view = TensorView::f32_contiguous(&lw.o_proj, &[hidden_dim, q_dim])?;
+                let norm2_view =
+                    TensorView::f32_contiguous(&lw.post_attention_layernorm, &[hidden_dim])?;
+                let gate_up_view = TensorView::f32_contiguous(
+                    &fused_gate_up,
+                    &[2 * intermediate_dim, hidden_dim],
+                )?;
+                let down_view =
+                    TensorView::f32_contiguous(&lw.down_proj, &[hidden_dim, intermediate_dim])?;
+
                 let layer_raw = unsafe {
                     blackwell_layer_weights_create(
-                        lw.input_layernorm.as_ptr(),
-                        fused_qkv.as_ptr(),
-                        lw.o_proj.as_ptr(),
-                        lw.post_attention_layernorm.as_ptr(),
-                        fused_gate_up.as_ptr(),
-                        lw.down_proj.as_ptr(),
+                        norm1_view.as_abi(),
+                        qkv_view.as_abi(),
+                        o_view.as_abi(),
+                        norm2_view.as_abi(),
+                        gate_up_view.as_abi(),
+                        down_view.as_abi(),
                         hidden_dim as i32,
                         q_dim as i32,
                         kv_dim as i32,
@@ -368,11 +390,6 @@ impl BlackwellBatchExecutor {
                     blackwell_model_weights_set_layer(model_raw, l_idx as i32, layer_raw);
                 }
             }
-
-            let resident_model = BlackwellResidentModel {
-                config: config.clone(),
-                raw: model_raw,
-            };
 
             Ok(Self {
                 config,
@@ -718,6 +735,43 @@ impl BlackwellBatchExecutor {
                 active_kv_blocks: kv_manager.allocated_block_count(),
             },
         ))
+    }
+}
+
+#[cfg(all(test, has_blackwell_cuda))]
+mod typed_residency_tests {
+    use super::*;
+    use crate::tensor_abi::{AbiDType, AbiResidency};
+
+    #[test]
+    fn dense_weights_keep_f32_values_with_typed_residency() {
+        let config = ModelConfig {
+            model_id: "typed-residency-test".to_string(),
+            max_sequence_length: 16,
+            block_size: 16,
+            num_layers: 1,
+            num_heads: 2,
+            head_dim: 8,
+            num_kv_heads: 1,
+            hidden_dim: 16,
+            intermediate_dim: 32,
+            vocab_size: 32,
+            rms_norm_eps: 1e-5,
+            rope_theta: 10000.0,
+        };
+        let weights = TransformerWeights::reference_test_weights(&config);
+        let executor = BlackwellBatchExecutor::new(&weights, 2).unwrap();
+        let model = unsafe { &*executor.resident_model.raw };
+        assert_eq!(model.d_embed_tokens.descriptor.dtype, AbiDType::F32);
+        assert_eq!(
+            model.d_embed_tokens.descriptor.residency,
+            AbiResidency::Device
+        );
+        assert_eq!(model.d_embed_tokens.descriptor.shape[..2], [32, 16]);
+        let layer = unsafe { &*model.layers };
+        assert_eq!(layer.d_w_qkv.descriptor.dtype, AbiDType::F32);
+        assert_eq!(layer.d_w_qkv.descriptor.shape[..2], [32, 16]);
+        assert_eq!(layer.d_w_gate_up.descriptor.shape[..2], [64, 16]);
     }
 }
 

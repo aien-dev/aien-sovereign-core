@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <math.h>
 #include <atomic>
+#include "tensor_abi.h"
 
 extern std::atomic<uint64_t> g_kernel_exec_count;
 
@@ -24,12 +25,12 @@ struct KvLayoutDesc {
 
 // Resident Layer Weights on GPU
 struct BlackwellResidentLayerWeights {
-    float *d_norm1;      // [hidden_dim]
-    float *d_w_qkv;      // [q_dim + 2 * kv_dim, hidden_dim]
-    float *d_w_o;        // [hidden_dim, q_dim]
-    float *d_norm2;      // [hidden_dim]
-    float *d_w_gate_up;  // [2 * intermediate_dim, hidden_dim]
-    float *d_w_down;     // [hidden_dim, intermediate_dim]
+    ResidentTensor d_norm1;      // [hidden_dim]
+    ResidentTensor d_w_qkv;      // [q_dim + 2 * kv_dim, hidden_dim]
+    ResidentTensor d_w_o;        // [hidden_dim, q_dim]
+    ResidentTensor d_norm2;      // [hidden_dim]
+    ResidentTensor d_w_gate_up;  // [2 * intermediate_dim, hidden_dim]
+    ResidentTensor d_w_down;     // [hidden_dim, intermediate_dim]
 };
 
 // Resident Model Weights on GPU
@@ -44,10 +45,10 @@ struct BlackwellResidentModelWeights {
     float rms_norm_eps;
     float rope_theta;
 
-    float *d_embed_tokens; // [vocab_size, hidden_dim]
+    ResidentTensor d_embed_tokens; // [vocab_size, hidden_dim]
     BlackwellResidentLayerWeights *layers;
-    float *d_final_norm;   // [hidden_dim]
-    float *d_lm_head;      // [vocab_size, hidden_dim]
+    ResidentTensor d_final_norm;   // [hidden_dim]
+    ResidentTensor d_lm_head;      // [vocab_size, hidden_dim]
 };
 
 // Persistent GPU Activation Workspace
@@ -572,7 +573,115 @@ __global__ void argmax_sampling_kernel(
 // C-ABI Execution Functions
 // ----------------------------------------------------------------------------
 
+static bool valid_tensor_view(const TensorView *view) {
+    if (!view || !view->address || view->descriptor.residency != TENSOR_HOST ||
+        view->descriptor.rank == 0 || view->descriptor.rank > 4 ||
+        view->descriptor.byte_len == 0 ||
+        view->descriptor.byte_len > SIZE_MAX) return false;
+    const TensorDescriptor &desc = view->descriptor;
+    uint64_t bytes_per_element;
+    switch (desc.dtype) {
+        case TENSOR_F32: bytes_per_element = 4; break;
+        case TENSOR_BF16: case TENSOR_FP16: bytes_per_element = 2; break;
+        case TENSOR_FP8_E4M3FN: case TENSOR_FP8_E5M2:
+        case TENSOR_INT8: case TENSOR_INT4: bytes_per_element = 1; break;
+        default: return false;
+    }
+    if (desc.layout != TENSOR_ROW_MAJOR && desc.layout != TENSOR_COLUMN_MAJOR &&
+        desc.layout != TENSOR_STRIDED) return false;
+    if (desc.dtype == TENSOR_INT4 && desc.quant.packing == PACKING_NONE) return false;
+    if (desc.quant.scheme != QUANT_NONE && desc.quant.scheme != QUANT_SYMMETRIC &&
+        desc.quant.scheme != QUANT_AFFINE) return false;
+    if (desc.quant.scheme == QUANT_NONE &&
+        (desc.quant.scale_count || desc.quant.zero_point_count)) return false;
+    if (desc.quant.scheme != QUANT_NONE &&
+        (!desc.quant.scales || desc.quant.scale_count == 0)) return false;
+    if (desc.quant.scale_count && !desc.quant.scales) return false;
+    if (desc.quant.zero_point_count && !desc.quant.zero_points) return false;
+    if (desc.quant.scale_count > SIZE_MAX / sizeof(float) ||
+        desc.quant.zero_point_count > SIZE_MAX / sizeof(int32_t)) return false;
+    if (desc.layout == TENSOR_ROW_MAJOR) {
+        uint64_t elements = 1;
+        uint64_t stride = 1;
+        for (int index = (int)desc.rank - 1; index >= 0; --index) {
+            if (!desc.shape[index] || desc.strides[index] != stride ||
+                elements > UINT64_MAX / desc.shape[index] ||
+                stride > UINT64_MAX / desc.shape[index]) return false;
+            elements *= desc.shape[index];
+            stride *= desc.shape[index];
+        }
+        if (elements > UINT64_MAX / bytes_per_element) return false;
+        uint64_t expected = desc.dtype == TENSOR_INT4 ? elements / 2 + elements % 2 : elements * bytes_per_element;
+        if (desc.byte_len != expected) return false;
+    }
+    return true;
+}
+
+static bool dense_f32_view(const TensorView *view, uint32_t rank,
+                           uint64_t dim0, uint64_t dim1 = 0) {
+    return valid_tensor_view(view) && view->descriptor.dtype == TENSOR_F32 &&
+           view->descriptor.layout == TENSOR_ROW_MAJOR &&
+           view->descriptor.quant.scheme == QUANT_NONE &&
+           view->descriptor.rank == rank &&
+           view->descriptor.shape[0] == dim0 &&
+           (rank == 1 || view->descriptor.shape[1] == dim1);
+}
+
+static const float *dense_f32_data(const ResidentTensor &tensor) {
+    return static_cast<const float *>(tensor.address);
+}
+
+static bool resident_dense_f32(const ResidentTensor &tensor) {
+    return tensor.address && tensor.descriptor.residency == TENSOR_DEVICE &&
+           tensor.descriptor.dtype == TENSOR_F32 &&
+           tensor.descriptor.layout == TENSOR_ROW_MAJOR &&
+           tensor.descriptor.quant.scheme == QUANT_NONE;
+}
+
 extern "C" {
+
+int blackwell_tensor_upload(const TensorView *host, ResidentTensor *device,
+                            cudaStream_t stream) {
+    if (!device || !valid_tensor_view(host)) return -1;
+    *device = {};
+    device->descriptor = host->descriptor;
+    device->descriptor.residency = TENSOR_DEVICE;
+    device->descriptor.quant.scales = nullptr;
+    device->descriptor.quant.zero_points = nullptr;
+    if (cudaMalloc(&device->address, (size_t)host->descriptor.byte_len) != cudaSuccess) return -2;
+    if (cudaMemcpyAsync(device->address, host->address, (size_t)host->descriptor.byte_len,
+                        cudaMemcpyHostToDevice, stream) != cudaSuccess) goto failed;
+    if (host->descriptor.quant.scale_count) {
+        void *scales = nullptr;
+        size_t bytes = (size_t)host->descriptor.quant.scale_count * sizeof(float);
+        if (cudaMalloc(&scales, bytes) != cudaSuccess) goto failed;
+        device->descriptor.quant.scales = static_cast<const float *>(scales);
+        if (cudaMemcpyAsync(scales, host->descriptor.quant.scales, bytes,
+                            cudaMemcpyHostToDevice, stream) != cudaSuccess) goto failed;
+    }
+    if (host->descriptor.quant.zero_point_count) {
+        void *zero_points = nullptr;
+        size_t bytes = (size_t)host->descriptor.quant.zero_point_count * sizeof(int32_t);
+        if (cudaMalloc(&zero_points, bytes) != cudaSuccess) goto failed;
+        device->descriptor.quant.zero_points = static_cast<const int32_t *>(zero_points);
+        if (cudaMemcpyAsync(zero_points, host->descriptor.quant.zero_points, bytes,
+                            cudaMemcpyHostToDevice, stream) != cudaSuccess) goto failed;
+    }
+    // Host views may reference temporary fused buffers. Finish transfer before return.
+    if (cudaStreamSynchronize(stream) != cudaSuccess) goto failed;
+    return 0;
+failed:
+    blackwell_tensor_free(device);
+    return -3;
+}
+
+void blackwell_tensor_free(ResidentTensor *device) {
+    if (!device) return;
+    if (device->address) cudaFree(device->address);
+    if (device->descriptor.quant.scales) cudaFree((void *)device->descriptor.quant.scales);
+    if (device->descriptor.quant.zero_points) cudaFree((void *)device->descriptor.quant.zero_points);
+    *device = {};
+}
 
 int blackwell_execute_layer(
     int layer_idx,
@@ -594,6 +703,12 @@ int blackwell_execute_layer(
 ) {
     int M = plan->num_tokens;
     if (M <= 0) return 0;
+    if (!resident_dense_f32(weights->d_norm1) ||
+        !resident_dense_f32(weights->d_w_qkv) ||
+        !resident_dense_f32(weights->d_w_o) ||
+        !resident_dense_f32(weights->d_norm2) ||
+        !resident_dense_f32(weights->d_w_gate_up) ||
+        !resident_dense_f32(weights->d_w_down)) return -2;
 
     float *d_x_in = is_ping ? workspace->d_x_b : workspace->d_x_a;
     float *d_x_out = is_ping ? workspace->d_x_a : workspace->d_x_b;
@@ -605,14 +720,14 @@ int blackwell_execute_layer(
 
     // 1. RMSNorm on x_in -> x_norm
     rmsnorm_batch_kernel<<<M, 256, 0, stream>>>(
-        d_x_in, weights->d_norm1, workspace->d_x_norm, M, hidden_dim, eps
+        d_x_in, dense_f32_data(weights->d_norm1), workspace->d_x_norm, M, hidden_dim, eps
     );
 
     // 2. Fused QKV GEMM -> qkv
     float alpha = 1.0f, beta = 0.0f;
     cublasSgemm(cublas_handle, CUBLAS_OP_T, CUBLAS_OP_N,
                 qkv_dim, M, hidden_dim,
-                &alpha, weights->d_w_qkv, hidden_dim,
+                &alpha, dense_f32_data(weights->d_w_qkv), hidden_dim,
                 workspace->d_x_norm, hidden_dim,
                 &beta, workspace->d_qkv, qkv_dim);
 
@@ -649,7 +764,7 @@ int blackwell_execute_layer(
     // 5. O Projection GEMM -> attn_proj
     cublasSgemm(cublas_handle, CUBLAS_OP_T, CUBLAS_OP_N,
                 hidden_dim, M, q_dim,
-                &alpha, weights->d_w_o, q_dim,
+                &alpha, dense_f32_data(weights->d_w_o), q_dim,
                 workspace->d_attn_out, q_dim,
                 &beta, workspace->d_attn_proj, hidden_dim);
 
@@ -661,13 +776,13 @@ int blackwell_execute_layer(
 
     // 7. Post-Attention RMSNorm -> post_norm
     rmsnorm_batch_kernel<<<M, 256, 0, stream>>>(
-        workspace->d_x_norm, weights->d_norm2, workspace->d_post_norm, M, hidden_dim, eps
+        workspace->d_x_norm, dense_f32_data(weights->d_norm2), workspace->d_post_norm, M, hidden_dim, eps
     );
 
     // 8. Fused Gate/Up GEMM -> gate_up
     cublasSgemm(cublas_handle, CUBLAS_OP_T, CUBLAS_OP_N,
                 2 * intermediate_dim, M, hidden_dim,
-                &alpha, weights->d_w_gate_up, hidden_dim,
+                &alpha, dense_f32_data(weights->d_w_gate_up), hidden_dim,
                 workspace->d_post_norm, hidden_dim,
                 &beta, workspace->d_gate_up, 2 * intermediate_dim);
 
@@ -680,7 +795,7 @@ int blackwell_execute_layer(
     // 10. Down Projection GEMM -> mlp_out
     cublasSgemm(cublas_handle, CUBLAS_OP_T, CUBLAS_OP_N,
                 hidden_dim, M, intermediate_dim,
-                &alpha, weights->d_w_down, intermediate_dim,
+                &alpha, dense_f32_data(weights->d_w_down), intermediate_dim,
                 workspace->d_act, intermediate_dim,
                 &beta, workspace->d_mlp_out, hidden_dim);
 
@@ -705,14 +820,17 @@ int blackwell_execute_step(
     int M = plan->num_tokens;
     if (M <= 0) return 0;
     int R = plan->terminal_count;
+    if (!resident_dense_f32(model->d_embed_tokens) ||
+        !resident_dense_f32(model->d_final_norm) ||
+        !resident_dense_f32(model->d_lm_head)) return -2;
 
     // Async upload of input embeddings or tokens to persistent GPU workspace
-    if (plan->h_input_tokens != NULL && model->d_embed_tokens != NULL) {
+    if (plan->h_input_tokens != NULL && model->d_embed_tokens.address != NULL) {
         cudaMemcpyAsync(workspace->d_tokens, plan->h_input_tokens,
                         (size_t)M * sizeof(uint32_t),
                         cudaMemcpyHostToDevice, stream);
         embedding_lookup_kernel<<<M, 256, 0, stream>>>(
-            workspace->d_tokens, model->d_embed_tokens, workspace->d_x_a,
+            workspace->d_tokens, dense_f32_data(model->d_embed_tokens), workspace->d_x_a,
             M, model->hidden_dim, model->vocab_size
         );
     } else if (plan->h_input_embeddings != NULL) {
@@ -754,13 +872,14 @@ int blackwell_execute_step(
 
     // Execute all layers sequentially on stream without synchronizing
     for (int l = 0; l < model->num_layers; l++) {
-        blackwell_execute_layer(
+        int layer_status = blackwell_execute_layer(
             l, &model->layers[l], plan, workspace, kv_pool, layout,
             stream, cublas_handle, l % 2,
             model->hidden_dim, model->num_q_heads, model->num_kv_heads,
             model->head_dim, model->intermediate_dim,
             model->rms_norm_eps, model->rope_theta
         );
+        if (layer_status != 0) return layer_status;
     }
 
     float *d_x_final = (model->num_layers % 2 == 1) ? workspace->d_x_b : workspace->d_x_a;
@@ -772,14 +891,14 @@ int blackwell_execute_step(
 
     // Final RMSNorm on terminal rows
     rmsnorm_batch_kernel<<<R, 256, 0, stream>>>(
-        workspace->d_term_x, model->d_final_norm, workspace->d_x_norm, R, model->hidden_dim, model->rms_norm_eps
+        workspace->d_term_x, dense_f32_data(model->d_final_norm), workspace->d_x_norm, R, model->hidden_dim, model->rms_norm_eps
     );
 
     // LM Head GEMM -> logits [R, vocab_size]
     float alpha = 1.0f, beta = 0.0f;
     cublasSgemm(cublas_handle, CUBLAS_OP_T, CUBLAS_OP_N,
                 model->vocab_size, R, model->hidden_dim,
-                &alpha, model->d_lm_head, model->hidden_dim,
+                &alpha, dense_f32_data(model->d_lm_head), model->hidden_dim,
                 workspace->d_x_norm, model->hidden_dim,
                 &beta, workspace->d_logits, model->vocab_size);
 
@@ -870,52 +989,53 @@ void blackwell_workspace_free(BlackwellWorkspaceC *ws) {
 }
 
 BlackwellResidentLayerWeights* blackwell_layer_weights_create(
-    const float *h_norm1,
-    const float *h_w_qkv,
-    const float *h_w_o,
-    const float *h_norm2,
-    const float *h_w_gate_up,
-    const float *h_w_down,
+    const TensorView *h_norm1,
+    const TensorView *h_w_qkv,
+    const TensorView *h_w_o,
+    const TensorView *h_norm2,
+    const TensorView *h_w_gate_up,
+    const TensorView *h_w_down,
     int hidden_dim,
     int q_dim,
     int kv_dim,
     int intermediate_dim,
     cudaStream_t stream
 ) {
+    int qkv_dim = q_dim + 2 * kv_dim;
+    if (!dense_f32_view(h_norm1, 1, hidden_dim) ||
+        !dense_f32_view(h_w_qkv, 2, qkv_dim, hidden_dim) ||
+        !dense_f32_view(h_w_o, 2, hidden_dim, q_dim) ||
+        !dense_f32_view(h_norm2, 1, hidden_dim) ||
+        !dense_f32_view(h_w_gate_up, 2, 2 * intermediate_dim, hidden_dim) ||
+        !dense_f32_view(h_w_down, 2, hidden_dim, intermediate_dim)) return NULL;
     BlackwellResidentLayerWeights *lw = (BlackwellResidentLayerWeights*)calloc(1, sizeof(BlackwellResidentLayerWeights));
     if (!lw) return NULL;
-
-    int qkv_dim = q_dim + 2 * kv_dim;
-
-    cudaMalloc((void**)&lw->d_norm1, (size_t)hidden_dim * sizeof(float));
-    cudaMemcpyAsync(lw->d_norm1, h_norm1, (size_t)hidden_dim * sizeof(float), cudaMemcpyHostToDevice, stream);
-
-    cudaMalloc((void**)&lw->d_w_qkv, (size_t)qkv_dim * hidden_dim * sizeof(float));
-    cudaMemcpyAsync(lw->d_w_qkv, h_w_qkv, (size_t)qkv_dim * hidden_dim * sizeof(float), cudaMemcpyHostToDevice, stream);
-
-    cudaMalloc((void**)&lw->d_w_o, (size_t)hidden_dim * q_dim * sizeof(float));
-    cudaMemcpyAsync(lw->d_w_o, h_w_o, (size_t)hidden_dim * q_dim * sizeof(float), cudaMemcpyHostToDevice, stream);
-
-    cudaMalloc((void**)&lw->d_norm2, (size_t)hidden_dim * sizeof(float));
-    cudaMemcpyAsync(lw->d_norm2, h_norm2, (size_t)hidden_dim * sizeof(float), cudaMemcpyHostToDevice, stream);
-
-    cudaMalloc((void**)&lw->d_w_gate_up, (size_t)2 * intermediate_dim * hidden_dim * sizeof(float));
-    cudaMemcpyAsync(lw->d_w_gate_up, h_w_gate_up, (size_t)2 * intermediate_dim * hidden_dim * sizeof(float), cudaMemcpyHostToDevice, stream);
-
-    cudaMalloc((void**)&lw->d_w_down, (size_t)hidden_dim * intermediate_dim * sizeof(float));
-    cudaMemcpyAsync(lw->d_w_down, h_w_down, (size_t)hidden_dim * intermediate_dim * sizeof(float), cudaMemcpyHostToDevice, stream);
-
+    if (blackwell_tensor_upload(h_norm1, &lw->d_norm1, stream) != 0 ||
+        blackwell_tensor_upload(h_w_qkv, &lw->d_w_qkv, stream) != 0 ||
+        blackwell_tensor_upload(h_w_o, &lw->d_w_o, stream) != 0 ||
+        blackwell_tensor_upload(h_norm2, &lw->d_norm2, stream) != 0 ||
+        blackwell_tensor_upload(h_w_gate_up, &lw->d_w_gate_up, stream) != 0 ||
+        blackwell_tensor_upload(h_w_down, &lw->d_w_down, stream) != 0) {
+        blackwell_tensor_free(&lw->d_norm1);
+        blackwell_tensor_free(&lw->d_w_qkv);
+        blackwell_tensor_free(&lw->d_w_o);
+        blackwell_tensor_free(&lw->d_norm2);
+        blackwell_tensor_free(&lw->d_w_gate_up);
+        blackwell_tensor_free(&lw->d_w_down);
+        free(lw);
+        return NULL;
+    }
     return lw;
 }
 
 void blackwell_layer_weights_free(BlackwellResidentLayerWeights *lw) {
     if (!lw) return;
-    if (lw->d_norm1) cudaFree(lw->d_norm1);
-    if (lw->d_w_qkv) cudaFree(lw->d_w_qkv);
-    if (lw->d_w_o) cudaFree(lw->d_w_o);
-    if (lw->d_norm2) cudaFree(lw->d_norm2);
-    if (lw->d_w_gate_up) cudaFree(lw->d_w_gate_up);
-    if (lw->d_w_down) cudaFree(lw->d_w_down);
+    blackwell_tensor_free(&lw->d_norm1);
+    blackwell_tensor_free(&lw->d_w_qkv);
+    blackwell_tensor_free(&lw->d_w_o);
+    blackwell_tensor_free(&lw->d_norm2);
+    blackwell_tensor_free(&lw->d_w_gate_up);
+    blackwell_tensor_free(&lw->d_w_down);
     free(lw);
 }
 
@@ -929,11 +1049,14 @@ BlackwellResidentModelWeights* blackwell_model_weights_create(
     int vocab_size,
     float rms_norm_eps,
     float rope_theta,
-    const float *h_embed_tokens,
-    const float *h_final_norm,
-    const float *h_lm_head,
+    const TensorView *h_embed_tokens,
+    const TensorView *h_final_norm,
+    const TensorView *h_lm_head,
     cudaStream_t stream
 ) {
+    if (!dense_f32_view(h_embed_tokens, 2, vocab_size, hidden_dim) ||
+        !dense_f32_view(h_final_norm, 1, hidden_dim) ||
+        !dense_f32_view(h_lm_head, 2, vocab_size, hidden_dim)) return NULL;
     BlackwellResidentModelWeights *mw = (BlackwellResidentModelWeights*)calloc(1, sizeof(BlackwellResidentModelWeights));
     if (!mw) return NULL;
 
@@ -948,16 +1071,17 @@ BlackwellResidentModelWeights* blackwell_model_weights_create(
     mw->rope_theta = rope_theta;
 
     mw->layers = (BlackwellResidentLayerWeights*)calloc(num_layers, sizeof(BlackwellResidentLayerWeights));
-
-    cudaMalloc((void**)&mw->d_embed_tokens, (size_t)vocab_size * hidden_dim * sizeof(float));
-    cudaMemcpyAsync(mw->d_embed_tokens, h_embed_tokens, (size_t)vocab_size * hidden_dim * sizeof(float), cudaMemcpyHostToDevice, stream);
-
-    cudaMalloc((void**)&mw->d_final_norm, (size_t)hidden_dim * sizeof(float));
-    cudaMemcpyAsync(mw->d_final_norm, h_final_norm, (size_t)hidden_dim * sizeof(float), cudaMemcpyHostToDevice, stream);
-
-    cudaMalloc((void**)&mw->d_lm_head, (size_t)vocab_size * hidden_dim * sizeof(float));
-    cudaMemcpyAsync(mw->d_lm_head, h_lm_head, (size_t)vocab_size * hidden_dim * sizeof(float), cudaMemcpyHostToDevice, stream);
-
+    if (!mw->layers ||
+        blackwell_tensor_upload(h_embed_tokens, &mw->d_embed_tokens, stream) != 0 ||
+        blackwell_tensor_upload(h_final_norm, &mw->d_final_norm, stream) != 0 ||
+        blackwell_tensor_upload(h_lm_head, &mw->d_lm_head, stream) != 0) {
+        blackwell_tensor_free(&mw->d_embed_tokens);
+        blackwell_tensor_free(&mw->d_final_norm);
+        blackwell_tensor_free(&mw->d_lm_head);
+        free(mw->layers);
+        free(mw);
+        return NULL;
+    }
     return mw;
 }
 
@@ -968,6 +1092,7 @@ void blackwell_model_weights_set_layer(
 ) {
     if (mw && lw && layer_idx >= 0 && layer_idx < mw->num_layers) {
         mw->layers[layer_idx] = *lw;
+        free((void *)lw);
     }
 }
 
@@ -975,18 +1100,18 @@ void blackwell_model_weights_free(BlackwellResidentModelWeights *mw) {
     if (!mw) return;
     if (mw->layers) {
         for (int i = 0; i < mw->num_layers; i++) {
-            if (mw->layers[i].d_norm1) cudaFree(mw->layers[i].d_norm1);
-            if (mw->layers[i].d_w_qkv) cudaFree(mw->layers[i].d_w_qkv);
-            if (mw->layers[i].d_w_o) cudaFree(mw->layers[i].d_w_o);
-            if (mw->layers[i].d_norm2) cudaFree(mw->layers[i].d_norm2);
-            if (mw->layers[i].d_w_gate_up) cudaFree(mw->layers[i].d_w_gate_up);
-            if (mw->layers[i].d_w_down) cudaFree(mw->layers[i].d_w_down);
+            blackwell_tensor_free(&mw->layers[i].d_norm1);
+            blackwell_tensor_free(&mw->layers[i].d_w_qkv);
+            blackwell_tensor_free(&mw->layers[i].d_w_o);
+            blackwell_tensor_free(&mw->layers[i].d_norm2);
+            blackwell_tensor_free(&mw->layers[i].d_w_gate_up);
+            blackwell_tensor_free(&mw->layers[i].d_w_down);
         }
         free(mw->layers);
     }
-    if (mw->d_embed_tokens) cudaFree(mw->d_embed_tokens);
-    if (mw->d_final_norm) cudaFree(mw->d_final_norm);
-    if (mw->d_lm_head) cudaFree(mw->d_lm_head);
+    blackwell_tensor_free(&mw->d_embed_tokens);
+    blackwell_tensor_free(&mw->d_final_norm);
+    blackwell_tensor_free(&mw->d_lm_head);
     free(mw);
 }
 

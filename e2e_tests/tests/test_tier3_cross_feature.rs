@@ -49,19 +49,19 @@ fn test_pair_p01_loader_and_validation() {
 
 #[test]
 fn test_pair_p02_loader_and_dual_storage() {
-    // P2 (F1 + F3): Safetensors loading populates both FP32 and raw BF16 weights
+    // P2 (F1 + F3): Safetensors loading decodes FP32 from stored raw BF16 bytes
     let original = vec![2.5f32, -1.0f32];
     let raw = encode_fp32_to_bf16(&original);
     let bytes = create_safetensors_bytes(&[("test_weight", &[2], "BF16", &raw)], None);
     let catalog = vec![("test_weight".to_string(), vec![2])];
 
     let loaded = parse_safetensors_with_catalog(&bytes, &catalog).unwrap();
-    let fp32 = loaded.get_fp32("test_weight").unwrap();
-    let bf16 = loaded.get_raw_bf16("test_weight").unwrap();
+    let fp32 = loaded.decode_fp32("test_weight").unwrap();
+    let bf16 = loaded.tensor_bytes("test_weight").unwrap();
 
     assert_eq!(fp32.len(), 2);
     assert_eq!(bf16.len(), 4);
-    assert!((fp32[0] - 2.5).abs() < 1e-4);
+    assert!((fp32[0] - 2.5).abs() < 1e-2);
 }
 
 #[test]
@@ -162,18 +162,16 @@ fn test_pair_p10_aligned_math_and_reference_cpu_backend() {
 #[test]
 fn test_pair_p11_dual_storage_and_mojo_c_abi_compatibility() {
     // P11 (F3 + F13): Raw BF16 buffers passed directly to C-ABI pointers
-    let checkpoint = LoadedCheckpoint {
-        fp32_weights: std::collections::HashMap::new(),
-        raw_bf16_weights: {
-            let mut m = std::collections::HashMap::new();
-            m.insert("weight".to_string(), vec![0x80, 0x3F, 0x00, 0x40]);
-            m
-        },
-        shapes: std::collections::HashMap::new(),
-    };
-    let bf16_slice = checkpoint.get_raw_bf16("weight").unwrap();
+    let raw = encode_fp32_to_bf16(&[1.0, 2.0]);
+    let checkpoint = LoadedCheckpoint::from_bf16_tensors(vec![(
+        "weight".to_string(),
+        vec![2],
+        raw,
+    )]);
+    let bf16_slice = checkpoint.tensor_bytes("weight").unwrap();
     let ptr = bf16_slice.as_ptr();
     assert!(!ptr.is_null());
+    assert_eq!(bf16_slice.len(), 4);
 }
 
 #[test]

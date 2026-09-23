@@ -7,6 +7,7 @@ fn main() {
     println!("cargo:rerun-if-changed=cuda/blackwell_gemm.cu");
     println!("cargo:rerun-if-changed=cuda/paged_attention_bf16.cu");
     println!("cargo:rerun-if-changed=cuda/blackwell_layer.cu");
+    println!("cargo:rerun-if-changed=cuda/tensor_abi.h");
     println!("cargo:rerun-if-changed=build.rs");
 
     let nvcc = PathBuf::from("/usr/local/cuda/bin/nvcc");

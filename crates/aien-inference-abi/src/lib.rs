@@ -11,9 +11,11 @@ pub mod backend;
 pub mod blackwell_backend;
 pub mod blackwell_batch;
 pub mod blackwell_batch_executor;
+pub mod capsule;
 pub mod checkpoint;
 pub mod mojo_backend;
 pub mod tensor;
+pub mod tensor_abi;
 pub mod tokenizer;
 pub mod transformer_backend;
 pub mod weights;
@@ -26,9 +28,11 @@ pub use blackwell_batch_executor::{
     BlackwellBatchExecutor, BlackwellResidentLayerWeights, BlackwellResidentModel,
     BlackwellResidentModelWeights, BlackwellWorkspace, BlackwellWorkspaceC,
 };
+pub use capsule::*;
 pub use checkpoint::*;
 pub use mojo_backend::*;
 pub use tensor::*;
+pub use tensor_abi::*;
 pub use tokenizer::*;
 pub use transformer_backend::*;
 pub use weights::*;
