@@ -1,4 +1,4 @@
-use aien_inference_protocol::{InferenceEvent, InferenceRequest, InferenceService};
+use aien_inference_service::{InferenceEvent, InferenceRequest, InferenceService};
 use aien_inference_runtime::EmbeddedInferenceService;
 
 #[tokio::test]

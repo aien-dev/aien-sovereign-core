@@ -1,5 +1,5 @@
 use super::model::EmbeddedModel;
-use aien_inference_protocol::{InferenceEvent, InferenceRequest, InferenceService};
+use aien_inference_service::{InferenceEvent, InferenceRequest, InferenceService};
 use async_trait::async_trait;
 use parking_lot::Mutex;
 use std::sync::Arc;

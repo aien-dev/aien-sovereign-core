@@ -873,18 +873,18 @@ fn test_t2_f62_git_log_zero_em_or_en_dashes() {
 }
 
 #[test]
-fn test_t2_f63_git_license_contains_anti_enclosure_covenants() {
-    let license_path = workspace_root().join("LICENSE");
-    let content = fs::read_to_string(license_path).expect("read LICENSE");
-    assert!(content.contains("Swarm Covenant"));
-    assert!(content.contains("One Team Covenant"));
+fn test_t2_f63_git_covenant_is_nonbinding_values_statement() {
+    let covenant_path = workspace_root().join("COVENANT.md");
+    let content = fs::read_to_string(covenant_path).expect("read COVENANT");
+    assert!(content.contains("Keep foundational advances open"));
+    assert!(content.contains("grants no legal rights"));
 }
 
 #[test]
-fn test_t2_f64_git_readme_contains_srcl_badge() {
+fn test_t2_f64_git_readme_contains_apache_badge() {
     let readme_path = workspace_root().join("README.md");
     let content = fs::read_to_string(readme_path).expect("read README");
-    assert!(content.contains("SRCL--1.0") || content.contains("SRCL-1.0"));
+    assert!(content.contains("Apache--2.0") || content.contains("Apache-2.0"));
 }
 
 #[test]

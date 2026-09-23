@@ -56,7 +56,7 @@ The runtime includes dynamic silicon probing via `ExecutionSurface::detect()`:
 
 - Pure Mojo LLaMA execution kernels are authored by Audrey (`a730/MojoLlama`).
 - Neural graph execution utilizes Modular MAX.
-- All repositories are published under the Sovereign Resource Commons License 1.0 (SRCL-1.0).
+- This release is published under the Apache License, Version 2.0 (with LLVM Exception).
 - Detailed provenance documentation resides in `docs/PROVENANCE.md`.
 
 ---

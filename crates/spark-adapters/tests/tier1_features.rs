@@ -1040,8 +1040,9 @@ fn test_t1_f64_git_commit_messages_unslop_compliant() {
 }
 
 #[test]
-fn test_t1_f65_git_license_file_declares_srcl() {
+fn test_t1_f65_git_license_file_declares_apache() {
     let license_path = workspace_root().join("LICENSE");
     let content = fs::read_to_string(license_path).expect("read LICENSE");
-    assert!(content.contains("SRCL-1.0"));
+    assert!(content.contains("Apache License, Version 2.0"));
+    assert!(!content.contains("SRCL-1.0"));
 }
