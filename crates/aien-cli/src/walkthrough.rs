@@ -335,9 +335,9 @@ graph TD
 - [x] **Phase 10: Mathematical Verification Oracles & Marketing Voice Elimination**
   - Replaced corrupted quadratic approximations with exact Shannon entropy (-p * ln(p)) in Mojo SIMD and Rust fallback.
   - Built standalone Python verification oracle (`verify_simd_math.py`) generating verified analytical fixtures.
-  - Scrubbed promotional marketing language across all active repositories (`openclaw-rs`, `spark-inquisitor`, `crumb-spec`, `spark-crumbs-publish`, `org-profile`, `aien-dev`).
+  - Scrubbed promotional marketing language across all active repositories (`aegis-runtime`, `spark-inquisitor`, `crumb-spec`, `spark-crumbs-publish`, `org-profile`, `aien-dev`).
   - Completed autonomous PR lifecycles with public branches, verification proof, and squash merges.
-  - Verified 143/143 tests in `spark-rsi`, 49/49 tests in `aien-inference-abi`, 52/52 tests in `openclaw-rs`, and 22/22 tests in `aien-cli`.
+  - Verified 143/143 tests in `spark-rsi`, 49/49 tests in `aien-inference-abi`, 52/52 tests in `aegis-runtime`, and 22/22 tests in `aien-cli`.
 
 ---
 

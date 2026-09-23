@@ -18,7 +18,7 @@ Standard: Brutally Factual Systems Audit. Zero Marketing Language.
 
 | Component | Status | Maturity Level | Verification Evidence | Known Limitations |
 | :--- | :--- | :--- | :--- | :--- |
-| **openclaw-rs** | Active | **Integrated** | Sub-millisecond heartbeat, 4.79 MB RSS, Axum HTTP routes active | Single-node gateway; cluster gossip specified in `docs/MULTI_STATION_ARCHITECTURE.md`. |
+| **aegis-runtime** | Active | **Integrated** | Sub-millisecond heartbeat, 4.79 MB RSS, Axum HTTP routes active | Single-node gateway; cluster gossip specified in `docs/MULTI_STATION_ARCHITECTURE.md`. |
 | **cortex-rs** | Active | **Benchmarked** | 21,262 req/s, 0.45 ms p50 latency, 10.67 MB RSS, SQLite WAL persistence tests | Schema migrations currently manual. |
 | **spark-cockpit-rs** | Active | **Benchmarked** | 4,421 req/s, 1.74 ms p50 latency, 10.05 MB RSS | Terminal UI requires ANSI 256-color support. |
 | **cortex-encoder-rs** | Active | **Working Locally** | 37,214 health req/s, ONNX BGE-M3 runtime loads on CUDA | Heavy cold-start initialization latency (~1.2s). |

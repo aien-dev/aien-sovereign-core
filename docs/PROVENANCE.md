@@ -35,7 +35,7 @@ The following systems are original architectures authored and maintained within 
    - aien-scheduler: Token-budgeted continuous batching scheduler with chunked prefill segmentation and watermark-based memory pressure preemption.
    - spark-max-cabi and spark-max-rs: Zero-copy FFI bridge between native Rust orchestrators and compiled Mojo C-ABI dynamic libraries (libspark_max.so).
    - cortex-rs: Canonical memory store with SQLite WAL persistence, entity-relationship graphs, and sub-microsecond prefix indexing.
-   - openclaw-rs: Compiled Rust sovereign control gateway, heartbeat daemon, and event multiplexer.
+   - aegis-runtime: Compiled Rust sovereign control gateway, heartbeat daemon, and event multiplexer.
    - spark-cockpit-rs: Real-time high-frequency hardware monitor, thermal sensor aggregator, and terminal UI.
    - cortex-encoder-rs: Native ONNX Runtime microservice for BGE-M3 text embeddings.
    - atlas-vault: Hardware TPM-bound secret resolution layer, enforcing zero plaintext credentials on disk.

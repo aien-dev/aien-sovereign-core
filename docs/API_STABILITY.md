@@ -33,7 +33,7 @@ Tier 1 interfaces define the core interoperability contracts of the ecosystem. E
    - JSON payload contracts: `WritePayload`, `EntityWriteInput`, `ClaimWriteInput`, `CortexReceipt`.
 3. **Telemetry & Watchdog Gateways**:
    - `spark-cockpit-rs`: `GET /api/pulse`, `GET /health`.
-   - `openclaw-rs`: WebSocket gateway packet frames and auth handshake.
+   - `aegis-runtime`: WebSocket gateway packet frames and auth handshake.
 4. **Command Line Interfaces**:
    - `aien`: `--version`, `status`, `eval`.
    - `atlas-vault`: `add`, `get`, `list`, `purge`.

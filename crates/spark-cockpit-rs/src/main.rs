@@ -1500,11 +1500,11 @@ fn get_services_snapshot() -> Vec<ServiceStatusInfo> {
             Box::new(|p: &ProcessInfo| p.cmdline.contains("cortex-encoder-rs")),
         ),
         (
-            "openclaw",
-            "OpenClaw Native Daemon",
+            "aegis",
+            "AEGIS Native Daemon",
             None,
             Box::new(|p: &ProcessInfo| {
-                p.cmdline.contains("openclaw") && !p.cmdline.contains("cortex")
+                p.cmdline.contains("aegis") && !p.cmdline.contains("cortex")
             }),
         ),
         (
@@ -1629,17 +1629,17 @@ async fn handle_services_action(
                 )),
             }
         }
-        "openclaw" => {
+        "aegis" => {
             let res = Command::new("systemctl")
-                .args(["--user", &action, "openclaw-heartbeat"])
+                .args(["--user", &action, "aegis-heartbeat"])
                 .output()
                 .await;
             match res {
                 Ok(out) if out.status.success() => Ok(Json(json!({
                     "status": "ok",
-                    "service": "openclaw",
+                    "service": "aegis",
                     "action": action,
-                    "message": format!("openclaw-heartbeat.service {} executed", action)
+                    "message": format!("aegis-heartbeat.service {} executed", action)
                 }))),
                 Ok(out) => Err((
                     StatusCode::INTERNAL_SERVER_ERROR,
@@ -3672,7 +3672,7 @@ mod tests {
         assert!(ids.contains(&"max-server"));
         assert!(ids.contains(&"cortex-rs"));
         assert!(ids.contains(&"cortex-encoder"));
-        assert!(ids.contains(&"openclaw"));
+        assert!(ids.contains(&"aegis"));
         assert!(ids.contains(&"spark-rsi"));
     }
 

@@ -86,7 +86,7 @@ We resolve concrete regressions directly. Thank you for holding the line on qual
             || combined.contains("stack trace")
             || combined.contains("thread 'main' panicked")
             || combined.contains("cargo run")
-            || combined.contains("openclaw ");
+            || combined.contains("aegis ");
 
         if has_repro {
             let labels = vec!["bug".to_string(), "triaged".to_string()];

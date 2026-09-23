@@ -241,4 +241,4 @@ Benchmark harness: `target/release/stress_aien_live` executing against live prod
 | cortex-rs | 15.97 MB | 18.57 MB | +2.60 MB | Confirmed leak-free |
 | cortex-encoder-rs | 780.02 MB | 780.39 MB | +0.36 MB | Confirmed leak-free |
 | max inference engine | 9,011.61 MB | 9,013.99 MB | +2.38 MB | Confirmed leak-free |
-| openclaw daemon | 4.80 MB | 4.80 MB | +0.00 MB | Zero drift |
+| aegis daemon | 4.80 MB | 4.80 MB | +0.00 MB | Zero drift |
