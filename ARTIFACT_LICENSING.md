@@ -34,4 +34,4 @@ To maintain technical and legal precision:
 
 ## Downstream Implementation Autonomy
 
-Enterprise applications, cloud deployments, proprietary software systems, and commercial SaaS providers may compile, link, embed, and monetize AIEN software components under standard Apache 2.0 terms without obligation to release independent application source code or independent neural network weights.
+Enterprise applications, cloud deployments, proprietary software systems, and commercial SaaS providers may compile, link, embed, and monetize AIEN software components under Apache-2.0 WITH LLVM-exception terms without obligation to release independent application source code or independent neural network weights.
