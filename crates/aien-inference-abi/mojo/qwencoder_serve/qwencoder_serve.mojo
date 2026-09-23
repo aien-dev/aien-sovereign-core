@@ -434,8 +434,9 @@ def qwencoder_moe_forward(model: ModelPtr, layer: Int32, x: BF16Ptr, output: BF1
 def qwencoder_fp8_gemv(
     model: ModelPtr, layer: Int32, slot: Int32, vec: F32Ptr, output: F32Ptr
 ) abi("C") -> Int32:
-    """One FP8 projection on persistent staging (o-proj: [2048,4096])."""
-    if layer < 0 or Int(layer) >= LAYERS or slot < 0 or Int(slot) >= PROJ_SLOTS:
+    """O-proj only: [2048,4096] FP8 on persistent staging. The launch shape is
+    fixed, so any other slot would read past a smaller host vector."""
+    if layer < 0 or Int(layer) >= LAYERS or Int(slot) != PROJ_SLOTS - 1:
         return STATUS_BAD_STATE
     try:
         ref m = model[]

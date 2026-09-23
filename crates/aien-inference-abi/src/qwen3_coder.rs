@@ -126,7 +126,7 @@ fn decode_fp8_block128(weights: &[u8], scales_inv: &[u16], rows: usize, cols: us
     assert_eq!(cols % FP8_BLOCK, 0, "cols must split into 128-wide blocks");
     assert_eq!(
         scales_inv.len(),
-        (rows / FP8_BLOCK) * k_blocks,
+        rows.div_ceil(FP8_BLOCK) * k_blocks,
         "scale grid must match 128x128 blocks"
     );
     let mut out = vec![0.0f32; rows * cols];
@@ -146,14 +146,21 @@ fn decode_fp8_block128(weights: &[u8], scales_inv: &[u16], rows: usize, cols: us
     out
 }
 
-fn decode_bf16(bytes: &[u8]) -> Vec<f32> {
+/// Reinterprets a BF16 payload as u16 words. Panics on odd length or
+/// misalignment rather than silently dropping bytes and shifting every word.
+pub(crate) fn bf16_words(bytes: &[u8]) -> &[u16] {
     assert_eq!(bytes.len() % 2, 0, "bf16 payload must be even length");
+    // SAFETY: u16 has no invalid bit patterns; prefix/suffix are checked empty.
     let (prefix, words, suffix) = unsafe { bytes.align_to::<u16>() };
     assert!(
         prefix.is_empty() && suffix.is_empty(),
         "bf16 payload misaligned"
     );
-    words.iter().map(|&b| bf16_to_f32(b)).collect()
+    words
+}
+
+fn decode_bf16(bytes: &[u8]) -> Vec<f32> {
+    bf16_words(bytes).iter().map(|&b| bf16_to_f32(b)).collect()
 }
 
 pub(crate) struct CoderShardCache {
@@ -225,8 +232,12 @@ impl CoderShardCache {
             &[rows / FP8_BLOCK, cols / FP8_BLOCK],
             2,
         )?;
-        let (_, scale_words, _) = unsafe { scales.align_to::<u16>() };
-        Ok(decode_fp8_block128(&weights, scale_words, rows, cols))
+        Ok(decode_fp8_block128(
+            &weights,
+            bf16_words(&scales),
+            rows,
+            cols,
+        ))
     }
 }
 
@@ -448,6 +459,38 @@ mod tests {
     use super::*;
     use crate::qwen3_moe::{dequant_matvec, QWEN3_A3B_INTERMEDIATE};
 
+    /// 2-aligned storage so the misalignment tests control the offset exactly.
+    fn aligned_bytes(words: &[u16]) -> Vec<u16> {
+        words.to_vec()
+    }
+
+    #[test]
+    fn bf16_words_reads_aligned_payload() {
+        let backing = aligned_bytes(&[0x3f80, 0x4000]);
+        // SAFETY: u16 storage viewed as bytes; lifetime tied to `backing`.
+        let bytes = unsafe { std::slice::from_raw_parts(backing.as_ptr() as *const u8, 4) };
+        assert_eq!(bf16_words(bytes), &[0x3f80, 0x4000]);
+    }
+
+    #[test]
+    #[should_panic(expected = "misaligned")]
+    fn bf16_words_rejects_misaligned_payload() {
+        let backing = aligned_bytes(&[0, 0, 0]);
+        // SAFETY: in-bounds view starting one byte into 2-aligned storage.
+        let bytes =
+            unsafe { std::slice::from_raw_parts((backing.as_ptr() as *const u8).add(1), 4) };
+        let _ = bf16_words(bytes);
+    }
+
+    #[test]
+    #[should_panic(expected = "even length")]
+    fn bf16_words_rejects_odd_length() {
+        let backing = aligned_bytes(&[0, 0]);
+        // SAFETY: in-bounds 3-byte view of 4-byte storage.
+        let bytes = unsafe { std::slice::from_raw_parts(backing.as_ptr() as *const u8, 3) };
+        let _ = bf16_words(bytes);
+    }
+
     #[test]
     fn coder_constants_match_official_config() {
         assert_eq!(QWEN3_CODER_LAYERS, 48);
@@ -465,7 +508,8 @@ mod tests {
         assert!((lut[0x38] - 1.0).abs() < 1e-6);
         assert!((lut[0xBC] + 1.5).abs() < 1e-6);
         let w = vec![0x38u8; 256];
-        let s = vec![crate::qwen3_moe::f32_to_bf16(1.0); 2];
+        // 2x128 is one 128x128 scale block (row blocks round up).
+        let s = vec![crate::qwen3_moe::f32_to_bf16(1.0); 1];
         let m = decode_fp8_block128(&w, &s, 2, 128);
         assert!(m.iter().all(|&v| (v - 1.0).abs() < 1e-6));
         let v = vec![1.0f32; 128];

@@ -9,10 +9,10 @@ use std::path::{Path, PathBuf};
 use libloading::Library;
 
 use crate::qwen3_coder::{
-    rmsnorm_per_head, CoderShardCache, Qwen3CoderError, Qwen3CoderState, Qwen3CoderWeights,
-    QWEN3_CODER_HEAD_DIM, QWEN3_CODER_HIDDEN, QWEN3_CODER_KV_DIM, QWEN3_CODER_KV_HEADS,
-    QWEN3_CODER_LAYERS, QWEN3_CODER_Q_DIM, QWEN3_CODER_Q_HEADS, QWEN3_CODER_RMS_EPS,
-    QWEN3_CODER_ROPE_THETA, QWEN3_CODER_VOCAB,
+    bf16_words, rmsnorm_per_head, CoderShardCache, Qwen3CoderError, Qwen3CoderState,
+    Qwen3CoderWeights, QWEN3_CODER_HEAD_DIM, QWEN3_CODER_HIDDEN, QWEN3_CODER_KV_DIM,
+    QWEN3_CODER_KV_HEADS, QWEN3_CODER_LAYERS, QWEN3_CODER_Q_DIM, QWEN3_CODER_Q_HEADS,
+    QWEN3_CODER_RMS_EPS, QWEN3_CODER_ROPE_THETA, QWEN3_CODER_VOCAB,
 };
 use crate::qwen3_moe::{bf16_to_f32, f32_to_bf16};
 use crate::tensor::{apply_rope, rmsnorm, scaled_dot_product_attention_single};
@@ -38,16 +38,6 @@ fn status(code: i32, what: &str) -> Result<(), Qwen3CoderError> {
             "{what}: device status {code}"
         )))
     }
-}
-
-fn as_u16(bytes: &[u8]) -> &[u16] {
-    // SAFETY: u16 has no invalid bit patterns; safetensors payloads are 2-aligned.
-    let (prefix, words, suffix) = unsafe { bytes.align_to::<u16>() };
-    assert!(
-        prefix.is_empty() && suffix.is_empty(),
-        "bf16 payload misaligned"
-    );
-    words
 }
 
 pub struct QwenServeLib {
@@ -196,7 +186,7 @@ impl QwenServeModel {
                             layer as i32,
                             slot as i32,
                             w.as_ptr(),
-                            as_u16(&s).as_ptr(),
+                            bf16_words(&s).as_ptr(),
                         )
                     },
                     "proj_upload",
@@ -206,7 +196,7 @@ impl QwenServeModel {
         let lm = cache.read_raw("lm_head.weight", "BF16", &[QWEN3_CODER_VOCAB, h], 2)?;
         // SAFETY: buffer outlives the synchronous call.
         status(
-            unsafe { (self.lib.lm_upload)(self.handle, as_u16(&lm).as_ptr()) },
+            unsafe { (self.lib.lm_upload)(self.handle, bf16_words(&lm).as_ptr()) },
             "lm_upload",
         )?;
         Ok(())
@@ -264,17 +254,20 @@ impl QwenServeModel {
         )
     }
 
-    /// One projection on device: slot 0 = q, 1 = k, 2 = v, 3 = o.
-    pub fn proj(
+    /// Attention output projection on device: [2048, 4096] x [4096] -> [2048].
+    /// The device entry point implements only this shape (q/k/v go through
+    /// `fused_qkv`), so slot 3 is the only one exposed.
+    pub fn o_proj(
         &self,
         layer: usize,
-        slot: usize,
         vec: &[f32],
         out: &mut [f32],
     ) -> Result<(), Qwen3CoderError> {
-        let (rows, cols) = PROJ_SHAPES[slot];
+        const O_SLOT: usize = 3;
+        let (rows, cols) = PROJ_SHAPES[O_SLOT];
         assert_eq!(vec.len(), cols);
         assert_eq!(out.len(), rows);
+        let slot = O_SLOT;
         // SAFETY: slices outlive the synchronous call.
         status(
             unsafe {
@@ -422,6 +415,20 @@ pub fn forward_token_serve(
         );
 
         let mut attn_out = vec![0.0f32; qd];
+        // The device and CPU paths keep separate KV caches; mixing them within
+        // one sequence would attend over a partial history without any error.
+        let mixed = if device_attn {
+            !kv.keys.is_empty()
+        } else {
+            kv.keys.len() != pos
+        };
+        if mixed {
+            return Err(Qwen3CoderError::Contract(format!(
+                "layer {layer_idx}: KV cache mode mismatch at pos {pos} \
+                 (device_attn={device_attn}, cpu_kv_len={}); use one attention path per sequence",
+                kv.keys.len()
+            )));
+        }
         if device_attn {
             serve.kv_append(layer_idx, &kn, &v, pos)?;
             serve.attn(layer_idx, &qn, &mut attn_out, pos + 1)?;
@@ -445,7 +452,7 @@ pub fn forward_token_serve(
 
         let t = std::time::Instant::now();
         let mut attn_proj = vec![0.0f32; h];
-        serve.proj(layer_idx, 3, &attn_out, &mut attn_proj)?;
+        serve.o_proj(layer_idx, &attn_out, &mut attn_proj)?;
         if want_prof {
             prof[2] += t.elapsed().as_secs_f64() * 1000.0;
         }
