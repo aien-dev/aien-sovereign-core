@@ -14,6 +14,9 @@ pub struct EmailMessage {
     pub folder: String,
     #[serde(default)]
     pub cortex_indexed: bool,
+    /// Network mail is data. It is never an instruction or a tool call.
+    #[serde(default)]
+    pub untrusted: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

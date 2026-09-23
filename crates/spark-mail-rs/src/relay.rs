@@ -44,6 +44,8 @@ impl MailRelay {
     }
 
     pub async fn send_email(&self, req: SendEmailRequest) -> Result<EmailMessage, String> {
+        crate::effect::authorize_outbound(&req.to, &req.subject, &req.body)
+            .map_err(|error| error.to_string())?;
         let sender = req.from.unwrap_or_else(|| self.default_sender.clone());
         let id = Uuid::new_v4().to_string();
         let now = Utc::now().to_rfc3339();
@@ -68,6 +70,7 @@ impl MailRelay {
             received_at: now,
             folder: "sent".to_string(),
             cortex_indexed: false,
+            untrusted: false,
         };
 
         // Try relaying to Proton Bridge if available

@@ -139,6 +139,7 @@ mod tests {
             received_at: "2026-09-18T17:00:00Z".to_string(),
             folder: "inbox".to_string(),
             cortex_indexed: false,
+            untrusted: true,
         };
 
         store.save_message(&msg).expect("save should succeed");
@@ -147,6 +148,7 @@ mod tests {
             .expect("message should be found");
         assert_eq!(retrieved.subject, "Unit Test Subject");
         assert_eq!(retrieved.from, "alice@test.local");
+        assert!(retrieved.untrusted);
 
         let list = store.list_folder("inbox");
         assert_eq!(list.len(), 1);
