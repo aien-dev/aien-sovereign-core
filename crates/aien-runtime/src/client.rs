@@ -45,6 +45,13 @@ impl AienRuntimeClient {
             )
         })?;
 
+        if !crate::server::peer_is_current_user(&stream) {
+            return Err(format!(
+                "Refusing runtime socket at {}: server runs as a different user",
+                self.socket_path.display()
+            ));
+        }
+
         let (reader, mut writer) = stream.into_split();
         let mut buf_reader = BufReader::new(reader);
 
@@ -134,6 +141,12 @@ impl AienRuntimeClient {
                 e
             )
         })?;
+        if !crate::server::peer_is_current_user(&stream) {
+            return Err(format!(
+                "Refusing runtime socket at {}: server runs as a different user",
+                self.socket_path.display()
+            ));
+        }
         let (reader, mut writer) = stream.into_split();
         let mut buf_reader = BufReader::new(reader);
         let now = std::time::SystemTime::now()

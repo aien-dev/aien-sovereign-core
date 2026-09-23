@@ -14,6 +14,8 @@ async fn test_cli_runtime_ipc_lifecycle() {
     let temp_dir = TempDir::new().expect("Failed to create tempdir");
     let socket_path = temp_dir.path().join("aien-test.sock");
     std::env::set_var("AIEN_RUNTIME_SOCK", socket_path.to_str().unwrap());
+    // Keep the idempotency log out of the shared /tmp default used by a live runtime.
+    std::env::set_var("AIEN_RUNTIME_STATE_DIR", temp_dir.path());
 
     let kv_manager = create_shared_kv_manager(512, 16);
     let sched_cfg = SchedulerConfig {
@@ -74,7 +76,17 @@ async fn test_cli_runtime_ipc_lifecycle() {
         .inspect_swarm(swarm_id)
         .await
         .expect("Inspect must succeed");
-    assert!(swarm_status.active_sequences >= 1);
+    // The mock backend may finish all branches before this request lands, so
+    // assert the swarm-scoped invariant rather than a still-running count.
+    assert!(
+        swarm_status.active_sequences <= 4,
+        "at most the 4 launched branches"
+    );
+    assert_eq!(
+        swarm_status.active_swarms == 1,
+        swarm_status.active_sequences > 0,
+        "swarm is active exactly while it has running branches"
+    );
 
     // 4. Clean shutdown
     client.shutdown().await.expect("Shutdown must succeed");

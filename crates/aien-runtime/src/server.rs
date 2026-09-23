@@ -12,6 +12,15 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{Mutex, Notify};
 
+/// True when the process on the other end of `stream` runs as this process's
+/// effective user. The default socket lives in shared /tmp, so both ends check
+/// peer credentials instead of trusting whoever created the path.
+pub(crate) fn peer_is_current_user(stream: &UnixStream) -> bool {
+    // SAFETY: geteuid has no preconditions and cannot fail.
+    let euid = unsafe { libc::geteuid() };
+    stream.peer_cred().map(|c| c.uid() == euid).unwrap_or(false)
+}
+
 pub struct AienRuntimeServer {
     socket_path: PathBuf,
     spine: Arc<Mutex<AienRuntimeSpine>>,
@@ -74,6 +83,17 @@ impl AienRuntimeServer {
                 e
             )
         })?;
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&self.socket_path, std::fs::Permissions::from_mode(0o600))
+                .map_err(|e| {
+                    format!(
+                        "Failed to restrict runtime socket {} to owner: {}",
+                        self.socket_path.display(),
+                        e
+                    )
+                })?;
+        }
 
         self.is_running.store(true, Ordering::SeqCst);
 
@@ -111,6 +131,10 @@ impl AienRuntimeServer {
                 accept_res = listener.accept() => {
                     match accept_res {
                         Ok((stream, _)) => {
+                            if !peer_is_current_user(&stream) {
+                                tracing::warn!("rejected runtime connection from another user");
+                                continue;
+                            }
                             let spine_conn = self.spine.clone();
                             let is_running_conn = self.is_running.clone();
                             let notify_conn = self.shutdown_notify.clone();

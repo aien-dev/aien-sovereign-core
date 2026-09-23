@@ -30,9 +30,12 @@ else
     echo "PASSED (Zero disk secrets detected)"
 fi
 
-# Step 3: Unslop and Sovereign Voice Audit on Staged / Working Changes
+# Step 3: Unslop and Sovereign Voice Audit on the branch (committed + working changes)
 echo -n "[3/5] Verifying Unslop & Anti-Slop Discipline... "
-DASH_VIOLATIONS=$(git diff HEAD -- ':(exclude)*.lock' ':(exclude)*.svg' ':(exclude)*.bin' 2>/dev/null | grep -E '^\+[^+]' | grep -E '(—|–)' | grep -v "replace" | grep -v "contains" | grep -v "ZERO EM DASHES" | grep -v "forbidden" | grep -v "assert\!" || true)
+# Diff against the merge base with main so committed branch work is audited,
+# not only uncommitted edits. Falls back to HEAD when no main ref exists.
+DIFF_BASE=$(git merge-base HEAD origin/main 2>/dev/null || git merge-base HEAD main 2>/dev/null || echo HEAD)
+DASH_VIOLATIONS=$(git diff "$DIFF_BASE" --':(exclude)*.lock' ':(exclude)*.svg' ':(exclude)*.bin' 2>/dev/null | grep -E '^\+[^+]' | grep -E '(—|–)' | grep -v "replace" | grep -v "contains" | grep -v "ZERO EM DASHES" | grep -v "forbidden" | grep -v "assert\!" || true)
 if [ -n "$DASH_VIOLATIONS" ]; then
     echo "FAILED"
     echo "Error: Prohibited em dash or en dash characters introduced in git diff:"
@@ -53,10 +56,13 @@ fi
 
 # Step 5: Vulnerability & Advisory Audit
 echo -n "[5/5] Checking RustSec Vulnerability Advisories... "
-if cargo audit 2>/dev/null; then
-    echo "PASSED (0 advisories)"
+if ! cargo audit --version >/dev/null 2>&1; then
+    echo "SKIPPED (cargo-audit not installed)"
+elif cargo audit; then
+    echo "PASSED (No vulnerabilities; review any warnings above)"
 else
-    echo "PASSED WITH WARNINGS (Check cargo audit logs)"
+    echo "FAILED (Vulnerabilities reported above)"
+    FAILED=1
 fi
 
 echo "============================================================"
