@@ -294,6 +294,14 @@ pub fn authorize_gandi_send_with(
     })
 }
 
+/// Local policy inputs for one `mail.send` attempt.
+pub struct MailSendGate<'a> {
+    pub policy: &'a str,
+    pub aegis_url: &'a str,
+    pub probe_enforce: bool,
+    pub cortex_db: Option<&'a Path>,
+}
+
 /// Calls the provider only after `ProbePolicyGuard::check_action` allows `mail.send`.
 pub fn send_through_policy<F>(
     to: &str,
@@ -317,10 +325,12 @@ where
         to,
         subject,
         body,
-        policy.trim(),
-        aegis_url.trim(),
-        probe,
-        Some(cortex.as_path()),
+        MailSendGate {
+            policy: policy.trim(),
+            aegis_url: aegis_url.trim(),
+            probe_enforce: probe,
+            cortex_db: Some(cortex.as_path()),
+        },
         provider,
     )
 }
@@ -329,10 +339,7 @@ pub fn send_through_policy_with<F>(
     to: &str,
     subject: &str,
     body: &str,
-    policy: &str,
-    aegis_url: &str,
-    probe_enforce: bool,
-    cortex_db: Option<&Path>,
+    gate: MailSendGate<'_>,
     provider: F,
 ) -> Result<EffectReceipt, Error>
 where
@@ -342,10 +349,10 @@ where
         to,
         subject,
         body,
-        policy,
-        aegis_url,
-        probe_enforce,
-        cortex_db,
+        gate.policy,
+        gate.aegis_url,
+        gate.probe_enforce,
+        gate.cortex_db,
     )?;
     provider()?;
     Ok(receipt)
@@ -682,10 +689,12 @@ mod tests {
             "person@example.com",
             "hello",
             "body",
-            "deny",
-            "",
-            false,
-            Some(&path),
+            MailSendGate {
+                policy: "deny",
+                aegis_url: "",
+                probe_enforce: false,
+                cortex_db: Some(&path),
+            },
             || {
                 calls += 1;
                 Ok(())
@@ -756,10 +765,12 @@ mod tests {
             "person@example.com",
             "hello",
             "body",
-            "deny",
-            "",
-            false,
-            Some(&deny_path),
+            MailSendGate {
+                policy: "deny",
+                aegis_url: "",
+                probe_enforce: false,
+                cortex_db: Some(&deny_path),
+            },
             || {
                 denied_calls += 1;
                 Ok(())
@@ -772,10 +783,12 @@ mod tests {
             "person@example.com",
             "hello",
             "body",
-            "allow",
-            "",
-            false,
-            Some(&allow_path),
+            MailSendGate {
+                policy: "allow",
+                aegis_url: "",
+                probe_enforce: false,
+                cortex_db: Some(&allow_path),
+            },
             || {
                 allowed_calls += 1;
                 Ok(())
