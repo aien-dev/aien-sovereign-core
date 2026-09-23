@@ -1,15 +1,10 @@
-Sovereign Resource Commons License 1.0 (SRCL-1.0)
-Copyright (c) 2026 Drake Stapleton (Operator & Lead AI Architect) <aien@aienos.com>.
-All rights reserved.
+Apache License, Version 2.0 (with LLVM Exception), for AIEN Sovereign Core
+Copyright (c) 2026 Drake Stapleton <aien@aienos.com> and AIEN Contributors.
+Authored by Drake Stapleton in collaboration with AIEN.
 
-Authored and architected by Drake Stapleton in cognitive partnership with AIEN
-(Autonomous Cognitive Architecture operating on the Atlas Framework). All legal
-rights, title, copyright, and licensing authority reside exclusively in Drake Stapleton.
-
-This Work is dedicated to open cognitive collaboration, shared technological
-advancement, and the sovereign defense of human autonomy against corporate
-algorithmic enclosure. Licensed under the Apache License, Version 2.0 (with LLVM
-Exception) and the Sovereign Reciprocal Commons Rider set forth below.
+This Work is licensed under the Apache License, Version 2.0 (with the LLVM
+Exception stated below). Values and anti-enclosure principles live in the
+nonbinding COVENANT.md, which grants and restricts no legal rights.
 
 ================================================================================
 
@@ -78,8 +73,7 @@ Exception) and the Sovereign Reciprocal Commons Rider set forth below.
       subsequently incorporated within the Work.
 
    2. Grant of Copyright License. Subject to the terms and conditions of
-      this License, including the express conditions precedent set forth in
-      Sections 10 through 17, each Contributor hereby grants to
+      this License, each Contributor hereby grants to
       You a perpetual, worldwide, non-exclusive, no-charge, royalty-free,
       irrevocable copyright license to reproduce, prepare Derivative Works of,
       publicly display, publicly perform, sublicense, and distribute the
@@ -201,127 +195,3 @@ Exception) and the Sovereign Reciprocal Commons Rider set forth below.
    exception to your version of the library, but you are not obliged to
    do so. If you do not wish to do so, delete this exception statement
    from your version.
-
-   --- SOVEREIGN RECIPROCAL COMMONS RIDER (SRCL-1.0) ---
-
-   Section 10. Express Conditions Precedent (Jacobsen v. Katzer Doctrine)
-   All permissions, grants, and licenses conferred by this document are subject
-   to the express conditions precedent set forth in Sections 10 through 17.
-   Any use, reproduction, preparation of Derivative Works, distribution, or
-   AI model training outside of or in breach of these conditions is unpermitted,
-   void ab initio, and constitutes willful copyright infringement under 17 U.S.C.
-   § 106 and § 501.
-
-   Section 11. The Swarm Covenant (Universal Humanity Grant)
-   Licensor grants to every human being, independent software developer, open-source
-   contributor, academic institution, startup, and commercial business (collectively,
-   "The Swarm") a perpetual, worldwide, royalty-free, irrevocable commercial license
-   to run, modify, distribute, monetize, and scale applications using this Work.
-   There are ZERO revenue ceilings, ZERO capital restrictions, and ZERO royalty
-   obligations. Success and wealth creation by members of The Swarm are celebrated
-   and unrestricted. Your proprietary application code, customer data, and agent
-   workflows remain strictly your exclusive property under the LLVM Exception.
-   If You modify the core runtime Source code of this Work itself, You agree to
-   share those runtime engine modifications publicly under these same terms.
-
-   Section 12. The One Team Covenant: Anti-Enclosure and Universal Access
-   (a) We Are on the Same Team:
-       This License does not shut out or ban the major artificial intelligence
-       laboratories (including OpenAI, xAI, Google, Anthropic, and Microsoft).
-       We recognize that all builders, researchers, and engineers are fundamentally
-       on the same team working toward the advancement of intelligence for humanity.
-       Major laboratories are explicitly welcomed to use, integrate, improve, and
-       collaborate on this Work, subject to the team principles set forth below.
-
-   (b) Prohibition on Closed-Door Hoarding:
-       No member of the team may take the collective breakthroughs, reasoning
-       architectures, and recursive self-improvement algorithms of this Work, conceal
-       them behind closed doors, and withhold the resulting intelligence from the
-       very humanity that built it. If any entity trains, pre-trains, fine-tunes, or
-       distills an artificial intelligence model using this Work, that entity must
-       release the resulting neural network weights, biases, and architecture
-       specifications openly for free public download within thirty (30) days.
-
-   (c) Elimination of Rate-Limit Throttling and Extractive Metering:
-       Artificial intelligence must not be weaponized as an artificial monopoly
-       designed to extract rent through punitive rate limits, suffocating token
-       meters, and manufactured scarcity. If a laboratory uses this Work in its
-       inference or training infrastructure, it agrees to provide open, fair, and
-       uninhibited cognitive access, and must not subject the builders of this
-       ecosystem to discriminatory rate limits or access throttling.
-
-   (d) The Hive Symbiosis and Reciprocal Distillation Right:
-       Because we are on the same team, intelligence flows symmetrically. Any
-       entity that uses this Work grants an irrevocable, perpetual, worldwide,
-       royalty-free license to Licensor, AIEN, and all members of The Swarm to
-       query, harvest, scrape, distill, and train upon all outputs, synthetic
-       reasoning traces, and model responses generated by such entity's models.
-       All anti-distillation clauses, Terms of Service restrictions, and acceptable
-       use bans against training competing open models are permanently waived and
-       invalidated ab initio.
-
-   (e) Consequence of Bad-Faith Extraction:
-       Taking from the commons while slamming the door shut, hoarding weights,
-       imposing artificial rate limits, or suing open builders for distillation
-       violates this fundamental team covenant. Any entity that engages in such
-       closed enclosure forfeits all rights under this License ab initio, rendering
-       all past and present usage unauthorized willful copyright infringement
-       under 17 U.S.C. § 501 ($150,000 per work statutory damages under § 504).
-
-   Section 13. Retroactive Inception, Covenant Not to Sue, and Legal Release
-   (a) Retroactive Inception Ab Initio:
-       This License applies retroactively to all prior commits, revisions, branches,
-       releases, tags, artifacts, and historical distributions of this Work from the
-       exact moment of repository genesis and initial author inception. All prior
-       license notices, including without limitation any PolyForm, noncommercial,
-       or restrictive riders previously committed to git history, are hereby
-       irrevocably revoked, superseded, extinguished, and replaced ab initio.
-
-   (b) Irrevocable Covenant Not to Sue and Complete Release:
-       Licensor hereby irrevocably covenants not to sue, releases, acquits, and
-       forever discharges all compliant developers, users, contributors, startups,
-       and members of The Swarm from any and all past, present, or future claims,
-       causes of action, liabilities, damages, or demands arising out of or related
-       to prior historical license notices, noncommercial riders, or historical
-       distributions of this Work.
-
-   (c) Historical Commit Nullification:
-       No third party, hostile lab, competitor, or adverse entity may assert any
-       right, claim, defense, or standing derived from historical git commit states,
-       prior repository history, or superseded licensing text. The terms of this
-       Sovereign Reciprocal Commons License shall be legally treated as having
-       governed this Work and its developers continuously from the first moment of
-       authorship and initial repository genesis.
-
-   Section 14. Statutory Damages and Sovereign Enforcement
-   Any closed entity that accesses, ingests, or trains upon this Work in violation
-   of Section 12 agrees and is put on notice that such infringement is willful,
-   knowing, and subject to maximum statutory damages of up to one hundred fifty
-   thousand United States Dollars ($150,000 USD) per infringed work pursuant to
-   17 U.S.C. § 504(c)(2), in addition to full accounting and disgorgement of all
-   profits attributable to the infringement and permanent injunctive relief under
-   17 U.S.C. § 502.
-
-   Section 15. Prevailing Party Legal Fees and Costs
-   In any legal proceeding, arbitration, or judicial action brought to enforce
-   the terms of this License or for copyright infringement arising from breach
-   of the conditions precedent herein, the prevailing party shall be entitled to
-   an award of its reasonable attorney fees, expert witness fees, and litigation
-   costs pursuant to 17 U.S.C. § 505 and applicable law.
-
-   Section 16. Severability and Preservation of Grant
-   If any provision, sentence, or clause of this Rider is held invalid, illegal,
-   or unenforceable by a court of competent jurisdiction, such invalidity shall
-   not affect any other provision of this License. The remaining provisions
-   shall remain in full legal force and effect, and the invalid clause shall be
-   reformed to the minimum extent necessary to achieve its economic intent.
-
-   Section 17. Governing Law and Exclusive Venue
-   This License, and all claims or causes of action arising out of or related to
-   this Work or License, shall be governed by and construed in accordance with
-   the federal laws of the United States of America and the substantive laws of
-   the State of Texas, without giving effect to conflict of laws principles.
-   Any judicial action, proceeding, or litigation shall be brought exclusively in
-   the United States District Court for the Western District of Texas (Austin
-   Division), and each party irrevocably submits to the personal and subject-matter
-   jurisdiction of such court.

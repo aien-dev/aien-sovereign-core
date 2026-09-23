@@ -1,4 +1,4 @@
-use aien_inference_protocol::{InferenceEvent, InferenceRequest};
+use aien_inference_service::{InferenceEvent, InferenceRequest};
 
 #[test]
 fn test_inference_request_builder_and_defaults() {

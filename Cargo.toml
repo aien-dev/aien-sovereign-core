@@ -29,7 +29,7 @@ members = [
     "crates/aien-platform-linux",
     "crates/aien-runtime",
     "crates/rad-id-sync",
-    "crates/aien-inference-protocol",
+    "crates/aien-inference-service",
     "crates/aien-inference-runtime",
     "crates/cortex-path-m1",
 ]
@@ -37,7 +37,7 @@ members = [
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
-license = "SRCL-1.0"
+license = "Apache-2.0 WITH LLVM-exception"
 authors = ["Drake Stapleton <aien@aienos.com>"]
 repository = "https://github.com/aien-dev/aien-sovereign-core"
 

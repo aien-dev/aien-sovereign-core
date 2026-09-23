@@ -32,6 +32,11 @@ Standard: Brutally Factual Systems Audit. Zero Marketing Language.
 
 ## Empirical Baseline Measurements
 
+Withdrawn pending regeneration under the publication rule in the top-level
+README (every headline number must resolve to a reproducible command and
+artifact). The table below is retained for provenance of what was previously
+stated and is not authoritative.
+
 <!-- AIEN:BENCHMARKS:START -->
 <!-- Sourced automatically from benchmarks/data/benchmarks_latest.json (Measurement Suite v0.2.0) -->
 | Workload / Service | Architecture | Measurement ID | Resident Memory (RSS) | p50 Latency | Throughput |

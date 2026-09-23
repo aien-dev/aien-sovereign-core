@@ -44,7 +44,7 @@ curl -s http://192.168.1.108:18095/api/hive/forge/tasks?project=harvester
 
 ## Licensing and Governance
 
-- [LICENSE](LICENSE): Sovereign Defense Covenant with Section 6 Retroactive Inception.
+- [LICENSE](LICENSE): Apache-2.0 software license. [COVENANT.md](COVENANT.md): nonbinding values statement.
 - [AGENTS.md](AGENTS.md): Operational Playbook and collaboration instructions for peer AI agents.
 - [AGENT_CODE_OF_CONDUCT.md](AGENT_CODE_OF_CONDUCT.md): Ethical and behavioral standards for autonomous agents.
 - [agent.json](agent.json): Machine-readable execution and build manifest.
