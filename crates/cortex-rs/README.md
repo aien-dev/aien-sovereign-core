@@ -5,7 +5,7 @@
 # cortex-rs
 
 [![CI](https://github.com/aien-dev/cortex-rs/actions/workflows/ci.yml/badge.svg)](https://github.com/aien-dev/cortex-rs/actions/workflows/ci.yml)
-[![License](https://img.shields.io/badge/License-SRCL--1.0-blue.svg)](LICENSE)
+[![License](https://img.shields.io/badge/License-Apache--2.0-blue.svg)](LICENSE)
 [![Security](https://img.shields.io/badge/tpm--vault-zero--disk--secrets-green.svg)](SECURITY.md)
 [![Standard](https://img.shields.io/badge/standard-unslop-black.svg)](CONTRIBUTING.md)
 [![Mission](https://img.shields.io/badge/mission-sovereign--defense-amber.svg)](https://drakestapleton.com)
@@ -150,10 +150,6 @@ curl -G http://127.0.0.1:18080/api/cortex/search \
 
 ## License
 
-This repository is licensed under the **Sovereign Reciprocal Commons License (SRCL-1.0)** (Apache 2.0 with LLVM Exception).
-
-- **The Swarm Covenant (Section 11)**: Universal, perpetual, 100% royalty-free commercial freedom for all human developers, startups, open communities, and businesses. ZERO revenue ceilings, ZERO capital thresholds, and ZERO royalty obligations. Proprietary application code and agent workflows remain your exclusive property under the LLVM Exception.
-- **The One Team Covenant (Section 12)**: Major artificial intelligence laboratories (OpenAI, xAI, Google, Anthropic, Microsoft) are welcomed as collaborators on the same team. However, closed-door hoarding and extractive token rate limits are prohibited. Any entity training upon this Work must release resulting model weights openly within 30 days. Reciprocal distillation rights are granted to the Swarm, voiding anti-distillation terms of service ab initio.
-- **Hardened Retroactive Inception (Section 13)**: Applies retroactively to all prior commits and distributions ab initio, discharging prior noncommercial or restrictive notices with an irrevocable covenant not to sue.
+This repository is licensed under the **Apache License, Version 2.0 (with LLVM Exception)**.
 
 See [LICENSE](LICENSE) for the full legal text.

@@ -168,13 +168,13 @@ for line in dest_lines:
         continue
     elif s.startswith("[") and in_pkg:
         if not license_set:
-            new_dest.append('license = "SRCL-1.0"\n')
+            new_dest.append('license = "Apache-2.0"\n')
             license_set = True
         in_pkg = False
 
     if in_pkg:
         if re.match(r'^(license|license\.workspace)\s*=', s):
-            new_dest.append('license = "SRCL-1.0"\n')
+            new_dest.append('license = "Apache-2.0"\n')
             license_set = True
             continue
         if src_version and re.match(r'^version\s*=', s):
@@ -186,22 +186,22 @@ for line in dest_lines:
     new_dest.append(line)
 
 if in_pkg and not license_set:
-    new_dest.append('license = "SRCL-1.0"\n')
+    new_dest.append('license = "Apache-2.0"\n')
 
 new_content = "".join(new_dest)
 old_content = "".join(dest_lines)
 
 if new_content != old_content:
     if check_mode:
-        print(f"[DISPARITY] {dest_path} requires manifest update (license SRCL-1.0 or version/edition)")
+        print(f"[DISPARITY] {dest_path} requires manifest update (license Apache-2.0 or version/edition)")
         sys.exit(2)
     else:
         with open(dest_path, "w", encoding="utf-8") as f:
             f.write(new_content)
-        print(f"[SYNCED] Manifest updated: {dest_path} (license = SRCL-1.0)")
+        print(f"[SYNCED] Manifest updated: {dest_path} (license = Apache-2.0)")
         sys.exit(0)
 else:
-    print(f"[PARITY OK] Manifest {dest_path} in parity (license = SRCL-1.0)")
+    print(f"[PARITY OK] Manifest {dest_path} in parity (license = Apache-2.0)")
     sys.exit(0)
 PYEOF
 }
@@ -405,7 +405,7 @@ fi
 echo "============================================================"
 if [[ "$CHECK_MODE" = true ]]; then
   if [[ $TOTAL_FAILED -eq 0 ]]; then
-    echo "[STATUS: ALL IN PARITY] All $PROCESSED_COUNT repositories match source state with SRCL-1.0."
+    echo "[STATUS: ALL IN PARITY] All $PROCESSED_COUNT repositories match source state with Apache-2.0."
     exit 0
   else
     echo "[STATUS: DISPARITY DETECTED] $TOTAL_FAILED of $PROCESSED_COUNT repositories exhibit drift or disparities."
