@@ -1,10 +1,14 @@
 //! Job fingerprints. Paths are hashed relative to the job's base directory, so
 //! the same code in two different worktrees produces the same key and shares
-//! one stamp.
+//! one stamp. Inside a git checkout, files git ignores (build output such as a
+//! compiled `.so` dropped into a source dir) are left out, exactly as git would.
 
+use std::ffi::OsStr;
 use std::fs;
 use std::io;
-use std::path::{Path, PathBuf};
+use std::os::unix::ffi::OsStrExt;
+use std::path::{Component, Path, PathBuf};
+use std::process::Command;
 
 /// Directory names never hashed: build output, git internals, live crumb scents.
 const SKIP: &[&str] = &["target", ".git", ".crumb.local"];
@@ -31,6 +35,36 @@ fn collect(path: &Path, out: &mut Vec<PathBuf>) -> io::Result<()> {
     Ok(())
 }
 
+/// Tracked plus untracked-but-not-ignored files under `inputs`, or `None` when
+/// `base` is not a git checkout.
+fn git_files(base: &Path, inputs: &[&PathBuf]) -> Option<Vec<PathBuf>> {
+    if inputs.is_empty() {
+        return Some(Vec::new());
+    }
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(base)
+        .args(["ls-files", "-z", "--cached", "--others", "--exclude-standard", "--"])
+        .args(inputs)
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let files = out
+        .stdout
+        .split(|b| *b == 0)
+        .filter(|s| !s.is_empty())
+        .map(|s| base.join(OsStr::from_bytes(s)))
+        .filter(|p| !p.components().any(|c| SKIP.iter().any(|s| c.as_os_str() == *s)))
+        .collect();
+    Some(files)
+}
+
+fn inside(input: &Path) -> bool {
+    input.is_relative() && !input.components().any(|c| c == Component::ParentDir)
+}
+
 pub fn job_key(
     base: &Path,
     job: &str,
@@ -39,7 +73,7 @@ pub fn job_key(
     inputs: &[PathBuf],
 ) -> io::Result<String> {
     let mut h = blake3::Hasher::new();
-    h.update(b"AIEN_PROOF_JOB_V1");
+    h.update(b"AIEN_PROOF_JOB_V2");
     field(&mut h, job.as_bytes());
     h.update(&(cmd.len() as u64).to_be_bytes());
     for arg in cmd {
@@ -47,8 +81,19 @@ pub fn job_key(
     }
     field(&mut h, toolchain.as_bytes());
 
+    // Inputs inside the checkout go through git's view; anything outside it
+    // (sibling repos reached by `../` path dependencies) is walked directly.
+    let (local, outside): (Vec<&PathBuf>, Vec<&PathBuf>) = inputs.iter().partition(|p| inside(p));
     let mut files = Vec::new();
-    for input in inputs {
+    match git_files(base, &local) {
+        Some(tracked) => files.extend(tracked),
+        None => {
+            for input in &local {
+                collect(&base.join(input), &mut files)?;
+            }
+        }
+    }
+    for input in &outside {
         collect(&base.join(input), &mut files)?;
     }
     files.sort();
@@ -57,7 +102,12 @@ pub fn job_key(
     for file in &files {
         let rel = file.strip_prefix(base).unwrap_or(file);
         field(&mut h, rel.to_string_lossy().as_bytes());
-        field(&mut h, blake3::hash(&fs::read(file)?).as_bytes());
+        match fs::read(file) {
+            Ok(data) => field(&mut h, blake3::hash(&data).as_bytes()),
+            // Tracked in git but deleted in this worktree.
+            Err(e) if e.kind() == io::ErrorKind::NotFound => field(&mut h, b"<deleted>"),
+            Err(e) => return Err(e),
+        }
     }
     Ok(h.finalize().to_hex().to_string())
 }
@@ -94,6 +144,25 @@ mod tests {
         fs::write(root.join("src/target/junk.o"), "different junk").unwrap();
         assert_eq!(before, key(&root));
         fs::write(root.join("src/lib.rs"), "pub fn b() {}").unwrap();
+        assert_ne!(before, key(&root));
+    }
+
+    #[test]
+    fn git_ignored_files_do_not_change_the_key() {
+        let root = temp_dir("fp-git");
+        tree(&root);
+        fs::write(root.join(".gitignore"), "*.so\n").unwrap();
+        let git = |args: &[&str]| {
+            assert!(Command::new("git").arg("-C").arg(&root).args(args).output().unwrap().status.success());
+        };
+        git(&["init", "-q"]);
+        git(&["add", "."]);
+        fs::write(root.join("src/libkernel.so"), "build 1").unwrap();
+        let before = key(&root);
+        fs::write(root.join("src/libkernel.so"), "build 2").unwrap();
+        assert_eq!(before, key(&root));
+        // Untracked source that git does not ignore still counts.
+        fs::write(root.join("src/new.rs"), "pub fn n() {}").unwrap();
         assert_ne!(before, key(&root));
     }
 
