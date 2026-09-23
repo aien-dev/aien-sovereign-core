@@ -2,7 +2,7 @@
 
 **A sovereign agent and inference runtime.** Native Rust workspace: agent CLI and runtime composition, persistent memory, physical KV-cache management, continuous-batching scheduler, inference ABI with Modular MAX bridges, and telemetry surfaces. Primary reference hardware is NVIDIA DGX Spark (Grace Blackwell GB10).
 
-[![License](https://img.shields.io/badge/License-Apache--2.0-blue.svg)](LICENSE)
+[![License](https://img.shields.io/badge/License-Apache--2.0%20WITH%20LLVM--exception-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/Rust-1.85+-orange.svg)](https://www.rust-lang.org)
 [![Modular MAX](https://img.shields.io/badge/Modular-MAX%2026.5-purple.svg)](https://modular.com)
 
@@ -98,7 +98,7 @@ SHA-256 digests, measurement definition, and reproducibility steps.
 - The fallback counter records only instrumented GPU operations (matmul, batch matmul, BF16 paged attention, logits). RMSNorm, RoPE, SwiGLU, and GQA paths execute on CPU without incrementing it. Per-operation device provenance is C1 work in progress.
 - Execution is hybrid CPU and GPU, not exclusively accelerated.
 - Apple Silicon, x86_64, and ROCm targets are qualified only as stated in the platform matrix. ROCm is experimental.
-- License transition is in flight: Apache-2.0 governs from the migration commit; historical commits remain as recorded.
+- License transition is in flight: Apache-2.0 WITH LLVM-exception governs from the migration commit; historical commits remain as recorded.
 - The installer is not yet signature-verifying.
 - Headline benchmark figures are withdrawn pending regeneration under the evidence standard above.
 - Qwen full-runtime qualification is not yet complete.
