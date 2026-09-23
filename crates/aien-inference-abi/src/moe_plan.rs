@@ -1,7 +1,7 @@
 //! Branch-agnostic MoE routing plan for Qwen3-Coder-30B-A3B.
 //!
 //! This is the host-side correctness oracle and batch metadata contract for
-//! Mojo/MAX execution. Expert GEMMs consume assignments in grouped order;
+//! the Mojo GB10 layer (`qwen3_moe`). Expert GEMMs consume assignments in grouped order;
 //! the inverse map restores each token's original top-k slots.
 
 use std::fmt;
@@ -33,7 +33,7 @@ impl fmt::Display for MoePlanError {
 
 impl std::error::Error for MoePlanError {}
 
-/// Assignment offsets and maps use u32 to match MAX's MoE index operators.
+/// Assignment offsets and maps use u32 to match the Mojo grouping kernel (`mojo/qwen3_moe`).
 #[derive(Debug, Clone, PartialEq)]
 pub struct MoeBatchPlan {
     pub tokens: usize,
@@ -202,7 +202,7 @@ impl MoeBatchPlan {
         }
     }
 
-    /// Reference weighted inverse permutation for parity checks with MAX.
+    /// Reference weighted inverse permutation for device parity checks.
     pub fn reduce_grouped(
         &self,
         grouped_output: &[f32],
