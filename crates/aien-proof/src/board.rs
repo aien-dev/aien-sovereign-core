@@ -87,7 +87,10 @@ impl Outcome {
 }
 
 fn now() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 fn env_num(name: &str) -> Option<u64> {
@@ -98,7 +101,13 @@ fn env_num(name: &str) -> Option<u64> {
 pub fn mem_available() -> Option<u64> {
     let info = fs::read_to_string("/proc/meminfo").ok()?;
     let line = info.lines().find(|l| l.starts_with("MemAvailable:"))?;
-    let kb: u64 = line.trim_start_matches("MemAvailable:").trim().trim_end_matches("kB").trim().parse().ok()?;
+    let kb: u64 = line
+        .trim_start_matches("MemAvailable:")
+        .trim()
+        .trim_end_matches("kB")
+        .trim()
+        .parse()
+        .ok()?;
     Some(kb * 1024)
 }
 
@@ -131,14 +140,22 @@ fn tee<R: Read + Send + 'static>(
 
 impl Board {
     pub fn from_env() -> Self {
-        let root = std::env::var_os("AIEN_PROOF_DIR").map(PathBuf::from).unwrap_or_else(|| {
-            let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."));
-            home.join(".local/state/aien-proof")
-        });
-        let cores = thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
+        let root = std::env::var_os("AIEN_PROOF_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                let home = std::env::var_os("HOME")
+                    .map(PathBuf::from)
+                    .unwrap_or_else(|| PathBuf::from("."));
+                home.join(".local/state/aien-proof")
+            });
+        let cores = thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4);
         Self {
             root,
-            cpu_slots: env_num("AIEN_PROOF_SLOTS").map(|n| n as usize).unwrap_or((cores / 8).max(2)),
+            cpu_slots: env_num("AIEN_PROOF_SLOTS")
+                .map(|n| n as usize)
+                .unwrap_or((cores / 8).max(2)),
             min_free_bytes: env_num("AIEN_PROOF_MIN_FREE_GB").unwrap_or(4) * GIB,
             mem_wait: Duration::from_secs(env_num("AIEN_PROOF_MEM_WAIT_SECS").unwrap_or(600)),
             quiet: false,
@@ -185,7 +202,9 @@ impl Board {
         let mut noted = false;
         loop {
             for i in 0..self.cpu_slots.max(1) {
-                if let Some(slot) = FileLock::try_acquire(&self.root.join("slots").join(format!("cpu-{i}.lock")))? {
+                if let Some(slot) =
+                    FileLock::try_acquire(&self.root.join("slots").join(format!("cpu-{i}.lock")))?
+                {
                     return Ok(slot);
                 }
             }
@@ -224,7 +243,8 @@ impl Board {
         if job.cmd.is_empty() {
             return Err(io::Error::new(io::ErrorKind::InvalidInput, "empty command"));
         }
-        let key = fingerprint::job_key(&job.base, &job.name, &job.cmd, &job.toolchain, &job.inputs)?;
+        let key =
+            fingerprint::job_key(&job.base, &job.name, &job.cmd, &job.toolchain, &job.inputs)?;
         if let Some(rec) = self.read_record("stamps", &key) {
             self.replay("stamped", &rec);
             return Ok(Outcome::Stamped(rec));
@@ -235,7 +255,10 @@ impl Board {
             Some(lock) => lock,
             None => {
                 let waited_from = now();
-                self.note(&format!("{}: identical run already in flight, joining it", job.name));
+                self.note(&format!(
+                    "{}: identical run already in flight, joining it",
+                    job.name
+                ));
                 let lock = FileLock::acquire(&lock_path)?;
                 if let Some(rec) = self.read_record("stamps", &key) {
                     self.replay("joined", &rec);
@@ -282,7 +305,12 @@ impl Board {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()?;
-        let out = tee(child.stdout.take().unwrap(), log.clone(), !self.quiet, false);
+        let out = tee(
+            child.stdout.take().unwrap(),
+            log.clone(),
+            !self.quiet,
+            false,
+        );
         let err = tee(child.stderr.take().unwrap(), log.clone(), !self.quiet, true);
         let status = child.wait()?;
         let _ = out.join();
@@ -335,14 +363,20 @@ mod tests {
             agent: "tester".into(),
             base: base.to_path_buf(),
             inputs: vec![PathBuf::from("src")],
-            cmd: vec!["sh".into(), "-c".into(), format!("echo x >> runs; {script}")],
+            cmd: vec![
+                "sh".into(),
+                "-c".into(),
+                format!("echo x >> runs; {script}"),
+            ],
             gpu: false,
             toolchain: "test".into(),
         }
     }
 
     fn runs(base: &std::path::Path) -> usize {
-        fs::read_to_string(base.join("runs")).map(|s| s.lines().count()).unwrap_or(0)
+        fs::read_to_string(base.join("runs"))
+            .map(|s| s.lines().count())
+            .unwrap_or(0)
     }
 
     #[test]
@@ -355,15 +389,24 @@ mod tests {
         assert!(matches!(second, Outcome::Stamped(_)));
         assert!(second.passed());
         assert_eq!(runs(&base), 1);
-        assert_eq!(ledger::verify(&b.root.join(ledger::LEDGER_FILE)).unwrap().0, 1);
+        assert_eq!(
+            ledger::verify(&b.root.join(ledger::LEDGER_FILE)).unwrap().0,
+            1
+        );
     }
 
     #[test]
     fn a_second_worktree_with_the_same_code_reuses_the_stamp() {
         let b = board("board-worktree");
         let (wt1, wt2) = (temp_dir("wt1"), temp_dir("wt2"));
-        assert!(matches!(b.run(&job(&wt1, "unit", "true")).unwrap(), Outcome::Ran(_)));
-        assert!(matches!(b.run(&job(&wt2, "unit", "true")).unwrap(), Outcome::Stamped(_)));
+        assert!(matches!(
+            b.run(&job(&wt1, "unit", "true")).unwrap(),
+            Outcome::Ran(_)
+        ));
+        assert!(matches!(
+            b.run(&job(&wt2, "unit", "true")).unwrap(),
+            Outcome::Stamped(_)
+        ));
         assert_eq!(runs(&wt1) + runs(&wt2), 1);
     }
 
@@ -380,7 +423,13 @@ mod tests {
             .collect();
         let outcomes: Vec<Outcome> = handles.into_iter().map(|h| h.join().unwrap()).collect();
         assert_eq!(runs(&base), 1);
-        assert_eq!(outcomes.iter().filter(|o| matches!(o, Outcome::Ran(_))).count(), 1);
+        assert_eq!(
+            outcomes
+                .iter()
+                .filter(|o| matches!(o, Outcome::Ran(_)))
+                .count(),
+            1
+        );
         assert!(outcomes.iter().all(Outcome::passed));
     }
 

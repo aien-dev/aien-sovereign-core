@@ -25,7 +25,11 @@ struct Flags {
 
 impl Flags {
     fn parse(args: &[String], switches: &[&str]) -> Self {
-        let mut f = Flags { values: vec![], switches: vec![], rest: vec![] };
+        let mut f = Flags {
+            values: vec![],
+            switches: vec![],
+            rest: vec![],
+        };
         let mut i = 0;
         while i < args.len() {
             let a = &args[i];
@@ -47,11 +51,19 @@ impl Flags {
     }
 
     fn get(&self, name: &str) -> Option<&str> {
-        self.values.iter().rev().find(|(k, _)| k == name).map(|(_, v)| v.as_str())
+        self.values
+            .iter()
+            .rev()
+            .find(|(k, _)| k == name)
+            .map(|(_, v)| v.as_str())
     }
 
     fn all(&self, name: &str) -> Vec<String> {
-        self.values.iter().filter(|(k, _)| k == name).map(|(_, v)| v.clone()).collect()
+        self.values
+            .iter()
+            .filter(|(k, _)| k == name)
+            .map(|(_, v)| v.clone())
+            .collect()
     }
 }
 
@@ -72,7 +84,10 @@ fn toolchain() -> String {
         .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
         .unwrap_or_default();
     for var in ["RUSTFLAGS", "RUSTDOCFLAGS", "CARGO_BUILD_TARGET"] {
-        t.push_str(&format!("{var}={}\n", std::env::var(var).unwrap_or_default()));
+        t.push_str(&format!(
+            "{var}={}\n",
+            std::env::var(var).unwrap_or_default()
+        ));
     }
     t
 }
@@ -84,10 +99,17 @@ fn cmd_run(args: &[String]) -> i32 {
         return 2;
     }
     let job = Job {
-        name: flags.get("--job").map(str::to_string).unwrap_or_else(|| flags.rest.join(" ")),
+        name: flags
+            .get("--job")
+            .map(str::to_string)
+            .unwrap_or_else(|| flags.rest.join(" ")),
         agent: agent(&flags),
         base: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
-        inputs: flags.all("--input").into_iter().map(PathBuf::from).collect(),
+        inputs: flags
+            .all("--input")
+            .into_iter()
+            .map(PathBuf::from)
+            .collect(),
         cmd: flags.rest.clone(),
         gpu: flags.switches.iter().any(|s| s == "--gpu"),
         toolchain: toolchain(),
@@ -120,10 +142,18 @@ fn cmd_crates(args: &[String]) -> i32 {
     let (agent, toolchain) = (agent(&flags), toolchain());
     let started = Instant::now();
     let (mut stamped, mut joined, mut ran, mut failed) = (0, 0, 0, Vec::new());
-    let selected: Vec<_> = members.iter().filter(|m| only.is_empty() || only.contains(&m.name)).collect();
+    let selected: Vec<_> = members
+        .iter()
+        .filter(|m| only.is_empty() || only.contains(&m.name))
+        .collect();
 
     for m in &selected {
-        let mut cmd = vec!["cargo".to_string(), "test".into(), "-p".into(), m.name.clone()];
+        let mut cmd = vec![
+            "cargo".to_string(),
+            "test".into(),
+            "-p".into(),
+            m.name.clone(),
+        ];
         cmd.extend(flags.rest.iter().cloned());
         let job = Job {
             name: format!("cargo-test:{}", m.name),

@@ -65,7 +65,10 @@ impl LedgerEvent {
 }
 
 fn now() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 /// Last event, read from the file tail so appends stay O(1) as the ledger grows.
@@ -87,7 +90,13 @@ fn last_event(path: &Path) -> io::Result<Option<LedgerEvent>> {
 }
 
 /// Seal and append one test event. `payload` is the run's full output.
-pub fn append(root: &Path, agent: &str, target: &str, intent: &str, payload: &[u8]) -> io::Result<LedgerEvent> {
+pub fn append(
+    root: &Path,
+    agent: &str,
+    target: &str,
+    intent: &str,
+    payload: &[u8],
+) -> io::Result<LedgerEvent> {
     fs::create_dir_all(root)?;
     let _guard = FileLock::acquire(&root.join("ledger.lock"))?;
     let path = root.join(LEDGER_FILE);
@@ -98,7 +107,16 @@ pub fn append(root: &Path, agent: &str, target: &str, intent: &str, payload: &[u
     let timestamp = now().max(last_ts);
     let payload_hash = *blake3::hash(payload).as_bytes();
     let action = "test";
-    let hash = compute_hash(index, timestamp, agent, action, target, intent, &payload_hash, &parent_hash);
+    let hash = compute_hash(
+        index,
+        timestamp,
+        agent,
+        action,
+        target,
+        intent,
+        &payload_hash,
+        &parent_hash,
+    );
     let event = LedgerEvent {
         index,
         timestamp,
@@ -127,18 +145,25 @@ pub fn verify(path: &Path) -> Result<(u64, [u8; 32]), String> {
     };
     let (mut expected, mut parent, mut last_ts) = (0u64, [0u8; 32], 0u64);
     for (n, line) in text.lines().filter(|l| !l.trim().is_empty()).enumerate() {
-        let e: LedgerEvent = serde_json::from_str(line).map_err(|err| format!("line {}: {err}", n + 1))?;
+        let e: LedgerEvent =
+            serde_json::from_str(line).map_err(|err| format!("line {}: {err}", n + 1))?;
         if e.index != expected {
             return Err(format!("event {}: index gap, expected {expected}", e.index));
         }
         if e.parent_hash != parent {
-            return Err(format!("event {}: parent hash does not match previous event", e.index));
+            return Err(format!(
+                "event {}: parent hash does not match previous event",
+                e.index
+            ));
         }
         if e.timestamp < last_ts {
             return Err(format!("event {}: timestamp goes backwards", e.index));
         }
         if e.recompute() != e.hash {
-            return Err(format!("event {}: hash mismatch, event was altered", e.index));
+            return Err(format!(
+                "event {}: hash mismatch, event was altered",
+                e.index
+            ));
         }
         expected += 1;
         parent = e.hash;
@@ -166,7 +191,9 @@ mod tests {
         let (count, _) = verify(&path).unwrap();
         assert_eq!(count, 3);
 
-        let tampered = fs::read_to_string(&path).unwrap().replacen("job-1", "job-X", 1);
+        let tampered = fs::read_to_string(&path)
+            .unwrap()
+            .replacen("job-1", "job-X", 1);
         fs::write(&path, tampered).unwrap();
         assert!(verify(&path).unwrap_err().contains("event 1"));
     }

@@ -16,7 +16,9 @@ pub struct Member {
 }
 
 fn rel(root: &Path, p: &Path) -> PathBuf {
-    p.strip_prefix(root).map(Path::to_path_buf).unwrap_or_else(|_| p.to_path_buf())
+    p.strip_prefix(root)
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|_| p.to_path_buf())
 }
 
 /// Returns the workspace root and its members, sorted by name.
@@ -26,14 +28,20 @@ pub fn members(start: &Path) -> io::Result<(PathBuf, Vec<Member>)> {
         .current_dir(start)
         .output()?;
     if !out.status.success() {
-        return Err(io::Error::other(String::from_utf8_lossy(&out.stderr).into_owned()));
+        return Err(io::Error::other(
+            String::from_utf8_lossy(&out.stderr).into_owned(),
+        ));
     }
     let meta: Value = serde_json::from_slice(&out.stdout)?;
     parse(&meta)
 }
 
 pub fn parse(meta: &Value) -> io::Result<(PathBuf, Vec<Member>)> {
-    let root = PathBuf::from(meta["workspace_root"].as_str().ok_or_else(|| io::Error::other("no workspace_root"))?);
+    let root = PathBuf::from(
+        meta["workspace_root"]
+            .as_str()
+            .ok_or_else(|| io::Error::other("no workspace_root"))?,
+    );
     let ids: BTreeSet<&str> = meta["workspace_members"]
         .as_array()
         .map(|a| a.iter().filter_map(Value::as_str).collect())
@@ -54,8 +62,17 @@ pub fn parse(meta: &Value) -> io::Result<(PathBuf, Vec<Member>)> {
             .filter_map(|d| d["path"].as_str())
             .map(|p| rel(&root, Path::new(p)))
             .collect();
-        let gpu = pkg["metadata"]["aien-proof"]["gpu"].as_bool().unwrap_or(false);
-        crates.insert(dir, (pkg["name"].as_str().unwrap_or_default().to_string(), deps, gpu));
+        let gpu = pkg["metadata"]["aien-proof"]["gpu"]
+            .as_bool()
+            .unwrap_or(false);
+        crates.insert(
+            dir,
+            (
+                pkg["name"].as_str().unwrap_or_default().to_string(),
+                deps,
+                gpu,
+            ),
+        );
     }
 
     let mut shared = vec![PathBuf::from("Cargo.toml"), PathBuf::from("Cargo.lock")];
@@ -78,7 +95,11 @@ pub fn parse(meta: &Value) -> io::Result<(PathBuf, Vec<Member>)> {
         }
         let mut inputs: Vec<PathBuf> = seen.into_iter().collect();
         inputs.extend(shared.iter().cloned());
-        members.push(Member { name: name.clone(), inputs, gpu: *gpu });
+        members.push(Member {
+            name: name.clone(),
+            inputs,
+            gpu: *gpu,
+        });
     }
     members.sort_by(|a, b| a.name.cmp(&b.name));
     Ok((root, members))
@@ -105,12 +126,19 @@ mod tests {
         });
         let (_, members) = parse(&meta).unwrap();
         let a = members.iter().find(|m| m.name == "a").unwrap();
-        let dirs: Vec<_> = a.inputs.iter().map(|p| p.to_string_lossy().into_owned()).collect();
+        let dirs: Vec<_> = a
+            .inputs
+            .iter()
+            .map(|p| p.to_string_lossy().into_owned())
+            .collect();
         assert!(dirs.contains(&"crates/a".into()));
         assert!(dirs.contains(&"crates/b".into()));
         assert!(dirs.contains(&"crates/c".into()));
         let c = members.iter().find(|m| m.name == "c").unwrap();
         assert!(c.gpu);
-        assert_eq!(c.inputs.iter().filter(|p| p.starts_with("crates")).count(), 1);
+        assert_eq!(
+            c.inputs.iter().filter(|p| p.starts_with("crates")).count(),
+            1
+        );
     }
 }

@@ -44,7 +44,14 @@ fn git_files(base: &Path, inputs: &[&PathBuf]) -> Option<Vec<PathBuf>> {
     let out = Command::new("git")
         .arg("-C")
         .arg(base)
-        .args(["ls-files", "-z", "--cached", "--others", "--exclude-standard", "--"])
+        .args([
+            "ls-files",
+            "-z",
+            "--cached",
+            "--others",
+            "--exclude-standard",
+            "--",
+        ])
         .args(inputs)
         .output()
         .ok()?;
@@ -56,7 +63,10 @@ fn git_files(base: &Path, inputs: &[&PathBuf]) -> Option<Vec<PathBuf>> {
         .split(|b| *b == 0)
         .filter(|s| !s.is_empty())
         .map(|s| base.join(OsStr::from_bytes(s)))
-        .filter(|p| !p.components().any(|c| SKIP.iter().any(|s| c.as_os_str() == *s)))
+        .filter(|p| {
+            !p.components()
+                .any(|c| SKIP.iter().any(|s| c.as_os_str() == *s))
+        })
         .collect();
     Some(files)
 }
@@ -136,7 +146,14 @@ mod tests {
     }
 
     fn key(root: &Path) -> String {
-        job_key(root, "t", &["cargo".into(), "test".into()], "rustc 1", &[PathBuf::from("src")]).unwrap()
+        job_key(
+            root,
+            "t",
+            &["cargo".into(), "test".into()],
+            "rustc 1",
+            &[PathBuf::from("src")],
+        )
+        .unwrap()
     }
 
     #[test]
@@ -164,7 +181,14 @@ mod tests {
         tree(&root);
         fs::write(root.join(".gitignore"), "*.so\n").unwrap();
         let git = |args: &[&str]| {
-            assert!(Command::new("git").arg("-C").arg(&root).args(args).output().unwrap().status.success());
+            assert!(Command::new("git")
+                .arg("-C")
+                .arg(&root)
+                .args(args)
+                .output()
+                .unwrap()
+                .status
+                .success());
         };
         git(&["init", "-q"]);
         git(&["add", "."]);
@@ -184,7 +208,14 @@ mod tests {
         fs::write(linked.join("lib.rs"), "pub fn a() {}").unwrap();
         std::os::unix::fs::symlink(&linked, root.join("src")).unwrap();
         for args in [&["init", "-q"][..], &["add", "."][..]] {
-            assert!(Command::new("git").arg("-C").arg(&root).args(args).output().unwrap().status.success());
+            assert!(Command::new("git")
+                .arg("-C")
+                .arg(&root)
+                .args(args)
+                .output()
+                .unwrap()
+                .status
+                .success());
         }
         let before = key(&root);
         fs::write(linked.join("lib.rs"), "pub fn b() {}").unwrap();
@@ -197,7 +228,13 @@ mod tests {
         tree(&root);
         let inputs = [PathBuf::from("src")];
         let base = job_key(&root, "t", &["x".into()], "rustc 1", &inputs).unwrap();
-        assert_ne!(base, job_key(&root, "t", &["y".into()], "rustc 1", &inputs).unwrap());
-        assert_ne!(base, job_key(&root, "t", &["x".into()], "rustc 2", &inputs).unwrap());
+        assert_ne!(
+            base,
+            job_key(&root, "t", &["y".into()], "rustc 1", &inputs).unwrap()
+        );
+        assert_ne!(
+            base,
+            job_key(&root, "t", &["x".into()], "rustc 2", &inputs).unwrap()
+        );
     }
 }
