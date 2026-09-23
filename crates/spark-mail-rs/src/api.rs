@@ -129,6 +129,7 @@ async fn handle_ingest_test(
         received_at: now,
         folder: "inbox".to_string(),
         cortex_indexed: false,
+        untrusted: false,
     };
 
     state

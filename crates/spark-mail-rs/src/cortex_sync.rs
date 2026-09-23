@@ -52,6 +52,11 @@ impl CortexSync {
 
     pub async fn commit_mail(&self, msg: &EmailMessage) -> Result<(), String> {
         let token = self.get_cortex_token();
+        let body = if msg.untrusted {
+            crate::effect::render_untrusted_body(&msg.body)
+        } else {
+            msg.body.clone()
+        };
         let formatted_content = format!(
             "From: {}\nTo: {}\nSubject: {}\nDate: {}\nFolder: {}\n\n{}",
             msg.from,
@@ -59,7 +64,7 @@ impl CortexSync {
             msg.subject,
             msg.received_at,
             msg.folder,
-            msg.body
+            body
         );
 
         let payload = json!({
@@ -74,7 +79,10 @@ impl CortexSync {
                     "from": msg.from,
                     "to": msg.to,
                     "folder": msg.folder,
-                    "received_at": msg.received_at
+                    "received_at": msg.received_at,
+                    "untrusted": msg.untrusted,
+                    "tool_calls": [],
+                    "instructions": null
                 },
                 "space": "atlas-memory"
             }

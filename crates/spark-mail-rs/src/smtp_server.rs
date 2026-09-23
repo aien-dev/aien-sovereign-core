@@ -97,7 +97,9 @@ async fn handle_smtp_session(
             // Parse simple email
             let id = Uuid::new_v4().to_string();
             let now = Utc::now().to_rfc3339();
-            let (subject, body, headers) = parse_raw_email(&raw_data);
+            let (subject, body, mut headers) = parse_raw_email(&raw_data);
+            let inbound = crate::effect::InboundBody::from_raw(body);
+            headers.insert("x-aien-trust".to_string(), "untrusted-data".to_string());
 
             let from_addr = if sender.is_empty() {
                 headers
@@ -126,11 +128,12 @@ async fn handle_smtp_session(
                 } else {
                     subject
                 },
-                body,
+                body: inbound.text().to_string(),
                 headers,
                 received_at: now,
                 folder: "inbox".to_string(),
                 cortex_indexed: false,
+                untrusted: inbound.is_untrusted(),
             };
 
             // Save to disk
