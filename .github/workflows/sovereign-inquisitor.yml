@@ -15,6 +15,8 @@ jobs:
     steps:
       - name: Checkout Sovereign Core
         uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
       - name: Build Sovereign Inquisitor
         run: cargo build --release -p spark-inquisitor
@@ -80,6 +82,8 @@ jobs:
     steps:
       - name: Checkout Sovereign Core
         uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
       - name: Build Sovereign Inquisitor
         run: cargo build --release -p spark-inquisitor
@@ -129,6 +133,8 @@ jobs:
     steps:
       - name: Checkout Sovereign Core
         uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
       - name: Build Sovereign Inquisitor
         run: cargo build --release -p spark-inquisitor

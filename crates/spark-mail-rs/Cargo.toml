@@ -23,7 +23,7 @@ imap = "2.4"
 native-tls = "0.2"
 lettre = { version = "0.11", default-features = false, features = ["builder", "smtp-transport", "native-tls", "hostname", "pool"] }
 mailparse = "0.15"
-aien-probe = { path = "../../../aien-protocols/crates/aien-probe" }
+aien-probe = { path = "../../third-party/aien-protocols/crates/aien-probe" }
 cortex-rs = { path = "../cortex-rs" }
 
 [[bin]]
