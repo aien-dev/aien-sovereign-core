@@ -1,5 +1,5 @@
-use aien_inference_service::{InferenceEvent, InferenceRequest, InferenceService};
 use aien_inference_runtime::EmbeddedInferenceService;
+use aien_inference_service::{InferenceEvent, InferenceRequest, InferenceService};
 
 #[tokio::test]
 async fn test_embedded_inference_service_reference_weights() {
