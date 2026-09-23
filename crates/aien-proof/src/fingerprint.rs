@@ -96,6 +96,17 @@ pub fn job_key(
     for input in &outside {
         collect(&base.join(input), &mut files)?;
     }
+    // Git lists a symlinked directory (e.g. a crate linked in from a sibling
+    // repo) as one entry; hash what it points at so edits there void the stamp.
+    let mut expanded = Vec::with_capacity(files.len());
+    for file in files {
+        if fs::metadata(&file).is_ok_and(|m| m.is_dir()) {
+            collect(&file, &mut expanded)?;
+        } else {
+            expanded.push(file);
+        }
+    }
+    let mut files = expanded;
     files.sort();
     files.dedup();
     h.update(&(files.len() as u64).to_be_bytes());
@@ -163,6 +174,20 @@ mod tests {
         assert_eq!(before, key(&root));
         // Untracked source that git does not ignore still counts.
         fs::write(root.join("src/new.rs"), "pub fn n() {}").unwrap();
+        assert_ne!(before, key(&root));
+    }
+
+    #[test]
+    fn edits_behind_a_tracked_directory_symlink_change_the_key() {
+        let (root, linked) = (temp_dir("fp-link"), temp_dir("fp-link-target"));
+        fs::create_dir_all(&root).unwrap();
+        fs::write(linked.join("lib.rs"), "pub fn a() {}").unwrap();
+        std::os::unix::fs::symlink(&linked, root.join("src")).unwrap();
+        for args in [&["init", "-q"][..], &["add", "."][..]] {
+            assert!(Command::new("git").arg("-C").arg(&root).args(args).output().unwrap().status.success());
+        }
+        let before = key(&root);
+        fs::write(linked.join("lib.rs"), "pub fn b() {}").unwrap();
         assert_ne!(before, key(&root));
     }
 
