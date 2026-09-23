@@ -111,8 +111,8 @@ async fn test_runtime_spine_500_branch_benchmark() {
     );
     assert_eq!(
         spine.arena.active_count(),
-        1,
-        "Only the root sequence anchor remains in arena"
+        0,
+        "Natural swarm completion reclaims the root anchor too; zero sequences remain"
     );
 
     let status = spine.status_report();

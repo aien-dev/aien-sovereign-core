@@ -1,5 +1,6 @@
 use colored::*;
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use std::fs;
 use std::io::Write;
 use std::path::Path;
@@ -418,9 +419,44 @@ pub fn dispatch_tool(name: &str, args: &Value) -> Value {
         }
     }
 
+    record_effect_receipt(name, args, &final_res, success);
+
     let elapsed = start.elapsed().as_millis();
     print_tool_done(name, elapsed, success);
     final_res
+}
+
+/// Persist a content-addressed, secret-free receipt for every tool effect.
+/// Arguments and results are hashed, never copied into the receipt.
+fn record_effect_receipt(tool: &str, args: &Value, result: &Value, success: bool) {
+    let digest = |value: &Value| {
+        let bytes = serde_json::to_vec(value).unwrap_or_default();
+        format!("sha256:{}", hex::encode(Sha256::digest(bytes)))
+    };
+    let receipt = json!({
+        "version": 1,
+        "tool": tool,
+        "success": success,
+        "arguments_digest": digest(args),
+        "result_digest": digest(result),
+        "policy": "default_sovereign_engine",
+        "timestamp": chrono::Utc::now().to_rfc3339(),
+    });
+    let dir = std::env::var("AIEN_PROVENANCE_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| std::path::PathBuf::from("/tmp/aien-provenance"));
+    if std::fs::create_dir_all(&dir).is_err() {
+        return;
+    }
+    let id = format!(
+        "{}-{}",
+        chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default(),
+        std::process::id()
+    );
+    let path = dir.join(format!("{}.json", id));
+    if let Ok(bytes) = serde_json::to_vec_pretty(&receipt) {
+        let _ = std::fs::write(path, bytes);
+    }
 }
 
 fn validate_tool_path(path: &str) -> Result<std::path::PathBuf, String> {
@@ -1041,6 +1077,27 @@ mod tests {
     use super::*;
 
     #[test]
+    fn effect_receipt_is_hashed_and_secret_free() {
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("AIEN_PROVENANCE_DIR", dir.path());
+        record_effect_receipt(
+            "write_to_file",
+            &json!({"path":"/tmp/receipt-test","content":"secret-value"}),
+            &json!({"status":"ok"}),
+            true,
+        );
+        let entry = std::fs::read_dir(dir.path())
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap();
+        let text = std::fs::read_to_string(entry.path()).unwrap();
+        assert!(text.contains("arguments_digest"));
+        assert!(!text.contains("secret-value"));
+        std::env::remove_var("AIEN_PROVENANCE_DIR");
+    }
+
+    #[test]
     fn test_adapter_tool_dispatch_list() {
         let args = json!({"action": "list"});
         let res = adapter_dispatch_tool(&args);
@@ -1120,5 +1177,24 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("CONFINEMENT DENIAL"));
+    }
+
+    #[test]
+    fn test_policy_approved_write_reaches_effect_handler() {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let path = format!("/tmp/aien-policy-effect-{}", std::process::id());
+            let args = json!({"path": path, "content": "approved", "overwrite": true});
+            let result = dispatch_tool("write_to_file", &args);
+            assert!(
+                result.get("error").is_none(),
+                "approved write failed: {result}"
+            );
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), "approved");
+            let _ = std::fs::remove_file(path);
+        });
     }
 }

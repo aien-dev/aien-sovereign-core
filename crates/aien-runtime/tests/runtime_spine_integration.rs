@@ -164,12 +164,12 @@ async fn test_swarm_launch_and_step_execution() {
         let _ = spine.step(&mut backend).await.unwrap();
     }
 
-    // 16 child branches have completed and been freed; root sequence remains as context anchor
+    // All 16 branches completed; natural completion reclaims the root anchor too
     assert_eq!(
         spine.arena.active_count(),
-        1,
-        "Only root sequence remains in arena"
+        0,
+        "Swarm completion reclaims the root anchor; zero sequences remain"
     );
     let status = spine.status_report();
-    assert_eq!(status.active_sequences, 1);
+    assert_eq!(status.active_sequences, 0);
 }

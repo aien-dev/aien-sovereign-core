@@ -419,6 +419,9 @@ impl SequenceArena {
     }
 
     /// Inserts a sequence record with an explicit SequenceId (e.g. from upstream caller/runtime).
+    /// Grows the arena to fit the requested slot: a fresh arena has no slots,
+    /// and refusing explicit ids forces auto allocation whose slot numbering
+    /// silently diverges from the caller's ids.
     pub fn insert_with_id(
         &mut self,
         seq_id: SequenceId,
@@ -433,12 +436,17 @@ impl SequenceArena {
         sink_id: Option<CompletionSinkId>,
     ) -> Result<SequenceId, String> {
         let slot_idx = seq_id.slot;
-        if (slot_idx as usize) >= self.slots.len() {
-            return Err(format!(
-                "Slot index {} exceeds arena capacity {}",
-                slot_idx,
-                self.slots.len()
-            ));
+        if seq_id.generation == 0 {
+            return Err("Generation zero is strictly invalid".to_string());
+        }
+        while (slot_idx as usize) >= self.slots.len() {
+            let next = self.slots.len() as u32;
+            self.slots.push(SlotEntry {
+                generation: 1,
+                retired: false,
+                record: None,
+            });
+            self.free_slots.push(next);
         }
         if let Some(pos) = self.free_slots.iter().position(|&s| s == slot_idx) {
             self.free_slots.remove(pos);
