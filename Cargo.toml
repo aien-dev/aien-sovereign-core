@@ -32,6 +32,7 @@ members = [
     "crates/aien-inference-protocol",
     "crates/aien-inference-runtime",
     "crates/cortex-path-m1",
+    "crates/aien-campaign-verifier",
 ]
 
 [workspace.package]
