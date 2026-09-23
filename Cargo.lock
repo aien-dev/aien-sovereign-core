@@ -892,6 +892,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "cortex-path-m1"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "clap",
+ "cortex-rs",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+]
+
+[[package]]
 name = "cortex-rs"
 version = "0.1.0"
 dependencies = [

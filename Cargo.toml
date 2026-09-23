@@ -31,6 +31,7 @@ members = [
     "crates/rad-id-sync",
     "crates/aien-inference-protocol",
     "crates/aien-inference-runtime",
+    "crates/cortex-path-m1",
 ]
 
 [workspace.package]
