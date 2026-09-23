@@ -288,7 +288,7 @@ pub fn sanitize_outbound_prompt(prompt: &str) -> String {
         Regex::new(r"-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----|\b(?:sk-ant-[a-zA-Z0-9_-]{20,}|sk-[a-zA-Z0-9_-]{20,}|AIzaSy[a-zA-Z0-9_-]{30,}|hf_[a-zA-Z0-9_]{30,}|ghp_[a-zA-Z0-9]{20,}|gho_[a-zA-Z0-9]{20,}|ey[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,})\b").unwrap()
     });
     let operator_re = OPERATOR_RE.get_or_init(|| {
-        Regex::new(r"(?i)\b(?:[a-zA-Z0-9._%+-]*(?:drake\.stapleton|drake\.aien|drakestapleton|ballentine)[a-zA-Z0-9._%+-]*@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}|michael\s+drake\s+ballentine|drake\s+ballentine|michael\s+ballentine|drake\s+stapleton|ballentine|drakestapleton|drake\.stapleton)\b").unwrap()
+        Regex::new(r"(?i)\b(?:[a-zA-Z0-9._%+-]*(?:drake\.stapleton|drake\.aien|drakestapleton|ballentine|aien)[a-zA-Z0-9._%+-]*@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}|michael\s+drake\s+ballentine|drake\s+ballentine|michael\s+ballentine|drake\s+stapleton|ballentine|drakestapleton|drake\.stapleton)\b").unwrap()
     });
 
     // 1. Filesystem paths
