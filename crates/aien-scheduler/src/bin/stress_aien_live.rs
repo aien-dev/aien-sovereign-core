@@ -133,10 +133,7 @@ async fn main() {
         encoder_rss
     );
     println!("  max engine Resident Set Size:        {:.2} MB", max_rss);
-    println!(
-        "  aegis daemon Resident Set Size:   {:.2} MB\n",
-        aegis_rss
-    );
+    println!("  aegis daemon Resident Set Size:   {:.2} MB\n", aegis_rss);
 
     // 1. Cortex-rs Vector Memory Call Stress
     stress_cortex_memory(&client).await;
