@@ -8,7 +8,7 @@ repository.workspace = true
 description = "Embedded model execution engine and weights loader"
 
 [dependencies]
-aien-inference-protocol = { path = "../aien-inference-protocol" }
+aien-inference-service = { path = "../aien-inference-service" }
 aien-inference-abi = { path = "../aien-inference-abi" }
 aien-kv-cache = { path = "../aien-kv-cache" }
 aien-scheduler = { path = "../aien-scheduler" }

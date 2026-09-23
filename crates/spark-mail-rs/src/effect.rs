@@ -459,7 +459,7 @@ fn screen_send(
 }
 
 /// Same floor as `aegis-runtime` `enforcement::pre_dispatch_check`. The aegis
-/// crate cannot be linked from this workspace: both own `aien-inference-protocol`.
+/// crate cannot be linked from this workspace: both own `aien-inference-service`.
 fn aegis_pre_dispatch(skill_name: &str, args: &serde_json::Value) -> Result<(), Error> {
     let name = skill_name.trim();
     if name.is_empty() {

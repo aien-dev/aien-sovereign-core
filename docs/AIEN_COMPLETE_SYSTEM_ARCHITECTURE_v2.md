@@ -547,7 +547,7 @@ Current workspace members include:
 - `aien-platform-linux`
 - `aien-runtime`
 - `rad-id-sync`
-- `aien-inference-protocol`
+- `aien-inference-service`
 - `aien-inference-runtime`
 
 The current public `main` has already connected native chat to the runtime socket and connected the native runtime to scheduler/KV/streaming paths.
