@@ -7,3 +7,10 @@ Atlas Framework).
 
 Website: https://github.com/aien-dev/aien-sovereign-core
 Lead Architect: Drake Stapleton <aien@aienos.com>
+
+Licensed under the Apache License, Version 2.0, with LLVM Exceptions
+(SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception). The full, unmodified
+license text is in LICENSE, taken verbatim from the LLVM Project's LICENSE.TXT.
+
+Values and anti-enclosure principles live in the nonbinding COVENANT.md, which
+grants and restricts no legal rights.
