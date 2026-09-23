@@ -7,7 +7,7 @@ use crate::control::{
     ControlCommand, ControlEnvelope, ControlResponse, RuntimeController, RuntimeStatusReport,
 };
 use crate::sequence::{SequenceArena, SequenceId, SequenceState};
-use crate::swarm::{SwarmConfig, SwarmManager};
+use crate::swarm::{SwarmConfig, SwarmManager, SwarmState};
 use crate::world::WorldStore;
 
 use aien_inference_abi::{AienInferenceBackend, SamplingParams, StepMetrics};
@@ -268,14 +268,10 @@ impl AienRuntimeSpine {
                 }
             }
             ControlCommand::GetRuntimeStatus => ControlResponse::Status(self.status_report()),
-            ControlCommand::InspectSwarm(swarm_id) => {
-                if let Some(swarm) = self.swarm_manager.get_swarm(swarm_id) {
-                    let _ = swarm;
-                    ControlResponse::Status(self.status_report())
-                } else {
-                    ControlResponse::Error(format!("Swarm {} not found", swarm_id))
-                }
-            }
+            ControlCommand::InspectSwarm(swarm_id) => match self.swarm_status_report(swarm_id) {
+                Some(report) => ControlResponse::Status(report),
+                None => ControlResponse::Error(format!("Swarm {} not found", swarm_id)),
+            },
             ControlCommand::StreamTurn { .. } => ControlResponse::Error(
                 "StreamTurn is handled on the socket connection, not as a one-shot command".into(),
             ),
@@ -287,6 +283,32 @@ impl AienRuntimeSpine {
         };
 
         resp
+    }
+
+    /// Status scoped to one swarm. Sequence, swarm, and world counts cover only
+    /// this swarm; KV block and page fields describe the shared runtime pool.
+    pub fn swarm_status_report(&self, swarm_id: u64) -> Option<RuntimeStatusReport> {
+        let swarm = self.swarm_manager.get_swarm(swarm_id)?;
+        let running = swarm.state == SwarmState::Running;
+        let active_sequences = if running {
+            swarm
+                .branch_sequences
+                .len()
+                .saturating_sub(swarm.finished_branches.len())
+        } else {
+            0
+        };
+        let active_worlds = swarm
+            .branch_worlds
+            .iter()
+            .filter(|&&w| self.world_store.get_world(w).is_some())
+            .count();
+        Some(RuntimeStatusReport {
+            active_sequences,
+            active_swarms: usize::from(running),
+            active_worlds,
+            ..self.status_report()
+        })
     }
 
     pub fn status_report(&self) -> RuntimeStatusReport {
