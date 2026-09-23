@@ -22,7 +22,7 @@ struct Harness {
     provider: ProviderId,
 }
 
-fn harness(tools: Vec<ToolDescriptor>, outcome: CallOutcome) -> Harness {
+async fn harness(tools: Vec<ToolDescriptor>, outcome: CallOutcome) -> Harness {
     let calls = Arc::new(AtomicUsize::new(0));
     let counted = calls.clone();
     let wire = MemoryWire::new(tools, move |_name, _args| {
@@ -31,7 +31,10 @@ fn harness(tools: Vec<ToolDescriptor>, outcome: CallOutcome) -> Harness {
     });
     let broker = McpBroker::new();
     let provider = ProviderId::new("mail");
-    broker.admit(provider.clone(), Arc::new(wire)).unwrap();
+    broker
+        .admit(provider.clone(), Arc::new(wire))
+        .await
+        .unwrap();
     Harness {
         broker,
         calls,
@@ -55,7 +58,8 @@ async fn discovery_returns_a_snapshot_and_does_not_call_a_tool() {
     let h = harness(
         vec![tool("mail.search", ToolEffects::READ_NETWORK)],
         CallOutcome::Finished(json!({})),
-    );
+    )
+    .await;
     let lane = SpeculativeLane::new(h.broker.clone());
     let snapshot = lane.discovery_snapshot(&h.provider).await.unwrap();
     assert_eq!(snapshot.provider, h.provider);
@@ -74,7 +78,8 @@ async fn read_only_tool_call_runs_on_the_speculative_lane() {
             ToolEffects::READ_NETWORK | ToolEffects::SECRET_BEARING,
         )],
         CallOutcome::Finished(json!({"hits": 1})),
-    );
+    )
+    .await;
     let lane = SpeculativeLane::new(h.broker);
     let result = lane
         .invoke_speculative(SpeculativeToolCall {
@@ -94,7 +99,8 @@ async fn irreversible_tool_call_is_rejected_before_the_session_is_used() {
     let h = harness(
         vec![tool("mail.send", ToolEffects::EXTERNAL_IRREVERSIBLE)],
         CallOutcome::Finished(json!({"sent": true})),
-    );
+    )
+    .await;
     let lane = SpeculativeLane::new(h.broker);
     let err = lane
         .invoke_speculative(SpeculativeToolCall {
@@ -117,7 +123,8 @@ async fn local_ephemeral_requires_a_sandbox() {
             ToolEffects::SPAWN_PROCESS | ToolEffects::LOCAL_EPHEMERAL,
         )],
         CallOutcome::Finished(json!({"ok": true})),
-    );
+    )
+    .await;
     let lane = SpeculativeLane::new(h.broker.clone());
     let err = lane
         .invoke_speculative(SpeculativeToolCall {
@@ -150,7 +157,8 @@ async fn irreversible_work_is_staged_and_the_session_is_not_called() {
             ToolEffects::EXTERNAL_IRREVERSIBLE | ToolEffects::SECRET_BEARING,
         )],
         CallOutcome::Finished(json!({})),
-    );
+    )
+    .await;
     let lane = SpeculativeLane::new(h.broker);
     let intent = lane
         .stage_effect_intent(&h.provider, "mail.send", json!({"to": "a@b.c"}))
@@ -165,7 +173,8 @@ async fn speculation_safe_tool_is_not_staged_as_an_external_effect() {
     let h = harness(
         vec![tool("mail.search", ToolEffects::READ_NETWORK)],
         CallOutcome::Finished(json!({})),
-    );
+    )
+    .await;
     let lane = SpeculativeLane::new(h.broker);
     let err = lane
         .stage_effect_intent(&h.provider, "mail.search", json!({}))
@@ -179,7 +188,8 @@ async fn effect_lane_calls_the_warm_session_when_the_catalog_digest_matches() {
     let h = harness(
         vec![tool("mail.send", ToolEffects::EXTERNAL_IRREVERSIBLE)],
         CallOutcome::Finished(json!({"id": "m1"})),
-    );
+    )
+    .await;
     let speculative = SpeculativeLane::new(h.broker.clone());
     let snapshot = speculative.discovery_snapshot(&h.provider).await.unwrap();
     let epoch = snapshot.session_epoch;
@@ -217,7 +227,10 @@ async fn stale_catalog_digest_does_not_call_the_tool() {
     });
     let broker = McpBroker::new();
     let provider = ProviderId::new("mail");
-    broker.admit(provider.clone(), Arc::new(wire)).unwrap();
+    broker
+        .admit(provider.clone(), Arc::new(wire))
+        .await
+        .unwrap();
     let speculative = SpeculativeLane::new(broker.clone());
     let snapshot = speculative.discovery_snapshot(&provider).await.unwrap();
     let intent = speculative
@@ -252,7 +265,8 @@ async fn a_completed_effect_is_not_sent_twice() {
     let h = harness(
         vec![tool("mail.send", ToolEffects::EXTERNAL_IRREVERSIBLE)],
         CallOutcome::Finished(json!({"id": "m1"})),
-    );
+    )
+    .await;
     let speculative = SpeculativeLane::new(h.broker.clone());
     let snapshot = speculative.discovery_snapshot(&h.provider).await.unwrap();
     let intent = speculative
@@ -288,7 +302,8 @@ async fn an_uncertain_call_is_reconciled_instead_of_retried() {
     let h = harness(
         vec![tool("mail.send", ToolEffects::EXTERNAL_IRREVERSIBLE)],
         CallOutcome::Uncertain,
-    );
+    )
+    .await;
     let speculative = SpeculativeLane::new(h.broker.clone());
     let snapshot = speculative.discovery_snapshot(&h.provider).await.unwrap();
     let intent = speculative

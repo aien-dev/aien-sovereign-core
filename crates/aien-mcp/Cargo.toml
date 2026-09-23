@@ -7,6 +7,8 @@ description = "MCP session manager. Discovery and speculative calls are separate
 
 [dependencies]
 aien-capability = { path = "../aien-capability" }
+async-trait = "0.1"
+rmcp = { version = "3.4.0", features = ["client", "server", "transport-async-rw"] }
 serde_json = "1.0"
 thiserror = "1.0"
-tokio = { version = "1.37", features = ["rt", "macros", "sync"] }
+tokio = { version = "1.37", features = ["rt", "macros", "sync", "io-util"] }

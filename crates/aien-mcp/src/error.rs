@@ -21,4 +21,8 @@ pub enum Error {
     EffectInFlight,
     #[error("tool call rejected: {0}")]
     Rejected(String),
+    #[error("tool `{0}` has no enrolled effect class")]
+    UnclassifiedTool(String),
+    #[error("mcp transport failed: {0}")]
+    Transport(String),
 }

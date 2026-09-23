@@ -14,7 +14,13 @@ pub enum CallOutcome {
     Uncertain,
 }
 
+/// Provider face used by an admitted session.
+///
+/// The methods are async so an `rmcp` peer can sit behind the same seam as an
+/// in-process wire. The trait stays object-safe: the session stores
+/// `Arc<dyn McpWire>` and never hands that handle to J-Space.
+#[async_trait::async_trait]
 pub trait McpWire: Send + Sync {
-    fn list_tools(&self) -> Result<Vec<ToolDescriptor>, Error>;
-    fn call_tool(&self, name: &str, arguments: &Value) -> Result<CallOutcome, Error>;
+    async fn list_tools(&self) -> Result<Vec<ToolDescriptor>, Error>;
+    async fn call_tool(&self, name: &str, arguments: &Value) -> Result<CallOutcome, Error>;
 }
