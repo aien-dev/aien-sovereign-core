@@ -50,8 +50,8 @@ impl McpBroker {
     }
 
     /// Enroll a provider. Speculative branches cannot do this.
-    pub fn admit(&self, provider: ProviderId, wire: Arc<dyn McpWire>) -> Result<(), Error> {
-        let tools = wire.list_tools()?;
+    pub async fn admit(&self, provider: ProviderId, wire: Arc<dyn McpWire>) -> Result<(), Error> {
+        let tools = wire.list_tools().await?;
         let session = McpSession {
             epoch: 1,
             catalog_digest: catalog_digest(&tools),
@@ -109,15 +109,34 @@ impl SpeculativeLane {
         Self { broker }
     }
 
+    /// Refresh an already admitted provider and return the snapshot.
+    ///
+    /// This does not dial. A provider missing from the session map is
+    /// `NotAdmitted`. Opening a transport is enrollment on [`crate::SessionManager`].
     pub async fn discovery_snapshot(
         &self,
         provider: &ProviderId,
     ) -> Result<CapabilitySnapshot, Error> {
-        let inner = self.broker.lock();
+        let wire = {
+            let inner = self.broker.lock();
+            let session = inner
+                .sessions
+                .get(provider.as_str())
+                .ok_or_else(|| Error::NotAdmitted(provider.clone()))?;
+            session.wire.clone()
+        };
+        let tools = wire.list_tools().await?;
+        let mut inner = self.broker.lock();
         let session = inner
             .sessions
-            .get(provider.as_str())
+            .get_mut(provider.as_str())
             .ok_or_else(|| Error::NotAdmitted(provider.clone()))?;
+        let digest = catalog_digest(&tools);
+        if digest != session.catalog_digest {
+            session.epoch = session.epoch.saturating_add(1);
+            session.catalog_digest = digest;
+        }
+        session.tools = tools;
         let generated_at = SystemTime::now();
         Ok(CapabilitySnapshot {
             provider: provider.clone(),
@@ -152,7 +171,7 @@ impl SpeculativeLane {
             }
             session.wire.clone()
         };
-        match wire.call_tool(&call.tool_name, &call.arguments)? {
+        match wire.call_tool(&call.tool_name, &call.arguments).await? {
             CallOutcome::Finished(output) => Ok(ToolResult { output }),
             CallOutcome::Rejected(reason) => Err(Error::Rejected(reason)),
             CallOutcome::Uncertain => Err(Error::ReconciliationRequired),
@@ -245,7 +264,7 @@ impl EffectLane {
             wire
         };
 
-        let outcome = wire.call_tool(&tool_name, &arguments);
+        let outcome = wire.call_tool(&tool_name, &arguments).await;
         let mut inner = self.broker.lock();
         match outcome {
             Ok(CallOutcome::Finished(output)) => {

@@ -25,12 +25,13 @@ impl MemoryWire {
     }
 }
 
+#[async_trait::async_trait]
 impl McpWire for MemoryWire {
-    fn list_tools(&self) -> Result<Vec<ToolDescriptor>, Error> {
+    async fn list_tools(&self) -> Result<Vec<ToolDescriptor>, Error> {
         Ok(self.tools.clone())
     }
 
-    fn call_tool(&self, name: &str, arguments: &Value) -> Result<CallOutcome, Error> {
+    async fn call_tool(&self, name: &str, arguments: &Value) -> Result<CallOutcome, Error> {
         Ok((self.call)(name, arguments))
     }
 }
