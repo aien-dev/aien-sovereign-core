@@ -49,6 +49,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "aien-evaluation-protocol"
+version = "0.1.0"
+dependencies = [
+ "aien-protocol-types",
+ "aien-provenance",
+ "async-trait",
+ "hex",
+ "p256",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 1.0.69",
+ "uuid",
+]
+
+[[package]]
 name = "aien-inference-abi"
 version = "0.1.0"
 dependencies = [
@@ -124,6 +140,22 @@ dependencies = [
  "aien-platform",
  "libc",
  "parking_lot",
+]
+
+[[package]]
+name = "aien-probe"
+version = "0.1.0"
+dependencies = [
+ "aien-evaluation-protocol",
+ "aien-protocol-types",
+ "async-trait",
+ "hex",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 1.0.69",
+ "tokio",
 ]
 
 [[package]]
@@ -3911,9 +3943,11 @@ dependencies = [
 name = "spark-mail-rs"
 version = "0.1.0"
 dependencies = [
+ "aien-probe",
  "axum 0.8.9",
  "chrono",
  "clap",
+ "cortex-rs",
  "imap",
  "lettre",
  "mailparse",
