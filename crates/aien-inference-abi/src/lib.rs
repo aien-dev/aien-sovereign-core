@@ -13,6 +13,7 @@ pub mod blackwell_batch;
 pub mod blackwell_batch_executor;
 pub mod capsule;
 pub mod checkpoint;
+pub mod moe_plan;
 pub mod mojo_backend;
 pub mod tensor;
 pub mod tensor_abi;
@@ -30,6 +31,7 @@ pub use blackwell_batch_executor::{
 };
 pub use capsule::*;
 pub use checkpoint::*;
+pub use moe_plan::*;
 pub use mojo_backend::*;
 pub use tensor::*;
 pub use tensor_abi::*;
