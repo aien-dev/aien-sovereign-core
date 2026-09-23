@@ -30,6 +30,7 @@ pub const QWEN3_A3B_HIDDEN: usize = 2048;
 pub const QWEN3_A3B_INTERMEDIATE: usize = 768;
 pub const QWEN3_A3B_LAYERS: usize = 48;
 const BLOCK: usize = 128;
+pub(crate) const FP8_BLOCK: usize = BLOCK;
 const EXPERTS: usize = QWEN3_CODER_A3B_EXPERTS;
 const TOP_K: usize = QWEN3_CODER_A3B_TOP_K;
 /// Largest safetensors JSON header accepted; real Qwen shards use about 2 MB.
@@ -259,7 +260,7 @@ fn bytes_of(values: &[u16]) -> &[u8] {
 
 /// Resolves a shard filename from the index. Only a single plain path component
 /// is accepted, so an index entry cannot point outside `checkpoint_dir`.
-fn shard_path(checkpoint_dir: &Path, filename: &str) -> Result<PathBuf, Qwen3MoeError> {
+pub(crate) fn shard_path(checkpoint_dir: &Path, filename: &str) -> Result<PathBuf, Qwen3MoeError> {
     let mut components = Path::new(filename).components();
     match (components.next(), components.next()) {
         (Some(Component::Normal(name)), None) if name == filename => Ok(checkpoint_dir.join(name)),
@@ -269,7 +270,7 @@ fn shard_path(checkpoint_dir: &Path, filename: &str) -> Result<PathBuf, Qwen3Moe
     }
 }
 
-struct Shard {
+pub(crate) struct Shard {
     file: File,
     payload_start: u64,
     file_len: u64,
@@ -277,7 +278,7 @@ struct Shard {
 }
 
 impl Shard {
-    fn open(path: &Path) -> Result<Self, Qwen3MoeError> {
+    pub(crate) fn open(path: &Path) -> Result<Self, Qwen3MoeError> {
         let io = |e: std::io::Error| Qwen3MoeError::Io(format!("{}: {e}", path.display()));
         let file = File::open(path).map_err(io)?;
         let file_len = file.metadata().map_err(io)?.len();
@@ -313,7 +314,7 @@ impl Shard {
     }
 
     /// Reads one tensor into `dst` after checking dtype, shape and byte range.
-    fn read(
+    pub(crate) fn read(
         &self,
         name: &str,
         dtype: &str,
@@ -495,7 +496,7 @@ pub fn fp8_e4m3fn_to_f32(bits: u8) -> f32 {
     }
 }
 
-fn fp8_table() -> [f32; 256] {
+pub(crate) fn fp8_table() -> [f32; 256] {
     std::array::from_fn(|bits| fp8_e4m3fn_to_f32(bits as u8))
 }
 
@@ -580,7 +581,7 @@ pub fn reference_router_logits(layer: &Qwen3MoeLayer, x: &[f32], tokens: usize) 
 }
 
 /// out[r] = sum_k W[r, k] * v[k] with W an FP8 [rows, cols] matrix and 128x128 BF16 inverse scales.
-fn dequant_matvec(
+pub(crate) fn dequant_matvec(
     weights: &[u8],
     scales: &[u16],
     rows: usize,
