@@ -217,6 +217,7 @@ dependencies = [
  "aien-security",
  "async-trait",
  "cortex-rs",
+ "libc",
  "parking_lot",
  "serde",
  "serde_json",
