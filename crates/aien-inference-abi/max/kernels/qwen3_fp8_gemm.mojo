@@ -33,7 +33,8 @@ def _gemm_gpu(
     activation_scales: ManagedTensorSlice[dtype=DType.float32, rank=2, ...],
     weights: ManagedTensorSlice[dtype=DType.float8_e4m3fn, rank=3, ...],
     weight_scales: ManagedTensorSlice[dtype=DType.bfloat16, rank=3, ...],
-    offsets: ManagedTensorSlice[dtype=DType.int32, rank=1, ...],
+    offsets: ManagedTensorSlice[dtype=DType.uint32, rank=1, ...],
+    expert_ids: ManagedTensorSlice[dtype=DType.int32, rank=1, ...],
     ctx: DeviceContext,
 ) raises:
     var experts = weights.dim_size(0)
@@ -50,16 +51,21 @@ def _gemm_gpu(
         raise Error("FP8 weight scale shape mismatch")
     if offsets.dim_size(0) != experts + 1:
         raise Error("FP8 expert offset shape mismatch")
+    if expert_ids.dim_size(0) != experts:
+        raise Error("FP8 expert ID shape mismatch")
 
     @parameter
     def mma_kernel(expert_count: Int32, out_channels: Int32, in_channels: Int32):
         var lane = thread_idx.x
-        var expert = block_idx.x
+        var group_id = block_idx.x
+        var expert = Int(expert_ids.load[1](IndexList[1](group_id))[0])
         var out_tile = block_idx.y * 8
         var group = lane // 4
         var quad = lane % 4
-        var begin = Int(offsets.load[1](IndexList[1](expert))[0])
-        var end = Int(offsets.load[1](IndexList[1](expert + 1))[0])
+        var begin = Int(offsets.load[1](IndexList[1](group_id))[0])
+        var end = Int(offsets.load[1](IndexList[1](group_id + 1))[0])
+        if begin == end:
+            return
         # Each warp owns an expert and eight output columns. It walks the
         # expert's ragged rows in 16-row tiles, so the launch grid is compact.
         for row_tile in range(begin, end, 16):
@@ -114,10 +120,11 @@ struct Qwen3GroupedFp8Gemm:
         activation_scales: InputTensor[dtype=DType.float32, rank=2, ...],
         weights: InputTensor[dtype=DType.float8_e4m3fn, rank=3, ...],
         weight_scales: InputTensor[dtype=DType.bfloat16, rank=3, ...],
-        offsets: InputTensor[dtype=DType.int32, rank=1, ...],
+        offsets: InputTensor[dtype=DType.uint32, rank=1, ...],
+        expert_ids: InputTensor[dtype=DType.int32, rank=1, ...],
         ctx: DeviceContext,
     ) raises:
         comptime if target == "gpu":
-            _gemm_gpu(result, activations, activation_scales, weights, weight_scales, offsets, ctx)
+            _gemm_gpu(result, activations, activation_scales, weights, weight_scales, offsets, expert_ids, ctx)
         else:
             raise Error("Grouped FP8 GEMM requires a GPU")

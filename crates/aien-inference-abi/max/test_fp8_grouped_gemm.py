@@ -26,11 +26,11 @@ class GroupedFp8GemmTest(unittest.TestCase):
         ref = DeviceRef.from_device(device)
         rows, experts, channels = 26, 2, 256
 
-        def forward(activations, activation_scales, weights, weight_scales, offsets):
+        def forward(activations, activation_scales, weights, weight_scales, offsets, expert_ids):
             return ops.custom(
                 name="aien.qwen3_moe.grouped_fp8_gemm",
                 device=ref,
-                values=[activations, activation_scales, weights, weight_scales, offsets],
+                values=[activations, activation_scales, weights, weight_scales, offsets, expert_ids],
                 out_types=[TensorType(DType.float32, [rows, channels], device=ref)],
             )[0].tensor
 
@@ -42,7 +42,8 @@ class GroupedFp8GemmTest(unittest.TestCase):
                 TensorType(DType.float32, [rows, 2], device=ref),
                 TensorType(DType.float8_e4m3fn, [experts, channels, channels], device=ref),
                 TensorType(DType.bfloat16, [experts, 2, 2], device=ref),
-                TensorType(DType.int32, [experts + 1], device=ref),
+                TensorType(DType.uint32, [experts + 1], device=ref),
+                TensorType(DType.int32, [experts], device=ref),
             ],
             custom_extensions=[Path(__file__).parent / "kernels"],
         )
@@ -62,17 +63,19 @@ class GroupedFp8GemmTest(unittest.TestCase):
         w = bits[weight_indices]
         a_scale = np.where(np.arange(rows)[:, None] % 2 == 0, 1.0, 0.5).astype(np.float32) * np.array([1.0, 2.0], dtype=np.float32)
         w_scale = np.array([[[1.0, 0.5], [2.0, 1.0]], [[0.5, 2.0], [1.0, 0.5]]], dtype=np.float32)
-        offsets = np.array([0, 19, rows], dtype=np.int32)
+        offsets = np.array([0, 19, rows], dtype=np.uint32)
+        expert_ids = np.array([1, 0], dtype=np.int32)
         actual = model.execute(
             fp8_buffer(a, device),
             Buffer.from_numpy(a_scale).to(device),
             fp8_buffer(w, device),
             bf16_buffer(w_scale, device),
             Buffer.from_numpy(offsets).to(device),
+            Buffer.from_numpy(expert_ids).to(device),
         )[0].to(CPU()).to_numpy()
         expected = np.empty_like(actual)
         for row in range(rows):
-            expert = 0 if row < offsets[1] else 1
+            expert = int(expert_ids[0 if row < offsets[1] else 1])
             for output in range(channels):
                 total = 0.0
                 for block in range(2):

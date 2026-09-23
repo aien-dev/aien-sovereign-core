@@ -117,3 +117,86 @@ def build_qwen3_moe_graph(shape: Qwen3MoeShape, device: DeviceRef) -> Graph:
         ],
         custom_extensions=[Path(__file__).parent / "kernels"],
     )
+
+
+def build_qwen3_moe_fp8_graph(
+    shape: Qwen3MoeShape, device: DeviceRef, *, return_ids: bool = False
+) -> Graph:
+    """Run both expert projections with resident FP8 checkpoint weights."""
+
+    def quantize(activations, channels):
+        result = ops.custom(
+            name="aien.qwen3_moe.quantize_fp8_block128",
+            device=device,
+            values=[activations],
+            out_types=[
+                TensorType(DType.float8_e4m3fn, [shape.tokens * shape.top_k, channels], device=device),
+                TensorType(DType.float32, [shape.tokens * shape.top_k, channels // 128], device=device),
+            ],
+        )
+        return result[0].tensor, result[1].tensor
+
+    def expert_gemm(activations, activation_scales, weights, weight_scales, offsets, expert_ids, channels):
+        return ops.custom(
+            name="aien.qwen3_moe.grouped_fp8_gemm",
+            device=device,
+            values=[activations, activation_scales, weights, weight_scales, offsets, expert_ids],
+            out_types=[
+                TensorType(DType.float32, [shape.tokens * shape.top_k, channels], device=device)
+            ],
+        )[0].tensor
+
+    def forward(x, router, gate_up, gate_up_scales, down, down_scales):
+        logits = ops.cast(x @ ops.transpose(router, 0, 1), DType.float32)
+        routed = ops.custom(
+            name="aien.qwen3_moe.route_top8",
+            device=device,
+            values=[logits],
+            out_types=[
+                TensorType(DType.int32, [shape.tokens, shape.top_k], device=device),
+                TensorType(DType.float32, [shape.tokens, shape.top_k], device=device),
+            ],
+        )
+        ids, probabilities = routed[0].tensor, routed[1].tensor
+        order, offsets, restore, expert_ids, _ = moe_create_indices(
+            ops.reshape(ids, [-1]), shape.experts
+        )
+        gathered = ops.cast(
+            ops.gather(
+                x,
+                ops.cast(ops.floor_div(order, shape.top_k), DType.int32),
+                axis=0,
+            ),
+            DType.float32,
+        )
+        quantized, activation_scales = quantize(gathered, shape.hidden)
+        gate_up_result = expert_gemm(
+            quantized, activation_scales, gate_up, gate_up_scales, offsets, expert_ids,
+            shape.intermediate * 2,
+        )
+        gate = gate_up_result[:, : shape.intermediate]
+        up = gate_up_result[:, shape.intermediate :]
+        activated = gate * ops.sigmoid(gate) * up
+        quantized, activation_scales = quantize(activated, shape.intermediate)
+        expert_output = expert_gemm(
+            quantized, activation_scales, down, down_scales, offsets, expert_ids, shape.hidden,
+        )
+        restored = ops.gather(expert_output, restore, axis=0)
+        restored = ops.reshape(restored, [shape.tokens, shape.top_k, shape.hidden])
+        weighted = restored * ops.unsqueeze(probabilities, axis=2)
+        output = ops.cast(ops.squeeze(ops.sum(weighted, axis=1), axis=1), DType.bfloat16)
+        return (output, ids, logits) if return_ids else output
+
+    return Graph(
+        "aien_qwen3_coder_a3b_moe_fp8",
+        forward=forward,
+        input_types=[
+            TensorType(DType.bfloat16, [shape.tokens, shape.hidden], device=device),
+            TensorType(DType.bfloat16, [shape.experts, shape.hidden], device=device),
+            TensorType(DType.float8_e4m3fn, [shape.experts, shape.intermediate * 2, shape.hidden], device=device),
+            TensorType(DType.bfloat16, [shape.experts, shape.intermediate * 2 // 128, shape.hidden // 128], device=device),
+            TensorType(DType.float8_e4m3fn, [shape.experts, shape.hidden, shape.intermediate], device=device),
+            TensorType(DType.bfloat16, [shape.experts, shape.hidden // 128, shape.intermediate // 128], device=device),
+        ],
+        custom_extensions=[Path(__file__).parent / "kernels"],
+    )

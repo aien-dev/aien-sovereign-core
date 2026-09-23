@@ -8,7 +8,12 @@ from max.dtype import DType
 from max.engine import InferenceSession
 from max.graph import DeviceRef
 
-from qwen3_moe import Qwen3MoeShape, build_fp8_unpack_graph, build_qwen3_moe_graph
+from qwen3_moe import (
+    Qwen3MoeShape,
+    build_fp8_unpack_graph,
+    build_qwen3_moe_graph,
+    build_qwen3_moe_fp8_graph,
+)
 
 
 def bf16_buffer(values: np.ndarray, device: Accelerator) -> Buffer:
@@ -28,6 +33,34 @@ def read_bf16(buffer: Buffer) -> np.ndarray:
 
 @unittest.skipUnless(accelerator_count() > 0, "requires a MAX accelerator")
 class Qwen3MoeGpuTest(unittest.TestCase):
+    def test_native_fp8_complete_routed_layer(self) -> None:
+        shape = Qwen3MoeShape(tokens=2, hidden=128, intermediate=128)
+        device = Accelerator()
+        device_ref = DeviceRef.from_device(device)
+        session = InferenceSession(devices=[device])
+        layer = session.init(session.compile(build_qwen3_moe_fp8_graph(shape, device_ref)))
+
+        gate_up = np.zeros((128, 256, 128), dtype=np.uint8)
+        down = np.zeros((128, 128, 128), dtype=np.uint8)
+        for expert in range(128):
+            for channel in range(128):
+                gate_up[expert, channel, channel] = 0x38
+                gate_up[expert, 128 + channel, channel] = 0x38
+                down[expert, channel, channel] = 0x38
+        x = np.ones((2, 128), dtype=np.float32)
+        router = np.zeros((128, 128), dtype=np.float32)
+        actual = read_bf16(layer.execute(
+            bf16_buffer(x, device),
+            bf16_buffer(router, device),
+            fp8_buffer(gate_up, device),
+            bf16_buffer(np.ones((128, 2, 1), dtype=np.float32), device),
+            fp8_buffer(down, device),
+            bf16_buffer(np.ones((128, 1, 1), dtype=np.float32), device),
+        )[0])
+        expected = 1.0 / (1.0 + np.exp(-1.0))
+        self.assertEqual(actual.shape, (2, 128))
+        self.assertLess(np.max(np.abs(actual - expected)), 0.01)
+
     def test_fp8_upload_and_complete_routed_layer(self) -> None:
         shape = Qwen3MoeShape(tokens=2, hidden=128, intermediate=128)
         device = Accelerator()

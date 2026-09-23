@@ -12,7 +12,12 @@ from max.engine import InferenceSession
 from max.graph import DeviceRef
 
 from checkpoint_fp8 import load_fp8_moe_layer
-from qwen3_moe import Qwen3MoeShape, build_fp8_unpack_graph, build_qwen3_moe_graph
+from qwen3_moe import (
+    Qwen3MoeShape,
+    build_fp8_unpack_graph,
+    build_qwen3_moe_graph,
+    build_qwen3_moe_fp8_graph,
+)
 
 
 def main() -> None:
@@ -21,6 +26,7 @@ def main() -> None:
     parser.add_argument("--layer", type=int, default=0)
     parser.add_argument("--tokens", type=int, default=500)
     parser.add_argument("--repeats", type=int, default=3)
+    parser.add_argument("--fp8", action="store_true", help="benchmark native FP8 expert GEMMs")
     args = parser.parse_args()
     if args.tokens < 1 or args.repeats < 1:
         parser.error("tokens and repeats must be positive")
@@ -30,13 +36,20 @@ def main() -> None:
     ref = DeviceRef.from_device(device)
     session = InferenceSession(devices=[device])
     shape = Qwen3MoeShape(tokens=args.tokens)
-    unpack = session.init(session.compile(build_fp8_unpack_graph(shape, ref)))
-    layer = session.init(session.compile(build_qwen3_moe_graph(shape, ref)))
+    if args.fp8:
+        layer = session.init(session.compile(build_qwen3_moe_fp8_graph(shape, ref)))
+    else:
+        unpack = session.init(session.compile(build_fp8_unpack_graph(shape, ref)))
+        layer = session.init(session.compile(build_qwen3_moe_graph(shape, ref)))
     router, gate_up, gate_up_scales, down, down_scales = packed.to_device(device)
-    resident_gate_up, resident_down = unpack.execute(
-        gate_up, gate_up_scales, down, down_scales
-    )
-    del gate_up, gate_up_scales, down, down_scales
+    if args.fp8:
+        weights = (gate_up, gate_up_scales, down, down_scales)
+    else:
+        resident_gate_up, resident_down = unpack.execute(
+            gate_up, gate_up_scales, down, down_scales
+        )
+        del gate_up, gate_up_scales, down, down_scales
+        weights = (resident_gate_up, resident_down)
 
     rng = np.random.default_rng(42)
     x = rng.normal(0.0, 0.25, (args.tokens, 2048)).astype(np.float32)
@@ -46,7 +59,7 @@ def main() -> None:
 
     def run_once() -> float:
         started = time.perf_counter()
-        output = layer.execute(x_device, router, resident_gate_up, resident_down)[0]
+        output = layer.execute(x_device, router, *weights)[0]
         output.to(CPU())  # Synchronize the device queue for a complete layer time.
         return time.perf_counter() - started
 
@@ -60,6 +73,7 @@ def main() -> None:
     probability = active / active.sum()
     receipt = {
         "model": "Qwen3-Coder-30B-A3B-Instruct-FP8",
+        "expert_compute": "fp8_mma" if args.fp8 else "bf16_grouped",
         "layer": args.layer,
         "tokens": args.tokens,
         "top_k": 8,

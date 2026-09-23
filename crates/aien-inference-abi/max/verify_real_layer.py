@@ -15,7 +15,12 @@ from max.engine import InferenceSession
 from max.graph import DeviceRef
 
 from checkpoint_fp8 import load_fp8_moe_layer
-from qwen3_moe import Qwen3MoeShape, build_fp8_unpack_graph, build_qwen3_moe_graph
+from qwen3_moe import (
+    Qwen3MoeShape,
+    build_fp8_unpack_graph,
+    build_qwen3_moe_graph,
+    build_qwen3_moe_fp8_graph,
+)
 
 
 def bf16_to_float(bits: np.ndarray) -> np.ndarray:
@@ -47,68 +52,102 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("checkpoint_dir", type=Path)
     parser.add_argument("--layer", type=int, default=0)
+    parser.add_argument("--fp8", action="store_true", help="use native FP8 expert GEMMs")
+    parser.add_argument("--seed", type=int, help="seed a random hidden vector instead of using ones")
+    parser.add_argument("--tokens", type=int, default=1)
     args = parser.parse_args()
+    if args.tokens < 1:
+        parser.error("tokens must be positive")
 
     started = time.monotonic()
     packed = load_fp8_moe_layer(args.checkpoint_dir, args.layer)
     print(f"checkpoint layer packed in {time.monotonic() - started:.2f}s", flush=True)
     device = Accelerator()
     ref = DeviceRef.from_device(device)
-    shape = Qwen3MoeShape(tokens=1)
+    shape = Qwen3MoeShape(tokens=args.tokens)
     session = InferenceSession(devices=[device])
-    unpack = session.init(session.compile(build_fp8_unpack_graph(shape, ref)))
-    layer = session.init(session.compile(build_qwen3_moe_graph(shape, ref)))
+    if args.fp8:
+        layer = session.init(session.compile(build_qwen3_moe_fp8_graph(shape, ref, return_ids=True)))
+    else:
+        unpack = session.init(session.compile(build_fp8_unpack_graph(shape, ref)))
+        layer = session.init(session.compile(build_qwen3_moe_graph(shape, ref)))
     print("MAX graphs compiled", flush=True)
 
     router, gate_up, gate_up_scales, down, down_scales = packed.to_device(device)
-    resident_gate_up, resident_down = unpack.execute(
-        gate_up, gate_up_scales, down, down_scales
-    )
-    del gate_up, gate_up_scales, down, down_scales
-    x = np.ones((1, 2048), dtype=np.float32)
+    if args.fp8:
+        weights = (gate_up, gate_up_scales, down, down_scales)
+    else:
+        resident_gate_up, resident_down = unpack.execute(
+            gate_up, gate_up_scales, down, down_scales
+        )
+        del gate_up, gate_up_scales, down, down_scales
+        weights = (resident_gate_up, resident_down)
+    x = (np.random.default_rng(args.seed).normal(0.0, 0.25, (args.tokens, 2048)).astype(np.float32)
+         if args.seed is not None else np.ones((args.tokens, 2048), dtype=np.float32))
     x_bits = (x.view(np.uint32) >> 16).astype(np.uint16)
+    x = bf16_to_float(x_bits)
     x_device = Buffer.from_numpy(x_bits).view(DType.bfloat16).to(device)
-    output = layer.execute(x_device, router, resident_gate_up, resident_down)[0]
+    outputs = layer.execute(x_device, router, *weights)
+    output = outputs[0]
     output_bits = output.to(CPU()).view(DType.uint16).to_numpy()
-    actual = bf16_to_float(output_bits)[0]
+    actual = bf16_to_float(output_bits)
     if not np.isfinite(actual).all():
         raise AssertionError("MAX MoE output contains non-finite values")
-    print(f"MAX output shape={actual.shape}, sample={actual[:8]}", flush=True)
+    print(f"MAX output shape={actual.shape}, sample={actual[0, :8]}", flush=True)
 
     # Independent CPU reference decodes only the eight selected experts.
     router_f32 = bf16_to_float(packed.router_bf16)
-    logits = router_f32 @ x[0]
-    selected = np.argsort(-logits, kind="stable")[:8]
-    scores = np.exp(logits[selected] - logits[selected[0]])
-    scores /= scores.sum()
+    logits = x @ router_f32.T
+    selected = np.argsort(-logits, axis=1, kind="stable")[:, :8]
+    if args.fp8:
+        gpu_ids = outputs[1].to(CPU()).to_numpy()
+        gpu_logits = outputs[2].to(CPU()).to_numpy()
+        expected_gpu_ids = np.argsort(-gpu_logits, axis=1, kind="stable")[:, :8]
+        if not np.array_equal(gpu_ids, expected_gpu_ids):
+            token = int(np.flatnonzero(np.any(gpu_ids != expected_gpu_ids, axis=1))[0])
+            raise AssertionError(
+                f"Mojo router diverges from GPU logits at token {token}: "
+                f"Mojo={gpu_ids[token].tolist()} sorted={expected_gpu_ids[token].tolist()}"
+            )
+        logit_error = float(np.max(np.abs(gpu_logits - logits)))
+        print(f"max_router_logit_error={logit_error:.6f}", flush=True)
+        if logit_error > 0.02 * max(1.0, float(np.max(np.abs(logits)))):
+            raise AssertionError("GPU router matmul diverges from BF16 CPU reference")
+        # The GPU's BF16 reduction can reorder experts separated by only a
+        # few ULPs. Use its logits for the independent expert computation.
+        logits = gpu_logits
+        selected = gpu_ids
     lut = fp8_lookup()
-    expected = np.zeros(2048, dtype=np.float32)
-    for expert, score in zip(selected, scores):
-        gate = dequant(
-            packed.gate_up_fp8[expert, :768],
-            packed.gate_up_scales_bf16[expert, :6],
-            lut,
-        ) @ x[0]
-        up = dequant(
-            packed.gate_up_fp8[expert, 768:],
-            packed.gate_up_scales_bf16[expert, 6:],
-            lut,
-        ) @ x[0]
-        hidden = (gate / (1.0 + np.exp(-np.clip(gate, -80, 80)))) * up
-        expert_out = dequant(
-            packed.down_fp8[expert], packed.down_scales_bf16[expert], lut
-        ) @ hidden
-        expected += score * expert_out
+    expected = np.zeros_like(actual)
+    for token in range(args.tokens):
+        scores = np.exp(logits[token, selected[token]] - logits[token, selected[token, 0]])
+        scores /= scores.sum()
+        for expert, score in zip(selected[token], scores):
+            gate = dequant(
+                packed.gate_up_fp8[expert, :768],
+                packed.gate_up_scales_bf16[expert, :6],
+                lut,
+            ) @ x[token]
+            up = dequant(
+                packed.gate_up_fp8[expert, 768:],
+                packed.gate_up_scales_bf16[expert, 6:],
+                lut,
+            ) @ x[token]
+            hidden = (gate / (1.0 + np.exp(-np.clip(gate, -80, 80)))) * up
+            expert_out = dequant(
+                packed.down_fp8[expert], packed.down_scales_bf16[expert], lut
+            ) @ hidden
+            expected[token] += score * expert_out
     absolute = np.abs(actual - expected)
     relative = absolute / np.maximum(np.abs(expected), 0.05)
-    cosine = float(actual @ expected / (np.linalg.norm(actual) * np.linalg.norm(expected)))
+    cosine = float(np.sum(actual * expected) / (np.linalg.norm(actual) * np.linalg.norm(expected)))
     print(
-        f"layer={args.layer} selected={selected.tolist()} "
+        f"layer={args.layer} tokens={args.tokens} selected_first={selected[0].tolist()} "
         f"max_abs={absolute.max():.6f} p95_rel={np.percentile(relative, 95):.6f} "
         f"cosine={cosine:.8f}",
         flush=True,
     )
-    if cosine < 0.995 or np.percentile(relative, 95) > 0.15:
+    if cosine < (0.9995 if args.fp8 else 0.995) or np.percentile(relative, 95) > (0.10 if args.fp8 else 0.15):
         raise AssertionError("MAX MoE layer diverges from FP8 CPU reference")
 
 
