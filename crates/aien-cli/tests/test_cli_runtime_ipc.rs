@@ -14,6 +14,8 @@ async fn test_cli_runtime_ipc_lifecycle() {
     let temp_dir = TempDir::new().expect("Failed to create tempdir");
     let socket_path = temp_dir.path().join("aien-test.sock");
     std::env::set_var("AIEN_RUNTIME_SOCK", socket_path.to_str().unwrap());
+    // Keep the idempotency log out of the shared /tmp default used by a live runtime.
+    std::env::set_var("AIEN_RUNTIME_STATE_DIR", temp_dir.path());
 
     let kv_manager = create_shared_kv_manager(512, 16);
     let sched_cfg = SchedulerConfig {

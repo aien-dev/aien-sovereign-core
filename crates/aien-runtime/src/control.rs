@@ -135,7 +135,13 @@ impl RuntimeController {
         self.processed_operations.insert(op_id);
         let ids: Vec<u128> = self.processed_operations.iter().copied().collect();
         if let Ok(bytes) = serde_json::to_vec(&ids) {
-            let _ = std::fs::write(operations_state_path(), bytes);
+            // Write then rename: a crash mid-write must not leave a truncated
+            // file, which new() would silently discard, losing idempotency.
+            let path = operations_state_path();
+            let tmp = path.with_extension(format!("json.tmp.{}", std::process::id()));
+            if std::fs::write(&tmp, bytes).is_ok() && std::fs::rename(&tmp, &path).is_err() {
+                let _ = std::fs::remove_file(&tmp);
+            }
         }
     }
 }
