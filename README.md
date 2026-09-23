@@ -42,7 +42,7 @@ For raw telemetry datasets, reproducible verification scripts, and SVG compariso
 
 ### Canonical Grace Blackwell GB10 Silicon Proof (Run `gb10_canonical_1789907893_4d762`)
 
-Physical hardware verification executed on the NVIDIA DGX Spark Grace Blackwell GB10 workstation (`sm_121`, 128 GB Unified LPDDR5X memory, NVLink-C2C 900 GB/s bidirectional interconnect, zero fallback `fallback_count: 0`):
+Physical hardware verification executed on the NVIDIA DGX Spark Grace Blackwell GB10 workstation (`sm_121`, 128 GB Unified LPDDR5X memory, NVLink-C2C 900 GB/s bidirectional interconnect). The recorded fallback counter was zero for the GPU operations instrumented by this benchmark. The current counter does not observe all CPU-executed operations; C1 is adding per-operation device provenance:
 - **Continuous Batching (TinyLlama-1.1B BF16)**: Peak 553.14 tokens/sec at concurrency C=16 (23.56 ms p50 step latency, 27.89 W); saturated 510.16 tokens/sec at C=64 (101.70 ms p50 step latency, 42.52 W).
 - **Branch-Native Reasoning (500 Branches, 32,768 Prefix Tokens)**: 2.06 µs median fork latency per branch (1.20 ms total fork time), 500.0x physical memory savings ratio (704 MB physical paged blocks vs 343.75 GB unshared copy), 13.04 µs cold fork to first token, and 13.30 µs copy-on-write page mutation.
 - **Cryptographic Provenance Receipts**: Complete raw telemetry manifests and SHA-256 digests are published in [`benchmarks/artifacts/gb10_canonical_1789907893_4d762/`](https://github.com/aien-dev/benchmarks/tree/main/artifacts/gb10_canonical_1789907893_4d762) and cataloged on the trust hub at [drakestapleton.com/evidence](https://drakestapleton.com/evidence#claim-branching-fork-gb10).

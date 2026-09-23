@@ -219,7 +219,7 @@ The integration spine milestone verifies that the six frozen boundaries operate 
    - 32 decode tokens generated per branch.
 2. **Acceptance Criteria**:
    - 500/500 branches complete successfully with verified token parity.
-   - Zero CPU fallback events (`fallback_count == 0`).
+   - Zero recorded fallback events on instrumented GPU operations. The current counter does not observe all CPU-executed operations; C1 is adding per-operation device provenance.
    - Zero stale `SequenceId` completions committed.
    - KV page physical sharing ratio $\ge 95\%$.
    - Telemetry emitted to CLI and cryptographic receipt committed to `.rsi/ledger.db`.
