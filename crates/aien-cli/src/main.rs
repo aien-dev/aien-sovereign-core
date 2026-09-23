@@ -2,6 +2,7 @@
 mod client;
 mod commands;
 pub mod compaction;
+mod context7;
 pub mod cortex;
 mod crumbs;
 pub mod goals;
@@ -105,6 +106,10 @@ async fn main() {
             };
             let _ = handle_slash_command(&cmd).await;
             return;
+        }
+        if args[1] == "context7-sync" || args[1] == "--context7-sync" {
+            let code = context7::sync_to_cortex().await;
+            std::process::exit(code);
         }
         if args[1] == "--cortex" || args[1] == "cortex" {
             let cmd = if args.len() > 2 {

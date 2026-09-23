@@ -8,6 +8,8 @@ use std::io::Read;
 use std::path::Path;
 
 const SKILL_METADATA_BYTE_LIMIT: u64 = 16 * 1024;
+const PREVIEW_BYTE_LIMIT: u64 = 32 * 1024;
+const SEARCH_BYTE_LIMIT: u64 = 256 * 1024;
 const DEFAULT_PREVIEW_TOKENS: usize = 96;
 const MAX_PREVIEW_TOKENS: usize = 256;
 const DEFAULT_SEARCH_SNIPPET_TOKENS: usize = 80;
@@ -47,12 +49,22 @@ fn extract_frontmatter_field(content: &str, field: &str) -> Option<String> {
 }
 
 fn read_prefix(path: &Path, byte_limit: u64) -> String {
-    let Ok(file) = File::open(path) else {
-        return String::new();
-    };
+    read_capped(path, byte_limit)
+        .map(|(text, _)| text)
+        .unwrap_or_default()
+}
+
+fn read_capped(path: &Path, byte_limit: u64) -> Result<(String, bool), String> {
+    let file = File::open(path).map_err(|e| e.to_string())?;
+    let len = file.metadata().map(|meta| meta.len()).unwrap_or(0);
     let mut bytes = Vec::new();
-    let _ = file.take(byte_limit).read_to_end(&mut bytes);
-    String::from_utf8_lossy(&bytes).into_owned()
+    file.take(byte_limit)
+        .read_to_end(&mut bytes)
+        .map_err(|e| e.to_string())?;
+    Ok((
+        String::from_utf8_lossy(&bytes).into_owned(),
+        len > byte_limit,
+    ))
 }
 
 fn body_without_frontmatter(content: &str) -> &str {
@@ -255,12 +267,17 @@ fn find_skill(name: &str) -> Result<Skill, String> {
         .ok_or_else(|| format!("Skill '{}' not found in discovered skill paths", name))
 }
 
-pub fn preview_skill(name: &str, token_limit: usize) -> Result<Value, String> {
-    let skill = find_skill(name)?;
-    let content = fs::read_to_string(&skill.path).map_err(|e| e.to_string())?;
-    let paragraph = first_body_paragraph(&content);
+fn preview_from_content(content: &str, token_limit: usize) -> (String, usize, bool) {
+    let paragraph = first_body_paragraph(content);
     let limit = token_limit.clamp(1, MAX_PREVIEW_TOKENS);
     let (preview, truncated) = truncate_tokens(paragraph, limit);
+    (preview, limit, truncated)
+}
+
+pub fn preview_skill(name: &str, token_limit: usize) -> Result<Value, String> {
+    let skill = find_skill(name)?;
+    let (content, scan_truncated) = read_capped(Path::new(&skill.path), PREVIEW_BYTE_LIMIT)?;
+    let (preview, limit, truncated) = preview_from_content(&content, token_limit);
     Ok(json!({
         "status": "ok",
         "mode": "preview",
@@ -268,9 +285,38 @@ pub fn preview_skill(name: &str, token_limit: usize) -> Result<Value, String> {
         "description": skill.description,
         "preview": preview,
         "token_limit": limit,
-        "truncated": truncated,
+        "truncated": truncated || scan_truncated,
         "next": "Use skill search for a targeted passage or skill full for explicit full context."
     }))
+}
+
+fn search_paragraphs(content: &str, terms: &[String], limit: usize) -> Vec<Value> {
+    let mut ranked: Vec<(usize, usize, String)> = body_without_frontmatter(content)
+        .split("\n\n")
+        .enumerate()
+        .filter_map(|(index, paragraph)| {
+            let paragraph = paragraph.trim();
+            let lower = paragraph.to_lowercase();
+            let score = terms
+                .iter()
+                .map(|term| lower.matches(term).count())
+                .sum::<usize>();
+            (score > 0).then(|| {
+                let (snippet, truncated) =
+                    truncate_tokens(paragraph, DEFAULT_SEARCH_SNIPPET_TOKENS);
+                let suffix = if truncated { " ..." } else { "" };
+                (score, index, format!("{snippet}{suffix}"))
+            })
+        })
+        .collect();
+    ranked.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+    ranked
+        .into_iter()
+        .take(limit.clamp(1, 8))
+        .map(|(score, paragraph, snippet)| {
+            json!({"score": score, "paragraph": paragraph, "snippet": snippet})
+        })
+        .collect()
 }
 
 fn discover_matching_skills(query: &str, limit: usize) -> Vec<Value> {
@@ -310,7 +356,6 @@ fn discover_matching_skills(query: &str, limit: usize) -> Vec<Value> {
 
 pub fn search_skill(name: &str, query: &str, limit: usize) -> Result<Value, String> {
     let skill = find_skill(name)?;
-    let content = fs::read_to_string(&skill.path).map_err(|e| e.to_string())?;
     let terms: Vec<String> = query
         .split_whitespace()
         .map(|term| term.to_lowercase())
@@ -320,38 +365,15 @@ pub fn search_skill(name: &str, query: &str, limit: usize) -> Result<Value, Stri
         return Err("Skill search requires a non-empty query".to_string());
     }
 
-    let mut ranked: Vec<(usize, usize, String)> = body_without_frontmatter(&content)
-        .split("\n\n")
-        .enumerate()
-        .filter_map(|(index, paragraph)| {
-            let paragraph = paragraph.trim();
-            let lower = paragraph.to_lowercase();
-            let score = terms
-                .iter()
-                .map(|term| lower.matches(term).count())
-                .sum::<usize>();
-            (score > 0).then(|| {
-                let (snippet, truncated) =
-                    truncate_tokens(paragraph, DEFAULT_SEARCH_SNIPPET_TOKENS);
-                let suffix = if truncated { " ..." } else { "" };
-                (score, index, format!("{}{}", snippet, suffix))
-            })
-        })
-        .collect();
-    ranked.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
-    let matches: Vec<Value> = ranked
-        .into_iter()
-        .take(limit.clamp(1, 8))
-        .map(|(score, paragraph, snippet)| {
-            json!({"score": score, "paragraph": paragraph, "snippet": snippet})
-        })
-        .collect();
+    let (content, scan_truncated) = read_capped(Path::new(&skill.path), SEARCH_BYTE_LIMIT)?;
+    let matches = search_paragraphs(&content, &terms, limit);
     Ok(json!({
         "status": "ok",
         "mode": "search",
         "name": skill.name,
         "query": query,
-        "matches": matches
+        "matches": matches,
+        "scan_truncated": scan_truncated
     }))
 }
 
@@ -472,5 +494,28 @@ mod tests {
     fn frontmatter_is_not_returned_as_body() {
         let content = "---\nname: test\n---\nFirst paragraph.\n\nSecond paragraph.";
         assert_eq!(first_body_paragraph(content), "First paragraph.");
+    }
+
+    #[test]
+    fn preview_stops_at_the_first_paragraph() {
+        let content = "---\nname: huge\ndescription: Large skill\n---\n# Heading\n\nAlpha beta gamma.\n\nLater delta epsilon, which must stay out of the preview.";
+        let (preview, limit, truncated) = preview_from_content(content, 96);
+        assert_eq!(preview, "Alpha beta gamma.");
+        assert_eq!(limit, 96);
+        assert!(!truncated);
+        assert!(!preview.contains("delta"));
+    }
+
+    #[test]
+    fn search_returns_one_matching_paragraph() {
+        let content = "---\nname: huge\n---\nUnrelated opening.\n\nThe reactor uses a graphite moderator.\n\nAnother note about orchards.";
+        let terms = vec!["graphite".to_string(), "moderator".to_string()];
+        let matches = search_paragraphs(content, &terms, 3);
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0]["paragraph"], 1);
+        assert!(matches[0]["snippet"]
+            .as_str()
+            .unwrap()
+            .contains("graphite moderator"));
     }
 }

@@ -25,6 +25,7 @@ use crate::nesting::perform_nesting_ritual;
 use crate::telemetry::get_gpu_telemetry;
 use colored::*;
 use reqwest::Client;
+use serde_json::json;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::Path;
@@ -50,6 +51,8 @@ pub async fn handle_slash_command(cmd: &str) -> bool {
             println!("{}", "\nAvailable Slash Commands:".cyan().bold());
             println!(
                 "  /skill [list|preview|search|full|optimize] CPU-filtered skill access
+  /context7 resolve <library> [query] | /context7 query <library_id> <query>
+  context7-sync             Refresh Rust, Mojo, MAX, Tokio, Axum, and Serde docs into Cortex
   /sandbox [init|status|test|promote|clean] Isolated Git worktree sandbox
   /browser [test|mentor]    Headless Chrome CDP mirror self-testing & mentoring
   /subagents [list|view|run] Recursive contextual subagents hierarchy
@@ -360,6 +363,38 @@ pub async fn handle_slash_command(cmd: &str) -> bool {
             let cwd = std::env::current_dir()
                 .unwrap_or_else(|_| crate::platform::PlatformContext::detect().home_dir);
             println!("{}", crate::rules::format_rules_tui(&cwd));
+            true
+        }
+        "/context7" => {
+            let result = if parts.len() < 3 {
+                json!({"status": "error", "error": "Usage: /context7 resolve <library> [query] | /context7 query <library_id> <query>"})
+            } else if parts[1] == "resolve" {
+                let library = parts[2];
+                let query = if parts.len() > 3 {
+                    parts[3..].join(" ")
+                } else {
+                    library.to_string()
+                };
+                crate::context7::context7_dispatch(&json!({
+                    "action": "resolve",
+                    "library": library,
+                    "query": query
+                }))
+                .await
+            } else if parts[1] == "query" && parts.len() >= 4 {
+                crate::context7::context7_dispatch(&json!({
+                    "action": "query",
+                    "library_id": parts[2],
+                    "query": parts[3..].join(" ")
+                }))
+                .await
+            } else {
+                json!({"status": "error", "error": "Usage: /context7 resolve <library> [query] | /context7 query <library_id> <query>"})
+            };
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&result).unwrap_or_default()
+            );
             true
         }
         "/skill" | "/skills" => {
