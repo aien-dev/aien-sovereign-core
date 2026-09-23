@@ -29,7 +29,7 @@ members = [
     "crates/aien-platform-linux",
     "crates/aien-runtime",
     "crates/rad-id-sync",
-    "crates/aien-inference-protocol",
+    "crates/aien-inference-service",
     "crates/aien-inference-runtime",
     "crates/cortex-path-m1",
 ]
