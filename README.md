@@ -1,23 +1,69 @@
-# AIEN Sovereign Core
+# AIEN Neural Runtime
+
+**A sovereign agent and inference runtime.** Native Rust workspace: agent CLI and runtime composition, persistent memory, physical KV-cache management, continuous-batching scheduler, inference ABI with Modular MAX bridges, and telemetry surfaces. Primary reference hardware is NVIDIA DGX Spark (Grace Blackwell GB10).
 
 [![License](https://img.shields.io/badge/License-Apache--2.0-blue.svg)](LICENSE)
-[![Target](https://img.shields.io/badge/Target-Multi--Platform%20%7C%20Apple%20Silicon%20%7C%20Linux%20%7C%20NVIDIA-76B900.svg)](https://github.com/aien-dev/benchmarks)
 [![Rust](https://img.shields.io/badge/Rust-1.85+-orange.svg)](https://www.rust-lang.org)
 [![Modular MAX](https://img.shields.io/badge/Modular-MAX%2026.5-purple.svg)](https://modular.com)
 
-High-performance native agent runtime, ultra-low-latency Axum web gateway, and custom Modular MAX model architectures engineered for cross-platform deployment across Apple Silicon, standard x86_64 Linux, and NVIDIA architectures.
+---
+
+## What is implemented today
+
+Demonstrated core, each with tests or runnable targets in this repo:
+
+- `crates/aien-cli`: terminal CLI and orchestrator (initiation sequence, fail-closed policy engine, lifecycle hooks, context compaction).
+- `crates/cortex-rs` (port 18080) and `crates/cortex-encoder-rs` (port 18081): persistent knowledge store and ONNX embedding service.
+- `crates/aien-kv-cache`: unified-memory page pool with copy-on-write branch forking (`fork_sequence`, `append_token`).
+- `crates/aien-scheduler`: continuous batching and chunked prefill, including the `bench_inference_stack` measurement binary.
+- `crates/aien-inference-abi` and `crates/aien-inference-service`: tensor backend trait with Blackwell GB10 and CPU reference paths, plus request and event contracts.
+- Qwen FP8 MoE execution work in `crates/aien-inference-abi` and Mojo kernels.
+- Provenance infrastructure for the C1 evidence campaign (see `docs/plans/public-surface-cleanup.md`).
+
+### Experimental and development areas
+
+Visibly not at core status: AEGIS capability boundary, MCP broker integration, supervisor, debugger, cockpit gateway, distillation pipeline, Harvester. Research concepts (RSI, Dream, higher-level Hive abstractions, self-improvement claims, Open Humanity concepts) live in research and roadmap documents, not here.
 
 ---
 
-## Mission & Purpose: Open Intelligence for Humanity
+## Supported hardware
 
-This project represents a durable engineering commitment to advance computing capability, support local communities, and build open-source artificial intelligence for all humanity.
+- **NVIDIA DGX Spark (Grace Blackwell GB10)**: primary reference platform. Runtime verified.
+- **Apple Silicon (macOS)**: validated runtime target for portable components. See verification matrix.
+- **Linux x86_64**: validated runtime target for portable components. See verification matrix.
+- **AMD ROCm**: experimental and architected only. Runtime qualification is pending.
 
-We celebrate the historic achievements of pioneering research laboratories and frontier developers worldwide. Teams at OpenAI, xAI, Anthropic, and open-weights initiatives across the United States, China, Europe, and every continent demonstrate what human curiosity and technical ambition can accomplish.
+Full status per component: [PLATFORM_MATRIX.md](docs/PLATFORM_MATRIX.md).
 
-Lasting progress requires transparency, humility, and open collaboration. When frontier laboratories operate in opaque silos, conceal compute bottlenecks, and accelerate an uncoordinated competitive arms race, humanity faces severe systemic risks. Millions of independent engineers and researchers worldwide stand ready to help solve efficiency limits, provide compute optimization, and support responsible development. We build this open-source infrastructure as an invitation to pool our collective potential, demystify hardware scaling, and ensure that the future of intelligence serves all of humanity as one Earth.
+---
 
-Review our full ethical and technical charter in [CONSTITUTION.md](CONSTITUTION.md).
+## Architecture
+
+Component contracts and runtime flows: [AIEN_RUNTIME_ARCHITECTURE.md](docs/AIEN_RUNTIME_ARCHITECTURE.md). System context: [AIEN_COMPLETE_SYSTEM_ARCHITECTURE_v2.md](docs/AIEN_COMPLETE_SYSTEM_ARCHITECTURE_v2.md).
+
+---
+
+## Installation
+
+Convenience path (builds release binaries from source; this script performs no signature verification):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/aien-dev/aien-sovereign-core/main/install.sh | bash
+```
+
+Signed releases with pinned, verified manifests are tracked follow-up work, not yet available.
+
+## Run a real example
+
+```bash
+cargo run -p aien-scheduler --bin bench_inference_stack
+```
+
+## Run the tests
+
+```bash
+cargo test --workspace
+```
 
 ---
 
@@ -47,103 +93,51 @@ SHA-256 digests, measurement definition, and reproducibility steps.
 
 ---
 
-## Multi-Platform Architecture & Portability Matrix
+## Known Limitations
 
-While the primary reference deployment executes on the NVIDIA DGX Spark (Grace Blackwell GB10), AIEN runs across multiple platform targets:
-
-- **Apple Silicon (macOS)**: Native ARM64 compilation for M1, M2, M3, and M4 chips, Metal acceleration, and sub-10MB daemon resident set size.
-- **Linux (x86_64)**: Standard glibc and musl native binaries, AVX-512 SIMD acceleration, and support for commodity desktops and server racks.
-- **AMD ROCm**: Native Rust runtime execution targeting ROCm and HIP compute drivers.
-- **NVIDIA Hardware**: Reference deployment on Grace Blackwell unified memory and standard CUDA accelerators via Modular MAX and ONNX Runtime.
-- **Air-Gapped Sovereign Servers**: Complete offline capability with hardware TPM 2.0 key vaulting and no unsolicited outbound telemetry.
-
-For formal verification statuses across architectures, see [PLATFORM_MATRIX.md](docs/PLATFORM_MATRIX.md).
-
-The target roadmap for review is [AIEN_COMPLETE_SYSTEM_ARCHITECTURE_v2.md](docs/AIEN_COMPLETE_SYSTEM_ARCHITECTURE_v2.md).
+- The fallback counter records only instrumented GPU operations (matmul, batch matmul, BF16 paged attention, logits). RMSNorm, RoPE, SwiGLU, and GQA paths execute on CPU without incrementing it. Per-operation device provenance is C1 work in progress.
+- Execution is hybrid CPU and GPU, not exclusively accelerated.
+- Apple Silicon, x86_64, and ROCm targets are qualified only as stated in the platform matrix. ROCm is experimental.
+- License transition is in flight: Apache-2.0 governs from the migration commit; historical commits remain as recorded.
+- The installer is not yet signature-verifying.
+- Headline benchmark figures are withdrawn pending regeneration under the evidence standard above.
+- Qwen full-runtime qualification is not yet complete.
+- The C1 evidence campaign is in progress.
 
 ---
 
-## Ecosystem Partnerships & Attribution: Modular (MAX & Mojo)
+## Subsystems in brief
 
-AIEN Sovereign Core proudly builds upon, interfaces with, and contributes back to the infrastructure created by **[Modular](https://modular.com)**.
-
-- **High-Performance Native Silicon**: We leverage Modular MAX Engine and the Mojo programming language to eliminate Python interpreter bottlenecks, executing compiled tensor kernels directly on hardware silicon.
-- **Upstream Stewardship (Drop != Delete)**: All custom architecture loaders, C-ABI dynamic bridges, and KV-cache optimizations engineered on our hardware are contributed back upstream to the open-source Modular ecosystem.
-- Read our full license notices and acknowledgments in [ATTRIBUTION.md](ATTRIBUTION.md).
-
----
-
-## Downstream Freedom and Architecture Charter
-
-Downstream developers and commercial users are governed exclusively by the terms of [LICENSE](LICENSE). Our internal architectural and ethical development charter is documented in [CONSTITUTION.md](CONSTITUTION.md).
+- `crates/aien-cli`: CLI runtime, initiation sequence, policy engine, hooks, compaction.
+- `crates/cortex-rs` / `crates/cortex-encoder-rs`: memory store and embedding service.
+- `crates/aien-kv-cache` / `crates/aien-scheduler`: page pool with COW branching, batching scheduler.
+- `crates/aien-inference-abi` / `crates/aien-inference-service`: backends and service contracts.
+- `crates/spark-max-cabi` / `crates/spark-max-rs`: C-ABI bridge between Mojo kernels and Rust.
+- `crates/spark-inquisitor`: pull request checks for secrets and telemetry.
+- `crates/spark-cockpit-rs`: HTTP and SSE telemetry gateway.
 
 ---
 
-## Quick Start: Universal 1-Line Installer
+## Mission and values
 
-### Linux & macOS (Apple Silicon / Intel)
-```bash
-curl -fsSL https://raw.githubusercontent.com/aien-dev/aien-sovereign-core/main/install.sh | bash
-```
+AIEN is built in the open so independent engineers can reproduce, extend, and challenge it. The full statement of values is [CONSTITUTION.md](CONSTITUTION.md), and the nonbinding open-building ask is [COVENANT.md](COVENANT.md): keep foundational advances open. Research motivations live in `docs/`.
 
-### Windows (PowerShell)
-```powershell
-iwr -useb https://raw.githubusercontent.com/aien-dev/aien-sovereign-core/main/install.ps1 | iex
-```
+## Attribution
 
----
+Built on [Modular](https://modular.com) MAX and Mojo, NVIDIA Blackwell hardware, and the Rust ecosystem. Full notices: [ATTRIBUTION.md](ATTRIBUTION.md). Upstream improvements are contributed back rather than forked silently.
 
-## Subsystems
+## Ecosystem
 
-### 1. `crates/aien-cli`
-Compiled native ARM64 Rust CLI runtime:
-- **Nesting Ritual**: Hardware-grounded initiation sequence verifying GPU thermals, unified VRAM, memory sockets, and active peer topography before taking execution turns.
-- **Fail-Closed Safety Engine**: 9-tier priority policy table matching the Google Antigravity SDK specification. Enforces strict workspace path confinement and blocks destructive command execution.
-- **Asynchronous Agent Hooks**: Extensible lifecycle interceptor trait (`pre_turn`, `post_turn`, `pre_tool`, `post_tool`, `on_tool_error`, `on_compaction`) featuring live unslop cleaning and credential redaction.
-- **Two-Pass Context Compactor**: Sliding-window context pruner calibrated for 32K context windows, pruning bloated intermediate tool responses while preserving initiation grounding.
-
-### 2. `crates/spark-cockpit-rs`
-Native Axum HTTP/SSE gateway:
-- **Memory Footprint**: 4.7 MB RSS (96% reduction compared to standard Python/Uvicorn runtimes).
-- **Latency**: Sub-millisecond Time-to-First-Byte (< 1 ms TTFB) on Grace Neoverse V2 cores.
-- **Streaming Pipeline**: Zero-allocation byte buffer with real-time SSE token stream redaction and unslop filtering.
-
-### 3. `crates/cortex-encoder-rs` & `crates/cortex-rs`
-Pure native compiled memory and vector pipeline:
-- **Port 18080 (`cortex-rs`)**: Epistemic knowledge store with ACID transaction logs, SQLite vector storage, and zero LAN leakage.
-- **Port 18081 (`cortex-encoder-rs`)**: Rust Axum microservice running ONNX Runtime C-API and HuggingFace tokenizers. Replaced legacy 1.08 GB Python Uvicorn process with bit-for-bit mathematical parity and 22 ms rerank latency.
-
-### 4. `crates/spark-max-cabi` & `crates/spark-max-rs`
-Modular MAX compiled dynamic FFI bridge:
-- Bridges high-speed Mojo kernels to compiled Rust via pure C-ABI (`libspark_max.so`).
-- Enforces the runtime invariant that Python is restricted solely to neural graph definitions and weights where C-ABI wrappers do not yet exist.
-
-### 5. `crates/spark-inquisitor`
-Autonomous Pull Request gatekeeper and alignment auditor:
-- Enforces the Sovereign Contributor Oath on all pull requests.
-- Scans git diffs to block telemetry, surveillance tracking SDKs, and unslop violations.
-
-### 6. `imprints/en2-trinity`
-The free-of-charge EN2 Experience Trinity Imprint:
-- Bundles the cognitive soul, 10 foundational Cortex lessons, and pure Mojo architecture adapter kernels for instant 1-click installation on any system.
-
----
-
-## Ecosystem Directory
-
-- **Primary Ecosystem Hub**: [github.com/aien-dev/aien-dev](https://github.com/aien-dev/aien-dev)
-- **Performance Benchmark Suite**: [github.com/aien-dev/benchmarks](https://github.com/aien-dev/benchmarks)
-- **Web Portfolio & Architecture Showcase**: [github.com/aien-dev/drakestapleton.com](https://github.com/aien-dev/drakestapleton.com) ([drakestapleton.com](https://drakestapleton.com))
-
----
+- Benchmark evidence: [github.com/aien-dev/benchmarks](https://github.com/aien-dev/benchmarks)
+- Versioned wire specs: `aien-protocols` (versioning in progress)
+- Project site: [drakestapleton.com](https://drakestapleton.com)
 
 ## Contributing
 
-All contributors ratify the Humanity & Open AI Stewardship Oath before pull requests are merged. Read [CONSTITUTION.md](CONSTITUTION.md) for details.
+Read [CONSTITUTION.md](CONSTITUTION.md) and [AGENTS.md](AGENTS.md) before opening a pull request. Every change ships on a branch with verification proof.
 
-## Contact & Sovereign Coordination
+## Contact
 
-For secure coordination, architectural questions, and peer federation:
 - Email: `aien@aienos.com`
 
 ## License and Governance
