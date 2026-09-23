@@ -32,8 +32,16 @@ fn main() {
     let cpu_ms = t_cpu.elapsed().as_secs_f64() * 1000.0;
 
     // Warmup, then timed.
-    forward_token_serve(&weights, &serve, token, 0, &mut Qwen3CoderState::new(), None, false)
-        .expect("warmup");
+    forward_token_serve(
+        &weights,
+        &serve,
+        token,
+        0,
+        &mut Qwen3CoderState::new(),
+        None,
+        false,
+    )
+    .expect("warmup");
     let t_dev = Instant::now();
     let mut prof = [0.0f64; 5];
     let dev = forward_token_serve(
@@ -45,7 +53,7 @@ fn main() {
         Some(&mut prof),
         false,
     )
-        .expect("device forward");
+    .expect("device forward");
     let dev_ms = t_dev.elapsed().as_secs_f64() * 1000.0;
 
     let stats = parity_stats(&dev, &cpu);
@@ -63,8 +71,16 @@ fn main() {
 
     // Full device path including GPU attention, same token, fresh device KV.
     let t_full = Instant::now();
-    let full = forward_token_serve(&weights, &serve, token, 0, &mut Qwen3CoderState::new(), None, true)
-        .expect("full device forward");
+    let full = forward_token_serve(
+        &weights,
+        &serve,
+        token,
+        0,
+        &mut Qwen3CoderState::new(),
+        None,
+        true,
+    )
+    .expect("full device forward");
     let full_ms = t_full.elapsed().as_secs_f64() * 1000.0;
     let stats_full = parity_stats(&full, &cpu);
     let stats_iso = parity_stats(&full, &dev);

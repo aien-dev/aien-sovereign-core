@@ -25,8 +25,7 @@ type ProjUploadFn = unsafe extern "C" fn(u64, i32, i32, *const u8, *const u16) -
 type LmUploadFn = unsafe extern "C" fn(u64, *const u16) -> i32;
 type MoeForwardFn = unsafe extern "C" fn(u64, i32, *const u16, *mut u16) -> i32;
 type Fp8GemvFn = unsafe extern "C" fn(u64, i32, i32, *const f32, *mut f32) -> i32;
-type FusedQkvFn =
-    unsafe extern "C" fn(u64, i32, *const f32, *mut f32, *mut f32, *mut f32) -> i32;
+type FusedQkvFn = unsafe extern "C" fn(u64, i32, *const f32, *mut f32, *mut f32, *mut f32) -> i32;
 type Bf16GemvFn = unsafe extern "C" fn(u64, *const f32, *mut f32) -> i32;
 type KvAppendFn = unsafe extern "C" fn(u64, i32, *const f32, *const f32, i32) -> i32;
 type AttnFn = unsafe extern "C" fn(u64, i32, *const f32, *mut f32, i32) -> i32;
@@ -68,13 +67,14 @@ pub struct QwenServeLib {
 }
 
 impl QwenServeLib {
-    /// `AIEN_QWENSERVE_LIB`, else the foundry seat build output.
+    /// `AIEN_QWENSERVE_LIB`, else the crate's `mojo/qwencoder_serve/libqwencoder_serve.so`.
     pub fn default_path() -> PathBuf {
-        if let Some(p) = std::env::var_os("AIEN_QWENSERVE_LIB") {
-            return PathBuf::from(p);
-        }
-        let home = std::env::var("HOME").unwrap_or_else(|_| "/home/drakestapleton".to_string());
-        PathBuf::from(home).join("spark-qwencoder-science/mojo-kernels/libqwencoder_serve.so")
+        std::env::var_os("AIEN_QWENSERVE_LIB")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("mojo/qwencoder_serve/libqwencoder_serve.so")
+            })
     }
 
     pub fn load(path: &Path) -> Result<Self, Qwen3CoderError> {
@@ -393,14 +393,18 @@ pub fn forward_token_serve(
         let t = std::time::Instant::now();
         let mut x_norm = vec![0.0f32; h];
         rmsnorm(&x, &attn.input_norm, eps, &mut x_norm);
-        if want_prof { prof[4] += t.elapsed().as_secs_f64() * 1000.0; }
+        if want_prof {
+            prof[4] += t.elapsed().as_secs_f64() * 1000.0;
+        }
 
         let t = std::time::Instant::now();
         let mut q = vec![0.0f32; qd];
         let mut k = vec![0.0f32; kvd];
         let mut v = vec![0.0f32; kvd];
         serve.fused_qkv(layer_idx, &x_norm, &mut q, &mut k, &mut v)?;
-        if want_prof { prof[0] += t.elapsed().as_secs_f64() * 1000.0; }
+        if want_prof {
+            prof[0] += t.elapsed().as_secs_f64() * 1000.0;
+        }
 
         let t = std::time::Instant::now();
         let mut qn = vec![0.0f32; qd];
@@ -435,12 +439,16 @@ pub fn forward_token_serve(
             );
         }
 
-        if want_prof { prof[1] += t.elapsed().as_secs_f64() * 1000.0; }
+        if want_prof {
+            prof[1] += t.elapsed().as_secs_f64() * 1000.0;
+        }
 
         let t = std::time::Instant::now();
         let mut attn_proj = vec![0.0f32; h];
         serve.proj(layer_idx, 3, &attn_out, &mut attn_proj)?;
-        if want_prof { prof[2] += t.elapsed().as_secs_f64() * 1000.0; }
+        if want_prof {
+            prof[2] += t.elapsed().as_secs_f64() * 1000.0;
+        }
 
         let t = std::time::Instant::now();
         for i in 0..h {
@@ -449,13 +457,17 @@ pub fn forward_token_serve(
 
         let mut post = vec![0.0f32; h];
         rmsnorm(&x, &attn.post_norm, eps, &mut post);
-        if want_prof { prof[4] += t.elapsed().as_secs_f64() * 1000.0; }
+        if want_prof {
+            prof[4] += t.elapsed().as_secs_f64() * 1000.0;
+        }
 
         let t = std::time::Instant::now();
         let post_bf16: Vec<u16> = post.iter().map(|&v| f32_to_bf16(v)).collect();
         let mut moe_bf16 = vec![0u16; h];
         serve.moe_layer(layer_idx, &post_bf16, &mut moe_bf16)?;
-        if want_prof { prof[3] += t.elapsed().as_secs_f64() * 1000.0; }
+        if want_prof {
+            prof[3] += t.elapsed().as_secs_f64() * 1000.0;
+        }
         for i in 0..h {
             x[i] += bf16_to_f32(moe_bf16[i]);
         }
@@ -464,7 +476,9 @@ pub fn forward_token_serve(
     let t = std::time::Instant::now();
     let mut x_final = vec![0.0f32; h];
     rmsnorm(&x, &weights.final_norm, eps, &mut x_final);
-    if want_prof { prof[4] += t.elapsed().as_secs_f64() * 1000.0; }
+    if want_prof {
+        prof[4] += t.elapsed().as_secs_f64() * 1000.0;
+    }
     if let Some(p) = profile {
         p.copy_from_slice(&prof);
     }

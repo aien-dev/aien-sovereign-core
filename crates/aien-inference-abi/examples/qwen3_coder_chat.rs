@@ -104,9 +104,8 @@ fn main() {
                        pos: usize|
          -> Vec<f32> {
             match serve {
-                Some(s) => {
-                    forward_token_serve(weights, s, tok, pos, state, None, false).expect("device forward")
-                }
+                Some(s) => forward_token_serve(weights, s, tok, pos, state, None, false)
+                    .expect("device forward"),
                 None => forward_token(weights, tok, pos, state),
             }
         };
