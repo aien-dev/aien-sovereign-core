@@ -1,9 +1,10 @@
 //! Strict Safetensors checkpoint loader with loud shape and dtype validation.
-//! Ingests BF16 weights, decodes to FP32 for oracle evaluation, and preserves raw BF16 bytes for acceleration.
+//! Ingests BF16 weights into one `ModelCapsule`. FP32 is decoded on demand.
 
 use std::collections::HashMap;
 use std::fmt;
 use std::path::Path;
+use std::sync::Arc;
 
 /// Loud error enum describing checkpoint parsing and validation failures.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -30,6 +31,8 @@ pub enum CheckpointError {
     },
     /// Safetensors binary header is malformed, truncated, or invalid JSON.
     InvalidHeader(String),
+    /// A capsule tensor could not be decoded.
+    Capsule(String),
 }
 
 impl fmt::Display for CheckpointError {
@@ -74,44 +77,91 @@ impl fmt::Display for CheckpointError {
             Self::InvalidHeader(err) => {
                 write!(f, "Invalid safetensors header: {}", err)
             }
+            Self::Capsule(err) => write!(f, "Invalid capsule tensor: {}", err),
         }
     }
 }
 
 impl std::error::Error for CheckpointError {}
 
-/// Dual storage representation of loaded model weights:
-/// FP32 floats for the reference correctness oracle and raw BF16 bytes for hardware kernels.
-#[derive(Debug, Clone, Default)]
+/// Checkpoint stored as one capsule. Tensor bytes stay in `capsule.bytes`.
+/// FP32 is produced by `decode_fp32` and is not retained.
+#[derive(Debug, Clone)]
 pub struct LoadedCheckpoint {
-    pub fp32_weights: HashMap<String, Vec<f32>>,
-    pub raw_bf16_weights: HashMap<String, Vec<u8>>,
-    pub shapes: HashMap<String, Vec<usize>>,
+    pub capsule: crate::capsule::ModelCapsule,
+}
+
+impl Default for LoadedCheckpoint {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl LoadedCheckpoint {
+    /// Empty capsule: empty byte buffer, empty tensor map, digests of that empty input.
     pub fn new() -> Self {
-        Self::default()
+        Self::from_bf16_tensors(Vec::new())
+    }
+
+    /// Builds a checkpoint from BF16 payloads without a safetensors file.
+    /// Payloads are concatenated into one `Arc<[u8]>`. Each tensor records its range.
+    pub fn from_bf16_tensors(items: Vec<(String, Vec<usize>, Vec<u8>)>) -> Self {
+        let mut payload = Vec::new();
+        let mut tensors = HashMap::with_capacity(items.len());
+        for (name, shape, raw) in items {
+            let start = payload.len();
+            payload.extend_from_slice(&raw);
+            let end = payload.len();
+            let logical_strides = crate::capsule::row_major_strides(&shape);
+            tensors.insert(
+                name,
+                crate::capsule::CapsuleTensor {
+                    dtype: crate::capsule::WeightDType::Bf16,
+                    layout: crate::capsule::TensorLayout::RowMajor,
+                    shape,
+                    logical_strides,
+                    byte_range: start..end,
+                    quant: None,
+                },
+            );
+        }
+        Self::from_owned_bytes(Arc::from(payload), tensors)
     }
 
     pub fn tensor_count(&self) -> usize {
-        self.fp32_weights.len()
+        self.capsule.tensors.len()
     }
 
     pub fn contains_tensor(&self, name: &str) -> bool {
-        self.fp32_weights.contains_key(name)
+        self.capsule.tensors.contains_key(name)
     }
 
-    pub fn get_fp32(&self, name: &str) -> Option<&Vec<f32>> {
-        self.fp32_weights.get(name)
+    pub fn decode_fp32(&self, name: &str) -> Result<Vec<f32>, crate::capsule::CapsuleError> {
+        self.capsule.decode_fp32(name)
     }
 
-    pub fn get_raw_bf16(&self, name: &str) -> Option<&Vec<u8>> {
-        self.raw_bf16_weights.get(name)
+    pub fn tensor_bytes(&self, name: &str) -> Result<&[u8], crate::capsule::CapsuleError> {
+        self.capsule.tensor_bytes(name)
     }
 
     pub fn get_shape(&self, name: &str) -> Option<&Vec<usize>> {
-        self.shapes.get(name)
+        self.capsule.tensors.get(name).map(|tensor| &tensor.shape)
+    }
+
+    fn from_owned_bytes(
+        bytes: Arc<[u8]>,
+        tensors: HashMap<String, crate::capsule::CapsuleTensor>,
+    ) -> Self {
+        let source_digest = crate::capsule::source_digest(&bytes);
+        let capsule_digest = crate::capsule::capsule_digest(&bytes, &tensors);
+        Self {
+            capsule: crate::capsule::ModelCapsule {
+                bytes,
+                source_digest,
+                tensors,
+                capsule_digest,
+            },
+        }
     }
 }
 
@@ -179,8 +229,17 @@ pub fn tinyllama_catalog() -> Vec<(String, Vec<usize>)> {
 }
 
 /// Parses a safetensors binary buffer and strictly validates against a specified tensor catalog.
+/// The file is copied once into the capsule. Tensor ranges point into that buffer.
 pub fn parse_safetensors_with_catalog(
     bytes: &[u8],
+    catalog: &[(String, Vec<usize>)],
+) -> Result<LoadedCheckpoint, CheckpointError> {
+    let bytes: Arc<[u8]> = Arc::from(bytes.to_vec());
+    parse_safetensors_arc(bytes, catalog)
+}
+
+fn parse_safetensors_arc(
+    bytes: Arc<[u8]>,
     catalog: &[(String, Vec<usize>)],
 ) -> Result<LoadedCheckpoint, CheckpointError> {
     if bytes.len() < 8 {
@@ -221,18 +280,16 @@ pub fn parse_safetensors_with_catalog(
         CheckpointError::InvalidHeader("Header JSON must be an object".to_string())
     })?;
 
-    let data_bytes = &bytes[header_end..];
+    let data_len = bytes.len() - header_end;
 
-    let mut fp32_weights = HashMap::with_capacity(catalog.len());
-    let mut raw_bf16_weights = HashMap::with_capacity(catalog.len());
-    let mut shapes = HashMap::with_capacity(catalog.len());
+    let mut tensors = HashMap::with_capacity(catalog.len());
 
     for (name, expected_shape) in catalog {
         let info = header_obj
             .get(name)
             .ok_or_else(|| CheckpointError::MissingTensor(name.clone()))?;
 
-        // 1. Verify dtype is BF16
+        // 1. Verify dtype is BF16. This catalog parser does not accept other dtypes.
         let dtype = info
             .get("dtype")
             .and_then(|v| v.as_str())
@@ -272,7 +329,7 @@ pub fn parse_safetensors_with_catalog(
             });
         }
 
-        // 3. Verify offsets and byte length
+        // 3. Verify offsets and byte length. Safetensors offsets are relative to the data blob.
         let offsets_arr = info
             .get("data_offsets")
             .and_then(|v| v.as_array())
@@ -296,34 +353,39 @@ pub fn parse_safetensors_with_catalog(
         let element_count: usize = expected_shape.iter().product();
         let expected_bytes = element_count * 2; // BF16 is 2 bytes per element
 
-        if start > end || (end - start) != expected_bytes || end > data_bytes.len() {
+        if start > end || (end - start) != expected_bytes || end > data_len {
             return Err(CheckpointError::OffsetOutOfBounds {
                 tensor: name.clone(),
                 offset: end,
-                buffer_len: data_bytes.len(),
+                buffer_len: data_len,
             });
         }
 
-        // 4. Ingest raw BF16 bytes and decode to FP32 in-memory
-        let raw_slice = &data_bytes[start..end];
-        let fp32_slice = decode_bf16_to_fp32(raw_slice);
-
-        raw_bf16_weights.insert(name.clone(), raw_slice.to_vec());
-        fp32_weights.insert(name.clone(), fp32_slice);
-        shapes.insert(name.clone(), actual_shape);
+        // Ranges are absolute inside the whole file, including the 8-byte length and JSON header.
+        let abs_start = header_end + start;
+        let abs_end = header_end + end;
+        let logical_strides = crate::capsule::row_major_strides(&actual_shape);
+        tensors.insert(
+            name.clone(),
+            crate::capsule::CapsuleTensor {
+                dtype: crate::capsule::WeightDType::Bf16,
+                layout: crate::capsule::TensorLayout::RowMajor,
+                shape: actual_shape,
+                logical_strides,
+                byte_range: abs_start..abs_end,
+                quant: None,
+            },
+        );
     }
 
-    Ok(LoadedCheckpoint {
-        fp32_weights,
-        raw_bf16_weights,
-        shapes,
-    })
+    Ok(LoadedCheckpoint::from_owned_bytes(bytes, tensors))
 }
 
-/// Loads a TinyLlama safetensors checkpoint directly from a binary byte buffer.
-pub fn load_safetensors_from_bytes(bytes: &[u8]) -> Result<LoadedCheckpoint, CheckpointError> {
+/// Loads a TinyLlama safetensors checkpoint from an owned byte buffer.
+/// The `Vec` is moved into one `Arc` and is not copied per tensor.
+pub fn load_safetensors_from_bytes(bytes: Vec<u8>) -> Result<LoadedCheckpoint, CheckpointError> {
     let catalog = tinyllama_catalog();
-    parse_safetensors_with_catalog(bytes, &catalog)
+    parse_safetensors_arc(Arc::from(bytes), &catalog)
 }
 
 /// Loads and validates a TinyLlama safetensors checkpoint from a filesystem path.
@@ -338,7 +400,7 @@ pub fn load_safetensors_checkpoint<P: AsRef<Path>>(
             e
         ))
     })?;
-    load_safetensors_from_bytes(&bytes)
+    load_safetensors_from_bytes(bytes)
 }
 
 #[cfg(test)]
@@ -427,12 +489,80 @@ mod tests {
         let loaded = parse_safetensors_with_catalog(&buffer, &catalog).unwrap();
 
         assert_eq!(loaded.tensor_count(), 1);
+        assert_eq!(loaded.capsule.tensors["test.weight"].shape, vec![2, 2]);
         assert_eq!(loaded.get_shape("test.weight").unwrap(), &vec![2, 2]);
-        let fp32 = loaded.get_fp32("test.weight").unwrap();
+        let fp32 = loaded.decode_fp32("test.weight").unwrap();
         assert_eq!(fp32.len(), 4);
         assert_eq!(fp32[0], 1.5);
         assert_eq!(fp32[1], 2.5);
-        assert_eq!(loaded.get_raw_bf16("test.weight").unwrap(), &bf16_bytes);
+        assert_eq!(loaded.tensor_bytes("test.weight").unwrap(), &bf16_bytes[..]);
+        assert!(matches!(
+            loaded.capsule.tensors["test.weight"].dtype,
+            crate::capsule::WeightDType::Bf16
+        ));
+        assert!(loaded.capsule.tensors["test.weight"].quant.is_none());
+    }
+
+    #[test]
+    fn test_capsule_owns_file_bytes_and_byte_range_points_at_payload() {
+        let floats = vec![1.0f32, -1.0f32, 0.5f32];
+        let bf16_bytes = encode_fp32_to_bf16(&floats);
+        let file_bytes = build_test_safetensors(&[("w", "BF16", &[3], &bf16_bytes)]);
+        let catalog = vec![("w".to_string(), vec![3])];
+        let loaded = parse_safetensors_with_catalog(&file_bytes, &catalog).unwrap();
+
+        assert_eq!(loaded.capsule.owned_payload_len(), file_bytes.len());
+        assert_eq!(loaded.capsule.bytes.as_ref(), file_bytes.as_slice());
+        assert_eq!(
+            loaded.capsule.source_digest,
+            crate::capsule::source_digest(&file_bytes)
+        );
+
+        let range = loaded.capsule.tensors["w"].byte_range.clone();
+        assert!(range.start >= 8);
+        assert_eq!(range.end - range.start, bf16_bytes.len());
+        assert_eq!(&loaded.capsule.bytes[range], bf16_bytes.as_slice());
+        assert_eq!(loaded.tensor_bytes("w").unwrap(), bf16_bytes.as_slice());
+        let decoded = loaded.decode_fp32("w").unwrap();
+        assert_eq!(decoded, decode_bf16_to_fp32(&bf16_bytes));
+    }
+
+    #[test]
+    fn test_from_bf16_tensors_one_buffer() {
+        let a = encode_fp32_to_bf16(&[1.0, 2.0]);
+        let b = encode_fp32_to_bf16(&[0.5]);
+        let loaded = LoadedCheckpoint::from_bf16_tensors(vec![
+            ("a".to_string(), vec![2], a.clone()),
+            ("b".to_string(), vec![1], b.clone()),
+        ]);
+
+        assert_eq!(loaded.capsule.owned_payload_len(), a.len() + b.len());
+        assert_eq!(loaded.tensor_bytes("a").unwrap(), a.as_slice());
+        assert_eq!(loaded.tensor_bytes("b").unwrap(), b.as_slice());
+        assert_eq!(loaded.decode_fp32("a").unwrap()[0], 1.0);
+        assert_eq!(loaded.decode_fp32("b").unwrap()[0], 0.5);
+        assert_eq!(
+            loaded.capsule.tensors["a"].logical_strides,
+            crate::capsule::row_major_strides(&[2])
+        );
+        assert!(loaded.capsule.tensors["b"].quant.is_none());
+        assert_eq!(
+            loaded.capsule.source_digest,
+            crate::capsule::source_digest(&loaded.capsule.bytes)
+        );
+        assert_eq!(
+            loaded.capsule.capsule_digest,
+            crate::capsule::capsule_digest(&loaded.capsule.bytes, &loaded.capsule.tensors)
+        );
+
+        let empty = LoadedCheckpoint::new();
+        assert_eq!(empty.tensor_count(), 0);
+        assert_eq!(empty.capsule.owned_payload_len(), 0);
+        assert!(empty.capsule.tensors.is_empty());
+        assert_eq!(
+            empty.capsule.source_digest,
+            crate::capsule::source_digest(&[])
+        );
     }
 
     #[test]

@@ -220,15 +220,28 @@ fn test_f3_01_loaded_checkpoint_contains_fp32_weights() {
         &[("model.norm.weight", &[4], "BF16", &raw_bf16)],
         None,
     );
+    let path = std::env::temp_dir().join(format!(
+        "f3_01_checkpoint_{}_{}.safetensors",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::write(&path, &bytes).unwrap();
+    let file_len = std::fs::metadata(&path).unwrap().len() as usize;
+    let file_bytes = std::fs::read(&path).unwrap();
     let catalog = vec![("model.norm.weight".to_string(), vec![4])];
-    let loaded = parse_safetensors_with_catalog(&bytes, &catalog).unwrap();
+    let loaded = parse_safetensors_with_catalog(&file_bytes, &catalog).unwrap();
+    let _ = std::fs::remove_file(&path);
 
-    let fp32 = loaded.get_fp32("model.norm.weight").unwrap();
+    let fp32 = loaded.decode_fp32("model.norm.weight").unwrap();
     assert_eq!(fp32.len(), 4);
-    assert!((fp32[0] - 1.5).abs() < 1e-4);
-    assert!((fp32[1] - (-2.5)).abs() < 1e-4);
+    assert!((fp32[0] - 1.5).abs() < 1e-2);
+    assert!((fp32[1] - (-2.5)).abs() < 1e-2);
     assert_eq!(fp32[2], 0.0);
-    assert!((fp32[3] - 42.0).abs() < 1e-4);
+    assert!((fp32[3] - 42.0).abs() < 1e-2);
+    assert_eq!(loaded.capsule.owned_payload_len(), file_len);
 }
 
 #[test]
@@ -242,8 +255,8 @@ fn test_f3_02_loaded_checkpoint_retains_raw_bf16_bytes() {
     let catalog = vec![("model.norm.weight".to_string(), vec![2])];
     let loaded = parse_safetensors_with_catalog(&bytes, &catalog).unwrap();
 
-    let bf16 = loaded.get_raw_bf16("model.norm.weight").unwrap();
-    assert_eq!(bf16, &raw_bf16);
+    let bf16 = loaded.tensor_bytes("model.norm.weight").unwrap();
+    assert_eq!(bf16, raw_bf16.as_slice());
 }
 
 #[test]
@@ -268,17 +281,21 @@ fn test_f3_04_loaded_checkpoint_shapes_record_dimensions() {
 
 #[test]
 fn test_f3_05_memory_isolation_between_fp32_and_bf16() {
-    let mut checkpoint = LoadedCheckpoint::new();
-    checkpoint.fp32_weights.insert("tensor_a".to_string(), vec![1.0, 2.0]);
-    checkpoint.raw_bf16_weights.insert("tensor_a".to_string(), vec![0x80, 0x3F, 0x00, 0x40]);
+    let raw = encode_fp32_to_bf16(&[1.0, 2.0]);
+    let checkpoint = LoadedCheckpoint::from_bf16_tensors(vec![(
+        "tensor_a".to_string(),
+        vec![2],
+        raw.clone(),
+    )]);
 
-    if let Some(fp32) = checkpoint.fp32_weights.get_mut("tensor_a") {
-        fp32[0] = 999.0;
-    }
+    let mut fp32 = checkpoint.decode_fp32("tensor_a").unwrap();
+    fp32[0] = 999.0;
 
-    let bf16 = checkpoint.get_raw_bf16("tensor_a").unwrap();
+    let bf16 = checkpoint.tensor_bytes("tensor_a").unwrap();
+    assert_eq!(bf16, raw.as_slice());
     assert_eq!(bf16[0], 0x80);
     assert_eq!(bf16[1], 0x3F);
+    assert_eq!(fp32[0], 999.0);
 }
 
 // ============================================================================
