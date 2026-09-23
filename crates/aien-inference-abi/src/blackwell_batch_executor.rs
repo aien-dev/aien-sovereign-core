@@ -10,7 +10,9 @@
 //! - Strict KV transaction semantics (reserve -> execute -> commit / rollback).
 //! - Zero CPU fallback in accelerated mode.
 
-use crate::tensor_abi::{ResidentTensor, TensorView};
+use crate::tensor_abi::ResidentTensor;
+#[cfg(has_blackwell_cuda)]
+use crate::tensor_abi::TensorView;
 use crate::weights::TransformerWeights;
 use crate::{AienInferenceBackend, DecodeOutput, ModelConfig, ScheduledBatch, StepMetrics};
 #[allow(unused_imports)]
