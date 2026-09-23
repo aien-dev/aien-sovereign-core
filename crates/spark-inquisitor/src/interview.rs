@@ -44,9 +44,7 @@ mod tests {
         assert!(text.contains("Sovereign Contributor Oath"));
         assert!(text.contains("Long-Term Mission Alignment"));
         assert!(text.contains("Downstream Heritage Preservation"));
-        assert!(
-            text.contains("Drake Stapleton (aien@aienos.com) and AIEN (aien@aienos.com)")
-        );
+        assert!(text.contains("Drake Stapleton (aien@aienos.com) and AIEN (aien@aienos.com)"));
         assert!(!text.contains('\u{2014}'));
         assert!(!text.contains('\u{2013}'));
     }
