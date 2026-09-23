@@ -14,7 +14,8 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 use aien_inference_abi::qwen3_coder::{
-    compute_logits, forward_token, Qwen3CoderState, QWEN3_CODER_VOCAB,
+    compute_logits, forward_token, forward_token_with_moe, MoeBackend, Qwen3CoderState,
+    QWEN3_CODER_VOCAB,
 };
 use aien_inference_abi::qwen3_moe::parity_stats;
 use aien_inference_abi::qwen3_serve::{forward_token_serve, QwenServeLib, QwenServeModel};
@@ -59,12 +60,24 @@ fn main() {
     let mut cpu_state = Qwen3CoderState::new();
     let mut gemm_state = Qwen3CoderState::new();
     let mut full_state = Qwen3CoderState::new();
+    let mut cpu16_state = Qwen3CoderState::new();
 
     let mut token = PROMPT[0];
     let (mut min_cos, mut min_iso, mut argmax_misses) = (1.0f64, 1.0f64, 0usize);
-    println!("pos token  cos(dev,cpu)  cos(full,gemm)  argmax cpu/gemm/full");
+    let mut min_cos16 = 1.0f64;
+    println!(
+        "pos token  cos(dev,cpu)  cos(full,gemm)  cos(gemm,cpu16)  cpu_top2_margin  argmax cpu/gemm/full"
+    );
     for pos in 0..positions {
         let cpu_h = forward_token(&weights, token, pos, &mut cpu_state);
+        // Diagnostic: CPU reference with the device's BF16 MoE I/O rounding.
+        let cpu16_h = forward_token_with_moe(
+            &weights,
+            token,
+            pos,
+            &mut cpu16_state,
+            &mut MoeBackend::CpuBf16Io,
+        );
         let gemm_h =
             forward_token_serve(&weights, &serve, token, pos, &mut gemm_state, None, false)
                 .expect("gemm-path forward");
@@ -87,7 +100,14 @@ fn main() {
         }
         min_cos = min_cos.min(cos);
         min_iso = min_iso.min(iso);
-        println!("{pos:>3} {token:>6}  {cos:.8}    {iso:.8}      {a_cpu}/{a_gemm}/{a_full}");
+        let cos16 = parity_stats(&gemm_l, &compute_logits(&weights, &cpu16_h)).cosine;
+        min_cos16 = min_cos16.min(cos16);
+        let mut sorted = cpu_l.clone();
+        sorted.sort_unstable_by(|a, b| b.total_cmp(a));
+        let margin = sorted[0] - sorted[1];
+        println!(
+            "{pos:>3} {token:>6}  {cos:.8}    {iso:.8}      {cos16:.8}       {margin:>8.4}        {a_cpu}/{a_gemm}/{a_full}"
+        );
 
         // Teacher-force: prompt first, then the CPU's greedy choice.
         token = PROMPT.get(pos + 1).copied().unwrap_or(a_cpu);
@@ -95,7 +115,7 @@ fn main() {
 
     let pass = min_cos >= 0.999 && argmax_misses == 0 && min_iso >= 0.99999;
     println!(
-        "positions={positions} min_cos(dev,cpu)={min_cos:.8} min_cos(full,gemm)={min_iso:.8} argmax_misses={argmax_misses}"
+        "positions={positions} min_cos(dev,cpu)={min_cos:.8} min_cos(full,gemm)={min_iso:.8} min_cos(gemm,cpu16)={min_cos16:.8} argmax_misses={argmax_misses}"
     );
     println!("{}", if pass { "PASS" } else { "FAIL" });
     if !pass {

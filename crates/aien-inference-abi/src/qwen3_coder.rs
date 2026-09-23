@@ -320,6 +320,9 @@ pub fn forward_token(
 /// the proven `libaien_qwen3_moe.so` forward for the same layer.
 pub enum MoeBackend<'a> {
     Cpu,
+    /// CPU reference with the device ABI's precision: MoE input and output
+    /// rounded to BF16. Separates BF16 activation rounding from kernel error.
+    CpuBf16Io,
     Device(&'a Qwen3MoeKernels),
 }
 
@@ -398,6 +401,16 @@ pub fn forward_token_with_moe(
                 let plan =
                     MoeBatchPlan::qwen3_coder_a3b(&router, 1).expect("routing plan must build");
                 reference_moe_forward(moe, &post, &plan)
+            }
+            MoeBackend::CpuBf16Io => {
+                let post_r: Vec<f32> = post.iter().map(|&v| bf16_to_f32(f32_to_bf16(v))).collect();
+                let router = reference_router_logits(moe, &post_r, 1);
+                let plan =
+                    MoeBatchPlan::qwen3_coder_a3b(&router, 1).expect("routing plan must build");
+                reference_moe_forward(moe, &post_r, &plan)
+                    .into_iter()
+                    .map(|v| bf16_to_f32(f32_to_bf16(v)))
+                    .collect()
             }
             MoeBackend::Device(kernels) => {
                 let post_bf16: Vec<u16> = post.iter().map(|&v| f32_to_bf16(v)).collect();
