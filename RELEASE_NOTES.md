@@ -15,7 +15,7 @@ AIEN enforces a Native Systems Priority: zero Python or Node interpreters in cor
 Each platform archive (`sovereign-*.tar.gz` and `sovereign-*.zip`) contains the compiled native binaries:
 
 1. **`aien`**: Sovereign CLI providing host environment probing, system health inspection, and evaluation harnesses.
-2. **`openclaw-rs`**: Autonomous agent gateway maintaining a sub-millisecond heartbeat loop in 4.79 MB resident memory.
+2. **`aegis-runtime`**: Autonomous agent gateway maintaining a sub-millisecond heartbeat loop in 4.79 MB resident memory.
 3. **`cortex-rs`**: Epistemic knowledge graph engine with SQLite WAL persistence, FTS5 lexical search, and vector similarity.
 4. **`cortex-encoder-rs`**: High-throughput vector embedding service utilizing ONNX Runtime INT8/FP16 models.
 5. **`spark-cockpit-rs`**: Real-time terminal telemetry gateway monitoring host latency distributions and service states.

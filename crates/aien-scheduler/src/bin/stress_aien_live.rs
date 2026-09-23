@@ -125,7 +125,7 @@ async fn main() {
     let cortex_rss = get_process_rss_mb("cortex-rs").unwrap_or(0.0);
     let encoder_rss = get_process_rss_mb("cortex-encoder-rs").unwrap_or(0.0);
     let max_rss = get_process_rss_mb("max").unwrap_or(0.0);
-    let openclaw_rss = get_process_rss_mb("openclaw").unwrap_or(0.0);
+    let aegis_rss = get_process_rss_mb("aegis").unwrap_or(0.0);
 
     println!("  cortex-rs Resident Set Size:        {:.2} MB", cortex_rss);
     println!(
@@ -134,8 +134,8 @@ async fn main() {
     );
     println!("  max engine Resident Set Size:        {:.2} MB", max_rss);
     println!(
-        "  openclaw daemon Resident Set Size:   {:.2} MB\n",
-        openclaw_rss
+        "  aegis daemon Resident Set Size:   {:.2} MB\n",
+        aegis_rss
     );
 
     // 1. Cortex-rs Vector Memory Call Stress

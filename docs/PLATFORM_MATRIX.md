@@ -40,7 +40,7 @@ AIEN follows an evidence-based verification standard. Platforms are labeled acco
 - `spark-cockpit-rs`: Axum web gateway and health endpoints: **Runtime & Benchmark Verified**
 
 ### Apple Silicon (macOS aarch64)
-- `cortex-rs` & `openclaw-rs`: Native binary execution: **Runtime Verified**
+- `cortex-rs` & `aegis-runtime`: Native binary execution: **Runtime Verified**
 - `spark-inquisitor`: Gatekeeper and diff auditor: **Test & Runtime Verified**
 - Local hardware secret protection: Supported via Secure Enclave and Keychain APIs.
 

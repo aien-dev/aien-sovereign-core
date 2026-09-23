@@ -12,7 +12,7 @@ Native compiled Rust daemons cut resident memory overhead by **81% to 99.8%** co
 
 | Service | Architecture | Memory RSS | Footprint Delta vs Python FastAPI |
 | :--- | :--- | :--- | :--- |
-| **openclaw-rs heartbeat** | Native Rust | **4.78 MB** | **-99.87%** |
+| **aegis-runtime heartbeat** | Native Rust | **4.78 MB** | **-99.87%** |
 | **spark-cockpit-rs** | Native Rust (Axum) | **8.57 MB** | **-99.77%** |
 | **cortex-rs** | Native Rust (Axum + SQLite) | **10.30 MB** | **-99.72%** |
 | **cortex-encoder-rs** | Native Rust (ONNX Runtime INT8) | **776.16 MB** | -79.2% vs PyTorch |
