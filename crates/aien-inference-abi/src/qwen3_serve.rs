@@ -130,12 +130,18 @@ impl QwenServeModel {
         weights: &Qwen3CoderWeights,
         checkpoint_dir: &Path,
     ) -> Result<Self, Qwen3CoderError> {
+        let this = Self::create(lib)?;
+        this.upload_weights(weights, checkpoint_dir)?;
+        Ok(this)
+    }
+
+    /// Allocates the device model without weights. Kernel-level checks (KV
+    /// append, attention) run against this without the multi-minute upload.
+    pub fn create(lib: QwenServeLib) -> Result<Self, Qwen3CoderError> {
         let mut handle = 0u64;
         // SAFETY: handle is written by the call.
         status(unsafe { (lib.create)(&mut handle) }, "model_create")?;
-        let this = Self { lib, handle };
-        this.upload_weights(weights, checkpoint_dir)?;
-        Ok(this)
+        Ok(Self { lib, handle })
     }
 
     fn upload_weights(
