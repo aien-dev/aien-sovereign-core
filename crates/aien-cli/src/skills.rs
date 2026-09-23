@@ -419,26 +419,6 @@ pub fn skills_dispatch_tool(args: &Value) -> Value {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn preview_uses_first_body_paragraph_and_budget() {
-        let content = "---\nname: huge\ndescription: Large skill\n---\n# Heading\n\nOne two three four five.\n\nSecond paragraph.";
-        assert_eq!(first_body_paragraph(content), "One two three four five.");
-        let (text, truncated) = truncate_tokens("one two three four", 3);
-        assert_eq!(text, "one two three");
-        assert!(truncated);
-    }
-
-    #[test]
-    fn frontmatter_is_not_returned_as_body() {
-        let content = "---\nname: test\n---\nFirst paragraph.\n\nSecond paragraph.";
-        assert_eq!(first_body_paragraph(content), "First paragraph.");
-    }
-}
-
 pub fn optimize_skill(name: &str) -> Value {
     let platform = crate::platform::PlatformContext::detect();
     let script = platform.home_dir.join("atlas-skillopt-stage.sh");
@@ -473,4 +453,24 @@ pub fn run_optimize_cli(name: &str) {
     );
     let res = optimize_skill(name);
     println!("{}", serde_json::to_string_pretty(&res).unwrap_or_default());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn preview_uses_first_body_paragraph_and_budget() {
+        let content = "---\nname: huge\ndescription: Large skill\n---\n# Heading\n\nOne two three four five.\n\nSecond paragraph.";
+        assert_eq!(first_body_paragraph(content), "One two three four five.");
+        let (text, truncated) = truncate_tokens("one two three four", 3);
+        assert_eq!(text, "one two three");
+        assert!(truncated);
+    }
+
+    #[test]
+    fn frontmatter_is_not_returned_as_body() {
+        let content = "---\nname: test\n---\nFirst paragraph.\n\nSecond paragraph.";
+        assert_eq!(first_body_paragraph(content), "First paragraph.");
+    }
 }
