@@ -102,7 +102,7 @@ bash scripts/agent-preflight.sh
 ## Certifications
 - Zero Plaintext Secrets: Hardware TPM vault only. No .env files on disk.
 - Sovereign Voice & Anti-Slop: Zero em dashes or en dashes present.
-- Sovereign Defense Covenant: Section 6 Retroactive Inception applies.
+- License: Apache-2.0 governs. COVENANT.md states values only.
 ```
 
 ---
