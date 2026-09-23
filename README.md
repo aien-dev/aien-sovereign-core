@@ -21,31 +21,29 @@ Review our full ethical and technical charter in [CONSTITUTION.md](CONSTITUTION.
 
 ---
 
-## Verified Performance Benchmarks
+## Measured Results
 
-AIEN eliminates interpreter overhead by compiling all core services directly to native machine code.
+Publication rule: every headline performance number must resolve to a
+reproducible command and evidence artifact in `benchmarks/`. Figures that do
+not yet meet that bar are withdrawn below until their artifact bundles exist.
+Previously published microbenchmark figures (branch fork latency, COW page
+mutation latency, memory sharing ratios) and the service comparison table are
+currently withdrawn for regeneration. The previously cited source file
+`benchmarks/data/benchmarks_latest.json` does not exist in this repo, and the
+`gb10_canonical` artifact directory lives only in the external
+[aien-dev/benchmarks](https://github.com/aien-dev/benchmarks) repository.
 
-<!-- AIEN:BENCHMARKS:START -->
-<!-- Sourced automatically from benchmarks/data/benchmarks_latest.json (Measurement Suite v0.2.0) -->
-| Workload / Service | Architecture | Measurement ID | Resident Memory (RSS) | p50 Latency | Throughput |
-| :--- | :--- | :--- | :---: | :---: | :---: |
-| Python Microservice Baseline | Python 3.12 + FastAPI + Uvicorn | `BENCH-FASTAPI-RSS-001` | 44.76 MB | 1.28 ms | 7252 req/s |
-| Sovereign Gateway & Heartbeat | Native Rust (Grace Blackwell) | `BENCH-OPENCLAW-RSS-001` | 4.56 MB (-89.8%) | N/A | N/A |
-| Canonical Memory Engine | Native Rust + SQLite WAL | `BENCH-CORTEX-RSS-001` | 18.66 MB (-58.3%) | 0.50 ms | 19367 req/s |
-| Real-time Telemetry Cockpit | Native Rust + Axum | `BENCH-COCKPIT-RSS-001` | 12.90 MB (-71.2%) | 1.63 ms | 5840 req/s |
-| Neural Embedding Microservice | Rust + ONNX Runtime (BGE-M3) | `BENCH-ENCODER-RSS-001` | 777.43 MB | 0.26 ms | 34685 req/s |
+To regenerate each class of measurement on GB10 hardware:
 
-*Hardware Reference: NVIDIA DGX Spark (NVIDIA Grace Blackwell (GB10, aarch64), 121 GB unified memory). All metrics measured under concurrency C=10 over 500 requests per endpoint.*
-<!-- AIEN:BENCHMARKS:END -->
+```bash
+cargo run -p aien-scheduler --bin bench_inference_stack
+cargo test -p aien-kv-cache --test cow_branching_tests -- --nocapture
+cargo run -p bench_apples_to_apples -- --engines aien,max --concurrency 1,2,4,8,16,32,64 --output-dir benchmarks/data
+```
 
-For raw telemetry datasets, reproducible verification scripts, and SVG comparison charts, see the dedicated [**aien-dev/benchmarks**](https://github.com/aien-dev/benchmarks) repository.
-
-### Canonical Grace Blackwell GB10 Silicon Proof (Run `gb10_canonical_1789907893_4d762`)
-
-Physical hardware verification executed on the NVIDIA DGX Spark Grace Blackwell GB10 workstation (`sm_121`, 128 GB Unified LPDDR5X memory, NVLink-C2C 900 GB/s bidirectional interconnect). The recorded fallback counter was zero for the GPU operations instrumented by this benchmark. The current counter does not observe all CPU-executed operations; C1 is adding per-operation device provenance:
-- **Continuous Batching (TinyLlama-1.1B BF16)**: Peak 553.14 tokens/sec at concurrency C=16 (23.56 ms p50 step latency, 27.89 W); saturated 510.16 tokens/sec at C=64 (101.70 ms p50 step latency, 42.52 W).
-- **Branch-Native Reasoning (500 Branches, 32,768 Prefix Tokens)**: 2.06 µs median fork latency per branch (1.20 ms total fork time), 500.0x physical memory savings ratio (704 MB physical paged blocks vs 343.75 GB unshared copy), 13.04 µs cold fork to first token, and 13.30 µs copy-on-write page mutation.
-- **Cryptographic Provenance Receipts**: Complete raw telemetry manifests and SHA-256 digests are published in [`benchmarks/artifacts/gb10_canonical_1789907893_4d762/`](https://github.com/aien-dev/benchmarks/tree/main/artifacts/gb10_canonical_1789907893_4d762) and cataloged on the trust hub at [drakestapleton.com/evidence](https://drakestapleton.com/evidence#claim-branching-fork-gb10).
+No withdrawn figure returns to this section until its artifact bundle carries
+commit identity, hardware and environment record, exact command, raw samples,
+SHA-256 digests, measurement definition, and reproducibility steps.
 
 ---
 
