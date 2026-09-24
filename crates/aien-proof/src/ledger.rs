@@ -97,6 +97,18 @@ pub fn append(
     intent: &str,
     payload: &[u8],
 ) -> io::Result<LedgerEvent> {
+    append_action(root, "test", agent, target, intent, payload)
+}
+
+/// Seal and append one event with a Crumb action such as `test` or `audit`.
+pub fn append_action(
+    root: &Path,
+    action: &str,
+    agent: &str,
+    target: &str,
+    intent: &str,
+    payload: &[u8],
+) -> io::Result<LedgerEvent> {
     fs::create_dir_all(root)?;
     let _guard = FileLock::acquire(&root.join("ledger.lock"))?;
     let path = root.join(LEDGER_FILE);
@@ -106,7 +118,6 @@ pub fn append(
     };
     let timestamp = now().max(last_ts);
     let payload_hash = *blake3::hash(payload).as_bytes();
-    let action = "test";
     let hash = compute_hash(
         index,
         timestamp,

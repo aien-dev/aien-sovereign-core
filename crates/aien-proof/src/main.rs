@@ -1,6 +1,7 @@
 //! aien-proof CLI.
 //!
-//!   aien-proof run --job NAME [--input PATH]... [--gpu] [--agent ID] -- CMD...
+//!   aien-proof run --job NAME [--input PATH]... [--gpu] [--resource NAME]... [--agent ID] -- CMD...
+//!   aien-proof hold --resource NAME... [--job NAME] [--agent ID] -- CMD...
 //!   aien-proof crates [--dir WORKSPACE] [--agent ID] [--gpu-crate NAME]... [--only NAME]... [-- CARGO_TEST_ARGS...]
 //!   aien-proof verify
 //!   aien-proof status
@@ -12,7 +13,8 @@ use std::process::{exit, Command};
 use std::time::Instant;
 
 const USAGE: &str = "usage:
-  aien-proof run --job NAME [--input PATH]... [--gpu] [--agent ID] -- CMD...
+  aien-proof run --job NAME [--input PATH]... [--gpu] [--resource NAME]... [--agent ID] -- CMD...
+  aien-proof hold --resource NAME... [--job NAME] [--agent ID] -- CMD...
   aien-proof crates [--dir WORKSPACE] [--agent ID] [--gpu-crate NAME]... [--only NAME]... [-- CARGO_TEST_ARGS...]
   aien-proof verify
   aien-proof status";
@@ -112,6 +114,7 @@ fn cmd_run(args: &[String]) -> i32 {
             .collect(),
         cmd: flags.rest.clone(),
         gpu: flags.switches.iter().any(|s| s == "--gpu"),
+        resources: flags.all("--resource"),
         toolchain: toolchain(),
     };
     match Board::from_env().run(&job) {
@@ -162,6 +165,7 @@ fn cmd_crates(args: &[String]) -> i32 {
             inputs: m.inputs.clone(),
             cmd,
             gpu: m.gpu || gpu_crates.contains(&m.name),
+            resources: vec![],
             toolchain: toolchain.clone(),
         };
         match board.run(&job) {
@@ -218,6 +222,47 @@ fn cmd_verify() -> i32 {
     }
 }
 
+/// Run a command while holding exclusive keys (for example `machine-1`).
+/// Always runs; recorded in the ledger as an `audit` event.
+fn cmd_hold(args: &[String]) -> i32 {
+    let flags = Flags::parse(args, &[]);
+    let resources = flags.all("--resource");
+    if flags.rest.is_empty() || resources.is_empty() {
+        eprintln!("{USAGE}");
+        return 2;
+    }
+    let job = Job {
+        name: flags
+            .get("--job")
+            .map(str::to_string)
+            .unwrap_or_else(|| flags.rest.join(" ")),
+        agent: agent(&flags),
+        base: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+        inputs: vec![],
+        cmd: flags.rest.clone(),
+        gpu: false,
+        resources,
+        toolchain: String::new(),
+    };
+    match Board::from_env().hold(&job) {
+        Ok(rec) => {
+            eprintln!(
+                "[aien-proof] {}: held {} for {} ms, exit {}, ledger #{}",
+                rec.job,
+                job.resources.join(","),
+                rec.duration_ms,
+                rec.exit_code,
+                rec.ledger_index
+            );
+            rec.exit_code
+        }
+        Err(e) => {
+            eprintln!("[aien-proof] {}: {e}", job.name);
+            1
+        }
+    }
+}
+
 fn count(dir: PathBuf) -> usize {
     std::fs::read_dir(dir).map(|d| d.count()).unwrap_or(0)
 }
@@ -232,6 +277,9 @@ fn cmd_status() -> i32 {
     if let Some(free) = mem_available() {
         println!("free now:   {} GiB", free >> 30);
     }
+    for (name, who) in b.holders() {
+        println!("key held:   {name} by {who}");
+    }
     cmd_verify()
 }
 
@@ -240,6 +288,7 @@ fn main() {
     let code = match args.first().map(String::as_str) {
         Some("run") => cmd_run(&args[1..]),
         Some("crates") => cmd_crates(&args[1..]),
+        Some("hold") => cmd_hold(&args[1..]),
         Some("verify") => cmd_verify(),
         Some("status") => cmd_status(),
         _ => {
