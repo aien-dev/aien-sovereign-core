@@ -64,6 +64,15 @@ mod tests {
         assert!(first.is_some());
         assert!(FileLock::try_acquire(&path).unwrap().is_none());
         drop(first);
-        assert!(FileLock::try_acquire(&path).unwrap().is_some());
+        // Another test forking a child between our open and its exec gives the
+        // child a copy of the lock's open file description until exec closes
+        // it (CLOEXEC), so the release can lag by microseconds. Allow that.
+        let freed = (0..100).any(|_| {
+            FileLock::try_acquire(&path).unwrap().is_some() || {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+                false
+            }
+        });
+        assert!(freed, "lock still held 1 s after release");
     }
 }

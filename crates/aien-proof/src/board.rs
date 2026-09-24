@@ -7,6 +7,9 @@
 //!   locks/<key>.lock    held while a job runs; identical requests block on it
 //!   slots/cpu-N.lock    CPU slots (`AIEN_PROOF_SLOTS`)
 //!   slots/gpu.lock      the GPU key, one GPU job at a time
+//!   slots/res-<name>.lock  other exclusive keys, e.g. `machine-1`
+//!   slots/<name>.holder    who holds a key right now (agent, pid, job, since)
+//!   holds/<key>.json    record of each `hold` run (never reused)
 //!   logs/<key>.log      full output of the latest real run
 //!   ledger.jsonl        hash-chained record of every real run
 
@@ -40,7 +43,45 @@ pub struct Job {
     pub inputs: Vec<PathBuf>,
     pub cmd: Vec<String>,
     pub gpu: bool,
+    /// Exclusive keys held for the whole run, e.g. `machine-1`.
+    pub resources: Vec<String>,
     pub toolchain: String,
+}
+
+impl Job {
+    /// Every exclusive key this job needs, including `gpu` when set.
+    pub fn resource_names(&self) -> Vec<String> {
+        let mut names = self.resources.clone();
+        if self.gpu {
+            names.push("gpu".into());
+        }
+        names.sort();
+        names.dedup();
+        names
+    }
+}
+
+/// Key names are path components: lowercase letters, digits and dashes only.
+pub fn valid_resource(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 64
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+}
+
+/// An exclusive key. The holder file is removed before the lock is released
+/// (`Drop` runs before fields are dropped), so a named holder is never stale
+/// while the key is free.
+pub struct ResourceGuard {
+    _lock: FileLock,
+    holder: PathBuf,
+}
+
+impl Drop for ResourceGuard {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.holder);
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -216,6 +257,167 @@ impl Board {
         }
     }
 
+    fn resource_lock_path(&self, name: &str) -> PathBuf {
+        // `gpu` keeps its original path so older binaries still exclude each other.
+        if name == "gpu" {
+            self.root.join("slots/gpu.lock")
+        } else {
+            self.root.join("slots").join(format!("res-{name}.lock"))
+        }
+    }
+
+    /// Acquire keys in sorted order so two jobs can never deadlock.
+    pub fn acquire_resources(
+        &self,
+        names: &[String],
+        agent: &str,
+        job: &str,
+    ) -> io::Result<Vec<ResourceGuard>> {
+        let mut names: Vec<&String> = names.iter().collect();
+        names.sort();
+        names.dedup();
+        let mut guards = Vec::with_capacity(names.len());
+        for name in names {
+            if !valid_resource(name) {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "invalid resource name {name:?}: use lowercase letters, digits, dashes"
+                    ),
+                ));
+            }
+            let lock_path = self.resource_lock_path(name);
+            let holder = self.root.join("slots").join(format!("{name}.holder"));
+            let lock = match FileLock::try_acquire(&lock_path)? {
+                Some(lock) => lock,
+                None => {
+                    let who = fs::read_to_string(&holder).unwrap_or_default();
+                    let who = who.trim();
+                    self.note(&format!(
+                        "{name} key held by {}, waiting",
+                        if who.is_empty() { "another run" } else { who }
+                    ));
+                    FileLock::acquire(&lock_path)?
+                }
+            };
+            fs::write(
+                &holder,
+                format!(
+                    "agent={agent} pid={} job={job} since={}\n",
+                    std::process::id(),
+                    now()
+                ),
+            )?;
+            guards.push(ResourceGuard {
+                _lock: lock,
+                holder,
+            });
+        }
+        Ok(guards)
+    }
+
+    /// Run `cmd` in `base`, teeing output to the terminal and `log_path`.
+    /// Returns the exit code and wall time in milliseconds.
+    fn execute(
+        &self,
+        cmd: &[String],
+        base: &std::path::Path,
+        log_path: &std::path::Path,
+    ) -> io::Result<(i32, u64)> {
+        fs::create_dir_all(log_path.parent().unwrap())?;
+        let log = Arc::new(Mutex::new(fs::File::create(log_path)?));
+        let started = Instant::now();
+        let mut child = Command::new(&cmd[0])
+            .args(&cmd[1..])
+            .current_dir(base)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()?;
+        let out = tee(
+            child.stdout.take().unwrap(),
+            log.clone(),
+            !self.quiet,
+            false,
+        );
+        let err = tee(child.stderr.take().unwrap(), log.clone(), !self.quiet, true);
+        let status = child.wait()?;
+        let _ = out.join();
+        let _ = err.join();
+        Ok((
+            status.code().unwrap_or(-1),
+            started.elapsed().as_millis() as u64,
+        ))
+    }
+
+    /// Run `job.cmd` while holding its exclusive keys, with no fingerprint,
+    /// stamp or reuse: hardware actions such as booting Machine 1 must happen
+    /// every time they are asked for. Recorded in the ledger as an `audit`
+    /// event whose payload is the full output.
+    pub fn hold(&self, job: &Job) -> io::Result<Record> {
+        if job.cmd.is_empty() {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "empty command"));
+        }
+        let names = job.resource_names();
+        if names.is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "hold needs at least one --resource",
+            ));
+        }
+        let _keys = self.acquire_resources(&names, &job.agent, &job.name)?;
+        let mut id = blake3::Hasher::new();
+        id.update(b"AIEN_PROOF_HOLD_V1");
+        id.update(job.name.as_bytes());
+        id.update(job.agent.as_bytes());
+        id.update(&std::process::id().to_be_bytes());
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        id.update(&nanos.to_be_bytes());
+        let key = id.finalize().to_hex().to_string();
+
+        let log_path = self.root.join("logs").join(format!("{key}.log"));
+        let (exit_code, duration_ms) = self.execute(&job.cmd, &job.base, &log_path)?;
+        let payload = fs::read(&log_path)?;
+        let verdict = if exit_code == 0 { "pass" } else { "fail" };
+        let intent = format!("{verdict} exit={exit_code} resources={}", names.join(","));
+        let event = ledger::append_action(
+            &self.root, "audit", &job.agent, &job.name, &intent, &payload,
+        )?;
+        let rec = Record {
+            key,
+            job: job.name.clone(),
+            agent: job.agent.clone(),
+            cmd: job.cmd.clone(),
+            exit_code,
+            duration_ms,
+            finished_at: now(),
+            ledger_index: event.index,
+            ledger_hash: ledger::hex(&event.hash),
+        };
+        self.write_record("holds", &rec)?;
+        Ok(rec)
+    }
+
+    /// Current key holders as `(name, holder line)`.
+    pub fn holders(&self) -> Vec<(String, String)> {
+        let mut out: Vec<(String, String)> = fs::read_dir(self.root.join("slots"))
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter_map(|e| {
+                let name = e.file_name().to_string_lossy().into_owned();
+                let name = name.strip_suffix(".holder")?.to_string();
+                let who = fs::read_to_string(e.path()).ok()?;
+                Some((name, who.trim().to_string()))
+            })
+            .collect();
+        out.sort();
+        out
+    }
+
     fn wait_for_memory(&self) {
         let start = Instant::now();
         let mut noted = false;
@@ -281,42 +483,10 @@ impl Board {
 
         let _cpu = self.acquire_cpu_slot()?;
         self.wait_for_memory();
-        let _gpu = if job.gpu {
-            let gpu_path = self.root.join("slots/gpu.lock");
-            Some(match FileLock::try_acquire(&gpu_path)? {
-                Some(lock) => lock,
-                None => {
-                    self.note("GPU key in use, waiting");
-                    FileLock::acquire(&gpu_path)?
-                }
-            })
-        } else {
-            None
-        };
+        let _keys = self.acquire_resources(&job.resource_names(), &job.agent, &job.name)?;
 
         let log_path = self.root.join("logs").join(format!("{key}.log"));
-        fs::create_dir_all(log_path.parent().unwrap())?;
-        let log = Arc::new(Mutex::new(fs::File::create(&log_path)?));
-        let started = Instant::now();
-        let mut child = Command::new(&job.cmd[0])
-            .args(&job.cmd[1..])
-            .current_dir(&job.base)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()?;
-        let out = tee(
-            child.stdout.take().unwrap(),
-            log.clone(),
-            !self.quiet,
-            false,
-        );
-        let err = tee(child.stderr.take().unwrap(), log.clone(), !self.quiet, true);
-        let status = child.wait()?;
-        let _ = out.join();
-        let _ = err.join();
-        let duration_ms = started.elapsed().as_millis() as u64;
-        let exit_code = status.code().unwrap_or(-1);
+        let (exit_code, duration_ms) = self.execute(&job.cmd, &job.base, &log_path)?;
 
         let payload = fs::read(&log_path)?;
         let verdict = if exit_code == 0 { "pass" } else { "fail" };
@@ -369,6 +539,7 @@ mod tests {
                 format!("echo x >> runs; {script}"),
             ],
             gpu: false,
+            resources: vec![],
             toolchain: "test".into(),
         }
     }
@@ -470,5 +641,112 @@ mod tests {
             assert!(h.join().unwrap().passed());
         }
         assert!(started.elapsed() >= Duration::from_millis(1000));
+    }
+
+    fn hold_job(base: &std::path::Path, resource: &str, script: &str) -> Job {
+        let mut j = job(base, "boot-machine-1", script);
+        j.resources = vec![resource.into()];
+        j
+    }
+
+    #[test]
+    fn holds_on_the_same_key_never_overlap_and_are_never_reused() {
+        let b = Arc::new(board("hold-same"));
+        let base = temp_dir("base-hold-same");
+        let started = Instant::now();
+        let handles: Vec<_> = (0..2)
+            .map(|_| {
+                let (b, j) = (b.clone(), hold_job(&base, "machine-1", "sleep 0.5"));
+                thread::spawn(move || b.hold(&j).unwrap())
+            })
+            .collect();
+        for h in handles {
+            assert_eq!(h.join().unwrap().exit_code, 0);
+        }
+        assert!(started.elapsed() >= Duration::from_millis(1000));
+        // Identical commands both ran: hardware actions are not stamped.
+        assert_eq!(runs(&base), 2);
+    }
+
+    #[test]
+    fn different_keys_run_in_parallel() {
+        let b = Arc::new(board("hold-diff"));
+        let base = temp_dir("base-hold-diff");
+        let started = Instant::now();
+        let handles: Vec<_> = ["machine-1", "machine-2"]
+            .into_iter()
+            .map(|r| {
+                let (b, j) = (b.clone(), hold_job(&base, r, "sleep 0.6"));
+                thread::spawn(move || b.hold(&j).unwrap())
+            })
+            .collect();
+        for h in handles {
+            h.join().unwrap();
+        }
+        assert!(started.elapsed() < Duration::from_millis(1100));
+    }
+
+    #[test]
+    fn holder_is_visible_during_the_run_and_the_run_is_audited() {
+        let b = board("hold-audit");
+        let base = temp_dir("base-hold-audit");
+        let holder = b.root.join("slots/machine-1.holder");
+        let rec = b
+            .hold(&hold_job(
+                &base,
+                "machine-1",
+                &format!("cat {}", holder.display()),
+            ))
+            .unwrap();
+        assert_eq!(rec.exit_code, 0);
+        let log = fs::read_to_string(b.root.join("logs").join(format!("{}.log", rec.key))).unwrap();
+        assert!(
+            log.contains("agent=tester") && log.contains("job=boot-machine-1"),
+            "{log}"
+        );
+        assert!(!holder.exists());
+        assert!(b.holders().is_empty());
+
+        let ledger_text = fs::read_to_string(b.root.join(ledger::LEDGER_FILE)).unwrap();
+        let event: ledger::LedgerEvent =
+            serde_json::from_str(ledger_text.lines().last().unwrap()).unwrap();
+        assert_eq!(event.action, "audit");
+        assert!(event.intent.contains("resources=machine-1"));
+        assert_eq!(
+            ledger::verify(&b.root.join(ledger::LEDGER_FILE)).unwrap().0,
+            1
+        );
+    }
+
+    #[test]
+    fn run_honors_named_keys() {
+        let b = Arc::new(board("run-keys"));
+        let base = temp_dir("base-run-keys");
+        let started = Instant::now();
+        let handles: Vec<_> = (0..2)
+            .map(|i| {
+                let mut j = job(&base, &format!("job-{i}"), "sleep 0.5");
+                j.resources = vec!["machine-1".into()];
+                let b = b.clone();
+                thread::spawn(move || b.run(&j).unwrap())
+            })
+            .collect();
+        for h in handles {
+            assert!(h.join().unwrap().passed());
+        }
+        assert!(started.elapsed() >= Duration::from_millis(1000));
+    }
+
+    #[test]
+    fn rejects_unsafe_key_names_and_holds_without_a_key() {
+        let b = board("hold-names");
+        let base = temp_dir("base-hold-names");
+        for bad in ["", "../etc", "Machine1", "a b", &"x".repeat(65)] {
+            assert!(!valid_resource(bad), "{bad:?}");
+            assert!(b.hold(&hold_job(&base, bad, "true")).is_err());
+        }
+        assert!(valid_resource("machine-1"));
+        assert!(b.hold(&job(&base, "no-key", "true")).is_err());
+        assert_eq!(runs(&base), 0);
     }
 }
