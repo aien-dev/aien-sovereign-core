@@ -10,8 +10,14 @@
 //! with the run's full output as the payload.
 
 pub mod board;
+pub mod chain;
+pub mod evidence;
 pub mod fingerprint;
+pub mod gate;
+pub mod import;
+pub mod lease;
 pub mod ledger;
+pub mod ledger_bind;
 pub mod lock;
 pub mod workspace;
 
