@@ -10,7 +10,7 @@ use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::evidence::{
-    check_commit, Assertion, LedgerRef, LeaseRef, Mutation, Receipt, Tier, Verdict, SCHEMA,
+    check_commit, Assertion, LeaseRef, LedgerRef, Mutation, Receipt, Tier, Verdict, SCHEMA,
     SCHEMA_VERSION,
 };
 use crate::lease::check_resource_name;
@@ -126,8 +126,7 @@ pub fn read_assertion_file(path: &Path) -> Result<(Vec<Assertion>, Verdict), Str
         Verdict::Fail
     };
     if let Some(claimed) = file.result {
-        let verdict =
-            Verdict::parse(&claimed).ok_or_else(|| format!("bad result {claimed:?}"))?;
+        let verdict = Verdict::parse(&claimed).ok_or_else(|| format!("bad result {claimed:?}"))?;
         if verdict == Verdict::Pass && derived != Verdict::Pass {
             return Err("assertion file claims PASS but an assertion failed".to_string());
         }
@@ -148,7 +147,11 @@ pub fn read_assertion_file(path: &Path) -> Result<(Vec<Assertion>, Verdict), Str
 /// Build a sealed receipt from validated inputs. Hardware tiers require an
 /// explicit declared mutation and a lease reference; PASS receipts require
 /// an output digest (direct hex or hashed from an output file).
-pub fn build_receipt(req: &ImportRequest, assertions: Vec<Assertion>, result: Verdict) -> Result<Receipt, String> {
+pub fn build_receipt(
+    req: &ImportRequest,
+    assertions: Vec<Assertion>,
+    result: Verdict,
+) -> Result<Receipt, String> {
     let tier = Tier::parse(&req.tier)
         .ok_or_else(|| format!("unknown qualification tier {:?}", req.tier))?;
     check_commit(&req.commit)?;
@@ -171,8 +174,7 @@ pub fn build_receipt(req: &ImportRequest, assertions: Vec<Assertion>, result: Ve
         }
     }
     let declared = match &req.declared_mutation {
-        Some(s) => Mutation::parse(s)
-            .ok_or_else(|| format!("unknown mutation class {s:?}"))?,
+        Some(s) => Mutation::parse(s).ok_or_else(|| format!("unknown mutation class {s:?}"))?,
         None => {
             if tier.is_hardware() {
                 return Err("hardware receipts require --declared-mutation".to_string());
@@ -181,8 +183,7 @@ pub fn build_receipt(req: &ImportRequest, assertions: Vec<Assertion>, result: Ve
         }
     };
     let observed = match &req.observed_mutation {
-        Some(s) => Mutation::parse(s)
-            .ok_or_else(|| format!("unknown mutation class {s:?}"))?,
+        Some(s) => Mutation::parse(s).ok_or_else(|| format!("unknown mutation class {s:?}"))?,
         None => declared,
     };
     let output_digest = match (&req.output_digest, &req.output_file) {
@@ -251,7 +252,11 @@ pub fn build_receipt(req: &ImportRequest, assertions: Vec<Assertion>, result: Ve
         input_artifacts: req.input_artifacts.clone(),
         output_artifacts: req.output_artifacts.clone(),
         assertions,
-        dependencies: req.dependencies.iter().map(|d| d.to_ascii_lowercase()).collect(),
+        dependencies: req
+            .dependencies
+            .iter()
+            .map(|d| d.to_ascii_lowercase())
+            .collect(),
         declared_mutation: declared,
         observed_mutation: observed,
         authority: req.authority.clone(),
@@ -268,7 +273,10 @@ pub fn build_receipt(req: &ImportRequest, assertions: Vec<Assertion>, result: Ve
     let text = serde_json::to_vec(&receipt).map_err(|e| e.to_string())?;
     let (_, report) = crate::evidence::verify_bytes(&text)?;
     if report.status == Verdict::Fail {
-        return Err(format!("built receipt fails self check: {}", report.reasons.join("; ")));
+        return Err(format!(
+            "built receipt fails self check: {}",
+            report.reasons.join("; ")
+        ));
     }
     Ok(receipt)
 }

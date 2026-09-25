@@ -44,8 +44,7 @@ pub type Resolver<'a> = &'a dyn Fn(&str) -> Result<(Receipt, Report), String>;
 /// Verify the complete reachable receipt graph for the receipt file at
 /// `path`. Dependencies resolve from `store`.
 pub fn verify_chain(path: &Path, store: &Path) -> Result<ChainReport, String> {
-    let text =
-        std::fs::read(path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+    let text = std::fs::read(path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
     let (root, root_report) = verify_with_store(&text, store)?;
     let resolve = |id: &str| -> Result<(Receipt, Report), String> {
         let receipt = load_receipt(store, id)?;
@@ -98,7 +97,9 @@ impl<'a> Walker<'a> {
             }
         };
         let lease_report = crate::lease::lease_status(&receipt, self.store);
-        let lease_bad = lease_report.as_ref().is_some_and(|r| r.status != Verdict::Pass);
+        let lease_bad = lease_report
+            .as_ref()
+            .is_some_and(|r| r.status != Verdict::Pass);
         let mut note = report.reasons.join("; ");
         if let Some(lease) = &lease_report {
             if lease.status != Verdict::Pass {
@@ -182,7 +183,9 @@ pub fn verify_graph(
     for dep in deps {
         walker.visit(&dep.to_ascii_lowercase(), 1);
     }
-    walker.lines.sort_by(|a, b| (a.depth, &a.id).cmp(&(b.depth, &b.id)));
+    walker
+        .lines
+        .sort_by(|a, b| (a.depth, &a.id).cmp(&(b.depth, &b.id)));
 
     if let Some(c) = walker.cycle {
         return ChainReport {
@@ -322,9 +325,11 @@ mod tests {
         let path = write_root(&dir, &root);
         assert_eq!(verify_chain(&path, &store).unwrap().status, Verdict::Pass);
         let dep_path = store.join("receipts").join(format!("{dep}.json"));
-        let text = std::fs::read_to_string(&dep_path)
-            .unwrap()
-            .replacen("artifact_signature_valid", "artifact_signature_tampered", 1);
+        let text = std::fs::read_to_string(&dep_path).unwrap().replacen(
+            "artifact_signature_valid",
+            "artifact_signature_tampered",
+            1,
+        );
         std::fs::write(&dep_path, text).unwrap();
         assert_eq!(
             verify_chain(&path, &store).unwrap().status,
@@ -358,6 +363,20 @@ mod tests {
         let report = verify_graph(&root, &Report::pass("ok"), &store, &resolve);
         assert_eq!(report.status, Verdict::Fail);
         assert!(report.reasons.iter().any(|r| r.contains("cycle")));
+    }
+
+    #[test]
+    fn blocked_dependency_blocks_chain_never_passes() {
+        let store = crate::testutil::temp_dir("chain-blocked");
+        let mut dep = sample();
+        dep.kind = "qemu-qual".to_string();
+        dep.result = Verdict::Blocked;
+        let dep_id = put(&store, &sealed(dep));
+        let root = sealed(qemu_receipt("seed", vec![dep_id]));
+        let dir = crate::testutil::temp_dir("chain-blocked-root");
+        let path = write_root(&dir, &root);
+        let report = verify_chain(&path, &store).unwrap();
+        assert_eq!(report.status, Verdict::Blocked);
     }
 
     #[test]
@@ -400,7 +419,10 @@ mod tests {
         assert!(tier_satisfies(Tier::Qemu, Tier::Machine1Mutating));
         assert!(!tier_satisfies(Tier::Machine1Attended, Tier::Qemu));
         assert!(!tier_satisfies(Tier::Machine1Attended, Tier::QemuSecurity));
-        assert!(tier_satisfies(Tier::Machine1ReadOnly, Tier::Machine1Mutating));
+        assert!(tier_satisfies(
+            Tier::Machine1ReadOnly,
+            Tier::Machine1Mutating
+        ));
         assert!(!tier_satisfies(Tier::HostTest, Tier::TestOnlyTrust));
         assert!(tier_satisfies(Tier::TestOnlyTrust, Tier::TestOnlyTrust));
     }

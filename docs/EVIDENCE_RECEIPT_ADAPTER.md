@@ -89,12 +89,21 @@ Field notes:
 
 ## 3. Machine 1 runs: the `hold` lease
 
-Every `MACHINE1_*` receipt must bind an exclusive hold. Wrap the run:
+Every `MACHINE1_*` receipt must bind an exclusive hold from the existing
+coordination machinery. No second lock exists. Wrap the run:
 
 ```sh
 HOLD=$(aien-proof hold --resource machine-1 --job seed-0b-machine1 -- \
-  scripts/seed0b_machine1.sh)
+  scripts/seed0b_machine1.sh 2>/dev/null | tail -n 1)
 ```
+
+`hold` always runs (no fingerprint, stamp, or reuse), holds every
+`--resource` key plus the holder record for the whole run, seals an `audit`
+event into the Crumb ledger with the full output as payload, and stores
+`holds/<key>.json`. The audit event hash printed on stdout is the hold ID.
+Resource names are lowercase letters, digits, and dashes only. `run
+--resource` takes the same keys, so test-board runs and holds exclude each
+other on one machine.
 
 Then import with:
 
@@ -148,24 +157,44 @@ Import with `--gate seed-0b-qemu --tier QEMU`, plus `--dep` on the M3
 receipt and the recovery media receipt IDs. The hostile input matrix is a
 separate import with `--gate seed-0b-hostile-matrix --tier QEMU`.
 
-### 4.2 Native boot rollback (owner: M0 rollback lane)
+### 4.2 M0 rollback QEMU and Machine 1 are different facts (owner: M0 rollback lane)
 
 EXAMPLE assertion file:
 
 ```json
 {
   "assertions": [
-    {"id": "secure_boot_unchanged", "expected": "on", "observed": "on", "result": "pass", "source": "rollback-verify.sh"},
-    {"id": "boot_order_unchanged", "expected": "<efibootmgr-before>", "observed": "<efibootmgr-after>", "result": "pass", "source": "rollback-verify.sh"},
-    {"id": "rollback_boot_ok", "expected": "linux", "observed": "linux", "result": "pass", "source": "rollback-verify.sh"}
+    {"id": "rollback_harness_version_recorded", "expected": "version in procedure identity", "observed": "exact harness version", "result": "pass", "source": "rollback_harness"},
+    {"id": "qemu_aavmf_environment_recorded", "expected": "QEMU and AAVMF identities", "observed": "exact QEMU/AAVMF versions and firmware digests", "result": "pass", "source": "qemu_environment_collector"},
+    {"id": "rollback_normal_pass", "expected": "pass", "observed": "pass", "result": "pass", "source": "aavmf_serial_output"},
+    {"id": "rollback_fault_pass", "expected": "pass", "observed": "pass", "result": "pass", "source": "aavmf_serial_output"},
+    {"id": "rollback_timeout_pass", "expected": "pass", "observed": "pass", "result": "pass", "source": "aavmf_serial_output"},
+    {"id": "rollback_rejected_pass", "expected": "pass", "observed": "pass", "result": "pass", "source": "aavmf_serial_output"},
+    {"id": "rollback_absent_pass", "expected": "pass", "observed": "pass", "result": "pass", "source": "aavmf_serial_output"},
+    {"id": "rollback_repeat_boot_pass", "expected": "pass", "observed": "pass", "result": "pass", "source": "aavmf_serial_output"},
+    {"id": "bootnext_consumed", "expected": "unset in AAVMF NVRAM after one-time boot", "observed": "unset", "result": "pass", "source": "aavmf_variables"},
+    {"id": "default_boot_unchanged", "expected": "default entry selected after candidate", "observed": "default entry selected", "result": "pass", "source": "aavmf_variables"},
+    {"id": "m0_native_rollback_qemu_pass", "expected": "all required branches pass", "observed": "all required branches pass", "result": "pass", "source": "rollback_harness_summary"}
   ]
 }
 ```
 
-QEMU rehearsal: `--gate native-rollback --tier QEMU`. Hardware gate input:
-`--tier MACHINE1_ATTENDED` under a `hold` lease with
-`--declared-mutation ONE_TIME_BOOT_SELECTION` (or higher if the run writes
-more), following section 3 exactly.
+Import the QEMU run under `--gate m0-native-rollback-qemu --tier QEMU`.
+Bind the exact `aienos` commit, harness version in `--procedure`, QEMU/AAVMF
+identity in `--machine` and input artifact digests, and complete captured
+output with `--output-file`. If the run also includes a pure state machine
+mock, emit its observations with source `rollback_state_machine_mock`; firmware
+variable observations must use source `aavmf_variables`. A mock result alone
+cannot satisfy `bootnext_consumed`.
+
+Do not import a Machine 1 rollback receipt until the owner trust chain permits
+the attended run. That future receipt must prove Secure Boot stayed on,
+permanent BootOrder stayed unchanged, BootNext was consumed, Linux/default boot
+returned, root and ESP UUIDs stayed unchanged, expected mounts are healthy, and
+the exact candidate digest and source commit were recorded. It must use
+`MACHINE1_ATTENDED`, declare `ONE_TIME_BOOT_SELECTION`, and reference the
+existing `aien-proof hold --resource machine-1 -- ...` event. QEMU rollback
+evidence never satisfies this receipt.
 
 ### 4.3 System Store v1 crash consistency (owner: System Store lane)
 
@@ -175,7 +204,9 @@ EXAMPLE assertion file:
 {
   "assertions": [
     {"id": "store_previous_or_new_only", "expected": "no torn writes", "observed": "no torn writes", "result": "pass", "source": "crash-qualify.sh"},
-    {"id": "root_graph_valid", "expected": "valid", "observed": "valid", "result": "pass", "source": "crash-qualify.sh"},
+    {"id": "store_graph_valid", "expected": "valid", "observed": "valid", "result": "pass", "source": "crash-qualify.sh"},
+    {"id": "store_nospace_zero_writes", "expected": "zero writes", "observed": "zero writes", "result": "pass", "source": "crash-qualify.sh"},
+    {"id": "store_io_error_not_fallback", "expected": "no silent fallback", "observed": "no silent fallback", "result": "pass", "source": "crash-qualify.sh"},
     {"id": "w_x_never_simultaneous", "expected": "never", "observed": "never", "result": "pass", "source": "crash-qualify.sh"}
   ]
 }
@@ -183,6 +214,43 @@ EXAMPLE assertion file:
 
 Import with `--gate store-v1-crash --tier QEMU` (or the tier the lane
 declares), with `--dep` on the ADR 0015 acceptance receipt once it exists.
+Store v1 format tests, mount validation, and the QEMU block-device suite
+follow the same shape with their own `--gate` kinds. Muse never defines
+Store v1 wire or recovery behavior; the Store lane emits structured
+observations and Muse verifies, chains, and evaluates them.
+
+### 4.4 Admission Receipts (owner: SEED-0B admission lane)
+
+Claude's Admission Receipt v0 stays where it is. It is the
+subsystem-specific proof of artifact verification, admission, and execution.
+It is not moved into `aien-proof`. An EvidenceReceipt references or digests
+it without conflating the two layers:
+
+- pass the admission receipt digest as an `--artifact` input digest, and/or
+- record its location or identifier in `--external-ref`.
+
+The EvidenceReceipt then proves the qualification procedure ran and its
+required assertions and dependencies hold; the Admission Receipt proves what
+the admission subsystem checked. Either layer can fail independently.
+
+### 4.5 Provenance tags for characterization evidence
+
+Characterization observations (for example GB10 topology facts) must carry
+their provenance in the assertion `source` field using this vocabulary:
+
+- `linux-observed`
+- `uefi-observed`
+- `native-aienos-observed`
+- `qemu-synthetic`
+- `derived`
+- `unknown`
+
+EXAMPLE source value: `gb10-topology:linux-observed`. Gate manifests pin the
+required origin per assertion with `assertion_sources`, so Linux-observed
+topology can never satisfy a native-AIENOS hardware-ownership claim and a
+pure state-machine mock can never prove firmware variable behavior. When a
+manifest is silent about origin, any recorded source is accepted, but the
+source string is still part of the canonical receipt identity.
 
 ## 5. Verification commands (read only)
 
@@ -190,17 +258,34 @@ declares), with `--dep` on the ADR 0015 acceptance receipt once it exists.
 aien-proof receipt verify <receipt-file>
 aien-proof verify-chain <receipt-file>
 aien-proof gate status SEED-0B
-aien-proof gate explain P3_ENTRY
+aien-proof gate explain P3_DEVELOPMENT_QEMU_ENTRY
+aien-proof gate explain P3_MACHINE1_WRITE_ENTRY
+aien-proof gate explain STORE_V1_FORMAT_PR_MERGE
 ```
 
-`gate status` prints one line per prerequisite (`PASS`, `FAIL`, `BLOCKED`
-with `MISSING` details) and names the responsible item. Example shape:
+`gate explain` reports each checked-in manifest prerequisite. Missing ordinary
+proof is `INCOMPLETE`. A known procedural blocker can declare `BLOCKED` and
+name it explicitly. Example current physical state:
 
 ```text
-P3_ENTRY: BLOCKED
-PASS    M3 ...
-MISSING SEED-0B-MACHINE1 ...
+P3_DEVELOPMENT_QEMU_ENTRY: INCOMPLETE
+INCOMPLETE M0_NATIVE_ROLLBACK_QEMU ...
+INCOMPLETE SEED0B_QEMU ...
+INCOMPLETE ADR0015 ...
+INCOMPLETE STRICT_MAIN ...
+
+P3_MACHINE1_WRITE_ENTRY: BLOCKED
+BLOCKED P3_DEVELOPMENT_QEMU_ENTRY ...
+BLOCKED OWNER_SECURE_BOOT_TRUST_CHAIN MISSING: HARDWARE_QUALIFICATION_BLOCKED_BY_TRUST_CHAIN
+BLOCKED M0_NATIVE_ROLLBACK_MACHINE1 MISSING: HARDWARE_QUALIFICATION_BLOCKED_BY_TRUST_CHAIN
+INCOMPLETE BOUNDED_MACHINE1_STORE_REGION ...
 ```
+
+`STORE_V1_FORMAT_PR_MERGE` is intentionally narrower. It requires ADR 0015,
+pure Store v1 format/golden-vector assertions, and strict main. It can pass
+without full SEED-0B completion. It does not authorize P3 QEMU qualification
+or any Machine 1 mutation. `P3_DEVELOPMENT_QEMU_ENTRY` requires all four of
+M0_NATIVE_ROLLBACK_QEMU, SEED0B_QEMU, ADR 0015, and strict main to pass.
 
 Materialize the checked in example manifests with:
 

@@ -881,10 +881,9 @@ fn check_consistency(r: &Receipt) -> Report {
     if problems.is_empty() {
         match r.result {
             Verdict::Pass => Report::pass("identity matches, assertions all pass"),
-            Verdict::Fail => Report::closed(
-                Verdict::Fail,
-                vec!["receipt records FAIL".to_string()],
-            ),
+            Verdict::Fail => {
+                Report::closed(Verdict::Fail, vec!["receipt records FAIL".to_string()])
+            }
             Verdict::Blocked => Report::closed(
                 Verdict::Blocked,
                 vec!["receipt records BLOCKED".to_string()],
@@ -1042,7 +1041,8 @@ mod tests {
     fn identity_is_stable_and_order_independent() {
         let a = sealed(sample());
         let mut b = a.clone();
-        b.input_artifacts.push("blake3:".to_string() + &"a".repeat(64));
+        b.input_artifacts
+            .push("blake3:".to_string() + &"a".repeat(64));
         b.input_artifacts.swap(0, 1);
         b.assertions.push(Assertion {
             id: "aaa_first".to_string(),

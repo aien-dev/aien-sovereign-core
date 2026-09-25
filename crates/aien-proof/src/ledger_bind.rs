@@ -85,7 +85,9 @@ mod tests {
             hash: "e".repeat(64),
         });
         let r = sealed(r);
-        assert!(check_ledger_ref(&r, &store).unwrap_err().contains("does not exist"));
+        assert!(check_ledger_ref(&r, &store)
+            .unwrap_err()
+            .contains("does not exist"));
     }
 
     #[test]
