@@ -615,6 +615,9 @@ pub const P3_STORE_QEMU: &str = include_str!("../gates/P3_STORE_QEMU.json");
 pub const P3_STORE_MACHINE1: &str = include_str!("../gates/P3_STORE_MACHINE1.json");
 pub const P3_DEVELOPMENT_QEMU_ENTRY: &str = include_str!("../gates/P3_DEVELOPMENT_QEMU_ENTRY.json");
 pub const P3_MACHINE1_WRITE_ENTRY: &str = include_str!("../gates/P3_MACHINE1_WRITE_ENTRY.json");
+pub const STORE_V1_FORMAT: &str = include_str!("../gates/STORE_V1_FORMAT.json");
+pub const STORE_V1_HOST: &str = include_str!("../gates/STORE_V1_HOST.json");
+pub const STORE_V1_QEMU: &str = include_str!("../gates/STORE_V1_QEMU.json");
 
 fn embedded_manifest(gate: &str) -> Option<&'static str> {
     match gate {
@@ -625,6 +628,9 @@ fn embedded_manifest(gate: &str) -> Option<&'static str> {
         "P3_STORE_MACHINE1" => Some(P3_STORE_MACHINE1),
         "P3_DEVELOPMENT_QEMU_ENTRY" => Some(P3_DEVELOPMENT_QEMU_ENTRY),
         "P3_MACHINE1_WRITE_ENTRY" => Some(P3_MACHINE1_WRITE_ENTRY),
+        "STORE_V1_FORMAT" => Some(STORE_V1_FORMAT),
+        "STORE_V1_HOST" => Some(STORE_V1_HOST),
+        "STORE_V1_QEMU" => Some(STORE_V1_QEMU),
         _ => None,
     }
 }
@@ -641,6 +647,9 @@ pub fn write_examples(dir: &Path) -> Result<Vec<std::path::PathBuf>, String> {
         ("P3_STORE_MACHINE1.json", P3_STORE_MACHINE1),
         ("P3_DEVELOPMENT_QEMU_ENTRY.json", P3_DEVELOPMENT_QEMU_ENTRY),
         ("P3_MACHINE1_WRITE_ENTRY.json", P3_MACHINE1_WRITE_ENTRY),
+        ("STORE_V1_FORMAT.json", STORE_V1_FORMAT),
+        ("STORE_V1_HOST.json", STORE_V1_HOST),
+        ("STORE_V1_QEMU.json", STORE_V1_QEMU),
     ] {
         // Validate the shipped shape before writing.
         let manifest: Gate =
@@ -1416,5 +1425,14 @@ mod tests {
         assert!(!p3.requires.is_empty());
         let physical: Gate = serde_json::from_str(P3_MACHINE1_WRITE_ENTRY).unwrap();
         assert_eq!(physical.gate, "P3_MACHINE1_WRITE_ENTRY");
+        let store_format: Gate = serde_json::from_str(STORE_V1_FORMAT).unwrap();
+        assert_eq!(store_format.gate, "STORE_V1_FORMAT");
+        store_format.validate().unwrap();
+        let store_host: Gate = serde_json::from_str(STORE_V1_HOST).unwrap();
+        assert_eq!(store_host.gate, "STORE_V1_HOST");
+        store_host.validate().unwrap();
+        let store_qemu: Gate = serde_json::from_str(STORE_V1_QEMU).unwrap();
+        assert_eq!(store_qemu.gate, "STORE_V1_QEMU");
+        store_qemu.validate().unwrap();
     }
 }

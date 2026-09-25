@@ -144,6 +144,119 @@ pub fn read_assertion_file(path: &Path) -> Result<(Vec<Assertion>, Verdict), Str
     }
 }
 
+// Canonical store assertion IDs live in store_assert.rs; this table only
+// groups them per qualification kind.
+use crate::store_assert::*;
+fn store_required_assertions(kind: &str) -> Option<&'static [&'static str]> {
+    match kind {
+        "store-v1-format" => Some(&[
+            STORE_FORMAT_VALID,
+            STORE_OBJECT_IDS_VALID,
+            STORE_CATALOG_VALID,
+            STORE_COMMIT_VALID,
+            STORE_FULL_GRAPH_VALID,
+        ]),
+        "store-v1-host" => Some(&[
+            STORE_PREVIOUS_OR_NEW_ONLY,
+            STORE_CONFLICT_FAIL_CLOSED,
+            STORE_INCONSISTENT_HISTORY_FAIL_CLOSED,
+            STORE_IO_ERROR_NOT_FALLBACK,
+            STORE_NOSPACE_ZERO_WRITES,
+            STORE_OPEN_SIDE_EFFECT_FREE,
+        ]),
+        "store-v1-qemu" => Some(&[
+            STORE_PREVIOUS_OR_NEW_ONLY,
+            STORE_FULL_GRAPH_VALID,
+            STORE_QEMU_REBOOT_RECOVERED,
+        ]),
+        _ => None,
+    }
+}
+
+/// Store qualification profile for kinds starting with "store-".
+/// Checks source identity, tier allow list, artifact and assertion
+/// presence, assertion origin, PASS consistency, mutation allow list,
+/// and the per-kind required assertion set. Output digest presence for
+/// PASS stays enforced by `build_receipt`.
+pub fn validate_store_profile(
+    req: &ImportRequest,
+    assertions: &[Assertion],
+    result: Verdict,
+) -> Result<(), String> {
+    if req.repo.trim().is_empty() {
+        return Err("store qualification requires non-empty repo".to_string());
+    }
+    check_commit(&req.commit)?;
+    if req.procedure.trim().is_empty() {
+        return Err("store qualification requires non-empty procedure".to_string());
+    }
+    if req.procedure.trim() == "TBD" {
+        return Err("store qualification requires a named procedure, got \"TBD\"".to_string());
+    }
+    let tier = Tier::parse(&req.tier).ok_or_else(|| {
+        format!(
+            "store qualification kind {:?} has unknown tier {:?}",
+            req.kind, req.tier
+        )
+    })?;
+    match tier {
+        Tier::HostTest | Tier::Qemu | Tier::QemuSecurity => {}
+        _ => {
+            return Err(format!(
+                "store qualification kind {:?} refuses tier {:?}",
+                req.kind,
+                tier.as_str()
+            ));
+        }
+    }
+    if req.input_artifacts.is_empty() {
+        return Err("store qualification requires at least one input artifact digest".to_string());
+    }
+    if assertions.is_empty() {
+        return Err("store qualification requires at least one assertion".to_string());
+    }
+    for a in assertions {
+        if a.source.trim().is_empty() {
+            return Err(format!(
+                "store qualification requires assertion source for {:?}",
+                a.id
+            ));
+        }
+    }
+    if result == Verdict::Pass && assertions.iter().any(|a| !a.pass) {
+        return Err("store qualification claims PASS but an assertion failed".to_string());
+    }
+    let declared = match &req.declared_mutation {
+        Some(s) => Mutation::parse(s).ok_or_else(|| format!("unknown mutation class {s:?}"))?,
+        None => Mutation::None,
+    };
+    match declared {
+        Mutation::None
+        | Mutation::VolatileOnly
+        | Mutation::RemovableMediaOnly
+        | Mutation::BoundedTestRegionWrite => {}
+        _ => {
+            return Err(format!(
+                "store qualification kind {:?} refuses declared mutation {:?}",
+                req.kind,
+                declared.as_str()
+            ));
+        }
+    }
+    if let Some(required) = store_required_assertions(req.kind.as_str()) {
+        for id in required {
+            let ok = assertions.iter().any(|a| a.id == *id && a.pass);
+            if !ok {
+                return Err(format!(
+                    "store qualification kind {:?} missing required passing assertion {:?}",
+                    req.kind, id
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Build a sealed receipt from validated inputs. Hardware tiers require an
 /// explicit declared mutation and a lease reference; PASS receipts require
 /// an output digest (direct hex or hashed from an output file).
@@ -152,6 +265,9 @@ pub fn build_receipt(
     assertions: Vec<Assertion>,
     result: Verdict,
 ) -> Result<Receipt, String> {
+    if req.kind.starts_with("store-") {
+        validate_store_profile(req, &assertions, result)?;
+    }
     let tier = Tier::parse(&req.tier)
         .ok_or_else(|| format!("unknown qualification tier {:?}", req.tier))?;
     check_commit(&req.commit)?;
@@ -377,5 +493,111 @@ mod tests {
         r.declared_mutation = Some("FORMAT_EVERYTHING".to_string());
         assert!(build_receipt(&r, assertions, result).is_err());
         let _ = dir;
+    }
+
+    fn store_req(kind: &str, tier: &str) -> ImportRequest {
+        let mut r = req();
+        r.kind = kind.to_string();
+        r.tier = tier.to_string();
+        r.procedure = "scripts/store_test.sh".to_string();
+        r.machine = "store-test-runner".to_string();
+        r
+    }
+
+    fn store_assertion(id: &str) -> Assertion {
+        Assertion {
+            id: id.to_string(),
+            expected: String::new(),
+            observed: String::new(),
+            pass: true,
+            source: "store run log".to_string(),
+            note: String::new(),
+        }
+    }
+
+    fn format_assertions() -> Vec<Assertion> {
+        vec![
+            store_assertion("store_format_valid"),
+            store_assertion("store_object_ids_valid"),
+            store_assertion("store_catalog_valid"),
+            store_assertion("store_commit_valid"),
+            store_assertion("store_full_graph_valid"),
+        ]
+    }
+
+    fn host_assertions() -> Vec<Assertion> {
+        vec![
+            store_assertion("store_previous_or_new_only"),
+            store_assertion("store_conflict_fail_closed"),
+            store_assertion("store_inconsistent_history_fail_closed"),
+            store_assertion("store_io_error_not_fallback"),
+            store_assertion("store_nospace_zero_writes"),
+            store_assertion("store_open_side_effect_free"),
+        ]
+    }
+
+    #[test]
+    fn store_format_valid_passes_profile() {
+        let r = store_req("store-v1-format", "HOST_TEST");
+        let assertions = format_assertions();
+        validate_store_profile(&r, &assertions, Verdict::Pass).unwrap();
+        let receipt = build_receipt(&r, assertions, Verdict::Pass).unwrap();
+        assert_eq!(receipt.kind, "store-v1-format");
+        assert_eq!(receipt.tier, Tier::HostTest);
+    }
+
+    #[test]
+    fn store_format_missing_required_refused() {
+        let r = store_req("store-v1-format", "HOST_TEST");
+        let mut assertions = format_assertions();
+        assertions.retain(|a| a.id != "store_commit_valid");
+        let err = validate_store_profile(&r, &assertions, Verdict::Pass).unwrap_err();
+        assert!(err.contains("store_commit_valid"), "got: {err}");
+        assert!(err.contains("store-v1-format"), "got: {err}");
+        assert!(build_receipt(&r, assertions, Verdict::Pass).is_err());
+    }
+
+    #[test]
+    fn store_empty_source_refused() {
+        let r = store_req("store-v1-format", "QEMU");
+        let mut assertions = format_assertions();
+        assertions[0].source.clear();
+        let err = validate_store_profile(&r, &assertions, Verdict::Pass).unwrap_err();
+        assert!(err.contains("source"), "got: {err}");
+        assert!(err.contains("store_format_valid"), "got: {err}");
+        assert!(build_receipt(&r, assertions, Verdict::Pass).is_err());
+    }
+
+    #[test]
+    fn store_host_machine1_tier_refused() {
+        let r = store_req("store-v1-host", "MACHINE1_ATTENDED");
+        let assertions = host_assertions();
+        let err = validate_store_profile(&r, &assertions, Verdict::Pass).unwrap_err();
+        assert!(err.contains("MACHINE1_ATTENDED"), "got: {err}");
+        assert!(build_receipt(&r, assertions, Verdict::Pass).is_err());
+    }
+
+    #[test]
+    fn store_destructive_mutation_refused() {
+        let mut r = store_req("store-v1-format", "QEMU");
+        r.declared_mutation = Some("DESTRUCTIVE_STORAGE".to_string());
+        let assertions = format_assertions();
+        let err = validate_store_profile(&r, &assertions, Verdict::Pass).unwrap_err();
+        assert!(err.contains("DESTRUCTIVE_STORAGE"), "got: {err}");
+        assert!(build_receipt(&r, assertions, Verdict::Pass).is_err());
+    }
+
+    #[test]
+    fn store_future_unknown_subkind_has_no_required_set() {
+        assert!(store_required_assertions("store-v1-future").is_none());
+        let r = store_req("store-v1-future", "QEMU");
+        let assertions = vec![store_assertion("store_future_check")];
+        validate_store_profile(&r, &assertions, Verdict::Pass).unwrap();
+        let receipt = build_receipt(&r, assertions, Verdict::Pass).unwrap();
+        assert_eq!(receipt.kind, "store-v1-future");
+        let mut bad = store_req("store-v1-future", "QEMU");
+        bad.procedure = "TBD".to_string();
+        let assertions = vec![store_assertion("store_future_check")];
+        assert!(build_receipt(&bad, assertions, Verdict::Pass).is_err());
     }
 }

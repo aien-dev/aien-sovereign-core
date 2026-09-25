@@ -19,6 +19,7 @@ pub mod lease;
 pub mod ledger;
 pub mod ledger_bind;
 pub mod lock;
+pub mod store_assert;
 pub mod workspace;
 
 #[cfg(test)]
