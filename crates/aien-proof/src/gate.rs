@@ -985,6 +985,64 @@ mod tests {
         assert_eq!(evaluate(&manifest, &store).status, Verdict::Incomplete);
     }
 
+    #[test]
+    fn mutation_class_mismatch_fails_gate() {
+        use crate::evidence::Mutation;
+        let store = crate::testutil::temp_dir("gate-mutation-mismatch");
+        store_qemu(&store, "store-qemu", vec!["store_previous_or_new_only"]);
+        let mut requirement = req(
+            "Store QEMU",
+            "store-qemu",
+            Tier::Qemu,
+            vec!["store_previous_or_new_only"],
+            MissingAs::Incomplete,
+        );
+        requirement.mutation = Some(Mutation::BoundedTestRegionWrite);
+        let report = evaluate(
+            &Gate {
+                gate: "MUTATION-DEMO".into(),
+                description: String::new(),
+                requires: vec![requirement],
+            },
+            &store,
+        );
+        assert_eq!(report.status, Verdict::Fail);
+        assert!(report.lines[0]
+            .detail
+            .contains("declared/observed mutation"));
+    }
+
+    #[test]
+    fn hardware_gate_requires_the_machine1_hold() {
+        let store = crate::testutil::temp_dir("gate-no-hold");
+        store_assertion_receipt(
+            &store,
+            "machine-run",
+            Tier::Machine1Attended,
+            "machine-1",
+            "scripts/qualify.sh",
+            pass_assertions(&["operator_attended"], "operator"),
+        );
+        let mut requirement = req(
+            "Machine 1 run",
+            "machine-run",
+            Tier::Machine1Attended,
+            vec!["operator_attended"],
+            MissingAs::Incomplete,
+        );
+        requirement.resource = Some("machine-1".into());
+        let report = evaluate(
+            &Gate {
+                gate: "MACHINE-HOLD-DEMO".into(),
+                description: String::new(),
+                requires: vec![requirement],
+            },
+            &store,
+        );
+        assert_eq!(report.status, Verdict::Incomplete);
+        assert!(report.lines[0].detail.contains("exclusive hold"));
+    }
+
     fn req(
         name: &str,
         kind: &str,
@@ -1092,7 +1150,6 @@ mod tests {
         "rollback_rejected_pass",
         "rollback_absent_pass",
         "rollback_repeat_boot_pass",
-        "default_boot_unchanged",
         "m0_native_rollback_qemu_pass",
     ];
 
@@ -1117,7 +1174,10 @@ mod tests {
             ROLLBACK_PROCEDURE,
             [
                 pass_assertions(ROLLBACK_BRANCHES, "rollback-verify"),
-                vec![assertion("bootnext_consumed", "aavmf_variables", true)],
+                vec![
+                    assertion("bootnext_consumed", "aavmf_variables", true),
+                    assertion("default_boot_unchanged", "aavmf_variables", true),
+                ],
             ]
             .concat(),
         );
@@ -1185,7 +1245,10 @@ mod tests {
             ROLLBACK_PROCEDURE,
             [
                 pass_assertions(ROLLBACK_BRANCHES, "rollback-verify"),
-                vec![assertion("bootnext_consumed", "state-machine-mock", true)],
+                vec![
+                    assertion("bootnext_consumed", "state-machine-mock", true),
+                    assertion("default_boot_unchanged", "aavmf_variables", true),
+                ],
             ]
             .concat(),
         );
