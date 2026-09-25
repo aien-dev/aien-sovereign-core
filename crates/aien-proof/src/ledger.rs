@@ -187,6 +187,23 @@ pub fn hex(bytes: &[u8; 32]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
+/// Read the event at `index`, or `Ok(None)` when the ledger is shorter.
+pub fn read_event(path: &Path, index: u64) -> Result<Option<LedgerEvent>, String> {
+    let text = match fs::read_to_string(path) {
+        Ok(t) => t,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e.to_string()),
+    };
+    for (n, line) in text.lines().filter(|l| !l.trim().is_empty()).enumerate() {
+        let e: LedgerEvent =
+            serde_json::from_str(line).map_err(|err| format!("line {}: {err}", n + 1))?;
+        if e.index == index {
+            return Ok(Some(e));
+        }
+    }
+    Ok(None)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

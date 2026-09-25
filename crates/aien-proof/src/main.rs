@@ -5,9 +5,17 @@
 //!   aien-proof crates [--dir WORKSPACE] [--agent ID] [--gpu-crate NAME]... [--only NAME]... [-- CARGO_TEST_ARGS...]
 //!   aien-proof verify
 //!   aien-proof status
+//!   aien-proof receipt show <id> [--store DIR]
+//!   aien-proof receipt verify <path> [--store DIR]
+//!   aien-proof receipt import [options] --assert FILE [--store DIR]
+//!   aien-proof qualify [same options as receipt import]
+//!   aien-proof verify-chain <path> [--store DIR]
+//!   aien-proof gate status <GATE> [--store DIR] [--gate FILE]
+//!   aien-proof gate explain <GATE> [--store DIR] [--gate FILE]
+//!   aien-proof gate examples [--out DIR]
 
 use aien_proof::board::{mem_available, Board, Job, Outcome};
-use aien_proof::{ledger, workspace};
+use aien_proof::{chain, evidence, gate, import, ledger, workspace};
 use std::path::PathBuf;
 use std::process::{exit, Command};
 use std::time::Instant;
@@ -17,12 +25,21 @@ const USAGE: &str = "usage:
   aien-proof hold --resource NAME... [--job NAME] [--agent ID] -- CMD...
   aien-proof crates [--dir WORKSPACE] [--agent ID] [--gpu-crate NAME]... [--only NAME]... [-- CARGO_TEST_ARGS...]
   aien-proof verify
-  aien-proof status";
+  aien-proof status
+  aien-proof receipt show <id> [--store DIR]
+  aien-proof receipt verify <path> [--store DIR]
+  aien-proof receipt import --repo URL --commit SHA --gate KIND --tier TIER --procedure PROC --machine MACH --assert FILE [--store DIR] [options]
+  aien-proof qualify --repo URL --commit SHA --gate KIND --tier TIER --procedure PROC --machine MACH --assert FILE [--store DIR] [options]
+  aien-proof verify-chain <path> [--store DIR]
+  aien-proof gate status <GATE> [--store DIR] [--gate FILE]
+  aien-proof gate explain <GATE> [--store DIR] [--gate FILE]
+  aien-proof gate examples [--out DIR]";
 
 struct Flags {
     values: Vec<(String, String)>,
     switches: Vec<String>,
     rest: Vec<String>,
+    positionals: Vec<String>,
 }
 
 impl Flags {
@@ -31,6 +48,7 @@ impl Flags {
             values: vec![],
             switches: vec![],
             rest: vec![],
+            positionals: vec![],
         };
         let mut i = 0;
         while i < args.len() {
@@ -43,9 +61,11 @@ impl Flags {
             } else if a.starts_with("--") && i + 1 < args.len() {
                 f.values.push((a.clone(), args[i + 1].clone()));
                 i += 1;
-            } else {
-                eprintln!("unexpected argument: {a}\n{USAGE}");
+            } else if a.starts_with("--") {
+                eprintln!("option {a} needs a value\n{USAGE}");
                 exit(2);
+            } else {
+                f.positionals.push(a.clone());
             }
             i += 1;
         }
@@ -66,6 +86,10 @@ impl Flags {
             .filter(|(k, _)| k == name)
             .map(|(_, v)| v.clone())
             .collect()
+    }
+
+    fn has(&self, name: &str) -> bool {
+        self.switches.iter().any(|s| s == name)
     }
 }
 
@@ -96,7 +120,7 @@ fn toolchain() -> String {
 
 fn cmd_run(args: &[String]) -> i32 {
     let flags = Flags::parse(args, &["--gpu"]);
-    if flags.rest.is_empty() {
+    if flags.rest.is_empty() || !flags.positionals.is_empty() {
         eprintln!("{USAGE}");
         return 2;
     }
@@ -128,6 +152,10 @@ fn cmd_run(args: &[String]) -> i32 {
 
 fn cmd_crates(args: &[String]) -> i32 {
     let flags = Flags::parse(args, &[]);
+    if !flags.positionals.is_empty() {
+        eprintln!("{USAGE}");
+        return 2;
+    }
     let here = flags
         .get("--dir")
         .map(PathBuf::from)
@@ -227,7 +255,7 @@ fn cmd_verify() -> i32 {
 fn cmd_hold(args: &[String]) -> i32 {
     let flags = Flags::parse(args, &[]);
     let resources = flags.all("--resource");
-    if flags.rest.is_empty() || resources.is_empty() {
+    if flags.rest.is_empty() || resources.is_empty() || !flags.positionals.is_empty() {
         eprintln!("{USAGE}");
         return 2;
     }
@@ -254,6 +282,9 @@ fn cmd_hold(args: &[String]) -> i32 {
                 rec.exit_code,
                 rec.ledger_index
             );
+            // The audit event hash on stdout is the hold ID that evidence
+            // receipts bind with `--lease-hold`.
+            println!("{}", rec.ledger_hash);
             rec.exit_code
         }
         Err(e) => {
@@ -272,6 +303,8 @@ fn cmd_status() -> i32 {
     println!("board:      {}", b.root.display());
     println!("stamps:     {}", count(b.root.join("stamps")));
     println!("failures:   {}", count(b.root.join("fails")));
+    println!("receipts:   {}", count(b.root.join(evidence::RECEIPT_DIR)));
+    println!("holds:      {}", count(b.root.join("holds")));
     println!("cpu slots:  {}", b.cpu_slots);
     println!("memory gate:{} GiB free required", b.min_free_bytes >> 30);
     if let Some(free) = mem_available() {
@@ -283,6 +316,384 @@ fn cmd_status() -> i32 {
     cmd_verify()
 }
 
+fn store_dir(flags: &Flags) -> PathBuf {
+    flags
+        .get("--store")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| Board::from_env().root)
+}
+
+fn verdict_code(v: evidence::Verdict) -> i32 {
+    match v {
+        evidence::Verdict::Pass => 0,
+        evidence::Verdict::Fail => 1,
+        evidence::Verdict::Blocked => 2,
+        evidence::Verdict::Incomplete => 3,
+        evidence::Verdict::Skipped => 4,
+    }
+}
+
+const IMPORT_USAGE: &str = "usage:
+  aien-proof receipt import --repo URL --commit SHA --gate KIND --tier TIER --procedure PROC --machine MACH --assert FILE [options]
+options:
+  --toolchain TEXT            build/toolchain identity (default: rustc -vV)
+  --artifact DIGEST           input artifact digest, repeatable
+  --output-artifact DIGEST    output artifact digest, repeatable
+  --dep RECEIPT_ID            dependency receipt ID, repeatable
+  --declared-mutation CLASS   required for hardware tiers
+  --observed-mutation CLASS   defaults to declared
+  --authority REF             approval reference; required for PRODUCTION
+  --output-digest HEX         BLAKE3 of complete captured output
+  --output-file PATH          hashed for the output digest
+  --external-ref REF          external evidence reference, repeatable
+  --ledger INDEX:HASH         Crumb ledger event reference
+  --lease-hold HOLD_ID        audit event hash from `aien-proof hold`
+  --lease-resource NAME       resource the hold covered
+  --dirty                     mark the source tree dirty
+  --out PATH                  also write the receipt file here
+  --store DIR                 receipt store (default: proof board dir)";
+
+fn cmd_receipt(args: &[String]) -> i32 {
+    let (sub, rest) = match args.split_first() {
+        Some((s, r)) => (s.as_str(), r),
+        None => {
+            eprintln!("{USAGE}");
+            return 2;
+        }
+    };
+    match sub {
+        "show" => cmd_receipt_show(rest),
+        "verify" => cmd_receipt_verify(rest),
+        "import" => cmd_receipt_import(rest),
+        _ => {
+            eprintln!("unknown receipt subcommand {sub}\n{USAGE}");
+            2
+        }
+    }
+}
+
+fn cmd_receipt_show(args: &[String]) -> i32 {
+    let flags = Flags::parse(args, &[]);
+    let store = store_dir(&flags);
+    let id = match flags.positionals.first() {
+        Some(id) => id.clone(),
+        None => {
+            eprintln!("usage: aien-proof receipt show <id> [--store DIR]");
+            return 2;
+        }
+    };
+    match evidence::load_receipt(&store, &id) {
+        Ok(receipt) => {
+            println!("{}", serde_json::to_string_pretty(&receipt).unwrap());
+            0
+        }
+        Err(e) => {
+            eprintln!("[aien-proof] {e}");
+            1
+        }
+    }
+}
+
+fn cmd_receipt_verify(args: &[String]) -> i32 {
+    let flags = Flags::parse(args, &[]);
+    let store = store_dir(&flags);
+    let path = match flags.positionals.first() {
+        Some(p) => PathBuf::from(p),
+        None => {
+            eprintln!("usage: aien-proof receipt verify <path> [--store DIR]");
+            return 2;
+        }
+    };
+    let text = match std::fs::read(&path) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("[aien-proof] cannot read {}: {e}", path.display());
+            return 2;
+        }
+    };
+    match evidence::verify_with_store(&text, &store) {
+        Ok((receipt, report)) => {
+            println!("receipt {}: {}", receipt.id, report.status.as_str());
+            for reason in &report.reasons {
+                println!("  - {reason}");
+            }
+            verdict_code(report.status)
+        }
+        Err(e) => {
+            println!("receipt BROKEN: {e}");
+            1
+        }
+    }
+}
+
+fn cmd_receipt_import(args: &[String]) -> i32 {
+    let flags = Flags::parse(args, &["--dirty"]);
+    let assert_path = match flags.get("--assert") {
+        Some(p) => PathBuf::from(p),
+        None => {
+            eprintln!("{IMPORT_USAGE}");
+            return 2;
+        }
+    };
+    for required in [
+        "--repo",
+        "--commit",
+        "--gate",
+        "--tier",
+        "--procedure",
+        "--machine",
+    ] {
+        if flags.get(required).is_none() {
+            eprintln!("missing {required}\n{IMPORT_USAGE}");
+            return 2;
+        }
+    }
+    let store = store_dir(&flags);
+    let (assertions, result) = match import::read_assertion_file(&assert_path) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("[aien-proof] {e}");
+            return 2;
+        }
+    };
+    let (ledger_index, ledger_hash) = match flags.get("--ledger") {
+        Some(pair) => match pair.split_once(':') {
+            Some((index, hash)) => match index.parse::<u64>() {
+                Ok(i) => (Some(i), Some(hash.to_string())),
+                Err(_) => {
+                    eprintln!("[aien-proof] bad --ledger value, want INDEX:HASH");
+                    return 2;
+                }
+            },
+            None => {
+                eprintln!("[aien-proof] bad --ledger value, want INDEX:HASH");
+                return 2;
+            }
+        },
+        None => (None, None),
+    };
+    let req = import::ImportRequest {
+        repo: flags.get("--repo").unwrap().to_string(),
+        commit: flags.get("--commit").unwrap().to_string(),
+        dirty: flags.has("--dirty"),
+        kind: flags.get("--gate").unwrap().to_string(),
+        tier: flags.get("--tier").unwrap().to_string(),
+        toolchain: flags
+            .get("--toolchain")
+            .map(str::to_string)
+            .unwrap_or_else(toolchain),
+        procedure: flags.get("--procedure").unwrap().to_string(),
+        machine: flags.get("--machine").unwrap().to_string(),
+        input_artifacts: flags.all("--artifact"),
+        output_artifacts: flags.all("--output-artifact"),
+        dependencies: flags.all("--dep"),
+        declared_mutation: flags.get("--declared-mutation").map(str::to_string),
+        observed_mutation: flags.get("--observed-mutation").map(str::to_string),
+        authority: flags
+            .get("--authority")
+            .map(str::to_string)
+            .unwrap_or_default(),
+        output_digest: flags.get("--output-digest").map(str::to_string),
+        output_file: flags.get("--output-file").map(str::to_string),
+        external_refs: flags.all("--external-ref"),
+        ledger_index,
+        ledger_hash,
+        lease_hold: flags.get("--lease-hold").map(str::to_string),
+        lease_resource: flags.get("--lease-resource").map(str::to_string),
+        timestamp: None,
+    };
+    let receipt = match import::build_receipt(&req, assertions, result) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("[aien-proof] import refused: {e}");
+            return 1;
+        }
+    };
+    // Warn about dependencies that cannot be resolved yet. They stay
+    // missing, and verification reports INCOMPLETE, never PASS.
+    for dep in &receipt.dependencies {
+        if evidence::load_receipt(&store, dep).is_err() {
+            eprintln!("[aien-proof] warning: dependency {dep} not in store yet");
+        }
+    }
+    match evidence::store_receipt(&store, &receipt) {
+        Ok(id) => {
+            println!("{id}");
+            if let Some(out) = flags.get("--out") {
+                let text = serde_json::to_string_pretty(&receipt).unwrap();
+                if let Err(e) = std::fs::write(out, format!("{text}\n")) {
+                    eprintln!("[aien-proof] stored as {id} but --out failed: {e}");
+                    return 1;
+                }
+            }
+            0
+        }
+        Err(e) => {
+            eprintln!("[aien-proof] cannot store receipt: {e}");
+            1
+        }
+    }
+}
+
+fn cmd_verify_chain(args: &[String]) -> i32 {
+    let flags = Flags::parse(args, &[]);
+    let store = store_dir(&flags);
+    let path = match flags.positionals.first() {
+        Some(p) => PathBuf::from(p),
+        None => {
+            eprintln!("usage: aien-proof verify-chain <path> [--store DIR]");
+            return 2;
+        }
+    };
+    match chain::verify_chain(&path, &store) {
+        Ok(report) => {
+            println!("chain {}: {}", report.root, report.status.as_str());
+            for line in &report.lines {
+                println!(
+                    "  {} {:<24} {:<18} {} {}",
+                    line.status.as_str(),
+                    line.kind,
+                    line.tier.as_str(),
+                    &line.id[..16.min(line.id.len())],
+                    line.note
+                );
+            }
+            for reason in &report.reasons {
+                println!("  - {reason}");
+            }
+            verdict_code(report.status)
+        }
+        Err(e) => {
+            println!("chain BROKEN: {e}");
+            1
+        }
+    }
+}
+
+fn cmd_gate(args: &[String]) -> i32 {
+    let (sub, rest) = match args.split_first() {
+        Some((s, r)) => (s.as_str(), r),
+        None => {
+            eprintln!("{USAGE}");
+            return 2;
+        }
+    };
+    match sub {
+        "status" => cmd_gate_status(rest, false),
+        "explain" => cmd_gate_status(rest, true),
+        "examples" => cmd_gate_examples(rest),
+        _ => {
+            eprintln!("unknown gate subcommand {sub}\n{USAGE}");
+            2
+        }
+    }
+}
+
+fn cmd_gate_status(args: &[String], verbose: bool) -> i32 {
+    let flags = Flags::parse(args, &[]);
+    let store = store_dir(&flags);
+    let name = match flags.positionals.first() {
+        Some(n) => n.clone(),
+        None => {
+            eprintln!("usage: aien-proof gate status <GATE> [--store DIR] [--gate FILE]");
+            return 2;
+        }
+    };
+    let explicit = flags.get("--gate").map(PathBuf::from);
+    let manifest = match gate::load_manifest(&store, &name, explicit.as_deref()) {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("[aien-proof] {e}");
+            return 2;
+        }
+    };
+    let report = gate::evaluate(&manifest, &store);
+    println!("{}: {}", report.gate, report.status.as_str());
+    for line in &report.lines {
+        let word = match line.status {
+            evidence::Verdict::Pass => "PASS",
+            evidence::Verdict::Fail => "FAIL",
+            _ => line.status.as_str(),
+        };
+        println!("{word:<7} {} {}", line.name, line.detail);
+        if verbose {
+            explain_requirement(&store, &manifest, line, 1);
+        }
+    }
+    verdict_code(report.status)
+}
+
+/// Verbose `explain` detail for one gate line: sub gate lines recurse with
+/// indentation, receipt matches show their assertion table.
+fn explain_requirement(
+    store: &std::path::Path,
+    manifest: &gate::Gate,
+    line: &gate::GateLine,
+    depth: usize,
+) {
+    if depth > 12 {
+        println!(
+            "{}gate explanation depth limit reached",
+            "  ".repeat(depth * 2)
+        );
+        return;
+    }
+    let pad = "  ".repeat(depth * 2);
+    let req = match manifest.requires.iter().find(|r| r.name == line.name) {
+        Some(r) => r,
+        None => return,
+    };
+    if let Some(child) = &req.gate_ref {
+        match gate::load_manifest(store, child, None) {
+            Ok(child_manifest) => {
+                let report = gate::evaluate(&child_manifest, store);
+                for subline in &report.lines {
+                    println!(
+                        "{pad}{} {} {}",
+                        subline.status.as_str(),
+                        subline.name,
+                        subline.detail
+                    );
+                    explain_requirement(store, &child_manifest, subline, depth + 1);
+                }
+            }
+            Err(e) => println!("{pad}BLOCKED {child}: {e}"),
+        }
+        return;
+    }
+    if let Some(receipt) = gate::best_candidate(store, &req.kind) {
+        println!("{pad}id {} tier {}", receipt.id, receipt.tier.as_str());
+        for a in &receipt.assertions {
+            println!(
+                "{pad}[{}] {} expected={:?} observed={:?} source={:?}",
+                if a.pass { "x" } else { " " },
+                a.id,
+                a.expected,
+                a.observed,
+                a.source
+            );
+        }
+    }
+}
+
+fn cmd_gate_examples(args: &[String]) -> i32 {
+    let flags = Flags::parse(args, &[]);
+    let default = Board::from_env().root.join(gate::GATE_DIR);
+    let out = flags.get("--out").map(PathBuf::from).unwrap_or(default);
+    match gate::write_examples(&out) {
+        Ok(paths) => {
+            for p in paths {
+                println!("{}", p.display());
+            }
+            0
+        }
+        Err(e) => {
+            eprintln!("[aien-proof] {e}");
+            1
+        }
+    }
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let code = match args.first().map(String::as_str) {
@@ -291,6 +702,10 @@ fn main() {
         Some("hold") => cmd_hold(&args[1..]),
         Some("verify") => cmd_verify(),
         Some("status") => cmd_status(),
+        Some("receipt") => cmd_receipt(&args[1..]),
+        Some("qualify") => cmd_receipt_import(&args[1..]),
+        Some("verify-chain") => cmd_verify_chain(&args[1..]),
+        Some("gate") => cmd_gate(&args[1..]),
         _ => {
             eprintln!("{USAGE}");
             2
