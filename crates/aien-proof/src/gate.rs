@@ -1344,6 +1344,10 @@ mod tests {
         assert_eq!(seed_qemu.gate, "SEED0B_QEMU");
         let format: Gate = serde_json::from_str(STORE_V1_FORMAT_PR_MERGE).unwrap();
         assert_eq!(format.gate, "STORE_V1_FORMAT_PR_MERGE");
+        let p3_qemu: Gate = serde_json::from_str(P3_STORE_QEMU).unwrap();
+        assert_eq!(p3_qemu.gate, "P3_STORE_QEMU");
+        let p3_machine: Gate = serde_json::from_str(P3_STORE_MACHINE1).unwrap();
+        assert_eq!(p3_machine.gate, "P3_STORE_MACHINE1");
         let p3: Gate = serde_json::from_str(P3_DEVELOPMENT_QEMU_ENTRY).unwrap();
         assert_eq!(p3.gate, "P3_DEVELOPMENT_QEMU_ENTRY");
         assert!(!p3.requires.is_empty());

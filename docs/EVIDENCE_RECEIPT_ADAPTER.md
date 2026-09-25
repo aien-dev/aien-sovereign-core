@@ -48,6 +48,13 @@ Rules:
   PASS, else FAIL). A claimed PASS with any failing assertion is refused.
   A failing run can never be upgraded to PASS at import.
 - At least one assertion is required for a PASS receipt.
+- Assertion `source` is part of the canonical receipt identity. For hardware
+  topology and ownership claims, use one stable provenance category as the
+  source: `linux_observed`, `uefi_observed`, `native_aienos_observed`,
+  `qemu_synthetic`, `derived`, or `unknown`. Put collector/tool identity and
+  detail in `note` and bind its output as an artifact. A Linux-observed
+  topology assertion cannot satisfy a gate that source-pins
+  `native_aienos_observed`.
 
 ## 2. Import command contract
 
@@ -214,6 +221,21 @@ EXAMPLE assertion file:
 
 Import with `--gate store-v1-crash --tier QEMU` (or the tier the lane
 declares), with `--dep` on the ADR 0015 acceptance receipt once it exists.
+
+The checked-in `P3_STORE_QEMU` manifest consumes separate Store format,
+crash-consistency, and QEMU block-device receipts. Crash consistency must link
+to the exact format qualification receipt. The block-device receipt must link
+to both the exact format and crash-consistency receipts. Required structured
+assertions are `store_previous_or_new_only`, `store_graph_valid`,
+`store_nospace_zero_writes`, and `store_io_error_not_fallback`. This adapter
+records observations; it does not define Store v1 semantics.
+
+`P3_STORE_MACHINE1` additionally requires an exact bounded-region receipt,
+exact-region provisioning authority, and an attended Machine 1 execution
+receipt. The execution receipt must be `MACHINE1_MUTATING`, bind the existing
+`machine-1` hold, depend on the target and provisioning receipts, and declare
+and observe only `BOUNDED_TEST_REGION_WRITE`. A read-only Machine 1 receipt
+cannot prove persistent writes.
 Store v1 format tests, mount validation, and the QEMU block-device suite
 follow the same shape with their own `--gate` kinds. Muse never defines
 Store v1 wire or recovery behavior; the Store lane emits structured
@@ -287,6 +309,13 @@ without full SEED-0B completion. It does not authorize P3 QEMU qualification
 or any Machine 1 mutation. `P3_DEVELOPMENT_QEMU_ENTRY` requires all four of
 M0_NATIVE_ROLLBACK_QEMU, SEED0B_QEMU, ADR 0015, and strict main to pass.
 
+The tier ordering is explicit: `TEST_ONLY_TRUST`, `HOST_TEST`, `QEMU`,
+`QEMU_SECURITY`, `MACHINE1_READ_ONLY`, `MACHINE1_ATTENDED`,
+`MACHINE1_MUTATING`, `PRODUCTION`. Test-only trust satisfies only itself.
+Physical requirements reject all QEMU tiers. The read-only Machine 1 tier
+cannot satisfy attended mutation requirements, and `PRODUCTION` cannot rely on
+test-only trust ancestry.
+
 Materialize the checked in example manifests with:
 
 ```sh
@@ -301,3 +330,7 @@ aien-proof gate examples --out <store>/gates
   input, the receipt schema or verification reports the gap instead.
 - Upgrade failing runs, satisfy physical requirements with QEMU receipts,
   or close gates on BLOCKED runs.
+- Move Claude's Admission Receipt format into `aien-proof`. An Admission
+  Receipt proves artifact admission/execution inside its subsystem. An
+  EvidenceReceipt proves a cross-repository qualification run and may bind an
+  Admission Receipt by digest/reference.
