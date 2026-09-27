@@ -39,7 +39,7 @@ Full status per component: [PLATFORM_MATRIX.md](docs/PLATFORM_MATRIX.md).
 
 ## Architecture
 
-Component contracts and runtime flows: [AIEN_RUNTIME_ARCHITECTURE.md](docs/AIEN_RUNTIME_ARCHITECTURE.md). System context: [AIEN_COMPLETE_SYSTEM_ARCHITECTURE_v2.md](docs/AIEN_COMPLETE_SYSTEM_ARCHITECTURE_v2.md).
+Component contracts and runtime flows: [AIEN_RUNTIME_ARCHITECTURE.md](docs/AIEN_RUNTIME_ARCHITECTURE.md). Whole-system architecture and execution order are owned by [aien-dev/aien-architecture](https://github.com/aien-dev/aien-architecture), starting with [PLAN_AUTHORITY.md](https://github.com/aien-dev/aien-architecture/blob/main/PLAN_AUTHORITY.md) and [CURRENT_EXECUTION_PLAN.md](https://github.com/aien-dev/aien-architecture/blob/main/CURRENT_EXECUTION_PLAN.md).
 
 ---
 
