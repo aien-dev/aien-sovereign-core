@@ -34,6 +34,7 @@ members = [
     "crates/cortex-path-m1",
     "crates/aien-campaign-verifier",
     "crates/aien-proof",
+    "crates/crumbs",
 ]
 
 [workspace.package]

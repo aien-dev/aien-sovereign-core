@@ -1041,6 +1041,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "crumbs"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "serde",
+ "serde_json",
+ "uuid",
+]
+
+[[package]]
 name = "crypto-bigint"
 version = "0.7.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
