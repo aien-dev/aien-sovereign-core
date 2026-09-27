@@ -1,6 +1,7 @@
-# Public Surface Cleanup: Master Plan
+# Public Surface Cleanup Workstream Plan
 
-Status: draft for analysis. No implementation in this document.
+Status: scoped workstream plan / NOT A MASTER PLAN. No implementation in this document.
+Whole-system sequencing is governed by https://github.com/aien-dev/aien-architecture/blob/main/CURRENT_EXECUTION_PLAN.md.
 Decision set: Q1 through Q14, frozen with the operator. One wording refinement
 on Q8/Q14 applies: withdrawn figures return when they meet the **applicable**
 C1-grade provenance requirements, not every requirement of the C1
@@ -77,8 +78,7 @@ the larger ambition.
   (request/event/service execution interface). The protocols-repo crate keeps
   the `aien-inference-protocol` name (shared cross-repo state, context,
   branch, lease types).
-- Q13: this document is the single canonical plan. Execution is sequenced
-  PRs, one purpose per PR.
+- Q13 (superseded 2026-09-27): this document is canonical only for the public-surface cleanup workstream. Whole-system sequencing is owned by `aien-dev/aien-architecture/CURRENT_EXECUTION_PLAN.md`. Execution here remains sequenced as one-purpose PRs.
 - Q14: benchmark engineering proceeds independently. Republication gates on
   the applicable C1-grade provenance requirements. C1 owns the evidence
   standard, not generation.
