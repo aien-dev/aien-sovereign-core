@@ -1,4 +1,4 @@
-> **SUPERSEDED / HISTORICAL — NOT AN ACTIVE PROJECT PLAN**
+> **SUPERSEDED / HISTORICAL: NOT AN ACTIVE PROJECT PLAN**
 >
 > Archived on 2026-09-27. Whole-system architecture and sequencing now live in `aien-dev/aien-architecture`.
 >
