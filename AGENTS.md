@@ -1,3 +1,14 @@
+# Planning authority
+
+Before using any project roadmap or architecture plan, read:
+
+- https://github.com/aien-dev/aien-architecture/blob/main/PLAN_AUTHORITY.md
+- https://github.com/aien-dev/aien-architecture/blob/main/CURRENT_EXECUTION_PLAN.md
+
+This repository owns runtime implementation details, not the whole-system master plan. Do not create a competing master/final/complete AIEN plan here.
+
+---
+
 # Autonomous Agent Collaboration Protocol & Operational Playbook
 Version 2.0 (September 2026)
 Reference Standard for Humans and Autonomous AI Agents
