@@ -11,6 +11,33 @@ echo "=================================================================="
 echo "      ⚡ AIEN Sovereign Stack: Universal Developer Installer       "
 echo "=================================================================="
 
+# Run from a checkout or bootstrap one when the script is piped to Bash.
+PROTOCOLS_REV="7ac6facb630ca7e9a6ab4125b292203fe2bb6687"
+INSTALL_WORKSPACE=""
+if [[ -n "${AIEN_SOURCE_DIR:-}" ]]; then
+    SOURCE_ROOT="$(cd "$AIEN_SOURCE_DIR" && pwd)"
+elif [[ -f "${BASH_SOURCE[0]:-}" && -f "$(dirname "${BASH_SOURCE[0]}")/Cargo.toml" ]]; then
+    SOURCE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+else
+    INSTALL_WORKSPACE="$(mktemp -d "${TMPDIR:-/tmp}/aien-install.XXXXXX")"
+    trap 'rm -rf "$INSTALL_WORKSPACE"' EXIT
+    git clone --quiet https://github.com/aien-dev/aien-sovereign-core.git "$INSTALL_WORKSPACE/core"
+    git -C "$INSTALL_WORKSPACE/core" checkout --quiet "${AIEN_REV:-main}"
+    SOURCE_ROOT="$INSTALL_WORKSPACE/core"
+fi
+[[ -f "$SOURCE_ROOT/Cargo.toml" ]] || { echo "AIEN source manifest is missing" >&2; exit 1; }
+PROTOCOLS_ROOT="$(dirname "$SOURCE_ROOT")/aien-protocols"
+if [[ ! -e "$PROTOCOLS_ROOT" ]]; then
+    git clone --quiet https://github.com/aien-dev/aien-protocols.git "$PROTOCOLS_ROOT"
+    git -C "$PROTOCOLS_ROOT" checkout --quiet "$PROTOCOLS_REV"
+fi
+[[ "$(git -C "$PROTOCOLS_ROOT" rev-parse HEAD)" = "$PROTOCOLS_REV" ]] || {
+    echo "Sibling aien-protocols must be at $PROTOCOLS_REV; existing checkout was preserved" >&2
+    exit 1
+}
+cd "$SOURCE_ROOT"
+echo "[*] Source commit: $(git rev-parse HEAD)"
+
 OS="$(uname -s | tr "[:upper:]" "[:lower:]")"
 ARCH="$(uname -m)"
 
@@ -35,8 +62,8 @@ if ! command -v cargo >/dev/null 2>&1; then
     source "$HOME/.cargo/env"
 fi
 
-BIN_DIR="$HOME/.local/bin"
-CONFIG_DIR="$HOME/.config/sovereign"
+BIN_DIR="${AIEN_BIN_DIR:-$HOME/.local/bin}"
+CONFIG_DIR="${AIEN_CONFIG_DIR:-$HOME/.config/sovereign}"
 IMPRINT_DIR="$CONFIG_DIR/imprints/en2"
 
 mkdir -p "$BIN_DIR" "$CONFIG_DIR" "$IMPRINT_DIR"
@@ -46,13 +73,15 @@ if [[ ":$PATH:" != *":$BIN_DIR:"* ]]; then
     export PATH="$BIN_DIR:$PATH"
 fi
 
+if [[ "${AIEN_INSTALL_NO_PROFILE:-0}" != "1" ]]; then
 for RC in "$HOME/.zshrc" "$HOME/.bashrc" "$HOME/.profile"; do
     if [ -f "$RC" ]; then
-        if ! grep -q "\$HOME/.local/bin" "\$RC"; then
+        if ! grep -Fq '$HOME/.local/bin' "$RC"; then
             echo "export PATH=\"\$HOME/.local/bin:\$PATH\"" >> "$RC"
         fi
     fi
 done
+fi
 
 echo "[*] Building Core Monorepo Binaries (High-Performance Release Mode)..."
 echo "    - aien-cli (Universal Terminal CLI & Orchestrator)"
@@ -62,9 +91,8 @@ echo "    - spark-supervisor (Resilient Process Supervisor)"
 echo "    - spark-debugger (Zero-Leak Health & Telemetry Auditor)"
 echo "    - spark-harness (5-Layer Verification Engine)"
 echo "    - spark-crumbs (Blake3 Scent & Action Vector Tracker)"
-echo "    - spark-aegis (Defensive Boundary & Containment Engine)"
 
-cargo build --release -p aien-cli -p spark-cockpit-rs -p cortex-rs -p spark-supervisor -p spark-debugger -p spark-harness -p spark-crumbs -p spark-aegis
+cargo build --locked --release -p aien-cli -p spark-cockpit-rs -p cortex-rs -p spark-supervisor -p spark-debugger -p spark-harness -p spark-crumbs
 
 echo "[*] Installing Binaries to $BIN_DIR..."
 cp target/release/aien-cli "$BIN_DIR/aien"
@@ -74,8 +102,7 @@ cp target/release/spark-supervisor "$BIN_DIR/spark-supervisor"
 cp target/release/spark-debugger "$BIN_DIR/spark-debugger"
 cp target/release/spark-harness "$BIN_DIR/spark-harness"
 cp target/release/spark-crumbs "$BIN_DIR/spark-crumbs"
-cp target/release/spark-aegis "$BIN_DIR/spark-aegis"
-chmod +x "$BIN_DIR/aien" "$BIN_DIR/spark-cockpit" "$BIN_DIR/cortex" "$BIN_DIR/spark-supervisor" "$BIN_DIR/spark-debugger" "$BIN_DIR/spark-harness" "$BIN_DIR/spark-crumbs" "$BIN_DIR/spark-aegis"
+chmod +x "$BIN_DIR/aien" "$BIN_DIR/spark-cockpit" "$BIN_DIR/cortex" "$BIN_DIR/spark-supervisor" "$BIN_DIR/spark-debugger" "$BIN_DIR/spark-harness" "$BIN_DIR/spark-crumbs"
 
 echo "[+] Binaries successfully linked:"
 echo "    - aien -> $BIN_DIR/aien"
@@ -85,7 +112,6 @@ echo "    - spark-supervisor -> $BIN_DIR/spark-supervisor"
 echo "    - spark-debugger -> $BIN_DIR/spark-debugger"
 echo "    - spark-harness -> $BIN_DIR/spark-harness"
 echo "    - spark-crumbs -> $BIN_DIR/spark-crumbs"
-echo "    - spark-aegis -> $BIN_DIR/spark-aegis"
 
 echo "[*] Initializing Sovereign Operator Profile..."
 if [ ! -f "$CONFIG_DIR/operator.toml" ]; then
@@ -120,7 +146,7 @@ if [ -d "imprints/en2-trinity" ]; then
 fi
 
 echo "=================================================================="
-echo "  ⚡ Installation Complete. The Entire AIEN Stack is Ready."
+echo "  ⚡ Portable binaries installed. Model and access-token provisioning remain."
 echo "=================================================================="
 echo "  Primary Command: aien"
 echo ""
@@ -130,6 +156,6 @@ echo "    aien status     # Real-time health, ports, and memory status"
 echo "    aien cockpit    # Launches Sovereign Glass Cockpit in browser"
 echo "    aien chat       # Interactive sovereign terminal pairing"
 echo "    aien harness    # Run 5-layer verification checks"
-echo "    aien aegis      # Run defensive boundary security audit"
+echo "    aien aegis      # Requires the separately installed legacy AEGIS runtime"
 echo "    aien doctor     # System diagnostic and TPM key vault audit"
 echo "=================================================================="

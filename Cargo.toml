@@ -20,7 +20,6 @@ members = [
     "crates/cortex-encoder-rs",
     "crates/spark-mail-rs",
     "crates/spark-harvester",
-    "crates/spark-aegis",
     "crates/aien-inference-abi",
     "crates/aien-kv-cache",
     "crates/aien-scheduler",
