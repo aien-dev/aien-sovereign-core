@@ -9,3 +9,6 @@ __pycache__/
 receipt.json
 tests_results.json
 aien-protocols/
+
+# spark-aegis Mojo build output (built locally by build.rs, never tracked)
+crates/spark-aegis/mojo/libsimd_matcher.so

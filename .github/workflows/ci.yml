@@ -22,6 +22,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: aien-dev/aien-protocols
+          ref: 7ac6facb630ca7e9a6ab4125b292203fe2bb6687
           path: aien-protocols
 
       - name: Setup Sibling Dependencies
@@ -36,6 +37,9 @@ jobs:
 
       - name: Verify Code Formatting
         run: cargo fmt --all -- --check
+
+      - name: Verify Piped Installer Bootstrap
+        run: bash scripts/test-install.sh
 
       - name: Cargo Workspace Check
         run: cargo check --workspace --all-targets
