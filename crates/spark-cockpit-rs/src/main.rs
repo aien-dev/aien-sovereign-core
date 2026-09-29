@@ -1,7 +1,7 @@
 use axum::{
     Router,
     extract::{
-        Query, State,
+        ConnectInfo, Query, State,
         ws::{Message, WebSocket, WebSocketUpgrade},
     },
     http::{HeaderMap, StatusCode},
@@ -1041,14 +1041,19 @@ async fn main() {
         )
         .with_state(state);
 
-    let addr = SocketAddr::from(([0, 0, 0, 0], 18095));
+    let addr = SocketAddr::from(([127, 0, 0, 1], 18095));
     println!(
         "🚀 AIEN Native Sovereign Cockpit (Rust Axum) active on http://{}",
         addr
     );
 
     let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
-    axum::serve(listener, app).await.unwrap();
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await
+    .unwrap();
 }
 
 // =========================================================================
@@ -1241,8 +1246,27 @@ async fn handle_telemetry_live() -> Json<Value> {
 // =========================================================================
 // ENDPOINT 2: LIVE INTERACTIVE PTY TERMINAL (/ws/terminal)
 // =========================================================================
-async fn handle_ws_terminal(ws: WebSocketUpgrade) -> impl IntoResponse {
-    ws.on_upgrade(handle_terminal_socket)
+const TERMINAL_ALLOWED_ORIGINS: [&str; 2] = ["http://127.0.0.1:18095", "http://localhost:18095"];
+
+/// The terminal spawns a shell, so only same-host browser pages served by the
+/// cockpit itself may open it: exact loopback Origin and a loopback peer.
+fn terminal_request_allowed(headers: &HeaderMap, peer: &SocketAddr) -> bool {
+    let origin_ok = headers
+        .get(axum::http::header::ORIGIN)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|o| TERMINAL_ALLOWED_ORIGINS.contains(&o));
+    origin_ok && peer.ip().is_loopback()
+}
+
+async fn handle_ws_terminal(
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    ws: WebSocketUpgrade,
+) -> Response {
+    if !terminal_request_allowed(&headers, &peer) {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    ws.on_upgrade(handle_terminal_socket).into_response()
 }
 
 async fn handle_terminal_socket(mut socket: WebSocket) {
@@ -3232,6 +3256,63 @@ async fn handle_mail_send(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn origin_headers(origin: Option<&str>) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        if let Some(o) = origin {
+            h.insert(axum::http::header::ORIGIN, o.parse().unwrap());
+        }
+        h
+    }
+
+    #[test]
+    fn terminal_allows_loopback_origin_and_peer() {
+        let peer: SocketAddr = "127.0.0.1:50000".parse().unwrap();
+        assert!(terminal_request_allowed(
+            &origin_headers(Some("http://127.0.0.1:18095")),
+            &peer
+        ));
+        assert!(terminal_request_allowed(
+            &origin_headers(Some("http://localhost:18095")),
+            &peer
+        ));
+        let peer6: SocketAddr = "[::1]:50000".parse().unwrap();
+        assert!(terminal_request_allowed(
+            &origin_headers(Some("http://localhost:18095")),
+            &peer6
+        ));
+    }
+
+    #[test]
+    fn terminal_rejects_missing_or_foreign_origin() {
+        let peer: SocketAddr = "127.0.0.1:50000".parse().unwrap();
+        assert!(!terminal_request_allowed(&origin_headers(None), &peer));
+        assert!(!terminal_request_allowed(
+            &origin_headers(Some("http://evil.example")),
+            &peer
+        ));
+        assert!(!terminal_request_allowed(
+            &origin_headers(Some("http://127.0.0.1:18095.evil.example")),
+            &peer
+        ));
+        assert!(!terminal_request_allowed(
+            &origin_headers(Some("http://192.168.1.108:18095")),
+            &peer
+        ));
+        assert!(!terminal_request_allowed(
+            &origin_headers(Some("null")),
+            &peer
+        ));
+    }
+
+    #[test]
+    fn terminal_rejects_non_loopback_peer() {
+        let peer: SocketAddr = "192.168.1.50:50000".parse().unwrap();
+        assert!(!terminal_request_allowed(
+            &origin_headers(Some("http://127.0.0.1:18095")),
+            &peer
+        ));
+    }
 
     #[test]
     fn skill_index_omits_bodies_and_preview_is_one_paragraph() {
