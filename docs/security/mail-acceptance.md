@@ -2,7 +2,8 @@
 
 ## Access
 
-The mail HTTP API (`127.0.0.1:18092`) requires `Authorization: Bearer <token>`. The token is resolved from `AIEN_MAIL_API_TOKEN` in the process environment, then from `~/.config/aien/mail-api.token`, then from `atlas-vault get AIEN_MAIL_API_TOKEN`. The file holds one random line of at least 32 characters and must be mode `0600`; a file readable by group or others is refused. It lives outside every repository and is never logged. Missing credentials fail closed. `/health` stays public for monitors. Browser requests (any `Origin` header) are refused; the cockpit reads the same file and forwards the token for its mail panel.
+The mail HTTP API (`127.0.0.1:18092`) requires `Authorization: Bearer <token>`. Provision `AIEN_MAIL_API_TOKEN` with `atlas-vault add AIEN_MAIL_API_TOKEN` using standard input. The daemon resolves the token from process memory or the TPM-bound vault. Plaintext token files are not supported. Missing credentials fail closed. `/health` stays public for monitors. Browser requests (any `Origin` header) are refused; the cockpit forwards the separately provisioned mail token.
+
 
 ## Transport outcome
 
