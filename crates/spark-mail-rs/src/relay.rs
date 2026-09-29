@@ -2,10 +2,10 @@ use crate::cortex_sync::CortexSync;
 use crate::models::{EmailMessage, SendEmailRequest};
 use crate::store::MailStore;
 use chrono::Utc;
+use lettre::{Message, SmtpTransport, Transport};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use uuid::Uuid;
 
@@ -73,43 +73,24 @@ impl MailRelay {
             untrusted: false,
         };
 
-        // Try relaying to Proton Bridge if available
-        let bridge_online = self.check_bridge().await;
-        if bridge_online {
-            let addr = format!("{}:{}", self.bridge_host, self.bridge_port);
-            if let Ok(mut stream) = TcpStream::connect(&addr).await {
-                let mut buf = [0u8; 1024];
-                let _ = stream.read(&mut buf).await;
-                let _ = stream.write_all(b"EHLO sovereign.spark\r\n").await;
-                let _ = stream.read(&mut buf).await;
-                let _ = stream
-                    .write_all(format!("MAIL FROM:<{}>\r\n", sender).as_bytes())
-                    .await;
-                let _ = stream.read(&mut buf).await;
-                for recipient in &req.to {
-                    let _ = stream
-                        .write_all(format!("RCPT TO:<{}>\r\n", recipient).as_bytes())
-                        .await;
-                    let _ = stream.read(&mut buf).await;
-                }
-                let _ = stream.write_all(b"DATA\r\n").await;
-                let _ = stream.read(&mut buf).await;
-                let email_payload = format!(
-                    "From: {}\r\nTo: {}\r\nSubject: {}\r\nDate: {}\r\n\r\n{}\r\n.\r\n",
-                    sender,
-                    req.to.join(", "),
-                    req.subject,
-                    Utc::now().to_rfc2822(),
-                    req.body
-                );
-                let _ = stream.write_all(email_payload.as_bytes()).await;
-                let _ = stream.read(&mut buf).await;
-                let _ = stream.write_all(b"QUIT\r\n").await;
-            }
-        }
+        let host = self.bridge_host.clone();
+        let port = self.bridge_port;
+        let transport_sender = sender.clone();
+        let transport_id = id.clone();
+        tokio::task::spawn_blocking(move || {
+            submit_to_bridge(&host, port, &transport_sender, &transport_id, &req)
+        })
+        .await
+        .map_err(|_| "SMTP transport worker failed; acceptance is unknown".to_string())??;
+        msg.headers
+            .insert("X-AIEN-Transport-Status".into(), "smtp_accepted".into());
 
         // Save sent message to local hardware storage
-        self.store.save_message(&msg)?;
+        if self.store.save_message(&msg).is_err() {
+            // SMTP has already accepted it. Do not invite a duplicate by reporting a send failure.
+            msg.headers
+                .insert("X-AIEN-Storage-Status".into(), "persist_failed".into());
+        }
 
         // Index in Cortex memory
         if self.cortex.commit_mail(&msg).await.is_ok() {
@@ -118,5 +99,129 @@ impl MailRelay {
         }
 
         Ok(msg)
+    }
+}
+
+/// Success means the relay's final positive DATA reply, not recipient delivery.
+fn submit_to_bridge(
+    host: &str,
+    port: u16,
+    sender: &str,
+    id: &str,
+    request: &SendEmailRequest,
+) -> Result<(), String> {
+    let mut builder = Message::builder()
+        .from(sender.parse().map_err(|_| "Invalid sender address")?)
+        .subject(&request.subject)
+        .message_id(Some(format!("<{id}@sovereign.spark>")));
+    if request.to.is_empty() {
+        return Err("At least one recipient is required".into());
+    }
+    for recipient in &request.to {
+        builder = builder.to(recipient.parse().map_err(|_| "Invalid recipient address")?);
+    }
+    let message = builder
+        .body(request.body.clone())
+        .map_err(|_| "Invalid mail headers or body")?;
+    let transport = SmtpTransport::builder_dangerous(host)
+        .port(port)
+        .timeout(Some(Duration::from_secs(5)))
+        .build();
+    transport.send(&message).map_err(|_| {
+        "SMTP relay refused or interrupted the send; acceptance is not confirmed".to_string()
+    })?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{BufRead, BufReader, Write};
+
+    fn relay_case(reject_recipient: bool, reject_data: bool) -> Result<(), String> {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(3)))
+                .unwrap();
+            stream.write_all(b"220 test relay\r\n").unwrap();
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut data = false;
+            let mut saw_body = false;
+            loop {
+                let mut line = String::new();
+                if reader.read_line(&mut line).unwrap_or(0) == 0 {
+                    break;
+                }
+                let reply: &[u8] = if data {
+                    if line == ".\r\n" {
+                        data = false;
+                        if reject_data {
+                            b"554 rejected\r\n"
+                        } else {
+                            b"250 accepted\r\n"
+                        }
+                    } else {
+                        saw_body = true;
+                        continue;
+                    }
+                } else if line.starts_with("EHLO") {
+                    b"250-test\r\n250 8BITMIME\r\n"
+                } else if line.starts_with("RCPT") && reject_recipient {
+                    b"550 recipient refused\r\n"
+                } else if line.starts_with("DATA") {
+                    data = true;
+                    b"354 send data\r\n"
+                } else if line.starts_with("QUIT") {
+                    let _ = stream.write_all(b"221 bye\r\n");
+                    break;
+                } else {
+                    b"250 ok\r\n"
+                };
+                if stream.write_all(reply).is_err() {
+                    break;
+                }
+            }
+            saw_body
+        });
+        let req = SendEmailRequest {
+            to: vec!["receiver@example.test".into()],
+            subject: "test".into(),
+            body: "hello\n.line\n".into(),
+            from: None,
+        };
+        let result = submit_to_bridge("127.0.0.1", port, "sender@example.test", "test-id", &req);
+        let saw_body = server.join().unwrap();
+        if reject_recipient {
+            assert!(!saw_body);
+        } else {
+            assert!(saw_body);
+        }
+        result
+    }
+
+    #[test]
+    fn transport_requires_final_smtp_acceptance() {
+        assert!(relay_case(false, false).is_ok());
+        assert!(relay_case(true, false).is_err());
+        assert!(relay_case(false, true).is_err());
+    }
+
+    #[test]
+    fn unavailable_bridge_cannot_report_success() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        let req = SendEmailRequest {
+            to: vec!["receiver@example.test".into()],
+            subject: "test".into(),
+            body: "hello".into(),
+            from: None,
+        };
+        assert!(
+            submit_to_bridge("127.0.0.1", port, "sender@example.test", "test-id", &req).is_err()
+        );
     }
 }

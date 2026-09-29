@@ -9,9 +9,13 @@ use axum::{
     response::Json,
     routing::{get, post},
 };
+use axum::{
+    extract::Request,
+    middleware::{self, Next},
+    response::{IntoResponse, Response},
+};
 use serde_json::{Value, json};
 use std::sync::Arc;
-use tower_http::cors::{Any, CorsLayer};
 
 #[derive(Clone)]
 pub struct ApiState {
@@ -25,7 +29,6 @@ pub struct ApiState {
 
 pub fn create_router(state: ApiState) -> Router {
     Router::new()
-        .route("/health", get(handle_health))
         .route("/api/mail/status", get(handle_status))
         .route("/api/mail/inbox", get(handle_list_inbox))
         .route("/api/mail/sent", get(handle_list_sent))
@@ -33,13 +36,68 @@ pub fn create_router(state: ApiState) -> Router {
         .route("/api/mail/message/{id}", get(handle_get_message))
         .route("/api/mail/send", post(handle_send_mail))
         .route("/api/mail/ingest-test", post(handle_ingest_test))
-        .layer(
-            CorsLayer::new()
-                .allow_origin(Any)
-                .allow_methods(Any)
-                .allow_headers(Any),
-        )
+        .layer(middleware::from_fn(require_mail_access))
         .with_state(state)
+        .merge(Router::new().route("/health", get(handle_health)))
+}
+
+async fn require_mail_access(request: Request, next: Next) -> Response {
+    // Browser access goes through the authenticated cockpit, never directly to mail.
+    if request.headers().contains_key(axum::http::header::ORIGIN) {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    let token = tokio::task::spawn_blocking(|| {
+        std::env::var("AIEN_MAIL_API_TOKEN")
+            .ok()
+            .or_else(|| {
+                let output = std::process::Command::new("atlas-vault")
+                    .args(["get", "AIEN_MAIL_API_TOKEN"])
+                    .output()
+                    .ok()?;
+                output
+                    .status
+                    .success()
+                    .then(|| String::from_utf8(output.stdout).ok())
+                    .flatten()
+            })
+            .unwrap_or_default()
+    })
+    .await
+    .unwrap_or_default();
+    if let Err(status) = validate_mail_token(
+        token.trim(),
+        request
+            .headers()
+            .get(axum::http::header::AUTHORIZATION)
+            .and_then(|v| v.to_str().ok()),
+    ) {
+        return status.into_response();
+    }
+    let mut response = next.run(request).await;
+    response.headers_mut().insert(
+        axum::http::header::CACHE_CONTROL,
+        "no-store".parse().unwrap(),
+    );
+    response
+}
+
+fn validate_mail_token(expected: &str, authorization: Option<&str>) -> Result<(), StatusCode> {
+    if expected.len() < 32 {
+        return Err(StatusCode::SERVICE_UNAVAILABLE);
+    }
+    let supplied = authorization.and_then(|v| v.strip_prefix("Bearer "));
+    let valid = supplied.is_some_and(|t| {
+        t.len() == expected.len()
+            && t.bytes()
+                .zip(expected.bytes())
+                .fold(0u8, |d, (a, b)| d | (a ^ b))
+                == 0
+    });
+    if valid {
+        Ok(())
+    } else {
+        Err(StatusCode::UNAUTHORIZED)
+    }
 }
 
 async fn handle_health() -> Json<Value> {
@@ -143,4 +201,29 @@ async fn handle_ingest_test(
     }
 
     Ok(Json(msg))
+}
+
+#[cfg(test)]
+mod access_tests {
+    use super::*;
+    #[test]
+    fn mail_access_fails_closed() {
+        let token = "a".repeat(64);
+        assert_eq!(
+            validate_mail_token("", None),
+            Err(StatusCode::SERVICE_UNAVAILABLE)
+        );
+        assert_eq!(
+            validate_mail_token(&token, None),
+            Err(StatusCode::UNAUTHORIZED)
+        );
+        assert_eq!(
+            validate_mail_token(&token, Some("Bearer wrong")),
+            Err(StatusCode::UNAUTHORIZED)
+        );
+        assert_eq!(
+            validate_mail_token(&token, Some(&format!("Bearer {token}"))),
+            Ok(())
+        );
+    }
 }
