@@ -3162,11 +3162,6 @@ fn mail_access_token() -> String {
     {
         return value.trim().to_owned();
     }
-    if let Ok(Some(value)) =
-        access::read_private_secret(&access::config_path(access::MAIL_TOKEN_FILE))
-    {
-        return value;
-    }
     spark_adapters::vault::resolve_secret("AIEN_MAIL_API_TOKEN").unwrap_or_default()
 }
 

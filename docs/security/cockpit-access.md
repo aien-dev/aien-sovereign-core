@@ -7,7 +7,7 @@ The cockpit now asks for a password-like access token before it shows anything o
 1. Open a terminal on the Spark and type:
 
    ```
-   cat ~/.config/aien/cockpit.token
+   atlas-vault get AIEN_COCKPIT_TOKEN
    ```
 
    It prints one long line of letters and numbers. Select it and copy it. That line is the cockpit key; do not paste it into chats, issues or screenshots.
@@ -17,24 +17,9 @@ The cockpit now asks for a password-like access token before it shows anything o
 
 From the MacBook, open a tunnel first (Terminal on the Mac: `ssh -L 18095:127.0.0.1:18095 <spark>`, leave it open), then follow steps 2 to 4 in a Mac browser at `http://127.0.0.1:18095`. The LAN address and the Tailscale address no longer work on purpose.
 
-## Where the keys live
+## Token provisioning
 
-| Key | File | Who reads it |
-| --- | --- | --- |
-| Cockpit operator token | `~/.config/aien/cockpit.token` | spark-cockpit-rs at start |
-| Mail API token | `~/.config/aien/mail-api.token` | spark-mail (checks it) and the cockpit (sends it when forwarding mail requests) |
-
-Both files hold one random line of at least 32 characters, owned by the operator account, mode `0600` (owner read and write only). A service refuses a file that group or others can read. The files live outside every repository and are never committed. Tokens are never printed to logs and never accepted in URLs.
-
-Lookup order for each token: the process environment (`AIEN_COCKPIT_TOKEN`, `AIEN_MAIL_API_TOKEN`), then the file above, then `atlas-vault get <NAME>`. With none present, the cockpit refuses to start and the mail API refuses every request.
-
-Create or rotate a token (then restart the service that reads it):
-
-```
-umask 077; mkdir -p ~/.config/aien
-head -c 48 /dev/urandom | base64 | tr -d '/+=\n' > ~/.config/aien/cockpit.token
-chmod 600 ~/.config/aien/cockpit.token
-```
+Store `AIEN_COCKPIT_TOKEN` and `AIEN_MAIL_API_TOKEN` with `atlas-vault add <NAME>`, which reads the value from standard input. Use a random token of at least 32 ASCII characters. The cockpit and mail service resolve these through process memory or `atlas-vault get <NAME>`. Plaintext token files are not supported. Missing credentials fail closed. Restart the cockpit after rotating its token; existing sessions are cleared.
 
 ## What is protected
 

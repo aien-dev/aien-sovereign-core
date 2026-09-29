@@ -55,12 +55,7 @@ impl Access {
         let from_env = std::env::var("AIEN_COCKPIT_TOKEN")
             .ok()
             .filter(|t| !t.trim().is_empty());
-        let from_file = match from_env {
-            Some(_) => None,
-            None => read_private_secret(&config_path(COCKPIT_TOKEN_FILE))?,
-        };
         let token = from_env
-            .or(from_file)
             .or_else(|| {
                 let result = std::process::Command::new("atlas-vault")
                     .args(["get", "AIEN_COCKPIT_TOKEN"])
@@ -72,9 +67,7 @@ impl Access {
                     .then(|| String::from_utf8(result.stdout).ok())
                     .flatten()
             })
-            .ok_or(
-                "AIEN_COCKPIT_TOKEN is unavailable from the environment, ~/.config/aien/cockpit.token or atlas-vault",
-            )?;
+            .ok_or("AIEN_COCKPIT_TOKEN is unavailable from memory or atlas-vault")?;
         let origins = std::env::var("AIEN_COCKPIT_ORIGINS")
             .unwrap_or_else(|_| "http://127.0.0.1:18095,http://localhost:18095".into());
         Self::new(
@@ -125,53 +118,11 @@ impl Access {
     }
 }
 
-/// Operator token file, relative to `$HOME/.config/aien`. Must be mode 0600.
-pub const COCKPIT_TOKEN_FILE: &str = "cockpit.token";
-/// Mail API token file shared with spark-mail, relative to `$HOME/.config/aien`.
-pub const MAIL_TOKEN_FILE: &str = "mail-api.token";
-
 /// Read-only health routes that local monitors (aien-cli, spark-debugger,
 /// spark-supervisor, bench_inference_stack) poll without credentials. GET/HEAD
 /// only, and only when the Host header names the loopback listener, so a
 /// DNS-rebinding page cannot read them through a foreign hostname.
 const PUBLIC_READ_ROUTES: &[&str] = &["/api/pulse", "/api/status"];
-
-pub fn config_path(name: &str) -> std::path::PathBuf {
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-    std::path::PathBuf::from(home)
-        .join(".config/aien")
-        .join(name)
-}
-
-/// Reads a secret file. Missing file is `Ok(None)`. A file readable or
-/// writable by group or others is refused so a leaked mode fails closed.
-/// The secret value never appears in an error message.
-pub fn read_private_secret(path: &std::path::Path) -> Result<Option<String>, String> {
-    use std::os::unix::fs::PermissionsExt;
-    let meta = match std::fs::metadata(path) {
-        Ok(meta) => meta,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(_) => return Err(format!("{} is unreadable", path.display())),
-    };
-    if meta.permissions().mode() & 0o077 != 0 {
-        return Err(format!(
-            "{} must be private to its owner (chmod 600)",
-            path.display()
-        ));
-    }
-    let value =
-        std::fs::read_to_string(path).map_err(|_| format!("{} is unreadable", path.display()))?;
-    let value = value.trim();
-    Ok((!value.is_empty()).then(|| value.to_owned()))
-}
-
-fn loopback_host(headers: &HeaderMap) -> bool {
-    headers
-        .get(header::HOST)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|host| host.parse::<axum::http::uri::Authority>().ok())
-        .is_some_and(|authority| matches!(authority.host(), "127.0.0.1" | "localhost" | "[::1]"))
-}
 
 pub fn bind_address() -> Result<SocketAddr, String> {
     std::env::var("AIEN_COCKPIT_ADDR")
@@ -518,24 +469,5 @@ mod tests {
             .status();
         assert_eq!(foreign_origin, 403);
         server.abort();
-    }
-
-    #[test]
-    fn token_file_must_be_owner_only() {
-        use std::os::unix::fs::PermissionsExt;
-        let dir = std::env::temp_dir().join(format!("cockpit-token-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("cockpit.token");
-        assert_eq!(read_private_secret(&path), Ok(None));
-        std::fs::write(&path, "secret-value-that-must-not-leak\n").unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
-        let error = read_private_secret(&path).unwrap_err();
-        assert!(!error.contains("secret-value"));
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
-        assert_eq!(
-            read_private_secret(&path),
-            Ok(Some("secret-value-that-must-not-leak".into()))
-        );
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 }
