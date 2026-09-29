@@ -3154,7 +3154,19 @@ async fn handle_install_en2_imprint(
     })))
 }
 
+/// Mail API bearer token: environment, then the owner-only file shared with
+/// spark-mail (~/.config/aien/mail-api.token), then atlas-vault.
 fn mail_access_token() -> String {
+    if let Ok(value) = std::env::var("AIEN_MAIL_API_TOKEN")
+        && !value.trim().is_empty()
+    {
+        return value.trim().to_owned();
+    }
+    if let Ok(Some(value)) =
+        access::read_private_secret(&access::config_path(access::MAIL_TOKEN_FILE))
+    {
+        return value;
+    }
     spark_adapters::vault::resolve_secret("AIEN_MAIL_API_TOKEN").unwrap_or_default()
 }
 
