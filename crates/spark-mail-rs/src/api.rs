@@ -67,22 +67,56 @@ async fn require_mail_access(request: Request, next: Next) -> Response {
 }
 
 /// Resolve through process memory or the TPM-bound vault; never a plaintext file.
+/// A vault hit is cached for 60 seconds so each request does not pay a TPM
+/// unseal (about 2 s); failures are not cached, so provisioning takes effect
+/// on the next request.
 fn resolve_mail_token() -> String {
+    use std::sync::Mutex;
+    use std::time::{Duration, Instant};
+    static CACHE: Mutex<Option<(Instant, String)>> = Mutex::new(None);
+
     if let Ok(value) = std::env::var("AIEN_MAIL_API_TOKEN")
         && !value.trim().is_empty()
     {
         return value;
     }
-    let Ok(output) = std::process::Command::new("atlas-vault")
-        .args(["get", "AIEN_MAIL_API_TOKEN"])
-        .output()
-    else {
-        return String::new();
+    if let Ok(guard) = CACHE.lock()
+        && let Some((at, value)) = guard.as_ref()
+        && at.elapsed() < Duration::from_secs(60)
+    {
+        return value.clone();
+    }
+    let value = vault_get("AIEN_MAIL_API_TOKEN");
+    if !value.trim().is_empty()
+        && let Ok(mut guard) = CACHE.lock()
+    {
+        *guard = Some((Instant::now(), value.clone()));
+    }
+    value
+}
+
+/// Runs `atlas-vault get`. The mail unit's PATH lacks ~/.local/bin, so fall
+/// back to the operator's install location when PATH lookup finds nothing.
+fn vault_get(name: &str) -> String {
+    let run = |program: &std::ffi::OsStr| {
+        std::process::Command::new(program)
+            .args(["get", name])
+            .stdin(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .output()
     };
-    if output.status.success() {
-        String::from_utf8(output.stdout).unwrap_or_default()
-    } else {
-        String::new()
+    let output = match run(std::ffi::OsStr::new("atlas-vault")) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            let home = std::env::var_os("HOME").unwrap_or_default();
+            run(std::path::Path::new(&home)
+                .join(".local/bin/atlas-vault")
+                .as_os_str())
+        }
+        other => other,
+    };
+    match output {
+        Ok(out) if out.status.success() => String::from_utf8(out.stdout).unwrap_or_default(),
+        _ => String::new(),
     }
 }
 

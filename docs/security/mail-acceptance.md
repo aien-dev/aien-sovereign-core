@@ -2,7 +2,7 @@
 
 ## Access
 
-The mail HTTP API (`127.0.0.1:18092`) requires `Authorization: Bearer <token>`. Provision `AIEN_MAIL_API_TOKEN` with `atlas-vault add AIEN_MAIL_API_TOKEN` using standard input. The daemon resolves the token from process memory or the TPM-bound vault. Plaintext token files are not supported. Missing credentials fail closed. `/health` stays public for monitors. Browser requests (any `Origin` header) are refused; the cockpit forwards the separately provisioned mail token.
+The mail HTTP API (`127.0.0.1:18092`) requires `Authorization: Bearer <token>`. Provision `AIEN_MAIL_API_TOKEN` with `atlas-vault add AIEN_MAIL_API_TOKEN` using standard input. The daemon resolves the token from process memory or the TPM-bound vault (PATH first, then `~/.local/bin/atlas-vault`, since the service PATH omits it) and caches a vault hit for 60 seconds. Plaintext token files are not supported. Missing credentials fail closed. `/health` stays public for monitors. Browser requests (any `Origin` header) are refused; the cockpit forwards the separately provisioned mail token.
 
 
 ## Transport outcome
