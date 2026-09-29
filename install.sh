@@ -91,8 +91,9 @@ echo "    - spark-supervisor (Resilient Process Supervisor)"
 echo "    - spark-debugger (Zero-Leak Health & Telemetry Auditor)"
 echo "    - spark-harness (5-Layer Verification Engine)"
 echo "    - spark-crumbs (Blake3 Scent & Action Vector Tracker)"
+echo "    - spark-aegis (Defensive Boundary & Containment Engine)"
 
-cargo build --locked --release -p aien-cli -p spark-cockpit-rs -p cortex-rs -p spark-supervisor -p spark-debugger -p spark-harness -p spark-crumbs
+cargo build --locked --release -p aien-cli -p spark-cockpit-rs -p cortex-rs -p spark-supervisor -p spark-debugger -p spark-harness -p spark-crumbs -p spark-aegis
 
 echo "[*] Installing Binaries to $BIN_DIR..."
 cp target/release/aien-cli "$BIN_DIR/aien"
@@ -102,7 +103,8 @@ cp target/release/spark-supervisor "$BIN_DIR/spark-supervisor"
 cp target/release/spark-debugger "$BIN_DIR/spark-debugger"
 cp target/release/spark-harness "$BIN_DIR/spark-harness"
 cp target/release/spark-crumbs "$BIN_DIR/spark-crumbs"
-chmod +x "$BIN_DIR/aien" "$BIN_DIR/spark-cockpit" "$BIN_DIR/cortex" "$BIN_DIR/spark-supervisor" "$BIN_DIR/spark-debugger" "$BIN_DIR/spark-harness" "$BIN_DIR/spark-crumbs"
+cp target/release/spark-aegis "$BIN_DIR/spark-aegis"
+chmod +x "$BIN_DIR/aien" "$BIN_DIR/spark-cockpit" "$BIN_DIR/cortex" "$BIN_DIR/spark-supervisor" "$BIN_DIR/spark-debugger" "$BIN_DIR/spark-harness" "$BIN_DIR/spark-crumbs" "$BIN_DIR/spark-aegis"
 
 echo "[+] Binaries successfully linked:"
 echo "    - aien -> $BIN_DIR/aien"
@@ -112,6 +114,7 @@ echo "    - spark-supervisor -> $BIN_DIR/spark-supervisor"
 echo "    - spark-debugger -> $BIN_DIR/spark-debugger"
 echo "    - spark-harness -> $BIN_DIR/spark-harness"
 echo "    - spark-crumbs -> $BIN_DIR/spark-crumbs"
+echo "    - spark-aegis -> $BIN_DIR/spark-aegis"
 
 echo "[*] Initializing Sovereign Operator Profile..."
 if [ ! -f "$CONFIG_DIR/operator.toml" ]; then
@@ -156,6 +159,6 @@ echo "    aien status     # Real-time health, ports, and memory status"
 echo "    aien cockpit    # Launches Sovereign Glass Cockpit in browser"
 echo "    aien chat       # Interactive sovereign terminal pairing"
 echo "    aien harness    # Run 5-layer verification checks"
-echo "    aien aegis      # Requires the separately installed legacy AEGIS runtime"
+echo "    aien aegis      # Run defensive boundary security audit"
 echo "    aien doctor     # System diagnostic and TPM key vault audit"
 echo "=================================================================="

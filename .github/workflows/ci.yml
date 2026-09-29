@@ -39,7 +39,7 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: Verify Piped Installer Bootstrap
-        run: python3 scripts/test-install.py
+        run: bash scripts/test-install.sh
 
       - name: Cargo Workspace Check
         run: cargo check --workspace --all-targets
