@@ -1333,7 +1333,7 @@ pub async fn handle_status_command() {
         ("Matrix Conduit Federation", "http://127.0.0.1:6167", 6167),
         (
             "Sovereign Loopback Mail",
-            "http://127.0.0.1:18092/status",
+            "http://127.0.0.1:18092/health",
             2525,
         ),
     ];

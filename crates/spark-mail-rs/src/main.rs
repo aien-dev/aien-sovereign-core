@@ -230,7 +230,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             };
             let sent = relay.send_email(req).await.map_err(std::io::Error::other)?;
             println!(
-                "Email recorded and sent: {} (Cortex indexed: {})",
+                "SMTP relay accepted: {} (Cortex indexed: {})",
                 sent.id, sent.cortex_indexed
             );
         }
