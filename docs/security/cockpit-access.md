@@ -19,6 +19,19 @@ From the MacBook, open a tunnel first (Terminal on the Mac: `ssh -L 18095:127.0.
 
 ## Token provisioning
 
+Both keys live in atlas-vault, the machine's TPM-sealed key store (encrypted by the Spark's security chip, kept under `~/.config/atlas/vault` with owner-only permissions). They never sit in a repository or a plain text file, and the services never print them to logs.
+
+| Key | Who reads it |
+| --- | --- |
+| `AIEN_COCKPIT_TOKEN` | spark-cockpit-rs at start; Drake pastes it at `/login` |
+| `AIEN_MAIL_API_TOKEN` | spark-mail (checks it) and the cockpit (sends it when forwarding mail requests) |
+
+Create or rotate a key, then restart the service that reads it:
+
+```
+head -c 48 /dev/urandom | base64 | tr -d '/+=\n' | atlas-vault add AIEN_COCKPIT_TOKEN
+```
+
 Store `AIEN_COCKPIT_TOKEN` and `AIEN_MAIL_API_TOKEN` with `atlas-vault add <NAME>`, which reads the value from standard input. Use a random token of at least 32 ASCII characters. The cockpit and mail service resolve these through process memory or `atlas-vault get <NAME>`. Plaintext token files are not supported. Missing credentials fail closed. Restart the cockpit after rotating its token; existing sessions are cleared.
 
 ## What is protected

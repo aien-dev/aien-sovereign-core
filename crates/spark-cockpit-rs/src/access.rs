@@ -124,6 +124,14 @@ impl Access {
 /// DNS-rebinding page cannot read them through a foreign hostname.
 const PUBLIC_READ_ROUTES: &[&str] = &["/api/pulse", "/api/status"];
 
+fn loopback_host(headers: &HeaderMap) -> bool {
+    headers
+        .get(header::HOST)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|host| host.parse::<axum::http::uri::Authority>().ok())
+        .is_some_and(|authority| matches!(authority.host(), "127.0.0.1" | "localhost" | "[::1]"))
+}
+
 pub fn bind_address() -> Result<SocketAddr, String> {
     std::env::var("AIEN_COCKPIT_ADDR")
         .unwrap_or_else(|_| "127.0.0.1:18095".into())
