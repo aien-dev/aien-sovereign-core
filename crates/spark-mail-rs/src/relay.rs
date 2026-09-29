@@ -44,8 +44,16 @@ impl MailRelay {
     }
 
     pub async fn send_email(&self, req: SendEmailRequest) -> Result<EmailMessage, String> {
+        reject_header_injection(req.from.as_deref(), &req.to, &req.subject)?;
         crate::effect::authorize_outbound(&req.to, &req.subject, &req.body)
             .map_err(|error| error.to_string())?;
+        self.deliver(req).await
+    }
+
+    /// Submits to the bridge, then records. Nothing is stored as "sent" or
+    /// indexed until the bridge's final 250 reply to end-of-DATA.
+    async fn deliver(&self, req: SendEmailRequest) -> Result<EmailMessage, String> {
+        reject_header_injection(req.from.as_deref(), &req.to, &req.subject)?;
         let sender = req
             .from
             .clone()
@@ -105,6 +113,26 @@ impl MailRelay {
     }
 }
 
+/// Refuses CR, LF and NUL in anything that becomes an SMTP command argument
+/// or a message header, so a caller cannot smuggle extra commands or headers.
+fn reject_header_injection(
+    sender: Option<&str>,
+    recipients: &[String],
+    subject: &str,
+) -> Result<(), String> {
+    let unsafe_text = |s: &str| s.contains(['\r', '\n', '\0']);
+    if sender.is_some_and(unsafe_text) {
+        return Err("Sender contains a line break or NUL; refused".into());
+    }
+    if recipients.iter().any(|r| unsafe_text(r)) {
+        return Err("Recipient contains a line break or NUL; refused".into());
+    }
+    if unsafe_text(subject) {
+        return Err("Subject contains a line break or NUL; refused".into());
+    }
+    Ok(())
+}
+
 /// Success means the relay's final positive DATA reply, not recipient delivery.
 fn submit_to_bridge(
     host: &str,
@@ -113,6 +141,7 @@ fn submit_to_bridge(
     id: &str,
     request: &SendEmailRequest,
 ) -> Result<(), String> {
+    reject_header_injection(Some(sender), &request.to, &request.subject)?;
     let mut builder = Message::builder()
         .from(sender.parse().map_err(|_| "Invalid sender address")?)
         .subject(&request.subject)
@@ -226,5 +255,152 @@ mod tests {
         assert!(
             submit_to_bridge("127.0.0.1", port, "sender@example.test", "test-id", &req).is_err()
         );
+    }
+
+    /// A port with nothing listening. Tests point Cortex here so they never
+    /// write to the live Cortex on 127.0.0.1:18080.
+    fn dead_port() -> u16 {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        assert_ne!(port, 18080);
+        port
+    }
+
+    fn fake_relay(reject_data: bool) -> (u16, std::thread::JoinHandle<()>) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(3)))
+                .unwrap();
+            stream.write_all(b"220 test relay\r\n").unwrap();
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut data = false;
+            loop {
+                let mut line = String::new();
+                if reader.read_line(&mut line).unwrap_or(0) == 0 {
+                    break;
+                }
+                let reply: &[u8] = if data {
+                    if line != ".\r\n" {
+                        continue;
+                    }
+                    data = false;
+                    if reject_data {
+                        b"554 rejected\r\n"
+                    } else {
+                        b"250 accepted\r\n"
+                    }
+                } else if line.starts_with("EHLO") {
+                    b"250-test\r\n250 8BITMIME\r\n"
+                } else if line.starts_with("DATA") {
+                    data = true;
+                    b"354 send data\r\n"
+                } else if line.starts_with("QUIT") {
+                    let _ = stream.write_all(b"221 bye\r\n");
+                    break;
+                } else {
+                    b"250 ok\r\n"
+                };
+                if stream.write_all(reply).is_err() {
+                    break;
+                }
+            }
+        });
+        (port, server)
+    }
+
+    fn test_relay(bridge_port: u16) -> (MailRelay, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!("spark-mail-relay-{}", Uuid::new_v4()));
+        let store = Arc::new(MailStore::new(Some(dir.clone())));
+        let cortex = Arc::new(CortexSync::new(Some(&format!(
+            "http://127.0.0.1:{}",
+            dead_port()
+        ))));
+        (
+            MailRelay::new(
+                "127.0.0.1",
+                bridge_port,
+                store,
+                cortex,
+                "sender@example.test",
+            ),
+            dir,
+        )
+    }
+
+    fn request(subject: &str) -> SendEmailRequest {
+        SendEmailRequest {
+            to: vec!["receiver@example.test".into()],
+            subject: subject.into(),
+            body: "hello".into(),
+            from: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn sent_is_recorded_only_after_final_acceptance() {
+        let (port, server) = fake_relay(false);
+        let (relay, dir) = test_relay(port);
+        let msg = relay.deliver(request("accepted")).await.unwrap();
+        server.join().unwrap();
+        assert_eq!(
+            msg.headers
+                .get("X-AIEN-Transport-Status")
+                .map(String::as_str),
+            Some("smtp_accepted")
+        );
+        assert!(!msg.cortex_indexed, "dead Cortex port must not index");
+        assert_eq!(relay.store.count_folder("sent"), 1);
+        std::fs::remove_dir_all(dir).unwrap();
+
+        let (port, server) = fake_relay(true);
+        let (relay, dir) = test_relay(port);
+        assert!(relay.deliver(request("rejected")).await.is_err());
+        server.join().unwrap();
+        assert_eq!(relay.store.count_folder("sent"), 0);
+        std::fs::remove_dir_all(dir).unwrap();
+
+        let (relay, dir) = test_relay(dead_port());
+        assert!(relay.deliver(request("no bridge")).await.is_err());
+        assert_eq!(relay.store.count_folder("sent"), 0);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn line_breaks_in_sender_recipient_or_subject_are_refused() {
+        let (relay, dir) = test_relay(dead_port());
+        let mut subject = request("hi\r\nBcc: victim@example.test");
+        assert!(
+            relay
+                .deliver(subject.clone())
+                .await
+                .unwrap_err()
+                .contains("Subject")
+        );
+        subject.subject = "hi\nRCPT TO:<x@example.test>".into();
+        assert!(
+            relay
+                .send_email(subject)
+                .await
+                .unwrap_err()
+                .contains("Subject")
+        );
+        let mut recipient = request("ok");
+        recipient.to = vec!["a@example.test>\r\nRCPT TO:<b@example.test".into()];
+        assert!(
+            relay
+                .deliver(recipient)
+                .await
+                .unwrap_err()
+                .contains("Recipient")
+        );
+        let mut sender = request("ok");
+        sender.from = Some("a@example.test\r\nX-Injected: 1".into());
+        assert!(relay.deliver(sender).await.unwrap_err().contains("Sender"));
+        assert_eq!(relay.store.count_folder("sent"), 0);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }

@@ -46,24 +46,9 @@ async fn require_mail_access(request: Request, next: Next) -> Response {
     if request.headers().contains_key(axum::http::header::ORIGIN) {
         return StatusCode::FORBIDDEN.into_response();
     }
-    let token = tokio::task::spawn_blocking(|| {
-        std::env::var("AIEN_MAIL_API_TOKEN")
-            .ok()
-            .or_else(|| {
-                let output = std::process::Command::new("atlas-vault")
-                    .args(["get", "AIEN_MAIL_API_TOKEN"])
-                    .output()
-                    .ok()?;
-                output
-                    .status
-                    .success()
-                    .then(|| String::from_utf8(output.stdout).ok())
-                    .flatten()
-            })
-            .unwrap_or_default()
-    })
-    .await
-    .unwrap_or_default();
+    let token = tokio::task::spawn_blocking(resolve_mail_token)
+        .await
+        .unwrap_or_default();
     if let Err(status) = validate_mail_token(
         token.trim(),
         request
@@ -81,6 +66,59 @@ async fn require_mail_access(request: Request, next: Next) -> Response {
     response
 }
 
+/// Owner-only token file shared with the cockpit.
+const MAIL_TOKEN_FILE: &str = ".config/aien/mail-api.token";
+
+/// Token lookup: environment, then ~/.config/aien/mail-api.token (refused
+/// unless mode 0600), then atlas-vault. Empty result fails closed.
+fn resolve_mail_token() -> String {
+    if let Ok(value) = std::env::var("AIEN_MAIL_API_TOKEN")
+        && !value.trim().is_empty()
+    {
+        return value;
+    }
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+    match read_private_secret(&std::path::Path::new(&home).join(MAIL_TOKEN_FILE)) {
+        Ok(Some(value)) => return value,
+        Ok(None) => {}
+        Err(reason) => {
+            tracing::error!("mail API token refused: {reason}");
+            return String::new();
+        }
+    }
+    let Ok(output) = std::process::Command::new("atlas-vault")
+        .args(["get", "AIEN_MAIL_API_TOKEN"])
+        .output()
+    else {
+        return String::new();
+    };
+    if output.status.success() {
+        String::from_utf8(output.stdout).unwrap_or_default()
+    } else {
+        String::new()
+    }
+}
+
+/// Missing file is `Ok(None)`. Group- or world-accessible files are refused.
+/// The secret never appears in an error.
+fn read_private_secret(path: &std::path::Path) -> Result<Option<String>, String> {
+    use std::os::unix::fs::PermissionsExt;
+    let meta = match std::fs::metadata(path) {
+        Ok(meta) => meta,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(_) => return Err(format!("{} is unreadable", path.display())),
+    };
+    if meta.permissions().mode() & 0o077 != 0 {
+        return Err(format!(
+            "{} must be private to its owner (chmod 600)",
+            path.display()
+        ));
+    }
+    let value =
+        std::fs::read_to_string(path).map_err(|_| format!("{} is unreadable", path.display()))?;
+    let value = value.trim();
+    Ok((!value.is_empty()).then(|| value.to_owned()))
+}
 fn validate_mail_token(expected: &str, authorization: Option<&str>) -> Result<(), StatusCode> {
     if expected.len() < 32 {
         return Err(StatusCode::SERVICE_UNAVAILABLE);
@@ -225,5 +263,27 @@ mod access_tests {
             validate_mail_token(&token, Some(&format!("Bearer {token}"))),
             Ok(())
         );
+    }
+
+    #[test]
+    fn token_file_must_be_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("mail-token-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("mail-api.token");
+        assert_eq!(read_private_secret(&path), Ok(None));
+        std::fs::write(&path, "secret-value-that-must-not-leak\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640)).unwrap();
+        assert!(
+            !read_private_secret(&path)
+                .unwrap_err()
+                .contains("secret-value")
+        );
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(
+            read_private_secret(&path),
+            Ok(Some("secret-value-that-must-not-leak".into()))
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }
