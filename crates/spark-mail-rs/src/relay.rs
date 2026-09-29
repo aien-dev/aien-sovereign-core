@@ -46,7 +46,10 @@ impl MailRelay {
     pub async fn send_email(&self, req: SendEmailRequest) -> Result<EmailMessage, String> {
         crate::effect::authorize_outbound(&req.to, &req.subject, &req.body)
             .map_err(|error| error.to_string())?;
-        let sender = req.from.unwrap_or_else(|| self.default_sender.clone());
+        let sender = req
+            .from
+            .clone()
+            .unwrap_or_else(|| self.default_sender.clone());
         let id = Uuid::new_v4().to_string();
         let now = Utc::now().to_rfc3339();
 
