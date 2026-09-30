@@ -21,6 +21,12 @@ case "$CONTEXT" in
         echo "PASSED (Branch: $BRANCH)"
         ;;
     merged-tree)
+        # Only honoured on the real CI runner validating main; a local shell cannot claim it.
+        if [ "${GITHUB_ACTIONS:-}" != "true" ] || [ "${GITHUB_REF:-}" != "refs/heads/main" ]; then
+            echo "FAILED"
+            echo "Error: merged-tree context is only valid in GitHub Actions on refs/heads/main."
+            exit 1
+        fi
         echo "PASSED (merged-tree context; branch rule not applicable, checked out: $BRANCH)"
         ;;
     *)
