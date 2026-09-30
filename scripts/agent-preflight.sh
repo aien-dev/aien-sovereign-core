@@ -9,14 +9,7 @@ FAILED=0
 
 # Step 1: Branch Guard (Zero direct commits to main)
 echo -n "[1/5] Verifying Branch Isolation... "
-CURRENT_BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "unknown")
-if [ "$CURRENT_BRANCH" = "main" ]; then
-    echo "FAILED"
-    echo "Error: Cannot commit directly to main. Create a feature branch (e.g. feat/, fix/)."
-    FAILED=1
-else
-    echo "PASSED (Branch: $CURRENT_BRANCH)"
-fi
+if bash "$(dirname "$0")/preflight-branch-guard.sh"; then :; else FAILED=1; fi
 
 # Step 2: Zero Disk Secrets Audit
 echo -n "[2/5] Auditing Zero Disk Secrets... "
