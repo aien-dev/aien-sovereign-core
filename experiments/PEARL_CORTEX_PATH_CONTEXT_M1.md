@@ -102,6 +102,6 @@ Result fields: `dataset_snapshot_sha256`, `eval_fixture_sha256`, `experiment_bin
 
 ## Synthetic fixture v1
 
-`experiments/fixtures/pearl_cortex_m1/` holds the first scientific fixture: 60 cases, 30 relational, over a synthetic snapshot of 477 entities and 520 claims. `gen_m1.c` derives every entity, claim, embedding and case from one fixed seed; `build.sh` rebuilds `snapshot.sqlite` and `fixture.json` with a C compiler and the sqlite3 tool, using the migration SQL in `crates/cortex-rs/src/db.rs`. It contains no real memory and no sealed material; the snapshot's HMAC key is a public all-zero test value.
+`experiments/fixtures/pearl_cortex_m1/` holds the first scientific fixture: 60 cases, 30 relational, over a synthetic snapshot of 507 entities (477 in the queried space, 30 in a second space) and 520 claims. `gen_m1.c` derives every entity, claim, embedding and case from one fixed seed; `build.sh` rebuilds `snapshot.sqlite` and `fixture.json` with a C compiler and the sqlite3 tool, using the migration SQL in `crates/cortex-rs/src/db.rs`. It contains no real memory and no sealed material; the snapshot's HMAC key is a public all-zero test value.
 
 The live Cortex store had no claims when this fixture was built, so M1 could not run on real memory. The generator's world model (header of `gen_m1.c`) was frozen and committed before the first M1 run. A result on this fixture shows how the path score behaves on a graph with the stated noise and gaps. It is not evidence about real Cortex memory.
