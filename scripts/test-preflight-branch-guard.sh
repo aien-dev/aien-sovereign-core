@@ -10,13 +10,13 @@ git init -q -b main . && git -c user.name=t -c user.email=t@t commit -q --allow-
 expect() { # want(0|1) description env...
     local want="$1" desc="$2"; shift 2
     local rc=0
-    env "$@" bash "$GUARD" >/dev/null 2>&1 || rc=$?
+    env -u AIEN_PREFLIGHT_CONTEXT -u GITHUB_ACTIONS -u GITHUB_REF "$@" bash "$GUARD" >/dev/null 2>&1 || rc=$?
     [ "$rc" -eq "$want" ] || { echo "FAIL: $desc (exit $rc, wanted $want)"; exit 1; }
     echo "ok: $desc"
 }
 
 expect 1 "developer on main is refused"            AIEN_PREFLIGHT_CONTEXT=developer
-expect 1 "default context on main is refused"      -u AIEN_PREFLIGHT_CONTEXT
+expect 1 "default context on main is refused"      AIEN_PREFLIGHT_NONE=1
 expect 0 "merged-tree on CI runner for main is accepted" AIEN_PREFLIGHT_CONTEXT=merged-tree GITHUB_ACTIONS=true GITHUB_REF=refs/heads/main
 expect 1 "merged-tree from a local shell is refused"     AIEN_PREFLIGHT_CONTEXT=merged-tree
 expect 1 "merged-tree on CI for a PR ref is refused"     AIEN_PREFLIGHT_CONTEXT=merged-tree GITHUB_ACTIONS=true GITHUB_REF=refs/pull/1/merge
