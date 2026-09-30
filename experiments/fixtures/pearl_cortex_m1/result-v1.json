@@ -1,0 +1,2991 @@
+{
+  "dataset_snapshot_sha256": "32e254541089be7d870424d2598aa1428f0a627eafa84c1ca87b190b732d3e28",
+  "eval_fixture_sha256": "c593f431d4427fc1d43e032b0a162dbc84524b1283f46fb1ef2a85752da84416",
+  "experiment_binary_sha256": "66a7ab0d3fb6feccc129c75a092617660208010da463dca6880c72c18011acf7",
+  "config_sha256": "e7584fad9534e3fb0ea95ff132ec5331958fdb81184d1178288fe6565715172a",
+  "snapshot_time": "2026-09-30T00:00:00+00:00",
+  "queries": [
+    {
+      "query_id": "m1-rel-00",
+      "baseline_ids": [
+        "ent-0000",
+        "ent-0001",
+        "ent-0166",
+        "ent-0458",
+        "ent-0254",
+        "ent-0170",
+        "ent-0004",
+        "ent-0193",
+        "ent-0450",
+        "ent-0167"
+      ],
+      "treatment_ids": [
+        "ent-0000",
+        "ent-0001",
+        "ent-0167",
+        "ent-0166",
+        "ent-0458",
+        "ent-0254",
+        "ent-0170",
+        "ent-0004",
+        "ent-0193",
+        "ent-0450"
+      ],
+      "baseline_ndcg": 0.6366824387328317,
+      "treatment_ndcg": 0.6366824387328317,
+      "absolute_ndcg_delta": 0.0,
+      "relative_ndcg": 0.0,
+      "baseline_recall": 0.5,
+      "treatment_recall": 0.5,
+      "baseline_latency_ms": 0.42539200000000005,
+      "treatment_latency_ms": 27.406225,
+      "baseline_accounted_bytes": 123392,
+      "treatment_accounted_bytes": 166976,
+      "paths_scored": 48,
+      "suggestions": [
+        {
+          "query_id": "m1-rel-00",
+          "subject": "ent-0166",
+          "predicate": "path_context.related",
+          "object": "ent-0170",
+          "score": 0.002300841627649834
+        }
+      ]
+    },
+    {
+      "query_id": "m1-rel-01",
+      "baseline_ids": [
+        "ent-0005",
+        "ent-0006",
+        "ent-0201",
+        "ent-0355",
+        "ent-0226",
+        "ent-0083",
+        "ent-0460",
+        "ent-0015",
+        "ent-0049",
+        "ent-0251"
+      ],
+      "treatment_ids": [
+        "ent-0005",
+        "ent-0006",
+        "ent-0201",
+        "ent-0355",
+        "ent-0226",
+        "ent-0083",
+        "ent-0460",
+        "ent-0015",
+        "ent-0009",
+        "ent-0049"
+      ],
+      "baseline_ndcg": 0.5531464700081437,
+      "treatment_ndcg": 0.6552438651310554,
+      "absolute_ndcg_delta": 0.10209739512291172,
+      "relative_ndcg": 0.18457569677956834,
+      "baseline_recall": 0.4,
+      "treatment_recall": 0.6,
+      "baseline_latency_ms": 0.366256,
+      "treatment_latency_ms": 27.130065,
+      "baseline_accounted_bytes": 123392,
+      "treatment_accounted_bytes": 166784,
+      "paths_scored": 44,
+      "suggestions": []
+    },
+    {
+      "query_id": "m1-rel-02",
+      "baseline_ids": [
+        "ent-0010",
+        "ent-0011",
+        "ent-0012",
+        "ent-0159",
+        "ent-0311",
+        "ent-0162",
+        "ent-0125",
+        "ent-0109",
+        "ent-0112",
+        "ent-0014"
+      ],
+      "treatment_ids": [
+        "ent-0010",
+        "ent-0011",
+        "ent-0012",
+        "ent-0159",
+        "ent-0162",
+        "ent-0311",
+        "ent-0014",
+        "ent-0125",
+        "ent-0109",
+        "ent-0015"
+      ],
+      "baseline_ndcg": 0.732296200528563,
+      "treatment_ndcg": 0.8331636716948344,
+      "absolute_ndcg_delta": 0.10086747116627137,
+      "relative_ndcg": 0.13774135533335607,
+      "baseline_recall": 0.6666666666666666,
+      "treatment_recall": 0.8333333333333334,
+      "baseline_latency_ms": 0.363328,
+      "treatment_latency_ms": 27.153008999999997,
+      "baseline_accounted_bytes": 123392,
+      "treatment_accounted_bytes": 167696,
+      "paths_scored": 63,
+      "suggestions": [
+        {
+          "query_id": "m1-rel-02",
+          "subject": "ent-0011",
+          "predicate": "path_context.related",
+          "object": "ent-0012",
+          "score": 0.006736191618300277
+        }
+      ]
+    },
+    {
+      "query_id": "m1-rel-03",
+      "baseline_ids": [
+        "ent-0016",
+        "ent-0017",
+        "ent-0023",
+        "ent-0230",
+        "ent-0021",
+        "ent-0183",
+        "ent-0020",
+        "ent-0025",
+        "ent-0018",
+        "ent-0019"
+      ],
+      "treatment_ids": [
+        "ent-0016",
+        "ent-0017",
+        "ent-0021",
+        "ent-0023",
+        "ent-0230",
+        "ent-0183",
+        "ent-0020",
+        "ent-0019",
+        "ent-0022",
+        "ent-0025"
+      ],
+      "baseline_ndcg": 0.8084692159756114,
+      "treatment_ndcg": 0.8468274504638792,
+      "absolute_ndcg_delta": 0.038358234488267806,
+      "relative_ndcg": 0.0474455102684144,
+      "baseline_recall": 0.8571428571428571,
+      "treatment_recall": 0.8571428571428571,
+      "baseline_latency_ms": 0.361104,
+      "treatment_latency_ms": 27.089681000000002,
+      "baseline_accounted_bytes": 123392,
+      "treatment_accounted_bytes": 167744,
+      "paths_scored": 64,
+      "suggestions": [
+        {
+          "query_id": "m1-rel-03",
+          "subject": "ent-0017",
+          "predicate": "path_context.related",
+          "object": "ent-0020",
+          "score": 0.0026553924403053173
+        },
+        {
+          "query_id": "m1-rel-03",
+          "subject": "ent-0017",
+          "predicate": "path_context.related",
+          "object": "ent-0021",
+          "score": 0.008193996851179636
+        },
+        {
+          "query_id": "m1-rel-03",
+          "subject": "ent-0017",
+          "predicate": "path_context.related",
+          "object": "ent-0183",
+          "score": 0.004778906511556776
+        },
+        {
+          "query_id": "m1-rel-03",
+          "subject": "ent-0020",
+          "predicate": "path_context.related",
+          "object": "ent-0021",
+          "score": 0.0020970567205585845
+        }
+      ]
+    },
+    {
+      "query_id": "m1-rel-04",
+      "baseline_ids": [
+        "ent-0024",
+        "ent-0025",
+        "ent-0018",
+        "ent-0021",
+        "ent-0028",
+        "ent-0069",
+        "ent-0115",
+        "ent-0271",
+        "ent-0064",
+        "ent-0436"
+      ],
+      "treatment_ids": [
+        "ent-0024",
+        "ent-0025",
+        "ent-0028",
+        "ent-0018",
+        "ent-0021",
+        "ent-0069",
+        "ent-0115",
+        "ent-0271",
+        "ent-0064",
+        "ent-0117"
+      ],
+      "baseline_ndcg": 0.5546406709327603,
+      "treatment_ndcg": 0.5857421563596757,
+      "absolute_ndcg_delta": 0.031101485426915487,
+      "relative_ndcg": 0.05607501767696,
+      "baseline_recall": 0.42857142857142855,
+      "treatment_recall": 0.42857142857142855,
+      "baseline_latency_ms": 0.36475199999999997,
+      "treatment_latency_ms": 27.109793,
+      "baseline_accounted_bytes": 123392,
+      "treatment_accounted_bytes": 166880,
+      "paths_scored": 46,
+      "suggestions": [
+        {
+          "query_id": "m1-rel-04",
+          "subject": "ent-0025",
+          "predicate": "path_context.related",
+          "object": "ent-0028",
+          "score": 0.004493041938914731
+        },
+        {
+          "query_id": "m1-rel-04",
+          "subject": "ent-0115",
+          "predicate": "path_context.related",
+          "object": "ent-0271",
+          "score": 0.0007400632874248084
+        }
+      ]
+    },
+    {
+      "query_id": "m1-rel-05",
+      "baseline_ids": [
+        "ent-0031",
+        "ent-0032",
+        "ent-0148",
+        "ent-0034",
+        "ent-0304",
+        "ent-0280",
+        "ent-0036",
+        "ent-0033",
+        "ent-0439",
+        "ent-0138"
+      ],
+      "treatment_ids": [
+        "ent-0031",
+        "ent-0032",
+        "ent-0034",
+        "ent-0148",
+        "ent-0036",
+        "ent-0304",
+        "ent-0033",
+        "ent-0280",
+        "ent-0439",
+        "ent-0138"
+      ],
+      "baseline_ndcg": 0.8201749498438573,
+      "treatment_ndcg": 0.8627545507313896,
+      "absolute_ndcg_delta": 0.04257960088753232,
+      "relative_ndcg": 0.05191526624366973,
+      "baseline_recall": 0.8333333333333334,
+      "treatment_recall": 0.8333333333333334,
+      "baseline_latency_ms": 0.362433,
+      "treatment_latency_ms": 27.079856,
+      "baseline_accounted_bytes": 123392,
+      "treatment_accounted_bytes": 167696,
+      "paths_scored": 63,
+      "suggestions": [
+        {
+          "query_id": "m1-rel-05",
+          "subject": "ent-0032",
+          "predicate": "path_context.related",
+          "object": "ent-0033",
+          "score": 0.004511317018101298
+        },
+        {
+          "query_id": "m1-rel-05",
+          "subject": "ent-0032",
+          "predicate": "path_context.related",
+          "object": "ent-0034",
+          "score": 0.0025920616208248183
+        },
+        {
+          "query_id": "m1-rel-05",
+          "subject": "ent-0032",
+          "predicate": "path_context.related",
+          "object": "ent-0036",
+          "score": 0.004998123844567939
+        },
+        {
+          "query_id": "m1-rel-05",
+          "subject": "ent-0033",
+          "predicate": "path_context.related",
+          "object": "ent-0034",
+          "score": 0.0008142510778567529
+        },
+        {
+          "query_id": "m1-rel-05",
+          "subject": "ent-0033",
+          "predicate": "path_context.related",
+          "object": "ent-0036",
+          "score": 0.0014988261696148603
+        },
+        {
+          "query_id": "m1-rel-05",
+          "subject": "ent-0034",
+          "predicate": "path_context.related",
+          "object": "ent-0036",
+          "score": 0.0009021152163263026
+        }
+      ]
+    },
+    {
+      "query_id": "m1-rel-06",
+      "baseline_ids": [
+        "ent-0037",
+        "ent-0038",
+        "ent-0043",
+        "ent-0041",
+        "ent-0117",
+        "ent-0393",
+        "ent-0247",
+        "ent-0070",
+        "ent-0349",
+        "ent-0317"
+      ],
+      "treatment_ids": [
+        "ent-0037",
+        "ent-0038",
+        "ent-0043",
+        "ent-0041",
+        "ent-0117",
+        "ent-0393",
+        "ent-0247",
+        "ent-0070",
+        "ent-0349",
+        "ent-0317"
+      ],
+      "baseline_ndcg": 0.7041249493150387,
+      "treatment_ndcg": 0.7041249493150387,
+      "absolute_ndcg_delta": 0.0,
+      "relative_ndcg": 0.0,
+      "baseline_recall": 0.5714285714285714,
+      "treatment_recall": 0.5714285714285714,
+      "baseline_latency_ms": 0.365905,
+      "treatment_latency_ms": 27.067088,
+      "baseline_accounted_bytes": 123392,
+      "treatment_accounted_bytes": 167744,
+      "paths_scored": 64,
+      "suggestions": [
+        {
+          "query_id": "m1-rel-06",
+          "subject": "ent-0038",
+          "predicate": "path_context.related",
+          "object": "ent-0043",
+          "score": 0.005716162986198325
+        }
+      ]
+    },
+    {
+      "query_id": "m1-rel-07",
+      "baseline_ids": [
+        "ent-0045",
+        "ent-0046",
+        "ent-0009",
+        "ent-0050",
+        "ent-0451",
+        "ent-0049",
+        "ent-0051",
+        "ent-0328",
+        "ent-0251",
+        "ent-0263"
+      ],
+      "treatment_ids": [
+        "ent-0045",
+        "ent-0046",
+        "ent-0009",
+        "ent-0050",
+        "ent-0451",
+        "ent-0049",
+        "ent-0051",
+        "ent-0328",
+        "ent-0251",
+        "ent-0263"
+      ],
+      "baseline_ndcg": 0.7562251525126247,
+      "treatment_ndcg": 0.7562251525126247,
+      "absolute_ndcg_delta": 0.0,
+      "relative_ndcg": 0.0,
+      "baseline_recall": 0.7142857142857143,
+      "treatment_recall": 0.7142857142857143,
+      "baseline_latency_ms": 0.368321,
+      "treatment_latency_ms": 27.036864,
+      "baseline_accounted_bytes": 123392,
+      "treatment_accounted_bytes": 166160,
+      "paths_scored": 31,
+      "suggestions": [
+        {
+          "query_id": "m1-rel-07",
+          "subject": "ent-0046",
+          "predicate": "path_context.related",
+          "object": "ent-0051",
+          "score": 0.0014954056682786507
+        }
+      ]
+    },
+    {
+      "query_id": "m1-rel-08",
+      "baseline_ids": [
+        "ent-0052",
+        "ent-0053",
+        "ent-0390",
+        "ent-0288",
+        "ent-0290",
+        "ent-0412",
+        "ent-0300",
+        "ent-0051",
+        "ent-0322",
+        "ent-0287"
+      ],
+      "treatment_ids": [
+        "ent-0052",
+        "ent-0053",
+        "ent-0390",
+        "ent-0288",
+        "ent-0290",
+        "ent-0412",
+        "ent-0300",
+        "ent-0051",
+        "ent-0287",
+        "ent-0322"
+      ],
+      "baseline_ndcg": 0.6366824387328317,
+      "treatment_ndcg": 0.6366824387328317,
+      "absolute_ndcg_delta": 0.0,
+      "relative_ndcg": 0.0,
+      "baseline_recall": 0.5,
+      "treatment_recall": 0.5,
+      "baseline_latency_ms": 0.369041,
+      "treatment_latency_ms": 27.040176,
+      "baseline_accounted_bytes": 123392,
+      "treatment_accounted_bytes": 167504,
+      "paths_scored": 59,
+      "suggestions": [
+        {
+          "query_id": "m1-rel-08",
+          "subject": "ent-0052",
+          "predicate": "path_context.related",
+          "object": "ent-0390",
+          "score": 0.0017328597063934474
+        },
+        {
+          "query_id": "m1-rel-08",
+          "subject": "ent-0288",
+          "predicate": "path_context.related",
+          "object": "ent-0290",
+          "score": 0.0009162848992489128
+        }
+      ]
+    },
+    {
+      "query_id": "m1-rel-09",
+      "baseline_ids": [
+        "ent-0056",
+        "ent-0057",
+        "ent-0163",
+        "ent-0306",
+        "ent-0365",
+        "ent-0043",
+        "ent-0147",
+        "ent-0059",
+        "ent-0234",
+        "ent-0396"
+      ],
+      "treatment_ids": [
+        "ent-0056",
+        "ent-0057",
+        "ent-0163",
+        "ent-0306",
+        "ent-0059",
+        "ent-0365",
+        "ent-0043",
+        "ent-0147",
+        "ent-0234",
+        "ent-0396"
+      ],
+      "baseline_ndcg": 0.53501781839665,
+      "treatment_ndcg": 0.5546406709327603,
+      "absolute_ndcg_delta": 0.01962285253611029,
+      "relative_ndcg": 0.036677007496528566,
+      "baseline_recall": 0.42857142857142855,
+      "treatment_recall": 0.42857142857142855,
+      "baseline_latency_ms": 0.367649,
+      "treatment_latency_ms": 27.036368000000003,
+      "baseline_accounted_bytes": 123392,
+      "treatment_accounted_bytes": 167648,
+      "paths_scored": 62,
+      "suggestions": [
+        {
+          "query_id": "m1-rel-09",
+          "subject": "ent-0057",
+          "predicate": "path_context.related",
+          "object": "ent-0059",
+          "score": 0.001515085076793607
+        }
+      ]
+    },
+    {
+      "query_id": "m1-rel-10",
+      "baseline_ids": [
+        "ent-0064",
+        "ent-0065",
+        "ent-0040",
+        "ent-0258",
+        "ent-0025",
+        "ent-0345",
+        "ent-0458",
+        "ent-0030",
+        "ent-0121",
+        "ent-0021"
+      ],
+      "treatment_ids": [
+        "ent-0064",
+        "ent-0065",
+        "ent-0040",
+        "ent-0258",
+        "ent-0025",
+        "ent-0345",
+        "ent-0458",
+        "ent-0030",
+        "ent-0121",
+        "ent-0021"
+      ],
+      "baseline_ndcg": 0.4935232796777481,
+      "treatment_ndcg": 0.4935232796777481,
+      "absolute_ndcg_delta": 0.0,
+      "relative_ndcg": 0.0,
+      "baseline_recall": 0.3333333333333333,
+      "treatment_recall": 0.3333333333333333,
+      "baseline_latency_ms": 0.366496,
+      "treatment_latency_ms": 27.035567999999998,
+      "baseline_accounted_bytes": 123392,
+      "treatment_accounted_bytes": 167120,
+      "paths_scored": 51,
+      "suggestions": []
+    },
+    {
+      "query_id": "m1-rel-11",
+      "baseline_ids": [
+        "ent-0070",
+        "ent-0071",
+        "ent-0260",
+        "ent-0472",
+        "ent-0262",
+        "ent-0316",
+        "ent-0464",
+        "ent-0039",
+        "ent-0261",
+        "ent-0175"
+      ],
+      "treatment_ids": [
+        "ent-0070",
+        "ent-0071",
+        "ent-0260",
+        "ent-0472",
+        "ent-0262",
+        "ent-0316",
+        "ent-0261",
+        "ent-0464",
+        "ent-0039",
+        "ent-0073"
+      ],
+      "baseline_ndcg": 0.5531464700081437,
+      "treatment_ndcg": 0.6511857558395008,
+      "absolute_ndcg_delta": 0.09803928583135713,
+      "relative_ndcg": 0.1772392867840479,
+      "baseline_recall": 0.4,
+      "treatment_recall": 0.6,
+      "baseline_latency_ms": 0.36528,
+      "treatment_latency_ms": 27.042817,
+      "baseline_accounted_bytes": 123392,
+      "treatment_accounted_bytes": 166256,
+      "paths_scored": 33,
+      "suggestions": []
+    },
+    {
+      "query_id": "m1-rel-12",
+      "baseline_ids": [
+        "ent-0075",
+        "ent-0076",
+        "ent-0079",
+        "ent-0098",
+        "ent-0077",
+        "ent-0164",
+        "ent-0056",
+        "ent-0163",
+        "ent-0160",
+        "ent-0099"
+      ],
+      "treatment_ids": [
+        "ent-0075",
+        "ent-0076",
+        "ent-0079",
+        "ent-0098",
+        "ent-0077",
+        "ent-0099",
+        "ent-0164",
+        "ent-0056",
+        "ent-0163",
+        "ent-0160"
+      ],
+      "baseline_ndcg": 0.787702056960637,
+      "treatment_ndcg": 0.787702056960637,
+      "absolute_ndcg_delta": 0.0,
+      "relative_ndcg": 0.0,
+      "baseline_recall": 0.75,
+      "treatment_recall": 0.75,
+      "baseline_latency_ms": 0.36529599999999995,
+      "treatment_latency_ms": 27.032193,
+      "baseline_accounted_bytes": 123392,
+      "treatment_accounted_bytes": 166688,
+      "paths_scored": 42,
+      "suggestions": [
+        {
+          "query_id": "m1-rel-12",
+          "subject": "ent-0076",
+          "predicate": "path_context.related",
+          "object": "ent-0077",
+          "score": 0.0013407273300494434
+        },
+        {
+          "query_id": "m1-rel-12",
+          "subject": "ent-0163",
+          "predicate": "path_context.related",
+          "object": "ent-0164",
+          "score": 0.00123648966909165
+        }
+      ]
+    },
+    {
+      "query_id": "m1-rel-13",
+      "baseline_ids": [
+        "ent-0080",
+        "ent-0081",
+        "ent-0132",
+        "ent-0322",
+        "ent-0424",
+        "ent-0410",
+        "ent-0083",
+        "ent-0049",
+        "ent-0149",
+        "ent-0451"
+      ],
+      "treatment_ids": [
+        "ent-0080",
+        "ent-0081",
+        "ent-0132",
+        "ent-0322",
+        "ent-0083",
+        "ent-0424",
+        "ent-0410",
+        "ent-0049",
+        "ent-0084",
+        "ent-0137"
+      ],
+      "baseline_ndcg": 0.5943907508440193,
+      "treatment_ndcg": 0.7016782760391698,
+      "absolute_ndcg_delta": 0.1072875251951505,
+      "relative_ndcg": 0.18049999102914208,
+      "baseline_recall": 0.5,
+      "treatment_recall": 0.6666666666666666,
+      "baseline_latency_ms": 0.364592,
+      "treatment_latency_ms": 27.056497,
+      "baseline_accounted_bytes": 123392,
+      "treatment_accounted_bytes": 167312,
+      "paths_scored": 55,
+      "suggestions": [
+        {
+          "query_id": "m1-rel-13",
+          "subject": "ent-0081",
+          "predicate": "path_context.related",
+          "object": "ent-0083",
+          "score": 0.0024390301243340526
+        }
+      ]
+    },
+    {
+      "query_id": "m1-rel-14",
+      "baseline_ids": [
+        "ent-0086",
+        "ent-0087",
+        "ent-0274",
+        "ent-0089",
+        "ent-0456",
+        "ent-0088",
+        "ent-0302",
+        "ent-0301",
+        "ent-0379",
+        "ent-0412"
+      ],
+      "treatment_ids": [
+        "ent-0086",
+        "ent-0087",
+        "ent-0274",
+        "ent-0089",
+        "ent-0456",
+        "ent-0088",
+        "ent-0302",
+        "ent-0301",
+        "ent-0379",
+        "ent-0412"
+      ],
+      "baseline_ndcg": 0.8200261225503443,
+      "treatment_ndcg": 0.8200261225503443,
+      "absolute_ndcg_delta": 0.0,
+      "relative_ndcg": 0.0,
+      "baseline_recall": 0.8,
+      "treatment_recall": 0.8,
+      "baseline_latency_ms": 0.365601,
+      "treatment_latency_ms": 26.996096,
+      "baseline_accounted_bytes": 123392,
+      "treatment_accounted_bytes": 166064,
+      "paths_scored": 29,
+      "suggestions": [
+        {
+          "query_id": "m1-rel-14",
+          "subject": "ent-0086",
+          "predicate": "path_context.related",
+          "object": "ent-0089",
+          "score": 0.002272021790452803
+        },
+        {
+          "query_id": "m1-rel-14",
+          "subject": "ent-0087",
+          "predicate": "path_context.related",
+          "object": "ent-0088",
+          "score": 0.001548576889731921
+        }
+      ]
+    },
+    {
+      "query_id": "m1-rel-15",
+      "baseline_ids": [
+        "ent-0091",
+        "ent-0092",
+        "ent-0370",
+        "ent-0096",
+        "ent-0097",
+        "ent-0095",
+        "ent-0226",
+        "ent-0408",
+        "ent-0356",
+        "ent-0427"
+      ],
+      "treatment_ids": [
+        "ent-0091",
+        "ent-0092",
+        "ent-0370",
+        "ent-0095",
+        "ent-0096",
+        "ent-0097",
+        "ent-0226",
+        "ent-0094",
+        "ent-0408",
+        "ent-0356"
+      ],
+      "baseline_ndcg": 0.7316362001126298,
+      "treatment_ndcg": 0.8363700718155497,
+      "absolute_ndcg_delta": 0.10473387170291992,
+      "relative_ndcg": 0.14315020455083682,
+      "baseline_recall": 0.6666666666666666,
+      "treatment_recall": 0.8333333333333334,
+      "baseline_latency_ms": 0.39908899999999997,
+      "treatment_latency_ms": 26.998192,
+      "baseline_accounted_bytes": 123392,
+      "treatment_accounted_bytes": 166016,
+      "paths_scored": 28,
+      "suggestions": [
+        {
+          "query_id": "m1-rel-15",
+          "subject": "ent-0092",
+          "predicate": "path_context.related",
+          "object": "ent-0095",
+          "score": 0.004815073302212146
+        }
+      ]
+    },
+    {
+      "query_id": "m1-rel-16",
+      "baseline_ids": [
+        "ent-0098",
+        "ent-0099",
+        "ent-0449",
+        "ent-0101",
+        "ent-0309",
+        "ent-0100",
+        "ent-0075",
+        "ent-0102",
+        "ent-0067",
+        "ent-0147"
+      ],
+      "treatment_ids": [
+        "ent-0098",
+        "ent-0099",
+        "ent-0101",
+        "ent-0449",
+        "ent-0100",
+        "ent-0102",
+        "ent-0309",
+        "ent-0075",
+        "ent-0067",
+        "ent-0147"
+      ],
+      "baseline_ndcg": 0.9270192549176082,
+      "treatment_ndcg": 0.9747429528567879,
+      "absolute_ndcg_delta": 0.04772369793917974,
+      "relative_ndcg": 0.05148080548059527,
+      "baseline_recall": 1.0,
+      "treatment_recall": 1.0,
+      "baseline_latency_ms": 0.36700900000000003,
+      "treatment_latency_ms": 27.026,
+      "baseline_accounted_bytes": 123392,
+      "treatment_accounted_bytes": 166880,
+      "paths_scored": 46,
+      "suggestions": [
+        {
+          "query_id": "m1-rel-16",
+          "subject": "ent-0098",
+          "predicate": "path_context.related",
+          "object": "ent-0102",
+          "score": 0.01327689178884758
+        },
+        {
+          "query_id": "m1-rel-16",
+          "subject": "ent-0099",
+          "predicate": "path_context.related",
+          "object": "ent-0100",
+          "score": 0.00964604438201054
+        },
+        {
+          "query_id": "m1-rel-16",
+          "subject": "ent-0099",
+          "predicate": "path_context.related",
+          "object": "ent-0101",
+          "score": 0.029147903290349258
+        },
+        {
+          "query_id": "m1-rel-16",
+          "subject": "ent-0100",
+          "predicate": "path_context.related",
+          "object": "ent-0101",
+          "score": 0.0015194919386379753
+        }
+      ]
+    },
+    {
+      "query_id": "m1-rel-17",
+      "baseline_ids": [
+        "ent-0103",
+        "ent-0104",
+        "ent-0106",
+        "ent-0083",
+        "ent-0266",
+        "ent-0080",
+        "ent-0110",
+        "ent-0048",
+        "ent-0409",
+        "ent-0084"
+      ],
+      "treatment_ids": [
+        "ent-0103",
+        "ent-0104",
+        "ent-0106",
+        "ent-0083",
+        "ent-0266",
+        "ent-0080",
+        "ent-0110",
+        "ent-0048",
+        "ent-0084",
+        "ent-0409"
+      ],
+      "baseline_ndcg": 0.644824486427155,
+      "treatment_ndcg": 0.644824486427155,
+      "absolute_ndcg_delta": 0.0,
+      "relative_ndcg": 0.0,
+      "baseline_recall": 0.5,
+      "treatment_recall": 0.5,
+      "baseline_latency_ms": 0.36966499999999997,
+      "treatment_latency_ms": 27.006224,
+      "baseline_accounted_bytes": 123392,
+      "treatment_accounted_bytes": 167744,
+      "paths_scored": 64,
+      "suggestions": [
+        {
+          "query_id": "m1-rel-17",
+          "subject": "ent-0104",
+          "predicate": "path_context.related",
+          "object": "ent-0106",
+          "score": 0.0021212888539983822
+        }
+      ]
+    },
+    {
+      "query_id": "m1-rel-18",
+      "baseline_ids": [
+        "ent-0109",
+        "ent-0110",
+        "ent-0114",
+        "ent-0204",
+        "ent-0112",
+        "ent-0051",
+        "ent-0084",
+        "ent-0009",
+        "ent-0083",
+        "ent-0028"
+      ],
+      "treatment_ids": [
+        "ent-0109",
+        "ent-0110",
+        "ent-0114",
+        "ent-0204",
+        "ent-0112",
+        "ent-0051",
+        "ent-0084",
+        "ent-0009",
+        "ent-0083",
+        "ent-0028"
+      ],
+      "baseline_ndcg": 0.6843515475204855,
+      "treatment_ndcg": 0.6843515475204855,
+      "absolute_ndcg_delta": 0.0,
+      "relative_ndcg": 0.0,
+      "baseline_recall": 0.6,
+      "treatment_recall": 0.6,
+      "baseline_latency_ms": 0.366928,
+      "treatment_latency_ms": 27.004625,
+      "baseline_accounted_bytes": 123392,
+      "treatment_accounted_bytes": 166832,
+      "paths_scored": 45,
+      "suggestions": [
+        {
+          "query_id": "m1-rel-18",
+          "subject": "ent-0110",
+          "predicate": "path_context.related",
+          "object": "ent-0112",
+          "score": 0.0048963086004874985
+        }
+      ]
+    },
+    {
+      "query_id": "m1-rel-19",
+      "baseline_ids": [
+        "ent-0115",
+        "ent-0116",
+        "ent-0118",
+        "ent-0256",
+        "ent-0475",
+        "ent-0107",
+        "ent-0346",
+        "ent-0227",
+        "ent-0284",
+        "ent-0360"
+      ],
+      "treatment_ids": [
+        "ent-0115",
+        "ent-0116",
+        "ent-0118",
+        "ent-0256",
+        "ent-0475",
+        "ent-0107",
+        "ent-0346",
+        "ent-0227",
+        "ent-0284",
+        "ent-0360"
+      ],
+      "baseline_ndcg": 0.7227265726449519,
+      "treatment_ndcg": 0.7227265726449519,
+      "absolute_ndcg_delta": 0.0,
+      "relative_ndcg": 0.0,
+      "baseline_recall": 0.6,
+      "treatment_recall": 0.6,
+      "baseline_latency_ms": 0.37096,
+      "treatment_latency_ms": 26.985025,
+      "baseline_accounted_bytes": 123392,
+      "treatment_accounted_bytes": 167024,
+      "paths_scored": 49,
+      "suggestions": [
+        {
+          "query_id": "m1-rel-19",
+          "subject": "ent-0116",
+          "predicate": "path_context.related",
+          "object": "ent-0118",
+          "score": 0.0012711977642823565
+        }
+      ]
+    },
+    {
+      "query_id": "m1-rel-20",
+      "baseline_ids": [
+        "ent-0120",
+        "ent-0121",
+        "ent-0193",
+        "ent-0297",
+        "ent-0123",
+        "ent-0021",
+        "ent-0172",
+        "ent-0024",
+        "ent-0183",
+        "ent-0171"
+      ],
+      "treatment_ids": [
+        "ent-0120",
+        "ent-0121",
+        "ent-0193",
+        "ent-0297",
+        "ent-0123",
+        "ent-0021",
+        "ent-0172",
+        "ent-0024",
+        "ent-0183",
+        "ent-0171"
+      ],
+      "baseline_ndcg": 0.6843515475204855,
+      "treatment_ndcg": 0.6843515475204855,
+      "absolute_ndcg_delta": 0.0,
+      "relative_ndcg": 0.0,
+      "baseline_recall": 0.6,
+      "treatment_recall": 0.6,
+      "baseline_latency_ms": 0.370032,
+      "treatment_latency_ms": 26.995808999999998,
+      "baseline_accounted_bytes": 123392,
+      "treatment_accounted_bytes": 167744,
+      "paths_scored": 64,
+      "suggestions": [
+        {
+          "query_id": "m1-rel-20",
+          "subject": "ent-0121",
+          "predicate": "path_context.related",
+          "object": "ent-0123",
+          "score": 0.0014692206045068743
+        }
+      ]
+    },
+    {
+      "query_id": "m1-rel-21",
+      "baseline_ids": [
+        "ent-0125",
+        "ent-0126",
+        "ent-0127",
+        "ent-0130",
+        "ent-0391",
+        "ent-0299",
+        "ent-0128",
+        "ent-0047",
+        "ent-0233",
+        "ent-0378"
+      ],
+      "treatment_ids": [
+        "ent-0125",
+        "ent-0126",
+        "ent-0127",
+        "ent-0130",
+        "ent-0391",
+        "ent-0128",
+        "ent-0299",
+        "ent-0047",
+        "ent-0386",
+        "ent-0233"
+      ],
+      "baseline_ndcg": 0.8760157235037966,
+      "treatment_ndcg": 0.8829374068620365,
+      "absolute_ndcg_delta": 0.0069216833582398385,
+      "relative_ndcg": 0.007901323198349922,
+      "baseline_recall": 0.8333333333333334,
+      "treatment_recall": 0.8333333333333334,
+      "baseline_latency_ms": 0.37019199999999997,
+      "treatment_latency_ms": 26.979201,
+      "baseline_accounted_bytes": 123392,
+      "treatment_accounted_bytes": 166736,
+      "paths_scored": 43,
+      "suggestions": [
+        {
+          "query_id": "m1-rel-21",
+          "subject": "ent-0125",
+          "predicate": "path_context.related",
+          "object": "ent-0130",
+          "score": 0.004421038734306114
+        },
+        {
+          "query_id": "m1-rel-21",
+          "subject": "ent-0126",
+          "predicate": "path_context.related",
+          "object": "ent-0127",
+          "score": 0.004412697609140406
+        },
+        {
+          "query_id": "m1-rel-21",
+          "subject": "ent-0126",
+          "predicate": "path_context.related",
+          "object": "ent-0128",
+          "score": 0.0027291072513515023
+        },
+        {
+          "query_id": "m1-rel-21",
+          "subject": "ent-0127",
+          "predicate": "path_context.related",
+          "object": "ent-0128",
+          "score": 0.003223718334031377
+        }
+      ]
+    },
+    {
+      "query_id": "m1-rel-22",
+      "baseline_ids": [
+        "ent-0132",
+        "ent-0133",
+        "ent-0135",
+        "ent-0124",
+        "ent-0137",
+        "ent-0322",
+        "ent-0453",
+        "ent-0290",
+        "ent-0149",
+        "ent-0004"
+      ],
+      "treatment_ids": [
+        "ent-0132",
+        "ent-0133",
+        "ent-0135",
+        "ent-0137",
+        "ent-0124",
+        "ent-0322",
+        "ent-0453",
+        "ent-0290",
+        "ent-0149",
+        "ent-0004"
+      ],
+      "baseline_ndcg": 0.6920788373899056,
+      "treatment_ndcg": 0.7041249493150387,
+      "absolute_ndcg_delta": 0.012046111925133052,
+      "relative_ndcg": 0.017405693216344477,
+      "baseline_recall": 0.5714285714285714,
+      "treatment_recall": 0.5714285714285714,
+      "baseline_latency_ms": 0.369105,
+      "treatment_latency_ms": 27.000064000000002,
+      "baseline_accounted_bytes": 123392,
+      "treatment_accounted_bytes": 166880,
+      "paths_scored": 46,
+      "suggestions": [
+        {
+          "query_id": "m1-rel-22",
+          "subject": "ent-0133",
+          "predicate": "path_context.related",
+          "object": "ent-0135",
+          "score": 0.003988248019575745
+        },
+        {
+          "query_id": "m1-rel-22",
+          "subject": "ent-0133",
+          "predicate": "path_context.related",
+          "object": "ent-0137",
+          "score": 0.009731320800735003
+        },
+        {
+          "query_id": "m1-rel-22",
+          "subject": "ent-0135",
+          "predicate": "path_context.related",
+          "object": "ent-0137",
+          "score": 0.0043137514225544855
+        }
+      ]
+    },
+    {
+      "query_id": "m1-rel-23",
+      "baseline_ids": [
+        "ent-0139",
+        "ent-0140",
+        "ent-0136",
+        "ent-0180",
+        "ent-0236",
+        "ent-0141",
+        "ent-0468",
+        "ent-0317",
+        "ent-0152",
+        "ent-0241"
+      ],
+      "treatment_ids": [
+        "ent-0139",
+        "ent-0140",
+        "ent-0141",
+        "ent-0136",
+        "ent-0180",
+        "ent-0236",
+        "ent-0468",
+        "ent-0317",
+        "ent-0152",
+        "ent-0143"
+      ],
+      "baseline_ndcg": 0.6739577727076379,
+      "treatment_ndcg": 0.8207658584763088,
+      "absolute_ndcg_delta": 0.14680808576867088,
+      "relative_ndcg": 0.21782979841432298,
+      "baseline_recall": 0.6,
+      "treatment_recall": 0.8,
+      "baseline_latency_ms": 0.37172900000000003,
+      "treatment_latency_ms": 26.979488,
+      "baseline_accounted_bytes": 123392,
+      "treatment_accounted_bytes": 166688,
+      "paths_scored": 42,
+      "suggestions": [
+        {
+          "query_id": "m1-rel-23",
+          "subject": "ent-0140",
+          "predicate": "path_context.related",
+          "object": "ent-0141",
+          "score": 0.010161486911402496
+        }
+      ]
+    },
+    {
+      "query_id": "m1-rel-24",
+      "baseline_ids": [
+        "ent-0144",
+        "ent-0145",
+        "ent-0148",
+        "ent-0118",
+        "ent-0270",
+        "ent-0121",
+        "ent-0151",
+        "ent-0216",
+        "ent-0410",
+        "ent-0400"
+      ],
+      "treatment_ids": [
+        "ent-0144",
+        "ent-0145",
+        "ent-0148",
+        "ent-0118",
+        "ent-0270",
+        "ent-0121",
+        "ent-0151",
+        "ent-0216",
+        "ent-0410",
+        "ent-0400"
+      ],
+      "baseline_ndcg": 0.6366824387328317,
+      "treatment_ndcg": 0.6366824387328317,
+      "absolute_ndcg_delta": 0.0,
+      "relative_ndcg": 0.0,
+      "baseline_recall": 0.5,
+      "treatment_recall": 0.5,
+      "baseline_latency_ms": 0.370977,
+      "treatment_latency_ms": 26.958032,
+      "baseline_accounted_bytes": 123392,
+      "treatment_accounted_bytes": 167168,
+      "paths_scored": 52,
+      "suggestions": [
+        {
+          "query_id": "m1-rel-24",
+          "subject": "ent-0144",
+          "predicate": "path_context.related",
+          "object": "ent-0148",
+          "score": 0.004548390388979892
+        }
+      ]
+    },
+    {
+      "query_id": "m1-rel-25",
+      "baseline_ids": [
+        "ent-0149",
+        "ent-0150",
+        "ent-0137",
+        "ent-0290",
+        "ent-0296",
+        "ent-0294",
+        "ent-0152",
+        "ent-0246",
+        "ent-0292",
+        "ent-0331"
+      ],
+      "treatment_ids": [
+        "ent-0149",
+        "ent-0150",
+        "ent-0137",
+        "ent-0152",
+        "ent-0294",
+        "ent-0290",
+        "ent-0296",
+        "ent-0246",
+        "ent-0295",
+        "ent-0292"
+      ],
+      "baseline_ndcg": 0.6661998717660157,
+      "treatment_ndcg": 0.6992148198508501,
+      "absolute_ndcg_delta": 0.033014948084834406,
+      "relative_ndcg": 0.04955712164476368,
+      "baseline_recall": 0.6,
+      "treatment_recall": 0.6,
+      "baseline_latency_ms": 0.37270499999999995,
+      "treatment_latency_ms": 27.026896,
+      "baseline_accounted_bytes": 123392,
+      "treatment_accounted_bytes": 167744,
+      "paths_scored": 64,
+      "suggestions": [
+        {
+          "query_id": "m1-rel-25",
+          "subject": "ent-0150",
+          "predicate": "path_context.related",
+          "object": "ent-0152",
+          "score": 0.0055537755103238955
+        },
+        {
+          "query_id": "m1-rel-25",
+          "subject": "ent-0152",
+          "predicate": "path_context.related",
+          "object": "ent-0246",
+          "score": 0.004099562197159417
+        }
+      ]
+    },
+    {
+      "query_id": "m1-rel-26",
+      "baseline_ids": [
+        "ent-0154",
+        "ent-0155",
+        "ent-0363",
+        "ent-0401",
+        "ent-0157",
+        "ent-0349",
+        "ent-0072",
+        "ent-0156",
+        "ent-0003",
+        "ent-0068"
+      ],
+      "treatment_ids": [
+        "ent-0154",
+        "ent-0155",
+        "ent-0363",
+        "ent-0157",
+        "ent-0401",
+        "ent-0156",
+        "ent-0349",
+        "ent-0072",
+        "ent-0003",
+        "ent-0068"
+      ],
+      "baseline_ndcg": 0.7913446798877494,
+      "treatment_ndcg": 0.8200261225503443,
+      "absolute_ndcg_delta": 0.02868144266259498,
+      "relative_ndcg": 0.036243931868807644,
+      "baseline_recall": 0.8,
+      "treatment_recall": 0.8,
+      "baseline_latency_ms": 0.37073599999999995,
+      "treatment_latency_ms": 27.007168,
+      "baseline_accounted_bytes": 123392,
+      "treatment_accounted_bytes": 166688,
+      "paths_scored": 42,
+      "suggestions": [
+        {
+          "query_id": "m1-rel-26",
+          "subject": "ent-0155",
+          "predicate": "path_context.related",
+          "object": "ent-0156",
+          "score": 0.0033432052163305547
+        },
+        {
+          "query_id": "m1-rel-26",
+          "subject": "ent-0155",
+          "predicate": "path_context.related",
+          "object": "ent-0157",
+          "score": 0.003485632170959307
+        },
+        {
+          "query_id": "m1-rel-26",
+          "subject": "ent-0156",
+          "predicate": "path_context.related",
+          "object": "ent-0157",
+          "score": 0.003070201879147597
+        }
+      ]
+    },
+    {
+      "query_id": "m1-rel-27",
+      "baseline_ids": [
+        "ent-0159",
+        "ent-0160",
+        "ent-0398",
+        "ent-0201",
+        "ent-0445",
+        "ent-0447",
+        "ent-0126",
+        "ent-0164",
+        "ent-0097",
+        "ent-0161"
+      ],
+      "treatment_ids": [
+        "ent-0159",
+        "ent-0160",
+        "ent-0398",
+        "ent-0164",
+        "ent-0201",
+        "ent-0445",
+        "ent-0447",
+        "ent-0126",
+        "ent-0097",
+        "ent-0161"
+      ],
+      "baseline_ndcg": 0.6764554268686237,
+      "treatment_ndcg": 0.7113187596895268,
+      "absolute_ndcg_delta": 0.03486333282090315,
+      "relative_ndcg": 0.051538255790612574,
+      "baseline_recall": 0.6666666666666666,
+      "treatment_recall": 0.6666666666666666,
+      "baseline_latency_ms": 0.367312,
+      "treatment_latency_ms": 26.976481,
+      "baseline_accounted_bytes": 123392,
+      "treatment_accounted_bytes": 166640,
+      "paths_scored": 41,
+      "suggestions": [
+        {
+          "query_id": "m1-rel-27",
+          "subject": "ent-0160",
+          "predicate": "path_context.related",
+          "object": "ent-0164",
+          "score": 0.003019985057838639
+        }
+      ]
+    },
+    {
+      "query_id": "m1-rel-28",
+      "baseline_ids": [
+        "ent-0166",
+        "ent-0167",
+        "ent-0254",
+        "ent-0169",
+        "ent-0271",
+        "ent-0458",
+        "ent-0417",
+        "ent-0253",
+        "ent-0384",
+        "ent-0258"
+      ],
+      "treatment_ids": [
+        "ent-0166",
+        "ent-0167",
+        "ent-0254",
+        "ent-0169",
+        "ent-0271",
+        "ent-0458",
+        "ent-0417",
+        "ent-0253",
+        "ent-0384",
+        "ent-0258"
+      ],
+      "baseline_ndcg": 0.6992148198508501,
+      "treatment_ndcg": 0.6992148198508501,
+      "absolute_ndcg_delta": 0.0,
+      "relative_ndcg": 0.0,
+      "baseline_recall": 0.6,
+      "treatment_recall": 0.6,
+      "baseline_latency_ms": 0.37056,
+      "treatment_latency_ms": 26.994289000000002,
+      "baseline_accounted_bytes": 123392,
+      "treatment_accounted_bytes": 166640,
+      "paths_scored": 41,
+      "suggestions": [
+        {
+          "query_id": "m1-rel-28",
+          "subject": "ent-0167",
+          "predicate": "path_context.related",
+          "object": "ent-0169",
+          "score": 0.029036035184972137
+        }
+      ]
+    },
+    {
+      "query_id": "m1-rel-29",
+      "baseline_ids": [
+        "ent-0171",
+        "ent-0172",
+        "ent-0170",
+        "ent-0337",
+        "ent-0254",
+        "ent-0338",
+        "ent-0193",
+        "ent-0185",
+        "ent-0174",
+        "ent-0162"
+      ],
+      "treatment_ids": [
+        "ent-0171",
+        "ent-0172",
+        "ent-0170",
+        "ent-0337",
+        "ent-0254",
+        "ent-0174",
+        "ent-0338",
+        "ent-0193",
+        "ent-0185",
+        "ent-0162"
+      ],
+      "baseline_ndcg": 0.7541985434892589,
+      "treatment_ndcg": 0.7757386182436072,
+      "absolute_ndcg_delta": 0.02154007475434838,
+      "relative_ndcg": 0.028560217916484415,
+      "baseline_recall": 0.75,
+      "treatment_recall": 0.75,
+      "baseline_latency_ms": 0.372816,
+      "treatment_latency_ms": 26.969457,
+      "baseline_accounted_bytes": 123392,
+      "treatment_accounted_bytes": 166592,
+      "paths_scored": 40,
+      "suggestions": []
+    },
+    {
+      "query_id": "m1-lex-30",
+      "baseline_ids": [
+        "ent-0175",
+        "ent-0176",
+        "ent-0041",
+        "ent-0314",
+        "ent-0419",
+        "ent-0247",
+        "ent-0315",
+        "ent-0367",
+        "ent-0262",
+        "ent-0347"
+      ],
+      "treatment_ids": [
+        "ent-0175",
+        "ent-0176",
+        "ent-0041",
+        "ent-0314",
+        "ent-0419",
+        "ent-0247",
+        "ent-0315",
+        "ent-0367",
+        "ent-0262",
+        "ent-0347"
+      ],
+      "baseline_ndcg": 1.0,
+      "treatment_ndcg": 1.0,
+      "absolute_ndcg_delta": 0.0,
+      "relative_ndcg": 0.0,
+      "baseline_recall": 1.0,
+      "treatment_recall": 1.0,
+      "baseline_latency_ms": 0.36624,
+      "treatment_latency_ms": 26.996769,
+      "baseline_accounted_bytes": 123392,
+      "treatment_accounted_bytes": 166976,
+      "paths_scored": 48,
+      "suggestions": []
+    },
+    {
+      "query_id": "m1-lex-31",
+      "baseline_ids": [
+        "ent-0182",
+        "ent-0183",
+        "ent-0020",
+        "ent-0021",
+        "ent-0459",
+        "ent-0319",
+        "ent-0362",
+        "ent-0452",
+        "ent-0017",
+        "ent-0361"
+      ],
+      "treatment_ids": [
+        "ent-0182",
+        "ent-0183",
+        "ent-0020",
+        "ent-0021",
+        "ent-0459",
+        "ent-0319",
+        "ent-0362",
+        "ent-0452",
+        "ent-0017",
+        "ent-0361"
+      ],
+      "baseline_ndcg": 1.0,
+      "treatment_ndcg": 1.0,
+      "absolute_ndcg_delta": 0.0,
+      "relative_ndcg": 0.0,
+      "baseline_recall": 1.0,
+      "treatment_recall": 1.0,
+      "baseline_latency_ms": 0.372384,
+      "treatment_latency_ms": 27.030929,
+      "baseline_accounted_bytes": 123392,
+      "treatment_accounted_bytes": 167360,
+      "paths_scored": 56,
+      "suggestions": [
+        {
+          "query_id": "m1-lex-31",
+          "subject": "ent-0020",
+          "predicate": "path_context.related",
+          "object": "ent-0021",
+          "score": 0.001992662455898008
+        }
+      ]
+    },
+    {
+      "query_id": "m1-lex-32",
+      "baseline_ids": [
+        "ent-0186",
+        "ent-0187",
+        "ent-0104",
+        "ent-0188",
+        "ent-0134",
+        "ent-0106",
+        "ent-0417",
+        "ent-0042",
+        "ent-0103",
+        "ent-0409"
+      ],
+      "treatment_ids": [
+        "ent-0186",
+        "ent-0187",
+        "ent-0104",
+        "ent-0188",
+        "ent-0134",
+        "ent-0106",
+        "ent-0417",
+        "ent-0103",
+        "ent-0042",
+        "ent-0409"
+      ],
+      "baseline_ndcg": 1.0,
+      "treatment_ndcg": 1.0,
+      "absolute_ndcg_delta": 0.0,
+      "relative_ndcg": 0.0,
+      "baseline_recall": 1.0,
+      "treatment_recall": 1.0,
+      "baseline_latency_ms": 0.370801,
+      "treatment_latency_ms": 27.11488,
+      "baseline_accounted_bytes": 123392,
+      "treatment_accounted_bytes": 166928,
+      "paths_scored": 47,
+      "suggestions": [
+        {
+          "query_id": "m1-lex-32",
+          "subject": "ent-0104",
+          "predicate": "path_context.related",
+          "object": "ent-0106",
+          "score": 0.0011069413340257337
+        },
+        {
+          "query_id": "m1-lex-32",
+          "subject": "ent-0187",
+          "predicate": "path_context.related",
+          "object": "ent-0188",
+          "score": 0.002008180549208148
+        }
+      ]
+    },
+    {
+      "query_id": "m1-lex-33",
+      "baseline_ids": [
+        "ent-0191",
+        "ent-0192",
+        "ent-0003",
+        "ent-0158",
+        "ent-0170",
+        "ent-0172",
+        "ent-0063",
+        "ent-0453",
+        "ent-0171",
+        "ent-0193"
+      ],
+      "treatment_ids": [
+        "ent-0191",
+        "ent-0192",
+        "ent-0193",
+        "ent-0003",
+        "ent-0158",
+        "ent-0170",
+        "ent-0172",
+        "ent-0063",
+        "ent-0453",
+        "ent-0171"
+      ],
+      "baseline_ndcg": 1.0,
+      "treatment_ndcg": 1.0,
+      "absolute_ndcg_delta": 0.0,
+      "relative_ndcg": 0.0,
+      "baseline_recall": 1.0,
+      "treatment_recall": 1.0,
+      "baseline_latency_ms": 0.373217,
+      "treatment_latency_ms": 27.049936,
+      "baseline_accounted_bytes": 123392,
+      "treatment_accounted_bytes": 166592,
+      "paths_scored": 40,
+      "suggestions": []
+    },
+    {
+      "query_id": "m1-lex-34",
+      "baseline_ids": [
+        "ent-0199",
+        "ent-0200",
+        "ent-0303",
+        "ent-0309",
+        "ent-0469",
+        "ent-0334",
+        "ent-0421",
+        "ent-0184",
+        "ent-0099",
+        "ent-0362"
+      ],
+      "treatment_ids": [
+        "ent-0199",
+        "ent-0200",
+        "ent-0303",
+        "ent-0309",
+        "ent-0469",
+        "ent-0334",
+        "ent-0421",
+        "ent-0184",
+        "ent-0099",
+        "ent-0362"
+      ],
+      "baseline_ndcg": 1.0,
+      "treatment_ndcg": 1.0,
+      "absolute_ndcg_delta": 0.0,
+      "relative_ndcg": 0.0,
+      "baseline_recall": 1.0,
+      "treatment_recall": 1.0,
+      "baseline_latency_ms": 0.369488,
+      "treatment_latency_ms": 27.025872999999997,
+      "baseline_accounted_bytes": 123392,
+      "treatment_accounted_bytes": 166976,
+      "paths_scored": 48,
+      "suggestions": []
+    },
+    {
+      "query_id": "m1-lex-35",
+      "baseline_ids": [
+        "ent-0205",
+        "ent-0206",
+        "ent-0242",
+        "ent-0177",
+        "ent-0210",
+        "ent-0181",
+        "ent-0245",
+        "ent-0243",
+        "ent-0328",
+        "ent-0015"
+      ],
+      "treatment_ids": [
+        "ent-0205",
+        "ent-0206",
+        "ent-0242",
+        "ent-0210",
+        "ent-0177",
+        "ent-0181",
+        "ent-0243",
+        "ent-0245",
+        "ent-0211",
+        "ent-0328"
+      ],
+      "baseline_ndcg": 1.0,
+      "treatment_ndcg": 1.0,
+      "absolute_ndcg_delta": 0.0,
+      "relative_ndcg": 0.0,
+      "baseline_recall": 1.0,
+      "treatment_recall": 1.0,
+      "baseline_latency_ms": 0.37512,
+      "treatment_latency_ms": 26.994641,
+      "baseline_accounted_bytes": 123392,
+      "treatment_accounted_bytes": 167744,
+      "paths_scored": 64,
+      "suggestions": [
+        {
+          "query_id": "m1-lex-35",
+          "subject": "ent-0206",
+          "predicate": "path_context.related",
+          "object": "ent-0210",
+          "score": 0.01234816157064057
+        },
+        {
+          "query_id": "m1-lex-35",
+          "subject": "ent-0243",
+          "predicate": "path_context.related",
+          "object": "ent-0245",
+          "score": 0.000826018350514876
+        }
+      ]
+    },
+    {
+      "query_id": "m1-lex-36",
+      "baseline_ids": [
+        "ent-0212",
+        "ent-0213",
+        "ent-0216",
+        "ent-0460",
+        "ent-0218",
+        "ent-0029",
+        "ent-0114",
+        "ent-0420",
+        "ent-0263",
+        "ent-0361"
+      ],
+      "treatment_ids": [
+        "ent-0212",
+        "ent-0213",
+        "ent-0216",
+        "ent-0460",
+        "ent-0218",
+        "ent-0029",
+        "ent-0114",
+        "ent-0420",
+        "ent-0263",
+        "ent-0361"
+      ],
+      "baseline_ndcg": 1.0,
+      "treatment_ndcg": 1.0,
+      "absolute_ndcg_delta": 0.0,
+      "relative_ndcg": 0.0,
+      "baseline_recall": 1.0,
+      "treatment_recall": 1.0,
+      "baseline_latency_ms": 0.370096,
+      "treatment_latency_ms": 26.999425000000002,
+      "baseline_accounted_bytes": 123392,
+      "treatment_accounted_bytes": 166928,
+      "paths_scored": 47,
+      "suggestions": [
+        {
+          "query_id": "m1-lex-36",
+          "subject": "ent-0213",
+          "predicate": "path_context.related",
+          "object": "ent-0216",
+          "score": 0.002627577097163803
+        }
+      ]
+    },
+    {
+      "query_id": "m1-lex-37",
+      "baseline_ids": [
+        "ent-0219",
+        "ent-0220",
+        "ent-0255",
+        "ent-0110",
+        "ent-0221",
+        "ent-0109",
+        "ent-0228",
+        "ent-0084",
+        "ent-0107",
+        "ent-0112"
+      ],
+      "treatment_ids": [
+        "ent-0219",
+        "ent-0220",
+        "ent-0221",
+        "ent-0110",
+        "ent-0255",
+        "ent-0109",
+        "ent-0228",
+        "ent-0112",
+        "ent-0084",
+        "ent-0107"
+      ],
+      "baseline_ndcg": 1.0,
+      "treatment_ndcg": 1.0,
+      "absolute_ndcg_delta": 0.0,
+      "relative_ndcg": 0.0,
+      "baseline_recall": 1.0,
+      "treatment_recall": 1.0,
+      "baseline_latency_ms": 0.37468799999999997,
+      "treatment_latency_ms": 27.047665,
+      "baseline_accounted_bytes": 123392,
+      "treatment_accounted_bytes": 166976,
+      "paths_scored": 48,
+      "suggestions": [
+        {
+          "query_id": "m1-lex-37",
+          "subject": "ent-0220",
+          "predicate": "path_context.related",
+          "object": "ent-0221",
+          "score": 0.004796223496100016
+        }
+      ]
+    },
+    {
+      "query_id": "m1-lex-38",
+      "baseline_ids": [
+        "ent-0223",
+        "ent-0224",
+        "ent-0475",
+        "ent-0352",
+        "ent-0210",
+        "ent-0243",
+        "ent-0270",
+        "ent-0177",
+        "ent-0397",
+        "ent-0401"
+      ],
+      "treatment_ids": [
+        "ent-0223",
+        "ent-0224",
+        "ent-0475",
+        "ent-0352",
+        "ent-0210",
+        "ent-0243",
+        "ent-0270",
+        "ent-0177",
+        "ent-0397",
+        "ent-0401"
+      ],
+      "baseline_ndcg": 1.0,
+      "treatment_ndcg": 1.0,
+      "absolute_ndcg_delta": 0.0,
+      "relative_ndcg": 0.0,
+      "baseline_recall": 1.0,
+      "treatment_recall": 1.0,
+      "baseline_latency_ms": 0.374049,
+      "treatment_latency_ms": 26.964432,
+      "baseline_accounted_bytes": 123392,
+      "treatment_accounted_bytes": 167504,
+      "paths_scored": 59,
+      "suggestions": []
+    },
+    {
+      "query_id": "m1-lex-39",
+      "baseline_ids": [
+        "ent-0230",
+        "ent-0231",
+        "ent-0182",
+        "ent-0183",
+        "ent-0275",
+        "ent-0227",
+        "ent-0459",
+        "ent-0116",
+        "ent-0395",
+        "ent-0471"
+      ],
+      "treatment_ids": [
+        "ent-0230",
+        "ent-0231",
+        "ent-0182",
+        "ent-0183",
+        "ent-0275",
+        "ent-0227",
+        "ent-0459",
+        "ent-0116",
+        "ent-0395",
+        "ent-0471"
+      ],
+      "baseline_ndcg": 1.0,
+      "treatment_ndcg": 1.0,
+      "absolute_ndcg_delta": 0.0,
+      "relative_ndcg": 0.0,
+      "baseline_recall": 1.0,
+      "treatment_recall": 1.0,
+      "baseline_latency_ms": 0.371905,
+      "treatment_latency_ms": 26.98208,
+      "baseline_accounted_bytes": 123392,
+      "treatment_accounted_bytes": 167600,
+      "paths_scored": 61,
+      "suggestions": [
+        {
+          "query_id": "m1-lex-39",
+          "subject": "ent-0182",
+          "predicate": "path_context.related",
+          "object": "ent-0230",
+          "score": 0.008685051497192472
+        },
+        {
+          "query_id": "m1-lex-39",
+          "subject": "ent-0183",
+          "predicate": "path_context.related",
+          "object": "ent-0231",
+          "score": 0.0039757370107611776
+        }
+      ]
+    },
+    {
+      "query_id": "m1-lex-40",
+      "baseline_ids": [
+        "ent-0235",
+        "ent-0236",
+        "ent-0241",
+        "ent-0238",
+        "ent-0152",
+        "ent-0240",
+        "ent-0453",
+        "ent-0149",
+        "ent-0135",
+        "ent-0136"
+      ],
+      "treatment_ids": [
+        "ent-0235",
+        "ent-0236",
+        "ent-0241",
+        "ent-0238",
+        "ent-0152",
+        "ent-0240",
+        "ent-0149",
+        "ent-0453",
+        "ent-0135",
+        "ent-0136"
+      ],
+      "baseline_ndcg": 1.0,
+      "treatment_ndcg": 1.0,
+      "absolute_ndcg_delta": 0.0,
+      "relative_ndcg": 0.0,
+      "baseline_recall": 1.0,
+      "treatment_recall": 1.0,
+      "baseline_latency_ms": 0.376561,
+      "treatment_latency_ms": 26.977568,
+      "baseline_accounted_bytes": 123392,
+      "treatment_accounted_bytes": 167744,
+      "paths_scored": 64,
+      "suggestions": [
+        {
+          "query_id": "m1-lex-40",
+          "subject": "ent-0236",
+          "predicate": "path_context.related",
+          "object": "ent-0238",
+          "score": 0.0025416050502089192
+        },
+        {
+          "query_id": "m1-lex-40",
+          "subject": "ent-0236",
+          "predicate": "path_context.related",
+          "object": "ent-0240",
+          "score": 0.0011505474917831867
+        },
+        {
+          "query_id": "m1-lex-40",
+          "subject": "ent-0238",
+          "predicate": "path_context.related",
+          "object": "ent-0240",
+          "score": 0.0008355921301164983
+        }
+      ]
+    },
+    {
+      "query_id": "m1-lex-41",
+      "baseline_ids": [
+        "ent-0242",
+        "ent-0243",
+        "ent-0245",
+        "ent-0205",
+        "ent-0177",
+        "ent-0119",
+        "ent-0207",
+        "ent-0227",
+        "ent-0247",
+        "ent-0346"
+      ],
+      "treatment_ids": [
+        "ent-0242",
+        "ent-0243",
+        "ent-0245",
+        "ent-0205",
+        "ent-0177",
+        "ent-0207",
+        "ent-0119",
+        "ent-0247",
+        "ent-0227",
+        "ent-0346"
+      ],
+      "baseline_ndcg": 1.0,
+      "treatment_ndcg": 1.0,
+      "absolute_ndcg_delta": 0.0,
+      "relative_ndcg": 0.0,
+      "baseline_recall": 1.0,
+      "treatment_recall": 1.0,
+      "baseline_latency_ms": 0.37515299999999996,
+      "treatment_latency_ms": 26.974464,
+      "baseline_accounted_bytes": 123392,
+      "treatment_accounted_bytes": 167744,
+      "paths_scored": 64,
+      "suggestions": [
+        {
+          "query_id": "m1-lex-41",
+          "subject": "ent-0243",
+          "predicate": "path_context.related",
+          "object": "ent-0245",
+          "score": 0.0019263943040570023
+        }
+      ]
+    },
+    {
+      "query_id": "m1-lex-42",
+      "baseline_ids": [
+        "ent-0248",
+        "ent-0249",
+        "ent-0252",
+        "ent-0354",
+        "ent-0066",
+        "ent-0470",
+        "ent-0454",
+        "ent-0201",
+        "ent-0059",
+        "ent-0355"
+      ],
+      "treatment_ids": [
+        "ent-0248",
+        "ent-0249",
+        "ent-0252",
+        "ent-0354",
+        "ent-0066",
+        "ent-0470",
+        "ent-0454",
+        "ent-0201",
+        "ent-0059",
+        "ent-0355"
+      ],
+      "baseline_ndcg": 1.0,
+      "treatment_ndcg": 1.0,
+      "absolute_ndcg_delta": 0.0,
+      "relative_ndcg": 0.0,
+      "baseline_recall": 1.0,
+      "treatment_recall": 1.0,
+      "baseline_latency_ms": 0.37312,
+      "treatment_latency_ms": 26.929568,
+      "baseline_accounted_bytes": 123392,
+      "treatment_accounted_bytes": 165824,
+      "paths_scored": 24,
+      "suggestions": []
+    },
+    {
+      "query_id": "m1-lex-43",
+      "baseline_ids": [
+        "ent-0253",
+        "ent-0254",
+        "ent-0458",
+        "ent-0259",
+        "ent-0348",
+        "ent-0195",
+        "ent-0191",
+        "ent-0156",
+        "ent-0444",
+        "ent-0196"
+      ],
+      "treatment_ids": [
+        "ent-0253",
+        "ent-0254",
+        "ent-0458",
+        "ent-0259",
+        "ent-0195",
+        "ent-0348",
+        "ent-0191",
+        "ent-0156",
+        "ent-0193",
+        "ent-0196"
+      ],
+      "baseline_ndcg": 1.0,
+      "treatment_ndcg": 1.0,
+      "absolute_ndcg_delta": 0.0,
+      "relative_ndcg": 0.0,
+      "baseline_recall": 1.0,
+      "treatment_recall": 1.0,
+      "baseline_latency_ms": 0.371632,
+      "treatment_latency_ms": 26.974593000000002,
+      "baseline_accounted_bytes": 123392,
+      "treatment_accounted_bytes": 166832,
+      "paths_scored": 45,
+      "suggestions": [
+        {
+          "query_id": "m1-lex-43",
+          "subject": "ent-0254",
+          "predicate": "path_context.related",
+          "object": "ent-0259",
+          "score": 0.0009056950969697751
+        }
+      ]
+    },
+    {
+      "query_id": "m1-lex-44",
+      "baseline_ids": [
+        "ent-0260",
+        "ent-0261",
+        "ent-0349",
+        "ent-0347",
+        "ent-0262",
+        "ent-0425",
+        "ent-0472",
+        "ent-0316",
+        "ent-0141",
+        "ent-0070"
+      ],
+      "treatment_ids": [
+        "ent-0260",
+        "ent-0261",
+        "ent-0349",
+        "ent-0347",
+        "ent-0262",
+        "ent-0425",
+        "ent-0472",
+        "ent-0316",
+        "ent-0141",
+        "ent-0070"
+      ],
+      "baseline_ndcg": 1.0,
+      "treatment_ndcg": 1.0,
+      "absolute_ndcg_delta": 0.0,
+      "relative_ndcg": 0.0,
+      "baseline_recall": 1.0,
+      "treatment_recall": 1.0,
+      "baseline_latency_ms": 0.371504,
+      "treatment_latency_ms": 27.001793,
+      "baseline_accounted_bytes": 123392,
+      "treatment_accounted_bytes": 166352,
+      "paths_scored": 35,
+      "suggestions": [
+        {
+          "query_id": "m1-lex-44",
+          "subject": "ent-0347",
+          "predicate": "path_context.related",
+          "object": "ent-0349",
+          "score": 0.0016395623350139907
+        }
+      ]
+    },
+    {
+      "query_id": "m1-lex-45",
+      "baseline_ids": [
+        "ent-0264",
+        "ent-0265",
+        "ent-0300",
+        "ent-0315",
+        "ent-0407",
+        "ent-0019",
+        "ent-0297",
+        "ent-0290",
+        "ent-0271",
+        "ent-0000"
+      ],
+      "treatment_ids": [
+        "ent-0264",
+        "ent-0265",
+        "ent-0300",
+        "ent-0315",
+        "ent-0407",
+        "ent-0269",
+        "ent-0019",
+        "ent-0297",
+        "ent-0290",
+        "ent-0271"
+      ],
+      "baseline_ndcg": 1.0,
+      "treatment_ndcg": 1.0,
+      "absolute_ndcg_delta": 0.0,
+      "relative_ndcg": 0.0,
+      "baseline_recall": 1.0,
+      "treatment_recall": 1.0,
+      "baseline_latency_ms": 0.37060800000000005,
+      "treatment_latency_ms": 26.947793,
+      "baseline_accounted_bytes": 123392,
+      "treatment_accounted_bytes": 167216,
+      "paths_scored": 53,
+      "suggestions": [
+        {
+          "query_id": "m1-lex-45",
+          "subject": "ent-0297",
+          "predicate": "path_context.related",
+          "object": "ent-0300",
+          "score": 0.0037754513422166864
+        }
+      ]
+    },
+    {
+      "query_id": "m1-lex-46",
+      "baseline_ids": [
+        "ent-0272",
+        "ent-0273",
+        "ent-0465",
+        "ent-0034",
+        "ent-0170",
+        "ent-0453",
+        "ent-0203",
+        "ent-0315",
+        "ent-0422",
+        "ent-0368"
+      ],
+      "treatment_ids": [
+        "ent-0272",
+        "ent-0273",
+        "ent-0465",
+        "ent-0034",
+        "ent-0170",
+        "ent-0453",
+        "ent-0203",
+        "ent-0315",
+        "ent-0422",
+        "ent-0368"
+      ],
+      "baseline_ndcg": 1.0,
+      "treatment_ndcg": 1.0,
+      "absolute_ndcg_delta": 0.0,
+      "relative_ndcg": 0.0,
+      "baseline_recall": 1.0,
+      "treatment_recall": 1.0,
+      "baseline_latency_ms": 0.383968,
+      "treatment_latency_ms": 27.016064999999998,
+      "baseline_accounted_bytes": 123392,
+      "treatment_accounted_bytes": 166976,
+      "paths_scored": 48,
+      "suggestions": []
+    },
+    {
+      "query_id": "m1-lex-47",
+      "baseline_ids": [
+        "ent-0276",
+        "ent-0277",
+        "ent-0205",
+        "ent-0110",
+        "ent-0207",
+        "ent-0227",
+        "ent-0244",
+        "ent-0211",
+        "ent-0107",
+        "ent-0181"
+      ],
+      "treatment_ids": [
+        "ent-0276",
+        "ent-0277",
+        "ent-0205",
+        "ent-0207",
+        "ent-0110",
+        "ent-0227",
+        "ent-0244",
+        "ent-0211",
+        "ent-0107",
+        "ent-0181"
+      ],
+      "baseline_ndcg": 1.0,
+      "treatment_ndcg": 1.0,
+      "absolute_ndcg_delta": 0.0,
+      "relative_ndcg": 0.0,
+      "baseline_recall": 1.0,
+      "treatment_recall": 1.0,
+      "baseline_latency_ms": 0.372064,
+      "treatment_latency_ms": 26.922945,
+      "baseline_accounted_bytes": 123392,
+      "treatment_accounted_bytes": 167120,
+      "paths_scored": 51,
+      "suggestions": [
+        {
+          "query_id": "m1-lex-47",
+          "subject": "ent-0207",
+          "predicate": "path_context.related",
+          "object": "ent-0211",
+          "score": 0.001071652488211379
+        }
+      ]
+    },
+    {
+      "query_id": "m1-lex-48",
+      "baseline_ids": [
+        "ent-0280",
+        "ent-0281",
+        "ent-0007",
+        "ent-0410",
+        "ent-0083",
+        "ent-0122",
+        "ent-0050",
+        "ent-0279",
+        "ent-0000",
+        "ent-0434"
+      ],
+      "treatment_ids": [
+        "ent-0280",
+        "ent-0281",
+        "ent-0007",
+        "ent-0410",
+        "ent-0083",
+        "ent-0122",
+        "ent-0050",
+        "ent-0279",
+        "ent-0000",
+        "ent-0434"
+      ],
+      "baseline_ndcg": 1.0,
+      "treatment_ndcg": 1.0,
+      "absolute_ndcg_delta": 0.0,
+      "relative_ndcg": 0.0,
+      "baseline_recall": 1.0,
+      "treatment_recall": 1.0,
+      "baseline_latency_ms": 0.373137,
+      "treatment_latency_ms": 26.95608,
+      "baseline_accounted_bytes": 123392,
+      "treatment_accounted_bytes": 167456,
+      "paths_scored": 58,
+      "suggestions": [
+        {
+          "query_id": "m1-lex-48",
+          "subject": "ent-0083",
+          "predicate": "path_context.related",
+          "object": "ent-0280",
+          "score": 0.0020730649429251398
+        },
+        {
+          "query_id": "m1-lex-48",
+          "subject": "ent-0083",
+          "predicate": "path_context.related",
+          "object": "ent-0281",
+          "score": 0.003713132503036103
+        }
+      ]
+    },
+    {
+      "query_id": "m1-lex-49",
+      "baseline_ids": [
+        "ent-0287",
+        "ent-0288",
+        "ent-0292",
+        "ent-0300",
+        "ent-0294",
+        "ent-0289",
+        "ent-0053",
+        "ent-0295",
+        "ent-0137",
+        "ent-0113"
+      ],
+      "treatment_ids": [
+        "ent-0287",
+        "ent-0288",
+        "ent-0292",
+        "ent-0300",
+        "ent-0294",
+        "ent-0289",
+        "ent-0295",
+        "ent-0053",
+        "ent-0137",
+        "ent-0290"
+      ],
+      "baseline_ndcg": 1.0,
+      "treatment_ndcg": 1.0,
+      "absolute_ndcg_delta": 0.0,
+      "relative_ndcg": 0.0,
+      "baseline_recall": 1.0,
+      "treatment_recall": 1.0,
+      "baseline_latency_ms": 0.37289700000000003,
+      "treatment_latency_ms": 26.943664,
+      "baseline_accounted_bytes": 123392,
+      "treatment_accounted_bytes": 167744,
+      "paths_scored": 64,
+      "suggestions": [
+        {
+          "query_id": "m1-lex-49",
+          "subject": "ent-0288",
+          "predicate": "path_context.related",
+          "object": "ent-0289",
+          "score": 0.0025782738323673906
+        },
+        {
+          "query_id": "m1-lex-49",
+          "subject": "ent-0288",
+          "predicate": "path_context.related",
+          "object": "ent-0292",
+          "score": 0.0029719681892351763
+        },
+        {
+          "query_id": "m1-lex-49",
+          "subject": "ent-0289",
+          "predicate": "path_context.related",
+          "object": "ent-0292",
+          "score": 0.0013097719618527918
+        },
+        {
+          "query_id": "m1-lex-49",
+          "subject": "ent-0295",
+          "predicate": "path_context.related",
+          "object": "ent-0300",
+          "score": 0.006446116952733304
+        }
+      ]
+    },
+    {
+      "query_id": "m1-lex-50",
+      "baseline_ids": [
+        "ent-0294",
+        "ent-0295",
+        "ent-0292",
+        "ent-0290",
+        "ent-0407",
+        "ent-0296",
+        "ent-0137",
+        "ent-0027",
+        "ent-0196",
+        "ent-0158"
+      ],
+      "treatment_ids": [
+        "ent-0294",
+        "ent-0295",
+        "ent-0292",
+        "ent-0296",
+        "ent-0290",
+        "ent-0407",
+        "ent-0300",
+        "ent-0137",
+        "ent-0027",
+        "ent-0196"
+      ],
+      "baseline_ndcg": 1.0,
+      "treatment_ndcg": 1.0,
+      "absolute_ndcg_delta": 0.0,
+      "relative_ndcg": 0.0,
+      "baseline_recall": 1.0,
+      "treatment_recall": 1.0,
+      "baseline_latency_ms": 0.37464,
+      "treatment_latency_ms": 26.90288,
+      "baseline_accounted_bytes": 123392,
+      "treatment_accounted_bytes": 167504,
+      "paths_scored": 59,
+      "suggestions": [
+        {
+          "query_id": "m1-lex-50",
+          "subject": "ent-0290",
+          "predicate": "path_context.related",
+          "object": "ent-0292",
+          "score": 0.0010952717928800432
+        },
+        {
+          "query_id": "m1-lex-50",
+          "subject": "ent-0295",
+          "predicate": "path_context.related",
+          "object": "ent-0296",
+          "score": 0.00966124401807886
+        }
+      ]
+    },
+    {
+      "query_id": "m1-lex-51",
+      "baseline_ids": [
+        "ent-0301",
+        "ent-0302",
+        "ent-0305",
+        "ent-0449",
+        "ent-0088",
+        "ent-0309",
+        "ent-0002",
+        "ent-0283",
+        "ent-0035",
+        "ent-0375"
+      ],
+      "treatment_ids": [
+        "ent-0301",
+        "ent-0302",
+        "ent-0305",
+        "ent-0449",
+        "ent-0088",
+        "ent-0309",
+        "ent-0002",
+        "ent-0283",
+        "ent-0089",
+        "ent-0035"
+      ],
+      "baseline_ndcg": 1.0,
+      "treatment_ndcg": 1.0,
+      "absolute_ndcg_delta": 0.0,
+      "relative_ndcg": 0.0,
+      "baseline_recall": 1.0,
+      "treatment_recall": 1.0,
+      "baseline_latency_ms": 0.371408,
+      "treatment_latency_ms": 27.001168999999997,
+      "baseline_accounted_bytes": 123392,
+      "treatment_accounted_bytes": 166880,
+      "paths_scored": 46,
+      "suggestions": []
+    },
+    {
+      "query_id": "m1-lex-52",
+      "baseline_ids": [
+        "ent-0306",
+        "ent-0307",
+        "ent-0312",
+        "ent-0234",
+        "ent-0161",
+        "ent-0347",
+        "ent-0059",
+        "ent-0060",
+        "ent-0358",
+        "ent-0062"
+      ],
+      "treatment_ids": [
+        "ent-0306",
+        "ent-0307",
+        "ent-0312",
+        "ent-0234",
+        "ent-0161",
+        "ent-0347",
+        "ent-0311",
+        "ent-0059",
+        "ent-0060",
+        "ent-0358"
+      ],
+      "baseline_ndcg": 1.0,
+      "treatment_ndcg": 1.0,
+      "absolute_ndcg_delta": 0.0,
+      "relative_ndcg": 0.0,
+      "baseline_recall": 1.0,
+      "treatment_recall": 1.0,
+      "baseline_latency_ms": 0.371712,
+      "treatment_latency_ms": 26.934593,
+      "baseline_accounted_bytes": 123392,
+      "treatment_accounted_bytes": 167744,
+      "paths_scored": 64,
+      "suggestions": [
+        {
+          "query_id": "m1-lex-52",
+          "subject": "ent-0059",
+          "predicate": "path_context.related",
+          "object": "ent-0060",
+          "score": 0.000755550283467745
+        },
+        {
+          "query_id": "m1-lex-52",
+          "subject": "ent-0307",
+          "predicate": "path_context.related",
+          "object": "ent-0312",
+          "score": 0.0031013051548366196
+        }
+      ]
+    },
+    {
+      "query_id": "m1-lex-53",
+      "baseline_ids": [
+        "ent-0313",
+        "ent-0314",
+        "ent-0117",
+        "ent-0317",
+        "ent-0346",
+        "ent-0073",
+        "ent-0037",
+        "ent-0316",
+        "ent-0118",
+        "ent-0115"
+      ],
+      "treatment_ids": [
+        "ent-0313",
+        "ent-0314",
+        "ent-0317",
+        "ent-0117",
+        "ent-0346",
+        "ent-0073",
+        "ent-0037",
+        "ent-0316",
+        "ent-0118",
+        "ent-0115"
+      ],
+      "baseline_ndcg": 1.0,
+      "treatment_ndcg": 1.0,
+      "absolute_ndcg_delta": 0.0,
+      "relative_ndcg": 0.0,
+      "baseline_recall": 1.0,
+      "treatment_recall": 1.0,
+      "baseline_latency_ms": 0.37518399999999996,
+      "treatment_latency_ms": 26.952689,
+      "baseline_accounted_bytes": 123392,
+      "treatment_accounted_bytes": 167552,
+      "paths_scored": 60,
+      "suggestions": [
+        {
+          "query_id": "m1-lex-53",
+          "subject": "ent-0314",
+          "predicate": "path_context.related",
+          "object": "ent-0317",
+          "score": 0.014636504546020163
+        }
+      ]
+    },
+    {
+      "query_id": "m1-lex-54",
+      "baseline_ids": [
+        "ent-0318",
+        "ent-0319",
+        "ent-0345",
+        "ent-0064",
+        "ent-0286",
+        "ent-0384",
+        "ent-0348",
+        "ent-0040",
+        "ent-0178",
+        "ent-0104"
+      ],
+      "treatment_ids": [
+        "ent-0318",
+        "ent-0319",
+        "ent-0345",
+        "ent-0064",
+        "ent-0286",
+        "ent-0384",
+        "ent-0040",
+        "ent-0348",
+        "ent-0178",
+        "ent-0104"
+      ],
+      "baseline_ndcg": 1.0,
+      "treatment_ndcg": 1.0,
+      "absolute_ndcg_delta": 0.0,
+      "relative_ndcg": 0.0,
+      "baseline_recall": 1.0,
+      "treatment_recall": 1.0,
+      "baseline_latency_ms": 0.371377,
+      "treatment_latency_ms": 26.982944,
+      "baseline_accounted_bytes": 123392,
+      "treatment_accounted_bytes": 166832,
+      "paths_scored": 45,
+      "suggestions": [
+        {
+          "query_id": "m1-lex-54",
+          "subject": "ent-0040",
+          "predicate": "path_context.related",
+          "object": "ent-0348",
+          "score": 0.001595662154709687
+        }
+      ]
+    },
+    {
+      "query_id": "m1-lex-55",
+      "baseline_ids": [
+        "ent-0323",
+        "ent-0324",
+        "ent-0454",
+        "ent-0408",
+        "ent-0433",
+        "ent-0385",
+        "ent-0388",
+        "ent-0044",
+        "ent-0427",
+        "ent-0370"
+      ],
+      "treatment_ids": [
+        "ent-0323",
+        "ent-0324",
+        "ent-0454",
+        "ent-0408",
+        "ent-0433",
+        "ent-0385",
+        "ent-0388",
+        "ent-0326",
+        "ent-0044",
+        "ent-0427"
+      ],
+      "baseline_ndcg": 1.0,
+      "treatment_ndcg": 1.0,
+      "absolute_ndcg_delta": 0.0,
+      "relative_ndcg": 0.0,
+      "baseline_recall": 1.0,
+      "treatment_recall": 1.0,
+      "baseline_latency_ms": 0.36944099999999996,
+      "treatment_latency_ms": 26.922576,
+      "baseline_accounted_bytes": 123392,
+      "treatment_accounted_bytes": 165872,
+      "paths_scored": 25,
+      "suggestions": []
+    },
+    {
+      "query_id": "m1-lex-56",
+      "baseline_ids": [
+        "ent-0329",
+        "ent-0330",
+        "ent-0333",
+        "ent-0331",
+        "ent-0009",
+        "ent-0023",
+        "ent-0465",
+        "ent-0251",
+        "ent-0152",
+        "ent-0422"
+      ],
+      "treatment_ids": [
+        "ent-0329",
+        "ent-0330",
+        "ent-0331",
+        "ent-0333",
+        "ent-0332",
+        "ent-0009",
+        "ent-0023",
+        "ent-0465",
+        "ent-0251",
+        "ent-0152"
+      ],
+      "baseline_ndcg": 1.0,
+      "treatment_ndcg": 1.0,
+      "absolute_ndcg_delta": 0.0,
+      "relative_ndcg": 0.0,
+      "baseline_recall": 1.0,
+      "treatment_recall": 1.0,
+      "baseline_latency_ms": 0.3656,
+      "treatment_latency_ms": 26.919952000000002,
+      "baseline_accounted_bytes": 123392,
+      "treatment_accounted_bytes": 166496,
+      "paths_scored": 38,
+      "suggestions": [
+        {
+          "query_id": "m1-lex-56",
+          "subject": "ent-0330",
+          "predicate": "path_context.related",
+          "object": "ent-0331",
+          "score": 0.004965048303180508
+        }
+      ]
+    },
+    {
+      "query_id": "m1-lex-57",
+      "baseline_ids": [
+        "ent-0336",
+        "ent-0337",
+        "ent-0359",
+        "ent-0332",
+        "ent-0252",
+        "ent-0317",
+        "ent-0340",
+        "ent-0152",
+        "ent-0182",
+        "ent-0238"
+      ],
+      "treatment_ids": [
+        "ent-0336",
+        "ent-0337",
+        "ent-0359",
+        "ent-0332",
+        "ent-0340",
+        "ent-0252",
+        "ent-0317",
+        "ent-0238",
+        "ent-0341",
+        "ent-0152"
+      ],
+      "baseline_ndcg": 1.0,
+      "treatment_ndcg": 1.0,
+      "absolute_ndcg_delta": 0.0,
+      "relative_ndcg": 0.0,
+      "baseline_recall": 1.0,
+      "treatment_recall": 1.0,
+      "baseline_latency_ms": 0.37263999999999997,
+      "treatment_latency_ms": 26.961025,
+      "baseline_accounted_bytes": 123392,
+      "treatment_accounted_bytes": 166880,
+      "paths_scored": 46,
+      "suggestions": [
+        {
+          "query_id": "m1-lex-57",
+          "subject": "ent-0337",
+          "predicate": "path_context.related",
+          "object": "ent-0340",
+          "score": 0.0036903506368161903
+        }
+      ]
+    },
+    {
+      "query_id": "m1-lex-58",
+      "baseline_ids": [
+        "ent-0343",
+        "ent-0344",
+        "ent-0471",
+        "ent-0379",
+        "ent-0314",
+        "ent-0177",
+        "ent-0247",
+        "ent-0313",
+        "ent-0245",
+        "ent-0468"
+      ],
+      "treatment_ids": [
+        "ent-0343",
+        "ent-0344",
+        "ent-0471",
+        "ent-0379",
+        "ent-0313",
+        "ent-0314",
+        "ent-0177",
+        "ent-0247",
+        "ent-0245",
+        "ent-0468"
+      ],
+      "baseline_ndcg": 1.0,
+      "treatment_ndcg": 1.0,
+      "absolute_ndcg_delta": 0.0,
+      "relative_ndcg": 0.0,
+      "baseline_recall": 1.0,
+      "treatment_recall": 1.0,
+      "baseline_latency_ms": 0.368768,
+      "treatment_latency_ms": 26.928912999999998,
+      "baseline_accounted_bytes": 123392,
+      "treatment_accounted_bytes": 167744,
+      "paths_scored": 64,
+      "suggestions": []
+    },
+    {
+      "query_id": "m1-lex-59",
+      "baseline_ids": [
+        "ent-0350",
+        "ent-0351",
+        "ent-0356",
+        "ent-0366",
+        "ent-0353",
+        "ent-0413",
+        "ent-0355",
+        "ent-0354",
+        "ent-0042",
+        "ent-0324"
+      ],
+      "treatment_ids": [
+        "ent-0350",
+        "ent-0351",
+        "ent-0356",
+        "ent-0353",
+        "ent-0366",
+        "ent-0413",
+        "ent-0355",
+        "ent-0354",
+        "ent-0042",
+        "ent-0324"
+      ],
+      "baseline_ndcg": 1.0,
+      "treatment_ndcg": 1.0,
+      "absolute_ndcg_delta": 0.0,
+      "relative_ndcg": 0.0,
+      "baseline_recall": 1.0,
+      "treatment_recall": 1.0,
+      "baseline_latency_ms": 0.37769600000000003,
+      "treatment_latency_ms": 26.923600999999998,
+      "baseline_accounted_bytes": 123392,
+      "treatment_accounted_bytes": 166784,
+      "paths_scored": 44,
+      "suggestions": [
+        {
+          "query_id": "m1-lex-59",
+          "subject": "ent-0351",
+          "predicate": "path_context.related",
+          "object": "ent-0353",
+          "score": 0.009051790556291376
+        },
+        {
+          "query_id": "m1-lex-59",
+          "subject": "ent-0351",
+          "predicate": "path_context.related",
+          "object": "ent-0354",
+          "score": 0.003314805760676814
+        },
+        {
+          "query_id": "m1-lex-59",
+          "subject": "ent-0353",
+          "predicate": "path_context.related",
+          "object": "ent-0354",
+          "score": 0.0011012696413120573
+        }
+      ]
+    }
+  ],
+  "relative_mean_ndcg": 0.024597274728213415,
+  "absolute_mean_ndcg_delta": 0.016271451661189016,
+  "zero_baseline": [],
+  "recall_at_10_delta": 0.018333333333333333,
+  "baseline_p95_ms": 0.37769600000000003,
+  "treatment_p95_ms": 27.11488,
+  "baseline_peak_accounted_bytes": 123392,
+  "treatment_peak_accounted_bytes": 167744,
+  "bootstrap_low": 0.012284989510772441,
+  "bootstrap_high": 0.03900331732322064,
+  "writes": 0,
+  "pass": false,
+  "strong_pass": false,
+  "fail": true
+}
