@@ -193,6 +193,7 @@ fn incremental(
             sequences,
             tensor_backend,
             kv_manager,
+            ..
         } = &mut *be;
         let seq = sequences
             .get_mut(&seq_id)
