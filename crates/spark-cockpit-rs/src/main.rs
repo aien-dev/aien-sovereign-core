@@ -2967,7 +2967,7 @@ async fn handle_get_operator() -> Json<Value> {
     Json(json!({
         "operator": {
             "name": "Drake Stapleton",
-            "email": "drake@aien.org",
+            "email": "drake@aienos.com",
             "handle": "drake",
             "sign_commits": true
         },
@@ -3566,7 +3566,7 @@ mod tests {
 "
                 .to_string(),
             ),
-            email: Some("drake@aien.org".to_string()),
+            email: Some("drake@aienos.com".to_string()),
             handle: Some("drake_ops-1".to_string()),
             sign_commits: Some(true),
         };
@@ -3575,7 +3575,7 @@ mod tests {
         let Json(body) = res.unwrap();
         let op = body.get("operator").unwrap();
         assert_eq!(op.get("name").unwrap().as_str().unwrap(), "Drake Stapleton");
-        assert_eq!(op.get("email").unwrap().as_str().unwrap(), "drake@aien.org");
+        assert_eq!(op.get("email").unwrap().as_str().unwrap(), "drake@aienos.com");
         assert_eq!(op.get("handle").unwrap().as_str().unwrap(), "drake_ops-1");
     }
 
