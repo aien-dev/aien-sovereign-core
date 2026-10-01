@@ -4,7 +4,7 @@
 
 The earlier **Linux-hosted** AIEN runtime, written in Rust: agent CLI, persistent memory (Cortex), a unified-memory KV-cache with copy-on-write branching, a continuous-batching scheduler, and an inference ABI with Modular MAX and Mojo bridges. It runs on top of Linux on the NVIDIA DGX Spark (Grace Blackwell GB10) and is the reference for what the native stack must beat.
 
-**This repository is legacy.** The project's target language is C, and AIEN's own stack (the [aienos](https://github.com/aien-dev/aienos) kernel, the [omega](https://github.com/aien-dev/omega) runtime, [physics](https://github.com/aien-dev/physics) FORGE) is replacing it. No new Rust is added here, with one declared exception: the DEV-MODEL-0 program (a local development model on AIEN-owned inference) may temporarily extend this Rust substrate while the C replacements are built. Component ownership (for example the Cortex now owned by omega, per ADR 0022) is recorded in [aien-architecture](https://github.com/aien-dev/aien-architecture); here `crates/cortex-rs` is non-authoritative and to be retired, not ported.
+**This repository is legacy.** AIEN's own stack (the [aienos](https://github.com/aien-dev/aienos) kernel, the [omega](https://github.com/aien-dev/omega) runtime, [physics](https://github.com/aien-dev/physics) FORGE) is replacing it. Under [ADR 0024](https://github.com/aien-dev/aien-architecture/blob/main/docs/adr/0024-rust-scaffolding-omega-destination.md), working Rust here is kept as temporary scaffolding, not rewritten into C: it stays behind language-neutral boundaries and Omega replaces components one at a time after passing the same conformance tests. New Rust is allowed where it is not hardware-bound (for example the DEV-MODEL-0 program, a local development model on AIEN-owned inference). Component ownership (for example the Cortex now owned by omega, per ADR 0022) is recorded in [aien-architecture](https://github.com/aien-dev/aien-architecture); here `crates/cortex-rs` is non-authoritative and to be retired, not ported.
 
 ## Current state
 
@@ -18,7 +18,7 @@ Every headline performance number must resolve to a reproducible command and an 
 
 ## Standing rules
 
-C is the target language, with assembly only where measured; no new Rust, and existing Rust is legacy. No new Python. The few existing `.py` files here (helper scripts and Modular experiment code) are legacy and are to be rewritten in C or shell. No CUDA toolkit and no new CUDA dependence. No systemd in AIENOS. No outside dependencies in the trusted base. Mojo is the default for kernels, not dogma: closest to the metal, fastest wins, beat it if you can, build what is missing.
+Language rule: Rust is scaffolding, Omega is the destination, and C or assembly stay only where hardware, boot, ABI or measurement justifies them (ADR 0024, which supersedes the old "C is the target, no new Rust" rule). No new Python. The few existing `.py` files here (helper scripts and Modular experiment code) are legacy and are to be rewritten in shell or a non-Python language when touched. No CUDA toolkit and no new CUDA dependence. No systemd in AIENOS. No outside dependencies in the trusted base. Mojo is the default for kernels, not dogma: closest to the metal, fastest wins, beat it if you can, build what is missing.
 
 ## Build and test
 
