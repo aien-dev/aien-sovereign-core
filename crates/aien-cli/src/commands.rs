@@ -1099,15 +1099,18 @@ fn load_production_weights(
     }
 }
 
-fn build_native_daemon_backend() -> Result<
-    (
-        aien_inference_abi::NativeTransformerBackend,
-        String,
-        String,
-        Option<aien_inference_abi::TinyLlamaTokenizer>,
-    ),
+/// Loaded daemon model parts: weights, tensor compute backend, backend label,
+/// model label, tokenizer. The KV manager is built from these by
+/// `aien_runtime::shared_kv::build_shared_kv_runtime` (one KV for spine and backend).
+type DaemonBackendParts = (
+    aien_inference_abi::TransformerWeights,
+    std::sync::Arc<dyn aien_inference_abi::TensorBackend>,
     String,
-> {
+    String,
+    Option<aien_inference_abi::TinyLlamaTokenizer>,
+);
+
+fn build_native_daemon_backend() -> Result<DaemonBackendParts, String> {
     let manifest = resolve_daemon_manifest();
     let (weights, tokenizer, model_label) = load_production_weights(&manifest);
     let probe = aien_inference_abi::BlackwellGb10Backend::new();
@@ -1117,9 +1120,11 @@ fn build_native_daemon_backend() -> Result<
     if probe.is_available() {
         let device = probe.device_name().to_string();
         drop(probe);
-        let backend = aien_inference_abi::NativeTransformerBackend::new_blackwell(weights);
+        let tensor_backend: std::sync::Arc<dyn aien_inference_abi::TensorBackend> =
+            std::sync::Arc::new(aien_inference_abi::BlackwellGb10Backend::new());
         Ok((
-            backend,
+            weights,
+            tensor_backend,
             format!("NativeTransformerBackend/Blackwell ({})", device),
             model_label,
             tokenizer,
@@ -1129,9 +1134,11 @@ fn build_native_daemon_backend() -> Result<
             "AIEN_REQUIRE_BLACKWELL is set but no Blackwell device initialized (fallback count nonzero)".to_string(),
         )
     } else {
-        let backend = aien_inference_abi::NativeTransformerBackend::new_reference(weights);
+        let tensor_backend: std::sync::Arc<dyn aien_inference_abi::TensorBackend> =
+            std::sync::Arc::new(aien_inference_abi::ReferenceCpuBackend::new());
         Ok((
-            backend,
+            weights,
+            tensor_backend,
             "NativeTransformerBackend/CPU-reference (Blackwell unavailable, explicit fallback)"
                 .to_string(),
             model_label,
@@ -1146,7 +1153,6 @@ pub async fn run_daemon_server() {
         "⚡ Starting AIEN Sovereign Runtime Daemon...".cyan().bold()
     );
     let socket_path = aien_runtime::client::AienRuntimeClient::default_socket_path();
-    let kv_manager = aien_kv_cache::create_shared_kv_manager(8192, 16);
     let sched_cfg = aien_scheduler::SchedulerConfig {
         max_batch_size: 256,
         max_batch_tokens: 16384,
@@ -1155,32 +1161,47 @@ pub async fn run_daemon_server() {
         chunk_prefill: true,
         watermark_blocks: 64,
     };
-    let spine = aien_runtime::spine::AienRuntimeSpine::new(4096, sched_cfg, kv_manager);
-    let server = aien_runtime::server::AienRuntimeServer::new(spine, &socket_path);
 
-    let backend = {
+    let (weights, tensor_backend, backend_label, model_label, tokenizer) =
         match build_native_daemon_backend() {
-            Ok((native_backend, backend_label, model_label, tokenizer)) => {
-                println!("  Backend: {}", backend_label.green());
-                println!("  Model: {}", model_label.yellow());
-                if let Some(tokenizer) = tokenizer {
-                    server.set_tokenizer(tokenizer);
-                    println!("  Tokenizer: {}", "TinyLlama chat template".green());
-                } else {
-                    println!(
-                        "  Tokenizer: {}",
-                        "not loaded; native chat will refuse turns until tokenizer.json is present"
-                            .yellow()
-                    );
-                }
-                native_backend
-            }
+            Ok(parts) => parts,
             Err(fatal) => {
                 eprintln!("Fatal: {}", fatal.red().bold());
                 std::process::exit(1);
             }
+        };
+
+    // One KV for runtime and backend: the spine's block tables and the
+    // backend's K/V writes go to the same pooled manager.
+    let (spine, backend) = match aien_runtime::shared_kv::build_shared_kv_runtime(
+        weights,
+        tensor_backend,
+        sched_cfg,
+        aien_runtime::shared_kv::SharedKvSizing {
+            arena_capacity: 4096,
+            total_blocks: 8192,
+        },
+    ) {
+        Ok(parts) => parts,
+        Err(fatal) => {
+            eprintln!("Fatal: shared KV pool: {}", fatal.red().bold());
+            std::process::exit(1);
         }
     };
+    let server = aien_runtime::server::AienRuntimeServer::new(spine, &socket_path);
+
+    println!("  Backend: {}", backend_label.green());
+    println!("  Model: {}", model_label.yellow());
+    println!("  KV: {}", "one pooled KV shared by runtime and backend".green());
+    if let Some(tokenizer) = tokenizer {
+        server.set_tokenizer(tokenizer);
+        println!("  Tokenizer: {}", "TinyLlama chat template".green());
+    } else {
+        println!(
+            "  Tokenizer: {}",
+            "not loaded; native chat will refuse turns until tokenizer.json is present".yellow()
+        );
+    }
     println!("✓ Binding socket at {}", socket_path.display());
     if let Err(e) = server.run(backend).await {
         eprintln!("Runtime daemon error: {}", e);
