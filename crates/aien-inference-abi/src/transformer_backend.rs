@@ -1473,12 +1473,11 @@ impl AienInferenceBackend for NativeTransformerBackend {
                 parent_id, child_id
             ));
         }
-        // The token prefill sampled but did not append yet belongs to the parent's
-        // stream: commit it first so parent and child both decode from it.
-        if self.sequences.contains_key(&parent_id) {
-            self.commit_pending_prefill_token(parent_id);
-        }
-        let parent_tokens = self
+        // The token prefill sampled but did not append yet (`pending_prefill_token`)
+        // belongs to the parent's stream. The child gets it appended to its own copy
+        // of the tokens; the parent is NOT mutated (its tokens stay prompt-only and
+        // its pending token stays pending, so the parent's own next decode commits it).
+        let mut parent_tokens = self
             .sequences
             .get(&parent_id)
             .ok_or_else(|| {
@@ -1489,6 +1488,9 @@ impl AienInferenceBackend for NativeTransformerBackend {
             })?
             .tokens
             .clone();
+        if let Some(&pending) = self.pending_prefill_token.get(&parent_id) {
+            parent_tokens.push(pending);
+        }
         self.sequences.insert(
             child_id,
             SequenceState {

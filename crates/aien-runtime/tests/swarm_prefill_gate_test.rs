@@ -596,8 +596,9 @@ async fn branch_first_decode_logits_equal_root_continuation_logits() {
 }
 
 /// C4c: the token prefill sampled but did not append (`pending_prefill_token`)
-/// belongs to the root's stream. `fork_sequence` must commit it before copying
-/// the parent's tokens, so every branch's first decode feeds that token at
+/// belongs to the root's stream. `fork_sequence` must give each child that token
+/// appended to its own copy of the parent's tokens WITHOUT mutating the parent, so every
+/// branch's first decode feeds that token at
 /// position `prompt_len`, exactly like the root's own continuation.
 #[tokio::test]
 async fn backend_fork_carries_parent_pending_prefill_token() {
@@ -642,21 +643,24 @@ async fn backend_fork_carries_parent_pending_prefill_token() {
         .tokens
         .clone();
     assert_eq!(
-        root_tokens.len(),
-        C4_PROMPT.len() + 1,
-        "root holds the prompt plus the token prefill sampled (committed at fork)"
+        root_tokens,
+        C4_PROMPT.to_vec(),
+        "fork must not mutate the parent: root tokens stay the prompt only"
     );
-    assert!(
-        !tap.inner.pending_prefill_token.contains_key(&root),
-        "PENDING_TOKEN_VIOLATION: the root's pending prefill token must be committed by the fork"
-    );
+    let pending = *tap
+        .inner
+        .pending_prefill_token
+        .get(&root)
+        .expect("fork must leave the parent's pending prefill token untouched");
+    let mut expected_child = root_tokens.clone();
+    expected_child.push(pending);
     for &b in &branches {
         let first = tap
             .first_decode_tokens
             .get(&b)
             .unwrap_or_else(|| panic!("branch {} never decoded", b));
         assert_eq!(
-            first, &root_tokens,
+            first, &expected_child,
             "PENDING_TOKEN_VIOLATION: branch {} must start its first decode from the root's \
              prompt plus the sampled token",
             b
