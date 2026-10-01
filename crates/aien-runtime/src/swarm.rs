@@ -3,7 +3,7 @@
 
 use crate::sequence::{SequenceArena, SequenceId, SequenceState};
 use crate::world::WorldStore;
-use aien_kv_cache::AienKvManager;
+use aien_kv_cache::{AienKvManager, PrefillGateError};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -46,6 +46,10 @@ pub struct SwarmRecord {
 pub struct SwarmManager {
     swarms: HashMap<u64, SwarmRecord>,
     next_swarm_id: u64,
+    /// PREFILL-GATE: swarms whose root prompt has not been prefilled yet
+    /// (swarm id -> root prompt). Branch KV is forked from the root only after
+    /// the root's prefill completion fence; see `fork_branches_from_ready_root`.
+    pending_root_prefill: HashMap<u64, Vec<u32>>,
 }
 
 impl Default for SwarmManager {
@@ -59,6 +63,7 @@ impl SwarmManager {
         Self {
             swarms: HashMap::new(),
             next_swarm_id: 1,
+            pending_root_prefill: HashMap::new(),
         }
     }
 
@@ -90,28 +95,35 @@ impl SwarmManager {
             timestamp,
         )?;
 
-        // 2. Allocate root prompt tokens in physical KV manager
+        // 2. Allocate root prompt blocks in physical KV manager. This reserves
+        // and zeroes blocks only (PrefillState::Allocated); no K/V is computed.
         let root_u64 = root_seq.as_u64();
         kv.allocate_sequence(root_u64, prompt_tokens)?;
 
         if let Some(record) = arena.get_mut(root_seq) {
-            record.prefill_cursor = prompt_tokens.len();
+            // Nothing is prefilled yet: the cursor advances at the completion fence.
+            record.prefill_cursor = 0;
             record.state = SequenceState::Prefill;
         }
 
-        // 3. Atomically fork N branches sharing the root World and root KV blocks
+        // 3. Fork N branch records and worlds. Branch KV is NOT forked here:
+        // the root blocks are not computed, and sharing them would let branches
+        // decode over zeroed K/V. `fork_branches_from_ready_root` shares the
+        // root blocks after the root prefill completion fence.
         let mut branch_sequences = Vec::with_capacity(config.branch_count);
         let mut branch_worlds = Vec::with_capacity(config.branch_count);
         for _ in 0..config.branch_count {
             let child_world = world_store.fork_world(root_world_id, timestamp)?;
             let child_seq = arena.fork(root_seq, child_world, timestamp)?;
-            let child_u64 = child_seq.as_u64();
-
-            // Zero-copy KV fork: increments refcount on parent physical blocks
-            kv.fork_sequence(root_u64, child_u64)?;
+            if let Some(child) = arena.get_mut(child_seq) {
+                // Waiting on the root prefill, not decoding.
+                child.state = SequenceState::Prefill;
+            }
             branch_sequences.push(child_seq);
             branch_worlds.push(child_world);
         }
+        self.pending_root_prefill
+            .insert(swarm_id, prompt_tokens.to_vec());
 
         let record = SwarmRecord {
             id: swarm_id,
@@ -132,6 +144,75 @@ impl SwarmManager {
         self.swarms.get(&swarm_id)
     }
 
+    /// Swarms whose root prompt still needs a model prefill:
+    /// (swarm id, root KV sequence id, root prompt).
+    pub fn pending_root_prefills(&self) -> Vec<(u64, u64, Vec<u32>)> {
+        let mut pending: Vec<(u64, u64, Vec<u32>)> = self
+            .pending_root_prefill
+            .iter()
+            .filter_map(|(&swarm_id, prompt)| {
+                self.swarms
+                    .get(&swarm_id)
+                    .filter(|s| s.state == SwarmState::Running)
+                    .map(|s| (swarm_id, s.root_sequence_id.as_u64(), prompt.clone()))
+            })
+            .collect();
+        pending.sort_by_key(|p| p.0);
+        pending
+    }
+
+    /// True while the swarm's root prompt has not passed its prefill fence.
+    pub fn is_root_prefill_pending(&self, swarm_id: u64) -> bool {
+        self.pending_root_prefill.contains_key(&swarm_id)
+    }
+
+    /// Shares the root KV blocks with every branch once the root prefill
+    /// completion fence has fired. Refuses (typed `PrefillGateError`, as a
+    /// String) while the root is not PrefillReady; nothing is forked then.
+    pub fn fork_branches_from_ready_root(
+        &mut self,
+        swarm_id: u64,
+        arena: &mut SequenceArena,
+        kv: &mut AienKvManager,
+    ) -> Result<(), String> {
+        let swarm = self
+            .swarms
+            .get(&swarm_id)
+            .ok_or_else(|| format!("Swarm {} not found", swarm_id))?;
+        let root_u64 = swarm.root_sequence_id.as_u64();
+
+        // Check readiness once up front so a refusal forks nothing.
+        match kv.prefill_state(root_u64) {
+            Some(state) if state.is_ready() => {}
+            Some(state) => {
+                return Err(PrefillGateError::NotReady {
+                    seq_id: root_u64,
+                    state,
+                }
+                .to_string())
+            }
+            None => return Err(PrefillGateError::UnknownSequence { seq_id: root_u64 }.to_string()),
+        }
+
+        let prompt_len = kv
+            .get_block_table(root_u64)
+            .map(|t| t.total_tokens)
+            .unwrap_or(0);
+        for &child in &swarm.branch_sequences {
+            kv.fork_prefilled(root_u64, child.as_u64())
+                .map_err(|e| e.to_string())?;
+            if let Some(rec) = arena.get_mut(child) {
+                rec.prefill_cursor = prompt_len;
+                rec.state = SequenceState::Decode;
+            }
+        }
+        if let Some(root) = arena.get_mut(swarm.root_sequence_id) {
+            root.prefill_cursor = prompt_len;
+        }
+        self.pending_root_prefill.remove(&swarm_id);
+        Ok(())
+    }
+
     /// Cancels a swarm and reclaims its resources: KV sequences, arena slots,
     /// and branch worlds. The root world is retained; branch worlds are dropped.
     pub fn cancel_swarm(
@@ -145,6 +226,7 @@ impl SwarmManager {
             .swarms
             .get_mut(&swarm_id)
             .ok_or_else(|| format!("Swarm {} not found", swarm_id))?;
+        self.pending_root_prefill.remove(&swarm_id);
 
         swarm.state = SwarmState::Cancelling;
 
@@ -212,6 +294,7 @@ impl SwarmManager {
         }
         let _ = kv.free_sequence(swarm.root_sequence_id.as_u64());
         arena.free(swarm.root_sequence_id);
+        self.pending_root_prefill.remove(&swarm_id);
 
         for world_id in swarm.branch_worlds.clone() {
             worlds.drop_world(world_id);
@@ -307,5 +390,62 @@ mod tests {
             arena.get(record.root_sequence_id).is_none(),
             "root arena slot must be reclaimed on natural completion"
         );
+    }
+
+    #[test]
+    fn prefill_gate_branches_do_not_share_uncomputed_root_blocks() {
+        let mut arena = SequenceArena::new(256);
+        let kv_shared = aien_kv_cache::create_shared_kv_manager(256, 16);
+        let mut kv = kv_shared.write();
+        let mut worlds = WorldStore::new();
+        let mut manager = SwarmManager::new();
+
+        let prompt = vec![4u32, 5, 6, 7];
+        let swarm_id = manager
+            .launch_swarm(test_config(3), &mut arena, &mut kv, &mut worlds, &prompt, 1)
+            .expect("swarm launch must succeed");
+        let record = manager.get_swarm(swarm_id).expect("record").clone();
+        let root = record.root_sequence_id.as_u64();
+
+        assert!(manager.is_root_prefill_pending(swarm_id));
+        assert_eq!(
+            kv.prefill_state(root),
+            Some(aien_kv_cache::PrefillState::Allocated),
+            "launch allocates root blocks; it computes nothing"
+        );
+        for child in &record.branch_sequences {
+            assert!(
+                kv.get_block_table(child.as_u64()).is_none(),
+                "no branch may hold root blocks before the root prefill fence"
+            );
+        }
+
+        // Typed refusal while the root is not PrefillReady; nothing is forked.
+        let err = manager
+            .fork_branches_from_ready_root(swarm_id, &mut arena, &mut kv)
+            .unwrap_err();
+        assert!(
+            err.contains("not PrefillReady"),
+            "unexpected error: {}",
+            err
+        );
+        for child in &record.branch_sequences {
+            assert!(kv.get_block_table(child.as_u64()).is_none());
+        }
+        assert!(manager.is_root_prefill_pending(swarm_id));
+
+        // After the completion fence, branches share the frozen root blocks.
+        kv.mark_prefill_pending(root).unwrap();
+        kv.complete_prefill(root).unwrap();
+        manager
+            .fork_branches_from_ready_root(swarm_id, &mut arena, &mut kv)
+            .expect("fork after fence");
+        assert!(!manager.is_root_prefill_pending(swarm_id));
+        let root_blocks = kv.get_block_table(root).unwrap().block_ids.clone();
+        for child in &record.branch_sequences {
+            let table = kv.get_block_table(child.as_u64()).expect("branch table");
+            assert_eq!(table.block_ids, root_blocks);
+            assert!(table.is_prefill_ready());
+        }
     }
 }

@@ -25,3 +25,10 @@ path = "src/bin/bench_inference_stack.rs"
 [[bin]]
 name = "stress_aien_live"
 path = "src/bin/stress_aien_live.rs"
+
+[features]
+# MUTANT ONLY (PREFILL-GATE). Never enable in a real build. Removes the
+# scheduler's prefill readiness check so allocated-but-uncomputed block tables
+# are decoded. The prefill-gate tests must FAIL with this feature on; see
+# scripts/prefill-gate/mutant.sh.
+prefill_mutant_no_check = []

@@ -14,3 +14,9 @@ libc = "0.2"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 aien-platform-linux = { path = "../aien-platform-linux" }
+
+[features]
+# MUTANT ONLY (PREFILL-GATE). Never enable in a real build. Marks a freshly
+# allocated block table PrefillReady (no completion fence). The prefill-gate
+# tests must FAIL with this feature on; see scripts/prefill-gate/mutant.sh.
+prefill_mutant_ready_at_alloc = []
