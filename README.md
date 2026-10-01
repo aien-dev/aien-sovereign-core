@@ -1,147 +1,40 @@
-# AIEN Neural Runtime
+# aien-sovereign-core
 
-**A sovereign agent and inference runtime.** Native Rust workspace: agent CLI and runtime composition, persistent memory, physical KV-cache management, continuous-batching scheduler, inference ABI with Modular MAX bridges, and telemetry surfaces. Primary reference hardware is NVIDIA DGX Spark (Grace Blackwell GB10).
+The earlier **Linux-hosted** AIEN runtime, written in Rust: agent CLI, persistent memory (Cortex), a unified-memory KV-cache with copy-on-write branching, a continuous-batching scheduler, and an inference ABI with Modular MAX and Mojo bridges. It runs on top of Linux on the NVIDIA DGX Spark (Grace Blackwell GB10) and is the reference for what the native stack must beat.
 
-[![License](https://img.shields.io/badge/License-Apache--2.0%20WITH%20LLVM--exception-blue.svg)](LICENSE)
-[![Rust](https://img.shields.io/badge/Rust-1.85+-orange.svg)](https://www.rust-lang.org)
-[![Modular MAX](https://img.shields.io/badge/Modular-MAX%2026.5-purple.svg)](https://modular.com)
+**This repository is legacy.** The project's target language is C, and AIEN's own stack (the [aienos](https://github.com/aien-dev/aienos) kernel, the [omega](https://github.com/aien-dev/omega) runtime, [physics](https://github.com/aien-dev/physics) FORGE) is replacing it. No new Rust is added here, with one declared exception: the DEV-MODEL-0 program (a local development model on AIEN-owned inference) may temporarily extend this Rust substrate while the C replacements are built. Component ownership (for example the Cortex now owned by omega, per ADR 0022) is recorded in [aien-architecture](https://github.com/aien-dev/aien-architecture); here `crates/cortex-rs` is non-authoritative and to be retired, not ported.
 
----
+## Current state
 
-## What is implemented today
+Research-grade and pre-alpha. Crates build and have unit tests on the DGX Spark; execution is hybrid CPU and GPU through Modular MAX and Mojo kernels. Modular MAX serving is being retired model by model, as AIEN's own native path becomes faster for that model. Nothing here is qualified on hardware as a finished system. Live status and sequencing: [CURRENT_EXECUTION_PLAN.md](https://github.com/aien-dev/aien-architecture/blob/main/CURRENT_EXECUTION_PLAN.md) and the [implementation status snapshot](https://github.com/aien-dev/aien-architecture/blob/main/docs/02-implementation-status.md). Component detail and platform status: [docs/PLATFORM_MATRIX.md](docs/PLATFORM_MATRIX.md), [docs/AIEN_RUNTIME_ARCHITECTURE.md](docs/AIEN_RUNTIME_ARCHITECTURE.md).
 
-Demonstrated core, each with tests or runnable targets in this repo:
+Known limits: the GPU fallback counter covers only instrumented operations, so execution is not exclusively accelerated; Qwen full-runtime qualification is not complete; the C1 evidence campaign is in progress.
 
-- `crates/aien-cli`: terminal CLI and orchestrator (initiation sequence, fail-closed policy engine, lifecycle hooks, context compaction).
-- `crates/cortex-rs` (port 18080) and `crates/cortex-encoder-rs` (port 18081): persistent knowledge store and ONNX embedding service.
-- `crates/aien-kv-cache`: unified-memory page pool with copy-on-write branch forking (`fork_sequence`, `append_token`).
-- `crates/aien-scheduler`: continuous batching and chunked prefill, including the `bench_inference_stack` measurement binary.
-- `crates/aien-inference-abi` and `crates/aien-inference-service`: tensor backend trait with Blackwell GB10 and CPU reference paths, plus request and event contracts.
-- Qwen FP8 MoE execution work in `crates/aien-inference-abi` and Mojo kernels.
-- Provenance infrastructure for the C1 evidence campaign (see `docs/plans/public-surface-cleanup.md`).
+## Measured results
 
-### Experimental and development areas
+Every headline performance number must resolve to a reproducible command and an artifact bundle (commit identity, hardware and environment record, exact command, raw samples, SHA-256 digests, measurement definition, reproducibility steps). Earlier figures (branch fork latency, COW page mutation latency, memory sharing ratios, service comparison table) are withdrawn until regenerated to that standard. The evidence bundles live in [aien-dev/benchmarks](https://github.com/aien-dev/benchmarks).
 
-Visibly not at core status: AEGIS capability boundary, MCP broker integration, supervisor, debugger, cockpit gateway, distillation pipeline, Harvester. Research concepts (RSI, Dream, higher-level Hive abstractions, self-improvement claims, Open Humanity concepts) live in research and roadmap documents, not here.
+## Standing rules
 
----
+C is the target language, with assembly only where measured; no new Rust, and existing Rust is legacy. No new Python. The few existing `.py` files here (helper scripts and Modular experiment code) are legacy and are to be rewritten in C or shell. No CUDA toolkit and no new CUDA dependence. No systemd in AIENOS. No outside dependencies in the trusted base. Mojo is the default for kernels, not dogma: closest to the metal, fastest wins, beat it if you can, build what is missing.
 
-## Supported hardware
+## Build and test
 
-- **NVIDIA DGX Spark (Grace Blackwell GB10)**: primary reference platform. Runtime verified.
-- **Apple Silicon (macOS)**: validated runtime target for portable components. See verification matrix.
-- **Linux x86_64**: validated runtime target for portable components. See verification matrix.
-- **AMD ROCm**: experimental and architected only. Runtime qualification is pending.
-
-Full status per component: [PLATFORM_MATRIX.md](docs/PLATFORM_MATRIX.md).
-
----
-
-## Architecture
-
-Component contracts and runtime flows: [AIEN_RUNTIME_ARCHITECTURE.md](docs/AIEN_RUNTIME_ARCHITECTURE.md). Whole-system architecture and execution order are owned by [aien-dev/aien-architecture](https://github.com/aien-dev/aien-architecture), starting with [PLAN_AUTHORITY.md](https://github.com/aien-dev/aien-architecture/blob/main/PLAN_AUTHORITY.md) and [CURRENT_EXECUTION_PLAN.md](https://github.com/aien-dev/aien-architecture/blob/main/CURRENT_EXECUTION_PLAN.md).
-
----
-
-## Installation
-
-Convenience path (builds release binaries from source; this script performs no signature verification):
+Needs a Rust toolchain (1.85 or newer) on the DGX Spark or another Linux machine.
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/aien-dev/aien-sovereign-core/main/install.sh | bash
-```
-
-Signed releases with pinned, verified manifests are tracked follow-up work, not yet available.
-
-## Run a real example
-
-```bash
-cargo run -p aien-scheduler --bin bench_inference_stack
-```
-
-## Run the tests
-
-```bash
+git clone https://github.com/aien-dev/aien-sovereign-core
+cd aien-sovereign-core
 cargo test --workspace
+cargo run -p aien-scheduler --bin bench_inference_stack   # measurement binary
 ```
 
----
-
-## Measured Results
-
-Publication rule: every headline performance number must resolve to a
-reproducible command and evidence artifact in `benchmarks/`. Figures that do
-not yet meet that bar are withdrawn below until their artifact bundles exist.
-Previously published microbenchmark figures (branch fork latency, COW page
-mutation latency, memory sharing ratios) and the service comparison table are
-currently withdrawn for regeneration. The previously cited source file
-`benchmarks/data/benchmarks_latest.json` does not exist in this repo, and the
-`gb10_canonical` artifact directory lives only in the external
-[aien-dev/benchmarks](https://github.com/aien-dev/benchmarks) repository.
-
-To regenerate each class of measurement on GB10 hardware:
-
-```bash
-cargo run -p aien-scheduler --bin bench_inference_stack
-cargo test -p aien-kv-cache --test cow_branching_tests -- --nocapture
-cargo run -p bench_apples_to_apples -- --engines aien,max --concurrency 1,2,4,8,16,32,64 --output-dir benchmarks/data
-```
-
-No withdrawn figure returns to this section until its artifact bundle carries
-commit identity, hardware and environment record, exact command, raw samples,
-SHA-256 digests, measurement definition, and reproducibility steps.
-
----
-
-## Known Limitations
-
-- The fallback counter records only instrumented GPU operations (matmul, batch matmul, BF16 paged attention, logits). RMSNorm, RoPE, SwiGLU, and GQA paths execute on CPU without incrementing it. Per-operation device provenance is C1 work in progress.
-- Execution is hybrid CPU and GPU, not exclusively accelerated.
-- Apple Silicon, x86_64, and ROCm targets are qualified only as stated in the platform matrix. ROCm is experimental.
-- License transition is in flight: Apache-2.0 WITH LLVM-exception governs from the migration commit; historical commits remain as recorded.
-- The installer is not yet signature-verifying.
-- Headline benchmark figures are withdrawn pending regeneration under the evidence standard above.
-- Qwen full-runtime qualification is not yet complete.
-- The C1 evidence campaign is in progress.
-
----
-
-## Subsystems in brief
-
-- `crates/aien-cli`: CLI runtime, initiation sequence, policy engine, hooks, compaction.
-- `crates/cortex-rs` / `crates/cortex-encoder-rs`: memory store and embedding service.
-- `crates/aien-kv-cache` / `crates/aien-scheduler`: page pool with COW branching, batching scheduler.
-- `crates/aien-inference-abi` / `crates/aien-inference-service`: backends and service contracts.
-- `crates/spark-max-cabi` / `crates/spark-max-rs`: C-ABI bridge between Mojo kernels and Rust.
-- `crates/spark-inquisitor`: pull request checks for secrets and telemetry.
-- `crates/spark-cockpit-rs`: HTTP and SSE telemetry gateway.
-
----
-
-## Mission and values
-
-AIEN is built in the open so independent engineers can reproduce, extend, and challenge it. The full statement of values is [CONSTITUTION.md](CONSTITUTION.md), and the nonbinding open-building ask is [COVENANT.md](COVENANT.md): keep foundational advances open. Research motivations live in `docs/`.
-
-## Attribution
-
-Built on [Modular](https://modular.com) MAX and Mojo, NVIDIA Blackwell hardware, and the Rust ecosystem. Full notices: [ATTRIBUTION.md](ATTRIBUTION.md). Upstream improvements are contributed back rather than forked silently.
-
-## Ecosystem
-
-- Benchmark evidence: [github.com/aien-dev/benchmarks](https://github.com/aien-dev/benchmarks)
-- Versioned wire specs: `aien-protocols` (versioning in progress)
-- Project site: [drakestapleton.com](https://drakestapleton.com)
+`install.sh` builds release binaries from source but performs no signature verification; signed releases are not yet available, so prefer building from a clone.
 
 ## Contributing
 
-Read [CONSTITUTION.md](CONSTITUTION.md) and [AGENTS.md](AGENTS.md) before opening a pull request. Every change ships on a branch with verification proof.
+Read [CONSTITUTION.md](CONSTITUTION.md) and [AGENTS.md](AGENTS.md) before opening a pull request. Changes ship on a branch with verification proof: the commands you ran and their output. Prefer work that moves capability into the C repositories over new Rust here. Contact: aien@aienos.com.
 
-## Contact
+## License and values
 
-- Email: `aien@aienos.com`
-
-## License and Governance
-
-This repository is licensed under the **Apache License, Version 2.0 (with LLVM Exception)**. See [LICENSE](LICENSE) and [NOTICE](NOTICE) for full legal terms and copyright notices. Values and anti-enclosure principles live in the nonbinding [COVENANT.md](COVENANT.md), which grants and restricts no legal rights: keep foundational advances open.
-
-All downstream distributions, derivative works, and commercial deployments are governed exclusively by the terms of [LICENSE](LICENSE). [CONSTITUTION.md](CONSTITUTION.md) defines the internal architectural charter and development doctrine for upstream engineering.
+Apache License 2.0 with LLVM Exception: see [LICENSE](LICENSE) and [NOTICE](NOTICE). Values live in the nonbinding [COVENANT.md](COVENANT.md): keep foundational advances open. It grants and restricts no legal rights. Built on [Modular](https://modular.com) MAX and Mojo and NVIDIA Blackwell hardware; full notices in [ATTRIBUTION.md](ATTRIBUTION.md).
