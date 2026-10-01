@@ -215,13 +215,16 @@ impl SwarmManager {
 
     /// Cancels a swarm and reclaims its resources: KV sequences, arena slots,
     /// and branch worlds. The root world is retained; branch worlds are dropped.
+    /// Returns the sequence ids (root first, then every branch) whose backend
+    /// per-sequence state the caller must release (PREFILL-E2E C5); the
+    /// swarm manager has no backend handle.
     pub fn cancel_swarm(
         &mut self,
         swarm_id: u64,
         arena: &mut SequenceArena,
         kv: &mut AienKvManager,
         worlds: &mut WorldStore,
-    ) -> Result<(), String> {
+    ) -> Result<Vec<u64>, String> {
         let swarm = self
             .swarms
             .get_mut(&swarm_id)
@@ -256,20 +259,25 @@ impl SwarmManager {
         worlds.collect_garbage();
 
         swarm.state = SwarmState::Completed;
-        Ok(())
+        let mut released = Vec::with_capacity(swarm.branch_sequences.len() + 1);
+        released.push(swarm.root_sequence_id.as_u64());
+        released.extend(swarm.branch_sequences.iter().map(|b| b.as_u64()));
+        Ok(released)
     }
 
     /// Records a branch that finished naturally. Once every branch of a
     /// running swarm has finished, reclaims the whole swarm: root arena slot,
     /// root KV blocks, and all branch worlds. Without this, the root sequence
     /// pins the arena forever and finished branch worlds leak.
+    /// Returns the root sequence id when this call reclaimed the swarm, so the
+    /// caller can release the root's backend state (PREFILL-E2E C5).
     pub fn note_sequence_finished(
         &mut self,
         seq_id: SequenceId,
         arena: &mut SequenceArena,
         kv: &mut AienKvManager,
         worlds: &mut WorldStore,
-    ) {
+    ) -> Option<SequenceId> {
         let swarm_id = self.swarms.iter().find_map(|(id, swarm)| {
             (swarm.state == SwarmState::Running
                 && swarm.branch_sequences.contains(&seq_id)
@@ -277,7 +285,7 @@ impl SwarmManager {
             .then_some(*id)
         });
         let Some(swarm_id) = swarm_id else {
-            return;
+            return None;
         };
 
         let swarm = self
@@ -286,7 +294,7 @@ impl SwarmManager {
             .expect("swarm id from live iterator must exist");
         swarm.finished_branches.push(seq_id);
         if swarm.finished_branches.len() < swarm.branch_sequences.len() {
-            return;
+            return None;
         }
 
         if let Some(root_rec) = arena.get_mut(swarm.root_sequence_id) {
@@ -301,6 +309,7 @@ impl SwarmManager {
         }
         worlds.collect_garbage();
         swarm.state = SwarmState::Completed;
+        Some(swarm.root_sequence_id)
     }
 
     pub fn active_swarm_count(&self) -> usize {

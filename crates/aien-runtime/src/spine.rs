@@ -31,6 +31,11 @@ pub struct AienRuntimeSpine {
     /// not yet: (parent, child) KV ids, applied via the backend's
     /// `fork_sequence` at the start of the next `step`, before any decode.
     pending_backend_forks: Vec<(u64, u64)>,
+    /// PREFILL-E2E C5: sequence ids whose KV and arena slots were reclaimed
+    /// without a backend in reach (swarm cancel). Their backend per-sequence
+    /// state is released by `release_pending_backend_sequences`, which `step`
+    /// calls first.
+    pending_backend_releases: Vec<u64>,
 }
 
 impl AienRuntimeSpine {
@@ -50,6 +55,7 @@ impl AienRuntimeSpine {
             controller: RuntimeController::new(),
             step_counter: 0,
             pending_backend_forks: Vec::new(),
+            pending_backend_releases: Vec::new(),
         }
     }
 
@@ -146,6 +152,12 @@ impl AienRuntimeSpine {
     ) -> Result<Option<StepMetrics>, String> {
         self.step_counter += 1;
 
+        // PREFILL-E2E C5: backend state of sequences cancelled since the last
+        // step; their KV is already freed. Known gap: CancelSwarm does not
+        // remove the branches from the scheduler's queues (no scheduler
+        // cancel API yet), so the scheduler may still re-admit them.
+        self.release_pending_backend_sequences(backend)?;
+
         // PREFILL-E2E C4: backend state for subagent forks made since the
         // last step, before the scheduler can decode the children.
         for (parent, child) in std::mem::take(&mut self.pending_backend_forks) {
@@ -194,13 +206,27 @@ impl AienRuntimeSpine {
                             record.state = SequenceState::Completed;
                         }
                         self.arena.free(seq_id);
-                        let mut kv = self.kv_manager.write();
-                        self.swarm_manager.note_sequence_finished(
-                            seq_id,
-                            &mut self.arena,
-                            &mut kv,
-                            &mut self.world_store,
-                        );
+                        let reclaimed_root = {
+                            let mut kv = self.kv_manager.write();
+                            self.swarm_manager.note_sequence_finished(
+                                seq_id,
+                                &mut self.arena,
+                                &mut kv,
+                                &mut self.world_store,
+                            )
+                        };
+                        // PREFILL-E2E C5 (bullet 12): drop the backend's
+                        // per-sequence state. Safe order: this runs after
+                        // execute_step returned, so the backend no longer
+                        // reads this sequence's KV (the scheduler already
+                        // freed it), and the KV lock is released first. The
+                        // root goes last, once its final branch finished:
+                        // branches hold their own copy of the root's tokens
+                        // (fork_sequence) and never read the root's state.
+                        backend.release_sequence(*request_id)?;
+                        if let Some(root) = reclaimed_root {
+                            backend.release_sequence(root.as_u64())?;
+                        }
                     }
                 }
             }
@@ -208,6 +234,24 @@ impl AienRuntimeSpine {
         } else {
             Ok(None)
         }
+    }
+
+    /// PREFILL-E2E C5: releases the backend per-sequence state of every
+    /// sequence reclaimed without a backend in reach (swarm cancel). Runs at
+    /// the start of each `step`; callers that stop stepping after a cancel
+    /// call it directly. Returns the number of ids released.
+    pub fn release_pending_backend_sequences<B: AienInferenceBackend>(
+        &mut self,
+        backend: &mut B,
+    ) -> Result<usize, String> {
+        let ids = std::mem::take(&mut self.pending_backend_releases);
+        // A cancelled sequence must not be forked from or into afterwards.
+        self.pending_backend_forks
+            .retain(|(parent, child)| !ids.contains(parent) && !ids.contains(child));
+        for &id in &ids {
+            backend.release_sequence(id)?;
+        }
+        Ok(ids.len())
     }
 
     /// Prefills every pending swarm root through the scheduler's completion
@@ -333,7 +377,10 @@ impl AienRuntimeSpine {
                     &mut kv,
                     &mut self.world_store,
                 ) {
-                    Ok(()) => {
+                    Ok(released) => {
+                        // KV, arena slots and branch worlds are reclaimed;
+                        // backend state follows on the next step (C5).
+                        self.pending_backend_releases.extend(released);
                         self.controller
                             .mark_operation_processed(envelope.operation_id);
                         ControlResponse::SwarmCancelled { swarm_id }

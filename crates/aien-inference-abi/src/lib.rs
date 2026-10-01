@@ -255,10 +255,13 @@ pub trait AienInferenceBackend: Send + Sync {
         Ok(())
     }
 
-    /// Drops the backend's per-sequence state for `seq_id`. Reclaim wiring
-    /// (calling this when a sequence finishes or a swarm is cancelled) is
-    /// PREFILL-E2E cut C5; it is not called by the runtime yet.
-    /// Default: no-op.
+    /// Drops the backend's per-sequence state for `seq_id` (PREFILL-E2E
+    /// bullet 12). The runtime spine calls it for every finished branch, for
+    /// the swarm root once its last branch finished, and for every sequence of
+    /// a cancelled swarm, always after the runtime freed the KV blocks and
+    /// never while a step is executing. Must not free KV: the runtime owns the
+    /// block tables. Unknown ids are a no-op (a cancelled branch may already
+    /// have finished). Default: no-op.
     fn release_sequence(&mut self, _seq_id: u64) -> Result<(), String> {
         Ok(())
     }
