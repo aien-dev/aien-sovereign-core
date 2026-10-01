@@ -268,6 +268,9 @@ pub fn build_receipt(
     if req.kind.starts_with("store-") {
         validate_store_profile(req, &assertions, result)?;
     }
+    if req.kind == crate::formal::KIND {
+        crate::formal::validate_formal_profile(req, &assertions, result)?;
+    }
     let tier = Tier::parse(&req.tier)
         .ok_or_else(|| format!("unknown qualification tier {:?}", req.tier))?;
     check_commit(&req.commit)?;

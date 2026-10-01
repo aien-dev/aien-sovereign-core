@@ -10,8 +10,9 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 
-/// Directory names never hashed: build output, git internals, live crumb scents.
-const SKIP: &[&str] = &["target", ".git", ".crumb.local"];
+/// Directory names never hashed: build output (Cargo `target`, oracle `.lake`), git
+/// internals, live crumb scents.
+const SKIP: &[&str] = &["target", ".git", ".crumb.local", ".lake"];
 
 fn field(h: &mut blake3::Hasher, bytes: &[u8]) {
     h.update(&(bytes.len() as u64).to_be_bytes());
@@ -75,22 +76,8 @@ fn inside(input: &Path) -> bool {
     input.is_relative() && !input.components().any(|c| c == Component::ParentDir)
 }
 
-pub fn job_key(
-    base: &Path,
-    job: &str,
-    cmd: &[String],
-    toolchain: &str,
-    inputs: &[PathBuf],
-) -> io::Result<String> {
-    let mut h = blake3::Hasher::new();
-    h.update(b"AIEN_PROOF_JOB_V2");
-    field(&mut h, job.as_bytes());
-    h.update(&(cmd.len() as u64).to_be_bytes());
-    for arg in cmd {
-        field(&mut h, arg.as_bytes());
-    }
-    field(&mut h, toolchain.as_bytes());
-
+/// Feed the sorted file set under `inputs` (paths and content hashes) into `h`.
+fn hash_inputs(h: &mut blake3::Hasher, base: &Path, inputs: &[PathBuf]) -> io::Result<()> {
     // Inputs inside the checkout go through git's view; anything outside it
     // (sibling repos reached by `../` path dependencies) is walked directly.
     let (local, outside): (Vec<&PathBuf>, Vec<&PathBuf>) = inputs.iter().partition(|p| inside(p));
@@ -122,14 +109,44 @@ pub fn job_key(
     h.update(&(files.len() as u64).to_be_bytes());
     for file in &files {
         let rel = file.strip_prefix(base).unwrap_or(file);
-        field(&mut h, rel.to_string_lossy().as_bytes());
+        field(h, rel.to_string_lossy().as_bytes());
         match fs::read(file) {
-            Ok(data) => field(&mut h, blake3::hash(&data).as_bytes()),
+            Ok(data) => field(h, blake3::hash(&data).as_bytes()),
             // Tracked in git but deleted in this worktree.
-            Err(e) if e.kind() == io::ErrorKind::NotFound => field(&mut h, b"<deleted>"),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => field(h, b"<deleted>"),
             Err(e) => return Err(e),
         }
     }
+    Ok(())
+}
+
+pub fn job_key(
+    base: &Path,
+    job: &str,
+    cmd: &[String],
+    toolchain: &str,
+    inputs: &[PathBuf],
+) -> io::Result<String> {
+    let mut h = blake3::Hasher::new();
+    h.update(b"AIEN_PROOF_JOB_V2");
+    field(&mut h, job.as_bytes());
+    h.update(&(cmd.len() as u64).to_be_bytes());
+    for arg in cmd {
+        field(&mut h, arg.as_bytes());
+    }
+    field(&mut h, toolchain.as_bytes());
+    hash_inputs(&mut h, base, inputs)?;
+    Ok(h.finalize().to_hex().to_string())
+}
+
+/// Digest of the file set under `inputs` alone (no command, no toolchain).
+/// Receipts use it to name one slice of a job's inputs, such as a formal
+/// model or the implementation file a proof covers, with the same file rules
+/// the job fingerprint uses.
+pub fn inputs_digest(base: &Path, inputs: &[PathBuf]) -> io::Result<String> {
+    let mut h = blake3::Hasher::new();
+    h.update(b"AIEN_PROOF_INPUTS_V1");
+    hash_inputs(&mut h, base, inputs)?;
     Ok(h.finalize().to_hex().to_string())
 }
 

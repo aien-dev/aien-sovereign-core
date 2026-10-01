@@ -13,6 +13,7 @@ pub mod board;
 pub mod chain;
 pub mod evidence;
 pub mod fingerprint;
+pub mod formal;
 pub mod gate;
 pub mod import;
 pub mod lease;

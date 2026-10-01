@@ -13,9 +13,10 @@
 //!   aien-proof gate status <GATE> [--store DIR] [--gate FILE]
 //!   aien-proof gate explain <GATE> [--store DIR] [--gate FILE]
 //!   aien-proof gate examples [--out DIR]
+//!   aien-proof formal digest|bind ...   (formal oracle bindings, see formal.rs)
 
 use aien_proof::board::{mem_available, Board, Job, Outcome};
-use aien_proof::{chain, evidence, gate, import, ledger, workspace};
+use aien_proof::{chain, evidence, formal, gate, import, ledger, workspace};
 use std::path::PathBuf;
 use std::process::{exit, Command};
 use std::time::Instant;
@@ -33,7 +34,8 @@ const USAGE: &str = "usage:
   aien-proof verify-chain <path> [--store DIR]
   aien-proof gate status <GATE> [--store DIR] [--gate FILE]
   aien-proof gate explain <GATE> [--store DIR] [--gate FILE]
-  aien-proof gate examples [--out DIR]";
+  aien-proof gate examples [--out DIR]
+  aien-proof formal digest|bind ...   (see: aien-proof formal)";
 
 struct Flags {
     values: Vec<(String, String)>,
@@ -694,6 +696,136 @@ fn cmd_gate_examples(args: &[String]) -> i32 {
     }
 }
 
+const FORMAL_USAGE: &str = "usage:
+  aien-proof formal digest [--base DIR] --invariant P --model P... --proof-source P... --covered P...
+  aien-proof formal bind [--base DIR] --invariant P --model P... --proof-source P... --covered P...
+        --oracle-toolchain TEXT --theorem NAME... --result-prefix PREFIX --output-file FILE
+        --repo URL --commit SHA --machine M --procedure PROC [--dirty] [--dep ID]... [--external-ref R]... [--store DIR]
+  paths are relative to --base (default: current directory); bind refuses output that
+  lacks the `inputs_digest:` line printed by `formal digest`, or whose last line is not
+  `PREFIX: PASS|FAIL|NOT_RUN`";
+
+fn formal_inputs(flags: &Flags) -> Option<formal::FormalInputs> {
+    let one = flags.get("--invariant")?;
+    Some(formal::FormalInputs {
+        base: flags
+            .get("--base")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))),
+        manifest: PathBuf::from(one),
+        model: flags
+            .all("--model")
+            .into_iter()
+            .map(PathBuf::from)
+            .collect(),
+        proof_source: flags
+            .all("--proof-source")
+            .into_iter()
+            .map(PathBuf::from)
+            .collect(),
+        covered: flags
+            .all("--covered")
+            .into_iter()
+            .map(PathBuf::from)
+            .collect(),
+    })
+}
+
+fn cmd_formal(args: &[String]) -> i32 {
+    let Some(sub) = args.first() else {
+        eprintln!("{FORMAL_USAGE}");
+        return 2;
+    };
+    let flags = Flags::parse(&args[1..], &["--dirty"]);
+    let Some(inputs) = formal_inputs(&flags) else {
+        eprintln!("{FORMAL_USAGE}");
+        return 2;
+    };
+    let run_digest = match inputs.run_digest() {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("[aien-proof] {e}");
+            return 1;
+        }
+    };
+    match sub.as_str() {
+        "digest" => {
+            println!("{run_digest}");
+            0
+        }
+        "bind" => formal_bind(&flags, &inputs, &run_digest),
+        _ => {
+            eprintln!("{FORMAL_USAGE}");
+            2
+        }
+    }
+}
+
+fn formal_bind(flags: &Flags, inputs: &formal::FormalInputs, run_digest: &str) -> i32 {
+    for required in [
+        "--oracle-toolchain",
+        "--result-prefix",
+        "--output-file",
+        "--repo",
+        "--commit",
+        "--machine",
+        "--procedure",
+    ] {
+        if flags.get(required).is_none() {
+            eprintln!("missing {required}\n{FORMAL_USAGE}");
+            return 2;
+        }
+    }
+    let refuse = |e: String| {
+        eprintln!("[aien-proof] formal bind refused: {e}");
+        1
+    };
+    let bytes = match std::fs::read(flags.get("--output-file").unwrap()) {
+        Ok(b) => b,
+        Err(e) => return refuse(format!("cannot read output file: {e}")),
+    };
+    let text = String::from_utf8_lossy(&bytes);
+    if let Err(e) = formal::check_output_binds_inputs(&text, run_digest) {
+        return refuse(e);
+    }
+    let result = match formal::parse_result_line(&text, flags.get("--result-prefix").unwrap()) {
+        Ok(v) => v,
+        Err(e) => return refuse(e),
+    };
+    let binding = match formal::compute_binding(
+        inputs,
+        flags.get("--oracle-toolchain").unwrap(),
+        &flags.all("--theorem"),
+    ) {
+        Ok(b) => b,
+        Err(e) => return refuse(e),
+    };
+    let run = formal::FormalRun {
+        repo: flags.get("--repo").unwrap().to_string(),
+        commit: flags.get("--commit").unwrap().to_string(),
+        dirty: flags.has("--dirty"),
+        machine: flags.get("--machine").unwrap().to_string(),
+        procedure: flags.get("--procedure").unwrap().to_string(),
+        result,
+        output_digest: blake3::hash(&bytes).to_hex().to_string(),
+        dependencies: flags.all("--dep"),
+        external_refs: flags.all("--external-ref"),
+        timestamp: None,
+    };
+    let receipt = match formal::bind_receipt(&binding, &run) {
+        Ok(r) => r,
+        Err(e) => return refuse(e),
+    };
+    match evidence::store_receipt(&store_dir(flags), &receipt) {
+        Ok(id) => {
+            println!("{id}");
+            println!("{}: {}", receipt.kind, receipt.result.as_str());
+            verdict_code(receipt.result)
+        }
+        Err(e) => refuse(e),
+    }
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let code = match args.first().map(String::as_str) {
@@ -706,6 +838,7 @@ fn main() {
         Some("qualify") => cmd_receipt_import(&args[1..]),
         Some("verify-chain") => cmd_verify_chain(&args[1..]),
         Some("gate") => cmd_gate(&args[1..]),
+        Some("formal") => cmd_formal(&args[1..]),
         _ => {
             eprintln!("{USAGE}");
             2
