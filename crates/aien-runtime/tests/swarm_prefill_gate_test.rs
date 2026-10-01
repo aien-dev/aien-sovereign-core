@@ -337,6 +337,8 @@ struct LogitsTap {
     decode_tokens: HashMap<u64, Vec<u32>>,
     /// Per decode batch: (id, last token fed) for every row (C6).
     decode_batches: Vec<Vec<(u64, u32)>>,
+    /// Each sequence's backend token stream as it was just before its first decode.
+    first_decode_tokens: HashMap<u64, Vec<u32>>,
 }
 
 #[async_trait]
@@ -375,6 +377,13 @@ impl AienInferenceBackend for LogitsTap {
                 })
                 .collect();
             self.decode_batches.push(fed);
+            for id in &batch.decode_requests {
+                if let Some(seq) = self.inner.sequences.get(id) {
+                    self.first_decode_tokens
+                        .entry(*id)
+                        .or_insert_with(|| seq.tokens.clone());
+                }
+            }
             let (o, logits) = self
                 .inner
                 .forward_decode_batch_with_logits(&batch.decode_requests)?;
@@ -553,6 +562,7 @@ async fn branch_first_decode_logits_equal_root_continuation_logits() {
         decode_logits: HashMap::new(),
         decode_tokens: HashMap::new(),
         decode_batches: Vec::new(),
+        first_decode_tokens: HashMap::new(),
     };
 
     let branch_count = 3usize;
@@ -630,6 +640,81 @@ async fn branch_first_decode_logits_equal_root_continuation_logits() {
     }
 }
 
+/// C4c: the token prefill sampled but did not append (`pending_prefill_token`)
+/// belongs to the root's stream. `fork_sequence` must give each child that token
+/// appended to its own copy of the parent's tokens WITHOUT mutating the parent, so every
+/// branch's first decode feeds that token at
+/// position `prompt_len`, exactly like the root's own continuation.
+#[tokio::test]
+async fn backend_fork_carries_parent_pending_prefill_token() {
+    let config = c4_config();
+    let weights = TransformerWeights::reference_test_weights(&config);
+    let (mut spine, backend) = build_shared_kv_runtime(
+        weights,
+        Arc::new(ReferenceCpuBackend::new()),
+        c4_scheduler(),
+        SharedKvSizing {
+            arena_capacity: 64,
+            total_blocks: 64,
+        },
+    )
+    .expect("build shared KV runtime");
+    let mut tap = LogitsTap {
+        inner: backend,
+        decode_logits: HashMap::new(),
+        decode_tokens: HashMap::new(),
+        decode_batches: Vec::new(),
+        first_decode_tokens: HashMap::new(),
+    };
+
+    let branch_count = 3usize;
+    let swarm_id = spine
+        .launch_swarm(c4_swarm_config(branch_count, 2), &C4_PROMPT)
+        .expect("launch swarm");
+    let swarm = spine.swarm_manager.get_swarm(swarm_id).unwrap().clone();
+    let root = swarm.root_sequence_id.as_u64();
+    let branches: Vec<u64> = swarm.branch_sequences.iter().map(|s| s.as_u64()).collect();
+
+    let mut steps = 0;
+    while (spine.scheduler.running_count() > 0 || spine.scheduler.waiting_count() > 0) && steps < 50
+    {
+        steps += 1;
+        spine.step(&mut tap).await.expect("spine step");
+    }
+
+    let root_tokens = tap
+        .inner
+        .sequences
+        .get(&root)
+        .expect("root state")
+        .tokens
+        .clone();
+    assert_eq!(
+        root_tokens,
+        C4_PROMPT.to_vec(),
+        "fork must not mutate the parent: root tokens stay the prompt only"
+    );
+    let pending = *tap
+        .inner
+        .pending_prefill_token
+        .get(&root)
+        .expect("fork must leave the parent's pending prefill token untouched");
+    let mut expected_child = root_tokens.clone();
+    expected_child.push(pending);
+    for &b in &branches {
+        let first = tap
+            .first_decode_tokens
+            .get(&b)
+            .unwrap_or_else(|| panic!("branch {} never decoded", b));
+        assert_eq!(
+            first, &expected_child,
+            "PENDING_TOKEN_VIOLATION: branch {} must start its first decode from the root's \
+             prompt plus the sampled token",
+            b
+        );
+    }
+}
+
 /// PREFILL-E2E C6, bullet 11: sampled branches diverge, and no branch sees
 /// another branch's suffix. Reference weights, CPU, spine + scheduler + one
 /// pooled KV (`build_shared_kv_runtime`).
@@ -652,6 +737,7 @@ async fn sampled_branches_diverge_and_each_matches_its_own_teacher_forced_contro
         decode_logits: HashMap::new(),
         decode_tokens: HashMap::new(),
         decode_batches: Vec::new(),
+        first_decode_tokens: HashMap::new(),
     };
 
     let branch_count = 3usize;
@@ -735,9 +821,14 @@ async fn sampled_branches_diverge_and_each_matches_its_own_teacher_forced_contro
         .expect("root backend state")
         .tokens
         .clone();
-    assert_eq!(root_tokens.len(), C4_PROMPT.len() + 1);
-    assert_eq!(&root_tokens[..C4_PROMPT.len()], &C4_PROMPT[..]);
-    let root_token = root_tokens[C4_PROMPT.len()];
+    // C4 semantics: the root keeps prompt-only tokens; the sampled prefill token
+    // stays pending and each fork child carries it.
+    assert_eq!(root_tokens, C4_PROMPT.to_vec());
+    let root_token = *tap
+        .inner
+        .pending_prefill_token
+        .get(&root)
+        .expect("root pending prefill token");
 
     for (b, gen) in branches.iter().zip(&generated) {
         let branch_logits = tap.decode_logits.get(b).expect("branch logits");
