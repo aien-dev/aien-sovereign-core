@@ -1,22 +1,21 @@
 //! PREFILL-E2E CX1: a cancelled swarm's branches are never re-admitted after
 //! the spine released their backend state.
 //!
-//! Code reading (see the PR): `CancelSwarm` leaves the cancelled ids in the
-//! scheduler's waiting/preempted queues (swarm.rs cancel_swarm touches only
-//! arena, KV and worlds), but `arena.free` bumps the slot generation, and the
-//! scheduler discards stale ids at the queue head (purge_stale_work) and at
-//! admission (is_stale / arena.get == None). This test pins that behaviour:
-//! launch a swarm with a small batch so some branches queue, cancel it, step
+//! `CancelSwarm` freed the branches in the spine arena, KV and worlds, but the
+//! scheduler keeps its own arena (same ids), so queued branches stayed live and
+//! were admitted and decoded after the backend released them. The fix frees the
+//! ids in the scheduler arena too, which turns queued copies stale. This test
+//! pins that behaviour: launch a swarm with a small batch so some branches queue, cancel it, step
 //! the spine several more times, and require
 //! - no backend `execute_step` request for a cancelled id after its
 //!   `release_sequence`,
 //! - empty scheduler waiting and preempted queues,
 //! - zero leaks (arena, KV, backend state).
-//! Every failure message carries the marker READMIT_VIOLATION.
+//!   Every failure message carries the marker READMIT_VIOLATION.
 //!
-//! Mutant (outside the repo, ~/workspace/hive/PE2E-CX1/mutant.patch):
-//! `SwarmManager::cancel_swarm` no longer frees the branch arena slots, so the
-//! cancelled branches stay admissible.
+//! Mutant (outside the repo, ~/workspace/hive/PE2E-CX1/mutant.patch): the
+//! spine no longer frees the cancelled ids in the scheduler arena, so queued
+//! branches stay admissible.
 //!
 //! State isolation: same per-process AIEN_RUNTIME_STATE_DIR as
 //! swarm_reclaim_test.rs, because the cancel sends a fixed operation id.
