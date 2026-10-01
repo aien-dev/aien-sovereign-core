@@ -25,6 +25,13 @@ pub struct NativeTransformerBackend {
     pub sequences: HashMap<u64, SequenceState>,
     pub tensor_backend: Arc<dyn TensorBackend>,
     pub kv_manager: Option<SharedKvManager>,
+    /// Token sampled after the most recent `execute_step` prefill chunk of a request,
+    /// not yet appended to `sequences[id].tokens`. A prefill request does not say
+    /// whether it is the final chunk of its prompt, so the sample is held here:
+    /// a following prefill chunk discards it (it was mid-prefill), and the first
+    /// decode (or fork) commits it. While a request is prefilling, `tokens.len()`
+    /// therefore always equals the number of positions whose K/V is cached.
+    pub pending_prefill_token: HashMap<u64, u32>,
 }
 
 impl NativeTransformerBackend {
@@ -35,6 +42,7 @@ impl NativeTransformerBackend {
             sequences: HashMap::new(),
             tensor_backend: Arc::new(ReferenceCpuBackend::new()),
             kv_manager: None,
+            pending_prefill_token: HashMap::new(),
         }
     }
 
@@ -48,6 +56,7 @@ impl NativeTransformerBackend {
             sequences: HashMap::new(),
             tensor_backend,
             kv_manager: None,
+            pending_prefill_token: HashMap::new(),
         }
     }
 
@@ -104,6 +113,7 @@ impl NativeTransformerBackend {
             sequences: HashMap::new(),
             tensor_backend: Arc::new(ReferenceCpuBackend::new()),
             kv_manager: Some(kv_mgr),
+            pending_prefill_token: HashMap::new(),
         })
     }
 
@@ -128,6 +138,7 @@ impl NativeTransformerBackend {
             sequences: HashMap::new(),
             tensor_backend,
             kv_manager: Some(kv_mgr),
+            pending_prefill_token: HashMap::new(),
         })
     }
 
@@ -142,6 +153,7 @@ impl NativeTransformerBackend {
             sequences: HashMap::new(),
             tensor_backend,
             kv_manager: Some(kv_manager),
+            pending_prefill_token: HashMap::new(),
         }
     }
 
@@ -213,8 +225,19 @@ impl NativeTransformerBackend {
         Ok(handle)
     }
 
+    /// Appends the token sampled after a completed `execute_step` prefill (if any)
+    /// to the sequence, so the next decode feeds it at position `prompt_len`.
+    fn commit_pending_prefill_token(&mut self, seq_id: u64) {
+        if let Some(tok) = self.pending_prefill_token.remove(&seq_id) {
+            if let Some(seq) = self.sequences.get_mut(&seq_id) {
+                seq.tokens.push(tok);
+            }
+        }
+    }
+
     /// Forks an existing context into an independently decoding branch with zero KV copying.
     pub fn fork_context(&mut self, parent: ContextHandle) -> Result<BranchHandle, String> {
+        self.commit_pending_prefill_token(parent.0);
         let parent_seq = self
             .sequences
             .get(&parent.0)
@@ -243,6 +266,7 @@ impl NativeTransformerBackend {
     /// Releases a branch and immediately reclaims its private COW pages.
     pub fn release_branch(&mut self, branch: BranchHandle) -> Result<(), String> {
         self.sequences.remove(&branch.0);
+        self.pending_prefill_token.remove(&branch.0);
         if let Some(kv_mgr) = &self.kv_manager {
             let _ = kv_mgr.write().release_branch(branch.0);
         }
@@ -251,6 +275,7 @@ impl NativeTransformerBackend {
 
     /// Executes one autoregressive decode step for a branch, triggering COW if tail page is shared.
     pub fn decode_branch_step(&mut self, branch: BranchHandle) -> Result<(u32, Vec<f32>), String> {
+        self.commit_pending_prefill_token(branch.0);
         let seq = self
             .sequences
             .get_mut(&branch.0)
@@ -278,6 +303,8 @@ impl NativeTransformerBackend {
 
     /// Ingests branch-specific prompt/delta tokens into the physical paged KV cache, triggering COW on shared blocks.
     pub fn append_branch_token(&mut self, branch: BranchHandle, token: u32) -> Result<(), String> {
+        // An explicitly supplied token replaces any sample held from a prefill chunk.
+        self.pending_prefill_token.remove(&branch.0);
         let seq = self
             .sequences
             .get_mut(&branch.0)
@@ -419,6 +446,7 @@ impl NativeTransformerBackend {
     /// Releases a sequence from memory and frees associated KV cache resources.
     pub fn release_sequence(&mut self, seq_id: u64) {
         self.sequences.remove(&seq_id);
+        self.pending_prefill_token.remove(&seq_id);
         if let Some(kv_mgr) = &self.kv_manager {
             let _ = kv_mgr.write().release_branch(seq_id);
         }
@@ -696,7 +724,11 @@ impl NativeTransformerBackend {
         if n == 0 {
             return Vec::new();
         }
-        if n == 1 {
+        // Tokens already in this sequence (earlier prefill chunks). This chunk's
+        // token t sits at absolute position `offset + t`: that position drives RoPE,
+        // the paged block/slot, and the causal attention length.
+        let offset = seq_state.tokens.len();
+        if n == 1 && offset == 0 {
             seq_state.tokens.push(prompt_tokens[0]);
             return Self::forward_token_impl_paged(
                 weights,
@@ -743,7 +775,52 @@ impl NativeTransformerBackend {
         let mut act_batch = vec![0.0f32; n * intermediate_dim];
         let mut mlp_out_batch = vec![0.0f32; n * hidden_dim];
 
-        let block_table = kv_manager.and_then(|mgr| mgr.read().get_block_table(seq_id).cloned());
+        // Paged mode: one physical (block, slot) per absolute position, resolved once
+        // (not per layer). Positions inside the table's allocated length (the
+        // scheduler allocates the whole prompt up front) use the existing blocks;
+        // positions beyond it are appended to the table.
+        let num_layers = weights.config.num_layers;
+        let mut paged_slots: Vec<Option<(usize, usize)>> = vec![None; n];
+        if let Some(mgr) = kv_manager {
+            let mut w = mgr.write();
+            if w.tensor_pool().is_some() {
+                let block_size = w.block_size();
+                if let Some(tbl) = w.get_block_table(seq_id).cloned() {
+                    for (t, slot_out) in paged_slots.iter_mut().enumerate() {
+                        let p = offset + t;
+                        *slot_out = if p < tbl.total_tokens && p / block_size < tbl.block_ids.len()
+                        {
+                            Some((tbl.block_ids[p / block_size], p % block_size))
+                        } else {
+                            w.append_token_with_slot(seq_id).ok()
+                        };
+                    }
+                }
+            }
+        }
+
+        // The dense per-layer cache must hold K/V for positions 0..offset before this
+        // chunk's attention runs. Paged mode clears it after each prefill, so rebuild
+        // it from the physical pool.
+        if seq_state.layers.len() != num_layers {
+            seq_state.layers = vec![LayerKvCache::default(); num_layers];
+            if offset > 0 {
+                if let Some(mgr) = kv_manager {
+                    let r = mgr.read();
+                    if let (Some(pool), Some(tbl)) = (r.tensor_pool(), r.get_block_table(seq_id)) {
+                        for (layer_idx, cache) in seq_state.layers.iter_mut().enumerate() {
+                            let (k, v) = pool.gather_layer_kv(&tbl.block_ids, offset, layer_idx);
+                            for (k_t, v_t) in k.chunks(kv_dim).zip(v.chunks(kv_dim)) {
+                                cache.cached_k.push(k_t.to_vec());
+                                cache.cached_v.push(v_t.to_vec());
+                            }
+                            cache.flat_k = k;
+                            cache.flat_v = v;
+                        }
+                    }
+                }
+            }
+        }
 
         for (layer_idx, layer_w) in weights.layers.iter().enumerate() {
             let kv_cache = &mut seq_state.layers[layer_idx];
@@ -783,13 +860,10 @@ impl NativeTransformerBackend {
                 let k_t = &mut k_batch[t * kv_dim..(t + 1) * kv_dim];
                 let v_t = &v_batch[t * kv_dim..(t + 1) * kv_dim];
 
-                backend.apply_rope(q_t, k_t, t, head_dim, num_heads, num_kv_heads, theta);
+                let pos = offset + t;
+                backend.apply_rope(q_t, k_t, pos, head_dim, num_heads, num_kv_heads, theta);
 
-                if let (Some(tbl), Some(mgr)) = (&block_table, kv_manager) {
-                    let block_size = weights.config.block_size;
-                    let block_idx = t / block_size;
-                    let block_id = tbl.block_ids[block_idx];
-                    let slot = t % block_size;
+                if let (Some((block_id, slot)), Some(mgr)) = (paged_slots[t], kv_manager) {
                     let _ = mgr
                         .write()
                         .write_explicit_token_kv(block_id, layer_idx, slot, k_t, v_t);
@@ -804,7 +878,7 @@ impl NativeTransformerBackend {
             for t in 0..n {
                 let q_t = &q_batch[t * q_dim..(t + 1) * q_dim];
                 let attn_t = &mut attn_out_batch[t * q_dim..(t + 1) * q_dim];
-                let seq_len = t + 1;
+                let seq_len = offset + t + 1;
 
                 backend.gqa_attention(
                     attn_t,
@@ -883,7 +957,9 @@ impl NativeTransformerBackend {
             }
         }
 
-        if kv_manager.is_some() {
+        // Drop the dense copy only when the physical pool holds the K/V (it is rebuilt
+        // from the pool if a later chunk continues this sequence).
+        if kv_manager.is_some_and(|m| m.read().tensor_pool().is_some()) {
             seq_state.layers.clear();
         }
 
@@ -936,6 +1012,7 @@ impl NativeTransformerBackend {
         // 1. Gather active sequence requests and their current positions / last tokens
         let mut valid_reqs = Vec::with_capacity(decode_req_ids.len());
         for &req_id in decode_req_ids {
+            self.commit_pending_prefill_token(req_id);
             let seq = self
                 .sequences
                 .entry(req_id)
@@ -1258,6 +1335,7 @@ impl AienInferenceBackend for NativeTransformerBackend {
     async fn load_model(&mut self, config: &ModelConfig) -> Result<(), String> {
         self.weights = TransformerWeights::reference_test_weights(config);
         self.sequences.clear();
+        self.pending_prefill_token.clear();
         Ok(())
     }
 
@@ -1277,6 +1355,9 @@ impl AienInferenceBackend for NativeTransformerBackend {
         // 1. Prefill Requests
         for req in &batch.prefill_requests {
             prefill_tokens += req.prompt_tokens.len();
+            // A further prefill chunk: the sample held from the previous chunk was
+            // mid-prompt and is discarded.
+            self.pending_prefill_token.remove(&req.request_id);
 
             if let Some(kv_mgr) = &self.kv_manager {
                 let mut mgr = kv_mgr.write();
@@ -1310,7 +1391,11 @@ impl AienInferenceBackend for NativeTransformerBackend {
                 sample_temperature(&logits, req.sampling_params.temperature, req.request_id)
             };
 
-            seq.tokens.push(sampled_tok);
+            // Not pushed to `seq.tokens`: if another chunk of this prompt follows, the
+            // next prefill call replaces this sample; otherwise the first decode
+            // commits it. Pushing here would put a sampled token between prompt chunks.
+            self.pending_prefill_token
+                .insert(req.request_id, sampled_tok);
 
             outputs.push(DecodeOutput::Token {
                 request_id: req.request_id,
@@ -1500,5 +1585,196 @@ mod tests {
         assert_eq!(streamed.len(), 4);
         assert!(!streamed.contains(&0));
         assert_eq!(backend.sequences.len(), 0);
+    }
+
+    // PREFILL-E2E-0 bullet 4, cut C3: a prompt longer than one prefill chunk must
+    // give the same result as a one-shot prefill. Chunk 128 matches the daemon's
+    // scheduler chunk size; 300 tokens = 128 + 128 + 44.
+    const C3_PROMPT_LEN: usize = 300;
+    const C3_CHUNK: usize = 128;
+    const C3_ABS_TOL: f32 = 1e-4;
+
+    fn c3_config() -> ModelConfig {
+        ModelConfig {
+            num_layers: 2,
+            num_heads: 4,
+            num_kv_heads: 2,
+            head_dim: 16,
+            hidden_dim: 64,
+            intermediate_dim: 128,
+            vocab_size: 256,
+            block_size: 16,
+            ..Default::default()
+        }
+    }
+
+    /// Deterministic prompt avoiding token ids 0..=2 (UNK/BOS/EOS).
+    fn c3_prompt() -> Vec<u32> {
+        (0..C3_PROMPT_LEN)
+            .map(|i| ((i * 37 + 11) % 253 + 3) as u32)
+            .collect()
+    }
+
+    fn c3_backend(paged: bool) -> NativeTransformerBackend {
+        let weights = TransformerWeights::reference_test_weights(&c3_config());
+        if paged {
+            NativeTransformerBackend::with_paged_kv(weights, 64, 16).unwrap()
+        } else {
+            NativeTransformerBackend::new(weights)
+        }
+    }
+
+    fn c3_max_abs_diff(a: &[f32], b: &[f32]) -> f32 {
+        assert_eq!(a.len(), b.len());
+        a.iter()
+            .zip(b.iter())
+            .map(|(x, y)| (x - y).abs())
+            .fold(0.0f32, f32::max)
+    }
+
+    /// Last-position logits of a 300-token prompt prefilled in chunks of 128 equal
+    /// the one-shot prefill within abs 1e-4, and the sequence holds exactly the
+    /// prompt after every chunk. In paged mode the first chunk allocates only its
+    /// own blocks, so later chunks exercise the append path and the pool rebuild.
+    fn c3_logits_parity(paged: bool) {
+        let prompt = c3_prompt();
+        let id = 7u64;
+
+        let mut one_shot = c3_backend(paged);
+        let reference = one_shot.prefill_sequence(id, &prompt).unwrap();
+
+        let mut chunked = c3_backend(paged);
+        let mut fed = 0usize;
+        let mut last = Vec::new();
+        for chunk in prompt.chunks(C3_CHUNK) {
+            last = chunked.prefill_sequence(id, chunk).unwrap();
+            fed += chunk.len();
+            assert_eq!(
+                chunked.sequences[&id].tokens,
+                prompt[..fed],
+                "sequence must hold exactly the prompt tokens fed so far"
+            );
+        }
+        assert_eq!(fed, C3_PROMPT_LEN);
+
+        let diff = c3_max_abs_diff(&reference, &last);
+        assert!(
+            diff <= C3_ABS_TOL,
+            "chunked vs one-shot last-position logits differ by {} (> {}), paged={}",
+            diff,
+            C3_ABS_TOL,
+            paged
+        );
+
+        if paged {
+            let kv = chunked.kv_manager.as_ref().unwrap().read();
+            assert_eq!(kv.total_tokens(id), Some(C3_PROMPT_LEN));
+        } else {
+            for layer in &chunked.sequences[&id].layers {
+                assert_eq!(layer.cached_k.len(), C3_PROMPT_LEN);
+                assert_eq!(
+                    layer.flat_k.len(),
+                    one_shot.sequences[&id].layers[0].flat_k.len()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn c3_chunked_prefill_logits_match_one_shot_unpaged() {
+        c3_logits_parity(false);
+    }
+
+    #[test]
+    fn c3_chunked_prefill_logits_match_one_shot_paged() {
+        c3_logits_parity(true);
+    }
+
+    /// Through `execute_step` (the scheduler path): no sampled token is pushed
+    /// between prompt chunks, the sequence holds exactly prompt_len tokens before
+    /// the first decode, and prefill + one decode match the one-shot control.
+    /// Paged mode pre-allocates the whole prompt, as `prefill_detached` does.
+    async fn c3_execute_step_chunked(paged: bool) {
+        use crate::{SamplingParams, SequenceRequest};
+        let prompt = c3_prompt();
+        let id = 9u64;
+        let req = |toks: &[u32]| SequenceRequest {
+            request_id: id,
+            prompt_tokens: toks.to_vec(),
+            sampling_params: SamplingParams {
+                temperature: 0.0,
+                ..Default::default()
+            },
+            arrival_time_ns: 0,
+            priority: 0,
+        };
+        let batch = |prefill: Vec<SequenceRequest>, decode: Vec<u64>| ScheduledBatch {
+            prefill_requests: prefill,
+            decode_requests: decode,
+            block_tables: HashMap::new(),
+            step_id: 0,
+        };
+
+        let mut one_shot = c3_backend(paged);
+        if let Some(kv) = &one_shot.kv_manager {
+            kv.write().allocate_sequence(id, &prompt).unwrap();
+        }
+        let (out_one, _) = one_shot
+            .execute_step(&batch(vec![req(&prompt)], vec![]))
+            .await
+            .unwrap();
+        one_shot
+            .execute_step(&batch(vec![], vec![id]))
+            .await
+            .unwrap();
+
+        let mut chunked = c3_backend(paged);
+        if let Some(kv) = &chunked.kv_manager {
+            kv.write().allocate_sequence(id, &prompt).unwrap();
+        }
+        let mut fed = 0usize;
+        let mut last_out = Vec::new();
+        for chunk in prompt.chunks(C3_CHUNK) {
+            let (out, metrics) = chunked
+                .execute_step(&batch(vec![req(chunk)], vec![]))
+                .await
+                .unwrap();
+            fed += chunk.len();
+            assert_eq!(metrics.prefill_tokens_processed, chunk.len());
+            assert_eq!(
+                chunked.sequences[&id].tokens,
+                prompt[..fed],
+                "no sampled token may be pushed between prompt chunks"
+            );
+            last_out = out;
+        }
+        assert_eq!(chunked.sequences[&id].tokens.len(), C3_PROMPT_LEN);
+
+        let first_token = |out: &[DecodeOutput]| match out.first() {
+            Some(DecodeOutput::Token { token_id, .. }) => *token_id,
+            other => panic!("expected a sampled token after prefill, got {:?}", other),
+        };
+        let first_chunked = first_token(&last_out[..]);
+        assert_eq!(first_chunked, first_token(&out_one[..]));
+
+        chunked
+            .execute_step(&batch(vec![], vec![id]))
+            .await
+            .unwrap();
+        let toks = &chunked.sequences[&id].tokens;
+        assert_eq!(toks.len(), C3_PROMPT_LEN + 2);
+        assert_eq!(toks[..C3_PROMPT_LEN], prompt[..]);
+        assert_eq!(toks[C3_PROMPT_LEN], first_chunked);
+        assert_eq!(*toks, one_shot.sequences[&id].tokens);
+    }
+
+    #[tokio::test]
+    async fn c3_chunked_prefill_execute_step_unpaged() {
+        c3_execute_step_chunked(false).await;
+    }
+
+    #[tokio::test]
+    async fn c3_chunked_prefill_execute_step_paged() {
+        c3_execute_step_chunked(true).await;
     }
 }
