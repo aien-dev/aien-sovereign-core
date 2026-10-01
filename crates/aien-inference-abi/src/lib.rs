@@ -255,6 +255,21 @@ pub trait AienInferenceBackend: Send + Sync {
         Ok(())
     }
 
+    /// PREFILL-E2E C6 (bullet 11): `fork_sequence` that also hands the
+    /// backend the child's own sampling params, so a branch decodes with its
+    /// request's temperature/top_p instead of argmax. Decode batches carry
+    /// only request ids (`ScheduledBatch::decode_requests`), so the fork hook
+    /// is where a branch's params reach the backend.
+    /// Default: plain `fork_sequence` (params ignored).
+    fn fork_sequence_with_sampling(
+        &mut self,
+        parent_id: u64,
+        child_id: u64,
+        _sampling: &SamplingParams,
+    ) -> Result<(), String> {
+        self.fork_sequence(parent_id, child_id)
+    }
+
     /// Drops the backend's per-sequence state for `seq_id` (PREFILL-E2E
     /// bullet 12). The runtime spine calls it for every finished branch, for
     /// the swarm root once its last branch finished, and for every sequence of

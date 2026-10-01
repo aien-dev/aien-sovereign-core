@@ -8,7 +8,7 @@ use crate::tensor::{sample_argmax, sample_temperature};
 use crate::weights::{LayerKvCache, SequenceState, TransformerWeights};
 use crate::{
     AienInferenceBackend, AienUsageReceipt, BranchHandle, ContextHandle, DecodeOutput,
-    FinishReason, ModelConfig, ScheduledBatch, StepMetrics,
+    FinishReason, ModelConfig, SamplingParams, ScheduledBatch, StepMetrics,
 };
 use aien_kv_cache::{create_shared_kv_manager_with_pool, KvDType, KvPoolConfig, SharedKvManager};
 use async_trait::async_trait;
@@ -17,6 +17,85 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 static NEXT_HANDLE_ID: AtomicU64 = AtomicU64::new(1);
+
+/// splitmix64 mixing step (the generator behind java.util.SplittableRandom):
+/// a bijective 64-bit mixer, in-house, no outside crate.
+fn splitmix64(mut z: u64) -> u64 {
+    z = z.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^ (z >> 31)
+}
+
+/// Deterministic seed for sampling the token at `position` (the sequence's
+/// token count before the new token) of request `request_id` (PREFILL-E2E
+/// C6). Swarm branches get distinct request ids from the runtime arena
+/// (`AienRuntimeSpine::launch_swarm` submits each branch with
+/// `request_id: child_seq.as_u64()`), so sibling branches forked from one
+/// root draw different streams; the same request replays the same stream.
+pub fn decode_sampling_seed(request_id: u64, position: usize) -> u64 {
+    splitmix64(request_id ^ splitmix64(position as u64))
+}
+
+/// Samples one token from `logits` under `params` with the given seed.
+/// - `temperature <= 0.001`: argmax (unchanged greedy path).
+/// - otherwise softmax(logits / temperature) in f64; if `0 < top_p < 1`
+///   only the smallest highest-probability set whose mass reaches `top_p`
+///   is kept (ties broken by lower token id); one uniform draw from the
+///   seed picks a token from the kept mass. (`SamplingParams` has no top-k
+///   field, so there is no top-k.)
+///
+/// Returns the token and its log-probability under the kept distribution.
+pub fn sample_with_params(logits: &[f32], params: &SamplingParams, seed: u64) -> (u32, f32) {
+    if params.temperature <= 0.001 {
+        return sample_argmax(logits);
+    }
+    assert!(!logits.is_empty(), "Logits cannot be empty");
+    let inv_t = 1.0f64 / params.temperature as f64;
+    let max = logits.iter().fold(f32::NEG_INFINITY, |m, &v| m.max(v)) as f64;
+    let mut probs: Vec<f64> = logits
+        .iter()
+        .map(|&v| ((v as f64 - max) * inv_t).exp())
+        .collect();
+    let sum: f64 = probs.iter().sum();
+    for p in probs.iter_mut() {
+        *p /= sum;
+    }
+
+    let mut kept: Vec<usize> = (0..probs.len()).collect();
+    let top_p = params.top_p as f64;
+    if top_p > 0.0 && top_p < 1.0 {
+        kept.sort_by(|&a, &b| {
+            probs[b]
+                .partial_cmp(&probs[a])
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then(a.cmp(&b))
+        });
+        let mut cum = 0.0f64;
+        let mut keep = 0usize;
+        for &i in &kept {
+            cum += probs[i];
+            keep += 1;
+            if cum >= top_p {
+                break;
+            }
+        }
+        kept.truncate(keep);
+    }
+
+    let mass: f64 = kept.iter().map(|&i| probs[i]).sum();
+    // 53 random bits -> uniform in [0, 1), scaled to the kept mass.
+    let r = ((seed >> 11) as f64 / (1u64 << 53) as f64) * mass;
+    let mut cum = 0.0f64;
+    for &i in &kept {
+        cum += probs[i];
+        if r < cum {
+            return (i as u32, (probs[i] / mass).max(1e-300).ln() as f32);
+        }
+    }
+    let last = *kept.last().expect("kept set is never empty");
+    (last as u32, (probs[last] / mass).max(1e-300).ln() as f32)
+}
 
 /// Fully native Rust transformer backend executing real tensor forward computation.
 /// Decouples execution orchestration from compute hardware via the TensorBackend trait.
@@ -32,6 +111,11 @@ pub struct NativeTransformerBackend {
     /// decode (or fork) commits it. While a request is prefilling, `tokens.len()`
     /// therefore always equals the number of positions whose K/V is cached.
     pub pending_prefill_token: HashMap<u64, u32>,
+    /// Per-request sampling params used by decode (PREFILL-E2E C6). Recorded
+    /// from the prefill request (`execute_step`) and from the fork hook
+    /// (`fork_sequence_with_sampling`; a plain `fork_sequence` child inherits
+    /// its parent's entry). A request with no entry decodes with argmax.
+    sampling: HashMap<u64, SamplingParams>,
 }
 
 impl NativeTransformerBackend {
@@ -40,6 +124,7 @@ impl NativeTransformerBackend {
         Self {
             weights,
             sequences: HashMap::new(),
+            sampling: HashMap::new(),
             tensor_backend: Arc::new(ReferenceCpuBackend::new()),
             kv_manager: None,
             pending_prefill_token: HashMap::new(),
@@ -54,6 +139,7 @@ impl NativeTransformerBackend {
         Self {
             weights,
             sequences: HashMap::new(),
+            sampling: HashMap::new(),
             tensor_backend,
             kv_manager: None,
             pending_prefill_token: HashMap::new(),
@@ -111,6 +197,7 @@ impl NativeTransformerBackend {
         Ok(Self {
             weights,
             sequences: HashMap::new(),
+            sampling: HashMap::new(),
             tensor_backend: Arc::new(ReferenceCpuBackend::new()),
             kv_manager: Some(kv_mgr),
             pending_prefill_token: HashMap::new(),
@@ -136,6 +223,7 @@ impl NativeTransformerBackend {
         Ok(Self {
             weights,
             sequences: HashMap::new(),
+            sampling: HashMap::new(),
             tensor_backend,
             kv_manager: Some(kv_mgr),
             pending_prefill_token: HashMap::new(),
@@ -151,10 +239,17 @@ impl NativeTransformerBackend {
         Self {
             weights,
             sequences: HashMap::new(),
+            sampling: HashMap::new(),
             tensor_backend,
             kv_manager: Some(kv_manager),
             pending_prefill_token: HashMap::new(),
         }
+    }
+
+    /// Sampling params decode will use for `request_id`, if any were recorded
+    /// (PREFILL-E2E C6). `None` means decode takes the argmax.
+    pub fn sampling_params(&self, request_id: u64) -> Option<&SamplingParams> {
+        self.sampling.get(&request_id)
     }
 
     /// Creates a new immutable root context from prompt tokens.
@@ -275,6 +370,7 @@ impl NativeTransformerBackend {
     pub fn release_branch(&mut self, branch: BranchHandle) -> Result<(), String> {
         self.sequences.remove(&branch.0);
         self.pending_prefill_token.remove(&branch.0);
+        self.sampling.remove(&branch.0);
         if let Some(kv_mgr) = &self.kv_manager {
             let _ = kv_mgr.write().release_branch(branch.0);
         }
@@ -455,6 +551,7 @@ impl NativeTransformerBackend {
     pub fn release_sequence(&mut self, seq_id: u64) {
         self.sequences.remove(&seq_id);
         self.pending_prefill_token.remove(&seq_id);
+        self.sampling.remove(&seq_id);
         if let Some(kv_mgr) = &self.kv_manager {
             let _ = kv_mgr.write().release_branch(seq_id);
         }
@@ -1378,9 +1475,18 @@ impl NativeTransformerBackend {
             crate::tokenizer::TinyLlamaTokenizer::EOS_TOKEN_ID,
         ];
 
-        for (i, &(seq_id, _, _)) in valid_reqs.iter().enumerate() {
+        for (i, &(seq_id, _, pos)) in valid_reqs.iter().enumerate() {
             let logits = &logits_batch[i * vocab_size..(i + 1) * vocab_size];
-            let (sampled_tok, logprob) = sample_argmax(logits);
+            // PREFILL-E2E C6: the request's own sampling params (recorded at
+            // prefill or by the fork hook), seeded per request and position.
+            // No params, or temperature 0: argmax as before.
+            let (sampled_tok, logprob) = match self.sampling.get(&seq_id) {
+                Some(params) => {
+                    let seed = decode_sampling_seed(seq_id, pos + 1);
+                    sample_with_params(logits, params, seed)
+                }
+                None => sample_argmax(logits),
+            };
 
             if let Some(seq) = self.sequences.get_mut(&seq_id) {
                 seq.tokens.push(sampled_tok);
@@ -1411,6 +1517,7 @@ impl AienInferenceBackend for NativeTransformerBackend {
         self.weights = TransformerWeights::reference_test_weights(config);
         self.sequences.clear();
         self.pending_prefill_token.clear();
+        self.sampling.clear();
         Ok(())
     }
 
@@ -1502,6 +1609,24 @@ impl AienInferenceBackend for NativeTransformerBackend {
                 layers: Vec::new(),
             },
         );
+        // PREFILL-E2E C6: a plain fork inherits the parent's sampling params
+        // (seeded by the child's own id at decode, so streams still differ).
+        if let Some(params) = self.sampling.get(&parent_id).cloned() {
+            self.sampling.insert(child_id, params);
+        }
+        Ok(())
+    }
+
+    /// PREFILL-E2E C6: same checks and state fork as `fork_sequence`, then
+    /// records the branch's own sampling params for decode.
+    fn fork_sequence_with_sampling(
+        &mut self,
+        parent_id: u64,
+        child_id: u64,
+        sampling: &SamplingParams,
+    ) -> Result<(), String> {
+        self.fork_sequence(parent_id, child_id)?;
+        self.sampling.insert(child_id, sampling.clone());
         Ok(())
     }
 
@@ -1511,9 +1636,13 @@ impl AienInferenceBackend for NativeTransformerBackend {
     /// `NativeTransformerBackend::release_sequence` (standalone generation,
     /// which owns its KV), this never touches the KV manager: in the runtime
     /// the scheduler and swarm manager free the block tables, and freeing here
-    /// too would race their accounting. Unknown ids are a no-op.
+    /// too would race their accounting. Unknown ids are a no-op. Also drops the
+    /// request's held prefill sample (C3) and its sampling params (C6), so no
+    /// per-request map outlives the sequence (C8 merge).
     fn release_sequence(&mut self, seq_id: u64) -> Result<(), String> {
         self.sequences.remove(&seq_id);
+        self.pending_prefill_token.remove(&seq_id);
+        self.sampling.remove(&seq_id);
         Ok(())
     }
 
@@ -1532,6 +1661,9 @@ impl AienInferenceBackend for NativeTransformerBackend {
             // A further prefill chunk: the sample held from the previous chunk was
             // mid-prompt and is discarded.
             self.pending_prefill_token.remove(&req.request_id);
+            // PREFILL-E2E C6: decode of this request uses its sampling params.
+            self.sampling
+                .insert(req.request_id, req.sampling_params.clone());
 
             if let Some(kv_mgr) = &self.kv_manager {
                 let mut mgr = kv_mgr.write();
