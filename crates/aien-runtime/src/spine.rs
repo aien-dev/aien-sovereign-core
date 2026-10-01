@@ -153,9 +153,8 @@ impl AienRuntimeSpine {
         self.step_counter += 1;
 
         // PREFILL-E2E C5: backend state of sequences cancelled since the last
-        // step; their KV is already freed. Known gap: CancelSwarm does not
-        // remove the branches from the scheduler's queues (no scheduler
-        // cancel API yet), so the scheduler may still re-admit them.
+        // step; their KV is already freed. CancelSwarm also frees them in the
+        // scheduler arena, so queued copies are stale and never re-admitted.
         self.release_pending_backend_sequences(backend)?;
 
         // PREFILL-E2E C4: backend state for subagent forks made since the
@@ -380,6 +379,15 @@ impl AienRuntimeSpine {
                     Ok(released) => {
                         // KV, arena slots and branch worlds are reclaimed;
                         // backend state follows on the next step (C5).
+                        // The scheduler keeps its own arena, with the same ids
+                        // (submit_request inserts them explicitly). Free them
+                        // there too, so queued or running copies turn stale
+                        // and are never admitted or decoded again.
+                        for &id in &released {
+                            if let Ok(sid) = aien_scheduler::sequence::SequenceId::from_u64(id) {
+                                self.scheduler.arena_mut().free_sequence(sid);
+                            }
+                        }
                         self.pending_backend_releases.extend(released);
                         self.controller
                             .mark_operation_processed(envelope.operation_id);
