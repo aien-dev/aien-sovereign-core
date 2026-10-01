@@ -1574,4 +1574,30 @@ mod tests {
         let handled_lattice = handle_slash_command("/adapter lattice").await;
         assert!(handled_lattice);
     }
+
+    /// PE2E-C1 Step A probe (asserts nothing). Runs the daemon's real checkpoint
+    /// resolve + load over the directory named by AIEN_VERIFY_MODELS_DIR and prints
+    /// which file was chosen and whether reference weights were used.
+    #[test]
+    fn verify_daemon_checkpoint_resolution_probe() {
+        let Ok(dir) = std::env::var("AIEN_VERIFY_MODELS_DIR") else {
+            eprintln!("PROBE: AIEN_VERIFY_MODELS_DIR unset; nothing to probe");
+            return;
+        };
+        std::env::set_var("AIEN_MODEL_DIR", &dir);
+        let manifest = resolve_daemon_manifest();
+        eprintln!(
+            "PROBE: models_dir={} chosen_checkpoint={:?} tokenizer={:?} model_id={}",
+            dir, manifest.checkpoint_path, manifest.tokenizer_path, manifest.model_id
+        );
+        let (weights, tokenizer, label) = load_production_weights(&manifest);
+        let used_reference = weights.config.model_id == "aien-daemon-reference-fallback";
+        eprintln!(
+            "PROBE: reference_weights_used={} weights_model_id={} tokenizer_loaded={} label={}",
+            used_reference,
+            weights.config.model_id,
+            tokenizer.is_some(),
+            label
+        );
+    }
 }
