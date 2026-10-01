@@ -1502,6 +1502,20 @@ impl AienInferenceBackend for NativeTransformerBackend {
         Ok(())
     }
 
+    /// PREFILL-E2E C5 (bullet 12): removes this request's entry from the
+    /// per-sequence map (tokens and, unpaged, dense K/V layers) and any pending
+    /// prefill token (C3). The map is the
+    /// backend's only per-request state. Unlike the inherent
+    /// `NativeTransformerBackend::release_sequence` (standalone generation,
+    /// which owns its KV), this never touches the KV manager: in the runtime
+    /// the scheduler and swarm manager free the block tables, and freeing here
+    /// too would race their accounting. Unknown ids are a no-op.
+    fn release_sequence(&mut self, seq_id: u64) -> Result<(), String> {
+        self.sequences.remove(&seq_id);
+        self.pending_prefill_token.remove(&seq_id);
+        Ok(())
+    }
+
     async fn execute_step(
         &mut self,
         batch: &ScheduledBatch,
