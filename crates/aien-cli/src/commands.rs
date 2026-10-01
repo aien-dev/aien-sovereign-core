@@ -1192,7 +1192,10 @@ pub async fn run_daemon_server() {
 
     println!("  Backend: {}", backend_label.green());
     println!("  Model: {}", model_label.yellow());
-    println!("  KV: {}", "one pooled KV shared by runtime and backend".green());
+    println!(
+        "  KV: {}",
+        "one pooled KV shared by runtime and backend".green()
+    );
     if let Some(tokenizer) = tokenizer {
         server.set_tokenizer(tokenizer);
         println!("  Tokenizer: {}", "TinyLlama chat template".green());
