@@ -3575,7 +3575,10 @@ mod tests {
         let Json(body) = res.unwrap();
         let op = body.get("operator").unwrap();
         assert_eq!(op.get("name").unwrap().as_str().unwrap(), "Drake Stapleton");
-        assert_eq!(op.get("email").unwrap().as_str().unwrap(), "drake@aienos.com");
+        assert_eq!(
+            op.get("email").unwrap().as_str().unwrap(),
+            "drake@aienos.com"
+        );
         assert_eq!(op.get("handle").unwrap().as_str().unwrap(), "drake_ops-1");
     }
 
