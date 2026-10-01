@@ -56,12 +56,12 @@ enum Op {
 fn op() -> impl Strategy<Value = Op> {
     let s = 0..SEQ_IDS;
     prop_oneof![
-        (s.clone(), 0usize..10).prop_map(|(seq, n)| Op::Alloc { seq, n }),
+        1 => (s.clone(), 0usize..10).prop_map(|(seq, n)| Op::Alloc { seq, n }),
         3 => (s.clone(), s.clone()).prop_map(|(parent, child)| Op::Fork { parent, child }),
         4 => s.clone().prop_map(|seq| Op::Append { seq }),
-        s.clone().prop_map(|seq| Op::Free { seq }),
+        1 => s.clone().prop_map(|seq| Op::Free { seq }),
         2 => s.clone().prop_map(|seq| Op::ReserveRollback { seq }),
-        s.prop_map(|seq| Op::ReserveCommit { seq }),
+        1 => s.prop_map(|seq| Op::ReserveCommit { seq }),
     ]
 }
 
