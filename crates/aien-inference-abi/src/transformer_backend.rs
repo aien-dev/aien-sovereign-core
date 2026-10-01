@@ -236,6 +236,14 @@ impl NativeTransformerBackend {
     }
 
     /// Forks an existing context into an independently decoding branch with zero KV copying.
+    ///
+    /// Handle-API helper for library tests (`paged_transformer_parity.rs`,
+    /// `branch_client_harness.rs`, the unit tests below). It is NOT on the
+    /// runtime path: the spine forks backend state only through the trait hook
+    /// `AienInferenceBackend::fork_sequence`, which is gated on PrefillReady and
+    /// never copies K/V. This method is ungated and, without a KV manager,
+    /// copies the parent's dense K/V per branch; no code in aien-runtime or
+    /// aien-cli calls it (grep `fork_context`, PREFILL-E2E C4).
     pub fn fork_context(&mut self, parent: ContextHandle) -> Result<BranchHandle, String> {
         self.commit_pending_prefill_token(parent.0);
         let parent_seq = self
@@ -992,12 +1000,45 @@ impl NativeTransformerBackend {
 
     /// Forward pass executing one token decode step across a batch of D sequences concurrently.
     /// Employs batched GEMM (M=D) for all linear projections and batched paged attention.
-    pub fn forward_decode_batch(&mut self, decode_req_ids: &[u64]) -> Vec<DecodeOutput> {
+    ///
+    /// Every id must already have backend state (from a prefill or from
+    /// `fork_sequence`). An unknown id, or one with no tokens, is an error and
+    /// nothing is computed: decoding it would start from token 1 at position 0
+    /// over an empty cache (PREFILL-E2E C4).
+    pub fn forward_decode_batch(
+        &mut self,
+        decode_req_ids: &[u64],
+    ) -> Result<Vec<DecodeOutput>, String> {
+        self.forward_decode_batch_impl(decode_req_ids)
+            .map(|(outputs, _logits, _vocab)| outputs)
+    }
+
+    /// Same as `forward_decode_batch`, also returning each sequence's logits
+    /// (in `decode_req_ids` order) for parity checks.
+    pub fn forward_decode_batch_with_logits(
+        &mut self,
+        decode_req_ids: &[u64],
+    ) -> Result<(Vec<DecodeOutput>, Vec<Vec<f32>>), String> {
+        let (outputs, logits_batch, vocab_size) = self.forward_decode_batch_impl(decode_req_ids)?;
+        let logits = if vocab_size == 0 {
+            Vec::new()
+        } else {
+            logits_batch
+                .chunks(vocab_size)
+                .map(|row| row.to_vec())
+                .collect()
+        };
+        Ok((outputs, logits))
+    }
+
+    fn forward_decode_batch_impl(
+        &mut self,
+        decode_req_ids: &[u64],
+    ) -> Result<(Vec<DecodeOutput>, Vec<f32>, usize), String> {
         if decode_req_ids.is_empty() {
-            return Vec::new();
+            return Ok((Vec::new(), Vec::new(), 0));
         }
 
-        let num_layers = self.weights.config.num_layers;
         let hidden_dim = self.weights.config.hidden_dim();
         let num_heads = self.weights.config.num_heads;
         let num_kv_heads = self.weights.config.num_kv_heads;
@@ -1010,18 +1051,26 @@ impl NativeTransformerBackend {
         let vocab_size = self.weights.config.vocab_size();
 
         // 1. Gather active sequence requests and their current positions / last tokens
+        // Validated before anything is written, so a refused batch leaves no state behind.
         let mut valid_reqs = Vec::with_capacity(decode_req_ids.len());
         for &req_id in decode_req_ids {
+            // C3 holds the token sampled after the final prefill chunk as pending;
+            // commit it so this decode feeds it at position prompt_len (C8 merge).
             self.commit_pending_prefill_token(req_id);
-            let seq = self
-                .sequences
-                .entry(req_id)
-                .or_insert_with(|| SequenceState {
-                    tokens: Vec::new(),
-                    layers: vec![LayerKvCache::default(); num_layers],
-                });
-            let pos = seq.tokens.len().saturating_sub(1);
-            let last_token = *seq.tokens.last().unwrap_or(&1);
+            let seq = self.sequences.get(&req_id).ok_or_else(|| {
+                format!(
+                    "decode refused: request {} has no backend sequence state \
+                     (never prefilled and never forked via fork_sequence)",
+                    req_id
+                )
+            })?;
+            let last_token = *seq.tokens.last().ok_or_else(|| {
+                format!(
+                    "decode refused: request {} has no tokens (no prefilled prompt)",
+                    req_id
+                )
+            })?;
+            let pos = seq.tokens.len() - 1;
             valid_reqs.push((req_id, last_token, pos));
         }
 
@@ -1060,7 +1109,8 @@ impl NativeTransformerBackend {
 
         let d = valid_reqs.len();
         if d == 0 {
-            return slot_failures;
+            // Every request failed its slot reservation (C2): nothing to compute.
+            return Ok((slot_failures, Vec::new(), 0));
         }
 
         // 2. Allocate batch activations
@@ -1351,7 +1401,7 @@ impl NativeTransformerBackend {
             }
         }
 
-        outputs
+        Ok((outputs, logits_batch, vocab_size))
     }
 }
 
@@ -1366,6 +1416,93 @@ impl AienInferenceBackend for NativeTransformerBackend {
 
     fn manages_kv_cache(&self) -> bool {
         self.kv_manager.is_some()
+    }
+
+    /// Forks per-sequence backend state (tokens, hence position and last
+    /// token) from a prefilled parent into a child whose physical KV the
+    /// shared KV manager has already forked (`fork_prefilled`). Never copies
+    /// or re-forks K/V. Refuses when:
+    /// - there is no KV manager, or it has no physical tensor pool: the K/V
+    ///   would live in the backend's dense per-sequence cache and a fork
+    ///   would have to copy it per branch (bullet 10);
+    /// - the parent is not PrefillReady/SharedFrozen in the KV manager
+    ///   (bullet 6: no fork before the completion fence);
+    /// - the child has no KV block table yet (the KV fork must come first);
+    /// - the parent is unknown to the backend, or the child already exists.
+    fn fork_sequence(&mut self, parent_id: u64, child_id: u64) -> Result<(), String> {
+        let kv_mgr = self.kv_manager.as_ref().ok_or_else(|| {
+            format!(
+                "fork_sequence {} -> {} refused: backend has no shared KV manager \
+                 (unpaged fork would copy dense K/V)",
+                parent_id, child_id
+            )
+        })?;
+        {
+            let kv = kv_mgr.read();
+            if kv.tensor_pool().is_none() {
+                return Err(format!(
+                    "fork_sequence {} -> {} refused: KV manager has no physical tensor pool",
+                    parent_id, child_id
+                ));
+            }
+            match kv.prefill_state(parent_id) {
+                Some(state) if state.is_ready() => {}
+                Some(state) => {
+                    return Err(format!(
+                        "fork_sequence {} -> {} refused: parent prefill state {:?} is not ready \
+                         (completion fence not passed)",
+                        parent_id, child_id, state
+                    ))
+                }
+                None => {
+                    return Err(format!(
+                        "fork_sequence {} -> {} refused: parent has no KV block table",
+                        parent_id, child_id
+                    ))
+                }
+            }
+            if kv.get_block_table(child_id).is_none() {
+                return Err(format!(
+                    "fork_sequence {} -> {} refused: child has no KV block table \
+                     (physical KV fork must precede the backend fork)",
+                    parent_id, child_id
+                ));
+            }
+        }
+        if self.sequences.contains_key(&child_id) {
+            return Err(format!(
+                "fork_sequence {} -> {} refused: child already has backend state",
+                parent_id, child_id
+            ));
+        }
+        let mut parent_tokens = self
+            .sequences
+            .get(&parent_id)
+            .ok_or_else(|| {
+                format!(
+                    "fork_sequence {} -> {} refused: parent unknown to the backend",
+                    parent_id, child_id
+                )
+            })?
+            .tokens
+            .clone();
+        // C3 holds the token sampled after the root's final prefill chunk as pending
+        // (not yet in `tokens`). The child carries it so its first decode feeds it at
+        // position prompt_len, exactly as the root's own first decode would. Without
+        // it the child would re-feed the last prompt token and append a duplicate
+        // K/V row. The parent is left unchanged (C8 merge of C3 + C4).
+        if let Some(&pending) = self.pending_prefill_token.get(&parent_id) {
+            parent_tokens.push(pending);
+        }
+        self.sequences.insert(
+            child_id,
+            SequenceState {
+                tokens: parent_tokens,
+                // Paged mode: K/V lives in the shared pool, never in per-sequence layers.
+                layers: Vec::new(),
+            },
+        );
+        Ok(())
     }
 
     async fn execute_step(
@@ -1431,7 +1568,7 @@ impl AienInferenceBackend for NativeTransformerBackend {
 
         // 2. Decode Requests (Batched across D active sequences)
         if !batch.decode_requests.is_empty() {
-            let decode_outputs = self.forward_decode_batch(&batch.decode_requests);
+            let decode_outputs = self.forward_decode_batch(&batch.decode_requests)?;
             outputs.extend(decode_outputs);
         }
 

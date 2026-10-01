@@ -243,6 +243,25 @@ pub trait AienInferenceBackend: Send + Sync {
     fn manages_kv_cache(&self) -> bool {
         false
     }
+
+    /// PREFILL-E2E-0 bullets 6-8: forks the backend's per-sequence state
+    /// (tokens, position, last token) from a prefilled parent into a child.
+    /// Called by the runtime spine once per branch AFTER the root passed the
+    /// prefill completion fence and the KV manager shared the root blocks
+    /// (`fork_branches_from_ready_root`), and BEFORE any branch is decoded.
+    /// Must never copy or re-fork K/V: the physical KV fork is already done.
+    /// Default: no-op, for backends that keep no per-sequence state.
+    fn fork_sequence(&mut self, _parent_id: u64, _child_id: u64) -> Result<(), String> {
+        Ok(())
+    }
+
+    /// Drops the backend's per-sequence state for `seq_id`. Reclaim wiring
+    /// (calling this when a sequence finishes or a swarm is cancelled) is
+    /// PREFILL-E2E cut C5; it is not called by the runtime yet.
+    /// Default: no-op.
+    fn release_sequence(&mut self, _seq_id: u64) -> Result<(), String> {
+        Ok(())
+    }
 }
 
 /// High-throughput simulated backend for benchmarking scheduler and KV manager overhead
