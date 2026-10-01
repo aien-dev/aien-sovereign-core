@@ -735,9 +735,20 @@ async fn sampled_branches_diverge_and_each_matches_its_own_teacher_forced_contro
         .expect("root backend state")
         .tokens
         .clone();
-    assert_eq!(root_tokens.len(), C4_PROMPT.len() + 1);
     assert_eq!(&root_tokens[..C4_PROMPT.len()], &C4_PROMPT[..]);
-    let root_token = root_tokens[C4_PROMPT.len()];
+    // C3 holds the token sampled after the root's final prefill chunk as
+    // pending until a decode commits it; the root itself never decodes, so it
+    // is still pending here (C8 merge). Branches carried it through the fork.
+    let root_token = match tap.inner.pending_prefill_token.get(&root) {
+        Some(&pending) => {
+            assert_eq!(root_tokens.len(), C4_PROMPT.len());
+            pending
+        }
+        None => {
+            assert_eq!(root_tokens.len(), C4_PROMPT.len() + 1);
+            root_tokens[C4_PROMPT.len()]
+        }
+    };
 
     for (b, gen) in branches.iter().zip(&generated) {
         let branch_logits = tap.decode_logits.get(b).expect("branch logits");
