@@ -152,6 +152,15 @@ fn assert_fully_reclaimed(
             .map(|b| b.as_u64())
             .collect::<Vec<_>>()
     );
+    // C6 x C5: the sampling map entry is dropped with the sequence.
+    assert!(
+        backend.sampling_params(swarm.root_sequence_id.as_u64()).is_none()
+            && swarm
+                .branch_sequences
+                .iter()
+                .all(|b| backend.sampling_params(b.as_u64()).is_none()),
+        "RECLAIM_VIOLATION: RECLAIM_SAMPLING_LEAK backend still holds sampling params for a released sequence"
+    );
     let kv = spine.kv_manager.read();
     assert_eq!(
         kv.allocated_block_count(),

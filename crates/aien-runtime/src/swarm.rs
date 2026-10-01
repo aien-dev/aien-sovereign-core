@@ -284,9 +284,7 @@ impl SwarmManager {
                 && !swarm.finished_branches.contains(&seq_id))
             .then_some(*id)
         });
-        let Some(swarm_id) = swarm_id else {
-            return None;
-        };
+        let swarm_id = swarm_id?;
 
         let swarm = self
             .swarms

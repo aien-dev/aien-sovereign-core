@@ -104,6 +104,11 @@ pub struct NativeTransformerBackend {
     pub sequences: HashMap<u64, SequenceState>,
     pub tensor_backend: Arc<dyn TensorBackend>,
     pub kv_manager: Option<SharedKvManager>,
+    /// Per-request sampling params used by decode (PREFILL-E2E C6). Recorded
+    /// from the prefill request (`execute_step`) and from the fork hook
+    /// (`fork_sequence_with_sampling`; a plain `fork_sequence` child inherits
+    /// its parent's entry). A request with no entry decodes with argmax.
+    sampling: HashMap<u64, SamplingParams>,
     /// Token sampled after the most recent `execute_step` prefill chunk of a request,
     /// not yet appended to `sequences[id].tokens`. A prefill request does not say
     /// whether it is the final chunk of its prompt, so the sample is held here:
@@ -111,11 +116,6 @@ pub struct NativeTransformerBackend {
     /// decode (or fork) commits it. While a request is prefilling, `tokens.len()`
     /// therefore always equals the number of positions whose K/V is cached.
     pub pending_prefill_token: HashMap<u64, u32>,
-    /// Per-request sampling params used by decode (PREFILL-E2E C6). Recorded
-    /// from the prefill request (`execute_step`) and from the fork hook
-    /// (`fork_sequence_with_sampling`; a plain `fork_sequence` child inherits
-    /// its parent's entry). A request with no entry decodes with argmax.
-    sampling: HashMap<u64, SamplingParams>,
 }
 
 impl NativeTransformerBackend {
@@ -370,7 +370,6 @@ impl NativeTransformerBackend {
     pub fn release_branch(&mut self, branch: BranchHandle) -> Result<(), String> {
         self.sequences.remove(&branch.0);
         self.pending_prefill_token.remove(&branch.0);
-        self.sampling.remove(&branch.0);
         if let Some(kv_mgr) = &self.kv_manager {
             let _ = kv_mgr.write().release_branch(branch.0);
         }
@@ -551,7 +550,6 @@ impl NativeTransformerBackend {
     pub fn release_sequence(&mut self, seq_id: u64) {
         self.sequences.remove(&seq_id);
         self.pending_prefill_token.remove(&seq_id);
-        self.sampling.remove(&seq_id);
         if let Some(kv_mgr) = &self.kv_manager {
             let _ = kv_mgr.write().release_branch(seq_id);
         }
@@ -1152,8 +1150,6 @@ impl NativeTransformerBackend {
         // Validated before anything is written, so a refused batch leaves no state behind.
         let mut valid_reqs = Vec::with_capacity(decode_req_ids.len());
         for &req_id in decode_req_ids {
-            // C3 holds the token sampled after the final prefill chunk as pending;
-            // commit it so this decode feeds it at position prompt_len (C8 merge).
             self.commit_pending_prefill_token(req_id);
             let seq = self.sequences.get(&req_id).ok_or_else(|| {
                 format!(
@@ -1207,7 +1203,6 @@ impl NativeTransformerBackend {
 
         let d = valid_reqs.len();
         if d == 0 {
-            // Every request failed its slot reservation (C2): nothing to compute.
             return Ok((slot_failures, Vec::new(), 0));
         }
 
@@ -1517,8 +1512,8 @@ impl AienInferenceBackend for NativeTransformerBackend {
     async fn load_model(&mut self, config: &ModelConfig) -> Result<(), String> {
         self.weights = TransformerWeights::reference_test_weights(config);
         self.sequences.clear();
-        self.pending_prefill_token.clear();
         self.sampling.clear();
+        self.pending_prefill_token.clear();
         Ok(())
     }
 
@@ -1583,6 +1578,10 @@ impl AienInferenceBackend for NativeTransformerBackend {
                 parent_id, child_id
             ));
         }
+        // The token prefill sampled but did not append yet (`pending_prefill_token`)
+        // belongs to the parent's stream. The child gets it appended to its own copy
+        // of the tokens; the parent is NOT mutated (its tokens stay prompt-only and
+        // its pending token stays pending, so the parent's own next decode commits it).
         let mut parent_tokens = self
             .sequences
             .get(&parent_id)
@@ -1594,11 +1593,6 @@ impl AienInferenceBackend for NativeTransformerBackend {
             })?
             .tokens
             .clone();
-        // C3 holds the token sampled after the root's final prefill chunk as pending
-        // (not yet in `tokens`). The child carries it so its first decode feeds it at
-        // position prompt_len, exactly as the root's own first decode would. Without
-        // it the child would re-feed the last prompt token and append a duplicate
-        // K/V row. The parent is left unchanged (C8 merge of C3 + C4).
         if let Some(&pending) = self.pending_prefill_token.get(&parent_id) {
             parent_tokens.push(pending);
         }
@@ -1632,17 +1626,17 @@ impl AienInferenceBackend for NativeTransformerBackend {
     }
 
     /// PREFILL-E2E C5 (bullet 12): removes this request's entry from the
-    /// per-sequence map (tokens and, unpaged, dense K/V layers). The map is the
+    /// per-sequence map (tokens and, unpaged, dense K/V layers) and any pending
+    /// prefill token (C3). The map is the
     /// backend's only per-request state. Unlike the inherent
     /// `NativeTransformerBackend::release_sequence` (standalone generation,
     /// which owns its KV), this never touches the KV manager: in the runtime
     /// the scheduler and swarm manager free the block tables, and freeing here
-    /// too would race their accounting. Unknown ids are a no-op. Also drops the
-    /// request's held prefill sample (C3) and its sampling params (C6), so no
-    /// per-request map outlives the sequence (C8 merge).
+    /// too would race their accounting. Unknown ids are a no-op.
     fn release_sequence(&mut self, seq_id: u64) -> Result<(), String> {
         self.sequences.remove(&seq_id);
         self.pending_prefill_token.remove(&seq_id);
+        // PREFILL-E2E C6: the per-request sampling params entry goes too.
         self.sampling.remove(&seq_id);
         Ok(())
     }
@@ -1659,12 +1653,12 @@ impl AienInferenceBackend for NativeTransformerBackend {
         // 1. Prefill Requests
         for req in &batch.prefill_requests {
             prefill_tokens += req.prompt_tokens.len();
-            // A further prefill chunk: the sample held from the previous chunk was
-            // mid-prompt and is discarded.
-            self.pending_prefill_token.remove(&req.request_id);
             // PREFILL-E2E C6: decode of this request uses its sampling params.
             self.sampling
                 .insert(req.request_id, req.sampling_params.clone());
+            // A further prefill chunk: the sample held from the previous chunk was
+            // mid-prompt and is discarded.
+            self.pending_prefill_token.remove(&req.request_id);
 
             if let Some(kv_mgr) = &self.kv_manager {
                 let mut mgr = kv_mgr.write();
