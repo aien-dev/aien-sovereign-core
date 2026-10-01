@@ -29,7 +29,20 @@ compare_every_generated_step = true
 # Measured noise floors. Filled by amendment before the equivalence runs they govern.
 # A run whose governing floor is "unmeasured" cannot produce a PASS for I3.
 [numerics.noise_floor.tinyllama]
-status = "unmeasured"
+status = "measured"
+backend = "ReferenceCpuBackend"
+hardware = "Spark CPU"
+runs = 3
+prompts = 5
+k = 8
+model_sha256 = "6e6001da2106d4757498752a021df6c2bdc332c650aae4bae6b0c004dcf14933"
+max_abs = 0.0
+max_rel = 0.0
+source_commit = "bc5a8b5"
+forge_log = "/home/drakestapleton/workspace/test-queue-logs/PE2E-C7-light-201114.log"
+# Rule 2.0 x floor (0) = 0: frozen as exact (bitwise) equality for the CPU reference backend; not loosened.
+tolerance_abs = 0.0
+tolerance_rel = 0.0
 
 [numerics.noise_floor.qwen3_coder_30b_a3b_fp8]
 status = "unmeasured"

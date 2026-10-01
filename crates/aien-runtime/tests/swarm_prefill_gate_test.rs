@@ -321,6 +321,8 @@ const C4_PROMPT: [u32; 6] = [5, 17, 42, 3, 88, 61];
 struct LogitsTap {
     inner: NativeTransformerBackend,
     decode_logits: HashMap<u64, Vec<Vec<f32>>>,
+    /// Each sequence's backend token stream as it was just before its first decode.
+    first_decode_tokens: HashMap<u64, Vec<u32>>,
 }
 
 #[async_trait]
@@ -345,6 +347,13 @@ impl AienInferenceBackend for LogitsTap {
             metrics = m;
         }
         if !batch.decode_requests.is_empty() {
+            for id in &batch.decode_requests {
+                if let Some(seq) = self.inner.sequences.get(id) {
+                    self.first_decode_tokens
+                        .entry(*id)
+                        .or_insert_with(|| seq.tokens.clone());
+                }
+            }
             let (o, logits) = self
                 .inner
                 .forward_decode_batch_with_logits(&batch.decode_requests)?;
@@ -508,6 +517,7 @@ async fn branch_first_decode_logits_equal_root_continuation_logits() {
     let mut tap = LogitsTap {
         inner: backend,
         decode_logits: HashMap::new(),
+        first_decode_tokens: HashMap::new(),
     };
 
     let branch_count = 3usize;
@@ -581,6 +591,75 @@ async fn branch_first_decode_logits_equal_root_continuation_logits() {
             b,
             max_diff,
             PARITY_TOL
+        );
+    }
+}
+
+/// C4c: the token prefill sampled but did not append (`pending_prefill_token`)
+/// belongs to the root's stream. `fork_sequence` must commit it before copying
+/// the parent's tokens, so every branch's first decode feeds that token at
+/// position `prompt_len`, exactly like the root's own continuation.
+#[tokio::test]
+async fn backend_fork_carries_parent_pending_prefill_token() {
+    let config = c4_config();
+    let weights = TransformerWeights::reference_test_weights(&config);
+    let (mut spine, backend) = build_shared_kv_runtime(
+        weights,
+        Arc::new(ReferenceCpuBackend::new()),
+        c4_scheduler(),
+        SharedKvSizing {
+            arena_capacity: 64,
+            total_blocks: 64,
+        },
+    )
+    .expect("build shared KV runtime");
+    let mut tap = LogitsTap {
+        inner: backend,
+        decode_logits: HashMap::new(),
+        first_decode_tokens: HashMap::new(),
+    };
+
+    let branch_count = 3usize;
+    let swarm_id = spine
+        .launch_swarm(c4_swarm_config(branch_count, 2), &C4_PROMPT)
+        .expect("launch swarm");
+    let swarm = spine.swarm_manager.get_swarm(swarm_id).unwrap().clone();
+    let root = swarm.root_sequence_id.as_u64();
+    let branches: Vec<u64> = swarm.branch_sequences.iter().map(|s| s.as_u64()).collect();
+
+    let mut steps = 0;
+    while (spine.scheduler.running_count() > 0 || spine.scheduler.waiting_count() > 0) && steps < 50
+    {
+        steps += 1;
+        spine.step(&mut tap).await.expect("spine step");
+    }
+
+    let root_tokens = tap
+        .inner
+        .sequences
+        .get(&root)
+        .expect("root state")
+        .tokens
+        .clone();
+    assert_eq!(
+        root_tokens.len(),
+        C4_PROMPT.len() + 1,
+        "root holds the prompt plus the token prefill sampled (committed at fork)"
+    );
+    assert!(
+        !tap.inner.pending_prefill_token.contains_key(&root),
+        "PENDING_TOKEN_VIOLATION: the root's pending prefill token must be committed by the fork"
+    );
+    for &b in &branches {
+        let first = tap
+            .first_decode_tokens
+            .get(&b)
+            .unwrap_or_else(|| panic!("branch {} never decoded", b));
+        assert_eq!(
+            first, &root_tokens,
+            "PENDING_TOKEN_VIOLATION: branch {} must start its first decode from the root's \
+             prompt plus the sampled token",
+            b
         );
     }
 }

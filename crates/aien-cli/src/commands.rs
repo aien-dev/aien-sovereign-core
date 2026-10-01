@@ -945,56 +945,131 @@ fn handle_adapter_command(args: &[&str]) {
 // --------------------------------------------------------------------------
 
 /// Explicit model manifest for daemon boot. No silent developer-machine paths.
+/// After loading, it records the SHA-256 (hex) of the model and tokenizer files
+/// so a later run receipt can name exactly which bytes were served.
 struct DaemonModelManifest {
     model_id: String,
     label: String,
     checkpoint_path: Option<std::path::PathBuf>,
     tokenizer_path: Option<std::path::PathBuf>,
+    /// Why no checkpoint file was resolved (None when one was found).
+    fallback_reason: Option<String>,
+    /// Hex SHA-256 of the loaded model file (set only when its weights loaded).
+    model_sha256: Option<String>,
+    /// Hex SHA-256 of the loaded tokenizer file (set only when it parsed).
+    tokenizer_sha256: Option<String>,
+}
+
+/// Checkpoint selection inputs, read once from the environment.
+/// `AIEN_MODEL_PATH` (a safetensors file) and `AIEN_TOKENIZER_PATH` (tokenizer.json,
+/// default: `tokenizer.json` beside the model file) take precedence over any directory
+/// scan. `AIEN_REQUIRE_CHECKPOINT=1` makes every fallback to reference weights fatal.
+#[derive(Debug, Clone, Default)]
+struct CheckpointPolicy {
+    model_path: Option<std::path::PathBuf>,
+    tokenizer_path: Option<std::path::PathBuf>,
+    scan_dirs: Vec<std::path::PathBuf>,
+    require_checkpoint: bool,
+}
+
+impl CheckpointPolicy {
+    fn from_lookup(get: impl Fn(&str) -> Option<String>) -> Self {
+        let non_empty = |key: &str| {
+            get(key)
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+        };
+        let mut scan_dirs = Vec::new();
+        if let Some(dir) = non_empty("AIEN_MODEL_DIR") {
+            scan_dirs.push(std::path::PathBuf::from(dir));
+        }
+        scan_dirs.push(std::path::PathBuf::from("models"));
+        if let Some(home) = non_empty("HOME") {
+            scan_dirs.push(std::path::PathBuf::from(home).join("models"));
+        }
+        Self {
+            model_path: non_empty("AIEN_MODEL_PATH").map(std::path::PathBuf::from),
+            tokenizer_path: non_empty("AIEN_TOKENIZER_PATH")
+                .or_else(|| non_empty("AIEN_TOKENIZER"))
+                .map(std::path::PathBuf::from),
+            scan_dirs,
+            require_checkpoint: non_empty("AIEN_REQUIRE_CHECKPOINT")
+                .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+                .unwrap_or(false),
+        }
+    }
+
+    fn from_env() -> Self {
+        Self::from_lookup(|key| std::env::var(key).ok())
+    }
 }
 
 fn is_safetensors(path: &std::path::Path) -> bool {
     path.extension().and_then(|ext| ext.to_str()) == Some("safetensors")
 }
 
-fn tokenizer_beside(checkpoint: &std::path::Path) -> Option<std::path::PathBuf> {
-    if let Ok(path) = std::env::var("AIEN_TOKENIZER") {
-        let path = std::path::PathBuf::from(path);
-        if path.is_file() {
-            return Some(path);
-        }
+/// Explicit tokenizer path if given, else `tokenizer.json` beside the checkpoint.
+/// The path is returned even if the file is missing; loading decides what that means.
+fn tokenizer_for(
+    policy: &CheckpointPolicy,
+    checkpoint: &std::path::Path,
+) -> Option<std::path::PathBuf> {
+    if let Some(path) = &policy.tokenizer_path {
+        return Some(path.clone());
     }
-    let candidate = checkpoint.parent()?.join("tokenizer.json");
-    candidate.is_file().then_some(candidate)
+    checkpoint.parent().map(|dir| dir.join("tokenizer.json"))
 }
 
-fn resolve_daemon_manifest() -> DaemonModelManifest {
-    let mut candidates: Vec<std::path::PathBuf> = Vec::new();
-    if let Ok(dir) = std::env::var("AIEN_MODEL_DIR") {
-        candidates.push(std::path::PathBuf::from(dir));
+fn checkpoint_manifest(
+    policy: &CheckpointPolicy,
+    path: std::path::PathBuf,
+    model_id: String,
+    label: String,
+) -> DaemonModelManifest {
+    DaemonModelManifest {
+        model_id,
+        label,
+        tokenizer_path: tokenizer_for(policy, &path),
+        checkpoint_path: Some(path),
+        fallback_reason: None,
+        model_sha256: None,
+        tokenizer_sha256: None,
     }
-    candidates.push(std::path::PathBuf::from("models"));
-    if let Ok(home) = std::env::var("HOME") {
-        candidates.push(std::path::PathBuf::from(home).join("models"));
+}
+
+fn resolve_daemon_manifest_with(policy: &CheckpointPolicy) -> DaemonModelManifest {
+    if let Some(path) = &policy.model_path {
+        let model_id = path
+            .parent()
+            .and_then(|dir| dir.file_name())
+            .and_then(|name| name.to_str())
+            .unwrap_or("checkpoint")
+            .to_string();
+        return checkpoint_manifest(
+            policy,
+            path.clone(),
+            model_id,
+            format!("explicit AIEN_MODEL_PATH={}", path.display()),
+        );
     }
-    for dir in candidates {
-        let Ok(entries) = std::fs::read_dir(&dir) else {
+    for dir in &policy.scan_dirs {
+        let Ok(entries) = std::fs::read_dir(dir) else {
             continue;
         };
         for entry in entries.flatten() {
             let path = entry.path();
             if is_safetensors(&path) {
-                return DaemonModelManifest {
-                    model_id: "checkpoint".into(),
-                    label: format!(
-                        "checkpoint found at {} (model_id={})",
-                        path.display(),
-                        path.file_stem()
-                            .and_then(|name| name.to_str())
-                            .unwrap_or("checkpoint")
-                    ),
-                    tokenizer_path: tokenizer_beside(&path),
-                    checkpoint_path: Some(path),
-                };
+                let model_id = path
+                    .file_stem()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or("checkpoint")
+                    .to_string();
+                let label = format!(
+                    "checkpoint found at {} (model_id={})",
+                    path.display(),
+                    model_id
+                );
+                return checkpoint_manifest(policy, path, "checkpoint".into(), label);
             }
             if path.is_dir() {
                 let Ok(nested) = std::fs::read_dir(&path) else {
@@ -1003,26 +1078,35 @@ fn resolve_daemon_manifest() -> DaemonModelManifest {
                 for child in nested.flatten() {
                     let child_path = child.path();
                     if is_safetensors(&child_path) {
-                        return DaemonModelManifest {
-                            model_id: path
-                                .file_name()
-                                .and_then(|name| name.to_str())
-                                .unwrap_or("checkpoint")
-                                .to_string(),
-                            label: format!("checkpoint found at {}", child_path.display()),
-                            tokenizer_path: tokenizer_beside(&child_path),
-                            checkpoint_path: Some(child_path),
-                        };
+                        let model_id = path
+                            .file_name()
+                            .and_then(|name| name.to_str())
+                            .unwrap_or("checkpoint")
+                            .to_string();
+                        let label = format!("checkpoint found at {}", child_path.display());
+                        return checkpoint_manifest(policy, child_path, model_id, label);
                     }
                 }
             }
         }
     }
+    let searched = policy
+        .scan_dirs
+        .iter()
+        .map(|dir| dir.display().to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
     DaemonModelManifest {
         model_id: "aien-daemon-reference-fallback".into(),
-        label: "no safetensors checkpoint found (AIEN_MODEL_DIR, ./models, ~/models); using reference fallback".into(),
+        label: "no safetensors checkpoint resolved".into(),
         checkpoint_path: None,
         tokenizer_path: None,
+        fallback_reason: Some(format!(
+            "no AIEN_MODEL_PATH and no *.safetensors found in [{}]",
+            searched
+        )),
+        model_sha256: None,
+        tokenizer_sha256: None,
     }
 }
 
@@ -1048,55 +1132,158 @@ fn reference_config() -> aien_inference_abi::ModelConfig {
     }
 }
 
-fn load_production_weights(
-    manifest: &DaemonModelManifest,
-) -> (
-    aien_inference_abi::TransformerWeights,
-    Option<aien_inference_abi::TinyLlamaTokenizer>,
-    String,
-) {
-    let Some(path) = &manifest.checkpoint_path else {
-        let config = reference_config();
-        return (
-            aien_inference_abi::TransformerWeights::reference_test_weights(&config),
-            None,
-            manifest.label.clone(),
-        );
+/// Result of daemon model loading: the manifest (with SHA-256 digests filled in on
+/// success), the weights, the tokenizer, and whether reference weights were used.
+struct DaemonModel {
+    #[allow(dead_code)] // digests are read by the PREFILL-E2E receipt (Cut 8)
+    manifest: DaemonModelManifest,
+    weights: aien_inference_abi::TransformerWeights,
+    tokenizer: Option<aien_inference_abi::TinyLlamaTokenizer>,
+    label: String,
+    #[allow(dead_code)] // read by tests now and by the PREFILL-E2E receipt (Cut 8)
+    reference_weights: bool,
+}
+
+/// Hex SHA-256 of a file, streamed in 1 MiB chunks.
+fn sha256_file_hex(path: &std::path::Path) -> std::io::Result<String> {
+    use sha2::{Digest, Sha256};
+    use std::io::Read;
+    let mut file = std::fs::File::open(path)?;
+    let mut hasher = Sha256::new();
+    let mut buf = vec![0u8; 1 << 20];
+    loop {
+        let read = file.read(&mut buf)?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buf[..read]);
+    }
+    Ok(hex::encode(hasher.finalize()))
+}
+
+/// The single decision point for every checkpoint fallback. Under
+/// AIEN_REQUIRE_CHECKPOINT=1 it refuses with an error naming the reason (which names
+/// the path); otherwise it prints exactly one warn-level line and lets the caller degrade.
+fn strict_checkpoint_gate(require_checkpoint: bool, reason: &str) -> Result<(), String> {
+    if require_checkpoint {
+        return Err(format!(
+            "AIEN_REQUIRE_CHECKPOINT=1: {}; refusing to fall back",
+            reason
+        ));
+    }
+    eprintln!(
+        "WARN aien-daemon: {}; falling back (set AIEN_REQUIRE_CHECKPOINT=1 to make this fatal)",
+        reason
+    );
+    Ok(())
+}
+
+fn reference_fallback(
+    manifest: DaemonModelManifest,
+    require_checkpoint: bool,
+    reason: String,
+) -> Result<DaemonModel, String> {
+    strict_checkpoint_gate(require_checkpoint, &reason)?;
+    let config = reference_config();
+    Ok(DaemonModel {
+        label: format!(
+            "{} ({}); using reference fallback weights",
+            manifest.label, reason
+        ),
+        weights: aien_inference_abi::TransformerWeights::reference_test_weights(&config),
+        tokenizer: None,
+        reference_weights: true,
+        manifest,
+    })
+}
+
+fn load_daemon_model(
+    mut manifest: DaemonModelManifest,
+    require_checkpoint: bool,
+) -> Result<DaemonModel, String> {
+    let Some(path) = manifest.checkpoint_path.clone() else {
+        let reason = manifest
+            .fallback_reason
+            .clone()
+            .unwrap_or_else(|| "no checkpoint resolved".to_string());
+        return reference_fallback(manifest, require_checkpoint, reason);
+    };
+    let model_sha256 = match sha256_file_hex(&path) {
+        Ok(digest) => digest,
+        Err(error) => {
+            let reason = format!("checkpoint {} is unreadable: {}", path.display(), error);
+            return reference_fallback(manifest, require_checkpoint, reason);
+        }
     };
     let config = aien_inference_abi::ModelConfig::tinyllama_1_1b();
-    match aien_inference_abi::TransformerWeights::load_from_safetensors(path, &config) {
-        Ok(weights) => {
-            let tokenizer = manifest.tokenizer_path.as_ref().and_then(|tokenizer_path| {
-                aien_inference_abi::TinyLlamaTokenizer::from_file(tokenizer_path).ok()
-            });
-            let tokenizer_note = if tokenizer.is_some() {
-                "tokenizer loaded"
-            } else {
-                "tokenizer missing"
-            };
-            (
-                weights,
-                tokenizer,
-                format!(
-                    "checkpoint loaded from {} ({}, model_id={})",
+    let weights =
+        match aien_inference_abi::TransformerWeights::load_from_safetensors(&path, &config) {
+            Ok(weights) => weights,
+            Err(error) => {
+                let reason = format!(
+                    "checkpoint {} failed to load against the {} config: {}",
                     path.display(),
-                    tokenizer_note,
-                    manifest.model_id
+                    config.model_id,
+                    error
+                );
+                return reference_fallback(manifest, require_checkpoint, reason);
+            }
+        };
+    manifest.model_sha256 = Some(model_sha256);
+
+    let mut tokenizer = None;
+    match manifest.tokenizer_path.clone() {
+        None => strict_checkpoint_gate(
+            require_checkpoint,
+            &format!("no tokenizer path for checkpoint {}", path.display()),
+        )?,
+        Some(tokenizer_path) => match sha256_file_hex(&tokenizer_path) {
+            Err(error) => strict_checkpoint_gate(
+                require_checkpoint,
+                &format!(
+                    "tokenizer {} is unreadable: {}",
+                    tokenizer_path.display(),
+                    error
                 ),
-            )
-        }
-        Err(error) => {
-            let config = reference_config();
-            (
-                aien_inference_abi::TransformerWeights::reference_test_weights(&config),
-                None,
-                format!(
-                    "{} (safetensors load failed: {}); using reference fallback",
-                    manifest.label, error
-                ),
-            )
-        }
+            )?,
+            Ok(digest) => {
+                match aien_inference_abi::TinyLlamaTokenizer::from_file(&tokenizer_path) {
+                    Ok(loaded) => {
+                        manifest.tokenizer_sha256 = Some(digest);
+                        tokenizer = Some(loaded);
+                    }
+                    Err(error) => strict_checkpoint_gate(
+                        require_checkpoint,
+                        &format!(
+                            "tokenizer {} failed to parse: {}",
+                            tokenizer_path.display(),
+                            error
+                        ),
+                    )?,
+                }
+            }
+        },
     }
+
+    let label = format!(
+        "checkpoint loaded from {} ({}, model_id={}, model_sha256={}, tokenizer_sha256={})",
+        path.display(),
+        if tokenizer.is_some() {
+            "tokenizer loaded"
+        } else {
+            "tokenizer missing"
+        },
+        manifest.model_id,
+        manifest.model_sha256.as_deref().unwrap_or("none"),
+        manifest.tokenizer_sha256.as_deref().unwrap_or("none"),
+    );
+    Ok(DaemonModel {
+        manifest,
+        weights,
+        tokenizer,
+        label,
+        reference_weights: false,
+    })
 }
 
 /// Loaded daemon model parts: weights, tensor compute backend, backend label,
@@ -1111,8 +1298,14 @@ type DaemonBackendParts = (
 );
 
 fn build_native_daemon_backend() -> Result<DaemonBackendParts, String> {
-    let manifest = resolve_daemon_manifest();
-    let (weights, tokenizer, model_label) = load_production_weights(&manifest);
+    let policy = CheckpointPolicy::from_env();
+    let manifest = resolve_daemon_manifest_with(&policy);
+    let DaemonModel {
+        weights,
+        tokenizer,
+        label: model_label,
+        ..
+    } = load_daemon_model(manifest, policy.require_checkpoint)?;
     let probe = aien_inference_abi::BlackwellGb10Backend::new();
     let require_blackwell = std::env::var("AIEN_REQUIRE_BLACKWELL")
         .map(|v| v.trim() == "1" || v.trim().eq_ignore_ascii_case("true"))
@@ -1597,5 +1790,230 @@ mod tests {
         // Test /adapter lattice
         let handled_lattice = handle_slash_command("/adapter lattice").await;
         assert!(handled_lattice);
+    }
+
+    /// PE2E-C1 Step A probe (asserts nothing). Runs the daemon's real checkpoint
+    /// resolve + load over the directory named by AIEN_VERIFY_MODELS_DIR (same scan
+    /// as the daemon, no explicit path, flag off) and prints which file was chosen
+    /// and whether reference weights were used.
+    #[test]
+    fn verify_daemon_checkpoint_resolution_probe() {
+        let Ok(dir) = std::env::var("AIEN_VERIFY_MODELS_DIR") else {
+            eprintln!("PROBE: AIEN_VERIFY_MODELS_DIR unset; nothing to probe");
+            return;
+        };
+        let policy = CheckpointPolicy {
+            scan_dirs: vec![std::path::PathBuf::from(&dir)],
+            ..CheckpointPolicy::default()
+        };
+        let manifest = resolve_daemon_manifest_with(&policy);
+        eprintln!(
+            "PROBE: models_dir={} chosen_checkpoint={:?} tokenizer={:?} model_id={}",
+            dir, manifest.checkpoint_path, manifest.tokenizer_path, manifest.model_id
+        );
+        let model = load_daemon_model(manifest, false).expect("flag off never errors");
+        eprintln!(
+            "PROBE: reference_weights_used={} weights_model_id={} tokenizer_loaded={} label={}",
+            model.reference_weights,
+            model.weights.config.model_id,
+            model.tokenizer.is_some(),
+            model.label
+        );
+    }
+
+    // ---- PE2E-C1 strict checkpoint tests ----
+
+    fn strict_policy(model_path: Option<std::path::PathBuf>) -> CheckpointPolicy {
+        CheckpointPolicy {
+            model_path,
+            require_checkpoint: true,
+            ..CheckpointPolicy::default()
+        }
+    }
+
+    /// Writes a tiny valid safetensors file whose only tensor is a BF16
+    /// `model.embed_tokens.weight` of shape [4, 8]: parseable, but not TinyLlama-shaped.
+    fn write_mismatched_safetensors(path: &std::path::Path) {
+        let payload = vec![0u8; 4 * 8 * 2];
+        let header = format!(
+            "{{\"model.embed_tokens.weight\":{{\"dtype\":\"BF16\",\"shape\":[4,8],\"data_offsets\":[0,{}]}}}}",
+            payload.len()
+        );
+        let mut bytes = (header.len() as u64).to_le_bytes().to_vec();
+        bytes.extend_from_slice(header.as_bytes());
+        bytes.extend_from_slice(&payload);
+        std::fs::write(path, bytes).unwrap();
+        std::fs::write(path.with_file_name("tokenizer.json"), b"{}").unwrap();
+    }
+
+    #[test]
+    fn checkpoint_policy_reads_explicit_paths_and_flag() {
+        let env = |key: &str| match key {
+            "AIEN_MODEL_PATH" => Some("/m/model.safetensors".to_string()),
+            "AIEN_TOKENIZER_PATH" => Some("/t/tokenizer.json".to_string()),
+            "AIEN_REQUIRE_CHECKPOINT" => Some("1".to_string()),
+            "HOME" => Some("/h".to_string()),
+            _ => None,
+        };
+        let policy = CheckpointPolicy::from_lookup(env);
+        assert_eq!(
+            policy.model_path.as_deref(),
+            Some(std::path::Path::new("/m/model.safetensors"))
+        );
+        assert_eq!(
+            policy.tokenizer_path.as_deref(),
+            Some(std::path::Path::new("/t/tokenizer.json"))
+        );
+        assert!(policy.require_checkpoint);
+        assert!(policy
+            .scan_dirs
+            .contains(&std::path::PathBuf::from("/h/models")));
+
+        let off = CheckpointPolicy::from_lookup(|key| {
+            (key == "AIEN_REQUIRE_CHECKPOINT").then(|| "0".to_string())
+        });
+        assert!(!off.require_checkpoint);
+        assert!(off.model_path.is_none());
+    }
+
+    #[test]
+    fn checkpoint_explicit_path_beats_directory_scan() {
+        let scan = tempfile::tempdir().unwrap();
+        let nested = scan.path().join("AAA-first");
+        std::fs::create_dir(&nested).unwrap();
+        write_mismatched_safetensors(&nested.join("model.safetensors"));
+        let explicit = scan.path().join("chosen").join("model.safetensors");
+        let policy = CheckpointPolicy {
+            model_path: Some(explicit.clone()),
+            scan_dirs: vec![scan.path().to_path_buf()],
+            ..CheckpointPolicy::default()
+        };
+        let manifest = resolve_daemon_manifest_with(&policy);
+        assert_eq!(manifest.checkpoint_path, Some(explicit.clone()));
+        assert_eq!(
+            manifest.tokenizer_path,
+            Some(explicit.with_file_name("tokenizer.json"))
+        );
+    }
+
+    #[test]
+    fn strict_checkpoint_refuses_missing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("absent.safetensors");
+        let policy = strict_policy(Some(missing.clone()));
+        let manifest = resolve_daemon_manifest_with(&policy);
+        let err = load_daemon_model(manifest, policy.require_checkpoint)
+            .err()
+            .expect("missing checkpoint under AIEN_REQUIRE_CHECKPOINT must be an error");
+        assert!(err.contains("AIEN_REQUIRE_CHECKPOINT=1"), "{err}");
+        assert!(err.contains(&missing.display().to_string()), "{err}");
+    }
+
+    #[test]
+    fn strict_checkpoint_refuses_shape_mismatch() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("model.safetensors");
+        write_mismatched_safetensors(&path);
+        let policy = strict_policy(Some(path.clone()));
+        let manifest = resolve_daemon_manifest_with(&policy);
+        let err = load_daemon_model(manifest, policy.require_checkpoint)
+            .err()
+            .expect("mis-shaped checkpoint under AIEN_REQUIRE_CHECKPOINT must be an error");
+        assert!(err.contains(&path.display().to_string()), "{err}");
+        assert!(err.contains("model.embed_tokens.weight"), "{err}");
+    }
+
+    #[test]
+    fn strict_checkpoint_refuses_scan_mismatch() {
+        // Directory scan picks a non-TinyLlama checkpoint (the Qwen-first case).
+        let dir = tempfile::tempdir().unwrap();
+        let nested = dir.path().join("Qwen-like");
+        std::fs::create_dir(&nested).unwrap();
+        let path = nested.join("model.safetensors");
+        write_mismatched_safetensors(&path);
+        let policy = CheckpointPolicy {
+            scan_dirs: vec![dir.path().to_path_buf()],
+            require_checkpoint: true,
+            ..CheckpointPolicy::default()
+        };
+        let manifest = resolve_daemon_manifest_with(&policy);
+        assert_eq!(manifest.checkpoint_path, Some(path.clone()));
+        let err = load_daemon_model(manifest, true)
+            .err()
+            .expect("scan finding a non-matching checkpoint must be an error under the flag");
+        assert!(err.contains(&path.display().to_string()), "{err}");
+    }
+
+    #[test]
+    fn strict_checkpoint_refuses_empty_scan() {
+        let dir = tempfile::tempdir().unwrap();
+        let policy = CheckpointPolicy {
+            scan_dirs: vec![dir.path().to_path_buf()],
+            require_checkpoint: true,
+            ..CheckpointPolicy::default()
+        };
+        let manifest = resolve_daemon_manifest_with(&policy);
+        assert!(manifest.checkpoint_path.is_none());
+        let err = load_daemon_model(manifest, true)
+            .err()
+            .expect("empty scan must be an error under the flag");
+        assert!(err.contains(&dir.path().display().to_string()), "{err}");
+    }
+
+    #[test]
+    fn checkpoint_fallback_without_flag_is_reported() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("absent.safetensors");
+        let policy = CheckpointPolicy {
+            model_path: Some(missing.clone()),
+            ..CheckpointPolicy::default()
+        };
+        let manifest = resolve_daemon_manifest_with(&policy);
+        let model = load_daemon_model(manifest, false).expect("flag off degrades");
+        assert!(model.reference_weights);
+        assert!(model.manifest.model_sha256.is_none());
+        assert!(
+            model.label.contains(&missing.display().to_string()),
+            "{}",
+            model.label
+        );
+    }
+
+    /// Real-checkpoint proof. Ignored in plain `cargo test`; the forge runs it with
+    /// `--include-ignored`, and then an unset AIEN_E2E_CHECKPOINT is a FAILURE, not a skip.
+    #[test]
+    #[ignore = "needs AIEN_E2E_CHECKPOINT (TinyLlama dir or model.safetensors); forge runs it"]
+    fn strict_checkpoint_real_tinyllama_loads() {
+        use sha2::{Digest, Sha256};
+        let raw = std::env::var("AIEN_E2E_CHECKPOINT")
+            .expect("AIEN_E2E_CHECKPOINT must point at the TinyLlama checkpoint");
+        let mut model_path = std::path::PathBuf::from(raw);
+        if model_path.is_dir() {
+            model_path = model_path.join("model.safetensors");
+        }
+        let policy = strict_policy(Some(model_path.clone()));
+        let manifest = resolve_daemon_manifest_with(&policy);
+        let model = load_daemon_model(manifest, true).expect("real TinyLlama must load");
+        assert!(!model.reference_weights);
+        assert_eq!(
+            model.weights.config.model_id,
+            aien_inference_abi::ModelConfig::tinyllama_1_1b().model_id
+        );
+        assert!(model.tokenizer.is_some());
+
+        let model_sha = model.manifest.model_sha256.clone().expect("model digest");
+        assert_eq!(model_sha.len(), 64);
+        assert!(model_sha.chars().all(|c| c.is_ascii_hexdigit()));
+        let expected = hex::encode(Sha256::digest(std::fs::read(&model_path).unwrap()));
+        assert_eq!(model_sha, expected);
+
+        let tokenizer_path = model_path.with_file_name("tokenizer.json");
+        let tokenizer_sha = model
+            .manifest
+            .tokenizer_sha256
+            .clone()
+            .expect("tokenizer digest");
+        let expected = hex::encode(Sha256::digest(std::fs::read(&tokenizer_path).unwrap()));
+        assert_eq!(tokenizer_sha, expected);
     }
 }
