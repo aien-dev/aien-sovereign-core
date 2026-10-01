@@ -225,7 +225,9 @@ fn shared_kv_decode_slot_exhaustion_preempts_instead_of_decoding_without_kv() {
         .expect("KV table")
         .total_tokens;
 
-    let outputs = backend.forward_decode_batch(&[id]);
+    let outputs = backend
+        .forward_decode_batch(&[id])
+        .expect("known, prefilled id: slot failure is an output, not an error");
 
     assert_eq!(
         outputs.len(),

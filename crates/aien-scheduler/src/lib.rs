@@ -272,6 +272,19 @@ impl AienScheduler {
         child_raw: u64,
         sink_id: Option<CompletionSinkId>,
     ) -> Result<(), String> {
+        self.fork_subagent_with_sink_ids(parent_raw, child_raw, sink_id)
+            .map(|_| ())
+    }
+
+    /// Same as `fork_subagent_with_sink`, returning the (parent, child) KV
+    /// sequence ids the fork was recorded under, so the runtime can fork the
+    /// backend's per-sequence state under the same ids (PREFILL-E2E C4).
+    pub fn fork_subagent_with_sink_ids(
+        &mut self,
+        parent_raw: u64,
+        child_raw: u64,
+        sink_id: Option<CompletionSinkId>,
+    ) -> Result<(u64, u64), String> {
         let parent_id = self
             .running_sequences
             .iter()
@@ -286,14 +299,19 @@ impl AienScheduler {
 
         let child_id = self.arena.fork(parent_id, sink_id)?;
 
-        {
+        let kv_ids = {
             let mut kv = self.kv_manager.write();
-            kv.fork_sequence(parent_id.to_u64(), child_id.to_u64())
-                .or_else(|_| kv.fork_sequence(parent_raw, child_raw))?;
-        }
+            match kv.fork_sequence(parent_id.to_u64(), child_id.to_u64()) {
+                Ok(_) => (parent_id.to_u64(), child_id.to_u64()),
+                Err(_) => {
+                    kv.fork_sequence(parent_raw, child_raw)?;
+                    (parent_raw, child_raw)
+                }
+            }
+        };
 
         self.running_sequences.push(child_id);
-        Ok(())
+        Ok(kv_ids)
     }
 
     /// Discards stale items from queue heads and internal lists without panics.

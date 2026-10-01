@@ -27,6 +27,10 @@ pub struct AienRuntimeSpine {
     pub swarm_manager: SwarmManager,
     pub controller: RuntimeController,
     pub step_counter: u64,
+    /// Subagent forks whose KV is already forked but whose backend state is
+    /// not yet: (parent, child) KV ids, applied via the backend's
+    /// `fork_sequence` at the start of the next `step`, before any decode.
+    pending_backend_forks: Vec<(u64, u64)>,
 }
 
 impl AienRuntimeSpine {
@@ -45,6 +49,7 @@ impl AienRuntimeSpine {
             swarm_manager: SwarmManager::new(),
             controller: RuntimeController::new(),
             step_counter: 0,
+            pending_backend_forks: Vec::new(),
         }
     }
 
@@ -104,8 +109,13 @@ impl AienRuntimeSpine {
         child_id: u64,
         sink_id: Option<CompletionSinkId>,
     ) -> Result<(), String> {
-        self.scheduler
-            .fork_subagent_with_sink(parent_id, child_id, sink_id)
+        let ids = self
+            .scheduler
+            .fork_subagent_with_sink_ids(parent_id, child_id, sink_id)?;
+        // The backend is not reachable here; its state is forked at the start
+        // of the next step, before the child can be decoded.
+        self.pending_backend_forks.push(ids);
+        Ok(())
     }
 
     /// Executes runtime steps in a closed loop until all active requests complete or max_steps is reached.
@@ -135,6 +145,12 @@ impl AienRuntimeSpine {
         backend: &mut B,
     ) -> Result<Option<StepMetrics>, String> {
         self.step_counter += 1;
+
+        // PREFILL-E2E C4: backend state for subagent forks made since the
+        // last step, before the scheduler can decode the children.
+        for (parent, child) in std::mem::take(&mut self.pending_backend_forks) {
+            backend.fork_sequence(parent, child)?;
+        }
 
         // PREFILL-GATE: run the model prefill over each pending swarm root
         // prompt BEFORE any branch can be scheduled, then share the computed
@@ -210,9 +226,27 @@ impl AienRuntimeSpine {
             {
                 prefilled += m.prefill_tokens_processed;
             }
-            let mut kv = self.kv_manager.write();
-            self.swarm_manager
-                .fork_branches_from_ready_root(swarm_id, &mut self.arena, &mut kv)?;
+            {
+                let mut kv = self.kv_manager.write();
+                self.swarm_manager.fork_branches_from_ready_root(
+                    swarm_id,
+                    &mut self.arena,
+                    &mut kv,
+                )?;
+            }
+            // PREFILL-E2E C4 (bullets 6-8): fork the backend's per-sequence
+            // state (tokens, position, last token) for each branch right after
+            // the physical KV fork and before any branch can be scheduled for
+            // decode. The KV lock is released first: the backend reads the
+            // same shared KV manager to check the parent is PrefillReady.
+            let branches: Vec<u64> = self
+                .swarm_manager
+                .get_swarm(swarm_id)
+                .map(|s| s.branch_sequences.iter().map(|b| b.as_u64()).collect())
+                .unwrap_or_default();
+            for child in branches {
+                backend.fork_sequence(root_kv_id, child)?;
+            }
         }
         Ok(prefilled)
     }
