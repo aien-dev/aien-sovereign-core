@@ -136,10 +136,25 @@ impl AienRuntimeSpine {
     ) -> Result<Option<StepMetrics>, String> {
         self.step_counter += 1;
 
+        // PREFILL-GATE: run the model prefill over each pending swarm root
+        // prompt BEFORE any branch can be scheduled, then share the computed
+        // root blocks with the branches. Branches never see root blocks that
+        // have not passed the completion fence.
+        let root_prefill_tokens = self.prefill_pending_swarm_roots(backend).await?;
+
         // Execute scheduler step via backend
         let step_result = self.scheduler.step(backend).await?;
 
-        if let Some((outputs, metrics)) = step_result {
+        if step_result.is_none() && root_prefill_tokens > 0 {
+            return Ok(Some(StepMetrics {
+                prefill_tokens_processed: root_prefill_tokens,
+                active_kv_blocks: self.kv_manager.read().allocated_block_count(),
+                ..StepMetrics::default()
+            }));
+        }
+
+        if let Some((outputs, mut metrics)) = step_result {
+            metrics.prefill_tokens_processed += root_prefill_tokens;
             // Generational SequenceId validation on step completion
             for output in &outputs {
                 match output {
@@ -179,7 +194,32 @@ impl AienRuntimeSpine {
         }
     }
 
+    /// Prefills every pending swarm root through the scheduler's completion
+    /// fence and, once the root is PrefillReady, shares its blocks with the
+    /// branches. Returns the number of root prompt tokens prefilled.
+    async fn prefill_pending_swarm_roots<B: AienInferenceBackend>(
+        &mut self,
+        backend: &mut B,
+    ) -> Result<usize, String> {
+        let mut prefilled = 0usize;
+        for (swarm_id, root_kv_id, prompt) in self.swarm_manager.pending_root_prefills() {
+            if let Some(m) = self
+                .scheduler
+                .prefill_detached(backend, root_kv_id, &prompt)
+                .await?
+            {
+                prefilled += m.prefill_tokens_processed;
+            }
+            let mut kv = self.kv_manager.write();
+            self.swarm_manager
+                .fork_branches_from_ready_root(swarm_id, &mut self.arena, &mut kv)?;
+        }
+        Ok(prefilled)
+    }
+
     /// Launches a swarm of agents sharing an immutable root World and physical KV blocks.
+    /// Branch KV is shared from the root only after the root prompt prefill
+    /// completes (next `step`); until then branches cannot be decoded.
     pub fn launch_swarm(
         &mut self,
         config: SwarmConfig,

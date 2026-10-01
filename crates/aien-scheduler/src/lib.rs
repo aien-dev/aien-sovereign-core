@@ -6,13 +6,26 @@ pub use sequence::*;
 use aien_inference_abi::{
     AienInferenceBackend, DecodeOutput, FinishReason, ScheduledBatch, SequenceRequest, StepMetrics,
 };
-use aien_kv_cache::AienKvManager;
+use aien_kv_cache::{AienKvManager, PrefillGateError};
 use aien_platform::{InferenceWork, Priority};
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::Instant;
+
+/// Prefill readiness gate (PREFILL-GATE). A sequence may enter decode only
+/// when its block table K/V was computed by a completed prefill
+/// (`BlockTable::is_prefill_ready`). Having a block table is not enough:
+/// `allocate_sequence` only reserves and zeroes blocks.
+#[inline]
+fn prefill_gate_allows_decode(table_ready: bool) -> bool {
+    if cfg!(feature = "prefill_mutant_no_check") {
+        // MUTANT: readiness check removed. Tests must catch this.
+        return true;
+    }
+    table_ready
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SchedulerConfig {
@@ -353,6 +366,7 @@ impl AienScheduler {
         // 2. Schedule active decode sequences and in-flight prefill chunks
         let mut running_ids = self.running_sequences.clone();
         running_ids.sort();
+        let mut needs_prefill: Vec<SequenceId> = Vec::new();
 
         for seq_id in running_ids {
             if decode_requests.len() + prefill_requests.len() >= self.config.max_batch_size {
@@ -368,11 +382,25 @@ impl AienScheduler {
             };
 
             if seq.is_prefilled {
-                // Active decode step
-                if let Some(table) = self.kv_manager.read().get_block_table(seq_id.to_u64()) {
-                    block_tables.insert(seq_id.to_u64(), table.block_ids.clone());
-                    decode_requests.push(seq_id.to_u64());
-                    current_tokens += 1;
+                // Active decode step, gated on computed K/V (PREFILL-GATE).
+                let table_state = self
+                    .kv_manager
+                    .read()
+                    .get_block_table(seq_id.to_u64())
+                    .map(|t| (t.block_ids.clone(), t.is_prefill_ready()));
+                if let Some((blocks, ready)) = table_state {
+                    if prefill_gate_allows_decode(ready) {
+                        block_tables.insert(seq_id.to_u64(), blocks);
+                        decode_requests.push(seq_id.to_u64());
+                        current_tokens += 1;
+                    } else {
+                        // The table exists but its K/V was never computed:
+                        // send the sequence back for a real prefill, never decode.
+                        seq.is_prefilled = false;
+                        seq.prompt_tokens_prefilled = 0;
+                        seq.phase = SequencePhase::Waiting;
+                        needs_prefill.push(seq_id);
+                    }
                 }
             } else {
                 // Continuing chunked prefill
@@ -403,6 +431,14 @@ impl AienScheduler {
                     prefill_budget = prefill_budget.saturating_sub(chunk_size);
                 }
             }
+        }
+
+        // Sequences refused decode by the prefill gate: drop the uncomputed
+        // (possibly shared) table and requeue at the front for a fresh prefill.
+        for seq_id in needs_prefill {
+            self.running_sequences.retain(|&x| x != seq_id);
+            let _ = self.kv_manager.write().free_sequence(seq_id.to_u64());
+            self.waiting_queue.push_front(seq_id);
         }
 
         // 3. Admit waiting or preempted requests if capacity permits and not under preemption pressure
@@ -473,22 +509,32 @@ impl AienScheduler {
                 let chunk_size = std::cmp::min(chunk_size, prefill_budget);
 
                 // Scheduler Zero-Copy Fork Invariant: Sequence admission must inspect existing block tables in KvCache.
-                // Pre-forked branches with assigned prefix blocks skip fresh block allocation and enter decode directly without redundant prefill.
+                // Pre-forked branches skip redundant prefill and enter decode directly ONLY when the
+                // shared prefix K/V was computed by a completed prefill (PREFILL-GATE). A block table
+                // alone proves allocation, not computation: allocate_sequence only reserves and zeroes.
                 let existing_table = self
                     .kv_manager
                     .read()
                     .get_block_table(next_seq_id.to_u64())
-                    .map(|t| t.block_ids.clone());
+                    .map(|t| (t.block_ids.clone(), t.is_prefill_ready()));
 
-                if let Some(blocks) = existing_table {
-                    block_tables.insert(next_seq_id.to_u64(), blocks);
-                    seq.is_prefilled = true;
-                    seq.phase = SequencePhase::Decode;
-                    seq.prompt_tokens_prefilled = prompt_len;
-                    decode_requests.push(next_seq_id.to_u64());
-                    current_tokens += 1;
-                    self.running_sequences.push(next_seq_id);
-                    continue;
+                match existing_table {
+                    Some((blocks, ready)) if prefill_gate_allows_decode(ready) => {
+                        block_tables.insert(next_seq_id.to_u64(), blocks);
+                        seq.is_prefilled = true;
+                        seq.phase = SequencePhase::Decode;
+                        seq.prompt_tokens_prefilled = prompt_len;
+                        decode_requests.push(next_seq_id.to_u64());
+                        current_tokens += 1;
+                        self.running_sequences.push(next_seq_id);
+                        continue;
+                    }
+                    Some(_) => {
+                        // Allocated but not computed: drop the table (and its share of
+                        // any parent blocks) and fall through to allocate + prefill.
+                        let _ = self.kv_manager.write().free_sequence(next_seq_id.to_u64());
+                    }
+                    None => {}
                 }
 
                 if chunk_size == 0 {
@@ -505,6 +551,10 @@ impl AienScheduler {
                     .kv_manager
                     .write()
                     .allocate_sequence(next_seq_id.to_u64(), &seq.prompt)?;
+                self.kv_manager
+                    .write()
+                    .mark_prefill_pending(next_seq_id.to_u64())
+                    .map_err(|e| e.to_string())?;
 
                 block_tables.insert(next_seq_id.to_u64(), assigned_blocks);
 
@@ -583,6 +633,90 @@ impl AienScheduler {
         }))
     }
 
+    /// Runs a model prefill over `prompt` for a KV sequence this scheduler does
+    /// not own (a swarm root, which is never decoded), then fires the
+    /// completion fence. The prompt is sent in chunks of `prefill_chunk_size`
+    /// (capped by `max_prefill_tokens`). PrefillReady is set only after every
+    /// chunk's `execute_step` returned Ok and the backend reported processing
+    /// the whole chunk; any error leaves the table not ready.
+    ///
+    /// Returns Ok(None) when the table is already ready (nothing to compute),
+    /// Ok(Some(metrics)) after a completed prefill.
+    pub async fn prefill_detached(
+        &mut self,
+        backend: &mut (dyn AienInferenceBackend + '_),
+        kv_seq_id: u64,
+        prompt: &[u32],
+    ) -> Result<Option<StepMetrics>, String> {
+        let blocks = {
+            let mut kv = self.kv_manager.write();
+            if kv.get_block_table(kv_seq_id).is_none() {
+                kv.allocate_sequence(kv_seq_id, prompt)?;
+            }
+            let table = kv.get_block_table(kv_seq_id).ok_or_else(|| {
+                PrefillGateError::UnknownSequence { seq_id: kv_seq_id }.to_string()
+            })?;
+            if table.is_prefill_ready() {
+                return Ok(None);
+            }
+            let blocks = table.block_ids.clone();
+            kv.mark_prefill_pending(kv_seq_id)
+                .map_err(|e| e.to_string())?;
+            blocks
+        };
+
+        let chunk_len = self
+            .config
+            .prefill_chunk_size
+            .min(self.config.max_prefill_tokens)
+            .max(1);
+        let t0 = Instant::now();
+        let mut prefill_tokens = 0usize;
+
+        for span in prompt.chunks(chunk_len) {
+            self.step_id += 1;
+            let mut block_tables = HashMap::new();
+            block_tables.insert(kv_seq_id, blocks.clone());
+            let batch = ScheduledBatch {
+                prefill_requests: vec![SequenceRequest {
+                    request_id: kv_seq_id,
+                    prompt_tokens: span.to_vec(),
+                    sampling_params: aien_inference_abi::SamplingParams::default(),
+                    arrival_time_ns: 0,
+                    priority: Priority::Normal as u8,
+                }],
+                decode_requests: Vec::new(),
+                block_tables,
+                step_id: self.step_id,
+            };
+            let (_outputs, metrics) = backend.execute_step(&batch).await?;
+            if metrics.prefill_tokens_processed < span.len() {
+                return Err(format!(
+                    "prefill gate: backend processed {} of {} prompt tokens for sequence {}; not marking ready",
+                    metrics.prefill_tokens_processed,
+                    span.len(),
+                    kv_seq_id
+                ));
+            }
+            prefill_tokens += span.len();
+        }
+
+        // PREFILL-GATE completion fence: the forward over the whole prompt span completed.
+        self.kv_manager
+            .write()
+            .complete_prefill(kv_seq_id)
+            .map_err(|e| e.to_string())?;
+
+        self.metrics.total_prefill_tokens += prefill_tokens as u64;
+        let active_kv_blocks = self.kv_manager.read().allocated_block_count();
+        Ok(Some(StepMetrics {
+            prefill_tokens_processed: prefill_tokens,
+            decode_tokens_emitted: 0,
+            step_latency_us: t0.elapsed().as_micros() as u64,
+            active_kv_blocks,
+        }))
+    }
+
     /// Advances the engine by one step using the configured backend.
     pub async fn step(
         &mut self,
@@ -606,6 +740,12 @@ impl AienScheduler {
                         if seq.prompt_tokens_prefilled >= seq.prompt.len() {
                             seq.is_prefilled = true;
                             seq.phase = SequencePhase::Decode;
+                            // PREFILL-GATE completion fence: execute_step returned Ok
+                            // for the final prompt chunk, so the K/V is computed.
+                            let _ = self
+                                .kv_manager
+                                .write()
+                                .complete_prefill(prefill_req.request_id);
                         }
                     }
                 }
@@ -923,5 +1063,116 @@ mod tests {
         assert_eq!(scheduler.metrics().preempted_requests, 1);
         assert_eq!(scheduler.preempted_count(), 1);
         assert_eq!(scheduler.running_count(), 1);
+    }
+
+    // PREFILL-GATE unit tests (new readiness API).
+
+    fn gate_request(request_id: u64, prompt: Vec<u32>, max_tokens: usize) -> SequenceRequest {
+        SequenceRequest {
+            request_id,
+            prompt_tokens: prompt,
+            sampling_params: SamplingParams {
+                temperature: 0.0,
+                top_p: 1.0,
+                max_tokens,
+                stop_token_ids: vec![],
+            },
+            arrival_time_ns: 0,
+            priority: 1,
+        }
+    }
+
+    #[tokio::test]
+    async fn test_prefill_gate_scheduler_fence_marks_ready_only_after_last_chunk() {
+        let kv_manager = create_shared_kv_manager(100, 16);
+        let config = SchedulerConfig {
+            max_batch_size: 16,
+            max_batch_tokens: 1024,
+            max_prefill_tokens: 512,
+            prefill_chunk_size: 64,
+            chunk_prefill: true,
+            watermark_blocks: 2,
+        };
+        let mut scheduler = AienScheduler::new(config, kv_manager.clone());
+        let mut backend = MockInferenceBackend::new(0);
+
+        let seq = scheduler.submit_request(gate_request(0, (0..128).collect(), 2));
+        let id = seq.to_u64();
+
+        // Chunk 1 of 2: prefill issued, not complete.
+        scheduler.step(&mut backend).await.unwrap().unwrap();
+        assert_eq!(
+            kv_manager.read().prefill_state(id),
+            Some(aien_kv_cache::PrefillState::PrefillPending),
+            "a half-prefilled table must not be ready"
+        );
+
+        // Chunk 2 of 2: completion fence fires.
+        scheduler.step(&mut backend).await.unwrap().unwrap();
+        assert_eq!(
+            kv_manager.read().prefill_state(id),
+            Some(aien_kv_cache::PrefillState::PrefillReady)
+        );
+
+        let res3 = scheduler.step(&mut backend).await.unwrap().unwrap();
+        assert_eq!(res3.1.decode_tokens_emitted, 1);
+    }
+
+    #[test]
+    fn test_prefill_gate_ready_fork_enters_decode_directly() {
+        // Positive control: a branch forked from a computed root decodes
+        // without redundant prefill. The gate is not "never decode".
+        let kv_manager = create_shared_kv_manager(64, 16);
+        let mut scheduler = AienScheduler::new(SchedulerConfig::default(), kv_manager.clone());
+
+        let root = SequenceId::new(1, 1).unwrap().to_u64();
+        let child = SequenceId::new(2, 1).unwrap().to_u64();
+        let prompt: Vec<u32> = (0..20).collect();
+        {
+            let mut kv = kv_manager.write();
+            kv.allocate_sequence(root, &prompt).unwrap();
+            kv.mark_prefill_pending(root).unwrap();
+            kv.complete_prefill(root).unwrap();
+            kv.fork_prefilled(root, child).unwrap();
+        }
+
+        scheduler.submit_request(gate_request(child, prompt, 4));
+        let batch = scheduler.build_scheduled_batch().unwrap().unwrap();
+        assert!(batch.decode_requests.contains(&child));
+        assert!(batch.prefill_requests.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_prefill_gate_running_sequence_with_unready_table_is_reprefilled() {
+        let kv_manager = create_shared_kv_manager(64, 16);
+        let mut scheduler = AienScheduler::new(SchedulerConfig::default(), kv_manager.clone());
+        let mut backend = MockInferenceBackend::new(0);
+
+        let prompt: Vec<u32> = vec![1, 2, 3, 4];
+        let seq = scheduler.submit_request(gate_request(0, prompt.clone(), 8));
+        let id = seq.to_u64();
+        scheduler.step(&mut backend).await.unwrap().unwrap();
+        assert!(kv_manager
+            .read()
+            .get_block_table(id)
+            .unwrap()
+            .is_prefill_ready());
+
+        // Counterexample: the running sequence's table is replaced by an
+        // allocated-but-uncomputed one. It must be prefilled again, not decoded.
+        {
+            let mut kv = kv_manager.write();
+            kv.free_sequence(id).unwrap();
+            kv.allocate_sequence(id, &prompt).unwrap();
+        }
+        let batch = scheduler.build_scheduled_batch().unwrap().unwrap();
+        assert!(
+            !batch.decode_requests.contains(&id),
+            "PREFILL_GATE_VIOLATION: running sequence decoded over an uncomputed table"
+        );
+        assert!(batch
+            .prefill_requests
+            .iter()
+            .any(|r| r.request_id == id && r.prompt_tokens == prompt));
     }
 }

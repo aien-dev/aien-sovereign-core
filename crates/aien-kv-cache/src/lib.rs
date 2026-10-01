@@ -605,11 +605,85 @@ pub struct KvBlock {
     pub is_shared: bool,
 }
 
+/// Readiness of the K/V content behind a block table.
+///
+/// Allocated is not computed: `allocate_sequence` only reserves and zeroes
+/// blocks. Only the prefill completion fence (the point where the model
+/// forward over the prompt span returned Ok, see `complete_prefill`) may move
+/// a table to `PrefillReady`. Decode and sharing require `PrefillReady` or
+/// `SharedFrozen`. Reclaimed is the absence of the table (`free_sequence`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum PrefillState {
+    /// Blocks reserved and zeroed; no K/V computed.
+    #[default]
+    Allocated,
+    /// A model prefill over the prompt span has been issued but has not completed.
+    PrefillPending,
+    /// The completion fence fired: K/V for the prompt span is computed.
+    PrefillReady,
+    /// Ready and shared with at least one fork; the prefix is immutable.
+    SharedFrozen,
+}
+
+impl PrefillState {
+    /// True only when the prompt K/V has been computed by a completed prefill.
+    pub fn is_ready(self) -> bool {
+        matches!(
+            self,
+            PrefillState::PrefillReady | PrefillState::SharedFrozen
+        )
+    }
+}
+
+/// Typed refusal from the prefill readiness gate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PrefillGateError {
+    /// No block table exists for this sequence.
+    UnknownSequence { seq_id: u64 },
+    /// The blocks are allocated but their K/V is not computed yet.
+    NotReady { seq_id: u64, state: PrefillState },
+    /// The completion fence fired for a table that never had a prefill issued.
+    FenceWithoutPending { seq_id: u64, state: PrefillState },
+}
+
+impl std::fmt::Display for PrefillGateError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PrefillGateError::UnknownSequence { seq_id } => {
+                write!(f, "prefill gate: sequence {} has no block table", seq_id)
+            }
+            PrefillGateError::NotReady { seq_id, state } => write!(
+                f,
+                "prefill gate: sequence {} blocks are {:?}, not PrefillReady; refusing to share or decode",
+                seq_id, state
+            ),
+            PrefillGateError::FenceWithoutPending { seq_id, state } => write!(
+                f,
+                "prefill gate: completion fence for sequence {} in state {:?} without a pending prefill",
+                seq_id, state
+            ),
+        }
+    }
+}
+
+impl std::error::Error for PrefillGateError {}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct BlockTable {
     pub sequence_id: u64,
     pub block_ids: Vec<BlockId>,
     pub total_tokens: usize,
+    /// Whether the K/V behind `block_ids` has been computed. Defaults to
+    /// `Allocated` (also for tables serialized before this field existed).
+    #[serde(default)]
+    pub prefill_state: PrefillState,
+}
+
+impl BlockTable {
+    /// True only when a completed prefill computed this table's prompt K/V.
+    pub fn is_prefill_ready(&self) -> bool {
+        self.prefill_state.is_ready()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -948,16 +1022,89 @@ impl<B: aien_platform::UnifiedBuffer> AienKvManager<B> {
             assigned.push(blk);
         }
 
+        // Allocation reserves and zeroes blocks only. No K/V is computed here,
+        // so the table starts Allocated; only the prefill completion fence
+        // (`complete_prefill`) may mark it PrefillReady.
+        let prefill_state = if cfg!(feature = "prefill_mutant_ready_at_alloc") {
+            PrefillState::PrefillReady
+        } else {
+            PrefillState::Allocated
+        };
+
         self.sequence_tables.insert(
             seq_id,
             BlockTable {
                 sequence_id: seq_id,
                 block_ids: assigned.clone(),
                 total_tokens: num_tokens,
+                prefill_state,
             },
         );
 
         Ok(assigned)
+    }
+
+    /// Readiness of a sequence's K/V, or None when it has no block table.
+    pub fn prefill_state(&self, seq_id: u64) -> Option<PrefillState> {
+        self.sequence_tables.get(&seq_id).map(|t| t.prefill_state)
+    }
+
+    /// Records that a model prefill over the prompt span has been issued.
+    /// A ready table stays ready (its prefix K/V is already computed).
+    pub fn mark_prefill_pending(&mut self, seq_id: u64) -> Result<(), PrefillGateError> {
+        let table = self
+            .sequence_tables
+            .get_mut(&seq_id)
+            .ok_or(PrefillGateError::UnknownSequence { seq_id })?;
+        if !table.prefill_state.is_ready() {
+            table.prefill_state = PrefillState::PrefillPending;
+        }
+        Ok(())
+    }
+
+    /// The prefill completion fence: the ONLY setter of `PrefillReady`.
+    /// Call it only after the backend forward over the whole prompt span
+    /// returned Ok (aien-scheduler `AienScheduler::step` after
+    /// `execute_step`, and `AienScheduler::prefill_detached`). Refuses a table
+    /// that never had a prefill issued, so allocation alone can never become
+    /// ready through this path.
+    pub fn complete_prefill(&mut self, seq_id: u64) -> Result<(), PrefillGateError> {
+        let table = self
+            .sequence_tables
+            .get_mut(&seq_id)
+            .ok_or(PrefillGateError::UnknownSequence { seq_id })?;
+        match table.prefill_state {
+            PrefillState::PrefillPending => {
+                table.prefill_state = PrefillState::PrefillReady;
+                Ok(())
+            }
+            PrefillState::PrefillReady | PrefillState::SharedFrozen => Ok(()),
+            state @ PrefillState::Allocated => {
+                Err(PrefillGateError::FenceWithoutPending { seq_id, state })
+            }
+        }
+    }
+
+    /// Gated zero-copy fork: shares the parent's blocks only when the parent
+    /// K/V is computed (PrefillReady or SharedFrozen). Refuses with a typed
+    /// error otherwise, so a branch can never share allocated-but-uncomputed
+    /// blocks. On success parent and child are both SharedFrozen.
+    pub fn fork_prefilled(
+        &mut self,
+        parent_id: u64,
+        child_id: u64,
+    ) -> Result<Vec<BlockId>, PrefillGateError> {
+        let state = self
+            .prefill_state(parent_id)
+            .ok_or(PrefillGateError::UnknownSequence { seq_id: parent_id })?;
+        if !state.is_ready() {
+            return Err(PrefillGateError::NotReady {
+                seq_id: parent_id,
+                state,
+            });
+        }
+        self.fork_sequence(parent_id, child_id)
+            .map_err(|_| PrefillGateError::UnknownSequence { seq_id: parent_id })
     }
 
     pub fn fork_sequence(&mut self, parent_id: u64, child_id: u64) -> Result<Vec<BlockId>, String> {
@@ -972,12 +1119,26 @@ impl<B: aien_platform::UnifiedBuffer> AienKvManager<B> {
             self.blocks[blk_id].is_shared = true;
         }
 
+        // Readiness travels with the blocks: a fork of a ready parent freezes
+        // the shared prefix; a fork of an unready parent stays unready, so the
+        // scheduler will not decode the child (use `fork_prefilled` to refuse
+        // such a fork outright).
+        let child_state = if parent_table.prefill_state.is_ready() {
+            if let Some(parent) = self.sequence_tables.get_mut(&parent_id) {
+                parent.prefill_state = PrefillState::SharedFrozen;
+            }
+            PrefillState::SharedFrozen
+        } else {
+            parent_table.prefill_state
+        };
+
         self.sequence_tables.insert(
             child_id,
             BlockTable {
                 sequence_id: child_id,
                 block_ids: parent_table.block_ids.clone(),
                 total_tokens: parent_table.total_tokens,
+                prefill_state: child_state,
             },
         );
 
@@ -1629,5 +1790,93 @@ mod tests {
         assert_eq!(mgr.get_block_table(1).unwrap().total_tokens, 21);
         mgr.commit(res2).unwrap();
         assert_eq!(mgr.get_block_table(1).unwrap().total_tokens, 21);
+    }
+
+    // PREFILL-GATE: allocated != computed.
+
+    #[test]
+    fn test_prefill_gate_allocation_is_not_ready() {
+        let mut mgr = AienKvManager::new(16, 16);
+        mgr.allocate_sequence(7, &[1, 2, 3, 4]).unwrap();
+        assert_eq!(mgr.prefill_state(7), Some(PrefillState::Allocated));
+        assert!(
+            !mgr.get_block_table(7).unwrap().is_prefill_ready(),
+            "allocate_sequence zeroes blocks only; it must never yield a ready table"
+        );
+    }
+
+    #[test]
+    fn test_prefill_gate_fork_refuses_unready_root() {
+        let mut mgr = AienKvManager::new(16, 16);
+        mgr.allocate_sequence(1, &[1, 2, 3]).unwrap();
+        let free_before = mgr.free_block_count();
+
+        let err = mgr.fork_prefilled(1, 2).unwrap_err();
+        assert_eq!(
+            err,
+            PrefillGateError::NotReady {
+                seq_id: 1,
+                state: PrefillState::Allocated
+            }
+        );
+        assert!(
+            mgr.get_block_table(2).is_none(),
+            "refused fork must not create a child table"
+        );
+        assert_eq!(mgr.free_block_count(), free_before);
+
+        mgr.mark_prefill_pending(1).unwrap();
+        let err = mgr.fork_prefilled(1, 2).unwrap_err();
+        assert_eq!(
+            err,
+            PrefillGateError::NotReady {
+                seq_id: 1,
+                state: PrefillState::PrefillPending
+            }
+        );
+        assert_eq!(
+            mgr.fork_prefilled(99, 2).unwrap_err(),
+            PrefillGateError::UnknownSequence { seq_id: 99 }
+        );
+    }
+
+    #[test]
+    fn test_prefill_gate_fence_requires_pending_then_shares_frozen() {
+        let mut mgr = AienKvManager::new(16, 16);
+        mgr.allocate_sequence(1, &[1, 2, 3]).unwrap();
+
+        // The fence cannot be fired on a table that never had a prefill issued.
+        assert_eq!(
+            mgr.complete_prefill(1).unwrap_err(),
+            PrefillGateError::FenceWithoutPending {
+                seq_id: 1,
+                state: PrefillState::Allocated
+            }
+        );
+        assert_eq!(mgr.prefill_state(1), Some(PrefillState::Allocated));
+
+        mgr.mark_prefill_pending(1).unwrap();
+        assert_eq!(mgr.prefill_state(1), Some(PrefillState::PrefillPending));
+        mgr.complete_prefill(1).unwrap();
+        assert_eq!(mgr.prefill_state(1), Some(PrefillState::PrefillReady));
+
+        let blocks = mgr.fork_prefilled(1, 2).unwrap();
+        assert_eq!(blocks, mgr.get_block_table(1).unwrap().block_ids);
+        assert_eq!(mgr.prefill_state(1), Some(PrefillState::SharedFrozen));
+        assert_eq!(mgr.prefill_state(2), Some(PrefillState::SharedFrozen));
+        assert!(mgr.get_block_table(2).unwrap().is_prefill_ready());
+
+        // Reclaimed = table gone.
+        mgr.free_sequence(2).unwrap();
+        assert_eq!(mgr.prefill_state(2), None);
+    }
+
+    #[test]
+    fn test_prefill_gate_plain_fork_of_unready_parent_stays_unready() {
+        let mut mgr = AienKvManager::new(16, 16);
+        mgr.allocate_sequence(1, &[1, 2, 3]).unwrap();
+        mgr.fork_sequence(1, 2).unwrap();
+        assert_eq!(mgr.prefill_state(2), Some(PrefillState::Allocated));
+        assert!(!mgr.get_block_table(2).unwrap().is_prefill_ready());
     }
 }
