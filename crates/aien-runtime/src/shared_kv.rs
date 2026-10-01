@@ -63,11 +63,7 @@ pub fn build_shared_kv_runtime(
     sizing: SharedKvSizing,
 ) -> Result<(AienRuntimeSpine, NativeTransformerBackend), String> {
     let kv_manager = build_model_kv_manager(&weights, sizing.total_blocks)?;
-    let spine = AienRuntimeSpine::new(
-        sizing.arena_capacity,
-        scheduler_config,
-        kv_manager.clone(),
-    );
+    let spine = AienRuntimeSpine::new(sizing.arena_capacity, scheduler_config, kv_manager.clone());
     let backend =
         NativeTransformerBackend::with_shared_kv_and_backend(weights, tensor_backend, kv_manager);
     Ok((spine, backend))

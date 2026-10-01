@@ -1033,7 +1033,8 @@ impl NativeTransformerBackend {
     }
 
     /// Same as `forward_decode_batch`, also returning each sequence's logits
-    /// (in `decode_req_ids` order) for parity checks.
+    /// (in `decode_req_ids` order, minus any sequence ended as Preempted for
+    /// lack of a KV slot, which gets no logits) for parity checks.
     pub fn forward_decode_batch_with_logits(
         &mut self,
         decode_req_ids: &[u64],
@@ -1090,7 +1091,43 @@ impl NativeTransformerBackend {
             valid_reqs.push((req_id, last_token, pos));
         }
 
+        // 1b. Reserve append slots in KV cache for this decode step. A sequence
+        // whose slot cannot be reserved (pool exhausted) has nowhere to put this
+        // step's K/V, so it is not computed and gets no token: it is ended as
+        // Preempted and the scheduler frees its KV. Before the backend owned
+        // decode K/V, the scheduler's append check did the same
+        // (aien-scheduler/src/lib.rs, `!backend.manages_kv_cache()` branch).
+        let mut slot_failures: Vec<DecodeOutput> = Vec::new();
+        let block_slots: Vec<Option<(usize, usize)>> = if let Some(mgr) = &self.kv_manager {
+            let mut write_mgr = mgr.write();
+            let mut kept_reqs = Vec::with_capacity(valid_reqs.len());
+            let mut kept_slots = Vec::with_capacity(valid_reqs.len());
+            for req in valid_reqs.drain(..) {
+                match write_mgr.append_token_with_slot(req.0) {
+                    Ok(slot) => {
+                        kept_reqs.push(req);
+                        kept_slots.push(Some(slot));
+                    }
+                    Err(_) => {
+                        let total_tokens = self.sequences.get(&req.0).map_or(0, |s| s.tokens.len());
+                        slot_failures.push(DecodeOutput::Finished {
+                            request_id: req.0,
+                            reason: FinishReason::Preempted,
+                            total_tokens,
+                        });
+                    }
+                }
+            }
+            valid_reqs = kept_reqs;
+            kept_slots
+        } else {
+            vec![None; valid_reqs.len()]
+        };
+
         let d = valid_reqs.len();
+        if d == 0 {
+            return Ok((slot_failures, Vec::new(), 0));
+        }
 
         // 2. Allocate batch activations
         let mut x = vec![0.0f32; d * hidden_dim];
@@ -1113,16 +1150,7 @@ impl NativeTransformerBackend {
                 .embed_token(last_token, &mut x[i * hidden_dim..(i + 1) * hidden_dim]);
         }
 
-        // 4. Reserve append slots in KV cache for this decode step
-        let block_slots: Vec<Option<(usize, usize)>> = if let Some(mgr) = &self.kv_manager {
-            let mut write_mgr = mgr.write();
-            valid_reqs
-                .iter()
-                .map(|&(seq_id, _, _)| write_mgr.append_token_with_slot(seq_id).ok())
-                .collect()
-        } else {
-            vec![None; d]
-        };
+        // 4. (Decode slots were reserved in step 1b.)
 
         // 5. Transformer layer loop
         for (layer_idx, layer_w) in self.weights.layers.iter().enumerate() {
@@ -1357,8 +1385,9 @@ impl NativeTransformerBackend {
             vocab_size,
         );
 
-        // 8. Sampling and output emission
-        let mut outputs = Vec::with_capacity(d);
+        // 8. Sampling and output emission (slot failures from step 1b first)
+        let mut outputs = slot_failures;
+        outputs.reserve(d);
         let stop_tokens = [
             crate::tokenizer::TinyLlamaTokenizer::UNK_TOKEN_ID,
             crate::tokenizer::TinyLlamaTokenizer::BOS_TOKEN_ID,
