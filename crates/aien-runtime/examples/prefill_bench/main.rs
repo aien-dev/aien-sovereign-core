@@ -88,6 +88,7 @@ fn env_usize(name: &str, default: usize) -> usize {
 struct Tap {
     inner: NativeTransformerBackend,
     branches: Vec<u64>,
+    prompt_len: usize,
     launch_at: Instant,
     prefill_wall: Duration,
     prefill_tokens: usize,
@@ -137,10 +138,18 @@ impl AienInferenceBackend for Tap {
                     self.first_decode_snapshot =
                         Some((m.physical_pages, m.logical_pages, m.shared_pages));
                 }
-                self.root_token = batch
-                    .decode_requests
-                    .first()
-                    .and_then(|id| self.inner.pending_prefill_token.get(id).copied());
+                self.root_token = batch.decode_requests.first().and_then(|id| {
+                    self.inner
+                        .pending_prefill_token
+                        .get(id)
+                        .copied()
+                        .or_else(|| {
+                            self.inner
+                                .sequences
+                                .get(id)
+                                .and_then(|s| s.tokens.get(self.prompt_len).copied())
+                        })
+                });
             }
             let t0 = Instant::now();
             let (o, logits) = self
@@ -268,6 +277,7 @@ async fn run_aien(weights: &TransformerWeights, prompt: &[u32], n: usize, steps:
     let mut tap = Tap {
         inner: backend,
         branches: branches.clone(),
+        prompt_len: prompt.len(),
         launch_at,
         prefill_wall: Duration::ZERO,
         prefill_tokens: 0,
