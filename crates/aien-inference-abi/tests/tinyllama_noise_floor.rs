@@ -25,7 +25,6 @@
 //! Run: AIEN_E2E_CHECKPOINT=$HOME/models/TinyLlama-1.1B-Chat-v1.0 \
 //!   cargo test --release -p aien-inference-abi --test tinyllama_noise_floor -- --ignored --nocapture
 
-use aien_inference_abi::backend::TensorBackend;
 use aien_inference_abi::tokenizer::TinyLlamaTokenizer;
 use aien_inference_abi::transformer_backend::NativeTransformerBackend;
 use aien_inference_abi::weights::TransformerWeights;
