@@ -6,6 +6,7 @@ pub mod control;
 pub mod rsi;
 pub mod sequence;
 pub mod server;
+pub mod shared_kv;
 pub mod spine;
 pub mod swarm;
 pub mod world;
