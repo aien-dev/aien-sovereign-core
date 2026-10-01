@@ -283,13 +283,22 @@ impl AienRuntimeSpine {
             // the physical KV fork and before any branch can be scheduled for
             // decode. The KV lock is released first: the backend reads the
             // same shared KV manager to check the parent is PrefillReady.
-            let branches: Vec<u64> = self
+            // PREFILL-E2E C6 (bullet 11): the fork hook also hands each
+            // branch its own sampling params (the same ones its scheduler
+            // request carries), so branches decode with temperature and a
+            // per-branch seed instead of all taking the argmax.
+            let (branches, sampling): (Vec<u64>, SamplingParams) = self
                 .swarm_manager
                 .get_swarm(swarm_id)
-                .map(|s| s.branch_sequences.iter().map(|b| b.as_u64()).collect())
-                .unwrap_or_default();
+                .map(|s| {
+                    (
+                        s.branch_sequences.iter().map(|b| b.as_u64()).collect(),
+                        branch_sampling_params(&s.config),
+                    )
+                })
+                .unwrap_or_else(|| (Vec::new(), SamplingParams::default()));
             for child in branches {
-                backend.fork_sequence(root_kv_id, child)?;
+                backend.fork_sequence_with_sampling(root_kv_id, child, &sampling)?;
             }
         }
         Ok(prefilled)
@@ -319,12 +328,7 @@ impl AienRuntimeSpine {
                 let req = aien_inference_abi::SequenceRequest {
                     request_id: child_seq.as_u64(),
                     prompt_tokens: prompt_tokens.to_vec(),
-                    sampling_params: aien_inference_abi::SamplingParams {
-                        temperature: 0.7,
-                        top_p: 0.95,
-                        max_tokens: swarm.config.max_tokens_per_branch,
-                        stop_token_ids: vec![2],
-                    },
+                    sampling_params: branch_sampling_params(&swarm.config),
                     arrival_time_ns: self.step_counter,
                     priority: swarm.config.priority,
                 };
@@ -456,5 +460,17 @@ impl AienRuntimeSpine {
             cow_faults: metrics.cow_faults,
             gpu_utilization_pct: pressure_pct,
         }
+    }
+}
+
+/// Sampling params of every swarm branch: submitted with the branch's
+/// scheduler request (`launch_swarm`) and handed to the backend by the fork
+/// hook (`prefill_pending_swarm_roots`), so both sides agree.
+fn branch_sampling_params(config: &SwarmConfig) -> SamplingParams {
+    SamplingParams {
+        temperature: 0.7,
+        top_p: 0.95,
+        max_tokens: config.max_tokens_per_branch,
+        stop_token_ids: vec![2],
     }
 }
