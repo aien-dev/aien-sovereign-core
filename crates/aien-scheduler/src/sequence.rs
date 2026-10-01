@@ -357,6 +357,16 @@ impl SequenceArena {
         }
     }
 
+    /// Test-only: start every slot at `generation` so the u32::MAX boundary is reachable.
+    #[cfg(test)]
+    pub(crate) fn with_start_generation(capacity: usize, generation: u32) -> Self {
+        let mut arena = Self::with_capacity(capacity);
+        for slot in &mut arena.slots {
+            slot.generation = generation;
+        }
+        arena
+    }
+
     /// Allocates an active sequence slot with a non-zero generation.
     /// Retires slot if generation wraps to u32::MAX.
     pub fn allocate_slot(&mut self) -> Result<SequenceId, String> {
@@ -680,6 +690,46 @@ mod tests {
         let id2 = arena.allocate_slot().unwrap();
         assert_eq!(id2.slot, 1);
         assert_eq!(id2.generation, 1);
+    }
+
+    fn insert_test_seq(arena: &mut SequenceArena) -> SequenceId {
+        let prompt: PromptHandle = Arc::from(vec![1, 2, 3].into_boxed_slice());
+        arena
+            .insert_with(
+                prompt,
+                ModelHandle(0),
+                KvHandle(0),
+                Priority::Normal,
+                None,
+                None,
+                10,
+                SamplingParams::default(),
+                None,
+            )
+            .unwrap()
+    }
+
+    #[test]
+    fn test_generation_boundary_below_max_reuses_then_retires_at_max() {
+        let mut arena = SequenceArena::with_start_generation(2, u32::MAX - 1);
+        let id = insert_test_seq(&mut arena);
+        assert_eq!(id.generation, u32::MAX - 1);
+        assert!(arena.free_sequence(id));
+        assert_eq!(arena.retired_slots(), 0);
+
+        // Slot is reused at exactly u32::MAX.
+        let top = insert_test_seq(&mut arena);
+        assert_eq!(top.slot, id.slot);
+        assert_eq!(top.generation, u32::MAX);
+        assert!(arena.get(id).is_none());
+
+        // Freeing at u32::MAX retires; neither stale id resolves, none is reallocated.
+        assert!(arena.free_sequence(top));
+        assert_eq!(arena.retired_slots(), 1);
+        assert!(arena.get(top).is_none());
+        assert!(!arena.free_sequence(top));
+        let next = insert_test_seq(&mut arena);
+        assert_ne!(next.slot, top.slot);
     }
 
     #[test]

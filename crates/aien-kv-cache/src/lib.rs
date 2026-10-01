@@ -176,12 +176,30 @@ impl KvLayout {
             }
         };
 
-        let head_stride_bytes = config.head_dim * element_bytes;
-        let token_stride_bytes = config.num_kv_heads * head_stride_bytes;
-        let kv_plane_stride_bytes = config.block_size * token_stride_bytes;
-        let layer_stride_bytes = 2 * kv_plane_stride_bytes;
-        let block_stride_bytes = config.num_layers * layer_stride_bytes;
-        let total_bytes = config.num_blocks * block_stride_bytes;
+        let overflow = |what: &str| format!("KV layout size overflow computing {what}");
+        let head_stride_bytes = config
+            .head_dim
+            .checked_mul(element_bytes)
+            .ok_or_else(|| overflow("head_stride_bytes"))?;
+        let token_stride_bytes = config
+            .num_kv_heads
+            .checked_mul(head_stride_bytes)
+            .ok_or_else(|| overflow("token_stride_bytes"))?;
+        let kv_plane_stride_bytes = config
+            .block_size
+            .checked_mul(token_stride_bytes)
+            .ok_or_else(|| overflow("kv_plane_stride_bytes"))?;
+        let layer_stride_bytes = kv_plane_stride_bytes
+            .checked_mul(2)
+            .ok_or_else(|| overflow("layer_stride_bytes"))?;
+        let block_stride_bytes = config
+            .num_layers
+            .checked_mul(layer_stride_bytes)
+            .ok_or_else(|| overflow("block_stride_bytes"))?;
+        let total_bytes = config
+            .num_blocks
+            .checked_mul(block_stride_bytes)
+            .ok_or_else(|| overflow("total_bytes"))?;
 
         Ok(Self {
             block_stride_bytes,
@@ -1542,6 +1560,24 @@ mod tests {
         assert_eq!(desc.layer_stride_bytes, 8192);
         assert_eq!(desc.block_stride_bytes, 24576);
         assert_eq!(desc.pool_bytes, (8 * 24576) as u64);
+    }
+
+    #[test]
+    fn test_kv_layout_rejects_total_bytes_overflow() {
+        // Formal finding (arch#112): 2^45 blocks wrapped total_bytes to
+        // 6917529027641081856 instead of 25364273101350633472.
+        let cfg = KvPoolConfig {
+            num_blocks: 1usize << 45,
+            block_size: 16,
+            num_layers: 22,
+            num_kv_heads: 4,
+            head_dim: 64,
+            dtype: KvDType::Fp32,
+        };
+        let err = KvLayout::from_config(&cfg).unwrap_err();
+        assert!(err.contains("overflow"), "unexpected error: {err}");
+        assert!(cfg.layout().is_err());
+        assert!(cfg.layout_desc().is_err());
     }
 
     #[test]

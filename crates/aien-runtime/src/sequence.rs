@@ -62,6 +62,9 @@ pub struct SequenceRecord {
 
 pub struct SequenceSlot {
     pub generation: u32,
+    /// Set when the generation reached u32::MAX and was freed. A retired slot is never reused,
+    /// so a stale id can never match again (same policy as the scheduler arena).
+    pub retired: bool,
     pub record: Option<SequenceRecord>,
 }
 
@@ -71,6 +74,7 @@ pub struct SequenceArena {
     free_slots: Vec<u32>,
     active_count: usize,
     capacity: usize,
+    retired_slots_count: usize,
 }
 
 impl SequenceArena {
@@ -81,6 +85,7 @@ impl SequenceArena {
         for i in 0..capacity {
             slots.push(SequenceSlot {
                 generation: 1,
+                retired: false,
                 record: None,
             });
             free_slots.push(i as u32);
@@ -92,7 +97,23 @@ impl SequenceArena {
             free_slots,
             active_count: 0,
             capacity,
+            retired_slots_count: 0,
         }
+    }
+
+    /// Test-only: start every slot at `generation` so the u32::MAX boundary is reachable.
+    #[cfg(test)]
+    pub(crate) fn with_start_generation(capacity: usize, generation: u32) -> Self {
+        let mut arena = Self::new(capacity);
+        for slot in &mut arena.slots {
+            slot.generation = generation;
+        }
+        arena
+    }
+
+    /// Number of slots permanently retired after exhausting their generation space.
+    pub fn retired_slots(&self) -> usize {
+        self.retired_slots_count
     }
 
     pub fn allocate(
@@ -198,9 +219,15 @@ impl SequenceArena {
         if let Some(slot) = self.slots.get_mut(id.slot as usize) {
             if slot.generation == id.generation && slot.record.is_some() {
                 slot.record = None;
-                // Increment generation counter to invalidate any in-flight references (ABA protection)
-                slot.generation = slot.generation.wrapping_add(1).max(1);
-                self.free_slots.push(id.slot);
+                // Advance the generation to invalidate in-flight references (ABA protection).
+                // At u32::MAX the slot is retired instead of wrapping, so no id can ever repeat.
+                if slot.generation == u32::MAX {
+                    slot.retired = true;
+                    self.retired_slots_count += 1;
+                } else {
+                    slot.generation += 1;
+                    self.free_slots.push(id.slot);
+                }
                 self.active_count = self.active_count.saturating_sub(1);
                 return true;
             }
@@ -226,5 +253,49 @@ impl SequenceArena {
 
     pub fn iter_active_mut(&mut self) -> impl Iterator<Item = &mut SequenceRecord> {
         self.slots.iter_mut().filter_map(|s| s.record.as_mut())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn free_below_max_advances_generation_and_reuses_slot() {
+        let mut arena = SequenceArena::with_start_generation(1, u32::MAX - 1);
+        let id = arena.allocate(1, 1, 0, 0).unwrap();
+        assert_eq!(id.generation, u32::MAX - 1);
+        assert!(arena.free(id));
+        assert_eq!(arena.retired_slots(), 0);
+        let next = arena.allocate(1, 1, 0, 0).unwrap();
+        assert_eq!(next.slot, id.slot);
+        assert_eq!(next.generation, u32::MAX);
+        assert!(!arena.validate(id));
+    }
+
+    #[test]
+    fn free_at_max_retires_slot_and_never_resurrects_stale_id() {
+        let mut arena = SequenceArena::with_start_generation(2, u32::MAX);
+        let id = arena.allocate(1, 1, 0, 0).unwrap();
+        assert_eq!(id.generation, u32::MAX);
+        assert!(arena.free(id));
+        assert_eq!(arena.retired_slots(), 1);
+        assert!(!arena.validate(id));
+        assert!(!arena.free(id));
+
+        // Retired slot is not handed out again; the other slot still works.
+        let other = arena.allocate(1, 1, 0, 0).unwrap();
+        assert_ne!(other.slot, id.slot);
+        assert!(arena.validate(other));
+        assert!(!arena.validate(id));
+    }
+
+    #[test]
+    fn retired_only_slot_exhausts_capacity() {
+        let mut arena = SequenceArena::with_start_generation(1, u32::MAX);
+        let id = arena.allocate(1, 1, 0, 0).unwrap();
+        assert!(arena.free(id));
+        assert!(arena.allocate(1, 1, 0, 0).is_err());
+        assert_eq!(arena.active_count(), 0);
     }
 }
