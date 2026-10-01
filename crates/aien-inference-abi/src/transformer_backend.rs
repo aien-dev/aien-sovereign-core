@@ -1111,7 +1111,8 @@ impl NativeTransformerBackend {
     }
 
     /// Same as `forward_decode_batch`, also returning each sequence's logits
-    /// (in `decode_req_ids` order) for parity checks.
+    /// (in `decode_req_ids` order, minus any sequence ended as Preempted for
+    /// lack of a KV slot, which gets no logits) for parity checks.
     pub fn forward_decode_batch_with_logits(
         &mut self,
         decode_req_ids: &[u64],
