@@ -12,13 +12,23 @@
 //! the backend its own separate pooled manager. Then the backend writes K/V
 //! into a pool the spine never sees, `Arc::ptr_eq` is false and the spine's
 //! pool holds only zeros for the root, so this test must fail.
+//! Mutant 2 (mutant-kv.patch): the paged prefill writes K into the V slot and
+//! V into the K slot, so the pool is non-zero but the K/V-equality check fails.
+//!
+//! Second test: with the shared KV the backend reserves decode slots itself
+//! (scheduler skips its append when `manages_kv_cache()`), so a tiny pool that
+//! is full after prefill must end the request as Preempted instead of
+//! decoding a token whose K/V was never stored.
+//! Mutant 3 (mutant-slot.patch): slot failures are kept in the batch again,
+//! so the request silently continues without K/V and this test must fail.
 
 use std::sync::Arc;
 
 use aien_inference_abi::{
-    ModelConfig, NativeTransformerBackend, ReferenceCpuBackend, TransformerWeights,
+    DecodeOutput, FinishReason, ModelConfig, NativeTransformerBackend, ReferenceCpuBackend,
+    TransformerWeights,
 };
-use aien_runtime::shared_kv::{build_shared_kv_runtime, SharedKvSizing};
+use aien_runtime::shared_kv::{build_model_kv_manager, build_shared_kv_runtime, SharedKvSizing};
 use aien_runtime::swarm::SwarmConfig;
 use aien_scheduler::SchedulerConfig;
 
@@ -127,7 +137,10 @@ async fn shared_kv_root_prefill_lands_in_spine_pool_and_matches_unpaged_backend(
         .read()
         .prefill_state(root)
         .expect("root still has a KV table after prefill");
-    assert!(after.is_ready(), "root must be ready after the completion fence");
+    assert!(
+        after.is_ready(),
+        "root must be ready after the completion fence"
+    );
     assert!(!spine.swarm_manager.is_root_prefill_pending(swarm_id));
 
     // Control: an unpaged backend (no KV manager) with the same weights.
@@ -151,7 +164,11 @@ async fn shared_kv_root_prefill_lands_in_spine_pool_and_matches_unpaged_backend(
 
         let ck = &control_seq.layers[layer].flat_k;
         let cv = &control_seq.layers[layer].flat_v;
-        assert_eq!(ck.len(), prompt.len() * kv_dim, "control K length, layer {layer}");
+        assert_eq!(
+            ck.len(),
+            prompt.len() * kv_dim,
+            "control K length, layer {layer}"
+        );
         assert_eq!(k.len(), ck.len(), "spine pool K length, layer {layer}");
         assert_eq!(v.len(), cv.len(), "spine pool V length, layer {layer}");
 
@@ -173,4 +190,78 @@ async fn shared_kv_root_prefill_lands_in_spine_pool_and_matches_unpaged_backend(
             );
         }
     }
+}
+
+#[test]
+fn shared_kv_decode_slot_exhaustion_preempts_instead_of_decoding_without_kv() {
+    let config = small_config();
+    let weights = TransformerWeights::reference_test_weights(&config);
+    // block_size 4, two blocks: an 8-token prompt fills the whole pool.
+    let kv = build_model_kv_manager(&weights, 2).expect("tiny pooled KV manager");
+    let mut backend = NativeTransformerBackend::with_shared_kv_and_backend(
+        weights,
+        Arc::new(ReferenceCpuBackend::new()),
+        kv.clone(),
+    );
+    let id = 77u64;
+    let prompt: Vec<u32> = vec![5, 17, 42, 3, 88, 61, 9, 23];
+    backend
+        .prefill_sequence(id, &prompt)
+        .expect("prefill fits the pool");
+    assert_eq!(
+        kv.read().free_block_count(),
+        0,
+        "pool must be full after prefill"
+    );
+    let tokens_before = backend
+        .sequences
+        .get(&id)
+        .expect("backend sequence")
+        .tokens
+        .len();
+    let kv_tokens_before = kv
+        .read()
+        .get_block_table(id)
+        .expect("KV table")
+        .total_tokens;
+
+    let outputs = backend.forward_decode_batch(&[id]);
+
+    assert_eq!(
+        outputs.len(),
+        1,
+        "exactly one output for the one decode request"
+    );
+    match &outputs[0] {
+        DecodeOutput::Finished {
+            request_id, reason, ..
+        } => {
+            assert_eq!(*request_id, id);
+            assert_eq!(
+                *reason,
+                FinishReason::Preempted,
+                "decode slot failure must end the request as Preempted"
+            );
+        }
+        DecodeOutput::Token { token_id, .. } => panic!(
+            "SHARED_KV_VIOLATION: decode emitted token {token_id} although no K/V slot \
+             could be reserved (request silently continued without K/V)"
+        ),
+    }
+    assert_eq!(
+        backend
+            .sequences
+            .get(&id)
+            .map_or(tokens_before, |s| s.tokens.len()),
+        tokens_before,
+        "SHARED_KV_VIOLATION: backend generated a token with no K/V slot"
+    );
+    assert_eq!(
+        kv.read()
+            .get_block_table(id)
+            .expect("KV table")
+            .total_tokens,
+        kv_tokens_before,
+        "KV table must not grow when the slot reservation failed"
+    );
 }
