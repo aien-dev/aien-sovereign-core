@@ -13,13 +13,25 @@
 //!
 //! Mutant (outside the repo, ~/workspace/hive/PE2E-C5/mutant.patch): the
 //! spine no longer calls `release_sequence` (finish path and cancel drain).
-//! Then the backend keeps the root and branch entries and both tests fail.
+//! Then the backend keeps the root and branch entries and both tests fail
+//! on the backend release check with the message `RECLAIM_BACKEND_LEAK`
+//! (the forge greps the mutant output for it, once per test).
+//!
+//! State isolation: `AienRuntimeSpine::new` builds a `RuntimeController`
+//! (spine.rs:55) that loads and persists processed operation ids at
+//! `$AIEN_RUNTIME_STATE_DIR/processed_operations.json`, falling back to the
+//! shared `/tmp/aien-runtime-processed-ops.json` (control.rs:102-108,
+//! 119-127, 134-144). The cancel test sends a fixed operation id, so every
+//! run gets its own fresh state directory (as swarm_completion_test.rs:12-14
+//! does), else a rerun is refused with "Operation N already processed".
 //!
 //! Known gap, not covered here: `CancelSwarm` does not remove the cancelled
 //! branches from the scheduler's queues (no scheduler cancel API exists), so
 //! the cancel test does not step the spine again after the cancel.
 
-use std::sync::Arc;
+use std::path::PathBuf;
+use std::sync::{Arc, OnceLock};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use aien_inference_abi::{
     ModelConfig, NativeTransformerBackend, ReferenceCpuBackend, TransformerWeights,
@@ -75,7 +87,32 @@ fn c5_swarm(max_tokens: usize) -> SwarmConfig {
     }
 }
 
+/// One fresh, empty controller state directory per test process (pid +
+/// nanosecond clock, so neither a rerun nor a reused pid sees old ids). Set
+/// once: both tests run as threads of one process and the env var is
+/// process-wide, so per-test values would race.
+fn fresh_state_dir() -> &'static PathBuf {
+    static DIR: OnceLock<PathBuf> = OnceLock::new();
+    DIR.get_or_init(|| {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock after epoch")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "aien-swarm-reclaim-test-{}-{}",
+            std::process::id(),
+            nanos
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create fresh state dir");
+        std::env::set_var("AIEN_RUNTIME_STATE_DIR", &dir);
+        dir
+    })
+}
+
 fn build() -> (AienRuntimeSpine, NativeTransformerBackend) {
+    // Before the spine (and its RuntimeController) is built.
+    fresh_state_dir();
     let weights = TransformerWeights::reference_test_weights(&c5_config());
     build_shared_kv_runtime(
         weights,
@@ -106,7 +143,7 @@ fn assert_fully_reclaimed(
     let leaked: Vec<u64> = backend.sequences.keys().copied().collect();
     assert!(
         leaked.is_empty(),
-        "RECLAIM_VIOLATION: backend still holds per-sequence state for {:?} (root {}, branches {:?})",
+        "RECLAIM_VIOLATION: RECLAIM_BACKEND_LEAK backend still holds per-sequence state for {:?} (root {}, branches {:?})",
         leaked,
         swarm.root_sequence_id.as_u64(),
         swarm
