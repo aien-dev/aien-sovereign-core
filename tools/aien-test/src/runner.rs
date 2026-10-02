@@ -1,4 +1,4 @@
-//! The runner (ADR 0028, Slices A and B): one gate, or a whole grah of gates
+//! The runner (ADR 0028, Slices A and B): one gate, or a whole graph of gates
 //! run by worker threads that honour the resource pools and the dependencies.
 //!
 //! Order for one gate: parse manifest (BAD_MANIFEST means no receipt), pin the
