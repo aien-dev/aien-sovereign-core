@@ -1,0 +1,18 @@
+# Mutations of tools/aien-test/src/*.rs. Format: id<TAB>file<TAB>sed expression<TAB>what it models.
+# Each must be KILLED (a unit test fails) for run_mutants.sh to pass.
+dirty_tree_not_refused	runner.rs	s#!before.is_empty() && !opts.allow_dirty#false#	a dirty tree is no longer refused
+timeout_not_enforced	process.rs	s#rx.recv_timeout(spec.timeout)#rx.recv().map_err(|_| mpsc::RecvTimeoutError::Disconnected)#	the wall-clock timeout never fires
+rule_mismatch_passes	verdict.rs	s#position(|r| !r.1)#position(|_r| false)#	a failed expectation rule still yields PASS
+receipt_overwrite_allowed	evidence.rs	s#opts.write(true).create_new(true).mode(0o444);#opts.write(true).create(true).truncate(true).mode(0o444);#	an existing receipt can be overwritten
+exit_status_ignored	verdict.rs	s#} else if f.exit_status != Some(m.expect_exit) {#} else if false {#	a wrong exit status is not a failure
+head_move_ignored	runner.rs	s#facts.head_moved = head_after != commit;#facts.head_moved = false;#	HEAD moving during the run is not noticed
+tree_change_ignored	runner.rs	s#facts.tree_changed_after = after != before;#facts.tree_changed_after = false;#	a run that dirties the tree is not noticed
+kill_leader_only	process.rs	s#libc::kill(-pid, sig);#libc::kill(pid, sig);#	timeout kills the leader but not its process group
+escape_hex_uppercase	evidence.rs	s#u{:04x}#u{:04X}#	canonical encoding escapes control characters with upper-case hex
+duplicate_key_allowed	manifest.rs	s#if entries.iter().any(|e| e.key == k) {#if false {#	a repeated top-level key is accepted
+unknown_key_allowed	manifest.rs	s#if !KNOWN.contains(&e.key.as_str()) {#if false {#	an unknown top-level key is ignored
+missing_exec_ignored	verdict.rs	s#if !exec_exists {#if false {#	a missing run.exec is not MISSING_IMPLEMENTATION
+last_value_becomes_first	verdict.rs	s#compare(rule.op, vals\[vals.len() - 1\], &rule.value)#compare(rule.op, vals[0], \&rule.value)#	a repeated observation uses the first value, not the last
+evidence_inside_not_refused	runner.rs	s#let evidence_inside = resolve(&opts.evidence_dir).starts_with(resolve(root));#let evidence_inside = false;#	evidence may be written inside the tree under test
+operator_gate_not_blocked	verdict.rs	s#if m.requires.iter().any(|r| r == "operator") {#if false {#	a gate needing an operator runs anyway
+timeout_checked_after_exit	verdict.rs	s#let (verdict, reason) = if f.timed_out {#let (verdict, reason) = if false {#	a timed-out run is reported as rc_nonzero, not timeout
