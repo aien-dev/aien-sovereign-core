@@ -40,8 +40,8 @@ impl Drop for TempDir {
 }
 
 pub fn git(dir: &Path, args: &[&str]) {
-    let out = Command::new("git")
-        .arg("-C")
+    let mut cmd = Command::new("git");
+    cmd.arg("-C")
         .arg(dir)
         .args([
             "-c",
@@ -51,9 +51,9 @@ pub fn git(dir: &Path, args: &[&str]) {
             "-c",
             "commit.gpgsign=false",
         ])
-        .args(args)
-        .output()
-        .expect("run git");
+        .args(args);
+    // Gated like every spawn: see `process::SPAWN_GATE`.
+    let out = crate::process::output_gated(&mut cmd).expect("run git");
     assert!(
         out.status.success(),
         "git {:?} failed: {}",

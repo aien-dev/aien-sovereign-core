@@ -99,13 +99,14 @@ pub struct Outcome {
 fn git_out(root: &Path, args: &[&str]) -> Result<String, String> {
     // Several jobs may ask for the status at once; the status command must
     // not take the index lock (and fail the other caller) to refresh it.
-    let out = Command::new("git")
-        .env("GIT_OPTIONAL_LOCKS", "0")
+    let mut cmd = Command::new("git");
+    cmd.env("GIT_OPTIONAL_LOCKS", "0")
         .arg("-C")
         .arg(root)
-        .args(args)
-        .output()
-        .map_err(|e| format!("cannot run git: {e}"))?;
+        .args(args);
+    // The spawn goes through the spawn gate (see `process::SPAWN_GATE`) so a
+    // git child never holds a GPU lock descriptor past the lock's release.
+    let out = process::output_gated(&mut cmd).map_err(|e| format!("cannot run git: {e}"))?;
     if !out.status.success() {
         return Err(format!(
             "git {:?} failed: {}",

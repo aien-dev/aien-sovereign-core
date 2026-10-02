@@ -19,6 +19,15 @@
 //! lock files are created if absent and never deleted. Dropping a
 //! `GpuGuard` closes the descriptors, and the kernel releases the locks (a
 //! dead holder frees them too).
+//!
+//! Fork window: a `flock` lives as long as any copy of the open file
+//! description does, and a child that another thread forks while a lock
+//! descriptor is open holds a copy until it execs (the descriptor is
+//! close-on-exec, so it never survives the exec). The guard therefore closes
+//! its descriptors under `process::spawn_gate`, the mutex every child spawn
+//! in this crate also takes, so no child is in that window at the moment the
+//! lock is released and the next `acquire_gpu` is not refused by a lock
+//! nobody holds.
 
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
@@ -382,10 +391,18 @@ pub fn preflight(cfg: &GpuConfig) -> Option<GpuRefusal> {
     None
 }
 
-/// Descriptors holding the GPU locks. Drop releases them.
+/// Descriptors holding the GPU locks. Drop releases them, under the spawn
+/// gate (see the module comment, "Fork window").
 #[derive(Debug)]
 pub struct GpuGuard {
-    _files: Vec<File>,
+    files: Vec<File>,
+}
+
+impl Drop for GpuGuard {
+    fn drop(&mut self) {
+        let _gate = crate::process::spawn_gate();
+        self.files.clear();
+    }
 }
 
 fn open_lock(path: &Path) -> io::Result<File> {
@@ -440,15 +457,18 @@ pub fn acquire_gpu(cfg: &GpuConfig) -> Result<GpuGuard, GpuRefusal> {
         Some(f) => f,
         None => return Err(GpuRefusal::LockHeld(cfg.lock_path.clone())),
     };
-    let mut files = vec![primary];
+    let mut guard = GpuGuard {
+        files: vec![primary],
+    };
     if let Some(p) = &cfg.proof_lock_path {
         match take_lock(p, cfg.wait)? {
-            Some(f) => files.push(f),
-            // Returning drops `files`, so the first lock is not left held.
+            Some(f) => guard.files.push(f),
+            // Returning drops `guard`, so the first lock is not left held,
+            // and it is released through the spawn gate like any other.
             None => return Err(GpuRefusal::ProofLockHeld(p.clone())),
         }
     }
-    Ok(GpuGuard { _files: files })
+    Ok(guard)
 }
 
 #[cfg(test)]
@@ -584,8 +604,82 @@ mod tests {
             other => panic!("expected LockHeld, got {other:?}"),
         }
         drop(g);
-        assert!(acquire_gpu(&cfg).is_ok(), "released by drop");
+        let again = acquire_gpu(&cfg);
+        assert!(again.is_ok(), "released by drop: {again:?}");
         assert!(cfg.lock_path.exists(), "the lock file is never deleted");
+    }
+
+    /// Regression for the forge flake at e703501c: a child that is between
+    /// fork and exec holds a copy of the lock's open file description, so the
+    /// lock looked held after the guard was dropped. The child below stays in
+    /// that window for 150 ms (its `pre_exec` hook sleeps), the guard is
+    /// dropped meanwhile, and the next acquire must succeed. The drop waits for
+    /// the spawn to finish (the spawn gate), so this passes whatever the
+    /// scheduling; without the gate it fails because the child still holds the
+    /// lock when the re-acquire runs.
+    #[test]
+    fn gpu_lock_release_waits_for_a_child_between_fork_and_exec() {
+        use std::os::unix::process::CommandExt;
+        use std::process::Command;
+
+        let d = TempDir::new("gpu");
+        let cfg = GpuConfig::rooted_at(d.path());
+        let mut fds: [libc::c_int; 2] = [0, 0];
+        // SAFETY: `fds` has room for the two descriptors pipe2 writes.
+        let rc = unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) };
+        assert_eq!(rc, 0, "pipe2");
+        let (ready_r, ready_w) = (fds[0], fds[1]);
+
+        for round in 0..3 {
+            let g = acquire_gpu(&cfg).unwrap_or_else(|e| panic!("round {round}: {e}"));
+            thread::scope(|s| {
+                let spawner = s.spawn(move || {
+                    let mut cmd = Command::new("/bin/true");
+                    // SAFETY: the hook runs between fork and exec and only
+                    // calls write(2) and poll(2), which are async-signal-safe;
+                    // it allocates nothing and touches no lock.
+                    unsafe {
+                        cmd.pre_exec(move || {
+                            let byte = [1u8];
+                            libc::write(ready_w, byte.as_ptr().cast(), 1);
+                            // poll with no descriptors is a sleep: 150 ms.
+                            libc::poll(std::ptr::null_mut(), 0, 150);
+                            Ok(())
+                        });
+                    }
+                    let mut child = crate::process::spawn_gated(&mut cmd).expect("spawn");
+                    child.wait().expect("wait")
+                });
+                // The child is now alive and between fork and exec.
+                let mut pfd = libc::pollfd {
+                    fd: ready_r,
+                    events: libc::POLLIN,
+                    revents: 0,
+                };
+                // SAFETY: one valid pollfd.
+                let n = unsafe { libc::poll(&mut pfd, 1, 20_000) };
+                assert_eq!(n, 1, "round {round}: the child never reached pre_exec");
+                let mut byte = [0u8; 1];
+                // SAFETY: reads at most one byte into a one byte buffer.
+                let got = unsafe { libc::read(ready_r, byte.as_mut_ptr().cast(), 1) };
+                assert_eq!(got, 1, "round {round}: ready byte");
+
+                drop(g);
+                let again = acquire_gpu(&cfg);
+                assert!(
+                    again.is_ok(),
+                    "round {round}: a child between fork and exec kept the lock: {again:?}"
+                );
+                drop(again);
+                let status = spawner.join().expect("spawner thread");
+                assert!(status.success(), "round {round}: /bin/true failed");
+            });
+        }
+        // SAFETY: both descriptors are ours and no thread is using them now.
+        unsafe {
+            libc::close(ready_r);
+            libc::close(ready_w);
+        }
     }
 
     #[test]
@@ -651,9 +745,11 @@ mod tests {
         let mut cfg = GpuConfig::rooted_at(d.path());
         let proof = d.path().join("board/slots/gpu.lock");
         cfg.proof_lock_path = Some(proof.clone());
-        // Someone else (aien-proof) holds its lock.
+        // Someone else (aien-proof) holds its lock. A `GpuGuard` stands in for
+        // that holder so its release goes through the spawn gate too.
         let other = open_lock(&proof).unwrap();
         assert!(flock_exclusive(&other, false).unwrap());
+        let other = GpuGuard { files: vec![other] };
         match acquire_gpu(&cfg) {
             Err(GpuRefusal::ProofLockHeld(p)) => assert_eq!(p, proof),
             got => panic!("expected ProofLockHeld, got {got:?}"),

@@ -31,3 +31,5 @@ gpu_lock_shared	resources.rs	s#libc::LOCK_EX | libc::LOCK_NB#libc::LOCK_SH | lib
 slot_released_twice	resources.rs	s#\*free += 1;#*free += 2;#	finishing a job frees two pool slots instead of one
 stale_receipt_counts_as_pass	why.rs	s#Evidence::Other(_) => State::Stale,#Evidence::Other(_) => State::Pass,#	why reports a receipt from another commit as PASS
 pass_over_failed_dependency	why.rs	s#let state = if own == State::Pass && !deps_pass {#let state = if false {#	why reports PASS although a dependency is not PASS
+gpu_release_not_gated	resources.rs	s#let _gate = crate::process::spawn_gate();#let _gate = ();#	the GPU guard closes its lock descriptors without the spawn gate, so a child between fork and exec can keep the lock held after the release
+spawn_not_gated	process.rs	s#let _gate = spawn_gate();#let _gate = ();#	child spawns no longer take the spawn gate, so a lock release does not wait for a child between fork and exec

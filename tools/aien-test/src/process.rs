@@ -6,8 +6,8 @@
 use std::io::{self, Read};
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::PathBuf;
-use std::process::{Child, Command, ExitStatus, Stdio};
-use std::sync::mpsc;
+use std::process::{Child, Command, ExitStatus, Output, Stdio};
+use std::sync::{mpsc, Mutex, MutexGuard};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -53,6 +53,51 @@ fn lost() -> io::Error {
     io::Error::other("waiter thread lost")
 }
 
+/// Held around every child spawn in this crate and around the release of the
+/// GPU lock descriptors (`resources::GpuGuard`), so the two never overlap.
+///
+/// Why: `flock(2)` locks belong to the open file description, and a child
+/// created by fork (or clone) gets its own copy of the descriptor table. The
+/// lock descriptor is close-on-exec (std opens every file with `O_CLOEXEC`,
+/// `library/std/src/sys/fs/unix.rs` `open_c`), so a child drops its copy at
+/// exec. Between the fork and the exec the child still holds the file
+/// description, and the lock looks held even after the parent closed its own
+/// descriptor. With several threads (parallel gates in the runner, parallel
+/// unit tests) another thread's child can sit in that window exactly when a
+/// guard is dropped, and the next `acquire_gpu` is refused with `LockHeld`
+/// although nobody holds the lock (an intermittent failure of
+/// `gpu_lock_is_exclusive_and_released_on_drop` was seen once on the forge).
+///
+/// `Command::spawn` returns only after the child has exec'd or failed (std
+/// reads the close-on-exec pipe until it closes, `process/unix/unix.rs`
+/// `spawn`). So a spawn made under this mutex has no child left in the window
+/// when the mutex is released, and a guard released under it can only be
+/// copied by spawns that start after the descriptors are already closed.
+/// A genuinely held lock is still refused at once (ADR 0028 Decision 6).
+static SPAWN_GATE: Mutex<()> = Mutex::new(());
+
+/// Take the spawn gate. It is a leaf lock: nothing else is taken while it is
+/// held, and a poisoned gate is still usable (it guards no data).
+pub(crate) fn spawn_gate() -> MutexGuard<'static, ()> {
+    SPAWN_GATE.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// `cmd.spawn()` under the spawn gate. Every child this crate starts goes
+/// through here (or `output_gated`), never through a bare `Command::spawn`.
+pub(crate) fn spawn_gated(cmd: &mut Command) -> io::Result<Child> {
+    let _gate = spawn_gate();
+    cmd.spawn()
+}
+
+/// `cmd.output()` with the spawn under the spawn gate. Waiting for the output
+/// happens after the gate is released, so a slow child never blocks others.
+pub(crate) fn output_gated(cmd: &mut Command) -> io::Result<Output> {
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    spawn_gated(cmd)?.wait_with_output()
+}
+
 fn spawn(spec: &RunSpec) -> io::Result<Child> {
     let mut cmd = Command::new(&spec.program);
     cmd.args(&spec.args)
@@ -63,7 +108,8 @@ fn spawn(spec: &RunSpec) -> io::Result<Child> {
         .process_group(0);
     let mut attempt = 0;
     loop {
-        match cmd.spawn() {
+        // One attempt per gate hold: the retry sleep below is outside it.
+        match spawn_gated(&mut cmd) {
             Ok(c) => return Ok(c),
             // A script written moments ago can be briefly busy when another
             // thread forks while its write descriptor is still open.
