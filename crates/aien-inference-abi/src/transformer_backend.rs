@@ -10,13 +10,21 @@ use crate::{
     AienInferenceBackend, AienUsageReceipt, BranchHandle, ContextHandle, DecodeOutput,
     FinishReason, ModelConfig, SamplingParams, ScheduledBatch, StepMetrics,
 };
-use aien_kv_cache::{create_shared_kv_manager_with_pool, KvDType, KvPoolConfig, SharedKvManager};
+use aien_kv_cache::{
+    create_shared_kv_manager_with_pool, AienKvManager, KvDType, KvPoolConfig, SharedKvManager,
+};
 use async_trait::async_trait;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 static NEXT_HANDLE_ID: AtomicU64 = AtomicU64::new(1);
+
+/// Stable prefix of every error returned when the paged KV pool cannot supply
+/// the blocks a prefill append or a single-token decode step needs
+/// (PREFILL-I25). The rest of the message says how many new blocks were needed
+/// and how many were free. Callers and tests may match on this prefix.
+pub const KV_POOL_EXHAUSTED_PREFIX: &str = "KV pool exhausted:";
 
 /// splitmix64 mixing step (the generator behind java.util.SplittableRandom):
 /// a bijective 64-bit mixer, in-house, no outside crate.
@@ -282,7 +290,7 @@ impl NativeTransformerBackend {
             seq,
             seq_id,
             self.kv_manager.as_ref(),
-        );
+        )?;
 
         let logits = Self::compute_logits_impl(&self.weights, &*self.tensor_backend, &last_hidden);
         Ok(logits)
@@ -315,7 +323,7 @@ impl NativeTransformerBackend {
             seq,
             handle.0,
             self.kv_manager.as_ref(),
-        );
+        )?;
 
         Ok(handle)
     }
@@ -387,7 +395,7 @@ impl NativeTransformerBackend {
         let pos = seq.tokens.len().saturating_sub(1);
         let last_token = *seq.tokens.last().unwrap_or(&1);
 
-        let hidden = Self::forward_token_impl_paged(
+        let hidden = Self::try_forward_token_impl_paged(
             &self.weights,
             &*self.tensor_backend,
             last_token,
@@ -395,7 +403,7 @@ impl NativeTransformerBackend {
             seq,
             branch.0,
             self.kv_manager.as_ref(),
-        );
+        )?;
 
         let logits = Self::compute_logits_impl(&self.weights, &*self.tensor_backend, &hidden);
         let (sampled_tok, _) = sample_argmax(&logits);
@@ -414,7 +422,7 @@ impl NativeTransformerBackend {
             .ok_or_else(|| format!("Branch {} not found", branch.0))?;
 
         let pos = seq.tokens.len();
-        let _hidden = Self::forward_token_impl_paged(
+        let _hidden = Self::try_forward_token_impl_paged(
             &self.weights,
             &*self.tensor_backend,
             token,
@@ -422,7 +430,7 @@ impl NativeTransformerBackend {
             seq,
             branch.0,
             self.kv_manager.as_ref(),
-        );
+        )?;
         seq.tokens.push(token);
         Ok(())
     }
@@ -487,7 +495,7 @@ impl NativeTransformerBackend {
             let pos = seq.tokens.len().saturating_sub(1);
             let last_token = *seq.tokens.last().unwrap_or(&1);
 
-            let hidden = Self::forward_token_impl_paged(
+            let hidden = match Self::try_forward_token_impl_paged(
                 &self.weights,
                 &*self.tensor_backend,
                 last_token,
@@ -495,7 +503,15 @@ impl NativeTransformerBackend {
                 seq,
                 seq_id,
                 self.kv_manager.as_ref(),
-            );
+            ) {
+                Ok(hidden) => hidden,
+                Err(e) => {
+                    // This standalone generator owns its KV: do not leak the
+                    // sequence when a decode step cannot get a block.
+                    self.release_sequence(seq_id);
+                    return Err(e);
+                }
+            };
 
             let next_logits =
                 Self::compute_logits_impl(&self.weights, &*self.tensor_backend, &hidden);
@@ -634,7 +650,77 @@ impl NativeTransformerBackend {
         Self::forward_token_impl_paged(weights, backend, token_id, pos, seq_state, 0, None)
     }
 
+    /// How many fresh physical blocks `appends` consecutive
+    /// `AienKvManager::append_token_with_slot` calls on `seq_id` would
+    /// allocate, computed read-only from the table's tail block with the same
+    /// rule as aien-kv-cache `append_token_with_slot`:
+    /// - empty table: the first append allocates a block;
+    /// - shared tail block, partly filled: copy-on-write, one fresh block;
+    /// - shared tail block, full: one fresh block;
+    /// - private tail block: its free slots take appends first;
+    ///
+    /// then every further `block_size` appends need one more fresh block.
+    /// Returns 0 when the sequence has no block table (the append itself then
+    /// reports the missing sequence).
+    fn kv_blocks_needed_for_appends(kv: &AienKvManager, seq_id: u64, appends: usize) -> usize {
+        if appends == 0 {
+            return 0;
+        }
+        let Some(table) = kv.get_block_table(seq_id) else {
+            return 0;
+        };
+        let block_size = kv.block_size();
+        let mut remaining = appends;
+        let mut needed = 0usize;
+        // Free slots left in the tail block once the first append has resolved.
+        let tail_free = match table.block_ids.last().and_then(|&id| kv.get_block(id)) {
+            None => {
+                // Empty table: the first append allocates a block holding 1 token.
+                needed += 1;
+                remaining -= 1;
+                block_size - 1
+            }
+            Some(blk) if blk.is_shared => {
+                // Copy-on-write of a partly filled tail, or a fresh block after a
+                // full one: either way one fresh private block takes this append.
+                needed += 1;
+                remaining -= 1;
+                if blk.num_tokens < block_size {
+                    block_size - (blk.num_tokens + 1)
+                } else {
+                    block_size - 1
+                }
+            }
+            Some(blk) => block_size.saturating_sub(blk.num_tokens),
+        };
+        remaining -= remaining.min(tail_free);
+        needed + remaining.div_ceil(block_size)
+    }
+
+    /// `Some((needed, available))` when `appends` appends to `seq_id` need more
+    /// new blocks than the pool has free, `None` when they fit. Read-only.
+    fn kv_pool_shortfall(
+        kv: &AienKvManager,
+        seq_id: u64,
+        appends: usize,
+    ) -> Option<(usize, usize)> {
+        let needed = Self::kv_blocks_needed_for_appends(kv, seq_id, appends);
+        let available = kv.available_blocks();
+        (needed > available).then_some((needed, available))
+    }
+
+    /// Message for a capacity failure; always starts with `KV_POOL_EXHAUSTED_PREFIX`.
+    fn kv_pool_exhausted_error(what: &str, seq_id: u64, needed: usize, available: usize) -> String {
+        format!(
+            "{KV_POOL_EXHAUSTED_PREFIX} {what} for sequence {seq_id} needs {needed} new KV blocks \
+             but only {available} are free; the block table, the pool and the sequence state are unchanged"
+        )
+    }
+
     /// Forward pass executing one token forward pass through the transformer with optional paged COW KV.
+    ///
+    /// Panics when the paged KV pool cannot supply the block this token needs
+    /// (see `try_forward_token_impl_paged`, which returns the error instead).
     pub fn forward_token_impl_paged(
         weights: &TransformerWeights,
         backend: &dyn TensorBackend,
@@ -644,6 +730,28 @@ impl NativeTransformerBackend {
         seq_id: u64,
         kv_manager: Option<&SharedKvManager>,
     ) -> Vec<f32> {
+        Self::try_forward_token_impl_paged(
+            weights, backend, token_id, pos, seq_state, seq_id, kv_manager,
+        )
+        .unwrap_or_else(|e| panic!("forward_token_impl_paged: {e}"))
+    }
+
+    /// Same as `forward_token_impl_paged`, but returns a loud `Err` (message
+    /// starting with `KV_POOL_EXHAUSTED_PREFIX`) when the paged KV pool has no
+    /// block for this token, instead of continuing with no stored K/V
+    /// (PREFILL-I25). The capacity check runs before anything is mutated, so a
+    /// failed call leaves the block table, the pool and `seq_state` unchanged.
+    /// A sequence with no block table in the manager still takes the dense
+    /// per-layer cache path, as before.
+    pub fn try_forward_token_impl_paged(
+        weights: &TransformerWeights,
+        backend: &dyn TensorBackend,
+        token_id: u32,
+        pos: usize,
+        seq_state: &mut SequenceState,
+        seq_id: u64,
+        kv_manager: Option<&SharedKvManager>,
+    ) -> Result<Vec<f32>, String> {
         let hidden_dim = weights.config.hidden_dim();
         let num_heads = weights.config.num_heads;
         let num_kv_heads = weights.config.num_kv_heads;
@@ -670,10 +778,34 @@ impl NativeTransformerBackend {
         let mut activated = vec![0.0f32; intermediate_dim];
         let mut mlp_out = vec![0.0f32; hidden_dim];
 
-        let block_slot = if let Some(mgr) = kv_manager {
-            mgr.write().append_token_with_slot(seq_id).ok()
-        } else {
-            None
+        // Reserve this token's slot. A full pool is a loud error (checked before
+        // anything is mutated), never a silent fall back to "no stored K/V".
+        // A sequence with no block table in the manager keeps the dense
+        // per-layer cache path, as before.
+        let block_slot = match kv_manager {
+            Some(mgr) => {
+                let mut w = mgr.write();
+                if w.get_block_table(seq_id).is_some() {
+                    if let Some((needed, available)) = Self::kv_pool_shortfall(&w, seq_id, 1) {
+                        return Err(Self::kv_pool_exhausted_error(
+                            &format!("decode step at position {pos}"),
+                            seq_id,
+                            needed,
+                            available,
+                        ));
+                    }
+                    let slot = w.append_token_with_slot(seq_id).map_err(|e| {
+                        format!(
+                            "{KV_POOL_EXHAUSTED_PREFIX} append of position {pos} for sequence \
+                             {seq_id} failed after the capacity check: {e}"
+                        )
+                    })?;
+                    Some(slot)
+                } else {
+                    None
+                }
+            }
+            None => None,
         };
 
         for (layer_idx, layer_w) in weights.layers.iter().enumerate() {
@@ -693,9 +825,21 @@ impl NativeTransformerBackend {
             );
 
             if let (Some((block_id, slot)), Some(mgr)) = (block_slot, kv_manager) {
-                let _ = mgr
-                    .write()
-                    .write_explicit_token_kv(block_id, layer_idx, slot, &k, &v);
+                {
+                    let mut w = mgr.write();
+                    // A manager with no physical pool has nowhere to store K/V;
+                    // that case is skipped, as before. With a pool the write
+                    // cannot fail silently any more.
+                    if w.tensor_pool().is_some() {
+                        w.write_explicit_token_kv(block_id, layer_idx, slot, &k, &v)
+                            .map_err(|e| {
+                                format!(
+                                    "KV write failed for sequence {seq_id} layer {layer_idx} \
+                                     position {pos}: {e}"
+                                )
+                            })?;
+                    }
+                }
 
                 let mgr_read = mgr.read();
                 if let (Some(pool), Some(table)) =
@@ -776,7 +920,7 @@ impl NativeTransformerBackend {
 
         let mut x_final = vec![0.0f32; hidden_dim];
         backend.rmsnorm(&mut x_final, &x, &weights.final_norm, eps);
-        x_final
+        Ok(x_final)
     }
 
     pub fn compute_logits_impl(
@@ -812,9 +956,17 @@ impl NativeTransformerBackend {
             0,
             None,
         )
+        .unwrap_or_else(|e| panic!("prefill without a KV manager cannot hit the KV pool: {e}"))
     }
 
     /// Prefill all prompt tokens layer-by-layer with optional paged COW KV registration.
+    ///
+    /// In paged mode, positions beyond the block table's allocated length are
+    /// appended to the table. If the pool cannot supply the blocks those
+    /// appends need, the call fails with an `Err` starting with
+    /// `KV_POOL_EXHAUSTED_PREFIX` BEFORE anything is mutated: the block table,
+    /// the free-block count and `seq_state` stay exactly as they were, so the
+    /// same call can be retried once blocks are freed (PREFILL-I25).
     pub fn prefill_prompt_layer_by_layer_paged(
         weights: &TransformerWeights,
         backend: &dyn TensorBackend,
@@ -822,18 +974,19 @@ impl NativeTransformerBackend {
         seq_state: &mut SequenceState,
         seq_id: u64,
         kv_manager: Option<&SharedKvManager>,
-    ) -> Vec<f32> {
+    ) -> Result<Vec<f32>, String> {
         let n = prompt_tokens.len();
         if n == 0 {
-            return Vec::new();
+            return Ok(Vec::new());
         }
         // Tokens already in this sequence (earlier prefill chunks). This chunk's
         // token t sits at absolute position `offset + t`: that position drives RoPE,
         // the paged block/slot, and the causal attention length.
         let offset = seq_state.tokens.len();
         if n == 1 && offset == 0 {
-            seq_state.tokens.push(prompt_tokens[0]);
-            return Self::forward_token_impl_paged(
+            // The token is recorded only after the forward pass succeeded, so a
+            // loud KV failure leaves `seq_state` untouched.
+            let hidden = Self::try_forward_token_impl_paged(
                 weights,
                 backend,
                 prompt_tokens[0],
@@ -841,7 +994,9 @@ impl NativeTransformerBackend {
                 seq_state,
                 seq_id,
                 kv_manager,
-            );
+            )?;
+            seq_state.tokens.push(prompt_tokens[0]);
+            return Ok(hidden);
         }
 
         let hidden_dim = weights.config.hidden_dim();
@@ -853,6 +1008,49 @@ impl NativeTransformerBackend {
         let intermediate_dim = weights.config.intermediate_dim();
         let eps = weights.config.rms_norm_eps;
         let theta = weights.config.rope_theta;
+
+        // Paged mode: one physical (block, slot) per absolute position, resolved once
+        // (not per layer). Positions inside the table's allocated length (the
+        // scheduler allocates the whole prompt up front) use the existing blocks;
+        // positions beyond it are appended to the table. Resolved first, before
+        // `seq_state` is touched, so a pool that cannot hold the appends fails the
+        // whole call cleanly (PREFILL-I25).
+        let num_layers = weights.config.num_layers;
+        let mut paged_slots: Vec<Option<(usize, usize)>> = vec![None; n];
+        if let Some(mgr) = kv_manager {
+            let mut w = mgr.write();
+            if w.tensor_pool().is_some() {
+                let block_size = w.block_size();
+                if let Some(tbl) = w.get_block_table(seq_id).cloned() {
+                    let covered =
+                        |p: usize| p < tbl.total_tokens && p / block_size < tbl.block_ids.len();
+                    let appends = (0..n).filter(|&t| !covered(offset + t)).count();
+                    if let Some((needed, available)) = Self::kv_pool_shortfall(&w, seq_id, appends)
+                    {
+                        return Err(Self::kv_pool_exhausted_error(
+                            &format!("prefill of {n} tokens at position {offset}"),
+                            seq_id,
+                            needed,
+                            available,
+                        ));
+                    }
+                    for (t, slot_out) in paged_slots.iter_mut().enumerate() {
+                        let p = offset + t;
+                        *slot_out = if covered(p) {
+                            Some((tbl.block_ids[p / block_size], p % block_size))
+                        } else {
+                            let slot = w.append_token_with_slot(seq_id).map_err(|e| {
+                                format!(
+                                    "{KV_POOL_EXHAUSTED_PREFIX} append of position {p} for \
+                                     sequence {seq_id} failed after the capacity check: {e}"
+                                )
+                            })?;
+                            Some(slot)
+                        };
+                    }
+                }
+            }
+        }
 
         seq_state.tokens.extend_from_slice(prompt_tokens);
 
@@ -877,30 +1075,6 @@ impl NativeTransformerBackend {
         let mut up_batch = vec![0.0f32; n * intermediate_dim];
         let mut act_batch = vec![0.0f32; n * intermediate_dim];
         let mut mlp_out_batch = vec![0.0f32; n * hidden_dim];
-
-        // Paged mode: one physical (block, slot) per absolute position, resolved once
-        // (not per layer). Positions inside the table's allocated length (the
-        // scheduler allocates the whole prompt up front) use the existing blocks;
-        // positions beyond it are appended to the table.
-        let num_layers = weights.config.num_layers;
-        let mut paged_slots: Vec<Option<(usize, usize)>> = vec![None; n];
-        if let Some(mgr) = kv_manager {
-            let mut w = mgr.write();
-            if w.tensor_pool().is_some() {
-                let block_size = w.block_size();
-                if let Some(tbl) = w.get_block_table(seq_id).cloned() {
-                    for (t, slot_out) in paged_slots.iter_mut().enumerate() {
-                        let p = offset + t;
-                        *slot_out = if p < tbl.total_tokens && p / block_size < tbl.block_ids.len()
-                        {
-                            Some((tbl.block_ids[p / block_size], p % block_size))
-                        } else {
-                            w.append_token_with_slot(seq_id).ok()
-                        };
-                    }
-                }
-            }
-        }
 
         // The dense per-layer cache must hold K/V for positions 0..offset before this
         // chunk's attention runs. Paged mode clears it after each prefill, so rebuild
@@ -967,9 +1141,16 @@ impl NativeTransformerBackend {
                 backend.apply_rope(q_t, k_t, pos, head_dim, num_heads, num_kv_heads, theta);
 
                 if let (Some((block_id, slot)), Some(mgr)) = (paged_slots[t], kv_manager) {
-                    let _ = mgr
-                        .write()
-                        .write_explicit_token_kv(block_id, layer_idx, slot, k_t, v_t);
+                    // Slots exist only when a physical pool is attached, so this
+                    // write has nowhere to fail silently; any error is loud.
+                    mgr.write()
+                        .write_explicit_token_kv(block_id, layer_idx, slot, k_t, v_t)
+                        .map_err(|e| {
+                            format!(
+                                "KV write failed for sequence {seq_id} layer {layer_idx} \
+                                 position {pos}: {e}"
+                            )
+                        })?;
                 }
 
                 kv_cache.cached_k.push(k_t.to_vec());
@@ -1069,7 +1250,7 @@ impl NativeTransformerBackend {
         let last_x = &states[n - 1];
         let mut x_final = vec![0.0f32; hidden_dim];
         backend.rmsnorm(&mut x_final, last_x, &weights.final_norm, eps);
-        x_final
+        Ok(x_final)
     }
 
     /// Single-token forward pass executing through the configured TensorBackend trait.
@@ -1656,9 +1837,6 @@ impl AienInferenceBackend for NativeTransformerBackend {
             // PREFILL-E2E C6: decode of this request uses its sampling params.
             self.sampling
                 .insert(req.request_id, req.sampling_params.clone());
-            // A further prefill chunk: the sample held from the previous chunk was
-            // mid-prompt and is discarded.
-            self.pending_prefill_token.remove(&req.request_id);
 
             if let Some(kv_mgr) = &self.kv_manager {
                 let mut mgr = kv_mgr.write();
@@ -1682,7 +1860,12 @@ impl AienInferenceBackend for NativeTransformerBackend {
                 seq,
                 req.request_id,
                 self.kv_manager.as_ref(),
-            );
+            )?;
+            // A further prefill chunk: the sample held from the previous chunk was
+            // mid-prompt and is discarded. Done only after this chunk succeeded, so a
+            // chunk that fails loudly (KV pool exhausted) keeps the held sample and
+            // can be retried against unchanged state (PREFILL-I25).
+            self.pending_prefill_token.remove(&req.request_id);
 
             let logits =
                 Self::compute_logits_impl(&self.weights, &*self.tensor_backend, &last_hidden);
