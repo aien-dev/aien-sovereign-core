@@ -239,6 +239,7 @@ dependencies = [
 name = "aien-runtime"
 version = "0.1.0"
 dependencies = [
+ "aien-abi-core",
  "aien-inference-abi",
  "aien-kv-cache",
  "aien-platform",
@@ -262,6 +263,7 @@ dependencies = [
 name = "aien-scheduler"
 version = "0.1.0"
 dependencies = [
+ "aien-abi-core",
  "aien-inference-abi",
  "aien-kv-cache",
  "aien-platform",
@@ -4215,7 +4217,7 @@ dependencies = [
 name = "spark-max-rs"
 version = "0.1.0"
 dependencies = [
- "aien-inference-abi",
+ "aien-abi-core",
  "async-trait",
  "spark-max-cabi",
  "tempfile",

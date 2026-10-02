@@ -8,6 +8,7 @@ license.workspace = true
 
 [dependencies]
 aien-platform = { path = "../aien-platform" }
+aien-abi-core = { path = "../aien-abi-core" }
 aien-inference-abi = { path = "../aien-inference-abi" }
 aien-kv-cache = { path = "../aien-kv-cache" }
 spark-max-rs = { path = "../spark-max-rs" }

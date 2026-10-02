@@ -3,7 +3,7 @@ pub mod sequence;
 
 pub use sequence::*;
 
-use aien_inference_abi::{
+use aien_abi_core::{
     AienInferenceBackend, DecodeOutput, FinishReason, ScheduledBatch, SequenceRequest, StepMetrics,
 };
 use aien_kv_cache::{AienKvManager, PrefillGateError};
@@ -213,7 +213,7 @@ impl AienScheduler {
         &mut self,
         work: InferenceWork,
         prompt: PromptHandle,
-        sampling_params: Option<aien_inference_abi::SamplingParams>,
+        sampling_params: Option<aien_abi_core::SamplingParams>,
         sink_id: Option<CompletionSinkId>,
     ) -> Result<SequenceId, String> {
         let sampling = sampling_params.unwrap_or_default();
@@ -699,7 +699,7 @@ impl AienScheduler {
                 prefill_requests: vec![SequenceRequest {
                     request_id: kv_seq_id,
                     prompt_tokens: span.to_vec(),
-                    sampling_params: aien_inference_abi::SamplingParams::default(),
+                    sampling_params: aien_abi_core::SamplingParams::default(),
                     arrival_time_ns: 0,
                     priority: Priority::Normal as u8,
                 }],
@@ -930,7 +930,8 @@ impl AienScheduler {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use aien_inference_abi::{MockInferenceBackend, SamplingParams};
+    use aien_abi_core::SamplingParams;
+    use aien_inference_abi::MockInferenceBackend;
     use aien_kv_cache::create_shared_kv_manager;
 
     #[tokio::test]
