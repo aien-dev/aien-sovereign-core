@@ -4,6 +4,7 @@
 //! internal edge is declared in a `closure.toml` manifest and backed by a
 //! verified aien-proof receipt. Fails closed: any finding is a non-zero exit.
 
+pub mod declare;
 pub mod digest;
 pub mod error;
 pub mod graph;
