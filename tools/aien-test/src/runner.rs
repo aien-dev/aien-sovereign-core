@@ -1,29 +1,45 @@
-//! Serial, host-pool runner for one gate (ADR 0028, Slice A).
+//! The runner (ADR 0028, Slices A and B): one gate, or a whole graph of gates
+//! run by worker threads that honour the resource pools and the dependencies.
 //!
-//! Order: parse manifest (BAD_MANIFEST means no receipt), pin the commit,
-//! record whether the tree is clean, decide refusals, run, measure what
-//! changed, derive the verdict, write blobs and an immutable receipt.
+//! Order for one gate: parse manifest (BAD_MANIFEST means no receipt), pin the
+//! commit, record whether the tree is clean, decide refusals, take the GPU
+//! locks if it is a gb10 gate, run, measure what changed, derive the verdict,
+//! write blobs and an immutable receipt.
 //!
-//! Slice A choices where the ADR is silent (recorded in the PR):
+//! Choices where the ADR is silent (recorded in the PRs):
 //! - A dirty tree is refused unless the operator passes `--allow-dirty` (the
 //!   manifest grammar has no key for it and P4 forbids adding one here). A
 //!   run allowed this way is recorded with `tree_clean_before = false`.
 //! - "Tree changed after the run" means `git status --porcelain` differs from
 //!   the pre-run output, so it also catches a run that dirties an already
-//!   allowed-dirty tree further.
-//! - `pins` is always empty and `dependencies` is always empty.
+//!   allowed-dirty tree further. In a graph run the check is per job and does
+//!   not know which job wrote a file, so when one gate dirties the tree, gates
+//!   that were running at the same moment fail with it. That is the safe side.
+//! - `pins` is always empty.
 //! - `gb10_present` is a heuristic: `/dev/nvidiactl` exists (UNVERIFIED).
+//! - `run GATE` never starts a gate's dependencies. It looks their receipts
+//!   up in the evidence store, for the current commit, and says NOT_RUN if one
+//!   is not a PASS. `run_graph` starts them.
 
-use crate::evidence::{build_receipt, canonical_digest, sha256_hex, utc_string, Store, SCHEMA};
+use crate::evidence::{
+    build_receipt, canonical_digest, sha256_hex, utc_string, Index, Store, SCHEMA,
+};
+use crate::graph::Graph;
 use crate::manifest::{self, Manifest};
 use crate::process::{self, RunSpec};
-use crate::verdict::{self, derive, parse_observations, Facts, Verdict};
+use crate::resources::{
+    acquire_gpu, lock, GpuConfig, GpuGuard, Hardware, Permit, Pool, PoolSizes, Pools,
+};
+use crate::verdict::{self, campaign_verdict, derive, parse_observations, DepFact, Facts, Verdict};
 use serde_json::{json, Map, Value};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::fs;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
+use std::sync::{Condvar, Mutex};
+use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 pub struct Options {
@@ -31,15 +47,26 @@ pub struct Options {
     pub allow_dirty: bool,
     pub args_override: Option<Vec<String>>,
     pub kill_grace: Duration,
+    /// Sizes of the host and qemu pools (the gb10 pool is always 1).
+    pub pool_sizes: PoolSizes,
+    /// Which special hardware this machine has.
+    pub hardware: Hardware,
+    /// Lock files and refusal checks for gb10 gates.
+    pub gpu: GpuConfig,
 }
 
 impl Options {
+    /// Options for the real machine: detected pool sizes, hardware and GPU
+    /// paths. Tests overwrite the last three with scratch values.
     pub fn new(evidence_dir: PathBuf) -> Options {
         Options {
             evidence_dir,
             allow_dirty: false,
             args_override: None,
             kill_grace: Duration::from_secs(10),
+            pool_sizes: PoolSizes::detect(),
+            hardware: Hardware::detect(),
+            gpu: GpuConfig::detect(),
         }
     }
 }
@@ -70,12 +97,16 @@ pub struct Outcome {
 }
 
 fn git_out(root: &Path, args: &[&str]) -> Result<String, String> {
-    let out = Command::new("git")
+    // Several jobs may ask for the status at once; the status command must
+    // not take the index lock (and fail the other caller) to refresh it.
+    let mut cmd = Command::new("git");
+    cmd.env("GIT_OPTIONAL_LOCKS", "0")
         .arg("-C")
         .arg(root)
-        .args(args)
-        .output()
-        .map_err(|e| format!("cannot run git: {e}"))?;
+        .args(args);
+    // The spawn goes through the spawn gate (see `process::SPAWN_GATE`) so a
+    // git child never holds a GPU lock descriptor past the lock's release.
+    let out = process::output_gated(&mut cmd).map_err(|e| format!("cannot run git: {e}"))?;
     if !out.status.success() {
         return Err(format!(
             "git {:?} failed: {}",
@@ -91,7 +122,8 @@ pub fn repo_root(dir: &Path) -> Result<PathBuf, String> {
     Ok(PathBuf::from(s.trim()))
 }
 
-fn head(root: &Path) -> Result<String, String> {
+/// The full commit id of HEAD (40 lower-case hex digits).
+pub fn head(root: &Path) -> Result<String, String> {
     let s = git_out(root, &["rev-parse", "HEAD"])?.trim().to_string();
     if s.len() == 40
         && s.chars()
@@ -105,6 +137,22 @@ fn head(root: &Path) -> Result<String, String> {
 
 fn porcelain(root: &Path) -> Result<String, String> {
     git_out(root, &["status", "--porcelain"])
+}
+
+/// Where receipts go when `--evidence-dir` is not given:
+/// `$HOME/workspace/evidence-out/<repository directory name>`.
+pub fn default_evidence_dir(root: &Path) -> Option<PathBuf> {
+    let home = std::env::var_os("HOME")?;
+    let name = root
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "repo".to_string());
+    Some(
+        PathBuf::from(home)
+            .join("workspace")
+            .join("evidence-out")
+            .join(name),
+    )
 }
 
 /// Absolute, lexically normalized path whose deepest existing ancestor is
@@ -247,7 +295,7 @@ fn collect_files(root: &Path, rel: &str, out: &mut BTreeSet<String>) {
 /// sha256 over the canonical list of (path, file sha256) for the explicit
 /// `inputs` plus the D3 convention-implied inputs of `tests/<dir>/<name>.gate`.
 /// A listed path that does not exist is recorded with a null digest. Compiler
-/// identity is not included in Slice A because Slice A does not build.
+/// identity is not included yet because nothing here builds.
 pub fn build_inputs_digest(root: &Path, manifest_rel: Option<&Path>, m: &Manifest) -> String {
     let mut paths: BTreeSet<String> = BTreeSet::new();
     for i in &m.inputs {
@@ -297,14 +345,7 @@ pub fn build_inputs_digest(root: &Path, manifest_rel: Option<&Path>, m: &Manifes
     canonical_digest(&json!({ "inputs": entries })).unwrap_or_default()
 }
 
-fn which(name: &str) -> bool {
-    match std::env::var_os("PATH") {
-        Some(p) => std::env::split_paths(&p).any(|d| d.join(name).is_file()),
-        None => false,
-    }
-}
-
-fn machine() -> Value {
+fn machine(hw: &Hardware) -> Value {
     let kernel = fs::read_to_string("/proc/sys/kernel/osrelease")
         .map(|s| s.trim().to_string())
         .unwrap_or_default();
@@ -325,16 +366,14 @@ fn machine() -> Value {
         .and_then(|l| l.split_whitespace().nth(1))
         .and_then(|v| v.parse::<u64>().ok())
         .unwrap_or(0);
-    let gb10 = Path::new("/dev/nvidiactl").exists();
-    let qemu = which("qemu-system-aarch64") || which("qemu-system-x86_64");
     json!({
         "arch": std::env::consts::ARCH,
         "kernel_release": kernel,
         "cpu_model": cpu_model,
         "cpu_count": cpus,
         "mem_total_kib": mem_kib,
-        "gb10_present": gb10,
-        "qemu_available": qemu,
+        "gb10_present": hw.gb10_present,
+        "qemu_available": hw.qemu_available,
     })
 }
 
@@ -368,10 +407,31 @@ fn fatal<E: fmt::Display>(e: E) -> RunError {
     RunError::Fatal(e.to_string())
 }
 
-pub fn run_gate(root: &Path, manifest_path: &Path, opts: &Options) -> Result<Outcome, RunError> {
-    let bytes = fs::read(manifest_path)
-        .map_err(|e| RunError::Fatal(format!("cannot read manifest: {e}")))?;
-    let m = manifest::parse(&bytes).map_err(|e| RunError::BadManifest(e.0))?;
+/// `core.dependencies`: gate to receipt digest, sorted by gate, only for the
+/// dependencies that have a receipt for this commit.
+fn dependency_rows(deps: &[DepFact]) -> BTreeMap<String, String> {
+    deps.iter()
+        .filter_map(|d| d.receipt.as_ref().map(|r| (d.gate.clone(), r.clone())))
+        .collect()
+}
+
+/// Everything `execute_gate` needs besides the permit.
+struct Job<'a> {
+    root: &'a Path,
+    manifest_path: &'a Path,
+    m: &'a Manifest,
+    opts: &'a Options,
+    /// What is known about each `depends_on` gate right now.
+    deps: Vec<DepFact>,
+    /// How long the job waited for a pool slot.
+    pool_wait_ms: u64,
+}
+
+/// Run one gate that has been parsed already. `permit` is the pool slot the
+/// job holds (None for a lone `run`, and for gates that cannot run anyway); it
+/// is released as soon as the job ends.
+fn execute_gate(job: &Job<'_>, permit: Option<Permit<'_>>) -> Result<Outcome, RunError> {
+    let (root, m, opts) = (job.root, job.m, job.opts);
     let started = now_secs();
     let t0 = Instant::now();
 
@@ -388,16 +448,34 @@ pub fn run_gate(root: &Path, manifest_path: &Path, opts: &Options) -> Result<Out
 
     let exec_path = root.join(&m.exec);
     let exec_exists = exec_path.is_file();
-    let will_run = verdict::pre_run(&m, &refusal, exec_exists).is_none();
-
     let mut facts = Facts {
         refusal,
         exec_exists,
+        deps: job.deps.clone(),
+        gb10_present: opts.hardware.gb10_present,
+        qemu_available: opts.hardware.qemu_available,
         ..Facts::default()
     };
+
+    // A gb10 gate takes the GPU locks only when nothing else already stops it.
+    // A refusal (quiet flag, est_load, a held lock) becomes the gate's reason.
+    let gpu: Option<GpuGuard> = if m.pool() == "gb10" && verdict::pre_run(m, &facts).is_none() {
+        match acquire_gpu(&opts.gpu) {
+            Ok(g) => Some(g),
+            Err(r) => {
+                facts.refusal = Some(r.reason().to_string());
+                None
+            }
+        }
+    } else {
+        None
+    };
+    let will_run = verdict::pre_run(m, &facts).is_none();
+
     let mut stdout: Vec<u8> = Vec::new();
     let mut stderr: Vec<u8> = Vec::new();
     let mut after = before.clone();
+    let mut timeout_exceeded = false;
     if will_run {
         let spec = RunSpec {
             program: exec_path.clone(),
@@ -405,11 +483,15 @@ pub fn run_gate(root: &Path, manifest_path: &Path, opts: &Options) -> Result<Out
             cwd: root.to_path_buf(),
             timeout: Duration::from_millis(m.timeout_ms),
             kill_grace: opts.kill_grace,
+            // gb10 jobs are never killed (ADR 0028 Decision 6): the timeout
+            // only marks the receipt.
+            enforce_timeout: m.pool() != "gb10",
         };
         match process::run(&spec) {
             Ok(o) => {
                 facts.exit_status = o.exit_code.map(i64::from);
                 facts.timed_out = o.timed_out;
+                timeout_exceeded = o.timeout_exceeded;
                 stdout = o.stdout;
                 stderr = o.stderr;
             }
@@ -417,13 +499,16 @@ pub fn run_gate(root: &Path, manifest_path: &Path, opts: &Options) -> Result<Out
                 stderr = format!("aien-test: cannot run {}: {e}\n", m.exec).into_bytes();
             }
         }
+        // The job is over: close the lock descriptors at once.
+        drop(gpu);
         after = porcelain(root).map_err(RunError::Fatal)?;
         let head_after = head(root).unwrap_or_default();
         facts.tree_changed_after = after != before;
         facts.head_moved = head_after != commit;
         facts.observations = parse_observations(&stdout);
     }
-    let derived = derive(&m, &facts);
+    drop(permit);
+    let derived = derive(m, &facts);
 
     if evidence_inside {
         return Ok(Outcome {
@@ -442,12 +527,13 @@ pub fn run_gate(root: &Path, manifest_path: &Path, opts: &Options) -> Result<Out
     } else {
         None
     };
-    let manifest_rel = manifest_path
+    let manifest_rel = job
+        .manifest_path
         .strip_prefix(root)
         .ok()
         .map(|p| p.to_path_buf());
-    let inputs_digest = build_inputs_digest(root, manifest_rel.as_deref(), &m);
-    let machine_v = machine();
+    let inputs_digest = build_inputs_digest(root, manifest_rel.as_deref(), m);
+    let machine_v = machine(&opts.hardware);
     let machine_digest = canonical_digest(&machine_v).map_err(fatal)?;
 
     let observations: Vec<Value> = facts
@@ -467,6 +553,10 @@ pub fn run_gate(root: &Path, manifest_path: &Path, opts: &Options) -> Result<Out
             let passed = will_run && c == "clean_tree_after" && !facts.tree_changed_after;
             json!({ "name": c, "passed": passed })
         })
+        .collect();
+    let dependencies: Vec<Value> = dependency_rows(&facts.deps)
+        .iter()
+        .map(|(gate, receipt)| json!({ "gate": gate, "receipt": receipt }))
         .collect();
 
     let mut core = Map::new();
@@ -494,14 +584,14 @@ pub fn run_gate(root: &Path, manifest_path: &Path, opts: &Options) -> Result<Out
     core.insert("reason".into(), json!(derived.reason));
     core.insert("mutants".into(), json!([]));
     core.insert("checks".into(), Value::Array(checks));
-    core.insert("dependencies".into(), json!([]));
+    core.insert("dependencies".into(), Value::Array(dependencies.clone()));
 
     let cache_key = canonical_digest(&json!({
         "manifest_digest": m.digest,
         "binary_sha256": binary_sha,
         "build_inputs_digest": inputs_digest,
         "machine_digest": machine_digest,
-        "dependencies": [],
+        "dependencies": dependencies,
         "runner_schema": SCHEMA,
         "pins": [],
     }))
@@ -511,11 +601,11 @@ pub fn run_gate(root: &Path, manifest_path: &Path, opts: &Options) -> Result<Out
         "started_utc": utc_string(started),
         "finished_utc": utc_string(now_secs()),
         "duration_ms": t0.elapsed().as_millis() as u64,
-        "pool": "host",
-        "pool_wait_ms": 0,
+        "pool": m.pool(),
+        "pool_wait_ms": job.pool_wait_ms,
         "runner": { "name": "aien-test", "version": env!("CARGO_PKG_VERSION"), "impl": "rust" },
         "cache": { "key": cache_key, "reused": false, "reused_from": null, "mode": "disabled" },
-        "timeout_exceeded": facts.timed_out,
+        "timeout_exceeded": timeout_exceeded,
     });
 
     let receipt = build_receipt(Value::Object(core), volatile);
@@ -526,6 +616,302 @@ pub fn run_gate(root: &Path, manifest_path: &Path, opts: &Options) -> Result<Out
         receipt_path: Some(path),
         receipt_digest: Some(digest),
     })
+}
+
+/// Run one gate. Its dependencies are not started: their receipts for the
+/// current commit are read from the evidence store, and a dependency without a
+/// PASS receipt makes this gate NOT_RUN (ADR row 5).
+pub fn run_gate(root: &Path, manifest_path: &Path, opts: &Options) -> Result<Outcome, RunError> {
+    let bytes = fs::read(manifest_path)
+        .map_err(|e| RunError::Fatal(format!("cannot read manifest: {e}")))?;
+    let m = manifest::parse(&bytes).map_err(|e| RunError::BadManifest(e.0))?;
+    let deps = if m.depends_on.is_empty() {
+        Vec::new()
+    } else {
+        let commit = head(root).map_err(RunError::Fatal)?;
+        Index::load(&Store::new(&opts.evidence_dir)).dep_facts(&m.depends_on, &commit)
+    };
+    let job = Job {
+        root,
+        manifest_path,
+        m: &m,
+        opts,
+        deps,
+        pool_wait_ms: 0,
+    };
+    execute_gate(&job, None)
+}
+
+/// The result of a graph run: one outcome per selected gate, in topological
+/// order (a gate always comes after the gates it depends on).
+#[derive(Debug, Clone)]
+pub struct Campaign {
+    pub results: Vec<(String, Outcome)>,
+}
+
+impl Campaign {
+    /// ADR 0028 exit rule: any FAIL is FAIL, else the worst of the other
+    /// non-PASS verdicts, else PASS.
+    pub fn verdict(&self) -> Verdict {
+        let all: Vec<Verdict> = self.results.iter().map(|(_, o)| o.verdict).collect();
+        campaign_verdict(&all)
+    }
+
+    pub fn exit_code(&self) -> i32 {
+        self.verdict().exit_code()
+    }
+}
+
+/// What the scheduler shares between worker threads.
+struct Sched {
+    /// Selected gates whose dependencies have all finished and that have not
+    /// started.
+    ready: BTreeSet<usize>,
+    /// Per gate: selected dependencies that have not finished yet.
+    waiting_on: Vec<usize>,
+    /// When each gate became ready (for `pool_wait_ms`).
+    ready_at: Vec<Option<Instant>>,
+    results: Vec<Option<Outcome>>,
+    /// Selected gates that have not finished.
+    remaining: usize,
+    /// The first fatal error; it stops the campaign.
+    error: Option<RunError>,
+}
+
+/// A gate chosen to start, with the facts about its dependencies and the pool
+/// slot it holds (None when it cannot run, so it needs no slot).
+struct Pick<'a> {
+    node: usize,
+    deps: Vec<DepFact>,
+    permit: Option<Permit<'a>>,
+}
+
+struct GraphRun<'a> {
+    root: &'a Path,
+    graph: &'a Graph,
+    selection: &'a BTreeSet<usize>,
+    opts: &'a Options,
+    pools: Pools,
+    state: Mutex<Sched>,
+    cv: Condvar,
+    /// Facts about dependencies outside the selection, read from the store.
+    outside: BTreeMap<String, DepFact>,
+}
+
+fn pool_of(m: &Manifest) -> Pool {
+    Pool::from_name(m.pool()).unwrap_or(Pool::Host)
+}
+
+impl GraphRun<'_> {
+    fn dep_facts(&self, results: &[Option<Outcome>], node: usize) -> Vec<DepFact> {
+        self.graph
+            .node(node)
+            .manifest
+            .depends_on
+            .iter()
+            .map(|id| {
+                let finished = self.graph.index_of(id).and_then(|d| results[d].as_ref());
+                match finished {
+                    Some(o) => DepFact {
+                        gate: id.clone(),
+                        verdict: Some(o.verdict),
+                        receipt: o.receipt_digest.clone(),
+                    },
+                    None => self.outside.get(id).cloned().unwrap_or_else(|| DepFact {
+                        gate: id.clone(),
+                        verdict: None,
+                        receipt: None,
+                    }),
+                }
+            })
+            .collect()
+    }
+
+    /// Choose a ready gate that can start now. A gate whose dependencies are
+    /// not all PASS cannot run, so it needs no pool slot and goes first; any
+    /// other gate needs a free slot in its pool, and if there is none the
+    /// next ready gate is tried (so a busy gb10 pool never holds up host
+    /// work). Called with the scheduler lock held.
+    fn pick(&self, st: &mut Sched) -> Option<Pick<'_>> {
+        let mut chosen = None;
+        for &i in &st.ready {
+            let deps = self.dep_facts(&st.results, i);
+            if !deps.iter().all(|d| d.verdict == Some(Verdict::Pass)) {
+                chosen = Some(Pick {
+                    node: i,
+                    deps,
+                    permit: None,
+                });
+                break;
+            }
+            let pool = pool_of(&self.graph.node(i).manifest);
+            if let Some(permit) = self.pools.try_acquire(pool) {
+                chosen = Some(Pick {
+                    node: i,
+                    deps,
+                    permit: Some(permit),
+                });
+                break;
+            }
+        }
+        if let Some(p) = &chosen {
+            st.ready.remove(&p.node);
+        }
+        chosen
+    }
+
+    fn worker(&self) {
+        loop {
+            let (pick, waited_ms) = {
+                let mut st = lock(&self.state);
+                let pick = loop {
+                    if st.remaining == 0 || st.error.is_some() {
+                        return;
+                    }
+                    if let Some(p) = self.pick(&mut st) {
+                        break p;
+                    }
+                    st = self.cv.wait(st).unwrap_or_else(|e| e.into_inner());
+                };
+                let waited = st.ready_at[pick.node].map_or(0, |t| t.elapsed().as_millis() as u64);
+                (pick, waited)
+            };
+            let i = pick.node;
+            let node = self.graph.node(i);
+            let job = Job {
+                root: self.root,
+                manifest_path: &node.path,
+                m: &node.manifest,
+                opts: self.opts,
+                deps: pick.deps,
+                pool_wait_ms: waited_ms,
+            };
+            let permit = pick.permit;
+            let ran = catch_unwind(AssertUnwindSafe(|| execute_gate(&job, permit)));
+            let outcome = match ran {
+                Ok(r) => r,
+                Err(_) => Err(RunError::Fatal(format!(
+                    "internal error while running gate {}",
+                    node.id
+                ))),
+            };
+            let mut st = lock(&self.state);
+            match outcome {
+                Ok(o) => {
+                    st.results[i] = Some(o);
+                    st.remaining = st.remaining.saturating_sub(1);
+                    for &d in self.graph.direct_dependents(i) {
+                        if self.selection.contains(&d) {
+                            st.waiting_on[d] = st.waiting_on[d].saturating_sub(1);
+                            if st.waiting_on[d] == 0 {
+                                st.ready.insert(d);
+                                st.ready_at[d] = Some(Instant::now());
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    if st.error.is_none() {
+                        st.error = Some(e);
+                    }
+                }
+            }
+            drop(st);
+            // The permit went back inside `execute_gate`, so waiting workers
+            // can use the slot as soon as they wake.
+            self.cv.notify_all();
+        }
+    }
+}
+
+/// Run the gates in `selection` (node numbers of `graph`) with worker threads.
+/// A gate starts when every selected gate it depends on has finished and its
+/// pool has a free slot (host, qemu, or gb10 with the GPU locks). A gate whose
+/// dependency did not PASS is not started: it gets a receipt saying NOT_RUN,
+/// or the blocked verdict of the dependency (ADR rows 4 and 5). `selection`
+/// should include the dependencies of its members; one that is left out is
+/// looked up in the evidence store for the current commit.
+pub fn run_graph(
+    root: &Path,
+    graph: &Graph,
+    selection: &BTreeSet<usize>,
+    opts: &Options,
+) -> Result<Campaign, RunError> {
+    if selection.is_empty() {
+        return Ok(Campaign {
+            results: Vec::new(),
+        });
+    }
+    let commit = head(root).map_err(RunError::Fatal)?;
+    let index = Index::load(&Store::new(&opts.evidence_dir));
+    let start = Instant::now();
+
+    let mut outside: BTreeMap<String, DepFact> = BTreeMap::new();
+    let mut waiting_on = vec![0usize; graph.len()];
+    let mut ready: BTreeSet<usize> = BTreeSet::new();
+    let mut ready_at: Vec<Option<Instant>> = vec![None; graph.len()];
+    for &i in selection {
+        for &d in &graph.node(i).deps {
+            if selection.contains(&d) {
+                waiting_on[i] += 1;
+            } else {
+                let id = graph.node(d).id.clone();
+                let facts = index.dep_facts(std::slice::from_ref(&id), &commit);
+                if let Some(f) = facts.into_iter().next() {
+                    outside.insert(id, f);
+                }
+            }
+        }
+        if waiting_on[i] == 0 {
+            ready.insert(i);
+            ready_at[i] = Some(start);
+        }
+    }
+
+    let run = GraphRun {
+        root,
+        graph,
+        selection,
+        opts,
+        pools: Pools::new(opts.pool_sizes),
+        state: Mutex::new(Sched {
+            ready,
+            waiting_on,
+            ready_at,
+            results: vec![None; graph.len()],
+            remaining: selection.len(),
+            error: None,
+        }),
+        cv: Condvar::new(),
+        outside,
+    };
+
+    // Enough workers for every slot of every pool to be busy at once.
+    let workers = (opts.pool_sizes.host + opts.pool_sizes.qemu + 1)
+        .min(selection.len())
+        .max(1);
+    thread::scope(|s| {
+        for _ in 0..workers {
+            s.spawn(|| run.worker());
+        }
+    });
+
+    let mut st = lock(&run.state);
+    if let Some(e) = st.error.take() {
+        return Err(e);
+    }
+    let mut results = Vec::with_capacity(selection.len());
+    for &i in graph.order() {
+        if !selection.contains(&i) {
+            continue;
+        }
+        let id = &graph.node(i).id;
+        match st.results[i].take() {
+            Some(o) => results.push((id.clone(), o)),
+            None => return Err(RunError::Fatal(format!("no result for gate {id}"))),
+        }
+    }
+    Ok(Campaign { results })
 }
 
 #[cfg(test)]
@@ -567,6 +953,11 @@ mod tests {
         fn opts(&self) -> Options {
             let mut o = Options::new(self.ev.path().join("out"));
             o.kill_grace = Duration::from_millis(300);
+            o.hardware = Hardware {
+                gb10_present: false,
+                qemu_available: false,
+            };
+            o.gpu = GpuConfig::rooted_at(self.scratch.path());
             o
         }
     }
@@ -637,6 +1028,7 @@ mod tests {
         assert_eq!(core["binary_sha256"], sha256_hex(&script_bytes));
         let gate_bytes = fs::read(fx.manifest()).unwrap();
         assert_eq!(core["manifest_digest"], sha256_hex(&gate_bytes));
+        assert_eq!(core["dependencies"], json!([]));
         assert_eq!(r["volatile"]["pool"], "host");
         assert_eq!(r["volatile"]["timeout_exceeded"], false);
         // Receipt is read-only and named by its digest.
@@ -824,7 +1216,7 @@ mod tests {
     }
 
     #[test]
-    fn operator_and_other_pool_gates_do_not_run() {
+    fn operator_and_missing_hardware_gates_do_not_run() {
         let fx = ok_fixture();
         let gate = fs::read_to_string(fx.manifest()).unwrap();
         write_file(
@@ -849,7 +1241,7 @@ mod tests {
         let o = run(&fx, &fx.opts());
         assert_eq!(
             (o.verdict, o.reason.as_str()),
-            (Verdict::NotRun, "pool_unsupported:gb10")
+            (Verdict::BlockedHardware, "NO_GB10")
         );
         assert!(!fx.marker().exists());
     }
@@ -942,5 +1334,459 @@ mod tests {
         let t = TempDir::new("res");
         let p = resolve(&t.path().join("a/b/../c"));
         assert_eq!(p, t.path().join("a/c"));
+    }
+
+    // ---- Slice B: pools, dependencies, graph runs ----
+
+    fn gb10_fixture(script: &str, timeout: &str) -> Fx {
+        let fx = fixture(script, 0, &[], timeout, "");
+        let gate = fs::read_to_string(fx.manifest()).unwrap();
+        write_file(
+            fx.repo.path(),
+            "tests/t.gate",
+            &gate.replace("  - host\n", "  - gb10\n"),
+            false,
+        );
+        git(fx.repo.path(), &["add", "-A"]);
+        git(fx.repo.path(), &["commit", "-q", "-m", "gb10"]);
+        fx
+    }
+
+    fn gb10_opts(fx: &Fx) -> Options {
+        let mut o = fx.opts();
+        o.hardware.gb10_present = true;
+        o
+    }
+
+    const TOUCH_MARKER: &str = "#!/bin/sh\ntouch \"$1\"\n";
+
+    #[test]
+    fn gb10_gate_runs_under_the_gpu_lock_and_records_its_pool() {
+        let fx = gb10_fixture(TOUCH_MARKER, "20s");
+        let opts = gb10_opts(&fx);
+        let o = run(&fx, &opts);
+        assert_eq!(o.verdict, Verdict::Pass, "reason {}", o.reason);
+        assert!(fx.marker().exists());
+        let r = read_json(&o.receipt_path.unwrap());
+        assert_eq!(r["volatile"]["pool"], "gb10");
+        assert_eq!(r["volatile"]["timeout_exceeded"], false);
+        assert_eq!(r["core"]["machine"]["gb10_present"], true);
+        assert!(opts.gpu.lock_path.exists(), "the lock file is created");
+        assert!(
+            acquire_gpu(&opts.gpu).is_ok(),
+            "the lock is released after the job"
+        );
+    }
+
+    #[test]
+    fn gb10_gate_without_the_hardware_is_blocked() {
+        let fx = gb10_fixture(TOUCH_MARKER, "20s");
+        let o = run(&fx, &fx.opts());
+        assert_eq!(
+            (o.verdict, o.reason.as_str()),
+            (Verdict::BlockedHardware, "NO_GB10")
+        );
+        assert!(!fx.marker().exists());
+    }
+
+    #[test]
+    fn gb10_gate_is_refused_while_the_quiet_flag_exists() {
+        let fx = gb10_fixture(TOUCH_MARKER, "20s");
+        let opts = gb10_opts(&fx);
+        let flag = opts.gpu.quiet_flag.clone().unwrap();
+        fs::write(&flag, "hold: testing\n").unwrap();
+        let o = run(&fx, &opts);
+        assert_eq!(
+            (o.verdict, o.reason.as_str()),
+            (Verdict::NotRun, "quiet_flag")
+        );
+        assert!(!fx.marker().exists());
+        assert_eq!(fs::read_to_string(&flag).unwrap(), "hold: testing\n");
+        let r = read_json(&o.receipt_path.unwrap());
+        assert_eq!(r["core"]["reason"], "quiet_flag");
+    }
+
+    #[test]
+    fn gb10_gate_is_refused_while_another_holder_has_the_lock() {
+        let fx = gb10_fixture(TOUCH_MARKER, "20s");
+        let opts = gb10_opts(&fx);
+        let held = acquire_gpu(&opts.gpu).unwrap();
+        let o = run(&fx, &opts);
+        assert_eq!(
+            (o.verdict, o.reason.as_str()),
+            (Verdict::NotRun, "gpu_lock")
+        );
+        assert!(!fx.marker().exists(), "a refused job must not run");
+        drop(held);
+        let o = run(&fx, &opts);
+        assert_eq!(o.verdict, Verdict::Pass, "reason {}", o.reason);
+        assert!(fx.marker().exists());
+    }
+
+    #[test]
+    fn gb10_timeout_is_advisory_and_never_kills_the_job() {
+        let fx = gb10_fixture("#!/bin/sh\nsleep 1\ntouch \"$1\"\n", "300ms");
+        let o = run(&fx, &gb10_opts(&fx));
+        assert_eq!(o.verdict, Verdict::Pass, "reason {}", o.reason);
+        assert!(fx.marker().exists(), "the job must be left to finish");
+        let r = read_json(&o.receipt_path.unwrap());
+        assert_eq!(r["volatile"]["timeout_exceeded"], true);
+    }
+
+    /// `(gate id, depends_on ids separated by spaces, requires, script)`.
+    type GateSpec = (&'static str, &'static str, &'static str, String);
+
+    fn graph_gate_text(id: &str, deps: &str, requires: &str) -> String {
+        let dep_block = if deps.trim().is_empty() {
+            String::new()
+        } else {
+            format!(
+                "depends_on:\n{}",
+                deps.split_whitespace()
+                    .map(|d| format!("  - {d}\n"))
+                    .collect::<String>()
+            )
+        };
+        format!(
+            "gate: {id}\nmanifest_version: 1\nowner: t\nrequires:\n  - {requires}\nrun:\n  exec: tools/{id}.sh\n  args: []\nexpects:\n  exit: 0\n  observe: []\n  verdict: PASS\ntimeout: 20s\n{dep_block}"
+        )
+    }
+
+    /// Script that appends `ran-<id>` to the shared log and exits with `exit`.
+    fn logging(id: &str, exit: i32) -> String {
+        format!("#!/bin/sh\necho ran-{id} >> \"@S@/log\"\nexit {exit}\n")
+    }
+
+    /// Script that logs `start-<id>`, takes a moment, then logs `end-<id>`.
+    fn slow(id: &str) -> String {
+        format!(
+            "#!/bin/sh\necho start-{id} >> \"@S@/log\"\nsleep 0.2\necho end-{id} >> \"@S@/log\"\n"
+        )
+    }
+
+    /// Script that proves another job is running at the same time: it waits
+    /// (at most about ten seconds) for the other script's start marker.
+    fn rendezvous(me: &str, other: &str) -> String {
+        format!(
+            "#!/bin/sh\ntouch \"@S@/started-{me}\"\ni=0\nwhile [ ! -f \"@S@/started-{other}\" ] && [ $i -lt 100 ]; do sleep 0.1; i=$((i+1)); done\nif [ -f \"@S@/started-{other}\" ]; then touch \"@S@/saw-{me}\"; fi\n"
+        )
+    }
+
+    struct Gfx {
+        repo: TempDir,
+        ev: TempDir,
+        scratch: TempDir,
+    }
+
+    /// A repository with one gate (tests/<id>.gate) and script
+    /// (tools/<id>.sh) per entry; `@S@` in a script is the scratch directory.
+    fn gfx(gates: &[GateSpec]) -> Gfx {
+        let scratch = TempDir::new("gscratch");
+        let s = scratch.path().to_str().unwrap().to_string();
+        let mut files: Vec<(String, String, bool)> = Vec::new();
+        for (id, deps, requires, script) in gates {
+            files.push((format!("tools/{id}.sh"), script.replace("@S@", &s), true));
+            files.push((
+                format!("tests/{id}.gate"),
+                graph_gate_text(id, deps, requires),
+                false,
+            ));
+        }
+        let refs: Vec<(&str, &str, bool)> = files
+            .iter()
+            .map(|(p, c, x)| (p.as_str(), c.as_str(), *x))
+            .collect();
+        let repo = init_repo("grepo", &refs);
+        Gfx {
+            repo,
+            ev: TempDir::new("gev"),
+            scratch,
+        }
+    }
+
+    impl Gfx {
+        fn gate_path(&self, id: &str) -> PathBuf {
+            self.repo.path().join(format!("tests/{id}.gate"))
+        }
+
+        fn opts(&self) -> Options {
+            let mut o = Options::new(self.ev.path().join("out"));
+            o.kill_grace = Duration::from_millis(300);
+            o.hardware = Hardware {
+                gb10_present: false,
+                qemu_available: false,
+            };
+            o.gpu = GpuConfig::rooted_at(self.scratch.path());
+            o.pool_sizes = PoolSizes { host: 2, qemu: 1 };
+            o
+        }
+
+        fn graph(&self) -> Graph {
+            crate::graph::load(self.repo.path()).unwrap()
+        }
+
+        fn campaign(&self, opts: &Options) -> Campaign {
+            let g = self.graph();
+            let all: BTreeSet<usize> = (0..g.len()).collect();
+            run_graph(self.repo.path(), &g, &all, opts).unwrap()
+        }
+
+        fn log(&self) -> Vec<String> {
+            fs::read_to_string(self.scratch.path().join("log"))
+                .unwrap_or_default()
+                .lines()
+                .map(|l| l.to_string())
+                .collect()
+        }
+    }
+
+    fn outcome<'a>(c: &'a Campaign, id: &str) -> &'a Outcome {
+        &c.results
+            .iter()
+            .find(|(g, _)| g == id)
+            .expect("gate is in the campaign")
+            .1
+    }
+
+    fn verdict_and_reason<'a>(c: &'a Campaign, id: &str) -> (Verdict, &'a str) {
+        let o = outcome(c, id);
+        (o.verdict, o.reason.as_str())
+    }
+
+    #[test]
+    fn a_chain_runs_in_order_and_each_receipt_names_its_dependencies() {
+        let fx = gfx(&[
+            ("G-A", "", "host", logging("G-A", 0)),
+            ("G-B", "G-A", "host", logging("G-B", 0)),
+            ("G-C", "G-B", "host", logging("G-C", 0)),
+        ]);
+        let c = fx.campaign(&fx.opts());
+        assert_eq!(c.exit_code(), 0);
+        let ids: Vec<&str> = c.results.iter().map(|(g, _)| g.as_str()).collect();
+        assert_eq!(ids, vec!["G-A", "G-B", "G-C"]);
+        assert!(c.results.iter().all(|(_, o)| o.verdict == Verdict::Pass));
+        assert_eq!(fx.log(), vec!["ran-G-A", "ran-G-B", "ran-G-C"]);
+        let a = outcome(&c, "G-A").receipt_digest.clone().unwrap();
+        let ra = read_json(outcome(&c, "G-A").receipt_path.as_ref().unwrap());
+        let rb = read_json(outcome(&c, "G-B").receipt_path.as_ref().unwrap());
+        assert_eq!(ra["core"]["dependencies"], json!([]));
+        assert_eq!(
+            rb["core"]["dependencies"],
+            json!([{ "gate": "G-A", "receipt": a }])
+        );
+        assert!(rb["volatile"]["pool_wait_ms"].is_u64());
+    }
+
+    #[test]
+    fn a_failed_dependency_makes_dependents_not_run_with_the_reason_recorded() {
+        let fx = gfx(&[
+            ("G-A", "", "host", logging("G-A", 1)),
+            ("G-B", "G-A", "host", logging("G-B", 0)),
+            ("G-C", "G-B", "host", logging("G-C", 0)),
+            ("G-D", "", "host", logging("G-D", 0)),
+        ]);
+        let c = fx.campaign(&fx.opts());
+        assert_eq!(verdict_and_reason(&c, "G-A"), (Verdict::Fail, "rc_nonzero"));
+        assert_eq!(
+            verdict_and_reason(&c, "G-B"),
+            (Verdict::NotRun, "DEP_NOT_PASS:G-A")
+        );
+        assert_eq!(
+            verdict_and_reason(&c, "G-C"),
+            (Verdict::NotRun, "DEP_NOT_PASS:G-B")
+        );
+        assert_eq!(verdict_and_reason(&c, "G-D"), (Verdict::Pass, ""));
+        assert_eq!(c.exit_code(), 1);
+        let mut log = fx.log();
+        log.sort();
+        assert_eq!(log, vec!["ran-G-A", "ran-G-D"], "B and C must not run");
+        let a = outcome(&c, "G-A").receipt_digest.clone().unwrap();
+        let rb = read_json(outcome(&c, "G-B").receipt_path.as_ref().unwrap());
+        assert_eq!(rb["core"]["derived_verdict"], "NOT_RUN");
+        assert_eq!(rb["core"]["reason"], "DEP_NOT_PASS:G-A");
+        assert_eq!(rb["core"]["exit_status"], Value::Null);
+        assert_eq!(
+            rb["core"]["dependencies"],
+            json!([{ "gate": "G-A", "receipt": a }])
+        );
+    }
+
+    #[test]
+    fn a_blocked_dependency_blocks_its_dependents_the_same_way() {
+        let fx = gfx(&[
+            ("G-A", "", "gb10", logging("G-A", 0)),
+            ("G-B", "G-A", "host", logging("G-B", 0)),
+            ("G-C", "G-B", "host", logging("G-C", 0)),
+        ]);
+        let c = fx.campaign(&fx.opts());
+        assert_eq!(
+            verdict_and_reason(&c, "G-A"),
+            (Verdict::BlockedHardware, "NO_GB10")
+        );
+        assert_eq!(
+            verdict_and_reason(&c, "G-B"),
+            (Verdict::BlockedHardware, "DEP_BLOCKED:G-A")
+        );
+        assert_eq!(
+            verdict_and_reason(&c, "G-C"),
+            (Verdict::BlockedHardware, "DEP_BLOCKED:G-B")
+        );
+        assert!(fx.log().is_empty(), "nothing may run");
+        assert_eq!(c.exit_code(), 3);
+    }
+
+    #[test]
+    fn independent_gates_run_at_the_same_time_when_the_pool_allows() {
+        let fx = gfx(&[
+            ("G-A", "", "host", rendezvous("a", "b")),
+            ("G-B", "", "host", rendezvous("b", "a")),
+        ]);
+        let c = fx.campaign(&fx.opts());
+        assert_eq!(c.exit_code(), 0);
+        assert!(fx.scratch.path().join("saw-a").exists(), "A never saw B");
+        assert!(fx.scratch.path().join("saw-b").exists(), "B never saw A");
+    }
+
+    #[test]
+    fn a_pool_of_one_runs_gates_one_at_a_time() {
+        let fx = gfx(&[
+            ("G-A", "", "host", slow("G-A")),
+            ("G-B", "", "host", slow("G-B")),
+            ("G-C", "", "host", slow("G-C")),
+        ]);
+        let mut opts = fx.opts();
+        opts.pool_sizes = PoolSizes { host: 1, qemu: 1 };
+        let c = fx.campaign(&opts);
+        assert_eq!(c.exit_code(), 0);
+        let log = fx.log();
+        assert_eq!(log.len(), 6, "{log:?}");
+        for pair in log.chunks(2) {
+            assert!(pair[0].starts_with("start-"), "{log:?}");
+            assert_eq!(pair[1], pair[0].replacen("start-", "end-", 1), "{log:?}");
+        }
+    }
+
+    #[test]
+    fn gb10_and_host_gates_run_together_and_record_their_pools() {
+        let fx = gfx(&[
+            ("G-A", "", "gb10", logging("G-A", 0)),
+            ("G-B", "", "host", logging("G-B", 0)),
+        ]);
+        let mut opts = fx.opts();
+        opts.hardware.gb10_present = true;
+        let c = fx.campaign(&opts);
+        assert_eq!(c.exit_code(), 0);
+        let r = read_json(outcome(&c, "G-A").receipt_path.as_ref().unwrap());
+        assert_eq!(r["volatile"]["pool"], "gb10");
+        let r = read_json(outcome(&c, "G-B").receipt_path.as_ref().unwrap());
+        assert_eq!(r["volatile"]["pool"], "host");
+    }
+
+    #[test]
+    fn a_held_gpu_lock_refuses_the_gb10_gate_and_its_dependents_do_not_run() {
+        let fx = gfx(&[
+            ("G-A", "", "gb10", logging("G-A", 0)),
+            ("G-B", "G-A", "host", logging("G-B", 0)),
+        ]);
+        let mut opts = fx.opts();
+        opts.hardware.gb10_present = true;
+        let held = acquire_gpu(&opts.gpu).unwrap();
+        let c = fx.campaign(&opts);
+        drop(held);
+        assert_eq!(verdict_and_reason(&c, "G-A"), (Verdict::NotRun, "gpu_lock"));
+        assert_eq!(
+            verdict_and_reason(&c, "G-B"),
+            (Verdict::NotRun, "DEP_NOT_PASS:G-A")
+        );
+        assert!(fx.log().is_empty());
+        assert_eq!(c.exit_code(), 2);
+    }
+
+    #[test]
+    fn run_gate_reads_dependency_receipts_from_the_store() {
+        let fx = gfx(&[
+            ("G-A", "", "host", logging("G-A", 0)),
+            ("G-B", "G-A", "host", logging("G-B", 0)),
+        ]);
+        let opts = fx.opts();
+        let run_one = |id: &str| run_gate(fx.repo.path(), &fx.gate_path(id), &opts).unwrap();
+        let o = run_one("G-B");
+        assert_eq!(
+            (o.verdict, o.reason.as_str()),
+            (Verdict::NotRun, "DEP_NOT_PASS:G-A")
+        );
+        assert!(fx.log().is_empty(), "no receipt for A, so B must not run");
+        assert_eq!(run_one("G-A").verdict, Verdict::Pass);
+        let o = run_one("G-B");
+        assert_eq!(o.verdict, Verdict::Pass, "reason {}", o.reason);
+        assert_eq!(fx.log(), vec!["ran-G-A", "ran-G-B"]);
+        // A receipt for an older commit does not count.
+        git(
+            fx.repo.path(),
+            &["commit", "-q", "--allow-empty", "-m", "next"],
+        );
+        let o = run_one("G-B");
+        assert_eq!(
+            (o.verdict, o.reason.as_str()),
+            (Verdict::NotRun, "DEP_NOT_PASS:G-A")
+        );
+        assert_eq!(fx.log().len(), 2);
+    }
+
+    #[test]
+    fn a_dependency_outside_the_selection_comes_from_the_store() {
+        let fx = gfx(&[
+            ("G-A", "", "host", logging("G-A", 0)),
+            ("G-B", "G-A", "host", logging("G-B", 0)),
+        ]);
+        let opts = fx.opts();
+        let g = fx.graph();
+        let only_b: BTreeSet<usize> = [g.index_of("G-B").unwrap()].into_iter().collect();
+        let c = run_graph(fx.repo.path(), &g, &only_b, &opts).unwrap();
+        assert_eq!(c.results.len(), 1);
+        assert_eq!(
+            verdict_and_reason(&c, "G-B"),
+            (Verdict::NotRun, "DEP_NOT_PASS:G-A")
+        );
+        let a = run_gate(fx.repo.path(), &fx.gate_path("G-A"), &opts).unwrap();
+        assert_eq!(a.verdict, Verdict::Pass);
+        let c = run_graph(fx.repo.path(), &g, &only_b, &opts).unwrap();
+        assert_eq!(verdict_and_reason(&c, "G-B"), (Verdict::Pass, ""));
+    }
+
+    #[test]
+    fn an_empty_selection_is_an_empty_campaign() {
+        let fx = gfx(&[("G-A", "", "host", logging("G-A", 0))]);
+        let g = fx.graph();
+        let c = run_graph(fx.repo.path(), &g, &BTreeSet::new(), &fx.opts()).unwrap();
+        assert!(c.results.is_empty());
+        assert_eq!(c.exit_code(), 0);
+    }
+
+    #[test]
+    fn a_fatal_error_stops_the_campaign_instead_of_hanging() {
+        let fx = gfx(&[
+            ("G-A", "", "host", logging("G-A", 0)),
+            ("G-B", "G-A", "host", logging("G-B", 0)),
+            ("G-C", "", "host", logging("G-C", 0)),
+        ]);
+        let blocker = fx.scratch.path().join("not-a-directory");
+        fs::write(&blocker, "x").unwrap();
+        let mut opts = fx.opts();
+        opts.evidence_dir = blocker.join("out");
+        let g = fx.graph();
+        let all: BTreeSet<usize> = (0..g.len()).collect();
+        match run_graph(fx.repo.path(), &g, &all, &opts) {
+            Err(RunError::Fatal(_)) => {}
+            other => panic!("expected a fatal error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn default_evidence_dir_is_named_after_the_repository() {
+        let p = default_evidence_dir(Path::new("/some/where/my-repo"));
+        if let Some(p) = p {
+            assert!(p.ends_with("workspace/evidence-out/my-repo"), "{p:?}");
+        }
     }
 }
