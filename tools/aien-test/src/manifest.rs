@@ -302,10 +302,9 @@ pub fn parse_duration_ms(s: &str) -> Option<u64> {
         (n, 1000)
     } else if let Some(n) = s.strip_suffix('m') {
         (n, 60_000)
-    } else if let Some(n) = s.strip_suffix('h') {
-        (n, 3_600_000)
     } else {
-        return None;
+        let n = s.strip_suffix('h')?;
+        (n, 3_600_000)
     };
     if num.is_empty() || !num.chars().all(|c| c.is_ascii_digit()) {
         return None;
