@@ -658,6 +658,7 @@ impl NativeTransformerBackend {
     /// - shared tail block, partly filled: copy-on-write, one fresh block;
     /// - shared tail block, full: one fresh block;
     /// - private tail block: its free slots take appends first;
+    ///
     /// then every further `block_size` appends need one more fresh block.
     /// Returns 0 when the sequence has no block table (the append itself then
     /// reports the missing sequence).
