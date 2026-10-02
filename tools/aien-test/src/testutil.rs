@@ -1,0 +1,87 @@
+//! Test helpers: unique temp dirs and throwaway git repositories.
+
+use std::fs;
+use std::os::unix::fs::PermissionsExt;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static COUNTER: AtomicU64 = AtomicU64::new(0);
+
+pub struct TempDir {
+    path: PathBuf,
+}
+
+impl TempDir {
+    pub fn new(tag: &str) -> TempDir {
+        let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.subsec_nanos())
+            .unwrap_or(0);
+        let path = std::env::temp_dir().join(format!(
+            "aien-test-{tag}-{}-{n}-{nanos}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&path).expect("create temp dir");
+        let path = fs::canonicalize(&path).expect("canonicalize temp dir");
+        TempDir { path }
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.path);
+    }
+}
+
+pub fn git(dir: &Path, args: &[&str]) {
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args([
+            "-c",
+            "user.name=test",
+            "-c",
+            "user.email=test@example.invalid",
+            "-c",
+            "commit.gpgsign=false",
+        ])
+        .args(args)
+        .output()
+        .expect("run git");
+    assert!(
+        out.status.success(),
+        "git {:?} failed: {}",
+        args,
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+pub fn write_file(dir: &Path, rel: &str, content: &str, executable: bool) {
+    let p = dir.join(rel);
+    if let Some(parent) = p.parent() {
+        fs::create_dir_all(parent).expect("create parent");
+    }
+    fs::write(&p, content).expect("write file");
+    if executable {
+        fs::set_permissions(&p, fs::Permissions::from_mode(0o755)).expect("chmod");
+    }
+}
+
+/// A fresh git repository with one commit containing whatever `files` lists
+/// as (relative path, content, executable).
+pub fn init_repo(tag: &str, files: &[(&str, &str, bool)]) -> TempDir {
+    let t = TempDir::new(tag);
+    git(t.path(), &["init", "-q"]);
+    for (rel, content, exec) in files {
+        write_file(t.path(), rel, content, *exec);
+    }
+    git(t.path(), &["add", "-A"]);
+    git(t.path(), &["commit", "-q", "-m", "init"]);
+    t
+}

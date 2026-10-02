@@ -1,0 +1,20 @@
+[package]
+name = "aien-test"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "AIEN-TEST Slice A: gate manifest parser, verdict derivation, immutable evidence receipts, host-pool serial runner (ADR 0028)"
+
+[dependencies]
+libc = "0.2"
+serde_json = "1.0"
+sha2 = "0.10"
+
+[[bin]]
+name = "aien-test"
+path = "src/main.rs"
+
+[lib]
+name = "aien_test"
+path = "src/lib.rs"

@@ -35,6 +35,7 @@ members = [
     "crates/aien-campaign-verifier",
     "crates/aien-proof",
     "crates/crumbs",
+    "tools/aien-test",
 ]
 
 [workspace.package]
