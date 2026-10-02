@@ -36,6 +36,7 @@ members = [
     "crates/aien-campaign-verifier",
     "crates/aien-proof",
     "crates/crumbs",
+    "crates/aien-closure",
     "tools/aien-test",
 ]
 
