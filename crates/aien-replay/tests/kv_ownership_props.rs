@@ -15,8 +15,8 @@
 //! - rollback: reserve_token followed by rollback leaves the manager state
 //!   identical to before the reservation.
 //!
-//! Known gap, not a property here: fork onto a sequence id that already exists
-//! (see `fork_onto_live_child_leaks_blocks` below).
+//! Forking onto a sequence id that already exists replaces it and releases its
+//! old blocks (issue #142; see `fork_onto_live_child_leaks_blocks` below).
 
 use aien_kv_cache::{AienKvManager, HeapUnifiedBuffer, KvDType, KvPoolConfig};
 use proptest::prelude::*;
@@ -206,8 +206,8 @@ fn apply(
             }
         }
         Op::Fork { parent, child } => {
-            if model.contains_key(&child) {
-                return Ok(()); // known gap, see fork_onto_live_child_leaks_blocks
+            if parent == child {
+                return Ok(()); // self-fork is refused, see fork_onto_self_is_refused_and_harmless
             }
             match mgr.fork_sequence(parent, child) {
                 Ok(_) => {
@@ -300,12 +300,9 @@ proptest! {
     }
 }
 
-/// Known gap: forking onto a sequence id that is still live overwrites its
-/// block table without releasing the old blocks, so they never return to the
-/// free list. Fixing it needs an edit to aien-kv-cache/src/lib.rs (reserved by
-/// PR #138). Run with `--ignored` to see it fail.
+/// Issue #142: forking onto a sequence id that is still live replaces it and
+/// must release its old blocks back to the pool.
 #[test]
-#[ignore = "known leak in fork_sequence onto a live child id; fix belongs to the aien-kv-cache owner"]
 fn fork_onto_live_child_leaks_blocks() {
     let mut mgr = new_mgr();
     mgr.allocate_sequence(1, &[1, 2, 3, 4, 5]).unwrap();
@@ -315,4 +312,30 @@ fn fork_onto_live_child_leaks_blocks() {
     mgr.free_sequence(1).unwrap();
     mgr.free_sequence(2).unwrap();
     assert_eq!(mgr.free_block_count(), TOTAL_BLOCKS, "blocks leaked");
+}
+
+/// Re-forking onto a child that already shares the parent's blocks must keep
+/// the counts right: nothing leaks and nothing is freed while still in use.
+#[test]
+fn refork_onto_existing_child_keeps_counts() {
+    let mut mgr = new_mgr();
+    mgr.allocate_sequence(1, &[1, 2, 3, 4, 5]).unwrap();
+    mgr.fork_sequence(1, 2).unwrap();
+    mgr.fork_sequence(1, 2).unwrap();
+    mgr.free_sequence(1).unwrap();
+    assert!(mgr.get_block_table(2).is_some());
+    mgr.free_sequence(2).unwrap();
+    assert_eq!(mgr.free_block_count(), TOTAL_BLOCKS, "blocks leaked");
+}
+
+/// Forking a sequence onto itself is refused and leaves it untouched.
+#[test]
+fn fork_onto_self_is_refused_and_harmless() {
+    let mut mgr = new_mgr();
+    mgr.allocate_sequence(1, &[1, 2, 3, 4, 5]).unwrap();
+    let before = mgr.get_block_table(1).unwrap().block_ids.clone();
+    assert!(mgr.fork_sequence(1, 1).is_err());
+    assert_eq!(mgr.get_block_table(1).unwrap().block_ids, before);
+    mgr.free_sequence(1).unwrap();
+    assert_eq!(mgr.free_block_count(), TOTAL_BLOCKS);
 }

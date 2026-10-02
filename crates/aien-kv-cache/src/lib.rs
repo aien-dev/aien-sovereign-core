@@ -1131,10 +1131,19 @@ impl<B: aien_platform::UnifiedBuffer> AienKvManager<B> {
             .get(&parent_id)
             .ok_or_else(|| format!("Parent sequence {} not found", parent_id))?
             .clone();
+        if parent_id == child_id {
+            return Err(format!("Cannot fork sequence {} onto itself", parent_id));
+        }
 
         for &blk_id in &parent_table.block_ids {
             self.blocks[blk_id].ref_count += 1;
             self.blocks[blk_id].is_shared = true;
+        }
+
+        // A live child id is replaced: release its old blocks (after taking the
+        // new references, so blocks shared with the parent stay counted).
+        if self.sequence_tables.contains_key(&child_id) {
+            self.free_sequence(child_id)?;
         }
 
         // Readiness travels with the blocks: a fork of a ready parent freezes
