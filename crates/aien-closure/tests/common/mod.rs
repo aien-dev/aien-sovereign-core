@@ -6,12 +6,14 @@ use aien_closure::digest::source_digest;
 use aien_closure::graph::{cargo_packages, graph_of};
 use aien_closure::manifest::{self, Manifest};
 use aien_closure::verify::{render_lock, LOCK_FILE};
+use aien_closure::{verify, Code, Options};
 use aien_proof::evidence::{
     receipt_id, store_receipt, Assertion, Mutation, Receipt, Tier, Verdict, SCHEMA, SCHEMA_VERSION,
 };
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 static N: AtomicUsize = AtomicUsize::new(0);
@@ -161,4 +163,51 @@ pub fn write(root: &Path, rel: &str, text: &str) {
 
 pub fn read(root: &Path, rel: &str) -> String {
     fs::read_to_string(root.join(rel)).unwrap()
+}
+
+pub fn run(root: &Path, store: &Path) -> aien_closure::Outcome {
+    verify(&Options {
+        root: root.to_path_buf(),
+        store: store.to_path_buf(),
+        write_lock: false,
+    })
+    .unwrap()
+}
+
+pub fn codes(root: &Path, store: &Path) -> BTreeSet<Code> {
+    let out = run(root, store);
+    for f in &out.findings {
+        eprintln!("{}", f.line());
+    }
+    out.findings.iter().map(|f| f.code).collect()
+}
+
+/// Run the real binary and return (exit code, stdout).
+pub fn bin(root: &Path, store: &Path) -> (i32, String) {
+    let o = Command::new(env!("CARGO_BIN_EXE_verify-closure"))
+        .args([
+            "--root",
+            root.to_str().unwrap(),
+            "--store",
+            store.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    (
+        o.status.code().unwrap(),
+        String::from_utf8_lossy(&o.stdout).into_owned(),
+    )
+}
+
+/// The case must produce exactly `want`, and the binary must exit with the
+/// matching code and print one FINDING line per finding.
+pub fn expect_only(root: &Path, store: &Path, want: Code) {
+    assert_eq!(codes(root, store), BTreeSet::from([want]), "wrong findings");
+    let (exit, stdout) = bin(root, store);
+    assert_eq!(exit, want.exit_code(), "wrong exit code:\n{stdout}");
+    assert!(
+        stdout.contains(&format!("FINDING {} ", want.as_str())),
+        "{stdout}"
+    );
+    assert!(stdout.contains("SUMMARY status=FAIL"), "{stdout}");
 }

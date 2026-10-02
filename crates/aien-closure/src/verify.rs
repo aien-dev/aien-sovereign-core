@@ -1,5 +1,6 @@
 //! The verification pipeline behind `verify-closure`.
 
+use crate::declare;
 use crate::digest::source_digest;
 use crate::error::{Code, Finding};
 use crate::graph::{cargo_packages, closure_of, find_cycle, graph_of, Package};
@@ -140,14 +141,26 @@ fn check_component(
         );
     }
 
-    // Edges: every actual edge declared and pinned to the dep's own receipt.
+    // Declarations (SPEC 6.2): an actual edge the manifest does not declare is
+    // UNDECLARED_IMPORT; a declared dep that is not an actual edge is
+    // UNVERIFIED_DEPENDENCY.
+    let actual: BTreeSet<String> = pkg.deps.iter().cloned().collect();
+    let declared: BTreeSet<String> = m.deps.keys().cloned().collect();
+    for d in declare::compare(&actual, &declared) {
+        let dep = &d.name;
+        let detail = match d.code {
+            Code::UndeclaredImport => {
+                format!("edge to {dep} is not declared in {}", manifest::FILE_NAME)
+            }
+            _ => format!("declared dep {dep} is not an edge of the graph"),
+        };
+        add(d.code, detail);
+    }
+
+    // Edges: every declared actual edge pinned to the dep's own receipt.
     for dep in &pkg.deps {
-        match m.deps.get(dep) {
-            None => add(
-                Code::UndeclaredImport,
-                format!("edge to {dep} is not declared in {}", manifest::FILE_NAME),
-            ),
-            Some(pin) => match manifests.get(dep) {
+        if let Some(pin) = m.deps.get(dep) {
+            match manifests.get(dep) {
                 None => add(
                     Code::UnverifiedDependency,
                     format!("dependency {dep} has no {}", manifest::FILE_NAME),
@@ -166,15 +179,7 @@ fn check_component(
                     ),
                     Some(_) => {}
                 },
-            },
-        }
-    }
-    for dep in m.deps.keys() {
-        if !pkg.deps.contains(dep) {
-            add(
-                Code::UnverifiedDependency,
-                format!("declared dep {dep} is not an edge of the graph"),
-            );
+            }
         }
     }
 
@@ -358,11 +363,25 @@ pub fn verify(opts: &Options) -> Result<Outcome, String> {
         }
         match fs::read_to_string(&path) {
             Ok(have) if have == want => {}
-            Ok(_) => findings.push(Finding::new(
-                Code::DependencyNotPinned,
-                "-",
-                format!("{LOCK_FILE} does not match the rebuilt closure"),
-            )),
+            Ok(have) => {
+                // A pin for something the component does not depend on is
+                // UNVERIFIED_DEPENDENCY (SPEC 6.2). Everything else that
+                // differs (missing line, wrong id) is DEPENDENCY_NOT_PINNED.
+                for (comp, dep) in declare::extra_needs(&have, &want) {
+                    findings.push(Finding::new(
+                        Code::UnverifiedDependency,
+                        &comp,
+                        format!("{LOCK_FILE} pins {dep} for {comp}, which does not depend on it"),
+                    ));
+                }
+                if declare::without_extra_needs(&have, &want) != want {
+                    findings.push(Finding::new(
+                        Code::DependencyNotPinned,
+                        "-",
+                        format!("{LOCK_FILE} does not match the rebuilt closure"),
+                    ));
+                }
+            }
             Err(_) => findings.push(Finding::new(
                 Code::DependencyNotPinned,
                 "-",

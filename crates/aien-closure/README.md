@@ -40,13 +40,13 @@ the first finding (sorted by the order below, then component).
 
 | Exit | Code | Raised when |
 | --- | --- | --- |
-| 10 | UNVERIFIED_DEPENDENCY | a dependency has no manifest, a manifest is malformed, a declared dep is not a real edge, the chain does not verify as PASS, the receipt tier is below the profile, or no manifest exists |
+| 10 | UNVERIFIED_DEPENDENCY | a dependency has no manifest, a manifest is malformed, a declared dep is not a real edge, `closure.lock` pins a dependency the component does not have, the chain does not verify as PASS, the receipt tier is below the profile, or no manifest exists |
 | 11 | MISSING_RECEIPT | a receipt id (component or any chain member) is not in the store |
 | 12 | RECEIPT_HASH_MISMATCH | a receipt file does not hash to its id, or is not a valid receipt |
-| 13 | DEPENDENCY_NOT_PINNED | a dep has no receipt pin, the pin differs from the dep's receipt, the receipt does not depend on the pinned receipt, or `closure.lock` is missing or differs |
+| 13 | DEPENDENCY_NOT_PINNED | a dep has no receipt pin, the pin differs from the dep's receipt, the receipt does not depend on the pinned receipt, or `closure.lock` is missing or has a missing or wrong line |
 | 14 | DEPENDENCY_CYCLE | the internal graph or the receipt graph has a cycle |
 | 15 | STALE_RECEIPT | current source digest differs from the manifest, or the receipt does not record the manifest's source digest |
-| 16 | UNDECLARED_IMPORT | the graph has an edge the manifest does not declare |
+| 16 | UNDECLARED_IMPORT | the graph has an edge the manifest does not declare (only this direction; an extra declaration is UNVERIFIED_DEPENDENCY) |
 | 17 | TAINTED_ARTIFACT | a receipt in the chain was recorded from a dirty tree or is TEST_ONLY_TRUST |
 | 18 | UNKNOWN_VERIFIER_PROFILE | the manifest names a profile this verifier does not know |
 
@@ -104,3 +104,27 @@ checks one PASS case and at least one failing case per code, each asserting the
 exact finding and the binary's exit code. The committed seeded fixture (with
 store) is what `.github/workflows/verify-closure.yml` runs against. To rewrite
 it: `cargo test -p aien-closure -- --ignored regenerate_committed_fixture`.
+
+## One meaning per declaration code
+
+The meanings follow `aien-protocols` `specs/verified-crumb/SPEC.md` section 6.2
+(contract 0.2.0), implemented in `src/declare.rs`:
+
+| Situation | Code |
+| --- | --- |
+| an edge (or import) with no receipt pin, or a pin that is not the dependency's receipt | DEPENDENCY_NOT_PINNED |
+| a `closure.lock` line for a dependency the component does not have | UNVERIFIED_DEPENDENCY |
+| a declared dep that is not an actual edge | UNVERIFIED_DEPENDENCY |
+| an actual edge the manifest does not declare | UNDECLARED_IMPORT |
+| a VC's stored source imports a program not in `dependencies[]` (SPEC step 8) | UNDECLARED_IMPORT |
+| a `dependencies[]` entry the VC's stored source does not import (SPEC step 8) | UNVERIFIED_DEPENDENCY |
+
+This crate reads no VCs, so the last two rows are covered by a unit test of the
+shared set comparison (`declare::compare`), not by the binary.
+`tests/declaration_codes.rs` has one test per row plus a negative twin that
+fails if the row's code is swapped for a neighbouring code.
+
+## Receipt cross-check fixtures
+
+`tests/fixtures/receipts/` holds receipts minted with aien-proof for cases the
+Omega C reader's three fixtures do not cover. See the README there.
