@@ -229,6 +229,7 @@ struct AienRun {
     tokens: Vec<Vec<u32>>,
     logits: Vec<Vec<Vec<f32>>>,
     error: Option<String>,
+    diag: String,
 }
 
 async fn run_aien(weights: &TransformerWeights, prompt: &[u32], n: usize, steps: usize) -> AienRun {
@@ -305,6 +306,14 @@ async fn run_aien(weights: &TransformerWeights, prompt: &[u32], n: usize, steps:
         }
     }
     let total_s = launch_at.elapsed().as_secs_f64();
+    let diag = format!(
+        "spine_steps={guard} running={} waiting={} root_prefill_pending={} prefill_tokens={} decode_steps={}",
+        spine.scheduler.running_count(),
+        spine.scheduler.waiting_count(),
+        spine.swarm_manager.is_root_prefill_pending(swarm_id),
+        tap.prefill_tokens,
+        tap.decode_steps
+    );
     let (phys, logical, _shared) = tap.first_decode_snapshot.unwrap_or((0, 0, 0));
     let allocated_after = kv.read().allocated_block_count();
     AienRun {
@@ -332,6 +341,7 @@ async fn run_aien(weights: &TransformerWeights, prompt: &[u32], n: usize, steps:
             .map(|b| tap.decode_logits.get(b).cloned().unwrap_or_default())
             .collect(),
         error,
+        diag,
     }
 }
 
@@ -628,7 +638,7 @@ async fn main() {
                 let blocks_per_prompt = len.div_ceil(config.block_size);
                 cells.push(json!({
                     "n": n, "prefix_tokens": len, "rep": rep, "decode_steps": nsteps,
-                    "aien_error": a.error,
+                    "aien_error": a.error, "aien_exit_state": a.diag,
                     "aien": {
                         "prefill_s": a.prefill_s, "prefill_tokens_computed": a.prefill_tokens,
                         "decode_s": a.decode_s, "total_s": a.total_s,
