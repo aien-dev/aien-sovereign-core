@@ -234,7 +234,13 @@ struct AienRun {
 
 async fn run_aien(weights: &TransformerWeights, prompt: &[u32], n: usize, steps: usize) -> AienRun {
     let block_size = weights.config.block_size;
-    let total_blocks = prompt.len().div_ceil(block_size) + n * 4 + 32;
+    // The scheduler admits a waiting branch only if free blocks >= a full
+    // prompt's worth (aien-scheduler lib.rs: required_blocks = prompt_len/16 vs
+    // available_blocks), even though the branch already shares the root's
+    // blocks. So the pool needs one extra prompt of headroom beyond the root,
+    // or branches starve at small N (700 tokens, N<=2 at the old sizing).
+    let prompt_blocks = prompt.len().div_ceil(block_size);
+    let total_blocks = prompt_blocks * 2 + n * 4 + 32;
     let scheduler = SchedulerConfig {
         max_batch_size: 64,
         max_batch_tokens: 4096,
@@ -613,6 +619,7 @@ async fn main() {
             .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
     };
     let mut cells = Vec::new();
+    let mut invalid_cells = 0usize;
     for &len in &lens {
         let prompt: Vec<u32> = all_ids[..len].to_vec();
         for &n in &ns {
@@ -620,6 +627,19 @@ async fn main() {
                 eprintln!("PREFILL_BENCH cell len={len} n={n} rep={rep}");
                 let a = run_aien(&weights, &prompt, n, steps).await;
                 let nsteps = a.tokens.iter().map(Vec::len).min().unwrap_or(0);
+                // Explicit validity: a guard hit or any branch that never
+                // decoded is INVALID, never a silent zero-token cell.
+                let invalid_reason: Option<String> = if let Some(e) = &a.error {
+                    Some(format!("spine error: {e}"))
+                } else if nsteps == 0 || a.diag.starts_with("spine_steps=1000 ") {
+                    Some(format!("INVALID: branches never decoded ({})", a.diag))
+                } else {
+                    None
+                };
+                if let Some(r) = &invalid_reason {
+                    invalid_cells += 1;
+                    eprintln!("PREFILL_BENCH_INVALID len={len} n={n} rep={rep}: {r}");
+                }
                 let forced: Vec<Vec<u32>> = a.tokens.iter().map(|t| t[..nsteps].to_vec()).collect();
                 let a_logits: Vec<Vec<Vec<f32>>> =
                     a.logits.iter().map(|l| l[..nsteps].to_vec()).collect();
@@ -639,6 +659,7 @@ async fn main() {
                 cells.push(json!({
                     "n": n, "prefix_tokens": len, "rep": rep, "decode_steps": nsteps,
                     "aien_error": a.error, "aien_exit_state": a.diag,
+                    "valid": invalid_reason.is_none(), "invalid_reason": invalid_reason,
                     "aien": {
                         "prefill_s": a.prefill_s, "prefill_tokens_computed": a.prefill_tokens,
                         "decode_s": a.decode_s, "total_s": a.total_s,
@@ -686,6 +707,7 @@ async fn main() {
     let doc = json!({
         "bench": "prefill_bench",
         "complete": true,
+        "invalid_cells": invalid_cells,
         "commit": git(&["rev-parse", "HEAD"]),
         "dirty": git(&["status", "--porcelain"]).map(|s| !s.is_empty()),
         "model": {"path": model_path.display().to_string(), "id": config.model_id,
@@ -698,4 +720,8 @@ async fn main() {
     });
     std::fs::write(&out_path, serde_json::to_vec_pretty(&doc).unwrap()).expect("write result");
     println!("PREFILL_BENCH_DONE {}", out_path.display());
+    if invalid_cells > 0 {
+        eprintln!("PREFILL_BENCH_FAIL {invalid_cells} invalid cell(s)");
+        std::process::exit(1);
+    }
 }
