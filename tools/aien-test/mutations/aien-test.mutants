@@ -16,3 +16,6 @@ last_value_becomes_first	verdict.rs	s#compare(rule.op, vals\[vals.len() - 1\], &
 evidence_inside_not_refused	runner.rs	s#let evidence_inside = resolve(&opts.evidence_dir).starts_with(resolve(root));#let evidence_inside = false;#	evidence may be written inside the tree under test
 operator_gate_not_blocked	verdict.rs	s#if m.requires.iter().any(|r| r == "operator") {#if false {#	a gate needing an operator runs anyway
 timeout_checked_after_exit	verdict.rs	s#let (verdict, reason) = if f.timed_out {#let (verdict, reason) = if false {#	a timed-out run is reported as rc_nonzero, not timeout
+discover_ignores_gate_files	runner.rs	s#} else if ft.is_file() && name.ends_with(".gate") {#} else if false {#	the walk finds no .gate file, so a repository-wide parse check silently covers nothing
+discover_not_recursive	runner.rs	s#walk(&path, out);#let _ = \&path;#	the walk does not descend into directories, so gates under crates/ or tests/ are never parsed
+unknown_child_key_allowed	manifest.rs	s#if !allowed.contains(&k.as_str()) {#if false {#	a mistyped child key such as exce under run is not rejected

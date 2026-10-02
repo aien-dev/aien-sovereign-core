@@ -1,0 +1,14 @@
+diff --git a/crates/aien-inference-abi/src/transformer_backend.rs b/crates/aien-inference-abi/src/transformer_backend.rs
+index 0ea923d..9e4a50f 100644
+--- a/crates/aien-inference-abi/src/transformer_backend.rs
++++ b/crates/aien-inference-abi/src/transformer_backend.rs
+@@ -963,7 +963,8 @@ impl NativeTransformerBackend {
+                 let k_t = &mut k_batch[t * kv_dim..(t + 1) * kv_dim];
+                 let v_t = &v_batch[t * kv_dim..(t + 1) * kv_dim];
+ 
+-                let pos = offset + t;
++                // MUTANT m2 (PE2E2-A): a short continuation chunk restarts RoPE at position 0
++                let pos = if offset > 0 && n < 64 { t } else { offset + t };
+                 backend.apply_rope(q_t, k_t, pos, head_dim, num_heads, num_kv_heads, theta);
+ 
+                 if let (Some((block_id, slot)), Some(mgr)) = (paged_slots[t], kv_manager) {

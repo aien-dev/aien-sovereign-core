@@ -1,0 +1,14 @@
+diff --git a/crates/aien-kv-cache/src/lib.rs b/crates/aien-kv-cache/src/lib.rs
+index cd73fc7..006b801 100644
+--- a/crates/aien-kv-cache/src/lib.rs
++++ b/crates/aien-kv-cache/src/lib.rs
+@@ -1187,7 +1187,8 @@ impl<B: aien_platform::UnifiedBuffer> AienKvManager<B> {
+         let last_blk_id = table.block_ids[last_blk_idx];
+         let blk = &self.blocks[last_blk_id];
+ 
+-        if blk.is_shared {
++        // MUTANT m5 (PE2E2-A): a shared partial tail is appended to in place, no copy-on-write
++        if false && blk.is_shared {
+             if blk.num_tokens < self.block_size {
+                 self.cow_faults += 1;
+                 let new_blk = self.allocate_block()?;
