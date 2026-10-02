@@ -1,0 +1,1752 @@
+{
+  "baseline_label": "MODELED vLLM automatic prefix caching, not a vLLM run",
+  "bench": "prefill_bench",
+  "cells": [
+    {
+      "aien": {
+        "blocks_still_allocated_after_run": 0,
+        "decode_s": 2.97553461,
+        "logical_kv_bytes_first_decode": 4325376,
+        "physical_kv_bytes_first_decode": 2162688,
+        "physical_kv_bytes_peak": 2883584,
+        "prefill_s": 2.025217174,
+        "prefill_tokens_computed": 40,
+        "tokens_per_s_decode": 2.6885924879227,
+        "tokens_per_s_total": 1.5997304703715378,
+        "total_s": 5.000842422,
+        "ttft_ms_max": 2397.144989,
+        "ttft_ms_mean": 2397.144989
+      },
+      "aien_error": null,
+      "baseline_modeled_vllm_apc": {
+        "decode_s": 2.959711463,
+        "kv_bytes_source": "bookkeeping model (examples/prefill_bench/vllm_model.rs), not measured",
+        "logical_kv_bytes_after_prefill": 2162688,
+        "physical_kv_bytes_after_prefill": 2162688,
+        "physical_kv_bytes_end": 2883584,
+        "prefill_s": 2.017204909,
+        "prefill_tokens_computed": 40,
+        "tokens_per_s_decode": 2.7029661843763315,
+        "tokens_per_s_total": 1.6074149550362355,
+        "total_s": 4.976935156,
+        "ttft_ms": 2386.721649
+      },
+      "control_prefill_s": 1.9774022439999999,
+      "decode_steps": 8,
+      "n": 1,
+      "naive_no_sharing_modeled": {
+        "physical_kv_bytes_after_prefill": 2162688,
+        "prefill_s": 1.9774022439999999,
+        "source": "N x control one-shot prefill time; N x ceil(len/block) blocks"
+      },
+      "parity": {
+        "aien_vs_baseline_all_branches": {
+          "bit_differences": 0,
+          "max_abs": 0.0,
+          "values": 256000
+        },
+        "aien_vs_control": {
+          "bit_differences": 0,
+          "max_abs": 0.0,
+          "values": 256000
+        },
+        "baseline_vs_control": {
+          "bit_differences": 0,
+          "max_abs": 0.0
+        },
+        "compared_branches_vs_control": 1
+      },
+      "prefix_tokens": 40,
+      "rep": 0
+    },
+    {
+      "aien": {
+        "blocks_still_allocated_after_run": 0,
+        "decode_s": 2.970881368,
+        "logical_kv_bytes_first_decode": 4325376,
+        "physical_kv_bytes_first_decode": 2162688,
+        "physical_kv_bytes_peak": 2883584,
+        "prefill_s": 1.969198529,
+        "prefill_tokens_computed": 40,
+        "tokens_per_s_decode": 2.6928035855519896,
+        "tokens_per_s_total": 1.6193785587778227,
+        "total_s": 4.940166681,
+        "ttft_ms_max": 2341.6430689999997,
+        "ttft_ms_mean": 2341.6430689999997
+      },
+      "aien_error": null,
+      "baseline_modeled_vllm_apc": {
+        "decode_s": 2.942665134,
+        "kv_bytes_source": "bookkeeping model (examples/prefill_bench/vllm_model.rs), not measured",
+        "logical_kv_bytes_after_prefill": 2162688,
+        "physical_kv_bytes_after_prefill": 2162688,
+        "physical_kv_bytes_end": 2883584,
+        "prefill_s": 2.007925719,
+        "prefill_tokens_computed": 40,
+        "tokens_per_s_decode": 2.718623980542939,
+        "tokens_per_s_total": 1.6159625178269652,
+        "total_s": 4.950609876,
+        "ttft_ms": 2376.041405
+      },
+      "control_prefill_s": 2.005382926,
+      "decode_steps": 8,
+      "n": 1,
+      "naive_no_sharing_modeled": {
+        "physical_kv_bytes_after_prefill": 2162688,
+        "prefill_s": 2.005382926,
+        "source": "N x control one-shot prefill time; N x ceil(len/block) blocks"
+      },
+      "parity": {
+        "aien_vs_baseline_all_branches": {
+          "bit_differences": 0,
+          "max_abs": 0.0,
+          "values": 256000
+        },
+        "aien_vs_control": {
+          "bit_differences": 0,
+          "max_abs": 0.0,
+          "values": 256000
+        },
+        "baseline_vs_control": {
+          "bit_differences": 0,
+          "max_abs": 0.0
+        },
+        "compared_branches_vs_control": 1
+      },
+      "prefix_tokens": 40,
+      "rep": 1
+    },
+    {
+      "aien": {
+        "blocks_still_allocated_after_run": 0,
+        "decode_s": 3.634429078,
+        "logical_kv_bytes_first_decode": 6488064,
+        "physical_kv_bytes_first_decode": 2162688,
+        "physical_kv_bytes_peak": 3604480,
+        "prefill_s": 1.9871161910000001,
+        "prefill_tokens_computed": 40,
+        "tokens_per_s_decode": 4.402342061605088,
+        "tokens_per_s_total": 2.846115549411393,
+        "total_s": 5.621697265,
+        "ttft_ms_max": 2420.32262,
+        "ttft_ms_mean": 2420.322348
+      },
+      "aien_error": null,
+      "baseline_modeled_vllm_apc": {
+        "decode_s": 3.821694748,
+        "kv_bytes_source": "bookkeeping model (examples/prefill_bench/vllm_model.rs), not measured",
+        "logical_kv_bytes_after_prefill": 4325376,
+        "physical_kv_bytes_after_prefill": 2883584,
+        "physical_kv_bytes_end": 4325376,
+        "prefill_s": 2.966497286,
+        "prefill_tokens_computed": 48,
+        "tokens_per_s_decode": 4.186624274053611,
+        "tokens_per_s_total": 2.3568489571625157,
+        "total_s": 6.788725239,
+        "ttft_ms": 3476.037166
+      },
+      "control_prefill_s": 4.7145455290000005,
+      "decode_steps": 8,
+      "n": 2,
+      "naive_no_sharing_modeled": {
+        "physical_kv_bytes_after_prefill": 4325376,
+        "prefill_s": 9.429091058000001,
+        "source": "N x control one-shot prefill time; N x ceil(len/block) blocks"
+      },
+      "parity": {
+        "aien_vs_baseline_all_branches": {
+          "bit_differences": 0,
+          "max_abs": 0.0,
+          "values": 512000
+        },
+        "aien_vs_control": {
+          "bit_differences": 0,
+          "max_abs": 0.0,
+          "values": 512000
+        },
+        "baseline_vs_control": {
+          "bit_differences": 0,
+          "max_abs": 0.0
+        },
+        "compared_branches_vs_control": 2
+      },
+      "prefix_tokens": 40,
+      "rep": 0
+    },
+    {
+      "aien": {
+        "blocks_still_allocated_after_run": 0,
+        "decode_s": 4.017390613,
+        "logical_kv_bytes_first_decode": 6488064,
+        "physical_kv_bytes_first_decode": 2162688,
+        "physical_kv_bytes_peak": 3604480,
+        "prefill_s": 2.084622961,
+        "prefill_tokens_computed": 40,
+        "tokens_per_s_decode": 3.9826846680591874,
+        "tokens_per_s_total": 2.622022860421279,
+        "total_s": 6.102158849,
+        "ttft_ms_max": 2621.323653,
+        "ttft_ms_mean": 2621.323445
+      },
+      "aien_error": null,
+      "baseline_modeled_vllm_apc": {
+        "decode_s": 3.7398010839999998,
+        "kv_bytes_source": "bookkeeping model (examples/prefill_bench/vllm_model.rs), not measured",
+        "logical_kv_bytes_after_prefill": 4325376,
+        "physical_kv_bytes_after_prefill": 2883584,
+        "physical_kv_bytes_end": 4325376,
+        "prefill_s": 3.042265976,
+        "prefill_tokens_computed": 48,
+        "tokens_per_s_decode": 4.278302412514088,
+        "tokens_per_s_total": 2.3589662788495045,
+        "total_s": 6.782631928,
+        "ttft_ms": 3513.923796
+      },
+      "control_prefill_s": 2.005220792,
+      "decode_steps": 8,
+      "n": 2,
+      "naive_no_sharing_modeled": {
+        "physical_kv_bytes_after_prefill": 4325376,
+        "prefill_s": 4.010441584,
+        "source": "N x control one-shot prefill time; N x ceil(len/block) blocks"
+      },
+      "parity": {
+        "aien_vs_baseline_all_branches": {
+          "bit_differences": 0,
+          "max_abs": 0.0,
+          "values": 512000
+        },
+        "aien_vs_control": {
+          "bit_differences": 0,
+          "max_abs": 0.0,
+          "values": 512000
+        },
+        "baseline_vs_control": {
+          "bit_differences": 0,
+          "max_abs": 0.0
+        },
+        "compared_branches_vs_control": 2
+      },
+      "prefix_tokens": 40,
+      "rep": 1
+    },
+    {
+      "aien": {
+        "blocks_still_allocated_after_run": 0,
+        "decode_s": 6.047401004,
+        "logical_kv_bytes_first_decode": 10813440,
+        "physical_kv_bytes_first_decode": 2162688,
+        "physical_kv_bytes_peak": 5046272,
+        "prefill_s": 1.8826653,
+        "prefill_tokens_computed": 40,
+        "tokens_per_s_decode": 5.291529365893527,
+        "tokens_per_s_total": 4.035186357968666,
+        "total_s": 7.930240926,
+        "ttft_ms_max": 2684.2638340000003,
+        "ttft_ms_mean": 2684.2628700000005
+      },
+      "aien_error": null,
+      "baseline_modeled_vllm_apc": {
+        "decode_s": 5.503569815,
+        "kv_bytes_source": "bookkeeping model (examples/prefill_bench/vllm_model.rs), not measured",
+        "logical_kv_bytes_after_prefill": 8650752,
+        "physical_kv_bytes_after_prefill": 4325376,
+        "physical_kv_bytes_end": 7208960,
+        "prefill_s": 5.009828904,
+        "prefill_tokens_computed": 64,
+        "tokens_per_s_decode": 5.814407934425376,
+        "tokens_per_s_total": 3.0429891737885306,
+        "total_s": 10.515975632,
+        "ttft_ms": 5713.5518999999995
+      },
+      "control_prefill_s": 1.966580606,
+      "decode_steps": 8,
+      "n": 4,
+      "naive_no_sharing_modeled": {
+        "physical_kv_bytes_after_prefill": 8650752,
+        "prefill_s": 7.866322424,
+        "source": "N x control one-shot prefill time; N x ceil(len/block) blocks"
+      },
+      "parity": {
+        "aien_vs_baseline_all_branches": {
+          "bit_differences": 0,
+          "max_abs": 0.0,
+          "values": 1024000
+        },
+        "aien_vs_control": {
+          "bit_differences": 0,
+          "max_abs": 0.0,
+          "values": 512000
+        },
+        "baseline_vs_control": {
+          "bit_differences": 0,
+          "max_abs": 0.0
+        },
+        "compared_branches_vs_control": 2
+      },
+      "prefix_tokens": 40,
+      "rep": 0
+    },
+    {
+      "aien": {
+        "blocks_still_allocated_after_run": 0,
+        "decode_s": 5.745322082,
+        "logical_kv_bytes_first_decode": 10813440,
+        "physical_kv_bytes_first_decode": 2162688,
+        "physical_kv_bytes_peak": 5046272,
+        "prefill_s": 2.025829264,
+        "prefill_tokens_computed": 40,
+        "tokens_per_s_decode": 5.56974866565888,
+        "tokens_per_s_total": 4.117698863638348,
+        "total_s": 7.771330799,
+        "ttft_ms_max": 2632.974107,
+        "ttft_ms_mean": 2632.972711
+      },
+      "aien_error": null,
+      "baseline_modeled_vllm_apc": {
+        "decode_s": 5.39424046,
+        "kv_bytes_source": "bookkeeping model (examples/prefill_bench/vllm_model.rs), not measured",
+        "logical_kv_bytes_after_prefill": 8650752,
+        "physical_kv_bytes_after_prefill": 4325376,
+        "physical_kv_bytes_end": 7208960,
+        "prefill_s": 5.030110684,
+        "prefill_tokens_computed": 64,
+        "tokens_per_s_decode": 5.932253157286948,
+        "tokens_per_s_total": 3.069126539950858,
+        "total_s": 10.426419238,
+        "ttft_ms": 5671.451937999999
+      },
+      "control_prefill_s": 1.984913368,
+      "decode_steps": 8,
+      "n": 4,
+      "naive_no_sharing_modeled": {
+        "physical_kv_bytes_after_prefill": 8650752,
+        "prefill_s": 7.939653472,
+        "source": "N x control one-shot prefill time; N x ceil(len/block) blocks"
+      },
+      "parity": {
+        "aien_vs_baseline_all_branches": {
+          "bit_differences": 0,
+          "max_abs": 0.0,
+          "values": 1024000
+        },
+        "aien_vs_control": {
+          "bit_differences": 0,
+          "max_abs": 0.0,
+          "values": 512000
+        },
+        "baseline_vs_control": {
+          "bit_differences": 0,
+          "max_abs": 0.0
+        },
+        "compared_branches_vs_control": 2
+      },
+      "prefix_tokens": 40,
+      "rep": 1
+    },
+    {
+      "aien": {
+        "blocks_still_allocated_after_run": 0,
+        "decode_s": 8.472267443,
+        "logical_kv_bytes_first_decode": 19464192,
+        "physical_kv_bytes_first_decode": 2162688,
+        "physical_kv_bytes_peak": 7929856,
+        "prefill_s": 2.032706543,
+        "prefill_tokens_computed": 40,
+        "tokens_per_s_decode": 7.554058040610888,
+        "tokens_per_s_total": 6.092211754236539,
+        "total_s": 10.505215935,
+        "ttft_ms_max": 3085.290182,
+        "ttft_ms_mean": 3085.286782
+      },
+      "aien_error": null,
+      "baseline_modeled_vllm_apc": {
+        "decode_s": 8.237421538,
+        "kv_bytes_source": "bookkeeping model (examples/prefill_bench/vllm_model.rs), not measured",
+        "logical_kv_bytes_after_prefill": 17301504,
+        "physical_kv_bytes_after_prefill": 7208960,
+        "physical_kv_bytes_end": 12976128,
+        "prefill_s": 9.105318549,
+        "prefill_tokens_computed": 96,
+        "tokens_per_s_decode": 7.769421499769313,
+        "tokens_per_s_total": 3.6888415353530615,
+        "total_s": 17.349620304,
+        "ttft_ms": 10146.026428000001
+      },
+      "control_prefill_s": 1.965310238,
+      "decode_steps": 8,
+      "n": 8,
+      "naive_no_sharing_modeled": {
+        "physical_kv_bytes_after_prefill": 17301504,
+        "prefill_s": 15.722481904,
+        "source": "N x control one-shot prefill time; N x ceil(len/block) blocks"
+      },
+      "parity": {
+        "aien_vs_baseline_all_branches": {
+          "bit_differences": 0,
+          "max_abs": 0.0,
+          "values": 2048000
+        },
+        "aien_vs_control": {
+          "bit_differences": 0,
+          "max_abs": 0.0,
+          "values": 512000
+        },
+        "baseline_vs_control": {
+          "bit_differences": 0,
+          "max_abs": 0.0
+        },
+        "compared_branches_vs_control": 2
+      },
+      "prefix_tokens": 40,
+      "rep": 0
+    },
+    {
+      "aien": {
+        "blocks_still_allocated_after_run": 0,
+        "decode_s": 8.454734826,
+        "logical_kv_bytes_first_decode": 19464192,
+        "physical_kv_bytes_first_decode": 2162688,
+        "physical_kv_bytes_peak": 7929856,
+        "prefill_s": 2.005122644,
+        "prefill_tokens_computed": 40,
+        "tokens_per_s_decode": 7.569722920603874,
+        "tokens_per_s_total": 6.118500491926102,
+        "total_s": 10.460079244,
+        "ttft_ms_max": 3043.144918,
+        "ttft_ms_mean": 3043.141786
+      },
+      "aien_error": null,
+      "baseline_modeled_vllm_apc": {
+        "decode_s": 8.214537371,
+        "kv_bytes_source": "bookkeeping model (examples/prefill_bench/vllm_model.rs), not measured",
+        "logical_kv_bytes_after_prefill": 17301504,
+        "physical_kv_bytes_after_prefill": 7208960,
+        "physical_kv_bytes_end": 12976128,
+        "prefill_s": 9.02107037,
+        "prefill_tokens_computed": 96,
+        "tokens_per_s_decode": 7.791065657080202,
+        "tokens_per_s_total": 3.7123485104669594,
+        "total_s": 17.239760712,
+        "ttft_ms": 10045.011199999999
+      },
+      "control_prefill_s": 2.012280403,
+      "decode_steps": 8,
+      "n": 8,
+      "naive_no_sharing_modeled": {
+        "physical_kv_bytes_after_prefill": 17301504,
+        "prefill_s": 16.098243224,
+        "source": "N x control one-shot prefill time; N x ceil(len/block) blocks"
+      },
+      "parity": {
+        "aien_vs_baseline_all_branches": {
+          "bit_differences": 0,
+          "max_abs": 0.0,
+          "values": 2048000
+        },
+        "aien_vs_control": {
+          "bit_differences": 0,
+          "max_abs": 0.0,
+          "values": 512000
+        },
+        "baseline_vs_control": {
+          "bit_differences": 0,
+          "max_abs": 0.0
+        },
+        "compared_branches_vs_control": 2
+      },
+      "prefix_tokens": 40,
+      "rep": 1
+    },
+    {
+      "aien": {
+        "blocks_still_allocated_after_run": 0,
+        "decode_s": 9.600701449,
+        "logical_kv_bytes_first_decode": 36765696,
+        "physical_kv_bytes_first_decode": 2162688,
+        "physical_kv_bytes_peak": 13697024,
+        "prefill_s": 1.985648475,
+        "prefill_tokens_computed": 40,
+        "tokens_per_s_decode": 13.332359169790907,
+        "tokens_per_s_total": 11.047166229207082,
+        "total_s": 11.58668181,
+        "ttft_ms_max": 3180.476397,
+        "ttft_ms_mean": 3180.4695739999997
+      },
+      "aien_error": null,
+      "baseline_modeled_vllm_apc": {
+        "decode_s": 9.151810978,
+        "kv_bytes_source": "bookkeeping model (examples/prefill_bench/vllm_model.rs), not measured",
+        "logical_kv_bytes_after_prefill": 34603008,
+        "physical_kv_bytes_after_prefill": 12976128,
+        "physical_kv_bytes_end": 24510464,
+        "prefill_s": 17.234761571,
+        "prefill_tokens_computed": 160,
+        "tokens_per_s_decode": 13.986302853904943,
+        "tokens_per_s_total": 4.848569876054917,
+        "total_s": 26.399537033,
+        "ttft_ms": 18389.703833
+      },
+      "control_prefill_s": 1.971069529,
+      "decode_steps": 8,
+      "n": 16,
+      "naive_no_sharing_modeled": {
+        "physical_kv_bytes_after_prefill": 34603008,
+        "prefill_s": 31.537112464,
+        "source": "N x control one-shot prefill time; N x ceil(len/block) blocks"
+      },
+      "parity": {
+        "aien_vs_baseline_all_branches": {
+          "bit_differences": 0,
+          "max_abs": 0.0,
+          "values": 4096000
+        },
+        "aien_vs_control": {
+          "bit_differences": 0,
+          "max_abs": 0.0,
+          "values": 512000
+        },
+        "baseline_vs_control": {
+          "bit_differences": 0,
+          "max_abs": 0.0
+        },
+        "compared_branches_vs_control": 2
+      },
+      "prefix_tokens": 40,
+      "rep": 0
+    },
+    {
+      "aien": {
+        "blocks_still_allocated_after_run": 0,
+        "decode_s": 9.537612731,
+        "logical_kv_bytes_first_decode": 36765696,
+        "physical_kv_bytes_first_decode": 2162688,
+        "physical_kv_bytes_peak": 13697024,
+        "prefill_s": 2.0230555,
+        "prefill_tokens_computed": 40,
+        "tokens_per_s_decode": 13.420549104909972,
+        "tokens_per_s_total": 11.071710167123983,
+        "total_s": 11.560996275,
+        "ttft_ms_max": 3222.042282,
+        "ttft_ms_mean": 3222.0357760000006
+      },
+      "aien_error": null,
+      "baseline_modeled_vllm_apc": {
+        "decode_s": 9.105412821,
+        "kv_bytes_source": "bookkeeping model (examples/prefill_bench/vllm_model.rs), not measured",
+        "logical_kv_bytes_after_prefill": 34603008,
+        "physical_kv_bytes_after_prefill": 12976128,
+        "physical_kv_bytes_end": 24510464,
+        "prefill_s": 17.352500099,
+        "prefill_tokens_computed": 160,
+        "tokens_per_s_decode": 14.057572404053003,
+        "tokens_per_s_total": 4.836130813466275,
+        "total_s": 26.467439558,
+        "ttft_ms": 18488.82711
+      },
+      "control_prefill_s": 2.015277514,
+      "decode_steps": 8,
+      "n": 16,
+      "naive_no_sharing_modeled": {
+        "physical_kv_bytes_after_prefill": 34603008,
+        "prefill_s": 32.244440224,
+        "source": "N x control one-shot prefill time; N x ceil(len/block) blocks"
+      },
+      "parity": {
+        "aien_vs_baseline_all_branches": {
+          "bit_differences": 0,
+          "max_abs": 0.0,
+          "values": 4096000
+        },
+        "aien_vs_control": {
+          "bit_differences": 0,
+          "max_abs": 0.0,
+          "values": 512000
+        },
+        "baseline_vs_control": {
+          "bit_differences": 0,
+          "max_abs": 0.0
+        },
+        "compared_branches_vs_control": 2
+      },
+      "prefix_tokens": 40,
+      "rep": 1
+    },
+    {
+      "aien": {
+        "blocks_still_allocated_after_run": 0,
+        "decode_s": 3.011815419,
+        "logical_kv_bytes_first_decode": 18743296,
+        "physical_kv_bytes_first_decode": 9371648,
+        "physical_kv_bytes_peak": 10092544,
+        "prefill_s": 9.430583971,
+        "prefill_tokens_computed": 200,
+        "tokens_per_s_decode": 2.656205273912903,
+        "tokens_per_s_total": 0.6429528817272933,
+        "total_s": 12.442591405,
+        "ttft_ms_max": 9805.987084,
+        "ttft_ms_mean": 9805.987084
+      },
+      "aien_error": null,
+      "baseline_modeled_vllm_apc": {
+        "decode_s": 2.991468757,
+        "kv_bytes_source": "bookkeeping model (examples/prefill_bench/vllm_model.rs), not measured",
+        "logical_kv_bytes_after_prefill": 9371648,
+        "physical_kv_bytes_after_prefill": 9371648,
+        "physical_kv_bytes_end": 10092544,
+        "prefill_s": 7.9731257620000004,
+        "prefill_tokens_computed": 200,
+        "tokens_per_s_decode": 2.674271620347062,
+        "tokens_per_s_total": 0.7296194354939552,
+        "total_s": 10.964620199,
+        "ttft_ms": 8346.273072
+      },
+      "control_prefill_s": 7.513682213,
+      "decode_steps": 8,
+      "n": 1,
+      "naive_no_sharing_modeled": {
+        "physical_kv_bytes_after_prefill": 9371648,
+        "prefill_s": 7.513682213,
+        "source": "N x control one-shot prefill time; N x ceil(len/block) blocks"
+      },
+      "parity": {
+        "aien_vs_baseline_all_branches": {
+          "bit_differences": 0,
+          "max_abs": 0.0,
+          "values": 256000
+        },
+        "aien_vs_control": {
+          "bit_differences": 0,
+          "max_abs": 0.0,
+          "values": 256000
+        },
+        "baseline_vs_control": {
+          "bit_differences": 0,
+          "max_abs": 0.0
+        },
+        "compared_branches_vs_control": 1
+      },
+      "prefix_tokens": 200,
+      "rep": 0
+    },
+    {
+      "aien": {
+        "blocks_still_allocated_after_run": 0,
+        "decode_s": 3.049884469,
+        "logical_kv_bytes_first_decode": 18743296,
+        "physical_kv_bytes_first_decode": 9371648,
+        "physical_kv_bytes_peak": 10092544,
+        "prefill_s": 8.63193707,
+        "prefill_tokens_computed": 200,
+        "tokens_per_s_decode": 2.623050178232833,
+        "tokens_per_s_total": 0.6848121298477069,
+        "total_s": 11.682036067,
+        "ttft_ms_max": 9013.318070000001,
+        "ttft_ms_mean": 9013.318070000001
+      },
+      "aien_error": null,
+      "baseline_modeled_vllm_apc": {
+        "decode_s": 2.995585018,
+        "kv_bytes_source": "bookkeeping model (examples/prefill_bench/vllm_model.rs), not measured",
+        "logical_kv_bytes_after_prefill": 9371648,
+        "physical_kv_bytes_after_prefill": 9371648,
+        "physical_kv_bytes_end": 10092544,
+        "prefill_s": 7.6683356,
+        "prefill_tokens_computed": 200,
+        "tokens_per_s_decode": 2.6705968790500876,
+        "tokens_per_s_total": 0.7501912493028366,
+        "total_s": 10.66394737,
+        "ttft_ms": 8042.867145000001
+      },
+      "control_prefill_s": 7.467938974,
+      "decode_steps": 8,
+      "n": 1,
+      "naive_no_sharing_modeled": {
+        "physical_kv_bytes_after_prefill": 9371648,
+        "prefill_s": 7.467938974,
+        "source": "N x control one-shot prefill time; N x ceil(len/block) blocks"
+      },
+      "parity": {
+        "aien_vs_baseline_all_branches": {
+          "bit_differences": 0,
+          "max_abs": 0.0,
+          "values": 256000
+        },
+        "aien_vs_control": {
+          "bit_differences": 0,
+          "max_abs": 0.0,
+          "values": 256000
+        },
+        "baseline_vs_control": {
+          "bit_differences": 0,
+          "max_abs": 0.0
+        },
+        "compared_branches_vs_control": 1
+      },
+      "prefix_tokens": 200,
+      "rep": 1
+    },
+    {
+      "aien": {
+        "blocks_still_allocated_after_run": 0,
+        "decode_s": 3.923794042,
+        "logical_kv_bytes_first_decode": 28114944,
+        "physical_kv_bytes_first_decode": 9371648,
+        "physical_kv_bytes_peak": 10813440,
+        "prefill_s": 8.680108034,
+        "prefill_tokens_computed": 200,
+        "tokens_per_s_decode": 4.077685991858183,
+        "tokens_per_s_total": 1.2694232295289418,
+        "total_s": 12.604149371,
+        "ttft_ms_max": 9160.129483,
+        "ttft_ms_mean": 9160.129275
+      },
+      "aien_error": null,
+      "baseline_modeled_vllm_apc": {
+        "decode_s": 4.095799429,
+        "kv_bytes_source": "bookkeeping model (examples/prefill_bench/vllm_model.rs), not measured",
+        "logical_kv_bytes_after_prefill": 18743296,
+        "physical_kv_bytes_after_prefill": 10092544,
+        "physical_kv_bytes_end": 11534336,
+        "prefill_s": 8.815362411,
+        "prefill_tokens_computed": 208,
+        "tokens_per_s_decode": 3.9064412887782543,
+        "tokens_per_s_total": 1.239060840627458,
+        "total_s": 12.913005944,
+        "ttft_ms": 9409.502462
+      },
+      "control_prefill_s": 8.018966207,
+      "decode_steps": 8,
+      "n": 2,
+      "naive_no_sharing_modeled": {
+        "physical_kv_bytes_after_prefill": 18743296,
+        "prefill_s": 16.037932414,
+        "source": "N x control one-shot prefill time; N x ceil(len/block) blocks"
+      },
+      "parity": {
+        "aien_vs_baseline_all_branches": {
+          "bit_differences": 0,
+          "max_abs": 0.0,
+          "values": 512000
+        },
+        "aien_vs_control": {
+          "bit_differences": 0,
+          "max_abs": 0.0,
+          "values": 512000
+        },
+        "baseline_vs_control": {
+          "bit_differences": 0,
+          "max_abs": 0.0
+        },
+        "compared_branches_vs_control": 2
+      },
+      "prefix_tokens": 200,
+      "rep": 0
+    },
+    {
+      "aien": {
+        "blocks_still_allocated_after_run": 0,
+        "decode_s": 3.770001092,
+        "logical_kv_bytes_first_decode": 28114944,
+        "physical_kv_bytes_first_decode": 9371648,
+        "physical_kv_bytes_peak": 10813440,
+        "prefill_s": 8.927841509,
+        "prefill_tokens_computed": 200,
+        "tokens_per_s_decode": 4.2440306009333115,
+        "tokens_per_s_total": 1.2600297365899558,
+        "total_s": 12.698113017,
+        "ttft_ms_max": 9395.881325,
+        "ttft_ms_mean": 9395.881013
+      },
+      "aien_error": null,
+      "baseline_modeled_vllm_apc": {
+        "decode_s": 3.797659994,
+        "kv_bytes_source": "bookkeeping model (examples/prefill_bench/vllm_model.rs), not measured",
+        "logical_kv_bytes_after_prefill": 18743296,
+        "physical_kv_bytes_after_prefill": 10092544,
+        "physical_kv_bytes_end": 11534336,
+        "prefill_s": 8.940957394,
+        "prefill_tokens_computed": 208,
+        "tokens_per_s_decode": 4.2131207178311705,
+        "tokens_per_s_total": 1.2557682910994021,
+        "total_s": 12.741204021,
+        "ttft_ms": 9389.927459999999
+      },
+      "control_prefill_s": 7.640007188,
+      "decode_steps": 8,
+      "n": 2,
+      "naive_no_sharing_modeled": {
+        "physical_kv_bytes_after_prefill": 18743296,
+        "prefill_s": 15.280014376,
+        "source": "N x control one-shot prefill time; N x ceil(len/block) blocks"
+      },
+      "parity": {
+        "aien_vs_baseline_all_branches": {
+          "bit_differences": 0,
+          "max_abs": 0.0,
+          "values": 512000
+        },
+        "aien_vs_control": {
+          "bit_differences": 0,
+          "max_abs": 0.0,
+          "values": 512000
+        },
+        "baseline_vs_control": {
+          "bit_differences": 0,
+          "max_abs": 0.0
+        },
+        "compared_branches_vs_control": 2
+      },
+      "prefix_tokens": 200,
+      "rep": 1
+    },
+    {
+      "aien": {
+        "blocks_still_allocated_after_run": 0,
+        "decode_s": 6.298311092,
+        "logical_kv_bytes_first_decode": 46858240,
+        "physical_kv_bytes_first_decode": 9371648,
+        "physical_kv_bytes_peak": 12255232,
+        "prefill_s": 8.682593123,
+        "prefill_tokens_computed": 200,
+        "tokens_per_s_decode": 5.080727123918318,
+        "tokens_per_s_total": 2.136010267125307,
+        "total_s": 14.981201398,
+        "ttft_ms_max": 9644.753537,
+        "ttft_ms_mean": 9644.751805
+      },
+      "aien_error": null,
+      "baseline_modeled_vllm_apc": {
+        "decode_s": 6.3050461890000005,
+        "kv_bytes_source": "bookkeeping model (examples/prefill_bench/vllm_model.rs), not measured",
+        "logical_kv_bytes_after_prefill": 37486592,
+        "physical_kv_bytes_after_prefill": 11534336,
+        "physical_kv_bytes_end": 14417920,
+        "prefill_s": 11.057585391,
+        "prefill_tokens_computed": 224,
+        "tokens_per_s_decode": 5.0752998536042915,
+        "tokens_per_s_total": 1.8424804160955837,
+        "total_s": 17.367891523,
+        "ttft_ms": 12101.700152
+      },
+      "control_prefill_s": 7.651668418,
+      "decode_steps": 8,
+      "n": 4,
+      "naive_no_sharing_modeled": {
+        "physical_kv_bytes_after_prefill": 37486592,
+        "prefill_s": 30.606673672,
+        "source": "N x control one-shot prefill time; N x ceil(len/block) blocks"
+      },
+      "parity": {
+        "aien_vs_baseline_all_branches": {
+          "bit_differences": 0,
+          "max_abs": 0.0,
+          "values": 1024000
+        },
+        "aien_vs_control": {
+          "bit_differences": 0,
+          "max_abs": 0.0,
+          "values": 512000
+        },
+        "baseline_vs_control": {
+          "bit_differences": 0,
+          "max_abs": 0.0
+        },
+        "compared_branches_vs_control": 2
+      },
+      "prefix_tokens": 200,
+      "rep": 0
+    },
+    {
+      "aien": {
+        "blocks_still_allocated_after_run": 0,
+        "decode_s": 5.454077517,
+        "logical_kv_bytes_first_decode": 46858240,
+        "physical_kv_bytes_first_decode": 9371648,
+        "physical_kv_bytes_peak": 12255232,
+        "prefill_s": 9.123443179,
+        "prefill_tokens_computed": 200,
+        "tokens_per_s_decode": 5.8671700026738,
+        "tokens_per_s_total": 2.1951171269142313,
+        "total_s": 14.577809816,
+        "ttft_ms_max": 9768.380333,
+        "ttft_ms_mean": 9768.378596999999
+      },
+      "aien_error": null,
+      "baseline_modeled_vllm_apc": {
+        "decode_s": 5.8785937619999995,
+        "kv_bytes_source": "bookkeeping model (examples/prefill_bench/vllm_model.rs), not measured",
+        "logical_kv_bytes_after_prefill": 37486592,
+        "physical_kv_bytes_after_prefill": 11534336,
+        "physical_kv_bytes_end": 14417920,
+        "prefill_s": 11.23503586,
+        "prefill_tokens_computed": 224,
+        "tokens_per_s_decode": 5.443478712009697,
+        "tokens_per_s_total": 1.869281015491884,
+        "total_s": 17.118881396,
+        "ttft_ms": 11871.131342
+      },
+      "control_prefill_s": 7.852343034,
+      "decode_steps": 8,
+      "n": 4,
+      "naive_no_sharing_modeled": {
+        "physical_kv_bytes_after_prefill": 37486592,
+        "prefill_s": 31.409372136,
+        "source": "N x control one-shot prefill time; N x ceil(len/block) blocks"
+      },
+      "parity": {
+        "aien_vs_baseline_all_branches": {
+          "bit_differences": 0,
+          "max_abs": 0.0,
+          "values": 1024000
+        },
+        "aien_vs_control": {
+          "bit_differences": 0,
+          "max_abs": 0.0,
+          "values": 512000
+        },
+        "baseline_vs_control": {
+          "bit_differences": 0,
+          "max_abs": 0.0
+        },
+        "compared_branches_vs_control": 2
+      },
+      "prefix_tokens": 200,
+      "rep": 1
+    },
+    {
+      "aien": {
+        "blocks_still_allocated_after_run": 0,
+        "decode_s": 9.324853812,
+        "logical_kv_bytes_first_decode": 84344832,
+        "physical_kv_bytes_first_decode": 9371648,
+        "physical_kv_bytes_peak": 15138816,
+        "prefill_s": 8.710469965,
+        "prefill_tokens_computed": 200,
+        "tokens_per_s_decode": 6.863378374644271,
+        "tokens_per_s_total": 3.5485157417199136,
+        "total_s": 18.035709761,
+        "ttft_ms_max": 9840.537106,
+        "ttft_ms_mean": 9840.531202000002
+      },
+      "aien_error": null,
+      "baseline_modeled_vllm_apc": {
+        "decode_s": 9.719819599000001,
+        "kv_bytes_source": "bookkeeping model (examples/prefill_bench/vllm_model.rs), not measured",
+        "logical_kv_bytes_after_prefill": 74973184,
+        "physical_kv_bytes_after_prefill": 14417920,
+        "physical_kv_bytes_end": 20185088,
+        "prefill_s": 16.282524366,
+        "prefill_tokens_computed": 256,
+        "tokens_per_s_decode": 6.58448434645685,
+        "tokens_per_s_total": 2.4594441378692458,
+        "total_s": 26.022140131,
+        "ttft_ms": 17477.650827
+      },
+      "control_prefill_s": 7.456674083,
+      "decode_steps": 8,
+      "n": 8,
+      "naive_no_sharing_modeled": {
+        "physical_kv_bytes_after_prefill": 74973184,
+        "prefill_s": 59.653392664,
+        "source": "N x control one-shot prefill time; N x ceil(len/block) blocks"
+      },
+      "parity": {
+        "aien_vs_baseline_all_branches": {
+          "bit_differences": 0,
+          "max_abs": 0.0,
+          "values": 2048000
+        },
+        "aien_vs_control": {
+          "bit_differences": 0,
+          "max_abs": 0.0,
+          "values": 512000
+        },
+        "baseline_vs_control": {
+          "bit_differences": 0,
+          "max_abs": 0.0
+        },
+        "compared_branches_vs_control": 2
+      },
+      "prefix_tokens": 200,
+      "rep": 0
+    },
+    {
+      "aien": {
+        "blocks_still_allocated_after_run": 0,
+        "decode_s": 9.244214746,
+        "logical_kv_bytes_first_decode": 84344832,
+        "physical_kv_bytes_first_decode": 9371648,
+        "physical_kv_bytes_peak": 15138816,
+        "prefill_s": 8.454273094,
+        "prefill_tokens_computed": 200,
+        "tokens_per_s_decode": 6.923248946341602,
+        "tokens_per_s_total": 3.6160594097696364,
+        "total_s": 17.698824258,
+        "ttft_ms_max": 9592.647297,
+        "ttft_ms_mean": 9592.642895
+      },
+      "aien_error": null,
+      "baseline_modeled_vllm_apc": {
+        "decode_s": 9.630338212,
+        "kv_bytes_source": "bookkeeping model (examples/prefill_bench/vllm_model.rs), not measured",
+        "logical_kv_bytes_after_prefill": 74973184,
+        "physical_kv_bytes_after_prefill": 14417920,
+        "physical_kv_bytes_end": 20185088,
+        "prefill_s": 15.773376587,
+        "prefill_tokens_computed": 256,
+        "tokens_per_s_decode": 6.645664834517652,
+        "tokens_per_s_total": 2.5169289737045566,
+        "total_s": 25.427813287,
+        "ttft_ms": 17041.886091
+      },
+      "control_prefill_s": 7.597422491,
+      "decode_steps": 8,
+      "n": 8,
+      "naive_no_sharing_modeled": {
+        "physical_kv_bytes_after_prefill": 74973184,
+        "prefill_s": 60.779379928,
+        "source": "N x control one-shot prefill time; N x ceil(len/block) blocks"
+      },
+      "parity": {
+        "aien_vs_baseline_all_branches": {
+          "bit_differences": 0,
+          "max_abs": 0.0,
+          "values": 2048000
+        },
+        "aien_vs_control": {
+          "bit_differences": 0,
+          "max_abs": 0.0,
+          "values": 512000
+        },
+        "baseline_vs_control": {
+          "bit_differences": 0,
+          "max_abs": 0.0
+        },
+        "compared_branches_vs_control": 2
+      },
+      "prefix_tokens": 200,
+      "rep": 1
+    },
+    {
+      "aien": {
+        "blocks_still_allocated_after_run": 0,
+        "decode_s": 11.182896205,
+        "logical_kv_bytes_first_decode": 159318016,
+        "physical_kv_bytes_first_decode": 9371648,
+        "physical_kv_bytes_peak": 20905984,
+        "prefill_s": 8.370501029,
+        "prefill_tokens_computed": 200,
+        "tokens_per_s_decode": 10.015294602298422,
+        "tokens_per_s_total": 5.7277695752895585,
+        "total_s": 19.553859234,
+        "ttft_ms_max": 9767.29556,
+        "ttft_ms_mean": 9767.289
+      },
+      "aien_error": null,
+      "baseline_modeled_vllm_apc": {
+        "decode_s": 10.135550919,
+        "kv_bytes_source": "bookkeeping model (examples/prefill_bench/vllm_model.rs), not measured",
+        "logical_kv_bytes_after_prefill": 149946368,
+        "physical_kv_bytes_after_prefill": 20185088,
+        "physical_kv_bytes_end": 20185088,
+        "prefill_s": 25.015421616,
+        "prefill_tokens_computed": 320,
+        "tokens_per_s_decode": 11.050213342626098,
+        "tokens_per_s_total": 3.1808930379646423,
+        "total_s": 35.210237711,
+        "ttft_ms": 26456.213976
+      },
+      "control_prefill_s": 7.500479851,
+      "decode_steps": 7,
+      "n": 16,
+      "naive_no_sharing_modeled": {
+        "physical_kv_bytes_after_prefill": 149946368,
+        "prefill_s": 120.007677616,
+        "source": "N x control one-shot prefill time; N x ceil(len/block) blocks"
+      },
+      "parity": {
+        "aien_vs_baseline_all_branches": {
+          "bit_differences": 0,
+          "max_abs": 0.0,
+          "values": 3584000
+        },
+        "aien_vs_control": {
+          "bit_differences": 0,
+          "max_abs": 0.0,
+          "values": 448000
+        },
+        "baseline_vs_control": {
+          "bit_differences": 0,
+          "max_abs": 0.0
+        },
+        "compared_branches_vs_control": 2
+      },
+      "prefix_tokens": 200,
+      "rep": 0
+    },
+    {
+      "aien": {
+        "blocks_still_allocated_after_run": 0,
+        "decode_s": 11.121596275,
+        "logical_kv_bytes_first_decode": 159318016,
+        "physical_kv_bytes_first_decode": 9371648,
+        "physical_kv_bytes_peak": 20905984,
+        "prefill_s": 8.671380311,
+        "prefill_tokens_computed": 200,
+        "tokens_per_s_decode": 10.07049682712925,
+        "tokens_per_s_total": 5.658437692662998,
+        "total_s": 19.793449373,
+        "ttft_ms_max": 10020.964763,
+        "ttft_ms_mean": 10020.957988999999
+      },
+      "aien_error": null,
+      "baseline_modeled_vllm_apc": {
+        "decode_s": 10.188062504,
+        "kv_bytes_source": "bookkeeping model (examples/prefill_bench/vllm_model.rs), not measured",
+        "logical_kv_bytes_after_prefill": 149946368,
+        "physical_kv_bytes_after_prefill": 20185088,
+        "physical_kv_bytes_end": 20185088,
+        "prefill_s": 25.270497931,
+        "prefill_tokens_computed": 320,
+        "tokens_per_s_decode": 10.99325803665093,
+        "tokens_per_s_total": 3.156296316273293,
+        "total_s": 35.484627797,
+        "ttft_ms": 26796.099801
+      },
+      "control_prefill_s": 7.613648588,
+      "decode_steps": 7,
+      "n": 16,
+      "naive_no_sharing_modeled": {
+        "physical_kv_bytes_after_prefill": 149946368,
+        "prefill_s": 121.818377408,
+        "source": "N x control one-shot prefill time; N x ceil(len/block) blocks"
+      },
+      "parity": {
+        "aien_vs_baseline_all_branches": {
+          "bit_differences": 0,
+          "max_abs": 0.0,
+          "values": 3584000
+        },
+        "aien_vs_control": {
+          "bit_differences": 0,
+          "max_abs": 0.0,
+          "values": 448000
+        },
+        "baseline_vs_control": {
+          "bit_differences": 0,
+          "max_abs": 0.0
+        },
+        "compared_branches_vs_control": 2
+      },
+      "prefix_tokens": 200,
+      "rep": 1
+    },
+    {
+      "aien": {
+        "blocks_still_allocated_after_run": 44,
+        "decode_s": 0.0,
+        "logical_kv_bytes_first_decode": 0,
+        "physical_kv_bytes_first_decode": 0,
+        "physical_kv_bytes_peak": 0,
+        "prefill_s": 34.219436487,
+        "prefill_tokens_computed": 700,
+        "tokens_per_s_decode": null,
+        "tokens_per_s_total": 0.0,
+        "total_s": 34.219968761,
+        "ttft_ms_max": null,
+        "ttft_ms_mean": null
+      },
+      "aien_error": null,
+      "baseline_modeled_vllm_apc": {
+        "decode_s": 0.0,
+        "kv_bytes_source": "bookkeeping model (examples/prefill_bench/vllm_model.rs), not measured",
+        "logical_kv_bytes_after_prefill": 31719424,
+        "physical_kv_bytes_after_prefill": 31719424,
+        "physical_kv_bytes_end": 31719424,
+        "prefill_s": 30.047978917,
+        "prefill_tokens_computed": 700,
+        "tokens_per_s_decode": null,
+        "tokens_per_s_total": 0.0,
+        "total_s": 30.048007766,
+        "ttft_ms": 0.0
+      },
+      "control_prefill_s": 30.638343102,
+      "decode_steps": 0,
+      "n": 1,
+      "naive_no_sharing_modeled": {
+        "physical_kv_bytes_after_prefill": 31719424,
+        "prefill_s": 30.638343102,
+        "source": "N x control one-shot prefill time; N x ceil(len/block) blocks"
+      },
+      "parity": {
+        "aien_vs_baseline_all_branches": {
+          "bit_differences": 0,
+          "max_abs": 0.0,
+          "values": 0
+        },
+        "aien_vs_control": {
+          "bit_differences": 0,
+          "max_abs": 0.0,
+          "values": 0
+        },
+        "baseline_vs_control": {
+          "bit_differences": 0,
+          "max_abs": 0.0
+        },
+        "compared_branches_vs_control": 1
+      },
+      "prefix_tokens": 700,
+      "rep": 0
+    },
+    {
+      "aien": {
+        "blocks_still_allocated_after_run": 44,
+        "decode_s": 0.0,
+        "logical_kv_bytes_first_decode": 0,
+        "physical_kv_bytes_first_decode": 0,
+        "physical_kv_bytes_peak": 0,
+        "prefill_s": 35.306169934,
+        "prefill_tokens_computed": 700,
+        "tokens_per_s_decode": null,
+        "tokens_per_s_total": 0.0,
+        "total_s": 35.306766065,
+        "ttft_ms_max": null,
+        "ttft_ms_mean": null
+      },
+      "aien_error": null,
+      "baseline_modeled_vllm_apc": {
+        "decode_s": 0.0,
+        "kv_bytes_source": "bookkeeping model (examples/prefill_bench/vllm_model.rs), not measured",
+        "logical_kv_bytes_after_prefill": 31719424,
+        "physical_kv_bytes_after_prefill": 31719424,
+        "physical_kv_bytes_end": 31719424,
+        "prefill_s": 30.414754022,
+        "prefill_tokens_computed": 700,
+        "tokens_per_s_decode": null,
+        "tokens_per_s_total": 0.0,
+        "total_s": 30.414783366,
+        "ttft_ms": 0.0
+      },
+      "control_prefill_s": 30.808185269,
+      "decode_steps": 0,
+      "n": 1,
+      "naive_no_sharing_modeled": {
+        "physical_kv_bytes_after_prefill": 31719424,
+        "prefill_s": 30.808185269,
+        "source": "N x control one-shot prefill time; N x ceil(len/block) blocks"
+      },
+      "parity": {
+        "aien_vs_baseline_all_branches": {
+          "bit_differences": 0,
+          "max_abs": 0.0,
+          "values": 0
+        },
+        "aien_vs_control": {
+          "bit_differences": 0,
+          "max_abs": 0.0,
+          "values": 0
+        },
+        "baseline_vs_control": {
+          "bit_differences": 0,
+          "max_abs": 0.0
+        },
+        "compared_branches_vs_control": 1
+      },
+      "prefix_tokens": 700,
+      "rep": 1
+    },
+    {
+      "aien": {
+        "blocks_still_allocated_after_run": 44,
+        "decode_s": 0.0,
+        "logical_kv_bytes_first_decode": 0,
+        "physical_kv_bytes_first_decode": 0,
+        "physical_kv_bytes_peak": 0,
+        "prefill_s": 34.598060322,
+        "prefill_tokens_computed": 700,
+        "tokens_per_s_decode": null,
+        "tokens_per_s_total": 0.0,
+        "total_s": 34.598635702,
+        "ttft_ms_max": null,
+        "ttft_ms_mean": null
+      },
+      "aien_error": null,
+      "baseline_modeled_vllm_apc": {
+        "decode_s": 0.0,
+        "kv_bytes_source": "bookkeeping model (examples/prefill_bench/vllm_model.rs), not measured",
+        "logical_kv_bytes_after_prefill": 63438848,
+        "physical_kv_bytes_after_prefill": 32440320,
+        "physical_kv_bytes_end": 32440320,
+        "prefill_s": 31.589217745,
+        "prefill_tokens_computed": 712,
+        "tokens_per_s_decode": null,
+        "tokens_per_s_total": 0.0,
+        "total_s": 31.595246629000002,
+        "ttft_ms": 0.0
+      },
+      "control_prefill_s": 29.889947856,
+      "decode_steps": 0,
+      "n": 2,
+      "naive_no_sharing_modeled": {
+        "physical_kv_bytes_after_prefill": 63438848,
+        "prefill_s": 59.779895712,
+        "source": "N x control one-shot prefill time; N x ceil(len/block) blocks"
+      },
+      "parity": {
+        "aien_vs_baseline_all_branches": {
+          "bit_differences": 0,
+          "max_abs": 0.0,
+          "values": 0
+        },
+        "aien_vs_control": {
+          "bit_differences": 0,
+          "max_abs": 0.0,
+          "values": 0
+        },
+        "baseline_vs_control": {
+          "bit_differences": 0,
+          "max_abs": 0.0
+        },
+        "compared_branches_vs_control": 2
+      },
+      "prefix_tokens": 700,
+      "rep": 0
+    },
+    {
+      "aien": {
+        "blocks_still_allocated_after_run": 44,
+        "decode_s": 0.0,
+        "logical_kv_bytes_first_decode": 0,
+        "physical_kv_bytes_first_decode": 0,
+        "physical_kv_bytes_peak": 0,
+        "prefill_s": 34.053125939,
+        "prefill_tokens_computed": 700,
+        "tokens_per_s_decode": null,
+        "tokens_per_s_total": 0.0,
+        "total_s": 34.053619815,
+        "ttft_ms_max": null,
+        "ttft_ms_mean": null
+      },
+      "aien_error": null,
+      "baseline_modeled_vllm_apc": {
+        "decode_s": 0.0,
+        "kv_bytes_source": "bookkeeping model (examples/prefill_bench/vllm_model.rs), not measured",
+        "logical_kv_bytes_after_prefill": 63438848,
+        "physical_kv_bytes_after_prefill": 32440320,
+        "physical_kv_bytes_end": 32440320,
+        "prefill_s": 31.393784444,
+        "prefill_tokens_computed": 712,
+        "tokens_per_s_decode": null,
+        "tokens_per_s_total": 0.0,
+        "total_s": 31.399900293,
+        "ttft_ms": 0.0
+      },
+      "control_prefill_s": 29.967115498,
+      "decode_steps": 0,
+      "n": 2,
+      "naive_no_sharing_modeled": {
+        "physical_kv_bytes_after_prefill": 63438848,
+        "prefill_s": 59.934230996,
+        "source": "N x control one-shot prefill time; N x ceil(len/block) blocks"
+      },
+      "parity": {
+        "aien_vs_baseline_all_branches": {
+          "bit_differences": 0,
+          "max_abs": 0.0,
+          "values": 0
+        },
+        "aien_vs_control": {
+          "bit_differences": 0,
+          "max_abs": 0.0,
+          "values": 0
+        },
+        "baseline_vs_control": {
+          "bit_differences": 0,
+          "max_abs": 0.0
+        },
+        "compared_branches_vs_control": 2
+      },
+      "prefix_tokens": 700,
+      "rep": 1
+    },
+    {
+      "aien": {
+        "blocks_still_allocated_after_run": 0,
+        "decode_s": 6.373980749,
+        "logical_kv_bytes_first_decode": 158597120,
+        "physical_kv_bytes_first_decode": 31719424,
+        "physical_kv_bytes_peak": 37486592,
+        "prefill_s": 33.367540977,
+        "prefill_tokens_computed": 700,
+        "tokens_per_s_decode": 5.020410518971274,
+        "tokens_per_s_total": 0.8051891745722637,
+        "total_s": 39.742213396,
+        "ttft_ms_max": 34174.00898599999,
+        "ttft_ms_mean": 34174.00663
+      },
+      "aien_error": null,
+      "baseline_modeled_vllm_apc": {
+        "decode_s": 8.429918175,
+        "kv_bytes_source": "bookkeeping model (examples/prefill_bench/vllm_model.rs), not measured",
+        "logical_kv_bytes_after_prefill": 126877696,
+        "physical_kv_bytes_after_prefill": 33882112,
+        "physical_kv_bytes_end": 36765696,
+        "prefill_s": 33.925670191,
+        "prefill_tokens_computed": 736,
+        "tokens_per_s_decode": 3.7960036308418856,
+        "tokens_per_s_total": 0.7549660195828416,
+        "total_s": 42.386013635,
+        "ttft_ms": 34634.965370000005
+      },
+      "control_prefill_s": 29.422927296,
+      "decode_steps": 8,
+      "n": 4,
+      "naive_no_sharing_modeled": {
+        "physical_kv_bytes_after_prefill": 126877696,
+        "prefill_s": 117.691709184,
+        "source": "N x control one-shot prefill time; N x ceil(len/block) blocks"
+      },
+      "parity": {
+        "aien_vs_baseline_all_branches": {
+          "bit_differences": 0,
+          "max_abs": 0.0,
+          "values": 1024000
+        },
+        "aien_vs_control": {
+          "bit_differences": 0,
+          "max_abs": 0.0,
+          "values": 512000
+        },
+        "baseline_vs_control": {
+          "bit_differences": 0,
+          "max_abs": 0.0
+        },
+        "compared_branches_vs_control": 2
+      },
+      "prefix_tokens": 700,
+      "rep": 0
+    },
+    {
+      "aien": {
+        "blocks_still_allocated_after_run": 0,
+        "decode_s": 6.7577353460000005,
+        "logical_kv_bytes_first_decode": 158597120,
+        "physical_kv_bytes_first_decode": 31719424,
+        "physical_kv_bytes_peak": 37486592,
+        "prefill_s": 33.726602853,
+        "prefill_tokens_computed": 700,
+        "tokens_per_s_decode": 4.7353141787272355,
+        "tokens_per_s_total": 0.7904179329045241,
+        "total_s": 40.484911422,
+        "ttft_ms_max": 34621.190466,
+        "ttft_ms_mean": 34621.188442
+      },
+      "aien_error": null,
+      "baseline_modeled_vllm_apc": {
+        "decode_s": 6.80621177,
+        "kv_bytes_source": "bookkeeping model (examples/prefill_bench/vllm_model.rs), not measured",
+        "logical_kv_bytes_after_prefill": 126877696,
+        "physical_kv_bytes_after_prefill": 33882112,
+        "physical_kv_bytes_end": 36765696,
+        "prefill_s": 33.891790692,
+        "prefill_tokens_computed": 736,
+        "tokens_per_s_decode": 4.701587473526407,
+        "tokens_per_s_total": 0.7859271926785358,
+        "total_s": 40.716239746,
+        "ttft_ms": 34750.823261
+      },
+      "control_prefill_s": 29.504619014,
+      "decode_steps": 8,
+      "n": 4,
+      "naive_no_sharing_modeled": {
+        "physical_kv_bytes_after_prefill": 126877696,
+        "prefill_s": 118.018476056,
+        "source": "N x control one-shot prefill time; N x ceil(len/block) blocks"
+      },
+      "parity": {
+        "aien_vs_baseline_all_branches": {
+          "bit_differences": 0,
+          "max_abs": 0.0,
+          "values": 1024000
+        },
+        "aien_vs_control": {
+          "bit_differences": 0,
+          "max_abs": 0.0,
+          "values": 512000
+        },
+        "baseline_vs_control": {
+          "bit_differences": 0,
+          "max_abs": 0.0
+        },
+        "compared_branches_vs_control": 2
+      },
+      "prefix_tokens": 700,
+      "rep": 1
+    },
+    {
+      "aien": {
+        "blocks_still_allocated_after_run": 0,
+        "decode_s": 12.281458384,
+        "logical_kv_bytes_first_decode": 285474816,
+        "physical_kv_bytes_first_decode": 31719424,
+        "physical_kv_bytes_peak": 43253760,
+        "prefill_s": 33.30886619,
+        "prefill_tokens_computed": 700,
+        "tokens_per_s_decode": 5.211107508484312,
+        "tokens_per_s_total": 1.403785230745678,
+        "total_s": 45.591019622,
+        "ttft_ms_max": 34626.986011,
+        "ttft_ms_mean": 34626.983451
+      },
+      "aien_error": null,
+      "baseline_modeled_vllm_apc": {
+        "decode_s": 13.35095523,
+        "kv_bytes_source": "bookkeeping model (examples/prefill_bench/vllm_model.rs), not measured",
+        "logical_kv_bytes_after_prefill": 253755392,
+        "physical_kv_bytes_after_prefill": 36765696,
+        "physical_kv_bytes_end": 42532864,
+        "prefill_s": 39.575183943,
+        "prefill_tokens_computed": 784,
+        "tokens_per_s_decode": 4.7936644904770604,
+        "tokens_per_s_total": 1.2073664820410854,
+        "total_s": 53.007931686,
+        "ttft_ms": 41298.604989
+      },
+      "control_prefill_s": 29.381371969,
+      "decode_steps": 8,
+      "n": 8,
+      "naive_no_sharing_modeled": {
+        "physical_kv_bytes_after_prefill": 253755392,
+        "prefill_s": 235.050975752,
+        "source": "N x control one-shot prefill time; N x ceil(len/block) blocks"
+      },
+      "parity": {
+        "aien_vs_baseline_all_branches": {
+          "bit_differences": 0,
+          "max_abs": 0.0,
+          "values": 2048000
+        },
+        "aien_vs_control": {
+          "bit_differences": 0,
+          "max_abs": 0.0,
+          "values": 512000
+        },
+        "baseline_vs_control": {
+          "bit_differences": 0,
+          "max_abs": 0.0
+        },
+        "compared_branches_vs_control": 2
+      },
+      "prefix_tokens": 700,
+      "rep": 0
+    },
+    {
+      "aien": {
+        "blocks_still_allocated_after_run": 0,
+        "decode_s": 12.015521709,
+        "logical_kv_bytes_first_decode": 285474816,
+        "physical_kv_bytes_first_decode": 31719424,
+        "physical_kv_bytes_peak": 43253760,
+        "prefill_s": 33.514981884,
+        "prefill_tokens_computed": 700,
+        "tokens_per_s_decode": 5.326443707563859,
+        "tokens_per_s_total": 1.4056298708265007,
+        "total_s": 45.531189489,
+        "ttft_ms_max": 35076.060097,
+        "ttft_ms_mean": 35076.056104999996
+      },
+      "aien_error": null,
+      "baseline_modeled_vllm_apc": {
+        "decode_s": 13.067893288,
+        "kv_bytes_source": "bookkeeping model (examples/prefill_bench/vllm_model.rs), not measured",
+        "logical_kv_bytes_after_prefill": 253755392,
+        "physical_kv_bytes_after_prefill": 36765696,
+        "physical_kv_bytes_end": 42532864,
+        "prefill_s": 39.71851038,
+        "prefill_tokens_computed": 784,
+        "tokens_per_s_decode": 4.897499435411674,
+        "tokens_per_s_total": 1.2105023375350066,
+        "total_s": 52.870612485,
+        "ttft_ms": 41080.978849
+      },
+      "control_prefill_s": 29.692341517,
+      "decode_steps": 8,
+      "n": 8,
+      "naive_no_sharing_modeled": {
+        "physical_kv_bytes_after_prefill": 253755392,
+        "prefill_s": 237.538732136,
+        "source": "N x control one-shot prefill time; N x ceil(len/block) blocks"
+      },
+      "parity": {
+        "aien_vs_baseline_all_branches": {
+          "bit_differences": 0,
+          "max_abs": 0.0,
+          "values": 2048000
+        },
+        "aien_vs_control": {
+          "bit_differences": 0,
+          "max_abs": 0.0,
+          "values": 512000
+        },
+        "baseline_vs_control": {
+          "bit_differences": 0,
+          "max_abs": 0.0
+        },
+        "compared_branches_vs_control": 2
+      },
+      "prefix_tokens": 700,
+      "rep": 1
+    },
+    {
+      "aien": {
+        "blocks_still_allocated_after_run": 0,
+        "decode_s": 14.594965757,
+        "logical_kv_bytes_first_decode": 539230208,
+        "physical_kv_bytes_first_decode": 31719424,
+        "physical_kv_bytes_peak": 54788096,
+        "prefill_s": 33.759715821,
+        "prefill_tokens_computed": 700,
+        "tokens_per_s_decode": 8.770147332384727,
+        "tokens_per_s_total": 2.6470634082286373,
+        "total_s": 48.355471804,
+        "ttft_ms_max": 35517.728616,
+        "ttft_ms_mean": 35517.724076
+      },
+      "aien_error": null,
+      "baseline_modeled_vllm_apc": {
+        "decode_s": 13.185587951,
+        "kv_bytes_source": "bookkeeping model (examples/prefill_bench/vllm_model.rs), not measured",
+        "logical_kv_bytes_after_prefill": 507510784,
+        "physical_kv_bytes_after_prefill": 42532864,
+        "physical_kv_bytes_end": 54067200,
+        "prefill_s": 52.605580539,
+        "prefill_tokens_computed": 880,
+        "tokens_per_s_decode": 9.70756863294006,
+        "tokens_per_s_total": 1.9395601763342492,
+        "total_s": 65.994343234,
+        "ttft_ms": 54461.98484899999
+      },
+      "control_prefill_s": 29.607783852,
+      "decode_steps": 8,
+      "n": 16,
+      "naive_no_sharing_modeled": {
+        "physical_kv_bytes_after_prefill": 507510784,
+        "prefill_s": 473.724541632,
+        "source": "N x control one-shot prefill time; N x ceil(len/block) blocks"
+      },
+      "parity": {
+        "aien_vs_baseline_all_branches": {
+          "bit_differences": 0,
+          "max_abs": 0.0,
+          "values": 4096000
+        },
+        "aien_vs_control": {
+          "bit_differences": 0,
+          "max_abs": 0.0,
+          "values": 512000
+        },
+        "baseline_vs_control": {
+          "bit_differences": 0,
+          "max_abs": 0.0
+        },
+        "compared_branches_vs_control": 2
+      },
+      "prefix_tokens": 700,
+      "rep": 0
+    },
+    {
+      "aien": {
+        "blocks_still_allocated_after_run": 0,
+        "decode_s": 13.993530059,
+        "logical_kv_bytes_first_decode": 539230208,
+        "physical_kv_bytes_first_decode": 31719424,
+        "physical_kv_bytes_peak": 54788096,
+        "prefill_s": 33.845659914,
+        "prefill_tokens_computed": 700,
+        "tokens_per_s_decode": 9.147084364011228,
+        "tokens_per_s_total": 2.675583740674932,
+        "total_s": 47.8400276,
+        "ttft_ms_max": 35599.744710000006,
+        "ttft_ms_mean": 35599.737
+      },
+      "aien_error": null,
+      "baseline_modeled_vllm_apc": {
+        "decode_s": 12.992392891,
+        "kv_bytes_source": "bookkeeping model (examples/prefill_bench/vllm_model.rs), not measured",
+        "logical_kv_bytes_after_prefill": 507510784,
+        "physical_kv_bytes_after_prefill": 42532864,
+        "physical_kv_bytes_end": 54067200,
+        "prefill_s": 51.356783501,
+        "prefill_tokens_computed": 880,
+        "tokens_per_s_decode": 9.851918816946128,
+        "tokens_per_s_total": 1.9829526346197537,
+        "total_s": 64.550205469,
+        "ttft_ms": 53233.209705
+      },
+      "control_prefill_s": 29.680487459,
+      "decode_steps": 8,
+      "n": 16,
+      "naive_no_sharing_modeled": {
+        "physical_kv_bytes_after_prefill": 507510784,
+        "prefill_s": 474.887799344,
+        "source": "N x control one-shot prefill time; N x ceil(len/block) blocks"
+      },
+      "parity": {
+        "aien_vs_baseline_all_branches": {
+          "bit_differences": 0,
+          "max_abs": 0.0,
+          "values": 4096000
+        },
+        "aien_vs_control": {
+          "bit_differences": 0,
+          "max_abs": 0.0,
+          "values": 512000
+        },
+        "baseline_vs_control": {
+          "bit_differences": 0,
+          "max_abs": 0.0
+        },
+        "compared_branches_vs_control": 2
+      },
+      "prefix_tokens": 700,
+      "rep": 1
+    }
+  ],
+  "commit": "f2a5a275023e35897c5e8d84af1d46862dc7833a",
+  "complete": true,
+  "dirty": false,
+  "hardware": {
+    "cpu_parts": [
+      "0xd87",
+      "0xd85"
+    ],
+    "loadavg_at_start": "8.81 10.51 11.46 2/1636 470703\n",
+    "lscpu_model": "Model name:                              Cortex-A725\nModel name:                              Cortex-X925",
+    "processors": 20,
+    "uname": "Linux spark-b87b 7.0.0-1019-nvidia #19~24.04.2-Ubuntu SMP PREEMPT_DYNAMIC Sun Sep  6 18:35:11 UTC 2 aarch64 aarch64 aarch64 GNU/Linux"
+  },
+  "knobs": {
+    "decode_steps": 8,
+    "n": [
+      1,
+      2,
+      4,
+      8,
+      16
+    ],
+    "parity_branches": 2,
+    "prefill_chunk": 128,
+    "prefix_tokens": [
+      40,
+      200,
+      700
+    ],
+    "reps": 2
+  },
+  "model": {
+    "id": "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
+    "kv_block_size": 16,
+    "path": "/home/drakestapleton/models/TinyLlama-1.1B-Chat-v1.0/model.safetensors"
+  }
+}

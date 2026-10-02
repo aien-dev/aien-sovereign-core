@@ -1,0 +1,94 @@
+{
+  "baseline_label": "MODELED vLLM automatic prefix caching, not a vLLM run",
+  "bench": "prefill_bench",
+  "cells": [
+    {
+      "aien": {
+        "blocks_still_allocated_after_run": 44,
+        "decode_s": 0.0,
+        "logical_kv_bytes_first_decode": 0,
+        "physical_kv_bytes_first_decode": 0,
+        "physical_kv_bytes_peak": 0,
+        "prefill_s": 34.234228324,
+        "prefill_tokens_computed": 700,
+        "tokens_per_s_decode": null,
+        "tokens_per_s_total": 0.0,
+        "total_s": 34.234723618,
+        "ttft_ms_max": null,
+        "ttft_ms_mean": null
+      },
+      "aien_error": null,
+      "aien_exit_state": "spine_steps=1000 running=0 waiting=2 root_prefill_pending=false prefill_tokens=700 decode_steps=0",
+      "baseline_modeled_vllm_apc": {
+        "decode_s": 0.0,
+        "kv_bytes_source": "bookkeeping model (examples/prefill_bench/vllm_model.rs), not measured",
+        "logical_kv_bytes_after_prefill": 63438848,
+        "physical_kv_bytes_after_prefill": 32440320,
+        "physical_kv_bytes_end": 32440320,
+        "prefill_s": 30.966225526,
+        "prefill_tokens_computed": 712,
+        "tokens_per_s_decode": null,
+        "tokens_per_s_total": 0.0,
+        "total_s": 30.972233383,
+        "ttft_ms": 0.0
+      },
+      "control_prefill_s": 29.875642446,
+      "decode_steps": 0,
+      "n": 2,
+      "naive_no_sharing_modeled": {
+        "physical_kv_bytes_after_prefill": 63438848,
+        "prefill_s": 59.751284892,
+        "source": "N x control one-shot prefill time; N x ceil(len/block) blocks"
+      },
+      "parity": {
+        "aien_vs_baseline_all_branches": {
+          "bit_differences": 0,
+          "max_abs": 0.0,
+          "values": 0
+        },
+        "aien_vs_control": {
+          "bit_differences": 0,
+          "max_abs": 0.0,
+          "values": 0
+        },
+        "baseline_vs_control": {
+          "bit_differences": 0,
+          "max_abs": 0.0
+        },
+        "compared_branches_vs_control": 2
+      },
+      "prefix_tokens": 700,
+      "rep": 0
+    }
+  ],
+  "commit": "1afc6990451cf2324f7ee21e0fa10279741f84ec",
+  "complete": true,
+  "dirty": false,
+  "hardware": {
+    "cpu_parts": [
+      "0xd87",
+      "0xd85"
+    ],
+    "loadavg_at_start": "14.99 11.15 7.87 3/1646 544987\n",
+    "lscpu_model": "Model name:                              Cortex-A725\nModel name:                              Cortex-X925",
+    "processors": 20,
+    "uname": "Linux spark-b87b 7.0.0-1019-nvidia #19~24.04.2-Ubuntu SMP PREEMPT_DYNAMIC Sun Sep  6 18:35:11 UTC 2 aarch64 aarch64 aarch64 GNU/Linux"
+  },
+  "knobs": {
+    "decode_steps": 4,
+    "n": [
+      2
+    ],
+    "parity_branches": 2,
+    "prefill_chunk": 128,
+    "prefix_tokens": [
+      700
+    ],
+    "reps": 1
+  },
+  "model": {
+    "id": "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
+    "kv_block_size": 16,
+    "path": "/home/drakestapleton/models/TinyLlama-1.1B-Chat-v1.0/model.safetensors"
+  }
+}
