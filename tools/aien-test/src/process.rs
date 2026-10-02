@@ -18,6 +18,10 @@ pub struct RunSpec {
     pub timeout: Duration,
     /// Time between SIGTERM and SIGKILL (ADR 0028 Decision 6 says 10 s).
     pub kill_grace: Duration,
+    /// false: the job is never signalled and never timed out (ADR 0028
+    /// Decision 6, gb10 jobs). `timeout` is then advisory and only sets
+    /// `timeout_exceeded`.
+    pub enforce_timeout: bool,
 }
 
 #[derive(Debug)]
@@ -27,7 +31,10 @@ pub struct RunOutput {
     pub signal: Option<i32>,
     pub stdout: Vec<u8>,
     pub stderr: Vec<u8>,
+    /// The runner killed the job because `timeout` passed.
     pub timed_out: bool,
+    /// The job ran longer than `timeout`, whether or not it was killed.
+    pub timeout_exceeded: bool,
     pub duration_ms: u64,
 }
 
@@ -104,16 +111,24 @@ pub fn run(spec: &RunSpec) -> io::Result<RunOutput> {
     });
 
     let mut timed_out = false;
-    let waited: Waited = match rx.recv_timeout(spec.timeout) {
-        Ok(r) => r,
-        Err(mpsc::RecvTimeoutError::Timeout) => {
-            timed_out = true;
-            terminate(pid, &rx, spec.kill_grace)?
+    let waited: Waited = if !spec.enforce_timeout {
+        // Advisory timeout: wait for the job however long it takes.
+        rx.recv().map_err(|_| lost())?
+    } else {
+        match rx.recv_timeout(spec.timeout) {
+            Ok(r) => r,
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                timed_out = true;
+                terminate(pid, &rx, spec.kill_grace)?
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => return Err(lost()),
         }
-        Err(mpsc::RecvTimeoutError::Disconnected) => return Err(lost()),
     };
-    // Whatever the leader did, nothing it started may outlive the run.
-    signal_group(pid, libc::SIGKILL);
+    let waited_for = start.elapsed();
+    if spec.enforce_timeout {
+        // Whatever the leader did, nothing it started may outlive the run.
+        signal_group(pid, libc::SIGKILL);
+    }
     let status = waited?;
     let stdout = h_out.join().unwrap_or_default();
     let stderr = h_err.join().unwrap_or_default();
@@ -123,6 +138,7 @@ pub fn run(spec: &RunSpec) -> io::Result<RunOutput> {
         stdout,
         stderr,
         timed_out,
+        timeout_exceeded: timed_out || (!spec.enforce_timeout && waited_for > spec.timeout),
         duration_ms: start.elapsed().as_millis() as u64,
     })
 }
@@ -138,6 +154,7 @@ mod tests {
             cwd: PathBuf::from("/"),
             timeout: Duration::from_millis(timeout_ms),
             kill_grace: Duration::from_millis(500),
+            enforce_timeout: true,
         }
     }
 
@@ -181,6 +198,28 @@ mod tests {
         assert_eq!(o.exit_code, Some(0));
         assert!(!o.timed_out);
         assert!(o.duration_ms < 10_000, "took {} ms", o.duration_ms);
+    }
+
+    #[test]
+    fn advisory_timeout_never_signals_the_job() {
+        let mut s = sh("sleep 1; echo done", 100);
+        s.enforce_timeout = false;
+        let o = run(&s).unwrap();
+        assert_eq!(o.exit_code, Some(0));
+        assert_eq!(o.stdout, b"done\n");
+        assert!(!o.timed_out, "an advisory timeout must not kill");
+        assert!(o.timeout_exceeded, "but it must be reported");
+        assert!(o.signal.is_none());
+    }
+
+    #[test]
+    fn within_the_limit_is_not_exceeded() {
+        let mut s = sh("echo quick", 20_000);
+        s.enforce_timeout = false;
+        let o = run(&s).unwrap();
+        assert!(!o.timeout_exceeded);
+        let o = run(&sh("echo quick", 20_000)).unwrap();
+        assert!(!o.timeout_exceeded && !o.timed_out);
     }
 
     #[test]

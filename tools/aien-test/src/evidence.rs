@@ -1,6 +1,8 @@
 //! EvidenceReceiptV1 (ADR 0028 Decision 4): canonical JSON, sha256 digest,
-//! content-addressed stdout/stderr blobs, immutable write (never overwrite).
+//! content-addressed stdout/stderr blobs, immutable write (never overwrite),
+//! and read-back of the receipts already in a store.
 
+use crate::verdict::{DepFact, Verdict};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::fmt;
@@ -8,8 +10,15 @@ use std::fs;
 use std::io::{ErrorKind, Write};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::SystemTime;
 
 pub const SCHEMA: &str = "aien-test/EvidenceReceiptV1";
+
+/// Makes every blob temp file name unique inside one process, so gates
+/// running on different threads can store the same bytes (an empty stderr,
+/// say) at the same moment.
+static TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 pub fn sha256_hex(bytes: &[u8]) -> String {
     let mut h = Sha256::new();
@@ -161,7 +170,8 @@ impl Store {
             }
             return Ok(sha);
         }
-        let tmp = blobs.join(format!(".tmp-{sha}-{}", std::process::id()));
+        let n = TMP_COUNTER.fetch_add(1, Ordering::SeqCst);
+        let tmp = blobs.join(format!(".tmp-{sha}-{}-{n}", std::process::id()));
         {
             let mut f = fs::OpenOptions::new()
                 .write(true)
@@ -216,6 +226,143 @@ impl Store {
             )));
         }
         Ok((digest, path))
+    }
+}
+
+/// A receipt read back from a store. `digest` comes from the file name and
+/// has been checked against the file's bytes.
+#[derive(Debug, Clone)]
+pub struct Stored {
+    pub digest: String,
+    pub value: Value,
+    modified: Option<SystemTime>,
+}
+
+impl Stored {
+    fn text(&self, section: &str, key: &str) -> &str {
+        self.value[section][key].as_str().unwrap_or("")
+    }
+
+    pub fn gate(&self) -> &str {
+        self.text("core", "gate")
+    }
+
+    pub fn commit(&self) -> &str {
+        self.text("core", "commit")
+    }
+
+    pub fn reason(&self) -> &str {
+        self.text("core", "reason")
+    }
+
+    pub fn finished_utc(&self) -> &str {
+        self.text("volatile", "finished_utc")
+    }
+
+    pub fn verdict(&self) -> Option<Verdict> {
+        Verdict::parse(self.text("core", "derived_verdict"))
+    }
+}
+
+fn is_sha256_hex(s: &str) -> bool {
+    s.len() == 64
+        && s.bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
+/// All verified receipts of one store, oldest first.
+#[derive(Debug, Clone, Default)]
+pub struct Index {
+    receipts: Vec<Stored>,
+}
+
+impl Index {
+    /// Read every `<digest>.json` in the store. A file is skipped, never
+    /// trusted, if its bytes do not hash to its name, it is not JSON, or it
+    /// does not carry the receipt schema. Order is by recorded finish time,
+    /// then by file modification time (receipts finished in the same second),
+    /// then by digest.
+    pub fn load(store: &Store) -> Index {
+        let mut receipts = Vec::new();
+        let rd = match fs::read_dir(store.dir()) {
+            Ok(r) => r,
+            Err(_) => return Index::default(),
+        };
+        for e in rd.flatten() {
+            let name = e.file_name().to_string_lossy().into_owned();
+            let digest = match name.strip_suffix(".json") {
+                Some(d) if is_sha256_hex(d) => d.to_string(),
+                _ => continue,
+            };
+            let bytes = match fs::read(e.path()) {
+                Ok(b) => b,
+                Err(_) => continue,
+            };
+            let body = bytes.strip_suffix(b"\n").unwrap_or(&bytes);
+            if sha256_hex(body) != digest {
+                continue;
+            }
+            let value: Value = match serde_json::from_slice(body) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+            if value["schema"] != SCHEMA {
+                continue;
+            }
+            let modified = e.metadata().and_then(|m| m.modified()).ok();
+            receipts.push(Stored {
+                digest,
+                value,
+                modified,
+            });
+        }
+        receipts.sort_by(|a, b| {
+            a.finished_utc()
+                .cmp(b.finished_utc())
+                .then_with(|| a.modified.cmp(&b.modified))
+                .then_with(|| a.digest.cmp(&b.digest))
+        });
+        Index { receipts }
+    }
+
+    pub fn len(&self) -> usize {
+        self.receipts.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.receipts.is_empty()
+    }
+
+    /// The newest receipt of `gate`, for any commit.
+    pub fn latest(&self, gate: &str) -> Option<&Stored> {
+        self.receipts.iter().rev().find(|r| r.gate() == gate)
+    }
+
+    /// The newest receipt of `gate` made at exactly `commit`.
+    pub fn latest_at(&self, gate: &str, commit: &str) -> Option<&Stored> {
+        self.receipts
+            .iter()
+            .rev()
+            .find(|r| r.gate() == gate && r.commit() == commit)
+    }
+
+    /// What is known about each of `deps` at `commit`, in the given order. A
+    /// dependency without a receipt for this commit has no verdict.
+    pub fn dep_facts(&self, deps: &[String], commit: &str) -> Vec<DepFact> {
+        deps.iter()
+            .map(|d| match self.latest_at(d, commit) {
+                Some(r) => DepFact {
+                    gate: d.clone(),
+                    verdict: r.verdict(),
+                    receipt: Some(r.digest.clone()),
+                },
+                None => DepFact {
+                    gate: d.clone(),
+                    verdict: None,
+                    receipt: None,
+                },
+            })
+            .collect()
     }
 }
 
@@ -365,5 +512,116 @@ mod tests {
             Err(StoreError::Collision(_)) => {}
             other => panic!("expected collision, got {other:?}"),
         }
+    }
+
+    fn receipt(gate: &str, commit: &str, verdict: &str, finished: &str) -> Value {
+        build_receipt(
+            json!({"gate": gate, "commit": commit, "derived_verdict": verdict, "reason": ""}),
+            json!({"finished_utc": finished}),
+        )
+    }
+
+    #[test]
+    fn index_finds_the_newest_receipt_per_gate_and_commit() {
+        let t = TempDir::new("ev6");
+        let store = Store::new(t.path());
+        let c1 = "1".repeat(40);
+        let c2 = "2".repeat(40);
+        store
+            .put_receipt(&receipt("G", &c1, "FAIL", "2026-10-02T01:00:00Z"))
+            .unwrap();
+        let (newer, _) = store
+            .put_receipt(&receipt("G", &c1, "PASS", "2026-10-02T02:00:00Z"))
+            .unwrap();
+        let (other_commit, _) = store
+            .put_receipt(&receipt("G", &c2, "FAIL", "2026-10-02T03:00:00Z"))
+            .unwrap();
+        store
+            .put_receipt(&receipt(
+                "H",
+                &c1,
+                "BLOCKED_HARDWARE",
+                "2026-10-02T01:30:00Z",
+            ))
+            .unwrap();
+        let ix = Index::load(&store);
+        assert_eq!(ix.len(), 4);
+        assert!(!ix.is_empty());
+        assert_eq!(ix.latest("G").unwrap().digest, other_commit);
+        let at = ix.latest_at("G", &c1).unwrap();
+        assert_eq!(at.digest, newer);
+        assert_eq!(at.verdict(), Some(Verdict::Pass));
+        assert_eq!((at.gate(), at.commit()), ("G", c1.as_str()));
+        assert!(ix.latest_at("G", &"3".repeat(40)).is_none());
+        assert!(ix.latest("nope").is_none());
+        let want = vec!["H".to_string(), "G".to_string(), "Z".to_string()];
+        let facts = ix.dep_facts(&want, &c1);
+        assert_eq!(facts.len(), 3);
+        assert_eq!(facts[0].verdict, Some(Verdict::BlockedHardware));
+        assert_eq!(facts[1].verdict, Some(Verdict::Pass));
+        assert_eq!(facts[1].receipt.as_deref(), Some(newer.as_str()));
+        assert_eq!(
+            facts[2],
+            DepFact {
+                gate: "Z".to_string(),
+                verdict: None,
+                receipt: None
+            }
+        );
+    }
+
+    #[test]
+    fn index_skips_files_that_are_not_trustworthy_receipts() {
+        let t = TempDir::new("ev7");
+        let store = Store::new(t.path());
+        let c = "1".repeat(40);
+        store
+            .put_receipt(&receipt("G", &c, "PASS", "2026-10-02T01:00:00Z"))
+            .unwrap();
+        // The file name does not match the bytes.
+        let forged = canonical(&receipt("G", &c, "FAIL", "2026-10-02T09:00:00Z")).unwrap();
+        fs::write(t.path().join(format!("{}.json", "0".repeat(64))), forged).unwrap();
+        // The right name, but not a receipt of this schema.
+        let alien = canonical(&json!({"schema": "something/else", "core": {"gate": "G"}})).unwrap();
+        fs::write(
+            t.path().join(format!("{}.json", sha256_hex(&alien))),
+            &alien,
+        )
+        .unwrap();
+        // Not JSON at all, with the right name.
+        let junk = b"not json".to_vec();
+        fs::write(t.path().join(format!("{}.json", sha256_hex(&junk))), &junk).unwrap();
+        fs::write(t.path().join("notes.txt"), b"hello").unwrap();
+        let ix = Index::load(&store);
+        assert_eq!(ix.len(), 1);
+        assert_eq!(ix.latest("G").unwrap().verdict(), Some(Verdict::Pass));
+        let missing = Store::new(&t.path().join("no-such-dir"));
+        assert!(Index::load(&missing).is_empty());
+    }
+
+    #[test]
+    fn identical_blobs_stored_at_the_same_moment_do_not_collide() {
+        let t = TempDir::new("ev8");
+        let store = Store::new(t.path());
+        let barrier = std::sync::Barrier::new(8);
+        std::thread::scope(|s| {
+            for _ in 0..8 {
+                s.spawn(|| {
+                    barrier.wait();
+                    for _ in 0..20 {
+                        store.put_blob(b"same bytes").expect("concurrent put_blob");
+                    }
+                });
+            }
+        });
+        let sha = sha256_hex(b"same bytes");
+        let blob = t.path().join("blobs").join(format!("{sha}.log"));
+        assert_eq!(fs::read(blob).unwrap(), b"same bytes");
+        let leftovers = fs::read_dir(t.path().join("blobs"))
+            .unwrap()
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().starts_with(".tmp-"))
+            .count();
+        assert_eq!(leftovers, 0, "no temp file may be left behind");
     }
 }

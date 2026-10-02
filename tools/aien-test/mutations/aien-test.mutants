@@ -11,7 +11,7 @@ kill_leader_only	process.rs	s#libc::kill(-pid, sig);#libc::kill(pid, sig);#	time
 escape_hex_uppercase	evidence.rs	s#u{:04x}#u{:04X}#	canonical encoding escapes control characters with upper-case hex
 duplicate_key_allowed	manifest.rs	s#if entries.iter().any(|e| e.key == k) {#if false {#	a repeated top-level key is accepted
 unknown_key_allowed	manifest.rs	s#if !KNOWN.contains(&e.key.as_str()) {#if false {#	an unknown top-level key is ignored
-missing_exec_ignored	verdict.rs	s#if !exec_exists {#if false {#	a missing run.exec is not MISSING_IMPLEMENTATION
+missing_exec_ignored	verdict.rs	s#if !f.exec_exists {#if false {#	a missing run.exec is not MISSING_IMPLEMENTATION
 last_value_becomes_first	verdict.rs	s#compare(rule.op, vals\[vals.len() - 1\], &rule.value)#compare(rule.op, vals[0], \&rule.value)#	a repeated observation uses the first value, not the last
 evidence_inside_not_refused	runner.rs	s#let evidence_inside = resolve(&opts.evidence_dir).starts_with(resolve(root));#let evidence_inside = false;#	evidence may be written inside the tree under test
 operator_gate_not_blocked	verdict.rs	s#if m.requires.iter().any(|r| r == "operator") {#if false {#	a gate needing an operator runs anyway
@@ -19,3 +19,15 @@ timeout_checked_after_exit	verdict.rs	s#let (verdict, reason) = if f.timed_out {
 discover_ignores_gate_files	runner.rs	s#} else if ft.is_file() && name.ends_with(".gate") {#} else if false {#	the walk finds no .gate file, so a repository-wide parse check silently covers nothing
 discover_not_recursive	runner.rs	s#walk(&path, out);#let _ = \&path;#	the walk does not descend into directories, so gates under crates/ or tests/ are never parsed
 unknown_child_key_allowed	manifest.rs	s#if !allowed.contains(&k.as_str()) {#if false {#	a mistyped child key such as exce under run is not rejected
+dep_blocked_ignored	verdict.rs	s#return Some((v, format!("DEP_BLOCKED:{d}")));#return Some((Verdict::NotRun, format!("DEP_NOT_PASS:{d}")));#	a blocked dependency no longer passes its blocked verdict on
+dep_not_pass_ignored	verdict.rs	s#\.find(|d| dep_verdict(&f.deps, d) != Some(Verdict::Pass))#.find(|_d| false)#	a gate runs although a dependency is not PASS
+no_hardware_not_blocked	verdict.rs	s#"gb10" if !f.gb10_present => {#"gb10" if false => {#	a gb10 gate on a machine without the GPU is not BLOCKED_HARDWARE
+campaign_takes_the_mildest	verdict.rs	s#\.max_by_key(|v| v.exit_code())#.min_by_key(|v| v.exit_code())#	a campaign reports its mildest verdict instead of its worst
+cycle_not_detected	graph.rs	s#if order.len() != nodes.len() {#if false {#	a dependency cycle is accepted as a graph
+topo_order_takes_highest_first	graph.rs	s#ready\.pop_first()#ready.pop_last()#	the topological order is no longer lowest-id first and stable
+gb10_timeout_enforced	runner.rs	s#enforce_timeout: m.pool() != "gb10",#enforce_timeout: true,#	a gb10 job is killed at its timeout
+quiet_flag_ignored	resources.rs	s#if fs::symlink_metadata(flag).is_ok() {#if false {#	the quiet flag no longer stops a GPU job
+gpu_lock_shared	resources.rs	s#libc::LOCK_EX | libc::LOCK_NB#libc::LOCK_SH | libc::LOCK_NB#	two GPU jobs can hold the lock at once
+slot_released_twice	resources.rs	s#\*free += 1;#*free += 2;#	finishing a job frees two pool slots instead of one
+stale_receipt_counts_as_pass	why.rs	s#Evidence::Other(_) => State::Stale,#Evidence::Other(_) => State::Pass,#	why reports a receipt from another commit as PASS
+pass_over_failed_dependency	why.rs	s#let state = if own == State::Pass && !deps_pass {#let state = if false {#	why reports PASS although a dependency is not PASS

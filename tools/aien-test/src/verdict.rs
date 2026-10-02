@@ -3,10 +3,11 @@
 //! expectations and facts the runner measured. Only the last row can yield
 //! PASS.
 //!
-//! Slice A scope (host pool, serial, one gate): rows 2 to 15 are implemented
-//! as below. Where Slice A cannot do what a row presumes (dependencies, other
-//! pools, build, symbol checks, operator attestations) it refuses with NOT_RUN
-//! or BLOCKED_OPERATOR and a reason code; it never guesses a PASS.
+//! Scope (Slice B): rows 2 to 15 are implemented as below, including the
+//! hardware verdict (row 3) and the dependency verdicts (rows 4 and 5). Where
+//! the runner still cannot do what a row presumes (build, symbol checks,
+//! operator attestations) it refuses with NOT_RUN or BLOCKED_OPERATOR and a
+//! reason code; it never guesses a PASS.
 //!
 //! Deviation from the ADR table order (recorded): timeout (row 14) is tested
 //! before the exit status (row 10), because a killed process has no exit code
@@ -26,6 +27,20 @@ pub enum Verdict {
 }
 
 impl Verdict {
+    pub const ALL: [Verdict; 6] = [
+        Verdict::Pass,
+        Verdict::Fail,
+        Verdict::NotRun,
+        Verdict::BlockedHardware,
+        Verdict::BlockedOperator,
+        Verdict::MissingImplementation,
+    ];
+
+    /// The verdict with this exact name, as written by `as_str`.
+    pub fn parse(s: &str) -> Option<Verdict> {
+        Verdict::ALL.into_iter().find(|v| v.as_str() == s)
+    }
+
     pub fn as_str(self) -> &'static str {
         match self {
             Verdict::Pass => "PASS",
@@ -49,6 +64,20 @@ impl Verdict {
             Verdict::MissingImplementation => 5,
         }
     }
+}
+
+/// The verdict of a campaign of gates: any FAIL makes it FAIL, otherwise the
+/// highest-numbered of NOT_RUN, BLOCKED_HARDWARE, BLOCKED_OPERATOR and
+/// MISSING_IMPLEMENTATION (ADR 0028 Decision 5), otherwise PASS. An empty list
+/// is PASS here; a caller that ran nothing must say so itself.
+pub fn campaign_verdict(vs: &[Verdict]) -> Verdict {
+    if vs.contains(&Verdict::Fail) {
+        return Verdict::Fail;
+    }
+    vs.iter()
+        .copied()
+        .max_by_key(|v| v.exit_code())
+        .unwrap_or(Verdict::Pass)
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -116,6 +145,20 @@ pub fn eval_rule(rule: &Rule, obs: &[Observation]) -> bool {
     }
 }
 
+/// What the runner knows about one dependency of a gate: its current verdict
+/// (None when there is no usable receipt: absent, or not for this commit) and
+/// the receipt that verdict came from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DepFact {
+    pub gate: String,
+    pub verdict: Option<Verdict>,
+    pub receipt: Option<String>,
+}
+
+fn dep_verdict(deps: &[DepFact], gate: &str) -> Option<Verdict> {
+    deps.iter().find(|d| d.gate == gate).and_then(|d| d.verdict)
+}
+
 /// Facts the runner measured. For a gate that did not run, `exit_status` is
 /// None and `observations` is empty.
 #[derive(Debug, Clone, Default)]
@@ -123,6 +166,12 @@ pub struct Facts {
     /// Refusal id decided before running (dirty_tree, evidence_inside, ...).
     pub refusal: Option<String>,
     pub exec_exists: bool,
+    /// Current verdicts of the gate's `depends_on` gates. A dependency with no
+    /// entry here counts as having no verdict.
+    pub deps: Vec<DepFact>,
+    /// `machine.gb10_present` and `machine.qemu_available` (row 3).
+    pub gb10_present: bool,
+    pub qemu_available: bool,
     pub exit_status: Option<i64>,
     pub observations: Vec<Observation>,
     pub timed_out: bool,
@@ -140,24 +189,39 @@ pub struct Derived {
 }
 
 /// Rows 2 to 7: decided before anything runs. Some(..) means do not run.
-pub fn pre_run(
-    m: &Manifest,
-    refusal: &Option<String>,
-    exec_exists: bool,
-) -> Option<(Verdict, String)> {
+pub fn pre_run(m: &Manifest, f: &Facts) -> Option<(Verdict, String)> {
     if m.requires.iter().any(|r| r == "operator") {
-        // Slice A has no operator attestation files, so this is always pending.
+        // There are no operator attestation files yet, so this is always pending.
         return Some((
             Verdict::BlockedOperator,
             "OPERATOR_STEP_PENDING".to_string(),
         ));
     }
-    if let Some(d) = m.depends_on.first() {
-        // Slice A has no dependency graph; it cannot show the dependency passed.
-        return Some((Verdict::NotRun, format!("DEP_NOT_PASS:{d}")));
+    // Row 3: the gate's pool needs hardware this machine does not have.
+    match m.pool() {
+        "gb10" if !f.gb10_present => {
+            return Some((Verdict::BlockedHardware, "NO_GB10".to_string()));
+        }
+        "qemu" if !f.qemu_available => {
+            return Some((Verdict::BlockedHardware, "NO_QEMU".to_string()));
+        }
+        _ => {}
     }
-    if m.pool() != "host" {
-        return Some((Verdict::NotRun, format!("pool_unsupported:{}", m.pool())));
+    // Row 4 before row 5: a blocked dependency passes its blocked verdict on.
+    for d in &m.depends_on {
+        if let Some(v @ (Verdict::BlockedHardware | Verdict::BlockedOperator)) =
+            dep_verdict(&f.deps, d)
+        {
+            return Some((v, format!("DEP_BLOCKED:{d}")));
+        }
+    }
+    // Row 5: every other dependency must currently be PASS.
+    if let Some(d) = m
+        .depends_on
+        .iter()
+        .find(|d| dep_verdict(&f.deps, d) != Some(Verdict::Pass))
+    {
+        return Some((Verdict::NotRun, format!("DEP_NOT_PASS:{d}")));
     }
     if let Some(b) = &m.build {
         if b.tool != "none" {
@@ -167,17 +231,17 @@ pub fn pre_run(
     if let Some(c) = m.checks.iter().find(|c| c.as_str() != "clean_tree_after") {
         return Some((Verdict::NotRun, format!("check_unsupported:{c}")));
     }
-    if let Some(r) = refusal {
+    if let Some(r) = &f.refusal {
         return Some((Verdict::NotRun, r.clone()));
     }
-    if !exec_exists {
+    if !f.exec_exists {
         return Some((Verdict::MissingImplementation, "NO_RUN_EXEC".to_string()));
     }
     None
 }
 
 pub fn derive(m: &Manifest, f: &Facts) -> Derived {
-    if let Some((verdict, reason)) = pre_run(m, &f.refusal, f.exec_exists) {
+    if let Some((verdict, reason)) = pre_run(m, f) {
         return Derived {
             verdict,
             reason,
@@ -237,6 +301,9 @@ mod tests {
         Facts {
             refusal: None,
             exec_exists: true,
+            deps: Vec::new(),
+            gb10_present: true,
+            qemu_available: true,
             exit_status: Some(0),
             observations: vec![obs("n", json!(3)), obs("k", json!(1)), obs("k", json!(2))],
             timed_out: false,
@@ -371,20 +438,194 @@ mod tests {
     }
 
     #[test]
-    fn other_pools_dependencies_build_and_checks_are_not_run() {
+    fn missing_hardware_blocks_the_gate() {
+        let mut f = good_facts();
         let g = m(Some(("  - host\n", "  - gb10\n")));
-        assert_eq!(derive(&g, &good_facts()).reason, "pool_unsupported:gb10");
+        assert_eq!(derive(&g, &f).verdict, Verdict::Pass);
+        f.gb10_present = false;
+        let d = derive(&g, &f);
+        assert_eq!(
+            (d.verdict, d.reason.as_str()),
+            (Verdict::BlockedHardware, "NO_GB10")
+        );
         let q = m(Some(("  - host\n", "  - qemu\n")));
-        assert_eq!(derive(&q, &good_facts()).reason, "pool_unsupported:qemu");
-        let d = m(Some((
-            "timeout: 5s\n",
-            "timeout: 5s\ndepends_on:\n  - OTHER\n",
-        )));
-        let r = derive(&d, &good_facts());
+        assert_eq!(
+            derive(&q, &f).verdict,
+            Verdict::Pass,
+            "gb10 is irrelevant to qemu"
+        );
+        f.qemu_available = false;
+        let d = derive(&q, &f);
+        assert_eq!(
+            (d.verdict, d.reason.as_str()),
+            (Verdict::BlockedHardware, "NO_QEMU")
+        );
+        // A host gate never needs the special hardware.
+        assert_eq!(derive(&m(None), &f).verdict, Verdict::Pass);
+        // gb10 beats qemu when both are listed (the scarcest pool decides).
+        let both = m(Some(("  - host\n", "  - qemu\n  - gb10\n")));
+        f.qemu_available = true;
+        assert_eq!(derive(&both, &f).reason, "NO_GB10");
+    }
+
+    fn dep(gate: &str, verdict: Option<Verdict>) -> DepFact {
+        DepFact {
+            gate: gate.to_string(),
+            verdict,
+            receipt: verdict.map(|_| format!("digest-of-{gate}")),
+        }
+    }
+
+    fn gate_with(requires: &str, deps: &str) -> Manifest {
+        let dep_block = if deps.is_empty() {
+            String::new()
+        } else {
+            format!("depends_on:\n{deps}")
+        };
+        let text = format!(
+            "gate: G\nmanifest_version: 1\nowner: o\nrequires:\n{requires}run:\n  exec: x.sh\nexpects:\n  exit: 0\n  observe: [\"n == 3\", \"all k <= 2\"]\n  verdict: PASS\ntimeout: 5s\n{dep_block}"
+        );
+        manifest::parse(text.as_bytes()).unwrap()
+    }
+
+    fn with_deps(list: &str) -> Manifest {
+        gate_with("  - host\n", list)
+    }
+
+    #[test]
+    fn a_passing_dependency_lets_the_gate_run() {
+        let mut f = good_facts();
+        f.deps = vec![dep("OTHER", Some(Verdict::Pass))];
+        let d = derive(&with_deps("  - OTHER\n"), &f);
+        assert_eq!(d.verdict, Verdict::Pass);
+    }
+
+    #[test]
+    fn a_dependency_that_is_not_pass_makes_not_run() {
+        let one = with_deps("  - OTHER\n");
+        let mut f = good_facts();
+        // No fact at all (absent or stale).
+        let r = derive(&one, &f);
         assert_eq!(
             (r.verdict, r.reason.as_str()),
             (Verdict::NotRun, "DEP_NOT_PASS:OTHER")
         );
+        for v in [
+            None,
+            Some(Verdict::Fail),
+            Some(Verdict::NotRun),
+            Some(Verdict::MissingImplementation),
+        ] {
+            f.deps = vec![dep("OTHER", v)];
+            let r = derive(&one, &f);
+            assert_eq!(
+                (r.verdict, r.reason.as_str()),
+                (Verdict::NotRun, "DEP_NOT_PASS:OTHER"),
+                "dependency verdict {v:?}"
+            );
+            assert!(r.rules.iter().all(|x| !x.1), "nothing was checked");
+        }
+    }
+
+    #[test]
+    fn the_first_dependency_that_is_not_pass_is_named() {
+        let two = with_deps("  - FIRST\n  - SECOND\n");
+        let mut f = good_facts();
+        f.deps = vec![dep("FIRST", Some(Verdict::Pass)), dep("SECOND", None)];
+        assert_eq!(derive(&two, &f).reason, "DEP_NOT_PASS:SECOND");
+        f.deps = vec![dep("FIRST", Some(Verdict::Fail)), dep("SECOND", None)];
+        assert_eq!(derive(&two, &f).reason, "DEP_NOT_PASS:FIRST");
+    }
+
+    #[test]
+    fn a_blocked_dependency_passes_its_verdict_on() {
+        let one = with_deps("  - OTHER\n");
+        let mut f = good_facts();
+        f.deps = vec![dep("OTHER", Some(Verdict::BlockedOperator))];
+        let r = derive(&one, &f);
+        assert_eq!(
+            (r.verdict, r.reason.as_str()),
+            (Verdict::BlockedOperator, "DEP_BLOCKED:OTHER")
+        );
+        f.deps = vec![dep("OTHER", Some(Verdict::BlockedHardware))];
+        let r = derive(&one, &f);
+        assert_eq!(
+            (r.verdict, r.reason.as_str()),
+            (Verdict::BlockedHardware, "DEP_BLOCKED:OTHER")
+        );
+    }
+
+    #[test]
+    fn blocked_beats_failed_across_dependencies() {
+        // Row 4 is checked before row 5, whatever the order in the manifest.
+        let two = with_deps("  - FAILED\n  - BLOCKED\n");
+        let mut f = good_facts();
+        f.deps = vec![
+            dep("FAILED", Some(Verdict::Fail)),
+            dep("BLOCKED", Some(Verdict::BlockedHardware)),
+        ];
+        let r = derive(&two, &f);
+        assert_eq!(
+            (r.verdict, r.reason.as_str()),
+            (Verdict::BlockedHardware, "DEP_BLOCKED:BLOCKED")
+        );
+    }
+
+    #[test]
+    fn rows_are_checked_in_order() {
+        let mut f = good_facts();
+        f.gb10_present = false;
+        f.refusal = Some("dirty_tree".to_string());
+        // Row 2 (operator) beats row 3 (hardware).
+        let op = gate_with("  - gb10\n  - operator\n", "  - OTHER\n");
+        assert_eq!(derive(&op, &f).reason, "OPERATOR_STEP_PENDING");
+        // Row 3 (hardware) beats rows 4 and 5 (dependencies).
+        let gb = gate_with("  - gb10\n", "  - OTHER\n");
+        assert_eq!(derive(&gb, &f).reason, "NO_GB10");
+        // Rows 4 and 5 beat the refusal (row 6).
+        let host = gate_with("  - host\n", "  - OTHER\n");
+        assert_eq!(derive(&host, &f).reason, "DEP_NOT_PASS:OTHER");
+        f.deps = vec![dep("OTHER", Some(Verdict::Pass))];
+        assert_eq!(derive(&host, &f).reason, "dirty_tree");
+        // Row 6 beats row 7.
+        f.exec_exists = false;
+        assert_eq!(derive(&host, &f).reason, "dirty_tree");
+        f.refusal = None;
+        assert_eq!(derive(&host, &f).reason, "NO_RUN_EXEC");
+    }
+
+    #[test]
+    fn campaign_verdict_follows_the_exit_code_rule() {
+        use Verdict::*;
+        assert_eq!(campaign_verdict(&[]), Pass);
+        assert_eq!(campaign_verdict(&[Pass, Pass]), Pass);
+        assert_eq!(campaign_verdict(&[Pass, NotRun]), NotRun);
+        assert_eq!(
+            campaign_verdict(&[NotRun, BlockedHardware]),
+            BlockedHardware
+        );
+        assert_eq!(
+            campaign_verdict(&[BlockedOperator, MissingImplementation, NotRun]),
+            MissingImplementation
+        );
+        // Any FAIL wins, even over the higher-numbered codes.
+        assert_eq!(campaign_verdict(&[MissingImplementation, Fail, Pass]), Fail);
+        assert_eq!(campaign_verdict(&[Fail]).exit_code(), 1);
+        assert_eq!(campaign_verdict(&[BlockedOperator, Pass]).exit_code(), 4);
+    }
+
+    #[test]
+    fn verdict_names_parse_back() {
+        for v in Verdict::ALL {
+            assert_eq!(Verdict::parse(v.as_str()), Some(v));
+        }
+        assert_eq!(Verdict::parse("pass"), None);
+        assert_eq!(Verdict::parse(""), None);
+        assert_eq!(Verdict::ALL.len(), 6);
+    }
+
+    #[test]
+    fn build_and_checks_are_not_run() {
         let b = m(Some((
             "timeout: 5s\n",
             "timeout: 5s\nbuild:\n  target: t\n  tool: make\n",
