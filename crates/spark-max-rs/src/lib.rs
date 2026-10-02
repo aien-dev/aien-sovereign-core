@@ -1,6 +1,4 @@
-use aien_abi_core::{
-    AienInferenceBackend, DecodeOutput, ModelConfig, ScheduledBatch, StepMetrics,
-};
+use aien_abi_core::{AienInferenceBackend, DecodeOutput, ModelConfig, ScheduledBatch, StepMetrics};
 use async_trait::async_trait;
 use spark_max_cabi::SparkMaxBindings;
 use std::fmt;
