@@ -14,9 +14,10 @@
 //! - STALE: there are receipts, but only for other commits.
 //!
 //! What this checks, and says so in its output: that a receipt exists, what
-//! its verdict is, and whether it was made at the current commit. It does not
-//! yet look at whether inputs, the program or the machine changed since the
-//! receipt was made. The digest-based reuse check is Slice C.
+//! its verdict is, and whether it was made at the current commit. Since Slice
+//! C it also says, per gate, what the digest cache would do now: reuse an
+//! earlier receipt, or run again and which of the manifest, program, inputs,
+//! machine or dependencies changed (`crate::cache::explain_chain`).
 
 use crate::evidence::{Index, Stored};
 use crate::graph::Graph;
@@ -160,6 +161,8 @@ struct Report<'a> {
     states: BTreeMap<usize, State>,
     shown: BTreeSet<usize>,
     lines: Vec<String>,
+    /// Plain lines about the digest cache, per gate.
+    cache: &'a BTreeMap<usize, Vec<String>>,
 }
 
 impl Report<'_> {
@@ -180,6 +183,13 @@ impl Report<'_> {
             )],
             Evidence::Absent => vec!["no receipt in the evidence store".to_string()],
         };
+        if let Some(c) = self
+            .graph
+            .index_of(&node.id)
+            .and_then(|i| self.cache.get(&i))
+        {
+            facts.extend(c.iter().cloned());
+        }
         if own_state(&ev) == State::Pass {
             for &d in &node.deps {
                 if self.state(d) != State::Pass {
@@ -238,7 +248,13 @@ pub fn states(graph: &Graph, index: &Index, commit: &str, target: usize) -> BTre
 }
 
 /// The full report for `target` at `commit`, as lines to print.
-pub fn explain(graph: &Graph, index: &Index, commit: &str, target: usize) -> Vec<String> {
+pub fn explain(
+    graph: &Graph,
+    index: &Index,
+    commit: &str,
+    target: usize,
+    cache: &BTreeMap<usize, Vec<String>>,
+) -> Vec<String> {
     let mut report = Report {
         graph,
         index,
@@ -246,6 +262,7 @@ pub fn explain(graph: &Graph, index: &Index, commit: &str, target: usize) -> Vec
         states: states(graph, index, commit, target),
         shown: BTreeSet::new(),
         lines: Vec::new(),
+        cache,
     };
     report.lines.push(format!(
         "why {} at commit {}",
@@ -258,7 +275,7 @@ pub fn explain(graph: &Graph, index: &Index, commit: &str, target: usize) -> Vec
             .to_string(),
     );
     report.lines.push(
-        "not checked yet: whether files, the program or the machine changed since a receipt was made (digest-based reuse is Slice C)"
+        "cache: a result is reused only when the manifest, program, declared inputs, machine and dependency receipts all have the same digests as an earlier fresh run; anything else, a dirty tree, or --no-cache runs the gate"
             .to_string(),
     );
     report.lines
@@ -382,7 +399,7 @@ mod tests {
         );
         store.put_receipt(&r).unwrap();
         let index = Index::load(&store);
-        let out = text(&explain(&g, &index, X, id(&g, "G-C")));
+        let out = text(&explain(&g, &index, X, id(&g, "G-C"), &BTreeMap::new()));
         assert!(out.contains("G-C: NEEDS RERUN"), "{out}");
         assert!(out.contains("no receipt in the evidence store"), "{out}");
         assert!(out.contains("G-B: FAILED"), "{out}");
@@ -409,7 +426,7 @@ mod tests {
         pass(&store, "G-A", Y);
         let index = Index::load(&store);
         assert_eq!(state_of(&g, &index, X, 0), State::Stale);
-        let out = text(&explain(&g, &index, X, 0));
+        let out = text(&explain(&g, &index, X, 0, &BTreeMap::new()));
         assert!(out.contains("G-A: STALE"), "{out}");
         assert!(out.contains("is for commit 222222222222"), "{out}");
         assert_eq!(state_of(&g, &index, Y, 0), State::Pass);
@@ -431,7 +448,7 @@ mod tests {
         pass(&store, "G-B", X);
         let index = Index::load(&store);
         assert_eq!(state_of(&g, &index, X, id(&g, "G-B")), State::NeedsRerun);
-        let out = text(&explain(&g, &index, X, id(&g, "G-B")));
+        let out = text(&explain(&g, &index, X, id(&g, "G-B"), &BTreeMap::new()));
         assert!(out.contains("rests on G-A, which is FAILED"), "{out}");
     }
 
@@ -471,7 +488,7 @@ mod tests {
             State::MissingImplementation
         );
         assert_eq!(state_of(&g, &index, X, id(&g, "G-C")), State::NeedsRerun);
-        let out = text(&explain(&g, &index, X, id(&g, "G-A")));
+        let out = text(&explain(&g, &index, X, id(&g, "G-A"), &BTreeMap::new()));
         assert!(out.contains("BLOCKED_HARDWARE, reason NO_GB10"), "{out}");
     }
 
@@ -511,7 +528,7 @@ mod tests {
         );
         store.put_receipt(&r).unwrap();
         let index = Index::load(&store);
-        let out = text(&explain(&g, &index, X, 0));
+        let out = text(&explain(&g, &index, X, 0, &BTreeMap::new()));
         assert!(out.contains("gb10 jobs are never killed"), "{out}");
         assert!(out.contains("G-A: PASS"), "{out}");
     }
@@ -530,7 +547,7 @@ mod tests {
             pass(&store, gate, X);
         }
         let index = Index::load(&store);
-        let lines = explain(&g, &index, X, id(&g, "G-D"));
+        let lines = explain(&g, &index, X, id(&g, "G-D"), &BTreeMap::new());
         let out = text(&lines);
         assert_eq!(out.matches("G-A: PASS").count(), 2, "{out}");
         assert_eq!(out.matches("(shown above)").count(), 1, "{out}");
@@ -538,15 +555,15 @@ mod tests {
     }
 
     #[test]
-    fn the_report_says_what_it_does_not_check() {
+    fn the_report_says_what_it_checks_and_how_the_cache_decides() {
         let g = graph_of(&[("G-A", &[])]);
         let ev = TempDir::new("why8");
         let index = Index::load(&Store::new(ev.path()));
-        let lines = explain(&g, &index, X, 0);
+        let lines = explain(&g, &index, X, 0, &BTreeMap::new());
         let out = text(&lines);
         assert!(out.contains("checked: whether a receipt exists"), "{out}");
-        assert!(out.contains("not checked yet"), "{out}");
-        assert!(out.contains("Slice C"), "{out}");
+        assert!(out.contains("cache: a result is reused only when"), "{out}");
+        assert!(!out.contains("Slice C"), "{out}");
         assert!(lines[0].starts_with("why G-A at commit 111111111111"));
     }
 
@@ -590,7 +607,7 @@ mod tests {
         );
         store.put_receipt(&r).unwrap();
         let index = Index::load(&store);
-        let out = text(&explain(&g, &index, X, 0));
+        let out = text(&explain(&g, &index, X, 0, &BTreeMap::new()));
         assert!(out.contains("uncommitted changes"), "{out}");
     }
 }

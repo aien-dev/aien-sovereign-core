@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
-description = "AIEN-TEST Slices A and B: gate manifests, verdict derivation, immutable evidence receipts, dependency graph, resource pools with GPU locks, parallel runner and why (ADR 0028)"
+description = "AIEN-TEST Slices A to C: gate manifests, verdict derivation, immutable evidence receipts, dependency graph, resource pools with GPU locks, parallel runner, why, and the digest cache (ADR 0028)"
 
 [dependencies]
 libc = "0.2"

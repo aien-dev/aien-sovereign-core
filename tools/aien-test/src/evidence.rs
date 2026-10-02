@@ -192,6 +192,16 @@ impl Store {
         Ok(sha)
     }
 
+    /// True if the stdout/stderr blob `sha` is present in this store (it is
+    /// not read or re-hashed here).
+    pub fn blob_exists(&self, sha: &str) -> bool {
+        sha.len() == 64
+            && sha
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            && self.dir.join("blobs").join(format!("{sha}.log")).is_file()
+    }
+
     /// Write `<digest>.json` exclusively, mode 0444, canonical bytes plus one
     /// LF. Identical existing content is success; different content is a
     /// fatal collision. Never overwrites.
@@ -323,6 +333,16 @@ impl Index {
                 .then_with(|| a.digest.cmp(&b.digest))
         });
         Index { receipts }
+    }
+
+    /// Every verified receipt, oldest first.
+    pub fn receipts(&self) -> &[Stored] {
+        &self.receipts
+    }
+
+    /// The receipt with exactly this digest, if the store has it.
+    pub fn get(&self, digest: &str) -> Option<&Stored> {
+        self.receipts.iter().find(|r| r.digest == digest)
     }
 
     pub fn len(&self) -> usize {

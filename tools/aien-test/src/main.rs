@@ -11,7 +11,7 @@
 use aien_test::cli::{parse_args, Cli, Command, Selection, USAGE};
 use aien_test::evidence::{Index, Store};
 use aien_test::graph::{self, GraphError};
-use aien_test::runner::{self, Options, RunError};
+use aien_test::runner::{self, CacheNote, Options, RunError};
 use aien_test::verdict::Verdict;
 use aien_test::why;
 use std::collections::BTreeSet;
@@ -60,6 +60,7 @@ fn options(cli: &Cli, root: &Path) -> Result<Options, i32> {
     };
     let mut opts = Options::new(evidence_dir);
     opts.allow_dirty = cli.allow_dirty;
+    opts.no_cache = cli.no_cache;
     opts.args_override = cli.args.clone();
     opts.pool_sizes = opts.pool_sizes.with(cli.jobs);
     opts.gpu.wait = cli.wait_gpu;
@@ -90,6 +91,21 @@ fn repo_root_or_report(cwd: &Path) -> Result<PathBuf, i32> {
     })
 }
 
+/// Say plainly what the cache did. A reused result is never presented as a
+/// fresh run.
+fn print_cache(note: &CacheNote) {
+    match note {
+        CacheNote::Reused { from } => {
+            println!("REUSED {from}");
+            println!(
+                "CACHE reused: an earlier run of exactly this experiment already has this result, so it was not run again (use --no-cache to force a fresh run)"
+            );
+        }
+        CacheNote::Miss(why) => println!("CACHE miss: {why}; the gate was run"),
+        CacheNote::Skipped(why) => println!("CACHE not used: {why}"),
+    }
+}
+
 fn cmd_run(cli: &Cli, gate: &str, cwd: &Path) -> i32 {
     let manifest_path = match runner::locate_gate(cwd, gate) {
         Ok(p) => p,
@@ -115,6 +131,7 @@ fn cmd_run(cli: &Cli, gate: &str, cwd: &Path) -> i32 {
             if let Some(p) = &o.receipt_path {
                 println!("RECEIPT {}", p.display());
             }
+            print_cache(&o.cache);
             if o.reason.is_empty() {
                 println!("AIEN_TEST: {}", o.verdict.as_str());
             } else {
@@ -164,6 +181,7 @@ fn cmd_test(cli: &Cli, selection: &Selection, cwd: &Path) -> i32 {
                 if let Some(p) = &o.receipt_path {
                     println!("RECEIPT {}", p.display());
                 }
+                print_cache(&o.cache);
             }
             println!("AIEN_TEST: {}", campaign.verdict().as_str());
             campaign.exit_code()
@@ -200,7 +218,9 @@ fn cmd_why(cli: &Cli, gate: &str, cwd: &Path) -> i32 {
         }
     };
     let index = Index::load(&Store::new(&opts.evidence_dir));
-    for line in why::explain(&graph, &index, &commit, target) {
+    let cache_facts =
+        aien_test::cache::explain_chain(&root, &graph, &index, &opts, &commit, target);
+    for line in why::explain(&graph, &index, &commit, target, &cache_facts) {
         println!("{line}");
     }
     0

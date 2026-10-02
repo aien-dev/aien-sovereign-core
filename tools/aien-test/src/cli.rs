@@ -8,8 +8,8 @@
 //! aien-test list [flags]
 //! ```
 //!
-//! `test changed`, `test crate:NAME`, `--host/--qemu/--gb10`, `--mutants`,
-//! `--release` and `--no-cache` come in later slices and are refused here.
+//! `test changed`, `test crate:NAME`, `--host/--qemu/--gb10`, `--mutants` and
+//! `--release` come in later slices and are refused here.
 
 use crate::resources::{parse_jobs, JobsSpec};
 use std::path::PathBuf;
@@ -19,7 +19,7 @@ pub const USAGE: &str = "usage:
   aien-test test ./... | gate:NAME [flags]
   aien-test why GATE_FILE_OR_NAME [flags]
   aien-test list [flags]
-flags: --evidence-dir DIR  --allow-dirty  --jobs host=N,qemu=M  --wait-gpu";
+flags: --evidence-dir DIR  --allow-dirty  --no-cache  --jobs host=N,qemu=M  --wait-gpu";
 
 /// Which gates `test` runs.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -43,6 +43,8 @@ pub struct Cli {
     pub command: Command,
     pub evidence_dir: Option<PathBuf>,
     pub allow_dirty: bool,
+    /// `--no-cache`: never reuse an earlier result; run every gate fresh.
+    pub no_cache: bool,
     /// Arguments after `--`; they replace `run.args` (CR-061). `run` only.
     pub args: Option<Vec<String>>,
     /// `--jobs host=N,qemu=M`: the pool sizes that were named.
@@ -74,6 +76,7 @@ pub fn parse_args(argv: &[String]) -> Result<Cli, String> {
     let mut positional: Option<String> = None;
     let mut evidence_dir: Option<PathBuf> = None;
     let mut allow_dirty = false;
+    let mut no_cache = false;
     let mut args: Option<Vec<String>> = None;
     let mut jobs = JobsSpec::default();
     let mut wait_gpu = false;
@@ -97,6 +100,8 @@ pub fn parse_args(argv: &[String]) -> Result<Cli, String> {
             }
         } else if a == "--allow-dirty" {
             allow_dirty = true;
+        } else if a == "--no-cache" {
+            no_cache = true;
         } else if a == "--wait-gpu" {
             wait_gpu = true;
         } else if a.starts_with('-') {
@@ -133,6 +138,7 @@ pub fn parse_args(argv: &[String]) -> Result<Cli, String> {
         command,
         evidence_dir,
         allow_dirty,
+        no_cache,
         args,
         jobs,
         wait_gpu,
@@ -159,6 +165,7 @@ mod tests {
         let c = parse_args(&v(&["run", "G"])).unwrap();
         assert_eq!(run_gate(&c), "G");
         assert!(!c.allow_dirty);
+        assert!(!c.no_cache);
         assert!(!c.wait_gpu);
         assert_eq!(c.args, None);
         assert_eq!(c.evidence_dir, None);
@@ -182,6 +189,17 @@ mod tests {
         assert!(c.allow_dirty);
         assert_eq!(c.evidence_dir, Some(PathBuf::from("/e")));
         assert_eq!(c.args, Some(v(&["-x", "y"])));
+    }
+
+    #[test]
+    fn no_cache_flag() {
+        let c = parse_args(&v(&["run", "G", "--no-cache"])).unwrap();
+        assert!(c.no_cache);
+        let c = parse_args(&v(&["test", "--no-cache", "./..."])).unwrap();
+        assert!(c.no_cache);
+        assert_eq!(c.command, Command::Test(Selection::All));
+        // --release (qualification mode) is a later slice and stays refused.
+        assert!(parse_args(&v(&["run", "G", "--release"])).is_err());
     }
 
     #[test]
