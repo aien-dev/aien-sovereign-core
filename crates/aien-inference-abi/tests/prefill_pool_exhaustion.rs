@@ -245,7 +245,8 @@ fn control_planes(len: usize) -> Planes {
 fn oracle_new_blocks(prompt: usize, appended: usize, shared_partial_tail: bool) -> usize {
     let before = prompt.div_ceil(BLOCK_SIZE);
     let after = (prompt + appended).div_ceil(BLOCK_SIZE);
-    let cow = usize::from(shared_partial_tail && prompt % BLOCK_SIZE != 0 && appended > 0);
+    let cow =
+        usize::from(shared_partial_tail && !prompt.is_multiple_of(BLOCK_SIZE) && appended > 0);
     after - before + cow
 }
 
@@ -673,7 +674,7 @@ async fn prefill_pool_exhaustion_is_loud_atomic_and_retryable() {
     // evidence (pass is false until every check ran).
     write_receipt(&[], false);
 
-    let checks = vec![
+    let checks = [
         check_loud(),
         check_atomic(),
         check_clean_path(),
