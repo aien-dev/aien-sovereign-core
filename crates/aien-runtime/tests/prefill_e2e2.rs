@@ -726,6 +726,52 @@ fn block_digests(
         .collect()
 }
 
+/// Block bookkeeping the KV manager keeps for one physical block
+/// (`aien_kv_cache::KvBlock`: `ref_count`, `num_tokens`, `is_shared`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct BlockMeta {
+    ref_count: usize,
+    num_tokens: usize,
+    is_shared: bool,
+}
+
+impl BlockMeta {
+    fn json(self) -> serde_json::Value {
+        serde_json::json!({
+            "ref_count": self.ref_count,
+            "num_tokens": self.num_tokens,
+            "is_shared": self.is_shared,
+        })
+    }
+}
+
+fn block_meta(kv: &SharedKvManager, block: usize) -> Option<BlockMeta> {
+    kv.read().get_block(block).map(|b| BlockMeta {
+        ref_count: b.ref_count,
+        num_tokens: b.num_tokens,
+        is_shared: b.is_shared,
+    })
+}
+
+/// Indexes whose digests differ between two snapshots of the same block list.
+fn changed_indexes(a: &[String], b: &[String]) -> Vec<usize> {
+    a.iter()
+        .zip(b)
+        .enumerate()
+        .filter(|(_, (x, y))| x != y)
+        .map(|(i, _)| i)
+        .collect()
+}
+
+/// PASS or FAIL label for one sub-result inside a check message.
+fn tag(ok: bool) -> &'static str {
+    if ok {
+        "PASS"
+    } else {
+        "FAIL"
+    }
+}
+
 fn gather_all(kv: &SharedKvManager, seq: u64, layers: usize) -> Result<KvGather, String> {
     let mut out = Vec::with_capacity(layers);
     for layer in 0..layers {
@@ -841,6 +887,33 @@ async fn prefill_step(
 // Evidence
 // ---------------------------------------------------------------------------
 
+/// What the two forked branches did to the root's blocks during the FIRST
+/// decode step, read at three moments: right after the branch forks (before any
+/// decode write), right after the first decode step, and at the end of the
+/// run. The end-of-run facts alone cannot see a branch that wrote into the
+/// shared 1-token tail block on step 1 (the second step copies the block once
+/// it holds 2 tokens, so the table ids look private again by the end), so the
+/// step-1 snapshot is what makes copy-on-write failures visible. Defaults mean
+/// "not captured" and every check that needs them then fails.
+#[derive(Default)]
+struct Isolation {
+    /// Table entry `final_blocks - 1` of the root, branch 1 and branch 2 right
+    /// after the first decode step.
+    root_tail: Option<usize>,
+    b1_tail: Option<usize>,
+    b2_tail: Option<usize>,
+    /// Bookkeeping of the root's tail block after the forks, after step 1 and
+    /// at the end.
+    tail_meta_before: Option<BlockMeta>,
+    tail_meta_step1: Option<BlockMeta>,
+    tail_meta_end: Option<BlockMeta>,
+    /// SHA-256 of the raw K/V (every layer, every slot, K and V) of each block
+    /// of the root's table, in table order, at the same three moments.
+    root_digests_before: Vec<String>,
+    root_digests_step1: Vec<String>,
+    root_digests_end: Vec<String>,
+}
+
 struct Reclaim {
     allocated: usize,
     free: usize,
@@ -907,6 +980,8 @@ struct Evidence {
     token_mismatch: Vec<u64>,
     branch_kv: Parity,
     witness_final_kv: Parity,
+    // First decode step snapshots (see `Isolation`).
+    iso: Isolation,
     // After decode.
     root_stable: bool,
     b1_ids: Vec<usize>,
@@ -1127,6 +1202,13 @@ async fn run_stages(env: &Env<'_>, ev: &mut Evidence) -> Result<(), String> {
             .map_err(|e| format!("branch {b} fork_prefilled: {e}"))?;
         backend.fork_sequence(ROOT, b)?;
     }
+    // Isolation snapshot 1: the root's blocks exactly as the forks left them,
+    // before any decode write. The tail block (table entry `final_blocks - 1`)
+    // holds 1 token and is shared by the root and both branches here.
+    let tail_pos = env.plan.final_blocks.saturating_sub(1);
+    let root_blocks = ev.root_ids_after.clone();
+    ev.iso.root_digests_before = block_digests(&kv, &root_blocks, layers, block_size, kv_dim);
+    ev.iso.tail_meta_before = root_blocks.get(tail_pos).and_then(|b| block_meta(&kv, *b));
     let order = [BRANCH_1, BRANCH_2, WITNESS];
     let mut dead: Vec<u64> = Vec::new();
     for step in 1..=DECODE_STEPS {
@@ -1147,6 +1229,16 @@ async fn run_stages(env: &Env<'_>, ev: &mut Evidence) -> Result<(), String> {
             ev.fed.entry(*id).or_default().push(last);
         }
         let (outs, rows) = backend.forward_decode_batch_with_logits(&live)?;
+        if step == 1 {
+            // Isolation snapshot 2: straight after the first decode step, before
+            // the second step can copy a block the first step wrote into.
+            ev.iso.root_tail = table_of(&kv, ROOT).0.get(tail_pos).copied();
+            ev.iso.b1_tail = table_of(&kv, BRANCH_1).0.get(tail_pos).copied();
+            ev.iso.b2_tail = table_of(&kv, BRANCH_2).0.get(tail_pos).copied();
+            ev.iso.tail_meta_step1 = root_blocks.get(tail_pos).and_then(|b| block_meta(&kv, *b));
+            ev.iso.root_digests_step1 =
+                block_digests(&kv, &root_blocks, layers, block_size, kv_dim);
+        }
         let preempted: Vec<u64> = outs
             .iter()
             .filter_map(|o| match o {
@@ -1270,6 +1362,9 @@ async fn run_stages(env: &Env<'_>, ev: &mut Evidence) -> Result<(), String> {
     ev.root_stable = root_ids_end == ev.root_ids_after
         && root_total_end == ev.root_total_after
         && same_bits(&root_end, &ev.root_kv_after);
+    // Isolation snapshot 3: the same block facts at the end of the run.
+    ev.iso.tail_meta_end = root_blocks.get(tail_pos).and_then(|b| block_meta(&kv, *b));
+    ev.iso.root_digests_end = block_digests(&kv, &root_blocks, layers, block_size, kv_dim);
     let (b1_ids, b1_total) = table_of(&kv, BRANCH_1);
     let (b2_ids, b2_total) = table_of(&kv, BRANCH_2);
     ev.b1_ids = b1_ids;
@@ -1360,6 +1455,80 @@ fn position_stats(positions: &[usize], layers: usize) -> PositionStats {
     }
 }
 
+/// Verdicts on the first-decode-step snapshots (see `Isolation`). Both the
+/// isolation check and the receipt read these, so they report the same facts.
+struct FirstStep {
+    /// Table entry the shared tail block sits at (`final_blocks - 1`).
+    tail: usize,
+    /// Tokens the root's tail block holds: 241 - 15 * 16 = 1.
+    tail_tokens: usize,
+    /// Right after step 1 branch 1, branch 2 and the root hold three distinct
+    /// tail blocks, and the root's tail block id did not move.
+    tails_private: bool,
+    /// After the forks the tail block is shared by the root and both branches
+    /// (ref_count 3, shared flag set) and holds `tail_tokens` tokens.
+    meta_before_ok: bool,
+    /// After step 1 both branches have copied away: the root is the sole owner
+    /// (ref_count 1, shared flag clear) and nobody wrote into the block, so it
+    /// still holds `tail_tokens` tokens. Same expectation at the end.
+    meta_step1_ok: bool,
+    meta_end_ok: bool,
+    /// Every one of the three digest snapshots covers every root block.
+    snapshots_complete: bool,
+    /// Root block indexes whose raw K/V changed between the forks and step 1,
+    /// and between the forks and the end.
+    changed_step1: Vec<usize>,
+    changed_end: Vec<usize>,
+    blocks_same_step1: bool,
+    blocks_same_end: bool,
+    /// The root's tail block (all slots, all layers, K and V) is bit identical
+    /// after step 1 and at the end.
+    tail_snapshot_equal: bool,
+}
+
+fn first_step(plan: &PoolPlan, ev: &Evidence) -> FirstStep {
+    let iso = &ev.iso;
+    let tail = plan.final_blocks.saturating_sub(1);
+    let tail_tokens = TOTAL_TOKENS.saturating_sub(tail * plan.block_size);
+    let tails_private = matches!(
+        (iso.b1_tail, iso.b2_tail, iso.root_tail),
+        (Some(x), Some(y), Some(r)) if x != y && x != r && y != r
+    ) && iso.root_tail == ev.root_ids_after.get(tail).copied();
+    let shared = BlockMeta {
+        ref_count: 1 + BRANCHES.len(),
+        num_tokens: tail_tokens,
+        is_shared: true,
+    };
+    let sole_owner = BlockMeta {
+        ref_count: 1,
+        num_tokens: tail_tokens,
+        is_shared: false,
+    };
+    let snapshots_complete = iso.root_digests_before.len() == plan.final_blocks
+        && iso.root_digests_step1.len() == plan.final_blocks
+        && iso.root_digests_end.len() == plan.final_blocks;
+    let changed_step1 = changed_indexes(&iso.root_digests_before, &iso.root_digests_step1);
+    let changed_end = changed_indexes(&iso.root_digests_before, &iso.root_digests_end);
+    let blocks_same_step1 = snapshots_complete && changed_step1.is_empty();
+    let blocks_same_end = snapshots_complete && changed_end.is_empty();
+    let tail_snapshot_equal =
+        snapshots_complete && !changed_step1.contains(&tail) && !changed_end.contains(&tail);
+    FirstStep {
+        tail,
+        tail_tokens,
+        tails_private,
+        meta_before_ok: iso.tail_meta_before == Some(shared),
+        meta_step1_ok: iso.tail_meta_step1 == Some(sole_owner),
+        meta_end_ok: iso.tail_meta_end == Some(sole_owner),
+        snapshots_complete,
+        changed_step1,
+        changed_end,
+        blocks_same_step1,
+        blocks_same_end,
+        tail_snapshot_equal,
+    }
+}
+
 /// Builds the nine checks from the evidence. Every message carries its marker
 /// and the numbers behind it. Nothing here can panic on missing evidence.
 fn evaluate(env: &Env<'_>, ev: &Evidence) -> Vec<Check> {
@@ -1378,27 +1547,30 @@ fn evaluate(env: &Env<'_>, ev: &Evidence) -> Vec<Check> {
     let witness_expected = layers * 2 * PROMPT_TOKENS * kv_dim;
     let branch_expected = BRANCHES.len() * layers * 2 * (TOTAL_TOKENS + DECODE_STEPS) * kv_dim;
     let witness_final_expected = layers * 2 * (PROMPT_TOKENS + DECODE_STEPS) * kv_dim;
-    let pass_a = ev.root_kv.pass()
-        && ev.witness_kv.pass()
-        && ev.branch_kv.pass()
-        && ev.witness_final_kv.pass()
-        && ev.root_kv.compared_values == root_expected
-        && ev.witness_kv.compared_values == witness_expected
-        && ev.branch_kv.compared_values == branch_expected
-        && ev.witness_final_kv.compared_values == witness_final_expected;
+    let a_root = ev.root_kv.pass() && ev.root_kv.compared_values == root_expected;
+    let a_witness = ev.witness_kv.pass() && ev.witness_kv.compared_values == witness_expected;
+    let a_branches = ev.branch_kv.pass() && ev.branch_kv.compared_values == branch_expected;
+    let a_witness_final =
+        ev.witness_final_kv.pass() && ev.witness_final_kv.compared_values == witness_final_expected;
+    let pass_a = a_root && a_witness && a_branches && a_witness_final;
     checks.push(check(
         "a_kv_equals_control",
         pass_a,
         format!(
-            "(a) KV_PARITY_VIOLATION: root after append vs one-shot 241 control: {} (expected {} \
-             values); witness vs 217 control: {} (expected {}); two branches after decode vs \
-             controls: {} (expected {}); witness after decode vs control: {} (expected {})",
+            "(a) KV_PARITY_VIOLATION: each sub-comparison below carries its own verdict; root \
+             after append vs one-shot 241 control: {}, {} (expected {} values); witness vs 217 \
+             control: {}, {} (expected {}); two branches after decode vs controls: {}, {} \
+             (expected {}); witness after decode vs control: {}, {} (expected {})",
+            tag(a_root),
             parity_summary(&ev.root_kv),
             root_expected,
+            tag(a_witness),
             parity_summary(&ev.witness_kv),
             witness_expected,
+            tag(a_branches),
             parity_summary(&ev.branch_kv),
             branch_expected,
+            tag(a_witness_final),
             parity_summary(&ev.witness_final_kv),
             witness_final_expected
         ),
@@ -1407,29 +1579,34 @@ fn evaluate(env: &Env<'_>, ev: &Evidence) -> Vec<Check> {
     // (b) the sampled tokens and every logit vector equal the controls.
     let b_expected = BRANCHES.len() * DECODE_STEPS * vocab;
     let w_expected = DECODE_STEPS * vocab;
-    let pass_b = same_sample(ev.sampled_217, ev.ctl_217)
-        && same_sample(ev.sampled_241, ev.ctl_241)
-        && ev.logits_b.pass()
-        && ev.logits_w.pass()
-        && ev.logits_b.compared_values == b_expected
-        && ev.logits_w.compared_values == w_expected
-        && ev.token_mismatch.is_empty();
+    let b_sample_217 = same_sample(ev.sampled_217, ev.ctl_217);
+    let b_sample_241 = same_sample(ev.sampled_241, ev.ctl_241);
+    let b_branch_logits = ev.logits_b.pass() && ev.logits_b.compared_values == b_expected;
+    let b_witness_logits = ev.logits_w.pass() && ev.logits_w.compared_values == w_expected;
+    let b_tokens = ev.token_mismatch.is_empty();
+    let pass_b = b_sample_217 && b_sample_241 && b_branch_logits && b_witness_logits && b_tokens;
     checks.push(check(
         "b_logits_and_tokens",
         pass_b,
         format!(
-            "(b) LOGITS_TOKENS_VIOLATION: sample after 217 {:?} vs control {:?}; sample after 241 \
-             {:?} vs control {:?}; branch logits: {} (expected {} values); witness logits: {} \
-             (expected {}); decode token mismatches (sequence ids) {:?}",
+            "(b) LOGITS_TOKENS_VIOLATION: each sub-comparison below carries its own verdict; \
+             sample after 217 {:?} vs control {:?}: {}; sample after 241 {:?} vs control {:?}: \
+             {}; branch logits: {}, {} (expected {} values); witness logits: {}, {} (expected \
+             {}); decode token mismatches (sequence ids) {:?}: {}",
             ev.sampled_217,
             ev.ctl_217,
+            tag(b_sample_217),
             ev.sampled_241,
             ev.ctl_241,
+            tag(b_sample_241),
+            tag(b_branch_logits),
             parity_summary(&ev.logits_b),
             b_expected,
+            tag(b_witness_logits),
             parity_summary(&ev.logits_w),
             w_expected,
-            ev.token_mismatch
+            ev.token_mismatch,
+            tag(b_tokens)
         ),
     ));
 
@@ -1505,13 +1682,25 @@ fn evaluate(env: &Env<'_>, ev: &Evidence) -> Vec<Check> {
         (Some(x), Some(y), Some(r)) if x != y && x != r && y != r
     );
     let branch_total = TOTAL_TOKENS + DECODE_STEPS;
+    // The end-of-run facts above cannot see a branch that wrote into the shared
+    // 1-token tail block on its first decode step (the second step copies the
+    // block once it holds 2 tokens, so the ids look private again by the end,
+    // and the root's own 241 positions never include the written slot). The
+    // snapshots taken right after the forks and right after step 1 can.
+    let fs = first_step(plan, ev);
     let pass_e = ev.root_stable
         && diverged
         && prefix_shared
         && tails_private
         && ev.b1_total == branch_total
         && ev.b2_total == branch_total
-        && ev.physical_final == plan.needed_blocks;
+        && ev.physical_final == plan.needed_blocks
+        && fs.tails_private
+        && fs.meta_before_ok
+        && fs.meta_step1_ok
+        && fs.meta_end_ok
+        && fs.blocks_same_step1
+        && fs.blocks_same_end;
     checks.push(check(
         "e_isolation",
         pass_e,
@@ -1519,7 +1708,14 @@ fn evaluate(env: &Env<'_>, ev: &Evidence) -> Vec<Check> {
             "(e) BRANCH_ISOLATION_VIOLATION: root unchanged by branch decode {}; branches fed \
              different tokens at step 2 {} ({:?} vs {:?}); the first {} block ids shared with the \
              root {}; private tail blocks (branch 1 {:?}, branch 2 {:?}, root {:?}) {}; branch \
-             totals {} and {} (expected {}); physical pages at the end {} (expected {})",
+             totals {} and {} (expected {}); physical pages at the end {} (expected {}); first \
+             decode step: tail block ids right after step 1 (branch 1 {:?}, branch 2 {:?}, root \
+             {:?}) distinct and the root's id unmoved: {}; tail block (ref_count, tokens, shared \
+             flag) after the forks {:?} (expected ref_count {}, {} tokens, shared): {}, after step \
+             1 {:?} (expected the root as sole owner: ref_count 1, {} tokens, not shared): {}, at \
+             the end {:?}: {}; raw K/V of all {} root blocks (every slot, layer, K and V) vs the \
+             snapshot taken after the forks: after step 1 changed block indexes {:?} ({}), at the \
+             end {:?} ({}); root tail block byte identical: {}; snapshots complete: {}",
             ev.root_stable,
             diverged,
             fed_at(BRANCH_1, 1),
@@ -1534,7 +1730,27 @@ fn evaluate(env: &Env<'_>, ev: &Evidence) -> Vec<Check> {
             ev.b2_total,
             branch_total,
             ev.physical_final,
-            plan.needed_blocks
+            plan.needed_blocks,
+            ev.iso.b1_tail,
+            ev.iso.b2_tail,
+            ev.iso.root_tail,
+            tag(fs.tails_private),
+            ev.iso.tail_meta_before,
+            1 + BRANCHES.len(),
+            fs.tail_tokens,
+            tag(fs.meta_before_ok),
+            ev.iso.tail_meta_step1,
+            fs.tail_tokens,
+            tag(fs.meta_step1_ok),
+            ev.iso.tail_meta_end,
+            tag(fs.meta_end_ok),
+            plan.final_blocks,
+            fs.changed_step1,
+            tag(fs.blocks_same_step1),
+            fs.changed_end,
+            tag(fs.blocks_same_end),
+            fs.tail_snapshot_equal,
+            fs.snapshots_complete
         ),
     ));
 
@@ -1724,6 +1940,7 @@ fn build_receipt(
     let plan = env.plan;
     let layers = env.weights.config.num_layers;
     let stats = position_stats(&ev.append_positions, layers);
+    let fs = first_step(plan, ev);
     let verdict = if run_error.is_none() && !checks.is_empty() && checks.iter().all(|c| c.pass) {
         "PASS"
     } else {
@@ -1800,6 +2017,29 @@ fn build_receipt(
             "after_append_root_table": ev.root_ids_after,
             "after_append_witness_table": ev.witness_ids_after,
             "digests_unchanged": ev.digests_before == ev.digests_after,
+        },
+        "branch_isolation_first_step": {
+            "tail_block_index": fs.tail,
+            "tail_tokens_expected": fs.tail_tokens,
+            "tails_after_step1": {
+                "branch1": ev.iso.b1_tail,
+                "branch2": ev.iso.b2_tail,
+                "root": ev.iso.root_tail,
+            },
+            "tails_distinct_and_root_unmoved": fs.tails_private,
+            "shared_tail_block_before_decode": ev.iso.tail_meta_before.map(BlockMeta::json),
+            "shared_tail_block_after_step1": ev.iso.tail_meta_step1.map(BlockMeta::json),
+            "shared_tail_block_at_end": ev.iso.tail_meta_end.map(BlockMeta::json),
+            "shared_tail_num_tokens_after_step1": ev.iso.tail_meta_step1.map(|m| m.num_tokens),
+            "shared_tail_meta_ok": {
+                "before_decode": fs.meta_before_ok,
+                "after_step1": fs.meta_step1_ok,
+                "at_end": fs.meta_end_ok,
+            },
+            "root_blocks_snapshots_complete": fs.snapshots_complete,
+            "root_blocks_changed_after_step1": fs.changed_step1,
+            "root_blocks_changed_at_end": fs.changed_end,
+            "root_tail_block_snapshot_equal": fs.tail_snapshot_equal,
         },
         "kv_block_bytes": ev.block_bytes,
         "physical_kv": {
