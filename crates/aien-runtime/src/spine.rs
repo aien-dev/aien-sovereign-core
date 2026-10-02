@@ -10,7 +10,7 @@ use crate::sequence::{SequenceArena, SequenceId, SequenceState};
 use crate::swarm::{SwarmConfig, SwarmManager, SwarmState};
 use crate::world::WorldStore;
 
-use aien_inference_abi::{AienInferenceBackend, SamplingParams, StepMetrics};
+use aien_abi_core::{AienInferenceBackend, SamplingParams, StepMetrics};
 use aien_kv_cache::AienKvManager;
 use aien_scheduler::{
     AienScheduler, CompletionSink, CompletionSinkId, PromptHandle, SchedulerConfig,
@@ -185,7 +185,7 @@ impl AienRuntimeSpine {
             // Generational SequenceId validation on step completion
             for output in &outputs {
                 match output {
-                    aien_inference_abi::DecodeOutput::Token {
+                    aien_abi_core::DecodeOutput::Token {
                         request_id,
                         token_id: _,
                         logprob: _,
@@ -195,7 +195,7 @@ impl AienRuntimeSpine {
                             record.generated_tokens += 1;
                         }
                     }
-                    aien_inference_abi::DecodeOutput::Finished {
+                    aien_abi_core::DecodeOutput::Finished {
                         request_id,
                         reason: _,
                         total_tokens: _,
@@ -324,7 +324,7 @@ impl AienRuntimeSpine {
         // Enqueue branch requests into scheduler
         if let Some(swarm) = self.swarm_manager.get_swarm(swarm_id) {
             for &child_seq in &swarm.branch_sequences {
-                let req = aien_inference_abi::SequenceRequest {
+                let req = aien_abi_core::SequenceRequest {
                     request_id: child_seq.as_u64(),
                     prompt_tokens: prompt_tokens.to_vec(),
                     sampling_params: branch_sampling_params(&swarm.config),

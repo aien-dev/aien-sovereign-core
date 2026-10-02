@@ -1,4 +1,4 @@
-use aien_inference_abi::{FinishReason, SamplingParams, SequenceRequest};
+use aien_abi_core::{FinishReason, SamplingParams, SequenceRequest};
 use aien_platform::{InferenceWork, KvHandle, ModelHandle, Priority, Ticks};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;

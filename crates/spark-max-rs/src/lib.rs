@@ -1,4 +1,4 @@
-use aien_inference_abi::{
+use aien_abi_core::{
     AienInferenceBackend, DecodeOutput, ModelConfig, ScheduledBatch, StepMetrics,
 };
 use async_trait::async_trait;
@@ -380,10 +380,10 @@ mod tests {
         };
         backend.load_model(&config).await.unwrap();
 
-        let req = aien_inference_abi::SequenceRequest {
+        let req = aien_abi_core::SequenceRequest {
             request_id: 42,
             prompt_tokens: vec![1, 2, 3, 4, 5],
-            sampling_params: aien_inference_abi::SamplingParams::default(),
+            sampling_params: aien_abi_core::SamplingParams::default(),
             arrival_time_ns: 0,
             priority: 1,
         };
