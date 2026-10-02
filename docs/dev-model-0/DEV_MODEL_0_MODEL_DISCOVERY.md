@@ -91,6 +91,7 @@ Chat template, VERIFIED (B/raw/main/chat_template.jinja, "Published: 2026-07-09"
 - So Drake does NOT need an account, license acceptance, or token. No steps are required from him.
 - Download without Python, no credentials, resumable (it is a 23.9 GB file; check free disk first):
   `curl -L -C - -o model.safetensors https://huggingface.co/google/gemma-4-12B-it/resolve/main/model.safetensors`
+- This model is an open-weight input we use to build with. The weights are kept on local disk, and nothing is fetched at runtime; AIEN must work fully offline, so the download above is a one-time build-time step.
   Repeat for config.json, generation_config.json, tokenizer.json, tokenizer_config.json, chat_template.jinja, processor_config.json (same URL pattern). Afterwards verify with `sha256sum model.safetensors` against 5a84cb313260ac447237b890387116dfa8682e49a6b44bc585ae8353abbff18d. git-lfs also works but is unnecessary.
 - If Hugging Face ever gates it, Drake would create a free HF account, open the model page, accept the terms, create a read-only token under Settings, then we would add `-H "Authorization: Bearer <token>"` to curl. Not needed today.
 
