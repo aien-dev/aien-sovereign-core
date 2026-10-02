@@ -26,6 +26,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "aien-abi-core"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "serde",
+]
+
+[[package]]
 name = "aien-campaign-verifier"
 version = "0.1.0"
 dependencies = [
@@ -87,6 +95,7 @@ dependencies = [
 name = "aien-inference-abi"
 version = "0.1.0"
 dependencies = [
+ "aien-abi-core",
  "aien-kv-cache",
  "aien-platform",
  "async-trait",
