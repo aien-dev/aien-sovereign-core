@@ -24,6 +24,7 @@ pub mod tokenizer;
 pub mod transformer_backend;
 pub mod weights;
 
+pub use aien_abi_core::*;
 pub use aien_kv_cache::*;
 pub use backend::*;
 pub use blackwell_backend::*;
@@ -44,7 +45,6 @@ pub use tensor_abi::*;
 pub use tokenizer::*;
 pub use transformer_backend::*;
 pub use weights::*;
-pub use aien_abi_core::*;
 
 /// High-throughput simulated backend for benchmarking scheduler and KV manager overhead
 pub struct MockInferenceBackend {
