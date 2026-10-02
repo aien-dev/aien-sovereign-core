@@ -5,7 +5,6 @@
 )]
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 
 pub mod backend;
 pub mod blackwell_backend;
@@ -750,6 +749,7 @@ impl AienInferenceBackend for EmbeddedInferenceBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
 
     #[tokio::test]
     async fn test_mock_inference_backend() {
