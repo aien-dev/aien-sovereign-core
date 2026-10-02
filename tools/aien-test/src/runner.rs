@@ -1,4 +1,4 @@
-//! The runner (ADR 0028, Slices A and B): one gate, or a whole graph of gates
+//! The runner (ADR 0028, Slices A and B): one gate, or a whole grah of gates
 //! run by worker threads that honour the resource pools and the dependencies.
 //!
 //! Order for one gate: parse manifest (BAD_MANIFEST means no receipt), pin the
@@ -21,9 +21,8 @@
 //!   up in the evidence store, for the current commit, and says NOT_RUN if one
 //!   is not a PASS. `run_graph` starts them.
 
-use crate::evidence::{
-    build_receipt, canonical_digest, sha256_hex, utc_string, Index, Store, SCHEMA,
-};
+use crate::cache;
+use crate::evidence::{build_receipt, canonical_digest, sha256_hex, utc_string, Index, Store};
 use crate::graph::Graph;
 use crate::manifest::{self, Manifest};
 use crate::process::{self, RunSpec};
@@ -45,6 +44,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 pub struct Options {
     pub evidence_dir: PathBuf,
     pub allow_dirty: bool,
+    /// `--no-cache`: never reuse an earlier result; every gate runs fresh.
+    pub no_cache: bool,
     pub args_override: Option<Vec<String>>,
     pub kill_grace: Duration,
     /// Sizes of the host and qemu pools (the gb10 pool is always 1).
@@ -62,6 +63,7 @@ impl Options {
         Options {
             evidence_dir,
             allow_dirty: false,
+            no_cache: false,
             args_override: None,
             kill_grace: Duration::from_secs(10),
             pool_sizes: PoolSizes::detect(),
@@ -94,6 +96,20 @@ pub struct Outcome {
     pub reason: String,
     pub receipt_path: Option<PathBuf>,
     pub receipt_digest: Option<String>,
+    /// What the digest cache did for this gate.
+    pub cache: CacheNote,
+}
+
+/// What the cache did, in words the report prints.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CacheNote {
+    /// The result was reused, not rerun. Holds the digest of the fresh
+    /// receipt it was taken from.
+    Reused { from: String },
+    /// The cache was consulted and had nothing usable; the gate ran.
+    Miss(String),
+    /// The cache was not consulted; the gate ran (or was refused). Holds why.
+    Skipped(String),
 }
 
 fn git_out(root: &Path, args: &[&str]) -> Result<String, String> {
@@ -377,7 +393,7 @@ fn machine(hw: &Hardware) -> Value {
     })
 }
 
-fn captured_env() -> Value {
+pub(crate) fn captured_env() -> Value {
     let mut m = Map::new();
     for k in [
         "AIEN_PROOF_OFF",
@@ -396,6 +412,43 @@ fn captured_env() -> Value {
     Value::Object(m)
 }
 
+/// Whether the working tree has uncommitted changes (including untracked
+/// files).
+pub(crate) fn working_tree_dirty(root: &Path) -> Result<bool, String> {
+    porcelain(root).map(|p| !p.is_empty())
+}
+
+/// The digests that identify one experiment besides its manifest and
+/// dependencies: the program, the declared inputs, the machine.
+pub(crate) struct Identity {
+    pub binary_sha: Option<String>,
+    pub inputs_digest: String,
+    pub machine: Value,
+    pub machine_digest: String,
+}
+
+pub(crate) fn identity(
+    root: &Path,
+    manifest_path: &Path,
+    m: &Manifest,
+    hw: &Hardware,
+) -> Result<Identity, crate::evidence::StoreError> {
+    let exec_path = root.join(&m.exec);
+    let binary_sha = if exec_path.is_file() {
+        fs::read(&exec_path).ok().map(|b| sha256_hex(&b))
+    } else {
+        None
+    };
+    let manifest_rel = manifest_path.strip_prefix(root).ok();
+    let machine = machine(hw);
+    let machine_digest = canonical_digest(&machine)?;
+    Ok(Identity {
+        binary_sha,
+        inputs_digest: build_inputs_digest(root, manifest_rel, m),
+        machine,
+        machine_digest,
+    })
+}
 fn now_secs() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -457,6 +510,83 @@ fn execute_gate(job: &Job<'_>, permit: Option<Permit<'_>>) -> Result<Outcome, Ru
         ..Facts::default()
     };
 
+    // Identify the experiment before anything runs, so the cache lookup and
+    // the receipt agree on what was hashed (ADR Decision 7).
+    let id = identity(root, job.manifest_path, m, &opts.hardware).map_err(fatal)?;
+    let store = Store::new(&opts.evidence_dir);
+    let tree_clean = before.is_empty();
+    let mut mode = cache::policy(m.cache_allowed, opts.no_cache);
+    let off_reason: &str = if opts.no_cache {
+        "--no-cache"
+    } else if opts.args_override.is_some() {
+        "replacement arguments were given after --"
+    } else {
+        "the tree has uncommitted changes"
+    };
+    if mode == cache::Mode::Allow && (opts.args_override.is_some() || !tree_clean) {
+        mode = cache::Mode::Disabled;
+    }
+    let dependencies: Vec<(String, String)> = dependency_rows(&facts.deps).into_iter().collect();
+    // Receipts are read when a lookup may happen, and to follow a reused
+    // dependency back to the receipt it stands for.
+    let index = if mode == cache::Mode::Allow || !dependencies.is_empty() {
+        Index::load(&store)
+    } else {
+        Index::default()
+    };
+    let experiment = cache::Experiment {
+        manifest_digest: m.digest.clone(),
+        binary_sha256: id.binary_sha.clone(),
+        build_inputs_digest: id.inputs_digest.clone(),
+        machine_digest: id.machine_digest.clone(),
+        dependencies,
+        pins: json!([]),
+        args_override: opts.args_override.clone(),
+    };
+    let cache_key = cache::key(&experiment, &index).map_err(fatal)?;
+    let mut note = match mode {
+        cache::Mode::Never => CacheNote::Skipped("the manifest says cache: never".to_string()),
+        cache::Mode::Disabled => CacheNote::Skipped(off_reason.to_string()),
+        cache::Mode::Allow => {
+            CacheNote::Skipped("the gate cannot run now, so there was nothing to reuse".to_string())
+        }
+    };
+    // Reuse only when the gate would really have run: a refusal, a blocked
+    // verdict or a dependency that is not PASS is reported as it is, never
+    // hidden behind an old result.
+    if mode == cache::Mode::Allow && !evidence_inside && verdict::pre_run(m, &facts).is_none() {
+        match cache::lookup(&index, &store, &cache_key, &captured_env()) {
+            cache::Lookup::Hit(src) => {
+                let reused_verdict = src
+                    .verdict()
+                    .ok_or_else(|| fatal("a reusable receipt has no verdict"))?;
+                let volatile = json!({
+                    "started_utc": utc_string(started),
+                    "finished_utc": utc_string(now_secs()),
+                    "duration_ms": t0.elapsed().as_millis() as u64,
+                    "pool": m.pool(),
+                    "pool_wait_ms": job.pool_wait_ms,
+                    "runner": { "name": "aien-test", "version": env!("CARGO_PKG_VERSION"), "impl": "rust" },
+                    "cache": cache::cache_member(&cache_key, Some(&src.digest), mode),
+                    "timeout_exceeded": false,
+                });
+                let receipt = build_receipt(cache::reused_core(src, &commit), volatile);
+                let (digest, path) = store.put_receipt(&receipt).map_err(fatal)?;
+                drop(permit);
+                return Ok(Outcome {
+                    verdict: reused_verdict,
+                    reason: src.reason().to_string(),
+                    receipt_path: Some(path),
+                    receipt_digest: Some(digest),
+                    cache: CacheNote::Reused {
+                        from: src.digest.clone(),
+                    },
+                });
+            }
+            cache::Lookup::Miss(miss) => note = CacheNote::Miss(miss.text()),
+        }
+    }
+
     // A gb10 gate takes the GPU locks only when nothing else already stops it.
     // A refusal (quiet flag, est_load, a held lock) becomes the gate's reason.
     let gpu: Option<GpuGuard> = if m.pool() == "gb10" && verdict::pre_run(m, &facts).is_none() {
@@ -516,25 +646,12 @@ fn execute_gate(job: &Job<'_>, permit: Option<Permit<'_>>) -> Result<Outcome, Ru
             reason: derived.reason,
             receipt_path: None,
             receipt_digest: None,
+            cache: note,
         });
     }
 
-    let store = Store::new(&opts.evidence_dir);
     let stdout_sha = store.put_blob(&stdout).map_err(fatal)?;
     let stderr_sha = store.put_blob(&stderr).map_err(fatal)?;
-    let binary_sha = if exec_exists {
-        fs::read(&exec_path).ok().map(|b| sha256_hex(&b))
-    } else {
-        None
-    };
-    let manifest_rel = job
-        .manifest_path
-        .strip_prefix(root)
-        .ok()
-        .map(|p| p.to_path_buf());
-    let inputs_digest = build_inputs_digest(root, manifest_rel.as_deref(), m);
-    let machine_v = machine(&opts.hardware);
-    let machine_digest = canonical_digest(&machine_v).map_err(fatal)?;
 
     let observations: Vec<Value> = facts
         .observations
@@ -554,7 +671,8 @@ fn execute_gate(job: &Job<'_>, permit: Option<Permit<'_>>) -> Result<Outcome, Ru
             json!({ "name": c, "passed": passed })
         })
         .collect();
-    let dependencies: Vec<Value> = dependency_rows(&facts.deps)
+    let dependency_values: Vec<Value> = experiment
+        .dependencies
         .iter()
         .map(|(gate, receipt)| json!({ "gate": gate, "receipt": receipt }))
         .collect();
@@ -568,13 +686,13 @@ fn execute_gate(job: &Job<'_>, permit: Option<Permit<'_>>) -> Result<Outcome, Ru
     core.insert("tree_clean_before".into(), json!(before.is_empty()));
     core.insert("tree_clean_after".into(), json!(after.is_empty()));
     core.insert("commit_unchanged_after".into(), json!(!facts.head_moved));
-    if let Some(b) = &binary_sha {
+    if let Some(b) = &id.binary_sha {
         core.insert("binary_sha256".into(), json!(b));
     }
-    core.insert("build_inputs_digest".into(), json!(inputs_digest));
+    core.insert("build_inputs_digest".into(), json!(id.inputs_digest));
     core.insert("env".into(), captured_env());
-    core.insert("machine".into(), machine_v);
-    core.insert("machine_digest".into(), json!(machine_digest));
+    core.insert("machine".into(), id.machine.clone());
+    core.insert("machine_digest".into(), json!(id.machine_digest));
     core.insert("exit_status".into(), json!(facts.exit_status));
     core.insert("stdout_sha256".into(), json!(stdout_sha));
     core.insert("stderr_sha256".into(), json!(stderr_sha));
@@ -584,18 +702,7 @@ fn execute_gate(job: &Job<'_>, permit: Option<Permit<'_>>) -> Result<Outcome, Ru
     core.insert("reason".into(), json!(derived.reason));
     core.insert("mutants".into(), json!([]));
     core.insert("checks".into(), Value::Array(checks));
-    core.insert("dependencies".into(), Value::Array(dependencies.clone()));
-
-    let cache_key = canonical_digest(&json!({
-        "manifest_digest": m.digest,
-        "binary_sha256": binary_sha,
-        "build_inputs_digest": inputs_digest,
-        "machine_digest": machine_digest,
-        "dependencies": dependencies,
-        "runner_schema": SCHEMA,
-        "pins": [],
-    }))
-    .map_err(fatal)?;
+    core.insert("dependencies".into(), Value::Array(dependency_values));
 
     let volatile = json!({
         "started_utc": utc_string(started),
@@ -604,7 +711,7 @@ fn execute_gate(job: &Job<'_>, permit: Option<Permit<'_>>) -> Result<Outcome, Ru
         "pool": m.pool(),
         "pool_wait_ms": job.pool_wait_ms,
         "runner": { "name": "aien-test", "version": env!("CARGO_PKG_VERSION"), "impl": "rust" },
-        "cache": { "key": cache_key, "reused": false, "reused_from": null, "mode": "disabled" },
+        "cache": cache::cache_member(&cache_key, None, mode),
         "timeout_exceeded": timeout_exceeded,
     });
 
@@ -615,6 +722,7 @@ fn execute_gate(job: &Job<'_>, permit: Option<Permit<'_>>) -> Result<Outcome, Ru
         reason: derived.reason,
         receipt_path: Some(path),
         receipt_digest: Some(digest),
+        cache: note,
     })
 }
 
