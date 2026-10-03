@@ -995,7 +995,7 @@ impl CheckpointPolicy {
             scan_dirs,
             require_checkpoint: non_empty("AIEN_REQUIRE_CHECKPOINT")
                 .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
-                .unwrap_or(false),
+                .unwrap_or(aien_inference_abi::strict::production_strict()),
         }
     }
 

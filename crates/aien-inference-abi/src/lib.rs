@@ -17,6 +17,7 @@ pub mod mojo_backend;
 pub mod qwen3_coder;
 pub mod qwen3_moe;
 pub mod qwen3_serve;
+pub mod strict;
 pub mod tensor;
 pub mod tensor_abi;
 pub mod tokenizer;

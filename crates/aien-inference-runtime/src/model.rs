@@ -83,6 +83,9 @@ impl EmbeddedModel {
                     info!("Binding EmbeddedModel to Blackwell sm_121 GPU cuBLAS acceleration");
                     Arc::new(gpu)
                 } else {
+                    if aien_inference_abi::strict::production_strict() {
+                        return Err(aien_inference_abi::strict::violation("GPU backend requested but BlackwellGb10Backend is unavailable"));
+                    }
                     info!("Blackwell GPU unavailable, falling back to CPU reference execution");
                     Arc::new(ReferenceCpuBackend::new())
                 }
@@ -130,6 +133,9 @@ impl EmbeddedModel {
             info!("Loading real TinyLlama checkpoint from {}", mp.display());
             Self::load_checkpoint(&mp, &tp, true, true)
         } else {
+            if aien_inference_abi::strict::production_strict() {
+                return Err(aien_inference_abi::strict::violation("no real checkpoint and tokenizer found on disk"));
+            }
             warn!("Real model checkpoint not found on disk, using reference test weights");
             Self::with_reference_weights(&ModelConfig::tinyllama_1_1b())
         }

@@ -22,3 +22,8 @@ parking_lot = "0.12"
 sha2 = "0.10"
 
 
+
+[features]
+# Off by default: a production build fails closed (no reference weights, no
+# silent CPU fallback behind the GPU backend). Only dev/test builds turn it on.
+dev-fallback = []
