@@ -49,7 +49,10 @@ pub fn violation(what: &str) -> String {
 /// fatal: a wrong-or-slow result is worse than no result for the gate.
 pub fn fallback_taken(backend: &str, op: &str) {
     if production_strict() {
-        panic!("{}", violation(&format!("{backend} fell back to CPU in {op}")));
+        panic!(
+            "{}",
+            violation(&format!("{backend} fell back to CPU in {op}"))
+        );
     }
 }
 
@@ -79,7 +82,10 @@ impl StrictModelReceipt {
             problems.push(format!("fallback_count = {}", self.fallback_count));
         }
         if !self.backend_identity.contains("sm_121") {
-            problems.push(format!("backend is not native GB10 sm_121: {}", self.backend_identity));
+            problems.push(format!(
+                "backend is not native GB10 sm_121: {}",
+                self.backend_identity
+            ));
         }
         if self.checkpoint_sha256.len() != 64 || self.tokenizer_sha256.len() != 64 {
             problems.push("checkpoint or tokenizer digest missing".to_string());

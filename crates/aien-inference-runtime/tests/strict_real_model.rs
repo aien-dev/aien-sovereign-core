@@ -25,7 +25,10 @@ fn sha256_file_hex(path: &Path) -> String {
 #[test]
 fn production_build_is_strict_unless_opted_in() {
     if std::env::var(strict::DEV_FALLBACK_ENV).is_ok() {
-        eprintln!("dev fallback opted in by {}; strictness not asserted", strict::DEV_FALLBACK_ENV);
+        eprintln!(
+            "dev fallback opted in by {}; strictness not asserted",
+            strict::DEV_FALLBACK_ENV
+        );
         return;
     }
     assert!(
@@ -76,15 +79,27 @@ fn receipt_rejects_fallbacks_and_dev_builds() {
 #[ignore = "needs the real checkpoint on the Spark: AIEN_E2E_CHECKPOINT + AIEN_STRICT_RECEIPT"]
 fn strict_real_model_gate() {
     let ckpt = PathBuf::from(std::env::var("AIEN_E2E_CHECKPOINT").expect("AIEN_E2E_CHECKPOINT"));
-    let receipt_path = PathBuf::from(std::env::var("AIEN_STRICT_RECEIPT").expect("AIEN_STRICT_RECEIPT"));
+    let receipt_path =
+        PathBuf::from(std::env::var("AIEN_STRICT_RECEIPT").expect("AIEN_STRICT_RECEIPT"));
     let (model_path, dir) = if ckpt.is_dir() {
         (ckpt.join("model.safetensors"), ckpt.clone())
     } else {
-        (ckpt.clone(), ckpt.parent().map(Path::to_path_buf).unwrap_or_default())
+        (
+            ckpt.clone(),
+            ckpt.parent().map(Path::to_path_buf).unwrap_or_default(),
+        )
     };
     let tokenizer_path = dir.join("tokenizer.json");
-    assert!(model_path.is_file(), "STRICT: checkpoint {} missing", model_path.display());
-    assert!(tokenizer_path.is_file(), "STRICT: tokenizer {} missing", tokenizer_path.display());
+    assert!(
+        model_path.is_file(),
+        "STRICT: checkpoint {} missing",
+        model_path.display()
+    );
+    assert!(
+        tokenizer_path.is_file(),
+        "STRICT: tokenizer {} missing",
+        tokenizer_path.display()
+    );
 
     let surface = ExecutionSurface::detect();
     println!("STRICT_GATE surface: {}", surface.display_name());
@@ -107,14 +122,23 @@ fn strict_real_model_gate() {
         tokenizer_sha256: sha256_file_hex(&tokenizer_path),
         backend_identity,
         model_id: model.config.model_id.clone(),
-        model_config: serde_json::to_value(&model.config).unwrap_or(serde_json::json!({"model_id": model.config.model_id})),
+        model_config: serde_json::to_value(&model.config)
+            .unwrap_or(serde_json::json!({"model_id": model.config.model_id})),
         fallback_count,
         dev_fallback_build: strict::dev_fallback_active(),
         verdict: String::new(),
     };
     let verdict = receipt.verify();
-    std::fs::write(&receipt_path, serde_json::to_string_pretty(&receipt).unwrap()).expect("write receipt");
-    println!("STRICT_GATE verdict: {} (receipt {})", receipt.verdict, receipt_path.display());
+    std::fs::write(
+        &receipt_path,
+        serde_json::to_string_pretty(&receipt).unwrap(),
+    )
+    .expect("write receipt");
+    println!(
+        "STRICT_GATE verdict: {} (receipt {})",
+        receipt.verdict,
+        receipt_path.display()
+    );
     assert!(!out.trim().is_empty(), "STRICT: empty output");
     verdict.unwrap_or_else(|e| panic!("{e}"));
 }
