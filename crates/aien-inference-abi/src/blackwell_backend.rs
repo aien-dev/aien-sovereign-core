@@ -252,6 +252,10 @@ impl Drop for BlackwellGb10Backend {
 }
 
 impl TensorBackend for BlackwellGb10Backend {
+    fn fallback_count(&self) -> u64 {
+        self.fallback_counter.load(Ordering::Relaxed)
+    }
+
     fn name(&self) -> &'static str {
         if self.available {
             "BlackwellGb10Backend (NVIDIA GB10 sm_121 cuBLAS)"
@@ -300,6 +304,7 @@ impl TensorBackend for BlackwellGb10Backend {
                 return;
             }
             self.fallback_counter.fetch_add(1, Ordering::Relaxed);
+            crate::strict::fallback_taken("BlackwellGb10Backend", "tensor op");
         }
         self.fallback.matmul_vec(out, x, weight, out_dim, in_dim);
     }
@@ -328,6 +333,7 @@ impl TensorBackend for BlackwellGb10Backend {
                 return;
             }
             self.fallback_counter.fetch_add(1, Ordering::Relaxed);
+            crate::strict::fallback_taken("BlackwellGb10Backend", "tensor op");
         }
         crate::tensor::matmul_batch(x, weight, out, batch_size, in_dim, out_dim);
     }
@@ -448,6 +454,7 @@ impl TensorBackend for BlackwellGb10Backend {
                 return;
             }
             self.fallback_counter.fetch_add(1, Ordering::Relaxed);
+            crate::strict::fallback_taken("BlackwellGb10Backend", "tensor op");
         }
 
         self.fallback.paged_attention_batch(
@@ -487,6 +494,7 @@ impl TensorBackend for BlackwellGb10Backend {
                 return;
             }
             self.fallback_counter.fetch_add(1, Ordering::Relaxed);
+            crate::strict::fallback_taken("BlackwellGb10Backend", "tensor op");
         }
         self.fallback
             .compute_logits(logits, hidden, embed_weight, vocab_size, hidden_dim);

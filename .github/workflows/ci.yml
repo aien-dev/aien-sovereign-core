@@ -48,6 +48,10 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
 
       - name: Run Workspace Unit and Integration Tests
+        env:
+          # CPU-only runner: let the GPU-backend tests take the software fallback.
+          # Recorded in every receipt; the strict real-model gate rejects it.
+          AIEN_DEV_FALLBACK: "1"
         run: cargo test --workspace --verbose -- --test-threads=1
 
       - name: Verify Preflight Branch Guard (both contexts)
@@ -56,6 +60,8 @@ jobs:
       - name: Run Required Agent Preflight
         env:
           AIEN_PROOF_OFF: '1'
+          # CI runners have no GB10; the dev fallback is a recorded opt-in here only (see aien-inference-abi::strict)
+          AIEN_DEV_FALLBACK: '1'
           # push to main validates an already-merged tree; PRs keep the developer branch policy
           AIEN_PREFLIGHT_CONTEXT: ${{ (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main' && 'merged-tree' || 'developer' }}
         run: bash scripts/agent-preflight.sh
