@@ -296,6 +296,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "aien-switchboard"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "toml",
+]
+
+[[package]]
 name = "aien-test"
 version = "0.1.0"
 dependencies = [
