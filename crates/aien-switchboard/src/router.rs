@@ -16,12 +16,7 @@ pub struct Decision {
 }
 
 /// Why an account has no room right now, or `None` if it has room.
-fn no_room(
-    id: &AccountId,
-    rules: &RuleTable,
-    gauges: &Gauges,
-    now: u64,
-) -> Option<String> {
+fn no_room(id: &AccountId, rules: &RuleTable, gauges: &Gauges, now: u64) -> Option<String> {
     let g = gauges.get(id)?;
     if let Some(t) = g.cooled_until.filter(|t| *t > now) {
         return Some(format!(

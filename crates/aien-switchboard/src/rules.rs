@@ -142,8 +142,7 @@ impl RuleTable {
     }
 
     pub fn from_toml_str(text: &str) -> Result<Self, RulesError> {
-        let raw: RawFile =
-            toml::from_str(text).map_err(|e| RulesError::Parse(e.to_string()))?;
+        let raw: RawFile = toml::from_str(text).map_err(|e| RulesError::Parse(e.to_string()))?;
 
         let c = raw.settings.ceiling_percent;
         if !(c > 0.0 && c <= 100.0) {

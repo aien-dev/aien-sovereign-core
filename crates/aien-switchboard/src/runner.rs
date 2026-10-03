@@ -11,7 +11,9 @@ pub enum RunResult {
     Output(String),
     /// The account hit its usage limit. `resets_at` is Unix seconds when the
     /// program said when it refills, else `None`.
-    LimitHit { resets_at: Option<u64> },
+    LimitHit {
+        resets_at: Option<u64>,
+    },
 }
 
 pub trait Runner {
@@ -33,7 +35,10 @@ impl FakeRunner {
 
     /// Queue the next answer for `id`.
     pub fn push(&mut self, id: &AccountId, result: RunResult) -> &mut Self {
-        self.scripts.entry(id.clone()).or_default().push_back(result);
+        self.scripts
+            .entry(id.clone())
+            .or_default()
+            .push_back(result);
         self
     }
 }
@@ -41,7 +46,11 @@ impl FakeRunner {
 impl Runner for FakeRunner {
     fn run(&mut self, account: &Account, _job: &Job, prompt: &str) -> RunResult {
         self.calls.push(account.id.clone());
-        match self.scripts.get_mut(&account.id).and_then(|q| q.pop_front()) {
+        match self
+            .scripts
+            .get_mut(&account.id)
+            .and_then(|q| q.pop_front())
+        {
             Some(r) => r,
             None => RunResult::Output(format!("fake output from {}: {prompt}", account.id)),
         }

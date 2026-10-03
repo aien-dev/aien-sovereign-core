@@ -60,7 +60,12 @@ fn rule_order_is_respected() {
         d.alternates,
         vec![id("anthropic-2"), id("openrouter-1"), id("local")]
     );
-    let d = route(&Job::new(JobKind::Review, JobSize::Small), &r, &Gauges::new(), 1000);
+    let d = route(
+        &Job::new(JobKind::Review, JobSize::Small),
+        &r,
+        &Gauges::new(),
+        1000,
+    );
     assert_eq!(d.account, id("anthropic-2"));
 }
 
@@ -84,7 +89,11 @@ fn cooled_down_account_is_skipped_with_a_plain_reason() {
     g.on_limit_hit(&id("anthropic-1"), Some(5000), 1000, 600);
     let d = route(&code(), &r, &g, 1000);
     assert_eq!(d.account, id("anthropic-2"));
-    assert!(d.reason.contains("anthropic-1 is cooling down"), "{}", d.reason);
+    assert!(
+        d.reason.contains("anthropic-1 is cooling down"),
+        "{}",
+        d.reason
+    );
 }
 
 #[test]
@@ -113,7 +122,11 @@ fn everything_exhausted_goes_to_local() {
     let d = route(&code(), &r, &g, 1000);
     assert_eq!(d.account, id("local"));
     assert!(d.alternates.is_empty());
-    assert!(d.reason.contains("stays on the local model"), "{}", d.reason);
+    assert!(
+        d.reason.contains("stays on the local model"),
+        "{}",
+        d.reason
+    );
 }
 
 #[test]
@@ -139,7 +152,12 @@ fn failover_on_limit_hit_then_cooldown_sticks() {
     let r = rules();
     let mut g = Gauges::new();
     let mut run = FakeRunner::new();
-    run.push(&id("anthropic-1"), RunResult::LimitHit { resets_at: Some(4000) });
+    run.push(
+        &id("anthropic-1"),
+        RunResult::LimitHit {
+            resets_at: Some(4000),
+        },
+    );
     let done = run_job(&code(), "hi", &r, &mut g, &mut run, 1000).unwrap();
     assert_eq!(done.account, id("anthropic-2"));
     assert_eq!(done.tried, vec![id("anthropic-1"), id("anthropic-2")]);
@@ -203,7 +221,9 @@ fn parse_errors_are_clear() {
     // Misspelled key.
     assert!(parse_err("[routes]\ndefalt = []\n").contains("defalt"));
     // Unknown provider.
-    let e = parse_err("[[accounts]]\nid=\"a\"\nprovider=\"bing\"\nprogram=\"x\"\n[routes]\ndefault=[\"a\"]\n");
+    let e = parse_err(
+        "[[accounts]]\nid=\"a\"\nprovider=\"bing\"\nprogram=\"x\"\n[routes]\ndefault=[\"a\"]\n",
+    );
     assert!(e.contains("bing"), "{e}");
 }
 
@@ -211,21 +231,36 @@ fn parse_errors_are_clear() {
 fn rule_mistakes_name_the_problem() {
     let local = "[[accounts]]\nid=\"local\"\nprovider=\"local\"\nprogram=\"aien\"\n";
     let g1 = "[[accounts]]\nid=\"g1\"\nprovider=\"google\"\nprogram=\"agy\"\n";
-    assert!(parse_err(&format!("{g1}[routes]\ndefault=[\"g1\"]\n")).contains("no account with provider = \"local\""));
-    assert!(parse_err(&format!("{local}[routes]\ndefault=[\"nope\"]\n")).contains("\"nope\", which is not in [[accounts]]"));
+    assert!(parse_err(&format!("{g1}[routes]\ndefault=[\"g1\"]\n"))
+        .contains("no account with provider = \"local\""));
+    assert!(parse_err(&format!("{local}[routes]\ndefault=[\"nope\"]\n"))
+        .contains("\"nope\", which is not in [[accounts]]"));
     assert!(parse_err(&format!("{local}[routes]\ndefault=[]\n")).contains("empty list"));
-    assert!(parse_err(&format!("{local}{local}[routes]\ndefault=[\"local\"]\n")).contains("listed twice"));
-    assert!(parse_err(&format!("{local}{g1}[routes]\ndefault=[\"g1\",\"g1\"]\n")).contains("lists g1 twice"));
-    assert!(parse_err(&format!("[settings]\nceiling_percent=150\n{local}[routes]\ndefault=[\"local\"]\n")).contains("ceiling_percent"));
+    assert!(
+        parse_err(&format!("{local}{local}[routes]\ndefault=[\"local\"]\n"))
+            .contains("listed twice")
+    );
+    assert!(
+        parse_err(&format!("{local}{g1}[routes]\ndefault=[\"g1\",\"g1\"]\n"))
+            .contains("lists g1 twice")
+    );
+    assert!(parse_err(&format!(
+        "[settings]\nceiling_percent=150\n{local}[routes]\ndefault=[\"local\"]\n"
+    ))
+    .contains("ceiling_percent"));
     let both = "[[accounts]]\nid=\"x\"\nprovider=\"xai\"\nprogram=\"grok\"\nsettings_dir=\"/a\"\nkey_ref=\"k\"\n";
     assert!(parse_err(&format!("{local}{both}[routes]\ndefault=[\"x\"]\n")).contains("pick one"));
     let secret = "[[accounts]]\nid=\"o\"\nprovider=\"openrouter\"\nprogram=\"http\"\nkey_ref=\"sk-or v1 abc def\"\n";
-    assert!(parse_err(&format!("{local}{secret}[routes]\ndefault=[\"o\"]\n")).contains("never the key itself"));
+    assert!(
+        parse_err(&format!("{local}{secret}[routes]\ndefault=[\"o\"]\n"))
+            .contains("never the key itself")
+    );
 }
 
 #[test]
 fn missing_file_is_a_read_error() {
-    let e = RuleTable::from_path(std::path::Path::new("/nonexistent/switchboard.toml")).unwrap_err();
+    let e =
+        RuleTable::from_path(std::path::Path::new("/nonexistent/switchboard.toml")).unwrap_err();
     assert!(e.to_string().starts_with("cannot read rule file:"), "{e}");
 }
 
