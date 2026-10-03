@@ -1,4 +1,4 @@
-//! PREFILL-E2E-1: the E2E-0 end-to-end gate at N = 1, 8, 32, 128 and 500
+//! PREFILL-E2E-1: the E2E-0 end-to-end gate at N = 1, 2, 8, 32, 128 and 500
 //! branches from ONE shared root prompt (TinyLlama, CPU, strict checkpoint).
 //!
 //! `#[ignore]`d for normal CI. Run with `--ignored`; it FAILS (never skips)
@@ -63,7 +63,7 @@ use async_trait::async_trait;
 use sha2::{Digest, Sha256};
 
 /// Branch counts of the gate, run in this order.
-const BRANCH_COUNTS: [usize; 5] = [1, 8, 32, 128, 500];
+const BRANCH_COUNTS: [usize; 6] = [1, 2, 8, 32, 128, 500];
 /// Decode budget per branch. 4 tokens keep N = 500 finishable on CPU: the run
 /// does N x 4 batched decode rows plus one full control (217-token prefill + 4
 /// decodes) per sampled branch, and 4 tokens still cover a partial-block
