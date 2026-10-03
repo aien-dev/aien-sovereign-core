@@ -1,4 +1,4 @@
-//! PREFILL-E2E-1: the E2E-0 end-to-end gate at N = 1, 8, 32, 128 and 500
+//! PREFILL-E2E-1: the E2E-0 end-to-end gate at N = 1, 2, 8, 32, 128 and 500
 //! branches from ONE shared root prompt (TinyLlama, CPU, strict checkpoint).
 //!
 //! `#[ignore]`d for normal CI. Run with `--ignored`; it FAILS (never skips)
@@ -28,15 +28,13 @@
 //! different branch inputs; (e) backend sequences, KV blocks, arena, worlds and
 //! scheduler all empty after each N.
 //!
-//! Scheduler admission trap (read, not assumed): crates/aien-scheduler/src/
-//! lib.rs `build_scheduled_batch` step 3 computes `required_blocks =
-//! prompt_len.div_ceil(16)` and `break`s when `available_blocks()` is below it,
-//! BEFORE it looks at the sequence's existing (shared) block table. So every
-//! admitted branch needs a full prompt's worth of FREE blocks at admission
-//! even though it shares the root blocks. This test does not change the
-//! scheduler: it sizes the pool with that headroom (see `pool_blocks`),
-//! records the pool size and the reason, and treats a step-guard hit, an
-//! idle-while-waiting step (starved branch) or a scheduler/spine error as FAIL.
+//! Scheduler admission (GB10-2): `build_scheduled_batch` step 3 asks
+//! `AienKvManager::incremental_blocks_needed` for the NEW blocks a sequence
+//! needs, so a fork child that shares the root blocks needs only its
+//! copy-on-write block. The pool is sized to the true requirement (prefix + N x
+//! private suffix + watermark, see `pool_plan`) and records the pool size and
+//! the reason. A step-guard hit, an idle-while-waiting step (starved branch) or
+//! a scheduler/spine error is FAIL.
 //!
 //! The run stops at the first N that fails (later counts are listed in the
 //! receipt as `not_run_after_failure`), so a failing gate stays failing and
@@ -63,7 +61,10 @@ use async_trait::async_trait;
 use sha2::{Digest, Sha256};
 
 /// Branch counts of the gate, run in this order.
-const BRANCH_COUNTS: [usize; 5] = [1, 8, 32, 128, 500];
+const BRANCH_COUNTS: [usize; 6] = [1, 2, 8, 32, 128, 500];
+/// Branch count from which (d) requires distinct outputs and a mixed decode
+/// batch; below it the counts are recorded only (sampling coincidence).
+const DIVERGENCE_MIN_N: usize = 8;
 /// Decode budget per branch. 4 tokens keep N = 500 finishable on CPU: the run
 /// does N x 4 batched decode rows plus one full control (217-token prefill + 4
 /// decodes) per sampled branch, and 4 tokens still cover a partial-block
@@ -744,18 +745,14 @@ fn check(name: &'static str, pass: bool, message: String) -> Check {
 // Pool sizing and branch sampling
 // ---------------------------------------------------------------------------
 
-/// Scheduler admission hard-codes 16-token blocks (crates/aien-scheduler/src/
-/// lib.rs `required_blocks = prompt_len.div_ceil(16)`); the model config block
-/// size must match or the headroom below is wrong.
-const SCHEDULER_ADMISSION_BLOCK_TOKENS: usize = 16;
-/// Extra free blocks on top of the exact need, so a step never lands on the
-/// admission or watermark edge.
-const POOL_SLACK_BLOCKS: usize = 16;
+/// Extra free blocks on top of the exact need (prefix + N x private suffix +
+/// watermark). Zero: the scheduler admits by the KV manager's incremental
+/// need (GB10-2), so the pool is sized to the true requirement.
+const POOL_SLACK_BLOCKS: usize = 0;
 
 struct PoolPlan {
     prefix_blocks: usize,
     per_branch_suffix_blocks: usize,
-    admission_headroom_blocks: usize,
     watermark_blocks: usize,
     total_blocks: usize,
 }
@@ -768,25 +765,19 @@ struct PoolPlan {
 ///   copied on the first append (copy-on-write, crates/aien-kv-cache/src/
 ///   lib.rs `append_token_with_slot`), so the private blocks a branch owns are
 ///   ceil((prompt_len % block_size + appends) / block_size).
-/// - admission headroom: the scheduler wants a full prompt's worth of FREE
-///   blocks for EVERY branch it admits even though the branch shares the root
-///   blocks (the known admission trap), so a pool of exactly prefix + private
-///   blocks would starve the last branches.
+/// - watermark: the scheduler preempts when free blocks fall below it, so the
+///   pool keeps that many free on top. Admission itself needs only the
+///   incremental blocks (GB10-2: `AienKvManager::incremental_blocks_needed`),
+///   not a whole prompt per branch.
 fn pool_plan(prompt_len: usize, block_size: usize, n: usize, watermark: usize) -> PoolPlan {
     let prefix_blocks = prompt_len.div_ceil(block_size);
     let appends = MAX_TOKENS_PER_BRANCH + 1;
     let per_branch_suffix_blocks = (prompt_len % block_size + appends).div_ceil(block_size);
-    let admission_headroom_blocks = prompt_len.div_ceil(SCHEDULER_ADMISSION_BLOCK_TOKENS);
     PoolPlan {
         prefix_blocks,
         per_branch_suffix_blocks,
-        admission_headroom_blocks,
         watermark_blocks: watermark,
-        total_blocks: prefix_blocks
-            + n * per_branch_suffix_blocks
-            + admission_headroom_blocks
-            + watermark
-            + POOL_SLACK_BLOCKS,
+        total_blocks: prefix_blocks + n * per_branch_suffix_blocks + watermark + POOL_SLACK_BLOCKS,
     }
 }
 
@@ -838,11 +829,6 @@ async fn run_one(n: usize, sh: &Shared<'_>) -> RunResult {
     std::env::set_var("AIEN_RUNTIME_STATE_DIR", state_dir.path());
 
     let block_size = sh.weights.config.block_size;
-    assert_eq!(
-        block_size, SCHEDULER_ADMISSION_BLOCK_TOKENS,
-        "POOL_SIZING: model block size {block_size} differs from the 16 the scheduler admission \
-         hard-codes; the headroom reasoning no longer holds"
-    );
     let watermark = 2usize;
     let plan = pool_plan(prompt_len, block_size, n, watermark);
     let max_batch = 32usize.max(n + 2);
@@ -1226,8 +1212,14 @@ async fn run_one(n: usize, sh: &Shared<'_>) -> RunResult {
     // (d) divergence and isolation (isolation proper is the controls above).
     let distinct: std::collections::HashSet<&Vec<u32>> = generated.iter().collect();
     let all_generated = generated.iter().all(|g| !g.is_empty());
-    let diverged = all_generated && (n == 1 || distinct.len() >= 2);
-    let mixed_batch = n == 1
+    // Branches diverge only by their sampling seeds, so with few branches and
+    // 4 tokens each, identical outputs are an ordinary coincidence (observed at
+    // N=2, 2026-10-03). Divergence is required from DIVERGENCE_MIN_N branches
+    // on, where every branch sampling the same 4 tokens would be a defect;
+    // below that the distinct count is recorded, not judged.
+    let divergence_required = n >= DIVERGENCE_MIN_N;
+    let diverged = all_generated && (!divergence_required || distinct.len() >= 2);
+    let mixed_batch = !divergence_required
         || tap.decode_batches.iter().any(|rows| {
             let fed: Vec<u32> = rows
                 .iter()
@@ -1241,7 +1233,7 @@ async fn run_one(n: usize, sh: &Shared<'_>) -> RunResult {
         diverged && mixed_batch && parity_pass,
         format!(
             "(d) BRANCH_ISOLATION_VIOLATION: N={n}: every branch produced tokens {all_generated}, \
-             {} distinct outputs among {n} (need >= 2 when N > 1), a decode batch mixed different \
+             {} distinct outputs among {n} (need >= 2 when N >= {DIVERGENCE_MIN_N}), a decode batch mixed different \
              branch inputs {mixed_batch}, control parity {parity_pass}{run_note}",
             distinct.len()
         ),
@@ -1323,12 +1315,11 @@ async fn run_one(n: usize, sh: &Shared<'_>) -> RunResult {
             "pool_bytes": pool_bytes,
             "prefix_blocks": plan.prefix_blocks,
             "per_branch_suffix_blocks": plan.per_branch_suffix_blocks,
-            "admission_headroom_blocks": plan.admission_headroom_blocks,
             "watermark_blocks": plan.watermark_blocks,
             "slack_blocks": POOL_SLACK_BLOCKS,
             "max_batch_size": max_batch,
             "host_mem_total_bytes": mem_total_bytes(),
-            "headroom_reason": "scheduler admission (crates/aien-scheduler/src/lib.rs build_scheduled_batch step 3) requires available_blocks >= prompt_len.div_ceil(16) for every admitted branch before it inspects the shared block table; the pool therefore holds prefix + N x private suffix blocks + one full prompt of free blocks + watermark + slack. Scheduler NOT changed.",
+            "headroom_reason": "scheduler admission (crates/aien-scheduler/src/lib.rs build_scheduled_batch step 3) asks AienKvManager::incremental_blocks_needed (GB10-2), so a fork child needs only its copy-on-write block at admission; the pool holds prefix + N x private suffix blocks + watermark, no whole-prompt headroom and no slack.",
         },
         "parity": {
             "result": parity_result,

@@ -1405,6 +1405,91 @@ impl<B: aien_platform::UnifiedBuffer> AienKvManager<B> {
         self.block_size
     }
 
+    /// Total physical blocks in the pool (free + allocated).
+    pub fn total_block_count(&self) -> usize {
+        self.total_blocks
+    }
+
+    /// How many fresh physical blocks `appends` consecutive
+    /// `append_token_with_slot` calls on `seq_id` would allocate, computed
+    /// read-only from the table's tail block with the same rule as
+    /// `append_token_with_slot`:
+    /// - empty table: the first append allocates a block;
+    /// - shared tail block, partly filled: copy-on-write, one fresh block;
+    /// - shared tail block, full: one fresh block;
+    /// - private tail block: its free slots take appends first;
+    ///
+    /// then every further `block_size` appends need one more fresh block.
+    /// Returns 0 when the sequence has no block table (the append itself then
+    /// reports the missing sequence).
+    pub fn blocks_needed_for_appends(&self, seq_id: u64, appends: usize) -> usize {
+        if appends == 0 {
+            return 0;
+        }
+        let Some(table) = self.sequence_tables.get(&seq_id) else {
+            return 0;
+        };
+        let block_size = self.block_size;
+        let mut remaining = appends;
+        let mut needed = 0usize;
+        // Free slots left in the tail block once the first append has resolved.
+        let tail_free = match table.block_ids.last().and_then(|&id| self.get_block(id)) {
+            None => {
+                // Empty table: the first append allocates a block holding 1 token.
+                needed += 1;
+                remaining -= 1;
+                block_size - 1
+            }
+            Some(blk) if blk.is_shared => {
+                // Copy-on-write of a partly filled tail, or a fresh block after a
+                // full one: either way one fresh private block takes this append.
+                needed += 1;
+                remaining -= 1;
+                if blk.num_tokens < block_size {
+                    block_size - (blk.num_tokens + 1)
+                } else {
+                    block_size - 1
+                }
+            }
+            Some(blk) => block_size.saturating_sub(blk.num_tokens),
+        };
+        remaining -= remaining.min(tail_free);
+        needed + remaining.div_ceil(block_size)
+    }
+
+    /// The sole authority for how many NEW physical blocks the scheduler must
+    /// find free before it admits `seq_id` with a `prompt_len`-token prompt.
+    /// Read-only; uses this pool's block size, never a literal.
+    ///
+    /// - No table: a fresh `allocate_sequence`, `ceil(prompt_len / block_size)`.
+    /// - Table whose K/V is not computed (`!is_prefill_ready`): the scheduler
+    ///   drops that table and allocates again, so the need is a fresh
+    ///   allocation minus the blocks the drop gives back (those only this
+    ///   table references).
+    /// - Computed table (a fork child or a resumed sequence): its blocks,
+    ///   shared or not, are already held, so only the tokens beyond the table
+    ///   plus the first decode token count. That first append is where a
+    ///   shared partial tail is copy-on-written, so a fork child of a
+    ///   mid-block prefix needs exactly one new block.
+    pub fn incremental_blocks_needed(&self, seq_id: u64, prompt_len: usize) -> usize {
+        let fresh = prompt_len.div_ceil(self.block_size);
+        match self.sequence_tables.get(&seq_id) {
+            None => fresh,
+            Some(table) if !table.is_prefill_ready() => {
+                let returned = table
+                    .block_ids
+                    .iter()
+                    .filter(|&&b| self.blocks.get(b).is_some_and(|blk| blk.ref_count == 1))
+                    .count();
+                fresh.saturating_sub(returned)
+            }
+            Some(table) => self.blocks_needed_for_appends(
+                seq_id,
+                prompt_len.saturating_sub(table.total_tokens) + 1,
+            ),
+        }
+    }
+
     pub fn total_tokens(&self, seq_id: u64) -> Option<usize> {
         self.sequence_tables.get(&seq_id).map(|t| t.total_tokens)
     }
