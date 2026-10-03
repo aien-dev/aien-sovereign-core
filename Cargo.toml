@@ -37,6 +37,7 @@ members = [
     "crates/aien-proof",
     "crates/crumbs",
     "crates/aien-closure",
+    "crates/aien-switchboard",
     "tools/aien-test",
 ]
 
