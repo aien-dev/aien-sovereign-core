@@ -610,6 +610,7 @@ impl BlackwellBatchExecutor {
         #[cfg(not(has_blackwell_cuda))]
         {
             self.fallback_count.fetch_add(1, Ordering::SeqCst);
+            crate::strict::fallback_taken("BlackwellBatchExecutor", "batch step");
             Ok(())
         }
     }
@@ -702,6 +703,7 @@ impl BlackwellBatchExecutor {
         #[cfg(not(has_blackwell_cuda))]
         {
             self.fallback_count.fetch_add(1, Ordering::SeqCst);
+            crate::strict::fallback_taken("BlackwellBatchExecutor", "batch step");
             sampled_tokens.fill(100);
         }
 

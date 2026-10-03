@@ -83,6 +83,13 @@ pub trait TensorBackend: Send + Sync {
     /// Human-readable name of the backend implementation.
     fn name(&self) -> &'static str;
 
+    /// How many operations this backend ran on a software fallback instead of
+    /// the device it was bound to. Zero for pure CPU backends; a production
+    /// build treats a non-zero count as a strict real-model violation.
+    fn fallback_count(&self) -> u64 {
+        0
+    }
+
     /// In-place Root Mean Square Normalization:
     /// out[i] = x[i] * weight[i] / sqrt(mean(x^2) + eps)
     fn rmsnorm(&self, out: &mut [f32], x: &[f32], weight: &[f32], eps: f32);
