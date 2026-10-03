@@ -151,3 +151,26 @@ fn shortfall_while_others_run_waits_without_error() {
     assert!(!batch.prefill_requests.iter().any(|r| r.request_id == b));
     assert_eq!(scheduler.waiting_count(), 1, "second request keeps waiting");
 }
+
+#[test]
+fn same_step_fork_admissions_reserve_their_copy_on_write_blocks() {
+    // 4-block pool: parent holds 3, ONE block free. Two children each need one
+    // new block on their first token. Admitting both in one step would promise
+    // the same free block twice; only the first may enter this batch.
+    let (kv, mut scheduler, first_child, prompt) = parent_and_forked_child(4, 16);
+    let second_child = SequenceId::new(7, 1).unwrap().to_u64();
+    let parent = SequenceId::new(2, 1).unwrap().to_u64();
+    kv.write()
+        .fork_prefilled(parent, second_child)
+        .expect("fork");
+    assert_eq!(kv.read().available_blocks(), 1, "setup: 1 free block");
+    scheduler.submit_request(request(first_child, &prompt));
+    scheduler.submit_request(request(second_child, &prompt));
+
+    let batch = scheduler
+        .build_scheduled_batch()
+        .expect("second child waits, it is not an error: the first is scheduled")
+        .expect("first child admitted");
+    assert_eq!(batch.decode_requests, vec![first_child]);
+    assert_eq!(scheduler.waiting_count(), 1, "second child keeps waiting");
+}

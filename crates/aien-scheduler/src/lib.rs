@@ -6,6 +6,7 @@ pub use sequence::*;
 use aien_abi_core::{
     AienInferenceBackend, DecodeOutput, FinishReason, ScheduledBatch, SequenceRequest, StepMetrics,
 };
+use aien_inference_abi::KV_POOL_EXHAUSTED_PREFIX;
 use aien_kv_cache::{AienKvManager, PrefillGateError};
 use aien_platform::{InferenceWork, Priority};
 use parking_lot::RwLock;
@@ -348,6 +349,9 @@ impl AienScheduler {
         let mut current_tokens = 0;
         let mut prefill_budget = self.config.max_prefill_tokens;
         let mut preempted_this_step = false;
+        // New blocks promised to sequences admitted into decode this step
+        // (copy-on-write on their first token) but not allocated until the backend runs.
+        let mut reserved_blocks = 0usize;
 
         // 1. Watermark Memory Pressure Check: Preempt lowest priority sequence if below watermark
         {
@@ -494,17 +498,49 @@ impl AienScheduler {
                     }
                 };
 
-                let required_blocks = prompt_len.div_ceil(16);
-                let available = self.kv_manager.read().available_blocks();
+                // The KV manager is the only authority on how many NEW physical
+                // blocks this sequence needs (its own pool block size, blocks it
+                // already owns or shares, a pending copy-on-write). The need is
+                // read BEFORE the sequence leaves its queue.
+                let (needed_blocks, free_blocks, pool_blocks) = {
+                    let kv = self.kv_manager.read();
+                    (
+                        kv.incremental_blocks_needed(next_seq_id.to_u64(), prompt_len),
+                        kv.available_blocks(),
+                        kv.total_block_count(),
+                    )
+                };
+                // Blocks promised to sequences admitted earlier in this step
+                // that have not allocated them yet (forks entering decode).
+                let available = free_blocks.saturating_sub(reserved_blocks);
 
                 // Preempted sequences require headroom above watermark to prevent thrashing
-                let min_needed = if is_preempted {
-                    required_blocks + self.config.watermark_blocks
+                let watermark_headroom = if is_preempted {
+                    self.config.watermark_blocks
                 } else {
-                    required_blocks
+                    0
                 };
+                let min_needed = needed_blocks + watermark_headroom;
 
                 if available < min_needed {
+                    // Waiting is only honest while something can still free blocks.
+                    // A request larger than the whole pool, or one that waits with
+                    // nothing running and nothing scheduled, would wait forever.
+                    let nothing_can_free = self.running_sequences.is_empty()
+                        && decode_requests.is_empty()
+                        && prefill_requests.is_empty();
+                    if min_needed > pool_blocks || nothing_can_free {
+                        return Err(format!(
+                            "{KV_POOL_EXHAUSTED_PREFIX} admission of sequence {} needs {} new KV \
+                             blocks (plus {} watermark) but only {} are free ({} in the pool) and \
+                             nothing is running that could free more; the request stays queued",
+                            next_seq_id.to_u64(),
+                            needed_blocks,
+                            watermark_headroom,
+                            available,
+                            pool_blocks,
+                        ));
+                    }
                     break;
                 }
 
@@ -544,6 +580,7 @@ impl AienScheduler {
                         seq.prompt_tokens_prefilled = prompt_len;
                         decode_requests.push(next_seq_id.to_u64());
                         current_tokens += 1;
+                        reserved_blocks += needed_blocks;
                         self.running_sequences.push(next_seq_id);
                         continue;
                     }

@@ -650,51 +650,11 @@ impl NativeTransformerBackend {
         Self::forward_token_impl_paged(weights, backend, token_id, pos, seq_state, 0, None)
     }
 
-    /// How many fresh physical blocks `appends` consecutive
-    /// `AienKvManager::append_token_with_slot` calls on `seq_id` would
-    /// allocate, computed read-only from the table's tail block with the same
-    /// rule as aien-kv-cache `append_token_with_slot`:
-    /// - empty table: the first append allocates a block;
-    /// - shared tail block, partly filled: copy-on-write, one fresh block;
-    /// - shared tail block, full: one fresh block;
-    /// - private tail block: its free slots take appends first;
-    ///
-    /// then every further `block_size` appends need one more fresh block.
-    /// Returns 0 when the sequence has no block table (the append itself then
-    /// reports the missing sequence).
+    /// Fresh physical blocks `appends` consecutive appends on `seq_id` would
+    /// allocate. The rule lives in one place, `AienKvManager::
+    /// blocks_needed_for_appends`; this only forwards to it.
     fn kv_blocks_needed_for_appends(kv: &AienKvManager, seq_id: u64, appends: usize) -> usize {
-        if appends == 0 {
-            return 0;
-        }
-        let Some(table) = kv.get_block_table(seq_id) else {
-            return 0;
-        };
-        let block_size = kv.block_size();
-        let mut remaining = appends;
-        let mut needed = 0usize;
-        // Free slots left in the tail block once the first append has resolved.
-        let tail_free = match table.block_ids.last().and_then(|&id| kv.get_block(id)) {
-            None => {
-                // Empty table: the first append allocates a block holding 1 token.
-                needed += 1;
-                remaining -= 1;
-                block_size - 1
-            }
-            Some(blk) if blk.is_shared => {
-                // Copy-on-write of a partly filled tail, or a fresh block after a
-                // full one: either way one fresh private block takes this append.
-                needed += 1;
-                remaining -= 1;
-                if blk.num_tokens < block_size {
-                    block_size - (blk.num_tokens + 1)
-                } else {
-                    block_size - 1
-                }
-            }
-            Some(blk) => block_size.saturating_sub(blk.num_tokens),
-        };
-        remaining -= remaining.min(tail_free);
-        needed + remaining.div_ceil(block_size)
+        kv.blocks_needed_for_appends(seq_id, appends)
     }
 
     /// `Some((needed, available))` when `appends` appends to `seq_id` need more
