@@ -177,6 +177,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "aien-omega-gpu"
+version = "0.1.0"
+
+[[package]]
 name = "aien-platform"
 version = "0.1.0"
 dependencies = [

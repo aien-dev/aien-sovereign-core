@@ -33,6 +33,7 @@ members = [
     "crates/aien-inference-service",
     "crates/aien-inference-runtime",
     "crates/cortex-path-m1",
+    "crates/aien-omega-gpu",
     "crates/aien-campaign-verifier",
     "crates/aien-proof",
     "crates/crumbs",
