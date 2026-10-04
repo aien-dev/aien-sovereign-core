@@ -712,11 +712,17 @@ impl NativeTransformerBackend {
         kv_manager: Option<&SharedKvManager>,
     ) -> Result<Vec<f32>, String> {
         let hidden_dim = weights.config.hidden_dim();
-        let num_heads = weights.config.num_heads;
-        let num_kv_heads = weights.config.num_kv_heads;
-        let head_dim = weights.config.head_dim;
-        let q_dim = num_heads * head_dim;
-        let kv_dim = num_kv_heads * head_dim;
+        // Checked once per forward: zero heads, non-divisible heads or an overflowing width
+        // are refused here instead of becoming a wrong slice later.
+        let geom = weights
+            .config
+            .attention_geometry()
+            .map_err(|e| e.to_string())?;
+        let num_heads = geom.num_q_heads();
+        let num_kv_heads = geom.num_kv_heads();
+        let head_dim = geom.head_dim();
+        let q_dim = geom.q_dim();
+        let kv_dim = geom.kv_dim();
         let intermediate_dim = weights.config.intermediate_dim();
         let eps = weights.config.rms_norm_eps;
         let theta = weights.config.rope_theta;
@@ -959,11 +965,17 @@ impl NativeTransformerBackend {
         }
 
         let hidden_dim = weights.config.hidden_dim();
-        let num_heads = weights.config.num_heads;
-        let num_kv_heads = weights.config.num_kv_heads;
-        let head_dim = weights.config.head_dim;
-        let q_dim = num_heads * head_dim;
-        let kv_dim = num_kv_heads * head_dim;
+        // Checked once per forward: zero heads, non-divisible heads or an overflowing width
+        // are refused here instead of becoming a wrong slice later.
+        let geom = weights
+            .config
+            .attention_geometry()
+            .map_err(|e| e.to_string())?;
+        let num_heads = geom.num_q_heads();
+        let num_kv_heads = geom.num_kv_heads();
+        let head_dim = geom.head_dim();
+        let q_dim = geom.q_dim();
+        let kv_dim = geom.kv_dim();
         let intermediate_dim = weights.config.intermediate_dim();
         let eps = weights.config.rms_norm_eps;
         let theta = weights.config.rope_theta;
@@ -1276,11 +1288,18 @@ impl NativeTransformerBackend {
         }
 
         let hidden_dim = self.weights.config.hidden_dim();
-        let num_heads = self.weights.config.num_heads;
-        let num_kv_heads = self.weights.config.num_kv_heads;
-        let head_dim = self.weights.config.head_dim;
-        let q_dim = num_heads * head_dim;
-        let kv_dim = num_kv_heads * head_dim;
+        // Checked once per forward: zero heads, non-divisible heads or an overflowing width
+        // are refused here instead of becoming a wrong slice later.
+        let geom = self
+            .weights
+            .config
+            .attention_geometry()
+            .map_err(|e| e.to_string())?;
+        let num_heads = geom.num_q_heads();
+        let num_kv_heads = geom.num_kv_heads();
+        let head_dim = geom.head_dim();
+        let q_dim = geom.q_dim();
+        let kv_dim = geom.kv_dim();
         let intermediate_dim = self.weights.config.intermediate_dim();
         let eps = self.weights.config.rms_norm_eps;
         let theta = self.weights.config.rope_theta;

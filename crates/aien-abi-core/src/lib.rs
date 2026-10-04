@@ -59,6 +59,200 @@ pub struct ModelConfig {
     pub rope_theta: f32,
 }
 
+/// Why an [`AttentionGeometry`] was refused. Every variant names the offending numbers so a
+/// refusal in a log says what to fix.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum AttentionGeometryError {
+    ZeroQueryHeads,
+    ZeroKvHeads,
+    ZeroHeadDim,
+    /// `num_q_heads` is not a whole multiple of `num_kv_heads` (every kv head must serve the
+    /// same number of query heads).
+    QueryHeadsNotDivisible {
+        num_q_heads: usize,
+        num_kv_heads: usize,
+    },
+    /// `num_q_heads * head_dim` or `num_kv_heads * head_dim` does not fit in `usize`.
+    Overflow {
+        heads: usize,
+        head_dim: usize,
+    },
+    /// A KV pool (or any KV buffer) is laid out for a different kv-head count or head width
+    /// than this geometry.
+    KvPoolMismatch {
+        geometry_kv_heads: usize,
+        geometry_head_dim: usize,
+        pool_kv_heads: usize,
+        pool_head_dim: usize,
+    },
+}
+
+impl std::fmt::Display for AttentionGeometryError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ZeroQueryHeads => write!(f, "attention geometry: num_q_heads is 0"),
+            Self::ZeroKvHeads => write!(f, "attention geometry: num_kv_heads is 0"),
+            Self::ZeroHeadDim => write!(f, "attention geometry: head_dim is 0"),
+            Self::QueryHeadsNotDivisible {
+                num_q_heads,
+                num_kv_heads,
+            } => write!(
+                f,
+                "attention geometry: num_q_heads {num_q_heads} is not a multiple of num_kv_heads {num_kv_heads}"
+            ),
+            Self::Overflow { heads, head_dim } => write!(
+                f,
+                "attention geometry: {heads} heads x head_dim {head_dim} overflows usize"
+            ),
+            Self::KvPoolMismatch {
+                geometry_kv_heads,
+                geometry_head_dim,
+                pool_kv_heads,
+                pool_head_dim,
+            } => write!(
+                f,
+                "attention geometry: model has {geometry_kv_heads} kv heads x head_dim {geometry_head_dim} but the KV pool is laid out for {pool_kv_heads} kv heads x head_dim {pool_head_dim}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for AttentionGeometryError {}
+
+/// The checked head geometry of one attention layer: `num_q_heads` query heads sharing
+/// `num_kv_heads` key/value heads, every head `head_dim` wide.
+///
+/// Construction is the only way to get a value, so a geometry in hand always satisfies:
+/// no zero count, `num_q_heads` divisible by `num_kv_heads`, and both `q_dim` and `kv_dim`
+/// fit in `usize`. The contract deliberately does NOT require a power-of-two GQA ratio,
+/// `q_dim == hidden_dim` (Qwen3-Coder: q_dim 4096, hidden 2048) or `num_q_heads ==
+/// num_kv_heads`; a kernel with a narrower envelope refuses on its own and says so.
+///
+/// Flattened layouts the geometry describes:
+/// - q and attention output: `[num_q_heads][head_dim]` (`q_dim` values), head h at
+///   `h * head_dim`;
+/// - one token of K or V: `[num_kv_heads][head_dim]` (`kv_dim` values);
+/// - query head h reads kv head `h / gqa_ratio` ([`Self::kv_head_of`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(try_from = "AttentionGeometryRaw", into = "AttentionGeometryRaw")]
+pub struct AttentionGeometry {
+    num_q_heads: usize,
+    num_kv_heads: usize,
+    head_dim: usize,
+}
+
+/// Serde shape of [`AttentionGeometry`]; deserialising re-runs the checks.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct AttentionGeometryRaw {
+    pub num_q_heads: usize,
+    pub num_kv_heads: usize,
+    pub head_dim: usize,
+}
+
+impl TryFrom<AttentionGeometryRaw> for AttentionGeometry {
+    type Error = AttentionGeometryError;
+    fn try_from(r: AttentionGeometryRaw) -> Result<Self, Self::Error> {
+        Self::new(r.num_q_heads, r.num_kv_heads, r.head_dim)
+    }
+}
+
+impl From<AttentionGeometry> for AttentionGeometryRaw {
+    fn from(g: AttentionGeometry) -> Self {
+        Self {
+            num_q_heads: g.num_q_heads,
+            num_kv_heads: g.num_kv_heads,
+            head_dim: g.head_dim,
+        }
+    }
+}
+
+impl AttentionGeometry {
+    /// Checks and builds the geometry. See the type docs for the exact rules.
+    pub fn new(
+        num_q_heads: usize,
+        num_kv_heads: usize,
+        head_dim: usize,
+    ) -> Result<Self, AttentionGeometryError> {
+        if num_q_heads == 0 {
+            return Err(AttentionGeometryError::ZeroQueryHeads);
+        }
+        if num_kv_heads == 0 {
+            return Err(AttentionGeometryError::ZeroKvHeads);
+        }
+        if head_dim == 0 {
+            return Err(AttentionGeometryError::ZeroHeadDim);
+        }
+        if !num_q_heads.is_multiple_of(num_kv_heads) {
+            return Err(AttentionGeometryError::QueryHeadsNotDivisible {
+                num_q_heads,
+                num_kv_heads,
+            });
+        }
+        if num_q_heads.checked_mul(head_dim).is_none() {
+            return Err(AttentionGeometryError::Overflow {
+                heads: num_q_heads,
+                head_dim,
+            });
+        }
+        // num_kv_heads <= num_q_heads here, so kv_dim fits whenever q_dim does.
+        Ok(Self {
+            num_q_heads,
+            num_kv_heads,
+            head_dim,
+        })
+    }
+
+    pub fn num_q_heads(&self) -> usize {
+        self.num_q_heads
+    }
+
+    pub fn num_kv_heads(&self) -> usize {
+        self.num_kv_heads
+    }
+
+    pub fn head_dim(&self) -> usize {
+        self.head_dim
+    }
+
+    /// Width of one flattened query (and of one attention output): `num_q_heads * head_dim`.
+    pub fn q_dim(&self) -> usize {
+        self.num_q_heads * self.head_dim
+    }
+
+    /// Width of one token's K (or V) row: `num_kv_heads * head_dim`.
+    pub fn kv_dim(&self) -> usize {
+        self.num_kv_heads * self.head_dim
+    }
+
+    /// Query heads per kv head (1 for multi-head attention).
+    pub fn gqa_ratio(&self) -> usize {
+        self.num_q_heads / self.num_kv_heads
+    }
+
+    /// The kv head query head `q_head` reads. `None` when `q_head >= num_q_heads`.
+    pub fn kv_head_of(&self, q_head: usize) -> Option<usize> {
+        (q_head < self.num_q_heads).then(|| q_head / self.gqa_ratio())
+    }
+
+    /// Refuses a KV pool or buffer laid out for a different kv-head count or head width.
+    /// Call it before any native (chip) code reads the pool with this geometry.
+    pub fn check_kv_pool(
+        &self,
+        pool_kv_heads: usize,
+        pool_head_dim: usize,
+    ) -> Result<(), AttentionGeometryError> {
+        if pool_kv_heads != self.num_kv_heads || pool_head_dim != self.head_dim {
+            return Err(AttentionGeometryError::KvPoolMismatch {
+                geometry_kv_heads: self.num_kv_heads,
+                geometry_head_dim: self.head_dim,
+                pool_kv_heads,
+                pool_head_dim,
+            });
+        }
+        Ok(())
+    }
+}
+
 impl ModelConfig {
     pub fn tinyllama_1_1b() -> Self {
         Self {
@@ -75,6 +269,12 @@ impl ModelConfig {
             rms_norm_eps: 1e-5,
             rope_theta: 10000.0,
         }
+    }
+
+    /// The checked head geometry of this model's attention layers
+    /// (`num_heads` query heads, `num_kv_heads` kv heads, `head_dim`).
+    pub fn attention_geometry(&self) -> Result<AttentionGeometry, AttentionGeometryError> {
+        AttentionGeometry::new(self.num_heads, self.num_kv_heads, self.head_dim)
     }
 
     pub fn hidden_dim(&self) -> usize {

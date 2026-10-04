@@ -4,6 +4,53 @@
 use crate::tensor::{
     apply_rope as tensor_rope, matmul_vec as tensor_matmul, rmsnorm as tensor_rmsnorm,
 };
+use aien_abi_core::AttentionGeometry;
+
+/// The trait's attention methods return `()`, so a wrong head layout cannot be reported as an
+/// error value; it must never turn into numbers either. These helpers refuse loudly (panic with
+/// the exact geometry) before any element is read. Callers that can report errors check the
+/// geometry up front (`ModelConfig::attention_geometry`), so a panic here means a caller bypassed
+/// that check.
+pub(crate) fn checked_geometry(
+    num_q_heads: usize,
+    num_kv_heads: usize,
+    head_dim: usize,
+    op: &str,
+) -> AttentionGeometry {
+    match AttentionGeometry::new(num_q_heads, num_kv_heads, head_dim) {
+        Ok(g) => g,
+        Err(e) => panic!("{op} refused: {e}"),
+    }
+}
+
+/// q and out must be exactly one flattened `[num_q_heads][head_dim]` row each.
+pub(crate) fn check_q_out(geom: &AttentionGeometry, q_len: usize, out_len: usize, op: &str) {
+    let want = geom.q_dim();
+    assert!(
+        q_len == want,
+        "{op} refused: q has {q_len} values, geometry {}x{} needs {want}",
+        geom.num_q_heads(),
+        geom.head_dim()
+    );
+    assert!(
+        out_len == want,
+        "{op} refused: out has {out_len} values, geometry {}x{} needs {want}",
+        geom.num_q_heads(),
+        geom.head_dim()
+    );
+}
+
+/// The pool must be laid out for this geometry's kv heads and head width.
+pub(crate) fn check_pool(
+    geom: &AttentionGeometry,
+    pool: &aien_kv_cache::UnifiedKvTensorPool,
+    op: &str,
+) {
+    let c = pool.config();
+    if let Err(e) = geom.check_kv_pool(c.num_kv_heads, c.head_dim) {
+        panic!("{op} refused: {e}");
+    }
+}
 
 /// Reads one KV head from the pool using the pool's dtype. Bf16 bytes are decoded.
 /// A short or unknown dtype returns zeros instead of reading past the allocation.
@@ -176,12 +223,15 @@ pub trait TensorBackend: Send + Sync {
         num_kv_heads: usize,
         head_dim: usize,
     ) {
+        let geom = checked_geometry(num_q_heads, num_kv_heads, head_dim, "paged_attention");
+        check_q_out(&geom, q.len(), out.len(), "paged_attention");
+        check_pool(&geom, pool, "paged_attention");
         if context_len == 0 || block_ids.is_empty() {
             out.fill(0.0);
             return;
         }
 
-        let gqa_ratio = num_q_heads / num_kv_heads;
+        let gqa_ratio = geom.gqa_ratio();
         let inv_sqrt_d = 1.0 / (head_dim as f64).sqrt();
         let block_size = pool.config().block_size;
 
@@ -247,7 +297,16 @@ pub trait TensorBackend: Send + Sync {
         num_kv_heads: usize,
         head_dim: usize,
     ) {
-        let q_stride = num_q_heads * head_dim;
+        let geom = checked_geometry(num_q_heads, num_kv_heads, head_dim, "paged_attention_batch");
+        check_pool(&geom, pool, "paged_attention_batch");
+        let q_stride = geom.q_dim();
+        assert!(
+            q.len() == num_seqs * q_stride && out.len() == num_seqs * q_stride,
+            "paged_attention_batch refused: q has {} and out has {} values, {num_seqs} sequences x q_dim {q_stride} need {}",
+            q.len(),
+            out.len(),
+            num_seqs * q_stride
+        );
         for s in 0..num_seqs {
             let q_s = &q[s * q_stride..(s + 1) * q_stride];
             let out_s = &mut out[s * q_stride..(s + 1) * q_stride];
@@ -370,12 +429,22 @@ impl TensorBackend for ReferenceCpuBackend {
         num_kv_heads: usize,
         head_dim: usize,
     ) {
+        let geom = checked_geometry(num_q_heads, num_kv_heads, head_dim, "gqa_attention");
+        check_q_out(&geom, q.len(), out.len(), "gqa_attention");
+        let need = seq_len * geom.kv_dim();
+        assert!(
+            k_cache.len() >= need && v_cache.len() >= need,
+            "gqa_attention refused: k/v caches hold {}/{} values, {seq_len} tokens x kv_dim {} need {need}",
+            k_cache.len(),
+            v_cache.len(),
+            geom.kv_dim()
+        );
         if seq_len == 0 {
             out.fill(0.0);
             return;
         }
 
-        let gqa_ratio = num_q_heads / num_kv_heads;
+        let gqa_ratio = geom.gqa_ratio();
         let inv_sqrt_d = 1.0 / (head_dim as f64).sqrt();
         let mut scores = vec![0.0f64; seq_len];
 
