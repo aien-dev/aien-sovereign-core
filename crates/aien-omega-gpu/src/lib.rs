@@ -46,7 +46,7 @@ impl fmt::Display for OmegaGpuError {
                 expected,
                 got,
             } => write!(f, "{what}: expected {expected} elements, got {got}"),
-            Self::Rc { rc, name } => write!(f, "omega_gpu_matmul rc={rc} ({name})"),
+            Self::Rc { rc, name } => write!(f, "omega_gpu rc={rc} ({name})"),
         }
     }
 }
@@ -344,4 +344,155 @@ pub fn is_blocked() -> bool {
     return unsafe { ffi::omega_gpu_matmul_is_blocked() } != 0;
     #[cfg(not(has_omega_gpu))]
     false
+}
+
+// ---- native elementwise ops (omega FB-1 cut 4) ----
+
+pub use ffi::OmegaGpuEwInfo;
+
+/// Name of an elementwise return code (omega's table when native).
+pub fn ew_rc_name(rc: i32) -> String {
+    #[cfg(has_omega_gpu)]
+    {
+        // SAFETY: returns a pointer to a static NUL-terminated string.
+        let p = unsafe { ffi::omega_gpu_elementwise_rc_name(rc) };
+        if !p.is_null() {
+            // SAFETY: non-null, static, NUL-terminated.
+            return unsafe { std::ffi::CStr::from_ptr(p) }
+                .to_string_lossy()
+                .into_owned();
+        }
+    }
+    match rc {
+        ffi::OMEGA_GPU_EW_OK => "OK",
+        ffi::OMEGA_GPU_EW_BAD_ARGS => "BAD_ARGS",
+        ffi::OMEGA_GPU_EW_TOO_LARGE => "TOO_LARGE",
+        ffi::OMEGA_GPU_EW_CODEGEN_FAIL => "CODEGEN_FAIL",
+        ffi::OMEGA_GPU_EW_CHIP_FAIL => "CHIP_FAIL",
+        ffi::OMEGA_GPU_EW_UNWRITTEN => "UNWRITTEN",
+        _ => "UNKNOWN",
+    }
+    .to_string()
+}
+
+#[cfg(has_omega_gpu)]
+fn ew_finish(rc: i32, info: OmegaGpuEwInfo) -> Result<OmegaGpuEwInfo, OmegaGpuError> {
+    if rc == ffi::OMEGA_GPU_EW_OK {
+        Ok(info)
+    } else {
+        Err(OmegaGpuError::Rc {
+            rc,
+            name: ew_rc_name(rc),
+        })
+    }
+}
+
+fn ew_dim(v: usize) -> Result<u32, OmegaGpuError> {
+    u32::try_from(v).map_err(|_| OmegaGpuError::Rc {
+        rc: ffi::OMEGA_GPU_EW_TOO_LARGE,
+        name: ew_rc_name(ffi::OMEGA_GPU_EW_TOO_LARGE),
+    })
+}
+
+/// `out[r*dim+i] = x[r*dim+i] * scale_r * weight[i]`, `scale_r = 1/sqrt(mean(x^2)+eps)`.
+/// omega requires `dim % 128 == 0` and `dim <= 16384`; otherwise `Rc { rc: -1 | -2 }`.
+pub fn rmsnorm_f32(
+    rows: usize,
+    dim: usize,
+    x: &[f32],
+    weight: &[f32],
+    eps: f32,
+    out: &mut [f32],
+) -> Result<OmegaGpuEwInfo, OmegaGpuError> {
+    check_len("x", rows * dim, x.len())?;
+    check_len("weight", dim, weight.len())?;
+    check_len("out", rows * dim, out.len())?;
+    let (ru, du) = (ew_dim(rows)?, ew_dim(dim)?);
+    #[cfg(has_omega_gpu)]
+    {
+        let mut info = OmegaGpuEwInfo::zeroed();
+        // SAFETY: lengths checked above; pointers valid for the call; info is an out-pointer.
+        let rc = unsafe {
+            ffi::omega_gpu_rmsnorm_f32(
+                ru,
+                du,
+                x.as_ptr(),
+                weight.as_ptr(),
+                eps,
+                out.as_mut_ptr(),
+                &mut info,
+            )
+        };
+        ew_finish(rc, info)
+    }
+    #[cfg(not(has_omega_gpu))]
+    {
+        let _ = (ru, du, eps);
+        Err(OmegaGpuError::Unavailable)
+    }
+}
+
+/// Rotate `heads` heads of `head_dim` values (rotate_half pairing `i, i+head_dim/2`) with a
+/// host-provided table of `head_dim/2` cos and sin values (same for every head).
+/// `out` may not alias `v` in safe Rust; omega itself copies through its own buffers.
+pub fn rope_f32(
+    heads: usize,
+    head_dim: usize,
+    v: &[f32],
+    cos_half: &[f32],
+    sin_half: &[f32],
+    out: &mut [f32],
+) -> Result<OmegaGpuEwInfo, OmegaGpuError> {
+    check_len("v", heads * head_dim, v.len())?;
+    check_len("cos_half", head_dim / 2, cos_half.len())?;
+    check_len("sin_half", head_dim / 2, sin_half.len())?;
+    check_len("out", heads * head_dim, out.len())?;
+    let (hu, du) = (ew_dim(heads)?, ew_dim(head_dim)?);
+    #[cfg(has_omega_gpu)]
+    {
+        let mut info = OmegaGpuEwInfo::zeroed();
+        // SAFETY: lengths checked above; pointers valid for the call.
+        let rc = unsafe {
+            ffi::omega_gpu_rope_f32(
+                hu,
+                du,
+                v.as_ptr(),
+                cos_half.as_ptr(),
+                sin_half.as_ptr(),
+                out.as_mut_ptr(),
+                &mut info,
+            )
+        };
+        ew_finish(rc, info)
+    }
+    #[cfg(not(has_omega_gpu))]
+    {
+        let _ = (hu, du);
+        Err(OmegaGpuError::Unavailable)
+    }
+}
+
+/// `out[i] = silu(gate[i]) * up[i]` for `i < n` (`n = gate.len()`, all three equal length).
+pub fn swiglu_f32(
+    gate: &[f32],
+    up: &[f32],
+    out: &mut [f32],
+) -> Result<OmegaGpuEwInfo, OmegaGpuError> {
+    check_len("up", gate.len(), up.len())?;
+    check_len("out", gate.len(), out.len())?;
+    let nu = ew_dim(gate.len())?;
+    #[cfg(has_omega_gpu)]
+    {
+        let mut info = OmegaGpuEwInfo::zeroed();
+        // SAFETY: lengths checked equal; pointers valid for the call.
+        let rc = unsafe {
+            ffi::omega_gpu_swiglu_f32(nu, gate.as_ptr(), up.as_ptr(), out.as_mut_ptr(), &mut info)
+        };
+        ew_finish(rc, info)
+    }
+    #[cfg(not(has_omega_gpu))]
+    {
+        let _ = nu;
+        Err(OmegaGpuError::Unavailable)
+    }
 }

@@ -45,7 +45,7 @@ fn worst_ratio(
 fn stub_backend_reports_unavailable() {
     let b = OmegaGb10Backend::new();
     assert_eq!(b.is_available(), aien_omega_gpu::is_native());
-    assert_eq!(b.native_ops().native_ops().len(), 3);
+    assert_eq!(b.native_ops().native_ops().len(), 6);
 }
 
 #[test]
@@ -97,4 +97,81 @@ fn chip_parity_on_tinyllama_shapes() {
     println!("PARITY overall worst max_err/scale = {overall:.3e}");
     println!("PARITY resident weights = {}", omega.resident_count());
     println!("PARITY {}", omega.op_report().line());
+}
+
+/// Worst of |got - want| / (1e-6 + 1e-5 * |want|) over all elements; <= 1 means inside the
+/// omega cut-4 elementwise tolerance (1e-5 relative + 1e-6 absolute).
+fn worst_tol_ratio(got: &[f32], want: &[f32]) -> f64 {
+    assert_eq!(got.len(), want.len());
+    got.iter()
+        .zip(want)
+        .map(|(g, w)| (*g as f64 - *w as f64).abs() / (1e-6 + 1e-5 * (*w as f64).abs()))
+        .fold(0.0, f64::max)
+}
+
+/// FB-1 cut 3c: rmsnorm, apply_rope and swiglu on the chip at TinyLlama shapes
+/// (hidden 2048, 32 q heads, 4 kv heads, head_dim 64, intermediate 5632, eps 1e-5,
+/// theta 10000) against ReferenceCpuBackend. Rope must be bit-exact (omega emits
+/// FMUL/FMUL/FADD, no fused multiply-add); rmsnorm and swiglu within the tolerance
+/// stated in omega docs/numeric/FB1_CUT4_ELEMENTWISE.md (1e-5 relative + 1e-6 absolute).
+#[test]
+#[ignore = "chip test: needs a native build and the GB10; run through the heavy queue"]
+fn chip_elementwise_parity_on_tinyllama_shapes() {
+    let omega = OmegaGb10Backend::new();
+    assert!(omega.is_available(), "native build required");
+    let reference = ReferenceCpuBackend::new();
+    let mut seed = 777u32;
+
+    // rmsnorm, dim 2048 (hidden), 20 different rows of data incl. a large-magnitude one.
+    let dim = 2048usize;
+    let w: Vec<f32> = (0..dim).map(|_| lcg(&mut seed) * 4.0 + 1.0).collect();
+    let mut rms_worst = 0.0f64;
+    for trial in 0..20 {
+        let scale = if trial == 19 { 50.0 } else { 2.0 };
+        let x: Vec<f32> = (0..dim).map(|_| lcg(&mut seed) * scale).collect();
+        let (mut got, mut want) = (vec![0.0f32; dim], vec![0.0f32; dim]);
+        omega.rmsnorm(&mut got, &x, &w, 1e-5);
+        reference.rmsnorm(&mut want, &x, &w, 1e-5);
+        rms_worst = rms_worst.max(worst_tol_ratio(&got, &want));
+    }
+    println!("PARITY rmsnorm 2048 worst err/tolerance = {rms_worst:.3e} (must be <= 1)");
+    assert!(rms_worst <= 1.0, "rmsnorm outside tolerance");
+
+    // rope, 32 q heads + 4 kv heads of 64, several positions.
+    let (hd, nq, nkv, theta) = (64usize, 32usize, 4usize, 10000.0f32);
+    let mut rope_mismatch = 0usize;
+    for pos in [0usize, 1, 2, 37, 511, 1500, 2047] {
+        let q0: Vec<f32> = (0..nq * hd).map(|_| lcg(&mut seed) * 3.0).collect();
+        let k0: Vec<f32> = (0..nkv * hd).map(|_| lcg(&mut seed) * 3.0).collect();
+        let (mut qg, mut kg) = (q0.clone(), k0.clone());
+        let (mut qw, mut kw) = (q0.clone(), k0.clone());
+        omega.apply_rope(&mut qg, &mut kg, pos, hd, nq, nkv, theta);
+        reference.apply_rope(&mut qw, &mut kw, pos, hd, nq, nkv, theta);
+        rope_mismatch += qg
+            .iter()
+            .zip(&qw)
+            .chain(kg.iter().zip(&kw))
+            .filter(|(a, b)| a.to_bits() != b.to_bits())
+            .count();
+    }
+    println!("PARITY rope 32+4 heads x 64, 7 positions: bit mismatches = {rope_mismatch}");
+    assert_eq!(rope_mismatch, 0, "rope must be bit-exact");
+
+    // swiglu, n = 5632 (intermediate), gate in a wide range.
+    let n = 5632usize;
+    let mut sw_worst = 0.0f64;
+    for _ in 0..10 {
+        let gate: Vec<f32> = (0..n).map(|_| lcg(&mut seed) * 16.0).collect();
+        let up: Vec<f32> = (0..n).map(|_| lcg(&mut seed) * 4.0).collect();
+        let (mut got, mut want) = (vec![0.0f32; n], vec![0.0f32; n]);
+        omega.swiglu(&mut got, &gate, &up);
+        reference.swiglu(&mut want, &gate, &up);
+        sw_worst = sw_worst.max(worst_tol_ratio(&got, &want));
+    }
+    println!("PARITY swiglu 5632 worst err/tolerance = {sw_worst:.3e} (must be <= 1)");
+    assert!(sw_worst <= 1.0, "swiglu outside tolerance");
+
+    assert_eq!(omega.fallback_count(), 0, "{}", omega.last_error());
+    assert_eq!(omega.chip_errors(), 0, "{}", omega.last_error());
+    println!("PARITY elementwise {}", omega.op_report().line());
 }
