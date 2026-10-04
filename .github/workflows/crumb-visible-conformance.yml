@@ -36,11 +36,6 @@ jobs:
           ref: b50c00d737fa5c57ea7280e2aa4b0354ff166cf5
           path: crb1-protocols
 
-      - name: Setup Sibling Dependencies
-        run: |
-          mkdir -p ../aien-protocols
-          cp -r crb1-protocols/* ../aien-protocols/
-
       - name: Install Stable Rust Toolchain
         uses: dtolnay/rust-toolchain@stable
 
