@@ -1,8 +1,14 @@
 #![allow(clippy::too_many_arguments)]
+pub mod dual_observer;
 pub mod sequence;
 
 pub use sequence::*;
 
+use crate::dual_observer::{
+    AdmissionCandidate, AdmissionVerdict, AdmitPreemptAlternatives, AdmitPreemptChoice,
+    AdmitPreemptRecord, AdmitPreemptTrace, BatchLimits, BatchOutcome, DecisionObserver, KvReading,
+    LoopStop, PreemptionVictim, RunningItem, RunningVerdict, SERVE_ADMIT_PREEMPT_SITE,
+};
 use aien_abi_core::{
     AienInferenceBackend, DecodeOutput, FinishReason, ScheduledBatch, SequenceRequest, StepMetrics,
 };
@@ -75,6 +81,9 @@ pub struct AienScheduler {
     running_sequences: Vec<SequenceId>,
     step_id: u64,
     metrics: SchedulerMetrics,
+    /// DUAL `serve.admit_preempt` read-only tap. `None` (the default) skips
+    /// every tracing branch in `build_scheduled_batch`.
+    observer: Option<Arc<dyn DecisionObserver>>,
 }
 
 impl AienScheduler {
@@ -89,7 +98,19 @@ impl AienScheduler {
             running_sequences: Vec::new(),
             step_id: 0,
             metrics: SchedulerMetrics::default(),
+            observer: None,
         }
+    }
+
+    /// Installs (or with `None` removes) the DUAL `serve.admit_preempt`
+    /// observer. The observer is shown each decision after it is final and
+    /// cannot change it (see `dual_observer`).
+    pub fn set_decision_observer(&mut self, observer: Option<Arc<dyn DecisionObserver>>) {
+        self.observer = observer;
+    }
+
+    pub fn decision_observer_installed(&self) -> bool {
+        self.observer.is_some()
     }
 
     pub fn config(&self) -> &SchedulerConfig {
@@ -337,10 +358,91 @@ impl AienScheduler {
         self.running_sequences.retain(|&id| !arena.is_stale(id));
     }
 
+    fn kv_reading(&self) -> KvReading {
+        let kv = self.kv_manager.read();
+        let total_blocks = kv.total_block_count();
+        let free_blocks = kv.available_blocks();
+        KvReading {
+            total_blocks,
+            free_blocks,
+            allocated_blocks: total_blocks - free_blocks,
+            active_tables: kv.active_sequence_count(),
+        }
+    }
+
     /// Builds the next scheduled batch enforcing chunked prefill budgets and watermark preemption.
+    ///
+    /// DUAL `serve.admit_preempt`: when an observer is installed, the decision
+    /// is traced while it is made and one `AdmitPreemptRecord` is handed to the
+    /// observer after it is final. Without an observer no trace exists and the
+    /// decision code path is the same as before the tap.
     pub fn build_scheduled_batch(&mut self) -> Result<Option<ScheduledBatch>, String> {
+        let mut trace = self.observer.is_some().then(AdmitPreemptTrace::default);
+        let result = self.build_scheduled_batch_traced(&mut trace);
+        if let (Some(observer), Some(trace)) = (self.observer.clone(), trace) {
+            let outcome = match &result {
+                Ok(Some(batch)) => BatchOutcome::Batch {
+                    prefill_requests: batch.prefill_requests.len(),
+                    decode_requests: batch.decode_requests.len(),
+                    batch_tokens: batch
+                        .prefill_requests
+                        .iter()
+                        .map(|r| r.prompt_tokens.len())
+                        .sum::<usize>()
+                        + batch.decode_requests.len(),
+                },
+                Ok(None) => BatchOutcome::Empty,
+                Err(e) => BatchOutcome::Error(e.clone()),
+            };
+            let record = AdmitPreemptRecord {
+                site: SERVE_ADMIT_PREEMPT_SITE,
+                step_id: self.step_id,
+                limits: BatchLimits {
+                    max_batch_size: self.config.max_batch_size,
+                    max_batch_tokens: self.config.max_batch_tokens,
+                    max_prefill_tokens: self.config.max_prefill_tokens,
+                    prefill_chunk_size: self.config.prefill_chunk_size,
+                    chunk_prefill: self.config.chunk_prefill,
+                    watermark_blocks: self.config.watermark_blocks,
+                },
+                arena_active_at_entry: trace.arena_active_at_entry,
+                kv_at_entry: trace.kv_at_entry,
+                below_watermark_at_entry: trace.below_watermark_at_entry,
+                kv_at_exit: self.kv_reading(),
+                running_count_at_exit: self.running_sequences.len(),
+                waiting_count_at_exit: self.waiting_queue.len(),
+                preempted_count_at_exit: self.preempted_queue.len(),
+                alternatives: trace.alternatives,
+                choice: AdmitPreemptChoice {
+                    preempted: trace.preempted,
+                    decode_scheduled: trace.decode_scheduled,
+                    prefill_scheduled: trace.prefill_scheduled,
+                    reprefill_requeued: trace.reprefill_requeued,
+                    outcome,
+                },
+            };
+            observer.observe_admit_preempt(&record);
+        }
+        result
+    }
+
+    fn build_scheduled_batch_traced(
+        &mut self,
+        trace: &mut Option<AdmitPreemptTrace>,
+    ) -> Result<Option<ScheduledBatch>, String> {
         self.step_id += 1;
         self.purge_stale_work();
+
+        if let Some(t) = trace.as_mut() {
+            t.arena_active_at_entry = self.arena.active_count();
+            t.kv_at_entry = self.kv_reading();
+            t.alternatives = AdmitPreemptAlternatives {
+                running_at_entry: self.running_sequences.clone(),
+                waiting_at_entry: self.waiting_queue.iter().copied().collect(),
+                preempted_at_entry: self.preempted_queue.iter().copied().collect(),
+                ..AdmitPreemptAlternatives::default()
+            };
+        }
 
         let mut prefill_requests = Vec::new();
         let mut decode_requests = Vec::new();
@@ -357,6 +459,10 @@ impl AienScheduler {
         {
             let kv = self.kv_manager.read();
             let available = kv.available_blocks();
+            if let Some(t) = trace.as_mut() {
+                t.below_watermark_at_entry =
+                    available < self.config.watermark_blocks && !self.running_sequences.is_empty();
+            }
             if available < self.config.watermark_blocks && !self.running_sequences.is_empty() {
                 let mut candidates: Vec<(SequenceId, Priority)> = self
                     .running_sequences
@@ -364,12 +470,24 @@ impl AienScheduler {
                     .filter_map(|&id| self.arena.get(id).map(|rec| (id, rec.priority)))
                     .collect();
                 candidates.sort_by_key(|c| c.1 as u8);
+                if let Some(t) = trace.as_mut() {
+                    t.alternatives.preemption_victims_considered = candidates
+                        .iter()
+                        .map(|&(seq, p)| PreemptionVictim {
+                            seq,
+                            priority: p as u8,
+                        })
+                        .collect();
+                }
 
                 if let Some((preempt_id, _)) = candidates.first() {
                     let preempt_id = *preempt_id;
                     drop(kv);
                     if let Some(pos) = self.running_sequences.iter().position(|&x| x == preempt_id)
                     {
+                        if let Some(t) = trace.as_mut() {
+                            t.preempted.push(preempt_id);
+                        }
                         self.running_sequences.remove(pos);
                         let _ = self.kv_manager.write().free_sequence(preempt_id.to_u64());
                         if let Some(rec) = self.arena.get_mut(preempt_id) {
@@ -392,15 +510,29 @@ impl AienScheduler {
 
         for seq_id in running_ids {
             if decode_requests.len() + prefill_requests.len() >= self.config.max_batch_size {
+                if let Some(t) = trace.as_mut() {
+                    t.alternatives.running_loop_stop = Some(LoopStop::BatchSizeReached);
+                }
                 break;
             }
             if current_tokens >= self.config.max_batch_tokens {
+                if let Some(t) = trace.as_mut() {
+                    t.alternatives.running_loop_stop = Some(LoopStop::BatchTokensReached);
+                }
                 break;
             }
 
             let seq = match self.arena.get_mut(seq_id) {
                 Some(s) => s,
-                None => continue,
+                None => {
+                    if let Some(t) = trace.as_mut() {
+                        t.alternatives.running_examined.push(RunningItem {
+                            seq: seq_id,
+                            verdict: RunningVerdict::NoRecord,
+                        });
+                    }
+                    continue;
+                }
             };
 
             if seq.is_prefilled {
@@ -410,11 +542,13 @@ impl AienScheduler {
                     .read()
                     .get_block_table(seq_id.to_u64())
                     .map(|t| (t.block_ids.clone(), t.is_prefill_ready()));
+                let mut verdict = RunningVerdict::DecodeNoTable;
                 if let Some((blocks, ready)) = table_state {
                     if prefill_gate_allows_decode(ready) {
                         block_tables.insert(seq_id.to_u64(), blocks);
                         decode_requests.push(seq_id.to_u64());
                         current_tokens += 1;
+                        verdict = RunningVerdict::Decode;
                     } else {
                         // The table exists but its K/V was never computed:
                         // send the sequence back for a real prefill, never decode.
@@ -422,7 +556,17 @@ impl AienScheduler {
                         seq.prompt_tokens_prefilled = 0;
                         seq.phase = SequencePhase::Waiting;
                         needs_prefill.push(seq_id);
+                        verdict = RunningVerdict::GateRefusedReprefill;
                     }
+                }
+                if let Some(t) = trace.as_mut() {
+                    if verdict == RunningVerdict::Decode {
+                        t.decode_scheduled.push(seq_id);
+                    }
+                    t.alternatives.running_examined.push(RunningItem {
+                        seq: seq_id,
+                        verdict,
+                    });
                 }
             } else {
                 // Continuing chunked prefill
@@ -452,12 +596,29 @@ impl AienScheduler {
                     current_tokens += chunk_size;
                     prefill_budget = prefill_budget.saturating_sub(chunk_size);
                 }
+                if let Some(t) = trace.as_mut() {
+                    let verdict = if chunk_size > 0 {
+                        t.prefill_scheduled.push((seq_id, chunk_size));
+                        RunningVerdict::ContinuePrefill {
+                            chunk_len: chunk_size,
+                        }
+                    } else {
+                        RunningVerdict::ContinuePrefillNoChunk
+                    };
+                    t.alternatives.running_examined.push(RunningItem {
+                        seq: seq_id,
+                        verdict,
+                    });
+                }
             }
         }
 
         // Sequences refused decode by the prefill gate: drop the uncomputed
         // (possibly shared) table and requeue at the front for a fresh prefill.
         for seq_id in needs_prefill {
+            if let Some(t) = trace.as_mut() {
+                t.reprefill_requeued.push(seq_id);
+            }
             self.running_sequences.retain(|&x| x != seq_id);
             let _ = self.kv_manager.write().free_sequence(seq_id.to_u64());
             self.waiting_queue.push_front(seq_id);
@@ -478,6 +639,15 @@ impl AienScheduler {
                 };
 
                 if self.arena.is_stale(next_seq_id) {
+                    if let Some(t) = trace.as_mut() {
+                        t.alternatives
+                            .admission_examined
+                            .push(AdmissionCandidate::before_kv(
+                                next_seq_id,
+                                is_preempted,
+                                AdmissionVerdict::StaleDropped,
+                            ));
+                    }
                     if is_preempted {
                         self.preempted_queue.pop_front();
                     } else {
@@ -489,6 +659,15 @@ impl AienScheduler {
                 let prompt_len = match self.arena.get(next_seq_id) {
                     Some(s) => s.prompt.len(),
                     None => {
+                        if let Some(t) = trace.as_mut() {
+                            t.alternatives
+                                .admission_examined
+                                .push(AdmissionCandidate::before_kv(
+                                    next_seq_id,
+                                    is_preempted,
+                                    AdmissionVerdict::MissingRecord,
+                                ));
+                        }
                         if is_preempted {
                             self.preempted_queue.pop_front();
                         } else {
@@ -522,6 +701,28 @@ impl AienScheduler {
                 };
                 let min_needed = needed_blocks + watermark_headroom;
 
+                // DUAL tap: one AdmissionCandidate per queue head examined, with
+                // the exact numbers compared above. Expands to nothing when no
+                // observer is installed (`trace` is None).
+                macro_rules! trace_admission {
+                    ($verdict:expr) => {
+                        if let Some(t) = trace.as_mut() {
+                            t.alternatives.admission_examined.push(AdmissionCandidate {
+                                seq: next_seq_id,
+                                from_preempted_queue: is_preempted,
+                                prompt_len,
+                                needed_blocks,
+                                free_blocks,
+                                reserved_blocks,
+                                watermark_headroom,
+                                min_needed,
+                                pool_blocks,
+                                verdict: $verdict,
+                            });
+                        }
+                    };
+                }
+
                 if available < min_needed {
                     // Waiting is only honest while something can still free blocks.
                     // A request larger than the whole pool, or one that waits with
@@ -530,6 +731,7 @@ impl AienScheduler {
                         && decode_requests.is_empty()
                         && prefill_requests.is_empty();
                     if min_needed > pool_blocks || nothing_can_free {
+                        trace_admission!(AdmissionVerdict::RefusedPoolExhausted);
                         return Err(format!(
                             "{KV_POOL_EXHAUSTED_PREFIX} admission of sequence {} needs {} new KV \
                              blocks (plus {} watermark) but only {} are free ({} in the pool) and \
@@ -541,6 +743,7 @@ impl AienScheduler {
                             pool_blocks,
                         ));
                     }
+                    trace_admission!(AdmissionVerdict::WaitForBlocks);
                     break;
                 }
 
@@ -580,8 +783,20 @@ impl AienScheduler {
                         seq.prompt_tokens_prefilled = prompt_len;
                         decode_requests.push(next_seq_id.to_u64());
                         current_tokens += 1;
+                        trace_admission!(AdmissionVerdict::AdmittedDecode);
+                        if let Some(t) = trace.as_mut() {
+                            t.decode_scheduled.push(next_seq_id);
+                        }
                         reserved_blocks += needed_blocks;
                         self.running_sequences.push(next_seq_id);
+                        // MUTANT ONLY (feature `dual_observer_mutant_changes_decision`):
+                        // an observer's presence stops admission after one grant.
+                        // The parity tests must FAIL with this feature on.
+                        if cfg!(feature = "dual_observer_mutant_changes_decision")
+                            && trace.is_some()
+                        {
+                            break;
+                        }
                         continue;
                     }
                     Some(_) => {
@@ -593,6 +808,7 @@ impl AienScheduler {
                 }
 
                 if chunk_size == 0 {
+                    trace_admission!(AdmissionVerdict::ChunkBudgetExhausted);
                     if is_preempted {
                         self.preempted_queue.push_front(next_seq_id);
                     } else {
@@ -611,6 +827,7 @@ impl AienScheduler {
                     .mark_prefill_pending(next_seq_id.to_u64())
                     .map_err(|e| e.to_string())?;
 
+                let new_blocks = assigned_blocks.len();
                 block_tables.insert(next_seq_id.to_u64(), assigned_blocks);
 
                 let chunk_tokens = seq.prompt[0..chunk_size].to_vec();
@@ -628,6 +845,18 @@ impl AienScheduler {
 
                 seq.phase = SequencePhase::Prefill;
                 self.running_sequences.push(next_seq_id);
+                trace_admission!(AdmissionVerdict::AdmittedPrefill {
+                    chunk_len: chunk_size,
+                    new_blocks,
+                });
+                if let Some(t) = trace.as_mut() {
+                    t.prefill_scheduled.push((next_seq_id, chunk_size));
+                }
+                // MUTANT ONLY (feature `dual_observer_mutant_changes_decision`),
+                // see the decode admission above.
+                if cfg!(feature = "dual_observer_mutant_changes_decision") && trace.is_some() {
+                    break;
+                }
             }
         }
 

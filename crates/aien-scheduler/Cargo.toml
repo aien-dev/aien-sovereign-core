@@ -19,6 +19,10 @@ serde_json = "1.0"
 reqwest = { version = "0.12", features = ["json", "stream"] }
 futures-util = "0.3"
 
+[dev-dependencies]
+async-trait = "0.1"
+sha2 = "0.10"
+
 [[bin]]
 name = "bench_inference_stack"
 path = "src/bin/bench_inference_stack.rs"
@@ -33,3 +37,8 @@ path = "src/bin/stress_aien_live.rs"
 # are decoded. The prefill-gate tests must FAIL with this feature on; see
 # scripts/prefill-gate/mutant.sh.
 prefill_mutant_no_check = []
+# MUTANT ONLY (DUAL serve.admit_preempt tap). Never enable in a real build.
+# Makes an installed observer stop admission after one grant per step, so the
+# decision differs with the tap on. tests/dual_observer_parity.rs must FAIL
+# with this feature on (negative control for the read-only tap).
+dual_observer_mutant_changes_decision = []
