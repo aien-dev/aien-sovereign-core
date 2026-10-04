@@ -175,39 +175,15 @@ pub async fn handle_slash_command(cmd: &str) -> bool {
             true
         }
         "/dream" => {
-            if parts.len() > 1 && (parts[1] == "now" || parts[1] == "run") {
-                println!("{}", "Triggering immediate JSpace Dream Cycle...".yellow());
-                let platform = crate::platform::PlatformContext::detect();
-                let py = platform.python_bin();
-                let dream_script = platform
-                    .home_dir
-                    .join("basecamp/aien-dream/dream_engine.py");
-                let out = Command::new(py)
-                    .args([dream_script.to_str().unwrap_or(""), "--now"])
-                    .output();
-                match out {
-                    Ok(o) => {
-                        println!("{}", String::from_utf8_lossy(&o.stdout));
-                        if !o.stderr.is_empty() {
-                            eprintln!("{}", String::from_utf8_lossy(&o.stderr).dimmed());
-                        }
-                    }
-                    Err(e) => println!("{}", format!("Failed to run dream engine: {}", e).red()),
-                }
-            } else {
-                let platform = crate::platform::PlatformContext::detect();
-                let py = platform.python_bin();
-                let dream_script = platform
-                    .home_dir
-                    .join("basecamp/aien-dream/dream_engine.py");
-                let out = Command::new(py)
-                    .args([dream_script.to_str().unwrap_or(""), "--status"])
-                    .output();
-                match out {
-                    Ok(o) => println!("{}", String::from_utf8_lossy(&o.stdout)),
-                    Err(e) => println!("{}", format!("Failed to query dream status: {}", e).red()),
-                }
-            }
+            // The former dream engine was a Python script outside this repository
+            // (basecamp/aien-dream/dream_engine.py). AIEN carries no Python, so the
+            // command says so instead of shelling out. Native dream telemetry lives
+            // in the spark-dream crate (binary `spark-dream`).
+            println!(
+                "{}",
+                "The /dream cycle is not part of the sovereign build: its old engine was a Python script outside this repo. Use the native `spark-dream` binary for dream telemetry."
+                    .yellow()
+            );
             true
         }
         "/adapter" | "/adapters" => {

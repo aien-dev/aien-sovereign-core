@@ -358,54 +358,17 @@ pub fn sandbox_dispatch_tool(args: &Value) -> Value {
     }
 }
 
-pub fn browser_dispatch_tool(action: &str, prompt: Option<&str>) -> Value {
-    let platform = crate::platform::PlatformContext::detect();
-    let max_py = platform.home_dir.join("max-env/bin/python");
-    let skill_py = platform.home_dir.join(".skillopt-venv/bin/python");
-    let py = if max_py.exists() {
-        max_py
-    } else if skill_py.exists() {
-        skill_py
-    } else {
-        std::path::PathBuf::from("python3")
-    };
-    let script = platform
-        .home_dir
-        .join("basecamp/scripts/browser_mirror_test.py");
-
-    let mut cmd = Command::new(&py);
-    cmd.arg(&script);
-
-    match action {
-        "screenshot" => {
-            cmd.arg("--screenshot");
-        }
-        "test" | "eval" => {
-            cmd.arg("--eval");
-            if let Some(p) = prompt {
-                cmd.arg(p);
-            }
-        }
-        _ => {
-            return json!({"status": "error", "error": format!("Unknown browser action '{}'", action)});
-        }
-    }
-
-    match cmd.output() {
-        Ok(out) => {
-            let stdout = String::from_utf8_lossy(&out.stdout).to_string();
-            let stderr = String::from_utf8_lossy(&out.stderr).to_string();
-            json!({
-                "status": if out.status.success() { "ok" } else { "failed" },
-                "exit_code": out.status.code().unwrap_or(-1),
-                "stdout": stdout,
-                "stderr": stderr
-            })
-        }
-        Err(e) => {
-            json!({"status": "error", "error": format!("Failed to invoke browser runner: {}", e)})
-        }
-    }
+pub fn browser_dispatch_tool(action: &str, _prompt: Option<&str>) -> Value {
+    // The browser mirror ran a Python script outside this repository
+    // (basecamp/scripts/browser_mirror_test.py). AIEN carries no Python, so the
+    // tool reports itself unavailable instead of shelling out.
+    json!({
+        "status": "error",
+        "error": format!(
+            "browser action '{}' is unavailable: the Python browser mirror was removed from the sovereign build",
+            action
+        )
+    })
 }
 
 pub fn handle_sandbox_command(parts: &[&str]) {
