@@ -6,6 +6,7 @@
 //! aien-test test ./... | gate:NAME [flags]
 //! aien-test why GATE_FILE_OR_NAME [flags]
 //! aien-test list [flags]
+//! aien-test identity GATE_FILE_OR_NAME [--compiler-identity S] [--flag F]... [--hardware-identity S]
 //! ```
 //!
 //! `test changed`, `test crate:NAME`, `--host/--qemu/--gb10`, `--mutants` and
@@ -19,6 +20,7 @@ pub const USAGE: &str = "usage:
   aien-test test ./... | gate:NAME [flags]
   aien-test why GATE_FILE_OR_NAME [flags]
   aien-test list [flags]
+  aien-test identity GATE_FILE_OR_NAME [--compiler-identity S] [--flag F]... [--hardware-identity S]
 flags: --evidence-dir DIR  --allow-dirty  --no-cache  --jobs host=N,qemu=M  --wait-gpu";
 
 /// Which gates `test` runs.
@@ -36,6 +38,7 @@ pub enum Command {
     Test(Selection),
     Why { gate: String },
     List,
+    Identity { gate: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -51,6 +54,13 @@ pub struct Cli {
     pub jobs: JobsSpec,
     /// `--wait-gpu`: wait for a held GPU lock instead of refusing.
     pub wait_gpu: bool,
+    /// `identity` only: the compiler identity string (default empty: nothing
+    /// here builds yet).
+    pub compiler_identity: String,
+    /// `identity` only: `--flag F`, repeatable, order kept.
+    pub flags: Vec<String>,
+    /// `identity` only: needed for `cache_scope: hardware`.
+    pub hardware_identity: Option<String>,
 }
 
 fn parse_selection(s: &str) -> Result<Selection, String> {
@@ -70,7 +80,7 @@ pub fn parse_args(argv: &[String]) -> Result<Cli, String> {
         .first()
         .map(|s| s.as_str())
         .ok_or_else(|| "no command".to_string())?;
-    if !["run", "test", "why", "list"].contains(&name) {
+    if !["run", "test", "why", "list", "identity"].contains(&name) {
         return Err(format!("unknown command {name:?}"));
     }
     let mut positional: Option<String> = None;
@@ -80,6 +90,10 @@ pub fn parse_args(argv: &[String]) -> Result<Cli, String> {
     let mut args: Option<Vec<String>> = None;
     let mut jobs = JobsSpec::default();
     let mut wait_gpu = false;
+    let mut compiler_identity = String::new();
+    let mut flags: Vec<String> = Vec::new();
+    let mut hardware_identity: Option<String> = None;
+    let mut identity_flags = false;
     let mut i = 1;
     while i < argv.len() {
         let a = argv[i].as_str();
@@ -97,6 +111,18 @@ pub fn parse_args(argv: &[String]) -> Result<Cli, String> {
             match argv.get(i) {
                 Some(v) => jobs = parse_jobs(v)?,
                 None => return Err("--jobs needs a value".to_string()),
+            }
+        } else if a == "--compiler-identity" || a == "--flag" || a == "--hardware-identity" {
+            identity_flags = true;
+            i += 1;
+            let v = match argv.get(i) {
+                Some(v) => v.clone(),
+                None => return Err(format!("{a} needs a value")),
+            };
+            match a {
+                "--compiler-identity" => compiler_identity = v,
+                "--flag" => flags.push(v),
+                _ => hardware_identity = Some(v),
             }
         } else if a == "--allow-dirty" {
             allow_dirty = true;
@@ -116,7 +142,16 @@ pub fn parse_args(argv: &[String]) -> Result<Cli, String> {
     if args.is_some() && name != "run" {
         return Err("-- ARGS only apply to the run command".to_string());
     }
+    if identity_flags && name != "identity" {
+        return Err(
+            "--compiler-identity, --flag and --hardware-identity only apply to identity"
+                .to_string(),
+        );
+    }
     let command = match name {
+        "identity" => Command::Identity {
+            gate: positional.ok_or("missing GATE_FILE_OR_NAME")?,
+        },
         "run" => Command::Run {
             gate: positional.ok_or("missing GATE_FILE_OR_NAME")?,
         },
@@ -142,6 +177,9 @@ pub fn parse_args(argv: &[String]) -> Result<Cli, String> {
         args,
         jobs,
         wait_gpu,
+        compiler_identity,
+        flags,
+        hardware_identity,
     })
 }
 
@@ -266,6 +304,31 @@ mod tests {
         assert_eq!(c.command, Command::List);
         assert!(parse_args(&v(&["why"])).is_err());
         assert!(parse_args(&v(&["list", "extra"])).is_err());
+    }
+
+    #[test]
+    fn identity_command_and_its_flags() {
+        let c = parse_args(&v(&[
+            "identity",
+            "G",
+            "--compiler-identity",
+            "rustc 1",
+            "--flag",
+            "-O",
+            "--flag",
+            "-C",
+            "--hardware-identity",
+            "gb10-1",
+        ]))
+        .unwrap();
+        assert_eq!(c.command, Command::Identity { gate: "G".into() });
+        assert_eq!(c.compiler_identity, "rustc 1");
+        assert_eq!(c.flags, v(&["-O", "-C"]));
+        assert_eq!(c.hardware_identity.as_deref(), Some("gb10-1"));
+        assert!(parse_args(&v(&["identity"])).is_err());
+        assert!(parse_args(&v(&["identity", "G", "--flag"])).is_err());
+        assert!(parse_args(&v(&["run", "G", "--flag", "x"])).is_err());
+        assert!(parse_args(&v(&["list", "--compiler-identity", "x"])).is_err());
     }
 
     #[test]

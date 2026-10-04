@@ -7,10 +7,13 @@
 //!   campaign verdict: any FAIL gives 1, else the worst of 2 to 5, else 0.
 //! - `why GATE`: explain a gate's state from the receipts already written.
 //! - `list`: list the gates and their dependencies.
+//! - `identity GATE`: print the check id (ADR 0033 Decision 3) and the object it
+//!   hashed, for the gate and everything it depends on.
 
 use aien_test::cli::{parse_args, Cli, Command, Selection, USAGE};
 use aien_test::evidence::{Index, Store};
 use aien_test::graph::{self, GraphError};
+use aien_test::identity;
 use aien_test::runner::{self, CacheNote, Options, RunError};
 use aien_test::verdict::Verdict;
 use aien_test::why;
@@ -43,6 +46,7 @@ fn real_main() -> i32 {
         Command::Test(selection) => cmd_test(&cli, selection, &cwd),
         Command::Why { gate } => cmd_why(&cli, gate, &cwd),
         Command::List => cmd_list(&cwd),
+        Command::Identity { gate } => cmd_identity(&cli, gate, &cwd),
     }
 }
 
@@ -222,6 +226,56 @@ fn cmd_why(cli: &Cli, gate: &str, cwd: &Path) -> i32 {
         aien_test::cache::explain_chain(&root, &graph, &index, &opts, &commit, target);
     for line in why::explain(&graph, &index, &commit, target, &cache_facts) {
         println!("{line}");
+    }
+    0
+}
+
+fn cmd_identity(cli: &Cli, gate: &str, cwd: &Path) -> i32 {
+    let root = match repo_root_or_report(cwd) {
+        Ok(r) => r,
+        Err(code) => return code,
+    };
+    let graph = match graph::load(&root) {
+        Ok(g) => g,
+        Err(e) => return graph_error(&e),
+    };
+    let target = match why::resolve_target(&graph, cwd, gate) {
+        Ok(i) => i,
+        Err(e) => {
+            println!("AIEN_TEST: BAD_MANIFEST {e}");
+            return 1;
+        }
+    };
+    let node = graph.node(target);
+    let binding = match identity::local_binding(cli.hardware_identity.as_deref().unwrap_or("")) {
+        Ok(b) => b,
+        Err(e) => {
+            println!("AIEN_TEST: FAIL {e}");
+            return 1;
+        }
+    };
+    let ids = match identity::graph_identities(
+        &graph,
+        target,
+        &root,
+        &cli.compiler_identity,
+        &cli.flags,
+        &binding,
+    ) {
+        Ok(i) => i,
+        Err(e) => {
+            println!("AIEN_TEST: FAIL {e}");
+            return 1;
+        }
+    };
+    for (g, (id, _)) in &ids {
+        if *g != node.id {
+            println!("DEPENDENCY {g} CHECK_ID {id}");
+        }
+    }
+    if let Some((id, obj)) = ids.get(&node.id) {
+        println!("CHECK_ID {id}");
+        println!("OBJECT {}", obj);
     }
     0
 }

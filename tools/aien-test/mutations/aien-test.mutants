@@ -51,3 +51,15 @@ cache_never_ignored	cache.rs	s#if !cache_allowed {#if false {#	a gate that says 
 cache_reuse_keeps_old_commit	cache.rs	s#core\["commit"\] = json!(commit);#let _ = commit;#	a reuse receipt still names the old commit, so the new commit looks unchecked
 cache_dirty_tree_looks_up	runner.rs	s#if mode == cache::Mode::Allow \&\& (opts.args_override.is_some() || !tree_clean) {#if false {#	a tree with uncommitted changes (or replacement args) still consults the cache
 cache_no_cache_ignored	runner.rs	s#cache::policy(m.cache_allowed, opts.no_cache)#cache::policy(m.cache_allowed, false)#	--no-cache does not force a fresh run
+identity_machine_scope_ignored	identity.rs	s#CacheScope::Machine => b.machine_digest.clone(),#CacheScope::Machine => String::new(),#	a machine-scoped check id no longer depends on the machine, so a result from another machine is reused
+identity_dependencies_dropped	identity.rs	s#"dependency_check_ids": deps,#"dependency_check_ids": Vec::<String>::new(),#	a check id ignores the checks it declares it depends on, so a changed dependency leaves it unchanged
+identity_compiler_ignored	identity.rs	s#"compiler_identity": compiler_identity,#"compiler_identity": "",#	a different compiler gives the same check id
+identity_flags_ignored	identity.rs	s#"flags": flags,#"flags": Vec::<String>::new(),#	different build flags give the same check id
+identity_dependency_ids_unsorted	identity.rs	s#^    deps.sort();#    let _ = \&deps;#	the order the dependency ids are given in changes the check id
+identity_missing_input_dropped	identity.rs	s#rows.entry(spec.to_string()).or_insert(None);#let _ = spec;#	a declared input that matches no tracked file leaves no trace in the identity
+identity_golden_not_hashed	identity.rs	s#goldens.push(sha256_hex(&bytes));#let _ = \&bytes;#	editing the golden file does not change the check id
+planner_drops_dependencies	identity.rs	s#graph.with_dependencies(&seeds)#seeds.into_iter().collect()#	path filtering selects the changed gate but drops the gates it declares it depends on
+v2_tolerance_without_bounded_allowed	manifest.rs	s#if tolerance.is_some() \&\& exactness != Exactness::Bounded {#if false {#	a tolerance is accepted on an EXACT check
+v2_analog_eligible_for_exact	manifest.rs	s#if is_analog(b) \&\& exactness == Exactness::Exact {#if false {#	an analog backend may be eligible for an EXACT check
+v2_canonical_outside_eligible	manifest.rs	s#if !eligible.contains(&canonical) {#if false {#	a canonical backend that is not eligible is accepted
+v1_accepts_v2_keys	manifest.rs	s#entries.iter().find(|e| V2_KEYS.contains(\&e.key.as_str()))#entries.iter().find(|_e| false)#	a v1 manifest may use v2 keys, so it is no longer strictly v1
