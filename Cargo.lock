@@ -85,6 +85,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "aien-dual-observation"
+version = "0.1.0"
+dependencies = [
+ "aien-abi-core",
+ "aien-inference-abi",
+ "aien-kv-cache",
+ "aien-scheduler",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "aien-evaluation-protocol"
 version = "0.1.0"
 source = "git+https://github.com/aien-dev/aien-protocols?rev=7ac6facb630ca7e9a6ab4125b292203fe2bb6687#7ac6facb630ca7e9a6ab4125b292203fe2bb6687"
