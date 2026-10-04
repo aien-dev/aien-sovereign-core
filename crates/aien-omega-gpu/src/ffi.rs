@@ -159,6 +159,7 @@ pub struct OmegaGpuEwInfo {
     pub ctas_last_launch: u32,
     pub target_chip: [c_char; 64],
     pub sm_architecture: u32,
+    pub call_ns: u64,
 }
 
 impl OmegaGpuEwInfo {
@@ -175,6 +176,7 @@ impl OmegaGpuEwInfo {
             ctas_last_launch: 0,
             target_chip: [0; 64],
             sm_architecture: 0,
+            call_ns: 0,
         }
     }
 }
