@@ -90,6 +90,19 @@ pub trait TensorBackend: Send + Sync {
         0
     }
 
+    /// Operations this backend claims to run natively on its device. Strict mode
+    /// fails only on fallbacks of ops in this mask; ops outside it run on the
+    /// reference CPU path by design. Default: all ops native (original semantics).
+    fn native_ops(&self) -> crate::native_ops::NativeOpMask {
+        crate::native_ops::NativeOpMask::ALL
+    }
+
+    /// Native-versus-reference listing and per-op counters for receipts.
+    /// Default: all native, no counters.
+    fn op_report(&self) -> crate::native_ops::OpReport {
+        crate::native_ops::OpReport::all_native()
+    }
+
     /// In-place Root Mean Square Normalization:
     /// out[i] = x[i] * weight[i] / sqrt(mean(x^2) + eps)
     fn rmsnorm(&self, out: &mut [f32], x: &[f32], weight: &[f32], eps: f32);

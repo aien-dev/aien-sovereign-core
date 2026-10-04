@@ -67,6 +67,9 @@ pub struct StrictModelReceipt {
     pub model_id: String,
     pub model_config: serde_json::Value,
     pub fallback_count: u64,
+    /// Native-versus-reference op listing for the run (None for receipts that predate cut 3a).
+    #[serde(default)]
+    pub op_report: Option<crate::native_ops::OpReport>,
     pub dev_fallback_build: bool,
     pub verdict: String,
 }
@@ -97,5 +100,44 @@ impl StrictModelReceipt {
             self.verdict = format!("FAIL: {}", problems.join("; "));
             Err(violation(&problems.join("; ")))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::native_ops::{NativeOpMask, OpAccounting, TensorOp};
+
+    fn receipt(fallback_count: u64, report: crate::native_ops::OpReport) -> StrictModelReceipt {
+        StrictModelReceipt {
+            checkpoint_path: "x".into(),
+            checkpoint_sha256: "0".repeat(64),
+            tokenizer_path: "y".into(),
+            tokenizer_sha256: "0".repeat(64),
+            backend_identity: "OmegaGb10Backend (sm_121)".into(),
+            model_id: "m".into(),
+            model_config: serde_json::json!({}),
+            fallback_count,
+            op_report: Some(report),
+            dev_fallback_build: false,
+            verdict: String::new(),
+        }
+    }
+
+    #[test]
+    fn reference_ops_by_design_pass_the_receipt_gate() {
+        let acct = OpAccounting::new(NativeOpMask::from_ops(&[TensorOp::MatmulVec]));
+        acct.record_reference(TensorOp::Rmsnorm);
+        let mut r = receipt(acct.fallback_count(), acct.report());
+        assert!(r.verify().is_ok(), "{}", r.verdict);
+        assert!(r.op_report.as_ref().unwrap().line().contains("rmsnorm:1"));
+    }
+
+    #[test]
+    fn claimed_native_fallback_fails_the_receipt_gate() {
+        let acct = OpAccounting::new(NativeOpMask::from_ops(&[TensorOp::MatmulVec]));
+        acct.record_reference(TensorOp::MatmulVec);
+        let mut r = receipt(acct.fallback_count(), acct.report());
+        assert!(r.verify().is_err());
     }
 }
