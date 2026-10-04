@@ -18,17 +18,6 @@ jobs:
       - name: Checkout Source
         uses: actions/checkout@v4
 
-      - name: Checkout Sibling Protocols Dependency
-        uses: actions/checkout@v4
-        with:
-          repository: aien-dev/aien-protocols
-          ref: 7ac6facb630ca7e9a6ab4125b292203fe2bb6687
-          path: aien-protocols
-
-      - name: Setup Sibling Dependencies
-        run: |
-          mkdir -p ../aien-protocols
-          cp -r aien-protocols/* ../aien-protocols/
 
       - name: Install Stable Rust Toolchain
         uses: dtolnay/rust-toolchain@stable

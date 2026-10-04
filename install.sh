@@ -12,7 +12,6 @@ echo "      ⚡ AIEN Sovereign Stack: Universal Developer Installer       "
 echo "=================================================================="
 
 # Run from a checkout or bootstrap one when the script is piped to Bash.
-PROTOCOLS_REV="7ac6facb630ca7e9a6ab4125b292203fe2bb6687"
 INSTALL_WORKSPACE=""
 if [[ -n "${AIEN_SOURCE_DIR:-}" ]]; then
     SOURCE_ROOT="$(cd "$AIEN_SOURCE_DIR" && pwd)"
@@ -26,15 +25,6 @@ else
     SOURCE_ROOT="$INSTALL_WORKSPACE/core"
 fi
 [[ -f "$SOURCE_ROOT/Cargo.toml" ]] || { echo "AIEN source manifest is missing" >&2; exit 1; }
-PROTOCOLS_ROOT="$(dirname "$SOURCE_ROOT")/aien-protocols"
-if [[ ! -e "$PROTOCOLS_ROOT" ]]; then
-    git clone --quiet https://github.com/aien-dev/aien-protocols.git "$PROTOCOLS_ROOT"
-    git -C "$PROTOCOLS_ROOT" checkout --quiet "$PROTOCOLS_REV"
-fi
-[[ "$(git -C "$PROTOCOLS_ROOT" rev-parse HEAD)" = "$PROTOCOLS_REV" ]] || {
-    echo "Sibling aien-protocols must be at $PROTOCOLS_REV; existing checkout was preserved" >&2
-    exit 1
-}
 cd "$SOURCE_ROOT"
 echo "[*] Source commit: $(git rev-parse HEAD)"
 

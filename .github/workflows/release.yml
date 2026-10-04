@@ -30,16 +30,6 @@ jobs:
       - name: Checkout Source
         uses: actions/checkout@v4
 
-      - name: Checkout pinned protocols
-        uses: actions/checkout@v4
-        with:
-          repository: aien-dev/aien-protocols
-          ref: 7ac6facb630ca7e9a6ab4125b292203fe2bb6687
-          path: protocols-checkout
-
-      - name: Place sibling dependency
-        run: mv protocols-checkout ../aien-protocols
-
       - name: Install Rust Toolchain
         uses: dtolnay/rust-toolchain@stable
         with:

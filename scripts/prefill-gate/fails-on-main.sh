@@ -8,8 +8,8 @@
 # Exit 0 ONLY when every test fails on the base ref with that marker. A test
 # that passes on main, or fails for another reason (build error), exits 1.
 #
-# The temporary worktree is created as a sibling of this checkout so the
-# workspace path dependencies (../aien-protocols) resolve, and is removed on exit.
+# The temporary worktree is created as a sibling of this checkout (kept out of
+# the repository tree), and is removed on exit.
 #
 # Usage: bash scripts/prefill-gate/fails-on-main.sh [base-ref]
 set -u
