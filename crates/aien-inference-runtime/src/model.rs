@@ -207,6 +207,16 @@ impl EmbeddedModel {
     }
 }
 
+/// Pinned TinyLlama snapshot in the Hugging Face cache, located from
+/// HF_HOME or HOME. Returns None when neither is set.
+fn tinyllama_snapshot_dir() -> Option<PathBuf> {
+    let hub = match std::env::var_os("HF_HOME") {
+        Some(h) => PathBuf::from(h).join("hub"),
+        None => PathBuf::from(std::env::var_os("HOME")?).join(".cache/huggingface/hub"),
+    };
+    Some(hub.join("models--TinyLlama--TinyLlama-1.1B-Chat-v1.0/snapshots/fe8a4ea1ffedaf415f4da2f062534de366a451e6"))
+}
+
 fn find_checkpoint_path() -> Option<PathBuf> {
     if let Ok(p) = std::env::var("TINYLLAMA_MODEL_PATH") {
         let path = PathBuf::from(p);
@@ -215,11 +225,11 @@ fn find_checkpoint_path() -> Option<PathBuf> {
         }
     }
 
-    let default_snap = PathBuf::from(
-        "/home/drakestapleton/.cache/huggingface/hub/models--TinyLlama--TinyLlama-1.1B-Chat-v1.0/snapshots/fe8a4ea1ffedaf415f4da2f062534de366a451e6/model.safetensors",
-    );
-    if default_snap.exists() {
-        return Some(default_snap);
+    if let Some(base) = tinyllama_snapshot_dir() {
+        let default_snap = base.join("model.safetensors");
+        if default_snap.exists() {
+            return Some(default_snap);
+        }
     }
 
     None
@@ -238,10 +248,10 @@ fn find_tokenizer_path() -> Option<PathBuf> {
         manifest_dir.join("../aien-inference-abi/fixtures/tokenizer.json"),
         manifest_dir.join("fixtures/tokenizer.json"),
         PathBuf::from("crates/aien-inference-abi/fixtures/tokenizer.json"),
-        PathBuf::from("/home/drakestapleton/.cache/huggingface/hub/models--TinyLlama--TinyLlama-1.1B-Chat-v1.0/snapshots/fe8a4ea1ffedaf415f4da2f062534de366a451e6/tokenizer.json"),
     ];
+    let hf_tok = tinyllama_snapshot_dir().map(|d| d.join("tokenizer.json"));
 
-    for c in &candidates {
+    for c in candidates.iter().chain(hf_tok.iter()) {
         if c.exists() {
             return Some(c.clone());
         }

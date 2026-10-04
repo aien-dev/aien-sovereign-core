@@ -21,7 +21,7 @@ else
     INSTALL_WORKSPACE="$(mktemp -d "${TMPDIR:-/tmp}/aien-install.XXXXXX")"
     trap 'rm -rf "$INSTALL_WORKSPACE"' EXIT
     git clone --quiet https://github.com/aien-dev/aien-sovereign-core.git "$INSTALL_WORKSPACE/core"
-    git -C "$INSTALL_WORKSPACE/core" checkout --quiet "${AIEN_REV:-main}"
+    git -C "$INSTALL_WORKSPACE/core" checkout --quiet "${AIEN_REV:-${AIEN_RELEASE_TAG:-main}}"
     SOURCE_ROOT="$INSTALL_WORKSPACE/core"
 fi
 [[ -f "$SOURCE_ROOT/Cargo.toml" ]] || { echo "AIEN source manifest is missing" >&2; exit 1; }
@@ -45,8 +45,69 @@ esac
 
 echo "[*] Detected Platform: $TARGET_OS ($TARGET_ARCH)"
 
-# Verify Rust Toolchain
-if ! command -v cargo >/dev/null 2>&1; then
+# Release asset names: linux uses x86_64 or aarch64, macOS uses arm64.
+RELEASE_ARCH="$TARGET_ARCH"
+[[ "$TARGET_OS" != macos || "$TARGET_ARCH" != aarch64 ]] || RELEASE_ARCH="arm64"
+
+# Release mode (AIEN_RELEASE_TAG=vX.Y.Z): install a published, signed release
+# instead of building from source. Fails closed: nothing is installed unless
+# SHA256SUMS.txt carries a valid signature from the key pinned in
+# docs/release/allowed_signers and the archive matches its listed checksum.
+sha256_of() {
+    if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | cut -d' ' -f1
+    else shasum -a 256 "$1" | cut -d' ' -f1; fi
+}
+
+install_release() {
+    local tag="$1"
+    command -v ssh-keygen >/dev/null 2>&1 || { echo "Error: ssh-keygen is required to verify the release signature" >&2; exit 1; }
+    command -v curl >/dev/null 2>&1 || { echo "Error: curl is required to download the release" >&2; exit 1; }
+    local signers="${AIEN_ALLOWED_SIGNERS:-$SOURCE_ROOT/docs/release/allowed_signers}"
+    [[ -f "$signers" ]] || { echo "Error: pinned signer file not found: $signers" >&2; exit 1; }
+    local base="${AIEN_RELEASE_BASE_URL:-https://github.com/aien-dev/aien-sovereign-core/releases/download/$tag}"
+    local asset="sovereign-${TARGET_OS}-${RELEASE_ARCH}.tar.gz"
+    DL_DIR=""
+    DL_DIR="$(mktemp -d "${TMPDIR:-/tmp}/aien-release.XXXXXX")"
+    trap 'rm -rf "$DL_DIR"; [[ -z "$INSTALL_WORKSPACE" ]] || rm -rf "$INSTALL_WORKSPACE"' EXIT
+    echo "[*] Downloading $tag: $asset, SHA256SUMS.txt, SHA256SUMS.txt.sig"
+    local f
+    for f in SHA256SUMS.txt SHA256SUMS.txt.sig "$asset"; do
+        curl --proto '=https,file' --fail --silent --show-error --location -o "$DL_DIR/$f" "$base/$f" \
+            || { echo "Error: could not download $f from $base" >&2; exit 1; }
+    done
+    echo "[*] Verifying signature against $signers"
+    ssh-keygen -Y verify -f "$signers" -I aien-release -n aien-release \
+        -s "$DL_DIR/SHA256SUMS.txt.sig" < "$DL_DIR/SHA256SUMS.txt" >/dev/null \
+        || { echo "Error: SHA256SUMS.txt signature is NOT valid. Nothing was installed." >&2; exit 1; }
+    local want got
+    want="$(awk -v a="$asset" '$2 == a || $2 == "*" a { print $1 }' "$DL_DIR/SHA256SUMS.txt")"
+    [[ "$(printf '%s\n' "$want" | grep -c .)" -eq 1 ]] \
+        || { echo "Error: $asset is not listed exactly once in the signed SHA256SUMS.txt" >&2; exit 1; }
+    got="$(sha256_of "$DL_DIR/$asset")"
+    [[ "$want" == "$got" ]] \
+        || { echo "Error: checksum mismatch for $asset (signed $want, downloaded $got). Nothing was installed." >&2; exit 1; }
+    echo "[+] Signature and checksum verified for $asset"
+    mkdir -p "$DL_DIR/x" "$BIN_DIR"
+    tar -xzf "$DL_DIR/$asset" -C "$DL_DIR/x"
+    [[ -d "$DL_DIR/x/bin" ]] || { echo "Error: archive has no bin/ directory" >&2; exit 1; }
+    local b name
+    for b in "$DL_DIR/x/bin/"*; do
+        name="$(basename "$b")"
+        case "$name" in
+            spark-cockpit-rs) name=spark-cockpit ;;
+            cortex-rs) name=cortex ;;
+        esac
+        cp "$b" "$BIN_DIR/$name"
+        chmod +x "$BIN_DIR/$name"
+        echo "    - $name -> $BIN_DIR/$name"
+    done
+}
+
+
+RELEASE_TAG="${AIEN_RELEASE_TAG:-}"
+
+# Verify Rust Toolchain (source builds only)
+if [[ -z "$RELEASE_TAG" ]] && ! command -v cargo >/dev/null 2>&1; then
     echo "[!] Cargo not found. Installing Rust toolchain via rustup..."
     curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
     source "$HOME/.cargo/env"
@@ -73,6 +134,9 @@ for RC in "$HOME/.zshrc" "$HOME/.bashrc" "$HOME/.profile"; do
 done
 fi
 
+if [[ -n "$RELEASE_TAG" ]]; then
+    install_release "$RELEASE_TAG"
+else
 echo "[*] Building Core Monorepo Binaries (High-Performance Release Mode)..."
 echo "    - aien-cli (Universal Terminal CLI & Orchestrator)"
 echo "    - spark-cockpit-rs (3D Sovereign Glass Cockpit Server)"
@@ -105,6 +169,7 @@ echo "    - spark-debugger -> $BIN_DIR/spark-debugger"
 echo "    - spark-harness -> $BIN_DIR/spark-harness"
 echo "    - spark-crumbs -> $BIN_DIR/spark-crumbs"
 echo "    - spark-aegis -> $BIN_DIR/spark-aegis"
+fi
 
 echo "[*] Initializing Sovereign Operator Profile..."
 if [ ! -f "$CONFIG_DIR/operator.toml" ]; then

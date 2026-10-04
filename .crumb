@@ -1,73 +1,100 @@
 {
-  "version": 1,
-  "dir_path": ".",
-  "dir_name": "aien-sovereign-core",
-  "description": "Workspace directory",
-  "purpose": {
-    "statement": "Documentation & implementation for AIEN Sovereign Core",
-    "created_by": "AIEN (Auto-Sensed)",
-    "session_id": "auto-sense",
-    "created_at": "2026-09-18T20:15:00.320079421+00:00",
-    "lifecycle": "permanent"
-  },
   "above": {
-    "path": "..",
     "canonical": "..",
     "name": "workspace",
+    "path": "..",
     "role": "Parent directory context"
   },
   "below": [
     {
+      "item_type": "file",
       "name": "Cargo.lock",
-      "item_type": "file",
       "role": ""
     },
     {
+      "item_type": "file",
       "name": "Cargo.toml",
-      "item_type": "file",
       "role": ""
     },
     {
+      "item_type": "file",
       "name": "LICENSE",
-      "item_type": "file",
       "role": ""
     },
     {
+      "item_type": "file",
       "name": "README.md",
-      "item_type": "file",
       "role": ""
     },
     {
+      "item_type": "dir",
       "name": "crates",
-      "item_type": "dir",
       "role": ""
     },
     {
+      "item_type": "dir",
       "name": "doctrine",
-      "item_type": "dir",
       "role": ""
     },
     {
+      "item_type": "dir",
       "name": "modular",
-      "item_type": "dir",
       "role": ""
     },
     {
+      "item_type": "dir",
       "name": "scripts",
-      "item_type": "dir",
       "role": ""
     },
     {
+      "item_type": "dir",
       "name": "skills",
-      "item_type": "dir",
       "role": ""
     },
     {
-      "name": "target",
       "item_type": "dir",
+      "name": "target",
       "role": ""
     }
   ],
+  "description": "Workspace directory",
+  "dir_name": "aien-sovereign-core",
+  "dir_path": ".",
+  "extensions": {
+    "generated": {
+      "children": [
+        {
+          "digest": "5b53b3617b045ba9e00445ec9f4ed4e312eea1791cf76542140d145587c600bb",
+          "last_commit": "0b09fe0",
+          "name": "scripts",
+          "purpose": ""
+        },
+        {
+          "digest": "ef1840de79311e5684993b0e0b66e0a9fce42a2d7966506201686ae5f8084a98",
+          "last_commit": "8b5caed",
+          "name": "skills",
+          "purpose": ""
+        }
+      ],
+      "children_root": "sha256:38c77df15675007bb39b5fdbc1fb61901835486fa3191a89a36000628b77df90",
+      "compiled_at": "2026-10-04T16:03:49Z",
+      "compiler": "crumb-compile/1",
+      "digest": "sha256:d56dbfc6a247cafe7f00c57d97dc96838030432843e10ef5889c3c4b4bf6d011",
+      "evidence_files": 19,
+      "evidence_root": "sha256:4fc93bc0533be92440e419df17436410d35e5972b340c3a281f6a1bb86693ee2",
+      "files": 664,
+      "generated_at_commit": "0b09fe012ccd0a3d3a1c046ac3a30a5e1ae39dea",
+      "source_tree": "sha256:66e2ad64bc4f5c396d2f4f2bf79e52b7dae2ddaabe2b78c7df85c4c47abdd0ef"
+    }
+  },
   "history": [],
+  "purpose": {
+    "created_at": "2026-09-18T20:15:00.320079421+00:00",
+    "created_by": "AIEN (Auto-Sensed)",
+    "lifecycle": "permanent",
+    "session_id": "auto-sense",
+    "statement": "Documentation & implementation for AIEN Sovereign Core"
+  },
+  "version": 1,
   "whispers": []
 }

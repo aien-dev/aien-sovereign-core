@@ -1,28 +1,42 @@
 {
-  "version": 1,
-  "dir_path": "skills/modular-upstream",
-  "dir_name": "modular-upstream",
-  "description": "Workspace directory",
-  "purpose": {
-    "statement": "Workspace subsystem directory for modular-upstream",
-    "created_by": "AIEN (Auto-Sensed)",
-    "session_id": "auto-sense",
-    "created_at": "2026-09-18T13:49:25.097404798+00:00",
-    "lifecycle": "permanent"
-  },
   "above": {
-    "path": "..",
     "canonical": "skills",
     "name": "skills",
+    "path": "..",
     "role": "Parent directory context"
   },
   "below": [
     {
-      "name": "SKILL.md",
       "item_type": "file",
+      "name": "SKILL.md",
       "role": ""
     }
   ],
+  "description": "Workspace directory",
+  "dir_name": "modular-upstream",
+  "dir_path": "skills/modular-upstream",
+  "extensions": {
+    "generated": {
+      "children": [],
+      "children_root": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "compiled_at": "2026-10-04T15:35:46Z",
+      "compiler": "crumb-compile/1",
+      "digest": "sha256:1dcf80b2cf21432716ebaba932c1158acf26adff1ebccb53b0b1a66c0f462d58",
+      "evidence_files": 0,
+      "evidence_root": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "files": 1,
+      "generated_at_commit": "c848c7bf9ada87072c5f1ecb2b36142de106ef66",
+      "source_tree": "sha256:0f3c9d120b412bc6e508c1a9ecc78b4e1446b289f9cf1fe93d0bea136062a733"
+    }
+  },
   "history": [],
+  "purpose": {
+    "created_at": "2026-09-18T13:49:25.097404798+00:00",
+    "created_by": "AIEN (Auto-Sensed)",
+    "lifecycle": "permanent",
+    "session_id": "auto-sense",
+    "statement": "Workspace subsystem directory for modular-upstream"
+  },
+  "version": 1,
   "whispers": []
 }

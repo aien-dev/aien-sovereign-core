@@ -442,7 +442,8 @@ async fn test_challenge4_cortex_dynamic_auth_and_zero_disk_touches() {
     });
 
     // Create decoy disk file ~/.config/cortex/token with bogus content if not present
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/home/drakestapleton".to_string());
+    let home = std::env::var("HOME")
+        .unwrap_or_else(|_| std::env::temp_dir().to_string_lossy().into_owned());
     let cortex_dir = PathBuf::from(&home).join(".config/cortex");
     let decoy_file = cortex_dir.join("token");
     let decoy_token = "BOGUS_DEPRECATED_DISK_TOKEN_NEVER_USE";

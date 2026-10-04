@@ -1,33 +1,47 @@
 {
-  "version": 1,
-  "dir_path": "/home/drakestapleton/workspace/aien-sovereign-core/crates/aien-scheduler/src/bin",
-  "dir_name": "bin",
-  "description": "Workspace directory",
-  "purpose": {
-    "statement": "Workspace subsystem directory for bin",
-    "created_by": "AIEN (Auto-Sensed)",
-    "session_id": "auto-sense",
-    "created_at": "2026-09-19T16:56:21.316618882+00:00",
-    "lifecycle": "permanent"
-  },
   "above": {
-    "path": "..",
     "canonical": "/home/drakestapleton/workspace/aien-sovereign-core/crates/aien-scheduler/src",
     "name": "src",
+    "path": "..",
     "role": "Parent directory context"
   },
   "below": [
     {
-      "name": "bench_inference_stack.rs",
       "item_type": "file",
+      "name": "bench_inference_stack.rs",
       "role": ""
     },
     {
-      "name": "stress_aien_live.rs",
       "item_type": "file",
+      "name": "stress_aien_live.rs",
       "role": ""
     }
   ],
+  "description": "Workspace directory",
+  "dir_name": "bin",
+  "dir_path": "/home/drakestapleton/workspace/aien-sovereign-core/crates/aien-scheduler/src/bin",
+  "extensions": {
+    "generated": {
+      "children": [],
+      "children_root": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "compiled_at": "2026-10-04T15:35:46Z",
+      "compiler": "crumb-compile/1",
+      "digest": "sha256:1586f6b210ade001c052fb8b89978fcc2cdf93af3c5466a7adf9cb0ae102ec80",
+      "evidence_files": 0,
+      "evidence_root": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "files": 2,
+      "generated_at_commit": "c848c7bf9ada87072c5f1ecb2b36142de106ef66",
+      "source_tree": "sha256:7dc2738d831ebfecede6620843a3e56218f0b1724b5351d9e99a80d693127e25"
+    }
+  },
   "history": [],
+  "purpose": {
+    "created_at": "2026-09-19T16:56:21.316618882+00:00",
+    "created_by": "AIEN (Auto-Sensed)",
+    "lifecycle": "permanent",
+    "session_id": "auto-sense",
+    "statement": "Workspace subsystem directory for bin"
+  },
+  "version": 1,
   "whispers": []
 }
