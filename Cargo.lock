@@ -87,6 +87,7 @@ dependencies = [
 [[package]]
 name = "aien-evaluation-protocol"
 version = "0.1.0"
+source = "git+https://github.com/aien-dev/aien-protocols?rev=7ac6facb630ca7e9a6ab4125b292203fe2bb6687#7ac6facb630ca7e9a6ab4125b292203fe2bb6687"
 dependencies = [
  "aien-protocol-types",
  "aien-provenance",
@@ -201,6 +202,7 @@ dependencies = [
 [[package]]
 name = "aien-probe"
 version = "0.1.0"
+source = "git+https://github.com/aien-dev/aien-protocols?rev=7ac6facb630ca7e9a6ab4125b292203fe2bb6687#7ac6facb630ca7e9a6ab4125b292203fe2bb6687"
 dependencies = [
  "aien-evaluation-protocol",
  "aien-protocol-types",
@@ -227,6 +229,7 @@ dependencies = [
 [[package]]
 name = "aien-protocol-types"
 version = "0.1.0"
+source = "git+https://github.com/aien-dev/aien-protocols?rev=7ac6facb630ca7e9a6ab4125b292203fe2bb6687#7ac6facb630ca7e9a6ab4125b292203fe2bb6687"
 dependencies = [
  "hex",
  "serde",
@@ -238,6 +241,7 @@ dependencies = [
 [[package]]
 name = "aien-provenance"
 version = "0.1.0"
+source = "git+https://github.com/aien-dev/aien-protocols?rev=7ac6facb630ca7e9a6ab4125b292203fe2bb6687#7ac6facb630ca7e9a6ab4125b292203fe2bb6687"
 dependencies = [
  "aien-protocol-types",
  "bitflags 2.13.2",
@@ -4399,7 +4403,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.4.3",
+ "getrandom 0.3.4",
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",
