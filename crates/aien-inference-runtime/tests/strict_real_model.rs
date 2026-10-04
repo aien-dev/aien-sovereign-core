@@ -9,6 +9,8 @@
 //!   AIEN_STRICT_RECEIPT=/path/receipt.json \
 //!   cargo test -p aien-inference-runtime --release --test strict_real_model -- --ignored --nocapture
 
+mod drift;
+
 use aien_inference_abi::strict::{self, StrictModelReceipt};
 use aien_inference_abi::ExecutionSurface;
 use aien_inference_runtime::model::EmbeddedModel;
@@ -151,7 +153,10 @@ fn strict_real_model_gate() {
 
 /// FB-1 cut 3b gate: the same greedy generation on the CPU reference backend and on
 /// the Omega backend (AIEN_GPU_BACKEND=omega), same checkpoint. Records tok/s for
-/// both, asserts identical text and zero fallbacks of the claimed-native matmul ops.
+/// both, checks zero fallbacks and all nine ops native, and judges the backend by teacher-
+/// forced logits (tests/drift): greedy text alone cannot tell a wrong backend from a
+/// near-tie flip (cut 3d: "processing" led "memory" by 0.0005 logits). Text equality is
+/// printed (tokens_match) but no longer asserted.
 ///   AIEN_E2E_CHECKPOINT=~/models/TinyLlama-1.1B-Chat-v1.0 AIEN_STRICT_RECEIPT=/path/receipt.json \
 ///   cargo test -p aien-inference-runtime --release --test strict_real_model \
 ///     omega_vs_reference_real_model -- --ignored --nocapture
@@ -199,6 +204,9 @@ fn omega_vs_reference_real_model() {
         "OMEGA_GATE ref tokens={cpu_n} secs={cpu_s:.3} tok/s={:.3} text={cpu_text:?}",
         cpu_n as f64 / cpu_s
     );
+    let ptoks = cpu.tokenizer.encode(prompt).expect("encode");
+    let (ref_logits, ref_toks) =
+        drift::logits_per_step(&mut cpu.transformer, &ptoks, max_tokens, &[]);
     drop(cpu);
 
     // Omega leg. The env var is read inside load_checkpoint; set before loading.
@@ -215,6 +223,21 @@ fn omega_vs_reference_real_model() {
         t.elapsed().as_secs_f64()
     );
     let (om_text, om_n, om_s) = run(&mut om);
+    let (om_logits, _) = drift::logits_per_step(&mut om.transformer, &ptoks, max_tokens, &ref_toks);
+    let cmp = drift::compare(&ref_logits, &om_logits);
+    for c in cmp.iter().filter(|c| c.ref_tok != c.cand_tok) {
+        println!(
+            "OMEGA_GATE flip step={} ref_tok={} omega_tok={} ref_margin={:.4} max_abs_dlogit={:.4}",
+            c.step, c.ref_tok, c.cand_tok, c.ref_margin, c.max_abs_dlogit
+        );
+    }
+    let worst = cmp.iter().map(|c| c.max_abs_dlogit).fold(0.0f32, f32::max);
+    let drift_verdict = drift::judge(&cmp);
+    println!(
+        "OMEGA_GATE teacher_forced steps={} worst_max_abs_dlogit={worst:.4} bound={} judge={drift_verdict:?}",
+        cmp.len(),
+        drift::MAX_ABS_DLOGIT
+    );
     println!(
         "OMEGA_GATE omega tokens={om_n} secs={om_s:.3} tok/s={:.3} text={om_text:?}",
         om_n as f64 / om_s
@@ -230,6 +253,9 @@ fn omega_vs_reference_real_model() {
         "rmsnorm",
         "apply_rope",
         "swiglu",
+        "gqa_attention",
+        "paged_attention",
+        "paged_attention_batch",
     ] {
         assert!(
             report.native_ops.iter().any(|n| n == op),
@@ -268,6 +294,8 @@ fn omega_vs_reference_real_model() {
         receipt.verdict,
         receipt_path.display()
     );
-    assert_eq!(cpu_text, om_text, "Omega backend changed the greedy output");
+    if let Err(e) = drift_verdict {
+        panic!("Omega backend logits disagree with the reference: {e}");
+    }
     verdict.unwrap_or_else(|e| panic!("{e}"));
 }
