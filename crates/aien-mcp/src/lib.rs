@@ -4,6 +4,7 @@
 //! and may invoke only speculation-safe tools. An irreversible `tools/call`
 //! runs only when the Effect Broker presents an [`AuthorizedEffect`].
 
+mod authority;
 mod broker;
 mod effect;
 mod error;
@@ -22,6 +23,10 @@ mod transport_tests;
 #[cfg(test)]
 pub(crate) use effect::authorize_for_test;
 
+pub use authority::{
+    intent_digest, AuthorityContext, AuthorityDecision, AuthorityOutcome, EffectAuthority,
+    EffectClassAuthority, EffectScope,
+};
 pub use broker::{EffectLane, McpBroker, SpeculativeLane, SpeculativeToolCall};
 pub use effect::{AuthorizedEffect, EffectIntent, EffectReceipt, ToolResult};
 pub use error::Error;
