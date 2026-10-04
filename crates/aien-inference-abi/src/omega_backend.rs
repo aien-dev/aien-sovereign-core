@@ -71,6 +71,9 @@ pub struct OmegaGb10Backend {
     chip_errors: AtomicU64,
     chip_calls: AtomicU64,
     chip_ns: AtomicU64,
+    /// OM-2 staging counters summed over every chip attention call.
+    kv_bytes_staged: AtomicU64,
+    kv_bytes_naive: AtomicU64,
     last_error: Mutex<String>,
 }
 
@@ -115,6 +118,8 @@ impl OmegaGb10Backend {
             chip_errors: AtomicU64::new(0),
             chip_calls: AtomicU64::new(0),
             chip_ns: AtomicU64::new(0),
+            kv_bytes_staged: AtomicU64::new(0),
+            kv_bytes_naive: AtomicU64::new(0),
             last_error: Mutex::new(String::new()),
         }
     }
@@ -135,6 +140,17 @@ impl OmegaGb10Backend {
     /// Sum of chip launch-to-completion time reported by omega, in nanoseconds.
     pub fn chip_ns(&self) -> u64 {
         self.chip_ns.load(Ordering::Relaxed)
+    }
+
+    /// KV bytes omega copied into its staging buffer over every chip attention call (OM-2:
+    /// one copy per physical block per launch) and what per-reference staging would have
+    /// copied. Equal when no block is shared inside a launch.
+    pub fn kv_bytes_staged(&self) -> u64 {
+        self.kv_bytes_staged.load(Ordering::Relaxed)
+    }
+
+    pub fn kv_bytes_naive(&self) -> u64 {
+        self.kv_bytes_naive.load(Ordering::Relaxed)
     }
 
     pub fn last_error(&self) -> String {
@@ -350,6 +366,10 @@ impl OmegaGb10Backend {
             Ok(info) => {
                 self.chip_calls.fetch_add(1, Ordering::Relaxed);
                 self.chip_ns.fetch_add(info.elapsed_ns, Ordering::Relaxed);
+                self.kv_bytes_staged
+                    .fetch_add(info.kv_bytes_staged, Ordering::Relaxed);
+                self.kv_bytes_naive
+                    .fetch_add(info.kv_bytes_naive, Ordering::Relaxed);
                 true
             }
             Err(e) => self.fail(format!("{what}: {e}")),
