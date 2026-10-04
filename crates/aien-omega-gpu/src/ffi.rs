@@ -1,6 +1,6 @@
 //! Raw declarations, written by hand from omega `src/omega_gpu_matmul_api.h`
-//! at the commit pinned in `omega.lock` (cd80bf4; matmul header unchanged since 6b940fa, attention header
-//! extended by OM-2 cd80bf4: staging counters appended to `OmegaGpuAttnInfo`). Nothing generated.
+//! at the commit pinned in `omega.lock` (f777036; matmul header unchanged since 6b940fa, attention header
+//! extended by OM-2 f777036: staging counters appended to `OmegaGpuAttnInfo`). Nothing generated.
 //! Includes the resident-weights handles added by omega FB-1 cut 1b.
 use std::os::raw::{c_char, c_int};
 
@@ -212,7 +212,7 @@ extern "C" {
     pub fn omega_gpu_elementwise_rc_name(rc: c_int) -> *const c_char;
 }
 
-// ---- omega `src/omega_gpu_attention_api.h` (FB-1 cut 5 + 4b + OM-1/OM-2, pinned cd80bf4) ----
+// ---- omega `src/omega_gpu_attention_api.h` (FB-1 cut 5 + 4b + OM-1/OM-2, pinned f777036) ----
 pub const OMEGA_GPU_ATTN_OK: c_int = 0;
 pub const OMEGA_GPU_ATTN_BAD_ARGS: c_int = -1;
 pub const OMEGA_GPU_ATTN_TOO_LARGE: c_int = -2;
@@ -238,7 +238,7 @@ pub struct OmegaGpuAttnInfo {
     pub threads_per_cta: u32,
     pub target_chip: [c_char; 64],
     pub sm_architecture: u32,
-    // OM-2 (omega cd80bf4): appended after sm_architecture, ABI order preserved.
+    // OM-2 (omega f777036): appended after sm_architecture, ABI order preserved.
     /// Bytes of KV copied into the staging buffer by this call (one copy per physical block per launch).
     pub kv_bytes_staged: u64,
     /// Bytes per-reference staging would have copied (every block-table entry once).
@@ -281,9 +281,9 @@ impl OmegaGpuAttnInfo {
     }
 }
 
-// Field-for-field mirror guard against omega `src/omega_gpu_attention_api.h` at cd80bf4: the C
+// Field-for-field mirror guard against omega `src/omega_gpu_attention_api.h` at f777036: the C
 // struct is 176 bytes and these are its offsets (checked with _Static_assert against the header on
-// 2026-10-04). A header change that moves a field fails this build instead of misreading a counter.
+// 2026-10-04; f777036 is cd80bf4 rebased onto omega main 55d05d6, same attention sources). A header change that moves a field fails this build instead of misreading a counter.
 const _: () = assert!(std::mem::size_of::<OmegaGpuAttnInfo>() == 176);
 const _: () = assert!(std::mem::offset_of!(OmegaGpuAttnInfo, sm_architecture) == 116);
 const _: () = assert!(std::mem::offset_of!(OmegaGpuAttnInfo, kv_bytes_staged) == 120);
