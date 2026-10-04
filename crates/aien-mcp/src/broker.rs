@@ -7,6 +7,7 @@ use aien_capability::{
 };
 use serde_json::Value;
 
+use crate::approval::{ApprovalError, ApprovalGrant, ApprovalRecord};
 use crate::authority::{
     intent_digest, AuthorityContext, AuthorityDecision, AuthorityOutcome, EffectAuthority,
     EffectScope,
@@ -33,9 +34,11 @@ enum LedgerEntry {
     Uncertain,
 }
 
-struct Inner {
+pub(crate) struct Inner {
     sessions: HashMap<String, McpSession>,
     ledger: HashMap<EffectId, LedgerEntry>,
+    pub(crate) approvals: HashMap<Digest32, ApprovalRecord>,
+    pub(crate) next_approval: u64,
 }
 
 /// Owns admitted MCP sessions and the idempotency ledger.
@@ -50,6 +53,8 @@ impl McpBroker {
             inner: Arc::new(Mutex::new(Inner {
                 sessions: HashMap::new(),
                 ledger: HashMap::new(),
+                approvals: HashMap::new(),
+                next_approval: 0,
             })),
         }
     }
@@ -90,7 +95,7 @@ impl McpBroker {
         Ok(())
     }
 
-    fn lock(&self) -> std::sync::MutexGuard<'_, Inner> {
+    pub(crate) fn lock(&self) -> std::sync::MutexGuard<'_, Inner> {
         self.inner
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -234,13 +239,40 @@ impl EffectLane {
     ///
     /// The lane, not the caller, reads the live descriptor for the authority. A stale intent
     /// (digest differs from the live catalog) is denied before the authority is asked.
-    /// `RequireApproval` returns `Pending` with the intent digest; no approval is created or
-    /// consumed here. `Deny` and `Contain` return errors.
+    /// `RequireApproval` returns `Pending` with the intent digest; no approval is consumed here
+    /// (see [`Self::authorize_approved`]). `Deny` and `Contain` return errors.
     pub fn authorize(
         &self,
         intent: EffectIntent,
         scope: EffectScope,
         authority: &dyn EffectAuthority,
+    ) -> Result<AuthorizedEffect<EffectIntent>, AuthorityOutcome> {
+        self.authorize_inner(intent, scope, authority, None)
+    }
+
+    /// Like [`Self::authorize`], but a `RequireApproval` verdict is satisfied by spending `grant`.
+    ///
+    /// The grant must have been issued by an [`crate::ApprovalDesk`] for exactly this intent and
+    /// scope, must be unspent and unexpired (`now < expires_at`). A refused grant is not spent
+    /// unless it was already spent. `Deny` and `Contain` stay refused whatever the grant says,
+    /// and an `Allow` verdict never touches the grant.
+    pub fn authorize_approved(
+        &self,
+        intent: EffectIntent,
+        scope: EffectScope,
+        authority: &dyn EffectAuthority,
+        grant: &ApprovalGrant,
+        now: u64,
+    ) -> Result<AuthorizedEffect<EffectIntent>, AuthorityOutcome> {
+        self.authorize_inner(intent, scope, authority, Some((grant, now)))
+    }
+
+    fn authorize_inner(
+        &self,
+        intent: EffectIntent,
+        scope: EffectScope,
+        authority: &dyn EffectAuthority,
+        approval: Option<(&ApprovalGrant, u64)>,
     ) -> Result<AuthorizedEffect<EffectIntent>, AuthorityOutcome> {
         let (descriptor, live) = {
             let inner = self.broker.lock();
@@ -274,10 +306,24 @@ impl EffectLane {
                 live,
                 scope.idempotency_key,
             )),
-            AuthorityDecision::RequireApproval(reason) => Err(AuthorityOutcome::Pending {
-                intent_digest: intent_digest(&intent),
-                reason,
-            }),
+            AuthorityDecision::RequireApproval(reason) => {
+                let Some((grant, now)) = approval else {
+                    return Err(AuthorityOutcome::Pending {
+                        intent_digest: intent_digest(&intent),
+                        reason,
+                    });
+                };
+                self.spend(grant, &intent, &scope, now)
+                    .map_err(AuthorityOutcome::Approval)?;
+                Ok(mint(
+                    intent,
+                    scope.world_id,
+                    scope.winning_jnode,
+                    policy_digest,
+                    live,
+                    scope.idempotency_key,
+                ))
+            }
             AuthorityDecision::Deny(reason) => Err(AuthorityOutcome::Denied(reason)),
             AuthorityDecision::Contain(reason) => Err(AuthorityOutcome::Contained(reason)),
         }
@@ -294,6 +340,73 @@ impl EffectLane {
         self.execute_effect(effect)
             .await
             .map_err(AuthorityOutcome::Execution)
+    }
+
+    /// `authorize_approved`, then `execute_effect`.
+    ///
+    /// If `grant` is already spent for this same effect (same intent, key, world, J-node), the
+    /// request is a replay: the ledger's existing outcome is returned and nothing is minted.
+    /// Any other use of a spent grant is refused with `ApprovalError::Consumed`.
+    pub async fn authorize_and_execute_approved(
+        &self,
+        intent: EffectIntent,
+        scope: EffectScope,
+        authority: &dyn EffectAuthority,
+        grant: &ApprovalGrant,
+        now: u64,
+    ) -> Result<EffectReceipt, AuthorityOutcome> {
+        if let Some(existing) = self.replay_of(grant, &intent, &scope) {
+            return existing.map_err(AuthorityOutcome::Execution);
+        }
+        let effect = self.authorize_approved(intent, scope, authority, grant, now)?;
+        self.execute_effect(effect)
+            .await
+            .map_err(AuthorityOutcome::Execution)
+    }
+
+    /// Ledger outcome for a spent grant presented again for the effect it was spent on.
+    fn replay_of(
+        &self,
+        grant: &ApprovalGrant,
+        intent: &EffectIntent,
+        scope: &EffectScope,
+    ) -> Option<Result<EffectReceipt, Error>> {
+        let inner = self.broker.lock();
+        let record = inner.approvals.get(&grant.id())?;
+        if !record.consumed || !record.binds(intent, scope) {
+            return None;
+        }
+        match inner.ledger.get(&scope.idempotency_key)? {
+            LedgerEntry::Completed(receipt) => Some(Ok(receipt.clone())),
+            LedgerEntry::Uncertain => Some(Err(Error::ReconciliationRequired)),
+            LedgerEntry::InFlight => Some(Err(Error::EffectInFlight)),
+        }
+    }
+
+    /// Check and spend `grant` atomically under the broker lock.
+    fn spend(
+        &self,
+        grant: &ApprovalGrant,
+        intent: &EffectIntent,
+        scope: &EffectScope,
+        now: u64,
+    ) -> Result<(), ApprovalError> {
+        let mut inner = self.broker.lock();
+        let record = inner
+            .approvals
+            .get_mut(&grant.id())
+            .ok_or(ApprovalError::Unknown)?;
+        if !record.binds(intent, scope) {
+            return Err(ApprovalError::Mismatch);
+        }
+        if record.consumed {
+            return Err(ApprovalError::Consumed);
+        }
+        if now >= record.expires_at {
+            return Err(ApprovalError::Expired);
+        }
+        record.consumed = true;
+        Ok(())
     }
 
     pub async fn execute_effect(
