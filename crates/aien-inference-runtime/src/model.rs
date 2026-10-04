@@ -75,7 +75,24 @@ impl EmbeddedModel {
         let weights = TransformerWeights::load_from_safetensors(checkpoint_path.as_ref(), &config)
             .map_err(|e| format!("Failed to load safetensors checkpoint: {}", e))?;
 
-        let tensor_backend: Arc<dyn TensorBackend> = if use_gpu {
+        let tensor_backend: Arc<dyn TensorBackend> = if use_gpu
+            && aien_inference_abi::omega_backend_selected()
+        {
+            let omega = aien_inference_abi::OmegaGb10Backend::new();
+            if omega.is_available() {
+                info!(
+                    "Binding EmbeddedModel to the native Omega GPU engine (AIEN_GPU_BACKEND=omega)"
+                );
+                Arc::new(omega)
+            } else if aien_inference_abi::strict::production_strict() {
+                return Err(aien_inference_abi::strict::violation(
+                    "AIEN_GPU_BACKEND=omega requested but the Omega GPU engine is not linked (stub build)",
+                ));
+            } else {
+                info!("Omega GPU engine unavailable, falling back to CPU reference execution");
+                Arc::new(ReferenceCpuBackend::new())
+            }
+        } else if use_gpu {
             let surface = ExecutionSurface::detect();
             if surface.is_accelerated_gpu() {
                 let gpu = BlackwellGb10Backend::new();

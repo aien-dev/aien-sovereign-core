@@ -1306,6 +1306,25 @@ fn build_native_daemon_backend() -> Result<DaemonBackendParts, String> {
         label: model_label,
         ..
     } = load_daemon_model(manifest, policy.require_checkpoint)?;
+    if aien_inference_abi::omega_backend_selected() {
+        let omega = aien_inference_abi::OmegaGb10Backend::new();
+        if omega.is_available() {
+            let name = aien_inference_abi::TensorBackend::name(&omega).to_string();
+            let tensor_backend: std::sync::Arc<dyn aien_inference_abi::TensorBackend> =
+                std::sync::Arc::new(omega);
+            return Ok((
+                weights,
+                tensor_backend,
+                format!("NativeTransformerBackend/{name}"),
+                model_label,
+                tokenizer,
+            ));
+        }
+        return Err(
+            "AIEN_GPU_BACKEND=omega is set but the Omega GPU engine is not linked (stub build)"
+                .to_string(),
+        );
+    }
     let probe = aien_inference_abi::BlackwellGb10Backend::new();
     let require_blackwell = std::env::var("AIEN_REQUIRE_BLACKWELL")
         .map(|v| v.trim() == "1" || v.trim().eq_ignore_ascii_case("true"))

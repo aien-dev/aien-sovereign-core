@@ -148,3 +148,107 @@ fn strict_real_model_gate() {
     assert!(!out.trim().is_empty(), "STRICT: empty output");
     verdict.unwrap_or_else(|e| panic!("{e}"));
 }
+
+/// FB-1 cut 3b gate: the same greedy generation on the CPU reference backend and on
+/// the Omega backend (AIEN_GPU_BACKEND=omega), same checkpoint. Records tok/s for
+/// both, asserts identical text and zero fallbacks of the claimed-native matmul ops.
+///   AIEN_E2E_CHECKPOINT=~/models/TinyLlama-1.1B-Chat-v1.0 AIEN_STRICT_RECEIPT=/path/receipt.json \
+///   cargo test -p aien-inference-runtime --release --test strict_real_model \
+///     omega_vs_reference_real_model -- --ignored --nocapture
+#[test]
+#[ignore = "needs the real checkpoint and the GB10 with a native Omega build; heavy queue only"]
+fn omega_vs_reference_real_model() {
+    let ckpt = PathBuf::from(std::env::var("AIEN_E2E_CHECKPOINT").expect("AIEN_E2E_CHECKPOINT"));
+    let receipt_path =
+        PathBuf::from(std::env::var("AIEN_STRICT_RECEIPT").expect("AIEN_STRICT_RECEIPT"));
+    let (model_path, dir) = if ckpt.is_dir() {
+        (ckpt.join("model.safetensors"), ckpt.clone())
+    } else {
+        (
+            ckpt.clone(),
+            ckpt.parent().map(Path::to_path_buf).unwrap_or_default(),
+        )
+    };
+    let tokenizer_path = dir.join("tokenizer.json");
+    let prompt = "The DGX Spark is a small computer with a large";
+    let max_tokens = 32usize;
+
+    let run = |model: &mut EmbeddedModel| -> (String, usize, f64) {
+        let mut text = String::new();
+        let mut n = 0usize;
+        let t = std::time::Instant::now();
+        model
+            .generate_stream(prompt, max_tokens, 0.0, |piece| {
+                text.push_str(piece);
+                n += 1;
+                true
+            })
+            .unwrap_or_else(|e| panic!("generate failed: {e}"));
+        (text, n, t.elapsed().as_secs_f64())
+    };
+
+    // Reference (CPU) leg.
+    let mut cpu = EmbeddedModel::load_checkpoint(&model_path, &tokenizer_path, false, true)
+        .unwrap_or_else(|e| panic!("reference load: {e}"));
+    println!(
+        "OMEGA_GATE ref backend: {}",
+        cpu.transformer.tensor_backend.name()
+    );
+    let (cpu_text, cpu_n, cpu_s) = run(&mut cpu);
+    println!(
+        "OMEGA_GATE ref tokens={cpu_n} secs={cpu_s:.3} tok/s={:.3} text={cpu_text:?}",
+        cpu_n as f64 / cpu_s
+    );
+    drop(cpu);
+
+    // Omega leg. The env var is read inside load_checkpoint; set before loading.
+    std::env::set_var(aien_inference_abi::GPU_BACKEND_ENV, "omega");
+    let mut om = EmbeddedModel::load_checkpoint(&model_path, &tokenizer_path, true, true)
+        .unwrap_or_else(|e| panic!("STRICT: omega bind refused: {e}"));
+    let backend_identity = om.transformer.tensor_backend.name().to_string();
+    println!("OMEGA_GATE omega backend: {backend_identity}");
+    // Warm-up: first call uploads every weight matrix; reported separately.
+    let t = std::time::Instant::now();
+    let _ = om.generate(prompt, 1, 0.0).expect("omega warm-up");
+    println!(
+        "OMEGA_GATE omega warm-up (weight upload + 1 token) secs={:.3}",
+        t.elapsed().as_secs_f64()
+    );
+    let (om_text, om_n, om_s) = run(&mut om);
+    println!(
+        "OMEGA_GATE omega tokens={om_n} secs={om_s:.3} tok/s={:.3} text={om_text:?}",
+        om_n as f64 / om_s
+    );
+    let report = om.transformer.tensor_backend.op_report();
+    println!("OMEGA_GATE {}", report.line());
+    let fallback_count = om.transformer.tensor_backend.fallback_count();
+    println!("OMEGA_GATE tokens_match={}", cpu_text == om_text);
+
+    let mut receipt = StrictModelReceipt {
+        checkpoint_path: model_path.display().to_string(),
+        checkpoint_sha256: sha256_file_hex(&model_path),
+        tokenizer_path: tokenizer_path.display().to_string(),
+        tokenizer_sha256: sha256_file_hex(&tokenizer_path),
+        backend_identity,
+        model_id: om.config.model_id.clone(),
+        model_config: serde_json::to_value(&om.config)
+            .unwrap_or(serde_json::json!({"model_id": om.config.model_id})),
+        fallback_count,
+        op_report: Some(report),
+        dev_fallback_build: strict::dev_fallback_active(),
+        verdict: String::new(),
+    };
+    let verdict = receipt.verify();
+    std::fs::write(
+        &receipt_path,
+        serde_json::to_string_pretty(&receipt).unwrap(),
+    )
+    .expect("write receipt");
+    println!(
+        "OMEGA_GATE verdict: {} (receipt {})",
+        receipt.verdict,
+        receipt_path.display()
+    );
+    assert_eq!(cpu_text, om_text, "Omega backend changed the greedy output");
+    verdict.unwrap_or_else(|e| panic!("{e}"));
+}

@@ -1,7 +1,6 @@
 //! Raw declarations, written by hand from omega `src/omega_gpu_matmul_api.h`
-//! at the commit pinned in `omega.lock` (d0ca8ce). Nothing generated.
-//! Functions added by later omega cuts (resident-weights handles, FB-1 cut 1b)
-//! get their own declarations here once they are on omega main and the lock moves.
+//! at the commit pinned in `omega.lock` (5e29b82). Nothing generated.
+//! Includes the resident-weights handles added by omega FB-1 cut 1b.
 use std::os::raw::{c_char, c_int};
 
 pub const OMEGA_GPU_MATMUL_OK: c_int = 0;
@@ -37,6 +36,13 @@ pub struct OmegaGpuMatmulInfo {
     pub kernel_cache_hit: bool,
     pub target_chip: [c_char; 64],
     pub sm_architecture: u32,
+    // cut 1b additions (appended in the C header, same order)
+    pub grid_x: u32,
+    pub grid_y: u32,
+    pub padded_k: u32,
+    pub resident: bool,
+    pub oracle_ran: bool,
+    pub call_ns: u64,
 }
 
 impl OmegaGpuMatmulInfo {
@@ -59,8 +65,20 @@ impl OmegaGpuMatmulInfo {
             kernel_cache_hit: false,
             target_chip: [0; 64],
             sm_architecture: 0,
+            grid_x: 0,
+            grid_y: 0,
+            padded_k: 0,
+            resident: false,
+            oracle_ran: false,
+            call_ns: 0,
         }
     }
+}
+
+/// Opaque resident weight tensor (omega `OmegaGpuTensor`).
+#[repr(C)]
+pub struct OmegaGpuTensor {
+    _private: [u8; 0],
 }
 
 #[cfg(has_omega_gpu)]
@@ -85,4 +103,35 @@ extern "C" {
     ) -> c_int;
     pub fn omega_gpu_matmul_rc_name(rc: c_int) -> *const c_char;
     pub fn omega_gpu_matmul_cache_clear();
+    pub fn omega_gpu_tensor_upload_bf16(
+        k: u32,
+        n: u32,
+        b: *const u16,
+        out: *mut *mut OmegaGpuTensor,
+    ) -> c_int;
+    pub fn omega_gpu_tensor_upload_f32(
+        k: u32,
+        n: u32,
+        b: *const f32,
+        out: *mut *mut OmegaGpuTensor,
+    ) -> c_int;
+    pub fn omega_gpu_tensor_free(t: *mut OmegaGpuTensor);
+    pub fn omega_gpu_tensor_shape(t: *const OmegaGpuTensor, k: *mut u32, n: *mut u32);
+    pub fn omega_gpu_matmul_resident_bf16(
+        m: u32,
+        a: *const u16,
+        b: *const OmegaGpuTensor,
+        c: *mut f32,
+        info: *mut OmegaGpuMatmulInfo,
+    ) -> c_int;
+    pub fn omega_gpu_matmul_resident_f32(
+        m: u32,
+        a: *const f32,
+        b: *const OmegaGpuTensor,
+        c: *mut f32,
+        info: *mut OmegaGpuMatmulInfo,
+    ) -> c_int;
+    pub fn omega_gpu_matmul_last_error() -> *const c_char;
+    pub fn omega_gpu_matmul_is_blocked() -> c_int;
+    pub fn omega_gpu_device_close();
 }

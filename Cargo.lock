@@ -106,6 +106,7 @@ version = "0.1.0"
 dependencies = [
  "aien-abi-core",
  "aien-kv-cache",
+ "aien-omega-gpu",
  "aien-platform",
  "async-trait",
  "libloading 0.8.9",
