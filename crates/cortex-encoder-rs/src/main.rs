@@ -27,11 +27,8 @@ pub fn resolve_onnx_runtime_lib() -> String {
     let home = std::env::var("HOME")
         .or_else(|_| std::env::var("USERPROFILE"))
         .unwrap_or_else(|_| ".".to_string());
+    // Only plain library locations: no lookup inside a Python environment.
     let candidates = [
-        format!(
-            "{}/max-env/lib/python3.12/site-packages/onnxruntime/capi/libonnxruntime.so.1.30.0",
-            home
-        ),
         format!("{}/.local/lib/libonnxruntime.so", home),
         "/usr/local/lib/libonnxruntime.so".to_string(),
         "/usr/lib/libonnxruntime.so".to_string(),
@@ -41,7 +38,8 @@ pub fn resolve_onnx_runtime_lib() -> String {
             return c.clone();
         }
     }
-    candidates[0].clone()
+    // Let the dynamic loader search its own paths (LD_LIBRARY_PATH, ldconfig).
+    "libonnxruntime.so".to_string()
 }
 
 pub fn resolve_embed_dir() -> String {

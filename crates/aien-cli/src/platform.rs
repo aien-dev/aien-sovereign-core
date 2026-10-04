@@ -82,13 +82,4 @@ impl PlatformContext {
     pub fn is_dgx_spark(&self) -> bool {
         self.kind == PlatformKind::DgxSpark
     }
-
-    pub fn python_bin(&self) -> PathBuf {
-        let max_env = self.home_dir.join("max-env/bin/python");
-        if max_env.exists() {
-            max_env
-        } else {
-            PathBuf::from("python3")
-        }
-    }
 }
