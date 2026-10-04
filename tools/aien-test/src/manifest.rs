@@ -60,6 +60,84 @@ pub struct Build {
     pub tool: String,
 }
 
+/// Epistemic requirement of a check (ADR 0033 Decision 2). v1 manifests are
+/// always `Exact`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Exactness {
+    Exact,
+    Bounded,
+    Approximate,
+    Advisory,
+}
+
+impl Exactness {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Exactness::Exact => "EXACT",
+            Exactness::Bounded => "BOUNDED",
+            Exactness::Approximate => "APPROXIMATE",
+            Exactness::Advisory => "ADVISORY",
+        }
+    }
+}
+
+/// What a check's cache key and identity bind to (ADR 0033 Decision 5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CacheScope {
+    Portable,
+    Arch,
+    Machine,
+    Hardware,
+}
+
+impl CacheScope {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            CacheScope::Portable => "portable",
+            CacheScope::Arch => "arch",
+            CacheScope::Machine => "machine",
+            CacheScope::Hardware => "hardware",
+        }
+    }
+}
+
+/// `tolerance`: integers only (receipts carry no floats, ADR 0028 C3).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Tolerance {
+    pub metric: String,
+    pub abs: u64,
+    pub rel_ppm: u64,
+}
+
+/// `backends`: where the check may run and which result is authoritative.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Backends {
+    pub eligible: Vec<String>,
+    pub canonical: String,
+}
+
+/// `oracle`: explicit pass condition beyond the v1 `exit` + `observe`.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Oracle {
+    /// Repo-relative golden file; its sha256 enters the check identity.
+    pub golden: Option<String>,
+    /// Another gate whose result this check is compared against.
+    pub compare: Option<String>,
+}
+
+pub const BACKEND_NAMES: [&str; 6] = [
+    "portable",
+    "spark",
+    "qemu",
+    "gb10",
+    "analog_sim",
+    "analog_device",
+];
+
+fn is_analog(b: &str) -> bool {
+    b == "analog_sim" || b == "analog_device"
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Manifest {
     pub gate: String,
@@ -76,6 +154,15 @@ pub struct Manifest {
     pub mutants: Vec<String>,
     pub checks: Vec<String>,
     pub cache_allowed: bool,
+    /// `manifest_version` (1 or 2). The fields below are v2 and hold their
+    /// documented defaults for a v1 manifest.
+    pub version: u8,
+    pub exactness: Exactness,
+    pub tolerance: Option<Tolerance>,
+    pub backends: Backends,
+    pub fallback: Vec<String>,
+    pub cache_scope: CacheScope,
+    pub oracle: Oracle,
     /// sha256 of the exact manifest file bytes (P7).
     pub digest: String,
 }
@@ -83,7 +170,7 @@ pub struct Manifest {
 impl Manifest {
     /// The scarcest listed pool: gb10 > qemu > host.
     pub fn pool(&self) -> &'static str {
-        if self.requires.iter().any(|r| r == "gb10") {
+        if self.requires.iter().any(|r| r == "gb10" || r == "nvrm") {
             "gb10"
         } else if self.requires.iter().any(|r| r == "qemu") {
             "qemu"
@@ -366,6 +453,233 @@ pub fn parse_json_scalar(s: &str) -> Option<Value> {
     }
 }
 
+pub const REQUIRES_V2: [&str; 9] = [
+    "portable",
+    "aarch64",
+    "host",
+    "qemu",
+    "gb10",
+    "nvrm",
+    "bare_metal",
+    "analog_eligible",
+    "operator",
+];
+
+const V2_KEYS: [&str; 6] = [
+    "exactness",
+    "tolerance",
+    "backends",
+    "fallback",
+    "cache_scope",
+    "oracle",
+];
+
+fn bad<T>(msg: String) -> Result<T, ManifestError> {
+    Err(ManifestError(msg))
+}
+
+fn child_u64(c: &[(String, Val, usize)], k: &str) -> Result<u64, ManifestError> {
+    let s = child_str(c, k)?.ok_or_else(|| ManifestError(format!("tolerance.{k} missing")))?;
+    if s.is_empty() || !s.chars().all(|ch| ch.is_ascii_digit()) {
+        return bad(format!(
+            "tolerance.{k} must be a non-negative integer, got {s:?}"
+        ));
+    }
+    s.parse::<u64>()
+        .map_err(|_| ManifestError(format!("tolerance.{k} out of range")))
+}
+
+/// The v2 keys (ADR 0033 Decision 2) with their defaults and refusals.
+type V2 = (
+    Exactness,
+    Option<Tolerance>,
+    Backends,
+    Vec<String>,
+    CacheScope,
+    Oracle,
+);
+
+fn parse_v2(entries: &[Entry], requires: &[String]) -> Result<V2, ManifestError> {
+    let get = |k: &str| entries.iter().find(|e| e.key == k);
+    let exactness = match get("exactness") {
+        None => Exactness::Exact,
+        Some(e) => match scalar(e)?.as_str() {
+            "EXACT" => Exactness::Exact,
+            "BOUNDED" => Exactness::Bounded,
+            "APPROXIMATE" => Exactness::Approximate,
+            "ADVISORY" => Exactness::Advisory,
+            o => return bad(format!("unknown exactness {o:?}")),
+        },
+    };
+    let tolerance = match get("tolerance") {
+        None => None,
+        Some(e) => {
+            let c = map(e, &["metric", "abs", "rel_ppm"])?;
+            let metric = child_str(c, "metric")?
+                .ok_or_else(|| ManifestError("tolerance.metric missing".into()))?;
+            if !valid_obs_name(&metric) {
+                return bad(format!("bad tolerance.metric {metric:?}"));
+            }
+            Some(Tolerance {
+                metric,
+                abs: child_u64(c, "abs")?,
+                rel_ppm: child_u64(c, "rel_ppm")?,
+            })
+        }
+    };
+    if tolerance.is_some() && exactness != Exactness::Bounded {
+        return bad("tolerance is only allowed with exactness BOUNDED".into());
+    }
+    if tolerance.is_none() && exactness == Exactness::Bounded {
+        return bad("exactness BOUNDED requires a tolerance".into());
+    }
+    let cache_scope = match get("cache_scope") {
+        None => CacheScope::Machine,
+        Some(e) => match scalar(e)?.as_str() {
+            "portable" => CacheScope::Portable,
+            "arch" => CacheScope::Arch,
+            "machine" => CacheScope::Machine,
+            "hardware" => CacheScope::Hardware,
+            o => return bad(format!("unknown cache_scope {o:?}")),
+        },
+    };
+    let analog_ok = exactness != Exactness::Exact;
+    if requires.iter().any(|r| r == "analog_eligible") && !analog_ok {
+        return bad("requires analog_eligible is not allowed for an EXACT check".into());
+    }
+    let check_backend = |b: &str| -> Result<(), ManifestError> {
+        if BACKEND_NAMES.contains(&b) {
+            Ok(())
+        } else {
+            bad(format!("unknown backend {b:?}"))
+        }
+    };
+    // Eligible backends implied by `requires` when none are declared.
+    let mut implied: Vec<String> = Vec::new();
+    for r in requires {
+        let b = match r.as_str() {
+            "portable" => "portable",
+            "host" | "aarch64" => "spark",
+            "qemu" => "qemu",
+            "gb10" | "nvrm" => "gb10",
+            "analog_eligible" => "analog_sim",
+            _ => continue,
+        };
+        if !implied.iter().any(|x| x == b) {
+            implied.push(b.to_string());
+        }
+    }
+    let (eligible, declared_canonical) = match get("backends") {
+        None => (implied, None),
+        Some(e) => {
+            let c = map(e, &["eligible", "canonical"])?;
+            let eligible = match child(c, "eligible") {
+                None => implied,
+                Some((_, Val::List(l), _)) => l.clone(),
+                Some((_, Val::Str(_), n)) => {
+                    return err(*n, "backends.eligible must be a one-line list")
+                }
+            };
+            (eligible, child_str(c, "canonical")?)
+        }
+    };
+    if eligible.is_empty() {
+        return bad("backends.eligible is empty".into());
+    }
+    for b in &eligible {
+        check_backend(b)?;
+        if is_analog(b) && exactness == Exactness::Exact {
+            return bad(format!(
+                "backend {b} may not be eligible for an EXACT check"
+            ));
+        }
+    }
+    let canonical = match declared_canonical {
+        Some(c) => {
+            check_backend(&c)?;
+            c
+        }
+        None => {
+            // ADR default: spark, or portable when `requires` is only
+            // portable. Deviation: when spark is not eligible (a qemu or gb10
+            // only check) the first digital eligible backend is canonical.
+            let only_portable = requires.iter().all(|r| r == "portable");
+            if only_portable && eligible.iter().any(|b| b == "portable") {
+                "portable".to_string()
+            } else if eligible.iter().any(|b| b == "spark") {
+                "spark".to_string()
+            } else {
+                match eligible.iter().find(|b| !is_analog(b)) {
+                    Some(b) => b.clone(),
+                    None => return bad("no digital backend is eligible".into()),
+                }
+            }
+        }
+    };
+    if !eligible.contains(&canonical) {
+        return bad(format!(
+            "canonical backend {canonical} is not in backends.eligible"
+        ));
+    }
+    if is_analog(&canonical)
+        && exactness != Exactness::Approximate
+        && exactness != Exactness::Advisory
+    {
+        return bad(format!(
+            "canonical backend {canonical} is only allowed for APPROXIMATE or ADVISORY"
+        ));
+    }
+    let fallback = match get("fallback") {
+        None => vec!["spark".to_string()],
+        Some(e) => {
+            let l = list(e)?;
+            if l.is_empty() {
+                return bad("fallback is empty".into());
+            }
+            for b in &l {
+                check_backend(b)?;
+            }
+            l
+        }
+    };
+    let oracle = match get("oracle") {
+        None => Oracle::default(),
+        Some(e) => {
+            let c = map(e, &["golden", "compare"])?;
+            let golden = child_str(c, "golden")?;
+            let compare = child_str(c, "compare")?;
+            if golden.is_some() && compare.is_some() {
+                return bad("oracle takes golden or compare, not both".into());
+            }
+            if golden.is_none() && compare.is_none() {
+                return bad("oracle needs golden or compare".into());
+            }
+            if let Some(g) = &golden {
+                if !valid_rel_path(g) {
+                    return bad(format!("oracle.golden must be a repo-relative path: {g:?}"));
+                }
+            }
+            if let Some(g) = &compare {
+                if !valid_gate_id(g) {
+                    return bad(format!("invalid oracle.compare gate id {g:?}"));
+                }
+            }
+            Oracle { golden, compare }
+        }
+    };
+    Ok((
+        exactness,
+        tolerance,
+        Backends {
+            eligible,
+            canonical,
+        },
+        fallback,
+        cache_scope,
+        oracle,
+    ))
+}
+
 pub fn parse(bytes: &[u8]) -> Result<Manifest, ManifestError> {
     if bytes.len() > MAX_BYTES {
         return Err(ManifestError("manifest larger than 16 KiB".into()));
@@ -388,7 +702,7 @@ pub fn parse(bytes: &[u8]) -> Result<Manifest, ManifestError> {
     }
     let entries = parse_entries(text)?;
 
-    const KNOWN: [&str; 13] = [
+    const KNOWN: [&str; 19] = [
         "gate",
         "manifest_version",
         "owner",
@@ -402,6 +716,12 @@ pub fn parse(bytes: &[u8]) -> Result<Manifest, ManifestError> {
         "mutants",
         "checks",
         "cache",
+        "exactness",
+        "tolerance",
+        "backends",
+        "fallback",
+        "cache_scope",
+        "oracle",
     ];
     for e in &entries {
         if !KNOWN.contains(&e.key.as_str()) {
@@ -418,26 +738,50 @@ pub fn parse(bytes: &[u8]) -> Result<Manifest, ManifestError> {
     if !valid_gate_id(&gate) {
         return Err(ManifestError(format!("invalid gate id {gate:?}")));
     }
-    if scalar(need("manifest_version")?)? != "1" {
-        return Err(ManifestError(
-            "unsupported manifest_version (only 1)".into(),
-        ));
+    let version: u8 = match scalar(need("manifest_version")?)?.as_str() {
+        "1" => 1,
+        "2" => 2,
+        _ => {
+            return Err(ManifestError(
+                "unsupported manifest_version (only 1 or 2)".into(),
+            ))
+        }
+    };
+    if version == 1 {
+        if let Some(e) = entries.iter().find(|e| V2_KEYS.contains(&e.key.as_str())) {
+            return err(
+                e.line,
+                &format!("key {} requires manifest_version 2", e.key),
+            );
+        }
     }
     let owner = scalar(need("owner")?)?;
 
-    let requires = list(need("requires")?)?;
+    let requires = match (version, get("requires")) {
+        (1, _) => list(need("requires")?)?,
+        (_, Some(e)) => list(e)?,
+        (_, None) => vec!["host".to_string()],
+    };
+    let allowed: &[&str] = if version == 1 {
+        &["host", "qemu", "gb10", "operator"]
+    } else {
+        &REQUIRES_V2
+    };
     for r in &requires {
-        if !["host", "qemu", "gb10", "operator"].contains(&r.as_str()) {
+        if !allowed.contains(&r.as_str()) {
             return Err(ManifestError(format!("unknown requires entry {r:?}")));
         }
     }
-    if !requires
-        .iter()
-        .any(|r| r == "host" || r == "qemu" || r == "gb10")
-    {
-        return Err(ManifestError(
-            "requires must list one of host, qemu, gb10".into(),
-        ));
+    let pools: &[&str] = if version == 1 {
+        &["host", "qemu", "gb10"]
+    } else {
+        &["host", "qemu", "gb10", "nvrm", "portable", "aarch64"]
+    };
+    if !requires.iter().any(|r| pools.contains(&r.as_str())) {
+        return Err(ManifestError(format!(
+            "requires must list one of {}",
+            pools.join(", ")
+        )));
     }
 
     let depends_on = match get("depends_on") {
@@ -555,6 +899,10 @@ pub fn parse(bytes: &[u8]) -> Result<Manifest, ManifestError> {
         },
     };
 
+    // v1 manifests carry none of the v2 keys, so this yields the defaults.
+    let (exactness, tolerance, backends, fallback, cache_scope, oracle) =
+        parse_v2(&entries, &requires)?;
+
     Ok(Manifest {
         gate,
         owner,
@@ -570,6 +918,13 @@ pub fn parse(bytes: &[u8]) -> Result<Manifest, ManifestError> {
         mutants,
         checks,
         cache_allowed,
+        version,
+        exactness,
+        tolerance,
+        backends,
+        fallback,
+        cache_scope,
+        oracle,
         digest: sha256_hex(bytes),
     })
 }
@@ -695,7 +1050,7 @@ mod tests {
     fn missing_required_and_bad_version() {
         assert!(parse(GOOD.replace("timeout: 5s\n", "").as_bytes()).is_err());
         assert!(parse(
-            GOOD.replace("manifest_version: 1", "manifest_version: 2")
+            GOOD.replace("manifest_version: 1", "manifest_version: 3")
                 .as_bytes()
         )
         .is_err());
@@ -748,6 +1103,173 @@ mod tests {
             parse_rule("s == \"a b\"").unwrap().value,
             Value::from("a b")
         );
+    }
+
+    fn v2(extra: &str) -> String {
+        GOOD.replace("manifest_version: 1", "manifest_version: 2") + extra
+    }
+
+    fn v2_err(extra: &str) -> String {
+        parse(v2(extra).as_bytes()).unwrap_err().0
+    }
+
+    #[test]
+    fn v1_fixture_parses_to_the_same_values_as_before_slice_d() {
+        let m = parse(GOOD.as_bytes()).unwrap();
+        let expected = Manifest {
+            gate: "G-1".into(),
+            owner: "omega".into(),
+            requires: vec!["host".into()],
+            depends_on: vec![],
+            inputs: vec![],
+            build: None,
+            exec: "tools/run.sh".into(),
+            args: vec!["--a".into(), "b c".into()],
+            expect_exit: 0,
+            rules: m.rules.clone(),
+            timeout_ms: 5000,
+            mutants: vec![],
+            checks: vec![],
+            cache_allowed: true,
+            version: 1,
+            exactness: Exactness::Exact,
+            tolerance: None,
+            backends: Backends {
+                eligible: vec!["spark".into()],
+                canonical: "spark".into(),
+            },
+            fallback: vec!["spark".into()],
+            cache_scope: CacheScope::Machine,
+            oracle: Oracle::default(),
+            digest: sha256_hex(GOOD.as_bytes()),
+        };
+        assert_eq!(m, expected);
+        assert_eq!(m.rules.len(), 3);
+    }
+
+    #[test]
+    fn v1_rejects_every_v2_key() {
+        for extra in [
+            "exactness: EXACT\n",
+            "cache_scope: portable\n",
+            "fallback: [\"spark\"]\n",
+            "backends:\n  canonical: spark\n",
+            "oracle:\n  golden: g.txt\n",
+            "tolerance:\n  metric: m\n  abs: 1\n  rel_ppm: 1\n",
+        ] {
+            let e = parse(with(extra).as_bytes()).unwrap_err().0;
+            assert!(e.contains("requires manifest_version 2"), "{extra}: {e}");
+        }
+        assert!(parse(with("requires: [\"portable\"]\n").as_bytes()).is_err());
+        let t = GOOD.replace("  - host\n", "  - host\n  - nvrm\n");
+        assert!(parse(t.as_bytes()).is_err());
+    }
+
+    #[test]
+    fn a_v2_manifest_without_v2_keys_equals_its_v1_twin() {
+        let a = parse(GOOD.as_bytes()).unwrap();
+        let b = parse(v2("").as_bytes()).unwrap();
+        assert_eq!(b.version, 2);
+        let mut b2 = b.clone();
+        b2.version = 1;
+        b2.digest = a.digest.clone();
+        assert_eq!(a, b2);
+    }
+
+    #[test]
+    fn v2_defaults() {
+        let m = parse(v2("").as_bytes()).unwrap();
+        assert_eq!(m.exactness, Exactness::Exact);
+        assert_eq!(m.cache_scope, CacheScope::Machine);
+        assert_eq!(m.fallback, vec!["spark".to_string()]);
+        assert_eq!(m.backends.canonical, "spark");
+        let t = v2("").replace("requires:\n  - host\n", "");
+        let m = parse(t.as_bytes()).unwrap();
+        assert_eq!(m.requires, vec!["host".to_string()]);
+        let t = v2("").replace("  - host\n", "  - portable\n");
+        let m = parse(t.as_bytes()).unwrap();
+        assert_eq!(m.backends.canonical, "portable");
+        let t = v2("").replace("  - host\n", "  - gb10\n");
+        let m = parse(t.as_bytes()).unwrap();
+        assert_eq!(m.backends.canonical, "gb10");
+        assert_eq!(m.pool(), "gb10");
+    }
+
+    #[test]
+    fn v2_keys_parse() {
+        let m = parse(
+            v2(concat!(
+                "exactness: BOUNDED\n",
+                "tolerance:\n  metric: max_ulp\n  abs: 2\n  rel_ppm: 100\n",
+                "backends:\n  eligible: [\"spark\", \"analog_sim\"]\n  canonical: spark\n",
+                "fallback: [\"spark\", \"gb10\"]\n",
+                "cache_scope: arch\n",
+                "oracle:\n  golden: tests/g.txt\n",
+            ))
+            .as_bytes(),
+        )
+        .unwrap();
+        assert_eq!(m.exactness, Exactness::Bounded);
+        let t = m.tolerance.unwrap();
+        assert_eq!((t.metric.as_str(), t.abs, t.rel_ppm), ("max_ulp", 2, 100));
+        assert_eq!(m.backends.eligible, vec!["spark", "analog_sim"]);
+        assert_eq!(m.fallback, vec!["spark", "gb10"]);
+        assert_eq!(m.cache_scope, CacheScope::Arch);
+        assert_eq!(m.oracle.golden.as_deref(), Some("tests/g.txt"));
+        let m = parse(v2("oracle:\n  compare: G-0\n").as_bytes()).unwrap();
+        assert_eq!(m.oracle.compare.as_deref(), Some("G-0"));
+    }
+
+    #[test]
+    fn v2_refusals() {
+        let tol = "tolerance:\n  metric: m\n  abs: 1\n  rel_ppm: 1\n";
+        assert!(v2_err(tol).contains("only allowed with exactness BOUNDED"));
+        assert!(v2_err("exactness: BOUNDED\n").contains("requires a tolerance"));
+        assert!(v2_err("backends:\n  eligible: [\"spark\", \"analog_sim\"]\n").contains("EXACT"));
+        assert!(v2_err("backends:\n  eligible: [\"analog_device\"]\n").contains("EXACT"));
+        assert!(
+            v2_err("backends:\n  eligible: [\"spark\"]\n  canonical: gb10\n")
+                .contains("not in backends.eligible")
+        );
+        let t =
+            v2("requires: [\"host\", \"analog_eligible\"]\n").replace("requires:\n  - host\n", "");
+        assert!(parse(t.as_bytes()).unwrap_err().0.contains("EXACT"));
+        for bad in [
+            "exactness: exact\n",
+            "cache_scope: galaxy\n",
+            "backends:\n  canonical: moon\n",
+            "backends:\n  eligible: [\"moon\"]\n",
+            "fallback: [\"moon\"]\n",
+            "fallback: []\n",
+            "oracle:\n  golden: /abs\n",
+            "oracle:\n  golden: a\n  compare: G\n",
+            "oracle:\n  shell: x\n",
+            "surprise: 1\n",
+            "exactness: BOUNDED\ntolerance:\n  metric: m\n  abs: 1.5\n  rel_ppm: 1\n",
+            "exactness: BOUNDED\ntolerance:\n  metric: m\n  abs: 1\n",
+        ] {
+            assert!(parse(v2(bad).as_bytes()).is_err(), "{bad}");
+        }
+        let t = v2("").replace("  - host\n", "  - moon\n");
+        assert!(parse(t.as_bytes()).is_err());
+    }
+
+    #[test]
+    fn analog_may_scout_bounded_and_run_approximate() {
+        let b = "exactness: BOUNDED\ntolerance:\n  metric: m\n  abs: 1\n  rel_ppm: 0\nbackends:\n  eligible: [\"spark\", \"analog_sim\"]\n";
+        assert!(parse(v2(b).as_bytes()).is_ok());
+        let bad = format!("{b}  canonical: analog_sim\n");
+        assert!(v2_err(&bad).contains("APPROXIMATE or ADVISORY"));
+        let a = "exactness: APPROXIMATE\nbackends:\n  eligible: [\"analog_sim\"]\n  canonical: analog_sim\n";
+        let m = parse(v2(a).as_bytes()).unwrap();
+        assert_eq!(m.backends.canonical, "analog_sim");
+        let m = parse(
+            v2("exactness: ADVISORY\nrequires: [\"host\", \"analog_eligible\"]\n")
+                .replace("requires:\n  - host\n", "")
+                .as_bytes(),
+        )
+        .unwrap();
+        assert!(m.backends.eligible.iter().any(|b| b == "analog_sim"));
     }
 
     #[test]

@@ -361,7 +361,7 @@ pub fn build_inputs_digest(root: &Path, manifest_rel: Option<&Path>, m: &Manifes
     canonical_digest(&json!({ "inputs": entries })).unwrap_or_default()
 }
 
-fn machine(hw: &Hardware) -> Value {
+pub(crate) fn machine(hw: &Hardware) -> Value {
     let kernel = fs::read_to_string("/proc/sys/kernel/osrelease")
         .map(|s| s.trim().to_string())
         .unwrap_or_default();
