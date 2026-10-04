@@ -18,7 +18,7 @@ exec /home/drakestapleton/max-env/bin/max serve \
   --model nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16 \
   "${WEIGHT_ARGS[@]}" \
   --served-model-name atlas-lightning-omni \
-  --custom-architectures /home/drakestapleton/nemotron_h_kvexp \
+  --custom-architectures /home/drakestapleton/workspace/aien-yardsticks/yardsticks/modular-nemotron-h-kvexp \
   --port 18006 \
   --max-batch-size 8 \
   --max-length 32768 \

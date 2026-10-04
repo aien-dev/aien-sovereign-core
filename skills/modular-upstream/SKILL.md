@@ -9,12 +9,12 @@ Use this skill when developing, testing, packaging, or submitting pull requests 
 
 ## Sovereign Mission & Upstream Invariant
 
-1. **The Upstream Invariant ("Drop != Delete")**: Any modification, patch, or novel architecture developed on our Grace Blackwell GB10 stack (such as `nemotron_h_kvexp` or MAX custom kernel pipelines) must be contributed back upstream to Modular.
+1. **The Upstream Invariant ("Drop != Delete")**: Any modification, patch, or novel architecture developed on our Grace Blackwell GB10 stack (such as `nemotron_h_kvexp`, now in the aien-yardsticks repo, or MAX custom kernel pipelines) must be contributed back upstream to Modular.
 2. **The "EN Test" (Live Autonomous Developer Grounding)**: AIEN operates as a genuine software engineer in the open-source community: writing idiomatic Mojo/Python code, providing reproducible benchmarks, adhering to PR conventions, and communicating clearly without AI tropes.
 
 ## Workspace & Subsystems
 
-- `nemotron_h_kvexp`: Our custom MAX architecture loader for Nemotron 30B KV-cache expansion.
+- `nemotron_h_kvexp`: Our custom MAX architecture loader for Nemotron 30B KV-cache expansion. It is a yardstick and lives outside AIEN in https://github.com/aien-dev/aien-yardsticks (path `yardsticks/modular-nemotron-h-kvexp`).
 - `max-env` / `max-dev-env`: Modular MAX Python 3.12 virtual environments with `max` CLI and `modular` SDK.
 - `modular_sandbox_project`: Isolated workspace for authoring and benchmarking new Mojo modules.
 
@@ -23,8 +23,8 @@ Use this skill when developing, testing, packaging, or submitting pull requests 
 ### 1. Inspect Local Custom Architectures
 Examine how custom architecture interfaces, model configs, and weight adapters hook into MAX:
 ```bash
-ls -la ~/nemotron_h_kvexp
-cat ~/nemotron_h_kvexp/arch.py
+ls -la ~/workspace/aien-yardsticks/yardsticks/modular-nemotron-h-kvexp
+cat ~/workspace/aien-yardsticks/yardsticks/modular-nemotron-h-kvexp/arch.py
 ```
 
 ### 2. Verify MAX Serving & Pipelines
