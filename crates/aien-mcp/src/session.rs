@@ -8,7 +8,7 @@ use rmcp::service::RoleClient;
 use rmcp::transport::IntoTransport;
 
 use crate::transport::RmcpClientWire;
-use crate::{EffectLane, Error, McpBroker, McpWire, SpeculativeLane};
+use crate::{ApprovalDesk, EffectLane, Error, McpBroker, McpWire, SpeculativeLane};
 
 /// Admits MCP providers and hands out the two lanes.
 ///
@@ -32,6 +32,11 @@ impl SessionManager {
 
     pub fn effect_lane(&self) -> EffectLane {
         EffectLane::new(self.broker.clone())
+    }
+
+    /// The approver's handle. Keep it away from callers of the effect lane.
+    pub fn approval_desk(&self) -> ApprovalDesk {
+        ApprovalDesk::new(self.broker.clone())
     }
 
     /// Enroll a provider that is already on an [`McpWire`].

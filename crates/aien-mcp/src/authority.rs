@@ -17,6 +17,7 @@
 
 use aien_capability::{Digest32, EffectId, JNodeId, ToolDescriptor, ToolEffects, WorldId};
 
+use crate::approval::ApprovalError;
 use crate::{EffectIntent, Error};
 
 /// Verdict of an [`EffectAuthority`]. Same five variants as aegis-runtime `DoctrineDecision`.
@@ -25,7 +26,7 @@ pub enum AuthorityDecision {
     Allow,
     /// Allowed under the listed restrictions (recorded in the policy digest).
     AllowRestricted(Vec<String>),
-    /// A human or approval authority must decide. Nothing runs and nothing is consumed.
+    /// A human or approval authority must decide. Nothing runs and nothing is consumed until an approval is spent.
     RequireApproval(String),
     Deny(String),
     Contain(String),
@@ -83,11 +84,13 @@ pub trait EffectAuthority {
 #[derive(Debug, PartialEq, Eq)]
 pub enum AuthorityOutcome {
     /// Approval is required. Nothing executed. `intent_digest` names the intent to approve.
-    /// No approval record is created or consumed by aien-mcp.
+    /// Issue one with [`crate::ApprovalDesk`] and spend it with [`crate::EffectLane::authorize_approved`].
     Pending {
         intent_digest: Digest32,
         reason: String,
     },
+    /// Approval was presented but could not be spent. See [`ApprovalError`].
+    Approval(ApprovalError),
     Denied(String),
     Contained(String),
     /// Authorization succeeded but the effect lane failed (stale catalog, provider error, ...).
