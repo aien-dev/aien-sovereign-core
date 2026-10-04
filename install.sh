@@ -11,22 +11,39 @@ echo "=================================================================="
 echo "      ⚡ AIEN Sovereign Stack: Universal Developer Installer       "
 echo "=================================================================="
 
-# Run from a checkout or bootstrap one when the script is piped to Bash.
+# Release mode (AIEN_RELEASE_TAG=vX.Y.Z) installs a published, signed release and
+# needs no source tree and no network beyond the three release assets.
+RELEASE_TAG="${AIEN_RELEASE_TAG:-}"
+
+# Release signing key, pinned here so a release can be verified with nothing but
+# this file and the assets (offline). Must equal docs/release/allowed_signers;
+# scripts/test-install-release.sh checks that they match.
+AIEN_PINNED_SIGNER='aien-release ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAID6WDVy2x8aV80ag10iPonS4J8k4seWrgsi5cuq8AIZJ'
+
+# Run from a checkout, or bootstrap one when the script is piped to Bash for a
+# source build. Release mode runs without a checkout.
 INSTALL_WORKSPACE=""
+SOURCE_ROOT=""
 if [[ -n "${AIEN_SOURCE_DIR:-}" ]]; then
     SOURCE_ROOT="$(cd "$AIEN_SOURCE_DIR" && pwd)"
 elif [[ -f "${BASH_SOURCE[0]:-}" && -f "$(dirname "${BASH_SOURCE[0]}")/Cargo.toml" ]]; then
     SOURCE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-else
+elif [[ -z "$RELEASE_TAG" ]]; then
     INSTALL_WORKSPACE="$(mktemp -d "${TMPDIR:-/tmp}/aien-install.XXXXXX")"
     trap 'rm -rf "$INSTALL_WORKSPACE"' EXIT
     git clone --quiet https://github.com/aien-dev/aien-sovereign-core.git "$INSTALL_WORKSPACE/core"
-    git -C "$INSTALL_WORKSPACE/core" checkout --quiet "${AIEN_REV:-${AIEN_RELEASE_TAG:-main}}"
+    git -C "$INSTALL_WORKSPACE/core" checkout --quiet "${AIEN_REV:-main}"
     SOURCE_ROOT="$INSTALL_WORKSPACE/core"
 fi
-[[ -f "$SOURCE_ROOT/Cargo.toml" ]] || { echo "AIEN source manifest is missing" >&2; exit 1; }
-cd "$SOURCE_ROOT"
-echo "[*] Source commit: $(git rev-parse HEAD)"
+if [[ -n "$SOURCE_ROOT" ]]; then
+    [[ -f "$SOURCE_ROOT/Cargo.toml" ]] || { echo "AIEN source manifest is missing" >&2; exit 1; }
+    cd "$SOURCE_ROOT"
+    echo "[*] Source commit: $(git rev-parse HEAD 2>/dev/null || echo unknown)"
+else
+    echo "[*] Release mode without a source tree: $RELEASE_TAG"
+fi
+# Where the EN2 imprint comes from: the checkout, or the release archive (set below).
+IMPRINT_SRC="${SOURCE_ROOT:+$SOURCE_ROOT/imprints/en2-trinity}"
 
 OS="$(uname -s | tr "[:upper:]" "[:lower:]")"
 ARCH="$(uname -m)"
@@ -62,13 +79,21 @@ install_release() {
     local tag="$1"
     command -v ssh-keygen >/dev/null 2>&1 || { echo "Error: ssh-keygen is required to verify the release signature" >&2; exit 1; }
     command -v curl >/dev/null 2>&1 || { echo "Error: curl is required to download the release" >&2; exit 1; }
-    local signers="${AIEN_ALLOWED_SIGNERS:-$SOURCE_ROOT/docs/release/allowed_signers}"
-    [[ -f "$signers" ]] || { echo "Error: pinned signer file not found: $signers" >&2; exit 1; }
     local base="${AIEN_RELEASE_BASE_URL:-https://github.com/aien-dev/aien-sovereign-core/releases/download/$tag}"
     local asset="sovereign-${TARGET_OS}-${RELEASE_ARCH}.tar.gz"
     DL_DIR=""
     DL_DIR="$(mktemp -d "${TMPDIR:-/tmp}/aien-release.XXXXXX")"
     trap 'rm -rf "$DL_DIR"; [[ -z "$INSTALL_WORKSPACE" ]] || rm -rf "$INSTALL_WORKSPACE"' EXIT
+    # Signer file: explicit override, else the checkout's copy, else the key pinned above.
+    local signers="${AIEN_ALLOWED_SIGNERS:-}"
+    if [[ -z "$signers" && -n "$SOURCE_ROOT" && -f "$SOURCE_ROOT/docs/release/allowed_signers" ]]; then
+        signers="$SOURCE_ROOT/docs/release/allowed_signers"
+    fi
+    if [[ -z "$signers" ]]; then
+        signers="$DL_DIR/allowed_signers"
+        printf '%s\n' "$AIEN_PINNED_SIGNER" > "$signers"
+    fi
+    [[ -f "$signers" ]] || { echo "Error: pinned signer file not found: $signers" >&2; exit 1; }
     echo "[*] Downloading $tag: $asset, SHA256SUMS.txt, SHA256SUMS.txt.sig"
     local f
     for f in SHA256SUMS.txt SHA256SUMS.txt.sig "$asset"; do
@@ -90,6 +115,7 @@ install_release() {
     mkdir -p "$DL_DIR/x" "$BIN_DIR"
     tar -xzf "$DL_DIR/$asset" -C "$DL_DIR/x"
     [[ -d "$DL_DIR/x/bin" ]] || { echo "Error: archive has no bin/ directory" >&2; exit 1; }
+    [[ ! -d "$DL_DIR/x/imprints/en2-trinity" ]] || IMPRINT_SRC="$DL_DIR/x/imprints/en2-trinity"
     local b name
     for b in "$DL_DIR/x/bin/"*; do
         name="$(basename "$b")"
@@ -102,9 +128,6 @@ install_release() {
         echo "    - $name -> $BIN_DIR/$name"
     done
 }
-
-
-RELEASE_TAG="${AIEN_RELEASE_TAG:-}"
 
 # Verify Rust Toolchain (source builds only)
 if [[ -z "$RELEASE_TAG" ]] && ! command -v cargo >/dev/null 2>&1; then
@@ -198,8 +221,8 @@ else
 fi
 
 echo "[*] Installing Free EN2 Trinity Imprint..."
-if [ -d "imprints/en2-trinity" ]; then
-    cp -r imprints/en2-trinity/* "$IMPRINT_DIR/"
+if [[ -n "$IMPRINT_SRC" && -d "$IMPRINT_SRC" ]]; then
+    cp -r "$IMPRINT_SRC"/* "$IMPRINT_DIR/"
     echo "[+] EN2 Trinity Imprint installed locally to $IMPRINT_DIR"
 fi
 
