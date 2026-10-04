@@ -18,6 +18,7 @@ rayon = "1.10"
 aien-abi-core = { path = "../aien-abi-core" }
 aien-kv-cache = { path = "../aien-kv-cache" }
 aien-platform = { path = "../aien-platform" }
+aien-omega-gpu = { path = "../aien-omega-gpu" }
 parking_lot = "0.12"
 sha2 = "0.10"
 
