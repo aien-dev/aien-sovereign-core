@@ -496,3 +496,234 @@ pub fn swiglu_f32(
         Err(OmegaGpuError::Unavailable)
     }
 }
+
+// ---- native decode attention (omega FB-1 cut 5, persistent session cut 4b) ----
+
+pub use ffi::{OmegaGpuAttnInfo, OmegaGpuKvLayout};
+
+/// Name of an attention return code (omega's table when native).
+pub fn attn_rc_name(rc: i32) -> String {
+    #[cfg(has_omega_gpu)]
+    {
+        // SAFETY: returns a pointer to a static NUL-terminated string.
+        let p = unsafe { ffi::omega_gpu_attention_rc_name(rc) };
+        if !p.is_null() {
+            // SAFETY: non-null, static, NUL-terminated.
+            return unsafe { std::ffi::CStr::from_ptr(p) }
+                .to_string_lossy()
+                .into_owned();
+        }
+    }
+    match rc {
+        ffi::OMEGA_GPU_ATTN_OK => "OK",
+        ffi::OMEGA_GPU_ATTN_BAD_ARGS => "BAD_ARGS",
+        ffi::OMEGA_GPU_ATTN_TOO_LARGE => "TOO_LARGE",
+        ffi::OMEGA_GPU_ATTN_CODEGEN_FAIL => "CODEGEN_FAIL",
+        ffi::OMEGA_GPU_ATTN_CHIP_FAIL => "CHIP_FAIL",
+        ffi::OMEGA_GPU_ATTN_UNWRITTEN => "UNWRITTEN",
+        _ => "UNKNOWN",
+    }
+    .to_string()
+}
+
+#[cfg(has_omega_gpu)]
+fn attn_finish(rc: i32, info: OmegaGpuAttnInfo) -> Result<OmegaGpuAttnInfo, OmegaGpuError> {
+    if rc == ffi::OMEGA_GPU_ATTN_OK {
+        Ok(info)
+    } else {
+        Err(OmegaGpuError::Rc {
+            rc,
+            name: attn_rc_name(rc),
+        })
+    }
+}
+
+fn attn_dim(v: usize) -> Result<u32, OmegaGpuError> {
+    u32::try_from(v).map_err(|_| OmegaGpuError::Rc {
+        rc: ffi::OMEGA_GPU_ATTN_TOO_LARGE,
+        name: attn_rc_name(ffi::OMEGA_GPU_ATTN_TOO_LARGE),
+    })
+}
+
+/// Decode attention over contiguous f32 KV (`TensorBackend::gqa_attention`).
+/// `q`, `out`: `[num_q_heads][head_dim]`; `k_cache`, `v_cache`: `[seq_len][num_kv_heads][head_dim]`.
+/// omega requires `head_dim == 64` and `num_q_heads <= 64`; otherwise `Rc { rc: -1 | -2 }`.
+#[allow(clippy::too_many_arguments)]
+pub fn gqa_attention_f32(
+    q: &[f32],
+    k_cache: &[f32],
+    v_cache: &[f32],
+    seq_len: usize,
+    num_q_heads: usize,
+    num_kv_heads: usize,
+    head_dim: usize,
+    out: &mut [f32],
+) -> Result<OmegaGpuAttnInfo, OmegaGpuError> {
+    check_len("q", num_q_heads * head_dim, q.len())?;
+    check_len("k_cache", seq_len * num_kv_heads * head_dim, k_cache.len())?;
+    check_len("v_cache", seq_len * num_kv_heads * head_dim, v_cache.len())?;
+    check_len("out", num_q_heads * head_dim, out.len())?;
+    let (su, qh, kh, hd) = (
+        attn_dim(seq_len)?,
+        attn_dim(num_q_heads)?,
+        attn_dim(num_kv_heads)?,
+        attn_dim(head_dim)?,
+    );
+    #[cfg(has_omega_gpu)]
+    {
+        let mut info = OmegaGpuAttnInfo::zeroed();
+        // SAFETY: lengths checked above; pointers valid for the call; info is an out-pointer.
+        let rc = unsafe {
+            ffi::omega_gpu_gqa_attention_f32(
+                q.as_ptr(),
+                k_cache.as_ptr(),
+                v_cache.as_ptr(),
+                su,
+                qh,
+                kh,
+                hd,
+                out.as_mut_ptr(),
+                &mut info,
+            )
+        };
+        attn_finish(rc, info)
+    }
+    #[cfg(not(has_omega_gpu))]
+    {
+        let _ = (su, qh, kh, hd);
+        Err(OmegaGpuError::Unavailable)
+    }
+}
+
+/// Decode attention over the bf16 paged KV pool (`TensorBackend::paged_attention`).
+/// `pool` is the whole pool (at least `layout.pool_bytes` bytes); `block_ids` lists the
+/// sequence's blocks in token order. `q`, `out`: `[num_q_heads][head_dim]`.
+#[allow(clippy::too_many_arguments)]
+pub fn paged_attention_bf16(
+    q: &[f32],
+    pool: &[u8],
+    layout: &OmegaGpuKvLayout,
+    block_ids: &[u32],
+    context_len: usize,
+    layer_idx: usize,
+    num_q_heads: usize,
+    num_kv_heads: usize,
+    head_dim: usize,
+    out: &mut [f32],
+) -> Result<OmegaGpuAttnInfo, OmegaGpuError> {
+    check_len("q", num_q_heads * head_dim, q.len())?;
+    check_len("out", num_q_heads * head_dim, out.len())?;
+    check_pool(pool, layout)?;
+    let (nb, cl, li, qh, kh, hd) = (
+        attn_dim(block_ids.len())?,
+        attn_dim(context_len)?,
+        attn_dim(layer_idx)?,
+        attn_dim(num_q_heads)?,
+        attn_dim(num_kv_heads)?,
+        attn_dim(head_dim)?,
+    );
+    #[cfg(has_omega_gpu)]
+    {
+        let mut info = OmegaGpuAttnInfo::zeroed();
+        // SAFETY: q/out lengths checked; pool covers layout.pool_bytes; block_ids has nb entries.
+        let rc = unsafe {
+            ffi::omega_gpu_paged_attention_bf16(
+                q.as_ptr(),
+                pool.as_ptr(),
+                layout,
+                block_ids.as_ptr(),
+                nb,
+                cl,
+                li,
+                qh,
+                kh,
+                hd,
+                out.as_mut_ptr(),
+                &mut info,
+            )
+        };
+        attn_finish(rc, info)
+    }
+    #[cfg(not(has_omega_gpu))]
+    {
+        let _ = (nb, cl, li, qh, kh, hd);
+        Err(OmegaGpuError::Unavailable)
+    }
+}
+
+/// Batched decode attention (`TensorBackend::paged_attention_batch`).
+/// `block_tables`: `[num_seqs][max_blocks_per_seq]` (negative = none), `context_lens`: `[num_seqs]`.
+/// `q`, `out`: `[num_seqs][num_q_heads][head_dim]`.
+#[allow(clippy::too_many_arguments)]
+pub fn paged_attention_batch_bf16(
+    q: &[f32],
+    pool: &[u8],
+    layout: &OmegaGpuKvLayout,
+    block_tables: &[i32],
+    context_lens: &[i32],
+    max_blocks_per_seq: usize,
+    num_seqs: usize,
+    layer_idx: usize,
+    num_q_heads: usize,
+    num_kv_heads: usize,
+    head_dim: usize,
+    out: &mut [f32],
+) -> Result<OmegaGpuAttnInfo, OmegaGpuError> {
+    check_len("q", num_seqs * num_q_heads * head_dim, q.len())?;
+    check_len("out", num_seqs * num_q_heads * head_dim, out.len())?;
+    check_len("context_lens", num_seqs, context_lens.len())?;
+    check_len(
+        "block_tables",
+        num_seqs * max_blocks_per_seq,
+        block_tables.len(),
+    )?;
+    check_pool(pool, layout)?;
+    let (mb, ns, li, qh, kh, hd) = (
+        attn_dim(max_blocks_per_seq)?,
+        attn_dim(num_seqs)?,
+        attn_dim(layer_idx)?,
+        attn_dim(num_q_heads)?,
+        attn_dim(num_kv_heads)?,
+        attn_dim(head_dim)?,
+    );
+    #[cfg(has_omega_gpu)]
+    {
+        let mut info = OmegaGpuAttnInfo::zeroed();
+        // SAFETY: every slice length checked against the stated shape; pool covers the layout.
+        let rc = unsafe {
+            ffi::omega_gpu_paged_attention_batch_bf16(
+                q.as_ptr(),
+                pool.as_ptr(),
+                layout,
+                block_tables.as_ptr(),
+                context_lens.as_ptr(),
+                mb,
+                ns,
+                li,
+                qh,
+                kh,
+                hd,
+                out.as_mut_ptr(),
+                &mut info,
+            )
+        };
+        attn_finish(rc, info)
+    }
+    #[cfg(not(has_omega_gpu))]
+    {
+        let _ = (mb, ns, li, qh, kh, hd);
+        Err(OmegaGpuError::Unavailable)
+    }
+}
+
+fn check_pool(pool: &[u8], layout: &OmegaGpuKvLayout) -> Result<(), OmegaGpuError> {
+    let need = usize::try_from(layout.pool_bytes).unwrap_or(usize::MAX);
+    if pool.len() < need {
+        return Err(OmegaGpuError::ShapeMismatch {
+            what: "pool",
+            expected: need,
+            got: pool.len(),
+        });
+    }
+    Ok(())
+}

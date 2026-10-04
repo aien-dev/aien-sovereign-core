@@ -1,5 +1,5 @@
 //! Raw declarations, written by hand from omega `src/omega_gpu_matmul_api.h`
-//! at the commit pinned in `omega.lock` (2636409). Nothing generated.
+//! at the commit pinned in `omega.lock` (6b940fa). Nothing generated.
 //! Includes the resident-weights handles added by omega FB-1 cut 1b.
 use std::os::raw::{c_char, c_int};
 
@@ -209,4 +209,111 @@ extern "C" {
         info: *mut OmegaGpuEwInfo,
     ) -> c_int;
     pub fn omega_gpu_elementwise_rc_name(rc: c_int) -> *const c_char;
+}
+
+// ---- omega `src/omega_gpu_attention_api.h` (FB-1 cut 5 + 4b, pinned 6b940fa) ----
+pub const OMEGA_GPU_ATTN_OK: c_int = 0;
+pub const OMEGA_GPU_ATTN_BAD_ARGS: c_int = -1;
+pub const OMEGA_GPU_ATTN_TOO_LARGE: c_int = -2;
+pub const OMEGA_GPU_ATTN_CODEGEN_FAIL: c_int = -3;
+pub const OMEGA_GPU_ATTN_CHIP_FAIL: c_int = -4;
+pub const OMEGA_GPU_ATTN_UNWRITTEN: c_int = -5;
+
+/// Mirrors `OmegaGpuAttnInfo` field for field, same order (note `call_ns` is third).
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct OmegaGpuAttnInfo {
+    pub chip_calls: u32,
+    pub elapsed_ns: u64,
+    pub call_ns: u64,
+    pub completion_marker: u32,
+    pub unwritten_words: u32,
+    pub gpr_count: u32,
+    pub insn_count: u32,
+    pub kernel_cache_hit: bool,
+    pub ctas_last_launch: u32,
+    pub threads_per_cta: u32,
+    pub target_chip: [c_char; 64],
+    pub sm_architecture: u32,
+}
+
+impl OmegaGpuAttnInfo {
+    pub fn zeroed() -> Self {
+        Self {
+            chip_calls: 0,
+            elapsed_ns: 0,
+            call_ns: 0,
+            completion_marker: 0,
+            unwritten_words: 0,
+            gpr_count: 0,
+            insn_count: 0,
+            kernel_cache_hit: false,
+            ctas_last_launch: 0,
+            threads_per_cta: 0,
+            target_chip: [0; 64],
+            sm_architecture: 0,
+        }
+    }
+}
+
+/// Mirrors `OmegaGpuKvLayout` (itself a mirror of aien-kv-cache `KvLayoutDesc`),
+/// field for field, strides in bytes.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct OmegaGpuKvLayout {
+    pub block_stride_bytes: u64,
+    pub layer_stride_bytes: u64,
+    pub kv_plane_stride_bytes: u64,
+    pub token_stride_bytes: u64,
+    pub head_stride_bytes: u64,
+    pub pool_bytes: u64,
+    pub num_blocks: u32,
+    pub num_layers: u32,
+    pub block_size: u32,
+}
+
+#[cfg(has_omega_gpu)]
+extern "C" {
+    pub fn omega_gpu_gqa_attention_f32(
+        q: *const f32,
+        k_cache: *const f32,
+        v_cache: *const f32,
+        seq_len: u32,
+        num_q_heads: u32,
+        num_kv_heads: u32,
+        head_dim: u32,
+        out: *mut f32,
+        info: *mut OmegaGpuAttnInfo,
+    ) -> c_int;
+    pub fn omega_gpu_paged_attention_bf16(
+        q: *const f32,
+        pool: *const u8,
+        layout: *const OmegaGpuKvLayout,
+        block_ids: *const u32,
+        num_block_ids: u32,
+        context_len: u32,
+        layer_idx: u32,
+        num_q_heads: u32,
+        num_kv_heads: u32,
+        head_dim: u32,
+        out: *mut f32,
+        info: *mut OmegaGpuAttnInfo,
+    ) -> c_int;
+    pub fn omega_gpu_paged_attention_batch_bf16(
+        q: *const f32,
+        pool: *const u8,
+        layout: *const OmegaGpuKvLayout,
+        block_tables: *const i32,
+        context_lens: *const i32,
+        max_blocks_per_seq: u32,
+        num_seqs: u32,
+        layer_idx: u32,
+        num_q_heads: u32,
+        num_kv_heads: u32,
+        head_dim: u32,
+        out: *mut f32,
+        info: *mut OmegaGpuAttnInfo,
+    ) -> c_int;
+    pub fn omega_gpu_attention_rc_name(rc: c_int) -> *const c_char;
+    pub fn omega_gpu_attention_last_error() -> *const c_char;
 }
