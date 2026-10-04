@@ -223,6 +223,25 @@ fn omega_vs_reference_real_model() {
     println!("OMEGA_GATE {}", report.line());
     let fallback_count = om.transformer.tensor_backend.fallback_count();
     println!("OMEGA_GATE tokens_match={}", cpu_text == om_text);
+    for op in [
+        "matmul_vec",
+        "matmul_batch",
+        "compute_logits",
+        "rmsnorm",
+        "apply_rope",
+        "swiglu",
+    ] {
+        assert!(
+            report.native_ops.iter().any(|n| n == op),
+            "{op} not in the native mask: {}",
+            report.line()
+        );
+    }
+    assert!(
+        report.native_fallbacks.is_empty(),
+        "native fallbacks: {}",
+        report.line()
+    );
 
     let mut receipt = StrictModelReceipt {
         checkpoint_path: model_path.display().to_string(),

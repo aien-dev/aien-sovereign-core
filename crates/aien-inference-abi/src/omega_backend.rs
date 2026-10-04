@@ -1,9 +1,10 @@
-//! `OmegaGb10Backend` (FB-1 cut 3b): the three matrix-multiply ops of
-//! `TensorBackend` run on our own native GPU engine (`libomega_gpu.a`, no CUDA)
-//! through the `aien-omega-gpu` crate; every other op runs on the reference CPU
-//! path by design and is counted by `OpAccounting`.
+//! `OmegaGb10Backend` (FB-1 cuts 3b and 3c): the three matrix-multiply ops, rmsnorm,
+//! rope and swiglu of `TensorBackend` run on our own native GPU engine
+//! (`libomega_gpu.a`, no CUDA) through the `aien-omega-gpu` crate; the attention ops
+//! run on the reference CPU path by design and are counted by `OpAccounting`.
 //!
-//! Native mask: `matmul_vec`, `matmul_batch`, `compute_logits`. A chip error in
+//! Native mask: `matmul_vec`, `matmul_batch`, `compute_logits`, `rmsnorm`,
+//! `apply_rope`, `swiglu`. A chip error in
 //! one of those is a fallback of a claimed-native op: it is counted, goes through
 //! `OpAccounting::reference_path` (fatal in a production build, see `strict.rs`)
 //! and, in a dev build only, the reference result is computed so the run goes on.
@@ -28,7 +29,7 @@ use crate::native_ops::{NativeOpMask, OpAccounting, OpReport, TensorOp};
 use aien_omega_gpu::ResidentTensor;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 /// Opt-in selection: `AIEN_GPU_BACKEND=omega` binds this backend instead of the
 /// default CUDA `BlackwellGb10Backend`. Unset (or any other value) keeps the default.
@@ -45,18 +46,26 @@ const BACKEND_NAME: &str = "OmegaGb10Backend";
 
 type Key = (usize, usize, usize, usize);
 
+/// Rope cos/sin table for one position: `head_dim / 2` values each.
+type RopeTable = Arc<(Vec<f32>, Vec<f32>)>;
+
+/// Cache key: (head_dim, theta bits, position). Drop everything past this many entries.
+type RopeKey = (usize, u32, usize);
+const ROPE_CACHE_MAX: usize = 16384;
+
 struct Resident {
     fingerprint: u64,
     tensor: ResidentTensor,
 }
 
-/// Native-matmul backend on the Omega GPU engine.
+/// Native backend on the Omega GPU engine (matmuls and elementwise ops).
 pub struct OmegaGb10Backend {
     reference: ReferenceCpuBackend,
     acct: OpAccounting,
     /// One lock serializes every chip call and guards the resident cache
     /// (omega's resident-call thread safety is not documented).
     chip: Mutex<HashMap<Key, Resident>>,
+    rope_tables: Mutex<HashMap<RopeKey, RopeTable>>,
     chip_errors: AtomicU64,
     chip_calls: AtomicU64,
     chip_ns: AtomicU64,
@@ -92,8 +101,12 @@ impl OmegaGb10Backend {
                 TensorOp::MatmulVec,
                 TensorOp::MatmulBatch,
                 TensorOp::ComputeLogits,
+                TensorOp::Rmsnorm,
+                TensorOp::ApplyRope,
+                TensorOp::Swiglu,
             ])),
             chip: Mutex::new(HashMap::new()),
+            rope_tables: Mutex::new(HashMap::new()),
             chip_errors: AtomicU64::new(0),
             chip_calls: AtomicU64::new(0),
             chip_ns: AtomicU64::new(0),
@@ -203,6 +216,120 @@ impl OmegaGb10Backend {
         }
     }
 
+    /// Rope cos/sin table for `pos`, built exactly as the reference does
+    /// (`tensor::apply_rope`, tensor.rs:101): f64 frequency and angle, then cast to f32.
+    /// Cached per (head_dim, theta, pos).
+    fn rope_table(&self, head_dim: usize, theta: f32, pos: usize) -> RopeTable {
+        let key: RopeKey = (head_dim, theta.to_bits(), pos);
+        let mut cache = self
+            .rope_tables
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(t) = cache.get(&key) {
+            return Arc::clone(t);
+        }
+        let half = head_dim / 2;
+        let mut cos = Vec::with_capacity(half);
+        let mut sin = Vec::with_capacity(half);
+        for i in 0..half {
+            let exponent = (2 * i) as f64 / (head_dim as f64);
+            let freq = 1.0 / (theta as f64).powf(exponent);
+            let rot = (pos as f64) * freq;
+            sin.push(rot.sin() as f32);
+            cos.push(rot.cos() as f32);
+        }
+        if cache.len() >= ROPE_CACHE_MAX {
+            cache.clear();
+        }
+        let t: RopeTable = Arc::new((cos, sin));
+        cache.insert(key, Arc::clone(&t));
+        t
+    }
+
+    /// Run one elementwise chip call under the chip lock. False on any error (recorded).
+    fn chip_elementwise(
+        &self,
+        what: &str,
+        call: impl FnOnce() -> Result<aien_omega_gpu::OmegaGpuEwInfo, aien_omega_gpu::OmegaGpuError>,
+    ) -> bool {
+        let guard = match self.chip.lock() {
+            Ok(g) => g,
+            Err(_) => return self.fail("chip lock poisoned".into()),
+        };
+        let res = call();
+        drop(guard);
+        match res {
+            Ok(info) => {
+                self.chip_calls.fetch_add(1, Ordering::Relaxed);
+                self.chip_ns.fetch_add(info.elapsed_ns, Ordering::Relaxed);
+                true
+            }
+            Err(e) => self.fail(format!("{what}: {e}")),
+        }
+    }
+
+    fn chip_rmsnorm(&self, out: &mut [f32], x: &[f32], weight: &[f32], eps: f32) -> bool {
+        let dim = x.len();
+        self.chip_elementwise(&format!("rmsnorm dim={dim}"), || {
+            aien_omega_gpu::rmsnorm_f32(1, dim, x, weight, eps, out)
+        })
+    }
+
+    /// q then k go to the chip as one `heads` run (the table is the same for every head).
+    #[allow(clippy::too_many_arguments)]
+    fn chip_rope(
+        &self,
+        q: &mut [f32],
+        k: &mut [f32],
+        pos: usize,
+        head_dim: usize,
+        num_q_heads: usize,
+        num_kv_heads: usize,
+        theta: f32,
+    ) -> bool {
+        if head_dim == 0
+            || !head_dim.is_multiple_of(2)
+            || q.len() != num_q_heads * head_dim
+            || k.len() != num_kv_heads * head_dim
+        {
+            return self.fail(format!(
+                "rope shape mismatch: q={} k={} head_dim={head_dim} q_heads={num_q_heads} kv_heads={num_kv_heads}",
+                q.len(),
+                k.len()
+            ));
+        }
+        let table = self.rope_table(head_dim, theta, pos);
+        let mut both = Vec::with_capacity(q.len() + k.len());
+        both.extend_from_slice(q);
+        both.extend_from_slice(k);
+        let mut rotated = vec![0.0f32; both.len()];
+        let heads = num_q_heads + num_kv_heads;
+        let ok = self.chip_elementwise(&format!("rope heads={heads} head_dim={head_dim}"), || {
+            aien_omega_gpu::rope_f32(heads, head_dim, &both, &table.0, &table.1, &mut rotated)
+        });
+        if ok {
+            let (rq, rk) = rotated.split_at(q.len());
+            q.copy_from_slice(rq);
+            k.copy_from_slice(rk);
+        }
+        ok
+    }
+
+    fn chip_swiglu(&self, out: &mut [f32], gate: &[f32], up: &[f32]) -> bool {
+        // The reference uses min(len) of the three; the chip path demands equal lengths.
+        if gate.len() != up.len() || gate.len() != out.len() {
+            return self.fail(format!(
+                "swiglu shape mismatch: gate={} up={} out={}",
+                gate.len(),
+                up.len(),
+                out.len()
+            ));
+        }
+        self.chip_elementwise(&format!("swiglu n={}", gate.len()), || {
+            aien_omega_gpu::swiglu_f32(gate, up, out)
+        })
+    }
+
     fn fail(&self, msg: String) -> bool {
         self.chip_errors.fetch_add(1, Ordering::Relaxed);
         let stage = aien_omega_gpu::last_error();
@@ -211,6 +338,7 @@ impl OmegaGb10Backend {
         } else {
             format!("{msg} (stage: {stage})")
         };
+        eprintln!("OMEGA_BACKEND chip error: {full}");
         if let Ok(mut l) = self.last_error.lock() {
             *l = full;
         }
@@ -244,8 +372,10 @@ impl TensorBackend for OmegaGb10Backend {
     }
 
     fn rmsnorm(&self, out: &mut [f32], x: &[f32], weight: &[f32], eps: f32) {
-        self.reference_for(TensorOp::Rmsnorm);
-        self.reference.rmsnorm(out, x, weight, eps);
+        if !self.chip_rmsnorm(out, x, weight, eps) {
+            self.reference_for(TensorOp::Rmsnorm);
+            self.reference.rmsnorm(out, x, weight, eps);
+        }
     }
 
     fn apply_rope(
@@ -258,9 +388,11 @@ impl TensorBackend for OmegaGb10Backend {
         num_kv_heads: usize,
         theta: f32,
     ) {
-        self.reference_for(TensorOp::ApplyRope);
-        self.reference
-            .apply_rope(q, k, pos, head_dim, num_q_heads, num_kv_heads, theta);
+        if !self.chip_rope(q, k, pos, head_dim, num_q_heads, num_kv_heads, theta) {
+            self.reference_for(TensorOp::ApplyRope);
+            self.reference
+                .apply_rope(q, k, pos, head_dim, num_q_heads, num_kv_heads, theta);
+        }
     }
 
     fn matmul_vec(
@@ -294,8 +426,10 @@ impl TensorBackend for OmegaGb10Backend {
     }
 
     fn swiglu(&self, out: &mut [f32], gate: &[f32], up: &[f32]) {
-        self.reference_for(TensorOp::Swiglu);
-        self.reference.swiglu(out, gate, up);
+        if !self.chip_swiglu(out, gate, up) {
+            self.reference_for(TensorOp::Swiglu);
+            self.reference.swiglu(out, gate, up);
+        }
     }
 
     fn gqa_attention(
@@ -406,7 +540,7 @@ mod tests {
     }
 
     #[test]
-    fn mask_is_exactly_the_three_matmuls() {
+    fn mask_is_exactly_the_six_native_ops() {
         let b = OmegaGb10Backend::new();
         let names: Vec<_> = b
             .native_ops()
@@ -414,16 +548,26 @@ mod tests {
             .iter()
             .map(|o| o.name())
             .collect();
-        assert_eq!(names, ["matmul_vec", "matmul_batch", "compute_logits"]);
+        assert_eq!(
+            names,
+            [
+                "rmsnorm",
+                "apply_rope",
+                "matmul_vec",
+                "matmul_batch",
+                "swiglu",
+                "compute_logits"
+            ]
+        );
     }
 
     #[test]
     fn reference_ops_are_counted_by_design_and_never_trip() {
         let b = OmegaGb10Backend::new();
-        let mut out = [0.0f32; 4];
-        b.swiglu(&mut out, &[1.0; 4], &[1.0; 4]);
+        let mut out = [0.0f32; 2];
+        b.gqa_attention(&mut out, &[1.0; 2], &[1.0; 2], &[1.0; 2], 1, 1, 1, 2);
         assert_eq!(b.fallback_count(), 0);
-        assert!(b.op_report().line().contains("swiglu:1"));
+        assert!(b.op_report().line().contains("gqa_attention:1"));
     }
 
     /// Stub build only: a chip error on a claimed-native op is a counted fallback
@@ -460,6 +604,68 @@ mod tests {
         let b = OmegaGb10Backend::new();
         let mut out = [0.0f32; 2];
         b.matmul_vec(&mut out, &[1.0; 2], &[1.0; 4], 2, 2);
+    }
+
+    /// The cached cos/sin table, applied on the host with the same f32 formulas as the
+    /// chip kernel (FMUL, FMUL, FADD), must equal the reference rope bit for bit.
+    #[test]
+    fn rope_table_reproduces_reference_rope() {
+        let b = OmegaGb10Backend::new();
+        let (head_dim, nq, nkv, pos, theta) = (64usize, 4usize, 2usize, 37usize, 10000.0f32);
+        let mut s = 99u32;
+        let q0: Vec<f32> = (0..nq * head_dim).map(|_| lcg(&mut s)).collect();
+        let k0: Vec<f32> = (0..nkv * head_dim).map(|_| lcg(&mut s)).collect();
+        let (mut qr, mut kr) = (q0.clone(), k0.clone());
+        ReferenceCpuBackend::new().apply_rope(&mut qr, &mut kr, pos, head_dim, nq, nkv, theta);
+        let t = b.rope_table(head_dim, theta, pos);
+        let half = head_dim / 2;
+        let rot = |v: &[f32]| -> Vec<f32> {
+            let mut o = v.to_vec();
+            for h in 0..v.len() / head_dim {
+                for i in 0..half {
+                    let (a, c) = (v[h * head_dim + i], v[h * head_dim + i + half]);
+                    o[h * head_dim + i] = a * t.0[i] - c * t.1[i];
+                    o[h * head_dim + i + half] = a * t.1[i] + c * t.0[i];
+                }
+            }
+            o
+        };
+        assert_eq!(rot(&q0), qr);
+        assert_eq!(rot(&k0), kr);
+        // cached: same allocation on the second ask
+        assert!(Arc::ptr_eq(&t, &b.rope_table(head_dim, theta, pos)));
+    }
+
+    /// Stub build only: each newly native elementwise op is a counted fallback with the
+    /// reference result when the chip is unavailable, never silent.
+    #[test]
+    fn elementwise_chip_errors_are_counted_fallbacks() {
+        if aien_omega_gpu::is_native() || !crate::strict::dev_fallback_active() {
+            return;
+        }
+        let b = OmegaGb10Backend::new();
+        let r = ReferenceCpuBackend::new();
+        let mut s = 5u32;
+        let x: Vec<f32> = (0..128).map(|_| lcg(&mut s)).collect();
+        let w: Vec<f32> = (0..128).map(|_| lcg(&mut s)).collect();
+        let (mut got, mut want) = (vec![0.0f32; 128], vec![0.0f32; 128]);
+        b.rmsnorm(&mut got, &x, &w, 1e-5);
+        r.rmsnorm(&mut want, &x, &w, 1e-5);
+        assert_eq!(got, want);
+        b.swiglu(&mut got, &x, &w);
+        r.swiglu(&mut want, &x, &w);
+        assert_eq!(got, want);
+        let (mut q, mut k) = (x[..64].to_vec(), x[64..].to_vec());
+        let (mut qw, mut kw) = (q.clone(), k.clone());
+        b.apply_rope(&mut q, &mut k, 3, 32, 2, 2, 10000.0);
+        r.apply_rope(&mut qw, &mut kw, 3, 32, 2, 2, 10000.0);
+        assert_eq!((q, k), (qw, kw));
+        assert_eq!(b.fallback_count(), 3);
+        let line = b.op_report().line();
+        assert!(
+            line.contains("native_fallbacks=[rmsnorm:1,apply_rope:1,swiglu:1]"),
+            "{line}"
+        );
     }
 
     #[test]
