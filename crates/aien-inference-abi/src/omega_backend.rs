@@ -1,10 +1,12 @@
-//! `OmegaGb10Backend` (FB-1 cuts 3b and 3c): the three matrix-multiply ops, rmsnorm,
-//! rope and swiglu of `TensorBackend` run on our own native GPU engine
-//! (`libomega_gpu.a`, no CUDA) through the `aien-omega-gpu` crate; the attention ops
-//! run on the reference CPU path by design and are counted by `OpAccounting`.
+//! `OmegaGb10Backend` (FB-1 cuts 3b, 3c, 3d): all nine `TensorBackend` ops run on our own
+//! native GPU engine (`libomega_gpu.a`, no CUDA) through the `aien-omega-gpu` crate.
 //!
 //! Native mask: `matmul_vec`, `matmul_batch`, `compute_logits`, `rmsnorm`,
-//! `apply_rope`, `swiglu`. A chip error in
+//! `apply_rope`, `swiglu`, `gqa_attention`, `paged_attention`, `paged_attention_batch`.
+//! Paged attention over a bf16 pool uses omega's paged kernel; over any other pool dtype
+//! (the model builds Fp32 pools) the sequence's K/V are gathered on the host into
+//! contiguous f32 exactly as the reference reads them, then run on the f32 gqa kernel.
+//! omega attention needs head_dim 64 (TinyLlama, Llama-3.2-1B). A chip error in
 //! one of those is a fallback of a claimed-native op: it is counted, goes through
 //! `OpAccounting::reference_path` (fatal in a production build, see `strict.rs`)
 //! and, in a dev build only, the reference result is computed so the run goes on.
@@ -104,6 +106,9 @@ impl OmegaGb10Backend {
                 TensorOp::Rmsnorm,
                 TensorOp::ApplyRope,
                 TensorOp::Swiglu,
+                TensorOp::GqaAttention,
+                TensorOp::PagedAttention,
+                TensorOp::PagedAttentionBatch,
             ])),
             chip: Mutex::new(HashMap::new()),
             rope_tables: Mutex::new(HashMap::new()),
@@ -330,6 +335,115 @@ impl OmegaGb10Backend {
         })
     }
 
+    fn chip_attention(
+        &self,
+        what: &str,
+        call: impl FnOnce() -> Result<aien_omega_gpu::OmegaGpuAttnInfo, aien_omega_gpu::OmegaGpuError>,
+    ) -> bool {
+        let guard = match self.chip.lock() {
+            Ok(g) => g,
+            Err(_) => return self.fail("chip lock poisoned".into()),
+        };
+        let res = call();
+        drop(guard);
+        match res {
+            Ok(info) => {
+                self.chip_calls.fetch_add(1, Ordering::Relaxed);
+                self.chip_ns.fetch_add(info.elapsed_ns, Ordering::Relaxed);
+                true
+            }
+            Err(e) => self.fail(format!("{what}: {e}")),
+        }
+    }
+
+    /// One sequence of paged attention on the chip. A bf16 pool goes straight to the
+    /// paged kernel; any other dtype (the model builds Fp32 pools) is gathered on the host
+    /// into contiguous `[t][kv_head][head_dim]` f32 K and V exactly as the reference reads
+    /// them (tokens past the block table are dropped), then runs the f32 gqa kernel.
+    #[allow(clippy::too_many_arguments)]
+    fn chip_paged_one(
+        &self,
+        out: &mut [f32],
+        q: &[f32],
+        pool: &aien_kv_cache::UnifiedKvTensorPool,
+        block_ids: &[usize],
+        context_len: usize,
+        layer_idx: usize,
+        num_q_heads: usize,
+        num_kv_heads: usize,
+        head_dim: usize,
+    ) -> bool {
+        if context_len == 0 || block_ids.is_empty() {
+            out.fill(0.0);
+            return true;
+        }
+        if pool.config().dtype == aien_kv_cache::KvDType::Bf16 {
+            let ids: Option<Vec<u32>> = block_ids.iter().map(|&b| u32::try_from(b).ok()).collect();
+            let Some(ids) = ids else {
+                return self.fail("paged_attention: block id past u32".into());
+            };
+            let d = pool.layout_desc();
+            let layout = aien_omega_gpu::OmegaGpuKvLayout {
+                block_stride_bytes: d.block_stride_bytes,
+                layer_stride_bytes: d.layer_stride_bytes,
+                kv_plane_stride_bytes: d.kv_plane_stride_bytes,
+                token_stride_bytes: d.token_stride_bytes,
+                head_stride_bytes: d.head_stride_bytes,
+                pool_bytes: d.pool_bytes,
+                num_blocks: d.num_blocks,
+                num_layers: d.num_layers,
+                block_size: d.block_size,
+            };
+            // SAFETY: the pool owns total_bytes() readable bytes at base_ptr() for its lifetime,
+            // and we hold &pool for the whole call.
+            let bytes = unsafe { std::slice::from_raw_parts(pool.base_ptr(), pool.total_bytes()) };
+            return self.chip_attention(&format!("paged_attention_bf16 ctx={context_len}"), || {
+                aien_omega_gpu::paged_attention_bf16(
+                    q,
+                    bytes,
+                    &layout,
+                    &ids,
+                    context_len,
+                    layer_idx,
+                    num_q_heads,
+                    num_kv_heads,
+                    head_dim,
+                    out,
+                )
+            });
+        }
+        let block_size = pool.config().block_size;
+        let n = context_len.min(block_ids.len().saturating_mul(block_size));
+        let row = num_kv_heads * head_dim;
+        let mut k = vec![0.0f32; n * row];
+        let mut v = vec![0.0f32; n * row];
+        for t in 0..n {
+            let blk = block_ids[t / block_size];
+            let slot = t % block_size;
+            for kh in 0..num_kv_heads {
+                let at = t * row + kh * head_dim;
+                k[at..at + head_dim].copy_from_slice(&crate::backend::read_kv_head(
+                    pool, blk, layer_idx, false, slot, kh, head_dim,
+                ));
+                v[at..at + head_dim].copy_from_slice(&crate::backend::read_kv_head(
+                    pool, blk, layer_idx, true, slot, kh, head_dim,
+                ));
+            }
+        }
+        self.chip_attention(&format!("paged_attention(gathered) ctx={n}"), || {
+            aien_omega_gpu::gqa_attention_f32(
+                q,
+                &k,
+                &v,
+                n,
+                num_q_heads,
+                num_kv_heads,
+                head_dim,
+                out,
+            )
+        })
+    }
+
     fn fail(&self, msg: String) -> bool {
         self.chip_errors.fetch_add(1, Ordering::Relaxed);
         let stage = aien_omega_gpu::last_error();
@@ -443,6 +557,26 @@ impl TensorBackend for OmegaGb10Backend {
         num_kv_heads: usize,
         head_dim: usize,
     ) {
+        // The reference reads only the first seq_len rows; causal prefill passes the whole
+        // prompt's cache with a shorter seq_len, so hand omega exactly those rows.
+        let need = seq_len * num_kv_heads * head_dim;
+        let k_rows = &k_cache[..need.min(k_cache.len())];
+        let v_rows = &v_cache[..need.min(v_cache.len())];
+        let native = self.chip_attention(&format!("gqa_attention seq={seq_len}"), || {
+            aien_omega_gpu::gqa_attention_f32(
+                q,
+                k_rows,
+                v_rows,
+                seq_len,
+                num_q_heads,
+                num_kv_heads,
+                head_dim,
+                out,
+            )
+        });
+        if native {
+            return;
+        }
         self.reference_for(TensorOp::GqaAttention);
         self.reference.gqa_attention(
             out,
@@ -468,6 +602,19 @@ impl TensorBackend for OmegaGb10Backend {
         num_kv_heads: usize,
         head_dim: usize,
     ) {
+        if self.chip_paged_one(
+            out,
+            q,
+            pool,
+            block_ids,
+            context_len,
+            layer_idx,
+            num_q_heads,
+            num_kv_heads,
+            head_dim,
+        ) {
+            return;
+        }
         self.reference_for(TensorOp::PagedAttention);
         self.reference.paged_attention(
             out,
@@ -496,8 +643,46 @@ impl TensorBackend for OmegaGb10Backend {
         num_kv_heads: usize,
         head_dim: usize,
     ) {
-        // Counted once as a batch op; the reference batch calls the reference
-        // single-sequence path, not ours, so there is no double count.
+        // Per sequence, the same row handling as the TensorBackend default (context_lens <= 0
+        // means 0, a row past the array is empty, negative entries are removed), each row on
+        // the chip. Any failed row sends the whole batch to the reference, counted once as a
+        // batch op (the reference batch calls the reference single path, not ours).
+        let q_stride = num_q_heads * head_dim;
+        let mut all_native = q.len() >= num_seqs * q_stride && out.len() >= num_seqs * q_stride;
+        for s in 0..num_seqs {
+            if !all_native {
+                break;
+            }
+            let ctx = context_lens
+                .get(s)
+                .copied()
+                .filter(|&c| c > 0)
+                .map_or(0, |c| c as usize);
+            let (b0, b1) = (s * max_blocks_per_seq, (s + 1) * max_blocks_per_seq);
+            let row: Vec<usize> = if b1 <= block_tables.len() {
+                block_tables[b0..b1]
+                    .iter()
+                    .filter(|&&b| b >= 0)
+                    .map(|&b| b as usize)
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            all_native = self.chip_paged_one(
+                &mut out[s * q_stride..(s + 1) * q_stride],
+                &q[s * q_stride..(s + 1) * q_stride],
+                pool,
+                &row,
+                ctx,
+                layer_idx,
+                num_q_heads,
+                num_kv_heads,
+                head_dim,
+            );
+        }
+        if all_native {
+            return;
+        }
         self.reference_for(TensorOp::PagedAttentionBatch);
         self.reference.paged_attention_batch(
             out,
@@ -540,7 +725,7 @@ mod tests {
     }
 
     #[test]
-    fn mask_is_exactly_the_six_native_ops() {
+    fn mask_is_all_nine_ops() {
         let b = OmegaGb10Backend::new();
         let names: Vec<_> = b
             .native_ops()
@@ -556,18 +741,35 @@ mod tests {
                 "matmul_vec",
                 "matmul_batch",
                 "swiglu",
+                "gqa_attention",
+                "paged_attention",
+                "paged_attention_batch",
                 "compute_logits"
             ]
         );
     }
 
     #[test]
-    fn reference_ops_are_counted_by_design_and_never_trip() {
+    fn attention_chip_error_is_a_counted_fallback() {
+        if aien_omega_gpu::is_native() || !crate::strict::dev_fallback_active() {
+            return; // native: nothing fails here; production: it would (correctly) panic
+        }
         let b = OmegaGb10Backend::new();
-        let mut out = [0.0f32; 2];
-        b.gqa_attention(&mut out, &[1.0; 2], &[1.0; 2], &[1.0; 2], 1, 1, 1, 2);
-        assert_eq!(b.fallback_count(), 0);
-        assert!(b.op_report().line().contains("gqa_attention:1"));
+        let (q, k, v) = (
+            [0.5f32, -1.0],
+            [1.0f32, 2.0, -1.0, 0.25],
+            [3.0f32, 4.0, 5.0, 6.0],
+        );
+        let mut got = [0.0f32; 2];
+        let mut want = [0.0f32; 2];
+        b.gqa_attention(&mut got, &q, &k, &v, 2, 1, 1, 2);
+        ReferenceCpuBackend::new().gqa_attention(&mut want, &q, &k, &v, 2, 1, 1, 2);
+        assert_eq!(got, want);
+        assert_eq!(b.fallback_count(), 1);
+        assert!(b
+            .op_report()
+            .line()
+            .contains("native_fallbacks=[gqa_attention:1]"));
     }
 
     /// Stub build only: a chip error on a claimed-native op is a counted fallback

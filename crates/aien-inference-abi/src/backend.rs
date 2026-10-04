@@ -7,7 +7,7 @@ use crate::tensor::{
 
 /// Reads one KV head from the pool using the pool's dtype. Bf16 bytes are decoded.
 /// A short or unknown dtype returns zeros instead of reading past the allocation.
-fn read_kv_head(
+pub(crate) fn read_kv_head(
     pool: &aien_kv_cache::UnifiedKvTensorPool,
     block_id: usize,
     layer_idx: usize,

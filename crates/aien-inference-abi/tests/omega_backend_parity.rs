@@ -45,7 +45,7 @@ fn worst_ratio(
 fn stub_backend_reports_unavailable() {
     let b = OmegaGb10Backend::new();
     assert_eq!(b.is_available(), aien_omega_gpu::is_native());
-    assert_eq!(b.native_ops().native_ops().len(), 6);
+    assert_eq!(b.native_ops().native_ops().len(), 9);
 }
 
 #[test]
@@ -203,4 +203,123 @@ fn chip_mixed_matmul_then_elementwise() {
         omega.chip_errors(),
         omega.last_error()
     );
+}
+
+fn worst_attn_ratio(got: &[f32], want: &[f32]) -> f64 {
+    // omega tests/gpu_attention_test.c tolerances (FB-1 cut 5): rel 2e-4, abs 2e-5.
+    assert_eq!(got.len(), want.len());
+    got.iter()
+        .zip(want)
+        .map(|(g, w)| (*g as f64 - *w as f64).abs() / (2e-5 + 2e-4 * (*w as f64).abs()))
+        .fold(0.0, f64::max)
+}
+
+/// Fill `n_tokens` tokens of `layer` into a fresh TinyLlama-shaped pool (block_size 16),
+/// blocks used in a scrambled order so the block table is not the identity.
+fn filled_pool(
+    dtype: aien_kv_cache::KvDType,
+    n_tokens: usize,
+    layer: usize,
+    seed: &mut u32,
+) -> (aien_kv_cache::UnifiedKvTensorPool, Vec<usize>) {
+    let (num_blocks, bs) = (160usize, 16usize);
+    let cfg = aien_kv_cache::KvPoolConfig::for_tinyllama(num_blocks, bs, dtype);
+    let mut pool = aien_kv_cache::UnifiedKvTensorPool::allocate(cfg).expect("pool");
+    let need = n_tokens.div_ceil(bs);
+    let blocks: Vec<usize> = (0..need).map(|i| (i * 37 + 11) % num_blocks).collect();
+    let kv_dim = 4 * 64;
+    for t in 0..n_tokens {
+        let k: Vec<f32> = (0..kv_dim).map(|_| lcg(seed) * 2.0).collect();
+        let v: Vec<f32> = (0..kv_dim).map(|_| lcg(seed) * 2.0).collect();
+        pool.write_token_kv(blocks[t / bs], layer, t % bs, &k, &v);
+    }
+    (pool, blocks)
+}
+
+/// FB-1 cut 3d: the three attention ops on the chip at TinyLlama shapes (32 q heads,
+/// 4 kv heads, head_dim 64) against ReferenceCpuBackend: contiguous gqa, paged over an
+/// Fp32 pool (the model's pool; host gather + f32 kernel), paged over a bf16 pool (omega's
+/// paged kernel), and the batch op with ragged rows, a negative entry and an empty row.
+#[test]
+#[ignore = "chip test: needs a native build and the GB10; run through the heavy queue"]
+fn chip_attention_parity_on_tinyllama_shapes() {
+    let omega = OmegaGb10Backend::new();
+    assert!(omega.is_available(), "native build required");
+    let reference = ReferenceCpuBackend::new();
+    let mut seed = 4242u32;
+    let (nq, nkv, hd) = (32usize, 4usize, 64usize);
+
+    let mut gqa_worst = 0.0f64;
+    for seq in [1usize, 7, 64, 300, 2048] {
+        let q: Vec<f32> = (0..nq * hd).map(|_| lcg(&mut seed) * 2.0).collect();
+        let k: Vec<f32> = (0..seq * nkv * hd).map(|_| lcg(&mut seed) * 2.0).collect();
+        let v: Vec<f32> = (0..seq * nkv * hd).map(|_| lcg(&mut seed) * 2.0).collect();
+        let (mut got, mut want) = (vec![0.0f32; nq * hd], vec![0.0f32; nq * hd]);
+        omega.gqa_attention(&mut got, &q, &k, &v, seq, nq, nkv, hd);
+        reference.gqa_attention(&mut want, &q, &k, &v, seq, nq, nkv, hd);
+        let r = worst_attn_ratio(&got, &want);
+        let at = got
+            .iter()
+            .zip(&want)
+            .map(|(g, w)| (*g as f64 - *w as f64).abs())
+            .enumerate()
+            .fold(
+                (0usize, 0.0f64),
+                |m, (i, d)| if d > m.1 { (i, d) } else { m },
+            );
+        println!(
+            "PARITY gqa seq={seq} err/tol={r:.3e} worst at {} got={} want={}",
+            at.0, got[at.0], want[at.0]
+        );
+        gqa_worst = gqa_worst.max(r);
+    }
+    println!(
+        "PARITY gqa_attention seq 1..2048 worst err/tolerance = {gqa_worst:.3e} (must be <= 1)"
+    );
+    assert!(gqa_worst <= 1.0, "gqa_attention outside tolerance");
+
+    for dtype in [aien_kv_cache::KvDType::Fp32, aien_kv_cache::KvDType::Bf16] {
+        let mut worst = 0.0f64;
+        for (ctx, layer) in [(1usize, 0usize), (17, 3), (250, 21), (1000, 9)] {
+            let (pool, blocks) = filled_pool(dtype, ctx, layer, &mut seed);
+            let q: Vec<f32> = (0..nq * hd).map(|_| lcg(&mut seed) * 2.0).collect();
+            let (mut got, mut want) = (vec![0.0f32; nq * hd], vec![0.0f32; nq * hd]);
+            omega.paged_attention(&mut got, &q, &pool, &blocks, ctx, layer, nq, nkv, hd);
+            reference.paged_attention(&mut want, &q, &pool, &blocks, ctx, layer, nq, nkv, hd);
+            worst = worst.max(worst_attn_ratio(&got, &want));
+        }
+        println!(
+            "PARITY paged_attention {dtype:?} worst err/tolerance = {worst:.3e} (must be <= 1)"
+        );
+        assert!(worst <= 1.0, "paged_attention {dtype:?} outside tolerance");
+
+        // batch: 3 rows (ctx 40, 0 = empty, 90 with a trailing -1), max_blocks 8.
+        let (pool, blocks) = filled_pool(dtype, 90, 5, &mut seed);
+        let mb = 8usize;
+        let mut tables = vec![-1i32; 3 * mb];
+        for (i, b) in blocks.iter().take(3).enumerate() {
+            tables[i] = *b as i32;
+        }
+        for (i, b) in blocks.iter().enumerate() {
+            tables[2 * mb + i] = *b as i32;
+        }
+        let lens = [40i32, 0, 90];
+        let q: Vec<f32> = (0..3 * nq * hd).map(|_| lcg(&mut seed) * 2.0).collect();
+        let (mut got, mut want) = (vec![0.0f32; 3 * nq * hd], vec![0.0f32; 3 * nq * hd]);
+        omega.paged_attention_batch(&mut got, &q, &pool, &tables, &lens, mb, 3, 5, nq, nkv, hd);
+        reference
+            .paged_attention_batch(&mut want, &q, &pool, &tables, &lens, mb, 3, 5, nq, nkv, hd);
+        let bw = worst_attn_ratio(&got, &want);
+        println!(
+            "PARITY paged_attention_batch {dtype:?} worst err/tolerance = {bw:.3e} (must be <= 1)"
+        );
+        assert!(
+            bw <= 1.0,
+            "paged_attention_batch {dtype:?} outside tolerance"
+        );
+    }
+
+    assert_eq!(omega.fallback_count(), 0, "{}", omega.last_error());
+    assert_eq!(omega.chip_errors(), 0, "{}", omega.last_error());
+    println!("PARITY attention {}", omega.op_report().line());
 }
