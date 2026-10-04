@@ -45,25 +45,15 @@ record() { # record PASS|PARTIAL|FAIL "step" "detail"
 # ---------------------------------------------------------------------------
 # IPC helper: one JSON-line ControlEnvelope over the runtime socket.
 # ---------------------------------------------------------------------------
-ipc() { # ipc '<envelope-json>' ; prints response line
-    python3 - "$SOCK" "$1" <<'PYEOF'
-import json, socket, sys
-sock_path, payload = sys.argv[1], sys.argv[2]
-s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-s.settimeout(120)
-try:
-    s.connect(sock_path)
-    s.sendall((payload + "\n").encode())
-    buf = b""
-    while not buf.endswith(b"\n"):
-        chunk = s.recv(65536)
-        if not chunk:
-            break
-        buf += chunk
-    print(buf.decode().strip())
-except OSError as e:
-    print(json.dumps({"Error": str(e)}))
-PYEOF
+for tool in socat jq; do command -v "$tool" >/dev/null 2>&1 || { echo "golden_path.sh needs $tool (no Python at run time)" >&2; exit 1; }; done
+ipc() { # ipc '<envelope-json>' ; prints response line (socat, no Python)
+    local resp
+    resp="$(printf '%s\n' "$1" | timeout 125 socat -t 120 - UNIX-CONNECT:"$SOCK" 2>/dev/null | head -n1)"
+    if [[ -z "$resp" ]]; then
+        printf '{"Error": "no response from %s"}\n' "$SOCK"
+    else
+        printf '%s\n' "$resp"
+    fi
 }
 
 status_json() {
@@ -71,7 +61,7 @@ status_json() {
 }
 
 field() { # field '<json>' '<key>' ; unwraps the Status envelope when present
-    python3 -c "import json,sys; d=json.load(sys.stdin); d=d.get('Status', d); print(d.get(sys.argv[1], ''))" "$2" <<<"$1" 2>/dev/null
+    jq -r --arg k "$2" '(.Status // .) | (.[$k] // "")' <<<"$1" 2>/dev/null
 }
 
 status_field() { # status_field '<key>'
@@ -173,9 +163,9 @@ else
 fi
 
 # Step 4: branch agents with zero-copy KV sharing.
-prompt_tokens="$(python3 -c 'print(json.dumps([b for b in b"golden path swarm probe"]))' 2>/dev/null || echo '[103,108,9]')"
+prompt_tokens="$(jq -cn '"golden path swarm probe" | explode' 2>/dev/null || echo '[103,108,9]')"
 launch_resp="$(ipc "{\"protocol_version\":1,\"request_id\":$RANDOM,\"operation_id\":$(date +%s%N),\"operator_session\":1,\"command\":{\"LaunchSwarm\":{\"model_handle\":1,\"branch_count\":4,\"max_active_sequences\":8,\"max_tokens_per_branch\":8,\"root_world_id\":0,\"priority\":1,\"prompt_tokens\":$prompt_tokens}}}")"
-swarm_id="$(python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('SwarmAccepted',{}).get('swarm_id',''))" <<<"$launch_resp" 2>/dev/null)"
+swarm_id="$(jq -r '.SwarmAccepted.swarm_id // ""' <<<"$launch_resp" 2>/dev/null)"
 if [ -n "$swarm_id" ]; then
     # Branches may complete between launch and the first status query, so the
     # fork proof is the copy-on-write fault count, not a transient snapshot.
@@ -249,7 +239,7 @@ stop_daemon
 if boot_daemon; then
     replay_resp="$(ipc "{\"protocol_version\":1,\"request_id\":$RANDOM,\"operation_id\":$cancel_op,\"operator_session\":1,\"command\":{\"CancelSwarm\":${swarm_id:-999999}}}")"
     if [[ "$replay_resp" == *"already processed"* ]]; then
-        record PASS "9 idempotency survives restart" "replayed op $cancel_op rejected: $(python3 -c "import json,sys; print(json.load(sys.stdin).get('Error','')[:80])" <<<"$replay_resp")"
+        record PASS "9 idempotency survives restart" "replayed op $cancel_op rejected: $(jq -r '(.Error // "")[:80]' <<<"$replay_resp" 2>/dev/null)"
     else
         record FAIL "9 idempotency survives restart" "replay response: $replay_resp"
     fi
