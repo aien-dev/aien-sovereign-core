@@ -119,109 +119,69 @@ check_dirty_worktree() {
   return 0
 }
 
+# Value of `key = "..."` inside the [package] table of a manifest (first match).
+pkg_field() {
+  awk -v key="$2" '
+    /^[[:space:]]*\[/ { in_pkg = ($0 ~ /^[[:space:]]*\[package\][[:space:]]*$/); next }
+    in_pkg && $0 ~ "^[[:space:]]*" key "[[:space:]]*=[[:space:]]*\"" {
+      s = $0; sub(/^[^"]*"/, "", s); sub(/".*$/, "", s); print s; exit
+    }
+  ' "$1"
+}
+
+# Bring the destination [package] table in line with the source: license from the
+# workspace root (single source of truth), version and edition from the source crate.
+# Pure awk, no Python. Exit 0 parity or synced, 2 disparity in check mode, 1 error.
 sync_manifest() {
   local src_manifest="$1"
   local dest_manifest="$2"
   local is_check="$3"
+  local ws_manifest="$SOVEREIGN_CORE/Cargo.toml"
 
-  python3 - << 'PYEOF' "$src_manifest" "$dest_manifest" "$is_check" "$SOVEREIGN_CORE/Cargo.toml"
-import sys, re
+  local license_id
+  license_id=$(awk '
+    /^[[:space:]]*\[/ { in_ws = ($0 ~ /^[[:space:]]*\[workspace\.package\][[:space:]]*$/); next }
+    in_ws && /^[[:space:]]*license[[:space:]]*=[[:space:]]*"/ {
+      s = $0; sub(/^[^"]*"/, "", s); sub(/".*$/, "", s); print s; exit
+    }
+  ' "$ws_manifest")
+  if [[ -z "$license_id" ]]; then
+    echo "[ERROR] No [workspace.package] license in $ws_manifest"
+    return 1
+  fi
 
-src_path = sys.argv[1]
-dest_path = sys.argv[2]
-check_mode = (sys.argv[3] == "true")
+  local src_version src_edition
+  src_version=$(pkg_field "$src_manifest" version)
+  src_edition=$(pkg_field "$src_manifest" edition)
 
-# The workspace root manifest is the single source of truth for the license.
-license_id = None
-in_ws_pkg = False
-with open(sys.argv[4], "r", encoding="utf-8") as f:
-    for line in f:
-        s = line.strip()
-        if s.startswith("["):
-            in_ws_pkg = (s == "[workspace.package]")
-            continue
-        m = re.match(r'^license\s*=\s*"([^"]+)"', s)
-        if in_ws_pkg and m:
-            license_id = m.group(1)
-            break
-if not license_id:
-    print(f"[ERROR] No [workspace.package] license in {sys.argv[4]}")
-    sys.exit(1)
-license_line = f'license = "{license_id}"\n'
+  local tmp
+  tmp=$(mktemp)
+  awk -v lic="$license_id" -v ver="$src_version" -v ed="$src_edition" '
+    function flush_license() {
+      if (in_pkg && !license_set) { printf "license = \"%s\"\n", lic; license_set = 1 }
+    }
+    /^[[:space:]]*\[package\][[:space:]]*$/ { in_pkg = 1; print; next }
+    /^[[:space:]]*\[/ { flush_license(); in_pkg = 0 }
+    in_pkg && /^[[:space:]]*license(\.workspace)?[[:space:]]*=/ { printf "license = \"%s\"\n", lic; license_set = 1; next }
+    in_pkg && ver != "" && /^[[:space:]]*version[[:space:]]*=/ { printf "version = \"%s\"\n", ver; next }
+    in_pkg && ed != "" && /^[[:space:]]*edition[[:space:]]*=/ { printf "edition = \"%s\"\n", ed; next }
+    { print }
+    END { flush_license() }
+  ' "$dest_manifest" > "$tmp"
 
-with open(src_path, "r", encoding="utf-8") as f:
-    src_lines = f.readlines()
-with open(dest_path, "r", encoding="utf-8") as f:
-    dest_lines = f.readlines()
-
-# Extract version and edition from source package table
-src_version = None
-src_edition = None
-in_pkg = False
-for line in src_lines:
-    s = line.strip()
-    if s.startswith("[package]"):
-        in_pkg = True
-        continue
-    elif s.startswith("[") and in_pkg:
-        in_pkg = False
-    if in_pkg:
-        mv = re.match(r'^version\s*=\s*"([^"]+)"', s)
-        if mv:
-            src_version = mv.group(1)
-        me = re.match(r'^edition\s*=\s*"([^"]+)"', s)
-        if me:
-            src_edition = me.group(1)
-
-# Build updated destination lines
-new_dest = []
-in_pkg = False
-license_set = False
-
-for line in dest_lines:
-    s = line.strip()
-    if s.startswith("[package]"):
-        in_pkg = True
-        new_dest.append(line)
-        continue
-    elif s.startswith("[") and in_pkg:
-        if not license_set:
-            new_dest.append(license_line)
-            license_set = True
-        in_pkg = False
-
-    if in_pkg:
-        if re.match(r'^(license|license\.workspace)\s*=', s):
-            new_dest.append(license_line)
-            license_set = True
-            continue
-        if src_version and re.match(r'^version\s*=', s):
-            new_dest.append(f'version = "{src_version}"\n')
-            continue
-        if src_edition and re.match(r'^edition\s*=', s):
-            new_dest.append(f'edition = "{src_edition}"\n')
-            continue
-    new_dest.append(line)
-
-if in_pkg and not license_set:
-    new_dest.append(license_line)
-
-new_content = "".join(new_dest)
-old_content = "".join(dest_lines)
-
-if new_content != old_content:
-    if check_mode:
-        print(f"[DISPARITY] {dest_path} requires manifest update (license {license_id} or version/edition)")
-        sys.exit(2)
-    else:
-        with open(dest_path, "w", encoding="utf-8") as f:
-            f.write(new_content)
-        print(f"[SYNCED] Manifest updated: {dest_path} (license = {license_id})")
-        sys.exit(0)
-else:
-    print(f"[PARITY OK] Manifest {dest_path} in parity (license = {license_id})")
-    sys.exit(0)
-PYEOF
+  if cmp -s "$tmp" "$dest_manifest"; then
+    rm -f "$tmp"
+    echo "[PARITY OK] Manifest $dest_manifest in parity (license = $license_id)"
+    return 0
+  fi
+  if [[ "$is_check" == "true" ]]; then
+    rm -f "$tmp"
+    echo "[DISPARITY] $dest_manifest requires manifest update (license $license_id or version/edition)"
+    return 2
+  fi
+  mv "$tmp" "$dest_manifest"
+  echo "[SYNCED] Manifest updated: $dest_manifest (license = $license_id)"
+  return 0
 }
 
 check_unslop_invariants() {
