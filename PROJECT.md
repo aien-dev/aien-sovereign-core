@@ -158,7 +158,7 @@ crates/aien-inference-abi/
 │   ├── tinyllama_parity.rs                 (owns: M4 5-stage numerical parity test harness)
 │   └── fixtures/                           (owns: M3 compact oracle and tokenizer fixtures)
 scripts/
-└── generate_tinyllama_oracle.py            (owns: M3 PyTorch CPU reference oracle generator)
+└── (TinyLlama oracle generator moved to aien-dev/aien-yardsticks)
 benchmarks/
 ├── Cargo.toml                              (owns: M6 benchmark workspace)
 └── crates/

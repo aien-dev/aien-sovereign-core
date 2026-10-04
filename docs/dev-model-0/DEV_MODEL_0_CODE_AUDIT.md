@@ -89,8 +89,8 @@ Sampling happens on host after full logits are read back (`transformer_backend.r
 ## 5. Python, Mojo, build, CLI inventory
 
 Python files in repo: 11 (confirmed). None is imported or shelled out to from the inference path.
-- `scripts/generate_tinyllama_oracle.py`: offline HF Transformers/torch oracle generator for the TinyLlama fixtures (`abi/fixtures/tinyllama_oracle*`). Offline tool, precedent for brief section 4. Violates the no-Python rule if kept in-repo; Phase E should replace by C/shell tooling or keep outside the repo with only artifacts committed.
-- `scripts/aien_drive.py`, `scripts/browser_mirror_test.py`: agent driver and browser test harness. `crates/aien-cli/src/sandbox.rs:363-374` and `platform.rs:87-91` shell out to `python`/`browser_mirror_test.py`; `commands.rs:184,202` calls `basecamp/aien-dream/dream_engine.py` (outside repo). None in the inference path.
+- `scripts/generate_tinyllama_oracle.py`: moved to aien-dev/aien-yardsticks `yardsticks/tinyllama-oracle/`.
+- `scripts/aien_drive.py`, `scripts/browser_mirror_test.py`: removed (no Python in this repo; see the Rust replacement issues). `crates/aien-cli/src/sandbox.rs` and `platform.rs` still shell out to a script outside the repo.
 - `modular/nemotron_h_kvexp` (a MAX architecture plugin for Nemotron-H, not referenced by any Rust crate): MOVED 2026-10-04 out of this repo to https://github.com/aien-dev/aien-yardsticks (`yardsticks/modular-nemotron-h-kvexp`), history preserved.
 - Python also appears inside shell scripts (`scripts/golden_path.sh`, `mac-platform-proxy.sh`, `sync-standalone-repos.sh:127`). Out of scope for DM0 but they are Python-in-shell, relevant to the standing rule.
 
