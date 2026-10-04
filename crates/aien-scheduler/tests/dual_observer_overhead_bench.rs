@@ -172,3 +172,108 @@ fn dual_observer_overhead() {
     assert_eq!(absent.records, 0);
     assert_eq!(absent.decisions, counting.decisions);
 }
+
+/// Exploratory (NOT pre-registered) protocol added after the first run: arms
+/// interleaved round by round so clock scaling and cache warmth hit every arm
+/// alike, 50 rounds, medians. Reported in the receipt as post-hoc only; it
+/// does not replace the pre-registered verdict above.
+#[test]
+#[ignore = "manual overhead benchmark (interleaved, exploratory); --ignored --nocapture in release"]
+fn dual_observer_overhead_interleaved() {
+    const N: usize = 50;
+    let set = scenarios();
+    let mut absent_w = Vec::with_capacity(N);
+    let mut counting_w = Vec::with_capacity(N);
+    let mut recording_w = Vec::with_capacity(N);
+    let mut absent_a = Vec::with_capacity(N);
+    let mut counting_a = Vec::with_capacity(N);
+    let mut recording_a = Vec::with_capacity(N);
+    let mut decisions = 0usize;
+    let mut records = 0u64;
+    let mut bytes = 0u64;
+
+    let run_arm = |mode: u8, walls: &mut Vec<u128>, allocs: &mut Vec<u64>| {
+        let a0 = ALLOCS.load(Relaxed);
+        let t0 = Instant::now();
+        let mut d = 0usize;
+        let mut r = 0u64;
+        let mut b = 0u64;
+        for s in &set {
+            let (mut scheduler, kv) = build(s);
+            let counting = Arc::new(CountingObserver::new());
+            let recording = Arc::new(RecordingObserver::new());
+            match mode {
+                1 => scheduler.set_decision_observer(Some(counting.clone())),
+                2 => scheduler.set_decision_observer(Some(recording.clone())),
+                _ => {}
+            }
+            let trace = run(s, &mut scheduler, &kv);
+            d += trace.decisions;
+            match mode {
+                1 => {
+                    r += counting.records();
+                    b += counting.bytes();
+                }
+                2 => {
+                    let recs = recording.take();
+                    r += recs.len() as u64;
+                    b += recs
+                        .iter()
+                        .map(|x| serde_json::to_vec(x).unwrap().len() as u64)
+                        .sum::<u64>();
+                }
+                _ => {}
+            }
+        }
+        walls.push(t0.elapsed().as_nanos());
+        allocs.push(ALLOCS.load(Relaxed) - a0);
+        (d, r, b)
+    };
+
+    // Warm-up round for every arm, discarded.
+    let (mut w, mut a) = (Vec::new(), Vec::new());
+    for mode in 0..3u8 {
+        run_arm(mode, &mut w, &mut a);
+    }
+    for _ in 0..N {
+        let (d, _, _) = run_arm(0, &mut absent_w, &mut absent_a);
+        decisions = d;
+        let (_, r, b) = run_arm(1, &mut counting_w, &mut counting_a);
+        records = r;
+        bytes = b;
+        run_arm(2, &mut recording_w, &mut recording_a);
+    }
+    let med = |v: &mut Vec<u128>| median(v);
+    let (ma, mc, mr) = (
+        med(&mut absent_w),
+        med(&mut counting_w),
+        med(&mut recording_w),
+    );
+    println!("DUAL serve.admit_preempt observer overhead, INTERLEAVED exploratory protocol, {N} rounds, median of per-round wall");
+    println!(
+        "{:<10} {:>12} {:>12} {:>10} {:>9} {:>12} {:>10} {:>8}",
+        "arm", "median_ms", "min_ms", "decisions", "records", "bytes", "allocs", "ratio"
+    );
+    for (name, w, al, rec, by) in [
+        ("absent", &absent_w, &absent_a, 0u64, 0u64),
+        ("counting", &counting_w, &counting_a, records, bytes),
+        ("recording", &recording_w, &recording_a, records, bytes),
+    ] {
+        let m = {
+            let mut c = w.clone();
+            median(&mut c)
+        };
+        println!(
+            "{:<10} {:>12.3} {:>12.3} {:>10} {:>9} {:>12} {:>10} {:>8.3}",
+            name,
+            m as f64 / 1e6,
+            *w.iter().min().unwrap() as f64 / 1e6,
+            decisions,
+            rec,
+            by,
+            al[al.len() / 2],
+            m as f64 / ma as f64
+        );
+    }
+    let _ = (mc, mr);
+}

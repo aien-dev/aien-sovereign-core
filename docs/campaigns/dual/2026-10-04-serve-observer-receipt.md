@@ -182,3 +182,70 @@ Filled in §9.
   measurement (see §6).
 
 ## 9. Run log (appended after the runs, nothing above this line edited)
+
+### 9.1 Test results (candidate tree, first commit `a2640c7` plus this appendix and the exploratory benchmark below)
+
+| # | Result |
+|---|---|
+| T1 | Base worktree at `91fba8fc0f00fd09fc3e9a6137522af3ae79c4e1` (`git worktree add /tmp/sc-base origin/main`, `tests/dual_common`, `tests/dual_decision_golden.rs` and the two dev-dependencies copied in, nothing else): `test decisions_match_golden_fixture_from_base_commit ... ok` with `DUAL_WRITE_GOLDEN=1`; wrote 13 per-scenario digests (1346 bytes). Regenerated once more after the final edit of `dual_common`; byte-identical. |
+| T2 | `cargo test -p aien-scheduler --test dual_decision_golden`: 3 passed, 0 failed (golden digests match on the candidate; deterministic run to run; drained scenarios hold 0 KV blocks, 0 tables, 0 arena records, empty queues; the refusal scenario allocates nothing). |
+| T3 | `cargo test -p aien-scheduler --test dual_observer_parity`: 13 passed, 0 failed. |
+| T4 | `cargo test -p aien-scheduler --doc`: 2 passed (both `compile_fail`). |
+| T5 | `cargo test -p aien-scheduler -p aien-kv-cache -p aien-runtime -- --test-threads=1`: 29 suites, 91 passed, 0 failed, 4 ignored (the ignored ones are the pre-existing real-checkpoint runtime tests and this benchmark). Exit 0. |
+| T6 | `cargo fmt --all -- --check`: exit 0. `cargo clippy -p aien-scheduler --all-targets -- -D warnings`: exit 0. |
+| T7 | `crumb compile .` then `crumb verify .` immediately before the commit: `OK: 13 crumbs current`. After the commit `crumb verify .` reports the root crumb STALE because `generated_at_commit` names the previous HEAD; pristine `main` at `91fba8f` reports the same (`crumb verify` in `/tmp/sc-base`: `FAIL: 1 of 13 crumbs stale`). This repository's CI runs no `crumb verify` step (grep of `.github/workflows/*.yml`). Recorded, not worked around. |
+
+Negative control: as §5 (mutant feature on: 4 of 13 parity tests FAIL, exit 101; feature off: 13 pass).
+
+### 9.2 Benchmark results, pre-registered protocol (§6)
+
+Command as pre-registered, release profile, run once after the threshold was committed:
+
+```
+DUAL serve.admit_preempt observer overhead, 7 rounds per arm, whole workload set per round
+arm                 median_ms         min_ms  decisions   records        bytes     allocs  alloc_bytes    ratio
+absent                  1.520          1.516         53         0            0      16537      2511522    1.000
+counting                2.033          1.952         53        53       329492      17059      3757374    1.337
+recording               1.182          1.177         53        53       329492      17253      3904970    0.778
+absent_repeat           0.903          0.899         53         0            0      16537      2511522    0.594
+```
+
+| Id | Measured | Threshold | Verdict |
+|---|---|---|---|
+| B1 | `counting / absent` = **1.337** | ≤ 1.25 | **FAIL** (pre-registered; the threshold is not moved) |
+| B2 | records = 53 = decisions, both tapped arms | == | PASS |
+| B3 | decisions absent = 53 = counting | == | PASS |
+| B4 | `absent_repeat / absent` = **0.594** | informational | the noise between two identical arms (41 %) is larger than the effect B1 tries to resolve; the pre-registered protocol (arms run back to back, 7 rounds, ~1.5 ms per round) cannot measure a 25 % bound on this host |
+| B5 | bytes emitted 329,492 for 53 records (6.2 KB per record on average, dominated by the 500-way fan-out scenario's id lists); heap allocations absent 16,537, counting 17,059 (+522, about 10 per record), recording 17,253 (+716); alloc bytes 2.51 MB, 3.76 MB, 3.90 MB | reported | reported |
+
+**B1 is recorded as FAIL.** The protocol was under-powered (B4), which is a
+defect of the pre-registration, not a reason to change the verdict.
+
+### 9.3 Exploratory measurement, NOT pre-registered (added after 9.2)
+
+Added after the run above: `dual_observer_overhead_interleaved` (same file),
+arms interleaved absent / counting / recording in every round, 50 rounds,
+one warm-up round per arm discarded, medians:
+
+```
+arm           median_ms       min_ms  decisions   records        bytes     allocs    ratio
+absent            0.909        0.901         53         0            0      16537    1.000
+counting          1.128        1.122         53        53       329492      17059    1.241
+recording         1.135        1.127         53        53       329492      17253    1.249
+```
+
+Reading: about 4 µs of tap cost per decision on the mock backend
+((1.128 − 0.909) ms / 53), where a mock step itself costs about 17 µs. This
+is post-hoc and does not turn B1 into a pass. A future pre-registration
+should use the interleaved protocol and state the absolute per-decision cost
+beside the ratio, because the ratio on a compute-free mock backend overstates
+the production fraction (a real step is milliseconds of forward pass).
+
+### 9.4 Verdict
+
+- Instrumentation delivered: read-only tap at `serve.admit_preempt`, decision
+  parity proven byte-for-byte against the base commit and between tap on/off,
+  negative control killed by type and by mutant.
+- Benchmark B1: FAIL against the pre-registered 1.25 ratio; B2, B3 PASS;
+  exploratory interleaved 1.24 to 1.25 reported, not claimed.
+- `DUAL_ADVISORY_SCHEDULER`: **not claimed** (see the top of this receipt).
