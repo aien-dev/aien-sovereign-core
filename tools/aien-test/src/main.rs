@@ -10,6 +10,7 @@
 //! - `identity GATE`: print the check id (ADR 0033 Decision 3) and the object it
 //!   hashed, for the gate and everything it depends on.
 
+use aien_test::bundle;
 use aien_test::cli::{parse_args, Cli, Command, Selection, USAGE};
 use aien_test::evidence::{Index, Store};
 use aien_test::graph::{self, GraphError};
@@ -26,6 +27,10 @@ fn main() {
 
 fn real_main() -> i32 {
     let argv: Vec<String> = std::env::args().skip(1).collect();
+    // VerificationBundleV1 commands (ADR 0033 Decision 6) have their own small parser.
+    if argv.first().is_some_and(|c| bundle::is_bundle_command(c)) {
+        return bundle::cli_main(&argv);
+    }
     let cli = match parse_args(&argv) {
         Ok(c) => c,
         Err(e) => {
