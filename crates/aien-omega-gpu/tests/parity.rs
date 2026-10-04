@@ -37,7 +37,8 @@ fn reference(m: usize, k: usize, n: usize, a: &[f32], b: &[f32]) -> Vec<f32> {
 #[test]
 fn lock_is_full_sha() {
     assert_eq!(PINNED_OMEGA_SHA.len(), 40);
-    assert!(PINNED_OMEGA_SHA.starts_with("5e29b82"));
+    // The build reads omega.lock; the constant must be exactly that file's sha.
+    assert_eq!(PINNED_OMEGA_SHA, include_str!("../../../omega.lock").trim());
 }
 
 #[test]
