@@ -5,8 +5,10 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-PROTOCOLS_REV="$(sed -n 's/^PROTOCOLS_REV="\([0-9a-f]\{40\}\)"$/\1/p' "$ROOT/install.sh")"
-[[ -n "$PROTOCOLS_REV" ]] || { echo "FAIL: PROTOCOLS_REV not found in install.sh" >&2; exit 1; }
+# aien-protocols is a git dependency pinned by revision in Cargo.lock, not a sibling checkout.
+PROTOCOLS_REV="$(sed -n 's/^source = "git+https:\/\/github.com\/aien-dev\/aien-protocols?rev=\([0-9a-f]\{40\}\)#.*"$/\1/p' "$ROOT/Cargo.lock" | sort -u)"
+[[ $(printf '%s\n' "$PROTOCOLS_REV" | grep -c .) -eq 1 ]] || { echo "FAIL: Cargo.lock must pin aien-protocols to exactly one revision" >&2; exit 1; }
+SOURCE_REV="0123456789abcdef0123456789abcdef01234567"
 
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/aien-test-install.XXXXXX")"
 trap 'rm -rf "$WORK"' EXIT
@@ -31,10 +33,10 @@ case "\$1" in
         ;;
     -C)
         case "\$3" in
-            rev-parse) echo "$PROTOCOLS_REV" ;;
+            rev-parse) echo "$SOURCE_REV" ;;
         esac
         ;;
-    rev-parse) echo "$PROTOCOLS_REV" ;;
+    rev-parse) echo "$SOURCE_REV" ;;
     config)
         if [[ "\${!#}" == user.name ]]; then echo "Fixture Operator"; else echo "fixture@example.test"; fi
         ;;
@@ -79,7 +81,7 @@ done
 [[ -f "$WORK/config/operator.toml" ]] || fail "operator.toml was not generated"
 grep -q '^name = "Fixture Operator"$' "$WORK/config/operator.toml" || fail "operator.toml lacks git identity"
 grep -q 'clone --quiet https://github.com/aien-dev/aien-sovereign-core.git' "$WORK/git.calls" || fail "installer did not clone the core repository"
-grep -q "checkout --quiet $PROTOCOLS_REV" "$WORK/git.calls" || fail "installer did not pin aien-protocols"
+! grep -q "aien-protocols" "$WORK/git.calls" || fail "installer must not clone aien-protocols (it is a pinned git dependency in Cargo.lock)"
 [[ -z "$(ls -A "$WORK/tmp")" ]] || fail "installer left its temporary checkout behind"
 [[ -z "$(ls -A "$WORK/cwd")" ]] || fail "installer wrote into the caller's working directory"
 
