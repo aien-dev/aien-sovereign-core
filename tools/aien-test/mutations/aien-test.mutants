@@ -63,3 +63,8 @@ v2_tolerance_without_bounded_allowed	manifest.rs	s#if tolerance.is_some() \&\& e
 v2_analog_eligible_for_exact	manifest.rs	s#if is_analog(b) \&\& exactness == Exactness::Exact {#if false {#	an analog backend may be eligible for an EXACT check
 v2_canonical_outside_eligible	manifest.rs	s#if !eligible.contains(&canonical) {#if false {#	a canonical backend that is not eligible is accepted
 v1_accepts_v2_keys	manifest.rs	s#entries.iter().find(|e| V2_KEYS.contains(\&e.key.as_str()))#entries.iter().find(|_e| false)#	a v1 manifest may use v2 keys, so it is no longer strictly v1
+sig_not_checked	bundle.rs	s#vk.verify_strict(&bytes, &signature)#Ok::<(), ed25519_dalek::SignatureError>(())#	the bundle signature is never checked
+commit_not_checked	bundle.rs	s#if commit != expect.commit {#if false {#	a bundle for another commit is accepted
+repo_not_checked	bundle.rs	s#if repo != expect.repository {#if false {#	a bundle for another repository is accepted
+key_not_checked	bundle.rs	s#if pubkey != expect.pubkey_hex.trim() {#if false {#	a bundle signed by an unknown key is accepted
+not_run_counts_as_pass	bundle.rs	s#if !(ran \&\& verdict == "PASS") {#if verdict == "FAIL" {#	a required check that did not run no longer blocks PASS
