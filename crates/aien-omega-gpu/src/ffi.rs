@@ -1,5 +1,5 @@
 //! Raw declarations, written by hand from omega `src/omega_gpu_matmul_api.h`
-//! at the commit pinned in `omega.lock` (6b940fa). Nothing generated.
+//! at the commit pinned in `omega.lock` (3d4648c; headers unchanged since 6b940fa). Nothing generated.
 //! Includes the resident-weights handles added by omega FB-1 cut 1b.
 use std::os::raw::{c_char, c_int};
 
@@ -211,7 +211,7 @@ extern "C" {
     pub fn omega_gpu_elementwise_rc_name(rc: c_int) -> *const c_char;
 }
 
-// ---- omega `src/omega_gpu_attention_api.h` (FB-1 cut 5 + 4b, pinned 6b940fa) ----
+// ---- omega `src/omega_gpu_attention_api.h` (FB-1 cut 5 + 4b, pinned 3d4648c) ----
 pub const OMEGA_GPU_ATTN_OK: c_int = 0;
 pub const OMEGA_GPU_ATTN_BAD_ARGS: c_int = -1;
 pub const OMEGA_GPU_ATTN_TOO_LARGE: c_int = -2;
