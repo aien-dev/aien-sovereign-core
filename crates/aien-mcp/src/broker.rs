@@ -7,6 +7,11 @@ use aien_capability::{
 };
 use serde_json::Value;
 
+use crate::authority::{
+    intent_digest, AuthorityContext, AuthorityDecision, AuthorityOutcome, EffectAuthority,
+    EffectScope,
+};
+use crate::effect::mint;
 use crate::{
     AuthorizedEffect, CallOutcome, CapabilitySnapshot, EffectIntent, EffectReceipt, Error, McpWire,
     ToolResult,
@@ -222,6 +227,73 @@ pub struct EffectLane {
 impl EffectLane {
     pub fn new(broker: McpBroker) -> Self {
         Self { broker }
+    }
+
+    /// Ask `authority` whether `intent` may run, and mint an `AuthorizedEffect` only on
+    /// `Allow` or `AllowRestricted`. This is the only production path to an `AuthorizedEffect`.
+    ///
+    /// The lane, not the caller, reads the live descriptor for the authority. A stale intent
+    /// (digest differs from the live catalog) is denied before the authority is asked.
+    /// `RequireApproval` returns `Pending` with the intent digest; no approval is created or
+    /// consumed here. `Deny` and `Contain` return errors.
+    pub fn authorize(
+        &self,
+        intent: EffectIntent,
+        scope: EffectScope,
+        authority: &dyn EffectAuthority,
+    ) -> Result<AuthorizedEffect<EffectIntent>, AuthorityOutcome> {
+        let (descriptor, live) = {
+            let inner = self.broker.lock();
+            let session = inner
+                .sessions
+                .get(intent.provider.as_str())
+                .ok_or_else(|| AuthorityOutcome::Denied("provider is not admitted".into()))?;
+            (
+                find_tool(session, &intent.tool_name).cloned(),
+                session.catalog_digest,
+            )
+        };
+        if intent.capability_digest != live {
+            return Err(AuthorityOutcome::Denied(
+                "intent was staged against a stale catalog".into(),
+            ));
+        }
+        let ctx = AuthorityContext::new(scope, descriptor, live);
+        let decision = authority.authorize(&intent, &ctx);
+        let policy_digest = {
+            let mut bytes = format!("{decision:?}|{}|", intent.tool_name).into_bytes();
+            bytes.extend_from_slice(&live.0);
+            Digest32::of(&bytes)
+        };
+        match decision {
+            AuthorityDecision::Allow | AuthorityDecision::AllowRestricted(_) => Ok(mint(
+                intent,
+                scope.world_id,
+                scope.winning_jnode,
+                policy_digest,
+                live,
+                scope.idempotency_key,
+            )),
+            AuthorityDecision::RequireApproval(reason) => Err(AuthorityOutcome::Pending {
+                intent_digest: intent_digest(&intent),
+                reason,
+            }),
+            AuthorityDecision::Deny(reason) => Err(AuthorityOutcome::Denied(reason)),
+            AuthorityDecision::Contain(reason) => Err(AuthorityOutcome::Contained(reason)),
+        }
+    }
+
+    /// `authorize`, then `execute_effect`. Nothing reaches the provider unless authorized.
+    pub async fn authorize_and_execute(
+        &self,
+        intent: EffectIntent,
+        scope: EffectScope,
+        authority: &dyn EffectAuthority,
+    ) -> Result<EffectReceipt, AuthorityOutcome> {
+        let effect = self.authorize(intent, scope, authority)?;
+        self.execute_effect(effect)
+            .await
+            .map_err(AuthorityOutcome::Execution)
     }
 
     pub async fn execute_effect(

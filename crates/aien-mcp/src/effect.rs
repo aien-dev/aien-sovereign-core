@@ -32,10 +32,31 @@ pub struct EffectReceipt {
 
 /// An effect the policy boundary has allowed.
 ///
-/// This commit has no production constructor. The next policy change is the
-/// only path that may mint one: an `EffectIntent` enters AEGIS, and an
-/// `AuthorizedEffect` comes out. Fields stay private so another crate cannot
-/// build the value with a struct literal.
+/// The only production mint is crate-private and reachable solely through
+/// [`crate::EffectLane::authorize`], which asks an [`crate::EffectAuthority`]. Fields stay
+/// private, so another crate cannot build the value with a struct literal:
+///
+/// ```compile_fail
+/// use aien_capability::{Digest32, EffectId, JNodeId, WorldId};
+/// use aien_mcp::AuthorizedEffect;
+/// let _ = AuthorizedEffect {
+///     intent: (),
+///     world_id: WorldId(1),
+///     winning_jnode: JNodeId(1),
+///     policy_digest: Digest32::of(b"x"),
+///     capability_digest: Digest32::of(b"x"),
+///     idempotency_key: EffectId::from_label("x"),
+/// };
+/// ```
+///
+/// A bare intent cannot be executed:
+///
+/// ```compile_fail
+/// use aien_mcp::{EffectIntent, EffectLane, McpBroker};
+/// async fn f(lane: EffectLane, intent: EffectIntent) {
+///     let _ = lane.execute_effect(intent).await;
+/// }
+/// ```
 #[derive(Clone, Debug)]
 pub struct AuthorizedEffect<T> {
     intent: T,
@@ -75,6 +96,26 @@ impl<T> AuthorizedEffect<T> {
 /// Test-only mint. Absent from production builds.
 #[cfg(test)]
 pub(crate) fn authorize_for_test<T>(
+    intent: T,
+    world_id: WorldId,
+    winning_jnode: JNodeId,
+    policy_digest: Digest32,
+    capability_digest: Digest32,
+    idempotency_key: EffectId,
+) -> AuthorizedEffect<T> {
+    AuthorizedEffect {
+        intent,
+        world_id,
+        winning_jnode,
+        policy_digest,
+        capability_digest,
+        idempotency_key,
+    }
+}
+
+/// Production mint. Crate-private: reached only from `EffectLane::authorize` after an
+/// `EffectAuthority` returned `Allow` or `AllowRestricted`.
+pub(crate) fn mint<T>(
     intent: T,
     world_id: WorldId,
     winning_jnode: JNodeId,
