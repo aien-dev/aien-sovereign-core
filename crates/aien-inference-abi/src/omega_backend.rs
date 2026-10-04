@@ -557,11 +557,16 @@ impl TensorBackend for OmegaGb10Backend {
         num_kv_heads: usize,
         head_dim: usize,
     ) {
+        // The reference reads only the first seq_len rows; causal prefill passes the whole
+        // prompt's cache with a shorter seq_len, so hand omega exactly those rows.
+        let need = seq_len * num_kv_heads * head_dim;
+        let k_rows = &k_cache[..need.min(k_cache.len())];
+        let v_rows = &v_cache[..need.min(v_cache.len())];
         let native = self.chip_attention(&format!("gqa_attention seq={seq_len}"), || {
             aien_omega_gpu::gqa_attention_f32(
                 q,
-                k_cache,
-                v_cache,
+                k_rows,
+                v_rows,
                 seq_len,
                 num_q_heads,
                 num_kv_heads,

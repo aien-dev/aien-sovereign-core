@@ -45,7 +45,7 @@ fn worst_ratio(
 fn stub_backend_reports_unavailable() {
     let b = OmegaGb10Backend::new();
     assert_eq!(b.is_available(), aien_omega_gpu::is_native());
-    assert_eq!(b.native_ops().native_ops().len(), 6);
+    assert_eq!(b.native_ops().native_ops().len(), 9);
 }
 
 #[test]
@@ -257,7 +257,21 @@ fn chip_attention_parity_on_tinyllama_shapes() {
         let (mut got, mut want) = (vec![0.0f32; nq * hd], vec![0.0f32; nq * hd]);
         omega.gqa_attention(&mut got, &q, &k, &v, seq, nq, nkv, hd);
         reference.gqa_attention(&mut want, &q, &k, &v, seq, nq, nkv, hd);
-        gqa_worst = gqa_worst.max(worst_attn_ratio(&got, &want));
+        let r = worst_attn_ratio(&got, &want);
+        let at = got
+            .iter()
+            .zip(&want)
+            .map(|(g, w)| (*g as f64 - *w as f64).abs())
+            .enumerate()
+            .fold(
+                (0usize, 0.0f64),
+                |m, (i, d)| if d > m.1 { (i, d) } else { m },
+            );
+        println!(
+            "PARITY gqa seq={seq} err/tol={r:.3e} worst at {} got={} want={}",
+            at.0, got[at.0], want[at.0]
+        );
+        gqa_worst = gqa_worst.max(r);
     }
     println!(
         "PARITY gqa_attention seq 1..2048 worst err/tolerance = {gqa_worst:.3e} (must be <= 1)"
