@@ -14,6 +14,7 @@ pub mod capsule;
 pub mod checkpoint;
 pub mod moe_plan;
 pub mod mojo_backend;
+pub mod native_ops;
 pub mod qwen3_coder;
 pub mod qwen3_moe;
 pub mod qwen3_serve;

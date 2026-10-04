@@ -61,6 +61,7 @@ fn receipt_rejects_fallbacks_and_dev_builds() {
         model_id: "tinyllama".into(),
         model_config: serde_json::json!({}),
         fallback_count: 0,
+        op_report: None,
         dev_fallback_build: false,
         verdict: String::new(),
     };
@@ -115,6 +116,10 @@ fn strict_real_model_gate() {
     println!("STRICT_GATE output: {out:?}");
     let fallback_count = model.transformer.tensor_backend.fallback_count();
 
+    println!(
+        "STRICT_GATE {}",
+        model.transformer.tensor_backend.op_report().line()
+    );
     let mut receipt = StrictModelReceipt {
         checkpoint_path: model_path.display().to_string(),
         checkpoint_sha256: sha256_file_hex(&model_path),
@@ -125,6 +130,7 @@ fn strict_real_model_gate() {
         model_config: serde_json::to_value(&model.config)
             .unwrap_or(serde_json::json!({"model_id": model.config.model_id})),
         fallback_count,
+        op_report: Some(model.transformer.tensor_backend.op_report()),
         dev_fallback_build: strict::dev_fallback_active(),
         verdict: String::new(),
     };
