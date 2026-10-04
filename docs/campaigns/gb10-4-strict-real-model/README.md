@@ -7,3 +7,5 @@ Gate: `crates/aien-inference-runtime/tests/strict_real_model.rs` (ignored test `
 Run 002 on the DGX Spark, 2026-10-03 (`receipt-run002.json`, `run002.summary.txt`): surface NVIDIA GB10, backend `BlackwellGb10Backend (NVIDIA GB10 sm_121 cuBLAS)`, TinyLlama-1.1B-Chat-v1.0, prompt "The DGX Spark is a small computer with a large" -> "amount of processing power. It is designed", fallback_count 0, verdict PASS. [OBSERVED]
 
 Limit: the GB10 backend in this crate is CUDA/cuBLAS; the project decision to keep CUDA out of AIEN (comparison runs only) means the native nvrm/Omega-engine backend is a separate open item. This gate measures strictness and binding, not the backend's provenance.
+
+Update 2026-10-04 (FB-1 cut 6): the CUDA/cuBLAS backend is deleted. The GB10 path is `OmegaGb10Backend` (Omega native kernels, all nine tensor ops), the default whenever the engine is linked. `scripts/zero-cuda-gate.sh` fails any `aien-cli` build that needs a CUDA library or imports a CUDA symbol; it has a self-test negative control. Run 002 above is kept as recorded.

@@ -6,7 +6,7 @@ use std::marker::PhantomData;
 
 pub const MAX_TENSOR_RANK: usize = 4;
 
-/// Numeric values are part of the CUDA C ABI in `cuda/tensor_abi.h`.
+/// Numeric values are part of the C ABI of this boundary (`#[repr]` below); keep them stable.
 #[repr(u32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AbiDType {
@@ -125,66 +125,12 @@ pub struct TensorView {
 }
 
 /// The device allocation owns `address`, `quant.scales`, and `quant.zero_points`.
-/// The matching CUDA free function must release all three.
+/// Whoever allocates it on a device must release all three.
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct ResidentTensor {
     pub address: *mut c_void,
     pub descriptor: TensorDescriptor,
-}
-
-/// Owns a CUDA allocation described by the same descriptor as its capsule source.
-/// Upload completes before the borrowed host view may be dropped.
-pub struct DeviceTensor {
-    resident: ResidentTensor,
-}
-
-impl DeviceTensor {
-    #[cfg(has_blackwell_cuda)]
-    pub fn upload(host: &BorrowedTensorView<'_>) -> Result<Self, String> {
-        let mut resident = ResidentTensor {
-            address: std::ptr::null_mut(),
-            descriptor: host.as_abi().descriptor,
-        };
-        let stream = unsafe { blackwell_get_stream() };
-        if stream.is_null() {
-            return Err("CUDA stream unavailable".to_string());
-        }
-        let status = unsafe { blackwell_tensor_upload(host.as_abi(), &mut resident, stream) };
-        if status != 0 {
-            return Err(format!("CUDA tensor upload failed: {status}"));
-        }
-        Ok(Self { resident })
-    }
-
-    #[cfg(not(has_blackwell_cuda))]
-    pub fn upload(_host: &BorrowedTensorView<'_>) -> Result<Self, String> {
-        Err("Blackwell CUDA backend unavailable".to_string())
-    }
-
-    pub fn resident(&self) -> &ResidentTensor {
-        &self.resident
-    }
-}
-
-impl Drop for DeviceTensor {
-    fn drop(&mut self) {
-        #[cfg(has_blackwell_cuda)]
-        unsafe {
-            blackwell_tensor_free(&mut self.resident);
-        }
-    }
-}
-
-#[cfg(has_blackwell_cuda)]
-extern "C" {
-    fn blackwell_get_stream() -> *mut c_void;
-    fn blackwell_tensor_upload(
-        host: *const TensorView,
-        device: *mut ResidentTensor,
-        stream: *mut c_void,
-    ) -> i32;
-    fn blackwell_tensor_free(device: *mut ResidentTensor);
 }
 
 /// Keeps the host bytes and quantization arrays alive during an FFI upload.
@@ -434,43 +380,10 @@ mod tests {
     }
 
     #[test]
-    fn c_abi_layout_matches_cuda_header() {
+    fn c_abi_layout_is_stable() {
         assert_eq!(std::mem::size_of::<AbiQuantization>(), 48);
         assert_eq!(std::mem::size_of::<TensorDescriptor>(), 136);
         assert_eq!(std::mem::size_of::<TensorView>(), 144);
         assert_eq!(std::mem::size_of::<ResidentTensor>(), 144);
-    }
-
-    #[cfg(has_blackwell_cuda)]
-    #[test]
-    fn device_upload_preserves_bf16_descriptor_and_payload_size() {
-        let bytes = vec![0_u8; 8];
-        let mut tensors = HashMap::new();
-        tensors.insert(
-            "w".to_string(),
-            CapsuleTensor {
-                dtype: WeightDType::Bf16,
-                layout: TensorLayout::RowMajor,
-                shape: vec![2, 2],
-                logical_strides: vec![2, 1],
-                byte_range: 0..8,
-                quant: None,
-            },
-        );
-        let capsule = ModelCapsule {
-            source_digest: source_digest(&bytes),
-            capsule_digest: capsule_digest(&bytes, &tensors),
-            bytes: Arc::from(bytes),
-            tensors,
-        };
-        let view = TensorView::from_capsule(&capsule, "w").unwrap();
-        let uploaded = DeviceTensor::upload(&view).unwrap();
-        assert!(!uploaded.resident().address.is_null());
-        assert_eq!(uploaded.resident().descriptor.dtype, AbiDType::Bf16);
-        assert_eq!(
-            uploaded.resident().descriptor.residency,
-            AbiResidency::Device
-        );
-        assert_eq!(uploaded.resident().descriptor.byte_len, 8);
     }
 }

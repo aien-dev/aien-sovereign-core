@@ -43,6 +43,12 @@ jobs:
           AIEN_DEV_FALLBACK: "1"
         run: cargo test --workspace --verbose -- --test-threads=1
 
+      - name: Zero-CUDA Gate (aien-cli links no NVIDIA CUDA library or symbol)
+        run: |
+          bash scripts/zero-cuda-gate.sh --self-test
+          cargo build -p aien-cli
+          bash scripts/zero-cuda-gate.sh target/debug/aien-cli
+
       - name: Verify Preflight Branch Guard (both contexts)
         run: bash scripts/test-preflight-branch-guard.sh
 

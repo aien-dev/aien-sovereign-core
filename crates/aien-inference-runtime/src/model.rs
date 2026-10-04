@@ -1,9 +1,8 @@
 use aien_inference_abi::backend::{ReferenceCpuBackend, TensorBackend};
-use aien_inference_abi::blackwell_backend::BlackwellGb10Backend;
 use aien_inference_abi::tokenizer::TinyLlamaTokenizer;
 use aien_inference_abi::transformer_backend::NativeTransformerBackend;
 use aien_inference_abi::weights::TransformerWeights;
-use aien_inference_abi::{ExecutionSurface, ModelConfig};
+use aien_inference_abi::ModelConfig;
 use aien_kv_cache::SharedKvManager;
 use aien_scheduler::AienScheduler;
 use parking_lot::RwLock;
@@ -75,40 +74,18 @@ impl EmbeddedModel {
         let weights = TransformerWeights::load_from_safetensors(checkpoint_path.as_ref(), &config)
             .map_err(|e| format!("Failed to load safetensors checkpoint: {}", e))?;
 
-        let tensor_backend: Arc<dyn TensorBackend> = if use_gpu
-            && aien_inference_abi::omega_backend_selected()
-        {
+        // FB-1 cut 6: the native Omega engine is the only GPU backend (no CUDA).
+        let tensor_backend: Arc<dyn TensorBackend> = if use_gpu {
             let omega = aien_inference_abi::OmegaGb10Backend::new();
             if omega.is_available() {
-                info!(
-                    "Binding EmbeddedModel to the native Omega GPU engine (AIEN_GPU_BACKEND=omega)"
-                );
+                info!("Binding EmbeddedModel to the native Omega GPU engine");
                 Arc::new(omega)
             } else if aien_inference_abi::strict::production_strict() {
                 return Err(aien_inference_abi::strict::violation(
-                    "AIEN_GPU_BACKEND=omega requested but the Omega GPU engine is not linked (stub build)",
+                    "GPU backend requested but the Omega GPU engine is not linked (stub build)",
                 ));
             } else {
-                info!("Omega GPU engine unavailable, falling back to CPU reference execution");
-                Arc::new(ReferenceCpuBackend::new())
-            }
-        } else if use_gpu {
-            let surface = ExecutionSurface::detect();
-            if surface.is_accelerated_gpu() {
-                let gpu = BlackwellGb10Backend::new();
-                if gpu.is_available() {
-                    info!("Binding EmbeddedModel to Blackwell sm_121 GPU cuBLAS acceleration");
-                    Arc::new(gpu)
-                } else {
-                    if aien_inference_abi::strict::production_strict() {
-                        return Err(aien_inference_abi::strict::violation(
-                            "GPU backend requested but BlackwellGb10Backend is unavailable",
-                        ));
-                    }
-                    info!("Blackwell GPU unavailable, falling back to CPU reference execution");
-                    Arc::new(ReferenceCpuBackend::new())
-                }
-            } else {
+                info!("Omega GPU engine not linked, falling back to CPU reference execution");
                 Arc::new(ReferenceCpuBackend::new())
             }
         } else {

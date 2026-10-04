@@ -2,7 +2,6 @@
 //! Dispatches tensor math through the decoupled TensorBackend trait for CPU and Mojo/GB10 execution.
 
 use crate::backend::{ReferenceCpuBackend, TensorBackend};
-use crate::blackwell_backend::BlackwellGb10Backend;
 use crate::mojo_backend::MojoGb10Backend;
 use crate::tensor::{sample_argmax, sample_temperature};
 use crate::weights::{LayerKvCache, SequenceState, TransformerWeights};
@@ -176,12 +175,12 @@ impl NativeTransformerBackend {
         Self::new_mojo(weights)
     }
 
-    /// Explicit constructor for genuine Blackwell GB10 GPU accelerated backend (sm_121 cuBLAS).
+    /// Explicit constructor for the GB10 GPU backend (Omega native kernels, no CUDA).
     pub fn new_blackwell(weights: TransformerWeights) -> Self {
-        Self::with_backend(weights, Arc::new(BlackwellGb10Backend::new()))
+        Self::with_backend(weights, Arc::new(crate::OmegaGb10Backend::new()))
     }
 
-    /// Convenience constructor with deterministic reference weights and BlackwellGb10Backend.
+    /// Convenience constructor with deterministic reference weights and OmegaGb10Backend.
     pub fn with_blackwell_backend(config: &ModelConfig) -> Self {
         let weights = TransformerWeights::reference_test_weights(config);
         Self::new_blackwell(weights)
@@ -584,7 +583,7 @@ impl NativeTransformerBackend {
         let backend = tensor_backend.unwrap_or_else(|| {
             let surface = crate::ExecutionSurface::detect();
             if surface.is_accelerated_gpu() {
-                Arc::new(BlackwellGb10Backend::new())
+                Arc::new(crate::OmegaGb10Backend::new())
             } else {
                 Arc::new(ReferenceCpuBackend::new())
             }
@@ -1896,7 +1895,7 @@ mod tests {
         assert!(blackwell_backend
             .tensor_backend
             .name()
-            .starts_with("BlackwellGb10Backend"));
+            .starts_with("OmegaGb10Backend"));
     }
 
     #[test]

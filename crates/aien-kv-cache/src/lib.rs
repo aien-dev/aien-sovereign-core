@@ -122,7 +122,7 @@ impl KvPoolConfig {
     }
 }
 
-/// Explicit C-ABI layout descriptor matching CUDA kernel parameterization.
+/// Explicit C-ABI layout descriptor matching the GPU kernel parameterization.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct KvLayoutDesc {

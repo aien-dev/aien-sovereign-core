@@ -38,7 +38,7 @@ AIEN serves as the native compiled inference runtime. High-performance tensor ex
 | :--- | :--- | :--- | :--- | :--- |
 | **Scheduler** | AIEN Native Continuous Batching Scheduler | AIEN Native Continuous Batching Scheduler | AIEN Native Continuous Batching Scheduler | Deterministic Step Scheduler |
 | **KV Management** | AIEN Physical Unified CoW Pool | AIEN Physical Unified CoW Pool | In-process Paged Pool | Virtual Page Table |
-| **Execution Engine** | Blackwell Gb10 sm_121 cuBLAS 13 | Mojo C-ABI (`libaien_kernels.so`) | Rayon Multi-Core NEON/AVX | ReferenceCpuBackend (FP32 Oracle) |
+| **Execution Engine** | GB10 sm_121 Omega native kernels (`OmegaGb10Backend`, no CUDA) | Mojo C-ABI (`libaien_kernels.so`) | Rayon Multi-Core NEON/AVX | ReferenceCpuBackend (FP32 Oracle) |
 | **Inference Backend** | `BlackwellInferenceBackend` | `MojoInferenceBackend` | `NativeCpuInferenceBackend` | `MockInferenceBackend` |
 | **Memory Substrate** | DGX Spark 128 GB Unified Coherent Memory | DGX Spark 128 GB Unified Coherent Memory | Standard Host DRAM | Heap Slices |
 

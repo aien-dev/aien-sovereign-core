@@ -1111,9 +1111,9 @@ fn resolve_daemon_manifest_with(policy: &CheckpointPolicy) -> DaemonModelManifes
 }
 
 /// Builds the native transformer backend for daemon boot with explicit fallback.
-/// Prefers Blackwell hardware when available, falls back to CPU reference math.
+/// Uses the native Omega GPU engine when linked, falls back to CPU reference math.
 /// Never returns the Mock backend: output always comes from real forward passes.
-/// When AIEN_REQUIRE_BLACKWELL is set, a missing Blackwell device is fatal:
+/// When AIEN_REQUIRE_BLACKWELL (or AIEN_GPU_BACKEND=omega) is set, a missing GPU engine is fatal:
 /// the hardware gate must fail when fallback count is nonzero.
 fn reference_config() -> aien_inference_abi::ModelConfig {
     aien_inference_abi::ModelConfig {
@@ -1306,44 +1306,29 @@ fn build_native_daemon_backend() -> Result<DaemonBackendParts, String> {
         label: model_label,
         ..
     } = load_daemon_model(manifest, policy.require_checkpoint)?;
-    if aien_inference_abi::omega_backend_selected() {
-        let omega = aien_inference_abi::OmegaGb10Backend::new();
-        if omega.is_available() {
-            let name = aien_inference_abi::TensorBackend::name(&omega).to_string();
-            let tensor_backend: std::sync::Arc<dyn aien_inference_abi::TensorBackend> =
-                std::sync::Arc::new(omega);
-            return Ok((
-                weights,
-                tensor_backend,
-                format!("NativeTransformerBackend/{name}"),
-                model_label,
-                tokenizer,
-            ));
-        }
-        return Err(
-            "AIEN_GPU_BACKEND=omega is set but the Omega GPU engine is not linked (stub build)"
-                .to_string(),
-        );
-    }
-    let probe = aien_inference_abi::BlackwellGb10Backend::new();
-    let require_blackwell = std::env::var("AIEN_REQUIRE_BLACKWELL")
-        .map(|v| v.trim() == "1" || v.trim().eq_ignore_ascii_case("true"))
-        .unwrap_or(false);
-    if probe.is_available() {
-        let device = probe.device_name().to_string();
-        drop(probe);
+    // FB-1 cut 6: the native Omega engine is the only GPU backend (no CUDA). The env names
+    // AIEN_REQUIRE_BLACKWELL (the GB10 chip, campaign spec) and AIEN_GPU_BACKEND=omega both
+    // make a missing engine fatal instead of falling back to CPU reference math.
+    let require_gpu = aien_inference_abi::omega_backend_selected()
+        || std::env::var("AIEN_REQUIRE_BLACKWELL")
+            .map(|v| v.trim() == "1" || v.trim().eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+    let omega = aien_inference_abi::OmegaGb10Backend::new();
+    if omega.is_available() {
+        let name = aien_inference_abi::TensorBackend::name(&omega).to_string();
         let tensor_backend: std::sync::Arc<dyn aien_inference_abi::TensorBackend> =
-            std::sync::Arc::new(aien_inference_abi::BlackwellGb10Backend::new());
+            std::sync::Arc::new(omega);
         Ok((
             weights,
             tensor_backend,
-            format!("NativeTransformerBackend/Blackwell ({})", device),
+            format!("NativeTransformerBackend/{name}"),
             model_label,
             tokenizer,
         ))
-    } else if require_blackwell {
+    } else if require_gpu {
         Err(
-            "AIEN_REQUIRE_BLACKWELL is set but no Blackwell device initialized (fallback count nonzero)".to_string(),
+            "the GB10 GPU is required (AIEN_REQUIRE_BLACKWELL or AIEN_GPU_BACKEND=omega) but the Omega GPU engine is not linked (stub build)"
+                .to_string(),
         )
     } else {
         let tensor_backend: std::sync::Arc<dyn aien_inference_abi::TensorBackend> =
@@ -1351,7 +1336,7 @@ fn build_native_daemon_backend() -> Result<DaemonBackendParts, String> {
         Ok((
             weights,
             tensor_backend,
-            "NativeTransformerBackend/CPU-reference (Blackwell unavailable, explicit fallback)"
+            "NativeTransformerBackend/CPU-reference (Omega GPU engine not linked, explicit fallback)"
                 .to_string(),
             model_label,
             tokenizer,

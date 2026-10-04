@@ -63,7 +63,6 @@ fn teacher_forced_logit_drift() {
     let tok = cpu.tokenizer;
     drop(cpu.transformer);
 
-    std::env::set_var(aien_inference_abi::GPU_BACKEND_ENV, "omega");
     let mut om = EmbeddedModel::load_checkpoint(&model_path, &tokenizer_path, true, true)
         .expect("omega load");
     println!(

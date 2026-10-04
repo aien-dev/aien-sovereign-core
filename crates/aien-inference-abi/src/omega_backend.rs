@@ -33,8 +33,8 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-/// Opt-in selection: `AIEN_GPU_BACKEND=omega` binds this backend instead of the
-/// default CUDA `BlackwellGb10Backend`. Unset (or any other value) keeps the default.
+/// `AIEN_GPU_BACKEND=omega` demands this backend: a build without the Omega engine linked
+/// refuses to start instead of falling back to the CPU reference. It is the only GPU backend.
 pub const GPU_BACKEND_ENV: &str = "AIEN_GPU_BACKEND";
 
 /// True when the environment asks for the Omega backend.
