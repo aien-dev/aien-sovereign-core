@@ -1,5 +1,6 @@
 //! Raw declarations, written by hand from omega `src/omega_gpu_matmul_api.h`
-//! at the commit pinned in `omega.lock` (3d4648c; headers unchanged since 6b940fa). Nothing generated.
+//! at the commit pinned in `omega.lock` (cd80bf4; matmul header unchanged since 6b940fa, attention header
+//! extended by OM-2 cd80bf4: staging counters appended to `OmegaGpuAttnInfo`). Nothing generated.
 //! Includes the resident-weights handles added by omega FB-1 cut 1b.
 use std::os::raw::{c_char, c_int};
 
@@ -211,13 +212,15 @@ extern "C" {
     pub fn omega_gpu_elementwise_rc_name(rc: c_int) -> *const c_char;
 }
 
-// ---- omega `src/omega_gpu_attention_api.h` (FB-1 cut 5 + 4b, pinned 3d4648c) ----
+// ---- omega `src/omega_gpu_attention_api.h` (FB-1 cut 5 + 4b + OM-1/OM-2, pinned cd80bf4) ----
 pub const OMEGA_GPU_ATTN_OK: c_int = 0;
 pub const OMEGA_GPU_ATTN_BAD_ARGS: c_int = -1;
 pub const OMEGA_GPU_ATTN_TOO_LARGE: c_int = -2;
 pub const OMEGA_GPU_ATTN_CODEGEN_FAIL: c_int = -3;
 pub const OMEGA_GPU_ATTN_CHIP_FAIL: c_int = -4;
 pub const OMEGA_GPU_ATTN_UNWRITTEN: c_int = -5;
+/// `OmegaGpuAttnInfo::kv_source`: KV reached the kernel through the per-call staging copy.
+pub const OMEGA_GPU_ATTN_KV_STAGED: u32 = 0;
 
 /// Mirrors `OmegaGpuAttnInfo` field for field, same order (note `call_ns` is third).
 #[repr(C)]
@@ -235,6 +238,20 @@ pub struct OmegaGpuAttnInfo {
     pub threads_per_cta: u32,
     pub target_chip: [c_char; 64],
     pub sm_architecture: u32,
+    // OM-2 (omega cd80bf4): appended after sm_architecture, ABI order preserved.
+    /// Bytes of KV copied into the staging buffer by this call (one copy per physical block per launch).
+    pub kv_bytes_staged: u64,
+    /// Bytes per-reference staging would have copied (every block-table entry once).
+    pub kv_bytes_naive: u64,
+    /// Block-table entries walked.
+    pub kv_blocks_logical: u32,
+    /// Distinct physical blocks actually copied.
+    pub kv_blocks_unique: u32,
+    pub q_bytes: u64,
+    pub tab_bytes: u64,
+    pub out_bytes: u64,
+    /// `OMEGA_GPU_ATTN_KV_STAGED` (0): the only source in this cut; there is no resident KV.
+    pub kv_source: u32,
 }
 
 impl OmegaGpuAttnInfo {
@@ -252,9 +269,27 @@ impl OmegaGpuAttnInfo {
             threads_per_cta: 0,
             target_chip: [0; 64],
             sm_architecture: 0,
+            kv_bytes_staged: 0,
+            kv_bytes_naive: 0,
+            kv_blocks_logical: 0,
+            kv_blocks_unique: 0,
+            q_bytes: 0,
+            tab_bytes: 0,
+            out_bytes: 0,
+            kv_source: 0,
         }
     }
 }
+
+// Field-for-field mirror guard against omega `src/omega_gpu_attention_api.h` at cd80bf4: the C
+// struct is 176 bytes and these are its offsets (checked with _Static_assert against the header on
+// 2026-10-04). A header change that moves a field fails this build instead of misreading a counter.
+const _: () = assert!(std::mem::size_of::<OmegaGpuAttnInfo>() == 176);
+const _: () = assert!(std::mem::offset_of!(OmegaGpuAttnInfo, sm_architecture) == 116);
+const _: () = assert!(std::mem::offset_of!(OmegaGpuAttnInfo, kv_bytes_staged) == 120);
+const _: () = assert!(std::mem::offset_of!(OmegaGpuAttnInfo, kv_blocks_logical) == 136);
+const _: () = assert!(std::mem::offset_of!(OmegaGpuAttnInfo, q_bytes) == 144);
+const _: () = assert!(std::mem::offset_of!(OmegaGpuAttnInfo, kv_source) == 168);
 
 /// Mirrors `OmegaGpuKvLayout` (itself a mirror of aien-kv-cache `KvLayoutDesc`),
 /// field for field, strides in bytes.
