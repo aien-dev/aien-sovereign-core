@@ -1,22 +1,36 @@
 {
-  "schema_version": "1.0",
   "dir_path": "./skills/self-improvement",
-  "purpose": {
-    "summary": "Autonomous self-improvement runbook: git worktree sandbox, Microsoft SkillOpt, and headless browser mirror testing",
-    "created_by": "AIEN",
-    "session_id": "self-improvement-mirror",
-    "created_at": "2026-09-18T14:50:00Z"
+  "extensions": {
+    "generated": {
+      "children": [],
+      "children_root": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "compiled_at": "2026-10-04T15:35:46Z",
+      "compiler": "crumb-compile/1",
+      "digest": "sha256:784393e353934cb6ed8f5c06c99a3570f3d69552ecdfda8416c70daa15340ecd",
+      "evidence_files": 0,
+      "evidence_root": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "files": 1,
+      "generated_at_commit": "c848c7bf9ada87072c5f1ecb2b36142de106ef66",
+      "source_tree": "sha256:aea84a8675c54bf4d3d0925b82cff97d13aa42a704c4afbeb596b67d204334d4"
+    }
   },
   "parent": {
     "canonical": "./skills",
     "name": "skills"
   },
+  "purpose": {
+    "created_at": "2026-09-18T14:50:00Z",
+    "created_by": "AIEN",
+    "session_id": "self-improvement-mirror",
+    "summary": "Autonomous self-improvement runbook: git worktree sandbox, Microsoft SkillOpt, and headless browser mirror testing"
+  },
+  "schema_version": "1.0",
   "whispers": [
     {
       "author": "AIEN",
+      "message": "Headless Chrome CDP mirror test verified against Cockpit on port 18095. 100% assertions passed.",
       "timestamp": "2026-09-18T14:50:00Z",
-      "whisper_id": "mirror-test-pass",
-      "message": "Headless Chrome CDP mirror test verified against Cockpit on port 18095. 100% assertions passed."
+      "whisper_id": "mirror-test-pass"
     }
   ]
 }

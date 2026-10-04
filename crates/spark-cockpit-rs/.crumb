@@ -1,119 +1,133 @@
 {
-  "version": 1,
-  "dir_path": "crates/spark-cockpit-rs",
-  "dir_name": "spark-cockpit-rs",
-  "description": "Native Axum web cockpit gateway.",
-  "purpose": {
-    "statement": "Ultra-fast standalone native Rust Axum web gateway (port 18095) for the AIEN Universal Sovereign Cockpit.",
-    "created_by": "operator",
-    "lifecycle": "permanent"
-  },
   "above": {
-    "path": "..",
     "canonical": "~",
     "name": "drakestapleton",
+    "path": "..",
     "role": "Parent directory context"
   },
   "below": [
     {
+      "item_type": "file",
       "name": "Cargo.lock",
-      "item_type": "file",
       "role": ""
     },
     {
+      "item_type": "file",
       "name": "Cargo.toml",
-      "item_type": "file",
       "role": ""
     },
     {
+      "item_type": "dir",
       "name": "src",
-      "item_type": "dir",
       "role": ""
     },
     {
-      "name": "target",
       "item_type": "dir",
+      "name": "target",
       "role": ""
     }
   ],
+  "description": "Native Axum web cockpit gateway.",
+  "dir_name": "spark-cockpit-rs",
+  "dir_path": "crates/spark-cockpit-rs",
+  "extensions": {
+    "generated": {
+      "children": [],
+      "children_root": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "compiled_at": "2026-10-04T15:35:46Z",
+      "compiler": "crumb-compile/1",
+      "digest": "sha256:a159ef3e85416944baee4f050142f19ef9ac5c2358451b9c9efc3b5d0345fe8f",
+      "evidence_files": 0,
+      "evidence_root": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "files": 18,
+      "generated_at_commit": "c848c7bf9ada87072c5f1ecb2b36142de106ef66",
+      "source_tree": "sha256:3a7372f5a03b844665a98c8a2e4db151f42fb422155ed90df05b26117d4e2617"
+    }
+  },
   "history": [
     {
+      "action": "seed:knowledge",
+      "agent_id": "Atlas-Prime",
       "crumb_id": "crumb-1789739085118508544",
+      "intent": "Contextual Knowledge Grounding",
+      "session_id": "seed-knowledge-init",
+      "target": "spark-cockpit-rs",
       "timestamp": "2026-09-18T13:44:45.118471+00:00",
-      "agent_id": "Atlas-Prime",
-      "session_id": "seed-knowledge-init",
-      "action": "seed:knowledge",
-      "target": "spark-cockpit-rs",
-      "intent": "Contextual Knowledge Grounding",
       "vector": "Ultra-fast standalone native Rust Axum web gateway (port 18095) for the AIEN Uni"
     },
     {
+      "action": "seed:knowledge",
+      "agent_id": "Atlas-Prime",
       "crumb_id": "crumb-1789739202165282304",
+      "intent": "Contextual Knowledge Grounding",
+      "session_id": "seed-knowledge-init",
+      "target": "spark-cockpit-rs",
       "timestamp": "2026-09-18T13:46:42.165185+00:00",
-      "agent_id": "Atlas-Prime",
-      "session_id": "seed-knowledge-init",
-      "action": "seed:knowledge",
-      "target": "spark-cockpit-rs",
-      "intent": "Contextual Knowledge Grounding",
       "vector": "Ultra-fast standalone native Rust Axum web gateway (port 18095) for the AIEN Uni"
     },
     {
+      "action": "seed:knowledge",
+      "agent_id": "Atlas-Prime",
       "crumb_id": "crumb-1789739243464093440",
+      "intent": "Contextual Knowledge Grounding",
+      "session_id": "seed-knowledge-init",
+      "target": "spark-cockpit-rs",
       "timestamp": "2026-09-18T13:47:23.463976+00:00",
-      "agent_id": "Atlas-Prime",
-      "session_id": "seed-knowledge-init",
-      "action": "seed:knowledge",
-      "target": "spark-cockpit-rs",
-      "intent": "Contextual Knowledge Grounding",
       "vector": "Ultra-fast standalone native Rust Axum web gateway (port 18095) for the AIEN Uni"
     },
     {
+      "action": "seed:knowledge",
+      "agent_id": "Atlas-Prime",
       "crumb_id": "crumb-1789739253124814592",
+      "intent": "Contextual Knowledge Grounding",
+      "session_id": "seed-knowledge-init",
+      "target": "spark-cockpit-rs",
       "timestamp": "2026-09-18T13:47:33.124764+00:00",
-      "agent_id": "Atlas-Prime",
-      "session_id": "seed-knowledge-init",
-      "action": "seed:knowledge",
-      "target": "spark-cockpit-rs",
-      "intent": "Contextual Knowledge Grounding",
       "vector": "Ultra-fast standalone native Rust Axum web gateway (port 18095) for the AIEN Uni"
     },
     {
+      "action": "seed:knowledge",
+      "agent_id": "Atlas-Prime",
       "crumb_id": "crumb-1789739279844503808",
+      "intent": "Contextual Knowledge Grounding",
+      "session_id": "seed-knowledge-init",
+      "target": "spark-cockpit-rs",
       "timestamp": "2026-09-18T13:47:59.844452+00:00",
-      "agent_id": "Atlas-Prime",
-      "session_id": "seed-knowledge-init",
-      "action": "seed:knowledge",
-      "target": "spark-cockpit-rs",
-      "intent": "Contextual Knowledge Grounding",
       "vector": "Ultra-fast standalone native Rust Axum web gateway (port 18095) for the AIEN Uni"
     },
     {
+      "action": "seed:knowledge",
+      "agent_id": "Atlas-Prime",
       "crumb_id": "crumb-1789739322418024704",
-      "timestamp": "2026-09-18T13:48:42.417740+00:00",
-      "agent_id": "Atlas-Prime",
-      "session_id": "seed-knowledge-init",
-      "action": "seed:knowledge",
-      "target": "spark-cockpit-rs",
       "intent": "Contextual Knowledge Grounding",
+      "session_id": "seed-knowledge-init",
+      "target": "spark-cockpit-rs",
+      "timestamp": "2026-09-18T13:48:42.417740+00:00",
       "vector": "Ultra-fast standalone native Rust Axum web gateway (port 18095) for the AIEN Uni"
     },
     {
-      "crumb_id": "crumb-1789739368948215552",
-      "timestamp": "2026-09-18T13:49:28.947673+00:00",
-      "agent_id": "Atlas-Prime",
-      "session_id": "seed-knowledge-init",
       "action": "seed:knowledge",
-      "target": "spark-cockpit-rs",
+      "agent_id": "Atlas-Prime",
+      "crumb_id": "crumb-1789739368948215552",
       "intent": "Contextual Knowledge Grounding",
+      "session_id": "seed-knowledge-init",
+      "target": "spark-cockpit-rs",
+      "timestamp": "2026-09-18T13:49:28.947673+00:00",
       "vector": "Ultra-fast standalone native Rust Axum web gateway (port 18095) for the AIEN Uni"
     }
   ],
+  "purpose": {
+    "created_by": "operator",
+    "lifecycle": "permanent",
+    "statement": "Ultra-fast standalone native Rust Axum web gateway (port 18095) for the AIEN Universal Sovereign Cockpit."
+  },
+  "version": 1,
   "whispers": [
     {
       "from_agent": "Atlas-Prime",
-      "timestamp": "2026-09-18T13:44:45.118471+00:00",
+      "message": "Replaced Python server.py. Consumes only 4.7 MB RSS, sub-millisecond TTFB, handles streaming SSE with unslop & vault filters.",
       "target_file": null,
-      "message": "Replaced Python server.py. Consumes only 4.7 MB RSS, sub-millisecond TTFB, handles streaming SSE with unslop & vault filters."
+      "timestamp": "2026-09-18T13:44:45.118471+00:00"
     }
   ]
 }

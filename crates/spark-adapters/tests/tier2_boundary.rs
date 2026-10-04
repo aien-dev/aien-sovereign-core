@@ -9,7 +9,8 @@ fn workspace_root() -> PathBuf {
             }
         }
     }
-    PathBuf::from("/home/drakestapleton/workspace/aien-sovereign-core")
+    // Fallback: this file lives at <root>/crates/spark-adapters/tests.
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
 
 fn spark_distill_bin() -> PathBuf {

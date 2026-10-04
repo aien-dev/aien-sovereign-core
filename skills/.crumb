@@ -1,124 +1,175 @@
 {
-  "version": 1,
-  "dir_path": "skills",
-  "dir_name": "skills",
-  "description": "Agent skills registry directory.",
-  "purpose": {
-    "statement": "Sovereign skill registry loaded dynamically by AIEN CLI and Cockpit UI without prompt bloat.",
-    "created_by": "operator",
-    "lifecycle": "permanent"
-  },
   "above": {
-    "path": "..",
     "canonical": "~",
     "name": "drakestapleton",
+    "path": "..",
     "role": "Parent directory context"
   },
   "below": [
     {
-      "name": "gpu-telemetry",
       "item_type": "dir",
+      "name": "gpu-telemetry",
       "role": "GPU telemetry skill folder."
     },
     {
-      "name": "modular-upstream",
       "item_type": "dir",
+      "name": "modular-upstream",
       "role": ""
     },
     {
-      "name": "radicle-sync",
       "item_type": "dir",
+      "name": "radicle-sync",
       "role": "Radicle P2P synchronization skill folder."
     },
     {
-      "name": "scaffold-project",
       "item_type": "dir",
+      "name": "scaffold-project",
       "role": "Project scaffolding protocol skill folder."
     },
     {
-      "name": "unslop",
       "item_type": "dir",
+      "name": "unslop",
       "role": "Sovereign technical voice skill folder."
     }
   ],
+  "description": "Agent skills registry directory.",
+  "dir_name": "skills",
+  "dir_path": "skills",
+  "extensions": {
+    "generated": {
+      "children": [
+        {
+          "digest": "7e3010879f3825cb16a0651afe37835aa9ba6ac4a1b1c2a7d03f4767dbd136a2",
+          "last_commit": "b2fef5c",
+          "name": "gpu-telemetry",
+          "purpose": ""
+        },
+        {
+          "digest": "1dcf80b2cf21432716ebaba932c1158acf26adff1ebccb53b0b1a66c0f462d58",
+          "last_commit": "8b5caed",
+          "name": "modular-upstream",
+          "purpose": ""
+        },
+        {
+          "digest": "b6f288e41c637959bf1df32b28d9b8a2088f531681f6319f6587f8b62d19b8ba",
+          "last_commit": "b2fef5c",
+          "name": "radicle-sync",
+          "purpose": ""
+        },
+        {
+          "digest": "9d5a5630ff03ffc43e893350b017638d6d39fbae9e537d565df217e037bfebf7",
+          "last_commit": "b2fef5c",
+          "name": "scaffold-project",
+          "purpose": ""
+        },
+        {
+          "digest": "784393e353934cb6ed8f5c06c99a3570f3d69552ecdfda8416c70daa15340ecd",
+          "last_commit": "b2fef5c",
+          "name": "self-improvement",
+          "purpose": ""
+        },
+        {
+          "digest": "db3e90e6d686daed3e36254b4b540f0592ae526710a3b0fab7ee585c2a34c305",
+          "last_commit": "b2fef5c",
+          "name": "unslop",
+          "purpose": ""
+        }
+      ],
+      "children_root": "sha256:1130b3b1c623cc53d3b7b23406bb57e1bd930ff3955dc51cc28c37d4ee40136c",
+      "compiled_at": "2026-10-04T15:35:46Z",
+      "compiler": "crumb-compile/1",
+      "digest": "sha256:ef1840de79311e5684993b0e0b66e0a9fce42a2d7966506201686ae5f8084a98",
+      "evidence_files": 0,
+      "evidence_root": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "files": 10,
+      "generated_at_commit": "c848c7bf9ada87072c5f1ecb2b36142de106ef66",
+      "source_tree": "sha256:c7d4d49cf2a89272eadee053733413c757eb02d5a2aea852de03c5605d269ac4"
+    }
+  },
   "history": [
     {
+      "action": "seed:knowledge",
+      "agent_id": "Atlas-Prime",
       "crumb_id": "crumb-1789739085119375616",
+      "intent": "Contextual Knowledge Grounding",
+      "session_id": "seed-knowledge-init",
+      "target": "skills",
       "timestamp": "2026-09-18T13:44:45.119340+00:00",
-      "agent_id": "Atlas-Prime",
-      "session_id": "seed-knowledge-init",
-      "action": "seed:knowledge",
-      "target": "skills",
-      "intent": "Contextual Knowledge Grounding",
       "vector": "Sovereign skill registry loaded dynamically by AIEN CLI and Cockpit UI without p"
     },
     {
+      "action": "seed:knowledge",
+      "agent_id": "Atlas-Prime",
       "crumb_id": "crumb-1789739202165680896",
+      "intent": "Contextual Knowledge Grounding",
+      "session_id": "seed-knowledge-init",
+      "target": "skills",
       "timestamp": "2026-09-18T13:46:42.165571+00:00",
-      "agent_id": "Atlas-Prime",
-      "session_id": "seed-knowledge-init",
-      "action": "seed:knowledge",
-      "target": "skills",
-      "intent": "Contextual Knowledge Grounding",
       "vector": "Sovereign skill registry loaded dynamically by AIEN CLI and Cockpit UI without p"
     },
     {
+      "action": "seed:knowledge",
+      "agent_id": "Atlas-Prime",
       "crumb_id": "crumb-1789739243467629312",
+      "intent": "Contextual Knowledge Grounding",
+      "session_id": "seed-knowledge-init",
+      "target": "skills",
       "timestamp": "2026-09-18T13:47:23.467504+00:00",
-      "agent_id": "Atlas-Prime",
-      "session_id": "seed-knowledge-init",
-      "action": "seed:knowledge",
-      "target": "skills",
-      "intent": "Contextual Knowledge Grounding",
       "vector": "Sovereign skill registry loaded dynamically by AIEN CLI and Cockpit UI without p"
     },
     {
+      "action": "seed:knowledge",
+      "agent_id": "Atlas-Prime",
       "crumb_id": "crumb-1789739253125096192",
+      "intent": "Contextual Knowledge Grounding",
+      "session_id": "seed-knowledge-init",
+      "target": "skills",
       "timestamp": "2026-09-18T13:47:33.125046+00:00",
-      "agent_id": "Atlas-Prime",
-      "session_id": "seed-knowledge-init",
-      "action": "seed:knowledge",
-      "target": "skills",
-      "intent": "Contextual Knowledge Grounding",
       "vector": "Sovereign skill registry loaded dynamically by AIEN CLI and Cockpit UI without p"
     },
     {
+      "action": "seed:knowledge",
+      "agent_id": "Atlas-Prime",
       "crumb_id": "crumb-1789739279844793088",
+      "intent": "Contextual Knowledge Grounding",
+      "session_id": "seed-knowledge-init",
+      "target": "skills",
       "timestamp": "2026-09-18T13:47:59.844746+00:00",
-      "agent_id": "Atlas-Prime",
-      "session_id": "seed-knowledge-init",
-      "action": "seed:knowledge",
-      "target": "skills",
-      "intent": "Contextual Knowledge Grounding",
       "vector": "Sovereign skill registry loaded dynamically by AIEN CLI and Cockpit UI without p"
     },
     {
+      "action": "seed:knowledge",
+      "agent_id": "Atlas-Prime",
       "crumb_id": "crumb-1789739322418423296",
-      "timestamp": "2026-09-18T13:48:42.418330+00:00",
-      "agent_id": "Atlas-Prime",
-      "session_id": "seed-knowledge-init",
-      "action": "seed:knowledge",
-      "target": "skills",
       "intent": "Contextual Knowledge Grounding",
+      "session_id": "seed-knowledge-init",
+      "target": "skills",
+      "timestamp": "2026-09-18T13:48:42.418330+00:00",
       "vector": "Sovereign skill registry loaded dynamically by AIEN CLI and Cockpit UI without p"
     },
     {
-      "crumb_id": "crumb-1789739368949514752",
-      "timestamp": "2026-09-18T13:49:28.949131+00:00",
-      "agent_id": "Atlas-Prime",
-      "session_id": "seed-knowledge-init",
       "action": "seed:knowledge",
-      "target": "skills",
+      "agent_id": "Atlas-Prime",
+      "crumb_id": "crumb-1789739368949514752",
       "intent": "Contextual Knowledge Grounding",
+      "session_id": "seed-knowledge-init",
+      "target": "skills",
+      "timestamp": "2026-09-18T13:49:28.949131+00:00",
       "vector": "Sovereign skill registry loaded dynamically by AIEN CLI and Cockpit UI without p"
     }
   ],
+  "purpose": {
+    "created_by": "operator",
+    "lifecycle": "permanent",
+    "statement": "Sovereign skill registry loaded dynamically by AIEN CLI and Cockpit UI without prompt bloat."
+  },
+  "version": 1,
   "whispers": [
     {
       "from_agent": "Atlas-Prime",
-      "timestamp": "2026-09-18T13:44:45.119340+00:00",
+      "message": "Contains gpu-telemetry, radicle-sync, scaffold-project, and unslop skill runbooks.",
       "target_file": null,
-      "message": "Contains gpu-telemetry, radicle-sync, scaffold-project, and unslop skill runbooks."
+      "timestamp": "2026-09-18T13:44:45.119340+00:00"
     }
   ]
 }
