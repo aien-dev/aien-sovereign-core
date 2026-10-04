@@ -175,3 +175,32 @@ fn chip_elementwise_parity_on_tinyllama_shapes() {
     assert_eq!(omega.chip_errors(), 0, "{}", omega.last_error());
     println!("PARITY elementwise {}", omega.op_report().line());
 }
+
+/// Diagnostic for the cut-3c finding: elementwise launches after the matmul device is
+/// open. Run with AIEN_DEV_FALLBACK=1 so a failure is reported instead of a strict panic.
+#[test]
+#[ignore = "chip diagnostic: heavy queue only"]
+fn chip_mixed_matmul_then_elementwise() {
+    let omega = OmegaGb10Backend::new();
+    assert!(omega.is_available(), "native build required");
+    let mut seed = 4242u32;
+    let (k, n) = (256usize, 64usize);
+    let w: Vec<f32> = (0..n * k).map(|_| lcg(&mut seed)).collect();
+    let x: Vec<f32> = (0..k).map(|_| lcg(&mut seed)).collect();
+    let mut out = vec![0.0f32; n];
+    let wn: Vec<f32> = (0..256).map(|_| lcg(&mut seed)).collect();
+    let mut no = vec![0.0f32; 256];
+    omega.rmsnorm(&mut no, &x, &wn, 1e-5);
+    println!(
+        "MIXED rmsnorm before matmul: chip_errors={}",
+        omega.chip_errors()
+    );
+    omega.matmul_vec(&mut out, &x, &w, n, k);
+    println!("MIXED matmul: chip_errors={}", omega.chip_errors());
+    omega.rmsnorm(&mut no, &x, &wn, 1e-5);
+    println!(
+        "MIXED rmsnorm after matmul: chip_errors={} last_error={}",
+        omega.chip_errors(),
+        omega.last_error()
+    );
+}

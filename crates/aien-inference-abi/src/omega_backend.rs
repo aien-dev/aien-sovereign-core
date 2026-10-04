@@ -338,6 +338,7 @@ impl OmegaGb10Backend {
         } else {
             format!("{msg} (stage: {stage})")
         };
+        eprintln!("OMEGA_BACKEND chip error: {full}");
         if let Ok(mut l) = self.last_error.lock() {
             *l = full;
         }
