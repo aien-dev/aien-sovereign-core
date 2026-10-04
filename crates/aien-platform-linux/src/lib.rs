@@ -6,7 +6,7 @@ pub mod queue;
 pub mod telemetry;
 
 pub use buffer::{LinuxMemoryKind, LinuxUnifiedBuffer, ResidencyPolicy};
-pub use device::{LinuxComputeDevice, LinuxCudaCapabilities};
+pub use device::LinuxComputeDevice;
 pub use queue::LinuxWorkQueue;
 pub use telemetry::LinuxTelemetrySource;
 
@@ -156,21 +156,17 @@ mod tests {
     }
 
     #[test]
-    fn test_linux_gb10_ats_capabilities_if_available() {
+    fn test_linux_device_allocates_plain_system_memory() {
         let device = LinuxComputeDevice::new();
-        let caps = device.capabilities();
-        eprintln!("LinuxComputeDevice detected capabilities: {:?}", caps);
-        eprintln!(
-            "Preferred memory kind: {:?}",
-            device.preferred_memory_kind()
-        );
-
-        #[cfg(has_blackwell_cuda)]
-        {
-            if caps.is_ats_hardware_coherent() {
-                assert_eq!(device.preferred_memory_kind(), LinuxMemoryKind::AtsSystem);
-            }
-        }
+        assert_eq!(device.preferred_memory_kind(), LinuxMemoryKind::AtsSystem);
+        let buf = device
+            .alloc(BufferLayout {
+                size: 8192,
+                align: 4096,
+            })
+            .expect("alloc");
+        assert_eq!(buf.kind(), LinuxMemoryKind::AtsSystem);
+        assert_eq!(buf.as_ptr() as usize % 4096, 0);
     }
 
     #[test]

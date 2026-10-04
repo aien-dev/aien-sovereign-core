@@ -59,7 +59,8 @@ fn receipt_rejects_fallbacks_and_dev_builds() {
         checkpoint_sha256: "0".repeat(64),
         tokenizer_path: "y".into(),
         tokenizer_sha256: "0".repeat(64),
-        backend_identity: "BlackwellGb10Backend (NVIDIA GB10 sm_121 cuBLAS)".into(),
+        backend_identity: "OmegaGb10Backend (native Omega engine, no CUDA, NVIDIA GB10 sm_121)"
+            .into(),
         model_id: "tinyllama".into(),
         model_config: serde_json::json!({}),
         fallback_count: 0,
@@ -152,7 +153,7 @@ fn strict_real_model_gate() {
 }
 
 /// FB-1 cut 3b gate: the same greedy generation on the CPU reference backend and on
-/// the Omega backend (AIEN_GPU_BACKEND=omega), same checkpoint. Records tok/s for
+/// the Omega backend (the default GPU path), same checkpoint. Records tok/s for
 /// both, checks zero fallbacks and all nine ops native, and judges the backend by teacher-
 /// forced logits (tests/drift): greedy text alone cannot tell a wrong backend from a
 /// near-tie flip (cut 3d: "processing" led "memory" by 0.0005 logits). Text equality is
@@ -209,8 +210,7 @@ fn omega_vs_reference_real_model() {
         drift::logits_per_step(&mut cpu.transformer, &ptoks, max_tokens, &[]);
     drop(cpu);
 
-    // Omega leg. The env var is read inside load_checkpoint; set before loading.
-    std::env::set_var(aien_inference_abi::GPU_BACKEND_ENV, "omega");
+    // Omega leg. No AIEN_GPU_BACKEND switch: since FB-1 cut 6 the GPU path is Omega by default.
     let mut om = EmbeddedModel::load_checkpoint(&model_path, &tokenizer_path, true, true)
         .unwrap_or_else(|e| panic!("STRICT: omega bind refused: {e}"));
     let backend_identity = om.transformer.tensor_backend.name().to_string();

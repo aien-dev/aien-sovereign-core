@@ -1,5 +1,5 @@
 //! Linux Unified Buffer implementation for Grace Blackwell GB10 and Linux host.
-//! Allocates anonymous page-aligned mmap with ATS hardware coherency on GB10.
+//! Allocates anonymous page-aligned mmap; GB10 shares one coherent system memory pool (ATS).
 
 use aien_platform::{BufferLayout, DeviceAddress, PlatformError, UnifiedBuffer};
 use core::mem::align_of;
@@ -9,7 +9,6 @@ use core::ptr::NonNull;
 pub enum LinuxMemoryKind {
     AtsSystem,
     HmmSystem,
-    CudaManagedFallback,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -48,66 +47,21 @@ impl LinuxUnifiedBuffer {
             .checked_add(align)
             .ok_or(PlatformError::OutOfMemory)?;
 
-        let (mapping_base_ptr, actual_kind) = match kind {
-            LinuxMemoryKind::AtsSystem | LinuxMemoryKind::HmmSystem => {
-                let p = unsafe {
-                    libc::mmap(
-                        core::ptr::null_mut(),
-                        mapping_len,
-                        libc::PROT_READ | libc::PROT_WRITE,
-                        libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
-                        -1,
-                        0,
-                    )
-                };
-                if p == libc::MAP_FAILED || p.is_null() {
-                    return Err(PlatformError::OutOfMemory);
-                }
-                (p as *mut u8, kind)
-            }
-            LinuxMemoryKind::CudaManagedFallback => {
-                #[cfg(has_blackwell_cuda)]
-                {
-                    let mut p: *mut libc::c_void = core::ptr::null_mut();
-                    let res = unsafe { cudaMallocManaged(&mut p, mapping_len, 1) };
-                    if res == 0 && !p.is_null() {
-                        (p as *mut u8, LinuxMemoryKind::CudaManagedFallback)
-                    } else {
-                        let fallback_ptr = unsafe {
-                            libc::mmap(
-                                core::ptr::null_mut(),
-                                mapping_len,
-                                libc::PROT_READ | libc::PROT_WRITE,
-                                libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
-                                -1,
-                                0,
-                            )
-                        };
-                        if fallback_ptr == libc::MAP_FAILED || fallback_ptr.is_null() {
-                            return Err(PlatformError::OutOfMemory);
-                        }
-                        (fallback_ptr as *mut u8, LinuxMemoryKind::AtsSystem)
-                    }
-                }
-                #[cfg(not(has_blackwell_cuda))]
-                {
-                    let p = unsafe {
-                        libc::mmap(
-                            core::ptr::null_mut(),
-                            mapping_len,
-                            libc::PROT_READ | libc::PROT_WRITE,
-                            libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
-                            -1,
-                            0,
-                        )
-                    };
-                    if p == libc::MAP_FAILED || p.is_null() {
-                        return Err(PlatformError::OutOfMemory);
-                    }
-                    (p as *mut u8, LinuxMemoryKind::AtsSystem)
-                }
-            }
+        let mapping_base_ptr = unsafe {
+            libc::mmap(
+                core::ptr::null_mut(),
+                mapping_len,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+                -1,
+                0,
+            )
         };
+        if mapping_base_ptr == libc::MAP_FAILED || mapping_base_ptr.is_null() {
+            return Err(PlatformError::OutOfMemory);
+        }
+        let mapping_base_ptr = mapping_base_ptr as *mut u8;
+        let actual_kind = kind;
 
         let mapping_base = NonNull::new(mapping_base_ptr).ok_or(PlatformError::OutOfMemory)?;
         let base_addr = mapping_base_ptr as usize;
@@ -165,32 +119,11 @@ impl UnifiedBuffer for LinuxUnifiedBuffer {
 
 impl Drop for LinuxUnifiedBuffer {
     fn drop(&mut self) {
-        match self.kind {
-            LinuxMemoryKind::AtsSystem | LinuxMemoryKind::HmmSystem => unsafe {
-                libc::munmap(
-                    self.mapping_base.as_ptr() as *mut libc::c_void,
-                    self.mapping_len,
-                );
-            },
-            LinuxMemoryKind::CudaManagedFallback => {
-                #[cfg(has_blackwell_cuda)]
-                unsafe {
-                    cudaFree(self.mapping_base.as_ptr() as *mut libc::c_void);
-                }
-                #[cfg(not(has_blackwell_cuda))]
-                unsafe {
-                    libc::munmap(
-                        self.mapping_base.as_ptr() as *mut libc::c_void,
-                        self.mapping_len,
-                    );
-                }
-            }
+        unsafe {
+            libc::munmap(
+                self.mapping_base.as_ptr() as *mut libc::c_void,
+                self.mapping_len,
+            );
         }
     }
-}
-
-#[cfg(has_blackwell_cuda)]
-extern "C" {
-    fn cudaMallocManaged(dev_ptr: *mut *mut libc::c_void, size: usize, flags: u32) -> i32;
-    fn cudaFree(dev_ptr: *mut libc::c_void) -> i32;
 }

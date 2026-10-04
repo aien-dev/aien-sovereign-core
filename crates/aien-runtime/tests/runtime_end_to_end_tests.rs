@@ -1,9 +1,9 @@
-//! End-to-end integration tests: Scheduler ticket submission -> Blackwell transformer -> CompletionSink channel.
+//! End-to-end integration tests: Scheduler ticket submission -> Omega GB10 transformer -> CompletionSink channel.
 //! Verifies zero socket, zero HTTP, and zero RPC boundaries in the entire execution path.
 
 use aien_inference_abi::{
-    BlackwellGb10Backend, ModelConfig, NativeTransformerBackend, ReferenceCpuBackend,
-    SamplingParams, TransformerWeights,
+    ModelConfig, NativeTransformerBackend, OmegaGb10Backend, ReferenceCpuBackend, SamplingParams,
+    TensorBackend, TransformerWeights,
 };
 use aien_kv_cache::{create_shared_kv_manager, KvDType, KvPoolConfig};
 use aien_runtime::spine::AienRuntimeSpine;
@@ -329,10 +329,10 @@ async fn test_end_to_end_subagent_branching_with_independent_sinks() {
 }
 
 #[tokio::test]
-async fn test_end_to_end_blackwell_hardware_execution_if_available() {
-    let gpu_backend = Arc::new(BlackwellGb10Backend::new());
+async fn test_end_to_end_gb10_hardware_execution_if_available() {
+    let gpu_backend = Arc::new(OmegaGb10Backend::new());
     if !gpu_backend.is_available() {
-        eprintln!("Skipping GB10 test: Blackwell hardware not available");
+        eprintln!("Skipping GB10 test: Omega GPU engine not linked");
         return;
     }
 
@@ -397,21 +397,21 @@ async fn test_end_to_end_blackwell_hardware_execution_if_available() {
     assert_eq!(
         tokens.len(),
         4,
-        "Expected 4 tokens generated on Blackwell GPU"
+        "Expected 4 tokens generated on the GB10 GPU"
     );
     assert!(
-        gpu_backend.kernel_exec_count() > 0,
-        "Blackwell GPU kernels must have executed"
+        gpu_backend.chip_calls() > 0,
+        "Omega GPU kernels must have executed"
     );
     assert_eq!(
         gpu_backend.fallback_count(),
         0,
-        "Zero silent CPU fallback allowed on Blackwell hardware"
+        "Zero silent CPU fallback allowed on the GB10"
     );
     eprintln!(
-        "Blackwell End-to-End Execution Certified: {} tokens emitted via GPU kernels (count = {})",
+        "Omega GB10 End-to-End Execution Certified: {} tokens emitted via GPU kernels (count = {})",
         tokens.len(),
-        gpu_backend.kernel_exec_count()
+        gpu_backend.chip_calls()
     );
 }
 
@@ -423,19 +423,19 @@ async fn release_golden_path_records_whether_gb10_ran() {
     let require = std::env::var("AIEN_REQUIRE_RELEASE")
         .map(|value| value.trim() == "1" || value.trim().eq_ignore_ascii_case("true"))
         .unwrap_or(false);
-    let gpu_backend = Arc::new(BlackwellGb10Backend::new());
+    let gpu_backend = Arc::new(OmegaGb10Backend::new());
     let commit = std::env::var("GITHUB_SHA").unwrap_or_else(|_| "local".into());
     let (checkpoint, discovered_weights) = checkpoint_identity();
     if !gpu_backend.is_available() {
         let artifact = serde_json::json!({
             "test": "release_golden_path",
             "skipped": true,
-            "reason": "Blackwell device not available",
+            "reason": "Omega GPU engine not linked (stub build)",
             "commit": commit,
             "checkpoint_id": checkpoint,
         "discovered_safetensors_sha256": discovered_weights,
             "require_release": require,
-            "gpu_executions": gpu_backend.kernel_exec_count(),
+            "gpu_executions": gpu_backend.chip_calls(),
             "fallback_count": gpu_backend.fallback_count(),
         });
         eprintln!("{artifact}");
@@ -514,8 +514,8 @@ async fn release_golden_path_records_whether_gb10_ran() {
         "checkpoint_id": checkpoint,
         "discovered_safetensors_sha256": discovered_weights,
         "model_id": config.model_id,
-        "device": gpu_backend.device_name(),
-        "gpu_executions": gpu_backend.kernel_exec_count(),
+        "device": gpu_backend.name(),
+        "gpu_executions": gpu_backend.chip_calls(),
         "fallback_count": gpu_backend.fallback_count(),
         "tokens": tokens.len(),
         "child_tokens": child_tokens.len(),
@@ -528,7 +528,7 @@ async fn release_golden_path_records_whether_gb10_ran() {
     assert!(branch.is_ok(), "{artifact}");
     assert!(shared_pages >= 1, "{artifact}");
     assert!(!child_tokens.is_empty(), "{artifact}");
-    assert!(gpu_backend.kernel_exec_count() > 0, "{artifact}");
+    assert!(gpu_backend.chip_calls() > 0, "{artifact}");
     assert_eq!(gpu_backend.fallback_count(), 0, "{artifact}");
     assert_eq!(tokens.len(), 4, "{artifact}");
     assert_eq!(leaked, 0, "{artifact}");

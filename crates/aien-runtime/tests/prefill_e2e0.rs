@@ -1201,7 +1201,7 @@ async fn prefill_e2e0_real_checkpoint_swarm_gate() {
         "kernel_exec_count": serde_json::Value::Null,
         "fallback_count": serde_json::Value::Null,
         "counters_reason": "ReferenceCpuBackend keeps no kernel/fallback counters; they exist only \
-                            on BlackwellGb10Backend (CPU path per the 2026-10-01 queen ruling)",
+                            on OmegaGb10Backend (CPU path per the 2026-10-01 queen ruling)",
         "commit_sha": commit,
         "commit_sha_source": "git rev-parse HEAD in CARGO_MANIFEST_DIR at runtime",
         "ttft_ms": ttft_ms,

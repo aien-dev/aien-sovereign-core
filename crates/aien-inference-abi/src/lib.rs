@@ -7,9 +7,6 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 pub mod backend;
-pub mod blackwell_backend;
-pub mod blackwell_batch;
-pub mod blackwell_batch_executor;
 pub mod capsule;
 pub mod checkpoint;
 pub mod moe_plan;
@@ -29,12 +26,6 @@ pub mod weights;
 pub use aien_abi_core::*;
 pub use aien_kv_cache::*;
 pub use backend::*;
-pub use blackwell_backend::*;
-pub use blackwell_batch::*;
-pub use blackwell_batch_executor::{
-    BlackwellBatchExecutor, BlackwellResidentLayerWeights, BlackwellResidentModel,
-    BlackwellResidentModelWeights, BlackwellWorkspace, BlackwellWorkspaceC,
-};
 pub use capsule::*;
 pub use checkpoint::*;
 pub use moe_plan::*;
@@ -461,16 +452,16 @@ impl AienInferenceBackend for NativeCpuInferenceBackend {
     }
 }
 
-/// Genuine Blackwell GB10 GPU hardware inference backend.
+/// GB10 GPU inference backend (name kept for callers; now Omega-backed).
 /// Executes single-token GEMV, batched GEMM, and Grouped Query Paged Attention
-/// in-process on NVIDIA DGX Spark sm_121 cuBLAS 13.
+/// in-process on the DGX Spark GB10 through Omega native kernels (no CUDA).
 pub struct BlackwellInferenceBackend {
     pub inner: EmbeddedInferenceBackend,
 }
 
 impl BlackwellInferenceBackend {
     pub fn new(weights: TransformerWeights, tokenizer: Option<TinyLlamaTokenizer>) -> Self {
-        let tensor_backend = std::sync::Arc::new(BlackwellGb10Backend::new());
+        let tensor_backend = std::sync::Arc::new(crate::OmegaGb10Backend::new());
         let backend = NativeTransformerBackend::with_backend(weights, tensor_backend);
         Self {
             inner: EmbeddedInferenceBackend::new(backend, tokenizer),
@@ -478,7 +469,7 @@ impl BlackwellInferenceBackend {
     }
 
     pub fn with_reference_weights(config: &ModelConfig) -> Self {
-        let tensor_backend = std::sync::Arc::new(BlackwellGb10Backend::new());
+        let tensor_backend = std::sync::Arc::new(crate::OmegaGb10Backend::new());
         let mut backend = NativeTransformerBackend::with_reference_weights(config);
         backend.tensor_backend = tensor_backend;
         Self {
@@ -491,7 +482,7 @@ impl BlackwellInferenceBackend {
         tokenizer_path: Option<P>,
         config: &ModelConfig,
     ) -> Result<Self, String> {
-        let tensor_backend = std::sync::Arc::new(BlackwellGb10Backend::new());
+        let tensor_backend = std::sync::Arc::new(crate::OmegaGb10Backend::new());
         let inner = EmbeddedInferenceBackend::load_checkpoint(
             checkpoint_path,
             tokenizer_path,
@@ -628,7 +619,7 @@ impl EmbeddedInferenceBackend {
         let tensor_backend = tensor_backend.unwrap_or_else(|| {
             let surface = ExecutionSurface::detect();
             if surface.is_accelerated_gpu() {
-                std::sync::Arc::new(BlackwellGb10Backend::new())
+                std::sync::Arc::new(crate::OmegaGb10Backend::new())
             } else {
                 std::sync::Arc::new(ReferenceCpuBackend::new())
             }
