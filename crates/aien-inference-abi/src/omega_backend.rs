@@ -373,6 +373,25 @@ impl OmegaGb10Backend {
         num_kv_heads: usize,
         head_dim: usize,
     ) -> bool {
+        // Geometry and pool layout are checked before any native code sees the pool. A refusal
+        // is counted like a chip error and the reference then refuses the same call loudly.
+        let geom = match aien_abi_core::AttentionGeometry::new(num_q_heads, num_kv_heads, head_dim)
+        {
+            Ok(g) => g,
+            Err(e) => return self.fail(format!("paged_attention geometry refused: {e}")),
+        };
+        let cfg = pool.config();
+        if let Err(e) = geom.check_kv_pool(cfg.num_kv_heads, cfg.head_dim) {
+            return self.fail(format!("paged_attention refused: {e}"));
+        }
+        if q.len() != geom.q_dim() || out.len() != geom.q_dim() {
+            return self.fail(format!(
+                "paged_attention refused: q={} out={} values, geometry needs {}",
+                q.len(),
+                out.len(),
+                geom.q_dim()
+            ));
+        }
         if context_len == 0 || block_ids.is_empty() {
             out.fill(0.0);
             return true;
@@ -559,21 +578,32 @@ impl TensorBackend for OmegaGb10Backend {
     ) {
         // The reference reads only the first seq_len rows; causal prefill passes the whole
         // prompt's cache with a shorter seq_len, so hand omega exactly those rows.
-        let need = seq_len * num_kv_heads * head_dim;
+        let geom = aien_abi_core::AttentionGeometry::new(num_q_heads, num_kv_heads, head_dim);
+        let need = geom.as_ref().map_or(0, |g| seq_len * g.kv_dim());
+        let shapes_ok = match &geom {
+            Ok(g) => {
+                q.len() == g.q_dim()
+                    && out.len() == g.q_dim()
+                    && k_cache.len() >= need
+                    && v_cache.len() >= need
+            }
+            Err(e) => self.fail(format!("gqa_attention geometry refused: {e}")),
+        };
         let k_rows = &k_cache[..need.min(k_cache.len())];
         let v_rows = &v_cache[..need.min(v_cache.len())];
-        let native = self.chip_attention(&format!("gqa_attention seq={seq_len}"), || {
-            aien_omega_gpu::gqa_attention_f32(
-                q,
-                k_rows,
-                v_rows,
-                seq_len,
-                num_q_heads,
-                num_kv_heads,
-                head_dim,
-                out,
-            )
-        });
+        let native = shapes_ok
+            && self.chip_attention(&format!("gqa_attention seq={seq_len}"), || {
+                aien_omega_gpu::gqa_attention_f32(
+                    q,
+                    k_rows,
+                    v_rows,
+                    seq_len,
+                    num_q_heads,
+                    num_kv_heads,
+                    head_dim,
+                    out,
+                )
+            });
         if native {
             return;
         }
