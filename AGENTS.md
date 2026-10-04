@@ -113,7 +113,7 @@ bash scripts/agent-preflight.sh
 ## Certifications
 - Zero Plaintext Secrets: Hardware TPM vault only. No .env files on disk.
 - Sovereign Voice & Anti-Slop: Zero em dashes or en dashes present.
-- License: Apache-2.0 WITH LLVM-exception governs. COVENANT.md states values only.
+- License: AGPL-3.0-or-later governs (see LICENSE). COVENANT.md states values only.
 ```
 
 ---
