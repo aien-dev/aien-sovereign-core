@@ -27,7 +27,7 @@ pub(crate) use effect::authorize_for_test;
 pub use approval::{ApprovalDesk, ApprovalError, ApprovalGrant};
 pub use authority::{
     intent_digest, AuthorityContext, AuthorityDecision, AuthorityOutcome, EffectAuthority,
-    EffectClassAuthority, EffectScope,
+    EffectClassAuthority, EffectScope, Exposure, TrustLevel,
 };
 pub use broker::{EffectLane, McpBroker, SpeculativeLane, SpeculativeToolCall};
 pub use effect::{AuthorizedEffect, EffectIntent, EffectReceipt, ToolResult};

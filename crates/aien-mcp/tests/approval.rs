@@ -9,7 +9,7 @@ use aien_mcp::memory::MemoryWire;
 use aien_mcp::{
     ApprovalDesk, ApprovalError, AuthorityContext, AuthorityDecision, AuthorityOutcome,
     CallOutcome, EffectAuthority, EffectClassAuthority, EffectIntent, EffectLane, EffectScope,
-    McpBroker, SpeculativeLane,
+    Exposure, McpBroker, SpeculativeLane, TrustLevel,
 };
 use serde_json::json;
 
@@ -278,4 +278,26 @@ async fn unapproved_request_is_still_pending() {
         .authorize(h.intent.clone(), scope("n"), &EffectClassAuthority)
         .unwrap_err();
     assert!(matches!(e, AuthorityOutcome::Pending { .. }));
+}
+
+#[tokio::test]
+async fn approved_grant_authorizes_effect_pending_on_untrusted_exposure() {
+    // E3: an effect held back by untrusted exposure is still released by an approval grant.
+    let h = harness().await;
+    let lane = h.lane.with_exposure(Exposure::new(
+        vec!["web-1".into()],
+        TrustLevel::ExternalUntrusted,
+    ));
+    let a = EffectClassAuthority;
+    assert!(matches!(
+        lane.authorize(h.intent.clone(), scope("ex"), &a),
+        Err(AuthorityOutcome::Pending { .. })
+    ));
+    let g = h.desk.issue(&h.intent, scope("ex"), 100);
+    let r = lane
+        .authorize_and_execute_approved(h.intent.clone(), scope("ex"), &a, &g, 1)
+        .await
+        .unwrap();
+    assert_eq!(r.output, json!({"done": true}));
+    assert_eq!(h.calls.load(Ordering::SeqCst), 1);
 }

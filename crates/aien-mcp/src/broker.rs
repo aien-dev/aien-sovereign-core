@@ -10,7 +10,7 @@ use serde_json::Value;
 use crate::approval::{ApprovalError, ApprovalGrant, ApprovalRecord};
 use crate::authority::{
     intent_digest, AuthorityContext, AuthorityDecision, AuthorityOutcome, EffectAuthority,
-    EffectScope,
+    EffectScope, Exposure,
 };
 use crate::effect::mint;
 use crate::{
@@ -227,11 +227,25 @@ pub struct SpeculativeToolCall {
 #[derive(Clone)]
 pub struct EffectLane {
     broker: McpBroker,
+    exposure: Option<Exposure>,
 }
 
 impl EffectLane {
     pub fn new(broker: McpBroker) -> Self {
-        Self { broker }
+        Self {
+            broker,
+            exposure: None,
+        }
+    }
+
+    /// A lane that tells authorities what the model was exposed to. Host/runtime call only:
+    /// an intent cannot carry exposure. A lane built with [`Self::new`] has no exposure, which
+    /// [`crate::EffectClassAuthority`] treats as `external_untrusted` for effect classes (fail closed).
+    pub fn with_exposure(&self, exposure: Exposure) -> Self {
+        Self {
+            broker: self.broker.clone(),
+            exposure: Some(exposure),
+        }
     }
 
     /// Ask `authority` whether `intent` may run, and mint an `AuthorizedEffect` only on
@@ -290,7 +304,7 @@ impl EffectLane {
                 "intent was staged against a stale catalog".into(),
             ));
         }
-        let ctx = AuthorityContext::new(scope, descriptor, live);
+        let ctx = AuthorityContext::new(scope, descriptor, live, self.exposure.clone());
         let decision = authority.authorize(&intent, &ctx);
         let policy_digest = {
             let mut bytes = format!("{decision:?}|{}|", intent.tool_name).into_bytes();
