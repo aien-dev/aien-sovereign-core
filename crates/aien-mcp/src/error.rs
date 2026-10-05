@@ -19,6 +19,8 @@ pub enum Error {
     ReconciliationRequired,
     #[error("effect is already in flight")]
     EffectInFlight,
+    #[error("idempotency key already belongs to a different effect")]
+    IdempotencyConflict,
     #[error("tool call rejected: {0}")]
     Rejected(String),
     #[error("tool `{0}` has no enrolled effect class")]

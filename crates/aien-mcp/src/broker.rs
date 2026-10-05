@@ -3,7 +3,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
 use aien_capability::{
-    catalog_digest, speculation_safe, Digest32, EffectId, ProviderId, ToolDescriptor, ToolEffects,
+    catalog_digest, speculation_safe, Digest32, EffectId, JNodeId, ProviderId, ToolDescriptor,
+    ToolEffects, WorldId,
 };
 use serde_json::Value;
 
@@ -34,9 +35,24 @@ enum LedgerEntry {
     Uncertain,
 }
 
+/// Which effect owns a ledger key: the intent digest (provider, tool, arguments, catalog), the
+/// world and the winning J-node. The same four things an approval binds, so a key cannot be
+/// replayed as a receipt for a different effect.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct EffectIdentity {
+    intent: Digest32,
+    world_id: WorldId,
+    winning_jnode: JNodeId,
+}
+
+struct LedgerRow {
+    identity: EffectIdentity,
+    entry: LedgerEntry,
+}
+
 pub(crate) struct Inner {
     sessions: HashMap<String, McpSession>,
-    ledger: HashMap<EffectId, LedgerEntry>,
+    ledger: HashMap<EffectId, LedgerRow>,
     pub(crate) approvals: HashMap<Digest32, ApprovalRecord>,
     pub(crate) next_approval: u64,
 }
@@ -267,7 +283,7 @@ impl EffectLane {
     /// Like [`Self::authorize`], but a `RequireApproval` verdict is satisfied by spending `grant`.
     ///
     /// The grant must have been issued by an [`crate::ApprovalDesk`] for exactly this intent and
-    /// scope, must be unspent and unexpired (`now < expires_at`). A refused grant is not spent
+    /// scope, must be unspent, unrevoked and unexpired (`now < expires_at`). A refused grant is not spent
     /// unless it was already spent. `Deny` and `Contain` stay refused whatever the grant says,
     /// and an `Allow` verdict never touches the grant.
     pub fn authorize_approved(
@@ -390,7 +406,11 @@ impl EffectLane {
         if !record.consumed || !record.binds(intent, scope) {
             return None;
         }
-        match inner.ledger.get(&scope.idempotency_key)? {
+        let row = inner.ledger.get(&scope.idempotency_key)?;
+        if row.identity != identity(intent, scope.world_id, scope.winning_jnode) {
+            return Some(Err(Error::IdempotencyConflict));
+        }
+        match &row.entry {
             LedgerEntry::Completed(receipt) => Some(Ok(receipt.clone())),
             LedgerEntry::Uncertain => Some(Err(Error::ReconciliationRequired)),
             LedgerEntry::InFlight => Some(Err(Error::EffectInFlight)),
@@ -416,6 +436,9 @@ impl EffectLane {
         if record.consumed {
             return Err(ApprovalError::Consumed);
         }
+        if record.revoked {
+            return Err(ApprovalError::Revoked);
+        }
         if now >= record.expires_at {
             return Err(ApprovalError::Expired);
         }
@@ -431,11 +454,17 @@ impl EffectLane {
         let provider = effect.intent().provider.clone();
         let tool_name = effect.intent().tool_name.clone();
         let arguments = effect.intent().arguments.clone();
-        let intent_digest = effect.intent().capability_digest;
+        let staged_catalog = effect.intent().capability_digest;
+        let who = identity(effect.intent(), effect.world_id(), effect.winning_jnode());
         let wire = {
             let mut inner = self.broker.lock();
             if let Some(existing) = inner.ledger.get(&key) {
-                return match existing {
+                // A key names one effect. A request for another effect under the same key did not
+                // run and must not be answered with the first effect's receipt.
+                if existing.identity != who {
+                    return Err(Error::IdempotencyConflict);
+                }
+                return match &existing.entry {
                     LedgerEntry::Completed(receipt) => Ok(receipt.clone()),
                     LedgerEntry::Uncertain => Err(Error::ReconciliationRequired),
                     LedgerEntry::InFlight => Err(Error::EffectInFlight),
@@ -447,7 +476,7 @@ impl EffectLane {
                     .get(provider.as_str())
                     .ok_or_else(|| Error::NotAdmitted(provider.clone()))?;
                 if session.catalog_digest != effect.capability_digest()
-                    || intent_digest != effect.capability_digest()
+                    || staged_catalog != effect.capability_digest()
                 {
                     return Err(Error::StaleCapability);
                 }
@@ -459,7 +488,13 @@ impl EffectLane {
                 }
                 session.wire.clone()
             };
-            inner.ledger.insert(key, LedgerEntry::InFlight);
+            inner.ledger.insert(
+                key,
+                LedgerRow {
+                    identity: who,
+                    entry: LedgerEntry::InFlight,
+                },
+            );
             wire
         };
 
@@ -477,13 +512,23 @@ impl EffectLane {
                     capability_digest: effect.capability_digest(),
                     output,
                 };
-                inner
-                    .ledger
-                    .insert(key, LedgerEntry::Completed(receipt.clone()));
+                inner.ledger.insert(
+                    key,
+                    LedgerRow {
+                        identity: who,
+                        entry: LedgerEntry::Completed(receipt.clone()),
+                    },
+                );
                 Ok(receipt)
             }
             Ok(CallOutcome::Uncertain) | Err(_) => {
-                inner.ledger.insert(key, LedgerEntry::Uncertain);
+                inner.ledger.insert(
+                    key,
+                    LedgerRow {
+                        identity: who,
+                        entry: LedgerEntry::Uncertain,
+                    },
+                );
                 Err(Error::ReconciliationRequired)
             }
             Ok(CallOutcome::Rejected(reason)) => {
@@ -491,6 +536,14 @@ impl EffectLane {
                 Err(Error::Rejected(reason))
             }
         }
+    }
+}
+
+fn identity(intent: &EffectIntent, world_id: WorldId, winning_jnode: JNodeId) -> EffectIdentity {
+    EffectIdentity {
+        intent: intent_digest(intent),
+        world_id,
+        winning_jnode,
     }
 }
 

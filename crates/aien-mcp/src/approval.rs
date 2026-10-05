@@ -11,6 +11,9 @@
 //! [`crate::EffectLane::authorize_and_execute_approved`] consults it for a spent grant that is
 //! bound to the same effect.
 //!
+//! A grant that has not been spent can be withdrawn with [`ApprovalDesk::revoke`]; after that
+//! it is refused with [`ApprovalError::Revoked`] and cannot be spent.
+//!
 //! Expiry uses a host-supplied `now` and `expires_at` in the same unit. The crate reads no clock.
 
 use aien_capability::{Digest32, EffectId, JNodeId, WorldId};
@@ -30,6 +33,8 @@ pub enum ApprovalError {
     Consumed,
     /// `now` is at or past `expires_at`. Nothing is spent.
     Expired,
+    /// The approver withdrew the grant with [`ApprovalDesk::revoke`] before it was spent.
+    Revoked,
 }
 
 /// Proof that a host approver approved exactly one effect. Fields are private and only an
@@ -48,6 +53,7 @@ pub(crate) struct ApprovalRecord {
     pub(crate) winning_jnode: JNodeId,
     pub(crate) expires_at: u64,
     pub(crate) consumed: bool,
+    pub(crate) revoked: bool,
 }
 
 impl ApprovalRecord {
@@ -101,8 +107,23 @@ impl ApprovalDesk {
                 winning_jnode: scope.winning_jnode,
                 expires_at,
                 consumed: false,
+                revoked: false,
             },
         );
         ApprovalGrant { id }
+    }
+
+    /// Withdraw a grant that has not been spent. Returns `true` if the grant is now dead.
+    /// A grant that was already spent (an effect may have been minted or run), or that this
+    /// desk never issued, returns `false` and nothing changes. Revoking twice is `true` both times.
+    pub fn revoke(&self, grant: &ApprovalGrant) -> bool {
+        let mut inner = self.broker.lock();
+        match inner.approvals.get_mut(&grant.id()) {
+            Some(record) if !record.consumed => {
+                record.revoked = true;
+                true
+            }
+            _ => false,
+        }
     }
 }
