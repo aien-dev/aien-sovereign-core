@@ -10,7 +10,7 @@ use aien_capability::{
 use aien_mcp::memory::MemoryWire;
 use aien_mcp::{
     AuthorityContext, AuthorityDecision, AuthorityOutcome, CallOutcome, EffectAuthority,
-    EffectClassAuthority, EffectIntent, EffectLane, EffectScope, McpBroker,
+    EffectClassAuthority, EffectIntent, EffectLane, EffectScope, Exposure, McpBroker, TrustLevel,
 };
 use serde_json::json;
 
@@ -182,4 +182,134 @@ async fn effect_class_table() {
         assert_eq!(got, want, "{effects:?}");
     }
     let _ = D::Allow;
+}
+
+// ---- E3: exposure input (INTERPLANE 0.3 cut E3) ----
+
+fn exposure(floor: TrustLevel) -> Exposure {
+    Exposure::new(vec!["in-1".into()], floor)
+}
+
+const EFFECT_BITS: [ToolEffects; 4] = [
+    ToolEffects::EXTERNAL_WRITE,
+    ToolEffects::WORLD_MUTATION,
+    ToolEffects::SECRET_BEARING,
+    ToolEffects::SPAWN_PROCESS,
+];
+
+#[test]
+fn trust_order_and_unknown_wire_value() {
+    assert!(TrustLevel::TrustedRuntime > TrustLevel::UserSupplied);
+    assert!(TrustLevel::UserSupplied > TrustLevel::WorkspaceUntrusted);
+    assert!(TrustLevel::WorkspaceUntrusted > TrustLevel::ExternalUntrusted);
+    assert_eq!(
+        TrustLevel::from_wire("user_supplied"),
+        TrustLevel::UserSupplied
+    );
+    assert_eq!(
+        TrustLevel::from_wire("unknown"),
+        TrustLevel::ExternalUntrusted
+    );
+    assert_eq!(
+        TrustLevel::from_wire("garbage"),
+        TrustLevel::ExternalUntrusted
+    );
+}
+
+#[tokio::test]
+async fn untrusted_exposure_makes_effects_pending_never_allow() {
+    for floor in [
+        TrustLevel::WorkspaceUntrusted,
+        TrustLevel::ExternalUntrusted,
+    ] {
+        for fx in EFFECT_BITS {
+            let h = harness(fx).await;
+            let r = h
+                .lane
+                .with_exposure(exposure(floor))
+                .authorize_and_execute(h.intent, scope("x"), &EffectClassAuthority)
+                .await;
+            match r {
+                Err(AuthorityOutcome::Pending { reason, .. }) => {
+                    assert!(reason.contains("exposure"), "{reason}")
+                }
+                other => panic!("expected Pending, got {other:?}"),
+            }
+            assert_eq!(h.calls.load(Ordering::SeqCst), 0);
+        }
+    }
+}
+
+#[tokio::test]
+async fn read_class_is_unaffected_by_exposure() {
+    for fx in [
+        ToolEffects::PURE,
+        ToolEffects::READ_FILESYSTEM,
+        ToolEffects::READ_NETWORK,
+    ] {
+        let h = harness(fx).await;
+        let r = h
+            .lane
+            .with_exposure(exposure(TrustLevel::ExternalUntrusted))
+            .authorize_and_execute(h.intent, scope("r"), &EffectClassAuthority)
+            .await;
+        assert!(r.is_ok());
+        assert_eq!(h.calls.load(Ordering::SeqCst), 1);
+    }
+}
+
+#[tokio::test]
+async fn absent_exposure_fails_closed_for_effects_only() {
+    let h = harness(ToolEffects::EXTERNAL_WRITE).await;
+    let r = h
+        .lane
+        .authorize(h.intent.clone(), scope("n"), &EffectClassAuthority);
+    match r {
+        Err(AuthorityOutcome::Pending { reason, .. }) => assert!(reason.contains("exposure")),
+        other => panic!("expected Pending, got {other:?}"),
+    }
+    let h = harness(ToolEffects::PURE).await;
+    assert!(h
+        .lane
+        .authorize(h.intent.clone(), scope("n2"), &EffectClassAuthority)
+        .is_ok());
+}
+
+#[tokio::test]
+async fn context_exposes_only_what_the_host_set() {
+    struct Probe(std::sync::Mutex<Option<Option<Exposure>>>);
+    impl EffectAuthority for Probe {
+        fn authorize(&self, _: &EffectIntent, c: &AuthorityContext) -> AuthorityDecision {
+            *self.0.lock().unwrap() = Some(c.exposure().cloned());
+            AuthorityDecision::Allow
+        }
+    }
+    let h = harness(ToolEffects::PURE).await;
+    let p = Probe(Default::default());
+    h.lane.authorize(h.intent.clone(), scope("p1"), &p).unwrap();
+    assert_eq!(p.0.lock().unwrap().take(), Some(None));
+    let e = exposure(TrustLevel::UserSupplied);
+    h.lane
+        .with_exposure(e.clone())
+        .authorize(h.intent.clone(), scope("p2"), &p)
+        .unwrap();
+    assert_eq!(p.0.lock().unwrap().take(), Some(Some(e)));
+}
+
+#[tokio::test]
+async fn user_supplied_or_better_keeps_the_existing_effect_table() {
+    for floor in [TrustLevel::UserSupplied, TrustLevel::TrustedRuntime] {
+        let h = harness(ToolEffects::EXTERNAL_WRITE).await;
+        let r = h.lane.with_exposure(exposure(floor)).authorize(
+            h.intent.clone(),
+            scope("t"),
+            &EffectClassAuthority,
+        );
+        match r {
+            Err(AuthorityOutcome::Pending { reason, .. }) => {
+                assert!(!reason.contains("exposure"), "{reason}")
+            }
+            other => panic!("expected Pending, got {other:?}"),
+        }
+    }
 }

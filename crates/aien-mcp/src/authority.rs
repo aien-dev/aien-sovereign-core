@@ -40,12 +40,52 @@ pub struct EffectScope {
     pub idempotency_key: EffectId,
 }
 
+/// How far the runtime trusts a piece of context. Mirrors INTERPLANE Crossveil `TrustLevel`.
+/// The derived order is least to most trusted:
+/// `ExternalUntrusted < WorkspaceUntrusted < UserSupplied < TrustedRuntime`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum TrustLevel {
+    ExternalUntrusted,
+    WorkspaceUntrusted,
+    UserSupplied,
+    TrustedRuntime,
+}
+
+impl TrustLevel {
+    /// Parse the wire name. `unknown` and any unrecognized value count as `ExternalUntrusted`:
+    /// inability to determine trust is never converted into trust.
+    pub fn from_wire(s: &str) -> Self {
+        match s {
+            "trusted_runtime" => Self::TrustedRuntime,
+            "user_supplied" => Self::UserSupplied,
+            "workspace_untrusted" => Self::WorkspaceUntrusted,
+            _ => Self::ExternalUntrusted,
+        }
+    }
+}
+
+/// What the model could see when it produced the turn: `{inputs: [input_id...], floor}`, where
+/// `floor` is the least trusted level among `inputs`. Host/runtime input only: the lane takes it
+/// from [`crate::EffectLane::with_exposure`], never from an intent, so nothing the model writes can set it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Exposure {
+    pub inputs: Vec<String>,
+    pub floor: TrustLevel,
+}
+
+impl Exposure {
+    pub fn new(inputs: Vec<String>, floor: TrustLevel) -> Self {
+        Self { inputs, floor }
+    }
+}
+
 /// What an authority sees. Built by the lane from the live session, never by the caller.
 #[derive(Clone, Debug)]
 pub struct AuthorityContext {
     scope: EffectScope,
     descriptor: Option<ToolDescriptor>,
     live_catalog_digest: Digest32,
+    exposure: Option<Exposure>,
 }
 
 impl AuthorityContext {
@@ -53,11 +93,13 @@ impl AuthorityContext {
         scope: EffectScope,
         descriptor: Option<ToolDescriptor>,
         live_catalog_digest: Digest32,
+        exposure: Option<Exposure>,
     ) -> Self {
         Self {
             scope,
             descriptor,
             live_catalog_digest,
+            exposure,
         }
     }
 
@@ -72,6 +114,12 @@ impl AuthorityContext {
 
     pub fn live_catalog_digest(&self) -> Digest32 {
         self.live_catalog_digest
+    }
+
+    /// Exposure the host attached to the lane, or `None` if it attached none.
+    /// `None` means unknown and is never read as trusted.
+    pub fn exposure(&self) -> Option<&Exposure> {
+        self.exposure.as_ref()
     }
 }
 
@@ -117,6 +165,7 @@ pub fn intent_digest(intent: &EffectIntent) -> Digest32 {
 /// | `EXTERNAL_IRREVERSIBLE` | `Deny` (irreversible effects stay intents, ADR 0005/0007) |
 /// | `EXTERNAL_WRITE`, `WORLD_MUTATION`, `SECRET_BEARING`, `SPAWN_PROCESS` | `RequireApproval` |
 /// | `PURE`, `READ_FILESYSTEM`, `READ_NETWORK`, `LOCAL_EPHEMERAL` | `Allow` |
+/// | effect-class bits (the four `RequireApproval` rows) while exposure floor < `UserSupplied`, or exposure absent | `RequireApproval` (never `Allow`; reason names exposure) |
 /// | unknown tool, unknown effect bits | `Deny` |
 #[derive(Clone, Copy, Debug, Default)]
 pub struct EffectClassAuthority;
@@ -139,6 +188,29 @@ impl EffectAuthority for EffectClassAuthority {
             return AuthorityDecision::Deny(
                 "irreversible external effects are intents only".into(),
             );
+        }
+        let effectful = e.intersects(
+            ToolEffects::EXTERNAL_WRITE
+                | ToolEffects::WORLD_MUTATION
+                | ToolEffects::SECRET_BEARING
+                | ToolEffects::SPAWN_PROCESS,
+        );
+        if effectful {
+            // Absent exposure is treated as external_untrusted: fail closed.
+            let floor = ctx
+                .exposure()
+                .map_or(TrustLevel::ExternalUntrusted, |x| x.floor);
+            if floor < TrustLevel::UserSupplied {
+                return AuthorityDecision::RequireApproval(format!(
+                    "tool `{}` is an effect under untrusted exposure ({})",
+                    intent.tool_name,
+                    if ctx.exposure().is_some() {
+                        "floor below user_supplied"
+                    } else {
+                        "exposure absent"
+                    }
+                ));
+            }
         }
         if e.intersects(
             ToolEffects::EXTERNAL_WRITE
