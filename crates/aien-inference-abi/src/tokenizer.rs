@@ -323,11 +323,28 @@ impl ChatTokenizer {
     ) -> Result<Self, TokenizerError> {
         let default_json = dir.join("tokenizer.json");
         let mut tokenizer = Self::from_file(tokenizer_json.unwrap_or(&default_json))?;
-        let config_template = read_json(&dir.join("tokenizer_config.json"))?.and_then(|c| {
-            c.get("chat_template")
-                .and_then(|t| t.as_str())
-                .map(str::to_string)
-        });
+        // A present `chat_template` key must be a string; any other form (the HF list
+        // form, null, an object) is an unrecognized template and never falls back to plain.
+        let config_template = match read_json(&dir.join("tokenizer_config.json"))?
+            .as_ref()
+            .and_then(|c| c.get("chat_template"))
+        {
+            None => None,
+            Some(serde_json::Value::String(text)) => Some(text.clone()),
+            Some(other) => {
+                let found = match other {
+                    serde_json::Value::Array(_) => "a list",
+                    serde_json::Value::Object(_) => "an object",
+                    serde_json::Value::Null => "null",
+                    _ => "a non-string value",
+                };
+                return Err(TokenizerError::LoadError(format!(
+                    "unrecognized chat template form in {}: expected a string, found {}",
+                    dir.join("tokenizer_config.json").display(),
+                    found
+                )));
+            }
+        };
         let jinja_path = dir.join("chat_template.jinja");
         let template_text = match config_template {
             Some(text) => Some(text),

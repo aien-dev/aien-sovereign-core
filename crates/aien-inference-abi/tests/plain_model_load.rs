@@ -75,3 +75,27 @@ fn plain_prompt_is_text_encoded_as_is() {
     assert_eq!(tok.encode("hi").unwrap(), direct.encode("hi").unwrap());
     assert_eq!(tok.encode("hi").unwrap(), vec![107, 108]);
 }
+
+/// A `chat_template` key that is present but not a string (Hugging Face's list form
+/// `[{name, template}, ...]`, `null`, or an object) is an unrecognized template, not
+/// "no template": it is refused at load and never falls back to the plain state.
+#[test]
+fn non_string_template_key_is_refused_not_plain() {
+    let dir = scratch("nonstring");
+    for form in [
+        r#"{"chat_template": [{"name": "default", "template": "{{ messages }}"}]}"#,
+        r#"{"chat_template": null}"#,
+        r#"{"chat_template": {"template": "{{ messages }}"}}"#,
+    ] {
+        std::fs::write(dir.join("tokenizer_config.json"), form).unwrap();
+        let err = ChatTokenizer::from_model_dir(&dir, None)
+            .err()
+            .unwrap_or_else(|| panic!("loaded as plain: {form}"))
+            .to_string();
+        assert!(
+            err.contains("unrecognized chat template form"),
+            "{form}: {err}"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
