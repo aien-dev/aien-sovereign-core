@@ -5,6 +5,11 @@ on:
     tags:
       - "v*"
   workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Dry run: build, package, sign with a throwaway key, verify, upload workflow artifacts only. Never creates a release."
+        type: boolean
+        default: true
 
 permissions:
   contents: write
@@ -46,7 +51,9 @@ jobs:
           rustup toolchain install "$(sed -n 's/^channel *= *"\(.*\)"/\1/p' rust-toolchain.toml)" --profile minimal
           rustc --version
 
-      - name: Release gate (candidate named, omega.lock equals the candidate's omega commit)
+      - name: Release gate (candidate named, omega.lock and Cargo.lock pins equal the candidate's)
+        id: gate
+        continue-on-error: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
         run: scripts/check-release-candidate.sh
 
       - name: Read pins (omega.lock, then omega physics.lock)
@@ -86,17 +93,34 @@ jobs:
           fi
           rm -rf "$CARGO_HOME"
           cargo fetch --locked
-          # The other binaries first; aien-cli alone and last (a multi-crate build gives a different
-          # aien-cli digest, see docs/release/receipts/2026-10-06-install-upgrade-rollback-v2.md, F1).
-          scripts/repro-build.sh -p spark-cockpit-rs -p spark-inquisitor -p cortex-encoder-rs -p cortex-rs -p spark-supervisor -p spark-debugger
-          scripts/repro-build.sh -p aien-cli
+          # The one recipe (docs/release/BUILD_RECIPE.md): helpers as one group, then aien-cli alone and last.
+          scripts/release-build.sh
 
       - name: Package Release Assets (reproducible tarball, release.toml inside)
+        env:
+          AIEN_DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run && '1' || '' }}
         run: |
           bash scripts/package-release.sh "${{ matrix.artifact_name }}"
           AIEN_SHA="$(sha256sum target/release/aien-cli 2>/dev/null || shasum -a 256 target/release/aien-cli)"
           printf '%s  %s  native_engine=%s\n' "${AIEN_SHA%% *}" "${{ matrix.artifact_name }}" "${{ matrix.native_engine }}" > "aien-cli-sha256-${{ matrix.target }}.txt"
           cat "aien-cli-sha256-${{ matrix.target }}.txt"
+
+      - name: Check the package against the candidate (model inputs, files, aien-cli digest; native build also the candidate digest)
+        id: pkgcheck
+        continue-on-error: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
+        run: |
+          if [ "${{ matrix.native_engine }}" = "true" ]; then NATIVE=--native; else NATIVE=; fi
+          scripts/check-release-candidate.sh --package "${{ matrix.artifact_name }}" $NATIVE
+
+      - name: Record dry-run status
+        if: always() && github.event_name == 'workflow_dispatch' && inputs.dry_run
+        run: |
+          {
+            echo "DRY RUN. This is not a release and must not be installed as a candidate."
+            echo "release gate: ${{ steps.gate.outcome }}"
+            echo "package check: ${{ steps.pkgcheck.outcome }}"
+          } > "DRY-RUN-STATUS-${{ matrix.target }}.txt"
+          cat "DRY-RUN-STATUS-${{ matrix.target }}.txt"
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
@@ -105,10 +129,47 @@ jobs:
           path: |
             ${{ matrix.artifact_name }}
             aien-cli-sha256-${{ matrix.target }}.txt
+            DRY-RUN-STATUS-${{ matrix.target }}.txt
+
+  dry-run-sign:
+    name: "Dry run: sign with a throwaway key and verify"
+    needs: build-release
+    if: github.event_name == 'workflow_dispatch' && inputs.dry_run
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout Source
+        uses: actions/checkout@v4
+
+      - name: Download Build Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-artifacts
+          merge-multiple: true
+
+      - name: Checksums, throwaway signature, verification
+        working-directory: release-artifacts
+        run: |
+          cat aien-cli-sha256-*.txt > aien-cli-digests.txt
+          sha256sum sovereign-* aien-cli-digests.txt > SHA256SUMS.txt
+          ssh-keygen -q -t ed25519 -N "" -C aien-dry-run-throwaway -f ../dry_key
+          printf "aien-release %s\n" "$(cut -d" " -f1,2 ../dry_key.pub)" > ../dry_signers
+          ssh-keygen -Y sign -f ../dry_key -n aien-release SHA256SUMS.txt
+          ../scripts/verify-release-assets.sh . ../dry_signers
+          rm -f ../dry_key
+          echo "DRY RUN: signed with a throwaway key generated in this job. Not the AIEN release key. Not a release." > DRY-RUN-NOT-A-RELEASE.txt
+
+      - name: Upload dry-run artifacts (workflow artifacts only, no release)
+        uses: actions/upload-artifact@v4
+        with:
+          name: dry-run-signed-assets
+          path: release-artifacts
 
   publish-release:
     name: Publish Release and Checksums
     needs: build-release
+    if: github.event_name == 'push' || inputs.dry_run == false
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Source
@@ -140,7 +201,7 @@ jobs:
           printf "%s\n" "$AIEN_RELEASE_SIGNING_KEY" > ../release_key
           ssh-keygen -Y sign -f ../release_key -n aien-release SHA256SUMS.txt
           rm -f ../release_key
-          ssh-keygen -Y verify -f ../docs/release/allowed_signers -I aien-release -n aien-release -s SHA256SUMS.txt.sig < SHA256SUMS.txt
+          ../scripts/verify-release-assets.sh . ../docs/release/allowed_signers
 
       - name: Publish GitHub Release
         env:

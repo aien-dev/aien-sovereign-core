@@ -30,6 +30,9 @@ jobs:
       - name: Verify Signed Release Install
         run: bash scripts/test-install-release.sh
 
+      - name: Release gate negative tests (pins, digests, model inputs, signatures)
+        run: bash scripts/test-release-checks.sh
+
       - name: Verify Piped Installer Bootstrap
         run: bash scripts/test-install.sh
 
