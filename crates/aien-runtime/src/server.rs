@@ -321,6 +321,7 @@ async fn submit_turn(
     (
         ChatTokenizer,
         tokio::sync::mpsc::UnboundedReceiver<CompletionEvent>,
+        Vec<u32>,
     ),
     String,
 > {
@@ -356,7 +357,7 @@ async fn submit_turn(
         2,
         Some(sink_id),
     )?;
-    Ok((tokenizer, events))
+    Ok((tokenizer, events, tokens))
 }
 
 /// Receipt label of a finish reason (ACCEPTANCE-v5 Q3): the stop token
@@ -385,7 +386,7 @@ async fn generate_text(
     limit: std::time::Duration,
     assistant_prefix: &str,
 ) -> Result<crate::spine::Generation, String> {
-    let (tokenizer, mut events) = submit_turn(
+    let (tokenizer, mut events, prompt_ids) = submit_turn(
         spine,
         tokenizer,
         messages,
@@ -406,6 +407,9 @@ async fn generate_text(
                             text,
                             tokens: produced.len(),
                             finish_reason: Some(finish_reason_label(&finish_reason).to_string()),
+                            token_ids: Some(produced.clone()),
+                            prompt_tokens: Some(prompt_ids.len()),
+                            prompt_ids_sha256: Some(crate::spine::token_ids_sha256(&prompt_ids)),
                         })
                         .map_err(|e| format!("tokenizer decode failed: {e}"));
                 }
@@ -453,8 +457,7 @@ pub fn model_proposer(
             ))
             .map(|g| crate::spine::Generation {
                 text: format!("{}{}", crate::spine::COMPOSE_ASSISTANT_PREFIX, g.text),
-                tokens: g.tokens,
-                finish_reason: g.finish_reason,
+                ..g
             })
     })
 }
@@ -467,7 +470,7 @@ async fn stream_turn(
     max_tokens: usize,
     temperature: f32,
 ) {
-    let (tokenizer, mut events) =
+    let (tokenizer, mut events, _prompt_ids) =
         match submit_turn(spine, tokenizer, messages, max_tokens, temperature, "").await {
             Ok(x) => x,
             Err(error) => {

@@ -363,6 +363,16 @@ pub struct ProposalAttempt {
     /// (ACCEPTANCE-v5 Q3). None when the call failed or the proposer did not say.
     #[serde(default)]
     pub finish_reason: Option<String>,
+    /// Generated token ids in order (NEXT-PHASE-1 v6 R1); None when the call
+    /// failed or the proposer does not expose them.
+    #[serde(default)]
+    pub token_ids: Option<Vec<u32>>,
+    /// How many prompt token ids were submitted (NEXT-PHASE-1 v6 R1).
+    #[serde(default)]
+    pub prompt_tokens: Option<usize>,
+    /// sha256 of the prompt ids, each 4 little-endian bytes (NEXT-PHASE-1 v6 R1).
+    #[serde(default)]
+    pub prompt_ids_sha256: Option<String>,
 }
 
 /// The record `ComposeNote` appended.
