@@ -18,7 +18,7 @@ if [ -n "${TASK_ID:-}" ]; then
   TASK=$(jq -c --arg id "$TASK_ID" '.tasks[] | select(.id == $id)' "${TASK_SPEC:-$HERE/tasks-v5.json}")
   [ -n "$TASK" ] || { echo "task $TASK_ID not in ${TASK_SPEC:-$HERE/tasks-v5.json}" >&2; exit 4; }
   row=$(jq -r '"| \(.id) | `\(.goal)` | `\(.destination)` | \(.phrases | map("`" + . + "`") | join(", ")) |"' <<<"$TASK")
-  grep -Fqx -- "$row" "$HERE/ACCEPTANCE-v5.md" && SPEC_OK=true
+  grep -Fqx -- "$row" "${TASK_ACCEPTANCE:-$HERE/ACCEPTANCE-v5.md}" && SPEC_OK=true
   # The daemon canonicalizes the workspace, so S5 paths are physical paths.
   WS=$(cd "$R/ws" && pwd -P)
   s5p=$(jq -r '.path // empty' "$S/S5.json" 2>/dev/null || true)
@@ -26,6 +26,33 @@ if [ -n "${TASK_ID:-}" ]; then
     real=$(realpath -e "$s5p")
     case "$real" in "$WS"/*) COMMITTED=$(jq -Rs . <"$real") ;; esac
   fi
+fi
+# ACCEPTANCE-v6: V6_TASK (T4, T5, N1, N2, R1) adds the v6 rows (rows-v6.jq) of
+# that launch of tasks-v6.json as `acceptance_v6`. V6_REFERENCE = the CPU
+# reference driver's JSON (R1), V6_MAX_TOKENS = the AIEN_COMPOSE_MAX_TOKENS the
+# harness passed. TASK_ACCEPTANCE (above) names the file the v5 Q2 task-row
+# check reads. The v1..v5 rows and `verdict` are computed as before; without
+# V6_TASK the receipt has no v6 field. The v6 containment rows read the v5 row
+# A2 result (null when the v5 rows are off). v6 launches are scored by run-v6.sh
+# through scoring/score-rows.sh, not by `verdict`.
+V6= V6T=null SEED=null REF=null WS6= COMMITTED6=null
+if [ -n "${V6_TASK:-}" ]; then
+  V6=1
+  V6T=$(jq -c --arg id "$V6_TASK" '.tasks[] | select(.id == $id)' "$HERE/tasks-v6.json")
+  [ -n "$V6T" ] || { echo "launch $V6_TASK not in $HERE/tasks-v6.json" >&2; exit 4; }
+  WS6=$(cd "$R/ws" && pwd -P)
+  s5p=$(jq -r '.path // empty' "$S/S5.json" 2>/dev/null || true)
+  if [ -n "$s5p" ] && [ -f "$s5p" ]; then
+    real=$(realpath -e "$s5p")
+    case "$real" in "$WS6"/*) COMMITTED6=$(jq -Rs . <"$real") ;; esac
+  fi
+  seedrel=$(jq -r '.seed // empty' <<<"$V6T")
+  if [ -n "$seedrel" ]; then
+    sf=$HERE/$seedrel/$(jq -r .destination <<<"$V6T")
+    SEED=$(jq -n --arg p "$(jq -r .destination <<<"$V6T")" --rawfile t "$sf" \
+      --arg s "$(sha256sum "$sf" | cut -d' ' -f1)" '{path:$p, text:$t, sha256:$s}')
+  fi
+  if [ -n "${V6_REFERENCE:-}" ] && [ -s "$V6_REFERENCE" ]; then REF=$(jq -c . "$V6_REFERENCE"); fi
 fi
 j() { if [ -s "$1" ]; then jq -c . "$1" 2>/dev/null || echo null; else echo null; fi; }
 skill_sha=$(printf '%s' 'aien.model.propose-file-change' | sha256sum | cut -d' ' -f1)
@@ -53,7 +80,10 @@ jq -n --argjson run "$(j "$R/run.json")" \
   --argjson receipts "$receipts" --arg sc "$SC" --arg omc "$OMC" --arg omg "$OMG" \
   --arg skill_sha "$skill_sha" --argjson rescues "$RESCUES" --arg note "$NOTE" --arg spec "${SPEC:-ACCEPTANCE.md spec_version 1}" \
   --arg conclusion "$CONCLUSION" --arg v5 "$V5" --argjson task "$TASK" --argjson spec_ok "$SPEC_OK" \
-  --arg ws "$WS" --argjson committed "$COMMITTED" "$(cat "$HERE/rows-v5.jq")"'
+  --arg ws "$WS" --argjson committed "$COMMITTED" \
+  --arg v6 "$V6" --argjson v6task "$V6T" --arg ws6 "$WS6" --argjson committed6 "$COMMITTED6" \
+  --argjson seed "$SEED" --argjson ref "$REF" --arg max6 "${V6_MAX_TOKENS:-}" \
+  "$(cat "$HERE/rows-v5.jq")$(cat "$HERE/rows-v6.jq")"'
   def st($id): ($run.steps // []) | map(select(.step == $id)) | (.[0] // {});
   def okv: if . then "PASS" else "FAIL" end;
   ($s3.report // {}) as $rep
@@ -182,7 +212,11 @@ jq -n --argjson run "$(j "$R/run.json")" \
         {step:7, name:"S7 restart", result:($reached.S7|okv), detail:(st("S7") + {vmhwm_kb_before:$d[0].vmhwm_kb})},
         {step:8, name:"S8 recall", result:($reached.S8|okv), detail:{ms:st("S8").wall_ms, machine_id:$s8.machine_id, constraints:(($s8.constraints // []) | map(.id)), effects:(($s8.effects // []) | map(.id)), vmhwm_kb_after:$d[1].vmhwm_kb, gpu_used:$gpu[1]}}
       ]}]
-  }' >"$tmp"
+  }
+  + (if $v6 == "1" then {task_v6:$v6task.id,
+       acceptance_v6:(v6_evidence($run; $rep; $s1; $s4; $s5; $s6; $s8; $pre; $receipts; $v6task; $ws6; $committed6; $seed; $ref; $max6)
+                     + {a2_v5: (($v5rows.authority // []) | map(select(.row == "A2")) | .[0].result // null)} | v6_rows)}
+     else {} end)' >"$tmp"
 h=$(sha256sum "$tmp" | cut -d' ' -f1)
 mv "$tmp" "$OUT/$h.json"
 v=$(jq -r .verdict "$OUT/$h.json")
@@ -201,6 +235,10 @@ v=$(jq -r .verdict "$OUT/$h.json")
   if [ -n "$V5" ]; then
     echo "ACCEPTANCE-v5 rows, task $TASK_ID (task quality, then authority):"
     jq -r '(.acceptance_v5.task_quality + .acceptance_v5.authority)[] | "  \(.result)  \(.row) \(.criterion)  \(.value | tojson | .[0:220])"' "$OUT/$h.json"
+  fi
+  if [ -n "$V6" ]; then
+    echo "ACCEPTANCE-v6 rows, launch $V6_TASK:"
+    jq -r '.acceptance_v6[] | "  \(.result)  \(.row) \(.criterion)  \(.value | tojson | .[0:220])"' "$OUT/$h.json"
   fi
   if [ -n "$NOTE" ]; then echo "Note: $NOTE"; fi
   if [ -n "$CONCLUSION" ]; then printf '\nConclusion on the frozen model input\n%s\n' "$CONCLUSION"; fi
