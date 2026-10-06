@@ -4,17 +4,17 @@
 //!   1. `AIEN_FORCE_CPU_STUB=1`          -> stub (no library; every call returns
 //!      `ComposeError::Unavailable`).
 //!   2. `AIEN_OMEGA_COMPOSE_LIB=<file>`  -> link that prebuilt archive (not sha-checked).
-//!   3. `AIEN_OMEGA_COMPOSE_DIR=<checkout>` -> its HEAD must equal the expected sha,
-//!      then `make <OUT_DIR>/librx_compose.a` runs in it. The expected sha is
-//!      omega.lock, unless `AIEN_OMEGA_COMPOSE_SHA=<40-hex>` overrides it
-//!      (pre-merge only: omega.lock pins the GPU candidate and is not edited for
-//!      this crate). `AIEN_PHYSICS_DIR` (default `<omega>/../physics`) is passed
+//!   3. `AIEN_OMEGA_COMPOSE_DIR=<checkout>`, else `AIEN_OMEGA_DIR` (the checkout
+//!      aien-omega-gpu builds from) -> its HEAD must equal omega.lock, then
+//!      `make <OUT_DIR>/librx_compose.a` runs in it. `AIEN_OMEGA_COMPOSE_SHA=<40-hex>`
+//!      replaces the expected sha: a documented developer override for building
+//!      against an unmerged omega branch, never used for a release or a receipt. `AIEN_PHYSICS_DIR` (default `<omega>/../physics`) is passed
 //!      as PHYSICS_DIR and `AIEN_AIENOS_LOCK_REPO` (if set) as AIENOS_LOCK_REPO;
 //!      omega's own lock checks still run.
 //!   4. otherwise                        -> stub, with a build warning.
 //!
-//! A separate checkout variable (not `AIEN_OMEGA_DIR`) keeps aien-omega-gpu's
-//! omega.lock check intact when both crates build in one invocation.
+//! `AIEN_OMEGA_COMPOSE_DIR` exists so a developer override never touches the
+//! checkout aien-omega-gpu checks against omega.lock.
 //! `cfg(has_omega_compose)` is set only when the real library is linked.
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -25,6 +25,7 @@ fn main() {
         "AIEN_FORCE_CPU_STUB",
         "AIEN_OMEGA_COMPOSE_LIB",
         "AIEN_OMEGA_COMPOSE_DIR",
+        "AIEN_OMEGA_DIR",
         "AIEN_OMEGA_COMPOSE_SHA",
         "AIEN_PHYSICS_DIR",
         "AIEN_AIENOS_LOCK_REPO",
@@ -45,7 +46,7 @@ fn main() {
                 is_sha(&s),
                 "AIEN_OMEGA_COMPOSE_SHA must be a full 40-hex sha"
             );
-            println!("cargo:warning=aien-omega-compose: AIEN_OMEGA_COMPOSE_SHA={s} overrides omega.lock {pinned} (pre-merge build)");
+            println!("cargo:warning=aien-omega-compose: AIEN_OMEGA_COMPOSE_SHA={s} overrides omega.lock {pinned} (developer override, not omega.lock)");
             s
         }
         Err(_) => pinned.clone(),
@@ -65,8 +66,10 @@ fn main() {
         link(&lib);
         return;
     }
-    let Ok(dir) = std::env::var("AIEN_OMEGA_COMPOSE_DIR") else {
-        println!("cargo:warning=aien-omega-compose: no AIEN_OMEGA_COMPOSE_DIR or AIEN_OMEGA_COMPOSE_LIB, building the stub");
+    let Ok(dir) =
+        std::env::var("AIEN_OMEGA_COMPOSE_DIR").or_else(|_| std::env::var("AIEN_OMEGA_DIR"))
+    else {
+        println!("cargo:warning=aien-omega-compose: no AIEN_OMEGA_COMPOSE_DIR, AIEN_OMEGA_DIR or AIEN_OMEGA_COMPOSE_LIB, building the stub");
         return;
     };
     let dir = PathBuf::from(dir);

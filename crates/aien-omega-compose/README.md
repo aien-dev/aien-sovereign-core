@@ -6,33 +6,30 @@ in omega `mk/rx_compose_lib.mk`). NEXT-PHASE-1 cut 1b.
 
 ## Building against omega
 
-The library is built from an omega checkout whose HEAD must equal the
-expected commit:
+The library is built from an omega checkout whose HEAD must equal `omega.lock`
+(the same pin aien-omega-gpu uses; since NEXT-PHASE-1 it is omega 62b6a28, which
+contains `librx_compose.a`). Default build, no override:
+
+```text
+AIEN_OMEGA_DIR=<omega checkout at omega.lock>
+AIEN_PHYSICS_DIR=<physics checkout at omega physics.lock>
+AIEN_AIENOS_LOCK_REPO=<aienos clone>
+cargo test -p aien-omega-compose
+```
 
 | Variable | Meaning |
 |----------|---------|
-| `AIEN_OMEGA_COMPOSE_DIR` | omega checkout; `make <OUT_DIR>/librx_compose.a` runs in it |
-| `AIEN_OMEGA_COMPOSE_SHA` | full 40-hex sha the checkout must be at. **Overrides `omega.lock`.** Pre-merge only: `omega.lock` pins the GPU candidate (CAND-2) and is not edited for this crate. |
+| `AIEN_OMEGA_DIR` | omega checkout at `omega.lock`; shared with aien-omega-gpu |
+| `AIEN_OMEGA_COMPOSE_DIR` | a different omega checkout for this crate only (takes precedence over `AIEN_OMEGA_DIR`) |
+| `AIEN_OMEGA_COMPOSE_SHA` | **developer override**: full 40-hex sha the checkout must be at instead of `omega.lock`, for building against an unmerged omega branch. Prints a build warning; never used for a release build or a campaign receipt. |
 | `AIEN_PHYSICS_DIR` | physics checkout at omega's `physics.lock` (default `<omega>/../physics`) |
 | `AIEN_AIENOS_LOCK_REPO` | aienos clone holding omega's `aienos.lock` commit (passed as `AIENOS_LOCK_REPO`) |
 | `AIEN_OMEGA_COMPOSE_LIB` | link a prebuilt `librx_compose.a` instead (not sha-checked) |
 | `AIEN_FORCE_CPU_STUB=1` | stub: every call returns `ComposeError::Unavailable` |
 
-With none of these set the crate builds the stub and prints a warning.
-`AIEN_OMEGA_COMPOSE_DIR` is separate from aien-omega-gpu's `AIEN_OMEGA_DIR`, so
-the GPU crate's `omega.lock` check is never bypassed by this override.
-
-Until omega `librx_compose.a` is merged and `omega.lock` pins a commit that
-has it, build with the branch commit of omega PR "runtime: librx_compose.a +
-host ABI facade (NEXT-PHASE-1 cut 1a)":
-
-```text
-AIEN_OMEGA_COMPOSE_DIR=<omega checkout at that commit>
-AIEN_OMEGA_COMPOSE_SHA=<that commit, 40 hex>
-AIEN_PHYSICS_DIR=<physics checkout at omega physics.lock>
-AIEN_AIENOS_LOCK_REPO=<aienos clone>
-cargo test -p aien-omega-compose
-```
+With no checkout and no library set the crate builds the stub and prints a warning.
+Use `AIEN_OMEGA_COMPOSE_DIR` together with `AIEN_OMEGA_COMPOSE_SHA`, so an override
+never changes the checkout aien-omega-gpu checks against `omega.lock`.
 
 The integration test (`tests/compose.rs`) is ignored in a stub build.
 
