@@ -51,7 +51,7 @@ export CARGO_TARGET_DIR="${MUTANT_TARGET_DIR:-$work/target}"
 cargo=${CARGO:-cargo}
 
 run_native() { $cargo test --offline --manifest-path "$manifest" --test "$test" >"$1" 2>&1; }
-run_miri() { $cargo miri test --manifest-path "$manifest" --test "$test" >"$1" 2>&1; }
+run_miri() { $cargo +nightly miri test --manifest-path "$manifest" --test "$test" >"$1" 2>&1; }
 
 fail=0
 killed=0

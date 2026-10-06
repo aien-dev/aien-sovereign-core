@@ -71,18 +71,18 @@ jobs:
           components: miri, rust-src
 
       - name: Miri setup
-        run: cargo miri setup
+        run: cargo +nightly miri setup
 
       - name: Miri on aien-capability
-        run: cargo miri test -p aien-capability
+        run: cargo +nightly miri test -p aien-capability
 
       - name: Miri on aien-kv-cache
-        run: cargo miri test -p aien-kv-cache
+        run: cargo +nightly miri test -p aien-kv-cache
 
       - name: Miri on KV ownership property tests (8 cases)
         run: |
           cargo fetch --manifest-path crates/aien-replay/Cargo.toml
-          cargo miri test --manifest-path crates/aien-replay/Cargo.toml --test kv_ownership_props
+          cargo +nightly miri test --manifest-path crates/aien-replay/Cargo.toml --test kv_ownership_props
 
       - name: Miri-only mutation must be caught
         run: sh crates/aien-replay/mutations/run_mutants.sh miri
