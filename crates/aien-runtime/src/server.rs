@@ -102,6 +102,7 @@ impl AienRuntimeServer {
         let is_running_worker = self.is_running.clone();
         let shutdown_notify_worker = self.shutdown_notify.clone();
 
+        let step_log = std::env::var("AIEN_STEP_LOG").is_ok_and(|v| v == "1");
         let worker_handle = tokio::spawn(async move {
             while is_running_worker.load(Ordering::Relaxed) {
                 let has_work = {
@@ -111,10 +112,21 @@ impl AienRuntimeServer {
 
                 if has_work {
                     let mut s = spine_worker.lock().await;
-                    if let Err(e) = s.step(&mut backend).await {
+                    let t_step = std::time::Instant::now();
+                    match s.step(&mut backend).await {
+                        // NEXT-PHASE-1 v3 observation: one line per engine step
+                        // (AIEN_STEP_LOG=1) from the metrics the step already reports.
+                        Ok(Some(m)) if step_log => eprintln!(
+                            "step: prefill_tokens={} emitted={} backend_us={} spine_us={}",
+                            m.prefill_tokens_processed,
+                            m.decode_tokens_emitted,
+                            m.step_latency_us,
+                            t_step.elapsed().as_micros()
+                        ),
+                        Ok(_) => {}
                         // A swallowed step error makes the daemon look alive
                         // while its decode loop is dead. Print it.
-                        eprintln!("runtime step error: {}", e);
+                        Err(e) => eprintln!("runtime step error: {}", e),
                     }
                 } else {
                     tokio::select! {
