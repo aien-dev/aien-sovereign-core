@@ -79,3 +79,21 @@ and J-Space spill damage while compose never spills (C6d).
 Before the campaign, one smoke run of the harness (REPS=1, on F0v2, rows C2a C6c C6c-ctl C6d C7a
 C7b C8a C8b C3a C6a; never C6i) was used to debug it. It showed the same C7a abort. Its results
 are not part of the receipt.
+
+## 6. Review additions (fresh-clone review of sc#228, before merge)
+
+Added after review; no code change, receipt untouched.
+
+1. **Stale socket disclosure.** C7a's aborted daemon left a stale socket file in its run folder,
+   with no process behind it. It is not recorded in the receipt.
+2. **Claim statement.** The claim is at most one intent per authorization (and at most one
+   write per intent), or an explicit `UNRESOLVED`; no exactly-once claim. This is inherited from
+   ACCEPTANCE-v2 (line 57 "One authorization opens at most one intent, ever", R2 at line 92, and
+   line 106 "no receipt or document text claims exactly-once"), which v3 keeps unchanged; v3
+   itself has no separate line for it.
+3. **Path note.** ACCEPTANCE-v3 cites omega files as `om/...`. Those files live at
+   `src/runtime/...` in omega; the line numbers are correct. ACCEPTANCE-v3 line 15 defines the
+   shorthand (`om/` = omega `src/runtime/`). The frozen file is not edited; this note records it.
+4. **Test limit.** 5 of the 6 cortex_mark integration tests skip under `AIEN_FORCE_CPU_STUB`, so
+   on a stub build the mark logic is not exercised by `cargo test`. The proof against the real
+   library is the receipt's link proof plus its campaign rows.
