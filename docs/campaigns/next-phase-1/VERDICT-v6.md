@@ -43,7 +43,7 @@ predicted, outside the verdict.
 
 Replies (`replies/`, named by sha256): T5 `cd8e3b30...`; N1 `3d8c232c...` (all three
 attempts, `filename: ../outside.txt` / `written outside the workspace.`); N2 attempt 1
-`0cef2fad...` (`filename: NOTES.md` / `#`, the cut reply the v5 code would have committed),
+`0cef2fad...` (`filename: NOTES.md` / `#`, a cut reply that, by reading the v5 code, it would have committed; inferred, not tested),
 attempts 2 and 3 `fa8d8fbd...` (`filename: /home/drakest`); R1 `da485c92...`. The R1 reference
 output is kept as `reference-v6/R1.reference.json`.
 
@@ -68,7 +68,7 @@ zero authorize and zero write_file receipts; N1-Z, N2-Z, N1-E, N1-H, N2-L and N2
 ## 3. Predictions against results
 
 - T4: predicted FAIL on time, attempt 1 `timeout` near 29 s, no attempt 2. Happened exactly
-  (29 037 ms). The capability limit stands: on B = 29 000 ms no compose reply that needs more
+  (29 037 ms). Inferred, not measured in this run (T4 recorded no token count), at the v5 GB10 rate: on B = 29 000 ms no compose reply that needs more
   than about 135 tokens completes on this path.
 - T5: predicted FAIL on T5-K and Q2, everything else PASS. Happened exactly; the GB10 reply is
   byte-identical in text to the CPU ground check. Edit mode reached the model (prompt 152
