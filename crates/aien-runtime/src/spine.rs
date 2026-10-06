@@ -411,7 +411,11 @@ impl AienRuntimeSpine {
             ControlCommand::RunComposeTask { .. }
             | ControlCommand::ComposeNote { .. }
             | ControlCommand::ComposeRecall { .. }
-            | ControlCommand::RecoverComposeHome => ControlResponse::Error(
+            | ControlCommand::RecoverComposeHome
+            | ControlCommand::ComposeEffectIntent { .. }
+            | ControlCommand::ComposeEffectAck { .. }
+            | ControlCommand::ComposeReconcile { .. }
+            | ControlCommand::ComposeControl { .. } => ControlResponse::Error(
                 "compose commands are handled on the socket connection, not as one-shot commands"
                     .into(),
             ),
@@ -807,7 +811,10 @@ pub fn propose_with_retries(
     (Err(last_reason), attempts)
 }
 
-fn record_view(compose: &mut Compose, r: &aien_omega_compose::Record) -> ComposeRecordView {
+pub(crate) fn record_view(
+    compose: &mut Compose,
+    r: &aien_omega_compose::Record,
+) -> ComposeRecordView {
     let host = r.subject == aien_omega_compose::SUBJECT_HOST;
     let note = if !host {
         None
@@ -839,9 +846,9 @@ fn record_view(compose: &mut Compose, r: &aien_omega_compose::Record) -> Compose
     }
 }
 
-struct ComposeHome {
-    compose: Compose,
-    machine_id: String,
+pub(crate) struct ComposeHome {
+    pub(crate) compose: Compose,
+    pub(crate) machine_id: String,
     prompts: Arc<parking_lot::Mutex<HashMap<u64, String>>>,
     /// What the model Skill returned per task: the text, or why it gave
     /// none, and every attempt it made.
@@ -1026,7 +1033,7 @@ impl ComposeBridge {
         })
     }
 
-    fn with_home<T>(
+    pub(crate) fn with_home<T>(
         &self,
         f: impl FnOnce(&mut ComposeHome) -> Result<T, String>,
     ) -> Result<T, String> {
