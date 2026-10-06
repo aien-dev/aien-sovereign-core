@@ -431,6 +431,15 @@ pub struct ComposeRecoverReport {
     pub open_rc: i32,
     pub rolled_back: u32,
     pub recovered_completed: u32,
+    /// ACCEPTANCE-v3 2.3: records the set-aside record mark said were lost
+    /// (0 = the mark was kept or only damaged), where it was kept, and the
+    /// host constraint record that names the repair (0 = none).
+    #[serde(default)]
+    pub mark_lost: u64,
+    #[serde(default)]
+    pub mark_kept_as: Option<String>,
+    #[serde(default)]
+    pub mark_repair_record: u64,
 }
 
 /// One unsettled effect as `ComposeReconcile` left it.

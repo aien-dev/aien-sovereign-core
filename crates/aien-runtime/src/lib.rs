@@ -3,6 +3,7 @@
 pub mod client;
 pub mod context;
 pub mod control;
+pub mod cortex_mark;
 pub mod effects;
 pub mod rsi;
 pub mod sequence;

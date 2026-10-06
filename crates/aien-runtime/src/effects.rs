@@ -481,6 +481,19 @@ pub fn executor_alive(pid: u32, start: u64) -> bool {
     pid != 0 && start != 0 && process_start_ticks(pid) == Some(start)
 }
 
+/// Effect commands refuse while the start-up reconcile has not succeeded
+/// (ACCEPTANCE-v3 2.5): `EFFECT_REFUSED ReconcileFailed`.
+fn reconcile_gate(b: &ComposeBridge) -> Result<(), String> {
+    match b.reconcile_failed() {
+        None => Ok(()),
+        Some(why) => Err(Refusal::new(
+            "ReconcileFailed",
+            format!("the start-up reconcile did not complete ({why}); run aien compose reconcile"),
+        )
+        .to_string()),
+    }
+}
+
 /// ComposeNote may not forge gated records (ACCEPTANCE-v2 2.7).
 pub fn check_reserved_note(kind: &str, text: &str) -> Result<(), String> {
     let Ok(v) = serde_json::from_str::<Value>(text) else {
@@ -494,6 +507,11 @@ pub fn check_reserved_note(kind: &str, text: &str) -> Result<(), String> {
         "authorization" if v.get("control").is_some() => {
             Err("ComposeNote: control records are written only by ComposeControl".into())
         }
+        // ACCEPTANCE-v3 2.4: repair records come only from RecoverComposeHome.
+        "constraint" if v.get("repair").is_some() => Err(
+            "ComposeNote: constraint records with a \"repair\" field are written only by RecoverComposeHome"
+                .into(),
+        ),
         _ => Ok(()),
     }
 }
@@ -558,6 +576,9 @@ fn noted(r: Result<ComposeNoteReport, String>) -> ControlResponse {
 /// ComposeEffectIntent: every check of 2.3 and the durable intent, in one
 /// step under the home lock. The answer's id is the intent.
 pub fn open_intent(b: &ComposeBridge, req: &IntentRequest) -> ControlResponse {
+    if let Err(e) = reconcile_gate(b) {
+        return ControlResponse::Error(e);
+    }
     noted(b.with_home(|home| {
         let l = ledger(home)?;
         let current = file_sha256(Path::new(&req.target))
@@ -576,6 +597,9 @@ pub fn open_intent(b: &ComposeBridge, req: &IntentRequest) -> ControlResponse {
 /// ComposeEffectAck: the executor's report after the write. The state is
 /// read from the world; the executor's own claim is kept beside it.
 pub fn ack(b: &ComposeBridge, intent: u64, reported: &Value) -> ControlResponse {
+    if let Err(e) = reconcile_gate(b) {
+        return ControlResponse::Error(e);
+    }
     noted(b.with_home(|home| {
         let l = ledger(home)?;
         let row = l
@@ -696,7 +720,14 @@ pub fn reconcile(
         })
     });
     match r {
-        Ok(r) => ControlResponse::ComposeReconciled(Box::new(r)),
+        Ok(r) => {
+            // A full reconcile that completed lifts the refusal of 2.5; a
+            // single declaration does not.
+            if declare.is_none() {
+                b.clear_reconcile_failed();
+            }
+            ControlResponse::ComposeReconciled(Box::new(r))
+        }
         Err(e) => ControlResponse::Error(e),
     }
 }
@@ -763,8 +794,18 @@ pub fn control(
     }
 }
 
+/// The tail of every start line after which effect commands refuse.
+pub const RECONCILE_GATE_NOTE: &str =
+    "effect commands refuse until a successful reconcile (aien compose reconcile)";
+
 /// Daemon start: reconcile an existing home once; one line for the log.
 pub fn reconcile_at_start(b: &ComposeBridge) -> String {
+    // Test builds only (ACCEPTANCE-v3 2.6): force the failure path of
+    // server.rs (a panic inside the spawn_blocking task).
+    #[cfg(feature = "fault-hold")]
+    if std::env::var("AIEN_FAULT_HOLD").as_deref() == Ok("reconcile_panic") {
+        panic!("fault hold reconcile_panic: forced start-up reconcile failure (test build)");
+    }
     if !b.dir().join("cortex.cx").exists() {
         return "Reconcile: no compose home yet".into();
     }
@@ -787,8 +828,14 @@ pub fn reconcile_at_start(b: &ComposeBridge) -> String {
                 serde_json::to_string(&r.outcomes).unwrap_or_default()
             )
         }
-        ControlResponse::Error(e) => format!("Reconcile: refused: {e}"),
-        other => format!("Reconcile: unexpected {other:?}"),
+        ControlResponse::Error(e) => {
+            b.set_reconcile_failed(format!("refused: {e}"));
+            format!("Reconcile: refused: {e}; {RECONCILE_GATE_NOTE}")
+        }
+        other => {
+            b.set_reconcile_failed(format!("unexpected {other:?}"));
+            format!("Reconcile: unexpected {other:?}; {RECONCILE_GATE_NOTE}")
+        }
     }
 }
 
