@@ -1,6 +1,8 @@
 //! Native weight data structures and zero-dependency loaders for transformer models.
 
-use crate::tensor::{apply_rope, matmul_vec, rmsnorm, scaled_dot_product_attention_single, swiglu};
+use crate::tensor::{
+    apply_rope_params, matmul_vec, rmsnorm, scaled_dot_product_attention_single, swiglu,
+};
 use crate::ModelConfig;
 use serde_json::Value;
 
@@ -37,7 +39,10 @@ pub struct TransformerWeights {
     pub embed_tokens: Vec<f32>,
     pub layers: Vec<TransformerLayerWeights>,
     pub final_norm: Vec<f32>,
-    pub lm_head: Vec<f32>,
+    /// Output projection `[vocab, hidden]`. `None` when `config.tie_word_embeddings`:
+    /// the projection is `embed_tokens` itself (no second copy). Read it through
+    /// [`TransformerWeights::output_projection`].
+    pub lm_head: Option<Vec<f32>>,
 }
 
 /// Diagnostic capture of intermediate activations and shapes across all transformer layers.
@@ -48,6 +53,16 @@ pub struct ForwardDiagnostics {
 }
 
 impl TransformerWeights {
+    /// The `[vocab, hidden]` matrix that projects the final hidden state to logits:
+    /// `lm_head`, or `embed_tokens` for a model with tied word embeddings.
+    #[inline]
+    pub fn output_projection(&self) -> &[f32] {
+        match &self.lm_head {
+            Some(lm_head) => lm_head,
+            None => &self.embed_tokens,
+        }
+    }
+
     /// Copies the embedding vector for a given token ID into a destination slice.
     #[inline]
     pub fn embed_token(&self, token_id: u32, out: &mut [f32]) {
@@ -155,10 +170,13 @@ impl TransformerWeights {
             *v = 1.0 + next_float() * 0.1;
         }
 
-        let mut lm_head = vec![0.0f32; hidden_dim * vocab_size];
-        for v in lm_head.iter_mut() {
-            *v = next_float();
-        }
+        let lm_head = (!config.tie_word_embeddings).then(|| {
+            let mut lm_head = vec![0.0f32; hidden_dim * vocab_size];
+            for v in lm_head.iter_mut() {
+                *v = next_float();
+            }
+            lm_head
+        });
 
         Self {
             config: config.clone(),
@@ -185,7 +203,7 @@ impl TransformerWeights {
         let kv_dim = num_kv_heads * head_dim;
         let intermediate_dim = self.config.intermediate_dim();
         let eps = self.config.rms_norm_eps;
-        let theta = self.config.rope_theta;
+        let rope = self.config.rope();
 
         // 1. Embedding lookup: x = embed_tokens[token_id]
         let token_idx = (token_id as usize) % self.config.vocab_size();
@@ -209,14 +227,14 @@ impl TransformerWeights {
             matmul_vec(&x_norm, &layer_w.v_proj, &mut v, hidden_dim, kv_dim);
 
             // 2c. Rotary Positional Embeddings (RoPE)
-            apply_rope(
+            apply_rope_params(
                 &mut q,
                 &mut k,
                 pos,
                 num_heads,
                 num_kv_heads,
                 head_dim,
-                theta,
+                &rope,
             );
 
             // 2d. Append to KV Cache
@@ -281,7 +299,7 @@ impl TransformerWeights {
         let mut logits = vec![0.0f32; vocab_size];
         matmul_vec(
             hidden_state,
-            &self.lm_head,
+            self.output_projection(),
             &mut logits,
             hidden_dim,
             vocab_size,
@@ -301,7 +319,7 @@ impl TransformerWeights {
         let intermediate_dim = self.config.intermediate_dim();
         let vocab_size = self.config.vocab_size();
         let eps = self.config.rms_norm_eps;
-        let theta = self.config.rope_theta;
+        let rope = self.config.rope();
 
         let mut activations = std::collections::HashMap::new();
         let mut shapes = std::collections::HashMap::new();
@@ -397,14 +415,14 @@ impl TransformerWeights {
                 matmul_vec(&x_norm, &layer_w.v_proj, &mut v, hidden_dim, kv_dim);
 
                 // 2c. Rotary Positional Embeddings (RoPE)
-                apply_rope(
+                apply_rope_params(
                     &mut q,
                     &mut k,
                     pos,
                     num_heads,
                     num_kv_heads,
                     head_dim,
-                    theta,
+                    &rope,
                 );
 
                 // Store RoPE Q in [1, num_heads, n, head_dim] layout
@@ -680,8 +698,10 @@ impl TransformerWeights {
             weights.final_norm = t;
         }
 
-        if let Some(t) = extract_tensor("lm_head.weight") {
-            weights.lm_head = t;
+        if !config.tie_word_embeddings {
+            if let Some(t) = extract_tensor("lm_head.weight") {
+                weights.lm_head = Some(t);
+            }
         }
 
         Ok(weights)
@@ -733,7 +753,11 @@ impl TransformerWeights {
         }
 
         let final_norm = decode("model.norm.weight")?;
-        let lm_head = decode("lm_head.weight")?;
+        let lm_head = if config.tie_word_embeddings {
+            None
+        } else {
+            Some(decode("lm_head.weight")?)
+        };
 
         Ok(Self {
             config: config.clone(),
@@ -744,12 +768,15 @@ impl TransformerWeights {
         })
     }
 
-    /// Loads model weights strictly from a safetensors checkpoint file on disk.
+    /// Loads model weights strictly from a safetensors checkpoint on disk, validated against
+    /// the tensor catalog `config` describes (`checkpoint::llama_catalog`). `path` is one
+    /// `.safetensors` file or a sharded `model.safetensors.index.json`.
     pub fn load_from_safetensors<P: AsRef<std::path::Path>>(
         path: P,
         config: &ModelConfig,
     ) -> Result<Self, crate::checkpoint::CheckpointError> {
-        let checkpoint = crate::checkpoint::load_safetensors_checkpoint(path)?;
+        let catalog = crate::checkpoint::llama_catalog(config);
+        let checkpoint = crate::checkpoint::load_checkpoint_with_catalog(path, &catalog)?;
         Self::from_loaded_checkpoint(&checkpoint, config)
     }
 }
@@ -802,6 +829,9 @@ mod tests {
             vocab_size: 256,
             rms_norm_eps: 1e-5,
             rope_theta: 10000.0,
+            rope_scaling: None,
+            tie_word_embeddings: false,
+            eos_token_ids: Vec::new(),
         };
 
         let weights = TransformerWeights::reference_test_weights(&config);
@@ -813,7 +843,7 @@ mod tests {
         assert_eq!(weights.layers[0].gate_proj.len(), 64 * 128);
         assert_eq!(weights.layers[0].down_proj.len(), 128 * 64);
         assert_eq!(weights.final_norm.len(), 64);
-        assert_eq!(weights.lm_head.len(), 64 * 256);
+        assert_eq!(weights.output_projection().len(), 64 * 256);
     }
 
     #[test]
@@ -831,6 +861,9 @@ mod tests {
             vocab_size: 256,
             rms_norm_eps: 1e-5,
             rope_theta: 10000.0,
+            rope_scaling: None,
+            tie_word_embeddings: false,
+            eos_token_ids: Vec::new(),
         };
 
         // 1. Missing tensor fails loudly with CheckpointError::MissingTensor
@@ -881,6 +914,6 @@ mod tests {
         assert_eq!(weights.layers[0].q_proj[0], 2.0);
         assert_eq!(weights.final_norm.len(), 64);
         assert_eq!(weights.final_norm[0], 1.0);
-        assert_eq!(weights.lm_head[0], 0.5);
+        assert_eq!(weights.output_projection()[0], 0.5);
     }
 }

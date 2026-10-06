@@ -712,7 +712,11 @@ pub const COMPOSE_ATTEMPT_BUDGET: std::time::Duration = std::time::Duration::fro
 /// assistant turn starts with it and the model generates the path and the
 /// content after it (ACCEPTANCE-v4 Section 2(1)). The reply the parser reads
 /// is this prefix followed by the generated text.
-pub const COMPOSE_ASSISTANT_PREFIX: &str = "filename: ";
+///
+/// NEXT-PHASE-1 v5 engine cut: no trailing space. A separate space token after
+/// the colon was measured harmful; the model's own tokenization puts the space
+/// in front of the path.
+pub const COMPOSE_ASSISTANT_PREFIX: &str = "filename:";
 
 /// The fixed proposal template of the production RunComposeTask path.
 pub fn proposal_prompt(goal: &str, workspace: &str, entries: &str) -> String {

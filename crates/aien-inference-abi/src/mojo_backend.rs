@@ -270,9 +270,11 @@ impl TensorBackend for MojoGb10Backend {
         head_dim: usize,
         num_q_heads: usize,
         num_kv_heads: usize,
-        theta: f32,
+        rope: &aien_abi_core::RopeParams,
     ) {
-        if let Some(ref b) = self.bindings {
+        // The Mojo kernel computes plain theta^(-2i/d) frequencies only.
+        let plain_theta = rope.llama3.is_none().then_some(rope.theta);
+        if let (Some(ref b), Some(theta)) = (&self.bindings, plain_theta) {
             if let Some(f32_fn) = b.rope_f32 {
                 unsafe {
                     f32_fn(
@@ -289,7 +291,7 @@ impl TensorBackend for MojoGb10Backend {
             }
         }
         self.fallback
-            .apply_rope(q, k, pos, head_dim, num_q_heads, num_kv_heads, theta);
+            .apply_rope(q, k, pos, head_dim, num_q_heads, num_kv_heads, rope);
     }
 
     fn matmul_vec(

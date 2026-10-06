@@ -19,6 +19,9 @@ fn main() {
         vocab_size: 32000,
         rms_norm_eps: 1e-5,
         rope_theta: 10000.0,
+        rope_scaling: None,
+        tie_word_embeddings: false,
+        eos_token_ids: Vec::new(),
     };
 
     let safetensors_path = "/home/drakestapleton/.cache/huggingface/hub/models--TinyLlama--TinyLlama-1.1B-Chat-v1.0/snapshots/fe8a4ea1ffedaf415f4da2f062534de366a451e6/model.safetensors";
@@ -37,7 +40,7 @@ fn main() {
     let q_dim = num_heads * head_dim;
     let kv_dim = num_kv_heads * head_dim;
     let eps = model_config.rms_norm_eps;
-    let theta = model_config.rope_theta;
+    let rope = model_config.rope();
 
     // Simulate seq_len = 128 (decode step 128)
     let seq_len = 128;
@@ -126,7 +129,7 @@ fn main() {
                 head_dim,
                 num_heads,
                 num_kv_heads,
-                theta,
+                &rope,
             );
             if is_bench {
                 time_rope_us += t0.elapsed().as_micros();
@@ -241,7 +244,7 @@ fn main() {
         backend.compute_logits(
             &mut logits,
             &x_final,
-            &weights.lm_head,
+            weights.output_projection(),
             vocab_size,
             hidden_dim,
         );

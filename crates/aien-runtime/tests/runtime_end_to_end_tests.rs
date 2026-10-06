@@ -78,6 +78,9 @@ fn test_micro_model_config() -> ModelConfig {
         vocab_size: 256,
         rms_norm_eps: 1e-5,
         rope_theta: 10000.0,
+        rope_scaling: None,
+        tie_word_embeddings: false,
+        eos_token_ids: Vec::new(),
     }
 }
 
@@ -100,6 +103,9 @@ fn gb10_micro_model_config() -> ModelConfig {
         vocab_size: 256,
         rms_norm_eps: 1e-5,
         rope_theta: 10000.0,
+        rope_scaling: None,
+        tie_word_embeddings: false,
+        eos_token_ids: Vec::new(),
     }
 }
 
@@ -168,11 +174,11 @@ impl TensorBackend for CountingBackend {
         head_dim: usize,
         num_q_heads: usize,
         num_kv_heads: usize,
-        theta: f32,
+        rope: &aien_inference_abi::RopeParams,
     ) {
         self.hit(TensorOp::ApplyRope);
         self.inner
-            .apply_rope(q, k, pos, head_dim, num_q_heads, num_kv_heads, theta)
+            .apply_rope(q, k, pos, head_dim, num_q_heads, num_kv_heads, rope)
     }
     fn matmul_vec(
         &self,
