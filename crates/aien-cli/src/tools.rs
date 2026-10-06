@@ -428,7 +428,7 @@ pub fn dispatch_tool(name: &str, args: &Value) -> Value {
         }
     }
 
-    record_effect_receipt(name, args, &final_res, success);
+    let _ = record_effect_receipt(name, args, &final_res, success);
 
     let elapsed = start.elapsed().as_millis();
     print_tool_done(name, elapsed, success);
@@ -437,7 +437,15 @@ pub fn dispatch_tool(name: &str, args: &Value) -> Value {
 
 /// Persist a content-addressed, secret-free receipt for every tool effect.
 /// Arguments and results are hashed, never copied into the receipt.
-fn record_effect_receipt(tool: &str, args: &Value, result: &Value, success: bool) {
+/// Writes one effect receipt under `$AIEN_PROVENANCE_DIR` and returns its path
+/// (None when it could not be written). NEXT-PHASE-1 `aien compose` cites the
+/// returned file by its sha256.
+pub(crate) fn record_effect_receipt(
+    tool: &str,
+    args: &Value,
+    result: &Value,
+    success: bool,
+) -> Option<std::path::PathBuf> {
     let digest = |value: &Value| {
         let bytes = serde_json::to_vec(value).unwrap_or_default();
         format!("sha256:{}", hex::encode(Sha256::digest(bytes)))
@@ -455,7 +463,7 @@ fn record_effect_receipt(tool: &str, args: &Value, result: &Value, success: bool
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|_| std::path::PathBuf::from("/tmp/aien-provenance"));
     if std::fs::create_dir_all(&dir).is_err() {
-        return;
+        return None;
     }
     let id = format!(
         "{}-{}",
@@ -463,9 +471,9 @@ fn record_effect_receipt(tool: &str, args: &Value, result: &Value, success: bool
         std::process::id()
     );
     let path = dir.join(format!("{}.json", id));
-    if let Ok(bytes) = serde_json::to_vec_pretty(&receipt) {
-        let _ = std::fs::write(path, bytes);
-    }
+    let bytes = serde_json::to_vec_pretty(&receipt).ok()?;
+    std::fs::write(&path, bytes).ok()?;
+    Some(path)
 }
 
 fn validate_tool_path(path: &str) -> Result<std::path::PathBuf, String> {
@@ -1089,7 +1097,7 @@ mod tests {
     fn effect_receipt_is_hashed_and_secret_free() {
         let dir = tempfile::tempdir().unwrap();
         std::env::set_var("AIEN_PROVENANCE_DIR", dir.path());
-        record_effect_receipt(
+        let _ = record_effect_receipt(
             "write_to_file",
             &json!({"path":"/tmp/receipt-test","content":"secret-value"}),
             &json!({"status":"ok"}),
