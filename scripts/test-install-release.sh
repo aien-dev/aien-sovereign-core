@@ -184,9 +184,28 @@ for point in mid-copy after-copy before-swap; do
     [[ "$(live "$WORK/cfg-good")" == "$OLD" ]] || fail "killed at $point changed the live release"
     out="$("$WORK/bin-good/aien")"; [[ "$out" == "aien-b" || "$out" == "aien-c" ]] || fail "live install does not run after kill at $point ($out)"
 done
+# 11b. kill after the single rename (current already switched, links and record not yet written):
+#      the new release is live and runs, the record still names the old one, a rerun repairs the record
+ID_NEW="$(sha256sum "$WORK/pkg/bin/aien" | cut -c1-12)"
+OLD="$(live "$WORK/cfg-good")"
+[[ "$OLD" != "$ID_NEW" ]] || fail "setup for the after-swap case failed"
+env AIEN_TEST_PAUSE_AT=after-swap AIEN_RELEASE_TAG=v0.0.0-test AIEN_RELEASE_BASE_URL="file://$WORK/rel3" \
+    AIEN_BIN_DIR="$WORK/bin-good" AIEN_CONFIG_DIR="$WORK/cfg-good" AIEN_INSTALL_NO_PROFILE=1 \
+    AIEN_SOURCE_DIR="$ROOT" AIEN_ALLOWED_SIGNERS="$WORK/allowed_signers" \
+    bash "$ROOT/install.sh" > "$WORK/log-int" 2>&1 &
+IPID=$!
+for _ in $(seq 1 100); do grep -q "paused at after-swap" "$WORK/log-int" 2>/dev/null && break; sleep 0.1; done
+grep -q "paused at after-swap" "$WORK/log-int" || fail "installer never reached after-swap"
+pkill -9 -P "$IPID" 2>/dev/null || true; kill -9 "$IPID"; wait "$IPID" 2>/dev/null || true
+[[ "$(live "$WORK/cfg-good")" == "$ID_NEW" ]] || fail "after-swap: the rename did not take effect"
+[[ "$("$WORK/bin-good/aien")" == "aien-e" ]] || fail "after-swap: the live release does not run"
+grep -q "^current = \"$OLD\"" "$WORK/cfg-good/installed.toml" || fail "after-swap: record unexpectedly updated before the kill"
+[[ -d "$WORK/cfg-good/releases/$OLD" ]] || fail "after-swap: the previous release was pruned before the record was written"
 run_install "$WORK/rel3" "$WORK/bin-good" "$WORK/cfg-good" "$ROOT/install.sh" "${SIGN_ENV[@]}" \
     || { cat "$WORK/log" >&2; fail "rerun after interruption failed"; }
 [[ "$("$WORK/bin-good/aien")" == "aien-e" ]] || fail "rerun did not install the new release"
+grep -q "^current = \"$ID_NEW\"" "$WORK/cfg-good/installed.toml" || fail "rerun after the after-swap kill did not repair the record"
+grep -q "^previous = \"$OLD\"" "$WORK/cfg-good/installed.toml" || fail "rerun after the after-swap kill lost the previous release"
 [[ -z "$(ls -A "$WORK/cfg-good/releases" | grep '^\.stage\.' || true)" ]] || fail "leftover stage after rerun"
 
 # 12. an existing release directory that is incomplete is never overwritten
@@ -199,4 +218,21 @@ if run_install "$WORK/rel4" "$WORK/bin-good" "$WORK/cfg-good" "$ROOT/install.sh"
 fi
 grep -q "was not overwritten" "$WORK/log" || fail "incomplete release directory not reported"
 [[ "$(live "$WORK/cfg-good")" == "$ID3" && -f "$WORK/cfg-good/releases/$ID4/junk" ]] || fail "refusal changed state"
-echo "PASS: release install verifies signature, checksum and every package file, rejects tampered and forged releases, installs standalone offline, pinned key matches allowed_signers, upgrades atomically, keeps one previous release, rolls back, refuses downgrades, survives an interrupted install"
+
+# 13. release gate: the candidate must be named and omega.lock must be the candidate's omega commit
+GT="$WORK/gate"; mkdir -p "$GT/scripts" "$GT/release"
+cp "$ROOT/scripts/check-release-candidate.sh" "$GT/scripts/"; cp "$ROOT/release/candidate.toml" "$GT/release/"
+gate() { (cd "$GT" && bash scripts/check-release-candidate.sh "$@" > "$WORK/log-gate" 2>&1); }
+OM="$(sed -n 's/^omega-commit *= *"\(.*\)"$/\1/p' "$GT/release/candidate.toml")"
+echo "$OM" > "$GT/omega.lock"
+gate --model "$WORK/model.toml" || { cat "$WORK/log-gate" >&2; fail "gate refused a matching tree"; }
+grep -q '^\[model\]' "$WORK/model.toml" && grep -q '^model-safetensors-sha256' "$WORK/model.toml" || fail "gate did not extract the model table"
+echo 0000000000000000000000000000000000000000 > "$GT/omega.lock"
+if gate; then fail "gate accepted an omega.lock that is not the candidate's"; fi
+grep -q "cannot be released" "$WORK/log-gate" || fail "omega mismatch not explained"
+echo "$OM" > "$GT/omega.lock"
+sed -i 's/^candidate = .*/candidate = "unknown"/' "$GT/release/candidate.toml"
+if gate; then fail "gate accepted candidate unknown"; fi
+rm "$GT/release/candidate.toml"
+if gate; then fail "gate accepted a missing candidate file"; fi
+echo "PASS: release gate fails closed, release install verifies signature, checksum and every package file, rejects tampered and forged releases, installs standalone offline, pinned key matches allowed_signers, upgrades atomically, keeps one previous release, rolls back, refuses downgrades, survives an interrupted install (including a kill after the swap)"
