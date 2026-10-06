@@ -31,6 +31,8 @@ tree_list() { (cd "$1" && find . -type f -print0 | sort -z | xargs -0 -r sha256s
 tree_digest() { tree_list "$1" | sha256sum | cut -d' ' -f1; }
 
 DPID=; NOTRUN=
+# Never leave a daemon of ours behind, whatever stops the harness.
+trap '[ -n "$DPID" ] && kill -0 "$DPID" 2>/dev/null && kill -9 "$DPID" 2>/dev/null' EXIT
 # start_daemon NAME: wait for the socket and the Reconcile: line (rc 0), or
 # for the process to exit (rc 1).
 start_daemon() {
@@ -467,3 +469,4 @@ for c in $CASES; do
   # never leave a daemon behind
   [ -n "$DPID" ] && kill -0 "$DPID" 2>/dev/null && kill_daemon
 done
+exit 0
