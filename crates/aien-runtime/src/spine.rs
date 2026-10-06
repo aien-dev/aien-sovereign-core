@@ -504,6 +504,7 @@ use crate::control::{
     ComposeNoteReport, ComposeRecallReport, ComposeRecordView, ComposeRecoverReport,
     ComposeTaskReport, ProposalAttempt,
 };
+use crate::cortex_mark::{self, Mark, MarkRefusal, Plan};
 use aien_omega_compose::{hex, note_bytes, Compose, ComposeError, NoteKind, RootKind};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
@@ -614,6 +615,11 @@ fn refusal(dir: &Path, e: &ComposeError) -> String {
         other => other.to_string(),
     };
     format!("compose home {} refused: {why}", dir.display())
+}
+
+/// A refusal by the Cortex record mark (ACCEPTANCE-v3 2.2), in the same form.
+fn mark_refusal(dir: &Path, r: &MarkRefusal) -> String {
+    format!("compose home {} refused: {r}", dir.display())
 }
 
 /// One proposed file change: a path relative to the workspace and the
@@ -860,6 +866,47 @@ pub(crate) struct ComposeHome {
     /// What the model Skill returned per task: the text, or why it gave
     /// none, and every attempt it made.
     proposals: Arc<parking_lot::Mutex<HashMap<u64, SkillOutput>>>,
+    /// The Cortex record mark (ACCEPTANCE-v3 2.1): where it lives, the raw
+    /// machine id it binds, and the last mark written (or verified).
+    mark_path: PathBuf,
+    machine_raw: [u8; 32],
+    mark: Option<Mark>,
+    /// seq of the last mark this home knows of (0 = none yet).
+    mark_seq: u64,
+}
+
+impl ComposeHome {
+    /// Write a new record mark when the journal holds more records than the
+    /// last mark (ACCEPTANCE-v3 2.1). Called only after appends returned,
+    /// so the mark never runs ahead of the journal. Returns the mark written.
+    pub(crate) fn advance_mark(&mut self) -> Result<Option<Mark>, String> {
+        let n = self
+            .compose
+            .info()
+            .map_err(|e| format!("record mark: info: {e}"))?
+            .records;
+        if self.mark.as_ref().is_some_and(|m| m.records >= n) {
+            return Ok(None);
+        }
+        let digest = if n == 0 {
+            [0u8; 32]
+        } else {
+            self.compose
+                .record(n)
+                .map_err(|e| format!("record mark: record {n}: {e}"))?
+                .digest
+        };
+        let m = Mark {
+            machine_id: self.machine_raw,
+            seq: self.mark_seq + 1,
+            records: n,
+            digest,
+        };
+        cortex_mark::write(&self.mark_path, &m)?;
+        self.mark_seq = m.seq;
+        self.mark = Some(m.clone());
+        Ok(Some(m))
+    }
 }
 
 type SkillOutput = (Result<String, String>, Vec<ProposalAttempt>);
@@ -870,6 +917,9 @@ pub struct ComposeBridge {
     proposer: ComposeProposer,
     proposer_label: String,
     home: std::sync::Mutex<Option<ComposeHome>>,
+    /// Set when the start-up reconcile failed or was refused (ACCEPTANCE-v3
+    /// 2.5): effect commands refuse until an operator reconcile succeeds.
+    reconcile_failed: std::sync::Mutex<Option<String>>,
 }
 
 impl ComposeBridge {
@@ -879,6 +929,7 @@ impl ComposeBridge {
             proposer,
             proposer_label: proposer_label.to_string(),
             home: std::sync::Mutex::new(None),
+            reconcile_failed: std::sync::Mutex::new(None),
         }
     }
 
@@ -887,10 +938,35 @@ impl ComposeBridge {
     }
 
     fn open_home(&self) -> Result<ComposeHome, String> {
+        self.open_home_marked(None)
+    }
+
+    /// Open the home and check its Cortex record mark (ACCEPTANCE-v3 2.2).
+    /// `rebuilt_from` = the seq of a mark RecoverComposeHome just set aside:
+    /// the home then opens without a mark and gets a fresh one.
+    fn open_home_marked(&self, rebuilt_from: Option<u64>) -> Result<ComposeHome, String> {
         let root = machine_root(&self.dir)?;
+        let mark_path = cortex_mark::mark_path(&self.dir);
+        let existing = match rebuilt_from {
+            Some(_) => None,
+            None => cortex_mark::read(&mark_path)
+                .map_err(|why| mark_refusal(&self.dir, &MarkRefusal::Damaged(why)))?,
+        };
+        let journal_present = std::fs::metadata(self.dir.join("cortex.cx"))
+            .map(|m| m.len() > 0)
+            .unwrap_or(false);
+        // rxc_host_open appends nothing: `info.records` is the read-only probe
+        // count, so the count check runs before the open appends anything.
         let (mut compose, info) =
             Compose::open(&self.dir, RootKind::Provisioned, &root, 0xA1E4_0001)
                 .map_err(|e: ComposeError| refusal(&self.dir, &e))?;
+        let plan = cortex_mark::plan(
+            existing.as_ref(),
+            &info.machine_id,
+            info.records,
+            journal_present,
+        )
+        .map_err(|r| mark_refusal(&self.dir, &r))?;
         let prompts: Arc<parking_lot::Mutex<HashMap<u64, String>>> = Arc::default();
         let proposals: Arc<parking_lot::Mutex<HashMap<u64, SkillOutput>>> = Arc::default();
         let (pr, pp, proposer) = (prompts.clone(), proposals.clone(), self.proposer.clone());
@@ -926,12 +1002,67 @@ impl ComposeBridge {
         // Open the composition now, so a home behind its anchor is refused here
         // with its name (E_REPLAY), not inside the first run.
         compose.info().map_err(|e| refusal(&self.dir, &e))?;
-        Ok(ComposeHome {
+        // The digest check needs the open home (the open appended the five
+        // start-up records; ACCEPTANCE-v3 G1, G3).
+        if let Plan::Verify(m) = &plan {
+            if m.records > 0 {
+                let at = compose.record(m.records).ok().map(|r| r.digest);
+                cortex_mark::check_digest(m, at).map_err(|r| mark_refusal(&self.dir, &r))?;
+            }
+        }
+        let mut home = ComposeHome {
             compose,
             machine_id: hex(&info.machine_id),
             prompts,
             proposals,
-        })
+            mark_path,
+            machine_raw: info.machine_id,
+            mark: existing.clone(),
+            mark_seq: existing
+                .as_ref()
+                .map_or(rebuilt_from.unwrap_or(0), |m| m.seq),
+        };
+        let written = home.advance_mark().map_err(|e| {
+            format!(
+                "compose home {} refused: record mark update failed (E_MARK_WRITE): {e}",
+                self.dir.display()
+            )
+        })?;
+        let event = match rebuilt_from {
+            Some(_) => written.as_ref().map(|w| {
+                format!(
+                    "Cortex mark: mark rebuilt by RecoverComposeHome (seq {}, records {})",
+                    w.seq, w.records
+                )
+            }),
+            None => cortex_mark::open_event(&plan, info.records, written.as_ref()),
+        };
+        if let Some(line) = event {
+            println!("{line}");
+        }
+        Ok(home)
+    }
+
+    /// Start-up reconcile failed or was refused: effect commands refuse
+    /// until an operator reconcile succeeds (ACCEPTANCE-v3 2.5).
+    pub fn set_reconcile_failed(&self, why: String) {
+        if let Ok(mut g) = self.reconcile_failed.lock() {
+            *g = Some(why);
+        }
+    }
+
+    /// Why effect commands are refused, if they are.
+    pub fn reconcile_failed(&self) -> Option<String> {
+        match self.reconcile_failed.lock() {
+            Ok(g) => g.clone(),
+            Err(_) => Some("reconcile state lock poisoned".into()),
+        }
+    }
+
+    pub(crate) fn clear_reconcile_failed(&self) {
+        if let Ok(mut g) = self.reconcile_failed.lock() {
+            *g = None;
+        }
     }
 
     /// Blocking: runs inference inside the Skill. Call from a blocking thread.
@@ -978,6 +1109,9 @@ impl ComposeBridge {
         let run = home.compose.run(task, now.as_micros() as u64);
         home.prompts.lock().remove(&task);
         let output = home.proposals.lock().remove(&task);
+        // A run appends whether or not it commits: move the record mark first.
+        home.advance_mark()
+            .map_err(|e| format!("compose run: record mark update failed (E_MARK_WRITE): {e}"))?;
         let r = run.map_err(|e| format!("compose run: {e}"))?;
         let committed = r.committed == 1;
         let (out, mut proposal_attempts) =
@@ -1035,7 +1169,15 @@ impl ComposeBridge {
         if guard.is_none() {
             *guard = Some(self.open_home()?);
         }
-        f(guard.as_mut().expect("opened above"))
+        let home = guard.as_mut().expect("opened above");
+        let r = f(home);
+        // Ok or not, the closure may have appended: the mark follows.
+        if let Err(e) = home.advance_mark() {
+            return Err(format!(
+                "record mark update failed after the operation (E_MARK_WRITE): {e}"
+            ));
+        }
+        r
     }
 
     /// S1 / S4 / S5: one operator record through the composition's writer.
@@ -1133,7 +1275,10 @@ impl ComposeBridge {
     }
 
     /// Operator repair: close this process's handle, run rxc_host_recover,
-    /// reopen lazily on the next command.
+    /// then check the Cortex record mark (ACCEPTANCE-v3 2.3): a mark that is
+    /// damaged, ahead of the records kept, or names a different record is
+    /// kept as `<mark>.lost-<seq>` (never deleted), the home is reopened with
+    /// a fresh mark and one host `constraint` record names the repair.
     pub fn recover(&self) -> ControlResponse {
         let mut guard = match self.home.lock() {
             Ok(g) => g,
@@ -1144,29 +1289,113 @@ impl ComposeBridge {
             Ok(r) => r,
             Err(e) => return ControlResponse::Error(format!("RecoverComposeHome: {e}")),
         };
-        match Compose::recover(&self.dir, RootKind::Provisioned, &root) {
-            Ok(r) => ControlResponse::ComposeRecovered(Box::new(ComposeRecoverReport {
-                compose_dir: self.dir.display().to_string(),
-                repaired: r.repaired == 1,
-                tail_torn: r.tail_torn == 1,
-                cause: r.cause,
-                cut_lo: r.cut_lo,
-                cut_hi: r.cut_hi,
-                records_kept: r.records_kept,
-                dropped_records: r.dropped_records,
-                anchor_records: r.anchor_records,
-                repair_record: r.event_id,
-                cut_bytes_kept: r.cut_bytes_kept,
-                cut_sha256: hex(&r.cut_sha256),
-                opens: r.opens == 1,
-                open_rc: r.open_rc,
-                rolled_back: r.rolled_back,
-                recovered_completed: r.recovered_completed,
-            })),
+        let mark_path = cortex_mark::mark_path(&self.dir);
+        let old_mark = cortex_mark::read(&mark_path);
+        let r = match Compose::recover(&self.dir, RootKind::Provisioned, &root) {
+            Ok(r) => r,
             Err(e) => {
-                ControlResponse::Error(format!("RecoverComposeHome {}: {e}", self.dir.display()))
+                return ControlResponse::Error(format!(
+                    "RecoverComposeHome {}: {e}",
+                    self.dir.display()
+                ))
             }
+        };
+        let mut report = ComposeRecoverReport {
+            compose_dir: self.dir.display().to_string(),
+            repaired: r.repaired == 1,
+            tail_torn: r.tail_torn == 1,
+            cause: r.cause,
+            cut_lo: r.cut_lo,
+            cut_hi: r.cut_hi,
+            records_kept: r.records_kept,
+            dropped_records: r.dropped_records,
+            anchor_records: r.anchor_records,
+            repair_record: r.event_id,
+            cut_bytes_kept: r.cut_bytes_kept,
+            cut_sha256: hex(&r.cut_sha256),
+            opens: r.opens == 1,
+            open_rc: r.open_rc,
+            rolled_back: r.rolled_back,
+            recovered_completed: r.recovered_completed,
+            mark_lost: 0,
+            mark_kept_as: None,
+            mark_repair_record: 0,
+        };
+        // (old mark if readable, records lost, why) when the mark must go.
+        let set_aside: Option<(Option<Mark>, u64, &str)> = match old_mark {
+            Err(_) => Some((None, 0, "damaged")),
+            Ok(None) => None,
+            Ok(Some(m)) if m.records > r.records_kept => {
+                let lost = m.records - r.records_kept;
+                Some((Some(m), lost, "ahead of the journal"))
+            }
+            Ok(Some(m)) => match self.open_home() {
+                Ok(home) => {
+                    *guard = Some(home);
+                    None
+                }
+                Err(e) if e.contains("E_MARK_DIGEST") => {
+                    Some((Some(m), 0, "names a different record"))
+                }
+                // Refused for another reason: reported as before, mark kept.
+                Err(_) => None,
+            },
+        };
+        let Some((old, lost, why)) = set_aside else {
+            return ControlResponse::ComposeRecovered(Box::new(report));
+        };
+        let old_seq = old.as_ref().map(|m| m.seq);
+        let kept_as = cortex_mark::lost_path(&mark_path, old_seq);
+        if let Err(e) = std::fs::rename(&mark_path, &kept_as) {
+            return ControlResponse::Error(format!(
+                "RecoverComposeHome: keep the record mark as {}: {e}",
+                kept_as.display()
+            ));
         }
+        let mut home = match self.open_home_marked(Some(old_seq.unwrap_or(0))) {
+            Ok(h) => h,
+            Err(e) => {
+                return ControlResponse::Error(format!(
+                    "RecoverComposeHome: record mark kept as {}; the home still refuses: {e}",
+                    kept_as.display()
+                ))
+            }
+        };
+        let text = serde_json::json!({
+            "repair": "cortex-mark",
+            "why": why,
+            "mark_records": old.as_ref().map(|m| m.records),
+            "journal_records": r.records_kept,
+            "lost": lost,
+            "old_seq": old_seq,
+            "old_digest": old.as_ref().map(|m| hex(&m.digest)),
+            "kept_as": kept_as.display().to_string(),
+        })
+        .to_string();
+        let id = match home
+            .compose
+            .note(NoteKind::Constraint, [0; 4], text.as_bytes())
+            .and_then(|id| home.compose.record(id).map(|_| id))
+        {
+            Ok(id) => id,
+            Err(e) => {
+                return ControlResponse::Error(format!(
+                    "RecoverComposeHome: record mark kept as {}; repair record failed: {e}",
+                    kept_as.display()
+                ))
+            }
+        };
+        if let Err(e) = home.advance_mark() {
+            return ControlResponse::Error(format!(
+                "RecoverComposeHome: repair record #{id} written; record mark update failed (E_MARK_WRITE): {e}"
+            ));
+        }
+        report.opens = true;
+        report.mark_lost = lost;
+        report.mark_kept_as = Some(kept_as.display().to_string());
+        report.mark_repair_record = id;
+        *guard = Some(home);
+        ControlResponse::ComposeRecovered(Box::new(report))
     }
 
     /// Recall: the Cortex record by id, digest re-checked (cut 2 uses this

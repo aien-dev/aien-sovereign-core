@@ -179,10 +179,24 @@ impl AienRuntimeServer {
         };
         // NEXT-PHASE-2 (ACCEPTANCE-v2 2.4): settle effects a previous process
         // left open, before serving anything. Reads the world, never re-runs.
+        // A failed or refused reconcile does not stop the daemon, but every
+        // effect command refuses until an operator reconcile succeeds
+        // (ACCEPTANCE-v3 2.5).
         if let Some(b) = compose.clone() {
-            let line = tokio::task::spawn_blocking(move || crate::effects::reconcile_at_start(&b))
-                .await
-                .unwrap_or_else(|e| format!("Reconcile: failed: {e}"));
+            let gate = b.clone();
+            let line =
+                match tokio::task::spawn_blocking(move || crate::effects::reconcile_at_start(&b))
+                    .await
+                {
+                    Ok(line) => line,
+                    Err(e) => {
+                        gate.set_reconcile_failed(format!("failed: {e}"));
+                        format!(
+                            "Reconcile: failed: {e}; {}",
+                            crate::effects::RECONCILE_GATE_NOTE
+                        )
+                    }
+                };
             println!("{line}");
         }
 

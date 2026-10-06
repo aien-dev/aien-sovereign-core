@@ -28,5 +28,10 @@ async-trait = "0.1"
 libc = "0.2"
 thiserror = "1.0"
 
+[features]
+# NEXT-PHASE-2 fault harness only (ACCEPTANCE-v3 2.6): forced start-up
+# reconcile failure. Enabled through aien-cli's `fault-hold`.
+fault-hold = []
+
 [dev-dependencies]
 tempfile = "3.10"

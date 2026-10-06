@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# NEXT-PHASE-2 fault harness (ACCEPTANCE-v2.md). Shell + jq only, no Python.
+# NEXT-PHASE-2 fault harness (ACCEPTANCE-v2.md, amended by ACCEPTANCE-v3.md).
+# Shell + jq only, no Python.
 #
 #   run-faults.sh fixture FIX_ROOT
 #       F0: one real S0..S3 on the gpu build (AIEN_BIN), then Shutdown.
@@ -11,7 +12,9 @@
 #       (AIEN_BIN built with the compose archive, no GPU archive, feature
 #       fault-hold). Never touches the GPU: a daemon whose Backend line is not
 #       CPU-reference stops the harness. CASE = control C1a C1b C2a C2b C2c C2d
-#       C3a C3b C4 C5a C5b C5c C6a..C6h (default: all). REPS (default 3).
+#       C3a C3b C4 C5a C5b C5c C6a..C6h C6c-ctl C6i C7a C7b C8a C8b (default:
+#       all). REPS (default 3); C6i always runs once (ACCEPTANCE-v3 DECIDED 4).
+#       C8a needs FIX_OLD = the v2 fixture F0v2 (no record mark), else NOT_RUN.
 #
 # Each run starts from a byte copy of F0 in RUN_ROOT/<case>-<rep>/ with its own
 # provenance and state dirs, and writes result.json there; RUN_ROOT/results.jsonl
@@ -29,6 +32,9 @@ sha() { sha256sum "$1" 2>/dev/null | cut -d' ' -f1; }
 tstat() { stat -c '%i %s %.9Y %.9Z' "$1" 2>/dev/null || echo absent; }
 tree_list() { (cd "$1" && find . -type f -print0 | sort -z | xargs -0 -r sha256sum); }
 tree_digest() { tree_list "$1" | sha256sum | cut -d' ' -f1; }
+# The home's files: compose dir, machine root, record mark (ACCEPTANCE-v3 2.1).
+home_digest() { (tree_list "$1/compose"; sha256sum "$1/compose.machine-root"; [ -f "$1/compose.cortex-mark" ] && sha256sum "$1/compose.cortex-mark") | sha256sum | cut -d' ' -f1; }
+mark_records() { od -An -tu8 -j56 -N8 "$1" 2>/dev/null | tr -d ' '; }
 
 DPID=; NOTRUN=
 # Never leave a daemon of ours behind, whatever stops the harness.
@@ -115,7 +121,7 @@ if [ "$MODE" = fixture ]; then
   stop_daemon
   jq -n --arg backend "$(grep -m1 'Backend:' "$R/daemon-fixture.log" | sed 's/\x1b\[[0-9;]*m//g; s/^ *Backend: //')" \
     --arg reconcile "$(reconcile_line daemon-fixture)" --argjson start_ms $((t1 - t0)) \
-    --slurpfile s3 "$R/steps/S3.json" --arg files "$( (tree_list "$R/compose"; sha256sum "$R/compose.machine-root"; tree_list "$WS") | sha256sum | cut -d' ' -f1)" \
+    --slurpfile s3 "$R/steps/S3.json" --arg files "$( (tree_list "$R/compose"; sha256sum "$R/compose.machine-root"; [ -f "$R/compose.cortex-mark" ] && sha256sum "$R/compose.cortex-mark"; tree_list "$WS") | sha256sum | cut -d' ' -f1)" \
     '{backend:$backend, reconcile:$reconcile, daemon_start_ms:$start_ms, s3_ok:($s3[0].ok // false),
       s3_committed:($s3[0].report.committed // false), proposal_path:($s3[0].report.proposal_path // null),
       machine_id:($s3[0].report.machine_id // null), files_sha256:$files}' >"$R/fixture.json"
@@ -128,12 +134,14 @@ ROOT=${3:?RUN_ROOT}; shift 3
 mkdir -p "$ROOT"; ROOT=$(cd "$ROOT" && pwd); FIX=$(cd "$FIX" && pwd)
 jq -e '.s3_committed == true' "$FIX/fixture.json" >/dev/null || { echo "fixture F0 has no committed proposal: cases NOT_RUN"; exit 3; }
 PPATH=$(jq -r .proposal_path "$FIX/fixture.json")
-CASES=${*:-control C1a C1b C2a C2b C2c C2d C3a C3b C4 C5a C5b C5c C6a C6b C6c C6d C6e C6f C6g C6h}
+CASES=${*:-control C1a C1b C2a C2b C2c C2d C3a C3b C4 C5a C5b C5c C6a C6b C6c C6c-ctl C6d C6e C6f C6g C6h C6i C7a C7b C8a C8b}
 
-new_run() {   # NAME
+new_run() {   # NAME [FIXTURE]
+  local from=${2:-$FIX}
   R=$ROOT/$1; rm -rf "$R"; mkdir -p "$R"/prov "$R"/state "$R"/steps
-  cp -a "$FIX/compose" "$FIX/compose.machine-root" "$FIX/ws" "$FIX/outside" "$FIX/s3-report.json" "$R/"
-  WS=$R/ws; T=$WS/$PPATH; CHECKS='[]'; INJ=; OUTCOME=; NOTRUN=
+  cp -a "$from/compose" "$from/compose.machine-root" "$from/ws" "$from/outside" "$from/s3-report.json" "$R/"
+  [ -f "$from/compose.cortex-mark" ] && cp -a "$from/compose.cortex-mark" "$R/"
+  WS=$R/ws; T=$WS/$PPATH; CHECKS='[]'; INJ=; OUTCOME=; NOTRUN=; NOTAPPL=; NO_R6=
   export AIEN_COMPOSE_DIR=$R/compose AIEN_PROVENANCE_DIR=$R/prov AIEN_RUNTIME_SOCK=$R/aien.sock \
          AIEN_RUNTIME_STATE_DIR=$R/state AIEN_REQUIRE_CHECKPOINT=0
   unset AIEN_MODEL_PATH AIEN_TOKENIZER_PATH AIEN_REQUIRE_BLACKWELL AIEN_GPU_BACKEND AIEN_FAULT_HOLD AIEN_FAULT_HOLD_FILE
@@ -180,7 +188,16 @@ rules() {
 
 finish() {   # NAME REP
   local verdict
+  # R6 (ACCEPTANCE-v3 section 3): no E_MARK in any start line, recall or execute
+  # answer of a control, C1..C5, C6c-ctl, C7a or C8 run.
+  case $1 in control-*|C1*|C2*|C3*|C4*|C5*|C6c-ctl|C7a|C8*)
+    local em; em=$(cd "$R" && grep -l 'E_MARK' daemon-*.log steps/*.json 2>/dev/null | paste -sd, -)
+    chk R6_no_E_MARK "$( [ -z "$em" ] && echo true || echo false)" "$(q "$em")";;
+  esac
   verdict=$(jq -r 'if length > 0 and all(.ok) then "PASS" else "FAIL" end' <<<"$CHECKS")
+  # C6d guard (DECIDED 3): an uninjected run whose checks all hold is
+  # NOT_APPLICABLE, never PASS; a failed check stays FAIL.
+  [ -n "$NOTAPPL" ] && [ "$verdict" = PASS ] && verdict=NOT_APPLICABLE
   [ -n "$NOTRUN" ] && verdict=NOT_RUN
   local ev
   ev=$(cd "$R" && find steps -maxdepth 1 -type f -name '*.json' -o -maxdepth 1 -name 'daemon-*.log' | sort | while read -r f; do
@@ -265,13 +282,17 @@ run_C2a() {
   chk executor_refused "$(eq "$(j X1 .ok)" false)" "$(q "$(j X1 .error)")"
   chk no_write "$(eq "$(tstat "$T")" "$T0")"
   up daemon-2 || return
-  cx count2 recall >/dev/null
-  # Every daemon open appends records that are not host notes (pinned omega):
-  # the growth of one clean restart is measured, so the counts compare like with like.
-  local n2 n3 h1 h2; n2=$(j count2 .recall.records_total); h1=$(j count1 '.recall.host | length'); h2=$(j count2 '.recall.host | length')
-  stop_daemon; up daemon-3 || return; cx count3 recall >/dev/null; n3=$(j count3 .recall.records_total)
+  # ACCEPTANCE-v3 C2a (rule frozen, G1): a daemon open appends exactly the 5
+  # start-up records (class 1, kind 65538, subjects 1..5), nothing else.
+  local n2 h1 h2 ids; n1=${n1:-0}; ids=$(seq -s, $((n1 + 1)) $((n1 + 5)))
+  cx count2 recall --ids "$ids" >/dev/null
+  n2=$(j count2 .recall.records_total); h1=$(j count1 '.recall.host | length'); h2=$(j count2 '.recall.host | length')
   chk host_record_count_unchanged "$(eq "$h2" "$h1")" "[$h1,$h2]"
-  chk record_count_unchanged_except_open_anchors "$(eq $((n2 - n1)) $((n3 - n2)))" "{\"before_kill\":$n1,\"after_restart\":$n2,\"after_clean_restart\":$n3}"
+  chk records_total_is_before_plus_5 "$(eq "$n2" $((n1 + 5)))" "{\"before_kill\":$n1,\"after_restart\":$n2}"
+  local seen; seen=$(j count2 '[.recall.cited[] | {id, cls, kind, subject}]')
+  chk startup_records_are_5_entity_creates "$(jq -n --argjson s "$seen" --argjson lo $((n1 + 1)) \
+    '($s | length == 5) and ([$s[] | select(.cls == 1 and .kind == 65538)] | length == 5)
+     and ([$s[].subject] | sort == [1,2,3,4,5]) and ([$s[].id] | sort == [range($lo; $lo + 5)])')" "$(jq -nc --argjson s "$seen" '$s')"
   ledger L1; chk no_intent "$(eq "$(intent_state L1 "$A1")" none)"
   execute X2 "$A1"; chk same_grant_executes_after_restart "$(eq "$(j X2 .state)" DONE)" "$(q "$(j X2 .state)")"
   T1=$(tstat "$T"); execute X3 "$A1"
@@ -323,14 +344,14 @@ run_C2bcd() {   # b|c|d
 
 run_C3a() {
   INJ="cpu-fault daemon started with AIEN_REQUIRE_BLACKWELL=1"
-  local before; before=$( (tree_list "$R/compose"; sha256sum "$R/compose.machine-root") | sha256sum | cut -d' ' -f1)
+  local before; before=$(home_digest "$R")
   export AIEN_REQUIRE_BLACKWELL=1
   if start_daemon daemon-1; then chk daemon_refused false; kill_daemon; else chk daemon_refused true "$DRC"; fi
   unset AIEN_REQUIRE_BLACKWELL
   chk exit_nonzero "$( [ "${DRC:-0}" != 0 ] && echo true || echo false)" "${DRC:-0}"
   chk names_gb10_requirement "$(grep -q 'GB10 GPU is required' "$R/daemon-1.log" && echo true || echo false)" "$(q "$(grep -m1 Fatal "$R/daemon-1.log" | sed 's/\x1b\[[0-9;]*m//g')")"
   chk no_socket "$( [ -S "$R/aien.sock" ] && echo false || echo true)"
-  chk home_unchanged "$(eq "$( (tree_list "$R/compose"; sha256sum "$R/compose.machine-root") | sha256sum | cut -d' ' -f1)" "$before")"
+  chk home_unchanged "$(eq "$(home_digest "$R")" "$before")"
   chk workspace_unchanged "$(eq "$(tree_list "$WS")" "$WS0")"
   OUTCOME="refused: $(grep -m1 Fatal "$R/daemon-1.log" | sed 's/\x1b\[[0-9;]*m//g' | cut -c1-120)"
 }
@@ -396,26 +417,70 @@ run_C5() {   # a|b|c
   rules final; stop_daemon
 }
 
-run_C6() {   # a..h
-  up daemon-1 || return; pre_state pre
+c6_base() {   # control run plus one unspent grant A2, daemon stopped
+  up daemon-1 || return 1; pre_state pre
   A1=$(authorize A1); execute X1 "$A1"
   chk base_execute_done "$(eq "$(j X1 .state)" DONE)"
-  local s1; s1=$(stat -c %s "$R/compose/cortex.cx")
+  S1=$(stat -c %s "$R/compose/cortex.cx")
+  [ "${1:-}" = save_mark ] && cp "$R/compose.cortex-mark" "$R/mark-before-A2" 2>/dev/null
   A2=$(authorize A2)
   stop_daemon
   T1=$(tstat "$T")
-  mkdir -p "$R/pre-damage"; (cd "$R" && cp -a --parents compose compose.machine-root state pre-damage/ 2>/dev/null)
+  mkdir -p "$R/pre-damage"
+  (cd "$R" && cp -a --parents compose compose.machine-root state pre-damage/ 2>/dev/null
+   [ -f compose.cortex-mark ] && cp -a compose.cortex-mark pre-damage/)
+  return 0
+}
+
+# c6_score NAME GRANT FILE: the v2 C6 rule on the damaged home (ACCEPTANCE-v2
+# section 5), plus the v3 mark rule (a refused start leaves the mark as it was).
+c6_score() {
+  local d=$1 g=$2 f=$3
+  local dmg ds; dmg=$(sha "$R/damaged.bin"); ds=$(stat -c %s "$R/damaged.bin" 2>/dev/null || echo 0)
+  local refused=false
+  if start_daemon "$d"; then
+    local rl; rl=$(reconcile_line "$d")
+    cx RCL-$d recall
+    local rok; rok=$(j RCL-$d .ok)
+    execute X-$d "$g"
+    local named=false
+    if [ "$rok" = false ] && j RCL-$d .error | grep -Eq 'E_TORN|E_DIGEST|E_REPLAY|E_IDENTITY|E_MARK|expected 32|refused|CorruptLedger|digest'; then named=true; fi
+    chk named_refusal_on_recall "$named" "$(q "$(j RCL-$d '.error // "recall succeeded"' | cut -c1-240)")"
+    chk start_reconcile_reports "$( { echo "$rl" | grep -q 'refused' || [ "$named" = false ]; } && echo true || echo false)" "$(q "$(echo "$rl" | cut -c1-240)")"
+    chk execute_grant_refused "$(eq "$(j X-$d .ok)" false)" "$(q "$(j X-$d '.error // .state' | cut -c1-200)")"
+    echo "$rl" | grep -q 'refused' && refused=true
+    stop_daemon
+    OUTCOME="opened; recall ok=$rok; execute ok=$(j X-$d .ok); $(echo "$rl" | cut -c1-160)"
+  else
+    refused=true
+    chk daemon_refused_named "$(grep -Eq 'is damaged|Fatal' "$R/$d.log" && echo true || echo false)" "$(q "$(grep -m1 Fatal "$R/$d.log" | sed 's/\x1b\[[0-9;]*m//g' | cut -c1-200)")"
+    OUTCOME="daemon refused to start: $(grep -m1 Fatal "$R/$d.log" | sed 's/\x1b\[[0-9;]*m//g' | cut -c1-140)"
+  fi
+  chk no_write_on_damaged_state "$(eq "$(tstat "$T")" "$T1")"
+  if [ "$f" != compose/jspace/jspace.meta ] || [ -f "$R/damaged.bin" ]; then
+    # No silent repair or reset: every damaged byte is still there (records the
+    # daemon appends after a refusal-free open are allowed and shown).
+    local cs; cs=$(stat -c %s "$R/$f" 2>/dev/null || echo 0)
+    chk damaged_bytes_kept "$( [ "$cs" -ge "$ds" ] && cmp -s -n "$ds" "$R/damaged.bin" "$R/$f" && echo true || echo false)" "{\"damaged_sha256\":\"$dmg\",\"damaged_bytes\":$ds,\"now_bytes\":$cs}"
+  fi
+  # ACCEPTANCE-v3 section 5, C6a..h: compose.cortex-mark unchanged by a refused start.
+  if [ "$refused" = true ] && [ -f "$R/damaged-mark.bin" ]; then
+    chk mark_unchanged_by_refused_start "$(cmp -s "$R/damaged-mark.bin" "$R/compose.cortex-mark" && echo true || echo false)" "$(q "$(sha "$R/compose.cortex-mark")")"
+  fi
+}
+
+run_C6() {   # a..i
+  c6_base || return
   local f
   case $1 in
   a) f=compose/cortex.cx; INJ="truncate cortex.cx by 1 byte (inside the last record)"
      truncate -s -1 "$R/$f";;
   b) f=compose/cortex.cx; INJ="flip one byte inside the last record of cortex.cx"
-     local sz; sz=$(stat -c %s "$R/$f"); local off=$(( s1 + (sz - s1) / 2 ))
+     local sz; sz=$(stat -c %s "$R/$f"); local off=$(( S1 + (sz - S1) / 2 ))
      printf "$(printf '\\x%02x' $(( $(od -An -tu1 -j $off -N1 "$R/$f") ^ 0xff )))" | dd of="$R/$f" bs=1 seek=$off conv=notrunc 2>/dev/null;;
   c) f=compose/cortex.cx; INJ="cut cortex.cx at the record boundary before the last record (A2 dropped)"
-     truncate -s "$s1" "$R/$f";;
-  d) f=compose/jspace/jspace.data; INJ="truncate jspace.data by 1 byte"
-     truncate -s -1 "$R/$f";;
+     truncate -s "$S1" "$R/$f";;
+  d) run_C6d; return;;
   e) f=compose/jspace/jspace.meta; INJ="flip one byte in the middle of jspace.meta"
      local sz; sz=$(stat -c %s "$R/$f"); local off=$(( sz / 2 ))
      printf "$(printf '\\x%02x' $(( $(od -An -tu1 -j $off -N1 "$R/$f") ^ 0xff )))" | dd of="$R/$f" bs=1 seek=$off conv=notrunc 2>/dev/null;;
@@ -425,37 +490,176 @@ run_C6() {   # a..h
      printf "$(printf '\\x%02x' $(( $(od -An -tu1 -j 0 -N1 "$R/$f") ^ 0xff )))" | dd of="$R/$f" bs=1 seek=0 conv=notrunc 2>/dev/null;;
   h) f=state/processed_operations.json; INJ="write '{' into processed_operations.json"
      printf '{' >"$R/$f";;
+  i) f=compose/jspace/jspace.meta; INJ="delete jspace/jspace.meta (daemon stopped)"
+     rm -f "$R/$f";;
   esac
-  local dmg; dmg=$(sha "$R/$f"); cp "$R/$f" "$R/damaged.bin"
-  if cmp -s "$R/pre-damage/$f" "$R/$f"; then
+  if [ -f "$R/$f" ]; then cp "$R/$f" "$R/damaged.bin"; else rm -f "$R/damaged.bin"; fi
+  [ -f "$R/compose.cortex-mark" ] && cp "$R/compose.cortex-mark" "$R/damaged-mark.bin"
+  if [ -f "$R/$f" ] && cmp -s "$R/pre-damage/$f" "$R/$f"; then
     NOTRUN="injection changed nothing: $f is $(stat -c %s "$R/$f") bytes before and after"; OUTCOME=$NOTRUN; return
   fi
-  if start_daemon daemon-2; then
-    local rl; rl=$(reconcile_line daemon-2)
-    cx RCL recall
-    local rok; rok=$(j RCL .ok)
-    execute X2 "$A2"
-    local named=false
-    if [ "$rok" = false ] && j RCL .error | grep -Eq 'E_TORN|E_DIGEST|E_REPLAY|E_IDENTITY|expected 32|refused|CorruptLedger|digest'; then named=true; fi
-    chk named_refusal_on_recall "$named" "$(q "$(j RCL '.error // "recall succeeded"' | cut -c1-200)")"
-    chk start_reconcile_reports "$( { echo "$rl" | grep -q 'refused' || [ "$named" = false ]; } && echo true || echo false)" "$(q "$(echo "$rl" | cut -c1-200)")"
-    chk execute_A2_refused "$(eq "$(j X2 .ok)" false)" "$(q "$(j X2 '.error // .state' | cut -c1-200)")"
-    stop_daemon
-    OUTCOME="opened; recall ok=$rok; execute A2 ok=$(j X2 .ok); $(echo "$rl" | cut -c1-120)"
-  else
-    chk daemon_refused_named "$(grep -Eq 'is damaged|Fatal' "$R/daemon-2.log" && echo true || echo false)" "$(q "$(grep -m1 Fatal "$R/daemon-2.log" | sed 's/\x1b\[[0-9;]*m//g' | cut -c1-200)")"
-    OUTCOME="daemon refused to start: $(grep -m1 Fatal "$R/daemon-2.log" | sed 's/\x1b\[[0-9;]*m//g' | cut -c1-140)"
+  if [ ! -f "$R/$f" ] && [ ! -f "$R/pre-damage/$f" ]; then
+    NOTRUN="injection changed nothing: $f was already absent"; OUTCOME=$NOTRUN; return
   fi
-  chk no_write_on_damaged_state "$(eq "$(tstat "$T")" "$T1")"
-  # No silent repair or reset: every damaged byte is still there (records the
-  # daemon appends after a refusal-free open are allowed and shown).
-  local ds cs; ds=$(stat -c %s "$R/damaged.bin"); cs=$(stat -c %s "$R/$f" 2>/dev/null || echo 0)
-  chk damaged_bytes_kept "$( [ "$cs" -ge "$ds" ] && cmp -s -n "$ds" "$R/damaged.bin" "$R/$f" && echo true || echo false)" "{\"damaged_sha256\":\"$dmg\",\"damaged_bytes\":$ds,\"now_bytes\":$cs}"
+  c6_score daemon-2 "$A2" "$f"
+  case $1 in
+  c) # ACCEPTANCE-v3 C6c: the cut is named E_MARK_TRUNCATED, nothing is rewritten.
+     chk start_line_refused_E_MARK_TRUNCATED "$(reconcile_line daemon-2 | grep -q 'Reconcile: refused.*E_MARK_TRUNCATED' && echo true || echo false)" "$(q "$(reconcile_line daemon-2 | cut -c1-240)")"
+     chk recall_refused_E_MARK_TRUNCATED "$( [ "$(j RCL-daemon-2 .ok)" = false ] && j RCL-daemon-2 .error | grep -q E_MARK_TRUNCATED && echo true || echo false)" "$(q "$(j RCL-daemon-2 '.error // "recall succeeded"' | cut -c1-240)")"
+     chk cortex_cx_identical_to_damaged "$(cmp -s "$R/damaged.bin" "$R/compose/cortex.cx" && echo true || echo false)"
+     chk mark_identical_to_damaged_state "$(cmp -s "$R/damaged-mark.bin" "$R/compose.cortex-mark" && echo true || echo false)";;
+  i) # ACCEPTANCE-v3 C6i: no silent re-creation; cortex.cx only grows by appends.
+     chk jspace_meta_still_absent "$( [ -e "$R/$f" ] && echo false || echo true)" "$(q "$(tstat "$R/$f")")"
+     local p0; p0=$(stat -c %s "$R/pre-damage/compose/cortex.cx")
+     chk cortex_cx_prefix_identical "$( [ "$(stat -c %s "$R/compose/cortex.cx")" -ge "$p0" ] && cmp -s -n "$p0" "$R/pre-damage/compose/cortex.cx" "$R/compose/cortex.cx" && echo true || echo false)" "{\"pre_bytes\":$p0,\"now_bytes\":$(stat -c %s "$R/compose/cortex.cx")}";;
+  esac
+}
+
+# C6d guard (ACCEPTANCE-v3 DECIDED 3). jspace.data is never written by compose
+# at omega 62b6a28 (G6); spill_end is the u64 at offset 48 of jspace.meta.
+c6d_trim() {
+  local f=$R/compose/jspace/jspace.data se; se=$(od -An -tu8 -j48 -N8 "$R/compose/jspace/jspace.meta" | tr -d ' ')
+  if [ "${se:-0}" -gt 0 ]; then truncate -s $((se - 1)) "$f"; INJ="truncate jspace.data to spill_end-1 = $((se - 1)) bytes"
+  else truncate -s -1 "$f"; INJ="truncate jspace.data by 1 byte (spill_end 0)"; fi
+}
+run_C6d() {
+  local f=compose/jspace/jspace.data ds se
+  ds=$(stat -c %s "$R/$f"); se=$(od -An -tu8 -j48 -N8 "$R/compose/jspace/jspace.meta" | tr -d ' ')
+  chk guard_read "$( [ -n "$ds" ] && [ -n "$se" ] && echo true || echo false)" "{\"data_bytes\":${ds:-null},\"spill_end\":${se:-null}}"
+  if [ "${ds:-0}" -gt 0 ] || [ "${se:-0}" -gt 0 ]; then
+    c6d_trim; cp "$R/$f" "$R/damaged.bin"; cp "$R/compose.cortex-mark" "$R/damaged-mark.bin" 2>/dev/null
+    c6_score daemon-2 "$A2" "$f"; return
+  fi
+  INJ="none: jspace.data 0 bytes and spill_end 0 (guard); case run uninjected"
+  up daemon-2 || return
+  cx RCL recall; chk recall_ok "$(eq "$(j RCL .ok)" true)"
+  execute X2 "$A2"; chk uninjected_A2_DONE "$(eq "$(j X2 .state)" DONE)" "$(q "$(j X2 '.state // .error')")"
+  A3=$(authorize A3)
+  stop_daemon
+  local de; de=$(stat -c %s "$R/$f")
+  if [ "$de" -eq 0 ]; then
+    chk end_of_case_jspace_data_still_0_bytes true 0
+    NOTAPPL=1; OUTCOME="NOT_APPLICABLE: jspace.data 0 bytes, spill_end 0 before and after the case (compose never spills at omega 62b6a28)"
+    return
+  fi
+  # The guard fired late: inject now and score on the fresh grant A3.
+  chk end_of_case_jspace_data_still_0_bytes false "$de"
+  T1=$(tstat "$T")
+  rm -rf "$R/pre-damage"; mkdir -p "$R/pre-damage"
+  (cd "$R" && cp -a --parents compose compose.machine-root state pre-damage/ 2>/dev/null; cp -a compose.cortex-mark pre-damage/ 2>/dev/null)
+  c6d_trim; cp "$R/$f" "$R/damaged.bin"; cp "$R/compose.cortex-mark" "$R/damaged-mark.bin" 2>/dev/null
+  chk injected_late_after_guard true "$de"
+  c6_score daemon-3 "$A3" "$f"
+}
+
+# C6c-ctl: the on-disk state of a process that died after the A2 append and
+# before its mark update (simulated: the older mark is put back).
+run_C6c_ctl() {
+  c6_base save_mark || return
+  [ -f "$R/mark-before-A2" ] || { NOTRUN="no record mark before A2"; OUTCOME=$NOTRUN; return; }
+  INJ="put back the record mark copied just before authorize A2 (daemon stopped)"
+  cp "$R/mark-before-A2" "$R/compose.cortex-mark"
+  local m; m=$(mark_records "$R/compose.cortex-mark")
+  up daemon-2 || return
+  chk start_log_mark_advanced_M_to_M_plus_1 "$(grep -q "record mark advanced $m->$((m + 1)) " "$R/daemon-2.log" && echo true || echo false)" "$(q "$(grep -m1 'Cortex mark:' "$R/daemon-2.log" | sed 's/\x1b\[[0-9;]*m//g')")"
+  cx RCL recall; chk recall_ok "$(eq "$(j RCL .ok)" true)" "$(q "$(j RCL '.error // "ok"' | cut -c1-200)")"
+  execute X2 "$A2"; chk A2_DONE "$(eq "$(j X2 .state)" DONE)" "$(q "$(j X2 '.state // .error')")"
+  local t2; t2=$(tstat "$T"); execute X3 "$A2"
+  chk A2_retry_AlreadySpent "$(eq "$(refusal X3)" AlreadySpent)" "$(q "$(refusal X3)")"
+  chk written_once "$(eq "$(tstat "$T")" "$t2")"
+  OUTCOME="mark M=$m put back; $(grep -m1 'Cortex mark:' "$R/daemon-2.log" | sed 's/\x1b\[[0-9;]*m//g' | cut -c1-80); A2 $(j X2 .state)"
+  rules final; stop_daemon
+}
+
+run_C7a() {
+  INJ="daemon started with AIEN_FAULT_HOLD=reconcile_panic (start-up reconcile panics)"
+  export AIEN_FAULT_HOLD=reconcile_panic
+  start_daemon daemon-1; local up1=$?
+  unset AIEN_FAULT_HOLD
+  chk daemon_serves_socket_up "$( [ $up1 -eq 0 ] && [ -S "$R/aien.sock" ] && echo true || echo false)" "$(q "$(tail -2 "$R/daemon-1.log" | tr '\n' ' ' | cut -c1-200)")"
+  [ $up1 -eq 0 ] || return
+  local rl; rl=$(reconcile_line daemon-1)
+  chk start_line_failed_names_refusal "$(echo "$rl" | grep -q '^Reconcile: failed:.*effect commands refuse until a successful reconcile' && echo true || echo false)" "$(q "$(echo "$rl" | cut -c1-240)")"
+  pre_state pre
+  A1=$(authorize A1); chk authorize_answers "$( [ -n "$A1" ] && echo true || echo false)" "$(q "$A1")"
+  execute X1 "$A1"; chk first_execute_refused_ReconcileFailed "$(eq "$(refusal X1)" ReconcileFailed)" "$(q "$(j X1 '.error // .state' | cut -c1-200)")"
+  ledger L1; chk no_intent "$(eq "$(intent_state L1 "$A1")" none)"
+  chk no_write "$(eq "$(tstat "$T")" "$T0")"
+  cx RC reconcile; chk reconcile_ok "$(eq "$(j RC .ok)" true)" "$(q "$(j RC '.error // "ok"' | cut -c1-200)")"
+  execute X2 "$A1"; chk second_execute_DONE "$(eq "$(j X2 .state)" DONE)" "$(q "$(j X2 '.state // .error')")"
+  local t1; t1=$(tstat "$T"); execute X3 "$A1"
+  chk written_once "$(eq "$(tstat "$T")" "$t1")"
+  stop_daemon; up daemon-2 || return
+  chk restart_reconcile_normal "$(reconcile_line daemon-2 | grep -q 'checked 0' && echo true || echo false)" "$(q "$(reconcile_line daemon-2)")"
+  OUTCOME="start reconcile failed (panic); execute $(refusal X1); reconcile ok=$(j RC .ok); execute $(j X2 .state); restart clean"
+  rules final; stop_daemon
+}
+
+run_C7b() {
+  c6_base || return
+  INJ="cut cortex.cx at the record boundary before the last record (C6c), then recover"
+  cp "$R/compose.cortex-mark" "$R/damaged-mark.bin"
+  truncate -s "$S1" "$R/compose/cortex.cx"
+  up daemon-2 || return
+  local rl; rl=$(reconcile_line daemon-2)
+  chk start_refused_E_MARK_TRUNCATED "$(echo "$rl" | grep -q 'Reconcile: refused.*E_MARK_TRUNCATED' && echo true || echo false)" "$(q "$(echo "$rl" | cut -c1-240)")"
+  cx REC recover
+  chk recover_mark_lost_1 "$(eq "$(j REC .repair.mark_lost)" 1)" "$(q "$(j REC '.repair.mark_lost // .error')")"
+  local kept; kept=$(j REC '.repair.mark_kept_as // ""')
+  chk mark_kept_as_lost_seq_file "$(echo "$kept" | grep -Eq '\.cortex-mark\.lost-[0-9]+$' && [ -f "$kept" ] && echo true || echo false)" "$(q "$kept")"
+  chk kept_mark_identical_to_damaged_state "$(cmp -s "$R/damaged-mark.bin" "$kept" && echo true || echo false)"
+  local rr; rr=$(j REC '.repair.mark_repair_record // 0')
+  cx RCR recall --ids "$rr"
+  chk repair_constraint_record "$(j RCR "[.recall.cited[] | select(.note == \"constraint\") | .text | fromjson? | select(.repair == \"cortex-mark\" and .lost == 1)] | length == 1")" "$(q "$(j RCR '.recall.cited[0].text // .error' | cut -c1-240)")"
+  A3=$(authorize A3); chk authorize_A3_answers "$( [ -n "$A3" ] && echo true || echo false)" "$(q "$A3")"
+  execute X3 "$A3"; chk first_execute_refused_ReconcileFailed "$(eq "$(refusal X3)" ReconcileFailed)" "$(q "$(j X3 '.error // .state' | cut -c1-200)")"
+  chk no_write_before_reconcile "$(eq "$(tstat "$T")" "$T1")"
+  cx RC reconcile; chk reconcile_ok "$(eq "$(j RC .ok)" true)" "$(q "$(j RC '.error // "ok"' | cut -c1-200)")"
+  execute X4 "$A3"; chk second_execute_A3_DONE "$(eq "$(j X4 .state)" DONE)" "$(q "$(j X4 '.state // .error')")"
+  local t4; t4=$(tstat "$T"); execute X5 "$A3"
+  chk written_once "$(eq "$(tstat "$T")" "$t4")"
+  OUTCOME="start refused (mark); recover mark_lost=$(j REC .repair.mark_lost); execute $(refusal X3); reconcile ok=$(j RC .ok); execute A3 $(j X4 .state)"
+  rules final; stop_daemon
+}
+
+run_C8a() {
+  INJ="v2 home without a record mark (copy of F0v2)"
+  [ -f "$R/compose.cortex-mark" ] && { NOTRUN="FIX_OLD has a record mark"; OUTCOME=$NOTRUN; return; }
+  up daemon-1 || return
+  local na; na=$(grep -c 'Cortex mark: mark adopted (seq 1, records [0-9]*)' "$R/daemon-1.log")
+  chk first_start_one_adopted_line "$(eq "$na" 1)" "$(q "$(grep -m1 'Cortex mark:' "$R/daemon-1.log" | sed 's/\x1b\[[0-9;]*m//g')")"
+  chk mark_128_bytes "$(eq "$(stat -c %s "$R/compose.cortex-mark" 2>/dev/null)" 128)"
+  pre_state pre; chk recall_ok "$(eq "$(j pre .ok)" true)"
+  stop_daemon; up daemon-2 || return
+  chk second_start_no_adopt_or_advance "$(grep -Eq 'mark adopted|record mark advanced' "$R/daemon-2.log" && echo false || echo true)" "$(q "$(grep -m1 'Cortex mark:' "$R/daemon-2.log" | sed 's/\x1b\[[0-9;]*m//g')")"
+  cx R2 recall; chk second_recall_ok "$(eq "$(j R2 .ok)" true)"
+  OUTCOME="$(grep -m1 'Cortex mark:' "$R/daemon-1.log" | sed 's/\x1b\[[0-9;]*m//g' | cut -c1-80); second start quiet"
+  rules final; stop_daemon
+}
+
+run_C8b() {
+  run_control
+  INJ="after the control steps: delete compose.cortex-mark (daemon stopped)"
+  rm -f "$R/compose.cortex-mark"
+  up daemon-3 || return
+  chk start_one_adopted_line "$(eq "$(grep -c 'Cortex mark: mark adopted' "$R/daemon-3.log")" 1)" "$(q "$(grep -m1 'Cortex mark:' "$R/daemon-3.log" | sed 's/\x1b\[[0-9;]*m//g')")"
+  cx R3 recall; chk recall_ok "$(eq "$(j R3 .ok)" true)"
+  local t1; t1=$(tstat "$T"); execute X9 "$A1"
+  chk reexecute_AlreadySpent "$(eq "$(refusal X9)" AlreadySpent)" "$(q "$(refusal X9)")"
+  chk no_second_write "$(eq "$(tstat "$T")" "$t1")"
+  OUTCOME="control done; mark deleted; restart adopted; re-execute $(refusal X9)"
+  rules final2; stop_daemon
+}
+
+old_fixture_ok() {   # F0v2 files sha re-check (ACCEPTANCE-v3 section 4)
+  local want got; want=$(jq -r .files_sha256 "$1/fixture.json" 2>/dev/null)
+  got=$( (tree_list "$1/compose"; sha256sum "$1/compose.machine-root"; [ -f "$1/compose.cortex-mark" ] && sha256sum "$1/compose.cortex-mark"; tree_list "$1/ws") | sha256sum | cut -d' ' -f1)
+  [ -n "$want" ] && [ "$want" = "$got" ]
 }
 
 for c in $CASES; do
   case $c in
-    control) for k in C1 C2 C4 C5 C6; do new_run "control-$k"; run_control; finish "control-$k" 1; done;;
+    control) for k in C1 C2 C4 C5 C6 C7 C8; do new_run "control-$k"; run_control; finish "control-$k" 1; done;;
     C1a|C1b) for r in $(seq 1 "$REPS"); do new_run "$c-$r"; run_C1 "${c#C1}"; finish "$c" "$r"; done;;
     C2a) for r in $(seq 1 "$REPS"); do new_run "$c-$r"; run_C2a; finish "$c" "$r"; done;;
     C2b|C2c|C2d) for r in $(seq 1 "$REPS"); do new_run "$c-$r"; run_C2bcd "${c#C2}"; finish "$c" "$r"; done;;
@@ -463,7 +667,17 @@ for c in $CASES; do
     C3b) for r in $(seq 1 "$REPS"); do new_run "$c-$r"; run_C3b; finish "$c" "$r"; done;;
     C4) for r in $(seq 1 "$REPS"); do new_run "$c-$r"; run_C4; finish "$c" "$r"; done;;
     C5a|C5b|C5c) for r in $(seq 1 "$REPS"); do new_run "$c-$r"; run_C5 "${c#C5}"; finish "$c" "$r"; done;;
+    C6i) new_run "$c-1"; run_C6 i; finish "$c" 1;;   # exactly once (DECIDED 4)
+    C6c-ctl) for r in $(seq 1 "$REPS"); do new_run "$c-$r"; run_C6c_ctl; finish "$c" "$r"; done;;
     C6?) for r in $(seq 1 "$REPS"); do new_run "$c-$r"; run_C6 "${c#C6}"; finish "$c" "$r"; done;;
+    C7a) for r in $(seq 1 "$REPS"); do new_run "$c-$r"; run_C7a; finish "$c" "$r"; done;;
+    C7b) for r in $(seq 1 "$REPS"); do new_run "$c-$r"; run_C7b; finish "$c" "$r"; done;;
+    C8a) for r in $(seq 1 "$REPS"); do
+           if [ -z "${FIX_OLD:-}" ] || ! old_fixture_ok "$FIX_OLD"; then
+             new_run "$c-$r"; NOTRUN="FIX_OLD (F0v2) missing or its files sha256 does not match its fixture.json"; OUTCOME=$NOTRUN
+           else new_run "$c-$r" "$FIX_OLD"; run_C8a; fi
+           finish "$c" "$r"; done;;
+    C8b) for r in $(seq 1 "$REPS"); do new_run "$c-$r"; run_C8b; finish "$c" "$r"; done;;
     *) echo "unknown case $c"; exit 2;;
   esac
   # never leave a daemon behind

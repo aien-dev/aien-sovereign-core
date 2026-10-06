@@ -28,7 +28,7 @@ aien-runtime = { path = "../aien-runtime" }
 
 [features]
 # NEXT-PHASE-2 fault harness only: named hold points in `aien compose execute`.
-fault-hold = []
+fault-hold = ["aien-runtime/fault-hold"]
 
 [dev-dependencies]
 tempfile = "3.10"
