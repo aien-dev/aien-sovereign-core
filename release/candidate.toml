@@ -1,0 +1,19 @@
+# The candidate this tree is allowed to be released as. Read by scripts/check-release-candidate.sh
+# (called from .github/workflows/release.yml and scripts/package-release.sh). A release fails
+# unless omega.lock equals omega-commit below. Copied from aien-architecture
+# qualification/candidates/CAND-3.toml ([commits] omega and [model]); change both together.
+candidate = "CAND-3"
+omega-commit = "f816473df391bc4fbcf99df722edd70ed26ebef1"
+source-manifest = "aien-architecture qualification/candidates/CAND-3.toml"
+
+[model]
+model-id = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
+format = "safetensors, torch_dtype bfloat16"
+model-safetensors-sha256 = "6e6001da2106d4757498752a021df6c2bdc332c650aae4bae6b0c004dcf14933"
+model-safetensors-bytes = "2200119864"
+tokenizer-json-sha256 = "bcd04f0eadf90287bd26e1a183ac487d8a141b09b06aecb7725bbdd343640f2e"
+config-json-sha256 = "486bedda3a6988332e60d9638a09ca4b260d34ebcf1b19e22cf3b140b63d8fe9"
+geometry = "LlamaForCausalLM: layers 22, hidden 2048, heads 32, kv heads 4, head_dim 64 (hidden/heads), intermediate 5632, vocab 32000, max positions 2048, rope_theta 10000.0, rms_norm_eps 1e-05"
+oracle-fixture-safetensors-sha256 = "4707e3ba5c75f6c953217235528b38b3dffa334f68b8356f7356f9a5f6a6a6ea"
+oracle-fixture-manifest-sha256 = "d9871e7834513dfff5d453e6915440e4976098a7e84bc75086a3ab7833dcefd9"
+
