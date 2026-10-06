@@ -13,14 +13,20 @@ use serde_json::Value;
 const DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/openwaldo-byte");
 
 fn load() -> (ChatTokenizer, Vec<Value>) {
-    let tok = ChatTokenizer::from_file(format!("{DIR}/tokenizer.json")).expect("load tokenizer.json");
+    let tok =
+        ChatTokenizer::from_file(format!("{DIR}/tokenizer.json")).expect("load tokenizer.json");
     let text = std::fs::read_to_string(format!("{DIR}/reference.json")).expect("read reference");
     let cases: Vec<Value> = serde_json::from_str(&text).expect("parse reference");
     (tok, cases)
 }
 
 fn ids(v: &Value) -> Vec<u32> {
-    v["ids"].as_array().unwrap().iter().map(|i| i.as_u64().unwrap() as u32).collect()
+    v["ids"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| i.as_u64().unwrap() as u32)
+        .collect()
 }
 
 #[test]
@@ -41,7 +47,12 @@ fn decode_matches_openwaldo_reference_on_valid_utf8() {
     let (tok, cases) = load();
     for case in cases.iter().filter(|c| c["text"].is_string()) {
         let got = tok.decode_opts(&ids(case), false).expect("decode");
-        assert_eq!(got, case["decoded"].as_str().unwrap(), "decode mismatch for {:?}", ids(case));
+        assert_eq!(
+            got,
+            case["decoded"].as_str().unwrap(),
+            "decode mismatch for {:?}",
+            ids(case)
+        );
     }
 }
 
@@ -64,7 +75,10 @@ fn every_byte_maps_to_byte_plus_three() {
 #[test]
 fn decode_diverges_on_invalid_utf8_run() {
     let (tok, cases) = load();
-    let case = cases.iter().find(|c| c["text"].is_null()).expect("invalid-run case");
+    let case = cases
+        .iter()
+        .find(|c| c["text"].is_null())
+        .expect("invalid-run case");
     assert_eq!(case["decoded"].as_str().unwrap(), "\u{FFFD}A");
     let got = tok.decode_opts(&ids(case), false).expect("decode");
     assert_eq!(got, "\u{FFFD}\u{FFFD}\u{FFFD}");
