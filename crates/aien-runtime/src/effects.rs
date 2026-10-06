@@ -800,8 +800,8 @@ pub const RECONCILE_GATE_NOTE: &str =
 
 /// Daemon start: reconcile an existing home once; one line for the log.
 pub fn reconcile_at_start(b: &ComposeBridge) -> String {
-    // Test builds only (ACCEPTANCE-v3 2.6): force the failure path of
-    // server.rs (a panic inside the spawn_blocking task).
+    // Test builds only (ACCEPTANCE-v3 2.6): a panic inside the spawn_blocking
+    // task. Release builds abort on it (ACCEPTANCE-v4 row C7c).
     #[cfg(feature = "fault-hold")]
     if std::env::var("AIEN_FAULT_HOLD").as_deref() == Ok("reconcile_panic") {
         panic!("fault hold reconcile_panic: forced start-up reconcile failure (test build)");
@@ -809,7 +809,19 @@ pub fn reconcile_at_start(b: &ComposeBridge) -> String {
     if !b.dir().join("cortex.cx").exists() {
         return "Reconcile: no compose home yet".into();
     }
-    match reconcile(b, None, "reconcile@start") {
+    // Test builds only (ACCEPTANCE-v4 2.1): force the error arm below, the
+    // path a release build takes (it aborts on panic, Cargo.toml).
+    #[cfg(feature = "fault-hold")]
+    let result = if std::env::var("AIEN_FAULT_HOLD").as_deref() == Ok("reconcile_error") {
+        ControlResponse::Error(
+            "fault hold reconcile_error: forced start-up reconcile error (test build)".into(),
+        )
+    } else {
+        reconcile(b, None, "reconcile@start")
+    };
+    #[cfg(not(feature = "fault-hold"))]
+    let result = reconcile(b, None, "reconcile@start");
+    match result {
         ControlResponse::ComposeReconciled(r) => {
             let n = |st: &str| {
                 r.outcomes

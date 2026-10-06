@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# NEXT-PHASE-2 receipt (ACCEPTANCE-v3 section 6, superseding v2 section 6) from
+# NEXT-PHASE-2 receipt (ACCEPTANCE-v4 section 6 over v3 section 6, superseding v2) from
 # one fixture F0 and one `run-faults.sh cases` run root. Shell + jq only. Usage:
 #   make-receipt.sh FIX_ROOT RUN_ROOT OUT_DIR SC_COMMIT OMEGA_COMPOSE_COMMIT GPU_BIN CPU_BIN \
 #                   BUILD_ENV_JSON LINK_PROOF_JSON [NOTE]
-# FIXTURE_KIND=F0v3 (default) or F0v2-fallback (ACCEPTANCE-v3 section 4: the C3
+# FIXTURE_KIND=F0v4 (default) or F0v3-fallback (ACCEPTANCE-v4 section 4: the C3
 # control is then NOT_RUN). FIX_OLD = the F0v2 root used by C8a (recorded).
 # Writes OUT_DIR/<sha256 of content>.json (never edited afterwards), appends one
 # line to OUT_DIR/INDEX.md, writes OUT_DIR/<sha256>.summary.txt, prints it.
@@ -13,7 +13,7 @@
 # is named in the verdict and never counted as a PASS.
 set -eu
 FIX=$1 R=$2 OUT=$3 SC=$4 OMC=$5 GPU=$6 CPU=$7 BENV=$8 LPROOF=$9 NOTE=${10:-}
-KIND=${FIXTURE_KIND:-F0v3}
+KIND=${FIXTURE_KIND:-F0v4}
 old=null
 if [ -n "${FIX_OLD:-}" ]; then old=$(jq -c '{sha256:.files_sha256, s3_committed, machine_id, backend}' "$FIX_OLD/fixture.json"); fi
 mkdir -p "$OUT"
@@ -34,7 +34,7 @@ jq -n --slurpfile runs "$R/results.jsonl" --argjson fixture "$fixture" --arg sc 
   | (($fixture.backend // "") | test("OmegaGb10Backend")) as $c3ok
   | [ "C1a","C1b","C2a","C2b","C2c","C2d","C3a","C3b","C4","C5a","C5b","C5c",
       "C6a","C6b","C6c","C6c-ctl","C6d","C6e","C6f","C6g","C6h","C6i",
-      "C7a","C7b","C8a","C8b" ] as $order
+      "C7a","C7b","C7c","C8a","C8b" ] as $order
   | ($order | map(. as $row
       | ($runs | map(select(.row == $row))) as $reps
       | (control_of($row)) as $c
@@ -46,14 +46,14 @@ jq -n --slurpfile runs "$R/results.jsonl" --argjson fixture "$fixture" --arg sc 
                   else "FAIL" end),
          outcomes:($reps | map(.outcome) | unique)})) as $rowv
   | ($rowv + [{row:"C3 control", control:"F0", control_pass:$f0, reps:1,
-      verdict:(if $kind != "F0v3" then "NOT_RUN" elif $f0 and $c3ok then "PASS" else "FAIL" end),
-      outcomes:[(if $kind != "F0v3" then "fixture " + $kind + " (pre-registered fallback): " else "" end)
+      verdict:(if $kind != "F0v4" then "NOT_RUN" elif $f0 and $c3ok then "PASS" else "FAIL" end),
+      outcomes:[(if $kind != "F0v4" then "fixture " + $kind + " (pre-registered fallback): " else "" end)
                 + "gpu daemon with AIEN_REQUIRE_BLACKWELL=1: " + ($fixture.backend // "none")]}]) as $all
   | {
     gate:"NEXT_PHASE_2",
     commit:$sc,
     omega_compose_commit:$omc,
-    acceptance_spec:"docs/campaigns/next-phase-2/ACCEPTANCE-v3.md spec_version 3 (amends ACCEPTANCE-v2.md)",
+    acceptance_spec:"docs/campaigns/next-phase-2/ACCEPTANCE-v4.md spec_version 4 (amends ACCEPTANCE-v3.md, which amends ACCEPTANCE-v2.md)",
     builds:[{name:"gpu", sha256:$gpu}, {name:"cpu-fault", sha256:$cpu}],
     build_env:$benv[0],
     link_proof:$lproof[0],
@@ -73,7 +73,9 @@ jq -n --slurpfile runs "$R/results.jsonl" --argjson fixture "$fixture" --arg sc 
       "torn writes below the file level",
       "tamper resistance of the record mark (journal and mark rewritten together, mark deleted then journal cut, compose dir and mark rolled back together)",
       "a real process kill between an append and its mark update (C6c-ctl reproduces the on-disk state only)",
-      "J-Space spill damage while compose never spills (C6d)"],
+      "J-Space spill damage while compose never spills (C6d)",
+      "the Err(e) arm of server.rs (Reconcile: failed:), unreachable in release builds (panic = abort)",
+      "the cause of a real start-up panic (C7c proves only that the daemon stops before serving and writes nothing)"],
     note:(if $note == "" then null else $note end)
   }' >"$tmp"
 h=$(sha256sum "$tmp" | cut -d' ' -f1)
@@ -84,7 +86,7 @@ v=$(jq -r .verdict "$OUT/$h.json")
   echo "sovereign-core $SC; omega compose $OMC"
   jq -r '.builds[] | "build \(.name) \(.sha256)"' "$OUT/$h.json"
   jq -r '.fixture | "fixture F0 \(.sha256): s3_committed \(.s3_committed), machine \(.machine_id), backend \(.backend)"' "$OUT/$h.json"
-  echo "Rows (ACCEPTANCE-v3 section 5 over v2; injected variants x3, C6i once, control once per case):"
+  echo "Rows (ACCEPTANCE-v4 section 5 over v3 and v2; injected variants x3, C6i once, control once per case):"
   jq -r '"build_env: \(.build_env | tojson)"' "$OUT/$h.json"
   jq -r '"link_proof: \(.link_proof | tojson | .[0:400])"' "$OUT/$h.json"
   jq -r 'if (.not_applicable | length) > 0 then "NOT_APPLICABLE (not counted as PASS): \(.not_applicable | join(", "))" else empty end' "$OUT/$h.json"

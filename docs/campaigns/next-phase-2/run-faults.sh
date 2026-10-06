@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# NEXT-PHASE-2 fault harness (ACCEPTANCE-v2.md, amended by ACCEPTANCE-v3.md).
+# NEXT-PHASE-2 fault harness (ACCEPTANCE-v2.md, amended by ACCEPTANCE-v3.md and ACCEPTANCE-v4.md).
 # Shell + jq only, no Python.
 #
 #   run-faults.sh fixture FIX_ROOT
@@ -12,7 +12,7 @@
 #       (AIEN_BIN built with the compose archive, no GPU archive, feature
 #       fault-hold). Never touches the GPU: a daemon whose Backend line is not
 #       CPU-reference stops the harness. CASE = control C1a C1b C2a C2b C2c C2d
-#       C3a C3b C4 C5a C5b C5c C6a..C6h C6c-ctl C6i C7a C7b C8a C8b (default:
+#       C3a C3b C4 C5a C5b C5c C6a..C6h C6c-ctl C6i C7a C7b C7c C8a C8b (default:
 #       all). REPS (default 3); C6i always runs once (ACCEPTANCE-v3 DECIDED 4).
 #       C8a needs FIX_OLD = the v2 fixture F0v2 (no record mark), else NOT_RUN.
 #
@@ -43,7 +43,7 @@ trap '[ -n "$DPID" ] && kill -0 "$DPID" 2>/dev/null && kill -9 "$DPID" 2>/dev/nu
 # for the process to exit (rc 1).
 start_daemon() {
   local log=$R/$1.log i=0
-  rm -f "$R/aien.sock"
+  [ -n "${KEEP_SOCK:-}" ] || rm -f "$R/aien.sock"   # C7c keeps a left socket file
   (cd "$R" && exec setsid "$BIN" daemon >"$log" 2>&1 </dev/null) &
   DPID=$!
   while kill -0 "$DPID" 2>/dev/null && [ $i -lt 1200 ]; do
@@ -134,7 +134,7 @@ ROOT=${3:?RUN_ROOT}; shift 3
 mkdir -p "$ROOT"; ROOT=$(cd "$ROOT" && pwd); FIX=$(cd "$FIX" && pwd)
 jq -e '.s3_committed == true' "$FIX/fixture.json" >/dev/null || { echo "fixture F0 has no committed proposal: cases NOT_RUN"; exit 3; }
 PPATH=$(jq -r .proposal_path "$FIX/fixture.json")
-CASES=${*:-control C1a C1b C2a C2b C2c C2d C3a C3b C4 C5a C5b C5c C6a C6b C6c C6c-ctl C6d C6e C6f C6g C6h C6i C7a C7b C8a C8b}
+CASES=${*:-control C1a C1b C2a C2b C2c C2d C3a C3b C4 C5a C5b C5c C6a C6b C6c C6c-ctl C6d C6e C6f C6g C6h C6i C7a C7b C7c C8a C8b}
 
 new_run() {   # NAME [FIXTURE]
   local from=${2:-$FIX}
@@ -144,7 +144,7 @@ new_run() {   # NAME [FIXTURE]
   WS=$R/ws; T=$WS/$PPATH; CHECKS='[]'; INJ=; OUTCOME=; NOTRUN=; NOTAPPL=; NO_R6=
   export AIEN_COMPOSE_DIR=$R/compose AIEN_PROVENANCE_DIR=$R/prov AIEN_RUNTIME_SOCK=$R/aien.sock \
          AIEN_RUNTIME_STATE_DIR=$R/state AIEN_REQUIRE_CHECKPOINT=0
-  unset AIEN_MODEL_PATH AIEN_TOKENIZER_PATH AIEN_REQUIRE_BLACKWELL AIEN_GPU_BACKEND AIEN_FAULT_HOLD AIEN_FAULT_HOLD_FILE
+  unset AIEN_MODEL_PATH AIEN_TOKENIZER_PATH AIEN_REQUIRE_BLACKWELL AIEN_GPU_BACKEND AIEN_FAULT_HOLD AIEN_FAULT_HOLD_FILE KEEP_SOCK
   T0=$(tstat "$T"); WS0=$(tree_list "$WS"); OUT0=$(tree_digest "$R/outside")
 }
 
@@ -189,8 +189,8 @@ rules() {
 finish() {   # NAME REP
   local verdict
   # R6 (ACCEPTANCE-v3 section 3): no E_MARK in any start line, recall or execute
-  # answer of a control, C1..C5, C6c-ctl, C7a or C8 run.
-  case $1 in control-*|C1*|C2*|C3*|C4*|C5*|C6c-ctl|C7a|C8*)
+  # answer of a control, C1..C5, C6c-ctl, C7a, C7c (ACCEPTANCE-v4) or C8 run.
+  case $1 in control-*|C1*|C2*|C3*|C4*|C5*|C6c-ctl|C7a|C7c|C8*)
     local em; em=$(cd "$R" && grep -l 'E_MARK' daemon-*.log steps/*.json 2>/dev/null | paste -sd, -)
     chk R6_no_E_MARK "$( [ -z "$em" ] && echo true || echo false)" "$(q "$em")";;
   esac
@@ -572,14 +572,16 @@ run_C6c_ctl() {
 }
 
 run_C7a() {
-  INJ="daemon started with AIEN_FAULT_HOLD=reconcile_panic (start-up reconcile panics)"
-  export AIEN_FAULT_HOLD=reconcile_panic
+  # ACCEPTANCE-v4 C7a: the start-up reconcile returns an error (release builds
+  # abort on panic, so the error arm is the path they take).
+  INJ="daemon started with AIEN_FAULT_HOLD=reconcile_error (start-up reconcile returns an error)"
+  export AIEN_FAULT_HOLD=reconcile_error
   start_daemon daemon-1; local up1=$?
   unset AIEN_FAULT_HOLD
   chk daemon_serves_socket_up "$( [ $up1 -eq 0 ] && [ -S "$R/aien.sock" ] && echo true || echo false)" "$(q "$(tail -2 "$R/daemon-1.log" | tr '\n' ' ' | cut -c1-200)")"
   [ $up1 -eq 0 ] || return
   local rl; rl=$(reconcile_line daemon-1)
-  chk start_line_failed_names_refusal "$(echo "$rl" | grep -q '^Reconcile: failed:.*effect commands refuse until a successful reconcile' && echo true || echo false)" "$(q "$(echo "$rl" | cut -c1-240)")"
+  chk start_line_refused_names_refusal "$(echo "$rl" | grep -q '^Reconcile: refused: fault hold reconcile_error.*effect commands refuse until a successful reconcile (aien compose reconcile)$' && echo true || echo false)" "$(q "$(echo "$rl" | cut -c1-240)")"
   pre_state pre
   A1=$(authorize A1); chk authorize_answers "$( [ -n "$A1" ] && echo true || echo false)" "$(q "$A1")"
   execute X1 "$A1"; chk first_execute_refused_ReconcileFailed "$(eq "$(refusal X1)" ReconcileFailed)" "$(q "$(j X1 '.error // .state' | cut -c1-200)")"
@@ -587,11 +589,43 @@ run_C7a() {
   chk no_write "$(eq "$(tstat "$T")" "$T0")"
   cx RC reconcile; chk reconcile_ok "$(eq "$(j RC .ok)" true)" "$(q "$(j RC '.error // "ok"' | cut -c1-200)")"
   execute X2 "$A1"; chk second_execute_DONE "$(eq "$(j X2 .state)" DONE)" "$(q "$(j X2 '.state // .error')")"
-  local t1; t1=$(tstat "$T"); execute X3 "$A1"
+  local t1; t1=$(tstat "$T"); chk written "$( [ "$t1" != "$T0" ] && echo true || echo false)"
+  execute X3 "$A1"
   chk written_once "$(eq "$(tstat "$T")" "$t1")"
   stop_daemon; up daemon-2 || return
   chk restart_reconcile_normal "$(reconcile_line daemon-2 | grep -q 'checked 0' && echo true || echo false)" "$(q "$(reconcile_line daemon-2)")"
-  OUTCOME="start reconcile failed (panic); execute $(refusal X1); reconcile ok=$(j RC .ok); execute $(j X2 .state); restart clean"
+  OUTCOME="start reconcile refused (error hook); execute $(refusal X1); reconcile ok=$(j RC .ok); execute $(j X2 .state); restart clean"
+  rules final; stop_daemon
+}
+
+run_C7c() {
+  # ACCEPTANCE-v4 C7c: a real panic at start. Expected: daemon exits, no
+  # socket served, no write; the next start clears the left socket file.
+  INJ="daemon started with AIEN_FAULT_HOLD=reconcile_panic (real panic); restart without the hook, left socket file kept"
+  local h0; h0=$(home_digest "$R")
+  export AIEN_FAULT_HOLD=reconcile_panic
+  DRC=; start_daemon daemon-1
+  unset AIEN_FAULT_HOLD
+  if kill -0 "$DPID" 2>/dev/null; then
+    chk daemon_exits_by_itself false "$(q "still running: $(tail -2 "$R/daemon-1.log" | tr '\n' ' ' | cut -c1-160)")"
+    kill_daemon; return
+  fi
+  chk daemon_exits_by_itself true
+  chk exit_status_nonzero "$( [ -n "$DRC" ] && [ "$DRC" -ne 0 ] && echo true || echo false)" "$(q "$DRC")"
+  chk log_names_fault_hold "$(grep -q 'fault hold reconcile_panic' "$R/daemon-1.log" && echo true || echo false)" "$(q "$(grep -m1 'panicked at' "$R/daemon-1.log" | cut -c1-160)")"
+  cx NS recall
+  chk no_process_serves_socket "$(j NS '(.ok == false) and ((.error // "") | test("Failed to connect"))')" "$(q "$(j NS '.error // "connected"' | cut -c1-200)")"
+  chk socket_file_left_recorded_not_scored true "$(q "$( [ -S "$R/aien.sock" ] && echo present || echo absent)")"
+  local sockleft; sockleft=$( [ -S "$R/aien.sock" ] && echo present || echo absent)
+  chk home_identical "$(eq "$(home_digest "$R")" "$h0")"
+  chk target_unchanged "$(eq "$(tstat "$T")" "$T0")"
+  chk provenance_empty "$( [ -z "$(ls -A "$R/prov")" ] && echo true || echo false)"
+  KEEP_SOCK=1; up daemon-2; local up2=$?; unset KEEP_SOCK
+  [ $up2 -eq 0 ] || return
+  chk restart_reconcile_normal "$(reconcile_line daemon-2 | grep -q 'checked 0' && echo true || echo false)" "$(q "$(reconcile_line daemon-2)")"
+  pre_state pre; chk recall_ok "$(eq "$(j pre .ok)" true)"
+  ledger L1; chk ledger_no_intent "$(eq "$(j L1 '.ledger.intents | length')" 0)" "$(q "$(j L1 '.ledger.intents | length')")"
+  OUTCOME="panic at start: exit $DRC, no server, home identical, socket file $sockleft; restart clean"
   rules final; stop_daemon
 }
 
@@ -672,6 +706,7 @@ for c in $CASES; do
     C6?) for r in $(seq 1 "$REPS"); do new_run "$c-$r"; run_C6 "${c#C6}"; finish "$c" "$r"; done;;
     C7a) for r in $(seq 1 "$REPS"); do new_run "$c-$r"; run_C7a; finish "$c" "$r"; done;;
     C7b) for r in $(seq 1 "$REPS"); do new_run "$c-$r"; run_C7b; finish "$c" "$r"; done;;
+    C7c) for r in $(seq 1 "$REPS"); do new_run "$c-$r"; run_C7c; finish "$c" "$r"; done;;
     C8a) for r in $(seq 1 "$REPS"); do
            if [ -z "${FIX_OLD:-}" ] || ! old_fixture_ok "$FIX_OLD"; then
              new_run "$c-$r"; NOTRUN="FIX_OLD (F0v2) missing or its files sha256 does not match its fixture.json"; OUTCOME=$NOTRUN
