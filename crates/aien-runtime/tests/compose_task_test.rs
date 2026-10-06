@@ -19,6 +19,7 @@ fn proposer() -> ComposeProposer {
             text: "filename: NOTES.md\nconstraint: keep main green\n".to_string(),
             tokens: 12,
             finish_reason: None,
+            ..Default::default()
         })
     })
 }
@@ -318,6 +319,7 @@ fn retry_is_capped_and_recorded() {
             text: "Sure!".into(),
             tokens: 2,
             finish_reason: None,
+            ..Default::default()
         })
     };
     let (out, a) = propose_with_retries(
@@ -352,6 +354,7 @@ ok
             text: text.into(),
             tokens: 3,
             finish_reason: None,
+            ..Default::default()
         })
     };
     let (out, a) = propose_with_retries(
@@ -388,6 +391,7 @@ ok
             text: "Sure!".into(),
             tokens: 2,
             finish_reason: None,
+            ..Default::default()
         })
     };
     let (out, a) = propose_with_retries(
@@ -431,6 +435,7 @@ fn measured_attempt_budget_admits_a_second_attempt() {
             text: "Goal: echo".into(),
             tokens: 48,
             finish_reason: None,
+            ..Default::default()
         })
     };
     let (out, a) = propose_with_retries(
@@ -460,6 +465,7 @@ fn unparseable_proposal_fails_the_aegis_contract() {
                 text: "Sure, I can help with that!".to_string(),
                 tokens: 8,
                 finish_reason: None,
+                ..Default::default()
             })
         }),
         "test:chatty",
@@ -556,12 +562,14 @@ fn finish_reason_is_recorded_per_attempt() {
                 text: "Goal: echo".into(),
                 tokens: 48,
                 finish_reason: Some("max_tokens".into()),
+                ..Default::default()
             }
         } else {
             Generation {
                 text: "filename: NOTES.md\nkeep changes in the workspace\n".into(),
                 tokens: 11,
                 finish_reason: Some("eos".into()),
+                ..Default::default()
             }
         })
     };

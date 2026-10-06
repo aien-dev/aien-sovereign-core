@@ -26,6 +26,7 @@ fn proposer() -> ComposeProposer {
             text: "filename: NOTES.md\nnote\n".into(),
             tokens: 4,
             finish_reason: Some("eos".into()),
+            ..Default::default()
         })
     })
 }

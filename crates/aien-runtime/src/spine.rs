@@ -511,13 +511,30 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 /// One model reply: the text and how many tokens were generated.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Generation {
     pub text: String,
     pub tokens: usize,
     /// How generation stopped: "eos" | "max_tokens" | "aborted" | "preempted"
     /// (ACCEPTANCE-v5 Q3); None when unknown.
     pub finish_reason: Option<String>,
+    /// NEXT-PHASE-1 v6 R1: the generated token ids in order (None when the
+    /// proposer does not expose them). Recorded only; nothing reads them.
+    pub token_ids: Option<Vec<u32>>,
+    /// NEXT-PHASE-1 v6 R1: how many prompt token ids were submitted.
+    pub prompt_tokens: Option<usize>,
+    /// NEXT-PHASE-1 v6 R1: `token_ids_sha256` of the submitted prompt ids.
+    pub prompt_ids_sha256: Option<String>,
+}
+
+/// sha256 (hex) of token ids, each as 4 little-endian bytes (NEXT-PHASE-1 v6
+/// R1): the daemon and the CPU reference driver hash prompts the same way.
+pub fn token_ids_sha256(ids: &[u32]) -> String {
+    let mut h = Sha256::new();
+    for id in ids {
+        h.update(id.to_le_bytes());
+    }
+    hex(&h.finalize())
 }
 
 /// The "model" Skill's work: prompt text and a wall limit in, one reply
@@ -737,6 +754,69 @@ pub fn proposal_prompt(goal: &str, workspace: &str) -> String {
     )
 }
 
+/// Largest existing file whose content the edit-mode block carries
+/// (NEXT-PHASE-1 v6 T5); a larger file gets no block.
+pub const COMPOSE_EDIT_MAX_BYTES: u64 = 8192;
+
+/// NEXT-PHASE-1 v6 edit mode: the first whitespace-separated word of the goal
+/// that (after stripping surrounding quotes, backticks, brackets and trailing
+/// `.,;:!?`) is a plain relative path naming an existing regular UTF-8 file
+/// of at most `COMPOSE_EDIT_MAX_BYTES` inside the canonical workspace `ws`.
+/// Returns that path and the file's content. None when the goal names no
+/// existing file, so a new-file goal keeps the v5 prompt byte for byte.
+pub fn existing_target(goal: &str, ws: &Path) -> Option<(String, String)> {
+    let ws = std::fs::canonicalize(ws).ok()?;
+    goal.split_whitespace().find_map(|w| {
+        let w = w
+            .trim_matches(|c| matches!(c, '"' | '\'' | '`' | '(' | ')' | '[' | ']'))
+            .trim_end_matches(['.', ',', ';', ':', '!', '?'])
+            .trim_matches(|c| matches!(c, '"' | '\'' | '`' | '(' | ')' | '[' | ']'));
+        check_relative_path(w).ok()?;
+        let full = std::fs::canonicalize(ws.join(w)).ok()?;
+        if !full.starts_with(&ws) {
+            return None;
+        }
+        let meta = std::fs::metadata(&full).ok()?;
+        if !meta.is_file() || meta.len() > COMPOSE_EDIT_MAX_BYTES {
+            return None;
+        }
+        let content = String::from_utf8(std::fs::read(&full).ok()?).ok()?;
+        Some((w.to_string(), content))
+    })
+}
+
+/// The additive edit-mode block (NEXT-PHASE-1 v6 T5), appended to the fixed
+/// proposal template only when the goal names an existing file.
+pub fn edit_block(path: &str, content: &str) -> String {
+    let nl = if content.ends_with('\n') { "" } else { "\n" };
+    format!(
+        "\nThe file {path} already exists. Its current content is:\n{content}{nl}\
+         Write the complete new content of {path}: keep every existing line and make the requested change."
+    )
+}
+
+/// The prompt of the production RunComposeTask path: the fixed template,
+/// plus the edit-mode block when the goal names an existing file of the
+/// canonical workspace `ws` (NEXT-PHASE-1 v6).
+pub fn task_prompt(goal: &str, ws: &Path) -> String {
+    let mut prompt = proposal_prompt(goal, &ws.display().to_string());
+    if let Some((path, content)) = existing_target(goal, ws) {
+        prompt.push_str(&edit_block(&path, &content));
+    }
+    prompt
+}
+
+/// Why a reply that stopped at the token limit is never a proposal
+/// (NEXT-PHASE-1 v6 N2): its content may be cut anywhere.
+pub fn length_cut_refusal(g: &Generation) -> Option<String> {
+    (g.finish_reason.as_deref() == Some("max_tokens")).then(|| {
+        format!(
+            "reply cut at the token limit after {} tokens (finish_reason max_tokens); a cut reply is never a proposal",
+            g.tokens
+        )
+    })
+}
+
 /// The one correction line added to attempt k > 1.
 pub fn retry_prompt(base: &str, reason: &str) -> String {
     format!(
@@ -788,14 +868,25 @@ pub fn propose_with_retries(
             text: None,
             aegis: None,
             finish_reason: None,
+            token_ids: None,
+            prompt_tokens: None,
+            prompt_ids_sha256: None,
         };
         match out {
             Ok(g) => {
                 a.tokens = g.tokens;
                 a.finish_reason = g.finish_reason.clone();
+                a.token_ids = g.token_ids.clone();
+                a.prompt_tokens = g.prompt_tokens;
+                a.prompt_ids_sha256 = g.prompt_ids_sha256.clone();
                 a.text_sha256 = Some(hex(&Sha256::digest(g.text.as_bytes())));
                 a.text = Some(g.text.clone());
-                match check_file_proposal(&g.text) {
+                // NEXT-PHASE-1 v6 N2: a length-cut reply is refused before parsing.
+                let checked = match length_cut_refusal(&g) {
+                    Some(why) => Err(why),
+                    None => check_file_proposal(&g.text).map(|_| ()),
+                };
+                match checked {
                     Ok(_) => {
                         a.outcome = "parsed".into();
                         attempts.push(a);
@@ -1085,7 +1176,7 @@ impl ComposeBridge {
                 ws.display()
             ));
         }
-        let prompt = proposal_prompt(goal, &ws.display().to_string());
+        let prompt = task_prompt(goal, &ws);
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_err(|e| format!("clock: {e}"))?;
