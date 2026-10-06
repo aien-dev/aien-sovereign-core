@@ -135,6 +135,10 @@ extern "C" {
     pub fn omega_gpu_matmul_last_error() -> *const c_char;
     pub fn omega_gpu_matmul_is_blocked() -> c_int;
     pub fn omega_gpu_device_close();
+    // omega c0369e6 `src/omega_gpu_matmul_api.h:130-133`: CTA budget per launch
+    // (default OMEGA_GPU_MATMUL_MAX_CTAS; 0 restores it). Clears the kernel cache.
+    pub fn omega_gpu_matmul_set_cta_budget(ctas: u32);
+    pub fn omega_gpu_matmul_cta_budget() -> u32;
 }
 
 // ---- omega `src/omega_gpu_elementwise_api.h` (FB-1 cut 4, pinned 2636409) ----

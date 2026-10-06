@@ -346,6 +346,78 @@ pub fn is_blocked() -> bool {
     false
 }
 
+// ---- matmul launch budget (omega c0369e6 `omega_gpu_matmul_api.h:130-133`) ----
+
+/// Daemon setting that picks the matmul CTA budget per launch. Unset or empty
+/// leaves omega's default ([`ffi::OMEGA_GPU_MATMUL_MAX_CTAS`], 64).
+pub const CTA_BUDGET_ENV: &str = "AIEN_OMEGA_CTA_BUDGET";
+
+/// Largest budget [`parse_cta_budget`] accepts. 64 (omega's default) and 256 are
+/// the only budgets run on the GB10 for the decode shapes (T4 measurement
+/// 2026-10-06, parity held at both); 512 and 1024 were never chip-tested, so a
+/// larger value is refused rather than tried in a production run.
+pub const CTA_BUDGET_MAX_MEASURED: u32 = 256;
+
+/// A validated CTA budget (1..=[`CTA_BUDGET_MAX_MEASURED`]). Only
+/// [`parse_cta_budget`] builds one, so [`set_cta_budget`] never sees 0 (which
+/// omega reads as "restore the default") or an unmeasured size.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CtaBudget(u32);
+
+impl CtaBudget {
+    pub fn get(self) -> u32 {
+        self.0
+    }
+}
+
+/// Parse the [`CTA_BUDGET_ENV`] setting. `None` or blank: `Ok(None)` (keep
+/// omega's default). Otherwise a plain decimal integer in
+/// 1..=[`CTA_BUDGET_MAX_MEASURED`]; anything else is an error naming the value.
+pub fn parse_cta_budget(raw: Option<&str>) -> Result<Option<CtaBudget>, String> {
+    let Some(text) = raw.map(str::trim).filter(|t| !t.is_empty()) else {
+        return Ok(None);
+    };
+    let refuse = |why: &str| {
+        Err(format!(
+            "{CTA_BUDGET_ENV}={text:?} refused: {why} (allowed 1..={CTA_BUDGET_MAX_MEASURED}; unset keeps omega's default {})",
+            ffi::OMEGA_GPU_MATMUL_MAX_CTAS
+        ))
+    };
+    if !text.bytes().all(|b| b.is_ascii_digit()) {
+        return refuse("not a plain decimal integer");
+    }
+    match text.parse::<u32>() {
+        Ok(0) => refuse("0 would silently restore omega's default"),
+        Ok(v) if v <= CTA_BUDGET_MAX_MEASURED => Ok(Some(CtaBudget(v))),
+        Ok(_) | Err(_) => refuse("larger than any budget measured on the GB10"),
+    }
+}
+
+/// Set omega's per-launch CTA budget. Omega clears its kernel cache (kernels
+/// bake in the grid), so call it before the first matmul. Stub: `Unavailable`.
+pub fn set_cta_budget(budget: CtaBudget) -> Result<(), OmegaGpuError> {
+    #[cfg(has_omega_gpu)]
+    {
+        // SAFETY: plain u32 argument; omega takes its session lock inside.
+        unsafe { ffi::omega_gpu_matmul_set_cta_budget(budget.0) };
+        Ok(())
+    }
+    #[cfg(not(has_omega_gpu))]
+    {
+        let _ = budget;
+        Err(OmegaGpuError::Unavailable)
+    }
+}
+
+/// The CTA budget omega will use for the next launch; `None` in the stub.
+pub fn cta_budget() -> Option<u32> {
+    #[cfg(has_omega_gpu)]
+    // SAFETY: no arguments; reads one u32 field, does not open the device.
+    return Some(unsafe { ffi::omega_gpu_matmul_cta_budget() });
+    #[cfg(not(has_omega_gpu))]
+    None
+}
+
 // ---- native elementwise ops (omega FB-1 cut 4) ----
 
 pub use ffi::OmegaGpuEwInfo;
@@ -726,4 +798,58 @@ fn check_pool(pool: &[u8], layout: &OmegaGpuKvLayout) -> Result<(), OmegaGpuErro
         });
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod cta_budget_tests {
+    use super::*;
+
+    #[test]
+    fn unset_or_blank_keeps_the_omega_default() {
+        assert_eq!(parse_cta_budget(None), Ok(None));
+        assert_eq!(parse_cta_budget(Some("")), Ok(None));
+        assert_eq!(parse_cta_budget(Some("  ")), Ok(None));
+    }
+
+    #[test]
+    fn measured_budgets_parse() {
+        for (raw, v) in [("64", 64), ("256", 256), (" 256\n", 256), ("1", 1)] {
+            assert_eq!(
+                parse_cta_budget(Some(raw)).unwrap().map(CtaBudget::get),
+                Some(v)
+            );
+        }
+    }
+
+    #[test]
+    fn invalid_values_are_refused() {
+        for raw in [
+            "0",
+            "-1",
+            "+64",
+            "abc",
+            "64.0",
+            "0x40",
+            "257",
+            "512",
+            "1024",
+            "99999999999",
+        ] {
+            let err = parse_cta_budget(Some(raw)).expect_err(raw);
+            assert!(err.contains(CTA_BUDGET_ENV), "{raw}: {err}");
+        }
+    }
+
+    #[test]
+    fn default_budget_is_omega_max_ctas() {
+        assert_eq!(ffi::OMEGA_GPU_MATMUL_MAX_CTAS, 64);
+        // Reading the budget never opens the device (omega_gpu_matmul_api.c:121).
+        if is_native() {
+            assert_eq!(cta_budget(), Some(ffi::OMEGA_GPU_MATMUL_MAX_CTAS));
+        } else {
+            assert_eq!(cta_budget(), None);
+            let b = parse_cta_budget(Some("256")).unwrap().unwrap();
+            assert_eq!(set_cta_budget(b), Err(OmegaGpuError::Unavailable));
+        }
+    }
 }
