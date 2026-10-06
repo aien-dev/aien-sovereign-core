@@ -91,14 +91,33 @@ the proposal attempt whose outcome is `parsed` (the one handed to AEGIS).
 ## 5. Model and budget: TO BE FROZEN by orchestrator diagnostic
 
 ```text
->>> TO BE FROZEN by orchestrator diagnostic (filled once, own commit, before any v5 run) >>>
-model_id            = TO BE FROZEN by orchestrator diagnostic
-model_sha256        = TO BE FROZEN by orchestrator diagnostic
-tokenizer_sha256    = TO BE FROZEN by orchestrator diagnostic
-max_tokens          = TO BE FROZEN by orchestrator diagnostic   (AIEN_COMPOSE_MAX_TOKENS)
-attempt budget A    = TO BE FROZEN by orchestrator diagnostic   (ms, from a measurement)
-skill budget B      = TO BE FROZEN by orchestrator diagnostic   (ms, under rx_compose_run's 30 000 ms quiescence wait unless that is raised by a declared change)
-driver timeouts     = TO BE FROZEN by orchestrator diagnostic   (daemon start wait, per-step)
+>>> FROZEN by orchestrator diagnostic 2026-10-06 (filled once, this commit, before any v5 run) >>>
+model_id            = unsloth/Llama-3.2-1B-Instruct (snapshot 5a8abab), LlamaForCausalLM, loaded from its own config.json
+                      (sovereign-core PR #226 merged into this branch: catalog from config, tied lm_head,
+                      llama3 rope scaling, Llama 3 chat template, stop set from generation_config)
+model_sha256        = 1ff795ff6a07e6a68085d206fb84417da2f083f68391c2843cd2b8ac6df8538f  (model.safetensors)
+                      config.json dfb67fd8afe73a1c75245824ef9d64a6ba8983025447e3bf76aa1ea57ee46152
+                      generation_config.json 6d4f979915331212d7672c68b22a4ddad9e21ed8126cf2bd1ea6b2b88f595c1c
+tokenizer_sha256    = 6b9e4e7fb171f92fd137b777cc2714bf87d11576700a1dcd7a399e7bbe39537b  (tokenizer.json)
+max_tokens          = 96   (AIEN_COMPOSE_MAX_TOKENS)
+attempt budget A    = 21 000 ms  (MEASURED on the GB10 under test load, docs/inference/LLAMA3-ENGINE-VERIFICATION.md:
+                      prefill about 2 100 ms, decode about 5.2 tokens/s => 2 100 + 96 x 192 = 20 532 ms, rounded up)
+skill budget B      = 29 000 ms  (unchanged: rx_compose_run 30 000 ms quiescence wait not raised)
+driver timeouts     = unchanged from v4 run-campaign.sh at this commit (daemon start wait and per-step values as in the script)
+
+Declared production-path changes relative to Section 1 (decided from the pre-freeze diagnostic, before any v5 run):
+1. Assistant prefix is `filename:` with NO trailing space (ACCEPTANCE-v4 Section 2(1) had `filename: `).
+   Basis: on the CPU reference the trailing-space prefix produced degenerate output (Qwen2.5-Coder-1.5B,
+   task 1: a run of zeros) and the v4 reply; without the space the same models answered in the format.
+2. The proposal template no longer contains the `Top-level entries:` line (spine.rs proposal_prompt).
+   Basis: Llama-3.2-1B-Instruct, greedy, 5 goals: with the line the proposed path copied README.md for
+   2 of 3 .md goals; without it 5/5 paths equalled the goal's path. Raw runs: orchestrator scratch
+   ~/.claude/jobs/a7c5d201/tmp/diag/llama32-1b-v5*.json (not committed).
+Why this model: the v4 prompt through the sovereign-core CPU reference backend and HF transformers gives
+output ids identical to the GB10 v4 reply (no inference divergence); TinyLlama 0/3 tasks, Qwen2.5-Coder-1.5B
+1/3, Qwen2.5-7B 1/3, Llama-3.2-3B 1/3, Llama-3.2-1B 2/3 under the strict format on the CPU reference;
+Llama-3.2-1B on the GB10 is token-identical to the CPU reference on 3 tasks (PR #226). 3B is blocked on
+the GB10 (omega attention accepts head size 64 only).
 <<< end of block <<<
 ```
 
