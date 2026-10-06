@@ -703,7 +703,8 @@ struct ComposeHome {
     compose: Compose,
     machine_id: String,
     prompts: Arc<parking_lot::Mutex<HashMap<u64, String>>>,
-    proposals: Arc<parking_lot::Mutex<HashMap<u64, String>>>,
+    /// What the model Skill returned per task: the text, or why it gave none.
+    proposals: Arc<parking_lot::Mutex<HashMap<u64, Result<String, String>>>>,
 }
 
 /// Owns the composition home of this process.
@@ -734,17 +735,25 @@ impl ComposeBridge {
             Compose::open(&self.dir, RootKind::Provisioned, &root, 0xA1E4_0001)
                 .map_err(|e: ComposeError| refusal(&self.dir, &e))?;
         let prompts: Arc<parking_lot::Mutex<HashMap<u64, String>>> = Arc::default();
-        let proposals: Arc<parking_lot::Mutex<HashMap<u64, String>>> = Arc::default();
+        let proposals: Arc<parking_lot::Mutex<HashMap<u64, Result<String, String>>>> =
+            Arc::default();
         let (pr, pp, proposer) = (prompts.clone(), proposals.clone(), self.proposer.clone());
         compose
             .register_skill(COMPOSE_MODEL_SKILL, None, 10, move |task| {
                 let prompt = pr.lock().get(&task).cloned()?;
-                let text = proposer(&prompt).ok()?;
-                if text.trim().is_empty() {
-                    return None;
-                }
+                let text = match proposer(&prompt) {
+                    Ok(t) if !t.trim().is_empty() => t,
+                    Ok(_) => {
+                        pp.lock().insert(task, Err("empty model output".into()));
+                        return None;
+                    }
+                    Err(e) => {
+                        pp.lock().insert(task, Err(e));
+                        return None;
+                    }
+                };
                 let h = proposal_handle(&text);
-                pp.lock().insert(task, text);
+                pp.lock().insert(task, Ok(text));
                 Some(h)
             })
             .map_err(|e| format!("compose register skill: {e}"))?;
@@ -755,6 +764,7 @@ impl ComposeBridge {
                 // the Skill recorded for this task, and that text parses as one
                 // file change (a relative path and nonempty content).
                 pv.lock().get(&task).is_some_and(|t| {
+                    let Ok(t) = t else { return false };
                     proposal_handle(t) == result && parse_file_proposal(t).is_some()
                 })
             })
@@ -831,10 +841,15 @@ impl ComposeBridge {
         home.prompts.lock().insert(task, prompt);
         let run = home.compose.run(task, now.as_micros() as u64);
         home.prompts.lock().remove(&task);
-        let proposal = home.proposals.lock().remove(&task);
+        let output = home.proposals.lock().remove(&task);
         let r = run.map_err(|e| format!("compose run: {e}"))?;
         let committed = r.committed == 1;
-        let proposal = if committed { proposal } else { None };
+        let (proposal, uncommitted_proposal, proposer_error) = match output {
+            Some(Ok(t)) if committed => (Some(t), None, None),
+            Some(Ok(t)) => (None, Some(t), None),
+            Some(Err(e)) => (None, None, Some(e)),
+            None => (None, None, None),
+        };
         let parsed = proposal.as_deref().and_then(parse_file_proposal);
         Ok(ComposeTaskReport {
             compose_dir: self.dir.display().to_string(),
@@ -861,6 +876,8 @@ impl ComposeBridge {
                 .as_ref()
                 .map(|t| hex(&Sha256::digest(t.as_bytes()))),
             proposal,
+            uncommitted_proposal,
+            proposer_error,
             proposer: self.proposer_label.clone(),
         })
     }

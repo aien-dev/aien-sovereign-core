@@ -22,6 +22,7 @@
 //!   explain   --report S3.json --cite ID,.. --receipts P,..
 //!                                                        S6 evidence-citing explanation
 //!   recall    [--ids ID,..] [--prefix N]                 S8 constraints + effects
+//!   shutdown                                             S7 stop the daemon (control Shutdown)
 //!   recover                                              repair a refused home
 use crate::safety::SafetyEngine;
 use crate::tools::record_effect_receipt;
@@ -385,12 +386,16 @@ async fn step(sub: &str, m: &HashMap<String, String>) -> Result<Value, String> {
                 "constraints": of("constraint"), "authorizations": of("authorization"),
                 "effects": of("effect"), "repairs": of("repair_tail"), "recall": rec}))
         }
+        "shutdown" => {
+            AienRuntimeClient::default_client().shutdown().await?;
+            Ok(json!({"step": "S7", "shutdown": true}))
+        }
         "recover" => match send(ControlCommand::RecoverComposeHome).await? {
             ControlResponse::ComposeRecovered(r) => Ok(json!({"repair": r, "opens": r.opens})),
             other => Err(format!("unexpected response {other:?}")),
         },
         other => Err(format!(
-            "unknown compose step {other:?} (remember, inspect, propose, authorize, execute, explain, recall, recover)"
+            "unknown compose step {other:?} (remember, inspect, propose, authorize, execute, explain, recall, shutdown, recover)"
         )),
     }
 }

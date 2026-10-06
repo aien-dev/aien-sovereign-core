@@ -274,6 +274,12 @@ pub struct ComposeTaskReport {
     /// and the sha256 of the new content.
     pub proposal_path: Option<String>,
     pub proposal_content_sha256: Option<String>,
+    /// When nothing committed: the model text AEGIS rejected (it did not
+    /// parse as one file change), or why the model Skill returned nothing.
+    #[serde(default)]
+    pub uncommitted_proposal: Option<String>,
+    #[serde(default)]
+    pub proposer_error: Option<String>,
     /// "model" when the Skill ran inference, or the stub label.
     pub proposer: String,
 }
