@@ -726,6 +726,20 @@ pub const COMPOSE_ATTEMPT_BUDGET: std::time::Duration = std::time::Duration::fro
 /// in front of the path.
 pub const COMPOSE_ASSISTANT_PREFIX: &str = "filename:";
 
+/// The compose assistant-response prefix for a model's chat template. Zephyr
+/// and Llama 3 keep `COMPOSE_ASSISTANT_PREFIX` byte for byte. ChatML
+/// (SmolLM2-Instruct) uses the same text: the proposal template asks for a
+/// `filename: <relative path>` first line, and in SmolLM2's byte-level BPE
+/// `filename:` ends on the colon token, so the path keeps its own leading
+/// space token as in Llama 3. `proposal_prompt` is the same for every template.
+pub fn compose_assistant_prefix(template: &aien_inference_abi::ChatTemplate) -> &'static str {
+    use aien_inference_abi::ChatTemplate;
+    match template {
+        ChatTemplate::Zephyr | ChatTemplate::Llama3 => COMPOSE_ASSISTANT_PREFIX,
+        ChatTemplate::ChatMl { .. } => "filename:",
+    }
+}
+
 /// The fixed proposal template of the production RunComposeTask path.
 pub fn proposal_prompt(goal: &str, workspace: &str) -> String {
     format!(

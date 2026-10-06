@@ -439,8 +439,14 @@ pub fn model_proposer(
             role: "user".into(),
             content: prompt.to_string(),
         }];
-        // The assistant turn starts with the fixed prefix; the reply the
-        // parser reads is prefix + generated text (ACCEPTANCE-v4 2(1)).
+        // The assistant turn starts with the template's fixed prefix; the
+        // reply the parser reads is prefix + generated text (ACCEPTANCE-v4 2(1)).
+        let prefix = tokenizer
+            .read()
+            .expect("tokenizer lock")
+            .as_ref()
+            .map(|t| crate::spine::compose_assistant_prefix(&t.template()))
+            .unwrap_or(crate::spine::COMPOSE_ASSISTANT_PREFIX);
         handle
             .block_on(generate_text(
                 spine.clone(),
@@ -449,10 +455,10 @@ pub fn model_proposer(
                 max_tokens,
                 0.0,
                 limit,
-                crate::spine::COMPOSE_ASSISTANT_PREFIX,
+                prefix,
             ))
             .map(|g| crate::spine::Generation {
-                text: format!("{}{}", crate::spine::COMPOSE_ASSISTANT_PREFIX, g.text),
+                text: format!("{prefix}{}", g.text),
                 tokens: g.tokens,
                 finish_reason: g.finish_reason,
             })
