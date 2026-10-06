@@ -17,3 +17,15 @@ geometry = "LlamaForCausalLM: layers 22, hidden 2048, heads 32, kv heads 4, head
 oracle-fixture-safetensors-sha256 = "4707e3ba5c75f6c953217235528b38b3dffa334f68b8356f7356f9a5f6a6a6ea"
 oracle-fixture-manifest-sha256 = "d9871e7834513dfff5d453e6915440e4976098a7e84bc75086a3ab7833dcefd9"
 
+
+# Source pins the release tree must consume (read from CAND-3 [commits] and [contracts]; checked against
+# Cargo.lock by scripts/check-release-candidate.sh).
+[pins]
+aien-protocols = "7ac6facb630ca7e9a6ab4125b292203fe2bb6687"
+crumb-spec = "24194d1b7917ef19244aae6bcaff510686b75fef"
+spark-crumbs = "9355a92bc9adfe95a6ec5f8ac926f38a0b6e7db2"
+
+# Executable digest of the packaged aien (native engine linked, linux aarch64 only), CAND-3 [executables].
+# Built by scripts/release-build.sh; checked by scripts/check-release-candidate.sh --package <tar.gz> --native.
+[executables]
+aien-cli-native-release = "3a17ee79a238ad223fd59f4436d98906a0144b8d5ac47809da194a9ac1d493db"

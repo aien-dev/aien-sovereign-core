@@ -4,8 +4,8 @@
 #   scripts/package-release.sh <output.tar.gz>
 #
 # Environment:
-#   AIEN_CANDIDATE_ID     candidate the binaries were built for, e.g. CAND-3 (recorded in release.toml)
-#   AIEN_MODEL_INPUTS     optional file holding a "[model]" TOML fragment (model input digests); copied in
+#   AIEN_DRY_RUN=1        package even when the release gate fails (candidate "NOT-RELEASABLE"); never for a release
+#   AIEN_RELEASE_BIN_DIR  directory holding the built binaries (default target/release)
 #   SOURCE_DATE_EPOCH     mtime for every entry (default 0)
 #
 # The archive carries release.toml: schema, candidate id, the sha256 of the packaged aien-cli,
@@ -16,20 +16,32 @@
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 ARTIFACT="${1:?provide output archive path}"
-CANDIDATE="${AIEN_CANDIDATE_ID:-unknown}"
+BIN_DIR="${AIEN_RELEASE_BIN_DIR:-target/release}"
+# The candidate id and model table come from the release gate, never from the caller. A tree that fails the
+# gate is not packaged, except with AIEN_DRY_RUN=1, which labels the package NOT-RELEASABLE (it then fails
+# check-release-candidate.sh --package and cannot be installed as a candidate).
+GATE_MODEL="$(mktemp)"
+if CANDIDATE="$(bash scripts/check-release-candidate.sh --model "$GATE_MODEL" | sed -n 's/^candidate=//p')" && [[ -n "$CANDIDATE" ]]; then
+    AIEN_MODEL_INPUTS="$GATE_MODEL"
+elif [[ "${AIEN_DRY_RUN:-}" == 1 ]]; then
+    echo "WARNING: release gate failed; dry run packages this tree as NOT-RELEASABLE" >&2
+    CANDIDATE="NOT-RELEASABLE"; AIEN_MODEL_INPUTS=""
+else
+    echo "release gate failed; refusing to package" >&2; exit 1
+fi
 EPOCH="${SOURCE_DATE_EPOCH:-0}"
 TAR=tar
 command -v gtar >/dev/null 2>&1 && TAR=gtar
 "$TAR" --version 2>/dev/null | grep -q 'GNU tar' || { echo "GNU tar is required (on macOS: brew install gnu-tar)" >&2; exit 1; }
 sha() { if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | cut -d' ' -f1; else shasum -a 256 "$1" | cut -d' ' -f1; fi; }
 PACKAGE_DIR="$(mktemp -d)"
-trap 'rm -rf "$PACKAGE_DIR"' EXIT
+trap 'rm -rf "$PACKAGE_DIR" "$GATE_MODEL"' EXIT
 mkdir -p "$PACKAGE_DIR/bin"
 for binary in aien-cli spark-cockpit-rs spark-inquisitor cortex-encoder-rs cortex-rs spark-supervisor spark-debugger; do
-    [[ -x "target/release/$binary" ]] || { echo "Missing release binary: $binary" >&2; exit 1; }
+    [[ -x "$BIN_DIR/$binary" ]] || { echo "Missing release binary: $binary" >&2; exit 1; }
     name="$binary"
     [[ "$binary" != aien-cli ]] || name=aien
-    cp "target/release/$binary" "$PACKAGE_DIR/bin/$name"
+    cp "$BIN_DIR/$binary" "$PACKAGE_DIR/bin/$name"
 done
 cp CONSTITUTION.md README.md install.sh "$PACKAGE_DIR/"
 if [[ -d imprints/en2-trinity ]]; then
