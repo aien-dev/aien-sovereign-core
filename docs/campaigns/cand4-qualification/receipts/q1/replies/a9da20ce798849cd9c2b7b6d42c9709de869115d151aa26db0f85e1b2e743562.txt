@@ -1,0 +1,2 @@
+filename: docs/CONTACT.txt
+Ada Lovelace: ada@example.org
