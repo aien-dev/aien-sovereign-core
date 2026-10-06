@@ -25,6 +25,7 @@ aien-inference-abi = { path = "../aien-inference-abi" }
 aien-kv-cache = { path = "../aien-kv-cache" }
 aien-scheduler = { path = "../aien-scheduler" }
 aien-runtime = { path = "../aien-runtime" }
+aien-omega-gpu = { path = "../aien-omega-gpu" }
 
 [features]
 # NEXT-PHASE-2 fault harness only: named hold points in `aien compose execute`.
