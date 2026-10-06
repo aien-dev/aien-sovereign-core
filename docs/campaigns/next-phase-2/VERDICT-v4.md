@@ -49,7 +49,8 @@ R6 (no `E_MARK` in controls, C1..C5, C6c-ctl, C7a, C7c, C8): held in every run.
   (C7a, C7b).
 - A start-up reconcile that panics stops the daemon before it serves anything, with nothing
   written to the home, the workspace or provenance; the next start clears the left socket file
-  and comes up normally (C7c). The daemon will not serve until the cause of the panic is gone.
+  and comes up normally (C7c). That a daemon whose panic cause persists keeps refusing to serve
+  is inferred, not tested: the C7c restart ran without the hook.
 
 ## 4. Not proved (declared)
 
@@ -64,3 +65,24 @@ expectations (ACCEPTANCE-v4 H4); it is not part of the receipt. Workspace `cargo
 build: four failures outside this cut (`spark-adapters` tier1 f61 and f63, which check the git
 branch and remote of the checkout; tier2 f36 axum route, also failing on the v3 run; and
 `spark-cockpit-rs` sub-millisecond latency, which passed when run alone).
+
+## 6. Where this PASS is weaker than it looks (fresh-clone review of sc#229, before merge)
+
+Added after review; no code change, receipt untouched.
+
+1. **C7a's error is synthetic.** The `reconcile_error` hook returns
+   `ControlResponse::Error` without calling `reconcile()` (`crates/aien-runtime/src/effects.rs:814-822`),
+   which feeds the error arm at `effects.rs:843-846`. C7a proves the handling after an error (gate
+   set, effect commands refused, operator reconcile clears it), not that a genuine failure
+   produces an error. Coverage of the same handling by genuine errors: C6a, C6b, C6c, C6e, C6f,
+   C6g, C6i and C7b. The `Err(e)` arm of `server.rs:192-198` stays not proved (section 4).
+2. **C7c is a confirmation, not a blind prediction.** Its outcome was first seen in the
+   pre-freeze probe of the v3 `cpu-fault` binary (ACCEPTANCE-v4 H4). The panic code did not change
+   between v3 and v4, so the campaign re-confirms an observed outcome.
+3. **Persistent panic not tested.** Section 3 states this: the restart ran without the hook.
+4. **State dir not checked in C7c.** H4 records that the state dir stayed empty in the probe; the
+   C7c row checks the home, the target and the provenance dir, not the state dir. For the campaign,
+   the state dir after the aborted start is not checked.
+5. **Receipt script repetition count.** `make-receipt.sh` lines 43-44 score a row PASS on any
+   number of passing repetitions (at least one). No effect on this receipt: every injected row has
+   its 3 runs and C6i its 1. To be fixed in the next spec version, not in this cut.
