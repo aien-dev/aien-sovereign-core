@@ -248,3 +248,40 @@ fn approved_hash_is_the_interplane_form() {
         interplane_sha("a/b.md", "x \"q\"\n\u{1}é\n")
     );
 }
+
+/// The path already exists: RunComposeTask would treat it as an edit target
+/// and merge the reply into the seed (v7 T5). An approved whole-file
+/// proposal must commit byte-exact, with no seed line merged in.
+#[test]
+fn approved_proposal_over_existing_file_commits_byte_exact() {
+    let (_tmp, _b, hook, ws) = setup();
+    let seed = "# Notes\nseed line one\nseed line two\n";
+    std::fs::write(Path::new(&ws).join(PATH), seed).unwrap();
+    // Shares "# Notes" with the seed, so an edit merge would keep both seed lines.
+    let content = "# Notes\napproved replacement line\n";
+    let mut p = proposal("req-x", "appr-x");
+    p.content = content.into();
+    p.content_sha256 = sha(content.as_bytes());
+    p.approved_proposal_sha256 = interplane_sha(PATH, content);
+    let out = hook.submit(&p, &ws);
+    if !aien_omega_compose::LINKED {
+        refused(out, "ComposeError");
+        return;
+    }
+    let r = out.unwrap();
+    let t = &r.task;
+    assert!(t.committed, "{t:?}");
+    let text = format!("filename: {PATH}\n{content}");
+    assert_eq!(t.proposal.as_deref(), Some(text.as_str()));
+    assert!(!t.proposal.as_deref().unwrap().contains("seed line"));
+    assert_eq!(
+        t.proposal_content_sha256.as_deref(),
+        Some(p.content_sha256.as_str())
+    );
+    assert_eq!(r.compose_proposal_sha256, sha(text.as_bytes()));
+    // The hook wrote nothing: the seed is untouched.
+    assert_eq!(
+        std::fs::read_to_string(Path::new(&ws).join(PATH)).unwrap(),
+        seed
+    );
+}

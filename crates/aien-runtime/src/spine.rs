@@ -817,11 +817,131 @@ pub fn edit_block(path: &str, content: &str) -> String {
 /// plus the edit-mode block when the goal names an existing file of the
 /// canonical workspace `ws` (NEXT-PHASE-1 v6).
 pub fn task_prompt(goal: &str, ws: &Path) -> String {
+    task_prompt_and_target(goal, ws).0
+}
+
+/// `task_prompt` plus the edit target it showed the model: the path and the
+/// exact content of the block, read once (NEXT-PHASE-1 v7 T5). The Skill
+/// merges an edit reply into this same content, so the bytes the model saw
+/// are the bytes the merge keeps.
+pub fn task_prompt_and_target(goal: &str, ws: &Path) -> (String, Option<(String, String)>) {
     let mut prompt = proposal_prompt(goal, &ws.display().to_string());
-    if let Some((path, content)) = existing_target(goal, ws) {
-        prompt.push_str(&edit_block(&path, &content));
+    let target = existing_target(goal, ws);
+    if let Some((path, content)) = &target {
+        prompt.push_str(&edit_block(path, content));
     }
-    prompt
+    (prompt, target)
+}
+
+/// Largest prior-lines x reply-lines table `merge_edit_reply` builds.
+pub const COMPOSE_EDIT_MERGE_MAX_CELLS: usize = 4 << 20;
+
+/// NEXT-PHASE-1 v7 T5: an edit-mode reply never removes an existing line.
+///
+/// v6 T5 showed the model answering an edit goal with only the changed part
+/// (the heading it edits under plus the new line), which the v6 Skill wrote
+/// as the whole file. Here the reply's content is merged into `prior`, the
+/// exact content the model was shown: the reply lines that equal prior lines
+/// (longest common subsequence, trailing whitespace ignored) are anchors,
+/// every other reply line is inserted next to its anchor (after the anchor
+/// above it; before the first anchor when no anchor is above it), and every
+/// prior line is kept with its own bytes, in order. A whole-file reply that
+/// keeps every line therefore merges to itself.
+///
+/// Limits: edit mode is additive. A line the reply leaves out or rewrites
+/// stays in the file (a rewrite appears as an added line next to the old
+/// one). Err when the reply shares no non-blank line with `prior` (no place
+/// for the change), when it changes nothing, or when the table would exceed
+/// `COMPOSE_EDIT_MERGE_MAX_CELLS`. The result ends with one newline.
+pub fn merge_edit_reply(prior: &str, reply_content: &str) -> Result<String, String> {
+    let mut p: Vec<&str> = prior.split('\n').collect();
+    if prior.ends_with('\n') || prior.is_empty() {
+        p.pop();
+    }
+    let r: Vec<&str> = reply_content.lines().collect();
+    let (n, m) = (p.len(), r.len());
+    if (n + 1).saturating_mul(m + 1) > COMPOSE_EDIT_MERGE_MAX_CELLS {
+        return Err(format!(
+            "edit reply too large to merge ({n} file lines x {m} reply lines)"
+        ));
+    }
+    let eq = |i: usize, j: usize| p[i].trim_end() == r[j].trim_end();
+    // l[i][j] = LCS length of p[i..] and r[j..].
+    let w = m + 1;
+    let mut l = vec![0u32; (n + 1) * w];
+    for i in (0..n).rev() {
+        for j in (0..m).rev() {
+            l[i * w + j] = if eq(i, j) {
+                l[(i + 1) * w + j + 1] + 1
+            } else {
+                l[(i + 1) * w + j].max(l[i * w + j + 1])
+            };
+        }
+    }
+    let mut anchors: Vec<(usize, usize)> = Vec::new();
+    let (mut i, mut j) = (0, 0);
+    while i < n && j < m {
+        if eq(i, j) && l[i * w + j] == l[(i + 1) * w + j + 1] + 1 {
+            anchors.push((i, j));
+            i += 1;
+            j += 1;
+        } else if l[(i + 1) * w + j] >= l[i * w + j + 1] {
+            i += 1;
+        } else {
+            j += 1;
+        }
+    }
+    if !anchors.iter().any(|&(i, _)| !p[i].trim().is_empty()) {
+        return Err(
+            "edit reply shares no line with the file: copy the existing line the change goes under, then the new lines"
+                .into(),
+        );
+    }
+    let mut out: Vec<&str> = Vec::with_capacity(n + m);
+    let (mut pi, mut rj) = (0, 0);
+    for (k, &(ai, aj)) in anchors.iter().chain(std::iter::once(&(n, m))).enumerate() {
+        if k == 0 {
+            // No anchor above: new lines hug the first anchor from above.
+            out.extend(&p[pi..ai]);
+            out.extend(&r[rj..aj]);
+        } else {
+            // New lines hug the anchor above them.
+            out.extend(&r[rj..aj]);
+            out.extend(&p[pi..ai]);
+        }
+        if ai < n {
+            out.push(p[ai]);
+        }
+        (pi, rj) = (ai + 1, aj + 1);
+    }
+    let mut merged = out.join("\n");
+    merged.push('\n');
+    let mut kept = p.join("\n");
+    kept.push('\n');
+    if merged == kept {
+        return Err("edit reply changes nothing in the file".into());
+    }
+    Ok(merged)
+}
+
+/// The proposal text the Skill hands to AEGIS for one parsed reply. In edit
+/// mode (`edit` = the target path and the content shown to the model) a reply
+/// naming that path is merged into the content by `merge_edit_reply` and
+/// returned in the canonical `filename: <path>` form; any other reply is
+/// returned unchanged (the v5 whole-file proposal).
+pub fn edit_proposal(reply: &str, edit: Option<(&str, &str)>) -> Result<String, String> {
+    let p = check_file_proposal(reply)?;
+    let Some((path, prior)) = edit.filter(|(path, _)| *path == p.path) else {
+        return Ok(reply.to_string());
+    };
+    let merged = merge_edit_reply(prior, &p.content)?;
+    let text = format!("filename: {path}\n{merged}");
+    match check_file_proposal(&text) {
+        Ok(q) if q.path == path && q.content == merged => Ok(text),
+        _ => Err(format!(
+            "the merged content of {path} does not survive the proposal format"
+        )),
+    }
 }
 
 /// Why a reply that stopped at the token limit is never a proposal
@@ -851,6 +971,21 @@ pub fn retry_prompt(base: &str, reason: &str) -> String {
 pub fn propose_with_retries(
     proposer: &(dyn Fn(&str, std::time::Duration) -> Result<Generation, String> + Send + Sync),
     base: &str,
+    budget: std::time::Duration,
+    attempt_budget: std::time::Duration,
+    max_attempts: u32,
+) -> (Result<String, String>, Vec<ProposalAttempt>) {
+    propose_task_with_retries(proposer, base, None, budget, attempt_budget, max_attempts)
+}
+
+/// `propose_with_retries` with the edit target of `task_prompt_and_target`:
+/// a parsed reply becomes `edit_proposal(reply, edit)`, so in edit mode the
+/// returned proposal is the merged file (NEXT-PHASE-1 v7 T5). Each attempt
+/// still records the model's own reply text.
+pub fn propose_task_with_retries(
+    proposer: &(dyn Fn(&str, std::time::Duration) -> Result<Generation, String> + Send + Sync),
+    base: &str,
+    edit: Option<(&str, &str)>,
     budget: std::time::Duration,
     attempt_budget: std::time::Duration,
     max_attempts: u32,
@@ -902,13 +1037,13 @@ pub fn propose_with_retries(
                 // NEXT-PHASE-1 v6 N2: a length-cut reply is refused before parsing.
                 let checked = match length_cut_refusal(&g) {
                     Some(why) => Err(why),
-                    None => check_file_proposal(&g.text).map(|_| ()),
+                    None => edit_proposal(&g.text, edit),
                 };
                 match checked {
-                    Ok(_) => {
+                    Ok(proposal) => {
                         a.outcome = "parsed".into();
                         attempts.push(a);
-                        return (Ok(g.text), attempts);
+                        return (Ok(proposal), attempts);
                     }
                     Err(e) => {
                         a.outcome = "refused".into();
@@ -971,7 +1106,7 @@ pub(crate) fn record_view(
 pub(crate) struct ComposeHome {
     pub(crate) compose: Compose,
     pub(crate) machine_id: String,
-    prompts: Arc<parking_lot::Mutex<HashMap<u64, String>>>,
+    prompts: Arc<parking_lot::Mutex<HashMap<u64, TaskPrompt>>>,
     /// Proposer hook: task -> approved proposal text (crate::approved).
     approved: Arc<parking_lot::Mutex<HashMap<u64, String>>>,
     /// What the model Skill returned per task: the text, or why it gave
@@ -1021,6 +1156,8 @@ impl ComposeHome {
 }
 
 type SkillOutput = (Result<String, String>, Vec<ProposalAttempt>);
+/// The prompt of one task and its edit target (`task_prompt_and_target`).
+type TaskPrompt = (String, Option<(String, String)>);
 
 /// Owns the composition home of this process.
 pub struct ComposeBridge {
@@ -1078,17 +1215,20 @@ impl ComposeBridge {
             journal_present,
         )
         .map_err(|r| mark_refusal(&self.dir, &r))?;
-        let prompts: Arc<parking_lot::Mutex<HashMap<u64, String>>> = Arc::default();
+        let prompts: Arc<parking_lot::Mutex<HashMap<u64, TaskPrompt>>> = Arc::default();
         let proposals: Arc<parking_lot::Mutex<HashMap<u64, SkillOutput>>> = Arc::default();
         let approved: Arc<parking_lot::Mutex<HashMap<u64, String>>> = Arc::default();
         let (pr, pp, proposer) = (prompts.clone(), proposals.clone(), self.proposer.clone());
         let pa = approved.clone();
         compose
             .register_skill(COMPOSE_MODEL_SKILL, None, 10, move |task| {
-                let prompt = pr.lock().get(&task).cloned()?;
+                let (prompt, target) = pr.lock().get(&task).cloned()?;
                 // Proposer hook (crate::approved): an approved proposal for this
                 // task replaces the model's reply. One attempt, the same
                 // template check, the same AEGIS contract and commit below.
+                // edit = None: an approved whole-file proposal never goes
+                // through merge_edit_reply, so the committed bytes are the
+                // approved bytes even when the path already exists.
                 let fixed = pa.lock().get(&task).cloned();
                 let (out, attempts) = match fixed {
                     Some(text) => {
@@ -1099,23 +1239,29 @@ impl ComposeBridge {
                                 ..Default::default()
                             })
                         };
-                        propose_with_retries(
+                        propose_task_with_retries(
                             &one,
                             &prompt,
+                            None,
                             COMPOSE_SKILL_BUDGET,
                             COMPOSE_ATTEMPT_BUDGET,
                             1,
                         )
                     }
                     // Fixed template + bounded automatic retry (ACCEPTANCE-v2 3a, 3b),
-                    // measured per-attempt budget (ACCEPTANCE-v3 3b).
-                    None => propose_with_retries(
-                        proposer.as_ref(),
-                        &prompt,
-                        COMPOSE_SKILL_BUDGET,
-                        COMPOSE_ATTEMPT_BUDGET,
-                        COMPOSE_MAX_ATTEMPTS,
-                    ),
+                    // measured per-attempt budget (ACCEPTANCE-v3 3b); an edit reply
+                    // is merged into the content the model was shown (v7 T5).
+                    None => {
+                        let edit = target.as_ref().map(|(p, c)| (p.as_str(), c.as_str()));
+                        propose_task_with_retries(
+                            proposer.as_ref(),
+                            &prompt,
+                            edit,
+                            COMPOSE_SKILL_BUDGET,
+                            COMPOSE_ATTEMPT_BUDGET,
+                            COMPOSE_MAX_ATTEMPTS,
+                        )
+                    }
                 };
                 let h = out.as_ref().ok().map(|t| proposal_handle(t));
                 pp.lock().insert(task, (out, attempts));
@@ -1239,7 +1385,7 @@ impl ComposeBridge {
                 ws.display()
             ));
         }
-        let prompt = task_prompt(goal, &ws);
+        let prompt = task_prompt_and_target(goal, &ws);
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_err(|e| format!("clock: {e}"))?;

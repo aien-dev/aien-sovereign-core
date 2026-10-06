@@ -172,7 +172,13 @@ impl ProposerHook {
                 seen.insert(k);
             }
         }
-        let goal = format!("apply approved proposal (request {})", p.request_id);
+        // The goal names the path, so an existing file is an edit target here as
+        // in RunComposeTask; the approved branch of the Skill ignores it (edit =
+        // None), see spine.rs.
+        let goal = format!(
+            "apply approved proposal for {} (request {})",
+            p.path, p.request_id
+        );
         let r = self
             .bridge
             .run_approved_task(&goal, workspace, &text)

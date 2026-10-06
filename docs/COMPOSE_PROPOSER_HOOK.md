@@ -7,18 +7,20 @@ Line numbers are for the commit that adds this note.
 ## Entry point
 `ProposerHook::submit` (crates/aien-runtime/src/approved.rs:152) checks the
 proposal (`verify`, approved.rs:109), refuses duplicates, then calls
-`ComposeBridge::run_approved_task` (crates/aien-runtime/src/spine.rs:1216),
-which is `run_task_inner` (spine.rs:1225), the body `RunComposeTask` runs
-(server.rs:593 -> spine.rs:1205). The approved text is staged per task and
-the registered model Skill (spine.rs:1087) returns it instead of calling the
-`ComposeProposer` (spine.rs:1092); one attempt, the same template check.
+`ComposeBridge::run_approved_task` (crates/aien-runtime/src/spine.rs:1362),
+which is `run_task_inner` (spine.rs:1371), the body `RunComposeTask` runs
+(server.rs:593 -> spine.rs:1351). The approved text is staged per task and
+the registered model Skill (spine.rs:1224) returns it instead of calling the
+`ComposeProposer` (spine.rs:1232); one attempt, the same template check, and edit
+= None (spine.rs:1245): an approved proposal never goes through
+`merge_edit_reply`, so an existing file is replaced byte-exact.
 
 ## Path to J-Space and World commit
-`home.compose.run` (spine.rs:1266) -> `Compose::run`
+`home.compose.run` (spine.rs:1412) -> `Compose::run`
 (crates/aien-omega-compose/src/lib.rs:302) -> `rxc_host_run` in omega
 `librx_compose.a` (omega.lock c0369e67, archive sha256 dfe0ffb8...): the Skill
 result is staged on a J-Space branch, AEGIS calls the bridge's verify callback
-(spine.rs:1127: result handle equals the Skill's text and it parses as one
+(spine.rs:1273: result handle equals the Skill's text and it parses as one
 file change), the winner commits through the World, Cortex records goal,
 candidates, evidence and promotion (`cx_*` in `ComposeTaskReport`). The hook
 returns Ok only if the run committed exactly the approved text.
@@ -54,3 +56,4 @@ process), `ComposeError`, `NotCommitted`, `Mismatch`.
   not by this hook. A durable request-id record is not written.
 - The effect receipt (`record_effect_receipt`) still has no request_id.
 - Real model leg NOT_RUN; no GPU.
+- approver / approval_id are caller-supplied: authenticate + durable replay first (#249).
