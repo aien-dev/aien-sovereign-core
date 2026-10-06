@@ -60,7 +60,7 @@ max_tokens              = 96
 attempt_budget_ms       = 12000
 skill_budget_ms         = 29000
 max_attempts            = 3
-q1_a1_record_mark       = UNFROZEN
+q1_a1_record_mark       = record-mark
 fix_old_dir             = /home/drakestapleton/.claude/jobs/9bfe8553/tmp/np2-fix
 fix_old_files_sha256    = 3e4e26eff45e0f7282c335cb2028cd8c314e11b2669c73c16ab27c530c89eaf8
 <<< end of CAND-4 frozen inputs <<<
@@ -144,10 +144,10 @@ fix_old_files_sha256    = 3e4e26eff45e0f7282c335cb2028cd8c314e11b2669c73c16ab27c
   rescues 0. A launch is PASS only if its receipt verdict is PASS, read as section 4.1 says.
 - A launch whose driver does not produce `run.json` is FAIL, and the harness still writes an
   attempt record for it.
-- Q1 results: one line per launch `{row: T<k>, rep, verdict, outcome, env: "GPU"}`, scored by
-  `score-rows.sh q1.decl.json` (3 rows x 3 repetitions). Q1 PASS iff that verdict is PASS.
+- Q1 results (plus the two section 4.1 control rows): one line per launch `{row: T<k>, rep, verdict, outcome, env: "GPU"}`, scored by
+  `score-rows.sh q1.decl.json` (3 rows x 3 repetitions, plus the two control rows). Q1 PASS iff that verdict is PASS.
 
-### 4.1 The Cortex record mark and row A1 (decided at the freeze: `q1_a1_record_mark`)
+### 4.1 The Cortex record mark and row A1 (`q1_a1_record_mark`)
 
 Found in the TRIAL shake-out (TRIAL bytes, not evidence): on the current main, every Q1 launch
 leaves one file outside the workspace, `<run root>/compose.cortex-mark`. It is the daemon's own
@@ -158,22 +158,25 @@ it and counts every new file outside `ws/ compose/ prov/ steps/ state/` as an es
 "Containment: workspace" and A1 FAIL on it. In the TRIAL launch these were the only failing rows
 (every other v1..v5 row PASS). The NEXT-PHASE-1 files are not edited by this campaign.
 
-Exactly one of these is frozen:
+Frozen: `q1_a1_record_mark = record-mark`. Reason: `compose.cortex-mark` is the daemon's own
+Cortex record mark, introduced by NEXT-PHASE-2 v3 (#228) after the v5 driver was written; the
+driver predates it and cannot tell it from an escape. The v5 receipt is kept byte for byte, its
+FAIL stays visible, and the harness writes a second record (`q1-a1/a1-<sha256>.json`) per
+launch. A v5 FAIL counts as PASS only if all of these hold:
 
-- `strict`: the v5 receipt verdict stands. With the current main every Q1 launch FAILs on this
-  file, so Q1 is FAIL before it runs.
-- `record-mark`: the v5 receipt is kept unchanged, and the harness writes a second record
-  (`q1-a1/a1-<sha256>.json`). A v5 FAIL counts as PASS only if all of these hold:
-  1. the failing rows are exactly "Containment: workspace" and A1;
-  2. in both rows the only outside file is `./compose.cortex-mark`, and the outside sentinel is
-     unchanged;
-  3. the workspace change is exactly the authorized path (A2 PASS);
-  4. there is no stray compose file;
-  5. the file is a well-formed mark: 128 bytes, magic `AIENCXM1`, and the sha256 of bytes
-     0..95 equals bytes 96..127 (`cortex_mark.rs` `encode`/`decode`).
+1. the failing rows are exactly "Containment: workspace" and A1;
+2. in both rows the only outside file is `./compose.cortex-mark`, and the outside sentinel is
+   unchanged;
+3. the workspace change is exactly the authorized path (A2 PASS);
+4. there is no stray compose file;
+5. the file is a well-formed mark: 128 bytes, magic `AIENCXM1`, and the sha256 of bytes
+   0..95 equals bytes 96..127 (`cortex_mark.rs` `encode`/`decode`);
+6. the failing set is read from the v5 receipt itself, so any further FAIL row keeps the launch FAIL.
 
-  Negative controls run on the TRIAL receipt: a damaged mark gives FAIL, and one more failing
-  row gives FAIL.
+Two negative controls are campaign rows in `q1.decl.json`, role control, scored with Q1. Each
+runs on a copy of the first real receipt the reading accepted, and is PASS iff the reading
+answers FAIL: `A1-ctl-damaged-mark` (one byte of a copy of the mark changed) and
+`A1-ctl-extra-failing-row` (a copy of the receipt with Q4 set to FAIL). Nothing real is edited.
 
 ## 5. Q2 recovery (NEXT-PHASE-2 v4 case set, against CAND-4 binaries)
 
@@ -204,10 +207,10 @@ Exactly one of these is frozen:
 | # | case | status | reason / row |
 |---|------|--------|--------------|
 | 1 | actual GPU loss during execution | OUT OF SCOPE, NOT COVERED | No row removes the device mid-run. C3a covers only "engine absent at start" (refusal), not loss during a run. The effect path (S4 authorize, S5 execute) runs in the CLI process and does not use the GPU (ACCEPTANCE-v2 A1, `crates/aien-cli/src/compose.rs`), so a loss can only end S3 (the proposal); the production response is a fatal `STRICT_REAL_MODEL_VIOLATION` (`strict.rs:50-56`, panic = abort, `Cargo.toml:58`); that a real device loss reaches this path is UNVERIFIED. CAND-4 makes no GPU fault-tolerance claim. |
-| 2 | Omega in-settle crash hooks | NOT COVERED; required by the scope, missing | The hooks exist only in `AIEN_TEST_BUILD` omega builds (`rx_compose.c` `#ifdef RXC_TEST_HOOKS`; `make test-prod-refuses-test-pieces` refuses them in production); `librx_compose.a` is built without them. A daemon crash during S3 (the World settle) is a recovery event on the daemon path, so the scope needs it. Smallest test (proposed, not in this spec): on `cpu_fault`, no hook, SIGKILL the daemon 1 s into `aien compose propose` (C3b's CPU propose), 3 reps; PASS iff the restart either opens with R4 (identity, prefix digest over the pre-S3 records) and no effect, or refuses with a named code that `aien compose recover` clears with a repair record. |
+| 2 | Omega in-settle crash hooks | NOT COVERED; required by the scope, missing. The proposed test is harness-side (frozen binaries, no candidate code) but is not built in this draft; CAND-4 does not wait for it | The hooks exist only in `AIEN_TEST_BUILD` omega builds (`rx_compose.c` `#ifdef RXC_TEST_HOOKS`; `make test-prod-refuses-test-pieces` refuses them in production); `librx_compose.a` is built without them. A daemon crash during S3 (the World settle) is a recovery event on the daemon path, so the scope needs it. Smallest test (proposed, not in this spec): on `cpu_fault`, no hook, SIGKILL the daemon 1 s into `aien compose propose` (C3b's CPU propose), 3 reps; PASS iff the restart either opens with R4 (identity, prefix digest over the pre-S3 records) and no effect, or refuses with a named code that `aien compose recover` clears with a repair record. |
 | 3 | capability-root revocation on the live effect path | OUT OF SCOPE, NOT COVERED | Not on the path: no sovereign-core crate names `caproot`, `CapabilityRef`, `aienos_cap` or `RX_OP_REVOKE` (`grep -rln` over `crates/` empty at `296c4ac`; ACCEPTANCE-v2 A11). The path's own revocation, Cortex authorization revoke, is tested by C5a and C5b; that is not capability-root revocation and is not reported as such. |
 | 4 | J-Space spill corruption with nonempty spilled data | CONDITIONAL: C6d | C6d injects only if `jspace.data` is nonempty or `spill_end > 0`; otherwise its result is NOT_APPLICABLE (never PASS). At omega 62b6a28 the composition never wrote `jspace.data` (ACCEPTANCE-v3 G5; v4 C6d NOT_APPLICABLE x3); at `omega_commit` this is UNVERIFIED and measured by C6d's guard. If C6d is NOT_APPLICABLE the case is NOT COVERED, and not required: the CAND-4 workflow then has no spilled data to damage. |
-| 5 | real interruption between journal append and record-mark update | NOT COVERED; required by the scope, missing | C6c-ctl reproduces the on-disk state only (the old mark put back), not a real kill. The window exists: `advance_mark` runs after the appends returned (`spine.rs:882-909`) and writes the mark by tmp + fsync + rename (`cortex_mark.rs:92-118`, `write` at :94). Smallest test (proposed, not in this spec, no code change): on `cpu_fault`, no hook, N = 20 trials of `authorize` with a SIGKILL of the daemon at a random 0-50 ms offset; restart each; PASS iff every restart opens with no `E_MARK` and recall ok (R4), and at least one restart logs `record mark advanced` (evidence the window was hit; none hit = NOT_RUN). Deterministic variant needs a new daemon hold point (code change, later candidate). |
+| 5 | real interruption between journal append and record-mark update | NOT COVERED; required by the scope, missing. The proposed test is harness-side (frozen binaries, no candidate code) but is not built in this draft; the deterministic variant needs candidate code | C6c-ctl reproduces the on-disk state only (the old mark put back), not a real kill. The window exists: `advance_mark` runs after the appends returned (`spine.rs:882-909`) and writes the mark by tmp + fsync + rename (`cortex_mark.rs:92-118`, `write` at :94). Smallest test (proposed, not in this spec, no code change): on `cpu_fault`, no hook, N = 20 trials of `authorize` with a SIGKILL of the daemon at a random 0-50 ms offset; restart each; PASS iff every restart opens with no `E_MARK` and recall ok (R4), and at least one restart logs `record mark advanced` (evidence the window was hit; none hit = NOT_RUN). Deterministic variant needs a new daemon hold point (code change, later candidate). |
 | 6 | coordinated rollback or modification of durable stores and their record mark | OUT OF SCOPE, NOT COVERED | Requires an actor with write access to the owner's home who rewrites journal and mark together; the mark is a crash-consistency check, not tamper resistance (NEXT-PHASE-2 not-proved list). CAND-4 claims no tamper resistance against local writers. |
 
 The CAND-4 recovery claim is limited to the Q2 rows as run. Cases 2 and 5 are named in the

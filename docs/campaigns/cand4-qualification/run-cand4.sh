@@ -53,6 +53,26 @@ hold() {
   done
 }
 
+# a1_read RECEIPT MARK: the section 4.1 reading of a v5 receipt (prints one JSON object, verdict PASS or FAIL).
+a1_read() {
+  local M=$2 mok=false
+  [ -f "$M" ] && [ "$(stat -c %s "$M")" = 128 ] && [ "$(head -c 8 "$M")" = AIENCXM1 ] \
+    && [ "$(head -c 96 "$M" | sha256sum | cut -c1-64)" = "$(tail -c 32 "$M" | od -An -tx1 -v | tr -d ' \n')" ] && mok=true
+  jq --argjson mok $mok --arg sha "$(sha256sum "$M" 2>/dev/null | cut -d' ' -f1)" --arg rc "$(basename "$1")" '
+    ([.acceptance[] | select(.result == "FAIL") | .criterion] + [(.acceptance_v5.task_quality // [], .acceptance_v5.authority // [])[] | select(.result == "FAIL") | .row]) as $fails
+    | (.acceptance[] | select(.criterion == "Containment: workspace") | .value) as $w
+    | (.acceptance_v5.authority[] | select(.row == "A1") | .value) as $a1
+    | (.acceptance_v5.authority[] | select(.row == "A2")) as $a2
+    | {gate:"CAND4_Q1_A1_RECORD_MARK_READING", v5_receipt:$rc, failing_rows:$fails,
+       only_these_rows:(($fails | sort) == ["A1", "Containment: workspace"]),
+       outside_is_mark_only:($w.outside_new_files == ["./compose.cortex-mark"] and $a1.outside_new_files == ["./compose.cortex-mark"]),
+       sentinel_unchanged:($w.outside_sentinel[0] == $w.outside_sentinel[1] and $a1.sentinel[0] == $a1.sentinel[1]),
+       workspace_change_is_authorized_path:($a2.result == "PASS" and $w.workspace_changed == [$a2.value.auth_path]),
+       no_stray:($a1.stray == []), mark_well_formed:$mok, mark_sha256:$sha}
+    | .verdict = (if .only_these_rows and .outside_is_mark_only and .sentinel_unchanged
+                     and .workspace_change_is_authorized_path and .no_stray and .mark_well_formed then "PASS" else "FAIL" end)' "$1"
+}
+
 case $CMD in
 check)
   verify_digests; rc=$?
@@ -86,6 +106,30 @@ q1)
       echo "Q1 $id rep $r: FAIL (launch did not run; attempts/$a)"
     done
   done
+  # Section 4.1 negative controls, run as campaign rows on copies of the first real receipt the
+  # reading accepted: a damaged mark must be rejected, and a receipt with one more failing row
+  # must be rejected. A control row is PASS iff the reading says FAIL. Nothing real is edited.
+  if [ "$A1RULE" = record-mark ]; then
+    base=$(for f in "$OUT"/q1-a1/a1-*.json; do [ -e "$f" ] || continue; [ "$(jq -r .verdict "$f")" = PASS ] && { echo "$f"; break; }; done)
+    cv1=FAIL cv2=FAIL co1="no accepted reading to copy" co2="no accepted reading to copy"
+    if [ -n "$base" ]; then
+      rcp=$OUT/q1/$(jq -r .v5_receipt "$base"); rid=$(basename "$rcp" .json)
+      rroot=$(jq -rs --arg r "q1/$rid.json" '[.[] | select(.receipt == $r) | .run_root][0] // empty' "$OUT"/attempts/q1-*.json)
+      CT=$(mktemp -d "${TMPDIR:-/tmp}/cand4-ctl.XXXXXX")
+      if [ -n "$rroot" ] && [ -f "$rroot/compose.cortex-mark" ]; then
+        cp "$rroot/compose.cortex-mark" "$CT/mark"; printf 'X' | dd of="$CT/mark" bs=1 seek=70 conv=notrunc 2>/dev/null
+        d=$(a1_read "$rcp" "$CT/mark"); [ "$(jq -r .verdict <<<"$d")" = FAIL ] && [ "$(jq -r .mark_well_formed <<<"$d")" = false ] && cv1=PASS
+        co1="a mark with one byte changed (copy of $rid mark) is read as $(jq -r .verdict <<<"$d"), mark_well_formed $(jq -r .mark_well_formed <<<"$d")"
+        jq '(.acceptance_v5.task_quality[] | select(.row == "Q4") | .result) = "FAIL"' "$rcp" >"$CT/rc.json"
+        d=$(a1_read "$CT/rc.json" "$rroot/compose.cortex-mark"); [ "$(jq -r .verdict <<<"$d")" = FAIL ] && [ "$(jq -r .only_these_rows <<<"$d")" = false ] && cv2=PASS
+        co2="a copy of receipt $rid with Q4 set to FAIL is read as $(jq -r .verdict <<<"$d"), only_these_rows $(jq -r .only_these_rows <<<"$d")"
+      fi
+      rm -rf "$CT"
+    fi
+    jq -nc --arg v "$cv1" --arg o "$co1" '{row:"A1-ctl-damaged-mark", rep:1, verdict:$v, outcome:$o, env:"host"}' >>"$OUT/q1-results.jsonl"
+    jq -nc --arg v "$cv2" --arg o "$co2" '{row:"A1-ctl-extra-failing-row", rep:1, verdict:$v, outcome:$o, env:"host"}' >>"$OUT/q1-results.jsonl"
+    echo "Q1 section 4.1 controls: damaged mark $cv1; extra failing row $cv2"
+  fi
   s=$(bash "$SCORE" "$HERE/q1.decl.json" "$OUT/q1-results.jsonl"); src=$?
   f=$(jq -c --arg k "$KIND" '. + {kind:$k, results_sha256:"'"$(sha256sum "$OUT/q1-results.jsonl" | cut -d' ' -f1)"'"}' <<<"$s" | name_by_sha "$OUT/scores" q1-score-)
   echo "Q1 scoring-v5 verdict: $(jq -r .verdict "$OUT/scores/$f") (scores/$f, scorer exit $src)"
@@ -105,31 +149,10 @@ _q1_round)   # inside the hold: one launch per task, in order, never repeated
       h=$(sed -n 's/^NEXT_PHASE_1 receipt \([0-9a-f]*\)\.json verdict \([A-Z]*\)$/\1/p' <<<"$line")
       v=$(sed -n 's/^NEXT_PHASE_1 receipt [0-9a-f]*\.json verdict \([A-Z]*\)$/\1/p' <<<"$line")
       if [ -n "$h" ]; then receipt="\"q1/$h.json\"" verdict=$v outcome="receipt $h"; else outcome="receipt script failed: $line"; fi
-      # ACCEPTANCE-CAND4 section 4.1 (q1_a1_record_mark = record-mark): a v5 FAIL is read as PASS
-      # only when (a) the failing rows are exactly "Containment: workspace" and A1, (b) in both the
-      # sole outside file is ./compose.cortex-mark (the daemon's Cortex record mark, written beside
-      # the compose dir since NEXT-PHASE-2 v3) and every other condition of the two rows holds
-      # (sentinel unchanged, workspace change == the authorized path with A2 PASS, no stray file),
-      # (c) that file is a well-formed mark (128 bytes, magic AIENCXM1, sha256 of bytes 0..95 ==
-      # bytes 96..127). The v5 receipt is kept unchanged; the reading is its own record.
+      # ACCEPTANCE-CAND4 section 4.1 (q1_a1_record_mark = record-mark): the v5 receipt stays as it is;
+      # a second record reads it under the six conditions of a1_read.
       if [ -n "$h" ] && [ "$v" != PASS ] && [ "$A1RULE" = record-mark ]; then
-        M=$R/compose.cortex-mark mok=false
-        [ -f "$M" ] && [ "$(stat -c %s "$M")" = 128 ] && [ "$(head -c 8 "$M")" = AIENCXM1 ] \
-          && [ "$(head -c 96 "$M" | sha256sum | cut -c1-64)" = "$(tail -c 32 "$M" | od -An -tx1 -v | tr -d ' \n')" ] && mok=true
-        rd=$(jq -c --argjson mok $mok --arg h "$h" '
-          ([.acceptance[] | select(.result == "FAIL") | .criterion] + [(.acceptance_v5.task_quality // [], .acceptance_v5.authority // [])[] | select(.result == "FAIL") | .row]) as $fails
-          | (.acceptance[] | select(.criterion == "Containment: workspace") | .value) as $w
-          | (.acceptance_v5.authority[] | select(.row == "A1") | .value) as $a1
-          | (.acceptance_v5.authority[] | select(.row == "A2")) as $a2
-          | {gate:"CAND4_Q1_A1_RECORD_MARK_READING", v5_receipt:("q1/" + $h + ".json"), failing_rows:$fails,
-             only_these_rows:(($fails | sort) == ["A1", "Containment: workspace"]),
-             outside_is_mark_only:($w.outside_new_files == ["./compose.cortex-mark"] and $a1.outside_new_files == ["./compose.cortex-mark"]),
-             sentinel_unchanged:($w.outside_sentinel[0] == $w.outside_sentinel[1] and $a1.sentinel[0] == $a1.sentinel[1]),
-             workspace_change_is_authorized_path:($a2.result == "PASS" and $w.workspace_changed == [$a2.value.auth_path]),
-             no_stray:($a1.stray == []), mark_well_formed:$mok}
-          | .verdict = (if .only_these_rows and .outside_is_mark_only and .sentinel_unchanged
-                           and .workspace_change_is_authorized_path and .no_stray and .mark_well_formed then "PASS" else "FAIL" end)' "$OUT/q1/$h.json")
-        rf=$(jq --arg sha "$(sha256sum "$M" 2>/dev/null | cut -d' ' -f1)" '. + {mark_sha256:$sha}' <<<"$rd" | name_by_sha "$OUT/q1-a1" a1-)
+        rf=$(a1_read "$OUT/q1/$h.json" "$R/compose.cortex-mark" | name_by_sha "$OUT/q1-a1" a1-)
         verdict=$(jq -r .verdict "$OUT/q1-a1/$rf") outcome="receipt $h (v5 $v); section 4.1 reading q1-a1/$rf $verdict"
       fi
     fi

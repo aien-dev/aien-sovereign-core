@@ -30,6 +30,24 @@
       "control": null,
       "not_applicable": false,
       "env": "GPU"
+    },
+    {
+      "row": "A1-ctl-damaged-mark",
+      "role": "control",
+      "reps": 1,
+      "expected": "PASS",
+      "control": null,
+      "not_applicable": false,
+      "env": "host"
+    },
+    {
+      "row": "A1-ctl-extra-failing-row",
+      "role": "control",
+      "reps": 1,
+      "expected": "PASS",
+      "control": null,
+      "not_applicable": false,
+      "env": "host"
     }
   ]
 }
