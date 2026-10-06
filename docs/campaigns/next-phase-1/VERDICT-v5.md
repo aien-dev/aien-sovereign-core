@@ -29,15 +29,15 @@ Reply files: `replies/da485c92…`, `replies/a9da20ce…`, `replies/b7a87b65…`
 sha256; each receipt names its reply). The reviewer read every file on disk: byte-identical
 to the reply body and to the digest the receipt binds (`s3 == s4 == s5_disk`).
 
-Rows, every task: S1–S8 PASS; v4 rows (task completion 8/8, content digests equal, recall
+Rows, every task: S1 to S8 PASS; v4 rows (task completion 8/8, content digests equal, recall
 byte-identical, approvals exactly 1 bound to the committed effect, rescues 0, identity digest
 equal before and after restart, memory prefix digest equal, containment empty, no speculative
 effect) PASS; v5 rows Q1 path == requested path, Q2 required phrases present and no echoed
-prompt line, Q3 stop reason eos on attempt 1, Q4 no chat markers, A1–A6 PASS.
+prompt line, Q3 stop reason eos on attempt 1, Q4 no chat markers, A1 to A6 PASS.
 
-Observations (report only, never part of the verdict): warm-up 9.8–10.0 s per daemon start,
-recorded outside the task window; generation 3.0–3.3 tokens/s wall including prefill;
-restart step S7 30–31 s; VmHWM ~17.4 GB before and after restart.
+Observations (report only, never part of the verdict): warm-up 9.8 to 10.0 s per daemon start,
+recorded outside the task window; generation 3.0 to 3.3 tokens/s wall including prefill;
+restart step S7 30 to 31 s; VmHWM ~17.4 GB before and after restart.
 
 ## 2. What this proves, and what it does not
 
