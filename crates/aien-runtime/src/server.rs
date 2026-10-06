@@ -336,6 +336,17 @@ async fn submit_turn(
     Ok((tokenizer, events))
 }
 
+/// Receipt label of a finish reason (ACCEPTANCE-v5 Q3): the stop token
+/// (end of sequence) is "eos", the token limit is "max_tokens".
+pub fn finish_reason_label(reason: &aien_inference_abi::FinishReason) -> &'static str {
+    match reason {
+        aien_inference_abi::FinishReason::StopToken => "eos",
+        aien_inference_abi::FinishReason::LengthLimit => "max_tokens",
+        aien_inference_abi::FinishReason::Aborted => "aborted",
+        aien_inference_abi::FinishReason::Preempted => "preempted",
+    }
+}
+
 /// A compose command, run on a blocking thread against the bridge.
 type ComposeJob = Box<dyn FnOnce(&ComposeBridge) -> ControlResponse + Send>;
 
@@ -365,12 +376,13 @@ async fn generate_text(
         loop {
             match events.recv().await {
                 Some(CompletionEvent::Token { token, .. }) => produced.push(token),
-                Some(CompletionEvent::Finished { .. }) => {
+                Some(CompletionEvent::Finished { finish_reason, .. }) => {
                     return tokenizer
                         .decode_opts(&produced, true)
                         .map(|text| crate::spine::Generation {
                             text,
                             tokens: produced.len(),
+                            finish_reason: Some(finish_reason_label(&finish_reason).to_string()),
                         })
                         .map_err(|e| format!("tokenizer decode failed: {e}"));
                 }
@@ -419,6 +431,7 @@ pub fn model_proposer(
             .map(|g| crate::spine::Generation {
                 text: format!("{}{}", crate::spine::COMPOSE_ASSISTANT_PREFIX, g.text),
                 tokens: g.tokens,
+                finish_reason: g.finish_reason,
             })
     })
 }

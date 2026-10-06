@@ -510,6 +510,9 @@ use std::path::{Path, PathBuf};
 pub struct Generation {
     pub text: String,
     pub tokens: usize,
+    /// How generation stopped: "eos" | "max_tokens" | "aborted" | "preempted"
+    /// (ACCEPTANCE-v5 Q3); None when unknown.
+    pub finish_reason: Option<String>,
 }
 
 /// The "model" Skill's work: prompt text and a wall limit in, one reply
@@ -772,10 +775,12 @@ pub fn propose_with_retries(
             text_sha256: None,
             text: None,
             aegis: None,
+            finish_reason: None,
         };
         match out {
             Ok(g) => {
                 a.tokens = g.tokens;
+                a.finish_reason = g.finish_reason.clone();
                 a.text_sha256 = Some(hex(&Sha256::digest(g.text.as_bytes())));
                 a.text = Some(g.text.clone());
                 match check_file_proposal(&g.text) {

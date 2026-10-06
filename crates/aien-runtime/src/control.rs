@@ -304,6 +304,10 @@ pub struct ProposalAttempt {
     pub text: Option<String>,
     /// For the attempt handed to AEGIS: "pass" or "fail".
     pub aegis: Option<String>,
+    /// How generation stopped: "eos" | "max_tokens" | "aborted" | "preempted"
+    /// (ACCEPTANCE-v5 Q3). None when the call failed or the proposer did not say.
+    #[serde(default)]
+    pub finish_reason: Option<String>,
 }
 
 /// The record `ComposeNote` appended.
