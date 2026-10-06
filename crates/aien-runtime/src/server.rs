@@ -257,8 +257,9 @@ async fn submit_turn(
 /// A compose command, run on a blocking thread against the bridge.
 type ComposeJob = Box<dyn FnOnce(&ComposeBridge) -> ControlResponse + Send>;
 
-/// NEXT-PHASE-1: the whole turn as one string (no streaming), for the compose
-/// "model" Skill. Same submission path as `StreamTurn`; fails after `limit`.
+/// NEXT-PHASE-1: the whole turn as one string (no streaming) and its token
+/// count, for the compose "model" Skill. Same submission path as
+/// `StreamTurn`; fails after `limit`.
 async fn generate_text(
     spine: Arc<Mutex<AienRuntimeSpine>>,
     tokenizer: Arc<RwLock<Option<TinyLlamaTokenizer>>>,
@@ -266,7 +267,7 @@ async fn generate_text(
     max_tokens: usize,
     temperature: f32,
     limit: std::time::Duration,
-) -> Result<String, String> {
+) -> Result<crate::spine::Generation, String> {
     let (tokenizer, mut events) =
         submit_turn(spine, tokenizer, messages, max_tokens, temperature).await?;
     let collect = async {
@@ -277,6 +278,10 @@ async fn generate_text(
                 Some(CompletionEvent::Finished { .. }) => {
                     return tokenizer
                         .decode_opts(&produced, true)
+                        .map(|text| crate::spine::Generation {
+                            text,
+                            tokens: produced.len(),
+                        })
                         .map_err(|e| format!("tokenizer decode failed: {e}"));
                 }
                 Some(CompletionEvent::Error { message, .. }) => return Err(message),
@@ -291,7 +296,9 @@ async fn generate_text(
 
 /// The compose "model" Skill: real inference through `generate_text`, run
 /// from an omega World worker thread (not a tokio thread) via `block_on`.
-/// The limit stays under rx_compose_run's 30 s quiescence wait, so a slow
+/// Greedy, at most `AIEN_COMPOSE_MAX_TOKENS` (default 48) tokens per reply;
+/// each call gets the limit `propose_with_retries` passes (what is left of
+/// the 25 s budget, under rx_compose_run's 30 s quiescence wait), so a slow
 /// model fails the Skill (no proposal) instead of failing the run.
 pub fn model_proposer(
     spine: Arc<Mutex<AienRuntimeSpine>>,
@@ -301,8 +308,8 @@ pub fn model_proposer(
     let max_tokens = std::env::var("AIEN_COMPOSE_MAX_TOKENS")
         .ok()
         .and_then(|v| v.trim().parse::<usize>().ok())
-        .unwrap_or(192);
-    Arc::new(move |prompt: &str| {
+        .unwrap_or(48);
+    Arc::new(move |prompt: &str, limit: std::time::Duration| {
         let messages = vec![crate::control::ChatTurn {
             role: "user".into(),
             content: prompt.to_string(),
@@ -313,7 +320,7 @@ pub fn model_proposer(
             messages,
             max_tokens,
             0.0,
-            std::time::Duration::from_secs(25),
+            limit,
         ))
     })
 }

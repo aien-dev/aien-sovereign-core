@@ -280,8 +280,30 @@ pub struct ComposeTaskReport {
     pub uncommitted_proposal: Option<String>,
     #[serde(default)]
     pub proposer_error: Option<String>,
+    /// Every proposal the model Skill made for this task (ACCEPTANCE-v2 3b).
+    #[serde(default)]
+    pub proposal_attempts: Vec<ProposalAttempt>,
     /// "model" when the Skill ran inference, or the stub label.
     pub proposer: String,
+}
+
+/// One proposal the compose "model" Skill made (ACCEPTANCE-v2 3b).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProposalAttempt {
+    /// 1-based.
+    pub attempt: u32,
+    /// Wall time of the model call.
+    pub ms: u64,
+    /// Generated tokens (0 when the call failed).
+    pub tokens: usize,
+    /// "parsed" | "refused" (template parser) | "timeout" | "error".
+    pub outcome: String,
+    /// Why the attempt was refused or failed.
+    pub reason: Option<String>,
+    pub text_sha256: Option<String>,
+    pub text: Option<String>,
+    /// For the attempt handed to AEGIS: "pass" or "fail".
+    pub aegis: Option<String>,
 }
 
 /// The record `ComposeNote` appended.

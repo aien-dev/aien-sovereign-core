@@ -18,7 +18,7 @@ jq -n --argjson run "$(j "$R/run.json")" \
   --argjson s4 "$(j "$S/S4.json")" --argjson s5 "$(j "$S/S5.json")" --argjson s6 "$(j "$S/S6.json")" \
   --argjson s8 "$(j "$S/S8.json")" --argjson pre "$(j "$S/pre-restart-recall.json")" \
   --argjson receipts "$receipts" --arg sc "$SC" --arg omc "$OMC" --arg omg "$OMG" \
-  --arg skill_sha "$skill_sha" --argjson rescues "$RESCUES" --arg note "$NOTE" '
+  --arg skill_sha "$skill_sha" --argjson rescues "$RESCUES" --arg note "$NOTE" --arg spec "${SPEC:-ACCEPTANCE.md spec_version 1}" '
   def st($id): ($run.steps // []) | map(select(.step == $id)) | (.[0] // {});
   def okv: if . then "PASS" else "FAIL" end;
   ($s3.report // {}) as $rep
@@ -109,6 +109,8 @@ jq -n --argjson run "$(j "$R/run.json")" \
     uname:$run.uname,
     model:($d | map(.model)),
     note:$note,
+    acceptance_spec:$spec,
+    observations:{tokens_per_s:(($rep.proposal_attempts // []) | map(select(.tokens > 0 and .ms > 0) | {attempt, tokens, ms, tokens_per_s:((.tokens * 100000 / .ms | floor) / 100)}))},
     skills:[{id:0, name:"aien.model.propose-file-change", version:null, digest:$skill_sha, cost:10}],
     record_digest:[($rep.record_digest // null)],
     prefix_digest:[($pre.recall.prefix_digest // null), ($s8.recall.prefix_digest // null)],
@@ -126,6 +128,7 @@ jq -n --argjson run "$(j "$R/run.json")" \
       proposer:$rep.proposer, proposal_path:$rep.proposal_path,
       proposal_sha256:$rep.proposal_sha256, proposal_content_sha256:$rep.proposal_content_sha256,
       uncommitted_proposal:($rep.uncommitted_proposal // null), proposer_error:($rep.proposer_error // null),
+      proposal_attempts:($rep.proposal_attempts // []),
       steps: [
         {step:1, name:"S1 remember", result:($reached.S1|okv), detail:{ms:st("S1").wall_ms, constraint:$s1.constraint}},
         {step:2, name:"S2 inspect", result:($reached.S2|okv), detail:{ms:st("S2").wall_ms, tree_sha256:$s2.tree_sha256, receipt:$s2.receipt, effect:$s2.effect.id}},
@@ -145,8 +148,11 @@ v=$(jq -r .verdict "$OUT/$h.json")
   echo "sovereign-core $SC; omega compose $OMC; omega GPU engine $OMG"
   jq -r '"machine \(.machine_id); backend \(.acceptance[4].value.backend | join(" / ")); gpu_used \(.acceptance[4].value.gpu_used)"' "$OUT/$h.json"
   jq -r '.runs[0].steps[] | "  \(.name): \(.result)  \(.detail.ms // .detail.wall_ms // "-") ms"' "$OUT/$h.json"
-  echo "Acceptance (frozen thresholds, ACCEPTANCE.md spec_version 1):"
+  echo "Acceptance (frozen thresholds, ${SPEC:-ACCEPTANCE.md spec_version 1}):"
   jq -r '.acceptance[] | "  \(.result)  \(.criterion)  [\(.threshold)]  \(.value | tojson | .[0:220])"' "$OUT/$h.json"
+  jq -r '(.runs[0].proposal_attempts // [])[] | "  proposal attempt \(.attempt): \(.outcome) \(.ms) ms \(.tokens) tokens aegis=\(.aegis // "-") \(.reason // "")"' "$OUT/$h.json"
+  echo "Observations:"
+  jq -r '.observations.tokens_per_s[] | "  attempt \(.attempt): \(.tokens) tokens in \(.ms) ms = \(.tokens_per_s) tokens/s (wall, incl. prompt prefill)"' "$OUT/$h.json"
   [ -n "$NOTE" ] && echo "Note: $NOTE"
 } >"$OUT/$h.summary.txt"
 [ -f "$OUT/INDEX.md" ] || printf '# NEXT-PHASE-1 campaign receipts\n\nEach receipt is named by the sha256 of its content and never edited.\n\n' >"$OUT/INDEX.md"

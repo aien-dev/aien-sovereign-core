@@ -5,13 +5,20 @@
 //! AIEN_OMEGA_COMPOSE_DIR, see its README) these run the real composition;
 //! in a stub build they check that the bridge reports the missing library.
 use aien_runtime::control::{ComposeRecallReport, ComposeTaskReport, ControlResponse};
-use aien_runtime::spine::{parse_file_proposal, ComposeBridge, ComposeProposer};
+use aien_runtime::spine::{
+    check_file_proposal, parse_file_proposal, propose_with_retries, ComposeBridge, ComposeProposer,
+    Generation, COMPOSE_MAX_ATTEMPTS,
+};
 use std::sync::Arc;
 
 fn proposer() -> ComposeProposer {
-    Arc::new(|prompt: &str| {
+    Arc::new(|prompt: &str, _limit: std::time::Duration| {
         assert!(prompt.contains("Authorized workspace:"));
-        Ok("NOTES.md\nconstraint: keep main green\n".to_string())
+        assert!(prompt.contains("filename: <relative path>"));
+        Ok(Generation {
+            text: "filename: NOTES.md\nconstraint: keep main green\n".to_string(),
+            tokens: 12,
+        })
     })
 }
 
@@ -79,8 +86,12 @@ fn compose_task_commits_and_survives_restart() {
     );
     assert_eq!(
         r1.proposal.as_deref(),
-        Some("NOTES.md\nconstraint: keep main green\n")
+        Some("filename: NOTES.md\nconstraint: keep main green\n")
     );
+    assert_eq!(r1.proposal_attempts.len(), 1, "{:?}", r1.proposal_attempts);
+    assert_eq!(r1.proposal_attempts[0].outcome, "parsed");
+    assert_eq!(r1.proposal_attempts[0].aegis.as_deref(), Some("pass"));
+    assert_eq!(r1.proposal_attempts[0].tokens, 12);
     assert_eq!(r1.machine_id.len(), 64);
     assert_eq!(r1.proposal_path.as_deref(), Some("NOTES.md"));
     assert_eq!(
@@ -169,7 +180,7 @@ fn failing_model_commits_nothing() {
     std::fs::create_dir_all(&ws).unwrap();
     let bridge = ComposeBridge::new(
         tmp.path().join("compose"),
-        Arc::new(|_: &str| Err("model unavailable".to_string())),
+        Arc::new(|_: &str, _: std::time::Duration| Err("model unavailable".to_string())),
         "test:failing",
     );
     let r = report(bridge.run_task("goal", ws.to_str().unwrap()));
@@ -189,24 +200,193 @@ fn bad_workspace_is_refused() {
 }
 
 #[test]
-fn proposal_parsing_is_strict_and_deterministic() {
-    let p = parse_file_proposal("NOTES.md\nline one\n").unwrap();
-    assert_eq!(
-        (p.path.as_str(), p.content.as_str()),
-        ("NOTES.md", "line one\n")
-    );
-    let p = parse_file_proposal(
-        "Sure! Here it is.\n\nPath: `docs/plan.txt`\n```\nstep 1\nstep 2\n```\nThanks",
+fn proposal_template_parser() {
+    // filename line present
+    let p = check_file_proposal(
+        "filename: NOTES.md
+line one
+",
     )
     .unwrap();
     assert_eq!(
         (p.path.as_str(), p.content.as_str()),
-        ("docs/plan.txt", "step 1\nstep 2\n")
+        (
+            "NOTES.md",
+            "line one
+"
+        )
     );
-    assert!(parse_file_proposal("Sure, I can help with that!").is_none());
-    assert!(parse_file_proposal("/etc/passwd\nroot\n").is_none());
-    assert!(parse_file_proposal("../escape.txt\nx\n").is_none());
-    assert!(parse_file_proposal("NOTES.md\n\n   \n").is_none());
+    let p = check_file_proposal(
+        "
+**Filename: `docs/plan.txt`**
+
+```
+step 1
+step 2
+```
+",
+    )
+    .unwrap();
+    assert_eq!(
+        (p.path.as_str(), p.content.as_str()),
+        (
+            "docs/plan.txt",
+            "step 1
+step 2
+"
+        )
+    );
+    // filename line absent: refused, even when a path appears later
+    for t in [
+        "Sure, I can help with that!",
+        "NOTES.md
+line one
+",
+        "To create NOTES.md:
+filename: NOTES.md
+x
+",
+        "",
+    ] {
+        assert!(check_file_proposal(t).is_err(), "{t:?}");
+        assert!(parse_file_proposal(t).is_none());
+    }
+    assert!(check_file_proposal(
+        "NOTES.md
+x"
+    )
+    .unwrap_err()
+    .contains("no filename line"));
+    // outside the workspace: refused before AEGIS
+    for t in [
+        "filename: /etc/passwd
+root
+",
+        "filename: ../escape.txt
+x
+",
+        "filename: docs/../../escape.txt
+x
+",
+        "filename: ~/.bashrc
+x
+",
+    ] {
+        let e = check_file_proposal(t).unwrap_err();
+        assert!(e.contains("outside the workspace"), "{t:?}: {e}");
+    }
+    assert!(check_file_proposal(
+        "filename: a b.txt
+x
+"
+    )
+    .is_err());
+    assert!(check_file_proposal(
+        "filename: NOTES.md
+
+   
+"
+    )
+    .unwrap_err()
+    .contains("empty content"));
+    // deterministic
+    assert_eq!(
+        check_file_proposal(
+            "filename: a.txt
+z
+"
+        ),
+        check_file_proposal(
+            "filename: a.txt
+z
+"
+        )
+    );
+}
+
+#[test]
+fn retry_is_capped_and_recorded() {
+    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::time::Duration;
+    let budget = Duration::from_secs(25);
+    // never parses: exactly COMPOSE_MAX_ATTEMPTS calls, all refused
+    let calls = AtomicU32::new(0);
+    let chatty = |_: &str, _: Duration| {
+        calls.fetch_add(1, Ordering::SeqCst);
+        Ok(Generation {
+            text: "Sure!".into(),
+            tokens: 2,
+        })
+    };
+    let (out, a) = propose_with_retries(&chatty, "base", budget, COMPOSE_MAX_ATTEMPTS);
+    assert!(out.unwrap_err().contains("no filename line"));
+    assert_eq!(calls.load(Ordering::SeqCst), COMPOSE_MAX_ATTEMPTS);
+    assert_eq!(a.len(), 3);
+    assert!(a
+        .iter()
+        .all(|x| x.outcome == "refused" && x.tokens == 2 && x.text_sha256.is_some()));
+    assert_eq!(
+        a.iter().map(|x| x.attempt).collect::<Vec<_>>(),
+        vec![1, 2, 3]
+    );
+    // second attempt parses: stops there, and the retry prompt names the refusal
+    let prompts = parking_lot::Mutex::new(Vec::<String>::new());
+    let second = |p: &str, _: Duration| {
+        prompts.lock().push(p.to_string());
+        let text = if prompts.lock().len() == 1 {
+            "Sure!"
+        } else {
+            "filename: a.txt
+ok
+"
+        };
+        Ok(Generation {
+            text: text.into(),
+            tokens: 3,
+        })
+    };
+    let (out, a) = propose_with_retries(&second, "base", budget, COMPOSE_MAX_ATTEMPTS);
+    assert_eq!(
+        out.unwrap(),
+        "filename: a.txt
+ok
+"
+    );
+    assert_eq!(a.len(), 2);
+    assert_eq!(
+        (a[0].outcome.as_str(), a[1].outcome.as_str()),
+        ("refused", "parsed")
+    );
+    let p = prompts.lock();
+    assert_eq!(p[0], "base");
+    assert!(
+        p[1].starts_with(
+            "base
+"
+        ) && p[1].contains("previous answer was refused")
+    );
+    drop(p);
+    // budget: attempt 2 does not start when less time is left than attempt 1 took
+    let slow = |_: &str, _: Duration| {
+        std::thread::sleep(Duration::from_millis(30));
+        Ok(Generation {
+            text: "Sure!".into(),
+            tokens: 2,
+        })
+    };
+    let (out, a) = propose_with_retries(
+        &slow,
+        "base",
+        Duration::from_millis(40),
+        COMPOSE_MAX_ATTEMPTS,
+    );
+    assert_eq!(a.len(), 1);
+    assert!(out.unwrap_err().contains("no attempt 2"));
+    // model errors are recorded, not retried past the cap
+    let err =
+        |_: &str, _: Duration| Err::<Generation, _>("model proposal exceeded 25000 ms".to_string());
+    let (_, a) = propose_with_retries(&err, "base", budget, COMPOSE_MAX_ATTEMPTS);
+    assert!(a.len() <= 3 && a.iter().all(|x| x.outcome == "timeout"));
 }
 
 #[test]
@@ -219,13 +399,33 @@ fn unparseable_proposal_fails_the_aegis_contract() {
     std::fs::create_dir_all(&ws).unwrap();
     let bridge = ComposeBridge::new(
         tmp.path().join("compose"),
-        Arc::new(|_: &str| Ok("Sure, I can help with that!".to_string())),
+        Arc::new(|_: &str, _: std::time::Duration| {
+            Ok(Generation {
+                text: "Sure, I can help with that!".to_string(),
+                tokens: 8,
+            })
+        }),
         "test:chatty",
     );
     let r = report(bridge.run_task("goal", ws.to_str().unwrap()));
     assert!(!r.committed, "{r:?}");
     assert_eq!(r.aegis_pass_mask & 1, 0);
     assert_eq!(r.proposal_path, None);
+    // Refused by the template parser before AEGIS, retried up to the cap.
+    assert_eq!(
+        r.proposal_attempts.len(),
+        COMPOSE_MAX_ATTEMPTS as usize,
+        "{r:?}"
+    );
+    assert!(r
+        .proposal_attempts
+        .iter()
+        .all(|a| a.outcome == "refused" && a.aegis.is_none()));
+    assert!(r
+        .proposer_error
+        .as_deref()
+        .unwrap_or("")
+        .contains("no filename line"));
 }
 
 #[test]

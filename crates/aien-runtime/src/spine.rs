@@ -498,17 +498,25 @@ fn branch_sampling_params(config: &SwarmConfig) -> SamplingParams {
 
 use crate::control::{
     ComposeNoteReport, ComposeRecallReport, ComposeRecordView, ComposeRecoverReport,
-    ComposeTaskReport,
+    ComposeTaskReport, ProposalAttempt,
 };
 use aien_omega_compose::{hex, note_bytes, Compose, ComposeError, NoteKind, RootKind};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-/// The "model" Skill's work: prompt text in, proposal text out. The server
-/// installs the real inference path (the one `StreamTurn` uses); tests
-/// install a deterministic proposer.
-pub type ComposeProposer = Arc<dyn Fn(&str) -> Result<String, String> + Send + Sync>;
+/// One model reply: the text and how many tokens were generated.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Generation {
+    pub text: String,
+    pub tokens: usize,
+}
+
+/// The "model" Skill's work: prompt text and a wall limit in, one reply
+/// out. The server installs the real inference path (the one `StreamTurn`
+/// uses); tests install a deterministic proposer.
+pub type ComposeProposer =
+    Arc<dyn Fn(&str, std::time::Duration) -> Result<Generation, String> + Send + Sync>;
 
 /// Most entries of the workspace listing put into the prompt.
 const COMPOSE_LISTING_MAX: usize = 32;
@@ -611,38 +619,52 @@ pub struct FileProposal {
     pub content: String,
 }
 
-fn path_token(line: &str) -> Option<String> {
-    let mut t = line
+fn bare(s: &str) -> &str {
+    s.trim()
+        .trim_matches(|c| matches!(c, '`' | '"' | '\'' | '*'))
         .trim()
-        .trim_matches(|c| matches!(c, '`' | '"' | '\'' | '*'));
-    for p in ["path:", "file:", "filename:"] {
-        if t.len() >= p.len() && t[..p.len()].eq_ignore_ascii_case(p) {
-            t = t[p.len()..]
-                .trim()
-                .trim_matches(|c| matches!(c, '`' | '"' | '\'' | '*'));
-        }
-    }
-    let ok = !t.is_empty()
-        && t.len() <= 255
-        && !t.starts_with('/')
-        && !t.starts_with('~')
-        && t.chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | '/'))
-        && (t.contains('.') || t.contains('/'))
-        && t.split('/').all(|c| !c.is_empty() && c != "." && c != "..");
-    ok.then(|| t.to_string())
 }
 
-/// The model's answer as one file change: the first line that is a plain
-/// relative path (letters, digits, `._-/`, no `..`, not absolute; `Path:`
-/// prefixes, quotes and backticks are stripped), then everything after it as
-/// the content (a surrounding code fence is dropped). None when no such line
-/// exists or the content is empty. Deterministic: the AEGIS contract, the
-/// authorization and the write all use this one reading.
-pub fn parse_file_proposal(text: &str) -> Option<FileProposal> {
+/// A path the workspace may hold: relative, at most 255 bytes, letters,
+/// digits and `._-/`, no empty, `.` or `..` component, not absolute, not `~`.
+fn check_relative_path(p: &str) -> Result<(), String> {
+    if p.is_empty() {
+        return Err("empty path on the filename line".into());
+    }
+    if p.starts_with('/') || p.starts_with('~') || p.split('/').any(|c| c == "..") {
+        return Err(format!("path {p:?} is outside the workspace"));
+    }
+    let ok = p.len() <= 255
+        && p.chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | '/'))
+        && p.split('/').all(|c| !c.is_empty() && c != ".");
+    if ok {
+        Ok(())
+    } else {
+        Err(format!("path {p:?} is not a plain relative path"))
+    }
+}
+
+/// The model's answer in the fixed proposal template: the first nonempty
+/// line is `filename: <relative path>` (case-insensitive key; quotes,
+/// backticks and asterisks around it or the path are ignored), everything
+/// after it is the complete content (blank lines around it and one
+/// surrounding code fence are dropped; it ends with one newline).
+/// Err names why the reply is refused. Deterministic: the Skill, the AEGIS
+/// contract, the authorization and the write all use this one reading.
+pub fn check_file_proposal(text: &str) -> Result<FileProposal, String> {
     let lines: Vec<&str> = text.lines().collect();
-    let at = lines.iter().position(|l| path_token(l).is_some())?;
-    let path = path_token(lines[at])?;
+    let at = lines
+        .iter()
+        .position(|l| !l.trim().is_empty())
+        .ok_or("empty reply")?;
+    let first = bare(lines[at]);
+    const KEY: &str = "filename:";
+    if first.len() < KEY.len() || !first[..KEY.len()].eq_ignore_ascii_case(KEY) {
+        return Err("no filename line: the first line must be 'filename: <relative path>'".into());
+    }
+    let path = bare(&first[KEY.len()..]).to_string();
+    check_relative_path(&path)?;
     let mut body: Vec<&str> = lines[at + 1..].to_vec();
     while body.first().is_some_and(|l| l.trim().is_empty()) {
         body.remove(0);
@@ -660,11 +682,118 @@ pub fn parse_file_proposal(text: &str) -> Option<FileProposal> {
         body.pop();
     }
     if body.iter().all(|l| l.trim().is_empty()) {
-        return None;
+        return Err("empty content after the filename line".into());
     }
     let mut content = body.join("\n");
     content.push('\n');
-    Some(FileProposal { path, content })
+    Ok(FileProposal { path, content })
+}
+
+/// `check_file_proposal` without the reason.
+pub fn parse_file_proposal(text: &str) -> Option<FileProposal> {
+    check_file_proposal(text).ok()
+}
+
+/// At most this many proposals per task (ACCEPTANCE-v2 Section 3b).
+pub const COMPOSE_MAX_ATTEMPTS: u32 = 3;
+/// Wall budget for all attempts of one task: under rx_compose_run's 30 s
+/// quiescence wait, which is not raised (ACCEPTANCE-v2 Section 4).
+pub const COMPOSE_SKILL_BUDGET: std::time::Duration = std::time::Duration::from_secs(25);
+
+/// The fixed proposal template of the production RunComposeTask path.
+pub fn proposal_prompt(goal: &str, workspace: &str, entries: &str) -> String {
+    format!(
+        "Goal: {goal}\nAuthorized workspace: {workspace}\nTop-level entries: {entries}\n\
+         Propose exactly one file change inside the workspace.\n\
+         Answer in exactly this format and nothing else:\n\
+         filename: <relative path>\n\
+         <the complete new file content>"
+    )
+}
+
+/// The one correction line added to attempt k > 1.
+pub fn retry_prompt(base: &str, reason: &str) -> String {
+    format!(
+        "{base}\nYour previous answer was refused ({reason}). \
+         Start your answer with the line \"filename: <relative path>\"."
+    )
+}
+
+/// Runs up to `max_attempts` proposals within `budget`: attempt 1 always
+/// starts; attempt k > 1 starts only if the remaining budget is at least
+/// the measured duration of attempt k-1, and gets the remaining budget as
+/// its limit. Returns the first reply that passes `check_file_proposal`
+/// (or the last refusal reason) and every attempt made.
+pub fn propose_with_retries(
+    proposer: &(dyn Fn(&str, std::time::Duration) -> Result<Generation, String> + Send + Sync),
+    base: &str,
+    budget: std::time::Duration,
+    max_attempts: u32,
+) -> (Result<String, String>, Vec<ProposalAttempt>) {
+    let start = std::time::Instant::now();
+    let mut attempts: Vec<ProposalAttempt> = Vec::new();
+    let mut last_reason = "no attempt made".to_string();
+    let mut last_ms: u64 = 0;
+    for k in 1..=max_attempts {
+        let remaining = budget.saturating_sub(start.elapsed());
+        if k > 1 && (remaining.as_millis() as u64) < last_ms.max(1) {
+            last_reason = format!(
+                "{last_reason}; no attempt {k}: {} ms left < {last_ms} ms measured for attempt {}",
+                remaining.as_millis(),
+                k - 1
+            );
+            break;
+        }
+        let prompt = if k == 1 {
+            base.to_string()
+        } else {
+            retry_prompt(base, &last_reason)
+        };
+        let t0 = std::time::Instant::now();
+        let out = proposer(&prompt, remaining);
+        last_ms = t0.elapsed().as_millis() as u64;
+        let mut a = ProposalAttempt {
+            attempt: k,
+            ms: last_ms,
+            tokens: 0,
+            outcome: String::new(),
+            reason: None,
+            text_sha256: None,
+            text: None,
+            aegis: None,
+        };
+        match out {
+            Ok(g) => {
+                a.tokens = g.tokens;
+                a.text_sha256 = Some(hex(&Sha256::digest(g.text.as_bytes())));
+                a.text = Some(g.text.clone());
+                match check_file_proposal(&g.text) {
+                    Ok(_) => {
+                        a.outcome = "parsed".into();
+                        attempts.push(a);
+                        return (Ok(g.text), attempts);
+                    }
+                    Err(e) => {
+                        a.outcome = "refused".into();
+                        a.reason = Some(e.clone());
+                        last_reason = e;
+                    }
+                }
+            }
+            Err(e) => {
+                a.outcome = if e.contains("exceeded") {
+                    "timeout"
+                } else {
+                    "error"
+                }
+                .into();
+                a.reason = Some(e.clone());
+                last_reason = e;
+            }
+        }
+        attempts.push(a);
+    }
+    (Err(last_reason), attempts)
 }
 
 fn record_view(compose: &mut Compose, r: &aien_omega_compose::Record) -> ComposeRecordView {
@@ -703,9 +832,12 @@ struct ComposeHome {
     compose: Compose,
     machine_id: String,
     prompts: Arc<parking_lot::Mutex<HashMap<u64, String>>>,
-    /// What the model Skill returned per task: the text, or why it gave none.
-    proposals: Arc<parking_lot::Mutex<HashMap<u64, Result<String, String>>>>,
+    /// What the model Skill returned per task: the text, or why it gave
+    /// none, and every attempt it made.
+    proposals: Arc<parking_lot::Mutex<HashMap<u64, SkillOutput>>>,
 }
+
+type SkillOutput = (Result<String, String>, Vec<ProposalAttempt>);
 
 /// Owns the composition home of this process.
 pub struct ComposeBridge {
@@ -735,26 +867,21 @@ impl ComposeBridge {
             Compose::open(&self.dir, RootKind::Provisioned, &root, 0xA1E4_0001)
                 .map_err(|e: ComposeError| refusal(&self.dir, &e))?;
         let prompts: Arc<parking_lot::Mutex<HashMap<u64, String>>> = Arc::default();
-        let proposals: Arc<parking_lot::Mutex<HashMap<u64, Result<String, String>>>> =
-            Arc::default();
+        let proposals: Arc<parking_lot::Mutex<HashMap<u64, SkillOutput>>> = Arc::default();
         let (pr, pp, proposer) = (prompts.clone(), proposals.clone(), self.proposer.clone());
         compose
             .register_skill(COMPOSE_MODEL_SKILL, None, 10, move |task| {
                 let prompt = pr.lock().get(&task).cloned()?;
-                let text = match proposer(&prompt) {
-                    Ok(t) if !t.trim().is_empty() => t,
-                    Ok(_) => {
-                        pp.lock().insert(task, Err("empty model output".into()));
-                        return None;
-                    }
-                    Err(e) => {
-                        pp.lock().insert(task, Err(e));
-                        return None;
-                    }
-                };
-                let h = proposal_handle(&text);
-                pp.lock().insert(task, Ok(text));
-                Some(h)
+                // Fixed template + bounded automatic retry (ACCEPTANCE-v2 3a, 3b).
+                let (out, attempts) = propose_with_retries(
+                    proposer.as_ref(),
+                    &prompt,
+                    COMPOSE_SKILL_BUDGET,
+                    COMPOSE_MAX_ATTEMPTS,
+                );
+                let h = out.as_ref().ok().map(|t| proposal_handle(t));
+                pp.lock().insert(task, (out, attempts));
+                h
             })
             .map_err(|e| format!("compose register skill: {e}"))?;
         let pv = proposals.clone();
@@ -763,7 +890,7 @@ impl ComposeBridge {
                 // AEGIS contract: the result names exactly the proposal text
                 // the Skill recorded for this task, and that text parses as one
                 // file change (a relative path and nonempty content).
-                pv.lock().get(&task).is_some_and(|t| {
+                pv.lock().get(&task).is_some_and(|(t, _)| {
                     let Ok(t) = t else { return false };
                     proposal_handle(t) == result && parse_file_proposal(t).is_some()
                 })
@@ -807,18 +934,16 @@ impl ComposeBridge {
         names.sort();
         let more = names.len().saturating_sub(COMPOSE_LISTING_MAX);
         names.truncate(COMPOSE_LISTING_MAX);
-        let prompt = format!(
-            "Goal: {goal}\nAuthorized workspace: {}\nTop-level entries: {}{}\n\
-             Propose exactly one file change inside the workspace. Answer with the \
-             relative path on the first line, then the complete new file content.",
-            ws.display(),
+        let entries = format!(
+            "{}{}",
             names.join(", "),
             if more > 0 {
                 format!(" (+{more} more)")
             } else {
                 String::new()
-            },
+            }
         );
+        let prompt = proposal_prompt(goal, &ws.display().to_string(), &entries);
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_err(|e| format!("clock: {e}"))?;
@@ -844,11 +969,16 @@ impl ComposeBridge {
         let output = home.proposals.lock().remove(&task);
         let r = run.map_err(|e| format!("compose run: {e}"))?;
         let committed = r.committed == 1;
-        let (proposal, uncommitted_proposal, proposer_error) = match output {
-            Some(Ok(t)) if committed => (Some(t), None, None),
-            Some(Ok(t)) => (None, Some(t), None),
-            Some(Err(e)) => (None, None, Some(e)),
-            None => (None, None, None),
+        let (out, mut proposal_attempts) =
+            output.unwrap_or((Err("the Skill did not run".into()), Vec::new()));
+        // The attempt handed to AEGIS is the parsed one; record its verdict.
+        if let Some(a) = proposal_attempts.iter_mut().find(|a| a.outcome == "parsed") {
+            a.aegis = Some(if committed { "pass" } else { "fail" }.into());
+        }
+        let (proposal, uncommitted_proposal, proposer_error) = match out {
+            Ok(t) if committed => (Some(t), None, None),
+            Ok(t) => (None, Some(t), None),
+            Err(e) => (None, None, Some(e)),
         };
         let parsed = proposal.as_deref().and_then(parse_file_proposal);
         Ok(ComposeTaskReport {
@@ -878,6 +1008,7 @@ impl ComposeBridge {
             proposal,
             uncommitted_proposal,
             proposer_error,
+            proposal_attempts,
             proposer: self.proposer_label.clone(),
         })
     }
