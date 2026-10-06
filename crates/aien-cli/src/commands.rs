@@ -1372,6 +1372,8 @@ pub async fn run_daemon_server() {
     if let Some(tokenizer) = tokenizer {
         server.set_tokenizer(tokenizer);
         println!("  Tokenizer: {}", "TinyLlama chat template".green());
+        // NEXT-PHASE-1 v4: one declared 1-token warm-up before serving.
+        server.enable_warm_up();
     } else {
         println!(
             "  Tokenizer: {}",
