@@ -13,8 +13,8 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/aien-test-install-release.XXXXXX")"
-trap 'rm -rf "$WORK"' EXIT
-fail() { echo "FAIL: $*" >&2; exit 1; }
+[[ -n "${KEEP:-}" ]] || trap 'rm -rf "$WORK"' EXIT
+fail() { echo "FAIL: $*" >&2; [[ -z "${KEEP:-}" ]] || echo "WORK=$WORK" >&2; exit 1; }
 
 case "$(uname -s)" in Linux) OS=linux ;; Darwin) OS=macos ;; *) fail "unsupported OS" ;; esac
 case "$(uname -m)" in x86_64|amd64) ARCH=x86_64 ;; aarch64|arm64) ARCH=aarch64 ;; *) fail "unsupported arch" ;; esac
@@ -31,14 +31,21 @@ ssh-keygen -q -t ed25519 -N '' -C test -f "$WORK/key"
 ssh-keygen -q -t ed25519 -N '' -C other -f "$WORK/other"
 printf 'aien-release %s\n' "$(cut -d' ' -f1,2 "$WORK/key.pub")" > "$WORK/allowed_signers"
 
-make_release() { # dir signing-key
-    local d="$1" k="$2"
+make_release() { # dir signing-key [candidate] [variant]
+    local d="$1" k="$2" cand="${3:-CAND-1}" variant="${4:-a}" f aien
     rm -rf "$WORK/pkg"
     mkdir -p "$d" "$WORK/pkg/bin" "$WORK/pkg/imprints/en2-trinity"
-    printf '#!/bin/sh\nexit 0\n' > "$WORK/pkg/bin/aien"
+    printf '#!/bin/sh\necho aien-%s\nexit 0\n' "$variant" > "$WORK/pkg/bin/aien"
     printf '#!/bin/sh\nexit 0\n' > "$WORK/pkg/bin/cortex-rs"
     printf 'fixture imprint\n' > "$WORK/pkg/imprints/en2-trinity/soul.md"
     chmod 755 "$WORK/pkg/bin/"*
+    aien="$(sha256sum "$WORK/pkg/bin/aien" 2>/dev/null | cut -d' ' -f1 || shasum -a 256 "$WORK/pkg/bin/aien" | cut -d' ' -f1)"
+    {
+        printf 'schema = "AienReleaseV1"\ncandidate = "%s"\naien-cli-sha256 = "%s"\n\n[files]\n' "$cand" "$aien"
+        (cd "$WORK/pkg" && find . -type f ! -name release.toml | LC_ALL=C sort | sed 's|^\./||') | while read -r f; do
+            printf '"%s" = "%s"\n' "$f" "$(sha256sum "$WORK/pkg/$f" | cut -d' ' -f1)"
+        done
+    } > "$WORK/pkg/release.toml"
     tar -czf "$d/$ASSET" -C "$WORK/pkg" .
     (cd "$d" && sha256sum "$ASSET" 2>/dev/null > SHA256SUMS.txt || shasum -a 256 "$ASSET" > SHA256SUMS.txt)
     ssh-keygen -q -Y sign -f "$k" -n aien-release "$d/SHA256SUMS.txt"
@@ -97,4 +104,135 @@ fi
 grep -q "signature is NOT valid" "$WORK/log" || fail "pinned-signer fallback did not reject the fixture"
 [[ ! -e "$WORK/bin-pinned/aien" ]] || fail "pinned-signer refusal left a binary"
 
-echo "PASS: release install verifies signature and checksum, rejects tampered and forged releases, installs standalone offline, pinned key matches allowed_signers"
+
+# 7. upgrade: a newer candidate installs over the first; one previous release is kept; the
+#    record names both; operator.toml is untouched
+SIGN_ENV=(AIEN_SOURCE_DIR="$ROOT" AIEN_ALLOWED_SIGNERS="$WORK/allowed_signers")
+live() { readlink "$1/releases/current"; }
+inst_args() { # bin cfg args... : run install.sh with arguments in explicit dirs
+    local bin="$1" cfg="$2"; shift 2
+    env AIEN_BIN_DIR="$bin" AIEN_CONFIG_DIR="$cfg" AIEN_INSTALL_NO_PROFILE=1 HOME="$WORK/home" \
+        bash "$ROOT/install.sh" "$@" > "$WORK/log" 2>&1
+}
+echo '# local edit' >> "$WORK/cfg-good/operator.toml"
+OP_BEFORE="$(sha256sum "$WORK/cfg-good/operator.toml" | cut -d' ' -f1)"
+ID1="$(live "$WORK/cfg-good")"
+[[ -n "$ID1" && -f "$WORK/cfg-good/installed.toml" ]] || fail "first install left no live release or record"
+[[ "$("$WORK/bin-good/aien")" == "aien-a" ]] || fail "first install does not run"
+make_release "$WORK/rel2" "$WORK/key" CAND-2 b
+run_install "$WORK/rel2" "$WORK/bin-good" "$WORK/cfg-good" "$ROOT/install.sh" "${SIGN_ENV[@]}" \
+    || { cat "$WORK/log" >&2; fail "upgrade did not install"; }
+ID2="$(live "$WORK/cfg-good")"
+[[ "$ID2" != "$ID1" ]] || fail "upgrade did not change the live release"
+[[ "$("$WORK/bin-good/aien")" == "aien-b" ]] || fail "installed aien is not the upgraded one"
+grep -q "^previous = \"$ID1\"" "$WORK/cfg-good/installed.toml" || fail "record does not name the previous release"
+grep -q 'candidate = "CAND-2"' "$WORK/cfg-good/installed.toml" || fail "record lacks the new candidate"
+[[ "$(sha256sum "$WORK/cfg-good/operator.toml" | cut -d' ' -f1)" == "$OP_BEFORE" ]] || fail "upgrade changed operator.toml"
+[[ "$(ls "$WORK/cfg-good/releases" | grep -vc '^current$')" -eq 2 ]] || fail "expected exactly two releases kept"
+
+# 8. rollback returns to the first release and records it; a second rollback goes forward again
+inst_args "$WORK/bin-good" "$WORK/cfg-good" --rollback || { cat "$WORK/log" >&2; fail "rollback failed"; }
+[[ "$(live "$WORK/cfg-good")" == "$ID1" && "$("$WORK/bin-good/aien")" == "aien-a" ]] || fail "rollback did not restore the first release"
+grep -q '^last-action = "rollback"' "$WORK/cfg-good/installed.toml" || fail "rollback not recorded"
+grep -q "^previous = \"$ID2\"" "$WORK/cfg-good/installed.toml" || fail "record does not name the rolled-back-from release"
+inst_args "$WORK/bin-good" "$WORK/cfg-good" --rollback || fail "second rollback failed"
+[[ "$(live "$WORK/cfg-good")" == "$ID2" ]] || fail "second rollback did not swap forward"
+inst_args "$WORK/bin-good" "$WORK/cfg-good" --rollback || fail "third rollback failed"
+if inst_args "$WORK/bin-none" "$WORK/cfg-none" --rollback; then fail "rollback with nothing installed succeeded"; fi
+grep -q "no previous release" "$WORK/log" || fail "rollback with nothing installed not explained"
+
+# 9. downgrade guard: an older candidate is refused unless --allow-downgrade
+inst_args "$WORK/bin-good" "$WORK/cfg-good" --rollback >/dev/null || true   # live = ID2 (CAND-2)
+[[ "$(live "$WORK/cfg-good")" == "$ID2" ]] || fail "setup for the downgrade case failed"
+make_release "$WORK/rel0" "$WORK/key" CAND-1 c
+if run_install "$WORK/rel0" "$WORK/bin-good" "$WORK/cfg-good" "$ROOT/install.sh" "${SIGN_ENV[@]}"; then
+    fail "older candidate installed without --allow-downgrade"
+fi
+grep -q "allow-downgrade" "$WORK/log" || fail "downgrade refusal not explained"
+[[ "$(live "$WORK/cfg-good")" == "$ID2" ]] || fail "refused downgrade changed the live release"
+env AIEN_RELEASE_TAG=v0.0.0-test AIEN_RELEASE_BASE_URL="file://$WORK/rel0" AIEN_BIN_DIR="$WORK/bin-good" \
+    AIEN_CONFIG_DIR="$WORK/cfg-good" AIEN_INSTALL_NO_PROFILE=1 "${SIGN_ENV[@]}" \
+    bash "$ROOT/install.sh" --allow-downgrade > "$WORK/log" 2>&1 \
+    || { cat "$WORK/log" >&2; fail "downgrade with --allow-downgrade failed"; }
+
+# 10. package that does not match its own release.toml installs nothing
+make_release "$WORK/badpkg" "$WORK/key" CAND-9 d
+mkdir -p "$WORK/unp"; tar -xzf "$WORK/badpkg/$ASSET" -C "$WORK/unp"; printf 'x' >> "$WORK/unp/bin/cortex-rs"
+tar -czf "$WORK/badpkg/$ASSET" -C "$WORK/unp" .
+(cd "$WORK/badpkg" && sha256sum "$ASSET" > SHA256SUMS.txt && rm -f SHA256SUMS.txt.sig \
+    && ssh-keygen -q -Y sign -f "$WORK/key" -n aien-release SHA256SUMS.txt)
+LIVE_BEFORE="$(live "$WORK/cfg-good")"
+if run_install "$WORK/badpkg" "$WORK/bin-good" "$WORK/cfg-good" "$ROOT/install.sh" "${SIGN_ENV[@]}"; then
+    fail "package with a file that does not match release.toml was installed"
+fi
+grep -q "does not match its release.toml" "$WORK/log" || fail "manifest mismatch not reported"
+[[ "$(live "$WORK/cfg-good")" == "$LIVE_BEFORE" ]] || fail "rejected package changed the live release"
+
+# 11. interrupted install: kill the installer mid-copy and before the swap; the live install is
+#     still the old version, runs, and a rerun completes the upgrade
+make_release "$WORK/rel3" "$WORK/key" CAND-3 e
+for point in mid-copy after-copy before-swap; do
+    OLD="$(live "$WORK/cfg-good")"
+    env AIEN_TEST_PAUSE_AT="$point" AIEN_RELEASE_TAG=v0.0.0-test AIEN_RELEASE_BASE_URL="file://$WORK/rel3" \
+        AIEN_BIN_DIR="$WORK/bin-good" AIEN_CONFIG_DIR="$WORK/cfg-good" AIEN_INSTALL_NO_PROFILE=1 \
+        AIEN_SOURCE_DIR="$ROOT" AIEN_ALLOWED_SIGNERS="$WORK/allowed_signers" \
+        bash "$ROOT/install.sh" > "$WORK/log-int" 2>&1 &
+    IPID=$!
+    for _ in $(seq 1 100); do grep -q "paused at $point" "$WORK/log-int" 2>/dev/null && break; sleep 0.1; done
+    grep -q "paused at $point" "$WORK/log-int" || fail "installer never reached $point"
+    pkill -9 -P "$IPID" 2>/dev/null || true; kill -9 "$IPID"; wait "$IPID" 2>/dev/null || true
+    [[ "$(live "$WORK/cfg-good")" == "$OLD" ]] || fail "killed at $point changed the live release"
+    out="$("$WORK/bin-good/aien")"; [[ "$out" == "aien-b" || "$out" == "aien-c" ]] || fail "live install does not run after kill at $point ($out)"
+done
+# 11b. kill after the single rename (current already switched, links and record not yet written):
+#      the new release is live and runs, the record still names the old one, a rerun repairs the record
+ID_NEW="$(sha256sum "$WORK/pkg/bin/aien" | cut -c1-12)"
+OLD="$(live "$WORK/cfg-good")"
+[[ "$OLD" != "$ID_NEW" ]] || fail "setup for the after-swap case failed"
+env AIEN_TEST_PAUSE_AT=after-swap AIEN_RELEASE_TAG=v0.0.0-test AIEN_RELEASE_BASE_URL="file://$WORK/rel3" \
+    AIEN_BIN_DIR="$WORK/bin-good" AIEN_CONFIG_DIR="$WORK/cfg-good" AIEN_INSTALL_NO_PROFILE=1 \
+    AIEN_SOURCE_DIR="$ROOT" AIEN_ALLOWED_SIGNERS="$WORK/allowed_signers" \
+    bash "$ROOT/install.sh" > "$WORK/log-int" 2>&1 &
+IPID=$!
+for _ in $(seq 1 100); do grep -q "paused at after-swap" "$WORK/log-int" 2>/dev/null && break; sleep 0.1; done
+grep -q "paused at after-swap" "$WORK/log-int" || fail "installer never reached after-swap"
+pkill -9 -P "$IPID" 2>/dev/null || true; kill -9 "$IPID"; wait "$IPID" 2>/dev/null || true
+[[ "$(live "$WORK/cfg-good")" == "$ID_NEW" ]] || fail "after-swap: the rename did not take effect"
+[[ "$("$WORK/bin-good/aien")" == "aien-e" ]] || fail "after-swap: the live release does not run"
+grep -q "^current = \"$OLD\"" "$WORK/cfg-good/installed.toml" || fail "after-swap: record unexpectedly updated before the kill"
+[[ -d "$WORK/cfg-good/releases/$OLD" ]] || fail "after-swap: the previous release was pruned before the record was written"
+run_install "$WORK/rel3" "$WORK/bin-good" "$WORK/cfg-good" "$ROOT/install.sh" "${SIGN_ENV[@]}" \
+    || { cat "$WORK/log" >&2; fail "rerun after interruption failed"; }
+[[ "$("$WORK/bin-good/aien")" == "aien-e" ]] || fail "rerun did not install the new release"
+grep -q "^current = \"$ID_NEW\"" "$WORK/cfg-good/installed.toml" || fail "rerun after the after-swap kill did not repair the record"
+grep -q "^previous = \"$OLD\"" "$WORK/cfg-good/installed.toml" || fail "rerun after the after-swap kill lost the previous release"
+[[ -z "$(ls -A "$WORK/cfg-good/releases" | grep '^\.stage\.' || true)" ]] || fail "leftover stage after rerun"
+
+# 12. an existing release directory that is incomplete is never overwritten
+ID3="$(live "$WORK/cfg-good")"
+make_release "$WORK/rel4" "$WORK/key" CAND-4 f
+ID4="$(sha256sum "$WORK/pkg/bin/aien" | cut -c1-12)"
+mkdir -p "$WORK/cfg-good/releases/$ID4"; echo partial > "$WORK/cfg-good/releases/$ID4/junk"
+if run_install "$WORK/rel4" "$WORK/bin-good" "$WORK/cfg-good" "$ROOT/install.sh" "${SIGN_ENV[@]}"; then
+    fail "install over an incomplete release directory succeeded"
+fi
+grep -q "was not overwritten" "$WORK/log" || fail "incomplete release directory not reported"
+[[ "$(live "$WORK/cfg-good")" == "$ID3" && -f "$WORK/cfg-good/releases/$ID4/junk" ]] || fail "refusal changed state"
+
+# 13. release gate: the candidate must be named and omega.lock must be the candidate's omega commit
+GT="$WORK/gate"; mkdir -p "$GT/scripts" "$GT/release"
+cp "$ROOT/scripts/check-release-candidate.sh" "$GT/scripts/"; cp "$ROOT/release/candidate.toml" "$GT/release/"
+gate() { (cd "$GT" && bash scripts/check-release-candidate.sh "$@" > "$WORK/log-gate" 2>&1); }
+OM="$(sed -n 's/^omega-commit *= *"\(.*\)"$/\1/p' "$GT/release/candidate.toml")"
+echo "$OM" > "$GT/omega.lock"
+gate --model "$WORK/model.toml" || { cat "$WORK/log-gate" >&2; fail "gate refused a matching tree"; }
+grep -q '^\[model\]' "$WORK/model.toml" && grep -q '^model-safetensors-sha256' "$WORK/model.toml" || fail "gate did not extract the model table"
+echo 0000000000000000000000000000000000000000 > "$GT/omega.lock"
+if gate; then fail "gate accepted an omega.lock that is not the candidate's"; fi
+grep -q "cannot be released" "$WORK/log-gate" || fail "omega mismatch not explained"
+echo "$OM" > "$GT/omega.lock"
+sed -i 's/^candidate = .*/candidate = "unknown"/' "$GT/release/candidate.toml"
+if gate; then fail "gate accepted candidate unknown"; fi
+rm "$GT/release/candidate.toml"
+if gate; then fail "gate accepted a missing candidate file"; fi
+echo "PASS: release gate fails closed, release install verifies signature, checksum and every package file, rejects tampered and forged releases, installs standalone offline, pinned key matches allowed_signers, upgrades atomically, keeps one previous release, rolls back, refuses downgrades, survives an interrupted install (including a kill after the swap)"

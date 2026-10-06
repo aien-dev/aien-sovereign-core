@@ -21,35 +21,90 @@ jobs:
             target: x86_64-unknown-linux-gnu
             artifact_name: sovereign-linux-x86_64.tar.gz
             use_tar: true
+            native_engine: false
           - os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
             artifact_name: sovereign-linux-aarch64.tar.gz
             use_tar: true
+            native_engine: true
           - os: macos-latest
             target: aarch64-apple-darwin
             artifact_name: sovereign-macos-arm64.tar.gz
             use_tar: true
+            native_engine: false
 
     steps:
       - name: Checkout Source
         uses: actions/checkout@v4
 
-      - name: Install Rust Toolchain
-        uses: dtolnay/rust-toolchain@stable
+      - name: GNU tar (reproducible packages need it)
+        if: runner.os == 'macOS'
+        run: brew install gnu-tar
+
+      - name: Install pinned Rust toolchain (rust-toolchain.toml)
+        run: |
+          rustup toolchain install "$(sed -n 's/^channel *= *"\(.*\)"/\1/p' rust-toolchain.toml)" --profile minimal
+          rustc --version
+
+      - name: Release gate (candidate named, omega.lock equals the candidate's omega commit)
+        run: scripts/check-release-candidate.sh
+
+      - name: Read pins (omega.lock, then omega physics.lock)
+        id: pins
+        run: echo "omega=$(tr -d '[:space:]' < omega.lock)" >> "$GITHUB_OUTPUT"
+
+      # The native engine is linked only on the candidate target (linux aarch64, the GB10 host class).
+      # Other targets build the CPU stub, are labelled as such in the release notes, and are not the candidate.
+      - name: Checkout omega at omega.lock
+        if: matrix.native_engine
+        uses: actions/checkout@v4
         with:
-          targets: ${{ matrix.target }}
+          repository: aien-dev/omega
+          ref: ${{ steps.pins.outputs.omega }}
+          path: omega
 
-      - name: Build Workspace
-        run: cargo build --locked --release --workspace
+      - name: Read physics pin and checkout physics
+        if: matrix.native_engine
+        id: physpin
+        run: echo "physics=$(tr -d '[:space:]' < omega/physics.lock)" >> "$GITHUB_OUTPUT"
 
-      - name: Package Release Assets
-        run: bash scripts/package-release.sh "${{ matrix.artifact_name }}"
+      - name: Checkout physics at omega's physics.lock
+        if: matrix.native_engine
+        uses: actions/checkout@v4
+        with:
+          repository: aien-dev/physics
+          ref: ${{ steps.physpin.outputs.physics }}
+          path: physics
+
+      - name: Build the candidate way (scripts/repro-build.sh, fresh CARGO_HOME, no mojo)
+        env:
+          CARGO_HOME: ${{ runner.temp }}/cargo-home
+        run: |
+          if command -v mojo >/dev/null 2>&1; then echo "mojo is on PATH; the candidate build runs without it" >&2; exit 1; fi
+          if [ "${{ matrix.native_engine }}" = "true" ]; then
+            export AIEN_OMEGA_DIR="$GITHUB_WORKSPACE/omega" AIEN_PHYSICS_DIR="$GITHUB_WORKSPACE/physics"
+          fi
+          rm -rf "$CARGO_HOME"
+          cargo fetch --locked
+          # The other binaries first; aien-cli alone and last (a multi-crate build gives a different
+          # aien-cli digest, see docs/release/receipts/2026-10-06-install-upgrade-rollback-v2.md, F1).
+          scripts/repro-build.sh -p spark-cockpit-rs -p spark-inquisitor -p cortex-encoder-rs -p cortex-rs -p spark-supervisor -p spark-debugger
+          scripts/repro-build.sh -p aien-cli
+
+      - name: Package Release Assets (reproducible tarball, release.toml inside)
+        run: |
+          bash scripts/package-release.sh "${{ matrix.artifact_name }}"
+          AIEN_SHA="$(sha256sum target/release/aien-cli 2>/dev/null || shasum -a 256 target/release/aien-cli)"
+          printf '%s  %s  native_engine=%s\n' "${AIEN_SHA%% *}" "${{ matrix.artifact_name }}" "${{ matrix.native_engine }}" > "aien-cli-sha256-${{ matrix.target }}.txt"
+          cat "aien-cli-sha256-${{ matrix.target }}.txt"
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.target }}
-          path: ${{ matrix.artifact_name }}
+          path: |
+            ${{ matrix.artifact_name }}
+            aien-cli-sha256-${{ matrix.target }}.txt
 
   publish-release:
     name: Publish Release and Checksums
@@ -68,17 +123,18 @@ jobs:
       - name: Generate Checksums
         working-directory: release-artifacts
         run: |
-          sha256sum sovereign-* > SHA256SUMS.txt
+          cat aien-cli-sha256-*.txt > aien-cli-digests.txt
+          sha256sum sovereign-* aien-cli-digests.txt > SHA256SUMS.txt
           cat SHA256SUMS.txt
 
-      - name: Sign Checksums (when the release key secret is configured)
+      - name: Sign Checksums (fails the job when the release key secret is absent)
         working-directory: release-artifacts
         env:
           AIEN_RELEASE_SIGNING_KEY: ${{ secrets.AIEN_RELEASE_SIGNING_KEY }}
         run: |
           if [ -z "$AIEN_RELEASE_SIGNING_KEY" ]; then
-            echo "No signing key secret; release will carry checksums only. Sign by hand per docs/release/RELEASE_SIGNING.md and upload SHA256SUMS.txt.sig."
-            exit 0
+            echo "AIEN_RELEASE_SIGNING_KEY secret is not configured. Refusing to publish an unsigned release." >&2
+            exit 1
           fi
           umask 077
           printf "%s\n" "$AIEN_RELEASE_SIGNING_KEY" > ../release_key
@@ -102,12 +158,26 @@ jobs:
             echo "Official release of the AIEN Sovereign Native Systems Architecture." >> "$NOTES_FILE"
           fi
 
+          {
+            cat "$NOTES_FILE"
+            echo
+            echo "## aien-cli digests (compare with the candidate manifest [executables] aien-cli-native-release)"
+            echo
+            echo "Columns: sha256 of target/release/aien-cli, archive, whether the native engine (omega at omega.lock) is linked. Only the native_engine=true linux-aarch64 row is the candidate binary."
+            echo
+            echo '```'
+            cat release-artifacts/aien-cli-digests.txt
+            echo '```'
+          } > release-notes-with-digests.md
+          NOTES_FILE=release-notes-with-digests.md
+
           cd release-artifacts
           SIG=""
-          [ ! -f SHA256SUMS.txt.sig ] || SIG="SHA256SUMS.txt.sig"
-          gh release create "$TAG" sovereign-* SHA256SUMS.txt $SIG \
+          [ -f SHA256SUMS.txt.sig ] || { echo "SHA256SUMS.txt.sig is missing; refusing to publish" >&2; exit 1; }
+          SIG="SHA256SUMS.txt.sig"
+          gh release create "$TAG" sovereign-* aien-cli-digests.txt SHA256SUMS.txt $SIG \
             --title "AIEN Sovereign Core ${TAG}" \
             --notes-file ../"$NOTES_FILE" \
             --draft=false \
             --prerelease=false || \
-          gh release upload "$TAG" sovereign-* SHA256SUMS.txt $SIG --clobber
+          gh release upload "$TAG" sovereign-* aien-cli-digests.txt SHA256SUMS.txt $SIG --clobber
