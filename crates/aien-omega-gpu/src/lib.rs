@@ -349,29 +349,40 @@ pub fn is_blocked() -> bool {
 // ---- matmul launch budget (omega c0369e6 `omega_gpu_matmul_api.h:130-133`) ----
 
 /// Daemon setting that picks the matmul CTA budget per launch. Unset or empty
-/// leaves omega's default ([`ffi::OMEGA_GPU_MATMUL_MAX_CTAS`], 64).
+/// means the AIEN daemon default ([`DAEMON_DEFAULT_CTA_BUDGET`], 256); omega's
+/// own library default ([`ffi::OMEGA_GPU_MATMUL_MAX_CTAS`], 64) is not changed.
 pub const CTA_BUDGET_ENV: &str = "AIEN_OMEGA_CTA_BUDGET";
 
 /// Largest budget [`parse_cta_budget`] accepts. 64 (omega's default) and 256 are
-/// the only budgets run on the GB10 for the decode shapes (T4 measurement
-/// 2026-10-06, parity held at both); 512 and 1024 were never chip-tested, so a
-/// larger value is refused rather than tried in a production run.
+/// the only budgets run on the GB10 (T4 measurement 2026-10-06 for the decode
+/// shapes, t4fix verification for the prefill shapes; parity held at both);
+/// 512 and 1024 were never chip-tested, so a larger value is refused.
 pub const CTA_BUDGET_MAX_MEASURED: u32 = 256;
 
 /// A validated CTA budget (1..=[`CTA_BUDGET_MAX_MEASURED`]). Only
-/// [`parse_cta_budget`] builds one, so [`set_cta_budget`] never sees 0 (which
-/// omega reads as "restore the default") or an unmeasured size.
+/// [`parse_cta_budget`] and [`DAEMON_DEFAULT_CTA_BUDGET`] build one, so
+/// [`set_cta_budget`] never sees 0 (which omega reads as "restore the
+/// default") or an unmeasured size.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CtaBudget(u32);
 
 impl CtaBudget {
-    pub fn get(self) -> u32 {
+    pub const fn get(self) -> u32 {
         self.0
     }
 }
 
-/// Parse the [`CTA_BUDGET_ENV`] setting. `None` or blank: `Ok(None)` (keep
-/// omega's default). Otherwise a plain decimal integer in
+/// The AIEN daemon's budget when [`CTA_BUDGET_ENV`] is unset: 256. Sealed GB10
+/// evidence in [`DAEMON_DEFAULT_CTA_BUDGET_EVIDENCE`]: decode 89.7 ms/token at
+/// 256 vs 184.7 at 64, T4 S3 23 678 ms (< B = 29 000 ms), prefill shapes at 256
+/// parity ok (repeat_mismatch 0).
+pub const DAEMON_DEFAULT_CTA_BUDGET: CtaBudget = CtaBudget(256);
+
+/// Repository path of the evidence behind [`DAEMON_DEFAULT_CTA_BUDGET`].
+pub const DAEMON_DEFAULT_CTA_BUDGET_EVIDENCE: &str = "docs/inference/evidence/t4fix-20261006T2254Z";
+
+/// Parse the [`CTA_BUDGET_ENV`] setting. `None` or blank: `Ok(None)` (the caller
+/// picks its default). Otherwise a plain decimal integer in
 /// 1..=[`CTA_BUDGET_MAX_MEASURED`]; anything else is an error naming the value.
 pub fn parse_cta_budget(raw: Option<&str>) -> Result<Option<CtaBudget>, String> {
     let Some(text) = raw.map(str::trim).filter(|t| !t.is_empty()) else {
@@ -379,8 +390,8 @@ pub fn parse_cta_budget(raw: Option<&str>) -> Result<Option<CtaBudget>, String> 
     };
     let refuse = |why: &str| {
         Err(format!(
-            "{CTA_BUDGET_ENV}={text:?} refused: {why} (allowed 1..={CTA_BUDGET_MAX_MEASURED}; unset keeps omega's default {})",
-            ffi::OMEGA_GPU_MATMUL_MAX_CTAS
+            "{CTA_BUDGET_ENV}={text:?} refused: {why} (allowed 1..={CTA_BUDGET_MAX_MEASURED}; unset uses the AIEN daemon default {})",
+            DAEMON_DEFAULT_CTA_BUDGET.get()
         ))
     };
     if !text.bytes().all(|b| b.is_ascii_digit()) {
@@ -805,7 +816,7 @@ mod cta_budget_tests {
     use super::*;
 
     #[test]
-    fn unset_or_blank_keeps_the_omega_default() {
+    fn unset_or_blank_parses_to_none_caller_default() {
         assert_eq!(parse_cta_budget(None), Ok(None));
         assert_eq!(parse_cta_budget(Some("")), Ok(None));
         assert_eq!(parse_cta_budget(Some("  ")), Ok(None));
@@ -851,5 +862,24 @@ mod cta_budget_tests {
             let b = parse_cta_budget(Some("256")).unwrap().unwrap();
             assert_eq!(set_cta_budget(b), Err(OmegaGpuError::Unavailable));
         }
+    }
+
+    #[test]
+    fn daemon_default_is_256_and_inside_the_measured_range() {
+        assert_eq!(DAEMON_DEFAULT_CTA_BUDGET.get(), 256);
+        assert!(DAEMON_DEFAULT_CTA_BUDGET.get() <= CTA_BUDGET_MAX_MEASURED);
+        // The same value as an explicit setting parses to the same budget.
+        assert_eq!(
+            parse_cta_budget(Some("256")),
+            Ok(Some(DAEMON_DEFAULT_CTA_BUDGET))
+        );
+        // Omega's own library default is untouched by the AIEN default.
+        assert_eq!(ffi::OMEGA_GPU_MATMUL_MAX_CTAS, 64);
+        assert!(DAEMON_DEFAULT_CTA_BUDGET_EVIDENCE.starts_with("docs/inference/evidence/"));
+        let doc = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join(DAEMON_DEFAULT_CTA_BUDGET_EVIDENCE)
+            .join("FINDINGS.md");
+        assert!(doc.is_file(), "evidence missing: {}", doc.display());
     }
 }

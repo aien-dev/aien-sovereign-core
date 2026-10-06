@@ -1324,7 +1324,7 @@ fn build_native_daemon_backend() -> Result<DaemonBackendParts, String> {
             .unwrap_or(false);
     // T4 launch budget: parsed before the backend is chosen, so a bad value is
     // always fatal; applied before the first matmul (omega clears its kernel
-    // cache on a change). Unset keeps omega's default (64).
+    // cache on a change). Unset means the AIEN default (256), not omega's 64.
     let cta_setting = std::env::var(aien_omega_gpu::CTA_BUDGET_ENV).ok();
     let cta_budget = aien_omega_gpu::parse_cta_budget(cta_setting.as_deref())?;
     let omega = aien_inference_abi::OmegaGb10Backend::new();
@@ -1366,23 +1366,45 @@ fn build_native_daemon_backend() -> Result<DaemonBackendParts, String> {
     }
 }
 
-/// Apply the parsed `AIEN_OMEGA_CTA_BUDGET` (if any) and return the startup
-/// log line with the budget omega reports back (`omega_gpu_matmul_cta_budget`).
-fn apply_omega_cta_budget(budget: Option<aien_omega_gpu::CtaBudget>) -> Result<String, String> {
+/// The budget the daemon uses and where it came from: the explicit
+/// `AIEN_OMEGA_CTA_BUDGET`, else the AIEN daemon default (256, sealed GB10
+/// evidence in `aien_omega_gpu::DAEMON_DEFAULT_CTA_BUDGET_EVIDENCE`). Omega's
+/// own library default (64) is never relied on by the daemon.
+fn daemon_cta_budget(
+    budget: Option<aien_omega_gpu::CtaBudget>,
+) -> (aien_omega_gpu::CtaBudget, String) {
     let env = aien_omega_gpu::CTA_BUDGET_ENV;
-    let source = match budget {
-        Some(b) => {
-            aien_omega_gpu::set_cta_budget(b).map_err(|e| format!("{env}={}: {e}", b.get()))?;
-            format!("{env}={}", b.get())
-        }
-        None => format!("omega default, {env} unset"),
-    };
-    let active = aien_omega_gpu::cta_budget()
-        .ok_or_else(|| format!("{env}: the Omega GPU engine is not linked (stub build)"))?;
-    if let Some(b) = budget {
-        if active != b.get() {
-            return Err(format!("{env}: set {} but omega reports {active}", b.get()));
-        }
+    match budget {
+        Some(b) => (b, format!("{env}={}", b.get())),
+        None => (
+            aien_omega_gpu::DAEMON_DEFAULT_CTA_BUDGET,
+            format!(
+                "AIEN default, {env} unset; evidence {}; omega library default {} not used",
+                aien_omega_gpu::DAEMON_DEFAULT_CTA_BUDGET_EVIDENCE,
+                aien_omega_gpu::ffi::OMEGA_GPU_MATMUL_MAX_CTAS
+            ),
+        ),
+    }
+}
+
+/// Apply the daemon's CTA budget (always set explicitly at start) and return
+/// the startup log line with the budget omega reports back
+/// (`omega_gpu_matmul_cta_budget`).
+fn apply_omega_cta_budget(budget: Option<aien_omega_gpu::CtaBudget>) -> Result<String, String> {
+    let (b, source) = daemon_cta_budget(budget);
+    aien_omega_gpu::set_cta_budget(b)
+        .map_err(|e| format!("Omega CTA budget {} ({source}): {e}", b.get()))?;
+    let active = aien_omega_gpu::cta_budget().ok_or_else(|| {
+        format!(
+            "Omega CTA budget {} ({source}): the Omega GPU engine is not linked (stub build)",
+            b.get()
+        )
+    })?;
+    if active != b.get() {
+        return Err(format!(
+            "Omega CTA budget: set {} but omega reports {active}",
+            b.get()
+        ));
     }
     Ok(format!(
         "Omega CTA budget: {active} CTAs per matmul launch ({source})"
@@ -1833,8 +1855,28 @@ pub async fn handle_aegis_command() {
 mod tests {
     use super::*;
 
-    /// T4 launch budget plumbing on the CPU stub: the daemon helper never
-    /// claims a budget it could not read back from omega, and names the value.
+    /// T4 launch budget: unset means the AIEN default 256 (not omega's 64),
+    /// the log names it as the AIEN default with the evidence dir, and an
+    /// explicit setting wins.
+    #[test]
+    fn daemon_cta_budget_defaults_to_256_with_evidence() {
+        let (b, source) = daemon_cta_budget(None);
+        assert_eq!(b.get(), 256);
+        assert!(source.contains("AIEN default"), "{source}");
+        assert!(
+            source.contains("docs/inference/evidence/t4fix-20261006T2254Z"),
+            "{source}"
+        );
+        let explicit = aien_omega_gpu::parse_cta_budget(Some("64"))
+            .unwrap()
+            .unwrap();
+        let (b, source) = daemon_cta_budget(Some(explicit));
+        assert_eq!(b.get(), 64);
+        assert_eq!(source, "AIEN_OMEGA_CTA_BUDGET=64");
+    }
+
+    /// On the CPU stub the helper never claims a budget it could not set and
+    /// read back from omega, and names the value it tried.
     #[test]
     fn omega_cta_budget_helper_refuses_on_the_stub() {
         if aien_omega_gpu::is_native() {
@@ -1843,13 +1885,17 @@ mod tests {
             );
             return;
         }
-        let none = apply_omega_cta_budget(None).expect_err("stub has no omega budget");
-        assert!(none.contains("not linked"), "{none}");
-        let b = aien_omega_gpu::parse_cta_budget(Some("256"))
+        let none = apply_omega_cta_budget(None).expect_err("stub cannot set the default");
+        assert!(
+            none.contains("Omega CTA budget 256 (AIEN default"),
+            "{none}"
+        );
+        assert!(none.contains("stub"), "{none}");
+        let b = aien_omega_gpu::parse_cta_budget(Some("128"))
             .unwrap()
             .unwrap();
         let set = apply_omega_cta_budget(Some(b)).expect_err("stub cannot set a budget");
-        assert!(set.contains("AIEN_OMEGA_CTA_BUDGET=256"), "{set}");
+        assert!(set.contains("AIEN_OMEGA_CTA_BUDGET=128"), "{set}");
     }
 
     #[tokio::test]
