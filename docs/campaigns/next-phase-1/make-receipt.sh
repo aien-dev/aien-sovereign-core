@@ -9,6 +9,9 @@ set -eu
 R=$1 OUT=$2 SC=$3 OMC=$4 OMG=$5 RESCUES=${6:-0} NOTE=${7:-}
 S=$R/steps
 HERE=$(cd "$(dirname "$0")" && pwd)
+# ACCEPTANCE-v7 Section 2: V6_ROWS picks the v6-row module, rows-v6.jq (default,
+# every existing caller unchanged) or rows-v7.jq (run-v7.sh). Nothing else is accepted.
+case ${V6_ROWS:=rows-v6.jq} in rows-v6.jq|rows-v7.jq) ;; *) echo "make-receipt: V6_ROWS must be rows-v6.jq or rows-v7.jq" >&2; exit 2 ;; esac
 # ACCEPTANCE-v5: TASK_ID (T1, T2, T3) turns on the v5 rows (rows-v5.jq) for
 # that task of tasks-v5.json (TASK_SPEC overrides the file). Without it the
 # receipt is the v1..v4 receipt, unchanged.
@@ -83,7 +86,8 @@ jq -n --argjson run "$(j "$R/run.json")" \
   --arg ws "$WS" --argjson committed "$COMMITTED" \
   --arg v6 "$V6" --argjson v6task "$V6T" --arg ws6 "$WS6" --argjson committed6 "$COMMITTED6" \
   --argjson seed "$SEED" --argjson ref "$REF" --arg max6 "${V6_MAX_TOKENS:-}" \
-  "$(cat "$HERE/rows-v5.jq")$(cat "$HERE/rows-v6.jq")"'
+  --arg rows6 "$V6_ROWS" --arg rows6sha "$(sha256sum "$HERE/$V6_ROWS" | cut -d" " -f1)" \
+  "$(cat "$HERE/rows-v5.jq")$(cat "$HERE/$V6_ROWS")"'
   def st($id): ($run.steps // []) | map(select(.step == $id)) | (.[0] // {});
   def okv: if . then "PASS" else "FAIL" end;
   ($s3.report // {}) as $rep
@@ -216,7 +220,8 @@ jq -n --argjson run "$(j "$R/run.json")" \
   + (if $v6 == "1" then {task_v6:$v6task.id,
        acceptance_v6:(v6_evidence($run; $rep; $s1; $s4; $s5; $s6; $s8; $pre; $receipts; $v6task; $ws6; $committed6; $seed; $ref; $max6)
                      + {a2_v5: (($v5rows.authority // []) | map(select(.row == "A2")) | .[0].result // null)} | v6_rows)}
-     else {} end)' >"$tmp"
+     else {} end)
+  + (if $v6 == "1" and $rows6 != "rows-v6.jq" then {v6_rows_module:{file:$rows6, sha256:$rows6sha}} else {} end)' >"$tmp"
 h=$(sha256sum "$tmp" | cut -d' ' -f1)
 mv "$tmp" "$OUT/$h.json"
 v=$(jq -r .verdict "$OUT/$h.json")
