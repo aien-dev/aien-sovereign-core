@@ -93,8 +93,20 @@ fn proposal_prompt_token_counts() {
 /// engine cut); nothing follows the colon.
 #[test]
 fn assistant_prefix_follows_the_assistant_marker() {
-    use aien_runtime::spine::{check_file_proposal, COMPOSE_ASSISTANT_PREFIX};
+    use aien_inference_abi::ChatTemplate;
+    use aien_runtime::spine::{
+        check_file_proposal, compose_assistant_prefix, COMPOSE_ASSISTANT_PREFIX,
+    };
     assert_eq!(COMPOSE_ASSISTANT_PREFIX, "filename:");
+    // The per-template seam keeps Zephyr and Llama 3 byte-identical to the v5 value.
+    assert_eq!(
+        compose_assistant_prefix(&ChatTemplate::Zephyr).as_bytes(),
+        b"filename:"
+    );
+    assert_eq!(
+        compose_assistant_prefix(&ChatTemplate::Llama3).as_bytes(),
+        b"filename:"
+    );
     let sent = format!(
         "{}{}",
         format_tinyllama_chat(&[turn("user", V2_PROMPT)]),
@@ -194,4 +206,79 @@ fn llama3_model_dir_tokenizer_has_one_bos_and_eos_list() {
     let tail = &ids[ids.len() - 7..];
     assert_eq!(&tail[..5], &[128009, 128006, 78191, 128007, 271]);
     assert_eq!(tok.decode(&tail[5..]).unwrap(), "filename:");
+}
+
+/// ChatML (SmolLM2-Instruct): the compose prefix for the ChatML template, and the bytes sent
+/// end with the publisher's generation prompt followed directly by it.
+#[test]
+fn chatml_compose_prefix_follows_the_im_start_assistant_marker() {
+    use aien_inference_abi::ChatTemplate;
+    use aien_runtime::control::format_chat;
+    use aien_runtime::spine::compose_assistant_prefix;
+    let chatml = ChatTemplate::ChatMl {
+        default_system: Some(
+            "You are a helpful AI assistant named SmolLM, trained by Hugging Face".into(),
+        ),
+    };
+    assert_eq!(compose_assistant_prefix(&chatml).as_bytes(), b"filename:");
+    assert_eq!(
+        compose_assistant_prefix(&ChatTemplate::ChatMl {
+            default_system: None
+        })
+        .as_bytes(),
+        b"filename:"
+    );
+    let sent = format!(
+        "{}{}",
+        format_chat(chatml, &[turn("user", V2_PROMPT)]),
+        compose_assistant_prefix(&ChatTemplate::ChatMl {
+            default_system: None
+        })
+    );
+    assert!(sent.starts_with("<|im_start|>system\nYou are a helpful AI assistant named SmolLM"));
+    assert!(sent.ends_with("<|im_end|>\n<|im_start|>assistant\nfilename:"));
+}
+
+/// With the pinned SmolLM2-1.7B-Instruct directory (`AIEN_SMOLLM2_DIR`, revision
+/// 31b70e2e869a): the template is detected from the model's own files, the stop set is
+/// `<|im_end|>` (2), encoding adds no BOS, and the prompt ids equal the ids of transformers
+/// 5.17.0 `apply_chat_template(tokenize=True, add_generation_prompt=True)` on the same message.
+#[test]
+fn smollm2_model_dir_tokenizer_matches_the_publisher_template_ids() {
+    let Ok(dir) = std::env::var("AIEN_SMOLLM2_DIR") else {
+        eprintln!("AIEN_SMOLLM2_DIR not set: SmolLM2 tokenizer check skipped");
+        return;
+    };
+    use aien_inference_abi::ChatTokenizer;
+    use aien_runtime::control::format_chat;
+    use aien_runtime::spine::compose_assistant_prefix;
+    let tok = ChatTokenizer::from_model_dir(std::path::Path::new(&dir), None).expect("tokenizer");
+    assert!(tok.template().name().starts_with("chatml"));
+    assert_eq!(
+        tok.template().default_system(),
+        Some("You are a helpful AI assistant named SmolLM, trained by Hugging Face")
+    );
+    assert_eq!(tok.stop_token_ids(), &[2]);
+    assert_eq!(tok.token_to_id("<|im_start|>"), Some(1));
+    assert_eq!(tok.token_to_id("<|im_end|>"), Some(2));
+    let text = format_chat(
+        tok.template(),
+        &[turn("user", "Goal: X\nAuthorized workspace: /w")],
+    );
+    let ids = tok.encode(&text).expect("encode");
+    let hf: [u32; 40] = [
+        1, 9690, 198, 2683, 359, 253, 5356, 5646, 11173, 3365, 3511, 308, 34519, 28, 7018, 411,
+        407, 19712, 8182, 2, 198, 1, 4093, 198, 44474, 42, 2273, 198, 15051, 1005, 26344, 42, 2272,
+        103, 2, 198, 1, 520, 9531, 198,
+    ];
+    assert_eq!(ids, hf);
+    // "filename:" is two tokens and ends on the colon.
+    let with_prefix = tok
+        .encode(&format!(
+            "{text}{}",
+            compose_assistant_prefix(&tok.template())
+        ))
+        .expect("encode");
+    assert_eq!(&with_prefix[..40], &hf);
+    assert_eq!(&with_prefix[40..], &[5805, 42]);
 }
