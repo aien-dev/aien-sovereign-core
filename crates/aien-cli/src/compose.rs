@@ -24,12 +24,23 @@
 //!   recall    [--ids ID,..] [--prefix N]                 S8 constraints + effects
 //!   shutdown                                             S7 stop the daemon (control Shutdown)
 //!   recover                                              repair a refused home
+//!   effects                                              the effect ledger (NEXT-PHASE-2)
+//!   reconcile [--intent ID --declare done|not_done --approver NAME]
+//!                                                        settle unsettled effects
+//!   stop      --approver NAME                            durable operator stop
+//!   resume    --approver NAME                            end the stop (old grants stay stale)
+//!   revoke    --authorization ID --approver NAME         revoke an unspent grant
+//!
+//! S5 `execute` brackets the write with a durable intent and an ack (see
+//! `aien_runtime::effects`); it prints `"state"` and exits 3 when the effect
+//! is UNRESOLVED.
 use crate::safety::SafetyEngine;
 use crate::tools::record_effect_receipt;
 use aien_runtime::client::AienRuntimeClient;
 use aien_runtime::control::{
-    ComposeRecallReport, ComposeRecordView, ComposeTaskReport, ControlCommand, ControlResponse,
+    ComposeRecallReport, ComposeTaskReport, ControlCommand, ControlResponse, ReconcileDeclare,
 };
+use aien_runtime::effects;
 use aien_runtime::spine::parse_file_proposal;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -247,15 +258,21 @@ async fn step(sub: &str, m: &HashMap<String, String>) -> Result<Value, String> {
                 .validate_path(ws.join(&path).to_str().ok_or("path is not UTF-8")?)
                 .map_err(|e| format!("CONFINEMENT DENIAL: {e}"))?;
             let csha = sha256_hex(content.as_bytes());
+            // NEXT-PHASE-2: the grant names the target and the state it was
+            // granted against; a changed target makes it stale.
+            let prior = effects::file_sha256(&target)?;
+            let tgt = target.display().to_string();
             let args = json!({"proposal_sha256": psha, "path": path, "content_sha256": csha,
-                "approver": approver, "cx_promotion": r.cx_promotion});
+                "approver": approver, "cx_promotion": r.cx_promotion, "target": tgt,
+                "prior_sha256": prior});
             let result = json!({"approved": true, "target": target.display().to_string()});
             let rc = receipt("authorize", &args, &result, true)?;
             let constraint = m.get("constraint").map(|s| ids(s)).transpose()?;
             let mut links = vec![r.cx_promotion, r.cx_evidence];
             links.extend(constraint.unwrap_or_default().into_iter().take(2));
             let text = json!({"proposal_sha256": psha, "path": path, "content_sha256": csha,
-                "approver": approver, "receipt_sha256": rc["sha256"]});
+                "approver": approver, "receipt_sha256": rc["sha256"], "target": tgt,
+                "prior_sha256": prior});
             let n = note("authorization", &text.to_string(), links).await?;
             Ok(json!({"step": "S4", "receipt": rc, "authorization": n, "approvals": 1}))
         }
@@ -267,48 +284,77 @@ async fn step(sub: &str, m: &HashMap<String, String>) -> Result<Value, String> {
                 .map_err(|e| format!("--authorization: {e}"))?;
             let (path, content, psha) = committed_proposal(&r)?;
             let csha = sha256_hex(content.as_bytes());
-            // The approval is read back from the journal, never taken from argv.
-            let rec = recall(vec![auth], None).await?;
-            let a: &ComposeRecordView = rec
-                .cited
-                .first()
-                .filter(|a| a.verified && a.note.as_deref() == Some("authorization"))
-                .ok_or_else(|| format!("cortex.cx#{auth} is not a verified authorization"))?;
-            let at: Value = serde_json::from_str(a.text.as_deref().unwrap_or(""))
-                .map_err(|e| format!("authorization #{auth}: {e}"))?;
-            if at["proposal_sha256"] != json!(psha)
-                || at["content_sha256"] != json!(csha)
-                || at["path"] != json!(path)
-            {
-                return Err(format!("authorization #{auth} names a different proposal"));
-            }
             let target = engine
                 .validate_path(ws.join(&path).to_str().ok_or("path is not UTF-8")?)
                 .map_err(|e| format!("CONFINEMENT DENIAL: {e}"))?;
+            // NEXT-PHASE-2 (ACCEPTANCE-v2 2.1-2.3): the daemon checks the grant
+            // (stop, revoke, stale, spent) and records the intent durably
+            // before anything touches the world. No intent, no write.
+            fault_hold("before_intent");
+            let (pid, start) = effects::self_executor();
+            let intent = match send(ControlCommand::ComposeEffectIntent {
+                authorization: auth,
+                proposal_sha256: psha.clone(),
+                path: path.clone(),
+                target: target.display().to_string(),
+                content_sha256: csha.clone(),
+                executor_pid: pid,
+                executor_start: start,
+            })
+            .await?
+            {
+                ControlResponse::ComposeNoted(n) => n,
+                other => return Err(format!("unexpected response {other:?}")),
+            };
+            fault_hold("after_intent");
             if let Some(parent) = target.parent() {
                 std::fs::create_dir_all(parent)
                     .map_err(|e| format!("create {}: {e}", parent.display()))?;
             }
-            let args = json!({"path": target.display().to_string(), "content_sha256": csha,
-                "authorization": auth});
             let written = std::fs::write(&target, content.as_bytes())
                 .map_err(|e| format!("write {}: {e}", target.display()))
                 .and_then(|_| std::fs::read(&target).map_err(|e| e.to_string()));
-            let (ok, disk_sha, bytes) = match &written {
-                Ok(b) => (sha256_hex(b) == csha, sha256_hex(b), b.len()),
-                Err(_) => (false, String::new(), 0),
+            let (disk_sha, bytes) = match &written {
+                Ok(b) => (sha256_hex(b), b.len()),
+                Err(_) => (String::new(), 0),
             };
-            let result = json!({"bytes": bytes, "disk_sha256": disk_sha, "error": written.err()});
+            fault_hold("after_write");
+            let reported = json!({"disk_sha256": disk_sha, "bytes": bytes,
+                "error": written.as_ref().err()});
+            // The ack's state is the daemon's reading of the world. If the
+            // ack cannot be recorded the effect is UNRESOLVED until reconcile.
+            let ack = send(ControlCommand::ComposeEffectAck {
+                intent: intent.id,
+                reported: reported.clone(),
+            })
+            .await;
+            let (state, ack_id, ack_err) = match &ack {
+                Ok(ControlResponse::ComposeNoted(n)) => {
+                    let rec = recall(vec![n.id], None).await.ok();
+                    let st = rec
+                        .and_then(|r| r.cited.into_iter().next())
+                        .and_then(|c| c.text)
+                        .and_then(|t| serde_json::from_str::<Value>(&t).ok())
+                        .and_then(|v| v["state"].as_str().map(str::to_string))
+                        .unwrap_or_else(|| "UNRESOLVED".into());
+                    (st, Some(n.id), None)
+                }
+                Ok(other) => ("UNRESOLVED".to_string(), None, Some(format!("{other:?}"))),
+                Err(e) => ("UNRESOLVED".to_string(), None, Some(e.clone())),
+            };
+            let ok = state == "DONE";
+            let args = json!({"path": target.display().to_string(), "content_sha256": csha,
+                "authorization": auth, "intent": intent.id});
+            let result = json!({"bytes": bytes, "disk_sha256": disk_sha, "error": written.err(),
+                "state": state, "ack": ack_id, "ack_error": ack_err});
             let rc = receipt("write_file", &args, &result, ok)?;
-            let text = json!({"tool": "write_file", "path": path, "content_sha256": csha,
-                "disk_sha256": disk_sha, "bytes": bytes, "success": ok,
-                "receipt_sha256": rc["sha256"], "authorization": auth});
-            let n = note("effect", &text.to_string(), vec![auth, r.cx_promotion]).await?;
-            if !ok {
-                return Err(format!("write_file failed; receipt {}", rc["sha256"]));
-            }
-            Ok(json!({"step": "S5", "receipt": rc, "effect": n, "path": target.display().to_string(),
-                "content_sha256": csha, "disk_sha256": disk_sha, "bytes": bytes}))
+            let out = json!({"step": "S5", "receipt": rc, "intent": intent,
+                "effect": {"id": ack_id}, "state": state, "path": target.display().to_string(),
+                "content_sha256": csha, "disk_sha256": disk_sha, "bytes": bytes,
+                "ack_error": ack_err});
+            // handle_compose_command turns a state other than DONE into
+            // "ok": false (exit 3 for UNRESOLVED, 1 otherwise).
+            Ok(out)
         }
         "explain" => {
             let r = read_report(need(m, "report")?)?;
@@ -390,12 +436,55 @@ async fn step(sub: &str, m: &HashMap<String, String>) -> Result<Value, String> {
             AienRuntimeClient::default_client().shutdown().await?;
             Ok(json!({"step": "S7", "shutdown": true}))
         }
+        // NEXT-PHASE-2 operator commands (ACCEPTANCE-v2 2.4-2.6).
+        "effects" => {
+            let rec = recall(vec![], None).await?;
+            let ledger = effects::Ledger::from_records(&rec.host).map_err(|r| r.to_string())?;
+            Ok(json!({"machine_id": rec.machine_id, "ledger": ledger.view()}))
+        }
+        "reconcile" => {
+            let declare = match m.get("declare") {
+                None => None,
+                Some(d) => Some(ReconcileDeclare {
+                    intent: need(m, "intent")?
+                        .parse()
+                        .map_err(|e| format!("--intent: {e}"))?,
+                    state: d.clone(),
+                    approver: need(m, "approver")?.to_string(),
+                }),
+            };
+            match send(ControlCommand::ComposeReconcile { declare }).await? {
+                ControlResponse::ComposeReconciled(r) => Ok(json!({"reconcile": r})),
+                other => Err(format!("unexpected response {other:?}")),
+            }
+        }
+        "stop" | "resume" | "revoke" => {
+            let authorization = if sub == "revoke" {
+                Some(
+                    need(m, "authorization")?
+                        .parse::<u64>()
+                        .map_err(|e| format!("--authorization: {e}"))?,
+                )
+            } else {
+                None
+            };
+            match send(ControlCommand::ComposeControl {
+                action: sub.to_string(),
+                approver: need(m, "approver")?.to_string(),
+                authorization,
+            })
+            .await?
+            {
+                ControlResponse::ComposeControlled(r) => Ok(json!({"control": r})),
+                other => Err(format!("unexpected response {other:?}")),
+            }
+        }
         "recover" => match send(ControlCommand::RecoverComposeHome).await? {
             ControlResponse::ComposeRecovered(r) => Ok(json!({"repair": r, "opens": r.opens})),
             other => Err(format!("unexpected response {other:?}")),
         },
         other => Err(format!(
-            "unknown compose step {other:?} (remember, inspect, propose, authorize, execute, explain, recall, shutdown, recover)"
+            "unknown compose step {other:?} (remember, inspect, propose, authorize, execute, explain, recall, shutdown, recover, effects, reconcile, stop, resume, revoke)"
         )),
     }
 }
@@ -414,8 +503,18 @@ pub async fn handle_compose_command(args: &[String]) {
     };
     match out {
         Ok(mut v) => {
-            v["ok"] = json!(true);
+            // An effect step reports its state; only DONE is success.
+            let state = v.get("state").and_then(Value::as_str).map(str::to_string);
+            let ok = state.as_deref().is_none_or(|s| s == "DONE");
+            v["ok"] = json!(ok);
             println!("{v}");
+            if !ok {
+                std::process::exit(if state.as_deref() == Some("UNRESOLVED") {
+                    3
+                } else {
+                    1
+                });
+            }
         }
         Err(e) => {
             println!("{}", json!({"ok": false, "step": sub, "error": e}));
@@ -423,3 +522,32 @@ pub async fn handle_compose_command(args: &[String]) {
         }
     }
 }
+
+/// Test builds only (cargo feature `fault-hold`, ACCEPTANCE-v2 2.9): stop at
+/// the named point when `AIEN_FAULT_HOLD` names it, until the harness deletes
+/// `AIEN_FAULT_HOLD_FILE`. The default build compiles this to nothing.
+#[cfg(feature = "fault-hold")]
+fn fault_hold(point: &str) {
+    if std::env::var("AIEN_FAULT_HOLD").as_deref() != Ok(point) {
+        return;
+    }
+    let Ok(file) = std::env::var("AIEN_FAULT_HOLD_FILE") else {
+        eprintln!("AIEN_FAULT_HOLD={point} without AIEN_FAULT_HOLD_FILE");
+        std::process::exit(86);
+    };
+    if let Err(e) = std::fs::write(&file, format!("{} {point}\n", std::process::id())) {
+        eprintln!("fault hold {point}: write {file}: {e}");
+        std::process::exit(86);
+    }
+    let t0 = std::time::Instant::now();
+    while Path::new(&file).exists() {
+        if t0.elapsed() > std::time::Duration::from_secs(300) {
+            eprintln!("fault hold {point}: not released in 300 s");
+            std::process::exit(86);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}
+
+#[cfg(not(feature = "fault-hold"))]
+fn fault_hold(_point: &str) {}

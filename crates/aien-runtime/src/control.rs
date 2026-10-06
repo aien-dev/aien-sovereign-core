@@ -79,6 +79,43 @@ pub enum ControlCommand {
     /// (torn journal tail, or a journal behind its J-Space anchor). Closes this
     /// process's handle first; the cut is recorded in the journal.
     RecoverComposeHome,
+    /// NEXT-PHASE-2: the effect-boundary checks and the durable intent, in one
+    /// step (ACCEPTANCE-v2 2.1, 2.3). Answered with `ComposeNoted` (the intent).
+    ComposeEffectIntent {
+        authorization: u64,
+        proposal_sha256: String,
+        path: String,
+        target: String,
+        content_sha256: String,
+        executor_pid: u32,
+        executor_start: u64,
+    },
+    /// NEXT-PHASE-2: the executor's report after the write; the daemon records
+    /// the state it reads from the world. Answered with `ComposeNoted`.
+    ComposeEffectAck {
+        intent: u64,
+        reported: serde_json::Value,
+    },
+    /// NEXT-PHASE-2: reconcile unsettled effects, or record one operator
+    /// declaration (ACCEPTANCE-v2 2.4).
+    ComposeReconcile {
+        declare: Option<ReconcileDeclare>,
+    },
+    /// NEXT-PHASE-2: operator `stop`, `resume`, `revoke` (ACCEPTANCE-v2 2.5, 2.6).
+    ComposeControl {
+        action: String,
+        approver: String,
+        authorization: Option<u64>,
+    },
+}
+
+/// An operator's decision for one unsettled effect.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReconcileDeclare {
+    pub intent: u64,
+    /// "done" or "not_done".
+    pub state: String,
+    pub approver: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -128,6 +165,10 @@ pub enum ControlResponse {
     ComposeRecalled(Box<ComposeRecallReport>),
     /// Result of `RecoverComposeHome`.
     ComposeRecovered(Box<ComposeRecoverReport>),
+    /// Result of `ComposeReconcile`.
+    ComposeReconciled(Box<ComposeReconcileReport>),
+    /// Result of `ComposeControl`.
+    ComposeControlled(Box<ComposeControlReport>),
     Error(String),
 }
 
@@ -153,16 +194,30 @@ impl Default for RuntimeController {
 }
 
 impl RuntimeController {
+    /// Panics when the state file exists but is damaged (see [`Self::load`]);
+    /// the daemon calls `load` first and refuses to start instead.
     pub fn new() -> Self {
-        let mut processed_operations = HashSet::new();
-        if let Ok(bytes) = std::fs::read(operations_state_path()) {
-            if let Ok(ids) = serde_json::from_slice::<Vec<u128>>(&bytes) {
-                processed_operations.extend(ids);
-            }
-        }
-        Self {
-            processed_operations,
-        }
+        Self::load().unwrap_or_else(|e| panic!("{e}"))
+    }
+
+    /// Loads the persisted operation ids. An absent file is an empty set; a
+    /// file that cannot be read or parsed is an error (NEXT-PHASE-2,
+    /// ACCEPTANCE-v2 2.8): idempotency state is never reset silently.
+    pub fn load() -> Result<Self, String> {
+        let path = operations_state_path();
+        let ids = match std::fs::read(&path) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+            Err(e) => return Err(format!("idempotency state {}: {e}", path.display())),
+            Ok(bytes) => serde_json::from_slice::<Vec<u128>>(&bytes).map_err(|e| {
+                format!(
+                    "idempotency state {} is damaged ({e}); refusing to start rather than forget processed operations",
+                    path.display()
+                )
+            })?,
+        };
+        Ok(Self {
+            processed_operations: ids.into_iter().collect(),
+        })
     }
 
     pub fn is_operation_processed(&self, op_id: u128) -> bool {
@@ -210,6 +265,15 @@ mod tests {
                 "replayed operation ID must be rejected after restart"
             );
         }
+
+        // NEXT-PHASE-2: a damaged state file is refused, never reset.
+        std::fs::write(dir.join("processed_operations.json"), b"{").unwrap();
+        let err = RuntimeController::load()
+            .err()
+            .expect("damaged state must be refused");
+        assert!(err.contains("is damaged"), "{err}");
+        std::fs::write(dir.join("processed_operations.json"), b"[1, 2").unwrap();
+        assert!(RuntimeController::load().is_err());
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -367,4 +431,36 @@ pub struct ComposeRecoverReport {
     pub open_rc: i32,
     pub rolled_back: u32,
     pub recovered_completed: u32,
+}
+
+/// One unsettled effect as `ComposeReconcile` left it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReconcileOutcome {
+    pub intent: u64,
+    pub authorization: u64,
+    /// OPEN, DONE, NOT_DONE or UNRESOLVED.
+    pub state: String,
+    pub disk_sha256: Option<String>,
+    /// The reconcile record appended (None: nothing recorded this time).
+    pub record: Option<u64>,
+    /// Who decided, or why nothing was decided.
+    pub note: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ComposeReconcileReport {
+    pub compose_dir: String,
+    pub machine_id: String,
+    /// Unsettled intents looked at.
+    pub checked: u64,
+    pub outcomes: Vec<ReconcileOutcome>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ComposeControlReport {
+    pub action: String,
+    /// The control record appended (None: nothing recorded).
+    pub recorded: Option<ComposeNoteReport>,
+    /// For `revoke`: false when the grant was already spent or revoked.
+    pub revoked: Option<bool>,
 }

@@ -1358,6 +1358,12 @@ pub async fn run_daemon_server() {
         "{}",
         "⚡ Starting AIEN Sovereign Runtime Daemon...".cyan().bold()
     );
+    // NEXT-PHASE-2 (ACCEPTANCE-v2 2.8): damaged idempotency state refuses the
+    // start; it is never reset silently.
+    if let Err(fatal) = aien_runtime::control::RuntimeController::load() {
+        eprintln!("Fatal: {}", fatal.red().bold());
+        std::process::exit(1);
+    }
     let socket_path = aien_runtime::client::AienRuntimeClient::default_socket_path();
     let sched_cfg = aien_scheduler::SchedulerConfig {
         max_batch_size: 256,
