@@ -155,6 +155,15 @@ fn approved_proposal_commits_then_effect_is_done() {
 #[test]
 fn unverified_proposal_is_refused_with_zero_effects() {
     let (_tmp, b, hook, ws) = setup();
+    println!(
+        "approved_proposal_test: compose LINKED={} (zero-journal assertions {})",
+        aien_omega_compose::LINKED,
+        if aien_omega_compose::LINKED {
+            "run"
+        } else {
+            "skipped: stub build"
+        }
+    );
     let before = aien_omega_compose::LINKED.then(|| recalled(&b, &[]).records_total);
     let mut cases: Vec<(&str, ApprovedProposal)> = Vec::new();
     let mut p = proposal("u1", "a1");
