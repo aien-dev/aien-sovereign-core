@@ -230,17 +230,14 @@ pub fn check_kv_memory(requested: u64, available: Option<u64>) -> Result<(), Str
     }
 }
 
-/// Daemon path (#239): plans the pool from `weights.config`, logs the plan,
-/// checks `MemAvailable` (read through `mem_available`) before allocating, then
-/// builds the spine and backend over the one pooled manager.
-pub fn build_shared_kv_runtime_for_model(
-    weights: TransformerWeights,
-    tensor_backend: Arc<dyn TensorBackend>,
-    scheduler_config: SchedulerConfig,
-    arena_capacity: usize,
+/// Daemon planning step (#239): plans the pool for `cfg`, logs the plan, and
+/// checks `MemAvailable` (read through `mem_available`) before anything is
+/// allocated. Allocates nothing itself.
+pub fn plan_checked_model_kv(
+    cfg: &aien_inference_abi::ModelConfig,
     mem_available: &dyn Fn() -> Option<u64>,
-) -> Result<(AienRuntimeSpine, NativeTransformerBackend, KvPoolPlan), String> {
-    let plan = KvPoolPlan::for_model(&weights.config)?;
+) -> Result<KvPoolPlan, String> {
+    let plan = KvPoolPlan::for_model(cfg)?;
     println!("  {}", plan.log_line());
     let available = mem_available();
     match available {
@@ -254,6 +251,19 @@ pub fn build_shared_kv_runtime_for_model(
         None => println!("  KV pool memory check: skipped (no MemAvailable in /proc/meminfo)"),
     }
     check_kv_memory(plan.total_bytes as u64, available)?;
+    Ok(plan)
+}
+
+/// Daemon path (#239): [`plan_checked_model_kv`], then builds the spine and
+/// backend over the one pooled manager sized by the plan.
+pub fn build_shared_kv_runtime_for_model(
+    weights: TransformerWeights,
+    tensor_backend: Arc<dyn TensorBackend>,
+    scheduler_config: SchedulerConfig,
+    arena_capacity: usize,
+    mem_available: &dyn Fn() -> Option<u64>,
+) -> Result<(AienRuntimeSpine, NativeTransformerBackend, KvPoolPlan), String> {
+    let plan = plan_checked_model_kv(&weights.config, mem_available)?;
     let (spine, backend) = build_shared_kv_runtime(
         weights,
         tensor_backend,
@@ -430,27 +440,22 @@ mod tests {
     }
 
     #[test]
-    fn daemon_builder_refuses_before_allocating_and_builds_the_planned_pool() {
-        let weights = TransformerWeights::reference_test_weights(&tiny_config());
-        let tb: Arc<dyn TensorBackend> = Arc::new(aien_inference_abi::ReferenceCpuBackend::new());
-        let err = match build_shared_kv_runtime_for_model(
-            weights.clone(),
-            tb.clone(),
-            SchedulerConfig::default(),
-            8,
-            &|| Some(1),
-        ) {
-            Err(e) => e,
-            Ok(_) => panic!("1 byte available must refuse the pool"),
-        };
+    fn daemon_plan_refuses_before_allocating_and_sizes_the_manager() {
+        // Exercises the planning, memory check and pooled manager without building a
+        // spine: a spine creates a RuntimeController, which reads the process-wide
+        // AIEN_RUNTIME_STATE_DIR that other tests in this crate point at temp dirs.
+        let cfg = tiny_config();
+        let err = plan_checked_model_kv(&cfg, &|| Some(1)).unwrap_err();
         assert!(err.contains("refusing"), "{err}");
 
-        let (spine, _backend, plan) =
-            build_shared_kv_runtime_for_model(weights, tb, SchedulerConfig::default(), 8, &|| None)
-                .expect("no meminfo: check skipped, pool built");
+        let plan = plan_checked_model_kv(&cfg, &|| None).expect("no meminfo: check skipped");
         // ceil(40 / 16) = 3 blocks of 16 tokens * (2 * 2 * 2 * 16 * 4) bytes per token.
         assert_eq!(plan.total_blocks, 3);
         assert_eq!(plan.total_bytes, 3 * 16 * 512);
-        assert_eq!(spine.kv_manager.read().total_block_count(), 3);
+
+        let weights = TransformerWeights::reference_test_weights(&cfg);
+        let mgr = build_model_kv_manager(&weights, plan.total_blocks).expect("pool built");
+        assert_eq!(mgr.read().total_block_count(), 3);
+        assert_eq!(plan.pool_config().total_bytes(), plan.total_bytes);
     }
 }
