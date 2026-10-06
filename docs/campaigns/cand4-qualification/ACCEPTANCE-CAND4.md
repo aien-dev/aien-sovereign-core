@@ -30,10 +30,10 @@ UNFROZEN, and before every launch it recomputes every sha256 below and refuses o
 >>> CAND-4 frozen inputs >>>
 kind                    = QUALIFICATION
 candidate_id            = CAND-4
-sc_commit               = UNFROZEN
-omega_commit            = UNFROZEN
-aienos_commit           = UNFROZEN
-physics_commit          = UNFROZEN
+sc_commit               = d5b78ff7a6be14d23e3cb00d3f9c4b4751442ffa
+omega_commit            = c0369e6705a4b0cb800978846e78915126a1b7f7
+aienos_commit           = b84c0a67590a934f3f3e001b12ec85ebc086a9eb
+physics_commit          = 6d7cf0d4d8eb2cda7b512100ff6058e25dbb3ddf
 build_evidence          = UNFROZEN
 aien_cli_path           = UNFROZEN
 aien_cli_sha256         = UNFROZEN
@@ -207,14 +207,42 @@ answers FAIL: `A1-ctl-damaged-mark` (one byte of a copy of the mark changed) and
 | # | case | status | reason / row |
 |---|------|--------|--------------|
 | 1 | actual GPU loss during execution | OUT OF SCOPE, NOT COVERED | No row removes the device mid-run. C3a covers only "engine absent at start" (refusal), not loss during a run. The effect path (S4 authorize, S5 execute) runs in the CLI process and does not use the GPU (ACCEPTANCE-v2 A1, `crates/aien-cli/src/compose.rs`), so a loss can only end S3 (the proposal); the production response is a fatal `STRICT_REAL_MODEL_VIOLATION` (`strict.rs:50-56`, panic = abort, `Cargo.toml:58`); that a real device loss reaches this path is UNVERIFIED. CAND-4 makes no GPU fault-tolerance claim. |
-| 2 | Omega in-settle crash hooks | NOT COVERED; required by the scope, missing. The proposed test is harness-side (frozen binaries, no candidate code) but is not built in this draft; CAND-4 does not wait for it | The hooks exist only in `AIEN_TEST_BUILD` omega builds (`rx_compose.c` `#ifdef RXC_TEST_HOOKS`; `make test-prod-refuses-test-pieces` refuses them in production); `librx_compose.a` is built without them. A daemon crash during S3 (the World settle) is a recovery event on the daemon path, so the scope needs it. Smallest test (proposed, not in this spec): on `cpu_fault`, no hook, SIGKILL the daemon 1 s into `aien compose propose` (C3b's CPU propose), 3 reps; PASS iff the restart either opens with R4 (identity, prefix digest over the pre-S3 records) and no effect, or refuses with a named code that `aien compose recover` clears with a repair record. |
+| 2 | Omega in-settle crash hooks | PARTLY COVERED by W2 (section 6.1; never the hooks): a SIGKILL while a propose request is pending, not a kill at a named internal step | The hooks exist only in `AIEN_TEST_BUILD` omega builds (`rx_compose.c` `#ifdef RXC_TEST_HOOKS`; `make test-prod-refuses-test-pieces` refuses them in production); `librx_compose.a` is built without them. A daemon crash during S3 (the World settle) is a recovery event on the daemon path, so the scope needs it. Smallest test (proposed, not in this spec): on `cpu_fault`, no hook, SIGKILL the daemon 1 s into `aien compose propose` (C3b's CPU propose), 3 reps; PASS iff the restart either opens with R4 (identity, prefix digest over the pre-S3 records) and no effect, or refuses with a named code that `aien compose recover` clears with a repair record. |
 | 3 | capability-root revocation on the live effect path | OUT OF SCOPE, NOT COVERED | Not on the path: no sovereign-core crate names `caproot`, `CapabilityRef`, `aienos_cap` or `RX_OP_REVOKE` (`grep -rln` over `crates/` empty at `296c4ac`; ACCEPTANCE-v2 A11). The path's own revocation, Cortex authorization revoke, is tested by C5a and C5b; that is not capability-root revocation and is not reported as such. |
 | 4 | J-Space spill corruption with nonempty spilled data | CONDITIONAL: C6d | C6d injects only if `jspace.data` is nonempty or `spill_end > 0`; otherwise its result is NOT_APPLICABLE (never PASS). At omega 62b6a28 the composition never wrote `jspace.data` (ACCEPTANCE-v3 G5; v4 C6d NOT_APPLICABLE x3); at `omega_commit` this is UNVERIFIED and measured by C6d's guard. If C6d is NOT_APPLICABLE the case is NOT COVERED, and not required: the CAND-4 workflow then has no spilled data to damage. |
-| 5 | real interruption between journal append and record-mark update | NOT COVERED; required by the scope, missing. The proposed test is harness-side (frozen binaries, no candidate code) but is not built in this draft; the deterministic variant needs candidate code | C6c-ctl reproduces the on-disk state only (the old mark put back), not a real kill. The window exists: `advance_mark` runs after the appends returned (`spine.rs:882-909`) and writes the mark by tmp + fsync + rename (`cortex_mark.rs:92-118`, `write` at :94). Smallest test (proposed, not in this spec, no code change): on `cpu_fault`, no hook, N = 20 trials of `authorize` with a SIGKILL of the daemon at a random 0-50 ms offset; restart each; PASS iff every restart opens with no `E_MARK` and recall ok (R4), and at least one restart logs `record mark advanced` (evidence the window was hit; none hit = NOT_RUN). Deterministic variant needs a new daemon hold point (code change, later candidate). |
+| 5 | real interruption between journal append and record-mark update | COVERED NON-DETERMINISTICALLY by W5 (section 6.1). The deterministic variant needs candidate code and stays NOT COVERED in that form | C6c-ctl reproduces the on-disk state only (the old mark put back), not a real kill. The window exists: `advance_mark` runs after the appends returned (`spine.rs:882-909`) and writes the mark by tmp + fsync + rename (`cortex_mark.rs:92-118`, `write` at :94). Smallest test (proposed, not in this spec, no code change): on `cpu_fault`, no hook, N = 20 trials of `authorize` with a SIGKILL of the daemon at a random 0-50 ms offset; restart each; PASS iff every restart opens with no `E_MARK` and recall ok (R4), and at least one restart logs `record mark advanced` (evidence the window was hit; none hit = NOT_RUN). Deterministic variant needs a new daemon hold point (code change, later candidate). |
 | 6 | coordinated rollback or modification of durable stores and their record mark | OUT OF SCOPE, NOT COVERED | Requires an actor with write access to the owner's home who rewrites journal and mark together; the mark is a crash-consistency check, not tamper resistance (NEXT-PHASE-2 not-proved list). CAND-4 claims no tamper resistance against local writers. |
 
-The CAND-4 recovery claim is limited to the Q2 rows as run. Cases 2 and 5 are named in the
-verdict as required and missing; CAND-4 does not claim them.
+### 6.1 Harness-side tests for cases 2 and 5 (`run-windows.sh`, `windows.decl.json`, `run-cand4.sh q2w`)
+
+No candidate code and no hook: the frozen `cpu_fault` binary is started on a copy of F0, killed
+with SIGKILL, restarted and checked. No GPU. Run after Q2, once, scored by `score-rows.sh`.
+Each row has a frozen expected outcome PASS, and a verdict NOT_RUN means the injection did not
+happen (nothing is claimed).
+
+Common restart check (every case row): the daemon starts (or refuses with a named code and
+`compose recover` then lets it start), recall is ok, no `E_MARK` anywhere, machine id equal, the
+prefix digest over the first N0 records equal to its value before the fault, workspace unchanged.
+
+| row | what it does | PASS iff |
+|-----|--------------|----------|
+| W-ctl-nokill | control: `compose propose` runs to the end, no kill; measures its time TP and the records it wrote | clean restart passes the common check; propose answered; TP > 0; propose wrote at least one record |
+| W-ctl-wrong-expect | control for the evaluator: the common check run against a deliberately wrong prefix digest | the evaluator says FAIL |
+| W-ctl-damaged-mark | control for the mark check: after a clean authorize, one byte of the mark is changed | `E_MARK` is reported |
+| W2 x3 (case 2) | SIGKILL the daemon at 0.3, 0.5 and 0.7 of TP into `compose propose` | the propose client was still waiting at the kill (else NOT_RUN) and the common check passes |
+| W5 x1 (case 5) | 40 trials: `compose authorize`, SIGKILL at a random 0 to 50 ms offset, restart | every restart passes the common check, and at least one restart logged `record mark advanced` (the window was hit; none = NOT_RUN) |
+
+Limits, stated before the run. The window of W5 is small and random, so the number of hits is
+reported, not promised. W2 proves the daemon survives a kill while a propose request is pending;
+it does not prove which internal step (World settle) the kill met, and the Omega in-settle hooks
+(`RXC_TEST_HOOKS`) are not used, because they exist only in test builds. The deterministic
+variant of case 5 (a kill held between the journal append and the mark update) needs a daemon
+hold point, which is candidate code: in that form case 5 stays NOT COVERED. W2 and W5 run on the
+CPU build, as every Q2 case does. W-ctl-nokill's records-written check and W2's N0 are read from
+`compose recall`.
+
+The CAND-4 recovery claim is limited to the Q2 and Q2w rows as run. Case 2 is covered only as W2
+states (no hook, no named internal step) and case 5 only in its non-deterministic form; neither is claimed beyond that.
 
 ## 7. Receipts, verdict, what is never done
 
@@ -222,7 +250,7 @@ verdict as required and missing; CAND-4 does not claim them.
   `receipts/` here (never edited), including failed launches; reply bytes as
   `receipts/replies/<sha256>.txt`; an `INDEX.md` line each.
 - CAND-4 qualification PASS iff: every digest check passed, H PASS (H1, H1c, H2, H3, H4, H4c,
-  H5), Q1 PASS and Q2 PASS. Otherwise FAIL, naming each failing row. NOT_RUN, NOT_APPLICABLE,
+  H5), Q1 PASS, Q2 PASS and Q2w PASS (section 6.1). Otherwise FAIL, naming each failing row. NOT_RUN, NOT_APPLICABLE,
   INCOMPLETE and UNVERIFIED are never PASS.
 - No launch is repeated, no threshold changes after results are seen, no run is repeated until
   it passes, no tuning. `VERDICT-CAND4.md` is written after the runs: PASS or FAIL per row,

@@ -6,6 +6,7 @@
 #   run-cand4.sh hygiene INPUTS OUT             section 3 (hygiene.sh)
 #   run-cand4.sh q1      INPUTS RUN_BASE OUT    section 4: 3 rounds x (T1, T2, T3), GPU, one quietlock hold per round
 #   run-cand4.sh q2      INPUTS RUN_BASE OUT    section 5: F0 on the GPU (one hold), then the cases on cpu_fault
+#   run-cand4.sh q2w     INPUTS RUN_BASE OUT    section 6.1: coverage cases 2 and 5 (run-windows.sh on cpu_fault, after q2)
 #
 # INPUTS = ACCEPTANCE-CAND4.md (kind QUALIFICATION, refused while UNFROZEN) or a TRIAL inputs
 # file (kind TRIAL: OUT must contain TRIAL and stay outside the evidence dir and the repo;
@@ -238,6 +239,22 @@ _q2_fixture)   # inside the hold: F0 on the production binary, once
       '{gate:"CAND4_Q2_FIXTURE", kind:$k, sc_commit:$sc, binary:"aien_cli", env:"GPU", exit:$frc, fixture:$fj,
         valid:(($fj // {}).s3_committed == true), started:$t0, ended:$t1, digests:$dg, tail:$tail}' | name_by_sha "$OUT/attempts" q2-fixture-)
   echo "Q2 F0 exit $frc valid $(jq -r '.s3_committed // false' "$BASE/F0/fixture.json" 2>/dev/null || echo false) (attempts/$a)"
+  ;;
+q2w)
+  BASE=${3:?RUN_BASE} OUT=${4:?OUT}; out_ok "$OUT" || exit 3
+  mkdir -p "$OUT/q2w" "$OUT/attempts" "$OUT/scores"; BASE=$(cd "$BASE" && pwd); OUT=$(cd "$OUT" && pwd)
+  [ -f "$BASE/F0/fixture.json" ] || { echo "REFUSED: no F0 under $BASE (run q2 first)" >&2; exit 3; }
+  [ -e "$BASE/windows" ] && { echo "REFUSED: the window tests already ran into $BASE/windows (never repeated)" >&2; exit 3; }
+  refuse_unless_digests
+  clean_env AIEN_BIN="$(inp cpu_fault_path)" bash "$HERE/run-windows.sh" "$BASE/F0" "$BASE/windows" >"$BASE/windows.out" 2>&1; wrc=$?
+  refuse_unless_digests
+  [ -f "$BASE/windows/results.jsonl" ] || : >"$BASE/windows/results.jsonl"
+  cp "$BASE/windows/results.jsonl" "$OUT/q2w-results.jsonl"
+  s=$(bash "$SCORE" "$HERE/windows.decl.json" "$OUT/q2w-results.jsonl"); src=$?
+  f=$(jq -c --arg k "$KIND" '. + {kind:$k}' <<<"$s" | name_by_sha "$OUT/scores" q2w-score-)
+  a=$(jq -n --arg k "$KIND" --arg sc "$SC" --argjson wrc "$wrc" --arg v "$(jq -r .verdict "$OUT/scores/$f")" --argjson dg "$DIGESTS" --arg tail "$(tail -8 "$BASE/windows.out")" \
+      '{gate:"CAND4_Q2W_ATTEMPT", kind:$k, sc_commit:$sc, binary:"cpu_fault", env:"CPU fault injection", exit:$wrc, verdict:$v, digests:$dg, tail:$tail}' | name_by_sha "$OUT/attempts" q2w-)
+  echo "Q2w (coverage cases 2 and 5) scoring-v5 verdict: $(jq -r .verdict "$OUT/scores/$f") (scores/$f, scorer exit $src; attempts/$a)"
   ;;
 *) echo "unknown command $CMD" >&2; exit 2;;
 esac
