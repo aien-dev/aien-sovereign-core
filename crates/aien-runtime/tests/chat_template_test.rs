@@ -73,7 +73,7 @@ fn proposal_prompt_token_counts() {
     let tok = TinyLlamaTokenizer::from_file(path).expect("tokenizer");
     let ws = "/home/drakestapleton/.claude/jobs/9bfe8553/tmp/np1-v3run/ws";
     let goal = "Create the file NOTES.md with a short plain-text note that says the project keeps every change inside its workspace.";
-    let base = aien_runtime::spine::proposal_prompt(goal, ws, "README.md, docs");
+    let base = aien_runtime::spine::proposal_prompt(goal, ws);
     let retry = aien_runtime::spine::retry_prompt(
         &base,
         "no filename line: the first line must be 'filename: <relative path>'",
@@ -89,22 +89,23 @@ fn proposal_prompt_token_counts() {
 }
 
 /// ACCEPTANCE-v4 2(1): the bytes sent end with the assistant marker, its
-/// newline and the literal prefix; nothing follows the final space.
+/// newline and the literal prefix "filename:" (no trailing space since the v5
+/// engine cut); nothing follows the colon.
 #[test]
 fn assistant_prefix_follows_the_assistant_marker() {
     use aien_runtime::spine::{check_file_proposal, COMPOSE_ASSISTANT_PREFIX};
-    assert_eq!(COMPOSE_ASSISTANT_PREFIX, "filename: ");
+    assert_eq!(COMPOSE_ASSISTANT_PREFIX, "filename:");
     let sent = format!(
         "{}{}",
         format_tinyllama_chat(&[turn("user", V2_PROMPT)]),
         COMPOSE_ASSISTANT_PREFIX
     );
     assert!(sent.starts_with("<|user|>\nGoal: "));
-    assert!(sent.ends_with("</s>\n<|assistant|>\nfilename: "));
+    assert!(sent.ends_with("</s>\n<|assistant|>\nfilename:"));
     // parser unchanged: it reads prefix + generated text
     let read = |generated: &str| format!("{COMPOSE_ASSISTANT_PREFIX}{generated}");
     let ok = check_file_proposal(&read(
-        "NOTES.md\nEvery change stays inside the workspace.\n",
+        " NOTES.md\nEvery change stays inside the workspace.\n",
     ))
     .expect("path + content parses");
     assert_eq!(ok.path, "NOTES.md");
@@ -122,7 +123,7 @@ fn assistant_prefix_follows_the_assistant_marker() {
             ids.len(),
             &ids[ids.len() - 6..]
         );
-        assert_eq!(&ids[ids.len() - 4..], &[13, 9507, 29901, 29871]);
+        assert_eq!(&ids[ids.len() - 3..], &[13, 9507, 29901]);
     }
 }
 
@@ -144,4 +145,53 @@ fn warm_up_prompt_spans_two_prefill_chunks() {
         .len();
     eprintln!("warm-up prompt tokens: {n}");
     assert!(n > 128 && n <= 256, "{n}");
+}
+
+/// Llama 3 instruct layout (v5 engine cut): header, blank line, content, `<|eot_id|>`, then
+/// the assistant header; no system block, no BOS in the text.
+#[test]
+fn llama3_template_renders_the_instruct_layout() {
+    use aien_inference_abi::ChatTemplate;
+    use aien_runtime::control::format_chat;
+    let text = format_chat(ChatTemplate::Llama3, &[turn("user", "  Hi there \n")]);
+    assert_eq!(
+        text,
+        "<|start_header_id|>user<|end_header_id|>\n\nHi there<|eot_id|>\
+         <|start_header_id|>assistant<|end_header_id|>\n\n"
+    );
+    // TinyLlama keeps the zephyr layout, byte for byte.
+    assert_eq!(
+        format_chat(ChatTemplate::Zephyr, &[turn("user", V2_PROMPT)]),
+        format_tinyllama_chat(&[turn("user", V2_PROMPT)])
+    );
+}
+
+/// With a Llama 3 model directory (`AIEN_LLAMA3_DIR`): the template is detected from the
+/// model's own files, encoding adds exactly one `<|begin_of_text|>` (128000), the stop set
+/// is the generation_config eos list, and the compose prefix is the last two tokens.
+#[test]
+fn llama3_model_dir_tokenizer_has_one_bos_and_eos_list() {
+    let Ok(dir) = std::env::var("AIEN_LLAMA3_DIR") else {
+        eprintln!("AIEN_LLAMA3_DIR not set: Llama 3 tokenizer check skipped");
+        return;
+    };
+    use aien_inference_abi::{ChatTemplate, ChatTokenizer};
+    use aien_runtime::control::format_chat;
+    use aien_runtime::spine::COMPOSE_ASSISTANT_PREFIX;
+    let tok = ChatTokenizer::from_model_dir(std::path::Path::new(&dir), None).expect("tokenizer");
+    assert_eq!(tok.template(), ChatTemplate::Llama3);
+    assert_eq!(tok.stop_token_ids(), &[128001, 128008, 128009]);
+    let text = format!(
+        "{}{COMPOSE_ASSISTANT_PREFIX}",
+        format_chat(tok.template(), &[turn("user", V2_PROMPT)])
+    );
+    let ids = tok.encode(&text).expect("encode");
+    assert_eq!(ids[0], 128000);
+    assert_eq!(ids.iter().filter(|&&t| t == 128000).count(), 1);
+    // "<|start_header_id|>user<|end_header_id|>\n\n" after the BOS
+    assert_eq!(&ids[1..5], &[128006, 882, 128007, 271]);
+    // "<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\nfilename:"
+    let tail = &ids[ids.len() - 7..];
+    assert_eq!(&tail[..5], &[128009, 128006, 78191, 128007, 271]);
+    assert_eq!(tok.decode(&tail[5..]).unwrap(), "filename:");
 }

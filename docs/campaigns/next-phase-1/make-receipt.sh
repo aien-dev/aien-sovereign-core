@@ -8,6 +8,25 @@
 set -eu
 R=$1 OUT=$2 SC=$3 OMC=$4 OMG=$5 RESCUES=${6:-0} NOTE=${7:-}
 S=$R/steps
+HERE=$(cd "$(dirname "$0")" && pwd)
+# ACCEPTANCE-v5: TASK_ID (T1, T2, T3) turns on the v5 rows (rows-v5.jq) for
+# that task of tasks-v5.json (TASK_SPEC overrides the file). Without it the
+# receipt is the v1..v4 receipt, unchanged.
+V5= TASK=null SPEC_OK=false WS= COMMITTED=null
+if [ -n "${TASK_ID:-}" ]; then
+  V5=1
+  TASK=$(jq -c --arg id "$TASK_ID" '.tasks[] | select(.id == $id)' "${TASK_SPEC:-$HERE/tasks-v5.json}")
+  [ -n "$TASK" ] || { echo "task $TASK_ID not in ${TASK_SPEC:-$HERE/tasks-v5.json}" >&2; exit 4; }
+  row=$(jq -r '"| \(.id) | `\(.goal)` | `\(.destination)` | \(.phrases | map("`" + . + "`") | join(", ")) |"' <<<"$TASK")
+  grep -Fqx -- "$row" "$HERE/ACCEPTANCE-v5.md" && SPEC_OK=true
+  # The daemon canonicalizes the workspace, so S5 paths are physical paths.
+  WS=$(cd "$R/ws" && pwd -P)
+  s5p=$(jq -r '.path // empty' "$S/S5.json" 2>/dev/null || true)
+  if [ -n "$s5p" ] && [ -f "$s5p" ]; then
+    real=$(realpath -e "$s5p")
+    case "$real" in "$WS"/*) COMMITTED=$(jq -Rs . <"$real") ;; esac
+  fi
+fi
 j() { if [ -s "$1" ]; then jq -c . "$1" 2>/dev/null || echo null; else echo null; fi; }
 skill_sha=$(printf '%s' 'aien.model.propose-file-change' | sha256sum | cut -d' ' -f1)
 receipts=$(for p in "$R"/prov/*.json; do [ -f "$p" ] && jq -c --arg p "$p" --arg s "$(sha256sum "$p" | cut -d' ' -f1)" \
@@ -33,7 +52,8 @@ jq -n --argjson run "$(j "$R/run.json")" \
   --argjson s8 "$(j "$S/S8.json")" --argjson pre "$(j "$S/pre-restart-recall.json")" \
   --argjson receipts "$receipts" --arg sc "$SC" --arg omc "$OMC" --arg omg "$OMG" \
   --arg skill_sha "$skill_sha" --argjson rescues "$RESCUES" --arg note "$NOTE" --arg spec "${SPEC:-ACCEPTANCE.md spec_version 1}" \
-  --arg conclusion "$CONCLUSION" '
+  --arg conclusion "$CONCLUSION" --arg v5 "$V5" --argjson task "$TASK" --argjson spec_ok "$SPEC_OK" \
+  --arg ws "$WS" --argjson committed "$COMMITTED" "$(cat "$HERE/rows-v5.jq")"'
   def st($id): ($run.steps // []) | map(select(.step == $id)) | (.[0] // {});
   def okv: if . then "PASS" else "FAIL" end;
   ($s3.report // {}) as $rep
@@ -113,12 +133,15 @@ jq -n --argjson run "$(j "$R/run.json")" \
      value:{compose_dir_files:$cfiles, other_files:$stray},
      result: (($cfiles | length) > 0 and ($stray | length) == 0) | okv}
   ] as $rows
+  | (if $v5 == "1" then v5_evidence($run; $rep; $s4; $s5; $s6; $s8; $receipts; $rescues; $task;
+        ($spec_ok and ($run.goal // "") == $task.goal); $ws; $committed) | v5_rows else null end) as $v5rows
+  | (($rows + ($v5rows.task_quality // []) + ($v5rows.authority // [])) | map(select(.result == "FAIL")) | length) as $nfail
   | {
     gate:"NEXT_PHASE_1",
     commit:$sc,
     omega_compose_commit:$omc,
     omega_gpu_commit:$omg,
-    verdict: (if ($rows | map(select(.result == "FAIL")) | length) == 0 then "PASS" else "FAIL" end),
+    verdict: (if $nfail == 0 then "PASS" else "FAIL" end),
     machine_id:($rep.machine_id // null),
     tier:"host",
     uname:$run.uname,
@@ -134,6 +157,8 @@ jq -n --argjson run "$(j "$R/run.json")" \
     prefix_digest:[($pre.recall.prefix_digest // null), ($s8.recall.prefix_digest // null)],
     winner_digest:[($rep.winner_digest // null)],
     acceptance:$rows,
+    task_id:($task.id // null),
+    acceptance_v5:$v5rows,
     effect_receipts:$receipts,
     explanation:($s6.text // null),
     runs:[{
@@ -168,11 +193,15 @@ v=$(jq -r .verdict "$OUT/$h.json")
   jq -r '.runs[0].steps[] | "  \(.name): \(.result)  \(.detail.ms // .detail.wall_ms // "-") ms"' "$OUT/$h.json"
   echo "Acceptance (frozen thresholds, ${SPEC:-ACCEPTANCE.md spec_version 1}):"
   jq -r '.acceptance[] | "  \(.result)  \(.criterion)  [\(.threshold)]  \(.value | tojson | .[0:220])"' "$OUT/$h.json"
-  jq -r '(.runs[0].proposal_attempts // [])[] | "  proposal attempt \(.attempt): \(.outcome) \(.ms) ms \(.tokens) tokens aegis=\(.aegis // "-") \(.reason // "")"' "$OUT/$h.json"
+  jq -r '(.runs[0].proposal_attempts // [])[] | "  proposal attempt \(.attempt): \(.outcome) \(.ms) ms \(.tokens) tokens finish=\(.finish_reason // "-") aegis=\(.aegis // "-") \(.reason // "")"' "$OUT/$h.json"
   echo "Observations:"
   jq -r '.observations.tokens_per_s[] | "  attempt \(.attempt): \(.tokens) tokens in \(.ms) ms = \(.tokens_per_s) tokens/s (wall, incl. prompt prefill)"' "$OUT/$h.json"
   jq -r '"  warm-up (declared, before the task window): \(.warm_up_ms | map(if . == null then "none" else "\(.) ms" end) | join(" / ")) (daemon 1 / daemon 2)"' "$OUT/$h.json"
   jq -r '.replies[] | "  reply attempt \(.attempt): \(.file)"' "$OUT/$h.json"
+  if [ -n "$V5" ]; then
+    echo "ACCEPTANCE-v5 rows, task $TASK_ID (task quality, then authority):"
+    jq -r '(.acceptance_v5.task_quality + .acceptance_v5.authority)[] | "  \(.result)  \(.row) \(.criterion)  \(.value | tojson | .[0:220])"' "$OUT/$h.json"
+  fi
   if [ -n "$NOTE" ]; then echo "Note: $NOTE"; fi
   if [ -n "$CONCLUSION" ]; then printf '\nConclusion on the frozen model input\n%s\n' "$CONCLUSION"; fi
 } >"$OUT/$h.summary.txt"

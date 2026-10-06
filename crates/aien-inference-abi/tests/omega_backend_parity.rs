@@ -138,7 +138,8 @@ fn chip_elementwise_parity_on_tinyllama_shapes() {
     assert!(rms_worst <= 1.0, "rmsnorm outside tolerance");
 
     // rope, 32 q heads + 4 kv heads of 64, several positions.
-    let (hd, nq, nkv, theta) = (64usize, 32usize, 4usize, 10000.0f32);
+    let (hd, nq, nkv) = (64usize, 32usize, 4usize);
+    let theta = &aien_inference_abi::RopeParams::plain(10000.0);
     let mut rope_mismatch = 0usize;
     for pos in [0usize, 1, 2, 37, 511, 1500, 2047] {
         let q0: Vec<f32> = (0..nq * hd).map(|_| lcg(&mut seed) * 3.0).collect();

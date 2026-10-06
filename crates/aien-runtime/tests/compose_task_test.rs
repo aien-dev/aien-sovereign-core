@@ -18,6 +18,7 @@ fn proposer() -> ComposeProposer {
         Ok(Generation {
             text: "filename: NOTES.md\nconstraint: keep main green\n".to_string(),
             tokens: 12,
+            finish_reason: None,
         })
     })
 }
@@ -316,6 +317,7 @@ fn retry_is_capped_and_recorded() {
         Ok(Generation {
             text: "Sure!".into(),
             tokens: 2,
+            finish_reason: None,
         })
     };
     let (out, a) = propose_with_retries(
@@ -349,6 +351,7 @@ ok
         Ok(Generation {
             text: text.into(),
             tokens: 3,
+            finish_reason: None,
         })
     };
     let (out, a) = propose_with_retries(
@@ -384,6 +387,7 @@ ok
         Ok(Generation {
             text: "Sure!".into(),
             tokens: 2,
+            finish_reason: None,
         })
     };
     let (out, a) = propose_with_retries(
@@ -426,6 +430,7 @@ fn measured_attempt_budget_admits_a_second_attempt() {
         Ok(Generation {
             text: "Goal: echo".into(),
             tokens: 48,
+            finish_reason: None,
         })
     };
     let (out, a) = propose_with_retries(
@@ -454,6 +459,7 @@ fn unparseable_proposal_fails_the_aegis_contract() {
             Ok(Generation {
                 text: "Sure, I can help with that!".to_string(),
                 tokens: 8,
+                finish_reason: None,
             })
         }),
         "test:chatty",
@@ -535,4 +541,65 @@ fn torn_home_is_refused_by_name_then_recovered() {
         .any(|h| h.id == rep.repair_record && h.note.as_deref() == Some("repair_tail")));
     let r2 = report(bridge.run_task("goal after recover", ws.to_str().unwrap()));
     assert!(r2.committed);
+}
+
+/// ACCEPTANCE-v5 Q3: the proposer's stop reason reaches every attempt record,
+/// so the receipt can tell end of sequence from the token limit.
+#[test]
+fn finish_reason_is_recorded_per_attempt() {
+    use std::time::Duration;
+    let n = std::sync::atomic::AtomicU32::new(0);
+    let truncated_then_eos = |_: &str, _: Duration| {
+        let k = n.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(if k == 0 {
+            Generation {
+                text: "Goal: echo".into(),
+                tokens: 48,
+                finish_reason: Some("max_tokens".into()),
+            }
+        } else {
+            Generation {
+                text: "filename: NOTES.md\nkeep changes in the workspace\n".into(),
+                tokens: 11,
+                finish_reason: Some("eos".into()),
+            }
+        })
+    };
+    let (out, a) = propose_with_retries(
+        &truncated_then_eos,
+        "base",
+        Duration::from_secs(5),
+        Duration::from_millis(1),
+        COMPOSE_MAX_ATTEMPTS,
+    );
+    assert!(out.is_ok(), "{out:?}");
+    assert_eq!(a.len(), 2, "{a:?}");
+    assert_eq!(a[0].finish_reason.as_deref(), Some("max_tokens"));
+    assert_eq!(a[1].finish_reason.as_deref(), Some("eos"));
+    // An attempt record without the field (v1..v4 receipts) still reads.
+    let old = r#"{"attempt":1,"ms":1,"tokens":48,"outcome":"parsed","reason":null,
+        "text_sha256":null,"text":null,"aegis":null}"#;
+    let parsed: aien_runtime::ProposalAttempt = serde_json::from_str(old).unwrap();
+    assert_eq!(parsed.finish_reason, None);
+}
+
+#[test]
+fn finish_reason_labels_match_acceptance_v5() {
+    use aien_inference_abi::FinishReason;
+    assert_eq!(
+        aien_runtime::finish_reason_label(&FinishReason::StopToken),
+        "eos"
+    );
+    assert_eq!(
+        aien_runtime::finish_reason_label(&FinishReason::LengthLimit),
+        "max_tokens"
+    );
+    assert_eq!(
+        aien_runtime::finish_reason_label(&FinishReason::Aborted),
+        "aborted"
+    );
+    assert_eq!(
+        aien_runtime::finish_reason_label(&FinishReason::Preempted),
+        "preempted"
+    );
 }

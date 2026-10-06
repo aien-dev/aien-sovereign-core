@@ -939,7 +939,10 @@ struct DaemonModelManifest {
 /// Checkpoint selection inputs, read once from the environment.
 /// `AIEN_MODEL_PATH` (a safetensors file) and `AIEN_TOKENIZER_PATH` (tokenizer.json,
 /// default: `tokenizer.json` beside the model file) take precedence over any directory
-/// scan. `AIEN_REQUIRE_CHECKPOINT=1` makes every fallback to reference weights fatal.
+/// scan. `AIEN_MODEL_DIR` is scanned first for a `*.safetensors` file (directly or one level
+/// down). The model is described by `config.json` beside the checkpoint when present (any
+/// `LlamaForCausalLM`, e.g. Llama 3.x), else by the built-in TinyLlama-1.1B config.
+/// `AIEN_REQUIRE_CHECKPOINT=1` makes every fallback to reference weights fatal.
 #[derive(Debug, Clone, Default)]
 struct CheckpointPolicy {
     model_path: Option<std::path::PathBuf>,
@@ -1105,6 +1108,9 @@ fn reference_config() -> aien_inference_abi::ModelConfig {
         vocab_size: 32000,
         rms_norm_eps: 1e-5,
         rope_theta: 10000.0,
+        rope_scaling: None,
+        tie_word_embeddings: false,
+        eos_token_ids: Vec::new(),
     }
 }
 
@@ -1114,7 +1120,7 @@ struct DaemonModel {
     #[allow(dead_code)] // digests are read by the PREFILL-E2E receipt (Cut 8)
     manifest: DaemonModelManifest,
     weights: aien_inference_abi::TransformerWeights,
-    tokenizer: Option<aien_inference_abi::TinyLlamaTokenizer>,
+    tokenizer: Option<aien_inference_abi::ChatTokenizer>,
     label: String,
     #[allow(dead_code)] // read by tests now and by the PREFILL-E2E receipt (Cut 8)
     reference_weights: bool,
@@ -1191,7 +1197,21 @@ fn load_daemon_model(
             return reference_fallback(manifest, require_checkpoint, reason);
         }
     };
-    let config = aien_inference_abi::ModelConfig::tinyllama_1_1b();
+    // The model description: config.json beside the checkpoint (any LlamaForCausalLM
+    // checkpoint), else the hard-wired TinyLlama-1.1B config.
+    let model_dir = path
+        .parent()
+        .map(std::path::Path::to_path_buf)
+        .unwrap_or_default();
+    let has_config_json = model_dir.join("config.json").is_file();
+    let config = if has_config_json {
+        match aien_inference_abi::load_model_config(&model_dir) {
+            Ok(config) => config,
+            Err(error) => return reference_fallback(manifest, require_checkpoint, error),
+        }
+    } else {
+        aien_inference_abi::ModelConfig::tinyllama_1_1b()
+    };
     let weights =
         match aien_inference_abi::TransformerWeights::load_from_safetensors(&path, &config) {
             Ok(weights) => weights,
@@ -1223,7 +1243,15 @@ fn load_daemon_model(
                 ),
             )?,
             Ok(digest) => {
-                match aien_inference_abi::TinyLlamaTokenizer::from_file(&tokenizer_path) {
+                let loaded = if has_config_json {
+                    aien_inference_abi::ChatTokenizer::from_model_dir(
+                        &model_dir,
+                        Some(&tokenizer_path),
+                    )
+                } else {
+                    aien_inference_abi::ChatTokenizer::from_file(&tokenizer_path)
+                };
+                match loaded {
                     Ok(loaded) => {
                         manifest.tokenizer_sha256 = Some(digest);
                         tokenizer = Some(loaded);
@@ -1242,7 +1270,7 @@ fn load_daemon_model(
     }
 
     let label = format!(
-        "checkpoint loaded from {} ({}, model_id={}, model_sha256={}, tokenizer_sha256={})",
+        "checkpoint loaded from {} ({}, model_id={}, config={}, model_sha256={}, tokenizer_sha256={})",
         path.display(),
         if tokenizer.is_some() {
             "tokenizer loaded"
@@ -1250,6 +1278,11 @@ fn load_daemon_model(
             "tokenizer missing"
         },
         manifest.model_id,
+        if has_config_json {
+            format!("{} (config.json)", config.model_id)
+        } else {
+            format!("{} (built in)", config.model_id)
+        },
         manifest.model_sha256.as_deref().unwrap_or("none"),
         manifest.tokenizer_sha256.as_deref().unwrap_or("none"),
     );
@@ -1270,7 +1303,7 @@ type DaemonBackendParts = (
     std::sync::Arc<dyn aien_inference_abi::TensorBackend>,
     String,
     String,
-    Option<aien_inference_abi::TinyLlamaTokenizer>,
+    Option<aien_inference_abi::ChatTokenizer>,
 );
 
 fn build_native_daemon_backend() -> Result<DaemonBackendParts, String> {
@@ -1376,8 +1409,12 @@ pub async fn run_daemon_server() {
         "one pooled KV shared by runtime and backend".green()
     );
     if let Some(tokenizer) = tokenizer {
+        println!(
+            "  Tokenizer: {} chat template, stop ids {:?}",
+            tokenizer.template().name().green(),
+            tokenizer.stop_token_ids()
+        );
         server.set_tokenizer(tokenizer);
-        println!("  Tokenizer: {}", "TinyLlama chat template".green());
         // NEXT-PHASE-1 v4: one declared 1-token warm-up before serving.
         server.enable_warm_up();
     } else {

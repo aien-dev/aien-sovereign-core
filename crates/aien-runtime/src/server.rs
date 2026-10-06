@@ -3,7 +3,7 @@
 
 use crate::control::{ControlCommand, ControlEnvelope, ControlResponse};
 use crate::spine::{compose_dir_from_env, AienRuntimeSpine, ComposeBridge, ComposeProposer};
-use aien_inference_abi::{AienInferenceBackend, SamplingParams, TinyLlamaTokenizer};
+use aien_inference_abi::{AienInferenceBackend, ChatTokenizer, SamplingParams};
 use aien_scheduler::{ChannelCompletionSink, CompletionEvent};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -26,7 +26,7 @@ pub struct AienRuntimeServer {
     spine: Arc<Mutex<AienRuntimeSpine>>,
     shutdown_notify: Arc<Notify>,
     is_running: Arc<AtomicBool>,
-    tokenizer: Arc<RwLock<Option<TinyLlamaTokenizer>>>,
+    tokenizer: Arc<RwLock<Option<ChatTokenizer>>>,
     warm_up: AtomicBool,
 }
 
@@ -53,7 +53,7 @@ impl AienRuntimeServer {
     }
 
     /// Installs the tokenizer that `StreamTurn` uses to encode prompts and decode tokens.
-    pub fn set_tokenizer(&self, tokenizer: TinyLlamaTokenizer) {
+    pub fn set_tokenizer(&self, tokenizer: ChatTokenizer) {
         *self.tokenizer.write().expect("tokenizer lock") = Some(tokenizer);
     }
 
@@ -266,7 +266,7 @@ impl AienRuntimeServer {
         let prompt_tokens = {
             let guard = self.tokenizer.read().expect("tokenizer lock");
             guard.as_ref().and_then(|t| {
-                t.encode(&crate::control::format_tinyllama_chat(&messages))
+                t.encode(&crate::control::format_chat(t.template(), &messages))
                     .ok()
                     .map(|ids| ids.len())
             })
@@ -298,14 +298,14 @@ impl AienRuntimeServer {
 /// the tokenizer and the completion event stream of the submitted sequence.
 async fn submit_turn(
     spine: Arc<Mutex<AienRuntimeSpine>>,
-    tokenizer: Arc<RwLock<Option<TinyLlamaTokenizer>>>,
+    tokenizer: Arc<RwLock<Option<ChatTokenizer>>>,
     messages: Vec<crate::control::ChatTurn>,
     max_tokens: usize,
     temperature: f32,
     assistant_prefix: &str,
 ) -> Result<
     (
-        TinyLlamaTokenizer,
+        ChatTokenizer,
         tokio::sync::mpsc::UnboundedReceiver<CompletionEvent>,
     ),
     String,
@@ -318,10 +318,11 @@ async fn submit_turn(
         return Err("tokenizer is not loaded; native chat cannot encode the prompt".into());
     };
     // The template ends with the assistant marker; an assistant-response
-    // prefix (compose Skill, ACCEPTANCE-v4 2(1)) follows it directly.
+    // prefix (compose Skill, ACCEPTANCE-v4 2(1)) follows it directly. The
+    // tokenizer adds the one BOS token.
     let prompt = format!(
         "{}{assistant_prefix}",
-        crate::control::format_tinyllama_chat(&messages)
+        crate::control::format_chat(tokenizer.template(), &messages)
     );
     let tokens = tokenizer
         .encode(&prompt)
@@ -333,7 +334,7 @@ async fn submit_turn(
         temperature,
         top_p: 0.95,
         max_tokens: max_tokens.max(1),
-        stop_token_ids: vec![TinyLlamaTokenizer::EOS_TOKEN_ID],
+        stop_token_ids: tokenizer.stop_token_ids().to_vec(),
     };
     spine.submit_work(
         std::sync::Arc::from(tokens.as_slice()),
@@ -344,6 +345,17 @@ async fn submit_turn(
     Ok((tokenizer, events))
 }
 
+/// Receipt label of a finish reason (ACCEPTANCE-v5 Q3): the stop token
+/// (end of sequence) is "eos", the token limit is "max_tokens".
+pub fn finish_reason_label(reason: &aien_inference_abi::FinishReason) -> &'static str {
+    match reason {
+        aien_inference_abi::FinishReason::StopToken => "eos",
+        aien_inference_abi::FinishReason::LengthLimit => "max_tokens",
+        aien_inference_abi::FinishReason::Aborted => "aborted",
+        aien_inference_abi::FinishReason::Preempted => "preempted",
+    }
+}
+
 /// A compose command, run on a blocking thread against the bridge.
 type ComposeJob = Box<dyn FnOnce(&ComposeBridge) -> ControlResponse + Send>;
 
@@ -352,7 +364,7 @@ type ComposeJob = Box<dyn FnOnce(&ComposeBridge) -> ControlResponse + Send>;
 /// `StreamTurn`; fails after `limit`.
 async fn generate_text(
     spine: Arc<Mutex<AienRuntimeSpine>>,
-    tokenizer: Arc<RwLock<Option<TinyLlamaTokenizer>>>,
+    tokenizer: Arc<RwLock<Option<ChatTokenizer>>>,
     messages: Vec<crate::control::ChatTurn>,
     max_tokens: usize,
     temperature: f32,
@@ -373,12 +385,13 @@ async fn generate_text(
         loop {
             match events.recv().await {
                 Some(CompletionEvent::Token { token, .. }) => produced.push(token),
-                Some(CompletionEvent::Finished { .. }) => {
+                Some(CompletionEvent::Finished { finish_reason, .. }) => {
                     return tokenizer
                         .decode_opts(&produced, true)
                         .map(|text| crate::spine::Generation {
                             text,
                             tokens: produced.len(),
+                            finish_reason: Some(finish_reason_label(&finish_reason).to_string()),
                         })
                         .map_err(|e| format!("tokenizer decode failed: {e}"));
                 }
@@ -400,7 +413,7 @@ async fn generate_text(
 /// model fails the Skill (no proposal) instead of failing the run.
 pub fn model_proposer(
     spine: Arc<Mutex<AienRuntimeSpine>>,
-    tokenizer: Arc<RwLock<Option<TinyLlamaTokenizer>>>,
+    tokenizer: Arc<RwLock<Option<ChatTokenizer>>>,
     handle: tokio::runtime::Handle,
 ) -> ComposeProposer {
     let max_tokens = std::env::var("AIEN_COMPOSE_MAX_TOKENS")
@@ -427,6 +440,7 @@ pub fn model_proposer(
             .map(|g| crate::spine::Generation {
                 text: format!("{}{}", crate::spine::COMPOSE_ASSISTANT_PREFIX, g.text),
                 tokens: g.tokens,
+                finish_reason: g.finish_reason,
             })
     })
 }
@@ -434,7 +448,7 @@ pub fn model_proposer(
 async fn stream_turn(
     writer: &mut tokio::net::unix::OwnedWriteHalf,
     spine: Arc<Mutex<AienRuntimeSpine>>,
-    tokenizer: Arc<RwLock<Option<TinyLlamaTokenizer>>>,
+    tokenizer: Arc<RwLock<Option<ChatTokenizer>>>,
     messages: Vec<crate::control::ChatTurn>,
     max_tokens: usize,
     temperature: f32,
@@ -499,7 +513,7 @@ async fn handle_connection(
     spine: Arc<Mutex<AienRuntimeSpine>>,
     is_running: Arc<AtomicBool>,
     shutdown_notify: Arc<Notify>,
-    tokenizer: Arc<RwLock<Option<TinyLlamaTokenizer>>>,
+    tokenizer: Arc<RwLock<Option<ChatTokenizer>>>,
     compose: Option<Arc<ComposeBridge>>,
 ) {
     let (reader, mut writer) = stream.into_split();

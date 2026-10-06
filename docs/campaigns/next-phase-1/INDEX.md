@@ -9,3 +9,6 @@ Each receipt is named by the sha256 of its content and never edited.
 - `2c12a5baf7f51d9ba2e20a846d7c0ea8a9d88ff9db57662c94cc681bd8e3c078.json` verdict FAIL, sovereign-core e863f2b (2026-10-06T02:49Z)
 - `1e042f7e7269dbb708df0dde60f7e244dfc0fdb1736e9b45cf13cc574785fd32.json` verdict FAIL, sovereign-core 6264a9e34551c4aff3f5e7f08aec6677125c4387 (2026-10-06T03:25Z)
 - `f8062c5e301965812a1e0a9848e83f5bd50294a4e50f889b1bd998418396ed76.json` verdict PASS, sovereign-core 9d3b537f690646e568bb35579e94dec9ca219c1e (2026-10-06T11:24Z)
+- `31dad76fad07498b4bc67b068c50f7b7cd16350ec395b3a4e652aa8e94e87217.json` verdict PASS, sovereign-core ac96e9cd6c38e2c236d5434194a9e7ba1454be5f (2026-10-06T15:41Z)
+- `5e52174ece3d75e253ab0c91967c9c311fbc8c74920f1bec6cc3d894b1f3ca43.json` verdict PASS, sovereign-core ac96e9cd6c38e2c236d5434194a9e7ba1454be5f (2026-10-06T15:43Z)
+- `c02bf4047b424000468b7fc4c7612fa6352f9392f274b9a5e57b459e39f6fdad.json` verdict PASS, sovereign-core ac96e9cd6c38e2c236d5434194a9e7ba1454be5f (2026-10-06T15:44Z)

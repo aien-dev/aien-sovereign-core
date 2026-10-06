@@ -725,7 +725,7 @@ impl NativeTransformerBackend {
         let kv_dim = geom.kv_dim();
         let intermediate_dim = weights.config.intermediate_dim();
         let eps = weights.config.rms_norm_eps;
-        let theta = weights.config.rope_theta;
+        let rope = weights.config.rope();
 
         let token_idx = (token_id as usize) % weights.config.vocab_size();
         let mut x =
@@ -786,7 +786,7 @@ impl NativeTransformerBackend {
                 head_dim,
                 num_heads,
                 num_kv_heads,
-                theta,
+                &rope,
             );
 
             if let (Some((block_id, slot)), Some(mgr)) = (block_slot, kv_manager) {
@@ -899,7 +899,7 @@ impl NativeTransformerBackend {
         backend.compute_logits(
             &mut logits,
             hidden_state,
-            &weights.lm_head,
+            weights.output_projection(),
             vocab_size,
             hidden_dim,
         );
@@ -978,7 +978,7 @@ impl NativeTransformerBackend {
         let kv_dim = geom.kv_dim();
         let intermediate_dim = weights.config.intermediate_dim();
         let eps = weights.config.rms_norm_eps;
-        let theta = weights.config.rope_theta;
+        let rope = weights.config.rope();
 
         // Paged mode: one physical (block, slot) per absolute position, resolved once
         // (not per layer). Positions inside the table's allocated length (the
@@ -1109,7 +1109,7 @@ impl NativeTransformerBackend {
                 let v_t = &v_batch[t * kv_dim..(t + 1) * kv_dim];
 
                 let pos = offset + t;
-                backend.apply_rope(q_t, k_t, pos, head_dim, num_heads, num_kv_heads, theta);
+                backend.apply_rope(q_t, k_t, pos, head_dim, num_heads, num_kv_heads, &rope);
 
                 if let (Some((block_id, slot)), Some(mgr)) = (paged_slots[t], kv_manager) {
                     // Slots exist only when a physical pool is attached, so this
@@ -1302,7 +1302,7 @@ impl NativeTransformerBackend {
         let kv_dim = geom.kv_dim();
         let intermediate_dim = self.weights.config.intermediate_dim();
         let eps = self.weights.config.rms_norm_eps;
-        let theta = self.weights.config.rope_theta;
+        let rope = self.weights.config.rope();
         let vocab_size = self.weights.config.vocab_size();
 
         // 1. Gather active sequence requests and their current positions / last tokens
@@ -1435,7 +1435,7 @@ impl NativeTransformerBackend {
                     head_dim,
                     num_heads,
                     num_kv_heads,
-                    theta,
+                    &rope,
                 );
             }
 
@@ -1615,7 +1615,7 @@ impl NativeTransformerBackend {
         self.tensor_backend.matmul_batch(
             &mut logits_batch,
             &x_norm,
-            &self.weights.lm_head,
+            self.weights.output_projection(),
             d,
             hidden_dim,
             vocab_size,
@@ -1624,11 +1624,9 @@ impl NativeTransformerBackend {
         // 8. Sampling and output emission (slot failures from step 1b first)
         let mut outputs = slot_failures;
         outputs.reserve(d);
-        let stop_tokens = [
-            crate::tokenizer::TinyLlamaTokenizer::UNK_TOKEN_ID,
-            crate::tokenizer::TinyLlamaTokenizer::BOS_TOKEN_ID,
-            crate::tokenizer::TinyLlamaTokenizer::EOS_TOKEN_ID,
-        ];
+        // The model's end-of-sequence set (legacy TinyLlama UNK/BOS/EOS when the config
+        // names none): a Llama 3 vocabulary has ordinary text at ids 0..=2.
+        let stop_tokens = self.weights.config.stop_token_ids().to_vec();
 
         for (i, &(seq_id, _, pos)) in valid_reqs.iter().enumerate() {
             let logits = &logits_batch[i * vocab_size..(i + 1) * vocab_size];

@@ -2,9 +2,9 @@
 //! Provides hardware-neutral abstraction for transformer mathematical operations.
 
 use crate::tensor::{
-    apply_rope as tensor_rope, matmul_vec as tensor_matmul, rmsnorm as tensor_rmsnorm,
+    apply_rope_params as tensor_rope, matmul_vec as tensor_matmul, rmsnorm as tensor_rmsnorm,
 };
-use aien_abi_core::AttentionGeometry;
+use aien_abi_core::{AttentionGeometry, RopeParams};
 
 /// The trait's attention methods return `()`, so a wrong head layout cannot be reported as an
 /// error value; it must never turn into numbers either. These helpers refuse loudly (panic with
@@ -156,7 +156,9 @@ pub trait TensorBackend: Send + Sync {
 
     /// In-place Rotary Positional Embeddings (RoPE) following canonical rotate_half convention:
     /// rot(v) = [-v[half_dim..], v[..half_dim]]
-    /// out = v * cos(pos * theta^(-2i/d)) + rot(v) * sin(pos * theta^(-2i/d))
+    /// out = v * cos(pos * f_i) + rot(v) * sin(pos * f_i), with f_i = `rope.inv_freq(i, head_dim)`
+    /// (theta^(-2i/d), smoothed by the llama3 scaling when the model has one).
+    #[allow(clippy::too_many_arguments)]
     fn apply_rope(
         &self,
         q: &mut [f32],
@@ -165,7 +167,7 @@ pub trait TensorBackend: Send + Sync {
         head_dim: usize,
         num_q_heads: usize,
         num_kv_heads: usize,
-        theta: f32,
+        rope: &RopeParams,
     );
 
     /// Vector-matrix multiplication for row-major weights: out = x * W^T
@@ -381,9 +383,9 @@ impl TensorBackend for ReferenceCpuBackend {
         head_dim: usize,
         num_q_heads: usize,
         num_kv_heads: usize,
-        theta: f32,
+        rope: &RopeParams,
     ) {
-        tensor_rope(q, k, pos, num_q_heads, num_kv_heads, head_dim, theta);
+        tensor_rope(q, k, pos, num_q_heads, num_kv_heads, head_dim, rope);
     }
 
     fn matmul_vec(
@@ -529,8 +531,8 @@ mod tests {
         let mut q2 = q1.clone();
         let mut k2 = k1.clone();
 
-        backend.apply_rope(&mut q1, &mut k1, 5, 64, 2, 1, 10000.0);
-        tensor_rope(&mut q2, &mut k2, 5, 2, 1, 64, 10000.0);
+        backend.apply_rope(&mut q1, &mut k1, 5, 64, 2, 1, &RopeParams::plain(10000.0));
+        crate::tensor::apply_rope(&mut q2, &mut k2, 5, 2, 1, 64, 10000.0);
 
         assert_eq!(q1, q2);
         assert_eq!(k1, k2);
