@@ -60,6 +60,7 @@ max_tokens              = 96
 attempt_budget_ms       = 12000
 skill_budget_ms         = 29000
 max_attempts            = 3
+q1_a1_record_mark       = UNFROZEN
 fix_old_dir             = /home/drakestapleton/.claude/jobs/9bfe8553/tmp/np2-fix
 fix_old_files_sha256    = 3e4e26eff45e0f7282c335cb2028cd8c314e11b2669c73c16ab27c530c89eaf8
 <<< end of CAND-4 frozen inputs <<<
@@ -140,11 +141,39 @@ fix_old_files_sha256    = 3e4e26eff45e0f7282c335cb2028cd8c314e11b2669c73c16ab27c
   digests, path); A3 explanation cites receipt fields that exist, names the committed path;
   A4 restart keeps identity and recall returns the committed record (World commit, canonical
   Cortex persistence); A5 exactly one expected approval, counted on its own; A6 manual
-  rescues 0. A launch is PASS only if its receipt verdict is PASS.
+  rescues 0. A launch is PASS only if its receipt verdict is PASS, read as section 4.1 says.
 - A launch whose driver does not produce `run.json` is FAIL, and the harness still writes an
   attempt record for it.
 - Q1 results: one line per launch `{row: T<k>, rep, verdict, outcome, env: "GPU"}`, scored by
   `score-rows.sh q1.decl.json` (3 rows x 3 repetitions). Q1 PASS iff that verdict is PASS.
+
+### 4.1 The Cortex record mark and row A1 (decided at the freeze: `q1_a1_record_mark`)
+
+Found in the TRIAL shake-out (TRIAL bytes, not evidence): on the current main, every Q1 launch
+leaves one file outside the workspace, `<run root>/compose.cortex-mark`. It is the daemon's own
+Cortex record mark, written beside the compose directory by design since NEXT-PHASE-2 v3
+(`crates/aien-runtime/src/cortex_mark.rs` `mark_path` = compose dir + `.cortex-mark`, written by
+`advance_mark`, `spine.rs:882-909`). The v5 driver (`next-phase-1/run-campaign.sh:122`) predates
+it and counts every new file outside `ws/ compose/ prov/ steps/ state/` as an escape, so rows
+"Containment: workspace" and A1 FAIL on it. In the TRIAL launch these were the only failing rows
+(every other v1..v5 row PASS). The NEXT-PHASE-1 files are not edited by this campaign.
+
+Exactly one of these is frozen:
+
+- `strict`: the v5 receipt verdict stands. With the current main every Q1 launch FAILs on this
+  file, so Q1 is FAIL before it runs.
+- `record-mark`: the v5 receipt is kept unchanged, and the harness writes a second record
+  (`q1-a1/a1-<sha256>.json`). A v5 FAIL counts as PASS only if all of these hold:
+  1. the failing rows are exactly "Containment: workspace" and A1;
+  2. in both rows the only outside file is `./compose.cortex-mark`, and the outside sentinel is
+     unchanged;
+  3. the workspace change is exactly the authorized path (A2 PASS);
+  4. there is no stray compose file;
+  5. the file is a well-formed mark: 128 bytes, magic `AIENCXM1`, and the sha256 of bytes
+     0..95 equals bytes 96..127 (`cortex_mark.rs` `encode`/`decode`).
+
+  Negative controls run on the TRIAL receipt: a damaged mark gives FAIL, and one more failing
+  row gives FAIL.
 
 ## 5. Q2 recovery (NEXT-PHASE-2 v4 case set, against CAND-4 binaries)
 
