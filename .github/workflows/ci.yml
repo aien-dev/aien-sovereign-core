@@ -33,6 +33,9 @@ jobs:
       - name: Verify Piped Installer Bootstrap
         run: bash scripts/test-install.sh
 
+      - name: Verify Scoring Contract v5 (negative tests)
+        run: bash docs/campaigns/scoring/test-scoring-v5.sh
+
       - name: Cargo Workspace Check
         run: cargo check --workspace --all-targets
 
