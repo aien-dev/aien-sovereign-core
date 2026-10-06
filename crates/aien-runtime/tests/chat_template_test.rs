@@ -73,7 +73,7 @@ fn proposal_prompt_token_counts() {
     let tok = TinyLlamaTokenizer::from_file(path).expect("tokenizer");
     let ws = "/home/drakestapleton/.claude/jobs/9bfe8553/tmp/np1-v3run/ws";
     let goal = "Create the file NOTES.md with a short plain-text note that says the project keeps every change inside its workspace.";
-    let base = aien_runtime::spine::proposal_prompt(goal, ws, "README.md, docs");
+    let base = aien_runtime::spine::proposal_prompt(goal, ws);
     let retry = aien_runtime::spine::retry_prompt(
         &base,
         "no filename line: the first line must be 'filename: <relative path>'",

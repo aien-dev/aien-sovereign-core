@@ -521,8 +521,6 @@ pub struct Generation {
 pub type ComposeProposer =
     Arc<dyn Fn(&str, std::time::Duration) -> Result<Generation, String> + Send + Sync>;
 
-/// Most entries of the workspace listing put into the prompt.
-const COMPOSE_LISTING_MAX: usize = 32;
 /// The one Skill name; its procedure digest is sha256 of this name.
 pub const COMPOSE_MODEL_SKILL: &str = "aien.model.propose-file-change";
 
@@ -719,9 +717,9 @@ pub const COMPOSE_ATTEMPT_BUDGET: std::time::Duration = std::time::Duration::fro
 pub const COMPOSE_ASSISTANT_PREFIX: &str = "filename:";
 
 /// The fixed proposal template of the production RunComposeTask path.
-pub fn proposal_prompt(goal: &str, workspace: &str, entries: &str) -> String {
+pub fn proposal_prompt(goal: &str, workspace: &str) -> String {
     format!(
-        "Goal: {goal}\nAuthorized workspace: {workspace}\nTop-level entries: {entries}\n\
+        "Goal: {goal}\nAuthorized workspace: {workspace}\n\
          Propose exactly one file change inside the workspace.\n\
          Answer in exactly this format and nothing else:\n\
          filename: <relative path>\n\
@@ -949,23 +947,7 @@ impl ComposeBridge {
                 ws.display()
             ));
         }
-        let mut names: Vec<String> = std::fs::read_dir(&ws)
-            .map_err(|e| format!("RunComposeTask: read {}: {e}", ws.display()))?
-            .filter_map(|e| e.ok().map(|e| e.file_name().to_string_lossy().into_owned()))
-            .collect();
-        names.sort();
-        let more = names.len().saturating_sub(COMPOSE_LISTING_MAX);
-        names.truncate(COMPOSE_LISTING_MAX);
-        let entries = format!(
-            "{}{}",
-            names.join(", "),
-            if more > 0 {
-                format!(" (+{more} more)")
-            } else {
-                String::new()
-            }
-        );
-        let prompt = proposal_prompt(goal, &ws.display().to_string(), &entries);
+        let prompt = proposal_prompt(goal, &ws.display().to_string());
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_err(|e| format!("clock: {e}"))?;
