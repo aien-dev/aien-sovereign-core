@@ -3,14 +3,19 @@
 Acceptance: `ACCEPTANCE-CAND4.md`, frozen in commit 130beeb before any run (sc d5b78ff, omega c0369e6,
 aienos b84c0a6, physics 6d7cf0d, manifest aien-architecture 7f99d7e). Binaries: the CAND4-BUILD-REAL3
 double build (aien-cli ad6b7eb5, 25 of 25 identical); cpu-fault 3ba0a8e6 built here from the frozen sc.
-Every pinned digest was recomputed before each round and matched. Receipts: `receipts/`, each
-named by the sha256 of its content. No launch was repeated.
+The pinned digests were checked in the parent run before the first round (`receipts/run-qual.out` line 9: "all pinned
+digests equal the frozen values"; `refuse_unless_digests` exits 3 on a mismatch) and again after every run by Q2w
+(14 of 14 OK). Harness defect, disclosed: each round runs as a fresh child process (`bash "$0" _q1_round` /
+`_q2_fixture`) and `inputs.sh` resets `DIGESTS='[]'` in the child, so the 9 Q1 attempt records carry
+`digests_checked_before_round: []` and the q2-fixture and q2-cases records carry `digests: []`. No per-round
+re-check inside the child is recorded; the parent check and the post-run check are the evidence. Receipts: `receipts/`,
+each named by the sha256 of its content. No launch was repeated.
 
 **VERDICT: PASS** (digests PASS, hygiene PASS, Q1 PASS, Q2 PASS, Q2w PASS), with the limits below.
 
 | part | result | evidence |
 |------|--------|----------|
-| digests | PASS | every `check` and each pre-round check |
+| digests | PASS | parent check before round 1 (`receipts/run-qual.out`:9) and Q2w post-run check 14/14; per-round records empty (defect, see above) |
 | hygiene H1, H1c, H2, H2c, H3, H4, H4c, H5 | PASS; H6 reports `AIEN_DEV_FALLBACK` | `receipts/hygiene/hygiene-754c729f...json` |
 | Q1 (T1, T2, T3 x 3, GPU) | PASS: 9 of 9 launches and both controls | `receipts/scores/q1-score-d6cc2dcd...json` |
 | Q2 (F0 on GPU, cases on cpu-fault, 3 reps) | PASS: 34 rows PASS, C6d NOT_APPLICABLE | `receipts/scores/q2-score-52445cf7...json`; NP2 receipt 64ca5ffe PASS |
@@ -43,3 +48,20 @@ The two controls (damaged mark, extra failing row) both rejected as required.
 - Q2 cases and Q2w: CPU only, no hold.
 Others in the quiet history after ours: cand4-release 20:46:10 to 20:47:46; laneS-236 21:02:43 to 21:05:06.
 No overlap with any laneQ launch. (Hold times from `~/workspace/.spark-quiet.history`.)
+
+## Disclosures from the fresh-clone review (wording only; no receipt or frozen file edited)
+- `a1_read` (`run-cand4.sh`) counts only rows whose result is exactly `FAIL`, so an `INCOMPLETE` or `NOT_RUN` row would
+  not block the "only the two mark-caused rows fail" condition, and it treats a missing sentinel pair as unchanged
+  (`null == null`). Harmless on these receipts (every row is PASS or FAIL, every sentinel pair present; checked in
+  review), but it must be hardened before reuse: issue #240.
+- `q1.decl.json` line 5 carries a stale note ("No control row ...") that contradicts its own rows; the frozen
+  `ACCEPTANCE-CAND4.md` section 4.1 (line 145) governs, and the declaration is not edited after the freeze.
+- Rule 4.1 (the record-mark reading) was written after a pre-freeze TRIAL showed the mark failure
+  (`ACCEPTANCE-CAND4.md` line 153 discloses this). It was frozen before any evidence run; no post-run
+  reinterpretation took place.
+- The C6d outcome text in the NEXT-PHASE-2 receipt hard-codes "omega 62b6a28" (inherited from the v4 declaration
+  string); the run used omega c0369e6 as pinned. The receipt is not edited.
+- The Q2w score (`receipts/scores/q2w-score-22867895...json`) has `results_sha256: null`; the per-row results are in
+  `receipts/q2w-results.jsonl` and `receipts/q2w/`.
+- This PR's title said "unfrozen draft" while the acceptance was being written; the acceptance was frozen in commit
+  130beeb before any run.
