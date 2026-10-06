@@ -12,13 +12,28 @@ j() { if [ -s "$1" ]; then jq -c . "$1" 2>/dev/null || echo null; else echo null
 skill_sha=$(printf '%s' 'aien.model.propose-file-change' | sha256sum | cut -d' ' -f1)
 receipts=$(for p in "$R"/prov/*.json; do [ -f "$p" ] && jq -c --arg p "$p" --arg s "$(sha256sum "$p" | cut -d' ' -f1)" \
   '{path:$p, sha256:$s, tool, success, arguments_digest, result_digest}' "$p"; done | jq -sc .)
+# ACCEPTANCE-v4 2(4): every attempt's full reply, as replies/<sha256>.txt
+# (named by its own sha256, which must equal text_sha256; never edited).
+mkdir -p "$OUT/replies"
+n_att=$(jq '(.report.proposal_attempts // []) | length' "$S/S3.json" 2>/dev/null || echo 0)
+for k in $(seq 0 $((n_att - 1))); do
+  want=$(jq -r ".report.proposal_attempts[$k].text_sha256 // empty" "$S/S3.json")
+  [ -n "$want" ] || continue
+  rf=$(mktemp "$OUT/replies/.reply.XXXXXX")
+  jq -j ".report.proposal_attempts[$k].text" "$S/S3.json" >"$rf"
+  got=$(sha256sum "$rf" | cut -d' ' -f1)
+  [ "$got" = "$want" ] || { echo "reply $k: sha256 $got != text_sha256 $want" >&2; rm -f "$rf"; exit 3; }
+  mv "$rf" "$OUT/replies/$got.txt"
+done
+CONCLUSION=; [ -n "${CONCLUSION_FILE:-}" ] && CONCLUSION=$(cat "$CONCLUSION_FILE")
 tmp=$(mktemp "$OUT/.receipt.XXXXXX")
 jq -n --argjson run "$(j "$R/run.json")" \
   --argjson s1 "$(j "$S/S1.json")" --argjson s2 "$(j "$S/S2.json")" --argjson s3 "$(j "$S/S3.json")" \
   --argjson s4 "$(j "$S/S4.json")" --argjson s5 "$(j "$S/S5.json")" --argjson s6 "$(j "$S/S6.json")" \
   --argjson s8 "$(j "$S/S8.json")" --argjson pre "$(j "$S/pre-restart-recall.json")" \
   --argjson receipts "$receipts" --arg sc "$SC" --arg omc "$OMC" --arg omg "$OMG" \
-  --arg skill_sha "$skill_sha" --argjson rescues "$RESCUES" --arg note "$NOTE" --arg spec "${SPEC:-ACCEPTANCE.md spec_version 1}" '
+  --arg skill_sha "$skill_sha" --argjson rescues "$RESCUES" --arg note "$NOTE" --arg spec "${SPEC:-ACCEPTANCE.md spec_version 1}" \
+  --arg conclusion "$CONCLUSION" '
   def st($id): ($run.steps // []) | map(select(.step == $id)) | (.[0] // {});
   def okv: if . then "PASS" else "FAIL" end;
   ($s3.report // {}) as $rep
@@ -110,6 +125,9 @@ jq -n --argjson run "$(j "$R/run.json")" \
     model:($d | map(.model)),
     note:$note,
     acceptance_spec:$spec,
+    warm_up_ms:($d | map(.warm_up_ms // null)),
+    replies:(($rep.proposal_attempts // []) | map(select(.text_sha256 != null) | {attempt, file:("replies/" + .text_sha256 + ".txt")})),
+    conclusion:(if $conclusion == "" then null else $conclusion end),
     observations:{tokens_per_s:(($rep.proposal_attempts // []) | map(select(.tokens > 0 and .ms > 0) | {attempt, tokens, ms, tokens_per_s:((.tokens * 100000 / .ms | floor) / 100)}))},
     skills:[{id:0, name:"aien.model.propose-file-change", version:null, digest:$skill_sha, cost:10}],
     record_digest:[($rep.record_digest // null)],
@@ -153,7 +171,10 @@ v=$(jq -r .verdict "$OUT/$h.json")
   jq -r '(.runs[0].proposal_attempts // [])[] | "  proposal attempt \(.attempt): \(.outcome) \(.ms) ms \(.tokens) tokens aegis=\(.aegis // "-") \(.reason // "")"' "$OUT/$h.json"
   echo "Observations:"
   jq -r '.observations.tokens_per_s[] | "  attempt \(.attempt): \(.tokens) tokens in \(.ms) ms = \(.tokens_per_s) tokens/s (wall, incl. prompt prefill)"' "$OUT/$h.json"
-  [ -n "$NOTE" ] && echo "Note: $NOTE"
+  jq -r '"  warm-up (declared, before the task window): \(.warm_up_ms | map(if . == null then "none" else "\(.) ms" end) | join(" / ")) (daemon 1 / daemon 2)"' "$OUT/$h.json"
+  jq -r '.replies[] | "  reply attempt \(.attempt): \(.file)"' "$OUT/$h.json"
+  if [ -n "$NOTE" ]; then echo "Note: $NOTE"; fi
+  if [ -n "$CONCLUSION" ]; then printf '\nConclusion on the frozen model input\n%s\n' "$CONCLUSION"; fi
 } >"$OUT/$h.summary.txt"
 [ -f "$OUT/INDEX.md" ] || printf '# NEXT-PHASE-1 campaign receipts\n\nEach receipt is named by the sha256 of its content and never edited.\n\n' >"$OUT/INDEX.md"
 echo "- \`$h.json\` verdict $v, sovereign-core $SC ($(date -u +%Y-%m-%dT%H:%MZ))" >>"$OUT/INDEX.md"

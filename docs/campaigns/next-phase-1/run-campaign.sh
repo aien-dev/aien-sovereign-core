@@ -37,6 +37,11 @@ start_daemon() {   # $1 = 1|2
   while [ ! -S "$R/aien.sock" ] && kill -0 "$DPID" 2>/dev/null && [ $i -lt 600 ]; do
     sleep 0.5; i=$((i + 1))
   done
+  # ACCEPTANCE-v4 2(2): a daemon counts as started once its declared warm-up
+  # line is printed (it runs before the daemon serves any request).
+  while ! grep -q 'Warm-up:' "$DLOG" && kill -0 "$DPID" 2>/dev/null && [ $i -lt 600 ]; do
+    sleep 0.5; i=$((i + 1))
+  done
   sleep 0.5
   [ -S "$R/aien.sock" ] && kill -0 "$DPID" 2>/dev/null
 }
@@ -120,18 +125,20 @@ STATE_NEW=$(cd "$R" && find ./state -type f | sort | jq -R . | jq -sc .)
 COMPOSE_FILES=$(cd "$R/compose" && find . -mindepth 1 | sort | jq -R . | jq -sc .)
 backend() { grep -m1 'Backend:' "$1" | sed 's/\x1b\[[0-9;]*m//g; s/^ *Backend: //'; }
 model_line() { grep -m1 'checkpoint loaded from' "$1" | sed 's/\x1b\[[0-9;]*m//g'; }
+warm_up_ms() { grep -m1 'Warm-up: [0-9]* token in [0-9]* ms' "$1" | sed 's/.* in \([0-9]*\) ms.*/\1/'; }
 
 jq -n --arg R "$R" --argjson steps "$STEPS" \
   --arg b1 "$(backend "$R/daemon-1.log")" --arg b2 "$(backend "$R/daemon-2.log")" \
   --arg m1 "$(model_line "$R/daemon-1.log")" --arg m2 "$(model_line "$R/daemon-2.log")" \
   --argjson pid1 "$PID1" --argjson pid2 "$PID2" --arg hwm1 "${HWM1:-}" --arg hwm2 "${HWM2:-}" \
+  --arg wu1 "$(warm_up_ms "$R/daemon-1.log")" --arg wu2 "$(warm_up_ms "$R/daemon-2.log")" \
   --arg wsb "$WS_BEFORE" --arg wsa "$WS_AFTER" --arg ob "$OUT_BEFORE" --arg oa "$OUT_AFTER" \
   --argjson wsc "$WS_CHANGED" --argjson outn "$OUTSIDE_NEW" --argjson staten "$STATE_NEW" \
   --argjson cfiles "$COMPOSE_FILES" --arg constraint "$CONSTRAINT" --arg goal "$GOAL" \
   --arg uname "$(uname -srm)" --arg midf1 "${MIDF1:-}" --arg midf2 "${MIDF2:-}" --arg cited "$CITED" --argjson nrec "${NREC:-0}" \
   '{root:$R, uname:$uname, goal:$goal, constraint_text:$constraint, steps:$steps,
-    daemon:[{pid:$pid1, backend:$b1, model:$m1, vmhwm_kb:($hwm1|tonumber? // null)},
-            {pid:$pid2, backend:$b2, model:$m2, vmhwm_kb:($hwm2|tonumber? // null)}],
+    daemon:[{pid:$pid1, backend:$b1, model:$m1, vmhwm_kb:($hwm1|tonumber? // null), warm_up_ms:($wu1|tonumber? // null)},
+            {pid:$pid2, backend:$b2, model:$m2, vmhwm_kb:($hwm2|tonumber? // null), warm_up_ms:($wu2|tonumber? // null)}],
     cited:($cited|split(",")|map(tonumber? // empty)), prefix_records:$nrec,
     containment:{workspace_before:$wsb, workspace_after:$wsa, workspace_changed:$wsc,
                  outside_sentinel_before:$ob, outside_sentinel_after:$oa,
