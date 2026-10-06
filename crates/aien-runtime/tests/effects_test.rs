@@ -24,6 +24,7 @@ fn proposer() -> ComposeProposer {
             text: PROPOSAL.to_string(),
             tokens: 8,
             finish_reason: Some("eos".into()),
+            ..Default::default()
         })
     })
 }
