@@ -132,7 +132,7 @@ jobs:
             DRY-RUN-STATUS-${{ matrix.target }}.txt
 
   dry-run-sign:
-    name: Dry run: sign with a throwaway key and verify
+    name: "Dry run: sign with a throwaway key and verify"
     needs: build-release
     if: github.event_name == 'workflow_dispatch' && inputs.dry_run
     runs-on: ubuntu-latest
