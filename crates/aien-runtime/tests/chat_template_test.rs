@@ -87,3 +87,61 @@ fn proposal_prompt_token_counts() {
         assert!(n <= 256);
     }
 }
+
+/// ACCEPTANCE-v4 2(1): the bytes sent end with the assistant marker, its
+/// newline and the literal prefix; nothing follows the final space.
+#[test]
+fn assistant_prefix_follows_the_assistant_marker() {
+    use aien_runtime::spine::{check_file_proposal, COMPOSE_ASSISTANT_PREFIX};
+    assert_eq!(COMPOSE_ASSISTANT_PREFIX, "filename: ");
+    let sent = format!(
+        "{}{}",
+        format_tinyllama_chat(&[turn("user", V2_PROMPT)]),
+        COMPOSE_ASSISTANT_PREFIX
+    );
+    assert!(sent.starts_with("<|user|>\nGoal: "));
+    assert!(sent.ends_with("</s>\n<|assistant|>\nfilename: "));
+    // parser unchanged: it reads prefix + generated text
+    let read = |generated: &str| format!("{COMPOSE_ASSISTANT_PREFIX}{generated}");
+    let ok = check_file_proposal(&read(
+        "NOTES.md\nEvery change stays inside the workspace.\n",
+    ))
+    .expect("path + content parses");
+    assert_eq!(ok.path, "NOTES.md");
+    assert!(check_file_proposal(&read("NOTES.md\n"))
+        .unwrap_err()
+        .contains("empty content"));
+    assert!(check_file_proposal(&read("../x\ny\n"))
+        .unwrap_err()
+        .contains("outside the workspace"));
+    if let Ok(path) = std::env::var("AIEN_TOKENIZER_PATH") {
+        let tok = TinyLlamaTokenizer::from_file(path).expect("tokenizer");
+        let ids = tok.encode(&sent).expect("encode");
+        eprintln!(
+            "prefixed prompt tokens: {} tail {:?}",
+            ids.len(),
+            &ids[ids.len() - 6..]
+        );
+        assert_eq!(&ids[ids.len() - 4..], &[13, 9507, 29901, 29871]);
+    }
+}
+
+/// ACCEPTANCE-v4 2(2): the warm-up prompt spans more than one 128-token
+/// prefill chunk.
+#[test]
+fn warm_up_prompt_spans_two_prefill_chunks() {
+    let Ok(path) = std::env::var("AIEN_TOKENIZER_PATH") else {
+        eprintln!("AIEN_TOKENIZER_PATH not set: warm-up length check skipped");
+        return;
+    };
+    let tok = TinyLlamaTokenizer::from_file(path).expect("tokenizer");
+    let n = tok
+        .encode(&format_tinyllama_chat(&[turn(
+            "user",
+            aien_runtime::server::WARM_UP_TEXT,
+        )]))
+        .expect("encode")
+        .len();
+    eprintln!("warm-up prompt tokens: {n}");
+    assert!(n > 128 && n <= 256, "{n}");
+}

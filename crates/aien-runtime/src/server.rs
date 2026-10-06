@@ -27,7 +27,18 @@ pub struct AienRuntimeServer {
     shutdown_notify: Arc<Notify>,
     is_running: Arc<AtomicBool>,
     tokenizer: Arc<RwLock<Option<TinyLlamaTokenizer>>>,
+    warm_up: AtomicBool,
 }
+
+/// NEXT-PHASE-1 v4 declared warm-up prompt (ACCEPTANCE-v4 Section 2(2)):
+/// fixed text, more than one 128-token prefill chunk once templated, so
+/// both the full-chunk and the remainder prefill paths run before serving.
+pub const WARM_UP_TEXT: &str = "Warm-up turn before serving requests. This text is fixed and its one generated token is discarded. \
+Warm-up turn before serving requests. This text is fixed and its one generated token is discarded. \
+Warm-up turn before serving requests. This text is fixed and its one generated token is discarded. \
+Warm-up turn before serving requests. This text is fixed and its one generated token is discarded. \
+Warm-up turn before serving requests. This text is fixed and its one generated token is discarded. \
+Warm-up turn before serving requests. This text is fixed and its one generated token is discarded.";
 
 impl AienRuntimeServer {
     pub fn new(spine: AienRuntimeSpine, socket_path: impl AsRef<Path>) -> Self {
@@ -37,12 +48,19 @@ impl AienRuntimeServer {
             shutdown_notify: Arc::new(Notify::new()),
             is_running: Arc::new(AtomicBool::new(false)),
             tokenizer: Arc::new(RwLock::new(None)),
+            warm_up: AtomicBool::new(false),
         }
     }
 
     /// Installs the tokenizer that `StreamTurn` uses to encode prompts and decode tokens.
     pub fn set_tokenizer(&self, tokenizer: TinyLlamaTokenizer) {
         *self.tokenizer.write().expect("tokenizer lock") = Some(tokenizer);
+    }
+
+    /// Run the declared warm-up turn (1 token, discarded) at the start of
+    /// `run`, before any request is served (ACCEPTANCE-v4 Section 2(2)).
+    pub fn enable_warm_up(&self) {
+        self.warm_up.store(true, Ordering::SeqCst);
     }
 
     pub fn spine(&self) -> Arc<Mutex<AienRuntimeSpine>> {
@@ -137,6 +155,12 @@ impl AienRuntimeServer {
             }
         });
 
+        // NEXT-PHASE-1 v4: the declared warm-up, before the accept loop
+        // serves anything (clients that connect meanwhile wait in the backlog).
+        if self.warm_up.load(Ordering::SeqCst) {
+            self.run_warm_up().await;
+        }
+
         // NEXT-PHASE-1: the compose bridge (opened on the first RunComposeTask).
         let compose = match compose_dir_from_env() {
             Ok(dir) => Some(Arc::new(ComposeBridge::new(
@@ -222,6 +246,46 @@ fn text_suffix(previous: &str, decoded: &str) -> String {
     decoded.strip_prefix(previous).unwrap_or("").to_string()
 }
 
+impl AienRuntimeServer {
+    /// One greedy 1-token turn on `WARM_UP_TEXT`; the token is discarded.
+    /// Prints `Warm-up: 1 token in <ms> ms over <n> prompt tokens (discarded)`
+    /// or `Warm-up: FAILED ...`; a failure does not stop the daemon.
+    async fn run_warm_up(&self) {
+        let messages = vec![crate::control::ChatTurn {
+            role: "user".into(),
+            content: WARM_UP_TEXT.into(),
+        }];
+        let prompt_tokens = {
+            let guard = self.tokenizer.read().expect("tokenizer lock");
+            guard.as_ref().and_then(|t| {
+                t.encode(&crate::control::format_tinyllama_chat(&messages))
+                    .ok()
+                    .map(|ids| ids.len())
+            })
+        };
+        let t0 = std::time::Instant::now();
+        let out = generate_text(
+            self.spine.clone(),
+            self.tokenizer.clone(),
+            messages,
+            1,
+            0.0,
+            std::time::Duration::from_secs(120),
+            "",
+        )
+        .await;
+        let ms = t0.elapsed().as_millis();
+        match out {
+            Ok(g) => println!(
+                "  Warm-up: {} token in {ms} ms over {} prompt tokens (discarded)",
+                g.tokens,
+                prompt_tokens.unwrap_or(0)
+            ),
+            Err(e) => println!("  Warm-up: FAILED after {ms} ms: {e}"),
+        }
+    }
+}
+
 /// Encode the chat and submit it to the spine (the `StreamTurn` path). Returns
 /// the tokenizer and the completion event stream of the submitted sequence.
 async fn submit_turn(
@@ -230,6 +294,7 @@ async fn submit_turn(
     messages: Vec<crate::control::ChatTurn>,
     max_tokens: usize,
     temperature: f32,
+    assistant_prefix: &str,
 ) -> Result<
     (
         TinyLlamaTokenizer,
@@ -244,7 +309,12 @@ async fn submit_turn(
     let Some(tokenizer) = tokenizer else {
         return Err("tokenizer is not loaded; native chat cannot encode the prompt".into());
     };
-    let prompt = crate::control::format_tinyllama_chat(&messages);
+    // The template ends with the assistant marker; an assistant-response
+    // prefix (compose Skill, ACCEPTANCE-v4 2(1)) follows it directly.
+    let prompt = format!(
+        "{}{assistant_prefix}",
+        crate::control::format_tinyllama_chat(&messages)
+    );
     let tokens = tokenizer
         .encode(&prompt)
         .map_err(|error| format!("tokenizer encode failed: {error}"))?;
@@ -279,9 +349,17 @@ async fn generate_text(
     max_tokens: usize,
     temperature: f32,
     limit: std::time::Duration,
+    assistant_prefix: &str,
 ) -> Result<crate::spine::Generation, String> {
-    let (tokenizer, mut events) =
-        submit_turn(spine, tokenizer, messages, max_tokens, temperature).await?;
+    let (tokenizer, mut events) = submit_turn(
+        spine,
+        tokenizer,
+        messages,
+        max_tokens,
+        temperature,
+        assistant_prefix,
+    )
+    .await?;
     let collect = async {
         let mut produced = Vec::new();
         loop {
@@ -326,14 +404,22 @@ pub fn model_proposer(
             role: "user".into(),
             content: prompt.to_string(),
         }];
-        handle.block_on(generate_text(
-            spine.clone(),
-            tokenizer.clone(),
-            messages,
-            max_tokens,
-            0.0,
-            limit,
-        ))
+        // The assistant turn starts with the fixed prefix; the reply the
+        // parser reads is prefix + generated text (ACCEPTANCE-v4 2(1)).
+        handle
+            .block_on(generate_text(
+                spine.clone(),
+                tokenizer.clone(),
+                messages,
+                max_tokens,
+                0.0,
+                limit,
+                crate::spine::COMPOSE_ASSISTANT_PREFIX,
+            ))
+            .map(|g| crate::spine::Generation {
+                text: format!("{}{}", crate::spine::COMPOSE_ASSISTANT_PREFIX, g.text),
+                tokens: g.tokens,
+            })
     })
 }
 
@@ -346,7 +432,7 @@ async fn stream_turn(
     temperature: f32,
 ) {
     let (tokenizer, mut events) =
-        match submit_turn(spine, tokenizer, messages, max_tokens, temperature).await {
+        match submit_turn(spine, tokenizer, messages, max_tokens, temperature, "").await {
             Ok(x) => x,
             Err(error) => {
                 let _ = write_response(writer, &ControlResponse::Error(error)).await;
