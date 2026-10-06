@@ -546,6 +546,10 @@ pub type ComposeProposer =
 /// The one Skill name; its procedure digest is sha256 of this name.
 pub const COMPOSE_MODEL_SKILL: &str = "aien.model.propose-file-change";
 
+/// `ComposeTaskReport::proposer` of a run driven by the proposer hook
+/// (crate::approved): the reply came from an approved proposal, not a model.
+pub const APPROVED_PROPOSER_LABEL: &str = "hook:approved-proposal";
+
 /// Composition home: `$AIEN_COMPOSE_DIR`, else `$AIEN_RUNTIME_STATE_DIR/compose`,
 /// else `$XDG_STATE_HOME/aien-runtime/compose`, else
 /// `$HOME/.local/state/aien-runtime/compose`. Never /tmp.
@@ -1105,6 +1109,8 @@ pub(crate) struct ComposeHome {
     pub(crate) compose: Compose,
     pub(crate) machine_id: String,
     prompts: Arc<parking_lot::Mutex<HashMap<u64, TaskPrompt>>>,
+    /// Proposer hook: task -> approved proposal text (crate::approved).
+    approved: Arc<parking_lot::Mutex<HashMap<u64, String>>>,
     /// What the model Skill returned per task: the text, or why it gave
     /// none, and every attempt it made.
     proposals: Arc<parking_lot::Mutex<HashMap<u64, SkillOutput>>>,
@@ -1213,22 +1219,52 @@ impl ComposeBridge {
         .map_err(|r| mark_refusal(&self.dir, &r))?;
         let prompts: Arc<parking_lot::Mutex<HashMap<u64, TaskPrompt>>> = Arc::default();
         let proposals: Arc<parking_lot::Mutex<HashMap<u64, SkillOutput>>> = Arc::default();
+        let approved: Arc<parking_lot::Mutex<HashMap<u64, String>>> = Arc::default();
         let (pr, pp, proposer) = (prompts.clone(), proposals.clone(), self.proposer.clone());
+        let pa = approved.clone();
         compose
             .register_skill(COMPOSE_MODEL_SKILL, None, 10, move |task| {
                 let (prompt, target) = pr.lock().get(&task).cloned()?;
-                // Fixed template + bounded automatic retry (ACCEPTANCE-v2 3a, 3b),
-                // measured per-attempt budget (ACCEPTANCE-v3 3b); an edit reply
-                // is merged into the content the model was shown (v7 T5).
-                let edit = target.as_ref().map(|(p, c)| (p.as_str(), c.as_str()));
-                let (out, attempts) = propose_task_with_retries(
-                    proposer.as_ref(),
-                    &prompt,
-                    edit,
-                    COMPOSE_SKILL_BUDGET,
-                    COMPOSE_ATTEMPT_BUDGET,
-                    COMPOSE_MAX_ATTEMPTS,
-                );
+                // Proposer hook (crate::approved): an approved proposal for this
+                // task replaces the model's reply. One attempt, the same
+                // template check, the same AEGIS contract and commit below.
+                // edit = None: an approved whole-file proposal never goes
+                // through merge_edit_reply, so the committed bytes are the
+                // approved bytes even when the path already exists.
+                let fixed = pa.lock().get(&task).cloned();
+                let (out, attempts) = match fixed {
+                    Some(text) => {
+                        let one = move |_: &str, _: std::time::Duration| {
+                            Ok(Generation {
+                                text: text.clone(),
+                                finish_reason: Some("approved".into()),
+                                ..Default::default()
+                            })
+                        };
+                        propose_task_with_retries(
+                            &one,
+                            &prompt,
+                            None,
+                            COMPOSE_SKILL_BUDGET,
+                            COMPOSE_ATTEMPT_BUDGET,
+                            1,
+                        )
+                    }
+                    // Fixed template + bounded automatic retry (ACCEPTANCE-v2 3a, 3b),
+                    // measured per-attempt budget (ACCEPTANCE-v3 3b); an edit reply
+                    // is merged into the content the model was shown (v7 T5).
+                    None => {
+                        let edit = target.as_ref().map(|(p, c)| (p.as_str(), c.as_str()));
+                        propose_task_with_retries(
+                            proposer.as_ref(),
+                            &prompt,
+                            edit,
+                            COMPOSE_SKILL_BUDGET,
+                            COMPOSE_ATTEMPT_BUDGET,
+                            COMPOSE_MAX_ATTEMPTS,
+                        )
+                    }
+                };
                 let h = out.as_ref().ok().map(|t| proposal_handle(t));
                 pp.lock().insert(task, (out, attempts));
                 h
@@ -1261,6 +1297,7 @@ impl ComposeBridge {
             compose,
             machine_id: hex(&info.machine_id),
             prompts,
+            approved,
             proposals,
             mark_path,
             machine_raw: info.machine_id,
@@ -1314,13 +1351,31 @@ impl ComposeBridge {
 
     /// Blocking: runs inference inside the Skill. Call from a blocking thread.
     pub fn run_task(&self, goal: &str, workspace: &str) -> ControlResponse {
-        match self.run_task_inner(goal, workspace) {
+        match self.run_task_inner(goal, workspace, None) {
             Ok(r) => ControlResponse::ComposeTaskResult(Box::new(r)),
             Err(e) => ControlResponse::Error(e),
         }
     }
 
-    fn run_task_inner(&self, goal: &str, workspace: &str) -> Result<ComposeTaskReport, String> {
+    /// Proposer hook entry (crate::approved): one compose run whose model
+    /// Skill returns `approved_text` instead of calling the proposer. The run
+    /// is otherwise the RunComposeTask run: J-Space branch, AEGIS verify
+    /// callback, World commit, Cortex records. Blocking.
+    pub(crate) fn run_approved_task(
+        &self,
+        goal: &str,
+        workspace: &str,
+        approved_text: &str,
+    ) -> Result<ComposeTaskReport, String> {
+        self.run_task_inner(goal, workspace, Some(approved_text))
+    }
+
+    fn run_task_inner(
+        &self,
+        goal: &str,
+        workspace: &str,
+        approved_text: Option<&str>,
+    ) -> Result<ComposeTaskReport, String> {
         if goal.trim().is_empty() {
             return Err("RunComposeTask: empty goal".into());
         }
@@ -1352,9 +1407,13 @@ impl ComposeBridge {
             *guard = Some(self.open_home()?);
         }
         let home = guard.as_mut().expect("opened above");
+        if let Some(t) = approved_text {
+            home.approved.lock().insert(task, t.to_string());
+        }
         home.prompts.lock().insert(task, prompt);
         let run = home.compose.run(task, now.as_micros() as u64);
         home.prompts.lock().remove(&task);
+        home.approved.lock().remove(&task);
         let output = home.proposals.lock().remove(&task);
         // A run appends whether or not it commits: move the record mark first.
         home.advance_mark()
@@ -1401,7 +1460,10 @@ impl ComposeBridge {
             uncommitted_proposal,
             proposer_error,
             proposal_attempts,
-            proposer: self.proposer_label.clone(),
+            proposer: match approved_text {
+                Some(_) => APPROVED_PROPOSER_LABEL.to_string(),
+                None => self.proposer_label.clone(),
+            },
         })
     }
 
