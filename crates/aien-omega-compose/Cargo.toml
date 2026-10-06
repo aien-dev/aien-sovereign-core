@@ -1,0 +1,14 @@
+[package]
+name = "aien-omega-compose"
+version = "0.1.0"
+edition = "2021"
+authors = ["Drake Stapleton <aien@aienos.com>"]
+description = "FFI to omega COMPOSITION-2 (librx_compose.a, rxc_host ABI): goals through J-Space, AEGIS and Cortex"
+license.workspace = true
+build = "build.rs"
+
+[dependencies]
+sha2 = "0.10"
+
+[dev-dependencies]
+tempfile = "3.10"

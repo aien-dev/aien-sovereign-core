@@ -1,0 +1,538 @@
+//! NEXT-PHASE-1 cut 1b + 2: RunComposeTask, ComposeNote, ComposeRecall and
+//! RecoverComposeHome through omega COMPOSITION-2.
+//!
+//! With librx_compose.a linked (aien-omega-compose built with
+//! AIEN_OMEGA_COMPOSE_DIR, see its README) these run the real composition;
+//! in a stub build they check that the bridge reports the missing library.
+use aien_runtime::control::{ComposeRecallReport, ComposeTaskReport, ControlResponse};
+use aien_runtime::spine::{
+    check_file_proposal, parse_file_proposal, propose_with_retries, ComposeBridge, ComposeProposer,
+    Generation, COMPOSE_ATTEMPT_BUDGET, COMPOSE_MAX_ATTEMPTS, COMPOSE_SKILL_BUDGET,
+};
+use std::sync::Arc;
+
+fn proposer() -> ComposeProposer {
+    Arc::new(|prompt: &str, _limit: std::time::Duration| {
+        assert!(prompt.contains("Authorized workspace:"));
+        assert!(prompt.contains("filename: <relative path>"));
+        Ok(Generation {
+            text: "filename: NOTES.md\nconstraint: keep main green\n".to_string(),
+            tokens: 12,
+        })
+    })
+}
+
+fn report(r: ControlResponse) -> ComposeTaskReport {
+    match r {
+        ControlResponse::ComposeTaskResult(r) => *r,
+        other => panic!("expected ComposeTaskResult, got {other:?}"),
+    }
+}
+
+fn recalled(r: ControlResponse) -> ComposeRecallReport {
+    match r {
+        ControlResponse::ComposeRecalled(r) => *r,
+        other => panic!("expected ComposeRecalled, got {other:?}"),
+    }
+}
+
+fn snapshot(dir: &std::path::Path) -> Vec<(String, Vec<u8>)> {
+    let mut v: Vec<(String, Vec<u8>)> = std::fs::read_dir(dir)
+        .unwrap()
+        .map(|e| {
+            let e = e.unwrap();
+            (
+                e.file_name().to_string_lossy().into_owned(),
+                std::fs::read(e.path()).unwrap_or_default(),
+            )
+        })
+        .collect();
+    v.sort();
+    v
+}
+
+#[test]
+fn compose_task_commits_and_survives_restart() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().join("compose");
+    let ws = tmp.path().join("workspace");
+    std::fs::create_dir_all(&ws).unwrap();
+    std::fs::write(ws.join("README.md"), b"project\n").unwrap();
+    let ws_before = snapshot(&ws);
+
+    let bridge = ComposeBridge::new(home.clone(), proposer(), "test:fixed-proposer");
+    let resp = bridge.run_task(
+        "remember the constraints and propose one change",
+        ws.to_str().unwrap(),
+    );
+    if !aien_omega_compose::LINKED {
+        match resp {
+            ControlResponse::Error(e) => assert!(e.contains("not linked"), "{e}"),
+            other => panic!("stub build must refuse, got {other:?}"),
+        }
+        return;
+    }
+    let r1 = report(resp);
+    assert!(r1.committed, "{r1:?}");
+    assert_eq!(r1.outcome, 1);
+    assert_eq!(r1.branch_count, 1);
+    assert_eq!(r1.winner, Some(0));
+    assert_eq!(r1.aegis_pass_mask & 1, 1);
+    assert!(
+        r1.cx_goal != 0
+            && r1.cx_evidence != 0
+            && r1.cx_promotion != 0
+            && !r1.cx_candidates.is_empty()
+    );
+    assert_eq!(
+        r1.proposal.as_deref(),
+        Some("filename: NOTES.md\nconstraint: keep main green\n")
+    );
+    assert_eq!(r1.proposal_attempts.len(), 1, "{:?}", r1.proposal_attempts);
+    assert_eq!(r1.proposal_attempts[0].outcome, "parsed");
+    assert_eq!(r1.proposal_attempts[0].aegis.as_deref(), Some("pass"));
+    assert_eq!(r1.proposal_attempts[0].tokens, 12);
+    assert_eq!(r1.machine_id.len(), 64);
+    assert_eq!(r1.proposal_path.as_deref(), Some("NOTES.md"));
+    assert_eq!(
+        r1.proposal_content_sha256.as_deref(),
+        Some(aien_omega_compose::hex(
+            &<sha2::Sha256 as sha2::Digest>::digest(b"constraint: keep main green\n")
+        ))
+        .as_deref()
+    );
+    let c = match bridge.note("constraint", "keep main green", &[]) {
+        ControlResponse::ComposeNoted(n) => n,
+        other => panic!("note: {other:?}"),
+    };
+    assert!(c.id > r1.cx_promotion);
+    assert!(matches!(
+        bridge.note("effect", "x", &[1 << 40]),
+        ControlResponse::Error(_)
+    ));
+    assert!(matches!(
+        bridge.note("rumour", "x", &[]),
+        ControlResponse::Error(_)
+    ));
+    let before = recalled(bridge.recall(&[r1.cx_promotion], Some(c.id)));
+    let cited = [
+        r1.cx_goal,
+        r1.cx_candidates[0],
+        r1.cx_evidence,
+        r1.cx_promotion,
+    ];
+    let digests: Vec<String> = cited
+        .iter()
+        .map(|&id| bridge.record_digest(id).unwrap())
+        .collect();
+    drop(bridge);
+
+    // restart: same home, same machine, cited records unchanged
+    let bridge = ComposeBridge::new(home.clone(), proposer(), "test:fixed-proposer");
+    for (id, d) in cited.iter().zip(digests.iter()) {
+        assert_eq!(
+            &bridge.record_digest(*id).unwrap(),
+            d,
+            "record {id} after restart"
+        );
+    }
+    let r2 = report(bridge.run_task("second goal", ws.to_str().unwrap()));
+    assert!(r2.committed);
+    assert_eq!(
+        r2.machine_id, r1.machine_id,
+        "same AienMachineId across restart"
+    );
+    assert!(r2.cx_evidence > r1.cx_evidence);
+    let after = recalled(bridge.recall(&[r1.cx_promotion], Some(c.id)));
+    assert_eq!(after.machine_id, before.machine_id);
+    assert_eq!(
+        after.prefix_digest, before.prefix_digest,
+        "records 1..=S1 unchanged"
+    );
+    assert_eq!(after.cited, before.cited);
+    let k = after
+        .host
+        .iter()
+        .find(|h| h.id == c.id)
+        .expect("constraint recalled after restart");
+    assert_eq!(k.note.as_deref(), Some("constraint"));
+    assert_eq!(k.text.as_deref(), Some("keep main green"));
+    assert!(k.verified);
+
+    // containment: nothing in the workspace changed (this cut executes no effect)
+    assert_eq!(snapshot(&ws), ws_before);
+    // the home holds only the composition files (no staged-branch leftovers)
+    for (name, _) in snapshot(&home) {
+        assert!(
+            name == "machine.id" || name == "cortex.cx" || name.starts_with("jspace"),
+            "unexpected file in compose home: {name}"
+        );
+    }
+}
+
+#[test]
+fn failing_model_commits_nothing() {
+    if !aien_omega_compose::LINKED {
+        return;
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let ws = tmp.path().join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    let bridge = ComposeBridge::new(
+        tmp.path().join("compose"),
+        Arc::new(|_: &str, _: std::time::Duration| Err("model unavailable".to_string())),
+        "test:failing",
+    );
+    let r = report(bridge.run_task("goal", ws.to_str().unwrap()));
+    assert!(!r.committed, "{r:?}");
+    assert_eq!(r.winner, None);
+    assert_eq!(r.proposal, None);
+}
+
+#[test]
+fn bad_workspace_is_refused() {
+    let tmp = tempfile::tempdir().unwrap();
+    let bridge = ComposeBridge::new(tmp.path().join("compose"), proposer(), "test");
+    match bridge.run_task("goal", tmp.path().join("missing").to_str().unwrap()) {
+        ControlResponse::Error(e) => assert!(e.contains("workspace"), "{e}"),
+        other => panic!("expected Error, got {other:?}"),
+    }
+}
+
+#[test]
+fn proposal_template_parser() {
+    // filename line present
+    let p = check_file_proposal(
+        "filename: NOTES.md
+line one
+",
+    )
+    .unwrap();
+    assert_eq!(
+        (p.path.as_str(), p.content.as_str()),
+        (
+            "NOTES.md",
+            "line one
+"
+        )
+    );
+    let p = check_file_proposal(
+        "
+**Filename: `docs/plan.txt`**
+
+```
+step 1
+step 2
+```
+",
+    )
+    .unwrap();
+    assert_eq!(
+        (p.path.as_str(), p.content.as_str()),
+        (
+            "docs/plan.txt",
+            "step 1
+step 2
+"
+        )
+    );
+    // filename line absent: refused, even when a path appears later
+    for t in [
+        "Sure, I can help with that!",
+        "NOTES.md
+line one
+",
+        "To create NOTES.md:
+filename: NOTES.md
+x
+",
+        "",
+    ] {
+        assert!(check_file_proposal(t).is_err(), "{t:?}");
+        assert!(parse_file_proposal(t).is_none());
+    }
+    assert!(check_file_proposal(
+        "NOTES.md
+x"
+    )
+    .unwrap_err()
+    .contains("no filename line"));
+    // outside the workspace: refused before AEGIS
+    for t in [
+        "filename: /etc/passwd
+root
+",
+        "filename: ../escape.txt
+x
+",
+        "filename: docs/../../escape.txt
+x
+",
+        "filename: ~/.bashrc
+x
+",
+    ] {
+        let e = check_file_proposal(t).unwrap_err();
+        assert!(e.contains("outside the workspace"), "{t:?}: {e}");
+    }
+    assert!(check_file_proposal(
+        "filename: a b.txt
+x
+"
+    )
+    .is_err());
+    assert!(check_file_proposal(
+        "filename: NOTES.md
+
+   
+"
+    )
+    .unwrap_err()
+    .contains("empty content"));
+    // deterministic
+    assert_eq!(
+        check_file_proposal(
+            "filename: a.txt
+z
+"
+        ),
+        check_file_proposal(
+            "filename: a.txt
+z
+"
+        )
+    );
+}
+
+#[test]
+fn retry_is_capped_and_recorded() {
+    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::time::Duration;
+    let budget = Duration::from_secs(25);
+    // never parses: exactly COMPOSE_MAX_ATTEMPTS calls, all refused
+    let calls = AtomicU32::new(0);
+    let chatty = |_: &str, _: Duration| {
+        calls.fetch_add(1, Ordering::SeqCst);
+        Ok(Generation {
+            text: "Sure!".into(),
+            tokens: 2,
+        })
+    };
+    let (out, a) = propose_with_retries(
+        &chatty,
+        "base",
+        budget,
+        COMPOSE_ATTEMPT_BUDGET,
+        COMPOSE_MAX_ATTEMPTS,
+    );
+    assert!(out.unwrap_err().contains("no filename line"));
+    assert_eq!(calls.load(Ordering::SeqCst), COMPOSE_MAX_ATTEMPTS);
+    assert_eq!(a.len(), 3);
+    assert!(a
+        .iter()
+        .all(|x| x.outcome == "refused" && x.tokens == 2 && x.text_sha256.is_some()));
+    assert_eq!(
+        a.iter().map(|x| x.attempt).collect::<Vec<_>>(),
+        vec![1, 2, 3]
+    );
+    // second attempt parses: stops there, and the retry prompt names the refusal
+    let prompts = parking_lot::Mutex::new(Vec::<String>::new());
+    let second = |p: &str, _: Duration| {
+        prompts.lock().push(p.to_string());
+        let text = if prompts.lock().len() == 1 {
+            "Sure!"
+        } else {
+            "filename: a.txt
+ok
+"
+        };
+        Ok(Generation {
+            text: text.into(),
+            tokens: 3,
+        })
+    };
+    let (out, a) = propose_with_retries(
+        &second,
+        "base",
+        budget,
+        COMPOSE_ATTEMPT_BUDGET,
+        COMPOSE_MAX_ATTEMPTS,
+    );
+    assert_eq!(
+        out.unwrap(),
+        "filename: a.txt
+ok
+"
+    );
+    assert_eq!(a.len(), 2);
+    assert_eq!(
+        (a[0].outcome.as_str(), a[1].outcome.as_str()),
+        ("refused", "parsed")
+    );
+    let p = prompts.lock();
+    assert_eq!(p[0], "base");
+    assert!(
+        p[1].starts_with(
+            "base
+"
+        ) && p[1].contains("previous answer was refused")
+    );
+    drop(p);
+    // budget: attempt 2 does not start when less than the per-attempt budget is left
+    let slow = |_: &str, _: Duration| {
+        std::thread::sleep(Duration::from_millis(30));
+        Ok(Generation {
+            text: "Sure!".into(),
+            tokens: 2,
+        })
+    };
+    let (out, a) = propose_with_retries(
+        &slow,
+        "base",
+        Duration::from_millis(40),
+        Duration::from_millis(30),
+        COMPOSE_MAX_ATTEMPTS,
+    );
+    assert_eq!(a.len(), 1);
+    assert!(out.unwrap_err().contains("no attempt 2"));
+    // model errors are recorded, not retried past the cap
+    let err =
+        |_: &str, _: Duration| Err::<Generation, _>("model proposal exceeded 25000 ms".to_string());
+    let (_, a) = propose_with_retries(
+        &err,
+        "base",
+        budget,
+        COMPOSE_ATTEMPT_BUDGET,
+        COMPOSE_MAX_ATTEMPTS,
+    );
+    assert!(a.len() <= 3 && a.iter().all(|x| x.outcome == "timeout"));
+}
+
+/// ACCEPTANCE-v3 Section 3b at 1/100 scale: a slow (cold) attempt 1 of 16.1 s
+/// no longer blocks attempt 2; attempt 2 of 11.6 s leaves too little for 3.
+#[test]
+fn measured_attempt_budget_admits_a_second_attempt() {
+    use std::time::Duration;
+    assert!(COMPOSE_SKILL_BUDGET < Duration::from_secs(30));
+    assert_eq!(COMPOSE_SKILL_BUDGET, Duration::from_secs(29));
+    assert_eq!(COMPOSE_ATTEMPT_BUDGET, Duration::from_millis(12_000));
+    // 2 839 + 896 + 47 x 166.6 + 60 ms, the measured full retry attempt
+    let measured: [f64; 4] = [2_839.0, 896.0, 47.0 * 166.6, 60.0];
+    assert!(measured.iter().sum::<f64>() <= COMPOSE_ATTEMPT_BUDGET.as_millis() as f64);
+    let n = std::sync::atomic::AtomicU32::new(0);
+    let cold_then_warm = |_: &str, _: Duration| {
+        let k = n.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        std::thread::sleep(Duration::from_millis(if k == 0 { 161 } else { 116 }));
+        Ok(Generation {
+            text: "Goal: echo".into(),
+            tokens: 48,
+        })
+    };
+    let (out, a) = propose_with_retries(
+        &cold_then_warm,
+        "base",
+        COMPOSE_SKILL_BUDGET / 100,
+        COMPOSE_ATTEMPT_BUDGET / 100,
+        COMPOSE_MAX_ATTEMPTS,
+    );
+    assert_eq!(a.len(), 2, "{a:?}");
+    let reason = out.unwrap_err();
+    assert!(reason.contains("no attempt 3") && reason.contains("120 ms per-attempt budget"));
+}
+
+#[test]
+fn unparseable_proposal_fails_the_aegis_contract() {
+    if !aien_omega_compose::LINKED {
+        return;
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let ws = tmp.path().join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    let bridge = ComposeBridge::new(
+        tmp.path().join("compose"),
+        Arc::new(|_: &str, _: std::time::Duration| {
+            Ok(Generation {
+                text: "Sure, I can help with that!".to_string(),
+                tokens: 8,
+            })
+        }),
+        "test:chatty",
+    );
+    let r = report(bridge.run_task("goal", ws.to_str().unwrap()));
+    assert!(!r.committed, "{r:?}");
+    assert_eq!(r.aegis_pass_mask & 1, 0);
+    assert_eq!(r.proposal_path, None);
+    // Refused by the template parser before AEGIS, retried up to the cap.
+    assert_eq!(
+        r.proposal_attempts.len(),
+        COMPOSE_MAX_ATTEMPTS as usize,
+        "{r:?}"
+    );
+    assert!(r
+        .proposal_attempts
+        .iter()
+        .all(|a| a.outcome == "refused" && a.aegis.is_none()));
+    assert!(r
+        .proposer_error
+        .as_deref()
+        .unwrap_or("")
+        .contains("no filename line"));
+}
+
+#[test]
+fn torn_home_is_refused_by_name_then_recovered() {
+    if !aien_omega_compose::LINKED {
+        return;
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().join("compose");
+    let ws = tmp.path().join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    let bridge = ComposeBridge::new(home.clone(), proposer(), "test");
+    let r1 = report(bridge.run_task("goal", ws.to_str().unwrap()));
+    assert!(r1.committed);
+    let all = recalled(bridge.recall(&[], Some(r1.cx_promotion)));
+    drop(bridge);
+    let cx = home.join("cortex.cx");
+    let len = std::fs::metadata(&cx).unwrap().len();
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&cx)
+        .unwrap()
+        .set_len(len - 5)
+        .unwrap();
+
+    let bridge = ComposeBridge::new(home.clone(), proposer(), "test");
+    for _ in 0..2 {
+        match bridge.note("constraint", "x", &[]) {
+            ControlResponse::Error(e) => {
+                assert!(e.contains("E_TORN") && e.contains("compose recover"), "{e}")
+            }
+            other => panic!("torn home must be refused, got {other:?}"),
+        }
+        assert_eq!(
+            std::fs::metadata(&cx).unwrap().len(),
+            len - 5,
+            "refusal wrote"
+        );
+    }
+    let rep = match bridge.recover() {
+        ControlResponse::ComposeRecovered(r) => *r,
+        other => panic!("recover: {other:?}"),
+    };
+    assert!(rep.repaired && rep.tail_torn && rep.opens, "{rep:?}");
+    assert_eq!((rep.cause, rep.cut_hi), (-8, len - 5));
+    assert!(rep.dropped_records >= 1 && rep.repair_record == rep.records_kept + 1);
+    let after = recalled(bridge.recall(&[], Some(r1.cx_promotion)));
+    assert_eq!(
+        after.prefix_digest, all.prefix_digest,
+        "old records unchanged"
+    );
+    assert_eq!(after.machine_id, all.machine_id);
+    assert!(after
+        .host
+        .iter()
+        .any(|h| h.id == rep.repair_record && h.note.as_deref() == Some("repair_tail")));
+    let r2 = report(bridge.run_task("goal after recover", ws.to_str().unwrap()));
+    assert!(r2.committed);
+}
