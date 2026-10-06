@@ -59,6 +59,15 @@ pub enum ControlCommand {
         max_tokens: usize,
         temperature: f32,
     },
+    /// NEXT-PHASE-1 cut 1b: one goal through omega COMPOSITION-2 (J-Space
+    /// alternatives, AEGIS verification, World commit, Cortex record) with a
+    /// "model" Skill that proposes one file change for `workspace`. Handled on
+    /// the socket connection (it runs inference). Nothing is written to
+    /// `workspace` in this cut: the committed result is the proposal record.
+    RunComposeTask {
+        goal: String,
+        workspace: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -84,12 +93,24 @@ pub struct RuntimeStatusReport {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ControlResponse {
-    SwarmAccepted { swarm_id: u64, operation_id: u128 },
-    SwarmCancelled { swarm_id: u64 },
+    SwarmAccepted {
+        swarm_id: u64,
+        operation_id: u128,
+    },
+    SwarmCancelled {
+        swarm_id: u64,
+    },
     Status(RuntimeStatusReport),
     ShutdownAck,
-    TurnDelta { text: String },
-    TurnFinished { text: String, total_tokens: usize },
+    TurnDelta {
+        text: String,
+    },
+    TurnFinished {
+        text: String,
+        total_tokens: usize,
+    },
+    /// Result record of `RunComposeTask`.
+    ComposeTaskResult(Box<ComposeTaskReport>),
     Error(String),
 }
 
@@ -192,4 +213,37 @@ mod tests {
         assert!(prompt.contains("<|user|>\nStatus?</s>\n"));
         assert!(prompt.ends_with("<|assistant|>\n"));
     }
+}
+
+/// The record of one `RunComposeTask` (omega rxc_host result, NEXT-PHASE-1).
+/// Cortex ids name records in `<compose dir>/cortex.cx`; digests are hex.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ComposeTaskReport {
+    /// Composition home (holds machine.id, cortex.cx, jspace).
+    pub compose_dir: String,
+    /// AienMachineId (32 bytes, hex) the home is bound to.
+    pub machine_id: String,
+    pub task: u64,
+    /// RXC_OUT_*: 1 committed, 2 no winner, 3 not committed, 4 not durable, 5 record failed.
+    pub outcome: i32,
+    pub committed: bool,
+    /// Staged J-Space branches forked (one per routed Skill alternative).
+    pub branch_count: u32,
+    pub branches_reclaimed: u32,
+    /// AEGIS verdict: index of the winning alternative (None = no winner)
+    /// and the pass mask (bit k = alternative k met the contract).
+    pub winner: Option<u32>,
+    pub aegis_pass_mask: u32,
+    pub cx_goal: u64,
+    pub cx_candidates: Vec<u64>,
+    pub cx_evidence: u64,
+    pub cx_promotion: u64,
+    pub cx_admissions: Vec<u64>,
+    pub winner_digest: String,
+    pub record_digest: String,
+    /// The committed proposal (the model Skill's output) and its sha256.
+    pub proposal: Option<String>,
+    pub proposal_sha256: Option<String>,
+    /// "model" when the Skill ran inference, or the stub label.
+    pub proposer: String,
 }

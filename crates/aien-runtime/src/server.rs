@@ -2,7 +2,7 @@
 //! Exposes typed control RPC over local IPC to operator CLI tools.
 
 use crate::control::{ControlCommand, ControlEnvelope, ControlResponse};
-use crate::spine::AienRuntimeSpine;
+use crate::spine::{compose_dir_from_env, AienRuntimeSpine, ComposeBridge, ComposeProposer};
 use aien_inference_abi::{AienInferenceBackend, SamplingParams, TinyLlamaTokenizer};
 use aien_scheduler::{ChannelCompletionSink, CompletionEvent};
 use std::path::{Path, PathBuf};
@@ -125,6 +125,23 @@ impl AienRuntimeServer {
             }
         });
 
+        // NEXT-PHASE-1: the compose bridge (opened on the first RunComposeTask).
+        let compose = match compose_dir_from_env() {
+            Ok(dir) => Some(Arc::new(ComposeBridge::new(
+                dir,
+                model_proposer(
+                    self.spine.clone(),
+                    self.tokenizer.clone(),
+                    tokio::runtime::Handle::current(),
+                ),
+                "model:StreamTurn-path",
+            ))),
+            Err(e) => {
+                tracing::warn!("compose bridge disabled: {e}");
+                None
+            }
+        };
+
         // Connection accept loop
         loop {
             tokio::select! {
@@ -140,6 +157,7 @@ impl AienRuntimeServer {
                             let notify_conn = self.shutdown_notify.clone();
 
                             let tokenizer_conn = self.tokenizer.clone();
+                            let compose_conn = compose.clone();
                             tokio::spawn(async move {
                                 handle_connection(
                                     stream,
@@ -147,6 +165,7 @@ impl AienRuntimeServer {
                                     is_running_conn,
                                     notify_conn,
                                     tokenizer_conn,
+                                    compose_conn,
                                 )
                                 .await;
                             });
@@ -191,6 +210,111 @@ fn text_suffix(previous: &str, decoded: &str) -> String {
     decoded.strip_prefix(previous).unwrap_or("").to_string()
 }
 
+/// Encode the chat and submit it to the spine (the `StreamTurn` path). Returns
+/// the tokenizer and the completion event stream of the submitted sequence.
+async fn submit_turn(
+    spine: Arc<Mutex<AienRuntimeSpine>>,
+    tokenizer: Arc<RwLock<Option<TinyLlamaTokenizer>>>,
+    messages: Vec<crate::control::ChatTurn>,
+    max_tokens: usize,
+    temperature: f32,
+) -> Result<
+    (
+        TinyLlamaTokenizer,
+        tokio::sync::mpsc::UnboundedReceiver<CompletionEvent>,
+    ),
+    String,
+> {
+    let tokenizer = {
+        let guard = tokenizer.read().expect("tokenizer lock");
+        guard.clone()
+    };
+    let Some(tokenizer) = tokenizer else {
+        return Err("tokenizer is not loaded; native chat cannot encode the prompt".into());
+    };
+    let prompt = crate::control::format_tinyllama_chat(&messages);
+    let tokens = tokenizer
+        .encode(&prompt)
+        .map_err(|error| format!("tokenizer encode failed: {error}"))?;
+    let (sink, events) = ChannelCompletionSink::channel();
+    let mut spine = spine.lock().await;
+    let sink_id = spine.register_completion_sink(std::sync::Arc::new(sink));
+    let sampling = SamplingParams {
+        temperature,
+        top_p: 0.95,
+        max_tokens: max_tokens.max(1),
+        stop_token_ids: vec![TinyLlamaTokenizer::EOS_TOKEN_ID],
+    };
+    spine.submit_work(
+        std::sync::Arc::from(tokens.as_slice()),
+        sampling,
+        2,
+        Some(sink_id),
+    )?;
+    Ok((tokenizer, events))
+}
+
+/// NEXT-PHASE-1: the whole turn as one string (no streaming), for the compose
+/// "model" Skill. Same submission path as `StreamTurn`; fails after `limit`.
+async fn generate_text(
+    spine: Arc<Mutex<AienRuntimeSpine>>,
+    tokenizer: Arc<RwLock<Option<TinyLlamaTokenizer>>>,
+    messages: Vec<crate::control::ChatTurn>,
+    max_tokens: usize,
+    temperature: f32,
+    limit: std::time::Duration,
+) -> Result<String, String> {
+    let (tokenizer, mut events) =
+        submit_turn(spine, tokenizer, messages, max_tokens, temperature).await?;
+    let collect = async {
+        let mut produced = Vec::new();
+        loop {
+            match events.recv().await {
+                Some(CompletionEvent::Token { token, .. }) => produced.push(token),
+                Some(CompletionEvent::Finished { .. }) => {
+                    return tokenizer
+                        .decode_opts(&produced, true)
+                        .map_err(|e| format!("tokenizer decode failed: {e}"));
+                }
+                Some(CompletionEvent::Error { message, .. }) => return Err(message),
+                None => return Err("native runtime stopped before the turn finished".into()),
+            }
+        }
+    };
+    tokio::time::timeout(limit, collect)
+        .await
+        .map_err(|_| format!("model proposal exceeded {} ms", limit.as_millis()))?
+}
+
+/// The compose "model" Skill: real inference through `generate_text`, run
+/// from an omega World worker thread (not a tokio thread) via `block_on`.
+/// The limit stays under rx_compose_run's 30 s quiescence wait, so a slow
+/// model fails the Skill (no proposal) instead of failing the run.
+pub fn model_proposer(
+    spine: Arc<Mutex<AienRuntimeSpine>>,
+    tokenizer: Arc<RwLock<Option<TinyLlamaTokenizer>>>,
+    handle: tokio::runtime::Handle,
+) -> ComposeProposer {
+    let max_tokens = std::env::var("AIEN_COMPOSE_MAX_TOKENS")
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .unwrap_or(192);
+    Arc::new(move |prompt: &str| {
+        let messages = vec![crate::control::ChatTurn {
+            role: "user".into(),
+            content: prompt.to_string(),
+        }];
+        handle.block_on(generate_text(
+            spine.clone(),
+            tokenizer.clone(),
+            messages,
+            max_tokens,
+            0.0,
+            std::time::Duration::from_secs(25),
+        ))
+    })
+}
+
 async fn stream_turn(
     writer: &mut tokio::net::unix::OwnedWriteHalf,
     spine: Arc<Mutex<AienRuntimeSpine>>,
@@ -199,53 +323,14 @@ async fn stream_turn(
     max_tokens: usize,
     temperature: f32,
 ) {
-    let tokenizer = {
-        let guard = tokenizer.read().expect("tokenizer lock");
-        guard.clone()
-    };
-    let Some(tokenizer) = tokenizer else {
-        let _ = write_response(
-            writer,
-            &ControlResponse::Error(
-                "tokenizer is not loaded; native chat cannot encode the prompt".into(),
-            ),
-        )
-        .await;
-        return;
-    };
-    let prompt = crate::control::format_tinyllama_chat(&messages);
-    let tokens = match tokenizer.encode(&prompt) {
-        Ok(tokens) => tokens,
-        Err(error) => {
-            let _ = write_response(
-                writer,
-                &ControlResponse::Error(format!("tokenizer encode failed: {error}")),
-            )
-            .await;
-            return;
-        }
-    };
-    let (sink, mut events) = ChannelCompletionSink::channel();
-    let submitted = {
-        let mut spine = spine.lock().await;
-        let sink_id = spine.register_completion_sink(std::sync::Arc::new(sink));
-        let sampling = SamplingParams {
-            temperature,
-            top_p: 0.95,
-            max_tokens: max_tokens.max(1),
-            stop_token_ids: vec![TinyLlamaTokenizer::EOS_TOKEN_ID],
+    let (tokenizer, mut events) =
+        match submit_turn(spine, tokenizer, messages, max_tokens, temperature).await {
+            Ok(x) => x,
+            Err(error) => {
+                let _ = write_response(writer, &ControlResponse::Error(error)).await;
+                return;
+            }
         };
-        spine.submit_work(
-            std::sync::Arc::from(tokens.as_slice()),
-            sampling,
-            2,
-            Some(sink_id),
-        )
-    };
-    if let Err(error) = submitted {
-        let _ = write_response(writer, &ControlResponse::Error(error)).await;
-        return;
-    }
 
     let mut produced = Vec::new();
     let mut text = String::new();
@@ -299,6 +384,7 @@ async fn handle_connection(
     is_running: Arc<AtomicBool>,
     shutdown_notify: Arc<Notify>,
     tokenizer: Arc<RwLock<Option<TinyLlamaTokenizer>>>,
+    compose: Option<Arc<ComposeBridge>>,
 ) {
     let (reader, mut writer) = stream.into_split();
     let mut buf_reader = BufReader::new(reader);
@@ -346,6 +432,23 @@ async fn handle_connection(
                 temperature,
             )
             .await;
+            line.clear();
+            continue;
+        }
+
+        if let ControlCommand::RunComposeTask { goal, workspace } = envelope.command {
+            let response = match compose.clone() {
+                Some(bridge) => tokio::task::spawn_blocking(move || bridge.run_task(&goal, &workspace))
+                    .await
+                    .unwrap_or_else(|e| ControlResponse::Error(format!("compose task failed: {e}"))),
+                None => ControlResponse::Error(
+                    "RunComposeTask: no compose home (set AIEN_COMPOSE_DIR or AIEN_RUNTIME_STATE_DIR)"
+                        .into(),
+                ),
+            };
+            if !write_response(&mut writer, &response).await {
+                break;
+            }
             line.clear();
             continue;
         }

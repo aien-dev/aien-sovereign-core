@@ -193,6 +193,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "aien-omega-compose"
+version = "0.1.0"
+dependencies = [
+ "tempfile",
+]
+
+[[package]]
 name = "aien-omega-gpu"
 version = "0.1.0"
 
@@ -275,6 +282,7 @@ dependencies = [
  "aien-abi-core",
  "aien-inference-abi",
  "aien-kv-cache",
+ "aien-omega-compose",
  "aien-platform",
  "aien-scheduler",
  "aien-security",

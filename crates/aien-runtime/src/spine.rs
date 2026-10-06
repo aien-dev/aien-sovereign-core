@@ -408,6 +408,10 @@ impl AienRuntimeSpine {
             ControlCommand::StreamTurn { .. } => ControlResponse::Error(
                 "StreamTurn is handled on the socket connection, not as a one-shot command".into(),
             ),
+            ControlCommand::RunComposeTask { .. } => ControlResponse::Error(
+                "RunComposeTask is handled on the socket connection, not as a one-shot command"
+                    .into(),
+            ),
             ControlCommand::Shutdown => {
                 self.controller
                     .mark_operation_processed(envelope.operation_id);
@@ -480,5 +484,277 @@ fn branch_sampling_params(config: &SwarmConfig) -> SamplingParams {
         top_p: 0.95,
         max_tokens: config.max_tokens_per_branch,
         stop_token_ids: vec![2],
+    }
+}
+
+// ---------------------------------------------------------------------------
+// NEXT-PHASE-1 cut 1b: the compose bridge (omega COMPOSITION-2 via
+// aien-omega-compose). One composition home per process, opened on first use
+// and kept open: the Cortex journal takes an exclusive writer lock.
+// ---------------------------------------------------------------------------
+
+use crate::control::ComposeTaskReport;
+use aien_omega_compose::{hex, Compose, ComposeError, RootKind};
+use sha2::{Digest, Sha256};
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+
+/// The "model" Skill's work: prompt text in, proposal text out. The server
+/// installs the real inference path (the one `StreamTurn` uses); tests
+/// install a deterministic proposer.
+pub type ComposeProposer = Arc<dyn Fn(&str) -> Result<String, String> + Send + Sync>;
+
+/// Most entries of the workspace listing put into the prompt.
+const COMPOSE_LISTING_MAX: usize = 32;
+/// The one Skill name; its procedure digest is sha256 of this name.
+pub const COMPOSE_MODEL_SKILL: &str = "aien.model.propose-file-change";
+
+/// Composition home: `$AIEN_COMPOSE_DIR`, else `$AIEN_RUNTIME_STATE_DIR/compose`,
+/// else `$XDG_STATE_HOME/aien-runtime/compose`, else
+/// `$HOME/.local/state/aien-runtime/compose`. Never /tmp.
+pub fn compose_dir_from_env() -> Result<PathBuf, String> {
+    let get = |k: &str| std::env::var(k).ok().filter(|v| !v.trim().is_empty());
+    if let Some(d) = get("AIEN_COMPOSE_DIR") {
+        return Ok(PathBuf::from(d.trim()));
+    }
+    if let Some(d) = get("AIEN_RUNTIME_STATE_DIR") {
+        return Ok(PathBuf::from(d.trim()).join("compose"));
+    }
+    if let Some(d) = get("XDG_STATE_HOME") {
+        return Ok(PathBuf::from(d.trim()).join("aien-runtime/compose"));
+    }
+    if let Some(h) = get("HOME") {
+        return Ok(PathBuf::from(h.trim()).join(".local/state/aien-runtime/compose"));
+    }
+    Err(
+        "no AIEN_COMPOSE_DIR, AIEN_RUNTIME_STATE_DIR, XDG_STATE_HOME or HOME for the compose home"
+            .into(),
+    )
+}
+
+/// The provisioned machine root: 32 random bytes kept beside the home
+/// (`<home>.machine-root`, mode 0600), created once. STOPGAP until AIENOS
+/// machine provisioning owns the AienMachineId root.
+fn machine_root(dir: &Path) -> Result<Vec<u8>, String> {
+    use std::io::Read;
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut name = dir.as_os_str().to_owned();
+    name.push(".machine-root");
+    let path = PathBuf::from(name);
+    if let Ok(b) = std::fs::read(&path) {
+        if b.len() == 32 {
+            return Ok(b);
+        }
+        return Err(format!(
+            "{} holds {} bytes, expected 32",
+            path.display(),
+            b.len()
+        ));
+    }
+    if let Some(p) = path.parent() {
+        std::fs::create_dir_all(p).map_err(|e| format!("create {}: {e}", p.display()))?;
+    }
+    let mut root = vec![0u8; 32];
+    std::fs::File::open("/dev/urandom")
+        .and_then(|mut f| f.read_exact(&mut root))
+        .map_err(|e| format!("read /dev/urandom: {e}"))?;
+    let mut f = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&path)
+        .map_err(|e| format!("create {}: {e}", path.display()))?;
+    std::io::Write::write_all(&mut f, &root)
+        .map_err(|e| format!("write {}: {e}", path.display()))?;
+    f.sync_all()
+        .map_err(|e| format!("sync {}: {e}", path.display()))?;
+    Ok(root)
+}
+
+fn proposal_handle(text: &str) -> u64 {
+    let d = Sha256::digest(text.as_bytes());
+    let h = u64::from_le_bytes(d[..8].try_into().expect("8 bytes"));
+    if h == 0 {
+        1
+    } else {
+        h
+    }
+}
+
+struct ComposeHome {
+    compose: Compose,
+    machine_id: String,
+    prompts: Arc<parking_lot::Mutex<HashMap<u64, String>>>,
+    proposals: Arc<parking_lot::Mutex<HashMap<u64, String>>>,
+}
+
+/// Owns the composition home of this process.
+pub struct ComposeBridge {
+    dir: PathBuf,
+    proposer: ComposeProposer,
+    proposer_label: String,
+    home: std::sync::Mutex<Option<ComposeHome>>,
+}
+
+impl ComposeBridge {
+    pub fn new(dir: PathBuf, proposer: ComposeProposer, proposer_label: &str) -> Self {
+        Self {
+            dir,
+            proposer,
+            proposer_label: proposer_label.to_string(),
+            home: std::sync::Mutex::new(None),
+        }
+    }
+
+    pub fn dir(&self) -> &Path {
+        &self.dir
+    }
+
+    fn open_home(&self) -> Result<ComposeHome, String> {
+        let root = machine_root(&self.dir)?;
+        let (mut compose, info) =
+            Compose::open(&self.dir, RootKind::Provisioned, &root, 0xA1E4_0001, false)
+                .map_err(|e: ComposeError| format!("compose open {}: {e}", self.dir.display()))?;
+        if info.tail_torn != 0 {
+            tracing::warn!(dir = %self.dir.display(), "compose: Cortex journal tail was torn; repaired or refused at first use");
+        }
+        let prompts: Arc<parking_lot::Mutex<HashMap<u64, String>>> = Arc::default();
+        let proposals: Arc<parking_lot::Mutex<HashMap<u64, String>>> = Arc::default();
+        let (pr, pp, proposer) = (prompts.clone(), proposals.clone(), self.proposer.clone());
+        compose
+            .register_skill(COMPOSE_MODEL_SKILL, None, 10, move |task| {
+                let prompt = pr.lock().get(&task).cloned()?;
+                let text = proposer(&prompt).ok()?;
+                if text.trim().is_empty() {
+                    return None;
+                }
+                let h = proposal_handle(&text);
+                pp.lock().insert(task, text);
+                Some(h)
+            })
+            .map_err(|e| format!("compose register skill: {e}"))?;
+        let pv = proposals.clone();
+        compose
+            .set_verify(move |task, result| {
+                // AEGIS contract: the result names exactly the proposal text
+                // the Skill recorded for this task, and that text is nonempty.
+                pv.lock()
+                    .get(&task)
+                    .is_some_and(|t| !t.trim().is_empty() && proposal_handle(t) == result)
+            })
+            .map_err(|e| format!("compose set verify: {e}"))?;
+        Ok(ComposeHome {
+            compose,
+            machine_id: hex(&info.machine_id),
+            prompts,
+            proposals,
+        })
+    }
+
+    /// Blocking: runs inference inside the Skill. Call from a blocking thread.
+    pub fn run_task(&self, goal: &str, workspace: &str) -> ControlResponse {
+        match self.run_task_inner(goal, workspace) {
+            Ok(r) => ControlResponse::ComposeTaskResult(Box::new(r)),
+            Err(e) => ControlResponse::Error(e),
+        }
+    }
+
+    fn run_task_inner(&self, goal: &str, workspace: &str) -> Result<ComposeTaskReport, String> {
+        if goal.trim().is_empty() {
+            return Err("RunComposeTask: empty goal".into());
+        }
+        let ws = std::fs::canonicalize(workspace)
+            .map_err(|e| format!("RunComposeTask: workspace {workspace}: {e}"))?;
+        if !ws.is_dir() {
+            return Err(format!(
+                "RunComposeTask: workspace {} is not a directory",
+                ws.display()
+            ));
+        }
+        let mut names: Vec<String> = std::fs::read_dir(&ws)
+            .map_err(|e| format!("RunComposeTask: read {}: {e}", ws.display()))?
+            .filter_map(|e| e.ok().map(|e| e.file_name().to_string_lossy().into_owned()))
+            .collect();
+        names.sort();
+        let more = names.len().saturating_sub(COMPOSE_LISTING_MAX);
+        names.truncate(COMPOSE_LISTING_MAX);
+        let prompt = format!(
+            "Goal: {goal}\nAuthorized workspace: {}\nTop-level entries: {}{}\n\
+             Propose exactly one file change inside the workspace. Answer with the \
+             relative path on the first line, then the complete new file content.",
+            ws.display(),
+            names.join(", "),
+            if more > 0 {
+                format!(" (+{more} more)")
+            } else {
+                String::new()
+            },
+        );
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|e| format!("clock: {e}"))?;
+        let mut h = Sha256::new();
+        h.update(goal.as_bytes());
+        h.update([0u8]);
+        h.update(ws.as_os_str().as_encoded_bytes());
+        h.update(now.as_nanos().to_le_bytes());
+        let d = h.finalize();
+        let task = u64::from_le_bytes(d[..8].try_into().expect("8 bytes")) | 1;
+
+        let mut guard = self
+            .home
+            .lock()
+            .map_err(|_| "compose home lock poisoned".to_string())?;
+        if guard.is_none() {
+            *guard = Some(self.open_home()?);
+        }
+        let home = guard.as_mut().expect("opened above");
+        home.prompts.lock().insert(task, prompt);
+        let run = home.compose.run(task, now.as_micros() as u64);
+        home.prompts.lock().remove(&task);
+        let proposal = home.proposals.lock().remove(&task);
+        let r = run.map_err(|e| format!("compose run: {e}"))?;
+        let committed = r.committed == 1;
+        let proposal = if committed { proposal } else { None };
+        Ok(ComposeTaskReport {
+            compose_dir: self.dir.display().to_string(),
+            machine_id: home.machine_id.clone(),
+            task,
+            outcome: r.outcome,
+            committed,
+            branch_count: r.n_branches,
+            branches_reclaimed: r.branches_reclaimed,
+            winner: (r.winner != aien_omega_compose::NONE).then_some(r.winner),
+            aegis_pass_mask: r.aegis_pass_mask,
+            cx_goal: r.cx_goal,
+            cx_candidates: r.cx_candidate.iter().copied().filter(|&x| x != 0).collect(),
+            cx_evidence: r.cx_evidence,
+            cx_promotion: r.cx_promotion,
+            cx_admissions: r.cx_admission.iter().copied().filter(|&x| x != 0).collect(),
+            winner_digest: hex(&r.winner_digest),
+            record_digest: hex(&r.record_digest),
+            proposal_sha256: proposal
+                .as_ref()
+                .map(|t| hex(&Sha256::digest(t.as_bytes()))),
+            proposal,
+            proposer: self.proposer_label.clone(),
+        })
+    }
+
+    /// Recall: the Cortex record by id, digest re-checked (cut 2 uses this
+    /// to prove cited ids survive a restart).
+    pub fn record_digest(&self, id: u64) -> Result<String, String> {
+        let mut guard = self
+            .home
+            .lock()
+            .map_err(|_| "compose home lock poisoned".to_string())?;
+        if guard.is_none() {
+            *guard = Some(self.open_home()?);
+        }
+        let home = guard.as_mut().expect("opened above");
+        home.compose
+            .record(id)
+            .map(|r| hex(&r.digest))
+            .map_err(|e| format!("compose record {id}: {e}"))
     }
 }
