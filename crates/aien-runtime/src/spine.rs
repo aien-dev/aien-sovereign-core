@@ -705,6 +705,12 @@ pub const COMPOSE_SKILL_BUDGET: std::time::Duration = std::time::Duration::from_
 /// only if at least this much budget is left.
 pub const COMPOSE_ATTEMPT_BUDGET: std::time::Duration = std::time::Duration::from_millis(12_000);
 
+/// Assistant-response prefix of the production RunComposeTask template: the
+/// assistant turn starts with it and the model generates the path and the
+/// content after it (ACCEPTANCE-v4 Section 2(1)). The reply the parser reads
+/// is this prefix followed by the generated text.
+pub const COMPOSE_ASSISTANT_PREFIX: &str = "filename: ";
+
 /// The fixed proposal template of the production RunComposeTask path.
 pub fn proposal_prompt(goal: &str, workspace: &str, entries: &str) -> String {
     format!(
