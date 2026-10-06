@@ -2,7 +2,7 @@
 
 Supersedes the v1 receipt (`2026-10-06-install-upgrade-rollback.md`, kept unchanged as the record of the gaps this cut closes).
 Machine: NVIDIA DGX Spark (aarch64), host CPU only. No GPU or chip work was run. Everything ran in a scratch prefix,
-`env -i`, empty HOME, `AIEN_INSTALL_NO_PROFILE=1`, no sudo. Evidence: `np4-v2-evidence/demo.sh` and `np4-v2-evidence/demo.log`
+`env -i`, empty HOME, `AIEN_INSTALL_NO_PROFILE=1`, no sudo. Evidence: `np4-v2-evidence/demo.sh` and `np4-v2-evidence/demo-log.txt`
 (scratch path shortened to `<scratch>` in the log).
 
 ## How the four releases in the demo were made (honest labelling)
@@ -15,7 +15,7 @@ Machine: NVIDIA DGX Spark (aarch64), host CPU only. No GPU or chip work was run.
 - relOld: the relA binary repackaged with candidate id CAND-2, to exercise the downgrade guard.
 - All signed with a throwaway key (not the pinned release key): NOT_RUN for a release signed by the pinned key.
 
-## Steps (demo.log)
+## Steps (demo-log.txt)
 
 | Step | Result | Evidence |
 |---|---|---|
