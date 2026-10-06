@@ -310,7 +310,7 @@ async fn generate_text(
 /// from an omega World worker thread (not a tokio thread) via `block_on`.
 /// Greedy, at most `AIEN_COMPOSE_MAX_TOKENS` (default 48) tokens per reply;
 /// each call gets the limit `propose_with_retries` passes (what is left of
-/// the 25 s budget, under rx_compose_run's 30 s quiescence wait), so a slow
+/// the 29 s budget, under rx_compose_run's 30 s quiescence wait), so a slow
 /// model fails the Skill (no proposal) instead of failing the run.
 pub fn model_proposer(
     spine: Arc<Mutex<AienRuntimeSpine>>,
