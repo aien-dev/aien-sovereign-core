@@ -313,6 +313,9 @@ fn c4_config() -> ModelConfig {
         vocab_size: 97,
         rms_norm_eps: 1e-5,
         rope_theta: 10000.0,
+        rope_scaling: None,
+        tie_word_embeddings: false,
+        eos_token_ids: Vec::new(),
     }
 }
 

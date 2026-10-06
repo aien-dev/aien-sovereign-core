@@ -37,7 +37,89 @@ fn default_rope_theta() -> f32 {
     10000.0
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Llama 3 rotary frequency smoothing (`rope_scaling` with `rope_type: "llama3"` in a
+/// Hugging Face `config.json`). Long wavelengths are divided by `factor`, short ones kept,
+/// the band between `high_freq_factor` and `low_freq_factor` is interpolated
+/// (transformers `_compute_llama3_parameters`).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct Llama3RopeScaling {
+    pub factor: f64,
+    pub low_freq_factor: f64,
+    pub high_freq_factor: f64,
+    pub original_max_position_embeddings: usize,
+}
+
+impl Llama3RopeScaling {
+    /// Applies the llama3 smoothing to one unscaled inverse frequency.
+    pub fn scale_inv_freq(&self, inv_freq: f64) -> f64 {
+        let old_context = self.original_max_position_embeddings as f64;
+        let low_freq_wavelen = old_context / self.low_freq_factor;
+        let high_freq_wavelen = old_context / self.high_freq_factor;
+        let wavelen = 2.0 * std::f64::consts::PI / inv_freq;
+        if wavelen < high_freq_wavelen {
+            inv_freq
+        } else if wavelen > low_freq_wavelen {
+            inv_freq / self.factor
+        } else {
+            let smooth = (old_context / wavelen - self.low_freq_factor)
+                / (self.high_freq_factor - self.low_freq_factor);
+            (1.0 - smooth) * inv_freq / self.factor + smooth * inv_freq
+        }
+    }
+}
+
+/// Rotary position embedding parameters of one model: the base `theta` and, for the
+/// Llama 3 family, the llama3 frequency smoothing.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RopeParams {
+    pub theta: f32,
+    pub llama3: Option<Llama3RopeScaling>,
+}
+
+impl RopeParams {
+    /// Unscaled rope: inverse frequency `theta^(-2i/d)`.
+    pub const fn plain(theta: f32) -> Self {
+        Self {
+            theta,
+            llama3: None,
+        }
+    }
+
+    /// Inverse frequency of rotary pair `i` (`0 <= i < head_dim / 2`), in f64.
+    /// The unscaled expression is exactly the one the reference rope has always used,
+    /// so models without scaling get bit-identical tables.
+    pub fn inv_freq(&self, i: usize, head_dim: usize) -> f64 {
+        let exponent = (2 * i) as f64 / (head_dim as f64);
+        let base = 1.0 / (self.theta as f64).powf(exponent);
+        match &self.llama3 {
+            None => base,
+            Some(scaling) => scaling.scale_inv_freq(base),
+        }
+    }
+
+    /// All `head_dim / 2` inverse frequencies.
+    pub fn inv_freqs(&self, head_dim: usize) -> Vec<f64> {
+        (0..head_dim / 2)
+            .map(|i| self.inv_freq(i, head_dim))
+            .collect()
+    }
+
+    /// Bit pattern identifying these parameters (for table caches).
+    pub fn cache_key(&self) -> [u64; 5] {
+        match &self.llama3 {
+            None => [self.theta.to_bits() as u64, 0, 0, 0, 0],
+            Some(s) => [
+                self.theta.to_bits() as u64 | (1 << 32),
+                s.factor.to_bits(),
+                s.low_freq_factor.to_bits(),
+                s.high_freq_factor.to_bits(),
+                s.original_max_position_embeddings as u64,
+            ],
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ModelConfig {
     pub model_id: String,
     pub max_sequence_length: usize,
@@ -57,6 +139,17 @@ pub struct ModelConfig {
     pub rms_norm_eps: f32,
     #[serde(default = "default_rope_theta")]
     pub rope_theta: f32,
+    /// Llama 3 rope smoothing; `None` is plain rope.
+    #[serde(default)]
+    pub rope_scaling: Option<Llama3RopeScaling>,
+    /// True when the output projection reuses `model.embed_tokens.weight`
+    /// (the checkpoint has no `lm_head.weight`).
+    #[serde(default)]
+    pub tie_word_embeddings: bool,
+    /// Token ids that end a sequence (`eos_token_id` of `generation_config.json`).
+    /// Empty means the legacy TinyLlama set, see [`ModelConfig::stop_token_ids`].
+    #[serde(default)]
+    pub eos_token_ids: Vec<u32>,
 }
 
 /// Why an [`AttentionGeometry`] was refused. Every variant names the offending numbers so a
@@ -268,6 +361,31 @@ impl ModelConfig {
             vocab_size: 32000,
             rms_norm_eps: 1e-5,
             rope_theta: 10000.0,
+            rope_scaling: None,
+            tie_word_embeddings: false,
+            eos_token_ids: Vec::new(),
+        }
+    }
+
+    /// Stop set the backend ends a sequence on before the scheduler sees the token:
+    /// UNK 0, BOS 1 and EOS 2 of the TinyLlama vocabulary.
+    pub const LEGACY_STOP_TOKEN_IDS: [u32; 3] = [0, 1, 2];
+
+    /// The backend's end-of-sequence set: `eos_token_ids` when the model description
+    /// names them, else [`ModelConfig::LEGACY_STOP_TOKEN_IDS`].
+    pub fn stop_token_ids(&self) -> &[u32] {
+        if self.eos_token_ids.is_empty() {
+            &Self::LEGACY_STOP_TOKEN_IDS
+        } else {
+            &self.eos_token_ids
+        }
+    }
+
+    /// Rotary embedding parameters of this model.
+    pub fn rope(&self) -> RopeParams {
+        RopeParams {
+            theta: self.rope_theta,
+            llama3: self.rope_scaling,
         }
     }
 
@@ -317,6 +435,9 @@ impl Default for ModelConfig {
             vocab_size: 151936,
             rms_norm_eps: 1e-6,
             rope_theta: 10000.0,
+            rope_scaling: None,
+            tie_word_embeddings: false,
+            eos_token_ids: Vec::new(),
         }
     }
 }

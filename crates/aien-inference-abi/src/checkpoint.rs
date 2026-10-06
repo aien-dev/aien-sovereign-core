@@ -228,6 +228,61 @@ pub fn tinyllama_catalog() -> Vec<(String, Vec<usize>)> {
     catalog
 }
 
+/// The tensor catalog of a Llama-architecture checkpoint (`LlamaForCausalLM`) described by
+/// `config`: names and shapes of every tensor the forward pass reads. `lm_head.weight` is
+/// left out when the model ties its output projection to `model.embed_tokens.weight`.
+/// For `ModelConfig::tinyllama_1_1b()` this is exactly [`tinyllama_catalog`].
+pub fn llama_catalog(config: &aien_abi_core::ModelConfig) -> Vec<(String, Vec<usize>)> {
+    let hidden = config.hidden_dim();
+    let inter = config.intermediate_dim();
+    let vocab = config.vocab_size();
+    let q_dim = config.num_heads * config.head_dim;
+    let kv_dim = config.num_kv_heads * config.head_dim;
+    let mut catalog = Vec::with_capacity(3 + 9 * config.num_layers);
+    catalog.push(("model.embed_tokens.weight".to_string(), vec![vocab, hidden]));
+    for layer in 0..config.num_layers {
+        let prefix = format!("model.layers.{}", layer);
+        catalog.push((format!("{}.input_layernorm.weight", prefix), vec![hidden]));
+        catalog.push((
+            format!("{}.self_attn.q_proj.weight", prefix),
+            vec![q_dim, hidden],
+        ));
+        catalog.push((
+            format!("{}.self_attn.k_proj.weight", prefix),
+            vec![kv_dim, hidden],
+        ));
+        catalog.push((
+            format!("{}.self_attn.v_proj.weight", prefix),
+            vec![kv_dim, hidden],
+        ));
+        catalog.push((
+            format!("{}.self_attn.o_proj.weight", prefix),
+            vec![hidden, q_dim],
+        ));
+        catalog.push((
+            format!("{}.post_attention_layernorm.weight", prefix),
+            vec![hidden],
+        ));
+        catalog.push((
+            format!("{}.mlp.gate_proj.weight", prefix),
+            vec![inter, hidden],
+        ));
+        catalog.push((
+            format!("{}.mlp.up_proj.weight", prefix),
+            vec![inter, hidden],
+        ));
+        catalog.push((
+            format!("{}.mlp.down_proj.weight", prefix),
+            vec![hidden, inter],
+        ));
+    }
+    catalog.push(("model.norm.weight".to_string(), vec![hidden]));
+    if !config.tie_word_embeddings {
+        catalog.push(("lm_head.weight".to_string(), vec![vocab, hidden]));
+    }
+    catalog
+}
+
 /// Parses a safetensors binary buffer and strictly validates against a specified tensor catalog.
 /// The file is copied once into the capsule. Tensor ranges point into that buffer.
 pub fn parse_safetensors_with_catalog(
@@ -242,6 +297,36 @@ fn parse_safetensors_arc(
     bytes: Arc<[u8]>,
     catalog: &[(String, Vec<usize>)],
 ) -> Result<LoadedCheckpoint, CheckpointError> {
+    let whole = 0..bytes.len();
+    parse_shards(bytes, &[whole], catalog)
+}
+
+/// Validates `catalog` against one or more safetensors files laid end to end in `bytes`
+/// (`shards` are their byte ranges). Every catalog tensor must appear in exactly one shard.
+fn parse_shards(
+    bytes: Arc<[u8]>,
+    shards: &[std::ops::Range<usize>],
+    catalog: &[(String, Vec<usize>)],
+) -> Result<LoadedCheckpoint, CheckpointError> {
+    let mut tensors = HashMap::with_capacity(catalog.len());
+    for shard in shards {
+        index_shard(&bytes, shard.clone(), catalog, &mut tensors)?;
+    }
+    if let Some((name, _)) = catalog.iter().find(|(name, _)| !tensors.contains_key(name)) {
+        return Err(CheckpointError::MissingTensor(name.clone()));
+    }
+    Ok(LoadedCheckpoint::from_owned_bytes(bytes, tensors))
+}
+
+/// Indexes the catalog tensors present in the safetensors file at `bytes[shard]`.
+fn index_shard(
+    all_bytes: &[u8],
+    shard: std::ops::Range<usize>,
+    catalog: &[(String, Vec<usize>)],
+    tensors: &mut HashMap<String, crate::capsule::CapsuleTensor>,
+) -> Result<(), CheckpointError> {
+    let base = shard.start;
+    let bytes = &all_bytes[shard];
     if bytes.len() < 8 {
         return Err(CheckpointError::InvalidHeader(
             "Buffer smaller than 8-byte header prefix".to_string(),
@@ -282,12 +367,16 @@ fn parse_safetensors_arc(
 
     let data_len = bytes.len() - header_end;
 
-    let mut tensors = HashMap::with_capacity(catalog.len());
-
     for (name, expected_shape) in catalog {
-        let info = header_obj
-            .get(name)
-            .ok_or_else(|| CheckpointError::MissingTensor(name.clone()))?;
+        let Some(info) = header_obj.get(name) else {
+            continue;
+        };
+        if tensors.contains_key(name) {
+            return Err(CheckpointError::InvalidHeader(format!(
+                "tensor {} appears in more than one shard",
+                name
+            )));
+        }
 
         // 1. Verify dtype is BF16. This catalog parser does not accept other dtypes.
         let dtype = info
@@ -362,8 +451,8 @@ fn parse_safetensors_arc(
         }
 
         // Ranges are absolute inside the whole file, including the 8-byte length and JSON header.
-        let abs_start = header_end + start;
-        let abs_end = header_end + end;
+        let abs_start = base + header_end + start;
+        let abs_end = base + header_end + end;
         let logical_strides = crate::capsule::row_major_strides(&actual_shape);
         tensors.insert(
             name.clone(),
@@ -378,7 +467,7 @@ fn parse_safetensors_arc(
         );
     }
 
-    Ok(LoadedCheckpoint::from_owned_bytes(bytes, tensors))
+    Ok(())
 }
 
 /// Loads a TinyLlama safetensors checkpoint from an owned byte buffer.
@@ -386,6 +475,93 @@ fn parse_safetensors_arc(
 pub fn load_safetensors_from_bytes(bytes: Vec<u8>) -> Result<LoadedCheckpoint, CheckpointError> {
     let catalog = tinyllama_catalog();
     parse_safetensors_arc(Arc::from(bytes), &catalog)
+}
+
+/// Name of the shard index Hugging Face writes beside sharded safetensors files.
+pub const SAFETENSORS_INDEX: &str = "model.safetensors.index.json";
+
+/// Loads and validates a checkpoint against `catalog`. `path` is a `.safetensors` file, a
+/// `model.safetensors.index.json` (sharded), or a model directory holding either. A shard
+/// file whose directory has an index loads the whole sharded set.
+pub fn load_checkpoint_with_catalog<P: AsRef<Path>>(
+    path: P,
+    catalog: &[(String, Vec<usize>)],
+) -> Result<LoadedCheckpoint, CheckpointError> {
+    let p = path.as_ref();
+    let read = |file: &Path| {
+        std::fs::read(file).map_err(|e| {
+            CheckpointError::InvalidHeader(format!(
+                "Failed to read checkpoint at {}: {}",
+                file.display(),
+                e
+            ))
+        })
+    };
+    let index = if p.is_dir() {
+        let single = p.join("model.safetensors");
+        if single.is_file() {
+            return parse_safetensors_arc(Arc::from(read(&single)?), catalog);
+        }
+        p.join(SAFETENSORS_INDEX)
+    } else if p.file_name().and_then(|n| n.to_str()) == Some(SAFETENSORS_INDEX) {
+        p.to_path_buf()
+    } else {
+        let sibling = p.with_file_name(SAFETENSORS_INDEX);
+        let is_shard = p.file_name().and_then(|n| n.to_str()) != Some("model.safetensors");
+        if !(is_shard && sibling.is_file()) {
+            return parse_safetensors_arc(Arc::from(read(p)?), catalog);
+        }
+        sibling
+    };
+    let index_text = std::fs::read_to_string(&index).map_err(|e| {
+        CheckpointError::InvalidHeader(format!("Failed to read {}: {}", index.display(), e))
+    })?;
+    let index_json: serde_json::Value = serde_json::from_str(&index_text).map_err(|e| {
+        CheckpointError::InvalidHeader(format!("Invalid {}: {}", index.display(), e))
+    })?;
+    let weight_map = index_json
+        .get("weight_map")
+        .and_then(|m| m.as_object())
+        .ok_or_else(|| {
+            CheckpointError::InvalidHeader(format!("{} has no weight_map", index.display()))
+        })?;
+    let mut files: Vec<&str> = weight_map.values().filter_map(|v| v.as_str()).collect();
+    files.sort_unstable();
+    files.dedup();
+    let dir = index.parent().unwrap_or(Path::new("."));
+    let mut paths = Vec::with_capacity(files.len());
+    let mut total = 0usize;
+    for file in files {
+        let shard = dir.join(file);
+        let len = std::fs::metadata(&shard)
+            .map_err(|e| {
+                CheckpointError::InvalidHeader(format!(
+                    "Failed to stat shard {}: {}",
+                    shard.display(),
+                    e
+                ))
+            })?
+            .len() as usize;
+        total += len;
+        paths.push(shard);
+    }
+    let mut bytes = Vec::with_capacity(total);
+    let mut ranges = Vec::with_capacity(paths.len());
+    for shard in &paths {
+        use std::io::Read;
+        let start = bytes.len();
+        std::fs::File::open(shard)
+            .and_then(|mut f| f.read_to_end(&mut bytes))
+            .map_err(|e| {
+                CheckpointError::InvalidHeader(format!(
+                    "Failed to read shard {}: {}",
+                    shard.display(),
+                    e
+                ))
+            })?;
+        ranges.push(start..bytes.len());
+    }
+    parse_shards(Arc::from(bytes), &ranges, catalog)
 }
 
 /// Loads and validates a TinyLlama safetensors checkpoint from a filesystem path.

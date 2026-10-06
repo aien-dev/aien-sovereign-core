@@ -21,28 +21,19 @@ pub struct ChatTurn {
     pub content: String,
 }
 
+/// Renders the chat with a model's template. Generation continues from an assistant
+/// header unless the last turn is a non-empty assistant turn.
+pub fn format_chat(template: aien_inference_abi::ChatTemplate, messages: &[ChatTurn]) -> String {
+    let turns: Vec<(&str, &str)> = messages
+        .iter()
+        .map(|m| (m.role.as_str(), m.content.as_str()))
+        .collect();
+    template.render(&turns)
+}
+
 /// TinyLlama chat template. Generation always continues from an assistant header.
 pub fn format_tinyllama_chat(messages: &[ChatTurn]) -> String {
-    let mut out = String::new();
-    for message in messages {
-        let body = message.content.trim();
-        if body.is_empty() {
-            continue;
-        }
-        let tag = match message.role.trim().to_ascii_lowercase().as_str() {
-            "system" => "system",
-            "assistant" => "assistant",
-            _ => "user",
-        };
-        out.push_str(&format!("<|{tag}|>\n{body}</s>\n"));
-    }
-    let ends_in_assistant = messages.last().is_some_and(|message| {
-        message.role.trim().eq_ignore_ascii_case("assistant") && !message.content.trim().is_empty()
-    });
-    if !ends_in_assistant {
-        out.push_str("<|assistant|>\n");
-    }
-    out
+    format_chat(aien_inference_abi::ChatTemplate::Zephyr, messages)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

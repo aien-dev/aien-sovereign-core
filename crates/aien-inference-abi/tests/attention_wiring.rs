@@ -20,6 +20,7 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 const HD: usize = 16;
 const BIG: f32 = 10.0;
 const THETA: f32 = 10000.0;
+const ROPE: aien_inference_abi::RopeParams = aien_inference_abi::RopeParams::plain(THETA);
 
 fn v_val(t: usize, j: usize, d: usize) -> f32 {
     assert!(t < 16 && d < 16);
@@ -300,14 +301,14 @@ fn lcg(seed: &mut u64) -> f32 {
 fn rope_q(be: &dyn TensorBackend, q0: &[f32], pos: usize, nq: usize, nkv: usize) -> Vec<f32> {
     let mut q = q0.to_vec();
     let mut k = vec![0.0f32; nkv * HD];
-    be.apply_rope(&mut q, &mut k, pos, HD, nq, nkv, THETA);
+    be.apply_rope(&mut q, &mut k, pos, HD, nq, nkv, &ROPE);
     q
 }
 
 fn rope_k(be: &dyn TensorBackend, k0: &[f32], pos: usize, nq: usize, nkv: usize) -> Vec<f32> {
     let mut q = vec![0.0f32; nq * HD];
     let mut k = k0.to_vec();
-    be.apply_rope(&mut q, &mut k, pos, HD, nq, nkv, THETA);
+    be.apply_rope(&mut q, &mut k, pos, HD, nq, nkv, &ROPE);
     k
 }
 

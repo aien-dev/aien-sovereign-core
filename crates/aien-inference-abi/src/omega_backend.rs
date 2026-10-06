@@ -28,6 +28,7 @@
 //! [`OmegaGb10Backend::clear_resident`] after changing weights.
 use crate::backend::{ReferenceCpuBackend, TensorBackend};
 use crate::native_ops::{NativeOpMask, OpAccounting, OpReport, TensorOp};
+use aien_abi_core::RopeParams;
 use aien_omega_gpu::ResidentTensor;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -51,8 +52,8 @@ type Key = (usize, usize, usize, usize);
 /// Rope cos/sin table for one position: `head_dim / 2` values each.
 type RopeTable = Arc<(Vec<f32>, Vec<f32>)>;
 
-/// Cache key: (head_dim, theta bits, position). Drop everything past this many entries.
-type RopeKey = (usize, u32, usize);
+/// Cache key: (head_dim, rope parameter bits, position). Drop everything past this many entries.
+type RopeKey = (usize, [u64; 5], usize);
 const ROPE_CACHE_MAX: usize = 16384;
 
 struct Resident {
@@ -239,9 +240,9 @@ impl OmegaGb10Backend {
 
     /// Rope cos/sin table for `pos`, built exactly as the reference does
     /// (`tensor::apply_rope`, tensor.rs:101): f64 frequency and angle, then cast to f32.
-    /// Cached per (head_dim, theta, pos).
-    fn rope_table(&self, head_dim: usize, theta: f32, pos: usize) -> RopeTable {
-        let key: RopeKey = (head_dim, theta.to_bits(), pos);
+    /// Cached per (head_dim, rope parameters, pos).
+    fn rope_table(&self, head_dim: usize, rope: &RopeParams, pos: usize) -> RopeTable {
+        let key: RopeKey = (head_dim, rope.cache_key(), pos);
         let mut cache = self
             .rope_tables
             .lock()
@@ -249,16 +250,7 @@ impl OmegaGb10Backend {
         if let Some(t) = cache.get(&key) {
             return Arc::clone(t);
         }
-        let half = head_dim / 2;
-        let mut cos = Vec::with_capacity(half);
-        let mut sin = Vec::with_capacity(half);
-        for i in 0..half {
-            let exponent = (2 * i) as f64 / (head_dim as f64);
-            let freq = 1.0 / (theta as f64).powf(exponent);
-            let rot = (pos as f64) * freq;
-            sin.push(rot.sin() as f32);
-            cos.push(rot.cos() as f32);
-        }
+        let (cos, sin) = crate::tensor::rope_cos_sin(rope, head_dim, pos);
         if cache.len() >= ROPE_CACHE_MAX {
             cache.clear();
         }
@@ -306,7 +298,7 @@ impl OmegaGb10Backend {
         head_dim: usize,
         num_q_heads: usize,
         num_kv_heads: usize,
-        theta: f32,
+        rope: &RopeParams,
     ) -> bool {
         if head_dim == 0
             || !head_dim.is_multiple_of(2)
@@ -319,7 +311,7 @@ impl OmegaGb10Backend {
                 k.len()
             ));
         }
-        let table = self.rope_table(head_dim, theta, pos);
+        let table = self.rope_table(head_dim, rope, pos);
         let mut both = Vec::with_capacity(q.len() + k.len());
         both.extend_from_slice(q);
         both.extend_from_slice(k);
@@ -539,12 +531,12 @@ impl TensorBackend for OmegaGb10Backend {
         head_dim: usize,
         num_q_heads: usize,
         num_kv_heads: usize,
-        theta: f32,
+        rope: &RopeParams,
     ) {
-        if !self.chip_rope(q, k, pos, head_dim, num_q_heads, num_kv_heads, theta) {
+        if !self.chip_rope(q, k, pos, head_dim, num_q_heads, num_kv_heads, rope) {
             self.reference_for(TensorOp::ApplyRope);
             self.reference
-                .apply_rope(q, k, pos, head_dim, num_q_heads, num_kv_heads, theta);
+                .apply_rope(q, k, pos, head_dim, num_q_heads, num_kv_heads, rope);
         }
     }
 
@@ -893,7 +885,8 @@ mod tests {
     #[test]
     fn rope_table_reproduces_reference_rope() {
         let b = OmegaGb10Backend::new();
-        let (head_dim, nq, nkv, pos, theta) = (64usize, 4usize, 2usize, 37usize, 10000.0f32);
+        let (head_dim, nq, nkv, pos) = (64usize, 4usize, 2usize, 37usize);
+        let theta = &RopeParams::plain(10000.0);
         let mut s = 99u32;
         let q0: Vec<f32> = (0..nq * head_dim).map(|_| lcg(&mut s)).collect();
         let k0: Vec<f32> = (0..nkv * head_dim).map(|_| lcg(&mut s)).collect();
@@ -939,8 +932,8 @@ mod tests {
         assert_eq!(got, want);
         let (mut q, mut k) = (x[..64].to_vec(), x[64..].to_vec());
         let (mut qw, mut kw) = (q.clone(), k.clone());
-        b.apply_rope(&mut q, &mut k, 3, 32, 2, 2, 10000.0);
-        r.apply_rope(&mut qw, &mut kw, 3, 32, 2, 2, 10000.0);
+        b.apply_rope(&mut q, &mut k, 3, 32, 2, 2, &RopeParams::plain(10000.0));
+        r.apply_rope(&mut qw, &mut kw, 3, 32, 2, 2, &RopeParams::plain(10000.0));
         assert_eq!((q, k), (qw, kw));
         assert_eq!(b.fallback_count(), 3);
         let line = b.op_report().line();

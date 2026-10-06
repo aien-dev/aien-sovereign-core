@@ -1,6 +1,7 @@
 //! Pure native Rust tensor operations for transformer forward execution.
 //! Provides cache-friendly vector and matrix math, RMSNorm, RoPE, and SwiGLU activations.
 
+use aien_abi_core::RopeParams;
 use rayon::prelude::*;
 
 /// Vector-matrix multiplication for PyTorch row-major weights: out = x * W^T
@@ -107,45 +108,55 @@ pub fn apply_rope(
     head_dim: usize,
     theta: f32,
 ) {
+    apply_rope_params(
+        q,
+        k,
+        pos,
+        num_heads,
+        num_kv_heads,
+        head_dim,
+        &RopeParams::plain(theta),
+    );
+}
+
+/// The cos and sin of every rotary pair at `pos`: f64 frequency and angle, cast to f32.
+/// Both the reference rope and the Omega GPU rope table use this.
+pub fn rope_cos_sin(rope: &RopeParams, head_dim: usize, pos: usize) -> (Vec<f32>, Vec<f32>) {
     let half_dim = head_dim / 2;
-
-    // Rotate query heads
-    for h in 0..num_heads {
-        let head_offset = h * head_dim;
-        for i in 0..half_dim {
-            let idx0 = head_offset + i;
-            let idx1 = head_offset + i + half_dim;
-
-            let exponent = (2 * i) as f64 / (head_dim as f64);
-            let freq = 1.0 / (theta as f64).powf(exponent);
-            let rot = (pos as f64) * freq;
-            let sin_val = rot.sin() as f32;
-            let cos_val = rot.cos() as f32;
-
-            let q0 = q[idx0];
-            let q1 = q[idx1];
-            q[idx0] = q0 * cos_val - q1 * sin_val;
-            q[idx1] = q0 * sin_val + q1 * cos_val;
-        }
+    let mut cos = Vec::with_capacity(half_dim);
+    let mut sin = Vec::with_capacity(half_dim);
+    for i in 0..half_dim {
+        let rot = (pos as f64) * rope.inv_freq(i, head_dim);
+        sin.push(rot.sin() as f32);
+        cos.push(rot.cos() as f32);
     }
+    (cos, sin)
+}
 
-    // Rotate key heads
-    for h in 0..num_kv_heads {
-        let head_offset = h * head_dim;
-        for i in 0..half_dim {
-            let idx0 = head_offset + i;
-            let idx1 = head_offset + i + half_dim;
-
-            let exponent = (2 * i) as f64 / (head_dim as f64);
-            let freq = 1.0 / (theta as f64).powf(exponent);
-            let rot = (pos as f64) * freq;
-            let sin_val = rot.sin() as f32;
-            let cos_val = rot.cos() as f32;
-
-            let k0 = k[idx0];
-            let k1 = k[idx1];
-            k[idx0] = k0 * cos_val - k1 * sin_val;
-            k[idx1] = k0 * sin_val + k1 * cos_val;
+/// [`apply_rope`] with explicit rope parameters (base theta and optional llama3 scaling).
+#[inline]
+pub fn apply_rope_params(
+    q: &mut [f32],
+    k: &mut [f32],
+    pos: usize,
+    num_heads: usize,
+    num_kv_heads: usize,
+    head_dim: usize,
+    rope: &RopeParams,
+) {
+    let half_dim = head_dim / 2;
+    let (cos, sin) = rope_cos_sin(rope, head_dim, pos);
+    for (v, heads) in [(q, num_heads), (k, num_kv_heads)] {
+        for h in 0..heads {
+            let head_offset = h * head_dim;
+            for i in 0..half_dim {
+                let idx0 = head_offset + i;
+                let idx1 = head_offset + i + half_dim;
+                let v0 = v[idx0];
+                let v1 = v[idx1];
+                v[idx0] = v0 * cos[i] - v1 * sin[i];
+                v[idx1] = v0 * sin[i] + v1 * cos[i];
+            }
         }
     }
 }

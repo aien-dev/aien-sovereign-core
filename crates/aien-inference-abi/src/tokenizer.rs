@@ -1,4 +1,5 @@
-//! Pure Rust tokenizer and chat template formatter for TinyLlama models.
+//! Pure Rust tokenizer and chat template formatter for the Llama model family
+//! (TinyLlama zephyr-style chat, Llama 3 instruct chat).
 //! Wraps Hugging Face tokenizers crate without Python runtime dependencies.
 
 use std::fmt;
@@ -32,13 +33,121 @@ impl fmt::Display for TokenizerError {
 
 impl std::error::Error for TokenizerError {}
 
-/// Pure Rust wrapper around Hugging Face tokenizers for TinyLlama.
-#[derive(Clone)]
-pub struct TinyLlamaTokenizer {
-    inner: tokenizers::Tokenizer,
+/// The chat layout a model was fine-tuned on. Selected from the model's own chat template
+/// text (no template engine): each variant renders the one layout that template produces
+/// for plain user/system/assistant turns ending in a generation prompt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChatTemplate {
+    /// TinyLlama-Chat (zephyr): `<|user|>\n{content}</s>\n<|assistant|>\n`.
+    Zephyr,
+    /// Llama 3 instruct: `<|start_header_id|>user<|end_header_id|>\n\n{content}<|eot_id|>`
+    /// then `<|start_header_id|>assistant<|end_header_id|>\n\n`. No system block is added
+    /// (the Hugging Face template's default "Cutting Knowledge Date / Today Date" block
+    /// depends on the wall clock, so it is left out).
+    Llama3,
 }
 
-impl TinyLlamaTokenizer {
+impl ChatTemplate {
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::Zephyr => "zephyr (TinyLlama chat)",
+            Self::Llama3 => "llama3 (Llama 3 instruct)",
+        }
+    }
+
+    /// Recognizes the layout from a Jinja chat template's text.
+    pub fn detect(template_text: &str) -> Result<Self, TokenizerError> {
+        if template_text.contains("<|start_header_id|>") && template_text.contains("<|eot_id|>") {
+            Ok(Self::Llama3)
+        } else if template_text.contains("<|user|>") && template_text.contains("<|assistant|>") {
+            Ok(Self::Zephyr)
+        } else {
+            Err(TokenizerError::LoadError(
+                "unsupported chat template: neither zephyr (<|user|>) nor llama3 \
+                 (<|start_header_id|>) markers found"
+                    .to_string(),
+            ))
+        }
+    }
+
+    /// Renders `(role, content)` turns. Contents are trimmed and empty turns skipped; roles
+    /// other than system and assistant are user turns. Generation continues from an
+    /// assistant header unless the last turn is a non-empty assistant turn. The BOS token
+    /// is not part of the text: `encode` adds exactly one through the tokenizer's
+    /// post-processor.
+    pub fn render(&self, turns: &[(&str, &str)]) -> String {
+        let mut out = String::new();
+        for (role, content) in turns {
+            let body = content.trim();
+            if body.is_empty() {
+                continue;
+            }
+            let role = match role.trim().to_ascii_lowercase().as_str() {
+                "system" => "system",
+                "assistant" => "assistant",
+                _ => "user",
+            };
+            match self {
+                Self::Zephyr => out.push_str(&format!("<|{role}|>\n{body}</s>\n")),
+                Self::Llama3 => out.push_str(&format!(
+                    "<|start_header_id|>{role}<|end_header_id|>\n\n{body}<|eot_id|>"
+                )),
+            }
+        }
+        let ends_in_assistant = turns.last().is_some_and(|(role, content)| {
+            role.trim().eq_ignore_ascii_case("assistant") && !content.trim().is_empty()
+        });
+        if !ends_in_assistant {
+            out.push_str(match self {
+                Self::Zephyr => "<|assistant|>\n",
+                Self::Llama3 => "<|start_header_id|>assistant<|end_header_id|>\n\n",
+            });
+        }
+        out
+    }
+}
+
+/// Pure Rust wrapper around Hugging Face tokenizers with the model's chat template and
+/// end-of-sequence set. `from_file`/`from_bytes` give the TinyLlama defaults;
+/// `from_model_dir` reads them from the model directory.
+#[derive(Clone)]
+pub struct ChatTokenizer {
+    inner: tokenizers::Tokenizer,
+    template: ChatTemplate,
+    stop_token_ids: Vec<u32>,
+    max_context_len: usize,
+}
+
+/// The name this tokenizer had while it served TinyLlama only.
+pub type TinyLlamaTokenizer = ChatTokenizer;
+
+fn read_json(path: &Path) -> Result<Option<serde_json::Value>, TokenizerError> {
+    match std::fs::read_to_string(path) {
+        Ok(text) => serde_json::from_str(&text).map(Some).map_err(|e| {
+            TokenizerError::LoadError(format!("{} is not valid JSON: {}", path.display(), e))
+        }),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(TokenizerError::LoadError(format!(
+            "Failed to read {}: {}",
+            path.display(),
+            e
+        ))),
+    }
+}
+
+/// `eos_token_id` of a Hugging Face config as a list (it is a number or an array).
+pub fn eos_token_ids_from_json(value: &serde_json::Value) -> Option<Vec<u32>> {
+    match value.get("eos_token_id")? {
+        serde_json::Value::Number(n) => n.as_u64().map(|id| vec![id as u32]),
+        serde_json::Value::Array(items) => items
+            .iter()
+            .map(|v| v.as_u64().map(|id| id as u32))
+            .collect(),
+        _ => None,
+    }
+}
+
+impl ChatTokenizer {
     /// Beginning of Sequence token ID pinned for TinyLlama (<s>).
     pub const BOS_TOKEN_ID: u32 = 1;
     /// End of Sequence token ID pinned for TinyLlama (</s>).
@@ -54,7 +163,7 @@ impl TinyLlamaTokenizer {
         let inner = tokenizers::Tokenizer::from_file(p).map_err(|e| {
             TokenizerError::LoadError(format!("Failed to load from {}: {}", p.display(), e))
         })?;
-        Ok(Self { inner })
+        Ok(Self::tinyllama(inner))
     }
 
     /// Loads tokenizer directly from a JSON byte buffer.
@@ -62,7 +171,84 @@ impl TinyLlamaTokenizer {
         let inner = tokenizers::Tokenizer::from_bytes(bytes).map_err(|e| {
             TokenizerError::LoadError(format!("Failed to parse tokenizer bytes: {}", e))
         })?;
-        Ok(Self { inner })
+        Ok(Self::tinyllama(inner))
+    }
+
+    fn tinyllama(inner: tokenizers::Tokenizer) -> Self {
+        Self {
+            inner,
+            template: ChatTemplate::Zephyr,
+            stop_token_ids: vec![Self::EOS_TOKEN_ID],
+            max_context_len: Self::MAX_CONTEXT_LEN,
+        }
+    }
+
+    /// Loads `tokenizer_json` (default `<dir>/tokenizer.json`) with the chat template and
+    /// end-of-sequence set of the model directory `dir`:
+    /// - template: detected from `chat_template` in `tokenizer_config.json`, else from
+    ///   `chat_template.jinja`;
+    /// - stop set: `eos_token_id` of `generation_config.json`, else of `config.json`;
+    /// - context limit: `max_position_embeddings` of `config.json` (default 2048).
+    pub fn from_model_dir(
+        dir: &Path,
+        tokenizer_json: Option<&Path>,
+    ) -> Result<Self, TokenizerError> {
+        let default_json = dir.join("tokenizer.json");
+        let mut tokenizer = Self::from_file(tokenizer_json.unwrap_or(&default_json))?;
+        let template_text = match read_json(&dir.join("tokenizer_config.json"))?
+            .and_then(|c| c.get("chat_template").and_then(|t| t.as_str()).map(str::to_string))
+        {
+            Some(text) => text,
+            None => std::fs::read_to_string(dir.join("chat_template.jinja")).map_err(|e| {
+                TokenizerError::LoadError(format!(
+                    "no chat template in {} (tokenizer_config.json chat_template or chat_template.jinja): {}",
+                    dir.display(),
+                    e
+                ))
+            })?,
+        };
+        tokenizer.template = ChatTemplate::detect(&template_text)?;
+        let config = read_json(&dir.join("config.json"))?;
+        let stop = read_json(&dir.join("generation_config.json"))?
+            .as_ref()
+            .and_then(eos_token_ids_from_json)
+            .or_else(|| config.as_ref().and_then(eos_token_ids_from_json))
+            .ok_or_else(|| {
+                TokenizerError::LoadError(format!(
+                    "no eos_token_id in {}/generation_config.json or config.json",
+                    dir.display()
+                ))
+            })?;
+        if stop.is_empty() {
+            return Err(TokenizerError::LoadError(format!(
+                "empty eos_token_id in {}",
+                dir.display()
+            )));
+        }
+        tokenizer.stop_token_ids = stop;
+        if let Some(max) = config
+            .as_ref()
+            .and_then(|c| c.get("max_position_embeddings"))
+            .and_then(|v| v.as_u64())
+        {
+            tokenizer.max_context_len = max as usize;
+        }
+        Ok(tokenizer)
+    }
+
+    /// The chat layout this tokenizer renders.
+    pub fn template(&self) -> ChatTemplate {
+        self.template
+    }
+
+    /// Token ids that end generation (the model's `eos_token_id` set).
+    pub fn stop_token_ids(&self) -> &[u32] {
+        &self.stop_token_ids
+    }
+
+    /// Renders `(role, content)` turns with this model's chat template.
+    pub fn format_chat(&self, turns: &[(&str, &str)]) -> String {
+        self.template.render(turns)
     }
 
     /// Formats a conversation according to the canonical TinyLlama chat template:
@@ -103,10 +289,10 @@ impl TinyLlamaTokenizer {
             .encode(text, add_special_tokens)
             .map_err(|e| TokenizerError::EncodeError(e.to_string()))?;
         let tokens = encoding.get_ids().to_vec();
-        if tokens.len() > Self::MAX_CONTEXT_LEN {
+        if tokens.len() > self.max_context_len {
             return Err(TokenizerError::ContextLengthExceeded {
                 len: tokens.len(),
-                max: Self::MAX_CONTEXT_LEN,
+                max: self.max_context_len,
             });
         }
         Ok(tokens)
@@ -130,7 +316,7 @@ impl TinyLlamaTokenizer {
 
     /// Checks if a token ID signifies generation stopping (EOS).
     pub fn is_eos(&self, token_id: u32) -> bool {
-        token_id == Self::EOS_TOKEN_ID
+        self.stop_token_ids.contains(&token_id)
     }
 
     /// Checks if a token ID signifies sequence beginning (BOS).

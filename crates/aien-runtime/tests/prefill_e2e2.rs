@@ -505,11 +505,11 @@ impl TensorBackend for CountingBackend {
         head_dim: usize,
         num_q_heads: usize,
         num_kv_heads: usize,
-        theta: f32,
+        rope: &aien_inference_abi::RopeParams,
     ) {
         self.rope_positions.lock().push(pos);
         self.inner
-            .apply_rope(q, k, pos, head_dim, num_q_heads, num_kv_heads, theta);
+            .apply_rope(q, k, pos, head_dim, num_q_heads, num_kv_heads, rope);
     }
 
     fn matmul_vec(
