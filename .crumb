@@ -71,20 +71,20 @@
         },
         {
           "digest": "ef1840de79311e5684993b0e0b66e0a9fce42a2d7966506201686ae5f8084a98",
-          "last_commit": "ffc5555",
+          "last_commit": "8b5caed",
           "name": "skills",
           "purpose": ""
         }
       ],
       "children_root": "sha256:009593670dc7accc2b442a6a8c6f3b848ab73de4d6e61df57401bf4bf00b294a",
-      "compiled_at": "2026-10-06T20:27:33Z",
+      "compiled_at": "2026-10-06T20:55:33Z",
       "compiler": "crumb-compile/1",
-      "digest": "sha256:269cca83838fadaff82e0e28a4168ab3a41bac87843f2a065181c62a79f39256",
-      "evidence_files": 24,
-      "evidence_root": "sha256:16192fc4be2f886385affd6e26faae4b831eb62b87ceac4ab39d662e0859d7f8",
-      "files": 840,
-      "generated_at_commit": "79adc3308f60a0fbb333d4fe83650111c9b1477a",
-      "source_tree": "sha256:c1d8cf3b4a948d604d92eade36fa78ffe64493a44bc2b55456aa1d01042a1bcd"
+      "digest": "sha256:5052e175d5bcdf5f02b19990437b2493435c7252feef16ec2a412bfcbb25b70b",
+      "evidence_files": 25,
+      "evidence_root": "sha256:714fb230bfff0e5d2dc3acefb5a7b31617ff6ff7acfdb94f5f64a6bd722389a5",
+      "files": 844,
+      "generated_at_commit": "088a24a7f1d7d9862ea37e4ff0b5a98302df0233",
+      "source_tree": "sha256:61cd54a12b2c925529821810c9c7e9d8925da90b83500762bdfe45ae10d5c48a"
     }
   },
   "history": [],
