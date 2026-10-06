@@ -408,8 +408,11 @@ impl AienRuntimeSpine {
             ControlCommand::StreamTurn { .. } => ControlResponse::Error(
                 "StreamTurn is handled on the socket connection, not as a one-shot command".into(),
             ),
-            ControlCommand::RunComposeTask { .. } => ControlResponse::Error(
-                "RunComposeTask is handled on the socket connection, not as a one-shot command"
+            ControlCommand::RunComposeTask { .. }
+            | ControlCommand::ComposeNote { .. }
+            | ControlCommand::ComposeRecall { .. }
+            | ControlCommand::RecoverComposeHome => ControlResponse::Error(
+                "compose commands are handled on the socket connection, not as one-shot commands"
                     .into(),
             ),
             ControlCommand::Shutdown => {
@@ -493,8 +496,11 @@ fn branch_sampling_params(config: &SwarmConfig) -> SamplingParams {
 // and kept open: the Cortex journal takes an exclusive writer lock.
 // ---------------------------------------------------------------------------
 
-use crate::control::ComposeTaskReport;
-use aien_omega_compose::{hex, Compose, ComposeError, RootKind};
+use crate::control::{
+    ComposeNoteReport, ComposeRecallReport, ComposeRecordView, ComposeRecoverReport,
+    ComposeTaskReport,
+};
+use aien_omega_compose::{hex, note_bytes, Compose, ComposeError, NoteKind, RootKind};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -581,6 +587,118 @@ fn proposal_handle(text: &str) -> u64 {
     }
 }
 
+/// A named refusal for an rxc_host open error: the operator learns what is
+/// wrong and that `RecoverComposeHome` is the remedy (never a silent repair).
+fn refusal(dir: &Path, e: &ComposeError) -> String {
+    let why = match e {
+        ComposeError::Code { code: -3, .. } => {
+            "Cortex journal tail torn (E_TORN, CX_ERR_TORN); nothing was cut. Run RecoverComposeHome (aien compose recover)"
+                .to_string()
+        }
+        ComposeError::Code { code: -11, detail } => format!(
+            "Cortex journal behind its J-Space anchor (E_REPLAY, RX_ERR_REPLAY {detail}). Run RecoverComposeHome (aien compose recover)"
+        ),
+        other => other.to_string(),
+    };
+    format!("compose home {} refused: {why}", dir.display())
+}
+
+/// One proposed file change: a path relative to the workspace and the
+/// complete new content.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileProposal {
+    pub path: String,
+    pub content: String,
+}
+
+fn path_token(line: &str) -> Option<String> {
+    let mut t = line
+        .trim()
+        .trim_matches(|c| matches!(c, '`' | '"' | '\'' | '*'));
+    for p in ["path:", "file:", "filename:"] {
+        if t.len() >= p.len() && t[..p.len()].eq_ignore_ascii_case(p) {
+            t = t[p.len()..]
+                .trim()
+                .trim_matches(|c| matches!(c, '`' | '"' | '\'' | '*'));
+        }
+    }
+    let ok = !t.is_empty()
+        && t.len() <= 255
+        && !t.starts_with('/')
+        && !t.starts_with('~')
+        && t.chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | '/'))
+        && (t.contains('.') || t.contains('/'))
+        && t.split('/').all(|c| !c.is_empty() && c != "." && c != "..");
+    ok.then(|| t.to_string())
+}
+
+/// The model's answer as one file change: the first line that is a plain
+/// relative path (letters, digits, `._-/`, no `..`, not absolute; `Path:`
+/// prefixes, quotes and backticks are stripped), then everything after it as
+/// the content (a surrounding code fence is dropped). None when no such line
+/// exists or the content is empty. Deterministic: the AEGIS contract, the
+/// authorization and the write all use this one reading.
+pub fn parse_file_proposal(text: &str) -> Option<FileProposal> {
+    let lines: Vec<&str> = text.lines().collect();
+    let at = lines.iter().position(|l| path_token(l).is_some())?;
+    let path = path_token(lines[at])?;
+    let mut body: Vec<&str> = lines[at + 1..].to_vec();
+    while body.first().is_some_and(|l| l.trim().is_empty()) {
+        body.remove(0);
+    }
+    if body
+        .first()
+        .is_some_and(|l| l.trim_start().starts_with("```"))
+    {
+        body.remove(0);
+        if let Some(end) = body.iter().position(|l| l.trim_start().starts_with("```")) {
+            body.truncate(end);
+        }
+    }
+    while body.last().is_some_and(|l| l.trim().is_empty()) {
+        body.pop();
+    }
+    if body.iter().all(|l| l.trim().is_empty()) {
+        return None;
+    }
+    let mut content = body.join("\n");
+    content.push('\n');
+    Some(FileProposal { path, content })
+}
+
+fn record_view(compose: &mut Compose, r: &aien_omega_compose::Record) -> ComposeRecordView {
+    let host = r.subject == aien_omega_compose::SUBJECT_HOST;
+    let note = if !host {
+        None
+    } else if r.tag == aien_omega_compose::ffi::RXC_HOST_TAG_REPAIR_TAIL {
+        Some("repair_tail".to_string())
+    } else {
+        NoteKind::from_tag(r.tag).map(|k| k.name().to_string())
+    };
+    let text = if host && NoteKind::from_tag(r.tag).is_some() {
+        compose
+            .payload(r.id)
+            .ok()
+            .and_then(|p| note_bytes(&p))
+            .map(|b| String::from_utf8_lossy(&b).into_owned())
+    } else {
+        None
+    };
+    ComposeRecordView {
+        id: r.id,
+        cls: r.cls,
+        kind: r.kind,
+        subject: r.subject,
+        tag: r.tag,
+        links: r.links.to_vec(),
+        digest: hex(&r.digest),
+        verified: r.verified == 1,
+        note,
+        text,
+    }
+}
+
 struct ComposeHome {
     compose: Compose,
     machine_id: String,
@@ -613,11 +731,8 @@ impl ComposeBridge {
     fn open_home(&self) -> Result<ComposeHome, String> {
         let root = machine_root(&self.dir)?;
         let (mut compose, info) =
-            Compose::open(&self.dir, RootKind::Provisioned, &root, 0xA1E4_0001, false)
-                .map_err(|e: ComposeError| format!("compose open {}: {e}", self.dir.display()))?;
-        if info.tail_torn != 0 {
-            tracing::warn!(dir = %self.dir.display(), "compose: Cortex journal tail was torn; repaired or refused at first use");
-        }
+            Compose::open(&self.dir, RootKind::Provisioned, &root, 0xA1E4_0001)
+                .map_err(|e: ComposeError| refusal(&self.dir, &e))?;
         let prompts: Arc<parking_lot::Mutex<HashMap<u64, String>>> = Arc::default();
         let proposals: Arc<parking_lot::Mutex<HashMap<u64, String>>> = Arc::default();
         let (pr, pp, proposer) = (prompts.clone(), proposals.clone(), self.proposer.clone());
@@ -637,12 +752,16 @@ impl ComposeBridge {
         compose
             .set_verify(move |task, result| {
                 // AEGIS contract: the result names exactly the proposal text
-                // the Skill recorded for this task, and that text is nonempty.
-                pv.lock()
-                    .get(&task)
-                    .is_some_and(|t| !t.trim().is_empty() && proposal_handle(t) == result)
+                // the Skill recorded for this task, and that text parses as one
+                // file change (a relative path and nonempty content).
+                pv.lock().get(&task).is_some_and(|t| {
+                    proposal_handle(t) == result && parse_file_proposal(t).is_some()
+                })
             })
             .map_err(|e| format!("compose set verify: {e}"))?;
+        // Open the composition now, so a home behind its anchor is refused here
+        // with its name (E_REPLAY), not inside the first run.
+        compose.info().map_err(|e| refusal(&self.dir, &e))?;
         Ok(ComposeHome {
             compose,
             machine_id: hex(&info.machine_id),
@@ -716,6 +835,7 @@ impl ComposeBridge {
         let r = run.map_err(|e| format!("compose run: {e}"))?;
         let committed = r.committed == 1;
         let proposal = if committed { proposal } else { None };
+        let parsed = proposal.as_deref().and_then(parse_file_proposal);
         Ok(ComposeTaskReport {
             compose_dir: self.dir.display().to_string(),
             machine_id: home.machine_id.clone(),
@@ -733,12 +853,161 @@ impl ComposeBridge {
             cx_admissions: r.cx_admission.iter().copied().filter(|&x| x != 0).collect(),
             winner_digest: hex(&r.winner_digest),
             record_digest: hex(&r.record_digest),
+            proposal_path: parsed.as_ref().map(|p| p.path.clone()),
+            proposal_content_sha256: parsed
+                .as_ref()
+                .map(|p| hex(&Sha256::digest(p.content.as_bytes()))),
             proposal_sha256: proposal
                 .as_ref()
                 .map(|t| hex(&Sha256::digest(t.as_bytes()))),
             proposal,
             proposer: self.proposer_label.clone(),
         })
+    }
+
+    fn with_home<T>(
+        &self,
+        f: impl FnOnce(&mut ComposeHome) -> Result<T, String>,
+    ) -> Result<T, String> {
+        let mut guard = self
+            .home
+            .lock()
+            .map_err(|_| "compose home lock poisoned".to_string())?;
+        if guard.is_none() {
+            *guard = Some(self.open_home()?);
+        }
+        f(guard.as_mut().expect("opened above"))
+    }
+
+    /// S1 / S4 / S5: one operator record through the composition's writer.
+    pub fn note(&self, kind: &str, text: &str, links: &[u64]) -> ControlResponse {
+        let k = match kind {
+            "constraint" => NoteKind::Constraint,
+            "authorization" => NoteKind::Authorization,
+            "effect" => NoteKind::Effect,
+            other => {
+                return ControlResponse::Error(format!(
+                    "ComposeNote: kind {other:?} (constraint, authorization, effect)"
+                ))
+            }
+        };
+        if links.len() > 4 {
+            return ControlResponse::Error("ComposeNote: at most 4 links".into());
+        }
+        let mut l = [0u64; 4];
+        l[..links.len()].copy_from_slice(links);
+        let r = self.with_home(|home| {
+            let id = home
+                .compose
+                .note(k, l, text.as_bytes())
+                .map_err(|e| format!("ComposeNote: {e}"))?;
+            let rec = home
+                .compose
+                .record(id)
+                .map_err(|e| format!("ComposeNote: re-read {id}: {e}"))?;
+            Ok(ComposeNoteReport {
+                machine_id: home.machine_id.clone(),
+                id,
+                kind: k.name().to_string(),
+                digest: hex(&rec.digest),
+                text_sha256: hex(&Sha256::digest(text.as_bytes())),
+                links: links.to_vec(),
+            })
+        });
+        match r {
+            Ok(r) => ControlResponse::ComposeNoted(r),
+            Err(e) => ControlResponse::Error(e),
+        }
+    }
+
+    /// S6 / S8: host records plus the cited ids, digests re-checked.
+    pub fn recall(&self, ids: &[u64], prefix: Option<u64>) -> ControlResponse {
+        let r = self.with_home(|home| {
+            let info = home
+                .compose
+                .info()
+                .map_err(|e| format!("ComposeRecall: {e}"))?;
+            let (host_recs, _) = home
+                .compose
+                .recall(aien_omega_compose::SUBJECT_HOST, 4096)
+                .map_err(|e| format!("ComposeRecall: host records: {e}"))?;
+            let host = host_recs
+                .iter()
+                .map(|r| record_view(&mut home.compose, r))
+                .collect();
+            let (mut cited, mut missing) = (Vec::new(), Vec::new());
+            for &id in ids {
+                match home.compose.record(id) {
+                    Ok(r) => cited.push(record_view(&mut home.compose, &r)),
+                    Err(_) => missing.push(id),
+                }
+            }
+            let prefix_digest = match prefix {
+                Some(n) if n <= info.records => {
+                    let mut h = Sha256::new();
+                    for id in 1..=n {
+                        let r = home
+                            .compose
+                            .record(id)
+                            .map_err(|e| format!("ComposeRecall: record {id}: {e}"))?;
+                        h.update(r.digest);
+                    }
+                    Some(hex(&h.finalize()))
+                }
+                _ => None,
+            };
+            Ok(ComposeRecallReport {
+                compose_dir: self.dir.display().to_string(),
+                machine_id: home.machine_id.clone(),
+                records_total: info.records,
+                host,
+                cited,
+                missing,
+                prefix,
+                prefix_digest,
+            })
+        });
+        match r {
+            Ok(r) => ControlResponse::ComposeRecalled(Box::new(r)),
+            Err(e) => ControlResponse::Error(e),
+        }
+    }
+
+    /// Operator repair: close this process's handle, run rxc_host_recover,
+    /// reopen lazily on the next command.
+    pub fn recover(&self) -> ControlResponse {
+        let mut guard = match self.home.lock() {
+            Ok(g) => g,
+            Err(_) => return ControlResponse::Error("compose home lock poisoned".into()),
+        };
+        *guard = None;
+        let root = match machine_root(&self.dir) {
+            Ok(r) => r,
+            Err(e) => return ControlResponse::Error(format!("RecoverComposeHome: {e}")),
+        };
+        match Compose::recover(&self.dir, RootKind::Provisioned, &root) {
+            Ok(r) => ControlResponse::ComposeRecovered(Box::new(ComposeRecoverReport {
+                compose_dir: self.dir.display().to_string(),
+                repaired: r.repaired == 1,
+                tail_torn: r.tail_torn == 1,
+                cause: r.cause,
+                cut_lo: r.cut_lo,
+                cut_hi: r.cut_hi,
+                records_kept: r.records_kept,
+                dropped_records: r.dropped_records,
+                anchor_records: r.anchor_records,
+                repair_record: r.event_id,
+                cut_bytes_kept: r.cut_bytes_kept,
+                cut_sha256: hex(&r.cut_sha256),
+                opens: r.opens == 1,
+                open_rc: r.open_rc,
+                rolled_back: r.rolled_back,
+                recovered_completed: r.recovered_completed,
+            })),
+            Err(e) => {
+                ControlResponse::Error(format!("RecoverComposeHome {}: {e}", self.dir.display()))
+            }
+        }
     }
 
     /// Recall: the Cortex record by id, digest re-checked (cut 2 uses this

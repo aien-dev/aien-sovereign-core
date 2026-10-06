@@ -69,6 +69,38 @@ async fn run_compose_task_over_socket() {
         }
         other => panic!("unexpected {other:?}"),
     }
+    // cut 2: a host note and its recall over the same socket.
+    let noted = client
+        .send_command(ControlCommand::ComposeNote {
+            kind: "constraint".into(),
+            text: "only the workspace".into(),
+            links: vec![],
+        })
+        .await
+        .unwrap();
+    match (noted, aien_omega_compose::LINKED) {
+        (ControlResponse::ComposeNoted(n), true) => {
+            let back = client
+                .send_command(ControlCommand::ComposeRecall {
+                    ids: vec![n.id],
+                    prefix: Some(n.id),
+                })
+                .await
+                .unwrap();
+            match back {
+                ControlResponse::ComposeRecalled(r) => {
+                    assert_eq!(r.machine_id, n.machine_id);
+                    assert_eq!(r.cited.len(), 1);
+                    assert_eq!(r.cited[0].digest, n.digest);
+                    assert_eq!(r.cited[0].text.as_deref(), Some("only the workspace"));
+                    assert!(r.prefix_digest.is_some());
+                }
+                other => panic!("recall: {other:?}"),
+            }
+        }
+        (ControlResponse::Error(e), false) => assert!(e.contains("not linked"), "{e}"),
+        (other, linked) => panic!("note (linked {linked}): {other:?}"),
+    }
     let _ = client.send_command(ControlCommand::Shutdown).await;
     let _ = tokio::time::timeout(Duration::from_secs(5), handle).await;
 }

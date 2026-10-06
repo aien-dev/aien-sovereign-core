@@ -43,7 +43,7 @@ pub enum ComposeError {
     /// The library is not linked (stub build).
     Unavailable,
     /// Rust and C struct layouts differ (wrong omega commit).
-    Layout { c: [u32; 3], rust: [u32; 3] },
+    Layout { c: [u32; 4], rust: [u32; 4] },
     /// An argument Rust refuses before calling C (interior NUL, empty name).
     Arg(String),
     /// `RXC_HOST_E_*` from the C side, with the underlying rx code when known.
@@ -63,6 +63,7 @@ impl ComposeError {
             ffi::RXC_HOST_E_NOMEM => "E_NOMEM",
             ffi::RXC_HOST_E_NOT_FOUND => "E_NOT_FOUND",
             ffi::RXC_HOST_E_DIGEST => "E_DIGEST",
+            ffi::RXC_HOST_E_REPLAY => "E_REPLAY",
             _ => "E_UNKNOWN",
         }
     }
@@ -92,6 +93,60 @@ impl std::error::Error for ComposeError {}
 pub type Info = ffi::RxcHostInfo;
 pub type RunResult = ffi::RxcHostResult;
 pub type Record = ffi::RxcHostRecord;
+pub type Repair = ffi::RxcHostRepair;
+pub use ffi::RXC_HOST_SUBJECT_HOST as SUBJECT_HOST;
+
+/// Host record kinds (`RXC_HOST_NOTE_*`), all on [`SUBJECT_HOST`]. The record tag
+/// is the kind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NoteKind {
+    /// CLAIM / CX_K_CLAIM: an operator constraint.
+    Constraint = 2,
+    /// EVIDENCE / CX_K_ADMISSION: an approval for one effect.
+    Authorization = 3,
+    /// EVIDENCE / CX_K_EVIDENCE_REF: an effect receipt.
+    Effect = 4,
+}
+
+impl NoteKind {
+    pub fn from_tag(tag: u64) -> Option<Self> {
+        match tag {
+            2 => Some(Self::Constraint),
+            3 => Some(Self::Authorization),
+            4 => Some(Self::Effect),
+            _ => None,
+        }
+    }
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Constraint => "constraint",
+            Self::Authorization => "authorization",
+            Self::Effect => "effect",
+        }
+    }
+}
+
+/// The bytes of a host note payload (`[len, sha256 x4, bytes...]`), or None
+/// when the payload is short or its sha256 does not match the bytes.
+pub fn note_bytes(payload: &[u64]) -> Option<Vec<u8>> {
+    use sha2::{Digest, Sha256};
+    let len = *payload.get(ffi::RXC_HOST_NP_LEN)? as usize;
+    let words = payload.get(ffi::RXC_HOST_NP_BYTES..)?;
+    if len > words.len() * 8 {
+        return None;
+    }
+    let bytes: Vec<u8> = words
+        .iter()
+        .flat_map(|w| w.to_le_bytes())
+        .take(len)
+        .collect();
+    let sha: Vec<u8> = payload
+        .get(ffi::RXC_HOST_NP_SHA..ffi::RXC_HOST_NP_SHA + 4)?
+        .iter()
+        .flat_map(|w| w.to_le_bytes())
+        .collect();
+    (Sha256::digest(&bytes).as_slice() == sha.as_slice()).then_some(bytes)
+}
 
 /// Lower-case hex of a byte slice.
 pub fn hex(b: &[u8]) -> String {
@@ -150,13 +205,14 @@ mod linked {
     }
 
     fn layout() -> Result<(), ComposeError> {
-        let mut c = [0u32; 3];
-        // SAFETY: writes exactly three u32.
+        let mut c = [0u32; 4];
+        // SAFETY: writes exactly four u32.
         let v = unsafe { ffi::rxc_host_abi_layout(c.as_mut_ptr()) };
         let rust = [
             std::mem::size_of::<ffi::RxcHostInfo>() as u32,
             std::mem::size_of::<ffi::RxcHostResult>() as u32,
             std::mem::size_of::<ffi::RxcHostRecord>() as u32,
+            std::mem::size_of::<ffi::RxcHostRepair>() as u32,
         ];
         if v != ffi::RXC_HOST_ABI_VERSION || c != rust {
             return Err(ComposeError::Layout { c, rust });
@@ -170,7 +226,6 @@ mod linked {
             root_kind: RootKind,
             root: &[u8],
             session: u64,
-            refuse_torn: bool,
         ) -> Result<(Self, Info), ComposeError> {
             layout()?;
             use std::os::unix::ffi::OsStrExt;
@@ -178,11 +233,6 @@ mod linked {
                 .map_err(|_| ComposeError::Arg("dir holds a NUL byte".into()))?;
             let mut h = std::ptr::null_mut();
             let mut info = Info::default();
-            let flags = if refuse_torn {
-                ffi::RXC_HOST_OPEN_REFUSE_TORN
-            } else {
-                0
-            };
             // SAFETY: valid C string, root slice, out pointers.
             let rc = unsafe {
                 ffi::rxc_host_open(
@@ -191,7 +241,7 @@ mod linked {
                     root.as_ptr(),
                     root.len(),
                     session,
-                    flags,
+                    0,
                     &mut h,
                     &mut info,
                 )
@@ -304,6 +354,72 @@ mod linked {
             check(rc, i.open_rc)?;
             Ok(i)
         }
+
+        /// Append one host record through the composition's Cortex writer
+        /// (between runs). `links` name related Cortex ids (0 = none); each
+        /// must exist. Returns the new record id.
+        pub fn note(
+            &mut self,
+            kind: NoteKind,
+            links: [u64; 4],
+            bytes: &[u8],
+        ) -> Result<u64, ComposeError> {
+            if bytes.is_empty() || bytes.len() > ffi::RXC_HOST_NOTE_MAX {
+                return Err(ComposeError::Arg(format!(
+                    "note of {} bytes (1..={})",
+                    bytes.len(),
+                    ffi::RXC_HOST_NOTE_MAX
+                )));
+            }
+            let mut id = 0u64;
+            // SAFETY: valid handle, 4 links, byte slice, out pointer.
+            let rc = unsafe {
+                ffi::rxc_host_note(
+                    self.h,
+                    kind as u32,
+                    links.as_ptr(),
+                    bytes.as_ptr(),
+                    bytes.len(),
+                    &mut id,
+                )
+            };
+            check(rc, 0)?;
+            Ok(id)
+        }
+
+        /// Operator repair of a refused home (no handle may be open on it).
+        /// `Ok` when nothing needed repair or the repair left a home that
+        /// opens (`opens == 1`), and also when the cut was recorded but the
+        /// composition still refuses (`repaired == 1, opens == 0`: the caller
+        /// must report it). `Err` when nothing was repaired.
+        pub fn recover(
+            dir: &Path,
+            root_kind: RootKind,
+            root: &[u8],
+        ) -> Result<Repair, ComposeError> {
+            layout()?;
+            use std::os::unix::ffi::OsStrExt;
+            let d = CString::new(dir.as_os_str().as_bytes())
+                .map_err(|_| ComposeError::Arg("dir holds a NUL byte".into()))?;
+            let mut r = Repair::default();
+            // SAFETY: valid C string, root slice, out pointer.
+            let rc = unsafe {
+                ffi::rxc_host_recover(
+                    d.as_ptr(),
+                    root_kind as u32,
+                    root.as_ptr(),
+                    root.len(),
+                    &mut r,
+                )
+            };
+            if rc == ffi::RXC_HOST_OK || (rc == ffi::RXC_HOST_E_REPLAY && r.repaired == 1) {
+                return Ok(r);
+            }
+            Err(ComposeError::Code {
+                code: rc,
+                detail: r.open_rc,
+            })
+        }
     }
 
     impl Drop for Compose {
@@ -318,13 +434,7 @@ mod linked {
 
 #[cfg(not(has_omega_compose))]
 impl Compose {
-    pub fn open(
-        _: &Path,
-        _: RootKind,
-        _: &[u8],
-        _: u64,
-        _: bool,
-    ) -> Result<(Self, Info), ComposeError> {
+    pub fn open(_: &Path, _: RootKind, _: &[u8], _: u64) -> Result<(Self, Info), ComposeError> {
         Err(ComposeError::Unavailable)
     }
     pub fn register_skill<F>(
@@ -360,6 +470,12 @@ impl Compose {
     pub fn info(&mut self) -> Result<Info, ComposeError> {
         Err(ComposeError::Unavailable)
     }
+    pub fn note(&mut self, _: NoteKind, _: [u64; 4], _: &[u8]) -> Result<u64, ComposeError> {
+        Err(ComposeError::Unavailable)
+    }
+    pub fn recover(_: &Path, _: RootKind, _: &[u8]) -> Result<Repair, ComposeError> {
+        Err(ComposeError::Unavailable)
+    }
 }
 
 #[cfg(test)]
@@ -370,7 +486,7 @@ mod tests {
     fn stub_or_linked_is_reported() {
         let dir =
             std::env::temp_dir().join(format!("aien-omega-compose-unit-{}", std::process::id()));
-        let r = Compose::open(&dir, RootKind::Provisioned, b"unit", 1, true);
+        let r = Compose::open(&dir, RootKind::Provisioned, b"unit", 1);
         match &r {
             Ok(_) => {
                 if !LINKED {

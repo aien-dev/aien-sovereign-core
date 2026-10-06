@@ -2,6 +2,7 @@
 mod client;
 mod commands;
 pub mod compaction;
+mod compose;
 mod context7;
 pub mod cortex;
 mod crumbs;
@@ -54,6 +55,10 @@ async fn main() {
         }
         if args[1] == "--stop" || args[1] == "stop" {
             commands::handle_stop_command().await;
+            return;
+        }
+        if args[1] == "compose" {
+            compose::handle_compose_command(&args[2..]).await;
             return;
         }
         if args[1] == "--status" || args[1] == "status" {

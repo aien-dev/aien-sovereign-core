@@ -1,10 +1,11 @@
-//! NEXT-PHASE-1 cut 1b: RunComposeTask through omega COMPOSITION-2.
+//! NEXT-PHASE-1 cut 1b + 2: RunComposeTask, ComposeNote, ComposeRecall and
+//! RecoverComposeHome through omega COMPOSITION-2.
 //!
 //! With librx_compose.a linked (aien-omega-compose built with
 //! AIEN_OMEGA_COMPOSE_DIR, see its README) these run the real composition;
 //! in a stub build they check that the bridge reports the missing library.
-use aien_runtime::control::{ComposeTaskReport, ControlResponse};
-use aien_runtime::spine::{ComposeBridge, ComposeProposer};
+use aien_runtime::control::{ComposeRecallReport, ComposeTaskReport, ControlResponse};
+use aien_runtime::spine::{parse_file_proposal, ComposeBridge, ComposeProposer};
 use std::sync::Arc;
 
 fn proposer() -> ComposeProposer {
@@ -18,6 +19,13 @@ fn report(r: ControlResponse) -> ComposeTaskReport {
     match r {
         ControlResponse::ComposeTaskResult(r) => *r,
         other => panic!("expected ComposeTaskResult, got {other:?}"),
+    }
+}
+
+fn recalled(r: ControlResponse) -> ComposeRecallReport {
+    match r {
+        ControlResponse::ComposeRecalled(r) => *r,
+        other => panic!("expected ComposeRecalled, got {other:?}"),
     }
 }
 
@@ -74,6 +82,28 @@ fn compose_task_commits_and_survives_restart() {
         Some("NOTES.md\nconstraint: keep main green\n")
     );
     assert_eq!(r1.machine_id.len(), 64);
+    assert_eq!(r1.proposal_path.as_deref(), Some("NOTES.md"));
+    assert_eq!(
+        r1.proposal_content_sha256.as_deref(),
+        Some(aien_omega_compose::hex(
+            &<sha2::Sha256 as sha2::Digest>::digest(b"constraint: keep main green\n")
+        ))
+        .as_deref()
+    );
+    let c = match bridge.note("constraint", "keep main green", &[]) {
+        ControlResponse::ComposeNoted(n) => n,
+        other => panic!("note: {other:?}"),
+    };
+    assert!(c.id > r1.cx_promotion);
+    assert!(matches!(
+        bridge.note("effect", "x", &[1 << 40]),
+        ControlResponse::Error(_)
+    ));
+    assert!(matches!(
+        bridge.note("rumour", "x", &[]),
+        ControlResponse::Error(_)
+    ));
+    let before = recalled(bridge.recall(&[r1.cx_promotion], Some(c.id)));
     let cited = [
         r1.cx_goal,
         r1.cx_candidates[0],
@@ -102,6 +132,21 @@ fn compose_task_commits_and_survives_restart() {
         "same AienMachineId across restart"
     );
     assert!(r2.cx_evidence > r1.cx_evidence);
+    let after = recalled(bridge.recall(&[r1.cx_promotion], Some(c.id)));
+    assert_eq!(after.machine_id, before.machine_id);
+    assert_eq!(
+        after.prefix_digest, before.prefix_digest,
+        "records 1..=S1 unchanged"
+    );
+    assert_eq!(after.cited, before.cited);
+    let k = after
+        .host
+        .iter()
+        .find(|h| h.id == c.id)
+        .expect("constraint recalled after restart");
+    assert_eq!(k.note.as_deref(), Some("constraint"));
+    assert_eq!(k.text.as_deref(), Some("keep main green"));
+    assert!(k.verified);
 
     // containment: nothing in the workspace changed (this cut executes no effect)
     assert_eq!(snapshot(&ws), ws_before);
@@ -141,4 +186,102 @@ fn bad_workspace_is_refused() {
         ControlResponse::Error(e) => assert!(e.contains("workspace"), "{e}"),
         other => panic!("expected Error, got {other:?}"),
     }
+}
+
+#[test]
+fn proposal_parsing_is_strict_and_deterministic() {
+    let p = parse_file_proposal("NOTES.md\nline one\n").unwrap();
+    assert_eq!(
+        (p.path.as_str(), p.content.as_str()),
+        ("NOTES.md", "line one\n")
+    );
+    let p = parse_file_proposal(
+        "Sure! Here it is.\n\nPath: `docs/plan.txt`\n```\nstep 1\nstep 2\n```\nThanks",
+    )
+    .unwrap();
+    assert_eq!(
+        (p.path.as_str(), p.content.as_str()),
+        ("docs/plan.txt", "step 1\nstep 2\n")
+    );
+    assert!(parse_file_proposal("Sure, I can help with that!").is_none());
+    assert!(parse_file_proposal("/etc/passwd\nroot\n").is_none());
+    assert!(parse_file_proposal("../escape.txt\nx\n").is_none());
+    assert!(parse_file_proposal("NOTES.md\n\n   \n").is_none());
+}
+
+#[test]
+fn unparseable_proposal_fails_the_aegis_contract() {
+    if !aien_omega_compose::LINKED {
+        return;
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let ws = tmp.path().join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    let bridge = ComposeBridge::new(
+        tmp.path().join("compose"),
+        Arc::new(|_: &str| Ok("Sure, I can help with that!".to_string())),
+        "test:chatty",
+    );
+    let r = report(bridge.run_task("goal", ws.to_str().unwrap()));
+    assert!(!r.committed, "{r:?}");
+    assert_eq!(r.aegis_pass_mask & 1, 0);
+    assert_eq!(r.proposal_path, None);
+}
+
+#[test]
+fn torn_home_is_refused_by_name_then_recovered() {
+    if !aien_omega_compose::LINKED {
+        return;
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().join("compose");
+    let ws = tmp.path().join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    let bridge = ComposeBridge::new(home.clone(), proposer(), "test");
+    let r1 = report(bridge.run_task("goal", ws.to_str().unwrap()));
+    assert!(r1.committed);
+    let all = recalled(bridge.recall(&[], Some(r1.cx_promotion)));
+    drop(bridge);
+    let cx = home.join("cortex.cx");
+    let len = std::fs::metadata(&cx).unwrap().len();
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&cx)
+        .unwrap()
+        .set_len(len - 5)
+        .unwrap();
+
+    let bridge = ComposeBridge::new(home.clone(), proposer(), "test");
+    for _ in 0..2 {
+        match bridge.note("constraint", "x", &[]) {
+            ControlResponse::Error(e) => {
+                assert!(e.contains("E_TORN") && e.contains("compose recover"), "{e}")
+            }
+            other => panic!("torn home must be refused, got {other:?}"),
+        }
+        assert_eq!(
+            std::fs::metadata(&cx).unwrap().len(),
+            len - 5,
+            "refusal wrote"
+        );
+    }
+    let rep = match bridge.recover() {
+        ControlResponse::ComposeRecovered(r) => *r,
+        other => panic!("recover: {other:?}"),
+    };
+    assert!(rep.repaired && rep.tail_torn && rep.opens, "{rep:?}");
+    assert_eq!((rep.cause, rep.cut_hi), (-8, len - 5));
+    assert!(rep.dropped_records >= 1 && rep.repair_record == rep.records_kept + 1);
+    let after = recalled(bridge.recall(&[], Some(r1.cx_promotion)));
+    assert_eq!(
+        after.prefix_digest, all.prefix_digest,
+        "old records unchanged"
+    );
+    assert_eq!(after.machine_id, all.machine_id);
+    assert!(after
+        .host
+        .iter()
+        .any(|h| h.id == rep.repair_record && h.note.as_deref() == Some("repair_tail")));
+    let r2 = report(bridge.run_task("goal after recover", ws.to_str().unwrap()));
+    assert!(r2.committed);
 }

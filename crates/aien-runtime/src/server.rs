@@ -254,6 +254,9 @@ async fn submit_turn(
     Ok((tokenizer, events))
 }
 
+/// A compose command, run on a blocking thread against the bridge.
+type ComposeJob = Box<dyn FnOnce(&ComposeBridge) -> ControlResponse + Send>;
+
 /// NEXT-PHASE-1: the whole turn as one string (no streaming), for the compose
 /// "model" Skill. Same submission path as `StreamTurn`; fails after `limit`.
 async fn generate_text(
@@ -436,13 +439,38 @@ async fn handle_connection(
             continue;
         }
 
-        if let ControlCommand::RunComposeTask { goal, workspace } = envelope.command {
+        let compose_job: Option<ComposeJob> = match envelope.command {
+            ControlCommand::RunComposeTask {
+                ref goal,
+                ref workspace,
+            } => {
+                let (g, w) = (goal.clone(), workspace.clone());
+                Some(Box::new(move |b: &ComposeBridge| b.run_task(&g, &w)))
+            }
+            ControlCommand::ComposeNote {
+                ref kind,
+                ref text,
+                ref links,
+            } => {
+                let (k, t, l) = (kind.clone(), text.clone(), links.clone());
+                Some(Box::new(move |b: &ComposeBridge| b.note(&k, &t, &l)))
+            }
+            ControlCommand::ComposeRecall { ref ids, prefix } => {
+                let i = ids.clone();
+                Some(Box::new(move |b: &ComposeBridge| b.recall(&i, prefix)))
+            }
+            ControlCommand::RecoverComposeHome => Some(Box::new(|b: &ComposeBridge| b.recover())),
+            _ => None,
+        };
+        if let Some(job) = compose_job {
             let response = match compose.clone() {
-                Some(bridge) => tokio::task::spawn_blocking(move || bridge.run_task(&goal, &workspace))
+                Some(bridge) => tokio::task::spawn_blocking(move || job(&bridge))
                     .await
-                    .unwrap_or_else(|e| ControlResponse::Error(format!("compose task failed: {e}"))),
+                    .unwrap_or_else(|e| {
+                        ControlResponse::Error(format!("compose command failed: {e}"))
+                    }),
                 None => ControlResponse::Error(
-                    "RunComposeTask: no compose home (set AIEN_COMPOSE_DIR or AIEN_RUNTIME_STATE_DIR)"
+                    "compose: no compose home (set AIEN_COMPOSE_DIR or AIEN_RUNTIME_STATE_DIR)"
                         .into(),
                 ),
             };

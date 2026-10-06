@@ -68,6 +68,26 @@ pub enum ControlCommand {
         goal: String,
         workspace: String,
     },
+    /// NEXT-PHASE-1 cut 2: append one operator record (`kind` = "constraint",
+    /// "authorization" or "effect") to the composition's Cortex journal through
+    /// its own writer. `links` name related Cortex ids (each must exist).
+    ComposeNote {
+        kind: String,
+        text: String,
+        links: Vec<u64>,
+    },
+    /// NEXT-PHASE-1 cut 2: recall every host record (constraints, authorizations,
+    /// effects, repair records) plus the records named in `ids`, each digest
+    /// re-checked; `prefix` (records 1..=prefix) gets a digest over their digests
+    /// so a restart can be compared byte for byte.
+    ComposeRecall {
+        ids: Vec<u64>,
+        prefix: Option<u64>,
+    },
+    /// NEXT-PHASE-1 cut 2: operator repair of a compose home that refuses to open
+    /// (torn journal tail, or a journal behind its J-Space anchor). Closes this
+    /// process's handle first; the cut is recorded in the journal.
+    RecoverComposeHome,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -111,6 +131,12 @@ pub enum ControlResponse {
     },
     /// Result record of `RunComposeTask`.
     ComposeTaskResult(Box<ComposeTaskReport>),
+    /// Result of `ComposeNote`.
+    ComposeNoted(ComposeNoteReport),
+    /// Result of `ComposeRecall`.
+    ComposeRecalled(Box<ComposeRecallReport>),
+    /// Result of `RecoverComposeHome`.
+    ComposeRecovered(Box<ComposeRecoverReport>),
     Error(String),
 }
 
@@ -244,6 +270,78 @@ pub struct ComposeTaskReport {
     /// The committed proposal (the model Skill's output) and its sha256.
     pub proposal: Option<String>,
     pub proposal_sha256: Option<String>,
+    /// The proposal parsed as one file change (AEGIS contract): relative path
+    /// and the sha256 of the new content.
+    pub proposal_path: Option<String>,
+    pub proposal_content_sha256: Option<String>,
     /// "model" when the Skill ran inference, or the stub label.
     pub proposer: String,
+}
+
+/// The record `ComposeNote` appended.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ComposeNoteReport {
+    pub machine_id: String,
+    pub id: u64,
+    pub kind: String,
+    /// Cortex record digest (hex), re-read after the append.
+    pub digest: String,
+    /// sha256 (hex) of the note text.
+    pub text_sha256: String,
+    pub links: Vec<u64>,
+}
+
+/// One Cortex record as recalled (digest re-checked by omega).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ComposeRecordView {
+    pub id: u64,
+    pub cls: u32,
+    pub kind: u32,
+    pub subject: u64,
+    pub tag: u64,
+    pub links: Vec<u64>,
+    pub digest: String,
+    pub verified: bool,
+    /// "constraint", "authorization", "effect", "repair_tail" for host records.
+    pub note: Option<String>,
+    /// Host note text (sha256-checked), when the record is a note.
+    pub text: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ComposeRecallReport {
+    pub compose_dir: String,
+    pub machine_id: String,
+    pub records_total: u64,
+    /// Every host record (subject 0), oldest first.
+    pub host: Vec<ComposeRecordView>,
+    /// The records asked for by id (absent ids are listed in `missing`).
+    pub cited: Vec<ComposeRecordView>,
+    pub missing: Vec<u64>,
+    /// sha256 over the digests of records 1..=prefix (hex), when asked.
+    pub prefix: Option<u64>,
+    pub prefix_digest: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ComposeRecoverReport {
+    pub compose_dir: String,
+    pub repaired: bool,
+    pub tail_torn: bool,
+    /// CX_ERR_TORN (-8), RX_ERR_REPLAY (-21), 0 = nothing to repair.
+    pub cause: i32,
+    pub cut_lo: u64,
+    pub cut_hi: u64,
+    pub records_kept: u64,
+    pub dropped_records: u64,
+    pub anchor_records: u64,
+    /// Cortex id of the repair record (0 = none).
+    pub repair_record: u64,
+    pub cut_bytes_kept: u64,
+    pub cut_sha256: String,
+    /// The composition opened after the repair (trial open).
+    pub opens: bool,
+    pub open_rc: i32,
+    pub rolled_back: u32,
+    pub recovered_completed: u32,
 }
