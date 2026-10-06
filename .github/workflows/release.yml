@@ -46,6 +46,9 @@ jobs:
           rustup toolchain install "$(sed -n 's/^channel *= *"\(.*\)"/\1/p' rust-toolchain.toml)" --profile minimal
           rustc --version
 
+      - name: Release gate (candidate named, omega.lock equals the candidate's omega commit)
+        run: scripts/check-release-candidate.sh
+
       - name: Read pins (omega.lock, then omega physics.lock)
         id: pins
         run: echo "omega=$(tr -d '[:space:]' < omega.lock)" >> "$GITHUB_OUTPUT"
@@ -89,8 +92,6 @@ jobs:
           scripts/repro-build.sh -p aien-cli
 
       - name: Package Release Assets (reproducible tarball, release.toml inside)
-        env:
-          AIEN_CANDIDATE_ID: ${{ vars.AIEN_CANDIDATE_ID }}
         run: |
           bash scripts/package-release.sh "${{ matrix.artifact_name }}"
           AIEN_SHA="$(sha256sum target/release/aien-cli 2>/dev/null || shasum -a 256 target/release/aien-cli)"
@@ -126,14 +127,14 @@ jobs:
           sha256sum sovereign-* aien-cli-digests.txt > SHA256SUMS.txt
           cat SHA256SUMS.txt
 
-      - name: Sign Checksums (when the release key secret is configured)
+      - name: Sign Checksums (fails the job when the release key secret is absent)
         working-directory: release-artifacts
         env:
           AIEN_RELEASE_SIGNING_KEY: ${{ secrets.AIEN_RELEASE_SIGNING_KEY }}
         run: |
           if [ -z "$AIEN_RELEASE_SIGNING_KEY" ]; then
-            echo "No signing key secret; release will carry checksums only. Sign by hand per docs/release/RELEASE_SIGNING.md and upload SHA256SUMS.txt.sig."
-            exit 0
+            echo "AIEN_RELEASE_SIGNING_KEY secret is not configured. Refusing to publish an unsigned release." >&2
+            exit 1
           fi
           umask 077
           printf "%s\n" "$AIEN_RELEASE_SIGNING_KEY" > ../release_key
@@ -172,7 +173,8 @@ jobs:
 
           cd release-artifacts
           SIG=""
-          [ ! -f SHA256SUMS.txt.sig ] || SIG="SHA256SUMS.txt.sig"
+          [ -f SHA256SUMS.txt.sig ] || { echo "SHA256SUMS.txt.sig is missing; refusing to publish" >&2; exit 1; }
+          SIG="SHA256SUMS.txt.sig"
           gh release create "$TAG" sovereign-* aien-cli-digests.txt SHA256SUMS.txt $SIG \
             --title "AIEN Sovereign Core ${TAG}" \
             --notes-file ../"$NOTES_FILE" \
