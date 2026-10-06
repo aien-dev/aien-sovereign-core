@@ -77,14 +77,14 @@
         }
       ],
       "children_root": "sha256:009593670dc7accc2b442a6a8c6f3b848ab73de4d6e61df57401bf4bf00b294a",
-      "compiled_at": "2026-10-06T23:04:15Z",
+      "compiled_at": "2026-10-06T23:23:17Z",
       "compiler": "crumb-compile/1",
-      "digest": "sha256:5fcc1a2013d7d54bf2fc775cb6872255c96ca2de9a53c6e60ed26fec29a38e8c",
+      "digest": "sha256:191a914b28362343c05b045c97b349d02e39c399362c594129a36f1785a4b8d0",
       "evidence_files": 80,
       "evidence_root": "sha256:8920c1b8b9d7bddb4f92b61c3855179967991bed932999d2ba8cc98ef32f7837",
-      "files": 935,
-      "generated_at_commit": "5b9ccdf99848b455930f364705cd7464d556335c",
-      "source_tree": "sha256:984a6f9788c923cd57aad1577e5a870b6ba2c7a9e7a6256c2e3336c4c948f86f"
+      "files": 938,
+      "generated_at_commit": "a20c58cf0c4d5ecfa8f08f4adbab7eea206b3fad",
+      "source_tree": "sha256:6a00f8afe7c43fd581160356c587e46d7678ce0b73639ce6b44c631383d6203c"
     }
   },
   "history": [],
