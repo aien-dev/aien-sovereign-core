@@ -7,7 +7,7 @@
 use aien_runtime::control::{ComposeRecallReport, ComposeTaskReport, ControlResponse};
 use aien_runtime::spine::{
     check_file_proposal, parse_file_proposal, propose_with_retries, ComposeBridge, ComposeProposer,
-    Generation, COMPOSE_MAX_ATTEMPTS,
+    Generation, COMPOSE_ATTEMPT_BUDGET, COMPOSE_MAX_ATTEMPTS, COMPOSE_SKILL_BUDGET,
 };
 use std::sync::Arc;
 
@@ -318,7 +318,13 @@ fn retry_is_capped_and_recorded() {
             tokens: 2,
         })
     };
-    let (out, a) = propose_with_retries(&chatty, "base", budget, COMPOSE_MAX_ATTEMPTS);
+    let (out, a) = propose_with_retries(
+        &chatty,
+        "base",
+        budget,
+        COMPOSE_ATTEMPT_BUDGET,
+        COMPOSE_MAX_ATTEMPTS,
+    );
     assert!(out.unwrap_err().contains("no filename line"));
     assert_eq!(calls.load(Ordering::SeqCst), COMPOSE_MAX_ATTEMPTS);
     assert_eq!(a.len(), 3);
@@ -345,7 +351,13 @@ ok
             tokens: 3,
         })
     };
-    let (out, a) = propose_with_retries(&second, "base", budget, COMPOSE_MAX_ATTEMPTS);
+    let (out, a) = propose_with_retries(
+        &second,
+        "base",
+        budget,
+        COMPOSE_ATTEMPT_BUDGET,
+        COMPOSE_MAX_ATTEMPTS,
+    );
     assert_eq!(
         out.unwrap(),
         "filename: a.txt
@@ -366,7 +378,7 @@ ok
         ) && p[1].contains("previous answer was refused")
     );
     drop(p);
-    // budget: attempt 2 does not start when less time is left than attempt 1 took
+    // budget: attempt 2 does not start when less than the per-attempt budget is left
     let slow = |_: &str, _: Duration| {
         std::thread::sleep(Duration::from_millis(30));
         Ok(Generation {
@@ -378,6 +390,7 @@ ok
         &slow,
         "base",
         Duration::from_millis(40),
+        Duration::from_millis(30),
         COMPOSE_MAX_ATTEMPTS,
     );
     assert_eq!(a.len(), 1);
@@ -385,8 +398,46 @@ ok
     // model errors are recorded, not retried past the cap
     let err =
         |_: &str, _: Duration| Err::<Generation, _>("model proposal exceeded 25000 ms".to_string());
-    let (_, a) = propose_with_retries(&err, "base", budget, COMPOSE_MAX_ATTEMPTS);
+    let (_, a) = propose_with_retries(
+        &err,
+        "base",
+        budget,
+        COMPOSE_ATTEMPT_BUDGET,
+        COMPOSE_MAX_ATTEMPTS,
+    );
     assert!(a.len() <= 3 && a.iter().all(|x| x.outcome == "timeout"));
+}
+
+/// ACCEPTANCE-v3 Section 3b at 1/100 scale: a slow (cold) attempt 1 of 16.1 s
+/// no longer blocks attempt 2; attempt 2 of 11.6 s leaves too little for 3.
+#[test]
+fn measured_attempt_budget_admits_a_second_attempt() {
+    use std::time::Duration;
+    assert!(COMPOSE_SKILL_BUDGET < Duration::from_secs(30));
+    assert_eq!(COMPOSE_SKILL_BUDGET, Duration::from_secs(29));
+    assert_eq!(COMPOSE_ATTEMPT_BUDGET, Duration::from_millis(12_000));
+    // 2 839 + 896 + 47 x 166.6 + 60 ms, the measured full retry attempt
+    let measured: [f64; 4] = [2_839.0, 896.0, 47.0 * 166.6, 60.0];
+    assert!(measured.iter().sum::<f64>() <= COMPOSE_ATTEMPT_BUDGET.as_millis() as f64);
+    let n = std::sync::atomic::AtomicU32::new(0);
+    let cold_then_warm = |_: &str, _: Duration| {
+        let k = n.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        std::thread::sleep(Duration::from_millis(if k == 0 { 161 } else { 116 }));
+        Ok(Generation {
+            text: "Goal: echo".into(),
+            tokens: 48,
+        })
+    };
+    let (out, a) = propose_with_retries(
+        &cold_then_warm,
+        "base",
+        COMPOSE_SKILL_BUDGET / 100,
+        COMPOSE_ATTEMPT_BUDGET / 100,
+        COMPOSE_MAX_ATTEMPTS,
+    );
+    assert_eq!(a.len(), 2, "{a:?}");
+    let reason = out.unwrap_err();
+    assert!(reason.contains("no attempt 3") && reason.contains("120 ms per-attempt budget"));
 }
 
 #[test]

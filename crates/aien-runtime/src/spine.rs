@@ -696,9 +696,14 @@ pub fn parse_file_proposal(text: &str) -> Option<FileProposal> {
 
 /// At most this many proposals per task (ACCEPTANCE-v2 Section 3b).
 pub const COMPOSE_MAX_ATTEMPTS: u32 = 3;
-/// Wall budget for all attempts of one task: under rx_compose_run's 30 s
-/// quiescence wait, which is not raised (ACCEPTANCE-v2 Section 4).
-pub const COMPOSE_SKILL_BUDGET: std::time::Duration = std::time::Duration::from_secs(25);
+/// Wall budget for all attempts of one task: rx_compose_run's 30 s
+/// quiescence wait (not raised) less a 1 s margin (ACCEPTANCE-v3 Section 3b).
+pub const COMPOSE_SKILL_BUDGET: std::time::Duration = std::time::Duration::from_secs(29);
+/// Time one full attempt needs, from the v3 measurement: 173-token retry
+/// prompt prefill (2 839 + 896 ms) + 47 decode steps x 166.6 ms + 60 ms
+/// = 11 625 ms, rounded up (ACCEPTANCE-v3 Section 3b). Attempt k > 1 starts
+/// only if at least this much budget is left.
+pub const COMPOSE_ATTEMPT_BUDGET: std::time::Duration = std::time::Duration::from_millis(12_000);
 
 /// The fixed proposal template of the production RunComposeTask path.
 pub fn proposal_prompt(goal: &str, workspace: &str, entries: &str) -> String {
@@ -721,26 +726,26 @@ pub fn retry_prompt(base: &str, reason: &str) -> String {
 
 /// Runs up to `max_attempts` proposals within `budget`: attempt 1 always
 /// starts; attempt k > 1 starts only if the remaining budget is at least
-/// the measured duration of attempt k-1, and gets the remaining budget as
-/// its limit. Returns the first reply that passes `check_file_proposal`
-/// (or the last refusal reason) and every attempt made.
+/// `attempt_budget` (the measured cost of one full attempt), and gets the
+/// remaining budget as its limit. Returns the first reply that passes
+/// `check_file_proposal` (or the last refusal reason) and every attempt made.
 pub fn propose_with_retries(
     proposer: &(dyn Fn(&str, std::time::Duration) -> Result<Generation, String> + Send + Sync),
     base: &str,
     budget: std::time::Duration,
+    attempt_budget: std::time::Duration,
     max_attempts: u32,
 ) -> (Result<String, String>, Vec<ProposalAttempt>) {
     let start = std::time::Instant::now();
     let mut attempts: Vec<ProposalAttempt> = Vec::new();
     let mut last_reason = "no attempt made".to_string();
-    let mut last_ms: u64 = 0;
+    let need_ms = (attempt_budget.as_millis() as u64).max(1);
     for k in 1..=max_attempts {
         let remaining = budget.saturating_sub(start.elapsed());
-        if k > 1 && (remaining.as_millis() as u64) < last_ms.max(1) {
+        if k > 1 && (remaining.as_millis() as u64) < need_ms {
             last_reason = format!(
-                "{last_reason}; no attempt {k}: {} ms left < {last_ms} ms measured for attempt {}",
-                remaining.as_millis(),
-                k - 1
+                "{last_reason}; no attempt {k}: {} ms left < {need_ms} ms per-attempt budget",
+                remaining.as_millis()
             );
             break;
         }
@@ -751,7 +756,7 @@ pub fn propose_with_retries(
         };
         let t0 = std::time::Instant::now();
         let out = proposer(&prompt, remaining);
-        last_ms = t0.elapsed().as_millis() as u64;
+        let last_ms = t0.elapsed().as_millis() as u64;
         let mut a = ProposalAttempt {
             attempt: k,
             ms: last_ms,
@@ -872,11 +877,13 @@ impl ComposeBridge {
         compose
             .register_skill(COMPOSE_MODEL_SKILL, None, 10, move |task| {
                 let prompt = pr.lock().get(&task).cloned()?;
-                // Fixed template + bounded automatic retry (ACCEPTANCE-v2 3a, 3b).
+                // Fixed template + bounded automatic retry (ACCEPTANCE-v2 3a, 3b),
+                // measured per-attempt budget (ACCEPTANCE-v3 3b).
                 let (out, attempts) = propose_with_retries(
                     proposer.as_ref(),
                     &prompt,
                     COMPOSE_SKILL_BUDGET,
+                    COMPOSE_ATTEMPT_BUDGET,
                     COMPOSE_MAX_ATTEMPTS,
                 );
                 let h = out.as_ref().ok().map(|t| proposal_handle(t));

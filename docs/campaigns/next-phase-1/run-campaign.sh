@@ -80,9 +80,15 @@ EID=$(jq -r '.effect.id // empty' "$R/steps/S5.json")
 IID=$(jq -r '.effect.id // empty' "$R/steps/S2.json")
 RECEIPTS=$(jq -r '[.receipt.path] | .[]' "$R/steps/S2.json" "$R/steps/S4.json" "$R/steps/S5.json" | paste -sd,)
 run_step S6 explain explain --report "$R/s3-report.json" --cite "$CID,$IID,$AID,$EID" --receipts "$RECEIPTS"
-CITED=$(jq -r '[.cited[].id] | map(tostring) | join(",")' "$R/steps/S6.json")
-NREC=$(jq -r '[.cited[].id] | max' "$R/steps/S6.json")
-"$BIN" compose recall --ids "$CITED" --prefix "$NREC" >"$R/steps/pre-restart-recall.json" 2>&1
+CITED=$(jq -r '[(.cited // [])[].id] | map(tostring) | join(",")' "$R/steps/S6.json" 2>/dev/null)
+NREC=$(jq -r '[(.cited // [])[].id] | max // empty' "$R/steps/S6.json" 2>/dev/null)
+# ACCEPTANCE-v3 3d: S8 (and this pre-restart recall) runs even when S6 cited
+# nothing; without --ids/--prefix it still returns the host records, so the
+# S1 constraint is recalled on its own.
+RECALL_ARGS=()
+[ -n "$CITED" ] && RECALL_ARGS+=(--ids "$CITED")
+[ -n "$NREC" ] && RECALL_ARGS+=(--prefix "$NREC")
+"$BIN" compose recall "${RECALL_ARGS[@]}" >"$R/steps/pre-restart-recall.json" 2>&1
 HWM1=$(vmhwm "$PID1")
 MIDF1=$(sha256sum "$R/compose/machine.id" | cut -d" " -f1)
 
@@ -100,7 +106,7 @@ STEPS=$(jq -c --argjson ms $((t1 - t0)) --argjson bms $(( (u1 - u0) * 10 )) \
   '. + [{step:"S7", name:"restart", rc:$rc, wall_ms:$ms, boottime_ms:$bms,
          ok:($rc == 0 and $e == "exited" and $p1 != $p2), old_pid:$p1, old_process:$e, new_pid:$p2}]' <<<"$STEPS")
 
-run_step S8 recall recall --ids "$CITED" --prefix "$NREC"
+run_step S8 recall recall "${RECALL_ARGS[@]}"
 HWM2=$(vmhwm "$PID2")
 MIDF2=$(sha256sum "$R/compose/machine.id" | cut -d" " -f1)
 "$BIN" compose shutdown >"$R/steps/final-shutdown.json" 2>&1
