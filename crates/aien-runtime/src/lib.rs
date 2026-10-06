@@ -3,6 +3,7 @@
 pub mod client;
 pub mod context;
 pub mod control;
+pub mod effects;
 pub mod rsi;
 pub mod sequence;
 pub mod server;

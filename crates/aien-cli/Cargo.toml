@@ -26,5 +26,9 @@ aien-kv-cache = { path = "../aien-kv-cache" }
 aien-scheduler = { path = "../aien-scheduler" }
 aien-runtime = { path = "../aien-runtime" }
 
+[features]
+# NEXT-PHASE-2 fault harness only: named hold points in `aien compose execute`.
+fault-hold = []
+
 [dev-dependencies]
 tempfile = "3.10"

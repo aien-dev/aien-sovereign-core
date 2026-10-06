@@ -177,6 +177,14 @@ impl AienRuntimeServer {
                 None
             }
         };
+        // NEXT-PHASE-2 (ACCEPTANCE-v2 2.4): settle effects a previous process
+        // left open, before serving anything. Reads the world, never re-runs.
+        if let Some(b) = compose.clone() {
+            let line = tokio::task::spawn_blocking(move || crate::effects::reconcile_at_start(&b))
+                .await
+                .unwrap_or_else(|e| format!("Reconcile: failed: {e}"));
+            println!("{line}");
+        }
 
         // Connection accept loop
         loop {
@@ -558,13 +566,67 @@ async fn handle_connection(
                 ref links,
             } => {
                 let (k, t, l) = (kind.clone(), text.clone(), links.clone());
-                Some(Box::new(move |b: &ComposeBridge| b.note(&k, &t, &l)))
+                // NEXT-PHASE-2: gated effect/control records cannot be forged here.
+                Some(Box::new(
+                    move |b: &ComposeBridge| match crate::effects::check_reserved_note(&k, &t) {
+                        Ok(()) => b.note(&k, &t, &l),
+                        Err(e) => ControlResponse::Error(e),
+                    },
+                ))
             }
             ControlCommand::ComposeRecall { ref ids, prefix } => {
                 let i = ids.clone();
                 Some(Box::new(move |b: &ComposeBridge| b.recall(&i, prefix)))
             }
             ControlCommand::RecoverComposeHome => Some(Box::new(|b: &ComposeBridge| b.recover())),
+            // NEXT-PHASE-2: effect intents, acks, reconcile, operator control.
+            ControlCommand::ComposeEffectIntent {
+                authorization,
+                ref proposal_sha256,
+                ref path,
+                ref target,
+                ref content_sha256,
+                executor_pid,
+                executor_start,
+            } => {
+                let req = crate::effects::IntentRequest {
+                    authorization,
+                    proposal_sha256: proposal_sha256.clone(),
+                    path: path.clone(),
+                    target: target.clone(),
+                    content_sha256: content_sha256.clone(),
+                    executor_pid,
+                    executor_start,
+                };
+                Some(Box::new(move |b: &ComposeBridge| {
+                    crate::effects::open_intent(b, &req)
+                }))
+            }
+            ControlCommand::ComposeEffectAck {
+                intent,
+                ref reported,
+            } => {
+                let r = reported.clone();
+                Some(Box::new(move |b: &ComposeBridge| {
+                    crate::effects::ack(b, intent, &r)
+                }))
+            }
+            ControlCommand::ComposeReconcile { ref declare } => {
+                let d = declare.clone();
+                Some(Box::new(move |b: &ComposeBridge| {
+                    crate::effects::reconcile(b, d.as_ref(), "reconcile")
+                }))
+            }
+            ControlCommand::ComposeControl {
+                ref action,
+                ref approver,
+                authorization,
+            } => {
+                let (a, p) = (action.clone(), approver.clone());
+                Some(Box::new(move |b: &ComposeBridge| {
+                    crate::effects::control(b, &a, &p, authorization)
+                }))
+            }
             _ => None,
         };
         if let Some(job) = compose_job {
