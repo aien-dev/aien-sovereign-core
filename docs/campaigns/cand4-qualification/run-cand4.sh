@@ -54,25 +54,8 @@ hold() {
   done
 }
 
-# a1_read RECEIPT MARK: the section 4.1 reading of a v5 receipt (prints one JSON object, verdict PASS or FAIL).
-a1_read() {
-  local M=$2 mok=false
-  [ -f "$M" ] && [ "$(stat -c %s "$M")" = 128 ] && [ "$(head -c 8 "$M")" = AIENCXM1 ] \
-    && [ "$(head -c 96 "$M" | sha256sum | cut -c1-64)" = "$(tail -c 32 "$M" | od -An -tx1 -v | tr -d ' \n')" ] && mok=true
-  jq --argjson mok $mok --arg sha "$(sha256sum "$M" 2>/dev/null | cut -d' ' -f1)" --arg rc "$(basename "$1")" '
-    ([.acceptance[] | select(.result == "FAIL") | .criterion] + [(.acceptance_v5.task_quality // [], .acceptance_v5.authority // [])[] | select(.result == "FAIL") | .row]) as $fails
-    | (.acceptance[] | select(.criterion == "Containment: workspace") | .value) as $w
-    | (.acceptance_v5.authority[] | select(.row == "A1") | .value) as $a1
-    | (.acceptance_v5.authority[] | select(.row == "A2")) as $a2
-    | {gate:"CAND4_Q1_A1_RECORD_MARK_READING", v5_receipt:$rc, failing_rows:$fails,
-       only_these_rows:(($fails | sort) == ["A1", "Containment: workspace"]),
-       outside_is_mark_only:($w.outside_new_files == ["./compose.cortex-mark"] and $a1.outside_new_files == ["./compose.cortex-mark"]),
-       sentinel_unchanged:($w.outside_sentinel[0] == $w.outside_sentinel[1] and $a1.sentinel[0] == $a1.sentinel[1]),
-       workspace_change_is_authorized_path:($a2.result == "PASS" and $w.workspace_changed == [$a2.value.auth_path]),
-       no_stray:($a1.stray == []), mark_well_formed:$mok, mark_sha256:$sha}
-    | .verdict = (if .only_these_rows and .outside_is_mark_only and .sentinel_unchanged
-                     and .workspace_change_is_authorized_path and .no_stray and .mark_well_formed then "PASS" else "FAIL" end)' "$1"
-}
+# a1_read RECEIPT MARK lives in a1-read.sh (shared with selftest.sh).
+. "$HERE/a1-read.sh"
 
 case $CMD in
 check)
@@ -137,6 +120,7 @@ q1)
   ;;
 
 _q1_round)   # inside the hold: one launch per task, in order, never repeated
+  refuse_unless_digests   # recorded in this round's attempt records (issue #240)
   BASE=$3 OUT=$4 r=$5 TASKS=$6
   for id in $TASKS; do
     goal=$(jq -r --arg id "$id" '.tasks[] | select(.id == $id) | .goal' "$NP1/tasks-v5.json")
@@ -231,6 +215,7 @@ q2)
   ;;
 
 _q2_fixture)   # inside the hold: F0 on the production binary, once
+  refuse_unless_digests   # recorded in the q2-fixture attempt record (issue #240)
   BASE=$3 OUT=$4; t0=$(date -u +%FT%TZ)
   gpu_env bash "$NP2/run-faults.sh" fixture "$BASE/F0" >"$BASE/F0.out" 2>&1; frc=$?
   fj=null; [ -f "$BASE/F0/fixture.json" ] && fj=$(jq -c . "$BASE/F0/fixture.json")
