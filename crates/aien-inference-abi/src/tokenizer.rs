@@ -1,9 +1,10 @@
 //! Pure Rust tokenizer and chat template formatter for the Llama model family
-//! (TinyLlama zephyr-style chat, Llama 3 instruct chat).
+//! (TinyLlama zephyr-style chat, Llama 3 instruct chat, ChatML as shipped by SmolLM2).
 //! Wraps Hugging Face tokenizers crate without Python runtime dependencies.
 
 use std::fmt;
 use std::path::Path;
+use std::sync::Arc;
 
 /// Loud error enum for tokenizer operations.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -36,7 +37,7 @@ impl std::error::Error for TokenizerError {}
 /// The chat layout a model was fine-tuned on. Selected from the model's own chat template
 /// text (no template engine): each variant renders the one layout that template produces
 /// for plain user/system/assistant turns ending in a generation prompt.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ChatTemplate {
     /// TinyLlama-Chat (zephyr): `<|user|>\n{content}</s>\n<|assistant|>\n`.
     Zephyr,
@@ -45,6 +46,95 @@ pub enum ChatTemplate {
     /// (the Hugging Face template's default "Cutting Knowledge Date / Today Date" block
     /// depends on the wall clock, so it is left out).
     Llama3,
+    /// ChatML exactly as the publisher's template renders it (SmolLM2-Instruct): per turn
+    /// `<|im_start|>{role}\n{content}<|im_end|>\n`, then `<|im_start|>assistant\n`. Contents
+    /// are kept verbatim and empty turns are kept (the template neither trims nor skips).
+    /// When the template carries a default system message and the first turn is not a
+    /// system turn, that message is rendered first as a system turn, as the template does.
+    /// No BOS is part of the text; the model's tokenizer decides whether `encode` adds one
+    /// (SmolLM2's `tokenizer.json` has no post-processor, so it adds none).
+    ChatMl {
+        /// The default system message read from the model's own template, if it has one.
+        default_system: Option<Arc<str>>,
+    },
+}
+
+/// The ChatML layouts this engine renders, as the exact Jinja text a model ships in
+/// `tokenizer_config.json` `chat_template` (the SmolLM2-Instruct template, and the same
+/// without its default system block). `{SYSTEM}` stands for the default system message
+/// (plain text: no quote, backslash, Jinja brace or ChatML marker). Any other ChatML
+/// template (tools, trimming, another generation prompt) is refused, not approximated.
+const CHATML_WITH_DEFAULT_SYSTEM: &str = "{% for message in messages %}{% if loop.first and messages[0]['role'] != 'system' %}{{ '<|im_start|>system\n{SYSTEM}<|im_end|>\n' }}{% endif %}{{'<|im_start|>' + message['role'] + '\n' + message['content'] + '<|im_end|>' + '\n'}}{% endfor %}{% if add_generation_prompt %}{{ '<|im_start|>assistant\n' }}{% endif %}";
+const CHATML_PLAIN: &str = "{% for message in messages %}{{'<|im_start|>' + message['role'] + '\n' + message['content'] + '<|im_end|>' + '\n'}}{% endfor %}{% if add_generation_prompt %}{{ '<|im_start|>assistant\n' }}{% endif %}";
+
+/// Matches a chat template text against the two ChatML layouts above. Returns the layout
+/// with its default system message (None for the plain layout), or a refusal.
+fn parse_chatml(template_text: &str) -> Result<ChatTemplate, TokenizerError> {
+    let text = template_text.trim();
+    if text == CHATML_PLAIN {
+        return Ok(ChatTemplate::ChatMl {
+            default_system: None,
+        });
+    }
+    let (head, tail) = CHATML_WITH_DEFAULT_SYSTEM
+        .split_once("{SYSTEM}")
+        .expect("placeholder in the ChatML layout");
+    let system = text
+        .strip_prefix(head)
+        .and_then(|rest| rest.strip_suffix(tail))
+        .filter(|s| {
+            !s.is_empty()
+                && !s.contains(['\'', '\\', '{', '}'])
+                && !s.contains("<|im_start|>")
+                && !s.contains("<|im_end|>")
+        });
+    match system {
+        Some(system) => Ok(ChatTemplate::ChatMl {
+            default_system: Some(Arc::from(system)),
+        }),
+        None => Err(TokenizerError::LoadError(
+            "unsupported ChatML chat template: only the plain ChatML layout (each turn \
+             <|im_start|>role, newline, content, <|im_end|>, newline; generation prompt \
+             <|im_start|>assistant and a newline), optionally with one plain-text default \
+             system message, is rendered; this template differs (tools, trimming or another \
+             layout)"
+                .to_string(),
+        )),
+    }
+}
+
+/// The publisher's ChatML rendering for `(role, content)` turns ending in a generation
+/// prompt (see [`ChatTemplate::ChatMl`]). Roles are normalized as for the other layouts.
+fn render_chatml(default_system: Option<&str>, turns: &[(&str, &str)]) -> String {
+    let role_of = |role: &str| match role.trim().to_ascii_lowercase().as_str() {
+        "system" => "system",
+        "assistant" => "assistant",
+        _ => "user",
+    };
+    let mut out = String::new();
+    if let (Some(system), Some((first_role, _))) = (default_system, turns.first()) {
+        if role_of(first_role) != "system" {
+            out.push_str(&format!("<|im_start|>system\n{system}<|im_end|>\n"));
+        }
+    }
+    for (role, content) in turns {
+        out.push_str(&format!(
+            "<|im_start|>{}\n{content}<|im_end|>\n",
+            role_of(role)
+        ));
+    }
+    if !ends_in_assistant(turns) {
+        out.push_str("<|im_start|>assistant\n");
+    }
+    out
+}
+
+/// True when the last turn is a non-empty assistant turn: generation then continues it
+/// instead of opening a new assistant turn.
+fn ends_in_assistant(turns: &[(&str, &str)]) -> bool {
+    turns.last().is_some_and(|(role, content)| {
+        role.trim().eq_ignore_ascii_case("assistant") && !content.trim().is_empty()
+    })
 }
 
 impl ChatTemplate {
@@ -52,30 +142,45 @@ impl ChatTemplate {
         match self {
             Self::Zephyr => "zephyr (TinyLlama chat)",
             Self::Llama3 => "llama3 (Llama 3 instruct)",
+            Self::ChatMl { .. } => "chatml (<|im_start|> / <|im_end|>)",
         }
     }
 
-    /// Recognizes the layout from a Jinja chat template's text.
+    /// Recognizes the layout from a Jinja chat template's text. A ChatML template must be
+    /// one of the exact layouts this engine renders (see [`ChatTemplate::ChatMl`]).
     pub fn detect(template_text: &str) -> Result<Self, TokenizerError> {
         if template_text.contains("<|start_header_id|>") && template_text.contains("<|eot_id|>") {
             Ok(Self::Llama3)
         } else if template_text.contains("<|user|>") && template_text.contains("<|assistant|>") {
             Ok(Self::Zephyr)
+        } else if template_text.contains("<|im_start|>") && template_text.contains("<|im_end|>") {
+            parse_chatml(template_text)
         } else {
             Err(TokenizerError::LoadError(
-                "unsupported chat template: neither zephyr (<|user|>) nor llama3 \
-                 (<|start_header_id|>) markers found"
+                "unsupported chat template: no zephyr (<|user|>), llama3 \
+                 (<|start_header_id|>) or chatml (<|im_start|>) markers found"
                     .to_string(),
             ))
         }
     }
 
-    /// Renders `(role, content)` turns. Contents are trimmed and empty turns skipped; roles
-    /// other than system and assistant are user turns. Generation continues from an
-    /// assistant header unless the last turn is a non-empty assistant turn. The BOS token
-    /// is not part of the text: `encode` adds exactly one through the tokenizer's
-    /// post-processor.
+    /// The default system message the model's template adds (ChatML only).
+    pub fn default_system(&self) -> Option<&str> {
+        match self {
+            Self::ChatMl { default_system } => default_system.as_deref(),
+            _ => None,
+        }
+    }
+
+    /// Renders `(role, content)` turns; roles other than system and assistant are user
+    /// turns. Generation continues from an assistant header unless the last turn is a
+    /// non-empty assistant turn. Zephyr and Llama 3: contents are trimmed and empty turns
+    /// skipped, and the BOS token is not part of the text (`encode` adds exactly one
+    /// through the tokenizer's post-processor). ChatML: see [`ChatTemplate::ChatMl`].
     pub fn render(&self, turns: &[(&str, &str)]) -> String {
+        if let Self::ChatMl { default_system } = self {
+            return render_chatml(default_system.as_deref(), turns);
+        }
         let mut out = String::new();
         for (role, content) in turns {
             let body = content.trim();
@@ -92,15 +197,14 @@ impl ChatTemplate {
                 Self::Llama3 => out.push_str(&format!(
                     "<|start_header_id|>{role}<|end_header_id|>\n\n{body}<|eot_id|>"
                 )),
+                Self::ChatMl { .. } => unreachable!("ChatML returned above"),
             }
         }
-        let ends_in_assistant = turns.last().is_some_and(|(role, content)| {
-            role.trim().eq_ignore_ascii_case("assistant") && !content.trim().is_empty()
-        });
-        if !ends_in_assistant {
+        if !ends_in_assistant(turns) {
             out.push_str(match self {
                 Self::Zephyr => "<|assistant|>\n",
                 Self::Llama3 => "<|start_header_id|>assistant<|end_header_id|>\n\n",
+                Self::ChatMl { .. } => unreachable!("ChatML returned above"),
             });
         }
         out
@@ -238,7 +342,7 @@ impl ChatTokenizer {
 
     /// The chat layout this tokenizer renders.
     pub fn template(&self) -> ChatTemplate {
-        self.template
+        self.template.clone()
     }
 
     /// Token ids that end generation (the model's `eos_token_id` set).
@@ -396,6 +500,72 @@ mod tests {
         assert_eq!(TinyLlamaTokenizer::EOS_TOKEN_ID, 2);
         assert_eq!(TinyLlamaTokenizer::BOS_TOKEN_ID, 1);
         assert_eq!(TinyLlamaTokenizer::UNK_TOKEN_ID, 0);
+    }
+
+    /// HuggingFaceTB/SmolLM2-1.7B-Instruct tokenizer_config.json `chat_template` at revision
+    /// 31b70e2e869a, verbatim (the decoded JSON string; its newlines are real newlines).
+    const SMOLLM2_TEMPLATE: &str = "{% for message in messages %}{% if loop.first and messages[0]['role'] != 'system' %}{{ '<|im_start|>system\nYou are a helpful AI assistant named SmolLM, trained by Hugging Face<|im_end|>\n' }}{% endif %}{{'<|im_start|>' + message['role'] + '\n' + message['content'] + '<|im_end|>' + '\n'}}{% endfor %}{% if add_generation_prompt %}{{ '<|im_start|>assistant\n' }}{% endif %}";
+
+    #[test]
+    fn smollm2_template_is_chatml_with_its_default_system_message() {
+        let t = ChatTemplate::detect(SMOLLM2_TEMPLATE).unwrap();
+        assert_eq!(
+            t.default_system(),
+            Some("You are a helpful AI assistant named SmolLM, trained by Hugging Face")
+        );
+        assert!(t.name().starts_with("chatml"));
+        // Expected strings: transformers 5.17.0 apply_chat_template(add_generation_prompt=True)
+        // on the same messages with the pinned tokenizer_config.json (scratch run, outside
+        // the repository).
+        assert_eq!(
+            t.render(&[("user", "Goal: X\nAuthorized workspace: /w")]),
+            "<|im_start|>system\nYou are a helpful AI assistant named SmolLM, trained by Hugging Face<|im_end|>\n\
+             <|im_start|>user\nGoal: X\nAuthorized workspace: /w<|im_end|>\n<|im_start|>assistant\n"
+        );
+        assert_eq!(
+            t.render(&[("system", "S"), ("user", "U")]),
+            "<|im_start|>system\nS<|im_end|>\n<|im_start|>user\nU<|im_end|>\n<|im_start|>assistant\n"
+        );
+        // Contents verbatim: the template does not trim.
+        assert!(t
+            .render(&[("user", "  Hi \n")])
+            .contains("<|im_start|>user\n  Hi \n<|im_end|>\n"));
+    }
+
+    #[test]
+    fn chatml_without_default_system_and_refusals() {
+        let plain = SMOLLM2_TEMPLATE.replace(
+            "{% if loop.first and messages[0]['role'] != 'system' %}{{ '<|im_start|>system\nYou are a helpful AI assistant named SmolLM, trained by Hugging Face<|im_end|>\n' }}{% endif %}",
+            "",
+        );
+        let t = ChatTemplate::detect(&plain).unwrap();
+        assert_eq!(t.default_system(), None);
+        assert_eq!(
+            t.render(&[("user", "U")]),
+            "<|im_start|>user\nU<|im_end|>\n<|im_start|>assistant\n"
+        );
+        // A ChatML template with other logic (tools, trimming) is refused, not approximated.
+        let tools = SMOLLM2_TEMPLATE.replace(
+            "{% for message in messages %}",
+            "{% if tools %}{{ tools | tojson }}{% endif %}{% for message in messages %}",
+        );
+        let err = ChatTemplate::detect(&tools).unwrap_err().to_string();
+        assert!(err.contains("unsupported ChatML"), "{err}");
+        let trimmed = SMOLLM2_TEMPLATE.replace("message['content']", "message['content'] | trim");
+        assert!(ChatTemplate::detect(&trimmed).is_err());
+        // A default system message with a quote cannot be read as plain text.
+        let quoted = SMOLLM2_TEMPLATE.replace("named SmolLM", "named 'SmolLM'");
+        assert!(ChatTemplate::detect(&quoted).is_err());
+        // Zephyr and Llama 3 detection is unchanged.
+        assert_eq!(
+            ChatTemplate::detect("<|user|> ... <|assistant|>").unwrap(),
+            ChatTemplate::Zephyr
+        );
+        assert_eq!(
+            ChatTemplate::detect("<|start_header_id|> <|eot_id|>").unwrap(),
+            ChatTemplate::Llama3
+        );
+        assert!(ChatTemplate::detect("{{ messages }}").is_err());
     }
 
     #[test]

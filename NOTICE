@@ -14,3 +14,9 @@ license text is in LICENSE, taken verbatim from https://www.gnu.org/licenses/agp
 
 Values and anti-enclosure principles live in the nonbinding COVENANT.md, which
 grants and restricts no legal rights.
+
+Third-party model (not part of this source tree): SmolLM2-1.7B-Instruct by
+Hugging Face (HuggingFaceTB), revision 31b70e2e869a7173562077fd711b654946d38674,
+licensed under the Apache License 2.0 (LICENSES/Apache-2.0.txt). Where AIEN
+distributes these weights, the publisher's model card and this notice go with
+them. Details and attribution: ATTRIBUTION.md.

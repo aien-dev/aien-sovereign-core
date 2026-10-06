@@ -380,6 +380,99 @@ mod tests {
         assert_eq!(c.rope_scaling, None);
     }
 
+    /// HuggingFaceTB/SmolLM2-1.7B-Instruct config.json at revision 31b70e2e869a, verbatim
+    /// (sha256 994f50b16abb4ae00880baefe03c10260b5bd608d2bf586f7056ca05a534feea), and its
+    /// generation_config.json (sha256 87b916ed...a013).
+    const SMOLLM2_17B_CONFIG: &str = r#"{
+  "architectures": [
+    "LlamaForCausalLM"
+  ],
+  "attention_bias": false,
+  "attention_dropout": 0.0,
+  "bos_token_id": 1,
+  "eos_token_id": 2,
+  "hidden_act": "silu",
+  "hidden_size": 2048,
+  "initializer_range": 0.02,
+  "intermediate_size": 8192,
+  "max_position_embeddings": 8192,
+  "mlp_bias": false,
+  "model_type": "llama",
+  "num_attention_heads": 32,
+  "num_hidden_layers": 24,
+  "num_key_value_heads": 32,
+  "pad_token_id": 2,
+  "pretraining_tp": 1,
+  "rms_norm_eps": 1e-05,
+  "rope_scaling": null,
+  "rope_theta": 130000,
+  "tie_word_embeddings": true,
+  "torch_dtype": "bfloat16",
+  "transformers_version": "4.42.3",
+  "transformers.js_config": {
+    "dtype": "q4",
+    "kv_cache_dtype": {
+      "q4f16": "float16",
+      "fp16": "float16"
+    },
+    "use_external_data_format": {
+      "model.onnx": true,
+      "model_fp16.onnx": true
+    }
+  },
+  "use_cache": true,
+  "vocab_size": 49152
+}
+"#;
+    const SMOLLM2_17B_GENERATION: &str = r#"{
+  "_from_model_config": true,
+  "bos_token_id": 1,
+  "eos_token_id": 2,
+  "pad_token_id": 2,
+  "transformers_version": "4.42.3"
+}
+"#;
+
+    #[test]
+    fn smollm2_config_is_full_mha_tied_plain_rope() {
+        let c = model_config_from_hf_json("s", SMOLLM2_17B_CONFIG, Some(SMOLLM2_17B_GENERATION))
+            .unwrap();
+        // 32 KV heads = 32 query heads: no GQA sharing (group size 1).
+        assert_eq!(
+            (c.num_layers, c.num_heads, c.num_kv_heads, c.head_dim),
+            (24, 32, 32, 64)
+        );
+        assert_eq!(
+            (c.hidden_dim, c.intermediate_dim, c.vocab_size),
+            (2048, 8192, 49152)
+        );
+        assert_eq!(c.max_sequence_length, 8192);
+        assert_eq!(c.rms_norm_eps, 1e-5);
+        assert!(c.tie_word_embeddings);
+        assert_eq!(c.eos_token_ids, vec![2]);
+        // "rope_theta": 130000 is a JSON integer; rope_scaling null is plain rope.
+        assert_eq!(c.rope_scaling, None);
+        assert_eq!(c.rope(), aien_abi_core::RopeParams::plain(130000.0));
+        let catalog = llama_catalog(&c);
+        // 218 tensors in the published model.safetensors: embed + norm + 9 per layer.
+        assert_eq!(catalog.len(), 2 + 9 * 24);
+        assert!(catalog.iter().all(|(n, _)| n != "lm_head.weight"));
+        let shape = |name: &str| catalog.iter().find(|(n, _)| n == name).unwrap().1.clone();
+        assert_eq!(shape("model.embed_tokens.weight"), vec![49152, 2048]);
+        assert_eq!(
+            shape("model.layers.23.self_attn.k_proj.weight"),
+            vec![2048, 2048]
+        );
+        assert_eq!(
+            shape("model.layers.0.self_attn.v_proj.weight"),
+            vec![2048, 2048]
+        );
+        assert_eq!(
+            shape("model.layers.0.mlp.down_proj.weight"),
+            vec![2048, 8192]
+        );
+    }
+
     #[test]
     fn hf_cache_snapshot_dirs_get_the_repo_id() {
         let dir = Path::new("/c/hub/models--unsloth--Llama-3.2-1B-Instruct/snapshots/5a8a");
