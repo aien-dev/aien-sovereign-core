@@ -23,6 +23,7 @@ fn proposer() -> ComposeProposer {
         Ok(Generation {
             text: PROPOSAL.to_string(),
             tokens: 8,
+            finish_reason: Some("eos".into()),
         })
     })
 }
