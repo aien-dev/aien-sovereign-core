@@ -23,7 +23,7 @@
 //!    introduced by a second destination verb. Otherwise `Err(Ambiguous)`
 //!    naming every candidate. Never a silent pick.
 //!
-//! The words of a goal are untrusted text); nothing here touches the disk
+//! The words of a goal are untrusted text; nothing here touches the disk
 //! except through the `is_file` callback.
 
 /// Verbs that introduce the destination of a task.
@@ -79,6 +79,34 @@ pub const FILLERS: &[&str] = &[
     "named",
     "same",
     "current",
+];
+
+/// Nouns that place a position INSIDE a file: in "the end of X" or "the Intro
+/// section of X", the word "of" points at the file being changed, so it is not
+/// a source marker. Other "of" phrases ("summary of X", "list of X", "copy of
+/// X") still mark X as material to read.
+pub const LOCATIONAL: &[&str] = &[
+    "section",
+    "sections",
+    "part",
+    "end",
+    "top",
+    "bottom",
+    "start",
+    "beginning",
+    "body",
+    "contents",
+    "content",
+    "heading",
+    "line",
+    "lines",
+    "row",
+    "block",
+    "footer",
+    "header",
+    "middle",
+    "rest",
+    "bit",
 ];
 
 /// Top-level domains that make a bare `name.tld` token a host name, not a file.
@@ -215,8 +243,9 @@ pub fn named_destination(
         }
         let prev = (i > 0).then(|| words[i - 1].as_str());
         let prev2 = (i > 1).then(|| words[i - 2].as_str());
+        let location_of = prev == Some("of") && prev2.is_some_and(|p| LOCATIONAL.contains(&p));
         let marked = !governed
-            && (prev.is_some_and(|p| SOURCE_MARKERS.contains(&p))
+            && (prev.is_some_and(|p| SOURCE_MARKERS.contains(&p) && !location_of)
                 || (prev == Some("on") && prev2 == Some("based"))
                 || (prev == Some("on") && prev2 == Some("relying")));
         // Joined to the previous path-like word: "A and B", "A, B", "A or B", "A B".
@@ -354,6 +383,52 @@ mod tests {
             Ok(Some("out.md".into()))
         );
         assert_eq!(d("Create example.org"), Ok(Some("example.org".into())));
+    }
+
+    #[test]
+    fn of_phrases_resolve_by_what_they_point_at() {
+        let one = |g: &str| d(g).unwrap().unwrap();
+        // A position inside the file being changed: the file is the destination.
+        for (g, want) in [
+            ("Add a line to the Intro section of README.md", "README.md"),
+            ("Append a note to the end of README.md", "README.md"),
+            ("Insert a badge at the top of README.md", "README.md"),
+            (
+                "Add \"x\" to the \"## Before a trip\" section of notes/GARAGE.md.",
+                "notes/GARAGE.md",
+            ),
+        ] {
+            assert_eq!(one(g), want, "{g}");
+        }
+        // Material to read: the file is a source, the destination is named elsewhere.
+        for (g, want) in [
+            ("Write a list of README.md into docs/L.md", "docs/L.md"),
+            ("Create docs/C.md as a copy of README.md", "docs/C.md"),
+            (
+                "Write a summary of README.md into docs/SUMMARY.md",
+                "docs/SUMMARY.md",
+            ),
+            // Location word in the source role: the later file is not demoted,
+            // the first file after the verb still wins (documented limit).
+            ("Create docs/S.md from the top of README.md", "docs/S.md"),
+            (
+                "Create docs/S.md summarising the section of README.md",
+                "docs/S.md",
+            ),
+            ("Create docs/S.md about the end of README.md", "docs/S.md"),
+        ] {
+            assert_eq!(one(g), want, "{g}");
+        }
+        for g in [
+            "Make a list of README.md",
+            "Summarise README.md",
+            "Make a copy of README.md",
+        ] {
+            assert!(
+                matches!(d(g), Err(DestinationError::NoDestination(_))),
+                "{g}"
+            );
+        }
     }
 
     #[test]

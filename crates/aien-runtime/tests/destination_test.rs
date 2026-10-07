@@ -129,3 +129,28 @@ fn rename_is_refused() {
         .unwrap_err()
         .contains("rename is not supported"));
 }
+
+#[test]
+fn u1_garage_goal_is_an_edit_of_the_named_file() {
+    let (_d, ws) = ws_with(&[]);
+    std::fs::create_dir_all(ws.join("notes")).unwrap();
+    std::fs::write(
+        ws.join("notes/GARAGE.md"),
+        "# Garage\n\n## Before a trip\n- check oil\n",
+    )
+    .unwrap();
+    let goal = r###"Please add "- check tyre pressure" to the "## Before a trip" section of notes/GARAGE.md."###;
+    let ((_, t, k), dest) = task_decision(goal, &ws).unwrap();
+    assert_eq!(k, ProposalKind::Edit);
+    assert_eq!(t.map(|t| t.0), Some("notes/GARAGE.md".into()));
+    assert_eq!(dest.as_deref(), Some("notes/GARAGE.md"));
+}
+
+#[test]
+fn summary_of_source_into_destination_is_a_document() {
+    let (_d, ws) = ws_with(&[("README.md", "# r\n")]);
+    let ((_, t, k), dest) =
+        task_decision("Write a summary of README.md into docs/SUMMARY.md", &ws).unwrap();
+    assert_eq!((t, k), (None, ProposalKind::Document));
+    assert_eq!(dest.as_deref(), Some("docs/SUMMARY.md"));
+}
