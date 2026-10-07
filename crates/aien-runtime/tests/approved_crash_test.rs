@@ -46,10 +46,13 @@ fn proposal(b: &ComposeBridge) -> ApprovedProposal {
         approved_proposal_sha256: aien_runtime::approved::approved_proposal_sha256(PATH, CONTENT),
         content_sha256: sha(CONTENT.as_bytes()),
         approval_mac: String::new(),
+        requirements: Some(String::new()),
+        requirements_mac: String::new(),
+        requirements_base: None,
     };
-    p.approval_mac = DeskKey::load(&desk_key_path(b.dir()))
+    DeskKey::load(&desk_key_path(b.dir()))
         .unwrap()
-        .sign(&p, &b.dir().parent().unwrap().join("ws"));
+        .seal(&mut p, &b.dir().parent().unwrap().join("ws"));
     p
 }
 
@@ -154,7 +157,9 @@ fn boundary(hold: &str, want_reconciled: &str, want_refusal: Option<&str>) {
     let want_refusal = want_refusal.unwrap_or("AlreadyCommitted");
     let mut q = p.clone();
     q.request_id = "req-crash-2".into();
-    q.approval_mac = DeskKey::load(&desk_key_path(&dir)).unwrap().sign(&q, &ws);
+    DeskKey::load(&desk_key_path(&dir))
+        .unwrap()
+        .seal(&mut q, &ws);
     assert_eq!(
         hook.submit(&q, ws.to_str().unwrap()).unwrap_err().name,
         want_refusal

@@ -1,31 +1,31 @@
 //! Requirement validation for composed documents.
 //!
-//! A task goal can state a measurable requirement ("in at least 20 lines").
-//! Before this module nothing checked it: a 13-line answer to such a goal was
-//! approved and committed. This module defines a small typed set of
-//! requirements, extracts them deterministically from the goal text, and
-//! checks the COMPLETE parsed document (the content that would be saved).
+//! A task goal can state a measurable requirement ("in at least 20 lines",
+//! "sections titled A, B and C", "covers preparing and testing"). This module
+//! defines a small typed set of requirements, extracts them deterministically
+//! from the goal text ([`analyze`], in `requirements_extract`), and checks the
+//! COMPLETE parsed document (the content that would be saved).
 //!
-//! ## Supported requirements (everything else is NOT extracted)
+//! ## Two outcomes of reading a goal
 //!
-//! Extraction matches the exact word sequence `at least|at most N <noun>`
-//! (case-insensitive, N written in digits, N >= 1, trailing punctuation on a
-//! word ignored) and `include|contain the phrase "<text>"` (double quotes).
-//! A goal that states a requirement in any other wording is not covered and
-//! gets no check; `ComposeTaskReport::requirements_recognized` lists exactly
-//! what was recognized.
+//! [`analyze`] returns an [`Extraction`]: the RECOGNIZED requirements, and the
+//! UNCERTAIN spans. An uncertain span is goal text that looks like an explicit
+//! measurable requirement (a bound word and a number next to a document
+//! noun, "titled", "covers", "include the word", ...) that extraction could
+//! not interpret reliably. Uncertainty is never treated as satisfied: the
+//! task is refused before any model call, the report lists the spans
+//! (`ComposeTaskReport::requirements_uncertain`) and nothing is approved,
+//! committed or written.
 //!
-//! | goal wording                | requirement      | how it is counted |
-//! |-----------------------------|------------------|-------------------|
-//! | `at least N lines`          | `MinLines(N)`    | non-empty lines (a line with a non-whitespace character) |
-//! | `at most N lines`           | `MaxLines(N)`    | non-empty lines |
-//! | `at least N items`          | `MinItems(Items, N)` | markdown list items: a line starting (after indentation) with `- `, `* `, `+ ` or `<digits>. ` / `<digits>) ` |
-//! | `at least N steps`          | `MinItems(Steps, N)` | numbered list items only: `<digits>. ` / `<digits>) ` |
-//! | `at least N sections`       | `MinItems(Sections, N)` | markdown headings: 1 to 6 `#` then a space then text |
-//! | `at least N questions`      | `MinItems(Questions, N)` | non-empty lines whose last character is `?` |
-//! | `include the phrase "X"`    | `RequiredPhrases([X])` | case-insensitive substring of the document |
+//! ## Supported requirements
 //!
-//! `item`, `step`, `section`, `question` (singular) are accepted too.
+//! The exact wordings are in the table of `requirements_extract`; in short:
+//! counts (`at least|at most|no fewer than|no more than|a minimum of|up to|
+//! more than|fewer than|N or more|N or fewer` with digits or number words
+//! one..twenty) of lines, words, list items, steps, sections/headings and
+//! questions; section titles (`sections titled A, B and C`), topics
+//! (`covers A, B and C`), required words and phrases, and a minimum number
+//! of sentences in every section.
 //!
 //! ## What a requirement is judged on
 //!
@@ -33,16 +33,46 @@
 //! not the model's reply). An edit only adds lines, so a prior file that
 //! already exceeds a `MaxLines` is refused before any attempt.
 //!
-//! Counting: `MinLines`/`MaxLines` count every non-empty line of the file,
-//! INCLUDING code lines and code-fence marker lines. Sections, questions,
-//! items and steps skip fenced code blocks (``` or ~~~, CommonMark close
-//! rule: same marker, at least as long, no info string; an unclosed fence
-//! runs to the end) and the fence lines themselves, so a `# comment` or a
-//! `- x` inside a code block is not a heading or an item.
+//! `AddedLines` (a request such as "add 2 lines to README.md") is the one requirement
+//! measured against the PRIOR file: the number of non-empty lines of the complete
+//! proposed bytes that are not in the longest common subsequence with the
+//! prior file's non-empty lines (trailing whitespace ignored). A new file is
+//! compared with an empty prior. Callers bind the prior with
+//! `Extraction::resolved`; an unresolved `AddedLines` is unmet (fails closed).
+//! An edit may only ADD: every non-empty line of the prior file must survive in
+//! order (trailing whitespace may differ), otherwise the requirement is unmet
+//! whatever the number of added lines. Replacing or deleting lines is a change the
+//! goal did not ask for, so "add 2 lines" can never wipe or rewrite the file.
+//! The approved path binds the file found in the workspace.
 //!
-//! Wording rules (see [`extract`]): the noun must end its clause (no
-//! "of/per/each/in/with ..." after it), negated wording is not extracted,
-//! and emphasis or quotes around the wording are not recognized.
+//! Counting: `MinLines`/`MaxLines` count every non-empty line of the file,
+//! INCLUDING code lines and code-fence marker lines; `MinWords`/`MaxWords`
+//! count every whitespace-separated word of the file. Sections, questions,
+//! items, steps, headings, topics and sentences skip fenced code blocks
+//! (``` or ~~~, CommonMark close rule: same marker, at least as long, no
+//! info string; an unclosed fence runs to the end) and the fence lines
+//! themselves, so a `# comment` or a `- x` inside a code block is not a
+//! heading or an item.
+//!
+//! Definitions used by the checks:
+//! - heading text: the heading line without its `#` run, leading numbering
+//!   (`1.`, `2)`), emphasis marks and trailing `:.!?#`, trimmed, whitespace
+//!   collapsed, compared case-insensitively.
+//! - word form (topics): lowercase, strip ONE suffix of `ment ing ion es ed
+//!   s` (only when 3 or more letters remain), then one trailing `e` (when 4
+//!   or more letters remain). `preparing`, `prepare` and `prepared` agree;
+//!   `publishing` and `public` do not. Irregular forms (`running` / `run`)
+//!   do not agree: the check errs on the side of refusing.
+//! - sentence: a run of at least two words ended by `.`, `!` or `?` (not
+//!   inside a number such as `3.10`); an unfinished last fragment of at
+//!   least three words counts as one. List markers are ignored.
+//! - section (for sentence counts): a heading and the prose directly under
+//!   it up to the next heading of any level. A heading with no prose of its
+//!   own whose next heading is deeper is a container, not a section.
+
+use std::collections::HashSet;
+
+pub use crate::requirements_extract::{analyze, extract, Extraction};
 
 /// What a `MinItems` requirement counts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -51,6 +81,8 @@ pub enum ItemKind {
     Steps,
     Sections,
     Questions,
+    /// Fenced code blocks (each opening fence line counts one).
+    CodeBlocks,
 }
 
 impl ItemKind {
@@ -60,6 +92,7 @@ impl ItemKind {
             ItemKind::Steps => "numbered steps",
             ItemKind::Sections => "headings",
             ItemKind::Questions => "questions",
+            ItemKind::CodeBlocks => "fenced code blocks",
         }
     }
 }
@@ -69,8 +102,47 @@ impl ItemKind {
 pub enum Requirement {
     MinLines(usize),
     MaxLines(usize),
+    MinWords(usize),
+    MaxWords(usize),
     MinItems(ItemKind, usize),
+    /// Case-insensitive substrings of the document.
     RequiredPhrases(Vec<String>),
+    /// Whole words, case-insensitive.
+    RequiredWords(Vec<String>),
+    /// Section titles that must each appear as a heading.
+    RequiredHeadings(Vec<String>),
+    /// Topics (each a list of content words) that must each be covered: every
+    /// content word must appear in the prose as a word form.
+    RequiredTopics(Vec<String>),
+    /// Every section holds at least this many sentences.
+    MinSentencesPerSection(usize),
+    /// Lines ADDED to the file, measured against the prior file (see the module
+    /// docs). `exact`: exactly `n`, else at least `n`. `prior` is None until
+    /// the caller resolves it ([`Extraction::resolved`]); an unresolved one is unmet.
+    AddedLines {
+        n: usize,
+        exact: bool,
+        prior: Option<String>,
+    },
+    /// The section with this title (None: the last section of the document)
+    /// holds at least `n` words of plain text (prose lines, no code, no headings).
+    SectionMinWords {
+        title: Option<String>,
+        n: usize,
+    },
+    /// Each title is present as a heading of exactly this level (1 to 6).
+    LevelHeadings {
+        level: usize,
+        titles: Vec<String>,
+    },
+}
+
+fn quoted(items: &[String]) -> String {
+    items
+        .iter()
+        .map(|x| format!("\"{x}\""))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 impl Requirement {
@@ -79,10 +151,29 @@ impl Requirement {
         match self {
             Requirement::MinLines(n) => format!("at least {n} non-empty lines"),
             Requirement::MaxLines(n) => format!("at most {n} non-empty lines"),
+            Requirement::MinWords(n) => format!("at least {n} words"),
+            Requirement::MaxWords(n) => format!("at most {n} words"),
             Requirement::MinItems(k, n) => format!("at least {n} {}", k.noun()),
-            Requirement::RequiredPhrases(p) => {
-                let q: Vec<String> = p.iter().map(|x| format!("\"{x}\"")).collect();
-                format!("the phrase {}", q.join(", "))
+            Requirement::RequiredPhrases(p) => format!("the phrase {}", quoted(p)),
+            Requirement::RequiredWords(p) => format!("the words {}", quoted(p)),
+            Requirement::RequiredHeadings(p) => format!("the headings {}", quoted(p)),
+            Requirement::RequiredTopics(p) => format!("the topics {}", quoted(p)),
+            Requirement::MinSentencesPerSection(n) => {
+                format!("at least {n} sentences in every section")
+            }
+            Requirement::AddedLines { n, exact, .. } => {
+                if *exact {
+                    format!("exactly {n} added non-empty lines")
+                } else {
+                    format!("at least {n} added non-empty lines")
+                }
+            }
+            Requirement::SectionMinWords { title, n } => match title {
+                Some(t) => format!("at least {n} words of plain text in the section \"{t}\""),
+                None => format!("at least {n} words of plain text in the last section"),
+            },
+            Requirement::LevelHeadings { level, titles } => {
+                format!("the level-{level} headings {}", quoted(titles))
             }
         }
     }
@@ -99,6 +190,14 @@ impl Requirement {
                 let c = non_empty_lines(content);
                 (c > *n).then(|| format!("{label}, found {c}"))
             }
+            Requirement::MinWords(n) => {
+                let c = content.split_whitespace().count();
+                (c < *n).then(|| format!("{label}, found {c}"))
+            }
+            Requirement::MaxWords(n) => {
+                let c = content.split_whitespace().count();
+                (c > *n).then(|| format!("{label}, found {c}"))
+            }
             Requirement::MinItems(k, n) => {
                 let c = count_items(*k, content);
                 (c < *n).then(|| format!("{label}, found {c}"))
@@ -108,9 +207,122 @@ impl Requirement {
                 let missing: Vec<String> = p
                     .iter()
                     .filter(|x| !low.contains(&x.to_lowercase()))
-                    .map(|x| format!("\"{x}\""))
+                    .cloned()
                     .collect();
-                (!missing.is_empty()).then(|| format!("{label}, missing {}", missing.join(", ")))
+                (!missing.is_empty()).then(|| format!("{label}, missing {}", quoted(&missing)))
+            }
+            Requirement::RequiredWords(p) => {
+                let have: HashSet<String> = words_of(content).into_iter().collect();
+                let missing: Vec<String> = p
+                    .iter()
+                    .filter(|x| !have.contains(&x.to_lowercase()))
+                    .cloned()
+                    .collect();
+                (!missing.is_empty()).then(|| format!("{label}, missing {}", quoted(&missing)))
+            }
+            Requirement::RequiredHeadings(p) => {
+                let have: HashSet<String> = parse_sections(content)
+                    .into_iter()
+                    .map(|s| s.title)
+                    .collect();
+                let missing: Vec<String> = p
+                    .iter()
+                    .filter(|x| !have.contains(&normalize_title(x)))
+                    .cloned()
+                    .collect();
+                (!missing.is_empty()).then(|| {
+                    format!(
+                        "{label}, missing {} (each must be a markdown heading line)",
+                        quoted(&missing)
+                    )
+                })
+            }
+            Requirement::RequiredTopics(p) => {
+                let have: HashSet<String> = words_of(&prose_lines(content).join("\n"))
+                    .iter()
+                    .map(|w| stem(w))
+                    .collect();
+                let missing: Vec<String> = p
+                    .iter()
+                    .filter(|t| !content_words(t).iter().all(|w| have.contains(&stem(w))))
+                    .cloned()
+                    .collect();
+                (!missing.is_empty()).then(|| {
+                    format!(
+                        "{label}, not covered: {} (use those words, or their word forms, in the text)",
+                        missing.join(", ")
+                    )
+                })
+            }
+            Requirement::AddedLines { n, exact, prior } => {
+                let Some(prior) = prior else {
+                    return Some(format!(
+                        "{label} cannot be measured: the existing file was not provided"
+                    ));
+                };
+                let (c, lost) = match added_non_empty_lines(prior, content) {
+                    Ok(c) => c,
+                    Err(e) => return Some(format!("{label} cannot be measured: {e}")),
+                };
+                if lost > 0 {
+                    return Some(format!(
+                        "{label}, but {lost} existing non-empty line(s) were changed or removed (every existing line must stay, in order; only trailing whitespace may differ)"
+                    ));
+                }
+                let bad = if *exact { c != *n } else { c < *n };
+                bad.then(|| format!("{label}, found {c}"))
+            }
+            Requirement::SectionMinWords { title, n } => {
+                let secs = parse_sections(content);
+                let sec = match title {
+                    Some(t) => secs.iter().find(|s| s.title == normalize_title(t)),
+                    None => secs.last(),
+                };
+                let Some(sec) = sec else {
+                    return Some(format!("{label}, the section was not found"));
+                };
+                let c = sec
+                    .body
+                    .split_whitespace()
+                    .filter(|w| w.chars().any(char::is_alphanumeric))
+                    .count();
+                (c < *n).then(|| format!("{label}, found {c}"))
+            }
+            Requirement::LevelHeadings { level, titles } => {
+                let secs = parse_sections(content);
+                let missing: Vec<String> = titles
+                    .iter()
+                    .filter(|t| {
+                        !secs
+                            .iter()
+                            .any(|s| s.level == *level && s.title == normalize_title(t))
+                    })
+                    .cloned()
+                    .collect();
+                (!missing.is_empty()).then(|| {
+                    format!(
+                        "{label}, missing {} (each must be a level-{level} markdown heading line)",
+                        quoted(&missing)
+                    )
+                })
+            }
+            Requirement::MinSentencesPerSection(n) => {
+                let secs = parse_sections(content);
+                if secs.is_empty() {
+                    return Some(format!("{label}, found no headings"));
+                }
+                let short: Vec<String> = secs
+                    .iter()
+                    .filter(|s| !s.container)
+                    .filter_map(|s| {
+                        let c = count_sentences(&s.body);
+                        (c < *n).then(|| format!("{} ({c})", s.raw_title))
+                    })
+                    .collect();
+                (!short.is_empty()).then(|| {
+                    let shown: Vec<String> = short.iter().take(8).cloned().collect();
+                    format!("{label}, too few in: {}", shown.join(", "))
+                })
             }
         }
     }
@@ -118,6 +330,156 @@ impl Requirement {
 
 fn non_empty_lines(s: &str) -> usize {
     s.lines().filter(|l| !l.trim().is_empty()).count()
+}
+
+/// Lowercase alphanumeric words (apostrophes kept inside a word).
+fn words_of(s: &str) -> Vec<String> {
+    s.split(|c: char| !(c.is_alphanumeric() || c == '\''))
+        .map(|w| w.trim_matches('\'').to_lowercase())
+        .filter(|w| !w.is_empty())
+        .collect()
+}
+
+const STOPWORDS: [&str; 30] = [
+    "a", "an", "the", "of", "to", "for", "and", "or", "in", "on", "with", "your", "you", "our",
+    "their", "its", "it", "is", "are", "be", "as", "at", "by", "from", "into", "about", "this",
+    "that", "new", "all",
+];
+
+/// The content words of a topic: its words minus the small stop list.
+pub(crate) fn content_words(topic: &str) -> Vec<String> {
+    words_of(topic)
+        .into_iter()
+        .filter(|w| !STOPWORDS.contains(&w.as_str()))
+        .collect()
+}
+
+/// Conservative word form (see the module docs).
+pub(crate) fn stem(w: &str) -> String {
+    let mut s = w.to_lowercase();
+    for suf in ["ment", "ing", "ion", "es", "ed", "s"] {
+        if s.len() >= suf.len() + 3 && s.ends_with(suf) {
+            s.truncate(s.len() - suf.len());
+            break;
+        }
+    }
+    if s.len() >= 4 && s.ends_with('e') {
+        s.pop();
+    }
+    s
+}
+
+/// Heading text as compared: see the module docs.
+pub(crate) fn normalize_title(t: &str) -> String {
+    let t: String = t
+        .chars()
+        .filter(|c| !matches!(c, '*' | '_' | '`'))
+        .collect();
+    let t = t.trim().trim_end_matches('#').trim();
+    let d = t.chars().take_while(|c| c.is_ascii_digit()).count();
+    let t = if d > 0 && matches!(t[d..].chars().next(), Some('.') | Some(')')) {
+        t[d + 1..].trim_start()
+    } else {
+        t
+    };
+    let t = t.trim_end_matches([':', '.', '!', '?']);
+    t.split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase()
+}
+
+struct Section {
+    /// Normalized title (compared) and the title as written (reported).
+    title: String,
+    raw_title: String,
+    /// Prose directly under the heading, headings excluded.
+    body: String,
+    /// No prose of its own and the next heading is deeper.
+    container: bool,
+    /// Heading level, 1 to 6.
+    level: usize,
+}
+
+fn heading_of(t: &str) -> Option<(usize, &str)> {
+    let t = t.trim();
+    let h = t.chars().take_while(|&c| c == '#').count();
+    ((1..=6).contains(&h) && t[h..].starts_with(' ') && !t[h..].trim().is_empty())
+        .then(|| (h, t[h..].trim()))
+}
+
+fn parse_sections(content: &str) -> Vec<Section> {
+    let lines = prose_lines(content);
+    let heads: Vec<(usize, usize, &str)> = lines
+        .iter()
+        .enumerate()
+        .filter_map(|(i, l)| heading_of(l).map(|(lv, t)| (i, lv, t)))
+        .collect();
+    heads
+        .iter()
+        .enumerate()
+        .map(|(k, &(i, lv, t))| {
+            let end = heads.get(k + 1).map_or(lines.len(), |h| h.0);
+            let body = lines[i + 1..end].join("\n");
+            let next_deeper = heads.get(k + 1).is_some_and(|n| n.1 > heads[k].1);
+            Section {
+                title: normalize_title(t),
+                raw_title: t.trim_end_matches('#').trim().to_string(),
+                container: body.trim().is_empty() && next_deeper,
+                level: lv,
+                body,
+            }
+        })
+        .collect()
+}
+
+fn count_sentences(body: &str) -> usize {
+    let mut text = String::new();
+    for l in body.lines() {
+        let mut t = l.trim();
+        if let Some(r) = ["- ", "* ", "+ "].iter().find_map(|m| t.strip_prefix(m)) {
+            t = r;
+        } else {
+            let d = t.chars().take_while(|c| c.is_ascii_digit()).count();
+            if d > 0
+                && matches!(t[d..].chars().next(), Some('.') | Some(')'))
+                && t[d + 1..].starts_with(' ')
+            {
+                t = &t[d + 2..];
+            }
+        }
+        text.push_str(t);
+        text.push(' ');
+    }
+    let chars: Vec<char> = text.chars().collect();
+    let (mut count, mut cur) = (0usize, String::new());
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        cur.push(c);
+        if matches!(c, '.' | '!' | '?') {
+            let mut j = i + 1;
+            while j < chars.len() && matches!(chars[j], '.' | '!' | '?' | '"' | '\'' | ')') {
+                cur.push(chars[j]);
+                j += 1;
+            }
+            if j >= chars.len() || chars[j].is_whitespace() {
+                if cur.split_whitespace().count() >= 2 {
+                    count += 1;
+                }
+                cur.clear();
+                i = j;
+                continue;
+            }
+            i = j;
+            continue;
+        }
+        i += 1;
+    }
+    if cur.split_whitespace().count() >= 3 {
+        count += 1;
+    }
+    count
 }
 
 fn numbered(t: &str) -> bool {
@@ -161,6 +523,9 @@ fn prose_lines(s: &str) -> Vec<&str> {
 }
 
 fn count_items(k: ItemKind, s: &str) -> usize {
+    if k == ItemKind::CodeBlocks {
+        return count_code_blocks(s);
+    }
     prose_lines(s)
         .into_iter()
         .map(str::trim)
@@ -174,6 +539,7 @@ fn count_items(k: ItemKind, s: &str) -> usize {
                 (1..=6).contains(&h) && t[h..].starts_with(' ') && !t[h..].trim().is_empty()
             }
             ItemKind::Questions => t.ends_with('?'),
+            ItemKind::CodeBlocks => false,
         })
         .count()
 }
@@ -189,156 +555,61 @@ pub fn refusal_reason(reqs: &[Requirement], content: &str) -> Option<String> {
     (!u.is_empty()).then(|| format!("unmet requirement: {}", u.join("; ")))
 }
 
-fn clean(w: &str) -> &str {
-    w.trim_matches(|c: char| matches!(c, ',' | '.' | ';' | ':' | '!' | '?' | '(' | ')'))
-}
-
-/// A word that ends its clause: it carries closing punctuation.
-fn ends_clause(raw: &str) -> bool {
-    raw.ends_with([',', '.', ';', ':', '!', '?', ')'])
-}
-
-/// Words allowed right after the counted noun or the quoted phrase: they
-/// join a new clause instead of qualifying the count.
-const CLAUSE_JOINERS: [&str; 9] = [
-    "and", "or", "but", "so", "then", "because", "that", "which", "covering",
-];
-
-/// Words that turn a requirement into its opposite or into something else.
-const NEGATORS: [&str; 20] = [
-    "not",
-    "no",
-    "never",
-    "without",
-    "avoid",
-    "dont",
-    "don't",
-    "doesnt",
-    "doesn't",
-    "cant",
-    "can't",
-    "cannot",
-    "wont",
-    "won't",
-    "shouldnt",
-    "shouldn't",
-    "mustnt",
-    "mustn't",
-    "isnt",
-    "isn't",
-];
-
-/// True when one of the (at most 4) words before position `at` in the same
-/// clause is a negator. `raw` are the whitespace-split lowercase words.
-fn negated_before(raw: &[&str], at: usize) -> bool {
-    for i in (at.saturating_sub(4)..at).rev() {
-        if ends_clause(raw[i]) {
-            return false;
-        }
-        if NEGATORS.contains(&clean(raw[i])) {
-            return true;
-        }
-    }
-    false
-}
-
-/// True when the clause ends right after word `at`: closing punctuation on
-/// it, end of the goal, or a clause-joining word next. Anything else
-/// ("of", "per", "each", "in", "with", ...) qualifies the count.
-fn clause_ends_after(raw: &[&str], at: usize) -> bool {
-    ends_clause(raw[at])
-        || raw
-            .get(at + 1)
-            .is_none_or(|n| CLAUSE_JOINERS.contains(&clean(n)))
-}
-
-/// The requirements stated in `goal`, in the exact supported wordings only.
-///
-/// Rules, all conservative (a requirement is extracted only when the
-/// wording is certainly the supported claim; otherwise it is simply not
-/// extracted and never appears in `requirements_recognized`):
-/// - the count noun must END its clause: closing punctuation, end of goal,
-///   or a joiner (`and or but so then because that which covering`). So
-///   "3 lines of context", "5 items per category", "2 sections in the
-///   file" are not extracted.
-/// - a negator (`not no never without avoid` and the contractions) in the
-///   same clause, up to 4 words before, cancels it: "do not include the
-///   phrase "X"", "not at least 20 lines". No forbidden-phrase check exists,
-///   so negated wording is reported unrecognized, not inverted.
-/// - the quoted phrase must also end its clause ("... "X" in the title" is
-///   not extracted).
-/// - emphasis or quotes around the wording (`**at least 20 lines**`,
-///   `"at least 20 lines"`, `at least **20** lines`) break the exact word
-///   sequence and are not recognized (known limitation).
-pub fn extract(goal: &str) -> Vec<Requirement> {
-    let low = goal.to_ascii_lowercase();
-    let raw: Vec<&str> = low.split_whitespace().collect();
-    let words: Vec<&str> = raw.iter().copied().map(clean).collect();
-    let mut out: Vec<Requirement> = Vec::new();
-    let mut push = |r: Requirement| {
-        if !out.contains(&r) {
-            out.push(r);
-        }
-    };
-    for (i, w) in words.windows(4).enumerate() {
-        if w[0] != "at" || !(w[1] == "least" || w[1] == "most") {
-            continue;
-        }
-        if !w[2].chars().all(|c| c.is_ascii_digit()) || w[2].is_empty() {
-            continue;
-        }
-        let Ok(n) = w[2].parse::<usize>() else {
-            continue;
-        };
-        if n == 0 || negated_before(&raw, i) || !clause_ends_after(&raw, i + 3) {
-            continue;
-        }
-        let least = w[1] == "least";
-        match (least, w[3]) {
-            (true, "lines") => push(Requirement::MinLines(n)),
-            (false, "lines") => push(Requirement::MaxLines(n)),
-            (true, "items" | "item") => push(Requirement::MinItems(ItemKind::Items, n)),
-            (true, "steps" | "step") => push(Requirement::MinItems(ItemKind::Steps, n)),
-            (true, "sections" | "section") => push(Requirement::MinItems(ItemKind::Sections, n)),
-            (true, "questions" | "question") => push(Requirement::MinItems(ItemKind::Questions, n)),
+/// Fenced code blocks: every opening fence line counts one (same fence rule as
+/// `prose_lines`; an unclosed block counts once).
+fn count_code_blocks(s: &str) -> usize {
+    let mut open: Option<(char, usize)> = None;
+    let mut blocks = 0;
+    for l in s.lines() {
+        match (open, fence_marker(l)) {
+            (None, Some((c, n, _))) => {
+                open = Some((c, n));
+                blocks += 1;
+            }
+            (Some((c, n)), Some((c2, n2, info))) if c2 == c && n2 >= n && !info => open = None,
             _ => {}
         }
     }
-    // include|contain the phrase "X": the text is taken from the original
-    // goal (case kept), between straight double quotes.
-    let mut phrases: Vec<String> = Vec::new();
-    for key in ["include the phrase \"", "contain the phrase \""] {
-        let mut from = 0;
-        while let Some(i) = low[from..].find(key) {
-            let key_at = from + i;
-            let start = key_at + key.len();
-            let Some(len) = low[start..].find('"') else {
-                break;
-            };
-            let end = start + len;
-            // Words before the key (negation) and the first word after the
-            // closing quote (qualifier), read from the same lowercase text.
-            let before: Vec<&str> = low[..key_at].split_whitespace().collect();
-            let negated = negated_before(&before, before.len());
-            let after = low[end + 1..].split_whitespace().next();
-            let closes_clause = low[end + 1..].starts_with([',', '.', ';', ':', '!', '?', ')'])
-                || after.is_none_or(|n| CLAUSE_JOINERS.contains(&clean(n)));
-            if len > 0
-                && !negated
-                && closes_clause
-                && goal.is_char_boundary(start)
-                && goal.is_char_boundary(end)
-            {
-                let p = goal[start..end].to_string();
-                if !phrases.contains(&p) {
-                    phrases.push(p);
-                }
-            }
-            from = end + 1;
+    blocks
+}
+
+/// Largest line-pair table the added-line diff will build.
+const DIFF_MAX_CELLS: usize = 25_000_000;
+
+/// (added, lost): `added` counts the non-empty lines of `content` outside the longest
+/// common subsequence with the non-empty lines of `prior` (lines compared with
+/// trailing whitespace ignored); `lost` counts the prior non-empty lines outside it,
+/// i.e. changed or removed ones. For an edit, which keeps every prior line,
+/// this is the number of lines the edit added; for whole replacement bytes it
+/// is the diff against the file they replace.
+pub(crate) fn added_non_empty_lines(prior: &str, content: &str) -> Result<(usize, usize), String> {
+    let a: Vec<&str> = prior
+        .lines()
+        .map(str::trim_end)
+        .filter(|l| !l.trim().is_empty())
+        .collect();
+    let b: Vec<&str> = content
+        .lines()
+        .map(str::trim_end)
+        .filter(|l| !l.trim().is_empty())
+        .collect();
+    if a.len().saturating_mul(b.len()) > DIFF_MAX_CELLS {
+        return Err(format!(
+            "the diff is too large ({} prior lines x {} lines)",
+            a.len(),
+            b.len()
+        ));
+    }
+    // Rolling-row longest common subsequence length.
+    let mut row = vec![0usize; b.len() + 1];
+    for x in &a {
+        let mut diag = 0;
+        for (j, y) in b.iter().enumerate() {
+            let up = row[j + 1];
+            row[j + 1] = if x == y { diag + 1 } else { up.max(row[j]) };
+            diag = up;
         }
     }
-    if !phrases.is_empty() {
-        push(Requirement::RequiredPhrases(phrases));
-    }
-    out
+    let common = row[b.len()];
+    Ok((b.len() - common, a.len() - common))
 }

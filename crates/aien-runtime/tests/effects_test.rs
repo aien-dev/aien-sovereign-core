@@ -85,6 +85,7 @@ fn state(b: &ComposeBridge, record: u64) -> String {
 }
 
 struct Fixture {
+    promotion: std::cell::Cell<u64>,
     target: String,
     psha: String,
     csha: String,
@@ -92,12 +93,22 @@ struct Fixture {
 
 impl Fixture {
     fn grant(&self, b: &ComposeBridge) -> u64 {
-        let prior = effects::file_sha256(Path::new(&self.target)).unwrap();
-        let text = json!({"proposal_sha256": self.psha, "path": "NOTES.md",
-            "content_sha256": self.csha, "approver": "drake", "target": self.target,
-            "prior_sha256": prior,
-            "workspace": Path::new(&self.target).parent().unwrap().display().to_string()});
-        noted(b.note("authorization", &text.to_string(), &[])).id
+        // sovereign-core #261: the daemon mints the grant from its own commit record.
+        noted(effects::mint_grant(
+            b,
+            &effects::MintRequest {
+                cx_promotion: self.promotion.get(),
+                proposal_sha256: self.psha.clone(),
+                workspace: Path::new(&self.target)
+                    .parent()
+                    .unwrap()
+                    .display()
+                    .to_string(),
+                approver: "drake".into(),
+                constraints: vec![],
+            },
+        ))
+        .id
     }
 
     /// `alive`: this test process is the executor; otherwise a dead one.
@@ -138,6 +149,7 @@ fn effect_intents_are_at_most_once_or_unresolved() {
     };
     assert!(report.committed, "{report:?}");
     let f = Fixture {
+        promotion: std::cell::Cell::new(report.cx_promotion),
         target: ws.join("NOTES.md").display().to_string(),
         psha: sha(PROPOSAL.as_bytes()),
         csha: sha(CONTENT.as_bytes()),
@@ -167,10 +179,22 @@ fn effect_intents_are_at_most_once_or_unresolved() {
     let c = controlled(effects::control(&b, "revoke", "drake", Some(a1)));
     assert_eq!((c.revoked, c.recorded), (Some(false), None));
 
+    // sovereign-core #261: a grant that settled DONE closes its commit (one
+    // committed proposal, at most one DONE effect); new content needs a new compose.
+    refused_mint(&f, &b);
     // 2. Executor died after the intent, before the write: NOT_DONE.
     // (Target removed first: a grant against the content itself would read
-    // DONE, ACCEPTANCE-v2 2.2 checks the content digest first.)
+    // DONE, ACCEPTANCE-v2 2.2 checks the content digest first. It also lets the
+    // second compose create NOTES.md again: since #288 a new-document compose
+    // never overwrites an existing file.)
     std::fs::remove_file(&f.target).unwrap();
+    match b.run_task("write the note again", ws.to_str().unwrap()) {
+        ControlResponse::ComposeTaskResult(r) => {
+            assert!(r.committed, "second compose: {r:?}");
+            f.promotion.set(r.cx_promotion)
+        }
+        other => panic!("second compose: {other:?}"),
+    }
     let a2 = f.grant(&b);
     let i2 = noted(effects::open_intent(&b, &f.req(a2, false))).id;
     let r = reconciled(effects::reconcile(&b, None, "test"));
@@ -245,4 +269,20 @@ fn effect_intents_are_at_most_once_or_unresolved() {
     assert!(line.starts_with("Reconcile: checked 0"), "{line}");
     assert_eq!(ledger(&b).view(), before);
     assert!(effects::check_reserved_note("effect", r#"{"phase":"ack","intent":1}"#).is_err());
+}
+
+fn refused_mint(f: &Fixture, b: &ComposeBridge) {
+    match effects::mint_grant(
+        b,
+        &effects::MintRequest {
+            cx_promotion: f.promotion.get(),
+            proposal_sha256: f.psha.clone(),
+            workspace: Path::new(&f.target).parent().unwrap().display().to_string(),
+            approver: "drake".into(),
+            constraints: vec![],
+        },
+    ) {
+        ControlResponse::Error(e) => assert!(e.contains("settled DONE"), "{e}"),
+        other => panic!("ATTACK SUCCEEDED (second grant after DONE): {other:?}"),
+    }
 }

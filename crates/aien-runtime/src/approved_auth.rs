@@ -127,6 +127,32 @@ pub fn binding_bytes(id: &ApprovalIdentity) -> Vec<u8> {
     Value::Object(m).to_string().into_bytes()
 }
 
+/// What the requirements MAC covers: a domain tag, the approval binding and
+/// the requirement goal (a missing goal and an empty goal differ).
+fn requirements_bytes(id: &ApprovalIdentity, goal: Option<&str>, base: Option<&str>) -> Vec<u8> {
+    // v2 adds the sha256 of the file the bytes replace (or "absent"); v1 is the
+    // binding of an approval whose requirements do not depend on the prior file.
+    let mut m = if base.is_some() {
+        b"aien.requirements.v2\0".to_vec()
+    } else {
+        b"aien.requirements.v1\0".to_vec()
+    };
+    m.extend(binding_bytes(id));
+    m.push(0);
+    match goal {
+        None => m.push(0),
+        Some(g) => {
+            m.push(1);
+            m.extend(g.as_bytes());
+        }
+    }
+    if let Some(b) = base {
+        m.push(0);
+        m.extend(b.as_bytes());
+    }
+    m
+}
+
 /// The durable replay key of an approval: sha256 (hex) of its binding.
 pub fn approval_key(id: &ApprovalIdentity) -> String {
     hex(&Sha256::digest(binding_bytes(id)))
@@ -306,6 +332,32 @@ impl DeskKey {
         self.mac(&ApprovalIdentity::of(p, &ws, &self.id))
     }
 
+    /// The MAC (hex) over the approval binding AND the bound requirements
+    /// (`p.requirements`, empty when None). A separate MAC so the identity
+    /// binding and its known-answer vector stay unchanged.
+    pub fn sign_requirements(
+        &self,
+        p: &crate::approved::ApprovedProposal,
+        workspace: &Path,
+    ) -> String {
+        let ws = canonical_workspace(workspace).unwrap_or_else(|_| workspace.display().to_string());
+        let id = ApprovalIdentity::of(p, &ws, &self.id);
+        hex(&hmac_sha256(
+            &self.key,
+            &requirements_bytes(
+                &id,
+                p.requirements.as_deref(),
+                p.requirements_base.as_deref(),
+            ),
+        ))
+    }
+
+    /// Desk side: set both MACs of `p` (the identity MAC and the requirements MAC).
+    pub fn seal(&self, p: &mut crate::approved::ApprovedProposal, workspace: &Path) {
+        p.approval_mac = self.sign(p, workspace);
+        p.requirements_mac = self.sign_requirements(p, workspace);
+    }
+
     /// Daemon side: Ok(identity) only when `p.approval_mac` is this key's MAC
     /// over `p`'s binding; else `PROPOSAL_REFUSED Unauthenticated`.
     pub fn authenticate(
@@ -318,7 +370,26 @@ impl DeskKey {
         let want = hmac_sha256(&self.key, &binding_bytes(&id));
         let got = unhex32(&p.approval_mac);
         match got {
-            Some(g) if ct_eq(&g, &want) => Ok(id),
+            Some(g) if ct_eq(&g, &want) => {
+                let want_r = hmac_sha256(
+                    &self.key,
+                    &requirements_bytes(
+                        &id,
+                        p.requirements.as_deref(),
+                        p.requirements_base.as_deref(),
+                    ),
+                );
+                match unhex32(&p.requirements_mac) {
+                    Some(r) if ct_eq(&r, &want_r) => Ok(id),
+                    _ => Err(refuse(
+                        "Unauthenticated",
+                        format!(
+                            "requirements_mac is not the approval desk's (key {}) MAC over the bound requirements",
+                            self.id
+                        ),
+                    )),
+                }
+            }
             _ => Err(refuse(
                 "Unauthenticated",
                 format!(

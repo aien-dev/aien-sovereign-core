@@ -14,9 +14,9 @@
 //!   intent (A1b, symlinked file, symlinked directory, workspace "/");
 //! - the approved grant kind (`approved_grant`) cannot be written through
 //!   ComposeNote at all;
-//! - STILL OPEN (sc#261, out of #249 scope): a same-user caller can write a
-//!   generic grant inside a workspace it names and reach DONE. The last block
-//!   asserts that observed behaviour so the follow-up flips it visibly.
+//! - sc#261 closed: every one of those forged notes is now refused at the note
+//!   (no `authorization` record is ever written by a caller). The parent
+//!   swap cases (c28, c28b) live in approved_attacks_test.rs.
 //!
 //! Needs librx_compose.a (AIEN_OMEGA_COMPOSE_LIB); in a stub build the compose
 //! commands refuse and the test returns early.
@@ -135,234 +135,50 @@ async fn forged_grants_are_confined_and_the_approved_kind_is_reserved() {
         g
     };
 
-    // A1 as found: a grant that names no workspace is refused.
-    refused(
-        note(&c, "authorization", grant("NOTES.md", &target, None)).await,
-        "must name its workspace",
-    );
-
-    // A1b: target outside the workspace, in every shape.
+    // sovereign-core #261: every shape of caller-written authorization is
+    // refused at the note, before any confinement question arises: no
+    // workspace, a target outside, `..`, an absolute path, a symlinked file,
+    // a symlinked directory, a well-formed in-workspace grant, and the
+    // reserved approved_grant kind.
+    let refused_note = |g: serde_json::Value| note(&c, "authorization", g);
     let outside = root.join("outside.txt").to_string_lossy().to_string();
-    refused(
-        note(&c, "authorization", grant("NOTES.md", &outside, Some(&w))).await,
-        "OutsideWorkspace",
-    );
-    refused(
-        note(
-            &c,
-            "authorization",
-            grant("../outside.txt", &outside, Some(&w)),
-        )
-        .await,
-        "OutsideWorkspace",
-    );
-    refused(
-        note(
-            &c,
-            "authorization",
-            grant("etc/passwd", "/etc/passwd", Some("/")),
-        )
-        .await,
-        "OutsideWorkspace",
-    );
-    // A symlinked file and a symlinked directory inside the workspace.
     std::fs::write(&outside, "outside\n").unwrap();
     std::os::unix::fs::symlink(&outside, ws.join("link.txt")).unwrap();
     let lt = ws.join("link.txt").to_string_lossy().to_string();
-    refused(
-        note(&c, "authorization", grant("link.txt", &lt, Some(&w))).await,
-        "OutsideWorkspace",
-    );
     let elsewhere = root.join("elsewhere");
     std::fs::create_dir_all(&elsewhere).unwrap();
     std::os::unix::fs::symlink(&elsewhere, ws.join("sub")).unwrap();
     let st = ws.join("sub/x.txt").to_string_lossy().to_string();
-    refused(
-        note(&c, "authorization", grant("sub/x.txt", &st, Some(&w))).await,
-        "OutsideWorkspace",
-    );
-
-    // The approved grant kind cannot be forged through ComposeNote.
     let mut fake = grant("NOTES.md", &target, Some(&w));
     fake["approved_grant"] = json!(1);
     fake["approval_key"] = json!("0".repeat(64));
     fake["replay_claim"] = json!(1);
     fake["cx_promotion"] = json!(1);
     fake["cx_evidence"] = json!(1);
-    refused(note(&c, "authorization", fake).await, "approved_grant");
+    let mut minted = grant("NOTES.md", &target, Some(&w));
+    minted["minted_grant"] = json!(1);
+    minted["compose_commit"] = json!(1);
+    for g in [
+        grant("NOTES.md", &target, None),
+        grant("NOTES.md", &outside, Some(&w)),
+        grant("../outside.txt", &outside, Some(&w)),
+        grant("etc/passwd", "/etc/passwd", Some("/")),
+        grant("link.txt", &lt, Some(&w)),
+        grant("sub/x.txt", &st, Some(&w)),
+        grant("NOTES.md", &target, Some(&w)),
+        fake,
+        minted,
+    ] {
+        refused(refused_note(g).await, "sovereign-core #261");
+    }
 
-    // A grant written while its target was inside, retargeted at the intent:
-    // the intent names a target outside -> refused (no intent record).
-    let ok = match note(&c, "authorization", grant("NOTES.md", &target, Some(&w))).await {
-        ControlResponse::ComposeNoted(n) => n.id,
-        other => panic!("in-workspace generic grant: {other:?}"),
-    };
+    // Nothing was written, and an intent on any id is refused.
     refused(
-        intent(&c, ok, &psha, "NOTES.md", &outside, &csha).await,
+        intent(&c, 1, &psha, "NOTES.md", &target, &csha).await,
         "NotAuthorized",
     );
-    // The target swapped for a symlink after the grant: refused at the intent
-    // (the target read refuses a non-regular file before confinement does).
-    std::os::unix::fs::symlink(&outside, &target).unwrap();
-    refused(
-        intent(&c, ok, &psha, "NOTES.md", &target, &csha).await,
-        "EFFECT_REFUSED",
-    );
-    std::fs::remove_file(&target).unwrap();
+    assert!(!std::path::Path::new(&target).exists());
     assert_eq!(std::fs::read_to_string(&outside).unwrap(), "outside\n");
-
-    // STILL OPEN (sc#261): the generic grant inside the named workspace opens.
-    let i = match intent(&c, ok, &psha, "NOTES.md", &target, &csha).await {
-        ControlResponse::ComposeNoted(n) => n.id,
-        other => panic!("generic grant intent: {other:?}"),
-    };
-    std::fs::write(&target, content).unwrap();
-    let ack = match c
-        .send_command(ControlCommand::ComposeEffectAck {
-            intent: i,
-            reported: json!({"wrote": true}),
-        })
-        .await
-        .unwrap()
-    {
-        ControlResponse::ComposeNoted(n) => n.id,
-        other => panic!("ack: {other:?}"),
-    };
-    let state = match c
-        .send_command(ControlCommand::ComposeRecall {
-            ids: vec![ack],
-            prefix: None,
-        })
-        .await
-        .unwrap()
-    {
-        ControlResponse::ComposeRecalled(r) => {
-            serde_json::from_str::<serde_json::Value>(r.cited[0].text.as_deref().unwrap()).unwrap()
-                ["state"]
-                .as_str()
-                .unwrap()
-                .to_string()
-        }
-        other => panic!("recall: {other:?}"),
-    };
-    eprintln!("A1 generic path (sc#261, still open to same-user callers): {state}");
-    assert_eq!(state, "DONE", "observed behaviour changed: update sc#261");
-
-    // 476ca4 c28 shape: the target's parent directory is swapped for a symlink
-    // to a directory outside the workspace after the intent opened, and the
-    // bytes land there. Ack and reconcile re-run the confinement: UNRESOLVED,
-    // never DONE, and an operator cannot declare it DONE.
-    std::fs::create_dir_all(ws.join("swp1")).unwrap();
-    std::fs::create_dir_all(ws.join("swp2")).unwrap();
-    let outdir = root.join("outdir");
-    std::fs::create_dir_all(&outdir).unwrap();
-    let recall_state = |id: u64| {
-        let c = &c;
-        async move {
-            match c
-                .send_command(ControlCommand::ComposeRecall {
-                    ids: vec![id],
-                    prefix: None,
-                })
-                .await
-                .unwrap()
-            {
-                ControlResponse::ComposeRecalled(r) => {
-                    serde_json::from_str::<serde_json::Value>(r.cited[0].text.as_deref().unwrap())
-                        .unwrap()
-                }
-                other => panic!("recall: {other:?}"),
-            }
-        }
-    };
-    let swap = |d: &str| {
-        std::fs::rename(ws.join(d), ws.join(format!("{d}-moved"))).unwrap();
-        std::os::unix::fs::symlink(&outdir, ws.join(d)).unwrap();
-        std::fs::write(outdir.join("NOTES.md"), content).unwrap();
-    };
-    // (a) ack by the live executor.
-    let t1 = ws.join("swp1/NOTES.md").to_string_lossy().to_string();
-    let g1 = match note(&c, "authorization", grant("swp1/NOTES.md", &t1, Some(&w))).await {
-        ControlResponse::ComposeNoted(n) => n.id,
-        other => panic!("swp1 grant: {other:?}"),
-    };
-    let i1 = match intent(&c, g1, &psha, "swp1/NOTES.md", &t1, &csha).await {
-        ControlResponse::ComposeNoted(n) => n.id,
-        other => panic!("swp1 intent: {other:?}"),
-    };
-    swap("swp1");
-    let a1 = match c
-        .send_command(ControlCommand::ComposeEffectAck {
-            intent: i1,
-            reported: json!({"wrote": true}),
-        })
-        .await
-        .unwrap()
-    {
-        ControlResponse::ComposeNoted(n) => n.id,
-        other => panic!("ack: {other:?}"),
-    };
-    let v = recall_state(a1).await;
-    assert_eq!(v["state"], "UNRESOLVED", "{v}");
-    assert!(
-        v["disk_error"]
-            .as_str()
-            .unwrap()
-            .starts_with("OutsideWorkspace"),
-        "{v}"
-    );
-    // (b) start-up style reconcile of an intent whose executor is gone.
-    let t2 = ws.join("swp2/NOTES.md").to_string_lossy().to_string();
-    let g2 = match note(&c, "authorization", grant("swp2/NOTES.md", &t2, Some(&w))).await {
-        ControlResponse::ComposeNoted(n) => n.id,
-        other => panic!("swp2 grant: {other:?}"),
-    };
-    let i2 = match c
-        .send_command(ControlCommand::ComposeEffectIntent {
-            authorization: g2,
-            proposal_sha256: psha.clone(),
-            path: "swp2/NOTES.md".into(),
-            target: t2.clone(),
-            content_sha256: csha.clone(),
-            executor_pid: 1,
-            executor_start: 1,
-        })
-        .await
-        .unwrap()
-    {
-        ControlResponse::ComposeNoted(n) => n.id,
-        other => panic!("swp2 intent: {other:?}"),
-    };
-    swap("swp2");
-    let declared = c
-        .send_command(ControlCommand::ComposeReconcile {
-            declare: Some(aien_runtime::control::ReconcileDeclare {
-                intent: i2,
-                state: "done".into(),
-                approver: "drake".into(),
-            }),
-        })
-        .await
-        .unwrap();
-    refused(declared, "cannot be declared DONE");
-    let rec = match c
-        .send_command(ControlCommand::ComposeReconcile { declare: None })
-        .await
-        .unwrap()
-    {
-        ControlResponse::ComposeReconciled(r) => *r,
-        other => panic!("reconcile: {other:?}"),
-    };
-    let o = rec
-        .outcomes
-        .iter()
-        .find(|o| o.intent == i2)
-        .expect("reconciled i2");
-    assert_eq!(o.state, "UNRESOLVED", "{o:?}");
-    assert!(
-        rec.outcomes
-            .iter()
-            .all(|o| o.intent != i1 || o.state != "DONE"),
-        "{rec:?}"
-    );
+    // The parent-directory-swap cases (476ca4 c28, c28b) are covered on the
+    // daemon-written approved grant in approved_attacks_test.rs.
 }
