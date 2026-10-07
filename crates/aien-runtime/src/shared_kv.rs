@@ -651,19 +651,13 @@ mod tests {
         assert!(plan_checked_model_kv(&cfg, None, &|| Ok(avail), false).is_err());
         let plan = plan_checked_model_kv(&cfg, Some(16), &|| Ok(avail), false).unwrap();
         assert_eq!(plan.total_blocks, 1);
-        // The daemon path builds exactly the capped pool.
-        let weights = TransformerWeights::reference_test_weights(&cfg);
-        let (spine, _backend, plan) = build_shared_kv_runtime_for_model(
-            weights,
-            Arc::new(aien_inference_abi::ReferenceCpuBackend::new()),
-            SchedulerConfig::default(),
-            8,
-            Some(17),
-            &|| Ok(1 << 30),
-            false,
-        )
-        .expect("capped runtime");
+        // The capped plan sizes the real pool. No spine here: a spine creates a
+        // RuntimeController, which reads the process-wide AIEN_RUNTIME_STATE_DIR that
+        // control::tests points at a dir holding deliberately damaged state files.
+        let plan = plan_checked_model_kv(&cfg, Some(17), &|| Ok(1 << 30), false).unwrap();
         assert_eq!(plan.total_blocks, 2);
-        assert_eq!(spine.kv_manager.read().total_block_count(), 2);
+        let weights = TransformerWeights::reference_test_weights(&cfg);
+        let mgr = build_model_kv_manager(&weights, plan.total_blocks).expect("pool built");
+        assert_eq!(mgr.read().total_block_count(), 2);
     }
 }
