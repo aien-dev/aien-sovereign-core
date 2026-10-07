@@ -97,6 +97,11 @@ impl AienRuntimeServer {
             }
         }
 
+        // Bad compose limits stop the daemon here, loudly, before anything is served.
+        crate::spine::compose_budgets_from_env().map_err(|e| format!("compose limits: {e}"))?;
+        crate::spine::compose_doc_max_tokens_from_env()
+            .map_err(|e| format!("compose limits: {e}"))?;
+
         let listener = UnixListener::bind(&self.socket_path).map_err(|e| {
             format!(
                 "Failed to bind runtime UNIX domain socket at {}: {}",
@@ -166,15 +171,22 @@ impl AienRuntimeServer {
 
         // NEXT-PHASE-1: the compose bridge (opened on the first RunComposeTask).
         let compose = match compose_dir_from_env() {
-            Ok(dir) => Some(Arc::new(ComposeBridge::new(
-                dir,
-                model_proposer(
+            Ok(dir) => Some(Arc::new(
+                ComposeBridge::new(
+                    dir,
+                    model_proposer(
+                        self.spine.clone(),
+                        self.tokenizer.clone(),
+                        tokio::runtime::Handle::current(),
+                    ),
+                    "model:StreamTurn-path",
+                )
+                .with_doc_proposer(doc_model_proposer(
                     self.spine.clone(),
                     self.tokenizer.clone(),
                     tokio::runtime::Handle::current(),
-                ),
-                "model:StreamTurn-path",
-            ))),
+                )?),
+            )),
             Err(e) => {
                 tracing::warn!("compose bridge disabled: {e}");
                 None
@@ -463,15 +475,15 @@ async fn generate_text(
     };
     tokio::time::timeout(limit, collect)
         .await
-        .map_err(|_| format!("model proposal exceeded {} ms", limit.as_millis()))?
+        .map_err(|_| crate::spine::wall_clock_reason(limit.as_millis()))?
 }
 
 /// The compose "model" Skill: real inference through `generate_text`, run
 /// from an omega World worker thread (not a tokio thread) via `block_on`.
 /// Greedy, at most `AIEN_COMPOSE_MAX_TOKENS` (default 48) tokens per reply;
 /// each call gets the limit `propose_with_retries` passes (what is left of
-/// the 29 s budget, under rx_compose_run's 30 s quiescence wait), so a slow
-/// model fails the Skill (no proposal) instead of failing the run.
+/// the task budget: 29 s for an edit, 120 s for a document; omega waits that
+/// plus 1 s), so a slow model fails the Skill (no proposal) instead of failing the run.
 pub fn model_proposer(
     spine: Arc<Mutex<AienRuntimeSpine>>,
     tokenizer: Arc<RwLock<Option<ChatTokenizer>>>,
@@ -481,6 +493,26 @@ pub fn model_proposer(
         .ok()
         .and_then(|v| v.trim().parse::<usize>().ok())
         .unwrap_or(48);
+    proposer_with_cap(spine, tokenizer, handle, max_tokens)
+}
+
+/// The proposer for full-document tasks: the same inference path with its own
+/// token cap, `AIEN_COMPOSE_DOC_MAX_TOKENS` (default 1024). A bad value is refused.
+pub fn doc_model_proposer(
+    spine: Arc<Mutex<AienRuntimeSpine>>,
+    tokenizer: Arc<RwLock<Option<ChatTokenizer>>>,
+    handle: tokio::runtime::Handle,
+) -> Result<ComposeProposer, String> {
+    let cap = crate::spine::compose_doc_max_tokens_from_env()?;
+    Ok(proposer_with_cap(spine, tokenizer, handle, cap))
+}
+
+fn proposer_with_cap(
+    spine: Arc<Mutex<AienRuntimeSpine>>,
+    tokenizer: Arc<RwLock<Option<ChatTokenizer>>>,
+    handle: tokio::runtime::Handle,
+    max_tokens: usize,
+) -> ComposeProposer {
     Arc::new(move |prompt: &str, limit: std::time::Duration| {
         let messages = vec![crate::control::ChatTurn {
             role: "user".into(),

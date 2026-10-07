@@ -6,8 +6,11 @@
 //! in a stub build they check that the bridge reports the missing library.
 use aien_runtime::control::{ComposeRecallReport, ComposeTaskReport, ControlResponse};
 use aien_runtime::spine::{
-    check_file_proposal, parse_file_proposal, propose_with_retries, ComposeBridge, ComposeProposer,
-    Generation, COMPOSE_ATTEMPT_BUDGET, COMPOSE_MAX_ATTEMPTS, COMPOSE_SKILL_BUDGET,
+    check_file_proposal, compose_attempt_budget, parse_compose_budget,
+    parse_compose_doc_max_tokens, parse_file_proposal, propose_with_retries, wall_clock_reason,
+    ComposeBridge, ComposeBudgets, ComposeProposer, Generation, ProposalKind,
+    COMPOSE_ATTEMPT_BUDGET, COMPOSE_DOC_BUDGET, COMPOSE_MAX_ATTEMPTS, COMPOSE_SKILL_BUDGET,
+    COMPOSE_WAIT_MARGIN,
 };
 use std::sync::Arc;
 
@@ -422,6 +425,7 @@ ok
 fn measured_attempt_budget_admits_a_second_attempt() {
     use std::time::Duration;
     assert!(COMPOSE_SKILL_BUDGET < Duration::from_secs(30));
+    // the default (AIEN_COMPOSE_EDIT_BUDGET_MS unset): omega's 30 s wait less 1 s
     assert_eq!(COMPOSE_SKILL_BUDGET, Duration::from_secs(29));
     assert_eq!(COMPOSE_ATTEMPT_BUDGET, Duration::from_millis(12_000));
     // 2 839 + 896 + 47 x 166.6 + 60 ms, the measured full retry attempt
@@ -682,4 +686,136 @@ fn proposal_fence_many_examples_and_trailing_text_keep_every_byte() {
     // No outer fence at all: the document is taken whole.
     let p = check_file_proposal(&format!("filename: g.md\n{doc}")).unwrap();
     assert_eq!(p.content, doc);
+}
+
+/// Both budget settings: unset gives the default; 1 000..=599 000 ms is
+/// accepted; anything else is refused with a message naming the setting.
+#[test]
+fn compose_budget_settings_parse_and_refuse() {
+    use std::time::Duration;
+    let edit = |v| parse_compose_budget("AIEN_COMPOSE_EDIT_BUDGET_MS", COMPOSE_SKILL_BUDGET, v);
+    let doc = |v| parse_compose_budget("AIEN_COMPOSE_DOC_BUDGET_MS", COMPOSE_DOC_BUDGET, v);
+    assert_eq!(edit(None), Ok(Duration::from_secs(29)));
+    assert_eq!(doc(None), Ok(Duration::from_secs(120)));
+    assert_eq!(edit(Some("29000")), Ok(COMPOSE_SKILL_BUDGET));
+    assert_eq!(doc(Some("90000")), Ok(Duration::from_secs(90)));
+    assert_eq!(doc(Some(" 1000 ")), Ok(Duration::from_secs(1)));
+    assert_eq!(doc(Some("599000")), Ok(Duration::from_millis(599_000)));
+    for bad in [
+        "",
+        "abc",
+        "-5",
+        "1.5",
+        "999",
+        "0",
+        "599001",
+        "600000",
+        "99999999999999999999",
+    ] {
+        let e = edit(Some(bad)).expect_err(bad);
+        assert!(e.contains("AIEN_COMPOSE_EDIT_BUDGET_MS"), "{bad}: {e}");
+        let e = doc(Some(bad)).expect_err(bad);
+        assert!(e.contains("AIEN_COMPOSE_DOC_BUDGET_MS"), "{bad}: {e}");
+    }
+}
+
+/// AIEN_COMPOSE_DOC_MAX_TOKENS: default 1024, 16..=4096, bad values refused.
+#[test]
+fn compose_doc_token_cap_parses_and_refuses() {
+    assert_eq!(parse_compose_doc_max_tokens(None), Ok(1024));
+    assert_eq!(parse_compose_doc_max_tokens(Some("16")), Ok(16));
+    assert_eq!(parse_compose_doc_max_tokens(Some(" 4096 ")), Ok(4096));
+    for bad in ["", "x", "-1", "15", "0", "4097", "1e3"] {
+        let e = parse_compose_doc_max_tokens(Some(bad)).expect_err(bad);
+        assert!(e.contains("AIEN_COMPOSE_DOC_MAX_TOKENS"), "{bad}: {e}");
+    }
+}
+
+/// A task that names an existing file is an edit (29 s); a task with no
+/// existing target creates a new document (120 s). Omega's wait follows by +1 s.
+#[test]
+fn kind_selects_budget() {
+    use std::time::Duration;
+    let ws = tempfile::tempdir().expect("tempdir");
+    std::fs::write(ws.path().join("notes.md"), "# notes\n").expect("write");
+    let (_, _, edit_kind) =
+        aien_runtime::spine::task_plan("add a line to notes.md", ws.path()).expect("plan");
+    let (_, _, new_kind) =
+        aien_runtime::spine::task_plan("write a new file faq.md", ws.path()).expect("plan");
+    assert_eq!(edit_kind, ProposalKind::Edit);
+    assert_eq!(new_kind, ProposalKind::Document);
+    let b = ComposeBudgets::default();
+    assert_eq!(b.for_kind(ProposalKind::Edit), Duration::from_secs(29));
+    assert_eq!(b.for_kind(ProposalKind::Document), Duration::from_secs(120));
+    assert_eq!(
+        b.for_kind(ProposalKind::Document) + COMPOSE_WAIT_MARGIN,
+        Duration::from_millis(121_000)
+    );
+    // edits keep the measured 12 s attempt budget; documents need ~the shortest
+    // measured full document (30 s), capped at half a small custom budget
+    assert_eq!(
+        compose_attempt_budget(ProposalKind::Edit, b.edit),
+        COMPOSE_ATTEMPT_BUDGET
+    );
+    assert_eq!(
+        compose_attempt_budget(ProposalKind::Document, b.doc),
+        Duration::from_secs(30)
+    );
+    assert_eq!(
+        compose_attempt_budget(ProposalKind::Document, Duration::from_secs(20)),
+        Duration::from_secs(10)
+    );
+}
+
+/// The two ways a long reply can fail leave different, stable reasons: a cut
+/// at the token limit is refused ("reply cut at the token limit ...
+/// finish_reason max_tokens"), a slow model times out ("model proposal
+/// exceeded N ms"). Neither text contains the other's marker.
+#[test]
+fn token_cut_and_wall_clock_reasons_are_distinct() {
+    use std::time::Duration;
+    // token-limit cut
+    let cut = |_: &str, _: Duration| {
+        Ok(Generation {
+            text: "filename: a.md\nline\n".into(),
+            tokens: 1024,
+            finish_reason: Some("max_tokens".into()),
+            ..Default::default()
+        })
+    };
+    let (out, a) = propose_with_retries(
+        &cut,
+        "p",
+        Duration::from_secs(120),
+        Duration::from_secs(30),
+        1,
+    );
+    let why = out.expect_err("a cut reply is never a proposal");
+    assert_eq!(a[0].outcome, "refused");
+    assert!(
+        why.contains("reply cut at the token limit after 1024 tokens (finish_reason max_tokens)"),
+        "{why}"
+    );
+    assert!(!why.contains("exceeded"), "{why}");
+    // wall-clock timeout (the text the daemon proposer emits)
+    let slow = |_: &str, limit: Duration| -> Result<Generation, String> {
+        Err(wall_clock_reason(limit.as_millis()))
+    };
+    let (out, a) = propose_with_retries(
+        &slow,
+        "p",
+        Duration::from_secs(120),
+        Duration::from_secs(30),
+        1,
+    );
+    let why = out.expect_err("timed out");
+    assert_eq!(a[0].outcome, "timeout");
+    assert!(
+        why.starts_with("model proposal exceeded ") && why.ends_with(" ms"),
+        "{why}"
+    );
+    assert!(
+        !why.contains("token limit") && !why.contains("max_tokens"),
+        "{why}"
+    );
 }

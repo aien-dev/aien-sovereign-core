@@ -182,3 +182,14 @@ extern "C" {
     ) -> c_int;
     pub fn rxc_host_close(h: *mut RxcHost);
 }
+
+// Present only when the omega checkout exposes it (build.rs sets
+// `has_omega_wait_ms` after finding the symbol in rxc_host_abi.h).
+#[cfg(has_omega_wait_ms)]
+extern "C" {
+    /// Wraps omega `rx_compose_set_wait_ms` on the handle's composition.
+    pub fn rxc_host_set_wait_ms(h: *mut RxcHost, wait_ms: u32) -> c_int;
+}
+
+/// omega settle wait when `rxc_host_set_wait_ms` is never called.
+pub const WAIT_MS_DEFAULT: u32 = 30_000;
