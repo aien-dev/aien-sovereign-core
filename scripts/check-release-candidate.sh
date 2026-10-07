@@ -2,14 +2,15 @@
 # Fail closed unless this tree (or a built package) may be released as the candidate in release/candidate.toml.
 #   scripts/check-release-candidate.sh                         tree check; prints "candidate=<id>" on success
 #   scripts/check-release-candidate.sh --model F               also write the [model] table to file F
-#   scripts/check-release-candidate.sh --package A.tar.gz [--native]
+#   scripts/check-release-candidate.sh --package A.tar.gz --native
 #                                                              also check a built package (see below)
 # Tree checks: candidate is set and not "unknown"; omega.lock equals omega-commit; Cargo.lock holds exactly the
 # [pins] revisions (aien-protocols, crumb-spec, spark-crumbs); the [model] table is complete (every digest is 64 hex).
 # Package checks: release.toml names this candidate; its [model] table equals the candidate's (model id, safetensors,
 # tokenizer, config, fixture digests); aien-cli-sha256 equals the sha256 of bin/aien in the archive; every [files]
-# entry matches; with --native (the linux-aarch64 build that links the omega engine) aien-cli-sha256 must also equal
-# [executables] aien-cli-native-release. Build recipe: docs/release/BUILD_RECIPE.md.
+# entry matches; --native is REQUIRED (the linux-aarch64 build that links the omega engine): aien-cli-sha256 must equal
+# [executables] aien-cli-native-release and every helper binary must equal its sc-<name> entry. A package without --native
+# is refused (no candidate digest for that kind). Build recipe: docs/release/BUILD_RECIPE.md.
 # Env: AIEN_CANDIDATE_ROOT overrides the tree root (tests).
 set -euo pipefail
 cd "${AIEN_CANDIDATE_ROOT:-$(dirname "${BASH_SOURCE[0]}")/..}"
@@ -79,10 +80,16 @@ if [[ -n "$PKG" ]]; then
     [[ "$n" -gt 0 ]] || die "release.toml lists no files"
     have_n="$(find "$X" -type f ! -name release.toml | grep -c .)"
     [[ "$have_n" -eq "$n" ]] || die "package holds $have_n files but release.toml lists $n"
-    if [[ "$NATIVE" -eq 1 ]]; then
-        exe="$(get executables aien-cli-native-release "$M")"
-        [[ "$exe" =~ ^[0-9a-f]{64}$ ]] || die "[executables] aien-cli-native-release missing in $M"
-        [[ "$want_aien" == "$exe" ]] || die "aien-cli digest $want_aien is not $cand's aien-cli-native-release $exe (build with scripts/release-build.sh, see docs/release/BUILD_RECIPE.md)"
-    fi
+    # Every shipped executable must be bound to a candidate manifest digest. Only the native build (linux aarch64, omega
+    # linked) has digests in [executables]; a package of any other kind has none and is refused, never passed.
+    [[ "$NATIVE" -eq 1 ]] || die "no candidate digest for this package kind: $cand has [executables] digests only for the native build (--native); a non-native package cannot be released as $cand"
+    exe="$(get executables aien-cli-native-release "$M")"
+    [[ "$exe" =~ ^[0-9a-f]{64}$ ]] || die "[executables] aien-cli-native-release missing in $M"
+    [[ "$want_aien" == "$exe" ]] || die "aien-cli digest $want_aien is not $cand's aien-cli-native-release $exe (build with scripts/release-build.sh, see docs/release/BUILD_RECIPE.md)"
+    for helper in spark-cockpit-rs spark-inquisitor cortex-encoder-rs cortex-rs spark-supervisor spark-debugger; do
+        hexe="$(get executables "sc-$helper" "$M")"
+        [[ "$hexe" =~ ^[0-9a-f]{64}$ ]] || die "[executables] sc-$helper missing in $M"
+        [[ -f "$X/bin/$helper" && "$(sha "$X/bin/$helper")" == "$hexe" ]] || die "package bin/$helper is not $cand's sc-$helper ($hexe)"
+    done
 fi
 echo "candidate=$cand"
