@@ -246,13 +246,28 @@ pub struct SpeculativeToolCall {
 pub struct EffectLane {
     broker: McpBroker,
     exposure: Option<Exposure>,
+    clock: Option<Clock>,
 }
+
+/// Host-supplied time source, in the same unit as `now` and `expires_at`.
+pub type Clock = Arc<dyn Fn() -> u64 + Send + Sync>;
 
 impl EffectLane {
     pub fn new(broker: McpBroker) -> Self {
         Self {
             broker,
             exposure: None,
+            clock: None,
+        }
+    }
+
+    /// A lane whose `execute_effect` re-checks approval expiry at commit using `clock`. The crate
+    /// reads no wall clock itself. Without a clock, commit judges expiry against the `now` the
+    /// host passed at mint (limit: a held effect can then outlive `expires_at`).
+    pub fn with_clock(&self, clock: Clock) -> Self {
+        Self {
+            clock: Some(clock),
+            ..self.clone()
         }
     }
 
@@ -263,6 +278,7 @@ impl EffectLane {
         Self {
             broker: self.broker.clone(),
             exposure: Some(exposure),
+            clock: self.clock.clone(),
         }
     }
 
@@ -459,7 +475,12 @@ impl EffectLane {
             .ok_or(ApprovalError::Unknown)?;
         record.state = GrantState::Reserved(token);
         record.release_reason = None;
-        Ok(Reservation::new(self.broker.clone(), grant.id(), token))
+        Ok(Reservation::new(
+            self.broker.clone(),
+            grant.id(),
+            token,
+            now,
+        ))
     }
 
     pub async fn execute_effect(
@@ -507,7 +528,11 @@ impl EffectLane {
             // Point of no return: the provider is about to be called. Until here a refusal drops
             // the effect and releases its grant; from here the grant is spent.
             if let Some(reservation) = effect.reservation() {
-                reservation.commit_locked(&mut inner)?;
+                let now = self
+                    .clock
+                    .as_ref()
+                    .map_or(reservation.reserved_at(), |c| c());
+                reservation.commit_locked(&mut inner, now)?;
             }
             inner.ledger.insert(
                 key,

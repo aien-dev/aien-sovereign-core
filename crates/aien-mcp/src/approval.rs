@@ -175,6 +175,7 @@ pub(crate) struct Reservation {
     broker: McpBroker,
     grant: Digest32,
     token: u64,
+    reserved_at: u64,
     finished: AtomicBool,
 }
 
@@ -187,13 +188,18 @@ impl std::fmt::Debug for Reservation {
 }
 
 impl Reservation {
-    pub(crate) fn new(broker: McpBroker, grant: Digest32, token: u64) -> Self {
+    pub(crate) fn new(broker: McpBroker, grant: Digest32, token: u64, reserved_at: u64) -> Self {
         Self {
             broker,
             grant,
             token,
+            reserved_at,
             finished: AtomicBool::new(false),
         }
+    }
+
+    pub(crate) fn reserved_at(&self) -> u64 {
+        self.reserved_at
     }
 
     pub(crate) fn grant_id(&self) -> Digest32 {
@@ -202,9 +208,16 @@ impl Reservation {
 
     /// Make the spend final. The caller already holds the broker lock (`inner`). Fails if the
     /// reservation was released (cancelled) first.
-    pub(crate) fn commit_locked(&self, inner: &mut Inner) -> Result<(), crate::Error> {
+    pub(crate) fn commit_locked(&self, inner: &mut Inner, now: u64) -> Result<(), crate::Error> {
         match inner.approvals.get_mut(&self.grant) {
             Some(r) if r.state == GrantState::Reserved(self.token) => {
+                if now >= r.expires_at {
+                    // Fail closed: give the grant back (a later mint refuses it as Expired).
+                    r.state = GrantState::Available;
+                    r.release_reason = Some("expired before execute".to_string());
+                    self.finished.store(true, Ordering::SeqCst);
+                    return Err(crate::Error::ApprovalExpired);
+                }
                 r.state = GrantState::Spent;
                 self.finished.store(true, Ordering::SeqCst);
                 Ok(())

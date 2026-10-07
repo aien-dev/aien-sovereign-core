@@ -295,3 +295,98 @@ async fn grant_from_another_broker_has_no_status() {
     let g = other.desk.issue(&other.intent, scope("o"), 100);
     assert_eq!(h.desk.status(&g), None);
 }
+
+#[tokio::test]
+async fn held_effect_past_expiry_is_refused_at_commit_and_released() {
+    let h = harness().await;
+    let clock = Arc::new(std::sync::atomic::AtomicU64::new(1));
+    let c = clock.clone();
+    let lane = h
+        .lane
+        .with_clock(Arc::new(move || c.load(Ordering::SeqCst)));
+    let g = h.desk.issue(&h.intent, scope("exp"), 10);
+    let effect = lane
+        .authorize_approved(h.intent.clone(), scope("exp"), &EffectClassAuthority, &g, 1)
+        .unwrap();
+    assert_eq!(h.desk.status(&g), Some(GrantStatus::Reserved));
+    clock.store(10, Ordering::SeqCst);
+    assert_eq!(
+        lane.execute_effect(effect).await.unwrap_err(),
+        Error::ApprovalExpired
+    );
+    assert_eq!(h.calls.load(Ordering::SeqCst), 0);
+    assert_eq!(h.desk.status(&g), Some(GrantStatus::Available));
+    assert_eq!(
+        h.desk.release_reason(&g).as_deref(),
+        Some("expired before execute")
+    );
+    assert_eq!(
+        approval(mint(&h, "exp", &g, 10).unwrap_err()),
+        ApprovalError::Expired
+    );
+}
+
+#[tokio::test]
+async fn clock_before_expiry_still_commits() {
+    let h = harness().await;
+    let lane = h.lane.with_clock(Arc::new(|| 5));
+    let g = h.desk.issue(&h.intent, scope("ok"), 10);
+    let effect = lane
+        .authorize_approved(h.intent.clone(), scope("ok"), &EffectClassAuthority, &g, 1)
+        .unwrap();
+    lane.execute_effect(effect).await.unwrap();
+    assert_eq!(h.desk.status(&g), Some(GrantStatus::Spent));
+}
+
+#[tokio::test]
+async fn provider_panic_after_commit_leaves_the_grant_spent_and_never_reruns() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let c = calls.clone();
+    let tool = ToolDescriptor::new("t", ToolEffects::WORLD_MUTATION, Digest32::of(b"t"));
+    let wire = MemoryWire::new(vec![tool], move |_, _| {
+        c.fetch_add(1, Ordering::SeqCst);
+        panic!("provider blew up");
+    });
+    let broker = McpBroker::new();
+    let provider = ProviderId::new("p");
+    broker
+        .admit(provider.clone(), Arc::new(wire))
+        .await
+        .unwrap();
+    let live = SpeculativeLane::new(broker.clone())
+        .discovery_snapshot(&provider)
+        .await
+        .unwrap()
+        .catalog_digest;
+    let intent = EffectIntent {
+        provider,
+        tool_name: "t".into(),
+        arguments: json!({"a": 1}),
+        capability_digest: live,
+    };
+    let lane = EffectLane::new(broker.clone());
+    let desk = ApprovalDesk::new(broker);
+    let g = desk.issue(&intent, scope("pan"), 100);
+    let (l2, i2, g2) = (lane.clone(), intent.clone(), g.clone());
+    let joined = std::thread::spawn(move || {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let _ = rt.block_on(l2.authorize_and_execute_approved(
+            i2,
+            scope("pan"),
+            &EffectClassAuthority,
+            &g2,
+            1,
+        ));
+    })
+    .join();
+    assert!(joined.is_err(), "provider panic must propagate");
+    assert_eq!(desk.status(&g), Some(GrantStatus::Spent));
+    let again = lane
+        .authorize_and_execute_approved(intent, scope("pan"), &EffectClassAuthority, &g, 1)
+        .await
+        .unwrap_err();
+    assert_eq!(again, AuthorityOutcome::Execution(Error::EffectInFlight));
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+}

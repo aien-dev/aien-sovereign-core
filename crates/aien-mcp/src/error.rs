@@ -29,4 +29,6 @@ pub enum Error {
     Transport(String),
     #[error("approval is no longer reserved for this effect (it was cancelled)")]
     ApprovalNotReserved,
+    #[error("approval expired before the effect could run; nothing was called")]
+    ApprovalExpired,
 }
