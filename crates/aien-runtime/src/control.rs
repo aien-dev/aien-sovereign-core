@@ -31,6 +31,18 @@ pub fn format_chat(template: aien_inference_abi::ChatTemplate, messages: &[ChatT
     template.render(&turns)
 }
 
+/// Fallible [`format_chat`]: a plain model (no chat template) is refused.
+pub fn try_format_chat(
+    template: aien_inference_abi::ChatTemplate,
+    messages: &[ChatTurn],
+) -> Result<String, aien_inference_abi::TokenizerError> {
+    let turns: Vec<(&str, &str)> = messages
+        .iter()
+        .map(|m| (m.role.as_str(), m.content.as_str()))
+        .collect();
+    template.try_render(&turns)
+}
+
 /// TinyLlama chat template. Generation always continues from an assistant header.
 pub fn format_tinyllama_chat(messages: &[ChatTurn]) -> String {
     format_chat(aien_inference_abi::ChatTemplate::Zephyr, messages)

@@ -757,6 +757,177 @@ impl TensorBackend for OmegaGb10Backend {
     }
 }
 
+// ---- bounded GPU session open (issue #239, diagnostics for #236) ----
+
+/// Attempts the daemon makes to open the GPU session before it refuses to start.
+pub const GPU_SESSION_OPEN_ATTEMPTS: u32 = 3;
+
+/// Pause between two session-open attempts.
+pub const GPU_SESSION_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// Wall-clock budget for the whole GPU session open (probe plus retries). It is checked
+/// only BETWEEN attempts: no new attempt starts once it has passed. An attempt already
+/// running is never interrupted, aborted or killed (standing rule: a GPU job is not
+/// killed mid-launch), so a single probe that hangs forever still blocks startup; the
+/// bound guarantees only that a slow-failing sequence of attempts cannot go on past
+/// the deadline plus one attempt.
+pub const GPU_SESSION_OPEN_DEADLINE: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Why one session-open attempt failed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionAttemptError {
+    /// Return code and omega stage, as the chip-error log prints them.
+    pub message: String,
+    /// True once omega has latched the process (every later chip call fails), so a
+    /// further attempt cannot succeed and is not made.
+    pub latched: bool,
+}
+
+/// Runs `attempt(n)` for `n = 1..=attempts` (at least once) until one succeeds and
+/// returns its value with the attempt number. Each failure goes to `on_failure`
+/// (the caller logs it); `pause(n)` runs between failed attempt `n` and the next. A
+/// latched failure stops at once. Never loops past `attempts`.
+pub fn retry_bounded<T>(
+    attempts: u32,
+    attempt: impl FnMut(u32) -> Result<T, SessionAttemptError>,
+    on_failure: impl FnMut(u32, u32, &SessionAttemptError),
+    pause: impl FnMut(u32),
+) -> Result<(T, u32), String> {
+    retry_bounded_within(
+        attempts,
+        None,
+        || std::time::Duration::ZERO,
+        attempt,
+        on_failure,
+        pause,
+    )
+}
+
+/// [`retry_bounded`] with a wall-clock bound. `elapsed()` is the time since the whole
+/// startup began (the caller's injected clock). `deadline` is checked only BETWEEN
+/// attempts, after the pause: once `elapsed() >= deadline` no further attempt starts
+/// and the error names the attempts made and the elapsed time. Attempt 1 always runs.
+/// An attempt already in flight is never interrupted: `attempt` is called to
+/// completion, because a GPU launch must not be cancelled or killed mid-way. So the
+/// deadline is a bound on starting attempts, not a timeout on a single hung attempt.
+pub fn retry_bounded_within<T>(
+    attempts: u32,
+    deadline: Option<std::time::Duration>,
+    mut elapsed: impl FnMut() -> std::time::Duration,
+    mut attempt: impl FnMut(u32) -> Result<T, SessionAttemptError>,
+    mut on_failure: impl FnMut(u32, u32, &SessionAttemptError),
+    mut pause: impl FnMut(u32),
+) -> Result<(T, u32), String> {
+    let attempts = attempts.max(1);
+    let mut last = String::new();
+    for n in 1..=attempts {
+        if n > 1 {
+            if let Some(limit) = deadline {
+                let now = elapsed();
+                if now >= limit {
+                    return Err(format!(
+                        "GPU session open timed out: deadline {} ms passed after {} of {attempts} attempts, elapsed {} ms (an attempt in flight is never interrupted; the deadline applies between attempts); last error: {last}",
+                        limit.as_millis(),
+                        n - 1,
+                        now.as_millis()
+                    ));
+                }
+            }
+        }
+        match attempt(n) {
+            Ok(v) => return Ok((v, n)),
+            Err(e) => {
+                on_failure(n, attempts, &e);
+                if e.latched {
+                    return Err(format!(
+                        "GPU session open failed on attempt {n}/{attempts} and omega latched the process (not retried): {}",
+                        e.message
+                    ));
+                }
+                last = e.message;
+                if n < attempts {
+                    pause(n);
+                }
+            }
+        }
+    }
+    Err(format!(
+        "GPU session did not open after {attempts} attempts; last error: {last}"
+    ))
+}
+
+fn fmt_mem(bytes: Option<u64>) -> String {
+    match bytes {
+        Some(b) => format!("{b} bytes ({:.2} GiB)", b as f64 / (1u64 << 30) as f64),
+        None => "unknown".to_string(),
+    }
+}
+
+/// Opens the GPU session before serving, with up to `attempts` tries `delay` apart.
+///
+/// omega opens its device and channel lazily on the first chip call, and a failed
+/// open leaves the session closed but not latched (omega c0369e6
+/// src/omega_gpu_session.c:101-109: `m16_native_create_channel` failure closes and
+/// returns NULL without setting `g_blocked`), so the next call opens again. The
+/// probe is one 1 x 128 rmsnorm called on `aien_omega_gpu` directly, outside the
+/// `TensorBackend` accounting, so a failure here is a clear start-up refusal
+/// instead of the strict-fallback panic at warm-up (#236). Every attempt logs its
+/// number, the omega status and stage, and `MemAvailable` from `mem_available`.
+/// `deadline` bounds the whole open between attempts only; see [`retry_bounded_within`]
+/// (an in-flight probe is never interrupted).
+/// Returns the attempt number that opened the session.
+pub fn open_gpu_session_with_retry(
+    attempts: u32,
+    delay: std::time::Duration,
+    deadline: std::time::Duration,
+    mem_available: &dyn Fn() -> Option<u64>,
+) -> Result<u32, String> {
+    if !aien_omega_gpu::is_native() {
+        return Err(
+            "GPU session open: the Omega GPU engine is not linked (stub build)".to_string(),
+        );
+    }
+    const PROBE_DIM: usize = 128; // omega rmsnorm needs dim % 128 == 0
+    let ones = [1.0f32; PROBE_DIM];
+    let started = std::time::Instant::now();
+    let (_, n) = retry_bounded_within(
+        attempts,
+        Some(deadline),
+        || started.elapsed(),
+        |_| {
+            let mut out = [0.0f32; PROBE_DIM];
+            aien_omega_gpu::rmsnorm_f32(1, PROBE_DIM, &ones, &ones, 1e-5, &mut out)
+                .map(|_| ())
+                .map_err(|e| {
+                    let stage = aien_omega_gpu::last_error();
+                    SessionAttemptError {
+                        message: if stage.is_empty() {
+                            e.to_string()
+                        } else {
+                            format!("{e} (stage: {stage})")
+                        },
+                        latched: aien_omega_gpu::is_blocked(),
+                    }
+                })
+        },
+        |n, of, e| {
+            eprintln!(
+                "OMEGA_BACKEND GPU session open attempt {n}/{of} failed: {}; latched={}; MemAvailable {}",
+                e.message,
+                e.latched,
+                fmt_mem(mem_available())
+            )
+        },
+        |_| std::thread::sleep(delay),
+    )?;
+    println!(
+        "  GPU session: open on attempt {n}/{} (MemAvailable {})",
+        attempts.max(1),
+        fmt_mem(mem_available())
+    );
+    Ok(n)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -949,5 +1120,161 @@ mod tests {
         let mut b = a.clone();
         b[999] = 2.0;
         assert_ne!(fingerprint(&a), fingerprint(&b));
+    }
+
+    fn fail_msg(n: u32, latched: bool) -> SessionAttemptError {
+        SessionAttemptError {
+            message: format!("omega_gpu rc=-4 (CHIP_FAIL) try {n}"),
+            latched,
+        }
+    }
+
+    #[test]
+    fn retry_stops_at_the_bound_and_logs_every_attempt() {
+        let (mut calls, mut logged, mut pauses) = (0u32, Vec::new(), Vec::new());
+        let err = retry_bounded::<()>(
+            3,
+            |n| {
+                calls += 1;
+                Err(fail_msg(n, false))
+            },
+            |n, of, e| logged.push(format!("{n}/{of}: {}", e.message)),
+            |n| pauses.push(n),
+        )
+        .unwrap_err();
+        assert_eq!(calls, 3);
+        assert_eq!(pauses, vec![1, 2]);
+        assert_eq!(logged.len(), 3);
+        assert!(logged[2].starts_with("3/3"));
+        assert!(
+            err.contains("after 3 attempts") && err.contains("try 3"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn retry_returns_the_attempt_that_succeeded() {
+        let mut pauses = 0;
+        let r = retry_bounded(
+            3,
+            |n| {
+                if n < 2 {
+                    Err(fail_msg(n, false))
+                } else {
+                    Ok(n * 10)
+                }
+            },
+            |_, _, _| {},
+            |_| pauses += 1,
+        );
+        assert_eq!(r, Ok((20, 2)));
+        assert_eq!(pauses, 1);
+    }
+
+    #[test]
+    fn retry_does_not_repeat_a_latched_failure_and_runs_at_least_once() {
+        let mut calls = 0;
+        let err = retry_bounded::<()>(
+            3,
+            |n| {
+                calls += 1;
+                Err(fail_msg(n, true))
+            },
+            |_, _, _| {},
+            |_| panic!("no pause after a latched failure"),
+        )
+        .unwrap_err();
+        assert_eq!(calls, 1);
+        assert!(err.contains("latched") && err.contains("1/3"), "{err}");
+
+        let mut zero_calls = 0;
+        let _ = retry_bounded::<()>(
+            0,
+            |n| {
+                zero_calls += 1;
+                Err(fail_msg(n, false))
+            },
+            |_, _, _| {},
+            |_| {},
+        );
+        assert_eq!(zero_calls, 1);
+    }
+
+    #[test]
+    fn deadline_passed_between_attempts_stops_with_a_timeout_error() {
+        // Injected clock: each attempt "takes" 400 ms; deadline 1000 ms.
+        let clock = std::cell::Cell::new(0u64);
+        let mut calls = 0;
+        let err = retry_bounded_within::<()>(
+            10,
+            Some(std::time::Duration::from_millis(1000)),
+            || std::time::Duration::from_millis(clock.get()),
+            |n| {
+                calls += 1;
+                clock.set(clock.get() + 400);
+                Err(fail_msg(n, false))
+            },
+            |_, _, _| {},
+            |_| {},
+        )
+        .unwrap_err();
+        // Attempts at t=0, 400, 800 start; the check at t=1200 stops the fourth.
+        assert_eq!(calls, 3, "{err}");
+        assert!(err.contains("timed out"), "{err}");
+        assert!(err.contains("after 3 of 10 attempts"), "{err}");
+        assert!(err.contains("elapsed 1200 ms"), "{err}");
+        assert!(err.contains("never interrupted"), "{err}");
+    }
+
+    #[test]
+    fn attempts_stay_bounded_when_the_deadline_never_passes() {
+        let mut calls = 0;
+        let err = retry_bounded_within::<()>(
+            3,
+            Some(std::time::Duration::from_secs(3600)),
+            || std::time::Duration::ZERO,
+            |n| {
+                calls += 1;
+                Err(fail_msg(n, false))
+            },
+            |_, _, _| {},
+            |_| {},
+        )
+        .unwrap_err();
+        assert_eq!(calls, 3);
+        assert!(err.contains("did not open after 3 attempts"), "{err}");
+        assert!(!err.contains("timed out"), "{err}");
+    }
+
+    #[test]
+    fn first_attempt_runs_even_if_the_deadline_is_already_zero() {
+        let mut calls = 0;
+        let _ = retry_bounded_within::<()>(
+            3,
+            Some(std::time::Duration::ZERO),
+            || std::time::Duration::from_secs(1),
+            |n| {
+                calls += 1;
+                Err(fail_msg(n, false))
+            },
+            |_, _, _| {},
+            |_| {},
+        );
+        assert_eq!(calls, 1);
+    }
+
+    #[test]
+    fn session_open_refuses_cleanly_in_a_stub_build() {
+        if aien_omega_gpu::is_native() {
+            return; // the native path is verified on the chip, not here
+        }
+        let err = open_gpu_session_with_retry(
+            3,
+            std::time::Duration::ZERO,
+            GPU_SESSION_OPEN_DEADLINE,
+            &|| None,
+        )
+        .unwrap_err();
+        assert!(err.contains("not linked"), "{err}");
     }
 }

@@ -32,7 +32,11 @@ pub use checkpoint::*;
 pub use model_dir::{load_model_config, model_config_from_hf_json, model_id_for_dir};
 pub use moe_plan::*;
 pub use mojo_backend::*;
-pub use omega_backend::{omega_backend_selected, OmegaGb10Backend, GPU_BACKEND_ENV};
+pub use omega_backend::{
+    omega_backend_selected, open_gpu_session_with_retry, retry_bounded, retry_bounded_within,
+    OmegaGb10Backend, SessionAttemptError, GPU_BACKEND_ENV, GPU_SESSION_OPEN_ATTEMPTS,
+    GPU_SESSION_OPEN_DEADLINE, GPU_SESSION_RETRY_DELAY,
+};
 pub use qwen3_coder::*;
 pub use qwen3_moe::*;
 pub use qwen3_serve::*;
