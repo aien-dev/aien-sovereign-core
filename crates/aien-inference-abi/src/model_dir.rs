@@ -10,8 +10,90 @@ use aien_abi_core::{Llama3RopeScaling, ModelConfig};
 use serde::Deserialize;
 use std::path::Path;
 
-/// The one architecture this engine runs.
+/// The Llama architecture this engine runs (also SmolLM2 and Llama 3.x).
 pub const LLAMA_ARCHITECTURE: &str = "LlamaForCausalLM";
+
+/// The Qwen3 dense architecture: Llama plus per-head RMSNorm of Q and K before RoPE,
+/// `head_dim` set explicitly in `config.json`.
+pub const QWEN3_ARCHITECTURE: &str = "Qwen3ForCausalLM";
+
+/// Every `config.json` key a `Qwen3ForCausalLM` checkpoint may carry. The ones that change
+/// the maths (`sliding_window`, `use_sliding_window`, `layer_types`, `rope_scaling`,
+/// `attention_bias`, `hidden_act`) are checked by value below; any key outside this list is
+/// refused by name, never ignored.
+const QWEN3_KNOWN_KEYS: &[&str] = &[
+    "architectures",
+    "attention_bias",
+    "attention_dropout",
+    "bos_token_id",
+    "dtype",
+    "eos_token_id",
+    "head_dim",
+    "hidden_act",
+    "hidden_size",
+    "initializer_range",
+    "intermediate_size",
+    "layer_types",
+    "max_position_embeddings",
+    "max_window_layers",
+    "model_type",
+    "num_attention_heads",
+    "num_hidden_layers",
+    "num_key_value_heads",
+    "pad_token_id",
+    "rms_norm_eps",
+    "rope_scaling",
+    "rope_theta",
+    "sliding_window",
+    "tie_word_embeddings",
+    "torch_dtype",
+    "transformers_version",
+    "use_cache",
+    "use_sliding_window",
+    "vocab_size",
+];
+
+/// Refusals specific to `Qwen3ForCausalLM`, each naming the field.
+fn check_qwen3_fields(raw: &serde_json::Value) -> Result<(), String> {
+    let obj = raw.as_object().ok_or("config.json is not an object")?;
+    if let Some(key) = obj.keys().find(|k| !QWEN3_KNOWN_KEYS.contains(&k.as_str())) {
+        return Err(format!("unsupported Qwen3 config field {key:?}"));
+    }
+    match obj.get("model_type").and_then(|v| v.as_str()) {
+        Some("qwen3") => {}
+        other => {
+            return Err(format!(
+                "unsupported model_type {other:?} for Qwen3ForCausalLM (expected \"qwen3\")"
+            ))
+        }
+    }
+    if !obj.get("head_dim").is_some_and(|v| v.is_u64()) {
+        return Err(
+            "Qwen3 config.json must set head_dim (it is not hidden_size / num_attention_heads)"
+                .to_string(),
+        );
+    }
+    if obj
+        .get("use_sliding_window")
+        .is_some_and(|v| v != &serde_json::Value::Bool(false))
+    {
+        return Err("unsupported use_sliding_window (supported: false)".to_string());
+    }
+    if obj.get("sliding_window").is_some_and(|v| !v.is_null()) {
+        return Err("unsupported sliding_window (supported: null)".to_string());
+    }
+    if let Some(types) = obj.get("layer_types") {
+        let all_full = types
+            .as_array()
+            .is_some_and(|a| a.iter().all(|t| t.as_str() == Some("full_attention")));
+        if !all_full {
+            return Err(
+                "unsupported layer_types (supported: every layer full_attention)".to_string(),
+            );
+        }
+    }
+    Ok(())
+}
 
 /// KV page size used for every model loaded from a directory.
 const BLOCK_SIZE: usize = 16;
@@ -89,7 +171,7 @@ fn parse_rope_scaling(
     }
 }
 
-/// Builds the [`ModelConfig`] of a `LlamaForCausalLM` checkpoint from the text of its
+/// Builds the [`ModelConfig`] of a `LlamaForCausalLM` or `Qwen3ForCausalLM` checkpoint from the text of its
 /// `config.json` and, when present, its `generation_config.json` (stop set: its
 /// `eos_token_id`, else the one in `config.json`).
 pub fn model_config_from_hf_json(
@@ -101,12 +183,18 @@ pub fn model_config_from_hf_json(
         serde_json::from_str(config_json).map_err(|e| format!("config.json: {e}"))?;
     let hf: HfLlamaConfig =
         serde_json::from_value(raw.clone()).map_err(|e| format!("config.json: {e}"))?;
-    if hf.architectures.as_slice() != [LLAMA_ARCHITECTURE] {
-        return Err(format!(
-            "unsupported architectures {:?}: this engine runs [\"{LLAMA_ARCHITECTURE}\"] only",
-            hf.architectures
-        ));
-    }
+    let qk_norm = match hf.architectures.as_slice() {
+        [a] if a == LLAMA_ARCHITECTURE => false,
+        [a] if a == QWEN3_ARCHITECTURE => {
+            check_qwen3_fields(&raw)?;
+            true
+        }
+        other => {
+            return Err(format!(
+                "unsupported architectures {other:?}: this engine runs [\"{LLAMA_ARCHITECTURE}\"] or [\"{QWEN3_ARCHITECTURE}\"] only"
+            ))
+        }
+    };
     if let Some(act) = hf.hidden_act.as_deref().filter(|a| *a != "silu") {
         return Err(format!("unsupported hidden_act {act:?} (supported: silu)"));
     }
@@ -114,14 +202,14 @@ pub fn model_config_from_hf_json(
         return Err("unsupported attention_bias/mlp_bias = true (no bias tensors)".to_string());
     }
     let num_heads = hf.num_attention_heads;
-    if num_heads == 0 || !hf.hidden_size.is_multiple_of(num_heads) {
+    if num_heads == 0 || (!qk_norm && !hf.hidden_size.is_multiple_of(num_heads)) {
         return Err(format!(
             "hidden_size {} is not a multiple of num_attention_heads {num_heads}",
             hf.hidden_size
         ));
     }
-    let head_dim = hf.head_dim.unwrap_or(hf.hidden_size / num_heads);
-    if head_dim * num_heads != hf.hidden_size {
+    let head_dim = hf.head_dim.unwrap_or(hf.hidden_size / num_heads.max(1));
+    if !qk_norm && head_dim * num_heads != hf.hidden_size {
         return Err(format!(
             "unsupported head_dim {head_dim}: num_attention_heads * head_dim must equal hidden_size {}",
             hf.hidden_size
@@ -153,6 +241,7 @@ pub fn model_config_from_hf_json(
         rope_scaling,
         tie_word_embeddings: hf.tie_word_embeddings,
         eos_token_ids,
+        qk_norm,
     };
     config
         .attention_geometry()
@@ -247,6 +336,7 @@ mod tests {
         assert_eq!(
             ModelConfig {
                 eos_token_ids: Vec::new(),
+                qk_norm: false,
                 ..from_json.clone()
             },
             wired
