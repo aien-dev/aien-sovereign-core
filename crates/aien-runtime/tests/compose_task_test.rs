@@ -616,6 +616,78 @@ fn finish_reason_labels_match_acceptance_v5() {
     );
 }
 
+// A file whose own content holds fenced blocks must not be cut at the
+// first inner fence (DIAGNOSTIC-LONG-1 task D5: a 649-token FAQ was saved
+// as 4 lines).
+#[test]
+fn proposal_fence_inner_block_kept() {
+    let p = check_file_proposal(
+        "filename: docs/FAQ.md\n```markdown\n# FAQ\n\nRun:\n```bash\nls -l\n```\nDone.\n```\nTrailing prose.\n",
+    )
+    .unwrap();
+    assert_eq!(p.path, "docs/FAQ.md");
+    assert_eq!(p.content, "# FAQ\n\nRun:\n```bash\nls -l\n```\nDone.\n");
+}
+
+#[test]
+fn proposal_fence_d5_reply_shape() {
+    // D5 reply, trimmed to its first two blocks and closed by the outer fence.
+    let reply = include_str!("fixtures/d5_reply_trimmed.txt");
+    let reply = format!("{reply}```\n");
+    let p = check_file_proposal(&reply).unwrap();
+    assert_eq!(p.path, "docs/FAQ.md");
+    assert_eq!(p.content.matches("```bash").count(), 2, "{}", p.content);
+    assert_eq!(p.content.lines().count(), 14, "{}", p.content);
+    assert!(p.content.ends_with("```\n"));
+    assert!(p.content.contains("sudo curl"));
+    assert!(p.content.lines().count() > 4, "old parser kept 4 lines");
+}
+
+#[test]
+fn proposal_fence_unbalanced_takes_last_bare_fence() {
+    // Inner block opened and never closed: the last bare fence ends the file.
+    let p = check_file_proposal("filename: a.md\n```md\ntext\n```bash\nls\nmore\n```\n").unwrap();
+    assert_eq!(p.content, "text\n```bash\nls\nmore\n");
+    // No bare fence at all: nothing to close, whole body kept (as before).
+    let p = check_file_proposal("filename: a.md\n```md\ntext\n```bash\nls\n").unwrap();
+    assert_eq!(p.content, "text\n```bash\nls\n");
+}
+
+#[test]
+fn proposal_fence_four_backtick_outer() {
+    let p = check_file_proposal(
+        "filename: a.md\n````markdown\nintro\n```\nbare inner\n```\n```bash\nls\n```\n````\n",
+    )
+    .unwrap();
+    assert_eq!(p.content, "intro\n```\nbare inner\n```\n```bash\nls\n```\n");
+}
+
+#[test]
+fn proposal_fence_plain_replies_unchanged() {
+    let p = check_file_proposal("filename: a.txt\nx\ny\n").unwrap();
+    assert_eq!(p.content, "x\ny\n");
+    let p = check_file_proposal("filename: a.txt\n```\nx\n```\nthanks\n").unwrap();
+    assert_eq!(p.content, "x\n");
+    let p = check_file_proposal("filename: a.txt\n```text\nx\n").unwrap();
+    assert_eq!(p.content, "x\n");
+}
+
+// Several code examples in one document and normal prose after the last one:
+// every byte is kept, in the fenced reply shape and in the unfenced shape.
+#[test]
+fn proposal_fence_many_examples_and_trailing_text_keep_every_byte() {
+    let doc = "# Guide\n\nStep one:\n```bash\nls -l\n```\nStep two:\n```python\nprint(1)\n```\nStep three:\n```\nplain\n```\nNotes after the last example.\nAnd one more line.\n";
+    // Outer fence with a label: inner fences nest, nothing after is lost.
+    let p = check_file_proposal(&format!("filename: g.md\n```markdown\n{doc}```\n")).unwrap();
+    assert_eq!(p.content, doc);
+    // Longer outer fence: inner bare and labelled fences are all content.
+    let p = check_file_proposal(&format!("filename: g.md\n````markdown\n{doc}````\n")).unwrap();
+    assert_eq!(p.content, doc);
+    // No outer fence at all: the document is taken whole.
+    let p = check_file_proposal(&format!("filename: g.md\n{doc}")).unwrap();
+    assert_eq!(p.content, doc);
+}
+
 /// Both budget settings: unset gives the default; 1 000..=599 000 ms is
 /// accepted; anything else is refused with a message naming the setting.
 #[test]
