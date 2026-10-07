@@ -896,7 +896,7 @@ mod tests {
     /// the chip. Before this test was split, it used head_dim 16 and asserted success
     /// unconditionally, so it only passed with AIEN_DEV_FALLBACK=1: a strict stub build
     /// correctly refuses at the first op (no engine linked), and a strict native build
-    /// would refuse at attention (omega attention needs head_dim 64, see omega_backend.rs).
+    /// would refuse at attention (omega attention needs head_dim 64 or 128, see omega_backend.rs).
     #[tokio::test]
     async fn test_blackwell_inference_backend() {
         let config = ModelConfig {

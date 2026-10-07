@@ -119,6 +119,23 @@ impl KvPoolPlan {
         )
     }
 
+    /// Plan for `cfg` at the model's own context, or at an operator cap that can only
+    /// lower it ([`KV_CONTEXT_CAP_ENV`]). A cap above the model's declared context is
+    /// refused, never used to enlarge the pool.
+    pub fn for_model_capped(
+        cfg: &aien_inference_abi::ModelConfig,
+        cap: Option<usize>,
+    ) -> Result<Self, String> {
+        match cap {
+            None => Self::for_model(cfg),
+            Some(c) if c > cfg.max_sequence_length => Err(format!(
+                "{KV_CONTEXT_CAP_ENV}={c} exceeds the model's declared context ({} tokens); the cap can only lower it",
+                cfg.max_sequence_length
+            )),
+            Some(c) => Self::for_context(cfg, c, "operator cap (AIEN_KV_CONTEXT_TOKENS)"),
+        }
+    }
+
     /// Plan for `cfg` at an explicit context budget. Every product is checked, so a
     /// config that would overflow `usize` is refused instead of wrapping.
     pub fn for_context(
@@ -240,6 +257,38 @@ pub fn allow_unchecked_memory_from_env() -> bool {
     std::env::var(ALLOW_UNCHECKED_MEMORY_ENV).is_ok_and(|v| v == "1")
 }
 
+/// Operator cap (documented): the daemon's KV context budget in tokens, a positive
+/// decimal integer no larger than the model's declared context. Unset: the model's
+/// own context (unchanged behaviour). A sequence that outgrows the capped pool is
+/// refused with `KV_POOL_EXHAUSTED_PREFIX` before anything is mutated.
+pub const KV_CONTEXT_CAP_ENV: &str = "AIEN_KV_CONTEXT_TOKENS";
+
+/// Parses a [`KV_CONTEXT_CAP_ENV`] value: digits only, greater than zero.
+pub fn parse_kv_context_cap(value: &str) -> Result<usize, String> {
+    if value.is_empty() || !value.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(format!(
+            "{KV_CONTEXT_CAP_ENV}={value:?} is not a positive decimal token count"
+        ));
+    }
+    match value.parse::<usize>() {
+        Ok(0) => Err(format!(
+            "{KV_CONTEXT_CAP_ENV}=0: the cap must be at least 1 token"
+        )),
+        Ok(n) => Ok(n),
+        Err(e) => Err(format!("{KV_CONTEXT_CAP_ENV}={value:?}: {e}")),
+    }
+}
+
+/// The operator cap from the environment: `Ok(None)` when unset, a refusal when set
+/// but not a valid count (including non-UTF-8).
+pub fn kv_context_cap_from_env() -> Result<Option<usize>, String> {
+    match std::env::var(KV_CONTEXT_CAP_ENV) {
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(e) => Err(format!("{KV_CONTEXT_CAP_ENV}: {e}")),
+        Ok(v) => parse_kv_context_cap(&v).map(Some),
+    }
+}
+
 /// Refuses the pool when the host reports less available memory than it needs.
 /// `available` is `Err(reason)` when memory could not be established: that refuses
 /// too (fail closed, #254) unless `allow_unchecked` is set, in which case the check
@@ -276,10 +325,11 @@ pub fn check_kv_memory(
 /// established unless `allow_unchecked` (#254).
 pub fn plan_checked_model_kv(
     cfg: &aien_inference_abi::ModelConfig,
+    context_cap: Option<usize>,
     mem_available: &dyn Fn() -> Result<u64, String>,
     allow_unchecked: bool,
 ) -> Result<KvPoolPlan, String> {
-    let plan = KvPoolPlan::for_model(cfg)?;
+    let plan = KvPoolPlan::for_model_capped(cfg, context_cap)?;
     println!("  {}", plan.log_line());
     let available = mem_available();
     if let Ok(avail) = &available {
@@ -302,10 +352,11 @@ pub fn build_shared_kv_runtime_for_model(
     tensor_backend: Arc<dyn TensorBackend>,
     scheduler_config: SchedulerConfig,
     arena_capacity: usize,
+    context_cap: Option<usize>,
     mem_available: &dyn Fn() -> Result<u64, String>,
     allow_unchecked: bool,
 ) -> Result<(AienRuntimeSpine, NativeTransformerBackend, KvPoolPlan), String> {
-    let plan = plan_checked_model_kv(&weights.config, mem_available, allow_unchecked)?;
+    let plan = plan_checked_model_kv(&weights.config, context_cap, mem_available, allow_unchecked)?;
     let (spine, backend) = build_shared_kv_runtime(
         weights,
         tensor_backend,
@@ -488,6 +539,7 @@ mod tests {
         let cfg = tiny_config();
         let err = plan_checked_model_kv(
             &cfg,
+            None,
             &|| Err("/proc/meminfo cannot be read: No such file".to_string()),
             false,
         )
@@ -501,7 +553,7 @@ mod tests {
     fn unreadable_meminfo_with_override_proceeds() {
         // The override path also prints a WARNING line on stderr (see check_kv_memory).
         let cfg = tiny_config();
-        let plan = plan_checked_model_kv(&cfg, &|| Err("unreadable".to_string()), true)
+        let plan = plan_checked_model_kv(&cfg, None, &|| Err("unreadable".to_string()), true)
             .expect("override set: proceeds");
         assert_eq!(plan.total_blocks, 3);
         // The override never bypasses a known shortage.
@@ -517,8 +569,9 @@ mod tests {
             "",
         ] {
             let cfg = tiny_config();
-            let err = plan_checked_model_kv(&cfg, &|| parse_mem_available_checked(text), false)
-                .unwrap_err();
+            let err =
+                plan_checked_model_kv(&cfg, None, &|| parse_mem_available_checked(text), false)
+                    .unwrap_err();
             assert!(err.contains("no parsable"), "{text:?}: {err}");
         }
     }
@@ -528,10 +581,11 @@ mod tests {
         // spine: a spine creates a RuntimeController, which reads the process-wide
         // AIEN_RUNTIME_STATE_DIR that other tests in this crate point at temp dirs.
         let cfg = tiny_config();
-        let err = plan_checked_model_kv(&cfg, &|| Ok(1), false).unwrap_err();
+        let err = plan_checked_model_kv(&cfg, None, &|| Ok(1), false).unwrap_err();
         assert!(err.contains("refusing"), "{err}");
 
-        let plan = plan_checked_model_kv(&cfg, &|| Ok(1 << 30), false).expect("enough memory");
+        let plan =
+            plan_checked_model_kv(&cfg, None, &|| Ok(1 << 30), false).expect("enough memory");
         // ceil(40 / 16) = 3 blocks of 16 tokens * (2 * 2 * 2 * 16 * 4) bytes per token.
         assert_eq!(plan.total_blocks, 3);
         assert_eq!(plan.total_bytes, 3 * 16 * 512);
@@ -540,5 +594,76 @@ mod tests {
         let mgr = build_model_kv_manager(&weights, plan.total_blocks).expect("pool built");
         assert_eq!(mgr.read().total_block_count(), 3);
         assert_eq!(plan.pool_config().total_bytes(), plan.total_bytes);
+    }
+
+    #[test]
+    fn kv_context_cap_parse_is_strict() {
+        assert_eq!(parse_kv_context_cap("8192"), Ok(8192));
+        assert_eq!(parse_kv_context_cap("1"), Ok(1));
+        for bad in [
+            "",
+            "0",
+            "00",
+            "-1",
+            "+5",
+            " 8",
+            "8 ",
+            "8k",
+            "1e3",
+            "0x10",
+            "99999999999999999999999",
+        ] {
+            let err = parse_kv_context_cap(bad).unwrap_err();
+            assert!(err.contains(KV_CONTEXT_CAP_ENV), "{bad:?}: {err}");
+        }
+    }
+
+    #[test]
+    fn kv_context_cap_only_lowers_the_model_context() {
+        let cfg = tiny_config(); // max_sequence_length 40, block 16
+        assert_eq!(
+            KvPoolPlan::for_model_capped(&cfg, None).unwrap(),
+            KvPoolPlan::for_model(&cfg).unwrap()
+        );
+        let capped = KvPoolPlan::for_model_capped(&cfg, Some(17)).unwrap();
+        assert_eq!((capped.context_tokens, capped.total_blocks), (17, 2));
+        assert!(capped.context_source.contains(KV_CONTEXT_CAP_ENV));
+        assert_eq!(
+            KvPoolPlan::for_model_capped(&cfg, Some(40))
+                .unwrap()
+                .total_blocks,
+            3
+        );
+        let err = KvPoolPlan::for_model_capped(&cfg, Some(41)).unwrap_err();
+        assert!(err.contains("can only lower"), "{err}");
+    }
+
+    #[test]
+    fn kv_context_cap_lets_a_long_context_model_fit_and_sizes_the_real_pool() {
+        let cfg = tiny_config();
+        let uncapped = KvPoolPlan::for_model(&cfg).unwrap().total_bytes as u64;
+        let capped = KvPoolPlan::for_model_capped(&cfg, Some(16))
+            .unwrap()
+            .total_bytes as u64;
+        assert!(capped < uncapped);
+        // Memory between the two: the model's own context is refused, the cap fits.
+        let avail = capped;
+        assert!(plan_checked_model_kv(&cfg, None, &|| Ok(avail), false).is_err());
+        let plan = plan_checked_model_kv(&cfg, Some(16), &|| Ok(avail), false).unwrap();
+        assert_eq!(plan.total_blocks, 1);
+        // The daemon path builds exactly the capped pool.
+        let weights = TransformerWeights::reference_test_weights(&cfg);
+        let (spine, _backend, plan) = build_shared_kv_runtime_for_model(
+            weights,
+            Arc::new(aien_inference_abi::ReferenceCpuBackend::new()),
+            SchedulerConfig::default(),
+            8,
+            Some(17),
+            &|| Ok(1 << 30),
+            false,
+        )
+        .expect("capped runtime");
+        assert_eq!(plan.total_blocks, 2);
+        assert_eq!(spine.kv_manager.read().total_block_count(), 2);
     }
 }

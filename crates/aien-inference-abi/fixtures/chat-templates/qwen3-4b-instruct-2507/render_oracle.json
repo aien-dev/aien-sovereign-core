@@ -1,0 +1,113 @@
+{
+ "oracle": "jinja2 3.1.6 ImmutableSandboxedEnvironment(trim_blocks, lstrip_blocks)",
+ "cases": [
+  {
+   "turns": [
+    [
+     "user",
+     "Hello"
+    ]
+   ],
+   "add_generation_prompt": true,
+   "text": "<|im_start|>user\nHello<|im_end|>\n<|im_start|>assistant\n"
+  },
+  {
+   "turns": [
+    [
+     "system",
+     "You are AIEN."
+    ],
+    [
+     "user",
+     "List two primes."
+    ]
+   ],
+   "add_generation_prompt": true,
+   "text": "<|im_start|>system\nYou are AIEN.<|im_end|>\n<|im_start|>user\nList two primes.<|im_end|>\n<|im_start|>assistant\n"
+  },
+  {
+   "turns": [
+    [
+     "system",
+     "Be brief."
+    ],
+    [
+     "user",
+     "2+2?"
+    ],
+    [
+     "assistant",
+     "4."
+    ],
+    [
+     "user",
+     "And 3+3?"
+    ]
+   ],
+   "add_generation_prompt": true,
+   "text": "<|im_start|>system\nBe brief.<|im_end|>\n<|im_start|>user\n2+2?<|im_end|>\n<|im_start|>assistant\n4.<|im_end|>\n<|im_start|>user\nAnd 3+3?<|im_end|>\n<|im_start|>assistant\n"
+  },
+  {
+   "turns": [
+    [
+     "user",
+     "  padded \n"
+    ]
+   ],
+   "add_generation_prompt": true,
+   "text": "<|im_start|>user\n  padded \n<|im_end|>\n<|im_start|>assistant\n"
+  },
+  {
+   "turns": [
+    [
+     "user",
+     ""
+    ]
+   ],
+   "add_generation_prompt": true,
+   "text": "<|im_start|>user\n<|im_end|>\n<|im_start|>assistant\n"
+  },
+  {
+   "turns": [
+    [
+     "user",
+     "a"
+    ],
+    [
+     "system",
+     "b"
+    ],
+    [
+     "user",
+     "c"
+    ]
+   ],
+   "add_generation_prompt": true,
+   "text": "<|im_start|>user\na<|im_end|>\n<|im_start|>system\nb<|im_end|>\n<|im_start|>user\nc<|im_end|>\n<|im_start|>assistant\n"
+  },
+  {
+   "turns": [
+    [
+     "user",
+     "Say hi."
+    ],
+    [
+     "assistant",
+     "Hi"
+    ]
+   ],
+   "add_generation_prompt": false,
+   "text": "<|im_start|>user\nSay hi.<|im_end|>\n<|im_start|>assistant\nHi<|im_end|>\n"
+  },
+  {
+   "turns": [
+    [
+     "user",
+     "unicode: é中😀 <tag> {{x}}"
+    ]
+   ],
+   "add_generation_prompt": true,
+   "text": "<|im_start|>user\nunicode: é中😀 <tag> {{x}}<|im_end|>\n<|im_start|>assistant\n"
+  }
+ ]
+}

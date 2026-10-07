@@ -347,7 +347,10 @@ fn gb10_backend_refuses_qwen3_and_not_llama() {
     .unwrap();
     let msg = omega_model_refusal(&q).expect("Qwen3 must be refused on the GB10 engine");
     assert!(
-        msg.contains("head_dim 128") && msg.contains("Qwen3"),
+        msg.contains("head_dim 128")
+            && msg.contains("Qwen3")
+            && msg.contains("q/k norm runs only on the CPU")
+            && !msg.contains("head_dim 64 only"),
         "{msg}"
     );
     let llama = aien_inference_abi::ModelConfig::tinyllama_1_1b();

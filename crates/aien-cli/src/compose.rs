@@ -30,6 +30,9 @@
 //!   stop      --approver NAME                            durable operator stop
 //!   resume    --approver NAME                            end the stop (old grants stay stale)
 //!   revoke    --authorization ID --approver NAME         revoke an unspent grant
+//!   desk-key  [--create 1]                               the approval desk key (#249):
+//!                                                        prints its id and path, never the key;
+//!                                                        --create 1 makes one if none exists
 //!
 //! S5 `execute` brackets the write with a durable intent and an ack (see
 //! `aien_runtime::effects`); it prints `"state"` and exits 3 when the effect
@@ -257,6 +260,18 @@ async fn step(sub: &str, m: &HashMap<String, String>) -> Result<Value, String> {
             let target = engine
                 .validate_path(ws.join(&path).to_str().ok_or("path is not UTF-8")?)
                 .map_err(|e| format!("CONFINEMENT DENIAL: {e}"))?;
+            // sovereign-core #249: the grant names the canonical workspace
+            // (symlinks resolved, whatever form --workspace took) and the
+            // target must be exactly <workspace>/<path>, as the daemon checks.
+            let wsc = std::fs::canonicalize(&ws)
+                .map_err(|e| format!("workspace {}: {e}", ws.display()))?;
+            if target != wsc.join(&path) {
+                return Err(format!(
+                    "CONFINEMENT DENIAL: target {} is not {}",
+                    target.display(),
+                    wsc.join(&path).display()
+                ));
+            }
             let csha = sha256_hex(content.as_bytes());
             // NEXT-PHASE-2: the grant names the target and the state it was
             // granted against; a changed target makes it stale.
@@ -272,7 +287,7 @@ async fn step(sub: &str, m: &HashMap<String, String>) -> Result<Value, String> {
             links.extend(constraint.unwrap_or_default().into_iter().take(2));
             let text = json!({"proposal_sha256": psha, "path": path, "content_sha256": csha,
                 "approver": approver, "receipt_sha256": rc["sha256"], "target": tgt,
-                "prior_sha256": prior});
+                "prior_sha256": prior, "workspace": wsc.display().to_string()});
             let n = note("authorization", &text.to_string(), links).await?;
             Ok(json!({"step": "S4", "receipt": rc, "authorization": n, "approvals": 1}))
         }
@@ -479,12 +494,23 @@ async fn step(sub: &str, m: &HashMap<String, String>) -> Result<Value, String> {
                 other => Err(format!("unexpected response {other:?}")),
             }
         }
+        "desk-key" => {
+            use aien_runtime::approved_auth::{desk_key_path, DeskKey};
+            let dir = aien_runtime::spine::compose_dir_from_env()?;
+            let path = desk_key_path(&dir);
+            let key = match (DeskKey::load(&path), m.contains_key("create")) {
+                (Ok(k), _) => k,
+                (Err(_), true) if !path.exists() => DeskKey::create(&path)?,
+                (Err(e), _) => return Err(e),
+            };
+            Ok(json!({"desk_key_id": key.id(), "path": path.display().to_string()}))
+        }
         "recover" => match send(ControlCommand::RecoverComposeHome).await? {
             ControlResponse::ComposeRecovered(r) => Ok(json!({"repair": r, "opens": r.opens})),
             other => Err(format!("unexpected response {other:?}")),
         },
         other => Err(format!(
-            "unknown compose step {other:?} (remember, inspect, propose, authorize, execute, explain, recall, shutdown, recover, effects, reconcile, stop, resume, revoke)"
+            "unknown compose step {other:?} (remember, inspect, propose, authorize, execute, explain, recall, shutdown, recover, effects, reconcile, stop, resume, revoke, desk-key)"
         )),
     }
 }

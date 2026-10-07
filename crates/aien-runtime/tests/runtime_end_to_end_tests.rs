@@ -85,7 +85,7 @@ fn test_micro_model_config() -> ModelConfig {
     }
 }
 
-/// Micro model in a shape the native Omega engine accepts: attention needs head_dim 64 and a
+/// Micro model in a shape the native Omega engine accepts: attention needs head_dim 64 (or 128) and a
 /// power-of-two q/kv head ratio, rmsnorm needs dim % 128 == 0 (omega
 /// omega_gpu_attention_api.c:603-604, omega_gpu_elementwise_api.c:527). The CPU micro shape
 /// above (head_dim 16, hidden 64) is refused by the engine, which in a production build is a
