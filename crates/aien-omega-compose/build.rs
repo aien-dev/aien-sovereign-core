@@ -115,12 +115,23 @@ fn main() {
     link(&out.join("librx_compose.a"));
 }
 
-/// Set `has_omega_wait_ms` when the omega checkout's host header declares `rxc_host_set_wait_ms`.
+/// Set `has_omega_wait_ms` from the omega checkout's host header. omega.lock pins a commit that
+/// declares `rxc_host_set_wait_ms`, so a real link without it is a build error, never a silent
+/// downgrade (the 120 s document budget would be refused at runtime).
 fn detect_wait_ms(dir: &Path) {
     let h = dir.join("src/runtime/rxc_host_abi.h");
-    if std::fs::read_to_string(h).is_ok_and(|s| s.contains("rxc_host_set_wait_ms")) {
-        println!("cargo:rustc-cfg=has_omega_wait_ms");
-    }
+    let text =
+        std::fs::read_to_string(&h).unwrap_or_else(|e| panic!("cannot read {}: {e}", h.display()));
+    assert!(
+        header_declares_wait_ms(&text),
+        "omega header {} does not declare rxc_host_set_wait_ms; omega.lock pins a commit that has it, so this checkout is not usable. Use AIEN_FORCE_CPU_STUB=1 for a stub build.",
+        h.display()
+    );
+    println!("cargo:rustc-cfg=has_omega_wait_ms");
+}
+
+fn header_declares_wait_ms(header: &str) -> bool {
+    header.contains("rxc_host_set_wait_ms")
 }
 
 fn link(lib: &Path) {
