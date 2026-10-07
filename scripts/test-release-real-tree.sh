@@ -10,7 +10,7 @@
 #            [executables] aien-cli-native-release. The binary digest is what ties a package to a source revision:
 #            a build from any other sovereign-core source gives another digest and is refused.
 #   NOT bound: the sovereign-core-commit field in candidate.toml is informational (candidate.toml itself changed after
-#            that commit). A non-native package is accepted if pins and model match; it is not the candidate binary.
+#            that commit); the executable digests are the binding. A package without --native is refused (no digest).
 #
 # Mutation note: the negative "post-candidate binary refused" case passes wrongly if the line
 #   [[ "$want_aien" == "$exe" ]] || die ...
@@ -65,8 +65,8 @@ native_negative() { # gate-script
 native_negative scripts/check-release-candidate.sh || { cat "$W/log" >&2; fail "post-candidate binary not refused for the right reason"; }
 grep -q "$NATIVE_DIGEST" "$W/log" || fail "refusal does not name the candidate digest"
 pass "package from a non-candidate binary refused (--native): digest differs from CAND-4 aien-cli-native-release"
-# non-native target: accepted by design (not the candidate binary); pinned here so a change is deliberate
-must_pass --package "$W/post.tar.gz"; pass "same package passes without --native (documented: not bound to a source revision)"
+# no --native: the manifest has no digest for that package kind, so it is refused (never passed)
+must_fail "no candidate digest for this package kind" --package "$W/post.tar.gz"; pass "package without --native refused: no candidate digest for the kind"
 # a package that names another candidate is refused
 rm -rf "$W/u"; mkdir "$W/u"; tar -xzf "$W/post.tar.gz" -C "$W/u"; sed -i 's/^candidate = .*/candidate = "CAND-3"/' "$W/u/release.toml"
 tar -czf "$W/cand3.tar.gz" -C "$W/u" .
@@ -75,7 +75,11 @@ must_fail "names candidate 'CAND-3', not CAND-4" --package "$W/cand3.tar.gz"; pa
 # positive control, package: manifest whose native digest is this package's binary
 GOOD="$(sha "$W/bins/aien-cli")"
 sed -i "s/^aien-cli-native-release = \"[0-9a-f]\{64\}\"/aien-cli-native-release = \"$GOOD\"/" "$T/release/candidate.toml"
-must_pass --package "$W/post.tar.gz" --native; pass "positive control: matching native digest passes the revision check"
+must_fail "is not CAND-4's sc-" --package "$W/post.tar.gz" --native; pass "aien-cli matches but helper digests do not: refused"
+for h in spark-cockpit-rs spark-inquisitor cortex-encoder-rs cortex-rs spark-supervisor spark-debugger; do
+    sed -i "s/^sc-$h = \"[0-9a-f]\{64\}\"/sc-$h = \"$(sha "$W/bins/$h")\"/" "$T/release/candidate.toml"
+done
+must_pass --package "$W/post.tar.gz" --native; pass "positive control: every shipped executable matches its manifest digest, package passes"
 cp "$ROOT/release/candidate.toml" "$T/release/candidate.toml"
 
 # mutation: weaken the digest comparison in a copy of the gate; the negative must turn red
