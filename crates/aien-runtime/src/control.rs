@@ -365,6 +365,10 @@ pub struct ComposeTaskReport {
     /// Every proposal the model Skill made for this task (ACCEPTANCE-v2 3b).
     #[serde(default)]
     pub proposal_attempts: Vec<ProposalAttempt>,
+    /// Requirements recognized in the goal (crate::requirements); the only
+    /// ones checked. Empty = none recognized, nothing checked.
+    #[serde(default)]
+    pub requirements_recognized: Vec<String>,
     /// "model" when the Skill ran inference, or the stub label.
     pub proposer: String,
 }
@@ -400,6 +404,10 @@ pub struct ProposalAttempt {
     /// sha256 of the prompt ids, each 4 little-endian bytes (NEXT-PHASE-1 v6 R1).
     #[serde(default)]
     pub prompt_ids_sha256: Option<String>,
+    /// Requirements of the goal this attempt's complete document failed
+    /// (crate::requirements); empty when none failed or none were recognized.
+    #[serde(default)]
+    pub unmet_requirements: Vec<String>,
 }
 
 /// The record `ComposeNote` appended.

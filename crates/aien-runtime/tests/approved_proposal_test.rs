@@ -708,3 +708,105 @@ fn copied_approved_grant_opens_nothing() {
     assert!(l.intents.is_empty());
     assert!(!Path::new(&r.target.unwrap()).exists());
 }
+
+/// A document with several fenced examples and prose after the last one.
+const FENCED_DOC: &str = "# FAQ\n\nInstall:\n```bash\ncurl -fsSL https://example.com/i.sh | sh\n```\nThen verify:\n```bash\ntool --version\n```\nLast words after the final example.\n";
+
+/// One approved document with embedded fences, through the real approval and
+/// effect path: the approval binds sha256(content); the proposal text reads
+/// back byte for byte; the intent only opens for that digest; and the effect
+/// is DONE only when the bytes on disk hash to the approved digest. A write cut
+/// at the first inner fence (the D5 truncation) is UNRESOLVED, never DONE.
+#[test]
+#[cfg_attr(not(compose_linked), ignore = "needs librx_compose.a: stub build")]
+fn approved_document_with_fences_is_saved_byte_exact_or_not_done() {
+    let _turn = turn();
+    let (_tmp, b, hook, ws) = setup();
+    // The compose template keeps every byte (check_file_proposal reads it back).
+    let text = format!("filename: {PATH}\n{FENCED_DOC}");
+    let back = aien_runtime::spine::check_file_proposal(&text).unwrap();
+    assert_eq!(back.content, FENCED_DOC);
+    let mut p = unsigned("req-f1", "appr-f1");
+    p.content = FENCED_DOC.into();
+    p.content_sha256 = sha(FENCED_DOC.as_bytes());
+    p.approved_proposal_sha256 = interplane_sha(PATH, FENCED_DOC);
+    let p = sign(&b, p);
+    let out = hook.submit(&p, &ws);
+    if !aien_omega_compose::LINKED {
+        stub_refused(out);
+        return;
+    }
+    let r = committed(out);
+    assert_eq!(r.content_sha256, sha(FENCED_DOC.as_bytes()));
+    assert_eq!(r.compose_proposal_sha256, sha(text.as_bytes()));
+    let a = r.approved_grant.expect("grant");
+    let tgt = r.target.clone().unwrap();
+    let (pid, start) = effects::self_executor();
+    let req = |content_sha: &str| IntentRequest {
+        authorization: a,
+        proposal_sha256: r.compose_proposal_sha256.clone(),
+        path: r.path.clone(),
+        target: tgt.clone(),
+        content_sha256: content_sha.to_string(),
+        executor_pid: pid,
+        executor_start: start,
+    };
+    // An intent for any other bytes (for example the truncated text) is refused.
+    let cut = FENCED_DOC.split("```bash").next().unwrap();
+    match effects::open_intent(&b, &req(&sha(cut.as_bytes()))) {
+        ControlResponse::Error(e) => assert!(e.contains("NotAuthorized"), "{e}"),
+        other => panic!("want refusal, got {other:?}"),
+    }
+    let i = match effects::open_intent(&b, &req(&r.content_sha256)) {
+        ControlResponse::ComposeNoted(n) => n.id,
+        other => panic!("intent: {other:?}"),
+    };
+    let state_of = |k: u64| -> Value {
+        let rec = recalled(&b, &[k]);
+        serde_json::from_str(rec.cited[0].text.as_deref().unwrap()).unwrap()
+    };
+    // Truncated bytes on disk: the ack records UNRESOLVED, not DONE.
+    let target = Path::new(&tgt).to_path_buf();
+    std::fs::write(&target, cut).unwrap();
+    let k = match effects::ack(&b, i, &json!({})) {
+        ControlResponse::ComposeNoted(n) => n.id,
+        other => panic!("ack: {other:?}"),
+    };
+    let v = state_of(k);
+    assert_eq!(v["state"], "UNRESOLVED", "{v}");
+    assert_ne!(sha(&std::fs::read(&target).unwrap()), p.content_sha256);
+
+    // Second approval, same document at another path: exact bytes are DONE.
+    let mut p2 = unsigned("req-f2", "appr-f2");
+    p2.path = "FAQ.md".into();
+    p2.content = FENCED_DOC.into();
+    p2.content_sha256 = sha(FENCED_DOC.as_bytes());
+    p2.approved_proposal_sha256 = interplane_sha("FAQ.md", FENCED_DOC);
+    let r2 = committed(hook.submit(&sign(&b, p2.clone()), &ws));
+    let a2 = r2.approved_grant.expect("grant");
+    let tgt2 = r2.target.clone().unwrap();
+    let i2 = match effects::open_intent(
+        &b,
+        &IntentRequest {
+            authorization: a2,
+            proposal_sha256: r2.compose_proposal_sha256.clone(),
+            path: r2.path.clone(),
+            target: tgt2.clone(),
+            content_sha256: r2.content_sha256.clone(),
+            executor_pid: pid,
+            executor_start: start,
+        },
+    ) {
+        ControlResponse::ComposeNoted(n) => n.id,
+        other => panic!("intent: {other:?}"),
+    };
+    std::fs::write(&tgt2, FENCED_DOC).unwrap();
+    let k2 = match effects::ack(&b, i2, &json!({})) {
+        ControlResponse::ComposeNoted(n) => n.id,
+        other => panic!("ack: {other:?}"),
+    };
+    assert_eq!(state_of(k2)["state"], "DONE");
+    let disk = std::fs::read(&tgt2).unwrap();
+    assert_eq!(disk, FENCED_DOC.as_bytes());
+    assert_eq!(sha(&disk), p2.content_sha256);
+}
