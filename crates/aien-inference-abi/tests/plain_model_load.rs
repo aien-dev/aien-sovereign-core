@@ -99,3 +99,16 @@ fn non_string_template_key_is_refused_not_plain() {
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn render_refusal_is_its_own_variant_not_a_load_failure() {
+    let tok = ChatTokenizer::from_model_dir(Path::new(DIR), None).unwrap();
+    let err = tok.try_format_chat(&[("user", "hello")]).unwrap_err();
+    assert!(
+        matches!(err, aien_inference_abi::TokenizerError::NoChatTemplate(_)),
+        "{err:?}"
+    );
+    let text = err.to_string();
+    assert!(text.contains("no chat template"), "{text}");
+    assert!(!text.contains("Failed to load tokenizer"), "{text}");
+}

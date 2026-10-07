@@ -10,15 +10,22 @@ use std::sync::Arc;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TokenizerError {
     LoadError(String),
+    /// Chat rendering was asked of a plain (base) model that has no chat template. Not a
+    /// load failure: the tokenizer loaded fine.
+    NoChatTemplate(String),
     EncodeError(String),
     DecodeError(String),
-    ContextLengthExceeded { len: usize, max: usize },
+    ContextLengthExceeded {
+        len: usize,
+        max: usize,
+    },
 }
 
 impl fmt::Display for TokenizerError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::LoadError(e) => write!(f, "Failed to load tokenizer: {}", e),
+            Self::NoChatTemplate(e) => write!(f, "{}", e),
             Self::EncodeError(e) => write!(f, "Tokenization encoding failed: {}", e),
             Self::DecodeError(e) => write!(f, "Tokenization decoding failed: {}", e),
             Self::ContextLengthExceeded { len, max } => {
@@ -144,7 +151,7 @@ fn ends_in_assistant(turns: &[(&str, &str)]) -> bool {
 }
 
 fn no_chat_template_error() -> TokenizerError {
-    TokenizerError::LoadError(
+    TokenizerError::NoChatTemplate(
         "no chat template: this is a plain (base) model, chat rendering is refused".to_string(),
     )
 }

@@ -335,3 +335,20 @@ async fn cpu_reference_tokens_unchanged_by_warm_up() {
     assert!(!runs[0].is_empty());
     assert_eq!(runs[0], runs[1], "the warm-up changed the turn's tokens");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn plain_model_warm_up_is_skipped_not_failed() {
+    // A plain (base) model has no chat template; the chat warm-up is skipped.
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../aien-inference-abi/fixtures/openwaldo-byte");
+    let plain = ChatTokenizer::from_model_dir(&dir, None).expect("plain fixture loads");
+    let tmp = tempfile::tempdir().unwrap();
+    let server = AienRuntimeServer::new(spine(), &tmp.path().join("plain.sock"));
+    server.set_tokenizer(plain);
+    // No step loop is running: an attempted warm-up would hang or fail, a skip returns at once.
+    let line = tokio::time::timeout(Duration::from_secs(5), server.run_warm_up())
+        .await
+        .expect("a skipped warm-up returns immediately");
+    assert_eq!(line, "Warm-up: skipped (plain model, no chat template)");
+    assert!(!line.contains("FAILED"), "{line}");
+}
