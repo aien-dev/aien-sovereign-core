@@ -27,7 +27,12 @@ sha() { sha256sum "$1" | cut -d' ' -f1; }
 # fixture: the real manifest and locks, the real gate and packager, throwaway binaries
 T="$W/tree"; mkdir -p "$T/scripts" "$T/release" "$W/bins"
 cp "$ROOT/scripts/check-release-candidate.sh" "$ROOT/scripts/package-release.sh" "$T/scripts/"
-cp "$ROOT/release/candidate.toml" "$T/release/"; cp "$ROOT/omega.lock" "$ROOT/Cargo.lock" "$T/"
+cp "$ROOT/release/candidate.toml" "$T/release/"; cp "$ROOT/Cargo.lock" "$T/"
+# The fixture tree is the candidate's tree: omega.lock is the candidate's omega-commit, not this revision's. Main may
+# move ahead of the candidate; whether THIS revision is releasable is reported (not enforced) by release-dry-run.yml,
+# and enforced at tag time by release.yml.
+sed -n 's/^omega-commit = "\([0-9a-f]\{40\}\)"$/\1/p' "$T/release/candidate.toml" > "$T/omega.lock"
+[[ -s "$T/omega.lock" ]] || fail "release/candidate.toml has no full omega-commit"
 echo constitution > "$T/CONSTITUTION.md"; echo readme > "$T/README.md"; echo '#!/bin/sh' > "$T/install.sh"
 for b in aien-cli spark-cockpit-rs spark-inquisitor cortex-encoder-rs cortex-rs spark-supervisor spark-debugger; do
     printf '#!/bin/sh\necho throwaway %s\n' "$b" > "$W/bins/$b"; chmod 755 "$W/bins/$b"
@@ -42,9 +47,8 @@ NATIVE_DIGEST="$(sed -n 's/^aien-cli-native-release = "\([0-9a-f]\{64\}\)".*/\1/
 [[ "$CAND" == CAND-4 && -n "$NATIVE_DIGEST" ]] || fail "release/candidate.toml is not CAND-4 with a native digest"
 grep -Eq '^sovereign-core-commit = "[0-9a-f]{40}"' "$T/release/candidate.toml" || fail "sovereign-core-commit is not a full hash"
 
-# positive control, tree: the committed tree is the candidate tree
-(cd "$ROOT" && bash scripts/check-release-candidate.sh >"$W/log" 2>&1) || { cat "$W/log" >&2; fail "real tree refused by the gate"; }
-grep -q "candidate=CAND-4" "$W/log"; pass "real tree passes the tree gate as CAND-4"
+# positive control, tree: a tree on the candidate's pins passes
+must_pass; grep -q "candidate=CAND-4" "$W/log"; pass "candidate tree passes the tree gate as CAND-4"
 
 # negative, tree: a tree on other pins than the candidate's (what a later main would look like) is refused
 cp "$T/omega.lock" "$W/omega.ok"; cp "$T/Cargo.lock" "$W/cargo.ok"

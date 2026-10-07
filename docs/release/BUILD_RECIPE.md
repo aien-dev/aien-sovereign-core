@@ -44,3 +44,9 @@ package aien-proof or aien-test.
   generated in the job (labelled in `DRY-RUN-NOT-A-RELEASE.txt`), verifies, uploads workflow artifacts only. Gate or
   package-check failures are recorded in `DRY-RUN-STATUS-<target>.txt` instead of stopping the run. It never creates a
   release. With `dry_run` set to false a manual run publishes like a tag push.
+- Pull requests (`release-dry-run.yml`): the publish guard, `scripts/test-release-gate-wiring.sh` and the refusal suite
+  (`scripts/test-release-real-tree.sh`, run on a fixture tree pinned to the candidate) block. The tree gate on the PR's
+  own revision only reports "IS / is NOT releasable as <candidate>" in the step summary: main may move ahead of the
+  candidate's omega-commit. A release must be cut from a commit whose tree passes the gate; the tag-push path enforces
+  it, and `test-release-gate-wiring.sh` fails if that step ever becomes non-blocking (only the manual dry run may
+  continue past it).

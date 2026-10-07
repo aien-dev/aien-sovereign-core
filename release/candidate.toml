@@ -2,6 +2,8 @@
 # (called from .github/workflows/release.yml and scripts/package-release.sh). A release fails
 # unless omega.lock equals omega-commit below. Copied from aien-architecture
 # qualification/candidates/CAND-4.toml ([commits] omega and [model]); change both together.
+# main may move ahead of omega-commit (pull requests only report it); a release must be cut from a commit whose
+# tree passes scripts/check-release-candidate.sh, which release.yml enforces on tag push.
 candidate = "CAND-4"
 omega-commit = "c0369e6705a4b0cb800978846e78915126a1b7f7"
 source-manifest = "aien-architecture qualification/candidates/CAND-4.toml"
