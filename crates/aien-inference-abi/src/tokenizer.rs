@@ -57,6 +57,12 @@ pub enum ChatTemplate {
         /// The default system message read from the model's own template, if it has one.
         default_system: Option<Arc<str>>,
     },
+    /// The model directory has no chat template at all (a base model). Plain text encode
+    /// and decode work; every chat render is refused (`try_render` errors with
+    /// "no chat template"). Chosen only when neither `tokenizer_config.json` `chat_template`
+    /// nor `chat_template.jinja` exists; a template that exists but is unrecognized is
+    /// refused at load.
+    None,
 }
 
 /// The ChatML layouts this engine renders, as the exact Jinja text a model ships in
@@ -137,12 +143,19 @@ fn ends_in_assistant(turns: &[(&str, &str)]) -> bool {
     })
 }
 
+fn no_chat_template_error() -> TokenizerError {
+    TokenizerError::LoadError(
+        "no chat template: this is a plain (base) model, chat rendering is refused".to_string(),
+    )
+}
+
 impl ChatTemplate {
     pub fn name(&self) -> &'static str {
         match self {
             Self::Zephyr => "zephyr (TinyLlama chat)",
             Self::Llama3 => "llama3 (Llama 3 instruct)",
             Self::ChatMl { .. } => "chatml (<|im_start|> / <|im_end|>)",
+            Self::None => "none (plain text model)",
         }
     }
 
@@ -178,8 +191,17 @@ impl ChatTemplate {
     /// skipped, and the BOS token is not part of the text (`encode` adds exactly one
     /// through the tokenizer's post-processor). ChatML: see [`ChatTemplate::ChatMl`].
     pub fn render(&self, turns: &[(&str, &str)]) -> String {
+        self.try_render(turns).expect("no chat template")
+    }
+
+    /// Like [`ChatTemplate::render`], but a plain model (no chat template) is refused with
+    /// an error containing "no chat template" instead of a layout being invented.
+    pub fn try_render(&self, turns: &[(&str, &str)]) -> Result<String, TokenizerError> {
+        if let Self::None = self {
+            return Err(no_chat_template_error());
+        }
         if let Self::ChatMl { default_system } = self {
-            return render_chatml(default_system.as_deref(), turns);
+            return Ok(render_chatml(default_system.as_deref(), turns));
         }
         let mut out = String::new();
         for (role, content) in turns {
@@ -198,6 +220,7 @@ impl ChatTemplate {
                     "<|start_header_id|>{role}<|end_header_id|>\n\n{body}<|eot_id|>"
                 )),
                 Self::ChatMl { .. } => unreachable!("ChatML returned above"),
+                Self::None => unreachable!("plain model refused above"),
             }
         }
         if !ends_in_assistant(turns) {
@@ -205,9 +228,10 @@ impl ChatTemplate {
                 Self::Zephyr => "<|assistant|>\n",
                 Self::Llama3 => "<|start_header_id|>assistant<|end_header_id|>\n\n",
                 Self::ChatMl { .. } => unreachable!("ChatML returned above"),
+                Self::None => unreachable!("plain model refused above"),
             });
         }
-        out
+        Ok(out)
     }
 }
 
@@ -299,19 +323,47 @@ impl ChatTokenizer {
     ) -> Result<Self, TokenizerError> {
         let default_json = dir.join("tokenizer.json");
         let mut tokenizer = Self::from_file(tokenizer_json.unwrap_or(&default_json))?;
-        let template_text = match read_json(&dir.join("tokenizer_config.json"))?
-            .and_then(|c| c.get("chat_template").and_then(|t| t.as_str()).map(str::to_string))
+        // A present `chat_template` key must be a string; any other form (the HF list
+        // form, null, an object) is an unrecognized template and never falls back to plain.
+        let config_template = match read_json(&dir.join("tokenizer_config.json"))?
+            .as_ref()
+            .and_then(|c| c.get("chat_template"))
         {
-            Some(text) => text,
-            None => std::fs::read_to_string(dir.join("chat_template.jinja")).map_err(|e| {
-                TokenizerError::LoadError(format!(
-                    "no chat template in {} (tokenizer_config.json chat_template or chat_template.jinja): {}",
-                    dir.display(),
-                    e
-                ))
-            })?,
+            None => None,
+            Some(serde_json::Value::String(text)) => Some(text.clone()),
+            Some(other) => {
+                let found = match other {
+                    serde_json::Value::Array(_) => "a list",
+                    serde_json::Value::Object(_) => "an object",
+                    serde_json::Value::Null => "null",
+                    _ => "a non-string value",
+                };
+                return Err(TokenizerError::LoadError(format!(
+                    "unrecognized chat template form in {}: expected a string, found {}",
+                    dir.join("tokenizer_config.json").display(),
+                    found
+                )));
+            }
         };
-        tokenizer.template = ChatTemplate::detect(&template_text)?;
+        let jinja_path = dir.join("chat_template.jinja");
+        let template_text = match config_template {
+            Some(text) => Some(text),
+            None if jinja_path.exists() => {
+                Some(std::fs::read_to_string(&jinja_path).map_err(|e| {
+                    TokenizerError::LoadError(format!(
+                        "unreadable chat template {}: {}",
+                        jinja_path.display(),
+                        e
+                    ))
+                })?)
+            }
+            None => None,
+        };
+        // Plain state only when neither source exists; an existing template must be recognized.
+        tokenizer.template = match template_text {
+            Some(text) => ChatTemplate::detect(&text)?,
+            None => ChatTemplate::None,
+        };
         let config = read_json(&dir.join("config.json"))?;
         let stop = read_json(&dir.join("generation_config.json"))?
             .as_ref()
@@ -353,6 +405,11 @@ impl ChatTokenizer {
     /// Renders `(role, content)` turns with this model's chat template.
     pub fn format_chat(&self, turns: &[(&str, &str)]) -> String {
         self.template.render(turns)
+    }
+
+    /// Fallible [`ChatTokenizer::format_chat`]: refuses a plain model ("no chat template").
+    pub fn try_format_chat(&self, turns: &[(&str, &str)]) -> Result<String, TokenizerError> {
+        self.template.try_render(turns)
     }
 
     /// Formats a conversation according to the canonical TinyLlama chat template:
