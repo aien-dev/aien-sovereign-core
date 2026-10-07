@@ -2129,6 +2129,12 @@ impl ComposeBridge {
         })
     }
 
+    /// Append the daemon's generation record (evidence only; see
+    /// `crate::generation`). Returns the record id only once it is written.
+    pub fn record_generation(&self, record: &serde_json::Value) -> Result<u64, String> {
+        self.with_home(|home| crate::generation::write(home, record))
+    }
+
     pub(crate) fn with_home<T>(
         &self,
         f: impl FnOnce(&mut ComposeHome) -> Result<T, String>,

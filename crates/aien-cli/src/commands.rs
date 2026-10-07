@@ -1118,13 +1118,36 @@ fn reference_config() -> aien_inference_abi::ModelConfig {
 /// Result of daemon model loading: the manifest (with SHA-256 digests filled in on
 /// success), the weights, the tokenizer, and whether reference weights were used.
 struct DaemonModel {
-    #[allow(dead_code)] // digests are read by the PREFILL-E2E receipt (Cut 8)
     manifest: DaemonModelManifest,
     weights: aien_inference_abi::TransformerWeights,
     tokenizer: Option<aien_inference_abi::ChatTokenizer>,
     label: String,
     #[allow(dead_code)] // read by tests now and by the PREFILL-E2E receipt (Cut 8)
     reference_weights: bool,
+}
+
+/// The digests of the files the daemon actually loaded, for its generation
+/// records. Present only when real weights AND a parsed tokenizer loaded (the
+/// reference fallback has no file identity).
+fn model_identity(
+    manifest: &DaemonModelManifest,
+    tokenizer_loaded: bool,
+) -> Option<aien_runtime::generation::ModelIdentity> {
+    if !tokenizer_loaded {
+        return None;
+    }
+    let path_text = |p: &std::path::Path| {
+        std::fs::canonicalize(p)
+            .unwrap_or_else(|_| p.to_path_buf())
+            .display()
+            .to_string()
+    };
+    Some(aien_runtime::generation::ModelIdentity {
+        model_sha256: manifest.model_sha256.clone()?,
+        model_path: path_text(manifest.checkpoint_path.as_deref()?),
+        tokenizer_sha256: manifest.tokenizer_sha256.clone()?,
+        tokenizer_path: path_text(manifest.tokenizer_path.as_deref()?),
+    })
 }
 
 /// Hex SHA-256 of a file, streamed in 1 MiB chunks.
@@ -1327,6 +1350,7 @@ type DaemonBackendParts = (
     String,
     String,
     Option<aien_inference_abi::ChatTokenizer>,
+    Option<aien_runtime::generation::ModelIdentity>,
 );
 
 fn build_native_daemon_backend() -> Result<DaemonBackendParts, String> {
@@ -1336,8 +1360,10 @@ fn build_native_daemon_backend() -> Result<DaemonBackendParts, String> {
         weights,
         tokenizer,
         label: model_label,
+        manifest,
         ..
     } = load_daemon_model(manifest, policy.require_checkpoint)?;
+    let identity = model_identity(&manifest, tokenizer.is_some());
     // FB-1 cut 6: the native Omega engine is the only GPU backend (no CUDA). The env names
     // AIEN_REQUIRE_BLACKWELL (the GB10 chip, campaign spec) and AIEN_GPU_BACKEND=omega both
     // make a missing engine fatal instead of falling back to CPU reference math.
@@ -1366,6 +1392,7 @@ fn build_native_daemon_backend() -> Result<DaemonBackendParts, String> {
             format!("NativeTransformerBackend/{name}"),
             model_label,
             tokenizer,
+            identity,
         ))
     } else if require_gpu {
         Err(
@@ -1389,6 +1416,7 @@ fn build_native_daemon_backend() -> Result<DaemonBackendParts, String> {
                 .to_string(),
             model_label,
             tokenizer,
+            identity,
         ))
     }
 }
@@ -1483,7 +1511,7 @@ pub async fn run_daemon_server() {
         watermark_blocks: 64,
     };
 
-    let (weights, tensor_backend, backend_label, model_label, tokenizer) =
+    let (weights, tensor_backend, backend_label, model_label, tokenizer, identity) =
         match build_native_daemon_backend() {
             Ok(parts) => parts,
             Err(fatal) => {
@@ -1550,6 +1578,10 @@ pub async fn run_daemon_server() {
             tokenizer.stop_token_ids()
         );
         server.set_tokenizer(tokenizer);
+        if let Some(identity) = identity {
+            // The daemon's generation records name these digests (docs/DAEMON_GENERATION_RECORD.md).
+            server.set_model_identity(identity);
+        }
         // NEXT-PHASE-1 v4: one declared 1-token warm-up before serving.
         server.enable_warm_up();
     } else {
@@ -1931,6 +1963,44 @@ pub async fn handle_aegis_command() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn model_identity_needs_real_weights_and_a_parsed_tokenizer() {
+        let loaded = DaemonModelManifest {
+            model_id: "m".into(),
+            label: "l".into(),
+            checkpoint_path: Some("/nonexistent/model.safetensors".into()),
+            tokenizer_path: Some("/nonexistent/tokenizer.json".into()),
+            fallback_reason: None,
+            model_sha256: Some("aa".into()),
+            tokenizer_sha256: Some("bb".into()),
+        };
+        let id = model_identity(&loaded, true).expect("identity");
+        assert_eq!(
+            (id.model_sha256.as_str(), id.tokenizer_sha256.as_str()),
+            ("aa", "bb")
+        );
+        assert_eq!(id.model_path, "/nonexistent/model.safetensors");
+        // No parsed tokenizer, no weights digest, or no tokenizer digest: no identity.
+        assert!(model_identity(&loaded, false).is_none());
+        for strip in [0, 1] {
+            let mut m = DaemonModelManifest {
+                model_sha256: loaded.model_sha256.clone(),
+                tokenizer_sha256: loaded.tokenizer_sha256.clone(),
+                checkpoint_path: loaded.checkpoint_path.clone(),
+                tokenizer_path: loaded.tokenizer_path.clone(),
+                model_id: "m".into(),
+                label: "l".into(),
+                fallback_reason: None,
+            };
+            if strip == 0 {
+                m.model_sha256 = None;
+            } else {
+                m.tokenizer_sha256 = None;
+            }
+            assert!(model_identity(&m, true).is_none());
+        }
+    }
 
     #[test]
     fn checkpoint_loaded_line_format_is_pinned() {

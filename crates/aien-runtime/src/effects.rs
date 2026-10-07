@@ -699,6 +699,12 @@ pub fn check_reserved_note(kind: &str, text: &str) -> Result<(), String> {
     // sovereign-core #261: no caller writes an authorization, whatever it
     // says. Grants come from ComposeAuthorize and ComposeApprovedProposal,
     // control records from ComposeControl; all are written by the daemon.
+    if kind == crate::generation::GENERATION {
+        return Err(
+            "ComposeNote: generation records are written only by the daemon when a turn finishes"
+                .into(),
+        );
+    }
     if kind == "authorization" {
         return Err(
             "ComposeNote: authorization records are written only by the daemon (ComposeAuthorize, ComposeApprovedProposal, ComposeControl); a caller-written grant is never honoured (sovereign-core #261)"
@@ -709,6 +715,12 @@ pub fn check_reserved_note(kind: &str, text: &str) -> Result<(), String> {
         return Ok(());
     };
     match kind {
+        // The daemon's generation record (evidence only, never an input to any
+        // decision): effect-class note with the marker field.
+        "effect" if v.get(crate::generation::GENERATION).is_some() => Err(
+            "ComposeNote: generation records are written only by the daemon when a turn finishes"
+                .into(),
+        ),
         "effect" if v.get("phase").is_some() => Err(
             "ComposeNote: effect records with a \"phase\" are written only by the effect commands"
                 .into(),
@@ -1083,7 +1095,7 @@ fn ledger(home: &mut ComposeHome) -> Result<Ledger, String> {
     Ledger::from_records(&host_views(home)?).map_err(|r| r.to_string())
 }
 
-fn append(
+pub(crate) fn append(
     home: &mut ComposeHome,
     kind: NoteKind,
     links: &[u64],
@@ -1495,6 +1507,67 @@ mod tests {
         l.check_intent(&req(a), &cur.map(str::to_string))
             .unwrap_err()
             .name
+    }
+
+    /// A real daemon-built generation record, as a ledger row.
+    fn generation_row(id: u64) -> ComposeRecordView {
+        let identity = crate::generation::ModelIdentity {
+            model_sha256: "m".repeat(64),
+            model_path: "/models/m.safetensors".into(),
+            tokenizer_sha256: "t".repeat(64),
+            tokenizer_path: "/models/tokenizer.json".into(),
+        };
+        let record = crate::generation::build_record(
+            &identity,
+            &crate::generation::TurnEvidence {
+                prompt_ids: &[1, 2, 3],
+                output_ids: &[100, 101],
+                text: "x100 x101",
+                total_tokens: 2,
+                finish_reason: "eos",
+                request_id: 7,
+                operation_id: 8,
+            },
+            crate::generation::DaemonStart(1),
+        );
+        rec(id, "effect", record)
+    }
+
+    /// Evidence only: generation records, anywhere in the ledger, change no
+    /// ledger state and no authorization or intent decision.
+    #[test]
+    fn generation_records_change_no_decision() {
+        let base = vec![
+            grant(2, Value::Null),
+            intent(3, 2),
+            settle(4, "ack", 3, "DONE"),
+            grant(5, Value::Null),
+        ];
+        let mut with = base.clone();
+        with.push(generation_row(6));
+        with.push(generation_row(7));
+        let (a, b) = (
+            Ledger::from_records(&base).unwrap(),
+            Ledger::from_records(&with).unwrap(),
+        );
+        assert_eq!(a.view(), b.view());
+        assert_eq!(refusal(&a, 2, None), refusal(&b, 2, None));
+        assert_eq!(refusal(&a, 2, None), "AlreadySpent");
+        assert_eq!(
+            a.check_intent(&req(5), &None).map(|g| g.id),
+            b.check_intent(&req(5), &None).map(|g| g.id)
+        );
+        // A generation record alone opens nothing and spends nothing.
+        let only = Ledger::from_records(&[generation_row(2)]).unwrap();
+        assert_eq!(only.view(), Ledger::default().view());
+    }
+
+    #[test]
+    fn generation_records_cannot_be_forged_through_compose_note() {
+        let g = r#"{"generation":1,"model_sha256":"x"}"#;
+        assert!(check_reserved_note("effect", g).is_err());
+        assert!(check_reserved_note("generation", "anything").is_err());
+        assert!(check_reserved_note("generation", g).is_err());
     }
 
     #[test]
