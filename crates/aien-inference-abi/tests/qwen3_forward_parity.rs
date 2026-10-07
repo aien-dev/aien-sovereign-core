@@ -11,9 +11,11 @@
 //! The negative test removes the q/k norm and shows the logits move far outside the tolerance,
 //! so the comparison is not vacuous.
 //!
-//! `AIEN_QWEN3_DIR` (a Qwen3-4B-Instruct-2507 model directory) also runs the real model against
+//! The ignored test `real_qwen3_4b_instruct_2507_matches_transformers` (run with `--ignored`) runs
+//! the real model in `AIEN_QWEN3_DIR` against
 //! `fixtures/qwen3-4b-instruct-2507-config/real_forward_reference.json` (top-20 logits of the
-//! prompt "The capital of France is", transformers 5.17.0 CPU float32); skipped when unset. Its
+//! prompt "The capital of France is", transformers 5.17.0 CPU float32). It fails when
+//! `AIEN_QWEN3_DIR` is unset, so a missing model never reads as a pass. Its
 //! tolerance (5e-3 absolute on 36 layers) was set before the run.
 
 use aien_inference_abi::{
@@ -356,11 +358,10 @@ fn gb10_backend_refuses_qwen3_and_not_llama() {
 }
 
 #[test]
+#[ignore = "needs the real Qwen3-4B-Instruct-2507 weights in AIEN_QWEN3_DIR"]
 fn real_qwen3_4b_instruct_2507_matches_transformers() {
-    let Ok(dir) = std::env::var("AIEN_QWEN3_DIR") else {
-        eprintln!("AIEN_QWEN3_DIR not set: real Qwen3-4B-Instruct-2507 comparison skipped");
-        return;
-    };
+    let dir = std::env::var("AIEN_QWEN3_DIR")
+        .expect("AIEN_QWEN3_DIR must name a Qwen3-4B-Instruct-2507 model directory");
     let dir = PathBuf::from(dir);
     let r: Value = serde_json::from_str(
         &std::fs::read_to_string(
