@@ -1467,7 +1467,15 @@ pub async fn run_daemon_server() {
     // One KV for runtime and backend: the spine's block tables and the
     // backend's K/V writes go to the same pooled manager. The pool is sized
     // from the loaded model's config and declared context, and the host's
-    // MemAvailable is checked before it is allocated (#239).
+    // MemAvailable is checked before it is allocated (#239). AIEN_KV_CONTEXT_TOKENS
+    // may lower the context budget below the model's declared context, never raise it.
+    let kv_context_cap = match aien_runtime::shared_kv::kv_context_cap_from_env() {
+        Ok(cap) => cap,
+        Err(fatal) => {
+            eprintln!("Fatal: shared KV pool: {}", fatal.red().bold());
+            std::process::exit(1);
+        }
+    };
     let gpu_native = aien_inference_abi::OmegaGb10Backend::new().is_available();
     let (spine, backend, _kv_plan) =
         match aien_runtime::shared_kv::build_shared_kv_runtime_for_model(
@@ -1475,6 +1483,7 @@ pub async fn run_daemon_server() {
             tensor_backend,
             sched_cfg,
             4096,
+            kv_context_cap,
             &aien_runtime::shared_kv::read_mem_available_checked,
             aien_runtime::shared_kv::allow_unchecked_memory_from_env(),
         ) {
