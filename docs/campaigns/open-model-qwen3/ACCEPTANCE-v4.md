@@ -246,30 +246,30 @@ Model: Qwen/Qwen3-4B-Instruct-2507, Hugging Face revision cdbee75f, Apache-2.0, 
 below is empty now and is filled and checked at the freeze; the wrapper compares what it can.
 
 ```text
-sovereign-core commit (exact)            = TO FILL AT FREEZE
-omega.lock commit                        = TO FILL AT FREEZE   (v3 used 01f6a74636b8383b010cdb95597839582c415c27)
-physics commit                           = TO FILL AT FREEZE   (v3 used 6d7cf0d4d8eb2cda7b512100ff6058e25dbb3ddf)
-aienos.lock commit                       = TO FILL AT FREEZE   (v3 used b84c0a67590a934f3f3e001b12ec85ebc086a9eb)
-Cargo.lock sha256                        = TO FILL AT FREEZE
-aien-cli sha256                          = TO FILL AT FREEZE
-np1_reference sha256                     = TO FILL AT FREEZE
-np1_edit_merge sha256                    = TO FILL AT FREEZE
-build logs show has_omega_compose, has_omega_gpu, has_omega_wait_ms = TO FILL AT FREEZE (confirm)
+sovereign-core commit (exact)            = 4d4dfd459ae7e7c6c175edc5017816d079c621a9 (main with #293, #296, #295)
+omega.lock commit                        = 01f6a74636b8383b010cdb95597839582c415c27 (unchanged) (v3 used 01f6a74636b8383b010cdb95597839582c415c27)
+physics commit                           = 6d7cf0d4d8eb2cda7b512100ff6058e25dbb3ddf (unchanged) (v3 used 6d7cf0d4d8eb2cda7b512100ff6058e25dbb3ddf)
+aienos.lock commit                       = b84c0a67590a934f3f3e001b12ec85ebc086a9eb (unchanged; build log "matches") (v3 used b84c0a67590a934f3f3e001b12ec85ebc086a9eb)
+Cargo.lock sha256                        = 0d9d1a3dbead55fb1581895a1c8246c396eeb35504871921ae4c00e28115acff
+aien-cli sha256                          = fa48da4a85023dac406dbf05bca60df316b4ecd441c94e8c0f356fbd61a9ebd2
+np1_reference sha256                     = 421d0db86539392a4d38b712b358041b0263a45ba92027838b8919cf3b865f2d
+np1_edit_merge sha256                    = 7592d74a05406804c430c3d5940ba8b7691c3d34510375344e2a5b4d8c3e9f6c
+build logs show has_omega_compose, has_omega_gpu, has_omega_wait_ms = confirmed (evidence-v4/build-lines.txt)
 ```
 
 Model files (values recorded from the v3 wrapper and re-hashed on this machine on 2026-10-07; TO FILL AT FREEZE means re-hash
 and confirm at the freeze), directory `/home/drakestapleton/models/qwen3-4b-instruct-2507-cdbee75/`:
 
 ```text
-model.safetensors.index.json             d6c42883a895dfef5b0080ed2116a1bcd764f558406b98923d675978a1abf29c   (confirm: TO FILL AT FREEZE)
-model-00001-of-00003.safetensors         75311d91bb08cf0b882913da464a1e722a31fb44db35208663487efb7a3d8ed6   (confirm: TO FILL AT FREEZE)
-model-00002-of-00003.safetensors         0b48adbb1f60e901153d91907ba11ce63bd4b8b584482e730f48808d055dfba1   (confirm: TO FILL AT FREEZE)
-model-00003-of-00003.safetensors         7dd39ccca5e4de123c74c14af44c9bf2eb75df33b4614382af0134528e060d5d   (confirm: TO FILL AT FREEZE)
-tokenizer.json                           aeb13307a71acd8fe81861d94ad54ab689df773318809eed3cbe794b4492dae4   (confirm: TO FILL AT FREEZE)
-tokenizer_config.json (holds the chat template; checked by the v4 wrapper, not by v3) a62ff0a2472a0fa1b8eaabcb57c59b58afa42a22831dc141400b6e0cf2b65ce3   (confirm: TO FILL AT FREEZE)
-chat template string alone (jq -j .chat_template | sha256sum)   64f85b198065d0fba2a81f37e10ed68161ce2c19a754c7100e67e0ca2ee9c326   (confirm: TO FILL AT FREEZE)
-config.json                              5beea1a4a34c62782bfb2f911c606741a3bab8f92d80a118fa053c28af12e8ba   (confirm: TO FILL AT FREEZE)
-generation_config.json                   835fffe355c9438e7a25be099b3fccaa98350b83451f9fd2d99512e74f1ade48   (confirm: TO FILL AT FREEZE)
+model.safetensors.index.json             d6c42883a895dfef5b0080ed2116a1bcd764f558406b98923d675978a1abf29c   (confirmed 2026-10-07, evidence-v4/model-sha256.txt)
+model-00001-of-00003.safetensors         75311d91bb08cf0b882913da464a1e722a31fb44db35208663487efb7a3d8ed6   (confirmed 2026-10-07, evidence-v4/model-sha256.txt)
+model-00002-of-00003.safetensors         0b48adbb1f60e901153d91907ba11ce63bd4b8b584482e730f48808d055dfba1   (confirmed 2026-10-07, evidence-v4/model-sha256.txt)
+model-00003-of-00003.safetensors         7dd39ccca5e4de123c74c14af44c9bf2eb75df33b4614382af0134528e060d5d   (confirmed 2026-10-07, evidence-v4/model-sha256.txt)
+tokenizer.json                           aeb13307a71acd8fe81861d94ad54ab689df773318809eed3cbe794b4492dae4   (confirmed 2026-10-07, evidence-v4/model-sha256.txt)
+tokenizer_config.json (holds the chat template; checked by the v4 wrapper, not by v3) a62ff0a2472a0fa1b8eaabcb57c59b58afa42a22831dc141400b6e0cf2b65ce3   (confirmed 2026-10-07, evidence-v4/model-sha256.txt)
+chat template string alone (jq -j .chat_template | sha256sum)   64f85b198065d0fba2a81f37e10ed68161ce2c19a754c7100e67e0ca2ee9c326   (confirmed 2026-10-07, evidence-v4/model-sha256.txt)
+config.json                              5beea1a4a34c62782bfb2f911c606741a3bab8f92d80a118fa053c28af12e8ba   (confirmed 2026-10-07, evidence-v4/model-sha256.txt)
+generation_config.json                   835fffe355c9438e7a25be099b3fccaa98350b83451f9fd2d99512e74f1ade48   (confirmed 2026-10-07, evidence-v4/model-sha256.txt)
 ```
 
 Environment, checked by the wrapper (values are what v3 used; confirm at the freeze):
@@ -350,11 +350,14 @@ Result when this draft was prepared (CPU only): test-v4.sh: 164 passed, 0 failed
 Freeze checklist (all TO FILL AT FREEZE unless marked done):
 
 1. Pick the sovereign-core commit to freeze on (main, with whatever product changes are then merged) and the matching
-   omega.lock and physics commits: TO FILL AT FREEZE.
+   omega.lock and physics commits: 4d4dfd4, omega 01f6a74, physics 6d7cf0d (Section 7).
 2. Re-read this file's Section 12 against that commit. TO FILL AT FREEZE.
-3. Combined build from clean checkouts, binaries' sha256 and build-line evidence into `evidence-v4/`: TO FILL AT FREEZE.
+3. Combined build from clean checkouts, binaries' sha256 and build-line evidence into `evidence-v4/`: done 2026-10-07 on
+   4d4dfd4, `evidence-v4/build-summary.txt` and `build-lines.txt`.
 4. Pre-run gate on that build: `cargo fmt --all --check`, clippy with `-D warnings`, the runtime and CLI tests in stub and
-   linked builds reported separately, `test-rows-v8.sh`, `test-v3.sh` and `test-v4.sh`: TO FILL AT FREEZE.
+   linked builds reported separately, `test-rows-v8.sh`, `test-v3.sh` and `test-v4.sh`: run 2026-10-07 on 4d4dfd4, results in
+   `evidence-v4/pre-run-gate.txt` (stub 289/1/65 with the one failure explained and filed as #299, linked 350/0/5, test-v4 164/0).
+   Repeat at freeze if the frozen commit changes.
 5. Scorer dry run on both declarations with made-up lines (`test-v4.sh` section 3): done in this draft; repeat at freeze.
 6. A GPU dry run of this exact wrapper in `OQ3_DRY_TASKS` mode: NOT DONE (needs five holds and Drake's approval). Until it runs,
    the part timings of Section 8, the live reading of `requirements_recognized` and W4's classification are unmeasured.
