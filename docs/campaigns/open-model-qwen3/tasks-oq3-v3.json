@@ -1,5 +1,5 @@
 {
-  "spec": "ACCEPTANCE-v3.md Section 2 (PREPARED, NOT FROZEN)",
+  "spec": "ACCEPTANCE-v3.md Section 2 (FROZEN when this file is on main)",
   "limits": {"edit_budget_ms": 29000, "doc_budget_ms": 120000, "edit_max_tokens": 96, "doc_max_tokens": 1024},
   "tasks": [
     {

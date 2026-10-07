@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# OPEN-MODEL-QWEN3 v3 (ACCEPTANCE-v3.md Section 4, PREPARED, NOT FROZEN): the extra rows of one launch,
+# OPEN-MODEL-QWEN3 v3 (ACCEPTANCE-v3.md Section 4, FROZEN): the extra rows of one launch,
 # computed from the run directory beside the v8 receipt. Shell + jq only. Usage:
 #   v3-rows.sh RUN_ROOT LAUNCH_ID TASKS.json OUT_DIR RECEIPT_BASENAME
 # Writes OUT_DIR/<sha256 of content>.v3rows.json (never edited afterwards) and prints one scoring-v5

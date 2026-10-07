@@ -1,4 +1,4 @@
-# OPEN-MODEL-QWEN3 v3 extra rows (ACCEPTANCE-v3.md Section 4), jq module. PREPARED, NOT FROZEN.
+# OPEN-MODEL-QWEN3 v3 extra rows (ACCEPTANCE-v3.md Section 4), jq module. FROZEN when ACCEPTANCE-v3.md is on main.
 # These rows are computed beside the v8 receipt rows, not inside the receipt (the receipt tool and
 # rows-v8.jq stay byte-identical; ACCEPTANCE-v3 Section 6). v3-rows.sh gathers the evidence of one
 # launch; v3_rows turns it into [{row, criterion, threshold, value, result}].
@@ -23,20 +23,42 @@ def v3_headings($t): ($t | split("\n") | map(select(test("^#{1,6} +\\S"))) | len
 # The accepted attempt: the last attempt of the S3 report whose outcome is "parsed".
 def v3_accepted: ((.report.proposal_attempts // []) | map(select(.outcome == "parsed")) | last);
 
-# Independent reading of a model reply as a document (ACCEPTANCE-v3 Section 4, row <id>-F):
-# drop up to and including the "filename:" line; if the next non-blank line opens a fence AND the
-# last non-blank line is a bare fence, drop both (the outer fence); otherwise the body is the
-# document whole. Documented behaviour of the parser repair (031756/fence-parse): the outer fence
-# closes at the last bare fence when inner fences are unbalanced, and an unfenced reply is taken whole.
+# Independent reading of a model reply as a document (ACCEPTANCE-v3 Section 4, row <id>-F), written from the
+# merged parser's documented rule (sovereign-core 8f3e8c8, spine.rs check_file_proposal / outer_fence_close):
+# the first non-blank line is the "filename:" line and is dropped; blank lines after it are dropped; if the
+# next line starts (after indentation) with three or more backticks, that opener is dropped and its length n
+# is taken; among the lines after it, a "fence" is a line of at least n backticks (an info string is allowed
+# but not a backtick in it); a fence with an info string opens a nested block (depth + 1); a bare fence at
+# depth > 0 closes it (depth - 1, remembered as the last bare fence); a bare fence at depth 0 that is the last
+# fence closes the outer fence; a bare fence at depth 0 with fences after it opens a bare inner block (depth + 1).
+# The outer close is the first outer-closing line, else the last remembered bare fence, else none. Everything
+# from the close on is dropped (none: the body is kept whole), then trailing blank lines. Tilde fences are
+# not an outer opener for the parser and are left in the text.
+def v3_fence_info:
+  sub("^\\s+"; "") | capture("^(?<b>`*)(?<r>.*)$") | (.b | length) as $n | (.r | sub("^\\s+"; "") | sub("\\s+$"; "")) as $info
+  | if $n < 3 or ($info | contains("`")) then null else {n: $n, info: ($info != "")} end;
+def v3_outer_close($body; $open):
+  ([$body | to_entries[] | (.value | v3_fence_info) as $f | select($f != null and $f.n >= $open) | {i: .key, info: $f.info}]) as $fx
+  | (reduce range(0; $fx | length) as $k ({depth: 0, last: null, ret: null};
+      if .ret != null then .
+      elif $fx[$k].info then .depth += 1
+      elif .depth > 0 then .depth -= 1 | .last = $fx[$k].i
+      elif $k + 1 == ($fx | length) then .ret = $fx[$k].i
+      else .depth += 1 end)) as $s
+  | ($s.ret // $s.last);
 def v3_doc_from_reply:
   v3_lines as $l
-  | (($l | map(test("^\\s*filename:\\s")) | index(true))) as $f
-  | (if $f == null then $l else $l[$f + 1:] end) as $body
-  | ($body | map(test("\\S")) | index(true)) as $first
-  | (if $first == null then [] else $body[$first:] end) as $b
-  | ($b | map(test("\\S")) | rindex(true)) as $last
-  | (if $last == null then [] else $b[0:$last + 1] end) as $c
-  | (if ($c | length) >= 2 and ($c[0] | v3_fence) and ($c[-1] | v3_bare_fence) then $c[1:-1] else $c end)
+  | (($l | map(test("\\S")) | index(true))) as $f
+  | (if $f == null then [] else $l[$f + 1:] end) as $rest
+  | (($rest | map(test("\\S")) | index(true)) // ($rest | length)) as $skip
+  | $rest[$skip:] as $b
+  | (if ($b | length) > 0 and ($b[0] | sub("^\\s+"; "") | startswith("```"))
+     then ($b[0] | sub("^\\s+"; "") | capture("^(?<b>`*)") | .b | length) as $open
+          | $b[1:] as $in | (v3_outer_close($in; $open)) as $c
+          | (if $c == null then $in else $in[0:$c] end)
+     else $b end) as $d
+  | ($d | map(test("\\S")) | rindex(true)) as $last
+  | (if $last == null then [] else $d[0:$last + 1] end)
   | join("\n") | v3_rtrim;
 
 # SB: saved bytes equal approved bytes. The file's own sha256 is computed by the scorer after the run.
@@ -64,7 +86,7 @@ def v3_row_f($id):
   | (if $L == null then [] elif $lastf == null or $minb == 0 then [] else $L[$lastf + 1:] end) as $after
   | (($after | join(" ") | [scan("\\S+")] | length)) as $tailw
   | (if $acc == null then null else ($acc.text | v3_doc_from_reply) end) as $rd
-  | (if $t == null then null else ($t | v3_rtrim) end) as $ct
+  | (if $t == null then null else ($t | v3_lines | join("\n") | v3_rtrim) end) as $ct
   | {row: "\($id)-F", criterion: "Complete document saved (no truncation at embedded fences)",
      threshold: "the file is read; its fence lines (``` or ~~~ at line start) are even in number and at least 2 x min_code_blocks; when min_code_blocks > 0 the text after the last fence line has at least min_tail_words words and, if tail_heading is set, a line equal to it; the saved text equals the document an independent reading takes from the accepted reply (outer fence stripped, trailing whitespace ignored)",
      value: {fence_lines: ($fx | length), min_code_blocks: $minb, last_fence_line: $lastf, words_after_last_fence: $tailw,

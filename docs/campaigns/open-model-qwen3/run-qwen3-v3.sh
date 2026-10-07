@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# OPEN-MODEL-QWEN3 v3 campaign (ACCEPTANCE-v3.md; PREPARED, NOT FROZEN: it refuses to run while the
-# build identity below is a placeholder). Eight launches in three parts, Qwen3-4B, adapted from
+# OPEN-MODEL-QWEN3 v3 campaign (ACCEPTANCE-v3.md; FROZEN when this file is on main: it refuses to run unless the
+# commits and the binaries sha256 below match). Eight launches in three parts, Qwen3-4B, adapted from
 # run-qwen3-v2.sh: same driver (next-phase-1/run-campaign.sh), same receipt builder and v8 rows, same
 # scorer; new tasks (tasks-oq3-v3.json), declaration (oq3-v3.decl.json) and extra rows (v3-rows.sh).
 # Shell + jq only. Run inside the caller's quietlock hold.
@@ -19,14 +19,14 @@ HERE=$(cd "$(dirname "$0")" && pwd)
 NP1=$(cd "$HERE/../next-phase-1" && pwd)
 BASE=${1:?RUN_BASE} OUT=${2:?OUT_DIR} SC=${3:?SC_COMMIT} OMC=${4:?OMEGA_COMPOSE} OMG=${5:?OMEGA_GPU} REFBIN=${6:?REFERENCE_BIN} MERGEBIN=${7:?MERGE_BIN}
 
-# ---- Build identity (ACCEPTANCE-v3 Section 6). TO BE FILLED at freeze, after all required changes merge and
-# the combined build passes review and checks. Until then every real run refuses.
+# ---- Build identity (ACCEPTANCE-v3 Section 7), filled at the freeze: sovereign-core main 8f3e8c8 (sc#285, #284, #287 merged),
+# omega.lock 01f6a74 (omega#331). A real run refuses unless the commit arguments and the three binaries sha256 equal these.
 PLACEHOLDER="TO BE FILLED at freeze, after all required changes merge and the combined build passes review and checks"
-FROZEN_SC_COMMIT=$PLACEHOLDER
-FROZEN_OMEGA_COMMIT=$PLACEHOLDER
-FROZEN_AIEN_CLI_SHA256=$PLACEHOLDER
-FROZEN_NP1_REFERENCE_SHA256=$PLACEHOLDER
-FROZEN_NP1_EDIT_MERGE_SHA256=$PLACEHOLDER
+FROZEN_SC_COMMIT=8f3e8c8b879e10dd83883cee150f16508284d643
+FROZEN_OMEGA_COMMIT=01f6a74636b8383b010cdb95597839582c415c27
+FROZEN_AIEN_CLI_SHA256=689027ea9ac09f52ec130a2d0b0310995b7539113ccd3a63b06f1037ad2cf4de
+FROZEN_NP1_REFERENCE_SHA256=df91eede1223f454b7c6afd47589aac6406c8e69e393018fdbe3377b2103f686
+FROZEN_NP1_EDIT_MERGE_SHA256=abc345a47e872728e8b59d050ccf41794c78266e19da882ad6e3d1db681c6377
 
 TASKS=$HERE/tasks-oq3-v3.json TAG=oq3-v3
 if [ -n "${OQ3_DRY_TASKS:-}" ]; then
@@ -44,7 +44,7 @@ else
     [ ! -e "$OUT" ] || [ -z "$(ls -A "$OUT" 2>/dev/null)" ] || { echo "run-qwen3-v3: OUT_DIR must be new or empty" >&2; exit 2; }
   fi
   for v in "$FROZEN_SC_COMMIT" "$FROZEN_OMEGA_COMMIT" "$FROZEN_AIEN_CLI_SHA256" "$FROZEN_NP1_REFERENCE_SHA256" "$FROZEN_NP1_EDIT_MERGE_SHA256"; do
-    [ "$v" != "$PLACEHOLDER" ] || { echo "run-qwen3-v3: the build identity is not frozen yet (ACCEPTANCE-v3 Section 6)" >&2; exit 2; }
+    [ "$v" != "$PLACEHOLDER" ] || { echo "run-qwen3-v3: the build identity is not frozen yet (ACCEPTANCE-v3 Section 7)" >&2; exit 2; }
   done
   [ "$SC" = "$FROZEN_SC_COMMIT" ] && [ "$OMC" = "$FROZEN_OMEGA_COMMIT" ] && [ "$OMG" = "$FROZEN_OMEGA_COMMIT" ] ||
     { echo "run-qwen3-v3: SC_COMMIT, OMEGA_COMPOSE_COMMIT and OMEGA_GPU_COMMIT must equal the frozen commits" >&2; exit 2; }
@@ -53,7 +53,7 @@ DECL=$HERE/../scoring/declarations/oq3-v3.decl.json
 SCORER=$HERE/../scoring/score-rows.sh
 [ -f "$DECL" ] && [ -x "$SCORER" ] && [ -x "$REFBIN" ] && [ -x "$MERGEBIN" ] || { echo "run-qwen3-v3: declaration, scorer, reference binary or merge binary missing" >&2; exit 2; }
 : "${AIEN_MODEL_PATH:?}" "${AIEN_TOKENIZER_PATH:?}" "${AIEN_BIN:?}"
-need() { [ "$(printenv "$1")" = "$2" ] || { echo "$1 must be $2 (ACCEPTANCE-v3 Section 6)" >&2; exit 3; }; }
+need() { [ "$(printenv "$1")" = "$2" ] || { echo "$1 must be $2 (ACCEPTANCE-v3 Section 7)" >&2; exit 3; }; }
 need AIEN_KV_CONTEXT_TOKENS 4096
 need AIEN_REQUIRE_BLACKWELL 1
 need AIEN_GB10_QWEN3_DECLARED_ATTEMPT 1
@@ -61,7 +61,7 @@ need AIEN_GB10_QWEN3_DECLARED_ATTEMPT 1
 # AIEN_COMPOSE_BUDGET_MS is the retired single budget (sc#284 refuses it too).
 for v in AIEN_FORCE_CPU_STUB AIEN_COMPOSE_MAX_TOKENS AIEN_COMPOSE_DOC_MAX_TOKENS AIEN_COMPOSE_EDIT_BUDGET_MS \
          AIEN_COMPOSE_DOC_BUDGET_MS AIEN_COMPOSE_BUDGET_MS AIEN_OMEGA_SPIN_US AIEN_OMEGA_CTA_BUDGET; do
-  [ -z "$(printenv $v)" ] || { echo "$v must be unset (ACCEPTANCE-v3 Section 6)" >&2; exit 3; }
+  [ -z "$(printenv $v)" ] || { echo "$v must be unset (ACCEPTANCE-v3 Section 7)" >&2; exit 3; }
 done
 MODEL_DIR=$(dirname "$AIEN_MODEL_PATH")
 chk() { [ "$(sha256sum "$1" | cut -d' ' -f1)" = "$2" ] || { echo "digest mismatch: $1" >&2; exit 3; }; }

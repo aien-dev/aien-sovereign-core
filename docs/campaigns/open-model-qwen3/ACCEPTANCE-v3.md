@@ -1,9 +1,11 @@
-# OPEN-MODEL-QWEN3 campaign v3: acceptance criteria (PREPARED)
+# OPEN-MODEL-QWEN3 campaign v3: acceptance criteria (FROZEN)
 
-**Status: PREPARED, NOT FROZEN.** Nothing here has been run. The build identity (Section 7) is a placeholder, the
-wrapper `run-qwen3-v3.sh` refuses to start while it is, and the features this campaign needs are not all merged
-(Section 9). This file becomes FROZEN only in a later change that fills Section 7 and the wrapper, after the
-freeze checklist (Section 9) is done. Written by session 031756 for Drake, 2026-10-07.
+**Status: FROZEN** when this file is on main (merged before the run). Section 7 names the merged commits and the
+binaries' sha256, the pre-run gate passed on that build (Section 9), and `run-qwen3-v3.sh` refuses unless the commit
+arguments and the binaries match. Nothing below is a verdict; VERDICT-v3.md is written after the run. Prepared by
+session 031756 for Drake, 2026-10-07; frozen 2026-10-07. **Read Section 12 first: it records what the merged code does
+differently from what Section 2 and Section 3 assumed, including one row (G3-RQ) that cannot pass as written. That
+needs Drake's decision before this is merged.**
 
 ## 0. Read this first: what is and is not established
 
@@ -26,7 +28,7 @@ freeze checklist (Section 9) is done. Written by session 031756 for Drake, 2026-
 
 | Task kind | Wall budget (one deadline shared by all attempts of the task) | Output cap |
 |---|---|---|
-| Small edit (the goal names an existing file) | 29 s | 96 tokens (today's cap, `AIEN_COMPOSE_MAX_TOKENS`) |
+| Small edit (the goal names an existing file) | 29 s | 96 tokens (`AIEN_COMPOSE_MAX_TOKENS`, set by the wrapper; the daemon default is 48, `server.rs:483-492`) |
 | Full document (the goal creates a new file) | 120 s | 1024 tokens (`AIEN_COMPOSE_DOC_MAX_TOKENS`) |
 
 - A reply cut at the token cap is still refused (never a proposal). A wall-clock timeout is a separate refusal.
@@ -95,7 +97,7 @@ for N launches do not exist, as in v8). Replay is R1-P and R1-T plus the `<id>-A
 | Row | Launches | What it requires |
 |---|---|---|
 | `<id>-SB` Saved bytes equal approved bytes | G1 G2 G3 E1 E2 R1 | exactly one authorization; the sha256 of the file found in the workspace, computed by the scorer after the run (not read from the runtime's report), equals the authorization's content sha256, S5 content sha256, S5 disk sha256 and the S3 proposal content sha256; the file path equals the task destination |
-| `<id>-F` Complete document saved | G1 G2 G3 | the file is read; fence lines (a line starting with three backticks or three tildes) are even in number and at least 2 x `min_code_blocks`; when `min_code_blocks` > 0 the text after the last fence line has at least `min_tail_words` words and a line equal to `tail_heading`; the saved text equals the document an independent reading takes from the accepted reply (drop up to and including the "filename:" line; if the next non-blank line opens a fence and the last non-blank line is a bare fence, drop both; otherwise take the body whole; trailing whitespace ignored) |
+| `<id>-F` Complete document saved | G1 G2 G3 | the file is read; fence lines (a line starting with three backticks or three tildes) are even in number and at least 2 x `min_code_blocks`; when `min_code_blocks` > 0 the text after the last fence line has at least `min_tail_words` words and a line equal to `tail_heading`; the saved text equals the document an independent reading takes from the accepted reply by the merged parser rule (Section 12: the "filename:" line dropped; a backtick opener dropped and the outer fence closed by the CommonMark-style nesting rule, text after the close dropped; otherwise the body whole; trailing whitespace ignored) |
 | `<id>-RQ` Stated requirements met | G1 G2 G3 | every requirement the task declares is listed (by its label, for example "at least 25 non-empty lines") in the S3 report field `requirements_recognized`, and an independent recount of the saved text meets it (non-empty lines, or markdown headings) |
 | `<id>-D` One deadline for all attempts | all eight | at least one attempt; the total of the attempts' ms is at or below the task's `budget_ms` (29000 edit, 120000 document); no attempt's reason contains "exceeded"; for positive launches an accepted (parsed) attempt exists |
 | `N2-R` Token-limit cut is not a timeout | N2 | at least one attempt; every attempt has finish_reason max_tokens and a reason containing "token limit" and not containing "exceeded" |
@@ -143,13 +145,15 @@ What the existing tooling cannot do, and the smallest addition (all done as new 
    never edited) and appends the scoring-v5 result lines. A permanent version would be a rows-v9.jq with those
    evidence fields; not done here.
 4. **The effective token and time limits are not recorded by the driver.** Row `<id>-M` compares the value the wrapper
-   passed, as in v8. If sc#284 prints its limits in the daemon log, one row reading that line should be added at
-   freeze (Section 9, item 7); this is the only row that may still be added.
+   passed, as in v8. Checked at freeze against merged sovereign-core 8f3e8c8: the daemon does not print its effective
+   limits (`server.rs:100-103` only refuses bad values), so no limits row is added and none can be.
 5. **The scorer needs nothing.** It is driven by the declaration; `test-v3.sh` section 3 runs it on the declaration
    with made-up result lines (all PASS gives PASS; a missing, failing or duplicate line does not).
 
-The row reading of a reply (`<id>-F`) is written against the documented behaviour of the parser repair, not against
-its code (Section 9). If the merged parser documents a different outer-fence rule, `v3_doc_from_reply` changes before freeze.
+The row reading of a reply (`<id>-F`, `v3_doc_from_reply` in `rows-oq3-v3.jq`) was re-written at freeze from the merged
+parser (`check_file_proposal` and `outer_fence_close`, `spine.rs`, sovereign-core 8f3e8c8): backtick openers only, the
+nesting rule, and text after the outer close dropped (Section 12). Both sides still read the same rule, so a shared
+misreading would pass both (Section 11).
 
 ## 7. Model, environment and build
 
@@ -159,19 +163,33 @@ ACCEPTANCE-v2 Section 2 (checked by the wrapper). Environment, checked by the wr
 `AIEN_COMPOSE_DOC_MAX_TOKENS`, `AIEN_COMPOSE_EDIT_BUDGET_MS`, `AIEN_COMPOSE_DOC_BUDGET_MS`, `AIEN_COMPOSE_BUDGET_MS`,
 `AIEN_OMEGA_SPIN_US`, `AIEN_OMEGA_CTA_BUDGET` (the wrapper sets the compose limits per launch).
 
-Build identity (placeholders; also the `FROZEN_*` lines of `run-qwen3-v3.sh`):
+Build identity (frozen; also the `FROZEN_*` lines of `run-qwen3-v3.sh`):
 
 ```text
-sovereign-core = TO BE FILLED at freeze, after all required changes merge and the combined build passes review and checks
-omega.lock     = TO BE FILLED at freeze, after all required changes merge and the combined build passes review and checks
-physics.lock   = TO BE FILLED at freeze, after all required changes merge and the combined build passes review and checks
-aienos.lock    = TO BE FILLED at freeze, after all required changes merge and the combined build passes review and checks
-aien-cli       sha256 TO BE FILLED at freeze, after all required changes merge and the combined build passes review and checks
-np1_reference  sha256 TO BE FILLED at freeze, after all required changes merge and the combined build passes review and checks
-np1_edit_merge sha256 TO BE FILLED at freeze, after all required changes merge and the combined build passes review and checks
+sovereign-core = 8f3e8c8b879e10dd83883cee150f16508284d643  (main: sc#285 a667276, sc#284 94c8c20, sc#287 8f3e8c8; binaries built here)
+omega.lock     = 01f6a74636b8383b010cdb95597839582c415c27  (omega main, omega#331 rx_compose_set_wait_ms)
+physics.lock   = 6d7cf0d4d8eb2cda7b512100ff6058e25dbb3ddf  (omega/physics.lock at 01f6a74)     aienos.lock = b84c0a67590a934f3f3e001b12ec85ebc086a9eb
+aien-cli       sha256 689027ea9ac09f52ec130a2d0b0310995b7539113ccd3a63b06f1037ad2cf4de
+np1_reference  sha256 df91eede1223f454b7c6afd47589aac6406c8e69e393018fdbe3377b2103f686
+np1_edit_merge sha256 abc345a47e872728e8b59d050ccf41794c78266e19da882ad6e3d1db681c6377
 ```
 
-The wrapper refuses a real run unless these are filled, the commit arguments equal them and the binaries' sha256 match.
+Built from clean checkouts (no local changes, `git status` empty) in `/home/drakestapleton/workspace/oq3-v3-build`:
+`sc` at 8f3e8c8 (the main parent of the campaign branch's merge commit; the campaign branch only adds files under
+`docs/campaigns/`, so the binaries' source is main's), `omega` at 01f6a74 (compose and GPU libraries both built from it),
+`physics` at 6d7cf0d, aienos lock repo `/home/drakestapleton/workspace/aienos-repo` (contains b84c0a6). Environment:
+`AIEN_OMEGA_DIR`, `AIEN_PHYSICS_DIR`, `AIEN_AIENOS_LOCK_REPO` set; no `AIEN_OMEGA_GPU_LIB` / `AIEN_OMEGA_COMPOSE_LIB` override.
+Commands: `cargo build -vv --release -p aien-cli` and `cargo build -vv --release -p aien-runtime --example np1_reference
+--example np1_edit_merge` (`evidence-v3/build.sh`). Both build logs show `cargo:rustc-cfg=has_omega_compose`,
+`cargo:rustc-link-lib=static=rx_compose`, `cargo:rustc-cfg=has_omega_gpu`, `cargo:rustc-link-lib=static=omega_gpu` and
+`cargo:rustc-cfg=has_omega_wait_ms`, and no `cargo:warning` line (`evidence-v3/build-summary.txt`; the only compiler
+warnings are dead-code and lifetime lints inside the third-party crates memchr, rustix and the workspace's own
+existing lints, the same kind v2 had).
+
+The wrapper refuses a real run unless the commit arguments equal these, and `chk` compares the three binaries' sha256
+to them before the first launch. The wrapper, tasks file, declaration and rows the run uses are the ones on main once this
+file is merged; that merge changes only files under `docs/campaigns/`, so the binaries' source is unchanged. If
+`omega.lock` on main moves before the run, the run does not start.
 
 ## 8. Run plan: parts and holds
 
@@ -198,29 +216,34 @@ The R1 CPU reference time is not measured. It is inferred from v2 (part 2 of 8 m
 bounds it near 11 minutes. Every part keeps at least 5 minutes of slack even in the worst case. If the dry run (Section 9)
 shows more, split part 2 or 3 further before freezing; a part is never extended.
 
-## 9. Dependencies and freeze checklist
+## 9. Dependencies and freeze record
 
-Rows and limits that depend on changes not yet merged, written against their documented behaviour. State read from
-the authors' working copies on 2026-10-07 (not evidence of merged behaviour):
+All four required changes are merged; the rows and limits were re-checked against the merged code (Section 12).
 
-| Dependency | Needed for | Documented behaviour this spec assumes | State when this was written |
-|---|---|---|---|
-| omega main at or after 01f6a74 (#331: `rx_compose_set_wait_ms`, `rxc_host_set_wait_ms`) | any wait above 30 s | omega settles a run after the wait set by the host | #331 merged per the lane notes; confirm the pin |
-| sc#284 per-task limits (031756/compose-budget) | all budgets and caps, rows D, N2-R, M, N2 | edit 29 s and document 120 s budgets (`AIEN_COMPOSE_EDIT_BUDGET_MS`, `AIEN_COMPOSE_DOC_BUDGET_MS`), `AIEN_COMPOSE_DOC_MAX_TOKENS` default 1024, range 16 to 4096, retired `AIEN_COMPOSE_BUDGET_MS` refused, one deadline shared by all attempts of a task, timeout reason contains "exceeded", token cut reason names "the token limit" | PR open as a draft; the pushed head still has the single `AIEN_COMPOSE_BUDGET_MS`; the two-budget form is in the author's working copy |
-| parser repair (031756/fence-parse) | rows G1-F, G1-SB, G1-A | the outer fence closes at a bare fence of at least its length; same-length inner fences with an info string nest; unbalanced replies use the last bare fence; an unfenced reply is taken whole | one local commit, not pushed |
-| requirement validation (031756/req-validate) | rows G1-RQ, G2-RQ, G3-RQ; G2 and G3 retry on a short document | goals stating "at least N lines" or "at least N sections" are recognized, the complete parsed document is checked, an unmet requirement refuses the attempt ("unmet requirement: ..."), and `ComposeTaskReport.requirements_recognized` lists the recognized labels ("at least N non-empty lines", "at least N headings") | working copy, not committed |
+| Dependency | Merged as | Re-checked against the merged code |
+|---|---|---|
+| omega `rx_compose_set_wait_ms` (#331) | omega main 01f6a74 = `omega.lock` | the build log shows `has_omega_wait_ms` (Section 7) |
+| two budgets and caps (sc#284) | sovereign-core 94c8c20 | env names, defaults, ranges and refusal wording confirmed (Section 12) |
+| parser repair (sc#285) | sovereign-core a667276 | outer-fence rule read; `v3_doc_from_reply` rewritten to match (Section 6, Section 12) |
+| requirement validation (sc#287) | sovereign-core 8f3e8c8 | extraction rules read and run on every goal; one goal not recognized (Section 12) |
 
-Freeze checklist (all before this file says FROZEN; none is done yet):
+Freeze checklist, as done on 2026-10-07 (logs in `evidence-v3/`):
 
-1. omega main at or after 01f6a74 (#331 merged); `omega.lock` in sovereign-core moved to it.
-2. sc#284 merged. Re-check the env names, the 16-token floor, and the reason wordings against rows D and N2-R and N2's cap.
-3. The parser repair PR merged. Re-check `v3_doc_from_reply` against its documentation.
-4. The requirement-validation PR merged, wired into the task path, with `requirements_recognized` in the S3 report. Re-check the labels in `tasks-oq3-v3.json`.
-5. The combined build from clean checkouts of main, with the build lines of ACCEPTANCE-v2 Section 2 (`has_omega_compose`, `has_omega_gpu`, `has_omega_wait_ms`, no warning) and the binaries' sha256.
-6. Pre-run gate on that build: `cargo fmt --all --check`; `cargo clippy --workspace --all-targets -- -D warnings`; `AIEN_FORCE_CPU_STUB=1 cargo test -p aien-runtime -p aien-cli`; `test-rows-v8.sh` with the built `np1_edit_merge`; `test-v3.sh` (this folder) exits 0 on the final files.
-7. CPU-only dry run of the scorer on `oq3-v3.decl.json` with made-up replies: `test-v3.sh` sections 3 and 4, re-run on the final files and the result recorded (it needs no hold). Check at the same time whether the daemon prints its effective limits; if so add the one limits row (Section 6, item 4).
-8. As in ACCEPTANCE-v2 Section 5: a GPU dry run of this exact wrapper in `OQ3_DRY_TASKS` mode with made-up goals (same ids, kinds, caps, budgets, destinations and seeds), which gives the real part timings for Section 8. It needs three holds, so it needs Drake's approval.
-9. Fill Section 7 and the `FROZEN_*` lines of `run-qwen3-v3.sh`, set the Status line to FROZEN, merge that change alone. After it, `omega.lock` must not move; if it does, the run does not start.
+1. omega main 01f6a74 (#331 merged); `omega.lock` in sovereign-core is 01f6a74. DONE.
+2. sc#284 merged; env names, 16-token floor, reason wordings re-checked. DONE, with the findings of Section 12.
+3. Parser repair merged; `v3_doc_from_reply` re-checked and rewritten. DONE (`test-v3.sh` has cases for each branch).
+4. Requirement validation merged and wired (`requirements_recognized` on the S3 report, `control.rs:371`). DONE; labels re-checked: G1 and G2 recognized, G3 not (Section 12).
+5. Combined build from clean checkouts with the v2 Section 2 build lines plus `has_omega_wait_ms`, binaries' sha256. DONE (Section 7, `evidence-v3/build-summary.txt`).
+6. Pre-run gate on 8f3e8c8: `cargo fmt --all --check` OK; `cargo clippy --workspace --all-targets -- -D warnings` OK;
+   `AIEN_FORCE_CPU_STUB=1 cargo test -p aien-runtime -p aien-cli` 216 passed, 0 failed; `test-rows-v8.sh` with `NP1_EDIT_MERGE` =
+   the frozen binary 142 passed, 0 failed; `test-v3.sh` 62 passed, 0 failed (`evidence-v3/gate-summary.txt`). DONE.
+7. CPU-only dry run of the scorer on `oq3-v3.decl.json` with made-up result lines: `test-v3.sh` section 3 (156 made-up PASS lines
+   give PASS; a missing, a failing and a duplicate line do not) plus an explicit run of all 156 rows in `evidence-v3/scorer-dryrun.txt`.
+   The daemon does not print its effective limits, so no limits row exists (Section 6, item 4). DONE.
+8. A GPU dry run of this exact wrapper in `OQ3_DRY_TASKS` mode (as ACCEPTANCE-v2 Section 5). NOT DONE: it needs three quietlock holds
+   and Drake's approval. Until it runs, the part timings of Section 8, the `<id>-M` cap row for document launches and the live reading of
+   `requirements_recognized` are unmeasured.
+9. Section 7 and the `FROZEN_*` lines of `run-qwen3-v3.sh` filled; Status FROZEN; merge this change alone. DONE here; the merge is Drake's.
 
 ## 10. Prediction (stated before any run; UNVERIFIED)
 
@@ -240,8 +263,48 @@ estimate, and the rows decide.
 
 - One run, one launch per task: one observation each, not a rate.
 - The tasks are fresh to Qwen3, but the spec writer chose them after seeing v2 and the diagnostic; this is not a held-out set in the strict sense.
-- Three features are unmerged while this is prepared; the rows are written against their documentation, and a merged behaviour that differs changes the rows before freeze, not after.
-- Requirement validation covers only the wordings it lists; "at least two sentences" in G3 is deliberately not covered and no row checks it.
-- `<id>-F` reads the parser's documented rule, not its code; a shared misreading would pass both.
+- The rows were re-checked against the merged code at freeze (Section 12), not against a live run: the GPU dry run (Section 9, item 8) has not happened, so how the daemon reports its caps and attempts live is read from code, not observed.
+- Requirement validation covers only the wordings it lists; "at least two sentences" in G3 is deliberately not covered and no row checks it. Its wording rules also leave the G3 goal unrecognized (Section 12, finding 1).
+- `<id>-F` reads the merged parser's rule, restated in jq; a shared misreading would pass both.
 - omega#327 (GPU memory failure) stays open: a PASS does not turn Qwen3 on GB10 on by default.
 - R1 and N2 use document caps of 96 and 16, not 1024. Greedy decoding, one model, one machine.
+
+## 12. Findings from re-checking against the merged code (sovereign-core 8f3e8c8, 2026-10-07)
+
+Quoted file:line are in sovereign-core at 8f3e8c8. Nothing in the tasks file was changed to avoid a product weakness.
+
+**Confirmed as the spec assumed**
+
+- Env names and defaults: `AIEN_COMPOSE_EDIT_BUDGET_MS` (default 29 s, `spine.rs:841,845`), `AIEN_COMPOSE_DOC_BUDGET_MS` (default 120 s,
+  `spine.rs:843,847`), `AIEN_COMPOSE_DOC_MAX_TOKENS` (default 1024, range 16..=4096, `spine.rs:850,854,856`); budgets accepted in
+  1000..=599000 ms (`spine.rs:858`); edit cap `AIEN_COMPOSE_MAX_TOKENS` read by the daemon, default 48 (`server.rs:483-492`).
+  N2's cap of 16 is the lowest accepted value. A stale `AIEN_COMPOSE_BUDGET_MS` is refused: `"AIEN_COMPOSE_BUDGET_MS is retired; set ..."`
+  (`spine.rs:852,970-973`); bad values stop the daemon at start (`server.rs:100-103`).
+- Reasons: a token-limit cut is `"reply cut at the token limit after N tokens (finish_reason max_tokens); a cut reply is never a proposal"`
+  (`spine.rs:1306-1312`), which contains "token limit" and not "exceeded" (rows D, N2-R). A wall-clock timeout starts `"model proposal exceeded "`
+  (`spine.rs:997`) and is classed "timeout".
+- Report fields: `proposal_content_sha256` (`control.rs:358`), `proposal_attempts` (`control.rs:367`), `requirements_recognized` (`control.rs:371`,
+  filled from the goal at `spine.rs:1869`), per-attempt `unmet_requirements` (`control.rs:410`, reason `"unmet requirement: ..."`, `requirements.rs:189`),
+  `finish_reason` and `text` per attempt (`control.rs`). Labels are `"at least N non-empty lines"` and `"at least N headings"` (`requirements.rs:78-81`, `61`).
+- Kind by goal (`classify_target`, `spine.rs:1091`, first existing path named in the goal, issue #288): run over all eight goals with the workspace the driver
+  builds (README.md, docs/plan.txt, plus the launch's seed): E1 finds ROADMAP.md and E2 finds docs/OPERATIONS.md (edit, 29 s, cap 96); G1, G2, G3, N1, N2, R1 find no
+  existing file (new document, 120 s). No task's kind differs from Section 2. N1's path is refused by the path check (`..`), not classified.
+
+**Differs from what the spec assumed**
+
+1. **G3's requirements are not recognized, so G3-RQ cannot pass as written.** `requirements::extract` (`requirements.rs:273`) only takes a count whose noun ends its
+   clause (`clause_ends_after`, `requirements.rs:248`; "of/per/each/in/with ..." after the noun disqualifies it). The G3 goal reads "at least 35 lines **with** at least 6
+   sections **titled** ...", so neither "at least 35 lines" nor "at least 6 sections" is extracted. Run on all eight goals with the merged module itself (`requirements::extract`):
+   G1 gives `["at least 18 non-empty lines"]`, G2 gives `["at least 25 non-empty lines"]`, G3 gives `[]`, the other five give `[]`. Consequences: the runtime would not refuse a short G3
+   reply and would not retry it; `requirements_recognized` is empty for G3, so row G3-RQ (which requires both labels in the report) FAILs whatever the model writes. G3-L
+   (line count) and G3-F still run. This is a real weakness of requirement validation (a plain sentence like G3's is not covered) and of the spec's assumption that
+   the G3 wording is recognized. The goal was NOT rewritten. Decision needed from Drake before this is merged: (a) accept it as a recorded, expected FAIL of G3-RQ (the whole
+   campaign then cannot PASS, as the prediction already expects a FAIL), (b) reword G3 so the nouns end their clauses (a new goal, same campaign, before merge), or
+   (c) widen requirement extraction in sovereign-core first and rebuild (a new freeze).
+2. **Outer-fence rule differs from the prepared reading** (`check_file_proposal`, `outer_fence_close`, `spine.rs:733-830`): only a backtick opener is an outer fence
+   (tilde is not); the opener line is always dropped; the close is found by the nesting rule (info-string fences nest; a bare fence at depth 0 with more fences after it opens
+   a bare inner block; none balanced uses the last bare fence); text after the close is dropped, not kept; no close at all keeps the whole body. `v3_doc_from_reply` now
+   follows this exactly (the earlier version kept an unclosed opener and text after the close, which would have failed honest replies). Known limit stated by the parser:
+   prose holding a fence after the real close is read as part of the file.
+3. **The daemon does not print its effective limits**, so no limits row (Section 6, item 4).
+4. **Build warnings:** the build logs contain compiler warnings from third-party crates (dead-code lints) but no `cargo:warning` line from any build script.

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# OPEN-MODEL-QWEN3 v3 (ACCEPTANCE-v3.md Section 9, PREPARED, NOT FROZEN): CPU-only checks of the v3 files.
+# OPEN-MODEL-QWEN3 v3 (ACCEPTANCE-v3.md Section 9, FROZEN): CPU-only checks of the v3 files.
 # No model, no GPU, no quietlock. Shell + jq only. Exit 0 only if every check passes.
 #   1 declaration is the generated one, 156 rows, ids unique
 #   2 every positive task row is a line of ACCEPTANCE-v3.md in the exact format make-receipt.sh greps for
@@ -27,7 +27,7 @@ if [ -f "$HERE/ACCEPTANCE-v3.md" ]; then
   while IFS= read -r row; do
     chk "ACCEPTANCE-v3.md has task row: ${row:0:50}" 'grep -Fqx -- "$row" "$HERE/ACCEPTANCE-v3.md"'
   done < <(jq -r '.tasks[] | select(.kind != "negative-boundary" and .kind != "negative-budget") | "| \(.id) | `\(.goal)` | `\(.destination)` | \(.phrases | map("`" + . + "`") | join(", ")) |"' "$HERE/tasks-oq3-v3.json")
-  chk "ACCEPTANCE-v3.md says PREPARED, NOT FROZEN" 'grep -q "Status: PREPARED, NOT FROZEN" "$HERE/ACCEPTANCE-v3.md"'
+  chk "ACCEPTANCE-v3.md says Status: FROZEN" 'grep -q "^\*\*Status: FROZEN\*\*" "$HERE/ACCEPTANCE-v3.md"'
 fi
 chk "no goal contains a backtick or a pipe" '! jq -r ".tasks[].goal" "$HERE/tasks-oq3-v3.json" | grep -q "[\`|]"'
 chk "no goal of v8 or the diagnostic is reused" '! jq -r ".tasks[].goal" "$HERE/tasks-oq3-v3.json" | grep -Fxf <(jq -r ".tasks[].goal" "$HERE/../next-phase-1/tasks-v8.json") | grep -q .'
@@ -84,6 +84,22 @@ mk_run "$T/g1n" G1 docs/PIPELINE.md "$NOTAIL" "$NOTAILR" "" "$RECG1"
 out=$(run_rows "$T/g1n" G1)
 chk "G1 no text after the last example: G1-F FAIL" '[ "$(rowres "$out" G1/G1-F)" = FAIL ]'
 
+
+# merged-parser outer-fence rule (sovereign-core 8f3e8c8): text after the outer close is not part of the file;
+# an opener without any bare fence is dropped and the body kept; an unfenced reply is taken whole.
+REPLYT="$REPLY"$'\nHope this helps.'
+mk_run "$T/g1x" G1 docs/PIPELINE.md "$DOC" "$REPLYT" "" "$RECG1"
+out=$(run_rows "$T/g1x" G1)
+chk "G1 prose after the outer close is not in the file: G1-F PASS" '[ "$(rowres "$out" G1/G1-F)" = PASS ]'
+REPLYU=$'filename: docs/PIPELINE.md\n'"$DOC"
+mk_run "$T/g1u" G1 docs/PIPELINE.md "$DOC" "$REPLYU" "" "$RECG1"
+out=$(run_rows "$T/g1u" G1)
+chk "G1 unfenced reply taken whole: G1-F PASS" '[ "$(rowres "$out" G1/G1-F)" = PASS ]'
+PLAIN=$'# Pipeline\n\n## Building\nRun make build.\n\n## Summary\nIt builds.'
+REPLYO=$'FILENAME: docs/PIPELINE.md\n\n```md\n'"$PLAIN"
+mk_run "$T/g1o" G1 docs/PIPELINE.md "$PLAIN" "$REPLYO" "" "$RECG1"
+out=$(run_rows "$T/g1o" G1)
+chk "G1 opener with no close: reading equals the saved file (opener dropped, body whole)" '[ "$(jq -r ".rows[]|select(.row==\"G1-F\")|.value.saved_equals_reply_document" "$T/$(jq -r "select(.row==\"G1/G1-F\")|.extra_rows_file" <<<"$out")")" = true ]'
 # saved bytes differ from approved bytes
 mk_run "$T/g1b" G1 docs/PIPELINE.md "$DOC" "$REPLY" "" "$RECG1"
 jq '.authorizations[0].text = ({content_sha256: "0000"} | tojson)' "$T/g1b/steps/S8.json" >"$T/g1b/x" && mv "$T/g1b/x" "$T/g1b/steps/S8.json"
@@ -156,7 +172,12 @@ if [ -e "$PINNED" ]; then bad "pinned run path already exists, wrapper checks sk
   chk "wrapper refuses a missing OQ3_PART" '[ "$(wr "$T/b")" != 0 ]'
   chk "wrapper refuses part 4 (exit 2)" '[ "$(wr "$T/b" OQ3_PART=4)" = 2 ]'
   chk "wrapper refuses a run base other than the pinned path (exit 2)" '[ "$(wr "$T/b" OQ3_PART=1 "${okenv[@]}")" = 2 ] && [ ! -e "$T/b" ]'
-  chk "wrapper refuses while the build identity is a placeholder (exit 2), pinned path not created" '[ "$(wr "$PINNED" OQ3_PART=1 "${okenv[@]}")" = 2 ] && [ ! -e "$PINNED" ] && grep -q "not frozen yet" "$T/w.err"'
+  chk "wrapper refuses commit arguments that are not the frozen ones (exit 2), pinned path not created" '[ "$(wr "$PINNED" OQ3_PART=1 "${okenv[@]}")" = 2 ] && [ ! -e "$PINNED" ] && grep -q "must equal the frozen commits" "$T/w.err"'
+  chk "ACCEPTANCE-v3.md Section 7 build identity equals the wrapper FROZEN_* lines" '
+    for kv in "sovereign-core = $(sed -n "s/^FROZEN_SC_COMMIT=//p" "$W")" "omega.lock     = $(sed -n "s/^FROZEN_OMEGA_COMMIT=//p" "$W")" "aien-cli       sha256 $(sed -n "s/^FROZEN_AIEN_CLI_SHA256=//p" "$W")" "np1_reference  sha256 $(sed -n "s/^FROZEN_NP1_REFERENCE_SHA256=//p" "$W")" "np1_edit_merge sha256 $(sed -n "s/^FROZEN_NP1_EDIT_MERGE_SHA256=//p" "$W")"; do
+      grep -q -- "^$kv" "$HERE/ACCEPTANCE-v3.md" || { echo "missing: $kv"; false; break; }
+    done'
+  chk "wrapper refuses a binary whose sha256 differs (the three chk lines are present)" 'grep -q "chk \"\$AIEN_BIN\" \"\$FROZEN_AIEN_CLI_SHA256\"" "$W" && grep -q "chk \"\$REFBIN\" \"\$FROZEN_NP1_REFERENCE_SHA256\"" "$W" && grep -q "chk \"\$MERGEBIN\" \"\$FROZEN_NP1_EDIT_MERGE_SHA256\"" "$W"'
   chk "wrapper refuses changed dry-run task shape (exit 2)" '
     jq ".tasks[0].max_tokens = 512" "$HERE/tasks-oq3-v3.json" >"$T/dry-bad.json"
     [ "$(wr "$T/b" OQ3_PART=1 OQ3_DRY_TASKS="$T/dry-bad.json" "${okenv[@]}")" = 2 ] && [ ! -e "$T/b" ]'
