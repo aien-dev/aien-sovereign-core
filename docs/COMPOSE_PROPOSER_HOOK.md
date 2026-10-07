@@ -32,7 +32,7 @@ requirements the approved bytes must meet; `requirements_mac` is the desk key's 
 a caller cannot swap or drop it. `Some("")` is a signed "no requirements"; a missing
 `requirements` is refused (`RequirementsUnbound`), a goal with an unreadable requirement
 is refused (`RequirementsUncertain`), and bytes that miss a requirement are refused
-(`RequirementsUnmet`), all before any claim or compose run. A count such as "add 2 lines to NOTES.md" is judged on the diff between the existing workspace file (empty when absent) and the approved bytes. The hook returns
+(`RequirementsUnmet`), all before any claim or compose run. A count such as "add 2 lines to NOTES.md" is judged on the diff between the existing workspace file (empty when absent) and the approved bytes. Existing lines must all survive, so such an approval can only add. Such a goal also needs `requirements_base`: the sha256 (hex) of the existing file as the desk saw it, or `absent`, covered by `requirements_mac` (tag `aien.requirements.v2`; v1 when no requirement depends on the file). It is refused when missing (`RequirementsUnbound`) or when the file differs (`BaseChanged`), and it is checked again under the compose-home lock when the grant is written, so a file that changed after the check gets no grant. Limit: a file over 8192 bytes (or not UTF-8) cannot be measured and is refused. The hook returns
 `ApprovedComposeReport`: state (COMMITTED | ALREADY_COMMITTED), the same
 ids, compose_proposal_sha256, grant_links, desk_key_id, approval_key,
 replay_claim and the compose `task` report (None for ALREADY_COMMITTED); or

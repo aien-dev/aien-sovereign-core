@@ -67,6 +67,7 @@ fn unsigned(request: &str, approval: &str, path: &str, content: &str) -> Approve
         approval_mac: String::new(),
         requirements: Some(String::new()),
         requirements_mac: String::new(),
+        requirements_base: None,
     }
 }
 

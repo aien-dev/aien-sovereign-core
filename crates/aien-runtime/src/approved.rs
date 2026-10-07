@@ -76,6 +76,12 @@ pub struct ApprovedProposal {
     /// `requirements` (crate::approved_auth::DeskKey::sign_requirements).
     #[serde(default)]
     pub requirements_mac: String,
+    /// Only when a requirement depends on the file the bytes replace (an added-line
+    /// count): the sha256 (hex) of that file as the desk saw it, or "absent". Bound by
+    /// `requirements_mac` (tag v2). The daemon refuses unless the file still has this
+    /// sha256 when the grant is written (same compose-home lock).
+    #[serde(default)]
+    pub requirements_base: Option<String>,
 }
 
 /// What a committed approved proposal hands to the effect ledger.
@@ -248,15 +254,32 @@ fn check_bound_requirements(p: &ApprovedProposal, workspace: &Path) -> Result<()
         } else {
             crate::spine::classify_target(&p.path, workspace)
         };
-        let prior =
+        let (prior, exists) =
             match class {
-                crate::spine::TargetClass::Edit(_, c) => c,
-                crate::spine::TargetClass::New => String::new(),
+                crate::spine::TargetClass::Edit(_, c) => (c, true),
+                crate::spine::TargetClass::New => (String::new(), false),
                 _ => return Err(refuse(
                     "RequirementsUnmet",
                     "the existing file cannot be read, so the added-line count cannot be measured",
                 )),
             };
+        let base = p.requirements_base.as_deref().ok_or_else(|| {
+            refuse(
+                "RequirementsUnbound",
+                "a requirement depends on the file these bytes replace, so the approval must bind requirements_base (its sha256, or \"absent\")",
+            )
+        })?;
+        let now = if exists {
+            sha256_hex(prior.as_bytes())
+        } else {
+            "absent".to_string()
+        };
+        if now != base {
+            return Err(refuse(
+                "BaseChanged",
+                format!("the file changed since the desk bound it (bound {base}, now {now})"),
+            ));
+        }
         ex = ex.resolved(&prior);
     }
     match crate::requirements::refusal_reason(&ex.requirements, &p.content) {
@@ -355,6 +378,11 @@ impl ProposerHook {
             return Err(refusal(why, Some(claim.id)));
         }
         let compose_sha = sha256_hex(text.as_bytes());
+        // The prior file the bound requirements were checked against (None when none depends on it).
+        let base = crate::requirements::analyze(p.requirements.as_deref().unwrap_or(""))
+            .needs_prior()
+            .then(|| p.requirements_base.clone())
+            .flatten();
         if r.proposal.as_deref() != Some(text.as_str())
             || r.proposal_sha256.as_deref() != Some(compose_sha.as_str())
             || r.proposal_path.as_deref() != Some(p.path.as_str())
@@ -394,6 +422,10 @@ impl ProposerHook {
         let ids = serde_json::json!({"request_id": p.request_id, "trace_id": p.trace_id,
             "approval_id": p.approval_id, "desk_key_id": identity.desk_key_id,
             "approved_proposal_sha256": p.approved_proposal_sha256});
+        #[cfg(test)]
+        if let Some(f) = BEFORE_GRANT.lock().unwrap().as_ref() {
+            f();
+        }
         let (grant, target) = write_approved_grant(
             &self.bridge,
             &identity.workspace,
@@ -403,6 +435,7 @@ impl ProposerHook {
             &ids,
             &link,
             &compose_sha,
+            base.as_deref(),
         )
         .map_err(|e| {
             refusal(
@@ -512,3 +545,81 @@ fn crash_point(name: &str) {
 
 #[cfg(not(feature = "fault-hold"))]
 fn crash_point(_: &str) {}
+
+/// Test seam: runs between the compose commit and the grant write, where a
+/// concurrent edit of the target would land.
+#[cfg(test)]
+static BEFORE_GRANT: std::sync::Mutex<Option<Box<dyn Fn() + Send>>> = std::sync::Mutex::new(None);
+
+#[cfg(test)]
+mod toctou_tests {
+    use super::*;
+    use crate::approved_auth::{desk_key_path, DeskKey};
+
+    fn proposal(b: &ComposeBridge, ws: &Path, id: &str, base: &str) -> ApprovedProposal {
+        let content = "one\ntwo\nthree\n".to_string();
+        let mut p = ApprovedProposal {
+            request_id: id.into(),
+            trace_id: format!("trace-{id}"),
+            approval_id: format!("appr-{id}"),
+            approver: "interplane-host".into(),
+            path: "NOTES.md".into(),
+            approved_proposal_sha256: approved_proposal_sha256("NOTES.md", &content),
+            content_sha256: sha256_hex(content.as_bytes()),
+            content,
+            approval_mac: String::new(),
+            requirements: Some("Add one line to NOTES.md".into()),
+            requirements_mac: String::new(),
+            requirements_base: Some(base.into()),
+        };
+        DeskKey::load(&desk_key_path(b.dir()))
+            .unwrap()
+            .seal(&mut p, ws);
+        p
+    }
+
+    /// The target changes after the requirements were checked and before the
+    /// grant is written: refused with BaseChanged, nothing authorizes a write.
+    /// Unchanged, the same approval shape passes. (Linked build: the stub
+    /// refuses at the claim, before the seam.)
+    #[test]
+    fn prior_changed_between_check_and_commit_is_refused() {
+        if !aien_omega_compose::LINKED {
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = tmp.path().join("ws");
+        std::fs::create_dir_all(&ws).unwrap();
+        let proposer: crate::spine::ComposeProposer =
+            Arc::new(|_: &str, _: std::time::Duration| panic!("model ran"));
+        let b = Arc::new(ComposeBridge::new(
+            tmp.path().join("compose"),
+            proposer,
+            "t",
+        ));
+        DeskKey::create(&desk_key_path(b.dir())).unwrap();
+        let hook = ProposerHook::new(b.clone());
+        let wss = ws.display().to_string();
+        let target = ws.join("NOTES.md");
+        std::fs::write(&target, "one\ntwo\n").unwrap();
+        let base = sha256_hex(b"one\ntwo\n");
+
+        let t2 = target.clone();
+        *BEFORE_GRANT.lock().unwrap() = Some(Box::new(move || {
+            std::fs::write(&t2, "one\ntwo\nEXTRA\n").unwrap()
+        }));
+        let e = hook
+            .submit(&proposal(&b, &ws, "toctou1", &base), &wss)
+            .expect_err("a changed prior must be refused");
+        *BEFORE_GRANT.lock().unwrap() = None;
+        assert_eq!(e.name, "GrantNotWritten", "{e}");
+        assert!(e.detail.contains("BaseChanged"), "{e}");
+
+        // Unchanged prior: the grant is written.
+        std::fs::write(&target, "one\ntwo\n").unwrap();
+        let ok = hook
+            .submit(&proposal(&b, &ws, "toctou2", &base), &wss)
+            .unwrap_or_else(|e| panic!("unchanged prior must pass: {e}"));
+        assert_eq!(ok.state, "COMMITTED");
+    }
+}

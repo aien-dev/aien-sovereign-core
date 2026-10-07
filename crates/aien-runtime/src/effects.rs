@@ -765,11 +765,21 @@ pub(crate) fn write_approved_grant(
     ids: &Value,
     link: &ApprovedLink,
     proposal_sha256: &str,
+    base: Option<&str>,
 ) -> Result<(u64, String), String> {
     b.with_home(|home| {
         let target = Path::new(workspace).join(path).display().to_string();
         confine_target(workspace, path, &target).map_err(|r| r.to_string())?;
         let prior = file_sha256(Path::new(&target))?;
+        // The file must still be the one the bound requirements were checked against.
+        if let Some(base) = base {
+            let now = prior.as_deref().unwrap_or("absent");
+            if now != base {
+                return Err(format!(
+                    "BaseChanged: {path} changed after the requirements were checked (bound {base}, now {now}); no grant was written"
+                ));
+            }
+        }
         let mut text = json!({
             APPROVED_GRANT: 1, "proposal_sha256": proposal_sha256, "path": path,
             "content_sha256": content_sha256, "approver": approver, "target": target,

@@ -40,6 +40,11 @@
 //! is UNCERTAIN and refused. `N words of plain text` without a named section
 //! (`section titled "T"`, `the last section`) is a count over an unknown scope and
 //! is UNCERTAIN. `three topics: a, b, c` is not mechanically checkable and is UNCERTAIN.
+//! "N lines at least" is a lower bound; "a single line" is exactly one. Left UNCERTAIN on
+//! purpose: ranges ("2-3 lines"), "a dozen lines", "three-plus sections", "line count at
+//! least 40", counts of shell commands or snippets, level-two headings given as a bare
+//! list, and a section title that itself holds a count. "a couple of", "a few",
+//! "several" and "add a line" (no number) state no number and stay silent.
 //! The machine goal of an approved run ("apply approved proposal for <path> ...")
 //! is never analysed; the goal bound into the approval is.
 //!
@@ -279,7 +284,7 @@ const VAGUE: [&str; 11] = [
     "below",
 ];
 
-const NOUNS: [&str; 42] = [
+const NOUNS: [&str; 46] = [
     "topic",
     "topics",
     "block",
@@ -322,6 +327,10 @@ const NOUNS: [&str; 42] = [
     "chapters",
     "character",
     "characters",
+    "command",
+    "commands",
+    "snippet",
+    "snippets",
 ];
 
 /// Verbs that introduce a bare line count (`true` = exactly N added lines).
@@ -1001,28 +1010,39 @@ pub fn analyze(goal: &str) -> Extraction {
             }
             continue;
         }
-        let (Num::Val(v), Some(noun)) =
-            (parse_num(&t.word), toks.get(i + 1).map(|t| t.word.as_str()))
-        else {
+        let num = if t.word == "single" {
+            Num::Val(1)
+        } else {
+            parse_num(&t.word)
+        };
+        let (Num::Val(v), Some(noun)) = (num, toks.get(i + 1).map(|t| t.word.as_str())) else {
             continue;
         };
         if !matches!(noun, "line" | "lines") || handled.contains(&(i + 1)) {
             continue;
         }
-        let tail_ok = qualifier_ok(&toks, i + 1)
-            || toks
-                .get(i + 2)
-                .is_some_and(|t| LINE_TAILS.contains(&t.word.as_str()));
+        // "N lines at least" is a lower bound; "at most" and the like stay uncertain.
+        let at = toks.get(i + 2).map(|t| t.word.as_str());
+        let bound = at == Some("at") && toks.get(i + 3).is_some_and(|t| t.word == "least");
+        let loose = at == Some("at")
+            && toks
+                .get(i + 3)
+                .is_some_and(|t| matches!(t.word.as_str(), "most" | "max" | "the"));
+        let tail_ok = !loose
+            && (qualifier_ok(&toks, i + 1)
+                || toks
+                    .get(i + 2)
+                    .is_some_and(|t| LINE_TAILS.contains(&t.word.as_str())));
         if tail_ok {
             add(
                 &mut counts,
                 Requirement::AddedLines {
                     n: v,
-                    exact,
+                    exact: exact && !bound,
                     prior: None,
                 },
             );
-            handled.extend(s..=i + 1);
+            handled.extend(s..=i + 1 + if bound { 2 } else { 0 });
         }
     }
 
@@ -1121,6 +1141,7 @@ pub fn analyze(goal: &str) -> Extraction {
         let level = (titled && noun_at >= 1)
             .then(|| level_adj(&toks[noun_at - 1].word))
             .flatten();
+        let quoted_list = !quotes.is_empty();
         let titles: Vec<String> = if quotes.is_empty() {
             split_list(region).iter().map(|t| trim_title(t)).collect()
         } else {
@@ -1132,6 +1153,7 @@ pub fn analyze(goal: &str) -> Extraction {
             && titles
                 .iter()
                 .all(|t| !t.is_empty() && t.split_whitespace().count() <= 8)
+            && (quoted_list || !titles.iter().any(|t| has_count_and_noun(t)))
             && declared.is_none_or(|d| d == titles.len());
         if ok {
             let seen = match level {
@@ -1420,6 +1442,30 @@ pub fn analyze(goal: &str) -> Extraction {
                         bad(&mut unsure, i, true);
                     }
                 }
+            }
+        }
+        // "2-3 lines" (a range), "three-plus sections", "a dozen lines"
+        if !handled.contains(&i) {
+            let noun_next = (i + 1..=i + 2).any(|j| nm(j).is_some_and(|x| NOUNS.contains(&x)));
+            let range = w.split_once('-').is_some_and(|(a, b)| {
+                matches!(parse_num(a), Num::Val(_))
+                    && (matches!(parse_num(b), Num::Val(_)) || b == "plus")
+            });
+            if (range || matches!(w, "dozen" | "dozens")) && noun_next {
+                bad(&mut unsure, i, true);
+            }
+            // "line count at least 40", "word count of 200"
+            if w == "count"
+                && i >= 1
+                && nm(i - 1).is_some_and(|x| NOUNS.contains(&x) || matches!(x, "line" | "word"))
+            {
+                if (i + 1..=i + 6).any(|j| matches!(nm(j).map(parse_num), Some(Num::Val(_)))) {
+                    bad(&mut unsure, i - 1, true);
+                }
+            }
+            // a heading level adjective that no title list consumed
+            if level_adj(w).is_some() && nm(i + 1).is_some_and(|x| SECTION_NOUNS.contains(&x)) {
+                bad(&mut unsure, i, true);
             }
         }
         // quantity cues next to a countable noun: twice, minimum, "or more", ...

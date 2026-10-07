@@ -252,27 +252,27 @@ fn a_machine_goal_for_an_approved_proposal_states_no_requirement() {
 const CORPUS: &str = include_str!("fixtures/goal_corpus.tsv");
 
 /// Goals that state no measurable requirement: nothing to enforce, nothing refused.
-const SILENT: [&str; 16] = [
-    "dryrun-tasks-v2/N1",
+const SILENT: [&str; 12] = [
     "dryrun-tasks-v2/N2",
     "dryrun-tasks-v2/R1",
     "dryrun-tasks-v2/T5",
     "dryrun-tasks-v2/T7",
     "tasks-oq3-v3/E1",
     "tasks-oq3-v3/E2",
-    "tasks-oq3-v3/N1",
-    "tasks-oq3-v4/N1",
     "tasks-oq3-v4/U1",
     "tasks-oq3-v4/U2",
     "tasks-v5/T1",
     "tasks-v5/T3",
-    "tasks-v6/N1",
     "tasks-v6/T5",
     "tasks-v8/T7",
 ];
 
 /// Goals whose explicit requirements are all read and enforced.
-const RECOGNIZED: [&str; 11] = [
+const RECOGNIZED: [&str; 15] = [
+    "dryrun-tasks-v2/N1",
+    "tasks-oq3-v3/N1",
+    "tasks-oq3-v4/N1",
+    "tasks-v6/N1",
     "dryrun-tasks-v2/T4",
     "tasks-oq3-v3/G2",
     "tasks-oq3-v3/G3",
@@ -412,4 +412,72 @@ fn the_w2_goal_is_fully_enforced() {
     assert!(refusal_reason(&ex.requirements, &short)
         .unwrap()
         .contains("words of plain text in the section \"Restore notes\""));
+}
+
+// ---- round 3 ----
+
+fn added_check(goal: &str, prior: &str, content: &str) -> Option<String> {
+    let ex = analyze(goal).resolved(prior);
+    assert!(ex.uncertain.is_empty(), "{:?}", ex.uncertain);
+    refusal_reason(&ex.requirements, content)
+}
+
+#[test]
+fn an_add_request_may_not_delete_or_rewrite_existing_lines() {
+    let prior = "a\nb\nc\nd\n";
+    let g = "Add 2 lines to README.md";
+    for bad in ["x\ny\n", "a\nb\nx\ny\n", "a\nb\nC\nD\n", "a\nb\nc\nd\nx\n"] {
+        assert!(
+            added_check(g, prior, bad).is_some(),
+            "{bad:?} must be refused"
+        );
+    }
+    let e = added_check(g, prior, "a\nb\nC\nD\n").unwrap();
+    assert!(e.contains("changed or removed"), "{e}");
+    // Inserts in the middle or at the end, blank lines, and trailing-space-only
+    // edits to existing lines are allowed (trailing whitespace is not content).
+    for ok in [
+        "a\nb\nx\nc\ny\nd\n",
+        "a\nb\nc\nd\nx\ny\n",
+        "x\ny\na\nb\nc\nd\n",
+        "a  \nb\nc\t\nd\n\nx\n\ny\n",
+    ] {
+        assert!(added_check(g, prior, ok).is_none(), "{ok:?} must pass");
+    }
+    // The same holds for "write N lines" (at least N).
+    let w = "Write 2 lines about bread to README.md";
+    assert!(added_check(w, prior, "x\ny\nz\n").is_some());
+    assert!(added_check(w, prior, "a\nb\nc\nd\nx\ny\nz\n").is_none());
+}
+
+#[test]
+fn vague_or_odd_counts_are_uncertain_not_silent() {
+    for goal in [
+        "Add 2-3 lines to README.md",
+        "Write a dozen lines about bread",
+        "The line count should be at least 40.",
+        "Write a script with 2 shell commands.",
+        "Use \"A\", \"B\" and \"C\" as level-two headings.",
+        "Use level-two headings \"A\", \"B\" and \"C\".",
+        "Write three-plus sections about bread.",
+        "Use a section titled Intro has 80 words of plain text.",
+        "Add 2 lines at most to README.md",
+    ] {
+        uncertain(goal);
+    }
+}
+
+#[test]
+fn lower_bound_after_the_noun_and_single_line() {
+    assert_eq!(
+        reqs("Write forty lines at least to docs/a.md"),
+        [added(40, false)]
+    );
+    assert_eq!(
+        reqs("Add a single line saying hello to a.md"),
+        [added(1, true)]
+    );
+    // No explicit count: nothing is measured (documented): "a line" is not a number word.
+    assert!(reqs("Add a line saying hello to a.md").is_empty());
+    assert!(reqs("Add a couple of lines or a few to a.md").is_empty());
 }

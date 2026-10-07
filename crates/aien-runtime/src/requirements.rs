@@ -39,6 +39,10 @@
 //! prior file's non-empty lines (trailing whitespace ignored). A new file is
 //! compared with an empty prior. Callers bind the prior with
 //! `Extraction::resolved`; an unresolved `AddedLines` is unmet (fails closed).
+//! An edit may only ADD: every non-empty line of the prior file must survive in
+//! order (trailing whitespace may differ), otherwise the requirement is unmet
+//! whatever the number of added lines. Replacing or deleting lines is a change the
+//! goal did not ask for, so "add 2 lines" can never wipe or rewrite the file.
 //! The approved path binds the file found in the workspace.
 //!
 //! Counting: `MinLines`/`MaxLines` count every non-empty line of the file,
@@ -256,10 +260,15 @@ impl Requirement {
                         "{label} cannot be measured: the existing file was not provided"
                     ));
                 };
-                let c = match added_non_empty_lines(prior, content) {
+                let (c, lost) = match added_non_empty_lines(prior, content) {
                     Ok(c) => c,
                     Err(e) => return Some(format!("{label} cannot be measured: {e}")),
                 };
+                if lost > 0 {
+                    return Some(format!(
+                        "{label}, but {lost} existing non-empty line(s) were changed or removed (every existing line must stay, in order; only trailing whitespace may differ)"
+                    ));
+                }
                 let bad = if *exact { c != *n } else { c < *n };
                 bad.then(|| format!("{label}, found {c}"))
             }
@@ -567,12 +576,13 @@ fn count_code_blocks(s: &str) -> usize {
 /// Largest line-pair table the added-line diff will build.
 const DIFF_MAX_CELLS: usize = 25_000_000;
 
-/// Non-empty lines of `content` that are not part of the longest common
-/// subsequence with the non-empty lines of `prior` (lines compared with
-/// trailing whitespace ignored). For an edit, which keeps every prior line,
+/// (added, lost): `added` counts the non-empty lines of `content` outside the longest
+/// common subsequence with the non-empty lines of `prior` (lines compared with
+/// trailing whitespace ignored); `lost` counts the prior non-empty lines outside it,
+/// i.e. changed or removed ones. For an edit, which keeps every prior line,
 /// this is the number of lines the edit added; for whole replacement bytes it
 /// is the diff against the file they replace.
-pub(crate) fn added_non_empty_lines(prior: &str, content: &str) -> Result<usize, String> {
+pub(crate) fn added_non_empty_lines(prior: &str, content: &str) -> Result<(usize, usize), String> {
     let a: Vec<&str> = prior
         .lines()
         .map(str::trim_end)
@@ -600,5 +610,6 @@ pub(crate) fn added_non_empty_lines(prior: &str, content: &str) -> Result<usize,
             diag = up;
         }
     }
-    Ok(b.len() - row[b.len()])
+    let common = row[b.len()];
+    Ok((b.len() - common, a.len() - common))
 }

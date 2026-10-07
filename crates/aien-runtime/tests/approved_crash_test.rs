@@ -48,6 +48,7 @@ fn proposal(b: &ComposeBridge) -> ApprovedProposal {
         approval_mac: String::new(),
         requirements: Some(String::new()),
         requirements_mac: String::new(),
+        requirements_base: None,
     };
     DeskKey::load(&desk_key_path(b.dir()))
         .unwrap()

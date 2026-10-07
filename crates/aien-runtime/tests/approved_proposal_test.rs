@@ -56,6 +56,7 @@ fn unsigned(request: &str, approval: &str) -> ApprovedProposal {
         approval_mac: String::new(),
         requirements: Some(String::new()),
         requirements_mac: String::new(),
+        requirements_base: None,
     }
 }
 
@@ -952,6 +953,7 @@ fn bound_added_line_counts_are_measured_against_the_existing_file() {
     p.approved_proposal_sha256 = interplane_sha(PATH, &p.content);
     p.content_sha256 = sha(p.content.as_bytes());
     p.requirements = Some("Add 2 lines to NOTES.md".into());
+    p.requirements_base = Some(sha(b"one\ntwo\n"));
     let two = sign(&b, p.clone());
     let e = refused(hook.submit(&two, &ws), "RequirementsUnmet");
     assert!(
@@ -986,4 +988,35 @@ fn a_path_that_reads_like_a_requirement_is_not_one() {
         return;
     }
     committed(out);
+}
+
+#[test]
+fn added_line_goal_without_a_bound_base_or_with_a_stale_one_is_refused() {
+    let _turn = turn();
+    let (_tmp, b, hook, ws) = setup();
+    std::fs::write(Path::new(&ws).join(PATH), "one\ntwo\n").unwrap();
+    let mut p = unsigned("req-bs1", "appr-bs1");
+    p.content = "one\ntwo\nthree\n".into();
+    p.approved_proposal_sha256 = interplane_sha(PATH, &p.content);
+    p.content_sha256 = sha(p.content.as_bytes());
+    p.requirements = Some("Add one line to NOTES.md".into());
+    // No base bound: the check could not be tied to a file state.
+    let none = sign(&b, p.clone());
+    refused(hook.submit(&none, &ws), "RequirementsUnbound");
+    // A base that is not the file now (it changed after the desk looked).
+    p.request_id = "req-bs2".into();
+    p.trace_id = "trace-req-bs2".into();
+    p.approval_id = "appr-bs2".into();
+    p.requirements_base = Some(sha(b"something else\n"));
+    let stale = sign(&b, p.clone());
+    let e = refused(hook.submit(&stale, &ws), "BaseChanged");
+    assert!(e.detail.contains("changed since the desk bound it"), "{e}");
+    // The base is covered by the MAC: swapping it after signing fails authentication.
+    p.request_id = "req-bs3".into();
+    p.trace_id = "trace-req-bs3".into();
+    p.approval_id = "appr-bs3".into();
+    p.requirements_base = Some(sha(b"one\ntwo\n"));
+    let mut signed = sign(&b, p);
+    signed.requirements_base = Some(sha(b"something else\n"));
+    refused(hook.submit(&signed, &ws), "Unauthenticated");
 }

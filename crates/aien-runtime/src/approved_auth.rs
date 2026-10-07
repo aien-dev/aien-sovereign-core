@@ -129,8 +129,14 @@ pub fn binding_bytes(id: &ApprovalIdentity) -> Vec<u8> {
 
 /// What the requirements MAC covers: a domain tag, the approval binding and
 /// the requirement goal (a missing goal and an empty goal differ).
-fn requirements_bytes(id: &ApprovalIdentity, goal: Option<&str>) -> Vec<u8> {
-    let mut m = b"aien.requirements.v1\0".to_vec();
+fn requirements_bytes(id: &ApprovalIdentity, goal: Option<&str>, base: Option<&str>) -> Vec<u8> {
+    // v2 adds the sha256 of the file the bytes replace (or "absent"); v1 is the
+    // binding of an approval whose requirements do not depend on the prior file.
+    let mut m = if base.is_some() {
+        b"aien.requirements.v2\0".to_vec()
+    } else {
+        b"aien.requirements.v1\0".to_vec()
+    };
     m.extend(binding_bytes(id));
     m.push(0);
     match goal {
@@ -139,6 +145,10 @@ fn requirements_bytes(id: &ApprovalIdentity, goal: Option<&str>) -> Vec<u8> {
             m.push(1);
             m.extend(g.as_bytes());
         }
+    }
+    if let Some(b) = base {
+        m.push(0);
+        m.extend(b.as_bytes());
     }
     m
 }
@@ -334,7 +344,11 @@ impl DeskKey {
         let id = ApprovalIdentity::of(p, &ws, &self.id);
         hex(&hmac_sha256(
             &self.key,
-            &requirements_bytes(&id, p.requirements.as_deref()),
+            &requirements_bytes(
+                &id,
+                p.requirements.as_deref(),
+                p.requirements_base.as_deref(),
+            ),
         ))
     }
 
@@ -359,7 +373,11 @@ impl DeskKey {
             Some(g) if ct_eq(&g, &want) => {
                 let want_r = hmac_sha256(
                     &self.key,
-                    &requirements_bytes(&id, p.requirements.as_deref()),
+                    &requirements_bytes(
+                        &id,
+                        p.requirements.as_deref(),
+                        p.requirements_base.as_deref(),
+                    ),
                 );
                 match unhex32(&p.requirements_mac) {
                     Some(r) if ct_eq(&r, &want_r) => Ok(id),
