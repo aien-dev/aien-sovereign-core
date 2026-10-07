@@ -94,6 +94,17 @@ pub fn rmsnorm(x: &[f32], weight: &[f32], eps: f32, out: &mut [f32]) {
     }
 }
 
+/// Qwen3 per-head RMSNorm in place: `x` is `[heads][head_dim]`, every head is normalised over
+/// its own `head_dim` values with the shared `weight` (`[head_dim]`), same maths as [`rmsnorm`].
+pub fn rmsnorm_heads_in_place(x: &mut [f32], weight: &[f32], head_dim: usize, eps: f32) {
+    assert!(head_dim > 0 && x.len().is_multiple_of(head_dim) && weight.len() == head_dim);
+    let mut scratch = vec![0.0f32; head_dim];
+    for head in x.chunks_exact_mut(head_dim) {
+        rmsnorm(head, weight, eps, &mut scratch);
+        head.copy_from_slice(&scratch);
+    }
+}
+
 /// Applies Rotary Positional Embeddings (RoPE) to query and key head slices.
 /// Follows canonical Hugging Face LLaMA rotate_half pairing coordinate i with coordinate i + half_dim:
 /// out[i] = q[i] * cos - q[i + half_dim] * sin

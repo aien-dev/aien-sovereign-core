@@ -4,7 +4,7 @@
 use crate::tensor::{
     apply_rope_params as tensor_rope, matmul_vec as tensor_matmul, rmsnorm as tensor_rmsnorm,
 };
-use aien_abi_core::{AttentionGeometry, RopeParams};
+use aien_abi_core::{AttentionGeometry, ModelConfig, RopeParams};
 
 /// The trait's attention methods return `()`, so a wrong head layout cannot be reported as an
 /// error value; it must never turn into numbers either. These helpers refuse loudly (panic with
@@ -129,6 +129,12 @@ fn fp16_bits_to_f32(bits: u16) -> f32 {
 pub trait TensorBackend: Send + Sync {
     /// Human-readable name of the backend implementation.
     fn name(&self) -> &'static str;
+
+    /// Refuses a model this backend cannot run correctly, before any forward pass. Default:
+    /// accepts everything. Called at the start of every forward pass.
+    fn check_model(&self, _config: &ModelConfig) -> Result<(), String> {
+        Ok(())
+    }
 
     /// How many operations this backend ran on a software fallback instead of
     /// the device it was bound to. Zero for pure CPU backends; a production

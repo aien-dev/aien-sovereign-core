@@ -28,7 +28,7 @@
 //! [`OmegaGb10Backend::clear_resident`] after changing weights.
 use crate::backend::{ReferenceCpuBackend, TensorBackend};
 use crate::native_ops::{NativeOpMask, OpAccounting, OpReport, TensorOp};
-use aien_abi_core::RopeParams;
+use aien_abi_core::{ModelConfig, RopeParams};
 use aien_omega_gpu::ResidentTensor;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -495,7 +495,26 @@ impl OmegaGb10Backend {
     }
 }
 
+/// Why the GB10 engine refuses `config`, if it does: Qwen3 (`qk_norm`) has `head_dim` 128 and
+/// the omega attention kernel is fixed at `head_dim` 64 (omega `omega_gpu_attention_api.h`),
+/// and the per-head q/k norm runs only on the CPU reference path. Llama-architecture models
+/// are not touched by this check.
+pub fn omega_model_refusal(config: &ModelConfig) -> Option<String> {
+    config.qk_norm.then(|| {
+        format!(
+            "OmegaGb10Backend refuses model {:?}: Qwen3 (per-head q/k norm, head_dim {}) is \
+             unsupported on the GB10 engine, whose attention kernel supports head_dim 64 only; \
+             run it on the CPU reference backend",
+            config.model_id, config.head_dim
+        )
+    })
+}
+
 impl TensorBackend for OmegaGb10Backend {
+    fn check_model(&self, config: &ModelConfig) -> Result<(), String> {
+        omega_model_refusal(config).map_or(Ok(()), Err)
+    }
+
     fn name(&self) -> &'static str {
         if self.is_available() {
             "OmegaGb10Backend (native Omega engine, no CUDA, NVIDIA GB10 sm_121)"

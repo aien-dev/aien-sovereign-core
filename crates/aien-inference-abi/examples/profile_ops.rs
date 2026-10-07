@@ -22,6 +22,7 @@ fn main() {
         rope_scaling: None,
         tie_word_embeddings: false,
         eos_token_ids: Vec::new(),
+        qk_norm: false,
     };
 
     let safetensors_path = "/home/drakestapleton/.cache/huggingface/hub/models--TinyLlama--TinyLlama-1.1B-Chat-v1.0/snapshots/fe8a4ea1ffedaf415f4da2f062534de366a451e6/model.safetensors";

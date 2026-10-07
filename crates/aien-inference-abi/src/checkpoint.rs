@@ -228,7 +228,8 @@ pub fn tinyllama_catalog() -> Vec<(String, Vec<usize>)> {
     catalog
 }
 
-/// The tensor catalog of a Llama-architecture checkpoint (`LlamaForCausalLM`) described by
+/// The tensor catalog of a Llama-architecture checkpoint (`LlamaForCausalLM`, or Qwen3 with
+/// per-layer `q_norm`/`k_norm` when `config.qk_norm`) described by
 /// `config`: names and shapes of every tensor the forward pass reads. `lm_head.weight` is
 /// left out when the model ties its output projection to `model.embed_tokens.weight`.
 /// For `ModelConfig::tinyllama_1_1b()` this is exactly [`tinyllama_catalog`].
@@ -238,7 +239,7 @@ pub fn llama_catalog(config: &aien_abi_core::ModelConfig) -> Vec<(String, Vec<us
     let vocab = config.vocab_size();
     let q_dim = config.num_heads * config.head_dim;
     let kv_dim = config.num_kv_heads * config.head_dim;
-    let mut catalog = Vec::with_capacity(3 + 9 * config.num_layers);
+    let mut catalog = Vec::with_capacity(3 + 11 * config.num_layers);
     catalog.push(("model.embed_tokens.weight".to_string(), vec![vocab, hidden]));
     for layer in 0..config.num_layers {
         let prefix = format!("model.layers.{}", layer);
@@ -275,6 +276,14 @@ pub fn llama_catalog(config: &aien_abi_core::ModelConfig) -> Vec<(String, Vec<us
             format!("{}.mlp.down_proj.weight", prefix),
             vec![hidden, inter],
         ));
+        if config.qk_norm {
+            for name in ["q_norm", "k_norm"] {
+                catalog.push((
+                    format!("{}.self_attn.{}.weight", prefix, name),
+                    vec![config.head_dim],
+                ));
+            }
+        }
     }
     catalog.push(("model.norm.weight".to_string(), vec![hidden]));
     if !config.tie_word_embeddings {
