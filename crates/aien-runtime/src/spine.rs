@@ -1914,7 +1914,19 @@ impl ComposeBridge {
         let plan = task_plan(goal, &ws)?;
         // The requirements the goal states are checked on every path: the model
         // path and an approved proposal (refused before any write when unmet).
-        let reqs = crate::requirements::analyze(goal);
+        let machine_goal =
+            approved_text.is_some() && goal.starts_with(crate::approved::APPROVED_GOAL_PREFIX);
+        let mut reqs = if machine_goal {
+            crate::requirements::Extraction::default()
+        } else {
+            crate::requirements::analyze(goal)
+        };
+        // Added-line counts are measured against the file the proposal replaces
+        // (the edit target's content, or nothing for a new file).
+        if reqs.needs_prior() {
+            let prior = plan.1.as_ref().map_or("", |(_, c)| c.as_str());
+            reqs = reqs.resolved(prior);
+        }
         let recognized: Vec<String> = reqs.requirements.iter().map(|r| r.label()).collect();
         let uncertain = reqs.uncertain.clone();
         let now = std::time::SystemTime::now()

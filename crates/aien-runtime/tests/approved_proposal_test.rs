@@ -940,3 +940,50 @@ fn uncertain_bound_requirements_are_refused() {
     );
     refused(hook.submit(&p, &ws), "RequirementsUncertain");
 }
+
+#[test]
+fn bound_added_line_counts_are_measured_against_the_existing_file() {
+    let _turn = turn();
+    let (_tmp, b, hook, ws) = setup();
+    std::fs::write(Path::new(&ws).join(PATH), "one\ntwo\n").unwrap();
+    // The approved bytes add one line to the two that exist.
+    let mut p = unsigned("req-al1", "appr-al1");
+    p.content = "one\ntwo\nthree\n".into();
+    p.approved_proposal_sha256 = interplane_sha(PATH, &p.content);
+    p.content_sha256 = sha(p.content.as_bytes());
+    p.requirements = Some("Add 2 lines to NOTES.md".into());
+    let two = sign(&b, p.clone());
+    let e = refused(hook.submit(&two, &ws), "RequirementsUnmet");
+    assert!(
+        e.detail
+            .contains("exactly 2 added non-empty lines, found 1"),
+        "{e}"
+    );
+    // One added line meets "Add one line": never a requirement refusal.
+    p.request_id = "req-al2".into();
+    p.trace_id = "trace-req-al2".into();
+    p.approval_id = "appr-al2".into();
+    p.requirements = Some("Add one line to NOTES.md".into());
+    let one = sign(&b, p);
+    if let Err(e) = hook.submit(&one, &ws) {
+        assert!(!e.name.starts_with("Requirements"), "{e}");
+    }
+}
+
+#[test]
+fn a_path_that_reads_like_a_requirement_is_not_one() {
+    let _turn = turn();
+    let (_tmp, b, hook, ws) = setup();
+    let path = "docs/add-2-lines-to-10-lines.md";
+    std::fs::create_dir_all(Path::new(&ws).join("docs")).unwrap();
+    let mut p = unsigned("req-mg1", "appr-mg1");
+    p.path = path.into();
+    p.approved_proposal_sha256 = interplane_sha(path, CONTENT);
+    let p = sign(&b, p);
+    let out = hook.submit(&p, &ws);
+    if !aien_omega_compose::LINKED {
+        stub_refused(out);
+        return;
+    }
+    committed(out);
+}

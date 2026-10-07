@@ -32,7 +32,7 @@ requirements the approved bytes must meet; `requirements_mac` is the desk key's 
 a caller cannot swap or drop it. `Some("")` is a signed "no requirements"; a missing
 `requirements` is refused (`RequirementsUnbound`), a goal with an unreadable requirement
 is refused (`RequirementsUncertain`), and bytes that miss a requirement are refused
-(`RequirementsUnmet`), all before any claim or compose run. The hook returns
+(`RequirementsUnmet`), all before any claim or compose run. A count such as "add 2 lines to NOTES.md" is judged on the diff between the existing workspace file (empty when absent) and the approved bytes. The hook returns
 `ApprovedComposeReport`: state (COMMITTED | ALREADY_COMMITTED), the same
 ids, compose_proposal_sha256, grant_links, desk_key_id, approval_key,
 replay_claim and the compose `task` report (None for ALREADY_COMMITTED); or

@@ -161,6 +161,11 @@ fn sha256_hex(b: &[u8]) -> String {
     hex(&Sha256::digest(b))
 }
 
+/// Start of the machine goal of an approved run. It carries the desk-supplied path, not
+/// a requirement statement: the run does not read requirements out of it (the
+/// goal bound into the approval was checked on the same bytes before the claim).
+pub(crate) const APPROVED_GOAL_PREFIX: &str = "apply approved proposal for ";
+
 fn refuse(name: &str, why: impl std::fmt::Display) -> String {
     format!("{REFUSED} {name}: {why}")
 }
@@ -225,16 +230,34 @@ pub fn verify(p: &ApprovedProposal) -> Result<String, String> {
 
 /// The requirements the desk bound to this approval, checked on the exact
 /// approved content (the bytes that would be saved). Uncertain wording refuses.
-fn check_bound_requirements(p: &ApprovedProposal) -> Result<(), String> {
+fn check_bound_requirements(p: &ApprovedProposal, workspace: &Path) -> Result<(), String> {
     let goal = p.requirements.as_deref().ok_or_else(|| {
         refuse(
             "RequirementsUnbound",
             "the approval carries no requirement binding",
         )
     })?;
-    let ex = crate::requirements::analyze(goal);
+    let mut ex = crate::requirements::analyze(goal);
     if let Some(why) = ex.refusal() {
         return Err(refuse("RequirementsUncertain", why));
+    }
+    if ex.needs_prior() {
+        // An added-line count is judged against the file these bytes replace.
+        let class = if p.path.contains(char::is_whitespace) {
+            crate::spine::TargetClass::Refused(String::new())
+        } else {
+            crate::spine::classify_target(&p.path, workspace)
+        };
+        let prior =
+            match class {
+                crate::spine::TargetClass::Edit(_, c) => c,
+                crate::spine::TargetClass::New => String::new(),
+                _ => return Err(refuse(
+                    "RequirementsUnmet",
+                    "the existing file cannot be read, so the added-line count cannot be measured",
+                )),
+            };
+        ex = ex.resolved(&prior);
     }
     match crate::requirements::refusal_reason(&ex.requirements, &p.content) {
         Some(why) => Err(refuse("RequirementsUnmet", why)),
@@ -283,7 +306,7 @@ impl ProposerHook {
         .map_err(|e| refusal(e, None))?;
         // The goal requirements bound by the desk, checked on the exact approved
         // bytes BEFORE any claim, run or commit.
-        check_bound_requirements(p).map_err(|e| refusal(e, None))?;
+        check_bound_requirements(p, Path::new(workspace)).map_err(|e| refusal(e, None))?;
         let keys = ClaimKeys {
             approval_key: approval_key(&identity),
             request_id: p.request_id.clone(),
@@ -303,7 +326,7 @@ impl ProposerHook {
         })?;
         // Exactly one compose run per claim.
         let goal = format!(
-            "apply approved proposal for {} (request {})",
+            "{APPROVED_GOAL_PREFIX}{} (request {})",
             p.path, p.request_id
         );
         let r = match self

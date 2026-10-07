@@ -33,6 +33,14 @@
 //! not the model's reply). An edit only adds lines, so a prior file that
 //! already exceeds a `MaxLines` is refused before any attempt.
 //!
+//! `AddedLines` (a request such as "add 2 lines to README.md") is the one requirement
+//! measured against the PRIOR file: the number of non-empty lines of the complete
+//! proposed bytes that are not in the longest common subsequence with the
+//! prior file's non-empty lines (trailing whitespace ignored). A new file is
+//! compared with an empty prior. Callers bind the prior with
+//! `Extraction::resolved`; an unresolved `AddedLines` is unmet (fails closed).
+//! The approved path binds the file found in the workspace.
+//!
 //! Counting: `MinLines`/`MaxLines` count every non-empty line of the file,
 //! INCLUDING code lines and code-fence marker lines; `MinWords`/`MaxWords`
 //! count every whitespace-separated word of the file. Sections, questions,
@@ -69,6 +77,8 @@ pub enum ItemKind {
     Steps,
     Sections,
     Questions,
+    /// Fenced code blocks (each opening fence line counts one).
+    CodeBlocks,
 }
 
 impl ItemKind {
@@ -78,6 +88,7 @@ impl ItemKind {
             ItemKind::Steps => "numbered steps",
             ItemKind::Sections => "headings",
             ItemKind::Questions => "questions",
+            ItemKind::CodeBlocks => "fenced code blocks",
         }
     }
 }
@@ -101,6 +112,25 @@ pub enum Requirement {
     RequiredTopics(Vec<String>),
     /// Every section holds at least this many sentences.
     MinSentencesPerSection(usize),
+    /// Lines ADDED to the file, measured against the prior file (see the module
+    /// docs). `exact`: exactly `n`, else at least `n`. `prior` is None until
+    /// the caller resolves it ([`Extraction::resolved`]); an unresolved one is unmet.
+    AddedLines {
+        n: usize,
+        exact: bool,
+        prior: Option<String>,
+    },
+    /// The section with this title (None: the last section of the document)
+    /// holds at least `n` words of plain text (prose lines, no code, no headings).
+    SectionMinWords {
+        title: Option<String>,
+        n: usize,
+    },
+    /// Each title is present as a heading of exactly this level (1 to 6).
+    LevelHeadings {
+        level: usize,
+        titles: Vec<String>,
+    },
 }
 
 fn quoted(items: &[String]) -> String {
@@ -126,6 +156,20 @@ impl Requirement {
             Requirement::RequiredTopics(p) => format!("the topics {}", quoted(p)),
             Requirement::MinSentencesPerSection(n) => {
                 format!("at least {n} sentences in every section")
+            }
+            Requirement::AddedLines { n, exact, .. } => {
+                if *exact {
+                    format!("exactly {n} added non-empty lines")
+                } else {
+                    format!("at least {n} added non-empty lines")
+                }
+            }
+            Requirement::SectionMinWords { title, n } => match title {
+                Some(t) => format!("at least {n} words of plain text in the section \"{t}\""),
+                None => format!("at least {n} words of plain text in the last section"),
+            },
+            Requirement::LevelHeadings { level, titles } => {
+                format!("the level-{level} headings {}", quoted(titles))
             }
         }
     }
@@ -203,6 +247,53 @@ impl Requirement {
                     format!(
                         "{label}, not covered: {} (use those words, or their word forms, in the text)",
                         missing.join(", ")
+                    )
+                })
+            }
+            Requirement::AddedLines { n, exact, prior } => {
+                let Some(prior) = prior else {
+                    return Some(format!(
+                        "{label} cannot be measured: the existing file was not provided"
+                    ));
+                };
+                let c = match added_non_empty_lines(prior, content) {
+                    Ok(c) => c,
+                    Err(e) => return Some(format!("{label} cannot be measured: {e}")),
+                };
+                let bad = if *exact { c != *n } else { c < *n };
+                bad.then(|| format!("{label}, found {c}"))
+            }
+            Requirement::SectionMinWords { title, n } => {
+                let secs = parse_sections(content);
+                let sec = match title {
+                    Some(t) => secs.iter().find(|s| s.title == normalize_title(t)),
+                    None => secs.last(),
+                };
+                let Some(sec) = sec else {
+                    return Some(format!("{label}, the section was not found"));
+                };
+                let c = sec
+                    .body
+                    .split_whitespace()
+                    .filter(|w| w.chars().any(char::is_alphanumeric))
+                    .count();
+                (c < *n).then(|| format!("{label}, found {c}"))
+            }
+            Requirement::LevelHeadings { level, titles } => {
+                let secs = parse_sections(content);
+                let missing: Vec<String> = titles
+                    .iter()
+                    .filter(|t| {
+                        !secs
+                            .iter()
+                            .any(|s| s.level == *level && s.title == normalize_title(t))
+                    })
+                    .cloned()
+                    .collect();
+                (!missing.is_empty()).then(|| {
+                    format!(
+                        "{label}, missing {} (each must be a level-{level} markdown heading line)",
+                        quoted(&missing)
                     )
                 })
             }
@@ -297,6 +388,8 @@ struct Section {
     body: String,
     /// No prose of its own and the next heading is deeper.
     container: bool,
+    /// Heading level, 1 to 6.
+    level: usize,
 }
 
 fn heading_of(t: &str) -> Option<(usize, &str)> {
@@ -316,7 +409,7 @@ fn parse_sections(content: &str) -> Vec<Section> {
     heads
         .iter()
         .enumerate()
-        .map(|(k, &(i, _, t))| {
+        .map(|(k, &(i, lv, t))| {
             let end = heads.get(k + 1).map_or(lines.len(), |h| h.0);
             let body = lines[i + 1..end].join("\n");
             let next_deeper = heads.get(k + 1).is_some_and(|n| n.1 > heads[k].1);
@@ -324,6 +417,7 @@ fn parse_sections(content: &str) -> Vec<Section> {
                 title: normalize_title(t),
                 raw_title: t.trim_end_matches('#').trim().to_string(),
                 container: body.trim().is_empty() && next_deeper,
+                level: lv,
                 body,
             }
         })
@@ -420,6 +514,9 @@ fn prose_lines(s: &str) -> Vec<&str> {
 }
 
 fn count_items(k: ItemKind, s: &str) -> usize {
+    if k == ItemKind::CodeBlocks {
+        return count_code_blocks(s);
+    }
     prose_lines(s)
         .into_iter()
         .map(str::trim)
@@ -433,6 +530,7 @@ fn count_items(k: ItemKind, s: &str) -> usize {
                 (1..=6).contains(&h) && t[h..].starts_with(' ') && !t[h..].trim().is_empty()
             }
             ItemKind::Questions => t.ends_with('?'),
+            ItemKind::CodeBlocks => false,
         })
         .count()
 }
@@ -446,4 +544,61 @@ pub fn unmet(reqs: &[Requirement], content: &str) -> Vec<String> {
 pub fn refusal_reason(reqs: &[Requirement], content: &str) -> Option<String> {
     let u = unmet(reqs, content);
     (!u.is_empty()).then(|| format!("unmet requirement: {}", u.join("; ")))
+}
+
+/// Fenced code blocks: every opening fence line counts one (same fence rule as
+/// `prose_lines`; an unclosed block counts once).
+fn count_code_blocks(s: &str) -> usize {
+    let mut open: Option<(char, usize)> = None;
+    let mut blocks = 0;
+    for l in s.lines() {
+        match (open, fence_marker(l)) {
+            (None, Some((c, n, _))) => {
+                open = Some((c, n));
+                blocks += 1;
+            }
+            (Some((c, n)), Some((c2, n2, info))) if c2 == c && n2 >= n && !info => open = None,
+            _ => {}
+        }
+    }
+    blocks
+}
+
+/// Largest line-pair table the added-line diff will build.
+const DIFF_MAX_CELLS: usize = 25_000_000;
+
+/// Non-empty lines of `content` that are not part of the longest common
+/// subsequence with the non-empty lines of `prior` (lines compared with
+/// trailing whitespace ignored). For an edit, which keeps every prior line,
+/// this is the number of lines the edit added; for whole replacement bytes it
+/// is the diff against the file they replace.
+pub(crate) fn added_non_empty_lines(prior: &str, content: &str) -> Result<usize, String> {
+    let a: Vec<&str> = prior
+        .lines()
+        .map(str::trim_end)
+        .filter(|l| !l.trim().is_empty())
+        .collect();
+    let b: Vec<&str> = content
+        .lines()
+        .map(str::trim_end)
+        .filter(|l| !l.trim().is_empty())
+        .collect();
+    if a.len().saturating_mul(b.len()) > DIFF_MAX_CELLS {
+        return Err(format!(
+            "the diff is too large ({} prior lines x {} lines)",
+            a.len(),
+            b.len()
+        ));
+    }
+    // Rolling-row longest common subsequence length.
+    let mut row = vec![0usize; b.len() + 1];
+    for x in &a {
+        let mut diag = 0;
+        for (j, y) in b.iter().enumerate() {
+            let up = row[j + 1];
+            row[j + 1] = if x == y { diag + 1 } else { up.max(row[j]) };
+            diag = up;
+        }
+    }
+    Ok(b.len() - row[b.len()])
 }
