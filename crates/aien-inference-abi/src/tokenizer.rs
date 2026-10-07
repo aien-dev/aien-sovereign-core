@@ -53,9 +53,10 @@ pub enum ChatTemplate {
     /// (the Hugging Face template's default "Cutting Knowledge Date / Today Date" block
     /// depends on the wall clock, so it is left out).
     Llama3,
-    /// ChatML exactly as the publisher's template renders it (SmolLM2-Instruct): per turn
-    /// `<|im_start|>{role}\n{content}<|im_end|>\n`, then `<|im_start|>assistant\n`. Contents
-    /// are kept verbatim and empty turns are kept (the template neither trims nor skips).
+    /// ChatML exactly as the publisher's template renders it (SmolLM2-Instruct, and
+    /// Qwen3-4B-Instruct-2507 without tools): per turn `<|im_start|>{role}\n{content}<|im_end|>\n`,
+    /// then `<|im_start|>assistant\n`. Contents are kept verbatim and empty turns are kept
+    /// (the template neither trims nor skips).
     /// When the template carries a default system message and the first turn is not a
     /// system turn, that message is rendered first as a system turn, as the template does.
     /// No BOS is part of the text; the model's tokenizer decides whether `encode` adds one
@@ -80,11 +81,19 @@ pub enum ChatTemplate {
 const CHATML_WITH_DEFAULT_SYSTEM: &str = "{% for message in messages %}{% if loop.first and messages[0]['role'] != 'system' %}{{ '<|im_start|>system\n{SYSTEM}<|im_end|>\n' }}{% endif %}{{'<|im_start|>' + message['role'] + '\n' + message['content'] + '<|im_end|>' + '\n'}}{% endfor %}{% if add_generation_prompt %}{{ '<|im_start|>assistant\n' }}{% endif %}";
 const CHATML_PLAIN: &str = "{% for message in messages %}{{'<|im_start|>' + message['role'] + '\n' + message['content'] + '<|im_end|>' + '\n'}}{% endfor %}{% if add_generation_prompt %}{{ '<|im_start|>assistant\n' }}{% endif %}";
 
-/// Matches a chat template text against the two ChatML layouts above. Returns the layout
+/// The Qwen3-4B-Instruct-2507 chat template, byte for byte (revision cdbee75f, Apache-2.0; see
+/// `fixtures/chat-templates/qwen3-4b-instruct-2507/PROVENANCE.md`). Without tools and without
+/// assistant tool calls (this engine passes neither) it renders exactly the plain ChatML layout:
+/// no default system message, contents verbatim, generation prompt `<|im_start|>assistant\n`.
+/// Any other Qwen template text (tools in use, thinking blocks, another revision) is refused.
+const QWEN3_INSTRUCT_2507: &str =
+    include_str!("../fixtures/chat-templates/qwen3-4b-instruct-2507/chat_template.jinja");
+
+/// Matches a chat template text against the ChatML layouts above. Returns the layout
 /// with its default system message (None for the plain layout), or a refusal.
 fn parse_chatml(template_text: &str) -> Result<ChatTemplate, TokenizerError> {
     let text = template_text.trim();
-    if text == CHATML_PLAIN {
+    if text == CHATML_PLAIN || text == QWEN3_INSTRUCT_2507.trim() {
         return Ok(ChatTemplate::ChatMl {
             default_system: None,
         });
