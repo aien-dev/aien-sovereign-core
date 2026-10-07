@@ -65,6 +65,9 @@ fn unsigned(request: &str, approval: &str, path: &str, content: &str) -> Approve
         approved_proposal_sha256: approved_proposal_sha256(path, content),
         content_sha256: sha(content.as_bytes()),
         approval_mac: String::new(),
+        requirements: Some(String::new()),
+        requirements_mac: String::new(),
+        requirements_base: None,
     }
 }
 
@@ -74,9 +77,9 @@ fn signed(tmp: &Path, request: &str, approval: &str) -> ApprovedProposal {
 }
 
 fn sign(tmp: &Path, mut p: ApprovedProposal) -> ApprovedProposal {
-    p.approval_mac = DeskKey::load(&desk_key_path(&home(tmp)))
+    DeskKey::load(&desk_key_path(&home(tmp)))
         .unwrap()
-        .sign(&p, &ws(tmp));
+        .seal(&mut p, &ws(tmp));
     p
 }
 
@@ -701,9 +704,9 @@ async fn c20_workspace_containing_the_compose_home() {
     let d = up(tmp.path(), "s.sock").await;
     // Signed for the overlapping workspace itself: only confinement can refuse.
     let mut p = unsigned("req-o", "appr-o", PATH, CONTENT);
-    p.approval_mac = DeskKey::load(&desk_key_path(&home(tmp.path())))
+    DeskKey::load(&desk_key_path(&home(tmp.path())))
         .unwrap()
-        .sign(&p, tmp.path());
+        .seal(&mut p, tmp.path());
     let (_, name) = refused(submit(&d.c, &p, tmp.path()).await, "overlapping workspace");
     assert_eq!(name, "Confinement");
     down(d).await;
