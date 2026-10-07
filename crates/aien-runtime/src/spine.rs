@@ -1349,8 +1349,97 @@ pub fn propose_task_with_retries(
     attempt_budget: std::time::Duration,
     max_attempts: u32,
 ) -> (Result<String, String>, Vec<ProposalAttempt>) {
+    propose_task_checked(
+        proposer,
+        base,
+        edit,
+        &[],
+        budget,
+        attempt_budget,
+        max_attempts,
+    )
+}
+
+fn new_attempt(k: u32) -> ProposalAttempt {
+    ProposalAttempt {
+        attempt: k,
+        ms: 0,
+        tokens: 0,
+        outcome: String::new(),
+        reason: None,
+        text_sha256: None,
+        text: None,
+        aegis: None,
+        finish_reason: None,
+        token_ids: None,
+        prompt_tokens: None,
+        prompt_ids_sha256: None,
+        unmet_requirements: Vec::new(),
+    }
+}
+
+/// The approved-proposal path of the Skill: exactly one attempt that returns
+/// `text` unchanged, through the same requirement check as a model reply (the
+/// bytes a human approved are still refused, before any write, when the goal
+/// states a requirement they do not meet).
+pub(crate) fn propose_approved(
+    text: &str,
+    prompt: &str,
+    reqs: &[crate::requirements::Requirement],
+    budget: std::time::Duration,
+    attempt_budget: std::time::Duration,
+) -> SkillOutput {
+    let text = text.to_string();
+    let one = move |_: &str, _: std::time::Duration| {
+        Ok(Generation {
+            text: text.clone(),
+            finish_reason: Some("approved".into()),
+            ..Default::default()
+        })
+    };
+    propose_task_checked(&one, prompt, None, reqs, budget, attempt_budget, 1)
+}
+
+/// `propose_task_with_retries` plus requirement validation: a parsed reply
+/// whose COMPLETE content (the merged file in edit mode, i.e. the bytes that
+/// would be saved) fails any of `reqs` is refused like a parse failure, the
+/// unmet requirement(s) are recorded on the attempt, and the next attempt
+/// gets them as its retry reason. `budget` is one deadline for the whole
+/// task, started when this function starts and never reset per attempt.
+/// Exhaustion returns Err: no proposal exists, so nothing is approved,
+/// committed or written.
+pub fn propose_task_checked(
+    proposer: &(dyn Fn(&str, std::time::Duration) -> Result<Generation, String> + Send + Sync),
+    base: &str,
+    edit: Option<(&str, &str)>,
+    reqs: &[crate::requirements::Requirement],
+    budget: std::time::Duration,
+    attempt_budget: std::time::Duration,
+    max_attempts: u32,
+) -> (Result<String, String>, Vec<ProposalAttempt>) {
     let start = std::time::Instant::now();
     let mut attempts: Vec<ProposalAttempt> = Vec::new();
+    // An edit only adds lines (`merge_edit_reply` keeps every prior line), so a
+    // prior file that already breaks a MaxLines can never satisfy it: refuse
+    // now with a recorded reason instead of spending attempts.
+    if let Some((path, prior)) = edit {
+        let over: Vec<String> = reqs
+            .iter()
+            .filter(|r| matches!(r, crate::requirements::Requirement::MaxLines(_)))
+            .filter_map(|r| r.check(prior))
+            .collect();
+        if !over.is_empty() {
+            let why = format!(
+                "unmet requirement: the existing {path} already breaks it ({}) and an edit only adds lines",
+                over.join("; ")
+            );
+            let mut a = new_attempt(1);
+            a.outcome = "refused".into();
+            a.reason = Some(why.clone());
+            a.unmet_requirements = over;
+            return (Err(why), vec![a]);
+        }
+    }
     let mut last_reason = "no attempt made".to_string();
     let need_ms = (attempt_budget.as_millis() as u64).max(1);
     for k in 1..=max_attempts {
@@ -1370,20 +1459,8 @@ pub fn propose_task_with_retries(
         let t0 = std::time::Instant::now();
         let out = proposer(&prompt, remaining);
         let last_ms = t0.elapsed().as_millis() as u64;
-        let mut a = ProposalAttempt {
-            attempt: k,
-            ms: last_ms,
-            tokens: 0,
-            outcome: String::new(),
-            reason: None,
-            text_sha256: None,
-            text: None,
-            aegis: None,
-            finish_reason: None,
-            token_ids: None,
-            prompt_tokens: None,
-            prompt_ids_sha256: None,
-        };
+        let mut a = new_attempt(k);
+        a.ms = last_ms;
         match out {
             Ok(g) => {
                 a.tokens = g.tokens;
@@ -1396,7 +1473,17 @@ pub fn propose_task_with_retries(
                 // NEXT-PHASE-1 v6 N2: a length-cut reply is refused before parsing.
                 let checked = match length_cut_refusal(&g) {
                     Some(why) => Err(why),
-                    None => edit_proposal(&g.text, edit),
+                    None => edit_proposal(&g.text, edit).and_then(|p| {
+                        // The complete content that would be saved.
+                        let content = check_file_proposal(&p)?.content;
+                        match crate::requirements::refusal_reason(reqs, &content) {
+                            Some(why) => {
+                                a.unmet_requirements = crate::requirements::unmet(reqs, &content);
+                                Err(why)
+                            }
+                            None => Ok(p),
+                        }
+                    }),
                 };
                 match checked {
                     Ok(proposal) => {
@@ -1465,7 +1552,7 @@ pub(crate) fn record_view(
 pub(crate) struct ComposeHome {
     pub(crate) compose: Compose,
     pub(crate) machine_id: String,
-    prompts: Arc<parking_lot::Mutex<HashMap<u64, TaskPrompt>>>,
+    prompts: Arc<parking_lot::Mutex<HashMap<u64, TaskEntry>>>,
     /// Proposer hook: task -> approved proposal text (crate::approved).
     approved: Arc<parking_lot::Mutex<HashMap<u64, String>>>,
     /// What the model Skill returned per task: the text, or why it gave
@@ -1519,6 +1606,8 @@ impl ComposeHome {
 type SkillOutput = (Result<String, String>, Vec<ProposalAttempt>);
 /// The prompt of one task, its edit target and its kind (`task_plan`).
 pub type TaskPrompt = (String, Option<(String, String)>, ProposalKind);
+/// A task's plan plus the requirements its goal states (`requirements::extract`).
+type TaskEntry = (TaskPrompt, Vec<crate::requirements::Requirement>);
 
 /// Owns the composition home of this process.
 pub struct ComposeBridge {
@@ -1594,7 +1683,7 @@ impl ComposeBridge {
             journal_present,
         )
         .map_err(|r| mark_refusal(&self.dir, &r))?;
-        let prompts: Arc<parking_lot::Mutex<HashMap<u64, TaskPrompt>>> = Arc::default();
+        let prompts: Arc<parking_lot::Mutex<HashMap<u64, TaskEntry>>> = Arc::default();
         let proposals: Arc<parking_lot::Mutex<HashMap<u64, SkillOutput>>> = Arc::default();
         let approved: Arc<parking_lot::Mutex<HashMap<u64, String>>> = Arc::default();
         let (pr, pp, proposer) = (prompts.clone(), proposals.clone(), self.proposer.clone());
@@ -1605,7 +1694,7 @@ impl ComposeBridge {
         let pa = approved.clone();
         compose
             .register_skill(COMPOSE_MODEL_SKILL, None, 10, move |task| {
-                let (prompt, target, kind) = pr.lock().get(&task).cloned()?;
+                let ((prompt, target, kind), reqs) = pr.lock().get(&task).cloned()?;
                 // Proposer hook (crate::approved): an approved proposal for this
                 // task replaces the model's reply. One attempt, the same
                 // template check, the same AEGIS contract and commit below.
@@ -1616,16 +1705,7 @@ impl ComposeBridge {
                 let attempt_budget = compose_attempt_budget(kind, budget);
                 let fixed = pa.lock().get(&task).cloned();
                 let (out, attempts) = match fixed {
-                    Some(text) => {
-                        let one = move |_: &str, _: std::time::Duration| {
-                            Ok(Generation {
-                                text: text.clone(),
-                                finish_reason: Some("approved".into()),
-                                ..Default::default()
-                            })
-                        };
-                        propose_task_with_retries(&one, &prompt, None, budget, attempt_budget, 1)
-                    }
+                    Some(text) => propose_approved(&text, &prompt, &reqs, budget, attempt_budget),
                     // Fixed template + bounded automatic retry (ACCEPTANCE-v2 3a, 3b),
                     // measured per-attempt budget (ACCEPTANCE-v3 3b); an edit reply
                     // is merged into the content the model was shown (v7 T5).
@@ -1635,10 +1715,11 @@ impl ComposeBridge {
                             ProposalKind::Edit => &proposer,
                             ProposalKind::Document => &doc_proposer,
                         };
-                        propose_task_with_retries(
+                        propose_task_checked(
                             p.as_ref(),
                             &prompt,
                             edit,
+                            &reqs,
                             budget,
                             attempt_budget,
                             COMPOSE_MAX_ATTEMPTS,
@@ -1650,15 +1731,25 @@ impl ComposeBridge {
                 h
             })
             .map_err(|e| format!("compose register skill: {e}"))?;
-        let pv = proposals.clone();
+        let (pv, pq) = (proposals.clone(), prompts.clone());
         compose
             .set_verify(move |task, result| {
                 // AEGIS contract: the result names exactly the proposal text
                 // the Skill recorded for this task, and that text parses as one
                 // file change (a relative path and nonempty content).
+                // The requirements of the goal are checked again on these same
+                // bytes, the ones that would be saved.
+                let reqs = pq
+                    .lock()
+                    .get(&task)
+                    .map(|p| p.1.clone())
+                    .unwrap_or_default();
                 pv.lock().get(&task).is_some_and(|(t, _)| {
                     let Ok(t) = t else { return false };
-                    proposal_handle(t) == result && parse_file_proposal(t).is_some()
+                    proposal_handle(t) == result
+                        && parse_file_proposal(t).is_some_and(|p| {
+                            crate::requirements::refusal_reason(&reqs, &p.content).is_none()
+                        })
                 })
             })
             .map_err(|e| format!("compose set verify: {e}"))?;
@@ -1771,7 +1862,11 @@ impl ComposeBridge {
                 ws.display()
             ));
         }
-        let prompt = task_plan(goal, &ws)?;
+        let plan = task_plan(goal, &ws)?;
+        // The requirements the goal states are checked on every path: the model
+        // path and an approved proposal (refused before any write when unmet).
+        let reqs = crate::requirements::extract(goal);
+        let recognized: Vec<String> = reqs.iter().map(|r| r.label()).collect();
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_err(|e| format!("clock: {e}"))?;
@@ -1795,7 +1890,7 @@ impl ComposeBridge {
         // starts, the Skill gives up at budget. Set only here, under the lock that
         // serializes runs, never while rx_compose_run is in flight. An omega without
         // rxc_host_set_wait_ms refuses a budget that needs a longer wait (no silent 30 s wait).
-        let kind = prompt.2;
+        let kind = plan.2;
         let wait = home.budgets.for_kind(kind) + COMPOSE_WAIT_MARGIN;
         home.compose
             .set_wait_ms(wait.as_millis() as u32)
@@ -1808,7 +1903,7 @@ impl ComposeBridge {
         if let Some(t) = approved_text {
             home.approved.lock().insert(task, t.to_string());
         }
-        home.prompts.lock().insert(task, prompt);
+        home.prompts.lock().insert(task, (plan, reqs));
         let run = home.compose.run(task, now.as_micros() as u64);
         home.prompts.lock().remove(&task);
         home.approved.lock().remove(&task);
@@ -1858,6 +1953,7 @@ impl ComposeBridge {
             uncommitted_proposal,
             proposer_error,
             proposal_attempts,
+            requirements_recognized: recognized,
             proposer: match approved_text {
                 Some(_) => APPROVED_PROPOSER_LABEL.to_string(),
                 None => self.proposer_label.clone(),
@@ -2120,5 +2216,91 @@ impl ComposeBridge {
             .record(id)
             .map(|r| hex(&r.digest))
             .map_err(|e| format!("compose record {id}: {e}"))
+    }
+}
+
+#[cfg(test)]
+mod requirement_tests {
+    use super::*;
+    use crate::requirements::extract;
+
+    const SHORT: &str = "filename: DOC.md\na\nb\nc\n";
+
+    #[test]
+    fn approved_text_is_checked_against_the_goal_requirements() {
+        let reqs = extract("write DOC.md in at least 10 lines");
+        let (out, a) = propose_approved(
+            SHORT,
+            "base",
+            &reqs,
+            COMPOSE_SKILL_BUDGET,
+            COMPOSE_ATTEMPT_BUDGET,
+        );
+        let why = out.unwrap_err();
+        assert!(
+            why.contains("at least 10 non-empty lines, found 3"),
+            "{why}"
+        );
+        assert_eq!(a.len(), 1);
+        assert_eq!(a[0].outcome, "refused");
+        assert_eq!(
+            a[0].unmet_requirements,
+            ["at least 10 non-empty lines, found 3"]
+        );
+        // Met, or none stated: the approved bytes pass through unchanged.
+        let (out, _) = propose_approved(
+            SHORT,
+            "base",
+            &extract("at least 3 lines"),
+            COMPOSE_SKILL_BUDGET,
+            COMPOSE_ATTEMPT_BUDGET,
+        );
+        assert_eq!(out.unwrap(), SHORT);
+        let (out, a) = propose_approved(
+            SHORT,
+            "base",
+            &[],
+            COMPOSE_SKILL_BUDGET,
+            COMPOSE_ATTEMPT_BUDGET,
+        );
+        assert_eq!(out.unwrap(), SHORT);
+        assert_eq!(a[0].finish_reason.as_deref(), Some("approved"));
+    }
+
+    #[test]
+    fn approved_run_reports_recognized_and_refuses_unmet_before_any_write() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = tmp.path().join("ws");
+        std::fs::create_dir_all(&ws).unwrap();
+        let proposer: ComposeProposer = Arc::new(|_: &str, _: std::time::Duration| {
+            panic!("the model proposer ran on the approved path")
+        });
+        let bridge = ComposeBridge::new(tmp.path().join("compose"), proposer, "test:approved");
+        let r = bridge.run_approved_task(
+            "write DOC.md in at least 10 lines",
+            ws.to_str().unwrap(),
+            SHORT,
+        );
+        if !aien_omega_compose::LINKED {
+            assert!(r.is_err());
+            return;
+        }
+        let r = r.unwrap();
+        assert!(!r.committed, "{r:?}");
+        assert!(r.proposal.is_none());
+        assert_eq!(r.requirements_recognized, ["at least 10 non-empty lines"]);
+        assert!(r.proposer_error.unwrap().contains("found 3"));
+        assert_eq!(std::fs::read_dir(&ws).unwrap().count(), 0);
+        // The same bytes pass when the goal states a requirement they meet.
+        let r = bridge
+            .run_approved_task(
+                "write DOC.md in at least 3 lines",
+                ws.to_str().unwrap(),
+                SHORT,
+            )
+            .unwrap();
+        assert!(r.committed, "{r:?}");
+        assert_eq!(r.requirements_recognized, ["at least 3 non-empty lines"]);
+        assert_eq!(r.proposal.as_deref(), Some(SHORT));
     }
 }
