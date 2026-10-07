@@ -1,3 +1,6 @@
+use std::sync::Arc;
+
+use crate::approval::Reservation;
 use aien_capability::{Digest32, EffectId, JNodeId, ProviderId, WorldId};
 use serde_json::Value;
 
@@ -65,9 +68,30 @@ pub struct AuthorizedEffect<T> {
     policy_digest: Digest32,
     capability_digest: Digest32,
     idempotency_key: EffectId,
+    reservation: Option<Arc<Reservation>>,
 }
 
 impl<T> AuthorizedEffect<T> {
+    /// Id of the approval grant this effect holds, if it was minted by `authorize_approved`.
+    pub fn approval_id(&self) -> Option<Digest32> {
+        self.reservation.as_ref().map(|r| r.grant_id())
+    }
+
+    /// Give up this effect without running it. If it holds an approval grant, the grant is
+    /// released (usable again once re-checked at the next mint) and `reason` is recorded
+    /// ([`crate::ApprovalDesk::release_reason`]). Dropping the effect has the same release with a
+    /// fixed reason. Clones share the hold: after a cancel, a clone cannot be executed with the
+    /// grant (`Error::ApprovalNotReserved`).
+    pub fn cancel(self, reason: &str) {
+        if let Some(r) = &self.reservation {
+            r.release(reason);
+        }
+    }
+
+    pub(crate) fn reservation(&self) -> Option<&Reservation> {
+        self.reservation.as_deref()
+    }
+
     pub fn intent(&self) -> &T {
         &self.intent
     }
@@ -110,6 +134,7 @@ pub(crate) fn authorize_for_test<T>(
         policy_digest,
         capability_digest,
         idempotency_key,
+        reservation: None,
     }
 }
 
@@ -130,5 +155,28 @@ pub(crate) fn mint<T>(
         policy_digest,
         capability_digest,
         idempotency_key,
+        reservation: None,
     }
+}
+
+/// Production mint for an effect that holds a reserved approval grant.
+pub(crate) fn mint_reserved<T>(
+    intent: T,
+    world_id: WorldId,
+    winning_jnode: JNodeId,
+    policy_digest: Digest32,
+    capability_digest: Digest32,
+    idempotency_key: EffectId,
+    reservation: Reservation,
+) -> AuthorizedEffect<T> {
+    let mut effect = mint(
+        intent,
+        world_id,
+        winning_jnode,
+        policy_digest,
+        capability_digest,
+        idempotency_key,
+    );
+    effect.reservation = Some(Arc::new(reservation));
+    effect
 }

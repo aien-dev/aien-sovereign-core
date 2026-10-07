@@ -8,12 +8,12 @@ use aien_capability::{
 };
 use serde_json::Value;
 
-use crate::approval::{ApprovalError, ApprovalGrant, ApprovalRecord};
+use crate::approval::{ApprovalError, ApprovalGrant, ApprovalRecord, GrantState, Reservation};
 use crate::authority::{
     intent_digest, AuthorityContext, AuthorityDecision, AuthorityOutcome, EffectAuthority,
     EffectScope, Exposure,
 };
-use crate::effect::mint;
+use crate::effect::{mint, mint_reserved};
 use crate::{
     AuthorizedEffect, CallOutcome, CapabilitySnapshot, EffectIntent, EffectReceipt, Error, McpWire,
     ToolResult,
@@ -55,6 +55,7 @@ pub(crate) struct Inner {
     ledger: HashMap<EffectId, LedgerRow>,
     pub(crate) approvals: HashMap<Digest32, ApprovalRecord>,
     pub(crate) next_approval: u64,
+    pub(crate) next_reservation: u64,
 }
 
 /// Owns admitted MCP sessions and the idempotency ledger.
@@ -71,6 +72,7 @@ impl McpBroker {
                 ledger: HashMap::new(),
                 approvals: HashMap::new(),
                 next_approval: 0,
+                next_reservation: 0,
             })),
         }
     }
@@ -244,13 +246,29 @@ pub struct SpeculativeToolCall {
 pub struct EffectLane {
     broker: McpBroker,
     exposure: Option<Exposure>,
+    clock: Option<Clock>,
 }
+
+/// Host-supplied time source, in the same unit as `now` and `expires_at`.
+pub type Clock = Arc<dyn Fn() -> u64 + Send + Sync>;
 
 impl EffectLane {
     pub fn new(broker: McpBroker) -> Self {
         Self {
             broker,
             exposure: None,
+            clock: None,
+        }
+    }
+
+    /// A lane whose `execute_effect` re-checks approval expiry at commit using `clock`. The crate
+    /// reads no wall clock itself. A lane without a clock refuses to run any effect that holds an
+    /// approval reservation (`Error::ApprovalClockMissing`) and releases the grant. Effects
+    /// without a reservation do not need a clock.
+    pub fn with_clock(&self, clock: Clock) -> Self {
+        Self {
+            clock: Some(clock),
+            ..self.clone()
         }
     }
 
@@ -261,6 +279,7 @@ impl EffectLane {
         Self {
             broker: self.broker.clone(),
             exposure: Some(exposure),
+            clock: self.clock.clone(),
         }
     }
 
@@ -343,15 +362,17 @@ impl EffectLane {
                         reason,
                     });
                 };
-                self.spend(grant, &intent, &scope, now)
+                let reservation = self
+                    .reserve(grant, &intent, &scope, now)
                     .map_err(AuthorityOutcome::Approval)?;
-                Ok(mint(
+                Ok(mint_reserved(
                     intent,
                     scope.world_id,
                     scope.winning_jnode,
                     policy_digest,
                     live,
                     scope.idempotency_key,
+                    reservation,
                 ))
             }
             AuthorityDecision::Deny(reason) => Err(AuthorityOutcome::Denied(reason)),
@@ -403,7 +424,7 @@ impl EffectLane {
     ) -> Option<Result<EffectReceipt, Error>> {
         let inner = self.broker.lock();
         let record = inner.approvals.get(&grant.id())?;
-        if !record.consumed || !record.binds(intent, scope) {
+        if record.state != GrantState::Spent || !record.binds(intent, scope) {
             return None;
         }
         let row = inner.ledger.get(&scope.idempotency_key)?;
@@ -417,14 +438,15 @@ impl EffectLane {
         }
     }
 
-    /// Check and spend `grant` atomically under the broker lock.
-    fn spend(
+    /// Check and reserve `grant` atomically under the broker lock. The returned reservation is
+    /// committed by `execute_effect` and released if the effect is dropped or cancelled.
+    fn reserve(
         &self,
         grant: &ApprovalGrant,
         intent: &EffectIntent,
         scope: &EffectScope,
         now: u64,
-    ) -> Result<(), ApprovalError> {
+    ) -> Result<Reservation, ApprovalError> {
         let mut inner = self.broker.lock();
         let record = inner
             .approvals
@@ -433,8 +455,10 @@ impl EffectLane {
         if !record.binds(intent, scope) {
             return Err(ApprovalError::Mismatch);
         }
-        if record.consumed {
-            return Err(ApprovalError::Consumed);
+        match record.state {
+            GrantState::Spent => return Err(ApprovalError::Consumed),
+            GrantState::Reserved(_) => return Err(ApprovalError::Reserved),
+            GrantState::Available => {}
         }
         if record.revoked {
             return Err(ApprovalError::Revoked);
@@ -442,8 +466,17 @@ impl EffectLane {
         if now >= record.expires_at {
             return Err(ApprovalError::Expired);
         }
-        record.consumed = true;
-        Ok(())
+        let token = {
+            inner.next_reservation = inner.next_reservation.saturating_add(1);
+            inner.next_reservation
+        };
+        let record = inner
+            .approvals
+            .get_mut(&grant.id())
+            .ok_or(ApprovalError::Unknown)?;
+        record.state = GrantState::Reserved(token);
+        record.release_reason = None;
+        Ok(Reservation::new(self.broker.clone(), grant.id(), token))
     }
 
     pub async fn execute_effect(
@@ -488,6 +521,12 @@ impl EffectLane {
                 }
                 session.wire.clone()
             };
+            // Point of no return: the provider is about to be called. Until here a refusal drops
+            // the effect and releases its grant; from here the grant is spent.
+            if let Some(reservation) = effect.reservation() {
+                let now = self.clock.as_ref().map(|c| c());
+                reservation.commit_locked(&mut inner, now)?;
+            }
             inner.ledger.insert(
                 key,
                 LedgerRow {

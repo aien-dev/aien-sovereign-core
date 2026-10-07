@@ -33,6 +33,9 @@ pub struct AienRuntimeServer {
 /// NEXT-PHASE-1 v4 declared warm-up prompt (ACCEPTANCE-v4 Section 2(2)):
 /// fixed text, more than one 128-token prefill chunk once templated, so
 /// both the full-chunk and the remainder prefill paths run before serving.
+/// Log line when the warm-up is skipped for a plain model (no chat template).
+pub const WARM_UP_SKIPPED_PLAIN: &str = "Warm-up: skipped (plain model, no chat template)";
+
 pub const WARM_UP_TEXT: &str = "Warm-up turn before serving requests. This text is fixed and its one generated token is discarded. \
 Warm-up turn before serving requests. This text is fixed and its one generated token is discarded. \
 Warm-up turn before serving requests. This text is fixed and its one generated token is discarded. \
@@ -158,7 +161,7 @@ impl AienRuntimeServer {
         // NEXT-PHASE-1 v4: the declared warm-up, before the accept loop
         // serves anything (clients that connect meanwhile wait in the backlog).
         if self.warm_up.load(Ordering::SeqCst) {
-            self.run_warm_up().await;
+            println!("  {}", self.run_warm_up().await);
         }
 
         // NEXT-PHASE-1: the compose bridge (opened on the first RunComposeTask).
@@ -270,9 +273,20 @@ fn text_suffix(previous: &str, decoded: &str) -> String {
 
 impl AienRuntimeServer {
     /// One greedy 1-token turn on `WARM_UP_TEXT`; the token is discarded.
-    /// Prints `Warm-up: 1 token in <ms> ms over <n> prompt tokens (discarded)`
-    /// or `Warm-up: FAILED ...`; a failure does not stop the daemon.
-    async fn run_warm_up(&self) {
+    /// Returns the log line: `Warm-up: 1 token in <ms> ms over <n> prompt tokens (discarded)`,
+    /// `Warm-up: FAILED ...` (a failure does not stop the daemon), or [`WARM_UP_SKIPPED_PLAIN`]
+    /// when the loaded tokenizer has no chat template (a plain model refuses chat turns by
+    /// design, so the chat warm-up is not attempted).
+    pub async fn run_warm_up(&self) -> String {
+        if self
+            .tokenizer
+            .read()
+            .expect("tokenizer lock")
+            .as_ref()
+            .is_some_and(|t| matches!(t.template(), aien_inference_abi::ChatTemplate::None))
+        {
+            return WARM_UP_SKIPPED_PLAIN.to_string();
+        }
         let messages = vec![crate::control::ChatTurn {
             role: "user".into(),
             content: WARM_UP_TEXT.into(),
@@ -299,12 +313,12 @@ impl AienRuntimeServer {
         .await;
         let ms = t0.elapsed().as_millis();
         match out {
-            Ok(g) => println!(
-                "  Warm-up: {} token in {ms} ms over {} prompt tokens (discarded)",
+            Ok(g) => format!(
+                "Warm-up: {} token in {ms} ms over {} prompt tokens (discarded)",
                 g.tokens,
                 prompt_tokens.unwrap_or(0)
             ),
-            Err(e) => println!("  Warm-up: FAILED after {ms} ms: {e}"),
+            Err(e) => format!("Warm-up: FAILED after {ms} ms: {e}"),
         }
     }
 }
