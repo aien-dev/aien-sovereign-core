@@ -1442,22 +1442,37 @@ pub async fn run_daemon_server() {
         };
 
     // One KV for runtime and backend: the spine's block tables and the
-    // backend's K/V writes go to the same pooled manager.
-    let (spine, backend) = match aien_runtime::shared_kv::build_shared_kv_runtime(
-        weights,
-        tensor_backend,
-        sched_cfg,
-        aien_runtime::shared_kv::SharedKvSizing {
-            arena_capacity: 4096,
-            total_blocks: 8192,
-        },
-    ) {
-        Ok(parts) => parts,
-        Err(fatal) => {
-            eprintln!("Fatal: shared KV pool: {}", fatal.red().bold());
+    // backend's K/V writes go to the same pooled manager. The pool is sized
+    // from the loaded model's config and declared context, and the host's
+    // MemAvailable is checked before it is allocated (#239).
+    let gpu_native = aien_inference_abi::OmegaGb10Backend::new().is_available();
+    let (spine, backend, _kv_plan) =
+        match aien_runtime::shared_kv::build_shared_kv_runtime_for_model(
+            weights,
+            tensor_backend,
+            sched_cfg,
+            4096,
+            &aien_runtime::shared_kv::read_mem_available,
+        ) {
+            Ok(parts) => parts,
+            Err(fatal) => {
+                eprintln!("Fatal: shared KV pool: {}", fatal.red().bold());
+                std::process::exit(1);
+            }
+        };
+    // Open the GPU session before serving, with a bounded retry, so a failed
+    // channel open is a clear refusal with status and free memory per attempt
+    // instead of the strict-fallback panic at warm-up (#239, #236).
+    if gpu_native {
+        if let Err(fatal) = aien_inference_abi::open_gpu_session_with_retry(
+            aien_inference_abi::GPU_SESSION_OPEN_ATTEMPTS,
+            aien_inference_abi::GPU_SESSION_RETRY_DELAY,
+            &aien_runtime::shared_kv::read_mem_available,
+        ) {
+            eprintln!("Fatal: {}", fatal.red().bold());
             std::process::exit(1);
         }
-    };
+    }
     let server = aien_runtime::server::AienRuntimeServer::new(spine, &socket_path);
 
     println!("  Backend: {}", backend_label.green());
