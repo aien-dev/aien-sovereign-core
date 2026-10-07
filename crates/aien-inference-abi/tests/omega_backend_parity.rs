@@ -45,7 +45,7 @@ fn worst_ratio(
 fn stub_backend_reports_unavailable() {
     let b = OmegaGb10Backend::new();
     assert_eq!(b.is_available(), aien_omega_gpu::is_native());
-    assert_eq!(b.native_ops().native_ops().len(), 9);
+    assert_eq!(b.native_ops().native_ops().len(), 10);
 }
 
 #[test]
@@ -175,6 +175,59 @@ fn chip_elementwise_parity_on_tinyllama_shapes() {
     assert_eq!(omega.fallback_count(), 0, "{}", omega.last_error());
     assert_eq!(omega.chip_errors(), 0, "{}", omega.last_error());
     println!("PARITY elementwise {}", omega.op_report().line());
+}
+
+/// Qwen3-4B shapes: `rmsnorm_heads` (32 q heads and 8 kv heads of 128, eps 1e-6, one launch each)
+/// within the elementwise tolerance, and rope at head_dim 128 with theta 5000000 bit-exact,
+/// against ReferenceCpuBackend. Same criteria as the TinyLlama elementwise test above.
+#[test]
+#[ignore = "chip test: needs a native build and the GB10; run through the heavy queue"]
+fn chip_elementwise_parity_on_qwen3_shapes() {
+    let omega = OmegaGb10Backend::new();
+    assert!(omega.is_available(), "native build required");
+    let reference = ReferenceCpuBackend::new();
+    let mut seed = 4242u32;
+    let (hd, nq, nkv) = (128usize, 32usize, 8usize);
+
+    let mut heads_worst = 0.0f64;
+    for heads in [nq, nkv] {
+        let w: Vec<f32> = (0..hd).map(|_| lcg(&mut seed) * 4.0 + 1.0).collect();
+        for trial in 0..10 {
+            let scale = if trial == 9 { 50.0 } else { 2.0 };
+            let x: Vec<f32> = (0..heads * hd).map(|_| lcg(&mut seed) * scale).collect();
+            let (mut got, mut want) = (x.clone(), x.clone());
+            omega.rmsnorm_heads(&mut got, &w, hd, 1e-6);
+            reference.rmsnorm_heads(&mut want, &w, hd, 1e-6);
+            heads_worst = heads_worst.max(worst_tol_ratio(&got, &want));
+        }
+    }
+    println!("PARITY rmsnorm_heads 32x128 and 8x128 worst err/tolerance = {heads_worst:.3e} (must be <= 1)");
+    assert!(heads_worst <= 1.0, "rmsnorm_heads outside tolerance");
+
+    let theta = &aien_inference_abi::RopeParams::plain(5_000_000.0);
+    let mut rope_mismatch = 0usize;
+    for pos in [0usize, 1, 2, 37, 511, 1500, 4095] {
+        let q0: Vec<f32> = (0..nq * hd).map(|_| lcg(&mut seed) * 3.0).collect();
+        let k0: Vec<f32> = (0..nkv * hd).map(|_| lcg(&mut seed) * 3.0).collect();
+        let (mut qg, mut kg) = (q0.clone(), k0.clone());
+        let (mut qw, mut kw) = (q0.clone(), k0.clone());
+        omega.apply_rope(&mut qg, &mut kg, pos, hd, nq, nkv, theta);
+        reference.apply_rope(&mut qw, &mut kw, pos, hd, nq, nkv, theta);
+        rope_mismatch += qg
+            .iter()
+            .zip(&qw)
+            .chain(kg.iter().zip(&kw))
+            .filter(|(a, b)| a.to_bits() != b.to_bits())
+            .count();
+    }
+    println!(
+        "PARITY rope 32+8 heads x 128 theta 5e6, 7 positions: bit mismatches = {rope_mismatch}"
+    );
+    assert_eq!(rope_mismatch, 0, "rope must be bit-exact");
+
+    assert_eq!(omega.fallback_count(), 0, "{}", omega.last_error());
+    assert_eq!(omega.chip_errors(), 0, "{}", omega.last_error());
+    println!("PARITY qwen3 elementwise {}", omega.op_report().line());
 }
 
 /// Diagnostic for the cut-3c finding: elementwise launches after the matmul device is

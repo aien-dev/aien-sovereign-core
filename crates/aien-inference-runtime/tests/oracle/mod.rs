@@ -152,6 +152,10 @@ impl TensorBackend for CountingBackend {
         self.hit(TensorOp::Rmsnorm);
         self.inner.rmsnorm(out, x, weight, eps)
     }
+    fn rmsnorm_heads(&self, x: &mut [f32], weight: &[f32], head_dim: usize, eps: f32) {
+        self.hit(TensorOp::RmsnormHeads);
+        self.inner.rmsnorm_heads(x, weight, head_dim, eps)
+    }
     fn apply_rope(
         &self,
         q: &mut [f32],

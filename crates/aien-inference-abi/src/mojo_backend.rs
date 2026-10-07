@@ -262,6 +262,11 @@ impl TensorBackend for MojoGb10Backend {
         self.fallback.rmsnorm(out, x, weight, eps);
     }
 
+    fn rmsnorm_heads(&self, x: &mut [f32], weight: &[f32], head_dim: usize, eps: f32) {
+        // No Mojo kernel for per-head norm: reference path, like every unbound op here.
+        self.fallback.rmsnorm_heads(x, weight, head_dim, eps);
+    }
+
     fn apply_rope(
         &self,
         q: &mut [f32],
