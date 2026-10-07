@@ -1400,6 +1400,40 @@ pub(crate) fn propose_approved(
     propose_task_checked(&one, prompt, None, reqs, budget, attempt_budget, 1)
 }
 
+/// Why a task is refused when its requirement record is gone (issue #289).
+pub(crate) const MISSING_RECORD_REASON: &str =
+    "requirement record missing for this task: refused, an absent record is never treated as no requirements";
+
+/// A task refused before the model ran: one attempt records the reason.
+pub(crate) fn refused_without_model(why: String) -> SkillOutput {
+    let mut a = new_attempt(1);
+    a.outcome = "refused".into();
+    a.reason = Some(why.clone());
+    (Err(why), vec![a])
+}
+
+/// The AEGIS verify decision for one task: the result names exactly the
+/// proposal the Skill recorded, that proposal parses as one file change, and
+/// the COMPLETE content (the bytes that would be saved) meets every requirement
+/// of the goal. A missing requirement record, or any uncertain span, refuses.
+pub(crate) fn verify_task_result(
+    ex: Option<&crate::requirements::Extraction>,
+    proposal: Option<&SkillOutput>,
+    result: u64,
+) -> bool {
+    let Some(ex) = ex else { return false };
+    if ex.refusal().is_some() {
+        return false;
+    }
+    let Some((Ok(t), _)) = proposal else {
+        return false;
+    };
+    proposal_handle(t) == result
+        && parse_file_proposal(t).is_some_and(|p| {
+            crate::requirements::refusal_reason(&ex.requirements, &p.content).is_none()
+        })
+}
+
 /// `propose_task_with_retries` plus requirement validation: a parsed reply
 /// whose COMPLETE content (the merged file in edit mode, i.e. the bytes that
 /// would be saved) fails any of `reqs` is refused like a parse failure, the
@@ -1607,7 +1641,7 @@ type SkillOutput = (Result<String, String>, Vec<ProposalAttempt>);
 /// The prompt of one task, its edit target and its kind (`task_plan`).
 pub type TaskPrompt = (String, Option<(String, String)>, ProposalKind);
 /// A task's plan plus the requirements its goal states (`requirements::extract`).
-type TaskEntry = (TaskPrompt, Vec<crate::requirements::Requirement>);
+type TaskEntry = (TaskPrompt, crate::requirements::Extraction);
 
 /// Owns the composition home of this process.
 pub struct ComposeBridge {
@@ -1694,7 +1728,21 @@ impl ComposeBridge {
         let pa = approved.clone();
         compose
             .register_skill(COMPOSE_MODEL_SKILL, None, 10, move |task| {
-                let ((prompt, target, kind), reqs) = pr.lock().get(&task).cloned()?;
+                // The requirement record of this task. A missing record is a refusal,
+                // never an empty requirement list (issue #289).
+                let entry = pr.lock().get(&task).cloned();
+                let Some(((prompt, target, kind), ex)) = entry else {
+                    pp.lock()
+                        .insert(task, refused_without_model(MISSING_RECORD_REASON.into()));
+                    return None;
+                };
+                // Goal text that looks like a measurable requirement but could not
+                // be read reliably: refuse before any model call.
+                if let Some(why) = ex.refusal() {
+                    pp.lock().insert(task, refused_without_model(why));
+                    return None;
+                }
+                let reqs = ex.requirements;
                 // Proposer hook (crate::approved): an approved proposal for this
                 // task replaces the model's reply. One attempt, the same
                 // template check, the same AEGIS contract and commit below.
@@ -1738,19 +1786,11 @@ impl ComposeBridge {
                 // the Skill recorded for this task, and that text parses as one
                 // file change (a relative path and nonempty content).
                 // The requirements of the goal are checked again on these same
-                // bytes, the ones that would be saved.
-                let reqs = pq
-                    .lock()
-                    .get(&task)
-                    .map(|p| p.1.clone())
-                    .unwrap_or_default();
-                pv.lock().get(&task).is_some_and(|(t, _)| {
-                    let Ok(t) = t else { return false };
-                    proposal_handle(t) == result
-                        && parse_file_proposal(t).is_some_and(|p| {
-                            crate::requirements::refusal_reason(&reqs, &p.content).is_none()
-                        })
-                })
+                // bytes, the ones that would be saved. No requirement record
+                // for the task means NO approval (issue #289).
+                let ex = pq.lock().get(&task).map(|p| p.1.clone());
+                let proposals = pv.lock();
+                verify_task_result(ex.as_ref(), proposals.get(&task), result)
             })
             .map_err(|e| format!("compose set verify: {e}"))?;
         // Open the composition now, so a home behind its anchor is refused here
@@ -1865,8 +1905,9 @@ impl ComposeBridge {
         let plan = task_plan(goal, &ws)?;
         // The requirements the goal states are checked on every path: the model
         // path and an approved proposal (refused before any write when unmet).
-        let reqs = crate::requirements::extract(goal);
-        let recognized: Vec<String> = reqs.iter().map(|r| r.label()).collect();
+        let reqs = crate::requirements::analyze(goal);
+        let recognized: Vec<String> = reqs.requirements.iter().map(|r| r.label()).collect();
+        let uncertain = reqs.uncertain.clone();
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_err(|e| format!("clock: {e}"))?;
@@ -1954,6 +1995,7 @@ impl ComposeBridge {
             proposer_error,
             proposal_attempts,
             requirements_recognized: recognized,
+            requirements_uncertain: uncertain,
             proposer: match approved_text {
                 Some(_) => APPROVED_PROPOSER_LABEL.to_string(),
                 None => self.proposer_label.clone(),
@@ -2302,5 +2344,70 @@ mod requirement_tests {
         assert!(r.committed, "{r:?}");
         assert_eq!(r.requirements_recognized, ["at least 3 non-empty lines"]);
         assert_eq!(r.proposal.as_deref(), Some(SHORT));
+    }
+}
+
+#[cfg(test)]
+mod verify_boundary_tests {
+    use super::*;
+    use crate::requirements::analyze;
+
+    const DOC: &str = "filename: DOC.md\na\nb\nc\n";
+
+    fn recorded(text: &str) -> SkillOutput {
+        (Ok(text.to_string()), Vec::new())
+    }
+
+    #[test]
+    fn verify_accepts_exactly_the_recorded_bytes_that_meet_the_goal() {
+        let ex = analyze("write DOC.md in at least 3 lines");
+        let out = recorded(DOC);
+        let h = proposal_handle(DOC);
+        assert!(verify_task_result(Some(&ex), Some(&out), h));
+        // a result naming other bytes is refused
+        assert!(!verify_task_result(Some(&ex), Some(&out), h ^ 1));
+        // bytes that no longer meet the requirement are refused
+        let short = analyze("write DOC.md in at least 4 lines");
+        assert!(!verify_task_result(Some(&short), Some(&out), h));
+        // a skill that returned no proposal is refused
+        let none: SkillOutput = (Err("no".into()), Vec::new());
+        assert!(!verify_task_result(Some(&ex), Some(&none), h));
+        assert!(!verify_task_result(Some(&ex), None, h));
+    }
+
+    /// Issue #289: an absent requirement record used to become an empty list,
+    /// so the verify step approved any well-formed file.
+    #[test]
+    fn missing_requirement_record_is_refused_never_empty() {
+        let out = recorded(DOC);
+        let h = proposal_handle(DOC);
+        // the same bytes that pass with a record are refused without one
+        let ex = analyze("write DOC.md in at least 3 lines");
+        assert!(verify_task_result(Some(&ex), Some(&out), h));
+        assert!(!verify_task_result(None, Some(&out), h));
+        // and even a goal with no requirements needs its (empty) record
+        let empty = analyze("write DOC.md");
+        assert!(verify_task_result(Some(&empty), Some(&out), h));
+        assert!(!verify_task_result(None, Some(&out), h));
+    }
+
+    #[test]
+    fn uncertain_goal_is_refused_at_verify_even_when_bytes_look_fine() {
+        let ex = analyze("write DOC.md with at least 3 lines of context");
+        assert!(!ex.uncertain.is_empty());
+        assert!(!verify_task_result(
+            Some(&ex),
+            Some(&recorded(DOC)),
+            proposal_handle(DOC)
+        ));
+    }
+
+    #[test]
+    fn refused_without_model_records_one_refused_attempt() {
+        let (out, a) = refused_without_model(MISSING_RECORD_REASON.into());
+        assert_eq!(out.unwrap_err(), MISSING_RECORD_REASON);
+        assert_eq!(a.len(), 1);
+        assert_eq!(a[0].outcome, "refused");
+        assert!(a[0].text.is_none());
     }
 }

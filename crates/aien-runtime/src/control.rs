@@ -369,6 +369,11 @@ pub struct ComposeTaskReport {
     /// ones checked. Empty = none recognized, nothing checked.
     #[serde(default)]
     pub requirements_recognized: Vec<String>,
+    /// Goal text that looks like a measurable requirement but could not be
+    /// interpreted reliably (crate::requirements::analyze). Non-empty = the
+    /// task was refused before any model call.
+    #[serde(default)]
+    pub requirements_uncertain: Vec<String>,
     /// "model" when the Skill ran inference, or the stub label.
     pub proposer: String,
 }

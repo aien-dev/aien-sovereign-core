@@ -61,11 +61,7 @@ fn extracts_each_supported_pattern() {
 fn unsupported_phrasing_is_not_extracted() {
     for g in [
         "write a long document",
-        "at least twenty lines",
-        "no fewer than 20 lines",
-        "more than 20 lines",
         "at least 20 long lines",
-        "at least 20 words",
         "at least 20 paragraphs",
         "at most 5 items",
         "at least 0 lines",
@@ -485,8 +481,6 @@ fn count_followed_by_a_qualifier_is_not_extracted() {
         "at least 4 questions in the survey",
         "at least 4 questions from the list",
         "at least 6 lines for the intro",
-        "at least 6 lines with comments",
-        "at least 6 lines about cats",
         "at most 10 lines in each file",
     ] {
         assert_eq!(extract(g), vec![], "{g}");
@@ -499,12 +493,25 @@ fn count_followed_by_a_qualifier_is_not_extracted() {
         ("at least 20 lines, please", MinLines(20)),
         ("at least 20 lines and a title", MinLines(20)),
         ("at least 20 lines or more", MinLines(20)),
-        ("at least 20 lines covering the topic", MinLines(20)),
         ("at least 20 lines that explain it", MinLines(20)),
         ("at most 8 lines which are short", MaxLines(8)),
+        ("at least 6 lines with comments", MinLines(6)),
+        ("at least 6 lines about cats", MinLines(6)),
+        ("at least 20 lines long", MinLines(20)),
     ] {
         assert_eq!(extract(g), [want], "{g}");
     }
+}
+
+#[test]
+fn covering_after_a_count_adds_a_topic_requirement() {
+    assert_eq!(
+        extract("at least 20 lines covering the topic"),
+        [
+            Requirement::MinLines(20),
+            Requirement::RequiredTopics(vec!["the topic".into()])
+        ]
+    );
 }
 
 #[test]
@@ -531,8 +538,6 @@ fn negated_wording_is_not_extracted() {
         "do not write at least 20 lines",
         "never write at least 3 sections",
         "it must not have at most 5 lines",
-        "no more than 20 lines",
-        "no fewer than 20 lines",
         "not at most 10 lines",
         "without at least 4 items",
     ] {
