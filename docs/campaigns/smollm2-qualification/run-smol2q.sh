@@ -272,7 +272,10 @@ _mem)   # inside the hold: SmolLM2 start, then the Llama control start, same bin
   start_one() {   # NAME MODEL_DIR -> one observation record (not scored)
     local name=$1 d=$2 R=$BASE/mem/$1 dp i t0 st=null hwm= wu plan chk fatal retries ex g0 h0
     mkdir -p "$R/compose" "$R/prov" "$R/state"; t0=$(date -u +%FT%TZ); g0=$(meminfo); h0=$(devholders)
-    clean_env AIEN_COMPOSE_DIR="$R/compose" AIEN_PROVENANCE_DIR="$R/prov" AIEN_RUNTIME_SOCK="$R/aien.sock" \
+    # exec: $! must be the daemon itself, not a subshell running the clean_env function
+    # (first mem run read VmHWM of that subshell: 2716 kB; disclosed in the verdict)
+    exec_clean() { exec env -i PATH="$PATH" HOME="$HOME" USER="${USER:-}" LANG="${LANG:-C.UTF-8}" "$@"; }
+    exec_clean AIEN_COMPOSE_DIR="$R/compose" AIEN_PROVENANCE_DIR="$R/prov" AIEN_RUNTIME_SOCK="$R/aien.sock" \
       AIEN_RUNTIME_STATE_DIR="$R/state" AIEN_REQUIRE_CHECKPOINT=1 AIEN_MODEL_PATH="$d/model.safetensors" \
       AIEN_TOKENIZER_PATH="$d/tokenizer.json" AIEN_COMPOSE_MAX_TOKENS="$(inp max_tokens)" AIEN_REQUIRE_BLACKWELL=1 \
       setsid "$(inp aien_cli_path)" daemon >"$R/daemon.log" 2>&1 </dev/null &
@@ -280,7 +283,7 @@ _mem)   # inside the hold: SmolLM2 start, then the Llama control start, same bin
     until grep -q 'Warm-up:\|Fatal:\|STRICT_REAL_MODEL_VIOLATION' "$R/daemon.log" || ! kill -0 "$dp" 2>/dev/null || [ $i -gt 600 ]; do sleep 0.5; i=$((i + 1)); done
     sleep 1
     if kill -0 "$dp" 2>/dev/null; then
-      st=$(grep -E '^(VmHWM|VmRSS|VmSize)' "/proc/$dp/status" | jq -R . | jq -sc .)
+      st=$( { echo "measured: $(tr "\\0" " " <"/proc/$dp/cmdline")"; grep -E "^(VmHWM|VmRSS|VmSize)" "/proc/$dp/status"; } | jq -R . | jq -sc .)
       hwm=$(awk '/^VmHWM/ {print $2}' "/proc/$dp/status")
       clean_env AIEN_RUNTIME_SOCK="$R/aien.sock" "$(inp aien_cli_path)" compose shutdown >"$R/shutdown.out" 2>&1
       i=0; while kill -0 "$dp" 2>/dev/null && [ $i -lt 120 ]; do sleep 0.5; i=$((i + 1)); done
