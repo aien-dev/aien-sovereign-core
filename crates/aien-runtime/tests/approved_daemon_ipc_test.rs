@@ -35,10 +35,13 @@ fn signed(dir: &Path, request: &str, approval: &str, approver: &str) -> Approved
         approved_proposal_sha256: approved_proposal_sha256(PATH, CONTENT),
         content_sha256: hex(&Sha256::digest(CONTENT.as_bytes())),
         approval_mac: String::new(),
+        requirements: Some(String::new()),
+        requirements_mac: String::new(),
+        requirements_base: None,
     };
-    p.approval_mac = DeskKey::load(&desk_key_path(dir))
+    DeskKey::load(&desk_key_path(dir))
         .unwrap()
-        .sign(&p, &dir.parent().unwrap().join("ws"));
+        .seal(&mut p, &dir.parent().unwrap().join("ws"));
     p
 }
 

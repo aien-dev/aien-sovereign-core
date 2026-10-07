@@ -416,6 +416,7 @@ impl AienRuntimeSpine {
             | ControlCommand::ComposeEffectAck { .. }
             | ControlCommand::ComposeReconcile { .. }
             | ControlCommand::ComposeControl { .. }
+            | ControlCommand::ComposeAuthorize { .. }
             | ControlCommand::ComposeApprovedProposal { .. } => ControlResponse::Error(
                 "compose commands are handled on the socket connection, not as one-shot commands"
                     .into(),
@@ -1068,12 +1069,12 @@ pub fn proposal_prompt(goal: &str, workspace: &str) -> String {
 /// (NEXT-PHASE-1 v6 T5); a larger file gets no block.
 pub const COMPOSE_EDIT_MAX_BYTES: u64 = 8192;
 
-/// NEXT-PHASE-1 v6 edit mode: the first whitespace-separated word of the goal
-/// that (after stripping surrounding quotes, backticks, brackets and trailing
-/// `.,;:!?`) is a plain relative path naming an existing regular UTF-8 file
-/// of at most `COMPOSE_EDIT_MAX_BYTES` inside the canonical workspace `ws`.
-/// Returns that path and the file's content. None when the goal names no
-/// existing file, so a new-file goal keeps the v5 prompt byte for byte.
+/// NEXT-PHASE-1 v6 edit mode: the goal's DESTINATION (see `destination.rs`,
+/// issue #288; paths the goal only reads are ignored) when it is a plain
+/// relative path naming an existing regular UTF-8 file of at most
+/// `COMPOSE_EDIT_MAX_BYTES` inside the canonical workspace `ws`. Returns that
+/// path and the file's content. None when the destination is missing, unsafe
+/// or ambiguous, so a new-file goal keeps the v5 prompt byte for byte.
 pub fn existing_target(goal: &str, ws: &Path) -> Option<(String, String)> {
     match classify_target(goal, ws) {
         TargetClass::Edit(p, c) => Some((p, c)),
@@ -1081,67 +1082,109 @@ pub fn existing_target(goal: &str, ws: &Path) -> Option<(String, String)> {
     }
 }
 
-/// Decide the task kind from whether the named target path EXISTS in the
-/// workspace (same word scan and `check_relative_path` as `existing_target`).
-/// A word that names an existing file or symlink decides the class: small
-/// UTF-8 file inside the workspace is `Edit`; any other existing file
-/// (over `COMPOSE_EDIT_MAX_BYTES`, non-UTF-8, unreadable, dangling or
-/// resolving outside the workspace) is `Refused`. Words naming nothing, or
-/// only a directory, are skipped; no word names a file means `New`.
+/// Decide the task kind from the goal's DESTINATION only (issue #288): the
+/// path the goal asks to create or change, found by
+/// `crate::destination::named_destination`; paths it merely reads ("about
+/// README.md") are never classified. The destination is then judged by the disk:
+/// a small UTF-8 file inside the workspace is `Edit`; a missing path inside the
+/// workspace is `New`; everything else is `Refused` with the reason: an
+/// absolute, `~`, `..` or non-plain path, a symlink or parent resolving outside
+/// the workspace, a directory, a file over `COMPOSE_EDIT_MAX_BYTES`, non-UTF-8
+/// or unreadable content, and an ambiguous destination (several candidates).
+/// A goal naming no destination is `New` (the model names the file).
 pub fn classify_target(goal: &str, ws: &Path) -> TargetClass {
+    classify_destination(goal, ws).0
+}
+
+/// `classify_target` plus the destination path it judged (None when the goal
+/// names none). This is the single decision of a task: the prompt, the budget,
+/// the merge target and the check of the reply's `filename:` all use it.
+pub fn classify_destination(goal: &str, ws: &Path) -> (TargetClass, Option<String>) {
     let Ok(ws) = std::fs::canonicalize(ws) else {
-        return TargetClass::New;
+        return (TargetClass::New, None);
     };
-    for w in goal.split_whitespace() {
-        let w = w
-            .trim_matches(|c| matches!(c, '"' | '\'' | '`' | '(' | ')' | '[' | ']'))
-            .trim_end_matches(['.', ',', ';', ':', '!', '?'])
-            .trim_matches(|c| matches!(c, '"' | '\'' | '`' | '(' | ')' | '[' | ']'));
-        if check_relative_path(w).is_err() {
-            continue;
-        }
-        let joined = ws.join(w);
-        // symlink_metadata: a dangling or outward symlink still EXISTS.
-        let Ok(lmeta) = std::fs::symlink_metadata(&joined) else {
-            continue;
-        };
-        let refuse = |why: &str| {
-            TargetClass::Refused(format!(
-                "target {w} already exists but cannot be edited safely ({why}); refusing instead of treating it as a new document"
-            ))
-        };
-        let full = match std::fs::canonicalize(&joined) {
-            Ok(f) => f,
-            Err(_) if lmeta.file_type().is_symlink() => return refuse("unresolvable symlink"),
-            Err(_) => return refuse("unresolvable path"),
-        };
-        if !full.starts_with(&ws) {
-            return refuse("resolves outside the workspace");
-        }
-        let Ok(meta) = std::fs::metadata(&full) else {
-            return refuse("unreadable");
-        };
-        if meta.is_dir() {
-            continue;
-        }
-        if !meta.is_file() {
-            return refuse("not a regular file");
-        }
-        if meta.len() > COMPOSE_EDIT_MAX_BYTES {
-            return refuse(&format!(
-                "{} bytes is over the {COMPOSE_EDIT_MAX_BYTES}-byte edit limit",
-                meta.len()
-            ));
-        }
-        let Ok(bytes) = std::fs::read(&full) else {
-            return refuse("unreadable");
-        };
-        return match String::from_utf8(bytes) {
-            Ok(content) => TargetClass::Edit(w.to_string(), content),
-            Err(_) => refuse("not UTF-8 text"),
-        };
+    let is_file = |w: &str| {
+        check_relative_path(w).is_ok() && std::fs::metadata(ws.join(w)).is_ok_and(|m| m.is_file())
+    };
+    let w = match crate::destination::named_destination(goal, &is_file) {
+        Ok(Some(w)) => w,
+        Ok(None) => return (TargetClass::New, None),
+        Err(e) => return (TargetClass::Refused(format!("{e}")), None),
+    };
+    let class = classify_named(&w, &ws);
+    (class, Some(w))
+}
+
+fn classify_named(w: &str, ws: &Path) -> TargetClass {
+    let refuse = |why: &str| {
+        TargetClass::Refused(format!(
+            "destination {w} cannot be written safely ({why}); refusing"
+        ))
+    };
+    if check_relative_path(w).is_err() {
+        return refuse("not a plain relative path inside the workspace");
     }
-    TargetClass::New
+    let joined = ws.join(w);
+    // symlink_metadata: a dangling or outward symlink still EXISTS.
+    let Ok(lmeta) = std::fs::symlink_metadata(&joined) else {
+        // Missing: a new document, if its nearest existing parent is a
+        // directory inside the workspace (no symlinked parent leaving it).
+        let mut anc = joined.parent();
+        while let Some(a) = anc {
+            if std::fs::symlink_metadata(a).is_ok() {
+                break;
+            }
+            anc = a.parent();
+        }
+        return match anc.map(std::fs::canonicalize) {
+            Some(Ok(p)) if p.starts_with(ws) && p.is_dir() => TargetClass::New,
+            Some(Ok(p)) if p.starts_with(ws) => refuse("a parent is not a directory"),
+            Some(Ok(_)) => refuse("a parent resolves outside the workspace"),
+            _ => refuse("unresolvable parent"),
+        };
+    };
+    let refuse = |why: &str| {
+        TargetClass::Refused(format!(
+            "destination {w} already exists but cannot be edited safely ({why}); refusing instead of treating it as a new document"
+        ))
+    };
+    let full = match std::fs::canonicalize(&joined) {
+        Ok(f) => f,
+        Err(_) if lmeta.file_type().is_symlink() => return refuse("unresolvable symlink"),
+        Err(_) => return refuse("unresolvable path"),
+    };
+    if !full.starts_with(ws) {
+        return refuse("resolves outside the workspace");
+    }
+    let Ok(meta) = std::fs::metadata(&full) else {
+        return refuse("unreadable");
+    };
+    if meta.is_dir() {
+        return refuse("it is a directory");
+    }
+    if !meta.is_file() {
+        return refuse("not a regular file");
+    }
+    if meta.len() > COMPOSE_EDIT_MAX_BYTES {
+        return refuse(&format!(
+            "{} bytes is over the {COMPOSE_EDIT_MAX_BYTES}-byte edit limit",
+            meta.len()
+        ));
+    }
+    let Ok(bytes) = std::fs::read(&full) else {
+        return refuse("unreadable");
+    };
+    match String::from_utf8(bytes) {
+        Ok(content) => TargetClass::Edit(w.to_string(), content),
+        Err(_) => refuse("not UTF-8 text"),
+    }
+}
+
+/// The additive new-document block, appended when the goal names a destination
+/// that does not exist yet: the model is told which file to write and must
+/// answer with that `filename:` line (issue #288).
+pub fn new_document_block(path: &str) -> String {
+    format!("\nWrite the new file {path}. The filename line of your answer must be exactly: filename: {path}")
 }
 
 /// The additive edit-mode block (NEXT-PHASE-1 v6 T5), appended to the fixed
@@ -1179,16 +1222,28 @@ pub fn task_prompt_and_target(goal: &str, ws: &Path) -> (String, Option<(String,
 /// Prompt, edit target and kind of a task, or the refusal when the goal names
 /// an existing file that no edit block can be built for.
 pub fn task_plan(goal: &str, ws: &Path) -> Result<TaskPrompt, String> {
+    task_decision(goal, ws).map(|(plan, _)| plan)
+}
+
+/// `task_plan` plus the destination path the goal named (None when it names
+/// none). The one decision of a task: a reply whose `filename:` differs from
+/// the destination is refused by the Skill.
+pub fn task_decision(goal: &str, ws: &Path) -> Result<(TaskPrompt, Option<String>), String> {
     let mut prompt = proposal_prompt(goal, &ws.display().to_string());
-    let class = classify_target(goal, ws);
+    let (class, dest) = classify_destination(goal, ws);
     let kind = class.kind();
     match class {
         TargetClass::Refused(why) => Err(format!("RunComposeTask: {why}")),
         TargetClass::Edit(path, content) => {
             prompt.push_str(&edit_block(&path, &content));
-            Ok((prompt, Some((path, content)), kind))
+            Ok(((prompt, Some((path, content)), kind), dest))
         }
-        TargetClass::New => Ok((prompt, None, kind)),
+        TargetClass::New => {
+            if let Some(d) = &dest {
+                prompt.push_str(&new_document_block(d));
+            }
+            Ok(((prompt, None, kind), dest))
+        }
     }
 }
 
@@ -1400,6 +1455,43 @@ pub(crate) fn propose_approved(
     propose_task_checked(&one, prompt, None, reqs, budget, attempt_budget, 1)
 }
 
+#[cfg(test)]
+pub(crate) const TEST_DROP_RECORD_MARKER: &str = "drop-the-record-marker";
+
+/// Why a task is refused when its requirement record is gone (issue #289).
+pub(crate) const MISSING_RECORD_REASON: &str =
+    "requirement record missing for this task: refused, an absent record is never treated as no requirements";
+
+/// A task refused before the model ran: one attempt records the reason.
+pub(crate) fn refused_without_model(why: String) -> SkillOutput {
+    let mut a = new_attempt(1);
+    a.outcome = "refused".into();
+    a.reason = Some(why.clone());
+    (Err(why), vec![a])
+}
+
+/// The AEGIS verify decision for one task: the result names exactly the
+/// proposal the Skill recorded, that proposal parses as one file change, and
+/// the COMPLETE content (the bytes that would be saved) meets every requirement
+/// of the goal. A missing requirement record, or any uncertain span, refuses.
+pub(crate) fn verify_task_result(
+    ex: Option<&crate::requirements::Extraction>,
+    proposal: Option<&SkillOutput>,
+    result: u64,
+) -> bool {
+    let Some(ex) = ex else { return false };
+    if ex.refusal().is_some() {
+        return false;
+    }
+    let Some((Ok(t), _)) = proposal else {
+        return false;
+    };
+    proposal_handle(t) == result
+        && parse_file_proposal(t).is_some_and(|p| {
+            crate::requirements::refusal_reason(&ex.requirements, &p.content).is_none()
+        })
+}
+
 /// `propose_task_with_retries` plus requirement validation: a parsed reply
 /// whose COMPLETE content (the merged file in edit mode, i.e. the bytes that
 /// would be saved) fails any of `reqs` is refused like a parse failure, the
@@ -1607,7 +1699,12 @@ type SkillOutput = (Result<String, String>, Vec<ProposalAttempt>);
 /// The prompt of one task, its edit target and its kind (`task_plan`).
 pub type TaskPrompt = (String, Option<(String, String)>, ProposalKind);
 /// A task's plan plus the requirements its goal states (`requirements::extract`).
-type TaskEntry = (TaskPrompt, Vec<crate::requirements::Requirement>);
+/// Prompt plan, requirements, and the destination the goal named (one decision).
+type TaskEntry = (
+    TaskPrompt,
+    crate::requirements::Extraction,
+    (Option<String>, PathBuf),
+);
 
 /// Owns the composition home of this process.
 pub struct ComposeBridge {
@@ -1694,7 +1791,21 @@ impl ComposeBridge {
         let pa = approved.clone();
         compose
             .register_skill(COMPOSE_MODEL_SKILL, None, 10, move |task| {
-                let ((prompt, target, kind), reqs) = pr.lock().get(&task).cloned()?;
+                // The requirement record of this task. A missing record is a refusal,
+                // never an empty requirement list (issue #289).
+                let entry = pr.lock().get(&task).cloned();
+                let Some(((prompt, target, kind), ex, dest)) = entry else {
+                    pp.lock()
+                        .insert(task, refused_without_model(MISSING_RECORD_REASON.into()));
+                    return None;
+                };
+                // Goal text that looks like a measurable requirement but could not
+                // be read reliably: refuse before any model call.
+                if let Some(why) = ex.refusal() {
+                    pp.lock().insert(task, refused_without_model(why));
+                    return None;
+                }
+                let reqs = ex.requirements;
                 // Proposer hook (crate::approved): an approved proposal for this
                 // task replaces the model's reply. One attempt, the same
                 // template check, the same AEGIS contract and commit below.
@@ -1726,8 +1837,20 @@ impl ComposeBridge {
                         )
                     }
                 };
+                let (out, attempts) = enforce_destination(
+                    (out, attempts),
+                    dest.0.as_deref(),
+                    &dest.1,
+                    kind == ProposalKind::Edit,
+                );
                 let h = out.as_ref().ok().map(|t| proposal_handle(t));
                 pp.lock().insert(task, (out, attempts));
+                // Test seam (compiled only into unit tests): lose the requirement
+                // record between the Skill and AEGIS verify, as a bug would (#289).
+                #[cfg(test)]
+                if prompt.contains(TEST_DROP_RECORD_MARKER) {
+                    pr.lock().remove(&task);
+                }
                 h
             })
             .map_err(|e| format!("compose register skill: {e}"))?;
@@ -1738,19 +1861,11 @@ impl ComposeBridge {
                 // the Skill recorded for this task, and that text parses as one
                 // file change (a relative path and nonempty content).
                 // The requirements of the goal are checked again on these same
-                // bytes, the ones that would be saved.
-                let reqs = pq
-                    .lock()
-                    .get(&task)
-                    .map(|p| p.1.clone())
-                    .unwrap_or_default();
-                pv.lock().get(&task).is_some_and(|(t, _)| {
-                    let Ok(t) = t else { return false };
-                    proposal_handle(t) == result
-                        && parse_file_proposal(t).is_some_and(|p| {
-                            crate::requirements::refusal_reason(&reqs, &p.content).is_none()
-                        })
-                })
+                // bytes, the ones that would be saved. No requirement record
+                // for the task means NO approval (issue #289).
+                let ex = pq.lock().get(&task).map(|p| p.1.clone());
+                let proposals = pv.lock();
+                verify_task_result(ex.as_ref(), proposals.get(&task), result)
             })
             .map_err(|e| format!("compose set verify: {e}"))?;
         // Open the composition now, so a home behind its anchor is refused here
@@ -1862,11 +1977,24 @@ impl ComposeBridge {
                 ws.display()
             ));
         }
-        let plan = task_plan(goal, &ws)?;
+        let (plan, dest) = task_decision(goal, &ws)?;
         // The requirements the goal states are checked on every path: the model
         // path and an approved proposal (refused before any write when unmet).
-        let reqs = crate::requirements::extract(goal);
-        let recognized: Vec<String> = reqs.iter().map(|r| r.label()).collect();
+        let machine_goal =
+            approved_text.is_some() && goal.starts_with(crate::approved::APPROVED_GOAL_PREFIX);
+        let mut reqs = if machine_goal {
+            crate::requirements::Extraction::default()
+        } else {
+            crate::requirements::analyze(goal)
+        };
+        // Added-line counts are measured against the file the proposal replaces
+        // (the edit target's content, or nothing for a new file).
+        if reqs.needs_prior() {
+            let prior = plan.1.as_ref().map_or("", |(_, c)| c.as_str());
+            reqs = reqs.resolved(prior);
+        }
+        let recognized: Vec<String> = reqs.requirements.iter().map(|r| r.label()).collect();
+        let uncertain = reqs.uncertain.clone();
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_err(|e| format!("clock: {e}"))?;
@@ -1903,7 +2031,9 @@ impl ComposeBridge {
         if let Some(t) = approved_text {
             home.approved.lock().insert(task, t.to_string());
         }
-        home.prompts.lock().insert(task, (plan, reqs));
+        home.prompts
+            .lock()
+            .insert(task, (plan, reqs, (dest, ws.clone())));
         let run = home.compose.run(task, now.as_micros() as u64);
         home.prompts.lock().remove(&task);
         home.approved.lock().remove(&task);
@@ -1925,7 +2055,44 @@ impl ComposeBridge {
             Err(e) => (None, None, Some(e)),
         };
         let parsed = proposal.as_deref().and_then(parse_file_proposal);
+        // sovereign-core #261: the daemon's own record that THIS run committed
+        // THIS proposal. `ComposeAuthorize` mints only from it. An approved
+        // proposal has its own replay claim and grant, so it gets none.
+        let mut compose_commit = None;
+        if let (true, None, Some(p), Some(text)) = (
+            committed,
+            approved_text,
+            parsed.as_ref(),
+            proposal.as_deref(),
+        ) {
+            let wsc = std::fs::canonicalize(&ws)
+                .map_err(|e| format!("workspace {}: {e}", ws.display()))?
+                .display()
+                .to_string();
+            let id = crate::effects::write_compose_commit(
+                home,
+                &wsc,
+                task,
+                r.cx_promotion,
+                r.cx_evidence,
+                &hex(&Sha256::digest(text.as_bytes())),
+                &p.path,
+                &hex(&Sha256::digest(p.content.as_bytes())),
+            )
+            .map_err(|e| {
+                format!(
+                    "compose run committed (promotion #{}) but its commit record was not written: {e}",
+                    r.cx_promotion
+                )
+            })?;
+            home.advance_mark().map_err(|e| {
+                format!("compose run: record mark update failed (E_MARK_WRITE): {e}")
+            })?;
+            compose_commit = Some(id);
+        }
         Ok(ComposeTaskReport {
+            compose_commit,
+
             compose_dir: self.dir.display().to_string(),
             machine_id: home.machine_id.clone(),
             task,
@@ -1954,6 +2121,7 @@ impl ComposeBridge {
             proposer_error,
             proposal_attempts,
             requirements_recognized: recognized,
+            requirements_uncertain: uncertain,
             proposer: match approved_text {
                 Some(_) => APPROVED_PROPOSER_LABEL.to_string(),
                 None => self.proposer_label.clone(),
@@ -1983,8 +2151,27 @@ impl ComposeBridge {
         r
     }
 
-    /// S1 / S4 / S5: one operator record through the composition's writer.
+    /// S1 / S5: one operator record through the composition's writer. Gated
+    /// records cannot be forged here, on any path (the socket handler calls
+    /// this too): authorizations, effect phases, replay and compose-commit
+    /// records are written only by the daemon (sovereign-core #261).
     pub fn note(&self, kind: &str, text: &str, links: &[u64]) -> ControlResponse {
+        if let Err(e) = crate::effects::check_reserved_note(kind, text) {
+            return ControlResponse::Error(e);
+        }
+        self.write_note(kind, text, links)
+    }
+
+    /// `note` WITHOUT the reserved-record check. Cargo feature `test-support`
+    /// only: it stands for an attacker who can append to the journal directly,
+    /// so the ledger's own defences can be exercised. Not in a normal build.
+    #[doc(hidden)]
+    #[cfg(feature = "test-support")]
+    pub fn note_unchecked(&self, kind: &str, text: &str, links: &[u64]) -> ControlResponse {
+        self.write_note(kind, text, links)
+    }
+
+    fn write_note(&self, kind: &str, text: &str, links: &[u64]) -> ControlResponse {
         let k = match kind {
             "constraint" => NoteKind::Constraint,
             "authorization" => NoteKind::Authorization,
@@ -2219,6 +2406,39 @@ impl ComposeBridge {
     }
 }
 
+/// The reply must write the destination the goal named (issue #288): the
+/// approved proposal and a model reply are both held to the same path, so the
+/// save and the commit land on the file the prompt and budget were chosen for.
+/// A goal that named no destination leaves the model free to name the file.
+fn enforce_destination(
+    out: SkillOutput,
+    dest: Option<&str>,
+    ws: &Path,
+    is_edit: bool,
+) -> SkillOutput {
+    let (res, attempts) = out;
+    let res = match res {
+        Ok(t) => match parse_file_proposal(&t) {
+            Some(p) if dest.is_some_and(|d| p.path != d) => Err(format!(
+                "the proposal writes {} but the goal named the destination {}",
+                p.path,
+                dest.unwrap_or_default()
+            )),
+            // Defence in depth: a new-document task never replaces a file
+            // that exists (symlinks and dangling links count as existing).
+            Some(p) if !is_edit && std::fs::symlink_metadata(ws.join(&p.path)).is_ok() => {
+                Err(format!(
+                    "the proposal writes {} which already exists; refusing to overwrite it as a new document",
+                    p.path
+                ))
+            }
+            _ => Ok(t),
+        },
+        r => r,
+    };
+    (res, attempts)
+}
+
 #[cfg(test)]
 mod requirement_tests {
     use super::*;
@@ -2302,5 +2522,160 @@ mod requirement_tests {
         assert!(r.committed, "{r:?}");
         assert_eq!(r.requirements_recognized, ["at least 3 non-empty lines"]);
         assert_eq!(r.proposal.as_deref(), Some(SHORT));
+    }
+}
+
+#[cfg(test)]
+mod verify_boundary_tests {
+    use super::*;
+    use crate::requirements::analyze;
+
+    const DOC: &str = "filename: DOC.md\na\nb\nc\n";
+
+    fn recorded(text: &str) -> SkillOutput {
+        (Ok(text.to_string()), Vec::new())
+    }
+
+    #[test]
+    fn verify_accepts_exactly_the_recorded_bytes_that_meet_the_goal() {
+        let ex = analyze("write DOC.md in at least 3 lines");
+        let out = recorded(DOC);
+        let h = proposal_handle(DOC);
+        assert!(verify_task_result(Some(&ex), Some(&out), h));
+        // a result naming other bytes is refused
+        assert!(!verify_task_result(Some(&ex), Some(&out), h ^ 1));
+        // bytes that no longer meet the requirement are refused
+        let short = analyze("write DOC.md in at least 4 lines");
+        assert!(!verify_task_result(Some(&short), Some(&out), h));
+        // a skill that returned no proposal is refused
+        let none: SkillOutput = (Err("no".into()), Vec::new());
+        assert!(!verify_task_result(Some(&ex), Some(&none), h));
+        assert!(!verify_task_result(Some(&ex), None, h));
+    }
+
+    /// Issue #289: an absent requirement record used to become an empty list,
+    /// so the verify step approved any well-formed file.
+    #[test]
+    fn missing_requirement_record_is_refused_never_empty() {
+        let out = recorded(DOC);
+        let h = proposal_handle(DOC);
+        // the same bytes that pass with a record are refused without one
+        let ex = analyze("write DOC.md in at least 3 lines");
+        assert!(verify_task_result(Some(&ex), Some(&out), h));
+        assert!(!verify_task_result(None, Some(&out), h));
+        // and even a goal with no requirements needs its (empty) record
+        let empty = analyze("write DOC.md");
+        assert!(verify_task_result(Some(&empty), Some(&out), h));
+        assert!(!verify_task_result(None, Some(&out), h));
+    }
+
+    #[test]
+    fn uncertain_goal_is_refused_at_verify_even_when_bytes_look_fine() {
+        let ex = analyze("write DOC.md with at least 3 lines of context");
+        assert!(!ex.uncertain.is_empty());
+        assert!(!verify_task_result(
+            Some(&ex),
+            Some(&recorded(DOC)),
+            proposal_handle(DOC)
+        ));
+    }
+
+    #[test]
+    fn refused_without_model_records_one_refused_attempt() {
+        let (out, a) = refused_without_model(MISSING_RECORD_REASON.into());
+        assert_eq!(out.unwrap_err(), MISSING_RECORD_REASON);
+        assert_eq!(a.len(), 1);
+        assert_eq!(a[0].outcome, "refused");
+        assert!(a[0].text.is_none());
+    }
+}
+
+#[cfg(test)]
+mod verify_callback_integration_tests {
+    use super::*;
+
+    fn bridge(dir: &std::path::Path) -> ComposeBridge {
+        let proposer: ComposeProposer = Arc::new(|_: &str, _: std::time::Duration| {
+            Ok(Generation {
+                text: "filename: DOC.md\na\nb\nc\n".into(),
+                finish_reason: Some("eos".into()),
+                ..Default::default()
+            })
+        });
+        ComposeBridge::new(dir.join("compose"), proposer, "test:verify-callback")
+    }
+
+    /// Issue #289 through the real compose run and the real verify callback:
+    /// the same document commits with its requirement record and is refused
+    /// by AEGIS (nothing committed, no promotion) when the record is gone.
+    #[test]
+    fn lost_requirement_record_is_refused_by_the_real_verify_callback() {
+        if !aien_omega_compose::LINKED {
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = tmp.path().join("ws");
+        std::fs::create_dir_all(&ws).unwrap();
+        let b = bridge(tmp.path());
+        let ok = b.run_task("write DOC.md in at least 3 lines", ws.to_str().unwrap());
+        let ControlResponse::ComposeTaskResult(ok) = ok else {
+            panic!("{ok:?}")
+        };
+        assert!(ok.committed, "{ok:?}");
+        let goal = format!("write DOC2.md in at least 3 lines {TEST_DROP_RECORD_MARKER}");
+        let lost = b.run_task(&goal, ws.to_str().unwrap());
+        let ControlResponse::ComposeTaskResult(lost) = lost else {
+            panic!("{lost:?}")
+        };
+        assert!(!lost.committed, "{lost:?}");
+        assert_eq!(lost.aegis_pass_mask & 1, 0, "{lost:?}");
+        assert_eq!(lost.cx_promotion, 0, "{lost:?}");
+    }
+}
+
+#[cfg(test)]
+mod destination_enforcement_tests {
+    use super::*;
+
+    #[test]
+    fn reply_must_write_the_named_destination() {
+        let ok = "filename: docs/SUMMARY.md\n# s\n".to_string();
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = tmp.path().to_path_buf();
+        let run = |d: Option<&str>, t: &str| {
+            enforce_destination((Ok(t.to_string()), vec![]), d, &ws, false).0
+        };
+        assert_eq!(run(Some("docs/SUMMARY.md"), &ok), Ok(ok.clone()));
+        let e = run(Some("README.md"), &ok).unwrap_err();
+        assert!(
+            e.contains("docs/SUMMARY.md") && e.contains("README.md"),
+            "{e}"
+        );
+        assert_eq!(run(None, &ok), Ok(ok));
+    }
+}
+
+#[cfg(test)]
+mod new_document_overwrite_tests {
+    use super::*;
+
+    #[test]
+    fn new_kind_proposal_never_replaces_an_existing_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = tmp.path();
+        std::fs::write(ws.join("README.md"), "# r\n").unwrap();
+        std::os::unix::fs::symlink("nowhere", ws.join("dangling.md")).unwrap();
+        let run = |dest: Option<&str>, path: &str, edit: bool| {
+            let t = format!("filename: {path}\nbody\n");
+            enforce_destination((Ok(t), vec![]), dest, ws, edit).0
+        };
+        for dest in [None, Some("README.md")] {
+            let e = run(dest, "README.md", false).unwrap_err();
+            assert!(e.contains("already exists"), "{e}");
+        }
+        assert!(run(None, "dangling.md", false).is_err());
+        assert!(run(None, "fresh.md", false).is_ok());
+        // An edit-kind task may write its own (existing) target.
+        assert!(run(Some("README.md"), "README.md", true).is_ok());
     }
 }

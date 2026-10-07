@@ -123,6 +123,19 @@ pub enum ControlCommand {
         proposal: crate::approved::ApprovedProposal,
         workspace: String,
     },
+    /// sovereign-core #261: the operator approves ONE proposal this daemon
+    /// committed (`RunComposeTask`), and the daemon mints the grant itself.
+    /// The caller names only the promotion, the proposal digest, the workspace
+    /// it expects and who approves; path, content and target come from the
+    /// daemon's own commit record. Answered with `ComposeNoted` (the grant).
+    /// This replaces a client-written `authorization` note, which is refused.
+    ComposeAuthorize {
+        cx_promotion: u64,
+        proposal_sha256: String,
+        workspace: String,
+        approver: String,
+        constraints: Vec<u64>,
+    },
     /// NEXT-PHASE-2: operator `stop`, `resume`, `revoke` (ACCEPTANCE-v2 2.5, 2.6).
     ComposeControl {
         action: String,
@@ -327,6 +340,10 @@ mod tests {
 /// Cortex ids name records in `<compose dir>/cortex.cx`; digests are hex.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ComposeTaskReport {
+    /// The daemon's compose-commit record for this run (#261), when it
+    /// committed a one-file proposal on the ordinary (non-approved) path.
+    #[serde(default)]
+    pub compose_commit: Option<u64>,
     /// Composition home (holds machine.id, cortex.cx, jspace).
     pub compose_dir: String,
     /// AienMachineId (32 bytes, hex) the home is bound to.
@@ -369,6 +386,11 @@ pub struct ComposeTaskReport {
     /// ones checked. Empty = none recognized, nothing checked.
     #[serde(default)]
     pub requirements_recognized: Vec<String>,
+    /// Goal text that looks like a measurable requirement but could not be
+    /// interpreted reliably (crate::requirements::analyze). Non-empty = the
+    /// task was refused before any model call.
+    #[serde(default)]
+    pub requirements_uncertain: Vec<String>,
     /// "model" when the Skill ran inference, or the stub label.
     pub proposer: String,
 }

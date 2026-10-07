@@ -273,22 +273,37 @@ async fn step(sub: &str, m: &HashMap<String, String>) -> Result<Value, String> {
                 ));
             }
             let csha = sha256_hex(content.as_bytes());
-            // NEXT-PHASE-2: the grant names the target and the state it was
-            // granted against; a changed target makes it stale.
-            let prior = effects::file_sha256(&target)?;
+            // sovereign-core #261: the daemon mints the grant. The CLI names
+            // the committed proposal (promotion + digest), the workspace it
+            // expects and the approver; path, content and target come from
+            // the daemon's own commit record, so nothing here is a grant the
+            // daemon has to trust. A raw `authorization` note is refused.
+            let constraints = m
+                .get("constraint")
+                .map(|s| ids(s))
+                .transpose()?
+                .unwrap_or_default();
+            let n = match send(ControlCommand::ComposeAuthorize {
+                cx_promotion: r.cx_promotion,
+                proposal_sha256: psha.clone(),
+                workspace: wsc.display().to_string(),
+                approver: approver.to_string(),
+                constraints: constraints.clone(),
+            })
+            .await?
+            {
+                ControlResponse::ComposeNoted(n) => {
+                    serde_json::to_value(n).map_err(|e| e.to_string())?
+                }
+                ControlResponse::Error(e) => return Err(e),
+                other => return Err(format!("unexpected response {other:?}")),
+            };
             let tgt = target.display().to_string();
             let args = json!({"proposal_sha256": psha, "path": path, "content_sha256": csha,
                 "approver": approver, "cx_promotion": r.cx_promotion, "target": tgt,
-                "prior_sha256": prior});
-            let result = json!({"approved": true, "target": target.display().to_string()});
+                "constraints": constraints});
+            let result = json!({"approved": true, "target": tgt, "authorization": n["id"]});
             let rc = receipt("authorize", &args, &result, true)?;
-            let constraint = m.get("constraint").map(|s| ids(s)).transpose()?;
-            let mut links = vec![r.cx_promotion, r.cx_evidence];
-            links.extend(constraint.unwrap_or_default().into_iter().take(2));
-            let text = json!({"proposal_sha256": psha, "path": path, "content_sha256": csha,
-                "approver": approver, "receipt_sha256": rc["sha256"], "target": tgt,
-                "prior_sha256": prior, "workspace": wsc.display().to_string()});
-            let n = note("authorization", &text.to_string(), links).await?;
             Ok(json!({"step": "S4", "receipt": rc, "authorization": n, "approvals": 1}))
         }
         "execute" => {

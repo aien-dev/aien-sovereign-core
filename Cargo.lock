@@ -67,6 +67,7 @@ version = "0.1.0"
 dependencies = [
  "aien-inference-abi",
  "aien-kv-cache",
+ "aien-omega-compose",
  "aien-omega-gpu",
  "aien-runtime",
  "aien-scheduler",
@@ -306,6 +307,7 @@ dependencies = [
  "aien-kv-cache",
  "aien-omega-compose",
  "aien-platform",
+ "aien-runtime",
  "aien-scheduler",
  "aien-security",
  "async-trait",
