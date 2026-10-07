@@ -527,6 +527,37 @@ pub fn world_state(row: &IntentRow) -> (EffectState, Result<Option<String>, Stri
     (st, now)
 }
 
+/// The world check, confined (476ca4 c28): the target is read only while it
+/// still resolves inside its grant's workspace (`confine_target` again, at
+/// ack and reconcile time, so a directory swapped for a symlink after the
+/// intent opened is seen). When confinement refuses, or the grant names no
+/// workspace, the state is UNRESOLVED, never DONE or NOT_DONE.
+pub fn confined_world_state(
+    l: &Ledger,
+    row: &IntentRow,
+) -> (EffectState, Result<Option<String>, String>) {
+    let ws = l
+        .grants
+        .get(&row.authorization)
+        .and_then(|g| g.workspace.clone());
+    let Some(ws) = ws else {
+        return (
+            EffectState::Unresolved,
+            Err(format!(
+                "OutsideWorkspace: authorization #{} names no workspace",
+                row.authorization
+            )),
+        );
+    };
+    if let Err(r) = confine_target(&ws, &row.path, &row.target) {
+        return (
+            EffectState::Unresolved,
+            Err(format!("{}: {}", r.name, r.detail)),
+        );
+    }
+    world_state(row)
+}
+
 /// Start time of a process (clock ticks since boot, /proc/<pid>/stat field 22).
 pub fn process_start_ticks(pid: u32) -> Option<u64> {
     let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
@@ -872,7 +903,7 @@ pub fn ack(b: &ComposeBridge, intent: u64, reported: &Value) -> ControlResponse 
                 row.state_record
             ));
         }
-        let (st, disk) = world_state(row);
+        let (st, disk) = confined_world_state(&l, row);
         let text = json!({
             "phase": PHASE_ACK, "intent": intent, "authorization": row.authorization,
             "tool": "write_file", "path": row.path, "content_sha256": row.content_sha256,
@@ -927,7 +958,7 @@ pub fn reconcile(
                 });
                 continue;
             }
-            let (world, disk) = world_state(&row);
+            let (world, disk) = confined_world_state(&l, &row);
             let disk_hex = disk.as_ref().ok().cloned().flatten();
             let (st, who) = match declare {
                 Some(d) => {
@@ -945,6 +976,18 @@ pub fn reconcile(
                 }
                 None => (world, by.to_string()),
             };
+            // Never DONE for a target outside its workspace, not even by declaration.
+            if st == EffectState::Done
+                && disk
+                    .as_ref()
+                    .is_err_and(|e| e.starts_with("OutsideWorkspace"))
+            {
+                return Err(format!(
+                    "reconcile: intent #{} cannot be declared DONE: {}",
+                    row.id,
+                    disk.as_ref().err().map(String::as_str).unwrap_or_default()
+                ));
+            }
             if st == EffectState::Unresolved && row.unresolved_digest.as_ref() == Some(&disk_hex) {
                 out.push(ReconcileOutcome {
                     intent: row.id,

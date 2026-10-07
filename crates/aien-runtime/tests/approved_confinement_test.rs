@@ -247,4 +247,122 @@ async fn forged_grants_are_confined_and_the_approved_kind_is_reserved() {
     };
     eprintln!("A1 generic path (sc#261, still open to same-user callers): {state}");
     assert_eq!(state, "DONE", "observed behaviour changed: update sc#261");
+
+    // 476ca4 c28 shape: the target's parent directory is swapped for a symlink
+    // to a directory outside the workspace after the intent opened, and the
+    // bytes land there. Ack and reconcile re-run the confinement: UNRESOLVED,
+    // never DONE, and an operator cannot declare it DONE.
+    std::fs::create_dir_all(ws.join("swp1")).unwrap();
+    std::fs::create_dir_all(ws.join("swp2")).unwrap();
+    let outdir = root.join("outdir");
+    std::fs::create_dir_all(&outdir).unwrap();
+    let recall_state = |id: u64| {
+        let c = &c;
+        async move {
+            match c
+                .send_command(ControlCommand::ComposeRecall {
+                    ids: vec![id],
+                    prefix: None,
+                })
+                .await
+                .unwrap()
+            {
+                ControlResponse::ComposeRecalled(r) => {
+                    serde_json::from_str::<serde_json::Value>(r.cited[0].text.as_deref().unwrap())
+                        .unwrap()
+                }
+                other => panic!("recall: {other:?}"),
+            }
+        }
+    };
+    let swap = |d: &str| {
+        std::fs::rename(ws.join(d), ws.join(format!("{d}-moved"))).unwrap();
+        std::os::unix::fs::symlink(&outdir, ws.join(d)).unwrap();
+        std::fs::write(outdir.join("NOTES.md"), content).unwrap();
+    };
+    // (a) ack by the live executor.
+    let t1 = ws.join("swp1/NOTES.md").to_string_lossy().to_string();
+    let g1 = match note(&c, "authorization", grant("swp1/NOTES.md", &t1, Some(&w))).await {
+        ControlResponse::ComposeNoted(n) => n.id,
+        other => panic!("swp1 grant: {other:?}"),
+    };
+    let i1 = match intent(&c, g1, &psha, "swp1/NOTES.md", &t1, &csha).await {
+        ControlResponse::ComposeNoted(n) => n.id,
+        other => panic!("swp1 intent: {other:?}"),
+    };
+    swap("swp1");
+    let a1 = match c
+        .send_command(ControlCommand::ComposeEffectAck {
+            intent: i1,
+            reported: json!({"wrote": true}),
+        })
+        .await
+        .unwrap()
+    {
+        ControlResponse::ComposeNoted(n) => n.id,
+        other => panic!("ack: {other:?}"),
+    };
+    let v = recall_state(a1).await;
+    assert_eq!(v["state"], "UNRESOLVED", "{v}");
+    assert!(
+        v["disk_error"]
+            .as_str()
+            .unwrap()
+            .starts_with("OutsideWorkspace"),
+        "{v}"
+    );
+    // (b) start-up style reconcile of an intent whose executor is gone.
+    let t2 = ws.join("swp2/NOTES.md").to_string_lossy().to_string();
+    let g2 = match note(&c, "authorization", grant("swp2/NOTES.md", &t2, Some(&w))).await {
+        ControlResponse::ComposeNoted(n) => n.id,
+        other => panic!("swp2 grant: {other:?}"),
+    };
+    let i2 = match c
+        .send_command(ControlCommand::ComposeEffectIntent {
+            authorization: g2,
+            proposal_sha256: psha.clone(),
+            path: "swp2/NOTES.md".into(),
+            target: t2.clone(),
+            content_sha256: csha.clone(),
+            executor_pid: 1,
+            executor_start: 1,
+        })
+        .await
+        .unwrap()
+    {
+        ControlResponse::ComposeNoted(n) => n.id,
+        other => panic!("swp2 intent: {other:?}"),
+    };
+    swap("swp2");
+    let declared = c
+        .send_command(ControlCommand::ComposeReconcile {
+            declare: Some(aien_runtime::control::ReconcileDeclare {
+                intent: i2,
+                state: "done".into(),
+                approver: "drake".into(),
+            }),
+        })
+        .await
+        .unwrap();
+    refused(declared, "cannot be declared DONE");
+    let rec = match c
+        .send_command(ControlCommand::ComposeReconcile { declare: None })
+        .await
+        .unwrap()
+    {
+        ControlResponse::ComposeReconciled(r) => *r,
+        other => panic!("reconcile: {other:?}"),
+    };
+    let o = rec
+        .outcomes
+        .iter()
+        .find(|o| o.intent == i2)
+        .expect("reconciled i2");
+    assert_eq!(o.state, "UNRESOLVED", "{o:?}");
+    assert!(
+        rec.outcomes
+            .iter()
+            .all(|o| o.intent != i1 || o.state != "DONE"),
+        "{rec:?}"
+    );
 }

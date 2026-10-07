@@ -148,7 +148,11 @@ after a claim: `ComposeError` and `Mismatch` (claim UNCERTAIN),
 `NotCommitted` (claim FAILED); after the replay commit: `GrantNotWritten`
 (the approval is spent, no grant, no effect). At the intent:
 `EFFECT_REFUSED OutsideWorkspace`, and `NotAuthorized` for a grant with no
-workspace or an approved grant without its committed backing.
+workspace or an approved grant without its committed backing. At ack and
+reconcile the confinement runs again (476ca4 c28/c28b: a parent directory
+swapped for a symlink after the intent): if it refuses, the state recorded is
+UNRESOLVED with `disk_error` `OutsideWorkspace: ...`, never DONE, and an
+operator declaration of DONE is refused.
 
 ## Deferred
 - The effect receipt (`record_effect_receipt`) still has no request_id or
