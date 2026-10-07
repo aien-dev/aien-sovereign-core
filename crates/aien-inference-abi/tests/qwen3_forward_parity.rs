@@ -403,3 +403,57 @@ fn real_qwen3_4b_instruct_2507_matches_transformers() {
     assert_eq!(argmax(&got), top_ids[0]);
     assert!(d <= 5e-3, "max abs diff {d:e}");
 }
+
+/// Batch decode (`forward_decode_batch_with_logits`, the third q/k-norm site): two sequences
+/// with the reference prompt must reproduce the transformers logits, and a third, different
+/// sequence in the same batch must equal its own single-sequence decode.
+#[test]
+fn qwen3_tiny_batch_decode_matches_transformers_and_single_sequence() {
+    let (weights, r) = tiny();
+    let n = r.ids.len();
+    let other: Vec<u32> = r.ids.iter().rev().copied().collect();
+
+    let mut batch = NativeTransformerBackend::new_reference(weights.clone());
+    for (id, prompt) in [(1u64, &r.ids), (2, &r.ids), (3, &other)] {
+        batch
+            .prefill_sequence(id, &prompt[..n - 1])
+            .expect("prefill");
+        // The decode step consumes the pending token at position n - 1.
+        batch.pending_prefill_token.insert(id, prompt[n - 1]);
+    }
+    let (_out, logits) = batch
+        .forward_decode_batch_with_logits(&[1, 2, 3])
+        .expect("batch decode");
+    assert_eq!(logits.len(), 3);
+    for row in &logits[..2] {
+        let d = max_abs(row, &r.logits);
+        eprintln!("batch decode vs transformers max abs diff = {d:e}");
+        assert!(d <= ABSOLUTE_TOLERANCE, "batch max abs diff {d:e}");
+    }
+
+    let mut single = NativeTransformerBackend::new_reference(weights);
+    single
+        .prefill_sequence(9, &other[..n - 1])
+        .expect("prefill");
+    let seq = single.sequences.get_mut(&9).unwrap();
+    let h = NativeTransformerBackend::forward_token_impl_paged(
+        &single.weights,
+        &*single.tensor_backend,
+        other[n - 1],
+        n - 1,
+        seq,
+        9,
+        None,
+    );
+    let want = single.compute_logits(&h);
+    let d = max_abs(&logits[2], &want);
+    eprintln!("batch row 3 vs single-sequence max abs diff = {d:e}");
+    assert!(
+        d <= ABSOLUTE_TOLERANCE,
+        "batch vs single max abs diff {d:e}"
+    );
+    assert!(
+        max_abs(&logits[2], &logits[0]) > 1e-3,
+        "third sequence must differ from the first"
+    );
+}
