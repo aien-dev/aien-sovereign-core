@@ -738,12 +738,12 @@ fn kind_selects_budget() {
     use std::time::Duration;
     let ws = tempfile::tempdir().expect("tempdir");
     std::fs::write(ws.path().join("notes.md"), "# notes\n").expect("write");
-    let (_, edit_target) =
-        aien_runtime::spine::task_prompt_and_target("add a line to notes.md", ws.path());
-    let (_, new_target) =
-        aien_runtime::spine::task_prompt_and_target("write a new file faq.md", ws.path());
-    assert_eq!(ProposalKind::of_target(&edit_target), ProposalKind::Edit);
-    assert_eq!(ProposalKind::of_target(&new_target), ProposalKind::Document);
+    let (_, _, edit_kind) =
+        aien_runtime::spine::task_plan("add a line to notes.md", ws.path()).expect("plan");
+    let (_, _, new_kind) =
+        aien_runtime::spine::task_plan("write a new file faq.md", ws.path()).expect("plan");
+    assert_eq!(edit_kind, ProposalKind::Edit);
+    assert_eq!(new_kind, ProposalKind::Document);
     let b = ComposeBudgets::default();
     assert_eq!(b.for_kind(ProposalKind::Edit), Duration::from_secs(29));
     assert_eq!(b.for_kind(ProposalKind::Document), Duration::from_secs(120));

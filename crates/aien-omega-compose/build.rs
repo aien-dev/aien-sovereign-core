@@ -64,6 +64,7 @@ fn main() {
             "AIEN_OMEGA_COMPOSE_LIB {} is not a file",
             lib.display()
         );
+        require_wait_ms_symbol(&lib);
         link(&lib);
         return;
     }
@@ -112,10 +113,11 @@ fn main() {
         dir.display()
     );
     detect_wait_ms(&dir);
+    require_wait_ms_symbol(&out.join("librx_compose.a"));
     link(&out.join("librx_compose.a"));
 }
 
-/// Set `has_omega_wait_ms` from the omega checkout's host header. omega.lock pins a commit that
+/// Check the omega checkout's host header. omega.lock pins a commit that
 /// declares `rxc_host_set_wait_ms`, so a real link without it is a build error, never a silent
 /// downgrade (the 120 s document budget would be refused at runtime).
 fn detect_wait_ms(dir: &Path) {
@@ -127,11 +129,49 @@ fn detect_wait_ms(dir: &Path) {
         "omega header {} does not declare rxc_host_set_wait_ms; omega.lock pins a commit that has it, so this checkout is not usable. Use AIEN_FORCE_CPU_STUB=1 for a stub build.",
         h.display()
     );
+}
+
+/// A real declaration, not a mention in a comment: a line that starts with
+/// `int rxc_host_set_wait_ms(`.
+fn header_declares_wait_ms(header: &str) -> bool {
+    header
+        .lines()
+        .any(|l| l.trim_start().starts_with("int rxc_host_set_wait_ms("))
+}
+
+/// Fail the build unless the linked archive defines `rxc_host_set_wait_ms` (checked with `nm`
+/// on both the make path and a prebuilt `AIEN_OMEGA_COMPOSE_LIB`), then set `has_omega_wait_ms`.
+fn require_wait_ms_symbol(lib: &Path) {
+    let out = Command::new("nm")
+        .arg("-g")
+        .arg("--defined-only")
+        .arg(lib)
+        .output()
+        .unwrap_or_else(|e| {
+            panic!(
+                "cannot run `nm` to check {} for rxc_host_set_wait_ms ({e}); install binutils or use AIEN_FORCE_CPU_STUB=1",
+                lib.display()
+            )
+        });
+    assert!(
+        out.status.success(),
+        "`nm` failed on {}: {}",
+        lib.display(),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        archive_defines_wait_ms(&text),
+        "{} does not define rxc_host_set_wait_ms; omega.lock pins a commit that has it. Rebuild the archive from that omega, or use AIEN_FORCE_CPU_STUB=1 for a stub build.",
+        lib.display()
+    );
     println!("cargo:rustc-cfg=has_omega_wait_ms");
 }
 
-fn header_declares_wait_ms(header: &str) -> bool {
-    header.contains("rxc_host_set_wait_ms")
+fn archive_defines_wait_ms(nm_out: &str) -> bool {
+    nm_out
+        .lines()
+        .any(|l| l.split_whitespace().last() == Some("rxc_host_set_wait_ms"))
 }
 
 fn link(lib: &Path) {

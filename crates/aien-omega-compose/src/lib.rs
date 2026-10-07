@@ -15,6 +15,10 @@ pub mod ffi;
 use std::fmt;
 use std::path::Path;
 
+/// The wait (ms) most recently accepted by `Compose::set_wait_ms`, 0 before any. A test
+/// observation point: the value omega was actually told, not a recomputation.
+pub static LAST_WAIT_MS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
 /// True when `librx_compose.a` is linked (not the stub).
 pub const LINKED: bool = cfg!(has_omega_compose);
 /// The omega commit this build expected (omega.lock or `AIEN_OMEGA_COMPOSE_SHA`).
@@ -265,11 +269,14 @@ mod linked {
             {
                 // SAFETY: valid open handle.
                 let rc = unsafe { ffi::rxc_host_set_wait_ms(self.h, wait_ms) };
-                check(rc, 0)
+                check(rc, 0)?;
+                LAST_WAIT_MS.store(wait_ms, std::sync::atomic::Ordering::SeqCst);
+                Ok(())
             }
             #[cfg(not(has_omega_wait_ms))]
             {
                 if wait_ms == ffi::WAIT_MS_DEFAULT {
+                    LAST_WAIT_MS.store(wait_ms, std::sync::atomic::Ordering::SeqCst);
                     Ok(())
                 } else {
                     Err(ComposeError::Arg(format!(

@@ -860,21 +860,32 @@ pub const COMPOSE_BUDGET_MS_RANGE: std::ops::RangeInclusive<u64> = 1_000..=599_0
 pub const COMPOSE_WAIT_MARGIN: std::time::Duration = std::time::Duration::from_millis(1_000);
 
 /// What a compose task is, for limits: a small edit of an existing file, or
-/// the creation of a whole new document. Decided by `ProposalKind::of_target`.
+/// the creation of a whole new document. Decided by `classify_target`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ProposalKind {
     Edit,
     Document,
 }
 
-impl ProposalKind {
-    /// `task_prompt_and_target` returns an edit target only when the goal names
-    /// an existing file (edit mode); no target means a new file (document).
-    pub fn of_target(target: &Option<(String, String)>) -> Self {
-        if target.is_some() {
-            Self::Edit
-        } else {
-            Self::Document
+/// What the goal's named target is, decided by whether the path EXISTS (not by
+/// whether an edit block can be built from it).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TargetClass {
+    /// No existing file is named: the task creates a new document.
+    New,
+    /// An existing small UTF-8 file inside the workspace: path and content.
+    Edit(String, String),
+    /// An existing path that no edit block can be built for (too large,
+    /// non-UTF-8, unreadable, or resolving outside the workspace). Never a
+    /// new document, never overwritten.
+    Refused(String),
+}
+
+impl TargetClass {
+    pub fn kind(&self) -> ProposalKind {
+        match self {
+            Self::Edit(..) => ProposalKind::Edit,
+            _ => ProposalKind::Document,
         }
     }
 }
@@ -981,11 +992,13 @@ pub fn compose_doc_max_tokens_from_env() -> Result<usize, String> {
     parse_compose_doc_max_tokens(env_opt(COMPOSE_DOC_MAX_TOKENS_ENV)?.as_deref())
 }
 
-/// Reason text of a wall-clock timeout. Stable: `propose_task_with_retries`
-/// classes an attempt as "timeout" by the word "exceeded", and the token-limit
-/// cut (`length_cut_refusal`) never contains it.
+/// Stable prefix of `wall_clock_reason`: `propose_task_with_retries` classes an
+/// attempt as "timeout" by it, and the token-limit cut (`length_cut_refusal`) never has it.
+pub const WALL_CLOCK_REASON_PREFIX: &str = "model proposal exceeded ";
+
+/// Reason text of a wall-clock timeout.
 pub fn wall_clock_reason(limit_ms: u128) -> String {
-    format!("model proposal exceeded {limit_ms} ms")
+    format!("{WALL_CLOCK_REASON_PREFIX}{limit_ms} ms")
 }
 
 /// Time one full attempt needs, from the v3 measurement: 173-token retry
@@ -1062,24 +1075,73 @@ pub const COMPOSE_EDIT_MAX_BYTES: u64 = 8192;
 /// Returns that path and the file's content. None when the goal names no
 /// existing file, so a new-file goal keeps the v5 prompt byte for byte.
 pub fn existing_target(goal: &str, ws: &Path) -> Option<(String, String)> {
-    let ws = std::fs::canonicalize(ws).ok()?;
-    goal.split_whitespace().find_map(|w| {
+    match classify_target(goal, ws) {
+        TargetClass::Edit(p, c) => Some((p, c)),
+        _ => None,
+    }
+}
+
+/// Decide the task kind from whether the named target path EXISTS in the
+/// workspace (same word scan and `check_relative_path` as `existing_target`).
+/// A word that names an existing file or symlink decides the class: small
+/// UTF-8 file inside the workspace is `Edit`; any other existing file
+/// (over `COMPOSE_EDIT_MAX_BYTES`, non-UTF-8, unreadable, dangling or
+/// resolving outside the workspace) is `Refused`. Words naming nothing, or
+/// only a directory, are skipped; no word names a file means `New`.
+pub fn classify_target(goal: &str, ws: &Path) -> TargetClass {
+    let Ok(ws) = std::fs::canonicalize(ws) else {
+        return TargetClass::New;
+    };
+    for w in goal.split_whitespace() {
         let w = w
             .trim_matches(|c| matches!(c, '"' | '\'' | '`' | '(' | ')' | '[' | ']'))
             .trim_end_matches(['.', ',', ';', ':', '!', '?'])
             .trim_matches(|c| matches!(c, '"' | '\'' | '`' | '(' | ')' | '[' | ']'));
-        check_relative_path(w).ok()?;
-        let full = std::fs::canonicalize(ws.join(w)).ok()?;
+        if check_relative_path(w).is_err() {
+            continue;
+        }
+        let joined = ws.join(w);
+        // symlink_metadata: a dangling or outward symlink still EXISTS.
+        let Ok(lmeta) = std::fs::symlink_metadata(&joined) else {
+            continue;
+        };
+        let refuse = |why: &str| {
+            TargetClass::Refused(format!(
+                "target {w} already exists but cannot be edited safely ({why}); refusing instead of treating it as a new document"
+            ))
+        };
+        let full = match std::fs::canonicalize(&joined) {
+            Ok(f) => f,
+            Err(_) if lmeta.file_type().is_symlink() => return refuse("unresolvable symlink"),
+            Err(_) => return refuse("unresolvable path"),
+        };
         if !full.starts_with(&ws) {
-            return None;
+            return refuse("resolves outside the workspace");
         }
-        let meta = std::fs::metadata(&full).ok()?;
-        if !meta.is_file() || meta.len() > COMPOSE_EDIT_MAX_BYTES {
-            return None;
+        let Ok(meta) = std::fs::metadata(&full) else {
+            return refuse("unreadable");
+        };
+        if meta.is_dir() {
+            continue;
         }
-        let content = String::from_utf8(std::fs::read(&full).ok()?).ok()?;
-        Some((w.to_string(), content))
-    })
+        if !meta.is_file() {
+            return refuse("not a regular file");
+        }
+        if meta.len() > COMPOSE_EDIT_MAX_BYTES {
+            return refuse(&format!(
+                "{} bytes is over the {COMPOSE_EDIT_MAX_BYTES}-byte edit limit",
+                meta.len()
+            ));
+        }
+        let Ok(bytes) = std::fs::read(&full) else {
+            return refuse("unreadable");
+        };
+        return match String::from_utf8(bytes) {
+            Ok(content) => TargetClass::Edit(w.to_string(), content),
+            Err(_) => refuse("not UTF-8 text"),
+        };
+    }
+    TargetClass::New
 }
 
 /// The additive edit-mode block (NEXT-PHASE-1 v6 T5), appended to the fixed
@@ -1104,12 +1166,30 @@ pub fn task_prompt(goal: &str, ws: &Path) -> String {
 /// merges an edit reply into this same content, so the bytes the model saw
 /// are the bytes the merge keeps.
 pub fn task_prompt_and_target(goal: &str, ws: &Path) -> (String, Option<(String, String)>) {
-    let mut prompt = proposal_prompt(goal, &ws.display().to_string());
-    let target = existing_target(goal, ws);
-    if let Some((path, content)) = &target {
-        prompt.push_str(&edit_block(path, content));
-    }
+    let (prompt, target, _) = task_plan(goal, ws).unwrap_or_else(|_| {
+        (
+            proposal_prompt(goal, &ws.display().to_string()),
+            None,
+            ProposalKind::Document,
+        )
+    });
     (prompt, target)
+}
+
+/// Prompt, edit target and kind of a task, or the refusal when the goal names
+/// an existing file that no edit block can be built for.
+pub fn task_plan(goal: &str, ws: &Path) -> Result<TaskPrompt, String> {
+    let mut prompt = proposal_prompt(goal, &ws.display().to_string());
+    let class = classify_target(goal, ws);
+    let kind = class.kind();
+    match class {
+        TargetClass::Refused(why) => Err(format!("RunComposeTask: {why}")),
+        TargetClass::Edit(path, content) => {
+            prompt.push_str(&edit_block(&path, &content));
+            Ok((prompt, Some((path, content)), kind))
+        }
+        TargetClass::New => Ok((prompt, None, kind)),
+    }
 }
 
 /// Largest prior-lines x reply-lines table `merge_edit_reply` builds.
@@ -1332,7 +1412,7 @@ pub fn propose_task_with_retries(
                 }
             }
             Err(e) => {
-                a.outcome = if e.contains("exceeded") {
+                a.outcome = if e.starts_with(WALL_CLOCK_REASON_PREFIX) {
                     "timeout"
                 } else {
                     "error"
@@ -1437,8 +1517,8 @@ impl ComposeHome {
 }
 
 type SkillOutput = (Result<String, String>, Vec<ProposalAttempt>);
-/// The prompt of one task and its edit target (`task_prompt_and_target`).
-type TaskPrompt = (String, Option<(String, String)>);
+/// The prompt of one task, its edit target and its kind (`task_plan`).
+pub type TaskPrompt = (String, Option<(String, String)>, ProposalKind);
 
 /// Owns the composition home of this process.
 pub struct ComposeBridge {
@@ -1525,14 +1605,13 @@ impl ComposeBridge {
         let pa = approved.clone();
         compose
             .register_skill(COMPOSE_MODEL_SKILL, None, 10, move |task| {
-                let (prompt, target) = pr.lock().get(&task).cloned()?;
+                let (prompt, target, kind) = pr.lock().get(&task).cloned()?;
                 // Proposer hook (crate::approved): an approved proposal for this
                 // task replaces the model's reply. One attempt, the same
                 // template check, the same AEGIS contract and commit below.
                 // edit = None: an approved whole-file proposal never goes
                 // through merge_edit_reply, so the committed bytes are the
                 // approved bytes even when the path already exists.
-                let kind = ProposalKind::of_target(&target);
                 let budget = budgets.for_kind(kind);
                 let attempt_budget = compose_attempt_budget(kind, budget);
                 let fixed = pa.lock().get(&task).cloned();
@@ -1692,7 +1771,7 @@ impl ComposeBridge {
                 ws.display()
             ));
         }
-        let prompt = task_prompt_and_target(goal, &ws);
+        let prompt = task_plan(goal, &ws)?;
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_err(|e| format!("clock: {e}"))?;
@@ -1716,7 +1795,7 @@ impl ComposeBridge {
         // starts, the Skill gives up at budget. Set only here, under the lock that
         // serializes runs, never while rx_compose_run is in flight. An omega without
         // rxc_host_set_wait_ms refuses a budget that needs a longer wait (no silent 30 s wait).
-        let kind = ProposalKind::of_target(&prompt.1);
+        let kind = prompt.2;
         let wait = home.budgets.for_kind(kind) + COMPOSE_WAIT_MARGIN;
         home.compose
             .set_wait_ms(wait.as_millis() as u32)
