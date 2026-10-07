@@ -139,6 +139,11 @@ extern "C" {
     // (default OMEGA_GPU_MATMUL_MAX_CTAS; 0 restores it). Clears the kernel cache.
     pub fn omega_gpu_matmul_set_cta_budget(ctas: u32);
     pub fn omega_gpu_matmul_cta_budget() -> u32;
+    // omega d6d82f/session-spin-default `src/omega_gpu_session.h`: process-wide marker-wait spin
+    // window in us for launches whose own spin_us is 0 (0 = sleep-poll, the default);
+    // -1 above OMEGA_GPU_SESSION_MAX_SPIN_US with the setting unchanged (omega#328).
+    pub fn omega_gpu_session_set_spin_us(us: u32) -> c_int;
+    pub fn omega_gpu_session_spin_us() -> u32;
 }
 
 // ---- omega `src/omega_gpu_elementwise_api.h` (FB-1 cut 4, pinned 2636409) ----
