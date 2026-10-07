@@ -42,6 +42,7 @@ spark-crumbs = "$SC"
 
 [executables]
 aien-cli-native-release = "$1"
+$(for b in spark-cockpit-rs spark-inquisitor cortex-encoder-rs cortex-rs spark-supervisor spark-debugger; do echo "sc-$b = \"$(sha256sum "$W/bins/$b" | cut -d" " -f1)\""; done)
 EOT
 }
 write_locks() {
@@ -90,7 +91,12 @@ must_fail "names candidate 'NOT-RELEASABLE'" --package "$W/dry.tar.gz"; pass "dr
 mkdir "$W/bins2"; cp "$W/bins/"* "$W/bins2/"; printf '#!/bin/sh\necho other build\n' > "$W/bins2/aien-cli"
 (cd "$T" && AIEN_RELEASE_BIN_DIR="$W/bins2" bash scripts/package-release.sh "$W/otherbin.tar.gz" >/dev/null 2>&1)
 must_fail "is not CAND-T's aien-cli-native-release" --package "$W/otherbin.tar.gz" --native; pass "executable digest mismatch rejected (--native)"
-must_pass --package "$W/otherbin.tar.gz"; pass "same package accepted without --native (non-native targets are not the candidate)"
+must_fail "no candidate digest for this package kind" --package "$W/otherbin.tar.gz"; pass "package without --native refused (no candidate digest for the kind)"
+must_fail "no candidate digest for this package kind" --package "$W/good.tar.gz"; pass "even a matching package is refused without --native"
+# a helper binary changed after the candidate: its sc-<name> digest differs
+mkdir "$W/bins3"; cp "$W/bins/"* "$W/bins3/"; printf "#!/bin/sh\necho other cortex\n" > "$W/bins3/cortex-rs"
+(cd "$T" && AIEN_RELEASE_BIN_DIR="$W/bins3" bash scripts/package-release.sh "$W/otherhelper.tar.gz" >/dev/null 2>&1)
+must_fail "is not CAND-T's sc-cortex-rs" --package "$W/otherhelper.tar.gz" --native; pass "helper binary digest mismatch rejected"
 
 # repack helper: edit a package then re-tar
 repack() { # src dst edit-command (run inside the unpacked dir)

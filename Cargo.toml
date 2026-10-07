@@ -43,6 +43,7 @@ members = [
     "crates/aien-dual-observation",
     "crates/aien-allen",
     "tools/aien-test",
+    "crates/aien-drive",
 ]
 
 [workspace.package]

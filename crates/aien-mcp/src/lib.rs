@@ -24,12 +24,12 @@ mod transport_tests;
 #[cfg(test)]
 pub(crate) use effect::authorize_for_test;
 
-pub use approval::{ApprovalDesk, ApprovalError, ApprovalGrant};
+pub use approval::{ApprovalDesk, ApprovalError, ApprovalGrant, GrantStatus};
 pub use authority::{
     intent_digest, AuthorityContext, AuthorityDecision, AuthorityOutcome, EffectAuthority,
     EffectClassAuthority, EffectScope, Exposure, TrustLevel,
 };
-pub use broker::{EffectLane, McpBroker, SpeculativeLane, SpeculativeToolCall};
+pub use broker::{Clock, EffectLane, McpBroker, SpeculativeLane, SpeculativeToolCall};
 pub use effect::{AuthorizedEffect, EffectIntent, EffectReceipt, ToolResult};
 pub use error::Error;
 pub use session::SessionManager;

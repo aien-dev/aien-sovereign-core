@@ -11,7 +11,12 @@ S=$R/steps
 HERE=$(cd "$(dirname "$0")" && pwd)
 # ACCEPTANCE-v7 Section 2: V6_ROWS picks the v6-row module, rows-v6.jq (default,
 # every existing caller unchanged) or rows-v7.jq (run-v7.sh). Nothing else is accepted.
-case ${V6_ROWS:=rows-v6.jq} in rows-v6.jq|rows-v7.jq) ;; *) echo "make-receipt: V6_ROWS must be rows-v6.jq or rows-v7.jq" >&2; exit 2 ;; esac
+case ${V6_ROWS:=rows-v6.jq} in rows-v6.jq|rows-v7.jq|rows-v8.jq) ;; *) echo "make-receipt: V6_ROWS must be rows-v6.jq, rows-v7.jq or rows-v8.jq" >&2; exit 2 ;; esac
+# ACCEPTANCE-v8 Section 2: only with rows-v8.jq, V8_MERGE (the np1_edit_merge JSON of an edit launch,
+# or unset/null) and the v5 row A2 value reach the evidence the v6 rows see. rows-v6/v7 receipts
+# are unchanged byte for byte.
+V8M=${V8_MERGE:-null}
+jq . <<<"$V8M" >/dev/null 2>&1 || { echo "make-receipt: V8_MERGE is not JSON" >&2; exit 2; }
 # ACCEPTANCE-v5: TASK_ID (T1, T2, T3) turns on the v5 rows (rows-v5.jq) for
 # that task of tasks-v5.json (TASK_SPEC overrides the file). Without it the
 # receipt is the v1..v4 receipt, unchanged.
@@ -41,8 +46,9 @@ fi
 V6= V6T=null SEED=null REF=null WS6= COMMITTED6=null
 if [ -n "${V6_TASK:-}" ]; then
   V6=1
-  V6T=$(jq -c --arg id "$V6_TASK" '.tasks[] | select(.id == $id)' "$HERE/tasks-v6.json")
-  [ -n "$V6T" ] || { echo "launch $V6_TASK not in $HERE/tasks-v6.json" >&2; exit 4; }
+  V6TF=$HERE/tasks-v6.json; [ "$V6_ROWS" = rows-v8.jq ] && V6TF=$HERE/tasks-v8.json   # ACCEPTANCE-v8 Section 3: T6 and T7 live in tasks-v8.json
+  V6T=$(jq -c --arg id "$V6_TASK" '.tasks[] | select(.id == $id)' "$V6TF")
+  [ -n "$V6T" ] || { echo "launch $V6_TASK not in $V6TF" >&2; exit 4; }
   WS6=$(cd "$R/ws" && pwd -P)
   s5p=$(jq -r '.path // empty' "$S/S5.json" 2>/dev/null || true)
   if [ -n "$s5p" ] && [ -f "$s5p" ]; then
@@ -86,7 +92,7 @@ jq -n --argjson run "$(j "$R/run.json")" \
   --arg ws "$WS" --argjson committed "$COMMITTED" \
   --arg v6 "$V6" --argjson v6task "$V6T" --arg ws6 "$WS6" --argjson committed6 "$COMMITTED6" \
   --argjson seed "$SEED" --argjson ref "$REF" --arg max6 "${V6_MAX_TOKENS:-}" \
-  --arg rows6 "$V6_ROWS" --arg rows6sha "$(sha256sum "$HERE/$V6_ROWS" | cut -d" " -f1)" \
+  --argjson v8merge "$V8M" --arg rows6 "$V6_ROWS" --arg rows6sha "$(sha256sum "$HERE/$V6_ROWS" | cut -d" " -f1)" \
   "$(cat "$HERE/rows-v5.jq")$(cat "$HERE/$V6_ROWS")"'
   def st($id): ($run.steps // []) | map(select(.step == $id)) | (.[0] // {});
   def okv: if . then "PASS" else "FAIL" end;
@@ -219,7 +225,8 @@ jq -n --argjson run "$(j "$R/run.json")" \
   }
   + (if $v6 == "1" then {task_v6:$v6task.id,
        acceptance_v6:(v6_evidence($run; $rep; $s1; $s4; $s5; $s6; $s8; $pre; $receipts; $v6task; $ws6; $committed6; $seed; $ref; $max6)
-                     + {a2_v5: (($v5rows.authority // []) | map(select(.row == "A2")) | .[0].result // null)} | v6_rows)}
+                     + {a2_v5: (($v5rows.authority // []) | map(select(.row == "A2")) | .[0].result // null)}
+                     + (if $rows6 == "rows-v8.jq" then {a2_v5_value: (($v5rows.authority // []) | map(select(.row == "A2")) | .[0].value // null), v8_merge: $v8merge} else {} end) | v6_rows)}
      else {} end)
   + (if $v6 == "1" and $rows6 != "rows-v6.jq" then {v6_rows_module:{file:$rows6, sha256:$rows6sha}} else {} end)' >"$tmp"
 h=$(sha256sum "$tmp" | cut -d' ' -f1)
