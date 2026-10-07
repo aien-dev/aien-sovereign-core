@@ -1,8 +1,8 @@
-# OPEN-MODEL-QWEN3 campaign v2: acceptance criteria (DRAFT, not frozen)
+# OPEN-MODEL-QWEN3 campaign v2: acceptance criteria (FROZEN)
 
-**Status: DRAFT.** This file freezes only when (a) Section 2's build fields name merged commits, (b) the
-pre-run gate of Section 2 passes on that build, and (c) the file is merged to main before the run. Until
-then no v2 run may start, and nothing below is a verdict. Written by session d6d82f, 2026-10-07.
+**Status: FROZEN** when this file is on main (merged before the run). Section 2's build fields name merged
+commits and the pre-run gate passed on that build (Section 2). Nothing below is a verdict; VERDICT-v2.md
+is written after the run. Written by session d6d82f, 2026-10-07; frozen 2026-10-07.
 
 v1 (ACCEPTANCE-v1.md, VERDICT-v1.md) FAILED on two containment rows that predate the daemon's
 `compose.cortex-mark` file. v2 replaces the v1 task set and rows with the NEXT-PHASE-1 v8 launches and
@@ -34,19 +34,32 @@ Environment (the wrapper refuses otherwise): `AIEN_KV_CONTEXT_TOKENS=4096`, `AIE
 run is the declared attempt); unset: `AIEN_FORCE_CPU_STUB`, `AIEN_COMPOSE_MAX_TOKENS` (set per launch),
 `AIEN_OMEGA_SPIN_US` and `AIEN_OMEGA_CTA_BUDGET` (daemon defaults 2000 us and 256 CTAs apply).
 
-Build (filled at freeze):
+Build (frozen):
 
 ```text
-sovereign-core = <main commit containing sc#280 re-pinned to the merged omega>   TO FILL
-omega.lock     = <omega main commit containing #329 and #330>                     TO FILL
-physics        = 6d7cf0d (physics.lock)     aienos = b84c0a6 (aienos.lock)
-binaries       = aien-cli, np1_reference, np1_edit_merge from that commit; sha256   TO FILL
+sovereign-core = 905fdfc18933ed47ae1cd075163be1eb8a421ca1  (main, merge of sc#280; binaries built here)
+omega.lock     = 459b46133550a39ed391ea11eeb5aa5968052611  (omega main: #329 spin window, #330 fragment matmul)
+physics        = 6d7cf0d4d8eb2cda7b512100ff6058e25dbb3ddf (physics.lock)     aienos = b84c0a6 (aienos.lock)
+aien-cli       sha256 ddb3827001a619f2e6e2d94d04a8e77f35dd837870b7ec995e71e30fa0940c7d
+np1_reference  sha256 99898f6796377c5af9b8ee239591d2e316c2081a90454503af175fe6beaa354d
+np1_edit_merge sha256 3e037794f6f933390762c06434411fa2f10c85e16ef5ab9eb3f8b3270b076987
 ```
 
-Pre-run gate on that commit (as VERDICT-v8): `cargo fmt --all --check`; `cargo clippy --workspace
---all-targets -- -D warnings`; `AIEN_FORCE_CPU_STUB=1 cargo test -p aien-runtime -p aien-cli`;
-`test-rows-v8.sh` with `NP1_EDIT_MERGE` set; build lines show `has_omega_compose` and `has_omega_gpu`
-with no stub warning.
+Built from clean checkouts (no local changes) with `AIEN_OMEGA_DIR` = omega at 459b461 (compose and GPU
+libraries both built from it), `AIEN_PHYSICS_DIR` = physics at 6d7cf0d, `AIEN_AIENOS_LOCK_REPO` set and no
+`AIEN_OMEGA_GPU_LIB` / `AIEN_OMEGA_COMPOSE_LIB` override: `cargo build -vv --release -p aien-cli` and
+`cargo build -vv --release -p aien-runtime --example np1_reference --example np1_edit_merge`. Both build
+logs show `has_omega_compose`, `rustc-link-lib=static=rx_compose`, `has_omega_gpu`,
+`rustc-link-lib=static=omega_gpu` and no build warning. The aien-cli sha256 equals the binary of the
+Section 5 speed A/B (build F), so the frozen binary is the one measured there. The wrapper, tasks file and
+declaration the run uses are the ones on main once this file is merged; that merge changes only files
+under `docs/campaigns/`, so the binaries' source is unchanged. If omega.lock on main moves before the run,
+the run does not start.
+
+Pre-run gate on 905fdfc (as VERDICT-v8), passed before the freeze: `cargo fmt --all --check` OK;
+`cargo clippy --workspace --all-targets -- -D warnings` OK; `AIEN_FORCE_CPU_STUB=1 cargo test -p
+aien-runtime -p aien-cli` 178 passed, 0 failed; `test-rows-v8.sh` with `NP1_EDIT_MERGE` = the frozen binary: 142
+passed, 0 failed. Build and gate logs go with the v2 receipts.
 
 ## 3. Run conditions
 
