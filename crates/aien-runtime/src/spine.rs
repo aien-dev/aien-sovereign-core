@@ -781,25 +781,88 @@ pub const COMPOSE_MAX_ATTEMPTS: u32 = 3;
 /// Wall budget for all attempts of one task: rx_compose_run's 30 s
 /// quiescence wait (not raised) less a 1 s margin (ACCEPTANCE-v3 Section 3b).
 pub const COMPOSE_SKILL_BUDGET: std::time::Duration = std::time::Duration::from_secs(29);
-/// Env setting that replaces the skill budget (milliseconds). Unset = `COMPOSE_SKILL_BUDGET`.
-pub const COMPOSE_BUDGET_ENV: &str = "AIEN_COMPOSE_BUDGET_MS";
-/// Accepted range of `AIEN_COMPOSE_BUDGET_MS`: omega waits budget + 1 000 ms and accepts at most 600 000 ms.
+/// Wall budget of a full-document task (one that creates a new file): 120 s.
+pub const COMPOSE_DOC_BUDGET: std::time::Duration = std::time::Duration::from_secs(120);
+/// Env: wall budget of a small edit, in ms. Unset = `COMPOSE_SKILL_BUDGET` (29 s).
+pub const COMPOSE_EDIT_BUDGET_ENV: &str = "AIEN_COMPOSE_EDIT_BUDGET_MS";
+/// Env: wall budget of a full-document task, in ms. Unset = `COMPOSE_DOC_BUDGET` (120 s).
+pub const COMPOSE_DOC_BUDGET_ENV: &str = "AIEN_COMPOSE_DOC_BUDGET_MS";
+/// Env: output token cap of a full-document task. Unset = `COMPOSE_DOC_MAX_TOKENS_DEFAULT`.
+/// (Small edits keep `AIEN_COMPOSE_MAX_TOKENS`, read by the daemon, default 48.)
+pub const COMPOSE_DOC_MAX_TOKENS_ENV: &str = "AIEN_COMPOSE_DOC_MAX_TOKENS";
+/// The one-budget setting this replaced. Setting it is refused, never ignored.
+pub const COMPOSE_BUDGET_ENV_RETIRED: &str = "AIEN_COMPOSE_BUDGET_MS";
+/// Default output token cap of a full-document task.
+pub const COMPOSE_DOC_MAX_TOKENS_DEFAULT: usize = 1024;
+/// Accepted range of `AIEN_COMPOSE_DOC_MAX_TOKENS`.
+pub const COMPOSE_DOC_MAX_TOKENS_RANGE: std::ops::RangeInclusive<usize> = 16..=4096;
+/// Accepted range of both budget settings: omega waits budget + 1 000 ms and accepts at most 600 000 ms.
 pub const COMPOSE_BUDGET_MS_RANGE: std::ops::RangeInclusive<u64> = 1_000..=599_000;
 /// Margin between the skill budget and omega's settle wait.
 pub const COMPOSE_WAIT_MARGIN: std::time::Duration = std::time::Duration::from_millis(1_000);
 
-/// Parse `AIEN_COMPOSE_BUDGET_MS`. `None` (unset) gives the default 29 s; an
+/// What a compose task is, for limits: a small edit of an existing file, or
+/// the creation of a whole new document. Decided by `ProposalKind::of_target`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProposalKind {
+    Edit,
+    Document,
+}
+
+impl ProposalKind {
+    /// `task_prompt_and_target` returns an edit target only when the goal names
+    /// an existing file (edit mode); no target means a new file (document).
+    pub fn of_target(target: &Option<(String, String)>) -> Self {
+        if target.is_some() {
+            Self::Edit
+        } else {
+            Self::Document
+        }
+    }
+}
+
+/// The two wall budgets in force.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ComposeBudgets {
+    pub edit: std::time::Duration,
+    pub doc: std::time::Duration,
+}
+
+impl Default for ComposeBudgets {
+    fn default() -> Self {
+        Self {
+            edit: COMPOSE_SKILL_BUDGET,
+            doc: COMPOSE_DOC_BUDGET,
+        }
+    }
+}
+
+impl ComposeBudgets {
+    pub fn for_kind(&self, kind: ProposalKind) -> std::time::Duration {
+        match kind {
+            ProposalKind::Edit => self.edit,
+            ProposalKind::Document => self.doc,
+        }
+    }
+}
+
+/// Parse one budget setting named `name`. `None` (unset) gives `default`; an
 /// empty, non-numeric or out-of-range value is refused, never replaced by the default.
-pub fn parse_compose_budget(v: Option<&str>) -> Result<std::time::Duration, String> {
+pub fn parse_compose_budget(
+    name: &str,
+    default: std::time::Duration,
+    v: Option<&str>,
+) -> Result<std::time::Duration, String> {
     let Some(raw) = v else {
-        return Ok(COMPOSE_SKILL_BUDGET);
+        return Ok(default);
     };
-    let ms: u64 = raw.trim().parse().map_err(|_| {
-        format!("{COMPOSE_BUDGET_ENV}={raw:?} is not a whole number of milliseconds")
-    })?;
+    let ms: u64 = raw
+        .trim()
+        .parse()
+        .map_err(|_| format!("{name}={raw:?} is not a whole number of milliseconds"))?;
     if !COMPOSE_BUDGET_MS_RANGE.contains(&ms) {
         return Err(format!(
-            "{COMPOSE_BUDGET_ENV}={ms} is outside {}..={} ms",
+            "{name}={ms} is outside {}..={} ms",
             COMPOSE_BUDGET_MS_RANGE.start(),
             COMPOSE_BUDGET_MS_RANGE.end()
         ));
@@ -807,19 +870,91 @@ pub fn parse_compose_budget(v: Option<&str>) -> Result<std::time::Duration, Stri
     Ok(std::time::Duration::from_millis(ms))
 }
 
-/// The skill budget in force: `AIEN_COMPOSE_BUDGET_MS` or the 29 s default.
-pub fn compose_budget_from_env() -> Result<std::time::Duration, String> {
-    match std::env::var(COMPOSE_BUDGET_ENV) {
-        Ok(v) => parse_compose_budget(Some(&v)),
-        Err(std::env::VarError::NotPresent) => parse_compose_budget(None),
-        Err(e) => Err(format!("{COMPOSE_BUDGET_ENV} unreadable: {e}")),
+/// Parse `AIEN_COMPOSE_DOC_MAX_TOKENS` (same refusal rule as the budgets).
+pub fn parse_compose_doc_max_tokens(v: Option<&str>) -> Result<usize, String> {
+    let Some(raw) = v else {
+        return Ok(COMPOSE_DOC_MAX_TOKENS_DEFAULT);
+    };
+    let n: usize = raw.trim().parse().map_err(|_| {
+        format!("{COMPOSE_DOC_MAX_TOKENS_ENV}={raw:?} is not a whole number of tokens")
+    })?;
+    if !COMPOSE_DOC_MAX_TOKENS_RANGE.contains(&n) {
+        return Err(format!(
+            "{COMPOSE_DOC_MAX_TOKENS_ENV}={n} is outside {}..={} tokens",
+            COMPOSE_DOC_MAX_TOKENS_RANGE.start(),
+            COMPOSE_DOC_MAX_TOKENS_RANGE.end()
+        ));
+    }
+    Ok(n)
+}
+
+fn env_opt(name: &str) -> Result<Option<String>, String> {
+    match std::env::var(name) {
+        Ok(v) => Ok(Some(v)),
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(e) => Err(format!("{name} unreadable: {e}")),
     }
 }
+
+/// Both budgets from the environment. Refuses the retired single-budget
+/// setting (a stale `AIEN_COMPOSE_BUDGET_MS` must not be silently ignored).
+pub fn compose_budgets_from_env() -> Result<ComposeBudgets, String> {
+    if std::env::var_os(COMPOSE_BUDGET_ENV_RETIRED).is_some() {
+        return Err(format!(
+            "{COMPOSE_BUDGET_ENV_RETIRED} is retired; set {COMPOSE_EDIT_BUDGET_ENV} and {COMPOSE_DOC_BUDGET_ENV}"
+        ));
+    }
+    Ok(ComposeBudgets {
+        edit: parse_compose_budget(
+            COMPOSE_EDIT_BUDGET_ENV,
+            COMPOSE_SKILL_BUDGET,
+            env_opt(COMPOSE_EDIT_BUDGET_ENV)?.as_deref(),
+        )?,
+        doc: parse_compose_budget(
+            COMPOSE_DOC_BUDGET_ENV,
+            COMPOSE_DOC_BUDGET,
+            env_opt(COMPOSE_DOC_BUDGET_ENV)?.as_deref(),
+        )?,
+    })
+}
+
+/// The document token cap from the environment.
+pub fn compose_doc_max_tokens_from_env() -> Result<usize, String> {
+    parse_compose_doc_max_tokens(env_opt(COMPOSE_DOC_MAX_TOKENS_ENV)?.as_deref())
+}
+
+/// Reason text of a wall-clock timeout. Stable: `propose_task_with_retries`
+/// classes an attempt as "timeout" by the word "exceeded", and the token-limit
+/// cut (`length_cut_refusal`) never contains it.
+pub fn wall_clock_reason(limit_ms: u128) -> String {
+    format!("model proposal exceeded {limit_ms} ms")
+}
+
 /// Time one full attempt needs, from the v3 measurement: 173-token retry
 /// prompt prefill (2 839 + 896 ms) + 47 decode steps x 166.6 ms + 60 ms
 /// = 11 625 ms, rounded up (ACCEPTANCE-v3 Section 3b). Attempt k > 1 starts
 /// only if at least this much budget is left.
 pub const COMPOSE_ATTEMPT_BUDGET: std::time::Duration = std::time::Duration::from_millis(12_000);
+/// Same rule for a full document. DIAGNOSTIC-LONG-1 (sovereign-core branch
+/// 031756/oq3-long-diag) measured replies of 313..649 tokens finishing by
+/// themselves in 28.6..61.9 s (~88 ms/token plus prefill), so a retry that
+/// has to write a whole document needs about the shortest measured one:
+/// 28.6 s, rounded up to 30 s. With the 120 s budget, a first attempt up to the
+/// longest measured (61.9 s) leaves 58 s and still allows a retry; one that ran
+/// to the token cap (1024 tokens, ~90 s) leaves ~30 s and may not. Capped at
+/// half the budget so a small custom doc budget keeps the retry rule meaningful.
+pub const COMPOSE_DOC_ATTEMPT_BUDGET: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// The per-attempt budget for `kind` under wall budget `budget`.
+pub fn compose_attempt_budget(
+    kind: ProposalKind,
+    budget: std::time::Duration,
+) -> std::time::Duration {
+    match kind {
+        ProposalKind::Edit => COMPOSE_ATTEMPT_BUDGET,
+        ProposalKind::Document => COMPOSE_DOC_ATTEMPT_BUDGET.min(budget / 2),
+    }
+}
 
 /// Assistant-response prefix of the production RunComposeTask template: the
 /// assistant turn starts with it and the model generates the path and the
@@ -1205,6 +1340,8 @@ pub(crate) struct ComposeHome {
     mark: Option<Mark>,
     /// seq of the last mark this home knows of (0 = none yet).
     mark_seq: u64,
+    /// Wall budgets in force; every run sets omega's wait from its own.
+    budgets: ComposeBudgets,
 }
 
 impl ComposeHome {
@@ -1249,6 +1386,8 @@ type TaskPrompt = (String, Option<(String, String)>);
 pub struct ComposeBridge {
     dir: PathBuf,
     proposer: ComposeProposer,
+    /// Proposer for full-document tasks (own token cap); `None` = `proposer`.
+    doc_proposer: Option<ComposeProposer>,
     proposer_label: String,
     home: std::sync::Mutex<Option<ComposeHome>>,
     /// Set when the start-up reconcile failed or was refused (ACCEPTANCE-v3
@@ -1261,10 +1400,17 @@ impl ComposeBridge {
         Self {
             dir,
             proposer,
+            doc_proposer: None,
             proposer_label: proposer_label.to_string(),
             home: std::sync::Mutex::new(None),
             reconcile_failed: std::sync::Mutex::new(None),
         }
+    }
+
+    /// Use `doc_proposer` (its own token cap) for full-document tasks.
+    pub fn with_doc_proposer(mut self, doc_proposer: ComposeProposer) -> Self {
+        self.doc_proposer = Some(doc_proposer);
+        self
     }
 
     pub fn dir(&self) -> &Path {
@@ -1280,7 +1426,7 @@ impl ComposeBridge {
     /// the home then opens without a mark and gets a fresh one.
     fn open_home_marked(&self, rebuilt_from: Option<u64>) -> Result<ComposeHome, String> {
         // Refuse a bad budget before anything is opened (never fall back).
-        let budget = compose_budget_from_env()
+        let budgets = compose_budgets_from_env()
             .map_err(|e| format!("compose home {} refused: {e}", self.dir.display()))?;
         let root = machine_root(&self.dir)?;
         let mark_path = cortex_mark::mark_path(&self.dir);
@@ -1297,9 +1443,11 @@ impl ComposeBridge {
         let (mut compose, info) =
             Compose::open(&self.dir, RootKind::Provisioned, &root, 0xA1E4_0001)
                 .map_err(|e: ComposeError| refusal(&self.dir, &e))?;
-        // omega settles after a fixed wait; keep it one second above the skill budget.
+        // omega settles after a fixed wait. Every run sets it again to its own
+        // budget + 1 s (run_task_inner); here the edit value is checked once, so an
+        // old omega without rxc_host_set_wait_ms refuses a changed edit budget at open.
         compose
-            .set_wait_ms((budget + COMPOSE_WAIT_MARGIN).as_millis() as u32)
+            .set_wait_ms((budgets.edit + COMPOSE_WAIT_MARGIN).as_millis() as u32)
             .map_err(|e| refusal(&self.dir, &e))?;
         let plan = cortex_mark::plan(
             existing.as_ref(),
@@ -1312,6 +1460,10 @@ impl ComposeBridge {
         let proposals: Arc<parking_lot::Mutex<HashMap<u64, SkillOutput>>> = Arc::default();
         let approved: Arc<parking_lot::Mutex<HashMap<u64, String>>> = Arc::default();
         let (pr, pp, proposer) = (prompts.clone(), proposals.clone(), self.proposer.clone());
+        let doc_proposer = self
+            .doc_proposer
+            .clone()
+            .unwrap_or_else(|| self.proposer.clone());
         let pa = approved.clone();
         compose
             .register_skill(COMPOSE_MODEL_SKILL, None, 10, move |task| {
@@ -1322,6 +1474,9 @@ impl ComposeBridge {
                 // edit = None: an approved whole-file proposal never goes
                 // through merge_edit_reply, so the committed bytes are the
                 // approved bytes even when the path already exists.
+                let kind = ProposalKind::of_target(&target);
+                let budget = budgets.for_kind(kind);
+                let attempt_budget = compose_attempt_budget(kind, budget);
                 let fixed = pa.lock().get(&task).cloned();
                 let (out, attempts) = match fixed {
                     Some(text) => {
@@ -1332,26 +1487,23 @@ impl ComposeBridge {
                                 ..Default::default()
                             })
                         };
-                        propose_task_with_retries(
-                            &one,
-                            &prompt,
-                            None,
-                            budget,
-                            COMPOSE_ATTEMPT_BUDGET,
-                            1,
-                        )
+                        propose_task_with_retries(&one, &prompt, None, budget, attempt_budget, 1)
                     }
                     // Fixed template + bounded automatic retry (ACCEPTANCE-v2 3a, 3b),
                     // measured per-attempt budget (ACCEPTANCE-v3 3b); an edit reply
                     // is merged into the content the model was shown (v7 T5).
                     None => {
                         let edit = target.as_ref().map(|(p, c)| (p.as_str(), c.as_str()));
+                        let p = match kind {
+                            ProposalKind::Edit => &proposer,
+                            ProposalKind::Document => &doc_proposer,
+                        };
                         propose_task_with_retries(
-                            proposer.as_ref(),
+                            p.as_ref(),
                             &prompt,
                             edit,
                             budget,
-                            COMPOSE_ATTEMPT_BUDGET,
+                            attempt_budget,
                             COMPOSE_MAX_ATTEMPTS,
                         )
                     }
@@ -1389,6 +1541,7 @@ impl ComposeBridge {
         allen_gate(&self.dir, &mut compose, &info.machine_id);
         let mut home = ComposeHome {
             compose,
+            budgets,
             machine_id: hex(&info.machine_id),
             prompts,
             approved,
@@ -1501,6 +1654,20 @@ impl ComposeBridge {
             *guard = Some(self.open_home()?);
         }
         let home = guard.as_mut().expect("opened above");
+        // Deadlines agree on both sides: omega settles budget + 1 s after the run
+        // starts, the Skill gives up at budget. Set only here, under the lock that
+        // serializes runs, never while rx_compose_run is in flight. An omega without
+        // rxc_host_set_wait_ms refuses a budget that needs a longer wait (no silent 30 s wait).
+        let kind = ProposalKind::of_target(&prompt.1);
+        let wait = home.budgets.for_kind(kind) + COMPOSE_WAIT_MARGIN;
+        home.compose
+            .set_wait_ms(wait.as_millis() as u32)
+            .map_err(|e| {
+                format!(
+                    "compose run refused: {kind:?} budget needs omega settle wait {} ms: {e}",
+                    wait.as_millis()
+                )
+            })?;
         if let Some(t) = approved_text {
             home.approved.lock().insert(task, t.to_string());
         }
