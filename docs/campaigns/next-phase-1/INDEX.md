@@ -17,3 +17,8 @@ Each receipt is named by the sha256 of its content and never edited.
 - `adceb286e490cfd313b06388aeea22441b9819b258a8b3ca5a5a81bec717c651.json` verdict FAIL, sovereign-core 0435a8c355b9402846cafe63d6b9e93c0fc01102 (2026-10-06T20:12Z)
 - `ed746c3ffd2815237b7643adec002b76f11a53f38176f2ca1221c9b5c3a852da.json` verdict FAIL, sovereign-core 0435a8c355b9402846cafe63d6b9e93c0fc01102 (2026-10-06T20:14Z)
 - `9800f3ee291e032ad4f1ff5d982ccbaa549e1847eab33d0aa5ce7da516a1f95f.json` verdict FAIL, sovereign-core 0435a8c355b9402846cafe63d6b9e93c0fc01102 (2026-10-06T20:15Z)
+- `bb059a0a49ab46db7b7ec0521b26f22fa953c21fa055107f55597ec7bea529f3.json` verdict FAIL, sovereign-core 08a24536aac83215b448488acabf59f52041702b (2026-10-07T00:01Z)
+- `d8cc248acede0b7029fa54ce6b2598b573aa63acc38ca2f65b9ccefe1e6d6b7b.json` verdict FAIL, sovereign-core 08a24536aac83215b448488acabf59f52041702b (2026-10-07T00:02Z)
+- `0dd08b9bd207efb72bfcc2b6a9bf8b62f949c7464afa7315c05235a96464104d.json` verdict FAIL, sovereign-core 08a24536aac83215b448488acabf59f52041702b (2026-10-07T00:03Z)
+- `c85631863de60a797ff3f8f56cdfb7dcba46984612b33935cc738e2b32cacc42.json` verdict FAIL, sovereign-core 08a24536aac83215b448488acabf59f52041702b (2026-10-07T00:04Z)
+- `a1bb4415d15da727f9883aa91bef9c0b87560223b6003044490bf3ffd1ce6949.json` verdict FAIL, sovereign-core 08a24536aac83215b448488acabf59f52041702b (2026-10-07T00:05Z)
