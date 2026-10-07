@@ -27,4 +27,6 @@ pub enum Error {
     UnclassifiedTool(String),
     #[error("mcp transport failed: {0}")]
     Transport(String),
+    #[error("approval is no longer reserved for this effect (it was cancelled)")]
+    ApprovalNotReserved,
 }

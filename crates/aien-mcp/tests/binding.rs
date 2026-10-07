@@ -143,6 +143,8 @@ async fn one_grant_spent_from_many_threads_mints_exactly_once() {
     let g = h.desk.issue(&intent, scope("race"), 100);
     let minted = AtomicUsize::new(0);
     let refused = AtomicUsize::new(0);
+    // Winners are kept alive: a dropped effect would release the grant for the next thread.
+    let held = std::sync::Mutex::new(Vec::new());
     std::thread::scope(|s| {
         for _ in 0..16 {
             s.spawn(|| {
@@ -153,8 +155,11 @@ async fn one_grant_spent_from_many_threads_mints_exactly_once() {
                     &g,
                     1,
                 ) {
-                    Ok(_) => minted.fetch_add(1, Ordering::SeqCst),
-                    Err(AuthorityOutcome::Approval(ApprovalError::Consumed)) => {
+                    Ok(e) => {
+                        held.lock().unwrap().push(e);
+                        minted.fetch_add(1, Ordering::SeqCst)
+                    }
+                    Err(AuthorityOutcome::Approval(ApprovalError::Reserved)) => {
                         refused.fetch_add(1, Ordering::SeqCst)
                     }
                     Err(other) => panic!("unexpected {other:?}"),
