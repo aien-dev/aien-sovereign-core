@@ -280,8 +280,9 @@ impl AienRuntimeServer {
         let prompt_tokens = {
             let guard = self.tokenizer.read().expect("tokenizer lock");
             guard.as_ref().and_then(|t| {
-                t.encode(&crate::control::format_chat(t.template(), &messages))
+                crate::control::try_format_chat(t.template(), &messages)
                     .ok()
+                    .and_then(|text| t.encode(&text).ok())
                     .map(|ids| ids.len())
             })
         };
@@ -337,7 +338,8 @@ async fn submit_turn(
     // tokenizer adds the one BOS token.
     let prompt = format!(
         "{}{assistant_prefix}",
-        crate::control::format_chat(tokenizer.template(), &messages)
+        crate::control::try_format_chat(tokenizer.template(), &messages)
+            .map_err(|error| format!("{error}"))?
     );
     let tokens = tokenizer
         .encode(&prompt)
