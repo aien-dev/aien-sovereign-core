@@ -13,6 +13,7 @@
 //! | `at least / no fewer than / no less than / not fewer than / a minimum of / minimum of / min N <noun>`, `N or more <noun>`, `N+ <noun>` | `MinX(N)` |
 //! | `at most / no more than / not more than / a maximum of / maximum of / max / up to N <noun>`, `N or fewer|less <noun>` | `MaxX(N)` |
 //! | `more than N <noun>`, `fewer|less than N <noun>` | `MinX(N+1)`, `MaxX(N-1)` |
+//! | `N <noun> or more|fewer|less`, `N <noun> minimum|maximum`, `no longer|shorter than N <noun>` | `MinX(N)` or `MaxX(N)` |
 //! | `<noun>` = `lines`, `words`; `items`, `steps`, `sections`, `headings`, `questions` (Min only; singular too) | lines, words, list items, numbered steps, headings, questions |
 //! | `N sentences in|per|for|within every|each section` (or `in every section, ... N sentences`) | `MinSentencesPerSection(N)` |
 //! | `sections|headings titled|named|called A, B and C`, `sections: A, B and C` | `RequiredHeadings` |
@@ -22,6 +23,15 @@
 //!
 //! `N` is digits or a number word (`one` to `twenty`, tens up to `hundred`,
 //! `twenty-five`), at least 1.
+//!
+//! Safety net: after the recognizers, any number (digits or one..hundred) within three
+//! words of a countable document noun (line, word, sentence, paragraph, section,
+//! heading, bullet, point, item, step, block, example, question, topic, character, page,
+//! table, row, column), a quantity cue (`twice minimum maximum limit or more/fewer no
+//! longer than`) near such a noun, and heading or word list cues without a number
+//! (`headings for`, `a Summary heading`, `these words:`) that no recognizer consumed is
+//! UNCERTAIN. A bare count ("Keep it to 10 lines", "three sections") is therefore
+//! uncertain, never silent. Numbers without such a noun ("Fix the 2 typos") are ignored.
 //!
 //! Rules that keep it conservative:
 //! - the counted noun must END its clause: closing punctuation, end of goal, a
@@ -137,8 +147,9 @@ const CLAUSE_JOINERS: [&str; 9] = [
 ];
 
 /// Other words that may follow the counted noun without changing its meaning.
-const NOUN_FOLLOWERS: [&str; 9] = [
-    "long", "with", "total", "overall", "titled", "named", "called", "about", "on",
+const NOUN_FOLLOWERS: [&str; 11] = [
+    "please", "thanks", "long", "with", "total", "overall", "titled", "named", "called", "about",
+    "on",
 ];
 const NOUN_FOLLOWERS_2: [&str; 2] = ["including", "containing"];
 
@@ -187,7 +198,9 @@ enum Dir {
 }
 
 /// (cue words, direction, adjustment: +1 strict min, -1 strict max).
-const CUES: [(&[&str], Dir, i64); 20] = [
+const CUES: [(&[&str], Dir, i64); 22] = [
+    (&["no", "longer", "than"], Dir::Max, 0),
+    (&["no", "shorter", "than"], Dir::Min, 0),
     (&["no", "fewer", "than"], Dir::Min, 0),
     (&["no", "less", "than"], Dir::Min, 0),
     (&["not", "fewer", "than"], Dir::Min, 0),
@@ -225,7 +238,15 @@ const VAGUE: [&str; 11] = [
     "below",
 ];
 
-const NOUNS: [&str; 34] = [
+const NOUNS: [&str; 42] = [
+    "topic",
+    "topics",
+    "block",
+    "blocks",
+    "table",
+    "tables",
+    "column",
+    "columns",
     "line",
     "lines",
     "word",
@@ -378,6 +399,27 @@ fn qualifier_ok(toks: &[Tok], j: usize) -> bool {
     }
 }
 
+/// Mark the tokens that start inside the byte range as consumed.
+fn mark_bytes(handled: &mut std::collections::BTreeSet<usize>, toks: &[Tok], lo: usize, hi: usize) {
+    for (i, t) in toks.iter().enumerate() {
+        if t.start >= lo && t.start < hi {
+            handled.insert(i);
+        }
+    }
+}
+
+/// True when the text holds a number next to a countable noun ("5 steps").
+fn has_count_and_noun(t: &str) -> bool {
+    let w: Vec<String> = t
+        .split_whitespace()
+        .map(|x| plain(&x.to_ascii_lowercase()).to_string())
+        .collect();
+    (0..w.len()).any(|i| {
+        matches!(parse_num(&w[i]), Num::Val(_))
+            && (i + 1..=i + 2).any(|j| w.get(j).is_some_and(|x| NOUNS.contains(&x.as_str())))
+    })
+}
+
 /// Text of the goal from token `from` to the end of its clause (at most 10 tokens).
 fn snippet(goal: &str, toks: &[Tok], from: usize, commas: bool) -> String {
     let ends = |raw: &str| {
@@ -397,16 +439,16 @@ fn snippet(goal: &str, toks: &[Tok], from: usize, commas: bool) -> String {
 }
 
 /// Sentence-counting words after the noun: `in|per|for|within [every|each|a|the|any] section(s)`.
-fn per_section_after(toks: &[Tok], j: usize) -> bool {
+fn per_section_after(toks: &[Tok], j: usize) -> Option<usize> {
     let w = |i: usize| toks.get(i).map(|t| t.word.as_str());
     if !matches!(w(j + 1), Some("in" | "per" | "for" | "within" | "under")) {
-        return false;
+        return None;
     }
     let mut k = j + 2;
     if matches!(w(k), Some("every" | "each" | "a" | "the" | "any")) {
         k += 1;
     }
-    matches!(w(k), Some("section" | "sections" | "heading" | "headings"))
+    matches!(w(k), Some("section" | "sections" | "heading" | "headings")).then_some(k)
 }
 
 /// "In every section, write ... N sentences": every|each section earlier in the sentence.
@@ -576,6 +618,29 @@ pub fn analyze(goal: &str) -> Extraction {
         })
     };
     for s in 0..n {
+        // "N <noun> or more|fewer|less" and "N <noun> minimum|maximum".
+        if let (Num::Val(v), Some(noun)) = (
+            parse_num(&toks[s].word),
+            toks.get(s + 1).map(|t| t.word.as_str()),
+        ) {
+            let w = |i: usize| toks.get(i).map(|t| t.word.as_str());
+            let post = match (w(s + 2), w(s + 3)) {
+                (Some("or"), Some("more")) => Some((Dir::Min, s + 3)),
+                (Some("or"), Some("fewer" | "less")) => Some((Dir::Max, s + 3)),
+                (Some("minimum" | "min"), _) => Some((Dir::Min, s + 2)),
+                (Some("maximum" | "max"), _) => Some((Dir::Max, s + 2)),
+                _ => None,
+            };
+            if let Some((dir, end)) = post {
+                if NOUNS.contains(&noun) && !negated_before(&toks, s) && qualifier_ok(&toks, end) {
+                    if let Some(r) = count_req(dir, noun, v) {
+                        add(&mut counts, r);
+                        handled.extend(s..=end);
+                        continue;
+                    }
+                }
+            }
+        }
         // "N or more|fewer|less <noun>" and "N+ <noun>": the number leads.
         let lead = match parse_num(toks[s].word.trim_end_matches('+')) {
             Num::Val(v) if toks[s].word.ends_with('+') => Some((v, Dir::Min, s + 1)),
@@ -621,10 +686,11 @@ pub fn analyze(goal: &str) -> Extraction {
             continue;
         }
         if matches!(noun, "sentences" | "sentence") {
-            if dir == Dir::Min && (per_section_after(&toks, j) || every_section_before(&toks, s)) {
+            let after = per_section_after(&toks, j);
+            if dir == Dir::Min && (after.is_some() || every_section_before(&toks, s)) {
                 let v = (v as i64 + adj) as usize;
                 add(&mut counts, Requirement::MinSentencesPerSection(v));
-                handled.extend(s..=j);
+                handled.extend(s..=after.unwrap_or(j));
             }
             continue;
         }
@@ -652,12 +718,14 @@ pub fn analyze(goal: &str) -> Extraction {
             continue;
         }
         let noun_at = if titled { k - 1 } else { k };
-        let declared = noun_at
-            .checked_sub(1)
-            .and_then(|p| match parse_num(&toks[p].word) {
-                Num::Val(v) => Some(v),
-                _ => None,
-            });
+        let declared_at = [1usize, 2].into_iter().find_map(|d| {
+            let p = noun_at.checked_sub(d)?;
+            matches!(parse_num(&toks[p].word), Num::Val(_)).then_some(p)
+        });
+        let declared = declared_at.and_then(|p| match parse_num(&toks[p].word) {
+            Num::Val(v) => Some(v),
+            _ => None,
+        });
         let region = list_region(goal, toks[k].end);
         let quotes = quoted_items(region);
         let titles: Vec<String> = if quotes.is_empty() {
@@ -678,7 +746,8 @@ pub fn analyze(goal: &str) -> Extraction {
                     headings.push(t);
                 }
             }
-            handled.insert(k);
+            handled.extend(declared_at.unwrap_or(noun_at)..=k);
+            mark_bytes(&mut handled, &toks, toks[k].end, toks[k].end + region.len());
         } else {
             bad(&mut unsure, noun_at.min(k), false);
         }
@@ -697,8 +766,10 @@ pub fn analyze(goal: &str) -> Extraction {
         if !key {
             continue;
         }
-        let items = split_list(list_region(goal, toks[k].end));
+        let region = list_region(goal, toks[k].end);
+        let items = split_list(region);
         let ok = !negated_before(&toks, k)
+            && !items.iter().any(|t| has_count_and_noun(t))
             && !items.is_empty()
             && items.len() <= 12
             && items.iter().all(|t| {
@@ -713,6 +784,7 @@ pub fn analyze(goal: &str) -> Extraction {
                 }
             }
             handled.insert(k);
+            mark_bytes(&mut handled, &toks, toks[k].end, toks[k].end + region.len());
         } else {
             bad(&mut unsure, k, false);
         }
@@ -748,6 +820,7 @@ pub fn analyze(goal: &str) -> Extraction {
                 if let Some(t) = toks.iter().position(|t| t.start == key_at) {
                     handled.insert(t);
                 }
+                mark_bytes(&mut handled, &toks, key_at, end + 1);
             }
             from = end + 1;
         }
@@ -813,7 +886,13 @@ pub fn analyze(goal: &str) -> Extraction {
                     dst.push(t);
                 }
             }
-            handled.insert(k);
+            handled.extend(k..=k + 2);
+            mark_bytes(
+                &mut handled,
+                &toks,
+                toks[k + 2].end,
+                toks[k + 2].end + region.len(),
+            );
         } else {
             bad(&mut unsure, k, false);
         }
@@ -874,6 +953,91 @@ pub fn analyze(goal: &str) -> Extraction {
         }
     }
 
+    // ---- safety net: a countable noun with a number, or a quantity or list cue ----
+    // Anything the recognizers above did not consume is UNCERTAIN, so a
+    // wording nobody listed is reported instead of silently passing.
+    let nm = |i: usize| toks.get(i).map(|t| t.norm.as_str());
+    for (i, tk) in toks.iter().enumerate() {
+        let w = tk.norm.as_str();
+        // N [adjective] [adjective] <noun>
+        if let Num::Val(_) = parse_num(w) {
+            let next = nm(i + 1).unwrap_or("");
+            let pronoun = w == "one"
+                && matches!(
+                    next,
+                    "of" | "can"
+                        | "may"
+                        | "should"
+                        | "must"
+                        | "that"
+                        | "who"
+                        | "which"
+                        | "is"
+                        | "to"
+                        | "more"
+                        | "another"
+                        | "thing"
+                        | "day"
+                        | "time"
+                );
+            if !pronoun {
+                if let Some(j) =
+                    (i + 1..=i + 3).find(|&j| nm(j).is_some_and(|x| NOUNS.contains(&x)))
+                {
+                    if !handled.contains(&i) || !handled.contains(&j) {
+                        bad(&mut unsure, i, true);
+                    }
+                }
+            }
+        }
+        // quantity cues next to a countable noun: twice, minimum, "or more", ...
+        let cue = matches!(
+            w,
+            "twice" | "thrice" | "minimum" | "maximum" | "limit" | "min" | "max"
+        ) || (w == "or" && matches!(nm(i + 1), Some("more" | "fewer" | "less")))
+            || (matches!(w, "longer" | "shorter") && nm(i + 1) == Some("than"));
+        if cue && !handled.contains(&i) {
+            let lo = i.saturating_sub(3);
+            if (lo..=i + 3).any(|j| nm(j).is_some_and(|x| NOUNS.contains(&x))) {
+                bad(&mut unsure, i.saturating_sub(1), true);
+            }
+        }
+        // heading and word lists without a number
+        let heading_list = matches!(w, "heading" | "headings")
+            && (nm(i + 1) == Some("for")
+                || tk.raw.ends_with(':')
+                || (i >= 2
+                    && matches!(nm(i - 2), Some("a" | "the"))
+                    && i >= 3
+                    && matches!(
+                        nm(i - 3),
+                        Some(
+                            "needs"
+                                | "need"
+                                | "must"
+                                | "should"
+                                | "have"
+                                | "has"
+                                | "include"
+                                | "includes"
+                                | "contain"
+                                | "contains"
+                                | "with"
+                                | "and"
+                        )
+                    )));
+        let word_list = matches!(w, "word" | "words")
+            && (tk.raw.ends_with(':')
+                || (i >= 1
+                    && matches!(
+                        nm(i - 1),
+                        Some("these" | "following" | "those" | "the" | "key")
+                    )));
+        if (heading_list || word_list) && !handled.contains(&i) {
+            bad(&mut unsure, i.saturating_sub(2), false);
+        }
+    }
+
     let mut requirements = counts;
     if !headings.is_empty() {
         requirements.push(Requirement::RequiredHeadings(headings));
@@ -889,9 +1053,14 @@ pub fn analyze(goal: &str) -> Extraction {
     }
     unsure.sort_by_key(|u| u.0);
     let mut uncertain: Vec<String> = Vec::new();
-    for (_, t) in unsure {
-        if !uncertain.contains(&t) {
-            uncertain.push(t);
+    let all: Vec<String> = unsure.into_iter().map(|u| u.1).collect();
+    for t in &all {
+        // A span inside a longer reported span is the same finding.
+        let inside = all
+            .iter()
+            .any(|o| o.len() > t.len() && o.contains(t.as_str()));
+        if !inside && !uncertain.contains(t) {
+            uncertain.push(t.clone());
         }
     }
     Extraction {

@@ -66,6 +66,16 @@ pub struct ApprovedProposal {
     /// (crate::approved_auth). Never caller text: only the desk key holder
     /// can make it.
     pub approval_mac: String,
+    /// The goal text whose measurable requirements the approved bytes must
+    /// meet (crate::requirements), bound by `requirements_mac`. `Some("")` is
+    /// an explicit, signed "no requirements"; `None` (field missing) is
+    /// refused: an absent binding is never read as an empty requirement set.
+    #[serde(default)]
+    pub requirements: Option<String>,
+    /// HMAC-SHA256 (hex) under the desk key over the approval binding and
+    /// `requirements` (crate::approved_auth::DeskKey::sign_requirements).
+    #[serde(default)]
+    pub requirements_mac: String,
 }
 
 /// What a committed approved proposal hands to the effect ledger.
@@ -204,7 +214,32 @@ pub fn verify(p: &ApprovedProposal) -> Result<String, String> {
             "approved_proposal_sha256 does not match {content, path}",
         ));
     }
+    if p.requirements.is_none() {
+        return Err(refuse(
+            "RequirementsUnbound",
+            "the approval carries no requirement binding (requirements); an absent binding is refused, sign an empty goal for none",
+        ));
+    }
     proposal_text(&p.path, &p.content)
+}
+
+/// The requirements the desk bound to this approval, checked on the exact
+/// approved content (the bytes that would be saved). Uncertain wording refuses.
+fn check_bound_requirements(p: &ApprovedProposal) -> Result<(), String> {
+    let goal = p.requirements.as_deref().ok_or_else(|| {
+        refuse(
+            "RequirementsUnbound",
+            "the approval carries no requirement binding",
+        )
+    })?;
+    let ex = crate::requirements::analyze(goal);
+    if let Some(why) = ex.refusal() {
+        return Err(refuse("RequirementsUncertain", why));
+    }
+    match crate::requirements::refusal_reason(&ex.requirements, &p.content) {
+        Some(why) => Err(refuse("RequirementsUnmet", why)),
+        None => Ok(()),
+    }
 }
 
 /// The hook over one compose bridge (the daemon's, or a test's). Replay
@@ -246,6 +281,9 @@ impl ProposerHook {
             desk.authenticate(p, Path::new(workspace))
         })()
         .map_err(|e| refusal(e, None))?;
+        // The goal requirements bound by the desk, checked on the exact approved
+        // bytes BEFORE any claim, run or commit.
+        check_bound_requirements(p).map_err(|e| refusal(e, None))?;
         let keys = ClaimKeys {
             approval_key: approval_key(&identity),
             request_id: p.request_id.clone(),

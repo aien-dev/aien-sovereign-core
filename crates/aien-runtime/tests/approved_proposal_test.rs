@@ -54,6 +54,8 @@ fn unsigned(request: &str, approval: &str) -> ApprovedProposal {
         approved_proposal_sha256: interplane_sha(PATH, CONTENT),
         content_sha256: sha(CONTENT.as_bytes()),
         approval_mac: String::new(),
+        requirements: Some(String::new()),
+        requirements_mac: String::new(),
     }
 }
 
@@ -69,7 +71,7 @@ fn ws_of(b: &ComposeBridge) -> std::path::PathBuf {
 }
 
 fn sign(b: &ComposeBridge, mut p: ApprovedProposal) -> ApprovedProposal {
-    p.approval_mac = desk(b).sign(&p, &ws_of(b));
+    desk(b).seal(&mut p, &ws_of(b));
     p
 }
 
@@ -809,4 +811,132 @@ fn approved_document_with_fences_is_saved_byte_exact_or_not_done() {
     let disk = std::fs::read(&tgt2).unwrap();
     assert_eq!(disk, FENCED_DOC.as_bytes());
     assert_eq!(sha(&disk), p2.content_sha256);
+}
+
+// ---- goal requirements bound into the desk-signed approval ----
+
+/// `unsigned` with a requirement goal, sealed by the desk.
+fn with_goal(
+    b: &ComposeBridge,
+    request: &str,
+    approval: &str,
+    goal: Option<&str>,
+) -> ApprovedProposal {
+    let mut p = unsigned(request, approval);
+    p.requirements = goal.map(str::to_string);
+    sign(b, p)
+}
+
+#[test]
+fn bound_requirements_the_bytes_miss_are_refused_and_nothing_is_consumed() {
+    let _turn = turn();
+    let (_tmp, b, hook, ws) = setup();
+    let p = with_goal(
+        &b,
+        "req-rq1",
+        "appr-rq1",
+        Some("write NOTES.md in at least 5 lines"),
+    );
+    let e = refused(hook.submit(&p, &ws), "RequirementsUnmet");
+    assert!(
+        e.detail.contains("at least 5 non-empty lines, found 1"),
+        "{e}"
+    );
+    // Refused before the claim: no replay claim was consumed, nothing was
+    // written, and the same ids still work for bytes that meet the goal.
+    assert!(!Path::new(&ws).join(PATH).exists());
+    if !aien_omega_compose::LINKED {
+        return;
+    }
+    let ok = with_goal(
+        &b,
+        "req-rq1",
+        "appr-rq1",
+        Some("write NOTES.md in at least 1 line."),
+    );
+    let r = committed(hook.submit(&ok, &ws));
+    assert_eq!(r.content_sha256, sha(CONTENT.as_bytes()));
+    assert_eq!(
+        r.task.as_ref().unwrap().proposal_content_sha256.as_deref(),
+        Some(r.content_sha256.as_str())
+    );
+}
+
+#[test]
+fn bytes_meeting_the_bound_requirements_commit_with_equal_sha256() {
+    let _turn = turn();
+    let (_tmp, b, hook, ws) = setup();
+    let p = with_goal(
+        &b,
+        "req-rq2",
+        "appr-rq2",
+        Some("write it in at least 1 line"),
+    );
+    let out = hook.submit(&p, &ws);
+    if !aien_omega_compose::LINKED {
+        stub_refused(out);
+        return;
+    }
+    let r = committed(out);
+    let t = r.task.as_ref().unwrap();
+    assert!(t.committed);
+    assert_eq!(r.content_sha256, sha(CONTENT.as_bytes()));
+    assert_eq!(
+        t.proposal_content_sha256.as_deref(),
+        Some(r.content_sha256.as_str())
+    );
+}
+
+#[test]
+fn explicitly_signed_empty_requirements_are_allowed() {
+    let _turn = turn();
+    let (_tmp, b, hook, ws) = setup();
+    let p = with_goal(&b, "req-rq3", "appr-rq3", Some(""));
+    let out = hook.submit(&p, &ws);
+    if !aien_omega_compose::LINKED {
+        stub_refused(out);
+        return;
+    }
+    committed(out);
+}
+
+#[test]
+fn missing_requirement_binding_is_refused_even_when_signed() {
+    let _turn = turn();
+    let (_tmp, b, hook, ws) = setup();
+    let p = with_goal(&b, "req-rq4", "appr-rq4", None);
+    // Refused in the checks that need no compose home, stub build included.
+    refused(hook.submit(&p, &ws), "RequirementsUnbound");
+}
+
+#[test]
+fn tampered_requirement_set_fails_the_mac() {
+    let _turn = turn();
+    let (_tmp, b, hook, ws) = setup();
+    // The desk signed a demanding goal; the caller swaps in an empty one.
+    let mut p = with_goal(
+        &b,
+        "req-rq5",
+        "appr-rq5",
+        Some("write NOTES.md in at least 5 lines"),
+    );
+    p.requirements = Some(String::new());
+    refused(hook.submit(&p, &ws), "Unauthenticated");
+    // And a bound goal cannot be dropped to None either.
+    let mut q = with_goal(&b, "req-rq6", "appr-rq6", Some(""));
+    q.requirements = None;
+    refused(hook.submit(&q, &ws), "RequirementsUnbound");
+}
+
+#[test]
+fn uncertain_bound_requirements_are_refused() {
+    let _turn = turn();
+    let (_tmp, b, hook, ws) = setup();
+    let p = with_goal(
+        &b,
+        "req-rq7",
+        "appr-rq7",
+        Some("at least 3 lines of context"),
+    );
+    refused(hook.submit(&p, &ws), "RequirementsUncertain");
 }

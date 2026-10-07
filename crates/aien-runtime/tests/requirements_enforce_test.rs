@@ -234,7 +234,6 @@ fn clean_goals_have_no_uncertain_spans() {
         "do not use tables. Write at least 20 lines.",
         "Add the line \"- add dark mode\" under the \"## Planned\" heading in ROADMAP.md.",
         "list three reasons",
-        "a 2 page summary",
     ] {
         assert!(analyze(g).uncertain.is_empty(), "{g}: {:?}", analyze(g));
     }
@@ -534,4 +533,71 @@ fn linked_g2_original_reply_exhausts_and_nothing_is_written() {
         .unwrap()
         .contains("not covered: publishing"));
     assert_eq!(std::fs::read_dir(&ws).unwrap().count(), 0);
+}
+
+// ---- review round: nothing that looks like a requirement passes silently ----
+
+#[test]
+fn sixteen_review_goals_are_recognized_or_uncertain_never_silent() {
+    for g in [
+        "run to 30 lines or more",
+        "25 lines minimum",
+        "Keep it to 10 lines",
+        "no longer than 40 lines",
+        "Limit it to 80 words",
+        "Use each of these words: alpha, beta",
+        "Include headings for A and B",
+        "needs a Summary heading and a Risks heading",
+        "three sections",
+        "ten bullet points",
+        "Give it two code blocks",
+        "One code block only",
+        "Three paragraphs",
+        "Cover at least 4 topics: a, b, c, d",
+        "Each section needs 2 sentences",
+        "say the word 'canary' at least twice",
+    ] {
+        let ex = analyze(g);
+        assert!(
+            !ex.requirements.is_empty() || !ex.uncertain.is_empty(),
+            "silent: {g}"
+        );
+    }
+    // the common ones are recognized properly
+    assert_eq!(extract("run to 30 lines or more"), [MinLines(30)]);
+    assert_eq!(extract("25 lines minimum"), [MinLines(25)]);
+    assert_eq!(extract("no longer than 40 lines"), [MaxLines(40)]);
+}
+
+#[test]
+fn false_positive_guards_stay_silent() {
+    for g in [
+        "Fix the 2 typos",
+        "version 3.2 notes",
+        "10 minute setup guide",
+        "5 tests",
+        "Add the line \"- x\" under the \"## Planned\" heading in ROADMAP.md.",
+        "Update section 2 of the README",
+        "Create 2024-report.md with a short summary",
+    ] {
+        let ex = analyze(g);
+        assert!(
+            ex.requirements.is_empty() && ex.uncertain.is_empty(),
+            "{g}: {ex:?}"
+        );
+    }
+}
+
+#[test]
+fn a_count_after_covering_is_a_count_or_uncertain_never_a_topic() {
+    let ex = analyze("Write GUIDE.md covering 5 steps.");
+    assert!(ex.requirements.is_empty(), "{ex:?}");
+    assert!(!ex.uncertain.is_empty());
+}
+
+#[test]
+fn trailing_courtesy_words_are_tolerated() {
+    assert_eq!(extract("At most 15 lines please."), [MaxLines(15)]);
+    assert!(analyze("At most 15 lines please.").uncertain.is_empty());
+    assert_eq!(extract("at least 12 lines, thanks"), [MinLines(12)]);
 }

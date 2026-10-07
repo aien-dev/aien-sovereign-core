@@ -1400,6 +1400,9 @@ pub(crate) fn propose_approved(
     propose_task_checked(&one, prompt, None, reqs, budget, attempt_budget, 1)
 }
 
+#[cfg(test)]
+pub(crate) const TEST_DROP_RECORD_MARKER: &str = "drop-the-record-marker";
+
 /// Why a task is refused when its requirement record is gone (issue #289).
 pub(crate) const MISSING_RECORD_REASON: &str =
     "requirement record missing for this task: refused, an absent record is never treated as no requirements";
@@ -1776,6 +1779,12 @@ impl ComposeBridge {
                 };
                 let h = out.as_ref().ok().map(|t| proposal_handle(t));
                 pp.lock().insert(task, (out, attempts));
+                // Test seam (compiled only into unit tests): lose the requirement
+                // record between the Skill and AEGIS verify, as a bug would (#289).
+                #[cfg(test)]
+                if prompt.contains(TEST_DROP_RECORD_MARKER) {
+                    pr.lock().remove(&task);
+                }
                 h
             })
             .map_err(|e| format!("compose register skill: {e}"))?;
@@ -2409,5 +2418,48 @@ mod verify_boundary_tests {
         assert_eq!(a.len(), 1);
         assert_eq!(a[0].outcome, "refused");
         assert!(a[0].text.is_none());
+    }
+}
+
+#[cfg(test)]
+mod verify_callback_integration_tests {
+    use super::*;
+
+    fn bridge(dir: &std::path::Path) -> ComposeBridge {
+        let proposer: ComposeProposer = Arc::new(|_: &str, _: std::time::Duration| {
+            Ok(Generation {
+                text: "filename: DOC.md\na\nb\nc\n".into(),
+                finish_reason: Some("eos".into()),
+                ..Default::default()
+            })
+        });
+        ComposeBridge::new(dir.join("compose"), proposer, "test:verify-callback")
+    }
+
+    /// Issue #289 through the real compose run and the real verify callback:
+    /// the same document commits with its requirement record and is refused
+    /// by AEGIS (nothing committed, no promotion) when the record is gone.
+    #[test]
+    fn lost_requirement_record_is_refused_by_the_real_verify_callback() {
+        if !aien_omega_compose::LINKED {
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = tmp.path().join("ws");
+        std::fs::create_dir_all(&ws).unwrap();
+        let b = bridge(tmp.path());
+        let ok = b.run_task("write DOC.md in at least 3 lines", ws.to_str().unwrap());
+        let ControlResponse::ComposeTaskResult(ok) = ok else {
+            panic!("{ok:?}")
+        };
+        assert!(ok.committed, "{ok:?}");
+        let goal = format!("write DOC2.md in at least 3 lines {TEST_DROP_RECORD_MARKER}");
+        let lost = b.run_task(&goal, ws.to_str().unwrap());
+        let ControlResponse::ComposeTaskResult(lost) = lost else {
+            panic!("{lost:?}")
+        };
+        assert!(!lost.committed, "{lost:?}");
+        assert_eq!(lost.aegis_pass_mask & 1, 0, "{lost:?}");
+        assert_eq!(lost.cx_promotion, 0, "{lost:?}");
     }
 }

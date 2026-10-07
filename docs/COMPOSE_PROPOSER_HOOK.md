@@ -27,7 +27,12 @@ returns Ok only if the run committed exactly the approved text.
 
 ## What the ledger hands over (`ApprovedProposal`)
 request_id, trace_id, approval_id, approver, path, content,
-approved_proposal_sha256, content_sha256, approval_mac. The hook returns
+approved_proposal_sha256, content_sha256, approval_mac, requirements, requirements_mac. `requirements` is the original goal text whose measurable
+requirements the approved bytes must meet; `requirements_mac` is the desk key's HMAC over the approval binding and that text (tag `aien.requirements.v1`), so
+a caller cannot swap or drop it. `Some("")` is a signed "no requirements"; a missing
+`requirements` is refused (`RequirementsUnbound`), a goal with an unreadable requirement
+is refused (`RequirementsUncertain`), and bytes that miss a requirement are refused
+(`RequirementsUnmet`), all before any claim or compose run. The hook returns
 `ApprovedComposeReport`: state (COMMITTED | ALREADY_COMMITTED), the same
 ids, compose_proposal_sha256, grant_links, desk_key_id, approval_key,
 replay_claim and the compose `task` report (None for ALREADY_COMMITTED); or
