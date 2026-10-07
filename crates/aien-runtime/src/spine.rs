@@ -781,6 +781,40 @@ pub const COMPOSE_MAX_ATTEMPTS: u32 = 3;
 /// Wall budget for all attempts of one task: rx_compose_run's 30 s
 /// quiescence wait (not raised) less a 1 s margin (ACCEPTANCE-v3 Section 3b).
 pub const COMPOSE_SKILL_BUDGET: std::time::Duration = std::time::Duration::from_secs(29);
+/// Env setting that replaces the skill budget (milliseconds). Unset = `COMPOSE_SKILL_BUDGET`.
+pub const COMPOSE_BUDGET_ENV: &str = "AIEN_COMPOSE_BUDGET_MS";
+/// Accepted range of `AIEN_COMPOSE_BUDGET_MS`: omega waits budget + 1 000 ms and accepts at most 600 000 ms.
+pub const COMPOSE_BUDGET_MS_RANGE: std::ops::RangeInclusive<u64> = 1_000..=599_000;
+/// Margin between the skill budget and omega's settle wait.
+pub const COMPOSE_WAIT_MARGIN: std::time::Duration = std::time::Duration::from_millis(1_000);
+
+/// Parse `AIEN_COMPOSE_BUDGET_MS`. `None` (unset) gives the default 29 s; an
+/// empty, non-numeric or out-of-range value is refused, never replaced by the default.
+pub fn parse_compose_budget(v: Option<&str>) -> Result<std::time::Duration, String> {
+    let Some(raw) = v else {
+        return Ok(COMPOSE_SKILL_BUDGET);
+    };
+    let ms: u64 = raw.trim().parse().map_err(|_| {
+        format!("{COMPOSE_BUDGET_ENV}={raw:?} is not a whole number of milliseconds")
+    })?;
+    if !COMPOSE_BUDGET_MS_RANGE.contains(&ms) {
+        return Err(format!(
+            "{COMPOSE_BUDGET_ENV}={ms} is outside {}..={} ms",
+            COMPOSE_BUDGET_MS_RANGE.start(),
+            COMPOSE_BUDGET_MS_RANGE.end()
+        ));
+    }
+    Ok(std::time::Duration::from_millis(ms))
+}
+
+/// The skill budget in force: `AIEN_COMPOSE_BUDGET_MS` or the 29 s default.
+pub fn compose_budget_from_env() -> Result<std::time::Duration, String> {
+    match std::env::var(COMPOSE_BUDGET_ENV) {
+        Ok(v) => parse_compose_budget(Some(&v)),
+        Err(std::env::VarError::NotPresent) => parse_compose_budget(None),
+        Err(e) => Err(format!("{COMPOSE_BUDGET_ENV} unreadable: {e}")),
+    }
+}
 /// Time one full attempt needs, from the v3 measurement: 173-token retry
 /// prompt prefill (2 839 + 896 ms) + 47 decode steps x 166.6 ms + 60 ms
 /// = 11 625 ms, rounded up (ACCEPTANCE-v3 Section 3b). Attempt k > 1 starts
@@ -1245,6 +1279,9 @@ impl ComposeBridge {
     /// `rebuilt_from` = the seq of a mark RecoverComposeHome just set aside:
     /// the home then opens without a mark and gets a fresh one.
     fn open_home_marked(&self, rebuilt_from: Option<u64>) -> Result<ComposeHome, String> {
+        // Refuse a bad budget before anything is opened (never fall back).
+        let budget = compose_budget_from_env()
+            .map_err(|e| format!("compose home {} refused: {e}", self.dir.display()))?;
         let root = machine_root(&self.dir)?;
         let mark_path = cortex_mark::mark_path(&self.dir);
         let existing = match rebuilt_from {
@@ -1260,6 +1297,10 @@ impl ComposeBridge {
         let (mut compose, info) =
             Compose::open(&self.dir, RootKind::Provisioned, &root, 0xA1E4_0001)
                 .map_err(|e: ComposeError| refusal(&self.dir, &e))?;
+        // omega settles after a fixed wait; keep it one second above the skill budget.
+        compose
+            .set_wait_ms((budget + COMPOSE_WAIT_MARGIN).as_millis() as u32)
+            .map_err(|e| refusal(&self.dir, &e))?;
         let plan = cortex_mark::plan(
             existing.as_ref(),
             &info.machine_id,
@@ -1295,7 +1336,7 @@ impl ComposeBridge {
                             &one,
                             &prompt,
                             None,
-                            COMPOSE_SKILL_BUDGET,
+                            budget,
                             COMPOSE_ATTEMPT_BUDGET,
                             1,
                         )
@@ -1309,7 +1350,7 @@ impl ComposeBridge {
                             proposer.as_ref(),
                             &prompt,
                             edit,
-                            COMPOSE_SKILL_BUDGET,
+                            budget,
                             COMPOSE_ATTEMPT_BUDGET,
                             COMPOSE_MAX_ATTEMPTS,
                         )

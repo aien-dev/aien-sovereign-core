@@ -6,8 +6,9 @@
 //! in a stub build they check that the bridge reports the missing library.
 use aien_runtime::control::{ComposeRecallReport, ComposeTaskReport, ControlResponse};
 use aien_runtime::spine::{
-    check_file_proposal, parse_file_proposal, propose_with_retries, ComposeBridge, ComposeProposer,
-    Generation, COMPOSE_ATTEMPT_BUDGET, COMPOSE_MAX_ATTEMPTS, COMPOSE_SKILL_BUDGET,
+    check_file_proposal, parse_compose_budget, parse_file_proposal, propose_with_retries,
+    ComposeBridge, ComposeProposer, Generation, COMPOSE_ATTEMPT_BUDGET, COMPOSE_MAX_ATTEMPTS,
+    COMPOSE_SKILL_BUDGET,
 };
 use std::sync::Arc;
 
@@ -422,7 +423,9 @@ ok
 fn measured_attempt_budget_admits_a_second_attempt() {
     use std::time::Duration;
     assert!(COMPOSE_SKILL_BUDGET < Duration::from_secs(30));
+    // the default (AIEN_COMPOSE_BUDGET_MS unset): omega's 30 s wait less 1 s
     assert_eq!(COMPOSE_SKILL_BUDGET, Duration::from_secs(29));
+    assert_eq!(parse_compose_budget(None), Ok(COMPOSE_SKILL_BUDGET));
     assert_eq!(COMPOSE_ATTEMPT_BUDGET, Duration::from_millis(12_000));
     // 2 839 + 896 + 47 x 166.6 + 60 ms, the measured full retry attempt
     let measured: [f64; 4] = [2_839.0, 896.0, 47.0 * 166.6, 60.0];
@@ -610,4 +613,42 @@ fn finish_reason_labels_match_acceptance_v5() {
         aien_runtime::finish_reason_label(&FinishReason::Preempted),
         "preempted"
     );
+}
+
+/// AIEN_COMPOSE_BUDGET_MS: unset gives 29 s; 1 000..=599 000 ms is accepted;
+/// anything else is refused with a message, never replaced by the default.
+#[test]
+fn compose_budget_setting_parses_and_refuses() {
+    use std::time::Duration;
+    assert_eq!(parse_compose_budget(None), Ok(Duration::from_secs(29)));
+    assert_eq!(
+        parse_compose_budget(Some("29000")),
+        Ok(COMPOSE_SKILL_BUDGET)
+    );
+    assert_eq!(
+        parse_compose_budget(Some("90000")),
+        Ok(Duration::from_secs(90))
+    );
+    assert_eq!(
+        parse_compose_budget(Some(" 1000 ")),
+        Ok(Duration::from_secs(1))
+    );
+    assert_eq!(
+        parse_compose_budget(Some("599000")),
+        Ok(Duration::from_millis(599_000))
+    );
+    for bad in [
+        "",
+        "abc",
+        "-5",
+        "1.5",
+        "999",
+        "0",
+        "599001",
+        "600000",
+        "99999999999999999999",
+    ] {
+        let e = parse_compose_budget(Some(bad)).expect_err(bad);
+        assert!(e.contains("AIEN_COMPOSE_BUDGET_MS"), "{bad}: {e}");
+    }
 }

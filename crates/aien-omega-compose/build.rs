@@ -21,6 +21,7 @@ use std::process::Command;
 
 fn main() {
     println!("cargo:rustc-check-cfg=cfg(has_omega_compose)");
+    println!("cargo:rustc-check-cfg=cfg(has_omega_wait_ms)");
     for v in [
         "AIEN_FORCE_CPU_STUB",
         "AIEN_OMEGA_COMPOSE_LIB",
@@ -110,7 +111,16 @@ fn main() {
         "make librx_compose.a failed in {}",
         dir.display()
     );
+    detect_wait_ms(&dir);
     link(&out.join("librx_compose.a"));
+}
+
+/// Set `has_omega_wait_ms` when the omega checkout's host header declares `rxc_host_set_wait_ms`.
+fn detect_wait_ms(dir: &Path) {
+    let h = dir.join("src/runtime/rxc_host_abi.h");
+    if std::fs::read_to_string(h).is_ok_and(|s| s.contains("rxc_host_set_wait_ms")) {
+        println!("cargo:rustc-cfg=has_omega_wait_ms");
+    }
 }
 
 fn link(lib: &Path) {
