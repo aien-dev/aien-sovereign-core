@@ -1474,7 +1474,8 @@ pub async fn run_daemon_server() {
             tensor_backend,
             sched_cfg,
             4096,
-            &aien_runtime::shared_kv::read_mem_available,
+            &aien_runtime::shared_kv::read_mem_available_checked,
+            aien_runtime::shared_kv::allow_unchecked_memory_from_env(),
         ) {
             Ok(parts) => parts,
             Err(fatal) => {
@@ -1489,6 +1490,7 @@ pub async fn run_daemon_server() {
         if let Err(fatal) = aien_inference_abi::open_gpu_session_with_retry(
             aien_inference_abi::GPU_SESSION_OPEN_ATTEMPTS,
             aien_inference_abi::GPU_SESSION_RETRY_DELAY,
+            aien_inference_abi::GPU_SESSION_OPEN_DEADLINE,
             &aien_runtime::shared_kv::read_mem_available,
         ) {
             eprintln!("Fatal: {}", fatal.red().bold());
