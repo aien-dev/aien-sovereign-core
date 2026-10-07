@@ -750,25 +750,31 @@ fn fence_line(l: &str) -> Option<(usize, bool)> {
 /// the same length that carry an info string (` ```bash `) open a nested block
 /// that its own bare fence must close first. If that scan finds no balanced
 /// close (unbalanced reply), the LAST bare fence of sufficient length is
-/// taken, so content is never cut at an inner fence. With no bare fence at
+/// taken, so content is never cut at an inner fence. A bare fence at depth 0
+/// that still has fences after it is a bare inner opener, so the outer fence
+/// is closed by the last fence of the reply. Limit: prose that itself holds a
+/// fence AFTER the real close is read as part of the file. With no bare fence at
 /// all there is no close: the caller keeps the whole body.
 fn outer_fence_close(body: &[&str], open_len: usize) -> Option<usize> {
+    let fences: Vec<(usize, bool)> = body
+        .iter()
+        .enumerate()
+        .filter_map(|(i, l)| fence_line(l).filter(|f| f.0 >= open_len).map(|f| (i, f.1)))
+        .collect();
     let mut depth = 0usize;
     let mut last_bare = None;
-    for (i, l) in body.iter().enumerate() {
-        let Some((n, info)) = fence_line(l) else {
-            continue;
-        };
-        if n < open_len {
-            continue;
-        }
+    for (k, &(i, info)) in fences.iter().enumerate() {
         if info {
             depth += 1;
         } else if depth > 0 {
             depth -= 1;
             last_bare = Some(i);
-        } else {
+        } else if k + 1 == fences.len() {
             return Some(i);
+        } else {
+            // A bare fence with more fences after it opens a bare inner block;
+            // only the final fence can then be the outer close.
+            depth += 1;
         }
     }
     last_bare

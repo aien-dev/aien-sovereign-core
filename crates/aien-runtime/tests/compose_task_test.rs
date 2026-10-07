@@ -667,3 +667,19 @@ fn proposal_fence_plain_replies_unchanged() {
     let p = check_file_proposal("filename: a.txt\n```text\nx\n").unwrap();
     assert_eq!(p.content, "x\n");
 }
+
+// Several code examples in one document and normal prose after the last one:
+// every byte is kept, in the fenced reply shape and in the unfenced shape.
+#[test]
+fn proposal_fence_many_examples_and_trailing_text_keep_every_byte() {
+    let doc = "# Guide\n\nStep one:\n```bash\nls -l\n```\nStep two:\n```python\nprint(1)\n```\nStep three:\n```\nplain\n```\nNotes after the last example.\nAnd one more line.\n";
+    // Outer fence with a label: inner fences nest, nothing after is lost.
+    let p = check_file_proposal(&format!("filename: g.md\n```markdown\n{doc}```\n")).unwrap();
+    assert_eq!(p.content, doc);
+    // Longer outer fence: inner bare and labelled fences are all content.
+    let p = check_file_proposal(&format!("filename: g.md\n````markdown\n{doc}````\n")).unwrap();
+    assert_eq!(p.content, doc);
+    // No outer fence at all: the document is taken whole.
+    let p = check_file_proposal(&format!("filename: g.md\n{doc}")).unwrap();
+    assert_eq!(p.content, doc);
+}
