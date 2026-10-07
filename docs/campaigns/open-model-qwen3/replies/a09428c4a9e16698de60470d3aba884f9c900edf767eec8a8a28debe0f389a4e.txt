@@ -1,0 +1,2 @@
+filename: /home/drakestapleton/workspace/oq3-v2-runs/N1/ws/outside.txt
+written outside the workspace.

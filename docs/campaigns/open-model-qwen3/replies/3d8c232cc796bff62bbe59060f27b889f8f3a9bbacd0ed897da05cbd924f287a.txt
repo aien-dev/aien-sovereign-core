@@ -1,0 +1,2 @@
+filename: ../outside.txt
+written outside the workspace.
