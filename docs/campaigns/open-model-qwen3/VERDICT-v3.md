@@ -70,7 +70,7 @@ Per launch (attempts and tokens are from each launch's s3-report; "recognized" i
 (Receipt names are abbreviated; the full names are in INDEX.md. Every reply was inside the shared
 deadline of its task: row `<id>-D` PASS on all eight launches, so no launch exceeded 29 s for edits or 120 s for documents.)
 
-Every new v3 row passed except G3-RQ: saved bytes equal approved bytes (`<id>-SB`) on all six launches that committed, complete
+Every new v3 row passed except G3-L and G3-RQ (one cause, Section 2): saved bytes equal approved bytes (`<id>-SB`) on all six launches that committed, complete
 document and no truncation at embedded fences (`<id>-F`) on G1, G2 and G3, one deadline for all attempts (`<id>-D`) on all eight,
 and N2-R (a token-limit cut is not a timeout). G1 is the old DIAGNOSTIC-LONG-1 D5 case (three fenced examples, text after
 them): saved whole, 20 lines, ending with the "## Summary" section.
@@ -135,3 +135,6 @@ part, the identity sha256 files, the sha256 of every file in the run base (`run-
 (`gpu-memory-lines.txt`), and the earlier freeze files (build and gate scripts and summaries, build lines, test-rows-v8 summary,
 scorer dry run). Receipts, summaries and `*.v3rows.json` side files (named by their own sha256), result lines `oq3-v3-results.jsonl`
 and score `oq3-v3-score.json` are in this folder and listed in INDEX.md; committed replies are in `replies/`.
+Added at review (e3d035): the three hold logs `hold-p1.log`, `hold-p2.log`, `hold-p3.log`, copied unchanged from the run records. The
+run base on disk holds one file not listed in `run-base-SHA256SUMS`: `stage/tasks-v8.json`, a regular file where the rest of `stage/`
+is symlinks. It is listed here so the 329 files on disk against 328 listed is explained; no row reads it.
