@@ -7,6 +7,7 @@ authors = ["Drake Stapleton <aien@aienos.com>"]
 description = "Sovereign Gemini-style Terminal CLI & Agent Harness for DGX Spark"
 
 [dependencies]
+aien-omega-compose = { path = "../aien-omega-compose" }
 tokio = { version = "1", features = ["full"] }
 reqwest = { version = "0.12", features = ["json", "stream"] }
 serde = { version = "1", features = ["derive"] }
@@ -33,3 +34,4 @@ fault-hold = ["aien-runtime/fault-hold"]
 
 [dev-dependencies]
 tempfile = "3.10"
+aien-runtime = { path = "../aien-runtime", features = ["test-support"] }

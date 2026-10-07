@@ -605,13 +605,25 @@ mod toctou_tests {
         let base = sha256_hex(b"one\ntwo\n");
 
         let t2 = target.clone();
+        let fired = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let f2 = fired.clone();
         *BEFORE_GRANT.lock().unwrap() = Some(Box::new(move || {
+            f2.store(true, std::sync::atomic::Ordering::SeqCst);
             std::fs::write(&t2, "one\ntwo\nEXTRA\n").unwrap()
         }));
         let e = hook
             .submit(&proposal(&b, &ws, "toctou1", &base), &wss)
             .expect_err("a changed prior must be refused");
         *BEFORE_GRANT.lock().unwrap() = None;
+        // The seam sits after the compose commit, so firing proves the run reached it.
+        assert!(
+            fired.load(std::sync::atomic::Ordering::SeqCst),
+            "seam did not fire"
+        );
+        eprintln!(
+            "TOCTOU seam fired after compose commit; refusal = {}: {}",
+            e.name, e.detail
+        );
         assert_eq!(e.name, "GrantNotWritten", "{e}");
         assert!(e.detail.contains("BaseChanged"), "{e}");
 

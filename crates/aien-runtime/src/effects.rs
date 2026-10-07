@@ -20,6 +20,17 @@
 //! `stop`, `resume`, `revoke`. A stop is durable; a grant older than the
 //! newest stop is stale forever.
 //!
+//! Grants (sovereign-core #261). The ledger honours only grants the daemon wrote
+//! itself: `approved_grant` (ComposeApprovedProposal, backed by a COMMITTED
+//! replay claim) and `minted_grant` (ComposeAuthorize, backed by a
+//! `compose_commit` record the daemon wrote when its own compose run
+//! committed the proposal). A caller-written `authorization` note (any record
+//! with neither marker, including ones already in a journal from before this
+//! rule) is read but never honoured: it opens no intent, and an intent it
+//! opened earlier is settled UNRESOLVED by the world check (never DONE, never
+//! NOT_DONE by the daemon itself) and an operator may not declare it DONE; an
+//! operator `--declare not_done` is still accepted.
+//!
 //! The ledger is rebuilt from the journal on every call, under the
 //! compose-home lock, so the check and the intent append are one step.
 use crate::control::{
@@ -109,13 +120,52 @@ pub struct Grant {
     pub workspace: Option<String>,
     /// Set on the grant the daemon writes after an approved compose (#249).
     pub approved: Option<ApprovedGrant>,
+    /// Set on the grant `ComposeAuthorize` minted (#261).
+    pub minted: Option<MintedGrant>,
     /// The record's links.
     pub links: Vec<u64>,
+}
+
+impl Grant {
+    /// True for a grant the daemon wrote itself (approved or minted). A
+    /// caller-written note, or an old one already in a journal, is not.
+    pub fn honoured(&self) -> bool {
+        self.approved.is_some() || self.minted.is_some()
+    }
 }
 
 /// Marker field of the grant the daemon itself writes after a COMMITTED
 /// approved compose (sovereign-core #249). Reserved: `ComposeNote` refuses it.
 pub const APPROVED_GRANT: &str = "approved_grant";
+
+/// Marker field of the grant `ComposeAuthorize` mints (sovereign-core #261).
+/// Reserved: `ComposeNote` refuses every `authorization` note.
+/// Prefix of the `disk_error` of an intent whose grant the daemon did not mint.
+pub const NOT_DAEMON_MINTED: &str = "NotDaemonMinted";
+
+pub const MINTED_GRANT: &str = "minted_grant";
+
+/// Marker field of the record the daemon writes when its own compose run
+/// COMMITTED a one-file proposal (sovereign-core #261). Reserved.
+pub const COMPOSE_COMMIT: &str = "compose_commit";
+
+/// What a minted grant is backed by: the daemon's own compose-commit record.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MintedGrant {
+    pub commit: u64,
+}
+
+/// A compose-commit record as the ledger reads it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommitRow {
+    pub id: u64,
+    pub cx_promotion: u64,
+    pub cx_evidence: u64,
+    pub proposal_sha256: String,
+    pub path: String,
+    pub content_sha256: String,
+    pub workspace: String,
+}
 
 /// What an approved grant must be backed by: a COMMITTED replay claim whose
 /// commit evidence names the grant's proposal, promotion and evidence.
@@ -171,6 +221,10 @@ pub struct Ledger {
     pub grants: BTreeMap<u64, Grant>,
     /// Approved grants by replay claim: more than one for a claim opens none.
     pub approved_by_claim: BTreeMap<u64, Vec<u64>>,
+    /// Compose-commit records the daemon wrote (#261), by record id.
+    pub commits: BTreeMap<u64, CommitRow>,
+    /// Minted grants by compose-commit record, oldest first.
+    pub minted_by_commit: BTreeMap<u64, Vec<u64>>,
     pub intents: BTreeMap<u64, IntentRow>,
     /// authorization id -> intent id (one intent per authorization).
     pub spent: BTreeMap<u64, u64>,
@@ -269,6 +323,14 @@ impl Ledger {
                     .get("workspace")
                     .and_then(Value::as_str)
                     .map(str::to_string),
+                minted: match v.get(MINTED_GRANT) {
+                    None => None,
+                    Some(_) => {
+                        let commit = u(&v, "compose_commit", id)?;
+                        self.minted_by_commit.entry(commit).or_default().push(id);
+                        Some(MintedGrant { commit })
+                    }
+                },
                 approved: match v.get(APPROVED_GRANT) {
                     None => None,
                     Some(_) => {
@@ -308,6 +370,21 @@ impl Ledger {
         let Ok(v) = serde_json::from_str::<Value>(text) else {
             return Ok(());
         };
+        if v.get(COMPOSE_COMMIT).is_some() {
+            self.commits.insert(
+                id,
+                CommitRow {
+                    id,
+                    cx_promotion: u(&v, "cx_promotion", id)?,
+                    cx_evidence: u(&v, "cx_evidence", id)?,
+                    proposal_sha256: s(&v, "proposal_sha256", id)?,
+                    path: s(&v, "path", id)?,
+                    content_sha256: s(&v, "content_sha256", id)?,
+                    workspace: s(&v, "workspace", id)?,
+                },
+            );
+            return Ok(());
+        }
         let Some(phase) = v.get("phase") else {
             // NEXT-PHASE-1 effect notes: a write_file spends its authorization.
             if v.get("tool").and_then(Value::as_str) == Some("write_file") {
@@ -403,6 +480,14 @@ impl Ledger {
                 format!("cortex.cx#{a} is not a verified authorization"),
             )
         })?;
+        if !g.honoured() {
+            return Err(Refusal::new(
+                "NotAuthorized",
+                format!(
+                    "authorization #{a} is a caller-written note; the daemon honours only grants it minted itself (sovereign-core #261): run aien compose authorize"
+                ),
+            ));
+        }
         if g.proposal_sha256 != req.proposal_sha256
             || g.path != req.path
             || g.content_sha256 != req.content_sha256
@@ -531,11 +616,30 @@ pub fn world_state(row: &IntentRow) -> (EffectState, Result<Option<String>, Stri
 /// still resolves inside its grant's workspace (`confine_target` again, at
 /// ack and reconcile time, so a directory swapped for a symlink after the
 /// intent opened is seen). When confinement refuses, or the grant names no
-/// workspace, the state is UNRESOLVED, never DONE or NOT_DONE.
+/// workspace, or its grant is not daemon-minted, the state is UNRESOLVED, never
+/// DONE or NOT_DONE.
 pub fn confined_world_state(
     l: &Ledger,
     row: &IntentRow,
 ) -> (EffectState, Result<Option<String>, String>) {
+    // sovereign-core #261: an intent whose grant the daemon did not write
+    // (a caller-written note, opened before this rule) is never settled
+    // DONE or NOT_DONE by the world check; it stays UNRESOLVED and the operator
+    // is told why. (An operator declaration of NOT_DONE is still accepted;
+    // DONE is refused.)
+    if !l
+        .grants
+        .get(&row.authorization)
+        .is_some_and(Grant::honoured)
+    {
+        return (
+            EffectState::Unresolved,
+            Err(format!(
+                "{NOT_DAEMON_MINTED}: authorization #{} was not minted by the daemon (sovereign-core #261)",
+                row.authorization
+            )),
+        );
+    }
     let ws = l
         .grants
         .get(&row.authorization)
@@ -592,6 +696,15 @@ fn reconcile_gate(b: &ComposeBridge) -> Result<(), String> {
 
 /// ComposeNote may not forge gated records (ACCEPTANCE-v2 2.7).
 pub fn check_reserved_note(kind: &str, text: &str) -> Result<(), String> {
+    // sovereign-core #261: no caller writes an authorization, whatever it
+    // says. Grants come from ComposeAuthorize and ComposeApprovedProposal,
+    // control records from ComposeControl; all are written by the daemon.
+    if kind == "authorization" {
+        return Err(
+            "ComposeNote: authorization records are written only by the daemon (ComposeAuthorize, ComposeApprovedProposal, ComposeControl); a caller-written grant is never honoured (sovereign-core #261)"
+                .into(),
+        );
+    }
     let Ok(v) = serde_json::from_str::<Value>(text) else {
         return Ok(());
     };
@@ -605,30 +718,10 @@ pub fn check_reserved_note(kind: &str, text: &str) -> Result<(), String> {
         "effect" if v.get(crate::approved_replay::FIELD).is_some() => Err(
             "ComposeNote: approved_submission records are written only by the replay ledger".into(),
         ),
-        "authorization" if v.get("control").is_some() => {
-            Err("ComposeNote: control records are written only by ComposeControl".into())
-        }
-        // sovereign-core #249: the approved grant comes only from the daemon,
-        // after a COMMITTED approved compose.
-        "authorization" if v.get(APPROVED_GRANT).is_some() => Err(
-            "ComposeNote: approved_grant records are written only by ComposeApprovedProposal"
-                .into(),
+        // sovereign-core #261: the daemon's own compose-commit record.
+        "effect" if v.get(COMPOSE_COMMIT).is_some() => Err(
+            "ComposeNote: compose_commit records are written only by the compose run".into(),
         ),
-        // sovereign-core #249: a grant names its workspace and a target inside it.
-        "authorization" if v.get("proposal_sha256").is_some() => {
-            let (Some(ws), Some(path), Some(target)) = (
-                v.get("workspace").and_then(Value::as_str),
-                v.get("path").and_then(Value::as_str),
-                v.get("target").and_then(Value::as_str),
-            ) else {
-                return Err(
-                    "ComposeNote: an authorization grant must name its workspace, path and target"
-                        .into(),
-                );
-            };
-            confine_target(ws, path, target)
-                .map_err(|r| format!("ComposeNote: authorization grant refused: {r}"))
-        }
         // ACCEPTANCE-v3 2.4: repair records come only from RecoverComposeHome.
         "constraint" if v.get("repair").is_some() => Err(
             "ComposeNote: constraint records with a \"repair\" field are written only by RecoverComposeHome"
@@ -802,6 +895,170 @@ pub(crate) fn write_approved_grant(
     })
 }
 
+/// A minted grant must be backed by the compose-commit record the daemon
+/// wrote when its own compose run committed this proposal (#261): same
+/// proposal, path, content and workspace, target = workspace + path, and the
+/// grant links the record.
+fn check_minted_backing(l: &Ledger, g: &Grant) -> Result<(), Refusal> {
+    let Some(m) = &g.minted else {
+        return Ok(());
+    };
+    let no = |w: &str| {
+        Refusal::new(
+            "NotAuthorized",
+            format!(
+                "minted grant #{} is not backed by a committed compose: {w}",
+                g.id
+            ),
+        )
+    };
+    let c = l
+        .commits
+        .get(&m.commit)
+        .ok_or_else(|| no("no such compose-commit record"))?;
+    let bound_target = Path::new(&c.workspace).join(&c.path);
+    if c.proposal_sha256 != g.proposal_sha256
+        || c.path != g.path
+        || c.content_sha256 != g.content_sha256
+        || g.workspace.as_deref() != Some(c.workspace.as_str())
+        || g.target.as_deref().map(Path::new) != Some(bound_target.as_path())
+        || !g.links.contains(&m.commit)
+    {
+        return Err(no("grant fields differ from the committed proposal"));
+    }
+    Ok(())
+}
+
+/// The record the daemon writes when its own compose run COMMITTED a
+/// one-file proposal (#261): the only thing `ComposeAuthorize` mints from.
+/// Linked to the promotion and evidence. Returns the record id.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn write_compose_commit(
+    home: &mut ComposeHome,
+    workspace: &str,
+    task: u64,
+    cx_promotion: u64,
+    cx_evidence: u64,
+    proposal_sha256: &str,
+    path: &str,
+    content_sha256: &str,
+) -> Result<u64, String> {
+    let text = json!({
+        COMPOSE_COMMIT: 1, "task": task, "cx_promotion": cx_promotion,
+        "cx_evidence": cx_evidence, "proposal_sha256": proposal_sha256,
+        "path": path, "content_sha256": content_sha256, "workspace": workspace,
+    });
+    append(home, NoteKind::Effect, &[cx_promotion, cx_evidence], &text).map(|n| n.id)
+}
+
+/// What `ComposeAuthorize` asks for: the operator's approval of one committed
+/// proposal. Only ids and digests; path, content and target come from the
+/// daemon's own commit record, never from the caller.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MintRequest {
+    pub cx_promotion: u64,
+    pub proposal_sha256: String,
+    pub workspace: String,
+    pub approver: String,
+    /// Constraint records the grant links (at most 3).
+    pub constraints: Vec<u64>,
+}
+
+/// ComposeAuthorize (#261): mint the one grant for a proposal this daemon
+/// committed. Refused when no commit record names (promotion, proposal), the
+/// workspace differs from the one the compose ran for, the target escapes it
+/// (`confine_target`), or an earlier grant for the same commit is still live
+/// or has an unsettled intent. A revoked, stale or NOT_DONE grant does not block a new one (each grant
+/// is spent exactly once); a grant that settled DONE does: one committed
+/// proposal gives at most one DONE effect.
+pub fn mint_grant(b: &ComposeBridge, req: &MintRequest) -> ControlResponse {
+    if let Err(e) = reconcile_gate(b) {
+        return ControlResponse::Error(e);
+    }
+    noted(b.with_home(|home| {
+        let no = |name: &'static str, why: String| Refusal::new(name, why).to_string();
+        if req.approver.trim().is_empty() {
+            return Err(no("NotAuthorized", "ComposeAuthorize needs an approver".into()));
+        }
+        if req.constraints.len() > 3 {
+            return Err(no("NotAuthorized", "at most 3 constraint links".into()));
+        }
+        let l = ledger(home)?;
+        let mut hits = l
+            .commits
+            .values()
+            .filter(|c| c.cx_promotion == req.cx_promotion && c.proposal_sha256 == req.proposal_sha256);
+        let (Some(c), None) = (hits.next(), hits.next()) else {
+            return Err(no(
+                "NotAuthorized",
+                format!(
+                    "no compose-commit record names promotion #{} and this proposal: only a proposal this daemon committed (aien compose propose) can be authorized",
+                    req.cx_promotion
+                ),
+            ));
+        };
+        let ws = std::fs::canonicalize(&req.workspace)
+            .map_err(|e| no("OutsideWorkspace", format!("workspace {}: {e}", req.workspace)))?
+            .display()
+            .to_string();
+        if ws != c.workspace {
+            return Err(no(
+                "OutsideWorkspace",
+                format!("the proposal was committed for workspace {}, not {ws}", c.workspace),
+            ));
+        }
+        let target = Path::new(&c.workspace).join(&c.path).display().to_string();
+        confine_target(&c.workspace, &c.path, &target).map_err(|r| r.to_string())?;
+        let prior = file_sha256(Path::new(&target))?;
+        for &gid in l.minted_by_commit.get(&c.id).into_iter().flatten() {
+            if l.revoked.contains_key(&gid) || l.stops.iter().any(|&s| s > gid) {
+                continue;
+            }
+            let g = &l.grants[&gid];
+            match l.spent.get(&gid).map(|i| &l.intents[i]) {
+                // Settled: the grant is spent for good (a new effect needs a
+                // new grant, as before).
+                Some(row) if row.state == EffectState::Done => {
+                    return Err(no(
+                        "AlreadySpent",
+                        format!(
+                            "grant #{gid} for this proposal settled DONE (intent #{}); one committed proposal gives at most one effect, new content needs a new compose",
+                            row.id
+                        ),
+                    ))
+                }
+                Some(row) if row.state.terminal() => continue,
+                Some(row) => {
+                    return Err(no(
+                        "ReconciliationRequired",
+                        format!(
+                            "intent #{} for grant #{gid} is {}; run aien compose reconcile",
+                            row.id,
+                            row.state.name()
+                        ),
+                    ))
+                }
+                None if g.prior_sha256.as_ref() != Some(&prior) => continue, // stale
+                None => {
+                    return Err(no(
+                        "AlreadyAuthorized",
+                        format!("grant #{gid} for this proposal is still live; revoke it first"),
+                    ))
+                }
+            }
+        }
+        let mut links = vec![c.id];
+        links.extend(&req.constraints);
+        let text = json!({
+            MINTED_GRANT: 1, "compose_commit": c.id, "proposal_sha256": c.proposal_sha256,
+            "path": c.path, "content_sha256": c.content_sha256,
+            "approver": req.approver.trim(), "target": target, "workspace": c.workspace,
+            "prior_sha256": prior, "cx_promotion": c.cx_promotion, "cx_evidence": c.cx_evidence,
+        });
+        append(home, NoteKind::Authorization, &links, &text)
+    }))
+}
+
 fn host_views(home: &mut ComposeHome) -> Result<Vec<ComposeRecordView>, String> {
     let (recs, total) = home
         .compose
@@ -884,6 +1141,7 @@ pub fn open_intent(b: &ComposeBridge, req: &IntentRequest) -> ControlResponse {
         })?;
         confine_target(ws, &req.path, &req.target).map_err(|r| r.to_string())?;
         check_approved_backing(&l, g, &views).map_err(|r| r.to_string())?;
+        check_minted_backing(&l, g).map_err(|r| r.to_string())?;
         let text = json!({
             "phase": PHASE_INTENT, "tool": "write_file", "authorization": g.id,
             "proposal_sha256": req.proposal_sha256, "path": req.path, "target": req.target,
@@ -988,9 +1246,9 @@ pub fn reconcile(
             };
             // Never DONE for a target outside its workspace, not even by declaration.
             if st == EffectState::Done
-                && disk
-                    .as_ref()
-                    .is_err_and(|e| e.starts_with("OutsideWorkspace"))
+                && disk.as_ref().is_err_and(|e| {
+                    e.starts_with("OutsideWorkspace") || e.starts_with(NOT_DAEMON_MINTED)
+                })
             {
                 return Err(format!(
                     "reconcile: intent #{} cannot be declared DONE: {}",
@@ -1186,8 +1444,20 @@ mod tests {
         rec(
             id,
             "authorization",
-            json!({"proposal_sha256": "p", "path": "N.md", "content_sha256": "c",
+            json!({"minted_grant": 1, "compose_commit": 1, "proposal_sha256": "p",
+                   "path": "N.md", "content_sha256": "c",
                    "approver": "drake", "target": "/w/N.md", "prior_sha256": prior}),
+        )
+    }
+
+    /// A grant record nobody minted: what a caller-written note looks like.
+    fn caller_grant(id: u64) -> ComposeRecordView {
+        rec(
+            id,
+            "authorization",
+            json!({"proposal_sha256": "p", "path": "N.md", "content_sha256": "c",
+                   "approver": "attacker", "target": "/w/N.md", "prior_sha256": null,
+                   "workspace": "/w"}),
         )
     }
 
@@ -1286,13 +1556,36 @@ mod tests {
     }
 
     #[test]
+    fn a_caller_written_grant_is_never_honoured() {
+        // Fields that would pass every other check; no marker, so no grant.
+        let l = Ledger::from_records(&[caller_grant(2)]).unwrap();
+        let e = l.check_intent(&req(2), &None).unwrap_err();
+        assert_eq!(e.name, "NotAuthorized");
+        assert!(e.detail.contains("caller-written"), "{}", e.detail);
+        // An intent it opened before the rule is never settled by the world.
+        let l = Ledger::from_records(&[caller_grant(2), intent(3, 2)]).unwrap();
+        let (st, disk) = confined_world_state(&l, &l.intents[&3]);
+        assert_eq!(st, EffectState::Unresolved);
+        assert!(disk.unwrap_err().starts_with(NOT_DAEMON_MINTED));
+        // A minted grant with no compose-commit record behind it opens nothing.
+        let l = Ledger::from_records(&[grant(2, Value::Null)]).unwrap();
+        let e = check_minted_backing(&l, &l.grants[&2]).unwrap_err();
+        assert!(
+            e.detail.contains("no such compose-commit record"),
+            "{}",
+            e.detail
+        );
+    }
+
+    #[test]
     fn world_change_and_legacy_grants_are_stale() {
         let l = Ledger::from_records(&[grant(2, Value::Null)]).unwrap();
         assert_eq!(refusal(&l, 2, Some("x")), "Stale");
         let legacy = rec(
             2,
             "authorization",
-            json!({"proposal_sha256": "p", "path": "N.md", "content_sha256": "c", "approver": "d"}),
+            json!({"minted_grant": 1, "compose_commit": 1, "proposal_sha256": "p",
+                   "path": "N.md", "content_sha256": "c", "approver": "d"}),
         );
         let l = Ledger::from_records(&[legacy]).unwrap();
         assert_eq!(refusal(&l, 2, None), "Stale");
@@ -1432,12 +1725,23 @@ mod tests {
             }
             v.to_string()
         };
-        assert!(check_reserved_note("authorization", &g(json!({}))).is_ok());
-        assert!(check_reserved_note("authorization", &g(json!({"approved_grant": 1}))).is_err());
-        assert!(check_reserved_note("authorization", &g(json!({"target": "/etc/N.md"}))).is_err());
-        let mut no_ws: Value = serde_json::from_str(&g(json!({}))).unwrap();
-        no_ws.as_object_mut().unwrap().remove("workspace");
-        assert!(check_reserved_note("authorization", &no_ws.to_string()).is_err());
+        // sovereign-core #261: every authorization note is refused, whatever it says.
+        for text in [
+            g(json!({})),
+            g(json!({"approved_grant": 1})),
+            g(json!({"minted_grant": 1, "compose_commit": 1})),
+            g(json!({"target": "/etc/N.md"})),
+            json!({"control": "resume", "approver": "x"}).to_string(),
+            "not json".to_string(),
+        ] {
+            let e = check_reserved_note("authorization", &text).unwrap_err();
+            assert!(e.contains("sovereign-core #261"), "{e}");
+        }
+        assert!(check_reserved_note(
+            "effect",
+            &json!({"compose_commit": 1, "proposal_sha256": "p"}).to_string()
+        )
+        .is_err());
 
         // Approved grants (476ca4 c25): fields bound to the approval key, one per
         // claim, and a COMMITTED claim behind it.
