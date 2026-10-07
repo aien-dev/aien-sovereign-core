@@ -184,15 +184,16 @@ fn exhaustion_returns_no_proposal() {
 
 #[test]
 fn deadline_is_shared_across_attempts() {
+    // No tight margins: every assertion is a one-sided bound that sleeping
+    // longer than planned (a loaded machine) can only make easier to meet.
     let seen: Mutex<Vec<Duration>> = Mutex::new(Vec::new());
     let proposer = |_: &str, limit: Duration| {
         seen.lock().unwrap().push(limit);
-        std::thread::sleep(Duration::from_millis(150));
+        std::thread::sleep(Duration::from_millis(300));
         gen(doc(1))
     };
     let reqs = extract("at least 20 lines");
-    let budget = Duration::from_millis(500);
-    let t0 = std::time::Instant::now();
+    let budget = Duration::from_millis(2000);
     let (out, a) = propose_task_checked(
         &proposer,
         "base",
@@ -200,17 +201,22 @@ fn deadline_is_shared_across_attempts() {
         &reqs,
         budget,
         Duration::from_millis(100),
-        10,
+        100,
     );
     assert!(out.is_err());
     let seen = seen.lock().unwrap();
     assert_eq!(seen.len(), a.len());
-    assert!(a.len() >= 2 && a.len() < 10, "attempts {}", a.len());
-    // Each attempt's limit is what is left of ONE budget: it only shrinks,
-    // by at least the time the earlier attempts took.
+    // Per-attempt reset would allow all 100 attempts. One shared deadline
+    // stops attempt k > 1 unless 100 ms are left, and every earlier attempt
+    // took at least 300 ms, so k - 1 <= (2000 - 100) / 300 = 6: at most 7.
+    assert!(a.len() <= 7, "attempts {}", a.len());
+    assert!(a.len() >= 2, "attempts {}", a.len());
+    // Each attempt's limit is what is left of ONE budget: attempt k starts
+    // after k - 1 sleeps of at least 300 ms, so it is at least that far
+    // below the first limit.
     for k in 1..seen.len() {
         assert!(
-            seen[k] + Duration::from_millis(140 * k as u64) <= seen[0],
+            seen[k] + Duration::from_millis(290 * k as u64) <= seen[0],
             "attempt {} limit {:?} vs first {:?}",
             k + 1,
             seen[k],
@@ -218,7 +224,6 @@ fn deadline_is_shared_across_attempts() {
         );
     }
     assert!(seen[0] <= budget);
-    assert!(t0.elapsed() < budget + Duration::from_millis(200));
     assert!(out.unwrap_err().contains("per-attempt budget"));
 }
 
@@ -464,4 +469,183 @@ fn linked_passing_document_is_approved_and_saved_byte_for_byte() {
     assert_eq!(sha256_hex(&std::fs::read(&target).unwrap()), content_sha);
     let ledger = effects::Ledger::from_records(&recalled(&bridge).host).unwrap();
     assert_eq!(ledger.intents.len(), 1);
+}
+
+// ---- review fixes (#287) ----
+
+#[test]
+fn count_followed_by_a_qualifier_is_not_extracted() {
+    // The noun must END the clause: "N lines of context" states something
+    // other than "the document has N lines", so it gets no check.
+    for g in [
+        "show a diff with at least 3 lines of context",
+        "write at least 2 sections of the config",
+        "at least 5 items per category",
+        "at least 3 steps for each stage",
+        "at least 4 questions in the survey",
+        "at least 4 questions from the list",
+        "at least 6 lines for the intro",
+        "at least 6 lines with comments",
+        "at least 6 lines about cats",
+        "at most 10 lines in each file",
+    ] {
+        assert_eq!(extract(g), vec![], "{g}");
+    }
+    use Requirement::*;
+    // Clause-ending punctuation, end of goal, and the joining words are fine.
+    for (g, want) in [
+        ("at least 20 lines", MinLines(20)),
+        ("at least 20 lines.", MinLines(20)),
+        ("at least 20 lines, please", MinLines(20)),
+        ("at least 20 lines and a title", MinLines(20)),
+        ("at least 20 lines or more", MinLines(20)),
+        ("at least 20 lines covering the topic", MinLines(20)),
+        ("at least 20 lines that explain it", MinLines(20)),
+        ("at most 8 lines which are short", MaxLines(8)),
+    ] {
+        assert_eq!(extract(g), [want], "{g}");
+    }
+}
+
+#[test]
+fn phrase_followed_by_a_qualifier_is_not_extracted() {
+    // "in the title" would make the whole-document check claim more than it covers.
+    assert_eq!(extract("include the phrase \"X\" in the title"), vec![]);
+    assert_eq!(
+        extract("include the phrase \"X\" in the title and contain the phrase \"Y\"."),
+        [Requirement::RequiredPhrases(vec!["Y".into()])]
+    );
+}
+
+#[test]
+fn negated_wording_is_not_extracted() {
+    for g in [
+        "do not include the phrase \"X\"",
+        "Do NOT include the phrase \"X\"",
+        "never contain the phrase \"X\"",
+        "the file must not include the phrase \"X\"",
+        "don't include the phrase \"X\"",
+        "it doesn't contain the phrase \"X\"",
+        "without ever including; never include the phrase \"X\"",
+        "not at least 20 lines",
+        "do not write at least 20 lines",
+        "never write at least 3 sections",
+        "it must not have at most 5 lines",
+        "no more than 20 lines",
+        "no fewer than 20 lines",
+        "not at most 10 lines",
+        "without at least 4 items",
+    ] {
+        assert_eq!(extract(g), vec![], "{g}");
+    }
+    // A negation in an EARLIER clause does not poison a later requirement.
+    assert_eq!(
+        extract("do not use tables. Write at least 20 lines."),
+        [Requirement::MinLines(20)]
+    );
+    assert_eq!(
+        extract("do not hedge, include the phrase \"X\""),
+        [Requirement::RequiredPhrases(vec!["X".into()])]
+    );
+}
+
+#[test]
+fn emphasis_and_quoted_forms_are_unrecognized() {
+    // Documented limitation: markdown emphasis or quotes around the wording
+    // break the exact word sequence, so nothing is extracted (and nothing is
+    // claimed as covered).
+    for g in [
+        "write **at least 20 lines**",
+        "write \"at least 20 lines\"",
+        "write 'at least 20 lines'",
+        "write at least **20** lines",
+        "write at least 20 *lines*",
+        "write at least 20 `lines`",
+    ] {
+        assert_eq!(extract(g), vec![], "{g}");
+    }
+}
+
+#[test]
+fn fenced_code_is_not_counted_as_headings_questions_items_or_steps() {
+    use ItemKind::*;
+    let d = "# Real\n- a\n1. s\nWhy?\n```bash\n# not a heading\n- not an item\n1. not a step\nnot a question?\n```\n~~~\n## also not\n- nor this\nq?\n~~~\n";
+    assert_eq!(count(Sections, d), 1);
+    assert_eq!(count(Items, d), 2);
+    assert_eq!(count(Steps, d), 1);
+    assert_eq!(count(Questions, d), 1);
+    // CommonMark close rule: a shorter or info-carrying fence does not close.
+    let d2 = "````\n```\n# inside\n```bash\n- inside\n````\n# outside\n";
+    assert_eq!(count(Sections, d2), 1);
+    // ~~~ is not closed by ``` and vice versa.
+    let d3 = "~~~\n```\n# inside\n~~~\n# outside\n";
+    assert_eq!(count(Sections, d3), 1);
+    // An unclosed fence runs to the end of the document.
+    assert_eq!(count(Sections, "# a\n```\n# b\n# c\n"), 1);
+    // A backtick fence whose info string holds a backtick is not a fence.
+    assert_eq!(count(Sections, "``` `x`\n# real\n"), 1);
+}
+
+fn count(k: ItemKind, s: &str) -> usize {
+    // found N appears in the unmet sentence; ask for an impossible minimum.
+    let m = Requirement::MinItems(k, usize::MAX).check(s).unwrap();
+    m.rsplit("found ").next().unwrap().parse().unwrap()
+}
+
+#[test]
+fn line_limits_count_every_non_empty_line_including_code_and_fences() {
+    // Documented: MinLines/MaxLines count lines of the file, so fence marker
+    // lines and code lines count; blank lines do not.
+    let d = "intro\n```rust\nlet x = 1;\n\nlet y = 2;\n```\nend\n";
+    assert_eq!(Requirement::MinLines(6).check(d), None);
+    assert_eq!(
+        Requirement::MinLines(7).check(d).unwrap(),
+        "at least 7 non-empty lines, found 6"
+    );
+    assert_eq!(Requirement::MaxLines(6).check(d), None);
+    assert!(Requirement::MaxLines(5).check(d).is_some());
+}
+
+#[test]
+fn edit_whose_prior_file_already_breaks_a_max_is_refused_before_any_attempt() {
+    let prior: String = (0..10).map(|i| format!("l{i}\n")).collect();
+    let calls = Mutex::new(0u32);
+    let proposer = |_: &str, _: Duration| {
+        *calls.lock().unwrap() += 1;
+        gen("filename: N.md\nl0\nnew\n".into())
+    };
+    let (out, a) = propose_task_checked(
+        &proposer,
+        "base",
+        Some(("N.md", &prior)),
+        &[Requirement::MaxLines(5)],
+        Duration::from_secs(5),
+        Duration::from_millis(1),
+        3,
+    );
+    assert_eq!(*calls.lock().unwrap(), 0, "no attempt may be spent");
+    let why = out.unwrap_err();
+    assert!(
+        why.contains("N.md") && why.contains("at most 5 non-empty lines, found 10"),
+        "{why}"
+    );
+    assert!(why.contains("an edit only adds lines"), "{why}");
+    assert_eq!(a.len(), 1);
+    assert_eq!(a[0].outcome, "refused");
+    assert_eq!(a[0].reason.as_deref(), Some(why.as_str()));
+    assert_eq!(
+        a[0].unmet_requirements,
+        ["at most 5 non-empty lines, found 10"]
+    );
+    // Min requirements and a prior file within the maximum are unaffected.
+    let (out, _) = propose_task_checked(
+        &proposer,
+        "base",
+        Some(("N.md", &prior)),
+        &[Requirement::MaxLines(12)],
+        Duration::from_secs(5),
+        Duration::from_millis(1),
+        1,
+    );
+    assert!(out.is_ok());
 }

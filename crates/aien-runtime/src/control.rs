@@ -365,11 +365,11 @@ pub struct ComposeTaskReport {
     /// Every proposal the model Skill made for this task (ACCEPTANCE-v2 3b).
     #[serde(default)]
     pub proposal_attempts: Vec<ProposalAttempt>,
-    /// "model" when the Skill ran inference, or the stub label.
     /// Requirements recognized in the goal (crate::requirements); the only
     /// ones checked. Empty = none recognized, nothing checked.
     #[serde(default)]
     pub requirements_recognized: Vec<String>,
+    /// "model" when the Skill ran inference, or the stub label.
     pub proposer: String,
 }
 

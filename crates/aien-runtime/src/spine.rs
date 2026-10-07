@@ -1111,6 +1111,52 @@ pub fn propose_task_with_retries(
     )
 }
 
+fn new_attempt(k: u32) -> ProposalAttempt {
+    ProposalAttempt {
+        attempt: k,
+        ms: 0,
+        tokens: 0,
+        outcome: String::new(),
+        reason: None,
+        text_sha256: None,
+        text: None,
+        aegis: None,
+        finish_reason: None,
+        token_ids: None,
+        prompt_tokens: None,
+        prompt_ids_sha256: None,
+        unmet_requirements: Vec::new(),
+    }
+}
+
+/// The approved-proposal path of the Skill: exactly one attempt that returns
+/// `text` unchanged, through the same requirement check as a model reply (the
+/// bytes a human approved are still refused, before any write, when the goal
+/// states a requirement they do not meet).
+pub(crate) fn propose_approved(
+    text: &str,
+    prompt: &str,
+    reqs: &[crate::requirements::Requirement],
+) -> SkillOutput {
+    let text = text.to_string();
+    let one = move |_: &str, _: std::time::Duration| {
+        Ok(Generation {
+            text: text.clone(),
+            finish_reason: Some("approved".into()),
+            ..Default::default()
+        })
+    };
+    propose_task_checked(
+        &one,
+        prompt,
+        None,
+        reqs,
+        COMPOSE_SKILL_BUDGET,
+        COMPOSE_ATTEMPT_BUDGET,
+        1,
+    )
+}
+
 /// `propose_task_with_retries` plus requirement validation: a parsed reply
 /// whose COMPLETE content (the merged file in edit mode, i.e. the bytes that
 /// would be saved) fails any of `reqs` is refused like a parse failure, the
@@ -1130,6 +1176,27 @@ pub fn propose_task_checked(
 ) -> (Result<String, String>, Vec<ProposalAttempt>) {
     let start = std::time::Instant::now();
     let mut attempts: Vec<ProposalAttempt> = Vec::new();
+    // An edit only adds lines (`merge_edit_reply` keeps every prior line), so a
+    // prior file that already breaks a MaxLines can never satisfy it: refuse
+    // now with a recorded reason instead of spending attempts.
+    if let Some((path, prior)) = edit {
+        let over: Vec<String> = reqs
+            .iter()
+            .filter(|r| matches!(r, crate::requirements::Requirement::MaxLines(_)))
+            .filter_map(|r| r.check(prior))
+            .collect();
+        if !over.is_empty() {
+            let why = format!(
+                "unmet requirement: the existing {path} already breaks it ({}) and an edit only adds lines",
+                over.join("; ")
+            );
+            let mut a = new_attempt(1);
+            a.outcome = "refused".into();
+            a.reason = Some(why.clone());
+            a.unmet_requirements = over;
+            return (Err(why), vec![a]);
+        }
+    }
     let mut last_reason = "no attempt made".to_string();
     let need_ms = (attempt_budget.as_millis() as u64).max(1);
     for k in 1..=max_attempts {
@@ -1149,21 +1216,8 @@ pub fn propose_task_checked(
         let t0 = std::time::Instant::now();
         let out = proposer(&prompt, remaining);
         let last_ms = t0.elapsed().as_millis() as u64;
-        let mut a = ProposalAttempt {
-            attempt: k,
-            ms: last_ms,
-            tokens: 0,
-            outcome: String::new(),
-            reason: None,
-            text_sha256: None,
-            text: None,
-            aegis: None,
-            finish_reason: None,
-            token_ids: None,
-            prompt_tokens: None,
-            prompt_ids_sha256: None,
-            unmet_requirements: Vec::new(),
-        };
+        let mut a = new_attempt(k);
+        a.ms = last_ms;
         match out {
             Ok(g) => {
                 a.tokens = g.tokens;
@@ -1384,23 +1438,7 @@ impl ComposeBridge {
                 // approved bytes even when the path already exists.
                 let fixed = pa.lock().get(&task).cloned();
                 let (out, attempts) = match fixed {
-                    Some(text) => {
-                        let one = move |_: &str, _: std::time::Duration| {
-                            Ok(Generation {
-                                text: text.clone(),
-                                finish_reason: Some("approved".into()),
-                                ..Default::default()
-                            })
-                        };
-                        propose_task_with_retries(
-                            &one,
-                            &prompt,
-                            None,
-                            COMPOSE_SKILL_BUDGET,
-                            COMPOSE_ATTEMPT_BUDGET,
-                            1,
-                        )
-                    }
+                    Some(text) => propose_approved(&text, &prompt, &reqs),
                     // Fixed template + bounded automatic retry (ACCEPTANCE-v2 3a, 3b),
                     // measured per-attempt budget (ACCEPTANCE-v3 3b); an edit reply
                     // is merged into the content the model was shown (v7 T5).
@@ -1553,13 +1591,9 @@ impl ComposeBridge {
             ));
         }
         let (prompt, target) = task_prompt_and_target(goal, &ws);
-        // Requirements are checked on the model path only: an approved proposal
-        // is bytes a human already saw and bound by digest.
-        let reqs = if approved_text.is_some() {
-            Vec::new()
-        } else {
-            crate::requirements::extract(goal)
-        };
+        // The requirements the goal states are checked on every path: the model
+        // path and an approved proposal (refused before any write when unmet).
+        let reqs = crate::requirements::extract(goal);
         let recognized: Vec<String> = reqs.iter().map(|r| r.label()).collect();
         let prompt = (prompt, target, reqs);
         let now = std::time::SystemTime::now()
@@ -1897,5 +1931,73 @@ impl ComposeBridge {
             .record(id)
             .map(|r| hex(&r.digest))
             .map_err(|e| format!("compose record {id}: {e}"))
+    }
+}
+
+#[cfg(test)]
+mod requirement_tests {
+    use super::*;
+    use crate::requirements::extract;
+
+    const SHORT: &str = "filename: DOC.md\na\nb\nc\n";
+
+    #[test]
+    fn approved_text_is_checked_against_the_goal_requirements() {
+        let reqs = extract("write DOC.md in at least 10 lines");
+        let (out, a) = propose_approved(SHORT, "base", &reqs);
+        let why = out.unwrap_err();
+        assert!(
+            why.contains("at least 10 non-empty lines, found 3"),
+            "{why}"
+        );
+        assert_eq!(a.len(), 1);
+        assert_eq!(a[0].outcome, "refused");
+        assert_eq!(
+            a[0].unmet_requirements,
+            ["at least 10 non-empty lines, found 3"]
+        );
+        // Met, or none stated: the approved bytes pass through unchanged.
+        let (out, _) = propose_approved(SHORT, "base", &extract("at least 3 lines"));
+        assert_eq!(out.unwrap(), SHORT);
+        let (out, a) = propose_approved(SHORT, "base", &[]);
+        assert_eq!(out.unwrap(), SHORT);
+        assert_eq!(a[0].finish_reason.as_deref(), Some("approved"));
+    }
+
+    #[test]
+    fn approved_run_reports_recognized_and_refuses_unmet_before_any_write() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = tmp.path().join("ws");
+        std::fs::create_dir_all(&ws).unwrap();
+        let proposer: ComposeProposer = Arc::new(|_: &str, _: std::time::Duration| {
+            panic!("the model proposer ran on the approved path")
+        });
+        let bridge = ComposeBridge::new(tmp.path().join("compose"), proposer, "test:approved");
+        let r = bridge.run_approved_task(
+            "write DOC.md in at least 10 lines",
+            ws.to_str().unwrap(),
+            SHORT,
+        );
+        if !aien_omega_compose::LINKED {
+            assert!(r.is_err());
+            return;
+        }
+        let r = r.unwrap();
+        assert!(!r.committed, "{r:?}");
+        assert!(r.proposal.is_none());
+        assert_eq!(r.requirements_recognized, ["at least 10 non-empty lines"]);
+        assert!(r.proposer_error.unwrap().contains("found 3"));
+        assert_eq!(std::fs::read_dir(&ws).unwrap().count(), 0);
+        // The same bytes pass when the goal states a requirement they meet.
+        let r = bridge
+            .run_approved_task(
+                "write DOC.md in at least 3 lines",
+                ws.to_str().unwrap(),
+                SHORT,
+            )
+            .unwrap();
+        assert!(r.committed, "{r:?}");
+        assert_eq!(r.requirements_recognized, ["at least 3 non-empty lines"]);
+        assert_eq!(r.proposal.as_deref(), Some(SHORT));
     }
 }
