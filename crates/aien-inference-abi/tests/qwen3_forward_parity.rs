@@ -571,6 +571,19 @@ fn real_qwen3_4b_instruct_2507_matches_transformers() {
 fn real_qwen3_4b_instruct_2507_on_gb10_matches_transformers() {
     let omega = Arc::new(aien_inference_abi::OmegaGb10Backend::new());
     assert!(omega.is_available(), "native build required");
+    // Open the GPU session before the f32 weight load (about 16 GB), in the daemon's
+    // order (aien-cli `start`, #277). The first declared attempt (#274) opened it lazily
+    // at the first op, right after the load, and the channel's GPU context buffer
+    // allocation failed with RM status 0x51 (NV_ERR_NO_MEMORY) while MemFree was low and
+    // the page cache full (omega#327); MemAvailable stays high then, so MemFree is logged.
+    eprintln!("QWEN3_GB10_MEM before session open: {}", meminfo_line());
+    aien_inference_abi::open_gpu_session_with_retry(
+        1,
+        std::time::Duration::ZERO,
+        std::time::Duration::from_secs(30),
+        &|| meminfo_kb("MemAvailable:").map(|kb| kb * 1024),
+    )
+    .expect("the GPU session must open before the weights load");
     let dir = PathBuf::from(
         std::env::var("AIEN_QWEN3_DIR").expect("AIEN_QWEN3_DIR must name the model directory"),
     );
@@ -608,6 +621,7 @@ fn real_qwen3_4b_instruct_2507_on_gb10_matches_transformers() {
         &config,
     )
     .expect("weights");
+    eprintln!("QWEN3_GB10_MEM after weight load: {}", meminfo_line());
     let mut b = NativeTransformerBackend::with_backend(weights, omega.clone());
     let got = b
         .prefill_sequence(1, &ids)
@@ -681,4 +695,26 @@ fn qwen3_tiny_batch_decode_matches_transformers_and_single_sequence() {
         max_abs(&logits[2], &logits[0]) > 1e-3,
         "third sequence must differ from the first"
     );
+}
+
+/// One /proc/meminfo value in kB, or None when it cannot be read.
+fn meminfo_kb(key: &str) -> Option<u64> {
+    std::fs::read_to_string("/proc/meminfo")
+        .ok()?
+        .lines()
+        .find(|l| l.starts_with(key))?
+        .split_whitespace()
+        .nth(1)?
+        .parse()
+        .ok()
+}
+
+/// MemFree and MemAvailable in MiB, for the GB10 memory log lines.
+fn meminfo_line() -> String {
+    let mib = |k: &str| meminfo_kb(k).map_or("UNKNOWN".to_string(), |kb| (kb / 1024).to_string());
+    format!(
+        "MemFree={} MiB MemAvailable={} MiB",
+        mib("MemFree:"),
+        mib("MemAvailable:")
+    )
 }
