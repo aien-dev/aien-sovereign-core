@@ -216,41 +216,82 @@ pub fn read_mem_available() -> Option<u64> {
         .and_then(parse_mem_available)
 }
 
+/// Why `MemAvailable` could not be established, as a plain message.
+pub fn parse_mem_available_checked(meminfo: &str) -> Result<u64, String> {
+    parse_mem_available(meminfo)
+        .ok_or_else(|| "/proc/meminfo has no parsable `MemAvailable: <n> kB` line".to_string())
+}
+
+/// `MemAvailable` of this host in bytes, or the reason it cannot be established
+/// (`/proc/meminfo` unreadable, or no parsable `MemAvailable` line).
+pub fn read_mem_available_checked() -> Result<u64, String> {
+    let text = std::fs::read_to_string("/proc/meminfo")
+        .map_err(|e| format!("/proc/meminfo cannot be read: {e}"))?;
+    parse_mem_available_checked(&text)
+}
+
+/// Operator override (documented): set to `1` to let the daemon allocate the KV pool
+/// although `MemAvailable` cannot be established. Without it the daemon refuses to
+/// start (fail closed). Every use is logged loudly on stderr.
+pub const ALLOW_UNCHECKED_MEMORY_ENV: &str = "AIEN_ALLOW_UNCHECKED_KV_MEMORY";
+
+/// True only when [`ALLOW_UNCHECKED_MEMORY_ENV`] is exactly `1`.
+pub fn allow_unchecked_memory_from_env() -> bool {
+    std::env::var(ALLOW_UNCHECKED_MEMORY_ENV).is_ok_and(|v| v == "1")
+}
+
 /// Refuses the pool when the host reports less available memory than it needs.
-/// `available == None` (no `/proc/meminfo`) cannot be checked and passes; the
-/// caller logs that the check was skipped.
-pub fn check_kv_memory(requested: u64, available: Option<u64>) -> Result<(), String> {
+/// `available` is `Err(reason)` when memory could not be established: that refuses
+/// too (fail closed, #254) unless `allow_unchecked` is set, in which case the check
+/// is bypassed with a loud stderr line.
+pub fn check_kv_memory(
+    requested: u64,
+    available: Result<u64, String>,
+    allow_unchecked: bool,
+) -> Result<(), String> {
     match available {
-        Some(avail) if requested > avail => Err(format!(
+        Ok(avail) if requested > avail => Err(format!(
             "KV pool needs {requested} bytes ({}) but MemAvailable is {avail} bytes ({}); refusing to allocate",
             fmt_gib(requested),
             fmt_gib(avail),
         )),
-        _ => Ok(()),
+        Ok(_) => Ok(()),
+        Err(reason) if allow_unchecked => {
+            eprintln!(
+                "WARNING: KV POOL MEMORY CHECK BYPASSED by {ALLOW_UNCHECKED_MEMORY_ENV}=1: {reason}; allocating {requested} bytes ({}) WITHOUT knowing MemAvailable",
+                fmt_gib(requested)
+            );
+            Ok(())
+        }
+        Err(reason) => Err(format!(
+            "KV pool memory cannot be checked: {reason}; refusing to allocate {requested} bytes ({}). Set {ALLOW_UNCHECKED_MEMORY_ENV}=1 to override (not recommended)",
+            fmt_gib(requested)
+        )),
     }
 }
 
 /// Daemon planning step (#239): plans the pool for `cfg`, logs the plan, and
 /// checks `MemAvailable` (read through `mem_available`) before anything is
-/// allocated. Allocates nothing itself.
+/// allocated. Allocates nothing itself. Fails closed when memory cannot be
+/// established unless `allow_unchecked` (#254).
 pub fn plan_checked_model_kv(
     cfg: &aien_inference_abi::ModelConfig,
-    mem_available: &dyn Fn() -> Option<u64>,
+    mem_available: &dyn Fn() -> Result<u64, String>,
+    allow_unchecked: bool,
 ) -> Result<KvPoolPlan, String> {
     let plan = KvPoolPlan::for_model(cfg)?;
     println!("  {}", plan.log_line());
     let available = mem_available();
-    match available {
-        Some(avail) => println!(
+    if let Ok(avail) = &available {
+        println!(
             "  KV pool memory check: needs {} bytes ({}), MemAvailable {} bytes ({})",
             plan.total_bytes,
             fmt_gib(plan.total_bytes as u64),
             avail,
-            fmt_gib(avail)
-        ),
-        None => println!("  KV pool memory check: skipped (no MemAvailable in /proc/meminfo)"),
+            fmt_gib(*avail)
+        );
     }
-    check_kv_memory(plan.total_bytes as u64, available)?;
+    check_kv_memory(plan.total_bytes as u64, available, allow_unchecked)?;
     Ok(plan)
 }
 
@@ -261,9 +302,10 @@ pub fn build_shared_kv_runtime_for_model(
     tensor_backend: Arc<dyn TensorBackend>,
     scheduler_config: SchedulerConfig,
     arena_capacity: usize,
-    mem_available: &dyn Fn() -> Option<u64>,
+    mem_available: &dyn Fn() -> Result<u64, String>,
+    allow_unchecked: bool,
 ) -> Result<(AienRuntimeSpine, NativeTransformerBackend, KvPoolPlan), String> {
-    let plan = plan_checked_model_kv(&weights.config, mem_available)?;
+    let plan = plan_checked_model_kv(&weights.config, mem_available, allow_unchecked)?;
     let (spine, backend) = build_shared_kv_runtime(
         weights,
         tensor_backend,
@@ -411,12 +453,11 @@ mod tests {
 
     #[test]
     fn memory_check_refuses_with_requested_and_available_bytes() {
-        let err = check_kv_memory(3_221_225_472, Some(1_073_741_824)).unwrap_err();
+        let err = check_kv_memory(3_221_225_472, Ok(1_073_741_824), false).unwrap_err();
         assert!(err.contains("3221225472 bytes (3.00 GiB)"), "{err}");
         assert!(err.contains("1073741824 bytes (1.00 GiB)"), "{err}");
         assert!(err.contains("refusing"), "{err}");
-        assert!(check_kv_memory(10, Some(10)).is_ok());
-        assert!(check_kv_memory(u64::MAX, None).is_ok());
+        assert!(check_kv_memory(10, Ok(10), false).is_ok());
     }
 
     fn tiny_config() -> aien_inference_abi::ModelConfig {
@@ -439,16 +480,57 @@ mod tests {
         }
     }
 
+    // ---- #254: fail closed when memory cannot be established ----
+
+    #[test]
+    fn unreadable_meminfo_refuses_the_pool() {
+        let cfg = tiny_config();
+        let err = plan_checked_model_kv(
+            &cfg,
+            &|| Err("/proc/meminfo cannot be read: No such file".to_string()),
+            false,
+        )
+        .unwrap_err();
+        assert!(err.contains("cannot be checked"), "{err}");
+        assert!(err.contains("refusing to allocate"), "{err}");
+        assert!(err.contains(ALLOW_UNCHECKED_MEMORY_ENV), "{err}");
+    }
+
+    #[test]
+    fn unreadable_meminfo_with_override_proceeds() {
+        // The override path also prints a WARNING line on stderr (see check_kv_memory).
+        let cfg = tiny_config();
+        let plan = plan_checked_model_kv(&cfg, &|| Err("unreadable".to_string()), true)
+            .expect("override set: proceeds");
+        assert_eq!(plan.total_blocks, 3);
+        // The override never bypasses a known shortage.
+        assert!(check_kv_memory(10, Ok(1), true).is_err());
+    }
+
+    #[test]
+    fn unparsable_meminfo_refuses_the_pool() {
+        for text in [
+            "MemTotal: 1 kB\n",
+            "MemAvailable: x kB\n",
+            "MemAvailable: 5\n",
+            "",
+        ] {
+            let cfg = tiny_config();
+            let err = plan_checked_model_kv(&cfg, &|| parse_mem_available_checked(text), false)
+                .unwrap_err();
+            assert!(err.contains("no parsable"), "{text:?}: {err}");
+        }
+    }
     #[test]
     fn daemon_plan_refuses_before_allocating_and_sizes_the_manager() {
         // Exercises the planning, memory check and pooled manager without building a
         // spine: a spine creates a RuntimeController, which reads the process-wide
         // AIEN_RUNTIME_STATE_DIR that other tests in this crate point at temp dirs.
         let cfg = tiny_config();
-        let err = plan_checked_model_kv(&cfg, &|| Some(1)).unwrap_err();
+        let err = plan_checked_model_kv(&cfg, &|| Ok(1), false).unwrap_err();
         assert!(err.contains("refusing"), "{err}");
 
-        let plan = plan_checked_model_kv(&cfg, &|| None).expect("no meminfo: check skipped");
+        let plan = plan_checked_model_kv(&cfg, &|| Ok(1 << 30), false).expect("enough memory");
         // ceil(40 / 16) = 3 blocks of 16 tokens * (2 * 2 * 2 * 16 * 4) bytes per token.
         assert_eq!(plan.total_blocks, 3);
         assert_eq!(plan.total_bytes, 3 * 16 * 512);
