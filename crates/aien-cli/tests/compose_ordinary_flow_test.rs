@@ -2,7 +2,7 @@
 //! execute) with the daemon minting the grant, driven through the real CLI
 //! binary against an in-process daemon whose compose bridge has a fixed
 //! proposer (no model). Needs the linked composition archive; in a stub
-//! build each test prints SKIPPED (stub build) and returns.
+//! build each test is IGNORED (cfg compose_linked from build.rs), never passed.
 use aien_inference_abi::MockInferenceBackend;
 use aien_kv_cache::create_shared_kv_manager;
 use aien_runtime::client::AienRuntimeClient;
@@ -40,8 +40,7 @@ struct Rig {
 
 async fn rig() -> Option<Rig> {
     if !aien_omega_compose::LINKED {
-        eprintln!("SKIPPED (stub build): needs the linked librx_compose.a");
-        return None;
+        panic!("built without compose_linked");
     }
     let tmp = tempfile::tempdir().unwrap();
     let root = std::fs::canonicalize(tmp.path()).unwrap();
@@ -143,6 +142,7 @@ impl Rig {
 static ONE_HOME: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[cfg_attr(not(compose_linked), ignore = "needs the linked librx_compose.a")]
 async fn ordinary_flow_propose_authorize_execute_reaches_done() {
     let _t = ONE_HOME.lock().await;
     let Some(r) = rig().await else { return };
@@ -186,6 +186,7 @@ async fn ordinary_flow_propose_authorize_execute_reaches_done() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[cfg_attr(not(compose_linked), ignore = "needs the linked librx_compose.a")]
 async fn a_client_written_authorization_note_is_refused_and_opens_nothing() {
     let _t = ONE_HOME.lock().await;
     let Some(r) = rig().await else { return };

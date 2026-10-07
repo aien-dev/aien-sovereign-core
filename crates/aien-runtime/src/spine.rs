@@ -2029,15 +2029,19 @@ impl ComposeBridge {
         if let Err(e) = crate::effects::check_reserved_note(kind, text) {
             return ControlResponse::Error(e);
         }
-        self.note_unchecked(kind, text, links)
+        self.write_note(kind, text, links)
     }
 
-    /// The writer behind `note`, WITHOUT the reserved-record check. Test
-    /// support only: it stands for an attacker who can append to the journal
-    /// directly, so the ledger's own defences can be exercised. Never call it
-    /// from the daemon.
+    /// `note` WITHOUT the reserved-record check. Cargo feature `test-support`
+    /// only: it stands for an attacker who can append to the journal directly,
+    /// so the ledger's own defences can be exercised. Not in a normal build.
     #[doc(hidden)]
+    #[cfg(feature = "test-support")]
     pub fn note_unchecked(&self, kind: &str, text: &str, links: &[u64]) -> ControlResponse {
+        self.write_note(kind, text, links)
+    }
+
+    fn write_note(&self, kind: &str, text: &str, links: &[u64]) -> ControlResponse {
         let k = match kind {
             "constraint" => NoteKind::Constraint,
             "authorization" => NoteKind::Authorization,

@@ -27,7 +27,9 @@
 //! committed the proposal). A caller-written `authorization` note (any record
 //! with neither marker, including ones already in a journal from before this
 //! rule) is read but never honoured: it opens no intent, and an intent it
-//! opened earlier is never settled DONE (it stays UNRESOLVED, loudly).
+//! opened earlier is settled UNRESOLVED by the world check (never DONE, never
+//! NOT_DONE by the daemon itself) and an operator may not declare it DONE; an
+//! operator `--declare not_done` is still accepted.
 //!
 //! The ledger is rebuilt from the journal on every call, under the
 //! compose-home lock, so the check and the intent append are one step.
@@ -614,14 +616,17 @@ pub fn world_state(row: &IntentRow) -> (EffectState, Result<Option<String>, Stri
 /// still resolves inside its grant's workspace (`confine_target` again, at
 /// ack and reconcile time, so a directory swapped for a symlink after the
 /// intent opened is seen). When confinement refuses, or the grant names no
-/// workspace, the state is UNRESOLVED, never DONE or NOT_DONE.
+/// workspace, or its grant is not daemon-minted, the state is UNRESOLVED, never
+/// DONE or NOT_DONE.
 pub fn confined_world_state(
     l: &Ledger,
     row: &IntentRow,
 ) -> (EffectState, Result<Option<String>, String>) {
     // sovereign-core #261: an intent whose grant the daemon did not write
     // (a caller-written note, opened before this rule) is never settled
-    // DONE or NOT_DONE; it stays UNRESOLVED and the operator is told why.
+    // DONE or NOT_DONE by the world check; it stays UNRESOLVED and the operator
+    // is told why. (An operator declaration of NOT_DONE is still accepted;
+    // DONE is refused.)
     if !l
         .grants
         .get(&row.authorization)
@@ -953,8 +958,9 @@ pub struct MintRequest {
 /// committed. Refused when no commit record names (promotion, proposal), the
 /// workspace differs from the one the compose ran for, the target escapes it
 /// (`confine_target`), or an earlier grant for the same commit is still live
-/// or has an unsettled intent. A revoked, stale or settled (DONE, NOT_DONE) grant does
-/// not block a new one: each grant is still spent exactly once.
+/// or has an unsettled intent. A revoked, stale or NOT_DONE grant does not block a new one (each grant
+/// is spent exactly once); a grant that settled DONE does: one committed
+/// proposal gives at most one DONE effect.
 pub fn mint_grant(b: &ComposeBridge, req: &MintRequest) -> ControlResponse {
     if let Err(e) = reconcile_gate(b) {
         return ControlResponse::Error(e);
@@ -1002,6 +1008,15 @@ pub fn mint_grant(b: &ComposeBridge, req: &MintRequest) -> ControlResponse {
             match l.spent.get(&gid).map(|i| &l.intents[i]) {
                 // Settled: the grant is spent for good (a new effect needs a
                 // new grant, as before).
+                Some(row) if row.state == EffectState::Done => {
+                    return Err(no(
+                        "AlreadySpent",
+                        format!(
+                            "grant #{gid} for this proposal settled DONE (intent #{}); one committed proposal gives at most one effect, new content needs a new compose",
+                            row.id
+                        ),
+                    ))
+                }
                 Some(row) if row.state.terminal() => continue,
                 Some(row) => {
                     return Err(no(

@@ -85,7 +85,7 @@ fn state(b: &ComposeBridge, record: u64) -> String {
 }
 
 struct Fixture {
-    promotion: u64,
+    promotion: std::cell::Cell<u64>,
     target: String,
     psha: String,
     csha: String,
@@ -97,7 +97,7 @@ impl Fixture {
         noted(effects::mint_grant(
             b,
             &effects::MintRequest {
-                cx_promotion: self.promotion,
+                cx_promotion: self.promotion.get(),
                 proposal_sha256: self.psha.clone(),
                 workspace: Path::new(&self.target)
                     .parent()
@@ -149,7 +149,7 @@ fn effect_intents_are_at_most_once_or_unresolved() {
     };
     assert!(report.committed, "{report:?}");
     let f = Fixture {
-        promotion: report.cx_promotion,
+        promotion: std::cell::Cell::new(report.cx_promotion),
         target: ws.join("NOTES.md").display().to_string(),
         psha: sha(PROPOSAL.as_bytes()),
         csha: sha(CONTENT.as_bytes()),
@@ -178,6 +178,14 @@ fn effect_intents_are_at_most_once_or_unresolved() {
     ));
     let c = controlled(effects::control(&b, "revoke", "drake", Some(a1)));
     assert_eq!((c.revoked, c.recorded), (Some(false), None));
+
+    // sovereign-core #261: a grant that settled DONE closes its commit (one
+    // committed proposal, at most one DONE effect); new content needs a new compose.
+    refused_mint(&f, &b);
+    match b.run_task("write the note again", ws.to_str().unwrap()) {
+        ControlResponse::ComposeTaskResult(r) => f.promotion.set(r.cx_promotion),
+        other => panic!("second compose: {other:?}"),
+    }
 
     // 2. Executor died after the intent, before the write: NOT_DONE.
     // (Target removed first: a grant against the content itself would read
@@ -257,4 +265,20 @@ fn effect_intents_are_at_most_once_or_unresolved() {
     assert!(line.starts_with("Reconcile: checked 0"), "{line}");
     assert_eq!(ledger(&b).view(), before);
     assert!(effects::check_reserved_note("effect", r#"{"phase":"ack","intent":1}"#).is_err());
+}
+
+fn refused_mint(f: &Fixture, b: &ComposeBridge) {
+    match effects::mint_grant(
+        b,
+        &effects::MintRequest {
+            cx_promotion: f.promotion.get(),
+            proposal_sha256: f.psha.clone(),
+            workspace: Path::new(&f.target).parent().unwrap().display().to_string(),
+            approver: "drake".into(),
+            constraints: vec![],
+        },
+    ) {
+        ControlResponse::Error(e) => assert!(e.contains("settled DONE"), "{e}"),
+        other => panic!("ATTACK SUCCEEDED (second grant after DONE): {other:?}"),
+    }
 }

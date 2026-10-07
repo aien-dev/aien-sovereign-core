@@ -351,3 +351,26 @@ linked_test!(raw_authorization_notes_are_refused_on_every_path, |fx| {
         "forged compose_commit",
     );
 });
+
+linked_test!(no_new_grant_after_a_grant_settled_done, |fx| {
+    let g = noted(fx.mint()).id;
+    let i = noted(fx.open(g)).id;
+    std::fs::write(fx.target(), CONTENT).unwrap();
+    assert_eq!(fx.ack_state(i), "DONE");
+    let e = refusal(fx.mint(), "second grant after DONE");
+    assert!(
+        e.contains("AlreadySpent") && e.contains("settled DONE"),
+        "{e}"
+    );
+    // New content needs a new compose: it has its own commit record.
+    let ControlResponse::ComposeTaskResult(second) =
+        fx.b.run_task("write the note again", fx.ws.to_str().unwrap())
+    else {
+        panic!("second compose")
+    };
+    assert_ne!(second.compose_commit, fx.report.compose_commit);
+    let mut r = fx.mint_req();
+    r.cx_promotion = second.cx_promotion;
+    // (The target now holds the content; the grant is minted against that state.)
+    noted(effects::mint_grant(&fx.b, &r));
+});

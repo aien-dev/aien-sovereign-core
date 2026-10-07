@@ -84,16 +84,21 @@ for an approved write.
     matches, when the workspace differs from the one the compose ran for,
     when `confine_target` fails, or when an earlier grant for the same commit
     is still live or has an unsettled intent. Revoked, stale and settled
-    (DONE, NOT_DONE) grants do not block a new one; each grant is spent once.
+    (NOT_DONE) grants do not block a new one; each grant is spent once. After a
+    grant for a commit settled DONE, no new grant is minted for that commit:
+    one committed proposal gives at most one DONE effect (new content needs a
+    new compose).
     At `ComposeEffectIntent` the grant is checked against its commit record.
   - Old records: an `authorization` record with neither marker (written by a
     client before this change) is read but never honoured. It opens no intent;
     an intent it opened earlier is settled UNRESOLVED with `disk_error`
-    `NotDaemonMinted`, never DONE or NOT_DONE, and an operator cannot declare
-    it DONE. An old committed proposal has no commit record, so it must be
+    `NotDaemonMinted` (the world check never yields DONE or NOT_DONE for it),
+    and an operator cannot declare it DONE (an operator `--declare not_done` is
+    still accepted). An old committed proposal has no commit record, so it must be
     proposed again before it can be authorized.
   - Limit: the approval in the ordinary flow is the operator's CLI call as
-    the daemon's OS user; it carries no desk-key MAC. What changed is that a
+    the daemon's OS user; it carries no desk-key MAC (accepted residual; optional MAC tracked in
+    sovereign-core #297). What changed is that a
     grant can exist only for content the daemon itself committed, at the
     workspace and path the daemon recorded, and only the daemon writes it.
     The approved-proposal path keeps its MAC.

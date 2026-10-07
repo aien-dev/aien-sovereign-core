@@ -62,6 +62,7 @@ impl AienRuntimeServer {
     /// fixed proposer) instead of the bridge built from the environment and
     /// the loaded model. The daemon binary never calls this.
     #[doc(hidden)]
+    #[cfg(feature = "test-support")]
     pub fn with_compose_bridge(self, bridge: Arc<ComposeBridge>) -> Self {
         *self.compose_override.lock().expect("compose override") = Some(bridge);
         self
