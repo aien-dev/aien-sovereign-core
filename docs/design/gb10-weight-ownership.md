@@ -31,6 +31,28 @@ Model numbers used (Qwen3-4B-Instruct-2507, `config.json`): hidden 2560, interme
 layers, 32 query heads, 8 KV heads, head_dim 128, vocab 151936, tied embeddings, declared context
 262144.
 
+
+## Update 2026-10-07 (after omega#332 and omega#333; still no chip run)
+
+- Cut B is done, on omega's fake GB10 layer (CPU only, no chip). omega#332 (merged 7894abb) counted
+  458 driver allocations and 456 frees after warm-up over 428 tokens: the per-length attention pool
+  reallocation and the matmul code-cache thrash (21 shapes, 8 slots) are real, OBSERVED on the fake
+  layer. This confirms section 1(c): serving-time allocations exist, so #278 alone cannot fix #277.
+- omega#333 (merged b980783) adds an opt-in up-front reservation, `omega_gpu_reserve_serving`
+  with `OmegaGpuServingBounds`: attention pool sized from the KV block size, matmul scratch, and a
+  deeper matmul kernel cache (32 slots of storage, 21 needed by Qwen3-4B). Opted in, the same test
+  counts 0 allocations and 0 frees after warm-up; a request past the reservation is refused with a
+  named error before any driver call. Not covered: elementwise scratch, the attention kernel cache
+  (8 slots), prebuilding matmul shapes at reserve time.
+- Not done: sovereign-core does not call the reservation yet (its `omega.lock` is still 01f6a74,
+  before #333), so the daemon's behaviour is unchanged. Wiring it in is a separate reviewed change
+  with its own chip attempt under the #277 protocol. Cuts A and C are not started. The default
+  refusal of Qwen3 on the GB10 stays.
+- The #277 chip attempts so far: attempt 1 (06:33Z) and attempt 2 (21:45Z) are both INVALID CONDITION:
+  the baseline did not reproduce the failure, so the fix runs were skipped by the rule fixed in advance.
+  In attempt 2 the low-memory state was present at launch, but the scripted cache fill reclaimed
+  memory before the baseline ran. A protocol amendment that
+  skips the fill when the trigger already holds is proposed on #277 and not applied.
 ## 1. Allocation audit
 
 All GPU-side allocations go through `omega_gpu_session_alloc` (omega `src/omega_gpu_session.c:78-82`)
