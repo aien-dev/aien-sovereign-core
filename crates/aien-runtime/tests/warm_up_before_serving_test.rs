@@ -343,7 +343,7 @@ async fn plain_model_warm_up_is_skipped_not_failed() {
         .join("../aien-inference-abi/fixtures/openwaldo-byte");
     let plain = ChatTokenizer::from_model_dir(&dir, None).expect("plain fixture loads");
     let tmp = tempfile::tempdir().unwrap();
-    let server = AienRuntimeServer::new(spine(), &tmp.path().join("plain.sock"));
+    let server = AienRuntimeServer::new(spine(), tmp.path().join("plain.sock"));
     server.set_tokenizer(plain);
     // No step loop is running: an attempted warm-up would hang or fail, a skip returns at once.
     let line = tokio::time::timeout(Duration::from_secs(5), server.run_warm_up())
