@@ -51,6 +51,24 @@ impl TransformerLayerWeights {
             rmsnorm_heads_in_place(k, w, head_dim, eps);
         }
     }
+
+    /// [`Self::apply_qk_norm`] through `backend` (`TensorBackend::rmsnorm_heads`), so a device
+    /// backend runs it and accounts for it like any other op. A no-op without q_norm/k_norm.
+    pub fn apply_qk_norm_on(
+        &self,
+        backend: &dyn crate::backend::TensorBackend,
+        q: &mut [f32],
+        k: &mut [f32],
+        head_dim: usize,
+        eps: f32,
+    ) {
+        if let Some(w) = &self.q_norm {
+            backend.rmsnorm_heads(q, w, head_dim, eps);
+        }
+        if let Some(w) = &self.k_norm {
+            backend.rmsnorm_heads(k, w, head_dim, eps);
+        }
+    }
 }
 
 #[derive(Debug, Clone)]

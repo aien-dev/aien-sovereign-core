@@ -20,10 +20,12 @@
 
 use aien_inference_abi::{
     load_model_config, model_config_from_hf_json, omega_model_refusal, NativeTransformerBackend,
-    SequenceState, TransformerWeights,
+    ReferenceCpuBackend, SequenceState, TensorBackend, TransformerWeights,
 };
 use serde_json::Value;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
 const ABSOLUTE_TOLERANCE: f32 = 1e-4;
 
@@ -345,16 +347,150 @@ fn gb10_backend_refuses_qwen3_and_not_llama() {
         Some("{\"eos_token_id\":[151645]}"),
     )
     .unwrap();
-    let msg = omega_model_refusal(&q).expect("Qwen3 must be refused on the GB10 engine");
+    // Qwen3-4B (head_dim 128): rmsnorm_heads and attention both run on the engine.
+    assert_eq!(q.head_dim, 128);
+    assert_eq!(omega_model_refusal(&q), None);
+    // A Qwen3 shape with head_dim 64 cannot run rmsnorm_heads (head_dim % 128): refused up front.
+    let q64 = model_config_from_hf_json(
+        "qwen3-head-dim-64",
+        &real_config_json().replace("\"head_dim\": 128", "\"head_dim\": 64"),
+        Some("{\"eos_token_id\":[151645]}"),
+    )
+    .unwrap();
+    assert_eq!(q64.head_dim, 64);
+    let msg = omega_model_refusal(&q64)
+        .expect("Qwen3 with head_dim 64 must be refused on the GB10 engine");
     assert!(
-        msg.contains("head_dim 128")
+        msg.contains("head_dim 64")
             && msg.contains("Qwen3")
-            && msg.contains("q/k norm runs only on the CPU")
-            && !msg.contains("head_dim 64 only"),
+            && msg.contains("only at head_dim 128"),
         "{msg}"
     );
     let llama = aien_inference_abi::ModelConfig::tinyllama_1_1b();
     assert!(omega_model_refusal(&llama).is_none());
+}
+
+/// Delegates every op to the reference backend and counts `rmsnorm_heads` calls.
+#[derive(Default)]
+struct HeadsSpy {
+    inner: ReferenceCpuBackend,
+    heads_calls: AtomicU64,
+}
+
+impl TensorBackend for HeadsSpy {
+    fn name(&self) -> &'static str {
+        "HeadsSpy"
+    }
+    fn rmsnorm(&self, out: &mut [f32], x: &[f32], weight: &[f32], eps: f32) {
+        self.inner.rmsnorm(out, x, weight, eps)
+    }
+    fn rmsnorm_heads(&self, x: &mut [f32], weight: &[f32], head_dim: usize, eps: f32) {
+        self.heads_calls.fetch_add(1, Ordering::Relaxed);
+        self.inner.rmsnorm_heads(x, weight, head_dim, eps)
+    }
+    fn apply_rope(
+        &self,
+        q: &mut [f32],
+        k: &mut [f32],
+        pos: usize,
+        head_dim: usize,
+        num_q_heads: usize,
+        num_kv_heads: usize,
+        rope: &aien_inference_abi::RopeParams,
+    ) {
+        self.inner
+            .apply_rope(q, k, pos, head_dim, num_q_heads, num_kv_heads, rope)
+    }
+    fn matmul_vec(
+        &self,
+        out: &mut [f32],
+        x: &[f32],
+        weight: &[f32],
+        out_dim: usize,
+        in_dim: usize,
+    ) {
+        self.inner.matmul_vec(out, x, weight, out_dim, in_dim)
+    }
+    fn swiglu(&self, out: &mut [f32], gate: &[f32], up: &[f32]) {
+        self.inner.swiglu(out, gate, up)
+    }
+    fn gqa_attention(
+        &self,
+        out: &mut [f32],
+        q: &[f32],
+        k_cache: &[f32],
+        v_cache: &[f32],
+        seq_len: usize,
+        num_q_heads: usize,
+        num_kv_heads: usize,
+        head_dim: usize,
+    ) {
+        self.inner.gqa_attention(
+            out,
+            q,
+            k_cache,
+            v_cache,
+            seq_len,
+            num_q_heads,
+            num_kv_heads,
+            head_dim,
+        )
+    }
+    fn compute_logits(
+        &self,
+        logits: &mut [f32],
+        hidden: &[f32],
+        embed_weight: &[f32],
+        vocab_size: usize,
+        hidden_dim: usize,
+    ) {
+        self.inner
+            .compute_logits(logits, hidden, embed_weight, vocab_size, hidden_dim)
+    }
+}
+
+/// The q/k norm goes through `TensorBackend::rmsnorm_heads` on every forward path (prefill,
+/// batch decode, single-token decode): two calls (q, k) per layer per token, and the logits still
+/// match transformers. A device backend therefore runs and accounts for it; before this, the
+/// norm was host math outside the backend.
+#[test]
+fn qwen3_qk_norm_runs_through_the_tensor_backend() {
+    let (weights, r) = tiny();
+    let per_token = 2 * weights.config.num_layers as u64;
+    let n = r.ids.len();
+    let spy = Arc::new(HeadsSpy::default());
+    let calls = || spy.heads_calls.load(Ordering::Relaxed);
+    let mut b = NativeTransformerBackend::with_backend(weights, spy.clone());
+
+    b.prefill_sequence(1, &r.ids[..n - 1]).expect("prefill");
+    assert_eq!(calls(), per_token * (n as u64 - 1), "prefill");
+
+    b.pending_prefill_token.insert(1, r.ids[n - 1]);
+    let (_out, logits) = b
+        .forward_decode_batch_with_logits(&[1])
+        .expect("batch decode");
+    assert_eq!(calls(), per_token * n as u64, "batch decode");
+    let d = max_abs(&logits[0], &r.logits);
+    assert!(d <= ABSOLUTE_TOLERANCE, "batch decode max abs diff {d:e}");
+
+    b.prefill_sequence(2, &r.ids[..n - 1]).expect("prefill");
+    let before = calls();
+    let seq = b.sequences.get_mut(&2).unwrap();
+    let h = NativeTransformerBackend::forward_token_impl_paged(
+        &b.weights,
+        &*b.tensor_backend,
+        r.ids[n - 1],
+        n - 1,
+        seq,
+        2,
+        None,
+    );
+    assert_eq!(calls(), before + per_token, "single-token decode");
+    let d = max_abs(&b.compute_logits(&h), &r.logits);
+    assert!(
+        d <= ABSOLUTE_TOLERANCE,
+        "single-token decode max abs diff {d:e}"
+    );
 }
 
 #[test]
@@ -406,6 +542,74 @@ fn real_qwen3_4b_instruct_2507_matches_transformers() {
     );
     assert_eq!(argmax(&got), top_ids[0]);
     assert!(d <= 5e-3, "max abs diff {d:e}");
+}
+
+/// Real Qwen3-4B-Instruct-2507 prefill on the GB10 engine (every op native, q/k norm as
+/// `rmsnorm_heads`) against the same transformers reference. Bound, set before any run: the
+/// project's GB10 logit bound `MAX_ABS_DLOGIT` = 0.15 (aien-inference-runtime tests/drift, from
+/// the Llama cut 3d measurement 0.059) over the reference top-20, the same argmax, no fallback
+/// and no chip error. Chip test: native build, AIEN_QWEN3_DIR, heavy queue / GPU hold only.
+#[test]
+#[ignore = "chip test: needs a native build, the GB10 and AIEN_QWEN3_DIR; run under a GPU hold"]
+fn real_qwen3_4b_instruct_2507_on_gb10_matches_transformers() {
+    let omega = Arc::new(aien_inference_abi::OmegaGb10Backend::new());
+    assert!(omega.is_available(), "native build required");
+    let dir = PathBuf::from(
+        std::env::var("AIEN_QWEN3_DIR").expect("AIEN_QWEN3_DIR must name the model directory"),
+    );
+    let r: Value = serde_json::from_str(
+        &std::fs::read_to_string(
+            fixture("qwen3-4b-instruct-2507-config").join("real_forward_reference.json"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let ids: Vec<u32> = r["ids"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_u64().unwrap() as u32)
+        .collect();
+    let top_ids: Vec<usize> = r["top_ids"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_u64().unwrap() as usize)
+        .collect();
+    let top_logits: Vec<f32> = r["top_logits"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_f64().unwrap() as f32)
+        .collect();
+    let config = load_model_config(&dir).expect("config");
+    omega
+        .check_model(&config)
+        .expect("GB10 engine must accept Qwen3-4B");
+    let weights = TransformerWeights::load_from_safetensors(
+        dir.join("model.safetensors.index.json"),
+        &config,
+    )
+    .expect("weights");
+    let mut b = NativeTransformerBackend::with_backend(weights, omega.clone());
+    let got = b
+        .prefill_sequence(1, &ids)
+        .expect("prefill on the GB10 engine");
+    let ours: Vec<f32> = top_ids.iter().map(|i| got[*i]).collect();
+    let d = max_abs(&ours, &top_logits);
+    println!(
+        "QWEN3_GB10 max abs diff over the reference top-20 = {d:e} (bound 0.15), argmax {} vs {}, \
+         chip_errors={} fallbacks={} {}",
+        argmax(&got),
+        top_ids[0],
+        omega.chip_errors(),
+        omega.fallback_count(),
+        omega.op_report().line()
+    );
+    assert_eq!(omega.chip_errors(), 0, "{}", omega.last_error());
+    assert_eq!(omega.fallback_count(), 0, "{}", omega.last_error());
+    assert_eq!(argmax(&got), top_ids[0]);
+    assert!(d <= 0.15, "max abs diff {d:e}");
 }
 
 /// Batch decode (`forward_decode_batch_with_logits`, the third q/k-norm site): two sequences

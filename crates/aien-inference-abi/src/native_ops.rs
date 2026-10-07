@@ -13,7 +13,8 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
-/// The nine operations of `TensorBackend` (fallback_count is not an op).
+/// The ten operations of `TensorBackend` (fallback_count is not an op). New ops go last so
+/// existing mask bits keep their positions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TensorOp {
@@ -26,10 +27,11 @@ pub enum TensorOp {
     PagedAttention,
     PagedAttentionBatch,
     ComputeLogits,
+    RmsnormHeads,
 }
 
 impl TensorOp {
-    pub const COUNT: usize = 9;
+    pub const COUNT: usize = 10;
     pub const ALL: [TensorOp; Self::COUNT] = [
         TensorOp::Rmsnorm,
         TensorOp::ApplyRope,
@@ -40,6 +42,7 @@ impl TensorOp {
         TensorOp::PagedAttention,
         TensorOp::PagedAttentionBatch,
         TensorOp::ComputeLogits,
+        TensorOp::RmsnormHeads,
     ];
 
     fn index(self) -> usize {
@@ -58,6 +61,7 @@ impl TensorOp {
             TensorOp::PagedAttention => "paged_attention",
             TensorOp::PagedAttentionBatch => "paged_attention_batch",
             TensorOp::ComputeLogits => "compute_logits",
+            TensorOp::RmsnormHeads => "rmsnorm_heads",
         }
     }
 }
@@ -235,7 +239,16 @@ mod tests {
         assert_eq!(m, NativeOpMask::ALL);
         assert!(TensorOp::ALL.iter().all(|op| m.contains(*op)));
         assert!(m.reference_ops().is_empty());
-        assert_eq!(m.native_ops().len(), 9);
+        assert_eq!(m.native_ops().len(), TensorOp::COUNT);
+    }
+
+    #[test]
+    fn op_bits_are_stable() {
+        // The nine original ops keep bits 0..8; rmsnorm_heads (Qwen3 q/k norm) is bit 9.
+        assert_eq!(NativeOpMask::from_ops(&[TensorOp::Rmsnorm]).0, 1 << 0);
+        assert_eq!(NativeOpMask::from_ops(&[TensorOp::ComputeLogits]).0, 1 << 8);
+        assert_eq!(NativeOpMask::from_ops(&[TensorOp::RmsnormHeads]).0, 1 << 9);
+        assert_eq!(TensorOp::RmsnormHeads.name(), "rmsnorm_heads");
     }
 
     #[test]
@@ -244,7 +257,7 @@ mod tests {
         assert!(m.contains(TensorOp::MatmulVec));
         assert!(!m.contains(TensorOp::Rmsnorm));
         assert_eq!(m.native_ops().len(), 2);
-        assert_eq!(m.reference_ops().len(), 7);
+        assert_eq!(m.reference_ops().len(), TensorOp::COUNT - 2);
         let m2 = m.with(TensorOp::ComputeLogits).without(TensorOp::MatmulVec);
         assert!(m2.contains(TensorOp::ComputeLogits));
         assert!(!m2.contains(TensorOp::MatmulVec));
@@ -308,7 +321,7 @@ mod tests {
         acct.record_reference(TensorOp::MatmulBatch);
         let rep = acct.report();
         assert_eq!(rep.native_ops, vec!["matmul_vec", "matmul_batch"]);
-        assert_eq!(rep.reference_ops.len(), 7);
+        assert_eq!(rep.reference_ops.len(), TensorOp::COUNT - 2);
         assert_eq!(rep.native_fallbacks, vec![("matmul_batch".to_string(), 1)]);
         assert_eq!(rep.reference_runs, vec![("rmsnorm".to_string(), 1)]);
         let line = rep.line();
@@ -320,7 +333,7 @@ mod tests {
     #[test]
     fn default_report_is_all_native() {
         let rep = OpReport::all_native();
-        assert_eq!(rep.native_ops.len(), 9);
+        assert_eq!(rep.native_ops.len(), TensorOp::COUNT);
         assert!(rep.reference_ops.is_empty());
         assert!(rep.native_fallbacks.is_empty());
     }

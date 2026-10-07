@@ -160,6 +160,10 @@ pub trait TensorBackend: Send + Sync {
     /// out[i] = x[i] * weight[i] / sqrt(mean(x^2) + eps)
     fn rmsnorm(&self, out: &mut [f32], x: &[f32], weight: &[f32], eps: f32);
 
+    /// Per-head RMS normalization in place (Qwen3 q/k norm): `x` is `[heads][head_dim]` and every
+    /// head is normalized on its own with the same `weight` (`head_dim` values).
+    fn rmsnorm_heads(&self, x: &mut [f32], weight: &[f32], head_dim: usize, eps: f32);
+
     /// In-place Rotary Positional Embeddings (RoPE) following canonical rotate_half convention:
     /// rot(v) = [-v[half_dim..], v[..half_dim]]
     /// out = v * cos(pos * f_i) + rot(v) * sin(pos * f_i), with f_i = `rope.inv_freq(i, head_dim)`
@@ -379,6 +383,10 @@ impl TensorBackend for ReferenceCpuBackend {
 
     fn rmsnorm(&self, out: &mut [f32], x: &[f32], weight: &[f32], eps: f32) {
         tensor_rmsnorm(x, weight, eps, out);
+    }
+
+    fn rmsnorm_heads(&self, x: &mut [f32], weight: &[f32], head_dim: usize, eps: f32) {
+        crate::tensor::rmsnorm_heads_in_place(x, weight, head_dim, eps);
     }
 
     fn apply_rope(
