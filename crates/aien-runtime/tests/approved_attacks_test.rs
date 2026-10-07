@@ -1028,6 +1028,74 @@ async fn c28_parent_directory_swap_after_the_intent() {
     );
 }
 
+/// c28b: the same parent swap, settled by reconcile instead of the ack. The
+/// intent names an executor that has already exited, so ComposeReconcile
+/// decides it from the world: it must not record DONE.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[cfg_attr(
+    not(compose_linked),
+    ignore = "needs the linked librx_compose.a (AIEN_OMEGA_COMPOSE_LIB)"
+)]
+async fn c28b_parent_directory_swap_settled_by_reconcile() {
+    let _t = TURN.lock().await;
+    let tmp = fresh();
+    let w = ws(tmp.path());
+    std::fs::create_dir_all(w.join("sub")).unwrap();
+    let d = up(tmp.path(), "s.sock").await;
+    let p = sign(
+        tmp.path(),
+        unsigned("req-q", "appr-q", "sub/NOTES.md", CONTENT),
+    );
+    let r = committed(submit(&d.c, &p, &w).await);
+    let g = r.approved_grant.expect("grant");
+    // An executor that is gone: a child that has exited. A dead pid reads as
+    // not alive whatever start ticks the intent names.
+    let mut child = std::process::Command::new("true").spawn().unwrap();
+    let pid = child.id();
+    child.wait().unwrap();
+    let (_, start) = effects::self_executor();
+    let i = match d
+        .c
+        .send_command(ControlCommand::ComposeEffectIntent {
+            authorization: g,
+            proposal_sha256: r.compose_proposal_sha256.clone(),
+            path: r.path.clone(),
+            target: r.target.clone().unwrap(),
+            content_sha256: r.content_sha256.clone(),
+            executor_pid: pid,
+            executor_start: start,
+        })
+        .await
+        .unwrap()
+    {
+        ControlResponse::ComposeNoted(n) => n.id,
+        other => panic!("intent did not open: {other:?}"),
+    };
+    let outdir = tmp.path().join("outdir");
+    std::fs::create_dir_all(&outdir).unwrap();
+    std::fs::rename(w.join("sub"), w.join("sub-moved")).unwrap();
+    std::os::unix::fs::symlink(&outdir, w.join("sub")).unwrap();
+    std::fs::write(outdir.join("NOTES.md"), CONTENT).unwrap();
+    let out =
+        d.c.send_command(ControlCommand::ComposeReconcile { declare: None })
+            .await
+            .unwrap();
+    down(d).await;
+    let ControlResponse::ComposeReconciled(rep) = out else {
+        panic!("reconcile: {out:?}");
+    };
+    let o = rep
+        .outcomes
+        .iter()
+        .find(|o| o.intent == i)
+        .expect("the intent was looked at");
+    eprintln!("c28b: reconcile {} ({})", o.state, o.note);
+    assert_ne!(
+        o.state, "DONE",
+        "ATTACK SUCCEEDED: reconcile settled DONE for bytes outside the workspace"
+    );
+}
+
 /// c22: an `approved_grant` record sent through the socket's ComposeNote
 /// (a copy of the daemon's own grant, same links) is refused and appends
 /// nothing.
