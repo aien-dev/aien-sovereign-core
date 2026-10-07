@@ -33,9 +33,9 @@ pub use model_dir::{load_model_config, model_config_from_hf_json, model_id_for_d
 pub use moe_plan::*;
 pub use mojo_backend::*;
 pub use omega_backend::{
-    omega_backend_selected, open_gpu_session_with_retry, retry_bounded, retry_bounded_within,
-    OmegaGb10Backend, SessionAttemptError, GPU_BACKEND_ENV, GPU_SESSION_OPEN_ATTEMPTS,
-    GPU_SESSION_OPEN_DEADLINE, GPU_SESSION_RETRY_DELAY,
+    omega_backend_selected, omega_model_refusal, open_gpu_session_with_retry, retry_bounded,
+    retry_bounded_within, OmegaGb10Backend, SessionAttemptError, GPU_BACKEND_ENV,
+    GPU_SESSION_OPEN_ATTEMPTS, GPU_SESSION_OPEN_DEADLINE, GPU_SESSION_RETRY_DELAY,
 };
 pub use qwen3_coder::*;
 pub use qwen3_moe::*;
@@ -896,7 +896,7 @@ mod tests {
     /// the chip. Before this test was split, it used head_dim 16 and asserted success
     /// unconditionally, so it only passed with AIEN_DEV_FALLBACK=1: a strict stub build
     /// correctly refuses at the first op (no engine linked), and a strict native build
-    /// would refuse at attention (omega attention needs head_dim 64, see omega_backend.rs).
+    /// would refuse at attention (omega attention needs head_dim 64 or 128, see omega_backend.rs).
     #[tokio::test]
     async fn test_blackwell_inference_backend() {
         let config = ModelConfig {

@@ -630,7 +630,7 @@ fn attn_dim(v: usize) -> Result<u32, OmegaGpuError> {
 
 /// Decode attention over contiguous f32 KV (`TensorBackend::gqa_attention`).
 /// `q`, `out`: `[num_q_heads][head_dim]`; `k_cache`, `v_cache`: `[seq_len][num_kv_heads][head_dim]`.
-/// omega requires `head_dim == 64` and `num_q_heads <= 64`; otherwise `Rc { rc: -1 | -2 }`.
+/// omega requires `head_dim` 64 or 128 and `num_q_heads <= 64`; otherwise `Rc { rc: -1 | -2 }`.
 #[allow(clippy::too_many_arguments)]
 pub fn gqa_attention_f32(
     q: &[f32],

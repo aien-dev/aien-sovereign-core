@@ -6,7 +6,8 @@
 //! Paged attention over a bf16 pool uses omega's paged kernel; over any other pool dtype
 //! (the model builds Fp32 pools) the sequence's K/V are gathered on the host into
 //! contiguous f32 exactly as the reference reads them, then run on the f32 gqa kernel.
-//! omega attention needs head_dim 64 (TinyLlama, Llama-3.2-1B). A chip error in
+//! omega attention needs head_dim 64 (TinyLlama, Llama-3.2-1B) or 128 (since omega b564bf4;
+//! Qwen3 is still refused, see `omega_model_refusal`). A chip error in
 //! one of those is a fallback of a claimed-native op: it is counted, goes through
 //! `OpAccounting::reference_path` (fatal in a production build, see `strict.rs`)
 //! and, in a dev build only, the reference result is computed so the run goes on.
@@ -28,7 +29,7 @@
 //! [`OmegaGb10Backend::clear_resident`] after changing weights.
 use crate::backend::{ReferenceCpuBackend, TensorBackend};
 use crate::native_ops::{NativeOpMask, OpAccounting, OpReport, TensorOp};
-use aien_abi_core::RopeParams;
+use aien_abi_core::{ModelConfig, RopeParams};
 use aien_omega_gpu::ResidentTensor;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -495,7 +496,28 @@ impl OmegaGb10Backend {
     }
 }
 
+/// Why the GB10 engine refuses `config`, if it does: Qwen3 (`qk_norm`) needs a per-head q/k
+/// norm, which has no engine op. It is host math in `TransformerLayerWeights::apply_qk_norm`,
+/// outside the `TensorBackend`, so a GB10 run would compute it on the CPU without op accounting.
+/// The attention kernel itself accepts `head_dim` 128 since omega b564bf4 (omega
+/// `omega_gpu_attention_api.h`); opening the GB10 Qwen3 path is its own qualification.
+/// Llama-architecture models are not touched by this check.
+pub fn omega_model_refusal(config: &ModelConfig) -> Option<String> {
+    config.qk_norm.then(|| {
+        format!(
+            "OmegaGb10Backend refuses model {:?}: Qwen3 (per-head q/k norm, head_dim {}) is \
+             unsupported on the GB10 engine: the per-head q/k norm runs only on the CPU, with no \
+             GB10 engine op; run it on the CPU reference backend",
+            config.model_id, config.head_dim
+        )
+    })
+}
+
 impl TensorBackend for OmegaGb10Backend {
+    fn check_model(&self, config: &ModelConfig) -> Result<(), String> {
+        omega_model_refusal(config).map_or(Ok(()), Err)
+    }
+
     fn name(&self) -> &'static str {
         if self.is_available() {
             "OmegaGb10Backend (native Omega engine, no CUDA, NVIDIA GB10 sm_121)"
