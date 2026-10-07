@@ -416,6 +416,7 @@ impl AienRuntimeSpine {
             | ControlCommand::ComposeEffectAck { .. }
             | ControlCommand::ComposeReconcile { .. }
             | ControlCommand::ComposeControl { .. }
+            | ControlCommand::ComposeAuthorize { .. }
             | ControlCommand::ComposeApprovedProposal { .. } => ControlResponse::Error(
                 "compose commands are handled on the socket connection, not as one-shot commands"
                     .into(),
@@ -1925,7 +1926,44 @@ impl ComposeBridge {
             Err(e) => (None, None, Some(e)),
         };
         let parsed = proposal.as_deref().and_then(parse_file_proposal);
+        // sovereign-core #261: the daemon's own record that THIS run committed
+        // THIS proposal. `ComposeAuthorize` mints only from it. An approved
+        // proposal has its own replay claim and grant, so it gets none.
+        let mut compose_commit = None;
+        if let (true, None, Some(p), Some(text)) = (
+            committed,
+            approved_text,
+            parsed.as_ref(),
+            proposal.as_deref(),
+        ) {
+            let wsc = std::fs::canonicalize(&ws)
+                .map_err(|e| format!("workspace {}: {e}", ws.display()))?
+                .display()
+                .to_string();
+            let id = crate::effects::write_compose_commit(
+                home,
+                &wsc,
+                task,
+                r.cx_promotion,
+                r.cx_evidence,
+                &hex(&Sha256::digest(text.as_bytes())),
+                &p.path,
+                &hex(&Sha256::digest(p.content.as_bytes())),
+            )
+            .map_err(|e| {
+                format!(
+                    "compose run committed (promotion #{}) but its commit record was not written: {e}",
+                    r.cx_promotion
+                )
+            })?;
+            home.advance_mark().map_err(|e| {
+                format!("compose run: record mark update failed (E_MARK_WRITE): {e}")
+            })?;
+            compose_commit = Some(id);
+        }
         Ok(ComposeTaskReport {
+            compose_commit,
+
             compose_dir: self.dir.display().to_string(),
             machine_id: home.machine_id.clone(),
             task,
@@ -1983,8 +2021,23 @@ impl ComposeBridge {
         r
     }
 
-    /// S1 / S4 / S5: one operator record through the composition's writer.
+    /// S1 / S5: one operator record through the composition's writer. Gated
+    /// records cannot be forged here, on any path (the socket handler calls
+    /// this too): authorizations, effect phases, replay and compose-commit
+    /// records are written only by the daemon (sovereign-core #261).
     pub fn note(&self, kind: &str, text: &str, links: &[u64]) -> ControlResponse {
+        if let Err(e) = crate::effects::check_reserved_note(kind, text) {
+            return ControlResponse::Error(e);
+        }
+        self.note_unchecked(kind, text, links)
+    }
+
+    /// The writer behind `note`, WITHOUT the reserved-record check. Test
+    /// support only: it stands for an attacker who can append to the journal
+    /// directly, so the ledger's own defences can be exercised. Never call it
+    /// from the daemon.
+    #[doc(hidden)]
+    pub fn note_unchecked(&self, kind: &str, text: &str, links: &[u64]) -> ControlResponse {
         let k = match kind {
             "constraint" => NoteKind::Constraint,
             "authorization" => NoteKind::Authorization,

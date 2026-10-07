@@ -59,8 +59,10 @@ fn mark_of(home: &Path) -> Mark {
 }
 
 fn grant(b: &ComposeBridge, n: u32) -> u64 {
+    // Any host record will do: only the journal length matters here, and a
+    // caller can no longer write an authorization (sovereign-core #261).
     noted(b.note(
-        "authorization",
+        "constraint",
         &json!({"approver": "drake", "n": n}).to_string(),
         &[],
     ))

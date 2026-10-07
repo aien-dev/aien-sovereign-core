@@ -432,12 +432,17 @@ fn linked_passing_document_is_approved_and_saved_byte_for_byte() {
     assert!(!ws.join("DOC.md").exists(), "composing writes nothing");
     // Approval (the authorization note) binds the digest; the effect writes.
     let target = ws.join(&saved.path);
-    let grant = serde_json::json!({
-        "proposal_sha256": r.proposal_sha256.clone().unwrap(), "path": saved.path,
-        "content_sha256": content_sha, "approver": "drake",
-        "target": target.display().to_string(), "prior_sha256": null,
-        "workspace": ws.display().to_string()});
-    let a = match bridge.note("authorization", &grant.to_string(), &[]) {
+    // sovereign-core #261: the daemon mints the grant from its own commit record.
+    let a = match effects::mint_grant(
+        &bridge,
+        &effects::MintRequest {
+            cx_promotion: r.cx_promotion,
+            proposal_sha256: r.proposal_sha256.clone().unwrap(),
+            workspace: ws.display().to_string(),
+            approver: "drake".into(),
+            constraints: vec![],
+        },
+    ) {
         ControlResponse::ComposeNoted(n) => n.id,
         other => panic!("authorize: {other:?}"),
     };

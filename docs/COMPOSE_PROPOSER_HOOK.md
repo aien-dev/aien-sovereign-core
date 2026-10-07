@@ -67,13 +67,37 @@ for an approved write.
   through `ComposeNote` and again at every `ComposeEffectIntent`. A grant
   with no `workspace` opens no intent. `aien compose authorize` now writes
   `workspace`; older unspent grants without it are refused (fail closed).
-- **Still open (sc#261, out of scope here):** the generic, client-written
-  `ComposeNote` authorization used by the `aien compose` operator flow. A
-  same-user socket caller can still write a generic grant for a proposal
-  nothing produced, inside a workspace it names, and reach DONE. The
-  workspace is the caller's claim, as it is for `aien compose authorize`.
-  `approved_confinement_test` asserts this observed behaviour so the follow-up
-  flips it visibly. `aien compose desk-key [--create 1]` prints the
+- **Closed (sc#261): only daemon-minted grants are honoured.** `ComposeNote`
+  refuses every `authorization` record, whatever it says (also inside
+  `ComposeBridge::note`, so no in-process path writes one). Two grant kinds
+  exist, both written by the daemon:
+  - `approved_grant`, from `ComposeApprovedProposal`, backed by a COMMITTED
+    replay claim and the desk-key MAC (above);
+  - `minted_grant`, from the new `ComposeAuthorize` command that
+    `aien compose authorize` now sends. When the daemon's own compose run
+    commits a one-file proposal on the ordinary path it writes a reserved
+    `compose_commit` record (promotion, evidence, proposal digest, path,
+    content digest, canonical workspace). `ComposeAuthorize` names only the
+    promotion, the proposal digest, the workspace the operator expects and
+    the approver; path, content and target come from the commit record, so
+    the caller never supplies them. It is refused when no commit record
+    matches, when the workspace differs from the one the compose ran for,
+    when `confine_target` fails, or when an earlier grant for the same commit
+    is still live or has an unsettled intent. Revoked, stale and settled
+    (DONE, NOT_DONE) grants do not block a new one; each grant is spent once.
+    At `ComposeEffectIntent` the grant is checked against its commit record.
+  - Old records: an `authorization` record with neither marker (written by a
+    client before this change) is read but never honoured. It opens no intent;
+    an intent it opened earlier is settled UNRESOLVED with `disk_error`
+    `NotDaemonMinted`, never DONE or NOT_DONE, and an operator cannot declare
+    it DONE. An old committed proposal has no commit record, so it must be
+    proposed again before it can be authorized.
+  - Limit: the approval in the ordinary flow is the operator's CLI call as
+    the daemon's OS user; it carries no desk-key MAC. What changed is that a
+    grant can exist only for content the daemon itself committed, at the
+    workspace and path the daemon recorded, and only the daemon writes it.
+    The approved-proposal path keeps its MAC.
+  `aien compose desk-key [--create 1]` prints the
 desk key id and path (never the key) and creates the key if none exists.
 
 ## Authentication design (#249 A)

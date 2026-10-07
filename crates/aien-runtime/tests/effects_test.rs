@@ -85,6 +85,7 @@ fn state(b: &ComposeBridge, record: u64) -> String {
 }
 
 struct Fixture {
+    promotion: u64,
     target: String,
     psha: String,
     csha: String,
@@ -92,12 +93,22 @@ struct Fixture {
 
 impl Fixture {
     fn grant(&self, b: &ComposeBridge) -> u64 {
-        let prior = effects::file_sha256(Path::new(&self.target)).unwrap();
-        let text = json!({"proposal_sha256": self.psha, "path": "NOTES.md",
-            "content_sha256": self.csha, "approver": "drake", "target": self.target,
-            "prior_sha256": prior,
-            "workspace": Path::new(&self.target).parent().unwrap().display().to_string()});
-        noted(b.note("authorization", &text.to_string(), &[])).id
+        // sovereign-core #261: the daemon mints the grant from its own commit record.
+        noted(effects::mint_grant(
+            b,
+            &effects::MintRequest {
+                cx_promotion: self.promotion,
+                proposal_sha256: self.psha.clone(),
+                workspace: Path::new(&self.target)
+                    .parent()
+                    .unwrap()
+                    .display()
+                    .to_string(),
+                approver: "drake".into(),
+                constraints: vec![],
+            },
+        ))
+        .id
     }
 
     /// `alive`: this test process is the executor; otherwise a dead one.
@@ -138,6 +149,7 @@ fn effect_intents_are_at_most_once_or_unresolved() {
     };
     assert!(report.committed, "{report:?}");
     let f = Fixture {
+        promotion: report.cx_promotion,
         target: ws.join("NOTES.md").display().to_string(),
         psha: sha(PROPOSAL.as_bytes()),
         csha: sha(CONTENT.as_bytes()),
