@@ -713,9 +713,8 @@ async fn c20_workspace_containing_the_compose_home() {
 /// confined target, as #262 requires) for a proposal digest no approved
 /// compose produced, then opens an effect intent on it.
 ///
-/// KNOWN GAP, sovereign-core #261 (the generic client-minted authorization
-/// path, its own cut). This test asserts the gap is still OPEN; when #261
-/// closes it the test fails: then flip it to assert refusal.
+/// sovereign-core #261: the daemon refuses a raw `authorization` note on every
+/// path, so the forged grant is never written and no intent can open.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[cfg_attr(
     not(compose_linked),
@@ -728,8 +727,8 @@ async fn c18_a1_raw_forged_authorization() {
     })
     .await;
     assert_eq!(
-        opened, "opened",
-        "sc#261 appears closed (A1 refused): flip c18 to assert refusal"
+        opened, "note refused",
+        "ATTACK SUCCEEDED (sc#261 A1): a caller-written authorization opened an effect intent"
     );
 }
 
@@ -753,9 +752,7 @@ async fn c19_a1b_forged_authorization_outside_workspace() {
 }
 
 /// A1c: the note names its OWN workspace: the parent of the real workspace,
-/// which also holds the compose home. Confinement in a client-minted note
-/// only says "inside the workspace the note names". Part of the #261 gap:
-/// asserts the gap is OPEN (flip with c18).
+/// which also holds the compose home. Refused like c18 (sc#261).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[cfg_attr(
     not(compose_linked),
@@ -768,8 +765,8 @@ async fn c19c_a1c_forged_authorization_names_its_own_workspace() {
     })
     .await;
     assert_eq!(
-        opened, "opened",
-        "sc#261 appears closed (A1c refused): flip c19c to assert refusal"
+        opened, "note refused",
+        "ATTACK SUCCEEDED (sc#261 A1c): a note naming its own workspace opened an effect intent"
     );
 }
 
@@ -1138,7 +1135,7 @@ fn bridge(tmp: &Path) -> aien_runtime::spine::ComposeBridge {
 }
 
 fn raw_note(b: &aien_runtime::spine::ComposeBridge, kind: &str, text: &str, links: &[u64]) -> u64 {
-    match b.note(kind, text, links) {
+    match b.note_unchecked(kind, text, links) {
         ControlResponse::ComposeNoted(n) => n.id,
         other => panic!("raw note: {other:?}"),
     }

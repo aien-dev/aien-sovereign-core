@@ -682,7 +682,7 @@ fn copied_approved_grant_opens_nothing() {
     let a = r.approved_grant.unwrap();
     let g = recalled(&b, &[a]);
     let text = g.cited[0].text.clone().unwrap();
-    let copy = match b.note("authorization", &text, &g.cited[0].links) {
+    let copy = match b.note_unchecked("authorization", &text, &g.cited[0].links) {
         ControlResponse::ComposeNoted(n) => n.id,
         other => panic!("bridge-level copy: {other:?}"),
     };

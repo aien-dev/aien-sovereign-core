@@ -33,6 +33,10 @@ thiserror = "1.0"
 # NEXT-PHASE-2 fault harness only (ACCEPTANCE-v3 2.6): forced start-up
 # reconcile failure. Enabled through aien-cli's `fault-hold`.
 fault-hold = []
+# Test seams that bypass the reserved-record guard (`note_unchecked`,
+# `with_compose_bridge`). Enabled only by dev-dependencies, never by the daemon.
+test-support = []
 
 [dev-dependencies]
 tempfile = "3.10"
+aien-runtime = { path = ".", features = ["test-support"] }
