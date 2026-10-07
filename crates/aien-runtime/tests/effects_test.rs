@@ -182,15 +182,19 @@ fn effect_intents_are_at_most_once_or_unresolved() {
     // sovereign-core #261: a grant that settled DONE closes its commit (one
     // committed proposal, at most one DONE effect); new content needs a new compose.
     refused_mint(&f, &b);
-    match b.run_task("write the note again", ws.to_str().unwrap()) {
-        ControlResponse::ComposeTaskResult(r) => f.promotion.set(r.cx_promotion),
-        other => panic!("second compose: {other:?}"),
-    }
-
     // 2. Executor died after the intent, before the write: NOT_DONE.
     // (Target removed first: a grant against the content itself would read
-    // DONE, ACCEPTANCE-v2 2.2 checks the content digest first.)
+    // DONE, ACCEPTANCE-v2 2.2 checks the content digest first. It also lets the
+    // second compose create NOTES.md again: since #288 a new-document compose
+    // never overwrites an existing file.)
     std::fs::remove_file(&f.target).unwrap();
+    match b.run_task("write the note again", ws.to_str().unwrap()) {
+        ControlResponse::ComposeTaskResult(r) => {
+            assert!(r.committed, "second compose: {r:?}");
+            f.promotion.set(r.cx_promotion)
+        }
+        other => panic!("second compose: {other:?}"),
+    }
     let a2 = f.grant(&b);
     let i2 = noted(effects::open_intent(&b, &f.req(a2, false))).id;
     let r = reconciled(effects::reconcile(&b, None, "test"));

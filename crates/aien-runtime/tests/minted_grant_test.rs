@@ -362,15 +362,18 @@ linked_test!(no_new_grant_after_a_grant_settled_done, |fx| {
         e.contains("AlreadySpent") && e.contains("settled DONE"),
         "{e}"
     );
-    // New content needs a new compose: it has its own commit record.
+    // New content needs a new compose: it has its own commit record. (Since
+    // #288 a new-document compose never overwrites an existing file, so the
+    // written note is removed first.)
+    std::fs::remove_file(fx.target()).unwrap();
     let ControlResponse::ComposeTaskResult(second) =
         fx.b.run_task("write the note again", fx.ws.to_str().unwrap())
     else {
         panic!("second compose")
     };
+    assert!(second.committed, "second compose: {second:?}");
     assert_ne!(second.compose_commit, fx.report.compose_commit);
     let mut r = fx.mint_req();
     r.cx_promotion = second.cx_promotion;
-    // (The target now holds the content; the grant is minted against that state.)
     noted(effects::mint_grant(&fx.b, &r));
 });
