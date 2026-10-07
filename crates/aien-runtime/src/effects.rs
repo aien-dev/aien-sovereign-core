@@ -700,8 +700,11 @@ fn check_approved_backing(
     let ev = row.evidence.as_ref();
     if row.state != crate::approved_replay::ClaimState::Committed
         || row.keys.approval_key != a.approval_key
-        || (&row.keys.request_id, &row.keys.approval_id, &row.keys.trace_id)
-            != (&id.request_id, &id.approval_id, &id.trace_id)
+        || (
+            &row.keys.request_id,
+            &row.keys.approval_id,
+            &row.keys.trace_id,
+        ) != (&id.request_id, &id.approval_id, &id.trace_id)
         || ev.map(|e| {
             (
                 e.compose_proposal_sha256.as_str(),
