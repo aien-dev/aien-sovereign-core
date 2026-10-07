@@ -62,7 +62,7 @@ async fn harness() -> H {
         capability_digest: live,
     };
     H {
-        lane: EffectLane::new(broker.clone()),
+        lane: EffectLane::new(broker.clone()).with_clock(std::sync::Arc::new(|| 1)),
         desk: ApprovalDesk::new(broker.clone()),
         broker,
         calls,
@@ -95,19 +95,27 @@ async fn second_mint_with_the_same_grant_is_refused() {
     let h = harness().await;
     let g = h.desk.issue(&h.intent, scope("b"), 100);
     let a = EffectClassAuthority;
-    assert!(h
+    // Hold the minted effect: a dropped one would release the grant (see tests/two_phase.rs).
+    let held = h
         .lane
         .authorize_approved(h.intent.clone(), scope("b"), &a, &g, 1)
-        .is_ok());
+        .unwrap();
     let err = h
         .lane
         .authorize_approved(h.intent.clone(), scope("b"), &a, &g, 1)
         .unwrap_err();
-    assert_eq!(approval(err), ApprovalError::Consumed);
+    assert_eq!(approval(err), ApprovalError::Reserved);
     // A cloned grant is the same grant.
     let err = h
         .lane
         .authorize_approved(h.intent.clone(), scope("b"), &a, &g.clone(), 1)
+        .unwrap_err();
+    assert_eq!(approval(err), ApprovalError::Reserved);
+    // Once the held effect runs, the grant is spent for good.
+    h.lane.execute_effect(held).await.unwrap();
+    let err = h
+        .lane
+        .authorize_approved(h.intent.clone(), scope("b"), &a, &g, 1)
         .unwrap_err();
     assert_eq!(approval(err), ApprovalError::Consumed);
 }

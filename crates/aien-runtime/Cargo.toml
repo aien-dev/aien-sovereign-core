@@ -16,6 +16,7 @@ aien-inference-abi = { path = "../aien-inference-abi" }
 aien-security = { path = "../aien-security" }
 cortex-rs = { path = "../cortex-rs" }
 aien-omega-compose = { path = "../aien-omega-compose" }
+aien-allen = { path = "../aien-allen" }
 
 tokio = { version = "1.37", features = ["full"] }
 parking_lot = "0.12"

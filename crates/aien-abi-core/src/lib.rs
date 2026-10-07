@@ -150,6 +150,13 @@ pub struct ModelConfig {
     /// Empty means the legacy TinyLlama set, see [`ModelConfig::stop_token_ids`].
     #[serde(default)]
     pub eos_token_ids: Vec<u32>,
+    /// True for Qwen3 (`Qwen3ForCausalLM`): every attention layer carries per-head RMSNorm
+    /// weights `self_attn.q_norm.weight` and `self_attn.k_norm.weight` (length `head_dim`),
+    /// applied to Q and K per head before RoPE. `head_dim` is then read from `config.json`
+    /// and `num_heads * head_dim` may differ from `hidden_dim`. Not serialized when false, so
+    /// every other model's serialized config is unchanged.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub qk_norm: bool,
 }
 
 /// Why an [`AttentionGeometry`] was refused. Every variant names the offending numbers so a
@@ -364,6 +371,7 @@ impl ModelConfig {
             rope_scaling: None,
             tie_word_embeddings: false,
             eos_token_ids: Vec::new(),
+            qk_norm: false,
         }
     }
 
@@ -438,6 +446,7 @@ impl Default for ModelConfig {
             rope_scaling: None,
             tie_word_embeddings: false,
             eos_token_ids: Vec::new(),
+            qk_norm: false,
         }
     }
 }

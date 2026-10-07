@@ -27,10 +27,10 @@ package aien-proof or aien-test.
   labels it `NOT-RELEASABLE`, which the checks reject).
 - `scripts/check-release-candidate.sh` (tree): candidate named, `omega.lock` equals `omega-commit`, `Cargo.lock`
   holds exactly the `[pins]` revisions (aien-protocols, crumb-spec, spark-crumbs), `[model]` complete.
-- `scripts/check-release-candidate.sh --package A.tar.gz [--native]`: candidate id, `[model]` table (model id,
+- `scripts/check-release-candidate.sh --package A.tar.gz --native`: candidate id, `[model]` table (model id,
   safetensors, tokenizer, config, oracle fixture digests), `aien-cli-sha256` equals the digest of `bin/aien`, every
-  listed file, no unlisted file; with `--native` (linux aarch64, omega linked) the digest must equal
-  `[executables] aien-cli-native-release`. Other targets build the CPU stub and are not the candidate.
+  listed file, no unlisted file; `--native` is required (linux aarch64, omega linked): the digest must equal
+  `[executables] aien-cli-native-release`, and each helper binary must equal its `sc-<name>` entry. A package without `--native` is refused (no candidate digest for that kind); the release matrix builds only the native target.
 - `scripts/verify-release-assets.sh <dir> <allowed_signers>`: signature on `SHA256SUMS.txt` valid for the pinned
   signer, every listed file matches, every `sovereign-*` archive is covered.
 - `scripts/test-release-checks.sh` (also in CI) proves each of these rejects: wrong omega.lock or Cargo.lock pins,

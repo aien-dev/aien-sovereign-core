@@ -1,7 +1,8 @@
 //! Native weight data structures and zero-dependency loaders for transformer models.
 
 use crate::tensor::{
-    apply_rope_params, matmul_vec, rmsnorm, scaled_dot_product_attention_single, swiglu,
+    apply_rope_params, matmul_vec, rmsnorm, rmsnorm_heads_in_place,
+    scaled_dot_product_attention_single, swiglu,
 };
 use crate::ModelConfig;
 use serde_json::Value;
@@ -31,6 +32,25 @@ pub struct TransformerLayerWeights {
     pub gate_proj: Vec<f32>,
     pub up_proj: Vec<f32>,
     pub down_proj: Vec<f32>,
+    /// Qwen3 per-head RMSNorm weights `[head_dim]` for Q and K (`config.qk_norm`); `None` for
+    /// Llama-architecture models.
+    pub q_norm: Option<Vec<f32>>,
+    pub k_norm: Option<Vec<f32>>,
+}
+
+impl TransformerLayerWeights {
+    /// Qwen3: RMSNorm each query head and each key head over `head_dim`, in place, right
+    /// after the projections and before RoPE (Hugging Face `modeling_qwen3.py`
+    /// `Qwen3Attention.forward`: `q_norm(q_proj(x).view(.., head_dim))`, then rotary).
+    /// A no-op for models without q_norm/k_norm.
+    pub fn apply_qk_norm(&self, q: &mut [f32], k: &mut [f32], head_dim: usize, eps: f32) {
+        if let Some(w) = &self.q_norm {
+            rmsnorm_heads_in_place(q, w, head_dim, eps);
+        }
+        if let Some(w) = &self.k_norm {
+            rmsnorm_heads_in_place(k, w, head_dim, eps);
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -162,6 +182,8 @@ impl TransformerWeights {
                 gate_proj,
                 up_proj,
                 down_proj,
+                q_norm: config.qk_norm.then(|| vec![1.0f32; config.head_dim]),
+                k_norm: config.qk_norm.then(|| vec![1.0f32; config.head_dim]),
             });
         }
 
@@ -225,6 +247,8 @@ impl TransformerWeights {
             matmul_vec(&x_norm, &layer_w.q_proj, &mut q, hidden_dim, q_dim);
             matmul_vec(&x_norm, &layer_w.k_proj, &mut k, hidden_dim, kv_dim);
             matmul_vec(&x_norm, &layer_w.v_proj, &mut v, hidden_dim, kv_dim);
+
+            layer_w.apply_qk_norm(&mut q, &mut k, head_dim, eps);
 
             // 2c. Rotary Positional Embeddings (RoPE)
             apply_rope_params(
@@ -413,6 +437,8 @@ impl TransformerWeights {
                 matmul_vec(&x_norm, &layer_w.q_proj, &mut q, hidden_dim, q_dim);
                 matmul_vec(&x_norm, &layer_w.k_proj, &mut k, hidden_dim, kv_dim);
                 matmul_vec(&x_norm, &layer_w.v_proj, &mut v, hidden_dim, kv_dim);
+
+                layer_w.apply_qk_norm(&mut q, &mut k, head_dim, eps);
 
                 // 2c. Rotary Positional Embeddings (RoPE)
                 apply_rope_params(
@@ -692,6 +718,10 @@ impl TransformerWeights {
             if let Some(t) = extract_tensor(&format!("{}.mlp.down_proj.weight", prefix)) {
                 layer.down_proj = t;
             }
+            if config.qk_norm {
+                layer.q_norm = extract_tensor(&format!("{}.self_attn.q_norm.weight", prefix));
+                layer.k_norm = extract_tensor(&format!("{}.self_attn.k_norm.weight", prefix));
+            }
         }
 
         if let Some(t) = extract_tensor("model.norm.weight") {
@@ -738,6 +768,14 @@ impl TransformerWeights {
             let gate_proj = decode(&format!("{}.mlp.gate_proj.weight", prefix))?;
             let up_proj = decode(&format!("{}.mlp.up_proj.weight", prefix))?;
             let down_proj = decode(&format!("{}.mlp.down_proj.weight", prefix))?;
+            let (q_norm, k_norm) = if config.qk_norm {
+                (
+                    Some(decode(&format!("{}.self_attn.q_norm.weight", prefix))?),
+                    Some(decode(&format!("{}.self_attn.k_norm.weight", prefix))?),
+                )
+            } else {
+                (None, None)
+            };
 
             layers.push(TransformerLayerWeights {
                 input_layernorm,
@@ -749,6 +787,8 @@ impl TransformerWeights {
                 gate_proj,
                 up_proj,
                 down_proj,
+                q_norm,
+                k_norm,
             });
         }
 
@@ -832,6 +872,7 @@ mod tests {
             rope_scaling: None,
             tie_word_embeddings: false,
             eos_token_ids: Vec::new(),
+            qk_norm: false,
         };
 
         let weights = TransformerWeights::reference_test_weights(&config);
@@ -864,6 +905,7 @@ mod tests {
             rope_scaling: None,
             tie_word_embeddings: false,
             eos_token_ids: Vec::new(),
+            qk_norm: false,
         };
 
         // 1. Missing tensor fails loudly with CheckpointError::MissingTensor

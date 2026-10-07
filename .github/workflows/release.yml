@@ -22,21 +22,13 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-            artifact_name: sovereign-linux-x86_64.tar.gz
-            use_tar: true
-            native_engine: false
+          # Only the native candidate target is released: the candidate manifest has executable digests for it alone,
+          # and the gate refuses any package without them (scripts/check-release-candidate.sh --native is required).
           - os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
             artifact_name: sovereign-linux-aarch64.tar.gz
             use_tar: true
             native_engine: true
-          - os: macos-latest
-            target: aarch64-apple-darwin
-            artifact_name: sovereign-macos-arm64.tar.gz
-            use_tar: true
-            native_engine: false
 
     steps:
       - name: Checkout Source
@@ -105,12 +97,11 @@ jobs:
           printf '%s  %s  native_engine=%s\n' "${AIEN_SHA%% *}" "${{ matrix.artifact_name }}" "${{ matrix.native_engine }}" > "aien-cli-sha256-${{ matrix.target }}.txt"
           cat "aien-cli-sha256-${{ matrix.target }}.txt"
 
-      - name: Check the package against the candidate (model inputs, files, aien-cli digest; native build also the candidate digest)
+      - name: Check the package against the candidate (model inputs, files, aien-cli and helper digests, all bound to the candidate manifest)
         id: pkgcheck
         continue-on-error: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
         run: |
-          if [ "${{ matrix.native_engine }}" = "true" ]; then NATIVE=--native; else NATIVE=; fi
-          scripts/check-release-candidate.sh --package "${{ matrix.artifact_name }}" $NATIVE
+          scripts/check-release-candidate.sh --package "${{ matrix.artifact_name }}" --native
 
       - name: Record dry-run status
         if: always() && github.event_name == 'workflow_dispatch' && inputs.dry_run

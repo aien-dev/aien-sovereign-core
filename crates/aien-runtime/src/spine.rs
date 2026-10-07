@@ -623,6 +623,55 @@ fn proposal_handle(text: &str) -> u64 {
     }
 }
 
+/// ALLEN identity gate (aien-allen, ADR 0035), run once per compose-home open.
+/// Not engaged (AIEN_ALLEN_SUBJECT unset): one log line, nothing else changes.
+/// Engaged: any refusal is FATAL (message, nonzero exit), never a fallback.
+fn allen_gate(dir: &Path, compose: &mut Compose, machine_id: &[u8; 32]) {
+    use aien_allen::{Context, Gate};
+    static NOT_ENGAGED_ONCE: std::sync::Once = std::sync::Once::new();
+    let lineage = compose.record(1).ok().map(|r| r.digest);
+    let ctx = Context {
+        machine_id: *machine_id,
+        lineage,
+    };
+    // The operator adoption variable is honoured once per process: after this
+    // process wrote the pin, later opens (recover, re-open) see it as spent.
+    static ADOPTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    let get = |k: &str| {
+        if k == aien_allen::ENV_ADOPT && ADOPTED.load(std::sync::atomic::Ordering::SeqCst) {
+            return None;
+        }
+        std::env::var(k).ok()
+    };
+    match aien_allen::gate(dir, &ctx, &get) {
+        Gate::NotEngaged => {
+            NOT_ENGAGED_ONCE.call_once(|| println!("{}", aien_allen::NOT_ENGAGED_LINE));
+        }
+        Gate::Engaged(r) => {
+            if r.adopted {
+                ADOPTED.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+            let adopted = if r.adopted {
+                " (ADOPTED: pin written once, operator-approved)"
+            } else {
+                ""
+            };
+            println!(
+                "ALLEN: engaged agent={} head_sequence={} chain_verified={}{adopted}",
+                aien_allen::hex(&r.agent),
+                r.head_seq,
+                r.chain_verified
+            );
+        }
+        Gate::Refused(why) => {
+            let msg = format!("FATAL ALLEN refused: {why}");
+            tracing::error!("{msg}");
+            eprintln!("{msg}");
+            std::process::exit(aien_allen::EXIT_REFUSED);
+        }
+    }
+}
+
 /// A named refusal for an rxc_host open error: the operator learns what is
 /// wrong and that `RecoverComposeHome` is the remedy (never a silent repair).
 fn refusal(dir: &Path, e: &ComposeError) -> String {
@@ -1294,6 +1343,9 @@ impl ComposeBridge {
                 cortex_mark::check_digest(m, at).map_err(|r| mark_refusal(&self.dir, &r))?;
             }
         }
+        // ALLEN identity gate: after the open (record 1 exists, skills are
+        // registered), before the home is handed out. Fatal when engaged.
+        allen_gate(&self.dir, &mut compose, &info.machine_id);
         let mut home = ComposeHome {
             compose,
             machine_id: hex(&info.machine_id),

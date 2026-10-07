@@ -1111,6 +1111,7 @@ fn reference_config() -> aien_inference_abi::ModelConfig {
         rope_scaling: None,
         tie_word_embeddings: false,
         eos_token_ids: Vec::new(),
+        qk_norm: false,
     }
 }
 
@@ -1269,20 +1270,12 @@ fn load_daemon_model(
         },
     }
 
-    let label = format!(
-        "checkpoint loaded from {} ({}, model_id={}, config={}, model_sha256={}, tokenizer_sha256={})",
-        path.display(),
-        if tokenizer.is_some() {
-            "tokenizer loaded"
-        } else {
-            "tokenizer missing"
-        },
-        manifest.model_id,
-        if has_config_json {
-            format!("{} (config.json)", config.model_id)
-        } else {
-            format!("{} (built in)", config.model_id)
-        },
+    let label = checkpoint_loaded_label(
+        &path,
+        tokenizer.is_some(),
+        &manifest.model_id,
+        &config.model_id,
+        has_config_json,
         manifest.model_sha256.as_deref().unwrap_or("none"),
         manifest.tokenizer_sha256.as_deref().unwrap_or("none"),
     );
@@ -1293,6 +1286,36 @@ fn load_daemon_model(
         label,
         reference_weights: false,
     })
+}
+
+/// The one-line "checkpoint loaded" label. Its format is parsed by the interplane
+/// verifier (interplane#76): keep it byte-identical (pinned by a test).
+fn checkpoint_loaded_label(
+    path: &std::path::Path,
+    tokenizer_loaded: bool,
+    manifest_model_id: &str,
+    config_model_id: &str,
+    has_config_json: bool,
+    model_sha256: &str,
+    tokenizer_sha256: &str,
+) -> String {
+    format!(
+        "checkpoint loaded from {} ({}, model_id={}, config={}, model_sha256={}, tokenizer_sha256={})",
+        path.display(),
+        if tokenizer_loaded {
+            "tokenizer loaded"
+        } else {
+            "tokenizer missing"
+        },
+        manifest_model_id,
+        if has_config_json {
+            format!("{} (config.json)", config_model_id)
+        } else {
+            format!("{} (built in)", config_model_id)
+        },
+        model_sha256,
+        tokenizer_sha256,
+    )
 }
 
 /// Loaded daemon model parts: weights, tensor compute backend, backend label,
@@ -1871,6 +1894,37 @@ pub async fn handle_aegis_command() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn checkpoint_loaded_line_format_is_pinned() {
+        // interplane#76 parses this line; the text must not drift.
+        let line = checkpoint_loaded_label(
+            std::path::Path::new("/m/dir"),
+            true,
+            "mid",
+            "cfgid",
+            true,
+            "aaa",
+            "bbb",
+        );
+        assert_eq!(
+            line,
+            "checkpoint loaded from /m/dir (tokenizer loaded, model_id=mid, config=cfgid (config.json), model_sha256=aaa, tokenizer_sha256=bbb)"
+        );
+        let line = checkpoint_loaded_label(
+            std::path::Path::new("/m/dir"),
+            false,
+            "mid",
+            "cfgid",
+            false,
+            "none",
+            "none",
+        );
+        assert_eq!(
+            line,
+            "checkpoint loaded from /m/dir (tokenizer missing, model_id=mid, config=cfgid (built in), model_sha256=none, tokenizer_sha256=none)"
+        );
+    }
 
     /// T4 launch budget: unset means the AIEN default 256 (not omega's 64),
     /// the log names it as the AIEN default with the evidence dir, and an
