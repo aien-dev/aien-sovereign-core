@@ -1,6 +1,7 @@
 //! Requirement validation for composed documents (crate::requirements).
 use aien_runtime::approved::{approved_proposal_sha256, proposal_text};
 use aien_runtime::control::ControlResponse;
+use aien_runtime::effects;
 use aien_runtime::requirements::{extract, refusal_reason, unmet, ItemKind, Requirement};
 use aien_runtime::spine::{
     check_file_proposal, propose_task_checked, ComposeBridge, ComposeProposer, Generation,
@@ -296,4 +297,171 @@ fn unmet_requirement_leaves_nothing_committed_or_written() {
     assert_eq!(r.proposal_attempts.len(), COMPOSE_MAX_ATTEMPTS as usize);
     assert!(r.proposer_error.unwrap().contains("found 13"));
     assert_eq!(std::fs::read_dir(&ws).unwrap().count(), 0);
+}
+
+// ---- linked proofs (real omega compose library; skipped in the CPU stub) ----
+
+fn sha256_hex(b: &[u8]) -> String {
+    aien_omega_compose::hex(&<sha2::Sha256 as sha2::Digest>::digest(b))
+}
+
+fn recalled(b: &ComposeBridge) -> aien_runtime::control::ComposeRecallReport {
+    match b.recall(&[], None) {
+        ControlResponse::ComposeRecalled(r) => *r,
+        other => panic!("recall: {other:?}"),
+    }
+}
+
+fn dir_names(d: &std::path::Path) -> Vec<String> {
+    let mut v: Vec<String> = std::fs::read_dir(d)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    v.sort();
+    v
+}
+
+/// Every attempt of a real compose run fails the requirement: nothing is
+/// proposed, approved, written, committed or recorded as an effect.
+#[test]
+fn linked_exhaustion_leaves_ledger_state_and_files_untouched() {
+    let tmp = tempfile::tempdir().unwrap();
+    let ws = tmp.path().join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    let home = tmp.path().join("compose");
+    let calls = Arc::new(Mutex::new(0usize));
+    let c2 = calls.clone();
+    let proposer: ComposeProposer = Arc::new(move |_: &str, _: Duration| {
+        *c2.lock().unwrap() += 1;
+        gen(doc(13))
+    });
+    let bridge = ComposeBridge::new(home.clone(), proposer, "test:short");
+    let resp = bridge.run_task("write DOC.md in at least 20 lines", ws.to_str().unwrap());
+    if !aien_omega_compose::LINKED {
+        assert!(matches!(resp, ControlResponse::Error(_)));
+        return;
+    }
+    let ControlResponse::ComposeTaskResult(r) = resp else {
+        panic!("{resp:?}")
+    };
+    // The real model Skill ran COMPOSE_MAX_ATTEMPTS times, each refused.
+    assert_eq!(*calls.lock().unwrap(), COMPOSE_MAX_ATTEMPTS as usize);
+    assert!(r
+        .proposal_attempts
+        .iter()
+        .all(|a| a.outcome == "refused" && a.aegis.is_none()));
+    // No committed proposal, no winner, no AEGIS pass, no promotion record.
+    assert!(!r.committed, "{r:?}");
+    assert_eq!(r.outcome, 2, "RXC_OUT_NO_WINNER: {r:?}");
+    assert!(r.proposal.is_none() && r.proposal_sha256.is_none());
+    assert!(r.proposal_path.is_none() && r.proposal_content_sha256.is_none());
+    assert_eq!((r.winner, r.aegis_pass_mask), (None, 0), "{r:?}");
+    assert_eq!(r.cx_promotion, 0, "{r:?}");
+    // No approval request, no effect intent: the host ledger holds no
+    // authorization or effect note, and rebuilds to an empty ledger.
+    let rec = recalled(&bridge);
+    assert!(
+        rec.host
+            .iter()
+            .all(|h| !matches!(h.note.as_deref(), Some("authorization") | Some("effect"))),
+        "{:?}",
+        rec.host
+    );
+    let ledger = effects::Ledger::from_records(&rec.host).unwrap();
+    assert!(ledger.grants.is_empty() && ledger.intents.is_empty());
+    assert!(ledger.approved_by_claim.is_empty() && ledger.spent.is_empty());
+    // No file was written and the destination is absent.
+    assert!(!ws.join("DOC.md").exists());
+    assert_eq!(dir_names(&ws), Vec::<String>::new());
+    // The compose home holds only composition files.
+    for n in dir_names(&home) {
+        assert!(
+            n == "machine.id" || n == "cortex.cx" || n.starts_with("jspace"),
+            "{n}"
+        );
+    }
+    // Compose state is unchanged by the failed task: a second identical task
+    // adds no promotion and the committed World has no new document.
+    let before = recalled(&bridge).records_total;
+    let again = bridge.run_task("write DOC.md in at least 20 lines", ws.to_str().unwrap());
+    let ControlResponse::ComposeTaskResult(r2) = again else {
+        panic!("{again:?}")
+    };
+    assert!(!r2.committed && r2.cx_promotion == 0, "{r2:?}");
+    assert!(!ws.join("DOC.md").exists());
+    let after = recalled(&bridge);
+    assert!(after.records_total >= before);
+    assert!(after
+        .host
+        .iter()
+        .all(|h| !matches!(h.note.as_deref(), Some("authorization") | Some("effect"))));
+}
+
+/// A document that passes validation commits through the real compose run,
+/// is approved by an authorization bound to its digest, and is saved with
+/// sha256(disk) == the approved content sha256.
+#[test]
+fn linked_passing_document_is_approved_and_saved_byte_for_byte() {
+    let tmp = tempfile::tempdir().unwrap();
+    let ws = tmp.path().join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    let ws = std::fs::canonicalize(&ws).unwrap();
+    let proposer: ComposeProposer = Arc::new(|_: &str, _: Duration| gen(doc(25)));
+    let bridge = ComposeBridge::new(tmp.path().join("compose"), proposer, "test:long");
+    let resp = bridge.run_task("write DOC.md in at least 20 lines", ws.to_str().unwrap());
+    if !aien_omega_compose::LINKED {
+        assert!(matches!(resp, ControlResponse::Error(_)));
+        return;
+    }
+    let ControlResponse::ComposeTaskResult(r) = resp else {
+        panic!("{resp:?}")
+    };
+    assert!(r.committed, "{r:?}");
+    assert_eq!(r.proposal_attempts.len(), 1);
+    assert_eq!(r.proposal_attempts[0].aegis.as_deref(), Some("pass"));
+    let proposal = r.proposal.clone().unwrap();
+    let saved = check_file_proposal(&proposal).unwrap();
+    assert!(refusal_reason(&extract("at least 20 lines"), &saved.content).is_none());
+    let content_sha = r.proposal_content_sha256.clone().unwrap();
+    assert_eq!(content_sha, sha256_hex(saved.content.as_bytes()));
+    assert!(!ws.join("DOC.md").exists(), "composing writes nothing");
+    // Approval (the authorization note) binds the digest; the effect writes.
+    let target = ws.join(&saved.path);
+    let grant = serde_json::json!({
+        "proposal_sha256": r.proposal_sha256.clone().unwrap(), "path": saved.path,
+        "content_sha256": content_sha, "approver": "drake",
+        "target": target.display().to_string(), "prior_sha256": null,
+        "workspace": ws.display().to_string()});
+    let a = match bridge.note("authorization", &grant.to_string(), &[]) {
+        ControlResponse::ComposeNoted(n) => n.id,
+        other => panic!("authorize: {other:?}"),
+    };
+    let (pid, start) = effects::self_executor();
+    let i = match effects::open_intent(
+        &bridge,
+        &effects::IntentRequest {
+            authorization: a,
+            proposal_sha256: r.proposal_sha256.clone().unwrap(),
+            path: saved.path.clone(),
+            target: target.display().to_string(),
+            content_sha256: content_sha.clone(),
+            executor_pid: pid,
+            executor_start: start,
+        },
+    ) {
+        ControlResponse::ComposeNoted(n) => n.id,
+        other => panic!("intent: {other:?}"),
+    };
+    std::fs::write(&target, &saved.content).unwrap();
+    assert!(matches!(
+        effects::ack(
+            &bridge,
+            i,
+            &serde_json::json!({"written_sha256": content_sha})
+        ),
+        ControlResponse::ComposeNoted(_)
+    ));
+    assert_eq!(sha256_hex(&std::fs::read(&target).unwrap()), content_sha);
+    let ledger = effects::Ledger::from_records(&recalled(&bridge).host).unwrap();
+    assert_eq!(ledger.intents.len(), 1);
 }
