@@ -7,7 +7,8 @@
 //! (the model builds Fp32 pools) the sequence's K/V are gathered on the host into
 //! contiguous f32 exactly as the reference reads them, then run on the f32 gqa kernel.
 //! omega attention needs head_dim 64 (TinyLlama, Llama-3.2-1B) or 128 (Qwen3-4B, since omega
-//! b564bf4; a Qwen3 model with another head_dim is refused, see `omega_model_refusal`). A chip
+//! b564bf4; Qwen3 is refused by default while omega#327 is open and at any other head_dim
+//! always, see `omega_model_refusal`). A chip
 //! error in one of those is a fallback of a claimed-native op: it is counted, goes through
 //! `OpAccounting::reference_path` (fatal in a production build, see `strict.rs`)
 //! and, in a dev build only, the reference result is computed so the run goes on.
@@ -519,20 +520,62 @@ impl OmegaGb10Backend {
 /// 128 (omega `omega_gpu_attention_api.h`, since b564bf4). So a Qwen3 model runs on the engine
 /// only with `head_dim` 128 (Qwen3-4B) and is refused up front otherwise, before any chip work.
 /// Llama-architecture models are not touched by this check.
+///
+/// Qwen3 at `head_dim` 128 is also refused by default while omega#327 is open: in the
+/// normal memory state (MemFree low, most memory in clean page cache) the driver's channel
+/// and weight allocations fail with NV_ERR_NO_MEMORY after the f32 weight load
+/// (sovereign-core #274, declared attempt 1). A declared chip attempt opts in with
+/// [`GB10_QWEN3_OPT_IN_ENV`]` = 1`; see [`omega_model_refusal_with`].
 pub fn omega_model_refusal(config: &ModelConfig) -> Option<String> {
-    (config.qk_norm && config.head_dim != 128).then(|| {
-        format!(
+    omega_model_refusal_with(config, gb10_qwen3_opted_in())
+}
+
+/// Environment switch for a declared GB10 attempt that runs Qwen3 although omega#327 is
+/// open. Only the exact value `1` opts in; unset or anything else keeps the refusal.
+pub const GB10_QWEN3_OPT_IN_ENV: &str = "AIEN_GB10_QWEN3_DECLARED_ATTEMPT";
+
+fn gb10_qwen3_opted_in() -> bool {
+    std::env::var(GB10_QWEN3_OPT_IN_ENV).is_ok_and(|v| v == "1")
+}
+
+/// [`omega_model_refusal`] with the opt-in passed explicitly instead of read from the
+/// environment.
+pub fn omega_model_refusal_with(config: &ModelConfig, qwen3_opted_in: bool) -> Option<String> {
+    if !config.qk_norm {
+        return None;
+    }
+    if config.head_dim != 128 {
+        return Some(format!(
             "OmegaGb10Backend refuses model {:?}: Qwen3 (per-head q/k norm) with head_dim {} is \
              unsupported on the GB10 engine, which runs Qwen3 only at head_dim 128 (rmsnorm_heads \
              needs head_dim % 128 == 0); run it on the CPU reference backend",
             config.model_id, config.head_dim
+        ));
+    }
+    (!qwen3_opted_in).then(|| {
+        format!(
+            "OmegaGb10Backend refuses model {:?}: the GB10 Qwen3 path is off by default while the \
+             resident-weight memory issue omega#327 is open (the driver's channel and weight \
+             allocations fail with NV_ERR_NO_MEMORY when MemFree is low after the f32 weight \
+             load); run it on the CPU reference backend, or set {GB10_QWEN3_OPT_IN_ENV}=1 for a \
+             declared chip attempt",
+            config.model_id
         )
     })
 }
 
 impl TensorBackend for OmegaGb10Backend {
     fn check_model(&self, config: &ModelConfig) -> Result<(), String> {
-        omega_model_refusal(config).map_or(Ok(()), Err)
+        omega_model_refusal(config).map_or(Ok(()), Err)?;
+        if config.qk_norm {
+            eprintln!(
+                "OMEGA_BACKEND WARNING: {GB10_QWEN3_OPT_IN_ENV}=1, running Qwen3 {:?} on GB10 \
+                 although omega#327 (NV_ERR_NO_MEMORY on low MemFree) is open; for a declared \
+                 chip attempt only",
+                config.model_id
+            );
+        }
+        Ok(())
     }
 
     fn name(&self) -> &'static str {

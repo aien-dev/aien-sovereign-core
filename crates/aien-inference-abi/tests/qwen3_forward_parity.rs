@@ -19,8 +19,9 @@
 //! tolerance (5e-3 absolute on 36 layers) was set before the run.
 
 use aien_inference_abi::{
-    load_model_config, model_config_from_hf_json, omega_model_refusal, NativeTransformerBackend,
-    ReferenceCpuBackend, SequenceState, TensorBackend, TransformerWeights,
+    load_model_config, model_config_from_hf_json, omega_model_refusal, omega_model_refusal_with,
+    NativeTransformerBackend, ReferenceCpuBackend, SequenceState, TensorBackend,
+    TransformerWeights, GB10_QWEN3_OPT_IN_ENV,
 };
 use serde_json::Value;
 use std::path::PathBuf;
@@ -347,9 +348,21 @@ fn gb10_backend_refuses_qwen3_and_not_llama() {
         Some("{\"eos_token_id\":[151645]}"),
     )
     .unwrap();
-    // Qwen3-4B (head_dim 128): rmsnorm_heads and attention both run on the engine.
+    // Qwen3-4B (head_dim 128): rmsnorm_heads and attention both run on the engine, but the
+    // path stays off by default while omega#327 (NV_ERR_NO_MEMORY on low MemFree) is open.
     assert_eq!(q.head_dim, 128);
-    assert_eq!(omega_model_refusal(&q), None);
+    let msg = omega_model_refusal_with(&q, false)
+        .expect("Qwen3-4B must be refused on the GB10 engine by default");
+    assert!(
+        msg.contains("omega#327")
+            && msg.contains("NV_ERR_NO_MEMORY")
+            && msg.contains("AIEN_GB10_QWEN3_DECLARED_ATTEMPT=1"),
+        "{msg}"
+    );
+    assert_eq!(omega_model_refusal_with(&q, true), None);
+    if std::env::var(GB10_QWEN3_OPT_IN_ENV).is_err() {
+        assert_eq!(omega_model_refusal(&q), Some(msg));
+    }
     // A Qwen3 shape with head_dim 64 cannot run rmsnorm_heads (head_dim % 128): refused up front.
     let q64 = model_config_from_hf_json(
         "qwen3-head-dim-64",
@@ -358,16 +371,20 @@ fn gb10_backend_refuses_qwen3_and_not_llama() {
     )
     .unwrap();
     assert_eq!(q64.head_dim, 64);
-    let msg = omega_model_refusal(&q64)
-        .expect("Qwen3 with head_dim 64 must be refused on the GB10 engine");
-    assert!(
-        msg.contains("head_dim 64")
-            && msg.contains("Qwen3")
-            && msg.contains("only at head_dim 128"),
-        "{msg}"
-    );
+    // The opt-in does not lift this one.
+    for opted_in in [false, true] {
+        let msg = omega_model_refusal_with(&q64, opted_in)
+            .expect("Qwen3 with head_dim 64 must be refused on the GB10 engine");
+        assert!(
+            msg.contains("head_dim 64")
+                && msg.contains("Qwen3")
+                && msg.contains("only at head_dim 128"),
+            "{msg}"
+        );
+    }
     let llama = aien_inference_abi::ModelConfig::tinyllama_1_1b();
     assert!(omega_model_refusal(&llama).is_none());
+    assert!(omega_model_refusal_with(&llama, false).is_none());
 }
 
 /// Delegates every op to the reference backend and counts `rmsnorm_heads` calls.
@@ -585,7 +602,7 @@ fn real_qwen3_4b_instruct_2507_on_gb10_matches_transformers() {
     let config = load_model_config(&dir).expect("config");
     omega
         .check_model(&config)
-        .expect("GB10 engine must accept Qwen3-4B");
+        .expect("GB10 engine must accept Qwen3-4B (a declared attempt sets AIEN_GB10_QWEN3_DECLARED_ATTEMPT=1)");
     let weights = TransformerWeights::load_from_safetensors(
         dir.join("model.safetensors.index.json"),
         &config,
