@@ -65,7 +65,7 @@
       "children": [
         {
           "digest": "f95432625ccdd27c1732e380e4ddb227483bdce00f37fb0effd5a5fddfea149b",
-          "last_commit": "71fbd51",
+          "last_commit": "a86b662",
           "name": "scripts",
           "purpose": ""
         },
@@ -77,14 +77,14 @@
         }
       ],
       "children_root": "sha256:4ff1a56b7c8ac606ad5709f2ba1141f16055c34f5f242ac491233dca20d5153e",
-      "compiled_at": "2026-10-07T01:56:30Z",
+      "compiled_at": "2026-10-07T02:08:27Z",
       "compiler": "crumb-compile/1",
-      "digest": "sha256:1c548de22ebc625f5612a8a3cfcf58f3e464d98d7d3a9c560db819b3e8420d03",
+      "digest": "sha256:01f422a3e3d03da594195ea4f970d9ab245a50fa03e9e27a6b8b6c27d254a56a",
       "evidence_files": 155,
       "evidence_root": "sha256:ff6dddfecfcc02cea55f46acaccc7eaecd27557209e98c3d5616ec02bdde31db",
-      "files": 1060,
-      "generated_at_commit": "71fbd511c5d246c1c45ce24db14430813ba53e47",
-      "source_tree": "sha256:0f6c1c7a067d98e1dc7bc544e3139815f2300a1893250dd074cf9e8a07a6c501"
+      "files": 1085,
+      "generated_at_commit": "f2edef8dd82fa6f9a8f8c650b8f1d1f75fed13e6",
+      "source_tree": "sha256:5b976101df6c4525eebf6a9ab11dbe29718f4b8fb70d172a2b1cba616fd48fdc"
     }
   },
   "history": [],
