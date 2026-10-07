@@ -727,6 +727,59 @@ fn check_relative_path(p: &str) -> Result<(), String> {
     }
 }
 
+/// A code-fence line: its backtick run length and whether an info string
+/// (such as `bash`) follows the run. Not a fence if fewer than three
+/// backticks start the line or the info string itself holds a backtick.
+fn fence_line(l: &str) -> Option<(usize, bool)> {
+    let t = l.trim_start();
+    let n = t.bytes().take_while(|&b| b == b'`').count();
+    if n < 3 {
+        return None;
+    }
+    let info = t[n..].trim();
+    if info.contains('`') {
+        return None;
+    }
+    Some((n, !info.is_empty()))
+}
+
+/// Index (into `body`, which starts after the opening fence of backtick
+/// length `open_len`) of the line that closes the outer fence, or None.
+/// CommonMark: a closing fence is bare (no info string) and at least as long
+/// as the opener, so shorter inner fences are plain content. Inner fences of
+/// the same length that carry an info string (` ```bash `) open a nested block
+/// that its own bare fence must close first. If that scan finds no balanced
+/// close (unbalanced reply), the LAST bare fence of sufficient length is
+/// taken, so content is never cut at an inner fence. A bare fence at depth 0
+/// that still has fences after it is a bare inner opener, so the outer fence
+/// is closed by the last fence of the reply. Limit: prose that itself holds a
+/// fence AFTER the real close is read as part of the file. With no bare fence at
+/// all there is no close: the caller keeps the whole body.
+fn outer_fence_close(body: &[&str], open_len: usize) -> Option<usize> {
+    let fences: Vec<(usize, bool)> = body
+        .iter()
+        .enumerate()
+        .filter_map(|(i, l)| fence_line(l).filter(|f| f.0 >= open_len).map(|f| (i, f.1)))
+        .collect();
+    let mut depth = 0usize;
+    let mut last_bare = None;
+    for (k, &(i, info)) in fences.iter().enumerate() {
+        if info {
+            depth += 1;
+        } else if depth > 0 {
+            depth -= 1;
+            last_bare = Some(i);
+        } else if k + 1 == fences.len() {
+            return Some(i);
+        } else {
+            // A bare fence with more fences after it opens a bare inner block;
+            // only the final fence can then be the outer close.
+            depth += 1;
+        }
+    }
+    last_bare
+}
+
 /// The model's answer in the fixed proposal template: the first nonempty
 /// line is `filename: <relative path>` (case-insensitive key; quotes,
 /// backticks and asterisks around it or the path are ignored), everything
@@ -755,8 +808,13 @@ pub fn check_file_proposal(text: &str) -> Result<FileProposal, String> {
         .first()
         .is_some_and(|l| l.trim_start().starts_with("```"))
     {
+        let open_len = body[0]
+            .trim_start()
+            .bytes()
+            .take_while(|&b| b == b'`')
+            .count();
         body.remove(0);
-        if let Some(end) = body.iter().position(|l| l.trim_start().starts_with("```")) {
+        if let Some(end) = outer_fence_close(&body, open_len) {
             body.truncate(end);
         }
     }
