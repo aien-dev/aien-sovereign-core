@@ -377,12 +377,40 @@ measured; the rows decide. Probabilities are for "every row of that launch passe
 - W4 about 10 percent. Low because of the classification described in Section 2 (the product may run it as an edit of the
   source file under 96 tokens and 29 s), not because of the model. If it is run as a document with the document limits, about 40 percent.
 - W5 about 35 percent. Needs at least 16 and at most 45 non-empty lines, twelve item lines in the stated form and two stated words.
-- Whole qualification PASS: about 2 to 3 percent. The expected verdict is FAIL. Launch results are correlated through the model's
+- Whole qualification PASS: about 2 to 3 percent (written before #295 merged; Section 10.1 now makes it 0 percent, because W3, W5 and R1 cannot commit). The expected verdict is FAIL. Launch results are correlated through the model's
   habit of writing short paragraphs, so the product of the figures above (below 1 percent) is too low; I round up.
 - Regression, reported only: RG2 about 30 percent, RG3 about 25 percent, RT4 about 70 percent, RT6 about 70 percent.
 - GPU memory failure during the run (omega#327 or #277): about 5 percent. If it happens it is reported as the second conclusion
   of Section 0 and the affected launches fail their rows without being read as document failures.
 - Per-token speed about 88 to 95 ms; documents between 300 and 700 tokens finish in 28 to 70 s; no token-limit cut at 1024 (about 5 percent).
+
+
+### 10.1 Requirement analyser outcome per task (stated before any run, from the product, not from any reply)
+
+Sovereign-core #295 (in the frozen 4d4dfd4) reads each goal's stated requirements and, when any span is uncertain, refuses the
+task before any model call (`spine.rs`, "refuse before any model call"; the verify step refuses again as a backstop). Such a
+launch therefore records no attempt at all. The table is what `crates/aien-runtime/tests/requirements_usability_test.rs`
+(lists SILENT, RECOGNIZED, REFUSED over `tests/fixtures/goal_corpus.tsv`) asserts for each v4 goal on that commit. It is a
+product fact, checked on CPU; it is not a model result. The goals were written before #295 merged and are kept verbatim:
+rewording a goal so the analyser accepts it would tailor the tasks to the product.
+
+| id | analyser | span reported (REFUSED only) | consequence for the rows |
+|----|----------|------------------------------|--------------------------|
+| W1 | RECOGNIZED | | requirements enforced at verify; the rows decide |
+| W2 | RECOGNIZED | | as W1 |
+| W3 | REFUSED (uncertain) | "three topics" | no model call, no commit: completion is not DONE, so W3 FAILS |
+| W4 | RECOGNIZED | | as W1 |
+| W5 | REFUSED (uncertain) | "twelve of them" | no model call, no commit: W5 FAILS |
+| U1 | SILENT | | nothing to enforce; the rows decide |
+| U2 | SILENT | | as U1 |
+| N1 | RECOGNIZED | | declared negative; expected REFUSED on the destination, the rows decide |
+| N2 | REFUSED (uncertain) | "at least twelve paragraphs" | refused, but before the model: no attempt, so N2-F and N2-R ("at least one attempt", rows-v8.jq and rows-oq3-v3.jq) FAIL; the budget limit is never exercised |
+| R1 | REFUSED (uncertain) | "one-sentence thank-you note" | no model call and no commit: R1-X needs an accepted attempt, so R1 FAILS; token identity is not measured |
+| RG2, RG3, RT4, RT6 | RECOGNIZED (RG2, RG3 are v3 G2, G3 verbatim, listed under tasks-oq3-v3) | | regression, reported only |
+
+Consequence: the qualification verdict is predicted FAIL with certainty, independent of the model (W3, W5, N2 and R1 make no
+model call). The run still measures the model on W1, W2, W4, U1 and U2, N1's destination refusal, the four regression goals,
+and GPU memory over a long session. A refusal of W3, W5, N2 or R1 is a product limit, reported as such; it is not rerun and the goals are not changed afterwards.
 
 ## 11. What v4 does not prove
 

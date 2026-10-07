@@ -1,0 +1,12 @@
+# v4 frozen build summary (2026-10-07T23:42:57Z); physics/omega/sc status --porcelain counts all 0 (rechecked)
+aien-cli rc=0
+examples rc=0
+01f6a74636b8383b010cdb95597839582c415c27
+0
+6d7cf0d4d8eb2cda7b512100ff6058e25dbb3ddf
+4d4dfd459ae7e7c6c175edc5017816d079c621a9
+0
+fa48da4a85023dac406dbf05bca60df316b4ecd441c94e8c0f356fbd61a9ebd2  /home/drakestapleton/workspace/oq3-v4-build/target/release/aien-cli
+421d0db86539392a4d38b712b358041b0263a45ba92027838b8919cf3b865f2d  /home/drakestapleton/workspace/oq3-v4-build/target/release/examples/np1_reference
+7592d74a05406804c430c3d5940ba8b7691c3d34510375344e2a5b4d8c3e9f6c  /home/drakestapleton/workspace/oq3-v4-build/target/release/examples/np1_edit_merge
+done
