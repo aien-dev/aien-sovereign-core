@@ -57,7 +57,7 @@ async fn harness() -> H {
         capability_digest: live,
     };
     H {
-        lane: EffectLane::new(broker.clone()),
+        lane: EffectLane::new(broker.clone()).with_clock(Arc::new(|| 1)),
         desk: ApprovalDesk::new(broker.clone()),
         broker,
         calls,
@@ -364,7 +364,7 @@ async fn provider_panic_after_commit_leaves_the_grant_spent_and_never_reruns() {
         arguments: json!({"a": 1}),
         capability_digest: live,
     };
-    let lane = EffectLane::new(broker.clone());
+    let lane = EffectLane::new(broker.clone()).with_clock(Arc::new(|| 1));
     let desk = ApprovalDesk::new(broker);
     let g = desk.issue(&intent, scope("pan"), 100);
     let (l2, i2, g2) = (lane.clone(), intent.clone(), g.clone());
@@ -389,4 +389,53 @@ async fn provider_panic_after_commit_leaves_the_grant_spent_and_never_reruns() {
         .unwrap_err();
     assert_eq!(again, AuthorityOutcome::Execution(Error::EffectInFlight));
     assert_eq!(calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn reserved_effect_on_a_lane_without_a_clock_fails_closed_and_releases() {
+    let h = harness().await;
+    let no_clock = EffectLane::new(h.broker.clone());
+    let g = h.desk.issue(&h.intent, scope("nc"), 100);
+    let effect = no_clock
+        .authorize_approved(h.intent.clone(), scope("nc"), &EffectClassAuthority, &g, 1)
+        .unwrap();
+    assert_eq!(
+        no_clock.execute_effect(effect).await.unwrap_err(),
+        Error::ApprovalClockMissing
+    );
+    assert_eq!(h.calls.load(Ordering::SeqCst), 0);
+    assert_eq!(h.desk.status(&g), Some(GrantStatus::Available));
+    assert_eq!(
+        h.desk.release_reason(&g).as_deref(),
+        Some("no clock: expiry cannot be checked")
+    );
+    // The same grant runs once on a lane that has a clock.
+    h.lane
+        .authorize_and_execute_approved(h.intent.clone(), scope("nc"), &EffectClassAuthority, &g, 1)
+        .await
+        .unwrap();
+    assert_eq!(h.calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn effect_without_a_reservation_runs_on_a_lane_without_a_clock() {
+    let h = harness().await;
+    let no_clock = EffectLane::new(h.broker.clone());
+    // Allow verdict: no grant involved, so no clock is needed.
+    struct AllowAll;
+    impl aien_mcp::EffectAuthority for AllowAll {
+        fn authorize(
+            &self,
+            _: &EffectIntent,
+            _: &aien_mcp::AuthorityContext,
+        ) -> aien_mcp::AuthorityDecision {
+            aien_mcp::AuthorityDecision::Allow
+        }
+    }
+    let r = no_clock
+        .authorize_and_execute(h.intent.clone(), scope("na"), &AllowAll)
+        .await
+        .unwrap();
+    assert_eq!(r.output["done"], json!(true));
+    assert_eq!(h.calls.load(Ordering::SeqCst), 1);
 }

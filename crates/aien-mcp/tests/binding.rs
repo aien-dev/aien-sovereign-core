@@ -54,7 +54,7 @@ async fn harness_with(wire: Arc<dyn McpWire>, calls: Arc<AtomicUsize>) -> H {
         .unwrap()
         .catalog_digest;
     H {
-        lane: EffectLane::new(broker.clone()),
+        lane: EffectLane::new(broker.clone()).with_clock(std::sync::Arc::new(|| 1)),
         desk: ApprovalDesk::new(broker.clone()),
         broker,
         calls,

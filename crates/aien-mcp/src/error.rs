@@ -31,4 +31,8 @@ pub enum Error {
     ApprovalNotReserved,
     #[error("approval expired before the effect could run; nothing was called")]
     ApprovalExpired,
+    #[error(
+        "approved effect needs a clock to check expiry; build the lane with EffectLane::with_clock"
+    )]
+    ApprovalClockMissing,
 }

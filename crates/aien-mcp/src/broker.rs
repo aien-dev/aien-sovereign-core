@@ -262,8 +262,9 @@ impl EffectLane {
     }
 
     /// A lane whose `execute_effect` re-checks approval expiry at commit using `clock`. The crate
-    /// reads no wall clock itself. Without a clock, commit judges expiry against the `now` the
-    /// host passed at mint (limit: a held effect can then outlive `expires_at`).
+    /// reads no wall clock itself. A lane without a clock refuses to run any effect that holds an
+    /// approval reservation (`Error::ApprovalClockMissing`) and releases the grant. Effects
+    /// without a reservation do not need a clock.
     pub fn with_clock(&self, clock: Clock) -> Self {
         Self {
             clock: Some(clock),
@@ -475,12 +476,7 @@ impl EffectLane {
             .ok_or(ApprovalError::Unknown)?;
         record.state = GrantState::Reserved(token);
         record.release_reason = None;
-        Ok(Reservation::new(
-            self.broker.clone(),
-            grant.id(),
-            token,
-            now,
-        ))
+        Ok(Reservation::new(self.broker.clone(), grant.id(), token))
     }
 
     pub async fn execute_effect(
@@ -528,10 +524,7 @@ impl EffectLane {
             // Point of no return: the provider is about to be called. Until here a refusal drops
             // the effect and releases its grant; from here the grant is spent.
             if let Some(reservation) = effect.reservation() {
-                let now = self
-                    .clock
-                    .as_ref()
-                    .map_or(reservation.reserved_at(), |c| c());
+                let now = self.clock.as_ref().map(|c| c());
                 reservation.commit_locked(&mut inner, now)?;
             }
             inner.ledger.insert(

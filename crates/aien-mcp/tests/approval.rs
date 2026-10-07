@@ -62,7 +62,7 @@ async fn harness() -> H {
         capability_digest: live,
     };
     H {
-        lane: EffectLane::new(broker.clone()),
+        lane: EffectLane::new(broker.clone()).with_clock(std::sync::Arc::new(|| 1)),
         desk: ApprovalDesk::new(broker.clone()),
         broker,
         calls,
