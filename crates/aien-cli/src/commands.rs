@@ -1455,6 +1455,25 @@ pub async fn run_daemon_server() {
         watermark_blocks: 64,
     };
 
+    // Open the GPU session before the weights load, with a bounded retry, so a
+    // failed channel open is a clear refusal with status and free memory per
+    // attempt instead of the strict-fallback panic at warm-up (#239, #236). It
+    // comes first because the channel open allocates the GPU context buffers,
+    // and after the f32 weight load those allocations fail with
+    // NV_ERR_NO_MEMORY while MemFree is low and the page cache is full
+    // (omega#327, sovereign-core#277). The session stays open for the process.
+    let gpu_native = aien_inference_abi::OmegaGb10Backend::new().is_available();
+    if gpu_native {
+        if let Err(fatal) = aien_inference_abi::open_gpu_session_with_retry(
+            aien_inference_abi::GPU_SESSION_OPEN_ATTEMPTS,
+            aien_inference_abi::GPU_SESSION_RETRY_DELAY,
+            aien_inference_abi::GPU_SESSION_OPEN_DEADLINE,
+            &aien_runtime::shared_kv::read_mem_available,
+        ) {
+            eprintln!("Fatal: {}", fatal.red().bold());
+            std::process::exit(1);
+        }
+    }
     let (weights, tensor_backend, backend_label, model_label, tokenizer) =
         match build_native_daemon_backend() {
             Ok(parts) => parts,
@@ -1476,7 +1495,6 @@ pub async fn run_daemon_server() {
             std::process::exit(1);
         }
     };
-    let gpu_native = aien_inference_abi::OmegaGb10Backend::new().is_available();
     let (spine, backend, _kv_plan) =
         match aien_runtime::shared_kv::build_shared_kv_runtime_for_model(
             weights,
@@ -1493,20 +1511,6 @@ pub async fn run_daemon_server() {
                 std::process::exit(1);
             }
         };
-    // Open the GPU session before serving, with a bounded retry, so a failed
-    // channel open is a clear refusal with status and free memory per attempt
-    // instead of the strict-fallback panic at warm-up (#239, #236).
-    if gpu_native {
-        if let Err(fatal) = aien_inference_abi::open_gpu_session_with_retry(
-            aien_inference_abi::GPU_SESSION_OPEN_ATTEMPTS,
-            aien_inference_abi::GPU_SESSION_RETRY_DELAY,
-            aien_inference_abi::GPU_SESSION_OPEN_DEADLINE,
-            &aien_runtime::shared_kv::read_mem_available,
-        ) {
-            eprintln!("Fatal: {}", fatal.red().bold());
-            std::process::exit(1);
-        }
-    }
     let server = aien_runtime::server::AienRuntimeServer::new(spine, &socket_path);
 
     println!("  Backend: {}", backend_label.green());
