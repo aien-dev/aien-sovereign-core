@@ -992,6 +992,42 @@ async fn c21_symlink_swap_of_the_target() {
     down(d).await;
 }
 
+/// c28: the approved path is in a subdirectory. After the intent opens, the
+/// subdirectory is swapped for a symlink to a directory outside the
+/// workspace, and the approved bytes are written there. The ack must not
+/// record DONE (the bytes are outside the workspace).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[cfg_attr(
+    not(compose_linked),
+    ignore = "needs the linked librx_compose.a (AIEN_OMEGA_COMPOSE_LIB)"
+)]
+async fn c28_parent_directory_swap_after_the_intent() {
+    let _t = TURN.lock().await;
+    let tmp = fresh();
+    let w = ws(tmp.path());
+    std::fs::create_dir_all(w.join("sub")).unwrap();
+    let d = up(tmp.path(), "s.sock").await;
+    let p = sign(
+        tmp.path(),
+        unsigned("req-p", "appr-p", "sub/NOTES.md", CONTENT),
+    );
+    let r = committed(submit(&d.c, &p, &w).await);
+    let g = r.approved_grant.expect("grant");
+    let i = opened(grant_intent(&d.c, &r, g).await, "honest grant");
+    let outdir = tmp.path().join("outdir");
+    std::fs::create_dir_all(&outdir).unwrap();
+    std::fs::rename(w.join("sub"), w.join("sub-moved")).unwrap();
+    std::os::unix::fs::symlink(&outdir, w.join("sub")).unwrap();
+    std::fs::write(outdir.join("NOTES.md"), CONTENT).unwrap();
+    let st = ack_state(&d.c, i).await;
+    eprintln!("c28: ack state {st}");
+    down(d).await;
+    assert_ne!(
+        st, "DONE",
+        "ATTACK SUCCEEDED: DONE recorded for bytes outside the workspace (parent symlink)"
+    );
+}
+
 /// c22: an `approved_grant` record sent through the socket's ComposeNote
 /// (a copy of the daemon's own grant, same links) is refused and appends
 /// nothing.
