@@ -504,6 +504,11 @@ pub fn check_reserved_note(kind: &str, text: &str) -> Result<(), String> {
             "ComposeNote: effect records with a \"phase\" are written only by the effect commands"
                 .into(),
         ),
+        // sovereign-core #249: approved-submission replay records come only from
+        // crate::approved_replay.
+        "effect" if v.get(crate::approved_replay::FIELD).is_some() => Err(
+            "ComposeNote: approved_submission records are written only by the replay ledger".into(),
+        ),
         "authorization" if v.get("control").is_some() => {
             Err("ComposeNote: control records are written only by ComposeControl".into())
         }
