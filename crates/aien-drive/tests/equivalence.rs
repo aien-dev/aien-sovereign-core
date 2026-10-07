@@ -48,7 +48,9 @@ fn prepare(tmp: &std::path::Path) {
 }
 
 fn run_dispatch_cases(mutate_expected: impl Fn(&mut Value)) -> Vec<String> {
-    let tmp = std::env::temp_dir().join(format!("aien-drive-eq-{}", std::process::id()));
+    static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let n = N.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let tmp = std::env::temp_dir().join(format!("aien-drive-eq-{}-{n}", std::process::id()));
     let _ = std::fs::remove_dir_all(&tmp);
     prepare(&tmp);
     let t = tmp.to_str().unwrap();
