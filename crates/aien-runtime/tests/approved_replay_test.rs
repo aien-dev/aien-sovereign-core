@@ -1,6 +1,7 @@
 //! Replay ledger for approved proposals (crate::approved_replay, sovereign-core #249 part B).
 //! Pure ledger rules run in every build; the journal tests need the linked
-//! composition library (aien_omega_compose::LINKED) and return early in a stub build.
+//! composition library and are IGNORED in a stub build (cfg compose_linked, set by
+//! build.rs from aien-omega-compose's links metadata).
 //! A "crashed" claim is made by a child process (this test binary re-run with
 //! REPLAY_CHILD set) that claims and exits without settling.
 use aien_runtime::approved_replay::{
@@ -213,10 +214,11 @@ fn compose_note_cannot_forge_replay_records() {
 // ---------- journal (linked composition library) ----------
 
 #[test]
+#[cfg_attr(
+    not(compose_linked),
+    ignore = "needs the linked librx_compose.a (AIEN_OMEGA_COMPOSE_LIB)"
+)]
 fn claim_is_durable_and_single_use_across_restart() {
-    if !aien_omega_compose::LINKED {
-        return;
-    }
     let tmp = tempfile::tempdir().unwrap();
     let k = keys("restart");
     {
@@ -275,10 +277,11 @@ fn claim_is_durable_and_single_use_across_restart() {
 }
 
 #[test]
+#[cfg_attr(
+    not(compose_linked),
+    ignore = "needs the linked librx_compose.a (AIEN_OMEGA_COMPOSE_LIB)"
+)]
 fn failed_and_not_executed_claims_stay_consumed() {
-    if !aien_omega_compose::LINKED {
-        return;
-    }
     let tmp = tempfile::tempdir().unwrap();
     let b = bridge(tmp.path());
     let c = replay::claim(&b, &keys("ne")).unwrap();
@@ -301,10 +304,11 @@ fn failed_and_not_executed_claims_stay_consumed() {
 }
 
 #[test]
+#[cfg_attr(
+    not(compose_linked),
+    ignore = "needs the linked librx_compose.a (AIEN_OMEGA_COMPOSE_LIB)"
+)]
 fn concurrent_duplicates_at_most_one_claim() {
-    if !aien_omega_compose::LINKED {
-        return;
-    }
     let tmp = tempfile::tempdir().unwrap();
     let b = Arc::new(bridge(tmp.path()));
     let n = 16;
@@ -333,7 +337,9 @@ fn concurrent_duplicates_at_most_one_claim() {
 }
 
 /// Child mode: claim (and optionally go in flight), then exit without settling.
+/// Run only by crash_child.
 #[test]
+#[ignore = "child mode, run by crash_before_and_during_execution_fail_closed"]
 fn child_claim_then_crash() {
     let Ok(mode) = std::env::var("REPLAY_CHILD") else {
         return;
@@ -352,6 +358,7 @@ fn crash_child(dir: &Path, mode: &str) {
         .args([
             "--exact",
             "child_claim_then_crash",
+            "--ignored",
             "--nocapture",
             "--test-threads=1",
         ])
@@ -363,10 +370,11 @@ fn crash_child(dir: &Path, mode: &str) {
 }
 
 #[test]
+#[cfg_attr(
+    not(compose_linked),
+    ignore = "needs the linked librx_compose.a (AIEN_OMEGA_COMPOSE_LIB)"
+)]
 fn crash_before_and_during_execution_fail_closed() {
-    if !aien_omega_compose::LINKED {
-        return;
-    }
     let tmp = tempfile::tempdir().unwrap();
     crash_child(tmp.path(), "before");
     crash_child(tmp.path(), "inflight");
