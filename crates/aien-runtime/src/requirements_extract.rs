@@ -1458,10 +1458,9 @@ pub fn analyze(goal: &str) -> Extraction {
             if w == "count"
                 && i >= 1
                 && nm(i - 1).is_some_and(|x| NOUNS.contains(&x) || matches!(x, "line" | "word"))
+                && (i + 1..=i + 6).any(|j| matches!(nm(j).map(parse_num), Some(Num::Val(_))))
             {
-                if (i + 1..=i + 6).any(|j| matches!(nm(j).map(parse_num), Some(Num::Val(_)))) {
-                    bad(&mut unsure, i - 1, true);
-                }
+                bad(&mut unsure, i - 1, true);
             }
             // a heading level adjective that no title list consumed
             if level_adj(w).is_some() && nm(i + 1).is_some_and(|x| SECTION_NOUNS.contains(&x)) {
