@@ -23,7 +23,7 @@
 //!    introduced by a second destination verb. Otherwise `Err(Ambiguous)`
 //!    naming every candidate. Never a silent pick.
 //!
-//! The words of a goal are untrusted text; nothing here touches the disk
+//! The words of a goal are untrusted text); nothing here touches the disk
 //! except through the `is_file` callback.
 
 /// Verbs that introduce the destination of a task.
@@ -55,6 +55,40 @@ pub const SOURCE_MARKERS: &[&str] = &[
     "given",
 ];
 
+/// Words that may sit between a destination verb and the path it governs
+/// ("Edit the given README.md"): a verb reaching the path through these wins
+/// over a source marker.
+pub const FILLERS: &[&str] = &[
+    "the",
+    "a",
+    "an",
+    "this",
+    "that",
+    "my",
+    "our",
+    "your",
+    "file",
+    "document",
+    "doc",
+    "new",
+    "existing",
+    "given",
+    "reference",
+    "referenced",
+    "called",
+    "named",
+    "same",
+    "current",
+];
+
+/// Top-level domains that make a bare `name.tld` token a host name, not a file.
+pub const HOST_TLDS: &[&str] = &[
+    "org", "com", "net", "io", "dev", "edu", "gov", "ai", "co", "app", "me", "info", "xyz",
+];
+
+/// Words after which a `name.tld` token is a web address.
+pub const HOST_LEAD: &[&str] = &["visit", "see", "at", "http", "https", "www", "url", "site"];
+
 /// A path-like word of the goal.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Cand {
@@ -72,11 +106,21 @@ struct Cand {
 pub enum DestinationError {
     /// Several candidate destinations and no rule picks one.
     Ambiguous(Vec<String>),
+    /// The goal only mentions paths as source material; nothing is named to write.
+    NoDestination(Vec<String>),
+    /// The goal asks for an operation this parser does not support.
+    Unsupported(String),
 }
 
 impl std::fmt::Display for DestinationError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::NoDestination(c) => write!(
+                f,
+                "no destination named: the goal only mentions {} as material to read; name the file to write",
+                c.join(", ")
+            ),
+            Self::Unsupported(w) => write!(f, "{w} is not supported: name the file to create or edit"),
             Self::Ambiguous(c) => write!(
                 f,
                 "ambiguous destination: the goal names several files to write ({}); name one",
@@ -133,6 +177,12 @@ pub fn named_destination(
 ) -> Result<Option<String>, DestinationError> {
     let raw: Vec<&str> = goal.split_whitespace().collect();
     let words: Vec<String> = raw.iter().map(|w| clean(w).to_ascii_lowercase()).collect();
+    if let Some(v) = words
+        .iter()
+        .find(|w| matches!(w.as_str(), "rename" | "move" | "delete" | "remove"))
+    {
+        return Err(DestinationError::Unsupported(v.clone()));
+    }
     let mut cands: Vec<Cand> = Vec::new();
     let mut verb_since_last = false;
     let mut first_verb: Option<usize> = None;
@@ -146,11 +196,29 @@ pub fn named_destination(
         if !path_like(c, is_file) {
             continue;
         }
+        let governed = {
+            let mut j = i;
+            while j > 0 && FILLERS.contains(&words[j - 1].as_str()) {
+                j -= 1;
+            }
+            j > 0 && DESTINATION_VERBS.contains(&words[j - 1].as_str())
+        };
+        let host_like = !c.contains('/')
+            && !is_file(c)
+            && (c
+                .rsplit('.')
+                .next()
+                .is_some_and(|t| HOST_TLDS.contains(&t.to_ascii_lowercase().as_str()))
+                || (i > 0 && HOST_LEAD.contains(&words[i - 1].as_str())));
+        if host_like && !governed {
+            continue;
+        }
         let prev = (i > 0).then(|| words[i - 1].as_str());
         let prev2 = (i > 1).then(|| words[i - 2].as_str());
-        let marked = prev.is_some_and(|p| SOURCE_MARKERS.contains(&p))
-            || (prev == Some("on") && prev2 == Some("based"))
-            || (prev == Some("on") && prev2 == Some("relying"));
+        let marked = !governed
+            && (prev.is_some_and(|p| SOURCE_MARKERS.contains(&p))
+                || (prev == Some("on") && prev2 == Some("based"))
+                || (prev == Some("on") && prev2 == Some("relying")));
         // Joined to the previous path-like word: "A and B", "A, B", "A or B", "A B".
         let joined = cands.last().is_some_and(|l| {
             (prev == Some("and") || prev == Some("or") || prev == Some("&")) && l.idx + 2 == i
@@ -168,7 +236,16 @@ pub fn named_destination(
     }
     let dests: Vec<&Cand> = cands.iter().filter(|c| !c.source).collect();
     let Some(first) = dests.first() else {
-        return Ok(None);
+        if cands.is_empty() {
+            return Ok(None);
+        }
+        let mut names: Vec<String> = Vec::new();
+        for c in &cands {
+            if !names.contains(&c.path) {
+                names.push(c.path.clone());
+            }
+        }
+        return Err(DestinationError::NoDestination(names));
     };
     if dests.len() > 1 {
         let verb_leads = first_verb.is_some_and(|v| v < first.idx);
@@ -232,6 +309,57 @@ mod tests {
         assert_eq!(
             d("Edit `docs/plan.txt`, then README.md"),
             Ok(Some("docs/plan.txt".into()))
+        );
+    }
+
+    #[test]
+    fn source_only_goals_name_no_destination() {
+        for g in [
+            "Summarise README.md",
+            "Summarise README.md and docs/A.md",
+            "Create a note summarising README.md",
+        ] {
+            assert!(
+                matches!(d(g), Err(DestinationError::NoDestination(_))),
+                "{g}"
+            );
+        }
+        let Err(e) = d("Summarise README.md") else {
+            panic!()
+        };
+        assert!(e.to_string().contains("README.md") && e.to_string().contains("no destination"));
+    }
+
+    #[test]
+    fn verb_governing_the_path_beats_a_marker_adjective() {
+        assert_eq!(d("Edit the given README.md"), Ok(Some("README.md".into())));
+        assert_eq!(
+            d("Update the reference README.md"),
+            Ok(Some("README.md".into()))
+        );
+        assert_eq!(
+            d("Create docs/S.md from the given README.md"),
+            Ok(Some("docs/S.md".into()))
+        );
+    }
+
+    #[test]
+    fn host_names_are_not_files_unless_governed() {
+        assert_eq!(
+            d("Visit example.org and write out.md"),
+            Ok(Some("out.md".into()))
+        );
+        assert_eq!(
+            d("See docs.example.com then create out.md"),
+            Ok(Some("out.md".into()))
+        );
+        assert_eq!(d("Create example.org"), Ok(Some("example.org".into())));
+    }
+
+    #[test]
+    fn rename_is_unsupported() {
+        assert!(
+            matches!(d("Rename a.md to b.md"), Err(DestinationError::Unsupported(w)) if w == "rename")
         );
     }
 

@@ -119,6 +119,8 @@ fn token_ids_reach_the_attempt_record() {
 fn edit_block_only_when_the_goal_names_an_existing_file() {
     let (_d, ws) = ws();
     let w = ws.display().to_string();
+    // A new-document goal keeps the v5 prompt and gains the destination line
+    // (issue #288); an unsafe destination is refused and keeps the plain prompt.
     for goal in [
         "Create the file NOTES.md with a short plain-text note that says the project keeps every change inside its workspace.",
         "Create the file docs/CONTACT.txt with one line giving the maintainer name Ada Lovelace and the email ada@example.org.",
@@ -127,7 +129,14 @@ fn edit_block_only_when_the_goal_names_an_existing_file() {
         "Create the file docs/GUIDE.md about docs and plan.txt.",
     ] {
         assert_eq!(existing_target(goal, &ws), None, "{goal}");
-        assert_eq!(task_prompt(goal, &ws), proposal_prompt(goal, &w), "{goal}");
+        let dest = aien_runtime::spine::task_decision(goal, &ws)
+            .ok()
+            .and_then(|(_, d)| d);
+        let want = match dest {
+            Some(d) => format!("{}{}", proposal_prompt(goal, &w), aien_runtime::spine::new_document_block(&d)),
+            None => proposal_prompt(goal, &w),
+        };
+        assert_eq!(task_prompt(goal, &ws), want, "{goal}");
     }
     let log = "# Changelog\n\n## 0.1.0\n- initial release\n";
     std::fs::write(ws.join("CHANGELOG.md"), log).unwrap();

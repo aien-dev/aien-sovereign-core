@@ -91,3 +91,41 @@ fn two_destinations_are_an_ambiguous_refusal_naming_both() {
         );
     }
 }
+
+#[test]
+fn source_only_goal_is_refused_with_candidates() {
+    let (_d, ws) = ws_with(&[("README.md", "# r\n")]);
+    for goal in ["Summarise README.md", "Edit the given README.md "] {
+        let r = task_plan(goal, &ws);
+        if goal.starts_with("Edit") {
+            let (_, t, k) = r.unwrap();
+            assert_eq!(
+                (t.map(|t| t.0), k),
+                (Some("README.md".into()), ProposalKind::Edit)
+            );
+        } else {
+            let e = r.unwrap_err();
+            assert!(
+                e.contains("no destination named") && e.contains("README.md"),
+                "{e}"
+            );
+        }
+    }
+    let (_, t, _) = task_plan("Update the reference README.md", &ws).unwrap();
+    assert_eq!(t.map(|t| t.0), Some("README.md".into()));
+}
+
+#[test]
+fn new_document_prompt_states_the_destination() {
+    let (_d, ws) = ws_with(&[("README.md", "# r\n")]);
+    let (p, _, _) = task_plan("Create docs/SUMMARY.md about README.md", &ws).unwrap();
+    assert!(p.contains("filename: docs/SUMMARY.md"), "{p}");
+}
+
+#[test]
+fn rename_is_refused() {
+    let (_d, ws) = ws_with(&[("a.md", "a\n")]);
+    assert!(task_plan("Rename a.md to b.md", &ws)
+        .unwrap_err()
+        .contains("rename is not supported"));
+}

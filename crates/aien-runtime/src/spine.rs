@@ -1179,6 +1179,13 @@ fn classify_named(w: &str, ws: &Path) -> TargetClass {
     }
 }
 
+/// The additive new-document block, appended when the goal names a destination
+/// that does not exist yet: the model is told which file to write and must
+/// answer with that `filename:` line (issue #288).
+pub fn new_document_block(path: &str) -> String {
+    format!("\nWrite the new file {path}. The filename line of your answer must be exactly: filename: {path}")
+}
+
 /// The additive edit-mode block (NEXT-PHASE-1 v6 T5), appended to the fixed
 /// proposal template only when the goal names an existing file.
 pub fn edit_block(path: &str, content: &str) -> String {
@@ -1230,7 +1237,12 @@ pub fn task_decision(goal: &str, ws: &Path) -> Result<(TaskPrompt, Option<String
             prompt.push_str(&edit_block(&path, &content));
             Ok(((prompt, Some((path, content)), kind), dest))
         }
-        TargetClass::New => Ok(((prompt, None, kind), dest)),
+        TargetClass::New => {
+            if let Some(d) = &dest {
+                prompt.push_str(&new_document_block(d));
+            }
+            Ok(((prompt, None, kind), dest))
+        }
     }
 }
 
@@ -1653,7 +1665,7 @@ pub type TaskPrompt = (String, Option<(String, String)>, ProposalKind);
 type TaskEntry = (
     TaskPrompt,
     Vec<crate::requirements::Requirement>,
-    Option<String>,
+    (Option<String>, PathBuf),
 );
 
 /// Owns the composition home of this process.
@@ -1773,7 +1785,12 @@ impl ComposeBridge {
                         )
                     }
                 };
-                let (out, attempts) = enforce_destination((out, attempts), dest.as_deref());
+                let (out, attempts) = enforce_destination(
+                    (out, attempts),
+                    dest.0.as_deref(),
+                    &dest.1,
+                    kind == ProposalKind::Edit,
+                );
                 let h = out.as_ref().ok().map(|t| proposal_handle(t));
                 pp.lock().insert(task, (out, attempts));
                 h
@@ -1951,7 +1968,9 @@ impl ComposeBridge {
         if let Some(t) = approved_text {
             home.approved.lock().insert(task, t.to_string());
         }
-        home.prompts.lock().insert(task, (plan, reqs, dest));
+        home.prompts
+            .lock()
+            .insert(task, (plan, reqs, (dest, ws.clone())));
         let run = home.compose.run(task, now.as_micros() as u64);
         home.prompts.lock().remove(&task);
         home.approved.lock().remove(&task);
@@ -2271,18 +2290,31 @@ impl ComposeBridge {
 /// approved proposal and a model reply are both held to the same path, so the
 /// save and the commit land on the file the prompt and budget were chosen for.
 /// A goal that named no destination leaves the model free to name the file.
-fn enforce_destination(out: SkillOutput, dest: Option<&str>) -> SkillOutput {
+fn enforce_destination(
+    out: SkillOutput,
+    dest: Option<&str>,
+    ws: &Path,
+    is_edit: bool,
+) -> SkillOutput {
     let (res, attempts) = out;
-    let res = match (res, dest) {
-        (Ok(t), Some(d)) => match parse_file_proposal(&t) {
-            Some(p) if p.path == d => Ok(t),
-            Some(p) => Err(format!(
-                "the proposal writes {} but the goal named the destination {d}",
-                p.path
+    let res = match res {
+        Ok(t) => match parse_file_proposal(&t) {
+            Some(p) if dest.is_some_and(|d| p.path != d) => Err(format!(
+                "the proposal writes {} but the goal named the destination {}",
+                p.path,
+                dest.unwrap_or_default()
             )),
-            None => Ok(t),
+            // Defence in depth: a new-document task never replaces a file
+            // that exists (symlinks and dangling links count as existing).
+            Some(p) if !is_edit && std::fs::symlink_metadata(ws.join(&p.path)).is_ok() => {
+                Err(format!(
+                    "the proposal writes {} which already exists; refusing to overwrite it as a new document",
+                    p.path
+                ))
+            }
+            _ => Ok(t),
         },
-        (r, _) => r,
+        r => r,
     };
     (res, attempts)
 }
@@ -2380,7 +2412,11 @@ mod destination_enforcement_tests {
     #[test]
     fn reply_must_write_the_named_destination() {
         let ok = "filename: docs/SUMMARY.md\n# s\n".to_string();
-        let run = |d: Option<&str>, t: &str| enforce_destination((Ok(t.to_string()), vec![]), d).0;
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = tmp.path().to_path_buf();
+        let run = |d: Option<&str>, t: &str| {
+            enforce_destination((Ok(t.to_string()), vec![]), d, &ws, false).0
+        };
         assert_eq!(run(Some("docs/SUMMARY.md"), &ok), Ok(ok.clone()));
         let e = run(Some("README.md"), &ok).unwrap_err();
         assert!(
@@ -2388,5 +2424,30 @@ mod destination_enforcement_tests {
             "{e}"
         );
         assert_eq!(run(None, &ok), Ok(ok));
+    }
+}
+
+#[cfg(test)]
+mod new_document_overwrite_tests {
+    use super::*;
+
+    #[test]
+    fn new_kind_proposal_never_replaces_an_existing_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = tmp.path();
+        std::fs::write(ws.join("README.md"), "# r\n").unwrap();
+        std::os::unix::fs::symlink("nowhere", ws.join("dangling.md")).unwrap();
+        let run = |dest: Option<&str>, path: &str, edit: bool| {
+            let t = format!("filename: {path}\nbody\n");
+            enforce_destination((Ok(t), vec![]), dest, ws, edit).0
+        };
+        for dest in [None, Some("README.md")] {
+            let e = run(dest, "README.md", false).unwrap_err();
+            assert!(e.contains("already exists"), "{e}");
+        }
+        assert!(run(None, "dangling.md", false).is_err());
+        assert!(run(None, "fresh.md", false).is_ok());
+        // An edit-kind task may write its own (existing) target.
+        assert!(run(Some("README.md"), "README.md", true).is_ok());
     }
 }
