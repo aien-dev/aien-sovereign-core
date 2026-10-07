@@ -52,6 +52,7 @@ fn small_config() -> ModelConfig {
         rope_scaling: None,
         tie_word_embeddings: false,
         eos_token_ids: Vec::new(),
+        qk_norm: false,
     }
 }
 

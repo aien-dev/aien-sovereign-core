@@ -718,6 +718,7 @@ impl NativeTransformerBackend {
             .config
             .attention_geometry()
             .map_err(|e| e.to_string())?;
+        backend.check_model(&weights.config)?;
         let num_heads = geom.num_q_heads();
         let num_kv_heads = geom.num_kv_heads();
         let head_dim = geom.head_dim();
@@ -779,6 +780,7 @@ impl NativeTransformerBackend {
             backend.matmul_vec(&mut k, &x_norm, &layer_w.k_proj, kv_dim, hidden_dim);
             backend.matmul_vec(&mut v, &x_norm, &layer_w.v_proj, kv_dim, hidden_dim);
 
+            layer_w.apply_qk_norm(&mut q, &mut k, head_dim, eps);
             backend.apply_rope(
                 &mut q,
                 &mut k,
@@ -971,6 +973,7 @@ impl NativeTransformerBackend {
             .config
             .attention_geometry()
             .map_err(|e| e.to_string())?;
+        backend.check_model(&weights.config)?;
         let num_heads = geom.num_q_heads();
         let num_kv_heads = geom.num_kv_heads();
         let head_dim = geom.head_dim();
@@ -1109,6 +1112,7 @@ impl NativeTransformerBackend {
                 let v_t = &v_batch[t * kv_dim..(t + 1) * kv_dim];
 
                 let pos = offset + t;
+                layer_w.apply_qk_norm(q_t, k_t, head_dim, eps);
                 backend.apply_rope(q_t, k_t, pos, head_dim, num_heads, num_kv_heads, &rope);
 
                 if let (Some((block_id, slot)), Some(mgr)) = (paged_slots[t], kv_manager) {
@@ -1295,6 +1299,7 @@ impl NativeTransformerBackend {
             .config
             .attention_geometry()
             .map_err(|e| e.to_string())?;
+        self.tensor_backend.check_model(&self.weights.config)?;
         let num_heads = geom.num_q_heads();
         let num_kv_heads = geom.num_kv_heads();
         let head_dim = geom.head_dim();
@@ -1428,6 +1433,12 @@ impl NativeTransformerBackend {
 
             // c. RoPE across all D sequences at their respective positions
             for (i, &(_seq_id, _tok, pos)) in valid_reqs.iter().enumerate() {
+                layer_w.apply_qk_norm(
+                    &mut q_batch[i * q_dim..(i + 1) * q_dim],
+                    &mut k_batch[i * kv_dim..(i + 1) * kv_dim],
+                    head_dim,
+                    eps,
+                );
                 self.tensor_backend.apply_rope(
                     &mut q_batch[i * q_dim..(i + 1) * q_dim],
                     &mut k_batch[i * kv_dim..(i + 1) * kv_dim],
