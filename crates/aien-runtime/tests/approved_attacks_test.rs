@@ -1049,11 +1049,26 @@ async fn grant_on_unfinished_claim(end: &str) {
     std::env::set_var("AIEN_COMPOSE_DIR", home(tmp.path()));
     let (g, csha, psha, target) = {
         let b = bridge(tmp.path());
-        let keys = rp::ClaimKeys {
-            approval_key: sha(end.as_bytes()),
+        let w = canon(&ws(tmp.path()));
+        let csha = sha(CONTENT.as_bytes());
+        // A complete bound identity: the grant parses and its identity hashes
+        // to the claim's key, so only the claim's state can refuse it.
+        let ident = aien_runtime::approved_auth::ApprovalIdentity {
+            trace_id: "t".into(),
             request_id: format!("req-{end}"),
             approval_id: format!("appr-{end}"),
-            trace_id: "t".into(),
+            approver: "attacker".into(),
+            path: PATH.into(),
+            content_sha256: csha.clone(),
+            approved_proposal_sha256: approved_proposal_sha256(PATH, CONTENT),
+            desk_key_id: "forged".into(),
+            workspace: w.display().to_string(),
+        };
+        let keys = rp::ClaimKeys {
+            approval_key: aien_runtime::approved_auth::approval_key(&ident),
+            request_id: ident.request_id.clone(),
+            approval_id: ident.approval_id.clone(),
+            trace_id: ident.trace_id.clone(),
         };
         let c = rp::claim(&b, &keys).unwrap();
         rp::mark_in_flight(&b, &c).unwrap();
@@ -1064,9 +1079,7 @@ async fn grant_on_unfinished_claim(end: &str) {
         if end == "declared" {
             rp::declare(&b, c.id, true, "attacker", "attack").unwrap();
         }
-        let w = canon(&ws(tmp.path()));
         let target = w.join(PATH).display().to_string();
-        let csha = sha(CONTENT.as_bytes());
         let psha = sha(b"forged compose proposal");
         // Promotion and evidence: any two existing records, linked.
         let pr = raw_note(&b, "constraint", "{\"fake\":\"promotion\"}", &[]);
@@ -1077,6 +1090,10 @@ async fn grant_on_unfinished_claim(end: &str) {
             "workspace": w.display().to_string(), "prior_sha256": null,
             "approval_key": keys.approval_key, "replay_claim": c.id,
             "cx_promotion": pr, "cx_evidence": ev,
+            "trace_id": ident.trace_id, "request_id": ident.request_id,
+            "approval_id": ident.approval_id,
+            "approved_proposal_sha256": ident.approved_proposal_sha256,
+            "desk_key_id": ident.desk_key_id,
         });
         let g = raw_note(&b, "authorization", &text.to_string(), &[pr, ev, c.id]);
         (g, csha, psha, target)
