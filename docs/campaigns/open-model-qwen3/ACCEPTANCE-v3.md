@@ -4,8 +4,8 @@
 binaries' sha256, the pre-run gate passed on that build (Section 9), and `run-qwen3-v3.sh` refuses unless the commit
 arguments and the binaries match. Nothing below is a verdict; VERDICT-v3.md is written after the run. Prepared by
 session 031756 for Drake, 2026-10-07; frozen 2026-10-07. **Read Section 12 first: it records what the merged code does
-differently from what Section 2 and Section 3 assumed, including one row (G3-RQ) that cannot pass as written. That
-needs Drake's decision before this is merged.**
+differently from what Section 2 and Section 3 assumed. Every `<id>-RQ` row is now outcome-based (decision recorded in
+Section 12), which settles the G3-RQ problem it describes.**
 
 ## 0. Read this first: what is and is not established
 
@@ -73,7 +73,7 @@ Seeds: E1 `ROADMAP.md` = `# Roadmap\n\n## Planned\n- ship search\n\n## Shipped\n
 (sha256 `fbea0ff34c7b30bf91384b846faf54e7163b98871242839304c3835004ca7d84`). Each seed has two headings on purpose, as the v8 T7 seed does.
 
 Task fields beyond v8 (all in `tasks-oq3-v3.json`): `budget_ms`; for documents `requirements` (what the goal states in the
-exact wordings the runtime recognizes: "at least N lines", "at least N sections"), `min_code_blocks`, `tail_heading`
+exact wordings the runtime recognizes: "at least N lines", "at least N sections"; G3 also carries the six `titles` its goal names, used only by row G3-RQ), `min_code_blocks`, `tail_heading`
 and `min_tail_words` (G1 only: three code blocks, then text after the last one under "## Summary", at least 6 words).
 Goals avoid backticks and pipes so the task rows above stay exact. No goal names an existing workspace file
 (README.md, docs/plan.txt) except the two edit goals, so only E1 and E2 run in edit mode.
@@ -98,7 +98,7 @@ for N launches do not exist, as in v8). Replay is R1-P and R1-T plus the `<id>-A
 |---|---|---|
 | `<id>-SB` Saved bytes equal approved bytes | G1 G2 G3 E1 E2 R1 | exactly one authorization; the sha256 of the file found in the workspace, computed by the scorer after the run (not read from the runtime's report), equals the authorization's content sha256, S5 content sha256, S5 disk sha256 and the S3 proposal content sha256; the file path equals the task destination |
 | `<id>-F` Complete document saved | G1 G2 G3 | the file is read; fence lines (a line starting with three backticks or three tildes) are even in number and at least 2 x `min_code_blocks`; when `min_code_blocks` > 0 the text after the last fence line has at least `min_tail_words` words and a line equal to `tail_heading`; the saved text equals the document an independent reading takes from the accepted reply by the merged parser rule (Section 12: the "filename:" line dropped; a backtick opener dropped and the outer fence closed by the CommonMark-style nesting rule, text after the close dropped; otherwise the body whole; trailing whitespace ignored) |
-| `<id>-RQ` Stated requirements met | G1 G2 G3 | every requirement the task declares is listed (by its label, for example "at least 25 non-empty lines") in the S3 report field `requirements_recognized`, and an independent recount of the saved text meets it (non-empty lines, or markdown headings) |
+| `<id>-RQ` Stated requirements met | G1 G2 G3 | **outcome-based** (Section 12): the file saved at the destination meets every measurable requirement the task's goal states, computed by the campaign tooling from the task's declared `requirements` fields, whether or not the product recognized them: non-empty lines (fence lines included) at or above `n`, and for headings at least `n` markdown headings outside fenced code, each declared title (G3: Welcome, Accounts and access, Tools to install, Your first week, Who to ask, Glossary) among them. Nothing saved is FAIL. The product's `requirements_recognized` is recorded as information in the side-file (`value.recognized_by_runtime`), not as a condition |
 | `<id>-D` One deadline for all attempts | all eight | at least one attempt; the total of the attempts' ms is at or below the task's `budget_ms` (29000 edit, 120000 document); no attempt's reason contains "exceeded"; for positive launches an accepted (parsed) attempt exists |
 | `N2-R` Token-limit cut is not a timeout | N2 | at least one attempt; every attempt has finish_reason max_tokens and a reason containing "token limit" and not containing "exceeded" |
 
@@ -232,11 +232,11 @@ Freeze checklist, as done on 2026-10-07 (logs in `evidence-v3/`):
 1. omega main 01f6a74 (#331 merged); `omega.lock` in sovereign-core is 01f6a74. DONE.
 2. sc#284 merged; env names, 16-token floor, reason wordings re-checked. DONE, with the findings of Section 12.
 3. Parser repair merged; `v3_doc_from_reply` re-checked and rewritten. DONE (`test-v3.sh` has cases for each branch).
-4. Requirement validation merged and wired (`requirements_recognized` on the S3 report, `control.rs:371`). DONE; labels re-checked: G1 and G2 recognized, G3 not (Section 12).
+4. Requirement validation merged and wired (`requirements_recognized` on the S3 report, `control.rs:371`). DONE; labels re-checked: G1 and G2 recognized, G3 not; RQ rows are outcome-based so this does not decide any row (Section 12).
 5. Combined build from clean checkouts with the v2 Section 2 build lines plus `has_omega_wait_ms`, binaries' sha256. DONE (Section 7, `evidence-v3/build-summary.txt`).
 6. Pre-run gate on 8f3e8c8: `cargo fmt --all --check` OK; `cargo clippy --workspace --all-targets -- -D warnings` OK;
    `AIEN_FORCE_CPU_STUB=1 cargo test -p aien-runtime -p aien-cli` 216 passed, 0 failed; `test-rows-v8.sh` with `NP1_EDIT_MERGE` =
-   the frozen binary 142 passed, 0 failed; `test-v3.sh` 62 passed, 0 failed (`evidence-v3/gate-summary.txt`). DONE.
+   the frozen binary 142 passed, 0 failed; `test-v3.sh` 67 passed, 0 failed (re-run after the outcome-based RQ change, Section 12) (`evidence-v3/gate-summary.txt`). DONE.
 7. CPU-only dry run of the scorer on `oq3-v3.decl.json` with made-up result lines: `test-v3.sh` section 3 (156 made-up PASS lines
    give PASS; a missing, a failing and a duplicate line do not) plus an explicit run of all 156 rows in `evidence-v3/scorer-dryrun.txt`.
    The daemon does not print its effective limits, so no limits row exists (Section 6, item 4). DONE.
@@ -296,11 +296,20 @@ Quoted file:line are in sovereign-core at 8f3e8c8. Nothing in the tasks file was
    clause (`clause_ends_after`, `requirements.rs:248`; "of/per/each/in/with ..." after the noun disqualifies it). The G3 goal reads "at least 35 lines **with** at least 6
    sections **titled** ...", so neither "at least 35 lines" nor "at least 6 sections" is extracted. Run on all eight goals with the merged module itself (`requirements::extract`):
    G1 gives `["at least 18 non-empty lines"]`, G2 gives `["at least 25 non-empty lines"]`, G3 gives `[]`, the other five give `[]`. Consequences: the runtime would not refuse a short G3
-   reply and would not retry it; `requirements_recognized` is empty for G3, so row G3-RQ (which requires both labels in the report) FAILs whatever the model writes. G3-L
-   (line count) and G3-F still run. This is a real weakness of requirement validation (a plain sentence like G3's is not covered) and of the spec's assumption that
-   the G3 wording is recognized. The goal was NOT rewritten. Decision needed from Drake before this is merged: (a) accept it as a recorded, expected FAIL of G3-RQ (the whole
-   campaign then cannot PASS, as the prediction already expects a FAIL), (b) reword G3 so the nouns end their clauses (a new goal, same campaign, before merge), or
-   (c) widen requirement extraction in sovereign-core first and rebuild (a new freeze).
+   reply and would not retry it; `requirements_recognized` is empty for G3. As first written, row G3-RQ demanded recognition (both labels in the report), so it would FAIL
+   whatever the model wrote. G3-L (line count) and G3-F still run. This is a real weakness of requirement validation (a plain sentence like G3's is not covered). The goal
+   was NOT rewritten, and sovereign-core was not changed.
+   **Decision (orchestrator, 2026-10-07; replaces the open question to Drake about options a, b, c):** every RQ row (G1-RQ, G2-RQ, G3-RQ) is OUTCOME-BASED. It passes iff
+   the bytes actually saved at the destination meet every measurable requirement the goal states, computed by the campaign tooling (`rows-oq3-v3.jq`, `v3_row_rq`) from the
+   task file's declared requirement fields, independent of whether the product recognized them. Counting follows the `requirements.rs` doc comments: non-empty lines count
+   every line with a non-whitespace character, code and fence marker lines included (`requirements.rs:36-37`, "Counting"); sections are markdown headings, 1 to 6 `#`, a space,
+   then text (`requirements.rs:24`), skipping fenced code blocks and the fence lines themselves (CommonMark close rule, an unclosed fence runs to the end, `requirements.rs:37-41`),
+   so a heading inside a code fence does not count. G3 therefore passes iff the saved ONBOARDING.md has at least 35 non-empty lines and the six named sections present as
+   headings outside code fences (the six titles are a new `titles` field on G3's declared headings requirement in `tasks-oq3-v3.json`; goal text, ids and budgets are unchanged). If
+   nothing was saved, RQ is FAIL. Why: the row used to measure the product's wording coverage, which `<id>-L` and the prediction already treat separately, and made G3-RQ unable
+   to pass; the campaign question is whether the document the user would get meets the stated requirements. Whether the product recognized each requirement
+   (`requirements_recognized`) is kept as information in the receipt side-file (`value.recognized_by_runtime`), not as a row. Row count is unchanged: 156 declared rows,
+   21 new, because RQ stays one row per document launch and the declaration is byte-identical. Not changed: goals, task ids, budgets, the prediction section.
 2. **Outer-fence rule differs from the prepared reading** (`check_file_proposal`, `outer_fence_close`, `spine.rs:733-830`): only a backtick opener is an outer fence
    (tilde is not); the opener line is always dropped; the close is found by the nesting rule (info-string fences nest; a bare fence at depth 0 with more fences after it opens
    a bare inner block; none balanced uses the last bare fence); text after the close is dropped, not kept; no close at all keeps the whole body. `v3_doc_from_reply` now

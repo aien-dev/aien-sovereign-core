@@ -110,10 +110,11 @@ printf 'changed after approval\n' >"$T/g1c/ws/docs/PIPELINE.md"
 out=$(run_rows "$T/g1c" G1)
 chk "G1 file changed after approval: G1-SB FAIL" '[ "$(rowres "$out" G1/G1-SB)" = FAIL ]'
 
-# requirement not recognized by the runtime (feature absent) or recognized but not met
+# outcome-based RQ (ACCEPTANCE-v3 Section 12): runtime recognition is information, not a condition
 mk_run "$T/g1r" G1 docs/PIPELINE.md "$DOC" "$REPLY" "" '[]'
 out=$(run_rows "$T/g1r" G1)
-chk "G1 requirement not recognized by the runtime: G1-RQ FAIL" '[ "$(rowres "$out" G1/G1-RQ)" = FAIL ]'
+chk "G1 requirement not recognized by the runtime but met by the saved bytes: G1-RQ PASS" '[ "$(rowres "$out" G1/G1-RQ)" = PASS ]'
+chk "G1 recognition is recorded as information in the side-file" '[ "$(jq -c ".rows[]|select(.row==\"G1-RQ\")|.value.recognized_by_runtime" "$T/$(jq -r "select(.row==\"G1/G1-RQ\")|.extra_rows_file" <<<"$out")")" = "[]" ]'
 
 # deadline: attempts over the shared budget, and a timeout reason
 ATT=$(jq -n --arg r "$REPLY" '[{attempt: 1, outcome: "refused", reason: "model proposal exceeded 30000 ms", tokens: 300, ms: 61000, finish_reason: "eos"},
@@ -130,16 +131,32 @@ mk_run "$T/g1f" G1 docs/PIPELINE.md "$DOC" "$REPLY" "$ATT3" "$RECG1"
 out=$(run_rows "$T/g1f" G1)
 chk "G1 first attempt refused for an unmet requirement, second accepted, within 120 s: G1-D PASS" '[ "$(rowres "$out" G1/G1-D)" = PASS ]'
 
-# G3: headings count
-G3=$'# Onboarding\n## Welcome\na\nb\n## Accounts and access\na\nb\n## Tools to install\na\nb\n## Your first week\na\nb\n## Who to ask\na\nb\n## Glossary\na\nb\nc\nd\ne\nf\ng\nh\ni\nj\nk\nl\nm\nn\no\np\nq\nr'
+# G3: outcome-based RQ, 36 lines, six named headings
+G3=$'# Onboarding\n## Welcome\na\nb\n## Accounts and access\na\nb\n## Tools to install\na\nb\n## Your first week\na\nb\n## Who to ask\na\nb\n## Glossary\na\nb\nc\nd\ne\nf\ng\nh\ni\nj\nk\nl\nm\nn\no\np\nq\nr\ns'
 G3R=$'filename: docs/ONBOARDING.md\n'"$G3"
 mk_run "$T/g3" G3 docs/ONBOARDING.md "$G3" "$G3R" "" '["at least 35 non-empty lines","at least 6 headings"]'
 out=$(run_rows "$T/g3" G3)
 chk "G3 unfenced reply taken whole: G3-F PASS" '[ "$(rowres "$out" G3/G3-F)" = PASS ]'
-chk "G3 35 lines and 6+ headings: G3-RQ PASS" '[ "$(rowres "$out" G3/G3-RQ)" = PASS ]'
-mk_run "$T/g3b" G3 docs/ONBOARDING.md "$G3" "$G3R" "" '["at least 35 non-empty lines"]'
+chk "G3 36 lines, 6 named headings, recognition recorded: G3-RQ PASS" '[ "$(rowres "$out" G3/G3-RQ)" = PASS ]'
+mk_run "$T/g3b" G3 docs/ONBOARDING.md "$G3" "$G3R" "" '[]'
 out=$(run_rows "$T/g3b" G3)
-chk "G3 headings requirement not recognized: G3-RQ FAIL" '[ "$(rowres "$out" G3/G3-RQ)" = FAIL ]'
+chk "G3 36 lines, 6 named headings, recognition EMPTY (the product's real behaviour): G3-RQ PASS" '[ "$(rowres "$out" G3/G3-RQ)" = PASS ]'
+G3S=$(printf '%s\n' "$G3" | head -n 30)
+mk_run "$T/g3c" G3 docs/ONBOARDING.md "$G3S" $'filename: docs/ONBOARDING.md\n'"$G3S" "" '[]'
+out=$(run_rows "$T/g3c" G3)
+chk "G3 30 lines (all six headings present): G3-RQ FAIL" '[ "$(rowres "$out" G3/G3-RQ)" = FAIL ]'
+G3F=$'# Onboarding\n```markdown\n## Welcome\na\nb\n## Accounts and access\na\nb\n## Tools to install\na\nb\n## Your first week\na\nb\n## Who to ask\na\nb\n## Glossary\na\nb\nc\nd\ne\nf\ng\nh\ni\nj\nk\nl\nm\nn\no\np\nq\nr\n```\nEnd of file.'
+mk_run "$T/g3d" G3 docs/ONBOARDING.md "$G3F" $'filename: docs/ONBOARDING.md\n'"$G3F" "" '[]'
+out=$(run_rows "$T/g3d" G3)
+chk "G3 headings only inside a code fence (36+ lines): G3-RQ FAIL" '[ "$(rowres "$out" G3/G3-RQ)" = FAIL ]'
+G3M=$(printf '%s\n' "$G3" | sed 's/^## Glossary$/Glossary/')
+mk_run "$T/g3e" G3 docs/ONBOARDING.md "$G3M" $'filename: docs/ONBOARDING.md\n'"$G3M" "" '[]'
+out=$(run_rows "$T/g3e" G3)
+chk "G3 one named section missing as a heading: G3-RQ FAIL" '[ "$(rowres "$out" G3/G3-RQ)" = FAIL ]'
+# nothing saved: no file, no authorization
+mkdir -p "$T/g3n/ws" "$T/g3n/steps"; echo '{"proposal_attempts":[],"requirements_recognized":["at least 35 non-empty lines","at least 6 headings"]}' >"$T/g3n/s3-report.json"
+out=$(run_rows "$T/g3n" G3)
+chk "G3 nothing saved (even if recognized): G3-RQ FAIL" '[ "$(rowres "$out" G3/G3-RQ)" = FAIL ]'
 
 # negatives
 NAT=$(jq -n '[{attempt: 1, outcome: "refused", reason: "reply cut at the token limit after 16 tokens (finish_reason max_tokens); a cut reply is never a proposal", tokens: 16, ms: 2100, finish_reason: "max_tokens"}]')

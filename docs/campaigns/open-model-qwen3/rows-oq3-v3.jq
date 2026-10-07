@@ -98,22 +98,51 @@ def v3_row_f($id):
                                    and (($ev.task.tail_heading // null) == null or ($after | map(. == $ev.task.tail_heading) | any))))
               and $ct == $rd) | v3_okv};
 
-# RQ: stated measurable requirements met (documents whose goal states one). Two checks per requirement:
-# the runtime recognized it (report field requirements_recognized, 031756/req-validate) and an
-# independent recount of the saved text meets it.
+# RQ: OUTCOME-BASED (ACCEPTANCE-v3 Section 12, decision of the orchestrator 2026-10-07). The row passes iff the bytes
+# actually saved at the destination meet every measurable requirement the task's goal states, computed here from the
+# task's declared requirement fields, whether or not the product recognized them. Nothing saved: FAIL. Whether the
+# runtime recognized each requirement (S3 report requirements_recognized) is information in the receipt side-file
+# (value.recognized_by_runtime), not part of the result.
+# Counting rules are those of crates/aien-runtime/src/requirements.rs (doc comments, "Counting", requirements.rs:36-41):
+#   lines    every non-empty line (a non-whitespace character), code lines and fence marker lines included;
+#   headings markdown headings, 1 to 6 "#" then a space then text, skipping fenced code blocks (``` or ~~~,
+#            CommonMark close rule: same marker, at least as long, no info string; an unclosed fence runs to the end)
+#            and the fence lines themselves (table at requirements.rs:24, "sections" = markdown headings).
+# A declared requirement may carry "titles": each title must equal (case-insensitive, trimmed) the text of a heading
+# found by that rule (G3: the six named sections).
+def v3_heading_texts($t):
+  (reduce ($t | split("\n"))[] as $ln ({open: null, h: []};
+     ($ln | sub("\\s+$"; "")) as $l
+     | if .open == null then
+         ($l | capture("^\\s*(?<m>`{3,}|~{3,})(?<i>.*)$"; "") // null) as $o
+         | if $o != null and (($o.m | startswith("`") | not) or ($o.i | contains("`") | not))
+           then .open = {c: ($o.m | .[0:1]), n: ($o.m | length)}
+           elif ($l | test("^#{1,6} +\\S")) then .h += [$l | sub("^#{1,6} +"; "") | sub(" +#+$"; "") | sub("^\\s+"; "") | sub("\\s+$"; "") | ascii_downcase]
+           else . end
+       else
+         (.open) as $op
+         | if ($l | test("^\\s*" + (if $op.c == "`" then "`" else "~" end) + "{" + ($op.n | tostring) + ",}\\s*$")) then .open = null else . end
+       end)) | .h;
+def v3_req_found($t): . as $r
+  | if $r.kind == "min_lines" then v3_nonempty($t)
+    elif $r.kind == "min_headings" then (v3_heading_texts($t) | length)
+    else null end;
 def v3_req_ok($t): . as $r
   | if $r.kind == "min_lines" then v3_nonempty($t) >= $r.n
-    elif $r.kind == "min_headings" then v3_headings($t) >= $r.n
+    elif $r.kind == "min_headings" then
+      (v3_heading_texts($t)) as $h
+      | ($h | length) >= $r.n and (($r.titles // []) | all(. as $x | ($h | index($x | sub("^\\s+"; "") | sub("\\s+$"; "") | ascii_downcase)) != null))
     else false end;
 def v3_row_rq($id):
   . as $ev | ($ev.committed.text) as $t | ($ev.task.requirements // []) as $reqs
   | ($ev.report.requirements_recognized // null) as $rec
-  | {row: "\($id)-RQ", criterion: "Stated requirements met",
-     threshold: "every requirement declared for the task is in the S3 report requirements_recognized (by label) and the saved text meets it on an independent recount (non-empty lines, or markdown headings)",
-     value: {declared: ($reqs | map(.label)), recognized: $rec,
-             recount: (if $t == null then null else $reqs | map({label, n, found: (if .kind == "min_lines" then v3_nonempty($t) elif .kind == "min_headings" then v3_headings($t) else null end)}) end)},
-     result: ($t != null and ($reqs | length) > 0 and $rec != null
-              and ($reqs | all(. as $r | ($rec | index($r.label)) != null and ($r | v3_req_ok($t))))) | v3_okv};
+  | {row: "\($id)-RQ", criterion: "Stated requirements met (outcome of the saved bytes)",
+     threshold: "the file saved at the destination exists and meets every requirement declared for the task, counted by the campaign tooling on the saved text by the requirements.rs rules (non-empty lines including fence lines; markdown headings outside fenced code; each declared title present as a heading); nothing saved = FAIL; whether the runtime recognized the requirement does not matter",
+     value: {declared: ($reqs | map(.label)), recognized_by_runtime: $rec,
+             recount: (if $t == null then null else $reqs | map({label, n, titles, found: v3_req_found($t),
+                         titles_missing: (if .kind == "min_headings" then ((.titles // []) | map(select(. as $x | (v3_heading_texts($t) | index($x | sub("^\\s+"; "") | sub("\\s+$"; "") | ascii_downcase)) == null))) else null end),
+                         met: v3_req_ok($t)}) end)},
+     result: ($t != null and ($reqs | length) > 0 and ($reqs | all(v3_req_ok($t)))) | v3_okv};
 
 # D: one wall-clock deadline for all attempts of the launch, and no attempt ended by timeout.
 def v3_row_d($id; $positive):

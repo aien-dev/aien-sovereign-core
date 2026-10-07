@@ -41,7 +41,7 @@
       "min_lines": 35,
       "requirements": [
         {"kind": "min_lines", "n": 35, "label": "at least 35 non-empty lines"},
-        {"kind": "min_headings", "n": 6, "label": "at least 6 headings"}
+        {"kind": "min_headings", "n": 6, "label": "at least 6 headings", "titles": ["Welcome", "Accounts and access", "Tools to install", "Your first week", "Who to ask", "Glossary"]}
       ],
       "min_code_blocks": 0,
       "tail_heading": null,
