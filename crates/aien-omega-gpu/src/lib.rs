@@ -429,6 +429,78 @@ pub fn cta_budget() -> Option<u32> {
     None
 }
 
+/// Environment setting for omega's marker-wait spin window, in microseconds
+/// (omega#328). Unset or blank means the AIEN daemon default
+/// ([`DAEMON_DEFAULT_SPIN_US`]); 0 restores omega's own default, the 50 us
+/// sleep-poll that timer slack rounds to about 102 us per launch.
+pub const SPIN_US_ENV: &str = "AIEN_OMEGA_SPIN_US";
+
+/// The AIEN daemon's window when [`SPIN_US_ENV`] is unset: 2000 us. Sealed GB10
+/// evidence in [`DAEMON_DEFAULT_SPIN_US_EVIDENCE`]: Qwen3-4B decode 310 -> 268 ms/token
+/// with identical replies (two alternating pairs).
+pub const DAEMON_DEFAULT_SPIN_US: u32 = 2000;
+
+/// Repository path of the evidence behind [`DAEMON_DEFAULT_SPIN_US`].
+pub const DAEMON_DEFAULT_SPIN_US_EVIDENCE: &str = "docs/inference/evidence/spin-20261007T0726Z";
+
+/// Largest window omega accepts (`OMEGA_GPU_SESSION_MAX_SPIN_US`).
+pub const SPIN_US_MAX: u32 = 1_000_000;
+
+// The daemon default must be a window omega accepts (checked at build time).
+const _: () = assert!(DAEMON_DEFAULT_SPIN_US <= SPIN_US_MAX);
+
+/// Parse the [`SPIN_US_ENV`] setting. `None` or blank: `Ok(None)` (the caller
+/// picks its default). Otherwise a plain decimal integer in 0..=[`SPIN_US_MAX`];
+/// anything else is an error naming the value.
+pub fn parse_spin_us(raw: Option<&str>) -> Result<Option<u32>, String> {
+    let Some(text) = raw.map(str::trim).filter(|t| !t.is_empty()) else {
+        return Ok(None);
+    };
+    let refuse = |why: &str| {
+        Err(format!(
+            "{SPIN_US_ENV}={text:?} refused: {why} (allowed 0..={SPIN_US_MAX}; unset uses the AIEN daemon default {DAEMON_DEFAULT_SPIN_US})"
+        ))
+    };
+    if !text.bytes().all(|b| b.is_ascii_digit()) {
+        return refuse("not a plain decimal integer");
+    }
+    match text.parse::<u32>() {
+        Ok(v) if v <= SPIN_US_MAX => Ok(Some(v)),
+        Ok(_) | Err(_) => refuse("larger than omega's maximum"),
+    }
+}
+
+/// Set omega's marker-wait spin window. Stub: `Unavailable`.
+pub fn set_spin_us(us: u32) -> Result<(), OmegaGpuError> {
+    #[cfg(has_omega_gpu)]
+    {
+        // SAFETY: plain u32 argument; omega stores it atomically and does not open the device.
+        let rc = unsafe { ffi::omega_gpu_session_set_spin_us(us) };
+        if rc == 0 {
+            Ok(())
+        } else {
+            Err(OmegaGpuError::Rc {
+                rc,
+                name: format!("spin window {us} us refused (maximum {SPIN_US_MAX})"),
+            })
+        }
+    }
+    #[cfg(not(has_omega_gpu))]
+    {
+        let _ = us;
+        Err(OmegaGpuError::Unavailable)
+    }
+}
+
+/// The spin window omega will use for the next launch; `None` in the stub.
+pub fn spin_us() -> Option<u32> {
+    #[cfg(has_omega_gpu)]
+    // SAFETY: no arguments; reads one u32, does not open the device.
+    return Some(unsafe { ffi::omega_gpu_session_spin_us() });
+    #[cfg(not(has_omega_gpu))]
+    None
+}
+
 // ---- native elementwise ops (omega FB-1 cut 4) ----
 
 pub use ffi::OmegaGpuEwInfo;
@@ -881,5 +953,74 @@ mod cta_budget_tests {
             .join(DAEMON_DEFAULT_CTA_BUDGET_EVIDENCE)
             .join("FINDINGS.md");
         assert!(doc.is_file(), "evidence missing: {}", doc.display());
+    }
+}
+
+#[cfg(test)]
+mod spin_us_tests {
+    use super::*;
+
+    #[test]
+    fn unset_or_blank_keeps_omega_default() {
+        assert_eq!(parse_spin_us(None), Ok(None));
+        assert_eq!(parse_spin_us(Some("")), Ok(None));
+        assert_eq!(parse_spin_us(Some(" \n")), Ok(None));
+    }
+
+    #[test]
+    fn in_range_values_parse() {
+        for (raw, v) in [
+            ("0", 0),
+            ("2000", 2000),
+            (" 2000\n", 2000),
+            ("1000000", SPIN_US_MAX),
+        ] {
+            assert_eq!(parse_spin_us(Some(raw)), Ok(Some(v)), "{raw}");
+        }
+    }
+
+    #[test]
+    fn invalid_values_are_refused() {
+        for raw in [
+            "-1",
+            "+2000",
+            "abc",
+            "2000.0",
+            "0x10",
+            "1000001",
+            "99999999999",
+        ] {
+            let err = parse_spin_us(Some(raw)).expect_err(raw);
+            assert!(err.contains(SPIN_US_ENV), "{raw}: {err}");
+        }
+    }
+
+    #[test]
+    fn daemon_default_is_2000_with_sealed_evidence() {
+        assert_eq!(DAEMON_DEFAULT_SPIN_US, 2000);
+        assert_eq!(
+            parse_spin_us(Some("2000")),
+            Ok(Some(DAEMON_DEFAULT_SPIN_US))
+        );
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join(DAEMON_DEFAULT_SPIN_US_EVIDENCE);
+        for file in ["FINDINGS.md", "SHA256SUMS", "run-ab.sh"] {
+            assert!(
+                dir.join(file).is_file(),
+                "evidence missing: {}",
+                dir.join(file).display()
+            );
+        }
+    }
+
+    #[test]
+    fn reading_the_window_matches_the_build() {
+        if is_native() {
+            assert!(spin_us().is_some_and(|us| us <= SPIN_US_MAX));
+        } else {
+            assert_eq!(spin_us(), None);
+            assert_eq!(set_spin_us(2000), Err(OmegaGpuError::Unavailable));
+        }
     }
 }

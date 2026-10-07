@@ -1350,9 +1350,13 @@ fn build_native_daemon_backend() -> Result<DaemonBackendParts, String> {
     // cache on a change). Unset means the AIEN default (256), not omega's 64.
     let cta_setting = std::env::var(aien_omega_gpu::CTA_BUDGET_ENV).ok();
     let cta_budget = aien_omega_gpu::parse_cta_budget(cta_setting.as_deref())?;
+    // Marker-wait spin window (omega#328): parsed here too, so a bad value is always fatal.
+    let spin_setting = std::env::var(aien_omega_gpu::SPIN_US_ENV).ok();
+    let spin_us = aien_omega_gpu::parse_spin_us(spin_setting.as_deref())?;
     let omega = aien_inference_abi::OmegaGb10Backend::new();
     if omega.is_available() {
         println!("  {}", apply_omega_cta_budget(cta_budget)?);
+        println!("  {}", apply_omega_spin_us(spin_us)?);
         let name = aien_inference_abi::TensorBackend::name(&omega).to_string();
         let tensor_backend: std::sync::Arc<dyn aien_inference_abi::TensorBackend> =
             std::sync::Arc::new(omega);
@@ -1408,6 +1412,30 @@ fn daemon_cta_budget(
             ),
         ),
     }
+}
+
+/// Apply the daemon's marker-wait spin window (always set explicitly at start, omega#328)
+/// and return the startup log line with the window omega reports back.
+fn apply_omega_spin_us(us: Option<u32>) -> Result<String, String> {
+    let env = aien_omega_gpu::SPIN_US_ENV;
+    let (us, source) = match us {
+        Some(v) => (v, format!("{env} set")),
+        None => (
+            aien_omega_gpu::DAEMON_DEFAULT_SPIN_US,
+            format!(
+                "AIEN default, {env} unset; evidence {}",
+                aien_omega_gpu::DAEMON_DEFAULT_SPIN_US_EVIDENCE
+            ),
+        ),
+    };
+    aien_omega_gpu::set_spin_us(us)
+        .map_err(|e| format!("Omega marker spin {us} us ({source}): {e}"))?;
+    let active = aien_omega_gpu::spin_us().ok_or_else(|| {
+        format!(
+            "Omega marker spin {us} us ({source}): the Omega GPU engine is not linked (stub build)"
+        )
+    })?;
+    Ok(format!("Omega marker spin: {active} us ({source})"))
 }
 
 /// Apply the daemon's CTA budget (always set explicitly at start) and return
