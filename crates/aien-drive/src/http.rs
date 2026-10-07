@@ -1,9 +1,11 @@
-//! Minimal plain-HTTP client over `std::net` (loopback endpoints only).
+//! Minimal plain-HTTP client over `std::net`, loopback endpoints only: every
+//! address the host resolves to must be loopback, and the connection goes to
+//! those resolved addresses (no second lookup between the check and connect).
 //! Sends HTTP/1.0 with `Connection: close` and decodes chunked bodies if the
 //! server uses them anyway.
 
 use std::io::{BufRead, BufReader, Read, Write};
-use std::net::TcpStream;
+use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
 use std::time::Duration;
 
 pub struct Response {
@@ -19,12 +21,29 @@ fn split_url(url: &str) -> Result<(String, String), String> {
         Some(i) => (&rest[..i], &rest[i..]),
         None => (rest, "/"),
     };
-    let host = if host.contains(':') {
+    let host = if host.starts_with('[') && host.ends_with(']') {
+        format!("{host}:80")
+    } else if host.contains(':') {
         host.to_string()
     } else {
         format!("{host}:80")
     };
     Ok((host, path.to_string()))
+}
+
+/// Resolve `host:port` and refuse it unless every address is loopback.
+fn loopback_addrs(host: &str) -> Result<Vec<SocketAddr>, String> {
+    let addrs: Vec<SocketAddr> = host
+        .to_socket_addrs()
+        .map_err(|e| format!("resolve {host}: {e}"))?
+        .collect();
+    if addrs.is_empty() {
+        return Err(format!("resolve {host}: no addresses"));
+    }
+    if let Some(a) = addrs.iter().find(|a| !a.ip().is_loopback()) {
+        return Err(format!("refused: {host} resolves to non-loopback {a}"));
+    }
+    Ok(addrs)
 }
 
 struct Chunked<R: BufRead> {
@@ -63,7 +82,8 @@ impl<R: BufRead> Read for Chunked<R> {
 /// POST a JSON body. `timeout` bounds each socket read and write.
 pub fn post_json(url: &str, body: &str, timeout: Duration) -> Result<Response, String> {
     let (host, path) = split_url(url)?;
-    let mut s = TcpStream::connect(&host).map_err(|e| format!("connect {host}: {e}"))?;
+    let addrs = loopback_addrs(&host)?;
+    let mut s = TcpStream::connect(&addrs[..]).map_err(|e| format!("connect {host}: {e}"))?;
     s.set_read_timeout(Some(timeout))
         .map_err(|e| e.to_string())?;
     s.set_write_timeout(Some(timeout))
@@ -105,4 +125,34 @@ pub fn post_json(url: &str, body: &str, timeout: Duration) -> Result<Response, S
         Box::new(r)
     };
     Ok(Response { status, body })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn loopback_hosts_are_accepted() {
+        for h in ["127.0.0.1:18080", "127.8.9.10:1", "[::1]:1", "localhost:1"] {
+            let a = loopback_addrs(h).unwrap_or_else(|e| panic!("{h}: {e}"));
+            assert!(a.iter().all(|a| a.ip().is_loopback()), "{h}");
+        }
+        assert_eq!(split_url("http://[::1]/x").unwrap().0, "[::1]:80");
+    }
+
+    #[test]
+    fn non_loopback_hosts_are_refused_before_connecting() {
+        for url in [
+            "http://10.0.0.1:18080/v1",
+            "http://192.168.1.192/v1",
+            "http://0.0.0.0:18080/v1",
+            "http://[2001:db8::1]:80/v1",
+            "http://203.0.113.7/v1",
+        ] {
+            let err = post_json(url, "{}", Duration::from_millis(50))
+                .err()
+                .unwrap_or_else(|| panic!("{url} was not refused"));
+            assert!(err.starts_with("refused: "), "{url}: {err}");
+        }
+    }
 }
