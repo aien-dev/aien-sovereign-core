@@ -59,11 +59,16 @@
 //! - heading text: the heading line without its `#` run, leading numbering
 //!   (`1.`, `2)`), emphasis marks and trailing `:.!?#`, trimmed, whitespace
 //!   collapsed, compared case-insensitively.
-//! - word form (topics): lowercase, strip ONE suffix of `ment ing ion es ed
-//!   s` (only when 3 or more letters remain), then one trailing `e` (when 4
-//!   or more letters remain). `preparing`, `prepare` and `prepared` agree;
-//!   `publishing` and `public` do not. Irregular forms (`running` / `run`)
-//!   do not agree: the check errs on the side of refusing.
+//! - word form (topics): lowercase, strip ONE suffix of `ment ing ion age es
+//!   ed s` (only when 3 or more letters remain, 4 for `age`), then one trailing `e` (when
+//!   4 or more letters remain), then a final `i` becomes `y`, then a doubled
+//!   final consonant is undoubled (when 4 or more letters remain).
+//!   `preparing`, `prepare` and `prepared` agree; so do `dry`, `dried` and
+//!   `drying`, `label`, `labelled` and `labelling`, `store`, `stored` and
+//!   `storage` (sc#332); `publishing` and `public` do not. Irregular forms
+//!   (`withdrew` / `withdraw`) do not agree: the check errs on the side of
+//!   refusing, unless the goal names the form for that topic, written into
+//!   the topic as `withdraw (or withdrew)`.
 //! - sentence: a run of at least two words ended by `.`, `!` or `?` (not
 //!   inside a number such as `3.10`); an unfinished last fragment of at
 //!   least three words counts as one. List markers are ignored.
@@ -113,7 +118,9 @@ pub enum Requirement {
     /// Section titles that must each appear as a heading.
     RequiredHeadings(Vec<String>),
     /// Topics (each a list of content words) that must each be covered: every
-    /// content word must appear in the prose as a word form.
+    /// content word must appear in the prose as a word form. A topic written
+    /// `withdraw (or withdrew, withdrawn)` is also covered by any one of the
+    /// forms the goal named for it.
     RequiredTopics(Vec<String>),
     /// Every section holds at least this many sentences.
     MinSentencesPerSection(usize),
@@ -256,11 +263,15 @@ impl Requirement {
                     .iter()
                     .map(|w| stem(w))
                     .collect();
-                let missing: Vec<String> = p
-                    .iter()
-                    .filter(|t| !content_words(t).iter().all(|w| have.contains(&stem(w))))
-                    .cloned()
-                    .collect();
+                let covered = |t: &str| {
+                    let (topic, forms) = topic_forms(t);
+                    content_words(topic).iter().all(|w| have.contains(&stem(w)))
+                        || forms.iter().any(|f| {
+                            let f = words_of(f);
+                            !f.is_empty() && f.iter().all(|w| have.contains(&stem(w)))
+                        })
+                };
+                let missing: Vec<String> = p.iter().filter(|t| !covered(t)).cloned().collect();
                 (!missing.is_empty()).then(|| {
                     format!(
                         "{label}, not covered: {} (use those words, or their word forms, in the text)",
@@ -389,8 +400,10 @@ pub(crate) fn content_words(topic: &str) -> Vec<String> {
 /// Conservative word form (see the module docs).
 pub(crate) fn stem(w: &str) -> String {
     let mut s = w.to_lowercase();
-    for suf in ["ment", "ing", "ion", "es", "ed", "s"] {
-        if s.len() >= suf.len() + 3 && s.ends_with(suf) {
+    for suf in ["ment", "ing", "ion", "age", "es", "ed", "s"] {
+        // `age` keeps 4 letters, so `manage` stays `manag` (as `management`).
+        let keep = if suf == "age" { 4 } else { 3 };
+        if s.len() >= suf.len() + keep && s.ends_with(suf) {
             s.truncate(s.len() - suf.len());
             break;
         }
@@ -398,7 +411,27 @@ pub(crate) fn stem(w: &str) -> String {
     if s.len() >= 4 && s.ends_with('e') {
         s.pop();
     }
+    if s.len() >= 3 && s.ends_with('i') {
+        s.pop();
+        s.push('y');
+    }
+    let b = s.as_bytes();
+    if b.len() >= 4 {
+        let (x, y) = (b[b.len() - 1], b[b.len() - 2]);
+        if x == y && x.is_ascii_alphabetic() && !b"aeiou".contains(&x) {
+            s.pop();
+        }
+    }
     s
+}
+
+/// A topic and the extra forms the goal named for it: `withdraw (or withdrew,
+/// withdrawn)` is `("withdraw", ["withdrew", "withdrawn"])`.
+pub(crate) fn topic_forms(t: &str) -> (&str, Vec<&str>) {
+    match t.strip_suffix(')').and_then(|x| x.split_once(" (or ")) {
+        Some((topic, forms)) => (topic, forms.split(',').map(str::trim).collect()),
+        None => (t, Vec::new()),
+    }
 }
 
 /// Heading text as compared: see the module docs.

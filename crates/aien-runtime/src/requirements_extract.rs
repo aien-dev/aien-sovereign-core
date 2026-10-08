@@ -18,6 +18,7 @@
 //! | `N sentences in|per|for|within every|each section` (or `in every section, ... N sentences`) | `MinSentencesPerSection(N)` |
 //! | `sections|headings titled|named|called A, B and C`, `sections: A, B and C` | `RequiredHeadings` |
 //! | `covers|covering A, B and C` (and `to|should|must|will|can cover ...`) | `RequiredTopics` |
+//! | `[must|...] cover|covers|covering N topics: a, b and c` (N equals the list, which ends with the item after its `and`/`or`); a later `... form ... for example X or Y for the first|second|...|last [one]` adds the named forms the word-form rule does not already accept, as `topic (or X)` | `RequiredTopics` |
 //! | `include|contain|use|mention the word(s)|term(s) X, Y` or `"X", "Y"` | `RequiredWords` |
 //! | `include|contain|use|mention the phrase "X"` / `the phrases "X", "Y"` | `RequiredPhrases` |
 //! | `add|append|insert|with N line(s)`, `exactly N lines` after such a verb, `a N-line <thing>` after a verb | `AddedLines` exactly N |
@@ -40,7 +41,8 @@
 //! cannot be verified reliably (headings, lists, abbreviations), so such a goal
 //! is UNCERTAIN and refused. `N words of plain text` without a named section
 //! (`section titled "T"`, `the last section`) is a count over an unknown scope and
-//! is UNCERTAIN. `three topics: a, b, c` is not mechanically checkable and is UNCERTAIN.
+//! is UNCERTAIN. `cover three topics: a, b and c` is read only when the count equals
+//! the list (sc#332); otherwise it is UNCERTAIN.
 //! "N lines at least" is a lower bound; "a single line" is exactly one. Left UNCERTAIN on
 //! purpose: ranges ("2-3 lines"), "a dozen lines", "three-plus sections", "line count at
 //! least 40", counts of shell commands or snippets, level-two headings given as a bare
@@ -82,7 +84,7 @@
 //!   trailing `and` splits the LAST comma item (`Who to ask and Glossary`),
 //!   so a title that itself contains `and` is only safe inside the list.
 
-use crate::requirements::{content_words, ItemKind, Requirement};
+use crate::requirements::{content_words, stem, topic_forms, ItemKind, Requirement};
 
 /// What a goal says: recognized requirements and the spans it could not read.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -813,6 +815,67 @@ fn split_list(region: &str) -> Vec<String> {
     segs
 }
 
+/// A list region cut after the item that follows its closing "and" or "or":
+/// "interest, deposit, withdraw and balance, and the file needs" is
+/// "interest, deposit, withdraw and balance".
+fn closed_list(region: &str) -> &str {
+    let low = region.to_ascii_lowercase();
+    let Some(join) = [" and ", " or "].iter().filter_map(|j| low.find(j)).min() else {
+        return region;
+    };
+    match region[join..].find(',') {
+        Some(c) => &region[..join + c],
+        None => region,
+    }
+}
+
+/// `(position, forms)` for each "<form> or <form> for the first|second|...|
+/// last [one|topic]" in a sentence that speaks of a word "form", for a list of
+/// `len` topics.
+fn positional_forms(goal: &str, len: usize) -> Vec<(usize, Vec<String>)> {
+    const ORDINALS: [&str; 12] = [
+        "first", "second", "third", "fourth", "fifth", "sixth", "seventh", "eighth", "ninth",
+        "tenth", "eleventh", "twelfth",
+    ];
+    let mut out = Vec::new();
+    for sentence in goal.split_inclusive(['.', '!', '?']) {
+        let low = sentence.to_ascii_lowercase();
+        if !low.contains(" form") {
+            continue;
+        }
+        let Some(cue) = ["for example", "for instance", "such as", "e.g."]
+            .iter()
+            .filter_map(|c| low.find(c).map(|i| i + c.len()))
+            .min()
+        else {
+            continue;
+        };
+        for seg in low[cue..].split([',', ';']) {
+            let seg = seg.trim().trim_end_matches(['.', '!', '?']);
+            let seg = seg.strip_prefix("and ").unwrap_or(seg);
+            let Some((forms, pos)) = seg.split_once(" for the ") else {
+                continue;
+            };
+            let ord = pos.split_whitespace().next().unwrap_or("");
+            let at = match ORDINALS.iter().position(|o| *o == ord) {
+                Some(i) if i < len => i,
+                None if ord == "last" => len - 1,
+                _ => continue,
+            };
+            let forms: Vec<String> = forms
+                .split(" or ")
+                .flat_map(|f| f.split(" and "))
+                .map(|f| f.trim().to_string())
+                .filter(|f| !f.is_empty() && f.split_whitespace().count() == 1)
+                .collect();
+            if !forms.is_empty() {
+                out.push((at, forms));
+            }
+        }
+    }
+    out
+}
+
 fn trim_title(t: &str) -> String {
     t.trim()
         .trim_matches(|c: char| matches!(c, '"' | '\'' | '\u{201C}' | '\u{201D}' | '*' | '_' | '`'))
@@ -1195,8 +1258,12 @@ pub fn analyze(goal: &str) -> Extraction {
     }
 
     // ---- topics: "covers A, B and C" ----
+    // The topics of the last counted list, for the forms a later sentence ties
+    // to them by position ("withdrew ... for the third").
+    let mut counted_topics: Vec<usize> = Vec::new();
     for k in 0..n {
         let w = toks[k].word.as_str();
+        let starts_sentence = k == 0 || toks[k - 1].raw.ends_with(['.', '!', '?']);
         let key = matches!(w, "covers" | "covering")
             || (w == "cover"
                 && k >= 1
@@ -1204,6 +1271,46 @@ pub fn analyze(goal: &str) -> Extraction {
                     toks[k - 1].word.as_str(),
                     "to" | "should" | "must" | "will" | "can" | "also" | "shall" | "would" | "and"
                 ));
+        // "cover|covers|covering N topics: a, b and c" (sc#332): the count must
+        // equal the list, which ends with the item after its "and" or "or".
+        let counted = matches!(w, "cover" | "covers" | "covering")
+            && (key || starts_sentence)
+            && matches!(toks.get(k + 2), Some(t) if matches!(t.word.as_str(), "topics" | "topic") && t.raw.ends_with(':'));
+        if counted {
+            let declared = match parse_num(&toks[k + 1].word) {
+                Num::Val(v) => Some(v),
+                _ => None,
+            };
+            let region = closed_list(list_region(goal, toks[k + 2].end));
+            let items: Vec<String> = split_list(region).iter().map(|t| trim_title(t)).collect();
+            let ok = declared == Some(items.len())
+                && !negated_before(&toks, k)
+                && items.len() <= 12
+                && !items.iter().any(|t| has_count_and_noun(t))
+                && items
+                    .iter()
+                    .all(|t| (1..=4).contains(&content_words(t).len()));
+            if ok {
+                counted_topics.clear();
+                for t in items {
+                    let at = topics.iter().position(|x| *x == t).unwrap_or_else(|| {
+                        topics.push(t);
+                        topics.len() - 1
+                    });
+                    counted_topics.push(at);
+                }
+                handled.extend(k..=k + 2);
+                mark_bytes(
+                    &mut handled,
+                    &toks,
+                    toks[k + 2].end,
+                    toks[k + 2].end + region.len(),
+                );
+            } else {
+                bad(&mut unsure, k, false);
+            }
+            continue;
+        }
         if !key {
             continue;
         }
@@ -1228,6 +1335,27 @@ pub fn analyze(goal: &str) -> Extraction {
             mark_bytes(&mut handled, &toks, toks[k].end, toks[k].end + region.len());
         } else {
             bad(&mut unsure, k, false);
+        }
+    }
+
+    // Forms a goal ties to a counted topic by position (sc#332): "for example
+    // interests or interested for the first one, ..., withdrew or withdrawing
+    // for the third". A form the word-form rule already accepts is not added.
+    if !counted_topics.is_empty() {
+        for (at, forms) in positional_forms(goal, counted_topics.len()) {
+            let i = counted_topics[at];
+            let (topic, _) = topic_forms(&topics[i]);
+            let topic_stems: Vec<String> = content_words(topic).iter().map(|w| stem(w)).collect();
+            let extra: Vec<String> = forms
+                .into_iter()
+                .filter(|f| {
+                    let fs: Vec<String> = content_words(f).iter().map(|w| stem(w)).collect();
+                    fs != topic_stems
+                })
+                .collect();
+            if !extra.is_empty() {
+                topics[i] = format!("{topic} (or {})", extra.join(", "));
+            }
         }
     }
 
