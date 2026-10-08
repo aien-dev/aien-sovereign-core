@@ -592,7 +592,10 @@ fn rendered_block_is_bounded_and_cuts_are_reported() {
     assert!(b.ends_with("End of saved notes.\n"));
     assert!(rep.items_omitted > 0, "{rep:?}");
     assert_eq!(rep.items_included, b.matches("\n- ").count());
-    assert!(rep.reason.as_deref().unwrap().contains("left out"), "{rep:?}");
+    assert!(
+        rep.reason.as_deref().unwrap().contains("left out"),
+        "{rep:?}"
+    );
 }
 
 /// Structural: the only code that can change the store is `handle_command`;

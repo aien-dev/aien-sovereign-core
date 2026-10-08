@@ -348,7 +348,10 @@ fn render(context: &str, items: &[aien_allen_memory::ItemView]) -> (String, usiz
         }
     };
     for v in items.iter().filter(|v| v.kind != Kind::Goal) {
-        push(&mut out, format!("- {}: {}\n", v.kind.as_str(), quote(&v.text)));
+        push(
+            &mut out,
+            format!("- {}: {}\n", v.kind.as_str(), quote(&v.text)),
+        );
     }
     if has_goal {
         out.push_str(&goals_head);
