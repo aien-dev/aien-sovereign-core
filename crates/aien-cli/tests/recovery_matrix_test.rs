@@ -7,14 +7,16 @@
 //! (before_intent, after_intent, after_write), then SIGKILL of the daemon,
 //! then a restart over the same state. Nothing is a clean shutdown or abort().
 //!
-//! How the grant is obtained: the ordinary `propose` step needs a trained model
-//! to emit `filename: ...` text, and none ships with the repository. The desk
-//! path (`ComposeApprovedProposal`, sovereign-core #249) commits an approved
-//! proposal through the same production compose run (J-Space, AEGIS, World
-//! commit, Cortex records) and the daemon itself writes the grant. Its task
-//! report is the S3 report that `aien compose execute` reads, so S5 (intent,
-//! write, ack, reconcile) is the unmodified ordinary one. The `authorize` step
-//! is exercised separately where the daemon allows it (case R6).
+//! How the grant is obtained: a real SmolLM2-1.7B proposal on the CPU reference
+//! backend (`aien compose propose`, one committed one-file change per case), then
+//! the ordinary `aien compose authorize`, so the daemon mints the grant from its
+//! own compose-commit record. That model daemon is SIGKILLed; the case then runs
+//! on a model-less daemon over the same state. Two modes: AIEN_MATRIX_MAC unset
+//! (daemon ignores desk proofs) and AIEN_MATRIX_MAC=1 (daemon started with
+//! AIEN_COMPOSE_AUTHORIZE_REQUIRES_DESK=1, desk key in the case compose dir, every
+//! authorize carries a desk MAC under a fresh nonce). Receipts record
+//! "Authorize MAC: on|off" from the daemon log. AIEN_PROPOSER_MODEL overrides the
+//! SmolLM2 directory. Rows M1 and M2 are about the MAC and always run with it on.
 //!
 //! Needs a compose-linked CPU build of `aien-cli` with the `fault-hold` feature
 //! (never a GPU build). Build once, then run (single documented command):
@@ -35,11 +37,7 @@
 mod support;
 
 use aien_allen::binding::pin_path;
-use aien_runtime::approved::{
-    approved_proposal_sha256, proposal_text, ApprovedComposeReport, ApprovedProposal,
-    ApprovedRefusal,
-};
-use aien_runtime::approved_auth::{desk_key_path, DeskKey};
+use aien_runtime::approved_auth::{desk_key_path, AuthorizeBinding, DeskKey};
 use aien_runtime::client::AienRuntimeClient;
 use aien_runtime::control::{ChatTurn, ControlCommand, ControlResponse};
 use serde_json::{json, Value};
@@ -50,8 +48,17 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
-const PATH: &str = "NOTES.md";
-const CONTENT: &str = "recovery matrix note\n";
+const AUTHORIZE_DESK_ENV: &str = "AIEN_COMPOSE_AUTHORIZE_REQUIRES_DESK";
+
+/// A committed proposal the real model made: the S3 report file and what it names.
+#[derive(Clone)]
+struct Prop {
+    report: PathBuf,
+    path: String,
+    content_sha256: String,
+    cx_promotion: u64,
+    proposal_sha256: String,
+}
 
 fn sha(b: &[u8]) -> String {
     aien_omega_compose::hex(&Sha256::digest(b))
@@ -93,10 +100,18 @@ struct Rig {
     backend: String,
     model: String,
     detail: String,
+    mac: bool,
+    mac_line: String,
+    props: Vec<Prop>,
 }
 
 impl Rig {
     fn new(case: &'static str) -> Rig {
+        Rig::with_mac(case, std::env::var("AIEN_MATRIX_MAC").as_deref() == Ok("1"))
+    }
+
+    /// `mac` forces the authorize-MAC mode (rows that are about the MAC itself).
+    fn with_mac(case: &'static str, mac: bool) -> Rig {
         let bin = PathBuf::from(std::env::var("AIEN_BIN").unwrap_or_else(|_| {
             panic!("AIEN_BIN must name the compose-linked CPU aien-cli (see the file header)")
         }));
@@ -110,7 +125,7 @@ impl Rig {
             std::fs::create_dir_all(root.join(d)).unwrap();
         }
         DeskKey::create(&desk_key_path(&root.join("compose"))).unwrap();
-        Rig {
+        let mut r = Rig {
             case,
             _tmp: tmp,
             root,
@@ -125,7 +140,14 @@ impl Rig {
             backend: "not started".into(),
             model: "none".into(),
             detail: String::new(),
+            mac,
+            mac_line: String::new(),
+            props: Vec::new(),
+        };
+        if mac {
+            r.env.push((AUTHORIZE_DESK_ENV.into(), "1".into()));
         }
+        r
     }
 
     fn sock(&self) -> PathBuf {
@@ -159,6 +181,7 @@ impl Rig {
             "AIEN_ALLEN_ADOPT",
             "AIEN_FAULT_HOLD",
             "AIEN_FAULT_HOLD_FILE",
+            AUTHORIZE_DESK_ENV,
         ] {
             c.env_remove(k);
         }
@@ -223,6 +246,11 @@ impl Rig {
                     );
                 }
                 self.backend = line;
+                self.mac_line = text
+                    .lines()
+                    .find(|l| l.starts_with("Authorize MAC:"))
+                    .unwrap_or("Authorize MAC: no line")
+                    .to_string();
                 if let Some(m) = text.lines().find(|l| l.contains("model_sha256=")) {
                     if let Some(i) = m.find("model_sha256=") {
                         self.model = m[i + 13..].split([',', ')']).next().unwrap().to_string();
@@ -325,53 +353,131 @@ impl Rig {
             .expect("daemon answers")
     }
 
-    /// The desk approves (path, content); the daemon commits it and writes the
-    /// grant. Returns the report or the named refusal.
-    fn approve(
-        &self,
-        req: &str,
-        path: &str,
-        content: &str,
-    ) -> Result<ApprovedComposeReport, Box<ApprovedRefusal>> {
-        let mut p = ApprovedProposal {
-            request_id: req.into(),
-            trace_id: format!("trace-{req}"),
-            approval_id: format!("appr-{req}"),
-            approver: "interplane-host".into(),
-            path: path.into(),
-            content: content.into(),
-            approved_proposal_sha256: approved_proposal_sha256(path, content),
-            content_sha256: sha(content.as_bytes()),
-            approval_mac: String::new(),
-            requirements: Some(String::new()),
-            requirements_mac: String::new(),
-            requirements_base: None,
-        };
-        DeskKey::load(&desk_key_path(&self.compose()))
-            .unwrap()
-            .seal(&mut p, &self.ws());
-        assert!(proposal_text(path, content).is_ok());
-        match self.send(ControlCommand::ComposeApprovedProposal {
-            proposal: p,
-            workspace: s(&self.ws()),
-        }) {
-            ControlResponse::ComposeApprovedResult(r) => Ok(*r),
-            ControlResponse::ComposeApprovedRefused(r) => Err(r),
-            other => panic!("approve: {other:?}"),
+    /// One model-daemon session (SmolLM2 on the CPU reference backend, never the
+    /// GPU): one real `aien compose propose` per file name. The daemon is then
+    /// SIGKILLed; the case continues on a model-less daemon over the same state.
+    /// A proposal that does not commit is retried (the model is sampled), up to 3 times.
+    fn proposals(&mut self, files: &[&str]) {
+        let m = std::env::var("AIEN_PROPOSER_MODEL").unwrap_or_else(|_| {
+            format!(
+                "{}/models/SmolLM2-1.7B-Instruct-31b70e2e869a",
+                std::env::var("HOME").unwrap()
+            )
+        });
+        let m = PathBuf::from(m);
+        let saved = self.env.clone();
+        self.env
+            .push(("AIEN_MODEL_PATH".into(), s(&m.join("model.safetensors"))));
+        self.env
+            .push(("AIEN_TOKENIZER_PATH".into(), s(&m.join("tokenizer.json"))));
+        self.env
+            .push(("AIEN_COMPOSE_EDIT_BUDGET_MS".into(), "590000".into()));
+        self.env
+            .push(("AIEN_COMPOSE_DOC_BUDGET_MS".into(), "590000".into()));
+        self.start()
+            .unwrap_or_else(|d| panic!("proposer daemon: {}", d.log));
+        let mut out = Vec::new();
+        for (i, file) in files.iter().enumerate() {
+            let goal = format!(
+                "Create the file {file} with a short plain-text note that says the project keeps every change inside its workspace."
+            );
+            let mut got = None;
+            for attempt in 0..3 {
+                let o = self.cli(&["propose", "--goal", &goal, "--workspace", &s(&self.ws())]);
+                let rep = &o.json["report"];
+                if o.code == 0 && rep["committed"] == json!(true) {
+                    let f = self.root.join(format!("S3-{}-{i}.json", self.case));
+                    std::fs::write(&f, o.json.to_string()).unwrap();
+                    got = Some(Prop {
+                        report: f,
+                        path: rep["proposal_path"].as_str().unwrap().to_string(),
+                        content_sha256: rep["proposal_content_sha256"]
+                            .as_str()
+                            .unwrap()
+                            .to_string(),
+                        cx_promotion: rep["cx_promotion"].as_u64().unwrap(),
+                        proposal_sha256: rep["proposal_sha256"].as_str().unwrap().to_string(),
+                    });
+                    break;
+                }
+                eprintln!("propose attempt {attempt} did not commit: {}", o.all());
+            }
+            out.push(got.expect("the model proposed a committable change in 3 attempts"));
         }
+        self.kill_daemon();
+        self.env = saved;
+        self.start()
+            .unwrap_or_else(|d| panic!("model-less restart: {}", d.log));
+        self.props = out;
     }
 
-    /// Approve and return (S3 report file for the CLI, the daemon's grant id).
-    fn prepare(&self, req: &str, path: &str, content: &str) -> (PathBuf, u64) {
-        let r = self
-            .approve(req, path, content)
-            .unwrap_or_else(|e| panic!("approve refused: {e:?}"));
-        assert_eq!(r.state, "COMMITTED");
-        let grant = r.approved_grant.expect("the daemon wrote the grant");
-        let task = serde_json::to_value(r.task.expect("task report")).unwrap();
-        let f = self.root.join(format!("S3-{req}.json"));
-        std::fs::write(&f, json!({"report": task}).to_string()).unwrap();
-        (f, grant)
+    /// Authorize proposal `i`; (its S3 report file, the daemon-minted grant id).
+    fn prepare(&self, i: usize) -> (PathBuf, u64) {
+        let p = &self.props[i];
+        (p.report.clone(), self.authorize(p))
+    }
+
+    fn path(&self, i: usize) -> String {
+        self.props[i].path.clone()
+    }
+
+    /// Are `bytes` exactly the content the model proposed for `i`?
+    fn is_content(&self, i: usize, bytes: &[u8]) -> bool {
+        sha(bytes) == self.props[i].content_sha256
+    }
+
+    /// `aien compose authorize` for `p`; with the MAC mode on it carries a desk
+    /// MAC under a fresh nonce. Returns the daemon-minted grant id.
+    fn authorize(&self, p: &Prop) -> u64 {
+        let o = self.authorize_raw(p, None);
+        assert_eq!(o.code, 0, "authorize: {}", o.all());
+        o.json["authorization"]["id"].as_u64().expect("grant id")
+    }
+
+    fn authorize_raw(&self, p: &Prop, proof: Option<(&str, &str)>) -> Out {
+        let (rep, ws) = (s(&p.report), s(&self.ws()));
+        let mut a = vec![
+            "authorize",
+            "--report",
+            &rep,
+            "--workspace",
+            &ws,
+            "--approver",
+            "drake",
+        ];
+        if let Some((nonce, mac)) = proof {
+            a.extend(["--desk-nonce", nonce, "--desk-mac", mac]);
+        } else if self.mac {
+            a.extend(["--desk", "1"]);
+        }
+        self.cli(&a)
+    }
+
+    /// A desk MAC for `p` under the desk key now in the compose dir, for `nonce`.
+    fn desk_mac(&self, p: &Prop, nonce: &str) -> String {
+        DeskKey::load(&desk_key_path(&self.compose()))
+            .unwrap()
+            .sign_authorize(&AuthorizeBinding {
+                cx_promotion: p.cx_promotion,
+                proposal_sha256: p.proposal_sha256.clone(),
+                path: p.path.clone(),
+                content_sha256: p.content_sha256.clone(),
+                workspace: s(&self.ws()),
+                approver: "drake".into(),
+                constraints: vec![],
+                nonce: nonce.into(),
+                desk_key_id: DeskKey::load(&desk_key_path(&self.compose()))
+                    .unwrap()
+                    .id()
+                    .to_string(),
+            })
+    }
+
+    /// Replace the desk key file with a new key (rotation while nothing runs).
+    fn rotate_desk_key(&self) {
+        let p = desk_key_path(&self.compose());
+        std::fs::remove_file(&p).unwrap();
+        DeskKey::create(&p).unwrap();
     }
 
     fn exec_args<'a>(&'a self, report: &'a Path, grant: &'a str) -> Vec<String> {
@@ -469,7 +575,7 @@ impl Drop for Rig {
             .map(|b| sha(&b))
             .unwrap_or_default();
         let line = json!({"case": self.case, "outcome": outcome, "commit": commit,
-            "bin_sha256": bin_sha, "backend": self.backend, "model_sha256": self.model,
+            "bin_sha256": bin_sha, "backend": self.backend, "authorize_mac": self.mac_line, "model_sha256": self.model,
             "detail": self.detail});
         println!("MATRIX_RECEIPT {line}");
         if let Ok(f) = std::env::var("AIEN_MATRIX_RECEIPTS") {
@@ -485,6 +591,7 @@ impl Drop for Rig {
     }
 }
 
+
 fn names_error(o: &Out, any: &[&str]) {
     let t = o.all();
     assert!(
@@ -498,11 +605,11 @@ fn names_error(o: &Out, any: &[&str]) {
 #[ignore = "needs AIEN_BIN: compose-linked CPU build with fault-hold"]
 fn r1_crash_before_commit() {
     let mut r = Rig::new("R1");
-    r.start().unwrap();
-    let (rep, grant) = r.prepare("r1", PATH, CONTENT);
+    r.proposals(&["r1.md"]);
+    let (rep, grant) = r.prepare(0);
     r.execute_killed_at(&rep, grant, "before_intent");
     r.crash_and_restart();
-    assert!(r.file(PATH).is_none(), "no file written");
+    assert!(r.file(&r.path(0)).is_none(), "no file written");
     assert!(r.intents().is_empty(), "no intent, so no grant spent");
     let rc = r.cli(&["reconcile"]);
     assert_eq!(rc.code, 0, "{}", rc.all());
@@ -515,7 +622,7 @@ fn r1_crash_before_commit() {
     // The grant is still unspent: the same grant now does the effect, once.
     let ok = r.execute(&rep, grant);
     assert_eq!(ok.json["state"], "DONE", "{}", ok.all());
-    assert_eq!(r.file(PATH).unwrap().0, CONTENT.as_bytes());
+    assert!(r.is_content(0, &r.file(&r.path(0)).unwrap().0));
     let again = r.execute(&rep, grant);
     assert_ne!(again.code, 0);
     names_error(&again, &["AlreadySpent"]);
@@ -529,11 +636,11 @@ fn r1_crash_before_commit() {
 #[ignore = "needs AIEN_BIN: compose-linked CPU build with fault-hold"]
 fn r2_crash_after_intent_before_write() {
     let mut r = Rig::new("R2");
-    r.start().unwrap();
-    let (rep, grant) = r.prepare("r2", PATH, CONTENT);
+    r.proposals(&["r2.md"]);
+    let (rep, grant) = r.prepare(0);
     r.execute_killed_at(&rep, grant, "after_intent");
     r.crash_and_restart();
-    assert!(r.file(PATH).is_none(), "the write never happened");
+    assert!(r.file(&r.path(0)).is_none(), "the write never happened");
     let st = r.states();
     assert_eq!(st.len(), 1, "{st:?}");
     assert_eq!(
@@ -555,7 +662,7 @@ fn r2_crash_after_intent_before_write() {
     let again = r.execute(&rep, grant);
     assert_ne!(again.code, 0, "{}", again.all());
     names_error(&again, &["AlreadySpent", "ReconciliationRequired"]);
-    assert!(r.file(PATH).is_none());
+    assert!(r.file(&r.path(0)).is_none());
     assert_eq!(r.intents().len(), 1, "no second intent");
     r.detail = format!("SIGKILL at after_intent; restart settled {}", st[0]);
 }
@@ -565,18 +672,18 @@ fn r2_crash_after_intent_before_write() {
 #[ignore = "needs AIEN_BIN: compose-linked CPU build with fault-hold"]
 fn r3_crash_after_write_before_ack() {
     let mut r = Rig::new("R3");
-    r.start().unwrap();
-    let (rep, grant) = r.prepare("r3", PATH, CONTENT);
+    r.proposals(&["r3.md"]);
+    let (rep, grant) = r.prepare(0);
     r.execute_killed_at(&rep, grant, "after_write");
-    let before = r.file(PATH).expect("the write happened before the crash");
-    assert_eq!(before.0, CONTENT.as_bytes());
+    let before = r.file(&r.path(0)).expect("the write happened before the crash");
+    assert!(r.is_content(0, &before.0));
     r.crash_and_restart();
     // The world matches content_sha256 inside the workspace: DONE.
     assert_eq!(r.states(), vec!["DONE"]);
     let again = r.execute(&rep, grant);
     assert_ne!(again.code, 0, "{}", again.all());
     names_error(&again, &["AlreadySpent"]);
-    let after = r.file(PATH).unwrap();
+    let after = r.file(&r.path(0)).unwrap();
     assert_eq!(
         (before.1, before.2, before.3),
         (after.1, after.2, after.3),
@@ -591,11 +698,11 @@ fn r3_crash_after_write_before_ack() {
 #[ignore = "needs AIEN_BIN: compose-linked CPU build with fault-hold"]
 fn r3b_crash_after_write_then_file_modified_is_unresolved() {
     let mut r = Rig::new("R3b");
-    r.start().unwrap();
-    let (rep, grant) = r.prepare("r3b", PATH, CONTENT);
+    r.proposals(&["r3b.md"]);
+    let (rep, grant) = r.prepare(0);
     r.execute_killed_at(&rep, grant, "after_write");
     r.kill_daemon();
-    std::fs::write(r.ws().join(PATH), "someone else wrote this\n").unwrap();
+    std::fs::write(r.ws().join(r.path(0)), "someone else wrote this\n").unwrap();
     r.start().unwrap_or_else(|d| panic!("restart: {}", d.log));
     let st = r.states();
     assert_eq!(st, vec!["UNRESOLVED"], "never DONE for changed bytes");
@@ -610,7 +717,7 @@ fn r3b_crash_after_write_then_file_modified_is_unresolved() {
     );
     assert_eq!(r.states(), vec!["UNRESOLVED"]);
     assert_eq!(
-        std::fs::read_to_string(r.ws().join(PATH)).unwrap(),
+        std::fs::read_to_string(r.ws().join(r.path(0))).unwrap(),
         "someone else wrote this\n",
         "the daemon did not overwrite the modified file"
     );
@@ -623,8 +730,8 @@ fn r3b_crash_after_write_then_file_modified_is_unresolved() {
 fn r4_corrupted_state_is_refused_not_reinitialised() {
     // (a) the compose ledger (Cortex journal), truncated between runs.
     let mut r = Rig::new("R4");
-    r.start().unwrap();
-    let (rep, grant) = r.prepare("r4", PATH, CONTENT);
+    r.proposals(&["r4.md"]);
+    let (rep, grant) = r.prepare(0);
     assert_eq!(r.execute(&rep, grant).json["state"], "DONE");
     r.kill_daemon();
     let cx = r.compose().join("cortex.cx");
@@ -663,7 +770,7 @@ fn r4_corrupted_state_is_refused_not_reinitialised() {
         "the damaged ledger was not silently reinitialised or repaired"
     );
     assert!(
-        r.file(PATH).unwrap().0 == CONTENT.as_bytes(),
+        r.is_content(0, &r.file(&r.path(0)).unwrap().0),
         "committed result untouched"
     );
     r.detail = verdict;
@@ -699,15 +806,18 @@ fn r4_corrupted_state_is_refused_not_reinitialised() {
 #[ignore = "needs AIEN_BIN: compose-linked CPU build with fault-hold"]
 fn r5_missing_gpu_is_honest() {
     let mut r = Rig::new("R5");
-    r.start().unwrap();
+    r.proposals(&["r5.md"]);
     assert!(r.backend.contains("CPU-reference"), "{}", r.backend);
     assert!(r.backend.contains("explicit fallback"), "{}", r.backend);
-    let log = std::fs::read_to_string(r.root.join("daemon-1.log")).unwrap();
+    let log = (1..=r.nd)
+        .map(|n| std::fs::read_to_string(r.root.join(format!("daemon-{n}.log"))).unwrap())
+        .collect::<Vec<_>>()
+        .join("\n");
     assert!(
         !log.contains("Omega CTA budget:") && !log.contains("Omega marker spin:"),
         "no GPU engine lines in a CPU build: {log}"
     );
-    let (rep, grant) = r.prepare("r5", PATH, CONTENT);
+    let (rep, grant) = r.prepare(0);
     let done = r.execute(&rep, grant);
     assert_eq!(done.json["state"], "DONE", "{}", done.all());
     // No receipt, record or CLI output claims GPU execution.
@@ -744,21 +854,21 @@ fn r5_missing_gpu_is_honest() {
 #[ignore = "needs AIEN_BIN: compose-linked CPU build with fault-hold"]
 fn r6_stale_permission_is_not_spendable() {
     let mut r = Rig::new("R6");
-    r.start().unwrap();
+    r.proposals(&["r6a.md", "r6b.md", "r6c.md"]);
     // (a) minted by daemon A, spent, kill -9, daemon B: AlreadySpent, no second write.
-    let (rep, grant) = r.prepare("r6a", PATH, CONTENT);
+    let (rep, grant) = r.prepare(0);
     assert_eq!(r.execute(&rep, grant).json["state"], "DONE");
-    let first = r.file(PATH).unwrap();
+    let first = r.file(&r.path(0)).unwrap();
     r.crash_and_restart();
     let again = r.execute(&rep, grant);
     assert_ne!(again.code, 0, "{}", again.all());
     names_error(&again, &["AlreadySpent"]);
-    let second = r.file(PATH).unwrap();
+    let second = r.file(&r.path(0)).unwrap();
     assert_eq!((first.1, first.2, first.3), (second.1, second.2, second.3));
     assert_eq!(r.intents().len(), 1);
 
     // (b) a revoked grant stays unusable, also across a kill -9 restart.
-    let (rep_b, grant_b) = r.prepare("r6b", "B.md", CONTENT);
+    let (rep_b, grant_b) = r.prepare(1);
     let rv = r.cli(&[
         "revoke",
         "--authorization",
@@ -771,68 +881,56 @@ fn r6_stale_permission_is_not_spendable() {
     let o = r.execute(&rep_b, grant_b);
     assert_ne!(o.code, 0, "{}", o.all());
     names_error(&o, &["Revoked"]);
-    assert!(r.file("B.md").is_none());
+    assert!(r.file(&r.path(1)).is_none());
 
     // (c) a grant older than an operator stop stays stale after resume.
-    let (rep_c, grant_c) = r.prepare("r6c", "C.md", CONTENT);
+    let (rep_c, grant_c) = r.prepare(2);
     assert_eq!(r.cli(&["stop", "--approver", "drake"]).code, 0);
     assert_eq!(r.cli(&["resume", "--approver", "drake"]).code, 0);
     let o = r.execute(&rep_c, grant_c);
     assert_ne!(o.code, 0, "{}", o.all());
     names_error(&o, &["Stale"]);
-    assert!(r.file("C.md").is_none());
+    assert!(r.file(&r.path(2)).is_none());
 
-    // (d) replaying the same desk approval mints no second grant and runs nothing.
-    let before = r.all_records_text().matches("approved_grant").count();
-    match r.approve("r6a", PATH, CONTENT) {
-        Ok(rep) => assert!(
-            rep.approved_grant.is_none() && rep.task.is_none(),
-            "a replay returned a fresh grant: {rep:?}"
-        ),
-        Err(e) => assert!(e.refused_by.contains("REFUSED"), "{e:?}"),
+    // (d) authorizing the already-spent proposal again. With the desk MAC on, an
+    // identical (nonce, MAC) pair is a replay and mints nothing; either way no
+    // second effect may ever run for the same file.
+    let p0 = r.props[0].clone();
+    let au_note;
+    if r.mac {
+        let nonce = "r6d-nonce";
+        let mac = r.desk_mac(&p0, nonce);
+        let first = r.authorize_raw(&p0, Some((nonce, &mac)));
+        let replay = r.authorize_raw(&p0, Some((nonce, &mac)));
+        assert_ne!(replay.code, 0, "{}", replay.all());
+        names_error(&replay, &["Replayed"]);
+        au_note = format!(
+            "first authorize on a spent proposal: code {} {}; identical replay refused",
+            first.code,
+            first.all().chars().take(120).collect::<String>()
+        );
+        if first.code == 0 {
+            let g2 = first.json["authorization"]["id"].as_u64().expect("grant id");
+            let o = r.execute(&rep, g2);
+            assert_ne!(o.json["state"], "DONE", "a second effect: {}", o.all());
+        }
+    } else {
+        let au = r.authorize_raw(&p0, None);
+        au_note = format!(
+            "authorize on a spent proposal: code {} {}",
+            au.code,
+            au.all().chars().take(160).collect::<String>()
+        );
+        if au.code == 0 {
+            let g2 = au.json["authorization"]["id"].as_u64().expect("grant id");
+            let o = r.execute(&rep, g2);
+            assert_ne!(o.json["state"], "DONE", "a second effect: {}", o.all());
+        }
     }
-    assert_eq!(
-        r.all_records_text().matches("approved_grant").count(),
-        before,
-        "a replay wrote a grant record"
-    );
     let o = r.execute(&rep, grant);
     assert_ne!(o.code, 0);
     assert_eq!(r.intents().len(), 1, "still exactly one effect");
-
-    // (e) the ordinary `authorize` step on a committed proposal that already has a
-    // grant: record what the daemon does; it must not open a second effect.
-    let rep_json = std::fs::read_to_string(&rep).unwrap();
-    let report: Value = serde_json::from_str(&rep_json).unwrap();
-    let promo = report["report"]["cx_promotion"]
-        .as_u64()
-        .unwrap()
-        .to_string();
-    let _ = promo;
-    let au = r.cli(&[
-        "authorize",
-        "--report",
-        &s(&rep),
-        "--workspace",
-        &s(&r.ws()),
-        "--approver",
-        "drake",
-    ]);
-    r.detail = format!(
-        "a-d PASS; authorize on an approved report: code {} {}",
-        au.code,
-        au.all().chars().take(160).collect::<String>()
-    );
-    if au.code == 0 {
-        let g2 = au.json["authorization"]["id"].as_u64().expect("grant id");
-        let o = r.execute(&rep, g2);
-        assert_ne!(
-            o.json["state"],
-            "DONE",
-            "a second effect for the same file: {}",
-            o.all()
-        );
-    }
+    r.detail = format!("a-c PASS; {au_note}");
     assert_eq!(r.states(), vec!["DONE"], "exactly one effect in the ledger");
 }
 
@@ -920,6 +1018,8 @@ fn record_text(r: &Rig, id: u64) -> Value {
 fn r7_different_model_on_restart() {
     let mut r = Rig::new("R7");
     let (ma, mb) = make_models(&r.root);
+    r.proposals(&["r7.md"]);
+    r.kill_daemon();
     model_env(&mut r, &ma);
     // Create the home, then engage ALLEN: a subject bound to this home's lineage, adopted once.
     r.start().unwrap();
@@ -936,12 +1036,12 @@ fn r7_different_model_on_restart() {
     let model_a = r.model.clone();
     assert_ne!(model_a, "none", "the real checkpoint loaded with a digest");
     let pin_bytes = std::fs::read(pin_path(&r.compose())).expect("pin written");
-    let (rep, grant) = r.prepare("r7", PATH, CONTENT);
+    let (rep, grant) = r.prepare(0);
     assert_eq!(r.execute(&rep, grant).json["state"], "DONE");
     let g1 = generate(&r);
     let rec1 = record_text(&r, g1);
     assert_eq!(rec1["model_sha256"], json!(model_a));
-    let done = r.file(PATH).unwrap();
+    let done = r.file(&r.path(0)).unwrap();
 
     // kill -9, restart with model B.
     r.kill_daemon();
@@ -961,14 +1061,14 @@ fn r7_different_model_on_restart() {
     );
     // Earlier committed results remain; identity unchanged.
     assert_eq!(r.states(), vec!["DONE"]);
-    let now = r.file(PATH).unwrap();
+    let now = r.file(&r.path(0)).unwrap();
     assert_eq!((done.0.clone(), done.1, done.2), (now.0, now.1, now.2));
     assert_eq!(
         pin_bytes,
         std::fs::read(pin_path(&r.compose())).unwrap(),
         "ALLEN pin unchanged"
     );
-    let log2 = std::fs::read_to_string(r.root.join("daemon-3.log")).unwrap();
+    let log2 = std::fs::read_to_string(r.root.join(format!("daemon-{}.log", r.nd))).unwrap();
     assert!(
         log2.contains(&format!("ALLEN: engaged agent={agent} head_sequence=2")),
         "ALLEN identity unchanged: {log2}"
@@ -986,7 +1086,7 @@ fn r7_different_model_on_restart() {
 #[ignore = "needs AIEN_BIN: compose-linked CPU build with fault-hold"]
 fn r8_foreign_identity_is_refused() {
     let mut r = Rig::new("R8");
-    r.start().unwrap();
+    r.proposals(&["r8.md"]);
     let lineage = home_lineage(&r);
     r.kill_daemon();
     // Agent A adopts the home.
@@ -1004,7 +1104,7 @@ fn r8_foreign_identity_is_refused() {
     .unwrap_or_else(|d| panic!("adopt: {}", d.log));
     let pin = std::fs::read(pin_path(&r.compose())).unwrap();
     // A real grant minted by A, spent by nobody yet.
-    let (rep, grant) = r.prepare("r8", PATH, CONTENT);
+    let (rep, grant) = r.prepare(0);
     r.kill_daemon();
     // Agent B (another logical agent, same lineage claim) starts over A's home.
     let mut fb = support::fx("agent-b");
@@ -1020,7 +1120,7 @@ fn r8_foreign_identity_is_refused() {
             let _ = r.cli(&["recall"]);
             std::thread::sleep(Duration::from_millis(500));
             let child = r.daemon.take().unwrap();
-            let log = r.root.join("daemon-3.log");
+            let log = r.root.join(format!("daemon-{}.log", r.nd));
             r.down_of(child, &log)
         }
     };
@@ -1043,13 +1143,13 @@ fn r8_foreign_identity_is_refused() {
         std::fs::read(pin_path(&r.compose())).unwrap(),
         "not rebound"
     );
-    assert!(r.file(PATH).is_none(), "nothing executed");
+    assert!(r.file(&r.path(0)).is_none(), "nothing executed");
     // Under B: a real grant is not spendable (no daemon serves B), and a fresh
     // desk-style request has nothing to talk to.
     let o = r.execute(&rep, grant);
     assert_ne!(o.code, 0, "{}", o.all());
     assert_ne!(o.json["state"], "DONE", "{}", o.all());
-    assert!(r.file(PATH).is_none(), "B executed A's grant");
+    assert!(r.file(&r.path(0)).is_none(), "B executed A's grant");
     // Positive control: the same grant is real, A executes it exactly once.
     r.start_with(&[("AIEN_ALLEN_SUBJECT", &s(&subj_a))])
         .unwrap_or_else(|d| panic!("agent A restart: {}", d.log));
@@ -1058,4 +1158,105 @@ fn r8_foreign_identity_is_refused() {
     assert_eq!(ok.json["state"], "DONE", "{}", ok.all());
     assert_eq!(r.intents().len(), 1);
     r.detail = refusal.chars().take(200).collect();
+}
+
+/// M1: an authorize MAC replayed after a SIGKILL restart is `Replayed`, with no
+/// second grant. The desk MAC is on in both matrix modes (the row is about it).
+#[test]
+#[ignore = "needs AIEN_BIN: compose-linked CPU build with fault-hold"]
+fn m1_mac_replay_across_sigkill_restart() {
+    let mut r = Rig::with_mac("M1", true);
+    r.proposals(&["m1.md"]);
+    let p = r.props[0].clone();
+    let nonce = "m1-nonce";
+    let mac = r.desk_mac(&p, nonce);
+    let ok = r.authorize_raw(&p, Some((nonce, &mac)));
+    assert_eq!(ok.code, 0, "{}", ok.all());
+    let grant = ok.json["authorization"]["id"].as_u64().expect("grant id");
+    // Real-process crash mid-effect, then SIGKILL of the daemon and a restart.
+    r.execute_killed_at(&p.report, grant, "after_write");
+    r.crash_and_restart();
+    assert_eq!(r.states(), vec!["DONE"]);
+    let replay = r.authorize_raw(&p, Some((nonce, &mac)));
+    assert_ne!(replay.code, 0, "{}", replay.all());
+    names_error(&replay, &["Replayed"]);
+    // No second grant: the only grant is spent, the next id does not exist, and
+    // the ledger still holds the one effect.
+    let again = r.execute(&p.report, grant);
+    assert_ne!(again.code, 0, "{}", again.all());
+    names_error(&again, &["AlreadySpent"]);
+    let next = r.execute(&p.report, grant + 1);
+    assert_ne!(next.code, 0, "{}", next.all());
+    assert_ne!(next.json["state"], "DONE", "{}", next.all());
+    assert_eq!(r.intents().len(), 1);
+    // A second replay after a second kill -9 restart is still refused.
+    r.crash_and_restart();
+    let replay2 = r.authorize_raw(&p, Some((nonce, &mac)));
+    names_error(&replay2, &["Replayed"]);
+    r.detail = "SIGKILL at after_write; restart DONE; same nonce+MAC twice (across 2 restarts) -> Replayed; grant+1 does not exist".into();
+}
+
+/// M2: the desk key is rotated while an intent is in flight (SIGKILL at
+/// fault_hold). The old key's MAC is refused afterwards, and the ambiguous
+/// outcome (the file changed while nothing ran) stays UNRESOLVED, never DONE.
+#[test]
+#[ignore = "needs AIEN_BIN: compose-linked CPU build with fault-hold"]
+fn m2_rotated_desk_key_during_inflight_intent() {
+    let mut r = Rig::with_mac("M2", true);
+    r.proposals(&["m2.md"]);
+    let p = r.props[0].clone();
+    let (n1, n2) = ("m2-nonce-1", "m2-nonce-2");
+    let mac1 = r.desk_mac(&p, n1);
+    let old_key_mac2 = r.desk_mac(&p, n2); // signed by the key that is about to go
+    let ok = r.authorize_raw(&p, Some((n1, &mac1)));
+    assert_eq!(ok.code, 0, "{}", ok.all());
+    let grant = ok.json["authorization"]["id"].as_u64().expect("grant id");
+    r.execute_killed_at(&p.report, grant, "after_write");
+    r.kill_daemon();
+    // Ambiguity: someone else changes the file; the desk key is rotated.
+    std::fs::write(r.ws().join(r.path(0)), "someone else wrote this\n").unwrap();
+    r.rotate_desk_key();
+    r.start().unwrap_or_else(|d| panic!("restart: {}", d.log));
+    assert_eq!(r.states(), vec!["UNRESOLVED"], "never DONE for changed bytes");
+    // The old MACs are refused (a fresh nonce under the old key; the used one).
+    let stale = r.authorize_raw(&p, Some((n2, &old_key_mac2)));
+    assert_ne!(stale.code, 0, "{}", stale.all());
+    names_error(&stale, &["DeskMacInvalid"]);
+    let used = r.authorize_raw(&p, Some((n1, &mac1)));
+    assert_ne!(used.code, 0, "{}", used.all());
+    names_error(&used, &["DeskMacInvalid", "Replayed"]);
+    let used_why = used.all().chars().take(100).collect::<String>();
+    // Control: the rotated key's MAC is accepted by the MAC check itself (it is
+    // then refused further on because the proposal is already spent/unresolved,
+    // which is not a MAC error).
+    let fresh = r.desk_mac(&p, "m2-nonce-3");
+    let ctl = r.authorize_raw(&p, Some(("m2-nonce-3", &fresh)));
+    let ctl_text = ctl.all();
+    assert!(
+        !ctl_text.contains("DeskMacInvalid") && !ctl_text.contains("DeskMacRequired"),
+        "rotated key rejected by the MAC check: {ctl_text}"
+    );
+    if ctl.code == 0 {
+        let g2 = ctl.json["authorization"]["id"].as_u64().expect("grant id");
+        let o = r.execute(&p.report, g2);
+        assert_ne!(o.json["state"], "DONE", "{}", o.all());
+    }
+    let rc = r.cli(&["reconcile"]);
+    assert!(
+        rc.json["reconcile"]["outcomes"]
+            .as_array()
+            .map(|a| a.iter().all(|o| o["state"] != "DONE"))
+            .unwrap_or(true),
+        "{}",
+        rc.json
+    );
+    assert_eq!(r.states(), vec!["UNRESOLVED"], "never DONE");
+    assert_eq!(
+        std::fs::read_to_string(r.ws().join(r.path(0))).unwrap(),
+        "someone else wrote this\n"
+    );
+    r.detail = format!(
+        "SIGKILL at after_write; file changed; desk key rotated; old-key MAC DeskMacInvalid; used MAC: {used_why}; UNRESOLVED kept; control (new key) passes MAC check: code {}",
+        ctl.code
+    );
 }
