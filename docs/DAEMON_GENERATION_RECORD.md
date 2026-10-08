@@ -90,3 +90,102 @@ The turn still succeeds, with `generation_record` absent, when:
   was not written.
 
 A verifier must treat an absent record as an absent claim, not as a pass.
+
+## Provenance link: which generation made a commit, and which ALLEN asked
+
+The `StreamTurn` record above says what the daemon generated. It did not say
+which commit that text became. The compose path (`aien compose propose`, the
+model Skill) now closes that gap (arch#162, ALLEN end-to-end demo v1 steps S4
+and S8).
+
+### What the daemon does
+
+1. When a compose task commits a model proposal, the daemon writes one
+   generation record for the proposal attempt the commit came from (the
+   `parsed` attempt), in the same format and with the same writer as above.
+   It is written under the compose home lock the task already holds (the
+   model call itself cannot take it). Extra fields on this record:
+   `origin` = `compose_proposal`, `task` (the compose task id) and `attempt`
+   (1-based). `request_id` is 0 and `operation_id` is `"0"`: the task makes
+   this model call itself, there is no client envelope. `prompt_ids_sha256`
+   and `output_token_ids_sha256` are the hashes of the ids the inference path
+   returned for that attempt. `output_text_sha256` is the digest of the reply
+   handed to the template parser (the assistant prefix plus the decoded
+   tokens), the same digest the attempt records as `text_sha256`. In edit
+   mode the committed proposal is that reply merged into the prior file, so
+   the proposal digest is not this one; the link is by record id, below.
+2. The id is returned in `ComposeTaskReport.generation_record` (optional
+   field, absent in old reports) and written into the daemon's
+   `compose_commit` record.
+3. Every record of the commit chain carries one evidence object,
+   `"provenance": {"generation_record": <id or null>, "allen_agent": "<64 hex or none>"}`:
+   the `compose_commit` record, the minted grant (`ComposeAuthorize`), the
+   intent, and the ack. Each is copied by the daemon from the record before it
+   (grant from commit, intent from grant, ack from intent), never from the
+   request. An approved grant (`ComposeApprovedProposal`) carries
+   `generation_record` null (no model ran) and the ALLEN agent. A reconcile
+   record is not stamped; its intent is.
+4. `allen_agent` is the ALLEN LogicalAgentId (`aien_allen::Resolved::agent`,
+   the 64 hex shown in the `ALLEN: engaged agent=...` line) of the daemon that
+   ran the task, or the explicit string `none` when no ALLEN is attached. No
+   second identity system.
+
+A verifier follows the commit's records (`aien compose recall --ids ...`) to
+`provenance.generation_record`, reads that record, and compares its
+`model_sha256` with the weights it holds. `aien compose effects` does not
+print provenance: the effect ledger deliberately does not parse it.
+
+### What it does not change (separation from authorization)
+
+Provenance is evidence, never an input. `Ledger`, `check_intent`,
+`check_minted_backing`, `check_approved_backing`, the world checks and
+reconcile never read it: their row types have no provenance field. The only
+reader is `generation::Provenance::from_text`, called from one writer helper
+(`effects::stamp`) after the writer's decisions are made. A damaged,
+absent or wrong-typed field reads as `generation_record` null and
+`allen_agent` `none`; it can never refuse or allow anything. Tests:
+`effects::provenance_changes_no_decision` (ledgers with absent, valid, bogus
+and hostile provenance give identical state and identical refusals),
+`effects::provenance_is_read_by_no_decision_code` (a source scan: which
+functions may mention provenance, and that no ledger type has the field).
+
+### Not forgeable by a client
+
+`ComposeNote` refuses any note, of any kind, whose JSON has a top-level
+`provenance` field, and still refuses kind `generation` and any `effect` note
+with the `generation` field. The grant, intent and ack requests carry only
+ids and digests, so there is no field a client can fill. A record the daemon
+writes that names a generation id is refused at write time unless that id is a
+verified generation record of the same ledger (`write_compose_commit`:
+`compose-commit not written: provenance names generation record #N ...`).
+When the daemon copies provenance along the chain (grant, intent, ack), an id
+that no longer names a verified generation record is copied as null instead of
+refused, so copying can never change an authorization outcome.
+
+### Old ledgers
+
+Records written before this change have no `provenance` field. They open and
+verify as before, and a grant, intent or ack the daemon writes from them
+carries the explicit default (`generation_record` null, `allen_agent` `none`).
+`ComposeTaskReport.generation_record` defaults to absent on old reports.
+Test: `an_old_ledger_without_provenance_still_opens_and_runs`.
+
+### No generation record means no claim
+
+`generation_record` is null when the daemon has no model identity (stub run,
+reference weights), the attempt did not expose its token ids, the proposal is
+an approved one, or the ledger append failed (logged as
+`generation record not written`). The commit still stands; a verifier treats
+null as an absent claim, not a pass. The same limits as above apply: the
+digest is of the file read at load time, the ledger is not signed, and the
+record proves nothing about capability or authority.
+
+### Tests
+
+- `crates/aien-runtime/tests/provenance_link_test.rs`: the real compose
+  library and the real daemon server, ordinary flow through the socket;
+  asserts the commit's records give a generation id whose `model_sha256` is the
+  loaded model's digest and the expected agent (an engaged ALLEN, and `none`).
+- `crates/aien-cli/tests/provenance_link_live_test.rs`: the same with the real
+  `aien daemon` process, SmolLM2-1.7B on CPU, the real CLI. Ignored (needs a
+  prebuilt binary and the model).
