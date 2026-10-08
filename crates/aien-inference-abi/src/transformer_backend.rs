@@ -776,9 +776,9 @@ impl NativeTransformerBackend {
 
         for (layer_idx, layer_w) in weights.layers.iter().enumerate() {
             backend.rmsnorm(&mut x_norm, &x, &layer_w.input_layernorm, eps);
-            backend.matmul_vec(&mut q, &x_norm, &layer_w.q_proj, q_dim, hidden_dim);
-            backend.matmul_vec(&mut k, &x_norm, &layer_w.k_proj, kv_dim, hidden_dim);
-            backend.matmul_vec(&mut v, &x_norm, &layer_w.v_proj, kv_dim, hidden_dim);
+            backend.matmul_vec_w(&mut q, &x_norm, layer_w.q_proj.as_ref(), q_dim, hidden_dim);
+            backend.matmul_vec_w(&mut k, &x_norm, layer_w.k_proj.as_ref(), kv_dim, hidden_dim);
+            backend.matmul_vec_w(&mut v, &x_norm, layer_w.v_proj.as_ref(), kv_dim, hidden_dim);
 
             layer_w.apply_qk_norm_on(backend, &mut q, &mut k, head_dim, eps);
             backend.apply_rope(
@@ -845,10 +845,10 @@ impl NativeTransformerBackend {
                 );
             }
 
-            backend.matmul_vec(
+            backend.matmul_vec_w(
                 &mut attn_proj,
                 &attn_out,
-                &layer_w.o_proj,
+                layer_w.o_proj.as_ref(),
                 hidden_dim,
                 q_dim,
             );
@@ -857,25 +857,25 @@ impl NativeTransformerBackend {
             }
 
             backend.rmsnorm(&mut post_norm, &x, &layer_w.post_attention_layernorm, eps);
-            backend.matmul_vec(
+            backend.matmul_vec_w(
                 &mut gate,
                 &post_norm,
-                &layer_w.gate_proj,
+                layer_w.gate_proj.as_ref(),
                 intermediate_dim,
                 hidden_dim,
             );
-            backend.matmul_vec(
+            backend.matmul_vec_w(
                 &mut up,
                 &post_norm,
-                &layer_w.up_proj,
+                layer_w.up_proj.as_ref(),
                 intermediate_dim,
                 hidden_dim,
             );
             backend.swiglu(&mut activated, &gate, &up);
-            backend.matmul_vec(
+            backend.matmul_vec_w(
                 &mut mlp_out,
                 &activated,
-                &layer_w.down_proj,
+                layer_w.down_proj.as_ref(),
                 hidden_dim,
                 intermediate_dim,
             );
@@ -898,10 +898,10 @@ impl NativeTransformerBackend {
         let vocab_size = weights.config.vocab_size();
         let hidden_dim = weights.config.hidden_dim();
         let mut logits = vec![0.0f32; vocab_size];
-        backend.compute_logits(
+        backend.compute_logits_w(
             &mut logits,
             hidden_state,
-            weights.output_projection(),
+            weights.output_matrix(),
             vocab_size,
             hidden_dim,
         );
@@ -1081,26 +1081,26 @@ impl NativeTransformerBackend {
                 backend.rmsnorm(out_slice, &states[t], &layer_w.input_layernorm, eps);
             }
 
-            backend.matmul_batch(
+            backend.matmul_batch_w(
                 &mut q_batch,
                 &x_norm_batch,
-                &layer_w.q_proj,
+                layer_w.q_proj.as_ref(),
                 n,
                 hidden_dim,
                 q_dim,
             );
-            backend.matmul_batch(
+            backend.matmul_batch_w(
                 &mut k_batch,
                 &x_norm_batch,
-                &layer_w.k_proj,
+                layer_w.k_proj.as_ref(),
                 n,
                 hidden_dim,
                 kv_dim,
             );
-            backend.matmul_batch(
+            backend.matmul_batch_w(
                 &mut v_batch,
                 &x_norm_batch,
-                &layer_w.v_proj,
+                layer_w.v_proj.as_ref(),
                 n,
                 hidden_dim,
                 kv_dim,
@@ -1151,10 +1151,10 @@ impl NativeTransformerBackend {
                 );
             }
 
-            backend.matmul_batch(
+            backend.matmul_batch_w(
                 &mut attn_proj_batch,
                 &attn_out_batch,
-                &layer_w.o_proj,
+                layer_w.o_proj.as_ref(),
                 n,
                 q_dim,
                 hidden_dim,
@@ -1176,18 +1176,18 @@ impl NativeTransformerBackend {
                 );
             }
 
-            backend.matmul_batch(
+            backend.matmul_batch_w(
                 &mut gate_batch,
                 &post_norm_batch,
-                &layer_w.gate_proj,
+                layer_w.gate_proj.as_ref(),
                 n,
                 hidden_dim,
                 intermediate_dim,
             );
-            backend.matmul_batch(
+            backend.matmul_batch_w(
                 &mut up_batch,
                 &post_norm_batch,
-                &layer_w.up_proj,
+                layer_w.up_proj.as_ref(),
                 n,
                 hidden_dim,
                 intermediate_dim,
@@ -1200,10 +1200,10 @@ impl NativeTransformerBackend {
                 backend.swiglu(act_t, gate_t, up_t);
             }
 
-            backend.matmul_batch(
+            backend.matmul_batch_w(
                 &mut mlp_out_batch,
                 &act_batch,
-                &layer_w.down_proj,
+                layer_w.down_proj.as_ref(),
                 n,
                 intermediate_dim,
                 hidden_dim,
@@ -1406,26 +1406,26 @@ impl NativeTransformerBackend {
             }
 
             // b. Batched Q, K, V projections (M = D)
-            self.tensor_backend.matmul_batch(
+            self.tensor_backend.matmul_batch_w(
                 &mut q_batch,
                 &x_norm,
-                &layer_w.q_proj,
+                layer_w.q_proj.as_ref(),
                 d,
                 hidden_dim,
                 q_dim,
             );
-            self.tensor_backend.matmul_batch(
+            self.tensor_backend.matmul_batch_w(
                 &mut k_batch,
                 &x_norm,
-                &layer_w.k_proj,
+                layer_w.k_proj.as_ref(),
                 d,
                 hidden_dim,
                 kv_dim,
             );
-            self.tensor_backend.matmul_batch(
+            self.tensor_backend.matmul_batch_w(
                 &mut v_batch,
                 &x_norm,
-                &layer_w.v_proj,
+                layer_w.v_proj.as_ref(),
                 d,
                 hidden_dim,
                 kv_dim,
@@ -1546,10 +1546,10 @@ impl NativeTransformerBackend {
             }
 
             // f. Attention output projection (M = D)
-            self.tensor_backend.matmul_batch(
+            self.tensor_backend.matmul_batch_w(
                 &mut attn_proj_batch,
                 &attn_out_batch,
-                &layer_w.o_proj,
+                layer_w.o_proj.as_ref(),
                 d,
                 q_dim,
                 hidden_dim,
@@ -1571,18 +1571,18 @@ impl NativeTransformerBackend {
             }
 
             // i. MLP Gate & Up projections (M = D)
-            self.tensor_backend.matmul_batch(
+            self.tensor_backend.matmul_batch_w(
                 &mut gate_batch,
                 &post_norm_batch,
-                &layer_w.gate_proj,
+                layer_w.gate_proj.as_ref(),
                 d,
                 hidden_dim,
                 intermediate_dim,
             );
-            self.tensor_backend.matmul_batch(
+            self.tensor_backend.matmul_batch_w(
                 &mut up_batch,
                 &post_norm_batch,
-                &layer_w.up_proj,
+                layer_w.up_proj.as_ref(),
                 d,
                 hidden_dim,
                 intermediate_dim,
@@ -1598,10 +1598,10 @@ impl NativeTransformerBackend {
             }
 
             // k. MLP Down projection (M = D)
-            self.tensor_backend.matmul_batch(
+            self.tensor_backend.matmul_batch_w(
                 &mut mlp_out_batch,
                 &act_batch,
-                &layer_w.down_proj,
+                layer_w.down_proj.as_ref(),
                 d,
                 intermediate_dim,
                 hidden_dim,
@@ -1624,10 +1624,10 @@ impl NativeTransformerBackend {
         }
 
         // 7. Batched Vocabulary Logits Projection (M = D)
-        self.tensor_backend.matmul_batch(
+        self.tensor_backend.matmul_batch_w(
             &mut logits_batch,
             &x_norm,
-            self.weights.output_projection(),
+            self.weights.output_matrix(),
             d,
             hidden_dim,
             vocab_size,

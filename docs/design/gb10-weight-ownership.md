@@ -55,6 +55,12 @@ layers, 32 query heads, 8 KV heads, head_dim 128, vocab 151936, tied embeddings,
   In attempt 2 the low-memory state was present at launch, but the scripted cache fill reclaimed
   memory before the baseline ran. A protocol amendment that
   skips the fill when the trigger already holds is proposed on #277 and not applied.
+## Update 2026-10-07 (cut C written, host-measured, not run on the chip)
+
+- Cut C is in draft PR "Part of #277 (cut C), stacked on #311": `MatrixWeight` (host f32 or a device handle) replaces the seven per-layer f32 matmul weights and the output head; `aien-inference-abi/src/resident.rs` streams each matrix from the bf16 shard (positioned reads, one tensor at a time, `checkpoint.rs` `StreamedCheckpoint`) into `omega_gpu_tensor_upload_bf16`, and the daemon does it only on the native, production-strict, opted-in GB10 Qwen3 path, after opening the GPU session. Every other load is the unchanged host f32 load.
+- Numerics: bf16 widened to f32 and narrowed again by omega (`(__bf16)f`, omega_blackwell_matmul.c:98 at omega.lock) is exact for 65410 of 65536 patterns and quiets the 126 signaling NaNs; the loader applies the same quieting, so the uploaded bits equal today's for every pattern.
+- Host measurement (stub uploader, real Qwen3-4B checkpoint): peak 22.479 GiB before, 2.176 GiB after; steady 14.988 GiB before, 1.452 GiB after. The chip effect on #277 is NOT measured.
+
 ## 1. Allocation audit
 
 All GPU-side allocations go through `omega_gpu_session_alloc` (omega `src/omega_gpu_session.c:78-82`)

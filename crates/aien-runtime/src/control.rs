@@ -644,6 +644,11 @@ pub struct ComposeTaskReport {
     /// committed a one-file proposal on the ordinary (non-approved) path.
     #[serde(default)]
     pub compose_commit: Option<u64>,
+    /// Ledger id of the generation record of the attempt the committed
+    /// proposal came from (arch#162). Evidence only; absent when no record
+    /// was written (no model identity, approved proposal, failed append).
+    #[serde(default)]
+    pub generation_record: Option<u64>,
     /// Composition home (holds machine.id, cortex.cx, jspace).
     pub compose_dir: String,
     /// AienMachineId (32 bytes, hex) the home is bound to.

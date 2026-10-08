@@ -262,6 +262,33 @@ impl ResidentTensor {
         }
     }
 
+    /// Upload a row-major k x n matrix of bf16 bit patterns exactly as given (no rounding).
+    /// The resident data equals `upload_f32` of the widened values, except that omega's
+    /// f32-to-bf16 step quiets signaling NaNs (see `aien-inference-abi` `resident.rs`).
+    pub fn upload_bf16(k: usize, n: usize, b: &[u16]) -> Result<Self, OmegaGpuError> {
+        check_len("b", k * n, b.len())?;
+        let (_, ku, nu) = dims(1, k, n)?;
+        #[cfg(has_omega_gpu)]
+        {
+            let mut ptr: *mut ffi::OmegaGpuTensor = std::ptr::null_mut();
+            // SAFETY: b has k*n elements (checked); ptr is a valid out-pointer.
+            let rc = unsafe { ffi::omega_gpu_tensor_upload_bf16(ku, nu, b.as_ptr(), &mut ptr) };
+            if rc != ffi::OMEGA_GPU_MATMUL_OK || ptr.is_null() {
+                return Err(rc_error(if rc == 0 {
+                    ffi::OMEGA_GPU_MATMUL_BAD_ARGS
+                } else {
+                    rc
+                }));
+            }
+            Ok(Self { ptr, k, n })
+        }
+        #[cfg(not(has_omega_gpu))]
+        {
+            let _ = (ku, nu);
+            Err(OmegaGpuError::Unavailable)
+        }
+    }
+
     pub fn k(&self) -> usize {
         self.k
     }

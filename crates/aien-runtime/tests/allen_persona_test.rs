@@ -342,6 +342,7 @@ fn only_the_command_handler_can_write_the_profile() {
 fn old_reports_without_persona_still_parse() {
     let report = ComposeTaskReport {
         compose_commit: None,
+        generation_record: None,
         compose_dir: "d".into(),
         machine_id: "m".into(),
         task: 1,
