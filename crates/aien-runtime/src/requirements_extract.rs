@@ -14,7 +14,7 @@
 //! | `at most / no more than / not more than / a maximum of / maximum of / max / up to N <noun>`, `N or fewer|less <noun>` | `MaxX(N)` |
 //! | `more than N <noun>`, `fewer|less than N <noun>` | `MinX(N+1)`, `MaxX(N-1)` |
 //! | `N <noun> or more|fewer|less`, `N <noun> minimum|maximum`, `no longer|shorter than N <noun>` | `MinX(N)` or `MaxX(N)` |
-//! | `<noun>` = `lines`, `words`; `items`, `steps`, `sections`, `headings`, `questions` (Min only; singular too) | lines, words, list items, numbered steps, headings, questions |
+//! | `<noun>` = `lines`, `words`; `items`, `steps`, `sections`, `headings`, `questions`, `paragraphs` (Min only; singular too) | lines, words, list items, numbered steps, headings, questions, paragraphs (`MinParagraphs`: runs of prose lines, see `requirements::count_paragraphs`) |
 //! | `N sentences in|per|for|within every|each section` (or `in every section, ... N sentences`) | `MinSentencesPerSection(N)` |
 //! | `sections|headings titled|named|called A, B and C`, `sections: A, B and C` | `RequiredHeadings` |
 //! | `covers|covering A, B and C` (and `to|should|must|will|can cover ...`) | `RequiredTopics` |
@@ -72,7 +72,7 @@
 //! - emphasis or quotes around the wording (`**at least 20 lines**`) are not
 //!   recognized and the span is UNCERTAIN.
 //! - a bound word with a number and a noun that is not supported (`at most 5
-//!   items`, `at least 3 paragraphs`, `exactly 20 lines`, `about 30 lines`,
+//!   items`, `at most 3 paragraphs`, `exactly 20 lines`, `about 30 lines`,
 //!   `between 10 and 20 lines`, `35-line` with no verb before it) is UNCERTAIN.
 //! - a title list whose parsed length differs from a declared count ("6
 //!   sections titled A, B, C") is UNCERTAIN; so is a list item that is not a
@@ -854,6 +854,7 @@ pub fn analyze(goal: &str) -> Extraction {
                 Requirement::MinItems(ItemKind::Sections, v)
             }
             (Dir::Min, "questions" | "question") => Requirement::MinItems(ItemKind::Questions, v),
+            (Dir::Min, "paragraphs" | "paragraph") => Requirement::MinParagraphs(v),
             _ => return None,
         })
     };

@@ -106,6 +106,8 @@ pub enum Requirement {
     MinWords(usize),
     MaxWords(usize),
     MinItems(ItemKind, usize),
+    /// At least this many paragraphs (see [`count_paragraphs`]).
+    MinParagraphs(usize),
     /// Case-insensitive substrings of the document.
     RequiredPhrases(Vec<String>),
     /// Whole words, case-insensitive.
@@ -161,6 +163,7 @@ impl Requirement {
             Requirement::MinWords(n) => format!("at least {n} words"),
             Requirement::MaxWords(n) => format!("at most {n} words"),
             Requirement::MinItems(k, n) => format!("at least {n} {}", k.noun()),
+            Requirement::MinParagraphs(n) => format!("at least {n} paragraphs"),
             Requirement::RequiredPhrases(p) => format!("the phrase {}", quoted(p)),
             Requirement::RequiredWords(p) => format!("the words {}", quoted(p)),
             Requirement::RequiredHeadings(p) => format!("the headings {}", quoted(p)),
@@ -215,6 +218,12 @@ impl Requirement {
             Requirement::MinItems(k, n) => {
                 let c = count_items(*k, content);
                 (c < *n).then(|| format!("{label}, found {c}"))
+            }
+            Requirement::MinParagraphs(n) => {
+                let c = count_paragraphs(content);
+                (c < *n).then(|| {
+                    format!("{label}, found {c} (a paragraph is a block of prose lines; separate paragraphs with a blank line)")
+                })
             }
             Requirement::RequiredPhrases(p) => {
                 let low = content.to_lowercase();
@@ -552,6 +561,50 @@ fn prose_lines(s: &str) -> Vec<&str> {
         }
     }
     out
+}
+
+/// Paragraphs: maximal runs of consecutive prose lines. A prose line is a
+/// non-empty line outside fenced code that is not a heading, a list item
+/// (`- `, `* `, `+ ` or a numbered marker), a table row (starts with `|`) or a
+/// thematic break (`---`, `***`, `___`). Every other line (blank, heading, list
+/// item, table row, break, fence or fenced line) ends the run.
+pub fn count_paragraphs(content: &str) -> usize {
+    let mut open: Option<(char, usize)> = None;
+    let (mut count, mut inside) = (0, false);
+    for l in content.lines() {
+        let fence = fence_marker(l);
+        let prose = match (open, fence) {
+            (None, Some((c, n, _))) => {
+                open = Some((c, n));
+                false
+            }
+            (None, None) => {
+                let t = l.trim();
+                let h = t.chars().take_while(|&c| c == '#').count();
+                let heading =
+                    (1..=6).contains(&h) && (t.len() == h || t[h..].starts_with([' ', '\t']));
+                let item = t.starts_with("- ")
+                    || t.starts_with("* ")
+                    || t.starts_with("+ ")
+                    || numbered(t);
+                let rule = t.len() >= 3
+                    && ['-', '*', '_']
+                        .iter()
+                        .any(|&c| t.chars().all(|x| x == c || x == ' ') && t.starts_with(c));
+                !t.is_empty() && !heading && !item && !t.starts_with('|') && !rule
+            }
+            (Some((c, n)), Some((c2, n2, info))) if c2 == c && n2 >= n && !info => {
+                open = None;
+                false
+            }
+            (Some(_), _) => false,
+        };
+        if prose && !inside {
+            count += 1;
+        }
+        inside = prose;
+    }
+    count
 }
 
 fn count_items(k: ItemKind, s: &str) -> usize {
