@@ -1063,7 +1063,7 @@ pub fn open_confined(workspace: &str, path: &str, target: &str) -> Result<Confin
 /// `OutsideWorkspace`, exactly what `confine_target` always returned for them.
 fn outside_of(r: Refusal) -> Refusal {
     match r.name {
-        "NotRegular" | "MissingParent" => Refusal::new("OutsideWorkspace", r.detail),
+        "NotRegular" | "MissingParent" | "Unreadable" => Refusal::new("OutsideWorkspace", r.detail),
         _ => r,
     }
 }
@@ -1080,19 +1080,7 @@ fn outside_of(r: Refusal) -> Refusal {
 pub fn confine_target(workspace: &str, path: &str, target: &str) -> Result<(), Refusal> {
     match open_confined(workspace, path, target) {
         Ok(_) => Ok(()),
-        Err(r) if r.name == "Unreadable" => Ok(()),
         Err(r) => Err(outside_of(r)),
-    }
-}
-
-/// How a caller that used to run `confine_target` and then `file_sha256`
-/// reports a refused open: a confinement refusal as before, an unreadable
-/// file as the plain read error it always was.
-fn prior_error(r: Refusal) -> String {
-    if r.name == "Unreadable" {
-        r.detail
-    } else {
-        outside_of(r).to_string()
     }
 }
 
@@ -1103,7 +1091,7 @@ pub fn confined_sha256(
     target: &str,
 ) -> Result<Option<String>, String> {
     open_confined(workspace, path, target)
-        .map_err(prior_error)?
+        .map_err(|r| outside_of(r).to_string())?
         .sha256()
 }
 
@@ -1370,13 +1358,8 @@ pub fn authorize(
         let target = Path::new(&c.workspace).join(&c.path).display().to_string();
         // #267 follow-up: keep the confined handle; the prior hash below is
         // read from it, not re-resolved by path after the MAC checks.
-        // An unreadable file keeps its old place in the order: the plain read
-        // error comes at the read below, after the MAC checks.
-        let held = match open_confined(&c.workspace, &c.path, &target) {
-            Ok(h) => Ok(h),
-            Err(r) if r.name == "Unreadable" => Err(r.detail),
-            Err(r) => return Err(outside_of(r).to_string()),
-        };
+        let held = open_confined(&c.workspace, &c.path, &target)
+            .map_err(|r| outside_of(r).to_string())?;
         if let Some((key, p)) = &desk {
             // Path, content and workspace are the daemon's own commit record;
             // the MAC must cover exactly those.
@@ -1400,7 +1383,7 @@ pub fn authorize(
                 ));
             }
         }
-        let prior = held?.sha256()?;
+        let prior = held.sha256()?;
         for &gid in l.minted_by_commit.get(&c.id).into_iter().flatten() {
             if l.revoked.contains_key(&gid) || l.stops.iter().any(|&s| s > gid) {
                 continue;

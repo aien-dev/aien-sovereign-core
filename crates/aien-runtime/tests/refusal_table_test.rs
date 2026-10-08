@@ -263,22 +263,15 @@ const EXPECTED: &[(&str, &str)] = &[
     ("MissingParent | open_intent(wrong grant)", "NotAuthorized"),
 ];
 
-/// The rows where the branch deliberately differs from origin/main, with the
-/// reason. Neither is a weakening: both are refusals.
-///  - "PermissionDenied | authorize": origin/main (since #312) said
-///    OutsideWorkspace; before #312 (12c1a5f) it was the plain read error. The
-///    branch restores the plain read error (the established behaviour).
-///  - "IntermediateSymlinkOtherBytes | open_intent": origin/main read the bytes
-///    THROUGH the symlinked directory, found them different and said Stale; the
-///    branch never reads through the symlink and says OutsideWorkspace. Telling
-///    Stale here would need the outside bytes: the very bug.
-const DIFFERS: &[(&str, &str)] = &[
-    ("PermissionDenied | authorize", "plain:read"),
-    (
-        "IntermediateSymlinkOtherBytes | open_intent",
-        "OutsideWorkspace",
-    ),
-];
+/// The one row where the branch deliberately differs from origin/main. It is
+/// still a refusal and stricter, not a weakening: main read the bytes THROUGH
+/// the symlinked directory and said Stale; the branch never reads through the
+/// symlink and says OutsideWorkspace. Telling Stale would need the outside
+/// bytes: the very bug.
+const DIFFERS: &[(&str, &str)] = &[(
+    "IntermediateSymlinkOtherBytes | open_intent",
+    "OutsideWorkspace",
+)];
 
 #[test]
 #[cfg_attr(not(compose_linked), ignore = "needs the linked librx_compose.a")]
