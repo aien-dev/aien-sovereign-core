@@ -1,0 +1,19 @@
+{
+  "extensions": {
+    "generated": {
+      "children": [],
+      "children_root": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "compiled_at": "2026-10-08T01:13:33Z",
+      "compiler": "crumb-compile/1",
+      "digest": "sha256:6c37f78b1de14405138ced998758a131ea3d061f11ac588faaa4f343a6417dee",
+      "evidence_files": 0,
+      "evidence_root": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "files": 7,
+      "generated_at_commit": "a5bf83850bd2661d926085d2f434440e1dcc2fc1",
+      "source_tree": "sha256:45e8c817ff29f2a37b008750bd40bdd24a30b54712b5b7e90734d05ac7ccaddf"
+    }
+  },
+  "name": "aien-allen-memory",
+  "purpose": "ALLEN scoped memory store: scopes enforced at recall, inspect/correct/export, key-destroying forget, host goal records (arch#159).",
+  "schema_version": "1.0.0"
+}

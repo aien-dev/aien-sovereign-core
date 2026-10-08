@@ -401,6 +401,74 @@ impl DeskKey {
     }
 }
 
+/// Version tag of the `ComposeAuthorize` binding (sovereign-core #297).
+pub const AUTHORIZE_BINDING_VERSION: &str = "aien.authorize.v1";
+
+/// Everything one operator `ComposeAuthorize` covers. `path`,
+/// `content_sha256` and `workspace` are the daemon's own commit-record values
+/// on the verifying side; the signer computes the same from its report.
+/// `nonce` makes each authorize unique: the daemon records it in the grant and
+/// refuses a second grant for the same nonce.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuthorizeBinding {
+    pub cx_promotion: u64,
+    pub proposal_sha256: String,
+    pub path: String,
+    pub content_sha256: String,
+    pub workspace: String,
+    pub approver: String,
+    pub constraints: Vec<u64>,
+    pub nonce: String,
+    pub desk_key_id: String,
+}
+
+/// Canonical bytes of an authorize binding: a domain tag, then compact JSON
+/// with sorted keys. The domain tag keeps it apart from every approval MAC.
+pub fn authorize_binding_bytes(b: &AuthorizeBinding) -> Vec<u8> {
+    let mut m = Map::new();
+    for (k, v) in [
+        ("approver", &b.approver),
+        ("content_sha256", &b.content_sha256),
+        ("desk_key_id", &b.desk_key_id),
+        ("nonce", &b.nonce),
+        ("path", &b.path),
+        ("proposal_sha256", &b.proposal_sha256),
+        ("workspace", &b.workspace),
+    ] {
+        m.insert(k.into(), Value::String(v.clone()));
+    }
+    m.insert("cx_promotion".into(), Value::from(b.cx_promotion));
+    m.insert("constraints".into(), Value::from(b.constraints.clone()));
+    m.insert("v".into(), Value::String(AUTHORIZE_BINDING_VERSION.into()));
+    let mut out = b"aien.authorize.mac\0".to_vec();
+    out.extend(Value::Object(m).to_string().into_bytes());
+    out
+}
+
+impl DeskKey {
+    /// Desk side: the MAC (hex) for one authorize. `desk_key_id` is filled
+    /// from this key, whatever `b` carries.
+    pub fn sign_authorize(&self, b: &AuthorizeBinding) -> String {
+        let mut b = b.clone();
+        b.desk_key_id = self.id.clone();
+        hex(&hmac_sha256(&self.key, &authorize_binding_bytes(&b)))
+    }
+
+    /// Daemon side: `Ok(())` only when `mac` is this key's MAC over `b`.
+    pub fn verify_authorize(&self, b: &AuthorizeBinding, mac: &str) -> Result<(), String> {
+        let mut b = b.clone();
+        b.desk_key_id = self.id.clone();
+        let want = hmac_sha256(&self.key, &authorize_binding_bytes(&b));
+        match unhex32(mac) {
+            Some(g) if ct_eq(&g, &want) => Ok(()),
+            _ => Err(format!(
+                "authorize_mac is not the approval desk's (key {}) MAC over this proposal, path, content, workspace, approver and nonce",
+                self.id
+            )),
+        }
+    }
+}
+
 /// Refuse when the compose home and the workspace overlap (either inside the
 /// other): the model-facing tools read inside the workspace, and the desk key
 /// and the journal must stay out of their reach.

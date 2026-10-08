@@ -82,7 +82,19 @@ impl AienInferenceBackend for RecordingBackend {
     }
 }
 
+/// This binary's own runtime state dir (#299): never the machine-wide
+/// `/tmp/aien-runtime-processed-ops.json` other daemons and tests write.
+fn private_state_dir() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let dir = std::env::temp_dir().join(format!("aien-warm-up-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::env::set_var("AIEN_RUNTIME_STATE_DIR", &dir);
+    });
+}
+
 fn spine() -> AienRuntimeSpine {
+    private_state_dir();
     // Small prefill chunks: the warm-up prompt spans several steps, so a
     // request accepted during the warm-up would interleave with its chunks.
     let cfg = SchedulerConfig {
@@ -105,7 +117,7 @@ fn user(content: &str) -> Vec<ChatTurn> {
 
 fn prompt_len(content: &str) -> usize {
     let tok = toy_tokenizer();
-    tok.encode(&format_chat(tok.template(), &user(content)))
+    tok.encode(&format_chat(tok.template(), &user(content)).expect("chat"))
         .expect("encode")
         .len()
 }
@@ -285,12 +297,13 @@ async fn cpu_reference_tokens_unchanged_by_warm_up() {
         format_chat(
             tok.template(),
             &user(&aien_runtime::spine::proposal_prompt(goal, "/tmp/ws"))
-        ),
+        )
+        .expect("chat"),
         aien_runtime::spine::COMPOSE_ASSISTANT_PREFIX
     );
     let ids = tok.encode(&text).expect("encode");
     let warm = tok
-        .encode(&format_chat(tok.template(), &user(WARM_UP_TEXT)))
+        .encode(&format_chat(tok.template(), &user(WARM_UP_TEXT)).expect("chat"))
         .expect("encode");
     const N: usize = 8;
 

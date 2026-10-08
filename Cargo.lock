@@ -45,6 +45,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "aien-allen-memory"
+version = "0.1.0"
+dependencies = [
+ "aien-allen",
+ "aien-allen-memory",
+ "ring",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+]
+
+[[package]]
+name = "aien-allen-profile"
+version = "0.1.0"
+dependencies = [
+ "aien-allen",
+ "aien-allen-profile",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+]
+
+[[package]]
 name = "aien-campaign-verifier"
 version = "0.1.0"
 dependencies = [
@@ -66,6 +91,7 @@ name = "aien-cli"
 version = "0.1.0"
 dependencies = [
  "aien-allen",
+ "aien-allen-profile",
  "aien-inference-abi",
  "aien-kv-cache",
  "aien-omega-compose",
@@ -304,6 +330,7 @@ version = "0.1.0"
 dependencies = [
  "aien-abi-core",
  "aien-allen",
+ "aien-allen-profile",
  "aien-inference-abi",
  "aien-kv-cache",
  "aien-omega-compose",

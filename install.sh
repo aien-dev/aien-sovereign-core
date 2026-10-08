@@ -96,8 +96,10 @@ verify_release_dir() {
 # Switch $REL_DIR/current to <id> with one rename.
 set_current() {
     local id="$1" tmp="$REL_DIR/.current.new.$$"
+    rm -f "$REL_DIR"/.current.new.*   # leftovers of an interrupted switch; never live
     rm -f "$tmp"
     ln -s "$id" "$tmp"
+    pause_at pre-rename
     if mv --help 2>&1 | grep -q -- ' -T'; then mv -T "$tmp" "$REL_DIR/current"; else mv -fh "$tmp" "$REL_DIR/current"; fi
 }
 
@@ -217,6 +219,7 @@ activate_release() {
     pause_at after-swap
     echo "[+] Live release is now $id (candidate $cand); binaries:"
     link_bins "$cur" "$id"
+    pause_at after-links
     if [[ -n "$cur" && "$cur" != "$id" ]]; then
         write_record "$id" "$cur" install
         prune_releases "$id" "$cur"
@@ -233,6 +236,7 @@ do_rollback() {
     [[ -d "$REL_DIR/$prev" ]] || { echo "Error: previous release $prev is missing from $REL_DIR." >&2; exit 1; }
     verify_release_dir "$REL_DIR/$prev" || { echo "Error: previous release $prev failed verification. Nothing was changed." >&2; exit 1; }
     set_current "$prev"
+    pause_at after-swap
     echo "[+] Rolled back: live release is now $prev (was $cur); binaries:"
     link_bins "$cur" "$prev"
     write_record "$prev" "$cur" rollback
