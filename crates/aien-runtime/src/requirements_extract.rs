@@ -835,18 +835,28 @@ const NAME_TITLES: [&str; 10] = [
     "dr", "mr", "mrs", "ms", "prof", "st", "jr", "sr", "mt", "rev",
 ];
 
-/// Words after "and" that bind a count or a scope to the list before it,
-/// instead of starting a new clause ("... and only in the summary").
-const LIST_BINDERS: [&str; 16] = [
-    "only", "at", "each", "every", "twice", "once", "thrice", "exactly", "no", "not", "never",
-    "more", "fewer", "both", "all", "in",
+/// Words after ", and" that open a new instruction ("..., and write 5 lines").
+const CLAUSE_VERBS: [&str; 13] = [
+    "then", "write", "add", "be", "keep", "make", "save", "put", "please", "give", "end", "start",
+    "finish",
+];
+
+/// Words after ", and" that open a new clause when a verb soon follows ("...,
+/// and the file needs at least 14 lines", "..., and it must be short").
+const CLAUSE_SUBJECTS: [&str; 8] = ["the", "it", "its", "this", "that", "there", "i", "we"];
+
+/// Verbs that make a `CLAUSE_SUBJECTS` opener a clause rather than one more item.
+const CLAUSE_AUX: [&str; 18] = [
+    "must", "should", "needs", "need", "is", "are", "has", "have", "will", "can", "shall", "would",
+    "want", "wants", "stays", "stay", "gets", "get",
 ];
 
 /// The text after a word or name list ends it cleanly: nothing, a sentence end
 /// (not after a title such as "Dr", and not a next sentence that starts with
-/// "and" or "or"), or ", and" with a new clause. A count, a scope or a
-/// narrowing ("at least twice", ", but only in the summary", "; and Tomas")
-/// is not clean, and the list is then uncertain (sc#345 review).
+/// "and" or "or"), or ", and" opening a new instruction or clause. Anything
+/// else after the list ("at least twice", ", but only in the summary", "; and
+/// Tomas", ", and also Wen", ", and nothing else") may bind to it, and the
+/// list is then uncertain (sc#345 review).
 fn list_ends_cleanly(after: &str, last_item: &str) -> bool {
     let t = after.trim_start_matches([' ', '\t']);
     if t.is_empty() || t.starts_with(['\n', '\r']) {
@@ -859,11 +869,21 @@ fn list_ends_cleanly(after: &str, last_item: &str) -> bool {
             && !matches!(next.to_ascii_lowercase().as_str(), "and" | "or");
     }
     let t = t.strip_prefix(',').unwrap_or(t);
-    let mut ws = t.split_whitespace().map(|x| clean(x).to_ascii_lowercase());
-    ws.next().as_deref() == Some("and")
-        && ws
-            .next()
-            .is_some_and(|x| !LIST_BINDERS.contains(&x.as_str()))
+    let ws: Vec<String> = t
+        .split_whitespace()
+        .take(7)
+        .map(|x| clean(x).to_ascii_lowercase())
+        .collect();
+    if ws.first().map(String::as_str) != Some("and") {
+        return false;
+    }
+    match ws.get(1).map(String::as_str) {
+        Some(x) if CLAUSE_VERBS.contains(&x) => true,
+        Some(x) if CLAUSE_SUBJECTS.contains(&x) => {
+            ws[2..].iter().any(|x| CLAUSE_AUX.contains(&x.as_str()))
+        }
+        _ => false,
+    }
 }
 
 /// The list offers a choice ("Priya or Tomas"): a required-words list is all of them.
@@ -1572,11 +1592,12 @@ pub fn analyze(goal: &str) -> Extraction {
             continue;
         }
         let full = list_region(goal, toks[k].end);
-        // ", and the file needs ..." starts a new clause; ", and Wen" is the last name.
-        let region = match full
-            .match_indices(", and ")
-            .find(|(i, m)| full[i + m.len()..].starts_with(|c: char| c.is_lowercase()))
-        {
+        // ", and the file needs ..." or ", and I want ..." starts a new clause;
+        // ", and Wen" is the last name.
+        let region = match full.match_indices(", and ").find(|(i, m)| {
+            let rest = &full[i + m.len()..];
+            rest.starts_with(|c: char| c.is_lowercase()) || rest.starts_with("I ")
+        }) {
             Some((i, _)) => &full[..i],
             None => full,
         };

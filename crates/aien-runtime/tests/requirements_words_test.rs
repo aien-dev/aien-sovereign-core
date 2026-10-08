@@ -112,6 +112,14 @@ fn a_list_followed_by_a_new_clause_is_still_read() {
             vec!["whetstone", "angle"],
         ),
         (
+            "It must name Priya, Tomas and Wen, and I want it short.",
+            vec!["Priya", "Tomas", "Wen"],
+        ),
+        (
+            "Make sure the words whetstone and angle appear, and then be at least 5 lines long.",
+            vec!["whetstone", "angle"],
+        ),
+        (
             "Use the exact words greens and browns somewhere in the file.",
             vec!["greens", "browns"],
         ),
@@ -156,6 +164,12 @@ fn near_misses_stay_uncertain() {
         "It must mention Priya or Tomas.",
         "Make sure the words red or blue appear.",
         "Use the exact words greens or browns.",
+        // round 2: a second requirement after ", and"
+        "It must name Priya and Tomas, and also Wen.",
+        "Make sure the words whetstone and angle appear, and kettle appears twice.",
+        "It must name Priya, Tomas and Wen, and nothing else.",
+        "It must name Priya, Tomas and Wen, and they must each appear in a different section.",
+        "It must name Priya and Tomas, and the dog.",
         // negated forms
         "Make sure none of the words whetstone and angle appear.",
         "Make sure the words whetstone and angle don't appear.",
