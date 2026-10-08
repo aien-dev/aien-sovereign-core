@@ -71,6 +71,9 @@ fn the_forms_the_goals_accept_cover_their_topics() {
         ("approve", "Ask for approvals."),
         ("grow", "The plants have grown."),
         ("take", "It was taken."),
+        // the cost of the rule, pinned so a tightening is deliberate (sc#354 review)
+        ("sign", "A signal."),
+        ("line", "A linen cloth."),
         ("interest", "The bank pays interest monthly."),
         ("balance", "Check the balances each week."),
         // the same rule elsewhere
@@ -125,6 +128,11 @@ fn other_words_still_do_not_cover_a_topic() {
         ("drawer", "She drew a line."),
         ("arm", "An armal plate."),
         ("bee", "It has been."),
+        // 4 letters before -al / -als, and -n only after w or e (sc#354 review)
+        ("met", "A metal box."),
+        ("met", "Two metals."),
+        ("melo", "A melon."),
+        ("see", "It was seen."),
     ] {
         let r = [RequiredTopics(vec![topic.to_string()])];
         assert!(refusal_reason(&r, text).is_some(), "{topic}: {text}");

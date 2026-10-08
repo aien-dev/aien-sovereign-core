@@ -75,10 +75,11 @@
 //!   `withdrawals` cover `withdraw`, `arrival` covers `arrive`, `grown` and
 //!   `taken` cover `grow` and `take`. This is an explicit list of endings, not
 //!   a prefix match: `drawer`, `withdrawer` and `withdrawable` do not cover
-//!   `withdraw` (sc#353 G2). Irregular forms (`withdrew` / `withdraw`)
-//!   do not agree: the check errs on the side of refusing, unless the goal
-//!   names the form for that topic, written into the topic as `withdraw (or
-//!   withdrew)`.
+//!   `withdraw`. The rule also lets close neighbours count: `signal` covers
+//!   `sign`, `personal` covers `person`, `linen` covers `line` (sc#353 G2).
+//!   Irregular forms (`withdrew` / `withdraw`) do not agree: the check errs
+//!   on the side of refusing, unless the goal names the form for that topic,
+//!   written into the topic as `withdraw (or withdrew)`.
 //! - sentence: a run of at least two words ended by `.`, `!` or `?` (not
 //!   inside a number such as `3.10`); an unfinished last fragment of at
 //!   least three words counts as one. List markers are ignored.
