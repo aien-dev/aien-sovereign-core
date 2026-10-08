@@ -89,6 +89,14 @@ and the task report says `persona.state = "refused"` with the reason.
 - Timestamps are informational. Nothing orders or trusts them.
 - Profile commands go through the compose home, so they wait while a task is
   running.
+- If syncing the folder fails after a revision is linked in, the call reports an
+  error even though the revision exists. A retry then says the profile moved
+  on (StaleUpdate), so check `aien allen history` before trying again.
+- Any unexpected file in the profile folder makes the store refuse it as
+  damaged, and the persona falls back to defaults, reported as refused.
+  Leftover temp files from a crash are ignored but are not cleaned up.
+- Every request re-reads and re-checks the whole revision chain, and there is
+  no cap on the number of revisions yet.
 
 ## Layout
 

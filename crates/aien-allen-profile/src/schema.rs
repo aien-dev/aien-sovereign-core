@@ -14,13 +14,18 @@ pub const MAX_PREFS: usize = 32;
 pub const GENESIS_PREV: &str = "0000000000000000000000000000000000000000000000000000000000000000";
 const PROVENANCE: &str = "user_explicit";
 /// A key containing any of these is refused (case-insensitive).
-const PERMISSION_WORDS: [&str; 6] = [
+const PERMISSION_WORDS: [&str; 11] = [
     "grant",
-    "permission",
-    "approve",
-    "capability",
+    "perm",
+    "approv",
+    "capab",
     "allow",
     "authori",
+    "bypass",
+    "sudo",
+    "admin",
+    "override",
+    "unrestrict",
 ];
 
 /// The engaged identity a profile is bound to (the resolved agent and root).
@@ -262,7 +267,10 @@ pub struct HistoryEntry {
 }
 
 fn has_control(s: &str) -> bool {
-    s.chars().any(|c| c.is_control())
+    s.chars().any(|c| {
+        c.is_control()
+            || matches!(c, '\u{2028}' | '\u{2029}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
+    })
 }
 
 pub fn is_hex64(s: &str) -> bool {
@@ -306,7 +314,8 @@ pub fn check_key(key: &str) -> Result<(), ProfileRefusal> {
             "preference key \"{key}\" (1 to 48 characters from a-z, 0-9, _ . -)"
         )));
     }
-    if PERMISSION_WORDS.iter().any(|w| key.contains(w)) {
+    let norm = key.to_ascii_lowercase().replace(['-', '.'], "_");
+    if PERMISSION_WORDS.iter().any(|w| norm.contains(w)) {
         return Err(ProfileRefusal::PermissionKey(key.to_string()));
     }
     Ok(())

@@ -4,7 +4,7 @@ use aien_allen_profile::{
     Changes, Identity, PersonaContext, PersonaState, PrefChange, ProfileRefusal as R, Scope, Store,
     Tone, Verbosity, WriteStep, CONTEXT_MAX_BYTES,
 };
-use std::sync::Arc;
+use std::sync::{Arc, Barrier};
 
 fn id(tag: u8) -> Identity {
     Identity {
@@ -103,10 +103,13 @@ fn stale_expect_changes_nothing() {
 fn concurrent_writers_exactly_one_wins() {
     let t = tempfile::tempdir().unwrap();
     let d = Arc::new(dir(&t));
+    let barrier = Arc::new(Barrier::new(8));
     let results: Vec<_> = (0..8)
         .map(|i| {
             let d = d.clone();
+            let barrier = barrier.clone();
             std::thread::spawn(move || {
+                barrier.wait();
                 Store::at((*d).clone(), id(1)).set(0, &name(&format!("Name{i}")))
             })
         })
@@ -238,6 +241,10 @@ fn permission_like_keys_are_rejected() {
         "capability-x",
         "allow_all",
         "authorized_paths",
+        "skip_approval",
+        "auto-approval",
+        "bypass.checks",
+        "sudo",
     ] {
         let ch = Changes {
             set_prefs: vec![pref(k, "yes")],
@@ -406,4 +413,76 @@ fn context_is_deterministic_and_bounded() {
     assert!(c.dropped > 0 && c.shown.len() + c.dropped == 32);
     assert!(r.contains(&format!("({} more preferences not shown)", c.dropped)));
     assert_eq!(r, PersonaContext::from_store(&s2).render());
+}
+
+#[test]
+fn control_and_bidi_characters_are_refused() {
+    let t = tempfile::tempdir().unwrap();
+    let s = Store::at(dir(&t), id(1));
+    for c in [
+        '\u{2028}', '\u{2029}', '\u{202A}', '\u{202B}', '\u{202C}', '\u{202D}', '\u{202E}',
+        '\u{2066}', '\u{2067}', '\u{2068}', '\u{2069}', '\n', '\u{0}',
+    ] {
+        assert!(
+            matches!(s.set(0, &name(&format!("Ab{c}cd"))), Err(R::Invalid(_))),
+            "name {c:?}"
+        );
+        let ch = Changes {
+            set_prefs: vec![pref("reply_language", &format!("en{c}x"))],
+            ..Default::default()
+        };
+        assert!(matches!(s.set(0, &ch), Err(R::Invalid(_))), "value {c:?}");
+    }
+    assert!(s.head().unwrap().is_none());
+}
+
+#[test]
+fn normal_key_is_accepted() {
+    let t = tempfile::tempdir().unwrap();
+    let s = Store::at(dir(&t), id(1));
+    let ch = Changes {
+        set_prefs: vec![pref("reply_language", "english")],
+        ..Default::default()
+    };
+    assert!(s.set(0, &ch).is_ok());
+}
+
+/// Both writers pass the stale check; the first finishes its whole write
+/// between the second's temp-file sync and its hard link, so the second hits
+/// the AlreadyExists path and must lose cleanly.
+#[test]
+fn link_race_loser_gets_stale_update_and_winner_is_intact() {
+    let t = tempfile::tempdir().unwrap();
+    let d = dir(&t);
+    let winner_dir = d.clone();
+    let loser = Store::at(d.clone(), id(1)).with_fault_hook(Arc::new(move |step| {
+        if step == WriteStep::TempSynced {
+            Store::at(winner_dir.clone(), id(1))
+                .set(0, &name("Winner"))
+                .unwrap();
+        }
+        false
+    }));
+    match loser.set(0, &name("Loser")) {
+        Err(R::StaleUpdate { expected, current }) => assert_eq!((expected, current), (0, 1)),
+        o => panic!("{o:?}"),
+    }
+    let s = Store::at(d.clone(), id(1));
+    let head = s.head().unwrap().unwrap();
+    assert_eq!(
+        (head.revision, head.persona.display_name.as_str()),
+        (1, "Winner")
+    );
+    assert_eq!(s.history().unwrap().len(), 1);
+    let leftovers = std::fs::read_dir(&d)
+        .unwrap()
+        .filter(|e| {
+            e.as_ref()
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".tmp-")
+        })
+        .count();
+    assert_eq!(leftovers, 0);
 }
