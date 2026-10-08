@@ -30,6 +30,9 @@ run() {  # run a test target with --include-ignored; the tests are serial (one p
     cargo test "$@" -- --include-ignored --test-threads=1 2>&1 | tee -a "$LOG"
 }
 : >"$LOG"
+# The floor comes from the suite itself, not a hardcoded number.
+SUITE=$(cargo test -p aien-runtime --test approved_attacks_test -- --list --include-ignored 2>/dev/null | grep -c ": test$" || true)
+[ "$SUITE" -gt 0 ] || die "could not list the approved_attacks tests"
 run -p aien-omega-compose --test compose
 for i in $(seq "$REPEAT"); do
     echo "== approved_attacks run $i/$REPEAT"
@@ -38,6 +41,6 @@ done
 # Not vacuous: the library was linked (no stub warning) and the tests really ran.
 if grep -q "building the stub" "$LOG"; then die "a stub was built: the composition library is not linked"; fi
 ran=$(grep -E '^test result: ok\. [0-9]+ passed' "$LOG" | awk '{s += $4} END {print s + 0}')
-[ "$ran" -ge $((34 * REPEAT)) ] || die "only $ran linked tests passed (expected at least $((34 * REPEAT)) from approved_attacks)"
+[ "$ran" -ge $((SUITE * REPEAT)) ] || die "only $ran linked tests passed (expected at least $((SUITE * REPEAT)): $SUITE approved_attacks tests x $REPEAT)"
 if grep -E '^test result:.* [1-9][0-9]* ignored' "$LOG" >/dev/null; then die "tests were still ignored"; fi
 echo "test-linked-compose: PASS ($ran linked tests passed, approved_attacks x$REPEAT)"

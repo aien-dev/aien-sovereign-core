@@ -1289,7 +1289,6 @@ async fn c25b_shutdown_closes_the_compose_home_while_a_connection_is_open() {
     let (_r, _g) = approved_grant(&d, tmp.path()).await;
     // An idle client connection that outlives the daemon's run().
     let idle = tokio::net::UnixStream::connect(&d.socket).await.unwrap();
-    let socket = d.socket.clone();
     down(d).await;
     // Another opener on the same home must get in at once, every time.
     for i in 0..5 {
@@ -1299,8 +1298,49 @@ async fn c25b_shutdown_closes_the_compose_home_while_a_connection_is_open() {
         drop(b);
     }
     drop(idle);
-    let _ = socket;
 }
+
+/// #306: once `close` has run, NO path may open the home again: a compose task,
+/// a record_digest, a note and a recover all refuse, and the journal gets no
+/// new bytes. (Every lazy open goes through one check.)
+#[test]
+#[cfg_attr(
+    not(compose_linked),
+    ignore = "needs the linked librx_compose.a (AIEN_OMEGA_COMPOSE_LIB)"
+)]
+fn c25c_a_closed_bridge_never_reopens_the_home() {
+    let tmp = fresh();
+    let b = bridge(tmp.path());
+    let first = raw_note(&b, "constraint", "before close", &[]);
+    assert!(first > 0);
+    let journal = home(tmp.path()).join("cortex.cx");
+    let before = std::fs::read(&journal).expect("journal exists after the first note");
+    b.close();
+    assert!(b.is_closed());
+    let refused = |what: &str, r: String| {
+        assert!(r.contains("compose home closed"), "{what} not refused: {r}");
+    };
+    refused("record_digest", b.record_digest(first).unwrap_err());
+    let ws = ws(tmp.path());
+    match b.run_task("write NOTES.md", &ws.display().to_string()) {
+        ControlResponse::Error(e) => refused("run_task", e),
+        other => panic!("run_task after close: {other:?}"),
+    }
+    match b.note_unchecked("constraint", "after close", &[]) {
+        ControlResponse::Error(e) => refused("note", e),
+        other => panic!("note after close: {other:?}"),
+    }
+    match b.recover() {
+        ControlResponse::Error(e) => refused("recover", e),
+        other => panic!("recover after close: {other:?}"),
+    }
+    assert_eq!(
+        std::fs::read(&journal).unwrap(),
+        before,
+        "the journal changed after close"
+    );
+}
+
 /// Crash tests: a child process runs a whole daemon, submits one approval
 /// over its socket and is aborted at a crash point inside the daemon. The
 /// parent restarts a daemon over the same compose home and retries.

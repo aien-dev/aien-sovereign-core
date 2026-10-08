@@ -1790,6 +1790,12 @@ impl ComposeBridge {
     /// `rebuilt_from` = the seq of a mark RecoverComposeHome just set aside:
     /// the home then opens without a mark and gets a fresh one.
     fn open_home_marked(&self, rebuilt_from: Option<u64>) -> Result<ComposeHome, String> {
+        // The one place every lazy open goes through (with_home, run_task_inner,
+        // record_digest, recover): callers hold the home lock and close() sets
+        // `closed` under the same lock, so no site can reopen after close.
+        if self.is_closed() {
+            return Err(CLOSED_REFUSAL.to_string());
+        }
         // Refuse a bad budget before anything is opened (never fall back).
         let budgets = compose_budgets_from_env()
             .map_err(|e| format!("compose home {} refused: {e}", self.dir.display()))?;
@@ -2198,9 +2204,6 @@ impl ComposeBridge {
             .home
             .lock()
             .map_err(|_| "compose home lock poisoned".to_string())?;
-        if self.closed.load(std::sync::atomic::Ordering::SeqCst) {
-            return Err(CLOSED_REFUSAL.to_string());
-        }
         if guard.is_none() {
             *guard = Some(self.open_home()?);
         }
