@@ -33,6 +33,7 @@ An `effect`-class host note whose JSON has the marker field `generation`:
 | `total_tokens`, `output_tokens` | token count the engine reported; generated tokens |
 | `finish_reason` | `eos`, `max_tokens`, `aborted` or `preempted` |
 | `decoding` | how the backend chose the output tokens (below); ABSENT when the backend did not report it |
+| `ops` | the tensor backend that ran the call and its op counters (below); ABSENT when the backend did not report them |
 | `daemon` | `pid`, `start_ticks` (process start, clock ticks) and `started_unix_ms` |
 | `request_id`, `operation_id` | CALLER-ASSERTED: the request envelope's ids, exactly as the client sent them |
 
@@ -115,6 +116,43 @@ What it does not prove: like the rest of the record, it is the daemon's own
 report, not signed. It covers the native backend's scheduler path
 (`execute_step`); the standalone generation helpers (`generate_tokens*`) and
 example binaries are not observed.
+
+### `ops`: the backend and its fallbacks (sc#337)
+
+"No silent fallback" used to be shown only by the absence of a crash. `ops`
+is positive evidence. The native backend reads its tensor backend's op
+counters (`TensorBackend::op_report`) when a sequence finishes
+(`AienInferenceBackend::op_evidence`), the scheduler puts them in
+`CompletionEvent::Finished.ops`, and the daemon copies them into the record.
+
+| field | meaning |
+|---|---|
+| `backend` | the tensor backend's name (`TensorBackend::name`, e.g. the Omega GB10 engine or `ReferenceCpuBackend`) |
+| `native_fallbacks` | runs of ops the backend claims native that ran on the reference CPU path |
+| `reference_runs` | runs of ops on the reference CPU path by design (outside the backend's native mask) |
+| `scope` | always `process`: the counts are totals since the daemon built the backend, NOT per call |
+| `report` | the full `OP_REPORT native=[..] reference=[..] native_fallbacks=[..] reference_runs=[..]` line |
+
+Because the counts are process totals, a later record's counts include every
+earlier call's; a per-call figure is the difference between two records of the
+same daemon (`daemon.pid` and `daemon.start_ticks` equal), and only when no
+other call ran in between. A production build panics on the first
+claimed-native fallback (`STRICT_REAL_MODEL_VIOLATION`), so a record written by
+a production daemon always has `native_fallbacks == 0`; a verifier that needs
+a strict run requires `ops` to be present with `native_fallbacks == 0` and the
+daemon's `STRICT strict=true dev_fallback_build=false ...` start line. `ops` is
+ABSENT, not zero, when the backend does not account its ops (the mock backend
+and the other `AienInferenceBackend` implementations; only
+`NativeTransformerBackend`, the backend the daemon builds, reports them).
+
+The daemon also logs, at the end of every model call (turn and compose), the
+`report` line with ` backend=<name>` appended, on stderr. At start it prints
+`STRICT strict=<bool> dev_fallback_build=<bool> require_checkpoint=<bool>
+backend=<name>` on stdout with its other start lines: `strict` is the
+effective value (false with `dev_fallback_build=false` means the
+`AIEN_DEV_FALLBACK=1` opt-in), `dev_fallback_build` is the compile-time
+`dev-fallback` feature, `require_checkpoint` is the effective checkpoint
+policy.
 
 ## What it proves
 

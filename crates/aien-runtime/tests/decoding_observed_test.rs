@@ -174,6 +174,7 @@ fn record_field_matches_the_report_and_is_absent_without_one() {
         request_id: 1,
         operation_id: 1,
         decoding: d,
+        ops: None,
     };
     let start = aien_runtime::generation::DaemonStart(1);
     let with = aien_runtime::generation::build_record(&id, &ev(Some(&report)), start);
