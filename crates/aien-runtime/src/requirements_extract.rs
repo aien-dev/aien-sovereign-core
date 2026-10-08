@@ -27,6 +27,7 @@
 //! | `N level-two|level-2|second-level|h2 sections titled A, B and C` | `LevelHeadings` (those headings at that level; extra headings of the level are allowed) |
 //! | `start|begin|open with a [markdown] [level-N] heading [line]`, then the end of the clause or `that begins|starts with "# "` (quoted, 1 to 6 `#` and one space) | `FirstLineHeading` (the first line of the file is that heading; a marker fixes the level). Negated, emphasised, qualified or unquoted forms, and any other heading wording after `start with a`, are UNCERTAIN |
 //! | `include|add|put|provide N [separate] fenced code examples|blocks`, or a bound cue before N | `MinItems(CodeBlocks)` |
+//! | `<min bound> N of them|these|those [items|lines|entries]` when the same sentence first says `line(s) [that] starting|beginning|starts|begins with "P"` (exactly one quoted prefix) | `MinPrefixedLines` (at least N lines starting with exactly `P`). Without that referent in the same sentence, with an upper bound, or with no bound cue, the count is UNCERTAIN |
 //!
 //! Bare line counts. The VERB decides the reading, no task wording is built in. An
 //! edit (the goal names an existing file) is judged on the diff between that file
@@ -725,6 +726,61 @@ fn section_scope_before(goal: &str, toks: &[Tok], s: usize) -> Option<Option<Str
     None
 }
 
+/// "<bound> N of them|these|those [items|lines|entries]" (`j` is the `of`): the
+/// count reads only when the same sentence, earlier, defines the counted lines
+/// as `line(s) [that] starting|beginning|starts|begins with "P"` with exactly one
+/// quoted prefix. Returns the last token of the count and the prefix as quoted
+/// (leading blanks dropped, a trailing space kept).
+fn of_line_prefix(goal: &str, toks: &[Tok], s: usize, j: usize) -> Option<(usize, String)> {
+    let w = |i: usize| toks.get(i).map(|t| t.word.as_str());
+    if !matches!(w(j + 1), Some("them" | "these" | "those")) {
+        return None;
+    }
+    let mut end = j + 1;
+    if !ends_clause(&toks[end].raw)
+        && matches!(w(end + 1), Some("items" | "item" | "lines" | "entries"))
+    {
+        end += 1;
+    }
+    if !qualifier_ok(toks, end) {
+        return None;
+    }
+    let mut found = None;
+    let mut m = s;
+    while m > 0 {
+        m -= 1;
+        if toks[m].raw.ends_with(['.', '!', '?']) {
+            break;
+        }
+        if w(m) == Some("with")
+            && m >= 2
+            && matches!(
+                w(m - 1),
+                Some("starting" | "beginning" | "starts" | "begins" | "start" | "begin")
+            )
+        {
+            let mut l = m - 2;
+            if w(l) == Some("that") && l >= 1 {
+                l -= 1;
+            }
+            if matches!(w(l), Some("line" | "lines")) {
+                if found.is_some() {
+                    return None;
+                }
+                found = Some(m);
+            }
+        }
+    }
+    let rest = &goal[toks[found?].end..];
+    if leading_quoted_items(rest).0.len() != 1 {
+        return None;
+    }
+    let t = rest.trim_start();
+    let body = &t[t.chars().next()?.len_utf8()..];
+    let prefix = body[..body.find(['"', '\u{201D}'])?].trim_start();
+    (!prefix.trim().is_empty()).then(|| (end, prefix.to_string()))
+}
+
 /// The heading level an adjective names: `level-two`, `level-2`, `second-level`, `h2`.
 fn level_adj(w: &str) -> Option<usize> {
     let lv = |v: usize| (1..=6).contains(&v).then_some(v);
@@ -922,6 +978,23 @@ pub fn analyze(goal: &str) -> Extraction {
         let Some(noun) = toks.get(j).map(|t| t.word.as_str()) else {
             continue;
         };
+        // "at least twelve of them", the lines named earlier in the sentence (sc#334).
+        if noun == "of" {
+            if let Some((end, prefix)) = of_line_prefix(goal, &toks, s, j) {
+                let v = v as i64 + adj;
+                if dir == Dir::Min && v >= 1 && !negated_before(&toks, s) {
+                    add(
+                        &mut counts,
+                        Requirement::MinPrefixedLines {
+                            prefix,
+                            n: v as usize,
+                        },
+                    );
+                    handled.extend(s..=end);
+                }
+            }
+            continue;
+        }
         if !NOUNS.contains(&noun) || negated_before(&toks, s) {
             continue;
         }
