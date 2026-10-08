@@ -118,6 +118,11 @@ fn a_short_second_sentence_still_counts() {
         "Thanks for the help.\n\nBye!\n",
         "Thanks for the help. OK\n",
         "Thanks for the help to the whole project. Cheers\n",
+        "Run took 5 ms. Done.\n",
+        "He lives on Main St. He is nice.\n",
+        "Thanks for the help\nBye\n",
+        "Thanks.Bye.\n",
+        "Thanks for coming\u{3002}Bye\u{3002}\n",
     ] {
         assert!(refusal_reason(&r, bad).is_some(), "{bad:?}");
     }
@@ -125,6 +130,8 @@ fn a_short_second_sentence_still_counts() {
         "Hi.\n",
         "Dr. Lee thanks everyone who tested the project.\n",
         "Version 3.5 is out, e.g. for testers.\n",
+        "Thanks to everyone who tested the project\u{2026}\n",
+        "Read README.md before you test the project.\n",
     ] {
         assert!(refusal_reason(&r, good).is_none(), "{good:?}");
     }

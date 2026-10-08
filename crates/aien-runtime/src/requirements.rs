@@ -539,33 +539,65 @@ fn count_sentences(body: &str) -> usize {
 }
 
 /// Sentences for `SingleSentence`, counted strictly: every stretch of words a
-/// `.` `!` `?` closes, however short ("Bye."), plus any words after the last
-/// one ("OK"). Headings and fenced code are not prose. A stop after a title
-/// or "e.g." / "i.e." does not end a sentence; any other stop does, so an
+/// stop (`.` `!` `?` `…` or a CJK stop) closes, however short ("Bye."), a stop
+/// glued to a capital ("Thanks.Bye."), and any words a line ends without a
+/// stop. Headings and fenced code are not prose. Only "e.g." / "i.e." and a
+/// title before a capitalised name ("Dr. Lee") do not end a sentence, so an
 /// unusual stop can only refuse a correct file, never pass a wrong one.
 fn count_every_sentence(content: &str) -> usize {
-    const NO_END: [&str; 9] = ["dr", "mr", "mrs", "ms", "prof", "mt", "st", "e.g", "i.e"];
-    let (mut count, mut open) = (0usize, false);
+    const STOPS: [char; 7] = [
+        '.', '!', '?', '\u{2026}', '\u{3002}', '\u{FF01}', '\u{FF1F}',
+    ];
+    const CLOSERS: [char; 8] = ['"', '\'', ')', ']', '*', '_', '\u{201D}', '\u{2019}'];
+    const TITLES: [&str; 4] = ["dr", "mr", "mrs", "prof"];
+    let mut count = 0usize;
     for l in prose_lines(content) {
         if l.trim_start().starts_with('#') {
             continue;
         }
+        let mut pieces: Vec<&str> = Vec::new();
         for w in l.split_whitespace() {
-            open |= w.chars().any(char::is_alphanumeric);
-            let w = w.trim_end_matches(['"', '\'', ')', ']', '*', '_', '\u{201D}', '\u{2019}']);
-            if !w.ends_with(['.', '!', '?']) {
+            let mut from = 0;
+            let mut it = w.char_indices().peekable();
+            while let Some((k, c)) = it.next() {
+                let cut = match it.peek() {
+                    Some(&(_, next)) => {
+                        matches!(c, '\u{3002}' | '\u{FF01}' | '\u{FF1F}')
+                            || matches!(c, '.' | '!' | '?') && next.is_uppercase()
+                    }
+                    None => false,
+                };
+                if cut {
+                    let at = k + c.len_utf8();
+                    pieces.push(&w[from..at]);
+                    from = at;
+                }
+            }
+            pieces.push(&w[from..]);
+        }
+        let mut open = false;
+        for (k, p) in pieces.iter().enumerate() {
+            open |= p.chars().any(char::is_alphanumeric);
+            let w = p.trim_end_matches(CLOSERS);
+            if !open || !w.ends_with(STOPS) {
                 continue;
             }
             let stem = w
-                .trim_end_matches(['.', '!', '?'])
-                .trim_start_matches(['(', '"', '\'']);
-            if open && !NO_END.contains(&stem.to_lowercase().as_str()) {
+                .trim_end_matches(STOPS)
+                .trim_start_matches(['(', '"', '\''])
+                .to_lowercase();
+            let title = TITLES.contains(&stem.as_str())
+                && pieces
+                    .get(k + 1)
+                    .is_some_and(|n| n.starts_with(char::is_uppercase));
+            if !title && !matches!(stem.as_str(), "e.g" | "i.e") {
                 count += 1;
                 open = false;
             }
         }
+        count += usize::from(open);
     }
-    count + usize::from(open)
+    count
 }
 
 fn numbered(t: &str) -> bool {
