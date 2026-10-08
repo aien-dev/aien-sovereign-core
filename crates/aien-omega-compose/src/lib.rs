@@ -15,6 +15,10 @@ pub mod ffi;
 use std::fmt;
 use std::path::Path;
 
+/// The wait (ms) most recently accepted by `Compose::set_wait_ms`, 0 before any. A test
+/// observation point: the value omega was actually told, not a recomputation.
+pub static LAST_WAIT_MS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
 /// True when `librx_compose.a` is linked (not the stub).
 pub const LINKED: bool = cfg!(has_omega_compose);
 /// The omega commit this build expected (omega.lock or `AIEN_OMEGA_COMPOSE_SHA`).
@@ -257,6 +261,32 @@ mod linked {
             ))
         }
 
+        /// Set how long omega waits for a run to settle (default 30 000 ms, 1..=600 000).
+        /// Needs an omega that exposes `rxc_host_set_wait_ms`; against an older omega only
+        /// the unchanged default 30 000 ms is accepted and anything else is refused.
+        pub fn set_wait_ms(&mut self, wait_ms: u32) -> Result<(), ComposeError> {
+            #[cfg(has_omega_wait_ms)]
+            {
+                // SAFETY: valid open handle.
+                let rc = unsafe { ffi::rxc_host_set_wait_ms(self.h, wait_ms) };
+                check(rc, 0)?;
+                LAST_WAIT_MS.store(wait_ms, std::sync::atomic::Ordering::SeqCst);
+                Ok(())
+            }
+            #[cfg(not(has_omega_wait_ms))]
+            {
+                if wait_ms == ffi::WAIT_MS_DEFAULT {
+                    LAST_WAIT_MS.store(wait_ms, std::sync::atomic::Ordering::SeqCst);
+                    Ok(())
+                } else {
+                    Err(ComposeError::Arg(format!(
+                        "wait {wait_ms} ms needs omega with rxc_host_set_wait_ms; this omega waits a fixed {} ms",
+                        ffi::WAIT_MS_DEFAULT
+                    )))
+                }
+            }
+        }
+
         pub fn register_skill<F>(
             &mut self,
             name: &str,
@@ -453,6 +483,9 @@ impl Compose {
     where
         F: Fn(u64, u64) -> bool + Send + Sync + 'static,
     {
+        Err(ComposeError::Unavailable)
+    }
+    pub fn set_wait_ms(&mut self, _: u32) -> Result<(), ComposeError> {
         Err(ComposeError::Unavailable)
     }
     pub fn run(&mut self, _: u64, _: u64) -> Result<RunResult, ComposeError> {

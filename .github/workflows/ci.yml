@@ -91,6 +91,9 @@ jobs:
         run: |
           echo "Auditing repository for em dashes, en dashes, and formulaic tropes..."
           BAD_CHARS=$(grep -rnE --exclude-dir=target --exclude-dir=.git --exclude-dir=aien-protocols --exclude="*.rs" --exclude="*.json" --exclude="*.safetensors" --exclude="FORGEJO_CI.md" "—|–" crates/ docs/ README.md || true)
+          # Saved model replies under docs/campaigns/*/replies/ are evidence named by the
+          # sha256 of their exact bytes, so they cannot be reworded. Everything else stays audited.
+          BAD_CHARS=$(printf "%s\n" "$BAD_CHARS" | grep -vE "^docs/campaigns/[^:]*/replies/[0-9a-f]{64}\.txt:" || true)
           if [ -n "$BAD_CHARS" ]; then
             echo "::error::Em dashes or en dashes detected:"
             echo "$BAD_CHARS"

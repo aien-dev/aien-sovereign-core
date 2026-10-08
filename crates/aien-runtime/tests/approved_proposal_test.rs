@@ -54,6 +54,9 @@ fn unsigned(request: &str, approval: &str) -> ApprovedProposal {
         approved_proposal_sha256: interplane_sha(PATH, CONTENT),
         content_sha256: sha(CONTENT.as_bytes()),
         approval_mac: String::new(),
+        requirements: Some(String::new()),
+        requirements_mac: String::new(),
+        requirements_base: None,
     }
 }
 
@@ -69,7 +72,7 @@ fn ws_of(b: &ComposeBridge) -> std::path::PathBuf {
 }
 
 fn sign(b: &ComposeBridge, mut p: ApprovedProposal) -> ApprovedProposal {
-    p.approval_mac = desk(b).sign(&p, &ws_of(b));
+    desk(b).seal(&mut p, &ws_of(b));
     p
 }
 
@@ -682,7 +685,7 @@ fn copied_approved_grant_opens_nothing() {
     let a = r.approved_grant.unwrap();
     let g = recalled(&b, &[a]);
     let text = g.cited[0].text.clone().unwrap();
-    let copy = match b.note("authorization", &text, &g.cited[0].links) {
+    let copy = match b.note_unchecked("authorization", &text, &g.cited[0].links) {
         ControlResponse::ComposeNoted(n) => n.id,
         other => panic!("bridge-level copy: {other:?}"),
     };
@@ -707,4 +710,313 @@ fn copied_approved_grant_opens_nothing() {
     let l = Ledger::from_records(&recalled(&b, &[]).host).unwrap();
     assert!(l.intents.is_empty());
     assert!(!Path::new(&r.target.unwrap()).exists());
+}
+
+/// A document with several fenced examples and prose after the last one.
+const FENCED_DOC: &str = "# FAQ\n\nInstall:\n```bash\ncurl -fsSL https://example.com/i.sh | sh\n```\nThen verify:\n```bash\ntool --version\n```\nLast words after the final example.\n";
+
+/// One approved document with embedded fences, through the real approval and
+/// effect path: the approval binds sha256(content); the proposal text reads
+/// back byte for byte; the intent only opens for that digest; and the effect
+/// is DONE only when the bytes on disk hash to the approved digest. A write cut
+/// at the first inner fence (the D5 truncation) is UNRESOLVED, never DONE.
+#[test]
+#[cfg_attr(not(compose_linked), ignore = "needs librx_compose.a: stub build")]
+fn approved_document_with_fences_is_saved_byte_exact_or_not_done() {
+    let _turn = turn();
+    let (_tmp, b, hook, ws) = setup();
+    // The compose template keeps every byte (check_file_proposal reads it back).
+    let text = format!("filename: {PATH}\n{FENCED_DOC}");
+    let back = aien_runtime::spine::check_file_proposal(&text).unwrap();
+    assert_eq!(back.content, FENCED_DOC);
+    let mut p = unsigned("req-f1", "appr-f1");
+    p.content = FENCED_DOC.into();
+    p.content_sha256 = sha(FENCED_DOC.as_bytes());
+    p.approved_proposal_sha256 = interplane_sha(PATH, FENCED_DOC);
+    let p = sign(&b, p);
+    let out = hook.submit(&p, &ws);
+    if !aien_omega_compose::LINKED {
+        stub_refused(out);
+        return;
+    }
+    let r = committed(out);
+    assert_eq!(r.content_sha256, sha(FENCED_DOC.as_bytes()));
+    assert_eq!(r.compose_proposal_sha256, sha(text.as_bytes()));
+    let a = r.approved_grant.expect("grant");
+    let tgt = r.target.clone().unwrap();
+    let (pid, start) = effects::self_executor();
+    let req = |content_sha: &str| IntentRequest {
+        authorization: a,
+        proposal_sha256: r.compose_proposal_sha256.clone(),
+        path: r.path.clone(),
+        target: tgt.clone(),
+        content_sha256: content_sha.to_string(),
+        executor_pid: pid,
+        executor_start: start,
+    };
+    // An intent for any other bytes (for example the truncated text) is refused.
+    let cut = FENCED_DOC.split("```bash").next().unwrap();
+    match effects::open_intent(&b, &req(&sha(cut.as_bytes()))) {
+        ControlResponse::Error(e) => assert!(e.contains("NotAuthorized"), "{e}"),
+        other => panic!("want refusal, got {other:?}"),
+    }
+    let i = match effects::open_intent(&b, &req(&r.content_sha256)) {
+        ControlResponse::ComposeNoted(n) => n.id,
+        other => panic!("intent: {other:?}"),
+    };
+    let state_of = |k: u64| -> Value {
+        let rec = recalled(&b, &[k]);
+        serde_json::from_str(rec.cited[0].text.as_deref().unwrap()).unwrap()
+    };
+    // Truncated bytes on disk: the ack records UNRESOLVED, not DONE.
+    let target = Path::new(&tgt).to_path_buf();
+    std::fs::write(&target, cut).unwrap();
+    let k = match effects::ack(&b, i, &json!({})) {
+        ControlResponse::ComposeNoted(n) => n.id,
+        other => panic!("ack: {other:?}"),
+    };
+    let v = state_of(k);
+    assert_eq!(v["state"], "UNRESOLVED", "{v}");
+    assert_ne!(sha(&std::fs::read(&target).unwrap()), p.content_sha256);
+
+    // Second approval, same document at another path: exact bytes are DONE.
+    let mut p2 = unsigned("req-f2", "appr-f2");
+    p2.path = "FAQ.md".into();
+    p2.content = FENCED_DOC.into();
+    p2.content_sha256 = sha(FENCED_DOC.as_bytes());
+    p2.approved_proposal_sha256 = interplane_sha("FAQ.md", FENCED_DOC);
+    let r2 = committed(hook.submit(&sign(&b, p2.clone()), &ws));
+    let a2 = r2.approved_grant.expect("grant");
+    let tgt2 = r2.target.clone().unwrap();
+    let i2 = match effects::open_intent(
+        &b,
+        &IntentRequest {
+            authorization: a2,
+            proposal_sha256: r2.compose_proposal_sha256.clone(),
+            path: r2.path.clone(),
+            target: tgt2.clone(),
+            content_sha256: r2.content_sha256.clone(),
+            executor_pid: pid,
+            executor_start: start,
+        },
+    ) {
+        ControlResponse::ComposeNoted(n) => n.id,
+        other => panic!("intent: {other:?}"),
+    };
+    std::fs::write(&tgt2, FENCED_DOC).unwrap();
+    let k2 = match effects::ack(&b, i2, &json!({})) {
+        ControlResponse::ComposeNoted(n) => n.id,
+        other => panic!("ack: {other:?}"),
+    };
+    assert_eq!(state_of(k2)["state"], "DONE");
+    let disk = std::fs::read(&tgt2).unwrap();
+    assert_eq!(disk, FENCED_DOC.as_bytes());
+    assert_eq!(sha(&disk), p2.content_sha256);
+}
+
+// ---- goal requirements bound into the desk-signed approval ----
+
+/// `unsigned` with a requirement goal, sealed by the desk.
+fn with_goal(
+    b: &ComposeBridge,
+    request: &str,
+    approval: &str,
+    goal: Option<&str>,
+) -> ApprovedProposal {
+    let mut p = unsigned(request, approval);
+    p.requirements = goal.map(str::to_string);
+    sign(b, p)
+}
+
+#[test]
+fn bound_requirements_the_bytes_miss_are_refused_and_nothing_is_consumed() {
+    let _turn = turn();
+    let (_tmp, b, hook, ws) = setup();
+    let p = with_goal(
+        &b,
+        "req-rq1",
+        "appr-rq1",
+        Some("write NOTES.md in at least 5 lines"),
+    );
+    let e = refused(hook.submit(&p, &ws), "RequirementsUnmet");
+    assert!(
+        e.detail.contains("at least 5 non-empty lines, found 1"),
+        "{e}"
+    );
+    // Refused before the claim: no replay claim was consumed, nothing was
+    // written, and the same ids still work for bytes that meet the goal.
+    assert!(!Path::new(&ws).join(PATH).exists());
+    if !aien_omega_compose::LINKED {
+        return;
+    }
+    let ok = with_goal(
+        &b,
+        "req-rq1",
+        "appr-rq1",
+        Some("write NOTES.md in at least 1 line."),
+    );
+    let r = committed(hook.submit(&ok, &ws));
+    assert_eq!(r.content_sha256, sha(CONTENT.as_bytes()));
+    assert_eq!(
+        r.task.as_ref().unwrap().proposal_content_sha256.as_deref(),
+        Some(r.content_sha256.as_str())
+    );
+}
+
+#[test]
+fn bytes_meeting_the_bound_requirements_commit_with_equal_sha256() {
+    let _turn = turn();
+    let (_tmp, b, hook, ws) = setup();
+    let p = with_goal(
+        &b,
+        "req-rq2",
+        "appr-rq2",
+        Some("write it in at least 1 line"),
+    );
+    let out = hook.submit(&p, &ws);
+    if !aien_omega_compose::LINKED {
+        stub_refused(out);
+        return;
+    }
+    let r = committed(out);
+    let t = r.task.as_ref().unwrap();
+    assert!(t.committed);
+    assert_eq!(r.content_sha256, sha(CONTENT.as_bytes()));
+    assert_eq!(
+        t.proposal_content_sha256.as_deref(),
+        Some(r.content_sha256.as_str())
+    );
+}
+
+#[test]
+fn explicitly_signed_empty_requirements_are_allowed() {
+    let _turn = turn();
+    let (_tmp, b, hook, ws) = setup();
+    let p = with_goal(&b, "req-rq3", "appr-rq3", Some(""));
+    let out = hook.submit(&p, &ws);
+    if !aien_omega_compose::LINKED {
+        stub_refused(out);
+        return;
+    }
+    committed(out);
+}
+
+#[test]
+fn missing_requirement_binding_is_refused_even_when_signed() {
+    let _turn = turn();
+    let (_tmp, b, hook, ws) = setup();
+    let p = with_goal(&b, "req-rq4", "appr-rq4", None);
+    // Refused in the checks that need no compose home, stub build included.
+    refused(hook.submit(&p, &ws), "RequirementsUnbound");
+}
+
+#[test]
+fn tampered_requirement_set_fails_the_mac() {
+    let _turn = turn();
+    let (_tmp, b, hook, ws) = setup();
+    // The desk signed a demanding goal; the caller swaps in an empty one.
+    let mut p = with_goal(
+        &b,
+        "req-rq5",
+        "appr-rq5",
+        Some("write NOTES.md in at least 5 lines"),
+    );
+    p.requirements = Some(String::new());
+    refused(hook.submit(&p, &ws), "Unauthenticated");
+    // And a bound goal cannot be dropped to None either.
+    let mut q = with_goal(&b, "req-rq6", "appr-rq6", Some(""));
+    q.requirements = None;
+    refused(hook.submit(&q, &ws), "RequirementsUnbound");
+}
+
+#[test]
+fn uncertain_bound_requirements_are_refused() {
+    let _turn = turn();
+    let (_tmp, b, hook, ws) = setup();
+    let p = with_goal(
+        &b,
+        "req-rq7",
+        "appr-rq7",
+        Some("at least 3 lines of context"),
+    );
+    refused(hook.submit(&p, &ws), "RequirementsUncertain");
+}
+
+#[test]
+fn bound_added_line_counts_are_measured_against_the_existing_file() {
+    let _turn = turn();
+    let (_tmp, b, hook, ws) = setup();
+    std::fs::write(Path::new(&ws).join(PATH), "one\ntwo\n").unwrap();
+    // The approved bytes add one line to the two that exist.
+    let mut p = unsigned("req-al1", "appr-al1");
+    p.content = "one\ntwo\nthree\n".into();
+    p.approved_proposal_sha256 = interplane_sha(PATH, &p.content);
+    p.content_sha256 = sha(p.content.as_bytes());
+    p.requirements = Some("Add 2 lines to NOTES.md".into());
+    p.requirements_base = Some(sha(b"one\ntwo\n"));
+    let two = sign(&b, p.clone());
+    let e = refused(hook.submit(&two, &ws), "RequirementsUnmet");
+    assert!(
+        e.detail
+            .contains("exactly 2 added non-empty lines, found 1"),
+        "{e}"
+    );
+    // One added line meets "Add one line": never a requirement refusal.
+    p.request_id = "req-al2".into();
+    p.trace_id = "trace-req-al2".into();
+    p.approval_id = "appr-al2".into();
+    p.requirements = Some("Add one line to NOTES.md".into());
+    let one = sign(&b, p);
+    if let Err(e) = hook.submit(&one, &ws) {
+        assert!(!e.name.starts_with("Requirements"), "{e}");
+    }
+}
+
+#[test]
+fn a_path_that_reads_like_a_requirement_is_not_one() {
+    let _turn = turn();
+    let (_tmp, b, hook, ws) = setup();
+    let path = "docs/add-2-lines-to-10-lines.md";
+    std::fs::create_dir_all(Path::new(&ws).join("docs")).unwrap();
+    let mut p = unsigned("req-mg1", "appr-mg1");
+    p.path = path.into();
+    p.approved_proposal_sha256 = interplane_sha(path, CONTENT);
+    let p = sign(&b, p);
+    let out = hook.submit(&p, &ws);
+    if !aien_omega_compose::LINKED {
+        stub_refused(out);
+        return;
+    }
+    committed(out);
+}
+
+#[test]
+fn added_line_goal_without_a_bound_base_or_with_a_stale_one_is_refused() {
+    let _turn = turn();
+    let (_tmp, b, hook, ws) = setup();
+    std::fs::write(Path::new(&ws).join(PATH), "one\ntwo\n").unwrap();
+    let mut p = unsigned("req-bs1", "appr-bs1");
+    p.content = "one\ntwo\nthree\n".into();
+    p.approved_proposal_sha256 = interplane_sha(PATH, &p.content);
+    p.content_sha256 = sha(p.content.as_bytes());
+    p.requirements = Some("Add one line to NOTES.md".into());
+    // No base bound: the check could not be tied to a file state.
+    let none = sign(&b, p.clone());
+    refused(hook.submit(&none, &ws), "RequirementsUnbound");
+    // A base that is not the file now (it changed after the desk looked).
+    p.request_id = "req-bs2".into();
+    p.trace_id = "trace-req-bs2".into();
+    p.approval_id = "appr-bs2".into();
+    p.requirements_base = Some(sha(b"something else\n"));
+    let stale = sign(&b, p.clone());
+    let e = refused(hook.submit(&stale, &ws), "BaseChanged");
+    assert!(e.detail.contains("changed since the desk bound it"), "{e}");
+    // The base is covered by the MAC: swapping it after signing fails authentication.
+    p.request_id = "req-bs3".into();
+    p.trace_id = "trace-req-bs3".into();
+    p.approval_id = "appr-bs3".into();
+    p.requirements_base = Some(sha(b"one\ntwo\n"));
+    let mut signed = sign(&b, p);
+    signed.requirements_base = Some(sha(b"something else\n"));
+    refused(hook.submit(&signed, &ws), "Unauthenticated");
 }

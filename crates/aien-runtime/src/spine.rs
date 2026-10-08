@@ -416,6 +416,7 @@ impl AienRuntimeSpine {
             | ControlCommand::ComposeEffectAck { .. }
             | ControlCommand::ComposeReconcile { .. }
             | ControlCommand::ComposeControl { .. }
+            | ControlCommand::ComposeAuthorize { .. }
             | ControlCommand::ComposeApprovedProposal { .. } => ControlResponse::Error(
                 "compose commands are handled on the socket connection, not as one-shot commands"
                     .into(),
@@ -727,6 +728,59 @@ fn check_relative_path(p: &str) -> Result<(), String> {
     }
 }
 
+/// A code-fence line: its backtick run length and whether an info string
+/// (such as `bash`) follows the run. Not a fence if fewer than three
+/// backticks start the line or the info string itself holds a backtick.
+fn fence_line(l: &str) -> Option<(usize, bool)> {
+    let t = l.trim_start();
+    let n = t.bytes().take_while(|&b| b == b'`').count();
+    if n < 3 {
+        return None;
+    }
+    let info = t[n..].trim();
+    if info.contains('`') {
+        return None;
+    }
+    Some((n, !info.is_empty()))
+}
+
+/// Index (into `body`, which starts after the opening fence of backtick
+/// length `open_len`) of the line that closes the outer fence, or None.
+/// CommonMark: a closing fence is bare (no info string) and at least as long
+/// as the opener, so shorter inner fences are plain content. Inner fences of
+/// the same length that carry an info string (` ```bash `) open a nested block
+/// that its own bare fence must close first. If that scan finds no balanced
+/// close (unbalanced reply), the LAST bare fence of sufficient length is
+/// taken, so content is never cut at an inner fence. A bare fence at depth 0
+/// that still has fences after it is a bare inner opener, so the outer fence
+/// is closed by the last fence of the reply. Limit: prose that itself holds a
+/// fence AFTER the real close is read as part of the file. With no bare fence at
+/// all there is no close: the caller keeps the whole body.
+fn outer_fence_close(body: &[&str], open_len: usize) -> Option<usize> {
+    let fences: Vec<(usize, bool)> = body
+        .iter()
+        .enumerate()
+        .filter_map(|(i, l)| fence_line(l).filter(|f| f.0 >= open_len).map(|f| (i, f.1)))
+        .collect();
+    let mut depth = 0usize;
+    let mut last_bare = None;
+    for (k, &(i, info)) in fences.iter().enumerate() {
+        if info {
+            depth += 1;
+        } else if depth > 0 {
+            depth -= 1;
+            last_bare = Some(i);
+        } else if k + 1 == fences.len() {
+            return Some(i);
+        } else {
+            // A bare fence with more fences after it opens a bare inner block;
+            // only the final fence can then be the outer close.
+            depth += 1;
+        }
+    }
+    last_bare
+}
+
 /// The model's answer in the fixed proposal template: the first nonempty
 /// line is `filename: <relative path>` (case-insensitive key; quotes,
 /// backticks and asterisks around it or the path are ignored), everything
@@ -755,8 +809,13 @@ pub fn check_file_proposal(text: &str) -> Result<FileProposal, String> {
         .first()
         .is_some_and(|l| l.trim_start().starts_with("```"))
     {
+        let open_len = body[0]
+            .trim_start()
+            .bytes()
+            .take_while(|&b| b == b'`')
+            .count();
         body.remove(0);
-        if let Some(end) = body.iter().position(|l| l.trim_start().starts_with("```")) {
+        if let Some(end) = outer_fence_close(&body, open_len) {
             body.truncate(end);
         }
     }
@@ -781,11 +840,193 @@ pub const COMPOSE_MAX_ATTEMPTS: u32 = 3;
 /// Wall budget for all attempts of one task: rx_compose_run's 30 s
 /// quiescence wait (not raised) less a 1 s margin (ACCEPTANCE-v3 Section 3b).
 pub const COMPOSE_SKILL_BUDGET: std::time::Duration = std::time::Duration::from_secs(29);
+/// Wall budget of a full-document task (one that creates a new file): 120 s.
+pub const COMPOSE_DOC_BUDGET: std::time::Duration = std::time::Duration::from_secs(120);
+/// Env: wall budget of a small edit, in ms. Unset = `COMPOSE_SKILL_BUDGET` (29 s).
+pub const COMPOSE_EDIT_BUDGET_ENV: &str = "AIEN_COMPOSE_EDIT_BUDGET_MS";
+/// Env: wall budget of a full-document task, in ms. Unset = `COMPOSE_DOC_BUDGET` (120 s).
+pub const COMPOSE_DOC_BUDGET_ENV: &str = "AIEN_COMPOSE_DOC_BUDGET_MS";
+/// Env: output token cap of a full-document task. Unset = `COMPOSE_DOC_MAX_TOKENS_DEFAULT`.
+/// (Small edits keep `AIEN_COMPOSE_MAX_TOKENS`, read by the daemon, default 48.)
+pub const COMPOSE_DOC_MAX_TOKENS_ENV: &str = "AIEN_COMPOSE_DOC_MAX_TOKENS";
+/// The one-budget setting this replaced. Setting it is refused, never ignored.
+pub const COMPOSE_BUDGET_ENV_RETIRED: &str = "AIEN_COMPOSE_BUDGET_MS";
+/// Default output token cap of a full-document task.
+pub const COMPOSE_DOC_MAX_TOKENS_DEFAULT: usize = 1024;
+/// Accepted range of `AIEN_COMPOSE_DOC_MAX_TOKENS`.
+pub const COMPOSE_DOC_MAX_TOKENS_RANGE: std::ops::RangeInclusive<usize> = 16..=4096;
+/// Accepted range of both budget settings: omega waits budget + 1 000 ms and accepts at most 600 000 ms.
+pub const COMPOSE_BUDGET_MS_RANGE: std::ops::RangeInclusive<u64> = 1_000..=599_000;
+/// Margin between the skill budget and omega's settle wait.
+pub const COMPOSE_WAIT_MARGIN: std::time::Duration = std::time::Duration::from_millis(1_000);
+
+/// What a compose task is, for limits: a small edit of an existing file, or
+/// the creation of a whole new document. Decided by `classify_target`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProposalKind {
+    Edit,
+    Document,
+}
+
+/// What the goal's named target is, decided by whether the path EXISTS (not by
+/// whether an edit block can be built from it).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TargetClass {
+    /// No existing file is named: the task creates a new document.
+    New,
+    /// An existing small UTF-8 file inside the workspace: path and content.
+    Edit(String, String),
+    /// An existing path that no edit block can be built for (too large,
+    /// non-UTF-8, unreadable, or resolving outside the workspace). Never a
+    /// new document, never overwritten.
+    Refused(String),
+}
+
+impl TargetClass {
+    pub fn kind(&self) -> ProposalKind {
+        match self {
+            Self::Edit(..) => ProposalKind::Edit,
+            _ => ProposalKind::Document,
+        }
+    }
+}
+
+/// The two wall budgets in force.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ComposeBudgets {
+    pub edit: std::time::Duration,
+    pub doc: std::time::Duration,
+}
+
+impl Default for ComposeBudgets {
+    fn default() -> Self {
+        Self {
+            edit: COMPOSE_SKILL_BUDGET,
+            doc: COMPOSE_DOC_BUDGET,
+        }
+    }
+}
+
+impl ComposeBudgets {
+    pub fn for_kind(&self, kind: ProposalKind) -> std::time::Duration {
+        match kind {
+            ProposalKind::Edit => self.edit,
+            ProposalKind::Document => self.doc,
+        }
+    }
+}
+
+/// Parse one budget setting named `name`. `None` (unset) gives `default`; an
+/// empty, non-numeric or out-of-range value is refused, never replaced by the default.
+pub fn parse_compose_budget(
+    name: &str,
+    default: std::time::Duration,
+    v: Option<&str>,
+) -> Result<std::time::Duration, String> {
+    let Some(raw) = v else {
+        return Ok(default);
+    };
+    let ms: u64 = raw
+        .trim()
+        .parse()
+        .map_err(|_| format!("{name}={raw:?} is not a whole number of milliseconds"))?;
+    if !COMPOSE_BUDGET_MS_RANGE.contains(&ms) {
+        return Err(format!(
+            "{name}={ms} is outside {}..={} ms",
+            COMPOSE_BUDGET_MS_RANGE.start(),
+            COMPOSE_BUDGET_MS_RANGE.end()
+        ));
+    }
+    Ok(std::time::Duration::from_millis(ms))
+}
+
+/// Parse `AIEN_COMPOSE_DOC_MAX_TOKENS` (same refusal rule as the budgets).
+pub fn parse_compose_doc_max_tokens(v: Option<&str>) -> Result<usize, String> {
+    let Some(raw) = v else {
+        return Ok(COMPOSE_DOC_MAX_TOKENS_DEFAULT);
+    };
+    let n: usize = raw.trim().parse().map_err(|_| {
+        format!("{COMPOSE_DOC_MAX_TOKENS_ENV}={raw:?} is not a whole number of tokens")
+    })?;
+    if !COMPOSE_DOC_MAX_TOKENS_RANGE.contains(&n) {
+        return Err(format!(
+            "{COMPOSE_DOC_MAX_TOKENS_ENV}={n} is outside {}..={} tokens",
+            COMPOSE_DOC_MAX_TOKENS_RANGE.start(),
+            COMPOSE_DOC_MAX_TOKENS_RANGE.end()
+        ));
+    }
+    Ok(n)
+}
+
+fn env_opt(name: &str) -> Result<Option<String>, String> {
+    match std::env::var(name) {
+        Ok(v) => Ok(Some(v)),
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(e) => Err(format!("{name} unreadable: {e}")),
+    }
+}
+
+/// Both budgets from the environment. Refuses the retired single-budget
+/// setting (a stale `AIEN_COMPOSE_BUDGET_MS` must not be silently ignored).
+pub fn compose_budgets_from_env() -> Result<ComposeBudgets, String> {
+    if std::env::var_os(COMPOSE_BUDGET_ENV_RETIRED).is_some() {
+        return Err(format!(
+            "{COMPOSE_BUDGET_ENV_RETIRED} is retired; set {COMPOSE_EDIT_BUDGET_ENV} and {COMPOSE_DOC_BUDGET_ENV}"
+        ));
+    }
+    Ok(ComposeBudgets {
+        edit: parse_compose_budget(
+            COMPOSE_EDIT_BUDGET_ENV,
+            COMPOSE_SKILL_BUDGET,
+            env_opt(COMPOSE_EDIT_BUDGET_ENV)?.as_deref(),
+        )?,
+        doc: parse_compose_budget(
+            COMPOSE_DOC_BUDGET_ENV,
+            COMPOSE_DOC_BUDGET,
+            env_opt(COMPOSE_DOC_BUDGET_ENV)?.as_deref(),
+        )?,
+    })
+}
+
+/// The document token cap from the environment.
+pub fn compose_doc_max_tokens_from_env() -> Result<usize, String> {
+    parse_compose_doc_max_tokens(env_opt(COMPOSE_DOC_MAX_TOKENS_ENV)?.as_deref())
+}
+
+/// Stable prefix of `wall_clock_reason`: `propose_task_with_retries` classes an
+/// attempt as "timeout" by it, and the token-limit cut (`length_cut_refusal`) never has it.
+pub const WALL_CLOCK_REASON_PREFIX: &str = "model proposal exceeded ";
+
+/// Reason text of a wall-clock timeout.
+pub fn wall_clock_reason(limit_ms: u128) -> String {
+    format!("{WALL_CLOCK_REASON_PREFIX}{limit_ms} ms")
+}
+
 /// Time one full attempt needs, from the v3 measurement: 173-token retry
 /// prompt prefill (2 839 + 896 ms) + 47 decode steps x 166.6 ms + 60 ms
 /// = 11 625 ms, rounded up (ACCEPTANCE-v3 Section 3b). Attempt k > 1 starts
 /// only if at least this much budget is left.
 pub const COMPOSE_ATTEMPT_BUDGET: std::time::Duration = std::time::Duration::from_millis(12_000);
+/// Same rule for a full document. DIAGNOSTIC-LONG-1 (sovereign-core branch
+/// 031756/oq3-long-diag) measured replies of 313..649 tokens finishing by
+/// themselves in 28.6..61.9 s (~88 ms/token plus prefill), so a retry that
+/// has to write a whole document needs about the shortest measured one:
+/// 28.6 s, rounded up to 30 s. With the 120 s budget, a first attempt up to the
+/// longest measured (61.9 s) leaves 58 s and still allows a retry; one that ran
+/// to the token cap (1024 tokens, ~90 s) leaves ~30 s and may not. Capped at
+/// half the budget so a small custom doc budget keeps the retry rule meaningful.
+pub const COMPOSE_DOC_ATTEMPT_BUDGET: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// The per-attempt budget for `kind` under wall budget `budget`.
+pub fn compose_attempt_budget(
+    kind: ProposalKind,
+    budget: std::time::Duration,
+) -> std::time::Duration {
+    match kind {
+        ProposalKind::Edit => COMPOSE_ATTEMPT_BUDGET,
+        ProposalKind::Document => COMPOSE_DOC_ATTEMPT_BUDGET.min(budget / 2),
+    }
+}
 
 /// Assistant-response prefix of the production RunComposeTask template: the
 /// assistant turn starts with it and the model generates the path and the
@@ -828,31 +1069,122 @@ pub fn proposal_prompt(goal: &str, workspace: &str) -> String {
 /// (NEXT-PHASE-1 v6 T5); a larger file gets no block.
 pub const COMPOSE_EDIT_MAX_BYTES: u64 = 8192;
 
-/// NEXT-PHASE-1 v6 edit mode: the first whitespace-separated word of the goal
-/// that (after stripping surrounding quotes, backticks, brackets and trailing
-/// `.,;:!?`) is a plain relative path naming an existing regular UTF-8 file
-/// of at most `COMPOSE_EDIT_MAX_BYTES` inside the canonical workspace `ws`.
-/// Returns that path and the file's content. None when the goal names no
-/// existing file, so a new-file goal keeps the v5 prompt byte for byte.
+/// NEXT-PHASE-1 v6 edit mode: the goal's DESTINATION (see `destination.rs`,
+/// issue #288; paths the goal only reads are ignored) when it is a plain
+/// relative path naming an existing regular UTF-8 file of at most
+/// `COMPOSE_EDIT_MAX_BYTES` inside the canonical workspace `ws`. Returns that
+/// path and the file's content. None when the destination is missing, unsafe
+/// or ambiguous, so a new-file goal keeps the v5 prompt byte for byte.
 pub fn existing_target(goal: &str, ws: &Path) -> Option<(String, String)> {
-    let ws = std::fs::canonicalize(ws).ok()?;
-    goal.split_whitespace().find_map(|w| {
-        let w = w
-            .trim_matches(|c| matches!(c, '"' | '\'' | '`' | '(' | ')' | '[' | ']'))
-            .trim_end_matches(['.', ',', ';', ':', '!', '?'])
-            .trim_matches(|c| matches!(c, '"' | '\'' | '`' | '(' | ')' | '[' | ']'));
-        check_relative_path(w).ok()?;
-        let full = std::fs::canonicalize(ws.join(w)).ok()?;
-        if !full.starts_with(&ws) {
-            return None;
+    match classify_target(goal, ws) {
+        TargetClass::Edit(p, c) => Some((p, c)),
+        _ => None,
+    }
+}
+
+/// Decide the task kind from the goal's DESTINATION only (issue #288): the
+/// path the goal asks to create or change, found by
+/// `crate::destination::named_destination`; paths it merely reads ("about
+/// README.md") are never classified. The destination is then judged by the disk:
+/// a small UTF-8 file inside the workspace is `Edit`; a missing path inside the
+/// workspace is `New`; everything else is `Refused` with the reason: an
+/// absolute, `~`, `..` or non-plain path, a symlink or parent resolving outside
+/// the workspace, a directory, a file over `COMPOSE_EDIT_MAX_BYTES`, non-UTF-8
+/// or unreadable content, and an ambiguous destination (several candidates).
+/// A goal naming no destination is `New` (the model names the file).
+pub fn classify_target(goal: &str, ws: &Path) -> TargetClass {
+    classify_destination(goal, ws).0
+}
+
+/// `classify_target` plus the destination path it judged (None when the goal
+/// names none). This is the single decision of a task: the prompt, the budget,
+/// the merge target and the check of the reply's `filename:` all use it.
+pub fn classify_destination(goal: &str, ws: &Path) -> (TargetClass, Option<String>) {
+    let Ok(ws) = std::fs::canonicalize(ws) else {
+        return (TargetClass::New, None);
+    };
+    let is_file = |w: &str| {
+        check_relative_path(w).is_ok() && std::fs::metadata(ws.join(w)).is_ok_and(|m| m.is_file())
+    };
+    let w = match crate::destination::named_destination(goal, &is_file) {
+        Ok(Some(w)) => w,
+        Ok(None) => return (TargetClass::New, None),
+        Err(e) => return (TargetClass::Refused(format!("{e}")), None),
+    };
+    let class = classify_named(&w, &ws);
+    (class, Some(w))
+}
+
+fn classify_named(w: &str, ws: &Path) -> TargetClass {
+    let refuse = |why: &str| {
+        TargetClass::Refused(format!(
+            "destination {w} cannot be written safely ({why}); refusing"
+        ))
+    };
+    if check_relative_path(w).is_err() {
+        return refuse("not a plain relative path inside the workspace");
+    }
+    let joined = ws.join(w);
+    // symlink_metadata: a dangling or outward symlink still EXISTS.
+    let Ok(lmeta) = std::fs::symlink_metadata(&joined) else {
+        // Missing: a new document, if its nearest existing parent is a
+        // directory inside the workspace (no symlinked parent leaving it).
+        let mut anc = joined.parent();
+        while let Some(a) = anc {
+            if std::fs::symlink_metadata(a).is_ok() {
+                break;
+            }
+            anc = a.parent();
         }
-        let meta = std::fs::metadata(&full).ok()?;
-        if !meta.is_file() || meta.len() > COMPOSE_EDIT_MAX_BYTES {
-            return None;
-        }
-        let content = String::from_utf8(std::fs::read(&full).ok()?).ok()?;
-        Some((w.to_string(), content))
-    })
+        return match anc.map(std::fs::canonicalize) {
+            Some(Ok(p)) if p.starts_with(ws) && p.is_dir() => TargetClass::New,
+            Some(Ok(p)) if p.starts_with(ws) => refuse("a parent is not a directory"),
+            Some(Ok(_)) => refuse("a parent resolves outside the workspace"),
+            _ => refuse("unresolvable parent"),
+        };
+    };
+    let refuse = |why: &str| {
+        TargetClass::Refused(format!(
+            "destination {w} already exists but cannot be edited safely ({why}); refusing instead of treating it as a new document"
+        ))
+    };
+    let full = match std::fs::canonicalize(&joined) {
+        Ok(f) => f,
+        Err(_) if lmeta.file_type().is_symlink() => return refuse("unresolvable symlink"),
+        Err(_) => return refuse("unresolvable path"),
+    };
+    if !full.starts_with(ws) {
+        return refuse("resolves outside the workspace");
+    }
+    let Ok(meta) = std::fs::metadata(&full) else {
+        return refuse("unreadable");
+    };
+    if meta.is_dir() {
+        return refuse("it is a directory");
+    }
+    if !meta.is_file() {
+        return refuse("not a regular file");
+    }
+    if meta.len() > COMPOSE_EDIT_MAX_BYTES {
+        return refuse(&format!(
+            "{} bytes is over the {COMPOSE_EDIT_MAX_BYTES}-byte edit limit",
+            meta.len()
+        ));
+    }
+    let Ok(bytes) = std::fs::read(&full) else {
+        return refuse("unreadable");
+    };
+    match String::from_utf8(bytes) {
+        Ok(content) => TargetClass::Edit(w.to_string(), content),
+        Err(_) => refuse("not UTF-8 text"),
+    }
+}
+
+/// The additive new-document block, appended when the goal names a destination
+/// that does not exist yet: the model is told which file to write and must
+/// answer with that `filename:` line (issue #288).
+pub fn new_document_block(path: &str) -> String {
+    format!("\nWrite the new file {path}. The filename line of your answer must be exactly: filename: {path}")
 }
 
 /// The additive edit-mode block (NEXT-PHASE-1 v6 T5), appended to the fixed
@@ -877,12 +1209,42 @@ pub fn task_prompt(goal: &str, ws: &Path) -> String {
 /// merges an edit reply into this same content, so the bytes the model saw
 /// are the bytes the merge keeps.
 pub fn task_prompt_and_target(goal: &str, ws: &Path) -> (String, Option<(String, String)>) {
-    let mut prompt = proposal_prompt(goal, &ws.display().to_string());
-    let target = existing_target(goal, ws);
-    if let Some((path, content)) = &target {
-        prompt.push_str(&edit_block(path, content));
-    }
+    let (prompt, target, _) = task_plan(goal, ws).unwrap_or_else(|_| {
+        (
+            proposal_prompt(goal, &ws.display().to_string()),
+            None,
+            ProposalKind::Document,
+        )
+    });
     (prompt, target)
+}
+
+/// Prompt, edit target and kind of a task, or the refusal when the goal names
+/// an existing file that no edit block can be built for.
+pub fn task_plan(goal: &str, ws: &Path) -> Result<TaskPrompt, String> {
+    task_decision(goal, ws).map(|(plan, _)| plan)
+}
+
+/// `task_plan` plus the destination path the goal named (None when it names
+/// none). The one decision of a task: a reply whose `filename:` differs from
+/// the destination is refused by the Skill.
+pub fn task_decision(goal: &str, ws: &Path) -> Result<(TaskPrompt, Option<String>), String> {
+    let mut prompt = proposal_prompt(goal, &ws.display().to_string());
+    let (class, dest) = classify_destination(goal, ws);
+    let kind = class.kind();
+    match class {
+        TargetClass::Refused(why) => Err(format!("RunComposeTask: {why}")),
+        TargetClass::Edit(path, content) => {
+            prompt.push_str(&edit_block(&path, &content));
+            Ok(((prompt, Some((path, content)), kind), dest))
+        }
+        TargetClass::New => {
+            if let Some(d) = &dest {
+                prompt.push_str(&new_document_block(d));
+            }
+            Ok(((prompt, None, kind), dest))
+        }
+    }
 }
 
 /// Largest prior-lines x reply-lines table `merge_edit_reply` builds.
@@ -1042,8 +1404,134 @@ pub fn propose_task_with_retries(
     attempt_budget: std::time::Duration,
     max_attempts: u32,
 ) -> (Result<String, String>, Vec<ProposalAttempt>) {
+    propose_task_checked(
+        proposer,
+        base,
+        edit,
+        &[],
+        budget,
+        attempt_budget,
+        max_attempts,
+    )
+}
+
+fn new_attempt(k: u32) -> ProposalAttempt {
+    ProposalAttempt {
+        attempt: k,
+        ms: 0,
+        tokens: 0,
+        outcome: String::new(),
+        reason: None,
+        text_sha256: None,
+        text: None,
+        aegis: None,
+        finish_reason: None,
+        token_ids: None,
+        prompt_tokens: None,
+        prompt_ids_sha256: None,
+        unmet_requirements: Vec::new(),
+    }
+}
+
+/// The approved-proposal path of the Skill: exactly one attempt that returns
+/// `text` unchanged, through the same requirement check as a model reply (the
+/// bytes a human approved are still refused, before any write, when the goal
+/// states a requirement they do not meet).
+pub(crate) fn propose_approved(
+    text: &str,
+    prompt: &str,
+    reqs: &[crate::requirements::Requirement],
+    budget: std::time::Duration,
+    attempt_budget: std::time::Duration,
+) -> SkillOutput {
+    let text = text.to_string();
+    let one = move |_: &str, _: std::time::Duration| {
+        Ok(Generation {
+            text: text.clone(),
+            finish_reason: Some("approved".into()),
+            ..Default::default()
+        })
+    };
+    propose_task_checked(&one, prompt, None, reqs, budget, attempt_budget, 1)
+}
+
+#[cfg(test)]
+pub(crate) const TEST_DROP_RECORD_MARKER: &str = "drop-the-record-marker";
+
+/// Why a task is refused when its requirement record is gone (issue #289).
+pub(crate) const MISSING_RECORD_REASON: &str =
+    "requirement record missing for this task: refused, an absent record is never treated as no requirements";
+
+/// A task refused before the model ran: one attempt records the reason.
+pub(crate) fn refused_without_model(why: String) -> SkillOutput {
+    let mut a = new_attempt(1);
+    a.outcome = "refused".into();
+    a.reason = Some(why.clone());
+    (Err(why), vec![a])
+}
+
+/// The AEGIS verify decision for one task: the result names exactly the
+/// proposal the Skill recorded, that proposal parses as one file change, and
+/// the COMPLETE content (the bytes that would be saved) meets every requirement
+/// of the goal. A missing requirement record, or any uncertain span, refuses.
+pub(crate) fn verify_task_result(
+    ex: Option<&crate::requirements::Extraction>,
+    proposal: Option<&SkillOutput>,
+    result: u64,
+) -> bool {
+    let Some(ex) = ex else { return false };
+    if ex.refusal().is_some() {
+        return false;
+    }
+    let Some((Ok(t), _)) = proposal else {
+        return false;
+    };
+    proposal_handle(t) == result
+        && parse_file_proposal(t).is_some_and(|p| {
+            crate::requirements::refusal_reason(&ex.requirements, &p.content).is_none()
+        })
+}
+
+/// `propose_task_with_retries` plus requirement validation: a parsed reply
+/// whose COMPLETE content (the merged file in edit mode, i.e. the bytes that
+/// would be saved) fails any of `reqs` is refused like a parse failure, the
+/// unmet requirement(s) are recorded on the attempt, and the next attempt
+/// gets them as its retry reason. `budget` is one deadline for the whole
+/// task, started when this function starts and never reset per attempt.
+/// Exhaustion returns Err: no proposal exists, so nothing is approved,
+/// committed or written.
+pub fn propose_task_checked(
+    proposer: &(dyn Fn(&str, std::time::Duration) -> Result<Generation, String> + Send + Sync),
+    base: &str,
+    edit: Option<(&str, &str)>,
+    reqs: &[crate::requirements::Requirement],
+    budget: std::time::Duration,
+    attempt_budget: std::time::Duration,
+    max_attempts: u32,
+) -> (Result<String, String>, Vec<ProposalAttempt>) {
     let start = std::time::Instant::now();
     let mut attempts: Vec<ProposalAttempt> = Vec::new();
+    // An edit only adds lines (`merge_edit_reply` keeps every prior line), so a
+    // prior file that already breaks a MaxLines can never satisfy it: refuse
+    // now with a recorded reason instead of spending attempts.
+    if let Some((path, prior)) = edit {
+        let over: Vec<String> = reqs
+            .iter()
+            .filter(|r| matches!(r, crate::requirements::Requirement::MaxLines(_)))
+            .filter_map(|r| r.check(prior))
+            .collect();
+        if !over.is_empty() {
+            let why = format!(
+                "unmet requirement: the existing {path} already breaks it ({}) and an edit only adds lines",
+                over.join("; ")
+            );
+            let mut a = new_attempt(1);
+            a.outcome = "refused".into();
+            a.reason = Some(why.clone());
+            a.unmet_requirements = over;
+            return (Err(why), vec![a]);
+        }
+    }
     let mut last_reason = "no attempt made".to_string();
     let need_ms = (attempt_budget.as_millis() as u64).max(1);
     for k in 1..=max_attempts {
@@ -1063,20 +1551,8 @@ pub fn propose_task_with_retries(
         let t0 = std::time::Instant::now();
         let out = proposer(&prompt, remaining);
         let last_ms = t0.elapsed().as_millis() as u64;
-        let mut a = ProposalAttempt {
-            attempt: k,
-            ms: last_ms,
-            tokens: 0,
-            outcome: String::new(),
-            reason: None,
-            text_sha256: None,
-            text: None,
-            aegis: None,
-            finish_reason: None,
-            token_ids: None,
-            prompt_tokens: None,
-            prompt_ids_sha256: None,
-        };
+        let mut a = new_attempt(k);
+        a.ms = last_ms;
         match out {
             Ok(g) => {
                 a.tokens = g.tokens;
@@ -1089,7 +1565,17 @@ pub fn propose_task_with_retries(
                 // NEXT-PHASE-1 v6 N2: a length-cut reply is refused before parsing.
                 let checked = match length_cut_refusal(&g) {
                     Some(why) => Err(why),
-                    None => edit_proposal(&g.text, edit),
+                    None => edit_proposal(&g.text, edit).and_then(|p| {
+                        // The complete content that would be saved.
+                        let content = check_file_proposal(&p)?.content;
+                        match crate::requirements::refusal_reason(reqs, &content) {
+                            Some(why) => {
+                                a.unmet_requirements = crate::requirements::unmet(reqs, &content);
+                                Err(why)
+                            }
+                            None => Ok(p),
+                        }
+                    }),
                 };
                 match checked {
                     Ok(proposal) => {
@@ -1105,7 +1591,7 @@ pub fn propose_task_with_retries(
                 }
             }
             Err(e) => {
-                a.outcome = if e.contains("exceeded") {
+                a.outcome = if e.starts_with(WALL_CLOCK_REASON_PREFIX) {
                     "timeout"
                 } else {
                     "error"
@@ -1158,7 +1644,7 @@ pub(crate) fn record_view(
 pub(crate) struct ComposeHome {
     pub(crate) compose: Compose,
     pub(crate) machine_id: String,
-    prompts: Arc<parking_lot::Mutex<HashMap<u64, TaskPrompt>>>,
+    prompts: Arc<parking_lot::Mutex<HashMap<u64, TaskEntry>>>,
     /// Proposer hook: task -> approved proposal text (crate::approved).
     approved: Arc<parking_lot::Mutex<HashMap<u64, String>>>,
     /// What the model Skill returned per task: the text, or why it gave
@@ -1171,6 +1657,8 @@ pub(crate) struct ComposeHome {
     mark: Option<Mark>,
     /// seq of the last mark this home knows of (0 = none yet).
     mark_seq: u64,
+    /// Wall budgets in force; every run sets omega's wait from its own.
+    budgets: ComposeBudgets,
 }
 
 impl ComposeHome {
@@ -1208,13 +1696,22 @@ impl ComposeHome {
 }
 
 type SkillOutput = (Result<String, String>, Vec<ProposalAttempt>);
-/// The prompt of one task and its edit target (`task_prompt_and_target`).
-type TaskPrompt = (String, Option<(String, String)>);
+/// The prompt of one task, its edit target and its kind (`task_plan`).
+pub type TaskPrompt = (String, Option<(String, String)>, ProposalKind);
+/// A task's plan plus the requirements its goal states (`requirements::extract`).
+/// Prompt plan, requirements, and the destination the goal named (one decision).
+type TaskEntry = (
+    TaskPrompt,
+    crate::requirements::Extraction,
+    (Option<String>, PathBuf),
+);
 
 /// Owns the composition home of this process.
 pub struct ComposeBridge {
     dir: PathBuf,
     proposer: ComposeProposer,
+    /// Proposer for full-document tasks (own token cap); `None` = `proposer`.
+    doc_proposer: Option<ComposeProposer>,
     proposer_label: String,
     home: std::sync::Mutex<Option<ComposeHome>>,
     /// Set when the start-up reconcile failed or was refused (ACCEPTANCE-v3
@@ -1227,10 +1724,17 @@ impl ComposeBridge {
         Self {
             dir,
             proposer,
+            doc_proposer: None,
             proposer_label: proposer_label.to_string(),
             home: std::sync::Mutex::new(None),
             reconcile_failed: std::sync::Mutex::new(None),
         }
+    }
+
+    /// Use `doc_proposer` (its own token cap) for full-document tasks.
+    pub fn with_doc_proposer(mut self, doc_proposer: ComposeProposer) -> Self {
+        self.doc_proposer = Some(doc_proposer);
+        self
     }
 
     pub fn dir(&self) -> &Path {
@@ -1245,6 +1749,9 @@ impl ComposeBridge {
     /// `rebuilt_from` = the seq of a mark RecoverComposeHome just set aside:
     /// the home then opens without a mark and gets a fresh one.
     fn open_home_marked(&self, rebuilt_from: Option<u64>) -> Result<ComposeHome, String> {
+        // Refuse a bad budget before anything is opened (never fall back).
+        let budgets = compose_budgets_from_env()
+            .map_err(|e| format!("compose home {} refused: {e}", self.dir.display()))?;
         let root = machine_root(&self.dir)?;
         let mark_path = cortex_mark::mark_path(&self.dir);
         let existing = match rebuilt_from {
@@ -1260,6 +1767,12 @@ impl ComposeBridge {
         let (mut compose, info) =
             Compose::open(&self.dir, RootKind::Provisioned, &root, 0xA1E4_0001)
                 .map_err(|e: ComposeError| refusal(&self.dir, &e))?;
+        // omega settles after a fixed wait. Every run sets it again to its own
+        // budget + 1 s (run_task_inner); here the edit value is checked once, so an
+        // old omega without rxc_host_set_wait_ms refuses a changed edit budget at open.
+        compose
+            .set_wait_ms((budgets.edit + COMPOSE_WAIT_MARGIN).as_millis() as u32)
+            .map_err(|e| refusal(&self.dir, &e))?;
         let plan = cortex_mark::plan(
             existing.as_ref(),
             &info.machine_id,
@@ -1267,69 +1780,92 @@ impl ComposeBridge {
             journal_present,
         )
         .map_err(|r| mark_refusal(&self.dir, &r))?;
-        let prompts: Arc<parking_lot::Mutex<HashMap<u64, TaskPrompt>>> = Arc::default();
+        let prompts: Arc<parking_lot::Mutex<HashMap<u64, TaskEntry>>> = Arc::default();
         let proposals: Arc<parking_lot::Mutex<HashMap<u64, SkillOutput>>> = Arc::default();
         let approved: Arc<parking_lot::Mutex<HashMap<u64, String>>> = Arc::default();
         let (pr, pp, proposer) = (prompts.clone(), proposals.clone(), self.proposer.clone());
+        let doc_proposer = self
+            .doc_proposer
+            .clone()
+            .unwrap_or_else(|| self.proposer.clone());
         let pa = approved.clone();
         compose
             .register_skill(COMPOSE_MODEL_SKILL, None, 10, move |task| {
-                let (prompt, target) = pr.lock().get(&task).cloned()?;
+                // The requirement record of this task. A missing record is a refusal,
+                // never an empty requirement list (issue #289).
+                let entry = pr.lock().get(&task).cloned();
+                let Some(((prompt, target, kind), ex, dest)) = entry else {
+                    pp.lock()
+                        .insert(task, refused_without_model(MISSING_RECORD_REASON.into()));
+                    return None;
+                };
+                // Goal text that looks like a measurable requirement but could not
+                // be read reliably: refuse before any model call.
+                if let Some(why) = ex.refusal() {
+                    pp.lock().insert(task, refused_without_model(why));
+                    return None;
+                }
+                let reqs = ex.requirements;
                 // Proposer hook (crate::approved): an approved proposal for this
                 // task replaces the model's reply. One attempt, the same
                 // template check, the same AEGIS contract and commit below.
                 // edit = None: an approved whole-file proposal never goes
                 // through merge_edit_reply, so the committed bytes are the
                 // approved bytes even when the path already exists.
+                let budget = budgets.for_kind(kind);
+                let attempt_budget = compose_attempt_budget(kind, budget);
                 let fixed = pa.lock().get(&task).cloned();
                 let (out, attempts) = match fixed {
-                    Some(text) => {
-                        let one = move |_: &str, _: std::time::Duration| {
-                            Ok(Generation {
-                                text: text.clone(),
-                                finish_reason: Some("approved".into()),
-                                ..Default::default()
-                            })
-                        };
-                        propose_task_with_retries(
-                            &one,
-                            &prompt,
-                            None,
-                            COMPOSE_SKILL_BUDGET,
-                            COMPOSE_ATTEMPT_BUDGET,
-                            1,
-                        )
-                    }
+                    Some(text) => propose_approved(&text, &prompt, &reqs, budget, attempt_budget),
                     // Fixed template + bounded automatic retry (ACCEPTANCE-v2 3a, 3b),
                     // measured per-attempt budget (ACCEPTANCE-v3 3b); an edit reply
                     // is merged into the content the model was shown (v7 T5).
                     None => {
                         let edit = target.as_ref().map(|(p, c)| (p.as_str(), c.as_str()));
-                        propose_task_with_retries(
-                            proposer.as_ref(),
+                        let p = match kind {
+                            ProposalKind::Edit => &proposer,
+                            ProposalKind::Document => &doc_proposer,
+                        };
+                        propose_task_checked(
+                            p.as_ref(),
                             &prompt,
                             edit,
-                            COMPOSE_SKILL_BUDGET,
-                            COMPOSE_ATTEMPT_BUDGET,
+                            &reqs,
+                            budget,
+                            attempt_budget,
                             COMPOSE_MAX_ATTEMPTS,
                         )
                     }
                 };
+                let (out, attempts) = enforce_destination(
+                    (out, attempts),
+                    dest.0.as_deref(),
+                    &dest.1,
+                    kind == ProposalKind::Edit,
+                );
                 let h = out.as_ref().ok().map(|t| proposal_handle(t));
                 pp.lock().insert(task, (out, attempts));
+                // Test seam (compiled only into unit tests): lose the requirement
+                // record between the Skill and AEGIS verify, as a bug would (#289).
+                #[cfg(test)]
+                if prompt.contains(TEST_DROP_RECORD_MARKER) {
+                    pr.lock().remove(&task);
+                }
                 h
             })
             .map_err(|e| format!("compose register skill: {e}"))?;
-        let pv = proposals.clone();
+        let (pv, pq) = (proposals.clone(), prompts.clone());
         compose
             .set_verify(move |task, result| {
                 // AEGIS contract: the result names exactly the proposal text
                 // the Skill recorded for this task, and that text parses as one
                 // file change (a relative path and nonempty content).
-                pv.lock().get(&task).is_some_and(|(t, _)| {
-                    let Ok(t) = t else { return false };
-                    proposal_handle(t) == result && parse_file_proposal(t).is_some()
-                })
+                // The requirements of the goal are checked again on these same
+                // bytes, the ones that would be saved. No requirement record
+                // for the task means NO approval (issue #289).
+                let ex = pq.lock().get(&task).map(|p| p.1.clone());
+                let proposals = pv.lock();
+                verify_task_result(ex.as_ref(), proposals.get(&task), result)
             })
             .map_err(|e| format!("compose set verify: {e}"))?;
         // Open the composition now, so a home behind its anchor is refused here
@@ -1348,6 +1884,7 @@ impl ComposeBridge {
         allen_gate(&self.dir, &mut compose, &info.machine_id);
         let mut home = ComposeHome {
             compose,
+            budgets,
             machine_id: hex(&info.machine_id),
             prompts,
             approved,
@@ -1440,7 +1977,24 @@ impl ComposeBridge {
                 ws.display()
             ));
         }
-        let prompt = task_prompt_and_target(goal, &ws);
+        let (plan, dest) = task_decision(goal, &ws)?;
+        // The requirements the goal states are checked on every path: the model
+        // path and an approved proposal (refused before any write when unmet).
+        let machine_goal =
+            approved_text.is_some() && goal.starts_with(crate::approved::APPROVED_GOAL_PREFIX);
+        let mut reqs = if machine_goal {
+            crate::requirements::Extraction::default()
+        } else {
+            crate::requirements::analyze(goal)
+        };
+        // Added-line counts are measured against the file the proposal replaces
+        // (the edit target's content, or nothing for a new file).
+        if reqs.needs_prior() {
+            let prior = plan.1.as_ref().map_or("", |(_, c)| c.as_str());
+            reqs = reqs.resolved(prior);
+        }
+        let recognized: Vec<String> = reqs.requirements.iter().map(|r| r.label()).collect();
+        let uncertain = reqs.uncertain.clone();
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_err(|e| format!("clock: {e}"))?;
@@ -1460,10 +2014,26 @@ impl ComposeBridge {
             *guard = Some(self.open_home()?);
         }
         let home = guard.as_mut().expect("opened above");
+        // Deadlines agree on both sides: omega settles budget + 1 s after the run
+        // starts, the Skill gives up at budget. Set only here, under the lock that
+        // serializes runs, never while rx_compose_run is in flight. An omega without
+        // rxc_host_set_wait_ms refuses a budget that needs a longer wait (no silent 30 s wait).
+        let kind = plan.2;
+        let wait = home.budgets.for_kind(kind) + COMPOSE_WAIT_MARGIN;
+        home.compose
+            .set_wait_ms(wait.as_millis() as u32)
+            .map_err(|e| {
+                format!(
+                    "compose run refused: {kind:?} budget needs omega settle wait {} ms: {e}",
+                    wait.as_millis()
+                )
+            })?;
         if let Some(t) = approved_text {
             home.approved.lock().insert(task, t.to_string());
         }
-        home.prompts.lock().insert(task, prompt);
+        home.prompts
+            .lock()
+            .insert(task, (plan, reqs, (dest, ws.clone())));
         let run = home.compose.run(task, now.as_micros() as u64);
         home.prompts.lock().remove(&task);
         home.approved.lock().remove(&task);
@@ -1485,7 +2055,44 @@ impl ComposeBridge {
             Err(e) => (None, None, Some(e)),
         };
         let parsed = proposal.as_deref().and_then(parse_file_proposal);
+        // sovereign-core #261: the daemon's own record that THIS run committed
+        // THIS proposal. `ComposeAuthorize` mints only from it. An approved
+        // proposal has its own replay claim and grant, so it gets none.
+        let mut compose_commit = None;
+        if let (true, None, Some(p), Some(text)) = (
+            committed,
+            approved_text,
+            parsed.as_ref(),
+            proposal.as_deref(),
+        ) {
+            let wsc = std::fs::canonicalize(&ws)
+                .map_err(|e| format!("workspace {}: {e}", ws.display()))?
+                .display()
+                .to_string();
+            let id = crate::effects::write_compose_commit(
+                home,
+                &wsc,
+                task,
+                r.cx_promotion,
+                r.cx_evidence,
+                &hex(&Sha256::digest(text.as_bytes())),
+                &p.path,
+                &hex(&Sha256::digest(p.content.as_bytes())),
+            )
+            .map_err(|e| {
+                format!(
+                    "compose run committed (promotion #{}) but its commit record was not written: {e}",
+                    r.cx_promotion
+                )
+            })?;
+            home.advance_mark().map_err(|e| {
+                format!("compose run: record mark update failed (E_MARK_WRITE): {e}")
+            })?;
+            compose_commit = Some(id);
+        }
         Ok(ComposeTaskReport {
+            compose_commit,
+
             compose_dir: self.dir.display().to_string(),
             machine_id: home.machine_id.clone(),
             task,
@@ -1513,6 +2120,8 @@ impl ComposeBridge {
             uncommitted_proposal,
             proposer_error,
             proposal_attempts,
+            requirements_recognized: recognized,
+            requirements_uncertain: uncertain,
             proposer: match approved_text {
                 Some(_) => APPROVED_PROPOSER_LABEL.to_string(),
                 None => self.proposer_label.clone(),
@@ -1542,8 +2151,27 @@ impl ComposeBridge {
         r
     }
 
-    /// S1 / S4 / S5: one operator record through the composition's writer.
+    /// S1 / S5: one operator record through the composition's writer. Gated
+    /// records cannot be forged here, on any path (the socket handler calls
+    /// this too): authorizations, effect phases, replay and compose-commit
+    /// records are written only by the daemon (sovereign-core #261).
     pub fn note(&self, kind: &str, text: &str, links: &[u64]) -> ControlResponse {
+        if let Err(e) = crate::effects::check_reserved_note(kind, text) {
+            return ControlResponse::Error(e);
+        }
+        self.write_note(kind, text, links)
+    }
+
+    /// `note` WITHOUT the reserved-record check. Cargo feature `test-support`
+    /// only: it stands for an attacker who can append to the journal directly,
+    /// so the ledger's own defences can be exercised. Not in a normal build.
+    #[doc(hidden)]
+    #[cfg(feature = "test-support")]
+    pub fn note_unchecked(&self, kind: &str, text: &str, links: &[u64]) -> ControlResponse {
+        self.write_note(kind, text, links)
+    }
+
+    fn write_note(&self, kind: &str, text: &str, links: &[u64]) -> ControlResponse {
         let k = match kind {
             "constraint" => NoteKind::Constraint,
             "authorization" => NoteKind::Authorization,
@@ -1775,5 +2403,279 @@ impl ComposeBridge {
             .record(id)
             .map(|r| hex(&r.digest))
             .map_err(|e| format!("compose record {id}: {e}"))
+    }
+}
+
+/// The reply must write the destination the goal named (issue #288): the
+/// approved proposal and a model reply are both held to the same path, so the
+/// save and the commit land on the file the prompt and budget were chosen for.
+/// A goal that named no destination leaves the model free to name the file.
+fn enforce_destination(
+    out: SkillOutput,
+    dest: Option<&str>,
+    ws: &Path,
+    is_edit: bool,
+) -> SkillOutput {
+    let (res, attempts) = out;
+    let res = match res {
+        Ok(t) => match parse_file_proposal(&t) {
+            Some(p) if dest.is_some_and(|d| p.path != d) => Err(format!(
+                "the proposal writes {} but the goal named the destination {}",
+                p.path,
+                dest.unwrap_or_default()
+            )),
+            // Defence in depth: a new-document task never replaces a file
+            // that exists (symlinks and dangling links count as existing).
+            Some(p) if !is_edit && std::fs::symlink_metadata(ws.join(&p.path)).is_ok() => {
+                Err(format!(
+                    "the proposal writes {} which already exists; refusing to overwrite it as a new document",
+                    p.path
+                ))
+            }
+            _ => Ok(t),
+        },
+        r => r,
+    };
+    (res, attempts)
+}
+
+#[cfg(test)]
+mod requirement_tests {
+    use super::*;
+    use crate::requirements::extract;
+
+    const SHORT: &str = "filename: DOC.md\na\nb\nc\n";
+
+    #[test]
+    fn approved_text_is_checked_against_the_goal_requirements() {
+        let reqs = extract("write DOC.md in at least 10 lines");
+        let (out, a) = propose_approved(
+            SHORT,
+            "base",
+            &reqs,
+            COMPOSE_SKILL_BUDGET,
+            COMPOSE_ATTEMPT_BUDGET,
+        );
+        let why = out.unwrap_err();
+        assert!(
+            why.contains("at least 10 non-empty lines, found 3"),
+            "{why}"
+        );
+        assert_eq!(a.len(), 1);
+        assert_eq!(a[0].outcome, "refused");
+        assert_eq!(
+            a[0].unmet_requirements,
+            ["at least 10 non-empty lines, found 3"]
+        );
+        // Met, or none stated: the approved bytes pass through unchanged.
+        let (out, _) = propose_approved(
+            SHORT,
+            "base",
+            &extract("at least 3 lines"),
+            COMPOSE_SKILL_BUDGET,
+            COMPOSE_ATTEMPT_BUDGET,
+        );
+        assert_eq!(out.unwrap(), SHORT);
+        let (out, a) = propose_approved(
+            SHORT,
+            "base",
+            &[],
+            COMPOSE_SKILL_BUDGET,
+            COMPOSE_ATTEMPT_BUDGET,
+        );
+        assert_eq!(out.unwrap(), SHORT);
+        assert_eq!(a[0].finish_reason.as_deref(), Some("approved"));
+    }
+
+    #[test]
+    fn approved_run_reports_recognized_and_refuses_unmet_before_any_write() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = tmp.path().join("ws");
+        std::fs::create_dir_all(&ws).unwrap();
+        let proposer: ComposeProposer = Arc::new(|_: &str, _: std::time::Duration| {
+            panic!("the model proposer ran on the approved path")
+        });
+        let bridge = ComposeBridge::new(tmp.path().join("compose"), proposer, "test:approved");
+        let r = bridge.run_approved_task(
+            "write DOC.md in at least 10 lines",
+            ws.to_str().unwrap(),
+            SHORT,
+        );
+        if !aien_omega_compose::LINKED {
+            assert!(r.is_err());
+            return;
+        }
+        let r = r.unwrap();
+        assert!(!r.committed, "{r:?}");
+        assert!(r.proposal.is_none());
+        assert_eq!(r.requirements_recognized, ["at least 10 non-empty lines"]);
+        assert!(r.proposer_error.unwrap().contains("found 3"));
+        assert_eq!(std::fs::read_dir(&ws).unwrap().count(), 0);
+        // The same bytes pass when the goal states a requirement they meet.
+        let r = bridge
+            .run_approved_task(
+                "write DOC.md in at least 3 lines",
+                ws.to_str().unwrap(),
+                SHORT,
+            )
+            .unwrap();
+        assert!(r.committed, "{r:?}");
+        assert_eq!(r.requirements_recognized, ["at least 3 non-empty lines"]);
+        assert_eq!(r.proposal.as_deref(), Some(SHORT));
+    }
+}
+
+#[cfg(test)]
+mod verify_boundary_tests {
+    use super::*;
+    use crate::requirements::analyze;
+
+    const DOC: &str = "filename: DOC.md\na\nb\nc\n";
+
+    fn recorded(text: &str) -> SkillOutput {
+        (Ok(text.to_string()), Vec::new())
+    }
+
+    #[test]
+    fn verify_accepts_exactly_the_recorded_bytes_that_meet_the_goal() {
+        let ex = analyze("write DOC.md in at least 3 lines");
+        let out = recorded(DOC);
+        let h = proposal_handle(DOC);
+        assert!(verify_task_result(Some(&ex), Some(&out), h));
+        // a result naming other bytes is refused
+        assert!(!verify_task_result(Some(&ex), Some(&out), h ^ 1));
+        // bytes that no longer meet the requirement are refused
+        let short = analyze("write DOC.md in at least 4 lines");
+        assert!(!verify_task_result(Some(&short), Some(&out), h));
+        // a skill that returned no proposal is refused
+        let none: SkillOutput = (Err("no".into()), Vec::new());
+        assert!(!verify_task_result(Some(&ex), Some(&none), h));
+        assert!(!verify_task_result(Some(&ex), None, h));
+    }
+
+    /// Issue #289: an absent requirement record used to become an empty list,
+    /// so the verify step approved any well-formed file.
+    #[test]
+    fn missing_requirement_record_is_refused_never_empty() {
+        let out = recorded(DOC);
+        let h = proposal_handle(DOC);
+        // the same bytes that pass with a record are refused without one
+        let ex = analyze("write DOC.md in at least 3 lines");
+        assert!(verify_task_result(Some(&ex), Some(&out), h));
+        assert!(!verify_task_result(None, Some(&out), h));
+        // and even a goal with no requirements needs its (empty) record
+        let empty = analyze("write DOC.md");
+        assert!(verify_task_result(Some(&empty), Some(&out), h));
+        assert!(!verify_task_result(None, Some(&out), h));
+    }
+
+    #[test]
+    fn uncertain_goal_is_refused_at_verify_even_when_bytes_look_fine() {
+        let ex = analyze("write DOC.md with at least 3 lines of context");
+        assert!(!ex.uncertain.is_empty());
+        assert!(!verify_task_result(
+            Some(&ex),
+            Some(&recorded(DOC)),
+            proposal_handle(DOC)
+        ));
+    }
+
+    #[test]
+    fn refused_without_model_records_one_refused_attempt() {
+        let (out, a) = refused_without_model(MISSING_RECORD_REASON.into());
+        assert_eq!(out.unwrap_err(), MISSING_RECORD_REASON);
+        assert_eq!(a.len(), 1);
+        assert_eq!(a[0].outcome, "refused");
+        assert!(a[0].text.is_none());
+    }
+}
+
+#[cfg(test)]
+mod verify_callback_integration_tests {
+    use super::*;
+
+    fn bridge(dir: &std::path::Path) -> ComposeBridge {
+        let proposer: ComposeProposer = Arc::new(|_: &str, _: std::time::Duration| {
+            Ok(Generation {
+                text: "filename: DOC.md\na\nb\nc\n".into(),
+                finish_reason: Some("eos".into()),
+                ..Default::default()
+            })
+        });
+        ComposeBridge::new(dir.join("compose"), proposer, "test:verify-callback")
+    }
+
+    /// Issue #289 through the real compose run and the real verify callback:
+    /// the same document commits with its requirement record and is refused
+    /// by AEGIS (nothing committed, no promotion) when the record is gone.
+    #[test]
+    fn lost_requirement_record_is_refused_by_the_real_verify_callback() {
+        if !aien_omega_compose::LINKED {
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = tmp.path().join("ws");
+        std::fs::create_dir_all(&ws).unwrap();
+        let b = bridge(tmp.path());
+        let ok = b.run_task("write DOC.md in at least 3 lines", ws.to_str().unwrap());
+        let ControlResponse::ComposeTaskResult(ok) = ok else {
+            panic!("{ok:?}")
+        };
+        assert!(ok.committed, "{ok:?}");
+        let goal = format!("write DOC2.md in at least 3 lines {TEST_DROP_RECORD_MARKER}");
+        let lost = b.run_task(&goal, ws.to_str().unwrap());
+        let ControlResponse::ComposeTaskResult(lost) = lost else {
+            panic!("{lost:?}")
+        };
+        assert!(!lost.committed, "{lost:?}");
+        assert_eq!(lost.aegis_pass_mask & 1, 0, "{lost:?}");
+        assert_eq!(lost.cx_promotion, 0, "{lost:?}");
+    }
+}
+
+#[cfg(test)]
+mod destination_enforcement_tests {
+    use super::*;
+
+    #[test]
+    fn reply_must_write_the_named_destination() {
+        let ok = "filename: docs/SUMMARY.md\n# s\n".to_string();
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = tmp.path().to_path_buf();
+        let run = |d: Option<&str>, t: &str| {
+            enforce_destination((Ok(t.to_string()), vec![]), d, &ws, false).0
+        };
+        assert_eq!(run(Some("docs/SUMMARY.md"), &ok), Ok(ok.clone()));
+        let e = run(Some("README.md"), &ok).unwrap_err();
+        assert!(
+            e.contains("docs/SUMMARY.md") && e.contains("README.md"),
+            "{e}"
+        );
+        assert_eq!(run(None, &ok), Ok(ok));
+    }
+}
+
+#[cfg(test)]
+mod new_document_overwrite_tests {
+    use super::*;
+
+    #[test]
+    fn new_kind_proposal_never_replaces_an_existing_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = tmp.path();
+        std::fs::write(ws.join("README.md"), "# r\n").unwrap();
+        std::os::unix::fs::symlink("nowhere", ws.join("dangling.md")).unwrap();
+        let run = |dest: Option<&str>, path: &str, edit: bool| {
+            let t = format!("filename: {path}\nbody\n");
+            enforce_destination((Ok(t), vec![]), dest, ws, edit).0
+        };
+        for dest in [None, Some("README.md")] {
+            let e = run(dest, "README.md", false).unwrap_err();
+            assert!(e.contains("already exists"), "{e}");
+        }
+        assert!(run(None, "dangling.md", false).is_err());
+        assert!(run(None, "fresh.md", false).is_ok());
+        // An edit-kind task may write its own (existing) target.
+        assert!(run(Some("README.md"), "README.md", true).is_ok());
     }
 }

@@ -6,8 +6,11 @@
 //! in a stub build they check that the bridge reports the missing library.
 use aien_runtime::control::{ComposeRecallReport, ComposeTaskReport, ControlResponse};
 use aien_runtime::spine::{
-    check_file_proposal, parse_file_proposal, propose_with_retries, ComposeBridge, ComposeProposer,
-    Generation, COMPOSE_ATTEMPT_BUDGET, COMPOSE_MAX_ATTEMPTS, COMPOSE_SKILL_BUDGET,
+    check_file_proposal, compose_attempt_budget, parse_compose_budget,
+    parse_compose_doc_max_tokens, parse_file_proposal, propose_with_retries, wall_clock_reason,
+    ComposeBridge, ComposeBudgets, ComposeProposer, Generation, ProposalKind,
+    COMPOSE_ATTEMPT_BUDGET, COMPOSE_DOC_BUDGET, COMPOSE_MAX_ATTEMPTS, COMPOSE_SKILL_BUDGET,
+    COMPOSE_WAIT_MARGIN,
 };
 use std::sync::Arc;
 
@@ -422,6 +425,7 @@ ok
 fn measured_attempt_budget_admits_a_second_attempt() {
     use std::time::Duration;
     assert!(COMPOSE_SKILL_BUDGET < Duration::from_secs(30));
+    // the default (AIEN_COMPOSE_EDIT_BUDGET_MS unset): omega's 30 s wait less 1 s
     assert_eq!(COMPOSE_SKILL_BUDGET, Duration::from_secs(29));
     assert_eq!(COMPOSE_ATTEMPT_BUDGET, Duration::from_millis(12_000));
     // 2 839 + 896 + 47 x 166.6 + 60 ms, the measured full retry attempt
@@ -609,5 +613,209 @@ fn finish_reason_labels_match_acceptance_v5() {
     assert_eq!(
         aien_runtime::finish_reason_label(&FinishReason::Preempted),
         "preempted"
+    );
+}
+
+// A file whose own content holds fenced blocks must not be cut at the
+// first inner fence (DIAGNOSTIC-LONG-1 task D5: a 649-token FAQ was saved
+// as 4 lines).
+#[test]
+fn proposal_fence_inner_block_kept() {
+    let p = check_file_proposal(
+        "filename: docs/FAQ.md\n```markdown\n# FAQ\n\nRun:\n```bash\nls -l\n```\nDone.\n```\nTrailing prose.\n",
+    )
+    .unwrap();
+    assert_eq!(p.path, "docs/FAQ.md");
+    assert_eq!(p.content, "# FAQ\n\nRun:\n```bash\nls -l\n```\nDone.\n");
+}
+
+#[test]
+fn proposal_fence_d5_reply_shape() {
+    // D5 reply, trimmed to its first two blocks and closed by the outer fence.
+    let reply = include_str!("fixtures/d5_reply_trimmed.txt");
+    let reply = format!("{reply}```\n");
+    let p = check_file_proposal(&reply).unwrap();
+    assert_eq!(p.path, "docs/FAQ.md");
+    assert_eq!(p.content.matches("```bash").count(), 2, "{}", p.content);
+    assert_eq!(p.content.lines().count(), 14, "{}", p.content);
+    assert!(p.content.ends_with("```\n"));
+    assert!(p.content.contains("sudo curl"));
+    assert!(p.content.lines().count() > 4, "old parser kept 4 lines");
+}
+
+#[test]
+fn proposal_fence_unbalanced_takes_last_bare_fence() {
+    // Inner block opened and never closed: the last bare fence ends the file.
+    let p = check_file_proposal("filename: a.md\n```md\ntext\n```bash\nls\nmore\n```\n").unwrap();
+    assert_eq!(p.content, "text\n```bash\nls\nmore\n");
+    // No bare fence at all: nothing to close, whole body kept (as before).
+    let p = check_file_proposal("filename: a.md\n```md\ntext\n```bash\nls\n").unwrap();
+    assert_eq!(p.content, "text\n```bash\nls\n");
+}
+
+#[test]
+fn proposal_fence_four_backtick_outer() {
+    let p = check_file_proposal(
+        "filename: a.md\n````markdown\nintro\n```\nbare inner\n```\n```bash\nls\n```\n````\n",
+    )
+    .unwrap();
+    assert_eq!(p.content, "intro\n```\nbare inner\n```\n```bash\nls\n```\n");
+}
+
+#[test]
+fn proposal_fence_plain_replies_unchanged() {
+    let p = check_file_proposal("filename: a.txt\nx\ny\n").unwrap();
+    assert_eq!(p.content, "x\ny\n");
+    let p = check_file_proposal("filename: a.txt\n```\nx\n```\nthanks\n").unwrap();
+    assert_eq!(p.content, "x\n");
+    let p = check_file_proposal("filename: a.txt\n```text\nx\n").unwrap();
+    assert_eq!(p.content, "x\n");
+}
+
+// Several code examples in one document and normal prose after the last one:
+// every byte is kept, in the fenced reply shape and in the unfenced shape.
+#[test]
+fn proposal_fence_many_examples_and_trailing_text_keep_every_byte() {
+    let doc = "# Guide\n\nStep one:\n```bash\nls -l\n```\nStep two:\n```python\nprint(1)\n```\nStep three:\n```\nplain\n```\nNotes after the last example.\nAnd one more line.\n";
+    // Outer fence with a label: inner fences nest, nothing after is lost.
+    let p = check_file_proposal(&format!("filename: g.md\n```markdown\n{doc}```\n")).unwrap();
+    assert_eq!(p.content, doc);
+    // Longer outer fence: inner bare and labelled fences are all content.
+    let p = check_file_proposal(&format!("filename: g.md\n````markdown\n{doc}````\n")).unwrap();
+    assert_eq!(p.content, doc);
+    // No outer fence at all: the document is taken whole.
+    let p = check_file_proposal(&format!("filename: g.md\n{doc}")).unwrap();
+    assert_eq!(p.content, doc);
+}
+
+/// Both budget settings: unset gives the default; 1 000..=599 000 ms is
+/// accepted; anything else is refused with a message naming the setting.
+#[test]
+fn compose_budget_settings_parse_and_refuse() {
+    use std::time::Duration;
+    let edit = |v| parse_compose_budget("AIEN_COMPOSE_EDIT_BUDGET_MS", COMPOSE_SKILL_BUDGET, v);
+    let doc = |v| parse_compose_budget("AIEN_COMPOSE_DOC_BUDGET_MS", COMPOSE_DOC_BUDGET, v);
+    assert_eq!(edit(None), Ok(Duration::from_secs(29)));
+    assert_eq!(doc(None), Ok(Duration::from_secs(120)));
+    assert_eq!(edit(Some("29000")), Ok(COMPOSE_SKILL_BUDGET));
+    assert_eq!(doc(Some("90000")), Ok(Duration::from_secs(90)));
+    assert_eq!(doc(Some(" 1000 ")), Ok(Duration::from_secs(1)));
+    assert_eq!(doc(Some("599000")), Ok(Duration::from_millis(599_000)));
+    for bad in [
+        "",
+        "abc",
+        "-5",
+        "1.5",
+        "999",
+        "0",
+        "599001",
+        "600000",
+        "99999999999999999999",
+    ] {
+        let e = edit(Some(bad)).expect_err(bad);
+        assert!(e.contains("AIEN_COMPOSE_EDIT_BUDGET_MS"), "{bad}: {e}");
+        let e = doc(Some(bad)).expect_err(bad);
+        assert!(e.contains("AIEN_COMPOSE_DOC_BUDGET_MS"), "{bad}: {e}");
+    }
+}
+
+/// AIEN_COMPOSE_DOC_MAX_TOKENS: default 1024, 16..=4096, bad values refused.
+#[test]
+fn compose_doc_token_cap_parses_and_refuses() {
+    assert_eq!(parse_compose_doc_max_tokens(None), Ok(1024));
+    assert_eq!(parse_compose_doc_max_tokens(Some("16")), Ok(16));
+    assert_eq!(parse_compose_doc_max_tokens(Some(" 4096 ")), Ok(4096));
+    for bad in ["", "x", "-1", "15", "0", "4097", "1e3"] {
+        let e = parse_compose_doc_max_tokens(Some(bad)).expect_err(bad);
+        assert!(e.contains("AIEN_COMPOSE_DOC_MAX_TOKENS"), "{bad}: {e}");
+    }
+}
+
+/// A task that names an existing file is an edit (29 s); a task with no
+/// existing target creates a new document (120 s). Omega's wait follows by +1 s.
+#[test]
+fn kind_selects_budget() {
+    use std::time::Duration;
+    let ws = tempfile::tempdir().expect("tempdir");
+    std::fs::write(ws.path().join("notes.md"), "# notes\n").expect("write");
+    let (_, _, edit_kind) =
+        aien_runtime::spine::task_plan("add a line to notes.md", ws.path()).expect("plan");
+    let (_, _, new_kind) =
+        aien_runtime::spine::task_plan("write a new file faq.md", ws.path()).expect("plan");
+    assert_eq!(edit_kind, ProposalKind::Edit);
+    assert_eq!(new_kind, ProposalKind::Document);
+    let b = ComposeBudgets::default();
+    assert_eq!(b.for_kind(ProposalKind::Edit), Duration::from_secs(29));
+    assert_eq!(b.for_kind(ProposalKind::Document), Duration::from_secs(120));
+    assert_eq!(
+        b.for_kind(ProposalKind::Document) + COMPOSE_WAIT_MARGIN,
+        Duration::from_millis(121_000)
+    );
+    // edits keep the measured 12 s attempt budget; documents need ~the shortest
+    // measured full document (30 s), capped at half a small custom budget
+    assert_eq!(
+        compose_attempt_budget(ProposalKind::Edit, b.edit),
+        COMPOSE_ATTEMPT_BUDGET
+    );
+    assert_eq!(
+        compose_attempt_budget(ProposalKind::Document, b.doc),
+        Duration::from_secs(30)
+    );
+    assert_eq!(
+        compose_attempt_budget(ProposalKind::Document, Duration::from_secs(20)),
+        Duration::from_secs(10)
+    );
+}
+
+/// The two ways a long reply can fail leave different, stable reasons: a cut
+/// at the token limit is refused ("reply cut at the token limit ...
+/// finish_reason max_tokens"), a slow model times out ("model proposal
+/// exceeded N ms"). Neither text contains the other's marker.
+#[test]
+fn token_cut_and_wall_clock_reasons_are_distinct() {
+    use std::time::Duration;
+    // token-limit cut
+    let cut = |_: &str, _: Duration| {
+        Ok(Generation {
+            text: "filename: a.md\nline\n".into(),
+            tokens: 1024,
+            finish_reason: Some("max_tokens".into()),
+            ..Default::default()
+        })
+    };
+    let (out, a) = propose_with_retries(
+        &cut,
+        "p",
+        Duration::from_secs(120),
+        Duration::from_secs(30),
+        1,
+    );
+    let why = out.expect_err("a cut reply is never a proposal");
+    assert_eq!(a[0].outcome, "refused");
+    assert!(
+        why.contains("reply cut at the token limit after 1024 tokens (finish_reason max_tokens)"),
+        "{why}"
+    );
+    assert!(!why.contains("exceeded"), "{why}");
+    // wall-clock timeout (the text the daemon proposer emits)
+    let slow = |_: &str, limit: Duration| -> Result<Generation, String> {
+        Err(wall_clock_reason(limit.as_millis()))
+    };
+    let (out, a) = propose_with_retries(
+        &slow,
+        "p",
+        Duration::from_secs(120),
+        Duration::from_secs(30),
+        1,
+    );
+    let why = out.expect_err("timed out");
+    assert_eq!(a[0].outcome, "timeout");
+    assert!(
+        why.starts_with("model proposal exceeded ") && why.ends_with(" ms"),
+        "{why}"
+    );
+    assert!(
+        !why.contains("token limit") && !why.contains("max_tokens"),
+        "{why}"
     );
 }

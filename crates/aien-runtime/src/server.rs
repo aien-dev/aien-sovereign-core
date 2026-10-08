@@ -28,6 +28,8 @@ pub struct AienRuntimeServer {
     is_running: Arc<AtomicBool>,
     tokenizer: Arc<RwLock<Option<ChatTokenizer>>>,
     warm_up: AtomicBool,
+    /// Test seam: a ready-made compose bridge (see `with_compose_bridge`).
+    compose_override: std::sync::Mutex<Option<Arc<ComposeBridge>>>,
 }
 
 /// NEXT-PHASE-1 v4 declared warm-up prompt (ACCEPTANCE-v4 Section 2(2)):
@@ -52,7 +54,18 @@ impl AienRuntimeServer {
             is_running: Arc::new(AtomicBool::new(false)),
             tokenizer: Arc::new(RwLock::new(None)),
             warm_up: AtomicBool::new(false),
+            compose_override: std::sync::Mutex::new(None),
         }
+    }
+
+    /// Test seam: serve compose commands from `bridge` (for example one with a
+    /// fixed proposer) instead of the bridge built from the environment and
+    /// the loaded model. The daemon binary never calls this.
+    #[doc(hidden)]
+    #[cfg(feature = "test-support")]
+    pub fn with_compose_bridge(self, bridge: Arc<ComposeBridge>) -> Self {
+        *self.compose_override.lock().expect("compose override") = Some(bridge);
+        self
     }
 
     /// Installs the tokenizer that `StreamTurn` uses to encode prompts and decode tokens.
@@ -96,6 +109,11 @@ impl AienRuntimeServer {
                 let _ = std::fs::create_dir_all(parent);
             }
         }
+
+        // Bad compose limits stop the daemon here, loudly, before anything is served.
+        crate::spine::compose_budgets_from_env().map_err(|e| format!("compose limits: {e}"))?;
+        crate::spine::compose_doc_max_tokens_from_env()
+            .map_err(|e| format!("compose limits: {e}"))?;
 
         let listener = UnixListener::bind(&self.socket_path).map_err(|e| {
             format!(
@@ -165,16 +183,29 @@ impl AienRuntimeServer {
         }
 
         // NEXT-PHASE-1: the compose bridge (opened on the first RunComposeTask).
+        let preset = self
+            .compose_override
+            .lock()
+            .expect("compose override")
+            .clone();
         let compose = match compose_dir_from_env() {
-            Ok(dir) => Some(Arc::new(ComposeBridge::new(
-                dir,
-                model_proposer(
+            _ if preset.is_some() => preset,
+            Ok(dir) => Some(Arc::new(
+                ComposeBridge::new(
+                    dir,
+                    model_proposer(
+                        self.spine.clone(),
+                        self.tokenizer.clone(),
+                        tokio::runtime::Handle::current(),
+                    ),
+                    "model:StreamTurn-path",
+                )
+                .with_doc_proposer(doc_model_proposer(
                     self.spine.clone(),
                     self.tokenizer.clone(),
                     tokio::runtime::Handle::current(),
-                ),
-                "model:StreamTurn-path",
-            ))),
+                )?),
+            )),
             Err(e) => {
                 tracing::warn!("compose bridge disabled: {e}");
                 None
@@ -463,15 +494,15 @@ async fn generate_text(
     };
     tokio::time::timeout(limit, collect)
         .await
-        .map_err(|_| format!("model proposal exceeded {} ms", limit.as_millis()))?
+        .map_err(|_| crate::spine::wall_clock_reason(limit.as_millis()))?
 }
 
 /// The compose "model" Skill: real inference through `generate_text`, run
 /// from an omega World worker thread (not a tokio thread) via `block_on`.
 /// Greedy, at most `AIEN_COMPOSE_MAX_TOKENS` (default 48) tokens per reply;
 /// each call gets the limit `propose_with_retries` passes (what is left of
-/// the 29 s budget, under rx_compose_run's 30 s quiescence wait), so a slow
-/// model fails the Skill (no proposal) instead of failing the run.
+/// the task budget: 29 s for an edit, 120 s for a document; omega waits that
+/// plus 1 s), so a slow model fails the Skill (no proposal) instead of failing the run.
 pub fn model_proposer(
     spine: Arc<Mutex<AienRuntimeSpine>>,
     tokenizer: Arc<RwLock<Option<ChatTokenizer>>>,
@@ -481,6 +512,26 @@ pub fn model_proposer(
         .ok()
         .and_then(|v| v.trim().parse::<usize>().ok())
         .unwrap_or(48);
+    proposer_with_cap(spine, tokenizer, handle, max_tokens)
+}
+
+/// The proposer for full-document tasks: the same inference path with its own
+/// token cap, `AIEN_COMPOSE_DOC_MAX_TOKENS` (default 1024). A bad value is refused.
+pub fn doc_model_proposer(
+    spine: Arc<Mutex<AienRuntimeSpine>>,
+    tokenizer: Arc<RwLock<Option<ChatTokenizer>>>,
+    handle: tokio::runtime::Handle,
+) -> Result<ComposeProposer, String> {
+    let cap = crate::spine::compose_doc_max_tokens_from_env()?;
+    Ok(proposer_with_cap(spine, tokenizer, handle, cap))
+}
+
+fn proposer_with_cap(
+    spine: Arc<Mutex<AienRuntimeSpine>>,
+    tokenizer: Arc<RwLock<Option<ChatTokenizer>>>,
+    handle: tokio::runtime::Handle,
+    max_tokens: usize,
+) -> ComposeProposer {
     Arc::new(move |prompt: &str, limit: std::time::Duration| {
         let messages = vec![crate::control::ChatTurn {
             role: "user".into(),
@@ -646,12 +697,26 @@ async fn handle_connection(
                 ref links,
             } => {
                 let (k, t, l) = (kind.clone(), text.clone(), links.clone());
-                // NEXT-PHASE-2: gated effect/control records cannot be forged here.
+                // Gated records (every authorization, effect phases, replay and
+                // commit records) are refused inside `note` itself (#261).
+                Some(Box::new(move |b: &Arc<ComposeBridge>| b.note(&k, &t, &l)))
+            }
+            ControlCommand::ComposeAuthorize {
+                cx_promotion,
+                ref proposal_sha256,
+                ref workspace,
+                ref approver,
+                ref constraints,
+            } => {
+                let req = crate::effects::MintRequest {
+                    cx_promotion,
+                    proposal_sha256: proposal_sha256.clone(),
+                    workspace: workspace.clone(),
+                    approver: approver.clone(),
+                    constraints: constraints.clone(),
+                };
                 Some(Box::new(move |b: &Arc<ComposeBridge>| {
-                    match crate::effects::check_reserved_note(&k, &t) {
-                        Ok(()) => b.note(&k, &t, &l),
-                        Err(e) => ControlResponse::Error(e),
-                    }
+                    crate::effects::mint_grant(b, &req)
                 }))
             }
             ControlCommand::ComposeRecall { ref ids, prefix } => {
