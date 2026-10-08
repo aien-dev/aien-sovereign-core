@@ -110,10 +110,11 @@ for an approved write.
     opt-out `AIEN_COMPOSE_AUTHORIZE_REQUIRES_DESK=0`, accepted only in a dev
     run (`AIEN_DEV_FALLBACK=1`), refused in a strict run (which release
     qualification is), and announced at startup as
-    `Authorize MAC: OFF, DEV OPT-OUT`. (Code that embeds the runtime can
-    build a bridge with `with_authorize_requires_desk(false)`, which tests of
-    the legacy path do; the `aien daemon` program never does, and the same
-    startup line announces it.) Also, a
+    `Authorize MAC: OFF, DEV OPT-OUT`. Code that embeds the runtime and builds
+    a bridge with `with_authorize_requires_desk(false)` is held to the same
+    rule: the server refuses to start with it in a strict run (the `aien
+    daemon` program never builds one). Bridge-level tests of the legacy path
+    call the bridge directly, without a server. Also, a
     grant can exist only for content the daemon itself committed, at the
     workspace and path the daemon recorded, and only the daemon writes it.
     The approved-proposal path keeps its MAC.

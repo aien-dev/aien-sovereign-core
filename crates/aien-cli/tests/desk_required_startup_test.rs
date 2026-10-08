@@ -163,6 +163,12 @@ fn d1_no_desk_key_refuses_startup() {
 #[test]
 fn d2_dev_opt_out_is_refused_in_a_strict_run() {
     let r = Rig::new();
+    if aien_inference_abi::strict::DEV_FALLBACK {
+        // A --features dev-fallback build is never strict: there the opt-out serves.
+        let text = r.serves(false, Some("0"));
+        assert!(text.contains("Authorize MAC: OFF, DEV OPT-OUT"), "{text}");
+        return;
+    }
     let text = r.refused(false, Some("0"));
     assert!(text.contains(SWITCH), "{text}");
     assert!(text.contains("release qualification"), "{text}");

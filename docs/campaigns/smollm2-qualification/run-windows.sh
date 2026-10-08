@@ -66,6 +66,8 @@ new_run() {   # NAME
   export AIEN_COMPOSE_DIR=$R/compose AIEN_PROVENANCE_DIR=$R/prov AIEN_RUNTIME_SOCK=$SOCK \
          AIEN_RUNTIME_STATE_DIR=$R/state AIEN_REQUIRE_CHECKPOINT=0
   unset AIEN_MODEL_PATH AIEN_TOKENIZER_PATH AIEN_REQUIRE_BLACKWELL AIEN_GPU_BACKEND AIEN_FAULT_HOLD AIEN_FAULT_HOLD_FILE
+  # sc#328: the daemon requires the approval desk key (the fixture may carry one).
+  [ -f "$R/compose/approval-desk.key" ] || "$BIN" compose desk-key --create 1 >/dev/null
   WS0=$(tree_list "$WS")
 }
 pre_state() {   # sets N0, MID0, PD0 (daemon up)
@@ -122,7 +124,7 @@ emit W-ctl-wrong-expect 1 $v "$o"; stop_daemon
 # ---- W-ctl-damaged-mark: a damaged record mark after a clean authorize must be seen
 new_run W-ctl-damaged-mark
 start_daemon d1; pre_state
-cx A1 authorize --report "$R/s3-report.json" --workspace "$WS" --approver drake
+cx A1 authorize --report "$R/s3-report.json" --workspace "$WS" --approver drake --desk 1
 stop_daemon
 if [ -f "$R/compose.cortex-mark" ]; then
   printf 'X' | dd of="$R/compose.cortex-mark" bs=1 seek=70 conv=notrunc 2>/dev/null
@@ -165,7 +167,7 @@ for t in $(seq 1 "$TRIALS"); do
   off=$(( RANDOM % 51 )); offs="$offs $off"
   if ! start_daemon d1; then bad=$((bad + 1)); ALLCHECKS=$(jq -c --argjson t "$t" '. + [{check:"trial_\($t)_daemon_1_up", ok:false}]' <<<"$ALLCHECKS"); continue; fi
   pre_state
-  "$BIN" compose authorize --report "$R/s3-report.json" --workspace "$WS" --approver drake >"$R/steps/A1.json" 2>"$R/steps/A1.err" & CPID=$!
+  "$BIN" compose authorize --report "$R/s3-report.json" --workspace "$WS" --approver drake --desk 1 >"$R/steps/A1.json" 2>"$R/steps/A1.err" & CPID=$!
   fsleep "$off"
   kill_daemon; wait "$CPID" 2>/dev/null
   start_daemon d2 || { chk daemon_2_up false; cx REC recover >/dev/null 2>&1; start_daemon d3; }

@@ -1869,7 +1869,8 @@ impl ComposeBridge {
     }
 
     /// Turn the desk-MAC requirement on `ComposeAuthorize` on or off (#297).
-    /// On by default (#328); off is for dev and tests of the legacy path.
+    /// On by default (#328); off is for dev and tests of the legacy path, and a
+    /// server refuses to start with it off in a strict run.
     pub fn with_authorize_requires_desk(mut self, on: bool) -> Self {
         self.authorize_requires_desk = on;
         self

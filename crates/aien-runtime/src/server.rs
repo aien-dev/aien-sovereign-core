@@ -142,14 +142,24 @@ impl AienRuntimeServer {
 
         let authorize_desk = crate::spine::authorize_requires_desk_from_env()?;
         // sc#328: a bridge that requires the approval desk refuses to start
-        // without a loadable desk key, before the socket exists.
+        // without a loadable desk key, before the socket exists. A bridge with
+        // the desk off (code that embeds the runtime) is the same dev-only
+        // opt-out as the env switch: a strict run refuses it.
         let desk_home = match self
             .compose_override
             .lock()
             .expect("compose override")
             .as_ref()
         {
-            Some(b) => b.authorize_requires_desk().then(|| b.dir().to_path_buf()),
+            Some(b) if !b.authorize_requires_desk() => {
+                crate::spine::authorize_desk_setting(
+                    Some("0"),
+                    aien_inference_abi::strict::dev_fallback_active(),
+                )
+                .map_err(|e| format!("compose bridge built with the approval desk off: {e}"))?;
+                None
+            }
+            Some(b) => Some(b.dir().to_path_buf()),
             None if authorize_desk => compose_dir_from_env().ok(),
             None => None,
         };
