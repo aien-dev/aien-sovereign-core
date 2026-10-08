@@ -403,17 +403,17 @@ fn host_slice_access_to_a_resident_weight_is_refused_by_name() {
 }
 
 #[test]
-fn resident_load_is_chosen_only_on_the_native_strict_opted_in_qwen3_path() {
+fn resident_load_is_chosen_only_on_the_native_strict_enabled_qwen3_path() {
     let dir = tiny_dir();
     let tiny = load_model_config(&dir).unwrap(); // qk_norm, head_dim 16
     let mut q4b = tiny.clone();
     q4b.head_dim = 128; // the head_dim the GB10 engine accepts for Qwen3
-                        // (native, strict, opted in, accepted Qwen3) -> resident
+                        // (native, strict, enabled, accepted Qwen3) -> resident
     assert!(resident_load_wanted(true, true, true, &q4b));
     // each condition off -> host f32 load, unchanged
     assert!(!resident_load_wanted(false, true, true, &q4b)); // stub build / no GB10
     assert!(!resident_load_wanted(true, false, true, &q4b)); // dev-fallback needs host values
-    assert!(!resident_load_wanted(true, true, false, &q4b)); // default refusal of Qwen3 stays
+    assert!(!resident_load_wanted(true, true, false, &q4b)); // Qwen3 switched off (=0): refused
     assert!(!resident_load_wanted(true, true, true, &tiny)); // engine refuses head_dim 16
     let mut llama = q4b.clone();
     llama.qk_norm = false; // other models keep their path

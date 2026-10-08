@@ -36,6 +36,7 @@ pub use model_dir::{load_model_config, model_config_from_hf_json, model_id_for_d
 pub use moe_plan::*;
 pub use mojo_backend::*;
 pub use omega_backend::{
+    gb10_qwen3_enabled, gb10_qwen3_enabled_from, gb10_qwen3_enabled_from_os,
     omega_backend_selected, omega_model_refusal, omega_model_refusal_with,
     open_gpu_session_with_retry, retry_bounded, retry_bounded_within, OmegaGb10Backend,
     SessionAttemptError, GB10_QWEN3_OPT_IN_ENV, GPU_BACKEND_ENV, GPU_SESSION_OPEN_ATTEMPTS,
