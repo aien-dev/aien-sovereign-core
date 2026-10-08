@@ -117,7 +117,12 @@ impl Daemon {
             max_prefill_tokens: 1024,
         };
         let spine = AienRuntimeSpine::new(64, cfg, create_shared_kv_manager(256, 16));
-        let bridge = Arc::new(ComposeBridge::new(home, proposer(), "test:provenance-link"));
+        // The legacy OS-user-only authorize, chosen explicitly (sc#328): this
+        // file proves provenance, the desk has its own tests.
+        let bridge = Arc::new(
+            ComposeBridge::new(home, proposer(), "test:provenance-link")
+                .with_authorize_requires_desk(false),
+        );
         let server = AienRuntimeServer::new(spine, &socket).with_compose_bridge(bridge.clone());
         if let Some(m) = model {
             server.set_model_identity(m);

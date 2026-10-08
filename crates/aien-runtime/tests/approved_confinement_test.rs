@@ -119,6 +119,11 @@ async fn forged_grants_are_confined_and_the_approved_kind_is_reserved() {
     let w = ws.to_str().unwrap().to_string();
     // The only test in this file: the env var is process-wide.
     std::env::set_var("AIEN_COMPOSE_DIR", root.join("compose"));
+    // sc#328: the daemon refuses to start without the (default) desk key.
+    aien_runtime::approved_auth::DeskKey::create(&aien_runtime::approved_auth::desk_key_path(
+        &root.join("compose"),
+    ))
+    .unwrap();
     let c = start(&dir).await;
 
     // A proposal digest no compose run ever produced.

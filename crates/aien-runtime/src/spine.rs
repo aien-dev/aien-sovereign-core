@@ -990,16 +990,72 @@ fn env_opt(name: &str) -> Result<Option<String>, String> {
     }
 }
 
-/// Env switch for the desk MAC on `ComposeAuthorize` (#297): `1` = required,
-/// unset or `0` = off. Anything else stops the daemon (a typo must not leave
-/// the requirement silently off).
+/// Env switch for the desk MAC on `ComposeAuthorize` (#297, #328). Required
+/// by default: unset or `1` = required. `0` is the dev-only opt-out, accepted
+/// only in a dev run (`aien_inference_abi::strict::dev_fallback_active`); a
+/// strict run, which is what release qualification runs, refuses it. Anything
+/// else stops the daemon (a typo must not leave the requirement silently off).
 pub const AUTHORIZE_DESK_ENV: &str = "AIEN_COMPOSE_AUTHORIZE_REQUIRES_DESK";
 
+/// The rule behind [`authorize_requires_desk_from_env`], for a switch value
+/// and whether this is a dev run.
+pub fn authorize_desk_setting(value: Option<&str>, dev: bool) -> Result<bool, String> {
+    match value {
+        None | Some("1") => Ok(true),
+        Some("0") if dev => Ok(false),
+        Some("0") => Err(format!(
+            "{AUTHORIZE_DESK_ENV}=0 is a dev-only opt-out and is prohibited here: this is a strict run \
+             (no {}=1), as release qualification is. Create the desk key with \
+             `aien compose desk-key --create 1` and unset {AUTHORIZE_DESK_ENV}",
+            aien_inference_abi::strict::DEV_FALLBACK_ENV
+        )),
+        Some(o) => Err(format!(
+            "{AUTHORIZE_DESK_ENV} must be 1 (required, the default) or 0 (dev-only opt-out), got {o:?}"
+        )),
+    }
+}
+
 pub fn authorize_requires_desk_from_env() -> Result<bool, String> {
-    match env_opt(AUTHORIZE_DESK_ENV)?.as_deref() {
-        None | Some("0") => Ok(false),
-        Some("1") => Ok(true),
-        Some(o) => Err(format!("{AUTHORIZE_DESK_ENV} must be 1 or 0, got {o:?}")),
+    authorize_desk_setting(
+        env_opt(AUTHORIZE_DESK_ENV)?.as_deref(),
+        aien_inference_abi::strict::dev_fallback_active(),
+    )
+}
+
+/// Startup check (#328): a bridge that requires the desk must find a loadable
+/// desk key in its compose home, or the daemon refuses to start. Never creates
+/// a key: minting one is the operator's `aien compose desk-key --create`.
+pub fn check_desk_key_at_start(compose_dir: &Path) -> Result<(), String> {
+    let path = crate::approved_auth::desk_key_path(compose_dir);
+    crate::approved_auth::DeskKey::load(&path).map(|_| ()).map_err(|e| {
+        format!(
+            "the approval desk is required ({AUTHORIZE_DESK_ENV} unset or 1) but its key is not usable: {e}. \
+             Create it with `aien compose desk-key --create 1` (AIEN_COMPOSE_DIR={}); the daemon refuses to \
+             start without it",
+            compose_dir.display()
+        )
+    })
+}
+
+/// The daemon's startup rule from the environment (#328): the setting,
+/// after the desk key check when the desk is required.
+pub fn authorize_desk_at_start_from_env() -> Result<bool, String> {
+    let required = authorize_requires_desk_from_env()?;
+    if required {
+        if let Ok(dir) = compose_dir_from_env() {
+            check_desk_key_at_start(&dir)?;
+        }
+    }
+    Ok(required)
+}
+
+/// The startup line that states the authorize rule this daemon enforces.
+pub fn authorize_mac_line(required: bool) -> &'static str {
+    if required {
+        "Authorize MAC: on (aien compose authorize requires the approval desk key MAC)"
+    } else {
+        "Authorize MAC: OFF, DEV OPT-OUT (AIEN_COMPOSE_AUTHORIZE_REQUIRES_DESK=0 in a dev run): \
+         authorize is authenticated by the OS user only; not valid for release qualification"
     }
 }
 
@@ -1766,8 +1822,9 @@ pub struct ComposeBridge {
     /// must not be reopened lazily by a connection task that outlives `run`
     /// (sovereign-core #306).
     closed: std::sync::atomic::AtomicBool,
-    /// sovereign-core #297: when true, `ComposeAuthorize` needs the approval
-    /// desk's MAC. Default false (legacy OS-user-only authorize).
+    /// sovereign-core #297, #328: when true, `ComposeAuthorize` needs the
+    /// approval desk's MAC. Default true (Drake decision b, 2026-10-08);
+    /// false is the legacy OS-user-only authorize, only by explicit choice.
     authorize_requires_desk: bool,
     /// The loaded model files and the daemon start, set by the daemon after
     /// load. Without them a compose proposal gets no generation record.
@@ -1789,7 +1846,7 @@ impl ComposeBridge {
             home: std::sync::Mutex::new(None),
             reconcile_failed: std::sync::Mutex::new(None),
             closed: std::sync::atomic::AtomicBool::new(false),
-            authorize_requires_desk: false,
+            authorize_requires_desk: true,
             identity: std::sync::Mutex::new(None),
         }
     }
@@ -1812,6 +1869,7 @@ impl ComposeBridge {
     }
 
     /// Turn the desk-MAC requirement on `ComposeAuthorize` on or off (#297).
+    /// On by default (#328); off is for dev and tests of the legacy path.
     pub fn with_authorize_requires_desk(mut self, on: bool) -> Self {
         self.authorize_requires_desk = on;
         self

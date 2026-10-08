@@ -90,6 +90,12 @@ fn private_state_dir() {
         let dir = std::env::temp_dir().join(format!("aien-warm-up-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         std::env::set_var("AIEN_RUNTIME_STATE_DIR", &dir);
+        // sc#328: the daemon refuses to start without the (default) desk key.
+        std::env::set_var("AIEN_COMPOSE_DIR", dir.join("compose"));
+        let key = aien_runtime::approved_auth::desk_key_path(&dir.join("compose"));
+        if !key.exists() {
+            aien_runtime::approved_auth::DeskKey::create(&key).unwrap();
+        }
     });
 }
 

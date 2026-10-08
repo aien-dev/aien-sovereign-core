@@ -87,6 +87,11 @@ impl Rig {
         for d in ["ws", "state", "home", "prov"] {
             std::fs::create_dir_all(root.join(d)).unwrap();
         }
+        // sc#328: the daemon refuses to start without the (default) desk key.
+        aien_runtime::approved_auth::DeskKey::create(&aien_runtime::approved_auth::desk_key_path(
+            &root.join("compose"),
+        ))
+        .unwrap();
         Rig {
             _tmp: tmp,
             root,

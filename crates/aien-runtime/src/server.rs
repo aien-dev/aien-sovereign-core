@@ -141,6 +141,21 @@ impl AienRuntimeServer {
             .map_err(|e| format!("compose limits: {e}"))?;
 
         let authorize_desk = crate::spine::authorize_requires_desk_from_env()?;
+        // sc#328: a bridge that requires the approval desk refuses to start
+        // without a loadable desk key, before the socket exists.
+        let desk_home = match self
+            .compose_override
+            .lock()
+            .expect("compose override")
+            .as_ref()
+        {
+            Some(b) => b.authorize_requires_desk().then(|| b.dir().to_path_buf()),
+            None if authorize_desk => compose_dir_from_env().ok(),
+            None => None,
+        };
+        if let Some(dir) = desk_home {
+            crate::spine::check_desk_key_at_start(&dir)?;
+        }
         let listener = UnixListener::bind(&self.socket_path).map_err(|e| {
             format!(
                 "Failed to bind runtime UNIX domain socket at {}: {}",
@@ -254,14 +269,11 @@ impl AienRuntimeServer {
         // effect command refuses until an operator reconcile succeeds
         // (ACCEPTANCE-v3 2.5).
         if let Some(b) = compose.as_ref() {
-            println!(
-                "Authorize MAC: {}",
-                if b.authorize_requires_desk() {
-                    "on (aien compose authorize requires the approval desk key MAC)"
-                } else {
-                    "off (authorize is authenticated by the OS user only)"
-                }
-            );
+            let line = crate::spine::authorize_mac_line(b.authorize_requires_desk());
+            println!("{line}");
+            if !b.authorize_requires_desk() {
+                tracing::warn!("{line}");
+            }
         }
         if let Some(b) = compose.clone() {
             let gate = b.clone();

@@ -1616,6 +1616,12 @@ pub async fn run_daemon_server() {
         eprintln!("Fatal: {}", fatal.red().bold());
         std::process::exit(1);
     }
+    // sc#328: the approval desk is required by default; a missing desk key
+    // refuses the start here, before any model or GPU work.
+    if let Err(fatal) = aien_runtime::spine::authorize_desk_at_start_from_env() {
+        eprintln!("Fatal: {}", fatal.red().bold());
+        std::process::exit(1);
+    }
     let socket_path = aien_runtime::client::AienRuntimeClient::default_socket_path();
     let sched_cfg = daemon_scheduler_config();
 
@@ -1733,6 +1739,8 @@ pub async fn run_daemon_server() {
     println!("✓ Binding socket at {}", socket_path.display());
     if let Err(e) = server.run(backend).await {
         eprintln!("Runtime daemon error: {}", e);
+        // A refused start (sc#328: no desk key) must not exit as a success.
+        std::process::exit(1);
     }
 }
 

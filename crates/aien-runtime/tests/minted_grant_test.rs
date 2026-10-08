@@ -80,7 +80,8 @@ impl Fx {
             w
         })
         .unwrap();
-        let b = ComposeBridge::new(home.clone(), proposer(), "test:fixed-proposer");
+        let b = ComposeBridge::new(home.clone(), proposer(), "test:fixed-proposer")
+            .with_authorize_requires_desk(false);
         let run = b.run_task("write the note", ws.to_str().unwrap());
         if !aien_omega_compose::LINKED {
             assert!(matches!(run, ControlResponse::Error(_)));
@@ -327,7 +328,8 @@ linked_test!(
         let Fx { home, ws, b, .. } = fx;
         drop(b);
         // New daemon process: the ledger is rebuilt from the journal alone.
-        let b = ComposeBridge::new(home, proposer(), "test:fixed-proposer");
+        let b = ComposeBridge::new(home, proposer(), "test:fixed-proposer")
+            .with_authorize_requires_desk(false);
         let line = effects::reconcile_at_start(&b);
         assert!(line.starts_with("Reconcile: checked 1"), "{line}");
         let l = match b.recall(&[], None) {
