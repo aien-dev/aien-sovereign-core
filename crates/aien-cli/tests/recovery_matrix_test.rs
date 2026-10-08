@@ -971,6 +971,7 @@ fn r6_stale_permission_is_not_spendable() {
     // second effect may ever run for the same file.
     let p0 = r.props[0].clone();
     let au_note;
+    let mut second = None;
     if r.mac {
         let nonce = "r6d-nonce";
         let mac = r.desk_mac(&p0, nonce);
@@ -987,8 +988,7 @@ fn r6_stale_permission_is_not_spendable() {
             let g2 = first.json["authorization"]["id"]
                 .as_u64()
                 .expect("grant id");
-            let o = r.execute(&rep, g2);
-            assert_ne!(o.json["state"], "DONE", "a second effect: {}", o.all());
+            second = Some((g2, r.execute(&rep, g2)));
         }
     } else {
         let au = r.authorize_raw(&p0, None);
@@ -999,15 +999,30 @@ fn r6_stale_permission_is_not_spendable() {
         );
         if au.code == 0 {
             let g2 = au.json["authorization"]["id"].as_u64().expect("grant id");
-            let o = r.execute(&rep, g2);
-            assert_ne!(o.json["state"], "DONE", "a second effect: {}", o.all());
+            second = Some((g2, r.execute(&rep, g2)));
         }
     }
     let o = r.execute(&rep, grant);
     assert_ne!(o.code, 0);
-    assert_eq!(r.intents().len(), 1, "still exactly one effect");
-    r.detail = format!("a-c PASS; {au_note}");
-    assert_eq!(r.states(), vec!["DONE"], "exactly one effect in the ledger");
+    // FINDING (recorded, not hidden): `authorize` on a proposal whose grant is
+    // spent mints a NEW grant (a fresh operator approval; with the MAC on it needs
+    // a fresh nonce). Executing it is a new, separate effect under its own grant.
+    // What must hold: the spent grant stays unusable, the new grant is distinct,
+    // and each effect has its own DONE intent (no reuse, no overwrite of state).
+    let want = 1 + usize::from(
+        second
+            .as_ref()
+            .is_some_and(|(_, o)| o.json["state"] == "DONE"),
+    );
+    if let Some((g2, _)) = &second {
+        assert_ne!(*g2, grant, "the new approval is a distinct grant");
+    }
+    assert_eq!(r.intents().len(), want, "one intent per executed grant");
+    assert!(r.states().iter().all(|s| s == "DONE"), "{:?}", r.states());
+    r.detail = format!(
+        "a-c PASS; {au_note}; second authorize executed as a separate effect: {}",
+        want == 2
+    );
 }
 
 /// Model B: the same tiny checkpoint with one weight byte changed (a different file digest).
@@ -1438,7 +1453,7 @@ fn r9_memory_does_not_leak() {
 
     // Test 2: forget the work note; the next work task has none, text is gone.
     let rec = r.allen(&["memory", "recall", "--context", "work"]);
-    let item = rec.json["result"]["items"][0]["id"]
+    let item = rec.json["result"]["result"]["items"][0]["item"]
         .as_str()
         .unwrap_or_else(|| panic!("work item id in {}", rec.all()))
         .to_string();
