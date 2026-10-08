@@ -298,6 +298,7 @@ pub fn for_task(
         }
         MemoryState::Open(m) => m,
     };
+    let scope_name = scope.to_string();
     let grant = ScopeGrant::new(scope);
     let rc = match m.recall(&grant, None, &RecallLimits::default()) {
         Ok(rc) => rc,
@@ -306,7 +307,7 @@ pub fn for_task(
             return Ok((None, report(Some(c), 0, "refused", Some(e.to_string()))));
         }
     };
-    let (block, shown, cut) = render(&scope.to_string(), &rc.items);
+    let (block, shown, cut) = render(&scope_name, &rc.items);
     let unresolved = rc.unresolved.len();
     let omitted = rc.omitted + cut;
     let why = (omitted > 0 || unresolved > 0).then(|| {
