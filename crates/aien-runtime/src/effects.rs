@@ -2001,6 +2001,7 @@ mod tests {
                 finish_reason: "eos",
                 request_id: 7,
                 operation_id: 8,
+                decoding: None,
             },
             crate::generation::DaemonStart(1),
         );

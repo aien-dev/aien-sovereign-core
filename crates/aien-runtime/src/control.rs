@@ -737,6 +737,10 @@ pub struct ProposalAttempt {
     /// sha256 of the prompt ids, each 4 little-endian bytes (NEXT-PHASE-1 v6 R1).
     #[serde(default)]
     pub prompt_ids_sha256: Option<String>,
+    /// How the backend chose this attempt's tokens (sc#294). None when the
+    /// call failed or nothing observed it; omitted from the JSON then.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decoding: Option<aien_abi_core::DecodeObservation>,
     /// Requirements of the goal this attempt's complete document failed
     /// (crate::requirements); empty when none failed or none were recognized.
     #[serde(default)]

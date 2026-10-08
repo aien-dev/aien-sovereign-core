@@ -58,6 +58,14 @@ fn identity() -> ModelIdentity {
     }
 }
 
+/// How the backend chose OUT_IDS: all greedy (sc#294).
+fn greedy_observation() -> aien_inference_abi::DecodeObservation {
+    aien_inference_abi::DecodeObservation {
+        greedy_tokens: OUT_IDS.len() as u64,
+        ..Default::default()
+    }
+}
+
 /// The reply the real inference path gives: text, generated ids, prompt ids hash.
 fn proposer() -> ComposeProposer {
     Arc::new(|_p: &str, _l: Duration| {
@@ -68,6 +76,8 @@ fn proposer() -> ComposeProposer {
             token_ids: Some(OUT_IDS.to_vec()),
             prompt_tokens: Some(PROMPT_IDS.len()),
             prompt_ids_sha256: Some(token_ids_sha256(&PROMPT_IDS)),
+            // sc#294: what the scheduler reports for a greedy run of these ids.
+            decoding: Some(greedy_observation()),
         })
     })
 }
@@ -277,6 +287,12 @@ async fn assert_linked(d: &Daemon, f: &Flow, want_agent: &str) {
     assert_eq!(g["output_tokens"], OUT_IDS.len());
     assert_eq!(g["finish_reason"], "eos");
     assert_eq!(g["daemon"]["pid"], std::process::id());
+    // sc#294: the decoding the backend reported travels into the record.
+    assert_eq!(
+        g["decoding"],
+        json!({"mode": "greedy", "greedy_tokens": OUT_IDS.len(), "sampled_tokens": 0}),
+        "{g}"
+    );
     // The grant, intent and commit still say what they said before.
     assert_eq!(
         d.record(f.commit).await["proposal_sha256"],

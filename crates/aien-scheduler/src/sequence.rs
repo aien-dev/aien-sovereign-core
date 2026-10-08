@@ -1,4 +1,4 @@
-use aien_abi_core::{FinishReason, SamplingParams, SequenceRequest};
+use aien_abi_core::{DecodeObservation, FinishReason, SamplingParams, SequenceRequest};
 use aien_platform::{InferenceWork, KvHandle, ModelHandle, Priority, Ticks};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -85,6 +85,11 @@ pub enum CompletionEvent {
         seq_id: SequenceId,
         finish_reason: FinishReason,
         total_tokens: usize,
+        /// How the backend chose this sequence's tokens, taken from the backend
+        /// when the sequence finished (sc#294). None when the backend does not
+        /// observe its decoding: an absent claim, not greedy.
+        #[serde(default)]
+        decoding: Option<DecodeObservation>,
     },
     Error {
         seq_id: SequenceId,
