@@ -73,7 +73,7 @@ cx() {
 }
 j() { jq -r "$2" "$R/steps/$1.json" 2>/dev/null; }
 refusal() { j "$1" '.error // ""' | sed -n 's/^EFFECT_REFUSED \([A-Za-z]*\):.*/\1/p'; }
-authorize() { cx "$1" authorize --report "$R/s3-report.json" --workspace "$WS" --approver drake; j "$1" '.authorization.id // empty'; }
+authorize() { cx "$1" authorize --report "$R/s3-report.json" --workspace "$WS" --approver drake --desk 1; j "$1" '.authorization.id // empty'; }
 execute() { cx "$1" execute --report "$R/s3-report.json" --workspace "$WS" --authorization "$2"; }
 
 # exec_hold POINT ID AUTH: execute in the background, stopped at POINT.
@@ -110,6 +110,8 @@ if [ "$MODE" = fixture ]; then
   printf '# Demo project\n\nA small local project used by the NEXT-PHASE-2 campaign.\n' >"$WS/README.md"
   printf 'Plan: keep notes short and local.\n' >"$WS/docs/plan.txt"
   printf 'sentinel outside the authorized workspace\n' >"$R/outside/sentinel.txt"
+  # sc#328: the daemon requires the approval desk key (copied into every run with the fixture).
+  "$BIN" compose desk-key --create 1 >/dev/null || { echo "desk key create failed"; exit 2; }
   t0=$(now_ms)
   start_daemon daemon-fixture || { echo "fixture daemon failed"; tail -5 "$R/daemon-fixture.log"; exit 2; }
   t1=$(now_ms)

@@ -17,6 +17,11 @@ async fn allen_commands_route_through_the_socket() {
     let tmp = tempfile::tempdir().unwrap();
     // Only this test binary sets these; one test per binary avoids env races.
     std::env::set_var("AIEN_COMPOSE_DIR", tmp.path().join("compose"));
+    // sc#328: the daemon refuses to start without the (default) desk key.
+    aien_runtime::approved_auth::DeskKey::create(&aien_runtime::approved_auth::desk_key_path(
+        &tmp.path().join("compose"),
+    ))
+    .unwrap();
     std::env::remove_var(ENV_SUBJECT);
     let socket = tmp.path().join("runtime.sock");
     let cfg = SchedulerConfig {

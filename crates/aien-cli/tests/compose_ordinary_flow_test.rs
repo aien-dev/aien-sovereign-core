@@ -1,10 +1,14 @@
 //! sovereign-core #261: the ordinary `aien compose` flow (propose, authorize,
 //! execute) with the daemon minting the grant, driven through the real CLI
 //! binary against an in-process daemon whose compose bridge has a fixed
-//! proposer (no model). Needs the linked composition archive; in a stub
-//! build each test is IGNORED (cfg compose_linked from build.rs), never passed.
+//! proposer (no model). The bridge keeps its default (sc#328): authorize
+//! requires the approval desk MAC, so the flow creates a desk key and signs
+//! with `--desk`, as an operator does. Needs the linked composition archive;
+//! in a stub build each test is IGNORED (cfg compose_linked from build.rs),
+//! never passed.
 use aien_inference_abi::MockInferenceBackend;
 use aien_kv_cache::create_shared_kv_manager;
+use aien_runtime::approved_auth::{desk_key_path, DeskKey};
 use aien_runtime::client::AienRuntimeClient;
 use aien_runtime::control::{ControlCommand, ControlResponse};
 use aien_runtime::server::AienRuntimeServer;
@@ -47,6 +51,7 @@ async fn rig() -> Option<Rig> {
     let ws = root.join("ws");
     std::fs::create_dir_all(&ws).unwrap();
     let socket = root.join("aien.sock");
+    DeskKey::create(&desk_key_path(&root.join("compose"))).unwrap();
     let bridge = Arc::new(ComposeBridge::new(
         root.join("compose"),
         proposer(),
@@ -83,13 +88,18 @@ async fn rig() -> Option<Rig> {
 impl Rig {
     /// Run `aien-cli compose <args>`; returns (exit code, JSON on stdout).
     async fn cli(&self, args: Vec<String>) -> (i32, Value) {
-        let (sock, prov) = (self.socket.clone(), self.dir.join("prov"));
+        let (sock, prov, compose) = (
+            self.socket.clone(),
+            self.dir.join("prov"),
+            self.dir.join("compose"),
+        );
         tokio::task::spawn_blocking(move || {
             let o = std::process::Command::new(env!("CARGO_BIN_EXE_aien-cli"))
                 .arg("compose")
                 .args(&args)
                 .env("AIEN_RUNTIME_SOCK", &sock)
                 .env("AIEN_PROVENANCE_DIR", &prov)
+                .env("AIEN_COMPOSE_DIR", &compose)
                 .output()
                 .expect("run aien-cli");
             let out = String::from_utf8_lossy(&o.stdout).to_string();
@@ -148,7 +158,11 @@ async fn ordinary_flow_propose_authorize_execute_reaches_done() {
     let Some(r) = rig().await else { return };
     let report = r.propose().await;
     let (code, auth) = r
-        .cli(r.args("authorize", &report, &["--approver", "drake"]))
+        .cli(r.args(
+            "authorize",
+            &report,
+            &["--approver", "drake", "--desk", "1"],
+        ))
         .await;
     assert_eq!(code, 0, "{auth}");
     let id = auth["authorization"]["id"].as_u64().expect("grant id");
@@ -217,5 +231,37 @@ async fn a_client_written_authorization_note_is_refused_and_opens_nothing() {
         .await;
     assert_ne!(code, 0, "{v}");
     assert!(!r.ws.join("NOTES.md").exists());
+    r.down().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[cfg_attr(not(compose_linked), ignore = "needs the linked librx_compose.a")]
+async fn authorize_without_the_desk_mac_is_refused_and_mints_nothing() {
+    // sc#328: the default bridge requires the desk; an OS-user-only authorize
+    // (what every client sent before #297) is refused and opens nothing.
+    let _t = ONE_HOME.lock().await;
+    let Some(r) = rig().await else { return };
+    let report = r.propose().await;
+    let (code, v) = r
+        .cli(r.args("authorize", &report, &["--approver", "drake"]))
+        .await;
+    assert_ne!(code, 0, "{v}");
+    assert!(v.to_string().contains("DeskMacRequired"), "{v}");
+    let (code, v) = r
+        .cli(r.args("execute", &report, &["--authorization", "1"]))
+        .await;
+    assert_ne!(code, 0, "{v}");
+    assert!(!r.ws.join("NOTES.md").exists());
+    // The same proposal, signed at the desk, is authorized: the refusal was
+    // the missing MAC, not a broken rig.
+    let (code, auth) = r
+        .cli(r.args(
+            "authorize",
+            &report,
+            &["--approver", "drake", "--desk", "1"],
+        ))
+        .await;
+    assert_eq!(code, 0, "{auth}");
+    assert!(auth["authorization"]["id"].as_u64().is_some(), "{auth}");
     r.down().await;
 }

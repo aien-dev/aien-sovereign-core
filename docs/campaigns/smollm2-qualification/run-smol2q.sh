@@ -275,6 +275,8 @@ _mem)   # inside the hold: SmolLM2 start, then the Llama control start, same bin
     # exec: $! must be the daemon itself, not a subshell running the clean_env function
     # (first mem run read VmHWM of that subshell: 2716 kB; disclosed in the verdict)
     exec_clean() { exec env -i PATH="$PATH" HOME="$HOME" USER="${USER:-}" LANG="${LANG:-C.UTF-8}" "$@"; }
+    # sc#328: the daemon requires the approval desk key.
+    AIEN_COMPOSE_DIR="$R/compose" "$(inp aien_cli_path)" compose desk-key --create 1 >/dev/null
     exec_clean AIEN_COMPOSE_DIR="$R/compose" AIEN_PROVENANCE_DIR="$R/prov" AIEN_RUNTIME_SOCK="$R/aien.sock" \
       AIEN_RUNTIME_STATE_DIR="$R/state" AIEN_REQUIRE_CHECKPOINT=1 AIEN_MODEL_PATH="$d/model.safetensors" \
       AIEN_TOKENIZER_PATH="$d/tokenizer.json" AIEN_COMPOSE_MAX_TOKENS="$(inp max_tokens)" AIEN_REQUIRE_BLACKWELL=1 \

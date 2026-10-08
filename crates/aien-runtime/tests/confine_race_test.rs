@@ -51,7 +51,8 @@ impl Fx {
         let root = std::fs::canonicalize(tmp.path()).unwrap();
         let ws = root.join("ws");
         std::fs::create_dir_all(ws.join("d")).unwrap();
-        let b = ComposeBridge::new(root.join("compose"), proposer(), "test:fixed-proposer");
+        let b = ComposeBridge::new(root.join("compose"), proposer(), "test:fixed-proposer")
+            .with_authorize_requires_desk(false);
         let run = b.run_task("write the note", ws.to_str().unwrap());
         if !aien_omega_compose::LINKED {
             return None;

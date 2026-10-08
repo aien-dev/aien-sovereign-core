@@ -64,6 +64,8 @@ run_step() {
   return $rc
 }
 
+# sc#328: the daemon requires the approval desk key; every authorize is signed (--desk 1).
+[ -f "$AIEN_COMPOSE_DIR/approval-desk.key" ] || "$BIN" compose desk-key --create 1 >/dev/null || { echo "desk key create failed"; exit 2; }
 start_daemon 1 || { echo "daemon 1 failed to start; see $R/daemon-1.log"; tail -5 "$R/daemon-1.log"; exit 2; }
 PID1=$DPID
 # S0 (setup, before the measured window): provision the composition home.
@@ -81,7 +83,7 @@ run_step S2 inspect inspect --workspace "$WS"
 run_step S3 propose propose --goal "$GOAL" --workspace "$WS"
 jq '.report' "$R/steps/S3.json" >"$R/s3-report.json"
 run_step S4 authorize authorize --report "$R/s3-report.json" --workspace "$WS" \
-  --approver drake --constraint "${CID:-0}"
+  --approver drake --constraint "${CID:-0}" --desk 1
 AID=$(jq -r '.authorization.id // empty' "$R/steps/S4.json")
 run_step S5 execute execute --report "$R/s3-report.json" --workspace "$WS" --authorization "${AID:-0}"
 EID=$(jq -r '.effect.id // empty' "$R/steps/S5.json")

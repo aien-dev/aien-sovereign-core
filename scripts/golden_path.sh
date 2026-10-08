@@ -117,6 +117,10 @@ echo "state dir:  $STATE_DIR"
 echo "daemon log: $DAEMON_LOG"
 echo
 
+# sc#328: the daemon requires the approval desk key by default; create it in
+# this run's compose home before the first boot.
+"$BIN" compose desk-key --create 1 >/dev/null || { echo "FATAL: cannot create the approval desk key" >&2; exit 1; }
+
 # Step 1: boot from clean state with one command, never the mock backend.
 stop_daemon
 if boot_daemon; then

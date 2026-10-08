@@ -87,6 +87,12 @@ async fn start_on<B: AienInferenceBackend + Send + 'static>(
     let spine = AienRuntimeSpine::new(64, cfg, create_shared_kv_manager(256, 16));
     let proposer: ComposeProposer =
         Arc::new(|_p: &str, _l: Duration| Err("not used in this test".to_string()));
+    // sc#328: the bridge requires the desk by default; the daemon will not
+    // start without its key.
+    aien_runtime::approved_auth::DeskKey::create(&aien_runtime::approved_auth::desk_key_path(
+        &tmp.path().join("compose"),
+    ))
+    .unwrap();
     let bridge = Arc::new(ComposeBridge::new(
         tmp.path().join("compose"),
         proposer,

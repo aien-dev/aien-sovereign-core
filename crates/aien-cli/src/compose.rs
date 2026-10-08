@@ -290,9 +290,9 @@ async fn step(sub: &str, m: &HashMap<String, String>) -> Result<Value, String> {
                 .map(|s| ids(s))
                 .transpose()?
                 .unwrap_or_default();
-            // sovereign-core #297: the optional approval-desk proof. Only a
-            // daemon started with AIEN_COMPOSE_AUTHORIZE_REQUIRES_DESK=1 checks
-            // it; without the switch the daemon ignores it.
+            // sovereign-core #297, #328: the approval-desk proof. The daemon
+            // requires it by default; only a dev run started with the opt-out
+            // AIEN_COMPOSE_AUTHORIZE_REQUIRES_DESK=0 ignores it.
             let desk_proof = {
                 use aien_runtime::approved_auth::{desk_key_path, AuthorizeBinding, DeskKey};
                 use aien_runtime::control::DeskProof;

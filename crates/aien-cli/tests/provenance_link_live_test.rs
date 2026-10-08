@@ -125,6 +125,11 @@ fn a_live_model_commit_names_its_generation_record_and_weights_digest() {
     for d in ["ws", "state", "home", "prov"] {
         std::fs::create_dir_all(root.join(d)).unwrap();
     }
+    // sc#328: the daemon requires the approval desk by default.
+    aien_runtime::approved_auth::DeskKey::create(&aien_runtime::approved_auth::desk_key_path(
+        &root.join("compose"),
+    ))
+    .unwrap();
     let rig = Rig {
         bin: bin.clone(),
         root: root.clone(),
@@ -191,6 +196,8 @@ fn a_live_model_commit_names_its_generation_record_and_weights_digest() {
         ws.to_str().unwrap(),
         "--approver",
         "drake",
+        "--desk",
+        "1",
     ]);
     assert_eq!(auth["ok"], true, "{auth}");
     let grant = auth["authorization"]["id"].as_u64().unwrap();
