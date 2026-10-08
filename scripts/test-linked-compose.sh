@@ -26,21 +26,43 @@ export AIEN_OMEGA_COMPOSE_DIR="$OMW" AIEN_PHYSICS_DIR="$PHW" AIEN_AIENOS_LOCK_RE
 unset AIEN_OMEGA_DIR AIEN_OMEGA_GPU_LIB AIEN_OMEGA_COMPOSE_LIB AIEN_OMEGA_COMPOSE_SHA AIEN_FORCE_CPU_STUB AIEN_DEV_FALLBACK
 cd "$ROOT"
 LOG=$(mktemp); trap 'rm -f "$LOG"' EXIT
-run() {  # run a test target with --include-ignored; the tests are serial (one process-wide compose home)
+run() {  # run test targets with --include-ignored; the tests are serial (one process-wide compose home)
     cargo test "$@" -- --include-ignored --test-threads=1 2>&1 | tee -a "$LOG"
 }
+count() {  # how many tests the targets hold, ignored ones included
+    cargo test "$@" -- --list --include-ignored 2>/dev/null | grep -c ": test$" || true
+}
+# Every aien-runtime test target, discovered from the directory so a new one is gated
+# automatically (sovereign-core #323: minted_grant_test, refusal_table_test and the rest
+# were linked-only and outside this gate). Left out, each needing what CI does not have:
+#   prefill_e2e0/1/2     a real TinyLlama checkpoint (AIEN_E2E_CHECKPOINT).
+# Also outside this gate, in other crates: aien-cli recovery_matrix_test and
+# provenance_link_live_test (a real SmolLM2 on disk, minutes of CPU per case; run on the
+# Spark, receipts on the PR), and the GB10/real-checkpoint inference tests (heavy queue).
+RT=()
+for f in "$ROOT"/crates/aien-runtime/tests/*.rs; do
+    t=$(basename "$f" .rs)
+    case "$t" in prefill_e2e*) continue ;; esac
+    RT+=(--test "$t")
+done
+[ "${#RT[@]}" -ge 60 ] || die "found only $((${#RT[@]} / 2)) aien-runtime test targets"
+CLI=(--test compose_ordinary_flow_test)
+ATT=$(count -p aien-runtime --test approved_attacks_test)
+ALL=$(( $(count -p aien-omega-compose --test compose) + $(count -p aien-runtime "${RT[@]}") + $(count -p aien-cli "${CLI[@]}") ))
+[ "$ATT" -gt 0 ] && [ "$ALL" -gt "$ATT" ] || die "could not list the linked tests"
 : >"$LOG"
-# The floor comes from the suite itself, not a hardcoded number.
-SUITE=$(cargo test -p aien-runtime --test approved_attacks_test -- --list --include-ignored 2>/dev/null | grep -c ": test$" || true)
-[ "$SUITE" -gt 0 ] || die "could not list the approved_attacks tests"
 run -p aien-omega-compose --test compose
-for i in $(seq "$REPEAT"); do
+run -p aien-runtime "${RT[@]}"
+run -p aien-cli "${CLI[@]}"
+# The approved_attacks suite again (it once hid a race, #306): REPEAT runs in all.
+for i in $(seq 2 "$REPEAT"); do
     echo "== approved_attacks run $i/$REPEAT"
     run -p aien-runtime --test approved_attacks_test
 done
 # Not vacuous: the library was linked (no stub warning) and the tests really ran.
 if grep -q "building the stub" "$LOG"; then die "a stub was built: the composition library is not linked"; fi
+want=$(( ALL + ATT * (REPEAT - 1) ))
 ran=$(grep -E '^test result: ok\. [0-9]+ passed' "$LOG" | awk '{s += $4} END {print s + 0}')
-[ "$ran" -ge $((SUITE * REPEAT)) ] || die "only $ran linked tests passed (expected at least $((SUITE * REPEAT)): $SUITE approved_attacks tests x $REPEAT)"
+[ "$ran" -ge "$want" ] || die "only $ran linked tests passed (expected $want: $ALL linked tests + approved_attacks $ATT x $((REPEAT - 1)) more)"
 if grep -E '^test result:.* [1-9][0-9]* ignored' "$LOG" >/dev/null; then die "tests were still ignored"; fi
-echo "test-linked-compose: PASS ($ran linked tests passed, approved_attacks x$REPEAT)"
+echo "test-linked-compose: PASS ($ran linked tests passed: $ALL across compose, every aien-runtime target but prefill_e2e*, aien-cli ordinary flow; approved_attacks x$REPEAT)"

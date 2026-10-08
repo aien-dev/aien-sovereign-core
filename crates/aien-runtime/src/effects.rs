@@ -751,6 +751,13 @@ pub fn check_reserved_note(kind: &str, text: &str) -> Result<(), String> {
             "ComposeNote: effect records with a \"phase\" are written only by the effect commands"
                 .into(),
         ),
+        // sovereign-core #323: a phase-less `write_file` note spends its
+        // authorization (NEXT-PHASE-1 journals, still read). No caller writes
+        // a new one: it would block a live grant and void its revoke.
+        "effect" if v.get("tool").and_then(Value::as_str) == Some("write_file") => Err(
+            "ComposeNote: write_file effect records are written only by the effect commands (a NEXT-PHASE-1 spend note is never accepted from a caller)"
+                .into(),
+        ),
         // sovereign-core #249: approved-submission replay records come only from
         // crate::approved_replay.
         "effect" if v.get(crate::approved_replay::FIELD).is_some() => Err(
@@ -2775,6 +2782,17 @@ mod tests {
     #[test]
     fn reserved_records_cannot_be_forged_through_compose_note() {
         assert!(check_reserved_note("effect", r#"{"phase":"ack","intent":3}"#).is_err());
+        // #323: the NEXT-PHASE-1 spend note, with or without an authorization.
+        let legacy = r#"{"tool":"write_file","authorization":2,"success":true}"#;
+        assert!(check_reserved_note("effect", legacy).is_err());
+        assert!(check_reserved_note("effect", r#"{"tool":"write_file"}"#).is_err());
+        // The ledger still reads one from an old journal.
+        let l = Ledger::from_records(&[
+            grant(2, Value::Null),
+            rec(3, "effect", serde_json::from_str(legacy).unwrap()),
+        ])
+        .unwrap();
+        assert_eq!(l.legacy_spent.get(&2), Some(&3));
         assert!(check_reserved_note("authorization", r#"{"control":"resume"}"#).is_err());
         assert!(check_reserved_note("effect", r#"{"tool":"inspect"}"#).is_ok());
         assert!(check_reserved_note("constraint", "plain text").is_ok());
