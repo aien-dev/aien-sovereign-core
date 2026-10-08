@@ -983,6 +983,21 @@ impl CheckpointPolicy {
     }
 }
 
+/// The daemon's start line (sc#337): whether this process fails closed, whether
+/// the binary was built with `dev-fallback`, the effective `require_checkpoint`
+/// and the tensor backend's name, so a run's log shows the protections were on
+/// instead of only the absence of a crash.
+fn strict_start_line(
+    strict: bool,
+    dev_fallback_build: bool,
+    require_checkpoint: bool,
+    backend: &str,
+) -> String {
+    format!(
+        "STRICT strict={strict} dev_fallback_build={dev_fallback_build} require_checkpoint={require_checkpoint} backend={backend}"
+    )
+}
+
 fn is_safetensors(path: &std::path::Path) -> bool {
     path.extension().and_then(|ext| ext.to_str()) == Some("safetensors")
 }
@@ -1626,6 +1641,15 @@ pub async fn run_daemon_server() {
                 std::process::exit(1);
             }
         };
+    println!(
+        "  {}",
+        strict_start_line(
+            aien_inference_abi::strict::production_strict(),
+            aien_inference_abi::strict::DEV_FALLBACK,
+            CheckpointPolicy::from_env().require_checkpoint,
+            tensor_backend.name(),
+        )
+    );
 
     // One KV for runtime and backend: the spine's block tables and the
     // backend's K/V writes go to the same pooled manager. The pool is sized
@@ -2102,6 +2126,18 @@ pub async fn handle_aegis_command() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn strict_start_line_names_every_protection() {
+        assert_eq!(
+            strict_start_line(true, false, true, "omega-gb10"),
+            "STRICT strict=true dev_fallback_build=false require_checkpoint=true backend=omega-gb10"
+        );
+        assert_eq!(
+            strict_start_line(false, true, false, "ReferenceCpuBackend"),
+            "STRICT strict=false dev_fallback_build=true require_checkpoint=false backend=ReferenceCpuBackend"
+        );
+    }
 
     // ---- GB10 serving reservation: the daemon's start-up decision (sovereign-core#277) ----
 
