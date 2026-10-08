@@ -156,6 +156,11 @@ pub enum ControlCommand {
         workspace: String,
         approver: String,
         constraints: Vec<u64>,
+        /// sovereign-core #297: the approval desk's MAC over this authorize.
+        /// Optional on the wire (old clients omit it; `None` is not written).
+        /// Required only when the daemon runs with the desk switch ON.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        desk_proof: Option<DeskProof>,
     },
     /// NEXT-PHASE-2: operator `stop`, `resume`, `revoke` (ACCEPTANCE-v2 2.5, 2.6).
     ComposeControl {
@@ -163,6 +168,15 @@ pub enum ControlCommand {
         approver: String,
         authorization: Option<u64>,
     },
+}
+
+/// The desk key's proof for one `ComposeAuthorize` (sovereign-core #297): a
+/// fresh nonce and the HMAC over the authorize binding
+/// (`approved_auth::AuthorizeBinding`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeskProof {
+    pub nonce: String,
+    pub mac: String,
 }
 
 /// An operator's decision for one unsettled effect.
