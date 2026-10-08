@@ -35,3 +35,4 @@ fault-hold = ["aien-runtime/fault-hold"]
 [dev-dependencies]
 tempfile = "3.10"
 aien-runtime = { path = "../aien-runtime", features = ["test-support"] }
+aien-allen = { path = "../aien-allen" }

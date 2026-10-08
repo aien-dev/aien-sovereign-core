@@ -65,6 +65,7 @@ dependencies = [
 name = "aien-cli"
 version = "0.1.0"
 dependencies = [
+ "aien-allen",
  "aien-inference-abi",
  "aien-kv-cache",
  "aien-omega-compose",
