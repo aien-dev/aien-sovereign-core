@@ -790,6 +790,13 @@ pub struct ComposeRecallReport {
     /// sha256 over the digests of records 1..=prefix (hex), when asked.
     pub prefix: Option<u64>,
     pub prefix_digest: Option<String>,
+    /// True when the daemon was built with the native Omega composition library
+    /// (not the stub). Absent in older replies (reads as false).
+    #[serde(default)]
+    pub compose_native: bool,
+    /// The omega commit the linked library was pinned to; empty for the stub.
+    #[serde(default)]
+    pub omega_sha: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

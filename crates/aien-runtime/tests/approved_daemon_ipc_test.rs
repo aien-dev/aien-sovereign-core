@@ -124,6 +124,28 @@ async fn approved_proposal_over_the_daemon_socket() {
     let socket = tmp.path().join("runtime.sock");
     let (c, handle) = start(&socket).await;
 
+    // The recall reply says whether the native library is linked (VAC M3a).
+    match c
+        .send_command(ControlCommand::ComposeRecall {
+            ids: vec![],
+            prefix: None,
+        })
+        .await
+        .unwrap()
+    {
+        ControlResponse::ComposeRecalled(r) => {
+            assert_eq!(r.compose_native, aien_omega_compose::LINKED);
+            if aien_omega_compose::LINKED {
+                assert_eq!(r.omega_sha.len(), 40);
+                assert!(r.omega_sha.chars().all(|ch| ch.is_ascii_hexdigit()));
+                assert_eq!(r.omega_sha, aien_omega_compose::EXPECTED_OMEGA_SHA);
+            } else {
+                assert!(r.omega_sha.is_empty());
+            }
+        }
+        other => panic!("recall: {other:?}"),
+    }
+
     // Before anything: forged approver (correct bytes, hashes and the MAC of
     // the honest approval) is refused, nothing appended.
     let good = signed(&dir, "req-1", "appr-1", "interplane-host");
@@ -248,4 +270,13 @@ async fn approved_proposal_over_the_daemon_socket() {
     );
     let _ = c2.send_command(ControlCommand::Shutdown).await;
     let _ = tokio::time::timeout(Duration::from_secs(5), handle2).await;
+}
+
+/// Compat: a recall reply from an older daemon (no native fields) still reads.
+#[test]
+fn old_recall_json_without_native_fields_deserializes() {
+    let old = r#"{"compose_dir":"/d","machine_id":"m","records_total":0,"host":[],"cited":[],"missing":[],"prefix":null,"prefix_digest":null}"#;
+    let r: aien_runtime::control::ComposeRecallReport = serde_json::from_str(old).unwrap();
+    assert!(!r.compose_native);
+    assert!(r.omega_sha.is_empty());
 }
