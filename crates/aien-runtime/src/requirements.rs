@@ -60,15 +60,16 @@
 //!   (`1.`, `2)`), emphasis marks and trailing `:.!?#`, trimmed, whitespace
 //!   collapsed, compared case-insensitively.
 //! - word form (topics): lowercase, strip ONE suffix of `ment ing ion es ed
-//!   s` (only when 3 or more letters remain), then one trailing `e` (when 4
+//!   s` (only when 3 or more letters remain; not the `s` of a final `ss`), then one trailing `e` (when 4
 //!   or more letters remain). `preparing`, `prepare` and `prepared` agree;
 //!   `publishing` and `public` do not. A word whose suffix was stripped also
 //!   matches with a final `i` as `y` and with a doubled final consonant
 //!   undoubled, so `dry`, `dried` and `drying`, `label`, `labelled` and
 //!   `labelling`, `run` and `running` agree (`fill` and `file`, `ski` and
 //!   `sky` do not). A topic word ending in `age` or `ages` also matches
-//!   without it when 4 letters remain: the topic `storage` is covered by
-//!   `store` or `stored` (sc#332). Irregular forms (`withdrew` / `withdraw`)
+//!   without it when 4 letters remain, by a verb form only: the topic
+//!   `storage` is covered by `store` or `stored`, `postage` not by `post`
+//!   (sc#332). Irregular forms (`withdrew` / `withdraw`)
 //!   do not agree: the check errs on the side of refusing, unless the goal
 //!   names the form for that topic, written into the topic as `withdraw (or
 //!   withdrew)`.
@@ -411,7 +412,8 @@ fn stem_parts(w: &str) -> (String, bool) {
     let mut s = w.to_lowercase();
     let mut stripped = false;
     for suf in ["ment", "ing", "ion", "es", "ed", "s"] {
-        if s.len() >= suf.len() + 3 && s.ends_with(suf) {
+        // A final `ss` is not a plural: `dress`, `class`, `mess` (sc#332).
+        if s.len() >= suf.len() + 3 && s.ends_with(suf) && !(suf == "s" && s.ends_with("ss")) {
             s.truncate(s.len() - suf.len());
             stripped = true;
             break;
@@ -426,11 +428,17 @@ fn stem_parts(w: &str) -> (String, bool) {
 /// The forms a word may match as (see the module docs): its word form and,
 /// only when a suffix was stripped, that form with a final `i` as `y`
 /// (`dried`: `dry`) or a doubled final consonant undoubled (`labelled`:
-/// `label`). A topic word also matches without a final `age` or `ages` when 4
-/// letters remain (`storage`: `stor`, as `store`) (sc#332).
+/// `label`). A topic word ending in `age` or `ages` (4 letters left) also
+/// matches a document word that is a verb form of the rest, one that ended
+/// in `e` or lost a suffix (`storage`: `store`, `stored`; not `post` for
+/// `postage`); those keys carry an `age:` mark so nothing else meets them
+/// (sc#332). `topic` is true for the topic's words, false for the document's.
 pub(crate) fn word_keys(w: &str, topic: bool) -> Vec<String> {
     let (s, stripped) = stem_parts(w);
     let mut keys = vec![s.clone()];
+    if !topic && (stripped || w.to_lowercase().ends_with('e')) {
+        keys.push(format!("age:{s}"));
+    }
     if stripped {
         if let Some(r) = s.strip_suffix('i') {
             keys.push(format!("{r}y"));
@@ -447,7 +455,7 @@ pub(crate) fn word_keys(w: &str, topic: bool) -> Vec<String> {
         let low = w.to_lowercase();
         for suf in ["ages", "age"] {
             if let Some(r) = low.strip_suffix(suf).filter(|r| r.len() >= 4) {
-                keys.push(stem(r));
+                keys.push(format!("age:{}", stem(r)));
                 break;
             }
         }

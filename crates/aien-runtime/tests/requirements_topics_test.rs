@@ -74,6 +74,8 @@ fn the_forms_the_goals_accept_cover_their_topics() {
         ("languages", "One language."),
         ("average", "Two averages."),
         ("fill", "The cup is filled."),
+        ("dress", "She dressed well."),
+        ("classes", "One class."),
     ] {
         let r = [RequiredTopics(vec![topic.to_string()])];
         assert!(refusal_reason(&r, text).is_none(), "{topic}: {text}");
@@ -93,6 +95,9 @@ fn other_words_still_do_not_cover_a_topic() {
         ("tale", "A tall tree."),
         ("ski", "The sky is blue."),
         ("pack", "A package came."),
+        ("postage", "Post it today."),
+        ("shortage", "A short note."),
+        ("message", "What a mess."),
         ("storage", "A story."),
         // an irregular form counts only when the goal names it
         ("withdraw", "She withdrew fifty pounds."),
