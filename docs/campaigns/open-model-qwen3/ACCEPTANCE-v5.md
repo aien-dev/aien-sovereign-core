@@ -345,7 +345,9 @@ GPU hold names, one per part            = TO FILL AT FREEZE   (proposed <runner 
 ```
 
 A real run refuses while any pin holds the placeholder and also while the `frozen-v5.json` status does not say FROZEN
-(`run-qwen3-v5.sh`; filled pins alone are not a freeze).
+(`run-qwen3-v5.sh`; filled pins alone are not a freeze). The pins describe the product build (sovereign-core 4770703 and its
+locks); the campaign files are bound separately by `evidence-v5/campaign-files.sha256` and the wrapper's identity file, so a
+later campaign-file commit on top of 4770703 does not change a pin.
 
 ## 8. Run plan: one chip slot
 
@@ -401,7 +403,9 @@ changed to pass a gate.**
   prepared as a DRAFT (2026-10-08, status line unchanged):** the eight build pins at 4770703, the model re-hash, the
   generated declaration (identical, QUALIFICATION_ROWS=334) and the campaign-file sha256 list are filled. Still TO FILL AT FREEZE:
   the daemon `CHECKPOINT_SHARDS` confirmation (G6) and the GPU hold names (who runs the parts). Any change to a campaign file
-  after this fill means regenerating `evidence-v5/campaign-files.sha256`; any product change means a new build and new pins.
+  after this fill means regenerating `evidence-v5/campaign-files.sha256`; any product change means a new build and new pins. The
+  G8 change is therefore the status line plus what it touches: `frozen-v5.json` is a campaign file, so that change also
+  regenerates `campaign-files.sha256`, and the draft-only check of `test-v5.sh` (status says DRAFT, NOT FROZEN) changes to FROZEN.
 
 ## 10. Prediction (stated before any run; UNVERIFIED)
 
