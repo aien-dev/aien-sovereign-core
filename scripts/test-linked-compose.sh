@@ -39,13 +39,13 @@ count() {  # how many tests the targets hold, ignored ones included
 # Also outside this gate, in other crates: aien-cli recovery_matrix_test and
 # provenance_link_live_test (a real SmolLM2 on disk, minutes of CPU per case; run on the
 # Spark, receipts on the PR), and the GB10/real-checkpoint inference tests (heavy queue).
-RT=()
+RT=()  # 46 targets on 2026-10-08; the floor below catches a lost glob or a deleted target
 for f in "$ROOT"/crates/aien-runtime/tests/*.rs; do
     t=$(basename "$f" .rs)
     case "$t" in prefill_e2e*) continue ;; esac
     RT+=(--test "$t")
 done
-[ "${#RT[@]}" -ge 60 ] || die "found only $((${#RT[@]} / 2)) aien-runtime test targets"
+[ "${#RT[@]}" -ge 90 ] || die "found only $((${#RT[@]} / 2)) aien-runtime test targets"
 CLI=(--test compose_ordinary_flow_test)
 ATT=$(count -p aien-runtime --test approved_attacks_test)
 ALL=$(( $(count -p aien-omega-compose --test compose) + $(count -p aien-runtime "${RT[@]}") + $(count -p aien-cli "${CLI[@]}") ))
