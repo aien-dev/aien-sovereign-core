@@ -18,9 +18,9 @@
 //! | `N sentences in|per|for|within every|each section` (or `in every section, ... N sentences`) | `MinSentencesPerSection(N)` |
 //! | `sections|headings titled|named|called A, B and C`, `sections: A, B and C` | `RequiredHeadings` |
 //! | `covers|covering A, B and C` (and `to|should|must|will|can cover ...`) | `RequiredTopics` |
-//! | `include|contain|use|mention the [exact|following|specific|same] word(s)|term(s) X, Y` or `"X", "Y"`, optionally followed by `somewhere|anywhere in it|the list|the text|...` (a place that is the whole document; any other place is UNCERTAIN) | `RequiredWords` |
-//! | `make sure|be sure|ensure|check that the word(s)|term(s) X and Y [both|all|each] appear|occur|show up|are used|are included|are present [somewhere in it]` | `RequiredWords`; a negator, another verb or a narrower place is UNCERTAIN |
-//! | `must|should|will|shall|to|also name|mention A, B and C [by name]` where every item is one capitalised word | `RequiredWords` (names); a list mixing names and other words is UNCERTAIN, a list without names stays silent |
+//! | `include|contain|use|mention the [exact|following|specific|same] word(s)|term(s) X, Y` or `"X", "Y"`, optionally followed by `somewhere|anywhere in it|in the text|file|document|list` (a place that is the whole document; any other place, a choice (`or`), or a count or scope after the list is UNCERTAIN) | `RequiredWords` |
+//! | `make sure|be sure|ensure|check that the word(s)|term(s) X and Y [both|all|each] appear|occur|show up|are used|are included|are present [somewhere in it]` | `RequiredWords`; a negator, another verb, a narrower place, a choice (`or`) or a count after it is UNCERTAIN |
+//! | `must|should|will|shall|to|also name|mention A, B and C [by name]` where every item is one capitalised word | `RequiredWords` (names); a list mixing names and other words, a choice (`or`), a count or scope after it, or a title with a period (`Dr. Smith`) is UNCERTAIN; a list without names (`the file README.md`, `2024`, `the Smith family`) stays silent |
 //! | `include|contain|use|mention the phrase "X"` / `the phrases "X", "Y"` | `RequiredPhrases` |
 //! | `add|append|insert|with N line(s)`, `exactly N lines` after such a verb, `a N-line <thing>` after a verb | `AddedLines` exactly N |
 //! | `write|put|create|draft|compose|produce|generate N line(s)` | `AddedLines` at least N |
@@ -815,8 +815,10 @@ fn split_list(region: &str) -> Vec<String> {
     segs
 }
 
-/// Words that may name the whole document as the place a word must appear.
-const PLACE_WORDS: [&str; 17] = [
+/// Words that may name the whole document as the place a word must appear:
+/// "somewhere", "anywhere", "in it", "in the text|file|document|list". A part
+/// that may be a section ("the summary", "the body", "the notes") is not one.
+const PLACE_WORDS: [&str; 9] = [
     "somewhere",
     "anywhere",
     "in",
@@ -825,16 +827,63 @@ const PLACE_WORDS: [&str; 17] = [
     "text",
     "file",
     "document",
-    "guide",
     "list",
-    "note",
-    "notes",
-    "essay",
-    "body",
-    "page",
-    "summary",
-    "checklist",
 ];
+
+/// Titles written with a period, so the name continues after it ("Dr. Smith").
+const NAME_TITLES: [&str; 10] = [
+    "dr", "mr", "mrs", "ms", "prof", "st", "jr", "sr", "mt", "rev",
+];
+
+/// Words after "and" that bind a count or a scope to the list before it,
+/// instead of starting a new clause ("... and only in the summary").
+const LIST_BINDERS: [&str; 16] = [
+    "only", "at", "each", "every", "twice", "once", "thrice", "exactly", "no", "not", "never",
+    "more", "fewer", "both", "all", "in",
+];
+
+/// The text after a word or name list ends it cleanly: nothing, a sentence end
+/// (not after a title such as "Dr", and not a next sentence that starts with
+/// "and" or "or"), or ", and" with a new clause. A count, a scope or a
+/// narrowing ("at least twice", ", but only in the summary", "; and Tomas")
+/// is not clean, and the list is then uncertain (sc#345 review).
+fn list_ends_cleanly(after: &str, last_item: &str) -> bool {
+    let t = after.trim_start_matches([' ', '\t']);
+    if t.is_empty() || t.starts_with(['\n', '\r']) {
+        return true;
+    }
+    if t.starts_with(['.', '!', '?']) {
+        let next = t[1..].split_whitespace().next().map(clean).unwrap_or("");
+        return !(t.starts_with('.')
+            && NAME_TITLES.contains(&last_item.to_ascii_lowercase().as_str()))
+            && !matches!(next.to_ascii_lowercase().as_str(), "and" | "or");
+    }
+    let t = t.strip_prefix(',').unwrap_or(t);
+    let mut ws = t.split_whitespace().map(|x| clean(x).to_ascii_lowercase());
+    ws.next().as_deref() == Some("and")
+        && ws
+            .next()
+            .is_some_and(|x| !LIST_BINDERS.contains(&x.as_str()))
+}
+
+/// The list offers a choice ("Priya or Tomas"): a required-words list is all of them.
+fn is_choice(list: &str) -> bool {
+    // Only the words outside quotes: a quoted phrase may itself hold "or".
+    let mut outside = String::new();
+    let mut quoted = false;
+    for c in list.chars() {
+        match c {
+            '"' => quoted = !quoted,
+            '\u{201C}' => quoted = true,
+            '\u{201D}' => quoted = false,
+            _ if !quoted => outside.push(c),
+            _ => {}
+        }
+    }
+    outside
+        .split_whitespace()
+        .any(|x| matches!(clean(x).to_ascii_lowercase().as_str(), "or" | "either"))
+}
 
 /// "somewhere in the list", "anywhere in it": a place that is the whole document.
 fn whole_document_place(t: &str) -> bool {
@@ -913,6 +962,17 @@ fn words_must_appear(goal: &str, toks: &[Tok], k: usize, q: usize) -> Option<(Ve
             Some(x) if PLACE_WORDS.contains(&x) => last += 1,
             Some(_) => return None,
         }
+    }
+    // The clause must end there, not carry a count or a narrowing on.
+    let raw = &toks[last].raw;
+    let punct = raw.len()
+        - raw
+            .trim_end_matches([',', '.', ';', ':', '!', '?', ')'])
+            .len();
+    if !list_ends_cleanly(&goal[toks[last].end - punct..], "")
+        || is_choice(&goal[toks[q].end..toks[items_end].start])
+    {
+        return None;
     }
     Some((items, last))
 }
@@ -1439,9 +1499,12 @@ pub fn analyze(goal: &str) -> Extraction {
                 tail.is_empty() || CLAUSE_JOINERS.contains(&tail_word),
             )
         };
+        let ends_ok = list_ends_cleanly(&goal[toks[q].end + full.len()..], "");
         if !negated_before(&toks, k)
             && tail_ok
             && place_ok
+            && ends_ok
+            && !is_choice(region)
             && !items.is_empty()
             && items.len() <= 20
         {
@@ -1493,7 +1556,9 @@ pub fn analyze(goal: &str) -> Extraction {
     }
     // "must|should|will|to name|mention Priya, Tomas and Wen [by name]": a list
     // of single capitalised words (names) is RequiredWords; a list that mixes
-    // names and other words is uncertain; anything else stays silent (sc#333).
+    // names and other words, offers a choice ("Priya or Tomas"), or carries a
+    // count or scope on ("at least twice", "Dr. Smith") is uncertain; a list
+    // without names ("the file README.md", "2024") stays silent (sc#333).
     for k in 1..n {
         if !matches!(
             toks[k].word.as_str(),
@@ -1506,7 +1571,15 @@ pub fn analyze(goal: &str) -> Extraction {
         {
             continue;
         }
-        let region = list_region(goal, toks[k].end);
+        let full = list_region(goal, toks[k].end);
+        // ", and the file needs ..." starts a new clause; ", and Wen" is the last name.
+        let region = match full
+            .match_indices(", and ")
+            .find(|(i, m)| full[i + m.len()..].starts_with(|c: char| c.is_lowercase()))
+        {
+            Some((i, _)) => &full[..i],
+            None => full,
+        };
         let trimmed = region.trim_end();
         let list = trimmed
             .strip_suffix(" by name")
@@ -1519,7 +1592,9 @@ pub fn analyze(goal: &str) -> Extraction {
             && items
                 .iter()
                 .all(|t| capital(t) && t.split_whitespace().count() == 1);
-        if names && !negated_before(&toks, k) {
+        let last_item = items.last().map_or("", String::as_str);
+        let ends_ok = list_ends_cleanly(&goal[toks[k].end + region.len()..], last_item);
+        if names && ends_ok && !is_choice(list) && !negated_before(&toks, k) {
             for t in items {
                 if !words.contains(&t) {
                     words.push(t);

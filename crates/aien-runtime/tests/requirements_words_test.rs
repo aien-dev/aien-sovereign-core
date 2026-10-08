@@ -86,6 +86,42 @@ fn a_hyphenated_word_is_matched_whole() {
 }
 
 #[test]
+fn a_hyphenated_word_has_punctuation_boundaries() {
+    let r = [words(&["first-aid"])];
+    for good in [
+        "Bring the first-aid-kit.",
+        "Bring (first-aid).",
+        "FIRST-AID.",
+    ] {
+        assert!(refusal_reason(&r, good).is_none(), "{good}");
+    }
+    let x = [words(&["x-ray"])];
+    assert!(refusal_reason(&x, "A box-ray is not one.").is_some());
+    assert!(refusal_reason(&x, "Get an x-ray.").is_none());
+}
+
+#[test]
+fn a_list_followed_by_a_new_clause_is_still_read() {
+    for (goal, w) in [
+        (
+            "It must name Priya, Tomas and Wen, and the file needs at least 14 lines.",
+            vec!["Priya", "Tomas", "Wen"],
+        ),
+        (
+            "Make sure the words whetstone and angle appear, and keep it short.",
+            vec!["whetstone", "angle"],
+        ),
+        (
+            "Use the exact words greens and browns somewhere in the file.",
+            vec!["greens", "browns"],
+        ),
+    ] {
+        let r = reqs(goal);
+        assert!(r.contains(&words(&w)), "{goal}: {r:?}");
+    }
+}
+
+#[test]
 fn near_misses_stay_uncertain() {
     for goal in [
         // negated
@@ -100,6 +136,29 @@ fn near_misses_stay_uncertain() {
         "Make sure the words sharp knife and angle appear.",
         // a partly named list
         "It must name Priya, Tomas and the dog.",
+        // sc#345 review: a title with a period, a list cut by ";"
+        "It must mention Dr. Smith.",
+        "It must mention Mr. Smith and Priya.",
+        "It must name Priya; and Tomas.",
+        "It must name Priya. And Tomas.",
+        // sc#345 review: a count or narrowing after the list
+        "It must mention Priya at least twice.",
+        "It must mention Priya, Tomas and Wen at least once each.",
+        "Use the exact words greens and browns somewhere in the list at least twice.",
+        "Use the exact words greens and browns somewhere in the list, but only in the summary.",
+        "Make sure the words whetstone and angle appear somewhere, but only in the summary.",
+        "Make sure the words whetstone and angle appear, and only in the summary.",
+        // sc#345 review: a place that may be a section
+        "Ensure the words red and blue appear in the summary.",
+        "Ensure the words red and blue appear in the body.",
+        "Use the exact words greens and browns somewhere in the notes.",
+        // sc#345 review: a choice is not "all of them"
+        "It must mention Priya or Tomas.",
+        "Make sure the words red or blue appear.",
+        "Use the exact words greens or browns.",
+        // negated forms
+        "Make sure none of the words whetstone and angle appear.",
+        "Make sure the words whetstone and angle don't appear.",
     ] {
         let ex = analyze(goal);
         assert!(

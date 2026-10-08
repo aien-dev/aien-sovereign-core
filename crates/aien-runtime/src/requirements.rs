@@ -378,6 +378,8 @@ fn non_empty_lines(s: &str) -> usize {
 
 /// Lowercase alphanumeric words (apostrophes kept inside a word).
 /// `needle` occurs in `hay` with no letter or digit right before or after it.
+/// Punctuation is a boundary: "first-aid" is found in "first-aid-kit" and
+/// "(first-aid)", not in "first-aider"; "x-ray" is not found in "box-ray".
 fn has_whole(hay: &str, needle: &str) -> bool {
     !needle.is_empty()
         && hay.match_indices(needle).any(|(i, _)| {
