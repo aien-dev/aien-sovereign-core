@@ -1,0 +1,5 @@
+{
+  "name": "aien-allen-profile",
+  "purpose": "ALLEN persona profile v1: versioned, user-editable profile bound to the engaged ALLEN identity; the only writer of <home>.allen-profile (arch#159).",
+  "schema_version": "1.0.0"
+}

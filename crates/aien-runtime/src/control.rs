@@ -91,6 +91,27 @@ pub enum ControlCommand {
     /// (torn journal tail, or a journal behind its J-Space anchor). Closes this
     /// process's handle first; the cut is recorded in the journal.
     RecoverComposeHome,
+    /// ALLEN persona profile (arch#159): identity, profile, model and unsupported
+    /// facilities in one answer. Handled on the socket connection.
+    AllenStatus,
+    /// The saved profile (or the defaults when none).
+    AllenProfileShow,
+    /// Change the profile; `expected_revision` is the compare-and-swap guard.
+    AllenProfileSet {
+        expected_revision: u64,
+        changes: aien_allen_profile::Changes,
+    },
+    /// Every saved revision, oldest first.
+    AllenProfileHistory,
+    /// Write a NEW revision that copies revision `to`.
+    AllenProfileRevert {
+        expected_revision: u64,
+        to: u64,
+    },
+    /// Write a NEW revision with the defaults. The identity is untouched.
+    AllenProfileReset {
+        expected_revision: u64,
+    },
     /// NEXT-PHASE-2: the effect-boundary checks and the durable intent, in one
     /// step (ACCEPTANCE-v2 2.1, 2.3). Answered with `ComposeNoted` (the intent).
     ComposeEffectIntent {
@@ -194,6 +215,14 @@ pub enum ControlResponse {
     },
     /// Result record of `RunComposeTask`.
     ComposeTaskResult(Box<ComposeTaskReport>),
+    /// Result of `AllenStatus`.
+    AllenStatusReport(Box<AllenStatusReport>),
+    /// Result of `AllenProfileShow`, `AllenProfileSet`, `AllenProfileRevert`, `AllenProfileReset`.
+    AllenProfile(Box<AllenProfileReport>),
+    /// Result of `AllenProfileHistory`.
+    AllenHistory(Box<AllenHistoryReport>),
+    /// A profile command was refused; nothing was changed.
+    AllenRefused(Box<AllenRefusalReport>),
     /// Result of `ComposeNote`.
     ComposeNoted(ComposeNoteReport),
     /// Result of `ComposeRecall`.
@@ -393,6 +422,9 @@ pub struct ComposeTaskReport {
     pub requirements_uncertain: Vec<String>,
     /// "model" when the Skill ran inference, or the stub label.
     pub proposer: String,
+    /// ALLEN persona used for this task (arch#159). Old reports have none.
+    #[serde(default)]
+    pub persona: Option<PersonaReport>,
 }
 
 /// One proposal the compose "model" Skill made (ACCEPTANCE-v2 3b).
@@ -539,4 +571,69 @@ pub struct ComposeControlReport {
     pub recorded: Option<ComposeNoteReport>,
     /// For `revoke`: false when the grant was already spent or revoked.
     pub revoked: Option<bool>,
+}
+
+/// Which persona a task ran with (arch#159). `state`: `not_engaged` (ALLEN is
+/// off, no persona text was added), `default` (no profile saved), `applied`
+/// (profile `revision` in use) or `refused` (profile damaged or foreign:
+/// defaults used, `reason` says why).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PersonaReport {
+    pub state: String,
+    pub display_name: String,
+    pub revision: u64,
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
+/// Latest deployment-record line, when the record exists and verifies.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeploymentSummary {
+    pub seq: u64,
+    pub candidate_id: String,
+    pub placeholder: bool,
+}
+
+/// `AllenStatus`: identity, persona, model and what is not supported yet,
+/// reported separately.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AllenStatusReport {
+    /// `not_engaged` or `engaged` (an engaged identity that cannot resolve stops the daemon).
+    pub identity: String,
+    /// First 8 hex characters of the agent id (engaged only).
+    pub fingerprint: Option<String>,
+    pub head_sequence: Option<u64>,
+    pub chain_verified: Option<bool>,
+    pub persona: PersonaReport,
+    /// The proposer label the daemon was started with.
+    pub model: String,
+    /// `local_model` or `stub`.
+    pub execution_mode: String,
+    pub deployment: Option<DeploymentSummary>,
+    /// Facilities that exist in the plan but not in v1; their controls do not exist.
+    pub unsupported: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AllenProfileReport {
+    /// 0 = no profile saved (defaults in effect).
+    pub revision: u64,
+    pub state: String,
+    /// The saved revision; `None` when none is saved.
+    pub profile: Option<aien_allen_profile::Profile>,
+    /// The values in effect when no profile is saved.
+    pub defaults: Option<aien_allen_profile::Persona>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AllenHistoryReport {
+    pub entries: Vec<aien_allen_profile::HistoryEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AllenRefusalReport {
+    pub code: String,
+    /// Plain-language reason.
+    pub message: String,
+    pub current_revision: Option<u64>,
 }
