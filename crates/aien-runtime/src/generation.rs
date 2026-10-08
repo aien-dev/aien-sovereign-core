@@ -14,12 +14,16 @@ use sha2::{Digest, Sha256};
 /// Marker field (and refused `ComposeNote` kind) of the generation record.
 pub const GENERATION: &str = "generation";
 
-/// The model files the daemon loaded, hashed once at load time.
-/// `model_sha256` is the sha256 of the single safetensors file's bytes
-/// (streamed, 1 MiB chunks); `tokenizer_sha256` that of the tokenizer file.
+/// The model files the daemon loaded, hashed once at load time (streamed,
+/// 1 MiB chunks). `model_sha256` is the digest of what was loaded, in the form
+/// `model_digest_kind` names: `file` (the single safetensors file's sha256) or
+/// `index+shards` (sc#338: the manifest digest over the shard index and every
+/// shard it names; docs/DAEMON_GENERATION_RECORD.md). `tokenizer_sha256` is the
+/// tokenizer file's sha256.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModelIdentity {
     pub model_sha256: String,
+    pub model_digest_kind: String,
     pub model_path: String,
     pub tokenizer_sha256: String,
     pub tokenizer_path: String,
@@ -98,6 +102,7 @@ pub fn build_record(id: &ModelIdentity, t: &TurnEvidence, start: DaemonStart) ->
         GENERATION: 1,
         "v": 1,
         "model_sha256": id.model_sha256,
+        "model_digest_kind": id.model_digest_kind,
         "model_path": id.model_path,
         "tokenizer_sha256": id.tokenizer_sha256,
         "tokenizer_path": id.tokenizer_path,
@@ -324,6 +329,7 @@ pub fn build_compose_record(id: &ModelIdentity, e: &ComposeEvidence, start: Daem
         "task": e.task,
         "attempt": e.attempt,
         "model_sha256": id.model_sha256,
+        "model_digest_kind": id.model_digest_kind,
         "model_path": id.model_path,
         "tokenizer_sha256": id.tokenizer_sha256,
         "tokenizer_path": id.tokenizer_path,

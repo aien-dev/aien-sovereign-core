@@ -1033,6 +1033,7 @@ mod generation_record_tests {
     fn identity() -> Arc<ModelIdentity> {
         Arc::new(ModelIdentity {
             model_sha256: "a".repeat(64),
+            model_digest_kind: "file".into(),
             model_path: "/m/model.safetensors".into(),
             tokenizer_sha256: "b".repeat(64),
             tokenizer_path: "/m/tokenizer.json".into(),
