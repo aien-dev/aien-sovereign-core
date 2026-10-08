@@ -3,7 +3,7 @@
   "placeholder": "TO FILL AT FREEZE",
   "model": {
     "model_sha256": "17a78fbba447a4e66a3d886c0998fbcf2f9201d46e5e0c5bfec2d57c975976b7",
-    "model_sha256_note": "COMPUTED FROM THE LISTED SHA256s (index and three shards below, manifest of docs/DAEMON_GENERATION_RECORD.md), NOT RE-HASHED when first written; re-hashed 2026-10-08T21:39Z on the chip host with no GPU hold: the index, the three shards, the tokenizer and the three config files all equal the listed values and the manifest rebuilt from them is this value (evidence-v5/model-rehash-2026-10-08.txt); the daemon CHECKPOINT_SHARDS confirmation is a G6 item",
+    "model_sha256_note": "COMPUTED FROM THE LISTED SHA256s (index and three shards below, manifest of docs/DAEMON_GENERATION_RECORD.md), NOT RE-HASHED when first written; re-hashed 2026-10-08T21:39Z on the chip host with no GPU hold: the index, the three shards, the tokenizer and the three config files all equal the listed values and the manifest rebuilt from them is this value (evidence-v5/model-rehash-2026-10-08.txt); confirmed by the daemon itself in the G6 GPU dry run 2026-10-08T22:08-22:30Z: all 22 daemon starts logged a CHECKPOINT_SHARDS line equal to these values (model_sha256, index+shards, index and the three shards)",
     "model_digest_kind": "index+shards",
     "index_sha256": "d6c42883a895dfef5b0080ed2116a1bcd764f558406b98923d675978a1abf29c",
     "shards": [
@@ -14,13 +14,13 @@
     "tokenizer_sha256": "aeb13307a71acd8fe81861d94ad54ab689df773318809eed3cbe794b4492dae4"
   },
   "pins": {
-    "sovereign_core_commit": "47707039016efa5f69d99eb3e8e58037df9be3df",
+    "sovereign_core_commit": "e27bda8af585290ec2c1d9146c4a5023e9b3a0d3",
     "omega_lock_commit": "6c6180cf378075b61291f4565d226eba38b4decd",
     "physics_lock_commit": "6d7cf0d4d8eb2cda7b512100ff6058e25dbb3ddf",
     "aienos_lock_commit": "b84c0a67590a934f3f3e001b12ec85ebc086a9eb",
     "cargo_lock_sha256": "49d97bf30113b1727fcfc0e33be79d9446ae13651a08afc32bba889b77fca265",
-    "aien_cli_sha256": "e00f572e32dc01d83f53e50f4b6ba89e6488c25c03d7471be9905f4f921702f1",
-    "np1_reference_sha256": "8dab0a7e0cbbabecd45dc5d59d27ac3325bc4aed179202f72561fb0afb9975fb",
+    "aien_cli_sha256": "62d98e0b92372862c4a1f7d762a92ec8cddcf398dced8048f75e086b2d66bc55",
+    "np1_reference_sha256": "a29832f8604f3c9be36d5534ece1b7bff0aeb4d402266568931c0dd111fdd348",
     "np1_edit_merge_sha256": "66be8da4d3c5c7c32089e851acdbed9c050afa38f2d7db9e8fbced3811949e80"
   }
 }

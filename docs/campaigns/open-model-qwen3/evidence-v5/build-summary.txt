@@ -1,4 +1,4 @@
-# v5 freeze-candidate build summary at sovereign-core 4770703 (2026-10-08T21:39:41Z); omega/physics/sc status --porcelain counts all 0 (output of evidence-v5/build.sh).
+# v5 freeze-candidate build summary at sovereign-core e27bda8 (2026-10-08T23:32:29Z); omega/physics/sc status --porcelain counts all 0 (output of evidence-v5/build.sh).
 # The build log shows cargo:rustc-cfg=has_omega_compose, has_omega_gpu and has_omega_wait_ms (aien-cli and examples), and the
 # aien-inference-abi feature dev-fallback is declared but not enabled. DRAFT, NOT FROZEN: G7 rebuilds from clean checkouts at these pins.
 cargo build -vv --release -p aien-cli
@@ -8,10 +8,9 @@ examples rc=0
 6c6180cf378075b61291f4565d226eba38b4decd
 0
 6d7cf0d4d8eb2cda7b512100ff6058e25dbb3ddf
-47707039016efa5f69d99eb3e8e58037df9be3df
+e27bda8af585290ec2c1d9146c4a5023e9b3a0d3
 0
-49d97bf30113b1727fcfc0e33be79d9446ae13651a08afc32bba889b77fca265  /home/drakestapleton/workspace/oq3-v5-build-4770703/sc/Cargo.lock
-e00f572e32dc01d83f53e50f4b6ba89e6488c25c03d7471be9905f4f921702f1  /home/drakestapleton/workspace/oq3-v5-build-4770703/target/release/aien-cli
-8dab0a7e0cbbabecd45dc5d59d27ac3325bc4aed179202f72561fb0afb9975fb  /home/drakestapleton/workspace/oq3-v5-build-4770703/target/release/examples/np1_reference
-66be8da4d3c5c7c32089e851acdbed9c050afa38f2d7db9e8fbced3811949e80  /home/drakestapleton/workspace/oq3-v5-build-4770703/target/release/examples/np1_edit_merge
-done
+49d97bf30113b1727fcfc0e33be79d9446ae13651a08afc32bba889b77fca265  /home/drakestapleton/workspace/oq3-v5-build-e27bda8/sc/Cargo.lock
+62d98e0b92372862c4a1f7d762a92ec8cddcf398dced8048f75e086b2d66bc55  /home/drakestapleton/workspace/oq3-v5-build-e27bda8/target/release/aien-cli
+a29832f8604f3c9be36d5534ece1b7bff0aeb4d402266568931c0dd111fdd348  /home/drakestapleton/workspace/oq3-v5-build-e27bda8/target/release/examples/np1_reference
+66be8da4d3c5c7c32089e851acdbed9c050afa38f2d7db9e8fbced3811949e80  /home/drakestapleton/workspace/oq3-v5-build-e27bda8/target/release/examples/np1_edit_merge

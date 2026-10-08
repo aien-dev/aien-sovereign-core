@@ -109,7 +109,7 @@ chk "evidence-v5/model-rehash-2026-10-08.txt equals the frozen model values and 
   [ "$(jq -r ".model.shards[] | .[1] + \"  \" + .[0]" "$FROZEN")" = "$(grep -E "^[0-9a-f]{64}  model-0000[0-9]-of-00003.safetensors$" "$R")" ] &&
   grep -q "^$(jq -r .model.model_sha256 "$FROZEN")  model_sha256 (index+shards)$" "$R"'
 # The campaign files (ACCEPTANCE-v5 Section 7): the fixed list plus every file under seed-v5/ and selftest-v5/.
-CAMPAIGN_FILES="run-qwen3-v5.sh tasks-oq3-v5.json ../scoring/declarations/oq3-v5.decl.json rows-oq3-v3.jq rows-oq3-v4.jq rows-oq3-v5.jq v5-rows.sh gen-decl-oq3-v5.sh test-v5.sh frozen-v5.json ../next-phase-1/run-campaign.sh ../next-phase-1/make-receipt.sh ../next-phase-1/v8-results.sh ../scoring/score-rows.sh"
+CAMPAIGN_FILES="run-qwen3-v5.sh tasks-oq3-v5.json ../scoring/declarations/oq3-v5.decl.json rows-oq3-v3.jq rows-oq3-v4.jq rows-oq3-v5.jq v5-rows.sh gen-decl-oq3-v5.sh test-v5.sh frozen-v5.json ../next-phase-1/run-campaign.sh ../next-phase-1/make-receipt.sh ../next-phase-1/rows-v5.jq ../next-phase-1/rows-v9.jq ../next-phase-1/v8-results.sh ../scoring/score-rows.sh"
 chk "evidence-v5/campaign-files.sha256 lists exactly the campaign files and matches each one (regenerate it after any change)" '
   (cd "$HERE" && sha256sum --quiet --strict -c evidence-v5/campaign-files.sha256 >/dev/null 2>&1) &&
   [ "$(cd "$HERE" && { printf "%s\n" $CAMPAIGN_FILES; find seed-v5 selftest-v5 -type f; } | LC_ALL=C sort)" = "$(cut -c67- "$HERE/evidence-v5/campaign-files.sha256" | LC_ALL=C sort)" ]'
