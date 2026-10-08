@@ -66,8 +66,8 @@ loads the whole sharded set).
   not determine it.
   The names are written raw: for a shard name holding a backslash or a line
   break, `sha256sum` escapes the line (leading `\`), so rebuild that line by
-  hand. An index that names no shard, and a directory given as the checkpoint
-  path, are refused (as before, the daemon names the files, not a directory).
+  hand. An index that names no shard is refused, and so is a directory given
+  as the checkpoint path (as it was before sc#338).
 
 The daemon also logs, on stdout after the "checkpoint loaded" line (which keeps
 its pinned form, parsed by interplane#76), for a sharded checkpoint only:
