@@ -25,6 +25,7 @@
 //! | `<bound> N lines is|are needed|required|necessary` (a trailing status word) | the same as the bound without it |
 //! | `... section titled "T" that holds at least N words of plain text`, `the last section ... N words of plain text` | `SectionMinWords` |
 //! | `N level-two|level-2|second-level|h2 sections titled A, B and C` | `LevelHeadings` (those headings at that level; extra headings of the level are allowed) |
+//! | `start|begin|open with a [markdown] [level-N] heading [line]`, then the end of the clause or `that begins|starts with "# "` (quoted, 1 to 6 `#` and one space) | `FirstLineHeading` (the first line of the file is that heading; a marker fixes the level). Negated, emphasised, qualified or unquoted forms, and any other heading wording after `start with a`, are UNCERTAIN |
 //! | `include|add|put|provide N [separate] fenced code examples|blocks`, or a bound cue before N | `MinItems(CodeBlocks)` |
 //!
 //! Bare line counts. The VERB decides the reading, no task wording is built in. An
@@ -1347,6 +1348,100 @@ pub fn analyze(goal: &str) -> Extraction {
         }
     }
 
+    // ---- first-line heading: "start with a [markdown] [level-N] heading [line]
+    //      [that begins with "# "]" ----
+    let mut first_heading: Option<Option<usize>> = None;
+    for v in 0..n {
+        let w = |i: usize| toks.get(i).map(|t| t.word.as_str());
+        if handled.contains(&v)
+            || !matches!(
+                w(v),
+                Some("start" | "starts" | "begin" | "begins" | "open" | "opens")
+            )
+            || w(v + 1) != Some("with")
+            || w(v + 2) != Some("a")
+            || (v..v + 2).any(|i| ends_clause(&toks[i].raw))
+        {
+            continue;
+        }
+        let mut k = v + 3;
+        if w(k) == Some("markdown") && !ends_clause(&toks[k].raw) {
+            k += 1;
+        }
+        let adj = w(k).and_then(level_adj);
+        if adj.is_some() && !ends_clause(&toks[k].raw) {
+            k += 1;
+        }
+        if w(k) != Some("heading") {
+            // "start with a **heading**", "start with a short heading": a heading
+            // wording this recognizer does not read is uncertain, never silent.
+            if (v + 3..=v + 5).any(|i| toks.get(i).is_some_and(|t| t.norm.starts_with("heading"))) {
+                bad(&mut unsure, v, false);
+            }
+            continue;
+        }
+        if w(k + 1) == Some("line") && !ends_clause(&toks[k].raw) {
+            k += 1;
+        }
+        if negated_before(&toks, v) {
+            bad(&mut unsure, v, false);
+            continue;
+        }
+        let clause_end = |raw: &str| raw.ends_with([',', '.', ';', '!', '?']);
+        let found =
+            if clause_end(&toks[k].raw) || k + 1 == n || matches!(w(k + 1), Some("and" | "then")) {
+                Some((adj, k))
+            } else if matches!(w(k + 1), Some("that" | "which"))
+                && matches!(w(k + 2), Some("begins" | "starts" | "begin" | "start"))
+                && w(k + 3) == Some("with")
+                && (k..k + 3).all(|i| !ends_clause(&toks[i].raw))
+            {
+                // The marker: a quoted run of 1 to 6 `#` and one space, then the end of
+                // the clause. Anything else ("#" alone, "a hash", a qualifier) is uncertain.
+                let from = toks[k + 3].end;
+                let rest = &goal[from..];
+                let lead = rest.len() - rest.trim_start().len();
+                let mut cs = rest[lead..].char_indices();
+                let marker = cs.next().and_then(|(_, q)| {
+                    let close: &[char] = match q {
+                        '"' => &['"'],
+                        '\u{201C}' => &['\u{201D}', '"'],
+                        '\'' => &['\''],
+                        '`' => &['`'],
+                        _ => return None,
+                    };
+                    let body = &rest[lead + q.len_utf8()..];
+                    let h = body.bytes().take_while(|&b| b == b'#').count();
+                    let after_space = body[h..].strip_prefix(' ')?;
+                    let c = after_space.chars().next().filter(|c| close.contains(c))?;
+                    let end = from + rest.len() - after_space.len() + c.len_utf8();
+                    let tail = goal[end..].trim_start();
+                    let tail_word = tail.split_whitespace().next().map(clean).unwrap_or("");
+                    let tail_ok = goal[end..].is_empty()
+                        || goal[end..].starts_with([',', '.', ';', '!', '?'])
+                        || matches!(tail_word, "and" | "then");
+                    ((1..=6).contains(&h) && tail_ok).then_some((h, end))
+                });
+                match marker {
+                    Some((h, end)) if adj.map_or(true, |a| a == h) => {
+                        mark_bytes(&mut handled, &toks, from, end);
+                        let last = (0..n).rev().find(|&i| toks[i].start < end).unwrap_or(k + 3);
+                        Some((Some(h), last))
+                    }
+                    _ => None,
+                }
+            } else {
+                None
+            };
+        match found {
+            Some((level, last)) if first_heading.map_or(true, |f| f == level) => {
+                first_heading = Some(level);
+                handled.extend(v..=last.max(k));
+            }
+            _ => bad(&mut unsure, v, false),
+        }
+    }
+
     // ---- candidates the recognizers above did not claim ----
     for s in 0..n {
         if handled.contains(&s) {
@@ -1530,6 +1625,9 @@ pub fn analyze(goal: &str) -> Extraction {
     }
     if !words.is_empty() {
         requirements.push(Requirement::RequiredWords(words));
+    }
+    if let Some(level) = first_heading {
+        requirements.push(Requirement::FirstLineHeading { level });
     }
     unsure.sort_by_key(|u| u.0);
     let mut uncertain: Vec<String> = Vec::new();
