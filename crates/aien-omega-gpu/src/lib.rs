@@ -907,7 +907,7 @@ pub struct ServingBounds {
     pub max_n: u32,
     /// Widest output dimension for calls of at most 16 rows (the logits projection).
     pub max_n_one_row: u32,
-    /// Matmul kernel cache slots (omega allows at most 32).
+    /// Matmul kernel cache slots (omega allows at most 128, CACHE_SLOTS_MAX).
     pub kernel_slots: u32,
 }
 
