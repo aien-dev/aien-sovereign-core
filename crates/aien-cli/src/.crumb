@@ -64,14 +64,14 @@
     "generated": {
       "children": [],
       "children_root": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-      "compiled_at": "2026-10-07T23:58:24Z",
+      "compiled_at": "2026-10-08T01:05:35Z",
       "compiler": "crumb-compile/1",
-      "digest": "sha256:b0298d44ce42c5d721ddf77d0550bb1d0206b9f1da7dfe755fd9e29dda0e4c81",
+      "digest": "sha256:5d6779d02b3f8c629a06b9eea9bfd88c53dc6857428bce872106df4b3ae33040",
       "evidence_files": 0,
       "evidence_root": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
       "files": 25,
-      "generated_at_commit": "8e0000e180d31dcc729cddce83dfc396fc835c8b",
-      "source_tree": "sha256:1204d16a4f14a133fbc7d1fe8188134c3abfef5a625acef2e9c9d16c74e38e85"
+      "generated_at_commit": "12c1a5ff18b70e748b678280c4210788f820c712",
+      "source_tree": "sha256:cc4112b683b29f7d7301328f0aa8e7a4f7667bb50c9b43054c7a36a4811d781f"
     }
   },
   "history": [

@@ -128,6 +128,7 @@ impl AienRuntimeServer {
         crate::spine::compose_doc_max_tokens_from_env()
             .map_err(|e| format!("compose limits: {e}"))?;
 
+        let authorize_desk = crate::spine::authorize_requires_desk_from_env()?;
         let listener = UnixListener::bind(&self.socket_path).map_err(|e| {
             format!(
                 "Failed to bind runtime UNIX domain socket at {}: {}",
@@ -218,7 +219,8 @@ impl AienRuntimeServer {
                     self.spine.clone(),
                     self.tokenizer.clone(),
                     tokio::runtime::Handle::current(),
-                )?),
+                )?)
+                .with_authorize_requires_desk(authorize_desk),
             )),
             Err(e) => {
                 tracing::warn!("compose bridge disabled: {e}");
@@ -230,6 +232,16 @@ impl AienRuntimeServer {
         // A failed or refused reconcile does not stop the daemon, but every
         // effect command refuses until an operator reconcile succeeds
         // (ACCEPTANCE-v3 2.5).
+        if let Some(b) = compose.as_ref() {
+            println!(
+                "Authorize MAC: {}",
+                if b.authorize_requires_desk() {
+                    "on (aien compose authorize requires the approval desk key MAC)"
+                } else {
+                    "off (authorize is authenticated by the OS user only)"
+                }
+            );
+        }
         if let Some(b) = compose.clone() {
             let gate = b.clone();
             let line =
@@ -827,6 +839,7 @@ async fn handle_connection(
                 ref workspace,
                 ref approver,
                 ref constraints,
+                ref desk_proof,
             } => {
                 let req = crate::effects::MintRequest {
                     cx_promotion,
@@ -835,8 +848,9 @@ async fn handle_connection(
                     approver: approver.clone(),
                     constraints: constraints.clone(),
                 };
+                let proof = desk_proof.clone();
                 Some(Box::new(move |b: &Arc<ComposeBridge>| {
-                    crate::effects::mint_grant(b, &req)
+                    crate::effects::authorize(b, &req, proof.as_ref())
                 }))
             }
             ControlCommand::ComposeRecall { ref ids, prefix } => {

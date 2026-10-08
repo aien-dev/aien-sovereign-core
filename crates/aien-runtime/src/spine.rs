@@ -966,6 +966,19 @@ fn env_opt(name: &str) -> Result<Option<String>, String> {
     }
 }
 
+/// Env switch for the desk MAC on `ComposeAuthorize` (#297): `1` = required,
+/// unset or `0` = off. Anything else stops the daemon (a typo must not leave
+/// the requirement silently off).
+pub const AUTHORIZE_DESK_ENV: &str = "AIEN_COMPOSE_AUTHORIZE_REQUIRES_DESK";
+
+pub fn authorize_requires_desk_from_env() -> Result<bool, String> {
+    match env_opt(AUTHORIZE_DESK_ENV)?.as_deref() {
+        None | Some("0") => Ok(false),
+        Some("1") => Ok(true),
+        Some(o) => Err(format!("{AUTHORIZE_DESK_ENV} must be 1 or 0, got {o:?}")),
+    }
+}
+
 /// Both budgets from the environment. Refuses the retired single-budget
 /// setting (a stale `AIEN_COMPOSE_BUDGET_MS` must not be silently ignored).
 pub fn compose_budgets_from_env() -> Result<ComposeBudgets, String> {
@@ -1717,6 +1730,9 @@ pub struct ComposeBridge {
     /// Set when the start-up reconcile failed or was refused (ACCEPTANCE-v3
     /// 2.5): effect commands refuse until an operator reconcile succeeds.
     reconcile_failed: std::sync::Mutex<Option<String>>,
+    /// sovereign-core #297: when true, `ComposeAuthorize` needs the approval
+    /// desk's MAC. Default false (legacy OS-user-only authorize).
+    authorize_requires_desk: bool,
 }
 
 impl ComposeBridge {
@@ -1728,6 +1744,7 @@ impl ComposeBridge {
             proposer_label: proposer_label.to_string(),
             home: std::sync::Mutex::new(None),
             reconcile_failed: std::sync::Mutex::new(None),
+            authorize_requires_desk: false,
         }
     }
 
@@ -1735,6 +1752,17 @@ impl ComposeBridge {
     pub fn with_doc_proposer(mut self, doc_proposer: ComposeProposer) -> Self {
         self.doc_proposer = Some(doc_proposer);
         self
+    }
+
+    /// Turn the desk-MAC requirement on `ComposeAuthorize` on or off (#297).
+    pub fn with_authorize_requires_desk(mut self, on: bool) -> Self {
+        self.authorize_requires_desk = on;
+        self
+    }
+
+    /// True when `ComposeAuthorize` needs the approval desk's MAC (#297).
+    pub fn authorize_requires_desk(&self) -> bool {
+        self.authorize_requires_desk
     }
 
     pub fn dir(&self) -> &Path {
