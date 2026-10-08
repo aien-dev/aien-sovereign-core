@@ -108,6 +108,18 @@ fn near_misses_stay_uncertain() {
         "One section must not be titled \"Intro\".",
         // the aux forms need quoted titles
         "One section must be titled with the trip name.",
+        // sc#343 review: a shared title, a conditional title
+        "Each section is titled \"X\".",
+        "Every section must be titled \"X\".",
+        "A section is titled \"X\" if needed.",
+        "Optionally one section must be titled \"X\".",
+        // sc#343 review: a range on a part of the document, or approximate
+        "Keep the gap between 10 and 20 lines.",
+        "Keep each paragraph between 2 and 4 lines.",
+        "Make the second paragraph between 16 and 30 words.",
+        "Keep it between 16 and 30 lines or so.",
+        // sc#343 review: "under" is a preposition only after an organising verb
+        "Keep it under 3 sections titled \"A\", \"B\" and \"C\".",
     ] {
         let ex = analyze(goal);
         assert!(
