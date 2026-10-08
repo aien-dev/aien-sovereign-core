@@ -108,6 +108,12 @@ pub enum Requirement {
     MinItems(ItemKind, usize),
     /// At least this many paragraphs (see [`count_paragraphs`]).
     MinParagraphs(usize),
+    /// At least `n` lines (outside fenced code, leading whitespace ignored) that
+    /// start with exactly `prefix`, e.g. the `- [ ]` of a checklist.
+    MinPrefixedLines {
+        prefix: String,
+        n: usize,
+    },
     /// Case-insensitive substrings of the document.
     RequiredPhrases(Vec<String>),
     /// Whole words, case-insensitive.
@@ -164,6 +170,9 @@ impl Requirement {
             Requirement::MaxWords(n) => format!("at most {n} words"),
             Requirement::MinItems(k, n) => format!("at least {n} {}", k.noun()),
             Requirement::MinParagraphs(n) => format!("at least {n} paragraphs"),
+            Requirement::MinPrefixedLines { prefix, n } => {
+                format!("at least {n} lines starting with \"{prefix}\"")
+            }
             Requirement::RequiredPhrases(p) => format!("the phrase {}", quoted(p)),
             Requirement::RequiredWords(p) => format!("the words {}", quoted(p)),
             Requirement::RequiredHeadings(p) => format!("the headings {}", quoted(p)),
@@ -224,6 +233,13 @@ impl Requirement {
                 (c < *n).then(|| {
                     format!("{label}, found {c} (a paragraph is a block of prose lines; separate paragraphs with a blank line)")
                 })
+            }
+            Requirement::MinPrefixedLines { prefix, n } => {
+                let c = prose_lines(content)
+                    .into_iter()
+                    .filter(|l| l.trim_start().starts_with(prefix.as_str()))
+                    .count();
+                (c < *n).then(|| format!("{label}, found {c}"))
             }
             Requirement::RequiredPhrases(p) => {
                 let low = content.to_lowercase();

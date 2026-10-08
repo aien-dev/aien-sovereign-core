@@ -27,6 +27,7 @@
 //! | `N level-two|level-2|second-level|h2 sections titled A, B and C` | `LevelHeadings` (those headings at that level; extra headings of the level are allowed) |
 //! | `start|begin|open with a [markdown] [level-N] heading [line]`, then the end of the clause or `that begins|starts with "# "` (quoted, 1 to 6 `#` and one space) | `FirstLineHeading` (the first line of the file is that heading; a marker fixes the level). Negated, emphasised, qualified or unquoted forms, and any other heading wording after `start with a`, are UNCERTAIN |
 //! | `include|add|put|provide N [separate] fenced code examples|blocks`, or a bound cue before N | `MinItems(CodeBlocks)` |
+//! | `<min bound> N of them|these|those [items|lines|entries]` right after `lines [that] starting|beginning|starts|begins with "P"` in the same sentence (exactly one quoted prefix; singular `line` only after `every|each`; at most four joining words such as `and I want` between the quote and the bound) | `MinPrefixedLines` (at least N lines, outside fenced code, whose text after any indentation starts with exactly `P`). Without that referent, with a negator or a per-section word (`per section heading chapter part`) earlier in the sentence, with another condition after the quote (`and ending with ...`), an upper bound, or no bound cue, the count is UNCERTAIN; so is `N or more of them` |
 //!
 //! Bare line counts. The VERB decides the reading, no task wording is built in. An
 //! edit (the goal names an existing file) is judged on the diff between that file
@@ -725,6 +726,119 @@ fn section_scope_before(goal: &str, toks: &[Tok], s: usize) -> Option<Option<Str
     None
 }
 
+/// Words that may stand between the quoted line prefix and the count cue
+/// ("... starting with "- [ ]" and I want at least 12 of those items").
+const OF_LINE_JOINERS: [&str; 11] = [
+    "and", "then", "also", "so", "i", "we", "want", "need", "include", "add", "write",
+];
+
+/// "<bound> N of them|these|those [items|lines|entries]" (`j` is the `of`): the
+/// count reads only when the same sentence (a line break also ends one), just
+/// before the cue, defines the
+/// counted lines as `lines starting|beginning|starts|begins with "P"` (singular
+/// `line` only after `every` or `each`, as in "every item on its own line"),
+/// with exactly one quoted prefix and at most four joining words
+/// (`OF_LINE_JOINERS`) between the closing quote and the cue. A negator or a
+/// per-section word (`per section heading chapter part`) anywhere in the
+/// sentence before the cue rejects it. Returns the last token of the count and
+/// the prefix as quoted (leading blanks dropped, a trailing space kept).
+fn of_line_prefix(goal: &str, toks: &[Tok], s: usize, j: usize) -> Option<(usize, String)> {
+    let w = |i: usize| toks.get(i).map(|t| t.word.as_str());
+    if !matches!(w(j + 1), Some("them" | "these" | "those")) {
+        return None;
+    }
+    let mut end = j + 1;
+    if !ends_clause(&toks[end].raw)
+        && matches!(w(end + 1), Some("items" | "item" | "lines" | "entries"))
+    {
+        end += 1;
+    }
+    if !qualifier_ok(toks, end) {
+        return None;
+    }
+    // (index of `with`, index of `line(s)`), and the first token of the sentence.
+    let mut found: Option<(usize, usize)> = None;
+    let mut first = 0;
+    let mut m = s;
+    while m > 0 {
+        m -= 1;
+        // A sentence ends at closing punctuation or at a line break.
+        if toks[m].raw.ends_with(['.', '!', '?'])
+            || goal[toks[m].end..toks[m + 1].start].contains('\n')
+        {
+            first = m + 1;
+            break;
+        }
+        let x = w(m).unwrap_or("");
+        if NEGATORS.contains(&x)
+            || matches!(
+                x,
+                "per"
+                    | "section"
+                    | "sections"
+                    | "heading"
+                    | "headings"
+                    | "chapter"
+                    | "chapters"
+                    | "part"
+                    | "parts"
+            )
+        {
+            return None;
+        }
+        if x == "with"
+            && m >= 2
+            && matches!(
+                w(m - 1),
+                Some("starting" | "beginning" | "starts" | "begins" | "start" | "begin")
+            )
+        {
+            let mut l = m - 2;
+            if w(l) == Some("that") && l >= 1 {
+                l -= 1;
+            }
+            if matches!(w(l), Some("line" | "lines")) {
+                if found.is_some() {
+                    return None;
+                }
+                found = Some((m, l));
+            }
+        }
+    }
+    let (with, line) = found?;
+    if w(line) == Some("line")
+        && !toks[first..line]
+            .iter()
+            .any(|t| matches!(t.word.as_str(), "every" | "each"))
+    {
+        return None;
+    }
+    let rest = &goal[toks[with].end..];
+    if leading_quoted_items(rest).0.len() != 1 {
+        return None;
+    }
+    let t = rest.trim_start();
+    let open = t.chars().next()?.len_utf8();
+    let body = &t[open..];
+    let close = body.find(['"', '\u{201D}'])?;
+    let prefix = body[..close].trim_start();
+    if prefix.trim().is_empty() {
+        return None;
+    }
+    // Only joining words between the closing quote and the cue.
+    let closer = body[close..].chars().next().map_or(1, char::len_utf8);
+    let after = toks[with].end + (rest.len() - t.len()) + open + close + closer;
+    let between: Vec<&Tok> = toks[..s].iter().filter(|t| t.start >= after).collect();
+    if between.len() > 4
+        || !between
+            .iter()
+            .all(|t| OF_LINE_JOINERS.contains(&t.word.as_str()))
+    {
+        return None;
+    }
+    Some((end, prefix.to_string()))
+}
+
 /// The heading level an adjective names: `level-two`, `level-2`, `second-level`, `h2`.
 fn level_adj(w: &str) -> Option<usize> {
     let lv = |v: usize| (1..=6).contains(&v).then_some(v);
@@ -774,7 +888,8 @@ fn leading_quoted_items(region: &str) -> (Vec<String>, usize) {
         if !item.is_empty() {
             out.push(item.to_string());
         }
-        at = region.len() - body.len() + close + 1;
+        let closer = body[close..].chars().next().map_or(1, char::len_utf8);
+        at = region.len() - body.len() + close + closer;
     }
     (out, at)
 }
@@ -923,6 +1038,23 @@ pub fn analyze(goal: &str) -> Extraction {
         let Some(noun) = toks.get(j).map(|t| t.word.as_str()) else {
             continue;
         };
+        // "at least twelve of them", the lines named earlier in the sentence (sc#334).
+        if noun == "of" {
+            if let Some((end, prefix)) = of_line_prefix(goal, &toks, s, j) {
+                let v = v as i64 + adj;
+                if dir == Dir::Min && v >= 1 && !negated_before(&toks, s) {
+                    add(
+                        &mut counts,
+                        Requirement::MinPrefixedLines {
+                            prefix,
+                            n: v as usize,
+                        },
+                    );
+                    handled.extend(s..=end);
+                }
+            }
+            continue;
+        }
         if !NOUNS.contains(&noun) || negated_before(&toks, s) {
             continue;
         }
@@ -1515,10 +1647,17 @@ pub fn analyze(goal: &str) -> Extraction {
                         | "day"
                         | "time"
                 );
-            // "twelve of them": a count of items the goal does not name.
+            // "twelve of them", "12 or more of them": a count of items the goal does not name.
+            let of_at = if nm(i + 1) == Some("or")
+                && matches!(nm(i + 2), Some("more" | "fewer" | "less"))
+            {
+                i + 3
+            } else {
+                i + 1
+            };
             if w != "one"
-                && nm(i + 1) == Some("of")
-                && matches!(nm(i + 2), Some("them" | "these" | "those"))
+                && nm(of_at) == Some("of")
+                && matches!(nm(of_at + 1), Some("them" | "these" | "those"))
                 && !handled.contains(&i)
             {
                 bad(&mut unsure, i, true);
