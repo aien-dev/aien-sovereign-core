@@ -109,3 +109,67 @@ fn an_outside_destination_is_refused_first_and_named() {
     let why = task_decision(V5_N1, &ws).expect_err("outside the workspace");
     assert!(why.contains("../shared-stuff/reminder.txt"), "{why}");
 }
+
+#[test]
+fn a_short_second_sentence_still_counts() {
+    let r = [SingleSentence];
+    for bad in [
+        "Thanks for coming. Bye.\n",
+        "Thanks for the help.\n\nBye!\n",
+        "Thanks for the help. OK\n",
+        "Thanks for the help to the whole project. Cheers\n",
+    ] {
+        assert!(refusal_reason(&r, bad).is_some(), "{bad:?}");
+    }
+    for good in [
+        "Hi.\n",
+        "Dr. Lee thanks everyone who tested the project.\n",
+        "Version 3.5 is out, e.g. for testers.\n",
+    ] {
+        assert!(refusal_reason(&r, good).is_none(), "{good:?}");
+    }
+}
+
+#[test]
+fn one_sentence_beside_other_content_or_an_edit_stays_uncertain() {
+    for goal in [
+        "Create a.txt with a one-sentence abstract and a one-sentence conclusion.",
+        "Create a.txt with a one-sentence note. Append a goodbye.",
+        "Update README.md with a one-sentence summary.",
+        "Replace the intro with a single sentence.",
+        "Rewrite notes.txt as a one-sentence note.",
+        "Put a one-sentence summary at the top of README.md.",
+        "Create a.txt with one-sentence notes.",
+    ] {
+        let ex = analyze(goal);
+        assert!(
+            !ex.uncertain.is_empty(),
+            "{goal:?} should stay uncertain, got {:?}",
+            ex.requirements
+        );
+    }
+}
+
+#[test]
+fn a_said_line_that_cannot_be_read_whole_stays_uncertain() {
+    for goal in [
+        "Create a.txt containing one line that says \"unclosed.",
+        "Create a.txt containing one line that says \"\".",
+        "Create a.txt containing one line that says \"Hi \" there\".",
+        "Create a.txt containing one line that says \"Hi.\" in bold.",
+        "Create a.txt containing one line that says \"Hi there\" and another line.",
+    ] {
+        let ex = analyze(goal);
+        assert!(
+            !ex.uncertain.is_empty(),
+            "{goal:?} should stay uncertain, got {:?}",
+            ex.requirements
+        );
+    }
+    // a quote that closes the goal sentence, followed by a new sentence
+    let r = reqs("Create a.txt containing one line that says \"Call Mum.\" Then save it.");
+    assert!(
+        r.contains(&RequiredPhrases(vec!["Call Mum".to_string()])),
+        "{r:?}"
+    );
+}

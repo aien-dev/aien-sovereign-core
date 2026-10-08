@@ -377,7 +377,7 @@ impl Requirement {
                 })
             }
             Requirement::SingleSentence => {
-                let c = count_sentences(&prose_lines(content).join("\n"));
+                let c = count_every_sentence(content);
                 (c != 1).then(|| format!("{label}, found {c}"))
             }
         }
@@ -536,6 +536,36 @@ fn count_sentences(body: &str) -> usize {
         count += 1;
     }
     count
+}
+
+/// Sentences for `SingleSentence`, counted strictly: every stretch of words a
+/// `.` `!` `?` closes, however short ("Bye."), plus any words after the last
+/// one ("OK"). Headings and fenced code are not prose. A stop after a title
+/// or "e.g." / "i.e." does not end a sentence; any other stop does, so an
+/// unusual stop can only refuse a correct file, never pass a wrong one.
+fn count_every_sentence(content: &str) -> usize {
+    const NO_END: [&str; 9] = ["dr", "mr", "mrs", "ms", "prof", "mt", "st", "e.g", "i.e"];
+    let (mut count, mut open) = (0usize, false);
+    for l in prose_lines(content) {
+        if l.trim_start().starts_with('#') {
+            continue;
+        }
+        for w in l.split_whitespace() {
+            open |= w.chars().any(char::is_alphanumeric);
+            let w = w.trim_end_matches(['"', '\'', ')', ']', '*', '_', '\u{201D}', '\u{2019}']);
+            if !w.ends_with(['.', '!', '?']) {
+                continue;
+            }
+            let stem = w
+                .trim_end_matches(['.', '!', '?'])
+                .trim_start_matches(['(', '"', '\'']);
+            if open && !NO_END.contains(&stem.to_lowercase().as_str()) {
+                count += 1;
+                open = false;
+            }
+        }
+    }
+    count + usize::from(open)
 }
 
 fn numbered(t: &str) -> bool {
