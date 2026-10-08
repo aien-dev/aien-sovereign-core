@@ -97,6 +97,17 @@ fn paragraphs_are_counted_by_the_documented_rule() {
         // HTML, setext underlines and lines without letters or digits
         ("<div>\n\n<div>\n", 0),
         ("Title\n=====\nbody\n", 1),
+        // round 2: a `---` underline is a setext heading too
+        ("Title\n---\n\nTitle2\n---\n\nTitle3\n---\n", 0),
+        ("Title\n-\nbody\n", 1),
+        ("above\n\n---\n\nbelow\n", 2),
+        // round 2: text indented under an item after a blank line belongs to it
+        ("- item\n\n  indented para\n\n  another\n", 0),
+        ("1. a\n\n   para under item\n", 0),
+        ("- item\n\nnot indented, a paragraph\n", 1),
+        // round 2: HTML or a pipe inside a run does not split it
+        ("one\n<span>x</span>\ntwo\n", 1),
+        ("one\n|two\nthree\n", 1),
         ("-\n\n1.\n\n***\n\n* * *\n\n...\n", 0),
         // blockquotes are prose; CRLF and non-ASCII text are fine
         ("> q1\n\n> q2\n", 2),
@@ -106,7 +117,7 @@ fn paragraphs_are_counted_by_the_documented_rule() {
         ("before\n\n```\nafter\n\nmore\n", 1),
         ("1. step\n2. step\n", 0),
         ("| a | b |\n|---|---|\n| 1 | 2 |\n", 0),
-        ("above\n---\nbelow\n", 2),
+        ("above\n***\nbelow\n", 2),
         // fenced code is not prose and ends a paragraph
         ("before\n```\ncode\n\nmore code\n```\nafter\n", 2),
         ("~~~\nonly code\n~~~\n", 0),
