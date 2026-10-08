@@ -388,10 +388,12 @@ impl Rig {
         t.lines().map(str::to_string).collect()
     }
 
-    /// Memory key files under the compose home.
+    /// Memory key files of the ALLEN memory store beside the compose home.
     fn memory_keys(&self) -> std::collections::BTreeSet<PathBuf> {
+        // The memory store is `<home>.allen-memory/` beside the compose home, keys in its `keys/`
+        // (aien-allen-memory store.rs), not inside the home itself.
         let mut out = std::collections::BTreeSet::new();
-        let mut stack = vec![self.compose()];
+        let mut stack = vec![PathBuf::from(format!("{}.allen-memory", self.compose().display()))];
         while let Some(d) = stack.pop() {
             for e in std::fs::read_dir(&d).into_iter().flatten().flatten() {
                 let p = e.path();
