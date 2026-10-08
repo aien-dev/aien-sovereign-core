@@ -1,0 +1,119 @@
+//! sc#331: ordinary count wordings of the v5 goals were refused as uncertain
+//! before any model call: an inclusive range ("between 16 and 30 lines"), the
+//! adjective "non-empty" before lines, a counted title list after the
+//! preposition "under", and a single title given as "one section must be
+//! titled". Each is now read; the near misses stay UNCERTAIN.
+use aien_runtime::requirements::{analyze, Requirement};
+
+use Requirement::*;
+
+fn reqs(goal: &str) -> Vec<Requirement> {
+    let ex = analyze(goal);
+    assert!(
+        ex.uncertain.is_empty(),
+        "{goal:?} should be read, uncertain: {:?}",
+        ex.uncertain
+    );
+    ex.requirements
+}
+
+fn heads(t: &[&str]) -> Requirement {
+    RequiredHeadings(t.iter().map(|x| x.to_string()).collect())
+}
+
+#[test]
+fn the_v5_d1_count_sentence_is_read() {
+    // v5 D1, second sentence, verbatim.
+    let g = "It should have at least 22 non-empty lines and three sections titled \"Gather Your Tools\", \"Sharpen the Edge\" and \"Test and Store\".";
+    assert_eq!(
+        reqs(g),
+        [
+            MinLines(22),
+            heads(&["Gather Your Tools", "Sharpen the Edge", "Test and Store"])
+        ]
+    );
+}
+
+#[test]
+fn the_v5_d5_range_and_sections_are_read() {
+    // v5 D5, second sentence, verbatim.
+    assert_eq!(
+        reqs("Keep it between 16 and 30 lines long."),
+        [MinLines(16), MaxLines(30)]
+    );
+    // v5 D5, last sentence up to its word clause (that clause is sc#333).
+    assert_eq!(
+        reqs("Organise it under three sections titled \"Documents\", \"Clothes\" and \"Electronics\"."),
+        [heads(&["Documents", "Clothes", "Electronics"])]
+    );
+}
+
+#[test]
+fn the_v5_d6_single_title_is_read() {
+    // v5 D6, the clause after its paragraph count (that count is sc#335).
+    let g = "Please write a warm essay about adopting a rescue cat, and one section must be titled \"Bringing Her Home\".";
+    assert_eq!(reqs(g), [heads(&["Bringing Her Home"])]);
+}
+
+#[test]
+fn related_wordings_are_read_the_same_way() {
+    for (goal, want) in [
+        (
+            "Write between 100 and 200 words.",
+            vec![MinWords(100), MaxWords(200)],
+        ),
+        (
+            "Keep it between 5 and 5 lines.",
+            vec![MinLines(5), MaxLines(5)],
+        ),
+        ("Use at least 10 nonempty lines.", vec![MinLines(10)]),
+        ("Use no fewer than 10 non-blank lines.", vec![MinLines(10)]),
+        (
+            "The section should be titled \"Costs\".",
+            vec![heads(&["Costs"])],
+        ),
+        ("A section is titled \"Costs\".", vec![heads(&["Costs"])]),
+        (
+            "Two sections must be titled \"Costs\" and \"Risks\".",
+            vec![heads(&["Costs", "Risks"])],
+        ),
+    ] {
+        assert_eq!(reqs(goal), want, "{goal}");
+    }
+}
+
+#[test]
+fn near_misses_stay_uncertain() {
+    for goal in [
+        // a reversed range
+        "Keep it between 30 and 16 lines.",
+        // no upper bound exists for items
+        "Use between 3 and 5 items.",
+        // a qualified range
+        "Keep it between 16 and 30 lines of code.",
+        "Keep it between 16 and 30 lines per section.",
+        // negated
+        "Do not keep it between 16 and 30 lines.",
+        // other range forms
+        "Write 2-3 lines.",
+        "Write from 16 to 30 lines.",
+        // non-empty before another noun
+        "Use at least 22 non-empty words.",
+        // the count differs from the list
+        "Organise it under two sections titled \"Documents\", \"Clothes\" and \"Electronics\".",
+        "One section must be titled \"A\" and \"B\".",
+        // "under N sections" with no titles is a bound
+        "Keep it under 3 sections.",
+        // negated title
+        "One section must not be titled \"Intro\".",
+        // the aux forms need quoted titles
+        "One section must be titled with the trip name.",
+    ] {
+        let ex = analyze(goal);
+        assert!(
+            !ex.uncertain.is_empty(),
+            "{goal:?} should stay uncertain, got {:?}",
+            ex.requirements
+        );
+    }
+}
