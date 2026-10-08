@@ -363,6 +363,65 @@ pub trait TensorBackend: Send + Sync {
         vocab_size: usize,
         hidden_dim: usize,
     );
+
+    /// [`Self::matmul_vec`] for a weight that may be device-resident. Host weights go to
+    /// `matmul_vec`; a resident weight is refused by name unless the backend overrides this (only
+    /// the Omega GB10 backend can use one). Never a silent CPU fallback.
+    fn matmul_vec_w(
+        &self,
+        out: &mut [f32],
+        x: &[f32],
+        weight: crate::resident::MatrixRef<'_>,
+        out_dim: usize,
+        in_dim: usize,
+    ) {
+        let w = self.resident_refusal_or_host(weight, "matmul_vec");
+        self.matmul_vec(out, x, w, out_dim, in_dim);
+    }
+
+    /// [`Self::matmul_batch`] for a weight that may be device-resident (see [`Self::matmul_vec_w`]).
+    fn matmul_batch_w(
+        &self,
+        out: &mut [f32],
+        x: &[f32],
+        weight: crate::resident::MatrixRef<'_>,
+        batch_size: usize,
+        in_dim: usize,
+        out_dim: usize,
+    ) {
+        let w = self.resident_refusal_or_host(weight, "matmul_batch");
+        self.matmul_batch(out, x, w, batch_size, in_dim, out_dim);
+    }
+
+    /// [`Self::compute_logits`] for a head that may be device-resident (see [`Self::matmul_vec_w`]).
+    fn compute_logits_w(
+        &self,
+        logits: &mut [f32],
+        hidden: &[f32],
+        head: crate::resident::MatrixRef<'_>,
+        vocab_size: usize,
+        hidden_dim: usize,
+    ) {
+        let w = self.resident_refusal_or_host(head, "compute_logits");
+        self.compute_logits(logits, hidden, w, vocab_size, hidden_dim);
+    }
+
+    /// Host values of `weight`, or the named refusal when it is resident and this backend
+    /// cannot use a device copy.
+    #[doc(hidden)]
+    fn resident_refusal_or_host<'a>(
+        &self,
+        weight: crate::resident::MatrixRef<'a>,
+        op: &str,
+    ) -> &'a [f32] {
+        match weight {
+            crate::resident::MatrixRef::Host(v) => v,
+            crate::resident::MatrixRef::Resident(_) => crate::resident::refuse_resident(&format!(
+                "backend {} cannot run {op} on a device-resident weight",
+                self.name()
+            )),
+        }
+    }
 }
 
 /// Pure Rust FP32 reference implementation satisfying TensorBackend.

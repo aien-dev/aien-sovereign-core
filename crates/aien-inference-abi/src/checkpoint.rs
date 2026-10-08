@@ -3,7 +3,7 @@
 
 use std::collections::HashMap;
 use std::fmt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 /// Loud error enum describing checkpoint parsing and validation failures.
@@ -33,6 +33,8 @@ pub enum CheckpointError {
     InvalidHeader(String),
     /// A capsule tensor could not be decoded.
     Capsule(String),
+    /// A weight could not be made resident on the device (named, never a silent host copy).
+    ResidentUpload { tensor: String, message: String },
 }
 
 impl fmt::Display for CheckpointError {
@@ -78,6 +80,13 @@ impl fmt::Display for CheckpointError {
                 write!(f, "Invalid safetensors header: {}", err)
             }
             Self::Capsule(err) => write!(f, "Invalid capsule tensor: {}", err),
+            Self::ResidentUpload { tensor, message } => {
+                write!(
+                    f,
+                    "Resident upload of tensor {} failed: {}",
+                    tensor, message
+                )
+            }
         }
     }
 }
@@ -374,8 +383,25 @@ fn index_shard(
         CheckpointError::InvalidHeader("Header JSON must be an object".to_string())
     })?;
 
-    let data_len = bytes.len() - header_end;
+    index_header(
+        header_obj,
+        bytes.len() - header_end,
+        base + header_end,
+        catalog,
+        tensors,
+    )
+}
 
+/// Validates the catalog tensors named in one safetensors header against their declared shape,
+/// dtype and offsets. `data_len` is the size of the data blob after the header; `data_start` is
+/// the absolute position of that blob in whatever buffer or file the ranges refer to.
+fn index_header(
+    header_obj: &serde_json::Map<String, serde_json::Value>,
+    data_len: usize,
+    data_start: usize,
+    catalog: &[(String, Vec<usize>)],
+    tensors: &mut HashMap<String, crate::capsule::CapsuleTensor>,
+) -> Result<(), CheckpointError> {
     for (name, expected_shape) in catalog {
         let Some(info) = header_obj.get(name) else {
             continue;
@@ -460,8 +486,8 @@ fn index_shard(
         }
 
         // Ranges are absolute inside the whole file, including the 8-byte length and JSON header.
-        let abs_start = base + header_end + start;
-        let abs_end = base + header_end + end;
+        let abs_start = data_start + start;
+        let abs_end = data_start + end;
         let logical_strides = crate::capsule::row_major_strides(&actual_shape);
         tensors.insert(
             name.clone(),
@@ -489,27 +515,31 @@ pub fn load_safetensors_from_bytes(bytes: Vec<u8>) -> Result<LoadedCheckpoint, C
 /// Name of the shard index Hugging Face writes beside sharded safetensors files.
 pub const SAFETENSORS_INDEX: &str = "model.safetensors.index.json";
 
-/// Loads and validates a checkpoint against `catalog`. `path` is a `.safetensors` file, a
-/// `model.safetensors.index.json` (sharded), or a model directory holding either. A shard
-/// file whose directory has an index loads the whole sharded set.
-pub fn load_checkpoint_with_catalog<P: AsRef<Path>>(
-    path: P,
-    catalog: &[(String, Vec<usize>)],
-) -> Result<LoadedCheckpoint, CheckpointError> {
-    let p = path.as_ref();
-    let read = |file: &Path| {
-        std::fs::read(file).map_err(|e| {
-            CheckpointError::InvalidHeader(format!(
-                "Failed to read checkpoint at {}: {}",
-                file.display(),
-                e
-            ))
-        })
-    };
+/// The files a checkpoint path names.
+enum ResolvedFiles {
+    /// One `.safetensors` file.
+    Single(PathBuf),
+    /// The shard files named by a `model.safetensors.index.json`, sorted and de-duplicated.
+    Sharded(Vec<PathBuf>),
+}
+
+impl ResolvedFiles {
+    fn into_paths(self) -> Vec<PathBuf> {
+        match self {
+            Self::Single(p) => vec![p],
+            Self::Sharded(v) => v,
+        }
+    }
+}
+
+/// Decides which files `path` names: a `.safetensors` file, a `model.safetensors.index.json`
+/// (sharded), or a model directory holding either. A shard file whose directory has an index
+/// names the whole sharded set.
+fn resolve_checkpoint_files(p: &Path) -> Result<ResolvedFiles, CheckpointError> {
     let index = if p.is_dir() {
         let single = p.join("model.safetensors");
         if single.is_file() {
-            return parse_safetensors_arc(Arc::from(read(&single)?), catalog);
+            return Ok(ResolvedFiles::Single(single));
         }
         p.join(SAFETENSORS_INDEX)
     } else if p.file_name().and_then(|n| n.to_str()) == Some(SAFETENSORS_INDEX) {
@@ -518,7 +548,7 @@ pub fn load_checkpoint_with_catalog<P: AsRef<Path>>(
         let sibling = p.with_file_name(SAFETENSORS_INDEX);
         let is_shard = p.file_name().and_then(|n| n.to_str()) != Some("model.safetensors");
         if !(is_shard && sibling.is_file()) {
-            return parse_safetensors_arc(Arc::from(read(p)?), catalog);
+            return Ok(ResolvedFiles::Single(p.to_path_buf()));
         }
         sibling
     };
@@ -538,11 +568,36 @@ pub fn load_checkpoint_with_catalog<P: AsRef<Path>>(
     files.sort_unstable();
     files.dedup();
     let dir = index.parent().unwrap_or(Path::new("."));
-    let mut paths = Vec::with_capacity(files.len());
+    Ok(ResolvedFiles::Sharded(
+        files.into_iter().map(|file| dir.join(file)).collect(),
+    ))
+}
+
+/// Loads and validates a checkpoint against `catalog`. `path` is a `.safetensors` file, a
+/// `model.safetensors.index.json` (sharded), or a model directory holding either. A shard
+/// file whose directory has an index loads the whole sharded set.
+pub fn load_checkpoint_with_catalog<P: AsRef<Path>>(
+    path: P,
+    catalog: &[(String, Vec<usize>)],
+) -> Result<LoadedCheckpoint, CheckpointError> {
+    let read = |file: &Path| {
+        std::fs::read(file).map_err(|e| {
+            CheckpointError::InvalidHeader(format!(
+                "Failed to read checkpoint at {}: {}",
+                file.display(),
+                e
+            ))
+        })
+    };
+    let paths = match resolve_checkpoint_files(path.as_ref())? {
+        ResolvedFiles::Single(file) => {
+            return parse_safetensors_arc(Arc::from(read(&file)?), catalog);
+        }
+        ResolvedFiles::Sharded(paths) => paths,
+    };
     let mut total = 0usize;
-    for file in files {
-        let shard = dir.join(file);
-        let len = std::fs::metadata(&shard)
+    for shard in &paths {
+        let len = std::fs::metadata(shard)
             .map_err(|e| {
                 CheckpointError::InvalidHeader(format!(
                     "Failed to stat shard {}: {}",
@@ -552,7 +607,6 @@ pub fn load_checkpoint_with_catalog<P: AsRef<Path>>(
             })?
             .len() as usize;
         total += len;
-        paths.push(shard);
     }
     let mut bytes = Vec::with_capacity(total);
     let mut ranges = Vec::with_capacity(paths.len());
@@ -571,6 +625,118 @@ pub fn load_checkpoint_with_catalog<P: AsRef<Path>>(
         ranges.push(start..bytes.len());
     }
     parse_shards(Arc::from(bytes), &ranges, catalog)
+}
+
+/// A checkpoint indexed but not read: the catalog is validated against each shard's header
+/// (the same checks as [`load_checkpoint_with_catalog`]) and tensor bytes are read one tensor
+/// at a time with positioned reads, so no whole-file copy is ever held in process memory.
+/// The shard pages stay in the kernel's page cache, which the kernel can reclaim.
+#[derive(Debug)]
+pub struct StreamedCheckpoint {
+    files: Vec<PathBuf>,
+    tensors: HashMap<String, (usize, crate::capsule::CapsuleTensor)>,
+}
+
+impl StreamedCheckpoint {
+    /// Indexes `path` (file, shard index, or model directory) against `catalog`. Reads only
+    /// each shard's header. Every catalog tensor must appear in exactly one shard.
+    pub fn open<P: AsRef<Path>>(
+        path: P,
+        catalog: &[(String, Vec<usize>)],
+    ) -> Result<Self, CheckpointError> {
+        use std::io::Read;
+        let files = resolve_checkpoint_files(path.as_ref())?.into_paths();
+        let mut tensors = HashMap::with_capacity(catalog.len());
+        for (idx, file) in files.iter().enumerate() {
+            let fail = |what: &str, e: std::io::Error| {
+                CheckpointError::InvalidHeader(format!("{what} {}: {e}", file.display()))
+            };
+            let mut f = std::fs::File::open(file).map_err(|e| fail("Failed to open", e))?;
+            let file_len = f.metadata().map_err(|e| fail("Failed to stat", e))?.len() as usize;
+            let mut prefix = [0u8; 8];
+            if file_len < 8 {
+                return Err(CheckpointError::InvalidHeader(
+                    "Buffer smaller than 8-byte header prefix".to_string(),
+                ));
+            }
+            f.read_exact(&mut prefix)
+                .map_err(|e| fail("Failed to read header of", e))?;
+            let header_len = usize::try_from(u64::from_le_bytes(prefix)).map_err(|_| {
+                CheckpointError::InvalidHeader("Header length exceeds address space".to_string())
+            })?;
+            let header_end = 8usize.checked_add(header_len).ok_or_else(|| {
+                CheckpointError::InvalidHeader("Header length arithmetic overflow".to_string())
+            })?;
+            if file_len < header_end {
+                return Err(CheckpointError::InvalidHeader(format!(
+                    "Header length {} exceeds total buffer size {}",
+                    header_len, file_len
+                )));
+            }
+            let mut header = vec![0u8; header_len];
+            f.read_exact(&mut header)
+                .map_err(|e| fail("Failed to read header of", e))?;
+            let header_str = std::str::from_utf8(&header).map_err(|e| {
+                CheckpointError::InvalidHeader(format!("Header JSON is not valid UTF-8: {}", e))
+            })?;
+            let header: serde_json::Value = serde_json::from_str(header_str).map_err(|e| {
+                CheckpointError::InvalidHeader(format!("Failed to parse header JSON: {}", e))
+            })?;
+            let header_obj = header.as_object().ok_or_else(|| {
+                CheckpointError::InvalidHeader("Header JSON must be an object".to_string())
+            })?;
+            let mut shard_tensors = HashMap::new();
+            index_header(
+                header_obj,
+                file_len - header_end,
+                header_end,
+                catalog,
+                &mut shard_tensors,
+            )?;
+            for (name, tensor) in shard_tensors {
+                if tensors.insert(name.clone(), (idx, tensor)).is_some() {
+                    return Err(CheckpointError::InvalidHeader(format!(
+                        "tensor {} appears in more than one shard",
+                        name
+                    )));
+                }
+            }
+        }
+        if let Some((name, _)) = catalog.iter().find(|(name, _)| !tensors.contains_key(name)) {
+            return Err(CheckpointError::MissingTensor(name.clone()));
+        }
+        Ok(Self { files, tensors })
+    }
+
+    /// Shape of `name` as the checkpoint declares it.
+    pub fn shape(&self, name: &str) -> Option<&[usize]> {
+        self.tensors.get(name).map(|(_, t)| t.shape.as_slice())
+    }
+
+    /// Reads the raw little-endian bf16 bytes of `name` into `buf` (cleared first; its
+    /// capacity is reused across calls). Returns the number of bf16 values.
+    pub fn read_bf16_bytes(&self, name: &str, buf: &mut Vec<u8>) -> Result<usize, CheckpointError> {
+        use std::os::unix::fs::FileExt;
+        let (idx, tensor) = self
+            .tensors
+            .get(name)
+            .ok_or_else(|| CheckpointError::MissingTensor(name.to_string()))?;
+        let range = tensor.byte_range.clone();
+        buf.clear();
+        buf.resize(range.len(), 0);
+        let file = &self.files[*idx];
+        std::fs::File::open(file)
+            .and_then(|f| f.read_exact_at(buf, range.start as u64))
+            .map_err(|e| {
+                CheckpointError::InvalidHeader(format!(
+                    "Failed to read tensor {} from {}: {}",
+                    name,
+                    file.display(),
+                    e
+                ))
+            })?;
+        Ok(range.len() / 2)
+    }
 }
 
 /// Loads and validates a TinyLlama safetensors checkpoint from a filesystem path.

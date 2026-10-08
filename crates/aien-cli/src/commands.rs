@@ -1203,9 +1203,30 @@ fn reference_fallback(
     })
 }
 
+/// How the daemon makes the GB10 Qwen3 weights resident instead of holding host f32 copies
+/// (sovereign-core #277 cut C). `None` anywhere means the unchanged host f32 load.
+struct ResidentLoad<'a> {
+    native_linked: bool,
+    strict: bool,
+    qwen3_opted_in: bool,
+    uploader: &'a dyn aien_inference_abi::ResidentUploader,
+    /// Opens the GPU session (bounded retry) so every driver allocation of the upload happens
+    /// while the process holds almost no memory.
+    open_session: &'a dyn Fn() -> Result<(), String>,
+}
+
+#[cfg(test)]
 fn load_daemon_model(
+    manifest: DaemonModelManifest,
+    require_checkpoint: bool,
+) -> Result<DaemonModel, String> {
+    load_daemon_model_with(manifest, require_checkpoint, None)
+}
+
+fn load_daemon_model_with(
     mut manifest: DaemonModelManifest,
     require_checkpoint: bool,
+    resident: Option<&ResidentLoad<'_>>,
 ) -> Result<DaemonModel, String> {
     let Some(path) = manifest.checkpoint_path.clone() else {
         let reason = manifest
@@ -1236,19 +1257,53 @@ fn load_daemon_model(
     } else {
         aien_inference_abi::ModelConfig::tinyllama_1_1b()
     };
-    let weights =
-        match aien_inference_abi::TransformerWeights::load_from_safetensors(&path, &config) {
-            Ok(weights) => weights,
-            Err(error) => {
-                let reason = format!(
-                    "checkpoint {} failed to load against the {} config: {}",
-                    path.display(),
-                    config.model_id,
-                    error
-                );
-                return reference_fallback(manifest, require_checkpoint, reason);
+    let resident = resident.filter(|r| {
+        aien_inference_abi::resident_load_wanted(
+            r.native_linked,
+            r.strict,
+            r.qwen3_opted_in,
+            &config,
+        )
+    });
+    let loaded = match resident {
+        None => aien_inference_abi::TransformerWeights::load_from_safetensors(&path, &config),
+        Some(r) => {
+            (r.open_session)()?;
+            let mut count = 0usize;
+            let loaded = aien_inference_abi::load_resident_weights(
+                &path,
+                &config,
+                r.uploader,
+                &mut |_name| count += 1,
+            );
+            match loaded {
+                // An upload that fails is fatal here: the weights have no host copy to degrade to.
+                Err(e @ aien_inference_abi::CheckpointError::ResidentUpload { .. }) => {
+                    return Err(format!("GB10_RESIDENT_LOAD failed: {e}"));
+                }
+                other => {
+                    if other.is_ok() {
+                        println!(
+                            "  GB10_RESIDENT_LOAD: {count} matmul weights streamed from the bf16 shards to the device; no host f32 copy of any matmul weight"
+                        );
+                    }
+                    other
+                }
             }
-        };
+        }
+    };
+    let weights = match loaded {
+        Ok(weights) => weights,
+        Err(error) => {
+            let reason = format!(
+                "checkpoint {} failed to load against the {} config: {}",
+                path.display(),
+                config.model_id,
+                error
+            );
+            return reference_fallback(manifest, require_checkpoint, reason);
+        }
+    };
     manifest.model_sha256 = Some(model_sha256);
 
     let mut tokenizer = None;
@@ -1362,7 +1417,26 @@ fn build_native_daemon_backend() -> Result<DaemonBackendParts, String> {
         label: model_label,
         manifest,
         ..
-    } = load_daemon_model(manifest, policy.require_checkpoint)?;
+    } = {
+        let open_session = || {
+            aien_inference_abi::open_gpu_session_with_retry(
+                aien_inference_abi::GPU_SESSION_OPEN_ATTEMPTS,
+                aien_inference_abi::GPU_SESSION_RETRY_DELAY,
+                aien_inference_abi::GPU_SESSION_OPEN_DEADLINE,
+                &aien_runtime::shared_kv::read_mem_available,
+            )
+            .map(|_| ())
+        };
+        let resident = ResidentLoad {
+            native_linked: aien_omega_gpu::is_native(),
+            strict: aien_inference_abi::strict::production_strict(),
+            qwen3_opted_in: std::env::var(aien_inference_abi::GB10_QWEN3_OPT_IN_ENV)
+                .is_ok_and(|v| v == "1"),
+            uploader: &aien_inference_abi::OmegaUploader,
+            open_session: &open_session,
+        };
+        load_daemon_model_with(manifest, policy.require_checkpoint, Some(&resident))?
+    };
     let identity = model_identity(&manifest, tokenizer.is_some());
     // FB-1 cut 6: the native Omega engine is the only GPU backend (no CUDA). The env names
     // AIEN_REQUIRE_BLACKWELL (the GB10 chip, campaign spec) and AIEN_GPU_BACKEND=omega both
