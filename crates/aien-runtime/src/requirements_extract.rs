@@ -1387,52 +1387,51 @@ pub fn analyze(goal: &str) -> Extraction {
             bad(&mut unsure, v, false);
             continue;
         }
-        let clause_end = |raw: &str| raw.ends_with([',', '.', ';', '!', '?']);
-        let found =
-            if clause_end(&toks[k].raw) || k + 1 == n || matches!(w(k + 1), Some("and" | "then")) {
-                Some((adj, k))
-            } else if matches!(w(k + 1), Some("that" | "which"))
-                && matches!(w(k + 2), Some("begins" | "starts" | "begin" | "start"))
-                && w(k + 3) == Some("with")
-                && (k..k + 3).all(|i| !ends_clause(&toks[i].raw))
-            {
-                // The marker: a quoted run of 1 to 6 `#` and one space, then the end of
-                // the clause. Anything else ("#" alone, "a hash", a qualifier) is uncertain.
-                let from = toks[k + 3].end;
-                let rest = &goal[from..];
-                let lead = rest.len() - rest.trim_start().len();
-                let mut cs = rest[lead..].char_indices();
-                let marker = cs.next().and_then(|(_, q)| {
-                    let close: &[char] = match q {
-                        '"' => &['"'],
-                        '\u{201C}' => &['\u{201D}', '"'],
-                        '\'' => &['\''],
-                        '`' => &['`'],
-                        _ => return None,
-                    };
-                    let body = &rest[lead + q.len_utf8()..];
-                    let h = body.bytes().take_while(|&b| b == b'#').count();
-                    let after_space = body[h..].strip_prefix(' ')?;
-                    let c = after_space.chars().next().filter(|c| close.contains(c))?;
-                    let end = from + rest.len() - after_space.len() + c.len_utf8();
-                    let tail = goal[end..].trim_start();
-                    let tail_word = tail.split_whitespace().next().map(clean).unwrap_or("");
-                    let tail_ok = goal[end..].is_empty()
-                        || goal[end..].starts_with([',', '.', ';', '!', '?'])
-                        || matches!(tail_word, "and" | "then");
-                    ((1..=6).contains(&h) && tail_ok).then_some((h, end))
-                });
-                match marker {
-                    Some((h, end)) if adj.is_none_or(|a| a == h) => {
-                        mark_bytes(&mut handled, &toks, from, end);
-                        let last = (0..n).rev().find(|&i| toks[i].start < end).unwrap_or(k + 3);
-                        Some((Some(h), last))
-                    }
-                    _ => None,
+        // The heading clause must END its sentence: anything after it in the same
+        // sentence ("and keep it brief", ", then a table") is left to the refusal below,
+        // so no sibling constraint is swallowed unchecked.
+        let sentence_end = |raw: &str| raw.ends_with(['.', '!', '?']);
+        let found = if sentence_end(&toks[k].raw) || k + 1 == n {
+            Some((adj, k))
+        } else if matches!(w(k + 1), Some("that" | "which"))
+            && matches!(w(k + 2), Some("begins" | "starts" | "begin" | "start"))
+            && w(k + 3) == Some("with")
+            && (k..k + 3).all(|i| !ends_clause(&toks[i].raw))
+        {
+            // The marker: a quoted run of 1 to 6 `#` and one space, then the end of
+            // the clause. Anything else ("#" alone, "a hash", a qualifier) is uncertain.
+            let from = toks[k + 3].end;
+            let rest = &goal[from..];
+            let lead = rest.len() - rest.trim_start().len();
+            let mut cs = rest[lead..].char_indices();
+            let marker = cs.next().and_then(|(_, q)| {
+                let close: &[char] = match q {
+                    '"' => &['"'],
+                    '\u{201C}' => &['\u{201D}', '"'],
+                    '\'' => &['\''],
+                    '`' => &['`'],
+                    _ => return None,
+                };
+                let body = &rest[lead + q.len_utf8()..];
+                let h = body.bytes().take_while(|&b| b == b'#').count();
+                let after_space = body[h..].strip_prefix(' ')?;
+                let c = after_space.chars().next().filter(|c| close.contains(c))?;
+                let end = from + rest.len() - after_space.len() + c.len_utf8();
+                let tail_ok =
+                    goal[end..].trim_end().is_empty() || goal[end..].starts_with(['.', '!', '?']);
+                ((1..=6).contains(&h) && tail_ok).then_some((h, end))
+            });
+            match marker {
+                Some((h, end)) if adj.is_none_or(|a| a == h) => {
+                    mark_bytes(&mut handled, &toks, from, end);
+                    let last = (0..n).rev().find(|&i| toks[i].start < end).unwrap_or(k + 3);
+                    Some((Some(h), last))
                 }
-            } else {
-                None
-            };
+                _ => None,
+            }
+        } else {
+            None
+        };
         match found {
             Some((level, last)) if first_heading.is_none_or(|f| f == level) => {
                 first_heading = Some(level);

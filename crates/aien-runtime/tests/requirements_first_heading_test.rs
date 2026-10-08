@@ -89,10 +89,7 @@ fn first_heading_phrasings() {
         ("Begin with a heading.", None),
         ("Start with a Markdown heading.", None),
         ("It must start with a level-two heading.", Some(2)),
-        (
-            "Open with a markdown heading line, and keep it short.",
-            None,
-        ),
+        ("Open with a markdown heading line.", None),
         (
             "Start with a heading that begins with \u{201C}# \u{201D}.",
             Some(1),
@@ -125,6 +122,16 @@ fn near_misses_stay_uncertain() {
         "Start with a Markdown heading line that begins with \"# \" in bold.",
         // no marker after "begins with"
         "Start with a Markdown heading line that begins with a hash.",
+        // a sibling constraint in the same sentence is never swallowed (R319 MUST 1)
+        "Begin with a markdown heading and keep it brief",
+        "Begin with a markdown heading and lowercase only",
+        "Begin with a markdown heading and end with a signature",
+        "Begin with a markdown heading, then a table",
+        "Begin with a markdown heading and a few sections",
+        "Open with a level-2 heading line and a short list",
+        "Open with a markdown heading line, and keep it short.",
+        "Start with a heading line that begins with \"# \" and at most 5 items.",
+        "Start with a heading, ####### markdown.",
         // other heading cues the safety net already refused
         "The page needs a Summary heading.",
         "Include headings for setup and use.",
