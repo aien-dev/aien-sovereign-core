@@ -60,6 +60,20 @@ fn the_forms_the_goals_accept_cover_their_topics() {
         ("storage", "The seeds are stored in a tin."),
         ("withdraw (or withdrew)", "She withdrew fifty pounds."),
         ("withdraw (or withdrew)", "Withdrawing money is free."),
+        // sc#353 G2: noun and participle forms by the -n, -al, -als rule
+        ("withdraw (or withdrew)", "The money was withdrawn."),
+        ("withdraw (or withdrew)", "One withdrawal a day."),
+        ("withdraw (or withdrew)", "Withdrawals are free."),
+        ("withdraw", "The money was withdrawn."),
+        ("withdraw", "Withdrawals are free."),
+        ("withdrawing", "One withdrawal a day."),
+        ("arrive", "Note the arrival time."),
+        ("approve", "Ask for approvals."),
+        ("grow", "The plants have grown."),
+        ("take", "It was taken."),
+        // the cost of the rule, pinned so a tightening is deliberate (sc#354 review)
+        ("sign", "A signal."),
+        ("line", "A linen cloth."),
         ("interest", "The bank pays interest monthly."),
         ("balance", "Check the balances each week."),
         // the same rule elsewhere
@@ -101,7 +115,24 @@ fn other_words_still_do_not_cover_a_topic() {
         ("storage", "A story."),
         // an irregular form counts only when the goal names it
         ("withdraw", "She withdrew fifty pounds."),
-        ("withdraw (or withdrew)", "She withdrawal fifty pounds."),
+        // naming `withdrew` opens no loose match: a word sharing its letters stays out
+        ("withdraw (or withdrew)", "She drew fifty pounds."),
+        // the -n / -al / -als rule is explicit, not a prefix: other endings, the bare
+        // shorter word and a different stem stay refused (sc#353 G2)
+        ("withdraw", "Draw fifty pounds."),
+        ("withdraw", "Open the drawer."),
+        ("withdraw (or withdrew)", "Open the drawer."),
+        ("withdraw", "A withdrawer came."),
+        ("withdraw", "The funds are withdrawable."),
+        ("withdraw", "She withheld fifty pounds."),
+        ("drawer", "She drew a line."),
+        ("arm", "An armal plate."),
+        ("bee", "It has been."),
+        // 4 letters before -al / -als, and -n only after w or e (sc#354 review)
+        ("met", "A metal box."),
+        ("met", "Two metals."),
+        ("melo", "A melon."),
+        ("see", "It was seen."),
     ] {
         let r = [RequiredTopics(vec![topic.to_string()])];
         assert!(refusal_reason(&r, text).is_some(), "{topic}: {text}");

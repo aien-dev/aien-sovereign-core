@@ -69,10 +69,17 @@
 //!   `sky` do not). A topic word ending in `age` or `ages` also matches
 //!   without it when 4 letters remain, by a verb form only: the topic
 //!   `storage` is covered by `store` or `stored`, `postage` not by `post`
-//!   (sc#332). Irregular forms (`withdrew` / `withdraw`)
-//!   do not agree: the check errs on the side of refusing, unless the goal
-//!   names the form for that topic, written into the topic as `withdraw (or
-//!   withdrew)`.
+//!   (sc#332). A document word that is a topic word (or its word form) plus
+//!   `n`, `al` or `als`, with 4 or more letters before the ending (for `n`
+//!   only after `w` or `e`), also covers it: `withdrawn`, `withdrawal` and
+//!   `withdrawals` cover `withdraw`, `arrival` covers `arrive`, `grown` and
+//!   `taken` cover `grow` and `take`. This is an explicit list of endings, not
+//!   a prefix match: `drawer`, `withdrawer` and `withdrawable` do not cover
+//!   `withdraw`. The rule also lets close neighbours count: `signal` covers
+//!   `sign`, `personal` covers `person`, `linen` covers `line` (sc#353 G2).
+//!   Irregular forms (`withdrew` / `withdraw`) do not agree: the check errs
+//!   on the side of refusing, unless the goal names the form for that topic,
+//!   written into the topic as `withdraw (or withdrew)`.
 //! - sentence: a run of at least two words ended by `.`, `!` or `?` (not
 //!   inside a number such as `3.10`); an unfinished last fragment of at
 //!   least three words counts as one. List markers are ignored.
@@ -489,7 +496,11 @@ fn stem_parts(w: &str) -> (String, bool) {
 /// matches a document word that is a verb form of the rest, one that ended
 /// in `e` or lost a suffix (`storage`: `store`, `stored`; not `post` for
 /// `postage`); those keys carry an `age:` mark so nothing else meets them
-/// (sc#332). `topic` is true for the topic's words, false for the document's.
+/// (sc#332). A document word ending in `als`, `al` or `n` (4 letters left;
+/// for `n` only after `w` or `e`) also gives a `der:` key for the rest, which
+/// meets the topic word or its word form (`withdrawal`, `withdrawn`:
+/// `withdraw`; `arrival`: `arrive`; sc#353 G2). `topic` is true for the
+/// topic's words, false for the document's.
 pub(crate) fn word_keys(w: &str, topic: bool) -> Vec<String> {
     let (s, stripped) = stem_parts(w);
     let mut keys = vec![s.clone()];
@@ -508,8 +519,21 @@ pub(crate) fn word_keys(w: &str, topic: bool) -> Vec<String> {
             }
         }
     }
+    let low = w.to_lowercase();
+    if !topic {
+        for suf in ["als", "al", "n"] {
+            let base = low
+                .strip_suffix(suf)
+                .filter(|r| r.len() >= 4 && (suf != "n" || r.ends_with('w') || r.ends_with('e')));
+            if let Some(r) = base {
+                keys.push(format!("der:{r}"));
+                break;
+            }
+        }
+    }
     if topic {
-        let low = w.to_lowercase();
+        keys.push(format!("der:{low}"));
+        keys.push(format!("der:{s}"));
         for suf in ["ages", "age"] {
             if let Some(r) = low.strip_suffix(suf).filter(|r| r.len() >= 4) {
                 keys.push(format!("age:{}", stem(r)));
