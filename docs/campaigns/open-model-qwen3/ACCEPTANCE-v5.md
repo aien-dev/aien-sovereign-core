@@ -307,7 +307,7 @@ model_sha256 (index+shards)              17a78fbba447a4e66a3d886c0998fbcf2f9201d
 COMPUTED FROM LISTED SHA256s, NOT RE-HASHED: the value is the manifest built from the index and shard sha256 values listed
 above, not from the files. Re-hash: DONE 2026-10-08T21:39Z (`evidence-v5/model-rehash-2026-10-08.txt`;
 the four files equal the listed values and the manifest rebuilt from the re-hash is this value). Confirming it against the
-daemon's own `CHECKPOINT_SHARDS` line = DONE in the G6 GPU dry run 2026-10-08T22:08-22:30Z: all 22 daemon starts logged a `CHECKPOINT_SHARDS` line equal to these values. Row `<id>-GR` binds the index and all three shards through it (`frozen-v5.json`).
+daemon's own `CHECKPOINT_SHARDS` line = DONE in the G6 GPU dry run 2026-10-08T22:08-22:30Z: all 22 daemon starts logged a `CHECKPOINT_SHARDS` line equal to these values. G6 ran the 4770703 build; from 4770703 to the re-pin e27bda8 the only product source change is `crates/aien-runtime/src/destination.rs` (plus tests), so the code that logs the line (`aien-cli` `commands.rs`) and the locks are unchanged. Row `<id>-GR` binds the index and all three shards through it (`frozen-v5.json`).
 
 Environment, checked by the wrapper and recorded in `run.json`:
 
