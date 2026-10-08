@@ -12,7 +12,7 @@ pass() { echo "ok: $*"; }
 # fixture tree
 T="$W/tree"; mkdir -p "$T/scripts" "$T/release" "$W/bins"
 cp "$ROOT/scripts/check-release-candidate.sh" "$ROOT/scripts/package-release.sh" "$ROOT/scripts/verify-release-assets.sh" "$T/scripts/"
-echo constitution > "$T/CONSTITUTION.md"; echo readme > "$T/README.md"; echo '#!/bin/sh' > "$T/install.sh"
+echo licence > "$T/LICENSE"; echo notice > "$T/NOTICE"; echo third > "$T/THIRD_PARTY.md"; echo constitution > "$T/CONSTITUTION.md"; echo readme > "$T/README.md"; echo '#!/bin/sh' > "$T/install.sh"
 OM=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 PR=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb; CS=cccccccccccccccccccccccccccccccccccccccc; SC=dddddddddddddddddddddddddddddddddddddddd
 H64() { printf '%064d' "$1"; }
