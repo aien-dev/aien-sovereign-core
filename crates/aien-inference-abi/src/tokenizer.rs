@@ -19,6 +19,9 @@ pub enum TokenizerError {
         len: usize,
         max: usize,
     },
+    /// Role `tool` offered to the raw `ChatTurn` path; tool turns must go through
+    /// `tool_boundary::ToolConversation` (issue #310).
+    ToolTurnRefused(String),
 }
 
 impl fmt::Display for TokenizerError {
@@ -28,6 +31,7 @@ impl fmt::Display for TokenizerError {
             Self::NoChatTemplate(e) => write!(f, "{}", e),
             Self::EncodeError(e) => write!(f, "Tokenization encoding failed: {}", e),
             Self::DecodeError(e) => write!(f, "Tokenization decoding failed: {}", e),
+            Self::ToolTurnRefused(e) => write!(f, "{}", e),
             Self::ContextLengthExceeded { len, max } => {
                 write!(
                     f,

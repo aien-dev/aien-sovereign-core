@@ -21,6 +21,7 @@ pub mod strict;
 pub mod tensor;
 pub mod tensor_abi;
 pub mod tokenizer;
+pub mod tool_boundary;
 pub mod transformer_backend;
 pub mod weights;
 

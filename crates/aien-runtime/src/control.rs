@@ -21,9 +21,26 @@ pub struct ChatTurn {
     pub content: String,
 }
 
+/// Role `tool` is refused on this path (issue #310): untrusted tool output must enter through
+/// `aien_inference_abi::tool_boundary::ToolConversation`, which refuses control sequences and
+/// checks call/result pairing. Otherwise a `ChatTurn` with role `tool` would reach the
+/// byte-exact Qwen3 renderer unguarded.
+fn refuse_tool_turns(messages: &[ChatTurn]) -> Result<(), aien_inference_abi::TokenizerError> {
+    if messages
+        .iter()
+        .any(|m| m.role.trim().eq_ignore_ascii_case("tool"))
+    {
+        return Err(aien_inference_abi::TokenizerError::ToolTurnRefused(
+            "role tool refused on the ChatTurn path: use tool_boundary::ToolConversation".into(),
+        ));
+    }
+    Ok(())
+}
+
 /// Renders the chat with a model's template. Generation continues from an assistant
 /// header unless the last turn is a non-empty assistant turn.
 pub fn format_chat(template: aien_inference_abi::ChatTemplate, messages: &[ChatTurn]) -> String {
+    refuse_tool_turns(messages).expect("tool turn refused");
     let turns: Vec<(&str, &str)> = messages
         .iter()
         .map(|m| (m.role.as_str(), m.content.as_str()))
@@ -36,6 +53,7 @@ pub fn try_format_chat(
     template: aien_inference_abi::ChatTemplate,
     messages: &[ChatTurn],
 ) -> Result<String, aien_inference_abi::TokenizerError> {
+    refuse_tool_turns(messages)?;
     let turns: Vec<(&str, &str)> = messages
         .iter()
         .map(|m| (m.role.as_str(), m.content.as_str()))
