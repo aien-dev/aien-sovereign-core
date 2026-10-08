@@ -28,6 +28,7 @@ FROZEN_NP1_REFERENCE_SHA256=$PLACEHOLDER
 FROZEN_NP1_EDIT_MERGE_SHA256=$PLACEHOLDER
 
 TASKS=$HERE/tasks-oq3-v4.json TAG=oq3-v4
+# A dry run skips the pinned-path, placeholder and frozen-build checks but still starts the real driver and daemon on the GPU.
 if [ -n "${OQ3_DRY_TASKS:-}" ]; then
   TASKS=$OQ3_DRY_TASKS TAG=oq3-v4-DRYRUN
   shape='[.tasks[] | [.id, .kind, .max_tokens, .budget_ms, .destination, .seed]]'
