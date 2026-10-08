@@ -53,6 +53,7 @@ fn sha(b: &[u8]) -> String {
 fn identity() -> ModelIdentity {
     ModelIdentity {
         model_sha256: "ab".repeat(32),
+        model_digest_kind: "index+shards".into(),
         model_path: "/models/toy/model.safetensors".into(),
         tokenizer_sha256: "cd".repeat(32),
         tokenizer_path: "/models/toy/tokenizer.json".into(),
@@ -327,6 +328,7 @@ async fn assert_linked(d: &Daemon, f: &Flow, want_agent: &str) {
     assert_eq!(g["generation"], 1);
     assert_eq!(g["origin"], "compose_proposal");
     assert_eq!(g["model_sha256"], want.model_sha256);
+    assert_eq!(g["model_digest_kind"], want.model_digest_kind);
     assert_eq!(g["tokenizer_sha256"], want.tokenizer_sha256);
     assert_eq!(g["task"], f.report["task"]);
     assert_eq!(g["attempt"], 1);

@@ -519,17 +519,53 @@ pub const SAFETENSORS_INDEX: &str = "model.safetensors.index.json";
 enum ResolvedFiles {
     /// One `.safetensors` file.
     Single(PathBuf),
-    /// The shard files named by a `model.safetensors.index.json`, sorted and de-duplicated.
-    Sharded(Vec<PathBuf>),
+    /// The `model.safetensors.index.json` and the shard files it names, as `(name in the
+    /// index, path)`, sorted by name and de-duplicated.
+    Sharded {
+        index: PathBuf,
+        shards: Vec<(String, PathBuf)>,
+    },
 }
 
 impl ResolvedFiles {
     fn into_paths(self) -> Vec<PathBuf> {
         match self {
             Self::Single(p) => vec![p],
-            Self::Sharded(v) => v,
+            Self::Sharded { shards, .. } => shards.into_iter().map(|(_, p)| p).collect(),
         }
     }
+}
+
+/// The files a checkpoint path names, exactly as the loaders read them (sc#338): what the
+/// daemon digests so its record binds the weight bytes, not only the path it was given.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CheckpointFiles {
+    /// The `model.safetensors.index.json` read; None for a single file.
+    pub index: Option<PathBuf>,
+    /// Every weight file as `(name, path)`, sorted by name and de-duplicated: the name the
+    /// index's `weight_map` gives a shard, or the file name of a single file.
+    pub weights: Vec<(String, PathBuf)>,
+}
+
+/// Resolves `path` like [`load_checkpoint_with_catalog`] and [`StreamedCheckpoint::open`]
+/// do: a `.safetensors` file, a `model.safetensors.index.json`, a model directory holding
+/// either, or a shard file whose directory has an index (the whole sharded set).
+pub fn checkpoint_files<P: AsRef<Path>>(path: P) -> Result<CheckpointFiles, CheckpointError> {
+    Ok(match resolve_checkpoint_files(path.as_ref())? {
+        ResolvedFiles::Single(p) => CheckpointFiles {
+            index: None,
+            weights: vec![(
+                p.file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default(),
+                p,
+            )],
+        },
+        ResolvedFiles::Sharded { index, shards } => CheckpointFiles {
+            index: Some(index),
+            weights: shards,
+        },
+    })
 }
 
 /// Decides which files `path` names: a `.safetensors` file, a `model.safetensors.index.json`
@@ -567,10 +603,12 @@ fn resolve_checkpoint_files(p: &Path) -> Result<ResolvedFiles, CheckpointError> 
     let mut files: Vec<&str> = weight_map.values().filter_map(|v| v.as_str()).collect();
     files.sort_unstable();
     files.dedup();
-    let dir = index.parent().unwrap_or(Path::new("."));
-    Ok(ResolvedFiles::Sharded(
-        files.into_iter().map(|file| dir.join(file)).collect(),
-    ))
+    let dir = index.parent().unwrap_or(Path::new(".")).to_path_buf();
+    let shards = files
+        .into_iter()
+        .map(|file| (file.to_string(), dir.join(file)))
+        .collect();
+    Ok(ResolvedFiles::Sharded { index, shards })
 }
 
 /// Loads and validates a checkpoint against `catalog`. `path` is a `.safetensors` file, a
@@ -593,7 +631,7 @@ pub fn load_checkpoint_with_catalog<P: AsRef<Path>>(
         ResolvedFiles::Single(file) => {
             return parse_safetensors_arc(Arc::from(read(&file)?), catalog);
         }
-        ResolvedFiles::Sharded(paths) => paths,
+        sharded => sharded.into_paths(),
     };
     let mut total = 0usize;
     for shard in &paths {
@@ -1029,5 +1067,40 @@ mod tests {
             CheckpointError::InvalidHeader(_) => {}
             _ => panic!("Expected InvalidHeader on arithmetic overflow"),
         }
+    }
+
+    /// sc#338: the files the loader reads, named for the daemon's digest: the index and
+    /// every shard it names (sorted, de-duplicated, by the index's name); a single file
+    /// has no index.
+    #[test]
+    fn checkpoint_files_names_the_index_and_every_shard() {
+        let dir = std::env::temp_dir().join(format!("aien-ckfiles-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let index = dir.join(SAFETENSORS_INDEX);
+        std::fs::write(
+            &index,
+            r#"{"weight_map":{"x":"b.safetensors","y":"a.safetensors","z":"b.safetensors"}}"#,
+        )
+        .unwrap();
+        let files = checkpoint_files(&index).unwrap();
+        assert_eq!(files.index.as_deref(), Some(index.as_path()));
+        assert_eq!(
+            files.weights,
+            vec![
+                ("a.safetensors".to_string(), dir.join("a.safetensors")),
+                ("b.safetensors".to_string(), dir.join("b.safetensors")),
+            ]
+        );
+        // A shard file beside an index names the whole set, like the loader.
+        std::fs::write(dir.join("a.safetensors"), b"").unwrap();
+        assert_eq!(checkpoint_files(dir.join("a.safetensors")).unwrap(), files);
+        let single = dir.join("model.safetensors");
+        let files = checkpoint_files(&single).unwrap();
+        assert_eq!(files.index, None);
+        assert_eq!(
+            files.weights,
+            vec![("model.safetensors".to_string(), single.clone())]
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

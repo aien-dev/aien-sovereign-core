@@ -6,11 +6,12 @@ have to take the run driver's word for "this text came from this model".
 
 ## What the daemon does
 
-1. At start, after the model loads, the CLI holds the sha256 of the model file
-   (the single safetensors file, streamed in 1 MiB chunks, hashed once) and of
-   the tokenizer file, with the path each came from. The daemon passes both to
-   the server (`set_model_identity`). The same digests are in the
-   "checkpoint loaded" log line.
+1. At start, after the model loads, the CLI holds the digest of the model
+   weights (below: `model_sha256`, files streamed in 1 MiB chunks, hashed once)
+   and the sha256 of the tokenizer file, with the path each came from. The
+   daemon passes both to the server (`set_model_identity`). The same digests are
+   in the "checkpoint loaded" log line; a sharded checkpoint also logs a
+   `CHECKPOINT_SHARDS` line (below).
 2. When a `StreamTurn` finishes, and the compose ledger is open, the daemon
    appends one record to the ledger and returns its id in
    `TurnFinished.generation_record` (optional field; absent when there is no
@@ -23,7 +24,8 @@ An `effect`-class host note whose JSON has the marker field `generation`:
 | field | meaning |
 |---|---|
 | `generation`, `v` | marker (1) and record version (1) |
-| `model_sha256`, `model_path` | the loaded weights file's digest and canonical path |
+| `model_sha256`, `model_path` | the digest of the loaded weights (form below) and the canonical path the daemon was given |
+| `model_digest_kind` | which form `model_sha256` has: `file` or `index+shards` (below) |
 | `tokenizer_sha256`, `tokenizer_path` | the loaded tokenizer file's digest and path |
 | `prompt_ids_sha256` | `token_ids_sha256` of the submitted prompt token ids |
 | `output_token_ids_sha256` | same hash over the generated token ids |
@@ -36,6 +38,47 @@ An `effect`-class host note whose JSON has the marker field `generation`:
 | `request_id`, `operation_id` | CALLER-ASSERTED: the request envelope's ids, exactly as the client sent them |
 
 The envelope ids are chosen by the client. They are recorded, not trusted (names kept to match the envelope fields).
+
+### `model_sha256`: the digest of what was loaded (sc#338)
+
+The daemon digests exactly the files the weights loader reads (the same
+resolution: a `.safetensors` file, a `model.safetensors.index.json`, a model
+directory holding either, or a shard file whose directory has an index, which
+loads the whole sharded set).
+
+- `model_digest_kind` = `file`: one safetensors file. `model_sha256` is that
+  file's sha256 (`sha256sum model.safetensors`).
+- `model_digest_kind` = `index+shards`: a sharded checkpoint. `model_sha256` is
+  the sha256 of this UTF-8 manifest text, with `\n` line ends and a final `\n`:
+
+  ```
+  aien-checkpoint-digest v1
+  index <sha256 of model.safetensors.index.json>
+  <shard sha256>  <shard name>
+  ...
+  ```
+
+  one shard line per file the index's `weight_map` names, de-duplicated and
+  sorted by name (byte order), the name exactly as the index writes it. The
+  shard lines are `sha256sum` lines, so a verifier can rebuild the manifest from
+  `sha256sum` output in the model directory and hash it. A changed shard, a
+  changed index, or a renamed shard changes `model_sha256`; the index alone does
+  not determine it.
+  The names are written raw: for a shard name holding a backslash or a line
+  break, `sha256sum` escapes the line (leading `\`), so rebuild that line by
+  hand. An index that names no shard is refused, and so is a directory given
+  as the checkpoint path (as it was before sc#338).
+
+The daemon also logs, on stdout after the "checkpoint loaded" line (which keeps
+its pinned form, parsed by interplane#76), for a sharded checkpoint only:
+
+```
+CHECKPOINT_SHARDS model_sha256=<digest> model_digest_kind=index+shards index_sha256=<sha256> shards=[<name>:<sha256>,...]
+```
+
+Records written before sc#338 have no `model_digest_kind`; their
+`model_sha256` is the sha256 of the file the daemon was given, which for a
+sharded checkpoint was the index only.
 
 ### `decoding`: the decoding actually taken (sc#294)
 
@@ -125,10 +168,11 @@ silently accepted.
   intent, replay, commit or effect decision depends on it
   (`effects::generation_records_change_no_decision`).
 - Not that the digest is of the very bytes the loader parsed. The CLI hashes the
-  model and tokenizer files at load, and the loaders then open the same paths
-  again (the weights loader and tokenizer loader take paths, not bytes). The
-  digest is of the file read at load time; a swap between the hash and the load
-  is not detected.
+  model files (for a sharded checkpoint, the index and every shard) and the
+  tokenizer file at load, and the loaders then open the same paths again (the
+  weights loader and tokenizer loader take paths, not bytes). The digest is of
+  the files read at load time; a swap between the hash and the load is not
+  detected.
 - Not that the file on disk still has that digest later, only what was loaded.
 - Not signed. The ledger's per-record digest detects edits to a record, not a
   forged append: a process of the same user that can append to the compose
