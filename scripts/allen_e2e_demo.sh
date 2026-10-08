@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # ALLEN end-to-end demo driver (docs/campaigns/allen-e2e/DEMO-v1.md and DEMO-v2.md, arch#162).
-# DEMO_VERSION=v1 (default) or v2 selects the predeclared spec; v2 differs only by its three named changes.
+# DEMO_VERSION=v1 (default), v2 or v3 selects the predeclared spec; v2 differs only by its three named changes,
+# v3 is v2 unchanged.
 #
 #   scripts/allen_e2e_demo.sh run      build, run S0-S8 + S3-red, write the receipts
 #   scripts/allen_e2e_demo.sh check F  the C1-C5 document checker on file F (prints failed ids)
@@ -69,14 +70,15 @@ MA=$HOME/models/SmolLM2-1.7B-Instruct-31b70e2e869a
 MB=$HOME/models/qwen3-4b-instruct-2507-cdbee75
 OUT=$REPO/docs/campaigns/allen-e2e
 V=${DEMO_VERSION:-v1}
-case $V in v1|v2) ;; *) echo "DEMO_VERSION must be v1 or v2" >&2; exit 2 ;; esac
+case $V in v1|v2|v3) ;; *) echo "DEMO_VERSION must be v1, v2 or v3" >&2; exit 2 ;; esac
+# v3 is v2 unchanged (DEMO-v3.md): every v2 rule below applies to v3 too.
 RECEIPTS=${DEMO_RECEIPTS:-$OUT/receipts-$V.jsonl}
 ART=${DEMO_ART:-$OUT/artifacts-$V}
 RUN=$D/run
 SOCK=$RUN/s
 GOAL_A="Write garden.md in the workspace, a garden plan."
 GOAL_B="Write garden-b.md in the workspace, a garden plan."
-if [ "$V" = v2 ]; then
+if [ "$V" != v1 ]; then
   # v2 change 1: the request states C2 and C4 (never C3, which must come from memory).
   FMT=" Start with a Markdown heading line that begins with \"# \". Use at most 200 words."
   GOAL_A="$GOAL_A$FMT"; GOAL_B="$GOAL_B$FMT"
@@ -295,7 +297,7 @@ provenance() { # tag file model_sha_expected
   l_model=$(printf '%s' "$pool" | grep -c "$msha")
   l_id=$(printf '%s' "$pool" | grep -c "$ID0")
   LINK_JSON=null
-  if [ "$V" = v2 ]; then
+  if [ "$V" != v1 ]; then
     follow_link "$tag" "$file" "$msha"
     l_model=$LINK_MODEL; l_id=$LINK_ID
   fi
@@ -466,7 +468,7 @@ if ! skip S7; then
     snap S7
     FPB=$(cli allen status | jq -r .result.fingerprint)
     CHK=""
-    if [ "$V" = v2 ]; then
+    if [ "$V" != v1 ]; then
       # v2 change 2: the Model: line must change; the Backend: line is recorded, not required to change.
       [ "$CUR_MODELLINE" != "$OLD_MODELLINE" ] && [ "$CUR_MODELLINE" != none ] || CHK="$CHK model-line-identical"
     else
@@ -482,7 +484,7 @@ if ! skip S7; then
     EXTRA=$(jq -nc --arg ob "$OLD_BACKEND" --arg nb "$CUR_BACKEND" --arg om "$OLD_MODELLINE" --arg nm "$CUR_MODELLINE" --arg od "$OLD_DSHA" --arg nd "$CUR_DSHA" \
       '{before:{backend_line:$ob,model_line:$om,daemon_model_sha256:$od},after:{backend_line:$nb,model_line:$nm,daemon_model_sha256:$nd}}')
     if [ -z "$CHK" ]; then
-      rec S7 PASS "$KILLED then start on M-B: $([ "$V" = v2 ] && echo "Model: line" || echo "backend line") and model digest changed (${OLD_DSHA:0:12} -> ${CUR_DSHA:0:12}); ID0 same; profile, N-work, G1 unchanged; N-pers still absent" "$EXTRA"
+      rec S7 PASS "$KILLED then start on M-B: $([ "$V" != v1 ] && echo "Model: line" || echo "backend line") and model digest changed (${OLD_DSHA:0:12} -> ${CUR_DSHA:0:12}); ID0 same; profile, N-work, G1 unchanged; N-pers still absent" "$EXTRA"
     else
       rec S7 FAIL "criteria not met:${CHK}. Backend line before: '$OLD_BACKEND'; after: '$CUR_BACKEND'. Model line and digest changed: $([ "$CUR_DSHA" != "$OLD_DSHA" ] && echo yes || echo no)" "$EXTRA"
     fi
