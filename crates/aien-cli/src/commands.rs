@@ -1208,7 +1208,7 @@ fn reference_fallback(
 struct ResidentLoad<'a> {
     native_linked: bool,
     strict: bool,
-    qwen3_opted_in: bool,
+    qwen3_enabled: bool,
     uploader: &'a dyn aien_inference_abi::ResidentUploader,
     /// Opens the GPU session (bounded retry) so every driver allocation of the upload happens
     /// while the process holds almost no memory.
@@ -1261,7 +1261,7 @@ fn load_daemon_model_with(
         aien_inference_abi::resident_load_wanted(
             r.native_linked,
             r.strict,
-            r.qwen3_opted_in,
+            r.qwen3_enabled,
             &config,
         )
     });
@@ -1430,7 +1430,7 @@ fn build_native_daemon_backend() -> Result<DaemonBackendParts, String> {
         let resident = ResidentLoad {
             native_linked: aien_omega_gpu::is_native(),
             strict: aien_inference_abi::strict::production_strict(),
-            qwen3_opted_in: aien_inference_abi::gb10_qwen3_enabled(),
+            qwen3_enabled: aien_inference_abi::gb10_qwen3_enabled(),
             uploader: &aien_inference_abi::OmegaUploader,
             open_session: &open_session,
         };
@@ -1586,7 +1586,7 @@ fn daemon_serving_reservation(
     kv_context_tokens: usize,
     sched: &aien_scheduler::SchedulerConfig,
     gpu_native: bool,
-    qwen3_opted_in: bool,
+    qwen3_enabled: bool,
     ops: &dyn aien_inference_abi::gb10_serving::ServingOps,
 ) -> Result<Option<String>, String> {
     let limits = aien_inference_abi::gb10_serving::ServingLimits {
@@ -1598,7 +1598,7 @@ fn daemon_serving_reservation(
         model_config,
         &limits,
         gpu_native,
-        qwen3_opted_in,
+        qwen3_enabled,
         ops,
     )
     .map(|r| r.map(|r| r.log_line()))

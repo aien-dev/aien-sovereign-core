@@ -4,7 +4,7 @@
 //! Without it, omega grows the attention staging pool, the matmul activation/result buffers
 //! and the matmul kernel cache on demand while serving, and every growth is a driver (RM)
 //! allocation that can fail with NV_ERR_NO_MEMORY when MemFree is low (omega#327; omega#332
-//! measured 458 allocations and 456 frees over 428 tokens). omega#333 and omega#338 add an
+//! measured 458 allocations and 456 frees over 428 tokens). omega#333 and omega#338 add a
 //! reservation: allocate the buffers once for declared bounds, build and pin every
 //! matmul kernel the model will run (`prepare`), then `seal`, after which serving makes no
 //! driver allocation inside the bounds and an unprepared kernel or a call past the bounds is
@@ -13,8 +13,11 @@
 //! This module derives the bounds and the shapes from the model and the daemon's declared
 //! limits, and runs reserve, prepare, seal in that order through [`ServingOps`] (the real one
 //! calls omega; tests record). It applies only to Qwen3 on the GB10, which is enabled by
-//! default since #277 (`AIEN_GB10_QWEN3_DECLARED_ATTEMPT=0` refuses it). It
-//! does not claim to fix #277: it is not proven on the chip, and omega's header lists what is
+//! default since #277 on a production-strict run (`AIEN_GB10_QWEN3_DECLARED_ATTEMPT=0` refuses it;
+//! `1` also enables it under `AIEN_DEV_FALLBACK=1`). Evidence: #277 attempt 3 passed
+//! (https://github.com/aien-dev/aien-sovereign-core/issues/277#issuecomment-6059774846), limited to a
+//! Linux-hosted GB10 (not native AIENOS), one prompt, context 4096, no endurance run and no
+//! failing baseline. It does not claim to fix #277 beyond that, and omega's header lists what is
 //! still not covered (elementwise scratch, the attention kernel).
 
 use crate::omega_backend::omega_model_refusal_with;
@@ -170,11 +173,10 @@ pub fn reserve_gb10_serving_with(
     config: &ModelConfig,
     limits: &ServingLimits,
     gpu_native: bool,
-    qwen3_opted_in: bool,
+    qwen3_enabled: bool,
     ops: &dyn ServingOps,
 ) -> Result<Option<ServingReservation>, String> {
-    if !gpu_native || !config.qk_norm || omega_model_refusal_with(config, qwen3_opted_in).is_some()
-    {
+    if !gpu_native || !config.qk_norm || omega_model_refusal_with(config, qwen3_enabled).is_some() {
         return Ok(None);
     }
     let refuse = |why: String| {

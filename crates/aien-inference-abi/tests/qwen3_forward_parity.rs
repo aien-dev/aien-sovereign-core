@@ -360,16 +360,25 @@ fn gb10_backend_refuses_qwen3_and_not_llama() {
     );
     assert_eq!(omega_model_refusal_with(&q, true), None);
     // The default is on: unset and 1 enable, 0 and any other value refuse (fail closed).
-    assert!(aien_inference_abi::gb10_qwen3_enabled_from(None));
-    assert!(aien_inference_abi::gb10_qwen3_enabled_from(Some("1")));
+    assert!(aien_inference_abi::gb10_qwen3_enabled_from(None, true));
+    assert!(aien_inference_abi::gb10_qwen3_enabled_from(Some("1"), true));
+    // Unset on a non-strict (AIEN_DEV_FALLBACK=1) run is outside the evidence: refused.
+    assert!(!aien_inference_abi::gb10_qwen3_enabled_from(None, false));
+    assert!(aien_inference_abi::gb10_qwen3_enabled_from(
+        Some("1"),
+        false
+    ));
     for v in ["0", "", "true", "yes", "2", " 1"] {
         assert!(
-            !aien_inference_abi::gb10_qwen3_enabled_from(Some(v)),
+            !aien_inference_abi::gb10_qwen3_enabled_from(Some(v), true),
             "{v:?}"
         );
     }
     match std::env::var(GB10_QWEN3_OPT_IN_ENV).ok().as_deref() {
-        None => assert_eq!(omega_model_refusal(&q), None),
+        None if aien_inference_abi::strict::production_strict() => {
+            assert_eq!(omega_model_refusal(&q), None)
+        }
+        None => assert_eq!(omega_model_refusal(&q), Some(msg)),
         Some("1") => assert_eq!(omega_model_refusal(&q), None),
         Some(_) => assert_eq!(omega_model_refusal(&q), Some(msg)),
     }

@@ -182,18 +182,18 @@ impl ResidentUploader for OmegaUploader {
 }
 
 /// Whether the daemon loads weights resident: the native engine is linked, the build is
-/// production-strict (no CPU fallback to need host values for), the declared GB10 Qwen3 attempt
-/// is on, and the model is one the engine accepts. Anything else keeps the host f32 load.
+/// production-strict (no CPU fallback to need host values for), the GB10 Qwen3 path
+/// is enabled (see `gb10_qwen3_enabled`), and the model is one the engine accepts. Anything else keeps the host f32 load.
 pub fn resident_load_wanted(
     native_linked: bool,
     strict: bool,
-    qwen3_opted_in: bool,
+    qwen3_enabled: bool,
     config: &ModelConfig,
 ) -> bool {
     native_linked
         && strict
         && config.qk_norm
-        && crate::omega_backend::omega_model_refusal_with(config, qwen3_opted_in).is_none()
+        && crate::omega_backend::omega_model_refusal_with(config, qwen3_enabled).is_none()
 }
 
 /// Streams a checkpoint straight to the device. For each of the seven matmul weights of each
