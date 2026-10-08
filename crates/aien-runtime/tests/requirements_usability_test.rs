@@ -118,7 +118,8 @@ fn wider_wordings_are_read() {
 #[test]
 fn unscoped_word_counts_and_topic_lists_stay_uncertain() {
     uncertain("Write it with at least 15 words of plain text.");
-    uncertain("Cover three topics: drying, labelling and storage.");
+    // sc#332: a counted topic list is read when the count matches the list.
+    uncertain("Cover two topics: drying, labelling and storage.");
     uncertain("Put one fenced shell code example in each of them.");
     uncertain("Each section has two sentences.");
 }
@@ -269,7 +270,7 @@ const SILENT: [&str; 12] = [
 ];
 
 /// Goals whose explicit requirements are all read and enforced.
-const RECOGNIZED: [&str; 20] = [
+const RECOGNIZED: [&str; 21] = [
     "dryrun-tasks-v2/N1",
     "tasks-oq3-v3/N1",
     "tasks-oq3-v4/N1",
@@ -287,6 +288,7 @@ const RECOGNIZED: [&str; 20] = [
     "tasks-oq3-v4/RT6",
     "tasks-oq3-v4/W1",
     "tasks-oq3-v4/W2",
+    "tasks-oq3-v4/W3",
     "tasks-oq3-v4/W4",
     // sc#334: "at least twelve of them" after `a line starting with "- [ ]"`.
     "tasks-oq3-v4/W5",
@@ -296,7 +298,7 @@ const RECOGNIZED: [&str; 20] = [
 ];
 
 /// Goals still refused as uncertain, each with the span that is reported and why.
-const REFUSED: [(&str, &str, &str); 4] = [
+const REFUSED: [(&str, &str, &str); 3] = [
     (
         "dryrun-tasks-v2/T6",
         "one section per symptom",
@@ -306,11 +308,6 @@ const REFUSED: [(&str, &str, &str); 4] = [
         "tasks-oq3-v3/G1",
         "one fenced shell code example in each of them",
         "a per-section code example count",
-    ),
-    (
-        "tasks-oq3-v4/W3",
-        "three topics",
-        "a topic list after a colon cannot be checked mechanically",
     ),
     (
         "tasks-v8/D5",
