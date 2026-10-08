@@ -63,6 +63,10 @@ loads the whole sharded set).
   `sha256sum` output in the model directory and hash it. A changed shard, a
   changed index, or a renamed shard changes `model_sha256`; the index alone does
   not determine it.
+  The names are written raw: for a shard name holding a backslash or a line
+  break, `sha256sum` escapes the line (leading `\`), so rebuild that line by
+  hand. An index that names no shard, and a directory given as the checkpoint
+  path, are refused (as before, the daemon names the files, not a directory).
 
 The daemon also logs, on stdout after the "checkpoint loaded" line (which keeps
 its pinned form, parsed by interplane#76), for a sharded checkpoint only:

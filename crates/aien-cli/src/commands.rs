@@ -1193,13 +1193,26 @@ struct CheckpointDigest {
     shards: Vec<(String, String)>,
 }
 
+/// Errors name the file only when it is not `path` itself (the caller names `path`).
+/// A directory is refused, as it was when `path` itself was hashed.
 fn checkpoint_digest(path: &std::path::Path) -> Result<CheckpointDigest, String> {
+    if path.is_dir() {
+        return Err("is a directory, not a safetensors file or shard index".to_string());
+    }
     let files = aien_inference_abi::checkpoint_files(path).map_err(|e| e.to_string())?;
     let sha = |p: &std::path::Path| {
-        sha256_file_hex(p).map_err(|e| format!("{} is unreadable: {}", p.display(), e))
+        sha256_file_hex(p).map_err(|e| {
+            if p == path {
+                e.to_string()
+            } else {
+                format!("{}: {}", p.display(), e)
+            }
+        })
     };
     let Some(index) = files.index else {
-        let (_, file) = &files.weights[0];
+        let Some((_, file)) = files.weights.first() else {
+            return Err("names no weight file".to_string());
+        };
         return Ok(CheckpointDigest {
             sha256: sha(file)?,
             kind: "file",
@@ -1207,6 +1220,9 @@ fn checkpoint_digest(path: &std::path::Path) -> Result<CheckpointDigest, String>
             shards: Vec::new(),
         });
     };
+    if files.weights.is_empty() {
+        return Err("its shard index names no shard".to_string());
+    }
     use sha2::{Digest, Sha256};
     let index_sha256 = sha(&index)?;
     let mut manifest = format!("aien-checkpoint-digest v1\nindex {index_sha256}\n");
@@ -2809,6 +2825,39 @@ mod tests {
         std::fs::write(shard(2), bytes).unwrap();
         let changed = load().manifest.model_sha256.unwrap();
         assert_ne!(changed, digest, "a changed shard must change the digest");
+    }
+
+    /// sc#338 review: the digest changes no refusal. A model directory as the
+    /// checkpoint path is still refused (as when the path itself was hashed),
+    /// and an index naming no shard is refused, with the path named once.
+    #[test]
+    fn a_directory_or_an_index_without_shards_is_still_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        write_two_shard_qwen3_tiny(dir.path());
+        let err = load_daemon_model(
+            resolve_daemon_manifest_with(&strict_policy(Some(dir.path().to_path_buf()))),
+            true,
+        )
+        .err()
+        .expect("a directory path is refused");
+        assert!(err.contains("AIEN_REQUIRE_CHECKPOINT=1"), "{err}");
+        assert!(err.contains("is a directory"), "{err}");
+
+        let empty = tempfile::tempdir().unwrap();
+        let index = empty.path().join("model.safetensors.index.json");
+        std::fs::write(&index, r#"{"weight_map":{}}"#).unwrap();
+        let err = load_daemon_model(
+            resolve_daemon_manifest_with(&strict_policy(Some(index.clone()))),
+            true,
+        )
+        .err()
+        .expect("an index without shards is refused");
+        assert!(err.contains("names no shard"), "{err}");
+        assert_eq!(
+            err.matches(&index.display().to_string()).count(),
+            1,
+            "{err}"
+        );
     }
 
     /// sc#338: a single safetensors file keeps `model_sha256` = the file's own
