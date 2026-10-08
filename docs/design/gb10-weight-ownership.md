@@ -19,7 +19,7 @@ proven on the chip. The default refusal of Qwen3 on the GB10 stays in place.
 ## Status and evidence labels
 
 - Source facts below were read at: omega main `01f6a74` (equal to `omega.lock`), sovereign-core
-  main `cad36d9`, physics `6d7cf0d` (the repo that holds `nvrm/nvrm.c`).
+  main `cad36d9`, physics `6d7cf0d` (the repo that holds `nvrm/nvrm.c`). These are the commits read; both mains have since moved.
 - OBSERVED = read in source or in a recorded receipt. COMPUTED = arithmetic from the model's
   `config.json` and the source formulas. INFERRED = follows from source, never run. UNVERIFIED =
   not checked.
@@ -58,7 +58,7 @@ layers, 32 query heads, 8 KV heads, head_dim 128, vocab 151936, tied embeddings,
 All GPU-side allocations go through `omega_gpu_session_alloc` (omega `src/omega_gpu_session.c:78-82`)
 which calls `nvrm_alloc_gpu_uncached` (physics `nvrm/nvrm.c:473-475`, body `:477-`). The size is
 rounded up to 4 KiB (`nvrm.c:480`), so any growth of even one page is a new request. A refused
-request sets `rm->faulted = 1` (`nvrm.c:507-509`) and later requests then fail in the same
+request sets `rm->faulted = 1` (`nvrm.c:506-509`) and later requests then fail in the same
 function (`nvrm.c:478`): one refused allocation ends the GPU session for the rest of the process.
 OBSERVED.
 
@@ -104,7 +104,7 @@ high-water size. No headroom, no geometric growth, no pre-reservation. OBSERVED.
 | Matmul activations `a_buf` | round16(m) * kp * 2 | rows per call m | when m or kp exceeds the previous maximum | at close |
 | Matmul results `c_buf` | round16(m) * np * 4; logits step: m = number of decoding sequences, np = 151936 (9.3 MiB at m <= 16, 37 MiB at 64, about 148 MiB at 256) | concurrent decodes, prefill chunk (128 rows) | when m rises past the previous maximum, or a bigger np appears | at close |
 | Elementwise a/b/c (`run_abc`, elementwise_api.c:978, :1074) | each launch is split to at most 64 CTAs (EW_MAX_CTAS), so at most 64 rows x 2560 x 4 = 640 KiB per buffer, independent of context | nothing past the first full-size call | no (after the first 64-row call) | at close |
-| Kernel code, matmul (matmul_api.c:144-167) | pages | (kp, np, grid_x) | **INFERRED yes.** The key includes grid_x, which depends on rows (grid_x = budget / ceil(m/16), capped by np/8). With the daemon CTA budget of 256: decode (m = 1) and prefill chunk (m = 128) give 6 shapes each (12 distinct, k and v share one), and the cache has 8 slots, evicted round-robin (`cache_next`). Alternating prefill and decode, or different decode batch sizes, therefore frees and re-allocates code buffers during serving | at close |
+| Kernel code, matmul (matmul_api.c:144-167) | pages | (kp, np, grid_x) | **INFERRED yes; since OBSERVED on the fake layer, see Update.** The key includes grid_x, which depends on rows (grid_x = budget / ceil(m/16), capped by np/8). With the daemon CTA budget of 256: decode (m = 1) and prefill chunk (m = 128) give 6 shapes each (12 distinct, k and v share one), and the cache has 8 slots, evicted round-robin (`cache_next`). Alternating prefill and decode, or different decode batch sizes, therefore frees and re-allocates code buffers during serving | at close |
 | Pushbuffer, cbank, marker, QMD | fixed (session.c:127) | none | no (each launch rewrites the same buffers) | at close |
 | Resident weights | fixed after (b) | none | no | when the `ResidentTensor` drops |
 | KV cache pool (`UnifiedKvTensorPool`, Fp32, shared_kv.rs:44-57) | 288 KiB per token (36 layers x 8 heads x 128 x 2 x 4 B) COMPUTED; declared context 262144 would be 72 GiB, so `AIEN_KV_CONTEXT_TOKENS` must lower it | context | n/a: **host memory, not driver memory** | daemon exit |
@@ -322,7 +322,7 @@ changes (separate omega PR, then an `omega.lock` bump).
 
 1. Cut A (CPU, small, safe now): MemFree log plus resident and envelope plan lines plus resident
    byte counters. Gives the next declared attempt its numbers and costs no chip time.
-2. Cut B (CPU test on omega's fake layer): confirm or refute the matmul code-cache thrash and the
+2. Cut B (DONE, see Update: omega#332 measured, omega#333 reserves) (CPU test on omega's fake layer): confirm or refute the matmul code-cache thrash and the
    per-token pool reallocation with allocation counters, no GPU. This decides whether the omega
    changes are needed.
 3. Cut C (the real change): `MatrixWeight`, streaming bf16 upload, session-first order, envelope
@@ -333,4 +333,4 @@ Open items I could not settle from source: why the baseline passed in the script
 UNKNOWN); whether the driver needs physically contiguous pages for the failing buffers (DOCS
 SILENT per #277); how many rows a real mixed prefill and decode step puts into one matmul in the
 daemon (the 256-row envelope is a bound from `max_batch_size`, not a measurement); the exact
-resident total (7.48 GiB computed against about 6.8 GiB quoted).
+resident total (7.48 GiB computed against about 6.8 GiB quoted; the gap is about the lm_head: 6.76 GiB is the layers alone, the lm_head adds 0.72 GiB, so the quote likely omits it).
