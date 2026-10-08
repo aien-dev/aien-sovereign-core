@@ -417,11 +417,20 @@ fn parse(
     // A file introduced as existing is read, not written, when a destination
     // verb directly names another file to write ("create a new file called
     // Y"); otherwise it stays a candidate (alone: the file to edit).
-    if dests
-        .iter()
-        .find(|c| !c.existing)
-        .is_some_and(|c| c.governed)
-    {
+    // Not when another destination verb stands between the two ("there is a
+    // file at X. Update it and create Y" asks to write both).
+    let demote = dests.iter().find(|c| !c.existing).is_some_and(|g| {
+        g.governed
+            && dests.iter().filter(|c| c.existing).all(|e| {
+                let (a, b) = (e.idx.min(g.idx), e.idx.max(g.idx));
+                words[a + 1..b]
+                    .iter()
+                    .filter(|w| DESTINATION_VERBS.contains(&w.as_str()))
+                    .count()
+                    <= 1
+            })
+    });
+    if demote {
         dests.retain(|c| !c.existing);
     }
     let Some(first) = dests.first() else {
@@ -702,8 +711,22 @@ mod tests {
             Err(DestinationError::Ambiguous(c)) if c == ["docs/x.md", "docs/y.md"]
         ));
         // A NEW file is never an existing one; "here is" is not an existence lead.
-        assert!(d("There is a new file docs/out.md. Create docs/z.md").is_err());
-        assert!(d("Here is a file docs/out.md. Create docs/z.md").is_err());
+        for g in [
+            "There is a new file docs/out.md. Create docs/z.md",
+            "Here is a file docs/out.md. Create docs/z.md",
+        ] {
+            assert!(
+                matches!(d(g), Err(DestinationError::Ambiguous(ref c)) if c == &["docs/out.md", "docs/z.md"]),
+                "{g}: {:?}",
+                d(g)
+            );
+        }
+        // Another destination verb between them: both are asked to be
+        // written, still ambiguous (review of #357, round 2).
+        assert!(matches!(
+            d("There is a file at docs/x.md. Update it and create docs/y.md"),
+            Err(DestinationError::Ambiguous(c)) if c == ["docs/x.md", "docs/y.md"]
+        ));
         // "Create a file at X" names the destination, not an existing file.
         assert_eq!(
             d("Create a file at docs/x.md with one line"),
