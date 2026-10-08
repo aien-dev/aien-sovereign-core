@@ -25,7 +25,8 @@
 //! one..twenty) of lines, words, list items, steps, sections/headings and
 //! questions; section titles (`sections titled A, B and C`), topics
 //! (`covers A, B and C`), required words and phrases, and a minimum number
-//! of sentences in every section.
+//! of sentences in every section; and a markdown heading as the first line
+//! (`start with a Markdown heading line that begins with "# "`).
 //!
 //! ## What a requirement is judged on
 //!
@@ -135,6 +136,12 @@ pub enum Requirement {
         level: usize,
         titles: Vec<String>,
     },
+    /// The first line of the file is a markdown ATX heading: 1 to 6 `#` at the very start of
+    /// the line, then a space or tab, then title text. `level`: exactly that many `#`;
+    /// None: any of 1 to 6.
+    FirstLineHeading {
+        level: Option<usize>,
+    },
 }
 
 fn quoted(items: &[String]) -> String {
@@ -175,6 +182,13 @@ impl Requirement {
             Requirement::LevelHeadings { level, titles } => {
                 format!("the level-{level} headings {}", quoted(titles))
             }
+            Requirement::FirstLineHeading { level } => match level {
+                Some(l) => format!(
+                    "a level-{l} markdown heading (\"{} \") as the first line",
+                    "#".repeat(*l)
+                ),
+                None => "a markdown heading as the first line".to_string(),
+            },
         }
     }
 
@@ -304,6 +318,24 @@ impl Requirement {
                         "{label}, missing {} (each must be a level-{level} markdown heading line)",
                         quoted(&missing)
                     )
+                })
+            }
+            Requirement::FirstLineHeading { level } => {
+                let first = content.split('\n').next().unwrap_or("");
+                let first = first.strip_suffix('\r').unwrap_or(first);
+                let hashes = first.bytes().take_while(|&b| b == b'#').count();
+                let has_title = first[hashes..]
+                    .strip_prefix([' ', '\t'])
+                    .is_some_and(|t| !t.trim().trim_end_matches('#').trim().is_empty());
+                let ok =
+                    (1..=6).contains(&hashes) && level.is_none_or(|l| l == hashes) && has_title;
+                (!ok).then(|| {
+                    let shown: String = first.chars().take(60).collect();
+                    if shown.is_empty() {
+                        format!("{label}, found an empty first line")
+                    } else {
+                        format!("{label}, found \"{shown}\"")
+                    }
                 })
             }
             Requirement::MinSentencesPerSection(n) => {
