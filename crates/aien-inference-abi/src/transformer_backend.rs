@@ -6,8 +6,8 @@ use crate::mojo_backend::MojoGb10Backend;
 use crate::tensor::{sample_argmax, sample_temperature};
 use crate::weights::{LayerKvCache, SequenceState, TransformerWeights};
 use crate::{
-    AienInferenceBackend, AienUsageReceipt, BranchHandle, ContextHandle, DecodeOutput,
-    FinishReason, ModelConfig, SamplingParams, ScheduledBatch, StepMetrics,
+    AienInferenceBackend, AienUsageReceipt, BranchHandle, ContextHandle, DecodeObservation,
+    DecodeOutput, FinishReason, ModelConfig, SamplingParams, ScheduledBatch, StepMetrics,
 };
 use aien_kv_cache::{
     create_shared_kv_manager_with_pool, AienKvManager, KvDType, KvPoolConfig, SharedKvManager,
@@ -54,9 +54,25 @@ pub fn decode_sampling_seed(request_id: u64, position: usize) -> u64 {
 ///
 /// Returns the token and its log-probability under the kept distribution.
 pub fn sample_with_params(logits: &[f32], params: &SamplingParams, seed: u64) -> (u32, f32) {
+    sample_with_params_observed(logits, params, seed, &mut DecodeObservation::default())
+}
+
+/// `sample_with_params` that also counts, inside the branch it takes, how the
+/// token was chosen (sc#294): greedy, or a draw at `temperature` (with
+/// `top_p` when nucleus filtering ran). The seed's request id is the caller's
+/// to record. The chosen token is identical to `sample_with_params`.
+pub fn sample_with_params_observed(
+    logits: &[f32],
+    params: &SamplingParams,
+    seed: u64,
+    obs: &mut DecodeObservation,
+) -> (u32, f32) {
     if params.temperature <= 0.001 {
+        obs.greedy_tokens += 1;
         return sample_argmax(logits);
     }
+    obs.sampled_tokens += 1;
+    obs.temperature = Some(params.temperature);
     assert!(!logits.is_empty(), "Logits cannot be empty");
     let inv_t = 1.0f64 / params.temperature as f64;
     let max = logits.iter().fold(f32::NEG_INFINITY, |m, &v| m.max(v)) as f64;
@@ -72,6 +88,7 @@ pub fn sample_with_params(logits: &[f32], params: &SamplingParams, seed: u64) ->
     let mut kept: Vec<usize> = (0..probs.len()).collect();
     let top_p = params.top_p as f64;
     if top_p > 0.0 && top_p < 1.0 {
+        obs.top_p = Some(params.top_p);
         kept.sort_by(|&a, &b| {
             probs[b]
                 .partial_cmp(&probs[a])
@@ -123,6 +140,32 @@ pub struct NativeTransformerBackend {
     /// decode (or fork) commits it. While a request is prefilling, `tokens.len()`
     /// therefore always equals the number of positions whose K/V is cached.
     pub pending_prefill_token: HashMap<u64, u32>,
+    /// How each request's tokens were actually chosen (sc#294), filled inside the
+    /// branch that chose them and taken once by the scheduler when the request
+    /// finishes (`take_decode_observation`).
+    decode_observed: HashMap<u64, DecodeTally>,
+}
+
+/// Per-request tally behind `DecodeObservation` (sc#294). The pick after a
+/// prefill chunk is held apart and replaced by the next chunk's, like
+/// `pending_prefill_token`, so a mid-prompt pick that is discarded is not counted.
+#[derive(Debug, Default)]
+struct DecodeTally {
+    prefill_pick: DecodeObservation,
+    decode: DecodeObservation,
+}
+
+impl DecodeTally {
+    fn merged(self) -> DecodeObservation {
+        let (p, d) = (self.prefill_pick, self.decode);
+        DecodeObservation {
+            greedy_tokens: p.greedy_tokens + d.greedy_tokens,
+            sampled_tokens: p.sampled_tokens + d.sampled_tokens,
+            temperature: d.temperature.or(p.temperature),
+            top_p: d.top_p.or(p.top_p),
+            seed_request_id: d.seed_request_id.or(p.seed_request_id),
+        }
+    }
 }
 
 impl NativeTransformerBackend {
@@ -132,6 +175,7 @@ impl NativeTransformerBackend {
             weights,
             sequences: HashMap::new(),
             sampling: HashMap::new(),
+            decode_observed: HashMap::new(),
             tensor_backend: Arc::new(ReferenceCpuBackend::new()),
             kv_manager: None,
             pending_prefill_token: HashMap::new(),
@@ -147,6 +191,7 @@ impl NativeTransformerBackend {
             weights,
             sequences: HashMap::new(),
             sampling: HashMap::new(),
+            decode_observed: HashMap::new(),
             tensor_backend,
             kv_manager: None,
             pending_prefill_token: HashMap::new(),
@@ -205,6 +250,7 @@ impl NativeTransformerBackend {
             weights,
             sequences: HashMap::new(),
             sampling: HashMap::new(),
+            decode_observed: HashMap::new(),
             tensor_backend: Arc::new(ReferenceCpuBackend::new()),
             kv_manager: Some(kv_mgr),
             pending_prefill_token: HashMap::new(),
@@ -231,6 +277,7 @@ impl NativeTransformerBackend {
             weights,
             sequences: HashMap::new(),
             sampling: HashMap::new(),
+            decode_observed: HashMap::new(),
             tensor_backend,
             kv_manager: Some(kv_mgr),
             pending_prefill_token: HashMap::new(),
@@ -247,6 +294,7 @@ impl NativeTransformerBackend {
             weights,
             sequences: HashMap::new(),
             sampling: HashMap::new(),
+            decode_observed: HashMap::new(),
             tensor_backend,
             kv_manager: Some(kv_manager),
             pending_prefill_token: HashMap::new(),
@@ -565,6 +613,7 @@ impl NativeTransformerBackend {
     pub fn release_sequence(&mut self, seq_id: u64) {
         self.sequences.remove(&seq_id);
         self.pending_prefill_token.remove(&seq_id);
+        self.decode_observed.remove(&seq_id);
         if let Some(kv_mgr) = &self.kv_manager {
             let _ = kv_mgr.write().release_branch(seq_id);
         }
@@ -1645,12 +1694,21 @@ impl NativeTransformerBackend {
             // PREFILL-E2E C6: the request's own sampling params (recorded at
             // prefill or by the fork hook), seeded per request and position.
             // No params, or temperature 0: argmax as before.
+            // sc#294: counted inside the branch taken.
+            let obs = &mut self.decode_observed.entry(seq_id).or_default().decode;
             let (sampled_tok, logprob) = match self.sampling.get(&seq_id) {
                 Some(params) => {
                     let seed = decode_sampling_seed(seq_id, pos + 1);
-                    sample_with_params(logits, params, seed)
+                    let picked = sample_with_params_observed(logits, params, seed, obs);
+                    if obs.sampled_tokens > 0 {
+                        obs.seed_request_id = Some(seq_id);
+                    }
+                    picked
                 }
-                None => sample_argmax(logits),
+                None => {
+                    obs.greedy_tokens += 1;
+                    sample_argmax(logits)
+                }
             };
 
             if let Some(seq) = self.sequences.get_mut(&seq_id) {
@@ -1683,6 +1741,7 @@ impl AienInferenceBackend for NativeTransformerBackend {
         self.sequences.clear();
         self.sampling.clear();
         self.pending_prefill_token.clear();
+        self.decode_observed.clear();
         Ok(())
     }
 
@@ -1807,7 +1866,17 @@ impl AienInferenceBackend for NativeTransformerBackend {
         self.pending_prefill_token.remove(&seq_id);
         // PREFILL-E2E C6: the per-request sampling params entry goes too.
         self.sampling.remove(&seq_id);
+        self.decode_observed.remove(&seq_id);
         Ok(())
+    }
+
+    /// sc#294: how this request's tokens were chosen, counted inside the
+    /// sampling branch taken (`sample_with_params_observed` and the prefill
+    /// pick); removed once taken.
+    fn take_decode_observation(&mut self, request_id: u64) -> Option<DecodeObservation> {
+        self.decode_observed
+            .remove(&request_id)
+            .map(DecodeTally::merged)
     }
 
     async fn execute_step(
@@ -1857,11 +1926,22 @@ impl AienInferenceBackend for NativeTransformerBackend {
 
             let logits =
                 Self::compute_logits_impl(&self.weights, &*self.tensor_backend, &last_hidden);
+            // sc#294: this chunk's pick replaces the previous chunk's (only the
+            // final chunk's pick is kept, like `pending_prefill_token`).
+            let mut pick = DecodeObservation::default();
             let (sampled_tok, logprob) = if req.sampling_params.temperature <= 0.001 {
+                pick.greedy_tokens = 1;
                 sample_argmax(&logits)
             } else {
+                pick.sampled_tokens = 1;
+                pick.temperature = Some(req.sampling_params.temperature);
+                pick.seed_request_id = Some(req.request_id);
                 sample_temperature(&logits, req.sampling_params.temperature, req.request_id)
             };
+            self.decode_observed
+                .entry(req.request_id)
+                .or_default()
+                .prefill_pick = pick;
 
             // Not pushed to `seq.tokens`: if another chunk of this prompt follows, the
             // next prefill call replaces this sample; otherwise the first decode
@@ -2248,5 +2328,126 @@ mod tests {
     #[tokio::test]
     async fn c3_chunked_prefill_execute_step_paged() {
         c3_execute_step_chunked(true).await;
+    }
+
+    /// sc#294: prefill in chunks, then `decodes` decode steps, through
+    /// `execute_step` (the scheduler path). Returns the observation the
+    /// scheduler would take at finish and the chosen tokens after the prompt.
+    async fn sc294_run(params: SamplingParams, decodes: usize) -> (DecodeObservation, Vec<u32>) {
+        use crate::SequenceRequest;
+        let prompt = c3_prompt();
+        let id = 11u64;
+        let batch = |prefill: Vec<SequenceRequest>, decode: Vec<u64>| ScheduledBatch {
+            prefill_requests: prefill,
+            decode_requests: decode,
+            block_tables: HashMap::new(),
+            step_id: 0,
+        };
+        let mut b = c3_backend(false);
+        for chunk in prompt.chunks(C3_CHUNK) {
+            let req = SequenceRequest {
+                request_id: id,
+                prompt_tokens: chunk.to_vec(),
+                sampling_params: params.clone(),
+                arrival_time_ns: 0,
+                priority: 0,
+            };
+            b.execute_step(&batch(vec![req], vec![])).await.unwrap();
+        }
+        for _ in 0..decodes {
+            b.execute_step(&batch(vec![], vec![id])).await.unwrap();
+        }
+        let chosen = b.sequences[&id].tokens[C3_PROMPT_LEN..].to_vec();
+        let obs = b.take_decode_observation(id).expect("observed");
+        assert_eq!(b.take_decode_observation(id), None, "taken once");
+        (obs, chosen)
+    }
+
+    /// Greedy request: every chosen token is counted as greedy, the
+    /// discarded mid-prompt picks are not, and nothing claims sampling.
+    #[tokio::test]
+    async fn sc294_greedy_request_is_observed_greedy() {
+        assert!(C3_PROMPT_LEN > C3_CHUNK, "prompt must take more than one chunk");
+        let greedy = SamplingParams {
+            temperature: 0.0,
+            ..Default::default()
+        };
+        let (obs, chosen) = sc294_run(greedy, 3).await;
+        // 1 pick after the final prefill chunk (committed by the first decode)
+        // plus 3 decode picks; the last decode's pick is pushed too.
+        assert_eq!(chosen.len(), 4);
+        assert_eq!(obs.greedy_tokens, 4);
+        assert_eq!(obs.sampled_tokens, 0);
+        assert_eq!(obs.mode(), "greedy");
+        assert_eq!((obs.temperature, obs.top_p, obs.seed_request_id), (None, None, None));
+    }
+
+    /// Sampling request: every token is counted as drawn, with the
+    /// temperature, the top_p the decode draws applied, and the seed's request id.
+    #[tokio::test]
+    async fn sc294_sampled_request_is_observed_sampled() {
+        let sampled = SamplingParams {
+            temperature: 0.7,
+            top_p: 0.95,
+            ..Default::default()
+        };
+        let (obs, _) = sc294_run(sampled, 3).await;
+        assert_eq!(obs.sampled_tokens, 4);
+        assert_eq!(obs.greedy_tokens, 0);
+        assert_eq!(obs.mode(), "sampled");
+        assert_eq!(obs.temperature, Some(0.7));
+        assert_eq!(obs.top_p, Some(0.95));
+        assert_eq!(obs.seed_request_id, Some(11));
+    }
+
+    /// Observing never changes the chosen token: the same token and logprob
+    /// as `sample_with_params`, greedy and sampled, over many seeds.
+    #[test]
+    fn sc294_observing_does_not_change_the_choice() {
+        let logits: Vec<f32> = (0..64).map(|i| ((i * 37 % 64) as f32) * 0.1).collect();
+        for temperature in [0.0f32, 0.0005, 0.3, 0.7, 1.5] {
+            for top_p in [0.0f32, 0.5, 0.95, 1.0] {
+                let p = SamplingParams {
+                    temperature,
+                    top_p,
+                    ..Default::default()
+                };
+                for seed in 0..50u64 {
+                    let seed = decode_sampling_seed(seed, 3);
+                    let mut o = DecodeObservation::default();
+                    assert_eq!(
+                        sample_with_params(&logits, &p, seed),
+                        sample_with_params_observed(&logits, &p, seed, &mut o)
+                    );
+                }
+            }
+        }
+    }
+
+    /// A released or never-seen request has no observation.
+    #[tokio::test]
+    async fn sc294_release_drops_the_observation() {
+        use crate::SequenceRequest;
+        let mut b = c3_backend(false);
+        let req = SequenceRequest {
+            request_id: 5,
+            prompt_tokens: c3_prompt()[..4].to_vec(),
+            sampling_params: SamplingParams {
+                temperature: 0.0,
+                ..Default::default()
+            },
+            arrival_time_ns: 0,
+            priority: 0,
+        };
+        let batch = ScheduledBatch {
+            prefill_requests: vec![req],
+            decode_requests: vec![],
+            block_tables: HashMap::new(),
+            step_id: 0,
+        };
+        b.execute_step(&batch).await.unwrap();
+        AienInferenceBackend::release_sequence(&mut b, 5).unwrap();
+        assert_eq!(b.take_decode_observation(5), None);
+        assert_eq!(b.take_decode_observation(6), None);
     }
 }

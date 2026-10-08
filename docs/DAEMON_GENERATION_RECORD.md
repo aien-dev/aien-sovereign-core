@@ -30,10 +30,45 @@ An `effect`-class host note whose JSON has the marker field `generation`:
 | `output_text_sha256` | sha256 of the exact `text` returned in `TurnFinished` |
 | `total_tokens`, `output_tokens` | token count the engine reported; generated tokens |
 | `finish_reason` | `eos`, `max_tokens`, `aborted` or `preempted` |
+| `decoding` | how the backend chose the output tokens (below); ABSENT when the backend did not report it |
 | `daemon` | `pid`, `start_ticks` (process start, clock ticks) and `started_unix_ms` |
 | `request_id`, `operation_id` | CALLER-ASSERTED: the request envelope's ids, exactly as the client sent them |
 
 The envelope ids are chosen by the client. They are recorded, not trusted (names kept to match the envelope fields).
+
+### `decoding`: the decoding actually taken (sc#294)
+
+The Qwen3 v4 review found greedy decoding documented but not observed: no
+record said which decoding a run used. `decoding` is that observation. The
+native backend (`NativeTransformerBackend`) counts every token it chooses
+inside the branch that chose it (`sample_with_params_observed` for decode, the
+prefill pick in `execute_step`), and the scheduler takes the count when the
+sequence finishes (`take_decode_observation`) and puts it in
+`CompletionEvent::Finished.decoding`. The daemon copies it into the record. It
+is never derived from the request's `temperature` or from any config file.
+
+| field | meaning |
+|---|---|
+| `mode` | `greedy` (every chosen token was the argmax), `sampled` (every one was a random draw), `mixed`, or `none` |
+| `greedy_tokens`, `sampled_tokens` | how many chosen tokens took each branch |
+| `temperature` | temperature of the sampled draws; only when a draw sampled |
+| `top_p` | nucleus mass of the sampled decode draws; only when filtering ran (`0 < top_p < 1`) |
+| `seed_request_id` | the backend request id the draws were seeded from; only when a draw sampled |
+
+There is no top-k: `SamplingParams` has none. Counted tokens are the pick
+after the final prefill chunk (a mid-prompt pick that is discarded is not
+counted) and every decode pick, the stop token included, so the count can be
+one more than `output_tokens`. A swarm branch counts only its own decode picks.
+
+`decoding` is ABSENT, not `greedy`, when the backend does not observe its
+decoding (the mock backend, a backend without the hook): an absent field is an
+absent claim. A verifier that needs greedy decoding requires `decoding.mode ==
+"greedy"` and `decoding.sampled_tokens == 0` on every record.
+
+What it does not prove: like the rest of the record, it is the daemon's own
+report, not signed. It covers the native backend's scheduler path
+(`execute_step`); the standalone generation helpers (`generate_tokens*`) and
+example binaries are not observed.
 
 ## What it proves
 

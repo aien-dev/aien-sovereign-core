@@ -3,7 +3,10 @@
 //! Socket-level, mock backend, toy tokenizer. Every test needs the linked
 //! composition archive and is IGNORED in a stub build, never passed (the
 //! no-record cases that hold in a stub build are unit tests in server.rs).
-use aien_inference_abi::{ChatTokenizer, MockInferenceBackend};
+use aien_inference_abi::{
+    AienInferenceBackend, ChatTokenizer, DecodeObservation, DecodeOutput, MockInferenceBackend,
+    ModelConfig, ScheduledBatch, StepMetrics,
+};
 use aien_kv_cache::create_shared_kv_manager;
 use aien_omega_compose::hex;
 use aien_runtime::client::AienRuntimeClient;
@@ -62,6 +65,14 @@ async fn start(identity: Option<ModelIdentity>) -> Daemon {
 }
 
 async fn start_with(identity: Option<ModelIdentity>, tokenizer: ChatTokenizer) -> Daemon {
+    start_on(identity, tokenizer, MockInferenceBackend::new(1)).await
+}
+
+async fn start_on<B: AienInferenceBackend + Send + 'static>(
+    identity: Option<ModelIdentity>,
+    tokenizer: ChatTokenizer,
+    backend: B,
+) -> Daemon {
     let tmp = tempfile::tempdir().unwrap();
     let socket = tmp.path().join("runtime.sock");
     let cfg = SchedulerConfig {
@@ -85,7 +96,7 @@ async fn start_with(identity: Option<ModelIdentity>, tokenizer: ChatTokenizer) -
     if let Some(id) = identity {
         server.set_model_identity(id);
     }
-    let handle = tokio::spawn(async move { server.run(MockInferenceBackend::new(1)).await });
+    let handle = tokio::spawn(async move { server.run(backend).await });
     let client = AienRuntimeClient::new(&socket);
     for _ in 0..200 {
         if client.is_alive().await {
@@ -200,6 +211,9 @@ async fn record_carries_the_digests_of_the_turn() {
     ));
     assert_eq!(r["daemon"]["pid"], std::process::id());
     assert!(r["daemon"]["started_unix_ms"].as_str().unwrap().len() > 8);
+    // sc#294: the mock backend observes nothing, so the record makes no
+    // decoding claim (absent, never a default "greedy").
+    assert!(r.get("decoding").is_none(), "{r}");
     // The envelope ids are the client's own, recorded as asserted.
     assert!(r["request_id"].as_u64().unwrap() > 0);
     assert!(r["operation_id"].as_str().unwrap().len() > 3);
@@ -311,4 +325,64 @@ fn turn_finished_without_a_record_serializes_as_before() {
     assert!(serde_json::to_string(&some)
         .unwrap()
         .contains(r#""generation_record":9"#));
+}
+
+/// The mock backend, plus a fixed report of how it decoded: stands in for a
+/// backend that observes its sampling branch (sc#294).
+struct ObservingMock {
+    inner: MockInferenceBackend,
+    report: DecodeObservation,
+}
+
+#[async_trait::async_trait]
+impl AienInferenceBackend for ObservingMock {
+    async fn load_model(&mut self, config: &ModelConfig) -> Result<(), String> {
+        self.inner.load_model(config).await
+    }
+    async fn execute_step(
+        &mut self,
+        batch: &ScheduledBatch,
+    ) -> Result<(Vec<DecodeOutput>, StepMetrics), String> {
+        self.inner.execute_step(batch).await
+    }
+    fn take_decode_observation(&mut self, _request_id: u64) -> Option<DecodeObservation> {
+        Some(self.report.clone())
+    }
+}
+
+/// sc#294: the StreamTurn record states the decoding the backend reported at
+/// finish (from `CompletionEvent::Finished`), not the request's temperature:
+/// the client asks for 0.0 here and the backend reports sampling, so a record
+/// built from the settings would say greedy.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[cfg_attr(not(compose_linked), ignore = "needs librx_compose.a: stub build")]
+async fn record_states_the_decoding_the_backend_reported() {
+    let _g = ONE_HOME.lock().await;
+    let report = DecodeObservation {
+        greedy_tokens: 1,
+        sampled_tokens: 3,
+        temperature: Some(0.7),
+        top_p: Some(0.95),
+        seed_request_id: Some(42),
+    };
+    let backend = ObservingMock {
+        inner: MockInferenceBackend::new(1),
+        report,
+    };
+    let d = start_on(Some(identity()), toy_tokenizer(), backend).await;
+    let (_, id) = d.turn("hello hello").await;
+    let r = d.record(id.expect("a record id")).await;
+    assert_eq!(
+        r["decoding"],
+        serde_json::json!({
+            "mode": "mixed",
+            "greedy_tokens": 1,
+            "sampled_tokens": 3,
+            "temperature": 0.7,
+            "top_p": 0.95,
+            "seed_request_id": 42
+        }),
+        "{r}"
+    );
+    d.stop().await;
 }

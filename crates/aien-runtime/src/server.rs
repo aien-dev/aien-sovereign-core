@@ -534,7 +534,11 @@ async fn generate_text(
         loop {
             match events.recv().await {
                 Some(CompletionEvent::Token { token, .. }) => produced.push(token),
-                Some(CompletionEvent::Finished { finish_reason, .. }) => {
+                Some(CompletionEvent::Finished {
+                    finish_reason,
+                    decoding,
+                    ..
+                }) => {
                     return tokenizer
                         .decode_opts(&produced, true)
                         .map(|text| crate::spine::Generation {
@@ -544,6 +548,7 @@ async fn generate_text(
                             token_ids: Some(produced.clone()),
                             prompt_tokens: Some(prompt_ids.len()),
                             prompt_ids_sha256: Some(crate::spine::token_ids_sha256(&prompt_ids)),
+                            decoding: decoding.clone(),
                         })
                         .map_err(|e| format!("tokenizer decode failed: {e}"));
                 }
@@ -640,6 +645,7 @@ struct GenerationOwned {
     finish_reason: &'static str,
     request_id: u64,
     operation_id: u128,
+    decoding: Option<aien_abi_core::DecodeObservation>,
 }
 
 /// Write the daemon's generation record for a finished turn and return its
@@ -665,6 +671,7 @@ async fn record_generation(
                 finish_reason: g.finish_reason,
                 request_id: g.request_id,
                 operation_id: g.operation_id,
+                decoding: g.decoding.as_ref(),
             },
             started,
         );
@@ -734,6 +741,7 @@ async fn stream_turn(
             Ok(Some(CompletionEvent::Finished {
                 total_tokens,
                 finish_reason,
+                decoding,
                 ..
             })) => {
                 let generation_record = record_generation(
@@ -748,6 +756,7 @@ async fn stream_turn(
                         finish_reason: finish_reason_label(&finish_reason),
                         request_id,
                         operation_id,
+                        decoding,
                     },
                 )
                 .await;
@@ -1031,6 +1040,7 @@ mod generation_record_tests {
             finish_reason: "eos",
             request_id: 1,
             operation_id: 1,
+            decoding: None,
         }
     }
 
