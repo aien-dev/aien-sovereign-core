@@ -920,6 +920,15 @@ async fn handle_connection(
                     crate::effects::control(b, &a, &p, authorization)
                 }))
             }
+            ControlCommand::AllenStatus
+            | ControlCommand::AllenProfileShow
+            | ControlCommand::AllenProfileSet { .. }
+            | ControlCommand::AllenProfileHistory
+            | ControlCommand::AllenProfileRevert { .. }
+            | ControlCommand::AllenProfileReset { .. } => {
+                let c = envelope.command.clone();
+                Some(Box::new(move |b: &Arc<ComposeBridge>| b.allen_command(&c)))
+            }
             _ => None,
         };
         if let Some(job) = compose_job {

@@ -91,6 +91,27 @@ pub enum ControlCommand {
     /// (torn journal tail, or a journal behind its J-Space anchor). Closes this
     /// process's handle first; the cut is recorded in the journal.
     RecoverComposeHome,
+    /// ALLEN persona profile (arch#159): identity, profile, model and unsupported
+    /// facilities in one answer. Handled on the socket connection.
+    AllenStatus,
+    /// The saved profile (or the defaults when none).
+    AllenProfileShow,
+    /// Change the profile; `expected_revision` is the compare-and-swap guard.
+    AllenProfileSet {
+        expected_revision: u64,
+        changes: aien_allen_profile::Changes,
+    },
+    /// Every saved revision, oldest first.
+    AllenProfileHistory,
+    /// Write a NEW revision that copies revision `to`.
+    AllenProfileRevert {
+        expected_revision: u64,
+        to: u64,
+    },
+    /// Write a NEW revision with the defaults. The identity is untouched.
+    AllenProfileReset {
+        expected_revision: u64,
+    },
     /// NEXT-PHASE-2: the effect-boundary checks and the durable intent, in one
     /// step (ACCEPTANCE-v2 2.1, 2.3). Answered with `ComposeNoted` (the intent).
     ComposeEffectIntent {
@@ -213,6 +234,14 @@ pub enum ControlResponse {
     },
     /// Result record of `RunComposeTask`.
     ComposeTaskResult(Box<ComposeTaskReport>),
+    /// Result of `AllenStatus`.
+    AllenStatusReport(Box<AllenStatusReport>),
+    /// Result of `AllenProfileShow`, `AllenProfileSet`, `AllenProfileRevert`, `AllenProfileReset`.
+    AllenProfile(Box<AllenProfileReport>),
+    /// Result of `AllenProfileHistory`.
+    AllenHistory(Box<AllenHistoryReport>),
+    /// A profile command was refused; nothing was changed.
+    AllenRefused(Box<AllenRefusalReport>),
     /// Result of `ComposeNote`.
     ComposeNoted(ComposeNoteReport),
     /// Result of `ComposeRecall`.
@@ -233,18 +262,87 @@ pub enum ControlResponse {
 
 /// Actor managing operator sessions and enforcing idempotent command execution.
 /// Processed operation IDs persist to disk so idempotency survives restarts.
+///
+/// The state file path is fixed when the controller is built (#275): a later
+/// change of `AIEN_RUNTIME_STATE_DIR` never redirects its writes. Every save
+/// is a read-merge-write under an exclusive `flock` on `<file>.lock`, through
+/// a temp file unique to that write, fsynced, then renamed (#299). Two
+/// controllers sharing one file (threads or processes) therefore never tear
+/// it and never drop each other's ids.
 pub struct RuntimeController {
     processed_operations: HashSet<u128>,
+    state_path: std::path::PathBuf,
 }
 
+/// The state file: `$AIEN_RUNTIME_STATE_DIR/processed_operations.json`, else
+/// the machine-wide `/tmp/aien-runtime-processed-ops.json`. Unit tests of this
+/// crate fall back to a per-process directory instead, so no lib test reads
+/// state another program wrote.
 fn operations_state_path() -> std::path::PathBuf {
     if let Ok(dir) = std::env::var("AIEN_RUNTIME_STATE_DIR") {
         if !dir.trim().is_empty() {
             return std::path::PathBuf::from(dir.trim()).join("processed_operations.json");
         }
     }
+    #[cfg(test)]
+    {
+        let dir = std::env::temp_dir().join(format!("aien-runtime-unit-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        dir.join("processed_operations.json")
+    }
+    #[cfg(not(test))]
     std::path::PathBuf::from("/tmp/aien-runtime-processed-ops.json")
 }
+
+/// Reads the ids in `path`. Absent = empty; unreadable or unparsable = error.
+fn read_operations(path: &std::path::Path) -> Result<Vec<u128>, String> {
+    match std::fs::read(path) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+        Err(e) => Err(format!("idempotency state {}: {e}", path.display())),
+        Ok(bytes) => serde_json::from_slice::<Vec<u128>>(&bytes).map_err(|e| {
+            format!(
+                "idempotency state {} is damaged ({e}); refusing to start rather than forget processed operations",
+                path.display()
+            )
+        }),
+    }
+}
+
+/// Exclusive advisory lock on `<state file>.lock`, released on drop.
+struct StateLock(std::fs::File);
+
+impl StateLock {
+    fn acquire(path: &std::path::Path) -> Result<Self, String> {
+        use std::os::fd::AsRawFd;
+        let lock_path = path.with_extension("json.lock");
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(&lock_path)
+            .map_err(|e| format!("idempotency lock {}: {e}", lock_path.display()))?;
+        loop {
+            // SAFETY: flock on a file descriptor this function owns.
+            if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } == 0 {
+                return Ok(Self(file));
+            }
+            let e = std::io::Error::last_os_error();
+            if e.kind() != std::io::ErrorKind::Interrupted {
+                return Err(format!("idempotency lock {}: {e}", lock_path.display()));
+            }
+        }
+    }
+}
+
+impl Drop for StateLock {
+    fn drop(&mut self) {
+        use std::os::fd::AsRawFd;
+        // SAFETY: unlock the descriptor locked in acquire (close would too).
+        unsafe { libc::flock(self.0.as_raw_fd(), libc::LOCK_UN) };
+    }
+}
+
+static TMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 impl Default for RuntimeController {
     fn default() -> Self {
@@ -259,42 +357,66 @@ impl RuntimeController {
         Self::load().unwrap_or_else(|e| panic!("{e}"))
     }
 
-    /// Loads the persisted operation ids. An absent file is an empty set; a
-    /// file that cannot be read or parsed is an error (NEXT-PHASE-2,
-    /// ACCEPTANCE-v2 2.8): idempotency state is never reset silently.
+    /// Loads the persisted operation ids from the default state file. An
+    /// absent file is an empty set; a file that cannot be read or parsed is
+    /// an error (NEXT-PHASE-2, ACCEPTANCE-v2 2.8): idempotency state is never
+    /// reset silently.
     pub fn load() -> Result<Self, String> {
-        let path = operations_state_path();
-        let ids = match std::fs::read(&path) {
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
-            Err(e) => return Err(format!("idempotency state {}: {e}", path.display())),
-            Ok(bytes) => serde_json::from_slice::<Vec<u128>>(&bytes).map_err(|e| {
-                format!(
-                    "idempotency state {} is damaged ({e}); refusing to start rather than forget processed operations",
-                    path.display()
-                )
-            })?,
-        };
+        Self::load_from(operations_state_path())
+    }
+
+    /// [`Self::load`] for an explicit state file, independent of the
+    /// environment.
+    pub fn load_from(state_path: std::path::PathBuf) -> Result<Self, String> {
+        let ids = read_operations(&state_path)?;
         Ok(Self {
             processed_operations: ids.into_iter().collect(),
+            state_path,
         })
+    }
+
+    /// The file this controller reads and writes.
+    pub fn state_path(&self) -> &std::path::Path {
+        &self.state_path
     }
 
     pub fn is_operation_processed(&self, op_id: u128) -> bool {
         self.processed_operations.contains(&op_id)
     }
 
-    pub fn mark_operation_processed(&mut self, op_id: u128) {
+    /// Records `op_id` in memory and on disk. The id stays recorded in memory
+    /// even when the disk write fails; the error says the record is not
+    /// durable (a restart would forget it). A damaged file on disk is an
+    /// error and is never overwritten.
+    pub fn mark_operation_processed(&mut self, op_id: u128) -> Result<(), String> {
         self.processed_operations.insert(op_id);
+        let _lock = StateLock::acquire(&self.state_path)?;
+        // Merge with what other controllers on this file recorded meanwhile.
+        let on_disk = read_operations(&self.state_path)?;
+        self.processed_operations.extend(on_disk);
         let ids: Vec<u128> = self.processed_operations.iter().copied().collect();
-        if let Ok(bytes) = serde_json::to_vec(&ids) {
-            // Write then rename: a crash mid-write must not leave a truncated
-            // file, which new() would silently discard, losing idempotency.
-            let path = operations_state_path();
-            let tmp = path.with_extension(format!("json.tmp.{}", std::process::id()));
-            if std::fs::write(&tmp, bytes).is_ok() && std::fs::rename(&tmp, &path).is_err() {
-                let _ = std::fs::remove_file(&tmp);
-            }
-        }
+        let bytes = serde_json::to_vec(&ids).map_err(|e| format!("idempotency state: {e}"))?;
+        // Write a temp file unique to this write, sync, then rename: a crash
+        // or a concurrent writer never leaves a truncated state file.
+        let tmp = self.state_path.with_extension(format!(
+            "json.tmp.{}.{}",
+            std::process::id(),
+            TMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        let write = || -> std::io::Result<()> {
+            use std::io::Write;
+            let mut f = std::fs::File::create(&tmp)?;
+            f.write_all(&bytes)?;
+            f.sync_all()?;
+            std::fs::rename(&tmp, &self.state_path)
+        };
+        write().map_err(|e| {
+            let _ = std::fs::remove_file(&tmp);
+            format!(
+                "idempotency state {}: write failed ({e}); operation {op_id:#x} is not durable",
+                self.state_path.display()
+            )
+        })
     }
 }
 
@@ -302,23 +424,28 @@ impl RuntimeController {
 mod tests {
     use super::*;
 
+    fn state_file(dir: &tempfile::TempDir) -> std::path::PathBuf {
+        dir.path().join("processed_operations.json")
+    }
+
     #[test]
     fn idempotency_survives_restart() {
-        let dir = std::env::temp_dir().join(format!("aien-ops-test-{}", std::process::id()));
-        let _ = std::fs::create_dir_all(&dir);
-        std::env::set_var("AIEN_RUNTIME_STATE_DIR", &dir);
+        // Explicit path: this test never sets the process-wide
+        // AIEN_RUNTIME_STATE_DIR other tests in this binary read (#275).
+        let dir = tempfile::tempdir().unwrap();
+        let path = state_file(&dir);
         let op_id = 0xC0FFEEu128;
 
         {
-            let mut first = RuntimeController::new();
+            let mut first = RuntimeController::load_from(path.clone()).unwrap();
             assert!(!first.is_operation_processed(op_id));
-            first.mark_operation_processed(op_id);
+            first.mark_operation_processed(op_id).unwrap();
             assert!(first.is_operation_processed(op_id));
         }
 
         // Simulate a process restart: a fresh controller reloads from disk.
         {
-            let second = RuntimeController::new();
+            let second = RuntimeController::load_from(path.clone()).unwrap();
             assert!(
                 second.is_operation_processed(op_id),
                 "replayed operation ID must be rejected after restart"
@@ -326,15 +453,99 @@ mod tests {
         }
 
         // NEXT-PHASE-2: a damaged state file is refused, never reset.
-        std::fs::write(dir.join("processed_operations.json"), b"{").unwrap();
-        let err = RuntimeController::load()
+        std::fs::write(&path, b"{").unwrap();
+        let err = RuntimeController::load_from(path.clone())
             .err()
             .expect("damaged state must be refused");
         assert!(err.contains("is damaged"), "{err}");
-        std::fs::write(dir.join("processed_operations.json"), b"[1, 2").unwrap();
-        assert!(RuntimeController::load().is_err());
+        std::fs::write(&path, b"[1, 2").unwrap();
+        assert!(RuntimeController::load_from(path.clone()).is_err());
+        // An empty file (what the #299 race left behind) is damaged too.
+        std::fs::write(&path, b"").unwrap();
+        assert!(RuntimeController::load_from(path).is_err());
+    }
 
-        let _ = std::fs::remove_dir_all(&dir);
+    #[test]
+    fn a_save_never_overwrites_damaged_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = state_file(&dir);
+        let mut c = RuntimeController::load_from(path.clone()).unwrap();
+        std::fs::write(&path, b"[1, 2").unwrap();
+        let err = c.mark_operation_processed(7).unwrap_err();
+        assert!(err.contains("is damaged"), "{err}");
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            b"[1, 2",
+            "damaged file kept as found"
+        );
+        assert!(c.is_operation_processed(7), "still recorded in memory");
+    }
+
+    #[test]
+    fn concurrent_saves_never_damage_or_drop_state() {
+        // #299 root cause: every save used the temp name `json.tmp.<pid>`, so
+        // two controllers in one process truncated each other's temp file and
+        // renamed an empty file into place. Red on 12c1a5f: "is damaged (EOF
+        // while parsing a value at line 1 column 0)".
+        let dir = tempfile::tempdir().unwrap();
+        let path = state_file(&dir);
+        let threads: Vec<_> = (0..8u128)
+            .map(|t| {
+                let path = path.clone();
+                std::thread::spawn(move || {
+                    let mut c = RuntimeController::load_from(path).unwrap();
+                    for i in 0..200u128 {
+                        c.mark_operation_processed(t * 1000 + i).unwrap();
+                    }
+                })
+            })
+            .collect();
+        for t in threads {
+            t.join().unwrap();
+        }
+        let after = RuntimeController::load_from(path).expect("state loads after concurrent saves");
+        for t in 0..8u128 {
+            for i in 0..200u128 {
+                assert!(
+                    after.is_operation_processed(t * 1000 + i),
+                    "id {t}/{i} forgotten"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn interrupted_save_leaves_the_last_good_state() {
+        // A process killed mid-save leaves its temp file (and the lock file)
+        // behind; the state file itself is the last complete write.
+        let dir = tempfile::tempdir().unwrap();
+        let path = state_file(&dir);
+        let mut c = RuntimeController::load_from(path.clone()).unwrap();
+        c.mark_operation_processed(1).unwrap();
+        std::fs::write(path.with_extension("json.tmp.999999.0"), b"[1, 2, 3").unwrap();
+        let mut restarted = RuntimeController::load_from(path.clone()).unwrap();
+        assert!(restarted.is_operation_processed(1));
+        assert!(
+            !restarted.is_operation_processed(3),
+            "half-written temp file is never read"
+        );
+        restarted.mark_operation_processed(2).unwrap();
+        let again = RuntimeController::load_from(path).unwrap();
+        assert!(again.is_operation_processed(1) && again.is_operation_processed(2));
+    }
+
+    #[test]
+    fn path_is_fixed_at_construction() {
+        // #275: a controller keeps writing where it loaded from, whatever a
+        // parallel test does to AIEN_RUNTIME_STATE_DIR afterwards.
+        let dir = tempfile::tempdir().unwrap();
+        let path = state_file(&dir);
+        let mut c = RuntimeController::load_from(path.clone()).unwrap();
+        assert_eq!(c.state_path(), path.as_path());
+        c.mark_operation_processed(5).unwrap();
+        assert!(RuntimeController::load_from(path)
+            .unwrap()
+            .is_operation_processed(5));
     }
 
     #[test]
@@ -412,6 +623,9 @@ pub struct ComposeTaskReport {
     pub requirements_uncertain: Vec<String>,
     /// "model" when the Skill ran inference, or the stub label.
     pub proposer: String,
+    /// ALLEN persona used for this task (arch#159). Old reports have none.
+    #[serde(default)]
+    pub persona: Option<PersonaReport>,
 }
 
 /// One proposal the compose "model" Skill made (ACCEPTANCE-v2 3b).
@@ -558,4 +772,69 @@ pub struct ComposeControlReport {
     pub recorded: Option<ComposeNoteReport>,
     /// For `revoke`: false when the grant was already spent or revoked.
     pub revoked: Option<bool>,
+}
+
+/// Which persona a task ran with (arch#159). `state`: `not_engaged` (ALLEN is
+/// off, no persona text was added), `default` (no profile saved), `applied`
+/// (profile `revision` in use) or `refused` (profile damaged or foreign:
+/// defaults used, `reason` says why).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PersonaReport {
+    pub state: String,
+    pub display_name: String,
+    pub revision: u64,
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
+/// Latest deployment-record line, when the record exists and verifies.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeploymentSummary {
+    pub seq: u64,
+    pub candidate_id: String,
+    pub placeholder: bool,
+}
+
+/// `AllenStatus`: identity, persona, model and what is not supported yet,
+/// reported separately.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AllenStatusReport {
+    /// `not_engaged` or `engaged` (an engaged identity that cannot resolve stops the daemon).
+    pub identity: String,
+    /// First 8 hex characters of the agent id (engaged only).
+    pub fingerprint: Option<String>,
+    pub head_sequence: Option<u64>,
+    pub chain_verified: Option<bool>,
+    pub persona: PersonaReport,
+    /// The proposer label the daemon was started with.
+    pub model: String,
+    /// `local_model` or `stub`.
+    pub execution_mode: String,
+    pub deployment: Option<DeploymentSummary>,
+    /// Facilities that exist in the plan but not in v1; their controls do not exist.
+    pub unsupported: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AllenProfileReport {
+    /// 0 = no profile saved (defaults in effect).
+    pub revision: u64,
+    pub state: String,
+    /// The saved revision; `None` when none is saved.
+    pub profile: Option<aien_allen_profile::Profile>,
+    /// The values in effect when no profile is saved.
+    pub defaults: Option<aien_allen_profile::Persona>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AllenHistoryReport {
+    pub entries: Vec<aien_allen_profile::HistoryEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AllenRefusalReport {
+    pub code: String,
+    /// Plain-language reason.
+    pub message: String,
+    pub current_revision: Option<u64>,
 }

@@ -82,7 +82,19 @@ impl AienInferenceBackend for RecordingBackend {
     }
 }
 
+/// This binary's own runtime state dir (#299): never the machine-wide
+/// `/tmp/aien-runtime-processed-ops.json` other daemons and tests write.
+fn private_state_dir() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let dir = std::env::temp_dir().join(format!("aien-warm-up-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::env::set_var("AIEN_RUNTIME_STATE_DIR", &dir);
+    });
+}
+
 fn spine() -> AienRuntimeSpine {
+    private_state_dir();
     // Small prefill chunks: the warm-up prompt spans several steps, so a
     // request accepted during the warm-up would interleave with its chunks.
     let cfg = SchedulerConfig {

@@ -1,4 +1,5 @@
 #![allow(clippy::type_complexity, clippy::needless_range_loop)]
+mod allen;
 mod client;
 mod commands;
 pub mod compaction;
@@ -55,6 +56,10 @@ async fn main() {
         }
         if args[1] == "--stop" || args[1] == "stop" {
             commands::handle_stop_command().await;
+            return;
+        }
+        if args[1] == "allen" {
+            allen::handle_allen_command(&args[2..]).await;
             return;
         }
         if args[1] == "compose" {
