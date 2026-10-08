@@ -106,6 +106,8 @@ pub enum Requirement {
     MinWords(usize),
     MaxWords(usize),
     MinItems(ItemKind, usize),
+    /// At least this many paragraphs (see [`count_paragraphs`]).
+    MinParagraphs(usize),
     /// At least `n` lines (outside fenced code, leading whitespace ignored) that
     /// start with exactly `prefix`, e.g. the `- [ ]` of a checklist.
     MinPrefixedLines {
@@ -167,6 +169,7 @@ impl Requirement {
             Requirement::MinWords(n) => format!("at least {n} words"),
             Requirement::MaxWords(n) => format!("at most {n} words"),
             Requirement::MinItems(k, n) => format!("at least {n} {}", k.noun()),
+            Requirement::MinParagraphs(n) => format!("at least {n} paragraphs"),
             Requirement::MinPrefixedLines { prefix, n } => {
                 format!("at least {n} lines starting with \"{prefix}\"")
             }
@@ -224,6 +227,12 @@ impl Requirement {
             Requirement::MinItems(k, n) => {
                 let c = count_items(*k, content);
                 (c < *n).then(|| format!("{label}, found {c}"))
+            }
+            Requirement::MinParagraphs(n) => {
+                let c = count_paragraphs(content);
+                (c < *n).then(|| {
+                    format!("{label}, found {c} (a paragraph is a block of prose lines; separate paragraphs with a blank line)")
+                })
             }
             Requirement::MinPrefixedLines { prefix, n } => {
                 let c = prose_lines(content)
@@ -568,6 +577,94 @@ fn prose_lines(s: &str) -> Vec<&str> {
         }
     }
     out
+}
+
+/// Paragraphs: maximal runs of consecutive prose lines, following CommonMark
+/// closely enough that a document cannot reach the count with lines a reader
+/// would not call paragraphs.
+/// - A blank line ends a run (whitespace-only lines are blank).
+/// - Not prose, and the end of a run: a fence and everything inside it, an ATX
+///   heading (`#` to `######`), a thematic break (`---`, `***`, `___`, also
+///   spaced). A run directly above a line of only `=` or only `-` is a setext
+///   heading and does not count.
+/// - A table row (starts with `|`) or an HTML line (starts with `<`) is not
+///   prose when it starts a block; inside a run it continues the run.
+/// - A list item (`- `, `* `, `+ `, a numbered marker, or a bare `1.`) is not
+///   prose, and neither is the text that belongs to it: the following lines up
+///   to a blank line, and after a blank line any line indented 2+ spaces.
+/// - An indented line (a tab or 4+ spaces) continues a run but never starts
+///   one (indented code).
+/// - A line with no letter or digit never starts a run.
+/// - Everything else is prose, including blockquote lines (`> text`).
+pub fn count_paragraphs(content: &str) -> usize {
+    let mut open: Option<(char, usize)> = None;
+    // `in_item`: inside a list item; `blank`: a blank line came since the last line.
+    let (mut count, mut inside, mut in_item, mut blank) = (0, false, false, false);
+    for l in content.lines() {
+        let fence = fence_marker(l);
+        if let Some((c, n)) = open {
+            if matches!(fence, Some((c2, n2, info)) if c2 == c && n2 >= n && !info) {
+                open = None;
+            }
+            continue;
+        }
+        if let Some((c, n, _)) = fence {
+            open = Some((c, n));
+            (inside, in_item) = (false, false);
+            continue;
+        }
+        let t = l.trim();
+        if t.is_empty() {
+            (inside, blank) = (false, true);
+            continue;
+        }
+        let after_blank = std::mem::replace(&mut blank, false);
+        // A run right above a line of only `=` or only `-` is a setext heading.
+        let setext = t.chars().all(|x| x == '=') || t.chars().all(|x| x == '-');
+        if setext && inside {
+            count -= 1;
+            (inside, in_item) = (false, false);
+            continue;
+        }
+        let h = t.chars().take_while(|&c| c == '#').count();
+        let heading = (1..=6).contains(&h) && (t.len() == h || t[h..].starts_with([' ', '\t']));
+        let rule = t.len() >= 3
+            && ['-', '*', '_']
+                .iter()
+                .any(|&c| t.starts_with(c) && t.chars().all(|x| x == c || x == ' '));
+        // HTML and table lines start a block, but do not interrupt a paragraph.
+        let block = !inside && (t.starts_with('|') || t.starts_with('<'));
+        if heading || rule || setext || block {
+            (inside, in_item) = (false, false);
+            continue;
+        }
+        let empty_marker = t.len() >= 2
+            && t.ends_with(['.', ')'])
+            && t[..t.len() - 1].chars().all(|c| c.is_ascii_digit());
+        if t.starts_with("- ")
+            || t.starts_with("* ")
+            || t.starts_with("+ ")
+            || numbered(t)
+            || empty_marker
+        {
+            (inside, in_item) = (false, true);
+            continue;
+        }
+        // Text right under an item, or indented 2+ after a blank line, belongs to it.
+        if in_item && (!after_blank || l.starts_with("  ") || l.starts_with('\t')) {
+            continue;
+        }
+        in_item = false;
+        let indented = l.starts_with('\t') || l.starts_with("    ");
+        if !inside && (indented || !t.chars().any(char::is_alphanumeric)) {
+            continue;
+        }
+        if !inside {
+            count += 1;
+        }
+        inside = true;
+    }
+    count
 }
 
 fn count_items(k: ItemKind, s: &str) -> usize {
