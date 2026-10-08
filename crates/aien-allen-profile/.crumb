@@ -1,0 +1,19 @@
+{
+  "extensions": {
+    "generated": {
+      "children": [],
+      "children_root": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "compiled_at": "2026-10-08T01:03:32Z",
+      "compiler": "crumb-compile/1",
+      "digest": "sha256:cd47dee5280a769dfc65a68275cc8a78b68392024f4d2bf25bd57383bce5c32a",
+      "evidence_files": 0,
+      "evidence_root": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "files": 8,
+      "generated_at_commit": "65edba04eb654df6123345163631cacae780d7e6",
+      "source_tree": "sha256:595d7155fdeb036754b502b29a8b30aeed0a229de41c8631cb935e995d6e8ea7"
+    }
+  },
+  "name": "aien-allen-profile",
+  "purpose": "ALLEN persona profile v1: versioned, user-editable profile bound to the engaged ALLEN identity; the only writer of <home>.allen-profile (arch#159).",
+  "schema_version": "1.0.0"
+}

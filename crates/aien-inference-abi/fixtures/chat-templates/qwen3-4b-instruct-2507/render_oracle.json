@@ -108,6 +108,94 @@
    ],
    "add_generation_prompt": true,
    "text": "<|im_start|>user\nunicode: é中😀 <tag> {{x}}<|im_end|>\n<|im_start|>assistant\n"
+  },
+  {
+   "turns": [
+    [
+     "user",
+     "Weather?"
+    ],
+    [
+     "assistant",
+     "Checking."
+    ],
+    [
+     "tool",
+     "{\"temp\":21}"
+    ]
+   ],
+   "add_generation_prompt": true,
+   "text": "<|im_start|>user\nWeather?<|im_end|>\n<|im_start|>assistant\nChecking.<|im_end|>\n<|im_start|>user\n<tool_response>\n{\"temp\":21}\n</tool_response><|im_end|>\n<|im_start|>assistant\n"
+  },
+  {
+   "turns": [
+    [
+     "user",
+     "Two lookups."
+    ],
+    [
+     "assistant",
+     "On it."
+    ],
+    [
+     "tool",
+     "first result"
+    ],
+    [
+     "tool",
+     "second result"
+    ]
+   ],
+   "add_generation_prompt": true,
+   "text": "<|im_start|>user\nTwo lookups.<|im_end|>\n<|im_start|>assistant\nOn it.<|im_end|>\n<|im_start|>user\n<tool_response>\nfirst result\n</tool_response>\n<tool_response>\nsecond result\n</tool_response><|im_end|>\n<|im_start|>assistant\n"
+  },
+  {
+   "turns": [
+    [
+     "tool",
+     "a"
+    ],
+    [
+     "user",
+     "next"
+    ],
+    [
+     "tool",
+     "b"
+    ]
+   ],
+   "add_generation_prompt": true,
+   "text": "<|im_start|>user\n<tool_response>\na\n</tool_response><|im_end|>\n<|im_start|>user\nnext<|im_end|>\n<|im_start|>user\n<tool_response>\nb\n</tool_response><|im_end|>\n<|im_start|>assistant\n"
+  },
+  {
+   "turns": [
+    [
+     "system",
+     "Be brief."
+    ],
+    [
+     "user",
+     "Sum?"
+    ],
+    [
+     "assistant",
+     "Calling."
+    ],
+    [
+     "tool",
+     "3"
+    ],
+    [
+     "tool",
+     ""
+    ],
+    [
+     "assistant",
+     "The sum is 3."
+    ]
+   ],
+   "add_generation_prompt": false,
+   "text": "<|im_start|>system\nBe brief.<|im_end|>\n<|im_start|>user\nSum?<|im_end|>\n<|im_start|>assistant\nCalling.<|im_end|>\n<|im_start|>user\n<tool_response>\n3\n</tool_response>\n<tool_response>\n\n</tool_response><|im_end|>\n<|im_start|>assistant\nThe sum is 3.<|im_end|>\n"
   }
  ]
 }
