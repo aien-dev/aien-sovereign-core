@@ -269,7 +269,7 @@ const SILENT: [&str; 12] = [
 ];
 
 /// Goals whose explicit requirements are all read and enforced.
-const RECOGNIZED: [&str; 16] = [
+const RECOGNIZED: [&str; 19] = [
     "dryrun-tasks-v2/N1",
     "tasks-oq3-v3/N1",
     "tasks-oq3-v4/N1",
@@ -277,19 +277,24 @@ const RECOGNIZED: [&str; 16] = [
     "dryrun-tasks-v2/T4",
     "tasks-oq3-v3/G2",
     "tasks-oq3-v3/G3",
+    // sc#335: "at least ten|twelve paragraphs" is MinParagraphs.
+    "tasks-oq3-v3/N2",
+    "tasks-oq3-v4/N2",
     "tasks-oq3-v4/RT4",
     "tasks-oq3-v4/RT6",
     "tasks-oq3-v4/W1",
     "tasks-oq3-v4/W2",
     "tasks-oq3-v4/W3",
     "tasks-oq3-v4/W4",
+    // sc#334: "at least twelve of them" after `a line starting with "- [ ]"`.
+    "tasks-oq3-v4/W5",
     "tasks-v5/T2",
     "tasks-v8/D3",
     "tasks-v8/D4",
 ];
 
 /// Goals still refused as uncertain, each with the span that is reported and why.
-const REFUSED: [(&str, &str, &str); 8] = [
+const REFUSED: [(&str, &str, &str); 5] = [
     (
         "dryrun-tasks-v2/T6",
         "one section per symptom",
@@ -301,29 +306,14 @@ const REFUSED: [(&str, &str, &str); 8] = [
         "a per-section code example count",
     ),
     (
-        "tasks-oq3-v3/N2",
-        "at least ten paragraphs",
-        "paragraph counts are not supported",
-    ),
-    (
         "tasks-oq3-v3/R1",
         "one-sentence greeting",
         "sentence counts over the whole document are not verified",
     ),
     (
-        "tasks-oq3-v4/N2",
-        "at least twelve paragraphs",
-        "paragraph counts are not supported",
-    ),
-    (
         "tasks-oq3-v4/R1",
         "one-sentence thank-you note",
         "sentence counts over the whole document are not verified",
-    ),
-    (
-        "tasks-oq3-v4/W5",
-        "twelve of them",
-        "a count of items the goal does not name",
     ),
     (
         "tasks-v8/D5",
