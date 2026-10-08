@@ -49,7 +49,7 @@ changed to make a task pass. Probe evidence for every line is in `evidence-v5/`.
 
 **All eight causes are fixed on main** (gate G1, `evidence-v5/requirements-probe-b2cae6d.txt`): P1 sc#331 by #343, P2 sc#332
 by #347, P3 sc#333 by #345, P4 sc#334 by #340, P5 sc#335 by #341, P6 sc#336 by #348, P7 sc#337 by #350, P8 sc#338 by #351;
-b2cae6d holds all eight. One P2 follow-up is open: the topic check refuses three accepted forms of withdraw (gate G2, Section 9).
+b2cae6d holds all eight. The P2 follow-up (the topic check refused three accepted forms of withdraw, gate G2) is fixed by sc#354 (Section 9).
 Since sc#342 (b0cee16) the approval desk is required: the next-phase-1 driver creates the desk key and signs with `--desk 1`, and
 the v5 wrapper refuses the dev-only opt-out `AIEN_COMPOSE_AUTHORIZE_REQUIRES_DESK`.
 
@@ -361,9 +361,11 @@ changed to pass a gate.**
   (`evidence-v5/requirements-probe-b2cae6d.txt`: no uncertain span for any v5 or v4 goal); re-run on the frozen commit.
 - **G2 Topic forms.** The product's topic check accepts every accepted form of Section 3.1 for its topic (the
   `topic-forms-probe` re-run with the D3 forms; sc#332). The re-run uses each topic as the product reads it from the goal, so
-  the third topic is checked as `withdraw (or withdrew)`, not as the bare name. **OPEN** (2026-10-08, b0cee16,
-  `evidence-v5/topic-forms-probe-v5-b0cee16.txt`): 15 of 18 forms MET; `withdrawn`, `withdrawal` and `withdrawals` are refused by
-  the product. Product cause (a sc#332 follow-up), fixed in the product; no form is removed and no goal is reworded.
+  the third topic is checked as `withdraw (or withdrew)`, not as the bare name. **MET on sc#354** (2026-10-08, 37ad5ac,
+  `evidence-v5/topic-forms-probe-v5-fix-37ad5ac.txt`): 18 of 18 forms MET, and the G1 reader gives the same result for every v5
+  and v4 goal. It was OPEN on b0cee16 (`evidence-v5/topic-forms-probe-v5-b0cee16.txt`: 15 of 18; `withdrawn`, `withdrawal` and
+  `withdrawals` refused by the product). Product cause (a sc#332 follow-up), fixed in the product by an explicit `-n`/`-al`/`-als`
+  word-form rule; no form is removed and no goal is reworded. Re-checked on the frozen commit.
 - **G3 N1 reason.** On the frozen commit a stub-build run of N1 through the driver is refused before any model call with the
   reason of `N1-NR`; the exact error string (verbatim) and the file and field it lands in are recorded in `evidence-v5/` and copied into `N1-NR`; each inherited N1 row is run
   on that output and any that cannot read it is listed and replaced as Section 3.3 says (sc#336 keeps the order tested).
