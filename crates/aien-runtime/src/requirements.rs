@@ -563,46 +563,82 @@ fn prose_lines(s: &str) -> Vec<&str> {
     out
 }
 
-/// Paragraphs: maximal runs of consecutive prose lines. A prose line is a
-/// non-empty line outside fenced code that is not a heading, a list item
-/// (`- `, `* `, `+ ` or a numbered marker), a table row (starts with `|`) or a
-/// thematic break (`---`, `***`, `___`). Every other line (blank, heading, list
-/// item, table row, break, fence or fenced line) ends the run.
+/// Paragraphs: maximal runs of consecutive prose lines, following CommonMark
+/// closely enough that a document cannot reach the count with lines a reader
+/// would not call paragraphs.
+/// - A blank line ends a run (whitespace-only lines are blank).
+/// - Not prose, and the end of a run: a fence and everything inside it, an ATX
+///   heading (`#` to `######`), a thematic break (`---`, `***`, `___`, also
+///   spaced), a table row (starts with `|`), a setext underline (only `=`), an
+///   HTML line (starts with `<`).
+/// - A list item (`- `, `* `, `+ `, a numbered marker, or a bare `1.`) is not prose, and
+///   neither is any following non-blank line up to the next blank line (an
+///   indented or lazy continuation of the item).
+/// - An indented line (a tab or 4+ spaces) continues a run but never starts
+///   one (indented code).
+/// - A line with no letter or digit never starts a run.
+/// - Everything else is prose, including blockquote lines (`> text`). A run
+///   directly above a `===` underline is a setext heading and does not count
+///   (a run above `---` still counts: that line reads as a break).
 pub fn count_paragraphs(content: &str) -> usize {
     let mut open: Option<(char, usize)> = None;
-    let (mut count, mut inside) = (0, false);
+    let (mut count, mut inside, mut in_item) = (0, false, false);
     for l in content.lines() {
         let fence = fence_marker(l);
-        let prose = match (open, fence) {
-            (None, Some((c, n, _))) => {
-                open = Some((c, n));
-                false
-            }
-            (None, None) => {
-                let t = l.trim();
-                let h = t.chars().take_while(|&c| c == '#').count();
-                let heading =
-                    (1..=6).contains(&h) && (t.len() == h || t[h..].starts_with([' ', '\t']));
-                let item = t.starts_with("- ")
-                    || t.starts_with("* ")
-                    || t.starts_with("+ ")
-                    || numbered(t);
-                let rule = t.len() >= 3
-                    && ['-', '*', '_']
-                        .iter()
-                        .any(|&c| t.chars().all(|x| x == c || x == ' ') && t.starts_with(c));
-                !t.is_empty() && !heading && !item && !t.starts_with('|') && !rule
-            }
-            (Some((c, n)), Some((c2, n2, info))) if c2 == c && n2 >= n && !info => {
+        if let Some((c, n)) = open {
+            if matches!(fence, Some((c2, n2, info)) if c2 == c && n2 >= n && !info) {
                 open = None;
-                false
             }
-            (Some(_), _) => false,
-        };
-        if prose && !inside {
+            continue;
+        }
+        if let Some((c, n, _)) = fence {
+            open = Some((c, n));
+            (inside, in_item) = (false, false);
+            continue;
+        }
+        let t = l.trim();
+        if t.is_empty() {
+            (inside, in_item) = (false, false);
+            continue;
+        }
+        let h = t.chars().take_while(|&c| c == '#').count();
+        let heading = (1..=6).contains(&h) && (t.len() == h || t[h..].starts_with([' ', '\t']));
+        let rule = t.len() >= 3
+            && ['-', '*', '_']
+                .iter()
+                .any(|&c| t.starts_with(c) && t.chars().all(|x| x == c || x == ' '));
+        let setext = t.chars().all(|x| x == '=');
+        if heading || rule || setext || t.starts_with('|') || t.starts_with('<') {
+            // A run right above `===` is a setext heading, not a paragraph.
+            if setext && inside {
+                count -= 1;
+            }
+            (inside, in_item) = (false, false);
+            continue;
+        }
+        let empty_marker = t.len() >= 2
+            && t.ends_with(['.', ')'])
+            && t[..t.len() - 1].chars().all(|c| c.is_ascii_digit());
+        if t.starts_with("- ")
+            || t.starts_with("* ")
+            || t.starts_with("+ ")
+            || numbered(t)
+            || empty_marker
+        {
+            (inside, in_item) = (false, true);
+            continue;
+        }
+        if in_item {
+            continue;
+        }
+        let indented = l.starts_with('\t') || l.starts_with("    ");
+        if !inside && (indented || !t.chars().any(char::is_alphanumeric)) {
+            continue;
+        }
+        if !inside {
             count += 1;
         }
-        inside = prose;
+        inside = true;
     }
     count
 }

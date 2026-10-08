@@ -87,7 +87,23 @@ fn paragraphs_are_counted_by_the_documented_rule() {
         // a heading ends a paragraph and is not one
         ("# Title\nfirst\n## Next\nsecond\n", 2),
         // list items, table rows and breaks are not prose and end a paragraph
-        ("intro\n- a\n- b\nafter the list\n", 2),
+        ("intro\n- a\n- b\n\nafter the list\n", 2),
+        // a line right after an item continues the item (sc#341 review)
+        ("intro\n- a\n- b\nafter the list\n", 1),
+        ("- a\n  more\n- b\n  more\n- c\n  more\n", 0),
+        // indented code never starts a paragraph, but an indented line continues one
+        ("    code1\n    code2\n\n    code3\n", 0),
+        ("text\n    still the same paragraph\n", 1),
+        // HTML, setext underlines and lines without letters or digits
+        ("<div>\n\n<div>\n", 0),
+        ("Title\n=====\nbody\n", 1),
+        ("-\n\n1.\n\n***\n\n* * *\n\n...\n", 0),
+        // blockquotes are prose; CRLF and non-ASCII text are fine
+        ("> q1\n\n> q2\n", 2),
+        ("a\r\n\r\nb\r\n", 2),
+        ("# h\u{e9}llo\n\n\u{fc}\u{fc}\n", 1),
+        // an unclosed fence hides the rest of the file
+        ("before\n\n```\nafter\n\nmore\n", 1),
         ("1. step\n2. step\n", 0),
         ("| a | b |\n|---|---|\n| 1 | 2 |\n", 0),
         ("above\n---\nbelow\n", 2),
