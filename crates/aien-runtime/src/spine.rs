@@ -1745,16 +1745,13 @@ pub struct ComposeBridge {
     /// Set when the start-up reconcile failed or was refused (ACCEPTANCE-v3
     /// 2.5): effect commands refuse until an operator reconcile succeeds.
     reconcile_failed: std::sync::Mutex<Option<String>>,
-<<<<<<< HEAD
     /// Set by `close`: the daemon is shutting down, the home is closed and
     /// must not be reopened lazily by a connection task that outlives `run`
     /// (sovereign-core #306).
     closed: std::sync::atomic::AtomicBool,
-=======
     /// sovereign-core #297: when true, `ComposeAuthorize` needs the approval
     /// desk's MAC. Default false (legacy OS-user-only authorize).
     authorize_requires_desk: bool,
->>>>>>> origin/main
 }
 
 impl ComposeBridge {
@@ -1766,11 +1763,8 @@ impl ComposeBridge {
             proposer_label: proposer_label.to_string(),
             home: std::sync::Mutex::new(None),
             reconcile_failed: std::sync::Mutex::new(None),
-<<<<<<< HEAD
             closed: std::sync::atomic::AtomicBool::new(false),
-=======
             authorize_requires_desk: false,
->>>>>>> origin/main
         }
     }
 
