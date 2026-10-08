@@ -9,6 +9,8 @@
 //!       at startup ("Authorize MAC: OFF, DEV OPT-OUT").
 //!   D4  a desk key created by `aien compose desk-key --create`: the daemon
 //!       serves with "Authorize MAC: on".
+//! A helper whose check fails still stops its daemon (a `Daemon` guard
+//! kills and reaps it on drop), so a failing run leaves nothing running.
 //! No model and no composition library are needed (host CPU only); these run
 //! in every build.
 use std::os::unix::process::CommandExt;
@@ -76,7 +78,7 @@ impl Rig {
         }
         c
     }
-    fn spawn(&self, dev: bool, switch: Option<&str>) -> Child {
+    fn spawn(&self, dev: bool, switch: Option<&str>) -> Daemon {
         let f = std::fs::File::create(self.log()).unwrap();
         let mut c = self.cmd(dev, switch);
         c.arg("daemon")
@@ -84,7 +86,7 @@ impl Rig {
             .stdin(Stdio::null())
             .stdout(f.try_clone().unwrap())
             .stderr(f);
-        c.spawn().expect("spawn daemon")
+        Daemon(c.spawn().expect("spawn daemon"))
     }
     fn text(&self) -> String {
         std::fs::read_to_string(self.log()).unwrap_or_default()
@@ -94,7 +96,7 @@ impl Rig {
     fn refused(&self, dev: bool, switch: Option<&str>) -> String {
         let mut d = self.spawn(dev, switch);
         for _ in 0..1200 {
-            if let Some(st) = d.try_wait().unwrap() {
+            if let Some(st) = d.0.try_wait().unwrap() {
                 let text = self.text();
                 assert!(
                     !st.success(),
@@ -113,8 +115,6 @@ impl Rig {
             );
             std::thread::sleep(Duration::from_millis(50));
         }
-        let _ = d.kill();
-        let _ = d.wait();
         panic!("the daemon did not refuse within 60 s: {}", self.text());
     }
 
@@ -123,19 +123,26 @@ impl Rig {
         let mut d = self.spawn(dev, switch);
         for _ in 0..1200 {
             std::thread::sleep(Duration::from_millis(50));
-            if let Some(st) = d.try_wait().unwrap() {
+            if let Some(st) = d.0.try_wait().unwrap() {
                 panic!("daemon exited early ({st:?}): {}", self.text());
             }
             let text = self.text();
             if self.sock().exists() && text.contains("Authorize MAC:") {
-                let _ = d.kill();
-                let _ = d.wait();
                 return text;
             }
         }
-        let _ = d.kill();
-        let _ = d.wait();
         panic!("the daemon did not come up in 60 s: {}", self.text());
+    }
+}
+
+/// A spawned daemon, killed and reaped when dropped: on return and on a
+/// failed assert alike, so a failing check never leaves it running.
+struct Daemon(Child);
+
+impl Drop for Daemon {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
     }
 }
 
@@ -210,4 +217,41 @@ fn d4_with_the_desk_key_the_daemon_serves_with_the_mac_on() {
         .find(|l| l.contains("Authorize MAC:"))
         .unwrap_or_default();
     assert!(line.starts_with("Authorize MAC: on"), "{line}");
+}
+
+/// Daemons still running on this socket (their environment names it).
+fn daemons_on(sock: &Path) -> Vec<String> {
+    let want = format!("AIEN_RUNTIME_SOCK={}", sock.display());
+    let mut pids = Vec::new();
+    for e in std::fs::read_dir("/proc").unwrap().flatten() {
+        let pid = e.file_name().to_string_lossy().to_string();
+        if !pid.chars().all(|c| c.is_ascii_digit()) {
+            continue;
+        }
+        if let Ok(env) = std::fs::read(e.path().join("environ")) {
+            if env.split(|b| *b == 0).any(|v| v == want.as_bytes()) {
+                pids.push(pid);
+            }
+        }
+    }
+    pids
+}
+
+/// A helper that fails must not leave its daemon running: here `refused`
+/// meets a daemon that serves (the dev opt-out), so it panics.
+#[test]
+fn a_failed_check_stops_its_daemon() {
+    let r = Rig::new();
+    let failed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        r.refused(true, Some("0"));
+    }));
+    assert!(failed.is_err(), "the daemon was expected to serve");
+    let left = daemons_on(&r.sock());
+    for pid in &left {
+        let _ = Command::new("kill").args(["-KILL", pid]).status();
+    }
+    assert!(
+        left.is_empty(),
+        "the failed check left daemon(s) {left:?} running"
+    );
 }
