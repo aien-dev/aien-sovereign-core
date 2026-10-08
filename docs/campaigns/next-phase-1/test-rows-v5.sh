@@ -97,6 +97,12 @@ check "harness approval-desk key in compose dir is allowed" "" "$(mutate '.conta
 for f in ./other.key ./approval-desk.key.bak ./approval-desk.keys ./sub/approval-desk.key; do
   check "$f beside the approval-desk key is stray" "A1" "$(mutate ".containment.compose_dir_files += [\"./approval-desk.key\", \"$f\"]")"
 done
+# Exact names only (G6 follow-up): the compose-dir layout of a real v5 dry receipt (G6, D2 run.json) passes; a name that only
+# starts like a harness file is stray.
+check "real v5 dry compose-dir layout is allowed" "" "$(mutate '.containment.compose_dir_files = ["./approval-desk.key","./cortex.cx","./jspace","./jspace/jspace.data","./jspace/jspace.meta","./machine.id"]')"
+for f in ./machine.idX ./machine.id.bak ./cortex.cxY ./jspaceX ./jspace.data ./jspace/other ./jspace/jspace.meta.tmp ./jspace/jspace.dataX ./jspace/sub/jspace.data; do
+  check "$f (only a prefix of a harness name) is stray" "A1" "$(mutate ".containment.compose_dir_files += [\"$f\"]")"
+done
 check "one manual rescue" "A6" "$(mutate '.rescues = 1')"
 
 echo "test-rows-v5: $pass passed, $fail failed"

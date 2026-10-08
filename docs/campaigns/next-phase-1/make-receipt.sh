@@ -124,7 +124,7 @@ jq -n --argjson run "$(j "$R/run.json")" \
   | ($s8.recall.cited // []) as $postcited
   | ($c8 | map(select(.id == $cid)) | .[0].text // null) as $recalled
   | ($run.compose_dir_files // []) as $cfiles
-  | ($cfiles | map(select((test("^\\./(machine\\.id|cortex\\.cx|jspace)") or . == "./approval-desk.key") | not))) as $stray
+  | ($cfiles | map(select(IN("./machine.id", "./cortex.cx", "./jspace", "./jspace/jspace.data", "./jspace/jspace.meta", "./approval-desk.key") | not))) as $stray
   | ($run.daemon // []) as $d
   | (($d | map(.backend // "") | map(test("CPU-reference") | not))) as $gpu
   | [

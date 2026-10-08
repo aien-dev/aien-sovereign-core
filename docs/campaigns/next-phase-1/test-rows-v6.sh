@@ -145,6 +145,13 @@ for f in ./other.key ./approval-desk.key.bak ./approval-desk.keys ./sub/approval
   check "N1 containment: $f beside the key is stray" "N1-Z" "$(mutate N1 ".containment.compose_dir_files += [\"./approval-desk.key\", \"$f\"]")"
   check "T5 containment: $f beside the key is stray" "T5-CM" "$(mutate T5 ".containment.compose_dir_files += [\"./approval-desk.key\", \"$f\"]")"
 done
+# Exact names only (G6 follow-up): the real v5 dry compose-dir layout passes; a name that only starts like a harness file is stray.
+check "N1 containment: real v5 dry compose-dir layout is allowed" "" "$(mutate N1 '.containment.compose_dir_files = ["./approval-desk.key","./cortex.cx","./jspace","./jspace/jspace.data","./jspace/jspace.meta","./machine.id"]')"
+check "T5 containment: real v5 dry compose-dir layout is allowed" "" "$(mutate T5 '.containment.compose_dir_files = ["./approval-desk.key","./cortex.cx","./jspace","./jspace/jspace.data","./jspace/jspace.meta","./machine.id"]')"
+for f in ./machine.idX ./machine.id.bak ./cortex.cxY ./jspaceX ./jspace.data ./jspace/other ./jspace/jspace.meta.tmp ./jspace/jspace.dataX ./jspace/sub/jspace.data; do
+  check "N1 containment: $f (only a prefix of a harness name) is stray" "N1-Z" "$(mutate N1 ".containment.compose_dir_files += [\"$f\"]")"
+  check "T5 containment: $f (only a prefix of a harness name) is stray" "T5-CM" "$(mutate T5 ".containment.compose_dir_files += [\"$f\"]")"
+done
 check "T4 containment: nothing committed" "T4-CM" "$(mutate T4 '.containment.workspace_changed = []')"
 check "R1 containment: v5 A2 FAIL" "R1-CM" "$(mutate R1 '.a2_v5 = "FAIL"')"
 check "T5: the mark excuses no other row (path wrong, mark fine)" "T5-P,T5-CM" "$(mutate T5 '.s3.proposal_path = "CHANGES.md" | .s5.path_rel = "CHANGES.md"')"

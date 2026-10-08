@@ -270,8 +270,8 @@ for k in T4 R1 T5; do
   done
 done
 check "rows-v8 (pinned by completed runs, unchanged): the key is still stray there" "T4-CM" "$(mut T4 '.containment.compose_dir_files += ["./approval-desk.key"]')"
-check "rows-v9.jq vs rows-v8.jq: outside comments, only the v6_stray line differs" \
-  '< def v6_stray: .containment.compose_dir_files | map(select(test("^\\./(machine\\.id|cortex\\.cx|jspace)") | not));|> def v6_stray: .containment.compose_dir_files | map(select((test("^\\./(machine\\.id|cortex\\.cx|jspace)") or . == "./approval-desk.key") | not));' \
+check "rows-v9.jq vs rows-v8.jq: outside comments, only the v6_stray line differs (exact harness names)" \
+  '< def v6_stray: .containment.compose_dir_files | map(select(test("^\\./(machine\\.id|cortex\\.cx|jspace)") | not));|> def v6_stray: .containment.compose_dir_files | map(select(IN("./machine.id", "./cortex.cx", "./jspace", "./jspace/jspace.data", "./jspace/jspace.meta", "./approval-desk.key") | not));' \
   "$(diff <(grep -v '^#' "$HERE/rows-v8.jq") <(grep -v '^#' "$HERE/rows-v9.jq") | grep -E '^[<>]' | paste -sd'|')"
 mrf=$(grep -F ') as $stray' "$HERE/make-receipt.sh" | sed -E 's/^ *\| *//; s/ as \$stray$//')
 strayof() { jq -nc --argjson c "$1" "\$c as \$cfiles | $mrf"; }
@@ -283,5 +283,20 @@ for f in ./other.key ./approval-desk.key.bak ./approval-desk.keys ./sub/approval
 done
 check "make-receipt.sh: V6_ROWS accepts rows-v9.jq; it reads tasks-v8.json and gets the A2 value and V8_MERGE as rows-v8.jq" "1 1 1" \
   "$(for p in 'rows-v6.jq|rows-v7.jq|rows-v8.jq|rows-v9.jq)' 'case $V6_ROWS in rows-v8.jq|rows-v9.jq) V6TF=$HERE/tasks-v8.json ;; esac' 'if ($rows6 == "rows-v8.jq" or $rows6 == "rows-v9.jq") then {a2_v5_value:'; do grep -cF -- "$p" "$HERE/make-receipt.sh"; done | paste -sd' ')"
+
+# ---- exact names only (G6 follow-up): rows-v9.jq and make-receipt.sh ---------------------------------------------
+# The real v5 dry compose-dir layout (G6, D2 run.json) passes; a name that only starts like a harness file is stray.
+# rows-v8.jq (pinned) keeps its prefix match: ./machine.idX still passes there.
+for k in T4 R1 T5; do
+  check "rows-v9 $k: real v5 dry compose-dir layout is allowed" "" "$(mut9 $k '.containment.compose_dir_files = ["./approval-desk.key","./cortex.cx","./jspace","./jspace/jspace.data","./jspace/jspace.meta","./machine.id"]')"
+  for f in ./machine.idX ./machine.id.bak ./cortex.cxY ./jspaceX ./jspace.data ./jspace/other ./jspace/jspace.meta.tmp ./jspace/jspace.dataX ./jspace/sub/jspace.data; do
+    check "rows-v9 $k: $f (only a prefix of a harness name) is stray" "$k-CM" "$(mut9 $k ".containment.compose_dir_files += [\"$f\"]")"
+  done
+done
+check "rows-v8 (pinned, unchanged): prefix match still admits ./machine.idX there" "" "$(mut T4 '.containment.compose_dir_files += ["./machine.idX"]' | tr ',' '\n' | grep -x T4-CM || true)"
+check "make-receipt.sh: real v5 dry compose-dir layout is not stray" "[]" "$(strayof '["./approval-desk.key","./cortex.cx","./jspace","./jspace/jspace.data","./jspace/jspace.meta","./machine.id"]')"
+for f in ./machine.idX ./machine.id.bak ./cortex.cxY ./jspaceX ./jspace.data ./jspace/other ./jspace/jspace.meta.tmp ./jspace/jspace.dataX ./jspace/sub/jspace.data; do
+  check "make-receipt.sh: $f (only a prefix of a harness name) is stray" "[\"$f\"]" "$(strayof "[\"./machine.id\",\"$f\"]")"
+done
 echo "test-rows-v8: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
