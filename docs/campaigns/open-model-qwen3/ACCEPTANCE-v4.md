@@ -2,6 +2,12 @@
 
 **Status: PREPARED, NOT FROZEN, NOT RUN**
 
+**SUPERSEDED by v5: diagnostic record only, never frozen, never run. Drake decision (c), 2026-10-08.**
+
+Drake chose to write v5 first (`ACCEPTANCE-v5.md`) and to keep this campaign unchanged in substance as the diagnostic spec and the regression
+evidence. Its "TO FILL AT FREEZE" entries stay unfilled on purpose, and `run-qwen3-v4.sh` keeps refusing a real run while its
+build identity holds the placeholder. v5 derives its wrapper and row modules from the files of this campaign.
+
 This is a draft written by session e3d035 for the orchestrator and Drake, 2026-10-07. It becomes FROZEN only when a later
 change fills every "TO FILL AT FREEZE" entry below, changes this status line, and is merged before the run. Until then no
 launch may run, `run-qwen3-v4.sh` refuses a real run while its build identity holds the placeholder, and nothing here is a

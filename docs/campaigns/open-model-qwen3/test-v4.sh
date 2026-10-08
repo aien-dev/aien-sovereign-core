@@ -316,6 +316,7 @@ done
 # ---- 7 spec file statements
 A=$HERE/ACCEPTANCE-v4.md
 chk "ACCEPTANCE-v4.md says PREPARED, NOT FROZEN, NOT RUN" 'grep -q "^\*\*Status: PREPARED, NOT FROZEN, NOT RUN\*\*" "$A"'
+chk "ACCEPTANCE-v4.md says SUPERSEDED by v5 and never run (Drake decision (c))" 'grep -q "^\*\*SUPERSEDED by v5: diagnostic record only, never frozen, never run\. Drake decision (c), 2026-10-08\.\*\*$" "$A"'
 chk "ACCEPTANCE-v4.md has a prediction section" 'grep -q "^## .*Prediction" "$A"'
 chk "ACCEPTANCE-v4.md has the freeze checklist with TO FILL AT FREEZE placeholders" '[ "$(grep -c "TO FILL AT FREEZE" "$A")" -ge 20 ]'
 chk "ACCEPTANCE-v4.md states that regression rows do not count toward the verdict" 'grep -q "do NOT count toward the qualification verdict" "$A"'
