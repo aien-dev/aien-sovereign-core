@@ -30,9 +30,10 @@ const V2_PROMPT: &str = "Goal: Create the file NOTES.md with a short plain-text 
 
 #[test]
 fn streamturn_formatting_matches_the_model_template() {
-    let ours = format_tinyllama_chat(&[turn("user", V2_PROMPT)]);
+    let ours = format_tinyllama_chat(&[turn("user", V2_PROMPT)]).expect("chat");
     assert_eq!(ours, rendered_by_template(&[("user", V2_PROMPT)]));
-    let with_system = format_tinyllama_chat(&[turn("system", "S"), turn("user", "U")]);
+    let with_system =
+        format_tinyllama_chat(&[turn("system", "S"), turn("user", "U")]).expect("chat");
     assert_eq!(
         with_system,
         rendered_by_template(&[("system", "S"), ("user", "U")])
@@ -49,7 +50,7 @@ fn template_encodes_bos_and_one_eos_token() {
     };
     let tok = TinyLlamaTokenizer::from_file(path).expect("tokenizer");
     let ids = tok
-        .encode(&format_tinyllama_chat(&[turn("user", V2_PROMPT)]))
+        .encode(&format_tinyllama_chat(&[turn("user", V2_PROMPT)]).expect("chat"))
         .expect("encode");
     eprintln!("template ids ({}): {:?}", ids.len(), ids);
     assert_eq!(ids[0], TinyLlamaTokenizer::BOS_TOKEN_ID);
@@ -80,7 +81,7 @@ fn proposal_prompt_token_counts() {
     );
     for (name, p) in [("base", &base), ("retry", &retry)] {
         let n = tok
-            .encode(&format_tinyllama_chat(&[turn("user", p)]))
+            .encode(&format_tinyllama_chat(&[turn("user", p)]).expect("chat"))
             .expect("encode")
             .len();
         eprintln!("{name} prompt tokens: {n}");
@@ -109,7 +110,7 @@ fn assistant_prefix_follows_the_assistant_marker() {
     );
     let sent = format!(
         "{}{}",
-        format_tinyllama_chat(&[turn("user", V2_PROMPT)]),
+        format_tinyllama_chat(&[turn("user", V2_PROMPT)]).expect("chat"),
         COMPOSE_ASSISTANT_PREFIX
     );
     assert!(sent.starts_with("<|user|>\nGoal: "));
@@ -149,10 +150,10 @@ fn warm_up_prompt_spans_two_prefill_chunks() {
     };
     let tok = TinyLlamaTokenizer::from_file(path).expect("tokenizer");
     let n = tok
-        .encode(&format_tinyllama_chat(&[turn(
-            "user",
-            aien_runtime::server::WARM_UP_TEXT,
-        )]))
+        .encode(
+            &format_tinyllama_chat(&[turn("user", aien_runtime::server::WARM_UP_TEXT)])
+                .expect("chat"),
+        )
         .expect("encode")
         .len();
     eprintln!("warm-up prompt tokens: {n}");
@@ -165,7 +166,7 @@ fn warm_up_prompt_spans_two_prefill_chunks() {
 fn llama3_template_renders_the_instruct_layout() {
     use aien_inference_abi::ChatTemplate;
     use aien_runtime::control::format_chat;
-    let text = format_chat(ChatTemplate::Llama3, &[turn("user", "  Hi there \n")]);
+    let text = format_chat(ChatTemplate::Llama3, &[turn("user", "  Hi there \n")]).expect("chat");
     assert_eq!(
         text,
         "<|start_header_id|>user<|end_header_id|>\n\nHi there<|eot_id|>\
@@ -173,8 +174,8 @@ fn llama3_template_renders_the_instruct_layout() {
     );
     // TinyLlama keeps the zephyr layout, byte for byte.
     assert_eq!(
-        format_chat(ChatTemplate::Zephyr, &[turn("user", V2_PROMPT)]),
-        format_tinyllama_chat(&[turn("user", V2_PROMPT)])
+        format_chat(ChatTemplate::Zephyr, &[turn("user", V2_PROMPT)]).expect("chat"),
+        format_tinyllama_chat(&[turn("user", V2_PROMPT)]).expect("chat")
     );
 }
 
@@ -195,7 +196,7 @@ fn llama3_model_dir_tokenizer_has_one_bos_and_eos_list() {
     assert_eq!(tok.stop_token_ids(), &[128001, 128008, 128009]);
     let text = format!(
         "{}{COMPOSE_ASSISTANT_PREFIX}",
-        format_chat(tok.template(), &[turn("user", V2_PROMPT)])
+        format_chat(tok.template(), &[turn("user", V2_PROMPT)]).expect("chat")
     );
     let ids = tok.encode(&text).expect("encode");
     assert_eq!(ids[0], 128000);
@@ -230,7 +231,7 @@ fn chatml_compose_prefix_follows_the_im_start_assistant_marker() {
     );
     let sent = format!(
         "{}{}",
-        format_chat(chatml, &[turn("user", V2_PROMPT)]),
+        format_chat(chatml, &[turn("user", V2_PROMPT)]).expect("chat"),
         compose_assistant_prefix(&ChatTemplate::ChatMl {
             default_system: None
         })
@@ -264,7 +265,8 @@ fn smollm2_model_dir_tokenizer_matches_the_publisher_template_ids() {
     let text = format_chat(
         tok.template(),
         &[turn("user", "Goal: X\nAuthorized workspace: /w")],
-    );
+    )
+    .expect("chat");
     let ids = tok.encode(&text).expect("encode");
     let hf: [u32; 40] = [
         1, 9690, 198, 2683, 359, 253, 5356, 5646, 11173, 3365, 3511, 308, 34519, 28, 7018, 411,

@@ -90,7 +90,7 @@ async fn main() {
         content: aien_runtime::WARM_UP_TEXT.into(),
     }];
     let wids = tok
-        .encode(&aien_runtime::format_chat(tok.template(), &wm))
+        .encode(&aien_runtime::format_chat(tok.template(), &wm).expect("chat"))
         .expect("encode");
     let (w, _, _) = turn(&mut spine, &mut backend, &wids, 1, &stop)
         .await
@@ -110,7 +110,7 @@ async fn main() {
     }];
     let text = format!(
         "{}{}",
-        aien_runtime::format_chat(tok.template(), &msgs),
+        aien_runtime::format_chat(tok.template(), &msgs).expect("chat"),
         aien_runtime::spine::COMPOSE_ASSISTANT_PREFIX
     );
     let ids = tok.encode(&text).expect("encode");

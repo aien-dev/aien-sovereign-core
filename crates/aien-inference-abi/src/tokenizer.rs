@@ -19,6 +19,9 @@ pub enum TokenizerError {
         len: usize,
         max: usize,
     },
+    /// Role `tool` offered to the raw `ChatTurn` path; tool turns must go through
+    /// `tool_boundary::ToolConversation` (issue #310).
+    ToolTurnRefused(String),
 }
 
 impl fmt::Display for TokenizerError {
@@ -28,6 +31,7 @@ impl fmt::Display for TokenizerError {
             Self::NoChatTemplate(e) => write!(f, "{}", e),
             Self::EncodeError(e) => write!(f, "Tokenization encoding failed: {}", e),
             Self::DecodeError(e) => write!(f, "Tokenization decoding failed: {}", e),
+            Self::ToolTurnRefused(e) => write!(f, "{}", e),
             Self::ContextLengthExceeded { len, max } => {
                 write!(
                     f,
@@ -276,6 +280,21 @@ impl ChatTemplate {
     }
 }
 
+/// Role `tool` is refused on every `ChatTokenizer` formatting path (issue #310): untrusted tool
+/// output must enter through `tool_boundary::ToolConversation`. `ChatTemplate::render` and
+/// `try_render` stay upstream-exact (the #309 oracle uses them) and are not a safe route.
+pub fn refuse_tool_role(turns: &[(&str, &str)]) -> Result<(), TokenizerError> {
+    if turns
+        .iter()
+        .any(|(r, _)| r.trim().eq_ignore_ascii_case("tool"))
+    {
+        return Err(TokenizerError::ToolTurnRefused(
+            "role tool refused: use tool_boundary::ToolConversation".into(),
+        ));
+    }
+    Ok(())
+}
+
 /// Pure Rust wrapper around Hugging Face tokenizers with the model's chat template and
 /// end-of-sequence set. `from_file`/`from_bytes` give the TinyLlama defaults;
 /// `from_model_dir` reads them from the model directory.
@@ -445,11 +464,13 @@ impl ChatTokenizer {
 
     /// Renders `(role, content)` turns with this model's chat template.
     pub fn format_chat(&self, turns: &[(&str, &str)]) -> String {
+        refuse_tool_role(turns).expect("tool role refused");
         self.template.render(turns)
     }
 
     /// Fallible [`ChatTokenizer::format_chat`]: refuses a plain model ("no chat template").
     pub fn try_format_chat(&self, turns: &[(&str, &str)]) -> Result<String, TokenizerError> {
+        refuse_tool_role(turns)?;
         self.template.try_render(turns)
     }
 
