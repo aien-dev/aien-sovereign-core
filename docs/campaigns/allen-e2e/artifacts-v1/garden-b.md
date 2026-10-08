@@ -1,0 +1,1 @@
+Tomatoes, carrots, and lettuce will be planted in rows along the south-facing side of the garden. Tomatoes will be placed in the center, with carrots on the left and lettuce on the right. The plan is simple and focused on key crops.
