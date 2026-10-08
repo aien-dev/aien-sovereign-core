@@ -1674,6 +1674,8 @@ pub(crate) fn record_view(
     }
 }
 
+const CLOSED_REFUSAL: &str = "compose home closed: the daemon is shutting down";
+
 pub(crate) struct ComposeHome {
     pub(crate) compose: Compose,
     /// The ALLEN identity this home resolved (`None` = not engaged).
@@ -1754,6 +1756,10 @@ pub struct ComposeBridge {
     /// Set when the start-up reconcile failed or was refused (ACCEPTANCE-v3
     /// 2.5): effect commands refuse until an operator reconcile succeeds.
     reconcile_failed: std::sync::Mutex<Option<String>>,
+    /// Set by `close`: the daemon is shutting down, the home is closed and
+    /// must not be reopened lazily by a connection task that outlives `run`
+    /// (sovereign-core #306).
+    closed: std::sync::atomic::AtomicBool,
     /// sovereign-core #297: when true, `ComposeAuthorize` needs the approval
     /// desk's MAC. Default false (legacy OS-user-only authorize).
     authorize_requires_desk: bool,
@@ -1768,6 +1774,7 @@ impl ComposeBridge {
             proposer_label: proposer_label.to_string(),
             home: std::sync::Mutex::new(None),
             reconcile_failed: std::sync::Mutex::new(None),
+            closed: std::sync::atomic::AtomicBool::new(false),
             authorize_requires_desk: false,
         }
     }
@@ -1793,6 +1800,27 @@ impl ComposeBridge {
         &self.dir
     }
 
+    /// Close the compose home and refuse to reopen it. Daemon shutdown calls
+    /// this before `run` returns: connection tasks hold their own `Arc` of the
+    /// bridge and can outlive `run`, so without it `rxc_host_close` (the drop of
+    /// the home) ran at an unspecified later time and a successor opening the
+    /// same home in that window saw a journal behind its J-Space anchor
+    /// (E_REPLAY, sovereign-core #306). Waits for a command in flight (it holds
+    /// the home lock). Blocking: call it from a blocking context.
+    pub fn close(&self) {
+        let mut guard = match self.home.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        self.closed.store(true, std::sync::atomic::Ordering::SeqCst);
+        *guard = None;
+    }
+
+    /// True after `close`.
+    pub fn is_closed(&self) -> bool {
+        self.closed.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
     fn open_home(&self) -> Result<ComposeHome, String> {
         self.open_home_marked(None)
     }
@@ -1801,6 +1829,12 @@ impl ComposeBridge {
     /// `rebuilt_from` = the seq of a mark RecoverComposeHome just set aside:
     /// the home then opens without a mark and gets a fresh one.
     fn open_home_marked(&self, rebuilt_from: Option<u64>) -> Result<ComposeHome, String> {
+        // The one place every lazy open goes through (with_home, run_task_inner,
+        // record_digest, recover): callers hold the home lock and close() sets
+        // `closed` under the same lock, so no site can reopen after close.
+        if self.is_closed() {
+            return Err(CLOSED_REFUSAL.to_string());
+        }
         // Refuse a bad budget before anything is opened (never fall back).
         let budgets = compose_budgets_from_env()
             .map_err(|e| format!("compose home {} refused: {e}", self.dir.display()))?;
@@ -2382,6 +2416,9 @@ impl ComposeBridge {
     /// kept as `<mark>.lost-<seq>` (never deleted), the home is reopened with
     /// a fresh mark and one host `constraint` record names the repair.
     pub fn recover(&self) -> ControlResponse {
+        if self.is_closed() {
+            return ControlResponse::Error(CLOSED_REFUSAL.to_string());
+        }
         let mut guard = match self.home.lock() {
             Ok(g) => g,
             Err(_) => return ControlResponse::Error("compose home lock poisoned".into()),
