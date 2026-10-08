@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# ALLEN end-to-end demo v1 driver (docs/campaigns/allen-e2e/DEMO-v1.md, arch#162).
+# ALLEN end-to-end demo driver (docs/campaigns/allen-e2e/DEMO-v1.md and DEMO-v2.md, arch#162).
+# DEMO_VERSION=v1 (default) or v2 selects the predeclared spec; v2 differs only by its three named changes.
 #
 #   scripts/allen_e2e_demo.sh run      build, run S0-S8 + S3-red, write the receipts
 #   scripts/allen_e2e_demo.sh check F  the C1-C5 document checker on file F (prints failed ids)
@@ -67,12 +68,19 @@ BIN=$D/target/release/aien-cli
 MA=$HOME/models/SmolLM2-1.7B-Instruct-31b70e2e869a
 MB=$HOME/models/qwen3-4b-instruct-2507-cdbee75
 OUT=$REPO/docs/campaigns/allen-e2e
-RECEIPTS=${DEMO_RECEIPTS:-$OUT/receipts-v1.jsonl}
-ART=${DEMO_ART:-$OUT/artifacts-v1}
+V=${DEMO_VERSION:-v1}
+case $V in v1|v2) ;; *) echo "DEMO_VERSION must be v1 or v2" >&2; exit 2 ;; esac
+RECEIPTS=${DEMO_RECEIPTS:-$OUT/receipts-$V.jsonl}
+ART=${DEMO_ART:-$OUT/artifacts-$V}
 RUN=$D/run
 SOCK=$RUN/s
 GOAL_A="Write garden.md in the workspace, a garden plan."
 GOAL_B="Write garden-b.md in the workspace, a garden plan."
+if [ "$V" = v2 ]; then
+  # v2 change 1: the request states C2 and C4 (never C3, which must come from memory).
+  FMT=" Start with a Markdown heading line that begins with \"# \". Use at most 200 words."
+  GOAL_A="$GOAL_A$FMT"; GOAL_B="$GOAL_B$FMT"
+fi
 NWORK="The garden plan must mention tomatoes."
 NPERS="$CANARY"
 G1="Keep the garden plan short."
@@ -85,11 +93,21 @@ QUIET=$HOME/workspace/.spark-quiet
 while [ -s "$QUIET" ]; do echo "quiet flag set; waiting"; sleep 30; done
 
 # The tree must be clean (apart from the outputs) so the receipt commit is the code that ran.
-DIRTY=$(git -C "$REPO" status --porcelain -- . ':!docs/campaigns/allen-e2e/receipts-v1.jsonl' ':!docs/campaigns/allen-e2e/artifacts-v1' ':!docs/campaigns/allen-e2e/RESULT-v1.md' | wc -l)
+DIRTY=$(git -C "$REPO" status --porcelain -- . ":!docs/campaigns/allen-e2e/receipts-$V.jsonl" ":!docs/campaigns/allen-e2e/artifacts-$V" ":!docs/campaigns/allen-e2e/RESULT-$V.md" | wc -l)
 if [ "$DIRTY" -ne 0 ] && [ -z "${DEMO_ALLOW_DIRTY:-}" ]; then
   echo "working tree has $DIRTY uncommitted changes; commit them first" >&2; exit 2
 fi
 COMMIT=$(git -C "$REPO" rev-parse HEAD)
+# v2 change 3: name the stack. It is main only if every file this branch changes against
+# origin/main is a demo-only file (this driver, the demo docs, the test-only subject fixture, crumbs).
+git -C "$REPO" fetch -q origin main 2>/dev/null
+MAIN=$(git -C "$REPO" rev-parse origin/main)
+NONDEMO=$(git -C "$REPO" diff --name-only "$MAIN" HEAD | grep -vE "^(scripts/allen_e2e_demo\.sh|docs/campaigns/allen-e2e/|crates/aien-allen/tests/e2e_demo_subject\.rs$|(.*/)?\.crumb$)" | wc -l)
+if git -C "$REPO" merge-base --is-ancestor "$MAIN" HEAD && [ "$NONDEMO" -eq 0 ]; then
+  STACK="main at ${MAIN:0:12} plus demo-only files"
+else
+  STACK="candidate stack at ${COMMIT:0:12}, not main"
+fi
 
 # Build with the real compose library (no omega dir, no GPU lib).
 (
@@ -133,8 +151,8 @@ rec() { # step status evidence [extra json]
   jq -nc --arg step "$1" --arg status "$2" --arg ev "$3" --argjson extra "$extra" \
     --arg commit "$COMMIT" --arg bin "$BIN_SHA" --arg backend "$CUR_BACKEND" --arg modelline "$CUR_MODELLINE" \
     --arg mdir "$CUR_DIR" --arg wd "$CUR_WD" --arg dsha "$CUR_DSHA" --arg tsha "$CUR_TSHA" \
-    --arg mac "$CUR_MAC" --arg id0 "$ID0" --arg utc "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-    '{step:$step,status:$status,label:"real-CPU",evidence:$ev,
+    --arg mac "$CUR_MAC" --arg id0 "$ID0" --arg stack "$STACK" --arg ver "$V" --arg utc "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    '{step:$step,status:$status,label:"real-CPU",stack:$stack,spec:("DEMO-"+$ver),evidence:$ev,
       repo_commit:$commit,daemon_sha256:$bin,cli_sha256:$bin,
       backend_line:$backend,model_line:$modelline,model_dir:$mdir,
       model_weights_digest:$wd,daemon_model_sha256:$dsha,tokenizer_sha256:$tsha,
@@ -228,10 +246,36 @@ model_task() {
     TASK_EV="MemoryReport context=$mem_ctx items_included=$mem_n (need work, >=1); constraints failed: [${failed:-none}]"; return
   fi
   if [ -n "$failed" ]; then
-    TASK_EV="commit DONE, MemoryReport work/$mem_n, but document fails: $failed (document in artifacts-v1/$file, recorded verbatim)"; return
+    TASK_EV="commit DONE, MemoryReport work/$mem_n, but document fails: $failed (document in artifacts-$V/$file, recorded verbatim)"; return
   fi
   TASK_STATUS=PASS
   TASK_EV="commit DONE, MemoryReport context=work items_included=$mem_n, C1-C5 hold, $(wc -w <"$WS/$file") words, sha256 $(sha_of "$WS/$file")"
+}
+
+# The link chain itself (v2): the commit, grant, intent and ack records of this task each name
+# the same generation record and ALLEN agent, and that generation record's model_sha256 is the
+# digest the daemon loaded. Read through recall, digest-verified. Sets LINK_MODEL, LINK_ID (0/1)
+# and LINK_JSON. Stricter than the v1 text search, which only asked whether the values appear.
+record_text() { cli compose recall --ids "$1" | jq -c 'if .recall.cited[0].verified == true then (.recall.cited[0].text|fromjson) else {unverified:true} end' 2>/dev/null || echo '{"unreadable":true}'; }
+follow_link() { # tag file msha
+  local tag=$1 file=$2 msha=$3 gen commit grant intent ack id r ok_m=1 ok_i=1 rows="[]"
+  gen=$(jq -r '.report.generation_record // "none"' "$ART/$tag-propose.json")
+  commit=$(jq -r '.report.compose_commit // "none"' "$ART/$tag-propose.json")
+  grant=$(jq -r '.authorization.id // "none"' "$ART/$tag-authorize.json")
+  intent=$(jq -r --arg f "$file" '[.ledger.intents[]|select(.path==$f)][0].intent // "none"' "$ART/$tag-effects.json")
+  ack=$(jq -r --arg f "$file" '[.ledger.intents[]|select(.path==$f)][0].state_record // "none"' "$ART/$tag-effects.json")
+  for id in "$commit" "$grant" "$intent" "$ack"; do
+    case $id in ''|none|null) ok_m=0; ok_i=0; continue ;; esac
+    r=$(record_text "$id")
+    [ "$(printf '%s' "$r" | jq -r '.provenance.generation_record|tostring')" = "$gen" ] || ok_m=0
+    [ "$(printf '%s' "$r" | jq -r '.provenance.allen_agent // "absent"')" = "$ID0" ] || ok_i=0
+    rows=$(printf '%s' "$rows" | jq -c --argjson id "$id" --argjson r "$r" '. + [{record:$id,provenance:($r.provenance // null)}]')
+  done
+  local g gm="none"
+  case $gen in ''|none|null) ok_m=0 ;; *) g=$(record_text "$gen"); gm=$(printf '%s' "$g" | jq -r '.model_sha256 // "none"'); [ "$gm" = "$msha" ] || ok_m=0 ;; esac
+  LINK_MODEL=$ok_m; LINK_ID=$ok_i
+  LINK_JSON=$(jq -nc --arg gen "$gen" --arg gm "$gm" --argjson rows "$rows" --arg c "$commit" --arg g "$grant" --arg i "$intent" --arg a "$ack" \
+    '{generation_record:$gen,generation_record_model_sha256:$gm,chain:{compose_commit:$c,grant:$g,intent:$i,ack:$a},records:$rows}')
 }
 
 # Provenance links for one commit: which of the five items appear in what the daemon recorded.
@@ -250,9 +294,14 @@ provenance() { # tag file model_sha_expected
   l_prop=$(printf '%s' "$pool" | grep -c "$psha")
   l_model=$(printf '%s' "$pool" | grep -c "$msha")
   l_id=$(printf '%s' "$pool" | grep -c "$ID0")
+  LINK_JSON=null
+  if [ "$V" = v2 ]; then
+    follow_link "$tag" "$file" "$msha"
+    l_model=$LINK_MODEL; l_id=$LINK_ID
+  fi
   PROV_JSON=$(jq -nc --argjson g "${l_grant:-0}" --argjson p "$l_prop" --argjson c "${l_content:-0}" --argjson m "$l_model" --argjson i "$l_id" \
-    --arg auth "$auth" --arg psha "$psha" --arg csha "$csha" --arg msha "$msha" \
-    '{grant_id:$auth,proposal_sha256:$psha,content_sha256:$csha,model_digest_expected:$msha,
+    --arg auth "$auth" --arg psha "$psha" --arg csha "$csha" --arg msha "$msha" --argjson link "$LINK_JSON" \
+    '{grant_id:$auth,proposal_sha256:$psha,content_sha256:$csha,model_digest_expected:$msha,link_chain:$link,
       ledger_links:{grant_id:($g>0),proposal_sha256:($p>0),content_sha256_equals_disk:($c>0),model_digest:($m>0),logical_agent_id:($i>0)}}')
   [ "${l_grant:-0}" -gt 0 ] && [ "$l_prop" -gt 0 ] && [ "${l_content:-0}" -gt 0 ] && [ "$l_model" -gt 0 ] && [ "$l_id" -gt 0 ]
 }
@@ -280,7 +329,7 @@ if ! skip S1; then
   kill9 || true
   SUBJ=$RUN/subject.bin
   FX=$(cd "$REPO" && env -u AIEN_OMEGA_DIR -u AIEN_OMEGA_COMPOSE_DIR AIEN_OMEGA_COMPOSE_LIB="$LIB" CARGO_TARGET_DIR="$D/target" \
-        DEMO_SUBJECT_OUT="$SUBJ" DEMO_LINEAGE_HEX="$LINEAGE" DEMO_SUBJECT_NAME="allen-e2e-demo-v1" \
+        DEMO_SUBJECT_OUT="$SUBJ" DEMO_LINEAGE_HEX="$LINEAGE" DEMO_SUBJECT_NAME="allen-e2e-demo-$V" \
         cargo test --release -p aien-allen --test e2e_demo_subject -- --ignored --nocapture 2>&1)
   AGENT=$(printf '%s\n' "$FX" | sed -n 's/^AGENT=//p'); AROOT=$(printf '%s\n' "$FX" | sed -n 's/^ROOT=//p')
   if [ -z "$AGENT" ] || [ ! -s "$SUBJ" ]; then
@@ -353,7 +402,7 @@ if ! skip S4; then
     rec S4 PASS "ledger links grant id, proposal sha256, content sha256 (= garden.md on disk), M-A model digest and ID0" "$PROV_JSON"
   else
     MISS=$(printf '%s' "$PROV_JSON" | jq -r '.ledger_links|to_entries|map(select(.value==false).key)|join(",")')
-    rec S4 FAIL "missing links in what the daemon recorded for the S3 commit: $MISS. Present: the rest. The model digest and ID0 appear in the daemon boot log and the ALLEN profile/memory stores, not in the compose or effect ledger records of the commit" "$PROV_JSON"
+    rec S4 FAIL "missing links in what the daemon recorded for the S3 commit: $MISS. Present: the rest$([ "$V" = v1 ] && echo ". The model digest and ID0 appear in the daemon boot log and the ALLEN profile/memory stores, not in the compose or effect ledger records of the commit")" "$PROV_JSON"
   fi
 fi
 
@@ -417,7 +466,12 @@ if ! skip S7; then
     snap S7
     FPB=$(cli allen status | jq -r .result.fingerprint)
     CHK=""
-    [ "$CUR_BACKEND" != "$OLD_BACKEND" ] || CHK="$CHK backend-line-identical"
+    if [ "$V" = v2 ]; then
+      # v2 change 2: the Model: line must change; the Backend: line is recorded, not required to change.
+      [ "$CUR_MODELLINE" != "$OLD_MODELLINE" ] && [ "$CUR_MODELLINE" != none ] || CHK="$CHK model-line-identical"
+    else
+      [ "$CUR_BACKEND" != "$OLD_BACKEND" ] || CHK="$CHK backend-line-identical"
+    fi
     [ "$CUR_DSHA" != "$OLD_DSHA" ] && [ "$CUR_DSHA" != none ] || CHK="$CHK model-digest-not-changed"
     [ "$FPB" = "${ID0:0:8}" ] || CHK="$CHK identity"
     same S6 S7 profile || CHK="$CHK profile"
@@ -428,7 +482,7 @@ if ! skip S7; then
     EXTRA=$(jq -nc --arg ob "$OLD_BACKEND" --arg nb "$CUR_BACKEND" --arg om "$OLD_MODELLINE" --arg nm "$CUR_MODELLINE" --arg od "$OLD_DSHA" --arg nd "$CUR_DSHA" \
       '{before:{backend_line:$ob,model_line:$om,daemon_model_sha256:$od},after:{backend_line:$nb,model_line:$nm,daemon_model_sha256:$nd}}')
     if [ -z "$CHK" ]; then
-      rec S7 PASS "$KILLED then start on M-B: backend line and model digest changed (${OLD_DSHA:0:12} -> ${CUR_DSHA:0:12}); ID0 same; profile, N-work, G1 unchanged; N-pers still absent" "$EXTRA"
+      rec S7 PASS "$KILLED then start on M-B: $([ "$V" = v2 ] && echo "Model: line" || echo "backend line") and model digest changed (${OLD_DSHA:0:12} -> ${CUR_DSHA:0:12}); ID0 same; profile, N-work, G1 unchanged; N-pers still absent" "$EXTRA"
     else
       rec S7 FAIL "criteria not met:${CHK}. Backend line before: '$OLD_BACKEND'; after: '$CUR_BACKEND'. Model line and digest changed: $([ "$CUR_DSHA" != "$OLD_DSHA" ] && echo yes || echo no)" "$EXTRA"
     fi
