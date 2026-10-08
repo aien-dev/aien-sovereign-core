@@ -183,7 +183,10 @@ snap() { # prefix: profile, memory inspect, goals, effects ledger, document
   cli allen memory inspect --owner 1 | jq -S .result.result >"$ART/$p-memory.json"
   cli allen goals list --owner 1 | jq -S .result.result >"$ART/$p-goals.json"
   cli compose effects | jq -S .ledger >"$ART/$p-ledger.json"
-  cli compose recall | jq -S .recall.records_total >"$ART/$p-records.json"
+  # Every daemon open adds 5 bookkeeping records of kind 65538 (same kind as record 1, no effect, no
+  # authorization). So compare the host (effect-class) records, not the raw total.
+  cli compose recall | jq -S ".recall.host|length" >"$ART/$p-records.json"
+  cli compose recall | jq -S .recall.records_total >"$ART/$p-records-total.json"
 }
 same() { cmp -s "$ART/$1-$3.json" "$ART/$2-$3.json"; }
 
@@ -372,7 +375,7 @@ if ! skip S5; then
     same S5a S5b memory || CHK="$CHK notes"
     same S5a S5b goals || CHK="$CHK goals"
     same S5a S5b ledger || CHK="$CHK ledger-changed(re-executed?)"
-    same S5a S5b records || CHK="$CHK record-count"
+    same S5a S5b records || CHK="$CHK host-record-count"
     [ "$S3_OK" = 1 ] || CHK="$CHK no-S3-commit"
     [ "$(jq -r '[.intents[]|select(.path=="garden.md" and .state=="DONE")]|length' "$ART/S5b-ledger.json")" = 1 ] || CHK="$CHK S3-not-DONE"
     [ "$G_SHA_BEFORE" != none ] && [ "$G_SHA_BEFORE" = "$G_SHA_AFTER" ] && [ "$G_STAT_BEFORE" = "$G_STAT_AFTER" ] || CHK="$CHK garden.md"
