@@ -3,14 +3,14 @@
     "generated": {
       "children": [],
       "children_root": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-      "compiled_at": "2026-10-08T00:43:44Z",
+      "compiled_at": "2026-10-08T01:03:32Z",
       "compiler": "crumb-compile/1",
-      "digest": "sha256:634b2b6ef1f6ff9c8255261ee9a021f535928c8261252c6ecb9f640f2166eb36",
+      "digest": "sha256:cd47dee5280a769dfc65a68275cc8a78b68392024f4d2bf25bd57383bce5c32a",
       "evidence_files": 0,
       "evidence_root": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
       "files": 8,
-      "generated_at_commit": "5ae4f1d475feeaa3b85d60fec18fe586508e99d5",
-      "source_tree": "sha256:6d1b0a3b82d40cbdc450534b5fac2fe93bb5072619d11ae2991bfe8409adb53f"
+      "generated_at_commit": "65edba04eb654df6123345163631cacae780d7e6",
+      "source_tree": "sha256:595d7155fdeb036754b502b29a8b30aeed0a229de41c8631cb935e995d6e8ea7"
     }
   },
   "name": "aien-allen-profile",
