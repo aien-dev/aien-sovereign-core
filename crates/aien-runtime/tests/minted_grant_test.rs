@@ -40,6 +40,14 @@ fn noted(r: ControlResponse) -> ComposeNoteReport {
     }
 }
 
+/// A stop, resume or revoke answer.
+fn controlled(r: ControlResponse) -> aien_runtime::control::ComposeControlReport {
+    match r {
+        ControlResponse::ComposeControlled(c) => *c,
+        other => panic!("expected ComposeControlled, got {other:?}"),
+    }
+}
+
 /// The refusal text of `r`; panics when the attack succeeded.
 fn refusal(r: ControlResponse, attack: &str) -> String {
     match r {
@@ -377,3 +385,54 @@ linked_test!(no_new_grant_after_a_grant_settled_done, |fx| {
     r.cx_promotion = second.cx_promotion;
     noted(effects::mint_grant(&fx.b, &r));
 });
+
+// A grant that settled DONE stays spent for its commit whatever happens to it
+// later. Before this fix a stop (then resume), or a revoke after the write,
+// made the authorize step skip the spent grant and mint a second one, and the
+// same committed proposal gave a second DONE effect (recovery matrix R6(d)).
+linked_test!(no_new_grant_after_done_even_after_stop_and_resume, |fx| {
+    let g = noted(fx.mint()).id;
+    let i = noted(fx.open(g)).id;
+    std::fs::write(fx.target(), CONTENT).unwrap();
+    assert_eq!(fx.ack_state(i), "DONE");
+    controlled(effects::control(&fx.b, "stop", "drake", None));
+    controlled(effects::control(&fx.b, "resume", "drake", None));
+    let e = refusal(fx.mint(), "second grant after DONE, stop and resume");
+    assert!(
+        e.contains("AlreadySpent") && e.contains("settled DONE"),
+        "{e}"
+    );
+});
+
+linked_test!(no_new_grant_after_done_even_after_revoke, |fx| {
+    let g = noted(fx.mint()).id;
+    let i = noted(fx.open(g)).id;
+    std::fs::write(fx.target(), CONTENT).unwrap();
+    assert_eq!(fx.ack_state(i), "DONE");
+    controlled(effects::control(&fx.b, "revoke", "drake", Some(g)));
+    let e = refusal(fx.mint(), "second grant after DONE and revoke");
+    assert!(
+        e.contains("AlreadySpent") && e.contains("settled DONE"),
+        "{e}"
+    );
+});
+
+// An unsettled intent blocks a new grant even when its own grant was later
+// made stale by a stop or revoked: the first write may still land.
+linked_test!(
+    no_new_grant_while_a_stale_or_revoked_grants_intent_is_unsettled,
+    |fx| {
+        let g = noted(fx.mint()).id;
+        noted(fx.open(g));
+        controlled(effects::control(&fx.b, "stop", "drake", None));
+        controlled(effects::control(&fx.b, "resume", "drake", None));
+        let e = refusal(
+            fx.mint(),
+            "second grant over an open intent, stop and resume",
+        );
+        assert!(e.contains("ReconciliationRequired"), "{e}");
+        controlled(effects::control(&fx.b, "revoke", "drake", Some(g)));
+        let e = refusal(fx.mint(), "second grant over an open intent, revoked");
+        assert!(e.contains("ReconciliationRequired"), "{e}");
+    }
+);
