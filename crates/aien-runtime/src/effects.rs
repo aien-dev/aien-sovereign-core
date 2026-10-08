@@ -1,4 +1,4 @@
-//! NEXT-PHASE-2: durable effect intents on the compose home's Cortex journal
+//! NEXT-PHASE-2: dulet plet prior = confined_sha256(&c.workspace, &c.path, &target).map_err(|r| r.to_string())?;ior = confined_sha256(workspace, path, &target).map_err(|r| r.to_string())?;able effect intents on the compose home's Cortex journal
 //! (ACCEPTANCE-v2 section 2).
 //!
 //! An external effect (today: the S5 `write_file`) is bracketed by host
@@ -43,6 +43,7 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::fmt;
+use std::os::fd::AsRawFd;
 use std::path::Path;
 
 pub const PHASE_INTENT: &str = "intent";
@@ -603,7 +604,13 @@ pub fn file_sha256(path: &Path) -> Result<Option<String>, String> {
 
 /// The world check of ACCEPTANCE-v2 2.2. Returns the state and the digest seen.
 pub fn world_state(row: &IntentRow) -> (EffectState, Result<Option<String>, String>) {
-    let now = file_sha256(Path::new(&row.target));
+    state_from(row, file_sha256(Path::new(&row.target)))
+}
+
+fn state_from(
+    row: &IntentRow,
+    now: Result<Option<String>, String>,
+) -> (EffectState, Result<Option<String>, String>) {
     let st = match &now {
         Ok(Some(d)) if *d == row.content_sha256 => EffectState::Done,
         Ok(d) if *d == row.prior_sha256 => EffectState::NotDone,
@@ -653,13 +660,15 @@ pub fn confined_world_state(
             )),
         );
     };
-    if let Err(r) = confine_target(&ws, &row.path, &row.target) {
-        return (
+    // sovereign-core #267: confine and read through the same held directory
+    // descriptors, so a swap after the check cannot redirect the read.
+    match open_confined(&ws, &row.path, &row.target) {
+        Err(r) => (
             EffectState::Unresolved,
             Err(format!("{}: {}", r.name, r.detail)),
-        );
+        ),
+        Ok(t) => state_from(row, t.sha256()),
     }
-    world_state(row)
 }
 
 /// Start time of a process (clock ticks since boot, /proc/<pid>/stat field 22).
@@ -743,13 +752,13 @@ pub fn check_reserved_note(kind: &str, text: &str) -> Result<(), String> {
     }
 }
 
-/// Workspace confinement of an effect target (sovereign-core #249): the
-/// workspace is an absolute, canonical directory that is not `/`; `path` is
-/// relative with plain components only; `target` is exactly
-/// `workspace/path`; its parent resolves (symlinks followed) to
-/// `workspace/<parent of path>`; and the target itself, when present, is a
-/// regular file, never a symlink.
-pub fn confine_target(workspace: &str, path: &str, target: &str) -> Result<(), Refusal> {
+/// Shape checks of `confine_target` (no filesystem walk below the workspace):
+/// returns the plain components of `path`.
+fn confine_shape<'a>(
+    workspace: &str,
+    path: &'a str,
+    target: &str,
+) -> Result<Vec<&'a std::ffi::OsStr>, Refusal> {
     use std::path::Component;
     let out = |w: String| Refusal::new("OutsideWorkspace", w);
     let ws = Path::new(workspace);
@@ -771,24 +780,209 @@ pub fn confine_target(workspace: &str, path: &str, target: &str) -> Result<(), R
             want.display()
         )));
     }
-    let parent = want.parent().unwrap_or(ws);
-    let real = std::fs::canonicalize(parent)
-        .map_err(|e| out(format!("target directory {}: {e}", parent.display())))?;
-    if real != parent || !real.starts_with(&canon) {
+    Ok(rel
+        .components()
+        .filter_map(|c| match c {
+            Component::Normal(n) => Some(n),
+            _ => None,
+        })
+        .collect())
+}
+
+/// An open handle on a confined target (sovereign-core #267): the file was
+/// opened by one `openat2(RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS)` call below a
+/// held descriptor of the workspace root, and is read through that descriptor
+/// only, never re-opened by path, so the check and the read name the same
+/// object even if a path component is swapped afterwards. `file` is the
+/// regular file, or None when it does not exist.
+pub struct ConfinedTarget {
+    #[allow(dead_code)] // held so the chain stays open for the handle's life
+    dir: std::os::fd::OwnedFd,
+    pub file: Option<std::fs::File>,
+}
+
+impl ConfinedTarget {
+    /// sha256 of the bytes behind the held descriptor, None when absent.
+    pub fn sha256(&self) -> Result<Option<String>, String> {
+        use std::io::Read;
+        let Some(f) = &self.file else {
+            return Ok(None);
+        };
+        let mut r = f;
+        let mut h = Sha256::new();
+        let mut buf = [0u8; 64 * 1024];
+        loop {
+            let n = r.read(&mut buf).map_err(|e| format!("read target: {e}"))?;
+            if n == 0 {
+                break;
+            }
+            h.update(&buf[..n]);
+        }
+        Ok(Some(hex(&h.finalize())))
+    }
+}
+
+/// `openat2(2)` syscall number: 437 on every architecture that has it.
+const SYS_OPENAT2: libc::c_long = 437;
+
+/// `struct open_how` of openat2(2) (libc marks its own copy non-exhaustive).
+#[repr(C)]
+struct OpenHow {
+    flags: u64,
+    mode: u64,
+    resolve: u64,
+}
+
+/// Open `rel` below the directory `dirfd`, resolved by the kernel in ONE
+/// step with RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS | RESOLVE_NO_MAGICLINKS:
+/// no symlink anywhere in `rel` is followed and nothing can resolve above
+/// `dirfd`. Falls back to a per-component `openat(O_NOFOLLOW)` walk only when
+/// the kernel lacks openat2 (ENOSYS); that walk is weaker (a directory
+/// renamed out of the workspace mid-walk is not caught).
+fn open_beneath(
+    dirfd: libc::c_int,
+    rel: &Path,
+    flags: libc::c_int,
+) -> std::io::Result<std::os::fd::OwnedFd> {
+    use std::os::fd::FromRawFd;
+    use std::os::unix::ffi::OsStrExt;
+    let c = std::ffi::CString::new(rel.as_os_str().as_bytes())
+        .map_err(|_| std::io::Error::from_raw_os_error(libc::EINVAL))?;
+    let how = OpenHow {
+        flags: (flags | libc::O_CLOEXEC) as u64,
+        mode: 0,
+        resolve: libc::RESOLVE_BENEATH | libc::RESOLVE_NO_SYMLINKS | libc::RESOLVE_NO_MAGICLINKS,
+    };
+    // SAFETY: valid C string and a correctly sized open_how; a descriptor
+    // returned (>= 0) is owned by nobody else and wrapped immediately.
+    let fd = unsafe {
+        libc::syscall(
+            SYS_OPENAT2,
+            dirfd,
+            c.as_ptr(),
+            &how as *const OpenHow,
+            std::mem::size_of::<OpenHow>(),
+        )
+    };
+    if fd >= 0 {
+        return Ok(unsafe { std::os::fd::OwnedFd::from_raw_fd(fd as libc::c_int) });
+    }
+    let err = std::io::Error::last_os_error();
+    if err.raw_os_error() != Some(libc::ENOSYS) {
+        return Err(err);
+    }
+    // Fallback: per-component openat with O_NOFOLLOW.
+    let comps: Vec<_> = rel.components().collect();
+    let mut cur: Option<std::os::fd::OwnedFd> = None;
+    for (i, comp) in comps.iter().enumerate() {
+        let name = std::ffi::CString::new(comp.as_os_str().as_bytes())
+            .map_err(|_| std::io::Error::from_raw_os_error(libc::EINVAL))?;
+        let fl = if i + 1 == comps.len() {
+            flags
+        } else {
+            libc::O_RDONLY | libc::O_DIRECTORY
+        };
+        let base = cur.as_ref().map_or(dirfd, |f| f.as_raw_fd());
+        // SAFETY: as above.
+        let fd =
+            unsafe { libc::openat(base, name.as_ptr(), fl | libc::O_CLOEXEC | libc::O_NOFOLLOW) };
+        if fd < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        cur = Some(unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) });
+    }
+    cur.ok_or_else(|| std::io::Error::from_raw_os_error(libc::EINVAL))
+}
+
+/// Open a confined target (see `ConfinedTarget`). Same refusals as
+/// `confine_target` ("OutsideWorkspace"). Ancestors of the workspace root
+/// itself are trusted (checked canonical, opened `O_NOFOLLOW`); everything
+/// below it is resolved beneath that held descriptor.
+pub fn open_confined(workspace: &str, path: &str, target: &str) -> Result<ConfinedTarget, Refusal> {
+    use std::os::fd::FromRawFd;
+    let out = |w: String| Refusal::new("OutsideWorkspace", w);
+    confine_shape(workspace, path, target)?;
+    let root = std::ffi::CString::new(workspace)
+        .map_err(|_| out(format!("workspace {workspace} holds a NUL")))?;
+    // SAFETY: valid C string; result checked and wrapped immediately.
+    let rfd = unsafe {
+        libc::open(
+            root.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+        )
+    };
+    if rfd < 0 {
         return Err(out(format!(
-            "target directory {} resolves to {} (outside or through a symlink)",
-            parent.display(),
-            real.display()
+            "workspace {workspace}: {}",
+            std::io::Error::last_os_error()
         )));
     }
-    match std::fs::symlink_metadata(&want) {
-        Ok(m) if !m.file_type().is_file() => Err(out(format!(
+    // SAFETY: `rfd` is a fresh descriptor owned by nobody else.
+    let dir = unsafe { std::os::fd::OwnedFd::from_raw_fd(rfd) };
+    let rel = Path::new(path);
+    let refuse_kind = || {
+        out(format!(
             "target {target} exists and is not a regular file (symlink or other)"
-        ))),
-        Ok(_) => Ok(()),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(e) => Err(out(format!("target {target}: {e}"))),
-    }
+        ))
+    };
+    // O_NONBLOCK so opening a FIFO cannot hang; the type is checked on the fd.
+    let file = match open_beneath(dir.as_raw_fd(), rel, libc::O_RDONLY | libc::O_NONBLOCK) {
+        Ok(fd) => {
+            let f = std::fs::File::from(fd);
+            let m = f
+                .metadata()
+                .map_err(|e| out(format!("target {target}: {e}")))?;
+            if !m.file_type().is_file() {
+                return Err(refuse_kind());
+            }
+            Some(f)
+        }
+        Err(e) if e.raw_os_error() == Some(libc::ELOOP) => return Err(refuse_kind()),
+        // EXDEV: RESOLVE_BENEATH refused an escape.
+        Err(e) if e.raw_os_error() == Some(libc::EXDEV) => {
+            return Err(out(format!("target {target} resolves outside {workspace}")))
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            // Absent file is fine; an absent or non-directory parent is not.
+            if let Some(parent) = rel.parent().filter(|p| !p.as_os_str().is_empty()) {
+                open_beneath(dir.as_raw_fd(), parent, libc::O_RDONLY | libc::O_DIRECTORY).map_err(
+                    |e| {
+                        out(format!(
+                            "target directory of {target}: {e} (outside, missing or a symlink)"
+                        ))
+                    },
+                )?;
+            }
+            None
+        }
+        Err(e) => return Err(out(format!("target {target}: {e}"))),
+    };
+    #[cfg(test)]
+    tests::run_pause_hook();
+    Ok(ConfinedTarget { dir, file })
+}
+
+/// Workspace confinement of an effect target (sovereign-core #249): the
+/// workspace is an absolute, canonical directory that is not `/`; `path` is
+/// relative with plain components only; `target` is exactly
+/// `workspace/path`; every directory below the workspace is a real directory,
+/// not a symlink; and the target itself, when present, is a regular file,
+/// never a symlink. Where the bytes are then read, use `open_confined` and
+/// read through it (sovereign-core #267), so the check and the read cannot
+/// be split by a swap.
+pub fn confine_target(workspace: &str, path: &str, target: &str) -> Result<(), Refusal> {
+    open_confined(workspace, path, target).map(|_| ())
+}
+
+/// `confine_target` and the sha256 of the target in one held walk.
+pub fn confined_sha256(
+    workspace: &str,
+    path: &str,
+    target: &str,
+) -> Result<Option<String>, Refusal> {
+    open_confined(workspace, path, target)?
+        .sha256()
+        .map_err(|e| Refusal::new("OutsideWorkspace", e))
 }
 
 /// An approved grant must be backed by its COMMITTED replay claim: same
@@ -1713,6 +1907,139 @@ mod tests {
         );
     }
 
+    thread_local! {
+        static PAUSE: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+            const { std::cell::RefCell::new(None) };
+    }
+
+    /// Test seam: runs once between confinement and the read.
+    pub(super) fn run_pause_hook() {
+        if let Some(f) = PAUSE.with(|p| p.borrow_mut().take()) {
+            f();
+        }
+    }
+
+    /// #267 red/green: a parent swapped for a symlink to a directory holding
+    /// the expected bytes, exactly between confinement and the read, must not
+    /// make the world check DONE. (Old code: confine_target, then read by
+    /// path, reached the outside file and returned DONE.)
+    #[test]
+    fn swap_between_confinement_and_read_is_not_done() {
+        let t = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(t.path()).unwrap();
+        let (ws, outside) = (root.join("ws"), root.join("outside"));
+        std::fs::create_dir_all(ws.join("d")).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(ws.join("d/f"), b"inside").unwrap();
+        std::fs::write(outside.join("f"), b"expected").unwrap();
+        let l = race_ledger(&ws, b"expected");
+        let (w2, o2) = (ws.clone(), outside.clone());
+        PAUSE.with(|p| {
+            *p.borrow_mut() = Some(Box::new(move || {
+                std::fs::rename(w2.join("d"), w2.join("d.held")).unwrap();
+                std::os::unix::fs::symlink(&o2, w2.join("d")).unwrap();
+            }))
+        });
+        let (st, disk) = confined_world_state(&l, &l.intents[&3]);
+        assert_ne!(st, EffectState::Done, "read outside bytes: {disk:?}");
+        assert_eq!(st, EffectState::Unresolved);
+        assert_eq!(disk.unwrap(), Some(hex(&Sha256::digest(b"inside"))));
+    }
+    /// Ledger with one daemon-minted grant for `ws` and one open intent
+    /// (#3) writing `d/f` with content `want`.
+    fn race_ledger(ws: &Path, want: &[u8]) -> Ledger {
+        let target = ws.join("d/f").display().to_string();
+        let g = rec(
+            2,
+            "authorization",
+            json!({"minted_grant": 1, "compose_commit": 1, "proposal_sha256": "p",
+                   "path": "d/f", "content_sha256": hex(&Sha256::digest(want)),
+                   "approver": "drake", "target": target, "prior_sha256": null,
+                   "workspace": ws.display().to_string()}),
+        );
+        let i = rec(
+            3,
+            "effect",
+            json!({"phase": "intent", "tool": "write_file", "authorization": 2, "path": "d/f",
+                   "target": target, "content_sha256": hex(&Sha256::digest(want)),
+                   "prior_sha256": null, "proposal_sha256": "p",
+                   "executor": {"pid": 1, "start": 1}}),
+        );
+        Ledger::from_records(&[g, i]).unwrap()
+    }
+
+    /// #267, deterministic: after confinement hands back a held handle, a
+    /// swap of the parent directory for a symlink to outside bytes cannot
+    /// redirect the read; the handle still reads the inside object.
+    #[test]
+    fn held_handle_ignores_a_parent_swap() {
+        let t = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(t.path()).unwrap();
+        let (ws, outside) = (root.join("ws"), root.join("outside"));
+        std::fs::create_dir_all(ws.join("d")).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(ws.join("d/f"), b"inside").unwrap();
+        std::fs::write(outside.join("f"), b"outside").unwrap();
+        let target = ws.join("d/f").display().to_string();
+        let h = open_confined(ws.to_str().unwrap(), "d/f", &target).unwrap();
+        std::fs::rename(ws.join("d"), ws.join("d.held")).unwrap();
+        std::os::unix::fs::symlink(&outside, ws.join("d")).unwrap();
+        // By path the old code would now read the outside file ...
+        assert_eq!(
+            file_sha256(Path::new(&target)).unwrap(),
+            Some(hex(&Sha256::digest(b"outside")))
+        );
+        // ... the held handle reads what confinement checked.
+        assert_eq!(h.sha256().unwrap(), Some(hex(&Sha256::digest(b"inside"))));
+        // A fresh walk refuses the swapped directory.
+        let e = open_confined(ws.to_str().unwrap(), "d/f", &target)
+            .err()
+            .unwrap();
+        assert_eq!(e.name, "OutsideWorkspace");
+    }
+
+    /// #267 acceptance: a parent directory swapped for a symlink to a
+    /// directory holding the expected bytes, raced against ack/reconcile's
+    /// `confined_world_state`, never yields DONE (the inside file differs).
+    #[test]
+    fn parent_swap_race_never_reads_outside_bytes() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let t = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(t.path()).unwrap();
+        let (ws, outside) = (root.join("ws"), root.join("outside"));
+        std::fs::create_dir_all(ws.join("d")).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(ws.join("d/f"), b"inside").unwrap();
+        std::fs::write(outside.join("f"), b"expected").unwrap();
+        let l = race_ledger(&ws, b"expected");
+        let stop = std::sync::Arc::new(AtomicBool::new(false));
+        let swapper = {
+            let (stop, ws, outside) = (stop.clone(), ws.clone(), outside.clone());
+            std::thread::spawn(move || {
+                while !stop.load(Ordering::Relaxed) {
+                    // dir -> symlink to outside, then back.
+                    std::fs::rename(ws.join("d"), ws.join("d.held")).unwrap();
+                    std::os::unix::fs::symlink(&outside, ws.join("d")).unwrap();
+                    std::fs::remove_file(ws.join("d")).unwrap();
+                    std::fs::rename(ws.join("d.held"), ws.join("d")).unwrap();
+                }
+            })
+        };
+        let (mut done, mut seen) = (0u32, std::collections::BTreeMap::<String, u32>::new());
+        let end = std::time::Instant::now() + std::time::Duration::from_secs(8);
+        while std::time::Instant::now() < end {
+            let (st, disk) = confined_world_state(&l, &l.intents[&3]);
+            if st == EffectState::Done {
+                done += 1;
+            }
+            *seen
+                .entry(format!("{} {:?}", st.name(), disk.is_ok()))
+                .or_default() += 1;
+        }
+        stop.store(true, Ordering::Relaxed);
+        swapper.join().unwrap();
+        assert_eq!(done, 0, "DONE for bytes outside the workspace: {seen:?}");
+    }
     #[test]
     fn world_state_reads_the_target() {
         let d = tempfile::tempdir().unwrap();
