@@ -77,6 +77,8 @@ fn token_ids_reach_the_attempt_record() {
             token_ids: Some(ids2.clone()),
             prompt_tokens: Some(p2.len()),
             prompt_ids_sha256: Some(token_ids_sha256(&p2)),
+            decoding: None,
+            ops: None,
         })
     };
     let (out, a) = propose_with_retries(

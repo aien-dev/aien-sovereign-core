@@ -456,3 +456,95 @@ linked_test!(
         assert!(!fx.ws.join("NOTES.md").exists());
     }
 );
+
+// sovereign-core #323: the NEXT-PHASE-1 effect note (`write_file`, an
+// authorization id, no `phase`) spends its authorization in the ledger. Only
+// old journals carry it; the daemon writes no such note since NEXT-PHASE-2.
+fn legacy_spend(a: u64) -> String {
+    json!({"tool": "write_file", "authorization": a, "success": true}).to_string()
+}
+
+// Before the fix a caller of ComposeNote could write one naming a live minted
+// grant: that grant then refused to execute (AlreadySpent) and a revoke of it
+// recorded nothing. A denial, never a second effect, but a forged record all
+// the same.
+linked_test!(a_caller_cannot_write_a_legacy_spend_note, |fx| {
+    let g = noted(fx.mint()).id;
+    let e = refusal(
+        fx.b.note("effect", &legacy_spend(g), &[]),
+        "legacy spend note",
+    );
+    assert!(e.contains("write_file"), "{e}");
+    // Not even for an id that is no grant (yet).
+    refusal(
+        fx.b.note("effect", &legacy_spend(g + 1000), &[]),
+        "legacy note, future id",
+    );
+    // The grant is untouched: it still executes once.
+    let i = noted(fx.open(g)).id;
+    std::fs::write(fx.target(), CONTENT).unwrap();
+    assert_eq!(fx.ack_state(i), "DONE");
+    // Other caller effect notes are still accepted.
+    noted(fx.b.note("effect", r#"{"tool":"inspect"}"#, &[]));
+});
+
+// An old journal that already holds such a note is still read the same way.
+linked_test!(an_old_legacy_spend_note_still_spends_its_grant, |fx| {
+    let g = noted(fx.mint()).id;
+    noted(fx.b.note_unchecked("effect", &legacy_spend(g), &[]));
+    let e = refusal(fx.open(g), "grant spent by an old note");
+    assert!(
+        e.contains("AlreadySpent") && e.contains("NEXT-PHASE-1"),
+        "{e}"
+    );
+    let c = controlled(effects::control(&fx.b, "revoke", "drake", Some(g)));
+    assert_eq!(c.revoked, Some(false));
+    assert!(!Path::new(&fx.target()).exists());
+});
+
+// Pin: a legacy note can never hide a DONE effect from the authorize step.
+// Every effect has an intent, and the intent is judged first; a legacy mark,
+// a stop, a resume or a revoke afterwards changes nothing.
+linked_test!(
+    a_legacy_note_never_lets_a_done_commit_be_authorized_again,
+    |fx| {
+        let g = noted(fx.mint()).id;
+        let i = noted(fx.open(g)).id;
+        std::fs::write(fx.target(), CONTENT).unwrap();
+        assert_eq!(fx.ack_state(i), "DONE");
+        noted(fx.b.note_unchecked("effect", &legacy_spend(g), &[]));
+        let done = |what: &str| {
+            let e = refusal(fx.mint(), what);
+            assert!(
+                e.contains("AlreadySpent") && e.contains("settled DONE"),
+                "{what}: {e}"
+            );
+        };
+        done("after a legacy mark");
+        controlled(effects::control(&fx.b, "stop", "drake", None));
+        controlled(effects::control(&fx.b, "resume", "drake", None));
+        done("after a legacy mark, stop and resume");
+        controlled(effects::control(&fx.b, "revoke", "drake", Some(g)));
+        done("after a legacy mark and revoke");
+        assert!(refusal(fx.open(g), "replay").contains("AlreadySpent"));
+    }
+);
+
+// A grant marked spent by an old note that never executed, then stopped: one
+// new grant may mint (nothing was written), and it gives the one effect.
+linked_test!(
+    a_legacy_marked_unexecuted_grant_still_allows_exactly_one_effect,
+    |fx| {
+        let g = noted(fx.mint()).id;
+        noted(fx.b.note_unchecked("effect", &legacy_spend(g), &[]));
+        controlled(effects::control(&fx.b, "stop", "drake", None));
+        controlled(effects::control(&fx.b, "resume", "drake", None));
+        let g2 = noted(fx.mint()).id;
+        assert!(refusal(fx.open(g), "the legacy-marked grant").contains("AlreadySpent"));
+        let i = noted(fx.open(g2)).id;
+        std::fs::write(fx.target(), CONTENT).unwrap();
+        assert_eq!(fx.ack_state(i), "DONE");
+        let e = refusal(fx.mint(), "a third grant");
+        assert!(e.contains("AlreadySpent"), "{e}");
+    }
+);

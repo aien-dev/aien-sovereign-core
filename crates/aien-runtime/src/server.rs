@@ -262,6 +262,14 @@ impl AienRuntimeServer {
                     "off (authorize is authenticated by the OS user only)"
                 }
             );
+            if aien_omega_compose::LINKED {
+                println!(
+                    "Compose: native (omega {})",
+                    aien_omega_compose::EXPECTED_OMEGA_SHA
+                );
+            } else {
+                println!("Compose: STUB (every compose call is Unavailable)");
+            }
         }
         if let Some(b) = compose.clone() {
             let gate = b.clone();
@@ -534,7 +542,15 @@ async fn generate_text(
         loop {
             match events.recv().await {
                 Some(CompletionEvent::Token { token, .. }) => produced.push(token),
-                Some(CompletionEvent::Finished { finish_reason, .. }) => {
+                Some(CompletionEvent::Finished {
+                    finish_reason,
+                    decoding,
+                    ops,
+                    ..
+                }) => {
+                    if let Some(line) = crate::generation::op_report_line(ops.as_ref()) {
+                        eprintln!("{line}");
+                    }
                     return tokenizer
                         .decode_opts(&produced, true)
                         .map(|text| crate::spine::Generation {
@@ -544,6 +560,8 @@ async fn generate_text(
                             token_ids: Some(produced.clone()),
                             prompt_tokens: Some(prompt_ids.len()),
                             prompt_ids_sha256: Some(crate::spine::token_ids_sha256(&prompt_ids)),
+                            decoding: decoding.clone(),
+                            ops: ops.clone(),
                         })
                         .map_err(|e| format!("tokenizer decode failed: {e}"));
                 }
@@ -640,6 +658,8 @@ struct GenerationOwned {
     finish_reason: &'static str,
     request_id: u64,
     operation_id: u128,
+    decoding: Option<aien_abi_core::DecodeObservation>,
+    ops: Option<aien_abi_core::OpEvidence>,
 }
 
 /// Write the daemon's generation record for a finished turn and return its
@@ -665,6 +685,8 @@ async fn record_generation(
                 finish_reason: g.finish_reason,
                 request_id: g.request_id,
                 operation_id: g.operation_id,
+                decoding: g.decoding.as_ref(),
+                ops: g.ops.as_ref(),
             },
             started,
         );
@@ -734,8 +756,13 @@ async fn stream_turn(
             Ok(Some(CompletionEvent::Finished {
                 total_tokens,
                 finish_reason,
+                decoding,
+                ops,
                 ..
             })) => {
+                if let Some(line) = crate::generation::op_report_line(ops.as_ref()) {
+                    eprintln!("{line}");
+                }
                 let generation_record = record_generation(
                     compose,
                     identity,
@@ -748,6 +775,8 @@ async fn stream_turn(
                         finish_reason: finish_reason_label(&finish_reason),
                         request_id,
                         operation_id,
+                        decoding,
+                        ops,
                     },
                 )
                 .await;
@@ -1016,6 +1045,7 @@ mod generation_record_tests {
     fn identity() -> Arc<ModelIdentity> {
         Arc::new(ModelIdentity {
             model_sha256: "a".repeat(64),
+            model_digest_kind: "file".into(),
             model_path: "/m/model.safetensors".into(),
             tokenizer_sha256: "b".repeat(64),
             tokenizer_path: "/m/tokenizer.json".into(),
@@ -1031,6 +1061,8 @@ mod generation_record_tests {
             finish_reason: "eos",
             request_id: 1,
             operation_id: 1,
+            decoding: None,
+            ops: None,
         }
     }
 

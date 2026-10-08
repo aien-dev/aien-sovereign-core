@@ -7,9 +7,10 @@
 //! (the model builds Fp32 pools) the sequence's K/V are gathered on the host into
 //! contiguous f32 exactly as the reference reads them, then run on the f32 gqa kernel.
 //! omega attention needs head_dim 64 (TinyLlama, Llama-3.2-1B) or 128 (Qwen3-4B, since omega
-//! b564bf4; Qwen3 is refused by default while omega#327 is open and at any other head_dim
-//! always, see `omega_model_refusal`). A chip
-//! error in one of those is a fallback of a claimed-native op: it is counted, goes through
+//! b564bf4). Qwen3 at any other head_dim is always refused; at 128 it is refused when the
+//! switch is off (see `omega_model_refusal`).
+//!
+//! A chip error in one of those ops is a fallback of a claimed-native op: it is counted, goes through
 //! `OpAccounting::reference_path` (fatal in a production build, see `strict.rs`)
 //! and, in a dev build only, the reference result is computed so the run goes on.
 //!
@@ -569,26 +570,59 @@ impl OmegaGb10Backend {
 /// only with `head_dim` 128 (Qwen3-4B) and is refused up front otherwise, before any chip work.
 /// Llama-architecture models are not touched by this check.
 ///
-/// Qwen3 at `head_dim` 128 is also refused by default while omega#327 is open: in the
-/// normal memory state (MemFree low, most memory in clean page cache) the driver's channel
-/// and weight allocations fail with NV_ERR_NO_MEMORY after the f32 weight load
-/// (sovereign-core #274, declared attempt 1). A declared chip attempt opts in with
-/// [`GB10_QWEN3_OPT_IN_ENV`]` = 1`; see [`omega_model_refusal_with`].
+/// Evidence limits: the #277 attempt 3 pass (issue comment 6059774846) covers a Linux-hosted
+/// GB10 only (not native AIENOS), one prompt, context 4096, no endurance run and no failing
+/// baseline. So the default (switch unset) enables Qwen3 only on a production-strict run; under
+/// `AIEN_DEV_FALLBACK=1` it is refused unless the switch is explicitly `1`.
+///
+/// Qwen3 at `head_dim` 128 runs on the GB10 by default since the qualified path passed
+/// (sovereign-core #277, declared attempt 3): the daemon streams the weights to the device
+/// and reserves, prepares and seals the serving buffers once, and refuses by name with no
+/// fallback if that fails. Before that, the driver's channel and weight allocations failed
+/// with NV_ERR_NO_MEMORY when MemFree was low after the f32 weight load (omega#327). The
+/// explicit refusal is [`GB10_QWEN3_OPT_IN_ENV`]` = 0`; see [`omega_model_refusal_with`].
 pub fn omega_model_refusal(config: &ModelConfig) -> Option<String> {
-    omega_model_refusal_with(config, gb10_qwen3_opted_in())
+    omega_model_refusal_with(config, gb10_qwen3_enabled())
 }
 
-/// Environment switch for a declared GB10 attempt that runs Qwen3 although omega#327 is
-/// open. Only the exact value `1` opts in; unset or anything else keeps the refusal.
+/// Environment switch for the GB10 Qwen3 path (rule, one place):
+/// - exactly `1`: enabled (the old declared-attempt opt-in, any build);
+/// - unset: enabled only on the path the evidence covers, a production-strict run
+///   ([`crate::strict::production_strict`], so no `AIEN_DEV_FALLBACK=1`); the native engine and
+///   the streamed resident load that go with it are checked by `check_model` and
+///   [`crate::resident::resident_load_wanted`];
+/// - `0`, or any other value including non-UTF8: refused by name (fail closed).
 pub const GB10_QWEN3_OPT_IN_ENV: &str = "AIEN_GB10_QWEN3_DECLARED_ATTEMPT";
 
-pub(crate) fn gb10_qwen3_opted_in() -> bool {
-    std::env::var(GB10_QWEN3_OPT_IN_ENV).is_ok_and(|v| v == "1")
+/// Whether the GB10 Qwen3 path is enabled, read from [`GB10_QWEN3_OPT_IN_ENV`] and the
+/// process strictness.
+pub fn gb10_qwen3_enabled() -> bool {
+    gb10_qwen3_enabled_from_os(
+        std::env::var_os(GB10_QWEN3_OPT_IN_ENV).as_deref(),
+        crate::strict::production_strict(),
+    )
 }
 
-/// [`omega_model_refusal`] with the opt-in passed explicitly instead of read from the
-/// environment.
-pub fn omega_model_refusal_with(config: &ModelConfig, qwen3_opted_in: bool) -> Option<String> {
+/// [`gb10_qwen3_enabled`] on an explicit value and strictness (`strict` is true when
+/// fallbacks are not allowed).
+pub fn gb10_qwen3_enabled_from(value: Option<&str>, strict: bool) -> bool {
+    match value {
+        None => strict,
+        Some(v) => v == "1",
+    }
+}
+
+/// Same rule on a raw OS value: non-UTF8 refuses.
+pub fn gb10_qwen3_enabled_from_os(value: Option<&std::ffi::OsStr>, strict: bool) -> bool {
+    match value {
+        None => gb10_qwen3_enabled_from(None, strict),
+        Some(v) => gb10_qwen3_enabled_from(Some(v.to_str().unwrap_or("<non-utf8>")), strict),
+    }
+}
+
+/// [`omega_model_refusal`] with the switch passed explicitly instead of read from the
+/// environment (`qwen3_enabled` is true when the Qwen3 path is enabled).
+pub fn omega_model_refusal_with(config: &ModelConfig, qwen3_enabled: bool) -> Option<String> {
     if !config.qk_norm {
         return None;
     }
@@ -600,30 +634,49 @@ pub fn omega_model_refusal_with(config: &ModelConfig, qwen3_opted_in: bool) -> O
             config.model_id, config.head_dim
         ));
     }
-    (!qwen3_opted_in).then(|| {
+    (!qwen3_enabled).then(|| {
         format!(
-            "OmegaGb10Backend refuses model {:?}: the GB10 Qwen3 path is off by default while the \
-             resident-weight memory issue omega#327 is open (the driver's channel and weight \
-             allocations fail with NV_ERR_NO_MEMORY when MemFree is low after the f32 weight \
-             load); run it on the CPU reference backend, or set {GB10_QWEN3_OPT_IN_ENV}=1 for a \
-             declared chip attempt",
+            "OmegaGb10Backend refuses model {:?}: the GB10 Qwen3 path is switched off by \
+             {GB10_QWEN3_OPT_IN_ENV} (only 1, or unset on a production-strict run, enables it); run it on the CPU \
+             reference backend, or unset {GB10_QWEN3_OPT_IN_ENV} on a strict run (no \
+             AIEN_DEV_FALLBACK) to use the qualified GB10 path (sovereign-core#277)",
             config.model_id
         )
     })
 }
 
-impl TensorBackend for OmegaGb10Backend {
-    fn check_model(&self, config: &ModelConfig) -> Result<(), String> {
-        omega_model_refusal(config).map_or(Ok(()), Err)?;
+impl OmegaGb10Backend {
+    /// [`TensorBackend::check_model`] with the Qwen3 switch passed explicitly (the real call reads
+    /// [`gb10_qwen3_enabled`]); refuses Qwen3 on a stub build whatever the switch says.
+    pub fn check_model_with(
+        &self,
+        config: &ModelConfig,
+        qwen3_enabled: bool,
+    ) -> Result<(), String> {
+        omega_model_refusal_with(config, qwen3_enabled).map_or(Ok(()), Err)?;
+        if config.qk_norm && !self.is_available() {
+            return Err(format!(
+                "OmegaGb10Backend refuses model {:?}: Qwen3 needs the linked GB10 engine for its \
+                 streamed weights and serving reservation, and this is a stub build (no chip); \
+                 run it on the CPU reference backend",
+                config.model_id
+            ));
+        }
         if config.qk_norm {
             eprintln!(
-                "OMEGA_BACKEND WARNING: {GB10_QWEN3_OPT_IN_ENV}=1, running Qwen3 {:?} on GB10 \
-                 although omega#327 (NV_ERR_NO_MEMORY on low MemFree) is open; for a declared \
-                 chip attempt only",
+                "OMEGA_BACKEND NOTE: running Qwen3 {:?} on GB10 via the qualified path \
+                 (streamed resident weights, reserve+prepare+seal once, no on-demand fallback; \
+                 sovereign-core#277). Set {GB10_QWEN3_OPT_IN_ENV}=0 to refuse it",
                 config.model_id
             );
         }
         Ok(())
+    }
+}
+
+impl TensorBackend for OmegaGb10Backend {
+    fn check_model(&self, config: &ModelConfig) -> Result<(), String> {
+        self.check_model_with(config, gb10_qwen3_enabled())
     }
 
     fn name(&self) -> &'static str {
@@ -1121,6 +1174,88 @@ pub fn open_gpu_session_with_retry(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn qwen3_4b_shape() -> ModelConfig {
+        let mut c = ModelConfig::tinyllama_1_1b();
+        c.model_id = "qwen3-shape-test".to_string();
+        c.qk_norm = true;
+        c.head_dim = 128;
+        c
+    }
+
+    #[test]
+    fn stub_backend_refuses_qwen3_with_switch_unset_or_one() {
+        let b = OmegaGb10Backend::new();
+        if b.is_available() {
+            return; // chip build: the stub refusal does not apply
+        }
+        let q = qwen3_4b_shape();
+        // Unset on a strict run is "enabled"; `1` is enabled. A stub build still refuses.
+        for enabled in [
+            gb10_qwen3_enabled_from(None, true),
+            gb10_qwen3_enabled_from(Some("1"), true),
+        ] {
+            assert!(enabled);
+            let err = b.check_model_with(&q, enabled).unwrap_err();
+            assert!(err.contains("stub build (no chip)"), "{err}");
+        }
+        // Llama-architecture models are unchanged.
+        assert!(b
+            .check_model_with(&ModelConfig::tinyllama_1_1b(), false)
+            .is_ok());
+    }
+
+    #[test]
+    fn non_utf8_switch_value_refuses() {
+        use std::os::unix::ffi::OsStrExt;
+        let bad = std::ffi::OsStr::from_bytes(&[0x31, 0xff]);
+        for strict in [true, false] {
+            assert!(!gb10_qwen3_enabled_from_os(Some(bad), strict));
+        }
+        assert!(gb10_qwen3_enabled_from_os(
+            Some(std::ffi::OsStr::new("1")),
+            false
+        ));
+        assert!(!gb10_qwen3_enabled_from_os(
+            Some(std::ffi::OsStr::new("0")),
+            true
+        ));
+    }
+
+    #[test]
+    fn unset_switch_needs_a_strict_run_but_one_always_enables() {
+        // Rule: AIEN_DEV_FALLBACK=1 (non-strict) with the switch unset is refused by name.
+        assert!(!gb10_qwen3_enabled_from(None, false));
+        let q = qwen3_4b_shape();
+        let msg = omega_model_refusal_with(&q, gb10_qwen3_enabled_from(None, false))
+            .expect("unset + non-strict must refuse");
+        assert!(msg.contains(GB10_QWEN3_OPT_IN_ENV), "{msg}");
+        let b = OmegaGb10Backend::new();
+        assert!(b
+            .check_model_with(&q, gb10_qwen3_enabled_from(None, false))
+            .unwrap_err()
+            .contains(GB10_QWEN3_OPT_IN_ENV));
+        // Explicit 1 keeps the declared-attempt opt-in; no resident load without strict.
+        assert!(omega_model_refusal_with(&q, gb10_qwen3_enabled_from(Some("1"), false)).is_none());
+        assert!(!crate::resident::resident_load_wanted(
+            true,
+            false,
+            gb10_qwen3_enabled_from(Some("1"), false),
+            &q
+        ));
+        assert!(!crate::resident::resident_load_wanted(
+            true,
+            false,
+            gb10_qwen3_enabled_from(None, false),
+            &q
+        ));
+        assert!(crate::resident::resident_load_wanted(
+            true,
+            true,
+            gb10_qwen3_enabled_from(None, true),
+            &q
+        ));
+    }
 
     fn lcg(s: &mut u32) -> f32 {
         *s = s.wrapping_mul(1664525).wrapping_add(1013904223);

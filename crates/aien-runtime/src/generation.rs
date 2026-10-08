@@ -14,12 +14,16 @@ use sha2::{Digest, Sha256};
 /// Marker field (and refused `ComposeNote` kind) of the generation record.
 pub const GENERATION: &str = "generation";
 
-/// The model files the daemon loaded, hashed once at load time.
-/// `model_sha256` is the sha256 of the single safetensors file's bytes
-/// (streamed, 1 MiB chunks); `tokenizer_sha256` that of the tokenizer file.
+/// The model files the daemon loaded, hashed once at load time (streamed,
+/// 1 MiB chunks). `model_sha256` is the digest of what was loaded, in the form
+/// `model_digest_kind` names: `file` (the single safetensors file's sha256) or
+/// `index+shards` (sc#338: the manifest digest over the shard index and every
+/// shard it names; docs/DAEMON_GENERATION_RECORD.md). `tokenizer_sha256` is the
+/// tokenizer file's sha256.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModelIdentity {
     pub model_sha256: String,
+    pub model_digest_kind: String,
     pub model_path: String,
     pub tokenizer_sha256: String,
     pub tokenizer_path: String,
@@ -36,6 +40,10 @@ pub struct TurnEvidence<'a> {
     /// Caller-supplied envelope ids (self-asserted by the client, no authority).
     pub request_id: u64,
     pub operation_id: u128,
+    /// How the backend chose the output tokens (sc#294); None: no claim.
+    pub decoding: Option<&'a aien_abi_core::DecodeObservation>,
+    /// The tensor backend and its op counters when the call finished (sc#337); None: no claim.
+    pub ops: Option<&'a aien_abi_core::OpEvidence>,
 }
 
 /// When this daemon started: unix milliseconds, captured once.
@@ -57,13 +65,70 @@ fn hex_sha256(bytes: &[u8]) -> String {
     aien_omega_compose::hex(&Sha256::digest(bytes))
 }
 
+/// An f32 setting as the JSON number it was written as (0.7, not 0.699999988).
+fn f32_number(v: f32) -> Value {
+    v.to_string()
+        .parse::<f64>()
+        .ok()
+        .and_then(serde_json::Number::from_f64)
+        .map_or(Value::Null, Value::Number)
+}
+
+/// Adds `decoding` (sc#294): how the backend chose the output tokens, counted
+/// in the sampling branch it took, not read from the request's settings. The
+/// field is left out when nothing observed it (a stub or a backend without the
+/// observation): no field means no claim, never "greedy".
+fn with_decoding(record: &mut Value, d: Option<&aien_abi_core::DecodeObservation>) {
+    let Some(d) = d else { return };
+    let mut o = json!({
+        "mode": d.mode(),
+        "greedy_tokens": d.greedy_tokens,
+        "sampled_tokens": d.sampled_tokens,
+    });
+    if let Some(t) = d.temperature {
+        o["temperature"] = f32_number(t);
+    }
+    if let Some(p) = d.top_p {
+        o["top_p"] = f32_number(p);
+    }
+    if let Some(s) = d.seed_request_id {
+        o["seed_request_id"] = json!(s);
+    }
+    record["decoding"] = o;
+}
+
+/// Adds `ops` (sc#337): the tensor backend that ran the call and its op
+/// counters when the call finished, as process totals since the daemon built
+/// the backend (`native_fallbacks`: claimed-native ops that ran on the
+/// reference CPU path, always 0 in a production build, which panics on the
+/// first; `reference_runs`: ops on the reference path by design). Left out
+/// when the backend does not account its ops: no field means no claim.
+fn with_ops(record: &mut Value, o: Option<&aien_abi_core::OpEvidence>) {
+    let Some(o) = o else { return };
+    record["ops"] = json!({
+        "backend": o.backend,
+        "native_fallbacks": o.native_fallbacks,
+        "reference_runs": o.reference_runs,
+        "scope": "process",
+        "report": o.report,
+    });
+}
+
+/// The line the daemon logs at the end of every model call (sc#337): the
+/// backend's `OP_REPORT ...` line with ` backend=<name>` appended. None when
+/// the backend does not account its ops.
+pub fn op_report_line(o: Option<&aien_abi_core::OpEvidence>) -> Option<String> {
+    o.map(|o| format!("{} backend={}", o.report, o.backend))
+}
+
 /// The record's JSON body (field list is documented in docs/DAEMON_GENERATION_RECORD.md).
 pub fn build_record(id: &ModelIdentity, t: &TurnEvidence, start: DaemonStart) -> Value {
     let (pid, start_ticks) = crate::effects::self_executor();
-    json!({
+    let mut record = json!({
         GENERATION: 1,
         "v": 1,
         "model_sha256": id.model_sha256,
+        "model_digest_kind": id.model_digest_kind,
         "model_path": id.model_path,
         "tokenizer_sha256": id.tokenizer_sha256,
         "tokenizer_path": id.tokenizer_path,
@@ -77,7 +142,10 @@ pub fn build_record(id: &ModelIdentity, t: &TurnEvidence, start: DaemonStart) ->
         // Caller-asserted: the client chooses the envelope ids; recorded, not trusted.
         "request_id": t.request_id,
         "operation_id": t.operation_id.to_string(),
-    })
+    });
+    with_decoding(&mut record, t.decoding);
+    with_ops(&mut record, t.ops);
+    record
 }
 
 /// Why an `effect`-class note carrying a `generation` marker, and not a new
@@ -271,6 +339,10 @@ pub struct ComposeEvidence<'a> {
     /// The compose task and attempt (1-based) that made the generation. Daemon-assigned.
     pub task: u64,
     pub attempt: u32,
+    /// How the backend chose the output tokens (sc#294); None: no claim.
+    pub decoding: Option<&'a aien_abi_core::DecodeObservation>,
+    /// The tensor backend and its op counters when the call finished (sc#337); None: no claim.
+    pub ops: Option<&'a aien_abi_core::OpEvidence>,
 }
 
 /// The generation record of one compose proposal attempt: the same fields as
@@ -279,13 +351,14 @@ pub struct ComposeEvidence<'a> {
 /// compose task makes itself.
 pub fn build_compose_record(id: &ModelIdentity, e: &ComposeEvidence, start: DaemonStart) -> Value {
     let (pid, start_ticks) = crate::effects::self_executor();
-    json!({
+    let mut record = json!({
         GENERATION: 1,
         "v": 1,
         "origin": "compose_proposal",
         "task": e.task,
         "attempt": e.attempt,
         "model_sha256": id.model_sha256,
+        "model_digest_kind": id.model_digest_kind,
         "model_path": id.model_path,
         "tokenizer_sha256": id.tokenizer_sha256,
         "tokenizer_path": id.tokenizer_path,
@@ -298,5 +371,8 @@ pub fn build_compose_record(id: &ModelIdentity, e: &ComposeEvidence, start: Daem
         "daemon": {"pid": pid, "start_ticks": start_ticks, "started_unix_ms": start.0.to_string()},
         "request_id": 0,
         "operation_id": "0",
-    })
+    });
+    with_decoding(&mut record, e.decoding);
+    with_ops(&mut record, e.ops);
+    record
 }

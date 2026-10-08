@@ -52,9 +52,28 @@ fn sha(b: &[u8]) -> String {
 fn identity() -> ModelIdentity {
     ModelIdentity {
         model_sha256: "ab".repeat(32),
+        model_digest_kind: "index+shards".into(),
         model_path: "/models/toy/model.safetensors".into(),
         tokenizer_sha256: "cd".repeat(32),
         tokenizer_path: "/models/toy/tokenizer.json".into(),
+    }
+}
+
+/// How the backend chose OUT_IDS: all greedy (sc#294).
+fn greedy_observation() -> aien_inference_abi::DecodeObservation {
+    aien_inference_abi::DecodeObservation {
+        greedy_tokens: OUT_IDS.len() as u64,
+        ..Default::default()
+    }
+}
+
+/// The tensor backend and op counters the scheduler reports (sc#337).
+fn cpu_ops() -> aien_inference_abi::OpEvidence {
+    aien_inference_abi::OpEvidence {
+        backend: "reference-cpu".into(),
+        native_fallbacks: 0,
+        reference_runs: 0,
+        report: "OP_REPORT native=[] reference=[] native_fallbacks=[] reference_runs=[]".into(),
     }
 }
 
@@ -68,6 +87,10 @@ fn proposer() -> ComposeProposer {
             token_ids: Some(OUT_IDS.to_vec()),
             prompt_tokens: Some(PROMPT_IDS.len()),
             prompt_ids_sha256: Some(token_ids_sha256(&PROMPT_IDS)),
+            // sc#294: what the scheduler reports for a greedy run of these ids.
+            decoding: Some(greedy_observation()),
+            // sc#337: what the scheduler reports for a production CPU run.
+            ops: Some(cpu_ops()),
         })
     })
 }
@@ -268,6 +291,7 @@ async fn assert_linked(d: &Daemon, f: &Flow, want_agent: &str) {
     assert_eq!(g["generation"], 1);
     assert_eq!(g["origin"], "compose_proposal");
     assert_eq!(g["model_sha256"], want.model_sha256);
+    assert_eq!(g["model_digest_kind"], want.model_digest_kind);
     assert_eq!(g["tokenizer_sha256"], want.tokenizer_sha256);
     assert_eq!(g["task"], f.report["task"]);
     assert_eq!(g["attempt"], 1);
@@ -277,6 +301,24 @@ async fn assert_linked(d: &Daemon, f: &Flow, want_agent: &str) {
     assert_eq!(g["output_tokens"], OUT_IDS.len());
     assert_eq!(g["finish_reason"], "eos");
     assert_eq!(g["daemon"]["pid"], std::process::id());
+    // sc#294: the decoding the backend reported travels into the record.
+    assert_eq!(
+        g["decoding"],
+        json!({"mode": "greedy", "greedy_tokens": OUT_IDS.len(), "sampled_tokens": 0}),
+        "{g}"
+    );
+    // sc#337: the backend and op counters travel into the record.
+    assert_eq!(
+        g["ops"],
+        json!({
+            "backend": "reference-cpu",
+            "native_fallbacks": 0,
+            "reference_runs": 0,
+            "scope": "process",
+            "report": cpu_ops().report,
+        }),
+        "{g}"
+    );
     // The grant, intent and commit still say what they said before.
     assert_eq!(
         d.record(f.commit).await["proposal_sha256"],

@@ -737,6 +737,15 @@ pub struct ProposalAttempt {
     /// sha256 of the prompt ids, each 4 little-endian bytes (NEXT-PHASE-1 v6 R1).
     #[serde(default)]
     pub prompt_ids_sha256: Option<String>,
+    /// How the backend chose this attempt's tokens (sc#294). None when the
+    /// call failed or nothing observed it; omitted from the JSON then.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decoding: Option<aien_abi_core::DecodeObservation>,
+    /// The tensor backend and its op counters when this attempt's call
+    /// finished (sc#337). None when the call failed or the backend does not
+    /// account its ops; omitted from the JSON then.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ops: Option<aien_abi_core::OpEvidence>,
     /// Requirements of the goal this attempt's complete document failed
     /// (crate::requirements); empty when none failed or none were recognized.
     #[serde(default)]
@@ -786,6 +795,13 @@ pub struct ComposeRecallReport {
     /// sha256 over the digests of records 1..=prefix (hex), when asked.
     pub prefix: Option<u64>,
     pub prefix_digest: Option<String>,
+    /// True when the daemon was built with the native Omega composition library
+    /// (not the stub). Absent in older replies (reads as false).
+    #[serde(default)]
+    pub compose_native: bool,
+    /// The omega commit the linked library was pinned to; empty for the stub.
+    #[serde(default)]
+    pub omega_sha: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

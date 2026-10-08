@@ -1113,6 +1113,10 @@ impl AienScheduler {
                                 reason: finish_reason,
                                 total_tokens,
                             });
+                            // sc#294: taken on every finish, listened to or not.
+                            let decoding = backend.take_decode_observation(request_id);
+                            // sc#337: the op counters at this finish, listened to or not.
+                            let ops = backend.op_evidence();
                             if let Some(sink_id) = finished_sink {
                                 self.completion_router.emit(
                                     sink_id,
@@ -1120,6 +1124,8 @@ impl AienScheduler {
                                         seq_id,
                                         finish_reason,
                                         total_tokens,
+                                        decoding,
+                                        ops,
                                     },
                                 );
                             }
@@ -1146,6 +1152,10 @@ impl AienScheduler {
                         let _ = self.kv_manager.write().free_sequence(request_id);
                         self.arena.free_sequence(seq_id);
                         self.metrics.finished_requests += 1;
+                        // sc#294: taken on every finish, listened to or not.
+                        let decoding = backend.take_decode_observation(request_id);
+                        // sc#337: the op counters at this finish, listened to or not.
+                        let ops = backend.op_evidence();
                         if let Some(sink_id) = finished_sink {
                             self.completion_router.emit(
                                 sink_id,
@@ -1153,6 +1163,8 @@ impl AienScheduler {
                                     seq_id,
                                     finish_reason: reason,
                                     total_tokens,
+                                    decoding,
+                                    ops,
                                 },
                             );
                         }

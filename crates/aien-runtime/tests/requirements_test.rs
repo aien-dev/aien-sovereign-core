@@ -62,7 +62,7 @@ fn unsupported_phrasing_is_not_extracted() {
     for g in [
         "write a long document",
         "at least 20 long lines",
-        "at least 20 paragraphs",
+        "at most 20 paragraphs",
         "at most 5 items",
         "at least 0 lines",
         "at least -3 lines",

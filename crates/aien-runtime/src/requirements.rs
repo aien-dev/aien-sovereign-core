@@ -60,10 +60,19 @@
 //!   (`1.`, `2)`), emphasis marks and trailing `:.!?#`, trimmed, whitespace
 //!   collapsed, compared case-insensitively.
 //! - word form (topics): lowercase, strip ONE suffix of `ment ing ion es ed
-//!   s` (only when 3 or more letters remain), then one trailing `e` (when 4
+//!   s` (only when 3 or more letters remain; not the `s` of a final `ss`), then one trailing `e` (when 4
 //!   or more letters remain). `preparing`, `prepare` and `prepared` agree;
-//!   `publishing` and `public` do not. Irregular forms (`running` / `run`)
-//!   do not agree: the check errs on the side of refusing.
+//!   `publishing` and `public` do not. A word whose suffix was stripped also
+//!   matches with a final `i` as `y` and with a doubled final consonant
+//!   undoubled, so `dry`, `dried` and `drying`, `label`, `labelled` and
+//!   `labelling`, `run` and `running` agree (`fill` and `file`, `ski` and
+//!   `sky` do not). A topic word ending in `age` or `ages` also matches
+//!   without it when 4 letters remain, by a verb form only: the topic
+//!   `storage` is covered by `store` or `stored`, `postage` not by `post`
+//!   (sc#332). Irregular forms (`withdrew` / `withdraw`)
+//!   do not agree: the check errs on the side of refusing, unless the goal
+//!   names the form for that topic, written into the topic as `withdraw (or
+//!   withdrew)`.
 //! - sentence: a run of at least two words ended by `.`, `!` or `?` (not
 //!   inside a number such as `3.10`); an unfinished last fragment of at
 //!   least three words counts as one. List markers are ignored.
@@ -106,17 +115,32 @@ pub enum Requirement {
     MinWords(usize),
     MaxWords(usize),
     MinItems(ItemKind, usize),
+    /// At least this many paragraphs (see [`count_paragraphs`]).
+    MinParagraphs(usize),
+    /// At least `n` lines (outside fenced code, leading whitespace ignored) that
+    /// start with exactly `prefix`, e.g. the `- [ ]` of a checklist.
+    MinPrefixedLines {
+        prefix: String,
+        n: usize,
+    },
     /// Case-insensitive substrings of the document.
     RequiredPhrases(Vec<String>),
-    /// Whole words, case-insensitive.
+    /// Whole words, case-insensitive. A word holding a mark other than an
+    /// apostrophe ("first-aid") must occur whole: no letter or digit right
+    /// before or after it.
     RequiredWords(Vec<String>),
     /// Section titles that must each appear as a heading.
     RequiredHeadings(Vec<String>),
     /// Topics (each a list of content words) that must each be covered: every
-    /// content word must appear in the prose as a word form.
+    /// content word must appear in the prose as a word form. A topic written
+    /// `withdraw (or withdrew, withdrawn)` is also covered by any one of the
+    /// forms the goal named for it.
     RequiredTopics(Vec<String>),
     /// Every section holds at least this many sentences.
     MinSentencesPerSection(usize),
+    /// The whole file is exactly one sentence: its prose (outside fenced code)
+    /// holds one sentence by the sentence rule in the module docs (sc#336).
+    SingleSentence,
     /// Lines ADDED to the file, measured against the prior file (see the module
     /// docs). `exact`: exactly `n`, else at least `n`. `prior` is None until
     /// the caller resolves it ([`Extraction::resolved`]); an unresolved one is unmet.
@@ -161,6 +185,10 @@ impl Requirement {
             Requirement::MinWords(n) => format!("at least {n} words"),
             Requirement::MaxWords(n) => format!("at most {n} words"),
             Requirement::MinItems(k, n) => format!("at least {n} {}", k.noun()),
+            Requirement::MinParagraphs(n) => format!("at least {n} paragraphs"),
+            Requirement::MinPrefixedLines { prefix, n } => {
+                format!("at least {n} lines starting with \"{prefix}\"")
+            }
             Requirement::RequiredPhrases(p) => format!("the phrase {}", quoted(p)),
             Requirement::RequiredWords(p) => format!("the words {}", quoted(p)),
             Requirement::RequiredHeadings(p) => format!("the headings {}", quoted(p)),
@@ -168,6 +196,7 @@ impl Requirement {
             Requirement::MinSentencesPerSection(n) => {
                 format!("at least {n} sentences in every section")
             }
+            Requirement::SingleSentence => "exactly one sentence".to_string(),
             Requirement::AddedLines { n, exact, .. } => {
                 if *exact {
                     format!("exactly {n} added non-empty lines")
@@ -216,6 +245,19 @@ impl Requirement {
                 let c = count_items(*k, content);
                 (c < *n).then(|| format!("{label}, found {c}"))
             }
+            Requirement::MinParagraphs(n) => {
+                let c = count_paragraphs(content);
+                (c < *n).then(|| {
+                    format!("{label}, found {c} (a paragraph is a block of prose lines; separate paragraphs with a blank line)")
+                })
+            }
+            Requirement::MinPrefixedLines { prefix, n } => {
+                let c = prose_lines(content)
+                    .into_iter()
+                    .filter(|l| l.trim_start().starts_with(prefix.as_str()))
+                    .count();
+                (c < *n).then(|| format!("{label}, found {c}"))
+            }
             Requirement::RequiredPhrases(p) => {
                 let low = content.to_lowercase();
                 let missing: Vec<String> = p
@@ -227,9 +269,19 @@ impl Requirement {
             }
             Requirement::RequiredWords(p) => {
                 let have: HashSet<String> = words_of(content).into_iter().collect();
+                let low = content.to_lowercase();
                 let missing: Vec<String> = p
                     .iter()
-                    .filter(|x| !have.contains(&x.to_lowercase()))
+                    .filter(|x| {
+                        let x = x.to_lowercase();
+                        // A word with a hyphen or other mark ("first-aid") is
+                        // matched whole in the text, not as split word parts.
+                        if x.chars().all(|c| c.is_alphanumeric() || c == '\'') {
+                            !have.contains(&x)
+                        } else {
+                            !has_whole(&low, &x)
+                        }
+                    })
                     .cloned()
                     .collect();
                 (!missing.is_empty()).then(|| format!("{label}, missing {}", quoted(&missing)))
@@ -254,13 +306,18 @@ impl Requirement {
             Requirement::RequiredTopics(p) => {
                 let have: HashSet<String> = words_of(&prose_lines(content).join("\n"))
                     .iter()
-                    .map(|w| stem(w))
+                    .flat_map(|w| word_keys(w, false))
                     .collect();
-                let missing: Vec<String> = p
-                    .iter()
-                    .filter(|t| !content_words(t).iter().all(|w| have.contains(&stem(w))))
-                    .cloned()
-                    .collect();
+                let has = |w: &String| word_keys(w, true).iter().any(|k| have.contains(k));
+                let covered = |t: &str| {
+                    let (topic, forms) = topic_forms(t);
+                    content_words(topic).iter().all(has)
+                        || forms.iter().any(|f| {
+                            let f = words_of(f);
+                            !f.is_empty() && f.iter().all(|w| have.contains(&stem(w)))
+                        })
+                };
+                let missing: Vec<String> = p.iter().filter(|t| !covered(t)).cloned().collect();
                 (!missing.is_empty()).then(|| {
                     format!(
                         "{label}, not covered: {} (use those words, or their word forms, in the text)",
@@ -356,6 +413,10 @@ impl Requirement {
                     format!("{label}, too few in: {}", shown.join(", "))
                 })
             }
+            Requirement::SingleSentence => {
+                let c = count_every_sentence(content);
+                (c != 1).then(|| format!("{label}, found {c}"))
+            }
         }
     }
 }
@@ -365,6 +426,18 @@ fn non_empty_lines(s: &str) -> usize {
 }
 
 /// Lowercase alphanumeric words (apostrophes kept inside a word).
+/// `needle` occurs in `hay` with no letter or digit right before or after it.
+/// Punctuation is a boundary: "first-aid" is found in "first-aid-kit" and
+/// "(first-aid)", not in "first-aider"; "x-ray" is not found in "box-ray".
+fn has_whole(hay: &str, needle: &str) -> bool {
+    !needle.is_empty()
+        && hay.match_indices(needle).any(|(i, _)| {
+            let before = hay[..i].chars().next_back();
+            let after = hay[i + needle.len()..].chars().next();
+            !before.is_some_and(char::is_alphanumeric) && !after.is_some_and(char::is_alphanumeric)
+        })
+}
+
 fn words_of(s: &str) -> Vec<String> {
     s.split(|c: char| !(c.is_alphanumeric() || c == '\''))
         .map(|w| w.trim_matches('\'').to_lowercase())
@@ -388,17 +461,72 @@ pub(crate) fn content_words(topic: &str) -> Vec<String> {
 
 /// Conservative word form (see the module docs).
 pub(crate) fn stem(w: &str) -> String {
+    stem_parts(w).0
+}
+
+/// The word form and whether a suffix was stripped.
+fn stem_parts(w: &str) -> (String, bool) {
     let mut s = w.to_lowercase();
+    let mut stripped = false;
     for suf in ["ment", "ing", "ion", "es", "ed", "s"] {
-        if s.len() >= suf.len() + 3 && s.ends_with(suf) {
+        // A final `ss` is not a plural: `dress`, `class`, `mess` (sc#332).
+        if s.len() >= suf.len() + 3 && s.ends_with(suf) && !(suf == "s" && s.ends_with("ss")) {
             s.truncate(s.len() - suf.len());
+            stripped = true;
             break;
         }
     }
     if s.len() >= 4 && s.ends_with('e') {
         s.pop();
     }
-    s
+    (s, stripped)
+}
+
+/// The forms a word may match as (see the module docs): its word form and,
+/// only when a suffix was stripped, that form with a final `i` as `y`
+/// (`dried`: `dry`) or a doubled final consonant undoubled (`labelled`:
+/// `label`). A topic word ending in `age` or `ages` (4 letters left) also
+/// matches a document word that is a verb form of the rest, one that ended
+/// in `e` or lost a suffix (`storage`: `store`, `stored`; not `post` for
+/// `postage`); those keys carry an `age:` mark so nothing else meets them
+/// (sc#332). `topic` is true for the topic's words, false for the document's.
+pub(crate) fn word_keys(w: &str, topic: bool) -> Vec<String> {
+    let (s, stripped) = stem_parts(w);
+    let mut keys = vec![s.clone()];
+    if !topic && (stripped || w.to_lowercase().ends_with('e')) {
+        keys.push(format!("age:{s}"));
+    }
+    if stripped {
+        if let Some(r) = s.strip_suffix('i') {
+            keys.push(format!("{r}y"));
+        }
+        let b = s.as_bytes();
+        if b.len() >= 4 {
+            let (x, y) = (b[b.len() - 1], b[b.len() - 2]);
+            if x == y && x.is_ascii_alphabetic() && !b"aeiou".contains(&x) {
+                keys.push(s[..s.len() - 1].to_string());
+            }
+        }
+    }
+    if topic {
+        let low = w.to_lowercase();
+        for suf in ["ages", "age"] {
+            if let Some(r) = low.strip_suffix(suf).filter(|r| r.len() >= 4) {
+                keys.push(format!("age:{}", stem(r)));
+                break;
+            }
+        }
+    }
+    keys
+}
+
+/// A topic and the extra forms the goal named for it: `withdraw (or withdrew,
+/// withdrawn)` is `("withdraw", ["withdrew", "withdrawn"])`.
+pub(crate) fn topic_forms(t: &str) -> (&str, Vec<&str>) {
+    match t.strip_suffix(')').and_then(|x| x.split_once(" (or ")) {
+        Some((topic, forms)) => (topic, forms.split(',').map(str::trim).collect()),
+        None => (t, Vec::new()),
+    }
 }
 
 /// Heading text as compared: see the module docs.
@@ -514,6 +642,68 @@ fn count_sentences(body: &str) -> usize {
     count
 }
 
+/// Sentences for `SingleSentence`, counted strictly: every stretch of words a
+/// stop (`.` `!` `?` `…` or a CJK stop) closes, however short ("Bye."), a stop
+/// glued to a capital ("Thanks.Bye."), and any words a line ends without a
+/// stop. Headings and fenced code are not prose. Only "e.g." / "i.e." and a
+/// title before a capitalised name ("Dr. Lee") do not end a sentence, so an
+/// unusual stop can only refuse a correct file, never pass a wrong one.
+fn count_every_sentence(content: &str) -> usize {
+    const STOPS: [char; 7] = [
+        '.', '!', '?', '\u{2026}', '\u{3002}', '\u{FF01}', '\u{FF1F}',
+    ];
+    const CLOSERS: [char; 8] = ['"', '\'', ')', ']', '*', '_', '\u{201D}', '\u{2019}'];
+    const TITLES: [&str; 4] = ["dr", "mr", "mrs", "prof"];
+    let mut count = 0usize;
+    for l in prose_lines(content) {
+        if l.trim_start().starts_with('#') {
+            continue;
+        }
+        let mut pieces: Vec<&str> = Vec::new();
+        for w in l.split_whitespace() {
+            let mut from = 0;
+            let mut it = w.char_indices().peekable();
+            while let Some((k, c)) = it.next() {
+                let cut = match it.peek() {
+                    Some(&(_, next)) => {
+                        matches!(c, '\u{3002}' | '\u{FF01}' | '\u{FF1F}')
+                            || matches!(c, '.' | '!' | '?') && next.is_uppercase()
+                    }
+                    None => false,
+                };
+                if cut {
+                    let at = k + c.len_utf8();
+                    pieces.push(&w[from..at]);
+                    from = at;
+                }
+            }
+            pieces.push(&w[from..]);
+        }
+        let mut open = false;
+        for (k, p) in pieces.iter().enumerate() {
+            open |= p.chars().any(char::is_alphanumeric);
+            let w = p.trim_end_matches(CLOSERS);
+            if !open || !w.ends_with(STOPS) {
+                continue;
+            }
+            let stem = w
+                .trim_end_matches(STOPS)
+                .trim_start_matches(['(', '"', '\''])
+                .to_lowercase();
+            let title = TITLES.contains(&stem.as_str())
+                && pieces
+                    .get(k + 1)
+                    .is_some_and(|n| n.starts_with(char::is_uppercase));
+            if !title && !matches!(stem.as_str(), "e.g" | "i.e") {
+                count += 1;
+                open = false;
+            }
+        }
+        count += usize::from(open);
+    }
+    count
+}
+
 fn numbered(t: &str) -> bool {
     let d = t.chars().take_while(|c| c.is_ascii_digit()).count();
     d > 0 && matches!(t[d..].chars().next(), Some('.') | Some(')')) && t[d + 1..].starts_with(' ')
@@ -552,6 +742,94 @@ fn prose_lines(s: &str) -> Vec<&str> {
         }
     }
     out
+}
+
+/// Paragraphs: maximal runs of consecutive prose lines, following CommonMark
+/// closely enough that a document cannot reach the count with lines a reader
+/// would not call paragraphs.
+/// - A blank line ends a run (whitespace-only lines are blank).
+/// - Not prose, and the end of a run: a fence and everything inside it, an ATX
+///   heading (`#` to `######`), a thematic break (`---`, `***`, `___`, also
+///   spaced). A run directly above a line of only `=` or only `-` is a setext
+///   heading and does not count.
+/// - A table row (starts with `|`) or an HTML line (starts with `<`) is not
+///   prose when it starts a block; inside a run it continues the run.
+/// - A list item (`- `, `* `, `+ `, a numbered marker, or a bare `1.`) is not
+///   prose, and neither is the text that belongs to it: the following lines up
+///   to a blank line, and after a blank line any line indented 2+ spaces.
+/// - An indented line (a tab or 4+ spaces) continues a run but never starts
+///   one (indented code).
+/// - A line with no letter or digit never starts a run.
+/// - Everything else is prose, including blockquote lines (`> text`).
+pub fn count_paragraphs(content: &str) -> usize {
+    let mut open: Option<(char, usize)> = None;
+    // `in_item`: inside a list item; `blank`: a blank line came since the last line.
+    let (mut count, mut inside, mut in_item, mut blank) = (0, false, false, false);
+    for l in content.lines() {
+        let fence = fence_marker(l);
+        if let Some((c, n)) = open {
+            if matches!(fence, Some((c2, n2, info)) if c2 == c && n2 >= n && !info) {
+                open = None;
+            }
+            continue;
+        }
+        if let Some((c, n, _)) = fence {
+            open = Some((c, n));
+            (inside, in_item) = (false, false);
+            continue;
+        }
+        let t = l.trim();
+        if t.is_empty() {
+            (inside, blank) = (false, true);
+            continue;
+        }
+        let after_blank = std::mem::replace(&mut blank, false);
+        // A run right above a line of only `=` or only `-` is a setext heading.
+        let setext = t.chars().all(|x| x == '=') || t.chars().all(|x| x == '-');
+        if setext && inside {
+            count -= 1;
+            (inside, in_item) = (false, false);
+            continue;
+        }
+        let h = t.chars().take_while(|&c| c == '#').count();
+        let heading = (1..=6).contains(&h) && (t.len() == h || t[h..].starts_with([' ', '\t']));
+        let rule = t.len() >= 3
+            && ['-', '*', '_']
+                .iter()
+                .any(|&c| t.starts_with(c) && t.chars().all(|x| x == c || x == ' '));
+        // HTML and table lines start a block, but do not interrupt a paragraph.
+        let block = !inside && (t.starts_with('|') || t.starts_with('<'));
+        if heading || rule || setext || block {
+            (inside, in_item) = (false, false);
+            continue;
+        }
+        let empty_marker = t.len() >= 2
+            && t.ends_with(['.', ')'])
+            && t[..t.len() - 1].chars().all(|c| c.is_ascii_digit());
+        if t.starts_with("- ")
+            || t.starts_with("* ")
+            || t.starts_with("+ ")
+            || numbered(t)
+            || empty_marker
+        {
+            (inside, in_item) = (false, true);
+            continue;
+        }
+        // Text right under an item, or indented 2+ after a blank line, belongs to it.
+        if in_item && (!after_blank || l.starts_with("  ") || l.starts_with('\t')) {
+            continue;
+        }
+        in_item = false;
+        let indented = l.starts_with('\t') || l.starts_with("    ");
+        if !inside && (indented || !t.chars().any(char::is_alphanumeric)) {
+            continue;
+        }
+        if !inside {
+            count += 1;
+        }
+        inside = true;
+    }
+    count
 }
 
 fn count_items(k: ItemKind, s: &str) -> usize {
