@@ -2090,6 +2090,7 @@ mod tests {
             json!({"generation_record": 7, "allen_agent": "ab".repeat(32)}),
             json!({"generation_record": 99999, "allen_agent": "none"}),
             json!({"generation_record": null, "allen_agent": "none"}),
+            json!({"generation_record": null, "allen_agent": "none", "generation_record_stale": 9, "provenance_note": "generation_record_stale"}),
             json!({"generation_record": "seven", "allen_agent": 5}),
             json!("garbage"),
             json!(null),
@@ -2125,6 +2126,10 @@ mod tests {
             "provenance",
             "stamp(",
             "inherit(",
+            "generation_record",
+            "allen_agent",
+            "stale_generation",
+            "provenance_note",
         ];
         // The enclosing `fn` of every mention.
         let mut cur = String::from("<top>");
@@ -2217,23 +2222,48 @@ mod tests {
         assert_eq!(p, Provenance::default());
         assert_eq!(p.allen_agent, NO_AGENT);
         assert_eq!(p.generation_record, None);
-        // Missing record, damaged text, wrong types: the same default, never an error.
+        // Missing record, or text that is not a record at all: the plain default
+        // (no provenance field was ever there), never an error.
         assert_eq!(inherit(&old, 77), Provenance::default());
         assert_eq!(Provenance::from_text("not json"), Provenance::default());
-        assert_eq!(
-            Provenance::from_text(
-                r#"{"provenance":{"allen_agent":"nope","generation_record":-1}}"#
-            ),
-            Provenance::default()
+        // A provenance field that is PRESENT but damaged is not silently "none":
+        // the values default and a visible note says why.
+        let bad_agent = Provenance::from_text(
+            r#"{"provenance":{"allen_agent":"nope","generation_record":-1}}"#,
         );
-        // A generation id that names no generation record is dropped on copy.
+        assert_eq!(bad_agent.allen_agent, NO_AGENT);
+        assert_eq!(bad_agent.note.as_deref(), Some("allen_agent_malformed"));
+        assert_ne!(bad_agent, Provenance::default());
+        assert_eq!(
+            bad_agent.to_json()["provenance_note"],
+            "allen_agent_malformed"
+        );
+        let not_obj = Provenance::from_text(r#"{"provenance":"garbage"}"#);
+        assert_eq!(not_obj.note.as_deref(), Some("provenance_malformed"));
+        // A generation id that names no generation record is not copied as a
+        // plain null: the old id stays visible and a note says it is stale.
         let named = vec![commit_row(
             1,
             Some(json!({"generation_record": 9, "allen_agent": "ab".repeat(32)})),
         )];
         let p = inherit(&named, 1);
         assert_eq!(p.generation_record, None);
+        assert_eq!(p.stale_generation, Some(9));
+        assert_eq!(p.note.as_deref(), Some("generation_record_stale"));
         assert_eq!(p.allen_agent, "ab".repeat(32));
+        let j = p.to_json();
+        assert_eq!(j["generation_record"], Value::Null);
+        assert_eq!(j["generation_record_stale"], 9);
+        assert_eq!(j["provenance_note"], "generation_record_stale");
+        // The marker survives the next copy down the chain (grant -> intent).
+        let next = vec![rec(
+            2,
+            "effect",
+            json!({"phase": "intent", "provenance": j}),
+        )];
+        let q = inherit(&next, 2);
+        assert_eq!(q.stale_generation, Some(9));
+        assert_eq!(q.note.as_deref(), Some("generation_record_stale"));
         // ... and kept when it does (the record must be a verified generation record).
         let mut with_gen = named.clone();
         with_gen.push(generation_row(9));
@@ -2278,6 +2308,7 @@ mod tests {
                     &Provenance {
                         generation_record: g,
                         allen_agent: "none".into(),
+                        ..Default::default()
                     },
                 )
             })

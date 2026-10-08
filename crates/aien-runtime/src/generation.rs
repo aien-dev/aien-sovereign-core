@@ -107,7 +107,7 @@ pub const PROVENANCE: &str = "provenance";
 /// The `allen_agent` value when no ALLEN identity is attached to the daemon.
 pub const NO_AGENT: &str = "none";
 
-/// The two evidence fields of the link.
+/// The evidence fields of the link.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Provenance {
     /// Ledger id of the generation record of the attempt the committed
@@ -118,6 +118,14 @@ pub struct Provenance {
     /// The ALLEN LogicalAgentId (64 hex, `aien_allen::Resolved::agent`) the
     /// task ran under, or [`NO_AGENT`].
     pub allen_agent: String,
+    /// Set when a copy found the source's generation id not naming a verified
+    /// generation record: the old id, kept visible. `generation_record` is then
+    /// null, and this marker tells that apart from "no model ran".
+    pub stale_generation: Option<u64>,
+    /// Why the evidence is degraded (`generation_record_stale`,
+    /// `allen_agent_malformed`, `provenance_malformed`), `;`-joined.
+    /// Absent on ordinary records.
+    pub note: Option<String>,
 }
 
 impl Default for Provenance {
@@ -125,6 +133,8 @@ impl Default for Provenance {
         Self {
             generation_record: None,
             allen_agent: NO_AGENT.to_string(),
+            stale_generation: None,
+            note: None,
         }
     }
 }
@@ -134,16 +144,37 @@ impl Provenance {
         Self {
             generation_record,
             allen_agent: allen.map_or_else(|| NO_AGENT.to_string(), |r| aien_allen::hex(&r.agent)),
+            ..Self::default()
+        }
+    }
+
+    fn add_note(&mut self, n: &str) {
+        match &mut self.note {
+            Some(x) if x.split("; ").any(|y| y == n) => {}
+            Some(x) => {
+                x.push_str("; ");
+                x.push_str(n);
+            }
+            None => self.note = Some(n.to_string()),
         }
     }
 
     pub fn to_json(&self) -> Value {
-        json!({"generation_record": self.generation_record, "allen_agent": self.allen_agent})
+        let mut v =
+            json!({"generation_record": self.generation_record, "allen_agent": self.allen_agent});
+        if let Some(s) = self.stale_generation {
+            v["generation_record_stale"] = json!(s);
+        }
+        if let Some(n) = &self.note {
+            v["provenance_note"] = json!(n);
+        }
+        v
     }
 
-    /// Lenient read of a record's text: anything missing or malformed reads as
-    /// the default (no generation record, agent "none"). Never an error, so a
-    /// record with a damaged or absent field is read like an old record.
+    /// Lenient read of a record's text, never an error. A record with no
+    /// provenance field at all (an old record) reads as the plain default.
+    /// A field that is present but damaged reads as the default values PLUS a
+    /// visible note, so it is never mistaken for "no model ran" / "no ALLEN".
     pub fn from_text(text: &str) -> Self {
         let Ok(v) = serde_json::from_str::<Value>(text) else {
             return Self::default();
@@ -151,19 +182,41 @@ impl Provenance {
         let Some(p) = v.get(PROVENANCE) else {
             return Self::default();
         };
-        let agent = p
-            .get("allen_agent")
-            .and_then(Value::as_str)
-            .filter(|a| {
-                *a == NO_AGENT
-                    || (a.len() == 64 && a.bytes().all(|c| matches!(c, b'0'..=b'9' | b'a'..=b'f')))
-            })
-            .unwrap_or(NO_AGENT)
-            .to_string();
-        Self {
-            generation_record: p.get("generation_record").and_then(Value::as_u64),
-            allen_agent: agent,
+        let mut out = Self::default();
+        if !p.is_object() {
+            tracing::warn!("provenance field is not an object; copied as default with a note");
+            out.add_note("provenance_malformed");
+            return out;
         }
+        match p.get("allen_agent").and_then(Value::as_str) {
+            Some(a)
+                if a == NO_AGENT
+                    || (a.len() == 64
+                        && a.bytes().all(|c| matches!(c, b'0'..=b'9' | b'a'..=b'f'))) =>
+            {
+                out.allen_agent = a.to_string()
+            }
+            _ => {
+                tracing::warn!(
+                    "provenance allen_agent is missing or malformed; copied as none with a note"
+                );
+                out.add_note("allen_agent_malformed");
+            }
+        }
+        out.generation_record = p.get("generation_record").and_then(Value::as_u64);
+        out.stale_generation = p.get("generation_record_stale").and_then(Value::as_u64);
+        // Carry an earlier note along the chain (bounded, printable ASCII only).
+        if let Some(n) = p.get("provenance_note").and_then(Value::as_str) {
+            let n: String = n
+                .chars()
+                .filter(|c| c.is_ascii_graphic() || *c == ' ')
+                .take(200)
+                .collect();
+            for part in n.split("; ").filter(|s| !s.is_empty()) {
+                out.add_note(part);
+            }
+        }
+        out
     }
 }
 
@@ -192,10 +245,15 @@ pub fn inherit(views: &[ComposeRecordView], source: u64) -> Provenance {
         .and_then(|r| r.text.as_deref())
         .map(Provenance::from_text)
         .unwrap_or_default();
-    if p.generation_record
-        .is_some_and(|g| !generation_exists(views, g))
-    {
-        p.generation_record = None;
+    if let Some(g) = p.generation_record {
+        if !generation_exists(views, g) {
+            tracing::warn!(
+                "provenance names generation record #{g}, which is not a verified generation record; copied as null with a stale marker"
+            );
+            p.generation_record = None;
+            p.stale_generation = Some(g);
+            p.add_note("generation_record_stale");
+        }
     }
     p
 }
