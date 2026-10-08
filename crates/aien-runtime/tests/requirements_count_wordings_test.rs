@@ -73,6 +73,15 @@ fn related_wordings_are_read_the_same_way() {
             vec![heads(&["Costs"])],
         ),
         ("A section is titled \"Costs\".", vec![heads(&["Costs"])]),
+        // a hedge in another sentence does not reach this one
+        (
+            "You may write more. One section must be titled \"Costs\".",
+            vec![heads(&["Costs"])],
+        ),
+        (
+            "Keep it between 16 and 30 lines and between 100 and 300 words.",
+            vec![MinLines(16), MaxLines(30), MinWords(100), MaxWords(300)],
+        ),
         (
             "Two sections must be titled \"Costs\" and \"Risks\".",
             vec![heads(&["Costs", "Risks"])],
@@ -120,6 +129,17 @@ fn near_misses_stay_uncertain() {
         "Keep it between 16 and 30 lines or so.",
         // sc#343 review: "under" is a preposition only after an organising verb
         "Keep it under 3 sections titled \"A\", \"B\" and \"C\".",
+        // sc#343 review round 2: a hedge anywhere in the sentence
+        "A section is titled \"X\", if you can.",
+        "One section must be titled \"X\", unless it is short.",
+        "One section must be titled \"X\"; maybe add more.",
+        "If needed, one section must be titled \"X\".",
+        "Please write an essay, and one section must be titled \"A\", when relevant.",
+        // round 2: a part of the document anywhere earlier in the sentence
+        "Write the essay so that every single long paragraph stays between 16 and 30 words.",
+        "Write the poem so that its stanzas are between 16 and 30 words.",
+        "Write the poem; the stanzas should be between 16 and 30 words.",
+        "Keep it between 16 and 30 lines long, or so.",
     ] {
         let ex = analyze(goal);
         assert!(

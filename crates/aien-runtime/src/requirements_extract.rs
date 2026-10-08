@@ -188,6 +188,53 @@ fn ends_clause(raw: &str) -> bool {
     raw.ends_with([',', '.', ';', ':', '!', '?', ')'])
 }
 
+/// The token ends a sentence: `.`, `!` or `?`, possibly before closing quotes
+/// or a bracket (`"Costs".` and `"Costs."` both end one).
+fn ends_sentence(raw: &str) -> bool {
+    raw.trim_end_matches(['"', '\'', '\u{201d}', '\u{2019}', ')'])
+        .ends_with(['.', '!', '?'])
+}
+
+/// The token range of the sentence holding token `i`.
+fn sentence_of(toks: &[Tok], i: usize) -> std::ops::Range<usize> {
+    let mut lo = i;
+    while lo > 0 && !ends_sentence(&toks[lo - 1].raw) {
+        lo -= 1;
+    }
+    let mut hi = i;
+    while hi + 1 < toks.len() && !ends_sentence(&toks[hi].raw) {
+        hi += 1;
+    }
+    lo..hi + 1
+}
+
+/// Nouns that name a part of the document, not the whole of it: a range or a
+/// bound in the same sentence may be about that part (sc#343 review).
+const PART_NOUNS: [&str; 22] = [
+    "paragraph",
+    "paragraphs",
+    "stanza",
+    "stanzas",
+    "verse",
+    "verses",
+    "bullet",
+    "bullets",
+    "entry",
+    "entries",
+    "item",
+    "items",
+    "sentence",
+    "sentences",
+    "gap",
+    "gaps",
+    "space",
+    "distance",
+    "row",
+    "rows",
+    "column",
+    "columns",
+];
+
 /// Words allowed right after the counted noun or the quoted phrase: they
 /// join a new clause instead of qualifying the count.
 const CLAUSE_JOINERS: [&str; 9] = [
@@ -879,16 +926,21 @@ pub fn analyze(goal: &str) -> Extraction {
                 };
                 // Not about a part of the document ("each paragraph between ...",
                 // "the gap between ..."), and not approximate ("... lines or so").
-                let part = s >= 1
-                    && (NOUNS.contains(&toks[s - 1].word.as_str())
-                        || matches!(
-                            toks[s - 1].word.as_str(),
-                            "gap" | "gaps" | "space" | "distance"
-                        ))
-                    || toks[s.saturating_sub(3)..s]
-                        .iter()
-                        .any(|t| matches!(t.word.as_str(), "each" | "every" | "per"));
-                let or_so = w(s + 5) == Some("or") && w(s + 6) == Some("so");
+                // Anywhere earlier in the sentence: "every single long paragraph
+                // stays between ...", "its stanzas are between ...".
+                let part = s >= 1 && NOUNS.contains(&toks[s - 1].word.as_str())
+                    || toks[sentence_of(&toks, s).start..s].iter().any(|t| {
+                        let t = t.word.as_str();
+                        matches!(t, "each" | "every" | "per")
+                            || PART_NOUNS.contains(&t)
+                            || SECTION_NOUNS.contains(&t)
+                    });
+                let o = if w(s + 5) == Some("long") {
+                    s + 6
+                } else {
+                    s + 5
+                };
+                let or_so = w(o) == Some("or") && w(o + 1) == Some("so");
                 if let Some((a, b)) = pair {
                     if lo <= hi
                         && !part
@@ -1205,21 +1257,15 @@ pub fn analyze(goal: &str) -> Extraction {
         let needs_quotes = titled_at.is_some_and(|x| x.1);
         // The new forms are read only for one plain, unconditional title list:
         // not "each|every|all|any section is titled", not "... if needed".
+        // The whole sentence is scanned, past commas and semicolons:
+        // "titled \"X\", unless ...", "If needed, one section ...".
         let hedged = needs_quotes && {
-            let mut lo = noun_at;
-            while lo > 0 && !ends_clause(&toks[lo - 1].raw) {
-                lo -= 1;
-            }
-            let mut hi = k;
-            while hi + 1 < n && !ends_clause(&toks[hi].raw) {
-                hi += 1;
-            }
             (noun_at >= 1
                 && matches!(
                     toks[noun_at - 1].word.as_str(),
                     "each" | "every" | "all" | "any"
                 ))
-                || toks[lo..=hi].iter().any(|t| {
+                || toks[sentence_of(&toks, noun_at)].iter().any(|t| {
                     matches!(
                         t.word.as_str(),
                         "if" | "unless"
