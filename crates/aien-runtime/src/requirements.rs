@@ -108,7 +108,9 @@ pub enum Requirement {
     MinItems(ItemKind, usize),
     /// Case-insensitive substrings of the document.
     RequiredPhrases(Vec<String>),
-    /// Whole words, case-insensitive.
+    /// Whole words, case-insensitive. A word holding a mark other than an
+    /// apostrophe ("first-aid") must occur whole: no letter or digit right
+    /// before or after it.
     RequiredWords(Vec<String>),
     /// Section titles that must each appear as a heading.
     RequiredHeadings(Vec<String>),
@@ -227,9 +229,19 @@ impl Requirement {
             }
             Requirement::RequiredWords(p) => {
                 let have: HashSet<String> = words_of(content).into_iter().collect();
+                let low = content.to_lowercase();
                 let missing: Vec<String> = p
                     .iter()
-                    .filter(|x| !have.contains(&x.to_lowercase()))
+                    .filter(|x| {
+                        let x = x.to_lowercase();
+                        // A word with a hyphen or other mark ("first-aid") is
+                        // matched whole in the text, not as split word parts.
+                        if x.chars().all(|c| c.is_alphanumeric() || c == '\'') {
+                            !have.contains(&x)
+                        } else {
+                            !has_whole(&low, &x)
+                        }
+                    })
                     .cloned()
                     .collect();
                 (!missing.is_empty()).then(|| format!("{label}, missing {}", quoted(&missing)))
@@ -365,6 +377,16 @@ fn non_empty_lines(s: &str) -> usize {
 }
 
 /// Lowercase alphanumeric words (apostrophes kept inside a word).
+/// `needle` occurs in `hay` with no letter or digit right before or after it.
+fn has_whole(hay: &str, needle: &str) -> bool {
+    !needle.is_empty()
+        && hay.match_indices(needle).any(|(i, _)| {
+            let before = hay[..i].chars().next_back();
+            let after = hay[i + needle.len()..].chars().next();
+            !before.is_some_and(char::is_alphanumeric) && !after.is_some_and(char::is_alphanumeric)
+        })
+}
+
 fn words_of(s: &str) -> Vec<String> {
     s.split(|c: char| !(c.is_alphanumeric() || c == '\''))
         .map(|w| w.trim_matches('\'').to_lowercase())
