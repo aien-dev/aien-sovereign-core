@@ -269,7 +269,7 @@ const SILENT: [&str; 12] = [
 ];
 
 /// Goals whose explicit requirements are all read and enforced.
-const RECOGNIZED: [&str; 18] = [
+const RECOGNIZED: [&str; 20] = [
     "dryrun-tasks-v2/N1",
     "tasks-oq3-v3/N1",
     "tasks-oq3-v4/N1",
@@ -280,6 +280,9 @@ const RECOGNIZED: [&str; 18] = [
     // sc#336: a file of one sentence.
     "tasks-oq3-v3/R1",
     "tasks-oq3-v4/R1",
+    // sc#335: "at least ten|twelve paragraphs" is MinParagraphs.
+    "tasks-oq3-v3/N2",
+    "tasks-oq3-v4/N2",
     "tasks-oq3-v4/RT4",
     "tasks-oq3-v4/RT6",
     "tasks-oq3-v4/W1",
@@ -293,7 +296,7 @@ const RECOGNIZED: [&str; 18] = [
 ];
 
 /// Goals still refused as uncertain, each with the span that is reported and why.
-const REFUSED: [(&str, &str, &str); 6] = [
+const REFUSED: [(&str, &str, &str); 4] = [
     (
         "dryrun-tasks-v2/T6",
         "one section per symptom",
@@ -303,16 +306,6 @@ const REFUSED: [(&str, &str, &str); 6] = [
         "tasks-oq3-v3/G1",
         "one fenced shell code example in each of them",
         "a per-section code example count",
-    ),
-    (
-        "tasks-oq3-v3/N2",
-        "at least ten paragraphs",
-        "paragraph counts are not supported",
-    ),
-    (
-        "tasks-oq3-v4/N2",
-        "at least twelve paragraphs",
-        "paragraph counts are not supported",
     ),
     (
         "tasks-oq3-v4/W3",

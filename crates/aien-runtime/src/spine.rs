@@ -2482,6 +2482,12 @@ impl ComposeBridge {
                 missing,
                 prefix,
                 prefix_digest,
+                compose_native: aien_omega_compose::LINKED,
+                omega_sha: if aien_omega_compose::LINKED {
+                    aien_omega_compose::EXPECTED_OMEGA_SHA.to_string()
+                } else {
+                    String::new()
+                },
             })
         });
         match r {
