@@ -225,6 +225,8 @@ pub struct Ledger {
     pub commits: BTreeMap<u64, CommitRow>,
     /// Minted grants by compose-commit record, oldest first.
     pub minted_by_commit: BTreeMap<u64, Vec<u64>>,
+    /// Desk-MAC nonces already used by a minted grant (#297): one grant per nonce.
+    pub desk_nonces: std::collections::BTreeSet<String>,
     pub intents: BTreeMap<u64, IntentRow>,
     /// authorization id -> intent id (one intent per authorization).
     pub spent: BTreeMap<u64, u64>,
@@ -328,6 +330,9 @@ impl Ledger {
                     Some(_) => {
                         let commit = u(&v, "compose_commit", id)?;
                         self.minted_by_commit.entry(commit).or_default().push(id);
+                        if let Some(n) = v.get("desk_nonce").and_then(Value::as_str) {
+                            self.desk_nonces.insert(n.to_string());
+                        }
                         Some(MintedGrant { commit })
                     }
                 },
@@ -984,6 +989,19 @@ pub struct MintRequest {
 /// is spent exactly once); a grant that settled DONE does: one committed
 /// proposal gives at most one DONE effect.
 pub fn mint_grant(b: &ComposeBridge, req: &MintRequest) -> ControlResponse {
+    authorize(b, req, None)
+}
+
+/// `ComposeAuthorize` with the optional approval-desk proof (#297). When the
+/// bridge runs with the desk switch ON, a missing or wrong proof, a missing
+/// desk key, a MAC over other fields, or a reused nonce is refused and
+/// NOTHING is written. With the switch OFF the proof is ignored (legacy
+/// behaviour: OS-user authentication only).
+pub fn authorize(
+    b: &ComposeBridge,
+    req: &MintRequest,
+    proof: Option<&crate::control::DeskProof>,
+) -> ControlResponse {
     if let Err(e) = reconcile_gate(b) {
         return ControlResponse::Error(e);
     }
@@ -995,6 +1013,25 @@ pub fn mint_grant(b: &ComposeBridge, req: &MintRequest) -> ControlResponse {
         if req.constraints.len() > 3 {
             return Err(no("NotAuthorized", "at most 3 constraint links".into()));
         }
+        let desk = if b.authorize_requires_desk() {
+            let Some(p) = proof else {
+                return Err(no(
+                    "DeskMacRequired",
+                    "this daemon requires the approval desk MAC on ComposeAuthorize (AIEN_COMPOSE_AUTHORIZE_REQUIRES_DESK=1); none was supplied".into(),
+                ));
+            };
+            if p.nonce.is_empty()
+                || p.nonce.len() > 128
+                || !p.nonce.bytes().all(|c| c.is_ascii_alphanumeric() || b"-_.".contains(&c))
+            {
+                return Err(no("DeskMacInvalid", "nonce must be 1 to 128 of [A-Za-z0-9._-]".into()));
+            }
+            let key = crate::approved_auth::DeskKey::load(&crate::approved_auth::desk_key_path(b.dir()))
+                .map_err(|e| no("NoDesk", e))?;
+            Some((key, p))
+        } else {
+            None
+        };
         let l = ledger(home)?;
         let mut hits = l
             .commits
@@ -1021,6 +1058,29 @@ pub fn mint_grant(b: &ComposeBridge, req: &MintRequest) -> ControlResponse {
         }
         let target = Path::new(&c.workspace).join(&c.path).display().to_string();
         confine_target(&c.workspace, &c.path, &target).map_err(|r| r.to_string())?;
+        if let Some((key, p)) = &desk {
+            // Path, content and workspace are the daemon's own commit record;
+            // the MAC must cover exactly those.
+            let binding = crate::approved_auth::AuthorizeBinding {
+                cx_promotion: c.cx_promotion,
+                proposal_sha256: c.proposal_sha256.clone(),
+                path: c.path.clone(),
+                content_sha256: c.content_sha256.clone(),
+                workspace: c.workspace.clone(),
+                approver: req.approver.trim().to_string(),
+                constraints: req.constraints.clone(),
+                nonce: p.nonce.clone(),
+                desk_key_id: key.id().to_string(),
+            };
+            key.verify_authorize(&binding, &p.mac)
+                .map_err(|e| no("DeskMacInvalid", e))?;
+            if l.desk_nonces.contains(&p.nonce) {
+                return Err(no(
+                    "Replayed",
+                    format!("authorize nonce {} already minted a grant; a replayed authorize mints nothing", p.nonce),
+                ));
+            }
+        }
         let prior = file_sha256(Path::new(&target))?;
         for &gid in l.minted_by_commit.get(&c.id).into_iter().flatten() {
             if l.revoked.contains_key(&gid) || l.stops.iter().any(|&s| s > gid) {
@@ -1061,12 +1121,16 @@ pub fn mint_grant(b: &ComposeBridge, req: &MintRequest) -> ControlResponse {
         }
         let mut links = vec![c.id];
         links.extend(&req.constraints);
-        let text = json!({
+        let mut text = json!({
             MINTED_GRANT: 1, "compose_commit": c.id, "proposal_sha256": c.proposal_sha256,
             "path": c.path, "content_sha256": c.content_sha256,
             "approver": req.approver.trim(), "target": target, "workspace": c.workspace,
             "prior_sha256": prior, "cx_promotion": c.cx_promotion, "cx_evidence": c.cx_evidence,
         });
+        if let Some((key, p)) = &desk {
+            text["desk_nonce"] = json!(p.nonce);
+            text["desk_key_id"] = json!(key.id());
+        }
         append(home, NoteKind::Authorization, &links, &text)
     }))
 }
