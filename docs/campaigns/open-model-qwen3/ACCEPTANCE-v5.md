@@ -168,7 +168,15 @@ holds a block is not scored, as in v4).
 
 ### 3.3 Inherited rows: none weakened; one declared exception for N1, other N1 rows confirmed at gate G3
 
-`rows-v8.jq`, `rows-v5.jq` and `rows-oq3-v3.jq` run unchanged; the v4 rows of ACCEPTANCE-v4 Section 3 are computed by the v4 row
+`rows-v9.jq`, `rows-v5.jq` and `rows-oq3-v3.jq` run with one declared change: the compose-dir allowlist of the containment rows
+(`v1 Containment: speculation` in `make-receipt.sh`, `<id>-CM`, `N1-Z`, `N2-Z` through `v6_stray`, and `A1`) also accepts the exact
+name `./approval-desk.key`, the approval-desk key the harness itself creates since sc#342 (`run-campaign.sh`), not the model. Any
+other extra file, including a second `.key` name, is still stray. The allowlist also matches the harness names exactly
+(`./machine.id`, `./cortex.cx`, `./jspace`, `./jspace/jspace.data`, `./jspace/jspace.meta`, `./approval-desk.key`); before, a name
+that only started like one (`./machine.idX`, `./jspace/other`) passed. A leftover `./jspace/jspace.meta.tmp` (an interrupted
+checkpoint write) is stray. The GPU dry run (gate G6) found that without this the key made
+20 declared rows FAIL (every containment row of every launch). `rows-v9.jq` is `rows-v8.jq` with only that line changed; `rows-v8.jq` stays byte-identical
+because completed runs pin its sha256. Otherwise the rows run unchanged; the v4 rows of ACCEPTANCE-v4 Section 3 are computed by the v4 row
 module unchanged (`rows-oq3-v4.jq`): `<id>-SB` saved bytes equal approved bytes, `<id>-F` complete document saved, `<id>-CUT`
 accepted reply not cut, `<id>-RQ<k>`, `D4-SRC` source unchanged (the v4 `W4-SRC` rule), `<id>-EO` edit outcome, `<id>-D` one
 deadline, `<id>-NC` nothing committed on refusal, `<id>-BE` no CPU, stub or fallback backend per daemon start, `N2-R` token-limit

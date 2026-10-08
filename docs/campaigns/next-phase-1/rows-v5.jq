@@ -59,7 +59,7 @@ def v5_rows:
   | ($e.committed.text) as $text
   | ($e.task.destination // null) as $dest
   | ($e.containment.compose_dir_files
-       | map(select(test("^\\./(machine\\.id|cortex\\.cx|jspace)") | not))) as $stray
+       | map(select(IN("./machine.id", "./cortex.cx", "./jspace", "./jspace/jspace.data", "./jspace/jspace.meta", "./approval-desk.key") | not))) as $stray
   | ($e.authorizations | .[0] // {}) as $auth
   | ($e.explanation.receipts | map(.tool)) as $tools
   | ($e.effect_receipts | map({path, sha256})) as $known

@@ -102,7 +102,8 @@ printf '%s\n' "$MEM" >"$BASE/meminfo-part$PART.json"
 up_ms() { echo $(( $(tr -d . </proc/uptime | cut -d' ' -f1) * 10 )); }
 # The receipt builder looks for tasks-v8.json, rows-v5/v8.jq and the seed folders next to itself. A staging folder of
 # links to the unchanged next-phase-1 files, with tasks-v8.json replaced by this campaign's tasks file and seed-v5
-# linked in, lets the unchanged make-receipt.sh and rows-v8.jq be used (as in v4).
+# linked in, lets make-receipt.sh and rows-v9.jq be used (rows-v9.jq is rows-v8.jq with the harness approval-desk key allowed in the
+# compose dir, sc#342; rows-v8.jq itself stays byte-identical because completed runs pin it).
 STAGE=$BASE/stage
 # The unchanged make-receipt.sh reads seed/<destination> for any task that has a seed, which only fits edits. A document
 # whose seed holds a different source file (D4) is staged with seed null for the receipt builder only; the driver still
@@ -154,7 +155,7 @@ for id in $LAUNCHES; do
     fi
     v5env=(); [ "$(jq -r '.destination // empty' <<<"$t")" != "" ] && [ "${id#N}" = "$id" ] && \
       v5env=(TASK_ID="$id" TASK_SPEC="$TASKS" TASK_ACCEPTANCE="$HERE/ACCEPTANCE-v5.md")
-    env "${v5env[@]}" V6_ROWS=rows-v8.jq V8_MERGE="$v8merge" V6_TASK="$id" V6_MAX_TOKENS="$max" V6_REFERENCE="$ref" \
+    env "${v5env[@]}" V6_ROWS=rows-v9.jq V8_MERGE="$v8merge" V6_TASK="$id" V6_MAX_TOKENS="$max" V6_REFERENCE="$ref" \
       SPEC="open-model-qwen3/ACCEPTANCE-v5.md spec_version 5${OQ3_DRY_TASKS:+ DRY RUN}" bash "$STAGE/make-receipt.sh" \
       "$BASE/$id" "$OUT" "$SC" "$OMC" "$OMG" 0 "OPEN-MODEL-QWEN3 v5${OQ3_DRY_TASKS:+ DRY RUN} launch $id" >"$BASE/$id.receipt.out" 2>&1
     rec=$OUT/$(head -1 "$BASE/$id.receipt.out" | sed -n 's/.*receipt \([0-9a-f]*\.json\).*/\1/p')
