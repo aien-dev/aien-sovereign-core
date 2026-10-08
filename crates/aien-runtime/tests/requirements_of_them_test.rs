@@ -51,6 +51,15 @@ fn other_referents_and_wordings_read_the_same_way() {
             "Every step is its own line starting with \"- \" and I want more than 4 of them.",
             5,
         ),
+        // curly quotes (sc#340 review: a curly closing quote panicked the reader)
+        (
+            "Write every item as a line starting with \u{201C}- [ ]\u{201D} and include at least 4 of them.",
+            4,
+        ),
+        (
+            "Write lines starting with \u{201C}- [ ]\u{201D} and include at least 6 of those lines.",
+            6,
+        ),
     ] {
         let ex = analyze(goal);
         assert!(ex.uncertain.is_empty(), "{goal}: {:?}", ex.uncertain);
@@ -96,6 +105,21 @@ fn a_count_without_a_stated_referent_stays_uncertain() {
         "Write every item as a line starting with \"- [ ]\" but do not include at least twelve of them.",
         // two prefixes: which one is meant is unclear
         "Write each item as a line starting with \"- [ ]\" or \"* [ ]\" and include at least twelve of them.",
+        // sc#340 review cases: a curly quote with another clause before the count
+        "Each line starting with \u{201C}- [ ]\u{201D} counts; include at least 4 of them.",
+        // a negator before the referent
+        "Avoid lines starting with \"- [ ]\" and include at least five of them.",
+        "Do not write any line starting with \"TODO\" and include at least five of them.",
+        // a single line, not every item
+        "Start the file with a line starting with \"# Title\" and include at least 5 of those items.",
+        // a per-section intent
+        "Each section has lines starting with \"- [ ]\", and include at least 3 of them.",
+        // another condition on the lines
+        "Write lines starting with \"- \" and ending with \"!\" and include at least 4 of them.",
+        // the referent is too far from the count
+        "Write lines starting with \"- \" for the shopping, the cleaning, the garden and the car, and include at least 4 of them.",
+        // a count the bound cue does not lead
+        "Write lines starting with \"- [ ]\" and include 12 or more of them.",
     ] {
         let ex = analyze(goal);
         assert!(
