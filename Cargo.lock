@@ -329,6 +329,7 @@ version = "0.1.0"
 dependencies = [
  "aien-abi-core",
  "aien-allen",
+ "aien-allen-memory",
  "aien-allen-profile",
  "aien-inference-abi",
  "aien-kv-cache",

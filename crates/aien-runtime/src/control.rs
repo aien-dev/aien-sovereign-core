@@ -70,6 +70,10 @@ pub enum ControlCommand {
     RunComposeTask {
         goal: String,
         workspace: String,
+        /// ALLEN memory context for this task (`personal`, `work`, `project:<name>`),
+        /// supplied by the operator only. `None`: no memory is included.
+        #[serde(default)]
+        context: Option<String>,
     },
     /// NEXT-PHASE-1 cut 2: append one operator record (`kind` = "constraint",
     /// "authorization" or "effect") to the composition's Cortex journal through
@@ -111,6 +115,50 @@ pub enum ControlCommand {
     /// Write a NEW revision with the defaults. The identity is untouched.
     AllenProfileReset {
         expected_revision: u64,
+    },
+    /// ALLEN scoped memory (arch#159). `context` is parsed by the daemon from this
+    /// operator command only; no model text or file content ever reaches it.
+    AllenMemoryPut {
+        context: String,
+        /// `fact` or `preference`.
+        kind: String,
+        text: String,
+    },
+    AllenMemoryRecall {
+        context: String,
+        query: Option<String>,
+    },
+    /// One context, or `owner` = true for every context (exactly one of the two).
+    AllenMemoryInspect {
+        context: Option<String>,
+        owner: bool,
+    },
+    AllenMemoryCorrect {
+        context: String,
+        item: String,
+        text: String,
+    },
+    /// Forget one `item`, or everything in `context` (`all_in_context`); exactly one.
+    AllenMemoryForget {
+        context: String,
+        item: Option<String>,
+        all_in_context: bool,
+    },
+    AllenMemoryExport {
+        context: Option<String>,
+        owner: bool,
+    },
+    AllenGoalsList {
+        context: Option<String>,
+        owner: bool,
+    },
+    AllenGoalAdd {
+        context: String,
+        text: String,
+    },
+    AllenGoalClose {
+        context: String,
+        item: String,
     },
     /// NEXT-PHASE-2: the effect-boundary checks and the durable intent, in one
     /// step (ACCEPTANCE-v2 2.1, 2.3). Answered with `ComposeNoted` (the intent).
@@ -228,6 +276,8 @@ pub enum ControlResponse {
     AllenHistory(Box<AllenHistoryReport>),
     /// A profile command was refused; nothing was changed.
     AllenRefused(Box<AllenRefusalReport>),
+    /// Result of an `AllenMemory*` or `AllenGoal*` command.
+    AllenMemoryResult(Box<AllenMemoryReport>),
     /// Result of `ComposeNote`.
     ComposeNoted(ComposeNoteReport),
     /// Result of `ComposeRecall`.
@@ -612,6 +662,9 @@ pub struct ComposeTaskReport {
     /// ALLEN persona used for this task (arch#159). Old reports have none.
     #[serde(default)]
     pub persona: Option<PersonaReport>,
+    /// ALLEN memory used for this task (arch#159). Old reports have none.
+    #[serde(default)]
+    pub memory: Option<MemoryReport>,
 }
 
 /// One proposal the compose "model" Skill made (ACCEPTANCE-v2 3b).
@@ -823,4 +876,27 @@ pub struct AllenRefusalReport {
     /// Plain-language reason.
     pub message: String,
     pub current_revision: Option<u64>,
+}
+
+/// Which memory a task saw (arch#159). `state`: `not_requested` (no context
+/// was given, nothing included), `not_engaged`, `included` (`items_included`
+/// notes for exactly `context`) or `refused` (store damaged or foreign: the
+/// task ran with no memory, `reason` says why).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MemoryReport {
+    pub context: Option<String>,
+    pub items_included: usize,
+    pub state: String,
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
+/// Answer to a memory or goal command: what was done, in which context, and
+/// the JSON result (items, ids, export).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AllenMemoryReport {
+    pub action: String,
+    /// The context the call named; `None` for an owner-wide call.
+    pub context: Option<String>,
+    pub result: serde_json::Value,
 }

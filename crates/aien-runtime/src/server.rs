@@ -807,9 +807,12 @@ async fn handle_connection(
             ControlCommand::RunComposeTask {
                 ref goal,
                 ref workspace,
+                ref context,
             } => {
-                let (g, w) = (goal.clone(), workspace.clone());
-                Some(Box::new(move |b: &Arc<ComposeBridge>| b.run_task(&g, &w)))
+                let (g, w, c) = (goal.clone(), workspace.clone(), context.clone());
+                Some(Box::new(move |b: &Arc<ComposeBridge>| {
+                    b.run_task_in(&g, &w, c.as_deref())
+                }))
             }
             ControlCommand::ComposeNote {
                 ref kind,
@@ -911,6 +914,15 @@ async fn handle_connection(
             | ControlCommand::AllenProfileSet { .. }
             | ControlCommand::AllenProfileHistory
             | ControlCommand::AllenProfileRevert { .. }
+            | ControlCommand::AllenMemoryPut { .. }
+            | ControlCommand::AllenMemoryRecall { .. }
+            | ControlCommand::AllenMemoryInspect { .. }
+            | ControlCommand::AllenMemoryCorrect { .. }
+            | ControlCommand::AllenMemoryForget { .. }
+            | ControlCommand::AllenMemoryExport { .. }
+            | ControlCommand::AllenGoalsList { .. }
+            | ControlCommand::AllenGoalAdd { .. }
+            | ControlCommand::AllenGoalClose { .. }
             | ControlCommand::AllenProfileReset { .. } => {
                 let c = envelope.command.clone();
                 Some(Box::new(move |b: &Arc<ComposeBridge>| b.allen_command(&c)))

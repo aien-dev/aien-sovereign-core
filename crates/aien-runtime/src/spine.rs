@@ -421,6 +421,15 @@ impl AienRuntimeSpine {
             | ControlCommand::AllenProfileSet { .. }
             | ControlCommand::AllenProfileHistory
             | ControlCommand::AllenProfileRevert { .. }
+            | ControlCommand::AllenMemoryPut { .. }
+            | ControlCommand::AllenMemoryRecall { .. }
+            | ControlCommand::AllenMemoryInspect { .. }
+            | ControlCommand::AllenMemoryCorrect { .. }
+            | ControlCommand::AllenMemoryForget { .. }
+            | ControlCommand::AllenMemoryExport { .. }
+            | ControlCommand::AllenGoalsList { .. }
+            | ControlCommand::AllenGoalAdd { .. }
+            | ControlCommand::AllenGoalClose { .. }
             | ControlCommand::AllenProfileReset { .. } => ControlResponse::Error(
                 "compose commands are handled on the socket connection, not as one-shot commands"
                     .into(),
@@ -1656,6 +1665,8 @@ pub(crate) struct ComposeHome {
     pub(crate) compose: Compose,
     /// The ALLEN identity this home resolved (`None` = not engaged).
     pub(crate) allen: Option<aien_allen::Resolved>,
+    /// ALLEN scoped memory (arch#159), opened with the identity above.
+    pub(crate) memory: crate::allen_memory::MemoryState,
     pub(crate) machine_id: String,
     prompts: Arc<parking_lot::Mutex<HashMap<u64, TaskEntry>>>,
     /// Proposer hook: task -> approved proposal text (crate::approved).
@@ -1895,9 +1906,11 @@ impl ComposeBridge {
         // ALLEN identity gate: after the open (record 1 exists, skills are
         // registered), before the home is handed out. Fatal when engaged.
         let allen = allen_gate(&self.dir, &mut compose, &info.machine_id);
+        let memory = crate::allen_memory::MemoryState::open(&self.dir, allen.as_ref());
         let mut home = ComposeHome {
             compose,
             allen,
+            memory,
             budgets,
             machine_id: hex(&info.machine_id),
             prompts,
@@ -1955,7 +1968,17 @@ impl ComposeBridge {
 
     /// Blocking: runs inference inside the Skill. Call from a blocking thread.
     pub fn run_task(&self, goal: &str, workspace: &str) -> ControlResponse {
-        match self.run_task_inner(goal, workspace, None) {
+        self.run_task_in(goal, workspace, None)
+    }
+
+    /// `run_task` with an operator-named ALLEN memory context (`None` = no memory).
+    pub fn run_task_in(
+        &self,
+        goal: &str,
+        workspace: &str,
+        context: Option<&str>,
+    ) -> ControlResponse {
+        match self.run_task_inner(goal, workspace, None, context) {
             Ok(r) => ControlResponse::ComposeTaskResult(Box::new(r)),
             Err(e) => ControlResponse::Error(e),
         }
@@ -1971,7 +1994,7 @@ impl ComposeBridge {
         workspace: &str,
         approved_text: &str,
     ) -> Result<ComposeTaskReport, String> {
-        self.run_task_inner(goal, workspace, Some(approved_text))
+        self.run_task_inner(goal, workspace, Some(approved_text), None)
     }
 
     fn run_task_inner(
@@ -1979,6 +2002,7 @@ impl ComposeBridge {
         goal: &str,
         workspace: &str,
         approved_text: Option<&str>,
+        context: Option<&str>,
     ) -> Result<ComposeTaskReport, String> {
         if goal.trim().is_empty() {
             return Err("RunComposeTask: empty goal".into());
@@ -2031,6 +2055,15 @@ impl ComposeBridge {
         // ALLEN persona (arch#159): only a model run reads it; an approved
         // proposal runs no model, so it carries no persona. Not engaged: the
         // prompt is exactly what it was.
+        // ALLEN memory (arch#159): a model run with an operator-named context only.
+        let (memory_block, memory) = match approved_text {
+            None => {
+                let (b, r) = crate::allen_memory::for_task(&home.memory, context)?;
+                (b, Some(r))
+            }
+            Some(_) => (None, None),
+        };
+        plan.0 = crate::allen_memory::prefix_prompt(&plan.0, memory_block.as_deref());
         let persona_ctx = match approved_text {
             None => crate::persona::context_for(&self.dir, home.allen.as_ref()),
             Some(_) => None,
@@ -2153,6 +2186,7 @@ impl ComposeBridge {
                 None => self.proposer_label.clone(),
             },
             persona,
+            memory,
         })
     }
 
@@ -2248,6 +2282,9 @@ impl ComposeBridge {
     /// identity is resolved there). Blocking.
     pub fn allen_command(&self, cmd: &ControlCommand) -> ControlResponse {
         let r = self.with_home(|home| {
+            if crate::allen_memory::is_memory_command(cmd) {
+                return Ok(crate::allen_memory::handle_command(&home.memory, cmd));
+            }
             Ok(crate::persona::handle_allen_command(
                 &self.dir,
                 home.allen.as_ref(),
