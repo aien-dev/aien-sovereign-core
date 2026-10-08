@@ -117,7 +117,7 @@ fn user(content: &str) -> Vec<ChatTurn> {
 
 fn prompt_len(content: &str) -> usize {
     let tok = toy_tokenizer();
-    tok.encode(&format_chat(tok.template(), &user(content)))
+    tok.encode(&format_chat(tok.template(), &user(content)).expect("chat"))
         .expect("encode")
         .len()
 }
@@ -297,12 +297,13 @@ async fn cpu_reference_tokens_unchanged_by_warm_up() {
         format_chat(
             tok.template(),
             &user(&aien_runtime::spine::proposal_prompt(goal, "/tmp/ws"))
-        ),
+        )
+        .expect("chat"),
         aien_runtime::spine::COMPOSE_ASSISTANT_PREFIX
     );
     let ids = tok.encode(&text).expect("encode");
     let warm = tok
-        .encode(&format_chat(tok.template(), &user(WARM_UP_TEXT)))
+        .encode(&format_chat(tok.template(), &user(WARM_UP_TEXT)).expect("chat"))
         .expect("encode");
     const N: usize = 8;
 
