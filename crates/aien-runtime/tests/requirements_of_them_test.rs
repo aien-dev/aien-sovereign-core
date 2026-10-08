@@ -72,6 +72,16 @@ fn other_referents_and_wordings_read_the_same_way() {
 }
 
 #[test]
+fn a_trailing_description_after_the_count_is_not_a_count() {
+    // "each with a date" is not measurable; the prefix count is what is checked.
+    let ex = analyze(
+        "Write every item as a line starting with \"- [ ]\" and include at least 4 of them, each with a date.",
+    );
+    assert!(ex.uncertain.is_empty(), "{:?}", ex.uncertain);
+    assert_eq!(ex.requirements, [prefixed(4)]);
+}
+
+#[test]
 fn only_lines_with_the_exact_prefix_count() {
     let r = prefixed(3);
     let good = "## Shelter\n- [ ] tent\n- [ ] pegs\n  - [ ] mallet\n";
@@ -120,6 +130,10 @@ fn a_count_without_a_stated_referent_stays_uncertain() {
         "Write lines starting with \"- \" for the shopping, the cleaning, the garden and the car, and include at least 4 of them.",
         // a count the bound cue does not lead
         "Write lines starting with \"- [ ]\" and include 12 or more of them.",
+        // round 2: a line break ends the sentence
+        "Write lines starting with \"- [ ]\"\nInclude at least 12 of them.",
+        // round 2: only the listed joining words
+        "Write lines starting with \"- [ ]\" and make at least 12 of them.",
     ] {
         let ex = analyze(goal);
         assert!(

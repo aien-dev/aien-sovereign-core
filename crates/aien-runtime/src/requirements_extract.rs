@@ -728,13 +728,13 @@ fn section_scope_before(goal: &str, toks: &[Tok], s: usize) -> Option<Option<Str
 
 /// Words that may stand between the quoted line prefix and the count cue
 /// ("... starting with "- [ ]" and I want at least 12 of those items").
-const OF_LINE_JOINERS: [&str; 19] = [
-    "and", "then", "also", "so", "i", "we", "want", "need", "include", "add", "write", "put",
-    "give", "list", "use", "have", "make", "should", "must",
+const OF_LINE_JOINERS: [&str; 11] = [
+    "and", "then", "also", "so", "i", "we", "want", "need", "include", "add", "write",
 ];
 
 /// "<bound> N of them|these|those [items|lines|entries]" (`j` is the `of`): the
-/// count reads only when the same sentence, just before the cue, defines the
+/// count reads only when the same sentence (a line break also ends one), just
+/// before the cue, defines the
 /// counted lines as `lines starting|beginning|starts|begins with "P"` (singular
 /// `line` only after `every` or `each`, as in "every item on its own line"),
 /// with exactly one quoted prefix and at most four joining words
@@ -762,7 +762,10 @@ fn of_line_prefix(goal: &str, toks: &[Tok], s: usize, j: usize) -> Option<(usize
     let mut m = s;
     while m > 0 {
         m -= 1;
-        if toks[m].raw.ends_with(['.', '!', '?']) {
+        // A sentence ends at closing punctuation or at a line break.
+        if toks[m].raw.ends_with(['.', '!', '?'])
+            || goal[toks[m].end..toks[m + 1].start].contains('\n')
+        {
             first = m + 1;
             break;
         }
