@@ -138,6 +138,9 @@ pub enum Requirement {
     RequiredTopics(Vec<String>),
     /// Every section holds at least this many sentences.
     MinSentencesPerSection(usize),
+    /// The whole file is exactly one sentence: its prose (outside fenced code)
+    /// holds one sentence by the sentence rule in the module docs (sc#336).
+    SingleSentence,
     /// Lines ADDED to the file, measured against the prior file (see the module
     /// docs). `exact`: exactly `n`, else at least `n`. `prior` is None until
     /// the caller resolves it ([`Extraction::resolved`]); an unresolved one is unmet.
@@ -193,6 +196,7 @@ impl Requirement {
             Requirement::MinSentencesPerSection(n) => {
                 format!("at least {n} sentences in every section")
             }
+            Requirement::SingleSentence => "exactly one sentence".to_string(),
             Requirement::AddedLines { n, exact, .. } => {
                 if *exact {
                     format!("exactly {n} added non-empty lines")
@@ -408,6 +412,10 @@ impl Requirement {
                     let shown: Vec<String> = short.iter().take(8).cloned().collect();
                     format!("{label}, too few in: {}", shown.join(", "))
                 })
+            }
+            Requirement::SingleSentence => {
+                let c = count_every_sentence(content);
+                (c != 1).then(|| format!("{label}, found {c}"))
             }
         }
     }
@@ -630,6 +638,68 @@ fn count_sentences(body: &str) -> usize {
     }
     if cur.split_whitespace().count() >= 3 {
         count += 1;
+    }
+    count
+}
+
+/// Sentences for `SingleSentence`, counted strictly: every stretch of words a
+/// stop (`.` `!` `?` `…` or a CJK stop) closes, however short ("Bye."), a stop
+/// glued to a capital ("Thanks.Bye."), and any words a line ends without a
+/// stop. Headings and fenced code are not prose. Only "e.g." / "i.e." and a
+/// title before a capitalised name ("Dr. Lee") do not end a sentence, so an
+/// unusual stop can only refuse a correct file, never pass a wrong one.
+fn count_every_sentence(content: &str) -> usize {
+    const STOPS: [char; 7] = [
+        '.', '!', '?', '\u{2026}', '\u{3002}', '\u{FF01}', '\u{FF1F}',
+    ];
+    const CLOSERS: [char; 8] = ['"', '\'', ')', ']', '*', '_', '\u{201D}', '\u{2019}'];
+    const TITLES: [&str; 4] = ["dr", "mr", "mrs", "prof"];
+    let mut count = 0usize;
+    for l in prose_lines(content) {
+        if l.trim_start().starts_with('#') {
+            continue;
+        }
+        let mut pieces: Vec<&str> = Vec::new();
+        for w in l.split_whitespace() {
+            let mut from = 0;
+            let mut it = w.char_indices().peekable();
+            while let Some((k, c)) = it.next() {
+                let cut = match it.peek() {
+                    Some(&(_, next)) => {
+                        matches!(c, '\u{3002}' | '\u{FF01}' | '\u{FF1F}')
+                            || matches!(c, '.' | '!' | '?') && next.is_uppercase()
+                    }
+                    None => false,
+                };
+                if cut {
+                    let at = k + c.len_utf8();
+                    pieces.push(&w[from..at]);
+                    from = at;
+                }
+            }
+            pieces.push(&w[from..]);
+        }
+        let mut open = false;
+        for (k, p) in pieces.iter().enumerate() {
+            open |= p.chars().any(char::is_alphanumeric);
+            let w = p.trim_end_matches(CLOSERS);
+            if !open || !w.ends_with(STOPS) {
+                continue;
+            }
+            let stem = w
+                .trim_end_matches(STOPS)
+                .trim_start_matches(['(', '"', '\''])
+                .to_lowercase();
+            let title = TITLES.contains(&stem.as_str())
+                && pieces
+                    .get(k + 1)
+                    .is_some_and(|n| n.starts_with(char::is_uppercase));
+            if !title && !matches!(stem.as_str(), "e.g" | "i.e") {
+                count += 1;
+                open = false;
+            }
+        }
+        count += usize::from(open);
     }
     count
 }

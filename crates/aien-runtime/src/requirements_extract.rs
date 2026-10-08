@@ -16,6 +16,8 @@
 //! | `N <noun> or more|fewer|less`, `N <noun> minimum|maximum`, `no longer|shorter than N <noun>` | `MinX(N)` or `MaxX(N)` |
 //! | `<noun>` = `lines` (also `non-empty|nonempty|non-blank lines`: lines are counted non-empty anyway), `words`; `items`, `steps`, `sections`, `headings`, `questions`, `paragraphs` (Min only; singular too) | lines, words, list items, numbered steps, headings, questions, paragraphs (`MinParagraphs`: runs of prose lines, see `requirements::count_paragraphs`) |
 //! | `N sentences in|per|for|within every|each section` (or `in every section, ... N sentences`) | `MinSentencesPerSection(N)` |
+//! | `a one-sentence|single-sentence X`, `a single sentence`, `just|only|exactly one sentence` (the only such phrase; no part of the file, edit or addition named in the goal) | `SingleSentence` |
+//! | `containing|with [just|only] one line that says|reads "S"` / `one line saying|reading "S"` | `AddedLines` exactly 1 and `RequiredPhrases([S])` (a final `.` `!` `?` inside quotes that end the goal sentence is not part of S) |
 //! | `sections|headings titled|named|called A, B and C`, `sections: A, B and C`; with quoted titles also `section(s) is|are titled "A"` and `[one] section(s) must|should|will|shall|can be titled "A"` | `RequiredHeadings` (a count before the noun must equal the number of titles; `organise it under three sections titled ...` is read the same). The is/are/be forms stay UNCERTAIN after `each every all any` or with `if unless optionally optional may might when whenever perhaps maybe` in the clause |
 //! | `between N and M lines|words` (N <= M) | `MinX(N)` and `MaxX(M)`, inclusive. Other nouns, `from N to M`, ranges like `2-3`, `... or so`, and a range on a part of the document (a countable noun or `gap space distance` right before `between`, or `each every per` within three words) stay UNCERTAIN |
 //! | `covers|covering A, B and C` (and `to|should|must|will|can cover ...`) | `RequiredTopics` |
@@ -41,9 +43,18 @@
 //! non-empty lines were added; `write 20 lines` at least twenty. The count must end
 //! its clause or be followed by `to in into at for about on saying describing giving
 //! listing ...`; `3 lines of context`, `10 lines per section` stay UNCERTAIN.
-//! "N-sentence" and "one-sentence" are NOT read: a sentence count over a whole document
-//! cannot be verified reliably (headings, lists, abbreviations), so such a goal
-//! is UNCERTAIN and refused. `N words of plain text` without a named section
+//! "N-sentence" is NOT read: a sentence count over a whole document cannot be
+//! verified reliably (headings, lists, abbreviations), so such a goal is UNCERTAIN
+//! and refused. The one exception (sc#336) is a file of one sentence: `a
+//! one-sentence|single-sentence X`, `a single sentence`, `just|only|exactly one
+//! sentence`, is `SingleSentence` when it is the goal's only such phrase and
+//! nothing anywhere in the goal names a part of the file (`each every per
+//! paragraph line section top title ...`) or an edit or addition (`add append
+//! insert prepend update replace rewrite put ...`); `one-sentence` needs `a`/`an`.
+//! A quoted `"S"` after `one line that says|reads|saying|reading` must be read
+//! whole: it closes the goal, or is followed by `.` `!` `?` or by a new
+//! capitalised sentence after a final `.` `!` `?`; otherwise (unclosed, empty,
+//! `"S" in bold`, `"S" and another line`) it is UNCERTAIN. `N words of plain text` without a named section
 //! (`section titled "T"`, `the last section`) is a count over an unknown scope and
 //! is UNCERTAIN. `cover three topics: a, b and c` is read only when the count equals
 //! the list (sc#332); otherwise it is UNCERTAIN.
@@ -392,6 +403,8 @@ fn line_verb(w: &str) -> Option<bool> {
     match w {
         "add" | "append" | "insert" | "with" => Some(true),
         "write" | "put" | "create" | "draft" | "compose" | "produce" | "generate" => Some(false),
+        // "a file containing just one line" (sc#336)
+        "containing" => Some(true),
         _ => None,
     }
 }
@@ -980,6 +993,45 @@ fn split_list(region: &str) -> Vec<String> {
     segs
 }
 
+/// The quoted text that token `q` opens and the byte after its closing
+/// quote: `"Renew the card on Friday."` is `Renew the card on Friday` when the
+/// quote closes the goal sentence (its final `.` `!` `?` is the goal's own).
+fn quoted_at(goal: &str, toks: &[Tok], q: usize) -> Option<(String, usize)> {
+    let start = toks.get(q)?.start;
+    let open = goal[start..].chars().next()?;
+    let close = match open {
+        '"' => '"',
+        '\u{201C}' => '\u{201D}',
+        _ => return None,
+    };
+    let body_at = start + open.len_utf8();
+    let len = goal[body_at..].find(close)?;
+    let end = body_at + len + close.len_utf8();
+    let body = goal[body_at..body_at + len].trim_end();
+    let rest = &goal[end..];
+    let next = rest.trim_start();
+    // The goal sentence ends inside the quote: at the end of the goal, or
+    // before a new capitalised sentence when the quoted text ends in . ! ?
+    let closes_goal = next.is_empty()
+        || body.ends_with(['.', '!', '?'])
+            && rest.starts_with(char::is_whitespace)
+            && next.starts_with(char::is_uppercase);
+    // The goal sentence ends just after the quote: `"S".`
+    let stop_after = rest.starts_with(['.', '!', '?'])
+        && rest[1..].chars().next().is_none_or(char::is_whitespace);
+    let text = if closes_goal {
+        body.trim_end_matches(['.', '!', '?'])
+    } else if stop_after {
+        body
+    } else {
+        // anything else ("in bold", "and another line", a stray inner quote)
+        // may change what the line holds
+        return None;
+    };
+    let text = text.trim();
+    (!text.is_empty()).then(|| (text.to_string(), end))
+}
+
 /// A list region cut after the item that follows its closing "and" or "or":
 /// "interest, deposit, withdraw and balance, and the file needs" is
 /// "interest, deposit, withdraw and balance". None when that last item holds
@@ -1564,6 +1616,108 @@ pub fn analyze(goal: &str) -> Extraction {
                 },
             );
             handled.extend(s..=i + 1 + if bound { 2 } else { 0 });
+            // "one line that says|reads \"S\"", "one line saying \"S\"" (sc#336):
+            // that line holds S. A final . ! ? inside quotes that close the goal
+            // sentence is the goal's own punctuation and is not required.
+            if v == 1 && exact && !bound {
+                let w = |k: usize| toks.get(k).map(|t| t.word.as_str());
+                let q = match (w(i + 2), w(i + 3)) {
+                    (Some("that"), Some("says" | "reads")) => Some(i + 4),
+                    (Some("saying" | "reading"), _) => Some(i + 3),
+                    _ => None,
+                };
+                // only a quoted S is read; an unquoted one keeps the older reading
+                let quoted = q.filter(|&q| {
+                    toks.get(q)
+                        .is_some_and(|t| t.raw.starts_with(['"', '\u{201C}']))
+                });
+                match quoted.map(|q| quoted_at(goal, &toks, q)) {
+                    Some(Some((phrase, end))) => {
+                        if !phrases.contains(&phrase) {
+                            phrases.push(phrase);
+                        }
+                        mark_bytes(&mut handled, &toks, toks[i + 1].end, end);
+                    }
+                    // what the line says cannot be read whole: never drop it
+                    Some(None) => bad(&mut unsure, i + 2, false),
+                    None => {}
+                }
+            }
+        }
+    }
+
+    // ---- one sentence: "a one-sentence note", "a single sentence", "just one
+    //      sentence" (sc#336): the whole file is exactly one sentence ----
+    let lead = |i: Option<usize>| i.map(|i| toks[i].word.as_str());
+    let one_sentence = |s: usize| -> Option<usize> {
+        let w = toks[s].word.as_str();
+        if matches!(w, "one-sentence" | "single-sentence") {
+            Some(s)
+        } else if w == "sentence"
+            && s >= 1
+            && (toks[s - 1].word == "single"
+                && matches!(lead(s.checked_sub(2)), Some("a" | "one" | "just" | "only"))
+                || toks[s - 1].word == "one"
+                    && matches!(lead(s.checked_sub(2)), Some("just" | "only" | "exactly")))
+        {
+            Some(s - 1)
+        } else {
+            None
+        }
+    };
+    let phrases_at: Vec<(usize, usize)> = (0..n)
+        .filter_map(|s| one_sentence(s).map(|start| (start, s)))
+        .collect();
+    // The whole file only: nothing anywhere in the goal names a part of it, an
+    // edit or addition to a file that may hold more ("update README.md with a
+    // one-sentence summary", "... Append a goodbye."), or a second sentence
+    // ("a one-sentence abstract and a one-sentence conclusion").
+    let part = phrases_at.len() > 1
+        || toks.iter().any(|t| {
+            matches!(
+                t.word.as_str(),
+                "each"
+                    | "every"
+                    | "per"
+                    | "paragraph"
+                    | "paragraphs"
+                    | "line"
+                    | "lines"
+                    | "add"
+                    | "append"
+                    | "insert"
+                    | "prepend"
+                    | "update"
+                    | "replace"
+                    | "rewrite"
+                    | "edit"
+                    | "modify"
+                    | "change"
+                    | "shorten"
+                    | "put"
+                    | "place"
+                    | "top"
+                    | "bottom"
+                    | "beginning"
+                    | "header"
+                    | "footer"
+                    | "intro"
+                    | "introduction"
+                    | "title"
+                    | "heading"
+            ) || SECTION_NOUNS.contains(&t.word.as_str())
+        });
+    for (start, s) in phrases_at {
+        if handled.contains(&start) {
+            continue;
+        }
+        // "a one-sentence note"; "one-sentence notes" may be many
+        let one = start < s || matches!(lead(start.checked_sub(1)), Some("a" | "an"));
+        if one && !part && !negated_before(&toks, start) {
+            add(&mut counts, Requirement::SingleSentence);
+            handled.extend(start..=s);
+        } else {
+            bad(&mut unsure, start, true);
         }
     }
 
