@@ -1423,7 +1423,7 @@ pub fn analyze(goal: &str) -> Extraction {
                     ((1..=6).contains(&h) && tail_ok).then_some((h, end))
                 });
                 match marker {
-                    Some((h, end)) if adj.map_or(true, |a| a == h) => {
+                    Some((h, end)) if adj.is_none_or(|a| a == h) => {
                         mark_bytes(&mut handled, &toks, from, end);
                         let last = (0..n).rev().find(|&i| toks[i].start < end).unwrap_or(k + 3);
                         Some((Some(h), last))
@@ -1434,7 +1434,7 @@ pub fn analyze(goal: &str) -> Extraction {
                 None
             };
         match found {
-            Some((level, last)) if first_heading.map_or(true, |f| f == level) => {
+            Some((level, last)) if first_heading.is_none_or(|f| f == level) => {
                 first_heading = Some(level);
                 handled.extend(v..=last.max(k));
             }

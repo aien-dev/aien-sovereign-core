@@ -328,7 +328,7 @@ impl Requirement {
                     .strip_prefix([' ', '\t'])
                     .is_some_and(|t| !t.trim().trim_end_matches('#').trim().is_empty());
                 let ok =
-                    (1..=6).contains(&hashes) && level.map_or(true, |l| l == hashes) && has_title;
+                    (1..=6).contains(&hashes) && level.is_none_or(|l| l == hashes) && has_title;
                 (!ok).then(|| {
                     let shown: String = first.chars().take(60).collect();
                     if shown.is_empty() {
