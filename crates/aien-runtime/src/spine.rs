@@ -415,7 +415,13 @@ impl AienRuntimeSpine {
             | ControlCommand::ComposeReconcile { .. }
             | ControlCommand::ComposeControl { .. }
             | ControlCommand::ComposeAuthorize { .. }
-            | ControlCommand::ComposeApprovedProposal { .. } => ControlResponse::Error(
+            | ControlCommand::ComposeApprovedProposal { .. }
+            | ControlCommand::AllenStatus
+            | ControlCommand::AllenProfileShow
+            | ControlCommand::AllenProfileSet { .. }
+            | ControlCommand::AllenProfileHistory
+            | ControlCommand::AllenProfileRevert { .. }
+            | ControlCommand::AllenProfileReset { .. } => ControlResponse::Error(
                 "compose commands are handled on the socket connection, not as one-shot commands"
                     .into(),
             ),
@@ -624,7 +630,13 @@ fn proposal_handle(text: &str) -> u64 {
 /// ALLEN identity gate (aien-allen, ADR 0035), run once per compose-home open.
 /// Not engaged (AIEN_ALLEN_SUBJECT unset): one log line, nothing else changes.
 /// Engaged: any refusal is FATAL (message, nonzero exit), never a fallback.
-fn allen_gate(dir: &Path, compose: &mut Compose, machine_id: &[u8; 32]) {
+/// Returns the resolved identity when engaged, so the compose home can keep it
+/// (persona profile, arch#159); `None` when not engaged.
+fn allen_gate(
+    dir: &Path,
+    compose: &mut Compose,
+    machine_id: &[u8; 32],
+) -> Option<aien_allen::Resolved> {
     use aien_allen::{Context, Gate};
     static NOT_ENGAGED_ONCE: std::sync::Once = std::sync::Once::new();
     let lineage = compose.record(1).ok().map(|r| r.digest);
@@ -644,6 +656,7 @@ fn allen_gate(dir: &Path, compose: &mut Compose, machine_id: &[u8; 32]) {
     match aien_allen::gate(dir, &ctx, &get) {
         Gate::NotEngaged => {
             NOT_ENGAGED_ONCE.call_once(|| println!("{}", aien_allen::NOT_ENGAGED_LINE));
+            None
         }
         Gate::Engaged(r) => {
             if r.adopted {
@@ -660,6 +673,7 @@ fn allen_gate(dir: &Path, compose: &mut Compose, machine_id: &[u8; 32]) {
                 r.head_seq,
                 r.chain_verified
             );
+            Some(r)
         }
         Gate::Refused(why) => {
             let msg = format!("FATAL ALLEN refused: {why}");
@@ -1640,6 +1654,8 @@ pub(crate) fn record_view(
 
 pub(crate) struct ComposeHome {
     pub(crate) compose: Compose,
+    /// The ALLEN identity this home resolved (`None` = not engaged).
+    pub(crate) allen: Option<aien_allen::Resolved>,
     pub(crate) machine_id: String,
     prompts: Arc<parking_lot::Mutex<HashMap<u64, TaskEntry>>>,
     /// Proposer hook: task -> approved proposal text (crate::approved).
@@ -1878,9 +1894,10 @@ impl ComposeBridge {
         }
         // ALLEN identity gate: after the open (record 1 exists, skills are
         // registered), before the home is handed out. Fatal when engaged.
-        allen_gate(&self.dir, &mut compose, &info.machine_id);
+        let allen = allen_gate(&self.dir, &mut compose, &info.machine_id);
         let mut home = ComposeHome {
             compose,
+            allen,
             budgets,
             machine_id: hex(&info.machine_id),
             prompts,
@@ -1974,7 +1991,7 @@ impl ComposeBridge {
                 ws.display()
             ));
         }
-        let (plan, dest) = task_decision(goal, &ws)?;
+        let (mut plan, dest) = task_decision(goal, &ws)?;
         // The requirements the goal states are checked on every path: the model
         // path and an approved proposal (refused before any write when unmet).
         let machine_goal =
@@ -2011,6 +2028,18 @@ impl ComposeBridge {
             *guard = Some(self.open_home()?);
         }
         let home = guard.as_mut().expect("opened above");
+        // ALLEN persona (arch#159): only a model run reads it; an approved
+        // proposal runs no model, so it carries no persona. Not engaged: the
+        // prompt is exactly what it was.
+        let persona_ctx = match approved_text {
+            None => crate::persona::context_for(&self.dir, home.allen.as_ref()),
+            Some(_) => None,
+        };
+        plan.0 = crate::persona::prefix_prompt(&plan.0, persona_ctx.as_ref());
+        let persona = match approved_text {
+            None => Some(crate::persona::report_for(persona_ctx.as_ref())),
+            Some(_) => None,
+        };
         // Deadlines agree on both sides: omega settles budget + 1 s after the run
         // starts, the Skill gives up at budget. Set only here, under the lock that
         // serializes runs, never while rx_compose_run is in flight. An omega without
@@ -2123,6 +2152,7 @@ impl ComposeBridge {
                 Some(_) => APPROVED_PROPOSER_LABEL.to_string(),
                 None => self.proposer_label.clone(),
             },
+            persona,
         })
     }
 
@@ -2212,6 +2242,20 @@ impl ComposeBridge {
             Ok(r) => ControlResponse::ComposeNoted(r),
             Err(e) => ControlResponse::Error(e),
         }
+    }
+
+    /// ALLEN persona profile commands (arch#159). Opens the home if needed (the
+    /// identity is resolved there). Blocking.
+    pub fn allen_command(&self, cmd: &ControlCommand) -> ControlResponse {
+        let r = self.with_home(|home| {
+            Ok(crate::persona::handle_allen_command(
+                &self.dir,
+                home.allen.as_ref(),
+                &self.proposer_label,
+                cmd,
+            ))
+        });
+        r.unwrap_or_else(ControlResponse::Error)
     }
 
     /// S6 / S8: host records plus the cited ids, digests re-checked.
