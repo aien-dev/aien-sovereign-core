@@ -10,9 +10,10 @@ R=$1 OUT=$2 SC=$3 OMC=$4 OMG=$5 RESCUES=${6:-0} NOTE=${7:-}
 S=$R/steps
 HERE=$(cd "$(dirname "$0")" && pwd)
 # ACCEPTANCE-v7 Section 2: V6_ROWS picks the v6-row module, rows-v6.jq (default,
-# every existing caller unchanged) or rows-v7.jq (run-v7.sh). Nothing else is accepted.
-case ${V6_ROWS:=rows-v6.jq} in rows-v6.jq|rows-v7.jq|rows-v8.jq) ;; *) echo "make-receipt: V6_ROWS must be rows-v6.jq, rows-v7.jq or rows-v8.jq" >&2; exit 2 ;; esac
-# ACCEPTANCE-v8 Section 2: only with rows-v8.jq, V8_MERGE (the np1_edit_merge JSON of an edit launch,
+# every existing caller unchanged), rows-v7.jq (run-v7.sh), rows-v8.jq or rows-v9.jq (open-model-qwen3 v5:
+# rows-v8.jq with the harness approval-desk key allowed in the compose dir). Nothing else is accepted.
+case ${V6_ROWS:=rows-v6.jq} in rows-v6.jq|rows-v7.jq|rows-v8.jq|rows-v9.jq) ;; *) echo "make-receipt: V6_ROWS must be rows-v6.jq, rows-v7.jq, rows-v8.jq or rows-v9.jq" >&2; exit 2 ;; esac
+# ACCEPTANCE-v8 Section 2: only with rows-v8.jq (or rows-v9.jq), V8_MERGE (the np1_edit_merge JSON of an edit launch,
 # or unset/null) and the v5 row A2 value reach the evidence the v6 rows see. rows-v6/v7 receipts
 # are unchanged byte for byte.
 V8M=${V8_MERGE:-null}
@@ -46,7 +47,7 @@ fi
 V6= V6T=null SEED=null REF=null WS6= COMMITTED6=null
 if [ -n "${V6_TASK:-}" ]; then
   V6=1
-  V6TF=$HERE/tasks-v6.json; [ "$V6_ROWS" = rows-v8.jq ] && V6TF=$HERE/tasks-v8.json   # ACCEPTANCE-v8 Section 3: T6 and T7 live in tasks-v8.json
+  V6TF=$HERE/tasks-v6.json; case $V6_ROWS in rows-v8.jq|rows-v9.jq) V6TF=$HERE/tasks-v8.json ;; esac   # ACCEPTANCE-v8 Section 3: T6 and T7 live in tasks-v8.json
   V6T=$(jq -c --arg id "$V6_TASK" '.tasks[] | select(.id == $id)' "$V6TF")
   [ -n "$V6T" ] || { echo "launch $V6_TASK not in $V6TF" >&2; exit 4; }
   WS6=$(cd "$R/ws" && pwd -P)
@@ -123,7 +124,7 @@ jq -n --argjson run "$(j "$R/run.json")" \
   | ($s8.recall.cited // []) as $postcited
   | ($c8 | map(select(.id == $cid)) | .[0].text // null) as $recalled
   | ($run.compose_dir_files // []) as $cfiles
-  | ($cfiles | map(select(test("^\\./(machine\\.id|cortex\\.cx|jspace)") | not))) as $stray
+  | ($cfiles | map(select((test("^\\./(machine\\.id|cortex\\.cx|jspace)") or . == "./approval-desk.key") | not))) as $stray
   | ($run.daemon // []) as $d
   | (($d | map(.backend // "") | map(test("CPU-reference") | not))) as $gpu
   | [
@@ -226,7 +227,7 @@ jq -n --argjson run "$(j "$R/run.json")" \
   + (if $v6 == "1" then {task_v6:$v6task.id,
        acceptance_v6:(v6_evidence($run; $rep; $s1; $s4; $s5; $s6; $s8; $pre; $receipts; $v6task; $ws6; $committed6; $seed; $ref; $max6)
                      + {a2_v5: (($v5rows.authority // []) | map(select(.row == "A2")) | .[0].result // null)}
-                     + (if $rows6 == "rows-v8.jq" then {a2_v5_value: (($v5rows.authority // []) | map(select(.row == "A2")) | .[0].value // null), v8_merge: $v8merge} else {} end) | v6_rows)}
+                     + (if ($rows6 == "rows-v8.jq" or $rows6 == "rows-v9.jq") then {a2_v5_value: (($v5rows.authority // []) | map(select(.row == "A2")) | .[0].value // null), v8_merge: $v8merge} else {} end) | v6_rows)}
      else {} end)
   + (if $v6 == "1" and $rows6 != "rows-v6.jq" then {v6_rows_module:{file:$rows6, sha256:$rows6sha}} else {} end)' >"$tmp"
 h=$(sha256sum "$tmp" | cut -d' ' -f1)
