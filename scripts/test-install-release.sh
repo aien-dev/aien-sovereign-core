@@ -242,8 +242,8 @@ make_release "$WORK/rel5" "$WORK/key" CAND-5 g
 ID5="$(sha256sum "$WORK/pkg/bin/aien" | cut -c1-12)"
 ID_OLD="$(live "$WORK/cfg-good")"
 kill_at pre-rename "$WORK/rel5"
-[[ "$(strays)" -ge 1 ]] || fail "pre-rename: no temp link, the hold is not at the rename"
 [[ "$(live "$WORK/cfg-good")" == "$ID_OLD" && "$("$WORK/bin-good/aien")" == "aien-e" ]] || fail "pre-rename kill: install is not wholly old"
+[[ "$(strays)" -ge 1 ]] || fail "pre-rename: no temp link, the hold is not at the rename"
 [[ "$(rec_cur)" == "$ID_OLD" ]] || fail "pre-rename kill: record changed"
 run_install "$WORK/rel5" "$WORK/bin-good" "$WORK/cfg-good" "$ROOT/install.sh" "${SIGN_ENV[@]}" \
     || { cat "$WORK/log" >&2; fail "rerun after pre-rename kill failed"; }

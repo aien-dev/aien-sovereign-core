@@ -7,8 +7,8 @@ relicense it. The SmolLM2 attribution detail lives in `ATTRIBUTION.md` and `NOTI
 ## What the release package contains
 
 Read from `scripts/package-release.sh`: the release tarball holds the seven built
-binaries, `CONSTITUTION.md`, `README.md`, `install.sh`, `imprints/en2-trinity/`
-(24 KB of text) and a generated `release.toml`. `release.toml` carries a `[model]`
+binaries, `CONSTITUTION.md`, `README.md`, `install.sh`, `LICENSE`, `NOTICE`, `THIRD_PARTY.md`, `imprints/en2-trinity/`
+(6,275 bytes of text) and a generated `release.toml`. `release.toml` carries a `[model]`
 table copied from `release/candidate.toml`; that table is **metadata only** (model id,
 snapshot, SHA-256 digests, geometry, licence name). **No model weights are packaged in
 any release artifact built by this script.** Weights are fetched or supplied
@@ -18,7 +18,7 @@ separately by the operator.
 |---|---|---|---|---|
 | SmolLM2-1.7B-Instruct (HuggingFaceTB), rev `31b70e2e869a7173562077fd711b654946d38674` | Apache-2.0 (model card `license: apache-2.0`) | https://huggingface.co/HuggingFaceTB/SmolLM2-1.7B-Instruct | No | `NOTICE`, `ATTRIBUTION.md`, `docs/campaigns/smollm2-qualification/` |
 | Llama 3.2 1B Instruct, as `unsloth/Llama-3.2-1B-Instruct`, snapshot `5a8abab4a5d6f164389b1079fb721cfab8d7126c` (CAND-4) | Llama 3.2 Community License (`licence` in `release/candidate.toml`) | https://huggingface.co/unsloth/Llama-3.2-1B-Instruct (re-host of Meta's model) | No. Digests only in `release.toml` | `release/candidate.toml`, `docs/release/ORACLE-FIXTURE-CAND4.md` |
-| Qwen3-4B-Instruct-2507 (Qwen), HF revision `cdbee75f` | Apache-2.0 per `docs/campaigns/open-model-qwen3/ACCEPTANCE-v3.md` (upstream card not re-checked, UNVERIFIED) | https://huggingface.co/Qwen/Qwen3-4B-Instruct-2507 | No. Referenced in campaign docs only; not qualified, not distributed, no notice shipped (no Qwen3 entry in `NOTICE`) | `docs/campaigns/open-model-qwen3/` |
+| Qwen3-4B-Instruct-2507 (Qwen), HF revision `cdbee75f` | Apache-2.0 per `docs/campaigns/open-model-qwen3/VERDICT-v2.md` line 31 (upstream card not re-checked) | https://huggingface.co/Qwen/Qwen3-4B-Instruct-2507 | No. Referenced in campaign docs only; not qualified, not distributed, no notice shipped (no Qwen3 entry in `NOTICE`) | `docs/campaigns/open-model-qwen3/` |
 
 ## CAND-4 (Llama 3.2 1B): internal only
 
@@ -34,8 +34,9 @@ from general knowledge of the licence and are **UNVERIFIED**: the official page
 dev.meta.ai, which returned HTTP 404 on 2026-10-07, so the text could not be checked.
 Re-read the official licence before any distribution. Its text is not reproduced here.
 
-## Open question found while preparing this file
+## Follow-up
 
-The release tarball does not include `LICENSE` or `NOTICE`. AGPL distribution
-generally expects the licence text to travel with the binaries. Adding them changes the
-package bytes and its pinned digests, so it was not changed in this PR.
+Packages built after this change carry `LICENSE`, `NOTICE` and this file (sha256 listed in
+`release.toml`). `package-release.sh` refuses to package without them, but `install.sh` and
+`verify-release-assets.sh` do not yet require `LICENSE` in a package; that would also reject
+the published v0.1.x archives. Published v0.1.0 and v0.1.1 are unchanged.

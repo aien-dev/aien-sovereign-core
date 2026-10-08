@@ -56,7 +56,7 @@ The runtime includes dynamic silicon probing via `ExecutionSurface::detect()`:
 
 - Pure Mojo LLaMA execution kernels are authored by Audrey (`a730/MojoLlama`).
 - Neural graph execution utilizes Modular MAX.
-- Licence: the project is licensed AGPL-3.0-or-later (`LICENSE`, `NOTICE`, `ARTIFACT_LICENSING.md`; relicensed 2026-10-04, commit f571b94, #197). Note on history: this file said "Apache License 2.0 (with LLVM Exception)" from 2026-09-23 (commit 3419488) until the relicensing. The v0.1.0 tag is dated 2026-09-20, before that statement was written, so which terms the v0.1.0 archive itself carried is UNVERIFIED here; check the `LICENSE` inside that archive. Releases cut after 2026-10-04 are AGPL-3.0-or-later. Third-party model licences are separate: see `THIRD_PARTY.md`.
+- Licence history: v0.1.0 (tag 2026-09-20) carried the Sovereign Resource Commons License 1.0 (SRCL-1.0): `git show v0.1.0:LICENSE` and its own notes say so. v0.1.1 (tag 2026-10-03) carried Apache-2.0 (`git show v0.1.1:LICENSE`). The Apache wording in this file dates from 2026-09-23 (commit 3419488). The project was relicensed to AGPL-3.0-or-later on 2026-10-04 (commit f571b94, #197); releases cut after that are AGPL-3.0-or-later (`LICENSE`, `NOTICE`, `ARTIFACT_LICENSING.md`). Archives already published keep the terms they carried. Third-party model licences are separate: see `THIRD_PARTY.md`.
 - Detailed provenance documentation resides in `docs/PROVENANCE.md`.
 
 ---
