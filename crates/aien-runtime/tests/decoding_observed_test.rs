@@ -56,7 +56,9 @@ async fn run<B: aien_inference_abi::AienInferenceBackend>(
     let (sink, mut rx) = ChannelCompletionSink::channel();
     let sink_id = spine.register_completion_sink(Arc::new(sink));
     let prompt: PromptHandle = Arc::from([1u32, 10, 25, 42].as_slice());
-    let seq = spine.submit_work(prompt, sampling, 1, Some(sink_id)).unwrap();
+    let seq = spine
+        .submit_work(prompt, sampling, 1, Some(sink_id))
+        .unwrap();
     spine.run_until_complete(backend, 40).await.unwrap();
     let (mut tokens, mut decoding, mut finished) = (Vec::new(), None, false);
     while let Ok(event) = rx.try_recv() {
@@ -107,7 +109,10 @@ async fn greedy_request_reports_greedy_from_the_backend() {
     assert_eq!(d.mode(), "greedy", "{d:?}");
     assert_eq!(d.sampled_tokens, 0);
     assert_counts_cover(&tokens, d.greedy_tokens);
-    assert_eq!((d.temperature, d.top_p, d.seed_request_id), (None, None, None));
+    assert_eq!(
+        (d.temperature, d.top_p, d.seed_request_id),
+        (None, None, None)
+    );
 }
 
 #[tokio::test]

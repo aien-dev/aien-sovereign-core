@@ -2367,7 +2367,12 @@ mod tests {
     /// discarded mid-prompt picks are not, and nothing claims sampling.
     #[tokio::test]
     async fn sc294_greedy_request_is_observed_greedy() {
-        assert!(C3_PROMPT_LEN > C3_CHUNK, "prompt must take more than one chunk");
+        const {
+            assert!(
+                C3_PROMPT_LEN > C3_CHUNK,
+                "prompt must take more than one chunk"
+            )
+        };
         let greedy = SamplingParams {
             temperature: 0.0,
             ..Default::default()
@@ -2379,7 +2384,10 @@ mod tests {
         assert_eq!(obs.greedy_tokens, 4);
         assert_eq!(obs.sampled_tokens, 0);
         assert_eq!(obs.mode(), "greedy");
-        assert_eq!((obs.temperature, obs.top_p, obs.seed_request_id), (None, None, None));
+        assert_eq!(
+            (obs.temperature, obs.top_p, obs.seed_request_id),
+            (None, None, None)
+        );
     }
 
     /// Sampling request: every token is counted as drawn, with the
