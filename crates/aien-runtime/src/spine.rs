@@ -1763,6 +1763,14 @@ pub struct ComposeBridge {
     /// sovereign-core #297: when true, `ComposeAuthorize` needs the approval
     /// desk's MAC. Default false (legacy OS-user-only authorize).
     authorize_requires_desk: bool,
+    /// The loaded model files and the daemon start, set by the daemon after
+    /// load. Without them a compose proposal gets no generation record.
+    identity: std::sync::Mutex<
+        Option<(
+            crate::generation::ModelIdentity,
+            crate::generation::DaemonStart,
+        )>,
+    >,
 }
 
 impl ComposeBridge {
@@ -1776,6 +1784,7 @@ impl ComposeBridge {
             reconcile_failed: std::sync::Mutex::new(None),
             closed: std::sync::atomic::AtomicBool::new(false),
             authorize_requires_desk: false,
+            identity: std::sync::Mutex::new(None),
         }
     }
 
@@ -1783,6 +1792,17 @@ impl ComposeBridge {
     pub fn with_doc_proposer(mut self, doc_proposer: ComposeProposer) -> Self {
         self.doc_proposer = Some(doc_proposer);
         self
+    }
+
+    /// The model files this daemon loaded (digests hashed at load) and when it
+    /// started. Set once by the daemon; the compose task uses them to write the
+    /// generation record of the proposal it commits. Evidence only.
+    pub fn set_model_identity(
+        &self,
+        identity: crate::generation::ModelIdentity,
+        started: crate::generation::DaemonStart,
+    ) {
+        *self.identity.lock().unwrap_or_else(|e| e.into_inner()) = Some((identity, started));
     }
 
     /// Turn the desk-MAC requirement on `ComposeAuthorize` on or off (#297).
@@ -2180,6 +2200,7 @@ impl ComposeBridge {
         // THIS proposal. `ComposeAuthorize` mints only from it. An approved
         // proposal has its own replay claim and grant, so it gets none.
         let mut compose_commit = None;
+        let mut generation_record = None;
         if let (true, None, Some(p), Some(text)) = (
             committed,
             approved_text,
@@ -2190,6 +2211,11 @@ impl ComposeBridge {
                 .map_err(|e| format!("workspace {}: {e}", ws.display()))?
                 .display()
                 .to_string();
+            // Provenance (arch#162): the generation record of the attempt the
+            // proposal came from, written now under the lock this run holds
+            // (the model call itself cannot take it). Evidence only.
+            generation_record = self.write_task_generation(home, task, &proposal_attempts);
+            let prov = crate::generation::Provenance::new(generation_record, home.allen.as_ref());
             let id = crate::effects::write_compose_commit(
                 home,
                 &wsc,
@@ -2199,6 +2225,7 @@ impl ComposeBridge {
                 &hex(&Sha256::digest(text.as_bytes())),
                 &p.path,
                 &hex(&Sha256::digest(p.content.as_bytes())),
+                &prov,
             )
             .map_err(|e| {
                 format!(
@@ -2213,6 +2240,7 @@ impl ComposeBridge {
         }
         Ok(ComposeTaskReport {
             compose_commit,
+            generation_record,
 
             compose_dir: self.dir.display().to_string(),
             machine_id: home.machine_id.clone(),
@@ -2250,6 +2278,51 @@ impl ComposeBridge {
             persona,
             memory,
         })
+    }
+
+    /// Write the generation record of the proposal attempt a committed task
+    /// came from. `None` (with the reason logged when a write failed) when the
+    /// daemon has no model identity, the attempt did not expose its token ids,
+    /// or the append failed: no record means no claim, and the commit stands.
+    fn write_task_generation(
+        &self,
+        home: &mut ComposeHome,
+        task: u64,
+        attempts: &[ProposalAttempt],
+    ) -> Option<u64> {
+        let (identity, started) = self
+            .identity
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()?;
+        let a = attempts.iter().find(|a| a.outcome == "parsed")?;
+        let (ids, text, prompt_sha, prompt_tokens) = (
+            a.token_ids.as_deref()?,
+            a.text.as_deref()?,
+            a.prompt_ids_sha256.as_deref()?,
+            a.prompt_tokens?,
+        );
+        let record = crate::generation::build_compose_record(
+            &identity,
+            &crate::generation::ComposeEvidence {
+                prompt_ids_sha256: prompt_sha,
+                prompt_tokens,
+                output_ids: ids,
+                text,
+                finish_reason: a.finish_reason.as_deref().unwrap_or("unknown"),
+                task,
+                attempt: a.attempt,
+            },
+            started,
+        );
+        match crate::generation::write(home, &record) {
+            Ok(id) => Some(id),
+            Err(e) => {
+                tracing::warn!("generation record not written: {e}");
+                eprintln!("generation record not written: {e}");
+                None
+            }
+        }
     }
 
     /// Append the daemon's generation record (evidence only; see
