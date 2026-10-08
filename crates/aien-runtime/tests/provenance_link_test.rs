@@ -22,8 +22,9 @@ use aien_allen::{hex as ahex, ENV_ADOPT, ENV_SUBJECT};
 use aien_inference_abi::MockInferenceBackend;
 use aien_kv_cache::create_shared_kv_manager;
 use aien_omega_compose::{hex, Compose, RootKind};
+use aien_runtime::approved_auth::{desk_key_path, AuthorizeBinding, DeskKey};
 use aien_runtime::client::AienRuntimeClient;
-use aien_runtime::control::{ControlCommand, ControlResponse};
+use aien_runtime::control::{ControlCommand, ControlResponse, DeskProof};
 use aien_runtime::generation::ModelIdentity;
 use aien_runtime::server::AienRuntimeServer;
 use aien_runtime::spine::{
@@ -130,6 +131,12 @@ impl Daemon {
             max_prefill_tokens: 1024,
         };
         let spine = AienRuntimeSpine::new(64, cfg, create_shared_kv_manager(256, 16));
+        // sc#328: the desk is required (the default); every authorize here is
+        // signed with this home's desk key, as `aien compose authorize --desk 1`.
+        let key = desk_key_path(&home);
+        if !key.exists() {
+            DeskKey::create(&key).unwrap();
+        }
         let bridge = Arc::new(ComposeBridge::new(home, proposer(), "test:provenance-link"));
         let server = AienRuntimeServer::new(spine, &socket).with_compose_bridge(bridge.clone());
         if let Some(m) = model {
@@ -150,6 +157,31 @@ impl Daemon {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
         panic!("daemon did not come up");
+    }
+
+    /// The approval desk's proof for an authorize of commit `cx` (path and
+    /// content as the daemon's commit record names them).
+    fn desk(
+        &self,
+        cx: u64,
+        proposal_sha256: &str,
+        path: &str,
+        content_sha256: &str,
+    ) -> Option<DeskProof> {
+        let key = DeskKey::load(&desk_key_path(self.bridge.dir())).unwrap();
+        let nonce = format!("prov-{cx}");
+        let mac = key.sign_authorize(&AuthorizeBinding {
+            cx_promotion: cx,
+            proposal_sha256: proposal_sha256.into(),
+            path: path.into(),
+            content_sha256: content_sha256.into(),
+            workspace: self.ws.display().to_string(),
+            approver: "drake".into(),
+            constraints: vec![],
+            nonce: nonce.clone(),
+            desk_key_id: key.id().into(),
+        });
+        Some(DeskProof { nonce, mac })
     }
 
     async fn send(&self, c: ControlCommand) -> ControlResponse {
@@ -231,7 +263,12 @@ async fn ordinary_flow(d: &Daemon) -> Flow {
             workspace: d.ws.display().to_string(),
             approver: "drake".into(),
             constraints: vec![],
-            desk_proof: None,
+            desk_proof: d.desk(
+                report["cx_promotion"].as_u64().unwrap(),
+                &sha(PROPOSAL.as_bytes()),
+                "NOTES.md",
+                &sha(CONTENT.as_bytes()),
+            ),
         })
         .await,
         "authorize",
@@ -430,7 +467,7 @@ async fn an_old_ledger_without_provenance_still_opens_and_runs() {
             workspace: d.ws.display().to_string(),
             approver: "drake".into(),
             constraints: vec![],
-            desk_proof: None,
+            desk_proof: d.desk(777, &sha(b"old proposal"), "OLD.md", &sha(b"old\n")),
         })
         .await,
         "authorize on an old commit",

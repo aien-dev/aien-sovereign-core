@@ -137,7 +137,8 @@ fn effect_intents_are_at_most_once_or_unresolved() {
     let ws = tmp.path().join("ws");
     std::fs::create_dir_all(&ws).unwrap();
     let ws = std::fs::canonicalize(&ws).unwrap();
-    let b = ComposeBridge::new(home.clone(), proposer(), "test:fixed-proposer");
+    let b = ComposeBridge::new(home.clone(), proposer(), "test:fixed-proposer")
+        .with_authorize_requires_desk(false);
     let run = b.run_task("write the note", ws.to_str().unwrap());
     if !aien_omega_compose::LINKED {
         assert!(matches!(run, ControlResponse::Error(_)));
@@ -264,7 +265,8 @@ fn effect_intents_are_at_most_once_or_unresolved() {
     // and the forged-record guard holds.
     let before = ledger(&b).view();
     drop(b);
-    let b = ComposeBridge::new(home, proposer(), "test:fixed-proposer");
+    let b = ComposeBridge::new(home, proposer(), "test:fixed-proposer")
+        .with_authorize_requires_desk(false);
     let line = effects::reconcile_at_start(&b);
     assert!(line.starts_with("Reconcile: checked 0"), "{line}");
     assert_eq!(ledger(&b).view(), before);

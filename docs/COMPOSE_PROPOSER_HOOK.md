@@ -101,9 +101,20 @@ for an approved write.
     and an operator cannot declare it DONE (an operator `--declare not_done` is
     still accepted). An old committed proposal has no commit record, so it must be
     proposed again before it can be authorized.
-  - Limit: the approval in the ordinary flow is the operator's CLI call as
-    the daemon's OS user; it carries no desk-key MAC (accepted residual; optional MAC tracked in
-    sovereign-core #297). What changed is that a
+  - The approval in the ordinary flow carries the desk-key MAC by default
+    (sovereign-core #297, required by default since #328, Drake decision b,
+    2026-10-08): `aien compose authorize ... --desk 1` signs it, and an
+    authorize without it is refused (`DeskMacRequired`). The daemon refuses to
+    start when the desk key is missing (`aien compose desk-key --create 1`
+    makes it). The only way back to the OS-user-only authorize is the dev
+    opt-out `AIEN_COMPOSE_AUTHORIZE_REQUIRES_DESK=0`, accepted only in a dev
+    run (`AIEN_DEV_FALLBACK=1`), refused in a strict run (which release
+    qualification is), and announced at startup as
+    `Authorize MAC: OFF, DEV OPT-OUT`. Code that embeds the runtime and builds
+    a bridge with `with_authorize_requires_desk(false)` is held to the same
+    rule: the server refuses to start with it in a strict run (the `aien
+    daemon` program never builds one). Bridge-level tests of the legacy path
+    call the bridge directly, without a server. Also, a
     grant can exist only for content the daemon itself committed, at the
     workspace and path the daemon recorded, and only the daemon writes it.
     The approved-proposal path keeps its MAC.

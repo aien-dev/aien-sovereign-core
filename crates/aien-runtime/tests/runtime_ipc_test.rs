@@ -14,6 +14,12 @@ use tempfile::TempDir;
 async fn test_runtime_server_client_ipc_lifecycle() {
     let temp_dir = TempDir::new().expect("Failed to create tempdir");
     let socket_path = temp_dir.path().join("runtime.sock");
+    // sc#328: the daemon refuses to start without the (default) desk key.
+    std::env::set_var("AIEN_COMPOSE_DIR", temp_dir.path().join("compose"));
+    aien_runtime::approved_auth::DeskKey::create(&aien_runtime::approved_auth::desk_key_path(
+        &temp_dir.path().join("compose"),
+    ))
+    .unwrap();
 
     let kv_manager = create_shared_kv_manager(1024, 16);
     let scheduler_config = SchedulerConfig {

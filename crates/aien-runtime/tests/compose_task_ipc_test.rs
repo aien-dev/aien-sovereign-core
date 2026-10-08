@@ -16,6 +16,11 @@ async fn run_compose_task_over_socket() {
     let tmp = tempfile::tempdir().unwrap();
     // Only this test binary sets it; one test per binary avoids env races.
     std::env::set_var("AIEN_COMPOSE_DIR", tmp.path().join("compose"));
+    // sc#328: the daemon refuses to start without the (default) desk key.
+    aien_runtime::approved_auth::DeskKey::create(&aien_runtime::approved_auth::desk_key_path(
+        &tmp.path().join("compose"),
+    ))
+    .unwrap();
     let ws = tmp.path().join("ws");
     std::fs::create_dir_all(&ws).unwrap();
     let socket = tmp.path().join("runtime.sock");

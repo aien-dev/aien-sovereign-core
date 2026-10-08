@@ -14,6 +14,11 @@ use std::time::Duration;
 async fn recall_reports_whether_compose_is_native() {
     let tmp = tempfile::tempdir().unwrap();
     std::env::set_var("AIEN_COMPOSE_DIR", tmp.path().join("compose"));
+    // sc#328: the daemon refuses to start without the (default) desk key.
+    aien_runtime::approved_auth::DeskKey::create(&aien_runtime::approved_auth::desk_key_path(
+        &tmp.path().join("compose"),
+    ))
+    .unwrap();
     let socket = tmp.path().join("runtime.sock");
     let cfg = SchedulerConfig {
         max_batch_size: 8,

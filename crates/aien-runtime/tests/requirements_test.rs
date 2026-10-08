@@ -283,7 +283,8 @@ fn unmet_requirement_leaves_nothing_committed_or_written() {
     let ws = tmp.path().join("ws");
     std::fs::create_dir_all(&ws).unwrap();
     let proposer: ComposeProposer = Arc::new(|_: &str, _: Duration| gen(doc(13)));
-    let bridge = ComposeBridge::new(tmp.path().join("compose"), proposer, "test:short");
+    let bridge = ComposeBridge::new(tmp.path().join("compose"), proposer, "test:short")
+        .with_authorize_requires_desk(false);
     let resp = bridge.run_task("write DOC.md in at least 20 lines", ws.to_str().unwrap());
     if !aien_omega_compose::LINKED {
         assert!(matches!(resp, ControlResponse::Error(_)));
@@ -336,7 +337,8 @@ fn linked_exhaustion_leaves_ledger_state_and_files_untouched() {
         *c2.lock().unwrap() += 1;
         gen(doc(13))
     });
-    let bridge = ComposeBridge::new(home.clone(), proposer, "test:short");
+    let bridge = ComposeBridge::new(home.clone(), proposer, "test:short")
+        .with_authorize_requires_desk(false);
     let resp = bridge.run_task("write DOC.md in at least 20 lines", ws.to_str().unwrap());
     if !aien_omega_compose::LINKED {
         assert!(matches!(resp, ControlResponse::Error(_)));
@@ -408,7 +410,8 @@ fn linked_passing_document_is_approved_and_saved_byte_for_byte() {
     std::fs::create_dir_all(&ws).unwrap();
     let ws = std::fs::canonicalize(&ws).unwrap();
     let proposer: ComposeProposer = Arc::new(|_: &str, _: Duration| gen(doc(25)));
-    let bridge = ComposeBridge::new(tmp.path().join("compose"), proposer, "test:long");
+    let bridge = ComposeBridge::new(tmp.path().join("compose"), proposer, "test:long")
+        .with_authorize_requires_desk(false);
     let resp = bridge.run_task("write DOC.md in at least 20 lines", ws.to_str().unwrap());
     if !aien_omega_compose::LINKED {
         assert!(matches!(resp, ControlResponse::Error(_)));

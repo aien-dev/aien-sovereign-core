@@ -11,11 +11,13 @@
 //! backend (`aien compose propose`, one committed one-file change per case), then
 //! the ordinary `aien compose authorize`, so the daemon mints the grant from its
 //! own compose-commit record. That model daemon is SIGKILLed; the case then runs
-//! on a model-less daemon over the same state. Two modes: AIEN_MATRIX_MAC unset
-//! (daemon ignores desk proofs) and AIEN_MATRIX_MAC=1 (daemon started with
-//! AIEN_COMPOSE_AUTHORIZE_REQUIRES_DESK=1, desk key in the case compose dir, every
-//! authorize carries a desk MAC under a fresh nonce). Receipts record
-//! "Authorize MAC: on|off" from the daemon log. AIEN_PROPOSER_MODEL overrides the
+//! on a model-less daemon over the same state. Two modes: the default (the desk
+//! is required, sc#328: desk key in the case compose dir, every authorize
+//! carries a desk MAC under a fresh nonce) and AIEN_MATRIX_MAC=0, the legacy
+//! OS-user-only authorize, which is only reachable through the dev opt-out
+//! (AIEN_COMPOSE_AUTHORIZE_REQUIRES_DESK=0 with AIEN_DEV_FALLBACK=1), so such a
+//! run is a dev run and never qualification evidence. Receipts record the
+//! daemon's "Authorize MAC: on" or "Authorize MAC: OFF, DEV OPT-OUT" line. AIEN_PROPOSER_MODEL overrides the
 //! SmolLM2 directory. Rows M1 and M2 are about the MAC and always run with it on.
 //!
 //! Needs a compose-linked CPU build of `aien-cli` with the `fault-hold` feature
@@ -107,7 +109,7 @@ struct Rig {
 
 impl Rig {
     fn new(case: &'static str) -> Rig {
-        Rig::with_mac(case, std::env::var("AIEN_MATRIX_MAC").as_deref() == Ok("1"))
+        Rig::with_mac(case, std::env::var("AIEN_MATRIX_MAC").as_deref() != Ok("0"))
     }
 
     /// `mac` forces the authorize-MAC mode (rows that are about the MAC itself).
@@ -146,6 +148,10 @@ impl Rig {
         };
         if mac {
             r.env.push((AUTHORIZE_DESK_ENV.into(), "1".into()));
+        } else {
+            // sc#328: the legacy path is the visible dev opt-out, never strict.
+            r.env.push((AUTHORIZE_DESK_ENV.into(), "0".into()));
+            r.env.push(("AIEN_DEV_FALLBACK".into(), "1".into()));
         }
         r
     }

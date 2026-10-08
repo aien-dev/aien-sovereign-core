@@ -16,6 +16,12 @@ async fn test_cli_runtime_ipc_lifecycle() {
     std::env::set_var("AIEN_RUNTIME_SOCK", socket_path.to_str().unwrap());
     // Keep the idempotency log out of the shared /tmp default used by a live runtime.
     std::env::set_var("AIEN_RUNTIME_STATE_DIR", temp_dir.path());
+    // sc#328: the daemon refuses to start without the (default) desk key.
+    std::env::set_var("AIEN_COMPOSE_DIR", temp_dir.path().join("compose"));
+    aien_runtime::approved_auth::DeskKey::create(&aien_runtime::approved_auth::desk_key_path(
+        &temp_dir.path().join("compose"),
+    ))
+    .unwrap();
 
     let kv_manager = create_shared_kv_manager(512, 16);
     let sched_cfg = SchedulerConfig {

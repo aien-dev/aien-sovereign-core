@@ -409,18 +409,71 @@ fn the_wire_field_is_optional_and_old_clients_parse() {
 }
 
 #[test]
+fn the_desk_is_required_unless_a_dev_run_opts_out() {
+    // sc#328 (Drake decision b, 2026-10-08): REQUIRED by default. "0" is the
+    // dev-only opt-out; a strict (release qualification) run refuses it.
+    use aien_runtime::spine::authorize_desk_setting;
+    for dev in [false, true] {
+        assert_eq!(
+            authorize_desk_setting(None, dev),
+            Ok(true),
+            "unset, dev={dev}"
+        );
+        assert_eq!(
+            authorize_desk_setting(Some("1"), dev),
+            Ok(true),
+            "1, dev={dev}"
+        );
+        assert!(
+            authorize_desk_setting(Some("yes"), dev).is_err(),
+            "yes, dev={dev}"
+        );
+        assert!(
+            authorize_desk_setting(Some(""), dev).is_err(),
+            "empty, dev={dev}"
+        );
+    }
+    assert_eq!(authorize_desk_setting(Some("0"), true), Ok(false));
+    let e = authorize_desk_setting(Some("0"), false).unwrap_err();
+    assert!(
+        e.contains("AIEN_DEV_FALLBACK") && e.contains("release qualification"),
+        "{e}"
+    );
+}
+
+#[test]
 fn the_env_switch_is_strict() {
-    // Pure parse check on the daemon's reader; run in one test so the
-    // process-wide env is not raced by another test.
+    // The daemon's reader: same rules, this process's dev mode. Run in one
+    // test so the process-wide env is not raced by another test.
+    use aien_inference_abi::strict::dev_fallback_active;
     use aien_runtime::spine::{authorize_requires_desk_from_env, AUTHORIZE_DESK_ENV};
     let _g = ONE_HOME.lock().unwrap_or_else(|e| e.into_inner());
     std::env::remove_var(AUTHORIZE_DESK_ENV);
-    assert_eq!(authorize_requires_desk_from_env(), Ok(false));
-    std::env::set_var(AUTHORIZE_DESK_ENV, "0");
-    assert_eq!(authorize_requires_desk_from_env(), Ok(false));
+    assert_eq!(authorize_requires_desk_from_env(), Ok(true));
     std::env::set_var(AUTHORIZE_DESK_ENV, "1");
     assert_eq!(authorize_requires_desk_from_env(), Ok(true));
+    std::env::set_var(AUTHORIZE_DESK_ENV, "0");
+    if dev_fallback_active() {
+        assert_eq!(authorize_requires_desk_from_env(), Ok(false));
+    } else {
+        assert!(authorize_requires_desk_from_env().is_err());
+    }
     std::env::set_var(AUTHORIZE_DESK_ENV, "yes");
     assert!(authorize_requires_desk_from_env().is_err());
     std::env::remove_var(AUTHORIZE_DESK_ENV);
+}
+
+#[test]
+fn a_new_bridge_requires_the_desk() {
+    // Secure by default for every library caller, not only the daemon.
+    let tmp = tempfile::tempdir().unwrap();
+    let b = ComposeBridge::new(
+        tmp.path().join("compose"),
+        proposer(),
+        "test:fixed-proposer",
+    );
+    assert!(b.authorize_requires_desk());
+    assert!(!b
+        .with_authorize_requires_desk(false)
+        .authorize_requires_desk());
 }
