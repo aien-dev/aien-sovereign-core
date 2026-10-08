@@ -8,7 +8,7 @@
 - **A public release requires three steps.** Each needs Drake's separate go-ahead when it is done:
   1. a documented key-generation ceremony for the dedicated offline release key;
   2. custody verification of that key;
-  3. a signature-verification test showing a release signed with the new key verifies against the newly pinned public key, and that the old key is refused for it.
+  3. a signature-verification test showing a release signed with the new key verifies against the newly pinned public key.
 - **No key is generated now.** No ceremony date is set. Nothing in this repository counts the old key as the public-release key.
 
 Every release carries `SHA256SUMS.txt` (one line per asset) and
