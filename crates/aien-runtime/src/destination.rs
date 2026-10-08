@@ -12,18 +12,20 @@
 //!   to a source by "and" or a comma are sources too.
 //!
 //! Rules, in order:
-//! 0. A file operation (rename, move, delete, remove) the goal ASKS for is
-//!    `Err(Unsupported)`: the verb acts on a path later in the same sentence,
-//!    on a word like "it" or "everything", or on nothing before the sentence
-//!    ends. The same word as subject matter ("a how-to that shows how to
-//!    rename a folder of photos") passes only when the goal names exactly one
-//!    file to write; otherwise the goal is refused as Unsupported, as before.
+//! 0. A file operation word (rename, move, delete, remove) is
+//!    `Err(Unsupported)`, as before, unless it is subject matter: it follows
+//!    "how to" (or when/where/why to) and acts on nothing (no path later in
+//!    the same sentence, no "it"/"the rest"/..., not the end of the sentence),
+//!    as in "a how-to that shows how to rename a folder of photos". Even then
+//!    the goal passes only when it names exactly one file to write.
 //! 1. A path-like word is one with a `/`, a file extension, or a name that
 //!    exists as a file (`Makefile`). Absolute, `~` and `..` paths are path-like
 //!    and unsafe.
 //! 2. Paths marked as sources are set aside. A path introduced as an existing
 //!    file ("there is a file at X", "there are files at X and Y") is set aside
-//!    too, but only when another candidate remains: alone, it is the file to edit.
+//!    too, but only when a destination verb directly names another file to
+//!    write ("create a new file called Y"); otherwise it stays a candidate
+//!    (alone: the file to edit).
 //! 3. No destination left: `Ok(None)` (a new document, the model names it).
 //! 4. One destination: it.
 //! 5. Several destinations: the first is taken only when a destination verb
@@ -120,10 +122,13 @@ pub const LOCATIONAL: &[&str] = &[
 /// File operations this parser never turns into a write.
 pub const FILE_OPS: &[&str] = &["rename", "move", "delete", "remove"];
 
-/// Words a file operation acts on without naming a path ("delete it").
+/// Words a file operation acts on without naming a path ("delete it",
+/// "remove the rest").
 pub const OP_OBJECTS: &[&str] = &[
     "it",
+    "its",
     "them",
+    "their",
     "everything",
     "all",
     "both",
@@ -131,7 +136,15 @@ pub const OP_OBJECTS: &[&str] = &[
     "those",
     "anything",
     "each",
+    "others",
+    "rest",
+    "else",
+    "one",
 ];
+
+/// Question words that, before "to", make a following file operation the
+/// subject of the document ("how to rename a folder"), not a request.
+pub const TOPIC_LEADS: &[&str] = &["how", "when", "where", "why"];
 
 /// Nouns of an existence statement ("there are files at ...").
 pub const EXISTING_NOUNS: &[&str] = &[
@@ -166,6 +179,8 @@ struct Cand {
     /// Introduced as a file that exists ("there is a file at X"), or joined
     /// to one: material to read when the goal names another file to write.
     existing: bool,
+    /// A destination verb governs this path directly ("create the file X").
+    governed: bool,
 }
 
 /// The raw word ends a sentence ("loop." but not "e.g.").
@@ -174,45 +189,48 @@ fn ends_sentence(raw: &str) -> bool {
     t.ends_with(['.', '!', '?', ';']) && !matches!(clean(raw), "e.g" | "i.e" | "etc" | "vs")
 }
 
-/// The first file operation the goal ASKS for: the verb acts on a path later
-/// in the same sentence, on a word like "it", or on nothing before the
-/// sentence ends ("delete this."). The same verb as subject matter ("how to
-/// rename a folder of photos") is not asked for.
+/// The file operation at `i` acts on something: a path later in the same
+/// sentence, a word like "it" or "the rest", or nothing before the sentence
+/// ends ("delete this.").
+fn op_acts(raw: &[&str], words: &[String], i: usize, is_file: &dyn Fn(&str) -> bool) -> bool {
+    if ends_sentence(raw[i]) || i + 1 == raw.len() {
+        return true;
+    }
+    let mut object_seen = false;
+    for j in i + 1..raw.len() {
+        if path_like(clean(raw[j]), is_file) {
+            return true;
+        }
+        let lw = words[j].as_str();
+        if !object_seen {
+            if OP_OBJECTS.contains(&lw) {
+                return true;
+            }
+            if !FILLERS.contains(&lw) {
+                object_seen = true;
+            } else if ends_sentence(raw[j]) || j + 1 == raw.len() {
+                return true;
+            }
+        }
+        if ends_sentence(raw[j]) {
+            break;
+        }
+    }
+    false
+}
+
+/// The first file operation the goal ASKS for. An operation word is subject
+/// matter only after "how to" (or when/where/why to) and only when it acts
+/// on nothing ("a how-to that shows how to rename a folder of photos");
+/// every other use is asked for ("so delete the stale doc", "Delete the
+/// draft.", "how to delete it").
 fn asked_file_op(raw: &[&str], words: &[String], is_file: &dyn Fn(&str) -> bool) -> Option<String> {
     for (i, w) in words.iter().enumerate() {
         if !FILE_OPS.contains(&w.as_str()) {
             continue;
         }
-        if ends_sentence(raw[i]) {
-            return Some(w.clone());
-        }
-        let mut j = i + 1;
-        let mut object_seen = false;
-        let mut acted = j == raw.len();
-        while j < raw.len() {
-            if path_like(clean(raw[j]), is_file) {
-                acted = true;
-                break;
-            }
-            let lw = words[j].as_str();
-            if !object_seen {
-                if OP_OBJECTS.contains(&lw) {
-                    acted = true;
-                    break;
-                }
-                if !FILLERS.contains(&lw) {
-                    object_seen = true;
-                } else if ends_sentence(raw[j]) || j + 1 == raw.len() {
-                    acted = true;
-                    break;
-                }
-            }
-            if ends_sentence(raw[j]) {
-                break;
-            }
-            j += 1;
-        }
-        if acted {
+        let topic = i >= 2 && words[i - 1] == "to" && TOPIC_LEADS.contains(&words[i - 2].as_str());
+        if !topic || op_acts(raw, words, i, is_file) {
             return Some(w.clone());
         }
     }
@@ -221,10 +239,14 @@ fn asked_file_op(raw: &[&str], words: &[String], is_file: &dyn Fn(&str) -> bool)
 
 /// The path at `i` is introduced as an existing file: "there is a file at X",
 /// "there's a file called X", "there are files at X", "a file exists at X".
+/// Never "there is a NEW file ...".
 fn introduced_as_existing(words: &[String], i: usize) -> bool {
     let mut j = i;
     while j > 0 {
         let p = words[j - 1].as_str();
+        if p == "new" {
+            return false;
+        }
         if FILLERS.contains(&p) || EXISTING_NOUNS.contains(&p) || matches!(p, "at" | "in") {
             j -= 1;
         } else {
@@ -236,8 +258,8 @@ fn introduced_as_existing(words: &[String], i: usize) -> bool {
     }
     let lead = words[j - 1].as_str();
     let before = (j > 1).then(|| words[j - 2].as_str());
-    matches!(lead, "there's" | "theres" | "here's" | "exists" | "exist")
-        || (matches!(lead, "is" | "are") && matches!(before, Some("there" | "here")))
+    matches!(lead, "there's" | "theres" | "exists" | "exist")
+        || (matches!(lead, "is" | "are") && before == Some("there"))
 }
 
 /// The destination could not be chosen.
@@ -387,13 +409,19 @@ fn parse(
             conj: joined,
             verb_before: verb_since_last && !cands.is_empty(),
             existing,
+            governed,
         });
         verb_since_last = false;
     }
     let mut dests: Vec<&Cand> = cands.iter().filter(|c| !c.source).collect();
-    // A file introduced as existing is read, not written, when the goal names
-    // another file to write; alone, it stays the destination (an edit).
-    if dests.iter().any(|c| !c.existing) {
+    // A file introduced as existing is read, not written, when a destination
+    // verb directly names another file to write ("create a new file called
+    // Y"); otherwise it stays a candidate (alone: the file to edit).
+    if dests
+        .iter()
+        .find(|c| !c.existing)
+        .is_some_and(|c| c.governed)
+    {
         dests.retain(|c| !c.existing);
     }
     let Some(first) = dests.first() else {
@@ -598,6 +626,27 @@ mod tests {
         unsupported("Delete all my notes", "delete");
         unsupported("Move the photos into the archive folder", "move");
         unsupported("Write a guide on how to delete files", "delete");
+        // Asked for although the object is a plain noun, or the path comes
+        // first: never turned into a write of that path (review of #357).
+        unsupported("docs/old.md is obsolete, so delete the stale doc", "delete");
+        unsupported(
+            "docs/a.md needs a better name, rename the file to something shorter",
+            "rename",
+        );
+        unsupported("Write docs/a.md. Delete the draft.", "delete");
+        unsupported("Create docs/a.md and delete the old files", "delete");
+        unsupported("Create docs/a.md and delete its contents", "delete");
+        unsupported("Create docs/a.md and remove the rest", "remove");
+        unsupported("Write docs/a.md showing how to delete it", "delete");
+        unsupported(
+            "Write docs/guide.md explaining how to delete docs/x.md",
+            "delete",
+        );
+        // Several operation words: one asked for is enough.
+        unsupported(
+            "Write docs/a.md explaining how to rename photos. Then rename the folder.",
+            "rename",
+        );
         // Subject matter of a named document.
         assert_eq!(
             d(
@@ -646,6 +695,15 @@ mod tests {
             d("Create docs/b.md and docs/c.md"),
             Err(DestinationError::Ambiguous(_))
         ));
+        // The other file is not directly named as the one to write: no
+        // demotion, still ambiguous (review of #357).
+        assert!(matches!(
+            d("There is a file at docs/x.md. Add a link to docs/y.md"),
+            Err(DestinationError::Ambiguous(c)) if c == ["docs/x.md", "docs/y.md"]
+        ));
+        // A NEW file is never an existing one; "here is" is not an existence lead.
+        assert!(d("There is a new file docs/out.md. Create docs/z.md").is_err());
+        assert!(d("Here is a file docs/out.md. Create docs/z.md").is_err());
         // "Create a file at X" names the destination, not an existing file.
         assert_eq!(
             d("Create a file at docs/x.md with one line"),
