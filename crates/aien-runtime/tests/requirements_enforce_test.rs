@@ -193,7 +193,7 @@ fn uncertain_spans_are_reported_not_dropped() {
             "at least 5 items per category",
         ),
         ("at most 5 items", "at most 5 items"),
-        ("at least 3 paragraphs", "at least 3 paragraphs"),
+        ("at most 3 paragraphs", "at most 3 paragraphs"),
         ("exactly 20 lines", "exactly 20 lines"),
         ("about 30 lines", "about 30 lines"),
         ("between 10 and 20 items", "between 10 and 20 items"),
