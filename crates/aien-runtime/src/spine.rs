@@ -362,8 +362,7 @@ impl AienRuntimeSpine {
                 };
                 match self.launch_swarm(config, &req.prompt_tokens) {
                     Ok(swarm_id) => {
-                        self.controller
-                            .mark_operation_processed(envelope.operation_id);
+                        record_processed(&mut self.controller, envelope.operation_id);
                         ControlResponse::SwarmAccepted {
                             swarm_id,
                             operation_id: envelope.operation_id,
@@ -393,8 +392,7 @@ impl AienRuntimeSpine {
                             }
                         }
                         self.pending_backend_releases.extend(released);
-                        self.controller
-                            .mark_operation_processed(envelope.operation_id);
+                        record_processed(&mut self.controller, envelope.operation_id);
                         ControlResponse::SwarmCancelled { swarm_id }
                     }
                     Err(e) => ControlResponse::Error(e),
@@ -422,8 +420,7 @@ impl AienRuntimeSpine {
                     .into(),
             ),
             ControlCommand::Shutdown => {
-                self.controller
-                    .mark_operation_processed(envelope.operation_id);
+                record_processed(&mut self.controller, envelope.operation_id);
                 ControlResponse::ShutdownAck
             }
         };
@@ -2636,6 +2633,15 @@ mod verify_callback_integration_tests {
         assert!(!lost.committed, "{lost:?}");
         assert_eq!(lost.aegis_pass_mask & 1, 0, "{lost:?}");
         assert_eq!(lost.cx_promotion, 0, "{lost:?}");
+    }
+}
+
+/// Records a processed operation id. The operation has already run, so a
+/// failed save does not change the reply; it is reported on stderr so the
+/// loss of durability is never silent (#299).
+fn record_processed(controller: &mut RuntimeController, operation_id: u128) {
+    if let Err(e) = controller.mark_operation_processed(operation_id) {
+        eprintln!("aien-runtime: {e}");
     }
 }
 
