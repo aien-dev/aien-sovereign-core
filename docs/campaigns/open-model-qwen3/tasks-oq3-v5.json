@@ -1,6 +1,6 @@
 {
   "spec": "ACCEPTANCE-v5.md Section 2 (DRAFT, NOT FROZEN, NOT RUN)",
-  "authorship": "goals, destinations, seeds and requirement wording written 2026-10-08 by an independent author (a Sonnet 5.5 worker) that was told not to open any repository, so no goal was shaped to the requirement reader; topic forms for interest and withdraw adjusted by the spec author before any run (ACCEPTANCE-v5 Section 3)",
+  "authorship": "goal wording, destinations and seeds written 2026-10-08 by an independent author (a Sonnet 5.5 worker) told not to open any repository (brief: evidence-v5/task-author-brief.md); requirement kinds per task were given by the spec author; after authoring the spec author changed only the topic forms of interest and withdraw, the phrases of D3, E1, E2 and R1, and added D2 heading_order from the goal's words (ACCEPTANCE-v5 Sections 3.1 and 12); no goal text was changed",
   "limits": {
     "edit_budget_ms": 29000,
     "doc_budget_ms": 120000,
@@ -93,6 +93,16 @@
           "heading": "Wrap Up",
           "n": 12,
           "label": "after the last code block, a Wrap Up heading followed by at least 12 words"
+        },
+        {
+          "kind": "heading_order",
+          "as_written": "in that order",
+          "titles": [
+            "Example One: Date Prefix",
+            "Example Two: Lowercase Names",
+            "Example Three: Number the Files"
+          ],
+          "label": "the three example headings appear in that order"
         }
       ],
       "max_tokens": 1024,
