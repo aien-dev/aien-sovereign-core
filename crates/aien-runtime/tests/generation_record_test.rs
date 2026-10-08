@@ -22,10 +22,16 @@ use std::time::Duration;
 static ONE_HOME: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 fn toy_tokenizer() -> ChatTokenizer {
+    toy_tokenizer_with(r#""x100":100,"x101":101"#)
+}
+
+/// The toy vocabulary with the spelling of the two mock tokens chosen by the test.
+fn toy_tokenizer_with(mock_tokens: &str) -> ChatTokenizer {
     let json = r#"{"version":"1.0","truncation":null,"padding":null,"added_tokens":[],
         "normalizer":null,"pre_tokenizer":{"type":"Whitespace"},"post_processor":null,
         "decoder":null,"model":{"type":"WordLevel","unk_token":"<unk>","vocab":{
-        "<unk>":0,"<s>":1,"</s>":2,"hello":6,"x100":100,"x101":101}}}"#;
+        "<unk>":0,"<s>":1,"</s>":2,"hello":6,MOCK}}}"#
+        .replace("MOCK", mock_tokens);
     ChatTokenizer::from_bytes(json.as_bytes()).expect("toy tokenizer")
 }
 
@@ -52,6 +58,10 @@ struct Daemon {
 }
 
 async fn start(identity: Option<ModelIdentity>) -> Daemon {
+    start_with(identity, toy_tokenizer()).await
+}
+
+async fn start_with(identity: Option<ModelIdentity>, tokenizer: ChatTokenizer) -> Daemon {
     let tmp = tempfile::tempdir().unwrap();
     let socket = tmp.path().join("runtime.sock");
     let cfg = SchedulerConfig {
@@ -71,7 +81,7 @@ async fn start(identity: Option<ModelIdentity>) -> Daemon {
         "test:generation-record",
     ));
     let server = AienRuntimeServer::new(spine, &socket).with_compose_bridge(bridge);
-    server.set_tokenizer(toy_tokenizer());
+    server.set_tokenizer(tokenizer);
     if let Some(id) = identity {
         server.set_model_identity(id);
     }
@@ -193,6 +203,30 @@ async fn record_carries_the_digests_of_the_turn() {
     // The envelope ids are the client's own, recorded as asserted.
     assert!(r["request_id"].as_u64().unwrap() > 0);
     assert!(r["operation_id"].as_str().unwrap().len() > 3);
+    d.stop().await;
+}
+
+/// The record hashes the text exactly as returned, whitespace included (a
+/// `trim()` before hashing would break the match with what the client holds).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[cfg_attr(not(compose_linked), ignore = "needs librx_compose.a: stub build")]
+async fn text_is_hashed_byte_exact_with_surrounding_whitespace() {
+    let _g = ONE_HOME.lock().await;
+    // Decoded text of the mock tokens: leading and trailing spaces.
+    let d = start_with(
+        Some(identity()),
+        toy_tokenizer_with(r#""  x100 ":100,"x101  ":101"#),
+    )
+    .await;
+    let (text, id) = d.turn("hello").await;
+    assert_ne!(
+        text,
+        text.trim(),
+        "test needs surrounding whitespace: {text:?}"
+    );
+    let r = d.record(id.expect("a record id")).await;
+    assert_eq!(r["output_text_sha256"], sha(text.as_bytes()));
+    assert_ne!(r["output_text_sha256"], sha(text.trim().as_bytes()));
     d.stop().await;
 }
 

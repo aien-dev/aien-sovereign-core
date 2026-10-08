@@ -74,11 +74,17 @@ pub fn build_record(id: &ModelIdentity, t: &TurnEvidence, start: DaemonStart) ->
         "output_tokens": t.output_ids.len(),
         "finish_reason": t.finish_reason,
         "daemon": {"pid": pid, "start_ticks": start_ticks, "started_unix_ms": start.0.to_string()},
+        // Caller-asserted: the client chooses the envelope ids; recorded, not trusted.
         "request_id": t.request_id,
         "operation_id": t.operation_id.to_string(),
     })
 }
 
+/// Why an `effect`-class note carrying a `generation` marker, and not a new
+/// note kind: omega-compose's `NoteKind` enum (constraint, authorization,
+/// effect) is a pinned external dependency with fixed kinds, so this crate
+/// cannot add one. The marker field plays the role of a kind: `ComposeNote`
+/// refuses it and no ledger reader acts on it.
 /// Append `record` to the ledger; the id is returned only once it is written.
 pub(crate) fn write(home: &mut crate::spine::ComposeHome, record: &Value) -> Result<u64, String> {
     crate::effects::append(home, aien_omega_compose::NoteKind::Effect, &[], record).map(|n| n.id)
