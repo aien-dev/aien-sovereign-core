@@ -14,14 +14,9 @@ fn template() -> String {
 }
 
 #[test]
-fn pinned_template_is_plain_chatml_without_default_system() {
+fn pinned_template_is_qwen3_chatml_without_default_system() {
     let t = ChatTemplate::detect(&template()).expect("Qwen3-4B-Instruct-2507 template accepted");
-    assert_eq!(
-        t,
-        ChatTemplate::ChatMl {
-            default_system: None
-        }
-    );
+    assert_eq!(t, ChatTemplate::ChatMlQwen3);
     assert_eq!(t.default_system(), None);
 }
 
@@ -33,7 +28,7 @@ fn rendering_matches_the_reference_jinja_rendering() {
     .unwrap();
     let t = ChatTemplate::detect(&template()).unwrap();
     let cases = oracle["cases"].as_array().unwrap();
-    assert_eq!(cases.len(), 8);
+    assert_eq!(cases.len(), 12);
     for (i, case) in cases.iter().enumerate() {
         let turns: Vec<(String, String)> = case["turns"]
             .as_array()
@@ -108,12 +103,7 @@ fn real_model_dir_loads_with_the_pinned_template() {
     use aien_inference_abi::tokenizer::ChatTokenizer;
     let dir = std::env::var("AIEN_QWEN3_DIR").expect("AIEN_QWEN3_DIR is not set");
     let tok = ChatTokenizer::from_model_dir(std::path::Path::new(&dir), None).unwrap();
-    assert_eq!(
-        tok.template(),
-        ChatTemplate::ChatMl {
-            default_system: None
-        }
-    );
+    assert_eq!(tok.template(), ChatTemplate::ChatMlQwen3);
     let im_end = tok.token_to_id("<|im_end|>").expect("<|im_end|> in vocab");
     assert!(
         tok.stop_token_ids().contains(&im_end),
@@ -129,4 +119,26 @@ fn real_model_dir_loads_with_the_pinned_template() {
         "no BOS is added"
     );
     assert_eq!(ids.iter().filter(|&&t| t == im_end).count(), 2);
+}
+
+/// Other ChatML models (SmolLM2, plain ChatML) keep their layout: role `tool` is still a plain
+/// user turn there, and the non-tool roles render the same as for Qwen3.
+#[test]
+fn plain_chatml_is_unchanged_and_shares_non_tool_roles_with_qwen3() {
+    let plain = ChatTemplate::ChatMl {
+        default_system: None,
+    };
+    let turns = [("user", "q"), ("tool", "r"), ("tool", "s")];
+    assert_eq!(
+        plain.try_render(&turns).unwrap(),
+        "<|im_start|>user\nq<|im_end|>\n<|im_start|>user\nr<|im_end|>\n<|im_start|>user\ns<|im_end|>\n<|im_start|>assistant\n"
+    );
+    let qwen = ChatTemplate::detect(&template()).unwrap();
+    let no_tool = [
+        ("system", "S"),
+        ("user", "U"),
+        ("assistant", "A"),
+        ("user", "V"),
+    ];
+    assert_eq!(plain.try_render(&no_tool), qwen.try_render(&no_tool));
 }

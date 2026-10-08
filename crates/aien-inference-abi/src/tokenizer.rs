@@ -65,6 +65,11 @@ pub enum ChatTemplate {
         /// The default system message read from the model's own template, if it has one.
         default_system: Option<Arc<str>>,
     },
+    /// Qwen3-4B-Instruct-2507: the plain ChatML layout above (no default system message) plus
+    /// the publisher template's handling of role `tool`: a run of consecutive `tool` turns is
+    /// one user turn, `<|im_start|>user`, then per turn `\n<tool_response>\n{content}\n</tool_response>`,
+    /// then `<|im_end|>\n`. Selected only by the pinned template text in `QWEN3_INSTRUCT_2507`.
+    ChatMlQwen3,
     /// The model directory has no chat template at all (a base model). Plain text encode
     /// and decode work; every chat render is refused (`try_render` errors with
     /// "no chat template"). Chosen only when neither `tokenizer_config.json` `chat_template`
@@ -93,7 +98,10 @@ const QWEN3_INSTRUCT_2507: &str =
 /// with its default system message (None for the plain layout), or a refusal.
 fn parse_chatml(template_text: &str) -> Result<ChatTemplate, TokenizerError> {
     let text = template_text.trim();
-    if text == CHATML_PLAIN || text == QWEN3_INSTRUCT_2507.trim() {
+    if text == QWEN3_INSTRUCT_2507.trim() {
+        return Ok(ChatTemplate::ChatMlQwen3);
+    }
+    if text == CHATML_PLAIN {
         return Ok(ChatTemplate::ChatMl {
             default_system: None,
         });
@@ -127,10 +135,11 @@ fn parse_chatml(template_text: &str) -> Result<ChatTemplate, TokenizerError> {
 
 /// The publisher's ChatML rendering for `(role, content)` turns ending in a generation
 /// prompt (see [`ChatTemplate::ChatMl`]). Roles are normalized as for the other layouts.
-fn render_chatml(default_system: Option<&str>, turns: &[(&str, &str)]) -> String {
+fn render_chatml(default_system: Option<&str>, qwen_tools: bool, turns: &[(&str, &str)]) -> String {
     let role_of = |role: &str| match role.trim().to_ascii_lowercase().as_str() {
         "system" => "system",
         "assistant" => "assistant",
+        "tool" if qwen_tools => "tool",
         _ => "user",
     };
     let mut out = String::new();
@@ -139,11 +148,23 @@ fn render_chatml(default_system: Option<&str>, turns: &[(&str, &str)]) -> String
             out.push_str(&format!("<|im_start|>system\n{system}<|im_end|>\n"));
         }
     }
-    for (role, content) in turns {
-        out.push_str(&format!(
-            "<|im_start|>{}\n{content}<|im_end|>\n",
-            role_of(role)
-        ));
+    for (i, (role, content)) in turns.iter().enumerate() {
+        let role = role_of(role);
+        if role == "tool" {
+            // Qwen3 template: one user turn per run of tool turns.
+            if i == 0 || role_of(turns[i - 1].0) != "tool" {
+                out.push_str("<|im_start|>user");
+            }
+            out.push_str(&format!("\n<tool_response>\n{content}\n</tool_response>"));
+            if turns
+                .get(i + 1)
+                .is_none_or(|(next, _)| role_of(next) != "tool")
+            {
+                out.push_str("<|im_end|>\n");
+            }
+        } else {
+            out.push_str(&format!("<|im_start|>{role}\n{content}<|im_end|>\n"));
+        }
     }
     if !ends_in_assistant(turns) {
         out.push_str("<|im_start|>assistant\n");
@@ -171,6 +192,7 @@ impl ChatTemplate {
             Self::Zephyr => "zephyr (TinyLlama chat)",
             Self::Llama3 => "llama3 (Llama 3 instruct)",
             Self::ChatMl { .. } => "chatml (<|im_start|> / <|im_end|>)",
+            Self::ChatMlQwen3 => "chatml-qwen3 (<|im_start|> / <|im_end|>, tool responses)",
             Self::None => "none (plain text model)",
         }
     }
@@ -217,7 +239,10 @@ impl ChatTemplate {
             return Err(no_chat_template_error());
         }
         if let Self::ChatMl { default_system } = self {
-            return Ok(render_chatml(default_system.as_deref(), turns));
+            return Ok(render_chatml(default_system.as_deref(), false, turns));
+        }
+        if let Self::ChatMlQwen3 = self {
+            return Ok(render_chatml(None, true, turns));
         }
         let mut out = String::new();
         for (role, content) in turns {
@@ -235,7 +260,7 @@ impl ChatTemplate {
                 Self::Llama3 => out.push_str(&format!(
                     "<|start_header_id|>{role}<|end_header_id|>\n\n{body}<|eot_id|>"
                 )),
-                Self::ChatMl { .. } => unreachable!("ChatML returned above"),
+                Self::ChatMl { .. } | Self::ChatMlQwen3 => unreachable!("ChatML returned above"),
                 Self::None => unreachable!("plain model refused above"),
             }
         }
@@ -243,7 +268,7 @@ impl ChatTemplate {
             out.push_str(match self {
                 Self::Zephyr => "<|assistant|>\n",
                 Self::Llama3 => "<|start_header_id|>assistant<|end_header_id|>\n\n",
-                Self::ChatMl { .. } => unreachable!("ChatML returned above"),
+                Self::ChatMl { .. } | Self::ChatMlQwen3 => unreachable!("ChatML returned above"),
                 Self::None => unreachable!("plain model refused above"),
             });
         }
