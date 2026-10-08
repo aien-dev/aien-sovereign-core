@@ -101,27 +101,47 @@ impl fmt::Display for ToolBoundaryError {
 
 impl std::error::Error for ToolBoundaryError {}
 
-/// Folds text for matching: drops invisible formatting characters, maps full-width ASCII and a
-/// small set of angle/bar/slash lookalikes to ASCII, lowercases ASCII.
+/// Characters that render as nothing (or are control characters) and are dropped before
+/// matching: soft hyphen, combining grapheme joiner, Arabic letter mark, Mongolian vowel
+/// separator, zero-width and bidi marks, invisible operators, variation selectors, braille
+/// blank, Hangul fillers, Khmer inherent vowels, tag characters, BOM, and all non-whitespace
+/// control characters (NUL included).
+fn is_invisible(c: char) -> bool {
+    matches!(c,
+        '\u{00AD}' | '\u{034F}' | '\u{061C}' | '\u{115F}' | '\u{1160}' | '\u{17B4}' | '\u{17B5}'
+        | '\u{180B}'..='\u{180F}' | '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}'
+        | '\u{2060}'..='\u{206F}' | '\u{2800}' | '\u{3164}' | '\u{FE00}'..='\u{FE0F}'
+        | '\u{FEFF}' | '\u{FFA0}' | '\u{FFF9}'..='\u{FFFB}' | '\u{E0000}'..='\u{E0FFF}')
+        || (c.is_control() && !c.is_whitespace())
+}
+
+/// Folds text for matching: drops invisible characters, maps full-width ASCII and a small set
+/// of angle/bar/slash and letter lookalikes (long s, dotless i) to ASCII, and lowercases (which
+/// also maps the Kelvin sign to `k`). This is NOT full NFKC: no normalization crate is in
+/// Cargo.lock (only `unicode-normalization-alignments`, unrelated) and the sovereignty rule
+/// forbids adding one.
 fn fold(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     for c in text.chars() {
+        if is_invisible(c) {
+            continue;
+        }
         let c = match c {
-            '\u{00AD}' | '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}' => continue,
-            '\u{2060}'..='\u{2064}' | '\u{2066}'..='\u{2069}' | '\u{FEFF}' => continue,
             '\u{FF01}'..='\u{FF5E}' => char::from_u32(c as u32 - 0xFEE0).unwrap_or(c),
             '\u{2039}' | '\u{27E8}' | '\u{2329}' | '\u{3008}' => '<',
             '\u{203A}' | '\u{27E9}' | '\u{232A}' | '\u{3009}' => '>',
             '\u{2758}' | '\u{2502}' | '\u{2223}' | '\u{01C0}' => '|',
             '\u{29F8}' | '\u{2215}' => '/',
+            '\u{017F}' => 's',
+            '\u{0131}' => 'i',
             other => other,
         };
-        out.push(c.to_ascii_lowercase());
+        out.extend(c.to_lowercase());
     }
     out
 }
 
-/// The refusal list. Construct with [`ToolGuard::qwen3`] or [`ToolGuard::from_tokenizer`].
+/// The refusal list. Construct with [`ToolGuard::from_tokenizer`] (the only public constructor).
 #[derive(Debug, Clone)]
 pub struct ToolGuard {
     patterns: Vec<String>,
@@ -129,7 +149,7 @@ pub struct ToolGuard {
 
 impl ToolGuard {
     /// The template's structural strings only.
-    pub fn qwen3() -> Self {
+    pub(crate) fn qwen3() -> Self {
         Self {
             patterns: QWEN3_CONTROL_STRINGS
                 .iter()
@@ -153,32 +173,35 @@ impl ToolGuard {
 
     fn scan(&self, text: &str) -> Result<(), ToolBoundaryError> {
         let f = fold(text);
+        // Also match with every whitespace character removed, so `<tool _response>` is caught.
+        let squeezed: String = f.chars().filter(|c| !c.is_whitespace()).collect();
         for p in &self.patterns {
-            if f.contains(p.as_str()) {
+            let squeezed_p: String = p.chars().filter(|c| !c.is_whitespace()).collect();
+            if f.contains(p.as_str()) || squeezed.contains(squeezed_p.as_str()) {
                 return Err(ToolBoundaryError::ControlSequence { pattern: p.clone() });
             }
         }
-        // Spacing variants: `<|` anywhere, and `<` [ws] [`/`] [ws] tag-name.
-        let b = f.as_bytes();
-        for (i, _) in f.match_indices('<') {
-            let mut j = i + 1;
-            let skip_ws = |mut j: usize| {
-                while j < b.len() && b[j].is_ascii_whitespace() {
-                    j += 1;
-                }
-                j
-            };
-            j = skip_ws(j);
-            if j < b.len() && b[j] == b'|' {
+        // Spacing variants: `<` [ws] `|`, and `<` [ws] [`/`] [ws] tag-name (Unicode whitespace).
+        let ch: Vec<char> = f.chars().collect();
+        let skip_ws = |mut j: usize| {
+            while j < ch.len() && ch[j].is_whitespace() {
+                j += 1;
+            }
+            j
+        };
+        for i in (0..ch.len()).filter(|&i| ch[i] == '<') {
+            let mut j = skip_ws(i + 1);
+            if ch.get(j) == Some(&'|') {
                 return Err(ToolBoundaryError::ControlSequence {
                     pattern: "<|".into(),
                 });
             }
-            if j < b.len() && b[j] == b'/' {
+            if ch.get(j) == Some(&'/') {
                 j = skip_ws(j + 1);
             }
+            let rest: String = ch[j..].iter().take(16).collect();
             for name in REFUSED_TAG_NAMES {
-                if f[j..].starts_with(name) {
+                if rest.starts_with(name) {
                     return Err(ToolBoundaryError::ControlSequence {
                         pattern: format!("<{name}> (spacing variant)"),
                     });

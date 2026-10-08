@@ -174,7 +174,7 @@ async fn record_carries_the_digests_of_the_turn() {
     let d = start(Some(identity())).await;
     let tok = toy_tokenizer();
     let prompt = tok
-        .encode(&format_chat(tok.template(), &user("hello hello")))
+        .encode(&format_chat(tok.template(), &user("hello hello")).expect("chat"))
         .unwrap();
     let (text, id) = d.turn("hello hello").await;
     assert!(!text.is_empty());

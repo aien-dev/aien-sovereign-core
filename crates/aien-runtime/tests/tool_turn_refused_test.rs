@@ -39,3 +39,9 @@ fn ordinary_turns_still_render() {
     .unwrap();
     assert!(out.ends_with("<|im_start|>assistant\n"));
 }
+
+#[test]
+fn format_chat_returns_an_error_not_a_panic_for_tool_role() {
+    let r = aien_runtime::control::format_chat(ChatTemplate::ChatMlQwen3, &[t("tool", "x")]);
+    assert!(matches!(r, Err(TokenizerError::ToolTurnRefused(_))));
+}

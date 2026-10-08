@@ -38,17 +38,16 @@ fn refuse_tool_turns(messages: &[ChatTurn]) -> Result<(), aien_inference_abi::To
 }
 
 /// Renders the chat with a model's template. Generation continues from an assistant
-/// header unless the last turn is a non-empty assistant turn.
-pub fn format_chat(template: aien_inference_abi::ChatTemplate, messages: &[ChatTurn]) -> String {
-    refuse_tool_turns(messages).expect("tool turn refused");
-    let turns: Vec<(&str, &str)> = messages
-        .iter()
-        .map(|m| (m.role.as_str(), m.content.as_str()))
-        .collect();
-    template.render(&turns)
+/// header unless the last turn is a non-empty assistant turn. Role `tool` and a plain model
+/// (no chat template) are refused with an error, never a panic.
+pub fn format_chat(
+    template: aien_inference_abi::ChatTemplate,
+    messages: &[ChatTurn],
+) -> Result<String, aien_inference_abi::TokenizerError> {
+    try_format_chat(template, messages)
 }
 
-/// Fallible [`format_chat`]: a plain model (no chat template) is refused.
+/// Same as [`format_chat`]; kept as the explicit fallible name.
 pub fn try_format_chat(
     template: aien_inference_abi::ChatTemplate,
     messages: &[ChatTurn],
@@ -62,7 +61,9 @@ pub fn try_format_chat(
 }
 
 /// TinyLlama chat template. Generation always continues from an assistant header.
-pub fn format_tinyllama_chat(messages: &[ChatTurn]) -> String {
+pub fn format_tinyllama_chat(
+    messages: &[ChatTurn],
+) -> Result<String, aien_inference_abi::TokenizerError> {
     format_chat(aien_inference_abi::ChatTemplate::Zephyr, messages)
 }
 
@@ -563,7 +564,8 @@ mod tests {
                 role: "user".into(),
                 content: "Status?".into(),
             },
-        ]);
+        ])
+        .expect("chat");
         assert!(prompt.starts_with("<|system|>\nYou are AIEN.</s>\n"));
         assert!(prompt.contains("<|user|>\nStatus?</s>\n"));
         assert!(prompt.ends_with("<|assistant|>\n"));
