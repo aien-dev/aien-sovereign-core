@@ -180,6 +180,15 @@ fn the_alloc_probe_logs_the_baseline_and_shows_any_nonzero_delta() {
         quiet.contains("allocs_since_warmup=0") && !quiet.contains("NONZERO"),
         "{quiet}"
     );
+    // frees alone (teardown) are flagged under their own name, never as an allocation
+    now.lock().unwrap().frees += 33;
+    let freed = p.after_request().unwrap();
+    assert!(
+        freed.contains("frees_since_warmup=33")
+            && freed.contains("FREES:")
+            && !freed.contains("NONZERO"),
+        "{freed}"
+    );
     now.lock().unwrap().allocs += 3;
     now.lock().unwrap().alloc_bytes += 12288;
     now.lock().unwrap().alloc_failures += 1;

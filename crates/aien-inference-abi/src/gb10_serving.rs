@@ -281,9 +281,12 @@ impl ServingProbe for AllocProbe {
             d(now.alloc_failures, base.alloc_failures),
             d(now.frees, base.frees),
         );
-        // Frees alone are not an allocation, but a free after warm-up means a buffer was replaced.
-        let flag = if allocs != 0 || failures != 0 || frees != 0 {
+        // Frees alone are not an allocation, but a free after warm-up means a buffer was replaced
+        // (or the daemon is tearing down), so it is flagged too, under its own name.
+        let flag = if allocs != 0 || failures != 0 {
             " NONZERO: serving asked the driver for memory after warm-up"
+        } else if frees != 0 {
+            " FREES: driver memory released after warm-up (teardown, or a buffer was replaced)"
         } else {
             ""
         };
