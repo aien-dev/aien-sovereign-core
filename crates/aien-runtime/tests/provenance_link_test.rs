@@ -67,6 +67,16 @@ fn greedy_observation() -> aien_inference_abi::DecodeObservation {
     }
 }
 
+/// The tensor backend and op counters the scheduler reports (sc#337).
+fn cpu_ops() -> aien_inference_abi::OpEvidence {
+    aien_inference_abi::OpEvidence {
+        backend: "reference-cpu".into(),
+        native_fallbacks: 0,
+        reference_runs: 0,
+        report: "OP_REPORT native=[] reference=[] native_fallbacks=[] reference_runs=[]".into(),
+    }
+}
+
 /// The reply the real inference path gives: text, generated ids, prompt ids hash.
 fn proposer() -> ComposeProposer {
     Arc::new(|_p: &str, _l: Duration| {
@@ -79,6 +89,8 @@ fn proposer() -> ComposeProposer {
             prompt_ids_sha256: Some(token_ids_sha256(&PROMPT_IDS)),
             // sc#294: what the scheduler reports for a greedy run of these ids.
             decoding: Some(greedy_observation()),
+            // sc#337: what the scheduler reports for a production CPU run.
+            ops: Some(cpu_ops()),
         })
     })
 }
@@ -328,6 +340,18 @@ async fn assert_linked(d: &Daemon, f: &Flow, want_agent: &str) {
     assert_eq!(
         g["decoding"],
         json!({"mode": "greedy", "greedy_tokens": OUT_IDS.len(), "sampled_tokens": 0}),
+        "{g}"
+    );
+    // sc#337: the backend and op counters travel into the record.
+    assert_eq!(
+        g["ops"],
+        json!({
+            "backend": "reference-cpu",
+            "native_fallbacks": 0,
+            "reference_runs": 0,
+            "scope": "process",
+            "report": cpu_ops().report,
+        }),
         "{g}"
     );
     // The grant, intent and commit still say what they said before.

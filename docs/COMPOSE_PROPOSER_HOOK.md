@@ -221,3 +221,10 @@ fix: the grant links the claim; a grant whose claim is not COMMITTED with
 matching evidence is refused at intent; the approved grant cannot be
 forged. Tests still to add: walk from an ack recovers trace_id and
 request_id; `record_effect_receipt` for approved writes names the grant.
+
+## Native vs stub in the recall reply (VAC M3a)
+`ComposeRecallReport` (reply to `ComposeRecall`) carries `compose_native: bool` (the native Omega
+composition library is linked, not the stub) and `omega_sha: String` (the pinned omega commit, 40 hex;
+empty for the stub). Both are `#[serde(default)]`, so older replies still read as stub. The daemon also
+prints `Compose: native (omega <sha>)` or `Compose: STUB (...)` at startup. An offline verifier uses
+these to refuse a "native" claim from a stub daemon.

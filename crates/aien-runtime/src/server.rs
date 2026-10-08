@@ -284,6 +284,14 @@ impl AienRuntimeServer {
             if !b.authorize_requires_desk() {
                 tracing::warn!("{line}");
             }
+            if aien_omega_compose::LINKED {
+                println!(
+                    "Compose: native (omega {})",
+                    aien_omega_compose::EXPECTED_OMEGA_SHA
+                );
+            } else {
+                println!("Compose: STUB (every compose call is Unavailable)");
+            }
         }
         if let Some(b) = compose.clone() {
             let gate = b.clone();
@@ -559,8 +567,12 @@ async fn generate_text(
                 Some(CompletionEvent::Finished {
                     finish_reason,
                     decoding,
+                    ops,
                     ..
                 }) => {
+                    if let Some(line) = crate::generation::op_report_line(ops.as_ref()) {
+                        eprintln!("{line}");
+                    }
                     return tokenizer
                         .decode_opts(&produced, true)
                         .map(|text| crate::spine::Generation {
@@ -571,6 +583,7 @@ async fn generate_text(
                             prompt_tokens: Some(prompt_ids.len()),
                             prompt_ids_sha256: Some(crate::spine::token_ids_sha256(&prompt_ids)),
                             decoding: decoding.clone(),
+                            ops: ops.clone(),
                         })
                         .map_err(|e| format!("tokenizer decode failed: {e}"));
                 }
@@ -668,6 +681,7 @@ struct GenerationOwned {
     request_id: u64,
     operation_id: u128,
     decoding: Option<aien_abi_core::DecodeObservation>,
+    ops: Option<aien_abi_core::OpEvidence>,
 }
 
 /// Write the daemon's generation record for a finished turn and return its
@@ -694,6 +708,7 @@ async fn record_generation(
                 request_id: g.request_id,
                 operation_id: g.operation_id,
                 decoding: g.decoding.as_ref(),
+                ops: g.ops.as_ref(),
             },
             started,
         );
@@ -764,8 +779,12 @@ async fn stream_turn(
                 total_tokens,
                 finish_reason,
                 decoding,
+                ops,
                 ..
             })) => {
+                if let Some(line) = crate::generation::op_report_line(ops.as_ref()) {
+                    eprintln!("{line}");
+                }
                 let generation_record = record_generation(
                     compose,
                     identity,
@@ -779,6 +798,7 @@ async fn stream_turn(
                         request_id,
                         operation_id,
                         decoding,
+                        ops,
                     },
                 )
                 .await;
@@ -1063,6 +1083,7 @@ mod generation_record_tests {
             request_id: 1,
             operation_id: 1,
             decoding: None,
+            ops: None,
         }
     }
 

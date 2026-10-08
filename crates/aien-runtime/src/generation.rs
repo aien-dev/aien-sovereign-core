@@ -38,6 +38,8 @@ pub struct TurnEvidence<'a> {
     pub operation_id: u128,
     /// How the backend chose the output tokens (sc#294); None: no claim.
     pub decoding: Option<&'a aien_abi_core::DecodeObservation>,
+    /// The tensor backend and its op counters when the call finished (sc#337); None: no claim.
+    pub ops: Option<&'a aien_abi_core::OpEvidence>,
 }
 
 /// When this daemon started: unix milliseconds, captured once.
@@ -91,6 +93,30 @@ fn with_decoding(record: &mut Value, d: Option<&aien_abi_core::DecodeObservation
     record["decoding"] = o;
 }
 
+/// Adds `ops` (sc#337): the tensor backend that ran the call and its op
+/// counters when the call finished, as process totals since the daemon built
+/// the backend (`native_fallbacks`: claimed-native ops that ran on the
+/// reference CPU path, always 0 in a production build, which panics on the
+/// first; `reference_runs`: ops on the reference path by design). Left out
+/// when the backend does not account its ops: no field means no claim.
+fn with_ops(record: &mut Value, o: Option<&aien_abi_core::OpEvidence>) {
+    let Some(o) = o else { return };
+    record["ops"] = json!({
+        "backend": o.backend,
+        "native_fallbacks": o.native_fallbacks,
+        "reference_runs": o.reference_runs,
+        "scope": "process",
+        "report": o.report,
+    });
+}
+
+/// The line the daemon logs at the end of every model call (sc#337): the
+/// backend's `OP_REPORT ...` line with ` backend=<name>` appended. None when
+/// the backend does not account its ops.
+pub fn op_report_line(o: Option<&aien_abi_core::OpEvidence>) -> Option<String> {
+    o.map(|o| format!("{} backend={}", o.report, o.backend))
+}
+
 /// The record's JSON body (field list is documented in docs/DAEMON_GENERATION_RECORD.md).
 pub fn build_record(id: &ModelIdentity, t: &TurnEvidence, start: DaemonStart) -> Value {
     let (pid, start_ticks) = crate::effects::self_executor();
@@ -113,6 +139,7 @@ pub fn build_record(id: &ModelIdentity, t: &TurnEvidence, start: DaemonStart) ->
         "operation_id": t.operation_id.to_string(),
     });
     with_decoding(&mut record, t.decoding);
+    with_ops(&mut record, t.ops);
     record
 }
 
@@ -309,6 +336,8 @@ pub struct ComposeEvidence<'a> {
     pub attempt: u32,
     /// How the backend chose the output tokens (sc#294); None: no claim.
     pub decoding: Option<&'a aien_abi_core::DecodeObservation>,
+    /// The tensor backend and its op counters when the call finished (sc#337); None: no claim.
+    pub ops: Option<&'a aien_abi_core::OpEvidence>,
 }
 
 /// The generation record of one compose proposal attempt: the same fields as
@@ -338,5 +367,6 @@ pub fn build_compose_record(id: &ModelIdentity, e: &ComposeEvidence, start: Daem
         "operation_id": "0",
     });
     with_decoding(&mut record, e.decoding);
+    with_ops(&mut record, e.ops);
     record
 }

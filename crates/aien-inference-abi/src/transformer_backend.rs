@@ -1879,6 +1879,15 @@ impl AienInferenceBackend for NativeTransformerBackend {
             .map(DecodeTally::merged)
     }
 
+    /// sc#337: the tensor backend's name and op counters so far.
+    fn op_evidence(&self) -> Option<crate::OpEvidence> {
+        Some(
+            self.tensor_backend
+                .op_report()
+                .evidence(self.tensor_backend.name()),
+        )
+    }
+
     async fn execute_step(
         &mut self,
         batch: &ScheduledBatch,
