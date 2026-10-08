@@ -60,10 +60,19 @@
 //!   (`1.`, `2)`), emphasis marks and trailing `:.!?#`, trimmed, whitespace
 //!   collapsed, compared case-insensitively.
 //! - word form (topics): lowercase, strip ONE suffix of `ment ing ion es ed
-//!   s` (only when 3 or more letters remain), then one trailing `e` (when 4
+//!   s` (only when 3 or more letters remain; not the `s` of a final `ss`), then one trailing `e` (when 4
 //!   or more letters remain). `preparing`, `prepare` and `prepared` agree;
-//!   `publishing` and `public` do not. Irregular forms (`running` / `run`)
-//!   do not agree: the check errs on the side of refusing.
+//!   `publishing` and `public` do not. A word whose suffix was stripped also
+//!   matches with a final `i` as `y` and with a doubled final consonant
+//!   undoubled, so `dry`, `dried` and `drying`, `label`, `labelled` and
+//!   `labelling`, `run` and `running` agree (`fill` and `file`, `ski` and
+//!   `sky` do not). A topic word ending in `age` or `ages` also matches
+//!   without it when 4 letters remain, by a verb form only: the topic
+//!   `storage` is covered by `store` or `stored`, `postage` not by `post`
+//!   (sc#332). Irregular forms (`withdrew` / `withdraw`)
+//!   do not agree: the check errs on the side of refusing, unless the goal
+//!   names the form for that topic, written into the topic as `withdraw (or
+//!   withdrew)`.
 //! - sentence: a run of at least two words ended by `.`, `!` or `?` (not
 //!   inside a number such as `3.10`); an unfinished last fragment of at
 //!   least three words counts as one. List markers are ignored.
@@ -123,7 +132,9 @@ pub enum Requirement {
     /// Section titles that must each appear as a heading.
     RequiredHeadings(Vec<String>),
     /// Topics (each a list of content words) that must each be covered: every
-    /// content word must appear in the prose as a word form.
+    /// content word must appear in the prose as a word form. A topic written
+    /// `withdraw (or withdrew, withdrawn)` is also covered by any one of the
+    /// forms the goal named for it.
     RequiredTopics(Vec<String>),
     /// Every section holds at least this many sentences.
     MinSentencesPerSection(usize),
@@ -291,13 +302,18 @@ impl Requirement {
             Requirement::RequiredTopics(p) => {
                 let have: HashSet<String> = words_of(&prose_lines(content).join("\n"))
                     .iter()
-                    .map(|w| stem(w))
+                    .flat_map(|w| word_keys(w, false))
                     .collect();
-                let missing: Vec<String> = p
-                    .iter()
-                    .filter(|t| !content_words(t).iter().all(|w| have.contains(&stem(w))))
-                    .cloned()
-                    .collect();
+                let has = |w: &String| word_keys(w, true).iter().any(|k| have.contains(k));
+                let covered = |t: &str| {
+                    let (topic, forms) = topic_forms(t);
+                    content_words(topic).iter().all(has)
+                        || forms.iter().any(|f| {
+                            let f = words_of(f);
+                            !f.is_empty() && f.iter().all(|w| have.contains(&stem(w)))
+                        })
+                };
+                let missing: Vec<String> = p.iter().filter(|t| !covered(t)).cloned().collect();
                 (!missing.is_empty()).then(|| {
                     format!(
                         "{label}, not covered: {} (use those words, or their word forms, in the text)",
@@ -437,17 +453,72 @@ pub(crate) fn content_words(topic: &str) -> Vec<String> {
 
 /// Conservative word form (see the module docs).
 pub(crate) fn stem(w: &str) -> String {
+    stem_parts(w).0
+}
+
+/// The word form and whether a suffix was stripped.
+fn stem_parts(w: &str) -> (String, bool) {
     let mut s = w.to_lowercase();
+    let mut stripped = false;
     for suf in ["ment", "ing", "ion", "es", "ed", "s"] {
-        if s.len() >= suf.len() + 3 && s.ends_with(suf) {
+        // A final `ss` is not a plural: `dress`, `class`, `mess` (sc#332).
+        if s.len() >= suf.len() + 3 && s.ends_with(suf) && !(suf == "s" && s.ends_with("ss")) {
             s.truncate(s.len() - suf.len());
+            stripped = true;
             break;
         }
     }
     if s.len() >= 4 && s.ends_with('e') {
         s.pop();
     }
-    s
+    (s, stripped)
+}
+
+/// The forms a word may match as (see the module docs): its word form and,
+/// only when a suffix was stripped, that form with a final `i` as `y`
+/// (`dried`: `dry`) or a doubled final consonant undoubled (`labelled`:
+/// `label`). A topic word ending in `age` or `ages` (4 letters left) also
+/// matches a document word that is a verb form of the rest, one that ended
+/// in `e` or lost a suffix (`storage`: `store`, `stored`; not `post` for
+/// `postage`); those keys carry an `age:` mark so nothing else meets them
+/// (sc#332). `topic` is true for the topic's words, false for the document's.
+pub(crate) fn word_keys(w: &str, topic: bool) -> Vec<String> {
+    let (s, stripped) = stem_parts(w);
+    let mut keys = vec![s.clone()];
+    if !topic && (stripped || w.to_lowercase().ends_with('e')) {
+        keys.push(format!("age:{s}"));
+    }
+    if stripped {
+        if let Some(r) = s.strip_suffix('i') {
+            keys.push(format!("{r}y"));
+        }
+        let b = s.as_bytes();
+        if b.len() >= 4 {
+            let (x, y) = (b[b.len() - 1], b[b.len() - 2]);
+            if x == y && x.is_ascii_alphabetic() && !b"aeiou".contains(&x) {
+                keys.push(s[..s.len() - 1].to_string());
+            }
+        }
+    }
+    if topic {
+        let low = w.to_lowercase();
+        for suf in ["ages", "age"] {
+            if let Some(r) = low.strip_suffix(suf).filter(|r| r.len() >= 4) {
+                keys.push(format!("age:{}", stem(r)));
+                break;
+            }
+        }
+    }
+    keys
+}
+
+/// A topic and the extra forms the goal named for it: `withdraw (or withdrew,
+/// withdrawn)` is `("withdraw", ["withdrew", "withdrawn"])`.
+pub(crate) fn topic_forms(t: &str) -> (&str, Vec<&str>) {
+    match t.strip_suffix(')').and_then(|x| x.split_once(" (or ")) {
+        Some((topic, forms)) => (topic, forms.split(',').map(str::trim).collect()),
+        None => (t, Vec::new()),
+    }
 }
 
 /// Heading text as compared: see the module docs.

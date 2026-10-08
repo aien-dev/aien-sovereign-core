@@ -19,6 +19,7 @@
 //! | `sections|headings titled|named|called A, B and C`, `sections: A, B and C`; with quoted titles also `section(s) is|are titled "A"` and `[one] section(s) must|should|will|shall|can be titled "A"` | `RequiredHeadings` (a count before the noun must equal the number of titles; `organise it under three sections titled ...` is read the same). The is/are/be forms stay UNCERTAIN after `each every all any` or with `if unless optionally optional may might when whenever perhaps maybe` in the clause |
 //! | `between N and M lines|words` (N <= M) | `MinX(N)` and `MaxX(M)`, inclusive. Other nouns, `from N to M`, ranges like `2-3`, `... or so`, and a range on a part of the document (a countable noun or `gap space distance` right before `between`, or `each every per` within three words) stay UNCERTAIN |
 //! | `covers|covering A, B and C` (and `to|should|must|will|can cover ...`) | `RequiredTopics` |
+//! | `[must|...] cover|covers|covering N topics: a, b and c` (N equals the list, which ends with the item after its `and`/`or`); a later `... form ... for example X or Y for the first|second|...|last [one]` adds the named forms the word-form rule does not already accept, as `topic (or X)` | `RequiredTopics` |
 //! | `include|contain|use|mention the [exact|following|specific|same] word(s)|term(s) X, Y` or `"X", "Y"`, optionally followed by `somewhere|anywhere in it|in the text|file|document|list` (a place that is the whole document; any other place, a choice (`or`), or a count or scope after the list is UNCERTAIN) | `RequiredWords` |
 //! | `make sure|be sure|ensure|check that the word(s)|term(s) X and Y [both|all|each] appear|occur|show up|are used|are included|are present [somewhere in it]` | `RequiredWords`; a negator, another verb, a narrower place, a choice (`or`) or a count after it is UNCERTAIN |
 //! | `must|should|will|shall|to|also name|mention A, B and C [by name]` where every item is one capitalised word | `RequiredWords` (names); a list mixing names and other words, a choice (`or`), a count or scope after it, or a title with a period (`Dr. Smith`) is UNCERTAIN; a list without names (`the file README.md`, `2024`, `the Smith family`) stays silent |
@@ -44,7 +45,8 @@
 //! cannot be verified reliably (headings, lists, abbreviations), so such a goal
 //! is UNCERTAIN and refused. `N words of plain text` without a named section
 //! (`section titled "T"`, `the last section`) is a count over an unknown scope and
-//! is UNCERTAIN. `three topics: a, b, c` is not mechanically checkable and is UNCERTAIN.
+//! is UNCERTAIN. `cover three topics: a, b and c` is read only when the count equals
+//! the list (sc#332); otherwise it is UNCERTAIN.
 //! "N lines at least" is a lower bound; "a single line" is exactly one. Left UNCERTAIN on
 //! purpose: ranges ("2-3 lines"), "a dozen lines", "three-plus sections", "line count at
 //! least 40", counts of shell commands or snippets, level-two headings given as a bare
@@ -86,7 +88,7 @@
 //!   trailing `and` splits the LAST comma item (`Who to ask and Glossary`),
 //!   so a title that itself contains `and` is only safe inside the list.
 
-use crate::requirements::{content_words, ItemKind, Requirement};
+use crate::requirements::{content_words, topic_forms, word_keys, ItemKind, Requirement};
 
 /// What a goal says: recognized requirements and the spans it could not read.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -978,6 +980,70 @@ fn split_list(region: &str) -> Vec<String> {
     segs
 }
 
+/// A list region cut after the item that follows its closing "and" or "or":
+/// "interest, deposit, withdraw and balance, and the file needs" is
+/// "interest, deposit, withdraw and balance". None when that last item holds
+/// another "and" or "or" ("labelling and storage and disposal").
+fn closed_list(region: &str) -> Option<&str> {
+    let low = region.to_ascii_lowercase();
+    let Some(join) = [" and ", " or "].iter().filter_map(|j| low.find(j)).min() else {
+        return Some(region);
+    };
+    let end = region[join..].find(',').map_or(region.len(), |c| join + c);
+    let last = &low[join + 4..end];
+    (!last.contains(" and ") && !last.contains(" or ")).then_some(&region[..end])
+}
+
+/// `(position, forms)` for each "<form> or <form> for the first|second|...|
+/// last [one|topic]" in a sentence that speaks of a word "form", for a list of
+/// `len` topics.
+fn positional_forms(goal: &str, len: usize) -> Vec<(usize, Vec<String>)> {
+    const ORDINALS: [&str; 12] = [
+        "first", "second", "third", "fourth", "fifth", "sixth", "seventh", "eighth", "ninth",
+        "tenth", "eleventh", "twelfth",
+    ];
+    let mut out = Vec::new();
+    for sentence in goal.split_inclusive(['.', '!', '?']) {
+        let low = sentence.to_ascii_lowercase();
+        if !low
+            .split(|c: char| !c.is_ascii_alphabetic())
+            .any(|w| matches!(w, "form" | "forms"))
+        {
+            continue;
+        }
+        let Some(cue) = ["for example", "for instance", "such as", "e.g."]
+            .iter()
+            .filter_map(|c| low.find(c).map(|i| i + c.len()))
+            .min()
+        else {
+            continue;
+        };
+        for seg in low[cue..].split([',', ';']) {
+            let seg = seg.trim().trim_end_matches(['.', '!', '?']);
+            let seg = seg.strip_prefix("and ").unwrap_or(seg);
+            let Some((forms, pos)) = seg.split_once(" for the ") else {
+                continue;
+            };
+            let ord = pos.split_whitespace().next().unwrap_or("");
+            let at = match ORDINALS.iter().position(|o| *o == ord) {
+                Some(i) if i < len => i,
+                None if ord == "last" => len - 1,
+                _ => continue,
+            };
+            let forms: Vec<String> = forms
+                .split(" or ")
+                .flat_map(|f| f.split(" and "))
+                .map(|f| f.trim().to_string())
+                .filter(|f| !f.is_empty() && f.split_whitespace().count() == 1)
+                .collect();
+            if !forms.is_empty() {
+                out.push((at, forms));
+            }
+        }
+    }
+    out
+}
+
 /// Words that may name the whole document as the place a word must appear:
 /// "somewhere", "anywhere", "in it", "in the text|file|document|list". A part
 /// that may be a section ("the summary", "the body", "the notes") is not one.
@@ -1700,8 +1766,12 @@ pub fn analyze(goal: &str) -> Extraction {
     }
 
     // ---- topics: "covers A, B and C" ----
+    // The topics of the last counted list, for the forms a later sentence ties
+    // to them by position ("withdrew ... for the third").
+    let mut counted_topics: Vec<usize> = Vec::new();
     for k in 0..n {
         let w = toks[k].word.as_str();
+        let starts_sentence = k == 0 || toks[k - 1].raw.ends_with(['.', '!', '?']);
         let key = matches!(w, "covers" | "covering")
             || (w == "cover"
                 && k >= 1
@@ -1709,6 +1779,47 @@ pub fn analyze(goal: &str) -> Extraction {
                     toks[k - 1].word.as_str(),
                     "to" | "should" | "must" | "will" | "can" | "also" | "shall" | "would" | "and"
                 ));
+        // "cover|covers|covering N topics: a, b and c" (sc#332): the count must
+        // equal the list, which ends with the item after its "and" or "or".
+        let counted = matches!(w, "cover" | "covers" | "covering")
+            && (key || starts_sentence)
+            && matches!(toks.get(k + 2), Some(t) if matches!(t.word.as_str(), "topics" | "topic") && t.raw.ends_with(':'));
+        if counted {
+            let declared = match parse_num(&toks[k + 1].word) {
+                Num::Val(v) => Some(v),
+                _ => None,
+            };
+            let region = closed_list(list_region(goal, toks[k + 2].end)).unwrap_or("");
+            let items: Vec<String> = split_list(region).iter().map(|t| trim_title(t)).collect();
+            let ok = !region.is_empty()
+                && declared == Some(items.len())
+                && !negated_before(&toks, k)
+                && items.len() <= 12
+                && !items.iter().any(|t| has_count_and_noun(t))
+                && items
+                    .iter()
+                    .all(|t| (1..=4).contains(&content_words(t).len()));
+            if ok {
+                counted_topics.clear();
+                for t in items {
+                    let at = topics.iter().position(|x| *x == t).unwrap_or_else(|| {
+                        topics.push(t);
+                        topics.len() - 1
+                    });
+                    counted_topics.push(at);
+                }
+                handled.extend(k..=k + 2);
+                mark_bytes(
+                    &mut handled,
+                    &toks,
+                    toks[k + 2].end,
+                    toks[k + 2].end + region.len(),
+                );
+            } else {
+                bad(&mut unsure, k, false);
+            }
+            continue;
+        }
         if !key {
             continue;
         }
@@ -1733,6 +1844,33 @@ pub fn analyze(goal: &str) -> Extraction {
             mark_bytes(&mut handled, &toks, toks[k].end, toks[k].end + region.len());
         } else {
             bad(&mut unsure, k, false);
+        }
+    }
+
+    // Forms a goal ties to a counted topic by position (sc#332): "for example
+    // interests or interested for the first one, ..., withdrew or withdrawing
+    // for the third". A form the word-form rule already accepts is not added.
+    if !counted_topics.is_empty() {
+        for (at, forms) in positional_forms(goal, counted_topics.len()) {
+            let i = counted_topics[at];
+            let (topic, _) = topic_forms(&topics[i]);
+            let words = content_words(topic);
+            // Only a form of this topic: one word, the topic one word, the same
+            // first three letters, and not already matched by the word-form rule.
+            let [word] = words.as_slice() else {
+                continue;
+            };
+            let keys = word_keys(word, true);
+            let extra: Vec<String> = forms
+                .into_iter()
+                .filter(|f| {
+                    f.get(..3).is_some_and(|p| word.starts_with(p))
+                        && !word_keys(f, false).iter().any(|k| keys.contains(k))
+                })
+                .collect();
+            if !extra.is_empty() {
+                topics[i] = format!("{topic} (or {})", extra.join(", "));
+            }
         }
     }
 
