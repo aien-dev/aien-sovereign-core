@@ -19,7 +19,10 @@
 //! | `sections|headings titled|named|called A, B and C`, `sections: A, B and C`; with quoted titles also `section(s) is|are titled "A"` and `[one] section(s) must|should|will|shall|can be titled "A"` | `RequiredHeadings` (a count before the noun must equal the number of titles; `organise it under three sections titled ...` is read the same). The is/are/be forms stay UNCERTAIN after `each every all any` or with `if unless optionally optional may might when whenever perhaps maybe` in the clause |
 //! | `between N and M lines|words` (N <= M) | `MinX(N)` and `MaxX(M)`, inclusive. Other nouns, `from N to M`, ranges like `2-3`, `... or so`, and a range on a part of the document (a countable noun or `gap space distance` right before `between`, or `each every per` within three words) stay UNCERTAIN |
 //! | `covers|covering A, B and C` (and `to|should|must|will|can cover ...`) | `RequiredTopics` |
-//! | `include|contain|use|mention the word(s)|term(s) X, Y` or `"X", "Y"` | `RequiredWords` |
+//! | `[must|...] cover|covers|covering N topics: a, b and c` (N equals the list, which ends with the item after its `and`/`or`); a later `... form ... for example X or Y for the first|second|...|last [one]` adds the named forms the word-form rule does not already accept, as `topic (or X)` | `RequiredTopics` |
+//! | `include|contain|use|mention the [exact|following|specific|same] word(s)|term(s) X, Y` or `"X", "Y"`, optionally followed by `somewhere|anywhere in it|in the text|file|document|list` (a place that is the whole document; any other place, a choice (`or`), or a count or scope after the list is UNCERTAIN) | `RequiredWords` |
+//! | `make sure|be sure|ensure|check that the word(s)|term(s) X and Y [both|all|each] appear|occur|show up|are used|are included|are present [somewhere in it]` | `RequiredWords`; a negator, another verb, a narrower place, a choice (`or`) or a count after it is UNCERTAIN |
+//! | `must|should|will|shall|to|also name|mention A, B and C [by name]` where every item is one capitalised word | `RequiredWords` (names); a list mixing names and other words, a choice (`or`), a count or scope after it, or a title with a period (`Dr. Smith`) is UNCERTAIN; a list without names (`the file README.md`, `2024`, `the Smith family`) stays silent |
 //! | `include|contain|use|mention the phrase "X"` / `the phrases "X", "Y"` | `RequiredPhrases` |
 //! | `add|append|insert|with N line(s)`, `exactly N lines` after such a verb, `a N-line <thing>` after a verb | `AddedLines` exactly N |
 //! | `write|put|create|draft|compose|produce|generate N line(s)` | `AddedLines` at least N |
@@ -42,7 +45,8 @@
 //! cannot be verified reliably (headings, lists, abbreviations), so such a goal
 //! is UNCERTAIN and refused. `N words of plain text` without a named section
 //! (`section titled "T"`, `the last section`) is a count over an unknown scope and
-//! is UNCERTAIN. `three topics: a, b, c` is not mechanically checkable and is UNCERTAIN.
+//! is UNCERTAIN. `cover three topics: a, b and c` is read only when the count equals
+//! the list (sc#332); otherwise it is UNCERTAIN.
 //! "N lines at least" is a lower bound; "a single line" is exactly one. Left UNCERTAIN on
 //! purpose: ranges ("2-3 lines"), "a dozen lines", "three-plus sections", "line count at
 //! least 40", counts of shell commands or snippets, level-two headings given as a bare
@@ -84,7 +88,7 @@
 //!   trailing `and` splits the LAST comma item (`Who to ask and Glossary`),
 //!   so a title that itself contains `and` is only safe inside the list.
 
-use crate::requirements::{content_words, ItemKind, Requirement};
+use crate::requirements::{content_words, topic_forms, word_keys, ItemKind, Requirement};
 
 /// What a goal says: recognized requirements and the spans it could not read.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -976,6 +980,278 @@ fn split_list(region: &str) -> Vec<String> {
     segs
 }
 
+/// A list region cut after the item that follows its closing "and" or "or":
+/// "interest, deposit, withdraw and balance, and the file needs" is
+/// "interest, deposit, withdraw and balance". None when that last item holds
+/// another "and" or "or" ("labelling and storage and disposal").
+fn closed_list(region: &str) -> Option<&str> {
+    let low = region.to_ascii_lowercase();
+    let Some(join) = [" and ", " or "].iter().filter_map(|j| low.find(j)).min() else {
+        return Some(region);
+    };
+    let end = region[join..].find(',').map_or(region.len(), |c| join + c);
+    let last = &low[join + 4..end];
+    (!last.contains(" and ") && !last.contains(" or ")).then_some(&region[..end])
+}
+
+/// `(position, forms)` for each "<form> or <form> for the first|second|...|
+/// last [one|topic]" in a sentence that speaks of a word "form", for a list of
+/// `len` topics.
+fn positional_forms(goal: &str, len: usize) -> Vec<(usize, Vec<String>)> {
+    const ORDINALS: [&str; 12] = [
+        "first", "second", "third", "fourth", "fifth", "sixth", "seventh", "eighth", "ninth",
+        "tenth", "eleventh", "twelfth",
+    ];
+    let mut out = Vec::new();
+    for sentence in goal.split_inclusive(['.', '!', '?']) {
+        let low = sentence.to_ascii_lowercase();
+        if !low
+            .split(|c: char| !c.is_ascii_alphabetic())
+            .any(|w| matches!(w, "form" | "forms"))
+        {
+            continue;
+        }
+        let Some(cue) = ["for example", "for instance", "such as", "e.g."]
+            .iter()
+            .filter_map(|c| low.find(c).map(|i| i + c.len()))
+            .min()
+        else {
+            continue;
+        };
+        for seg in low[cue..].split([',', ';']) {
+            let seg = seg.trim().trim_end_matches(['.', '!', '?']);
+            let seg = seg.strip_prefix("and ").unwrap_or(seg);
+            let Some((forms, pos)) = seg.split_once(" for the ") else {
+                continue;
+            };
+            let ord = pos.split_whitespace().next().unwrap_or("");
+            let at = match ORDINALS.iter().position(|o| *o == ord) {
+                Some(i) if i < len => i,
+                None if ord == "last" => len - 1,
+                _ => continue,
+            };
+            let forms: Vec<String> = forms
+                .split(" or ")
+                .flat_map(|f| f.split(" and "))
+                .map(|f| f.trim().to_string())
+                .filter(|f| !f.is_empty() && f.split_whitespace().count() == 1)
+                .collect();
+            if !forms.is_empty() {
+                out.push((at, forms));
+            }
+        }
+    }
+    out
+}
+
+/// Words that may name the whole document as the place a word must appear:
+/// "somewhere", "anywhere", "in it", "in the text|file|document|list". A part
+/// that may be a section ("the summary", "the body", "the notes") is not one.
+const PLACE_WORDS: [&str; 9] = [
+    "somewhere",
+    "anywhere",
+    "in",
+    "it",
+    "the",
+    "text",
+    "file",
+    "document",
+    "list",
+];
+
+/// Titles written with a period, so the name continues after it ("Dr. Smith").
+const NAME_TITLES: [&str; 10] = [
+    "dr", "mr", "mrs", "ms", "prof", "st", "jr", "sr", "mt", "rev",
+];
+
+/// Words after ", and" that open a new instruction ("..., and write 5 lines").
+const CLAUSE_VERBS: [&str; 13] = [
+    "then", "write", "add", "be", "keep", "make", "save", "put", "please", "give", "end", "start",
+    "finish",
+];
+
+/// Words after ", and" that open a new clause when a verb soon follows ("...,
+/// and the file needs at least 14 lines", "..., and it must be short").
+const CLAUSE_SUBJECTS: [&str; 8] = ["the", "it", "its", "this", "that", "there", "i", "we"];
+
+/// Verbs that make a `CLAUSE_SUBJECTS` opener a clause rather than one more item.
+const CLAUSE_AUX: [&str; 18] = [
+    "must", "should", "needs", "need", "is", "are", "has", "have", "will", "can", "shall", "would",
+    "want", "wants", "stays", "stay", "gets", "get",
+];
+
+/// Words in the clause after ", and" that may add to the list or bind it.
+const CLAUSE_MENTIONS: [&str; 19] = [
+    "name", "names", "named", "mention", "mentions", "appear", "appears", "include", "includes",
+    "contain", "contains", "use", "uses", "twice", "once", "thrice", "too", "also", "each",
+];
+
+/// The text after a word or name list ends it cleanly: nothing, a sentence end
+/// (not after a title such as "Dr", and not a next sentence that starts with
+/// "and" or "or"), or ", and" opening a new instruction or clause. Anything
+/// else after the list ("at least twice", ", but only in the summary", "; and
+/// Tomas", ", and also Wen", ", and nothing else") may bind to it, and the
+/// list is then uncertain (sc#345 review).
+fn list_ends_cleanly(after: &str, last_item: &str) -> bool {
+    let t = after.trim_start_matches([' ', '\t']);
+    if t.is_empty() || t.starts_with(['\n', '\r']) {
+        return true;
+    }
+    if t.starts_with(['.', '!', '?']) {
+        let next = t[1..].split_whitespace().next().map(clean).unwrap_or("");
+        return !(t.starts_with('.')
+            && NAME_TITLES.contains(&last_item.to_ascii_lowercase().as_str()))
+            && !matches!(next.to_ascii_lowercase().as_str(), "and" | "or");
+    }
+    let t = t.strip_prefix(',').unwrap_or(t);
+    // The new clause runs to the end of its sentence; it must not carry a name
+    // or word requirement of its own ("..., and I want Wen too", "..., and add Z").
+    let end = t
+        .char_indices()
+        .find(|&(i, c)| {
+            c == '\n'
+                || (matches!(c, '.' | '!' | '?')
+                    && t[i + 1..].chars().next().is_none_or(char::is_whitespace))
+        })
+        .map_or(t.len(), |(i, _)| i);
+    let raw: Vec<&str> = t[..end].split_whitespace().collect();
+    let names_more = raw.iter().skip(2).any(|x| {
+        let x = plain(x);
+        let low = x.to_ascii_lowercase();
+        (x.starts_with(|c: char| c.is_uppercase()) && x != "I")
+            || CLAUSE_MENTIONS.contains(&low.as_str())
+    });
+    if names_more {
+        return false;
+    }
+    let ws: Vec<String> = raw
+        .iter()
+        .take(7)
+        .map(|x| clean(x).to_ascii_lowercase())
+        .collect();
+    if ws.first().map(String::as_str) != Some("and") {
+        return false;
+    }
+    match ws.get(1).map(String::as_str) {
+        Some(x) if CLAUSE_VERBS.contains(&x) => true,
+        Some(x) if CLAUSE_SUBJECTS.contains(&x) => {
+            ws[2..].iter().any(|x| CLAUSE_AUX.contains(&x.as_str()))
+        }
+        _ => false,
+    }
+}
+
+/// The list offers a choice ("Priya or Tomas"): a required-words list is all of them.
+fn is_choice(list: &str) -> bool {
+    // Only the words outside quotes: a quoted phrase may itself hold "or".
+    let mut outside = String::new();
+    let mut quoted = false;
+    for c in list.chars() {
+        match c {
+            '"' => quoted = !quoted,
+            '\u{201C}' => quoted = true,
+            '\u{201D}' => quoted = false,
+            _ if !quoted => outside.push(c),
+            _ => {}
+        }
+    }
+    outside
+        .split_whitespace()
+        .any(|x| matches!(clean(x).to_ascii_lowercase().as_str(), "or" | "either"))
+}
+
+/// "somewhere in the list", "anywhere in it": a place that is the whole document.
+fn whole_document_place(t: &str) -> bool {
+    t.split_whitespace()
+        .all(|x| PLACE_WORDS.contains(&plain(&x.to_ascii_lowercase())))
+}
+
+/// The word list and the last token of `the words X and Y [both|all] appear|
+/// appears|occur|occurs|show up|shows up|are used|is used|are included|are
+/// present [somewhere in it]` (`k` is `the`, `q` the noun). None when anything
+/// else follows, a negator sits in the clause, or an item is not one word.
+fn words_must_appear(goal: &str, toks: &[Tok], k: usize, q: usize) -> Option<(Vec<String>, usize)> {
+    let w = |i: usize| toks.get(i).map(|t| t.word.as_str());
+    if negated_before(toks, k - 1) {
+        return None;
+    }
+    // The verb, in the same clause as the noun.
+    let mut v = q + 1;
+    loop {
+        let x = w(v)?;
+        if NEGATORS.contains(&x) {
+            return None;
+        }
+        if matches!(
+            x,
+            "appear" | "appears" | "occur" | "occurs" | "show" | "shows" | "are" | "is"
+        ) {
+            break;
+        }
+        // Commas separate the list items; a sentence or clause mark ends the search.
+        if toks[v].raw.ends_with(['.', ';', ':', '!', '?', ')']) {
+            return None;
+        }
+        v += 1;
+    }
+    let mut items_end = v;
+    if matches!(w(v - 1), Some("both" | "all" | "each")) {
+        items_end = v - 1;
+    }
+    if items_end <= q + 1 {
+        return None;
+    }
+    let items: Vec<String> = split_list(&goal[toks[q].end..toks[items_end].start])
+        .iter()
+        .map(|t| trim_title(t))
+        .collect();
+    if items.is_empty()
+        || items.len() > 20
+        || !items
+            .iter()
+            .all(|t| !t.is_empty() && t.split_whitespace().count() == 1)
+    {
+        return None;
+    }
+    let mut last = v;
+    match w(v)? {
+        "show" | "shows" => {
+            if w(v + 1) != Some("up") {
+                return None;
+            }
+            last = v + 1;
+        }
+        "are" | "is" => {
+            if !matches!(w(v + 1), Some("used" | "included" | "present")) {
+                return None;
+            }
+            last = v + 1;
+        }
+        _ => {}
+    }
+    // The rest of the clause names the whole document, or nothing.
+    while !ends_clause(&toks[last].raw) {
+        match w(last + 1) {
+            None => break,
+            Some(x) if CLAUSE_JOINERS.contains(&x) => break,
+            Some(x) if PLACE_WORDS.contains(&x) => last += 1,
+            Some(_) => return None,
+        }
+    }
+    // The clause must end there, not carry a count or a narrowing on.
+    let raw = &toks[last].raw;
+    let punct = raw.len()
+        - raw
+            .trim_end_matches([',', '.', ';', ':', '!', '?', ')'])
+            .len();
+    if !list_ends_cleanly(&goal[toks[last].end - punct..], "")
+        || is_choice(&goal[toks[q].end..toks[items_end].start])
+    {
+        return None;
+    }
+    Some((items, last))
+}
+
 fn trim_title(t: &str) -> String {
     t.trim()
         .trim_matches(|c: char| matches!(c, '"' | '\'' | '\u{201C}' | '\u{201D}' | '*' | '_' | '`'))
@@ -1490,8 +1766,12 @@ pub fn analyze(goal: &str) -> Extraction {
     }
 
     // ---- topics: "covers A, B and C" ----
+    // The topics of the last counted list, for the forms a later sentence ties
+    // to them by position ("withdrew ... for the third").
+    let mut counted_topics: Vec<usize> = Vec::new();
     for k in 0..n {
         let w = toks[k].word.as_str();
+        let starts_sentence = k == 0 || toks[k - 1].raw.ends_with(['.', '!', '?']);
         let key = matches!(w, "covers" | "covering")
             || (w == "cover"
                 && k >= 1
@@ -1499,6 +1779,47 @@ pub fn analyze(goal: &str) -> Extraction {
                     toks[k - 1].word.as_str(),
                     "to" | "should" | "must" | "will" | "can" | "also" | "shall" | "would" | "and"
                 ));
+        // "cover|covers|covering N topics: a, b and c" (sc#332): the count must
+        // equal the list, which ends with the item after its "and" or "or".
+        let counted = matches!(w, "cover" | "covers" | "covering")
+            && (key || starts_sentence)
+            && matches!(toks.get(k + 2), Some(t) if matches!(t.word.as_str(), "topics" | "topic") && t.raw.ends_with(':'));
+        if counted {
+            let declared = match parse_num(&toks[k + 1].word) {
+                Num::Val(v) => Some(v),
+                _ => None,
+            };
+            let region = closed_list(list_region(goal, toks[k + 2].end)).unwrap_or("");
+            let items: Vec<String> = split_list(region).iter().map(|t| trim_title(t)).collect();
+            let ok = !region.is_empty()
+                && declared == Some(items.len())
+                && !negated_before(&toks, k)
+                && items.len() <= 12
+                && !items.iter().any(|t| has_count_and_noun(t))
+                && items
+                    .iter()
+                    .all(|t| (1..=4).contains(&content_words(t).len()));
+            if ok {
+                counted_topics.clear();
+                for t in items {
+                    let at = topics.iter().position(|x| *x == t).unwrap_or_else(|| {
+                        topics.push(t);
+                        topics.len() - 1
+                    });
+                    counted_topics.push(at);
+                }
+                handled.extend(k..=k + 2);
+                mark_bytes(
+                    &mut handled,
+                    &toks,
+                    toks[k + 2].end,
+                    toks[k + 2].end + region.len(),
+                );
+            } else {
+                bad(&mut unsure, k, false);
+            }
+            continue;
+        }
         if !key {
             continue;
         }
@@ -1523,6 +1844,33 @@ pub fn analyze(goal: &str) -> Extraction {
             mark_bytes(&mut handled, &toks, toks[k].end, toks[k].end + region.len());
         } else {
             bad(&mut unsure, k, false);
+        }
+    }
+
+    // Forms a goal ties to a counted topic by position (sc#332): "for example
+    // interests or interested for the first one, ..., withdrew or withdrawing
+    // for the third". A form the word-form rule already accepts is not added.
+    if !counted_topics.is_empty() {
+        for (at, forms) in positional_forms(goal, counted_topics.len()) {
+            let i = counted_topics[at];
+            let (topic, _) = topic_forms(&topics[i]);
+            let words = content_words(topic);
+            // Only a form of this topic: one word, the topic one word, the same
+            // first three letters, and not already matched by the word-form rule.
+            let [word] = words.as_slice() else {
+                continue;
+            };
+            let keys = word_keys(word, true);
+            let extra: Vec<String> = forms
+                .into_iter()
+                .filter(|f| {
+                    f.get(..3).is_some_and(|p| word.starts_with(p))
+                        && !word_keys(f, false).iter().any(|k| keys.contains(k))
+                })
+                .collect();
+            if !extra.is_empty() {
+                topics[i] = format!("{topic} (or {})", extra.join(", "));
+            }
         }
     }
 
@@ -1577,7 +1925,16 @@ pub fn analyze(goal: &str) -> Extraction {
         {
             continue;
         }
-        let Some(kind) = toks.get(k + 2).map(|t| t.word.as_str()) else {
+        // "use the exact words X and Y" (sc#333): an adjective may sit before the noun.
+        let q = if toks
+            .get(k + 2)
+            .is_some_and(|t| matches!(t.word.as_str(), "exact" | "following" | "specific" | "same"))
+        {
+            k + 3
+        } else {
+            k + 2
+        };
+        let Some(kind) = toks.get(q).map(|t| t.word.as_str()) else {
             continue;
         };
         if !matches!(
@@ -1594,7 +1951,17 @@ pub fn analyze(goal: &str) -> Extraction {
             bad(&mut unsure, k, false);
             continue;
         }
-        let region = list_region(goal, toks[k + 2].end);
+        let full = list_region(goal, toks[q].end);
+        // "... headlamp and first-aid somewhere in the list": a place that is the
+        // whole document is not part of the list; any other place is uncertain.
+        let (region, place_ok) = match ["somewhere", "anywhere"]
+            .iter()
+            .filter_map(|p| full.to_ascii_lowercase().find(&format!(" {p}")))
+            .min()
+        {
+            Some(at) => (&full[..at], whole_document_place(&full[at..])),
+            None => (full, true),
+        };
         let quotes = quoted_items(region);
         let (items, tail_ok) = if quotes.is_empty() {
             let items: Vec<String> = split_list(region).iter().map(|t| trim_title(t)).collect();
@@ -1611,7 +1978,15 @@ pub fn analyze(goal: &str) -> Extraction {
                 tail.is_empty() || CLAUSE_JOINERS.contains(&tail_word),
             )
         };
-        if !negated_before(&toks, k) && tail_ok && !items.is_empty() && items.len() <= 20 {
+        let ends_ok = list_ends_cleanly(&goal[toks[q].end + full.len()..], "");
+        if !negated_before(&toks, k)
+            && tail_ok
+            && place_ok
+            && ends_ok
+            && !is_choice(region)
+            && !items.is_empty()
+            && items.len() <= 20
+        {
             let dst = if kind == "phrases" {
                 &mut phrases
             } else {
@@ -1622,15 +1997,93 @@ pub fn analyze(goal: &str) -> Extraction {
                     dst.push(t);
                 }
             }
-            handled.extend(k..=k + 2);
-            mark_bytes(
-                &mut handled,
-                &toks,
-                toks[k + 2].end,
-                toks[k + 2].end + region.len(),
-            );
+            handled.extend(k..=q);
+            mark_bytes(&mut handled, &toks, toks[q].end, toks[q].end + full.len());
         } else {
             bad(&mut unsure, k, false);
+        }
+    }
+    // "make sure|be sure|ensure|check that the words X and Y [both|all] appear|
+    // show up|are used [somewhere in it]" (sc#333).
+    for k in 1..n {
+        let w = |i: usize| toks.get(i).map(|t| t.word.as_str());
+        if w(k) != Some("the")
+            || !matches!(w(k - 1), Some("sure" | "ensure" | "that"))
+            || handled.contains(&k)
+        {
+            continue;
+        }
+        let q = if matches!(w(k + 1), Some("exact" | "following" | "specific")) {
+            k + 2
+        } else {
+            k + 1
+        };
+        if !matches!(w(q), Some("word" | "words" | "term" | "terms")) {
+            continue;
+        }
+        match words_must_appear(goal, &toks, k, q) {
+            Some((items, last)) => {
+                for t in items {
+                    if !words.contains(&t) {
+                        words.push(t);
+                    }
+                }
+                handled.extend(k - 1..=last);
+            }
+            None => bad(&mut unsure, k - 1, false),
+        }
+    }
+    // "must|should|will|to name|mention Priya, Tomas and Wen [by name]": a list
+    // of single capitalised words (names) is RequiredWords; a list that mixes
+    // names and other words, offers a choice ("Priya or Tomas"), or carries a
+    // count or scope on ("at least twice", "Dr. Smith") is uncertain; a list
+    // without names ("the file README.md", "2024") stays silent (sc#333).
+    for k in 1..n {
+        if !matches!(
+            toks[k].word.as_str(),
+            "name" | "names" | "mention" | "mentions"
+        ) || !matches!(
+            toks[k - 1].word.as_str(),
+            "must" | "should" | "will" | "shall" | "to" | "also"
+        ) || handled.contains(&k)
+            || ends_clause(&toks[k].raw)
+        {
+            continue;
+        }
+        let full = list_region(goal, toks[k].end);
+        // ", and the file needs ..." or ", and I want ..." starts a new clause;
+        // ", and Wen" is the last name.
+        let region = match full.match_indices(", and ").find(|(i, m)| {
+            let rest = &full[i + m.len()..];
+            rest.starts_with(|c: char| c.is_lowercase()) || rest.starts_with("I ")
+        }) {
+            Some((i, _)) => &full[..i],
+            None => full,
+        };
+        let trimmed = region.trim_end();
+        let list = trimmed
+            .strip_suffix(" by name")
+            .or_else(|| trimmed.strip_suffix(" by name,"))
+            .unwrap_or(trimmed);
+        let items: Vec<String> = split_list(list).iter().map(|t| trim_title(t)).collect();
+        let capital = |t: &String| t.starts_with(|c: char| c.is_ascii_uppercase());
+        let names = !items.is_empty()
+            && items.len() <= 20
+            && items
+                .iter()
+                .all(|t| capital(t) && t.split_whitespace().count() == 1);
+        let last_item = items.last().map_or("", String::as_str);
+        let ends_ok = list_ends_cleanly(&goal[toks[k].end + region.len()..], last_item);
+        if names && ends_ok && !is_choice(list) && !negated_before(&toks, k) {
+            for t in items {
+                if !words.contains(&t) {
+                    words.push(t);
+                }
+            }
+            handled.insert(k);
+            mark_bytes(&mut handled, &toks, toks[k].end, toks[k].end + region.len());
+        } else if items.iter().any(capital) {
+            bad(&mut unsure, k - 1, false);
         }
     }
     // The singular phrase key that matched no quoted text at all.
@@ -1924,7 +2377,16 @@ pub fn analyze(goal: &str) -> Extraction {
                 || (i >= 1
                     && matches!(
                         nm(i - 1),
-                        Some("these" | "following" | "those" | "the" | "key")
+                        Some(
+                            "these"
+                                | "following"
+                                | "those"
+                                | "the"
+                                | "key"
+                                | "exact"
+                                | "specific"
+                                | "same"
+                        )
                     )));
         if (heading_list || word_list) && !handled.contains(&i) {
             bad(&mut unsure, i.saturating_sub(2), false);
