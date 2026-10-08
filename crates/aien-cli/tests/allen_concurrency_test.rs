@@ -4,14 +4,18 @@
 //! real SIGKILL of the daemon in the middle of a write burst.
 //!
 //! Points proved (ids are used in the assertion messages):
-//!   C1  identity: concurrent first contact leaves exactly one agent, one pin,
-//!       one "ALLEN: engaged" line; the same agent after kill -9 + restart.
+//!   C1  identity: ALLEN is engaged once at daemon boot (not by clients), so this proves
+//!       one identity served consistently to concurrent clients: one agent, one pin,
+//!       one "ALLEN: engaged" line, unchanged after kill -9 + restart. It does NOT
+//!       claim concurrent creation of the identity.
 //!   C2  scoped memory: concurrent writers into work and personal; every item
 //!       present exactly once in its own scope; recall never crosses scopes.
 //!   C3  correction: concurrent corrections of one item end in one coherent
 //!       final value and version == 1 + number of acknowledged corrections.
 //!   C4  forgetting racing reads: no read that starts after forget returned
-//!       shows the canary; no file under the daemon's state holds it.
+//!       shows the canary; the item's key file exists before forget and is gone after
+//!       (the ciphertext stays in the immutable log; plaintext is never on disk, so a
+//!       plaintext file scan would prove nothing and is not used).
 //!   C5  recovery: kill -9 mid write burst, restart: identity unchanged, every
 //!       acknowledged write present, nothing half-present, forgotten stays so.
 //!   C6  persona: concurrent profile changes with the same expected revision
@@ -230,27 +234,35 @@ impl Rig {
         (o, t)
     }
 
-    /// Plain-text scan: how many files under the whole test root contain `needle`.
-    fn files_containing(&self, needle: &str) -> usize {
-        fn walk(d: &Path, needle: &[u8], n: &mut usize) {
-            let Ok(rd) = std::fs::read_dir(d) else { return };
-            for e in rd.flatten() {
-                let p = e.path();
-                let Ok(ft) = e.file_type() else { continue };
-                if ft.is_dir() {
-                    walk(&p, needle, n);
-                } else if ft.is_file() {
-                    if let Ok(b) = std::fs::read(&p) {
-                        if b.windows(needle.len()).any(|w| w == needle) {
-                            *n += 1;
-                        }
-                    }
-                }
-            }
-        }
-        let mut n = 0;
-        walk(&self.root, needle.as_bytes(), &mut n);
-        n
+    /// The store directory `<compose>.allen-memory` (read-only use in this test).
+    fn mem_dir(&self) -> PathBuf {
+        PathBuf::from(format!("{}.allen-memory", self.compose().display()))
+    }
+    /// Key files of one item (`keys/<item>-v<n>.key`). The store keeps ciphertext in
+    /// its immutable log and destroys KEYS to forget or supersede (store.rs header).
+    fn key_files(&self, item: &str) -> Vec<String> {
+        let mut v: Vec<String> = std::fs::read_dir(self.mem_dir().join("keys"))
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .filter(|n| n.starts_with(&format!("{item}-v")) && n.ends_with(".key"))
+            .collect();
+        v.sort();
+        v
+    }
+    /// Log record files whose bytes name the item (its ciphertext records).
+    fn log_records_of(&self, item: &str) -> usize {
+        std::fs::read_dir(self.mem_dir().join("log"))
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter(|e| {
+                std::fs::read(e.path())
+                    .map(|b| b.windows(item.len()).any(|w| w == item.as_bytes()))
+                    .unwrap_or(false)
+            })
+            .count()
     }
 }
 
@@ -323,7 +335,7 @@ fn allen_concurrent_clients_one_daemon() {
     r.env.push(("AIEN_ALLEN_SUBJECT".into(), s(&subj)));
     let log1 = r.start_with(&[("AIEN_ALLEN_ADOPT", &agent)]);
 
-    // ---- C1: N concurrent first-contact calls (status, put, inspect) at once.
+    // ---- C1: N concurrent calls (status, put, inspect) all served by the one boot-time identity.
     let mut c1_puts = BTreeMap::new();
     {
         let results = Mutex::new(Vec::new());
@@ -348,7 +360,7 @@ fn allen_concurrent_clients_one_daemon() {
             }
         });
         for (i, o) in results.into_inner().unwrap() {
-            assert!(o.ok(), "C1 first contact call {i} failed: {}", o.raw);
+            assert!(o.ok(), "C1 concurrent call {i} failed: {}", o.raw);
             if i % 3 == 0 {
                 assert_eq!(o.json["result"]["identity"], "engaged", "C1 {}", o.raw);
                 assert_eq!(
@@ -552,6 +564,11 @@ fn allen_concurrent_clients_one_daemon() {
         6,
         "C3 every correction was acknowledged or visibly refused"
     );
+    assert_eq!(
+        r.key_files(&c3_item),
+        vec![format!("{c3_item}-v{}.key", 1 + corr_ok.len())],
+        "C3 only the final version's key remains (superseded keys destroyed)"
+    );
     expected.insert(c3_item, ("work".into(), top.1.clone()));
 
     // ---- C6: persona. Same expected revision from six clients: exactly one wins.
@@ -600,11 +617,18 @@ fn allen_concurrent_clients_one_daemon() {
     let put = r.allen(&["memory", "put", "--context", "personal", "--text", CANARY]);
     assert!(put.ok(), "{}", put.raw);
     let canary_item = put.result()["item"].as_str().unwrap().to_string();
-    // The scanner must be able to see a canary at all (positive control).
-    let ctl = r.root.join("scan-control.txt");
-    std::fs::write(&ctl, CANARY).unwrap();
-    assert_eq!(r.files_containing(CANARY), 1, "C4 scanner positive control");
-    std::fs::remove_file(&ctl).unwrap();
+    // Evidence on the real item, before forget: its key file and its ciphertext record exist.
+    let keys_before = r.key_files(&canary_item);
+    let recs_before = r.log_records_of(&canary_item);
+    assert_eq!(
+        keys_before.len(),
+        1,
+        "C4 before forget the item has its key: {keys_before:?}"
+    );
+    assert!(
+        recs_before >= 1,
+        "C4 before forget the item has a log record"
+    );
     {
         let forgot = AtomicBool::new(false);
         let stop = AtomicBool::new(false);
@@ -688,10 +712,15 @@ fn allen_concurrent_clients_one_daemon() {
     );
     let exp = r.allen(&["memory", "export", "--owner", "1"]);
     assert!(!exp.raw.contains(CANARY), "C4 export shows the canary");
-    assert_eq!(
-        r.files_containing(CANARY),
-        0,
-        "C4 canary found in daemon state files"
+    // Ground truth (store.rs): forget destroys the key; the ciphertext stays in the immutable log.
+    // So the observable change is: key file present before, absent after; record still there.
+    assert!(
+        r.key_files(&canary_item).is_empty(),
+        "C4 key file of the forgotten item still on disk (before: {keys_before:?})"
+    );
+    assert!(
+        r.log_records_of(&canary_item) >= recs_before,
+        "C4 the ciphertext record vanished (expected: kept, unreadable without the key)"
     );
 
     // ---- C5: kill -9 in the middle of a concurrent write burst, then restart.
@@ -707,11 +736,14 @@ fn allen_concurrent_clients_one_daemon() {
         "C1 a second identity/memory dir appeared: {added:?}"
     );
     let attempts: Mutex<Vec<(String, String, Option<String>)>> = Mutex::new(Vec::new()); // ctx, text, acked item
+    let killing = AtomicBool::new(false);
+    let in_flight_unacked = AtomicUsize::new(0);
     let acked = AtomicUsize::new(0);
     let dead = AtomicBool::new(false);
     std::thread::scope(|sc| {
         for w in 0..6 {
-            let (r, attempts, acked, dead) = (&r, &attempts, &acked, &dead);
+            let (r, attempts, acked, dead, killing, in_flight_unacked) =
+                (&r, &attempts, &acked, &dead, &killing, &in_flight_unacked);
             sc.spawn(move || {
                 let ctx = if w % 2 == 0 { "work" } else { "personal" };
                 for i in 0..40 {
@@ -719,12 +751,16 @@ fn allen_concurrent_clients_one_daemon() {
                         break;
                     }
                     let text = format!("c5-{ctx}-w{w}-n{i}");
+                    let issued_before_kill = !killing.load(Ordering::SeqCst);
                     let o = r.allen(&["memory", "put", "--context", ctx, "--text", &text]);
                     let item = if o.ok() {
                         acked.fetch_add(1, Ordering::SeqCst);
                         Some(o.result()["item"].as_str().unwrap().to_string())
                     } else {
                         dead.store(true, Ordering::SeqCst);
+                        if issued_before_kill {
+                            in_flight_unacked.fetch_add(1, Ordering::SeqCst);
+                        }
                         None
                     };
                     attempts.lock().unwrap().push((ctx.into(), text, item));
@@ -744,6 +780,7 @@ fn allen_concurrent_clients_one_daemon() {
             "C5 burst never got going"
         );
         // kill -9 from the test thread while the writers keep going.
+        killing.store(true, Ordering::SeqCst);
         let c = r.daemon.as_ref().expect("daemon").id();
         let st = Command::new("kill")
             .args(["-9", &c.to_string()])
@@ -761,6 +798,11 @@ fn allen_concurrent_clients_one_daemon() {
     let attempts = attempts.into_inner().unwrap();
     let n_acked = attempts.iter().filter(|a| a.2.is_some()).count();
     assert!(n_acked >= 12, "C5 acked {n_acked}");
+    let in_flight = in_flight_unacked.load(Ordering::SeqCst);
+    assert!(
+        in_flight >= 1,
+        "C5 no write was in flight (issued before the kill, never acknowledged) when the kill landed"
+    );
     let log2 = r.start_with(&[]); // restart over the same state, no ADOPT
     assert_eq!(
         all_engaged_lines(&log2),
@@ -891,10 +933,9 @@ fn allen_concurrent_clients_one_daemon() {
         o.ok() && !o.raw.contains(CANARY) && !texts.iter().any(|t| t == CANARY),
         "C5 canary back"
     );
-    assert_eq!(
-        r.files_containing(CANARY),
-        0,
-        "C5 canary found in state files after restart"
+    assert!(
+        r.key_files(&canary_item).is_empty(),
+        "C5 forgotten item has a key again after restart"
     );
     // Scope isolation still holds after recovery.
     for ctx in ["work", "personal"] {
@@ -904,7 +945,7 @@ fn allen_concurrent_clients_one_daemon() {
     }
     println!(
         "CONC_RECEIPT {}",
-        json!({"acked_before_kill": n_acked, "attempts": attempts.len(),
+        json!({"acked_before_kill": n_acked, "in_flight_unacked_at_kill": in_flight, "attempts": attempts.len(),
                "corrections_ok": corr_ok.len(), "agent": &agent[..8]})
     );
 }
