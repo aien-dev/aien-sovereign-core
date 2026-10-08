@@ -1,4 +1,4 @@
-# DIAGNOSTIC-LONG-1: does truncation hide a good answer or delay a bad one? (DRAFT)
+# DIAGNOSTIC-LONG-1: does truncation hide a good answer or delay a bad one? (plan; run 2026-10-07 by session 031756, results in DIAGNOSTIC-LONG-1-RESULTS.md)
 
 **This is a measurement, not a campaign. It has no verdict and scores nothing.** It is not frozen, is
 not an acceptance spec and does not replace or amend ACCEPTANCE-v2.md or VERDICT-v2.md. Its goals are
