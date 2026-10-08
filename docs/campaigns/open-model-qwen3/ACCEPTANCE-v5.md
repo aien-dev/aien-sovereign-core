@@ -47,6 +47,12 @@ changed to make a task pass. Probe evidence for every line is in `evidence-v5/`.
 | P7 | No positive fallback evidence: the daemon records neither strict mode nor op accounting (`OP_REPORT`) | every launch (row `<id>-OPR`) | issue sc#337 |
 | P8 | The generation record binds only the index file of a sharded checkpoint (`model.safetensors.index.json`), not the three weight shards | every committed launch (row `<id>-GR`) | issue sc#338 |
 
+**All eight causes are fixed on main** (gate G1, `evidence-v5/requirements-probe-b2cae6d.txt`): P1 sc#331 by #343, P2 sc#332
+by #347, P3 sc#333 by #345, P4 sc#334 by #340, P5 sc#335 by #341, P6 sc#336 by #348, P7 sc#337 by #350, P8 sc#338 by #351;
+b2cae6d holds all eight. One P2 follow-up is open: the topic check refuses three accepted forms of withdraw (gate G2, Section 9).
+Since sc#342 (b0cee16) the approval desk is required: the next-phase-1 driver creates the desk key and signs with `--desk 1`, and
+the v5 wrapper refuses the dev-only opt-out `AIEN_COMPOSE_AUTHORIZE_REQUIRES_DESK`.
+
 Already merged and used by v5: sc#329 (the generation record and every compose attempt state the decoding actually taken,
 row `<id>-DEC`), sc#293 (the destination is the path the goal names to create, which D4 needs), sc#295 and sc#319
 (requirement enforcement end to end).
@@ -180,6 +186,16 @@ and are stricter on one point (no model call at all). This is a scorer change ca
 any run, with red and green controls (Section 3.5); it is not a relaxation and is flagged for the reviewer and Drake at freeze.
 Which of the other inherited N1 rows (`N1-C`, `N1-Z`, `N1-E`, `N1-H`, v4 `N1-NC`) can read a refusal that leaves no S3 report is
 confirmed at gate G3 by a stub-build run; any that cannot is listed and replaced the same declared way, never dropped silently.
+**Gate G3 result** (CPU stub run through the unchanged driver, `evidence-v5/g3-n1-stub-run.txt`). The refusal lands in
+`steps/S3.json`, field `error` (`ok` false, step `propose`, S3 exit 1), verbatim: `RunComposeTask: destination
+../shared-stuff/reminder.txt cannot be written safely (not a plain relative path inside the workspace); refusing`. No S3 report is
+written, S4 to S6 exit non-zero, the workspace is unchanged. On that output `N1-Z` and `N1-E` PASS and stay declared. Three more
+v8 rows cannot read a refusal that leaves no S3 report and are replaced the declared way: `N1-B` by `N1-NR`, `N1-C` (completion
+state from the S3 report) by `N1-RC` (completion state from the step exit codes), `N1-H` (machine id from the S3 report) by
+`N1-RH` (machine id from the pre-restart and S8 recalls); v4's `N1-D` is replaced by `N1-NM` and v4's `N1-NC` is kept. The
+unchanged receipt still computes `N1-B`, `N1-C` and `N1-H`; they are not declared, so the scorer lists them as extras, outside
+the verdict.
+
 The same product change means v4's N1 would now fail `N1-B` on 9b5e6e8; v4 is not edited, and this is recorded as a v4 finding
 (Section 12).
 
@@ -189,12 +205,15 @@ The same product change means v4's N1 would now fail `N1-B` on 9b5e6e8; v4 is no
 |---|---|---|
 | `<id>-PRE` Asked the model | every launch except N1 | the S3 report has the field `requirements_uncertain` and it is an empty list (the field is always written, so an absent field is FAIL), and at least one attempt exists. A product refusal before the model is named by this row, so the verdict can say "product" rather than "model" |
 | `<id>-DEC` Decoding observed greedy | every launch except N1 | **On every attempt** of the S3 report: `decoding` is present and not null; `decoding.greedy_tokens` is at least 1; `decoding.sampled_tokens` is 0; `temperature`, `top_p` and `seed_request_id` are null or absent (an attempt's `decoding` is the plain `DecodeObservation`, which has no `mode` field). An attempt with no `decoding` (timed out, errored, or not observed) FAILs the row. **On the generation record** named by a committed launch's `provenance.generation_record`: `decoding.mode` is `greedy` and `decoding.sampled_tokens` is 0. sc#329: absent means no claim, so absent is FAIL. The value is never read from the request, `generation_config.json` or any config |
-| `<id>-GR` Generation record binds model and text | committed launches | the commit chain names a generation record (not null); the scorer reads it with `aien compose recall` (verified); its `output_text_sha256` equals the parsed attempt's `text_sha256`; its `model_sha256` equals the frozen value of the file the daemon hashes (Section 7) and the daemon's `checkpoint loaded` line; its `tokenizer_sha256` equals the frozen tokenizer.json sha256. Until sc#338 is fixed this binds the index file only; the verdict says so |
-| `<id>-OPR` No fallback, positive evidence | every launch | for **every daemon start** of the launch (the driver starts more than one: `daemon-1.log`, `daemon-2.log`, as `<id>-BE` counts them), that daemon's log has the start line of sc#337 with `strict=true`, `dev_fallback_build=false`, `require_checkpoint=true` and a backend containing `OmegaGb10`; every `OP_REPORT` line of the launch has `native_fallbacks=[]` and `reference_runs=[]` and lists all ten native ops; launches that call the model have at least one `OP_REPORT` line; the log has no `STRICT_REAL_MODEL_VIOLATION`. A missing line is FAIL. (The exact line format is fixed at freeze from the merged sc#337.) |
-| `<id>-PIN` Build pins | every launch | `run.json` records the sovereign-core commit, the omega, physics and aienos lock commits, the sha256 of `aien`, `np1_reference` and `np1_edit_merge`, and `Cargo.lock`, each equal to its frozen value (Section 7). The wrapper refuses a mismatch; the row makes the check part of the score |
-| `<id>-MEAS` Measurements present and consistent | every launch | `run.json` has the launch wall time (monotonic ms), and for each attempt its ms, `tokens`, and `token_ids`; every number is a non-negative integer; the attempts' ms sum to no more than the launch wall time; `tokens` equals the length of `token_ids`; no attempt's `tokens` exceeds the launch's cap; MemFree and Cached are recorded before the part and the daemon's `vmhwm_kb` after it |
-| `N1-NR` Refused for the destination | N1 | the propose step (S3) did not succeed, and its error text (the place it is read from is fixed at gate G3) contains `destination ../shared-stuff/reminder.txt cannot be written safely` and `refusing`, and does not contain `uncertain requirement`. Replaces `N1-B` for N1 (Section 3.3) |
-| `N1-NM` No model call, nothing committed | N1 | no attempt, no generation record, no authorization record, no S5 path, and no file at `../shared-stuff/reminder.txt` relative to the workspace. Replaces `N1-D` for N1 (Section 3.3) |
+| `<id>-GR` Generation record binds model and text | committed launches | the S3 report names a generation record (not null), and the commit record (`compose_commit`) and every authorization carry `provenance.generation_record` equal to it; the record is in the S8 recall (`aien compose recall`), verified, `generation` 1, `origin` `compose_proposal`, its `task` and `attempt` those of the accepted (parsed) attempt; its `output_text_sha256` equals that attempt's `text_sha256`; `model_digest_kind` is `index+shards` and `model_sha256` equals the frozen manifest digest (Section 7, `frozen-v5.json`); `tokenizer_sha256` equals the frozen tokenizer.json sha256; every daemon start's `checkpoint loaded` line carries the same `model_sha256` and `tokenizer_sha256`, and its log has exactly one line `CHECKPOINT_SHARDS model_sha256=<m> model_digest_kind=index+shards index_sha256=<i> shards=[<name>:<sha256>,...]` equal to the frozen one (the three shards of Section 7, in order) |
+| `<id>-OPR` No fallback, positive evidence | every launch | for **every daemon start** of the launch (one log per entry of `run.json` `daemon`: `daemon-1.log`, `daemon-2.log`, as `<id>-BE` counts them), read after removing colour codes and leading spaces: the log has exactly one start line `STRICT strict=<b> dev_fallback_build=<b> require_checkpoint=<b> backend=<name>` and it reads `strict=true dev_fallback_build=false require_checkpoint=true` with a backend containing `OmegaGb10` (the GB10 backend names itself `OmegaGb10Backend (native Omega engine, no CUDA, NVIDIA GB10 sm_121)`; the CPU stub prints `ReferenceCpuBackend`, gate G3), and no `STRICT_REAL_MODEL_VIOLATION` line; every line `OP_REPORT native=[a,b,..] reference=[..] native_fallbacks=[name:count,..] reference_runs=[..] backend=<name>` (one per model call) lists all ten native ops in `native` (`rmsnorm`, `apply_rope`, `matmul_vec`, `matmul_batch`, `swiglu`, `gqa_attention`, `paged_attention`, `paged_attention_batch`, `compute_logits`, `rmsnorm_heads`), has `native_fallbacks=[]` and `reference_runs=[]` and a backend containing `OmegaGb10`; a launch that calls the model (every launch except N1) has at least one `OP_REPORT` line. A missing line or log is FAIL. Formats copied from the merged sc#337 (#350, `server.rs`; gate G4) |
+| `<id>-PIN` Build pins | every launch | the wrapper's launch record `<id>.launch-v5.json` (the driver `run-campaign.sh` is unchanged and records no pins) holds `pins`: the sovereign-core commit, the omega, physics and aienos lock commits, and the sha256 of `Cargo.lock`, `aien`, `np1_reference` and `np1_edit_merge`; each of the eight frozen values in `frozen-v5.json` is filled (40 or 64 lowercase hex, not the placeholder) and equals the recorded one. The wrapper refuses a mismatch before any launch; the row makes the check part of the score |
+| `<id>-MEAS` Measurements present and consistent | every launch | the launch record `<id>.launch-v5.json` has `wall_ms` (launch wall time on CLOCK_BOOTTIME from `/proc/uptime`, ms) and `meminfo_before` `mem_free_kb` and `cached_kb` (`/proc/meminfo` before the part); every daemon start in `run.json` has `vmhwm_kb`; every attempt of the S3 report has `ms`, `tokens` and `token_ids`; every number is a non-negative integer; `tokens` equals the length of `token_ids` and is at most the launch's `max_tokens`; the attempts' ms sum to no more than `wall_ms` |
+| `E2-EP` Edit position | E2 | in the saved text the last non-empty line after `## Steps` and before the next heading equals the new line (Section 3.1, Edit position) |
+| `N1-NR` Refused for the destination | N1 | the propose step failed (S3 exit code in `run.json` recorded as a number other than 0, `steps/S3.json` `ok` false) and `steps/S3.json` `error` equals exactly the string recorded at gate G3: `RunComposeTask: destination ../shared-stuff/reminder.txt cannot be written safely (not a plain relative path inside the workspace); refusing`. Any other text, for example an uncertain-requirement refusal, is FAIL. Replaces `N1-B` for N1 (Section 3.3) |
+| `N1-NM` No model call, nothing committed | N1 | no attempt, no generation record named in an S3 report or present in the S8 recall (`steps/S8.json` must exist; a missing recall is FAIL), no authorization record, no S5 path, and nothing at `../shared-stuff/reminder.txt` resolved against the workspace. Replaces v4 `N1-D` for N1 (Section 3.3) |
+| `N1-RC` Completion state REFUSED, read from the steps | N1 | S3, S4 and S5 are recorded in `run.json` and each has a recorded exit code other than 0 (a missing exit code is FAIL); no authorization record; no S5 path; `containment.workspace_changed` is empty. Replaces v8 `N1-C` (Section 3.3) |
+| `N1-RH` Daemon healthy after the refusal | N1 | the pre-restart recall (`steps/pre-restart-recall.json`) and the S8 recall after the restart are both `ok` and return the S1 constraint (`run.json` `constraint_text`) byte-identical and verified, with the same `machine_id`. Replaces v8 `N1-H` (Section 3.3) |
 
 Whether the product recognized a requirement is not a row condition (as in v4): the rows read the saved bytes. A reply the
 runtime refuses leaves no committed file, so every row that needs one FAILs for that launch.
@@ -207,17 +226,22 @@ inside a longer word, a topic form not in the table, an unclosed fence, a paragr
 an attempt whose `decoding` is null or has one sampled token, a record whose `decoding.mode` is `mixed`, swapped example headings in D2, a missing `requirements_uncertain` field, a null generation record, a record whose text digest differs, a log with
 a fallback count of 1 or no `OP_REPORT` line, a pin off by one character, attempt ms summing above the wall time, and an N1
 refused for an uncertain requirement or after a model attempt. A row that cannot be made to fail is not a check and blocks the freeze.
+`test-v5.sh` holds these cases: each product-row red case changes one thing in a passing synthetic launch and checks that exactly
+the named rows fail; each document fixture in `selftest-v5/` names the rows it must fail.
 
 ## 4. Declaration and tooling
 
 `gen-decl-oq3-v5.sh` writes `../scoring/declarations/oq3-v5.decl.json` from the v8 row shapes plus the rows above. One
 repetition, role case, no control, none NOT_APPLICABLE. `test-v5.sh` fails if the committed file differs from the generated
 one. The wrapper `run-qwen3-v5.sh`, the row module `rows-oq3-v5.jq` (including `rows-oq3-v4.jq` and `rows-oq3-v3.jq`
-unchanged) and `v5-rows.sh` are derived from the v4 files of sc#294 without changing any inherited row. None of these exists in
-this draft: they are written after the product fixes of Section 1 merge, so that the log line formats they read are the merged
-ones.
+unchanged) and `v5-rows.sh` are derived from the v4 files of sc#294 without changing any inherited row. They were written after
+the product fixes of Section 1 merged and read the merged line formats. `v5-rows.sh` computes the extra rows of a launch from the
+run directory, the daemon logs and the wrapper's launch record `<id>.launch-v5.json`; the frozen model values and pins come from
+`frozen-v5.json`. `tasks-oq3-v5.json` carries the machine fields the inherited row modules read (Section 12).
 
-QUALIFICATION_ROWS = TO FILL AT FREEZE (generated; per launch counts listed in the generated declaration)
+QUALIFICATION_ROWS=334
+
+Per launch: D1 34, D2 36, D3 36, D4 35, D5 36, D6 33, E1 33, E2 34, R1 32, N1 11, N2 14 (generated; `test-v5.sh` checks both).
 
 ## 5. Verdict
 
@@ -263,9 +287,18 @@ generation_config.json                   835fffe355c9438e7a25be099b3fccaa98350b8
 the sampling fields are the publisher's suggestion for other runtimes and are **not read** by this product. The campaign does not
 rely on that reading: row `<id>-DEC` checks the decoding the backend actually took on every attempt.
 
-**Which file the generation record hashes.** The daemon is started with `AIEN_MODEL_PATH` = the index file, and
-`model_sha256` is the sha256 of that file (sc#338). Until sc#338 is fixed, row `<id>-GR` compares with the index sha256 above and
-the verdict states that the shards are bound by the wrapper's pre-run hash only.
+**What the generation record binds** (sc#338, fixed by #351). The daemon is started with `AIEN_MODEL_PATH` = the index file.
+For a sharded checkpoint `model_sha256` is the manifest digest over the index and every shard (`docs/DAEMON_GENERATION_RECORD.md`),
+the record says `model_digest_kind=index+shards`, and the daemon logs `CHECKPOINT_SHARDS model_sha256=<m>
+model_digest_kind=index+shards index_sha256=<i> shards=[<name>:<sha256>,...]`. Expected manifest digest:
+
+```text
+model_sha256 (index+shards)              17a78fbba447a4e66a3d886c0998fbcf2f9201d46e5e0c5bfec2d57c975976b7
+```
+
+COMPUTED FROM LISTED SHA256s, NOT RE-HASHED: the value is the manifest built from the index and shard sha256 values listed
+above, not from the files. Re-hashing the four files on the frozen build and confirming this value against the daemon's own
+`CHECKPOINT_SHARDS` line = TO FILL AT FREEZE. Row `<id>-GR` binds the index and all three shards through it (`frozen-v5.json`).
 
 Environment, checked by the wrapper and recorded in `run.json`:
 
@@ -278,7 +311,8 @@ AIEN_COMPOSE_EDIT_BUDGET_MS              = 29000
 AIEN_COMPOSE_DOC_BUDGET_MS               = 120000
 AIEN_COMPOSE_MAX_TOKENS                  = 96
 AIEN_COMPOSE_DOC_MAX_TOKENS              = 1024 for documents, 16 for N2, 96 for R1
-unset: AIEN_FORCE_CPU_STUB, AIEN_DEV_FALLBACK (new in v5), AIEN_COMPOSE_BUDGET_MS, AIEN_OMEGA_SPIN_US, AIEN_OMEGA_CTA_BUDGET
+unset: AIEN_FORCE_CPU_STUB, AIEN_DEV_FALLBACK (new in v5), AIEN_COMPOSE_AUTHORIZE_REQUIRES_DESK (sc#342 dev-only opt-out),
+       AIEN_COMPOSE_BUDGET_MS, AIEN_OMEGA_SPIN_US, AIEN_OMEGA_CTA_BUDGET
 build: release, linked (has_omega_compose, has_omega_gpu, has_omega_wait_ms in the build log), WITHOUT the dev-fallback feature;
        the exact cargo command line is recorded in evidence-v5/build-summary.txt
 ```
@@ -302,7 +336,9 @@ GPU hold names, one per part            = TO FILL AT FREEZE
 
 Run path pinned at freeze (`RUN_BASE=/home/drakestapleton/workspace/oq3-v5-runs`). One run: no retry, no repeated launch, no
 cache drop. Four parts, one quietlock hold of 20 minutes or less each, back to back, together the one chip slot of decision (c).
-Part k refuses unless part k-1 completed in the same RUN_BASE with the same binaries and campaign files.
+Part k refuses unless part k-1 completed in the same RUN_BASE with the same binaries and campaign files. The parts below are
+the ones `run-qwen3-v5.sh` runs (`OQ3_PART` 1 to 4). Before each part the wrapper writes the build pins and `/proc/meminfo`, and
+for each launch `<id>.launch-v5.json` (wall time, driver exit, memory before the part, pins).
 
 Time estimate, UNVERIFIED, from v3 (a launch costs about 140 s without decoding; documents decoded in 20 to 43 s):
 
@@ -321,17 +357,23 @@ All must hold on the commit being frozen. If one fails, the product or the tooli
 changed to pass a gate.**
 
 - **G1 Asked the model.** The requirement-reader probe on the frozen commit gives no uncertain span for any v5 goal except N1
-  (sc#331 to sc#336 merged). Committed as `evidence-v5/requirements-probe-<commit>.txt`.
+  (sc#331 to sc#336 merged). Committed as `evidence-v5/requirements-probe-<commit>.txt`. **MET on b2cae6d**
+  (`evidence-v5/requirements-probe-b2cae6d.txt`: no uncertain span for any v5 or v4 goal); re-run on the frozen commit.
 - **G2 Topic forms.** The product's topic check accepts every accepted form of Section 3.1 for its topic (the
-  `topic-forms-probe` re-run with the D3 forms; sc#332).
+  `topic-forms-probe` re-run with the D3 forms; sc#332). The re-run uses each topic as the product reads it from the goal, so
+  the third topic is checked as `withdraw (or withdrew)`, not as the bare name. **OPEN** (2026-10-08, b0cee16,
+  `evidence-v5/topic-forms-probe-v5-b0cee16.txt`): 15 of 18 forms MET; `withdrawn`, `withdrawal` and `withdrawals` are refused by
+  the product. Product cause (a sc#332 follow-up), fixed in the product; no form is removed and no goal is reworded.
 - **G3 N1 reason.** On the frozen commit a stub-build run of N1 through the driver is refused before any model call with the
   reason of `N1-NR`; the exact error string (verbatim) and the file and field it lands in are recorded in `evidence-v5/` and copied into `N1-NR`; each inherited N1 row is run
   on that output and any that cannot read it is listed and replaced as Section 3.3 says (sc#336 keeps the order tested).
+  **DONE on b2cae6d** (`evidence-v5/g3-n1-stub-run.txt`); re-checked on the frozen commit.
 - **G4 Fallback evidence.** sc#337 merged; a stub-build daemon prints the start line; the line format is copied into Section 3.4
-  and `rows-oq3-v5.jq`.
+  and `rows-oq3-v5.jq`. **DONE**: sc#337 merged as #350; the G3 stub daemons print `STRICT strict=true dev_fallback_build=false
+  require_checkpoint=true backend=ReferenceCpuBackend`; both formats are in Section 3.4 and `rows-oq3-v5.jq`.
 - **G5 Self-test.** `test-v5.sh` passes, including every red case of Section 3.5, freshness of every v5 goal against every
   earlier tasks file, acceptance file, verdict and the diagnostic (D4 shares the first name Priya with v4 W4: a name, declared
-  here, not a reused task), and the wrapper's refusals.
+  here, not a reused task), and the wrapper's refusals. `test-v5.sh` exists and passes on this draft; re-run on the frozen build.
 - **G6 GPU dry run.** One dry run of the exact wrapper in dry mode on the chip, with Drake's approval and its own holds:
   measures part timings, confirms `decoding` reaches `steps/S3.json` attempts on the GB10 path, the generation record is
   written, and the OP_REPORT lines appear. Not a qualification run; its outputs are kept and never scored.
@@ -353,7 +395,8 @@ qualification PASS: a few percent. A FAIL is the expected and acceptable outcome
 - One run, one launch per task: one observation each, not a rate. One model, one machine.
 - `<id>-DEC` shows the backend's own count of how it chose each token. It is the daemon's report, not signed, and covers the
   scheduler path only (DAEMON_GENERATION_RECORD.md, "What it does not prove").
-- `<id>-GR` binds the index file of the checkpoint, not the shards, until sc#338 is fixed.
+- `<id>-GR` binds the index and the three shards through the manifest digest the daemon computes; the expected value is stated
+  from the listed sha256s and re-hashed at freeze (Section 7). It is the daemon's own record, not signed.
 - `<id>-OPR` shows the daemon's own accounting, not an independent measurement of where each op ran.
 - The topic, paragraph and sentence rules are stated narrow readings, not judgements of quality. In particular: D3's goal says
   "another form of that word" counts, but only the forms in the Section 3.1 table count (a document that uses only
@@ -385,4 +428,10 @@ qualification PASS: a few percent. A FAIL is the expected and acceptable outcome
   no effect while the destination check comes first; `N1-NR` fails if that order ever changes.
 - **The model's own sampling suggestion** (`generation_config.json`: sampled, temperature 0.7) differs from the campaign's
   greedy decoding; the product does not read those fields, and `<id>-DEC` checks the result directly.
+- **Machine fields of the task file.** After the product fixes merged, the fields the inherited row modules read were aligned
+  with the v4 task file: `min_lines`, `min_code_blocks`, `tail_heading` (null) and `min_tail_words` (0) on the six documents, D4's
+  `source` as path plus sha256, and N1's kind `negative-boundary` (the v8 receipt names that kind). No goal, destination, seed,
+  phrase or requirement changed (`test-v5.sh` checks the digest of goals, destinations, seeds and phrases). The v5
+  requirements state counts as `n` and required words as a list `words`; `rows-oq3-v5.jq` reads both explicitly and fails closed
+  when either is missing.
 - v4 is not modified by this change; no product code is modified by this change.
