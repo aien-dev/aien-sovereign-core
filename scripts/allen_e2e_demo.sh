@@ -91,16 +91,34 @@ gb_life_record() { # appends this daemon life's facts (from its log) to GB_LIVES
            nvrm_kernel_delta:(if $delta=="unavailable" then "unavailable" else ($delta|tonumber) end)}]')
 }
 GB_STOP_OK=0; GB_STOP_DESC=""; GB_EXIT=""; GB_UNCLEAN=0
+GB_STOPPING=0; SIG_PENDING=""
+# A GB10 daemon is started in its own session with HUP and INT ignored, so a terminal Ctrl-C, a hangup or a signal to the
+# driver's process group cannot reach it. `( trap '' HUP INT; exec setsid CMD )&` keeps $! equal to the daemon's pid:
+# setsid only forks when its caller is a process group leader, which a background subshell of a script is not (checked
+# by the session test in start_daemon and by selftest-gb).
+gb_spawn() { # logfile cmd...; sets DPID
+  local log=$1; shift
+  ( trap '' HUP INT; exec setsid "$@" >"$log" 2>&1 </dev/null ) &
+  DPID=$!
+}
+# The driver itself: on INT, TERM or HUP it stops a live GB10 daemon gracefully (unbounded wait), then exits.
+gb_on_signal() {
+  echo "driver got $1: stopping a live GB10 daemon gracefully (no timeout), then exiting" >&2
+  if [ "$GB_STOPPING" = 1 ]; then SIG_PENDING=$1; return 0; fi
+  if [ -n "${DPID:-}" ] && [ "${DAEMON_GB:-0}" = 1 ]; then SIG_PENDING=$1; gb_stop; fi
+  exit 130
+}
 gb_stop() { # graceful stop of the GB10 daemon in DPID; waits with NO timeout; never signals it
   local rc ack=no gone i=0
   GB_STOP_OK=0; GB_STOP_DESC=""
+  GB_STOPPING=1
   [ -n "${DPID:-}" ] || { GB_STOP_DESC="no daemon"; return 1; }
   while alive "$DPID"; do
     if gb_send_shutdown; then ack=yes; break; fi
     i=$((i + 1)); [ $((i % 12)) -eq 0 ] && echo "waiting for the GB10 daemon to take the shutdown request (no timeout, no kill)" >&2
     sleep "$GB_POLL"
   done
-  wait "$DPID"; rc=$?
+  while :; do wait "$DPID"; rc=$?; if [ "$rc" -gt 128 ] && alive "$DPID"; then continue; fi; break; done   # a signal to the driver interrupts wait, not the daemon
   GB_EXIT=$rc; DPID=""; DAEMON_GB=0
   gone=no; [ ! -e "$SOCK" ] && gone=yes
   if [ "$rc" -eq 0 ] && [ "$ack" = yes ] && [ "$gone" = yes ] && ! grep -aqi 'seat kill' "$DLOG"; then
@@ -110,10 +128,35 @@ gb_stop() { # graceful stop of the GB10 daemon in DPID; waits with NO timeout; n
     GB_STOP_DESC="graceful stop NOT clean (exit $rc, shutdown acked: $ack, socket removed: $gone)"
   fi
   gb_life_record
+  GB_STOPPING=0
+  [ -z "${GB_RESULT_FILE:-}" ] || echo "exit=$GB_EXIT clean=$GB_STOP_OK" >"$GB_RESULT_FILE"
+  [ -z "$SIG_PENDING" ] || { echo "driver exiting after signal $SIG_PENDING" >&2; exit 130; }
   [ "$GB_STOP_OK" = 1 ]
 }
 gb_early_exit() { wait "$DPID" 2>/dev/null; GB_EXIT=$?; GB_STOP_OK=0; GB_STOP_DESC="daemon exited by itself (exit $GB_EXIT), no shutdown request"; GB_UNCLEAN=1; gb_life_record; }
 
+# Inner half of the signal proof, run as its own session and process-group leader (see selftest_gb).
+selftest_gb_sig() { # SIGNAME DIR
+  local sig=$1 t=$2; mkdir -p "$t"; GB_POLL=0.2; GB_RESULT_FILE=$t/result
+  trap 'gb_on_signal INT' INT; trap 'gb_on_signal TERM' TERM; trap 'gb_on_signal HUP' HUP
+  cli() { [ "$1 $2" = "compose shutdown" ] && { echo '{"step": "S7", "shutdown": true}'; : >"$t/go"; }; }
+  LOGS=$t; SOCK=$t/s; DN=1; DLOG=$t/d.log; GB_LIVES='[]'; NVRM_BEFORE=0; : >"$SOCK"
+  cat >"$t/fake.sh" <<F
+#!/bin/bash
+for s in TERM QUIT USR1; do trap "echo got-\$s >>$t/sigs" \$s; done
+echo '  Backend: NativeTransformerBackend/OmegaGb10Backend (fake)'
+while [ ! -e $t/go ]; do sleep 0.1 & wait \$!; done
+sleep 1; rm -f $SOCK; exit 0
+F
+  chmod +x "$t/fake.sh"
+  gb_spawn "$DLOG" "$t/fake.sh"; DAEMON_GB=1
+  sleep 0.5
+  local sid pg; sid=$(sed 's/.*) //' /proc/$DPID/stat | awk '{print $4}'); pg=$(sed 's/.*) //' /proc/$DPID/stat | awk '{print $3}')
+  echo "driver pid $$ pgid $(sed 's/.*) //' /proc/$$/stat | awk '{print $3}'); daemon pid $DPID (\$! matches: $([ -d /proc/$DPID ] && echo yes)) session $sid pgrp $pg" >"$t/where"
+  # signal the driver's whole process group; the handler must stop the daemon gracefully and the driver must get its exit code
+  command kill -s "$sig" -- "-$$"
+  sleep 3; echo "handler did not exit the driver" >"$t/result"; exit 1
+}
 # Control-flow proof without a chip: fake daemons, with `kill` shadowed so any call is recorded.
 selftest_gb() {
   local t rc=0; t=$(mktemp -d); GB_POLL=0.2
@@ -130,8 +173,22 @@ selftest_gb() {
   run_fake 3; gb_stop; [ "$GB_STOP_OK" = 0 ] && [ "$GB_UNCLEAN" = 1 ] || { echo "unclean stop control failed: $GB_STOP_DESC"; rc=1; }
   [ "$(printf '%s' "$GB_LIVES" | jq 'length')" = 2 ] || { echo "life records: $GB_LIVES"; rc=1; }
   [ ! -s "$t/kills" ] || { echo "a kill was called: $(cat "$t/kills")"; rc=1; }
+  # Signals sent to the driver's process group: the GB10 daemon (own session, HUP/INT ignored) must not receive them,
+  # and the driver must still collect exit 0 after the graceful stop. Control: an ordinary background child does receive TERM.
+  local s r
+  for s in INT HUP TERM; do
+    setsid -w bash "$0" selftest-gb-sig "$s" "$t/sig-$s" 2>"$t/sig-$s.err"
+    r=$(cat "$t/sig-$s/result" 2>/dev/null)
+    if [ "$r" = "exit=0 clean=1" ] && [ ! -s "$t/sig-$s/sigs" ] && grep -q "graceful" "$t/sig-$s.err"; then
+      echo "  group $s: daemon received nothing; driver stopped it gracefully, $r; $(cat "$t/sig-$s/where")"
+    else
+      echo "group $s FAILED: result='$r' daemon saw: $(cat "$t/sig-$s/sigs" 2>/dev/null)"; rc=1
+    fi
+  done
+  setsid -w bash -c 'bash -c "trap \"echo got-TERM >>'"$t"'/ctl\" TERM; sleep 3 & wait" & sleep 0.5; command kill -s TERM -- -$$; wait' 2>/dev/null; sleep 0.3
+  grep -q got-TERM "$t/ctl" 2>/dev/null && echo "  control: an ordinary child in the group DID receive TERM (the test can see a leak)" || { echo "control failed: ordinary child did not get TERM"; rc=1; }
   unset -f kill cli; rm -rf "$t"
-  [ $rc -eq 0 ] && echo "selftest-gb ok (graceful stop waits for exit 0, an unclean exit is flagged, a refused first request is retried, no kill was called)"
+  [ $rc -eq 0 ] && echo "selftest-gb ok (graceful stop waits for exit 0; unclean exit flagged; refused request retried; no kill called; group INT/HUP/TERM never reach the GB10 daemon)"
   return $rc
 }
 
@@ -140,6 +197,7 @@ case "${1:-}" in
   check) check_doc "${2:?file}"; exit 0 ;;
   selftest) selftest; exit $? ;;
   selftest-gb) selftest_gb; exit $? ;;
+  selftest-gb-sig) selftest_gb_sig "$2" "$3"; exit $? ;;
   run) ;;
   *) echo "usage: $0 run | check FILE | selftest | selftest-gb" >&2; exit 2 ;;
 esac
@@ -292,9 +350,19 @@ start_daemon() { # model_dir [VAR=val ...]; sets CUR_* from the daemon log
     NVRM_BEFORE=$(nvrm_count)
   fi
   DN=$((DN + 1)); DLOG=$LOGS/daemon-$DN.log; rm -f "$SOCK"
+  if [ "$IS_GB" = 1 ]; then
+    gb_spawn "$DLOG" "${E[@]}" AIEN_MODEL_PATH="$mp" AIEN_TOKENIZER_PATH="$d/tokenizer.json" "$@" "$dbin" daemon
+  else
   "${E[@]}" AIEN_MODEL_PATH="$mp" AIEN_TOKENIZER_PATH="$d/tokenizer.json" "$@" "$dbin" daemon >"$DLOG" 2>&1 &
   DPID=$!
+  fi
   DAEMON_GB=$IS_GB
+  if [ "$IS_GB" = 1 ]; then
+    # the GB10 daemon must be the leader of its own session (so group and terminal signals cannot reach it)
+    local k sid=""
+    for k in $(seq 1 50); do sid=$(sed 's/.*) //' "/proc/$DPID/stat" 2>/dev/null | awk '{print $4}'); [ "$sid" = "$DPID" ] && break; sleep 0.1; done
+    [ "$sid" = "$DPID" ] || { echo "GB10 daemon pid $DPID is not its own session leader (session '$sid'); stopping it gracefully"; gb_stop; return 1; }
+  fi
   local i
   for i in $(seq 1 600); do
     sleep 2
@@ -333,6 +401,7 @@ if [ "$GB" = 1 ]; then
   # exit path: a GB10 daemon still alive is stopped gracefully (unbounded wait), a CPU daemon is killed as in v1-v3
   gb_exit() { if [ -n "$DPID" ]; then if [ "$DAEMON_GB" = 1 ]; then gb_stop; else kill9; fi; fi; }
   trap gb_exit EXIT
+  trap 'gb_on_signal INT' INT; trap 'gb_on_signal TERM' TERM; trap 'gb_on_signal HUP' HUP
 else
 trap '[ -n "$DPID" ] && kill -9 "$DPID" 2>/dev/null' EXIT
 fi

@@ -36,8 +36,8 @@ S1, S5, the S7 switch-over, to every error path, and to the exit trap. `aien-cli
 If a GB10 daemon never takes the request or never exits, the driver waits and a human decides; it does not kill.
 A stop is "clean" only if: the shutdown request was acknowledged, the daemon exits 0, its socket file is removed, and the
 daemon log has no `seat kill` line. After an unclean stop the driver starts no further GB10 daemon.
-Note: the daemon prints no dedicated "session closed" line. The closed-session evidence is the four facts above plus the
-kernel-log check below (Q277's verdict used exit 0 and no new NVRM lines).
+No "session closed" line exists: the daemon prints none (checked in the Q277 logs and the sources). The four clean-stop signs used are (1) ShutdownAck received, (2) exit code 0, (3) the socket file removed, (4) no `seat kill` line in the log; the
+kernel-log NVRM delta below is recorded as well (Q277 judged a close by exit 0 and no new NVRM lines).
 
 ## Evidence recorded per GB10 life (receipt `GB10-lives`)
 The `Backend:` line, the `GB10_SERVING_RESERVATION reserved bytes=` line, count of lines matching `fallback`, count of NVRM
@@ -64,3 +64,11 @@ One request per GB10 life; no endurance; no cache fill, no drop_caches, no setti
 so S3 and S8 texts are not comparable to v3. Whether the CLI client built without the GPU library can drive the GB10 daemon
 over the socket is expected (same commit, same wire protocol) but untested here. The daemon runs with the driver's isolated
 HOME, which the Q277 run did not use: UNKNOWN whether the GB10 path reads HOME.
+
+## Signals to the driver
+The GB10 daemon is started in its own session (`setsid`, with HUP and INT ignored, `$!` still its pid; the driver checks that it
+is its own session leader). A Ctrl-C, a terminal hangup or a signal to the driver's process group therefore cannot reach it.
+The driver traps INT, TERM and HUP: it stops a live GB10 daemon gracefully (unbounded wait, a repeated signal only
+queues the exit) and only then exits (130); it never exits while a GB10 daemon is alive. `selftest-gb` proves this with a
+fake daemon, including a control showing an ordinary child in the same group does receive the signal.
+A SIGKILL of the driver itself, or a power loss, cannot be handled and is outside this rule.
