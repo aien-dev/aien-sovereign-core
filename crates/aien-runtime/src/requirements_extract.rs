@@ -14,9 +14,10 @@
 //! | `at most / no more than / not more than / a maximum of / maximum of / max / up to N <noun>`, `N or fewer|less <noun>` | `MaxX(N)` |
 //! | `more than N <noun>`, `fewer|less than N <noun>` | `MinX(N+1)`, `MaxX(N-1)` |
 //! | `N <noun> or more|fewer|less`, `N <noun> minimum|maximum`, `no longer|shorter than N <noun>` | `MinX(N)` or `MaxX(N)` |
-//! | `<noun>` = `lines`, `words`; `items`, `steps`, `sections`, `headings`, `questions`, `paragraphs` (Min only; singular too) | lines, words, list items, numbered steps, headings, questions, paragraphs (`MinParagraphs`: runs of prose lines, see `requirements::count_paragraphs`) |
+//! | `<noun>` = `lines` (also `non-empty|nonempty|non-blank lines`: lines are counted non-empty anyway), `words`; `items`, `steps`, `sections`, `headings`, `questions`, `paragraphs` (Min only; singular too) | lines, words, list items, numbered steps, headings, questions, paragraphs (`MinParagraphs`: runs of prose lines, see `requirements::count_paragraphs`) |
 //! | `N sentences in|per|for|within every|each section` (or `in every section, ... N sentences`) | `MinSentencesPerSection(N)` |
-//! | `sections|headings titled|named|called A, B and C`, `sections: A, B and C` | `RequiredHeadings` |
+//! | `sections|headings titled|named|called A, B and C`, `sections: A, B and C`; with quoted titles also `section(s) is|are titled "A"` and `[one] section(s) must|should|will|shall|can be titled "A"` | `RequiredHeadings` (a count before the noun must equal the number of titles; `organise it under three sections titled ...` is read the same). The is/are/be forms stay UNCERTAIN after `each every all any` or with `if unless optionally optional may might when whenever perhaps maybe` in the clause |
+//! | `between N and M lines|words` (N <= M) | `MinX(N)` and `MaxX(M)`, inclusive. Other nouns, `from N to M`, ranges like `2-3`, `... or so`, and a range on a part of the document (a countable noun or `gap space distance` right before `between`, or `each every per` within three words) stay UNCERTAIN |
 //! | `covers|covering A, B and C` (and `to|should|must|will|can cover ...`) | `RequiredTopics` |
 //! | `include|contain|use|mention the word(s)|term(s) X, Y` or `"X", "Y"` | `RequiredWords` |
 //! | `include|contain|use|mention the phrase "X"` / `the phrases "X", "Y"` | `RequiredPhrases` |
@@ -74,7 +75,7 @@
 //!   recognized and the span is UNCERTAIN.
 //! - a bound word with a number and a noun that is not supported (`at most 5
 //!   items`, `at most 3 paragraphs`, `exactly 20 lines`, `about 30 lines`,
-//!   `between 10 and 20 lines`, `35-line` with no verb before it) is UNCERTAIN.
+//!   `between 10 and 20 items`, `35-line` with no verb before it) is UNCERTAIN.
 //! - a title list whose parsed length differs from a declared count ("6
 //!   sections titled A, B, C") is UNCERTAIN; so is a list item that is not a
 //!   short noun phrase.
@@ -187,6 +188,53 @@ fn tokenize(goal: &str) -> Vec<Tok> {
 fn ends_clause(raw: &str) -> bool {
     raw.ends_with([',', '.', ';', ':', '!', '?', ')'])
 }
+
+/// The token ends a sentence: `.`, `!` or `?`, possibly before closing quotes
+/// or a bracket (`"Costs".` and `"Costs."` both end one).
+fn ends_sentence(raw: &str) -> bool {
+    raw.trim_end_matches(['"', '\'', '\u{201d}', '\u{2019}', ')'])
+        .ends_with(['.', '!', '?'])
+}
+
+/// The token range of the sentence holding token `i`.
+fn sentence_of(toks: &[Tok], i: usize) -> std::ops::Range<usize> {
+    let mut lo = i;
+    while lo > 0 && !ends_sentence(&toks[lo - 1].raw) {
+        lo -= 1;
+    }
+    let mut hi = i;
+    while hi + 1 < toks.len() && !ends_sentence(&toks[hi].raw) {
+        hi += 1;
+    }
+    lo..hi + 1
+}
+
+/// Nouns that name a part of the document, not the whole of it: a range or a
+/// bound in the same sentence may be about that part (sc#343 review).
+const PART_NOUNS: [&str; 22] = [
+    "paragraph",
+    "paragraphs",
+    "stanza",
+    "stanzas",
+    "verse",
+    "verses",
+    "bullet",
+    "bullets",
+    "entry",
+    "entries",
+    "item",
+    "items",
+    "sentence",
+    "sentences",
+    "gap",
+    "gaps",
+    "space",
+    "distance",
+    "row",
+    "rows",
+    "column",
+    "columns",
+];
 
 /// Words allowed right after the counted noun or the quoted phrase: they
 /// join a new clause instead of qualifying the count.
@@ -974,6 +1022,59 @@ pub fn analyze(goal: &str) -> Extraction {
         })
     };
     for s in 0..n {
+        // "between N and M lines|words": inclusive, N <= M (sc#331).
+        if toks[s].word == "between" {
+            let w = |i: usize| toks.get(i).map(|t| t.word.as_str());
+            if let (Some(Num::Val(lo)), Some("and"), Some(Num::Val(hi)), Some(noun)) = (
+                w(s + 1).map(parse_num),
+                w(s + 2),
+                w(s + 3).map(parse_num),
+                w(s + 4),
+            ) {
+                let pair = match noun {
+                    "lines" | "line" => {
+                        Some((Requirement::MinLines(lo), Requirement::MaxLines(hi)))
+                    }
+                    "words" | "word" => {
+                        Some((Requirement::MinWords(lo), Requirement::MaxWords(hi)))
+                    }
+                    _ => None,
+                };
+                // Not about a part of the document ("each paragraph between ...",
+                // "the gap between ..."), and not approximate ("... lines or so",
+                // "roughly", "approximately", "give or take", "-ish").
+                // Anywhere earlier in the sentence: "every single long paragraph
+                // stays between ...", "its stanzas are between ...".
+                let part = s >= 1 && NOUNS.contains(&toks[s - 1].word.as_str())
+                    || toks[sentence_of(&toks, s).start..s].iter().any(|t| {
+                        let t = t.word.as_str();
+                        matches!(t, "each" | "every" | "per")
+                            || PART_NOUNS.contains(&t)
+                            || SECTION_NOUNS.contains(&t)
+                    });
+                let o = if w(s + 5) == Some("long") {
+                    s + 6
+                } else {
+                    s + 5
+                };
+                let or_so = (w(o) == Some("or") && w(o + 1) == Some("so"))
+                    || matches!(w(o), Some("roughly" | "approximately" | "ish"))
+                    || (w(o) == Some("give") && w(o + 1) == Some("or") && w(o + 2) == Some("take"));
+                if let Some((a, b)) = pair {
+                    if lo <= hi
+                        && !part
+                        && !or_so
+                        && !negated_before(&toks, s)
+                        && qualifier_ok(&toks, s + 4)
+                    {
+                        add(&mut counts, a);
+                        add(&mut counts, b);
+                        handled.extend(s..=s + 4);
+                    }
+                }
+            }
+            continue;
+        }
         // "N <noun> or more|fewer|less" and "N <noun> minimum|maximum".
         if let (Num::Val(v), Some(noun)) = (
             parse_num(&toks[s].word),
@@ -1034,7 +1135,17 @@ pub fn analyze(goal: &str) -> Extraction {
         let Num::Val(v) = parse_num(&numtok.word) else {
             continue;
         };
-        let j = i + 1;
+        let mut j = i + 1;
+        // "non-empty lines": line counts are over non-empty lines already (sc#331).
+        if toks
+            .get(j)
+            .is_some_and(|t| matches!(t.word.as_str(), "non-empty" | "nonempty" | "non-blank"))
+            && toks
+                .get(j + 1)
+                .is_some_and(|t| matches!(t.word.as_str(), "lines" | "line"))
+        {
+            j += 1;
+        }
         let Some(noun) = toks.get(j).map(|t| t.word.as_str()) else {
             continue;
         };
@@ -1254,14 +1365,63 @@ pub fn analyze(goal: &str) -> Extraction {
     // ---- section titles: "sections titled A, B and C", "sections: A, B and C" ----
     for k in 0..n {
         let w = toks[k].word.as_str();
-        let titled = matches!(w, "titled" | "named" | "called" | "entitled")
-            && k >= 1
-            && SECTION_NOUNS.contains(&toks[k - 1].word.as_str());
+        let tw = |i: usize| toks[i].word.as_str();
+        // "sections titled", and (sc#331, quoted titles only) "section is titled",
+        // "one section must|should|will|shall|can be titled".
+        let titled_at = if !matches!(w, "titled" | "named" | "called" | "entitled") || k < 1 {
+            None
+        } else if SECTION_NOUNS.contains(&tw(k - 1)) {
+            Some((k - 1, false))
+        } else if k >= 2 && matches!(tw(k - 1), "is" | "are") && SECTION_NOUNS.contains(&tw(k - 2))
+        {
+            Some((k - 2, true))
+        } else if k >= 3
+            && tw(k - 1) == "be"
+            && matches!(tw(k - 2), "must" | "should" | "will" | "shall" | "can")
+            && SECTION_NOUNS.contains(&tw(k - 3))
+        {
+            Some((k - 3, true))
+        } else {
+            None
+        };
+        let titled = titled_at.is_some();
         let colon = SECTION_NOUNS.contains(&w) && toks[k].raw.ends_with(':');
         if !titled && !colon {
             continue;
         }
-        let noun_at = if titled { k - 1 } else { k };
+        let noun_at = titled_at.map_or(k, |x| x.0);
+        let needs_quotes = titled_at.is_some_and(|x| x.1);
+        // The new forms are read only for one plain, unconditional title list:
+        // not "each|every|all|any section is titled", not "... if needed".
+        // The whole sentence is scanned, past commas and semicolons:
+        // "titled \"X\", unless ...", "If needed, one section ...".
+        // The quoted titles themselves ("When to Plant", "What If") are not hedges.
+        let title_bytes = {
+            let from = toks[k].end;
+            from..from + leading_quoted_items(list_region(goal, from)).1
+        };
+        let hedged = needs_quotes && {
+            (noun_at >= 1
+                && matches!(
+                    toks[noun_at - 1].word.as_str(),
+                    "each" | "every" | "all" | "any"
+                ))
+                || toks[sentence_of(&toks, noun_at)].iter().any(|t| {
+                    !title_bytes.contains(&t.start)
+                        && matches!(
+                            t.word.as_str(),
+                            "if" | "unless"
+                                | "optionally"
+                                | "optional"
+                                | "may"
+                                | "might"
+                                | "when"
+                                | "whenever"
+                                | "perhaps"
+                                | "maybe"
+                        )
+                })
+        };
         let declared_at = [1usize, 2].into_iter().find_map(|d| {
             let p = noun_at.checked_sub(d)?;
             matches!(parse_num(&toks[p].word), Num::Val(_)).then_some(p)
@@ -1288,6 +1448,8 @@ pub fn analyze(goal: &str) -> Extraction {
                 .iter()
                 .all(|t| !t.is_empty() && t.split_whitespace().count() <= 8)
             && (quoted_list || !titles.iter().any(|t| has_count_and_noun(t)))
+            && (quoted_list || !needs_quotes)
+            && !hedged
             && declared.is_none_or(|d| d == titles.len());
         if ok {
             let seen = match level {
@@ -1592,7 +1754,27 @@ pub fn analyze(goal: &str) -> Extraction {
             let looks_numeric = matches!(num_at, Some(Num::Val(_)) | Some(Num::Bad));
             let noun_near =
                 (i + 1..=i + reach).any(|j| after(j).is_some_and(|w| NOUNS.contains(&w)));
-            if looks_numeric && (noun_near || num_at == Some(Num::Bad)) {
+            // "under three sections titled A, B and C": a preposition before a
+            // count a recognizer already read (sc#331).
+            let organise = |m: usize| {
+                toks.get(m).is_some_and(|t| {
+                    matches!(
+                        t.word.as_str(),
+                        "organise"
+                            | "organize"
+                            | "structure"
+                            | "arrange"
+                            | "divide"
+                            | "group"
+                            | "split"
+                            | "sort"
+                    )
+                })
+            };
+            let under_read = toks[s].norm == "under"
+                && handled.contains(&i)
+                && ((s >= 1 && organise(s - 1)) || (s >= 2 && organise(s - 2)));
+            if looks_numeric && (noun_near || num_at == Some(Num::Bad)) && !under_read {
                 bad(&mut unsure, s, true);
                 continue;
             }

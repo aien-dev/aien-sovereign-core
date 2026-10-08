@@ -196,7 +196,7 @@ fn uncertain_spans_are_reported_not_dropped() {
         ("at most 3 paragraphs", "at most 3 paragraphs"),
         ("exactly 20 lines", "exactly 20 lines"),
         ("about 30 lines", "about 30 lines"),
-        ("between 10 and 20 lines", "between 10 and 20 lines"),
+        ("between 10 and 20 items", "between 10 and 20 items"),
         ("write **at least 20 lines**", "at least 20 lines"),
         ("at least 20 long lines", "at least 20 long lines"),
         ("do not write at least 20 lines", "at least 20 lines"),
