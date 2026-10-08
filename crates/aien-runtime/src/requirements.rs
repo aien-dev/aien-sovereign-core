@@ -59,16 +59,19 @@
 //! - heading text: the heading line without its `#` run, leading numbering
 //!   (`1.`, `2)`), emphasis marks and trailing `:.!?#`, trimmed, whitespace
 //!   collapsed, compared case-insensitively.
-//! - word form (topics): lowercase, strip ONE suffix of `ment ing ion age es
-//!   ed s` (only when 3 or more letters remain, 4 for `age`), then one trailing `e` (when
-//!   4 or more letters remain), then a final `i` becomes `y`, then a doubled
-//!   final consonant is undoubled (when 4 or more letters remain).
-//!   `preparing`, `prepare` and `prepared` agree; so do `dry`, `dried` and
-//!   `drying`, `label`, `labelled` and `labelling`, `store`, `stored` and
-//!   `storage` (sc#332); `publishing` and `public` do not. Irregular forms
-//!   (`withdrew` / `withdraw`) do not agree: the check errs on the side of
-//!   refusing, unless the goal names the form for that topic, written into
-//!   the topic as `withdraw (or withdrew)`.
+//! - word form (topics): lowercase, strip ONE suffix of `ment ing ion es ed
+//!   s` (only when 3 or more letters remain), then one trailing `e` (when 4
+//!   or more letters remain). `preparing`, `prepare` and `prepared` agree;
+//!   `publishing` and `public` do not. A word whose suffix was stripped also
+//!   matches with a final `i` as `y` and with a doubled final consonant
+//!   undoubled, so `dry`, `dried` and `drying`, `label`, `labelled` and
+//!   `labelling`, `run` and `running` agree (`fill` and `file`, `ski` and
+//!   `sky` do not). A topic word ending in `age` or `ages` also matches
+//!   without it when 4 letters remain: the topic `storage` is covered by
+//!   `store` or `stored` (sc#332). Irregular forms (`withdrew` / `withdraw`)
+//!   do not agree: the check errs on the side of refusing, unless the goal
+//!   names the form for that topic, written into the topic as `withdraw (or
+//!   withdrew)`.
 //! - sentence: a run of at least two words ended by `.`, `!` or `?` (not
 //!   inside a number such as `3.10`); an unfinished last fragment of at
 //!   least three words counts as one. List markers are ignored.
@@ -261,11 +264,12 @@ impl Requirement {
             Requirement::RequiredTopics(p) => {
                 let have: HashSet<String> = words_of(&prose_lines(content).join("\n"))
                     .iter()
-                    .map(|w| stem(w))
+                    .flat_map(|w| word_keys(w, false))
                     .collect();
+                let has = |w: &String| word_keys(w, true).iter().any(|k| have.contains(k));
                 let covered = |t: &str| {
                     let (topic, forms) = topic_forms(t);
-                    content_words(topic).iter().all(|w| have.contains(&stem(w)))
+                    content_words(topic).iter().all(has)
                         || forms.iter().any(|f| {
                             let f = words_of(f);
                             !f.is_empty() && f.iter().all(|w| have.contains(&stem(w)))
@@ -399,30 +403,56 @@ pub(crate) fn content_words(topic: &str) -> Vec<String> {
 
 /// Conservative word form (see the module docs).
 pub(crate) fn stem(w: &str) -> String {
+    stem_parts(w).0
+}
+
+/// The word form and whether a suffix was stripped.
+fn stem_parts(w: &str) -> (String, bool) {
     let mut s = w.to_lowercase();
-    for suf in ["ment", "ing", "ion", "age", "es", "ed", "s"] {
-        // `age` keeps 4 letters, so `manage` stays `manag` (as `management`).
-        let keep = if suf == "age" { 4 } else { 3 };
-        if s.len() >= suf.len() + keep && s.ends_with(suf) {
+    let mut stripped = false;
+    for suf in ["ment", "ing", "ion", "es", "ed", "s"] {
+        if s.len() >= suf.len() + 3 && s.ends_with(suf) {
             s.truncate(s.len() - suf.len());
+            stripped = true;
             break;
         }
     }
     if s.len() >= 4 && s.ends_with('e') {
         s.pop();
     }
-    if s.len() >= 3 && s.ends_with('i') {
-        s.pop();
-        s.push('y');
-    }
-    let b = s.as_bytes();
-    if b.len() >= 4 {
-        let (x, y) = (b[b.len() - 1], b[b.len() - 2]);
-        if x == y && x.is_ascii_alphabetic() && !b"aeiou".contains(&x) {
-            s.pop();
+    (s, stripped)
+}
+
+/// The forms a word may match as (see the module docs): its word form and,
+/// only when a suffix was stripped, that form with a final `i` as `y`
+/// (`dried`: `dry`) or a doubled final consonant undoubled (`labelled`:
+/// `label`). A topic word also matches without a final `age` or `ages` when 4
+/// letters remain (`storage`: `stor`, as `store`) (sc#332).
+pub(crate) fn word_keys(w: &str, topic: bool) -> Vec<String> {
+    let (s, stripped) = stem_parts(w);
+    let mut keys = vec![s.clone()];
+    if stripped {
+        if let Some(r) = s.strip_suffix('i') {
+            keys.push(format!("{r}y"));
+        }
+        let b = s.as_bytes();
+        if b.len() >= 4 {
+            let (x, y) = (b[b.len() - 1], b[b.len() - 2]);
+            if x == y && x.is_ascii_alphabetic() && !b"aeiou".contains(&x) {
+                keys.push(s[..s.len() - 1].to_string());
+            }
         }
     }
-    s
+    if topic {
+        let low = w.to_lowercase();
+        for suf in ["ages", "age"] {
+            if let Some(r) = low.strip_suffix(suf).filter(|r| r.len() >= 4) {
+                keys.push(stem(r));
+                break;
+            }
+        }
+    }
+    keys
 }
 
 /// A topic and the extra forms the goal named for it: `withdraw (or withdrew,

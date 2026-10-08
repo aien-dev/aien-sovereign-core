@@ -84,7 +84,7 @@
 //!   trailing `and` splits the LAST comma item (`Who to ask and Glossary`),
 //!   so a title that itself contains `and` is only safe inside the list.
 
-use crate::requirements::{content_words, stem, topic_forms, ItemKind, Requirement};
+use crate::requirements::{content_words, topic_forms, word_keys, ItemKind, Requirement};
 
 /// What a goal says: recognized requirements and the spans it could not read.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -817,16 +817,16 @@ fn split_list(region: &str) -> Vec<String> {
 
 /// A list region cut after the item that follows its closing "and" or "or":
 /// "interest, deposit, withdraw and balance, and the file needs" is
-/// "interest, deposit, withdraw and balance".
-fn closed_list(region: &str) -> &str {
+/// "interest, deposit, withdraw and balance". None when that last item holds
+/// another "and" or "or" ("labelling and storage and disposal").
+fn closed_list(region: &str) -> Option<&str> {
     let low = region.to_ascii_lowercase();
     let Some(join) = [" and ", " or "].iter().filter_map(|j| low.find(j)).min() else {
-        return region;
+        return Some(region);
     };
-    match region[join..].find(',') {
-        Some(c) => &region[..join + c],
-        None => region,
-    }
+    let end = region[join..].find(',').map_or(region.len(), |c| join + c);
+    let last = &low[join + 4..end];
+    (!last.contains(" and ") && !last.contains(" or ")).then_some(&region[..end])
 }
 
 /// `(position, forms)` for each "<form> or <form> for the first|second|...|
@@ -840,7 +840,10 @@ fn positional_forms(goal: &str, len: usize) -> Vec<(usize, Vec<String>)> {
     let mut out = Vec::new();
     for sentence in goal.split_inclusive(['.', '!', '?']) {
         let low = sentence.to_ascii_lowercase();
-        if !low.contains(" form") {
+        if !low
+            .split(|c: char| !c.is_ascii_alphabetic())
+            .any(|w| matches!(w, "form" | "forms"))
+        {
             continue;
         }
         let Some(cue) = ["for example", "for instance", "such as", "e.g."]
@@ -1281,9 +1284,10 @@ pub fn analyze(goal: &str) -> Extraction {
                 Num::Val(v) => Some(v),
                 _ => None,
             };
-            let region = closed_list(list_region(goal, toks[k + 2].end));
+            let region = closed_list(list_region(goal, toks[k + 2].end)).unwrap_or("");
             let items: Vec<String> = split_list(region).iter().map(|t| trim_title(t)).collect();
-            let ok = declared == Some(items.len())
+            let ok = !region.is_empty()
+                && declared == Some(items.len())
                 && !negated_before(&toks, k)
                 && items.len() <= 12
                 && !items.iter().any(|t| has_count_and_noun(t))
@@ -1345,12 +1349,18 @@ pub fn analyze(goal: &str) -> Extraction {
         for (at, forms) in positional_forms(goal, counted_topics.len()) {
             let i = counted_topics[at];
             let (topic, _) = topic_forms(&topics[i]);
-            let topic_stems: Vec<String> = content_words(topic).iter().map(|w| stem(w)).collect();
+            let words = content_words(topic);
+            // Only a form of this topic: one word, the topic one word, the same
+            // first three letters, and not already matched by the word-form rule.
+            let [word] = words.as_slice() else {
+                continue;
+            };
+            let keys = word_keys(word, true);
             let extra: Vec<String> = forms
                 .into_iter()
                 .filter(|f| {
-                    let fs: Vec<String> = content_words(f).iter().map(|w| stem(w)).collect();
-                    fs != topic_stems
+                    f.get(..3).is_some_and(|p| word.starts_with(p))
+                        && !word_keys(f, false).iter().any(|k| keys.contains(k))
                 })
                 .collect();
             if !extra.is_empty() {

@@ -67,6 +67,13 @@ fn the_forms_the_goals_accept_cover_their_topics() {
         ("running", "Run every day."),
         ("addressing", "Write the address."),
         ("stories", "Tell a story."),
+        // sc#347 review: plurals of -age words still agree
+        ("messages", "Read the message."),
+        ("message", "Read the messages."),
+        ("storages", "Check the storage."),
+        ("languages", "One language."),
+        ("average", "Two averages."),
+        ("fill", "The cup is filled."),
     ] {
         let r = [RequiredTopics(vec![topic.to_string()])];
         assert!(refusal_reason(&r, text).is_none(), "{topic}: {text}");
@@ -80,6 +87,12 @@ fn other_words_still_do_not_cover_a_topic() {
         ("storage", "Stop here."),
         ("labelling", "Lab work is fun."),
         ("manage", "One man went."),
+        // sc#347 review: unrelated words do not collide
+        ("file", "Fill the cup."),
+        ("mile", "The mill turns."),
+        ("tale", "A tall tree."),
+        ("ski", "The sky is blue."),
+        ("pack", "A package came."),
         ("storage", "A story."),
         // an irregular form counts only when the goal names it
         ("withdraw", "She withdrew fifty pounds."),
@@ -100,6 +113,9 @@ fn counted_topic_near_misses_stay_uncertain() {
         "Do not cover three topics: drying, labelling and storage.",
         // a list item that is not a topic
         "Cover two topics: drying and at least 3 lines.",
+        // sc#347 review: the last item runs on
+        "Cover three topics: drying, labelling and storage and disposal.",
+        "Cover three topics: drying, labelling and storage and write at least 20 lines.",
     ] {
         let ex = analyze(goal);
         assert!(
@@ -107,5 +123,17 @@ fn counted_topic_near_misses_stay_uncertain() {
             "{goal:?} should stay uncertain, got {:?}",
             ex.requirements
         );
+    }
+}
+
+#[test]
+fn forms_are_read_only_when_tied_to_their_topic() {
+    // A sentence that is not about word forms, or a form that is not one of
+    // the topic's, adds nothing.
+    for goal in [
+        "Cover three topics: drying, labelling and storage. In the final format, for example sold or bought for the first one.",
+        "Cover three topics: drying, labelling and storage. Any form is fine, for example sold or bought for the first one.",
+    ] {
+        assert_eq!(topics(&reqs(goal)), ["drying", "labelling", "storage"], "{goal}");
     }
 }
