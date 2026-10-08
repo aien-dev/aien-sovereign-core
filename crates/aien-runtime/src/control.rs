@@ -881,11 +881,17 @@ pub struct AllenRefusalReport {
 /// Which memory a task saw (arch#159). `state`: `not_requested` (no context
 /// was given, nothing included), `not_engaged`, `included` (`items_included`
 /// notes for exactly `context`) or `refused` (store damaged or foreign: the
-/// task ran with no memory, `reason` says why).
+/// task ran with no memory, `reason` says why). `items_omitted` notes were left
+/// out by the count/byte bound; `items_unresolved` notes in the context could
+/// not be read (key missing) and were not shown to the model.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MemoryReport {
     pub context: Option<String>,
     pub items_included: usize,
+    #[serde(default)]
+    pub items_omitted: usize,
+    #[serde(default)]
+    pub items_unresolved: usize,
     pub state: String,
     #[serde(default)]
     pub reason: Option<String>,

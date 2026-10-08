@@ -577,6 +577,24 @@ fn recall_is_bounded() {
     assert!(b.len() < 4096 + 1024, "{}", b.len());
 }
 
+/// Quoting expands a control character to six bytes; the rendered block stays
+/// under its own cap and the report counts what was left out.
+#[test]
+fn rendered_block_is_bounded_and_cuts_are_reported() {
+    let rig = rig("mem-render-bound");
+    let s = state(&rig);
+    for _ in 0..12 {
+        put(&s, "work", &"\u{1}".repeat(300));
+    }
+    let (b, rep) = block(&s, Some("work"));
+    let b = b.unwrap();
+    assert!(b.len() <= 8192, "{}", b.len());
+    assert!(b.ends_with("End of saved notes.\n"));
+    assert!(rep.items_omitted > 0, "{rep:?}");
+    assert_eq!(rep.items_included, b.matches("\n- ").count());
+    assert!(rep.reason.as_deref().unwrap().contains("left out"), "{rep:?}");
+}
+
 /// Structural: the only code that can change the store is `handle_command`;
 /// scopes are parsed only from command fields; nothing else in the runtime
 /// even names the memory crate.
