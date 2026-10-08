@@ -1415,11 +1415,13 @@ pub fn authorize(
         }
         let prior = held.sha256()?;
         for &gid in l.minted_by_commit.get(&c.id).into_iter().flatten() {
-            if l.revoked.contains_key(&gid) || l.stops.iter().any(|&s| s > gid) {
-                continue;
-            }
             let g = &l.grants[&gid];
+            // The spent intent is judged FIRST: a revoke or a stop after the grant
+            // never undoes a DONE effect, nor settles an intent that may still
+            // land. Only an unspent revoked or stopped grant gives way.
+            let dead = l.revoked.contains_key(&gid) || l.stops.iter().any(|&s| s > gid);
             match l.spent.get(&gid).map(|i| &l.intents[i]) {
+                None if dead => continue,
                 // Settled: the grant is spent for good (a new effect needs a
                 // new grant, as before).
                 Some(row) if row.state == EffectState::Done => {
