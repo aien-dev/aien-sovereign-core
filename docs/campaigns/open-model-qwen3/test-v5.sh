@@ -92,8 +92,8 @@ chk "ACCEPTANCE-v5.md has the task row of every positive launch (the format make
   while IFS= read -r row; do grep -Fqx -- "$row" "$A" || { echo "missing row: ${row:0:40}"; exit 1; }; done < <(jq -r ".tasks[] | select(.kind != \"negative-boundary\" and .kind != \"negative-budget\") | \"| \(.id) | \`\(.goal)\` | \`\(.destination)\` | \(.phrases | map(\"\`\" + . + \"\`\") | join(\", \")) |\"" "$TASKS")'
 chk "ACCEPTANCE-v5.md has the N1 and N2 goals" 'grep -Fq -- "N1 goal (declared negative, not a Q2 row): \`$(jq -r ".tasks[]|select(.id==\"N1\")|.goal" "$TASKS")\`" "$A" && grep -Fq -- "N2 goal (declared negative, not a Q2 row): \`$(jq -r ".tasks[]|select(.id==\"N2\")|.goal" "$TASKS")\`" "$A"'
 chk "frozen-v5.json: the model digest is index+shards and is the manifest of the listed sha256s (not re-hashed)" '
-  m=$(jq -r ".model | \"index \(.index_sha256)\n\" + (.shards|map(\"\(.[0]) \(.[1])\")|join(\"\n\"))" "$FROZEN")
-  [ "$(jq -r .model.model_digest_kind "$FROZEN")" = index+shards ] && [ "$(jq -r .model.model_sha256 "$FROZEN")" = 17a78fbba447a4e66a3d886c0998fbcf2f9201d46e5e0c5bfec2d57c975976b7 ] &&
+  m=$(jq -j ".model | \"aien-checkpoint-digest v1\nindex \(.index_sha256)\n\" + (.shards | sort_by(.[0]) | map(\"\(.[1])  \(.[0])\n\") | join(\"\"))" "$FROZEN" | sha256sum | cut -d" " -f1)
+  [ "$m" = "$(jq -r .model.model_sha256 "$FROZEN")" ] && [ "$(jq -r .model.model_digest_kind "$FROZEN")" = index+shards ] && [ "$(jq -r .model.model_sha256 "$FROZEN")" = 17a78fbba447a4e66a3d886c0998fbcf2f9201d46e5e0c5bfec2d57c975976b7 ] &&
   [ "$(jq -r .model.index_sha256 "$FROZEN")" = d6c42883a895dfef5b0080ed2116a1bcd764f558406b98923d675978a1abf29c ] && [ "$(jq ".model.shards|length" "$FROZEN")" = 3 ] &&
   grep -q "NOT RE-HASHED" <<<"$(jq -r .model.model_sha256_note "$FROZEN")"'
 chk "frozen-v5.json: the eight pins are the placeholder in this draft" '[ "$(jq -r ".placeholder as \$p|[.pins[]|select(. == \$p)]|length" "$FROZEN")" = 8 ]'
@@ -350,6 +350,9 @@ n1red no-pre-recall   'rm steps/pre-restart-recall.json' RH
 n1red op-report-bad   'printf "%s\n" "OP_REPORT native=[] reference=[rmsnorm] native_fallbacks=[] reference_runs=[rmsnorm:1] backend=ReferenceCpuBackend" >>daemon-1.log' OPR
 n1red cpu-start       'printf "%s\n" "  STRICT strict=true dev_fallback_build=false require_checkpoint=true backend=ReferenceCpuBackend" >daemon-2.log' OPR
 n1red no-launch-rec   'rm ../n1-no-launch-rec.launch-v5.json' PIN MEAS
+# sc#353 review: a step record with no exit code is not a non-zero exit, and a missing S8 recall is not "no record"
+n1red rc-absent       'jqi run.json ".steps |= map(del(.rc))"' NR RC
+n1red s8-missing      'rm steps/S8.json' NM RH
 
 # ---- N2 (negative-budget): a token-limit cut, nothing committed, the model was asked
 mk_n2() {

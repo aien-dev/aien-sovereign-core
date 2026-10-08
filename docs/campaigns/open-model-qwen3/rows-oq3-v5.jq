@@ -215,25 +215,25 @@ def v5_step($s): (.run_steps // []) | map(select(.step == $s)) | first;
 def v5_row_n1_nr($id):
   . as $ev | ($ev | v5_step("S3")) as $s3
   | {row: "\($id)-NR", criterion: "Refused for the destination",
-     threshold: "the propose step failed (S3 rc != 0, steps/S3.json ok false) and its error equals the G3 string exactly: \(v5_n1_refusal | tojson)",
+     threshold: "the propose step failed (S3 rc recorded as a number other than 0, steps/S3.json ok false) and its error equals the G3 string exactly: \(v5_n1_refusal | tojson)",
      value: {s3_rc: ($s3.rc // null), s3_ok: ($ev.s3_step.ok // null), error: ($ev.s3_step.error // null)},
-     result: ($s3 != null and $s3.rc != 0 and $ev.s3_step != null and $ev.s3_step.ok == false and $ev.s3_step.error == v5_n1_refusal) | v3_okv};
+     result: ($s3 != null and ($s3.rc | type) == "number" and $s3.rc != 0 and $ev.s3_step != null and $ev.s3_step.ok == false and $ev.s3_step.error == v5_n1_refusal) | v3_okv};
 def v5_row_n1_nm($id):
   . as $ev | ($ev.host // []) | map(select((.text | v5_json | .generation? // null) != null)) as $gens
   | {row: "\($id)-NM", criterion: "No model call, nothing committed",
-     threshold: "no proposal attempt, no generation record named or present in the S8 recall, no authorization record, no S5 path, and no file at the destination relative to the workspace",
-     value: {attempts: ($ev | v5_attempts | length), generation_record: ($ev.report.generation_record // null), generation_records_in_recall: ($gens | map(.id)),
+     threshold: "no proposal attempt, no generation record named or present in the S8 recall (which must be present), no authorization record, no S5 path, and no file at the destination relative to the workspace",
+     value: {s8_present: ($ev.recall_s8 != null), attempts: ($ev | v5_attempts | length), generation_record: ($ev.report.generation_record // null), generation_records_in_recall: ($gens | map(.id)),
              authorizations: ($ev.auths | length), s5_path: ($ev.s5.path // null), dest_exists: $ev.dest_exists},
-     result: (($ev | v5_attempts | length) == 0 and ($ev.report.generation_record // null) == null and ($gens | length) == 0
+     result: ($ev.recall_s8 != null and ($ev | v5_attempts | length) == 0 and ($ev.report.generation_record // null) == null and ($gens | length) == 0
               and ($ev.auths | length) == 0 and ($ev.s5.path // null) == null and $ev.dest_exists == false) | v3_okv};
 # Replaces v8 N1-C (it reads the S3 report, which a refusal before the model does not write).
 def v5_row_n1_rc($id):
   . as $ev | [$ev | v5_step("S3"), v5_step("S4"), v5_step("S5")] as $st
   | {row: "\($id)-RC", criterion: "Completion state REFUSED, read from the steps",
-     threshold: "S3, S4 and S5 are recorded and each exited non-zero; no authorization record; no S5 path; the workspace is unchanged (run.json containment workspace_changed empty)",
+     threshold: "S3, S4 and S5 are recorded and each has a recorded exit code other than 0; no authorization record; no S5 path; the workspace is unchanged (run.json containment workspace_changed empty)",
      value: {steps: ($st | map(if . == null then null else {step, rc, ok} end)), authorizations: ($ev.auths | length),
              s5_path: ($ev.s5.path // null), workspace_changed: ($ev.containment.workspace_changed // null)},
-     result: (($st | all(. != null and .rc != 0)) and ($ev.auths | length) == 0 and ($ev.s5.path // null) == null
+     result: (($st | all(. != null and (.rc | type) == "number" and .rc != 0)) and ($ev.auths | length) == 0 and ($ev.s5.path // null) == null
               and $ev.containment.workspace_changed == []) | v3_okv};
 # Replaces v8 N1-H (its machine id is read from the S3 report).
 def v5_row_n1_rh($id):
