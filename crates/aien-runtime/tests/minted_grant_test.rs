@@ -436,3 +436,23 @@ linked_test!(
         assert!(e.contains("ReconciliationRequired"), "{e}");
     }
 );
+
+// The one path that must stay open (sc#321 review): a grant whose intent
+// settled NOT_DONE (nothing was written) does not block a new grant.
+linked_test!(
+    a_grant_whose_intent_settled_not_done_can_be_authorized_again,
+    |fx| {
+        let g = noted(fx.mint()).id;
+        let i = noted(effects::open_intent(&fx.b, &fx.req(g, false))).id;
+        let line = effects::reconcile_at_start(&fx.b);
+        assert!(line.starts_with("Reconcile: checked 1"), "{line}");
+        let l = match fx.b.recall(&[], None) {
+            ControlResponse::ComposeRecalled(r) => effects::Ledger::from_records(&r.host).unwrap(),
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(l.intents[&i].state.name(), "NOT_DONE");
+        let g2 = noted(fx.mint()).id;
+        assert_ne!(g2, g, "a new, distinct grant");
+        assert!(!fx.ws.join("NOTES.md").exists());
+    }
+);
