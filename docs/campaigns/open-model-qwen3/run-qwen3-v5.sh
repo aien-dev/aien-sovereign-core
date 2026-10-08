@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # OPEN-MODEL-QWEN3 v5 campaign (ACCEPTANCE-v5.md; DRAFT, NOT FROZEN, NOT RUN). It refuses a real run while any pin
-# in frozen-v5.json holds the placeholder, and afterwards unless every pin read from the checkouts and binaries equals
-# it. Qwen3-4B, derived from run-qwen3-v4.sh: same driver (next-phase-1/run-campaign.sh), receipt builder, v8 rows and
+# in frozen-v5.json holds the placeholder or its status does not say FROZEN, and afterwards unless every pin read
+# from the checkouts and binaries equals it. Qwen3-4B, derived from run-qwen3-v4.sh: same driver (next-phase-1/run-campaign.sh), receipt builder, v8 rows and
 # scorer; new tasks (tasks-oq3-v5.json), one declaration (qualification) and extra rows (v5-rows.sh, rows-oq3-v5.jq).
 # Shell + jq only. Run inside the caller's hold, one part per hold. Environment as in ACCEPTANCE-v5 Section 7
 # (model, tokenizer, binary, KV context, hardware requirement, checkpoint requirement, declared attempt flag), then:
@@ -39,6 +39,9 @@ else
   fi
   [ "$(jq --arg p "$PLACEHOLDER" '[.pins[] | select(. == $p)] | length' "$FROZEN")" = 0 ] ||
     { echo "run-qwen3-v5: the build pins are not frozen yet (frozen-v5.json, ACCEPTANCE-v5 Section 7)" >&2; exit 2; }
+  # Filled pins are not a freeze: a draft freeze-fill change fills them first. The status line changes only at G8.
+  case "$(jq -r .status "$FROZEN")" in FROZEN*) ;; *)
+    echo "run-qwen3-v5: frozen-v5.json status is not FROZEN (ACCEPTANCE-v5 Section 9, gate G8)" >&2; exit 2 ;; esac
 fi
 DECL=$HERE/../scoring/declarations/oq3-v5.decl.json
 SCORER=$HERE/../scoring/score-rows.sh

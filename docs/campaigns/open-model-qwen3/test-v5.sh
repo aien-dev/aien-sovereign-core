@@ -397,6 +397,15 @@ if [ -e "$PINNED" ]; then bad "pinned run path already exists, wrapper checks sk
   chk "wrapper refuses part 5 (exit 2)" '[ "$(wr "$T/b" OQ3_PART=5)" = 2 ]'
   chk "wrapper refuses a run base other than the pinned path (exit 2), nothing created" '[ "$(wr "$T/b" OQ3_PART=1 "${okenv[@]}")" = 2 ] && [ ! -e "$T/b" ]'
   chk "wrapper refuses a real run while the pins are the placeholder (exit 2), pinned path not created" '[ "$(wr "$PINNED" OQ3_PART=1 "${okenv[@]}")" = 2 ] && [ ! -e "$PINNED" ] && grep -q "not frozen" "$T/w.err"'
+  # Filled pins alone do not make a real run: the status line must say FROZEN too (a draft freeze-fill PR fills the pins).
+  WC=$T/wcopy/oq3; mkdir -p "$WC" "$T/wcopy/next-phase-1"; cp "$W" "$WC/run-qwen3-v5.sh"
+  jq --argjson p "$PINS" '.pins = $p' "$FROZEN" >"$WC/frozen-v5.json"
+  wrc() { local b=$1; shift; "${base[@]}" "$@" bash "$WC/run-qwen3-v5.sh" "$b" "$T/out" "$T" "$T" "$T/x" "$T/x" >/dev/null 2>"$T/w.err"; echo $?; }
+  chk "wrapper refuses a real run with every pin filled while the status is not FROZEN (exit 2), pinned path not created" '
+    [ "$(wrc "$PINNED" OQ3_PART=1 "${okenv[@]}")" = 2 ] && [ ! -e "$PINNED" ] && grep -q "status is not FROZEN" "$T/w.err"'
+  chk "wrapper passes the status check once the pins are filled and the status says FROZEN (stops later, pinned path not created)" '
+    jq ".status = \"FROZEN (test copy)\"" "$WC/frozen-v5.json" >"$WC/f.tmp" && mv "$WC/f.tmp" "$WC/frozen-v5.json"
+    [ "$(wrc "$PINNED" OQ3_PART=1 "${okenv[@]}")" = 2 ] && [ ! -e "$PINNED" ] && ! grep -q "status is not FROZEN" "$T/w.err" && grep -q "declaration, scorer" "$T/w.err"'
   chk "wrapper refuses changed dry-run task shape (exit 2)" '
     jq ".tasks[0].max_tokens = 512" "$TASKS" >"$T/dry-bad.json"
     [ "$(wr "$T/b" OQ3_PART=1 OQ3_DRY_TASKS="$T/dry-bad.json" "${okenv[@]}")" = 2 ] && [ ! -e "$T/b" ]'
