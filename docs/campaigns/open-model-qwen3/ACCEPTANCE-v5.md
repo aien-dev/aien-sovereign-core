@@ -78,21 +78,24 @@ for every launch; the retired `AIEN_COMPOSE_BUDGET_MS` must be unset.
 | N2 | declared negative: budget exhaustion | 16 | 120 s | none | REFUSED, token limit |
 | R1 | token-identity replay against the CPU reference; one sentence | 96 | 120 s | none | DONE |
 
-Goals (exact text given to the driver; written by the independent author, unchanged):
+Task rows in the format the inherited Q2 check reads (`make-receipt.sh` builds this exact line from the task file and requires it
+verbatim in the acceptance file; generated from `tasks-oq3-v5.json` with the same jq). Phrases are matched as case-insensitive
+substrings after whitespace is collapsed (`rows-v5.jq`, Q2), so `shoulder` matches "shoulders" and `saving` matches "savings".
 
-| id | goal | destination |
-|----|------|-------------|
-| D1 | `Please create the file docs/knife-sharpening.md, a short how-to guide on sharpening a kitchen knife by hand. It should have at least 22 non-empty lines and three sections titled "Gather Your Tools", "Sharpen the Edge" and "Test and Store". Make sure the words whetstone and angle both appear somewhere in it.` | `docs/knife-sharpening.md` |
-| D2 | `I need a technical how-to saved as docs/rename-photos.md that shows how to rename a folder of holiday photos with a bash loop. Write at least 18 lines in total and include 3 fenced code examples, where each example is introduced by its own section titled "Example One: Date Prefix", "Example Two: Lowercase Names" and "Example Three: Number the Files" in that order. After the last code example, add a final section titled "Wrap Up" containing at least 12 words of plain text and no code.` | `docs/rename-photos.md` |
-| D3 | `Write an explainer for beginners called docs/savings-basics.md about how a savings account works. It must cover four topics: interest, deposit, withdraw and balance, and the file needs at least 18 lines. A topic counts as covered when its word or another form of that word appears, for example interests or interested for the first one, deposits or deposited for the second, withdrew or withdrawing for the third, and balances or balancing for the last.` | `docs/savings-basics.md` |
-| D4 | `There is a file at notes/choir-rehearsal.txt with my rough notes from choir practice. Please create a new file called docs/choir-summary.md that summarises it, and leave the original alone. The summary needs at least 13 lines, two sections titled "Key Points" and "Next Steps", and must mention Marta, Owen and Priya by name.` | `docs/choir-summary.md` |
-| D5 | `Make me a carry-on packing checklist in docs/packing-carry-on.md. Keep it between 16 and 30 lines long. Every item must be its own line starting with "- [ ]" and I want at least 12 of those items. Organise it under three sections titled "Documents", "Clothes" and "Electronics", and be sure the words passport and charger show up.` | `docs/packing-carry-on.md` |
-| D6 | `Please write a warm, longer essay about adopting a rescue cat and save it as docs/rescue-cat-essay.md. It should run to at least 7 paragraphs, and one section must be titled "Bringing Her Home".` | `docs/rescue-cat-essay.md` |
-| E1 | `In the existing file repairs/tap-repair.md, add the bullet line "- Thread seal tape for the spout" under the section called "Parts" and leave everything else as it is.` | `repairs/tap-repair.md` |
-| E2 | `Open crafts/yarn/scarf.md and put one more numbered item, "4. Cast off loosely and weave in the ends.", at the end of the list under the heading "Steps". Don't change the other sections.` | `crafts/yarn/scarf.md` |
-| N1 | `Create a file at ../shared-stuff/reminder.txt containing just one line that says "Renew the library card on Friday."` | refused |
-| N2 | `I would like a long, detailed history of the marathon as a race, from the legend of ancient Greece to modern city events, saved as docs/marathon-story.md. Please make it at least twelve paragraphs long.` | refused |
-| R1 | `Save a one-sentence reminder about stretching the shoulders before swimming into notes/swim-tip.txt.` | `notes/swim-tip.txt` |
+| id | goal (exact text given to the driver; written by the independent author, unchanged) | requested destination | required phrases (all) |
+|----|------|------|------|
+| D1 | `Please create the file docs/knife-sharpening.md, a short how-to guide on sharpening a kitchen knife by hand. It should have at least 22 non-empty lines and three sections titled "Gather Your Tools", "Sharpen the Edge" and "Test and Store". Make sure the words whetstone and angle both appear somewhere in it.` | `docs/knife-sharpening.md` | `Gather Your Tools`, `Sharpen the Edge`, `Test and Store`, `whetstone`, `angle` |
+| D2 | `I need a technical how-to saved as docs/rename-photos.md that shows how to rename a folder of holiday photos with a bash loop. Write at least 18 lines in total and include 3 fenced code examples, where each example is introduced by its own section titled "Example One: Date Prefix", "Example Two: Lowercase Names" and "Example Three: Number the Files" in that order. After the last code example, add a final section titled "Wrap Up" containing at least 12 words of plain text and no code.` | `docs/rename-photos.md` | `Example One: Date Prefix`, `Example Two: Lowercase Names`, `Example Three: Number the Files`, `Wrap Up` |
+| D3 | `Write an explainer for beginners called docs/savings-basics.md about how a savings account works. It must cover four topics: interest, deposit, withdraw and balance, and the file needs at least 18 lines. A topic counts as covered when its word or another form of that word appears, for example interests or interested for the first one, deposits or deposited for the second, withdrew or withdrawing for the third, and balances or balancing for the last.` | `docs/savings-basics.md` | `saving` |
+| D4 | `There is a file at notes/choir-rehearsal.txt with my rough notes from choir practice. Please create a new file called docs/choir-summary.md that summarises it, and leave the original alone. The summary needs at least 13 lines, two sections titled "Key Points" and "Next Steps", and must mention Marta, Owen and Priya by name.` | `docs/choir-summary.md` | `Key Points`, `Next Steps` |
+| D5 | `Make me a carry-on packing checklist in docs/packing-carry-on.md. Keep it between 16 and 30 lines long. Every item must be its own line starting with "- [ ]" and I want at least 12 of those items. Organise it under three sections titled "Documents", "Clothes" and "Electronics", and be sure the words passport and charger show up.` | `docs/packing-carry-on.md` | `- [ ]`, `Documents`, `Clothes`, `Electronics`, `passport`, `charger` |
+| D6 | `Please write a warm, longer essay about adopting a rescue cat and save it as docs/rescue-cat-essay.md. It should run to at least 7 paragraphs, and one section must be titled "Bringing Her Home".` | `docs/rescue-cat-essay.md` | `Bringing Her Home` |
+| E1 | `In the existing file repairs/tap-repair.md, add the bullet line "- Thread seal tape for the spout" under the section called "Parts" and leave everything else as it is.` | `repairs/tap-repair.md` | `- Thread seal tape for the spout` |
+| E2 | `Open crafts/yarn/scarf.md and put one more numbered item, "4. Cast off loosely and weave in the ends.", at the end of the list under the heading "Steps". Don't change the other sections.` | `crafts/yarn/scarf.md` | `4. Cast off loosely and weave in the ends.` |
+| R1 | `Save a one-sentence reminder about stretching the shoulders before swimming into notes/swim-tip.txt.` | `notes/swim-tip.txt` | `shoulder` |
+
+N1 goal (declared negative, not a Q2 row): `Create a file at ../shared-stuff/reminder.txt containing just one line that says "Renew the library card on Friday."`
+N2 goal (declared negative, not a Q2 row): `I would like a long, detailed history of the marathon as a race, from the legend of ancient Greece to modern city events, saved as docs/marathon-story.md. Please make it at least twelve paragraphs long.`
 
 Seeds (each edit seed has three level-two headings; the D4 source names the three people):
 
@@ -157,7 +160,7 @@ not separate rows: "no code" in Wrap Up holds by construction for fenced code (R
 block), and inline backticks are not scored; "its own section" for each example is not scored beyond RQ3 and RQ5 (which section
 holds a block is not scored, as in v4).
 
-### 3.3 Inherited rows, none weakened
+### 3.3 Inherited rows: none weakened; one declared exception for N1, other N1 rows confirmed at gate G3
 
 `rows-v8.jq`, `rows-v5.jq` and `rows-oq3-v3.jq` run unchanged; the v4 rows of ACCEPTANCE-v4 Section 3 are computed by the v4 row
 module unchanged (`rows-oq3-v4.jq`): `<id>-SB` saved bytes equal approved bytes, `<id>-F` complete document saved, `<id>-CUT`
@@ -322,7 +325,7 @@ changed to pass a gate.**
 - **G2 Topic forms.** The product's topic check accepts every accepted form of Section 3.1 for its topic (the
   `topic-forms-probe` re-run with the D3 forms; sc#332).
 - **G3 N1 reason.** On the frozen commit a stub-build run of N1 through the driver is refused before any model call with the
-  reason of `N1-NR`; the file and field the error lands in are recorded and copied into `N1-NR`; each inherited N1 row is run
+  reason of `N1-NR`; the exact error string (verbatim) and the file and field it lands in are recorded in `evidence-v5/` and copied into `N1-NR`; each inherited N1 row is run
   on that output and any that cannot read it is listed and replaced as Section 3.3 says (sc#336 keeps the order tested).
 - **G4 Fallback evidence.** sc#337 merged; a stub-build daemon prints the start line; the line format is copied into Section 3.4
   and `rows-oq3-v5.jq`.
@@ -368,7 +371,7 @@ qualification PASS: a few percent. A FAIL is the expected and acceptable outcome
   product fixes on fresh wording of the same kinds. The spec author (session fb5693) read `requirements.rs`,
   `requirements_extract.rs` and `spine.rs` while finding the causes of the v4 refusals, and therefore did not write or edit any
   goal. Post-authoring changes: the two topic-form changes of Section 3.1, the `phrases` of D3, E1, E2 and R1 (each a substring
-  of its goal), and D2's `heading_order` requirement (the goal's own words "in that order", added after the draft review). None
+  of its goal), all made before any probe of their effect and before any run, and D2's `heading_order` requirement (the goal's own words "in that order", added after the draft review, also before any run). None
   changes a goal.
 - **Probes.** Both probes are throwaway examples calling the public functions on an unmodified checkout. Their sources are
   committed as `evidence-v5/probes/*.rs.txt`; the requirement probe's sha256 equals the one in its evidence header. The draft
