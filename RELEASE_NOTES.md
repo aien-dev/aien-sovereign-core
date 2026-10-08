@@ -1,6 +1,8 @@
 # AIEN Sovereign Core v0.1.0 Release Notes
 
-Initial production release of the AIEN Sovereign Native Systems Architecture, establishing a pure compiled runtime for autonomous AI systems across dedicated silicon.
+**Status (Drake decision, 2026-10-08): v0.1.0 and v0.1.1 are internal test releases, not public releases.** v0.1.0 carries only `SHA256SUMS.txt` (no signature). v0.1.1 is signed with the old release-signing key (checked 2026-10-08: `ssh-keygen -Y verify` against `docs/release/allowed_signers` gives a good `aien-release` signature), which is not the dedicated offline key a public release requires. See `docs/release/RELEASE_SIGNING.md`.
+
+Initial internal test release of the AIEN Sovereign Native Systems Architecture, establishing a pure compiled runtime for autonomous AI systems across dedicated silicon.
 
 ---
 

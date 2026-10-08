@@ -39,7 +39,8 @@ package aien-proof or aien-test.
 ## Release workflow modes
 
 - Tag push `v*`: build, check, sign with the `AIEN_RELEASE_SIGNING_KEY` secret (job fails if absent), verify against
-  `docs/release/allowed_signers`, publish.
+  `docs/release/allowed_signers`, publish. Until the public-release key steps in `RELEASE_SIGNING.md` are done, what this
+  publishes is an internal test release signed with the old key, never a public release.
 - Manual run (`workflow_dispatch`): input `dry_run`, default true. Builds, packages, checks, signs with a throwaway key
   generated in the job (labelled in `DRY-RUN-NOT-A-RELEASE.txt`), verifies, uploads workflow artifacts only. Gate or
   package-check failures are recorded in `DRY-RUN-STATUS-<target>.txt` instead of stopping the run. It never creates a
