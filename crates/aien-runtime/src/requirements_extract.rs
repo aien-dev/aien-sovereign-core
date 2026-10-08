@@ -925,7 +925,8 @@ pub fn analyze(goal: &str) -> Extraction {
                     _ => None,
                 };
                 // Not about a part of the document ("each paragraph between ...",
-                // "the gap between ..."), and not approximate ("... lines or so").
+                // "the gap between ..."), and not approximate ("... lines or so",
+                // "roughly", "approximately", "give or take", "-ish").
                 // Anywhere earlier in the sentence: "every single long paragraph
                 // stays between ...", "its stanzas are between ...".
                 let part = s >= 1 && NOUNS.contains(&toks[s - 1].word.as_str())
@@ -940,7 +941,9 @@ pub fn analyze(goal: &str) -> Extraction {
                 } else {
                     s + 5
                 };
-                let or_so = w(o) == Some("or") && w(o + 1) == Some("so");
+                let or_so = (w(o) == Some("or") && w(o + 1) == Some("so"))
+                    || matches!(w(o), Some("roughly" | "approximately" | "ish"))
+                    || (w(o) == Some("give") && w(o + 1) == Some("or") && w(o + 2) == Some("take"));
                 if let Some((a, b)) = pair {
                     if lo <= hi
                         && !part
@@ -1259,6 +1262,11 @@ pub fn analyze(goal: &str) -> Extraction {
         // not "each|every|all|any section is titled", not "... if needed".
         // The whole sentence is scanned, past commas and semicolons:
         // "titled \"X\", unless ...", "If needed, one section ...".
+        // The quoted titles themselves ("When to Plant", "What If") are not hedges.
+        let title_bytes = {
+            let from = toks[k].end;
+            from..from + leading_quoted_items(list_region(goal, from)).1
+        };
         let hedged = needs_quotes && {
             (noun_at >= 1
                 && matches!(
@@ -1266,18 +1274,19 @@ pub fn analyze(goal: &str) -> Extraction {
                     "each" | "every" | "all" | "any"
                 ))
                 || toks[sentence_of(&toks, noun_at)].iter().any(|t| {
-                    matches!(
-                        t.word.as_str(),
-                        "if" | "unless"
-                            | "optionally"
-                            | "optional"
-                            | "may"
-                            | "might"
-                            | "when"
-                            | "whenever"
-                            | "perhaps"
-                            | "maybe"
-                    )
+                    !title_bytes.contains(&t.start)
+                        && matches!(
+                            t.word.as_str(),
+                            "if" | "unless"
+                                | "optionally"
+                                | "optional"
+                                | "may"
+                                | "might"
+                                | "when"
+                                | "whenever"
+                                | "perhaps"
+                                | "maybe"
+                        )
                 })
         };
         let declared_at = [1usize, 2].into_iter().find_map(|d| {

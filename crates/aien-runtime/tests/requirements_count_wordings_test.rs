@@ -73,6 +73,15 @@ fn related_wordings_are_read_the_same_way() {
             vec![heads(&["Costs"])],
         ),
         ("A section is titled \"Costs\".", vec![heads(&["Costs"])]),
+        // round 3: a hedge word inside the quoted title is part of the title
+        (
+            "One section must be titled \"Water When Dry\".",
+            vec![heads(&["Water When Dry"])],
+        ),
+        (
+            "A section is titled \"What If We Wait\".",
+            vec![heads(&["What If We Wait"])],
+        ),
         // a hedge in another sentence does not reach this one
         (
             "You may write more. One section must be titled \"Costs\".",
@@ -140,6 +149,9 @@ fn near_misses_stay_uncertain() {
         "Write the poem so that its stanzas are between 16 and 30 words.",
         "Write the poem; the stanzas should be between 16 and 30 words.",
         "Keep it between 16 and 30 lines long, or so.",
+        "Write between 16 and 30 lines, roughly.",
+        "Write between 16 and 30 lines, give or take.",
+        "Write between 16 and 30 lines approximately.",
     ] {
         let ex = analyze(goal);
         assert!(
