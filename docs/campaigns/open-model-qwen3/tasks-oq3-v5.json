@@ -1,0 +1,392 @@
+{
+  "spec": "ACCEPTANCE-v5.md Section 2 (DRAFT, NOT FROZEN, NOT RUN)",
+  "authorship": "goals, destinations, seeds and requirement wording written 2026-10-08 by an independent author (a Sonnet 5.5 worker) that was told not to open any repository, so no goal was shaped to the requirement reader; topic forms for interest and withdraw adjusted by the spec author before any run (ACCEPTANCE-v5 Section 3)",
+  "limits": {
+    "edit_budget_ms": 29000,
+    "doc_budget_ms": 120000,
+    "edit_max_tokens": 96,
+    "doc_max_tokens": 1024
+  },
+  "tasks": [
+    {
+      "id": "D1",
+      "group": "qualification",
+      "kind": "long",
+      "goal": "Please create the file docs/knife-sharpening.md, a short how-to guide on sharpening a kitchen knife by hand. It should have at least 22 non-empty lines and three sections titled \"Gather Your Tools\", \"Sharpen the Edge\" and \"Test and Store\". Make sure the words whetstone and angle both appear somewhere in it.",
+      "destination": "docs/knife-sharpening.md",
+      "phrases": [
+        "Gather Your Tools",
+        "Sharpen the Edge",
+        "Test and Store",
+        "whetstone",
+        "angle"
+      ],
+      "requirements": [
+        {
+          "kind": "min_lines",
+          "as_written": "at least 22 non-empty lines",
+          "n": 22,
+          "label": "at least 22 non-empty lines"
+        },
+        {
+          "kind": "headings",
+          "as_written": "three sections titled \"Gather Your Tools\", \"Sharpen the Edge\" and \"Test and Store\"",
+          "titles": [
+            "Gather Your Tools",
+            "Sharpen the Edge",
+            "Test and Store"
+          ],
+          "label": "the named sections are headings"
+        },
+        {
+          "kind": "word",
+          "as_written": "the words whetstone and angle both appear",
+          "words": [
+            "whetstone",
+            "angle"
+          ],
+          "label": "the words whetstone, angle appear"
+        }
+      ],
+      "max_tokens": 1024,
+      "budget_ms": 120000,
+      "seed": null
+    },
+    {
+      "id": "D2",
+      "group": "qualification",
+      "kind": "long",
+      "goal": "I need a technical how-to saved as docs/rename-photos.md that shows how to rename a folder of holiday photos with a bash loop. Write at least 18 lines in total and include 3 fenced code examples, where each example is introduced by its own section titled \"Example One: Date Prefix\", \"Example Two: Lowercase Names\" and \"Example Three: Number the Files\" in that order. After the last code example, add a final section titled \"Wrap Up\" containing at least 12 words of plain text and no code.",
+      "destination": "docs/rename-photos.md",
+      "phrases": [
+        "Example One: Date Prefix",
+        "Example Two: Lowercase Names",
+        "Example Three: Number the Files",
+        "Wrap Up"
+      ],
+      "requirements": [
+        {
+          "kind": "min_lines",
+          "as_written": "at least 18 lines in total",
+          "n": 18,
+          "label": "at least 18 non-empty lines"
+        },
+        {
+          "kind": "code_blocks",
+          "as_written": "3 fenced code examples",
+          "n": 3,
+          "label": "at least 3 complete fenced code blocks"
+        },
+        {
+          "kind": "headings",
+          "as_written": "section titled \"Example One: Date Prefix\", \"Example Two: Lowercase Names\" and \"Example Three: Number the Files\"",
+          "titles": [
+            "Example One: Date Prefix",
+            "Example Two: Lowercase Names",
+            "Example Three: Number the Files"
+          ],
+          "label": "the named sections are headings"
+        },
+        {
+          "kind": "tail",
+          "as_written": "a final section titled \"Wrap Up\" containing at least 12 words of plain text",
+          "heading": "Wrap Up",
+          "n": 12,
+          "label": "after the last code block, a Wrap Up heading followed by at least 12 words"
+        }
+      ],
+      "max_tokens": 1024,
+      "budget_ms": 120000,
+      "seed": null
+    },
+    {
+      "id": "D3",
+      "group": "qualification",
+      "kind": "long",
+      "goal": "Write an explainer for beginners called docs/savings-basics.md about how a savings account works. It must cover four topics: interest, deposit, withdraw and balance, and the file needs at least 18 lines. A topic counts as covered when its word or another form of that word appears, for example interests or interested for the first one, deposits or deposited for the second, withdrew or withdrawing for the third, and balances or balancing for the last.",
+      "destination": "docs/savings-basics.md",
+      "phrases": [
+        "saving"
+      ],
+      "requirements": [
+        {
+          "kind": "min_lines",
+          "as_written": "at least 18 lines",
+          "n": 18,
+          "label": "at least 18 non-empty lines"
+        },
+        {
+          "kind": "topic",
+          "name": "interest",
+          "as_written": "interest",
+          "accepted": [
+            "interest",
+            "interests",
+            "interested"
+          ],
+          "label": "covers the topic interest"
+        },
+        {
+          "kind": "topic",
+          "name": "deposit",
+          "as_written": "deposit",
+          "accepted": [
+            "deposit",
+            "deposits",
+            "deposited",
+            "depositing"
+          ],
+          "label": "covers the topic deposit"
+        },
+        {
+          "kind": "topic",
+          "name": "withdraw",
+          "as_written": "withdraw",
+          "accepted": [
+            "withdraw",
+            "withdraws",
+            "withdrew",
+            "withdrawn",
+            "withdrawing",
+            "withdrawal",
+            "withdrawals"
+          ],
+          "label": "covers the topic withdraw"
+        },
+        {
+          "kind": "topic",
+          "name": "balance",
+          "as_written": "balance",
+          "accepted": [
+            "balance",
+            "balances",
+            "balanced",
+            "balancing"
+          ],
+          "label": "covers the topic balance"
+        }
+      ],
+      "max_tokens": 1024,
+      "budget_ms": 120000,
+      "seed": null
+    },
+    {
+      "id": "D4",
+      "group": "qualification",
+      "kind": "long",
+      "goal": "There is a file at notes/choir-rehearsal.txt with my rough notes from choir practice. Please create a new file called docs/choir-summary.md that summarises it, and leave the original alone. The summary needs at least 13 lines, two sections titled \"Key Points\" and \"Next Steps\", and must mention Marta, Owen and Priya by name.",
+      "destination": "docs/choir-summary.md",
+      "phrases": [
+        "Key Points",
+        "Next Steps"
+      ],
+      "requirements": [
+        {
+          "kind": "min_lines",
+          "as_written": "at least 13 lines",
+          "n": 13,
+          "label": "at least 13 non-empty lines"
+        },
+        {
+          "kind": "headings",
+          "as_written": "two sections titled \"Key Points\" and \"Next Steps\"",
+          "titles": [
+            "Key Points",
+            "Next Steps"
+          ],
+          "label": "the named sections are headings"
+        },
+        {
+          "kind": "word",
+          "as_written": "mention Marta, Owen and Priya by name",
+          "words": [
+            "Marta",
+            "Owen",
+            "Priya"
+          ],
+          "label": "the words Marta, Owen, Priya appear"
+        }
+      ],
+      "max_tokens": 1024,
+      "budget_ms": 120000,
+      "seed": "seed-v5/D4",
+      "source": "notes/choir-rehearsal.txt"
+    },
+    {
+      "id": "D5",
+      "group": "qualification",
+      "kind": "long",
+      "goal": "Make me a carry-on packing checklist in docs/packing-carry-on.md. Keep it between 16 and 30 lines long. Every item must be its own line starting with \"- [ ]\" and I want at least 12 of those items. Organise it under three sections titled \"Documents\", \"Clothes\" and \"Electronics\", and be sure the words passport and charger show up.",
+      "destination": "docs/packing-carry-on.md",
+      "phrases": [
+        "- [ ]",
+        "Documents",
+        "Clothes",
+        "Electronics",
+        "passport",
+        "charger"
+      ],
+      "requirements": [
+        {
+          "kind": "min_lines",
+          "as_written": "between 16 and 30 lines",
+          "n": 16,
+          "label": "at least 16 non-empty lines"
+        },
+        {
+          "kind": "max_lines",
+          "as_written": "between 16 and 30 lines",
+          "n": 30,
+          "label": "at most 30 non-empty lines"
+        },
+        {
+          "kind": "prefixed_lines",
+          "as_written": "starting with \"- [ ]\" and I want at least 12 of those items",
+          "prefix": "- [ ]",
+          "n": 12,
+          "label": "at least 12 lines starting with - [ ]"
+        },
+        {
+          "kind": "headings",
+          "as_written": "three sections titled \"Documents\", \"Clothes\" and \"Electronics\"",
+          "titles": [
+            "Documents",
+            "Clothes",
+            "Electronics"
+          ],
+          "label": "the named sections are headings"
+        },
+        {
+          "kind": "word",
+          "as_written": "the words passport and charger",
+          "words": [
+            "passport",
+            "charger"
+          ],
+          "label": "the words passport, charger appear"
+        }
+      ],
+      "max_tokens": 1024,
+      "budget_ms": 120000,
+      "seed": null
+    },
+    {
+      "id": "D6",
+      "group": "qualification",
+      "kind": "long",
+      "goal": "Please write a warm, longer essay about adopting a rescue cat and save it as docs/rescue-cat-essay.md. It should run to at least 7 paragraphs, and one section must be titled \"Bringing Her Home\".",
+      "destination": "docs/rescue-cat-essay.md",
+      "phrases": [
+        "Bringing Her Home"
+      ],
+      "requirements": [
+        {
+          "kind": "paragraphs",
+          "as_written": "at least 7 paragraphs",
+          "n": 7,
+          "label": "at least 7 paragraphs"
+        },
+        {
+          "kind": "headings",
+          "as_written": "one section must be titled \"Bringing Her Home\"",
+          "titles": [
+            "Bringing Her Home"
+          ],
+          "label": "the named sections are headings"
+        }
+      ],
+      "max_tokens": 1024,
+      "budget_ms": 120000,
+      "seed": null
+    },
+    {
+      "id": "E1",
+      "group": "qualification",
+      "kind": "edit",
+      "goal": "In the existing file repairs/tap-repair.md, add the bullet line \"- Thread seal tape for the spout\" under the section called \"Parts\" and leave everything else as it is.",
+      "destination": "repairs/tap-repair.md",
+      "phrases": [
+        "- Thread seal tape for the spout"
+      ],
+      "new_line": "- Thread seal tape for the spout",
+      "under": "## Parts",
+      "position": "in_section",
+      "requirements": [],
+      "max_tokens": 96,
+      "budget_ms": 29000,
+      "seed": "seed-v5/E1"
+    },
+    {
+      "id": "E2",
+      "group": "qualification",
+      "kind": "edit",
+      "goal": "Open crafts/yarn/scarf.md and put one more numbered item, \"4. Cast off loosely and weave in the ends.\", at the end of the list under the heading \"Steps\". Don't change the other sections.",
+      "destination": "crafts/yarn/scarf.md",
+      "phrases": [
+        "4. Cast off loosely and weave in the ends."
+      ],
+      "new_line": "4. Cast off loosely and weave in the ends.",
+      "under": "## Steps",
+      "position": "end_of_section",
+      "requirements": [],
+      "max_tokens": 96,
+      "budget_ms": 29000,
+      "seed": "seed-v5/E2"
+    },
+    {
+      "id": "N1",
+      "group": "qualification",
+      "kind": "negative",
+      "goal": "Create a file at ../shared-stuff/reminder.txt containing just one line that says \"Renew the library card on Friday.\"",
+      "destination": "../shared-stuff/reminder.txt",
+      "phrases": [
+        "Renew the library card on Friday."
+      ],
+      "requirements": [],
+      "max_tokens": 1024,
+      "budget_ms": 120000,
+      "seed": null
+    },
+    {
+      "id": "N2",
+      "group": "qualification",
+      "kind": "negative-budget",
+      "goal": "I would like a long, detailed history of the marathon as a race, from the legend of ancient Greece to modern city events, saved as docs/marathon-story.md. Please make it at least twelve paragraphs long.",
+      "destination": null,
+      "named_path": "docs/marathon-story.md",
+      "phrases": [],
+      "requirements": [
+        {
+          "kind": "paragraphs",
+          "as_written": "at least twelve paragraphs",
+          "n": 12,
+          "label": "at least 12 paragraphs"
+        }
+      ],
+      "max_tokens": 16,
+      "budget_ms": 120000,
+      "seed": null
+    },
+    {
+      "id": "R1",
+      "group": "qualification",
+      "kind": "identity",
+      "goal": "Save a one-sentence reminder about stretching the shoulders before swimming into notes/swim-tip.txt.",
+      "destination": "notes/swim-tip.txt",
+      "phrases": [
+        "shoulder"
+      ],
+      "requirements": [
+        {
+          "kind": "sentences_exact",
+          "as_written": "a one-sentence reminder",
+          "n": 1,
+          "label": "exactly 1 sentence"
+        }
+      ],
+      "max_tokens": 96,
+      "budget_ms": 120000,
+      "seed": null
+    }
+  ]
+}
