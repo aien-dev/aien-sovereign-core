@@ -254,5 +254,34 @@ check "run-v8.sh: RUN_BASE pinned (guard lines present)" "1 1 1" \
 msg=$(bash "$HERE/run-v8.sh" "$tmp/other-base" "$tmp/o" a b c /bin/true /bin/true 2>&1); rc=$?
 check "run-v8.sh: a different RUN_BASE is refused before anything runs" "2 yes no" \
   "$rc $(grep -q 'RUN_BASE must be /home/drakestapleton/workspace/np1-v8-runs' <<<"$msg" && echo yes || echo no) $([ -e "$tmp/other-base" ] && echo yes || echo no)"
+
+# ---- harness approval-desk key (sc#342): rows-v9.jq and make-receipt.sh allow exactly ./approval-desk.key --------
+# run-campaign.sh creates the key in the compose dir since sc#342. rows-v8.jq is pinned by completed runs' receipts and
+# stays byte-identical (it still calls the key stray); rows-v9.jq is rows-v8.jq with only the v6_stray line changed.
+R9=$(cat "$HERE/rows-v9.jq")
+fails9() { jq -r "$R9"'
+v6_rows | [.[] | select(.result != "PASS") | "\(.row)\(if .result == "NOT_RUN" then ":NOT_RUN" else "" end)"] | join(",")'; }
+mut9() { fx "$1" | jq -c "$2" | fails9; }
+for k in T4 R1 T5; do
+  check "rows-v9 $k: good evidence" "" "$(fx $k | fails9)"
+  check "rows-v9 $k: harness approval-desk key in the compose dir is allowed" "" "$(mut9 $k '.containment.compose_dir_files += ["./approval-desk.key"]')"
+  for f in ./other.key ./approval-desk.key.bak ./approval-desk.keys ./sub/approval-desk.key ./branch-1.stage; do
+    check "rows-v9 $k: $f beside the key is stray" "$k-CM" "$(mut9 $k ".containment.compose_dir_files += [\"./approval-desk.key\", \"$f\"]")"
+  done
+done
+check "rows-v8 (pinned by completed runs, unchanged): the key is still stray there" "T4-CM" "$(mut T4 '.containment.compose_dir_files += ["./approval-desk.key"]')"
+check "rows-v9.jq vs rows-v8.jq: outside comments, only the v6_stray line differs" \
+  '< def v6_stray: .containment.compose_dir_files | map(select(test("^\\./(machine\\.id|cortex\\.cx|jspace)") | not));|> def v6_stray: .containment.compose_dir_files | map(select((test("^\\./(machine\\.id|cortex\\.cx|jspace)") or . == "./approval-desk.key") | not));' \
+  "$(diff <(grep -v '^#' "$HERE/rows-v8.jq") <(grep -v '^#' "$HERE/rows-v9.jq") | grep -E '^[<>]' | paste -sd'|')"
+mrf=$(grep -F ') as $stray' "$HERE/make-receipt.sh" | sed -E 's/^ *\| *//; s/ as \$stray$//')
+strayof() { jq -nc --argjson c "$1" "\$c as \$cfiles | $mrf"; }
+check "make-receipt.sh: one compose-dir allowlist line" "1" "$(grep -cF ') as $stray' "$HERE/make-receipt.sh")"
+check "make-receipt.sh: the harness files and the approval-desk key are not stray" "[]" \
+  "$(strayof '["./approval-desk.key","./cortex.cx","./jspace","./jspace/jspace.data","./jspace/jspace.meta","./machine.id"]')"
+for f in ./other.key ./approval-desk.key.bak ./approval-desk.keys ./sub/approval-desk.key ./branch-1.stage; do
+  check "make-receipt.sh: $f beside the key is stray" "[\"$f\"]" "$(strayof "[\"./approval-desk.key\",\"./machine.id\",\"$f\"]")"
+done
+check "make-receipt.sh: V6_ROWS accepts rows-v9.jq; it reads tasks-v8.json and gets the A2 value and V8_MERGE as rows-v8.jq" "1 1 1" \
+  "$(for p in 'rows-v6.jq|rows-v7.jq|rows-v8.jq|rows-v9.jq)' 'case $V6_ROWS in rows-v8.jq|rows-v9.jq) V6TF=$HERE/tasks-v8.json ;; esac' 'if ($rows6 == "rows-v8.jq" or $rows6 == "rows-v9.jq") then {a2_v5_value:'; do grep -cF -- "$p" "$HERE/make-receipt.sh"; done | paste -sd' ')"
 echo "test-rows-v8: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
