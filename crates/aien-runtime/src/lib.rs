@@ -1,5 +1,6 @@
 //! AIEN Runtime: Canonical Single-Process Host for Persistent Branching Intelligence
 
+pub mod allen_memory;
 pub mod approved;
 pub mod approved_auth;
 pub mod approved_replay;
