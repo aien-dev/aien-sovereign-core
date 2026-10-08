@@ -219,6 +219,64 @@ fi
 grep -q "was not overwritten" "$WORK/log" || fail "incomplete release directory not reported"
 [[ "$(live "$WORK/cfg-good")" == "$ID3" && -f "$WORK/cfg-good/releases/$ID4/junk" ]] || fail "refusal changed state"
 
+# 12b. kill -9 at the final switch itself. install.sh switches releases with one rename(2) of a
+#      temp symlink over releases/current. After every kill the install is wholly old or wholly new:
+#      it runs, its record is readable, and a rerun (or --rollback) finishes cleanly.
+kill_at() { # point release-dir [install.sh args...]: run install.sh held at point, then kill -9 it
+    local point="$1" rel="$2" ipid
+    shift 2
+    env AIEN_TEST_PAUSE_AT="$point" AIEN_RELEASE_TAG=v0.0.0-test AIEN_RELEASE_BASE_URL="file://$rel" \
+        AIEN_BIN_DIR="$WORK/bin-good" AIEN_CONFIG_DIR="$WORK/cfg-good" AIEN_INSTALL_NO_PROFILE=1 \
+        AIEN_SOURCE_DIR="$ROOT" AIEN_ALLOWED_SIGNERS="$WORK/allowed_signers" HOME="$WORK/home" \
+        bash "$ROOT/install.sh" "$@" > "$WORK/log-int" 2>&1 &
+    ipid=$!
+    for _ in $(seq 1 100); do grep -q "paused at $point" "$WORK/log-int" 2>/dev/null && break; sleep 0.1; done
+    grep -q "paused at $point" "$WORK/log-int" || fail "installer never reached $point"
+    pkill -9 -P "$ipid" 2>/dev/null || true; kill -9 "$ipid"; wait "$ipid" 2>/dev/null || true
+}
+rec_cur() { sed -n 's/^current = "\(.*\)"$/\1/p' "$WORK/cfg-good/installed.toml"; }
+strays() { ls -A "$WORK/cfg-good/releases" | grep -c '^\.current\.new\.' || true; }
+
+#   A. install killed after the temp link exists, before the rename: wholly old
+make_release "$WORK/rel5" "$WORK/key" CAND-5 g
+ID5="$(sha256sum "$WORK/pkg/bin/aien" | cut -c1-12)"
+ID_OLD="$(live "$WORK/cfg-good")"
+kill_at pre-rename "$WORK/rel5"
+[[ "$(strays)" -ge 1 ]] || fail "pre-rename: no temp link, the hold is not at the rename"
+[[ "$(live "$WORK/cfg-good")" == "$ID_OLD" && "$("$WORK/bin-good/aien")" == "aien-e" ]] || fail "pre-rename kill: install is not wholly old"
+[[ "$(rec_cur)" == "$ID_OLD" ]] || fail "pre-rename kill: record changed"
+run_install "$WORK/rel5" "$WORK/bin-good" "$WORK/cfg-good" "$ROOT/install.sh" "${SIGN_ENV[@]}" \
+    || { cat "$WORK/log" >&2; fail "rerun after pre-rename kill failed"; }
+[[ "$(live "$WORK/cfg-good")" == "$ID5" && "$("$WORK/bin-good/aien")" == "aien-g" && "$(rec_cur)" == "$ID5" ]] || fail "rerun after pre-rename kill is not wholly new"
+[[ "$(strays)" -eq 0 ]] || fail "temp link left after rerun"
+
+#   B. install killed after the rename and the links, before the record: wholly new, record repaired by rerun
+make_release "$WORK/rel6" "$WORK/key" CAND-6 h
+ID6="$(sha256sum "$WORK/pkg/bin/aien" | cut -c1-12)"
+kill_at after-links "$WORK/rel6"
+[[ "$(live "$WORK/cfg-good")" == "$ID6" && "$("$WORK/bin-good/aien")" == "aien-h" ]] || fail "after-links kill: install is not wholly new"
+[[ "$(rec_cur)" == "$ID5" && -d "$WORK/cfg-good/releases/$ID5" ]] || fail "after-links kill: record or previous release lost"
+run_install "$WORK/rel6" "$WORK/bin-good" "$WORK/cfg-good" "$ROOT/install.sh" "${SIGN_ENV[@]}" \
+    || { cat "$WORK/log" >&2; fail "rerun after after-links kill failed"; }
+[[ "$(rec_cur)" == "$ID6" ]] && grep -q "^previous = \"$ID5\"" "$WORK/cfg-good/installed.toml" || fail "rerun did not repair the record"
+
+#   C. --rollback killed before its rename: wholly old (the release it was leaving); rerun completes
+kill_at pre-rename "$WORK/none" --rollback
+[[ "$(live "$WORK/cfg-good")" == "$ID6" && "$("$WORK/bin-good/aien")" == "aien-h" && "$(rec_cur)" == "$ID6" ]] || fail "rollback killed pre-rename: not wholly old"
+inst_args "$WORK/bin-good" "$WORK/cfg-good" --rollback || { cat "$WORK/log" >&2; fail "rollback rerun failed"; }
+[[ "$(live "$WORK/cfg-good")" == "$ID5" && "$("$WORK/bin-good/aien")" == "aien-g" && "$(rec_cur)" == "$ID5" ]] || fail "rollback rerun: not wholly rolled back"
+[[ "$(strays)" -eq 0 ]] || fail "temp link left after rollback rerun"
+
+#   D. --rollback killed after its rename, before the record: wholly new (the target); rerun is safe and
+#      leaves a consistent record; a further rollback still swaps back and verifies
+kill_at after-swap "$WORK/none" --rollback
+[[ "$(live "$WORK/cfg-good")" == "$ID6" && "$("$WORK/bin-good/aien")" == "aien-h" ]] || fail "rollback killed after-swap: not wholly switched"
+inst_args "$WORK/bin-good" "$WORK/cfg-good" --rollback || { cat "$WORK/log" >&2; fail "rollback rerun after after-swap kill failed"; }
+[[ "$(live "$WORK/cfg-good")" == "$(rec_cur)" ]] || fail "record and live release disagree after the rerun"
+[[ "$("$WORK/bin-good/aien")" == "aien-h" || "$("$WORK/bin-good/aien")" == "aien-g" ]] || fail "install does not run after the rerun"
+inst_args "$WORK/bin-good" "$WORK/cfg-good" --rollback || fail "rollback after recovery failed"
+[[ "$(live "$WORK/cfg-good")" == "$(rec_cur)" ]] || fail "record and live release disagree after a further rollback"
+
 # 13. release gate: the candidate must be named and omega.lock must be the candidate's omega commit
 GT="$WORK/gate"; mkdir -p "$GT/scripts" "$GT/release"
 cp "$ROOT/scripts/check-release-candidate.sh" "$GT/scripts/"; cp "$ROOT/release/candidate.toml" "$GT/release/"; cp "$ROOT/Cargo.lock" "$GT/"
@@ -235,4 +293,4 @@ sed -i 's/^candidate = .*/candidate = "unknown"/' "$GT/release/candidate.toml"
 if gate; then fail "gate accepted candidate unknown"; fi
 rm "$GT/release/candidate.toml"
 if gate; then fail "gate accepted a missing candidate file"; fi
-echo "PASS: release gate fails closed, release install verifies signature, checksum and every package file, rejects tampered and forged releases, installs standalone offline, pinned key matches allowed_signers, upgrades atomically, keeps one previous release, rolls back, refuses downgrades, survives an interrupted install (including a kill after the swap)"
+echo "PASS: release gate fails closed, release install verifies signature, checksum and every package file, rejects tampered and forged releases, installs standalone offline, pinned key matches allowed_signers, upgrades atomically, keeps one previous release, rolls back, refuses downgrades, survives an interrupted install (including kill -9 just before the rename, just after it, and during rollback)"
