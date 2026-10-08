@@ -851,6 +851,12 @@ const CLAUSE_AUX: [&str; 18] = [
     "want", "wants", "stays", "stay", "gets", "get",
 ];
 
+/// Words in the clause after ", and" that may add to the list or bind it.
+const CLAUSE_MENTIONS: [&str; 19] = [
+    "name", "names", "named", "mention", "mentions", "appear", "appears", "include", "includes",
+    "contain", "contains", "use", "uses", "twice", "once", "thrice", "too", "also", "each",
+];
+
 /// The text after a word or name list ends it cleanly: nothing, a sentence end
 /// (not after a title such as "Dr", and not a next sentence that starts with
 /// "and" or "or"), or ", and" opening a new instruction or clause. Anything
@@ -869,8 +875,28 @@ fn list_ends_cleanly(after: &str, last_item: &str) -> bool {
             && !matches!(next.to_ascii_lowercase().as_str(), "and" | "or");
     }
     let t = t.strip_prefix(',').unwrap_or(t);
-    let ws: Vec<String> = t
-        .split_whitespace()
+    // The new clause runs to the end of its sentence; it must not carry a name
+    // or word requirement of its own ("..., and I want Wen too", "..., and add Z").
+    let end = t
+        .char_indices()
+        .find(|&(i, c)| {
+            c == '\n'
+                || (matches!(c, '.' | '!' | '?')
+                    && t[i + 1..].chars().next().is_none_or(char::is_whitespace))
+        })
+        .map_or(t.len(), |(i, _)| i);
+    let raw: Vec<&str> = t[..end].split_whitespace().collect();
+    let names_more = raw.iter().skip(2).any(|x| {
+        let x = plain(x);
+        let low = x.to_ascii_lowercase();
+        (x.starts_with(|c: char| c.is_uppercase()) && x != "I")
+            || CLAUSE_MENTIONS.contains(&low.as_str())
+    });
+    if names_more {
+        return false;
+    }
+    let ws: Vec<String> = raw
+        .iter()
         .take(7)
         .map(|x| clean(x).to_ascii_lowercase())
         .collect();
