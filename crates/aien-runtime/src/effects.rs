@@ -733,6 +733,13 @@ pub fn check_reserved_note(kind: &str, text: &str) -> Result<(), String> {
     let Ok(v) = serde_json::from_str::<Value>(text) else {
         return Ok(());
     };
+    // Provenance evidence is copied by the daemon along its own chain; no caller sets it.
+    if v.get(crate::generation::PROVENANCE).is_some() {
+        return Err(
+            "ComposeNote: the provenance field is written only by the daemon (generation link and ALLEN agent id)"
+                .into(),
+        );
+    }
     match kind {
         // The daemon's generation record (evidence only, never an input to any
         // decision): effect-class note with the marker field.
@@ -1195,6 +1202,9 @@ pub(crate) fn write_approved_grant(
             "workspace": workspace, "prior_sha256": prior,
             "approval_key": link.approval_key, "replay_claim": link.replay_claim,
             "cx_promotion": link.cx_promotion, "cx_evidence": link.cx_evidence,
+            // An approved proposal runs no model: no generation record, the ALLEN only.
+            crate::generation::PROVENANCE:
+                crate::generation::Provenance::new(None, home.allen.as_ref()).to_json(),
         });
         if let (Some(t), Some(i)) = (text.as_object_mut(), ids.as_object()) {
             for (k, v) in i {
@@ -1245,6 +1255,14 @@ fn check_minted_backing(l: &Ledger, g: &Grant) -> Result<(), Refusal> {
     Ok(())
 }
 
+/// Copy the provenance evidence of record `source` onto `text`, a record the
+/// daemon is about to append. EVIDENCE ONLY: this is the single place the
+/// ledger-side code reads provenance, it never fails and is called after every
+/// decision of its caller (`provenance_changes_no_decision` scans for that).
+fn stamp(text: &mut Value, views: &[ComposeRecordView], source: u64) {
+    text[crate::generation::PROVENANCE] = crate::generation::inherit(views, source).to_json();
+}
+
 /// The record the daemon writes when its own compose run COMMITTED a
 /// one-file proposal (#261): the only thing `ComposeAuthorize` mints from.
 /// Linked to the promotion and evidence. Returns the record id.
@@ -1258,11 +1276,22 @@ pub(crate) fn write_compose_commit(
     proposal_sha256: &str,
     path: &str,
     content_sha256: &str,
+    prov: &crate::generation::Provenance,
 ) -> Result<u64, String> {
+    // Refused at write time: a record never names a generation id that is not
+    // a verified generation record of this ledger.
+    if let Some(g) = prov.generation_record {
+        if !crate::generation::generation_exists(&host_views(home)?, g) {
+            return Err(format!(
+                "compose-commit not written: provenance names generation record #{g}, which is not a verified generation record"
+            ));
+        }
+    }
     let text = json!({
         COMPOSE_COMMIT: 1, "task": task, "cx_promotion": cx_promotion,
         "cx_evidence": cx_evidence, "proposal_sha256": proposal_sha256,
         "path": path, "content_sha256": content_sha256, "workspace": workspace,
+        crate::generation::PROVENANCE: prov.to_json(),
     });
     append(home, NoteKind::Effect, &[cx_promotion, cx_evidence], &text).map(|n| n.id)
 }
@@ -1331,7 +1360,8 @@ pub fn authorize(
         } else {
             None
         };
-        let l = ledger(home)?;
+        let views = host_views(home)?;
+        let l = Ledger::from_records(&views).map_err(|r| r.to_string())?;
         let mut hits = l
             .commits
             .values()
@@ -1433,6 +1463,7 @@ pub fn authorize(
             text["desk_nonce"] = json!(p.nonce);
             text["desk_key_id"] = json!(key.id());
         }
+        stamp(&mut text, &views, c.id);
         append(home, NoteKind::Authorization, &links, &text)
     }))
 }
@@ -1585,12 +1616,13 @@ pub fn open_intent(b: &ComposeBridge, req: &IntentRequest) -> ControlResponse {
         }
         check_approved_backing(&l, g, &views).map_err(|r| r.to_string())?;
         check_minted_backing(&l, g).map_err(|r| r.to_string())?;
-        let text = json!({
+        let mut text = json!({
             "phase": PHASE_INTENT, "tool": "write_file", "authorization": g.id,
             "proposal_sha256": req.proposal_sha256, "path": req.path, "target": req.target,
             "content_sha256": req.content_sha256, "prior_sha256": current,
             "executor": {"pid": req.executor_pid, "start": req.executor_start},
         });
+        stamp(&mut text, &views, g.id);
         append(home, NoteKind::Effect, &[g.id], &text)
     }))
 }
@@ -1602,7 +1634,8 @@ pub fn ack(b: &ComposeBridge, intent: u64, reported: &Value) -> ControlResponse 
         return ControlResponse::Error(e);
     }
     noted(b.with_home(|home| {
-        let l = ledger(home)?;
+        let views = host_views(home)?;
+        let l = Ledger::from_records(&views).map_err(|r| r.to_string())?;
         let row = l
             .intents
             .get(&intent)
@@ -1615,12 +1648,13 @@ pub fn ack(b: &ComposeBridge, intent: u64, reported: &Value) -> ControlResponse 
             ));
         }
         let (st, disk) = confined_world_state(&l, row);
-        let text = json!({
+        let mut text = json!({
             "phase": PHASE_ACK, "intent": intent, "authorization": row.authorization,
             "tool": "write_file", "path": row.path, "content_sha256": row.content_sha256,
             "state": st.name(), "disk_sha256": disk.as_ref().ok().cloned().flatten(),
             "disk_error": disk.as_ref().err(), "executor_reported": reported,
         });
+        stamp(&mut text, &views, intent);
         append(home, NoteKind::Effect, &[intent, row.authorization], &text)
     }))
 }
@@ -1999,6 +2033,280 @@ mod tests {
         assert!(check_reserved_note("effect", g).is_err());
         assert!(check_reserved_note("generation", "anything").is_err());
         assert!(check_reserved_note("generation", g).is_err());
+    }
+
+    #[test]
+    fn provenance_cannot_be_set_through_compose_note() {
+        let p = r#"{"provenance":{"generation_record":3,"allen_agent":"none"}}"#;
+        for kind in ["effect", "constraint", "authorization", "provenance"] {
+            assert!(check_reserved_note(kind, p).is_err(), "{kind}");
+        }
+        // A forged copy of the daemon's own records, with provenance, is refused too.
+        let c = r#"{"compose_commit":1,"provenance":{"generation_record":3}}"#;
+        assert!(check_reserved_note("effect", c).is_err());
+        // Without the field an ordinary note is still fine.
+        assert!(check_reserved_note("constraint", r#"{"a":1}"#).is_ok());
+    }
+
+    fn commit_row(id: u64, prov: Option<Value>) -> ComposeRecordView {
+        let mut v = json!({"compose_commit": 1, "task": 1, "cx_promotion": 1, "cx_evidence": 1,
+            "proposal_sha256": "p", "path": "N.md", "content_sha256": "c", "workspace": "/w"});
+        if let Some(p) = prov {
+            v["provenance"] = p;
+        }
+        rec(id, "effect", v)
+    }
+
+    fn with_prov(mut r: ComposeRecordView, prov: Value) -> ComposeRecordView {
+        let mut v: Value = serde_json::from_str(r.text.as_deref().unwrap()).unwrap();
+        v["provenance"] = prov;
+        r.text = Some(v.to_string());
+        r
+    }
+
+    /// Evidence only: whatever the provenance fields say (valid, absent, naming
+    /// nothing, the wrong type, hostile), the ledger state and every decision
+    /// are the ones the same records give without them.
+    #[test]
+    fn provenance_changes_no_decision() {
+        let chain = |prov: Option<Value>| {
+            let mut v = vec![
+                commit_row(1, prov.clone()),
+                grant(2, Value::Null),
+                intent(3, 2),
+                settle(4, "ack", 3, "DONE"),
+                grant(5, Value::Null),
+                intent(6, 5),
+            ];
+            if let Some(p) = prov {
+                for r in v.iter_mut().skip(1) {
+                    *r = with_prov(r.clone(), p.clone());
+                }
+            }
+            v
+        };
+        let base = Ledger::from_records(&chain(None)).unwrap();
+        for prov in [
+            json!({"generation_record": 7, "allen_agent": "ab".repeat(32)}),
+            json!({"generation_record": 99999, "allen_agent": "none"}),
+            json!({"generation_record": null, "allen_agent": "none"}),
+            json!({"generation_record": "seven", "allen_agent": 5}),
+            json!("garbage"),
+            json!(null),
+            json!({"generation_record": u64::MAX, "allen_agent": "\u{0}x".repeat(500)}),
+        ] {
+            let l = Ledger::from_records(&chain(Some(prov.clone()))).unwrap();
+            assert_eq!(base.view(), l.view(), "{prov}");
+            for a in [2u64, 5, 9] {
+                assert_eq!(refusal(&base, a, None), refusal(&l, a, None), "{prov} #{a}");
+            }
+            assert_eq!(
+                base.check_intent(&req(5), &None).map(|g| g.id),
+                l.check_intent(&req(5), &None).map(|g| g.id)
+            );
+            assert_eq!(base.commits, l.commits, "{prov}");
+            assert_eq!(base.grants, l.grants, "{prov}");
+            assert_eq!(base.intents, l.intents, "{prov}");
+        }
+    }
+
+    /// The same, for the code: the only reader of provenance is
+    /// `Provenance::from_text`, reached only through `stamp`/`inherit`, and the
+    /// ledger-side code that mentions provenance is a short, named list of
+    /// writers that call it after their decisions are made. Nothing in
+    /// `Ledger`, `check_*`, the world checks or reconcile can see it.
+    #[test]
+    fn provenance_is_read_by_no_decision_code() {
+        let src = include_str!("effects.rs");
+        let prod = src.split("#[cfg(test)]\nmod tests").next().unwrap();
+        let tokens = [
+            "PROVENANCE",
+            "Provenance",
+            "provenance",
+            "stamp(",
+            "inherit(",
+        ];
+        // The enclosing `fn` of every mention.
+        let mut cur = String::from("<top>");
+        let mut hits: Vec<(String, String)> = Vec::new();
+        for line in prod.lines() {
+            let t = line.trim_start();
+            if let Some(i) = t.find("fn ") {
+                let pre = &t[..i];
+                if pre.is_empty() || pre == "pub " || pre == "pub(crate) " {
+                    cur = t[i + 3..]
+                        .split(|c: char| !(c.is_alphanumeric() || c == '_'))
+                        .next()
+                        .unwrap()
+                        .to_string();
+                }
+            }
+            if t.starts_with("//") {
+                continue;
+            }
+            if tokens.iter().any(|k| line.contains(k)) {
+                hits.push((cur.clone(), t.to_string()));
+            }
+        }
+        let writers = [
+            "stamp",
+            "write_compose_commit",
+            "write_approved_grant",
+            "authorize",
+            "open_intent",
+            "ack",
+            "check_reserved_note",
+        ];
+        for (f, line) in &hits {
+            assert!(
+                writers.contains(&f.as_str()),
+                "{f} mentions provenance: {line}"
+            );
+        }
+        // Inside the writers that also decide, the only mention is the stamp
+        // call (or the reserved-field refusal), never a read of the fields.
+        for (f, line) in &hits {
+            if ["authorize", "open_intent", "ack"].contains(&f.as_str()) {
+                assert!(
+                    line.starts_with("stamp(&mut text, &views, "),
+                    "{f} touches provenance other than by stamp: {line}"
+                );
+            }
+        }
+        // Everything else in the crate: the field's name and its reader appear
+        // only in generation.rs (definition), effects.rs (above), spine.rs
+        // (the writer of the commit) and server.rs/control.rs (plumbing).
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        for e in std::fs::read_dir(dir).unwrap() {
+            let p = e.unwrap().path();
+            let name = p.file_name().unwrap().to_string_lossy().into_owned();
+            if !name.ends_with(".rs") {
+                continue;
+            }
+            let s = std::fs::read_to_string(&p).unwrap();
+            let s = s.split("#[cfg(test)]").next().unwrap();
+            let reads = s.contains("Provenance::from_text") || s.contains("generation::inherit");
+            let allowed = ["generation.rs", "effects.rs"].contains(&name.as_str());
+            assert!(!reads || allowed, "{name} reads provenance");
+        }
+        // The Ledger types carry no provenance field at all.
+        for ty in [
+            "pub struct Grant",
+            "pub struct CommitRow",
+            "pub struct IntentRow",
+            "pub struct Ledger",
+        ] {
+            let body = prod
+                .split(ty)
+                .nth(1)
+                .unwrap()
+                .split("\n}\n")
+                .next()
+                .unwrap();
+            assert!(!body.to_lowercase().contains("provenance"), "{ty}");
+        }
+    }
+
+    #[test]
+    fn old_records_without_provenance_read_as_explicit_none() {
+        use crate::generation::{inherit, Provenance, NO_AGENT};
+        let old = vec![commit_row(1, None), grant(2, Value::Null), intent(3, 2)];
+        // The ledger opens and verifies as before.
+        assert!(Ledger::from_records(&old).is_ok());
+        let p = inherit(&old, 1);
+        assert_eq!(p, Provenance::default());
+        assert_eq!(p.allen_agent, NO_AGENT);
+        assert_eq!(p.generation_record, None);
+        // Missing record, damaged text, wrong types: the same default, never an error.
+        assert_eq!(inherit(&old, 77), Provenance::default());
+        assert_eq!(Provenance::from_text("not json"), Provenance::default());
+        assert_eq!(
+            Provenance::from_text(
+                r#"{"provenance":{"allen_agent":"nope","generation_record":-1}}"#
+            ),
+            Provenance::default()
+        );
+        // A generation id that names no generation record is dropped on copy.
+        let named = vec![commit_row(
+            1,
+            Some(json!({"generation_record": 9, "allen_agent": "ab".repeat(32)})),
+        )];
+        let p = inherit(&named, 1);
+        assert_eq!(p.generation_record, None);
+        assert_eq!(p.allen_agent, "ab".repeat(32));
+        // ... and kept when it does (the record must be a verified generation record).
+        let mut with_gen = named.clone();
+        with_gen.push(generation_row(9));
+        assert_eq!(inherit(&with_gen, 1).generation_record, Some(9));
+        // A non-generation record (or an unverified one) does not count.
+        let mut not_gen = named;
+        not_gen.push(rec(9, "effect", json!({"x": 1})));
+        assert_eq!(inherit(&not_gen, 1).generation_record, None);
+        let mut bad = with_gen;
+        bad[1].verified = false;
+        assert_eq!(inherit(&bad, 1).generation_record, None);
+    }
+
+    /// A record that names a nonexistent generation id is refused at write time.
+    #[test]
+    fn a_commit_naming_no_generation_record_is_not_written() {
+        use crate::generation::Provenance;
+        use crate::spine::{ComposeBridge, Generation};
+        if !aien_omega_compose::LINKED {
+            eprintln!("NOT_RUN: stub compose build");
+            return;
+        }
+        let t = tempfile::tempdir().unwrap();
+        let proposer: crate::spine::ComposeProposer =
+            std::sync::Arc::new(|_: &str, _: std::time::Duration| Ok(Generation::default()));
+        let b = ComposeBridge::new(t.path().join("compose"), proposer, "test:fixed");
+        let note = match b.note("constraint", "an ordinary note", &[]) {
+            ControlResponse::ComposeNoted(n) => n.id,
+            other => panic!("{other:?}"),
+        };
+        let write = |g: Option<u64>| {
+            b.with_home(|home| {
+                write_compose_commit(
+                    home,
+                    "/w",
+                    1,
+                    1,
+                    1,
+                    "p",
+                    "N.md",
+                    "c",
+                    &Provenance {
+                        generation_record: g,
+                        allen_agent: "none".into(),
+                    },
+                )
+            })
+        };
+        let before = host_count(&b);
+        for bad in [999_999u64, note, 1] {
+            let e = write(Some(bad)).unwrap_err();
+            assert!(e.contains("not a verified generation record"), "{bad}: {e}");
+        }
+        assert_eq!(host_count(&b), before, "nothing was written");
+        // A real generation record is accepted, and none is accepted.
+        let g = b
+            .with_home(|home| crate::generation::write(home, &generation_json()))
+            .unwrap();
+        let ok = write(Some(g));
+        assert!(ok.is_ok(), "{ok:?}");
+        let ok = write(None);
+        assert!(ok.is_ok(), "{ok:?}");
+    }
+
+    fn generation_json() -> Value {
+        json!({"generation": 1, "v": 1, "model_sha256": "x"})
+    }
+
+    fn host_count(b: &crate::spine::ComposeBridge) -> usize {
+        match b.recall(&[], None) {
+            ControlResponse::ComposeRecalled(r) => r.host.len(),
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]

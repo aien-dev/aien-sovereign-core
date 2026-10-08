@@ -243,6 +243,11 @@ impl AienRuntimeServer {
                 None
             }
         };
+        // Provenance (arch#162): the compose task writes the generation record of
+        // the proposal it commits, so the bridge needs the model identity too.
+        if let (Some(b), Some(id)) = (compose.as_ref(), identity.as_ref()) {
+            b.set_model_identity((**id).clone(), self.started);
+        }
         // NEXT-PHASE-2 (ACCEPTANCE-v2 2.4): settle effects a previous process
         // left open, before serving anything. Reads the world, never re-runs.
         // A failed or refused reconcile does not stop the daemon, but every
