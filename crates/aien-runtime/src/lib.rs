@@ -9,6 +9,7 @@ pub mod control;
 pub mod cortex_mark;
 pub mod destination;
 pub mod effects;
+pub mod generation;
 pub mod persona;
 pub mod requirements;
 mod requirements_extract;

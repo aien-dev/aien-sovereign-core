@@ -212,6 +212,11 @@ pub enum ControlResponse {
     TurnFinished {
         text: String,
         total_tokens: usize,
+        /// Compose ledger id of the daemon's generation record for this turn
+        /// (docs/DAEMON_GENERATION_RECORD.md). `None` = no record, no claim:
+        /// no ledger, no model identity, or the append failed.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        generation_record: Option<u64>,
     },
     /// Result record of `RunComposeTask`.
     ComposeTaskResult(Box<ComposeTaskReport>),

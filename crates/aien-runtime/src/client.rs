@@ -134,6 +134,19 @@ impl AienRuntimeClient {
         max_tokens: usize,
         temperature: f32,
     ) -> Result<String, String> {
+        self.stream_turn_recorded(messages, max_tokens, temperature)
+            .await
+            .map(|(text, _)| text)
+    }
+
+    /// [`Self::stream_turn`] plus the compose ledger id of the daemon's
+    /// generation record for the turn (`None` = the daemon wrote no record).
+    pub async fn stream_turn_recorded(
+        &self,
+        messages: Vec<ChatTurn>,
+        max_tokens: usize,
+        temperature: f32,
+    ) -> Result<(String, Option<u64>), String> {
         let stream = UnixStream::connect(&self.socket_path).await.map_err(|e| {
             format!(
                 "Failed to connect to AIEN runtime socket at {}: {}",
@@ -185,11 +198,15 @@ impl AienRuntimeClient {
                 .map_err(|e| format!("Failed to parse ControlResponse: {}", e))?;
             match response {
                 ControlResponse::TurnDelta { text } => finished.push_str(&text),
-                ControlResponse::TurnFinished { text, .. } => {
+                ControlResponse::TurnFinished {
+                    text,
+                    generation_record,
+                    ..
+                } => {
                     if !text.is_empty() {
-                        return Ok(text);
+                        return Ok((text, generation_record));
                     }
-                    return Ok(finished);
+                    return Ok((finished, generation_record));
                 }
                 ControlResponse::Error(error) => return Err(error),
                 other => {
@@ -203,7 +220,7 @@ impl AienRuntimeClient {
         if finished.is_empty() {
             Err("native runtime closed the socket before the turn finished".into())
         } else {
-            Ok(finished)
+            Ok((finished, None))
         }
     }
 
