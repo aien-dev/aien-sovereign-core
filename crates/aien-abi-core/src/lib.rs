@@ -498,6 +498,25 @@ pub struct DecodeObservation {
 // NaN from the runtime; equality is used only to compare records.
 impl Eq for DecodeObservation {}
 
+/// Which tensor backend ran the model and how many operations it ran on the
+/// reference CPU path, as process totals since the backend was built (sc#337:
+/// "no silent fallback" must be shown, not inferred from the absence of a
+/// crash). Evidence only: nothing decides on it.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OpEvidence {
+    /// The tensor backend's name (`TensorBackend::name`).
+    pub backend: String,
+    /// Runs of ops the backend claims native that fell back to the reference
+    /// CPU path. A production build panics on the first one, so a finished
+    /// strict call always records 0.
+    pub native_fallbacks: u64,
+    /// Runs of ops on the reference CPU path by design (outside the native mask).
+    pub reference_runs: u64,
+    /// The full `OP_REPORT native=[..] reference=[..] native_fallbacks=[..]
+    /// reference_runs=[..]` line.
+    pub report: String,
+}
+
 impl DecodeObservation {
     /// "greedy" (every chosen token was the argmax), "sampled" (every one was
     /// drawn), "mixed", or "none" (no token was chosen).
@@ -614,6 +633,14 @@ pub trait AienInferenceBackend: Send + Sync {
     /// attaches it to `CompletionEvent::Finished`. Default: None, for a
     /// backend that does not observe its decoding (an absent claim, not greedy).
     fn take_decode_observation(&mut self, _request_id: u64) -> Option<DecodeObservation> {
+        None
+    }
+
+    /// The tensor backend and its op counters so far (sc#337). The scheduler
+    /// reads it when a request finishes and attaches it to
+    /// `CompletionEvent::Finished`. Default: None, for a backend that does not
+    /// account its ops (an absent claim, not zero fallbacks).
+    fn op_evidence(&self) -> Option<OpEvidence> {
         None
     }
 }

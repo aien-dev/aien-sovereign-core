@@ -2002,6 +2002,7 @@ mod tests {
                 request_id: 7,
                 operation_id: 8,
                 decoding: None,
+                ops: None,
             },
             crate::generation::DaemonStart(1),
         );

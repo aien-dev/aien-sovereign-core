@@ -126,6 +126,18 @@ pub struct OpReport {
 }
 
 impl OpReport {
+    /// The evidence a run keeps (sc#337): `backend`, the summed fallback and
+    /// reference-run counts, and this report's [`OpReport::line`].
+    pub fn evidence(&self, backend: &str) -> aien_abi_core::OpEvidence {
+        let total = |v: &[(String, u64)]| v.iter().map(|(_, c)| c).sum();
+        aien_abi_core::OpEvidence {
+            backend: backend.to_string(),
+            native_fallbacks: total(&self.native_fallbacks),
+            reference_runs: total(&self.reference_runs),
+            report: self.line(),
+        }
+    }
+
     /// One greppable line: `OP_REPORT native=[..] reference=[..] native_fallbacks=[..] reference_runs=[..]`.
     pub fn line(&self) -> String {
         let counts = |v: &[(String, u64)]| {
@@ -232,6 +244,28 @@ impl OpAccounting {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// sc#337: the evidence a run keeps sums the counters by kind and keeps
+    /// the full line; a forced fallback (counted without the strict check)
+    /// shows as a non-zero `native_fallbacks`.
+    #[test]
+    fn evidence_sums_the_counters_and_keeps_the_line() {
+        let acct = OpAccounting::new(NativeOpMask::from_ops(&[TensorOp::MatmulVec]));
+        assert_eq!(acct.report().evidence("omega-gb10").native_fallbacks, 0);
+        assert!(acct.record_reference(TensorOp::MatmulVec));
+        acct.record_reference(TensorOp::Rmsnorm);
+        acct.record_reference(TensorOp::Rmsnorm);
+        acct.record_reference(TensorOp::Swiglu);
+        let e = acct.report().evidence("omega-gb10");
+        assert_eq!(e.backend, "omega-gb10");
+        assert_eq!((e.native_fallbacks, e.reference_runs), (1, 3));
+        assert_eq!(e.report, acct.report().line());
+        assert!(
+            e.report.contains("native_fallbacks=[matmul_vec:1]"),
+            "{}",
+            e.report
+        );
+    }
 
     #[test]
     fn default_mask_is_all_native() {

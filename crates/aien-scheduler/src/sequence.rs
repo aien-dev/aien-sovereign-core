@@ -1,4 +1,4 @@
-use aien_abi_core::{DecodeObservation, FinishReason, SamplingParams, SequenceRequest};
+use aien_abi_core::{DecodeObservation, FinishReason, OpEvidence, SamplingParams, SequenceRequest};
 use aien_platform::{InferenceWork, KvHandle, ModelHandle, Priority, Ticks};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -90,6 +90,11 @@ pub enum CompletionEvent {
         /// observe its decoding: an absent claim, not greedy.
         #[serde(default)]
         decoding: Option<DecodeObservation>,
+        /// The tensor backend and its op counters (process totals) when the
+        /// sequence finished (sc#337). None when the backend does not account
+        /// its ops: an absent claim, not zero fallbacks.
+        #[serde(default)]
+        ops: Option<OpEvidence>,
     },
     Error {
         seq_id: SequenceId,

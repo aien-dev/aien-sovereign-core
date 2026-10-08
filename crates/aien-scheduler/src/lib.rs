@@ -1115,6 +1115,8 @@ impl AienScheduler {
                             });
                             // sc#294: taken on every finish, listened to or not.
                             let decoding = backend.take_decode_observation(request_id);
+                            // sc#337: the op counters at this finish, listened to or not.
+                            let ops = backend.op_evidence();
                             if let Some(sink_id) = finished_sink {
                                 self.completion_router.emit(
                                     sink_id,
@@ -1123,6 +1125,7 @@ impl AienScheduler {
                                         finish_reason,
                                         total_tokens,
                                         decoding,
+                                        ops,
                                     },
                                 );
                             }
@@ -1151,6 +1154,8 @@ impl AienScheduler {
                         self.metrics.finished_requests += 1;
                         // sc#294: taken on every finish, listened to or not.
                         let decoding = backend.take_decode_observation(request_id);
+                        // sc#337: the op counters at this finish, listened to or not.
+                        let ops = backend.op_evidence();
                         if let Some(sink_id) = finished_sink {
                             self.completion_router.emit(
                                 sink_id,
@@ -1159,6 +1164,7 @@ impl AienScheduler {
                                     finish_reason: reason,
                                     total_tokens,
                                     decoding,
+                                    ops,
                                 },
                             );
                         }
