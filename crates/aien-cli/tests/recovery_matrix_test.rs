@@ -393,7 +393,10 @@ impl Rig {
         // The memory store is `<home>.allen-memory/` beside the compose home, keys in its `keys/`
         // (aien-allen-memory store.rs), not inside the home itself.
         let mut out = std::collections::BTreeSet::new();
-        let mut stack = vec![PathBuf::from(format!("{}.allen-memory", self.compose().display()))];
+        let mut stack = vec![PathBuf::from(format!(
+            "{}.allen-memory",
+            self.compose().display()
+        ))];
         while let Some(d) = stack.pop() {
             for e in std::fs::read_dir(&d).into_iter().flatten().flatten() {
                 let p = e.path();
@@ -787,7 +790,7 @@ fn r3b_crash_after_write_then_file_modified_is_unresolved() {
         rc.json["reconcile"]["outcomes"]
             .as_array()
             .map(|a| a.iter().all(|o| o["state"] != "DONE"))
-            .unwrap_or(true),
+            .expect("reconcile outcomes"),
         "{}",
         rc.json
     );
@@ -968,62 +971,34 @@ fn r6_stale_permission_is_not_spendable() {
     names_error(&o, &["Stale"]);
     assert!(r.file(&r.path(2)).is_none());
 
-    // (d) authorizing the already-spent proposal again. With the desk MAC on, an
-    // identical (nonce, MAC) pair is a replay and mints nothing; either way no
-    // second effect may ever run for the same file.
+    // (d) authorizing the already-spent proposal again is refused AlreadySpent,
+    // after the stop + resume above (sc#320: before the fix a stop/resume made
+    // `authorize` skip the spent grant and mint a second one, and a second DONE
+    // effect ran). With the desk MAC on, a valid fresh (nonce, MAC) is refused
+    // the same way, and sending it again mints nothing either.
     let p0 = r.props[0].clone();
-    let au_note;
-    let mut second = None;
-    if r.mac {
+    let before = r.file(&r.path(0));
+    let au = if r.mac {
         let nonce = "r6d-nonce";
         let mac = r.desk_mac(&p0, nonce);
         let first = r.authorize_raw(&p0, Some((nonce, &mac)));
-        let replay = r.authorize_raw(&p0, Some((nonce, &mac)));
-        assert_ne!(replay.code, 0, "{}", replay.all());
-        names_error(&replay, &["Replayed"]);
-        au_note = format!(
-            "first authorize on a spent proposal: code {} {}; identical replay refused",
-            first.code,
-            first.all().chars().take(120).collect::<String>()
-        );
-        if first.code == 0 {
-            let g2 = first.json["authorization"]["id"]
-                .as_u64()
-                .expect("grant id");
-            second = Some((g2, r.execute(&rep, g2)));
-        }
+        let again = r.authorize_raw(&p0, Some((nonce, &mac)));
+        assert_ne!(again.code, 0, "{}", again.all());
+        names_error(&again, &["AlreadySpent", "Replayed"]);
+        first
     } else {
-        let au = r.authorize_raw(&p0, None);
-        au_note = format!(
-            "authorize on a spent proposal: code {} {}",
-            au.code,
-            au.all().chars().take(160).collect::<String>()
-        );
-        if au.code == 0 {
-            let g2 = au.json["authorization"]["id"].as_u64().expect("grant id");
-            second = Some((g2, r.execute(&rep, g2)));
-        }
-    }
+        r.authorize_raw(&p0, None)
+    };
+    assert_ne!(au.code, 0, "second grant minted: {}", au.all());
+    names_error(&au, &["AlreadySpent"]);
     let o = r.execute(&rep, grant);
     assert_ne!(o.code, 0);
-    // FINDING (recorded, not hidden): `authorize` on a proposal whose grant is
-    // spent mints a NEW grant (a fresh operator approval; with the MAC on it needs
-    // a fresh nonce). Executing it is a new, separate effect under its own grant.
-    // What must hold: the spent grant stays unusable, the new grant is distinct,
-    // and each effect has its own DONE intent (no reuse, no overwrite of state).
-    let want = 1 + usize::from(
-        second
-            .as_ref()
-            .is_some_and(|(_, o)| o.json["state"] == "DONE"),
-    );
-    if let Some((g2, _)) = &second {
-        assert_ne!(*g2, grant, "the new approval is a distinct grant");
-    }
-    assert_eq!(r.intents().len(), want, "one intent per executed grant");
-    assert!(r.states().iter().all(|s| s == "DONE"), "{:?}", r.states());
+    assert_eq!(r.intents().len(), 1, "exactly one effect for the proposal");
+    assert_eq!(r.states(), vec!["DONE"]);
+    assert_eq!(r.file(&r.path(0)), before, "file untouched by (d)");
     r.detail = format!(
-        "a-c PASS; {au_note}; second authorize executed as a separate effect: {}",
-        want == 2
+        "a-c PASS; (d) authorize on a spent proposal after stop+resume refused: {}",
+        au.all().chars().take(120).collect::<String>()
     );
 }
 
@@ -1333,17 +1308,16 @@ fn m2_rotated_desk_key_during_inflight_intent() {
         !ctl_text.contains("DeskMacInvalid") && !ctl_text.contains("DeskMacRequired"),
         "rotated key rejected by the MAC check: {ctl_text}"
     );
-    if ctl.code == 0 {
-        let g2 = ctl.json["authorization"]["id"].as_u64().expect("grant id");
-        let o = r.execute(&p.report, g2);
-        assert_ne!(o.json["state"], "DONE", "{}", o.all());
-    }
+    // ...and an UNRESOLVED intent is unsettled: no new grant until reconcile
+    // (sc#320: never a second effect for the same commit).
+    assert_ne!(ctl.code, 0, "{ctl_text}");
+    names_error(&ctl, &["ReconciliationRequired"]);
     let rc = r.cli(&["reconcile"]);
     assert!(
         rc.json["reconcile"]["outcomes"]
             .as_array()
             .map(|a| a.iter().all(|o| o["state"] != "DONE"))
-            .unwrap_or(true),
+            .expect("reconcile outcomes"),
         "{}",
         rc.json
     );
@@ -1353,7 +1327,7 @@ fn m2_rotated_desk_key_during_inflight_intent() {
         "someone else wrote this\n"
     );
     r.detail = format!(
-        "SIGKILL at after_write; file changed; desk key rotated; old-key MAC DeskMacInvalid; used MAC: {used_why}; UNRESOLVED kept; control (new key) passes MAC check: code {}",
+        "SIGKILL at after_write; file changed; desk key rotated; old-key MAC DeskMacInvalid; used MAC: {used_why}; UNRESOLVED kept; control (new key) passes MAC check, then ReconciliationRequired: code {}",
         ctl.code
     );
 }
