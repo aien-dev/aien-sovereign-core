@@ -123,6 +123,9 @@ pub enum Requirement {
     RequiredTopics(Vec<String>),
     /// Every section holds at least this many sentences.
     MinSentencesPerSection(usize),
+    /// The whole file is exactly one sentence: its prose (outside fenced code)
+    /// holds one sentence by the sentence rule in the module docs (sc#336).
+    SingleSentence,
     /// Lines ADDED to the file, measured against the prior file (see the module
     /// docs). `exact`: exactly `n`, else at least `n`. `prior` is None until
     /// the caller resolves it ([`Extraction::resolved`]); an unresolved one is unmet.
@@ -177,6 +180,7 @@ impl Requirement {
             Requirement::MinSentencesPerSection(n) => {
                 format!("at least {n} sentences in every section")
             }
+            Requirement::SingleSentence => "exactly one sentence".to_string(),
             Requirement::AddedLines { n, exact, .. } => {
                 if *exact {
                     format!("exactly {n} added non-empty lines")
@@ -371,6 +375,10 @@ impl Requirement {
                     let shown: Vec<String> = short.iter().take(8).cloned().collect();
                     format!("{label}, too few in: {}", shown.join(", "))
                 })
+            }
+            Requirement::SingleSentence => {
+                let c = count_sentences(&prose_lines(content).join("\n"));
+                (c != 1).then(|| format!("{label}, found {c}"))
             }
         }
     }

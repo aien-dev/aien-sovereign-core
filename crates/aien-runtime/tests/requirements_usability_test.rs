@@ -72,8 +72,9 @@ fn bare_counts_with_a_qualifier_or_no_verb_stay_uncertain() {
         "Keep it to 10 lines",
         "Do not add 2 lines to README.md",
         "The note should be 5 lines",
+        // sc#336: an addition may sit in a longer file; a new one-sentence
+        // file ("with a one-sentence greeting") is read as SingleSentence.
         "Add a one-sentence summary to README.md",
-        "Create the file docs/HELLO.txt with a one-sentence greeting.",
     ] {
         uncertain(goal);
     }
@@ -268,7 +269,7 @@ const SILENT: [&str; 12] = [
 ];
 
 /// Goals whose explicit requirements are all read and enforced.
-const RECOGNIZED: [&str; 16] = [
+const RECOGNIZED: [&str; 18] = [
     "dryrun-tasks-v2/N1",
     "tasks-oq3-v3/N1",
     "tasks-oq3-v4/N1",
@@ -276,6 +277,9 @@ const RECOGNIZED: [&str; 16] = [
     "dryrun-tasks-v2/T4",
     "tasks-oq3-v3/G2",
     "tasks-oq3-v3/G3",
+    // sc#336: a file of one sentence.
+    "tasks-oq3-v3/R1",
+    "tasks-oq3-v4/R1",
     "tasks-oq3-v4/RT4",
     "tasks-oq3-v4/RT6",
     "tasks-oq3-v4/W1",
@@ -289,7 +293,7 @@ const RECOGNIZED: [&str; 16] = [
 ];
 
 /// Goals still refused as uncertain, each with the span that is reported and why.
-const REFUSED: [(&str, &str, &str); 8] = [
+const REFUSED: [(&str, &str, &str); 6] = [
     (
         "dryrun-tasks-v2/T6",
         "one section per symptom",
@@ -306,19 +310,9 @@ const REFUSED: [(&str, &str, &str); 8] = [
         "paragraph counts are not supported",
     ),
     (
-        "tasks-oq3-v3/R1",
-        "one-sentence greeting",
-        "sentence counts over the whole document are not verified",
-    ),
-    (
         "tasks-oq3-v4/N2",
         "at least twelve paragraphs",
         "paragraph counts are not supported",
-    ),
-    (
-        "tasks-oq3-v4/R1",
-        "one-sentence thank-you note",
-        "sentence counts over the whole document are not verified",
     ),
     (
         "tasks-oq3-v4/W3",
