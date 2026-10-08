@@ -59,6 +59,9 @@ There is no top-k: `SamplingParams` has none. Counted tokens are the pick
 after the final prefill chunk (a mid-prompt pick that is discarded is not
 counted) and every decode pick, the stop token included, so the count can be
 one more than `output_tokens`. A swarm branch counts only its own decode picks.
+A preempted request finishes once at the preemption (the scheduler takes its
+count then); after it resumes, counting starts again, so a later record covers
+only the tokens chosen after the resume.
 
 `decoding` is ABSENT, not `greedy`, when the backend does not observe its
 decoding (the mock backend, a backend without the hook): an absent field is an

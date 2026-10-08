@@ -2432,6 +2432,39 @@ mod tests {
         }
     }
 
+    /// A decoding request with no recorded sampling params takes the argmax
+    /// arm of decode; those picks are counted as greedy too.
+    #[tokio::test]
+    async fn sc294_decode_without_params_is_observed_greedy() {
+        use crate::SequenceRequest;
+        let id = 7u64;
+        let mut b = c3_backend(false);
+        let req = SequenceRequest {
+            request_id: id,
+            prompt_tokens: c3_prompt()[..4].to_vec(),
+            sampling_params: SamplingParams {
+                temperature: 0.0,
+                ..Default::default()
+            },
+            arrival_time_ns: 0,
+            priority: 0,
+        };
+        let batch = |prefill: Vec<SequenceRequest>, decode: Vec<u64>| ScheduledBatch {
+            prefill_requests: prefill,
+            decode_requests: decode,
+            block_tables: HashMap::new(),
+            step_id: 0,
+        };
+        b.execute_step(&batch(vec![req], vec![])).await.unwrap();
+        b.sampling.remove(&id);
+        for _ in 0..2 {
+            b.execute_step(&batch(vec![], vec![id])).await.unwrap();
+        }
+        let obs = b.take_decode_observation(id).expect("observed");
+        assert_eq!((obs.greedy_tokens, obs.sampled_tokens), (3, 0));
+        assert_eq!(obs.mode(), "greedy");
+    }
+
     /// A released or never-seen request has no observation.
     #[tokio::test]
     async fn sc294_release_drops_the_observation() {
