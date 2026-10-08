@@ -1,4 +1,4 @@
-//! NEXT-PHASE-2: dulet plet prior = confined_sha256(&c.workspace, &c.path, &target).map_err(|r| r.to_string())?;ior = confined_sha256(workspace, path, &target).map_err(|r| r.to_string())?;able effect intents on the compose home's Cortex journal
+//! NEXT-PHASE-2: durable effect intents on the compose home's Cortex journal
 //! (ACCEPTANCE-v2 section 2).
 //!
 //! An external effect (today: the S5 `write_file`) is bracketed by host
