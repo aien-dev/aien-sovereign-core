@@ -18,6 +18,7 @@ cortex-rs = { path = "../cortex-rs" }
 aien-omega-compose = { path = "../aien-omega-compose" }
 aien-allen = { path = "../aien-allen" }
 aien-allen-profile = { path = "../aien-allen-profile" }
+aien-allen-memory = { path = "../aien-allen-memory" }
 
 tokio = { version = "1.37", features = ["full"] }
 parking_lot = "0.12"

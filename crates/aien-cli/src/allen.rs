@@ -9,6 +9,10 @@
 //!   history                                        every saved revision
 //!   revert --to N --expect R                       new revision copying revision N
 //!   reset --expect R                               new revision with the defaults
+//!   memory put|recall|inspect|correct|forget|export   scoped memory, see parse_memory
+//!   goals list|add|close                           host goal records
+//! Memory and goal calls name their context: --context personal|work|project:NAME.
+//! Only inspect, export and goals list take --owner 1 (every context) instead.
 //!
 //! Every change needs `--expect <current revision>` (0 when nothing is saved
 //! yet): if the profile moved since you looked, the change is refused.
@@ -82,6 +86,8 @@ fn parse_pref(s: &str) -> Result<PrefChange, String> {
 /// Turn the command line into the daemon command (pure, no I/O).
 pub fn parse(sub: &str, args: &[String]) -> Result<ControlCommand, String> {
     match sub {
+        "memory" => parse_memory(args),
+        "goals" => parse_goals(args),
         "status" => {
             flags(args, &[])?;
             Ok(ControlCommand::AllenStatus)
@@ -157,8 +163,121 @@ pub fn parse(sub: &str, args: &[String]) -> Result<ControlCommand, String> {
             })
         }
         other => Err(format!(
-            "unknown step {other:?} (status, show, set, history, revert, reset)"
+            "unknown step {other:?} (status, show, set, history, revert, reset, memory, goals)"
         )),
+    }
+}
+
+/// `--context C` or `--owner 1`, exactly one (the daemon checks again).
+fn context_or_owner(f: &Flags) -> Result<(Option<String>, bool), String> {
+    let context = one(f, "context")?.map(str::to_string);
+    let owner = match one(f, "owner")? {
+        None => false,
+        Some("1") => true,
+        Some(o) => return Err(format!("--owner must be 1, got {o:?}")),
+    };
+    match (&context, owner) {
+        (None, false) => Err(
+            "name a context (--context personal|work|project:NAME) or use --owner 1 for every context"
+                .into(),
+        ),
+        (Some(_), true) => Err("give either --context or --owner 1, not both".into()),
+        _ => Ok((context, owner)),
+    }
+}
+
+fn required(f: &Flags, k: &str) -> Result<String, String> {
+    one(f, k)?
+        .map(str::to_string)
+        .ok_or_else(|| format!("--{k} is required"))
+}
+
+fn parse_memory(args: &[String]) -> Result<ControlCommand, String> {
+    let (op, rest) = args.split_first().ok_or(
+        "usage: aien allen memory <put|recall|inspect|correct|forget|export> --context C ...",
+    )?;
+    match op.as_str() {
+        "put" => {
+            let f = flags(rest, &["context", "kind", "text"])?;
+            Ok(ControlCommand::AllenMemoryPut {
+                context: required(&f, "context")?,
+                kind: one(&f, "kind")?.unwrap_or("fact").to_string(),
+                text: required(&f, "text")?,
+            })
+        }
+        "recall" => {
+            let f = flags(rest, &["context", "query"])?;
+            Ok(ControlCommand::AllenMemoryRecall {
+                context: required(&f, "context")?,
+                query: one(&f, "query")?.map(str::to_string),
+            })
+        }
+        "inspect" => {
+            let f = flags(rest, &["context", "owner"])?;
+            let (context, owner) = context_or_owner(&f)?;
+            Ok(ControlCommand::AllenMemoryInspect { context, owner })
+        }
+        "export" => {
+            let f = flags(rest, &["context", "owner"])?;
+            let (context, owner) = context_or_owner(&f)?;
+            Ok(ControlCommand::AllenMemoryExport { context, owner })
+        }
+        "correct" => {
+            let f = flags(rest, &["context", "item", "text"])?;
+            Ok(ControlCommand::AllenMemoryCorrect {
+                context: required(&f, "context")?,
+                item: required(&f, "item")?,
+                text: required(&f, "text")?,
+            })
+        }
+        "forget" => {
+            let f = flags(rest, &["context", "item", "all-in-context"])?;
+            let all_in_context = match one(&f, "all-in-context")? {
+                None => false,
+                Some("1") => true,
+                Some(o) => return Err(format!("--all-in-context must be 1, got {o:?}")),
+            };
+            let item = one(&f, "item")?.map(str::to_string);
+            if item.is_some() == all_in_context {
+                return Err("give exactly one of --item ID or --all-in-context 1".into());
+            }
+            Ok(ControlCommand::AllenMemoryForget {
+                context: required(&f, "context")?,
+                item,
+                all_in_context,
+            })
+        }
+        other => Err(format!(
+            "unknown memory step {other:?} (put, recall, inspect, correct, forget, export)"
+        )),
+    }
+}
+
+fn parse_goals(args: &[String]) -> Result<ControlCommand, String> {
+    let (op, rest) = args
+        .split_first()
+        .ok_or("usage: aien allen goals <list|add|close> --context C ...")?;
+    match op.as_str() {
+        "list" => {
+            let f = flags(rest, &["context", "owner"])?;
+            let (context, owner) = context_or_owner(&f)?;
+            Ok(ControlCommand::AllenGoalsList { context, owner })
+        }
+        "add" => {
+            let f = flags(rest, &["context", "text"])?;
+            Ok(ControlCommand::AllenGoalAdd {
+                context: required(&f, "context")?,
+                text: required(&f, "text")?,
+            })
+        }
+        "close" => {
+            let f = flags(rest, &["context", "item"])?;
+            Ok(ControlCommand::AllenGoalClose {
+                context: required(&f, "context")?,
+                item: required(&f, "item")?,
+            })
+        }
+        other => Err(format!("unknown goals step {other:?} (list, add, close)")),
     }
 }
 
@@ -177,6 +296,7 @@ fn render(sub: &str, r: ControlResponse) -> Result<Value, Value> {
         ControlResponse::AllenStatusReport(x) => ok(to_json(&*x).unwrap_or(Value::Null)),
         ControlResponse::AllenProfile(x) => ok(to_json(&*x).unwrap_or(Value::Null)),
         ControlResponse::AllenHistory(x) => ok(to_json(&*x).unwrap_or(Value::Null)),
+        ControlResponse::AllenMemoryResult(x) => ok(to_json(&*x).unwrap_or(Value::Null)),
         ControlResponse::AllenRefused(x) => Err(json!({
             "ok": false,
             "step": sub,
@@ -194,7 +314,7 @@ pub async fn handle_allen_command(args: &[String]) {
     let Some(sub) = args.first() else {
         println!(
             "{}",
-            json!({"ok": false, "error": "usage: aien allen <status|show|set|history|revert|reset> [--flag value ...]"})
+            json!({"ok": false, "error": "usage: aien allen <status|show|set|history|revert|reset|memory|goals> [--flag value ...]"})
         );
         std::process::exit(1);
     };
@@ -301,5 +421,83 @@ mod tests {
         }
         assert!(parse("status", &a(&["--x", "1"])).is_err());
         assert!(parse("nope", &a(&[])).is_err());
+    }
+
+    #[test]
+    fn memory_and_goal_calls_must_name_a_context() {
+        for bad in [
+            vec!["put", "--text", "x"],
+            vec!["recall"],
+            vec!["inspect"],
+            vec!["export"],
+            vec!["inspect", "--context", "work", "--owner", "1"],
+            vec!["inspect", "--owner", "yes"],
+            vec!["forget", "--context", "work"],
+            vec![
+                "forget",
+                "--context",
+                "work",
+                "--item",
+                "a",
+                "--all-in-context",
+                "1",
+            ],
+            vec![
+                "put",
+                "--context",
+                "work",
+                "--scope",
+                "personal",
+                "--text",
+                "x",
+            ],
+        ] {
+            assert!(parse("memory", &a(&bad)).is_err(), "{bad:?}");
+        }
+        for bad in [
+            vec!["list"],
+            vec!["add", "--text", "g"],
+            vec!["close", "--item", "i"],
+        ] {
+            assert!(parse("goals", &a(&bad)).is_err(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn memory_calls_parse() {
+        let c = parse(
+            "memory",
+            &a(&[
+                "put",
+                "--context",
+                "project:a",
+                "--kind",
+                "preference",
+                "--text",
+                "t",
+            ]),
+        )
+        .unwrap();
+        assert!(matches!(
+            c,
+            ControlCommand::AllenMemoryPut { ref context, ref kind, .. }
+                if context == "project:a" && kind == "preference"
+        ));
+        let c = parse("memory", &a(&["inspect", "--owner", "1"])).unwrap();
+        assert!(matches!(
+            c,
+            ControlCommand::AllenMemoryInspect {
+                context: None,
+                owner: true
+            }
+        ));
+        let c = parse("goals", &a(&["list", "--context", "work"])).unwrap();
+        assert!(matches!(
+            c,
+            ControlCommand::AllenGoalsList {
+                context: Some(_),
+                owner: false
+            }
+        ));
     }
 }

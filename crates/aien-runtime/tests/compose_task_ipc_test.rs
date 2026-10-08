@@ -43,6 +43,7 @@ async fn run_compose_task_over_socket() {
 
     let resp = client
         .send_command(ControlCommand::RunComposeTask {
+            context: None,
             goal: "propose one change".into(),
             workspace: ws.to_str().unwrap().into(),
         })
