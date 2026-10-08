@@ -332,6 +332,12 @@ impl AienRuntimeServer {
         self.is_running.store(false, Ordering::SeqCst);
         let _ = worker_handle.await;
 
+        // Close the compose home now, not whenever the last connection task drops
+        // its Arc (sovereign-core #306).
+        if let Some(c) = compose.clone() {
+            let _ = tokio::task::spawn_blocking(move || c.close()).await;
+        }
+
         // Clean up socket file on clean shutdown
         if self.socket_path.exists() {
             let _ = std::fs::remove_file(&self.socket_path);
