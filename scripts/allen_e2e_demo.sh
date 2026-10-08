@@ -62,7 +62,7 @@ selftest() {
 # shutdown`, crates/aien-cli/src/compose.rs "shutdown"), and the script then waits with NO timeout for
 # the daemon to exit. `aien-cli stop` is not used: it also runs `pkill -f spark-cockpit`. The only
 # signal-sending commands left in this file act on CPU daemons (v1-v3, and M-B in v4-gb10); each is
-# unreachable while DAEMON_GB=1 (see kill9, start_daemon and the exit trap).
+# unreachable while a GB10 daemon is live (GB_LIVE_PID set; see safe_kill9, kill9, start_daemon and the exit trap).
 alive() { [ -d "/proc/$1" ]; }   # liveness by /proc, not by a signal
 GB_POLL=${GB_POLL:-5}
 nvrm_count() { # number of NVRM lines in the kernel log, or "unavailable"
@@ -76,6 +76,7 @@ gb_life_record() { # appends this daemon life's facts (from its log) to GB_LIVES
   rv=$(grep -a -m1 'GB10_SERVING_RESERVATION reserved bytes=' "$log" | sed 's/^ *//' | cut -c1-300)
   nb=${NVRM_BEFORE:-unavailable}; na=$(nvrm_count)
   case "$nb$na" in *unavailable*) delta=unavailable ;; *) delta=$((na - nb)) ;; esac
+  GB_LAST_DELTA=$delta
   GB_LIVES=$(printf '%s' "$GB_LIVES" | jq -c --argjson n "$DN" --arg log "$(basename "$log")" --arg bk "$bk" --arg rv "$rv" \
     --argjson fb "$(grep -aic fallback "$log")" \
     --argjson nvl "$(grep -a -i nvrm "$log" | grep -avc WARNING)" \
@@ -83,73 +84,98 @@ gb_life_record() { # appends this daemon life's facts (from its log) to GB_LIVES
     --argjson rm "$(grep -aiE 'NV_ERR_NO_MEMORY|status 0x51|RM_ALLOC.*fail' "$log" | grep -avc WARNING)" \
     --argjson sk "$(grep -aci 'seat kill' "$log")" \
     --arg exit "${GB_EXIT:-unknown}" --arg stop "${GB_STOP_DESC:-}" --argjson ok "${GB_STOP_OK:-0}" \
-    --arg nb "$nb" --arg na "$na" --arg delta "$delta" \
+    --arg nb "$nb" --arg na "$na" --arg delta "$delta" --arg ack "$GB_ACK" --argjson att "${GB_ATT:-0}" --arg gone "$GB_GONE" \
     '. + [{life:$n,log:$log,backend_line:$bk,backend_gb10:($bk|contains("OmegaGb10Backend")),reservation_line:$rv,
            reservation_line_present:($rv|length>0),fallback_lines:$fb,nvrm_log_lines:$nvl,alloc_failure_lines:$af,
-           rm_failure_lines:$rm,seat_kill_lines:$sk,daemon_exit:$exit,stop:$stop,stop_clean:($ok==1),
+           rm_failure_lines:$rm,seat_kill_lines:$sk,daemon_exit:$exit,stop:$stop,stop_clean:($ok==1),shutdown_requests_sent:$att,shutdown_acked:$ack,socket_removed:$gone,
            nvrm_kernel_before:$nb,nvrm_kernel_after:$na,
            nvrm_kernel_delta:(if $delta=="unavailable" then "unavailable" else ($delta|tonumber) end)}]')
 }
-GB_STOP_OK=0; GB_STOP_DESC=""; GB_EXIT=""; GB_UNCLEAN=0
-GB_STOPPING=0; SIG_PENDING=""
+GB_STOP_OK=0; GB_STOP_DESC=""; GB_EXIT=""; GB_UNCLEAN=0; GB_ACK=no; GB_ATT=0; GB_GONE=no; GB_LAST_DELTA=unavailable
+GB_STOPPING=0; SIG_PENDING=""; SPAWNING=0; GB_LIVE_PID=""
+GB_SIGS="INT TERM HUP QUIT USR1 USR2 PIPE ALRM"
 # A GB10 daemon is started in its own session with HUP and INT ignored, so a terminal Ctrl-C, a hangup or a signal to the
 # driver's process group cannot reach it. `( trap '' HUP INT; exec setsid CMD )&` keeps $! equal to the daemon's pid:
 # setsid only forks when its caller is a process group leader, which a background subshell of a script is not (checked
 # by the session test in start_daemon and by selftest-gb).
-gb_spawn() { # logfile cmd...; sets DPID
+# GB_LIVE_PID is the pid of a live GB10 daemon: set at spawn (signals are deferred while SPAWNING=1, so the handler never
+# sees a half-started daemon), cleared only after the graceful stop's wait has returned. While it is set, nothing in this
+# script may signal that pid (safe_kill9 refuses; kill9, the exit trap and the signal handler all route to gb_stop).
+gb_spawn() { # logfile cmd...; sets DPID, DAEMON_GB, GB_LIVE_PID
   local log=$1; shift
+  SPAWNING=1; DAEMON_GB=1
   ( trap '' HUP INT; exec setsid "$@" >"$log" 2>&1 </dev/null ) &
-  DPID=$!
+  eval "${GB_BEFORE_ASSIGN_HOOK:-:}"   # test hook: a signal here is deferred (SPAWNING=1)
+  DPID=$!; GB_LIVE_PID=$DPID; SPAWNING=0
+  eval "${GB_AFTER_SPAWN_HOOK:-:}"     # test hook: a signal here sees a live GB10 daemon
+  [ -z "$SIG_PENDING" ] || gb_stop      # a signal deferred during the spawn: stop gracefully now (exits 130)
 }
-# The driver itself: on INT, TERM or HUP it stops a live GB10 daemon gracefully (unbounded wait), then exits.
+safe_kill9() { # the only place a CPU daemon is killed; refuses the live GB10 pid
+  if [ -n "$GB_LIVE_PID" ] && [ "$1" = "$GB_LIVE_PID" ]; then echo "REFUSING to signal live GB10 daemon $1" >&2; return 1; fi
+  kill -9 "$1" 2>/dev/null
+}
+gb_install_traps() { local s; for s in $GB_SIGS; do trap "gb_on_signal $s" "$s"; done; }
+# The driver itself: on any of these signals it stops a live GB10 daemon gracefully (unbounded wait), then exits.
 gb_on_signal() {
   echo "driver got $1: stopping a live GB10 daemon gracefully (no timeout), then exiting" >&2
-  if [ "$GB_STOPPING" = 1 ]; then SIG_PENDING=$1; return 0; fi
-  if [ -n "${DPID:-}" ] && [ "${DAEMON_GB:-0}" = 1 ]; then SIG_PENDING=$1; gb_stop; fi
+  if [ "$GB_STOPPING" = 1 ] || [ "$SPAWNING" = 1 ]; then SIG_PENDING=$1; return 0; fi
+  SIG_PENDING=$1
+  if [ -n "$GB_LIVE_PID" ]; then gb_stop; fi
   exit 130
 }
-gb_stop() { # graceful stop of the GB10 daemon in DPID; waits with NO timeout; never signals it
-  local rc ack=no gone i=0
-  GB_STOP_OK=0; GB_STOP_DESC=""
-  GB_STOPPING=1
+gb_stop() { # graceful stop of the GB10 daemon; waits with NO timeout; never signals it
+  local rc gone=no
+  GB_STOP_OK=0; GB_STOP_DESC=""; GB_ACK=no; GB_ATT=0
+  [ -n "${DPID:-}" ] || DPID=$GB_LIVE_PID
   [ -n "${DPID:-}" ] || { GB_STOP_DESC="no daemon"; return 1; }
+  GB_STOPPING=1
   while alive "$DPID"; do
-    if gb_send_shutdown; then ack=yes; break; fi
-    i=$((i + 1)); [ $((i % 12)) -eq 0 ] && echo "waiting for the GB10 daemon to take the shutdown request (no timeout, no kill)" >&2
+    GB_ATT=$((GB_ATT + 1))
+    if gb_send_shutdown; then GB_ACK=yes; break; fi
+    # The daemon closes its accept loop before it writes the ack (server.rs), so a missing ack is not an error by itself.
+    [ $((GB_ATT % 12)) -eq 0 ] && echo "waiting for the GB10 daemon to take the shutdown request (no timeout, no kill)" >&2
     sleep "$GB_POLL"
   done
   while :; do wait "$DPID"; rc=$?; if [ "$rc" -gt 128 ] && alive "$DPID"; then continue; fi; break; done   # a signal to the driver interrupts wait, not the daemon
-  GB_EXIT=$rc; DPID=""; DAEMON_GB=0
-  gone=no; [ ! -e "$SOCK" ] && gone=yes
-  if [ "$rc" -eq 0 ] && [ "$ack" = yes ] && [ "$gone" = yes ] && ! grep -aqi 'seat kill' "$DLOG"; then
+  GB_EXIT=$rc; DPID=""; DAEMON_GB=0; GB_LIVE_PID=""
+  [ ! -e "$SOCK" ] && gone=yes; GB_GONE=$gone
+  # Clean = a shutdown request was sent at least once AND exit 0 AND socket removed AND no seat-kill line.
+  # The ack is recorded, not required. A kernel-log NVRM delta above 0 also blocks any further GB10 life.
+  if [ "$GB_ATT" -ge 1 ] && [ "$rc" -eq 0 ] && [ "$gone" = yes ] && ! grep -aqi 'seat kill' "$DLOG"; then
     GB_STOP_OK=1; GB_STOP_DESC="graceful stop (exit 0, session closed)"
   else
     GB_UNCLEAN=1
-    GB_STOP_DESC="graceful stop NOT clean (exit $rc, shutdown acked: $ack, socket removed: $gone)"
+    GB_STOP_DESC="graceful stop NOT clean (exit $rc, shutdown requests sent: $GB_ATT, acked: $GB_ACK, socket removed: $gone)"
   fi
   gb_life_record
+  case $GB_LAST_DELTA in 0|unavailable) ;; *) GB_UNCLEAN=1; GB_STOP_OK=0; GB_STOP_DESC="$GB_STOP_DESC; NEW NVRM kernel-log lines: $GB_LAST_DELTA" ;; esac
   GB_STOPPING=0
   [ -z "${GB_RESULT_FILE:-}" ] || echo "exit=$GB_EXIT clean=$GB_STOP_OK" >"$GB_RESULT_FILE"
   [ -z "$SIG_PENDING" ] || { echo "driver exiting after signal $SIG_PENDING" >&2; exit 130; }
   [ "$GB_STOP_OK" = 1 ]
 }
-gb_early_exit() { wait "$DPID" 2>/dev/null; GB_EXIT=$?; GB_STOP_OK=0; GB_STOP_DESC="daemon exited by itself (exit $GB_EXIT), no shutdown request"; GB_UNCLEAN=1; gb_life_record; }
+gb_early_exit() { wait "$DPID" 2>/dev/null; GB_EXIT=$?; GB_STOP_OK=0; GB_STOP_DESC="daemon exited by itself (exit $GB_EXIT), no shutdown request"; GB_UNCLEAN=1; GB_LIVE_PID=""; GB_ATT=0; GB_ACK=no; GB_GONE=no; gb_life_record; }
 
 # Inner half of the signal proof, run as its own session and process-group leader (see selftest_gb).
-selftest_gb_sig() { # SIGNAME DIR
-  local sig=$1 t=$2; mkdir -p "$t"; GB_POLL=0.2; GB_RESULT_FILE=$t/result
-  trap 'gb_on_signal INT' INT; trap 'gb_on_signal TERM' TERM; trap 'gb_on_signal HUP' HUP
+selftest_gb_sig() { # SIGNAME DIR [none|before|after]: where the signal is sent relative to gb_spawn
+  local sig=$1 t=$2 mode=${3:-none}; mkdir -p "$t"; GB_POLL=0.2; GB_RESULT_FILE=$t/result
+  gb_install_traps
+  kill() { echo "KILL-CALLED $*" >>"$t/kills"; return 0; }   # any kill the script itself issues is recorded; the test sends with `command kill`
   cli() { [ "$1 $2" = "compose shutdown" ] && { echo '{"step": "S7", "shutdown": true}'; : >"$t/go"; }; }
-  LOGS=$t; SOCK=$t/s; DN=1; DLOG=$t/d.log; GB_LIVES='[]'; NVRM_BEFORE=0; : >"$SOCK"
+  LOGS=$t; SOCK=$t/s; DN=1; DLOG=$t/d.log; GB_LIVES='[]'; NVRM_BEFORE=$(nvrm_count); : >"$SOCK"
   cat >"$t/fake.sh" <<F
 #!/bin/bash
-for s in TERM QUIT USR1; do trap "echo got-\$s >>$t/sigs" \$s; done
+for s in TERM QUIT USR1 USR2 ALRM; do trap "echo got-\$s >>$t/sigs" \$s; done
 echo '  Backend: NativeTransformerBackend/OmegaGb10Backend (fake)'
 while [ ! -e $t/go ]; do sleep 0.1 & wait \$!; done
 sleep 1; rm -f $SOCK; exit 0
 F
   chmod +x "$t/fake.sh"
-  gb_spawn "$DLOG" "$t/fake.sh"; DAEMON_GB=1
+  case $mode in
+    before) GB_BEFORE_ASSIGN_HOOK="sleep 0.5; command kill -s $sig -- -$$" ;;   # between the background launch and DPID=$!
+    after) GB_AFTER_SPAWN_HOOK="sleep 0.5; command kill -s $sig -- -$$" ;;      # right after the spawn, before start_daemon's checks
+  esac
+  gb_spawn "$DLOG" "$t/fake.sh"
   sleep 0.5
   local sid pg; sid=$(sed 's/.*) //' /proc/$DPID/stat | awk '{print $4}'); pg=$(sed 's/.*) //' /proc/$DPID/stat | awk '{print $3}')
   echo "driver pid $$ pgid $(sed 's/.*) //' /proc/$$/stat | awk '{print $3}'); daemon pid $DPID (\$! matches: $([ -d /proc/$DPID ] && echo yes)) session $sid pgrp $pg" >"$t/where"
@@ -162,33 +188,48 @@ selftest_gb() {
   local t rc=0; t=$(mktemp -d); GB_POLL=0.2
   kill() { echo "KILL-CALLED $*" >>"$t/kills"; return 0; }
   cli() { [ -e "$t/fifo" ] || return 1; if [ "$1 $2" = "compose shutdown" ]; then
+            [ -e "$t/lostack" ] && { [ -e "$t/sent" ] || { : >"$t/sent"; echo down >"$t/fifo" & }; return 1; }
             [ -e "$t/refuse" ] && { rm -f "$t/refuse"; return 1; }; echo '{"step": "S7", "shutdown": true}'; echo down >"$t/fifo" & fi; }
-  LOGS=$t; SOCK=$t/s; DN=1; DLOG=$t/d.log; GB_LIVES='[]'; NVRM_BEFORE=0
+  LOGS=$t; SOCK=$t/s; DN=1; DLOG=$t/d.log; GB_LIVES='[]'; NVRM_BEFORE=$(nvrm_count)
   printf '  Backend: NativeTransformerBackend/OmegaGb10Backend (x)\n  GB10_SERVING_RESERVATION reserved bytes=1 (x)\n' >"$DLOG"
   run_fake() { # exitcode: fake daemon that exits with that code a second after the shutdown request
     rm -f "$t/fifo"; mkfifo "$t/fifo"; : >"$SOCK"
-    ( read -r _ <"$t/fifo"; sleep 1; [ "$1" = 0 ] && rm -f "$SOCK"; exit "$1" ) & DPID=$!; DAEMON_GB=1
+    ( read -r _ <"$t/fifo"; sleep 1; [ "$1" = 0 ] && rm -f "$SOCK"; exit "$1" ) & DPID=$!; DAEMON_GB=1; GB_LIVE_PID=$DPID
   }
   run_fake 0; touch "$t/refuse"; gb_stop; [ "$GB_STOP_OK" = 1 ] && [ "$GB_EXIT" = 0 ] || { echo "clean stop control failed: $GB_STOP_DESC"; rc=1; }
   run_fake 3; gb_stop; [ "$GB_STOP_OK" = 0 ] && [ "$GB_UNCLEAN" = 1 ] || { echo "unclean stop control failed: $GB_STOP_DESC"; rc=1; }
-  [ "$(printf '%s' "$GB_LIVES" | jq 'length')" = 2 ] || { echo "life records: $GB_LIVES"; rc=1; }
+  GB_UNCLEAN=0; run_fake 0; touch "$t/lostack"; gb_stop; rm -f "$t/lostack" "$t/sent"
+  [ "$GB_STOP_OK" = 1 ] && [ "$GB_ACK" = no ] && [ "$GB_ATT" -ge 1 ] || { echo "ack lost but daemon exit 0 + socket removed should be clean: $GB_STOP_DESC"; rc=1; }
+  DPID=""; GB_LIVE_PID=""; gb_stop; [ "$GB_STOPPING" = 0 ] || { echo "GB_STOPPING stuck after a no-daemon stop"; rc=1; }
+  [ "$(printf "%s" "$GB_LIVES" | jq length)" = 3 ] || { echo "life records: $GB_LIVES"; rc=1; }
   [ ! -s "$t/kills" ] || { echo "a kill was called: $(cat "$t/kills")"; rc=1; }
-  # Signals sent to the driver's process group: the GB10 daemon (own session, HUP/INT ignored) must not receive them,
-  # and the driver must still collect exit 0 after the graceful stop. Control: an ordinary background child does receive TERM.
-  local s r
-  for s in INT HUP TERM; do
-    setsid -w bash "$0" selftest-gb-sig "$s" "$t/sig-$s" 2>"$t/sig-$s.err"
+  # Signals sent to the driver's process group: the GB10 daemon (own session, HUP/INT ignored) must not receive them, the
+  # script must issue no kill, and the driver must still collect exit 0 after the graceful stop. Also with the signal
+  # delivered inside gb_spawn (before DPID is assigned: deferred) and right after it (daemon live, before any later check).
+  local s m r
+  for s in $GB_SIGS; do
+    setsid -w bash "$0" selftest-gb-sig "$s" "$t/sig-$s" none 2>"$t/sig-$s.err"
     r=$(cat "$t/sig-$s/result" 2>/dev/null)
-    if [ "$r" = "exit=0 clean=1" ] && [ ! -s "$t/sig-$s/sigs" ] && grep -q "graceful" "$t/sig-$s.err"; then
-      echo "  group $s: daemon received nothing; driver stopped it gracefully, $r; $(cat "$t/sig-$s/where")"
+    if [ "$r" = "exit=0 clean=1" ] && [ ! -s "$t/sig-$s/sigs" ] && [ ! -s "$t/sig-$s/kills" ] && grep -q "graceful" "$t/sig-$s.err"; then
+      echo "  group $s: daemon received nothing, no kill called; driver stopped it gracefully, $r"
     else
-      echo "group $s FAILED: result='$r' daemon saw: $(cat "$t/sig-$s/sigs" 2>/dev/null)"; rc=1
+      echo "group $s FAILED: result='$r' daemon saw: $(cat "$t/sig-$s/sigs" 2>/dev/null) kills: $(cat "$t/sig-$s/kills" 2>/dev/null)"; rc=1
     fi
   done
+  echo "  last case: $(cat "$t/sig-TERM/where")"
+  for m in before after; do for s in TERM INT; do
+    setsid -w bash "$0" selftest-gb-sig "$s" "$t/h-$m-$s" "$m" 2>"$t/h-$m-$s.err"
+    r=$(cat "$t/h-$m-$s/result" 2>/dev/null)
+    if [ "$r" = "exit=0 clean=1" ] && [ ! -s "$t/h-$m-$s/sigs" ] && [ ! -s "$t/h-$m-$s/kills" ]; then
+      echo "  $s sent $m the spawn completed: graceful stop, $r, no kill called"
+    else
+      echo "hook $m/$s FAILED: result='$r' kills: $(cat "$t/h-$m-$s/kills" 2>/dev/null)"; rc=1
+    fi
+  done; done
   setsid -w bash -c 'bash -c "trap \"echo got-TERM >>'"$t"'/ctl\" TERM; sleep 3 & wait" & sleep 0.5; command kill -s TERM -- -$$; wait' 2>/dev/null; sleep 0.3
   grep -q got-TERM "$t/ctl" 2>/dev/null && echo "  control: an ordinary child in the group DID receive TERM (the test can see a leak)" || { echo "control failed: ordinary child did not get TERM"; rc=1; }
   unset -f kill cli; rm -rf "$t"
-  [ $rc -eq 0 ] && echo "selftest-gb ok (graceful stop waits for exit 0; unclean exit flagged; refused request retried; no kill called; group INT/HUP/TERM never reach the GB10 daemon)"
+  [ $rc -eq 0 ] && echo "selftest-gb ok (graceful stop waits for exit 0; unclean exit flagged; refused request retried; no kill called; lost ack still clean; group INT TERM HUP QUIT USR1 USR2 PIPE ALRM never reach the GB10 daemon, also when sent during the spawn)"
   return $rc
 }
 
@@ -197,7 +238,7 @@ case "${1:-}" in
   check) check_doc "${2:?file}"; exit 0 ;;
   selftest) selftest; exit $? ;;
   selftest-gb) selftest_gb; exit $? ;;
-  selftest-gb-sig) selftest_gb_sig "$2" "$3"; exit $? ;;
+  selftest-gb-sig) selftest_gb_sig "$2" "$3" "${4:-none}"; exit $? ;;
   run) ;;
   *) echo "usage: $0 run | check FILE | selftest | selftest-gb" >&2; exit 2 ;;
 esac
@@ -385,23 +426,23 @@ start_daemon() { # model_dir [VAR=val ...]; sets CUR_* from the daemon log
     [ -n "$CUR_RESV" ] || { echo "no GB10 reservation line"; gb_stop; return 1; }
     return 0
   fi
-  case $CUR_BACKEND in *CPU-reference*) ;; *) echo "not the CPU reference backend: $CUR_BACKEND"; kill -9 "$DPID" 2>/dev/null; wait "$DPID" 2>/dev/null; DPID=""; return 1 ;; esac
+  case $CUR_BACKEND in *CPU-reference*) ;; *) echo "not the CPU reference backend: $CUR_BACKEND"; safe_kill9 "$DPID"; wait "$DPID" 2>/dev/null; DPID=""; return 1 ;; esac
   return 0
 }
 KILL_RC=""
 kill9() {
   GB_STOP_DESC=""
   # v4-gb10: a live GB10 daemon is never signalled; stop it through its shutdown path and wait without a timeout.
-  if [ "$GB" = 1 ] && [ "$DAEMON_GB" = 1 ] && [ -n "$DPID" ]; then gb_stop; local r=$?; KILL_RC=$GB_EXIT; return $r; fi
+  if [ "$GB" = 1 ] && [ -n "$GB_LIVE_PID" ]; then gb_stop; local r=$?; KILL_RC=$GB_EXIT; return $r; fi
   [ -n "$DPID" ] || { KILL_RC="no daemon"; return 1; }
-  kill -9 "$DPID" 2>/dev/null; wait "$DPID" 2>/dev/null; KILL_RC=$?; DPID=""; rm -f "$SOCK"
+  safe_kill9 "$DPID"; wait "$DPID" 2>/dev/null; KILL_RC=$?; DPID=""; rm -f "$SOCK"
   [ "$KILL_RC" -eq 137 ]
 }
 if [ "$GB" = 1 ]; then
   # exit path: a GB10 daemon still alive is stopped gracefully (unbounded wait), a CPU daemon is killed as in v1-v3
-  gb_exit() { if [ -n "$DPID" ]; then if [ "$DAEMON_GB" = 1 ]; then gb_stop; else kill9; fi; fi; }
+  gb_exit() { if [ -n "$GB_LIVE_PID" ]; then gb_stop; elif [ -n "$DPID" ]; then kill9; fi; }
   trap gb_exit EXIT
-  trap 'gb_on_signal INT' INT; trap 'gb_on_signal TERM' TERM; trap 'gb_on_signal HUP' HUP
+  gb_install_traps
 else
 trap '[ -n "$DPID" ] && kill -9 "$DPID" 2>/dev/null' EXIT
 fi

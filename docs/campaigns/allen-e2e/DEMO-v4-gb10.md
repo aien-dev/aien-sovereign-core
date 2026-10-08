@@ -34,10 +34,10 @@ channel under a spinning seat makes the driver's stop request time out). The dri
 `ShutdownAck`, `crates/aien-runtime/src/spine.rs` Shutdown), then waits with NO timeout for the daemon to exit. This applies at
 S1, S5, the S7 switch-over, to every error path, and to the exit trap. `aien-cli stop` is not used (it also runs `pkill`).
 If a GB10 daemon never takes the request or never exits, the driver waits and a human decides; it does not kill.
-A stop is "clean" only if: the shutdown request was acknowledged, the daemon exits 0, its socket file is removed, and the
+A stop is "clean" only if: a shutdown request was sent at least once, the daemon exits 0, its socket file is removed, and the
 daemon log has no `seat kill` line. After an unclean stop the driver starts no further GB10 daemon.
 No "session closed" line exists: the daemon prints none (checked in the Q277 logs and the sources). The four clean-stop signs used are (1) ShutdownAck received, (2) exit code 0, (3) the socket file removed, (4) no `seat kill` line in the log; the
-kernel-log NVRM delta below is recorded as well (Q277 judged a close by exit 0 and no new NVRM lines).
+kernel-log NVRM delta below is recorded as well, and a delta above 0 blocks any further GB10 life (Q277 judged a close by exit 0 and no new NVRM lines).
 
 ## Evidence recorded per GB10 life (receipt `GB10-lives`)
 The `Backend:` line, the `GB10_SERVING_RESERVATION reserved bytes=` line, count of lines matching `fallback`, count of NVRM
@@ -68,7 +68,21 @@ HOME, which the Q277 run did not use: UNKNOWN whether the GB10 path reads HOME.
 ## Signals to the driver
 The GB10 daemon is started in its own session (`setsid`, with HUP and INT ignored, `$!` still its pid; the driver checks that it
 is its own session leader). A Ctrl-C, a terminal hangup or a signal to the driver's process group therefore cannot reach it.
-The driver traps INT, TERM and HUP: it stops a live GB10 daemon gracefully (unbounded wait, a repeated signal only
+The driver traps INT, TERM, HUP, QUIT, USR1, USR2, PIPE and ALRM: it stops a live GB10 daemon gracefully (unbounded wait, a repeated signal only
 queues the exit) and only then exits (130); it never exits while a GB10 daemon is alive. `selftest-gb` proves this with a
 fake daemon, including a control showing an ordinary child in the same group does receive the signal.
 A SIGKILL of the driver itself, or a power loss, cannot be handled and is outside this rule.
+Signals that arrive while the daemon is being spawned are deferred until its pid is recorded, then handled by the graceful
+stop. The pid of a live GB10 daemon is held in `GB_LIVE_PID` until the stop's wait returns; the only function that sends a
+kill (`safe_kill9`, CPU daemons only) refuses that pid. The one unprotected instant is the few microseconds between the
+fork and `setsid`, when the child is still a plain shell that has not opened the chip.
+
+### What the driver cannot survive
+SIGKILL of the driver, or a tree-kill by a harness (kill of the whole process tree or container), bypasses every handler. The
+GB10 daemon then survives orphaned in its own session and no Shutdown has been sent. A human must stop it gracefully,
+without any signal, with:
+
+    AIEN_RUNTIME_SOCK=$CLAUDE_JOB_DIR/tmp/demo/run/s $CLAUDE_JOB_DIR/tmp/demo/target/release/aien-cli compose shutdown
+
+(expect `{"step": "S7", "shutdown": true}`), then wait until `pgrep -f 'aien-cli-main daemon'` shows nothing and check the
+kernel log for new NVRM lines. Never `kill` it.
