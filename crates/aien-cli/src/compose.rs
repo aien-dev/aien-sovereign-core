@@ -20,6 +20,9 @@
 //!             [--desk 1 | --desk-key PATH | --desk-mac HEX --desk-nonce N]
 //!                                                        optional approval-desk MAC (#297); the daemon
 //!                                                        checks it only with AIEN_COMPOSE_AUTHORIZE_REQUIRES_DESK=1
+//!                                                        ON mode adds assurance only if the authorizing caller
+//!                                                        cannot read the desk key file; a process as the same
+//!                                                        OS user that can read it passes trivially (as in #249)
 //!   execute   --report S3.json --workspace W --authorization ID
 //!                                                        S5 the write, confined
 //!   explain   --report S3.json --cite ID,.. --receipts P,..
