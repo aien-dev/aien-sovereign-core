@@ -241,6 +241,54 @@ impl OmegaGb10Backend {
         }
     }
 
+    /// `out[m x out_dim] = x[m x in_dim] * W^T` for a device-resident weight. The weight has no
+    /// host values, so a chip failure cannot fall back to the CPU: it is recorded and then
+    /// refused by name (panic), in every build.
+    fn chip_resident_matmul(
+        &self,
+        out: &mut [f32],
+        x: &[f32],
+        w: &crate::resident::ResidentWeight,
+        m: usize,
+        in_dim: usize,
+        out_dim: usize,
+    ) {
+        let refuse = |this: &Self, why: String| -> ! {
+            this.fail(why.clone());
+            crate::resident::refuse_resident(&why)
+        };
+        if w.k() != in_dim || w.n() != out_dim || x.len() != m * in_dim || out.len() != m * out_dim
+        {
+            refuse(
+                self,
+                format!(
+                    "resident weight is {}x{} but the call is m={m} in={in_dim} out={out_dim} (x={} out={})",
+                    w.k(),
+                    w.n(),
+                    x.len(),
+                    out.len()
+                ),
+            );
+        }
+        // One lock serializes every chip call (same lock as `chip_matmul`).
+        let guard = match self.chip.lock() {
+            Ok(g) => g,
+            Err(_) => refuse(self, "chip lock poisoned".into()),
+        };
+        let res = w.matmul_f32(m, x, out);
+        drop(guard);
+        match res {
+            Ok(ns) => {
+                self.chip_calls.fetch_add(1, Ordering::Relaxed);
+                self.chip_ns.fetch_add(ns, Ordering::Relaxed);
+            }
+            Err(e) => refuse(
+                self,
+                format!("resident matmul m={m} k={in_dim} n={out_dim}: {e}"),
+            ),
+        }
+    }
+
     /// Rope cos/sin table for `pos`, built exactly as the reference does
     /// (`tensor::apply_rope`, tensor.rs:101): f64 frequency and angle, then cast to f32.
     /// Cached per (head_dim, rope parameters, pos).
@@ -656,6 +704,59 @@ impl TensorBackend for OmegaGb10Backend {
             self.reference_for(TensorOp::MatmulBatch);
             self.reference
                 .matmul_batch(out, x, weight, batch_size, in_dim, out_dim);
+        }
+    }
+
+    fn matmul_vec_w(
+        &self,
+        out: &mut [f32],
+        x: &[f32],
+        weight: crate::resident::MatrixRef<'_>,
+        out_dim: usize,
+        in_dim: usize,
+    ) {
+        match weight {
+            crate::resident::MatrixRef::Host(w) => self.matmul_vec(out, x, w, out_dim, in_dim),
+            crate::resident::MatrixRef::Resident(r) => {
+                self.chip_resident_matmul(out, x, r, 1, in_dim, out_dim)
+            }
+        }
+    }
+
+    fn matmul_batch_w(
+        &self,
+        out: &mut [f32],
+        x: &[f32],
+        weight: crate::resident::MatrixRef<'_>,
+        batch_size: usize,
+        in_dim: usize,
+        out_dim: usize,
+    ) {
+        match weight {
+            crate::resident::MatrixRef::Host(w) => {
+                self.matmul_batch(out, x, w, batch_size, in_dim, out_dim)
+            }
+            crate::resident::MatrixRef::Resident(r) => {
+                self.chip_resident_matmul(out, x, r, batch_size, in_dim, out_dim)
+            }
+        }
+    }
+
+    fn compute_logits_w(
+        &self,
+        logits: &mut [f32],
+        hidden: &[f32],
+        head: crate::resident::MatrixRef<'_>,
+        vocab_size: usize,
+        hidden_dim: usize,
+    ) {
+        match head {
+            crate::resident::MatrixRef::Host(w) => {
+                self.compute_logits(logits, hidden, w, vocab_size, hidden_dim)
+            }
+            crate::resident::MatrixRef::Resident(r) => {
+                self.chip_resident_matmul(logits, hidden, r, 1, hidden_dim, vocab_size)
+            }
         }
     }
 

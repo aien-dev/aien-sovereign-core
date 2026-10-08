@@ -1,5 +1,6 @@
 //! Native weight data structures and zero-dependency loaders for transformer models.
 
+use crate::resident::{MatrixRef, MatrixWeight};
 use crate::tensor::{
     apply_rope_params, matmul_vec, rmsnorm, rmsnorm_heads_in_place,
     scaled_dot_product_attention_single, swiglu,
@@ -24,14 +25,14 @@ pub struct SequenceState {
 #[derive(Debug, Clone)]
 pub struct TransformerLayerWeights {
     pub input_layernorm: Vec<f32>,
-    pub q_proj: Vec<f32>,
-    pub k_proj: Vec<f32>,
-    pub v_proj: Vec<f32>,
-    pub o_proj: Vec<f32>,
+    pub q_proj: MatrixWeight,
+    pub k_proj: MatrixWeight,
+    pub v_proj: MatrixWeight,
+    pub o_proj: MatrixWeight,
     pub post_attention_layernorm: Vec<f32>,
-    pub gate_proj: Vec<f32>,
-    pub up_proj: Vec<f32>,
-    pub down_proj: Vec<f32>,
+    pub gate_proj: MatrixWeight,
+    pub up_proj: MatrixWeight,
+    pub down_proj: MatrixWeight,
     /// Qwen3 per-head RMSNorm weights `[head_dim]` for Q and K (`config.qk_norm`); `None` for
     /// Llama-architecture models.
     pub q_norm: Option<Vec<f32>>,
@@ -77,10 +78,11 @@ pub struct TransformerWeights {
     pub embed_tokens: Vec<f32>,
     pub layers: Vec<TransformerLayerWeights>,
     pub final_norm: Vec<f32>,
-    /// Output projection `[vocab, hidden]`. `None` when `config.tie_word_embeddings`:
-    /// the projection is `embed_tokens` itself (no second copy). Read it through
-    /// [`TransformerWeights::output_projection`].
-    pub lm_head: Option<Vec<f32>>,
+    /// Output projection `[vocab, hidden]`. `None` when `config.tie_word_embeddings` on the host
+    /// path: the projection is `embed_tokens` itself (no second copy). On the GB10 resident path
+    /// it is `Some(Resident)` even for tied models (the embedding's own device copy). Read it
+    /// through [`TransformerWeights::output_matrix`].
+    pub lm_head: Option<MatrixWeight>,
 }
 
 /// Diagnostic capture of intermediate activations and shapes across all transformer layers.
@@ -95,9 +97,15 @@ impl TransformerWeights {
     /// `lm_head`, or `embed_tokens` for a model with tied word embeddings.
     #[inline]
     pub fn output_projection(&self) -> &[f32] {
+        self.output_matrix().host_or_refuse("output_projection")
+    }
+
+    /// [`Self::output_projection`] as host values or a device handle; what the backends take.
+    #[inline]
+    pub fn output_matrix(&self) -> MatrixRef<'_> {
         match &self.lm_head {
-            Some(lm_head) => lm_head,
-            None => &self.embed_tokens,
+            Some(lm_head) => lm_head.as_ref(),
+            None => MatrixRef::Host(&self.embed_tokens),
         }
     }
 
@@ -192,14 +200,14 @@ impl TransformerWeights {
 
             layers.push(TransformerLayerWeights {
                 input_layernorm,
-                q_proj,
-                k_proj,
-                v_proj,
-                o_proj,
+                q_proj: q_proj.into(),
+                k_proj: k_proj.into(),
+                v_proj: v_proj.into(),
+                o_proj: o_proj.into(),
                 post_attention_layernorm,
-                gate_proj,
-                up_proj,
-                down_proj,
+                gate_proj: gate_proj.into(),
+                up_proj: up_proj.into(),
+                down_proj: down_proj.into(),
                 q_norm: config.qk_norm.then(|| vec![1.0f32; config.head_dim]),
                 k_norm: config.qk_norm.then(|| vec![1.0f32; config.head_dim]),
             });
@@ -223,7 +231,7 @@ impl TransformerWeights {
             embed_tokens,
             layers,
             final_norm,
-            lm_head,
+            lm_head: lm_head.map(Into::into),
         }
     }
 
@@ -712,29 +720,29 @@ impl TransformerWeights {
                 layer.input_layernorm = t;
             }
             if let Some(t) = extract_tensor(&format!("{}.self_attn.q_proj.weight", prefix)) {
-                layer.q_proj = t;
+                layer.q_proj = t.into();
             }
             if let Some(t) = extract_tensor(&format!("{}.self_attn.k_proj.weight", prefix)) {
-                layer.k_proj = t;
+                layer.k_proj = t.into();
             }
             if let Some(t) = extract_tensor(&format!("{}.self_attn.v_proj.weight", prefix)) {
-                layer.v_proj = t;
+                layer.v_proj = t.into();
             }
             if let Some(t) = extract_tensor(&format!("{}.self_attn.o_proj.weight", prefix)) {
-                layer.o_proj = t;
+                layer.o_proj = t.into();
             }
             if let Some(t) = extract_tensor(&format!("{}.post_attention_layernorm.weight", prefix))
             {
                 layer.post_attention_layernorm = t;
             }
             if let Some(t) = extract_tensor(&format!("{}.mlp.gate_proj.weight", prefix)) {
-                layer.gate_proj = t;
+                layer.gate_proj = t.into();
             }
             if let Some(t) = extract_tensor(&format!("{}.mlp.up_proj.weight", prefix)) {
-                layer.up_proj = t;
+                layer.up_proj = t.into();
             }
             if let Some(t) = extract_tensor(&format!("{}.mlp.down_proj.weight", prefix)) {
-                layer.down_proj = t;
+                layer.down_proj = t.into();
             }
             if config.qk_norm {
                 layer.q_norm = extract_tensor(&format!("{}.self_attn.q_norm.weight", prefix));
@@ -748,7 +756,7 @@ impl TransformerWeights {
 
         if !config.tie_word_embeddings {
             if let Some(t) = extract_tensor("lm_head.weight") {
-                weights.lm_head = Some(t);
+                weights.lm_head = Some(t.into());
             }
         }
 
@@ -797,14 +805,14 @@ impl TransformerWeights {
 
             layers.push(TransformerLayerWeights {
                 input_layernorm,
-                q_proj,
-                k_proj,
-                v_proj,
-                o_proj,
+                q_proj: q_proj.into(),
+                k_proj: k_proj.into(),
+                v_proj: v_proj.into(),
+                o_proj: o_proj.into(),
                 post_attention_layernorm,
-                gate_proj,
-                up_proj,
-                down_proj,
+                gate_proj: gate_proj.into(),
+                up_proj: up_proj.into(),
+                down_proj: down_proj.into(),
                 q_norm,
                 k_norm,
             });
@@ -822,7 +830,7 @@ impl TransformerWeights {
             embed_tokens,
             layers,
             final_norm,
-            lm_head,
+            lm_head: lm_head.map(Into::into),
         })
     }
 

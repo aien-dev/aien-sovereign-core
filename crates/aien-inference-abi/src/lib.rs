@@ -18,6 +18,7 @@ pub mod omega_backend;
 pub mod qwen3_coder;
 pub mod qwen3_moe;
 pub mod qwen3_serve;
+pub mod resident;
 pub mod strict;
 pub mod tensor;
 pub mod tensor_abi;
@@ -43,6 +44,7 @@ pub use omega_backend::{
 pub use qwen3_coder::*;
 pub use qwen3_moe::*;
 pub use qwen3_serve::*;
+pub use resident::*;
 pub use tensor::*;
 pub use tensor_abi::*;
 pub use tokenizer::*;
