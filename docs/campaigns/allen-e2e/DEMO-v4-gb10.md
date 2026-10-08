@@ -80,9 +80,11 @@ fork and `setsid`, when the child is still a plain shell that has not opened the
 ### What the driver cannot survive
 SIGKILL of the driver, or a tree-kill by a harness (kill of the whole process tree or container), bypasses every handler. The
 GB10 daemon then survives orphaned in its own session and no Shutdown has been sent. A human must stop it gracefully,
-without any signal, with:
+without any signal. At every GB10 spawn the driver writes the exact command, with absolute paths, to
+`$CLAUDE_JOB_DIR/tmp/demo/run/logs/STOP-BY-HAND.txt` (a human shell may not have `CLAUDE_JOB_DIR`; for this campaign's job
+that is `/home/drakestapleton/.claude/jobs/294ea9b6/tmp/demo/run/logs/STOP-BY-HAND.txt`). Its form is:
 
-    AIEN_RUNTIME_SOCK=$CLAUDE_JOB_DIR/tmp/demo/run/s $CLAUDE_JOB_DIR/tmp/demo/target/release/aien-cli compose shutdown
+    AIEN_RUNTIME_SOCK=<job>/tmp/demo/run/s <job>/tmp/demo/target/release/aien-cli compose shutdown
 
 (expect `{"step": "S7", "shutdown": true}`), then wait until `pgrep -f 'aien-cli-main daemon'` shows nothing and check the
 kernel log for new NVRM lines. Never `kill` it.

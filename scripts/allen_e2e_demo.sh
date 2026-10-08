@@ -107,6 +107,8 @@ gb_spawn() { # logfile cmd...; sets DPID, DAEMON_GB, GB_LIVE_PID
   ( trap '' HUP INT; exec setsid "$@" >"$log" 2>&1 </dev/null ) &
   eval "${GB_BEFORE_ASSIGN_HOOK:-:}"   # test hook: a signal here is deferred (SPAWNING=1)
   DPID=$!; GB_LIVE_PID=$DPID; SPAWNING=0
+  # the exact graceful-stop command, absolute paths, for a human if the driver itself is SIGKILLed (see DEMO-v4-gb10.md)
+  printf 'AIEN_RUNTIME_SOCK=%s %s compose shutdown\n' "${SOCK:-}" "${BIN:-aien-cli}" >"${LOGS:-.}/STOP-BY-HAND.txt" 2>/dev/null
   eval "${GB_AFTER_SPAWN_HOOK:-:}"     # test hook: a signal here sees a live GB10 daemon
   [ -z "$SIG_PENDING" ] || gb_stop      # a signal deferred during the spawn: stop gracefully now (exits 130)
 }
