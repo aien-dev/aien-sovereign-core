@@ -1053,3 +1053,36 @@ fn stale_temp_files_in_the_log_are_removed_on_open() {
         Err(MemoryRefusal::Damaged(_))
     ));
 }
+
+#[test]
+fn read_only_open_and_open_during_a_held_writer_lock_do_not_sweep() {
+    let f = fx();
+    let m = f.open();
+    m.put(Scope::Work, Kind::Fact, "x").unwrap();
+    let orphan = f
+        .dir()
+        .join("keys")
+        .join(format!("{}-v1.key", "ab".repeat(16)));
+    std::fs::write(&orphan, [1u8; 32]).unwrap();
+    let stale = f.dir().join("log").join(".tmp-9-9-9");
+    std::fs::write(&stale, b"in flight").unwrap();
+    // another process holds the writer lock (simulated by a second handle)
+    let lock = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(f.dir().join("lock"))
+        .unwrap();
+    lock.lock().unwrap();
+    let ro = Memory::open_read_only(&f.home, Some(&resolved(1))).unwrap();
+    assert_eq!(texts(&ro.recall(&g("work"), None, &lim()).unwrap()), ["x"]);
+    assert!(orphan.exists() && stale.exists());
+    assert!(ro.put(Scope::Work, Kind::Fact, "no").is_err());
+    let m2 = f.open(); // lock busy: verifies only
+    assert!(orphan.exists() && stale.exists());
+    assert_eq!(texts(&m2.recall(&g("work"), None, &lim()).unwrap()), ["x"]);
+    lock.unlock().unwrap();
+    drop(lock);
+    // lock free again: a normal open sweeps
+    f.open();
+    assert!(!orphan.exists() && !stale.exists());
+}

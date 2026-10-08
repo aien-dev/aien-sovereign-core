@@ -96,7 +96,11 @@ writes SubjectState. A real subject intent needs an aienos ADR 0018 amendment.
 
 ## Other limits
 
-- Single writer per store is assumed. A second writer racing the same record
+- Writers take an exclusive lock (flock on `lock` in the store folder) per
+  operation. Only an open that gets the lock sweeps orphan keys, removes stale
+  temp files and finishes pending forgets; an open that does not (or
+  `open_read_only`) changes nothing. flock covers processes on one machine, not
+  network filesystems. Single writer per store is otherwise assumed. A second writer racing the same record
   number loses cleanly (`Conflict`); key files of a crashed put may be left
   behind and are harmless (no ciphertext refers to them).
 - The store needs a filesystem that supports hard links.

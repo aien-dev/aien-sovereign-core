@@ -227,6 +227,7 @@ struct Replay {
 }
 
 pub struct Memory {
+    read_only: bool,
     dir: PathBuf,
     agent: [u8; 32],
     root: [u8; 32],
@@ -279,6 +280,7 @@ impl Memory {
     pub fn at(dir: PathBuf, engaged: Option<&Resolved>) -> Result<Memory, R> {
         let r = engaged.ok_or(R::NotEngaged)?;
         let m = Memory {
+            read_only: false,
             dir,
             agent: r.agent,
             root: r.root,
@@ -294,6 +296,43 @@ impl Memory {
     pub fn with_fault_hook(mut self, hook: Hook) -> Memory {
         self.hook = Some(hook);
         self
+    }
+
+    /// Open without recovery, sweeping or writing: safe beside a running writer.
+    pub fn open_read_only(home: &Path, engaged: Option<&Resolved>) -> Result<Memory, R> {
+        let r = engaged.ok_or(R::NotEngaged)?;
+        let m = Memory {
+            read_only: true,
+            dir: memory_dir(home),
+            agent: r.agent,
+            root: r.root,
+            #[cfg(feature = "fault-injection")]
+            hook: None,
+        };
+        m.check_layout()?;
+        m.replay()?;
+        Ok(m)
+    }
+
+    /// Exclusive writer lock (flock on `<store>/lock`), held until dropped.
+    fn lock(&self) -> Result<std::fs::File, R> {
+        if self.read_only {
+            return Err(R::Invalid("this memory was opened read-only".into()));
+        }
+        let f = self.lock_file()?;
+        f.lock().map_err(|e| io("lock", e))?;
+        Ok(f)
+    }
+
+    fn lock_file(&self) -> Result<std::fs::File, R> {
+        std::fs::create_dir_all(&self.dir).map_err(|e| io("create store folder", e))?;
+        std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(self.dir.join("lock"))
+            .map_err(|e| io("open lock", e))
     }
 
     pub fn dir(&self) -> &Path {
@@ -683,6 +722,11 @@ impl Memory {
     /// Run on every open, so restoring an old copy of `keys/` cannot bring
     /// forgotten content back once the log is intact.
     pub fn reapply_forgets(&self) -> Result<usize, R> {
+        let _g = self.lock()?;
+        self.reapply_inner()
+    }
+
+    fn reapply_inner(&self) -> Result<usize, R> {
         let rp = self.replay()?;
         let mut keep = std::collections::BTreeSet::new();
         for (id, it) in &rp.items {
@@ -721,6 +765,15 @@ impl Memory {
 
     fn recover(&self) -> Result<(), R> {
         self.check_layout()?;
+        // Sweeping and finishing forgets need the writer lock. If another process
+        // holds it, it may be mid-write: only verify, change nothing.
+        let _guard = match self.lock_file() {
+            Ok(f) if f.try_lock().is_ok() => f,
+            _ => {
+                self.replay()?;
+                return Ok(());
+            }
+        };
         // Leftovers of a crashed append (single writer: none can be in flight now).
         if let Ok(rd) = std::fs::read_dir(self.log_dir()) {
             for ent in rd.flatten() {
@@ -767,7 +820,7 @@ impl Memory {
             self.remove_marker(&path)?;
         }
         self.replay()?; // verify the log even when nothing is pending
-        self.reapply_forgets()?;
+        self.reapply_inner()?;
         Ok(())
     }
 
@@ -789,6 +842,7 @@ impl Memory {
     /// Store a new item; returns its id.
     pub fn put(&self, scope: Scope, kind: Kind, text: &str) -> Result<String, R> {
         Memory::check_text(text)?;
+        let _g = self.lock()?;
         let rp = self.replay()?;
         let item = rand_hex(16)?;
         let kid = key_id(&item, 1);
@@ -817,6 +871,7 @@ impl Memory {
         text: &str,
     ) -> Result<u32, R> {
         Memory::check_text(text)?;
+        let _g = self.lock()?;
         let rp = self.replay()?;
         let it = rp
             .items
@@ -857,6 +912,7 @@ impl Memory {
         auth: impl Into<Authority<'a>>,
         target: ForgetTarget,
     ) -> Result<Vec<String>, R> {
+        let _g = self.lock()?;
         let rp = self.replay()?;
         let auth = auth.into();
         let (marker, ids, op) = match &target {
@@ -909,6 +965,7 @@ impl Memory {
 
     /// Mark a goal closed. Its content stays readable (the key is kept).
     pub fn close_goal<'a>(&self, auth: impl Into<Authority<'a>>, item: &str) -> Result<(), R> {
+        let _g = self.lock()?;
         let rp = self.replay()?;
         let it = rp
             .items
@@ -1194,12 +1251,22 @@ fn apply(rp: &mut Replay, rec: &Record) -> Result<(), String> {
 /// Open an existing regular file without following a symlink: lstat must say
 /// "regular file" and the opened handle must be the same inode (no swap race).
 fn open_regular(path: &Path, write: bool) -> std::io::Result<std::fs::File> {
+    open_regular_with(path, write, || {})
+}
+
+/// `between` runs after the lstat and before the open (test seam for the swap race).
+fn open_regular_with(
+    path: &Path,
+    write: bool,
+    between: impl FnOnce(),
+) -> std::io::Result<std::fs::File> {
     use std::os::unix::fs::MetadataExt;
     let bad = |w: &str| std::io::Error::new(std::io::ErrorKind::PermissionDenied, w.to_string());
     let l = std::fs::symlink_metadata(path)?;
     if !l.file_type().is_file() {
         return Err(bad("not a regular file"));
     }
+    between();
     let f = std::fs::OpenOptions::new()
         .read(true)
         .write(write)
@@ -1238,4 +1305,29 @@ fn check_dir(p: &Path, private: bool) -> Result<(), R> {
             .map_err(|e| io("tighten folder mode", e))?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn open_regular_refuses_a_file_swapped_between_lstat_and_open() {
+        let d = std::env::temp_dir().join(format!("aienmem-swap-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let (a, b) = (d.join("a"), d.join("b"));
+        std::fs::write(&a, b"original").unwrap();
+        std::fs::write(&b, b"other inode").unwrap();
+        let r = open_regular_with(&a, false, || {
+            std::fs::rename(&b, &a).unwrap(); // a now names a different inode
+        });
+        assert_eq!(r.unwrap_err().kind(), std::io::ErrorKind::PermissionDenied);
+        // no swap: opens fine; symlink: refused
+        std::fs::write(d.join("c"), b"x").unwrap();
+        assert!(open_regular(&d.join("c"), false).is_ok());
+        std::os::unix::fs::symlink(d.join("c"), d.join("l")).unwrap();
+        assert!(open_regular(&d.join("l"), false).is_err());
+        let _ = std::fs::remove_dir_all(&d);
+    }
 }
