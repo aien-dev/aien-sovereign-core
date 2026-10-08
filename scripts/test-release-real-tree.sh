@@ -33,7 +33,7 @@ cp "$ROOT/release/candidate.toml" "$T/release/"; cp "$ROOT/Cargo.lock" "$T/"
 # and enforced at tag time by release.yml.
 sed -n 's/^omega-commit = "\([0-9a-f]\{40\}\)"$/\1/p' "$T/release/candidate.toml" > "$T/omega.lock"
 [[ -s "$T/omega.lock" ]] || fail "release/candidate.toml has no full omega-commit"
-echo constitution > "$T/CONSTITUTION.md"; echo readme > "$T/README.md"; echo '#!/bin/sh' > "$T/install.sh"
+echo licence > "$T/LICENSE"; echo notice > "$T/NOTICE"; echo third > "$T/THIRD_PARTY.md"; echo constitution > "$T/CONSTITUTION.md"; echo readme > "$T/README.md"; echo '#!/bin/sh' > "$T/install.sh"
 for b in aien-cli spark-cockpit-rs spark-inquisitor cortex-encoder-rs cortex-rs spark-supervisor spark-debugger; do
     printf '#!/bin/sh\necho throwaway %s\n' "$b" > "$W/bins/$b"; chmod 755 "$W/bins/$b"
 done

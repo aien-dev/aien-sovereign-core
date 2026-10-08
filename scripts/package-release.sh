@@ -43,7 +43,8 @@ for binary in aien-cli spark-cockpit-rs spark-inquisitor cortex-encoder-rs corte
     [[ "$binary" != aien-cli ]] || name=aien
     cp "$BIN_DIR/$binary" "$PACKAGE_DIR/bin/$name"
 done
-cp CONSTITUTION.md README.md install.sh "$PACKAGE_DIR/"
+for f in LICENSE NOTICE THIRD_PARTY.md; do [[ -f "$f" ]] || { echo "Missing $f; a release must carry its licence notices" >&2; exit 1; }; done
+cp CONSTITUTION.md README.md install.sh LICENSE NOTICE THIRD_PARTY.md "$PACKAGE_DIR/"
 if [[ -d imprints/en2-trinity ]]; then
     mkdir -p "$PACKAGE_DIR/imprints"
     cp -R imprints/en2-trinity "$PACKAGE_DIR/imprints/"
