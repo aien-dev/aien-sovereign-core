@@ -14,7 +14,7 @@
 //!
 //!   remember  --text T                                   S1 constraint record
 //!   inspect   --workspace W                              S2 read-only listing + receipt
-//!   propose   --goal G --workspace W                     S3 one RunComposeTask
+//!   propose   --goal G --workspace W  [--context personal|work|project:NAME]  S3 one RunComposeTask
 //!   authorize --report S3.json --workspace W --approver NAME [--constraint ID]
 //!                                                        S4 the one approval
 //!             [--desk 1 | --desk-key PATH | --desk-mac HEX --desk-nonce N]
@@ -251,6 +251,7 @@ async fn step(sub: &str, m: &HashMap<String, String>) -> Result<Value, String> {
             match send(ControlCommand::RunComposeTask {
                 goal: need(m, "goal")?.to_string(),
                 workspace: ws.display().to_string(),
+                context: m.get("context").cloned(),
             })
             .await?
             {

@@ -374,6 +374,7 @@ fn old_reports_without_persona_still_parse() {
             revision: 2,
             reason: None,
         }),
+        memory: None,
     };
     let mut v = serde_json::to_value(&report).unwrap();
     assert_eq!(v["persona"]["display_name"], "Nova");
