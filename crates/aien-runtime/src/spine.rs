@@ -539,6 +539,10 @@ pub struct Generation {
     pub prompt_tokens: Option<usize>,
     /// NEXT-PHASE-1 v6 R1: `token_ids_sha256` of the submitted prompt ids.
     pub prompt_ids_sha256: Option<String>,
+    /// How the backend chose the generated tokens (sc#294), as the scheduler
+    /// reported it when the sequence finished. None when the proposer or the
+    /// backend does not observe it: an absent claim, not greedy.
+    pub decoding: Option<aien_abi_core::DecodeObservation>,
 }
 
 /// sha256 (hex) of token ids, each as 4 little-endian bytes (NEXT-PHASE-1 v6
@@ -1462,6 +1466,7 @@ fn new_attempt(k: u32) -> ProposalAttempt {
         token_ids: None,
         prompt_tokens: None,
         prompt_ids_sha256: None,
+        decoding: None,
         unmet_requirements: Vec::new(),
     }
 }
@@ -1593,6 +1598,7 @@ pub fn propose_task_checked(
                 a.token_ids = g.token_ids.clone();
                 a.prompt_tokens = g.prompt_tokens;
                 a.prompt_ids_sha256 = g.prompt_ids_sha256.clone();
+                a.decoding = g.decoding.clone();
                 a.text_sha256 = Some(hex(&Sha256::digest(g.text.as_bytes())));
                 a.text = Some(g.text.clone());
                 // NEXT-PHASE-1 v6 N2: a length-cut reply is refused before parsing.
@@ -2312,6 +2318,7 @@ impl ComposeBridge {
                 finish_reason: a.finish_reason.as_deref().unwrap_or("unknown"),
                 task,
                 attempt: a.attempt,
+                decoding: a.decoding.as_ref(),
             },
             started,
         );

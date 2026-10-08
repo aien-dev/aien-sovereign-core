@@ -470,6 +470,47 @@ impl Default for SamplingParams {
     }
 }
 
+/// How a backend actually chose the tokens of one request, counted at the
+/// point of choice, never read back from the request's `SamplingParams`
+/// (Qwen3 v4 review, sc#294: greedy decoding must be observed, not only
+/// documented). Evidence only: no scheduling or decoding decision reads it.
+///
+/// Counts every token the backend chose for the request: the token after the
+/// final prefill chunk (a mid-prompt chunk's discarded pick is not counted)
+/// and every decode token, the stop token included.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct DecodeObservation {
+    /// Tokens taken as the argmax of the logits (greedy).
+    pub greedy_tokens: u64,
+    /// Tokens drawn at random from the temperature-scaled distribution.
+    pub sampled_tokens: u64,
+    /// Temperature of the sampled draws (the last draw's). None when no draw sampled.
+    pub temperature: Option<f32>,
+    /// top_p of the sampled decode draws when nucleus filtering was applied
+    /// (`0 < top_p < 1`). None when no draw applied it.
+    pub top_p: Option<f32>,
+    /// The request id the sampled draws were seeded from (the stream is a
+    /// pure function of it and the position). None when no draw sampled.
+    pub seed_request_id: Option<u64>,
+}
+
+// Temperatures recorded here passed through the sampler, which never sees a
+// NaN from the runtime; equality is used only to compare records.
+impl Eq for DecodeObservation {}
+
+impl DecodeObservation {
+    /// "greedy" (every chosen token was the argmax), "sampled" (every one was
+    /// drawn), "mixed", or "none" (no token was chosen).
+    pub fn mode(&self) -> &'static str {
+        match (self.greedy_tokens > 0, self.sampled_tokens > 0) {
+            (true, false) => "greedy",
+            (false, true) => "sampled",
+            (true, true) => "mixed",
+            (false, false) => "none",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SequenceRequest {
     pub request_id: u64,
@@ -566,5 +607,13 @@ pub trait AienInferenceBackend: Send + Sync {
     /// have finished). Default: no-op.
     fn release_sequence(&mut self, _seq_id: u64) -> Result<(), String> {
         Ok(())
+    }
+
+    /// Takes (and forgets) how the backend chose `request_id`'s tokens so
+    /// far. The scheduler calls it once, when the request finishes, and
+    /// attaches it to `CompletionEvent::Finished`. Default: None, for a
+    /// backend that does not observe its decoding (an absent claim, not greedy).
+    fn take_decode_observation(&mut self, _request_id: u64) -> Option<DecodeObservation> {
+        None
     }
 }

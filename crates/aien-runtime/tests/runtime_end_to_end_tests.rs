@@ -448,6 +448,7 @@ async fn test_end_to_end_ticket_submission_and_channel_streaming_cpu() {
                 seq_id: sid,
                 total_tokens,
                 finish_reason,
+                ..
             } => {
                 assert_eq!(sid.to_u64(), seq_id);
                 saw_finished = true;
