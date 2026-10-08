@@ -536,9 +536,9 @@ fn r2_crash_after_intent_before_write() {
     assert!(r.file(PATH).is_none(), "the write never happened");
     let st = r.states();
     assert_eq!(st.len(), 1, "{st:?}");
-    assert!(
-        st[0] == "NOT_DONE" || st[0] == "UNRESOLVED",
-        "never DONE for an effect that did not happen, got {st:?}"
+    assert_eq!(
+        st[0], "NOT_DONE",
+        "an intent whose write never happened settles NOT_DONE, got {st:?}"
     );
     let rc = r.cli(&["reconcile"]);
     assert_eq!(rc.code, 0, "{}", rc.all());
@@ -1003,6 +1003,8 @@ fn r8_foreign_identity_is_refused() {
     ])
     .unwrap_or_else(|d| panic!("adopt: {}", d.log));
     let pin = std::fs::read(pin_path(&r.compose())).unwrap();
+    // A real grant minted by A, spent by nobody yet.
+    let (rep, grant) = r.prepare("r8", PATH, CONTENT);
     r.kill_daemon();
     // Agent B (another logical agent, same lineage claim) starts over A's home.
     let mut fb = support::fx("agent-b");
@@ -1042,9 +1044,18 @@ fn r8_foreign_identity_is_refused() {
         "not rebound"
     );
     assert!(r.file(PATH).is_none(), "nothing executed");
-    // The rightful agent still starts, and its ledger holds no effect.
+    // Under B: a real grant is not spendable (no daemon serves B), and a fresh
+    // desk-style request has nothing to talk to.
+    let o = r.execute(&rep, grant);
+    assert_ne!(o.code, 0, "{}", o.all());
+    assert_ne!(o.json["state"], "DONE", "{}", o.all());
+    assert!(r.file(PATH).is_none(), "B executed A's grant");
+    // Positive control: the same grant is real, A executes it exactly once.
     r.start_with(&[("AIEN_ALLEN_SUBJECT", &s(&subj_a))])
         .unwrap_or_else(|d| panic!("agent A restart: {}", d.log));
-    assert!(r.intents().is_empty());
+    assert!(r.intents().is_empty(), "no effect was opened under B");
+    let ok = r.execute(&rep, grant);
+    assert_eq!(ok.json["state"], "DONE", "{}", ok.all());
+    assert_eq!(r.intents().len(), 1);
     r.detail = refusal.chars().take(200).collect();
 }
