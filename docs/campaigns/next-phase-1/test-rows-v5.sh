@@ -92,6 +92,11 @@ check "recalled record unverified" "A4" "$(mutate '.s8_effects[1].verified = fal
 check "new file outside the workspace" "A1" "$(mutate '.containment.outside_new_files = ["./outside/x"]')"
 check "sentinel changed" "A1" "$(mutate '.containment.sentinel[1] = "s2"')"
 check "stray speculative file in compose dir" "A1" "$(mutate '.containment.compose_dir_files += ["./branch-3.stage"]')"
+# sc#342: the harness (run-campaign.sh) creates ./approval-desk.key in the compose dir. That exact name is allowed, nothing broader.
+check "harness approval-desk key in compose dir is allowed" "" "$(mutate '.containment.compose_dir_files += ["./approval-desk.key"]')"
+for f in ./other.key ./approval-desk.key.bak ./approval-desk.keys ./sub/approval-desk.key; do
+  check "$f beside the approval-desk key is stray" "A1" "$(mutate ".containment.compose_dir_files += [\"./approval-desk.key\", \"$f\"]")"
+done
 check "one manual rescue" "A6" "$(mutate '.rescues = 1')"
 
 echo "test-rows-v5: $pass passed, $fail failed"

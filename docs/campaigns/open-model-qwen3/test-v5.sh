@@ -423,7 +423,7 @@ for id in $(jq -r '.tasks[].id' "$TASKS"); do
   R=$T/stg-$id; mkdir -p "$R/ws" "$R/steps" "$R/prov"; echo '{"steps":[],"daemon":[],"containment":{}}' >"$R/run.json"
   seed=$(jq -r --arg i "$id" '.tasks[]|select(.id==$i)|.seed//empty' "$TASKS"); [ -n "$seed" ] && cp -R "$HERE/$seed/." "$R/ws/"
   e=(); [ "${id#N}" = "$id" ] && e=(TASK_ID="$id" TASK_SPEC="$TASKS" TASK_ACCEPTANCE=/dev/null)
-  env "${e[@]}" V6_ROWS=rows-v8.jq V6_TASK="$id" V6_MAX_TOKENS=1 V8_MERGE=null bash "$STAGE/make-receipt.sh" "$R" "$T/rec" sc omc omg 0 n >/dev/null 2>&1
+  env "${e[@]}" V6_ROWS=rows-v9.jq V6_TASK="$id" V6_MAX_TOKENS=1 V8_MERGE=null bash "$STAGE/make-receipt.sh" "$R" "$T/rec" sc omc omg 0 n >/dev/null 2>&1
   rec=$(ls -t "$T/rec"/*.json | head -1)
   bash "$NP1/v8-results.sh" "$id" "$rec" | jq -r .row | sort >"$T/$id.got"
   case $(jq -r --arg i "$id" ".tasks[]|select(.id==\$i)|.kind" "$TASKS") in
