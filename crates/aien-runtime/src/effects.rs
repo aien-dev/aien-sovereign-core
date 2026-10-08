@@ -860,19 +860,31 @@ fn open_beneath(
     };
     // SAFETY: valid C string and a correctly sized open_how; a descriptor
     // returned (>= 0) is owned by nobody else and wrapped immediately.
-    let fd = unsafe {
-        libc::syscall(
-            SYS_OPENAT2,
-            dirfd,
-            c.as_ptr(),
-            &how as *const OpenHow,
-            std::mem::size_of::<OpenHow>(),
-        )
+    #[cfg(test)]
+    let force_fallback = tests::FORCE_FALLBACK.with(|f| f.get());
+    #[cfg(not(test))]
+    let force_fallback = false;
+    let fd = if force_fallback {
+        -1
+    } else {
+        unsafe {
+            libc::syscall(
+                SYS_OPENAT2,
+                dirfd,
+                c.as_ptr(),
+                &how as *const OpenHow,
+                std::mem::size_of::<OpenHow>(),
+            )
+        }
     };
     if fd >= 0 {
         return Ok(unsafe { std::os::fd::OwnedFd::from_raw_fd(fd as libc::c_int) });
     }
-    let err = std::io::Error::last_os_error();
+    let err = if force_fallback {
+        std::io::Error::from_raw_os_error(libc::ENOSYS)
+    } else {
+        std::io::Error::last_os_error()
+    };
     if err.raw_os_error() != Some(libc::ENOSYS) {
         return Err(err);
     }
@@ -924,6 +936,8 @@ pub fn open_confined(workspace: &str, path: &str, target: &str) -> Result<Confin
     }
     // SAFETY: `rfd` is a fresh descriptor owned by nobody else.
     let dir = unsafe { std::os::fd::OwnedFd::from_raw_fd(rfd) };
+    #[cfg(test)]
+    tests::run_before_hook();
     let rel = Path::new(path);
     let refuse_kind = || {
         out(format!(
@@ -1073,8 +1087,8 @@ pub(crate) fn write_approved_grant(
 ) -> Result<(u64, String), String> {
     b.with_home(|home| {
         let target = Path::new(workspace).join(path).display().to_string();
-        confine_target(workspace, path, &target).map_err(|r| r.to_string())?;
-        let prior = file_sha256(Path::new(&target))?;
+        // #267 follow-up: confine and hash through one held handle.
+        let prior = confined_sha256(workspace, path, &target).map_err(|r| r.to_string())?;
         // The file must still be the one the bound requirements were checked against.
         if let Some(base) = base {
             let now = prior.as_deref().unwrap_or("absent");
@@ -1251,7 +1265,9 @@ pub fn authorize(
             ));
         }
         let target = Path::new(&c.workspace).join(&c.path).display().to_string();
-        confine_target(&c.workspace, &c.path, &target).map_err(|r| r.to_string())?;
+        // #267 follow-up: keep the confined handle; the prior hash below is
+        // read from it, not re-resolved by path after the MAC checks.
+        let held = open_confined(&c.workspace, &c.path, &target).map_err(|r| r.to_string())?;
         if let Some((key, p)) = &desk {
             // Path, content and workspace are the daemon's own commit record;
             // the MAC must cover exactly those.
@@ -1275,7 +1291,7 @@ pub fn authorize(
                 ));
             }
         }
-        let prior = file_sha256(Path::new(&target))?;
+        let prior = held.sha256()?;
         for &gid in l.minted_by_commit.get(&c.id).into_iter().flatten() {
             if l.revoked.contains_key(&gid) || l.stops.iter().any(|&s| s > gid) {
                 continue;
@@ -1389,6 +1405,26 @@ fn noted(r: Result<ComposeNoteReport, String>) -> ControlResponse {
     }
 }
 
+/// The prior hash an intent records (#267 follow-up): when the grant names a
+/// workspace, the target is confined and hashed through one held handle
+/// BEFORE any other check, so what is compared with the grant is what
+/// confinement checked. A grant with no workspace keeps the by-path read (it
+/// is refused right after: it names no workspace).
+fn intent_prior(l: &Ledger, req: &IntentRequest) -> Result<Option<String>, String> {
+    let stale = |e: String| Refusal::new("Stale", format!("target unreadable: {e}")).to_string();
+    let ws = l
+        .grants
+        .get(&req.authorization)
+        .and_then(|g| g.workspace.as_deref());
+    match ws {
+        Some(ws) => open_confined(ws, &req.path, &req.target)
+            .map_err(|r| r.to_string())?
+            .sha256()
+            .map_err(stale),
+        None => file_sha256(Path::new(&req.target)).map_err(stale),
+    }
+}
+
 /// ComposeEffectIntent: every check of 2.3 and the durable intent, in one
 /// step under the home lock. The answer's id is the intent.
 pub fn open_intent(b: &ComposeBridge, req: &IntentRequest) -> ControlResponse {
@@ -1398,9 +1434,22 @@ pub fn open_intent(b: &ComposeBridge, req: &IntentRequest) -> ControlResponse {
     noted(b.with_home(|home| {
         let views = host_views(home)?;
         let l = Ledger::from_records(&views).map_err(|r| r.to_string())?;
-        let current = file_sha256(Path::new(&req.target))
-            .map_err(|e| Refusal::new("Stale", format!("target unreadable: {e}")).to_string())?;
+        // A confinement refusal is held back until the grant checks have run
+        // (their refusals keep their order); meanwhile the grant's own prior
+        // stands in so that "Stale" cannot fire from the failed read.
+        let (current, deferred) = match intent_prior(&l, req) {
+            Ok(c) => (c, None),
+            Err(e) => (
+                l.grants
+                    .get(&req.authorization)
+                    .and_then(|g| g.prior_sha256.clone().flatten()),
+                Some(e),
+            ),
+        };
         let g = l.check_intent(req, &current).map_err(|r| r.to_string())?;
+        if let Some(e) = deferred {
+            return Err(e);
+        }
         // sovereign-core #249: confinement, and an approved grant's backing.
         let ws = g.workspace.as_deref().ok_or_else(|| {
             Refusal::new(
@@ -1409,7 +1458,8 @@ pub fn open_intent(b: &ComposeBridge, req: &IntentRequest) -> ControlResponse {
             )
             .to_string()
         })?;
-        confine_target(ws, &req.path, &req.target).map_err(|r| r.to_string())?;
+        // Confinement already ran in `intent_prior` (same grant workspace).
+        let _ = ws;
         check_approved_backing(&l, g, &views).map_err(|r| r.to_string())?;
         check_minted_backing(&l, g).map_err(|r| r.to_string())?;
         let text = json!({
@@ -2008,6 +2058,143 @@ mod tests {
         assert_ne!(st, EffectState::Done, "read outside bytes: {disk:?}");
         assert_eq!(st, EffectState::Unresolved);
         assert_eq!(disk.unwrap(), Some(hex(&Sha256::digest(b"inside"))));
+    }
+
+    thread_local! {
+        pub(super) static FORCE_FALLBACK: std::cell::Cell<bool> =
+            const { std::cell::Cell::new(false) };
+        static BEFORE: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+            const { std::cell::RefCell::new(None) };
+    }
+
+    /// Test seam: runs once at the START of `open_confined`, before any
+    /// descriptor is opened.
+    pub(super) fn run_before_hook() {
+        if let Some(f) = BEFORE.with(|p| p.borrow_mut().take()) {
+            f();
+        }
+    }
+
+    /// ws/d/f = "inside", outside/f = "expected".
+    fn swap_fixture() -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf) {
+        let t = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(t.path()).unwrap();
+        let (ws, outside) = (root.join("ws"), root.join("outside"));
+        std::fs::create_dir_all(ws.join("d")).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(ws.join("d/f"), b"inside").unwrap();
+        std::fs::write(outside.join("f"), b"expected").unwrap();
+        (t, ws, outside)
+    }
+
+    fn swap_in_symlink(ws: &Path, outside: &Path) {
+        std::fs::rename(ws.join("d"), ws.join("d.held")).unwrap();
+        std::os::unix::fs::symlink(outside, ws.join("d")).unwrap();
+    }
+
+    fn h(b: &[u8]) -> Option<String> {
+        Some(hex(&Sha256::digest(b)))
+    }
+
+    /// Grant creation (`write_approved_grant`): the prior hash is read through
+    /// the handle confinement opened. The old shape (confine_target, then
+    /// file_sha256 by path) is the negative control: it reads outside bytes.
+    #[test]
+    fn grant_prior_is_read_through_the_confined_handle() {
+        let (_t, ws, outside) = swap_fixture();
+        let (w, target) = (ws.to_str().unwrap(), ws.join("d/f").display().to_string());
+        let hook = |ws: std::path::PathBuf, o: std::path::PathBuf| {
+            PAUSE.with(|p| *p.borrow_mut() = Some(Box::new(move || swap_in_symlink(&ws, &o))))
+        };
+        // Old shape: red.
+        hook(ws.clone(), outside.clone());
+        confine_target(w, "d/f", &target).unwrap();
+        assert_eq!(file_sha256(Path::new(&target)).unwrap(), h(b"expected"));
+        // Restore, then the new shape: green.
+        std::fs::remove_file(ws.join("d")).unwrap();
+        std::fs::rename(ws.join("d.held"), ws.join("d")).unwrap();
+        hook(ws.clone(), outside.clone());
+        assert_eq!(confined_sha256(w, "d/f", &target).unwrap(), h(b"inside"));
+    }
+
+    /// Mint (`authorize`): confinement happens early, the prior hash after the
+    /// MAC checks. The kept handle reads the confined object; a by-path read
+    /// at that later point reads the swapped-in outside file.
+    #[test]
+    fn mint_prior_is_read_from_the_kept_handle() {
+        let (_t, ws, outside) = swap_fixture();
+        let (w, target) = (ws.to_str().unwrap(), ws.join("d/f").display().to_string());
+        let held = open_confined(w, "d/f", &target).unwrap();
+        swap_in_symlink(&ws, &outside);
+        // Old shape (red): by path, after the swap.
+        assert_eq!(file_sha256(Path::new(&target)).unwrap(), h(b"expected"));
+        // New shape (green).
+        assert_eq!(held.sha256().unwrap(), h(b"inside"));
+    }
+
+    /// open_intent: `intent_prior` confines before it hashes. The parent is a
+    /// symlink to the expected bytes when the call starts and swapped back to
+    /// the real directory mid-call. The old code hashed by path first and
+    /// recorded the OUTSIDE hash as the prior of an inside file.
+    #[test]
+    fn intent_prior_never_records_outside_bytes() {
+        let (_t, ws, outside) = swap_fixture();
+        let l = race_ledger(&ws, b"expected");
+        swap_in_symlink(&ws, &outside);
+        let (w2, ws2) = (ws.clone(), ws.clone());
+        BEFORE.with(|p| {
+            *p.borrow_mut() = Some(Box::new(move || {
+                std::fs::remove_file(w2.join("d")).unwrap();
+                std::fs::rename(w2.join("d.held"), w2.join("d")).unwrap();
+            }))
+        });
+        let req = IntentRequest {
+            authorization: 2,
+            proposal_sha256: "p".into(),
+            path: "d/f".into(),
+            target: ws2.join("d/f").display().to_string(),
+            content_sha256: hex(&Sha256::digest(b"expected")),
+            executor_pid: 1,
+            executor_start: 1,
+        };
+        match intent_prior(&l, &req) {
+            Ok(p) => assert_eq!(
+                p,
+                h(b"inside"),
+                "recorded a prior that is not the inside file"
+            ),
+            Err(e) => assert!(e.contains("OutsideWorkspace") || e.contains("Stale"), "{e}"),
+        }
+    }
+
+    /// The ENOSYS fallback walk (forced here) refuses a symlink at every
+    /// component and every path outside the workspace.
+    #[test]
+    fn fallback_walk_refuses_symlinks_and_outside_paths() {
+        FORCE_FALLBACK.with(|f| f.set(true));
+        let t = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(t.path()).unwrap();
+        let (ws, outside) = (root.join("ws"), root.join("outside"));
+        std::fs::create_dir_all(ws.join("a/b")).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("f"), b"expected").unwrap();
+        std::fs::write(ws.join("a/b/f"), b"inside").unwrap();
+        std::os::unix::fs::symlink(&outside, ws.join("s")).unwrap();
+        std::os::unix::fs::symlink(&outside, ws.join("a/l")).unwrap();
+        std::os::unix::fs::symlink(outside.join("f"), ws.join("a/b/lf")).unwrap();
+        let w = ws.to_str().unwrap();
+        let open = |p: &str| open_confined(w, p, &ws.join(p).display().to_string());
+        assert_eq!(open("a/b/f").unwrap().sha256().unwrap(), h(b"inside"));
+        assert!(open("a/b/new").unwrap().file.is_none());
+        for bad in ["s/f", "a/l/f", "a/b/lf", "a/missing/f", "s"] {
+            let e = open(bad)
+                .err()
+                .unwrap_or_else(|| panic!("{bad} was opened"));
+            assert_eq!(e.name, "OutsideWorkspace", "{bad}");
+        }
+        let e = open_confined(w, "../outside/f", &format!("{w}/../outside/f"));
+        assert_eq!(e.err().unwrap().name, "OutsideWorkspace");
+        FORCE_FALLBACK.with(|f| f.set(false));
     }
     /// Ledger with one daemon-minted grant for `ws` and one open intent
     /// (#3) writing `d/f` with content `want`.
