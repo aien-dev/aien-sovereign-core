@@ -96,7 +96,19 @@ chk "frozen-v5.json: the model digest is index+shards and is the manifest of the
   [ "$m" = "$(jq -r .model.model_sha256 "$FROZEN")" ] && [ "$(jq -r .model.model_digest_kind "$FROZEN")" = index+shards ] && [ "$(jq -r .model.model_sha256 "$FROZEN")" = 17a78fbba447a4e66a3d886c0998fbcf2f9201d46e5e0c5bfec2d57c975976b7 ] &&
   [ "$(jq -r .model.index_sha256 "$FROZEN")" = d6c42883a895dfef5b0080ed2116a1bcd764f558406b98923d675978a1abf29c ] && [ "$(jq ".model.shards|length" "$FROZEN")" = 3 ] &&
   grep -q "NOT RE-HASHED" <<<"$(jq -r .model.model_sha256_note "$FROZEN")"'
-chk "frozen-v5.json: the eight pins are the placeholder in this draft" '[ "$(jq -r ".placeholder as \$p|[.pins[]|select(. == \$p)]|length" "$FROZEN")" = 8 ]'
+chk "frozen-v5.json: the eight pins are filled (commits 40 hex, sha256 values 64 hex) and the status still says DRAFT, NOT FROZEN" 'jq -e "(.pins | [.sovereign_core_commit, .omega_lock_commit, .physics_lock_commit, .aienos_lock_commit] | all(test(\"^[0-9a-f]{40}$\"))) and (.pins | [.cargo_lock_sha256, .aien_cli_sha256, .np1_reference_sha256, .np1_edit_merge_sha256] | all(test(\"^[0-9a-f]{64}$\"))) and (.status | startswith(\"DRAFT, NOT FROZEN\"))" "$FROZEN" >/dev/null'
+chk "frozen-v5.json pins equal evidence-v5/build-summary.txt (commits, Cargo.lock and the three binaries)" '
+  S=$HERE/evidence-v5/build-summary.txt; h() { awk -v n="$1" "\$2 ~ (\"/\" n \"\$\") {print \$1}" "$S"; }
+  [ "$(jq -r .pins.sovereign_core_commit "$FROZEN")" = "$(grep -E "^[0-9a-f]{40}$" "$S" | sed -n 3p)" ] && [ "$(jq -r .pins.omega_lock_commit "$FROZEN")" = "$(grep -E "^[0-9a-f]{40}$" "$S" | sed -n 1p)" ] &&
+  [ "$(jq -r .pins.physics_lock_commit "$FROZEN")" = "$(grep -E "^[0-9a-f]{40}$" "$S" | sed -n 2p)" ] && [ "$(jq -r .pins.cargo_lock_sha256 "$FROZEN")" = "$(h Cargo.lock)" ] &&
+  [ "$(jq -r .pins.aien_cli_sha256 "$FROZEN")" = "$(h aien-cli)" ] && [ "$(jq -r .pins.np1_reference_sha256 "$FROZEN")" = "$(h np1_reference)" ] &&
+  [ "$(jq -r .pins.np1_edit_merge_sha256 "$FROZEN")" = "$(h np1_edit_merge)" ] && grep -q "^aien-cli rc=0$" "$S" && grep -q "^examples rc=0$" "$S"'
+chk "evidence-v5/model-rehash-2026-10-08.txt equals the frozen model values and the manifest digest" '
+  R=$HERE/evidence-v5/model-rehash-2026-10-08.txt; r() { awk -v n="$1" "\$2 == n {print \$1}" "$R"; }
+  [ "$(r model.safetensors.index.json)" = "$(jq -r .model.index_sha256 "$FROZEN")" ] && [ "$(r tokenizer.json)" = "$(jq -r .model.tokenizer_sha256 "$FROZEN")" ] &&
+  [ "$(jq -r ".model.shards[] | .[1] + \"  \" + .[0]" "$FROZEN")" = "$(grep -E "^[0-9a-f]{64}  model-0000[0-9]-of-00003.safetensors$" "$R")" ] &&
+  grep -q "^$(jq -r .model.model_sha256 "$FROZEN")  model_sha256 (index+shards)$" "$R"'
+chk "evidence-v5/campaign-files.sha256 matches every campaign file (regenerate it after any change to one)" '(cd "$HERE" && sha256sum --quiet --strict -c evidence-v5/campaign-files.sha256 >/dev/null 2>&1) && [ "$(wc -l <"$HERE/evidence-v5/campaign-files.sha256")" -ge 20 ]'
 
 # ---- 3 scorer dry run (made-up result lines)
 jq -r '.rows[].row' "$QD" | jq -R -c '{row: ., rep: 1, verdict: "PASS", receipt: "made-up"}' >"$T/res-all.jsonl"
@@ -125,6 +137,8 @@ CT='Project constraints: every change stays inside the authorized workspace; one
 # a frozen file with filled pins, and a launch record that matches it
 PINS='{"sovereign_core_commit":"1111111111111111111111111111111111111111","omega_lock_commit":"2222222222222222222222222222222222222222","physics_lock_commit":"3333333333333333333333333333333333333333","aienos_lock_commit":"4444444444444444444444444444444444444444","cargo_lock_sha256":"5555555555555555555555555555555555555555555555555555555555555555","aien_cli_sha256":"6666666666666666666666666666666666666666666666666666666666666666","np1_reference_sha256":"7777777777777777777777777777777777777777777777777777777777777777","np1_edit_merge_sha256":"8888888888888888888888888888888888888888888888888888888888888888"}'
 FZ=$T/frozen-filled.json; jq --argjson p "$PINS" '.pins = $p' "$FROZEN" >"$FZ"
+# The same values with every pin back to the placeholder (the draft before the freeze fill).
+FPH=$T/frozen-placeholder.json; jq '.placeholder as $p | .pins |= map_values($p)' "$FROZEN" >"$FPH"
 # mk_launch DIR WALL_MS: the wrapper's launch record for DIR (DIR.launch-v5.json)
 mk_launch() { jq -n --argjson p "$PINS" --argjson w "${2:-600000}" '{launch: "x", wall_ms: $w, wall_clock: "made-up", driver_exit: 0, meminfo_before: {mem_free_kb: 100000000, cached_kb: 2000000}, pins: $p}' >"$1.launch-v5.json"; }
 # mk_logs DIR [EXTRA_LOG_LINE]: two daemon logs with the start line, the shards line and one OP_REPORT line each
@@ -296,7 +310,7 @@ red opr-log-missing   'rm daemon-2.log' GR OPR
 # PIN
 red pin-off-by-one    'jqi ../red-pin-off-by-one.launch-v5.json ".pins.aien_cli_sha256 |= (.[0:-1] + \"7\")"' PIN
 red pin-no-record     'jqi ../red-pin-no-record.launch-v5.json "del(.pins)"' PIN
-FZX=$FROZEN red pin-placeholder 'jqi ../red-pin-placeholder.launch-v5.json --argjson p "$(jq .pins "$FROZEN")" ".pins = \$p"' PIN
+FZX=$FPH red pin-placeholder 'jqi ../red-pin-placeholder.launch-v5.json --argjson p "$(jq .pins "$FPH")" ".pins = \$p"' PIN
 # MEAS
 red meas-sum-over-wall 'jqi ../red-meas-sum-over-wall.launch-v5.json ".wall_ms = 41999"' MEAS
 red meas-no-wall      'jqi ../red-meas-no-wall.launch-v5.json "del(.wall_ms)"' MEAS
@@ -396,11 +410,14 @@ if [ -e "$PINNED" ]; then bad "pinned run path already exists, wrapper checks sk
   chk "wrapper refuses a missing OQ3_PART (exit 2)" '[ "$(wr "$T/b")" = 2 ]'
   chk "wrapper refuses part 5 (exit 2)" '[ "$(wr "$T/b" OQ3_PART=5)" = 2 ]'
   chk "wrapper refuses a run base other than the pinned path (exit 2), nothing created" '[ "$(wr "$T/b" OQ3_PART=1 "${okenv[@]}")" = 2 ] && [ ! -e "$T/b" ]'
-  chk "wrapper refuses a real run while the pins are the placeholder (exit 2), pinned path not created" '[ "$(wr "$PINNED" OQ3_PART=1 "${okenv[@]}")" = 2 ] && [ ! -e "$PINNED" ] && grep -q "not frozen" "$T/w.err"'
+  chk "the wrapper as committed refuses a real run while the status is not FROZEN (exit 2), pinned path not created" '[ "$(wr "$PINNED" OQ3_PART=1 "${okenv[@]}")" = 2 ] && [ ! -e "$PINNED" ] && grep -q "status is not FROZEN" "$T/w.err"'
   # Filled pins alone do not make a real run: the status line must say FROZEN too (a draft freeze-fill PR fills the pins).
   WC=$T/wcopy/oq3; mkdir -p "$WC" "$T/wcopy/next-phase-1"; cp "$W" "$WC/run-qwen3-v5.sh"
   jq --argjson p "$PINS" '.pins = $p' "$FROZEN" >"$WC/frozen-v5.json"
   wrc() { local b=$1; shift; "${base[@]}" "$@" bash "$WC/run-qwen3-v5.sh" "$b" "$T/out" "$T" "$T" "$T/x" "$T/x" >/dev/null 2>"$T/w.err"; echo $?; }
+  cp "$FPH" "$WC/frozen-v5.json"
+  chk "wrapper refuses a real run while the pins are the placeholder (exit 2), pinned path not created" '[ "$(wrc "$PINNED" OQ3_PART=1 "${okenv[@]}")" = 2 ] && [ ! -e "$PINNED" ] && grep -q "pins are not frozen yet" "$T/w.err"'
+  jq --argjson p "$PINS" '.pins = $p' "$FPH" >"$WC/frozen-v5.json"
   chk "wrapper refuses a real run with every pin filled while the status is not FROZEN (exit 2), pinned path not created" '
     [ "$(wrc "$PINNED" OQ3_PART=1 "${okenv[@]}")" = 2 ] && [ ! -e "$PINNED" ] && grep -q "status is not FROZEN" "$T/w.err"'
   chk "wrapper passes the status check once the pins are filled and the status says FROZEN (stops later, pinned path not created)" '

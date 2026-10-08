@@ -274,8 +274,8 @@ chip in v5.
 ## 7. Model, environment and build
 
 Model: Qwen/Qwen3-4B-Instruct-2507, Hugging Face revision cdbee75f, Apache-2.0, weights unchanged, directory
-`/home/drakestapleton/models/qwen3-4b-instruct-2507-cdbee75/`. Expected sha256 (re-hashed and confirmed at freeze; the values are
-those of ACCEPTANCE-v4 Section 7, re-hashed there on 2026-10-08):
+`/home/drakestapleton/models/qwen3-4b-instruct-2507-cdbee75/`. Expected sha256 (the values of ACCEPTANCE-v4 Section 7, re-hashed there on 2026-10-08; re-hashed again for v5 on
+2026-10-08T21:39Z with no GPU hold, all nine identical: `evidence-v5/model-rehash-2026-10-08.txt`):
 
 ```text
 model.safetensors.index.json             d6c42883a895dfef5b0080ed2116a1bcd764f558406b98923d675978a1abf29c
@@ -305,8 +305,9 @@ model_sha256 (index+shards)              17a78fbba447a4e66a3d886c0998fbcf2f9201d
 ```
 
 COMPUTED FROM LISTED SHA256s, NOT RE-HASHED: the value is the manifest built from the index and shard sha256 values listed
-above, not from the files. Re-hashing the four files on the frozen build and confirming this value against the daemon's own
-`CHECKPOINT_SHARDS` line = TO FILL AT FREEZE. Row `<id>-GR` binds the index and all three shards through it (`frozen-v5.json`).
+above, not from the files. Re-hash: DONE 2026-10-08T21:39Z (`evidence-v5/model-rehash-2026-10-08.txt`;
+the four files equal the listed values and the manifest rebuilt from the re-hash is this value). Confirming it against the
+daemon's own `CHECKPOINT_SHARDS` line = TO FILL AT FREEZE (needs a daemon start on the GPU: gate G6). Row `<id>-GR` binds the index and all three shards through it (`frozen-v5.json`).
 
 Environment, checked by the wrapper and recorded in `run.json`:
 
@@ -325,20 +326,26 @@ build: release, linked (has_omega_compose, has_omega_gpu, has_omega_wait_ms in t
        the exact cargo command line is recorded in evidence-v5/build-summary.txt
 ```
 
-Build pins (current main as of this draft; TO FILL AT FREEZE with the commit that contains the Section 1 fixes):
+Build pins (FILLED IN A DRAFT, NOT FROZEN: main 4770703 holds the Section 1 fixes, sc#353 and sc#354; built from clean
+clones by `evidence-v5/build.sh`, output `evidence-v5/build-summary.txt`; the same values are in `frozen-v5.json`, and G7
+rebuilds at these pins):
 
 ```text
-sovereign-core commit                    = TO FILL AT FREEZE   (draft written on 9b5e6e82359f4ad6b6f03042e83ef6411c5f15ce)
-omega.lock commit                        = TO FILL AT FREEZE   (6c6180cf378075b61291f4565d226eba38b4decd at 9b5e6e8)
-physics commit                           = TO FILL AT FREEZE   (6d7cf0d4d8eb2cda7b512100ff6058e25dbb3ddf at 9b5e6e8)
-aienos.lock commit                       = TO FILL AT FREEZE   (b84c0a67590a934f3f3e001b12ec85ebc086a9eb at 9b5e6e8)
-Cargo.lock sha256                        = TO FILL AT FREEZE
-aien-cli sha256                          = TO FILL AT FREEZE
-np1_reference sha256                     = TO FILL AT FREEZE
-np1_edit_merge sha256                    = TO FILL AT FREEZE
-campaign files (wrapper, tasks file, declaration, row modules, generator, self-test, seeds, next-phase-1 driver) sha256 = TO FILL AT FREEZE
-GPU hold names, one per part            = TO FILL AT FREEZE
+sovereign-core commit                    = 47707039016efa5f69d99eb3e8e58037df9be3df
+omega.lock commit                        = 6c6180cf378075b61291f4565d226eba38b4decd   (unchanged since v4)
+physics commit                           = 6d7cf0d4d8eb2cda7b512100ff6058e25dbb3ddf   (physics.lock at omega 6c6180c)
+aienos.lock commit                       = b84c0a67590a934f3f3e001b12ec85ebc086a9eb   (aienos.lock at omega 6c6180c)
+Cargo.lock sha256                        = 49d97bf30113b1727fcfc0e33be79d9446ae13651a08afc32bba889b77fca265
+aien-cli sha256                          = e00f572e32dc01d83f53e50f4b6ba89e6488c25c03d7471be9905f4f921702f1
+np1_reference sha256                     = 8dab0a7e0cbbabecd45dc5d59d27ac3325bc4aed179202f72561fb0afb9975fb
+np1_edit_merge sha256                    = 66be8da4d3c5c7c32089e851acdbed9c050afa38f2d7db9e8fbced3811949e80
+campaign files sha256                    = evidence-v5/campaign-files.sha256 (wrapper, tasks file, declaration, row modules,
+                                           generator, self-test, seeds, frozen values, next-phase-1 driver and scorer)
+GPU hold names, one per part            = TO FILL AT FREEZE   (proposed <runner session>-oq3-v5-p1 to -p4, 20 minutes each)
 ```
+
+A real run refuses while any pin holds the placeholder and also while the `frozen-v5.json` status does not say FROZEN
+(`run-qwen3-v5.sh`; filled pins alone are not a freeze).
 
 ## 8. Run plan: one chip slot
 
@@ -390,7 +397,11 @@ changed to pass a gate.**
 - **G7 Pre-run gate.** `cargo fmt --all --check`, clippy `-D warnings`, the stub and linked test suites reported separately,
   `test-rows-v8.sh`, `test-v3.sh`, `test-v5.sh` on the frozen build; combined build from clean checkouts at the pins.
 - **G8 Review and freeze.** An independent review of this file, the tooling and the gate evidence; then every "TO FILL AT
-  FREEZE" is filled, the status line changes, and that change alone merges with Drake's go-ahead.
+  FREEZE" is filled, the status line changes, and that change alone merges with Drake's go-ahead. **Freeze fill
+  prepared as a DRAFT (2026-10-08, status line unchanged):** the eight build pins at 4770703, the model re-hash, the
+  generated declaration (identical, QUALIFICATION_ROWS=334) and the campaign-file sha256 list are filled. Still TO FILL AT FREEZE:
+  the daemon `CHECKPOINT_SHARDS` confirmation (G6) and the GPU hold names (who runs the parts). Any change to a campaign file
+  after this fill means regenerating `evidence-v5/campaign-files.sha256`; any product change means a new build and new pins.
 
 ## 10. Prediction (stated before any run; UNVERIFIED)
 
