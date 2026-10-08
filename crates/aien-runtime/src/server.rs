@@ -262,6 +262,14 @@ impl AienRuntimeServer {
                     "off (authorize is authenticated by the OS user only)"
                 }
             );
+            if aien_omega_compose::LINKED {
+                println!(
+                    "Compose: native (omega {})",
+                    aien_omega_compose::EXPECTED_OMEGA_SHA
+                );
+            } else {
+                println!("Compose: STUB (every compose call is Unavailable)");
+            }
         }
         if let Some(b) = compose.clone() {
             let gate = b.clone();
