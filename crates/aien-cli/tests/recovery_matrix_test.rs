@@ -39,7 +39,7 @@ mod support;
 use aien_allen::binding::pin_path;
 use aien_runtime::approved_auth::{desk_key_path, AuthorizeBinding, DeskKey};
 use aien_runtime::client::AienRuntimeClient;
-use aien_runtime::control::{ChatTurn, ControlCommand, ControlResponse};
+use aien_runtime::control::ChatTurn;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::os::unix::fs::MetadataExt;
@@ -346,11 +346,84 @@ impl Rig {
         );
     }
 
-    fn send(&self, cmd: ControlCommand) -> ControlResponse {
-        let client = AienRuntimeClient::new(self.sock());
-        self.rt
-            .block_on(client.send_command(cmd))
-            .expect("daemon answers")
+    /// `aien allen <args>` against this rig's daemon (scoped memory commands).
+    fn allen(&self, args: &[&str]) -> Out {
+        let mut c = Command::new(&self.bin);
+        c.arg("allen").args(args);
+        self.cmd_env(&mut c);
+        let o = c.output().expect("run aien allen");
+        let stdout = String::from_utf8_lossy(&o.stdout).to_string();
+        let json = stdout
+            .lines()
+            .rev()
+            .find_map(|l| serde_json::from_str::<Value>(l).ok())
+            .unwrap_or_else(|| json!({"unparsed": stdout}));
+        Out {
+            code: o.status.code().unwrap_or(-1),
+            json,
+            stdout,
+            stderr: String::from_utf8_lossy(&o.stderr).to_string(),
+        }
+    }
+
+    /// Everything the daemon wrote down that a note could leak into: compose
+    /// records, every daemon log, the provenance dir. One string per line.
+    fn observable_lines(&self) -> std::collections::BTreeSet<String> {
+        let mut t = self.all_records_text();
+        for n in 1..=self.nd {
+            t += "\n";
+            t += &std::fs::read_to_string(self.root.join(format!("daemon-{n}.log")))
+                .unwrap_or_default();
+        }
+        for e in std::fs::read_dir(self.root.join("prov"))
+            .into_iter()
+            .flatten()
+            .flatten()
+        {
+            if e.path().is_file() {
+                t += "\n";
+                t += &String::from_utf8_lossy(&std::fs::read(e.path()).unwrap());
+            }
+        }
+        t.lines().map(str::to_string).collect()
+    }
+
+    /// Memory key files under the compose home.
+    fn memory_keys(&self) -> std::collections::BTreeSet<PathBuf> {
+        let mut out = std::collections::BTreeSet::new();
+        let mut stack = vec![self.compose()];
+        while let Some(d) = stack.pop() {
+            for e in std::fs::read_dir(&d).into_iter().flatten().flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    stack.push(p);
+                } else if p.extension().is_some_and(|x| x == "key")
+                    && p.parent().is_some_and(|q| q.ends_with("keys"))
+                {
+                    out.insert(p);
+                }
+            }
+        }
+        out
+    }
+
+    /// `aien compose propose --context ctx`; the task's MemoryReport.
+    fn propose_memory(&self, ctx: Option<&str>) -> (Out, Value) {
+        let mut a = vec![
+            "propose",
+            "--goal",
+            "Create the file R9.md with a short plain-text note about the project.",
+            "--workspace",
+        ];
+        let ws = s(&self.ws());
+        a.push(&ws);
+        if let Some(c) = ctx {
+            a.extend(["--context", c]);
+        }
+        let o = self.cli(&a);
+        let m = o.json["report"]["memory"].clone();
+        assert!(m.is_object(), "no MemoryReport in: {}", o.all());
+        (o, m)
     }
 
     /// One model-daemon session (SmolLM2 on the CPU reference backend, never the
@@ -591,7 +664,6 @@ impl Drop for Rig {
     }
 }
 
-
 fn names_error(o: &Out, any: &[&str]) {
     let t = o.all();
     assert!(
@@ -675,7 +747,9 @@ fn r3_crash_after_write_before_ack() {
     r.proposals(&["r3.md"]);
     let (rep, grant) = r.prepare(0);
     r.execute_killed_at(&rep, grant, "after_write");
-    let before = r.file(&r.path(0)).expect("the write happened before the crash");
+    let before = r
+        .file(&r.path(0))
+        .expect("the write happened before the crash");
     assert!(r.is_content(0, &before.0));
     r.crash_and_restart();
     // The world matches content_sha256 inside the workspace: DONE.
@@ -910,7 +984,9 @@ fn r6_stale_permission_is_not_spendable() {
             first.all().chars().take(120).collect::<String>()
         );
         if first.code == 0 {
-            let g2 = first.json["authorization"]["id"].as_u64().expect("grant id");
+            let g2 = first.json["authorization"]["id"]
+                .as_u64()
+                .expect("grant id");
             let o = r.execute(&rep, g2);
             assert_ne!(o.json["state"], "DONE", "a second effect: {}", o.all());
         }
@@ -1217,7 +1293,11 @@ fn m2_rotated_desk_key_during_inflight_intent() {
     std::fs::write(r.ws().join(r.path(0)), "someone else wrote this\n").unwrap();
     r.rotate_desk_key();
     r.start().unwrap_or_else(|d| panic!("restart: {}", d.log));
-    assert_eq!(r.states(), vec!["UNRESOLVED"], "never DONE for changed bytes");
+    assert_eq!(
+        r.states(),
+        vec!["UNRESOLVED"],
+        "never DONE for changed bytes"
+    );
     // The old MACs are refused (a fresh nonce under the old key; the used one).
     let stale = r.authorize_raw(&p, Some((n2, &old_key_mac2)));
     assert_ne!(stale.code, 0, "{}", stale.all());
@@ -1258,5 +1338,160 @@ fn m2_rotated_desk_key_during_inflight_intent() {
     r.detail = format!(
         "SIGKILL at after_write; file changed; desk key rotated; old-key MAC DeskMacInvalid; used MAC: {used_why}; UNRESOLVED kept; control (new key) passes MAC check: code {}",
         ctl.code
+    );
+}
+
+/// R9: memory leakage, on the real composed path with a live SmolLM2 proposer.
+/// A note remembered in one context never reaches a task in another; a forgotten
+/// note is gone; an unreadable (key-missing) note is counted, never shown.
+/// LIMIT: the memory block is part of the model prompt, which the daemon does not
+/// expose; so "not shown" is checked on the MemoryReport counts and on every
+/// observable the daemon writes (task output, records, logs, provenance).
+#[test]
+#[ignore = "needs AIEN_BIN: compose-linked CPU build with fault-hold"]
+fn r9_memory_does_not_leak() {
+    let mut r = Rig::new("R9");
+    // Home, then ALLEN engaged (as R8).
+    r.start().unwrap();
+    let lineage = home_lineage(&r);
+    r.kill_daemon();
+    let mut f = support::fx("r9");
+    f.cortex = lineage;
+    let subj = support::write_head(
+        &r.root.join("subject.bin"),
+        support::chain(&f, 2).last().unwrap(),
+    );
+    r.env.push(("AIEN_ALLEN_SUBJECT".into(), s(&subj)));
+    let agent = aien_allen::hex(&f.agent);
+    r.start_with(&[("AIEN_ALLEN_ADOPT", &agent)])
+        .unwrap_or_else(|d| panic!("ALLEN adopt: {}", d.log));
+    r.kill_daemon();
+    // The live proposer for the rest of the case.
+    let m = PathBuf::from(std::env::var("AIEN_PROPOSER_MODEL").unwrap_or_else(|_| {
+        format!(
+            "{}/models/SmolLM2-1.7B-Instruct-31b70e2e869a",
+            std::env::var("HOME").unwrap()
+        )
+    }));
+    r.env
+        .push(("AIEN_MODEL_PATH".into(), s(&m.join("model.safetensors"))));
+    r.env
+        .push(("AIEN_TOKENIZER_PATH".into(), s(&m.join("tokenizer.json"))));
+    r.env
+        .push(("AIEN_COMPOSE_EDIT_BUDGET_MS".into(), "590000".into()));
+    r.env
+        .push(("AIEN_COMPOSE_DOC_BUDGET_MS".into(), "590000".into()));
+    r.start()
+        .unwrap_or_else(|d| panic!("proposer daemon: {}", d.log));
+
+    let put = |r: &Rig, ctx: &str, text: &str| {
+        let o = r.allen(&["memory", "put", "--context", ctx, "--text", text]);
+        assert_eq!(o.code, 0, "put {ctx}: {}", o.all());
+    };
+    let (a1, a2) = (
+        "ZEBRA-ALPHA-7731 lives only in personal",
+        "ZEBRA-ALPHA-7732 also personal",
+    );
+    let b1 = "KIWI-BETA-4420 lives only in work";
+    put(&r, "personal", a1);
+    put(&r, "personal", a2);
+    put(&r, "work", b1);
+
+    // No context named: no memory at all.
+    let (o0, m0) = r.propose_memory(None);
+    assert_eq!(m0["state"], "not_requested", "{}", o0.all());
+    assert_eq!(m0["items_included"], 0);
+
+    // Test 1: a task in context B (work) sees B's one note, none of A's.
+    let before = r.observable_lines();
+    let (ob, mb) = r.propose_memory(Some("work"));
+    assert_eq!(mb["context"], "work", "{mb}");
+    assert_eq!(mb["state"], "included", "{mb}");
+    assert_eq!(mb["items_included"], 1, "only the work note: {mb}");
+    assert_eq!(mb["items_unresolved"], 0, "{mb}");
+    let new_b: String = r
+        .observable_lines()
+        .difference(&before)
+        .cloned()
+        .collect::<Vec<_>>()
+        .join("\n")
+        + &ob.all();
+    assert!(
+        !new_b.contains("ZEBRA-ALPHA"),
+        "a personal note appeared in a work task: {new_b}"
+    );
+    // And the other way round: a personal task has two notes, never the work one.
+    let before = r.observable_lines();
+    let (oa, ma) = r.propose_memory(Some("personal"));
+    assert_eq!(ma["items_included"], 2, "{ma}");
+    let new_a: String = r
+        .observable_lines()
+        .difference(&before)
+        .cloned()
+        .collect::<Vec<_>>()
+        .join("\n")
+        + &oa.all();
+    assert!(
+        !new_a.contains("KIWI-BETA"),
+        "a work note appeared in a personal task: {new_a}"
+    );
+
+    // Test 2: forget the work note; the next work task has none, text is gone.
+    let rec = r.allen(&["memory", "recall", "--context", "work"]);
+    let item = rec.json["result"]["items"][0]["id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("work item id in {}", rec.all()))
+        .to_string();
+    let fg = r.allen(&["memory", "forget", "--context", "work", "--item", &item]);
+    assert_eq!(fg.code, 0, "{}", fg.all());
+    let before = r.observable_lines();
+    let (of, mf) = r.propose_memory(Some("work"));
+    assert_eq!(
+        mf["items_included"], 0,
+        "forgotten note still included: {mf}"
+    );
+    assert_eq!(mf["items_unresolved"], 0, "{mf}");
+    let rec2 = r.allen(&["memory", "recall", "--context", "work"]);
+    let new_f: String = r
+        .observable_lines()
+        .difference(&before)
+        .cloned()
+        .collect::<Vec<_>>()
+        .join("\n")
+        + &of.all()
+        + &rec2.all();
+    assert!(
+        !new_f.contains("KIWI-BETA"),
+        "a forgotten note is still visible: {new_f}"
+    );
+
+    // Test 3: a note whose key is gone is counted unresolved and never shown.
+    let keys_before = r.memory_keys();
+    let secret = "OPAL-GAMMA-9915 unreadable on purpose";
+    put(&r, "project:r9c", secret);
+    let new_keys: Vec<_> = r.memory_keys().difference(&keys_before).cloned().collect();
+    assert_eq!(new_keys.len(), 1, "one new key file: {new_keys:?}");
+    std::fs::remove_file(&new_keys[0]).unwrap();
+    let before = r.observable_lines();
+    let (ou, mu) = r.propose_memory(Some("project:r9c"));
+    assert_eq!(mu["items_unresolved"], 1, "{mu}");
+    assert_eq!(mu["items_included"], 0, "{mu}");
+    let rec3 = r.allen(&["memory", "recall", "--context", "project:r9c"]);
+    let new_u: String = r
+        .observable_lines()
+        .difference(&before)
+        .cloned()
+        .collect::<Vec<_>>()
+        .join("\n")
+        + &ou.all()
+        + &rec3.all();
+    assert!(
+        !new_u.contains("OPAL-GAMMA"),
+        "an unreadable note's text was shown: {new_u}"
+    );
+    r.detail = format!(
+        "work={} personal={} after-forget={} key-missing: unresolved={} included={}; block text itself not observable (UNVERIFIED), counts + all observables checked",
+        mb["items_included"], ma["items_included"], mf["items_included"],
+        mu["items_unresolved"], mu["items_included"]
     );
 }
