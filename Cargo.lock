@@ -90,6 +90,7 @@ dependencies = [
 name = "aien-cli"
 version = "0.1.0"
 dependencies = [
+ "aien-allen",
  "aien-allen-profile",
  "aien-inference-abi",
  "aien-kv-cache",
