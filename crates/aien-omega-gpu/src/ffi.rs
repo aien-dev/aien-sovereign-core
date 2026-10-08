@@ -81,6 +81,32 @@ impl OmegaGpuMatmulInfo {
 pub struct OmegaGpuTensor {
     _private: [u8; 0],
 }
+/// omega `OmegaGpuAllocStats` (`src/omega_gpu_session.h`), field for field.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct OmegaGpuAllocStats {
+    pub allocs: u64,
+    pub alloc_bytes: u64,
+    pub alloc_failures: u64,
+    pub frees: u64,
+}
+
+/// omega `OmegaGpuServingBounds` (`src/omega_gpu_serving.h`), field for field.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct OmegaGpuServingBounds {
+    pub max_context: u32,
+    pub max_seqs: u32,
+    pub num_q_heads: u32,
+    pub num_kv_heads: u32,
+    pub head_dim: u32,
+    pub kv_block_size: u32,
+    pub max_rows: u32,
+    pub max_k: u32,
+    pub max_n: u32,
+    pub max_n_one_row: u32,
+    pub kernel_slots: u32,
+}
 
 #[cfg(has_omega_gpu)]
 extern "C" {
@@ -144,6 +170,17 @@ extern "C" {
     // -1 above OMEGA_GPU_SESSION_MAX_SPIN_US with the setting unchanged (omega#328).
     pub fn omega_gpu_session_set_spin_us(us: u32) -> c_int;
     pub fn omega_gpu_session_spin_us() -> u32;
+    // omega c1/lib-serving `src/omega_gpu_serving.h` (omega#333 reservation, shipped in libomega_gpu.a by
+    // omega#338): one all-or-nothing call; 0 on success, else the first failing OMEGA_GPU_MATMUL_* /
+    // OMEGA_GPU_ATTN_* code (omega_gpu_matmul_last_error() has the text).
+    pub fn omega_gpu_reserve_serving(b: *const OmegaGpuServingBounds) -> c_int;
+    pub fn omega_gpu_serving_release();
+    // omega c1/lib-serving 80c4daa (omega#338): build and pin the kernel one call shape will use;
+    // then seal so any unprepared kernel is refused TOO_LARGE with no driver call.
+    pub fn omega_gpu_matmul_prepare(m: u32, k: u32, n: u32) -> c_int;
+    pub fn omega_gpu_serving_seal();
+    // omega c1/lib-serving bc9fa71 `src/omega_gpu_session.h`: process-wide driver allocation counters.
+    pub fn omega_gpu_session_alloc_stats(out: *mut OmegaGpuAllocStats);
 }
 
 // ---- omega `src/omega_gpu_elementwise_api.h` (FB-1 cut 4, pinned 2636409) ----

@@ -1490,6 +1490,47 @@ fn apply_omega_cta_budget(budget: Option<aien_omega_gpu::CtaBudget>) -> Result<S
     ))
 }
 
+/// The scheduler limits the daemon declares. One definition for `run_daemon_server` and the tests
+/// of the GB10 serving reservation, whose bounds (decode rows, prefill chunk) come from it.
+fn daemon_scheduler_config() -> aien_scheduler::SchedulerConfig {
+    aien_scheduler::SchedulerConfig {
+        max_batch_size: 256,
+        max_batch_tokens: 16384,
+        max_prefill_tokens: 8192,
+        prefill_chunk_size: 128,
+        chunk_prefill: true,
+        watermark_blocks: 64,
+    }
+}
+
+/// The daemon's start-up decision for the GB10 serving reservation, apart from the chip so a CPU
+/// test can run it: derives the bounds from the KV plan's context and the scheduler limits, makes
+/// runs reserve, prepare of every (rows, weight shape) kernel, then seal through `ops` on the opt-in
+/// Qwen3 GB10 path (and never elsewhere), and returns the log line, or the named refusal that stops the daemon (no on-demand fallback).
+/// `run_daemon_server` calls it once, before the server is built, hence before any request.
+fn daemon_serving_reservation(
+    model_config: &aien_inference_abi::ModelConfig,
+    kv_context_tokens: usize,
+    sched: &aien_scheduler::SchedulerConfig,
+    gpu_native: bool,
+    qwen3_opted_in: bool,
+    ops: &dyn aien_inference_abi::gb10_serving::ServingOps,
+) -> Result<Option<String>, String> {
+    let limits = aien_inference_abi::gb10_serving::ServingLimits {
+        context_tokens: kv_context_tokens,
+        max_batch_rows: sched.max_batch_size,
+        prefill_chunk_rows: sched.prefill_chunk_size,
+    };
+    aien_inference_abi::gb10_serving::reserve_gb10_serving_with(
+        model_config,
+        &limits,
+        gpu_native,
+        qwen3_opted_in,
+        ops,
+    )
+    .map(|r| r.map(|r| r.log_line()))
+}
+
 pub async fn run_daemon_server() {
     println!(
         "{}",
@@ -1502,14 +1543,7 @@ pub async fn run_daemon_server() {
         std::process::exit(1);
     }
     let socket_path = aien_runtime::client::AienRuntimeClient::default_socket_path();
-    let sched_cfg = aien_scheduler::SchedulerConfig {
-        max_batch_size: 256,
-        max_batch_tokens: 16384,
-        max_prefill_tokens: 8192,
-        prefill_chunk_size: 128,
-        chunk_prefill: true,
-        watermark_blocks: 64,
-    };
+    let sched_cfg = daemon_scheduler_config();
 
     let (weights, tensor_backend, backend_label, model_label, tokenizer, identity) =
         match build_native_daemon_backend() {
@@ -1525,6 +1559,8 @@ pub async fn run_daemon_server() {
     // from the loaded model's config and declared context, and the host's
     // MemAvailable is checked before it is allocated (#239). AIEN_KV_CONTEXT_TOKENS
     // may lower the context budget below the model's declared context, never raise it.
+    let model_config = weights.config.clone();
+    let sched_for_reservation = sched_cfg.clone();
     let kv_context_cap = match aien_runtime::shared_kv::kv_context_cap_from_env() {
         Ok(cap) => cap,
         Err(fatal) => {
@@ -1563,7 +1599,37 @@ pub async fn run_daemon_server() {
             std::process::exit(1);
         }
     }
+    // GB10 Qwen3 (the opt-in path only): reserve the serving buffers once, from the declared
+    // bounds, before the first request. A refusal stops the daemon by name; there is no
+    // on-demand fallback (sovereign-core#277, omega#327, omega#333). The outcome is logged
+    // either way so a chip run can measure it.
+    let mut serving_probe: Option<
+        std::sync::Arc<dyn aien_inference_abi::gb10_serving::ServingProbe>,
+    > = None;
+    match daemon_serving_reservation(
+        &model_config,
+        _kv_plan.context_tokens,
+        &sched_for_reservation,
+        gpu_native,
+        std::env::var(aien_inference_abi::GB10_QWEN3_OPT_IN_ENV).is_ok_and(|v| v == "1"),
+        &aien_inference_abi::gb10_serving::OmegaServingOps,
+    ) {
+        Ok(Some(line)) => {
+            println!("  {line}");
+            serving_probe = Some(std::sync::Arc::new(
+                aien_inference_abi::gb10_serving::AllocProbe::omega(),
+            ));
+        }
+        Ok(None) => {}
+        Err(fatal) => {
+            eprintln!("Fatal: {}", fatal.red().bold());
+            std::process::exit(1);
+        }
+    }
     let server = aien_runtime::server::AienRuntimeServer::new(spine, &socket_path);
+    if let Some(probe) = serving_probe {
+        server.set_serving_probe(probe);
+    }
 
     println!("  Backend: {}", backend_label.green());
     println!("  Model: {}", model_label.yellow());
@@ -1963,6 +2029,198 @@ pub async fn handle_aegis_command() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---- GB10 serving reservation: the daemon's start-up decision (sovereign-core#277) ----
+
+    fn qwen3_4b_config() -> aien_inference_abi::ModelConfig {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../aien-inference-abi/fixtures/qwen3-4b-instruct-2507-config");
+        let cfg = std::fs::read_to_string(dir.join("config.json")).unwrap();
+        let gen = std::fs::read_to_string(dir.join("generation_config.json")).unwrap();
+        aien_inference_abi::model_config_from_hf_json(
+            "Qwen/Qwen3-4B-Instruct-2507",
+            &cfg,
+            Some(&gen),
+        )
+        .unwrap()
+    }
+
+    use aien_inference_abi::gb10_serving::ServingOps;
+    use std::cell::RefCell;
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    enum Ev {
+        Reserve(aien_omega_gpu::ServingBounds),
+        Prepare(u32, u32, u32),
+        Seal,
+    }
+
+    /// Records every omega call in order; `fail_prepare_at` makes that (0-based) prepare fail.
+    struct Recorder {
+        events: RefCell<Vec<Ev>>,
+        fail_prepare_at: Option<usize>,
+        refuse_reserve: bool,
+    }
+
+    impl Recorder {
+        fn new() -> Self {
+            Recorder {
+                events: RefCell::new(Vec::new()),
+                fail_prepare_at: None,
+                refuse_reserve: false,
+            }
+        }
+    }
+
+    impl ServingOps for Recorder {
+        fn reserve(&self, b: &aien_omega_gpu::ServingBounds) -> Result<(), String> {
+            self.events.borrow_mut().push(Ev::Reserve(*b));
+            if self.refuse_reserve {
+                return Err("omega_gpu rc=-4 (CHIP_FAIL)".to_string());
+            }
+            Ok(())
+        }
+        fn prepare(&self, m: u32, k: u32, n: u32) -> Result<(), String> {
+            let mut ev = self.events.borrow_mut();
+            let nth = ev.iter().filter(|e| matches!(e, Ev::Prepare(..))).count();
+            ev.push(Ev::Prepare(m, k, n));
+            if self.fail_prepare_at == Some(nth) {
+                return Err("omega_gpu rc=-4 (CHIP_FAIL)".to_string());
+            }
+            Ok(())
+        }
+        fn seal(&self) {
+            self.events.borrow_mut().push(Ev::Seal);
+        }
+    }
+
+    fn run(
+        rec: &Recorder,
+        ctx: usize,
+        native: bool,
+        opted_in: bool,
+    ) -> Result<Option<String>, String> {
+        daemon_serving_reservation(
+            &qwen3_4b_config(),
+            ctx,
+            &daemon_scheduler_config(),
+            native,
+            opted_in,
+            rec,
+        )
+    }
+
+    #[test]
+    fn opt_in_qwen3_gb10_reserves_prepares_every_shape_and_seals_in_order() {
+        let cfg = qwen3_4b_config();
+        // the plan the daemon builds (context capped like AIEN_KV_CONTEXT_TOKENS=2048)
+        let plan = aien_runtime::shared_kv::plan_checked_model_kv(
+            &cfg,
+            Some(2048),
+            &|| Ok(u64::MAX),
+            false,
+        )
+        .unwrap();
+        let rec = Recorder::new();
+        let line = run(&rec, plan.context_tokens, true, true)
+            .unwrap()
+            .expect("reserved on the opt-in path");
+        let ev = rec.events.borrow();
+        // exactly one reserve, first, with bounds from the KV plan and the scheduler
+        let Ev::Reserve(b) = &ev[0] else {
+            panic!("the first omega call must be the reservation: {:?}", ev[0])
+        };
+        assert_eq!(ev.iter().filter(|e| matches!(e, Ev::Reserve(_))).count(), 1);
+        assert_eq!(b.max_context, 2048, "from the KV plan");
+        assert_eq!(b.max_rows, 256, "from the scheduler");
+        assert_eq!(b.kernel_slots, 128);
+        // every (rows 1..=256) x (shape from the model config) is prepared, each exactly once
+        let shapes = aien_inference_abi::gb10_serving::serving_matmul_shapes(&cfg).unwrap();
+        assert_eq!(shapes.len(), 6, "q, kv, o, gate/up, down, logits");
+        assert!(
+            shapes.contains(&(2560, cfg.vocab_size as u32)),
+            "logits included"
+        );
+        let prepared: Vec<_> = ev
+            .iter()
+            .filter_map(|e| match e {
+                Ev::Prepare(m, k, n) => Some((*m, *k, *n)),
+                _ => None,
+            })
+            .collect();
+        let want: std::collections::BTreeSet<_> = (1..=256u32)
+            .flat_map(|m| shapes.iter().map(move |&(k, n)| (m, k, n)))
+            .collect();
+        assert_eq!(prepared.len(), 256 * 6);
+        assert_eq!(
+            prepared
+                .iter()
+                .copied()
+                .collect::<std::collections::BTreeSet<_>>(),
+            want
+        );
+        // seal is last: after all prepares, before serving can start
+        assert_eq!(ev.last(), Some(&Ev::Seal));
+        assert_eq!(ev.iter().filter(|e| **e == Ev::Seal).count(), 1);
+        assert_eq!(ev.len(), 1 + 256 * 6 + 1);
+        assert!(
+            line.contains("prepared 1536 matmul kernel calls in"),
+            "{line}"
+        );
+        assert!(
+            line.starts_with("GB10_SERVING_RESERVATION reserved bytes="),
+            "{line}"
+        );
+    }
+
+    #[test]
+    fn a_refused_reservation_stops_the_daemon_by_name_before_any_prepare() {
+        let mut rec = Recorder::new();
+        rec.refuse_reserve = true;
+        let err = run(&rec, 4096, true, true).unwrap_err();
+        assert!(err.contains("GB10_SERVING_RESERVATION refused"), "{err}");
+        assert!(
+            err.contains("CHIP_FAIL") && err.contains("no on-demand fallback"),
+            "{err}"
+        );
+        assert_eq!(
+            rec.events.borrow().len(),
+            1,
+            "nothing after a refused reserve"
+        );
+    }
+
+    #[test]
+    fn a_prepare_failure_is_the_same_named_refusal_and_never_seals() {
+        let mut rec = Recorder::new();
+        rec.fail_prepare_at = Some(7);
+        let err = run(&rec, 4096, true, true).unwrap_err();
+        assert!(err.contains("GB10_SERVING_RESERVATION refused"), "{err}");
+        assert!(err.contains("matmul kernel prepare m="), "{err}");
+        let ev = rec.events.borrow();
+        assert_eq!(
+            ev.len(),
+            1 + 8,
+            "reserve + 8 prepares, the 8th failed, stop"
+        );
+        assert!(!ev.contains(&Ev::Seal), "a failed start-up must not seal");
+    }
+
+    #[test]
+    fn default_path_makes_no_omega_call() {
+        // Qwen3 without the declared-attempt opt-in (the default refusal path)
+        let rec = Recorder::new();
+        assert_eq!(run(&rec, 4096, true, false), Ok(None));
+        // CPU daemon (no GB10 engine linked)
+        assert_eq!(run(&rec, 4096, false, true), Ok(None));
+        assert!(rec.events.borrow().is_empty());
+    }
+
+    #[test]
+    fn the_shared_scheduler_config_is_the_daemons() {
+        let s = daemon_scheduler_config();
+        assert_eq!((s.max_batch_size, s.prefill_chunk_size), (256, 128));
+    }
 
     #[test]
     fn model_identity_needs_real_weights_and_a_parsed_tokenizer() {
