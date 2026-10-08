@@ -232,6 +232,7 @@ async fn a_backend_without_op_accounting_makes_no_claim() {
 fn record_field_matches_the_evidence_and_is_absent_without_it() {
     let id = aien_runtime::generation::ModelIdentity {
         model_sha256: "m".repeat(64),
+        model_digest_kind: "file".into(),
         model_path: "/m".into(),
         tokenizer_sha256: "t".repeat(64),
         tokenizer_path: "/t".into(),

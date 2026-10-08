@@ -1987,6 +1987,7 @@ mod tests {
     fn generation_row(id: u64) -> ComposeRecordView {
         let identity = crate::generation::ModelIdentity {
             model_sha256: "m".repeat(64),
+            model_digest_kind: "file".into(),
             model_path: "/models/m.safetensors".into(),
             tokenizer_sha256: "t".repeat(64),
             tokenizer_path: "/models/tokenizer.json".into(),

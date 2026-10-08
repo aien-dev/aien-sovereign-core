@@ -41,6 +41,7 @@ fn toy_tokenizer_with(mock_tokens: &str) -> ChatTokenizer {
 fn identity() -> ModelIdentity {
     ModelIdentity {
         model_sha256: "ab".repeat(32),
+        model_digest_kind: "index+shards".into(),
         model_path: "/models/toy/model.safetensors".into(),
         tokenizer_sha256: "cd".repeat(32),
         tokenizer_path: "/models/toy/tokenizer.json".into(),
@@ -195,6 +196,7 @@ async fn record_carries_the_digests_of_the_turn() {
     assert_eq!(r["generation"], 1);
     assert_eq!(r["v"], 1);
     assert_eq!(r["model_sha256"], want.model_sha256);
+    assert_eq!(r["model_digest_kind"], want.model_digest_kind);
     assert_eq!(r["model_path"], want.model_path);
     assert_eq!(r["tokenizer_sha256"], want.tokenizer_sha256);
     assert_eq!(r["tokenizer_path"], want.tokenizer_path);

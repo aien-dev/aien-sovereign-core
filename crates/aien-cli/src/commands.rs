@@ -930,8 +930,12 @@ struct DaemonModelManifest {
     tokenizer_path: Option<std::path::PathBuf>,
     /// Why no checkpoint file was resolved (None when one was found).
     fallback_reason: Option<String>,
-    /// Hex SHA-256 of the loaded model file (set only when its weights loaded).
+    /// Hex SHA-256 of what was loaded (set only when its weights loaded): the file's own
+    /// digest for a single file, the manifest digest over the index and every shard for a
+    /// sharded checkpoint (see [`checkpoint_digest`]).
     model_sha256: Option<String>,
+    /// Which form `model_sha256` has: `file` or `index+shards` (set with it).
+    model_digest_kind: Option<&'static str>,
     /// Hex SHA-256 of the loaded tokenizer file (set only when it parsed).
     tokenizer_sha256: Option<String>,
 }
@@ -1027,6 +1031,7 @@ fn checkpoint_manifest(
         checkpoint_path: Some(path),
         fallback_reason: None,
         model_sha256: None,
+        model_digest_kind: None,
         tokenizer_sha256: None,
     }
 }
@@ -1100,6 +1105,7 @@ fn resolve_daemon_manifest_with(policy: &CheckpointPolicy) -> DaemonModelManifes
             searched
         )),
         model_sha256: None,
+        model_digest_kind: None,
         tokenizer_sha256: None,
     }
 }
@@ -1137,6 +1143,9 @@ struct DaemonModel {
     weights: aien_inference_abi::TransformerWeights,
     tokenizer: Option<aien_inference_abi::ChatTokenizer>,
     label: String,
+    /// The `CHECKPOINT_SHARDS` line for a sharded checkpoint (logged after the
+    /// "checkpoint loaded" line, which keeps its pinned form); None otherwise.
+    shards_line: Option<String>,
     #[allow(dead_code)] // read by tests now and by the PREFILL-E2E receipt (Cut 8)
     reference_weights: bool,
 }
@@ -1159,6 +1168,7 @@ fn model_identity(
     };
     Some(aien_runtime::generation::ModelIdentity {
         model_sha256: manifest.model_sha256.clone()?,
+        model_digest_kind: manifest.model_digest_kind?.to_string(),
         model_path: path_text(manifest.checkpoint_path.as_deref()?),
         tokenizer_sha256: manifest.tokenizer_sha256.clone()?,
         tokenizer_path: path_text(manifest.tokenizer_path.as_deref()?),
@@ -1180,6 +1190,83 @@ fn sha256_file_hex(path: &std::path::Path) -> std::io::Result<String> {
         hasher.update(&buf[..read]);
     }
     Ok(hex::encode(hasher.finalize()))
+}
+
+/// The digest of a checkpoint's weight bytes (sc#338), over exactly the files the
+/// loader reads ([`aien_inference_abi::checkpoint_files`]).
+struct CheckpointDigest {
+    /// A single file: its own sha256. A sharded checkpoint: the sha256 of the
+    /// manifest text `aien-checkpoint-digest v1\nindex <index sha256>\n` followed by
+    /// one `<shard sha256>  <shard name>\n` line per shard, sorted by name (the
+    /// shard lines are `sha256sum` lines).
+    sha256: String,
+    /// `file` or `index+shards`.
+    kind: &'static str,
+    /// The index's own sha256 (sharded only).
+    index_sha256: Option<String>,
+    /// `(shard name, shard sha256)` in name order (sharded only).
+    shards: Vec<(String, String)>,
+}
+
+/// Errors name the file only when it is not `path` itself (the caller names `path`).
+/// A directory is refused, as it was when `path` itself was hashed.
+fn checkpoint_digest(path: &std::path::Path) -> Result<CheckpointDigest, String> {
+    if path.is_dir() {
+        return Err("is a directory, not a safetensors file or shard index".to_string());
+    }
+    let files = aien_inference_abi::checkpoint_files(path).map_err(|e| e.to_string())?;
+    let sha = |p: &std::path::Path| {
+        sha256_file_hex(p).map_err(|e| {
+            if p == path {
+                e.to_string()
+            } else {
+                format!("{}: {}", p.display(), e)
+            }
+        })
+    };
+    let Some(index) = files.index else {
+        let Some((_, file)) = files.weights.first() else {
+            return Err("names no weight file".to_string());
+        };
+        return Ok(CheckpointDigest {
+            sha256: sha(file)?,
+            kind: "file",
+            index_sha256: None,
+            shards: Vec::new(),
+        });
+    };
+    if files.weights.is_empty() {
+        return Err("its shard index names no shard".to_string());
+    }
+    use sha2::{Digest, Sha256};
+    let index_sha256 = sha(&index)?;
+    let mut manifest = format!("aien-checkpoint-digest v1\nindex {index_sha256}\n");
+    let mut shards = Vec::with_capacity(files.weights.len());
+    for (name, file) in &files.weights {
+        let digest = sha(file)?;
+        manifest.push_str(&format!("{digest}  {name}\n"));
+        shards.push((name.clone(), digest));
+    }
+    Ok(CheckpointDigest {
+        sha256: hex::encode(Sha256::digest(manifest.as_bytes())),
+        kind: "index+shards",
+        index_sha256: Some(index_sha256),
+        shards,
+    })
+}
+
+/// The `CHECKPOINT_SHARDS` log line (sc#338): every shard's sha256 and the index's,
+/// so a run's log ties `model_sha256` to the shard bytes. None for a single file.
+fn checkpoint_shards_line(d: &CheckpointDigest) -> Option<String> {
+    let index = d.index_sha256.as_deref()?;
+    let shards: Vec<String> = d.shards.iter().map(|(n, s)| format!("{n}:{s}")).collect();
+    Some(format!(
+        "CHECKPOINT_SHARDS model_sha256={} model_digest_kind={} index_sha256={} shards=[{}]",
+        d.sha256,
+        d.kind,
+        index,
+        shards.join(",")
+    ))
 }
 
 /// The single decision point for every checkpoint fallback. Under
@@ -1213,6 +1300,7 @@ fn reference_fallback(
         ),
         weights: aien_inference_abi::TransformerWeights::reference_test_weights(&config),
         tokenizer: None,
+        shards_line: None,
         reference_weights: true,
         manifest,
     })
@@ -1250,7 +1338,7 @@ fn load_daemon_model_with(
             .unwrap_or_else(|| "no checkpoint resolved".to_string());
         return reference_fallback(manifest, require_checkpoint, reason);
     };
-    let model_sha256 = match sha256_file_hex(&path) {
+    let digest = match checkpoint_digest(&path) {
         Ok(digest) => digest,
         Err(error) => {
             let reason = format!("checkpoint {} is unreadable: {}", path.display(), error);
@@ -1319,7 +1407,8 @@ fn load_daemon_model_with(
             return reference_fallback(manifest, require_checkpoint, reason);
         }
     };
-    manifest.model_sha256 = Some(model_sha256);
+    manifest.model_sha256 = Some(digest.sha256.clone());
+    manifest.model_digest_kind = Some(digest.kind);
 
     let mut tokenizer = None;
     match manifest.tokenizer_path.clone() {
@@ -1377,6 +1466,7 @@ fn load_daemon_model_with(
         weights,
         tokenizer,
         label,
+        shards_line: checkpoint_shards_line(&digest),
         reference_weights: false,
     })
 }
@@ -1431,6 +1521,7 @@ fn build_native_daemon_backend() -> Result<DaemonBackendParts, String> {
         tokenizer,
         label: model_label,
         manifest,
+        shards_line,
         ..
     } = {
         let open_session = || {
@@ -1451,6 +1542,9 @@ fn build_native_daemon_backend() -> Result<DaemonBackendParts, String> {
         };
         load_daemon_model_with(manifest, policy.require_checkpoint, Some(&resident))?
     };
+    if let Some(line) = &shards_line {
+        println!("  {line}");
+    }
     let identity = model_identity(&manifest, tokenizer.is_some());
     // FB-1 cut 6: the native Omega engine is the only GPU backend (no CUDA). The env names
     // AIEN_REQUIRE_BLACKWELL (the GB10 chip, campaign spec) and AIEN_GPU_BACKEND=omega both
@@ -2340,6 +2434,7 @@ mod tests {
             tokenizer_path: Some("/nonexistent/tokenizer.json".into()),
             fallback_reason: None,
             model_sha256: Some("aa".into()),
+            model_digest_kind: Some("index+shards"),
             tokenizer_sha256: Some("bb".into()),
         };
         let id = model_identity(&loaded, true).expect("identity");
@@ -2348,11 +2443,13 @@ mod tests {
             ("aa", "bb")
         );
         assert_eq!(id.model_path, "/nonexistent/model.safetensors");
+        assert_eq!(id.model_digest_kind, "index+shards");
         // No parsed tokenizer, no weights digest, or no tokenizer digest: no identity.
         assert!(model_identity(&loaded, false).is_none());
         for strip in [0, 1] {
             let mut m = DaemonModelManifest {
                 model_sha256: loaded.model_sha256.clone(),
+                model_digest_kind: loaded.model_digest_kind,
                 tokenizer_sha256: loaded.tokenizer_sha256.clone(),
                 checkpoint_path: loaded.checkpoint_path.clone(),
                 tokenizer_path: loaded.tokenizer_path.clone(),
@@ -2648,6 +2745,177 @@ mod tests {
             "{}",
             model.label
         );
+    }
+
+    /// Copies the tiny Qwen3 fixture into `dir` as two shards plus a
+    /// `model.safetensors.index.json` (tensors split by sorted name, half each).
+    fn write_two_shard_qwen3_tiny(dir: &std::path::Path) -> std::path::PathBuf {
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../aien-inference-abi/fixtures/qwen3-tiny");
+        std::fs::copy(fixture.join("config.json"), dir.join("config.json")).unwrap();
+        let bytes = std::fs::read(fixture.join("model.safetensors")).unwrap();
+        let header_len = u64::from_le_bytes(bytes[..8].try_into().unwrap()) as usize;
+        let header: serde_json::Map<String, serde_json::Value> =
+            serde_json::from_slice(&bytes[8..8 + header_len]).unwrap();
+        let data = &bytes[8 + header_len..];
+        let mut names: Vec<&String> = header.keys().filter(|k| *k != "__metadata__").collect();
+        names.sort();
+        let (first, second) = names.split_at(names.len() / 2);
+        let mut weight_map = serde_json::Map::new();
+        for (file, part) in [
+            ("model-00001-of-00002.safetensors", first),
+            ("model-00002-of-00002.safetensors", second),
+        ] {
+            let mut shard_header = serde_json::Map::new();
+            let mut payload = Vec::new();
+            for name in part {
+                let mut info = header[*name].clone();
+                let offsets = info["data_offsets"].as_array().unwrap();
+                let (a, b) = (
+                    offsets[0].as_u64().unwrap() as usize,
+                    offsets[1].as_u64().unwrap() as usize,
+                );
+                let start = payload.len();
+                payload.extend_from_slice(&data[a..b]);
+                info["data_offsets"] = serde_json::json!([start, payload.len()]);
+                shard_header.insert((*name).clone(), info);
+                weight_map.insert((*name).clone(), serde_json::json!(file));
+            }
+            let text = serde_json::Value::Object(shard_header).to_string();
+            let mut out = (text.len() as u64).to_le_bytes().to_vec();
+            out.extend_from_slice(text.as_bytes());
+            out.extend_from_slice(&payload);
+            std::fs::write(dir.join(file), out).unwrap();
+        }
+        let index = dir.join("model.safetensors.index.json");
+        std::fs::write(
+            &index,
+            serde_json::json!({"metadata": {}, "weight_map": weight_map}).to_string(),
+        )
+        .unwrap();
+        index
+    }
+
+    fn file_sha(path: &std::path::Path) -> String {
+        use sha2::{Digest, Sha256};
+        hex::encode(Sha256::digest(std::fs::read(path).unwrap()))
+    }
+
+    /// sc#338: a sharded checkpoint's `model_sha256` binds the index AND every
+    /// shard it names (the documented manifest form), not the index alone; a
+    /// changed shard under the same index changes it.
+    #[test]
+    fn a_sharded_checkpoint_digest_binds_every_shard() {
+        use sha2::{Digest, Sha256};
+        let dir = tempfile::tempdir().unwrap();
+        let index = write_two_shard_qwen3_tiny(dir.path());
+        let load = || {
+            let policy = CheckpointPolicy {
+                model_path: Some(index.clone()),
+                ..CheckpointPolicy::default()
+            };
+            let model = load_daemon_model(resolve_daemon_manifest_with(&policy), false)
+                .expect("the two-shard fixture loads");
+            assert!(!model.reference_weights, "{}", model.label);
+            model
+        };
+        let model = load();
+        assert_eq!(model.manifest.model_digest_kind, Some("index+shards"));
+        let shard = |n| {
+            dir.path()
+                .join(format!("model-0000{n}-of-00002.safetensors"))
+        };
+        let expected = hex::encode(Sha256::digest(format!(
+            "aien-checkpoint-digest v1\nindex {}\n{}  model-00001-of-00002.safetensors\n{}  model-00002-of-00002.safetensors\n",
+            file_sha(&index),
+            file_sha(&shard(1)),
+            file_sha(&shard(2)),
+        )));
+        let digest = model.manifest.model_sha256.clone().unwrap();
+        assert_eq!(digest, expected);
+        assert_ne!(digest, file_sha(&index), "not the index alone");
+        let line = model
+            .shards_line
+            .clone()
+            .expect("a sharded load logs its shards");
+        assert_eq!(
+            line,
+            format!(
+                "CHECKPOINT_SHARDS model_sha256={digest} model_digest_kind=index+shards index_sha256={} shards=[model-00001-of-00002.safetensors:{},model-00002-of-00002.safetensors:{}]",
+                file_sha(&index),
+                file_sha(&shard(1)),
+                file_sha(&shard(2)),
+            )
+        );
+        // The "checkpoint loaded" line keeps its pinned form and carries the new digest.
+        assert!(
+            model.label.contains(&format!("model_sha256={digest},")),
+            "{}",
+            model.label
+        );
+
+        // Change one weight byte in the second shard, same index: a new digest.
+        let mut bytes = std::fs::read(shard(2)).unwrap();
+        let last = bytes.len() - 1;
+        bytes[last] ^= 0x01;
+        std::fs::write(shard(2), bytes).unwrap();
+        let changed = load().manifest.model_sha256.unwrap();
+        assert_ne!(changed, digest, "a changed shard must change the digest");
+    }
+
+    /// sc#338 review: the digest changes no refusal. A model directory as the
+    /// checkpoint path is still refused (as when the path itself was hashed),
+    /// and an index naming no shard is refused, with the path named once.
+    #[test]
+    fn a_directory_or_an_index_without_shards_is_still_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        write_two_shard_qwen3_tiny(dir.path());
+        let err = load_daemon_model(
+            resolve_daemon_manifest_with(&strict_policy(Some(dir.path().to_path_buf()))),
+            true,
+        )
+        .err()
+        .expect("a directory path is refused");
+        assert!(err.contains("AIEN_REQUIRE_CHECKPOINT=1"), "{err}");
+        assert!(err.contains("is a directory"), "{err}");
+
+        let empty = tempfile::tempdir().unwrap();
+        let index = empty.path().join("model.safetensors.index.json");
+        std::fs::write(&index, r#"{"weight_map":{}}"#).unwrap();
+        let err = load_daemon_model(
+            resolve_daemon_manifest_with(&strict_policy(Some(index.clone()))),
+            true,
+        )
+        .err()
+        .expect("an index without shards is refused");
+        assert!(err.contains("names no shard"), "{err}");
+        assert_eq!(
+            err.matches(&index.display().to_string()).count(),
+            1,
+            "{err}"
+        );
+    }
+
+    /// sc#338: a single safetensors file keeps `model_sha256` = the file's own
+    /// sha256 (`model_digest_kind` = `file`) and logs no shard line.
+    #[test]
+    fn a_single_file_checkpoint_digest_is_the_file_sha256() {
+        let dir = tempfile::tempdir().unwrap();
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../aien-inference-abi/fixtures/qwen3-tiny");
+        for f in ["config.json", "model.safetensors"] {
+            std::fs::copy(fixture.join(f), dir.path().join(f)).unwrap();
+        }
+        let path = dir.path().join("model.safetensors");
+        let policy = CheckpointPolicy {
+            model_path: Some(path.clone()),
+            ..CheckpointPolicy::default()
+        };
+        let model = load_daemon_model(resolve_daemon_manifest_with(&policy), false).unwrap();
+        assert!(!model.reference_weights, "{}", model.label);
+        assert_eq!(model.manifest.model_digest_kind, Some("file"));
+        assert_eq!(model.manifest.model_sha256, Some(file_sha(&path)));
+        assert_eq!(model.shards_line, None);
     }
 
     /// Real-checkpoint proof. Ignored in plain `cargo test`; the forge runs it with
