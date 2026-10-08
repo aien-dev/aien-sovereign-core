@@ -229,6 +229,14 @@
       "not_applicable": false
     },
     {
+      "row": "W1/W1-BE",
+      "role": "case",
+      "reps": 1,
+      "expected": "PASS",
+      "control": null,
+      "not_applicable": false
+    },
+    {
       "row": "W2/v1 Task completion",
       "role": "case",
       "reps": 1,
@@ -453,6 +461,14 @@
       "not_applicable": false
     },
     {
+      "row": "W2/W2-BE",
+      "role": "case",
+      "reps": 1,
+      "expected": "PASS",
+      "control": null,
+      "not_applicable": false
+    },
+    {
       "row": "W3/v1 Task completion",
       "role": "case",
       "reps": 1,
@@ -670,6 +686,14 @@
     },
     {
       "row": "W3/W3-D",
+      "role": "case",
+      "reps": 1,
+      "expected": "PASS",
+      "control": null,
+      "not_applicable": false
+    },
+    {
+      "row": "W3/W3-BE",
       "role": "case",
       "reps": 1,
       "expected": "PASS",
@@ -917,6 +941,14 @@
       "not_applicable": false
     },
     {
+      "row": "W4/W4-BE",
+      "role": "case",
+      "reps": 1,
+      "expected": "PASS",
+      "control": null,
+      "not_applicable": false
+    },
+    {
       "row": "W5/v1 Task completion",
       "role": "case",
       "reps": 1,
@@ -1157,6 +1189,14 @@
       "not_applicable": false
     },
     {
+      "row": "W5/W5-BE",
+      "role": "case",
+      "reps": 1,
+      "expected": "PASS",
+      "control": null,
+      "not_applicable": false
+    },
+    {
       "row": "U1/v1 Task completion",
       "role": "case",
       "reps": 1,
@@ -1358,6 +1398,14 @@
     },
     {
       "row": "U1/U1-D",
+      "role": "case",
+      "reps": 1,
+      "expected": "PASS",
+      "control": null,
+      "not_applicable": false
+    },
+    {
+      "row": "U1/U1-BE",
       "role": "case",
       "reps": 1,
       "expected": "PASS",
@@ -1573,6 +1621,14 @@
       "not_applicable": false
     },
     {
+      "row": "U2/U2-BE",
+      "role": "case",
+      "reps": 1,
+      "expected": "PASS",
+      "control": null,
+      "not_applicable": false
+    },
+    {
       "row": "R1/v1 Task completion",
       "role": "case",
       "reps": 1,
@@ -1765,6 +1821,14 @@
       "not_applicable": false
     },
     {
+      "row": "R1/R1-BE",
+      "role": "case",
+      "reps": 1,
+      "expected": "PASS",
+      "control": null,
+      "not_applicable": false
+    },
+    {
       "row": "N1/N1-C",
       "role": "case",
       "reps": 1,
@@ -1814,6 +1878,14 @@
     },
     {
       "row": "N1/N1-NC",
+      "role": "case",
+      "reps": 1,
+      "expected": "PASS",
+      "control": null,
+      "not_applicable": false
+    },
+    {
+      "row": "N1/N1-BE",
       "role": "case",
       "reps": 1,
       "expected": "PASS",
@@ -1878,6 +1950,14 @@
     },
     {
       "row": "N2/N2-R",
+      "role": "case",
+      "reps": 1,
+      "expected": "PASS",
+      "control": null,
+      "not_applicable": false
+    },
+    {
+      "row": "N2/N2-BE",
       "role": "case",
       "reps": 1,
       "expected": "PASS",

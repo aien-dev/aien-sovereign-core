@@ -14,9 +14,15 @@
 //!
 //!   remember  --text T                                   S1 constraint record
 //!   inspect   --workspace W                              S2 read-only listing + receipt
-//!   propose   --goal G --workspace W                     S3 one RunComposeTask
+//!   propose   --goal G --workspace W  [--context personal|work|project:NAME]  S3 one RunComposeTask
 //!   authorize --report S3.json --workspace W --approver NAME [--constraint ID]
 //!                                                        S4 the one approval
+//!             [--desk 1 | --desk-key PATH | --desk-mac HEX --desk-nonce N]
+//!                                                        optional approval-desk MAC (#297); the daemon
+//!                                                        checks it only with AIEN_COMPOSE_AUTHORIZE_REQUIRES_DESK=1
+//!                                                        ON mode adds assurance only if the authorizing caller
+//!                                                        cannot read the desk key file; a process as the same
+//!                                                        OS user that can read it passes trivially (as in #249)
 //!   execute   --report S3.json --workspace W --authorization ID
 //!                                                        S5 the write, confined
 //!   explain   --report S3.json --cite ID,.. --receipts P,..
@@ -245,6 +251,7 @@ async fn step(sub: &str, m: &HashMap<String, String>) -> Result<Value, String> {
             match send(ControlCommand::RunComposeTask {
                 goal: need(m, "goal")?.to_string(),
                 workspace: ws.display().to_string(),
+                context: m.get("context").cloned(),
             })
             .await?
             {
@@ -283,12 +290,50 @@ async fn step(sub: &str, m: &HashMap<String, String>) -> Result<Value, String> {
                 .map(|s| ids(s))
                 .transpose()?
                 .unwrap_or_default();
+            // sovereign-core #297: the optional approval-desk proof. Only a
+            // daemon started with AIEN_COMPOSE_AUTHORIZE_REQUIRES_DESK=1 checks
+            // it; without the switch the daemon ignores it.
+            let desk_proof = {
+                use aien_runtime::approved_auth::{desk_key_path, AuthorizeBinding, DeskKey};
+                use aien_runtime::control::DeskProof;
+                match (m.get("desk-mac"), m.get("desk-key"), m.contains_key("desk")) {
+                    (Some(mac), _, _) => Some(DeskProof {
+                        nonce: need(m, "desk-nonce")?.to_string(),
+                        mac: mac.to_string(),
+                    }),
+                    (None, key_path, desk) if key_path.is_some() || desk => {
+                        let key_file = match key_path {
+                            Some(p) => std::path::PathBuf::from(p),
+                            None => desk_key_path(&aien_runtime::spine::compose_dir_from_env()?),
+                        };
+                        let key = DeskKey::load(&key_file)?;
+                        let mut raw = [0u8; 16];
+                        std::io::Read::read_exact(&mut std::fs::File::open("/dev/urandom").map_err(|e| e.to_string())?, &mut raw)
+                            .map_err(|e| e.to_string())?;
+                        let nonce = hex::encode(raw);
+                        let mac = key.sign_authorize(&AuthorizeBinding {
+                            cx_promotion: r.cx_promotion,
+                            proposal_sha256: psha.clone(),
+                            path: path.clone(),
+                            content_sha256: csha.clone(),
+                            workspace: wsc.display().to_string(),
+                            approver: approver.trim().to_string(),
+                            constraints: constraints.clone(),
+                            nonce: nonce.clone(),
+                            desk_key_id: key.id().to_string(),
+                        });
+                        Some(DeskProof { nonce, mac })
+                    }
+                    _ => None,
+                }
+            };
             let n = match send(ControlCommand::ComposeAuthorize {
                 cx_promotion: r.cx_promotion,
                 proposal_sha256: psha.clone(),
                 workspace: wsc.display().to_string(),
                 approver: approver.to_string(),
                 constraints: constraints.clone(),
+                desk_proof,
             })
             .await?
             {

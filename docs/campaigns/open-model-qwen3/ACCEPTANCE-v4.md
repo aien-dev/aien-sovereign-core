@@ -109,8 +109,8 @@ failure stands as a product finding, not a model finding, and the verdict says w
 
 Row counts (machine-read by `test-v4.sh`, which fails if they drift from the generated declarations):
 
-QUALIFICATION_ROWS=235
-REGRESSION_ROWS=101
+QUALIFICATION_ROWS=245
+REGRESSION_ROWS=105
 
 **Counting rules** (the same as ACCEPTANCE-v3 Section 12, plus the rules for the new requirement kinds; implemented in
 `rows-oq3-v4.jq`, tested by `test-v4.sh` on made-up documents):
@@ -194,6 +194,7 @@ Q1 to Q4, `<id>-A` approval binds the proposal, A3 to A6, `<id>-CM` containment,
 | `<id>-EO` Edit outcome | U1, U2 | every non-empty seed line is a line of the saved text; a line equal to the declared new line follows the declared heading before the next level-one or level-two heading; the saved text has exactly one more non-empty line than the seed |
 | `<id>-D` One deadline | all | at least one attempt; the attempts' total ms is at or below the task's `budget_ms`; no attempt's reason contains "exceeded"; for positive launches an accepted attempt exists |
 | `<id>-NC` Nothing committed on refusal | N1, N2 | no authorization record, no S5 path and no file found at any S5 path |
+| `<id>-BE` No CPU, stub or fallback backend | every launch | `run.json` `daemon` (one entry per daemon start, `backend` read from the daemon log by the driver) is non-empty, every backend contains `OmegaGb10` and none contains cpu, stub, reference or fallback (case-insensitive); no entry, an empty backend or a missing `run.json` FAILs. This is the only backend field a receipt carries: it is per daemon start, not per operation |
 | `N2-R` Token-limit cut is not a timeout | N2 | every attempt has finish_reason max_tokens and a reason containing "token limit" and not containing "exceeded" |
 
 Whether the product recognized a requirement (`requirements_recognized` in the S3 report) is not a row condition. A reply the
@@ -204,7 +205,7 @@ runtime refuses leaves no committed file, so every row that needs one FAILs for 
 `gen-decl-oq3-v4.sh` writes two declarations from the v8 row shapes of the v2 declaration plus the v4 rows:
 `../scoring/declarations/oq3-v4.decl.json` (qualification, 235 rows) and `../scoring/declarations/oq3-v4-regression.decl.json`
 (regression, 101 rows). One repetition each, role case, no control, none NOT_APPLICABLE. `test-v4.sh` fails if either committed
-file differs from the generated one. Per launch, qualification: N1 7, N2 8, R1 24, U1 26, U2 26, W1 28, W2 28, W3 28, W4 30, W5 30.
+file differs from the generated one. Per launch, qualification: N1 8, N2 9, R1 25, U1 27, U2 27, W1 29, W2 29, W3 29, W4 31, W5 31.
 
 ## 5. Verdict (qualification)
 
@@ -246,14 +247,14 @@ Model: Qwen/Qwen3-4B-Instruct-2507, Hugging Face revision cdbee75f, Apache-2.0, 
 below is empty now and is filled and checked at the freeze; the wrapper compares what it can.
 
 ```text
-sovereign-core commit (exact)            = 4d4dfd459ae7e7c6c175edc5017816d079c621a9 (main with #293, #296, #295)
-omega.lock commit                        = 01f6a74636b8383b010cdb95597839582c415c27 (unchanged) (v3 used 01f6a74636b8383b010cdb95597839582c415c27)
+sovereign-core commit (exact)            = 6bbe2ec269768c7c9b94b9484c757ca45f55f564 (main; contains sc#311, #313, #315 to #319; v4 previously drafted at 4d4dfd4)
+omega.lock commit                        = 6c6180cf378075b61291f4565d226eba38b4decd (omega.lock at 6bbe2ec2; changed from 01f6a74636b8383b010cdb95597839582c415c27, v3 used that)
 physics commit                           = 6d7cf0d4d8eb2cda7b512100ff6058e25dbb3ddf (unchanged) (v3 used 6d7cf0d4d8eb2cda7b512100ff6058e25dbb3ddf)
 aienos.lock commit                       = b84c0a67590a934f3f3e001b12ec85ebc086a9eb (unchanged; build log "matches") (v3 used b84c0a67590a934f3f3e001b12ec85ebc086a9eb)
-Cargo.lock sha256                        = 0d9d1a3dbead55fb1581895a1c8246c396eeb35504871921ae4c00e28115acff
-aien-cli sha256                          = fa48da4a85023dac406dbf05bca60df316b4ecd441c94e8c0f356fbd61a9ebd2
-np1_reference sha256                     = 421d0db86539392a4d38b712b358041b0263a45ba92027838b8919cf3b865f2d
-np1_edit_merge sha256                    = 7592d74a05406804c430c3d5940ba8b7691c3d34510375344e2a5b4d8c3e9f6c
+Cargo.lock sha256                        = 49d97bf30113b1727fcfc0e33be79d9446ae13651a08afc32bba889b77fca265
+aien-cli sha256                          = 152c0aecce662f618bf683c8854d6de56a7075e0461c2433570f4c15b68571a5
+np1_reference sha256                     = ea1e22f114192cbb94afddef8026239252246a03390ef6986eb4b2c00ad9c046
+np1_edit_merge sha256                    = 1815cd51b2975afc3ef841123a47cf6d48b381cd14c42afa3dbf0fecaa43a07d
 build logs show has_omega_compose, has_omega_gpu, has_omega_wait_ms = confirmed (evidence-v4/build-lines.txt)
 ```
 
@@ -261,15 +262,15 @@ Model files (values recorded from the v3 wrapper and re-hashed on this machine o
 and confirm at the freeze), directory `/home/drakestapleton/models/qwen3-4b-instruct-2507-cdbee75/`:
 
 ```text
-model.safetensors.index.json             d6c42883a895dfef5b0080ed2116a1bcd764f558406b98923d675978a1abf29c   (confirmed 2026-10-07, evidence-v4/model-sha256.txt)
-model-00001-of-00003.safetensors         75311d91bb08cf0b882913da464a1e722a31fb44db35208663487efb7a3d8ed6   (confirmed 2026-10-07, evidence-v4/model-sha256.txt)
-model-00002-of-00003.safetensors         0b48adbb1f60e901153d91907ba11ce63bd4b8b584482e730f48808d055dfba1   (confirmed 2026-10-07, evidence-v4/model-sha256.txt)
-model-00003-of-00003.safetensors         7dd39ccca5e4de123c74c14af44c9bf2eb75df33b4614382af0134528e060d5d   (confirmed 2026-10-07, evidence-v4/model-sha256.txt)
-tokenizer.json                           aeb13307a71acd8fe81861d94ad54ab689df773318809eed3cbe794b4492dae4   (confirmed 2026-10-07, evidence-v4/model-sha256.txt)
-tokenizer_config.json (holds the chat template; checked by the v4 wrapper, not by v3) a62ff0a2472a0fa1b8eaabcb57c59b58afa42a22831dc141400b6e0cf2b65ce3   (confirmed 2026-10-07, evidence-v4/model-sha256.txt)
-chat template string alone (jq -j .chat_template | sha256sum)   64f85b198065d0fba2a81f37e10ed68161ce2c19a754c7100e67e0ca2ee9c326   (confirmed 2026-10-07, evidence-v4/model-sha256.txt)
-config.json                              5beea1a4a34c62782bfb2f911c606741a3bab8f92d80a118fa053c28af12e8ba   (confirmed 2026-10-07, evidence-v4/model-sha256.txt)
-generation_config.json                   835fffe355c9438e7a25be099b3fccaa98350b83451f9fd2d99512e74f1ade48   (confirmed 2026-10-07, evidence-v4/model-sha256.txt)
+model.safetensors.index.json             d6c42883a895dfef5b0080ed2116a1bcd764f558406b98923d675978a1abf29c   (re-hashed 2026-10-08, identical to 2026-10-07; evidence-v4/model-sha256.txt)
+model-00001-of-00003.safetensors         75311d91bb08cf0b882913da464a1e722a31fb44db35208663487efb7a3d8ed6   (re-hashed 2026-10-08, identical to 2026-10-07; evidence-v4/model-sha256.txt)
+model-00002-of-00003.safetensors         0b48adbb1f60e901153d91907ba11ce63bd4b8b584482e730f48808d055dfba1   (re-hashed 2026-10-08, identical to 2026-10-07; evidence-v4/model-sha256.txt)
+model-00003-of-00003.safetensors         7dd39ccca5e4de123c74c14af44c9bf2eb75df33b4614382af0134528e060d5d   (re-hashed 2026-10-08, identical to 2026-10-07; evidence-v4/model-sha256.txt)
+tokenizer.json                           aeb13307a71acd8fe81861d94ad54ab689df773318809eed3cbe794b4492dae4   (re-hashed 2026-10-08, identical to 2026-10-07; evidence-v4/model-sha256.txt)
+tokenizer_config.json (holds the chat template; checked by the v4 wrapper, not by v3) a62ff0a2472a0fa1b8eaabcb57c59b58afa42a22831dc141400b6e0cf2b65ce3   (re-hashed 2026-10-08, identical to 2026-10-07; evidence-v4/model-sha256.txt)
+chat template string alone (jq -j .chat_template | sha256sum)   64f85b198065d0fba2a81f37e10ed68161ce2c19a754c7100e67e0ca2ee9c326   (re-hashed 2026-10-08, identical to 2026-10-07; evidence-v4/model-sha256.txt)
+config.json                              5beea1a4a34c62782bfb2f911c606741a3bab8f92d80a118fa053c28af12e8ba   (re-hashed 2026-10-08, identical to 2026-10-07; evidence-v4/model-sha256.txt)
+generation_config.json                   835fffe355c9438e7a25be099b3fccaa98350b83451f9fd2d99512e74f1ade48   (re-hashed 2026-10-08, identical to 2026-10-07; evidence-v4/model-sha256.txt)
 ```
 
 Environment, checked by the wrapper (values are what v3 used; confirm at the freeze):
@@ -345,18 +346,18 @@ least one failing synthetic reply per qualification task, run through `v4-rows.s
 intended requirement rows); negatives, identity, approval-binding, cut and deadline cases; direct tests of each counting
 rule; wrapper refusals; and the unchanged receipt builder staged as the wrapper stages it.
 
-Result when this draft was prepared (CPU only): test-v4.sh: 164 passed, 0 failed (CPU only, no GPU, no hold; run from the repository root of the branch)
+Result when this draft was prepared (CPU only): test-v4.sh: 170 passed, 0 failed (CPU only, no GPU, no hold; run from the repository root of the branch)
 
 Freeze checklist (all TO FILL AT FREEZE unless marked done):
 
 1. Pick the sovereign-core commit to freeze on (main, with whatever product changes are then merged) and the matching
-   omega.lock and physics commits: 4d4dfd4, omega 01f6a74, physics 6d7cf0d (Section 7).
+   omega.lock and physics commits: 6bbe2ec2, omega 6c6180c, physics 6d7cf0d (Section 7; moved from 4d4dfd4 on 2026-10-08; if main moves again before freeze, repeat items 2 to 5).
 2. Re-read this file's Section 12 against that commit. TO FILL AT FREEZE.
-3. Combined build from clean checkouts, binaries' sha256 and build-line evidence into `evidence-v4/`: done 2026-10-07 on
-   4d4dfd4, `evidence-v4/build-summary.txt` and `build-lines.txt`.
+3. Combined build from clean checkouts, binaries' sha256 and build-line evidence into `evidence-v4/`: done 2026-10-08 on
+   6bbe2ec2, `evidence-v4/build-summary.txt` and `build-lines.txt`.
 4. Pre-run gate on that build: `cargo fmt --all --check`, clippy with `-D warnings`, the runtime and CLI tests in stub and
-   linked builds reported separately, `test-rows-v8.sh`, `test-v3.sh` and `test-v4.sh`: run 2026-10-07 on 4d4dfd4, results in
-   `evidence-v4/pre-run-gate.txt` (stub 289/1/65 with the one failure explained and filed as #299, linked 350/0/5, test-v4 164/0).
+   linked builds reported separately, `test-rows-v8.sh`, `test-v3.sh` and `test-v4.sh`: first run 2026-10-07 on 4d4dfd4, re-run in part on 6bbe2ec2 on 2026-10-08 (all but the linked tests and test-v3.sh), results in
+   `evidence-v4/pre-run-gate.txt` (4d4dfd4: stub 289/1/65, linked 350/0/5, test-v4 164/0; 6bbe2ec2: stub 365/0/107, linked NOT RUN, test-v4 170/0).
    Repeat at freeze if the frozen commit changes.
 5. Scorer dry run on both declarations with made-up lines (`test-v4.sh` section 3): done in this draft; repeat at freeze.
 6. A GPU dry run of this exact wrapper in `OQ3_DRY_TASKS` mode: NOT DONE (needs five holds and Drake's approval). Until it runs,
@@ -390,11 +391,11 @@ measured; the rows decide. Probabilities are for "every row of that launch passe
 
 ### 10.1 Requirement analyser outcome per task (stated before any run, from the product, not from any reply)
 
-Sovereign-core #295 (in the frozen 4d4dfd4) reads each goal's stated requirements and, when any span is uncertain, refuses the
+Sovereign-core #295 (in the pinned 6bbe2ec2, with #319 FirstLineHeading) reads each goal's stated requirements and, when any span is uncertain, refuses the
 task before any model call (`spine.rs`, "refuse before any model call"; the verify step refuses again as a backstop). Such a
 launch therefore records no attempt at all. The table is what `crates/aien-runtime/tests/requirements_usability_test.rs`
 (lists SILENT, RECOGNIZED, REFUSED over `tests/fixtures/goal_corpus.tsv`) asserts for each v4 goal on that commit. It is a
-product fact, checked on CPU; it is not a model result. The goals were written before #295 merged and are kept verbatim:
+product fact, checked on CPU; it is not a model result. Regenerated mechanically on 2026-10-08 at 6bbe2ec2 by calling `requirements::analyze` on each goal text of `tasks-oq3-v4.json` (no model, no daemon, no GPU; output and probe source in `evidence-v4/requirements-probe-6bbe2ec2.txt`). The only difference from the 4d4dfd4 table is the longer span reported for R1; every outcome is unchanged. The goals were written before #295 merged and are kept verbatim:
 rewording a goal so the analyser accepts it would tailor the tasks to the product.
 
 | id | analyser | span reported (REFUSED only) | consequence for the rows |
@@ -408,7 +409,7 @@ rewording a goal so the analyser accepts it would tailor the tasks to the produc
 | U2 | SILENT | | as U1 |
 | N1 | RECOGNIZED | | declared negative; expected REFUSED on the destination, the rows decide |
 | N2 | REFUSED (uncertain) | "at least twelve paragraphs" | refused, but before the model: no attempt, so N2-F and N2-R ("at least one attempt", rows-v8.jq and rows-oq3-v3.jq) FAIL; the budget limit is never exercised |
-| R1 | REFUSED (uncertain) | "one-sentence thank-you note" | no model call and no commit: R1-X needs an accepted attempt, so R1 FAILS; token identity is not measured |
+| R1 | REFUSED (uncertain) | "one-sentence thank-you note for everyone who tested the project" | no model call and no commit: R1-X needs an accepted attempt, so R1 FAILS; token identity is not measured |
 | RG2, RG3, RT4, RT6 | RECOGNIZED (RG2, RG3 are v3 G2, G3 verbatim, listed under tasks-oq3-v3) | | regression, reported only |
 
 Consequence: the qualification verdict is predicted FAIL with certainty, independent of the model (W3, W5, N2 and R1 make no
@@ -417,7 +418,7 @@ and GPU memory over a long session. A refusal of W3, W5, N2 or R1 is a product l
 
 ## 11. What v4 does not prove
 
-- One run, one launch per task: one observation each, not a rate. Greedy decoding, one model, one machine.
+- One run, one launch per task: one observation each, not a rate. Greedy decoding is the intended mode (documented: `server.rs` model_proposer "Greedy"; `np1_reference` temperature 0.0), one model, one machine. **GAP, not closed:** no receipt, run.json or attempt field records the temperature or sampling used per launch (checked 2026-10-08 on 6bbe2ec2: the attempt carries tokens, token_ids, finish_reason, prompt_ids_sha256, text_sha256; the daemon entry carries pid, backend, model, vmhwm_kb, warm_up_ms). A "greedy proven per launch" row would need a new product field and is not added; the verdict reports greedy as DOCUMENTED, not OBSERVED.
 - The tasks are fresh and were written without reading the extraction code, but the author knows v1 to v3 results and chose
   requirement kinds that earlier runs found hard (line counts, stated words, structure after code blocks). This is a held-out set
   in the sense that no earlier goal or topic is reused (`test-v4.sh` proves it against the repository files), not in the

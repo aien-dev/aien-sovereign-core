@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# OPEN-MODEL-QWEN3 v4 frozen build: sovereign-core 4d4dfd4 (main with sc#293, #296, #295), omega 01f6a74 (= omega.lock,
-# omega#331), physics 6d7cf0d (physics.lock), aienos b84c0a6 (aienos.lock). Real compose + GPU libraries, never the stub.
+# OPEN-MODEL-QWEN3 v4 frozen build: sovereign-core 6bbe2ec2 (main), omega 6c6180c (= omega.lock,
+# omega.lock at 6bbe2ec2), physics 6d7cf0d (physics.lock), aienos b84c0a6 (aienos.lock). Real compose + GPU libraries, never the stub.
 set -u
-B=/home/drakestapleton/workspace/oq3-v4-build
+B=/home/drakestapleton/workspace/oq3-v4-build-6bbe2ec
 cd $B/sc
 export AIEN_AIENOS_LOCK_REPO=/home/drakestapleton/workspace/aienos-repo AIEN_OMEGA_DIR=$B/omega AIEN_PHYSICS_DIR=$B/physics CARGO_TARGET_DIR=$B/target
 unset AIEN_FORCE_CPU_STUB AIEN_OMEGA_GPU_LIB AIEN_OMEGA_COMPOSE_LIB AIEN_OMEGA_COMPOSE_DIR AIEN_OMEGA_COMPOSE_SHA

@@ -13,3 +13,12 @@ test-rows-v8.sh (NP1_EDIT_MERGE = frozen release np1_edit_merge)   142 passed, 0
 test-v3.sh                                      56 passed, 1 failed: "pinned run path already exists, wrapper checks skipped"
   (expected: v3 ran and its RUN_BASE is retained; the v3 wrapper's pre-run refusals cannot be exercised now)
 test-v4.sh                                      164 passed, 0 failed
+
+# Re-run on the new pin, 2026-10-08, sovereign-core 6bbe2ec2 (worktree = origin/main + v4 docs; no Rust changed), CPU only, no GPU, no hold
+cargo fmt --all --check                         rc=0
+clippy --workspace --all-targets -D warnings    stub rc=0
+cargo test -p aien-runtime -p aien-cli, stub    365 passed, 0 failed, 107 ignored (sum of all "test result" lines)
+cargo test, linked                              NOT RUN (the linked build can start GPU code; needs a quietlock decision; run at freeze)
+test-rows-v8.sh (NP1_EDIT_MERGE = new np1_edit_merge)   142 passed, 0 failed
+test-v4.sh                                      170 passed, 0 failed (includes the new BE row checks)
+test-v3.sh                                      NOT RE-RUN (its only known failure is the retained v3 run path)

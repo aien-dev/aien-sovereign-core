@@ -36,10 +36,10 @@ tmp=$(mktemp "$OUT/.v4rows.XXXXXX")
 mods=$(cat "$HERE/rows-oq3-v3.jq" "$HERE/rows-oq3-v4.jq" | sha256sum | cut -d' ' -f1)
 jq -L "$HERE" -n --argjson task "$task" --argjson report "$(j "$R/s3-report.json")" --argjson s5 "$(j "$S/S5.json")" \
   --argjson s8 "$(j "$S/S8.json")" --argjson committed "$committed" --argjson seed_text "$seed_text" --argjson source_now "$source_now" \
-  --arg rec "$REC" --arg mod "$mods" \
+  --argjson run "$(j "$R/run.json")" --arg rec "$REC" --arg mod "$mods" \
   'include "rows-oq3-v4";
   def j2: (try fromjson catch null);
-  {task: $task, report: $report, s5: ($s5 // {}), committed: $committed, seed_text: $seed_text, source_now: $source_now,
+  {task: $task, daemon: ($run.daemon // null), report: $report, s5: ($s5 // {}), committed: $committed, seed_text: $seed_text, source_now: $source_now,
    auths: (($s8.authorizations // []) | map((.text // "" | j2) + {id, verified}))} as $ev
   | {launch: $task.id, receipt: $rec, rows_modules_sha256: $mod, rows: ($ev | v4_rows)}' >"$tmp"
 h=$(sha256sum "$tmp" | cut -d' ' -f1)

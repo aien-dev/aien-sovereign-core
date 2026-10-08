@@ -100,3 +100,52 @@ jobs:
             exit 1
           fi
           echo "Sovereign voice compliance verified."
+
+  linked-compose:
+    # The verify job builds the stub, where the compose-linked tests are #[ignore] and never run
+    # (sovereign-core #306). This job builds the real omega composition library (CPU only, no GPU
+    # engine) at the omega.lock pin and runs those tests. Mandatory: a failure blocks.
+    name: Linked composition tests (real librx_compose, CPU)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Source
+        uses: actions/checkout@v4
+
+      - name: Install pinned Rust toolchain (rust-toolchain.toml)
+        run: |
+          rustup toolchain install "$(sed -n 's/^channel *= *"\(.*\)"/\1/p' rust-toolchain.toml)" --profile minimal
+          rustc --version
+
+      - name: Read pin (omega.lock)
+        id: pins
+        run: echo "omega=$(tr -d '[:space:]' < omega.lock)" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout omega at omega.lock
+        uses: actions/checkout@v4
+        with:
+          repository: aien-dev/omega
+          ref: ${{ steps.pins.outputs.omega }}
+          path: omega
+
+      - name: Read omega's physics.lock and aienos.lock
+        id: sub
+        run: |
+          echo "physics=$(tr -d '[:space:]' < omega/physics.lock)" >> "$GITHUB_OUTPUT"
+          echo "aienos=$(tr -d '[:space:]' < omega/aienos.lock)" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout physics at omega's physics.lock
+        uses: actions/checkout@v4
+        with:
+          repository: aien-dev/physics
+          ref: ${{ steps.sub.outputs.physics }}
+          path: physics
+
+      - name: Checkout aienos at omega's aienos.lock
+        uses: actions/checkout@v4
+        with:
+          repository: aien-dev/aienos
+          ref: ${{ steps.sub.outputs.aienos }}
+          path: aienos
+
+      - name: Run the linked composition tests (scripts/test-linked-compose.sh)
+        run: bash scripts/test-linked-compose.sh "$GITHUB_WORKSPACE/omega" "$GITHUB_WORKSPACE/physics" "$GITHUB_WORKSPACE/aienos"

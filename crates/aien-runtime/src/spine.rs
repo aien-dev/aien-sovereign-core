@@ -362,8 +362,7 @@ impl AienRuntimeSpine {
                 };
                 match self.launch_swarm(config, &req.prompt_tokens) {
                     Ok(swarm_id) => {
-                        self.controller
-                            .mark_operation_processed(envelope.operation_id);
+                        record_processed(&mut self.controller, envelope.operation_id);
                         ControlResponse::SwarmAccepted {
                             swarm_id,
                             operation_id: envelope.operation_id,
@@ -393,8 +392,7 @@ impl AienRuntimeSpine {
                             }
                         }
                         self.pending_backend_releases.extend(released);
-                        self.controller
-                            .mark_operation_processed(envelope.operation_id);
+                        record_processed(&mut self.controller, envelope.operation_id);
                         ControlResponse::SwarmCancelled { swarm_id }
                     }
                     Err(e) => ControlResponse::Error(e),
@@ -417,13 +415,27 @@ impl AienRuntimeSpine {
             | ControlCommand::ComposeReconcile { .. }
             | ControlCommand::ComposeControl { .. }
             | ControlCommand::ComposeAuthorize { .. }
-            | ControlCommand::ComposeApprovedProposal { .. } => ControlResponse::Error(
+            | ControlCommand::ComposeApprovedProposal { .. }
+            | ControlCommand::AllenStatus
+            | ControlCommand::AllenProfileShow
+            | ControlCommand::AllenProfileSet { .. }
+            | ControlCommand::AllenProfileHistory
+            | ControlCommand::AllenProfileRevert { .. }
+            | ControlCommand::AllenMemoryPut { .. }
+            | ControlCommand::AllenMemoryRecall { .. }
+            | ControlCommand::AllenMemoryInspect { .. }
+            | ControlCommand::AllenMemoryCorrect { .. }
+            | ControlCommand::AllenMemoryForget { .. }
+            | ControlCommand::AllenMemoryExport { .. }
+            | ControlCommand::AllenGoalsList { .. }
+            | ControlCommand::AllenGoalAdd { .. }
+            | ControlCommand::AllenGoalClose { .. }
+            | ControlCommand::AllenProfileReset { .. } => ControlResponse::Error(
                 "compose commands are handled on the socket connection, not as one-shot commands"
                     .into(),
             ),
             ControlCommand::Shutdown => {
-                self.controller
-                    .mark_operation_processed(envelope.operation_id);
+                record_processed(&mut self.controller, envelope.operation_id);
                 ControlResponse::ShutdownAck
             }
         };
@@ -627,7 +639,13 @@ fn proposal_handle(text: &str) -> u64 {
 /// ALLEN identity gate (aien-allen, ADR 0035), run once per compose-home open.
 /// Not engaged (AIEN_ALLEN_SUBJECT unset): one log line, nothing else changes.
 /// Engaged: any refusal is FATAL (message, nonzero exit), never a fallback.
-fn allen_gate(dir: &Path, compose: &mut Compose, machine_id: &[u8; 32]) {
+/// Returns the resolved identity when engaged, so the compose home can keep it
+/// (persona profile, arch#159); `None` when not engaged.
+fn allen_gate(
+    dir: &Path,
+    compose: &mut Compose,
+    machine_id: &[u8; 32],
+) -> Option<aien_allen::Resolved> {
     use aien_allen::{Context, Gate};
     static NOT_ENGAGED_ONCE: std::sync::Once = std::sync::Once::new();
     let lineage = compose.record(1).ok().map(|r| r.digest);
@@ -647,6 +665,7 @@ fn allen_gate(dir: &Path, compose: &mut Compose, machine_id: &[u8; 32]) {
     match aien_allen::gate(dir, &ctx, &get) {
         Gate::NotEngaged => {
             NOT_ENGAGED_ONCE.call_once(|| println!("{}", aien_allen::NOT_ENGAGED_LINE));
+            None
         }
         Gate::Engaged(r) => {
             if r.adopted {
@@ -663,6 +682,7 @@ fn allen_gate(dir: &Path, compose: &mut Compose, machine_id: &[u8; 32]) {
                 r.head_seq,
                 r.chain_verified
             );
+            Some(r)
         }
         Gate::Refused(why) => {
             let msg = format!("FATAL ALLEN refused: {why}");
@@ -966,6 +986,19 @@ fn env_opt(name: &str) -> Result<Option<String>, String> {
     }
 }
 
+/// Env switch for the desk MAC on `ComposeAuthorize` (#297): `1` = required,
+/// unset or `0` = off. Anything else stops the daemon (a typo must not leave
+/// the requirement silently off).
+pub const AUTHORIZE_DESK_ENV: &str = "AIEN_COMPOSE_AUTHORIZE_REQUIRES_DESK";
+
+pub fn authorize_requires_desk_from_env() -> Result<bool, String> {
+    match env_opt(AUTHORIZE_DESK_ENV)?.as_deref() {
+        None | Some("0") => Ok(false),
+        Some("1") => Ok(true),
+        Some(o) => Err(format!("{AUTHORIZE_DESK_ENV} must be 1 or 0, got {o:?}")),
+    }
+}
+
 /// Both budgets from the environment. Refuses the retired single-budget
 /// setting (a stale `AIEN_COMPOSE_BUDGET_MS` must not be silently ignored).
 pub fn compose_budgets_from_env() -> Result<ComposeBudgets, String> {
@@ -1050,7 +1083,7 @@ pub fn compose_assistant_prefix(template: &aien_inference_abi::ChatTemplate) -> 
         ChatTemplate::Zephyr | ChatTemplate::Llama3 => COMPOSE_ASSISTANT_PREFIX,
         // A plain model never reaches generation (chat render is refused first).
         ChatTemplate::None => COMPOSE_ASSISTANT_PREFIX,
-        ChatTemplate::ChatMl { .. } => "filename:",
+        ChatTemplate::ChatMl { .. } | ChatTemplate::ChatMlQwen3 => "filename:",
     }
 }
 
@@ -1641,8 +1674,14 @@ pub(crate) fn record_view(
     }
 }
 
+const CLOSED_REFUSAL: &str = "compose home closed: the daemon is shutting down";
+
 pub(crate) struct ComposeHome {
     pub(crate) compose: Compose,
+    /// The ALLEN identity this home resolved (`None` = not engaged).
+    pub(crate) allen: Option<aien_allen::Resolved>,
+    /// ALLEN scoped memory (arch#159), opened with the identity above.
+    pub(crate) memory: crate::allen_memory::MemoryState,
     pub(crate) machine_id: String,
     prompts: Arc<parking_lot::Mutex<HashMap<u64, TaskEntry>>>,
     /// Proposer hook: task -> approved proposal text (crate::approved).
@@ -1717,6 +1756,21 @@ pub struct ComposeBridge {
     /// Set when the start-up reconcile failed or was refused (ACCEPTANCE-v3
     /// 2.5): effect commands refuse until an operator reconcile succeeds.
     reconcile_failed: std::sync::Mutex<Option<String>>,
+    /// Set by `close`: the daemon is shutting down, the home is closed and
+    /// must not be reopened lazily by a connection task that outlives `run`
+    /// (sovereign-core #306).
+    closed: std::sync::atomic::AtomicBool,
+    /// sovereign-core #297: when true, `ComposeAuthorize` needs the approval
+    /// desk's MAC. Default false (legacy OS-user-only authorize).
+    authorize_requires_desk: bool,
+    /// The loaded model files and the daemon start, set by the daemon after
+    /// load. Without them a compose proposal gets no generation record.
+    identity: std::sync::Mutex<
+        Option<(
+            crate::generation::ModelIdentity,
+            crate::generation::DaemonStart,
+        )>,
+    >,
 }
 
 impl ComposeBridge {
@@ -1728,6 +1782,9 @@ impl ComposeBridge {
             proposer_label: proposer_label.to_string(),
             home: std::sync::Mutex::new(None),
             reconcile_failed: std::sync::Mutex::new(None),
+            closed: std::sync::atomic::AtomicBool::new(false),
+            authorize_requires_desk: false,
+            identity: std::sync::Mutex::new(None),
         }
     }
 
@@ -1737,8 +1794,51 @@ impl ComposeBridge {
         self
     }
 
+    /// The model files this daemon loaded (digests hashed at load) and when it
+    /// started. Set once by the daemon; the compose task uses them to write the
+    /// generation record of the proposal it commits. Evidence only.
+    pub fn set_model_identity(
+        &self,
+        identity: crate::generation::ModelIdentity,
+        started: crate::generation::DaemonStart,
+    ) {
+        *self.identity.lock().unwrap_or_else(|e| e.into_inner()) = Some((identity, started));
+    }
+
+    /// Turn the desk-MAC requirement on `ComposeAuthorize` on or off (#297).
+    pub fn with_authorize_requires_desk(mut self, on: bool) -> Self {
+        self.authorize_requires_desk = on;
+        self
+    }
+
+    /// True when `ComposeAuthorize` needs the approval desk's MAC (#297).
+    pub fn authorize_requires_desk(&self) -> bool {
+        self.authorize_requires_desk
+    }
+
     pub fn dir(&self) -> &Path {
         &self.dir
+    }
+
+    /// Close the compose home and refuse to reopen it. Daemon shutdown calls
+    /// this before `run` returns: connection tasks hold their own `Arc` of the
+    /// bridge and can outlive `run`, so without it `rxc_host_close` (the drop of
+    /// the home) ran at an unspecified later time and a successor opening the
+    /// same home in that window saw a journal behind its J-Space anchor
+    /// (E_REPLAY, sovereign-core #306). Waits for a command in flight (it holds
+    /// the home lock). Blocking: call it from a blocking context.
+    pub fn close(&self) {
+        let mut guard = match self.home.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        self.closed.store(true, std::sync::atomic::Ordering::SeqCst);
+        *guard = None;
+    }
+
+    /// True after `close`.
+    pub fn is_closed(&self) -> bool {
+        self.closed.load(std::sync::atomic::Ordering::SeqCst)
     }
 
     fn open_home(&self) -> Result<ComposeHome, String> {
@@ -1749,6 +1849,12 @@ impl ComposeBridge {
     /// `rebuilt_from` = the seq of a mark RecoverComposeHome just set aside:
     /// the home then opens without a mark and gets a fresh one.
     fn open_home_marked(&self, rebuilt_from: Option<u64>) -> Result<ComposeHome, String> {
+        // The one place every lazy open goes through (with_home, run_task_inner,
+        // record_digest, recover): callers hold the home lock and close() sets
+        // `closed` under the same lock, so no site can reopen after close.
+        if self.is_closed() {
+            return Err(CLOSED_REFUSAL.to_string());
+        }
         // Refuse a bad budget before anything is opened (never fall back).
         let budgets = compose_budgets_from_env()
             .map_err(|e| format!("compose home {} refused: {e}", self.dir.display()))?;
@@ -1881,9 +1987,12 @@ impl ComposeBridge {
         }
         // ALLEN identity gate: after the open (record 1 exists, skills are
         // registered), before the home is handed out. Fatal when engaged.
-        allen_gate(&self.dir, &mut compose, &info.machine_id);
+        let allen = allen_gate(&self.dir, &mut compose, &info.machine_id);
+        let memory = crate::allen_memory::MemoryState::open(&self.dir, allen.as_ref());
         let mut home = ComposeHome {
             compose,
+            allen,
+            memory,
             budgets,
             machine_id: hex(&info.machine_id),
             prompts,
@@ -1941,7 +2050,17 @@ impl ComposeBridge {
 
     /// Blocking: runs inference inside the Skill. Call from a blocking thread.
     pub fn run_task(&self, goal: &str, workspace: &str) -> ControlResponse {
-        match self.run_task_inner(goal, workspace, None) {
+        self.run_task_in(goal, workspace, None)
+    }
+
+    /// `run_task` with an operator-named ALLEN memory context (`None` = no memory).
+    pub fn run_task_in(
+        &self,
+        goal: &str,
+        workspace: &str,
+        context: Option<&str>,
+    ) -> ControlResponse {
+        match self.run_task_inner(goal, workspace, None, context) {
             Ok(r) => ControlResponse::ComposeTaskResult(Box::new(r)),
             Err(e) => ControlResponse::Error(e),
         }
@@ -1957,7 +2076,7 @@ impl ComposeBridge {
         workspace: &str,
         approved_text: &str,
     ) -> Result<ComposeTaskReport, String> {
-        self.run_task_inner(goal, workspace, Some(approved_text))
+        self.run_task_inner(goal, workspace, Some(approved_text), None)
     }
 
     fn run_task_inner(
@@ -1965,6 +2084,7 @@ impl ComposeBridge {
         goal: &str,
         workspace: &str,
         approved_text: Option<&str>,
+        context: Option<&str>,
     ) -> Result<ComposeTaskReport, String> {
         if goal.trim().is_empty() {
             return Err("RunComposeTask: empty goal".into());
@@ -1977,7 +2097,7 @@ impl ComposeBridge {
                 ws.display()
             ));
         }
-        let (plan, dest) = task_decision(goal, &ws)?;
+        let (mut plan, dest) = task_decision(goal, &ws)?;
         // The requirements the goal states are checked on every path: the model
         // path and an approved proposal (refused before any write when unmet).
         let machine_goal =
@@ -2014,6 +2134,27 @@ impl ComposeBridge {
             *guard = Some(self.open_home()?);
         }
         let home = guard.as_mut().expect("opened above");
+        // ALLEN persona (arch#159): only a model run reads it; an approved
+        // proposal runs no model, so it carries no persona. Not engaged: the
+        // prompt is exactly what it was.
+        // ALLEN memory (arch#159): a model run with an operator-named context only.
+        let (memory_block, memory) = match approved_text {
+            None => {
+                let (b, r) = crate::allen_memory::for_task(&home.memory, context)?;
+                (b, Some(r))
+            }
+            Some(_) => (None, None),
+        };
+        plan.0 = crate::allen_memory::prefix_prompt(&plan.0, memory_block.as_deref());
+        let persona_ctx = match approved_text {
+            None => crate::persona::context_for(&self.dir, home.allen.as_ref()),
+            Some(_) => None,
+        };
+        plan.0 = crate::persona::prefix_prompt(&plan.0, persona_ctx.as_ref());
+        let persona = match approved_text {
+            None => Some(crate::persona::report_for(persona_ctx.as_ref())),
+            Some(_) => None,
+        };
         // Deadlines agree on both sides: omega settles budget + 1 s after the run
         // starts, the Skill gives up at budget. Set only here, under the lock that
         // serializes runs, never while rx_compose_run is in flight. An omega without
@@ -2059,6 +2200,7 @@ impl ComposeBridge {
         // THIS proposal. `ComposeAuthorize` mints only from it. An approved
         // proposal has its own replay claim and grant, so it gets none.
         let mut compose_commit = None;
+        let mut generation_record = None;
         if let (true, None, Some(p), Some(text)) = (
             committed,
             approved_text,
@@ -2069,6 +2211,11 @@ impl ComposeBridge {
                 .map_err(|e| format!("workspace {}: {e}", ws.display()))?
                 .display()
                 .to_string();
+            // Provenance (arch#162): the generation record of the attempt the
+            // proposal came from, written now under the lock this run holds
+            // (the model call itself cannot take it). Evidence only.
+            generation_record = self.write_task_generation(home, task, &proposal_attempts);
+            let prov = crate::generation::Provenance::new(generation_record, home.allen.as_ref());
             let id = crate::effects::write_compose_commit(
                 home,
                 &wsc,
@@ -2078,6 +2225,7 @@ impl ComposeBridge {
                 &hex(&Sha256::digest(text.as_bytes())),
                 &p.path,
                 &hex(&Sha256::digest(p.content.as_bytes())),
+                &prov,
             )
             .map_err(|e| {
                 format!(
@@ -2092,6 +2240,7 @@ impl ComposeBridge {
         }
         Ok(ComposeTaskReport {
             compose_commit,
+            generation_record,
 
             compose_dir: self.dir.display().to_string(),
             machine_id: home.machine_id.clone(),
@@ -2126,7 +2275,60 @@ impl ComposeBridge {
                 Some(_) => APPROVED_PROPOSER_LABEL.to_string(),
                 None => self.proposer_label.clone(),
             },
+            persona,
+            memory,
         })
+    }
+
+    /// Write the generation record of the proposal attempt a committed task
+    /// came from. `None` (with the reason logged when a write failed) when the
+    /// daemon has no model identity, the attempt did not expose its token ids,
+    /// or the append failed: no record means no claim, and the commit stands.
+    fn write_task_generation(
+        &self,
+        home: &mut ComposeHome,
+        task: u64,
+        attempts: &[ProposalAttempt],
+    ) -> Option<u64> {
+        let (identity, started) = self
+            .identity
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()?;
+        let a = attempts.iter().find(|a| a.outcome == "parsed")?;
+        let (ids, text, prompt_sha, prompt_tokens) = (
+            a.token_ids.as_deref()?,
+            a.text.as_deref()?,
+            a.prompt_ids_sha256.as_deref()?,
+            a.prompt_tokens?,
+        );
+        let record = crate::generation::build_compose_record(
+            &identity,
+            &crate::generation::ComposeEvidence {
+                prompt_ids_sha256: prompt_sha,
+                prompt_tokens,
+                output_ids: ids,
+                text,
+                finish_reason: a.finish_reason.as_deref().unwrap_or("unknown"),
+                task,
+                attempt: a.attempt,
+            },
+            started,
+        );
+        match crate::generation::write(home, &record) {
+            Ok(id) => Some(id),
+            Err(e) => {
+                tracing::warn!("generation record not written: {e}");
+                eprintln!("generation record not written: {e}");
+                None
+            }
+        }
+    }
+
+    /// Append the daemon's generation record (evidence only; see
+    /// `crate::generation`). Returns the record id only once it is written.
+    pub fn record_generation(&self, record: &serde_json::Value) -> Result<u64, String> {
+        self.with_home(|home| crate::generation::write(home, record))
     }
 
     pub(crate) fn with_home<T>(
@@ -2211,6 +2413,23 @@ impl ComposeBridge {
         }
     }
 
+    /// ALLEN persona profile commands (arch#159). Opens the home if needed (the
+    /// identity is resolved there). Blocking.
+    pub fn allen_command(&self, cmd: &ControlCommand) -> ControlResponse {
+        let r = self.with_home(|home| {
+            if crate::allen_memory::is_memory_command(cmd) {
+                return Ok(crate::allen_memory::handle_command(&home.memory, cmd));
+            }
+            Ok(crate::persona::handle_allen_command(
+                &self.dir,
+                home.allen.as_ref(),
+                &self.proposer_label,
+                cmd,
+            ))
+        });
+        r.unwrap_or_else(ControlResponse::Error)
+    }
+
     /// S6 / S8: host records plus the cited ids, digests re-checked.
     pub fn recall(&self, ids: &[u64], prefix: Option<u64>) -> ControlResponse {
         let r = self.with_home(|home| {
@@ -2270,6 +2489,9 @@ impl ComposeBridge {
     /// kept as `<mark>.lost-<seq>` (never deleted), the home is reopened with
     /// a fresh mark and one host `constraint` record names the repair.
     pub fn recover(&self) -> ControlResponse {
+        if self.is_closed() {
+            return ControlResponse::Error(CLOSED_REFUSAL.to_string());
+        }
         let mut guard = match self.home.lock() {
             Ok(g) => g,
             Err(_) => return ControlResponse::Error("compose home lock poisoned".into()),
@@ -2630,6 +2852,15 @@ mod verify_callback_integration_tests {
         assert!(!lost.committed, "{lost:?}");
         assert_eq!(lost.aegis_pass_mask & 1, 0, "{lost:?}");
         assert_eq!(lost.cx_promotion, 0, "{lost:?}");
+    }
+}
+
+/// Records a processed operation id. The operation has already run, so a
+/// failed save does not change the reply; it is reported on stderr so the
+/// loss of durability is never silent (#299).
+fn record_processed(controller: &mut RuntimeController, operation_id: u128) {
+    if let Err(e) = controller.mark_operation_processed(operation_id) {
+        eprintln!("aien-runtime: {e}");
     }
 }
 

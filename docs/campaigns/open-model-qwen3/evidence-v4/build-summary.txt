@@ -1,12 +1,12 @@
-# v4 frozen build summary (2026-10-07T23:42:57Z); physics/omega/sc status --porcelain counts all 0 (rechecked)
+# v4 build summary at sovereign-core 6bbe2ec2 (2026-10-08T11:38:44Z); omega/physics/sc status --porcelain counts all 0 (output of evidence-v4/build.sh)
 aien-cli rc=0
 examples rc=0
-01f6a74636b8383b010cdb95597839582c415c27
+6c6180cf378075b61291f4565d226eba38b4decd
 0
 6d7cf0d4d8eb2cda7b512100ff6058e25dbb3ddf
-4d4dfd459ae7e7c6c175edc5017816d079c621a9
+6bbe2ec269768c7c9b94b9484c757ca45f55f564
 0
-fa48da4a85023dac406dbf05bca60df316b4ecd441c94e8c0f356fbd61a9ebd2  /home/drakestapleton/workspace/oq3-v4-build/target/release/aien-cli
-421d0db86539392a4d38b712b358041b0263a45ba92027838b8919cf3b865f2d  /home/drakestapleton/workspace/oq3-v4-build/target/release/examples/np1_reference
-7592d74a05406804c430c3d5940ba8b7691c3d34510375344e2a5b4d8c3e9f6c  /home/drakestapleton/workspace/oq3-v4-build/target/release/examples/np1_edit_merge
+152c0aecce662f618bf683c8854d6de56a7075e0461c2433570f4c15b68571a5  /home/drakestapleton/workspace/oq3-v4-build-6bbe2ec/target/release/aien-cli
+ea1e22f114192cbb94afddef8026239252246a03390ef6986eb4b2c00ad9c046  /home/drakestapleton/workspace/oq3-v4-build-6bbe2ec/target/release/examples/np1_reference
+1815cd51b2975afc3ef841123a47cf6d48b381cd14c42afa3dbf0fecaa43a07d  /home/drakestapleton/workspace/oq3-v4-build-6bbe2ec/target/release/examples/np1_edit_merge
 done

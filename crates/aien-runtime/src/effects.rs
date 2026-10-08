@@ -43,6 +43,7 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::fmt;
+use std::os::fd::AsRawFd;
 use std::path::Path;
 
 pub const PHASE_INTENT: &str = "intent";
@@ -225,6 +226,8 @@ pub struct Ledger {
     pub commits: BTreeMap<u64, CommitRow>,
     /// Minted grants by compose-commit record, oldest first.
     pub minted_by_commit: BTreeMap<u64, Vec<u64>>,
+    /// Desk-MAC nonces already used by a minted grant (#297): one grant per nonce.
+    pub desk_nonces: std::collections::BTreeSet<String>,
     pub intents: BTreeMap<u64, IntentRow>,
     /// authorization id -> intent id (one intent per authorization).
     pub spent: BTreeMap<u64, u64>,
@@ -328,6 +331,9 @@ impl Ledger {
                     Some(_) => {
                         let commit = u(&v, "compose_commit", id)?;
                         self.minted_by_commit.entry(commit).or_default().push(id);
+                        if let Some(n) = v.get("desk_nonce").and_then(Value::as_str) {
+                            self.desk_nonces.insert(n.to_string());
+                        }
                         Some(MintedGrant { commit })
                     }
                 },
@@ -603,7 +609,13 @@ pub fn file_sha256(path: &Path) -> Result<Option<String>, String> {
 
 /// The world check of ACCEPTANCE-v2 2.2. Returns the state and the digest seen.
 pub fn world_state(row: &IntentRow) -> (EffectState, Result<Option<String>, String>) {
-    let now = file_sha256(Path::new(&row.target));
+    state_from(row, file_sha256(Path::new(&row.target)))
+}
+
+fn state_from(
+    row: &IntentRow,
+    now: Result<Option<String>, String>,
+) -> (EffectState, Result<Option<String>, String>) {
     let st = match &now {
         Ok(Some(d)) if *d == row.content_sha256 => EffectState::Done,
         Ok(d) if *d == row.prior_sha256 => EffectState::NotDone,
@@ -653,13 +665,20 @@ pub fn confined_world_state(
             )),
         );
     };
-    if let Err(r) = confine_target(&ws, &row.path, &row.target) {
-        return (
-            EffectState::Unresolved,
-            Err(format!("{}: {}", r.name, r.detail)),
-        );
+    // sovereign-core #267: confine and read through the same held directory
+    // descriptors, so a swap after the check cannot redirect the read.
+    match open_confined(&ws, &row.path, &row.target) {
+        // The file exists but cannot be read: the plain read error, as before.
+        Err(r) if r.name == "Unreadable" => (EffectState::Unresolved, Err(r.detail)),
+        Err(r) => {
+            let r = outside_of(r);
+            (
+                EffectState::Unresolved,
+                Err(format!("{}: {}", r.name, r.detail)),
+            )
+        }
+        Ok(t) => state_from(row, t.sha256()),
     }
-    world_state(row)
 }
 
 /// Start time of a process (clock ticks since boot, /proc/<pid>/stat field 22).
@@ -699,6 +718,12 @@ pub fn check_reserved_note(kind: &str, text: &str) -> Result<(), String> {
     // sovereign-core #261: no caller writes an authorization, whatever it
     // says. Grants come from ComposeAuthorize and ComposeApprovedProposal,
     // control records from ComposeControl; all are written by the daemon.
+    if kind == crate::generation::GENERATION {
+        return Err(
+            "ComposeNote: generation records are written only by the daemon when a turn finishes"
+                .into(),
+        );
+    }
     if kind == "authorization" {
         return Err(
             "ComposeNote: authorization records are written only by the daemon (ComposeAuthorize, ComposeApprovedProposal, ComposeControl); a caller-written grant is never honoured (sovereign-core #261)"
@@ -708,7 +733,20 @@ pub fn check_reserved_note(kind: &str, text: &str) -> Result<(), String> {
     let Ok(v) = serde_json::from_str::<Value>(text) else {
         return Ok(());
     };
+    // Provenance evidence is copied by the daemon along its own chain; no caller sets it.
+    if v.get(crate::generation::PROVENANCE).is_some() {
+        return Err(
+            "ComposeNote: the provenance field is written only by the daemon (generation link and ALLEN agent id)"
+                .into(),
+        );
+    }
     match kind {
+        // The daemon's generation record (evidence only, never an input to any
+        // decision): effect-class note with the marker field.
+        "effect" if v.get(crate::generation::GENERATION).is_some() => Err(
+            "ComposeNote: generation records are written only by the daemon when a turn finishes"
+                .into(),
+        ),
         "effect" if v.get("phase").is_some() => Err(
             "ComposeNote: effect records with a \"phase\" are written only by the effect commands"
                 .into(),
@@ -731,13 +769,13 @@ pub fn check_reserved_note(kind: &str, text: &str) -> Result<(), String> {
     }
 }
 
-/// Workspace confinement of an effect target (sovereign-core #249): the
-/// workspace is an absolute, canonical directory that is not `/`; `path` is
-/// relative with plain components only; `target` is exactly
-/// `workspace/path`; its parent resolves (symlinks followed) to
-/// `workspace/<parent of path>`; and the target itself, when present, is a
-/// regular file, never a symlink.
-pub fn confine_target(workspace: &str, path: &str, target: &str) -> Result<(), Refusal> {
+/// Shape checks of `confine_target` (no filesystem walk below the workspace):
+/// returns the plain components of `path`.
+fn confine_shape<'a>(
+    workspace: &str,
+    path: &'a str,
+    target: &str,
+) -> Result<Vec<&'a std::ffi::OsStr>, Refusal> {
     use std::path::Component;
     let out = |w: String| Refusal::new("OutsideWorkspace", w);
     let ws = Path::new(workspace);
@@ -759,24 +797,309 @@ pub fn confine_target(workspace: &str, path: &str, target: &str) -> Result<(), R
             want.display()
         )));
     }
-    let parent = want.parent().unwrap_or(ws);
-    let real = std::fs::canonicalize(parent)
-        .map_err(|e| out(format!("target directory {}: {e}", parent.display())))?;
-    if real != parent || !real.starts_with(&canon) {
+    Ok(rel
+        .components()
+        .filter_map(|c| match c {
+            Component::Normal(n) => Some(n),
+            _ => None,
+        })
+        .collect())
+}
+
+/// An open handle on a confined target (sovereign-core #267): the file was
+/// opened by one `openat2(RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS)` call below a
+/// held descriptor of the workspace root, and is read through that descriptor
+/// only, never re-opened by path, so the check and the read name the same
+/// object even if a path component is swapped afterwards. `file` is the
+/// regular file, or None when it does not exist.
+pub struct ConfinedTarget {
+    #[allow(dead_code)] // held so the chain stays open for the handle's life
+    dir: std::os::fd::OwnedFd,
+    pub file: Option<std::fs::File>,
+    target: String,
+}
+
+impl ConfinedTarget {
+    /// sha256 of the bytes behind the held descriptor, None when absent.
+    pub fn sha256(&self) -> Result<Option<String>, String> {
+        use std::io::Read;
+        let Some(f) = &self.file else {
+            return Ok(None);
+        };
+        let mut r = f;
+        let mut h = Sha256::new();
+        let mut buf = [0u8; 64 * 1024];
+        loop {
+            let n = r
+                .read(&mut buf)
+                .map_err(|e| format!("read {}: {e}", self.target))?;
+            if n == 0 {
+                break;
+            }
+            h.update(&buf[..n]);
+        }
+        Ok(Some(hex(&h.finalize())))
+    }
+}
+
+/// Test seams (unit tests and, through the `test-support` feature, the
+/// integration tests): a swap hook that fires inside the real call between
+/// confinement and the read, one at the start of `open_confined`, and a switch
+/// that forces the ENOSYS fallback walk. Never compiled into the daemon.
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_hooks {
+    use std::cell::{Cell, RefCell};
+    type Hook = RefCell<Option<Box<dyn FnOnce()>>>;
+    thread_local! {
+        static PAUSE: Hook = const { RefCell::new(None) };
+        static BEFORE: Hook = const { RefCell::new(None) };
+        static FALLBACK: Cell<bool> = const { Cell::new(false) };
+    }
+    /// Run `f` once, right after confinement succeeded and before any read.
+    pub fn set_pause(f: impl FnOnce() + 'static) {
+        PAUSE.with(|p| *p.borrow_mut() = Some(Box::new(f)));
+    }
+    /// Run `f` once, at the start of `open_confined`, before any descriptor opens.
+    pub fn set_before(f: impl FnOnce() + 'static) {
+        BEFORE.with(|p| *p.borrow_mut() = Some(Box::new(f)));
+    }
+    /// Force the per-component fallback walk (as on a kernel without openat2).
+    pub fn set_force_fallback(on: bool) {
+        FALLBACK.with(|f| f.set(on));
+    }
+    pub(super) fn run_pause() {
+        if let Some(f) = PAUSE.with(|p| p.borrow_mut().take()) {
+            f();
+        }
+    }
+    pub(super) fn run_before() {
+        if let Some(f) = BEFORE.with(|p| p.borrow_mut().take()) {
+            f();
+        }
+    }
+    pub(super) fn force_fallback() -> bool {
+        FALLBACK.with(|f| f.get())
+    }
+}
+
+/// `openat2(2)` syscall number: 437 on every architecture that has it.
+const SYS_OPENAT2: libc::c_long = 437;
+
+/// `struct open_how` of openat2(2) (libc marks its own copy non-exhaustive).
+#[repr(C)]
+struct OpenHow {
+    flags: u64,
+    mode: u64,
+    resolve: u64,
+}
+
+/// Open `rel` below the directory `dirfd`, resolved by the kernel in ONE
+/// step with RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS | RESOLVE_NO_MAGICLINKS:
+/// no symlink anywhere in `rel` is followed and nothing can resolve above
+/// `dirfd`. Falls back to a per-component `openat(O_NOFOLLOW)` walk only when
+/// the kernel lacks openat2 (ENOSYS); that walk is weaker (a directory
+/// renamed out of the workspace mid-walk is not caught).
+fn open_beneath(
+    dirfd: libc::c_int,
+    rel: &Path,
+    flags: libc::c_int,
+) -> std::io::Result<std::os::fd::OwnedFd> {
+    use std::os::fd::FromRawFd;
+    use std::os::unix::ffi::OsStrExt;
+    let c = std::ffi::CString::new(rel.as_os_str().as_bytes())
+        .map_err(|_| std::io::Error::from_raw_os_error(libc::EINVAL))?;
+    let how = OpenHow {
+        flags: (flags | libc::O_CLOEXEC) as u64,
+        mode: 0,
+        resolve: libc::RESOLVE_BENEATH | libc::RESOLVE_NO_SYMLINKS | libc::RESOLVE_NO_MAGICLINKS,
+    };
+    #[cfg(any(test, feature = "test-support"))]
+    let force_fallback = test_hooks::force_fallback();
+    #[cfg(not(any(test, feature = "test-support")))]
+    let force_fallback = false;
+    let fd = if force_fallback {
+        -1
+    } else {
+        // SAFETY: valid C string and a correctly sized open_how; a descriptor
+        // returned (>= 0) is owned by nobody else and wrapped immediately.
+        unsafe {
+            libc::syscall(
+                SYS_OPENAT2,
+                dirfd,
+                c.as_ptr(),
+                &how as *const OpenHow,
+                std::mem::size_of::<OpenHow>(),
+            )
+        }
+    };
+    if fd >= 0 {
+        return Ok(unsafe { std::os::fd::OwnedFd::from_raw_fd(fd as libc::c_int) });
+    }
+    let err = if force_fallback {
+        std::io::Error::from_raw_os_error(libc::ENOSYS)
+    } else {
+        std::io::Error::last_os_error()
+    };
+    if err.raw_os_error() != Some(libc::ENOSYS) {
+        return Err(err);
+    }
+    // Fallback: per-component openat with O_NOFOLLOW.
+    let comps: Vec<_> = rel.components().collect();
+    let mut cur: Option<std::os::fd::OwnedFd> = None;
+    for (i, comp) in comps.iter().enumerate() {
+        let name = std::ffi::CString::new(comp.as_os_str().as_bytes())
+            .map_err(|_| std::io::Error::from_raw_os_error(libc::EINVAL))?;
+        let fl = if i + 1 == comps.len() {
+            flags
+        } else {
+            libc::O_RDONLY | libc::O_DIRECTORY
+        };
+        let base = cur.as_ref().map_or(dirfd, |f| f.as_raw_fd());
+        // SAFETY: as above.
+        let fd =
+            unsafe { libc::openat(base, name.as_ptr(), fl | libc::O_CLOEXEC | libc::O_NOFOLLOW) };
+        if fd < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        cur = Some(unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) });
+    }
+    cur.ok_or_else(|| std::io::Error::from_raw_os_error(libc::EINVAL))
+}
+
+/// Open a confined target (see `ConfinedTarget`). Ancestors of the workspace
+/// root itself are trusted (checked canonical, opened `O_NOFOLLOW`);
+/// everything below it is resolved beneath that held descriptor.
+///
+/// Refusal names. `OutsideWorkspace`: the shape checks, an escape, an
+/// intermediate symlink or non-directory. Three INTERNAL names let each caller
+/// keep the refusal it always gave (they never leave this module):
+/// `NotRegular` (the final component exists and is a symlink, directory or
+/// other non-file), `Unreadable` (the file exists but cannot be opened) and
+/// `MissingParent` (a directory above the target is absent).
+pub fn open_confined(workspace: &str, path: &str, target: &str) -> Result<ConfinedTarget, Refusal> {
+    use std::os::fd::FromRawFd;
+    let out = |w: String| Refusal::new("OutsideWorkspace", w);
+    confine_shape(workspace, path, target)?;
+    let root = std::ffi::CString::new(workspace)
+        .map_err(|_| out(format!("workspace {workspace} holds a NUL")))?;
+    // SAFETY: valid C string; result checked and wrapped immediately.
+    let rfd = unsafe {
+        libc::open(
+            root.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+        )
+    };
+    if rfd < 0 {
         return Err(out(format!(
-            "target directory {} resolves to {} (outside or through a symlink)",
-            parent.display(),
-            real.display()
+            "workspace {workspace}: {}",
+            std::io::Error::last_os_error()
         )));
     }
-    match std::fs::symlink_metadata(&want) {
-        Ok(m) if !m.file_type().is_file() => Err(out(format!(
-            "target {target} exists and is not a regular file (symlink or other)"
-        ))),
-        Ok(_) => Ok(()),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(e) => Err(out(format!("target {target}: {e}"))),
+    // SAFETY: `rfd` is a fresh descriptor owned by nobody else.
+    let dir = unsafe { std::os::fd::OwnedFd::from_raw_fd(rfd) };
+    #[cfg(any(test, feature = "test-support"))]
+    test_hooks::run_before();
+    let rel = Path::new(path);
+    let not_regular = || {
+        Refusal::new(
+            "NotRegular",
+            format!("target {target} exists and is not a regular file (symlink or other)"),
+        )
+    };
+    let dir_flags = libc::O_RDONLY | libc::O_DIRECTORY;
+    let parent = rel.parent().filter(|p| !p.as_os_str().is_empty());
+    // O_NONBLOCK so opening a FIFO cannot hang; the type is checked on the fd.
+    let file = match open_beneath(dir.as_raw_fd(), rel, libc::O_RDONLY | libc::O_NONBLOCK) {
+        Ok(fd) => {
+            let f = std::fs::File::from(fd);
+            let m = f
+                .metadata()
+                .map_err(|e| Refusal::new("Unreadable", format!("read {target}: {e}")))?;
+            if !m.file_type().is_file() {
+                return Err(not_regular());
+            }
+            Some(f)
+        }
+        // ELOOP: a symlink. In the last component it is a non-regular target;
+        // in a directory component it is an escape route.
+        Err(e) if e.raw_os_error() == Some(libc::ELOOP) => {
+            let leaf = parent.is_none_or(|p| open_beneath(dir.as_raw_fd(), p, dir_flags).is_ok());
+            return Err(if leaf {
+                not_regular()
+            } else {
+                out(format!(
+                    "target directory of {target} passes through a symlink"
+                ))
+            });
+        }
+        // EXDEV: RESOLVE_BENEATH refused an escape. ENOTDIR: a component is not a directory.
+        Err(e) if matches!(e.raw_os_error(), Some(libc::EXDEV | libc::ENOTDIR)) => {
+            return Err(out(format!(
+                "target directory of {target}: {e} (outside or not a directory)"
+            )))
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            // Absent file is fine; an absent parent directory is not.
+            if let Some(p) = parent {
+                if let Err(pe) = open_beneath(dir.as_raw_fd(), p, dir_flags) {
+                    return Err(match pe.raw_os_error() {
+                        Some(libc::ENOENT) => Refusal::new(
+                            "MissingParent",
+                            format!("target directory of {target}: {pe} (missing)"),
+                        ),
+                        _ => out(format!(
+                            "target directory of {target}: {pe} (outside or a symlink)"
+                        )),
+                    });
+                }
+            }
+            None
+        }
+        Err(e) => return Err(Refusal::new("Unreadable", format!("read {target}: {e}"))),
+    };
+    #[cfg(any(test, feature = "test-support"))]
+    test_hooks::run_pause();
+    Ok(ConfinedTarget {
+        dir,
+        file,
+        target: target.to_string(),
+    })
+}
+
+/// The refusal an outside caller sees: the internal names collapse to
+/// `OutsideWorkspace`, exactly what `confine_target` always returned for them.
+fn outside_of(r: Refusal) -> Refusal {
+    match r.name {
+        "NotRegular" | "MissingParent" | "Unreadable" => Refusal::new("OutsideWorkspace", r.detail),
+        _ => r,
     }
+}
+
+/// Workspace confinement of an effect target (sovereign-core #249): the
+/// workspace is an absolute, canonical directory that is not `/`; `path` is
+/// relative with plain components only; `target` is exactly
+/// `workspace/path`; every directory below the workspace is a real directory,
+/// not a symlink; and the target itself, when present, is a regular file,
+/// never a symlink. A file that exists but cannot be opened is still
+/// confined (its read fails later, as before). Where the bytes are then read,
+/// use `open_confined` and read through it (sovereign-core #267), so the
+/// check and the read cannot be split by a swap.
+pub fn confine_target(workspace: &str, path: &str, target: &str) -> Result<(), Refusal> {
+    match open_confined(workspace, path, target) {
+        Ok(_) => Ok(()),
+        Err(r) => Err(outside_of(r)),
+    }
+}
+
+/// `confine_target` and the sha256 of the target in one held walk.
+pub fn confined_sha256(
+    workspace: &str,
+    path: &str,
+    target: &str,
+) -> Result<Option<String>, String> {
+    open_confined(workspace, path, target)
+        .map_err(|r| outside_of(r).to_string())?
+        .sha256()
 }
 
 /// An approved grant must be backed by its COMMITTED replay claim: same
@@ -862,8 +1185,8 @@ pub(crate) fn write_approved_grant(
 ) -> Result<(u64, String), String> {
     b.with_home(|home| {
         let target = Path::new(workspace).join(path).display().to_string();
-        confine_target(workspace, path, &target).map_err(|r| r.to_string())?;
-        let prior = file_sha256(Path::new(&target))?;
+        // #267 follow-up: confine and hash through one held handle.
+        let prior = confined_sha256(workspace, path, &target)?;
         // The file must still be the one the bound requirements were checked against.
         if let Some(base) = base {
             let now = prior.as_deref().unwrap_or("absent");
@@ -879,6 +1202,9 @@ pub(crate) fn write_approved_grant(
             "workspace": workspace, "prior_sha256": prior,
             "approval_key": link.approval_key, "replay_claim": link.replay_claim,
             "cx_promotion": link.cx_promotion, "cx_evidence": link.cx_evidence,
+            // An approved proposal runs no model: no generation record, the ALLEN only.
+            crate::generation::PROVENANCE:
+                crate::generation::Provenance::new(None, home.allen.as_ref()).to_json(),
         });
         if let (Some(t), Some(i)) = (text.as_object_mut(), ids.as_object()) {
             for (k, v) in i {
@@ -929,6 +1255,14 @@ fn check_minted_backing(l: &Ledger, g: &Grant) -> Result<(), Refusal> {
     Ok(())
 }
 
+/// Copy the provenance evidence of record `source` onto `text`, a record the
+/// daemon is about to append. EVIDENCE ONLY: this is the single place the
+/// ledger-side code reads provenance, it never fails and is called after every
+/// decision of its caller (`provenance_changes_no_decision` scans for that).
+fn stamp(text: &mut Value, views: &[ComposeRecordView], source: u64) {
+    text[crate::generation::PROVENANCE] = crate::generation::inherit(views, source).to_json();
+}
+
 /// The record the daemon writes when its own compose run COMMITTED a
 /// one-file proposal (#261): the only thing `ComposeAuthorize` mints from.
 /// Linked to the promotion and evidence. Returns the record id.
@@ -942,11 +1276,22 @@ pub(crate) fn write_compose_commit(
     proposal_sha256: &str,
     path: &str,
     content_sha256: &str,
+    prov: &crate::generation::Provenance,
 ) -> Result<u64, String> {
+    // Refused at write time: a record never names a generation id that is not
+    // a verified generation record of this ledger.
+    if let Some(g) = prov.generation_record {
+        if !crate::generation::generation_exists(&host_views(home)?, g) {
+            return Err(format!(
+                "compose-commit not written: provenance names generation record #{g}, which is not a verified generation record"
+            ));
+        }
+    }
     let text = json!({
         COMPOSE_COMMIT: 1, "task": task, "cx_promotion": cx_promotion,
         "cx_evidence": cx_evidence, "proposal_sha256": proposal_sha256,
         "path": path, "content_sha256": content_sha256, "workspace": workspace,
+        crate::generation::PROVENANCE: prov.to_json(),
     });
     append(home, NoteKind::Effect, &[cx_promotion, cx_evidence], &text).map(|n| n.id)
 }
@@ -972,6 +1317,19 @@ pub struct MintRequest {
 /// is spent exactly once); a grant that settled DONE does: one committed
 /// proposal gives at most one DONE effect.
 pub fn mint_grant(b: &ComposeBridge, req: &MintRequest) -> ControlResponse {
+    authorize(b, req, None)
+}
+
+/// `ComposeAuthorize` with the optional approval-desk proof (#297). When the
+/// bridge runs with the desk switch ON, a missing or wrong proof, a missing
+/// desk key, a MAC over other fields, or a reused nonce is refused and
+/// NOTHING is written. With the switch OFF the proof is ignored (legacy
+/// behaviour: OS-user authentication only).
+pub fn authorize(
+    b: &ComposeBridge,
+    req: &MintRequest,
+    proof: Option<&crate::control::DeskProof>,
+) -> ControlResponse {
     if let Err(e) = reconcile_gate(b) {
         return ControlResponse::Error(e);
     }
@@ -983,7 +1341,27 @@ pub fn mint_grant(b: &ComposeBridge, req: &MintRequest) -> ControlResponse {
         if req.constraints.len() > 3 {
             return Err(no("NotAuthorized", "at most 3 constraint links".into()));
         }
-        let l = ledger(home)?;
+        let desk = if b.authorize_requires_desk() {
+            let Some(p) = proof else {
+                return Err(no(
+                    "DeskMacRequired",
+                    "this daemon requires the approval desk MAC on ComposeAuthorize (AIEN_COMPOSE_AUTHORIZE_REQUIRES_DESK=1); none was supplied".into(),
+                ));
+            };
+            if p.nonce.is_empty()
+                || p.nonce.len() > 128
+                || !p.nonce.bytes().all(|c| c.is_ascii_alphanumeric() || b"-_.".contains(&c))
+            {
+                return Err(no("DeskMacInvalid", "nonce must be 1 to 128 of [A-Za-z0-9._-]".into()));
+            }
+            let key = crate::approved_auth::DeskKey::load(&crate::approved_auth::desk_key_path(b.dir()))
+                .map_err(|e| no("NoDesk", e))?;
+            Some((key, p))
+        } else {
+            None
+        };
+        let views = host_views(home)?;
+        let l = Ledger::from_records(&views).map_err(|r| r.to_string())?;
         let mut hits = l
             .commits
             .values()
@@ -1008,14 +1386,42 @@ pub fn mint_grant(b: &ComposeBridge, req: &MintRequest) -> ControlResponse {
             ));
         }
         let target = Path::new(&c.workspace).join(&c.path).display().to_string();
-        confine_target(&c.workspace, &c.path, &target).map_err(|r| r.to_string())?;
-        let prior = file_sha256(Path::new(&target))?;
-        for &gid in l.minted_by_commit.get(&c.id).into_iter().flatten() {
-            if l.revoked.contains_key(&gid) || l.stops.iter().any(|&s| s > gid) {
-                continue;
+        // #267 follow-up: keep the confined handle; the prior hash below is
+        // read from it, not re-resolved by path after the MAC checks.
+        let held = open_confined(&c.workspace, &c.path, &target)
+            .map_err(|r| outside_of(r).to_string())?;
+        if let Some((key, p)) = &desk {
+            // Path, content and workspace are the daemon's own commit record;
+            // the MAC must cover exactly those.
+            let binding = crate::approved_auth::AuthorizeBinding {
+                cx_promotion: c.cx_promotion,
+                proposal_sha256: c.proposal_sha256.clone(),
+                path: c.path.clone(),
+                content_sha256: c.content_sha256.clone(),
+                workspace: c.workspace.clone(),
+                approver: req.approver.trim().to_string(),
+                constraints: req.constraints.clone(),
+                nonce: p.nonce.clone(),
+                desk_key_id: key.id().to_string(),
+            };
+            key.verify_authorize(&binding, &p.mac)
+                .map_err(|e| no("DeskMacInvalid", e))?;
+            if l.desk_nonces.contains(&p.nonce) {
+                return Err(no(
+                    "Replayed",
+                    format!("authorize nonce {} already minted a grant; a replayed authorize mints nothing", p.nonce),
+                ));
             }
+        }
+        let prior = held.sha256()?;
+        for &gid in l.minted_by_commit.get(&c.id).into_iter().flatten() {
             let g = &l.grants[&gid];
+            // The spent intent is judged FIRST: a revoke or a stop after the grant
+            // never undoes a DONE effect, nor settles an intent that may still
+            // land. Only an unspent revoked or stopped grant gives way.
+            let dead = l.revoked.contains_key(&gid) || l.stops.iter().any(|&s| s > gid);
             match l.spent.get(&gid).map(|i| &l.intents[i]) {
+                None if dead => continue,
                 // Settled: the grant is spent for good (a new effect needs a
                 // new grant, as before).
                 Some(row) if row.state == EffectState::Done => {
@@ -1049,12 +1455,17 @@ pub fn mint_grant(b: &ComposeBridge, req: &MintRequest) -> ControlResponse {
         }
         let mut links = vec![c.id];
         links.extend(&req.constraints);
-        let text = json!({
+        let mut text = json!({
             MINTED_GRANT: 1, "compose_commit": c.id, "proposal_sha256": c.proposal_sha256,
             "path": c.path, "content_sha256": c.content_sha256,
             "approver": req.approver.trim(), "target": target, "workspace": c.workspace,
             "prior_sha256": prior, "cx_promotion": c.cx_promotion, "cx_evidence": c.cx_evidence,
         });
+        if let Some((key, p)) = &desk {
+            text["desk_nonce"] = json!(p.nonce);
+            text["desk_key_id"] = json!(key.id());
+        }
+        stamp(&mut text, &views, c.id);
         append(home, NoteKind::Authorization, &links, &text)
     }))
 }
@@ -1083,7 +1494,7 @@ fn ledger(home: &mut ComposeHome) -> Result<Ledger, String> {
     Ledger::from_records(&host_views(home)?).map_err(|r| r.to_string())
 }
 
-fn append(
+pub(crate) fn append(
     home: &mut ComposeHome,
     kind: NoteKind,
     links: &[u64],
@@ -1119,6 +1530,56 @@ fn noted(r: Result<ComposeNoteReport, String>) -> ControlResponse {
     }
 }
 
+/// What `open_intent` learned about the target before the grant checks.
+enum IntentRead {
+    /// The hash of the target (None when absent), read through the handle
+    /// confinement opened.
+    Prior(Option<String>),
+    /// The target cannot be read as a regular file (a directory, a leaf
+    /// symlink, no permission). Refused at once as "Stale", exactly where the
+    /// old by-path read refused it, before the grant is looked at.
+    Stale(String),
+    /// A directory above the target is absent: the old read saw "absent"; so
+    /// does the grant check, then the confinement refusal follows.
+    MissingParent(String),
+    /// The path escapes the workspace (symlinked or non-directory component,
+    /// bad shape). Nothing outside is read; the grant checks run with the
+    /// grant's own prior standing in, then this refusal follows.
+    Outside(String),
+}
+
+/// The prior hash an intent records (#267 follow-up): when the grant names a
+/// workspace, the target is confined and hashed through one held handle
+/// BEFORE any other check, so what is compared with the grant is what
+/// confinement checked. A grant with no workspace keeps the by-path read (it
+/// is refused right after: it names no workspace).
+fn intent_prior(l: &Ledger, req: &IntentRequest) -> IntentRead {
+    let stale = |e: String| {
+        IntentRead::Stale(Refusal::new("Stale", format!("target unreadable: {e}")).to_string())
+    };
+    let ws = l
+        .grants
+        .get(&req.authorization)
+        .and_then(|g| g.workspace.as_deref());
+    let Some(ws) = ws else {
+        return match file_sha256(Path::new(&req.target)) {
+            Ok(p) => IntentRead::Prior(p),
+            Err(e) => stale(e),
+        };
+    };
+    match open_confined(ws, &req.path, &req.target) {
+        Ok(t) => match t.sha256() {
+            Ok(p) => IntentRead::Prior(p),
+            Err(e) => stale(e),
+        },
+        Err(r) => match r.name {
+            "NotRegular" | "Unreadable" => stale(r.detail),
+            "MissingParent" => IntentRead::MissingParent(outside_of(r).to_string()),
+            _ => IntentRead::Outside(r.to_string()),
+        },
+    }
+}
+
 /// ComposeEffectIntent: every check of 2.3 and the durable intent, in one
 /// step under the home lock. The answer's id is the intent.
 pub fn open_intent(b: &ComposeBridge, req: &IntentRequest) -> ControlResponse {
@@ -1128,26 +1589,42 @@ pub fn open_intent(b: &ComposeBridge, req: &IntentRequest) -> ControlResponse {
     noted(b.with_home(|home| {
         let views = host_views(home)?;
         let l = Ledger::from_records(&views).map_err(|r| r.to_string())?;
-        let current = file_sha256(Path::new(&req.target))
-            .map_err(|e| Refusal::new("Stale", format!("target unreadable: {e}")).to_string())?;
+        // Refusal order is the one callers always saw: an unreadable target is
+        // "Stale" first; then the grant checks; then confinement. A confinement
+        // refusal found while reading is held back until the grant checks ran.
+        let (current, deferred) = match intent_prior(&l, req) {
+            IntentRead::Prior(p) => (p, None),
+            IntentRead::Stale(e) => return Err(e),
+            IntentRead::MissingParent(e) => (None, Some(e)),
+            IntentRead::Outside(e) => (
+                l.grants
+                    .get(&req.authorization)
+                    .and_then(|g| g.prior_sha256.clone().flatten()),
+                Some(e),
+            ),
+        };
         let g = l.check_intent(req, &current).map_err(|r| r.to_string())?;
-        // sovereign-core #249: confinement, and an approved grant's backing.
-        let ws = g.workspace.as_deref().ok_or_else(|| {
-            Refusal::new(
+        // sovereign-core #249: a grant names its workspace; confinement (already
+        // done above, through the handle that was read); an approved grant's backing.
+        if g.workspace.is_none() {
+            return Err(Refusal::new(
                 "NotAuthorized",
                 format!("authorization #{} names no workspace", g.id),
             )
-            .to_string()
-        })?;
-        confine_target(ws, &req.path, &req.target).map_err(|r| r.to_string())?;
+            .to_string());
+        }
+        if let Some(e) = deferred {
+            return Err(e);
+        }
         check_approved_backing(&l, g, &views).map_err(|r| r.to_string())?;
         check_minted_backing(&l, g).map_err(|r| r.to_string())?;
-        let text = json!({
+        let mut text = json!({
             "phase": PHASE_INTENT, "tool": "write_file", "authorization": g.id,
             "proposal_sha256": req.proposal_sha256, "path": req.path, "target": req.target,
             "content_sha256": req.content_sha256, "prior_sha256": current,
             "executor": {"pid": req.executor_pid, "start": req.executor_start},
         });
+        stamp(&mut text, &views, g.id);
         append(home, NoteKind::Effect, &[g.id], &text)
     }))
 }
@@ -1159,7 +1636,8 @@ pub fn ack(b: &ComposeBridge, intent: u64, reported: &Value) -> ControlResponse 
         return ControlResponse::Error(e);
     }
     noted(b.with_home(|home| {
-        let l = ledger(home)?;
+        let views = host_views(home)?;
+        let l = Ledger::from_records(&views).map_err(|r| r.to_string())?;
         let row = l
             .intents
             .get(&intent)
@@ -1172,12 +1650,13 @@ pub fn ack(b: &ComposeBridge, intent: u64, reported: &Value) -> ControlResponse 
             ));
         }
         let (st, disk) = confined_world_state(&l, row);
-        let text = json!({
+        let mut text = json!({
             "phase": PHASE_ACK, "intent": intent, "authorization": row.authorization,
             "tool": "write_file", "path": row.path, "content_sha256": row.content_sha256,
             "state": st.name(), "disk_sha256": disk.as_ref().ok().cloned().flatten(),
             "disk_error": disk.as_ref().err(), "executor_reported": reported,
         });
+        stamp(&mut text, &views, intent);
         append(home, NoteKind::Effect, &[intent, row.authorization], &text)
     }))
 }
@@ -1497,6 +1976,372 @@ mod tests {
             .name
     }
 
+    /// A real daemon-built generation record, as a ledger row.
+    fn generation_row(id: u64) -> ComposeRecordView {
+        let identity = crate::generation::ModelIdentity {
+            model_sha256: "m".repeat(64),
+            model_path: "/models/m.safetensors".into(),
+            tokenizer_sha256: "t".repeat(64),
+            tokenizer_path: "/models/tokenizer.json".into(),
+        };
+        let record = crate::generation::build_record(
+            &identity,
+            &crate::generation::TurnEvidence {
+                prompt_ids: &[1, 2, 3],
+                output_ids: &[100, 101],
+                text: "x100 x101",
+                total_tokens: 2,
+                finish_reason: "eos",
+                request_id: 7,
+                operation_id: 8,
+            },
+            crate::generation::DaemonStart(1),
+        );
+        rec(id, "effect", record)
+    }
+
+    /// Evidence only: generation records, anywhere in the ledger, change no
+    /// ledger state and no authorization or intent decision.
+    #[test]
+    fn generation_records_change_no_decision() {
+        let base = vec![
+            grant(2, Value::Null),
+            intent(3, 2),
+            settle(4, "ack", 3, "DONE"),
+            grant(5, Value::Null),
+        ];
+        let mut with = base.clone();
+        with.push(generation_row(6));
+        with.push(generation_row(7));
+        let (a, b) = (
+            Ledger::from_records(&base).unwrap(),
+            Ledger::from_records(&with).unwrap(),
+        );
+        assert_eq!(a.view(), b.view());
+        assert_eq!(refusal(&a, 2, None), refusal(&b, 2, None));
+        assert_eq!(refusal(&a, 2, None), "AlreadySpent");
+        assert_eq!(
+            a.check_intent(&req(5), &None).map(|g| g.id),
+            b.check_intent(&req(5), &None).map(|g| g.id)
+        );
+        // A generation record alone opens nothing and spends nothing.
+        let only = Ledger::from_records(&[generation_row(2)]).unwrap();
+        assert_eq!(only.view(), Ledger::default().view());
+    }
+
+    #[test]
+    fn generation_records_cannot_be_forged_through_compose_note() {
+        let g = r#"{"generation":1,"model_sha256":"x"}"#;
+        assert!(check_reserved_note("effect", g).is_err());
+        assert!(check_reserved_note("generation", "anything").is_err());
+        assert!(check_reserved_note("generation", g).is_err());
+    }
+
+    #[test]
+    fn provenance_cannot_be_set_through_compose_note() {
+        let p = r#"{"provenance":{"generation_record":3,"allen_agent":"none"}}"#;
+        for kind in ["effect", "constraint", "authorization", "provenance"] {
+            assert!(check_reserved_note(kind, p).is_err(), "{kind}");
+        }
+        // A forged copy of the daemon's own records, with provenance, is refused too.
+        let c = r#"{"compose_commit":1,"provenance":{"generation_record":3}}"#;
+        assert!(check_reserved_note("effect", c).is_err());
+        // Without the field an ordinary note is still fine.
+        assert!(check_reserved_note("constraint", r#"{"a":1}"#).is_ok());
+    }
+
+    fn commit_row(id: u64, prov: Option<Value>) -> ComposeRecordView {
+        let mut v = json!({"compose_commit": 1, "task": 1, "cx_promotion": 1, "cx_evidence": 1,
+            "proposal_sha256": "p", "path": "N.md", "content_sha256": "c", "workspace": "/w"});
+        if let Some(p) = prov {
+            v["provenance"] = p;
+        }
+        rec(id, "effect", v)
+    }
+
+    fn with_prov(mut r: ComposeRecordView, prov: Value) -> ComposeRecordView {
+        let mut v: Value = serde_json::from_str(r.text.as_deref().unwrap()).unwrap();
+        v["provenance"] = prov;
+        r.text = Some(v.to_string());
+        r
+    }
+
+    /// Evidence only: whatever the provenance fields say (valid, absent, naming
+    /// nothing, the wrong type, hostile), the ledger state and every decision
+    /// are the ones the same records give without them.
+    #[test]
+    fn provenance_changes_no_decision() {
+        let chain = |prov: Option<Value>| {
+            let mut v = vec![
+                commit_row(1, prov.clone()),
+                grant(2, Value::Null),
+                intent(3, 2),
+                settle(4, "ack", 3, "DONE"),
+                grant(5, Value::Null),
+                intent(6, 5),
+            ];
+            if let Some(p) = prov {
+                for r in v.iter_mut().skip(1) {
+                    *r = with_prov(r.clone(), p.clone());
+                }
+            }
+            v
+        };
+        let base = Ledger::from_records(&chain(None)).unwrap();
+        for prov in [
+            json!({"generation_record": 7, "allen_agent": "ab".repeat(32)}),
+            json!({"generation_record": 99999, "allen_agent": "none"}),
+            json!({"generation_record": null, "allen_agent": "none"}),
+            json!({"generation_record": null, "allen_agent": "none", "generation_record_stale": 9, "provenance_note": "generation_record_stale"}),
+            json!({"generation_record": "seven", "allen_agent": 5}),
+            json!("garbage"),
+            json!(null),
+            json!({"generation_record": u64::MAX, "allen_agent": "\u{0}x".repeat(500)}),
+        ] {
+            let l = Ledger::from_records(&chain(Some(prov.clone()))).unwrap();
+            assert_eq!(base.view(), l.view(), "{prov}");
+            for a in [2u64, 5, 9] {
+                assert_eq!(refusal(&base, a, None), refusal(&l, a, None), "{prov} #{a}");
+            }
+            assert_eq!(
+                base.check_intent(&req(5), &None).map(|g| g.id),
+                l.check_intent(&req(5), &None).map(|g| g.id)
+            );
+            assert_eq!(base.commits, l.commits, "{prov}");
+            assert_eq!(base.grants, l.grants, "{prov}");
+            assert_eq!(base.intents, l.intents, "{prov}");
+        }
+    }
+
+    /// The same, for the code: the only reader of provenance is
+    /// `Provenance::from_text`, reached only through `stamp`/`inherit`, and the
+    /// ledger-side code that mentions provenance is a short, named list of
+    /// writers that call it after their decisions are made. Nothing in
+    /// `Ledger`, `check_*`, the world checks or reconcile can see it.
+    #[test]
+    fn provenance_is_read_by_no_decision_code() {
+        let src = include_str!("effects.rs");
+        let prod = src.split("#[cfg(test)]\nmod tests").next().unwrap();
+        let tokens = [
+            "PROVENANCE",
+            "Provenance",
+            "provenance",
+            "stamp(",
+            "inherit(",
+            "generation_record",
+            "allen_agent",
+            "stale_generation",
+            "provenance_note",
+        ];
+        // The enclosing `fn` of every mention.
+        let mut cur = String::from("<top>");
+        let mut hits: Vec<(String, String)> = Vec::new();
+        for line in prod.lines() {
+            let t = line.trim_start();
+            if let Some(i) = t.find("fn ") {
+                let pre = &t[..i];
+                if pre.is_empty() || pre == "pub " || pre == "pub(crate) " {
+                    cur = t[i + 3..]
+                        .split(|c: char| !(c.is_alphanumeric() || c == '_'))
+                        .next()
+                        .unwrap()
+                        .to_string();
+                }
+            }
+            if t.starts_with("//") {
+                continue;
+            }
+            if tokens.iter().any(|k| line.contains(k)) {
+                hits.push((cur.clone(), t.to_string()));
+            }
+        }
+        let writers = [
+            "stamp",
+            "write_compose_commit",
+            "write_approved_grant",
+            "authorize",
+            "open_intent",
+            "ack",
+            "check_reserved_note",
+        ];
+        for (f, line) in &hits {
+            assert!(
+                writers.contains(&f.as_str()),
+                "{f} mentions provenance: {line}"
+            );
+        }
+        // Inside the writers that also decide, the only mention is the stamp
+        // call (or the reserved-field refusal), never a read of the fields.
+        for (f, line) in &hits {
+            if ["authorize", "open_intent", "ack"].contains(&f.as_str()) {
+                assert!(
+                    line.starts_with("stamp(&mut text, &views, "),
+                    "{f} touches provenance other than by stamp: {line}"
+                );
+            }
+        }
+        // Everything else in the crate: the field's name and its reader appear
+        // only in generation.rs (definition), effects.rs (above), spine.rs
+        // (the writer of the commit) and server.rs/control.rs (plumbing).
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        for e in std::fs::read_dir(dir).unwrap() {
+            let p = e.unwrap().path();
+            let name = p.file_name().unwrap().to_string_lossy().into_owned();
+            if !name.ends_with(".rs") {
+                continue;
+            }
+            let s = std::fs::read_to_string(&p).unwrap();
+            let s = s.split("#[cfg(test)]").next().unwrap();
+            let reads = s.contains("Provenance::from_text") || s.contains("generation::inherit");
+            let allowed = ["generation.rs", "effects.rs"].contains(&name.as_str());
+            assert!(!reads || allowed, "{name} reads provenance");
+        }
+        // The Ledger types carry no provenance field at all.
+        for ty in [
+            "pub struct Grant",
+            "pub struct CommitRow",
+            "pub struct IntentRow",
+            "pub struct Ledger",
+        ] {
+            let body = prod
+                .split(ty)
+                .nth(1)
+                .unwrap()
+                .split("\n}\n")
+                .next()
+                .unwrap();
+            assert!(!body.to_lowercase().contains("provenance"), "{ty}");
+        }
+    }
+
+    #[test]
+    fn old_records_without_provenance_read_as_explicit_none() {
+        use crate::generation::{inherit, Provenance, NO_AGENT};
+        let old = vec![commit_row(1, None), grant(2, Value::Null), intent(3, 2)];
+        // The ledger opens and verifies as before.
+        assert!(Ledger::from_records(&old).is_ok());
+        let p = inherit(&old, 1);
+        assert_eq!(p, Provenance::default());
+        assert_eq!(p.allen_agent, NO_AGENT);
+        assert_eq!(p.generation_record, None);
+        // Missing record, or text that is not a record at all: the plain default
+        // (no provenance field was ever there), never an error.
+        assert_eq!(inherit(&old, 77), Provenance::default());
+        assert_eq!(Provenance::from_text("not json"), Provenance::default());
+        // A provenance field that is PRESENT but damaged is not silently "none":
+        // the values default and a visible note says why.
+        let bad_agent = Provenance::from_text(
+            r#"{"provenance":{"allen_agent":"nope","generation_record":-1}}"#,
+        );
+        assert_eq!(bad_agent.allen_agent, NO_AGENT);
+        assert_eq!(bad_agent.note.as_deref(), Some("allen_agent_malformed"));
+        assert_ne!(bad_agent, Provenance::default());
+        assert_eq!(
+            bad_agent.to_json()["provenance_note"],
+            "allen_agent_malformed"
+        );
+        let not_obj = Provenance::from_text(r#"{"provenance":"garbage"}"#);
+        assert_eq!(not_obj.note.as_deref(), Some("provenance_malformed"));
+        // A generation id that names no generation record is not copied as a
+        // plain null: the old id stays visible and a note says it is stale.
+        let named = vec![commit_row(
+            1,
+            Some(json!({"generation_record": 9, "allen_agent": "ab".repeat(32)})),
+        )];
+        let p = inherit(&named, 1);
+        assert_eq!(p.generation_record, None);
+        assert_eq!(p.stale_generation, Some(9));
+        assert_eq!(p.note.as_deref(), Some("generation_record_stale"));
+        assert_eq!(p.allen_agent, "ab".repeat(32));
+        let j = p.to_json();
+        assert_eq!(j["generation_record"], Value::Null);
+        assert_eq!(j["generation_record_stale"], 9);
+        assert_eq!(j["provenance_note"], "generation_record_stale");
+        // The marker survives the next copy down the chain (grant -> intent).
+        let next = vec![rec(
+            2,
+            "effect",
+            json!({"phase": "intent", "provenance": j}),
+        )];
+        let q = inherit(&next, 2);
+        assert_eq!(q.stale_generation, Some(9));
+        assert_eq!(q.note.as_deref(), Some("generation_record_stale"));
+        // ... and kept when it does (the record must be a verified generation record).
+        let mut with_gen = named.clone();
+        with_gen.push(generation_row(9));
+        assert_eq!(inherit(&with_gen, 1).generation_record, Some(9));
+        // A non-generation record (or an unverified one) does not count.
+        let mut not_gen = named;
+        not_gen.push(rec(9, "effect", json!({"x": 1})));
+        assert_eq!(inherit(&not_gen, 1).generation_record, None);
+        let mut bad = with_gen;
+        bad[1].verified = false;
+        assert_eq!(inherit(&bad, 1).generation_record, None);
+    }
+
+    /// A record that names a nonexistent generation id is refused at write time.
+    #[test]
+    fn a_commit_naming_no_generation_record_is_not_written() {
+        use crate::generation::Provenance;
+        use crate::spine::{ComposeBridge, Generation};
+        if !aien_omega_compose::LINKED {
+            eprintln!("NOT_RUN: stub compose build");
+            return;
+        }
+        let t = tempfile::tempdir().unwrap();
+        let proposer: crate::spine::ComposeProposer =
+            std::sync::Arc::new(|_: &str, _: std::time::Duration| Ok(Generation::default()));
+        let b = ComposeBridge::new(t.path().join("compose"), proposer, "test:fixed");
+        let note = match b.note("constraint", "an ordinary note", &[]) {
+            ControlResponse::ComposeNoted(n) => n.id,
+            other => panic!("{other:?}"),
+        };
+        let write = |g: Option<u64>| {
+            b.with_home(|home| {
+                write_compose_commit(
+                    home,
+                    "/w",
+                    1,
+                    1,
+                    1,
+                    "p",
+                    "N.md",
+                    "c",
+                    &Provenance {
+                        generation_record: g,
+                        allen_agent: "none".into(),
+                        ..Default::default()
+                    },
+                )
+            })
+        };
+        let before = host_count(&b);
+        for bad in [999_999u64, note, 1] {
+            let e = write(Some(bad)).unwrap_err();
+            assert!(e.contains("not a verified generation record"), "{bad}: {e}");
+        }
+        assert_eq!(host_count(&b), before, "nothing was written");
+        // A real generation record is accepted, and none is accepted.
+        let g = b
+            .with_home(|home| crate::generation::write(home, &generation_json()))
+            .unwrap();
+        let ok = write(Some(g));
+        assert!(ok.is_ok(), "{ok:?}");
+        let ok = write(None);
+        assert!(ok.is_ok(), "{ok:?}");
+    }
+
+    fn generation_json() -> Value {
+        json!({"generation": 1, "v": 1, "model_sha256": "x"})
+    }
+
+    fn host_count(b: &crate::spine::ComposeBridge) -> usize {
+        match b.recall(&[], None) {
+            ControlResponse::ComposeRecalled(r) => r.host.len(),
+            other => panic!("{other:?}"),
+        }
+    }
+
     #[test]
     fn fresh_grant_opens_once() {
         let l = Ledger::from_records(&[grant(2, Value::Null)]).unwrap();
@@ -1640,6 +2485,254 @@ mod tests {
         );
     }
 
+    /// #267 red/green: a parent swapped for a symlink to a directory holding
+    /// the expected bytes, exactly between confinement and the read, must not
+    /// make the world check DONE. (Old code: confine_target, then read by
+    /// path, reached the outside file and returned DONE.)
+    #[test]
+    fn swap_between_confinement_and_read_is_not_done() {
+        let t = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(t.path()).unwrap();
+        let (ws, outside) = (root.join("ws"), root.join("outside"));
+        std::fs::create_dir_all(ws.join("d")).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(ws.join("d/f"), b"inside").unwrap();
+        std::fs::write(outside.join("f"), b"expected").unwrap();
+        let l = race_ledger(&ws, b"expected");
+        let (w2, o2) = (ws.clone(), outside.clone());
+        test_hooks::set_pause(move || {
+            std::fs::rename(w2.join("d"), w2.join("d.held")).unwrap();
+            std::os::unix::fs::symlink(&o2, w2.join("d")).unwrap();
+        });
+        let (st, disk) = confined_world_state(&l, &l.intents[&3]);
+        assert_ne!(st, EffectState::Done, "read outside bytes: {disk:?}");
+        assert_eq!(st, EffectState::Unresolved);
+        assert_eq!(disk.unwrap(), Some(hex(&Sha256::digest(b"inside"))));
+    }
+
+    /// #267 follow-up, grant creation: the REAL `write_approved_grant`, with the
+    /// parent swapped for a symlink to a directory holding other bytes exactly
+    /// between its confinement and its read. The grant must record the hash of
+    /// the file confinement checked, and a `base` equal to that hash must
+    /// still pass. (With the by-path read the recorded prior is the OUTSIDE
+    /// hash and `base` is refused as BaseChanged.)
+    #[test]
+    fn write_approved_grant_records_the_prior_of_the_confined_file() {
+        use crate::spine::{ComposeBridge, Generation};
+        if !aien_omega_compose::LINKED {
+            eprintln!("NOT_RUN: stub compose build");
+            return;
+        }
+        let t = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(t.path()).unwrap();
+        let (ws, outside) = (root.join("ws"), root.join("outside"));
+        std::fs::create_dir_all(ws.join("d")).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(ws.join("d/NOTES.md"), b"inside").unwrap();
+        std::fs::write(outside.join("NOTES.md"), b"expected").unwrap();
+        let proposer: crate::spine::ComposeProposer =
+            std::sync::Arc::new(|_: &str, _: std::time::Duration| {
+                Ok(Generation {
+                    text: "filename: d/NOTES.md\nkeep it\n".to_string(),
+                    tokens: 4,
+                    finish_reason: Some("eos".into()),
+                    ..Default::default()
+                })
+            });
+        let b = ComposeBridge::new(root.join("compose"), proposer, "test:fixed");
+        let ControlResponse::ComposeTaskResult(rep) = b.run_task("g", ws.to_str().unwrap()) else {
+            panic!("run_task did not produce a result")
+        };
+        let cx = rep.cx_promotion;
+        let link = ApprovedLink {
+            approval_key: "k".into(),
+            replay_claim: cx,
+            cx_promotion: cx,
+            cx_evidence: cx,
+        };
+        let w = ws.to_str().unwrap();
+        let prior_of = |id: u64| -> Value {
+            let ControlResponse::ComposeRecalled(r) = b.recall(&[id], None) else {
+                panic!("recall failed")
+            };
+            let v: Value = serde_json::from_str(r.cited[0].text.as_deref().unwrap()).unwrap();
+            v["prior_sha256"].clone()
+        };
+        for base in [None, Some(hex(&Sha256::digest(b"inside")))] {
+            let (w2, o2) = (ws.clone(), outside.clone());
+            test_hooks::set_pause(move || swap_in_symlink(&w2, &o2));
+            let r = write_approved_grant(
+                &b,
+                w,
+                "d/NOTES.md",
+                "c",
+                "drake",
+                &json!({}),
+                &link,
+                "p",
+                base.as_deref(),
+            );
+            let (id, _) = r.unwrap_or_else(|e| panic!("grant refused: {e}"));
+            assert_eq!(
+                prior_of(id),
+                json!(hex(&Sha256::digest(b"inside"))),
+                "the grant recorded bytes that confinement did not check"
+            );
+            // put the directory back for the next round
+            std::fs::remove_file(ws.join("d")).unwrap();
+            std::fs::rename(ws.join("d.held"), ws.join("d")).unwrap();
+        }
+    }
+
+    fn swap_in_symlink(ws: &Path, outside: &Path) {
+        std::fs::rename(ws.join("d"), ws.join("d.held")).unwrap();
+        std::os::unix::fs::symlink(outside, ws.join("d")).unwrap();
+    }
+
+    fn h(b: &[u8]) -> Option<String> {
+        Some(hex(&Sha256::digest(b)))
+    }
+
+    /// Both the openat2 path and the forced ENOSYS fallback walk give the same
+    /// exact refusal for every shape: a symlink in a middle component, a symlink
+    /// to a file in a middle component (ELOOP) as against a plain file there
+    /// (ENOTDIR), a symlink as the last component, a missing parent, and a
+    /// `..` path.
+    #[test]
+    fn fallback_walk_refuses_symlinks_and_outside_paths() {
+        let t = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(t.path()).unwrap();
+        let (ws, outside) = (root.join("ws"), root.join("outside"));
+        std::fs::create_dir_all(ws.join("a/b")).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("f"), b"expected").unwrap();
+        std::fs::write(ws.join("a/b/f"), b"inside").unwrap();
+        std::fs::write(ws.join("a/file"), b"plain file").unwrap();
+        std::os::unix::fs::symlink(&outside, ws.join("s")).unwrap();
+        std::os::unix::fs::symlink(&outside, ws.join("a/l")).unwrap();
+        std::os::unix::fs::symlink(outside.join("f"), ws.join("a/b/lf")).unwrap();
+        std::os::unix::fs::symlink(ws.join("a/file"), ws.join("a/lfile")).unwrap();
+        let w = ws.to_str().unwrap();
+        let open = |p: &str| open_confined(w, p, &ws.join(p).display().to_string());
+        for forced in [false, true] {
+            test_hooks::set_force_fallback(forced);
+            assert_eq!(open("a/b/f").unwrap().sha256().unwrap(), h(b"inside"));
+            assert!(open("a/b/new").unwrap().file.is_none());
+            for (p, want) in [
+                ("s/f", "OutsideWorkspace"),       // symlink to a dir, middle
+                ("a/l/f", "OutsideWorkspace"),     // same, deeper
+                ("a/lfile/f", "OutsideWorkspace"), // symlink to a FILE, middle: ELOOP
+                ("a/file/f", "OutsideWorkspace"),  // plain file, middle: ENOTDIR
+                ("a/b/lf", "NotRegular"),          // symlink, last component
+                ("s", "NotRegular"),               // symlink, only component
+                ("a/missing/f", "MissingParent"),
+            ] {
+                let e = open(p)
+                    .err()
+                    .unwrap_or_else(|| panic!("{p} was opened (forced={forced})"));
+                assert_eq!(e.name, want, "{p} (forced={forced}): {}", e.detail);
+            }
+            let e = open_confined(w, "../outside/f", &format!("{w}/../outside/f"));
+            assert_eq!(e.err().unwrap().name, "OutsideWorkspace");
+        }
+        test_hooks::set_force_fallback(false);
+    }
+
+    /// Ledger with one daemon-minted grant for `ws` and one open intent
+    /// (#3) writing `d/f` with content `want`.
+    fn race_ledger(ws: &Path, want: &[u8]) -> Ledger {
+        let target = ws.join("d/f").display().to_string();
+        let g = rec(
+            2,
+            "authorization",
+            json!({"minted_grant": 1, "compose_commit": 1, "proposal_sha256": "p",
+                   "path": "d/f", "content_sha256": hex(&Sha256::digest(want)),
+                   "approver": "drake", "target": target, "prior_sha256": null,
+                   "workspace": ws.display().to_string()}),
+        );
+        let i = rec(
+            3,
+            "effect",
+            json!({"phase": "intent", "tool": "write_file", "authorization": 2, "path": "d/f",
+                   "target": target, "content_sha256": hex(&Sha256::digest(want)),
+                   "prior_sha256": null, "proposal_sha256": "p",
+                   "executor": {"pid": 1, "start": 1}}),
+        );
+        Ledger::from_records(&[g, i]).unwrap()
+    }
+
+    /// #267, deterministic: after confinement hands back a held handle, a
+    /// swap of the parent directory for a symlink to outside bytes cannot
+    /// redirect the read; the handle still reads the inside object.
+    #[test]
+    fn held_handle_ignores_a_parent_swap() {
+        let t = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(t.path()).unwrap();
+        let (ws, outside) = (root.join("ws"), root.join("outside"));
+        std::fs::create_dir_all(ws.join("d")).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(ws.join("d/f"), b"inside").unwrap();
+        std::fs::write(outside.join("f"), b"outside").unwrap();
+        let target = ws.join("d/f").display().to_string();
+        let h = open_confined(ws.to_str().unwrap(), "d/f", &target).unwrap();
+        std::fs::rename(ws.join("d"), ws.join("d.held")).unwrap();
+        std::os::unix::fs::symlink(&outside, ws.join("d")).unwrap();
+        // By path the old code would now read the outside file ...
+        assert_eq!(
+            file_sha256(Path::new(&target)).unwrap(),
+            Some(hex(&Sha256::digest(b"outside")))
+        );
+        // ... the held handle reads what confinement checked.
+        assert_eq!(h.sha256().unwrap(), Some(hex(&Sha256::digest(b"inside"))));
+        // A fresh walk refuses the swapped directory.
+        let e = open_confined(ws.to_str().unwrap(), "d/f", &target)
+            .err()
+            .unwrap();
+        assert_eq!(e.name, "OutsideWorkspace");
+    }
+
+    /// #267 acceptance: a parent directory swapped for a symlink to a
+    /// directory holding the expected bytes, raced against ack/reconcile's
+    /// `confined_world_state`, never yields DONE (the inside file differs).
+    #[test]
+    fn parent_swap_race_never_reads_outside_bytes() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let t = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(t.path()).unwrap();
+        let (ws, outside) = (root.join("ws"), root.join("outside"));
+        std::fs::create_dir_all(ws.join("d")).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(ws.join("d/f"), b"inside").unwrap();
+        std::fs::write(outside.join("f"), b"expected").unwrap();
+        let l = race_ledger(&ws, b"expected");
+        let stop = std::sync::Arc::new(AtomicBool::new(false));
+        let swapper = {
+            let (stop, ws, outside) = (stop.clone(), ws.clone(), outside.clone());
+            std::thread::spawn(move || {
+                while !stop.load(Ordering::Relaxed) {
+                    // dir -> symlink to outside, then back.
+                    std::fs::rename(ws.join("d"), ws.join("d.held")).unwrap();
+                    std::os::unix::fs::symlink(&outside, ws.join("d")).unwrap();
+                    std::fs::remove_file(ws.join("d")).unwrap();
+                    std::fs::rename(ws.join("d.held"), ws.join("d")).unwrap();
+                }
+            })
+        };
+        let (mut done, mut seen) = (0u32, std::collections::BTreeMap::<String, u32>::new());
+        let end = std::time::Instant::now() + std::time::Duration::from_secs(8);
+        while std::time::Instant::now() < end {
+            let (st, disk) = confined_world_state(&l, &l.intents[&3]);
+            if st == EffectState::Done {
+                done += 1;
+            }
+            *seen
+                .entry(format!("{} {:?}", st.name(), disk.is_ok()))
+                .or_default() += 1;
+        }
+        stop.store(true, Ordering::Relaxed);
+        swapper.join().unwrap();
+        assert_eq!(done, 0, "DONE for bytes outside the workspace: {seen:?}");
+    }
     #[test]
     fn world_state_reads_the_target() {
         let d = tempfile::tempdir().unwrap();

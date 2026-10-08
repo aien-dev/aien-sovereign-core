@@ -2,6 +2,7 @@
 //! Exposes typed control RPC over local IPC to operator CLI tools.
 
 use crate::control::{ControlCommand, ControlEnvelope, ControlResponse};
+use crate::generation::{DaemonStart, ModelIdentity, TurnEvidence};
 use crate::spine::{compose_dir_from_env, AienRuntimeSpine, ComposeBridge, ComposeProposer};
 use aien_inference_abi::{AienInferenceBackend, ChatTokenizer, SamplingParams};
 use aien_scheduler::{ChannelCompletionSink, CompletionEvent};
@@ -28,8 +29,14 @@ pub struct AienRuntimeServer {
     is_running: Arc<AtomicBool>,
     tokenizer: Arc<RwLock<Option<ChatTokenizer>>>,
     warm_up: AtomicBool,
+    /// Optional serving-time probe (GB10 allocation counters), see `set_serving_probe`.
+    probe: std::sync::Mutex<Option<Arc<dyn aien_inference_abi::gb10_serving::ServingProbe>>>,
     /// Test seam: a ready-made compose bridge (see `with_compose_bridge`).
     compose_override: std::sync::Mutex<Option<Arc<ComposeBridge>>>,
+    /// The loaded model files' digests (set by the daemon after load; absent
+    /// = no generation record, see crate::generation).
+    identity: std::sync::Mutex<Option<Arc<ModelIdentity>>>,
+    started: DaemonStart,
 }
 
 /// NEXT-PHASE-1 v4 declared warm-up prompt (ACCEPTANCE-v4 Section 2(2)):
@@ -54,7 +61,10 @@ impl AienRuntimeServer {
             is_running: Arc::new(AtomicBool::new(false)),
             tokenizer: Arc::new(RwLock::new(None)),
             warm_up: AtomicBool::new(false),
+            probe: std::sync::Mutex::new(None),
             compose_override: std::sync::Mutex::new(None),
+            identity: std::sync::Mutex::new(None),
+            started: DaemonStart::now(),
         }
     }
 
@@ -68,6 +78,12 @@ impl AienRuntimeServer {
         self
     }
 
+    /// Installs the digests of the model and tokenizer files the daemon loaded.
+    /// Without them (stub or reference weights) no generation record is written.
+    pub fn set_model_identity(&self, identity: ModelIdentity) {
+        *self.identity.lock().expect("identity lock") = Some(Arc::new(identity));
+    }
+
     /// Installs the tokenizer that `StreamTurn` uses to encode prompts and decode tokens.
     pub fn set_tokenizer(&self, tokenizer: ChatTokenizer) {
         *self.tokenizer.write().expect("tokenizer lock") = Some(tokenizer);
@@ -77,6 +93,15 @@ impl AienRuntimeServer {
     /// `run`, before any request is served (ACCEPTANCE-v4 Section 2(2)).
     pub fn enable_warm_up(&self) {
         self.warm_up.store(true, Ordering::SeqCst);
+    }
+
+    /// Log the GB10 allocation counters once after warm-up and the change since warm-up after
+    /// every served connection (sovereign-core#277). Unset = nothing is logged.
+    pub fn set_serving_probe(
+        &self,
+        probe: Arc<dyn aien_inference_abi::gb10_serving::ServingProbe>,
+    ) {
+        *self.probe.lock().expect("probe lock") = Some(probe);
     }
 
     pub fn spine(&self) -> Arc<Mutex<AienRuntimeSpine>> {
@@ -115,6 +140,7 @@ impl AienRuntimeServer {
         crate::spine::compose_doc_max_tokens_from_env()
             .map_err(|e| format!("compose limits: {e}"))?;
 
+        let authorize_desk = crate::spine::authorize_requires_desk_from_env()?;
         let listener = UnixListener::bind(&self.socket_path).map_err(|e| {
             format!(
                 "Failed to bind runtime UNIX domain socket at {}: {}",
@@ -181,6 +207,10 @@ impl AienRuntimeServer {
         if self.warm_up.load(Ordering::SeqCst) {
             println!("  {}", self.run_warm_up().await);
         }
+        let probe = self.probe.lock().expect("probe lock").clone();
+        if let Some(line) = probe.as_ref().and_then(|p| p.after_warm_up()) {
+            println!("  {line}");
+        }
 
         // NEXT-PHASE-1: the compose bridge (opened on the first RunComposeTask).
         let preset = self
@@ -188,6 +218,7 @@ impl AienRuntimeServer {
             .lock()
             .expect("compose override")
             .clone();
+        let identity = self.identity.lock().expect("identity lock").clone();
         let compose = match compose_dir_from_env() {
             _ if preset.is_some() => preset,
             Ok(dir) => Some(Arc::new(
@@ -204,18 +235,34 @@ impl AienRuntimeServer {
                     self.spine.clone(),
                     self.tokenizer.clone(),
                     tokio::runtime::Handle::current(),
-                )?),
+                )?)
+                .with_authorize_requires_desk(authorize_desk),
             )),
             Err(e) => {
                 tracing::warn!("compose bridge disabled: {e}");
                 None
             }
         };
+        // Provenance (arch#162): the compose task writes the generation record of
+        // the proposal it commits, so the bridge needs the model identity too.
+        if let (Some(b), Some(id)) = (compose.as_ref(), identity.as_ref()) {
+            b.set_model_identity((**id).clone(), self.started);
+        }
         // NEXT-PHASE-2 (ACCEPTANCE-v2 2.4): settle effects a previous process
         // left open, before serving anything. Reads the world, never re-runs.
         // A failed or refused reconcile does not stop the daemon, but every
         // effect command refuses until an operator reconcile succeeds
         // (ACCEPTANCE-v3 2.5).
+        if let Some(b) = compose.as_ref() {
+            println!(
+                "Authorize MAC: {}",
+                if b.authorize_requires_desk() {
+                    "on (aien compose authorize requires the approval desk key MAC)"
+                } else {
+                    "off (authorize is authenticated by the OS user only)"
+                }
+            );
+        }
         if let Some(b) = compose.clone() {
             let gate = b.clone();
             let line =
@@ -277,6 +324,9 @@ impl AienRuntimeServer {
 
                             let tokenizer_conn = self.tokenizer.clone();
                             let compose_conn = compose.clone();
+                            let identity_conn = identity.clone();
+                            let started = self.started;
+                            let probe_conn = probe.clone();
                             tokio::spawn(async move {
                                 handle_connection(
                                     stream,
@@ -285,8 +335,12 @@ impl AienRuntimeServer {
                                     notify_conn,
                                     tokenizer_conn,
                                     compose_conn,
+                                    (identity_conn, started),
                                 )
                                 .await;
+                                if let Some(line) = probe_conn.as_ref().and_then(|p| p.after_request()) {
+                                    println!("  {line}");
+                                }
                             });
                         }
                         Err(e) => {
@@ -302,6 +356,12 @@ impl AienRuntimeServer {
 
         self.is_running.store(false, Ordering::SeqCst);
         let _ = worker_handle.await;
+
+        // Close the compose home now, not whenever the last connection task drops
+        // its Arc (sovereign-core #306).
+        if let Some(c) = compose.clone() {
+            let _ = tokio::task::spawn_blocking(move || c.close()).await;
+        }
 
         // Clean up socket file on clean shutdown
         if self.socket_path.exists() {
@@ -562,6 +622,70 @@ fn proposer_with_cap(
     })
 }
 
+/// What a turn needs to write its generation record.
+struct RecordCtx {
+    compose: Option<Arc<ComposeBridge>>,
+    identity: Option<Arc<ModelIdentity>>,
+    started: DaemonStart,
+    request_id: u64,
+    operation_id: u128,
+}
+
+/// Owned inputs of one finished turn's generation record.
+struct GenerationOwned {
+    prompt_ids: Vec<u32>,
+    output_ids: Vec<u32>,
+    text: String,
+    total_tokens: usize,
+    finish_reason: &'static str,
+    request_id: u64,
+    operation_id: u128,
+}
+
+/// Write the daemon's generation record for a finished turn and return its
+/// ledger id. `None` when there is no compose ledger or no model identity (a
+/// stub or reference-weights run), or when the append failed; the failure is
+/// logged and the turn still succeeds, but an id is returned only for a record
+/// that was written.
+async fn record_generation(
+    compose: Option<Arc<ComposeBridge>>,
+    identity: Option<Arc<ModelIdentity>>,
+    started: DaemonStart,
+    g: GenerationOwned,
+) -> Option<u64> {
+    let (bridge, identity) = (compose?, identity?);
+    let written = tokio::task::spawn_blocking(move || {
+        let record = crate::generation::build_record(
+            &identity,
+            &TurnEvidence {
+                prompt_ids: &g.prompt_ids,
+                output_ids: &g.output_ids,
+                text: &g.text,
+                total_tokens: g.total_tokens,
+                finish_reason: g.finish_reason,
+                request_id: g.request_id,
+                operation_id: g.operation_id,
+            },
+            started,
+        );
+        bridge.record_generation(&record)
+    })
+    .await;
+    match written {
+        Ok(Ok(id)) => Some(id),
+        Ok(Err(e)) => {
+            tracing::warn!("generation record not written: {e}");
+            eprintln!("generation record not written: {e}");
+            None
+        }
+        Err(e) => {
+            tracing::warn!("generation record task failed: {e}");
+            eprintln!("generation record task failed: {e}");
+            None
+        }
+    }
+}
+
 async fn stream_turn(
     writer: &mut tokio::net::unix::OwnedWriteHalf,
     spine: Arc<Mutex<AienRuntimeSpine>>,
@@ -569,8 +693,16 @@ async fn stream_turn(
     messages: Vec<crate::control::ChatTurn>,
     max_tokens: usize,
     temperature: f32,
+    rec: RecordCtx,
 ) {
-    let (tokenizer, mut events, _prompt_ids) =
+    let RecordCtx {
+        compose,
+        identity,
+        started,
+        request_id,
+        operation_id,
+    } = rec;
+    let (tokenizer, mut events, prompt_ids) =
         match submit_turn(spine, tokenizer, messages, max_tokens, temperature, "").await {
             Ok(x) => x,
             Err(error) => {
@@ -599,10 +731,33 @@ async fn stream_turn(
                     return;
                 }
             }
-            Ok(Some(CompletionEvent::Finished { total_tokens, .. })) => {
+            Ok(Some(CompletionEvent::Finished {
+                total_tokens,
+                finish_reason,
+                ..
+            })) => {
+                let generation_record = record_generation(
+                    compose,
+                    identity,
+                    started,
+                    GenerationOwned {
+                        prompt_ids,
+                        output_ids: produced,
+                        text: text.clone(),
+                        total_tokens,
+                        finish_reason: finish_reason_label(&finish_reason),
+                        request_id,
+                        operation_id,
+                    },
+                )
+                .await;
                 let _ = write_response(
                     writer,
-                    &ControlResponse::TurnFinished { text, total_tokens },
+                    &ControlResponse::TurnFinished {
+                        text,
+                        total_tokens,
+                        generation_record,
+                    },
                 )
                 .await;
                 return;
@@ -632,6 +787,7 @@ async fn handle_connection(
     shutdown_notify: Arc<Notify>,
     tokenizer: Arc<RwLock<Option<ChatTokenizer>>>,
     compose: Option<Arc<ComposeBridge>>,
+    (identity, started): (Option<Arc<ModelIdentity>>, DaemonStart),
 ) {
     let (reader, mut writer) = stream.into_split();
     let mut buf_reader = BufReader::new(reader);
@@ -677,6 +833,13 @@ async fn handle_connection(
                 messages,
                 max_tokens,
                 temperature,
+                RecordCtx {
+                    compose: compose.clone(),
+                    identity: identity.clone(),
+                    started,
+                    request_id: envelope.request_id,
+                    operation_id: envelope.operation_id,
+                },
             )
             .await;
             line.clear();
@@ -687,9 +850,12 @@ async fn handle_connection(
             ControlCommand::RunComposeTask {
                 ref goal,
                 ref workspace,
+                ref context,
             } => {
-                let (g, w) = (goal.clone(), workspace.clone());
-                Some(Box::new(move |b: &Arc<ComposeBridge>| b.run_task(&g, &w)))
+                let (g, w, c) = (goal.clone(), workspace.clone(), context.clone());
+                Some(Box::new(move |b: &Arc<ComposeBridge>| {
+                    b.run_task_in(&g, &w, c.as_deref())
+                }))
             }
             ControlCommand::ComposeNote {
                 ref kind,
@@ -707,6 +873,7 @@ async fn handle_connection(
                 ref workspace,
                 ref approver,
                 ref constraints,
+                ref desk_proof,
             } => {
                 let req = crate::effects::MintRequest {
                     cx_promotion,
@@ -715,8 +882,9 @@ async fn handle_connection(
                     approver: approver.clone(),
                     constraints: constraints.clone(),
                 };
+                let proof = desk_proof.clone();
                 Some(Box::new(move |b: &Arc<ComposeBridge>| {
-                    crate::effects::mint_grant(b, &req)
+                    crate::effects::authorize(b, &req, proof.as_ref())
                 }))
             }
             ControlCommand::ComposeRecall { ref ids, prefix } => {
@@ -786,6 +954,24 @@ async fn handle_connection(
                     crate::effects::control(b, &a, &p, authorization)
                 }))
             }
+            ControlCommand::AllenStatus
+            | ControlCommand::AllenProfileShow
+            | ControlCommand::AllenProfileSet { .. }
+            | ControlCommand::AllenProfileHistory
+            | ControlCommand::AllenProfileRevert { .. }
+            | ControlCommand::AllenMemoryPut { .. }
+            | ControlCommand::AllenMemoryRecall { .. }
+            | ControlCommand::AllenMemoryInspect { .. }
+            | ControlCommand::AllenMemoryCorrect { .. }
+            | ControlCommand::AllenMemoryForget { .. }
+            | ControlCommand::AllenMemoryExport { .. }
+            | ControlCommand::AllenGoalsList { .. }
+            | ControlCommand::AllenGoalAdd { .. }
+            | ControlCommand::AllenGoalClose { .. }
+            | ControlCommand::AllenProfileReset { .. } => {
+                let c = envelope.command.clone();
+                Some(Box::new(move |b: &Arc<ComposeBridge>| b.allen_command(&c)))
+            }
             _ => None,
         };
         if let Some(job) = compose_job {
@@ -820,5 +1006,70 @@ async fn handle_connection(
             break;
         }
         line.clear();
+    }
+}
+
+#[cfg(test)]
+mod generation_record_tests {
+    use super::*;
+
+    fn identity() -> Arc<ModelIdentity> {
+        Arc::new(ModelIdentity {
+            model_sha256: "a".repeat(64),
+            model_path: "/m/model.safetensors".into(),
+            tokenizer_sha256: "b".repeat(64),
+            tokenizer_path: "/m/tokenizer.json".into(),
+        })
+    }
+
+    fn turn() -> GenerationOwned {
+        GenerationOwned {
+            prompt_ids: vec![1, 2],
+            output_ids: vec![3],
+            text: "t".into(),
+            total_tokens: 1,
+            finish_reason: "eos",
+            request_id: 1,
+            operation_id: 1,
+        }
+    }
+
+    fn bridge(dir: std::path::PathBuf) -> Arc<ComposeBridge> {
+        let proposer: ComposeProposer =
+            Arc::new(|_p: &str, _l: std::time::Duration| Err("not used".to_string()));
+        Arc::new(ComposeBridge::new(dir, proposer, "test:generation-record"))
+    }
+
+    #[tokio::test]
+    async fn no_ledger_means_no_record() {
+        let got = record_generation(None, Some(identity()), DaemonStart::now(), turn()).await;
+        assert_eq!(got, None);
+    }
+
+    #[tokio::test]
+    async fn no_model_identity_means_no_record() {
+        let tmp = tempfile::tempdir().unwrap();
+        let b = bridge(tmp.path().join("compose"));
+        let got = record_generation(Some(b), None, DaemonStart::now(), turn()).await;
+        assert_eq!(got, None);
+        // Nothing was opened or written.
+        assert!(!tmp.path().join("compose").exists());
+    }
+
+    /// A ledger that cannot be written (here: its directory is a regular
+    /// file, and in a stub build the engine is absent) yields no id.
+    #[tokio::test]
+    async fn a_failed_append_returns_no_id() {
+        let tmp = tempfile::tempdir().unwrap();
+        let blocked = tmp.path().join("compose");
+        std::fs::write(&blocked, b"not a directory").unwrap();
+        let got = record_generation(
+            Some(bridge(blocked)),
+            Some(identity()),
+            DaemonStart::now(),
+            turn(),
+        )
+        .await;
+        assert_eq!(got, None);
     }
 }

@@ -205,6 +205,14 @@
       "not_applicable": false
     },
     {
+      "row": "RG2/RG2-BE",
+      "role": "case",
+      "reps": 1,
+      "expected": "PASS",
+      "control": null,
+      "not_applicable": false
+    },
+    {
       "row": "RG3/v1 Task completion",
       "role": "case",
       "reps": 1,
@@ -413,6 +421,14 @@
       "not_applicable": false
     },
     {
+      "row": "RG3/RG3-BE",
+      "role": "case",
+      "reps": 1,
+      "expected": "PASS",
+      "control": null,
+      "not_applicable": false
+    },
+    {
       "row": "RT4/v1 Task completion",
       "role": "case",
       "reps": 1,
@@ -613,6 +629,14 @@
       "not_applicable": false
     },
     {
+      "row": "RT4/RT4-BE",
+      "role": "case",
+      "reps": 1,
+      "expected": "PASS",
+      "control": null,
+      "not_applicable": false
+    },
+    {
       "row": "RT6/v1 Task completion",
       "role": "case",
       "reps": 1,
@@ -806,6 +830,14 @@
     },
     {
       "row": "RT6/RT6-D",
+      "role": "case",
+      "reps": 1,
+      "expected": "PASS",
+      "control": null,
+      "not_applicable": false
+    },
+    {
+      "row": "RT6/RT6-BE",
       "role": "case",
       "reps": 1,
       "expected": "PASS",

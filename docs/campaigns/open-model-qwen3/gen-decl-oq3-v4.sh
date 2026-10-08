@@ -16,11 +16,11 @@ gen() {  # group out note
     def extra($id; $names): [$names[] | {row: ($id + "/" + $id + "-" + .), role: "case", reps: 1, expected: "PASS", control: null, not_applicable: false}];
     ([$t[0].tasks[] | select(.group == $g)]) as $tasks
     | ([$tasks[] | select(.kind == "long") | .id as $i | (.requirements | length) as $n
-         | shape("T4"; $i) + extra($i; ["SB", "F", "CUT"] + [range(1; $n + 1) | "RQ\(.)"] + (if .source != null then ["SRC"] else [] end) + ["D"])]
-       + [$tasks[] | select(.kind == "edit") | .id as $i | shape("T5"; $i) + extra($i; ["SB", "CUT", "EO", "D"])]
-       + [$tasks[] | select(.kind == "identity") | .id as $i | shape("R1"; $i) + extra($i; ["SB", "CUT", "D"])]
-       + [$tasks[] | select(.kind == "negative-boundary") | .id as $i | shape("N1"; $i) + extra($i; ["D", "NC"])]
-       + [$tasks[] | select(.kind == "negative-budget") | .id as $i | shape("N2"; $i) + extra($i; ["D", "NC", "R"])]
+         | shape("T4"; $i) + extra($i; ["SB", "F", "CUT"] + [range(1; $n + 1) | "RQ\(.)"] + (if .source != null then ["SRC"] else [] end) + ["D", "BE"])]
+       + [$tasks[] | select(.kind == "edit") | .id as $i | shape("T5"; $i) + extra($i; ["SB", "CUT", "EO", "D", "BE"])]
+       + [$tasks[] | select(.kind == "identity") | .id as $i | shape("R1"; $i) + extra($i; ["SB", "CUT", "D", "BE"])]
+       + [$tasks[] | select(.kind == "negative-boundary") | .id as $i | shape("N1"; $i) + extra($i; ["D", "NC", "BE"])]
+       + [$tasks[] | select(.kind == "negative-budget") | .id as $i | shape("N2"; $i) + extra($i; ["D", "NC", "R", "BE"])]
        | add) as $rows
     | {contract: "scoring-v5", campaign: $camp,
        frozen_by: "docs/campaigns/open-model-qwen3/ACCEPTANCE-v4.md (Section 4); PREPARED, NOT FROZEN until that file says FROZEN on main",

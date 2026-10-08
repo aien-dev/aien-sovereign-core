@@ -120,7 +120,7 @@ def v4_row_nc($id):
      value: {authorizations: ($ev.auths | length), file_sha256: $ev.committed.file_sha256, s5_path: ($ev.s5.path // null)},
      result: (($ev.auths | length) == 0 and $ev.committed.file_sha256 == null and ($ev.s5.path // null) == null) | v3_okv};
 
-def v4_rows:
+def v4_rows_base:
   . as $ev | ($ev.task.id) as $id | ($ev.task.kind) as $k
   | (($ev.task.requirements // []) | length) as $nreq
   | (if $k == "long" then
@@ -133,3 +133,17 @@ def v4_rows:
      elif $k == "negative-boundary" then [v3_row_d($id; false), v4_row_nc($id)]
      elif $k == "negative-budget" then [v3_row_d($id; false), v4_row_nc($id), v3_row_n2r]
      else [{row: "?", criterion: "unknown launch kind", threshold: "-", value: $ev.task, result: "FAIL"}] end);
+
+# BE: no CPU, stub, reference or fallback backend served the launch (added after the first draft, before any run).
+# Source: run.json "daemon" array, one entry per daemon start, "backend" parsed from the daemon log by
+# run-campaign.sh. This is the only backend field a receipt carries; there is no per-operation backend field.
+# Fail closed: no daemon entry, an empty backend, any backend not containing OmegaGb10, or any backend naming
+# cpu, stub, reference or fallback is FAIL.
+def v4_row_be($id):
+  . as $ev | (($ev.daemon // []) | map(.backend // "")) as $b
+  | {row: "\($id)-BE", criterion: "No CPU, stub or fallback backend",
+     threshold: "run.json daemon is non-empty; every daemon backend contains OmegaGb10 and none contains cpu, stub, reference or fallback (case-insensitive)",
+     value: {backends: $b},
+     result: (($b | length) > 0 and ($b | all(test("OmegaGb10") and (test("cpu|stub|reference|fallback"; "i") | not)))) | v3_okv};
+
+def v4_rows: . as $ev | ($ev.task.id) as $id | ($ev | v4_rows_base) + [$ev | v4_row_be($id)];

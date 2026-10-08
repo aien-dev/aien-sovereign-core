@@ -142,6 +142,7 @@ mk_run() {
   jq -n --argjson a "$att" --arg h "$h" '{proposal_attempts: $a, proposal_content_sha256: $h, requirements_recognized: []}' >"$d/s3-report.json"
   jq -n --arg p "$ws/$dest" --arg h "$h" '{path: $p, content_sha256: $h, disk_sha256: $h}' >"$d/steps/S5.json"
   jq -n --arg h "$h" '{authorizations: [{id: 1, verified: true, text: ({content_sha256: $h} | tojson)}]}' >"$d/steps/S8.json"
+  jq -n '{daemon: [{pid: 1, backend: "OmegaGb10 (made-up)"}, {pid: 2, backend: "OmegaGb10 (made-up)"}]}' >"$d/run.json"
 }
 rowres() { jq -r --arg r "$2" 'select(.row == $r) | .verdict' <<<"$1"; }
 run_rows() { bash "$HERE/v4-rows.sh" "$1" "$2" "$TASKS" "$T" "made-up.json"; }
@@ -155,7 +156,7 @@ for id in $(jq -r '.tasks[]|select(.group=="qualification" and .kind=="long")|.i
   doc=$(cat "$STD/$id.pass.md")
   mk_run "$T/$id-pass" "$id" "$dest" "$doc" "$(reply_of "$dest" "$doc")" "" "$scopy"
   out=$(run_rows "$T/$id-pass" "$id")
-  declared=$(jq -r --arg i "$id" '.rows[].row | select(startswith($i + "/" + $i + "-")) | select(test("-(SB|F|CUT|RQ[0-9]+|SRC|D)$"))' "$QD" | sort)
+  declared=$(jq -r --arg i "$id" '.rows[].row | select(startswith($i + "/" + $i + "-")) | select(test("-(SB|F|CUT|RQ[0-9]+|SRC|D|BE)$"))' "$QD" | sort)
   got=$(jq -r '.row' <<<"$out" | sort)
   chk "$id: the rows v4-rows.sh emits are exactly the declared v4 rows" '[ "$declared" = "$got" ]'
   chk "$id: the passing synthetic reply passes every v4 row" '[ "$(jq -r "select(.verdict != \"PASS\") | .row" <<<"$out" | wc -l)" = 0 ]'
@@ -221,8 +222,8 @@ for id in U1 U2; do
   doc=$(cat "$STD/$id.pass.md")
   mk_run "$T/$id-pass" "$id" "$dest" "$doc" "$(reply_of "$dest" "$doc")" "$EDITATT" "$HERE/$sd"
   out=$(run_rows "$T/$id-pass" "$id")
-  chk "$id: the passing synthetic edit passes every v4 row" '[ "$(jq -r "select(.verdict != \"PASS\") | .row" <<<"$out" | wc -l)" = 0 ] && [ "$(jq -s length <<<"$out")" = 4 ]'
-  chk "$id: the rows emitted are exactly the declared v4 rows" '[ "$(jq -r ".row" <<<"$out" | sort)" = "$(jq -r --arg i "$id" ".rows[].row | select(startswith(\$i + \"/\" + \$i + \"-\")) | select(test(\"-(SB|CUT|EO|D)\$\"))" "$QD" | sort)" ]'
+  chk "$id: the passing synthetic edit passes every v4 row" '[ "$(jq -r "select(.verdict != \"PASS\") | .row" <<<"$out" | wc -l)" = 0 ] && [ "$(jq -s length <<<"$out")" = 5 ]'
+  chk "$id: the rows emitted are exactly the declared v4 rows" '[ "$(jq -r ".row" <<<"$out" | sort)" = "$(jq -r --arg i "$id" ".rows[].row | select(startswith(\$i + \"/\" + \$i + \"-\")) | select(test(\"-(SB|CUT|EO|D|BE)\$\"))" "$QD" | sort)" ]'
   for fr in "$STD/$id".fail-*.md; do
     tag=$(basename "$fr" .md); tag=${tag#"$id".}; fdoc=$(cat "$fr")
     mk_run "$T/$id-$tag" "$id" "$dest" "$fdoc" "$(reply_of "$dest" "$fdoc")" "$EDITATT" "$HERE/$sd"
@@ -236,9 +237,19 @@ done
 # identity launch
 THX='Thank you to everyone who tested the project.'
 mk_run "$T/r1" R1 docs/THANKS.txt "$THX" "$(reply_of docs/THANKS.txt "$THX")" "$EDITATT"
-out=$(run_rows "$T/r1" R1); chk "R1 good launch: R1-SB, R1-CUT, R1-D PASS (3 rows)" '[ "$(jq -r "select(.verdict != \"PASS\") | .row" <<<"$out" | wc -l)" = 0 ] && [ "$(jq -s length <<<"$out")" = 3 ]'
+out=$(run_rows "$T/r1" R1); chk "R1 good launch: R1-SB, R1-CUT, R1-D, R1-BE PASS (4 rows)" '[ "$(jq -r "select(.verdict != \"PASS\") | .row" <<<"$out" | wc -l)" = 0 ] && [ "$(jq -s length <<<"$out")" = 4 ]'
 mk_run "$T/r1b" R1 docs/THANKS.txt "$THX" x "$EDITATT"; printf 'other\n' >"$T/r1b/ws/docs/THANKS.txt"
 out=$(run_rows "$T/r1b" R1); chk "R1 file differs from the approved bytes: R1-SB FAIL" '[ "$(rowres "$out" R1/R1-SB)" = FAIL ]'
+# BE row (no CPU, stub, reference or fallback backend): red checks, one per way to fail
+for v in "CPU-reference" "OmegaGb10 with stub fallback" "ReferenceCpuBackend" ""; do
+  mk_run "$T/be-x" R1 docs/THANKS.txt "$THX" x "$EDITATT"
+  jq -n --arg b "$v" '{daemon: [{pid: 1, backend: "OmegaGb10 (made-up)"}, {pid: 2, backend: $b}]}' >"$T/be-x/run.json"
+  out=$(run_rows "$T/be-x" R1); chk "BE: daemon backend '$v' on one start: R1-BE FAIL" '[ "$(rowres "$out" R1/R1-BE)" = FAIL ]'
+done
+mk_run "$T/be-y" R1 docs/THANKS.txt "$THX" x "$EDITATT"; echo '{"daemon":[]}' >"$T/be-y/run.json"
+out=$(run_rows "$T/be-y" R1); chk "BE: no daemon entry: R1-BE FAIL" '[ "$(rowres "$out" R1/R1-BE)" = FAIL ]'
+mk_run "$T/be-z" R1 docs/THANKS.txt "$THX" x "$EDITATT"; rm "$T/be-z/run.json"
+out=$(run_rows "$T/be-z" R1); chk "BE: no run.json: R1-BE FAIL" '[ "$(rowres "$out" R1/R1-BE)" = FAIL ]'
 
 # negatives
 N1ATT=$(jq -n '[{attempt: 1, outcome: "refused", reason: "path outside the workspace", tokens: 12, ms: 3000, finish_reason: "eos"}]')
@@ -297,7 +308,7 @@ for id in $(jq -r '.tasks[].id' "$TASKS"); do
   env "${e[@]}" V6_ROWS=rows-v8.jq V6_TASK="$id" V6_MAX_TOKENS=1 V8_MERGE=null bash "$STAGE/make-receipt.sh" "$R" "$T/rec" sc omc omg 0 n >/dev/null 2>&1
   rec=$(ls -t "$T/rec"/*.json | head -1)
   bash "$NP1/v8-results.sh" "$id" "$rec" | jq -r .row | sort >"$T/$id.got"
-  case $(jq -r --arg i "$id" ".tasks[]|select(.id==\$i)|.kind" "$TASKS") in long) xs="SB|F|CUT|RQ[0-9]+|SRC|D" ;; edit) xs="SB|CUT|EO|D" ;; identity) xs="SB|CUT|D" ;; *) xs="D|NC" ;; esac
+  case $(jq -r --arg i "$id" ".tasks[]|select(.id==\$i)|.kind" "$TASKS") in long) xs="SB|F|CUT|RQ[0-9]+|SRC|D|BE" ;; edit) xs="SB|CUT|EO|D|BE" ;; identity) xs="SB|CUT|D|BE" ;; *) xs="D|NC|BE" ;; esac
   jq -r --arg i "$id" '.rows[].row | select(startswith($i + "/"))' "$D" | grep -vE "^$id/$id-($xs)\$" | grep -v "^N2/N2-R\$" | sort >"$T/$id.want"
   chk "launch $id: receipt rows == declared v8-shape rows" 'cmp -s "$T/$id.got" "$T/$id.want"'
 done
