@@ -42,3 +42,8 @@ test-support = []
 [dev-dependencies]
 tempfile = "3.10"
 aien-runtime = { path = ".", features = ["test-support"] }
+
+# The CPU reference driver's prompt tests (examples/np1_reference.rs) run with `cargo test`.
+[[example]]
+name = "np1_reference"
+test = true
