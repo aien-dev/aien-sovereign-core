@@ -1790,10 +1790,11 @@ pub fn analyze(goal: &str) -> Extraction {
             // "one line that says|reads \"S\"", "one line saying \"S\"" (sc#336):
             // that line holds S. A final . ! ? inside quotes that close the goal
             // sentence is the goal's own punctuation and is not required.
-            // A saying clause on a counted line is never dropped: one line (exact
-            // or "at least one") reads S, any other count (or a lower bound) is
-            // uncertain (sc#349).
-            if let Some(said) = said_clause(goal, &toks, i + 1) {
+            // A saying clause on a counted line is never dropped: exactly one line
+            // with no bound reads S; any other count, or a bound ("one line at
+            // least saying S", the clause read after "at least"), is uncertain
+            // (sc#349).
+            if let Some(said) = said_clause(goal, &toks, i + 1 + if bound { 2 } else { 0 }) {
                 match said {
                     Ok((phrase, end)) if v == 1 && !bound => {
                         if !phrases.contains(&phrase) {

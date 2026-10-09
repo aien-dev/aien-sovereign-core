@@ -178,6 +178,8 @@ fn a_saying_clause_on_any_line_wording_is_read_or_uncertain() {
         "Write three lines saying hello",
         "Add 2 lines that say hi",
         "Add at least 3 lines saying hi to a.md",
+        "Add at least one line saying hi to a.md",
+        "Add one line at least saying hi to a.md",
         "Write a line saying hello and then save it",
         "Write a line saying something nice",
         "Add one line saying",
