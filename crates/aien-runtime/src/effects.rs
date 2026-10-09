@@ -2552,8 +2552,9 @@ mod tests {
                 })
             });
         let b = ComposeBridge::new(root.join("compose"), proposer, "test:fixed");
-        let ControlResponse::ComposeTaskResult(rep) = b.run_task("g", ws.to_str().unwrap()) else {
-            panic!("run_task did not produce a result")
+        let r = b.run_task("g", ws.to_str().unwrap());
+        let ControlResponse::ComposeTaskResult(rep) = r else {
+            panic!("run_task did not produce a result: {r:?}")
         };
         let cx = rep.cx_promotion;
         let link = ApprovedLink {

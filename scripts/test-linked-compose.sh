@@ -40,6 +40,8 @@ count() {  # how many tests the targets hold, ignored ones included
 # no model) are gated. Outside this gate, in other crates: aien-cli recovery_matrix_test and
 # provenance_link_live_test (a real SmolLM2 on disk, minutes of CPU per case; run on the
 # Spark, receipts on the PR), and the GB10/real-checkpoint inference tests (heavy queue).
+# The aien-runtime library (unit) tests run too (`--lib`, sc#364): six of them open a compose home and take the
+# home_guard slot (sc#363); run() is serial (--test-threads=1) regardless.
 RT=()  # 46 targets on 2026-10-08; the floor below catches a lost glob or a deleted target
 for f in "$ROOT"/crates/aien-runtime/tests/*.rs; do
     t=$(basename "$f" .rs)
@@ -49,10 +51,11 @@ done
 [ "${#RT[@]}" -ge 90 ] || die "found only $((${#RT[@]} / 2)) aien-runtime test targets"
 CLI=(--test compose_ordinary_flow_test --test allen_concurrency_test)
 ATT=$(count -p aien-runtime --test approved_attacks_test)
-ALL=$(( $(count -p aien-omega-compose --test compose) + $(count -p aien-runtime "${RT[@]}") + $(count -p aien-cli "${CLI[@]}") ))
+ALL=$(( $(count -p aien-omega-compose --test compose) + $(count -p aien-runtime --lib) + $(count -p aien-runtime "${RT[@]}") + $(count -p aien-cli "${CLI[@]}") ))
 [ "$ATT" -gt 0 ] && [ "$ALL" -gt "$ATT" ] || die "could not list the linked tests"
 : >"$LOG"
 run -p aien-omega-compose --test compose
+run -p aien-runtime --lib
 run -p aien-runtime "${RT[@]}"
 run -p aien-cli "${CLI[@]}"
 # The approved_attacks suite again (it once hid a race, #306): REPEAT runs in all.
@@ -66,4 +69,4 @@ want=$(( ALL + ATT * (REPEAT - 1) ))
 ran=$(grep -E '^test result: ok\. [0-9]+ passed' "$LOG" | awk '{s += $4} END {print s + 0}')
 [ "$ran" -ge "$want" ] || die "only $ran linked tests passed (expected $want: $ALL linked tests + approved_attacks $ATT x $((REPEAT - 1)) more)"
 if grep -E '^test result:.* [1-9][0-9]* ignored' "$LOG" >/dev/null; then die "tests were still ignored"; fi
-echo "test-linked-compose: PASS ($ran linked tests passed: $ALL across compose, every aien-runtime target but prefill_e2e*, aien-cli ordinary flow + ALLEN concurrency; approved_attacks x$REPEAT)"
+echo "test-linked-compose: PASS ($ran linked tests passed: $ALL across compose, aien-runtime library tests, every aien-runtime test target but prefill_e2e*, aien-cli ordinary flow + ALLEN concurrency; approved_attacks x$REPEAT)"
