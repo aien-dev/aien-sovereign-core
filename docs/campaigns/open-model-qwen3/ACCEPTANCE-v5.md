@@ -361,18 +361,19 @@ build: release, linked (has_omega_compose, has_omega_gpu, has_omega_wait_ms in t
        the exact cargo command line is recorded in evidence-v5/build-summary.txt
 ```
 
-Build pins (FILLED IN A DRAFT, NOT FROZEN: main e27bda8 holds the Section 1 fixes, sc#353, sc#354 and the G6 fixes sc#357, sc#358, sc#359; built from clean
+Build pins (FILLED IN A DRAFT, NOT FROZEN: main 30258fc holds the Section 1 fixes, sc#353, sc#354, the G6 fixes sc#357, sc#358, sc#359 and the
+extra-hold fix sc#360 (CPU reference prompt, example only: no product source changed since e27bda8, aien-cli bytes equal); built from clean
 clones by `evidence-v5/build.sh`, output `evidence-v5/build-summary.txt`; the same values are in `frozen-v5.json`, and G7
 rebuilds at these pins):
 
 ```text
-sovereign-core commit                    = e27bda8af585290ec2c1d9146c4a5023e9b3a0d3
+sovereign-core commit                    = 30258fce8d373bbd01ede59076dddce6e8a64901
 omega.lock commit                        = 6c6180cf378075b61291f4565d226eba38b4decd   (unchanged since v4)
 physics commit                           = 6d7cf0d4d8eb2cda7b512100ff6058e25dbb3ddf   (physics.lock at omega 6c6180c)
 aienos.lock commit                       = b84c0a67590a934f3f3e001b12ec85ebc086a9eb   (aienos.lock at omega 6c6180c)
 Cargo.lock sha256                        = 49d97bf30113b1727fcfc0e33be79d9446ae13651a08afc32bba889b77fca265
-aien-cli sha256                          = 62d98e0b92372862c4a1f7d762a92ec8cddcf398dced8048f75e086b2d66bc55
-np1_reference sha256                     = a29832f8604f3c9be36d5534ece1b7bff0aeb4d402266568931c0dd111fdd348
+aien-cli sha256                          = 62d98e0b92372862c4a1f7d762a92ec8cddcf398dced8048f75e086b2d66bc55 (unchanged at 30258fc)
+np1_reference sha256                     = a684b55af6efb1cea91ee119352552e7462c50026f2c91d38010b40c4e3fb7b9   (new at 30258fc: sc#360)
 np1_edit_merge sha256                    = 66be8da4d3c5c7c32089e851acdbed9c050afa38f2d7db9e8fbced3811949e80
 campaign files sha256                    = evidence-v5/campaign-files.sha256 (wrapper, tasks file, declaration, row modules,
                                            generator, self-test, seeds, frozen values, next-phase-1 driver, receipt builder with rows-v5.jq and rows-v9.jq, scorer)
@@ -380,9 +381,9 @@ GPU hold names, one per part            = TO FILL AT FREEZE   (proposed <runner 
 ```
 
 A real run refuses while any pin holds the placeholder and also while the `frozen-v5.json` status does not say FROZEN
-(`run-qwen3-v5.sh`; filled pins alone are not a freeze). The pins describe the product build (sovereign-core e27bda8 and its
+(`run-qwen3-v5.sh`; filled pins alone are not a freeze). The pins describe the product build (sovereign-core 30258fc and its
 locks); the campaign files are bound separately by `evidence-v5/campaign-files.sha256` and the wrapper's identity file, so a
-later campaign-file commit on top of e27bda8 does not change a pin.
+later campaign-file commit on top of 30258fc does not change a pin.
 
 ## 8. Run plan: one chip slot
 
@@ -435,9 +436,9 @@ changed to pass a gate.**
   `test-rows-v8.sh`, `test-v3.sh`, `test-v5.sh` on the frozen build; combined build from clean checkouts at the pins.
 - **G8 Review and freeze.** An independent review of this file, the tooling and the gate evidence; then every "TO FILL AT
   FREEZE" is filled, the status line changes, and that change alone merges with Drake's go-ahead. **Freeze fill
-  prepared as a DRAFT (2026-10-08, status line unchanged):** the eight build pins at e27bda8 (re-pinned after the G6 fixes; first filled at 4770703), the model re-hash, the
+  prepared as a DRAFT (2026-10-08, status line unchanged):** the eight build pins at 30258fc (re-pinned after the extra hold, sc#360; before that at e27bda8 after the G6 fixes; first filled at 4770703), the model re-hash, the
   generated declaration (identical, QUALIFICATION_ROWS=334), the campaign-file sha256 list and the daemon `CHECKPOINT_SHARDS`
-  confirmation (G6, all 22 daemon starts) are filled. On e27bda8 the 11 goals were probed again: the 10 positive goals
+  confirmation (G6, all 22 daemon starts) are filled. On e27bda8 (product source identical at 30258fc) the 11 goals were probed again: the 10 positive goals
   resolve their destination, N1 is refused, and no goal has an uncertain requirement span (`evidence-v5/repin-probes-e27bda8.txt`). Still TO FILL AT FREEZE: the GPU hold names (who runs the parts). Any change to a campaign file
   after this fill means regenerating `evidence-v5/campaign-files.sha256`; any product change means a new build and new pins. The
   G8 change is therefore the status line plus what it touches: `frozen-v5.json` is a campaign file, so that change also

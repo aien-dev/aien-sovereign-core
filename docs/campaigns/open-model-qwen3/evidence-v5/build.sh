@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# OPEN-MODEL-QWEN3 v5 freeze-candidate build (DRAFT, NOT FROZEN): sovereign-core e27bda8 (main, holds sc#353, sc#354, sc#357, sc#358 and sc#359),
-# omega 6c6180c (= omega.lock at e27bda8), physics 6d7cf0d (physics.lock), aienos b84c0a6 (aienos.lock). Clean clones,
+# OPEN-MODEL-QWEN3 v5 freeze-candidate build (DRAFT, NOT FROZEN): sovereign-core 30258fc (main, holds sc#353, sc#354, sc#357, sc#358, sc#359 and sc#360),
+# omega 6c6180c (= omega.lock at 30258fc), physics 6d7cf0d (physics.lock), aienos b84c0a6 (aienos.lock). Clean clones,
 # release, real compose + GPU libraries, never the stub, without the dev-fallback feature. Derived from evidence-v4/build.sh.
 set -u
-B=/home/drakestapleton/workspace/oq3-v5-build-e27bda8
+B=/home/drakestapleton/workspace/oq3-v5-build-30258fc
 cd $B/sc
 export AIEN_AIENOS_LOCK_REPO=/home/drakestapleton/workspace/aienos-repo AIEN_OMEGA_DIR=$B/omega AIEN_PHYSICS_DIR=$B/physics CARGO_TARGET_DIR=$B/target
 unset AIEN_FORCE_CPU_STUB AIEN_OMEGA_GPU_LIB AIEN_OMEGA_COMPOSE_LIB AIEN_OMEGA_COMPOSE_DIR AIEN_OMEGA_COMPOSE_SHA AIEN_DEV_FALLBACK
