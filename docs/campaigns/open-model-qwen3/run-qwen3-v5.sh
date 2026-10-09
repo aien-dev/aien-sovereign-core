@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # OPEN-MODEL-QWEN3 v5 campaign (ACCEPTANCE-v5.md; DRAFT, NOT FROZEN, NOT RUN). It refuses a real run while any pin
-# in frozen-v5.json holds the placeholder, and afterwards unless every pin read from the checkouts and binaries equals
-# it. Qwen3-4B, derived from run-qwen3-v4.sh: same driver (next-phase-1/run-campaign.sh), receipt builder, v8 rows and
+# in frozen-v5.json holds the placeholder or its status does not say FROZEN, and afterwards unless every pin read
+# from the checkouts and binaries equals it. Qwen3-4B, derived from run-qwen3-v4.sh: same driver (next-phase-1/run-campaign.sh), receipt builder, v8 rows and
 # scorer; new tasks (tasks-oq3-v5.json), one declaration (qualification) and extra rows (v5-rows.sh, rows-oq3-v5.jq).
 # Shell + jq only. Run inside the caller's hold, one part per hold. Environment as in ACCEPTANCE-v5 Section 7
 # (model, tokenizer, binary, KV context, hardware requirement, checkpoint requirement, declared attempt flag), then:
@@ -39,6 +39,9 @@ else
   fi
   [ "$(jq --arg p "$PLACEHOLDER" '[.pins[] | select(. == $p)] | length' "$FROZEN")" = 0 ] ||
     { echo "run-qwen3-v5: the build pins are not frozen yet (frozen-v5.json, ACCEPTANCE-v5 Section 7)" >&2; exit 2; }
+  # Filled pins are not a freeze: a draft freeze-fill change fills them first. The status line changes only at G8.
+  case "$(jq -r .status "$FROZEN")" in FROZEN*) ;; *)
+    echo "run-qwen3-v5: frozen-v5.json status is not FROZEN (ACCEPTANCE-v5 Section 9, gate G8)" >&2; exit 2 ;; esac
 fi
 DECL=$HERE/../scoring/declarations/oq3-v5.decl.json
 SCORER=$HERE/../scoring/score-rows.sh
@@ -105,10 +108,11 @@ up_ms() { echo $(( $(tr -d . </proc/uptime | cut -d' ' -f1) * 10 )); }
 # linked in, lets make-receipt.sh and rows-v9.jq be used (rows-v9.jq is rows-v8.jq with the harness approval-desk key allowed in the
 # compose dir, sc#342; rows-v8.jq itself stays byte-identical because completed runs pin it).
 STAGE=$BASE/stage
-# The unchanged make-receipt.sh reads seed/<destination> for any task that has a seed, which only fits edits. A document
-# whose seed holds a different source file (D4) is staged with seed null for the receipt builder only; the driver still
-# gets the real seed from the tasks file (NP1_SEED_DIR below), and v5-rows.sh checks the source file itself (row SRC).
-STAGE_FILTER='(.tasks[] | select(.source != null) | .seed) = null'
+# The unchanged make-receipt.sh reads seed/<destination> for any task that has a seed, which only fits edits. A non-edit
+# task whose seed holds other files (D4: its source file; R1: the notes/ folder its destination needs, Section 2) is
+# staged with seed null for the receipt builder only; the driver still gets the real seed from the tasks file
+# (NP1_SEED_DIR below), and v5-rows.sh checks the D4 source file itself (row SRC).
+STAGE_FILTER='(.tasks[] | select(.kind != "edit") | .seed) = null'
 if [ $PART = 1 ]; then
   mkdir -p "$STAGE"
   for f in "$NP1"/*; do
@@ -119,15 +123,17 @@ if [ $PART = 1 ]; then
   ln -s "$HERE/seed-v5" "$STAGE/seed-v5"
 fi
 [ "$(jq "$STAGE_FILTER" "$TASKS")" = "$(cat "$STAGE/tasks-v8.json")" ] || { echo "run-qwen3-v5: staged tasks file differs from the tasks file" >&2; exit 2; }
-# Product limits (ACCEPTANCE-v5 Section 2), the same for every launch.
-export AIEN_COMPOSE_EDIT_BUDGET_MS=$(jq -r .limits.edit_budget_ms "$TASKS") AIEN_COMPOSE_DOC_BUDGET_MS=$(jq -r .limits.doc_budget_ms "$TASKS")
+# Product limits (ACCEPTANCE-v5 Section 2) come from the task's own max_tokens and budget_ms (row <id>-D scores the
+# same budget_ms); only D6 differs from the product values (Drake 2026-10-09, ACCEPTANCE-v5 Section 2.1).
 for id in $LAUNCHES; do
   t=$(jq -c --arg id "$id" '.tasks[] | select(.id == $id)' "$TASKS")
-  goal=$(jq -r .goal <<<"$t"); max=$(jq -r .max_tokens <<<"$t"); kind=$(jq -r .kind <<<"$t"); seed=$(jq -r '.seed // empty' <<<"$t")
+  goal=$(jq -r .goal <<<"$t"); max=$(jq -r .max_tokens <<<"$t"); bud=$(jq -r .budget_ms <<<"$t"); kind=$(jq -r .kind <<<"$t"); seed=$(jq -r '.seed // empty' <<<"$t")
   seed_dir=; [ -n "$seed" ] && seed_dir=$HERE/$seed
-  # An edit goal (names an existing file) uses the edit cap AIEN_COMPOSE_MAX_TOKENS; every other goal creates a
-  # new file and uses the document cap AIEN_COMPOSE_DOC_MAX_TOKENS. The other cap stays at its product value.
-  if [ "$kind" = edit ]; then ecap=$max dcap=$(jq -r .limits.doc_max_tokens "$TASKS"); else ecap=$(jq -r .limits.edit_max_tokens "$TASKS") dcap=$max; fi
+  # An edit goal (names an existing file) uses the edit cap AIEN_COMPOSE_MAX_TOKENS and budget AIEN_COMPOSE_EDIT_BUDGET_MS;
+  # every other goal creates a new file and uses the document cap and budget. The other cap and budget stay at their product values.
+  if [ "$kind" = edit ]; then ecap=$max dcap=$(jq -r .limits.doc_max_tokens "$TASKS") ebud=$bud dbud=$(jq -r .limits.doc_budget_ms "$TASKS")
+  else ecap=$(jq -r .limits.edit_max_tokens "$TASKS") dcap=$max ebud=$(jq -r .limits.edit_budget_ms "$TASKS") dbud=$bud; fi
+  export AIEN_COMPOSE_EDIT_BUDGET_MS=$ebud AIEN_COMPOSE_DOC_BUDGET_MS=$dbud
   t0=$(up_ms)
   NP1_GOAL=$goal AIEN_COMPOSE_MAX_TOKENS=$ecap AIEN_COMPOSE_DOC_MAX_TOKENS=$dcap NP1_SEED_DIR=$seed_dir \
     bash "$NP1/run-campaign.sh" "$BASE/$id" >"$BASE/$id.driver.out" 2>&1
