@@ -1,5 +1,5 @@
 {
-  "status": "DRAFT, NOT FROZEN. Model and tokenizer values from ACCEPTANCE-v5 Section 7; every pin is TO FILL AT FREEZE and a real run refuses while one is.",
+  "status": "FROZEN 2026-10-09 (ACCEPTANCE-v5 Section 9, gate G8). Model and tokenizer values from ACCEPTANCE-v5 Section 7; pins filled at sovereign-core 30258fc.",
   "placeholder": "TO FILL AT FREEZE",
   "model": {
     "model_sha256": "17a78fbba447a4e66a3d886c0998fbcf2f9201d46e5e0c5bfec2d57c975976b7",

@@ -1,6 +1,6 @@
-# OPEN-MODEL-QWEN3 campaign v5: acceptance criteria (DRAFT)
+# OPEN-MODEL-QWEN3 campaign v5: acceptance criteria (FROZEN)
 
-**Status: DRAFT, NOT FROZEN, NOT RUN**
+**Status: FROZEN, NOT RUN**
 
 Written by session fb5693 on 2026-10-08 under Drake's decision (c) (`~/handoffs/2026-10-08-drake-decisions.md`): do not run
 v4, write v5 first; keep v4 unchanged as a diagnostic spec and regression evidence; fix the product causes of legitimate
@@ -377,7 +377,7 @@ np1_reference sha256                     = a684b55af6efb1cea91ee119352552e7462c5
 np1_edit_merge sha256                    = 66be8da4d3c5c7c32089e851acdbed9c050afa38f2d7db9e8fbced3811949e80
 campaign files sha256                    = evidence-v5/campaign-files.sha256 (wrapper, tasks file, declaration, row modules,
                                            generator, self-test, seeds, frozen values, next-phase-1 driver, receipt builder with rows-v5.jq and rows-v9.jq, scorer)
-GPU hold names, one per part            = TO FILL AT FREEZE   (proposed <runner session>-oq3-v5-p1 to -p4, 20 minutes each)
+GPU hold names, one per part            = 166657-oq3-v5-p1, 166657-oq3-v5-p2, 166657-oq3-v5-p3, 166657-oq3-v5-p4 (20 minutes each; runner session 166657)
 ```
 
 A real run refuses while any pin holds the placeholder and also while the `frozen-v5.json` status does not say FROZEN
@@ -443,6 +443,12 @@ changed to pass a gate.**
   after this fill means regenerating `evidence-v5/campaign-files.sha256`; any product change means a new build and new pins. The
   G8 change is therefore the status line plus what it touches: `frozen-v5.json` is a campaign file, so that change also
   regenerates `campaign-files.sha256`, and the draft-only check of `test-v5.sh` (status says DRAFT, NOT FROZEN) changes to FROZEN.
+  **FROZEN 2026-10-09 (session 166657, Drake's go-ahead 2026-10-09 to freeze and run).** Before the status change, the second extra
+  hold (a7c5d201-oq3-v5-extra-p2, 13:07:40-13:12:09Z, build 30258fc, wrapper 7ec7585) PASSED: the R1-worded identity smoke on
+  the GB10 path matched the CPU reference exactly (R1-X, R1-P, R1-T PASS: 117 prompt tokens, 29 output tokens, finish eos,
+  same reply sha256), and the linked suite (aien-runtime, aien-cli) gave 527 passed, 0 failed, 19 ignored; NVRM count 1533
+  before and after (`evidence-v5/extra-hold-2-30258fc.txt`). This closes the G7 linked suite. The hold names are filled; no
+  pin, goal, row or limit changed.
 
 ## 10. Prediction (stated before any run; UNVERIFIED)
 

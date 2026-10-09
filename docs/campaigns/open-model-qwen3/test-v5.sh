@@ -101,7 +101,7 @@ chk "frozen-v5.json: the model digest is index+shards and is the manifest of the
   [ "$m" = "$(jq -r .model.model_sha256 "$FROZEN")" ] && [ "$(jq -r .model.model_digest_kind "$FROZEN")" = index+shards ] && [ "$(jq -r .model.model_sha256 "$FROZEN")" = 17a78fbba447a4e66a3d886c0998fbcf2f9201d46e5e0c5bfec2d57c975976b7 ] &&
   [ "$(jq -r .model.index_sha256 "$FROZEN")" = d6c42883a895dfef5b0080ed2116a1bcd764f558406b98923d675978a1abf29c ] && [ "$(jq ".model.shards|length" "$FROZEN")" = 3 ] &&
   grep -q "NOT RE-HASHED" <<<"$(jq -r .model.model_sha256_note "$FROZEN")"'
-chk "frozen-v5.json: the eight pins are filled (commits 40 hex, sha256 values 64 hex) and the status still says DRAFT, NOT FROZEN" 'jq -e "(.pins | [.sovereign_core_commit, .omega_lock_commit, .physics_lock_commit, .aienos_lock_commit] | all(test(\"^[0-9a-f]{40}$\"))) and (.pins | [.cargo_lock_sha256, .aien_cli_sha256, .np1_reference_sha256, .np1_edit_merge_sha256] | all(test(\"^[0-9a-f]{64}$\"))) and (.status | startswith(\"DRAFT, NOT FROZEN\"))" "$FROZEN" >/dev/null'
+chk "frozen-v5.json: the eight pins are filled (commits 40 hex, sha256 values 64 hex) and the status says FROZEN" 'jq -e "(.pins | [.sovereign_core_commit, .omega_lock_commit, .physics_lock_commit, .aienos_lock_commit] | all(test(\"^[0-9a-f]{40}$\"))) and (.pins | [.cargo_lock_sha256, .aien_cli_sha256, .np1_reference_sha256, .np1_edit_merge_sha256] | all(test(\"^[0-9a-f]{64}$\"))) and (.status | startswith(\"FROZEN\"))" "$FROZEN" >/dev/null'
 chk "frozen-v5.json pins equal evidence-v5/build-summary.txt (commits, Cargo.lock and the three binaries)" '
   S=$HERE/evidence-v5/build-summary.txt; h() { awk -v n="$1" "\$2 ~ (\"/\" n \"\$\") {print \$1}" "$S"; }
   [ "$(jq -r .pins.sovereign_core_commit "$FROZEN")" = "$(grep -E "^[0-9a-f]{40}$" "$S" | sed -n 3p)" ] && [ "$(jq -r .pins.omega_lock_commit "$FROZEN")" = "$(grep -E "^[0-9a-f]{40}$" "$S" | sed -n 1p)" ] &&
@@ -147,7 +147,7 @@ CT='Project constraints: every change stays inside the authorized workspace; one
 PINS='{"sovereign_core_commit":"1111111111111111111111111111111111111111","omega_lock_commit":"2222222222222222222222222222222222222222","physics_lock_commit":"3333333333333333333333333333333333333333","aienos_lock_commit":"4444444444444444444444444444444444444444","cargo_lock_sha256":"5555555555555555555555555555555555555555555555555555555555555555","aien_cli_sha256":"6666666666666666666666666666666666666666666666666666666666666666","np1_reference_sha256":"7777777777777777777777777777777777777777777777777777777777777777","np1_edit_merge_sha256":"8888888888888888888888888888888888888888888888888888888888888888"}'
 FZ=$T/frozen-filled.json; jq --argjson p "$PINS" '.pins = $p' "$FROZEN" >"$FZ"
 # The same values with every pin back to the placeholder (the draft before the freeze fill).
-FPH=$T/frozen-placeholder.json; jq '.placeholder as $p | .pins |= map_values($p)' "$FROZEN" >"$FPH"
+FPH=$T/frozen-placeholder.json; jq '.placeholder as $p | .pins |= map_values($p) | .status = "DRAFT, NOT FROZEN (test copy)"' "$FROZEN" >"$FPH"
 # mk_launch DIR WALL_MS: the wrapper's launch record for DIR (DIR.launch-v5.json)
 mk_launch() { jq -n --argjson p "$PINS" --argjson w "${2:-600000}" '{launch: "x", wall_ms: $w, wall_clock: "made-up", driver_exit: 0, meminfo_before: {mem_free_kb: 100000000, cached_kb: 2000000}, pins: $p}' >"$1.launch-v5.json"; }
 # mk_logs DIR [EXTRA_LOG_LINE]: two daemon logs with the start line, the shards line and one OP_REPORT line each
@@ -419,7 +419,7 @@ if [ -e "$PINNED" ]; then bad "pinned run path already exists, wrapper checks sk
   chk "wrapper refuses a missing OQ3_PART (exit 2)" '[ "$(wr "$T/b")" = 2 ]'
   chk "wrapper refuses part 5 (exit 2)" '[ "$(wr "$T/b" OQ3_PART=5)" = 2 ]'
   chk "wrapper refuses a run base other than the pinned path (exit 2), nothing created" '[ "$(wr "$T/b" OQ3_PART=1 "${okenv[@]}")" = 2 ] && [ ! -e "$T/b" ]'
-  chk "the wrapper as committed refuses a real run while the status is not FROZEN (exit 2), pinned path not created" '[ "$(wr "$PINNED" OQ3_PART=1 "${okenv[@]}")" = 2 ] && [ ! -e "$PINNED" ] && grep -q "status is not FROZEN" "$T/w.err"'
+  chk "the wrapper as committed (status FROZEN, pins filled) passes the status and pin checks (stops at the model digest check, exit 3), pinned path not created" '[ "$(wr "$PINNED" OQ3_PART=1 "${okenv[@]}")" = 3 ] && [ ! -e "$PINNED" ] && ! grep -q "status is not FROZEN" "$T/w.err" && ! grep -q "pins are not frozen yet" "$T/w.err" && grep -q "digest mismatch" "$T/w.err"'
   # Filled pins alone do not make a real run: the status line must say FROZEN too (a draft freeze-fill PR fills the pins).
   WC=$T/wcopy/oq3; mkdir -p "$WC" "$T/wcopy/next-phase-1"; cp "$W" "$WC/run-qwen3-v5.sh"
   jq --argjson p "$PINS" '.pins = $p' "$FROZEN" >"$WC/frozen-v5.json"
@@ -474,7 +474,7 @@ for id in $(jq -r '.tasks[].id' "$TASKS"); do
 done
 
 # ---- 7 spec file statements
-chk "ACCEPTANCE-v5.md says DRAFT, NOT FROZEN, NOT RUN" 'grep -q "^\*\*Status: DRAFT, NOT FROZEN, NOT RUN\*\*" "$A"'
+chk "ACCEPTANCE-v5.md says FROZEN, NOT RUN" 'grep -q "^\*\*Status: FROZEN, NOT RUN\*\*" "$A"'
 chk "Section 7 states the index+shards digest as computed from the listed sha256s, not re-hashed, and the re-hash as a freeze item" 'grep -q "17a78fbba447a4e66a3d886c0998fbcf2f9201d46e5e0c5bfec2d57c975976b7" "$A" && grep -q "COMPUTED FROM LISTED SHA256s, NOT RE-HASHED" "$A" && grep -q "model_digest_kind=index+shards" "$A"'
 chk "the old caveat (shards bound by the wrapper pre-run hash only) is gone" '! grep -q "bound by the wrapper.s pre-run hash only" "$A" && ! grep -q "binds the index file of the checkpoint, not the shards" "$A"'
 chk "Section 3.4 carries the STRICT start line, the OP_REPORT format and the ten ops" 'grep -qF "STRICT strict=<b> dev_fallback_build=<b> require_checkpoint=<b> backend=<name>" "$A" && grep -qF "OP_REPORT native=[a,b,..] reference=[..] native_fallbacks=[name:count,..] reference_runs=[..] backend=<name>" "$A" && grep -qF "$(tr , " " <<<"$OPS" | sed "s/ /\`, \`/g")" "$A"'
