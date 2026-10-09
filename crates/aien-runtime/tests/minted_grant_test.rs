@@ -6,6 +6,9 @@
 //! composition archive and is IGNORED in a stub build, never passed. The
 //! socket-level refusal of a raw `authorization` note is
 //! `c18_a1_raw_forged_authorization` in approved_attacks_test.rs.
+#[path = "support/home_guard.rs"]
+mod home_guard;
+
 use aien_omega_compose::hex;
 use aien_runtime::control::{ComposeNoteReport, ComposeTaskReport, ControlResponse};
 use aien_runtime::effects::{self, IntentRequest, MintRequest};
@@ -161,6 +164,7 @@ macro_rules! linked_test {
         #[test]
         #[cfg_attr(not(compose_linked), ignore = "needs the linked librx_compose.a")]
         fn $name() {
+            let _home = home_guard::home_slot();
             let Some($fx) = Fx::new() else { return };
             $body
         }

@@ -2,6 +2,9 @@
 //! is loaded, so the real "model" Skill (the StreamTurn inference path)
 //! fails and nothing commits: this proves the routing, the blocking hand-off
 //! and the result record, not the model.
+#[path = "support/home_guard.rs"]
+mod home_guard;
+
 use aien_inference_abi::MockInferenceBackend;
 use aien_kv_cache::create_shared_kv_manager;
 use aien_runtime::client::AienRuntimeClient;
@@ -13,6 +16,7 @@ use std::time::Duration;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn run_compose_task_over_socket() {
+    let _home = home_guard::home_slot();
     let tmp = tempfile::tempdir().unwrap();
     // Only this test binary sets it; one test per binary avoids env races.
     std::env::set_var("AIEN_COMPOSE_DIR", tmp.path().join("compose"));

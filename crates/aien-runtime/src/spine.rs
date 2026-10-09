@@ -2789,6 +2789,7 @@ mod requirement_tests {
 
     #[test]
     fn approved_run_reports_recognized_and_refuses_unmet_before_any_write() {
+        let _home = crate::home_guard::home_slot();
         let tmp = tempfile::tempdir().unwrap();
         let ws = tmp.path().join("ws");
         std::fs::create_dir_all(&ws).unwrap();
@@ -2910,6 +2911,7 @@ mod verify_callback_integration_tests {
     /// by AEGIS (nothing committed, no promotion) when the record is gone.
     #[test]
     fn lost_requirement_record_is_refused_by_the_real_verify_callback() {
+        let _home = crate::home_guard::home_slot();
         if !aien_omega_compose::LINKED {
             return;
         }

@@ -5,6 +5,9 @@
 //! (and so its own desk key) in a fresh temp dir; nothing is shared. Every
 //! test needs the linked composition archive and is IGNORED in a stub build,
 //! never passed.
+#[path = "support/home_guard.rs"]
+mod home_guard;
+
 use aien_omega_compose::hex;
 use aien_runtime::approved_auth::{desk_key_path, AuthorizeBinding, DeskKey};
 use aien_runtime::control::{ComposeNoteReport, ComposeTaskReport, ControlResponse, DeskProof};
@@ -194,6 +197,7 @@ macro_rules! linked_test {
         #[test]
         #[cfg_attr(not(compose_linked), ignore = "needs the linked librx_compose.a")]
         fn $name() {
+            let _home = home_guard::home_slot();
             let Some($fx) = Fx::new($on, $key) else {
                 return;
             };

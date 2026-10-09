@@ -4,6 +4,9 @@
 //! build.rs from aien-omega-compose's links metadata).
 //! A "crashed" claim is made by a child process (this test binary re-run with
 //! REPLAY_CHILD set) that claims and exits without settling.
+#[path = "support/home_guard.rs"]
+mod home_guard;
+
 use aien_runtime::approved_replay::{
     self as replay, ClaimKeys, ClaimState, CommitEvidence, ReplayLedger, FIELD,
 };
@@ -219,6 +222,7 @@ fn compose_note_cannot_forge_replay_records() {
     ignore = "needs the linked librx_compose.a (AIEN_OMEGA_COMPOSE_LIB)"
 )]
 fn claim_is_durable_and_single_use_across_restart() {
+    let _home = home_guard::home_slot();
     let tmp = tempfile::tempdir().unwrap();
     let k = keys("restart");
     {
@@ -282,6 +286,7 @@ fn claim_is_durable_and_single_use_across_restart() {
     ignore = "needs the linked librx_compose.a (AIEN_OMEGA_COMPOSE_LIB)"
 )]
 fn failed_and_not_executed_claims_stay_consumed() {
+    let _home = home_guard::home_slot();
     let tmp = tempfile::tempdir().unwrap();
     let b = bridge(tmp.path());
     let c = replay::claim(&b, &keys("ne")).unwrap();
@@ -309,6 +314,7 @@ fn failed_and_not_executed_claims_stay_consumed() {
     ignore = "needs the linked librx_compose.a (AIEN_OMEGA_COMPOSE_LIB)"
 )]
 fn concurrent_duplicates_at_most_one_claim() {
+    let _home = home_guard::home_slot();
     let tmp = tempfile::tempdir().unwrap();
     let b = Arc::new(bridge(tmp.path()));
     let n = 16;
@@ -341,6 +347,7 @@ fn concurrent_duplicates_at_most_one_claim() {
 #[test]
 #[ignore = "child mode, run by crash_before_and_during_execution_fail_closed"]
 fn child_claim_then_crash() {
+    let _home = home_guard::home_slot();
     let Ok(mode) = std::env::var("REPLAY_CHILD") else {
         return;
     };

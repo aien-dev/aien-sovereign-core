@@ -3,6 +3,9 @@
 //! Socket-level, mock backend, toy tokenizer. Every test needs the linked
 //! composition archive and is IGNORED in a stub build, never passed (the
 //! no-record cases that hold in a stub build are unit tests in server.rs).
+#[path = "support/home_guard.rs"]
+mod home_guard;
+
 use aien_inference_abi::{
     AienInferenceBackend, ChatTokenizer, DecodeObservation, DecodeOutput, MockInferenceBackend,
     ModelConfig, ScheduledBatch, StepMetrics,
@@ -188,6 +191,7 @@ fn ids_of(text: &str) -> Vec<u32> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[cfg_attr(not(compose_linked), ignore = "needs librx_compose.a: stub build")]
 async fn record_carries_the_digests_of_the_turn() {
+    let _home = home_guard::home_slot();
     let _g = ONE_HOME.lock().await;
     let d = start(Some(identity())).await;
     let tok = toy_tokenizer();
@@ -233,6 +237,7 @@ async fn record_carries_the_digests_of_the_turn() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[cfg_attr(not(compose_linked), ignore = "needs librx_compose.a: stub build")]
 async fn text_is_hashed_byte_exact_with_surrounding_whitespace() {
+    let _home = home_guard::home_slot();
     let _g = ONE_HOME.lock().await;
     // Decoded text of the mock tokens: leading and trailing spaces.
     let d = start_with(
@@ -255,6 +260,7 @@ async fn text_is_hashed_byte_exact_with_surrounding_whitespace() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[cfg_attr(not(compose_linked), ignore = "needs librx_compose.a: stub build")]
 async fn two_identical_turns_make_two_records() {
+    let _home = home_guard::home_slot();
     let _g = ONE_HOME.lock().await;
     let d = start(Some(identity())).await;
     let (t1, a) = d.turn("hello").await;
@@ -271,6 +277,7 @@ async fn two_identical_turns_make_two_records() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[cfg_attr(not(compose_linked), ignore = "needs librx_compose.a: stub build")]
 async fn no_model_identity_means_no_record_and_the_turn_succeeds() {
+    let _home = home_guard::home_slot();
     let _g = ONE_HOME.lock().await;
     let d = start(None).await;
     let before = d.records().await;
@@ -284,6 +291,7 @@ async fn no_model_identity_means_no_record_and_the_turn_succeeds() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[cfg_attr(not(compose_linked), ignore = "needs librx_compose.a: stub build")]
 async fn a_caller_cannot_write_a_generation_record() {
+    let _home = home_guard::home_slot();
     let _g = ONE_HOME.lock().await;
     let d = start(Some(identity())).await;
     let (_, id) = d.turn("hello").await;
@@ -365,6 +373,7 @@ impl AienInferenceBackend for ObservingMock {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[cfg_attr(not(compose_linked), ignore = "needs librx_compose.a: stub build")]
 async fn record_states_the_decoding_the_backend_reported() {
+    let _home = home_guard::home_slot();
     let _g = ONE_HOME.lock().await;
     let report = DecodeObservation {
         greedy_tokens: 1,

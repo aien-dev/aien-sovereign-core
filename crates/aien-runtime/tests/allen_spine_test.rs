@@ -6,6 +6,9 @@
 //! checks exit code and output. With the stub omega library (no
 //! librx_compose.a) the compose home cannot open at all, so every case
 //! reports NOT_RUN and returns; with `AIEN_OMEGA_COMPOSE_DIR` set they run.
+#[path = "support/home_guard.rs"]
+mod home_guard;
+
 #[path = "../../aien-allen/tests/support/mod.rs"]
 mod support;
 
@@ -146,6 +149,7 @@ fn not_engaged_path_is_unchanged() {
 
 #[test]
 fn engaged_without_pin_or_adopt_is_fatal_and_creates_nothing() {
+    let _home = home_guard::home_slot();
     if skip() {
         return;
     }
@@ -185,6 +189,7 @@ fn engaged_missing_subject_is_fatal_never_minted() {
 
 #[test]
 fn adopt_restart_machine_change_and_foreign_journal() {
+    let _home = home_guard::home_slot();
     if skip() {
         return;
     }

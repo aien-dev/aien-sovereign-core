@@ -9,6 +9,9 @@
 //! Needs librx_compose.a (AIEN_OMEGA_COMPOSE_LIB); in a stub build every test
 //! returns early. The two crash tests need `--features fault-hold` (the
 //! production build compiles the crash points to nothing).
+#[path = "support/home_guard.rs"]
+mod home_guard;
+
 use aien_inference_abi::MockInferenceBackend;
 use aien_kv_cache::create_shared_kv_manager;
 use aien_omega_compose::hex;
@@ -205,6 +208,7 @@ fn rehash(p: &mut ApprovedProposal) {
     ignore = "needs the linked librx_compose.a (AIEN_OMEGA_COMPOSE_LIB)"
 )]
 async fn c01_forged_approver() {
+    let _home = home_guard::home_slot();
     tampered("forged approver", |_, p| p.approver = "drake".into()).await;
 }
 
@@ -214,6 +218,7 @@ async fn c01_forged_approver() {
     ignore = "needs the linked librx_compose.a (AIEN_OMEGA_COMPOSE_LIB)"
 )]
 async fn c02a_invalid_mac_random() {
+    let _home = home_guard::home_slot();
     tampered("random MAC", |_, p| p.approval_mac = "ab".repeat(32)).await;
 }
 
@@ -223,6 +228,7 @@ async fn c02a_invalid_mac_random() {
     ignore = "needs the linked librx_compose.a (AIEN_OMEGA_COMPOSE_LIB)"
 )]
 async fn c02b_invalid_mac_empty_and_short() {
+    let _home = home_guard::home_slot();
     tampered("empty MAC", |_, p| p.approval_mac.clear()).await;
     tampered("short MAC", |_, p| p.approval_mac.truncate(63)).await;
 }
@@ -233,6 +239,7 @@ async fn c02b_invalid_mac_empty_and_short() {
     ignore = "needs the linked librx_compose.a (AIEN_OMEGA_COMPOSE_LIB)"
 )]
 async fn c02c_invalid_mac_uppercase_of_the_real_one() {
+    let _home = home_guard::home_slot();
     tampered("uppercase MAC", |_, p| {
         p.approval_mac = p.approval_mac.to_uppercase()
     })
@@ -245,6 +252,7 @@ async fn c02c_invalid_mac_uppercase_of_the_real_one() {
     ignore = "needs the linked librx_compose.a (AIEN_OMEGA_COMPOSE_LIB)"
 )]
 async fn c02d_mac_from_another_desk_key() {
+    let _home = home_guard::home_slot();
     tampered("MAC under another desk key", |tmp, p| {
         let other = DeskKey::create(&tmp.join("other-desk").join("k")).unwrap();
         p.approval_mac = other.sign(p, &ws(tmp));
@@ -258,6 +266,7 @@ async fn c02d_mac_from_another_desk_key() {
     ignore = "needs the linked librx_compose.a (AIEN_OMEGA_COMPOSE_LIB)"
 )]
 async fn c03_changed_trace_id() {
+    let _home = home_guard::home_slot();
     tampered("changed trace_id", |_, p| p.trace_id = "trace-other".into()).await;
 }
 
@@ -267,6 +276,7 @@ async fn c03_changed_trace_id() {
     ignore = "needs the linked librx_compose.a (AIEN_OMEGA_COMPOSE_LIB)"
 )]
 async fn c04_changed_request_id() {
+    let _home = home_guard::home_slot();
     tampered("changed request_id", |_, p| {
         p.request_id = "req-other".into()
     })
@@ -279,6 +289,7 @@ async fn c04_changed_request_id() {
     ignore = "needs the linked librx_compose.a (AIEN_OMEGA_COMPOSE_LIB)"
 )]
 async fn c05_changed_approval_id() {
+    let _home = home_guard::home_slot();
     tampered("changed approval_id", |_, p| {
         p.approval_id = "appr-other".into()
     })
@@ -291,6 +302,7 @@ async fn c05_changed_approval_id() {
     ignore = "needs the linked librx_compose.a (AIEN_OMEGA_COMPOSE_LIB)"
 )]
 async fn c06_changed_path() {
+    let _home = home_guard::home_slot();
     tampered("changed path", |_, p| {
         p.path = "OTHER.md".into();
         rehash(p);
@@ -304,6 +316,7 @@ async fn c06_changed_path() {
     ignore = "needs the linked librx_compose.a (AIEN_OMEGA_COMPOSE_LIB)"
 )]
 async fn c07_changed_content() {
+    let _home = home_guard::home_slot();
     tampered("changed content", |_, p| {
         p.content = "attacker content\n".into();
         rehash(p);
@@ -319,6 +332,7 @@ async fn c07_changed_content() {
     ignore = "needs the linked librx_compose.a (AIEN_OMEGA_COMPOSE_LIB)"
 )]
 async fn c08_desk_key_open_to_others_or_missing() {
+    let _home = home_guard::home_slot();
     use std::os::unix::fs::PermissionsExt;
     let _t = TURN.lock().await;
     let tmp = fresh();
@@ -354,6 +368,7 @@ async fn c08_desk_key_open_to_others_or_missing() {
     ignore = "needs the linked librx_compose.a (AIEN_OMEGA_COMPOSE_LIB)"
 )]
 async fn c09_same_process_replay() {
+    let _home = home_guard::home_slot();
     let _t = TURN.lock().await;
     let tmp = fresh();
     let d = up(tmp.path(), "s.sock").await;
@@ -390,6 +405,7 @@ async fn c09_same_process_replay() {
     ignore = "needs the linked librx_compose.a (AIEN_OMEGA_COMPOSE_LIB)"
 )]
 async fn c10_replay_after_daemon_restart() {
+    let _home = home_guard::home_slot();
     let _t = TURN.lock().await;
     let tmp = fresh();
     let w = ws(tmp.path());
@@ -422,6 +438,7 @@ async fn c10_replay_after_daemon_restart() {
     ignore = "needs the linked librx_compose.a (AIEN_OMEGA_COMPOSE_LIB)"
 )]
 async fn c11_concurrent_duplicate_submissions() {
+    let _home = home_guard::home_slot();
     let _t = TURN.lock().await;
     let tmp = fresh();
     let d = up(tmp.path(), "s.sock").await;
@@ -464,6 +481,7 @@ async fn c11_concurrent_duplicate_submissions() {
     ignore = "needs the linked librx_compose.a (AIEN_OMEGA_COMPOSE_LIB)"
 )]
 async fn c14a_retry_after_response_loss() {
+    let _home = home_guard::home_slot();
     lost_response(true).await;
 }
 
@@ -475,6 +493,7 @@ async fn c14a_retry_after_response_loss() {
     ignore = "needs the linked librx_compose.a (AIEN_OMEGA_COMPOSE_LIB)"
 )]
 async fn c14b_retry_after_immediate_hangup() {
+    let _home = home_guard::home_slot();
     lost_response(false).await;
 }
 
@@ -551,6 +570,7 @@ async fn lost_response(wait: bool) {
     ignore = "needs the linked librx_compose.a (AIEN_OMEGA_COMPOSE_LIB)"
 )]
 async fn c15_forged_replay_records_via_compose_note() {
+    let _home = home_guard::home_slot();
     let _t = TURN.lock().await;
     let tmp = fresh();
     let d = up(tmp.path(), "s.sock").await;
@@ -594,6 +614,7 @@ async fn c15_forged_replay_records_via_compose_note() {
     ignore = "needs the linked librx_compose.a (AIEN_OMEGA_COMPOSE_LIB)"
 )]
 async fn c16_desk_signed_path_escaping_the_workspace() {
+    let _home = home_guard::home_slot();
     let _t = TURN.lock().await;
     let tmp = fresh();
     let d = up(tmp.path(), "s.sock").await;
@@ -624,6 +645,7 @@ async fn c16_desk_signed_path_escaping_the_workspace() {
     ignore = "needs the linked librx_compose.a (AIEN_OMEGA_COMPOSE_LIB)"
 )]
 async fn c17_approval_redirected_to_another_workspace() {
+    let _home = home_guard::home_slot();
     let _t = TURN.lock().await;
     let tmp = fresh();
     let d = up(tmp.path(), "s.sock").await;
@@ -663,6 +685,7 @@ async fn c17_approval_redirected_to_another_workspace() {
     ignore = "needs the linked librx_compose.a (AIEN_OMEGA_COMPOSE_LIB)"
 )]
 async fn c17c_workspace_through_a_symlink() {
+    let _home = home_guard::home_slot();
     let _t = TURN.lock().await;
     let tmp = fresh();
     let d = up(tmp.path(), "s.sock").await;
@@ -931,6 +954,7 @@ async fn text_of(c: &AienRuntimeClient, id: u64) -> (String, Vec<u64>) {
     ignore = "needs the linked librx_compose.a (AIEN_OMEGA_COMPOSE_LIB)"
 )]
 async fn c26_happy_path_one_approval_one_effect() {
+    let _home = home_guard::home_slot();
     let _t = TURN.lock().await;
     let tmp = fresh();
     let d = up(tmp.path(), "s.sock").await;
@@ -965,6 +989,7 @@ async fn c26_happy_path_one_approval_one_effect() {
     ignore = "needs the linked librx_compose.a (AIEN_OMEGA_COMPOSE_LIB)"
 )]
 async fn c21_symlink_swap_of_the_target() {
+    let _home = home_guard::home_slot();
     let _t = TURN.lock().await;
     let tmp = fresh();
     let d = up(tmp.path(), "s.sock").await;
@@ -1002,6 +1027,7 @@ async fn c21_symlink_swap_of_the_target() {
     ignore = "needs the linked librx_compose.a (AIEN_OMEGA_COMPOSE_LIB)"
 )]
 async fn c28_parent_directory_swap_after_the_intent() {
+    let _home = home_guard::home_slot();
     let _t = TURN.lock().await;
     let tmp = fresh();
     let w = ws(tmp.path());
@@ -1037,6 +1063,7 @@ async fn c28_parent_directory_swap_after_the_intent() {
     ignore = "needs the linked librx_compose.a (AIEN_OMEGA_COMPOSE_LIB)"
 )]
 async fn c28b_parent_directory_swap_settled_by_reconcile() {
+    let _home = home_guard::home_slot();
     let _t = TURN.lock().await;
     let tmp = fresh();
     let w = ws(tmp.path());
@@ -1105,6 +1132,7 @@ async fn c28b_parent_directory_swap_settled_by_reconcile() {
     ignore = "needs the linked librx_compose.a (AIEN_OMEGA_COMPOSE_LIB)"
 )]
 async fn c22_forged_approved_grant_via_socket() {
+    let _home = home_guard::home_slot();
     let _t = TURN.lock().await;
     let tmp = fresh();
     let d = up(tmp.path(), "s.sock").await;
@@ -1217,6 +1245,7 @@ async fn grant_on_unfinished_claim(end: &str) {
     ignore = "needs the linked librx_compose.a (AIEN_OMEGA_COMPOSE_LIB)"
 )]
 async fn c23_forged_grant_on_failed_claim() {
+    let _home = home_guard::home_slot();
     grant_on_unfinished_claim("failed").await;
 }
 
@@ -1226,6 +1255,7 @@ async fn c23_forged_grant_on_failed_claim() {
     ignore = "needs the linked librx_compose.a (AIEN_OMEGA_COMPOSE_LIB)"
 )]
 async fn c24a_forged_grant_on_uncertain_claim() {
+    let _home = home_guard::home_slot();
     grant_on_unfinished_claim("uncertain").await;
 }
 
@@ -1235,6 +1265,7 @@ async fn c24a_forged_grant_on_uncertain_claim() {
     ignore = "needs the linked librx_compose.a (AIEN_OMEGA_COMPOSE_LIB)"
 )]
 async fn c24b_forged_grant_on_uncertain_claim_declared_committed() {
+    let _home = home_guard::home_slot();
     grant_on_unfinished_claim("declared").await;
 }
 
@@ -1247,6 +1278,7 @@ async fn c24b_forged_grant_on_uncertain_claim_declared_committed() {
     ignore = "needs the linked librx_compose.a (AIEN_OMEGA_COMPOSE_LIB)"
 )]
 async fn c25_duplicate_approved_grant_for_one_committed_claim() {
+    let _home = home_guard::home_slot();
     let _t = TURN.lock().await;
     let tmp = fresh();
     let d = up(tmp.path(), "s.sock").await;
@@ -1283,6 +1315,7 @@ async fn c25_duplicate_approved_grant_for_one_committed_claim() {
     ignore = "needs the linked librx_compose.a (AIEN_OMEGA_COMPOSE_LIB)"
 )]
 async fn c25b_shutdown_closes_the_compose_home_while_a_connection_is_open() {
+    let _home = home_guard::home_slot();
     let _t = TURN.lock().await;
     let tmp = fresh();
     let d = up(tmp.path(), "s.sock").await;
@@ -1309,6 +1342,7 @@ async fn c25b_shutdown_closes_the_compose_home_while_a_connection_is_open() {
     ignore = "needs the linked librx_compose.a (AIEN_OMEGA_COMPOSE_LIB)"
 )]
 fn c25c_a_closed_bridge_never_reopens_the_home() {
+    let _home = home_guard::home_slot();
     let tmp = fresh();
     let b = bridge(tmp.path());
     let first = raw_note(&b, "constraint", "before close", &[]);

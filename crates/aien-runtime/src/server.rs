@@ -1114,6 +1114,7 @@ mod generation_record_tests {
     /// file, and in a stub build the engine is absent) yields no id.
     #[tokio::test]
     async fn a_failed_append_returns_no_id() {
+        let _home = crate::home_guard::home_slot();
         let tmp = tempfile::tempdir().unwrap();
         let blocked = tmp.path().join("compose");
         std::fs::write(&blocked, b"not a directory").unwrap();

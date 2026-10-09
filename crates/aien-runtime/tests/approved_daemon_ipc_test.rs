@@ -6,6 +6,9 @@
 //! every replay is refused and the same approval's retry gets the original
 //! result back without a second run. One test per binary (it sets
 //! AIEN_COMPOSE_DIR).
+#[path = "support/home_guard.rs"]
+mod home_guard;
+
 use aien_inference_abi::MockInferenceBackend;
 use aien_kv_cache::create_shared_kv_manager;
 use aien_omega_compose::hex;
@@ -115,6 +118,7 @@ fn refusal(r: ControlResponse) -> (String, String) {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[cfg_attr(not(compose_linked), ignore = "needs librx_compose.a: stub build")]
 async fn approved_proposal_over_the_daemon_socket() {
+    let _home = home_guard::home_slot();
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path().join("compose");
     std::env::set_var("AIEN_COMPOSE_DIR", &dir);

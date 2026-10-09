@@ -584,6 +584,7 @@ mod toctou_tests {
     /// refuses at the claim, before the seam.)
     #[test]
     fn prior_changed_between_check_and_commit_is_refused() {
+        let _home = crate::home_guard::home_slot();
         if !aien_omega_compose::LINKED {
             return;
         }

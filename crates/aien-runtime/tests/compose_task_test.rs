@@ -4,6 +4,9 @@
 //! With librx_compose.a linked (aien-omega-compose built with
 //! AIEN_OMEGA_COMPOSE_DIR, see its README) these run the real composition;
 //! in a stub build they check that the bridge reports the missing library.
+#[path = "support/home_guard.rs"]
+mod home_guard;
+
 use aien_runtime::control::{ComposeRecallReport, ComposeTaskReport, ControlResponse};
 use aien_runtime::spine::{
     check_file_proposal, compose_attempt_budget, parse_compose_budget,
@@ -58,6 +61,7 @@ fn snapshot(dir: &std::path::Path) -> Vec<(String, Vec<u8>)> {
 
 #[test]
 fn compose_task_commits_and_survives_restart() {
+    let _home = home_guard::home_slot();
     let tmp = tempfile::tempdir().unwrap();
     let home = tmp.path().join("compose");
     let ws = tmp.path().join("workspace");
@@ -177,6 +181,7 @@ fn compose_task_commits_and_survives_restart() {
 
 #[test]
 fn failing_model_commits_nothing() {
+    let _home = home_guard::home_slot();
     if !aien_omega_compose::LINKED {
         return;
     }
@@ -456,6 +461,7 @@ fn measured_attempt_budget_admits_a_second_attempt() {
 
 #[test]
 fn unparseable_proposal_fails_the_aegis_contract() {
+    let _home = home_guard::home_slot();
     if !aien_omega_compose::LINKED {
         return;
     }
@@ -497,6 +503,7 @@ fn unparseable_proposal_fails_the_aegis_contract() {
 
 #[test]
 fn torn_home_is_refused_by_name_then_recovered() {
+    let _home = home_guard::home_slot();
     if !aien_omega_compose::LINKED {
         return;
     }

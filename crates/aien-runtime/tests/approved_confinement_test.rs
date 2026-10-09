@@ -20,6 +20,9 @@
 //!
 //! Needs librx_compose.a (AIEN_OMEGA_COMPOSE_LIB); in a stub build the compose
 //! commands refuse and the test returns early.
+#[path = "support/home_guard.rs"]
+mod home_guard;
+
 use aien_inference_abi::MockInferenceBackend;
 use aien_kv_cache::create_shared_kv_manager;
 use aien_omega_compose::hex;
@@ -109,6 +112,7 @@ fn refused(r: ControlResponse, want: &str) -> String {
 #[tokio::test]
 #[cfg_attr(not(compose_linked), ignore = "needs librx_compose.a: stub build")]
 async fn forged_grants_are_confined_and_the_approved_kind_is_reserved() {
+    let _home = home_guard::home_slot();
     if !aien_omega_compose::LINKED {
         return;
     }

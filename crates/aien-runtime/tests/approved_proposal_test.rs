@@ -4,6 +4,9 @@
 //! replayed (#249 B) proposals are refused with no compose run. CPU only, no
 //! model, no socket: the bridge is driven exactly as the daemon drives it. In
 //! a stub build only the refusal paths run.
+#[path = "support/home_guard.rs"]
+mod home_guard;
+
 use aien_omega_compose::hex;
 use aien_runtime::approved::{
     self, ApprovedComposeReport, ApprovedProposal, ApprovedRefusal, ProposerHook,
@@ -142,6 +145,7 @@ fn setup() -> (tempfile::TempDir, Arc<ComposeBridge>, ProposerHook, String) {
 #[test]
 #[cfg_attr(not(compose_linked), ignore = "needs librx_compose.a: stub build")]
 fn approved_proposal_commits_then_effect_is_done() {
+    let _home = home_guard::home_slot();
     let _turn = turn();
     let (_tmp, b, hook, ws) = setup();
     let p = sign(&b, unsigned("req-1", "appr-1"));
@@ -249,6 +253,7 @@ fn approved_proposal_commits_then_effect_is_done() {
 
 #[test]
 fn unverified_proposal_is_refused_with_zero_effects() {
+    let _home = home_guard::home_slot();
     let _turn = turn();
     let (_tmp, b, hook, ws) = setup();
     println!(
@@ -310,6 +315,7 @@ fn unverified_proposal_is_refused_with_zero_effects() {
 #[test]
 #[cfg_attr(not(compose_linked), ignore = "needs librx_compose.a: stub build")]
 fn duplicate_proposal_is_refused() {
+    let _home = home_guard::home_slot();
     let _turn = turn();
     let (_tmp, b, hook, ws) = setup();
     let p = sign(&b, unsigned("req-d", "appr-d"));
@@ -356,6 +362,7 @@ fn duplicate_proposal_is_refused() {
 /// zero records, nothing on disk.
 #[test]
 fn unauthenticated_approval_is_refused_with_no_compose() {
+    let _home = home_guard::home_slot();
     let _turn = turn();
     let (tmp, b, hook, ws) = setup();
     let good = sign(&b, unsigned("req-a", "appr-a"));
@@ -416,6 +423,7 @@ fn unauthenticated_approval_is_refused_with_no_compose() {
 /// keys are refused NoDesk; refusals and reports never carry the key.
 #[test]
 fn desk_key_file_rules() {
+    let _home = home_guard::home_slot();
     let _turn = turn();
     use std::os::unix::fs::PermissionsExt;
     let (tmp, b, hook, ws) = setup();
@@ -495,6 +503,7 @@ fn compose_home_overlapping_the_workspace_is_refused() {
 #[test]
 #[cfg_attr(not(compose_linked), ignore = "needs librx_compose.a: stub build")]
 fn replay_is_refused_after_restart() {
+    let _home = home_guard::home_slot();
     let _turn = turn();
     let (tmp, b, hook, ws) = setup();
     let p = sign(&b, unsigned("req-r", "appr-r"));
@@ -535,6 +544,7 @@ fn replay_is_refused_after_restart() {
 #[test]
 #[cfg_attr(not(compose_linked), ignore = "needs librx_compose.a: stub build")]
 fn concurrent_duplicates_run_once() {
+    let _home = home_guard::home_slot();
     let _turn = turn();
     let (_tmp, b, hook, ws) = setup();
     if !aien_omega_compose::LINKED {
@@ -596,6 +606,7 @@ fn approved_hash_is_the_interplane_form() {
 #[test]
 #[cfg_attr(not(compose_linked), ignore = "needs librx_compose.a: stub build")]
 fn approved_proposal_over_existing_file_commits_byte_exact() {
+    let _home = home_guard::home_slot();
     let _turn = turn();
     let (_tmp, _b, hook, ws) = setup();
     let seed = "# Notes\nseed line one\nseed line two\n";
@@ -636,6 +647,7 @@ fn approved_proposal_over_existing_file_commits_byte_exact() {
 /// daemon's grant targets the bound workspace.
 #[test]
 fn approval_redirected_to_another_workspace_is_refused() {
+    let _home = home_guard::home_slot();
     let _turn = turn();
     let (tmp, b, hook, ws) = setup();
     let other = tmp.path().join("elsewhere");
@@ -679,6 +691,7 @@ fn approval_redirected_to_another_workspace_is_refused() {
 #[test]
 #[cfg_attr(not(compose_linked), ignore = "needs librx_compose.a: stub build")]
 fn copied_approved_grant_opens_nothing() {
+    let _home = home_guard::home_slot();
     let _turn = turn();
     let (_tmp, b, hook, ws) = setup();
     let r = committed(hook.submit(&sign(&b, unsigned("req-g", "appr-g")), &ws));
@@ -723,6 +736,7 @@ const FENCED_DOC: &str = "# FAQ\n\nInstall:\n```bash\ncurl -fsSL https://example
 #[test]
 #[cfg_attr(not(compose_linked), ignore = "needs librx_compose.a: stub build")]
 fn approved_document_with_fences_is_saved_byte_exact_or_not_done() {
+    let _home = home_guard::home_slot();
     let _turn = turn();
     let (_tmp, b, hook, ws) = setup();
     // The compose template keeps every byte (check_file_proposal reads it back).
@@ -830,6 +844,7 @@ fn with_goal(
 
 #[test]
 fn bound_requirements_the_bytes_miss_are_refused_and_nothing_is_consumed() {
+    let _home = home_guard::home_slot();
     let _turn = turn();
     let (_tmp, b, hook, ws) = setup();
     let p = with_goal(
@@ -865,6 +880,7 @@ fn bound_requirements_the_bytes_miss_are_refused_and_nothing_is_consumed() {
 
 #[test]
 fn bytes_meeting_the_bound_requirements_commit_with_equal_sha256() {
+    let _home = home_guard::home_slot();
     let _turn = turn();
     let (_tmp, b, hook, ws) = setup();
     let p = with_goal(
@@ -890,6 +906,7 @@ fn bytes_meeting_the_bound_requirements_commit_with_equal_sha256() {
 
 #[test]
 fn explicitly_signed_empty_requirements_are_allowed() {
+    let _home = home_guard::home_slot();
     let _turn = turn();
     let (_tmp, b, hook, ws) = setup();
     let p = with_goal(&b, "req-rq3", "appr-rq3", Some(""));
@@ -944,6 +961,7 @@ fn uncertain_bound_requirements_are_refused() {
 
 #[test]
 fn bound_added_line_counts_are_measured_against_the_existing_file() {
+    let _home = home_guard::home_slot();
     let _turn = turn();
     let (_tmp, b, hook, ws) = setup();
     std::fs::write(Path::new(&ws).join(PATH), "one\ntwo\n").unwrap();
@@ -974,6 +992,7 @@ fn bound_added_line_counts_are_measured_against_the_existing_file() {
 
 #[test]
 fn a_path_that_reads_like_a_requirement_is_not_one() {
+    let _home = home_guard::home_slot();
     let _turn = turn();
     let (_tmp, b, hook, ws) = setup();
     let path = "docs/add-2-lines-to-10-lines.md";

@@ -3,6 +3,9 @@
 //!
 //! With librx_compose.a linked this drives the bridge exactly as the daemon
 //! does (no socket); in a stub build it only checks the refusal.
+#[path = "support/home_guard.rs"]
+mod home_guard;
+
 use aien_omega_compose::hex;
 use aien_runtime::control::{
     ComposeControlReport, ComposeNoteReport, ComposeReconcileReport, ControlResponse,
@@ -132,6 +135,7 @@ impl Fixture {
 
 #[test]
 fn effect_intents_are_at_most_once_or_unresolved() {
+    let _home = home_guard::home_slot();
     let tmp = tempfile::tempdir().unwrap();
     let home = tmp.path().join("compose");
     let ws = tmp.path().join("ws");

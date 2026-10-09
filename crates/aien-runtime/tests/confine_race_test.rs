@@ -6,6 +6,9 @@
 //! branch must give the identical kind for every row.
 //!
 //! Needs the linked composition archive; IGNORED in a stub build.
+#[path = "support/home_guard.rs"]
+mod home_guard;
+
 use aien_omega_compose::hex;
 use aien_runtime::control::{ComposeNoteReport, ComposeTaskReport, ControlResponse};
 use aien_runtime::effects::test_hooks;
@@ -128,6 +131,7 @@ fn swap_in_symlink(ws: PathBuf, outside: PathBuf) {
 #[test]
 #[cfg_attr(not(compose_linked), ignore = "needs the linked librx_compose.a")]
 fn mint_records_the_prior_of_the_confined_file() {
+    let _home = home_guard::home_slot();
     let Some(fx) = Fx::new() else { return };
     let outside = fx.root.join("outside");
     std::fs::create_dir_all(&outside).unwrap();
@@ -157,6 +161,7 @@ fn mint_records_the_prior_of_the_confined_file() {
 #[test]
 #[cfg_attr(not(compose_linked), ignore = "needs the linked librx_compose.a")]
 fn open_intent_reads_the_confined_file_not_the_path() {
+    let _home = home_guard::home_slot();
     let Some(fx) = Fx::new() else { return };
     let outside = fx.root.join("outside");
     std::fs::create_dir_all(&outside).unwrap();
