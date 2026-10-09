@@ -40,7 +40,6 @@ fn uncertain(goal: &str) -> Vec<String> {
 fn counted_requests_are_read_by_the_documented_rule() {
     // add|append|insert|with N lines (and "N-line"): exactly N added lines.
     for (goal, n) in [
-        ("Add one line to notes/TODO.md saying buy milk", 1),
         ("Add 2 lines to README.md", 2),
         ("Append 3 lines to LOG.md", 3),
         ("Add a one-line note to README.md", 1),
@@ -54,6 +53,14 @@ fn counted_requests_are_read_by_the_documented_rule() {
     ] {
         assert_eq!(reqs(goal), [added(n, true)], "{goal}");
     }
+    // sc#349: the plain phrase after "saying" is required as well
+    assert_eq!(
+        reqs("Add one line to notes/TODO.md saying buy milk"),
+        [
+            added(1, true),
+            RequiredPhrases(vec!["buy milk".to_string()])
+        ]
+    );
     // write|put|create|... N lines: at least N added lines.
     for (goal, n) in [
         ("Write 20 lines about X to docs/x.md", 20),
@@ -456,7 +463,7 @@ fn lower_bound_after_the_noun_and_single_line() {
     );
     assert_eq!(
         reqs("Add a single line saying hello to a.md"),
-        [added(1, true)]
+        [added(1, true), RequiredPhrases(vec!["hello".to_string()])]
     );
     // No explicit count: nothing is measured (documented): "a line" is not a number word.
     assert!(reqs("Add a line saying hello to a.md").is_empty());
