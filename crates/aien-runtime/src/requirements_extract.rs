@@ -1,4 +1,4 @@
-//! | `<min bound> N <noun> and|or|but <bound> M` (second noun left out, e.g. `at least 20 lines and no more than 40`) | the second bound is read with the earlier noun (`MaxLines(40)`); with no clear earlier noun, or a direction the noun does not support (`at least 3 paragraphs and no more than 5`), it is UNCERTAIN, never dropped (#344) |
+//! | `<min bound> N <noun> and|or|but <bound> M` (second noun left out, e.g. `at least 20 lines and no more than 40`) | the second bound is read with the earlier noun (`MaxLines(40)`); with no clear earlier noun (or no earlier count at all), or a direction the noun does not support (`at least 3 paragraphs and no more than 5`), it is UNCERTAIN, never dropped (#344) |
 //! Reading the requirements out of a goal (see `requirements` for the model).
 //!
 //! `analyze` is rule based and deterministic. It returns the requirements it
@@ -1473,7 +1473,6 @@ pub fn analyze(goal: &str) -> Extraction {
             let sent = sentence_of(&toks, s);
             let joined =
                 s > sent.start && matches!(toks[s - 1].word.as_str(), "and" | "or" | "but");
-            let earlier = (sent.start..s).any(|k| handled.contains(&k));
             // the noun of the count that ends right before the joiner
             let antecedent = if joined {
                 (sent.start..s - 1).rev().find_map(|p| {
@@ -1501,11 +1500,10 @@ pub fn analyze(goal: &str) -> Extraction {
                     add(&mut counts, r);
                     handled.extend(s..=i);
                 }
-                _ if earlier => {
+                _ => {
                     bad(&mut unsure, s, true);
                     handled.extend(s..=i);
                 }
-                _ => {}
             }
             continue;
         }

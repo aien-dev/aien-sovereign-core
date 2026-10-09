@@ -52,7 +52,7 @@ fn unsupported_noun_or_direction_is_uncertain_not_silent() {
     // items: no upper bound either
     let ex = analyze("List at least 3 items and no more than 5.");
     assert!(!ex.uncertain.is_empty(), "{ex:?}");
-    // a cue with no earlier noun to carry over, after a read count
+    // a cue with no earlier noun to carry over
     let ex = analyze("Write at least 20 lines and then keep it under, no more than 40.");
     assert!(!ex.uncertain.is_empty(), "{ex:?}");
 }
@@ -177,4 +177,33 @@ fn compose_boundary_refuses_45_lines_and_approves_30() {
     let (out, attempts) = run(30);
     assert_eq!(out.unwrap(), reply(30));
     assert_eq!(attempts.len(), 1);
+}
+
+#[test]
+fn bound_cue_with_bare_number_and_no_antecedent_is_uncertain() {
+    for g in [
+        "Keep it to no more than 40",
+        "Keep it to no more than 40.",
+        "Write at least 20",
+        "Write at least 20.",
+        "Use up to 12.",
+        "Make it fewer than 40.",
+        "Make it more than 10.",
+        "Write a maximum of 30.",
+        "Write a minimum of 30.",
+        "Write no fewer than 5.",
+    ] {
+        let ex = analyze(g);
+        assert!(!ex.uncertain.is_empty(), "{g:?} silent: {ex:?}");
+    }
+    for g in [
+        "Fix 2 typos",
+        "Update section 3",
+        "Use Python 3",
+        "Use Python 3.",
+    ] {
+        let ex = analyze(g);
+        assert!(ex.uncertain.is_empty(), "{g:?}: {:?}", ex.uncertain);
+        assert!(ex.requirements.is_empty(), "{g:?}: {:?}", ex.requirements);
+    }
 }
