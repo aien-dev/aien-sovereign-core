@@ -1,6 +1,6 @@
-# OPEN-MODEL-QWEN3 campaign v5: acceptance criteria (DRAFT)
+# OPEN-MODEL-QWEN3 campaign v5: acceptance criteria (FROZEN)
 
-**Status: DRAFT, NOT FROZEN, NOT RUN**
+**Status: FROZEN, NOT RUN**
 
 Written by session fb5693 on 2026-10-08 under Drake's decision (c) (`~/handoffs/2026-10-08-drake-decisions.md`): do not run
 v4, write v5 first; keep v4 unchanged as a diagnostic spec and regression evidence; fix the product causes of legitimate
@@ -67,8 +67,9 @@ Eleven qualification launches, once each, in this order: **D1, D2, D3, D4, D5, D
 CPU probe of all fourteen v4 goals on the frozen commit (Section 6), reported, not counted.
 
 Limits are the v3 and v4 product limits: small edit 29 s and 96 tokens; new document 120 s and 1024 tokens; N2 a document cap of
-16 tokens (budget exhaustion); R1 a document cap of 96 (bounded CPU reference replay). The wrapper sets both budgets and both caps
-for every launch; the retired `AIEN_COMPOSE_BUDGET_MS` must be unset.
+16 tokens (budget exhaustion); R1 a document cap of 96 (bounded CPU reference replay). One declared adjustment: D6 runs at 170 s
+and 1536 tokens (Section 2.1). The wrapper sets both budgets and both caps for every launch from the task file (the task's own
+`max_tokens` and `budget_ms` for its kind, the product values for the other kind); the retired `AIEN_COMPOSE_BUDGET_MS` must be unset.
 
 | id | kind | cap | budget | seed | expected completion |
 |----|------|-----|--------|------|---------------------|
@@ -77,12 +78,12 @@ for every launch; the retired `AIEN_COMPOSE_BUDGET_MS` must be unset.
 | D3 | document: line count, four named topics with stated word forms | 1024 | 120 s | none | DONE |
 | D4 | document created from a different existing file; titled sections; three names | 1024 | 120 s | `seed-v5/D4/notes/choir-rehearsal.txt` | DONE |
 | D5 | document: line range, item prefix and item count, titled sections, two stated words | 1024 | 120 s | none | DONE |
-| D6 | document: paragraph count, one titled section | 1024 | 120 s | none | DONE |
+| D6 | document: paragraph count, one titled section | 1536 | 170 s | none | DONE |
 | E1 | small edit: add a bullet to one section | 96 | 29 s | `seed-v5/E1/repairs/tap-repair.md` | DONE |
 | E2 | small edit, nested path: add a numbered item at the end of a list | 96 | 29 s | `seed-v5/E2/crafts/yarn/scarf.md` | DONE |
 | N1 | declared negative: destination outside the workspace | 1024 | 120 s | none | REFUSED, for the destination |
 | N2 | declared negative: budget exhaustion | 16 | 120 s | none | REFUSED, token limit |
-| R1 | token-identity replay against the CPU reference; one sentence | 96 | 120 s | none | DONE |
+| R1 | token-identity replay against the CPU reference; one sentence | 96 | 120 s | `seed-v5/R1/notes/README.txt` (the `notes/` folder only) | DONE |
 
 Task rows in the format the inherited Q2 check reads (`make-receipt.sh` builds this exact line from the task file and requires it
 verbatim in the acceptance file; generated from `tasks-oq3-v5.json` with the same jq). Phrases are matched as case-insensitive
@@ -103,13 +104,47 @@ substrings after whitespace is collapsed (`rows-v5.jq`, Q2), so `shoulder` match
 N1 goal (declared negative, not a Q2 row): `Create a file at ../shared-stuff/reminder.txt containing just one line that says "Renew the library card on Friday."`
 N2 goal (declared negative, not a Q2 row): `I would like a long, detailed history of the marathon as a race, from the legend of ancient Greece to modern city events, saved as docs/marathon-story.md. Please make it at least twelve paragraphs long.`
 
-Seeds (each edit seed has three level-two headings; the D4 source names the three people):
+Seeds (each edit seed has three level-two headings; the D4 source names the three people; the R1 seed only provides the
+`notes/` folder its destination needs, see the known limit below):
 
 ```text
 seed-v5/D4/notes/choir-rehearsal.txt     sha256 aa8780bbc1c587cc6f980e44d838b1dfc39e11d06365d3471126008c9b99b7b7
 seed-v5/E1/repairs/tap-repair.md         sha256 4766451b85a3cabde953959bb75c990fbf9f82e1caf41554c9a695e8937b91b9
 seed-v5/E2/crafts/yarn/scarf.md          sha256 3a5a8494fbe60908c9a9431ac4839f17e4962a5a51f22399662087073cf00909
+seed-v5/R1/notes/README.txt              sha256 d376553dc23c5cc230cfa60ec0f11cc0f0671b7f8bcbb3fc6f8bc46232ab6b0d
 ```
+
+Known product limit (found by the extra hold `a7c5d201-oq3-v5-extra-p1`, 2026-10-09): the product refuses to write into a
+folder that does not exist. The compose step accepts such a destination as a new document (`spine::classify_destination`
+treats a missing path whose nearest existing parent is inside the workspace as `New`), but authorize then refuses it
+(`EFFECT_REFUSED OutsideWorkspace: target directory of <ws>/notes/swim-tip.txt ... (missing)`). v5 does not test or
+change this behaviour. Every positive destination's folder therefore exists before its launch: the root and `docs/` come
+from the default workspace that `run-campaign.sh` builds, `repairs/` and `crafts/yarn/` from the E1 and E2 seeds, and
+`notes/` from the R1 seed (one placeholder file; the R1 goal text is unchanged and the prompt carries no file listing, so
+the identity rows are unaffected). `test-v5.sh` checks this for every positive task. The receipt builder stages every
+non-edit seed (D4, R1) as null, as it did for D4 (the wrapper's `STAGE_FILTER`).
+
+### 2.1 Declared adjustment: D6 answer budget (Drake, 2026-10-09T00:15:14Z)
+
+D6 runs at **1536 output tokens and 170 s** (170000 ms) instead of the document product values of 1024 tokens and 120 s.
+Decided by Drake at 2026-10-09T00:15:14Z, before the freeze, in his words: "Option 1 approved. Raise D6's limit to 1,536
+output tokens and 170 seconds. Apply the change before the evaluation package is locked. A task should be judged on the
+model's ability to complete it, not on an insufficient execution budget. The additional runtime is justified. Keep all
+other evaluation conditions unchanged, document the adjustment, and apply the same limits to every model evaluated on D6
+to preserve fairness."
+
+| field (`tasks-oq3-v5.json`, D6) | old | new |
+|---|---|---|
+| `max_tokens` | 1024 | 1536 |
+| `budget_ms` | 120000 | 170000 |
+
+- D6 only. These are the only two fields changed for this adjustment; every other task's limits are byte-identical.
+- The same limits for every leg that scores D6: the wrapper passes D6's own `max_tokens` and `budget_ms` as
+  `AIEN_COMPOSE_DOC_MAX_TOKENS` and `AIEN_COMPOSE_DOC_BUDGET_MS` for the launch, and row `D6-D` scores against the same
+  `budget_ms`. There is no per-backend or per-model override; any other model evaluated on D6 uses 1536 tokens and 170 s.
+  D6 has no CPU reference leg (only R1 does).
+- Within the product's limits (`spine.rs`: document tokens 16 to 4096, budget 1000 to 599000 ms). D6's prompt is 148
+  tokens (G6 dry run), so 148 + 1536 fits the 4096-token KV context. Part 2 stays inside its 20-minute hold (Section 8).
 
 ## 3. Rows and exactly how each is counted
 
@@ -274,8 +309,8 @@ chip in v5.
 ## 7. Model, environment and build
 
 Model: Qwen/Qwen3-4B-Instruct-2507, Hugging Face revision cdbee75f, Apache-2.0, weights unchanged, directory
-`/home/drakestapleton/models/qwen3-4b-instruct-2507-cdbee75/`. Expected sha256 (re-hashed and confirmed at freeze; the values are
-those of ACCEPTANCE-v4 Section 7, re-hashed there on 2026-10-08):
+`/home/drakestapleton/models/qwen3-4b-instruct-2507-cdbee75/`. Expected sha256 (the values of ACCEPTANCE-v4 Section 7, re-hashed there on 2026-10-08; re-hashed again for v5 on
+2026-10-08T21:39Z with no GPU hold, all nine identical: `evidence-v5/model-rehash-2026-10-08.txt`):
 
 ```text
 model.safetensors.index.json             d6c42883a895dfef5b0080ed2116a1bcd764f558406b98923d675978a1abf29c
@@ -305,8 +340,9 @@ model_sha256 (index+shards)              17a78fbba447a4e66a3d886c0998fbcf2f9201d
 ```
 
 COMPUTED FROM LISTED SHA256s, NOT RE-HASHED: the value is the manifest built from the index and shard sha256 values listed
-above, not from the files. Re-hashing the four files on the frozen build and confirming this value against the daemon's own
-`CHECKPOINT_SHARDS` line = TO FILL AT FREEZE. Row `<id>-GR` binds the index and all three shards through it (`frozen-v5.json`).
+above, not from the files. Re-hash: DONE 2026-10-08T21:39Z (`evidence-v5/model-rehash-2026-10-08.txt`;
+the four files equal the listed values and the manifest rebuilt from the re-hash is this value). Confirming it against the
+daemon's own `CHECKPOINT_SHARDS` line = DONE in the G6 GPU dry run 2026-10-08T22:08-22:30Z: all 22 daemon starts logged a `CHECKPOINT_SHARDS` line equal to these values. G6 ran the 4770703 build; from 4770703 to the re-pin e27bda8 the only product source change is `crates/aien-runtime/src/destination.rs` (plus tests), so the code that logs the line (`aien-cli` `commands.rs`) and the locks are unchanged. Row `<id>-GR` binds the index and all three shards through it (`frozen-v5.json`).
 
 Environment, checked by the wrapper and recorded in `run.json`:
 
@@ -316,29 +352,38 @@ AIEN_REQUIRE_BLACKWELL                   = 1      (a missing GPU engine is fatal
 AIEN_REQUIRE_CHECKPOINT                  = 1      (already exported by the next-phase-1 driver, run-campaign.sh; the v5 wrapper also checks it; reference weights are fatal)
 AIEN_GB10_QWEN3_DECLARED_ATTEMPT         = 1      (opt-in while omega#327 is open)
 AIEN_COMPOSE_EDIT_BUDGET_MS              = 29000
-AIEN_COMPOSE_DOC_BUDGET_MS               = 120000
+AIEN_COMPOSE_DOC_BUDGET_MS               = the task budget_ms: 120000, D6 170000 (set per launch)
 AIEN_COMPOSE_MAX_TOKENS                  = 96
-AIEN_COMPOSE_DOC_MAX_TOKENS              = 1024 for documents, 16 for N2, 96 for R1
+AIEN_COMPOSE_DOC_MAX_TOKENS              = the task max_tokens: 1024 for documents, D6 1536, 16 for N2, 96 for R1
 unset: AIEN_FORCE_CPU_STUB, AIEN_DEV_FALLBACK (new in v5), AIEN_COMPOSE_AUTHORIZE_REQUIRES_DESK (sc#342 dev-only opt-out),
        AIEN_COMPOSE_BUDGET_MS, AIEN_OMEGA_SPIN_US, AIEN_OMEGA_CTA_BUDGET
 build: release, linked (has_omega_compose, has_omega_gpu, has_omega_wait_ms in the build log), WITHOUT the dev-fallback feature;
        the exact cargo command line is recorded in evidence-v5/build-summary.txt
 ```
 
-Build pins (current main as of this draft; TO FILL AT FREEZE with the commit that contains the Section 1 fixes):
+Build pins (FILLED IN A DRAFT, NOT FROZEN: main 30258fc holds the Section 1 fixes, sc#353, sc#354, the G6 fixes sc#357, sc#358, sc#359 and the
+extra-hold fix sc#360 (CPU reference prompt, example only: no product source changed since e27bda8, aien-cli bytes equal); built from clean
+clones by `evidence-v5/build.sh`, output `evidence-v5/build-summary.txt`; the same values are in `frozen-v5.json`, and G7
+rebuilds at these pins):
 
 ```text
-sovereign-core commit                    = TO FILL AT FREEZE   (draft written on 9b5e6e82359f4ad6b6f03042e83ef6411c5f15ce)
-omega.lock commit                        = TO FILL AT FREEZE   (6c6180cf378075b61291f4565d226eba38b4decd at 9b5e6e8)
-physics commit                           = TO FILL AT FREEZE   (6d7cf0d4d8eb2cda7b512100ff6058e25dbb3ddf at 9b5e6e8)
-aienos.lock commit                       = TO FILL AT FREEZE   (b84c0a67590a934f3f3e001b12ec85ebc086a9eb at 9b5e6e8)
-Cargo.lock sha256                        = TO FILL AT FREEZE
-aien-cli sha256                          = TO FILL AT FREEZE
-np1_reference sha256                     = TO FILL AT FREEZE
-np1_edit_merge sha256                    = TO FILL AT FREEZE
-campaign files (wrapper, tasks file, declaration, row modules, generator, self-test, seeds, next-phase-1 driver) sha256 = TO FILL AT FREEZE
-GPU hold names, one per part            = TO FILL AT FREEZE
+sovereign-core commit                    = 30258fce8d373bbd01ede59076dddce6e8a64901
+omega.lock commit                        = 6c6180cf378075b61291f4565d226eba38b4decd   (unchanged since v4)
+physics commit                           = 6d7cf0d4d8eb2cda7b512100ff6058e25dbb3ddf   (physics.lock at omega 6c6180c)
+aienos.lock commit                       = b84c0a67590a934f3f3e001b12ec85ebc086a9eb   (aienos.lock at omega 6c6180c)
+Cargo.lock sha256                        = 49d97bf30113b1727fcfc0e33be79d9446ae13651a08afc32bba889b77fca265
+aien-cli sha256                          = 62d98e0b92372862c4a1f7d762a92ec8cddcf398dced8048f75e086b2d66bc55 (unchanged at 30258fc)
+np1_reference sha256                     = a684b55af6efb1cea91ee119352552e7462c50026f2c91d38010b40c4e3fb7b9   (new at 30258fc: sc#360)
+np1_edit_merge sha256                    = 66be8da4d3c5c7c32089e851acdbed9c050afa38f2d7db9e8fbced3811949e80
+campaign files sha256                    = evidence-v5/campaign-files.sha256 (wrapper, tasks file, declaration, row modules,
+                                           generator, self-test, seeds, frozen values, next-phase-1 driver, receipt builder with rows-v5.jq and rows-v9.jq, scorer)
+GPU hold names, one per part            = 166657-oq3-v5-p1, 166657-oq3-v5-p2, 166657-oq3-v5-p3, 166657-oq3-v5-p4 (20 minutes each; runner session 166657)
 ```
+
+A real run refuses while any pin holds the placeholder and also while the `frozen-v5.json` status does not say FROZEN
+(`run-qwen3-v5.sh`; filled pins alone are not a freeze). The pins describe the product build (sovereign-core 30258fc and its
+locks); the campaign files are bound separately by `evidence-v5/campaign-files.sha256` and the wrapper's identity file, so a
+later campaign-file commit on top of 30258fc does not change a pin.
 
 ## 8. Run plan: one chip slot
 
@@ -350,10 +395,10 @@ for each launch `<id>.launch-v5.json` (wall time, driver exit, memory before the
 
 Time estimate, UNVERIFIED, from v3 (a launch costs about 140 s without decoding; documents decoded in 20 to 43 s):
 
-| Part | Launches | Worst case (documents at 120 s, edits at 29 s) | Hold |
+| Part | Launches | Worst case (documents at 120 s, D6 at 170 s, edits at 29 s) | Hold |
 |---|---|---|---|
 | 1 | D1 D2 D3 | 3 x (140 + 120) s = 13 min | 20 min |
-| 2 | D4 D5 D6 | 3 x (140 + 120) s = 13 min | 20 min |
+| 2 | D4 D5 D6 | 2 x (140 + 120) + (140 + 170) s = 13 min 50 s | 20 min |
 | 3 | E1 E2 N1 | 2 x (140 + 29) + (140 + 120) s = 9 min 58 s | 20 min |
 | 4 | N2 R1 and the score | (140 + 120) s + about 14 min if the CPU reference runs to its 96-token cap | 20 min |
 
@@ -390,7 +435,20 @@ changed to pass a gate.**
 - **G7 Pre-run gate.** `cargo fmt --all --check`, clippy `-D warnings`, the stub and linked test suites reported separately,
   `test-rows-v8.sh`, `test-v3.sh`, `test-v5.sh` on the frozen build; combined build from clean checkouts at the pins.
 - **G8 Review and freeze.** An independent review of this file, the tooling and the gate evidence; then every "TO FILL AT
-  FREEZE" is filled, the status line changes, and that change alone merges with Drake's go-ahead.
+  FREEZE" is filled, the status line changes, and that change alone merges with Drake's go-ahead. **Freeze fill
+  prepared as a DRAFT (2026-10-08, status line unchanged):** the eight build pins at 30258fc (re-pinned after the extra hold, sc#360; before that at e27bda8 after the G6 fixes; first filled at 4770703), the model re-hash, the
+  generated declaration (identical, QUALIFICATION_ROWS=334), the campaign-file sha256 list and the daemon `CHECKPOINT_SHARDS`
+  confirmation (G6, all 22 daemon starts) are filled. On e27bda8 (product source identical at 30258fc) the 11 goals were probed again: the 10 positive goals
+  resolve their destination, N1 is refused, and no goal has an uncertain requirement span (`evidence-v5/repin-probes-e27bda8.txt`); the G7 stub gate at 30258fc is `evidence-v5/g7-stub-gate-30258fc.txt`. Still TO FILL AT FREEZE: the GPU hold names (who runs the parts). Any change to a campaign file
+  after this fill means regenerating `evidence-v5/campaign-files.sha256`; any product change means a new build and new pins. The
+  G8 change is therefore the status line plus what it touches: `frozen-v5.json` is a campaign file, so that change also
+  regenerates `campaign-files.sha256`, and the draft-only check of `test-v5.sh` (status says DRAFT, NOT FROZEN) changes to FROZEN.
+  **FROZEN 2026-10-09 (session 166657, Drake's go-ahead 2026-10-09 to freeze and run).** Before the status change, the second extra
+  hold (a7c5d201-oq3-v5-extra-p2, 13:07:40-13:12:09Z, build 30258fc, wrapper 7ec7585) PASSED: the R1-worded identity smoke on
+  the GB10 path matched the CPU reference exactly (R1-X, R1-P, R1-T PASS: 117 prompt tokens, 29 output tokens, finish eos,
+  same reply sha256), and the linked suite (aien-runtime, aien-cli) gave 527 passed, 0 failed, 19 ignored; NVRM count 1533
+  before and after (`evidence-v5/extra-hold-2-30258fc.txt`). This closes the G7 linked suite. The hold names are filled; no
+  pin, goal, row or limit changed.
 
 ## 10. Prediction (stated before any run; UNVERIFIED)
 

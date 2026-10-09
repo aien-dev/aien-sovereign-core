@@ -328,8 +328,8 @@
           "label": "the named sections are headings"
         }
       ],
-      "max_tokens": 1024,
-      "budget_ms": 120000,
+      "max_tokens": 1536,
+      "budget_ms": 170000,
       "seed": null,
       "min_lines": 1,
       "min_code_blocks": 0,
@@ -423,7 +423,7 @@
       ],
       "max_tokens": 96,
       "budget_ms": 120000,
-      "seed": null
+      "seed": "seed-v5/R1"
     }
   ]
 }
