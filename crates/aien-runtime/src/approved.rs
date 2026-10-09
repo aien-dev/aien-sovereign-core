@@ -619,7 +619,9 @@ mod toctou_tests {
         // The seam sits after the compose commit, so firing proves the run reached it.
         assert!(
             fired.load(std::sync::atomic::Ordering::SeqCst),
-            "seam did not fire; refusal was {}: {}", e.name, e.detail
+            "seam did not fire; refusal was {}: {}",
+            e.name,
+            e.detail
         );
         eprintln!(
             "TOCTOU seam fired after compose commit; refusal = {}: {}",
