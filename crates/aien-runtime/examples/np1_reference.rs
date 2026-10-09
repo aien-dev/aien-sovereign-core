@@ -7,7 +7,10 @@
 //! the model's stop set. Prints one JSON object.
 //!
 //! usage: np1_reference <model_dir> <goal> <workspace> <max_tokens> <new|task> [retry reason]
-//!   new  = `proposal_prompt(goal, workspace)` (the v5 template, no edit block)
+//!   new  = the product's NEW-destination prompt (`spine::task_decision`, `TargetClass::New`):
+//!          `proposal_prompt(goal, workspace)` plus `new_document_block` for the destination the
+//!          goal names, from the product's own public pieces, so it still holds after the run wrote
+//!          that destination (the v5 template alone when the goal names none)
 //!   task = `task_prompt(goal, workspace)` on the workspace as it is now
 //!   retry reason: the prompt of attempt k > 1, `retry_prompt(<prompt>, reason)`
 use aien_inference_abi::{ChatTokenizer, SamplingParams};
@@ -95,10 +98,7 @@ async fn main() {
     let (w, _, _) = turn(&mut spine, &mut backend, &wids, 1, &stop)
         .await
         .expect("warm-up");
-    let base = match mode {
-        "new" => aien_runtime::spine::proposal_prompt(goal, &ws.display().to_string()),
-        _ => aien_runtime::spine::task_prompt(goal, &ws),
-    };
+    let base = reference_prompt(mode, goal, &ws);
     let retry = a.get(6).cloned();
     let prompt = match &retry {
         Some(why) => aien_runtime::spine::retry_prompt(&base, why),
@@ -140,4 +140,94 @@ async fn main() {
             "finish": finish, "ms": ms, "reply": reply, "reply_sha256": hex(reply.as_bytes()),
         })
     );
+}
+
+/// The prompt of one reference run. `new` repeats the `TargetClass::New` branch of
+/// `spine::task_decision` (the template plus `new_document_block` for the named
+/// destination) with the product's own functions; it does not call `task_decision`
+/// because the run being replayed may already have written that destination, which
+/// would turn the live decision into an edit. `task` is the product's `task_prompt`
+/// on the workspace as it is now. The tests below hold both byte-equal to the product.
+fn reference_prompt(mode: &str, goal: &str, ws: &std::path::Path) -> String {
+    use aien_runtime::spine::{
+        classify_destination, new_document_block, proposal_prompt, task_prompt,
+    };
+    match mode {
+        "new" => {
+            let mut prompt = proposal_prompt(goal, &ws.display().to_string());
+            if let Some(dest) = classify_destination(goal, ws).1 {
+                prompt.push_str(&new_document_block(&dest));
+            }
+            prompt
+        }
+        _ => task_prompt(goal, ws),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::reference_prompt;
+    use aien_runtime::spine::{task_decision, ProposalKind};
+    use std::path::{Path, PathBuf};
+
+    fn workspace() -> (tempfile::TempDir, PathBuf) {
+        let t = tempfile::tempdir().unwrap();
+        let ws = std::fs::canonicalize(t.path()).unwrap();
+        std::fs::create_dir_all(ws.join("docs")).unwrap();
+        std::fs::write(ws.join("README.md"), "# workspace\n").unwrap();
+        (t, ws)
+    }
+
+    fn product(goal: &str, ws: &Path) -> (String, ProposalKind) {
+        let ((prompt, _, kind), _) = task_decision(goal, ws).unwrap();
+        (prompt, kind)
+    }
+
+    // NEW: a goal naming a missing file (here in a folder that does not exist yet, like
+    // v5 R1). The reference prompt equals the product prompt before the run, and stays
+    // byte-equal to it after the run wrote the destination.
+    #[test]
+    fn new_destination_prompt_equals_the_product_before_and_after_the_write() {
+        let (_t, ws) = workspace();
+        let goal = "Save a one-sentence reminder about stretching the shoulders before swimming into notes/swim-tip.txt.";
+        let (want, kind) = product(goal, &ws);
+        assert_eq!(kind, ProposalKind::Document);
+        assert!(want.ends_with("filename: notes/swim-tip.txt"), "{want}");
+        assert_eq!(reference_prompt("new", goal, &ws), want);
+        std::fs::create_dir_all(ws.join("notes")).unwrap();
+        std::fs::write(ws.join("notes/swim-tip.txt"), "Stretch first.\n").unwrap();
+        assert_eq!(reference_prompt("new", goal, &ws), want);
+    }
+
+    // EDIT: a goal naming an existing file. The reference `task` mode is the product
+    // prompt with the edit block.
+    #[test]
+    fn edit_destination_prompt_equals_the_product() {
+        let (_t, ws) = workspace();
+        std::fs::write(ws.join("docs/plan.md"), "## Steps\n1. Start.\n").unwrap();
+        let goal = "In the existing file docs/plan.md, add the line \"2. Finish.\" at the end.";
+        let (want, kind) = product(goal, &ws);
+        assert_eq!(kind, ProposalKind::Edit);
+        assert!(
+            want.contains("The file docs/plan.md already exists."),
+            "{want}"
+        );
+        assert_eq!(reference_prompt("task", goal, &ws), want);
+    }
+
+    // Plain task: a goal naming no destination. Both reference modes are the product
+    // prompt, the template with no added block.
+    #[test]
+    fn plain_task_prompt_equals_the_product() {
+        let (_t, ws) = workspace();
+        let goal = "Write a short note about brewing green tea.";
+        let (want, kind) = product(goal, &ws);
+        assert_eq!(kind, ProposalKind::Document);
+        assert_eq!(
+            want,
+            aien_runtime::spine::proposal_prompt(goal, &ws.display().to_string())
+        );
+        assert_eq!(reference_prompt("new", goal, &ws), want);
+        assert_eq!(reference_prompt("task", goal, &ws), want);
+    }
 }
