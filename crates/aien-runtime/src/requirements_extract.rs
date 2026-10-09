@@ -18,7 +18,7 @@
 //! | `<noun>` = `lines` (also `non-empty|nonempty|non-blank lines`: lines are counted non-empty anyway), `words`; `items`, `steps`, `sections`, `headings`, `questions`, `paragraphs` (Min only; singular too) | lines, words, list items, numbered steps, headings, questions, paragraphs (`MinParagraphs`: runs of prose lines, see `requirements::count_paragraphs`) |
 //! | `N sentences in|per|for|within every|each section` (or `in every section, ... N sentences`) | `MinSentencesPerSection(N)` |
 //! | `a one-sentence|single-sentence X`, `a single sentence`, `just|only|exactly one sentence` (the only such phrase; no part of the file, edit or addition named in the goal) | `SingleSentence` |
-//! | `containing|with [just|only] one line that says|reads "S"` / `one line saying|reading "S"` | `AddedLines` exactly 1 and `RequiredPhrases([S])` (a final `.` `!` `?` inside quotes that end the goal sentence is not part of S) |
+//! | `containing|with [just|only] one line that says|reads "S"` / `one line saying|reading "S"` | `AddedLines` exactly 1 and `RequiredPhrases([S])` (a final `.` `!` `?` inside quotes that end the goal sentence is not part of S). UNQUOTED text there (also after a destination, `one line to a.md saying S`) is read only as one to three plain words running to the end of the sentence, optionally before one destination file (`saying hello to a.md`); a pronoun or vague word, a joiner (`and then`), an instruction verb or a preposition makes it UNCERTAIN, never dropped (sc#349) |
 //! | `sections|headings titled|named|called A, B and C`, `sections: A, B and C`; with quoted titles also `section(s) is|are titled "A"` and `[one] section(s) must|should|will|shall|can be titled "A"` | `RequiredHeadings` (a count before the noun must equal the number of titles; `organise it under three sections titled ...` is read the same). The is/are/be forms stay UNCERTAIN after `each every all any` or with `if unless optionally optional may might when whenever perhaps maybe` in the clause |
 //! | `between N and M lines|words` (N <= M) | `MinX(N)` and `MaxX(M)`, inclusive. Other nouns, `from N to M`, ranges like `2-3`, `... or so`, and a range on a part of the document (a countable noun or `gap space distance` right before `between`, or `each every per` within three words) stay UNCERTAIN |
 //! | `covers|covering A, B and C` (and `to|should|must|will|can cover ...`) | `RequiredTopics` |
@@ -582,6 +582,118 @@ fn qualifier_ok(toks: &[Tok], j: usize) -> bool {
                 || (w == "in" && toks.get(j + 2).is_some_and(|t| clean(&t.raw) == "total"))
         }
     }
+}
+
+/// Words that make an unquoted "saying S" ambiguous: a pronoun or vague word
+/// (what is said is not named), a joiner (a second clause follows), or a
+/// preposition or instruction verb (S is not a plain phrase).
+const SAID_AMBIGUOUS: &[&str] = &[
+    "it",
+    "them",
+    "this",
+    "that",
+    "these",
+    "those",
+    "something",
+    "anything",
+    "everything",
+    "whatever",
+    "one",
+    "some",
+    "and",
+    "or",
+    "but",
+    "so",
+    "then",
+    "because",
+    "which",
+    "also",
+    "while",
+    "when",
+    "if",
+    "to",
+    "in",
+    "into",
+    "at",
+    "on",
+    "for",
+    "about",
+    "with",
+    "using",
+    "like",
+    "save",
+    "write",
+    "add",
+    "make",
+    "create",
+    "put",
+    "the",
+];
+
+/// sc#349: the unquoted text after `saying|reading|that says|reads`, starting
+/// at token `q`, read as a required phrase: one to three plain words that run to
+/// the end of the sentence, optionally followed by one destination file
+/// (`hello to a.md`). Returns the text and the byte after it; None when it is
+/// wider or ambiguous (see `SAID_AMBIGUOUS`), so the caller marks it uncertain.
+fn unquoted_said(goal: &str, toks: &[Tok], q: usize) -> Option<(String, usize)> {
+    let mut last = (q..toks.len())
+        .find(|&k| ends_sentence(&toks[k].raw))
+        .unwrap_or(toks.len().checked_sub(1)?);
+    // "hello to a.md": a lone path-like word after to|in|into|at is the destination.
+    if last >= q + 2
+        && matches!(toks[last - 1].word.as_str(), "to" | "in" | "into" | "at")
+        && toks[last].word.contains(['.', '/'])
+    {
+        last -= 2;
+    }
+    if last < q || last >= q + 3 {
+        return None;
+    }
+    for (k, t) in toks.iter().enumerate().take(last + 1).skip(q) {
+        let w = plain(&t.raw);
+        if (k < last && t.raw.ends_with([',', '.', ';', ':', '!', '?', ')']))
+            || w.is_empty()
+            || !w
+                .chars()
+                .all(|c| c.is_alphanumeric() || matches!(c, '\'' | '-'))
+            || SAID_AMBIGUOUS.contains(&w)
+        {
+            return None;
+        }
+    }
+    let end = toks[last].end;
+    let text = goal[toks[q].start..end].trim_end_matches([',', '.', ';', ':', '!', '?']);
+    Some((text.to_string(), end))
+}
+
+/// sc#336 / sc#349: the "saying" clause of a line, `noun` being the token of
+/// `line|lines`: `that says|reads S`, `saying|reading S`, also after one
+/// destination file (`to a.md saying S`). None when there is no such clause;
+/// Ok((S, end byte)) when S is read (quoted whole, or a short plain unquoted
+/// phrase, see `unquoted_said`); Err(()) when S is there but cannot be read.
+fn said_clause(goal: &str, toks: &[Tok], noun: usize) -> Option<Result<(String, usize), ()>> {
+    let w = |k: usize| toks.get(k).map(|t| t.word.as_str());
+    let at = if matches!(w(noun + 1), Some("to" | "in" | "into" | "at"))
+        && w(noun + 2).is_some_and(|p| p.contains(['.', '/']))
+    {
+        noun + 3
+    } else {
+        noun + 1
+    };
+    let q = match (w(at), w(at + 1)) {
+        (Some("that"), Some("says" | "reads" | "say" | "read")) => at + 2,
+        (Some("saying" | "reading"), _) => at + 1,
+        _ => return None,
+    };
+    if toks.get(q).is_none() {
+        return Some(Err(()));
+    }
+    let said = if toks[q].raw.starts_with(['"', '\u{201C}']) {
+        quoted_at(goal, toks, q)
+    } else {
+        unquoted_said(goal, toks, q)
+    };
+    Some(said.ok_or(()))
 }
 
 /// Mark the tokens that start inside the byte range as consumed.
@@ -1632,6 +1744,21 @@ pub fn analyze(goal: &str) -> Extraction {
         } else {
             parse_num(&t.word)
         };
+        // "add|write a line saying hello" (sc#349): no count is measured, but the
+        // text it names is required (or uncertain), never dropped
+        if t.word == "line" && i > 0 && matches!(toks[i - 1].word.as_str(), "a" | "an") {
+            match said_clause(goal, &toks, i) {
+                Some(Ok((phrase, end))) => {
+                    if !phrases.contains(&phrase) {
+                        phrases.push(phrase);
+                    }
+                    mark_bytes(&mut handled, &toks, toks[i].end, end);
+                }
+                Some(Err(())) => bad(&mut unsure, i + 1, false),
+                None => {}
+            }
+            continue;
+        }
         let (Num::Val(v), Some(noun)) = (num, toks.get(i + 1).map(|t| t.word.as_str())) else {
             continue;
         };
@@ -1663,28 +1790,18 @@ pub fn analyze(goal: &str) -> Extraction {
             // "one line that says|reads \"S\"", "one line saying \"S\"" (sc#336):
             // that line holds S. A final . ! ? inside quotes that close the goal
             // sentence is the goal's own punctuation and is not required.
-            if v == 1 && exact && !bound {
-                let w = |k: usize| toks.get(k).map(|t| t.word.as_str());
-                let q = match (w(i + 2), w(i + 3)) {
-                    (Some("that"), Some("says" | "reads")) => Some(i + 4),
-                    (Some("saying" | "reading"), _) => Some(i + 3),
-                    _ => None,
-                };
-                // only a quoted S is read; an unquoted one keeps the older reading
-                let quoted = q.filter(|&q| {
-                    toks.get(q)
-                        .is_some_and(|t| t.raw.starts_with(['"', '\u{201C}']))
-                });
-                match quoted.map(|q| quoted_at(goal, &toks, q)) {
-                    Some(Some((phrase, end))) => {
+            // A saying clause on a counted line is never dropped: one line (exact
+            // or "at least one") reads S, any other count (or a lower bound) is
+            // uncertain (sc#349).
+            if let Some(said) = said_clause(goal, &toks, i + 1) {
+                match said {
+                    Ok((phrase, end)) if v == 1 && !bound => {
                         if !phrases.contains(&phrase) {
                             phrases.push(phrase);
                         }
                         mark_bytes(&mut handled, &toks, toks[i + 1].end, end);
                     }
-                    // what the line says cannot be read whole: never drop it
-                    Some(None) => bad(&mut unsure, i + 2, false),
-                    None => {}
+                    _ => bad(&mut unsure, i + 2, false),
                 }
             }
         }
