@@ -2425,7 +2425,13 @@ pub fn analyze(goal: &str) -> Extraction {
             let under_read = toks[s].norm == "under"
                 && handled.contains(&i)
                 && ((s >= 1 && organise(s - 1)) || (s >= 2 && organise(s - 2)));
-            if looks_numeric && (noun_near || num_at == Some(Num::Bad)) && !under_read {
+            // a bound cue and a number nothing above read: read or UNCERTAIN, never
+            // ignored ("at most 40 please", "fix at least 2 typos") (#344)
+            let unread_bound =
+                !vague && matches!(num_at, Some(Num::Val(_))) && !handled.contains(&i);
+            if ((looks_numeric && (noun_near || num_at == Some(Num::Bad))) || unread_bound)
+                && !under_read
+            {
                 bad(&mut unsure, s, true);
                 continue;
             }

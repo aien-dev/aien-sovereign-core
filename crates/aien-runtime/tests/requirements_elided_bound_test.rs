@@ -207,3 +207,32 @@ fn bound_cue_with_bare_number_and_no_antecedent_is_uncertain() {
         assert!(ex.requirements.is_empty(), "{g:?}: {:?}", ex.requirements);
     }
 }
+
+#[test]
+fn every_bound_cue_with_a_number_is_read_or_uncertain() {
+    for g in [
+        "Keep it at most 40 please",
+        "Keep it to no more than 40, thanks.",
+        "Include at least 2 of them",
+        "Fix at least 2 typos in README.md",
+        "Write at least 20 lines and fix at least 2 typos.",
+        "Use not more than 3 colours.",
+        "Use not less than 3 colours.",
+    ] {
+        let ex = analyze(g);
+        assert!(!ex.uncertain.is_empty(), "{g:?} silent: {ex:?}");
+    }
+    // still read, not uncertain
+    assert_eq!(read("Write at most 40 lines please."), [MaxLines(40)]);
+    for g in [
+        "Fix 2 typos in README.md",
+        "Update section 3",
+        "Use Python 3",
+    ] {
+        let ex = analyze(g);
+        assert!(
+            ex.uncertain.is_empty() && ex.requirements.is_empty(),
+            "{g:?}"
+        );
+    }
+}
