@@ -70,21 +70,21 @@
           "purpose": ""
         },
         {
-          "digest": "ef1840de79311e5684993b0e0b66e0a9fce42a2d7966506201686ae5f8084a98",
+          "digest": "ac32ed84159cae1f43f3b5d2307b2a1ab04ea580c8f96c1f52566a7f21cca0b0",
           "last_commit": "8b5caed",
           "name": "skills",
           "purpose": ""
         }
       ],
-      "children_root": "sha256:20c95358a2e6cde016bc1a6b9d07b1ed5500de7131c7eb30982592664870658c",
-      "compiled_at": "2026-10-09T15:22:56Z",
+      "children_root": "sha256:9f52af6646e027e9ee559d1715bf3979e963ad638fe61f0c882b7a01a5f19654",
+      "compiled_at": "2026-10-09T21:32:49Z",
       "compiler": "crumb-compile/1",
-      "digest": "sha256:ce8646a619112f8c35c6d9b3e1148ec8cb62104c3e0b55e9406f1f89ed29f9a0",
+      "digest": "sha256:eb80ee528b5b244f10a8a1337cd72fd5faf4eb5d3cf60bc495f72e2a8574c57e",
       "evidence_files": 187,
       "evidence_root": "sha256:27ee0353cb4d4aae2b7dbce2bfe0d9f4ef2a94cd7a4555b84684d59372503280",
       "files": 1850,
-      "generated_at_commit": "149456df3e2ee45497847c00790541bee3ac9a12",
-      "source_tree": "sha256:9217db9dd539d13ac1b3d60b748dfbcfd45491f5a25bb74f0662295cd1fc7d52"
+      "generated_at_commit": "df60af9215d57c3e6a37f476caba05ef3b2cf384",
+      "source_tree": "sha256:cbeeb7688173520a0d86a1b81f7565abf4d1649cddbe48c721bfb47ddcd0c3e3"
     }
   },
   "history": [],

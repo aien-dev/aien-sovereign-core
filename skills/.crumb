@@ -63,7 +63,7 @@
           "purpose": ""
         },
         {
-          "digest": "784393e353934cb6ed8f5c06c99a3570f3d69552ecdfda8416c70daa15340ecd",
+          "digest": "5c53b4ecd62e0faa383da295b44842cd3f7d2d6c41f5b432757e3f5f0e361245",
           "last_commit": "b2fef5c",
           "name": "self-improvement",
           "purpose": ""
@@ -75,15 +75,15 @@
           "purpose": ""
         }
       ],
-      "children_root": "sha256:1130b3b1c623cc53d3b7b23406bb57e1bd930ff3955dc51cc28c37d4ee40136c",
-      "compiled_at": "2026-10-04T15:35:46Z",
+      "children_root": "sha256:b84fd33f93982c0d0f78d560d7ac7a9d0c6df559fd3872d4f5bb03c75ea2bb4b",
+      "compiled_at": "2026-10-09T21:32:49Z",
       "compiler": "crumb-compile/1",
-      "digest": "sha256:ef1840de79311e5684993b0e0b66e0a9fce42a2d7966506201686ae5f8084a98",
+      "digest": "sha256:ac32ed84159cae1f43f3b5d2307b2a1ab04ea580c8f96c1f52566a7f21cca0b0",
       "evidence_files": 0,
       "evidence_root": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
       "files": 10,
-      "generated_at_commit": "c848c7bf9ada87072c5f1ecb2b36142de106ef66",
-      "source_tree": "sha256:c7d4d49cf2a89272eadee053733413c757eb02d5a2aea852de03c5605d269ac4"
+      "generated_at_commit": "df60af9215d57c3e6a37f476caba05ef3b2cf384",
+      "source_tree": "sha256:fbe818262c8e6a6dff3417d6265ec5ebf15dbaf7650dd9132dd65cd767e66d7a"
     }
   },
   "history": [
