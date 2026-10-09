@@ -148,6 +148,10 @@ async fn main() {
 /// because the run being replayed may already have written that destination, which
 /// would turn the live decision into an edit. `task` is the product's `task_prompt`
 /// on the workspace as it is now. The tests below hold both byte-equal to the product.
+/// Limit: a word without an extension is a destination only once it exists as a file
+/// (`destination::path_like`), so a goal like "save it into notes/tea" can gain the block
+/// after the run wrote `notes/tea`; name replayed destinations with an extension (v5 R1:
+/// `notes/swim-tip.txt`).
 fn reference_prompt(mode: &str, goal: &str, ws: &std::path::Path) -> String {
     use aien_runtime::spine::{
         classify_destination, new_document_block, proposal_prompt, task_prompt,
