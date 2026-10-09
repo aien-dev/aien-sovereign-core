@@ -28,7 +28,7 @@
   "whispers": [
     {
       "author": "AIEN",
-      "message": "browser_mirror_test.py drives headless Chrome via native CDP on port 9222 to test Cockpit UI.",
+      "message": "browser_mirror_test.py (headless Chrome via native CDP on port 9222) was removed from the sovereign build; the Rust browser test is tracked in sovereign-core #180.",
       "timestamp": "2026-09-18T14:50:00Z",
       "whisper_id": "browser-mirror-verified"
     }

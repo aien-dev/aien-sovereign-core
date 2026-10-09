@@ -87,62 +87,18 @@ curl -s http://127.0.0.1:18085/pulse
 Outputs heartbeat BPM, coherence score, secret hygiene posture, and territory maps.
 
 ### Manual Cycle Trigger and Integration Verification
-```bash
-~/max-env/bin/python ~/basecamp/aien-dream/dream_engine.py --test
-~/max-env/bin/python ~/basecamp/aien-dream/dream_engine.py --now
-```
-Verifies live scoring against JSpace Truth Judge on port 18082 and permanent storage into Spark Cortex on port 18080.
+The Python dream engine (basecamp/aien-dream/dream_engine.py) was removed from the sovereign build (sovereign-core #181). The `/dream` command in `aien` now says so and points to the native `spark-dream` binary for dream telemetry. A manual cycle trigger and the scoring/storage verification are unavailable until a native replacement lands.
 
 ## 4. Headless Browser Mirror and Mentor Harness
 
-AIEN can verify his own Cockpit UI and converse with himself via headless Chrome and Chrome DevTools Protocol (CDP):
+AIEN's headless-Chrome Cockpit mirror (Chrome DevTools Protocol) was a Python script outside this repository (basecamp/scripts/browser_mirror_test.py). It was removed from the sovereign build (sovereign-core #181). Today `aien --browser` and `aien --browser mentor "<prompt>"` run, but both report `status: error` ("browser action ... is unavailable"). The assertion self-test and self-mentoring steps are unavailable until the Rust browser test lands (sovereign-core #180). Do not run the old script by hand.
 
-### Assertion Self-Test
-```bash
-aien --browser
-```
-Or directly:
-```bash
-~/max-env/bin/python ~/basecamp/scripts/browser_mirror_test.py --test
-```
-Verifies:
-1. Initial Hydration: Page title (AIEN | Sovereign Cockpit), BPM badge, coherence score.
-2. Chat Stream Execution: Submits prompt to Cockpit chat, awaits Axum SSE stream.
-3. Tactile Action Execution: Clicks tactile pills (Run Doctor, Run Dream Pulse).
-4. Tab Navigation: Goals, Skills, Cortex, and Walkthrough panes.
-5. Visual Artifacts: Saved to ~/basecamp/ui-tests/:
-   - cockpit_init.png
-   - cockpit_chat_stream.png
-   - cockpit_actions.png
-
-### Self-Mentoring Mode
-```bash
-aien --browser mentor "AIEN, explain your sandbox test and self-improvement architecture."
-```
-Or directly:
-```bash
-~/max-env/bin/python ~/basecamp/scripts/browser_mirror_test.py --mentor "Challenge prompt"
-```
-Captures live assistant response and stores screenshot in ~/basecamp/ui-tests/cockpit_mentor_response.png.
+When #180 lands, restore here: the self-test checks (hydration, chat stream, tactile actions, tab navigation) and the screenshots saved under ~/basecamp/ui-tests/.
 
 ## 5. Cortex Memory Commitment
 
-Record durable procedure receipts to Spark Cortex in atlas-memory space:
-```bash
-python3 -c '
-import urllib.request, json
-token = open("~/.config/cortex/token").read().strip()
-payload = {
-    "kind": "entity",
-    "value": {
-        "space": "atlas-memory",
-        "entityType": "procedure",
-        "canonicalName": "sovereign_self_improvement_loop",
-        "content": "Verified self-improvement procedure: isolated git worktree in ~/workspace/aien-sandbox, headless Chrome CDP mirror self-test on port 9222, JSpace dream cycle on port 18085, and Microsoft SkillOpt validation gate.",
-        "metadata": {"source": "skills/self-improvement", "author": "AIEN"}
-    }
-}
-req = urllib.request.Request("http://127.0.0.1:18080/api/cortex/write", data=json.dumps(payload).encode(), headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"})
-urllib.request.urlopen(req)
-'
+Record a durable procedure receipt to Spark Cortex from inside `aien`, using the built-in command (name, a vertical bar, then the content):
 ```
+/cortex write sovereign_self_improvement_loop | Verified self-improvement procedure: isolated git worktree in ~/workspace/aien-sandbox, JSpace dream telemetry via spark-dream, and Microsoft SkillOpt validation gate.
+```
+The command reads CORTEX_TOKEN from the AIEN vault and prints the receipt id; check it with `/cortex search sovereign_self_improvement_loop`.
