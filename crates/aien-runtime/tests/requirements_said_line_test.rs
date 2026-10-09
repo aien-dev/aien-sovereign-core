@@ -64,20 +64,7 @@ fn an_ambiguous_unquoted_phrase_is_uncertain_never_dropped() {
 #[test]
 fn unrelated_numbers_and_words_are_unchanged() {
     assert!(read("Fix 2 typos in README.md").is_empty());
-    assert!(read("Add a line saying hello to a.md").is_empty());
-}
-
-/// tasks-v5 goals (docs/campaigns/next-phase-1/tasks-v5.json), verbatim.
-#[test]
-fn v5_campaign_goals_read_as_before() {
-    for goal in [
-        "Create the file NOTES.md with a short plain-text note that says the project keeps every change inside its workspace.",
-        "Create the file docs/CONTACT.txt with one line giving the maintainer name Ada Lovelace and the email ada@example.org.",
-        "Create the file TODO.md listing three tasks: write tests, update the changelog, tag the release.",
-    ] {
-        let ex = analyze(goal);
-        println!("V5 {goal}\n  -> {:?} | uncertain {:?}", ex.requirements, ex.uncertain);
-    }
+    assert!(read("Add a line to a.md").is_empty());
 }
 
 #[test]
@@ -120,12 +107,20 @@ fn linked_compose_does_not_commit_a_line_without_the_phrase() {
     };
     assert!(!r.committed, "{r:?}");
     assert!(r.proposal.is_none());
+    assert!(
+        r.proposer_error
+            .as_deref()
+            .is_some_and(|e| e.contains("hello")),
+        "{r:?}"
+    );
+    assert_eq!(r.proposal_attempts.len(), 3, "{:?}", r.proposal_attempts);
     assert!(!ws.join("a.md").exists());
     let ControlResponse::ComposeTaskResult(ok) = run("filename: a.md\nhello\n", "c2") else {
         panic!()
     };
     assert!(ok.committed, "{ok:?}");
-    assert_eq!(std::fs::read_to_string(ws.join("a.md")).unwrap(), "hello\n");
+    // committed = the proposal is approved for write authorization with these exact bytes
+    assert_eq!(ok.proposal.as_deref(), Some("filename: a.md\nhello\n"));
 }
 
 /// The compose verification boundary that runs without the linked compose
@@ -158,4 +153,43 @@ fn the_proposal_boundary_approves_only_the_line_with_the_phrase() {
     };
     assert!(go("filename: a.md\ngoodbye\n").is_err());
     assert!(go("filename: a.md\nhello\n").is_ok());
+}
+
+/// A saying clause on a line is never silently dropped, whatever the count
+/// wording: it is read (one line, short plain phrase) or uncertain.
+#[test]
+fn a_saying_clause_on_any_line_wording_is_read_or_uncertain() {
+    // not exact ("write" means at least) but a single line with a plain phrase: read
+    for (goal, phrase) in [
+        ("Write one line saying hello to a.md", "hello"),
+        ("Write a line saying hello to a.md", "hello"),
+        ("Add a line that says hello.", "hello"),
+        ("Write a line saying \"hello there\"", "hello there"),
+    ] {
+        let r = read(goal);
+        assert!(
+            r.contains(&RequiredPhrases(vec![phrase.to_string()])),
+            "{goal}: {r:?}"
+        );
+    }
+    // another count, or a bound, cannot say what each line holds: uncertain
+    for goal in [
+        "Add 2 lines saying hi to a.md",
+        "Write three lines saying hello",
+        "Add 2 lines that say hi",
+        "Add at least 3 lines saying hi to a.md",
+        "Write a line saying hello and then save it",
+        "Write a line saying something nice",
+        "Add one line saying",
+    ] {
+        let ex = analyze(goal);
+        assert!(
+            !ex.uncertain.is_empty(),
+            "{goal:?} must be uncertain, got {:?}",
+            ex.requirements
+        );
+    }
+    // unrelated numbers and words stay as they were
+    assert!(read("Fix 2 typos in README.md").is_empty());
+    assert!(read("Add a line to a.md").is_empty());
 }

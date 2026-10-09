@@ -666,6 +666,36 @@ fn unquoted_said(goal: &str, toks: &[Tok], q: usize) -> Option<(String, usize)> 
     Some((text.to_string(), end))
 }
 
+/// sc#336 / sc#349: the "saying" clause of a line, `noun` being the token of
+/// `line|lines`: `that says|reads S`, `saying|reading S`, also after one
+/// destination file (`to a.md saying S`). None when there is no such clause;
+/// Ok((S, end byte)) when S is read (quoted whole, or a short plain unquoted
+/// phrase, see `unquoted_said`); Err(()) when S is there but cannot be read.
+fn said_clause(goal: &str, toks: &[Tok], noun: usize) -> Option<Result<(String, usize), ()>> {
+    let w = |k: usize| toks.get(k).map(|t| t.word.as_str());
+    let at = if matches!(w(noun + 1), Some("to" | "in" | "into" | "at"))
+        && w(noun + 2).is_some_and(|p| p.contains(['.', '/']))
+    {
+        noun + 3
+    } else {
+        noun + 1
+    };
+    let q = match (w(at), w(at + 1)) {
+        (Some("that"), Some("says" | "reads" | "say" | "read")) => at + 2,
+        (Some("saying" | "reading"), _) => at + 1,
+        _ => return None,
+    };
+    if toks.get(q).is_none() {
+        return Some(Err(()));
+    }
+    let said = if toks[q].raw.starts_with(['"', '\u{201C}']) {
+        quoted_at(goal, toks, q)
+    } else {
+        unquoted_said(goal, toks, q)
+    };
+    Some(said.ok_or(()))
+}
+
 /// Mark the tokens that start inside the byte range as consumed.
 fn mark_bytes(handled: &mut std::collections::BTreeSet<usize>, toks: &[Tok], lo: usize, hi: usize) {
     for (i, t) in toks.iter().enumerate() {
@@ -1714,6 +1744,21 @@ pub fn analyze(goal: &str) -> Extraction {
         } else {
             parse_num(&t.word)
         };
+        // "add|write a line saying hello" (sc#349): no count is measured, but the
+        // text it names is required (or uncertain), never dropped
+        if t.word == "line" && i > 0 && matches!(toks[i - 1].word.as_str(), "a" | "an") {
+            match said_clause(goal, &toks, i) {
+                Some(Ok((phrase, end))) => {
+                    if !phrases.contains(&phrase) {
+                        phrases.push(phrase);
+                    }
+                    mark_bytes(&mut handled, &toks, toks[i].end, end);
+                }
+                Some(Err(())) => bad(&mut unsure, i + 1, false),
+                None => {}
+            }
+            continue;
+        }
         let (Num::Val(v), Some(noun)) = (num, toks.get(i + 1).map(|t| t.word.as_str())) else {
             continue;
         };
@@ -1745,51 +1790,18 @@ pub fn analyze(goal: &str) -> Extraction {
             // "one line that says|reads \"S\"", "one line saying \"S\"" (sc#336):
             // that line holds S. A final . ! ? inside quotes that close the goal
             // sentence is the goal's own punctuation and is not required.
-            if v == 1 && exact && !bound {
-                let w = |k: usize| toks.get(k).map(|t| t.word.as_str());
-                // "one line to notes/TODO.md saying buy milk" (sc#349): skip a destination
-                let at = if matches!(w(i + 2), Some("to" | "in" | "into" | "at"))
-                    && w(i + 3).is_some_and(|p| p.contains(['.', '/']))
-                {
-                    i + 4
-                } else {
-                    i + 2
-                };
-                let q = match (w(at), w(at + 1)) {
-                    (Some("that"), Some("says" | "reads")) => Some(at + 2),
-                    (Some("saying" | "reading"), _) => Some(at + 1),
-                    _ => None,
-                };
-                // a quoted S is read whole; an unquoted one by `unquoted_said` (sc#349)
-                let quoted = q.filter(|&q| {
-                    toks.get(q)
-                        .is_some_and(|t| t.raw.starts_with(['"', '\u{201C}']))
-                });
-                match quoted.map(|q| quoted_at(goal, &toks, q)) {
-                    Some(Some((phrase, end))) => {
+            // A saying clause on a counted line is never dropped: one line (exact
+            // or "at least one") reads S, any other count (or a lower bound) is
+            // uncertain (sc#349).
+            if let Some(said) = said_clause(goal, &toks, i + 1) {
+                match said {
+                    Ok((phrase, end)) if v == 1 && !bound => {
                         if !phrases.contains(&phrase) {
                             phrases.push(phrase);
                         }
                         mark_bytes(&mut handled, &toks, toks[i + 1].end, end);
                     }
-                    // what the line says cannot be read whole: never drop it
-                    Some(None) => bad(&mut unsure, i + 2, false),
-                    // sc#349: an unquoted S is read only when it is a short plain
-                    // phrase running to the end of its sentence (or to a trailing
-                    // destination file); anything wider is uncertain, never dropped
-                    None => {
-                        if let Some(q) = q {
-                            match unquoted_said(goal, &toks, q) {
-                                Some((phrase, end)) => {
-                                    if !phrases.contains(&phrase) {
-                                        phrases.push(phrase);
-                                    }
-                                    mark_bytes(&mut handled, &toks, toks[i + 1].end, end);
-                                }
-                                None => bad(&mut unsure, i + 2, false),
-                            }
-                        }
-                    }
+                    _ => bad(&mut unsure, i + 2, false),
                 }
             }
         }

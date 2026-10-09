@@ -466,6 +466,10 @@ fn lower_bound_after_the_noun_and_single_line() {
         [added(1, true), RequiredPhrases(vec!["hello".to_string()])]
     );
     // No explicit count: nothing is measured (documented): "a line" is not a number word.
-    assert!(reqs("Add a line saying hello to a.md").is_empty());
+    // sc#349: no count is measured, but what the line says is still required
+    assert_eq!(
+        reqs("Add a line saying hello to a.md"),
+        [RequiredPhrases(vec!["hello".to_string()])]
+    );
     assert!(reqs("Add a couple of lines or a few to a.md").is_empty());
 }
