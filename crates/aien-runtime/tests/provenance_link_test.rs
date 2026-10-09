@@ -15,6 +15,9 @@
 //! the report as JSON, so the test is the same on a build without the link.
 //! Every test needs the linked composition archive and is IGNORED in a stub
 //! build, never passed.
+#[path = "support/home_guard.rs"]
+mod home_guard;
+
 #[path = "../../aien-allen/tests/support/mod.rs"]
 mod support;
 
@@ -370,6 +373,7 @@ async fn assert_linked(d: &Daemon, f: &Flow, want_agent: &str) {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[cfg_attr(not(compose_linked), ignore = "needs librx_compose.a: stub build")]
 async fn commit_names_generation_record_and_no_agent_when_none_is_attached() {
+    let _home = home_guard::home_slot();
     let _g = ONE_HOME.lock().await;
     std::env::remove_var(ENV_SUBJECT);
     std::env::remove_var(ENV_ADOPT);
@@ -391,6 +395,7 @@ fn home_lineage(home: &Path) -> [u8; 32] {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[cfg_attr(not(compose_linked), ignore = "needs librx_compose.a: stub build")]
 async fn commit_names_generation_record_and_the_allen_logical_agent_id() {
+    let _home = home_guard::home_slot();
     let _g = ONE_HOME.lock().await;
     std::env::remove_var(ENV_SUBJECT);
     std::env::remove_var(ENV_ADOPT);
@@ -425,6 +430,7 @@ async fn commit_names_generation_record_and_the_allen_logical_agent_id() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[cfg_attr(not(compose_linked), ignore = "needs librx_compose.a: stub build")]
 async fn no_model_identity_means_no_generation_claim_and_the_flow_still_works() {
+    let _home = home_guard::home_slot();
     let _g = ONE_HOME.lock().await;
     std::env::remove_var(ENV_SUBJECT);
     std::env::remove_var(ENV_ADOPT);
@@ -444,6 +450,7 @@ async fn no_model_identity_means_no_generation_claim_and_the_flow_still_works() 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[cfg_attr(not(compose_linked), ignore = "needs librx_compose.a: stub build")]
 async fn an_old_ledger_without_provenance_still_opens_and_runs() {
+    let _home = home_guard::home_slot();
     let _g = ONE_HOME.lock().await;
     std::env::remove_var(ENV_SUBJECT);
     std::env::remove_var(ENV_ADOPT);
@@ -511,6 +518,7 @@ async fn an_old_ledger_without_provenance_still_opens_and_runs() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[cfg_attr(not(compose_linked), ignore = "needs librx_compose.a: stub build")]
 async fn a_client_cannot_set_the_provenance_fields() {
+    let _home = home_guard::home_slot();
     let _g = ONE_HOME.lock().await;
     std::env::remove_var(ENV_SUBJECT);
     std::env::remove_var(ENV_ADOPT);

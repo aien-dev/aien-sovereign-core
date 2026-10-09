@@ -1,6 +1,9 @@
 //! ALLEN memory commands over the runtime socket (arch#159): routing only. ALLEN is not engaged here, so status answers "not_engaged" and a
 //! change is refused. In a stub omega build the compose home cannot open and
 //! the daemon says so (the answer is an error, never a made-up identity).
+#[path = "support/home_guard.rs"]
+mod home_guard;
+
 use aien_allen::ENV_SUBJECT;
 use aien_inference_abi::MockInferenceBackend;
 use aien_kv_cache::create_shared_kv_manager;
@@ -13,6 +16,7 @@ use std::time::Duration;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn allen_memory_commands_route_through_the_socket() {
+    let _home = home_guard::home_slot();
     let tmp = tempfile::tempdir().unwrap();
     // Only this test binary sets these; one test per binary avoids env races.
     std::env::set_var("AIEN_COMPOSE_DIR", tmp.path().join("compose"));

@@ -2292,6 +2292,7 @@ mod tests {
     /// A record that names a nonexistent generation id is refused at write time.
     #[test]
     fn a_commit_naming_no_generation_record_is_not_written() {
+        let _home = crate::home_guard::home_slot();
         use crate::generation::Provenance;
         use crate::spine::{ComposeBridge, Generation};
         if !aien_omega_compose::LINKED {
@@ -2528,6 +2529,7 @@ mod tests {
     /// hash and `base` is refused as BaseChanged.)
     #[test]
     fn write_approved_grant_records_the_prior_of_the_confined_file() {
+        let _home = crate::home_guard::home_slot();
         use crate::spine::{ComposeBridge, Generation};
         if !aien_omega_compose::LINKED {
             eprintln!("NOT_RUN: stub compose build");

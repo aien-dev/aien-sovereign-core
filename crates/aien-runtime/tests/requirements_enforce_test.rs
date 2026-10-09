@@ -2,6 +2,9 @@
 //! (crate::requirements, crate::requirements_extract). Covers the two
 //! open-model-qwen3 v3 gaps (G3 "with" after a count, G2 "covers" topics),
 //! the uncertain-span refusal and the missing-record refusal (#289).
+#[path = "support/home_guard.rs"]
+mod home_guard;
+
 use aien_runtime::control::ControlResponse;
 use aien_runtime::requirements::{analyze, extract, refusal_reason, ItemKind, Requirement};
 use aien_runtime::spine::{
@@ -468,6 +471,7 @@ fn result(resp: ControlResponse) -> Option<aien_runtime::control::ComposeTaskRep
 
 #[test]
 fn linked_uncertain_goal_is_refused_before_any_model_call() {
+    let _home = home_guard::home_slot();
     let tmp = tempfile::tempdir().unwrap();
     let ws = tmp.path().join("ws");
     std::fs::create_dir_all(&ws).unwrap();
@@ -495,6 +499,7 @@ fn linked_uncertain_goal_is_refused_before_any_model_call() {
 
 #[test]
 fn linked_g3_original_reply_is_refused_then_a_good_reply_commits_exact_bytes() {
+    let _home = home_guard::home_slot();
     let tmp = tempfile::tempdir().unwrap();
     let ws = tmp.path().join("ws");
     std::fs::create_dir_all(&ws).unwrap();
@@ -519,6 +524,7 @@ fn linked_g3_original_reply_is_refused_then_a_good_reply_commits_exact_bytes() {
 
 #[test]
 fn linked_g2_original_reply_exhausts_and_nothing_is_written() {
+    let _home = home_guard::home_slot();
     let tmp = tempfile::tempdir().unwrap();
     let ws = tmp.path().join("ws");
     std::fs::create_dir_all(&ws).unwrap();

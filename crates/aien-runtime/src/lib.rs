@@ -22,6 +22,11 @@ pub mod spine;
 pub mod swarm;
 pub mod world;
 
+/// Test-only: one slot per process for tests that open a compose home (omega allows 4 handles).
+#[cfg(test)]
+#[path = "../tests/support/home_guard.rs"]
+mod home_guard;
+
 pub use aien_kv_cache::create_shared_kv_manager;
 pub use aien_scheduler::SchedulerConfig;
 pub use client::*;

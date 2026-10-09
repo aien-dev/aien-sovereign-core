@@ -5,6 +5,9 @@
 //! Part A needs no composition library and always runs. Part B (marked
 //! `b_*`) re-executes this binary against a real compose home and reports
 //! NOT_RUN in a stub omega build, like allen_spine_test.
+#[path = "support/home_guard.rs"]
+mod home_guard;
+
 #[path = "../../aien-allen/tests/support/mod.rs"]
 mod support;
 
@@ -470,6 +473,7 @@ fn child(home: &Path, ws: Option<&Path>, env: &[(&str, &str)]) -> (i32, String, 
 
 #[test]
 fn b_engaged_task_uses_the_persona_and_a_reply_cannot_change_it() {
+    let _home = home_guard::home_slot();
     if !LINKED {
         println!("NOT_RUN: stub omega build (no librx_compose.a); set AIEN_OMEGA_COMPOSE_DIR");
         return;

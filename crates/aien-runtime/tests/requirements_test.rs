@@ -1,4 +1,7 @@
 //! Requirement validation for composed documents (crate::requirements).
+#[path = "support/home_guard.rs"]
+mod home_guard;
+
 use aien_runtime::approved::{approved_proposal_sha256, proposal_text};
 use aien_runtime::control::ControlResponse;
 use aien_runtime::effects;
@@ -279,6 +282,7 @@ fn edit_mode_validates_the_merged_file_not_the_reply() {
 
 #[test]
 fn unmet_requirement_leaves_nothing_committed_or_written() {
+    let _home = home_guard::home_slot();
     let tmp = tempfile::tempdir().unwrap();
     let ws = tmp.path().join("ws");
     std::fs::create_dir_all(&ws).unwrap();
@@ -327,6 +331,7 @@ fn dir_names(d: &std::path::Path) -> Vec<String> {
 /// proposed, approved, written, committed or recorded as an effect.
 #[test]
 fn linked_exhaustion_leaves_ledger_state_and_files_untouched() {
+    let _home = home_guard::home_slot();
     let tmp = tempfile::tempdir().unwrap();
     let ws = tmp.path().join("ws");
     std::fs::create_dir_all(&ws).unwrap();
@@ -405,6 +410,7 @@ fn linked_exhaustion_leaves_ledger_state_and_files_untouched() {
 /// sha256(disk) == the approved content sha256.
 #[test]
 fn linked_passing_document_is_approved_and_saved_byte_for_byte() {
+    let _home = home_guard::home_slot();
     let tmp = tempfile::tempdir().unwrap();
     let ws = tmp.path().join("ws");
     std::fs::create_dir_all(&ws).unwrap();

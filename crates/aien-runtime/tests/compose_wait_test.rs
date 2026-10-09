@@ -1,6 +1,9 @@
 //! The omega settle wait really set before each run, and the target-kind
 //! decision (existing path => Edit/refused, missing path => Document).
 //! One test binary, one wait test: `LAST_WAIT_MS` is process-global.
+#[path = "support/home_guard.rs"]
+mod home_guard;
+
 use aien_runtime::control::ControlResponse;
 use aien_runtime::spine::{
     classify_target, propose_task_with_retries, task_plan, ComposeBridge, ComposeBudgets,
@@ -15,6 +18,7 @@ use std::time::Duration;
 #[test]
 #[cfg_attr(not(compose_linked), ignore = "needs librx_compose.a: stub build")]
 fn run_task_sets_omega_wait_to_budget_plus_margin_for_both_kinds() {
+    let _home = home_guard::home_slot();
     let tmp = tempfile::tempdir().unwrap();
     let ws = tmp.path().join("ws");
     std::fs::create_dir_all(&ws).unwrap();

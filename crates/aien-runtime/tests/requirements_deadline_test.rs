@@ -2,6 +2,9 @@
 //! second attempt passes: both attempts happen inside the ONE per-task document
 //! deadline (a short injected budget), and the bytes saved are the bytes approved.
 //! Own test binary: it sets a process-global environment variable.
+#[path = "support/home_guard.rs"]
+mod home_guard;
+
 use aien_runtime::control::ControlResponse;
 use aien_runtime::requirements::extract;
 use aien_runtime::spine::{
@@ -31,6 +34,7 @@ fn reply(text: String) -> Result<Generation, String> {
 
 #[test]
 fn requirement_retry_stays_inside_the_single_document_deadline_and_saves_approved_bytes() {
+    let _home = home_guard::home_slot();
     std::env::set_var(COMPOSE_DOC_BUDGET_ENV, "6000");
     let budget = compose_budgets_from_env().unwrap().doc;
     assert_eq!(budget, Duration::from_millis(6000));

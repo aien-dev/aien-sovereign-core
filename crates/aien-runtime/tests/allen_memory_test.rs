@@ -8,6 +8,9 @@
 //! and always runs. Part B (`b_*`) runs a real compose home in child
 //! processes (each child is a fresh daemon over the same home = a restart)
 //! and reports NOT_RUN in a stub omega build.
+#[path = "support/home_guard.rs"]
+mod home_guard;
+
 #[path = "../../aien-allen/tests/support/mod.rs"]
 mod support;
 
@@ -864,6 +867,7 @@ macro_rules! need_linked {
 
 #[test]
 fn b_prompt_has_only_the_named_context_and_a_reply_cannot_write_memory() {
+    let _home = home_guard::home_slot();
     need_linked!();
     let w = world("mem-b-iso", true);
     let seed = child(&w, &[], &seeds());
@@ -949,6 +953,7 @@ fn b_prompt_has_only_the_named_context_and_a_reply_cannot_write_memory() {
 
 #[test]
 fn b_restart_keeps_scopes_and_forget_holds_in_the_next_prompt_after_restart() {
+    let _home = home_guard::home_slot();
     need_linked!();
     let w = world("mem-b-restart", true);
     child(&w, &[], &seeds());
@@ -1025,6 +1030,7 @@ fn b_not_engaged_refuses_memory_but_compose_runs() {
 
 #[test]
 fn b_foreign_store_is_refused_and_compose_runs_with_no_memory() {
+    let _home = home_guard::home_slot();
     need_linked!();
     let a = world("mem-b-a", true);
     let other = world("mem-b-other", true);
@@ -1048,6 +1054,7 @@ fn b_foreign_store_is_refused_and_compose_runs_with_no_memory() {
 
 #[test]
 fn b_model_swap_leaves_memory_untouched() {
+    let _home = home_guard::home_slot();
     need_linked!();
     let w = world("mem-b-swap", true);
     child(&w, &[], &seeds());

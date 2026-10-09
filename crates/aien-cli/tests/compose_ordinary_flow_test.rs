@@ -6,6 +6,9 @@
 //! with `--desk`, as an operator does. Needs the linked composition archive;
 //! in a stub build each test is IGNORED (cfg compose_linked from build.rs),
 //! never passed.
+#[path = "../../aien-runtime/tests/support/home_guard.rs"]
+mod home_guard;
+
 use aien_inference_abi::MockInferenceBackend;
 use aien_kv_cache::create_shared_kv_manager;
 use aien_runtime::approved_auth::{desk_key_path, DeskKey};
@@ -154,6 +157,7 @@ static ONE_HOME: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[cfg_attr(not(compose_linked), ignore = "needs the linked librx_compose.a")]
 async fn ordinary_flow_propose_authorize_execute_reaches_done() {
+    let _home = home_guard::home_slot();
     let _t = ONE_HOME.lock().await;
     let Some(r) = rig().await else { return };
     let report = r.propose().await;
@@ -202,6 +206,7 @@ async fn ordinary_flow_propose_authorize_execute_reaches_done() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[cfg_attr(not(compose_linked), ignore = "needs the linked librx_compose.a")]
 async fn a_client_written_authorization_note_is_refused_and_opens_nothing() {
+    let _home = home_guard::home_slot();
     let _t = ONE_HOME.lock().await;
     let Some(r) = rig().await else { return };
     let report = r.propose().await;
@@ -237,6 +242,7 @@ async fn a_client_written_authorization_note_is_refused_and_opens_nothing() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[cfg_attr(not(compose_linked), ignore = "needs the linked librx_compose.a")]
 async fn authorize_without_the_desk_mac_is_refused_and_mints_nothing() {
+    let _home = home_guard::home_slot();
     // sc#328: the default bridge requires the desk; an OS-user-only authorize
     // (what every client sent before #297) is refused and opens nothing.
     let _t = ONE_HOME.lock().await;

@@ -4,6 +4,9 @@
 //!
 //! With librx_compose.a linked this drives the bridge as the daemon does (no
 //! socket); in a stub build it only checks the refusal.
+#[path = "support/home_guard.rs"]
+mod home_guard;
+
 use aien_runtime::control::{ComposeNoteReport, ControlResponse};
 use aien_runtime::cortex_mark::{self, Mark};
 use aien_runtime::effects::{self, IntentRequest};
@@ -90,6 +93,7 @@ fn setup() -> Option<(tempfile::TempDir, PathBuf)> {
 
 #[test]
 fn boundary_cut_is_refused_and_recover_keeps_the_old_mark() {
+    let _home = home_guard::home_slot();
     let _serial = serial();
     let Some((_tmp, home)) = setup() else { return };
     let cx = home.join("cortex.cx");
@@ -149,6 +153,7 @@ fn boundary_cut_is_refused_and_recover_keeps_the_old_mark() {
 
 #[test]
 fn crash_between_append_and_mark_is_not_corruption() {
+    let _home = home_guard::home_slot();
     let _serial = serial();
     let Some((_tmp, home)) = setup() else { return };
     let mp = cortex_mark::mark_path(&home);
@@ -170,6 +175,7 @@ fn crash_between_append_and_mark_is_not_corruption() {
 
 #[test]
 fn digest_mismatch_and_damaged_mark_are_refused() {
+    let _home = home_guard::home_slot();
     let _serial = serial();
     let Some((_tmp, home)) = setup() else { return };
     let mp = cortex_mark::mark_path(&home);
@@ -197,6 +203,7 @@ fn digest_mismatch_and_damaged_mark_are_refused() {
 
 #[test]
 fn missing_mark_is_adopted_not_refused() {
+    let _home = home_guard::home_slot();
     let _serial = serial();
     let Some((_tmp, home)) = setup() else { return };
     let mp = cortex_mark::mark_path(&home);
@@ -216,6 +223,7 @@ fn repair_key_is_reserved() {
 
 #[test]
 fn effect_commands_refuse_until_reconcile_succeeds() {
+    let _home = home_guard::home_slot();
     let _serial = serial();
     let Some((tmp, home)) = setup() else { return };
     let b = ComposeBridge::new(home.clone(), proposer(), "test");

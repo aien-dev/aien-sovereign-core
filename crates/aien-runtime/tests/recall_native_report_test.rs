@@ -1,6 +1,9 @@
 //! VAC M3a: the recall reply says whether the native Omega composition library
 //! is linked. Runs in both builds (stub: recall is an explicit refusal naming the stub; linked: true and
 //! the pinned 40-hex sha). One test per binary (it sets AIEN_COMPOSE_DIR).
+#[path = "support/home_guard.rs"]
+mod home_guard;
+
 use aien_inference_abi::MockInferenceBackend;
 use aien_kv_cache::create_shared_kv_manager;
 use aien_runtime::client::AienRuntimeClient;
@@ -12,6 +15,7 @@ use std::time::Duration;
 
 #[tokio::test]
 async fn recall_reports_whether_compose_is_native() {
+    let _home = home_guard::home_slot();
     let tmp = tempfile::tempdir().unwrap();
     std::env::set_var("AIEN_COMPOSE_DIR", tmp.path().join("compose"));
     // sc#328: the daemon refuses to start without the (default) desk key.

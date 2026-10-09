@@ -5,6 +5,9 @@
 //! branch must give the identical kind for every row.
 //!
 //! Needs the linked composition archive; IGNORED in a stub build.
+#[path = "support/home_guard.rs"]
+mod home_guard;
+
 use aien_omega_compose::hex;
 use aien_runtime::control::{ComposeNoteReport, ComposeTaskReport, ControlResponse};
 use aien_runtime::effects::{self, IntentRequest, MintRequest};
@@ -277,6 +280,7 @@ const DIFFERS: &[(&str, &str)] = &[(
 #[test]
 #[cfg_attr(not(compose_linked), ignore = "needs the linked librx_compose.a")]
 fn refusal_kinds_match_origin_main() {
+    let _home = home_guard::home_slot();
     if !aien_omega_compose::LINKED {
         return;
     }
