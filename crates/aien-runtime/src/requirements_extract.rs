@@ -1,3 +1,4 @@
+//! | `<min bound> N <noun> and|or|but <bound> M` (second noun left out, e.g. `at least 20 lines and no more than 40`) | the second bound is read with the earlier noun (`MaxLines(40)`); with no clear earlier noun, or a direction the noun does not support (`at least 3 paragraphs and no more than 5`), it is UNCERTAIN, never dropped (#344) |
 //! Reading the requirements out of a goal (see `requirements` for the model).
 //!
 //! `analyze` is rule based and deterministic. It returns the requirements it
@@ -1463,6 +1464,51 @@ pub fn analyze(goal: &str) -> Extraction {
         let Num::Val(v) = parse_num(&numtok.word) else {
             continue;
         };
+        // "at least 20 lines and no more than 40": the second noun is elided
+        // (#344). Read it with the earlier noun, or report it UNCERTAIN; never drop it.
+        let next_is_noun = toks
+            .get(i + 1)
+            .is_some_and(|t| NOUNS.contains(&t.word.as_str()));
+        if !next_is_noun && qualifier_ok(&toks, i) && !negated_before(&toks, s) {
+            let sent = sentence_of(&toks, s);
+            let joined =
+                s > sent.start && matches!(toks[s - 1].word.as_str(), "and" | "or" | "but");
+            let earlier = (sent.start..s).any(|k| handled.contains(&k));
+            // the noun of the count that ends right before the joiner
+            let antecedent = if joined {
+                (sent.start..s - 1).rev().find_map(|p| {
+                    let (l, _, _) = match_cue(&toks, p, false)?;
+                    let Num::Val(_) = parse_num(&toks.get(p + l)?.word) else {
+                        return None;
+                    };
+                    let mut j = p + l + 1;
+                    if toks.get(j).is_some_and(|t| {
+                        matches!(t.word.as_str(), "non-empty" | "nonempty" | "non-blank")
+                    }) {
+                        j += 1;
+                    }
+                    let noun = toks.get(j)?.word.as_str();
+                    // the noun sits right before the joiner (an optional "long" between)
+                    let gap_ok = j + 1 == s - 1 || (j + 2 == s - 1 && toks[j + 1].word == "long");
+                    (NOUNS.contains(&noun) && handled.contains(&p) && gap_ok).then_some(noun)
+                })
+            } else {
+                None
+            };
+            let v = v as i64 + adj;
+            match antecedent.and_then(|noun| count_req(dir, noun, v.max(1) as usize)) {
+                Some(r) if v >= 1 => {
+                    add(&mut counts, r);
+                    handled.extend(s..=i);
+                }
+                _ if earlier => {
+                    bad(&mut unsure, s, true);
+                    handled.extend(s..=i);
+                }
+                _ => {}
+            }
+            continue;
+        }
         let mut j = i + 1;
         // "non-empty lines": line counts are over non-empty lines already (sc#331).
         if toks
