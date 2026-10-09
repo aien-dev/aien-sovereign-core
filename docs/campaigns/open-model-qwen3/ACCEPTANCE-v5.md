@@ -439,7 +439,7 @@ changed to pass a gate.**
   prepared as a DRAFT (2026-10-08, status line unchanged):** the eight build pins at 30258fc (re-pinned after the extra hold, sc#360; before that at e27bda8 after the G6 fixes; first filled at 4770703), the model re-hash, the
   generated declaration (identical, QUALIFICATION_ROWS=334), the campaign-file sha256 list and the daemon `CHECKPOINT_SHARDS`
   confirmation (G6, all 22 daemon starts) are filled. On e27bda8 (product source identical at 30258fc) the 11 goals were probed again: the 10 positive goals
-  resolve their destination, N1 is refused, and no goal has an uncertain requirement span (`evidence-v5/repin-probes-e27bda8.txt`). Still TO FILL AT FREEZE: the GPU hold names (who runs the parts). Any change to a campaign file
+  resolve their destination, N1 is refused, and no goal has an uncertain requirement span (`evidence-v5/repin-probes-e27bda8.txt`); the G7 stub gate at 30258fc is `evidence-v5/g7-stub-gate-30258fc.txt`. Still TO FILL AT FREEZE: the GPU hold names (who runs the parts). Any change to a campaign file
   after this fill means regenerating `evidence-v5/campaign-files.sha256`; any product change means a new build and new pins. The
   G8 change is therefore the status line plus what it touches: `frozen-v5.json` is a campaign file, so that change also
   regenerates `campaign-files.sha256`, and the draft-only check of `test-v5.sh` (status says DRAFT, NOT FROZEN) changes to FROZEN.
