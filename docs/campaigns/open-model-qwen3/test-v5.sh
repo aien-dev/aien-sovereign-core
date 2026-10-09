@@ -43,8 +43,13 @@ chk "only E2 declares EP" '[ "$(jq -r ".rows[].row|select(endswith(\"-EP\"))" "$
 chk "one repetition, role case, no control, none NOT_APPLICABLE" '[ "$(jq "[.rows[]|select(.reps!=1 or .role!=\"case\" or .control!=null or .not_applicable!=false or .expected!=\"PASS\")]|length" "$QD")" = 0 ]'
 
 # ---- 2 task file
-GOALS=a42aae721e85bd3d0febb7a6ad2b0ebfc4f0a0c56f6ff135aaca42ace7996dee
+GOALS=01ab9f9a26d79242391cf72b5f91b556a06a2b8dea6102604969e257ded9486c
 chk "goals, destinations, seeds and phrases are the authored ones (digest $GOALS)" '[ "$(jq -c "[.tasks[]|{id,goal,destination,phrases,seed}]" "$TASKS" | sha256sum | cut -d" " -f1)" = "$GOALS" ]'
+# The product refuses to write into a folder that does not exist (ACCEPTANCE-v5 Section 2, known limit): every positive
+# destination's folder is in the default workspace that run-campaign.sh builds (the root and docs/) or in the task's seed.
+chk "every positive destination's folder exists before the run (root, docs/ or the task's seed; R1 notes/ from seed-v5/R1)" '
+  jq -r ".tasks[]|select(.kind|startswith(\"negative\")|not)|\"\(.destination) \(.seed // \"-\")\"" "$TASKS" | while read -r d s; do
+    f=$(dirname "$d"); case "$f" in .|docs) continue ;; esac; [ "$s" != - ] && [ -d "$HERE/$s/$f" ] || exit 1; done'
 chk "eleven qualification tasks, ids unique, no regression group" '[ "$(jq "[.tasks[]|select(.group==\"qualification\")]|length" "$TASKS")" = 11 ] && [ "$(jq "[.tasks[].id]|(length==(unique|length))" "$TASKS")" = true ] && [ "$(jq "[.tasks[]|select(.group!=\"qualification\")]|length" "$TASKS")" = 0 ]'
 chk "N1 is kind negative-boundary and N2 negative-budget" '[ "$(jq -r ".tasks[]|select(.id==\"N1\" or .id==\"N2\")|.kind" "$TASKS" | tr "\n" " ")" = "negative-boundary negative-budget " ]'
 chk "document machine fields agree with the declared requirements (min_lines, min_code_blocks; no tail heading)" '
@@ -71,9 +76,9 @@ chk "declared words and topic forms use only letters, digits and hyphen" '[ "$(j
 chk "every accepted topic form is listed in ACCEPTANCE-v5.md Section 3.1" '
   for f in $(jq -r ".tasks[].requirements[]|select(.kind==\"topic\")|.accepted[]" "$TASKS"); do grep -q "\`$f\`" "$A" || { echo "missing form: $f"; exit 1; }; done'
 chk "the goal names the D3 topic forms the product reads (gate G2: withdraw and withdrew)" 'jq -e ".tasks[]|select(.id==\"D3\")|.goal|contains(\"withdraw\") and contains(\"withdrew\")" "$TASKS" >/dev/null'
-chk "limits equal the v4 limits; per task max_tokens and budgets as ACCEPTANCE-v5 Section 2" '
+chk "limits equal the v4 limits; per task max_tokens and budgets as ACCEPTANCE-v5 Section 2 (D6 1536 and 170000, Section 2.1)" '
   [ "$(jq -c .limits "$TASKS")" = "$(jq -c .limits "$HERE/tasks-oq3-v4.json")" ] &&
-  [ "$(jq -c "[.tasks[]|[.id,.max_tokens,.budget_ms]]" "$TASKS")" = "[[\"D1\",1024,120000],[\"D2\",1024,120000],[\"D3\",1024,120000],[\"D4\",1024,120000],[\"D5\",1024,120000],[\"D6\",1024,120000],[\"E1\",96,29000],[\"E2\",96,29000],[\"N1\",1024,120000],[\"N2\",16,120000],[\"R1\",96,120000]]" ]'
+  [ "$(jq -c "[.tasks[]|[.id,.max_tokens,.budget_ms]]" "$TASKS")" = "[[\"D1\",1024,120000],[\"D2\",1024,120000],[\"D3\",1024,120000],[\"D4\",1024,120000],[\"D5\",1024,120000],[\"D6\",1536,170000],[\"E1\",96,29000],[\"E2\",96,29000],[\"N1\",1024,120000],[\"N2\",16,120000],[\"R1\",96,120000]]" ]'
 # freshness: no v5 goal, destination or distinctive word appears in any earlier campaign file
 CORPUS=$T/corpus.txt
 { for f in $(cd "$HERE/.." && find . -name 'tasks*.json' ! -name 'tasks-oq3-v5.json') $(cd "$HERE/.." && find . -name 'ACCEPTANCE*.md' ! -name 'ACCEPTANCE-v5.md') $(cd "$HERE/.." && find . -name 'VERDICT*.md') $(cd "$HERE/.." && find . -name 'DIAGNOSTIC*'); do cat "$HERE/../$f"; done
@@ -447,8 +452,8 @@ fi
 # ---- 6 the unchanged receipt builder, staged as the wrapper stages it, yields the declared v8-shape rows
 NP1=$(cd "$HERE/../next-phase-1" && pwd); STAGE=$T/stage; mkdir -p "$STAGE" "$T/rec"
 for f in "$NP1"/*; do n=$(basename "$f"); [ "$n" = tasks-v8.json ] && continue; ln -s "$f" "$STAGE/$n"; done
-jq "(.tasks[] | select(.source != null) | .seed) = null" "$TASKS" >"$STAGE/tasks-v8.json"; ln -s "$HERE/seed-v5" "$STAGE/seed-v5"
-chk "the wrapper's staging filter is the one used here" 'grep -qF "STAGE_FILTER='"'"'(.tasks[] | select(.source != null) | .seed) = null'"'"'" "$W"'
+jq '(.tasks[] | select(.kind != "edit") | .seed) = null' "$TASKS" >"$STAGE/tasks-v8.json"; ln -s "$HERE/seed-v5" "$STAGE/seed-v5"
+chk "the wrapper's staging filter is the one used here" 'grep -qF "STAGE_FILTER='"'"'(.tasks[] | select(.kind != \"edit\") | .seed) = null'"'"'" "$W"'
 for id in $(jq -r '.tasks[].id' "$TASKS"); do
   R=$T/stg-$id; mkdir -p "$R/ws" "$R/steps" "$R/prov"; echo '{"steps":[],"daemon":[],"containment":{}}' >"$R/run.json"
   seed=$(jq -r --arg i "$id" '.tasks[]|select(.id==$i)|.seed//empty' "$TASKS"); [ -n "$seed" ] && cp -R "$HERE/$seed/." "$R/ws/"

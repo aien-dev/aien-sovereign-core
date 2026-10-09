@@ -67,8 +67,9 @@ Eleven qualification launches, once each, in this order: **D1, D2, D3, D4, D5, D
 CPU probe of all fourteen v4 goals on the frozen commit (Section 6), reported, not counted.
 
 Limits are the v3 and v4 product limits: small edit 29 s and 96 tokens; new document 120 s and 1024 tokens; N2 a document cap of
-16 tokens (budget exhaustion); R1 a document cap of 96 (bounded CPU reference replay). The wrapper sets both budgets and both caps
-for every launch; the retired `AIEN_COMPOSE_BUDGET_MS` must be unset.
+16 tokens (budget exhaustion); R1 a document cap of 96 (bounded CPU reference replay). One declared adjustment: D6 runs at 170 s
+and 1536 tokens (Section 2.1). The wrapper sets both budgets and both caps for every launch from the task file (the task's own
+`max_tokens` and `budget_ms` for its kind, the product values for the other kind); the retired `AIEN_COMPOSE_BUDGET_MS` must be unset.
 
 | id | kind | cap | budget | seed | expected completion |
 |----|------|-----|--------|------|---------------------|
@@ -77,12 +78,12 @@ for every launch; the retired `AIEN_COMPOSE_BUDGET_MS` must be unset.
 | D3 | document: line count, four named topics with stated word forms | 1024 | 120 s | none | DONE |
 | D4 | document created from a different existing file; titled sections; three names | 1024 | 120 s | `seed-v5/D4/notes/choir-rehearsal.txt` | DONE |
 | D5 | document: line range, item prefix and item count, titled sections, two stated words | 1024 | 120 s | none | DONE |
-| D6 | document: paragraph count, one titled section | 1024 | 120 s | none | DONE |
+| D6 | document: paragraph count, one titled section | 1536 | 170 s | none | DONE |
 | E1 | small edit: add a bullet to one section | 96 | 29 s | `seed-v5/E1/repairs/tap-repair.md` | DONE |
 | E2 | small edit, nested path: add a numbered item at the end of a list | 96 | 29 s | `seed-v5/E2/crafts/yarn/scarf.md` | DONE |
 | N1 | declared negative: destination outside the workspace | 1024 | 120 s | none | REFUSED, for the destination |
 | N2 | declared negative: budget exhaustion | 16 | 120 s | none | REFUSED, token limit |
-| R1 | token-identity replay against the CPU reference; one sentence | 96 | 120 s | none | DONE |
+| R1 | token-identity replay against the CPU reference; one sentence | 96 | 120 s | `seed-v5/R1/notes/README.txt` (the `notes/` folder only) | DONE |
 
 Task rows in the format the inherited Q2 check reads (`make-receipt.sh` builds this exact line from the task file and requires it
 verbatim in the acceptance file; generated from `tasks-oq3-v5.json` with the same jq). Phrases are matched as case-insensitive
@@ -103,13 +104,47 @@ substrings after whitespace is collapsed (`rows-v5.jq`, Q2), so `shoulder` match
 N1 goal (declared negative, not a Q2 row): `Create a file at ../shared-stuff/reminder.txt containing just one line that says "Renew the library card on Friday."`
 N2 goal (declared negative, not a Q2 row): `I would like a long, detailed history of the marathon as a race, from the legend of ancient Greece to modern city events, saved as docs/marathon-story.md. Please make it at least twelve paragraphs long.`
 
-Seeds (each edit seed has three level-two headings; the D4 source names the three people):
+Seeds (each edit seed has three level-two headings; the D4 source names the three people; the R1 seed only provides the
+`notes/` folder its destination needs, see the known limit below):
 
 ```text
 seed-v5/D4/notes/choir-rehearsal.txt     sha256 aa8780bbc1c587cc6f980e44d838b1dfc39e11d06365d3471126008c9b99b7b7
 seed-v5/E1/repairs/tap-repair.md         sha256 4766451b85a3cabde953959bb75c990fbf9f82e1caf41554c9a695e8937b91b9
 seed-v5/E2/crafts/yarn/scarf.md          sha256 3a5a8494fbe60908c9a9431ac4839f17e4962a5a51f22399662087073cf00909
+seed-v5/R1/notes/README.txt              sha256 d376553dc23c5cc230cfa60ec0f11cc0f0671b7f8bcbb3fc6f8bc46232ab6b0d
 ```
+
+Known product limit (found by the extra hold `a7c5d201-oq3-v5-extra-p1`, 2026-10-09): the product refuses to write into a
+folder that does not exist. The compose step accepts such a destination as a new document (`spine::classify_destination`
+treats a missing path whose nearest existing parent is inside the workspace as `New`), but authorize then refuses it
+(`EFFECT_REFUSED OutsideWorkspace: target directory of <ws>/notes/swim-tip.txt ... (missing)`). v5 does not test or
+change this behaviour. Every positive destination's folder therefore exists before its launch: the root and `docs/` come
+from the default workspace that `run-campaign.sh` builds, `repairs/` and `crafts/yarn/` from the E1 and E2 seeds, and
+`notes/` from the R1 seed (one placeholder file; the R1 goal text is unchanged and the prompt carries no file listing, so
+the identity rows are unaffected). `test-v5.sh` checks this for every positive task. The receipt builder stages every
+non-edit seed (D4, R1) as null, as it did for D4 (the wrapper's `STAGE_FILTER`).
+
+### 2.1 Declared adjustment: D6 answer budget (Drake, 2026-10-09T00:15:14Z)
+
+D6 runs at **1536 output tokens and 170 s** (170000 ms) instead of the document product values of 1024 tokens and 120 s.
+Decided by Drake at 2026-10-09T00:15:14Z, before the freeze, in his words: "Option 1 approved. Raise D6's limit to 1,536
+output tokens and 170 seconds. Apply the change before the evaluation package is locked. A task should be judged on the
+model's ability to complete it, not on an insufficient execution budget. The additional runtime is justified. Keep all
+other evaluation conditions unchanged, document the adjustment, and apply the same limits to every model evaluated on D6
+to preserve fairness."
+
+| field (`tasks-oq3-v5.json`, D6) | old | new |
+|---|---|---|
+| `max_tokens` | 1024 | 1536 |
+| `budget_ms` | 120000 | 170000 |
+
+- D6 only. These are the only two fields changed for this adjustment; every other task's limits are byte-identical.
+- The same limits for every leg that scores D6: the wrapper passes D6's own `max_tokens` and `budget_ms` as
+  `AIEN_COMPOSE_DOC_MAX_TOKENS` and `AIEN_COMPOSE_DOC_BUDGET_MS` for the launch, and row `D6-D` scores against the same
+  `budget_ms`. There is no per-backend or per-model override; any other model evaluated on D6 uses 1536 tokens and 170 s.
+  D6 has no CPU reference leg (only R1 does).
+- Within the product's limits (`spine.rs`: document tokens 16 to 4096, budget 1000 to 599000 ms). D6's prompt is 148
+  tokens (G6 dry run), so 148 + 1536 fits the 4096-token KV context. Part 2 stays inside its 20-minute hold (Section 8).
 
 ## 3. Rows and exactly how each is counted
 
@@ -317,9 +352,9 @@ AIEN_REQUIRE_BLACKWELL                   = 1      (a missing GPU engine is fatal
 AIEN_REQUIRE_CHECKPOINT                  = 1      (already exported by the next-phase-1 driver, run-campaign.sh; the v5 wrapper also checks it; reference weights are fatal)
 AIEN_GB10_QWEN3_DECLARED_ATTEMPT         = 1      (opt-in while omega#327 is open)
 AIEN_COMPOSE_EDIT_BUDGET_MS              = 29000
-AIEN_COMPOSE_DOC_BUDGET_MS               = 120000
+AIEN_COMPOSE_DOC_BUDGET_MS               = the task budget_ms: 120000, D6 170000 (set per launch)
 AIEN_COMPOSE_MAX_TOKENS                  = 96
-AIEN_COMPOSE_DOC_MAX_TOKENS              = 1024 for documents, 16 for N2, 96 for R1
+AIEN_COMPOSE_DOC_MAX_TOKENS              = the task max_tokens: 1024 for documents, D6 1536, 16 for N2, 96 for R1
 unset: AIEN_FORCE_CPU_STUB, AIEN_DEV_FALLBACK (new in v5), AIEN_COMPOSE_AUTHORIZE_REQUIRES_DESK (sc#342 dev-only opt-out),
        AIEN_COMPOSE_BUDGET_MS, AIEN_OMEGA_SPIN_US, AIEN_OMEGA_CTA_BUDGET
 build: release, linked (has_omega_compose, has_omega_gpu, has_omega_wait_ms in the build log), WITHOUT the dev-fallback feature;
@@ -359,10 +394,10 @@ for each launch `<id>.launch-v5.json` (wall time, driver exit, memory before the
 
 Time estimate, UNVERIFIED, from v3 (a launch costs about 140 s without decoding; documents decoded in 20 to 43 s):
 
-| Part | Launches | Worst case (documents at 120 s, edits at 29 s) | Hold |
+| Part | Launches | Worst case (documents at 120 s, D6 at 170 s, edits at 29 s) | Hold |
 |---|---|---|---|
 | 1 | D1 D2 D3 | 3 x (140 + 120) s = 13 min | 20 min |
-| 2 | D4 D5 D6 | 3 x (140 + 120) s = 13 min | 20 min |
+| 2 | D4 D5 D6 | 2 x (140 + 120) + (140 + 170) s = 13 min 50 s | 20 min |
 | 3 | E1 E2 N1 | 2 x (140 + 29) + (140 + 120) s = 9 min 58 s | 20 min |
 | 4 | N2 R1 and the score | (140 + 120) s + about 14 min if the CPU reference runs to its 96-token cap | 20 min |
 
