@@ -242,10 +242,17 @@ fn remember_then_recall_includes_item_when_engaged() {
     assert!(texts(&r).iter().any(|t| t == ITEM), "item recalled");
     // The same item is what a proposal in the `work` context is given.
     let direct = r.cli(&["allen", "memory", "recall", "--context", "work"]);
-    assert!(direct.raw.contains(ITEM), "ALLEN memory holds it: {}", direct.raw);
+    assert!(
+        direct.raw.contains(ITEM),
+        "ALLEN memory holds it: {}",
+        direct.raw
+    );
 
     // SIGKILL and restart: the item is still there.
     r.kill();
     r.start(None);
-    assert!(texts(&r).iter().any(|t| t == ITEM), "item recalled after restart");
+    assert!(
+        texts(&r).iter().any(|t| t == ITEM),
+        "item recalled after restart"
+    );
 }

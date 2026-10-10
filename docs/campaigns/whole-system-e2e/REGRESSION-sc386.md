@@ -27,3 +27,9 @@ The full harness `run` mode is not run by this lane (16 minutes on CPU); the orc
 ## Must not change
 
 Desk, grants, effect boundary, every refusal other than the new `remember` refusal, anything under `runs/`, the two ACCEPTANCE files and the result notes. CTRL-E3a (no desk key) starts without a subject, unchanged.
+
+## Notes added with the fix
+
+- The harness engages the subject the way demo S1 does: a plain start opens the compose home, the subject is built bound to record 1 of that home (`cargo test -p aien-allen --test e2e_demo_subject -- --ignored`), the daemon is SIGKILLed and restarted with `AIEN_ALLEN_SUBJECT=<path>` and, once, `AIEN_ALLEN_ADOPT=<agent>`. The daemon log must show `ALLEN: engaged` and `aien-cli allen status` must give a fingerprint, or the start counts as failed.
+- CTRL-E4 removes the store; the home is then refused at its integrity mark before ALLEN can resolve (observed by hand: no `ALLEN: engaged` line, `allen status` returns the mark refusal), so that one start does not require engagement. The old subject is still passed.
+- Append objective: option (b), `AIEN_COMPOSE_MAX_TOKENS=400` on the E4 start only, recorded as `compose_max_tokens` in the E4 receipt. Whether a 1B model then produces exactly one added line is measured by the next declared run, not claimed here.
