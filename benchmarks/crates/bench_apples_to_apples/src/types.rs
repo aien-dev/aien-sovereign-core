@@ -19,8 +19,8 @@ pub struct BenchmarkConfig {
 impl Default for BenchmarkConfig {
     fn default() -> Self {
         Self {
-            model_path: "/home/drakestapleton/.cache/huggingface/hub/models--TinyLlama--TinyLlama-1.1B-Chat-v1.0/snapshots/fe8a4ea1ffedaf415f4da2f062534de366a451e6".to_string(),
-            tokenizer_path: "/home/drakestapleton/.cache/huggingface/hub/models--TinyLlama--TinyLlama-1.1B-Chat-v1.0/snapshots/fe8a4ea1ffedaf415f4da2f062534de366a451e6/tokenizer.json".to_string(),
+            model_path: format!("{}/.cache/huggingface/hub/models--TinyLlama--TinyLlama-1.1B-Chat-v1.0/snapshots/fe8a4ea1ffedaf415f4da2f062534de366a451e6", std::env::var("HOME").unwrap_or_default()),
+            tokenizer_path: format!("{}/.cache/huggingface/hub/models--TinyLlama--TinyLlama-1.1B-Chat-v1.0/snapshots/fe8a4ea1ffedaf415f4da2f062534de366a451e6/tokenizer.json", std::env::var("HOME").unwrap_or_default()),
             prompt: "<|system|>\nYou are a helpful and truthful AI assistant. Explain technical concepts with clarity and precision.</s>\n<|user|>\nProvide an overview of modern computer architecture, memory hierarchies, cache coherency protocols, and unified memory subsystems across CPU and GPU accelerators. Specifically discuss: virtual memory translation lookaside buffers page tables interconnect bandwidth latency coherence invalidation snooping directory protocols numa domains shared address spaces hardware acceleration tensor pipelines register files instruction sched</s>\n<|assistant|>\n".to_string(),
             prompt_token_count: 128,
             output_token_count: 128,

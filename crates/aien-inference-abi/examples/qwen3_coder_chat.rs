@@ -45,7 +45,7 @@ fn main() {
         }
     }
     let checkpoint = checkpoint.unwrap_or_else(|| {
-        PathBuf::from("/home/drakestapleton/.cache/huggingface/hub/models--Qwen--Qwen3-Coder-30B-A3B-Instruct-FP8/snapshots/dcaee4d4dfc5ee71ad501f01f530e5652438fde0")
+        PathBuf::from(format!("{}/.cache/huggingface/hub/models--Qwen--Qwen3-Coder-30B-A3B-Instruct-FP8/snapshots/dcaee4d4dfc5ee71ad501f01f530e5652438fde0", std::env::var("HOME").unwrap_or_default()))
     });
 
     let t0 = Instant::now();

@@ -92,16 +92,9 @@ fn load_cortex_token() -> String {
             return tok.trim().to_string();
         }
     }
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/home/drakestapleton".to_string());
+    let home = std::env::var("HOME").unwrap_or_default();
     let path = format!("{}/.config/cortex/token", home);
-    let tok = fs::read_to_string(&path)
-        .unwrap_or_default()
-        .trim()
-        .to_string();
-    if !tok.is_empty() {
-        return tok;
-    }
-    fs::read_to_string("/home/drakestapleton/.config/cortex/token")
+    fs::read_to_string(&path)
         .unwrap_or_default()
         .trim()
         .to_string()

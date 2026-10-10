@@ -66,9 +66,7 @@ fn find_model_checkpoint_path() -> Option<PathBuf> {
         }
     }
 
-    let default_snap = PathBuf::from(
-        "/home/drakestapleton/.cache/huggingface/hub/models--TinyLlama--TinyLlama-1.1B-Chat-v1.0/snapshots/fe8a4ea1ffedaf415f4da2f062534de366a451e6/model.safetensors",
-    );
+    let default_snap = PathBuf::from(format!("{}/.cache/huggingface/hub/models--TinyLlama--TinyLlama-1.1B-Chat-v1.0/snapshots/fe8a4ea1ffedaf415f4da2f062534de366a451e6/model.safetensors", std::env::var("HOME").unwrap_or_default()));
     if default_snap.exists() {
         return Some(default_snap);
     }

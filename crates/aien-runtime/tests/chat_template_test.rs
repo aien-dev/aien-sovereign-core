@@ -72,7 +72,9 @@ fn proposal_prompt_token_counts() {
         return;
     };
     let tok = TinyLlamaTokenizer::from_file(path).expect("tokenizer");
-    let ws = "/home/drakestapleton/.claude/jobs/9bfe8553/tmp/np1-v3run/ws";
+    let ws_owned =
+        std::env::var("AIEN_PROPOSAL_WS").unwrap_or_else(|_| "/tmp/np1-v3run/ws".to_string());
+    let ws = ws_owned.as_str();
     let goal = "Create the file NOTES.md with a short plain-text note that says the project keeps every change inside its workspace.";
     let base = aien_runtime::spine::proposal_prompt(goal, ws);
     let retry = aien_runtime::spine::retry_prompt(
