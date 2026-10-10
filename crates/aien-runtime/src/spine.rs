@@ -1558,6 +1558,42 @@ pub const COMPOSE_EDIT_MERGE_MAX_CELLS: usize = 4 << 20;
 /// for the change), when it changes nothing, or when the table would exceed
 /// `COMPOSE_EDIT_MERGE_MAX_CELLS`. The result ends with one newline.
 pub fn merge_edit_reply(prior: &str, reply_content: &str) -> Result<String, String> {
+    merge_edit_reply_placed(prior, reply_content, EditPlacement::NextToAnchor)
+}
+
+/// Where the reply lines that are not anchors go (sc#394).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EditPlacement {
+    /// Next to the anchor above (before the first anchor when none is above).
+    NextToAnchor,
+    /// After the last non-blank prior line, in reply order.
+    AtEnd,
+}
+
+impl EditPlacement {
+    /// `AtEnd` when the goal contains the word `append` as a whole word,
+    /// case-insensitive (split on every non-alphanumeric character, so
+    /// `appendix` and `appended` do not match); otherwise `NextToAnchor`.
+    pub fn for_goal(goal: &str) -> Self {
+        let append = goal
+            .split(|c: char| !c.is_ascii_alphanumeric())
+            .any(|w| w.eq_ignore_ascii_case("append"));
+        if append {
+            EditPlacement::AtEnd
+        } else {
+            EditPlacement::NextToAnchor
+        }
+    }
+}
+
+/// `merge_edit_reply` with the placement of the new lines chosen by the
+/// caller. Kept prior lines, the shared-line requirement, the cell limit and
+/// the single final newline are the same for both placements.
+pub fn merge_edit_reply_placed(
+    prior: &str,
+    reply_content: &str,
+    placement: EditPlacement,
+) -> Result<String, String> {
     let mut p: Vec<&str> = prior.split('\n').collect();
     if prior.ends_with('\n') || prior.is_empty() {
         p.pop();
@@ -1602,21 +1638,42 @@ pub fn merge_edit_reply(prior: &str, reply_content: &str) -> Result<String, Stri
         );
     }
     let mut out: Vec<&str> = Vec::with_capacity(n + m);
-    let (mut pi, mut rj) = (0, 0);
-    for (k, &(ai, aj)) in anchors.iter().chain(std::iter::once(&(n, m))).enumerate() {
-        if k == 0 {
-            // No anchor above: new lines hug the first anchor from above.
-            out.extend(&p[pi..ai]);
-            out.extend(&r[rj..aj]);
-        } else {
-            // New lines hug the anchor above them.
-            out.extend(&r[rj..aj]);
-            out.extend(&p[pi..ai]);
+    if placement == EditPlacement::AtEnd {
+        // Every prior line stays in place; the non-anchor reply lines follow
+        // the last non-blank prior line, in reply order.
+        let mut is_anchor = vec![false; m];
+        for &(_, aj) in &anchors {
+            is_anchor[aj] = true;
         }
-        if ai < n {
-            out.push(p[ai]);
+        let last = p
+            .iter()
+            .rposition(|l| !l.trim().is_empty())
+            .map_or(0, |i| i + 1);
+        out.extend(&p[..last]);
+        out.extend(
+            r.iter()
+                .zip(&is_anchor)
+                .filter(|(_, a)| !**a)
+                .map(|(l, _)| *l),
+        );
+        out.extend(&p[last..]);
+    } else {
+        let (mut pi, mut rj) = (0, 0);
+        for (k, &(ai, aj)) in anchors.iter().chain(std::iter::once(&(n, m))).enumerate() {
+            if k == 0 {
+                // No anchor above: new lines hug the first anchor from above.
+                out.extend(&p[pi..ai]);
+                out.extend(&r[rj..aj]);
+            } else {
+                // New lines hug the anchor above them.
+                out.extend(&r[rj..aj]);
+                out.extend(&p[pi..ai]);
+            }
+            if ai < n {
+                out.push(p[ai]);
+            }
+            (pi, rj) = (ai + 1, aj + 1);
         }
-        (pi, rj) = (ai + 1, aj + 1);
     }
     let mut merged = out.join("\n");
     merged.push('\n');
@@ -1628,38 +1685,26 @@ pub fn merge_edit_reply(prior: &str, reply_content: &str) -> Result<String, Stri
     Ok(merged)
 }
 
-/// Where an edit reply's new lines go (sc#394).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum EditPlacement {
-    NextToAnchor,
-    AtEnd,
-}
-
-impl EditPlacement {
-    pub fn for_goal(_goal: &str) -> Self {
-        EditPlacement::NextToAnchor
-    }
-}
-
-pub fn merge_edit_reply_placed(
-    prior: &str,
-    reply_content: &str,
-    _placement: EditPlacement,
-) -> Result<String, String> {
-    merge_edit_reply(prior, reply_content)
-}
-
 /// The proposal text the Skill hands to AEGIS for one parsed reply. In edit
 /// mode (`edit` = the target path and the content shown to the model) a reply
 /// naming that path is merged into the content by `merge_edit_reply` and
 /// returned in the canonical `filename: <path>` form; any other reply is
 /// returned unchanged (the v5 whole-file proposal).
 pub fn edit_proposal(reply: &str, edit: Option<(&str, &str)>) -> Result<String, String> {
+    edit_proposal_placed(reply, edit, EditPlacement::NextToAnchor)
+}
+
+/// `edit_proposal` with the placement of the goal (`EditPlacement::for_goal`).
+pub fn edit_proposal_placed(
+    reply: &str,
+    edit: Option<(&str, &str)>,
+    placement: EditPlacement,
+) -> Result<String, String> {
     let p = check_file_proposal(reply)?;
     let Some((path, prior)) = edit.filter(|(path, _)| *path == p.path) else {
         return Ok(reply.to_string());
     };
-    let merged = merge_edit_reply(prior, &p.content)?;
+    let merged = merge_edit_reply_placed(prior, &p.content, placement)?;
     let text = format!("filename: {path}\n{merged}");
     match check_file_proposal(&text) {
         Ok(q) if q.path == path && q.content == merged => Ok(text),
@@ -1822,6 +1867,30 @@ pub fn propose_task_checked(
     attempt_budget: std::time::Duration,
     max_attempts: u32,
 ) -> (Result<String, String>, Vec<ProposalAttempt>) {
+    propose_task_placed(
+        proposer,
+        base,
+        edit,
+        EditPlacement::NextToAnchor,
+        reqs,
+        budget,
+        attempt_budget,
+        max_attempts,
+    )
+}
+
+/// `propose_task_checked` with the placement of the goal's new lines.
+#[allow(clippy::too_many_arguments)]
+pub fn propose_task_placed(
+    proposer: &(dyn Fn(&str, std::time::Duration) -> Result<Generation, String> + Send + Sync),
+    base: &str,
+    edit: Option<(&str, &str)>,
+    placement: EditPlacement,
+    reqs: &[crate::requirements::Requirement],
+    budget: std::time::Duration,
+    attempt_budget: std::time::Duration,
+    max_attempts: u32,
+) -> (Result<String, String>, Vec<ProposalAttempt>) {
     let start = std::time::Instant::now();
     let mut attempts: Vec<ProposalAttempt> = Vec::new();
     // An edit only adds lines (`merge_edit_reply` keeps every prior line), so a
@@ -1880,7 +1949,7 @@ pub fn propose_task_checked(
                 // NEXT-PHASE-1 v6 N2: a length-cut reply is refused before parsing.
                 let checked = match length_cut_refusal(&g) {
                     Some(why) => Err(why),
-                    None => edit_proposal(&g.text, edit).and_then(|p| {
+                    None => edit_proposal_placed(&g.text, edit, placement).and_then(|p| {
                         // The complete content that would be saved.
                         let content = check_file_proposal(&p)?.content;
                         match crate::requirements::refusal_reason(reqs, &content) {
@@ -2025,6 +2094,7 @@ type TaskEntry = (
     TaskPrompt,
     crate::requirements::Extraction,
     (Option<String>, PathBuf),
+    EditPlacement,
 );
 
 /// Owns the composition home of this process.
@@ -2185,7 +2255,7 @@ impl ComposeBridge {
                 // The requirement record of this task. A missing record is a refusal,
                 // never an empty requirement list (issue #289).
                 let entry = pr.lock().get(&task).cloned();
-                let Some(((prompt, target, kind), ex, dest)) = entry else {
+                let Some(((prompt, target, kind), ex, dest, placement)) = entry else {
                     pp.lock()
                         .insert(task, refused_without_model(MISSING_RECORD_REASON.into()));
                     return None;
@@ -2217,10 +2287,11 @@ impl ComposeBridge {
                             ProposalKind::Edit => &proposer,
                             ProposalKind::Document => &doc_proposer,
                         };
-                        propose_task_checked(
+                        propose_task_placed(
                             p.as_ref(),
                             &prompt,
                             edit,
+                            placement,
                             &reqs,
                             budget,
                             attempt_budget,
@@ -2457,9 +2528,15 @@ impl ComposeBridge {
         if let Some(t) = approved_text {
             home.approved.lock().insert(task, t.to_string());
         }
-        home.prompts
-            .lock()
-            .insert(task, (plan, reqs, (dest, ws.clone())));
+        home.prompts.lock().insert(
+            task,
+            (
+                plan,
+                reqs,
+                (dest, ws.clone()),
+                EditPlacement::for_goal(goal),
+            ),
+        );
         let run = home.compose.run(task, now.as_micros() as u64);
         home.prompts.lock().remove(&task);
         home.approved.lock().remove(&task);
