@@ -358,17 +358,30 @@ pub fn sandbox_dispatch_tool(args: &Value) -> Value {
     }
 }
 
-pub fn browser_dispatch_tool(action: &str, _prompt: Option<&str>) -> Value {
-    // The browser mirror ran a Python script outside this repository
-    // (basecamp/scripts/browser_mirror_test.py). AIEN carries no Python, so the
-    // tool reports itself unavailable instead of shelling out.
-    json!({
-        "status": "error",
-        "error": format!(
-            "browser action '{}' is unavailable: the Python browser mirror was removed from the sovereign build",
-            action
-        )
-    })
+pub fn browser_dispatch_tool(action: &str, prompt: Option<&str>) -> Value {
+    browser_dispatch_tool_at(action, prompt, None, None)
+}
+
+/// Browser mirror with an explicit Cockpit URL and output directory.
+/// `None` falls back to the Cockpit default (127.0.0.1:18095) and
+/// `~/basecamp/ui-tests`. The AIEN_COCKPIT_URL environment variable
+/// overrides the default URL.
+pub fn browser_dispatch_tool_at(
+    action: &str,
+    prompt: Option<&str>,
+    url: Option<&str>,
+    out_dir: Option<&std::path::Path>,
+) -> Value {
+    use aien_cli::browser_mirror as bm;
+    let env_url = std::env::var("AIEN_COCKPIT_URL").ok();
+    let url = url
+        .map(str::to_string)
+        .or(env_url)
+        .unwrap_or_else(|| bm::DEFAULT_URL.to_string());
+    let out = out_dir
+        .map(std::path::Path::to_path_buf)
+        .unwrap_or_else(bm::default_out_dir);
+    bm::dispatch(action, prompt, &url, &out)
 }
 
 pub fn handle_sandbox_command(parts: &[&str]) {
@@ -437,30 +450,25 @@ pub fn handle_sandbox_command(parts: &[&str]) {
 }
 
 pub fn handle_browser_command(parts: &[&str]) {
-    if !parts.is_empty() && parts[0] == "mentor" {
-        let prompt = if parts.len() > 1 {
-            parts[1..].join(" ")
-        } else {
-            "AIEN, report self-improvement status.".to_string()
-        };
-        println!(
-            "{}",
-            format!(
-                "Spawning browser mentor session with prompt: '{}'...",
-                prompt
-            )
-            .yellow()
-        );
-        let res = browser_dispatch_tool("mentor", Some(&prompt));
-        println!("{}", serde_json::to_string_pretty(&res).unwrap_or_default());
+    let action = parts.first().copied().unwrap_or("test");
+    let rest = if parts.len() > 1 {
+        Some(parts[1..].join(" "))
     } else {
-        println!(
-            "{}",
-            "Spawning headless Chrome and running mirror self-test on Cockpit...".yellow()
-        );
-        let res = browser_dispatch_tool("test", None);
-        println!("{}", serde_json::to_string_pretty(&res).unwrap_or_default());
-    }
+        None
+    };
+    let note = match action {
+        "mentor" => format!(
+            "Spawning browser mentor session with prompt: '{}'...",
+            rest.as_deref()
+                .unwrap_or("AIEN, report self-improvement status.")
+        ),
+        "screenshot" => "Spawning headless Chrome for a Cockpit screenshot...".to_string(),
+        "eval" => "Spawning headless Chrome to evaluate JavaScript on the Cockpit...".to_string(),
+        _ => "Spawning headless Chrome and running mirror self-test on Cockpit...".to_string(),
+    };
+    println!("{}", note.yellow());
+    let res = browser_dispatch_tool(action, rest.as_deref());
+    println!("{}", serde_json::to_string_pretty(&res).unwrap_or_default());
 }
 
 #[cfg(test)]

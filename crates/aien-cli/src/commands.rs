@@ -54,7 +54,7 @@ pub async fn handle_slash_command(cmd: &str) -> bool {
   /context7 resolve <library> [query] | /context7 query <library_id> <query>
   context7-sync             Refresh Rust, Mojo, MAX, Tokio, Axum, and Serde docs into Cortex
   /sandbox [init|status|test|promote|clean] Isolated Git worktree sandbox
-  /browser [test|mentor]    Headless Chrome CDP mirror self-testing & mentoring
+  /browser [test|mentor|screenshot|eval] Headless Chrome CDP mirror (Rust, aien-browser-mirror)
   /subagents [list|view|run] Recursive contextual subagents hierarchy
   /goal [list|new|done]     Manage project goals & milestone lattices"
             );
