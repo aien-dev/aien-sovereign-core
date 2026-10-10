@@ -1628,6 +1628,27 @@ pub fn merge_edit_reply(prior: &str, reply_content: &str) -> Result<String, Stri
     Ok(merged)
 }
 
+/// Where an edit reply's new lines go (sc#394).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EditPlacement {
+    NextToAnchor,
+    AtEnd,
+}
+
+impl EditPlacement {
+    pub fn for_goal(_goal: &str) -> Self {
+        EditPlacement::NextToAnchor
+    }
+}
+
+pub fn merge_edit_reply_placed(
+    prior: &str,
+    reply_content: &str,
+    _placement: EditPlacement,
+) -> Result<String, String> {
+    merge_edit_reply(prior, reply_content)
+}
+
 /// The proposal text the Skill hands to AEGIS for one parsed reply. In edit
 /// mode (`edit` = the target path and the content shown to the model) a reply
 /// naming that path is merged into the content by `merge_edit_reply` and
@@ -3201,5 +3222,59 @@ mod folder_destination_enforcement_tests {
         let t = "filename: outbox/ctrl.md\ncontrol\n".to_string();
         let r = enforce_destination((Ok(t.clone()), vec![]), dest.as_deref(), &ws, false).0;
         assert_eq!(r, Ok(t));
+    }
+}
+
+#[cfg(test)]
+mod append_placement_tests {
+    use super::*;
+
+    const PRIOR: &str = "# Report\n\nOne.\nTwo.\nThree.\n";
+    const APPEND: &str = "Append one line to report.md naming the topic.";
+
+    #[test]
+    fn append_goal_places_new_lines_at_end() {
+        let placement = EditPlacement::for_goal(APPEND);
+        let out = merge_edit_reply_placed(PRIOR, "# Report\nThe topic is harbours.\n", placement)
+            .unwrap();
+        assert_eq!(out, format!("{PRIOR}The topic is harbours.\n"));
+    }
+
+    #[test]
+    fn append_goal_with_several_new_lines_keeps_reply_order() {
+        let placement = EditPlacement::for_goal(APPEND);
+        let out = merge_edit_reply_placed(PRIOR, "# Report\nNew A.\nNew B.\nNew C.\n", placement)
+            .unwrap();
+        assert_eq!(out, format!("{PRIOR}New A.\nNew B.\nNew C.\n"));
+    }
+
+    #[test]
+    fn non_append_goal_keeps_anchor_placement() {
+        let placement = EditPlacement::for_goal("Add a line under the heading of report.md");
+        assert_eq!(placement, EditPlacement::NextToAnchor);
+        let reply = "# Report\nNew line.\n";
+        let out = merge_edit_reply_placed(PRIOR, reply, placement).unwrap();
+        assert_eq!(out, "# Report\nNew line.\n\nOne.\nTwo.\nThree.\n");
+        assert_eq!(out, merge_edit_reply(PRIOR, reply).unwrap());
+    }
+
+    #[test]
+    fn append_goal_still_needs_a_shared_line() {
+        let placement = EditPlacement::for_goal(APPEND);
+        assert!(merge_edit_reply_placed(PRIOR, "Nothing shared.\n", placement).is_err());
+        assert!(merge_edit_reply_placed(PRIOR, "\n", placement).is_err());
+        assert!(merge_edit_reply_placed(PRIOR, PRIOR, placement).is_err());
+    }
+
+    #[test]
+    fn append_word_detection() {
+        let at_end = |g: &str| EditPlacement::for_goal(g) == EditPlacement::AtEnd;
+        assert!(at_end("Append one line"));
+        assert!(at_end("append"));
+        assert!(at_end("APPEND"));
+        assert!(at_end("Please, append: a line to report.md."));
+        assert!(!at_end("Add a line under the heading of report.md"));
+        assert!(!at_end("Write the appendix"));
+        assert!(!at_end("The appended line"));
     }
 }
