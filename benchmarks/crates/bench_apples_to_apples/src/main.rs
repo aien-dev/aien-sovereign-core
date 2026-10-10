@@ -57,18 +57,20 @@ struct Args {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
 
-    let mut config = BenchmarkConfig::default();
-    config.output_token_count = args.output_tokens;
-    config.max_serve_port = args.max_port;
-    config.cool_down_target_power_watts = args.target_power_watts;
-    config.cool_down_max_temp_c = args.max_temp_c;
-
     let concurrency_levels: Vec<usize> = args
         .concurrency
         .split(',')
         .filter_map(|s| s.trim().parse::<usize>().ok())
         .collect();
-    config.concurrency_levels = concurrency_levels.clone();
+
+    let config = BenchmarkConfig {
+        output_token_count: args.output_tokens,
+        max_serve_port: args.max_port,
+        cool_down_target_power_watts: args.target_power_watts,
+        cool_down_max_temp_c: args.max_temp_c,
+        concurrency_levels: concurrency_levels.clone(),
+        ..Default::default()
+    };
 
     let target_engines: Vec<String> = args
         .engines
@@ -85,7 +87,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Workload: 128 input tokens -> 128 output tokens (Greedy, Temp=0.0)");
     println!("Engines: {:?}", target_engines);
     println!("Concurrency levels: {:?}", concurrency_levels);
-    println!("Thermal cooldown envelope: <= {:.1}W, <= {:.1}C", config.cool_down_target_power_watts, config.cool_down_max_temp_c);
+    println!(
+        "Thermal cooldown envelope: <= {:.1}W, <= {:.1}C",
+        config.cool_down_target_power_watts, config.cool_down_max_temp_c
+    );
     println!("================================================================================");
 
     let mut all_results: Vec<ConcurrencyRunResult> = Vec::new();
@@ -202,7 +207,16 @@ fn print_sweep_result_line(res: &ConcurrencyRunResult) {
 fn print_summary_table(results: &[ConcurrencyRunResult]) {
     println!(
         "| {:<24} | {:>3} | {:>10} | {:>10} | {:>10} | {:>9} | {:>9} | {:>8} | {:>9} | {:>8} |",
-        "Engine", "C", "Throughput", "TTFT p50", "TTFT p95", "ITL p50", "ITL p95", "Peak RSS", "Avg Power", "Parity"
+        "Engine",
+        "C",
+        "Throughput",
+        "TTFT p50",
+        "TTFT p95",
+        "ITL p50",
+        "ITL p95",
+        "Peak RSS",
+        "Avg Power",
+        "Parity"
     );
     println!(
         "|--------------------------|-----|------------|------------|------------|-----------|-----------|----------|-----------|----------|"

@@ -23,7 +23,11 @@ pub fn calculate_percentile(values: &[f64], percentile: f64) -> f64 {
 
 /// Computes energy efficiency in Joules per token.
 /// Formula: (Average Power in Watts * Total Elapsed Time in Seconds) / Total Tokens Generated.
-pub fn calculate_joules_per_token(avg_power_watts: f64, elapsed_secs: f64, total_tokens: usize) -> f64 {
+pub fn calculate_joules_per_token(
+    avg_power_watts: f64,
+    elapsed_secs: f64,
+    total_tokens: usize,
+) -> f64 {
     if total_tokens == 0 {
         return 0.0;
     }
