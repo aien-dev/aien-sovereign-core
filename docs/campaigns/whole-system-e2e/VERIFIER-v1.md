@@ -102,3 +102,26 @@ Each must be detected with a named reason: M1 one byte changed in `artifacts/E3m
 M3 one file dropped from `SHA256SUMS`: `MANIFEST_UNLISTED`; M4 receipt status edited from FAIL to PASS without the facts
 with links and manifest repaired: the row stays FAIL and `status_disagreement` names it; also the unrepaired form is
 caught by `LINK_BROKEN`. In every case the exit code is non-zero.
+
+## Measured on the first run of the tests
+
+Contract digest passed: `8ba653848287bc77db253466f6d3ff37c70a42be55601ad47eb1f838a41d20f0`. Rows came out exactly as
+registered above, with `chain_unbroken` true and exit code 1 for both fixtures.
+
+| fixture | verdict_id |
+|---|---|
+| A `RUN-1-dry-20261010T133749Z` | `728ae9152ef546ab4ccf1b7619fd22d21acb2914870197ac58e8843f9afaaf77` |
+| B `RUN-1-dry-20261010T134202Z` | `d7d57162ac318ec05f2d97ad9530d9d3a571275409b040f65ccd0e391f6c9615` |
+
+Test file also covers: unknown-peer E5 FAIL, matching-peer E5 PASS (changes the final id), `--write` on a copy, a wrong
+`--objective-id`, an unlisted extra file (`MANIFEST_UNLISTED`) and a dropped receipt (`SEQUENCE_GAP`), and that the
+fixture tree hash is unchanged after the tests.
+
+## Limits
+
+The E1, E2, E4 and CTRL-E1, CTRL-E2, CTRL-E5, CTRL-E6 PASS paths and the E3 contract-objective PASS path are implemented from
+the contract text but have no fixture that reaches them yet; they are exercised only as NOT_RUN or FAIL here. The
+CTRL-E1, CTRL-E2, CTRL-E5 and CTRL-E6 field names are provisional until lanes L5, L6, L4 and L2 pre-register theirs. The
+second-machine agreement (E5) is a procedure (each machine passes the other's base id) that this folder has not yet been run
+through on a MacBook. Run folders are not signed: an adversary who rewrites receipts, links and manifest consistently
+defeats the chain check; the verifier still re-derives every row from facts and files, which is what this lane promises.
