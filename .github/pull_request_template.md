@@ -1,3 +1,13 @@
+### Initiative issue and evidence ledger
+
+- **Tracking issue:** Refs owner/repo#NUMBER; use `Closes #NUMBER` only when this PR truly completes its acceptance gates.
+- **Workstream owner and file boundaries:**
+- **Acceptance gates advanced:** PASS / FAIL / INCONCLUSIVE / NOT_RUN / BLOCKED
+- **Evidence and test receipts:** commit-bound source and output links; list missing/failed checks.
+- [ ] The issue ledger will be updated with this PR's merge SHA and remaining gate statuses.
+
+Protocol: [AIEN issue-first delivery](https://github.com/aien-dev/aien-architecture/blob/main/docs/process/ISSUE_FIRST_DELIVERY.md). Existing preflight, security and certification requirements below remain in force.
+
 ### Technical Summary
 <!-- 2-3 sentence technical explanation of the change and architectural intent -->
 
