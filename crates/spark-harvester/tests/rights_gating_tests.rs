@@ -246,7 +246,23 @@ fn test_evidence_bundle_quarantine_enforced() {
     )
     .expect("Evidence grant must be accepted");
 
-    let tmp = tempfile::tempdir().unwrap();
+    // The quarantine gate scans every path component for train/sft/dpo/distill,
+    // so a random temp-dir name can trip it by accident. Draw until the name is clean.
+    let tmp = loop {
+        let t = tempfile::tempdir().unwrap();
+        let name = t
+            .path()
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .to_lowercase();
+        if !["train", "sft", "dpo", "distill"]
+            .iter()
+            .any(|b| name.contains(b))
+        {
+            break t;
+        }
+    };
 
     // 1. Attempting to export evidence bundle to training path fails closed
     let train_path = tmp.path().join("train_dataset.jsonl");
