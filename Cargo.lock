@@ -233,6 +233,7 @@ name = "aien-mcp"
 version = "0.1.0"
 dependencies = [
  "aien-capability",
+ "aien-trace",
  "async-trait",
  "rmcp",
  "serde_json",
@@ -339,6 +340,7 @@ dependencies = [
  "aien-runtime",
  "aien-scheduler",
  "aien-security",
+ "aien-trace",
  "async-trait",
  "cortex-rs",
  "libc",
@@ -398,6 +400,14 @@ dependencies = [
  "libc",
  "serde_json",
  "sha2 0.10.9",
+]
+
+[[package]]
+name = "aien-trace"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

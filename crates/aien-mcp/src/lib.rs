@@ -29,7 +29,9 @@ pub use authority::{
     intent_digest, AuthorityContext, AuthorityDecision, AuthorityOutcome, EffectAuthority,
     EffectClassAuthority, EffectScope, Exposure, TrustLevel,
 };
-pub use broker::{Clock, EffectLane, McpBroker, SpeculativeLane, SpeculativeToolCall};
+pub use broker::{
+    receipt_digest, Clock, EffectLane, McpBroker, SpeculativeLane, SpeculativeToolCall,
+};
 pub use effect::{AuthorizedEffect, EffectIntent, EffectReceipt, ToolResult};
 pub use error::Error;
 pub use session::SessionManager;

@@ -2124,6 +2124,15 @@ pub struct ComposeBridge {
             crate::generation::DaemonStart,
         )>,
     >,
+    /// Correlation trace (sovereign-core #398). Observational only: events
+    /// carry ids and digests, never prompts, proposals or file contents, and
+    /// nothing reads them to decide. `NullSink` by default (tracing off).
+    trace: Arc<dyn aien_trace::TraceSink>,
+    /// One trace id per bridge (per daemon start and compose home).
+    trace_id: aien_trace::TraceId,
+    /// Event id of the first event this bridge emitted; the parent of all its
+    /// later events. 0 until the first event.
+    trace_root: std::sync::atomic::AtomicU64,
 }
 
 impl ComposeBridge {
@@ -2138,7 +2147,68 @@ impl ComposeBridge {
             closed: std::sync::atomic::AtomicBool::new(false),
             authorize_requires_desk: true,
             identity: std::sync::Mutex::new(None),
+            trace: Arc::new(aien_trace::NullSink),
+            trace_id: aien_trace::TraceId::derive(
+                aien_trace::now_unix_ms(),
+                u64::from(std::process::id()),
+                0,
+            ),
+            trace_root: std::sync::atomic::AtomicU64::new(0),
         }
+    }
+
+    /// Installs the correlation trace sink (#398). Default `NullSink`.
+    pub fn with_trace_sink(mut self, sink: Arc<dyn aien_trace::TraceSink>) -> Self {
+        self.trace = sink;
+        self
+    }
+
+    /// This bridge's trace id (correlation key, not a secret).
+    pub fn trace_id(&self) -> aien_trace::TraceId {
+        self.trace_id
+    }
+
+    /// True when a trace sink is installed. Call sites check this before
+    /// building ids so that a disabled sink costs no allocation.
+    pub(crate) fn trace_enabled(&self) -> bool {
+        self.trace.enabled()
+    }
+
+    /// Emits one correlation event for this bridge. The first event becomes
+    /// the root; every later one is its child. With the sink disabled this
+    /// allocates nothing and reads no clock (callers build the ids only after
+    /// `trace_enabled`). Returns the event id (0 if off).
+    pub(crate) fn trace_event(
+        &self,
+        kind: aien_trace::EventKind,
+        status: aien_trace::EventStatus,
+        effect_certainty: Option<aien_trace::EffectCertainty>,
+        ids: aien_trace::CorrelationIds,
+        refs: aien_trace::EvidenceRefs,
+        note: &str,
+    ) -> u64 {
+        use std::sync::atomic::Ordering;
+        if !self.trace.enabled() {
+            return 0;
+        }
+        let id = self.trace.next_event_id();
+        let parent = self
+            .trace_root
+            .compare_exchange(0, id, Ordering::AcqRel, Ordering::Acquire)
+            .err();
+        self.trace.emit(aien_trace::TraceEvent {
+            trace_id: self.trace_id,
+            event_id: id,
+            parent_event_id: parent,
+            at_unix_ms: aien_trace::now_unix_ms(),
+            kind,
+            status,
+            effect_certainty,
+            ids,
+            refs,
+            note: (!note.is_empty()).then(|| aien_trace::BoundedNote::new(note)),
+        });
+        id
     }
 
     /// Use `doc_proposer` (its own token cap) for full-document tasks.
@@ -2599,6 +2669,32 @@ impl ComposeBridge {
                 format!("compose run: record mark update failed (E_MARK_WRITE): {e}")
             })?;
             compose_commit = Some(id);
+        }
+        // Correlation only (#398): the turn happened, what record names it,
+        // and whether it committed. No proposal text, no goal text.
+        if self.trace_enabled() {
+            self.trace_event(
+                aien_trace::EventKind::ModelTurn,
+                if proposer_error.is_some() {
+                    aien_trace::EventStatus::Failed
+                } else {
+                    aien_trace::EventStatus::Ok
+                },
+                None,
+                aien_trace::CorrelationIds {
+                    generation_record,
+                    decision_id: compose_commit.map(|c| aien_trace::BoundedId::new(&c.to_string())),
+                    ..Default::default()
+                },
+                aien_trace::EvidenceRefs::default(),
+                if proposer_error.is_some() {
+                    "proposer_error"
+                } else if committed {
+                    "compose_commit"
+                } else {
+                    "uncommitted"
+                },
+            );
         }
         Ok(ComposeTaskReport {
             compose_commit,
