@@ -6,6 +6,10 @@ use aien_capability::{
     catalog_digest, speculation_safe, Digest32, EffectId, JNodeId, ProviderId, ToolDescriptor,
     ToolEffects, WorldId,
 };
+use aien_trace::{
+    now_unix_ms, BoundedId, BoundedNote, CorrelationIds, EffectCertainty, EventKind, EventStatus,
+    EvidenceRefs, NullSink, TraceEvent, TraceId, TraceSink,
+};
 use serde_json::Value;
 
 use crate::approval::{ApprovalError, ApprovalGrant, ApprovalRecord, GrantState, Reservation};
@@ -247,6 +251,122 @@ pub struct EffectLane {
     broker: McpBroker,
     exposure: Option<Exposure>,
     clock: Option<Clock>,
+    trace: LaneTrace,
+}
+
+/// Correlation tap of one lane. Observational: it never changes a verdict.
+#[derive(Clone)]
+struct LaneTrace {
+    sink: Arc<dyn TraceSink>,
+    trace_id: TraceId,
+    parent: Option<u64>,
+}
+
+impl LaneTrace {
+    fn off() -> Self {
+        Self {
+            sink: Arc::new(NullSink),
+            trace_id: TraceId([0; 16]),
+            parent: None,
+        }
+    }
+
+    fn enabled(&self) -> bool {
+        self.sink.enabled()
+    }
+
+    fn emit(
+        &self,
+        kind: EventKind,
+        status: EventStatus,
+        certainty: Option<EffectCertainty>,
+        ids: CorrelationIds,
+        refs: EvidenceRefs,
+        note: Option<&str>,
+    ) {
+        self.sink.emit(TraceEvent {
+            trace_id: self.trace_id,
+            event_id: self.sink.next_event_id(),
+            parent_event_id: self.parent,
+            at_unix_ms: now_unix_ms(),
+            kind,
+            status,
+            effect_certainty: certainty,
+            ids,
+            refs,
+            note: note.map(BoundedNote::new),
+        });
+    }
+}
+
+const STALE_INTENT: &str = "intent was staged against a stale catalog";
+const NOT_ADMITTED: &str = "provider is not admitted";
+
+fn hex(bytes: &[u8]) -> String {
+    const H: &[u8; 16] = b"0123456789abcdef";
+    let mut s = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        s.push(H[(b >> 4) as usize] as char);
+        s.push(H[(b & 15) as usize] as char);
+    }
+    s
+}
+
+fn put_str(out: &mut Vec<u8>, s: &str) {
+    out.extend_from_slice(&(s.len() as u64).to_le_bytes());
+    out.extend_from_slice(s.as_bytes());
+}
+
+// Canonical, length-prefixed encoding of a JSON value: object keys sorted, so the
+// result does not depend on serde_json's map order feature.
+fn put_value(out: &mut Vec<u8>, v: &Value) {
+    match v {
+        Value::Null => out.push(0),
+        Value::Bool(b) => out.extend_from_slice(&[1, *b as u8]),
+        Value::Number(n) => {
+            out.push(2);
+            put_str(out, &n.to_string());
+        }
+        Value::String(s) => {
+            out.push(3);
+            put_str(out, s);
+        }
+        Value::Array(a) => {
+            out.push(4);
+            out.extend_from_slice(&(a.len() as u64).to_le_bytes());
+            for x in a {
+                put_value(out, x);
+            }
+        }
+        Value::Object(m) => {
+            out.push(5);
+            out.extend_from_slice(&(m.len() as u64).to_le_bytes());
+            let mut keys: Vec<&String> = m.keys().collect();
+            keys.sort();
+            for k in keys {
+                put_str(out, k);
+                put_value(out, &m[k]);
+            }
+        }
+    }
+}
+
+/// SHA-256 over a canonical encoding of every receipt field: a domain tag, then fixed-width
+/// ids and digests, then length-prefixed strings, then the output value with sorted object
+/// keys. A trace carries this digest, never the output itself. The independent receipt
+/// verifier, not this digest, governs whether a receipt is believed.
+pub fn receipt_digest(r: &EffectReceipt) -> [u8; 32] {
+    let mut b = Vec::new();
+    b.extend_from_slice(b"aien-mcp.effect-receipt.v1\0");
+    b.extend_from_slice(&r.effect_id.0);
+    b.extend_from_slice(&r.world_id.0.to_le_bytes());
+    b.extend_from_slice(&r.winning_jnode.0.to_le_bytes());
+    b.extend_from_slice(&r.policy_digest.0);
+    put_str(&mut b, r.provider.as_str());
+    put_str(&mut b, &r.tool_name);
+    b.extend_from_slice(&r.capability_digest.0);
+    put_value(&mut b, &r.output);
+    Digest32::of(&b).0
 }
 
 /// Host-supplied time source, in the same unit as `now` and `expires_at`.
@@ -258,6 +378,7 @@ impl EffectLane {
             broker,
             exposure: None,
             clock: None,
+            trace: LaneTrace::off(),
         }
     }
 
@@ -280,6 +401,26 @@ impl EffectLane {
             broker: self.broker.clone(),
             exposure: Some(exposure),
             clock: self.clock.clone(),
+            trace: self.trace.clone(),
+        }
+    }
+
+    /// Attach a correlation trace (observational only). Every `authority_decided` and
+    /// `effect_executed` event of this lane becomes a child of `parent_event` in `trace_id`. Events
+    /// carry digests and ids, never arguments or outputs. The default is a `NullSink`.
+    pub fn with_trace(
+        self,
+        sink: Arc<dyn TraceSink>,
+        trace_id: TraceId,
+        parent_event: Option<u64>,
+    ) -> Self {
+        Self {
+            trace: LaneTrace {
+                sink,
+                trace_id,
+                parent: parent_event,
+            },
+            ..self
         }
     }
 
@@ -323,21 +464,75 @@ impl EffectLane {
         authority: &dyn EffectAuthority,
         approval: Option<(&ApprovalGrant, u64)>,
     ) -> Result<AuthorizedEffect<EffectIntent>, AuthorityOutcome> {
+        if !self.trace.enabled() {
+            return self.authorize_core(intent, scope, authority, approval);
+        }
+        let digest = intent_digest(&intent);
+        let mut ids = self.effect_ids(&intent.provider, &intent.tool_name, scope.world_id);
+        let presented = approval.map(|(g, _)| hex(&g.id().0));
+        let result = self.authorize_core(intent, scope, authority, approval);
+        let (status, note): (EventStatus, Option<&str>) = match &result {
+            Ok(_) => (EventStatus::Ok, None),
+            Err(AuthorityOutcome::Pending { .. }) => (EventStatus::ApprovalPending, None),
+            Err(AuthorityOutcome::Denied(r)) if r == STALE_INTENT => {
+                (EventStatus::Rejected, Some("stale_intent"))
+            }
+            Err(AuthorityOutcome::Denied(r)) if r == NOT_ADMITTED => {
+                (EventStatus::Rejected, Some("provider_not_admitted"))
+            }
+            Err(AuthorityOutcome::Denied(_)) => (EventStatus::Rejected, None),
+            Err(AuthorityOutcome::Contained(_)) => (EventStatus::Rejected, Some("contained")),
+            Err(AuthorityOutcome::Approval(e)) => (EventStatus::Rejected, Some(approval_name(e))),
+            Err(AuthorityOutcome::Execution(_)) => (EventStatus::Failed, None),
+        };
+        let grant = match &result {
+            Ok(e) => e.approval_id().map(|d| hex(&d.0)),
+            Err(_) => presented,
+        };
+        if let Some(grant) = grant {
+            ids.grant_id = Some(BoundedId::new(&grant));
+        }
+        let refs = EvidenceRefs {
+            intent_digest: aien_trace::Digest::new(&hex(&digest.0)).ok(),
+            ..Default::default()
+        };
+        self.trace
+            .emit(EventKind::AuthorityDecided, status, None, ids, refs, note);
+        result
+    }
+
+    fn effect_ids(&self, provider: &ProviderId, tool: &str, world: WorldId) -> CorrelationIds {
+        let mut name = String::with_capacity(provider.as_str().len() + 1 + tool.len());
+        name.push_str(provider.as_str());
+        name.push(':');
+        name.push_str(tool);
+        CorrelationIds {
+            world_id: Some(world.0),
+            tool_request_id: Some(BoundedId::new(&name)),
+            ..Default::default()
+        }
+    }
+
+    fn authorize_core(
+        &self,
+        intent: EffectIntent,
+        scope: EffectScope,
+        authority: &dyn EffectAuthority,
+        approval: Option<(&ApprovalGrant, u64)>,
+    ) -> Result<AuthorizedEffect<EffectIntent>, AuthorityOutcome> {
         let (descriptor, live) = {
             let inner = self.broker.lock();
             let session = inner
                 .sessions
                 .get(intent.provider.as_str())
-                .ok_or_else(|| AuthorityOutcome::Denied("provider is not admitted".into()))?;
+                .ok_or_else(|| AuthorityOutcome::Denied(NOT_ADMITTED.into()))?;
             (
                 find_tool(session, &intent.tool_name).cloned(),
                 session.catalog_digest,
             )
         };
         if intent.capability_digest != live {
-            return Err(AuthorityOutcome::Denied(
-                "intent was staged against a stale catalog".into(),
-            ));
+            return Err(AuthorityOutcome::Denied(STALE_INTENT.into()));
         }
         let ctx = AuthorityContext::new(scope, descriptor, live, self.exposure.clone());
         let decision = authority.authorize(&intent, &ctx);
@@ -407,6 +602,11 @@ impl EffectLane {
         now: u64,
     ) -> Result<EffectReceipt, AuthorityOutcome> {
         if let Some(existing) = self.replay_of(grant, &intent, &scope) {
+            if self.trace.enabled() {
+                let mut ids = self.effect_ids(&intent.provider, &intent.tool_name, scope.world_id);
+                ids.grant_id = Some(BoundedId::new(&hex(&grant.id().0)));
+                self.trace_execution(&existing, true, ids, Some(intent_digest(&intent)));
+            }
             return existing.map_err(AuthorityOutcome::Execution);
         }
         let effect = self.authorize_approved(intent, scope, authority, grant, now)?;
@@ -483,6 +683,70 @@ impl EffectLane {
         &self,
         effect: AuthorizedEffect<EffectIntent>,
     ) -> Result<EffectReceipt, Error> {
+        if !self.trace.enabled() {
+            return self.execute_core(effect, &mut false).await;
+        }
+        let mut ids = self.effect_ids(
+            &effect.intent().provider,
+            &effect.intent().tool_name,
+            effect.world_id(),
+        );
+        ids.grant_id = effect.approval_id().map(|d| BoundedId::new(&hex(&d.0)));
+        let digest = intent_digest(effect.intent());
+        let mut replay = false;
+        let result = self.execute_core(effect, &mut replay).await;
+        self.trace_execution(&result, replay, ids, Some(digest));
+        result
+    }
+
+    fn trace_execution(
+        &self,
+        result: &Result<EffectReceipt, Error>,
+        replay: bool,
+        ids: CorrelationIds,
+        intent: Option<Digest32>,
+    ) {
+        let mut refs = EvidenceRefs {
+            intent_digest: intent.and_then(|d| aien_trace::Digest::new(&hex(&d.0)).ok()),
+            ..Default::default()
+        };
+        let (status, certainty, note) = match result {
+            Ok(receipt) => {
+                refs.effect_receipt_digest =
+                    aien_trace::Digest::new(&hex(&receipt_digest(receipt))).ok();
+                let note = replay.then_some("ledger_replay");
+                (EventStatus::Ok, Some(EffectCertainty::EffectOccurred), note)
+            }
+            Err(Error::Rejected(_)) => {
+                (EventStatus::Rejected, Some(EffectCertainty::NoEffect), None)
+            }
+            Err(Error::ReconciliationRequired) => (
+                EventStatus::Uncertain,
+                Some(EffectCertainty::Uncertain),
+                None,
+            ),
+            Err(Error::EffectInFlight) => (EventStatus::Rejected, None, Some("in_flight")),
+            Err(_) => (
+                EventStatus::Rejected,
+                Some(EffectCertainty::NoEffect),
+                Some("refused"),
+            ),
+        };
+        self.trace.emit(
+            EventKind::EffectExecuted,
+            status,
+            certainty,
+            ids,
+            refs,
+            note,
+        );
+    }
+
+    async fn execute_core(
+        &self,
+        effect: AuthorizedEffect<EffectIntent>,
+        replay: &mut bool,
+    ) -> Result<EffectReceipt, Error> {
         let key = effect.idempotency_key();
         let provider = effect.intent().provider.clone();
         let tool_name = effect.intent().tool_name.clone();
@@ -498,7 +762,10 @@ impl EffectLane {
                     return Err(Error::IdempotencyConflict);
                 }
                 return match &existing.entry {
-                    LedgerEntry::Completed(receipt) => Ok(receipt.clone()),
+                    LedgerEntry::Completed(receipt) => {
+                        *replay = true;
+                        Ok(receipt.clone())
+                    }
                     LedgerEntry::Uncertain => Err(Error::ReconciliationRequired),
                     LedgerEntry::InFlight => Err(Error::EffectInFlight),
                 };
@@ -588,4 +855,15 @@ fn identity(intent: &EffectIntent, world_id: WorldId, winning_jnode: JNodeId) ->
 
 fn find_tool<'a>(session: &'a McpSession, name: &str) -> Option<&'a ToolDescriptor> {
     session.tools.iter().find(|tool| tool.name() == name)
+}
+
+fn approval_name(e: &ApprovalError) -> &'static str {
+    match e {
+        ApprovalError::Unknown => "approval_unknown",
+        ApprovalError::Mismatch => "approval_mismatch",
+        ApprovalError::Consumed => "approval_consumed",
+        ApprovalError::Reserved => "approval_reserved",
+        ApprovalError::Expired => "approval_expired",
+        ApprovalError::Revoked => "approval_revoked",
+    }
 }
