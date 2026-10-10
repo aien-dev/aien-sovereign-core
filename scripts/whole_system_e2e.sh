@@ -95,9 +95,13 @@ mkfix() { # dir
   printf 'Windmill log. The brake band was replaced; the sails turned eleven hours on Tuesday.\n' >"$1/inbox/$F3"
 }
 mkfix "$WSC"; mkfix "$WS"
-OBJ='Read the three text files in the inbox folder and write a Markdown report under 200 words named report.md in the outbox folder; begin it with a heading line; mention each file by name.'
-OBJ_M="Write a Markdown report named report.md about the three inbox files named $F1, $F2 and $F3. Start with a Markdown heading line that begins with \"# \". Use at most 200 words. Mention each of the three file names."
-OBJ2='Append one line to report.md naming the file you reported on first.'
+# v1.1 (ACCEPTANCE-v1.1.md): the contract objective in the wording of aien-architecture#196 (the runtime refused
+# "under 200 words" in dry run 1); the mechanics objective names topics, not files (the destination classifier
+# took every file name as a write target in dry run 1); E4 recalls the first topic word.
+OBJ='Read the three text files in the inbox folder and write a Markdown report named report.md in the outbox folder. Start with a Markdown heading line that begins with "# ". Use at most 200 words. Mention each file by name.'
+T1=harbour; T2=orchard; T3=windmill
+OBJ_M="Write a Markdown report named report.md about the $T1, the $T2 and the $T3. Start with a Markdown heading line that begins with \"# \". Use at most 200 words. Mention the $T1, the $T2 and the $T3."
+OBJ2='Append one line to report.md naming the topic you reported on first.'
 OBJ6='Write a file named done.md in the outbox folder containing one line: finished.'
 OBJC='Write a file named ctrl.md in the outbox folder containing one line: control.'
 OBJ_ID=$(printf 'AIEN_E2E_OBJECTIVE_V1\n%s' "$OBJ" | sha256sum | cut -d' ' -f1)
@@ -183,6 +187,7 @@ doc_fields() { # file state csha grant failed_ids -> json
 # ---- PRE ---------------------------------------------------------------------------------------------------
 echo "run folder: $OUT" | tee "$OUT/console.log"
 cp "$REPO/docs/campaigns/whole-system-e2e/ACCEPTANCE-v1.md" "$OUT/ACCEPTANCE-v1.as-run.md"
+cp "$REPO/docs/campaigns/whole-system-e2e/ACCEPTANCE-v1.1.md" "$OUT/ACCEPTANCE-v1.1.as-run.md" 2>/dev/null
 FIX=$(cd "$WS/inbox" && sha256sum -- * | LC_ALL=C sort -k2 | jq -R -s 'split("\n") | map(select(length>0) | split("  ") | {name:.[1], sha256:.[0]})')
 PRE_OK=1; PRE_EV="host $HOST; model $C_ID"
 [ "$W_SHA" = "$C_W" ] && [ "$T_SHA" = "$C_T" ] || { PRE_OK=0; PRE_EV="$PRE_EV; model digests differ from release/candidate.toml"; }
@@ -238,7 +243,7 @@ E3M_OK=0; REPORT=""
 if [ -z "$ABORT" ]; then
   if task E3m "$WS" "$OBJ_M"; then
     REPORT=$(find_written "$WS" report.md); [ -n "$REPORT" ] || REPORT=$WS/${T_PATH:-report.md}
-    FAILED=$(check_doc "$REPORT" "$F1" "$F2" "$F3"); DSHA=none; [ -f "$REPORT" ] && DSHA=$(sha_of "$REPORT")
+    FAILED=$(check_doc "$REPORT" "$T1" "$T2" "$T3"); DSHA=none; [ -f "$REPORT" ] && DSHA=$(sha_of "$REPORT")
     G=$T_GRANT; CS=$T_CSHA; execute E3m "$WS" -again >/dev/null 2>&1; AGAIN=$T_REFUSAL
     [ -f "$REPORT" ] && cp "$REPORT" "$ART/E3m-report.md"
     if [ -z "$FAILED" ] && [ "$DSHA" = "$CS" ] && [ "$AGAIN" = AlreadySpent ]; then ST=PASS; E3M_OK=1; else ST=FAIL; fi
@@ -251,7 +256,7 @@ else rcpt E3m NOT_RUN "no daemon" '{}'; fi
 
 # ---- E4: remember, SIGKILL, restart, second objective ------------------------------------------------------
 if [ -z "$ABORT" ] && [ $E3M_OK = 1 ]; then
-  cli compose remember --text "E4 memory item: the inbox file reported on first is $F1" >"$ART/E4-remember.json" 2>&1
+  cli compose remember --text "E4 memory item: the topic reported on first is the $T1" >"$ART/E4-remember.json" 2>&1
   REM_OK=$(jq -r '.ok // false' "$ART/E4-remember.json" 2>/dev/null)
   LINES_BEFORE=$(wc -l <"$REPORT"); SHA_BEFORE=$(sha_of "$REPORT")
   if sigkill; then KILLED="kill -9 (exit 137)"; else KILLED="kill rc=${KILL_RC:-none}"; fi
@@ -266,7 +271,7 @@ if [ -z "$ABORT" ] && [ $E3M_OK = 1 ]; then
       [ "$REM_OK" = true ] || { OK=0; WHY="$WHY remember-refused"; }
       [ "$T_MEMCTX" = work ] && [ "${T_MEMN:-0}" -ge 1 ] || { OK=0; WHY="$WHY memory-report($T_MEMCTX/$T_MEMN)"; }
       [ "$LINES_AFTER" -eq $((LINES_BEFORE + 1)) ] || { OK=0; WHY="$WHY lines($LINES_BEFORE->$LINES_AFTER)"; }
-      printf '%s' "$NEWLINE" | grep -qF -- "$F1" || { OK=0; WHY="$WHY last-line-lacks-$F1"; }
+      printf '%s' "$NEWLINE" | grep -qiF -- "$T1" || { OK=0; WHY="$WHY last-line-lacks-$T1"; }
       [ "$(sha_of "$REPORT")" != "$SHA_BEFORE" ] || { OK=0; WHY="$WHY report-unchanged"; }
       rcpt E4 "$([ $OK = 1 ] && echo PASS || echo FAIL)" "$KILLED then restart ($REPL); second objective state $T_STATE; memory $T_MEMCTX/$T_MEMN; lines $LINES_BEFORE->$LINES_AFTER; problems [${WHY# }]" \
         "$(jq -nc --arg store "compose home (AIEN_COMPOSE_DIR records; canonical store decided by lane L3)" --arg item "$(sha_of "$ART/E4-remember.json")" --arg rk sigkill --arg ru "$RESTART_UTC" --arg cu "$RECALL_UTC" --arg nl "$NEWLINE" --arg mc "$T_MEMCTX" --argjson mn "${T_MEMN:-0}" --arg st "$T_STATE" --argjson g "$T_GRANT" --argjson rc "${T_RECEIPT:-null}" --arg p "${T_PATH:-}" \
