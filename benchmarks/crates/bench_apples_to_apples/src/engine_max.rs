@@ -92,7 +92,10 @@ impl MaxServerHandle {
 impl Drop for MaxServerHandle {
     fn drop(&mut self) {
         let pid_str = self.child.id().to_string();
-        eprintln!("Terminating Modular MAX server PID {} and its worker subprocesses...", pid_str);
+        eprintln!(
+            "Terminating Modular MAX server PID {} and its worker subprocesses...",
+            pid_str
+        );
         let _ = Command::new("pkill").args(["-9", "-P", &pid_str]).output();
         let _ = self.child.kill();
         let _ = self.child.wait();
@@ -152,10 +155,8 @@ async fn execute_single_max_request(
                 if let Ok(val) = serde_json::from_str::<Value>(json_str) {
                     if let Some(choices) = val.get("choices").and_then(|c| c.as_array()) {
                         if let Some(first) = choices.first() {
-                            let text_opt = first
-                                .get("text")
-                                .and_then(|t| t.as_str())
-                                .or_else(|| {
+                            let text_opt =
+                                first.get("text").and_then(|t| t.as_str()).or_else(|| {
                                     first
                                         .get("delta")
                                         .and_then(|d| d.get("content"))
@@ -166,7 +167,9 @@ async fn execute_single_max_request(
                                 if token_count == 0 {
                                     ttft_ms = start.elapsed().as_secs_f64() * 1000.0;
                                 } else {
-                                    itl_ms.push(now.duration_since(last_chunk_time).as_secs_f64() * 1000.0);
+                                    itl_ms.push(
+                                        now.duration_since(last_chunk_time).as_secs_f64() * 1000.0,
+                                    );
                                 }
                                 last_chunk_time = now;
                                 token_count += 1;
@@ -219,7 +222,8 @@ pub async fn run_max_concurrency_sweep(
         let model_name = server.model_id.clone();
 
         handles.push(tokio::spawn(async move {
-            execute_single_max_request(client_clone, port, req_idx, prompt, max_tokens, model_name).await
+            execute_single_max_request(client_clone, port, req_idx, prompt, max_tokens, model_name)
+                .await
         }));
     }
 
@@ -260,12 +264,14 @@ pub async fn run_max_concurrency_sweep(
     let itl_p50 = calculate_percentile(&all_itl, 50.0);
     let itl_p95 = calculate_percentile(&all_itl, 95.0);
     let itl_p99 = calculate_percentile(&all_itl, 99.0);
-    let energy_j_per_tok = calculate_joules_per_token(avg_power_watts, wall_clock_elapsed, total_output_tokens);
+    let energy_j_per_tok =
+        calculate_joules_per_token(avg_power_watts, wall_clock_elapsed, total_output_tokens);
 
     let parity_match_rate_pct = if let Ok(tok) =
         aien_inference_abi::tokenizer::TinyLlamaTokenizer::from_file(&config.tokenizer_path)
     {
-        let toks = crate::oracle::encode_generated_text_in_context(&tok, &config.prompt, &sample_text);
+        let toks =
+            crate::oracle::encode_generated_text_in_context(&tok, &config.prompt, &sample_text);
         verify_token_sequence_match(&toks, &ORACLE_BENCHMARK_128_TOKENS)
     } else {
         0.0

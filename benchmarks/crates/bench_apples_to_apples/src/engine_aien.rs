@@ -34,6 +34,10 @@ impl AienEngineHandle {
             vocab_size: 32000,
             rms_norm_eps: 1e-5,
             rope_theta: 10000.0,
+            rope_scaling: None,
+            tie_word_embeddings: false,
+            eos_token_ids: Vec::new(),
+            qk_norm: false,
         };
 
         let safetensors_path = format!("{}/model.safetensors", config.model_path);
@@ -49,8 +53,13 @@ impl AienEngineHandle {
 
         let tokenizer_path = resolve_tokenizer_path(&config.tokenizer_path, &config.model_path)?;
         eprintln!("Loading tokenizer from {}...", tokenizer_path.display());
-        let tokenizer = TinyLlamaTokenizer::from_file(&tokenizer_path)
-            .map_err(|e| format!("Failed to load tokenizer from {}: {}", tokenizer_path.display(), e))?;
+        let tokenizer = TinyLlamaTokenizer::from_file(&tokenizer_path).map_err(|e| {
+            format!(
+                "Failed to load tokenizer from {}: {}",
+                tokenizer_path.display(),
+                e
+            )
+        })?;
 
         Ok(Self { backend, tokenizer })
     }

@@ -173,7 +173,10 @@ pub async fn enforce_thermal_cooldown(target_watts: f64, max_temp_c: f64) {
             );
 
             if sample.power_watts <= target_watts && sample.temperature_c <= max_temp_c {
-                eprintln!("Thermal envelope satisfied in {:.1}s.", start.elapsed().as_secs_f64());
+                eprintln!(
+                    "Thermal envelope satisfied in {:.1}s.",
+                    start.elapsed().as_secs_f64()
+                );
                 return;
             }
         }
