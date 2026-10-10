@@ -432,7 +432,15 @@ fn test_t2_f36_axum_nonexistent_route_404() {
         .output()
         .expect("curl cockpit");
     let code = String::from_utf8_lossy(&output.stdout);
-    assert_eq!(code.trim(), "404");
+    // An unknown route never serves content. Without a session the cockpit access
+    // gate (spark-cockpit-rs/src/access.rs) answers 401 before routing, so an
+    // anonymous probe learns nothing about which routes exist; a gate-less build
+    // answers 404.
+    assert!(
+        code.trim() == "404" || code.trim() == "401",
+        "unknown route returned {} (expected 404, or 401 from the access gate)",
+        code.trim()
+    );
 }
 
 #[test]
@@ -891,14 +899,26 @@ fn test_t2_f64_git_readme_contains_agpl_badge() {
 
 #[test]
 fn test_t2_f65_git_worktree_clean_no_confidential_files() {
+    // target/ is build output and holds the pinned dependency checkouts written by
+    // scripts/pins.sh, whose vendored crates ship PEM test fixtures; the scan is
+    // about files a person or agent committed or dropped into the worktree.
+    let root = workspace_root();
+    let target = root.join("target");
     let output = Command::new("find")
         .args([
-            workspace_root().to_str().unwrap(),
+            root.to_str().unwrap(),
+            "-path",
+            target.to_str().unwrap(),
+            "-prune",
+            "-o",
+            "(",
             "-name",
             "*.pem",
             "-o",
             "-name",
             "*.id_rsa",
+            ")",
+            "-print",
         ])
         .output()
         .expect("find keys");
