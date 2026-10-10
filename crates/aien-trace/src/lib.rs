@@ -79,7 +79,8 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-fn now_ms() -> u64 {
+/// Wall clock in unix milliseconds (0 if the clock is before the epoch).
+pub fn now_unix_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
@@ -426,6 +427,10 @@ pub struct TraceEvent {
 
 /// Destination of events. Implementations must never block the caller for I/O.
 pub trait TraceSink: Send + Sync {
+    /// False for sinks that discard everything, so callers can skip building events.
+    fn enabled(&self) -> bool {
+        true
+    }
     fn emit(&self, event: TraceEvent);
     fn next_event_id(&self) -> u64;
 }
@@ -435,6 +440,9 @@ pub trait TraceSink: Send + Sync {
 pub struct NullSink;
 
 impl TraceSink for NullSink {
+    fn enabled(&self) -> bool {
+        false
+    }
     fn emit(&self, _event: TraceEvent) {}
     fn next_event_id(&self) -> u64 {
         0
@@ -532,7 +540,7 @@ impl BoundedJsonlSink {
                 trace_id,
                 event_id: self.next_event_id(),
                 parent_event_id: None,
-                at_unix_ms: now_ms(),
+                at_unix_ms: now_unix_ms(),
                 kind: EventKind::TraceDropped,
                 status: EventStatus::Ok,
                 effect_certainty: None,
@@ -665,12 +673,15 @@ impl TraceContext {
         refs: EvidenceRefs,
         note: Option<BoundedNote>,
     ) -> u64 {
+        if !self.sink.enabled() {
+            return 0;
+        }
         let id = self.sink.next_event_id();
         self.sink.emit(TraceEvent {
             trace_id: self.trace_id,
             event_id: id,
             parent_event_id: parent,
-            at_unix_ms: now_ms(),
+            at_unix_ms: now_unix_ms(),
             kind,
             status,
             effect_certainty: None,
@@ -815,7 +826,7 @@ mod tests {
             "aien-trace-{name}-{}-{}-{}.jsonl",
             std::process::id(),
             N.fetch_add(1, Ordering::Relaxed),
-            now_ms()
+            now_unix_ms()
         ))
     }
 

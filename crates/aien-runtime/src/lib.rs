@@ -20,6 +20,7 @@ pub mod server;
 pub mod shared_kv;
 pub mod spine;
 pub mod swarm;
+pub mod trace_observer;
 pub mod world;
 
 /// Test-only: one slot per process for tests that open a compose home (omega allows 4 handles).

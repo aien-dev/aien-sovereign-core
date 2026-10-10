@@ -4,8 +4,12 @@
 use crate::sequence::{SequenceArena, SequenceId, SequenceState};
 use crate::world::WorldStore;
 use aien_kv_cache::{AienKvManager, PrefillGateError};
+use aien_trace::{
+    CorrelationIds, EventKind, EventStatus, EvidenceRefs, NullSink, TraceEvent, TraceId, TraceSink,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::sync::Arc;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SwarmState {
@@ -41,10 +45,18 @@ pub struct SwarmRecord {
     pub finished_branches: Vec<SequenceId>,
     pub state: SwarmState,
     pub created_at: u64,
+    /// Id of the `swarm_launched` trace event (the parent of this swarm's
+    /// other trace events). Correlation only; `None` in old records.
+    #[serde(default)]
+    pub trace_root_event: Option<u64>,
 }
 
 pub struct SwarmManager {
     swarms: HashMap<u64, SwarmRecord>,
+    /// Correlation trace sink. `NullSink` by default (tracing off).
+    trace: Arc<dyn TraceSink>,
+    /// swarm id -> trace id, derived at launch from (root world, swarm id).
+    trace_ids: HashMap<u64, TraceId>,
     next_swarm_id: u64,
     /// PREFILL-GATE: swarms whose root prompt has not been prefilled yet
     /// (swarm id -> root prompt). Branch KV is forked from the root only after
@@ -62,9 +74,48 @@ impl SwarmManager {
     pub fn new() -> Self {
         Self {
             swarms: HashMap::new(),
+            trace: Arc::new(NullSink),
+            trace_ids: HashMap::new(),
             next_swarm_id: 1,
             pending_root_prefill: HashMap::new(),
         }
+    }
+
+    /// Installs the correlation trace sink. The default is `NullSink`.
+    pub fn set_trace_sink(&mut self, sink: Arc<dyn TraceSink>) {
+        self.trace = sink;
+    }
+
+    /// Trace id of a launched swarm: `TraceId::derive(root_world_id, swarm_id, 0)`.
+    pub fn trace_id(&self, swarm_id: u64) -> Option<TraceId> {
+        self.trace_ids.get(&swarm_id).copied()
+    }
+
+    fn trace_event(
+        &self,
+        trace_id: TraceId,
+        parent: Option<u64>,
+        kind: EventKind,
+        status: EventStatus,
+        ids: CorrelationIds,
+    ) -> u64 {
+        if !self.trace.enabled() {
+            return 0;
+        }
+        let event_id = self.trace.next_event_id();
+        self.trace.emit(TraceEvent {
+            trace_id,
+            event_id,
+            parent_event_id: parent,
+            at_unix_ms: aien_trace::now_unix_ms(),
+            kind,
+            status,
+            effect_certainty: None,
+            ids,
+            refs: EvidenceRefs::default(),
+            note: None,
+        });
+        event_id
     }
 
     /// Launches a swarm: creates root sequence, preallocates root KV blocks, and forks N branches.
@@ -97,6 +148,19 @@ impl SwarmManager {
 
         // 2. Allocate root prompt blocks in physical KV manager. This reserves
         // and zeroes blocks only (PrefillState::Allocated); no K/V is computed.
+        let trace_id = TraceId::derive(root_world_id, swarm_id, 0);
+        let root_event = self.trace_event(
+            trace_id,
+            None,
+            EventKind::SwarmLaunched,
+            EventStatus::Ok,
+            CorrelationIds {
+                swarm_id: Some(swarm_id),
+                world_id: Some(root_world_id),
+                root_sequence_id: Some(root_seq.as_u64()),
+                ..Default::default()
+            },
+        );
         let root_u64 = root_seq.as_u64();
         kv.allocate_sequence(root_u64, prompt_tokens)?;
 
@@ -119,6 +183,19 @@ impl SwarmManager {
                 // Waiting on the root prefill, not decoding.
                 child.state = SequenceState::Prefill;
             }
+            self.trace_event(
+                trace_id,
+                Some(root_event),
+                EventKind::BranchForked,
+                EventStatus::Ok,
+                CorrelationIds {
+                    swarm_id: Some(swarm_id),
+                    world_id: Some(child_world),
+                    root_sequence_id: Some(root_seq.as_u64()),
+                    sequence_id: Some(child_seq.as_u64()),
+                    ..Default::default()
+                },
+            );
             branch_sequences.push(child_seq);
             branch_worlds.push(child_world);
         }
@@ -134,7 +211,9 @@ impl SwarmManager {
             finished_branches: Vec::new(),
             state: SwarmState::Running,
             created_at: timestamp,
+            trace_root_event: Some(root_event),
         };
+        self.trace_ids.insert(swarm_id, trace_id);
 
         self.swarms.insert(swarm_id, record);
         Ok(swarm_id)
@@ -262,6 +341,19 @@ impl SwarmManager {
         let mut released = Vec::with_capacity(swarm.branch_sequences.len() + 1);
         released.push(swarm.root_sequence_id.as_u64());
         released.extend(swarm.branch_sequences.iter().map(|b| b.as_u64()));
+        let root_event = swarm.trace_root_event;
+        if let Some(trace_id) = self.trace_ids.get(&swarm_id).copied() {
+            self.trace_event(
+                trace_id,
+                root_event,
+                EventKind::SwarmCancelled,
+                EventStatus::Cancelled,
+                CorrelationIds {
+                    swarm_id: Some(swarm_id),
+                    ..Default::default()
+                },
+            );
+        }
         Ok(released)
     }
 
@@ -285,6 +377,20 @@ impl SwarmManager {
             .then_some(*id)
         });
         let swarm_id = swarm_id?;
+        if let Some(trace_id) = self.trace_ids.get(&swarm_id).copied() {
+            let root_event = self.swarms.get(&swarm_id).and_then(|s| s.trace_root_event);
+            self.trace_event(
+                trace_id,
+                root_event,
+                EventKind::SequenceFinished,
+                EventStatus::Ok,
+                CorrelationIds {
+                    swarm_id: Some(swarm_id),
+                    sequence_id: Some(seq_id.as_u64()),
+                    ..Default::default()
+                },
+            );
+        }
 
         let swarm = self
             .swarms
