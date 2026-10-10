@@ -1,4 +1,14 @@
-#!/usr/bin/env bash
+if [ "$SKIP_BUILD" -eq 0 ] || [ ! -x "$BIN" ]; then
+    echo "== Building release binary =="
+    # Step 1 of the gate is "clean checkout, one command": scripts/pins.sh --gpu writes
+    # target/pins/env.sh so the real omega libraries link (sovereign-core #92). Without it
+    # the build carries the CPU stubs and step 2 (GB10) cannot pass.
+    if [ -f "$REPO_ROOT/target/pins/env.sh" ]; then
+        # shellcheck disable=SC1091
+        . "$REPO_ROOT/target/pins/env.sh"
+    else
+        echo "WARNING: no target/pins/env.sh (run scripts/pins.sh --gpu first); building with the CPU stubs"
+    fi#!/usr/bin/env bash
 # AIEN 0.1 Native Golden Path acceptance harness.
 # Executes the 10-step release gate from docs/NATIVE_GOLDEN_PATH.md against a
 # freshly booted daemon and prints one verdict line per step.

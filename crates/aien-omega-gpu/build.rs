@@ -19,6 +19,7 @@ fn main() {
         "AIEN_OMEGA_GPU_LIB",
         "AIEN_OMEGA_DIR",
         "AIEN_PHYSICS_DIR",
+        "AIEN_REQUIRE_NATIVE_LIBS",
     ] {
         println!("cargo:rerun-if-env-changed={v}");
     }
@@ -48,6 +49,13 @@ fn main() {
         return;
     }
     let Ok(dir) = std::env::var("AIEN_OMEGA_DIR") else {
+        // AIEN_REQUIRE_NATIVE_LIBS=1 (set by scripts/pins.sh env.sh) turns the silent
+        // stub fallback into a build error: a release or receipt build must never
+        // discover at run time that it carries the CPU stub (sovereign-core #92).
+        assert!(
+            std::env::var("AIEN_REQUIRE_NATIVE_LIBS").as_deref() != Ok("1"),
+            "aien-omega-gpu: AIEN_REQUIRE_NATIVE_LIBS=1 but neither AIEN_OMEGA_DIR nor AIEN_OMEGA_GPU_LIB is set (run scripts/pins.sh --gpu and source target/pins/env.sh)"
+        );
         println!("cargo:warning=aien-omega-gpu: no AIEN_OMEGA_DIR or AIEN_OMEGA_GPU_LIB, building the CPU stub");
         return;
     };

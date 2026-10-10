@@ -5,6 +5,18 @@ checks all use the same commands.
 
 ## Build
 
+One command materializes every pin a native build needs (sovereign-core #92, "clean checkout plus one command"):
+
+```
+scripts/pins.sh --gpu      # omega at omega.lock, physics and aienos at omega's locks, under target/pins
+. target/pins/env.sh       # AIEN_OMEGA_DIR, AIEN_OMEGA_COMPOSE_DIR, AIEN_PHYSICS_DIR, AIEN_AIENOS_LOCK_REPO, AIEN_REQUIRE_NATIVE_LIBS=1
+```
+
+Without `--gpu` only the composition library is linked (the CI gate shape). `scripts/pins.sh --check` verifies the
+three checkouts are at their pins without touching the network. `AIEN_REQUIRE_NATIVE_LIBS=1` makes a build that
+would silently fall back to a CPU stub fail instead; `scripts/golden_path.sh` sources `target/pins/env.sh` when
+present. `scripts/test-pins.sh` is the offline self-test (throwaway repositories, no network).
+
 `scripts/release-build.sh` (needs the pinned toolchain from `rust-toolchain.toml`, `cargo fetch --locked` into the
 CARGO_HOME in use, and for the native engine `AIEN_OMEGA_DIR` at `omega.lock` and `AIEN_PHYSICS_DIR` at omega's
 `physics.lock`; `AIEN_DEV_FALLBACK` and `AIEN_FORCE_CPU_STUB` unset, no mojo on PATH):

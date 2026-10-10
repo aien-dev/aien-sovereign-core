@@ -30,6 +30,7 @@ fn main() {
         "AIEN_OMEGA_COMPOSE_SHA",
         "AIEN_PHYSICS_DIR",
         "AIEN_AIENOS_LOCK_REPO",
+        "AIEN_REQUIRE_NATIVE_LIBS",
     ] {
         println!("cargo:rerun-if-env-changed={v}");
     }
@@ -71,6 +72,11 @@ fn main() {
     let Ok(dir) =
         std::env::var("AIEN_OMEGA_COMPOSE_DIR").or_else(|_| std::env::var("AIEN_OMEGA_DIR"))
     else {
+        // See aien-omega-gpu/build.rs: AIEN_REQUIRE_NATIVE_LIBS=1 refuses the stub.
+        assert!(
+            std::env::var("AIEN_REQUIRE_NATIVE_LIBS").as_deref() != Ok("1"),
+            "aien-omega-compose: AIEN_REQUIRE_NATIVE_LIBS=1 but no AIEN_OMEGA_COMPOSE_DIR, AIEN_OMEGA_DIR or AIEN_OMEGA_COMPOSE_LIB is set (run scripts/pins.sh and source target/pins/env.sh)"
+        );
         println!("cargo:warning=aien-omega-compose: no AIEN_OMEGA_COMPOSE_DIR, AIEN_OMEGA_DIR or AIEN_OMEGA_COMPOSE_LIB, building the stub");
         return;
     };
