@@ -2168,9 +2168,16 @@ impl ComposeBridge {
         self.trace_id
     }
 
+    /// True when a trace sink is installed. Call sites check this before
+    /// building ids so that a disabled sink costs no allocation.
+    pub(crate) fn trace_enabled(&self) -> bool {
+        self.trace.enabled()
+    }
+
     /// Emits one correlation event for this bridge. The first event becomes
     /// the root; every later one is its child. With the sink disabled this
-    /// allocates nothing and reads no clock. Returns the event id (0 if off).
+    /// allocates nothing and reads no clock (callers build the ids only after
+    /// `trace_enabled`). Returns the event id (0 if off).
     pub(crate) fn trace_event(
         &self,
         kind: aien_trace::EventKind,
@@ -2665,28 +2672,30 @@ impl ComposeBridge {
         }
         // Correlation only (#398): the turn happened, what record names it,
         // and whether it committed. No proposal text, no goal text.
-        self.trace_event(
-            aien_trace::EventKind::ModelTurn,
-            if proposer_error.is_some() {
-                aien_trace::EventStatus::Failed
-            } else {
-                aien_trace::EventStatus::Ok
-            },
-            None,
-            aien_trace::CorrelationIds {
-                generation_record,
-                decision_id: compose_commit.map(|c| aien_trace::BoundedId::new(&c.to_string())),
-                ..Default::default()
-            },
-            aien_trace::EvidenceRefs::default(),
-            if proposer_error.is_some() {
-                "proposer_error"
-            } else if committed {
-                "compose_commit"
-            } else {
-                "uncommitted"
-            },
-        );
+        if self.trace_enabled() {
+            self.trace_event(
+                aien_trace::EventKind::ModelTurn,
+                if proposer_error.is_some() {
+                    aien_trace::EventStatus::Failed
+                } else {
+                    aien_trace::EventStatus::Ok
+                },
+                None,
+                aien_trace::CorrelationIds {
+                    generation_record,
+                    decision_id: compose_commit.map(|c| aien_trace::BoundedId::new(&c.to_string())),
+                    ..Default::default()
+                },
+                aien_trace::EvidenceRefs::default(),
+                if proposer_error.is_some() {
+                    "proposer_error"
+                } else if committed {
+                    "compose_commit"
+                } else {
+                    "uncommitted"
+                },
+            );
+        }
         Ok(ComposeTaskReport {
             compose_commit,
             generation_record,

@@ -43,7 +43,7 @@ and refusal names into it).
 | compose model turn | `ComposeBridge::run_task_inner` after the commit record is written | `model_turn` ok with `generation_record` and `decision_id` = commit id, note `compose_commit` or `uncommitted`; proposer error: `model_turn` failed, note `proposer_error` |
 | compose authority | `effects::authorize` | `authority_decided` ok (`grant_id` = grant record) / rejected+no_effect (note = refusal name) / failed |
 | compose intent | `effects::open_intent` | `tool_requested` ok (`tool_request_id` = intent record, `grant_id`) / rejected (refusal name) / failed |
-| compose ack | `effects::ack` | `effect_executed` ok+effect_occurred (DONE) / failed+no_effect (NOT_DONE) / uncertain+uncertain (UNRESOLVED) / rejected / failed |
+| compose ack | `effects::ack` | `effect_executed` ok+effect_occurred (DONE) / rejected+no_effect (NOT_DONE: the world check says the effect did not happen, a definite no-effect outcome, not "ran and errored") / uncertain+uncertain (UNRESOLVED) / rejected (refusal name) / failed (other error) |
 | compose reconcile | `effects::reconcile` (also `reconcile_at_start`) | `result_received` ok (note = caller label) or failed (`reconcile_failed`), one per call, `tool_request_id` when one intent was declared |
 
 The compose bridge's first event is the root of its trace and every later event is its child (the bridge
@@ -52,11 +52,14 @@ emitted from inside a kernel launch, a KV block operation or a decode step.
 
 ## Exporter, cardinality, buffering, retention
 
-- Default sink is `NullSink` (disabled): `enabled()` is false, so no event is built, no clock is read, nothing
-  is allocated. The daemon installs `BoundedJsonlSink` only when `AIEN_TRACE_JSONL` names a file
-  (`server.rs: trace_sink_from_env`; file created 0o600, append only, one JSON object per line); a flusher
-  thread writes every 250 ms and once more when the handle drops at the end of `run`, after the compose home
-  closed.
+- Default sink is `NullSink` (disabled): `enabled()` is false; every compose emit site checks
+  `trace_enabled()` before building ids, so no event is built, no clock is read and no id string is allocated
+  (the swarm and broker sites pass ids that already exist). The daemon installs `BoundedJsonlSink` only when
+  `AIEN_TRACE_JSONL` names a file (`server.rs: trace_sink_from_env`; append only, one JSON object per line); a
+  flusher thread writes every 250 ms and once more when the handle drops at the end of `run`, after the compose
+  home closed. The path must be a regular file or absent: a symbolic link is refused on every flush (the batch is
+  counted as dropped, nothing is written through the link), the file is created 0o600 and set back to 0o600 on
+  every flush, so a mode widened between flushes does not persist.
 - Cardinality: at most one event per boundary crossing, so per run about `2 + 2 x branches + 3 x tool
   calls + reconcile rows`. There is no per-token or per-step event.
 - Buffering and backpressure: a bounded in-memory queue (default 4096 events) under a mutex held only for
@@ -96,3 +99,21 @@ workload has no model forward pass, so the measured overhead is that of the sche
   `authority_decided` (the `AuthorizedEffect` type is frozen and carries no event id).
 - Tie order of events in the same millisecond is by `event_id`; not stressed with many concurrent emitters.
 - OTEL export is out of scope (a separate concern per the issue).
+
+### Recorded from the independent review of PR #400 (2026-10-10, 0 blocking, 9 minor)
+
+Fixed before merge: NOT_DONE is `rejected` + `no_effect` (was `failed`); the exporter refuses a symbolic link at
+the path and resets the mode to 0o600 on every flush; the compose emit sites check `trace_enabled()` before
+building ids. Kept as limits of this version:
+
+- `timed_out`, `unavailable` and the `Cancelled`/`TimedOut` kinds exist in the type and are emitted by no site
+  yet (the broker has no timeout path of its own today; the Interplane adapter will carry them).
+- The `trace_dropped` marker has no parent and no `last_trace` field; it is a per-file loss count, not a tree node.
+- Swarm trace ids derive from counters and start time, so one appended file across daemon restarts can repeat an
+  id; join on `event_id` order within a restart, or rotate the file between runs (retention note above).
+- Digests are unsalted sha256 of canonical encodings: they name content, they do not hide it from someone who
+  already holds the content.
+- The overhead benchmark compares `NullSink` with `MemorySink` on the scheduling path only. The reviewer's own
+  release-build run (64 branches, load about 3.5) measured off 8.44/6.68/6.48 ms against on 9.66/7.36/7.04 ms:
+  a small overhead within a few milliseconds, not proven to be noise.
+- `TraceContext::child` is not synchronised across threads; one context per thread is the intended use.

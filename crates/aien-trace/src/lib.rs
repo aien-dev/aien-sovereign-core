@@ -491,6 +491,21 @@ pub struct BoundedJsonlSink {
     last_trace: Mutex<TraceId>,
 }
 
+/// Refuses an export path that is a symbolic link, so nothing is written
+/// through a link planted at the configured path. An absent path is fine (the
+/// file is created). Metadata errors other than "absent" are returned.
+fn refuse_symlink(path: &Path) -> std::io::Result<()> {
+    match std::fs::symlink_metadata(path) {
+        Ok(m) if m.file_type().is_symlink() => Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "trace export path is a symbolic link",
+        )),
+        Ok(_) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e),
+    }
+}
+
 impl BoundedJsonlSink {
     pub fn new(path: impl Into<PathBuf>) -> Self {
         Self::with_capacity(path, DEFAULT_CAPACITY)
@@ -518,8 +533,10 @@ impl BoundedJsonlSink {
         &self.path
     }
 
-    /// Appends queued events, one JSON object per line. The file is created
-    /// with mode 0o600 on unix. After drops, one `trace_dropped` event follows.
+    /// Appends queued events, one JSON object per line. The path must not be a
+    /// symbolic link (a link is refused and the batch counted as dropped); the
+    /// file is created with mode 0o600 on unix and set back to 0o600 on every
+    /// flush. After drops, one `trace_dropped` event follows.
     pub fn flush(&self) -> std::io::Result<()> {
         let batch: Vec<TraceEvent> = lock(&self.queue).drain(..).collect();
         let pending = self.dropped.swap(0, Ordering::Relaxed);
@@ -558,7 +575,16 @@ impl BoundedJsonlSink {
             use std::os::unix::fs::OpenOptionsExt;
             opts.mode(0o600);
         }
-        let result = opts.open(&self.path).and_then(|mut f| f.write_all(&lines));
+        let result = refuse_symlink(&self.path)
+            .and_then(|()| opts.open(&self.path))
+            .and_then(|mut f| {
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    f.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+                }
+                f.write_all(&lines)
+            });
         if result.is_err() {
             // Not written: report the loss instead of hiding it.
             let lost = batch.len() as u64 + pending;
@@ -1032,6 +1058,62 @@ mod tests {
                 0o600
             );
         }
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlink_path_is_refused_and_mode_is_reset_on_every_flush() {
+        use std::os::unix::fs::PermissionsExt;
+        // A link planted at the export path: nothing is written through it,
+        // the batch is counted as dropped, the target stays empty.
+        let target = tmp("symlink-target");
+        std::fs::write(&target, b"").unwrap();
+        let link = tmp("symlink");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let sink = BoundedJsonlSink::new(&link);
+        let t = TraceId::derive(1, 2, 3);
+        sink.emit(TraceEvent {
+            trace_id: t,
+            event_id: sink.next_event_id(),
+            parent_event_id: None,
+            at_unix_ms: 1,
+            kind: EventKind::SwarmLaunched,
+            status: EventStatus::Ok,
+            effect_certainty: None,
+            ids: CorrelationIds::default(),
+            refs: EvidenceRefs::default(),
+            note: None,
+        });
+        assert!(sink.flush().is_err());
+        assert_eq!(std::fs::read(&target).unwrap().len(), 0);
+        assert_eq!(sink.dropped_total(), 1);
+        let _ = std::fs::remove_file(&link);
+        let _ = std::fs::remove_file(&target);
+
+        // A pre-existing file with a wide mode is narrowed to 0o600 on flush.
+        let path = tmp("mode");
+        std::fs::write(&path, b"").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let sink = BoundedJsonlSink::new(&path);
+        sink.emit(TraceEvent {
+            trace_id: t,
+            event_id: sink.next_event_id(),
+            parent_event_id: None,
+            at_unix_ms: 1,
+            kind: EventKind::SwarmLaunched,
+            status: EventStatus::Ok,
+            effect_certainty: None,
+            ids: CorrelationIds::default(),
+            refs: EvidenceRefs::default(),
+            note: None,
+        });
+        sink.flush().unwrap();
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap().lines().count(), 1);
         let _ = std::fs::remove_file(&path);
     }
 

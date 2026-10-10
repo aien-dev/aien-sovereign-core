@@ -1383,17 +1383,19 @@ pub fn authorize(
     proof: Option<&crate::control::DeskProof>,
 ) -> ControlResponse {
     let r = authorize_inner(b, req, proof);
-    trace_response(
-        b,
-        aien_trace::EventKind::AuthorityDecided,
-        &r,
-        aien_trace::CorrelationIds {
-            decision_id: Some(aien_trace::BoundedId::new(&req.cx_promotion.to_string())),
-            ..Default::default()
-        },
-        |ids, id| ids.grant_id = Some(aien_trace::BoundedId::new(&id.to_string())),
-        Some(aien_trace::EffectCertainty::NoEffect),
-    );
+    if b.trace_enabled() {
+        trace_response(
+            b,
+            aien_trace::EventKind::AuthorityDecided,
+            &r,
+            aien_trace::CorrelationIds {
+                decision_id: Some(aien_trace::BoundedId::new(&req.cx_promotion.to_string())),
+                ..Default::default()
+            },
+            |ids, id| ids.grant_id = Some(aien_trace::BoundedId::new(&id.to_string())),
+            Some(aien_trace::EffectCertainty::NoEffect),
+        );
+    }
     r
 }
 
@@ -1656,17 +1658,19 @@ fn intent_prior(l: &Ledger, req: &IntentRequest) -> IntentRead {
 /// step under the home lock. The answer's id is the intent.
 pub fn open_intent(b: &ComposeBridge, req: &IntentRequest) -> ControlResponse {
     let r = open_intent_inner(b, req);
-    trace_response(
-        b,
-        aien_trace::EventKind::ToolRequested,
-        &r,
-        aien_trace::CorrelationIds {
-            grant_id: Some(aien_trace::BoundedId::new(&req.authorization.to_string())),
-            ..Default::default()
-        },
-        |ids, id| ids.tool_request_id = Some(aien_trace::BoundedId::new(&id.to_string())),
-        Some(aien_trace::EffectCertainty::NoEffect),
-    );
+    if b.trace_enabled() {
+        trace_response(
+            b,
+            aien_trace::EventKind::ToolRequested,
+            &r,
+            aien_trace::CorrelationIds {
+                grant_id: Some(aien_trace::BoundedId::new(&req.authorization.to_string())),
+                ..Default::default()
+            },
+            |ids, id| ids.tool_request_id = Some(aien_trace::BoundedId::new(&id.to_string())),
+            Some(aien_trace::EffectCertainty::NoEffect),
+        );
+    }
     r
 }
 
@@ -1755,7 +1759,7 @@ pub fn ack(b: &ComposeBridge, intent: u64, reported: &Value) -> ControlResponse 
     // Correlation only (#398): the settled state of this intent as the ledger
     // judged it. DONE is the only `effect_occurred`; NOT_DONE is `no_effect`;
     // UNRESOLVED stays `uncertain` and nothing reading a trace may retry it.
-    {
+    if b.trace_enabled() {
         use aien_trace::{EffectCertainty, EventStatus};
         let (status, certainty, note) = match (&r, settled.as_deref()) {
             (ControlResponse::ComposeNoted(_), Some("DONE")) => (
@@ -1763,8 +1767,11 @@ pub fn ack(b: &ComposeBridge, intent: u64, reported: &Value) -> ControlResponse 
                 Some(EffectCertainty::EffectOccurred),
                 "DONE",
             ),
+            // NOT_DONE: the world check says the effect did not happen, so it is a
+            // definite no-effect outcome (C2 `rejected`), not `failed` (ran and
+            // errored).
             (ControlResponse::ComposeNoted(_), Some("NOT_DONE")) => (
-                EventStatus::Failed,
+                EventStatus::Rejected,
                 Some(EffectCertainty::NoEffect),
                 "NOT_DONE",
             ),
@@ -1916,22 +1923,24 @@ pub fn reconcile(
     // Correlation only (#398): one event per reconcile call. `by` is a short
     // caller label ("reconcile@start", an operator name), never free text
     // from a model; the note is bounded anyway.
-    let (status, note) = match &out {
-        ControlResponse::ComposeReconciled(_) => (aien_trace::EventStatus::Ok, by),
-        ControlResponse::Error(_) => (aien_trace::EventStatus::Failed, "reconcile_failed"),
-        _ => (aien_trace::EventStatus::Malformed, "unexpected_response"),
-    };
-    b.trace_event(
-        aien_trace::EventKind::ResultReceived,
-        status,
-        None,
-        aien_trace::CorrelationIds {
-            tool_request_id: declare.map(|d| aien_trace::BoundedId::new(&d.intent.to_string())),
-            ..Default::default()
-        },
-        aien_trace::EvidenceRefs::default(),
-        note,
-    );
+    if b.trace_enabled() {
+        let (status, note) = match &out {
+            ControlResponse::ComposeReconciled(_) => (aien_trace::EventStatus::Ok, by),
+            ControlResponse::Error(_) => (aien_trace::EventStatus::Failed, "reconcile_failed"),
+            _ => (aien_trace::EventStatus::Malformed, "unexpected_response"),
+        };
+        b.trace_event(
+            aien_trace::EventKind::ResultReceived,
+            status,
+            None,
+            aien_trace::CorrelationIds {
+                tool_request_id: declare.map(|d| aien_trace::BoundedId::new(&d.intent.to_string())),
+                ..Default::default()
+            },
+            aien_trace::EvidenceRefs::default(),
+            note,
+        );
+    }
     out
 }
 
