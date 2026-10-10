@@ -290,6 +290,15 @@ async fn main() {
         "Type your request, or /help for slash commands. Press Ctrl+C or /exit to exit.\n".dimmed()
     );
 
+    // sc#397: one compactor per session. Originals of every altered or removed
+    // message are written under the session store before the list changes.
+    let compactor = crate::compaction::ContextCompactor::default()
+        .with_store(crate::compaction::CompactionStore::new(
+            sessions_dir.join(format!("{}-compaction", session_id)),
+        ))
+        .with_redactor(crate::vault::redact_secrets)
+        .with_counter_from_env();
+
     loop {
         let prompt_str = format!("{}{}", "AIEN".magenta().bold(), " ❯ ".cyan().bold());
         match rl.readline(&prompt_str) {
@@ -310,11 +319,7 @@ async fn main() {
 
                 messages.push(json!({"role": "user", "content": user_turn}));
 
-                let compactor = crate::compaction::ContextCompactor::default();
-                if let Some(stats) = compactor.compact_if_needed(&mut messages) {
-                    println!("{}", format!("⚡ ContextCompactor: Pruned {} bytes of tool output (tokens: {} -> {})",
-                        stats.pruned_tool_bytes, stats.initial_tokens, stats.compacted_tokens).cyan().dimmed());
-                }
+                report_compaction(&compactor.compact_if_needed(&mut messages));
 
                 // Multi-turn tool execution loop
                 let mut max_tool_steps = 10;
@@ -336,11 +341,7 @@ async fn main() {
                     hook_registry.run_post_turn(&mut assistant_resp).await;
                     messages.push(json!({"role": "assistant", "content": assistant_resp.clone()}));
 
-                    let compactor = crate::compaction::ContextCompactor::default();
-                    if let Some(stats) = compactor.compact_if_needed(&mut messages) {
-                        println!("{}", format!("  ⚡ ContextCompactor: Pruned {} bytes across {} turns (tokens: {} -> {})",
-                            stats.pruned_tool_bytes, stats.pruned_messages_count, stats.initial_tokens, stats.compacted_tokens).cyan().dimmed());
-                    }
+                    report_compaction(&compactor.compact_if_needed(&mut messages));
 
                     let tool_calls = extract_tool_calls(&assistant_resp);
                     if !tool_calls.is_empty() {
@@ -594,4 +595,48 @@ pub async fn run_autonomous_goal(goal_id: &str) {
         .green()
         .bold()
     );
+}
+
+/// Prints the outcome of a compaction pass. Skips are reported too, so a
+/// refusal (detached tool result, store failure) is never silent.
+fn report_compaction(report: &crate::compaction::CompactionReport) {
+    use crate::compaction::SkipReason;
+    if let Some(stats) = &report.stats {
+        println!(
+            "{}",
+            format!(
+                "  ⚡ ContextCompactor: {} -> {} tokens ({}), {} messages recapped, {} tool bytes pruned, {} oversized, record {}",
+                stats.initial_tokens,
+                stats.compacted_tokens,
+                stats.token_source,
+                stats.pruned_messages_count,
+                stats.pruned_tool_bytes,
+                stats.oversized_results,
+                stats.recovery_pointer
+            )
+            .cyan()
+            .dimmed()
+        );
+        if stats.still_over_budget {
+            println!(
+                "{}",
+                "  ⚡ ContextCompactor: still over the hard token maximum after compaction (everything left is protected: recent turns or an approval wait)"
+                    .yellow()
+                    .dimmed()
+            );
+        }
+        return;
+    }
+    match &report.skipped {
+        None | Some(SkipReason::NotNeeded) | Some(SkipReason::TooShort) => {}
+        Some(reason) => println!(
+            "{}",
+            format!(
+                "  ⚡ ContextCompactor: skipped ({:?}); history left unchanged",
+                reason
+            )
+            .yellow()
+            .dimmed()
+        ),
+    }
 }
