@@ -71,7 +71,7 @@ rcpt() { # step status evidence [fields json]
 # ---- per-row environment (same variables as the E2E harness) -------------------------------------------------
 R=""; WS=""; SOCK=""; ART=""; E=(); REPORT=""
 mkenv() { # row dir R already exists
-  SOCK=$R/s; WS=$R/ws
+  SOCK=$R/s; WS=$D/work/ws   # the proposal binds the workspace path, so every row uses the same path (re-seeded per row)
   E=(env -u AIEN_OMEGA_DIR -u AIEN_OMEGA_COMPOSE_DIR -u AIEN_OMEGA_GPU_LIB -u AIEN_REQUIRE_BLACKWELL
      -u AIEN_GPU_BACKEND -u AIEN_MODEL_DIR -u AIEN_MODEL_PATH -u AIEN_TOKENIZER_PATH -u AIEN_FORCE_CPU_STUB
      -u AIEN_FAULT_HOLD -u AIEN_FAULT_HOLD_FILE -u AIEN_ALLEN_SUBJECT -u AIEN_ALLEN_ADOPT
@@ -139,7 +139,7 @@ intent_count() { jq -r "[.ledger.intents[] | select(.authorization == $2)] | len
 row_open() { # name: fresh row dir from the fixture, daemon 1 up, grant G minted
   RN=$1; R=$D/rows/$RN; ART=$OUT/artifacts/$RN; DN=0
   rm -rf "$R"; mkdir -p "$R"/{state,prov,logs} "$ART"
-  cp -a "$D/fixture/compose" "$D/fixture/home" "$D/fixture/ws" "$R/"
+  cp -a "$D/fixture/compose" "$D/fixture/home" "$R/"; rm -rf "$D/work/ws"; cp -a "$D/fixture/ws" "$D/work/ws"
   cp -a "$D/fixture/compose.machine-root" "$R/"; [ -e "$D/fixture/compose.cortex-mark" ] && cp -a "$D/fixture/compose.cortex-mark" "$R/"
   cp "$D/fixture/propose.json" "$ART/propose.json"; REPORT=$ART/propose.json
   mkenv
@@ -158,7 +158,7 @@ dupflag() { # stat_first stat_last count -> 0/1
 
 # ---- fixture: one real propose --------------------------------------------------------------------------------
 echo "run folder: $OUT" | tee "$OUT/console.log"
-R=$D/fixture; ART=$OUT/artifacts/fixture; mkdir -p "$R"/{state,prov,logs,home,compose,ws/inbox,ws/outbox} "$ART"; mkenv
+R=$D/fixture; ART=$OUT/artifacts/fixture; rm -rf "$D/work"; mkdir -p "$R"/{state,prov,logs,home,compose} "$D/work/ws/inbox" "$D/work/ws/outbox" "$ART"; mkenv
 printf 'Harbour notes. Three boats came in before noon.\n' >"$WS/inbox/harbour-notes.txt"
 cli compose desk-key --create 1 >"$ART/deskkey.json" 2>&1   # prints id and path, never the key
 ABORT=""
@@ -170,7 +170,7 @@ if start_daemon; then
   done
   stop_graceful; cp "$R"/logs/daemon-*.log "$ART/" 2>/dev/null
   if [ $PROP_OK = 1 ]; then
-    cp "$ART/propose.json" "$D/fixture/propose.json"
+    cp "$ART/propose.json" "$D/fixture/propose.json"; cp -a "$WS" "$D/fixture/ws"
     PRE_ST=PASS; [ "$W_SHA" = "$C_W" ] && [ "$T_SHA" = "$C_T" ] || PRE_ST=FAIL
     rcpt PRE $PRE_ST "fault-hold build $BIN_SHA; backend '$CUR_BACKEND'; fixture proposal committed (path $(jq -r '.report.proposal_path // "?"' "$ART/propose.json")); model $C_ID" \
       "$(jq -nc --arg cw "$C_W" --arg ct "$C_T" --arg cid "$C_ID" --arg mdir "$MDIR" --arg q "$([ -s "$QUIET" ] && echo held || echo not-held)" --arg f "cargo feature aien-cli/fault-hold" --arg ok "$PRE_ST" \
