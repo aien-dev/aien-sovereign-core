@@ -352,6 +352,6 @@ rcpt CTRL-E5 NOT_RUN "no verifier (lane L4)" '{}'
 rcpt CTRL-E6 NOT_RUN "no durable objective state to remove (lane L2)" '{}'
 stop_graceful
 cp "$LOGS"/daemon-*.log "$OUT/artifacts/" 2>/dev/null
-printf 'objective_id %s\ncontract_sha256 5fd4b3d4a671f70d3799c5efaca11a71093852148425e006465ce9d3b320927d\n%s' "$OBJ_ID" "$ROWS" >"$OUT/VERDICT_ROWS.txt"
+printf 'objective_id %s\ncontract_sha256 8ba653848287bc77db253466f6d3ff37c70a42be55601ad47eb1f838a41d20f0\n%s' "$OBJ_ID" "$ROWS" >"$OUT/VERDICT_ROWS.txt"
 ( cd "$OUT" && find . -type f ! -name SHA256SUMS -print0 | LC_ALL=C sort -z | xargs -0 sha256sum >chain/SHA256SUMS )
 echo "run folder written: $OUT ($(ls "$CHAIN" | wc -l) chain files)"; cat "$OUT/VERDICT_ROWS.txt"
