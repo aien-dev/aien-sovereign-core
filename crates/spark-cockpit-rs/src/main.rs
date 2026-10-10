@@ -1512,7 +1512,7 @@ fn get_services_snapshot() -> Vec<ServiceStatusInfo> {
     let defs: Vec<ServiceDef> = vec![
         (
             "max-server",
-            "Modular MAX Engine",
+            "Modular MAX Engine (outside yardstick, observe/stop only)",
             Some(18006),
             Box::new(|p: &ProcessInfo| {
                 p.cmdline.contains("max serve") && p.cmdline.contains("18006")
@@ -1686,29 +1686,35 @@ async fn handle_services_action(
             }
         }
         "max" | "max-server" => {
+            // Modular MAX is an outside comparison tool, not part of AIEN's trusted
+            // execution path (issue #369; aien-yardsticks HISTORICAL-PYTHON.md). The
+            // cockpit observes a running instance and can stop it, but never launches
+            // it: the old launcher loaded the historical yardstick Python adapter.
+            if action == "start" || action == "restart" {
+                return Err((
+                    StatusCode::CONFLICT,
+                    Json(json!({
+                        "status": "error",
+                        "service": "max-server",
+                        "action": action,
+                        "error": "max-server is an outside comparison tool (Modular MAX); \
+                                  the cockpit does not launch it. Start it by hand outside \
+                                  AIEN if a yardstick comparison is wanted."
+                    })),
+                ));
+            }
             let snapshot = get_services_snapshot();
             let max_svc = snapshot.into_iter().find(|s| s.id == "max-server");
-
-            if (action == "stop" || action == "restart")
-                && let Some(s) = &max_svc
+            if let Some(s) = &max_svc
                 && let Some(pid) = s.pid
             {
                 let _ = Command::new("kill").arg(pid.to_string()).output().await;
-            }
-            if action == "restart" {
-                tokio::time::sleep(Duration::from_millis(1000)).await;
-            }
-            if action == "start" || action == "restart" {
-                let script_path = "/home/drakestapleton/start_max_lightning_18006.sh";
-                if Path::new(script_path).exists() {
-                    let _ = Command::new("nohup").arg("bash").arg(script_path).spawn();
-                }
             }
             Ok(Json(json!({
                 "status": "ok",
                 "service": "max-server",
                 "action": action,
-                "message": format!("max-server {} command executed", action)
+                "message": "max-server stop command executed"
             })))
         }
         "rsi" | "spark-rsi" => {
@@ -3780,6 +3786,31 @@ mod tests {
         let (status, Json(err)) = res.unwrap_err();
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert!(err["error"].as_str().unwrap().contains("Invalid action"));
+    }
+
+    /// Issue #369: the cockpit must never launch the outside Modular MAX server,
+    /// whose launcher depended on historical yardstick Python. Start and restart
+    /// are refused loudly instead of spawning anything.
+    #[tokio::test]
+    async fn test_cockpit_services_action_max_server_never_launched() {
+        for action in ["start", "restart", "START"] {
+            let payload = ServiceActionPayload {
+                service: "max-server".to_string(),
+                action: action.to_string(),
+            };
+            let res = handle_services_action(Json(payload)).await;
+            let (status, Json(err)) = res.expect_err("max-server launch must be refused");
+            assert_eq!(status, StatusCode::CONFLICT, "action {action}");
+            assert_eq!(err["status"], "error");
+            assert_eq!(err["service"], "max-server");
+            assert!(
+                err["error"]
+                    .as_str()
+                    .unwrap()
+                    .contains("does not launch it"),
+                "action {action}: {err}"
+            );
+        }
     }
 
     #[tokio::test]
