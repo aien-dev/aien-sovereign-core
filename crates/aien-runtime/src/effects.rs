@@ -1332,7 +1332,72 @@ pub fn mint_grant(b: &ComposeBridge, req: &MintRequest) -> ControlResponse {
 /// desk key, a MAC over other fields, or a reused nonce is refused and
 /// NOTHING is written. With the switch OFF the proof is ignored (legacy
 /// behaviour: OS-user authentication only).
+/// The refusal name out of a `Refusal` display string, or "error" for any
+/// other error text. Used only for trace notes (#398); never for decisions.
+fn refusal_name(e: &str) -> &str {
+    e.strip_prefix("EFFECT_REFUSED ")
+        .and_then(|rest| rest.split(':').next())
+        .map(str::trim)
+        .filter(|n| !n.is_empty())
+        .unwrap_or("error")
+}
+
+/// Emits one correlation event for a control response (#398): `Ok` with the
+/// note's record id in `id_slot`, `Rejected` with the refusal name for a
+/// refusal, `Failed` for any other error. Observational only.
+fn trace_response(
+    b: &ComposeBridge,
+    kind: aien_trace::EventKind,
+    r: &ControlResponse,
+    mut ids: aien_trace::CorrelationIds,
+    id_slot: fn(&mut aien_trace::CorrelationIds, u64),
+    certainty_ok: Option<aien_trace::EffectCertainty>,
+) {
+    use aien_trace::EventStatus;
+    let (status, certainty, note) = match r {
+        ControlResponse::ComposeNoted(n) => {
+            id_slot(&mut ids, n.id);
+            (EventStatus::Ok, certainty_ok, "")
+        }
+        ControlResponse::Error(e) if e.starts_with("EFFECT_REFUSED ") => (
+            EventStatus::Rejected,
+            Some(aien_trace::EffectCertainty::NoEffect),
+            refusal_name(e),
+        ),
+        ControlResponse::Error(_) => (EventStatus::Failed, None, "error"),
+        _ => (EventStatus::Malformed, None, "unexpected_response"),
+    };
+    b.trace_event(
+        kind,
+        status,
+        certainty,
+        ids,
+        aien_trace::EvidenceRefs::default(),
+        note,
+    );
+}
+
 pub fn authorize(
+    b: &ComposeBridge,
+    req: &MintRequest,
+    proof: Option<&crate::control::DeskProof>,
+) -> ControlResponse {
+    let r = authorize_inner(b, req, proof);
+    trace_response(
+        b,
+        aien_trace::EventKind::AuthorityDecided,
+        &r,
+        aien_trace::CorrelationIds {
+            decision_id: Some(aien_trace::BoundedId::new(&req.cx_promotion.to_string())),
+            ..Default::default()
+        },
+        |ids, id| ids.grant_id = Some(aien_trace::BoundedId::new(&id.to_string())),
+        Some(aien_trace::EffectCertainty::NoEffect),
+    );
+    r
+}
+
+fn authorize_inner(
     b: &ComposeBridge,
     req: &MintRequest,
     proof: Option<&crate::control::DeskProof>,
@@ -1590,6 +1655,22 @@ fn intent_prior(l: &Ledger, req: &IntentRequest) -> IntentRead {
 /// ComposeEffectIntent: every check of 2.3 and the durable intent, in one
 /// step under the home lock. The answer's id is the intent.
 pub fn open_intent(b: &ComposeBridge, req: &IntentRequest) -> ControlResponse {
+    let r = open_intent_inner(b, req);
+    trace_response(
+        b,
+        aien_trace::EventKind::ToolRequested,
+        &r,
+        aien_trace::CorrelationIds {
+            grant_id: Some(aien_trace::BoundedId::new(&req.authorization.to_string())),
+            ..Default::default()
+        },
+        |ids, id| ids.tool_request_id = Some(aien_trace::BoundedId::new(&id.to_string())),
+        Some(aien_trace::EffectCertainty::NoEffect),
+    );
+    r
+}
+
+fn open_intent_inner(b: &ComposeBridge, req: &IntentRequest) -> ControlResponse {
     if let Err(e) = reconcile_gate(b) {
         return ControlResponse::Error(e);
     }
@@ -1642,7 +1723,10 @@ pub fn ack(b: &ComposeBridge, intent: u64, reported: &Value) -> ControlResponse 
     if let Err(e) = reconcile_gate(b) {
         return ControlResponse::Error(e);
     }
-    noted(b.with_home(|home| {
+    // The settled state, for the trace event only (#398).
+    let mut settled: Option<String> = None;
+    let mut grant: Option<u64> = None;
+    let r = noted(b.with_home(|home| {
         let views = host_views(home)?;
         let l = Ledger::from_records(&views).map_err(|r| r.to_string())?;
         let row = l
@@ -1657,6 +1741,8 @@ pub fn ack(b: &ComposeBridge, intent: u64, reported: &Value) -> ControlResponse 
             ));
         }
         let (st, disk) = confined_world_state(&l, row);
+        settled = Some(st.name().to_string());
+        grant = Some(row.authorization);
         let mut text = json!({
             "phase": PHASE_ACK, "intent": intent, "authorization": row.authorization,
             "tool": "write_file", "path": row.path, "content_sha256": row.content_sha256,
@@ -1665,7 +1751,48 @@ pub fn ack(b: &ComposeBridge, intent: u64, reported: &Value) -> ControlResponse 
         });
         stamp(&mut text, &views, intent);
         append(home, NoteKind::Effect, &[intent, row.authorization], &text)
-    }))
+    }));
+    // Correlation only (#398): the settled state of this intent as the ledger
+    // judged it. DONE is the only `effect_occurred`; NOT_DONE is `no_effect`;
+    // UNRESOLVED stays `uncertain` and nothing reading a trace may retry it.
+    {
+        use aien_trace::{EffectCertainty, EventStatus};
+        let (status, certainty, note) = match (&r, settled.as_deref()) {
+            (ControlResponse::ComposeNoted(_), Some("DONE")) => (
+                EventStatus::Ok,
+                Some(EffectCertainty::EffectOccurred),
+                "DONE",
+            ),
+            (ControlResponse::ComposeNoted(_), Some("NOT_DONE")) => (
+                EventStatus::Failed,
+                Some(EffectCertainty::NoEffect),
+                "NOT_DONE",
+            ),
+            (ControlResponse::ComposeNoted(_), _) => (
+                EventStatus::Uncertain,
+                Some(EffectCertainty::Uncertain),
+                "UNRESOLVED",
+            ),
+            (ControlResponse::Error(e), _) if e.starts_with("EFFECT_REFUSED ") => {
+                (EventStatus::Rejected, None, refusal_name(e))
+            }
+            (ControlResponse::Error(_), _) => (EventStatus::Failed, None, "error"),
+            _ => (EventStatus::Malformed, None, "unexpected_response"),
+        };
+        b.trace_event(
+            aien_trace::EventKind::EffectExecuted,
+            status,
+            certainty,
+            aien_trace::CorrelationIds {
+                tool_request_id: Some(aien_trace::BoundedId::new(&intent.to_string())),
+                grant_id: grant.map(|g| aien_trace::BoundedId::new(&g.to_string())),
+                ..Default::default()
+            },
+            aien_trace::EvidenceRefs::default(),
+            note,
+        );
+    }
+    r
 }
 
 /// Reconcile every unsettled intent whose executor is gone, or record one
@@ -1775,7 +1902,7 @@ pub fn reconcile(
             outcomes: out,
         })
     });
-    match r {
+    let out = match r {
         Ok(r) => {
             // A full reconcile that completed lifts the refusal of 2.5; a
             // single declaration does not.
@@ -1785,7 +1912,27 @@ pub fn reconcile(
             ControlResponse::ComposeReconciled(Box::new(r))
         }
         Err(e) => ControlResponse::Error(e),
-    }
+    };
+    // Correlation only (#398): one event per reconcile call. `by` is a short
+    // caller label ("reconcile@start", an operator name), never free text
+    // from a model; the note is bounded anyway.
+    let (status, note) = match &out {
+        ControlResponse::ComposeReconciled(_) => (aien_trace::EventStatus::Ok, by),
+        ControlResponse::Error(_) => (aien_trace::EventStatus::Failed, "reconcile_failed"),
+        _ => (aien_trace::EventStatus::Malformed, "unexpected_response"),
+    };
+    b.trace_event(
+        aien_trace::EventKind::ResultReceived,
+        status,
+        None,
+        aien_trace::CorrelationIds {
+            tool_request_id: declare.map(|d| aien_trace::BoundedId::new(&d.intent.to_string())),
+            ..Default::default()
+        },
+        aien_trace::EvidenceRefs::default(),
+        note,
+    );
+    out
 }
 
 /// ComposeControl: stop, resume, revoke (ACCEPTANCE-v2 2.5, 2.6).
@@ -1910,6 +2057,111 @@ pub fn reconcile_at_start(b: &ComposeBridge) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn refusal_name_reads_only_the_name() {
+        assert_eq!(
+            refusal_name("EFFECT_REFUSED NotAuthorized: needs an approver"),
+            "NotAuthorized"
+        );
+        assert_eq!(refusal_name("EFFECT_REFUSED Revoked: grant #3"), "Revoked");
+        assert_eq!(refusal_name("EFFECT_REFUSED : odd"), "error");
+        assert_eq!(refusal_name("compose home refused: journal"), "error");
+        assert_eq!(refusal_name(""), "error");
+    }
+
+    /// #398: the compose spine emits correlation events for authority, intent,
+    /// ack and reconcile outcomes; refusals carry only the refusal name, and no
+    /// event carries goal, proposal or path text.
+    #[test]
+    fn compose_spine_emits_correlation_events_without_content() {
+        use aien_trace::{EffectCertainty, EventKind, EventStatus, MemorySink};
+        let _home = crate::home_guard::home_slot();
+        if !aien_omega_compose::LINKED {
+            eprintln!("NOT_RUN: stub compose build");
+            return;
+        }
+        let t = tempfile::tempdir().unwrap();
+        let proposer: crate::spine::ComposeProposer =
+            std::sync::Arc::new(|_: &str, _: std::time::Duration| {
+                Ok(crate::spine::Generation::default())
+            });
+        let sink = std::sync::Arc::new(MemorySink::new());
+        let b = ComposeBridge::new(t.path().join("compose"), proposer, "test:trace")
+            .with_trace_sink(sink.clone());
+        // Start-up reconcile on an empty home: one result_received event.
+        let _ = reconcile_at_start(&b);
+        // Refused authorization: no approver.
+        let r = authorize(
+            &b,
+            &MintRequest {
+                cx_promotion: 7,
+                proposal_sha256: "00".repeat(32),
+                workspace: t.path().display().to_string(),
+                approver: "   ".into(),
+                constraints: vec![],
+            },
+            None,
+        );
+        assert!(
+            matches!(r, ControlResponse::Error(ref e) if e.contains("NotAuthorized")),
+            "{r:?}"
+        );
+        // Ack of an intent that does not exist: plain error, never a certainty.
+        let r = ack(&b, 999, &json!({"wrote": true}));
+        assert!(matches!(r, ControlResponse::Error(_)), "{r:?}");
+        let events = sink.drain();
+        let kinds: Vec<EventKind> = events.iter().map(|e| e.kind).collect();
+        assert!(
+            kinds.contains(&EventKind::AuthorityDecided)
+                && kinds.contains(&EventKind::EffectExecuted),
+            "{kinds:?}"
+        );
+        let auth = events
+            .iter()
+            .find(|e| e.kind == EventKind::AuthorityDecided)
+            .unwrap();
+        assert_eq!(auth.status, EventStatus::Rejected);
+        assert_eq!(auth.effect_certainty, Some(EffectCertainty::NoEffect));
+        assert_eq!(
+            auth.note.as_ref().map(|n| n.as_str()),
+            Some("NotAuthorized")
+        );
+        assert_eq!(auth.ids.decision_id.as_ref().map(|d| d.as_str()), Some("7"));
+        let eff = events
+            .iter()
+            .find(|e| e.kind == EventKind::EffectExecuted)
+            .unwrap();
+        assert_eq!(eff.status, EventStatus::Failed);
+        assert_eq!(eff.effect_certainty, None);
+        assert_eq!(
+            eff.ids.tool_request_id.as_ref().map(|d| d.as_str()),
+            Some("999")
+        );
+        // One trace id, one root, every other event a child of it.
+        let root = events
+            .iter()
+            .filter(|e| e.parent_event_id.is_none())
+            .count();
+        assert_eq!(root, 1, "{events:?}");
+        let root_id = events
+            .iter()
+            .find(|e| e.parent_event_id.is_none())
+            .unwrap()
+            .event_id;
+        assert!(events.iter().all(|e| e.trace_id == b.trace_id()));
+        assert!(events
+            .iter()
+            .filter(|e| e.event_id != root_id)
+            .all(|e| e.parent_event_id == Some(root_id)));
+        // No content: the serialized events never carry the workspace path or
+        // the proposal digest, only ids, kinds, statuses and refusal names.
+        let text = serde_json::to_string(&events).unwrap();
+        assert!(!text.contains(&t.path().display().to_string()), "{text}");
+        assert!(!text.contains(&"00".repeat(32)), "{text}");
+        let tree = aien_trace::reconstruct(&events).unwrap();
+        assert_eq!(tree.len(), events.len());
+    }
 
     fn rec(id: u64, note: &str, text: Value) -> ComposeRecordView {
         ComposeRecordView {
@@ -2170,7 +2422,9 @@ mod tests {
             "write_compose_commit",
             "write_approved_grant",
             "authorize",
+            "authorize_inner",
             "open_intent",
+            "open_intent_inner",
             "ack",
             "check_reserved_note",
         ];
@@ -2183,7 +2437,15 @@ mod tests {
         // Inside the writers that also decide, the only mention is the stamp
         // call (or the reserved-field refusal), never a read of the fields.
         for (f, line) in &hits {
-            if ["authorize", "open_intent", "ack"].contains(&f.as_str()) {
+            if [
+                "authorize",
+                "authorize_inner",
+                "open_intent",
+                "open_intent_inner",
+                "ack",
+            ]
+            .contains(&f.as_str())
+            {
                 assert!(
                     line.starts_with("stamp(&mut text, &views, "),
                     "{f} touches provenance other than by stamp: {line}"

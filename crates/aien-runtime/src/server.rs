@@ -244,6 +244,11 @@ impl AienRuntimeServer {
             .expect("compose override")
             .clone();
         let identity = self.identity.lock().expect("identity lock").clone();
+        // Correlation trace exporter (#398): on only when AIEN_TRACE_JSONL names
+        // a file. Off, the bridge keeps a NullSink and emits nothing. The flusher
+        // handle lives until the end of `run`, after the compose home closes,
+        // so the last events are written at shutdown.
+        let (trace_sink, _trace_flusher) = trace_sink_from_env();
         let compose = match compose_dir_from_env() {
             _ if preset.is_some() => preset,
             Ok(dir) => Some(Arc::new(
@@ -261,7 +266,8 @@ impl AienRuntimeServer {
                     self.tokenizer.clone(),
                     tokio::runtime::Handle::current(),
                 )?)
-                .with_authorize_requires_desk(authorize_desk),
+                .with_authorize_requires_desk(authorize_desk)
+                .with_trace_sink(trace_sink),
             )),
             Err(e) => {
                 tracing::warn!("compose bridge disabled: {e}");
@@ -1060,6 +1066,25 @@ async fn handle_connection(
     }
 }
 
+/// The correlation trace sink for this daemon (#398). `AIEN_TRACE_JSONL=<file>`
+/// turns on a bounded append-only JSON-lines exporter (4096 queued events,
+/// drops counted and reported as `trace_dropped`, flushed every 250 ms and
+/// once more when the returned handle drops). Unset or empty: `NullSink`.
+/// Never fails the daemon: an unwritable file only loses trace lines.
+pub fn trace_sink_from_env() -> (
+    Arc<dyn aien_trace::TraceSink>,
+    Option<aien_trace::FlusherHandle>,
+) {
+    match std::env::var("AIEN_TRACE_JSONL") {
+        Ok(path) if !path.trim().is_empty() => {
+            let sink = Arc::new(aien_trace::BoundedJsonlSink::new(path.trim()));
+            let flusher = sink.spawn_flusher(std::time::Duration::from_millis(250));
+            tracing::info!(path = %sink.path().display(), "trace exporter on (AIEN_TRACE_JSONL)");
+            (sink, Some(flusher))
+        }
+        _ => (Arc::new(aien_trace::NullSink), None),
+    }
+}
 #[cfg(test)]
 mod generation_record_tests {
     use super::*;
