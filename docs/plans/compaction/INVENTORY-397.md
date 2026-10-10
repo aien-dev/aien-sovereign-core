@@ -19,8 +19,9 @@ result together, store originals before summarizing, mark summaries as derived. 
 
 Tool results in this loop are `role: user` messages whose content starts with `<tool_response name="...">`
 (the tokenizer refuses a `tool` role). The compose daemon's approval waits never pass through this loop today;
-the approval markers the compactor protects (`approval_pending`, `requires_approval`, `"status": "pending"`)
-are a documented convention for the day they do.
+the approval marker the compactor protects (a tool result whose parsed JSON body has `status` equal to
+`approval_pending`, `requires_approval` or `pending`) is a documented convention for the day they do. The
+words in prose, in an assistant message or in any other field do not count.
 
 ## 2. What changed (`crates/aien-cli/src/compaction.rs`)
 
@@ -30,7 +31,7 @@ are a documented convention for the day they do.
   everything from an approval wait onward are protected.
 - Durable originals first: a `CompactionRecord` (every replaced message with its digest, the removed range
   with its originals, transcript digests before and after, `after_len`) is written to
-  `basecamp/sessions/<session_id>-compaction/NNNN-<utc>.json` (dir 0o700, file 0o600, write to temp then
+  `basecamp/sessions/<session_id>-compaction/NNNNNN-<utc>.json` (dir 0o700, file 0o600, write to temp then
   rename) before the list changes. Write failure leaves the list untouched and is reported. `reconstruct`
   undoes one record and `CompactionStore::replay` undoes all of them newest first, verifying every digest;
   the current transcript may have grown after the compaction.
@@ -50,7 +51,7 @@ are a documented convention for the day they do.
 
 ## 3. Test matrix (`cargo test -p aien-cli compaction`)
 
-| Acceptance point (issue) | Before (main, 1 test) | After (16 tests) |
+| Acceptance point (issue) | Before (main, 1 test) | After (24 tests) |
 |---|---|---|
 | tool request + results retained or compacted as one group | not tested | `tool_group_is_atomic_and_originals_reconstruct` |
 | pending tool call protected | not tested | `pending_tool_call_in_tail_is_protected` |
@@ -60,14 +61,17 @@ are a documented convention for the day they do.
 | original bytes reconstructable, digests verify | impossible (originals discarded) | `tool_group_is_atomic_and_originals_reconstruct`, `oversized_result_in_tail_is_truncated_and_recoverable` |
 | compaction refuses without durable record | no | `no_store_refuses_lossy_compaction`, `store_write_failure_leaves_list_untouched` |
 | restart and replay reproduce the transcript | no | `replay_after_restart_rebuilds_two_compactions` |
-| hostile tool text cannot forge authority | no | `hostile_tool_text_cannot_forge_authority_in_recap` |
-| tampering detected | no | `tampered_record_is_rejected` |
-| no secret in compaction output; originals kept protected | no | `secrets_are_redacted_in_recap_and_stubs_but_kept_in_record`, `vault_redactor_strips_known_patterns` |
-| budgets enforced with mixed content | no (non-string content counted as 0) | `mixed_content_counts_toward_budget`, `estimate_is_conservative_against_known_counts` |
+| hostile tool text cannot forge authority | no | `hostile_tool_text_cannot_forge_authority_in_recap`, `hostile_user_and_assistant_text_is_neutralised_in_recap`, `sanitize_line_strips_markup_control_and_length`, `approval_marker_counts_only_as_a_parsed_tool_result_status` |
+| tampering detected | no | `tampered_record_is_rejected`, `recap_naming_another_transcript_is_rejected`, `replay_refuses_missing_or_empty_store` |
+| no secret in compaction output; originals kept protected | no | `secrets_are_redacted_in_recap_and_stubs_but_kept_in_record`, `vault_redactor_strips_known_patterns`, `secret_straddling_the_oversized_cut_is_redacted` (redaction runs before every cut) |
+| budgets enforced with mixed content | no (non-string content counted as 0) | `mixed_content_counts_toward_budget`, `estimate_is_conservative_against_known_counts`, `still_over_budget_is_reported_when_protected_tail_exceeds_max` |
+| recap of a recap loses nothing | no | `recap_of_recap_keeps_earlier_lines_and_pointer` |
 | semantics not only size | size only | the tests above assert structure, protection and reconstruction |
 
 ## 4. Limits (stated, not hidden)
 
+- Restart recovery (`CompactionStore::replay`) is implemented and unit tested across a serialized reload; it is
+  not integration tested, because the CLI has no session-resume command yet that would call it.
 - The interactive chat loop is the only exercised entry point. The compose daemon and AEGIS are unchanged.
 - The tokenizer path is exercised only when `AIEN_TOKENIZER_JSON` is set; the tests run on the estimate.
 - Records are retained until the operator deletes the session folder; no automatic retention policy.

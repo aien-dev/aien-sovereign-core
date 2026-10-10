@@ -617,6 +617,14 @@ fn report_compaction(report: &crate::compaction::CompactionReport) {
             .cyan()
             .dimmed()
         );
+        if stats.still_over_budget {
+            println!(
+                "{}",
+                "  ⚡ ContextCompactor: still over the hard token maximum after compaction (everything left is protected: recent turns or an approval wait)"
+                    .yellow()
+                    .dimmed()
+            );
+        }
         return;
     }
     match &report.skipped {
