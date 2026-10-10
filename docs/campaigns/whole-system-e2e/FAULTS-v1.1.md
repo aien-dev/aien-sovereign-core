@@ -5,8 +5,8 @@ Amends `FAULTS-v1.md`. Written after the first run of `scripts/whole_system_e2e_
 neither an engine behaviour:
 
 1. **E6-before_intent, executor refusal.** v1 says "executor refuses (`ok:false`)". With the daemon dead the
-   executor never gets a JSON answer: it exits 1 and writes the connection error to stderr, so `ok` is absent.
-   The first run scored that FAIL on the missing `ok:false`. Amended predicate: the released executor exits
+   executor gets no daemon answer: it exits 1 and prints a connection error with `ok:false` on stdout. The harness read `ok` with jq `.ok // "none"`, which turns `false` into "none" (jq treats false as absent), so the check saw no `ok:false`.
+   The first run scored that FAIL on that misread. Amended predicate: the released executor exits
    non-zero, writes no file, and records no intent (stderr text kept as evidence). `ok:false`, when present, also
    counts. Nothing else in the row changes.
 2. **CTRL-E6 and CTRL-E6b, what is removed.** The approval desk key lives inside the compose home

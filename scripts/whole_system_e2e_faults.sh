@@ -188,7 +188,7 @@ if [ -z "$ABORT" ]; then
   KP=before_intent
   if row_open E6-before_intent && hold_execute $KP held "$G"; then
     kill_daemon; DK=$KILL_RC; EB=$(count_effects); release_executor; XRC=$ERC
-    XOK=$(jq -r '.ok // "none"' "$ART/held.json" 2>/dev/null); AFTER_REL=$(count_effects)
+    XOK=$(jq -r 'if has("ok") then (.ok|tostring) else "none" end' "$ART/held.json" 2>/dev/null); AFTER_REL=$(count_effects)
     XERR=$(head -c 160 "$ART/held.err" 2>/dev/null | tr "\n" " "); XREF=no; { [ "$XOK" = false ] || { [ "${XRC:-0}" -ne 0 ] && [ -z "$XOK" -o "$XOK" = none ]; }; } && XREF=yes
     if start_daemon; then
       RL=$(reconcile_line); ledger L1; IS1=$(intent_state L1 "$G")
