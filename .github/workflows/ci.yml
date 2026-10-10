@@ -33,6 +33,9 @@ jobs:
       - name: Release gate negative tests (pins, digests, model inputs, signatures)
         run: bash scripts/test-release-checks.sh
 
+      - name: Pin materializer self-test (scripts/pins.sh, offline)
+        run: bash scripts/test-pins.sh
+
       - name: Verify Piped Installer Bootstrap
         run: bash scripts/test-install.sh
 
