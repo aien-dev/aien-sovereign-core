@@ -38,7 +38,8 @@ check_doc() {
 # E4's second objective appends one line to a document; the small-edit path caps a reply at 48 tokens by default
 # (AIEN_COMPOSE_MAX_TOKENS) and the 1B model re-emits the whole report, so row E4 alone raises the cap to a
 # documented value (the report is at most 200 words, about 300 tokens, plus the added line). The value is
-# recorded in the E4 receipt. Later restarts (E6, CTRL-E4) keep the default.
+# recorded in the E4 receipt; CTRL-E4b (the memory-loss control of the same objective) gets the same budget.
+# Later restarts (E6, CTRL-E6, CTRL-E4) keep the default.
 E4_MAX_TOKENS=400
 allen_env() { # subject_path [agent_hex]: the env lines that engage the fixture subject (adopt only the first time)
   echo "AIEN_ALLEN_SUBJECT=$1"
@@ -57,7 +58,7 @@ selftest() {
   [ "$(allen_env /x/subject.bin | tr '\n' ' ')" = "AIEN_ALLEN_SUBJECT=/x/subject.bin " ] || { echo "selftest: allen_env without adopt wrong"; rc=1; }
   case ${E4_MAX_TOKENS:-} in ''|*[!0-9]*) echo "selftest: E4_MAX_TOKENS not a number"; rc=1 ;; *) { [ "$E4_MAX_TOKENS" -ge 48 ] && [ "$E4_MAX_TOKENS" -le 4096 ]; } || { echo "selftest: E4_MAX_TOKENS outside 48..4096"; rc=1; } ;; esac
   # The budget is passed on the E4 daemon start only.
-  [ "$(grep -c 'AIEN_COMPOSE_MAX_TOKENS="\?\$E4_MAX_TOKENS' "$0")" = 1 ] || { echo "selftest: AIEN_COMPOSE_MAX_TOKENS must be set on exactly one start (E4)"; rc=1; }
+  [ "$(grep -c 'AIEN_COMPOSE_MAX_TOKENS="\?\$E4_MAX_TOKENS' "$0")" = 2 ] || { echo "selftest: AIEN_COMPOSE_MAX_TOKENS must be set on exactly two starts (E4 and CTRL-E4b)"; rc=1; }
   rm -rf "$t"; [ $rc -eq 0 ] && echo "selftest PASS"; return $rc
 }
 case ${1:-} in
@@ -423,7 +424,7 @@ rcpt NET "$([ "${NET:-0}" = 0 ] && echo PASS || echo FAIL)" "established TCP soc
 MEMDIR=$RUN/compose.allen-memory
 if [ -z "$ABORT" ] && [ $E3M_OK = 1 ] && [ -d "$MEMDIR" ]; then
   stop_graceful; SHA_B4B=$(sha_of "$REPORT"); mv "$MEMDIR" "$MEMDIR.removed-ctrl-e4b"
-  if start_daemon; then
+  if start_daemon AIEN_COMPOSE_MAX_TOKENS=$E4_MAX_TOKENS; then   # the same budget as E4, so the row measures memory loss, not the cap
     if task CTRL-E4b "$WS" "$OBJ2" work; then EVB="memory files removed, home intact: the second objective ran to $T_STATE (memory $T_MEMCTX/$T_MEMN)"
     else EVB="memory files removed, home intact: refused ($T_EV)"; fi
     WROTE=$([ "$(sha_of "$REPORT")" != "$SHA_B4B" ] && echo yes || echo no)
