@@ -33,6 +33,12 @@ selftest() {
   [ -z "$(check_doc "$t/good.md" alpha.txt beta.txt gamma.txt)" ] || { echo "selftest: good document failed: $(check_doc "$t/good.md" alpha.txt beta.txt gamma.txt)"; rc=1; }
   [ "$(check_doc "$t/bad.md" alpha.txt beta.txt gamma.txt)" = "D2 D4" ] || { echo "selftest: bad document gave '$(check_doc "$t/bad.md" alpha.txt beta.txt gamma.txt)', want 'D2 D4'"; rc=1; }
   [ "$(check_doc "$t/absent.md")" = "D1" ] || { echo "selftest: absent file not D1"; rc=1; }
+  # sc#386: the ALLEN engagement lines and the E4 token budget are fixed, documented values.
+  [ "$(allen_env /x/subject.bin abc123 | tr '\n' ' ')" = "AIEN_ALLEN_SUBJECT=/x/subject.bin AIEN_ALLEN_ADOPT=abc123 " ] || { echo "selftest: allen_env adopt lines wrong"; rc=1; }
+  [ "$(allen_env /x/subject.bin | tr '\n' ' ')" = "AIEN_ALLEN_SUBJECT=/x/subject.bin " ] || { echo "selftest: allen_env without adopt wrong"; rc=1; }
+  case ${E4_MAX_TOKENS:-} in ''|*[!0-9]*) echo "selftest: E4_MAX_TOKENS not a number"; rc=1 ;; *) { [ "$E4_MAX_TOKENS" -ge 48 ] && [ "$E4_MAX_TOKENS" -le 4096 ]; } || { echo "selftest: E4_MAX_TOKENS outside 48..4096"; rc=1; } ;; esac
+  # The budget is passed on the E4 daemon start only.
+  [ "$(grep -c 'AIEN_COMPOSE_MAX_TOKENS="\?\$E4_MAX_TOKENS' "$0")" = 1 ] || { echo "selftest: AIEN_COMPOSE_MAX_TOKENS must be set on exactly one start (E4)"; rc=1; }
   rm -rf "$t"; [ $rc -eq 0 ] && echo "selftest PASS"; return $rc
 }
 case ${1:-} in
