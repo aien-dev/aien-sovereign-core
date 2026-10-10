@@ -3,6 +3,9 @@
 # sync-standalone-repos.sh: Monorepo Crate Synchronization Pipeline
 #
 # Synchronizes crates from aien-sovereign-core to standalone publish repositories on DGX Spark.
+# Note (2026-10-10, #93): every standalone repository on GitHub is archived read-only
+# with a pointer back to its crate here. --check is the drift check against local
+# publish checkouts; sync mode only matters if they are ever unarchived.
 # Adheres strictly to Sovereign Voice: zero em dashes, zero en dashes.
 #
 # Preserved standalone-specific files:
@@ -15,7 +18,9 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SOVEREIGN_CORE="$(cd "$SCRIPT_DIR/.." && pwd)"
-WORKSPACE="$(cd "$SOVEREIGN_CORE/.." && pwd)"
+# Parent directory holding the <publish_dirname> checkouts. Override for a CI
+# runner or a scratch directory; defaults to the monorepo's parent.
+WORKSPACE="${AIEN_MIRROR_WORKSPACE:-$(cd "$SOVEREIGN_CORE/.." && pwd)}"
 
 # Repository mapping: <cli_name>:<crate_subpath>:<publish_dirname>
 REPOS=(
@@ -302,10 +307,12 @@ process_repo() {
 
   # Step 4: Selective manifest synchronization
   if [[ -f "$src_dir/Cargo.toml" && -f "$dest_dir/Cargo.toml" ]]; then
-    set +e
-    sync_manifest "$src_dir/Cargo.toml" "$dest_dir/Cargo.toml" "$CHECK_MODE"
-    local manifest_code=$?
-    set -e
+    local manifest_code=0
+    if sync_manifest "$src_dir/Cargo.toml" "$dest_dir/Cargo.toml" "$CHECK_MODE"; then
+      manifest_code=0
+    else
+      manifest_code=$?
+    fi
     if [[ $manifest_code -eq 2 ]]; then
       repo_has_disparity=1
     elif [[ $manifest_code -ne 0 ]]; then
@@ -361,10 +368,11 @@ for entry in "${REPOS[@]}"; do
   fi
 
   PROCESSED_COUNT=$((PROCESSED_COUNT + 1))
-  set +e
-  process_repo "$entry"
-  repo_rc=$?
-  set -e
+  if process_repo "$entry"; then
+    repo_rc=0
+  else
+    repo_rc=$?
+  fi
   if [[ $repo_rc -ne 0 ]]; then
     TOTAL_FAILED=$((TOTAL_FAILED + 1))
   fi

@@ -6,13 +6,22 @@
 runtime, scheduler, KV cache, inference ABI, Cortex, protocols, worlds, CLI.
 
 Satellite repositories (`cortex-rs`, `spark-hive`, `spark-supervisor`,
-`spark-debugger`, `spark-adapters`, `spark-crumbs`, `spark-inquisitor`,
-`rad-id-sync`) are published mirrors, not parallel implementations. Changes
-land in the monorepo first, then mirror out by automation. Manual
-synchronization between the monorepo and a satellite is a bug, not a workflow.
+`spark-dream`, `spark-debugger`, `spark-adapters`, `spark-crumbs`,
+`spark-inquisitor`, `aien-harness`, `rad-id-sync`) are archived, read-only
+snapshots on GitHub as of 2026-09-23. Each one's final commit ("docs: archival
+pointer to canonical home") points back at its crate in this repository.
+They are not parallel implementations and nothing mirrors into them; a
+satellite that disagrees with the monorepo is stale by definition. The
+monorepo wins.
 
-Until the mirror pipeline exists, any satellite that disagrees with the
-monorepo is stale by definition. The monorepo wins.
+`scripts/sync-standalone-repos.sh --check --all` is the drift check for anyone
+who still holds the local `<name>-publish` checkouts: it diffs each crate's
+`src/`, `tests/`, `schemas/` and `[package]` manifest fields against the
+monorepo and exits non-zero on any difference. `AIEN_MIRROR_WORKSPACE` points
+it at the directory holding those checkouts. The sync mode of the same script
+is the mirror pipeline should the satellites ever be unarchived (that is a
+GitHub-side decision for the project owner, together with relicensing them to
+the workspace licence); until then there is no satellite automation to run.
 
 ## Canonical process model
 
