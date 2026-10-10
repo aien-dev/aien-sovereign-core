@@ -40,6 +40,7 @@ members = [
     "crates/crumbs",
     "crates/aien-closure",
     "crates/aien-switchboard",
+    "crates/aien-trace",
     "crates/aien-dual-observation",
     "crates/aien-allen",
     "crates/aien-allen-profile",
