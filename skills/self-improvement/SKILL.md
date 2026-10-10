@@ -91,9 +91,18 @@ The Python dream engine (basecamp/aien-dream/dream_engine.py) was removed from t
 
 ## 4. Headless Browser Mirror and Mentor Harness
 
-AIEN's headless-Chrome Cockpit mirror (Chrome DevTools Protocol) was a Python script outside this repository (basecamp/scripts/browser_mirror_test.py). It was removed from the sovereign build (sovereign-core #181). Today `aien --browser` and `aien --browser mentor "<prompt>"` run, but both report `status: error` ("browser action ... is unavailable"). The assertion self-test and self-mentoring steps are unavailable until the Rust browser test lands (sovereign-core #180). Do not run the old script by hand.
+AIEN drives a headless Chrome over the Chrome DevTools Protocol from Rust (`crates/aien-cli/src/browser_mirror.rs`, sovereign-core #180). No Python and no extra crates: the websocket client and the base64 decoder live in the module. The same code runs behind the `browser` tool, `aien --browser`, and the standalone binary:
 
-When #180 lands, restore here: the self-test checks (hydration, chat stream, tactile actions, tab navigation) and the screenshots saved under ~/basecamp/ui-tests/.
+```
+aien-browser-mirror --test                          # Cockpit self-test: report.json + 3 screenshots
+aien-browser-mirror --mentor "<prompt>"             # one chat prompt, waits for the reply, screenshot
+aien-browser-mirror --screenshot [file.png] --url U # screenshot of any page
+aien-browser-mirror --eval "<javascript>" --url U   # evaluate an expression on any page
+```
+
+Defaults: `--url http://127.0.0.1:18095` (override with `--url` or `AIEN_COCKPIT_URL`), `--out-dir ~/basecamp/ui-tests`, Chrome found as `google-chrome`, `chromium` or `AIEN_CHROME`. Exit status 0 means PASSED, COMPLETED or ok.
+
+The self-test checks hydration (title, `#chat-input`, navigation controls), a live chat reply sent through `#btn-send` that stops growing, and every `[data-view]` or `[data-tab]` control switching to a present view. Screenshots land as `cockpit_init.png`, `cockpit_chat_stream.png` and `cockpit_actions.png`, next to `report.json`. The mentor run writes `cockpit_mentor_response.png` and `mentor_response.json` (COMPLETED when the reply is longer than 50 characters). The Cockpit must be running for the self-test; against a dead port the report says FAILED with `chat_input: false`.
 
 ## 5. Cortex Memory Commitment
 
