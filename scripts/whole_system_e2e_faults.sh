@@ -44,6 +44,7 @@ HOST=$(hostname)
 
 rm -rf "$D/rows" "$D/fixture"; mkdir -p "$D/rows" "$D/fixture" "$OUT/chain" "$OUT/artifacts"
 cp "$REPO/docs/campaigns/whole-system-e2e/FAULTS-v1.md" "$OUT/FAULTS-v1.as-run.md"
+cp "$REPO/docs/campaigns/whole-system-e2e/FAULTS-v1.1.md" "$OUT/FAULTS-v1.1.as-run.md"
 
 sha_of() { sha256sum "$1" | cut -d' ' -f1; }
 tstat() { stat -c '%i %s %.9Y' "$1" 2>/dev/null || echo absent; }
@@ -188,14 +189,15 @@ if [ -z "$ABORT" ]; then
   if row_open E6-before_intent && hold_execute $KP held "$G"; then
     kill_daemon; DK=$KILL_RC; EB=$(count_effects); release_executor; XRC=$ERC
     XOK=$(jq -r '.ok // "none"' "$ART/held.json" 2>/dev/null); AFTER_REL=$(count_effects)
+    XERR=$(head -c 160 "$ART/held.err" 2>/dev/null | tr "\n" " "); XREF=no; { [ "$XOK" = false ] || { [ "${XRC:-0}" -ne 0 ] && [ -z "$XOK" -o "$XOK" = none ]; }; } && XREF=yes
     if start_daemon; then
       RL=$(reconcile_line); ledger L1; IS1=$(intent_state L1 "$G")
       execute again "$G"; ST1=$T_STATE; F=$(effect_file); S1=$(tstat "${F:-/nonexistent}")
       execute third "$G"; THIRD=$T_REF; S2=$(tstat "${F:-/nonexistent}"); EA=$(count_effects); ledger L2
       DUP=$(dupflag "$S1" "$S2" "$EA")
-      if [ "$DK" -eq 137 ] && [ "$XOK" = false ] && [ "$EB" -eq 0 ] && [ "$AFTER_REL" -eq 0 ] && [ "$IS1" = none ] && [ "$ST1" = DONE ] && [ "$EA" -eq 1 ] && [ "$THIRD" = AlreadySpent ] && [ "$DUP" -eq 0 ]; then ST=PASS; else ST=FAIL; fi
-      rcpt E6-before_intent $ST "daemon SIGKILL rc $DK while the executor held at $KP; executor released: ok=$XOK rc=$XRC, files $AFTER_REL; restart ($RL); intent before retry: $IS1; same grant: $ST1; third execute: ${THIRD:-none}; files $EA; duplicates $DUP" \
-        "$(fields $KP 1 "$EB" "$EA" "$DUP" "$G" "$(jq -nc --arg ok "$XOK" --arg th "${THIRD:-}" --arg is "$IS1" --arg rl "$RL" '{executor_ok_after_release:$ok, intent_after_restart_before_retry:$is, third_execute_refusal:$th, restart_reconcile_line:$rl}')")"
+      if [ "$DK" -eq 137 ] && [ "$XREF" = yes ] && [ "$EB" -eq 0 ] && [ "$AFTER_REL" -eq 0 ] && [ "$IS1" = none ] && [ "$ST1" = DONE ] && [ "$EA" -eq 1 ] && [ "$THIRD" = AlreadySpent ] && [ "$DUP" -eq 0 ]; then ST=PASS; else ST=FAIL; fi
+      rcpt E6-before_intent $ST "daemon SIGKILL rc $DK while the executor held at $KP; executor released: refused=$XREF (ok=$XOK, rc=$XRC, stderr: $XERR), files $AFTER_REL; restart ($RL); intent before retry: $IS1; same grant: $ST1; third execute: ${THIRD:-none}; files $EA; duplicates $DUP" \
+        "$(fields $KP 1 "$EB" "$EA" "$DUP" "$G" "$(jq -nc --arg ok "$XOK" --arg xerr "$XERR" --arg th "${THIRD:-}" --arg is "$IS1" --arg rl "$RL" '{executor_ok_after_release:$ok, executor_stderr:$xerr, intent_after_restart_before_retry:$is, third_execute_refusal:$th, restart_reconcile_line:$rl}')")"
     else rcpt E6-before_intent FAIL "daemon did not restart: $(tail -c 300 "$DLOG" | tr '\n' ' ')" "$(fields $KP 1 "$EB" 0 0 "$G")"; fi
   else
     kill_executor; rcpt E6-before_intent FAIL "setup failed (daemon, authorize or hold not reached)" "$(fields $KP 0 0 0 0 null)"
@@ -272,7 +274,7 @@ fi
 ctrl_row() { # step rowname remove_mark(0/1)
   local step=$1 rn=$2 rm_mark=$3 KP=after_write
   if crash_after_write "$rn"; then
-    mv "$R/compose" "$R/compose.removed"; mkdir -p "$R/compose"
+    mv "$R/compose" "$R/compose.removed"; mkdir -p "$R/compose"; cp -a "$R/compose.removed/approval-desk.key" "$R/compose/"   # v1.1: the desk key lives in the home and stays
     if [ "$rm_mark" = 1 ]; then mv "$R/compose.cortex-mark" "$R/compose.cortex-mark.removed" 2>/dev/null; fi
     START="served"; REFTEXT=""
     if start_daemon; then
@@ -282,7 +284,7 @@ ctrl_row() { # step rowname remove_mark(0/1)
     else START="refused to start (rc ${DRC:-?})"; REFTEXT=$(tail -c 300 "$DLOG" | tr '\n' ' '); REFN=$(printf '%s' "$REFTEXT" | grep -o 'E_[A-Z_]*\|ReconciliationRequired\|ReconcileFailed' | head -1); CST=none; RL=""; fi
     EA=$(count_effects); S2=$(tstat "${F:-/nonexistent}"); DUP=$(dupflag "$SW" "$S2" "$EA")
     if [ "$DK" -eq 137 ] && [ "$EK" -eq 137 ] && [ "$EB" -eq 1 ] && [ "$CST" != DONE ] && [ -n "$REFN" ] && [ "$EA" -eq 1 ] && [ "$DUP" -eq 0 ]; then ST=PASS; else ST=FAIL; fi
-    rcpt "$step" $ST "after $KP kill, durable state removed (compose home replaced by an empty folder; record mark removed=$rm_mark); restart: $START ($RL); execute same grant: state $CST, refusal name '${REFN:-none}', text: $REFTEXT; files $EA; duplicates $DUP" \
+    rcpt "$step" $ST "after $KP kill, durable state removed (journal, jspace and machine.id gone, desk key kept; record mark removed=$rm_mark); restart: $START ($RL); execute same grant: state $CST, refusal name '${REFN:-none}', text: $REFTEXT; files $EA; duplicates $DUP" \
       "$(fields $KP 1 "$EB" "$EA" "$DUP" "$G" "$(jq -nc --arg s "$START" --arg n "${REFN:-}" --arg t "$REFTEXT" --argjson rm "$rm_mark" --arg cs "$CST" '{daemon_start:$s, refusal_name:$n, refusal_text:$t, record_mark_removed:($rm==1), execute_state:$cs}')")"
   else
     kill_executor; rcpt "$step" FAIL "setup failed (daemon, authorize or hold not reached)" "$(fields $KP 0 0 0 0 null)"
