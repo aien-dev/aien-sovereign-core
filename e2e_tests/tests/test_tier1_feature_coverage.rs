@@ -906,7 +906,8 @@ fn test_f17_01_zero_plaintext_env_files() {
 
 #[test]
 fn test_f17_02_secrets_resolve_via_tpm_vault() {
-    let vault_binary = Path::new("/home/drakestapleton/.local/bin/atlas-vault");
+    let home = std::env::var("HOME").unwrap_or_default();
+    let vault_binary = Path::new(&home).join(".local/bin/atlas-vault");
     if vault_binary.exists() {
         assert!(vault_binary.is_file());
     }

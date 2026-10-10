@@ -12,7 +12,7 @@ use aien_inference_abi::qwen3_serve::{forward_token_serve, QwenServeLib, QwenSer
 
 fn main() {
     let checkpoint = std::env::args().nth(1).map(std::path::PathBuf::from).unwrap_or_else(|| {
-        "/home/drakestapleton/.cache/huggingface/hub/models--Qwen--Qwen3-Coder-30B-A3B-Instruct-FP8/snapshots/dcaee4d4dfc5ee71ad501f01f530e5652438fde0".into()
+        format!("{}/.cache/huggingface/hub/models--Qwen--Qwen3-Coder-30B-A3B-Instruct-FP8/snapshots/dcaee4d4dfc5ee71ad501f01f530e5652438fde0", std::env::var("HOME").unwrap_or_default()).into()
     });
 
     let t0 = Instant::now();

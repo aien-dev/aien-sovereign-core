@@ -25,8 +25,8 @@ fn main() {
         qk_norm: false,
     };
 
-    let safetensors_path = "/home/drakestapleton/.cache/huggingface/hub/models--TinyLlama--TinyLlama-1.1B-Chat-v1.0/snapshots/fe8a4ea1ffedaf415f4da2f062534de366a451e6/model.safetensors";
-    let weights = TransformerWeights::load_from_safetensors(safetensors_path, &model_config)
+    let safetensors_path = format!("{}/.cache/huggingface/hub/models--TinyLlama--TinyLlama-1.1B-Chat-v1.0/snapshots/fe8a4ea1ffedaf415f4da2f062534de366a451e6/model.safetensors", std::env::var("HOME").unwrap_or_default());
+    let weights = TransformerWeights::load_from_safetensors(&safetensors_path, &model_config)
         .expect("Failed to load safetensors");
 
     let backend = MojoGb10Backend::new();

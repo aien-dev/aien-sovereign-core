@@ -113,7 +113,6 @@ pub fn find_kernel_library_path() -> Option<PathBuf> {
     let candidates = [
         PathBuf::from("crates/aien-inference-abi/mojo/libaien_kernels.so"),
         PathBuf::from("mojo/libaien_kernels.so"),
-        PathBuf::from("/home/drakestapleton/workspace/aien-sovereign-core/crates/aien-inference-abi/mojo/libaien_kernels.so"),
     ];
 
     for c in &candidates {

@@ -9,7 +9,7 @@ fn workspace_root() -> PathBuf {
             }
         }
     }
-    PathBuf::from("/home/drakestapleton/workspace/aien-sovereign-core")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
 
 fn workshop_html_path() -> PathBuf {
