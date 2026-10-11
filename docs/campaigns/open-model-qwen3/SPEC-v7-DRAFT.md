@@ -50,6 +50,24 @@ containment: speculation, `v1 Memory`, `v1 Correctness: recall`); and if the lau
 model-behaviour rows `RQ<k>`, `CUT`, `F`, `SB`. A missing row is a failure. `test-v7.sh` proves the gate goes red on the v6 failure
 (S1 refused, no ALLEN line, recall FAIL) and green on a clean synthetic launch (16 of 16 checks).
 
+Correction to the correction (dry attempt 2, 2026-10-11T22:26:12Z to 22:40:00Z, hold rc 0, G6 FAIL; records in `evidence-v7/attempt-2-g6-fail/`):
+the first gate listed `v1 Memory`, `DEC` and `MEAS` as rows independent of the model. They are not. A refused reply writes no memory
+record, so `v1 Memory` FAILs on every launch that did not commit (RESULT-v6 already classed it (a); attempt 2 D1 and D3 showed it, the
+committed D2 passed it); it now belongs to the committed group. An attempt the product ends by timeout has no decoding and no token ids,
+so `DEC` and `MEAS` FAIL by the frozen v5 rules whenever the model is too slow for the task budget (attempt 2 D3: reply 1 refused after
+63 s, reply 2 cut at the 57 s left of the 120 s budget, 0 tokens kept); the gate now requires them unless `s3-report.json` shows a
+timeout attempt, prints a NOTE naming it, and counts it as a campaign finding, not a harness fault. `g6-reasons-corrected-gate.txt`
+replays the corrected gate over the attempt 2 records: the remaining failures are `OPR` (Section 2.1) and `PIN` plus `GR` on the
+committed D2 (pre-freeze by construction, Section 7). `test-v7.sh` now proves both corrections red and green (20 of 20 checks).
+
+### 2.1 Product-side finding from attempt 2: the OP_REPORT line order (fixed in sc#454)
+
+The frozen v5 `-OPR` row parses the daemon line as `OP_REPORT native=[..] reference=[..] native_fallbacks=[..] reference_runs=[..]
+backend=<rest>`. sc#405 (chip call count, after v6) put ` gpu_executions=<n>` before ` backend=`, so every attempt 2 launch failed
+`-OPR` although the logs show native ops only, zero fallbacks and zero STRICT violations (`op-report-lines.txt`). sc#454 moves the
+count after `backend=` and adds the layout contract to `op_report_line` with a test. The v5 rows stay unchanged (Drake: thresholds
+never move); the freeze build must include sc#454.
+
 ## 3. Model, engine and build
 
 - Weights downloaded and hashed: `frozen-v7.json` `model` block (index, five shards, tokenizer, three config files). The five shards and
@@ -76,7 +94,9 @@ model-behaviour rows `RQ<k>`, `CUT`, `F`, `SB`. A missing row is a failure. `tes
 4. [ ] `model_sha256` filled from the daemon's `CHECKPOINT_SHARDS` line in a smoke run.
 5. [ ] Clean build at the freeze commit; every pin in `frozen-v7.json` filled; checkouts clean.
 6. [~] (pre-check on main c26f4d7: `evidence-v7/test-v7-c26f4d7.txt` 16 ok 0 failed; `evidence-v7/campaign-files-check-c26f4d7.txt` 63 OK; repeat at the freeze commit) `test-v7.sh` passes at the freeze commit; the v5 campaign file hashes still match (`evidence-v5/campaign-files.sha256`) for every file v7 reuses.
-7. [ ] G6 dry run of part 1 on GB10 in its own hold, then `g6-gate.sh` exit 0 over D1 D2 D3 (all product rows, ALLEN engaged). The dry
+7. [ ] G6 dry run of part 1 on GB10 in its own hold AFTER the freeze commit (as v6: the -PIN and -GR rows need the frozen pins and model
+   hash; attempt 2 ran on the draft and failed them by construction), then `g6-gate.sh` exit 0 over D1 D2 D3 (all product rows, ALLEN
+   engaged; attempts 1 and 2 recorded under `evidence-v7/attempt-1-hold-refused/` and `evidence-v7/attempt-2-g6-fail/`). The dry
    run must also show the containment and identity rows PASS with the ALLEN state directories present beside the compose home (they are new
    since v6 and unproven against the unchanged row files; the proof run in the PR shows the directories exist, whether any row counts them
    is decided by the dry run, not assumed).
@@ -91,7 +111,20 @@ host-built fixture, not a provisioned identity.
 ## 7. Launchers (added 2026-10-11, `evidence-v7/`)
 
 `build.sh <sc commit>` (clean clone + pinned release build, CPU only), `run-part.sh` (one part per hold; Qwen3-8B folder, v7 wrapper),
-`run-dry.sh <wrap commit> <build folder>` (gate G6: dry part 1 in one hold, then `g6-gate.sh` over D1 D2 D3, writes `records/g6.txt`
+`run-dry.sh <freeze commit> <build folder>` (gate G6: refuses unless `frozen-v7.json` is FROZEN at that commit; dry part 1 in one hold,
+then `g6-gate.sh` over D1 D2 D3, writes `records/g6.txt`
 and the daemon's `CHECKPOINT_SHARDS` line for checklist item 4), `run.sh <freeze commit> <build folder>` (four real parts, refuses
 without `G6 PASS` and without `frozen-v7.json` FROZEN). Each is the v6 launcher with the v7 names; the diff against `evidence-v6/`
 is the review. Holds are 20 minutes: quietlock refuses longer holds without Drake's approval token (attempt 1, 2026-10-11T22:10:23Z, rc 77, refused with 40; recorded in `evidence-v7/attempt-1-hold-refused/`) and on overrun keeps the flag until the command exits without killing it, so a part that runs past 20 minutes (the 8B is predicted to take about twice the v6 7 to 8 minutes) completes under the kept flag.
+
+## 8. Speed observed in dry attempt 2 (Qwen3-8B on GB10, f32, greedy; not a verdict)
+
+| launch | attempt 1 | attempt 2 | product outcome |
+|---|---|---|---|
+| D1 | 655 tokens in 93.2 s, refused (14 of 22 lines) | none: 26.8 s left < 30 s per-attempt minimum | not committed |
+| D2 | 354 tokens in 53.0 s, refused (section missing) | parsed in 56.2 s | committed |
+| D3 | 425 tokens in 63.2 s, refused (13 of 18 lines) | cut by the product at 56.9 s (budget left), 0 tokens kept | not committed |
+
+About 7 tokens a second against the 4B's about 10 (v6 D1 to D3: 345 to 524 tokens in 33 to 53 s). The task budgets (120 s, ACCEPTANCE-v5
+Section 2) are frozen product limits and stay; a refused first reply leaves the 8B little or no room for a retry, so the real campaign is
+expected to record more timeouts and uncommitted launches than v6 did. That is what the campaign measures; it is not a reason to change it.
