@@ -88,19 +88,19 @@ never move); the freeze build must include sc#454.
 ## 5. Freeze checklist (all must be true; each is a yes or no with evidence)
 
 1. [x] (2026-10-11, sc#436 merged 7cfc7a8; render oracle re-verified independently the same day, EVAL Section 8) Chat template gap closed on main: Qwen3-8B template pinned with fixture, provenance and render oracle; thinking off; new tests pass.
-2. [ ] Download hashes recorded in `frozen-v7.json` (done in this PR: OBSERVED) and re-hashed on the chip host within the freeze day.
+2. [x] (re-hashed on the chip host 2026-10-11, `evidence-v7/model-rehash-2026-10-11.txt`, 10 of 10 equal) Download hashes recorded in `frozen-v7.json` (OBSERVED) and re-hashed on the chip host within the freeze day.
 3. [x] (2026-10-11T16:02:55Z, SMOKE-8B-v1 attempt 2 on main c26f4d7, evidence under `evidence-smoke-8b/attempt-2/`, sc#440) Engine smoke test PASS (EVAL Section 8, steps 2 to 5: template render, golden ids on CPU reference, GB10 equals CPU reference token for token;
    the untied output head is exercised). Recorded under `evidence-v7/`.
-4. [ ] `model_sha256` filled from the daemon's `CHECKPOINT_SHARDS` line in a smoke run.
-5. [ ] Clean build at the freeze commit; every pin in `frozen-v7.json` filled; checkouts clean.
-6. [~] (pre-check on main c26f4d7: `evidence-v7/test-v7-c26f4d7.txt` 16 ok 0 failed; `evidence-v7/campaign-files-check-c26f4d7.txt` 63 OK; repeat at the freeze commit) `test-v7.sh` passes at the freeze commit; the v5 campaign file hashes still match (`evidence-v5/campaign-files.sha256`) for every file v7 reuses.
+4. [x] (17bc36882b981cdaa253076c43273e3b5e54251db26cb6a5f51de396c456f5a6, index+shards, from the daemon line of dry attempt 2, `evidence-v7/attempt-2-g6-fail/model_sha256-line.txt`, the same on every daemon start of D1 to D3) `model_sha256` filled from the daemon's `CHECKPOINT_SHARDS` line in a smoke run.
+5. [x] (clean build at main a6e5f85, the last product change (sc#454), `evidence-v7/build-summary-a6e5f85.txt`, all checkouts dirty=0; the freeze commit pins it, as v6 pinned de9c626 from wrapper f8d8c72) Clean build at the freeze commit; every pin in `frozen-v7.json` filled; checkouts clean.
+6. [x] (at the freeze candidate a6e5f85 + this file: `evidence-v7/test-v7-a6e5f85.txt` 20 ok 0 failed; `evidence-v7/campaign-files-check-a6e5f85.txt` 63 OK; pre-check on c26f4d7: 16 ok, 63 OK) `test-v7.sh` passes at the freeze commit; the v5 campaign file hashes still match (`evidence-v5/campaign-files.sha256`) for every file v7 reuses.
 7. [ ] G6 dry run of part 1 on GB10 in its own hold AFTER the freeze commit (as v6: the -PIN and -GR rows need the frozen pins and model
    hash; attempt 2 ran on the draft and failed them by construction), then `g6-gate.sh` exit 0 over D1 D2 D3 (all product rows, ALLEN
    engaged; attempts 1 and 2 recorded under `evidence-v7/attempt-1-hold-refused/` and `evidence-v7/attempt-2-g6-fail/`). The dry
    run must also show the containment and identity rows PASS with the ALLEN state directories present beside the compose home (they are new
    since v6 and unproven against the unchanged row files; the proof run in the PR shows the directories exist, whether any row counts them
    is decided by the dry run, not assumed).
-8. [ ] Coordinator go for the chip window (Drake: a quiet hold is his approval; the 8B dry part 1 is one 40-minute hold, the real run four more), quiet flag checked with `quietlock check`, `frozen-v7.json` status changed to FROZEN in the freeze PR, merged before any launch.
+8. [x] (Drake 2026-10-11: "wait for the other agent ... then you can follow that with the hold"; holds are 20 minutes each since sc#453, the dry part 1 one hold, the real run four more) Coordinator go for the chip window (Drake: a quiet hold is his approval), quiet flag checked with `quietlock check`, `frozen-v7.json` status changed to FROZEN in the freeze PR, merged before any launch.
 
 ## 6. What v7 does not prove
 

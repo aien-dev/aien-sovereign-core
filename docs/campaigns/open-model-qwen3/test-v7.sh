@@ -24,8 +24,8 @@ chk "the frozen next-phase-1 driver is unchanged by this lane" '! git diff --qui
 # ---- wrapper: v7 differs from v6 only where intended
 chk "run-qwen3-v7.sh uses the ALLEN driver and keeps the v6 refusals (pinned base, FROZEN status, placeholder pins)" \
   'grep -q "run-campaign-allen.sh" run-qwen3-v7.sh && grep -q "PINNED_BASE=/home/drakestapleton/workspace/oq3-v7-runs" run-qwen3-v7.sh && grep -q "status is not FROZEN" run-qwen3-v7.sh && grep -q "build pins are not frozen" run-qwen3-v7.sh'
-chk "frozen-v7.json is a draft: status says DRAFT NOT FROZEN and every pin is the placeholder" \
-  '[ "$(jq -r .status frozen-v7.json | cut -c1-16)" = "DRAFT NOT FROZEN" ] && [ "$(jq "[.pins[] | select(. == \$p)] | length" --arg p "$(jq -r .placeholder frozen-v7.json)" frozen-v7.json)" = 8 ]'
+chk "frozen-v7.json is FROZEN: status says so, the same eight pin names as v6, every pin 40 or 64 lowercase hex, model_sha256 64 hex, no placeholder left" \
+  '[ "$(jq -r .status frozen-v7.json | cut -c1-6)" = FROZEN ] && [ "$(jq -c ".pins | keys" frozen-v7.json)" = "$(jq -c ".pins | keys" frozen-v6.json)" ] && [ "$(jq "[.pins[] | select(test(\"^([0-9a-f]{40}|[0-9a-f]{64})$\") | not)] | length" frozen-v7.json)" = 0 ] && jq -e ".model.model_sha256 | test(\"^[0-9a-f]{64}$\")" frozen-v7.json >/dev/null && [ "$(jq -r "[(.pins[], .model[]) | strings | select(. == \"TO FILL AT FREEZE\")] | length" frozen-v7.json)" = 0 ]'
 chk "a real v7 run is refused while frozen-v7.json is a draft" \
   'out=$(OQ3_PART=1 AIEN_MODEL_PATH=x AIEN_TOKENIZER_PATH=y AIEN_BIN=z bash run-qwen3-v7.sh /home/drakestapleton/workspace/oq3-v7-runs-selftest-absent "$T/o" . . /bin/true /bin/true 2>&1); echo "$out" | grep -q "RUN_BASE must be"'
 chk "OQ3_FROZEN outside a dry run is refused" 'out=$(OQ3_FROZEN=$HERE/frozen-v6.json OQ3_PART=1 bash run-qwen3-v7.sh a b c d e f 2>&1); echo "$out" | grep -q "allowed in a dry run only"'
