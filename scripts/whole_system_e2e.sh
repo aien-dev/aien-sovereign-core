@@ -16,6 +16,10 @@
 # the INSTALLED binaries, and adds the CTRL-E1 refused copies (ACCEPTANCE-v1.4-e1.md). ENGINEERING READINESS only for a dry-run-key install.
 # Without the variable nothing changes. Needs the archive's SHA256SUMS.txt and SHA256SUMS.txt.sig beside it; WSE2E_DRY_RUN_SIGNERS names the
 # signer file (default: dry-run-signers beside the archive, when present); WSE2E_RELEASE_TAG names the install (default e2e-artifact).
+# v1.5: WSE2E_RUN_ROOT=<absolute real path> puts the run state (workspaces, home, state, socket, logs) there instead of
+# $CLAUDE_JOB_DIR/tmp/e2e/run, so the workspace path inside the model prompt is the same every attempt; PRE records
+# run_root, E3/E3m/E4 record the daemon's prompt token count and prompt id per attempt (ACCEPTANCE-v1.5-fixed-root.md).
+# Without the variable nothing changes.
 #
 #   scripts/whole_system_e2e.sh run        build the CLI, run the chain E2..E6 + controls, write one run folder
 #   scripts/whole_system_e2e.sh check F    the document checks of rows E3/E3m on file F (prints failed ids)
@@ -112,6 +116,22 @@ gb10_receipt() {
       gpu_executions_source:"report.proposal_attempts[].ops.gpu_executions (sc#405, Omega chip_calls, process total)",
       fallback_count:$fc, fallback_native_ops:$fn, fallback_log_lines:$fl, fallback_detected:$fd, pins:$pins, nvidia_driver:$drv,
       zero_cuda_gate_exit:$zc, daemon_strict_line:$sl, host_load:$hl, gb10_problems:$why}')
+}
+
+# ---- v1.5 (ACCEPTANCE-v1.5-fixed-root.md): a fixed run root and the prompt ids ---------------------------------
+# run_root_ok PATH: 0 when PATH is absolute, has no '.', '..' or empty component and no trailing '/', is at most
+# 100 bytes (the daemon socket lives inside it), and, once it exists, is its own real path (no symlink on the way).
+run_root_ok() {
+  case $1 in /*) ;; *) return 1 ;; esac
+  case $1 in */|*//*|*/./*|*/../*|*/.|*/..) return 1 ;; esac
+  [ ${#1} -le 100 ] || return 1
+  [ ! -e "$1" ] || [ "$(readlink -f -- "$1")" = "$1" ]
+}
+# prompt_fields PROPOSE_JSON: per proposal attempt, the prompt token count and token-id digest the daemon reports in
+# report.proposal_attempts[]; [] when the file or the attempts are absent. Recorded only, never judged.
+prompt_fields() {
+  jq -c '[.report.proposal_attempts[]? | {prompt_tokens:(.prompt_tokens // null), prompt_ids_sha256:(.prompt_ids_sha256 // null)}]' \
+    "$1" 2>/dev/null | grep -E '^\[' || echo '[]'
 }
 
 # ---- v1.4 (ACCEPTANCE-v1.4-e1.md): install from a release artifact (E1) and the refused copies (CTRL-E1) --------
@@ -277,6 +297,16 @@ selftest() {
   [ "$(fallback_lines "$t/logs"/daemon-*.txt)" = 2 ] || { echo "selftest: fallback lines not counted"; rc=1; }
   gb10_receipt NONE; [ "$(jq -c '[.fallback_count,.fallback_detected]' <<<"$G_JSON")" = '[2,true]' ] && [ -n "$G_WHY" ] || { echo "selftest: fallback not flagged $G_JSON"; rc=1; }
   ART=$sv_art; LOGS=$sv_logs; PROP_DN=(); GPU_SEEN_DN=""; GPU_SEEN_TOTAL=0; FALLBACK_SEEN=false
+  # v1.5 (ACCEPTANCE-v1.5-fixed-root.md): run-root rule and the recorded prompt ids, with negative controls.
+  mkdir -p "$t/root/real"; ln -s "$t/root/real" "$t/root/link"; local rt; rt=$(readlink -f -- "$t/root")
+  run_root_ok /home/drakestapleton/.aien-e2e/run && run_root_ok "$rt/real" && run_root_ok "$rt/new" || { echo "selftest: a valid run root was refused"; rc=1; }
+  for bad in relative/run /a/b/ /a//b /a/./b /a/../b /a/.. "$rt/link" "/$(printf 'x%.0s' $(seq 1 100))"; do
+    ! run_root_ok "$bad" || { echo "selftest: run root '$bad' was accepted"; rc=1; }
+  done
+  jq -nc '{report:{proposal_attempts:[{prompt_tokens:347,prompt_ids_sha256:"6847"},{prompt_tokens:350,prompt_ids_sha256:"ab"}]}}' >"$t/p6.json"
+  [ "$(prompt_fields "$t/p6.json")" = '[{"prompt_tokens":347,"prompt_ids_sha256":"6847"},{"prompt_tokens":350,"prompt_ids_sha256":"ab"}]' ] || { echo "selftest: prompt_fields p6 gave '$(prompt_fields "$t/p6.json")'"; rc=1; }
+  [ "$(prompt_fields "$t/p5.json")" = '[{"prompt_tokens":null,"prompt_ids_sha256":null}]' ] || { echo "selftest: prompt_fields without ids gave '$(prompt_fields "$t/p5.json")'"; rc=1; }
+  [ "$(prompt_fields "$t/p3.json")" = '[]' ] && [ "$(prompt_fields "$t/absent.json")" = '[]' ] || { echo "selftest: prompt_fields on no attempts or no file"; rc=1; }
   # v1.4 (ACCEPTANCE-v1.4-e1.md): E1 and CTRL-E1 on a throwaway signed fixture release (no daemon, no network).
   [ "$(map_sig release)" = verified ] && [ "$(map_sig dry-run-key)" = dry-run-key ] && [ "$(map_sig internal-test-key)" = internal-test-key ] || { echo "selftest: map_sig wrong"; rc=1; }
   if command -v ssh-keygen >/dev/null 2>&1; then
@@ -335,6 +365,11 @@ D=$JOB/tmp/e2e
 MODE=${WSE2E_BACKEND:-cpu}   # v1.3: cpu (default, v1.2 behaviour) or gb10 (ACCEPTANCE-v1.3-gb10.md)
 case $MODE in cpu|gb10) ;; *) echo "WSE2E_BACKEND must be cpu or gb10, not '$MODE'" >&2; exit 2 ;; esac
 ARTIFACT=${WSE2E_ARTIFACT:-}   # v1.4: install from a release artifact instead of building the system under test
+RUN_ROOT=${WSE2E_RUN_ROOT:-}   # v1.5: a fixed run root (ACCEPTANCE-v1.5-fixed-root.md); empty keeps $D/run
+if [ -n "$RUN_ROOT" ]; then
+  run_root_ok "$RUN_ROOT" && mkdir -p -- "$RUN_ROOT" && run_root_ok "$RUN_ROOT" \
+    || { echo "WSE2E_RUN_ROOT '$RUN_ROOT' must be an absolute real path (no symlink, '.', '..', '//' or trailing '/'), at most 100 bytes" >&2; exit 2; }
+fi
 TGT=$D/target; RUN_NAME0=RUN-1
 [ "$MODE" = gb10 ] && { TGT=$D/target-gb10; RUN_NAME0=RUN-3-GB10; }
 [ -n "$ARTIFACT" ] && RUN_NAME0=RUN-4-INSTALL
@@ -403,7 +438,11 @@ C_T=$(sed -n 's/^tokenizer-json-sha256 = "\(.*\)"/\1/p' "$REPO/release/candidate
 C_ID=$(sed -n 's/^model-id = "\(.*\)"/\1/p' "$REPO/release/candidate.toml")
 HOST=$(hostname)
 
+if [ -n "$RUN_ROOT" ]; then   # v1.5: the same path every attempt; an empty root is reused, an earlier run is moved aside
+  RUN=$RUN_ROOT; rmdir -- "$RUN" 2>/dev/null || mv -- "$RUN" "$RUN.old-$(date +%s)"
+else
 RUN=$D/run; [ -e "$RUN" ] && mv "$RUN" "$RUN.old-$(date +%s)"
+fi
 mkdir -p "$RUN"/{state,compose,prov,home,logs,ws-contract/inbox,ws-contract/outbox,ws/inbox,ws/outbox} "$OUT/chain" "$OUT/artifacts"
 SOCK=$RUN/s; LOGS=$RUN/logs; ART=$OUT/artifacts; WS=$RUN/ws; WSC=$RUN/ws-contract
 E=(env -u AIEN_OMEGA_DIR -u AIEN_OMEGA_COMPOSE_DIR -u AIEN_OMEGA_GPU_LIB -u AIEN_REQUIRE_BLACKWELL
@@ -465,17 +504,24 @@ RUN_ID=$(printf '%s\n%s\n%s\n%s' "$OBJ_ID" "$BIN_SHA" "$W_SHA" "$HOST" | sha256s
 N=0; PREV=$(printf '0%.0s' $(seq 1 64)); CHAIN=$OUT/chain; ROWS=""
 rcpt() { # step status evidence [fields json]
   N=$((N + 1)); local f; f=$(printf '%s/%03d-%s.json' "$CHAIN" "$N" "$1")
-  local st=$2 ev=$3 gx='{}'
+  local st=$2 ev=$3 gx='{}' px='{}'
   if [ "$MODE" = gb10 ]; then   # v1.3 G3-G5: counters in every receipt; a fallback or an off-chip model call is a FAIL
     gb10_receipt "$1"; gx=$G_JSON
     if [ -n "$G_WHY" ]; then case $st in PASS|RECORDED) st=FAIL ;; esac; ev="$ev | gb10: ${G_WHY# }"; fi
   fi
+  if [ -n "$RUN_ROOT" ]; then   # v1.5 (ACCEPTANCE-v1.5-fixed-root.md): recorded only, never judged
+    case $1 in
+      PRE) px=$(jq -nc --arg r "$RUN_ROOT" '{run_root:$r, run_root_rule:"ACCEPTANCE-v1.5-fixed-root.md"}') ;;
+      E3|E3m|E4) px=$(jq -nc --argjson a "$(prompt_fields "$ART/$1-propose.json")" \
+        '{prompt_attempts:$a, prompt_source:"report.proposal_attempts[].prompt_tokens and .prompt_ids_sha256 of the propose output (ACCEPTANCE-v1.5-fixed-root.md)"}') ;;
+    esac
+  fi
   jq -n --arg oid "$OBJ_ID" --arg rid "$RUN_ID" --arg step "$1" --arg status "$st" --arg ev "$ev" --argjson fields "${4:-{\}}" \
     --arg utc "$(utc)" --arg prev "$PREV" --arg commit "$COMMIT" --arg bin "$BIN_SHA" --arg w "$W_SHA" --arg t "$T_SHA" \
-    --arg backend "${CUR_BACKEND:-no daemon started}" --arg host "$HOST" --argjson gx "$gx" --argjson rx "${RCPT_EXTRA:-{\}}" \
+    --arg backend "${CUR_BACKEND:-no daemon started}" --arg host "$HOST" --argjson gx "$gx" --argjson rx "${RCPT_EXTRA:-{\}}" --argjson px "$px" \
     '{objective_id:$oid, run_id:$rid, step:$step, status:$status, utc:$utc, prev_receipt_sha256:$prev, evidence:$ev,
       repo_commit:$commit, daemon_sha256:$bin, cli_sha256:$bin, model_weights_digest:$w, tokenizer_sha256:$t,
-      backend_line:$backend, host:$host} + $fields + $gx + $rx' >"$f"
+      backend_line:$backend, host:$host} + $fields + $gx + $rx + $px' >"$f"
   PREV=$(sha_of "$f")
   case $1 in CTRL-*|E[0-9]*) ROWS="$ROWS$1 $st"$'\n' ;; esac
   echo "[$(date -u +%H:%M:%S)] $1 $st: $ev" | cut -c1-300 | tee -a "$OUT/console.txt"
@@ -600,6 +646,7 @@ if [ "$MODE" = gb10 ]; then   # v1.3: the gb10 rows as run, the zero-CUDA gate o
   [ -n "$ARTIFACT" ] || { cp "$D/zero-cuda-gate.txt" "$ART/zero-cuda-gate.txt"; cp "$D/pins.txt" "$ART/pins.txt"; }   # artifact mode wrote its own gate output at the install
 fi
 [ -z "$ARTIFACT" ] || cp "$REPO/docs/campaigns/whole-system-e2e/ACCEPTANCE-v1.4-e1.md" "$OUT/ACCEPTANCE-v1.4-e1.as-run.md"
+[ -z "$RUN_ROOT" ] || cp "$REPO/docs/campaigns/whole-system-e2e/ACCEPTANCE-v1.5-fixed-root.md" "$OUT/ACCEPTANCE-v1.5-fixed-root.as-run.md"
 FIX=$(cd "$WS/inbox" && sha256sum -- * | LC_ALL=C sort -k2 | jq -R -s 'split("\n") | map(select(length>0) | split("  ") | {name:.[1], sha256:.[0]})')
 PRE_OK=1; PRE_EV="host $HOST; model $C_ID"
 [ "$W_SHA" = "$C_W" ] && [ "$T_SHA" = "$C_T" ] || { PRE_OK=0; PRE_EV="$PRE_EV; model digests differ from release/candidate.toml"; }
