@@ -139,3 +139,20 @@ fn chip_parity_f32_and_bf16() {
         }
     }
 }
+
+/// Shape products that overflow `usize` are refused before the C call (TOO_LARGE), in debug
+/// and release alike. Before abi-qual, `seq_len * num_kv_heads * head_dim` wrapped to 0 in a
+/// release build, so empty cache slices passed the length check with each dimension still
+/// inside u32 range; only omega's own argument checks stood between that call and an
+/// out-of-bounds read.
+#[test]
+fn overflowing_shapes_are_refused_before_ffi() {
+    let too_large = |e: OmegaGpuError| matches!(e, OmegaGpuError::Rc { rc: -2, .. });
+    let q = vec![0f32; 1 << 16];
+    let mut out = vec![0f32; 1 << 16];
+    let e = gqa_attention_f32(&q, &[], &[], 1 << 31, 1, 1 << 17, 1 << 16, &mut out).unwrap_err();
+    assert!(too_large(e.clone()), "{e:?}");
+    let mut c = vec![0f32; 0];
+    let e = matmul_f32(usize::MAX / 2 + 1, 2, 0, &[], &[], &mut c).unwrap_err();
+    assert!(too_large(e.clone()), "{e:?}");
+}
