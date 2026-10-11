@@ -19,6 +19,7 @@ use aien_test::graph::{self, GraphError};
 use aien_test::identity;
 use aien_test::plan::{self, Request};
 use aien_test::runner::{self, CacheNote, Options, RunError};
+use aien_test::sandbox::Sandbox;
 use aien_test::status;
 use aien_test::verdict::Verdict;
 use aien_test::verify;
@@ -468,6 +469,8 @@ fn cmd_verify(cli: &Cli, commit: &str, cwd: &Path) -> i32 {
     let ask = verify::Ask {
         state,
         commit: commit.to_string(),
+        // verify applies the worker's rule: a commit on this line is
+        // checked against its first parent.
         base: cli
             .base
             .clone()
@@ -517,7 +520,22 @@ fn cmd_worker(cli: &Cli) -> i32 {
         .clone()
         .unwrap_or_else(|| PathBuf::from("/var/lib/aien-run/wt"));
     let mut cfg = worker::Config::new(state, &key, &clones, &wt_root);
-    cfg.sandbox = cli.sandbox;
+    // The worker runs other people's code: the user sandbox is its default.
+    // `--sandbox none` is a development mode only, needs
+    // `--dev-unsandboxed`, and is never allowed with `--github`.
+    cfg.sandbox = if cli.sandbox_given {
+        cli.sandbox
+    } else {
+        Sandbox::User
+    };
+    cfg.allow_unsandboxed = cli.dev_unsandboxed;
+    if let Err(e) = cfg.check_sandbox_policy_for(cli.github) {
+        eprintln!("aien-test: {e}");
+        return 2;
+    }
+    if let Some(b) = &cli.base {
+        cfg.base_ref = b.clone();
+    }
     cfg.github = cli.github;
     cfg.poll = Duration::from_secs(cli.poll.unwrap_or(30));
     cfg.repos = cli.repos.clone();

@@ -32,6 +32,7 @@ use crate::resources::Hardware;
 use crate::runner::{self, CacheNote, Options};
 use crate::sandbox::Sandbox;
 use crate::verdict::Verdict;
+use crate::verify;
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::fs;
@@ -42,6 +43,50 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 pub const CONTEXT: &str = "AIEN Verification (Spark)";
 pub const EXECUTOR_CLASS: &str = "spark";
+/// Where INFRA keeps the per-repository cargo target dirs (A2).
+pub const TARGET_ROOT: &str = "/var/lib/aien-run/target";
+
+/// A repository directory key the worker accepts: letters, digits, `.`, `_`
+/// and `-`, not starting with a dot (so never `.` or `..`).
+pub fn valid_repo_key(repo: &str) -> bool {
+    !repo.is_empty()
+        && repo.len() <= 100
+        && !repo.starts_with('.')
+        && repo
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'_' || b == b'-')
+}
+
+/// A full lowercase 40-hex commit id.
+pub fn valid_sha(sha: &str) -> bool {
+    sha.len() == 40
+        && sha
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
+/// The signing key must be a regular file only its owner can read or write
+/// (mode 0600 or stricter): a key the `aien-run` user could read would let a
+/// gate sign its own bundle.
+pub fn check_key_private(path: &Path) -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt;
+    let meta = fs::symlink_metadata(path)
+        .map_err(|e| format!("cannot stat signing key {}: {e}", path.display()))?;
+    if !meta.file_type().is_file() {
+        return Err(format!(
+            "signing key {} is not a regular file",
+            path.display()
+        ));
+    }
+    let mode = meta.permissions().mode() & 0o777;
+    if mode & 0o077 != 0 {
+        return Err(format!(
+            "signing key {} has mode {mode:o}; it must be 0600 (no group or other access)",
+            path.display()
+        ));
+    }
+    Ok(())
+}
 
 /// The local-CI state directory.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -161,6 +206,12 @@ pub struct Config {
     /// The GitHub CLI (`gh`), looked up on PATH.
     pub gh: String,
     pub hardware_identity: String,
+    /// Allow `Sandbox::None` (development only: gates then run as the
+    /// worker user, who can read the signing key). Never with `github`.
+    pub allow_unsandboxed: bool,
+    /// Per-repository cargo target directories by trust class
+    /// (`<target_root>/<repo>/main|pr`), used under `Sandbox::User`.
+    pub target_root: PathBuf,
 }
 
 impl Config {
@@ -179,7 +230,24 @@ impl Config {
             crumb: Some("crumb".to_string()),
             gh: "gh".to_string(),
             hardware_identity: String::new(),
+            allow_unsandboxed: false,
+            target_root: PathBuf::from(TARGET_ROOT),
         }
+    }
+
+    /// The sandbox rule: `Sandbox::User` always; `Sandbox::None` only when
+    /// `allow_unsandboxed` (development) and never when serving GitHub heads.
+    pub fn check_sandbox_policy_for(&self, github: bool) -> Result<(), String> {
+        if self.sandbox == Sandbox::User {
+            return Ok(());
+        }
+        if github {
+            return Err("--sandbox none is refused with --github: pull request code must run as the aien-run user".to_string());
+        }
+        if !self.allow_unsandboxed {
+            return Err("--sandbox none runs gates as the worker user, who can read the signing key; it needs --dev-unsandboxed (development only)".to_string());
+        }
+        Ok(())
     }
 }
 
@@ -196,6 +264,8 @@ pub struct Summary {
     pub bundle_digest: String,
     pub gates: Vec<(String, String, Verdict)>,
     pub publication: String,
+    /// What the independent check (`verify`) said about the bundle.
+    pub ready: bool,
     pub notes: Vec<String>,
 }
 
@@ -295,6 +365,19 @@ fn crumb(cfg: &Config, wt: &Path, args: &[&str], notes: &mut Vec<String>) {
 
 /// Verify one head end to end. Never panics on GitHub trouble.
 pub fn run_once(cfg: &Config, repo: &str, sha: &str) -> Result<Summary, String> {
+    // Refusals first: nothing is fetched, checked out or run before these.
+    if !valid_repo_key(repo) {
+        return Err(format!("refusing repository name {repo:?}"));
+    }
+    if !valid_sha(sha) {
+        return Err(format!(
+            "refusing commit {sha:?}: a lowercase 40-hex id is required"
+        ));
+    }
+    // Development mode needs the explicit opt-in; the CLI also refuses it
+    // with `--github` (tests post to a fake `gh` without the helper).
+    cfg.check_sandbox_policy_for(false)?;
+    check_key_private(&cfg.key)?;
     let mut notes: Vec<String> = Vec::new();
     cfg.state.beat(repo, sha, "checkout");
     let (clone, wt) = checkout(cfg, repo, sha, &mut notes)?;
@@ -307,7 +390,7 @@ pub fn run_once(cfg: &Config, repo: &str, sha: &str) -> Result<Summary, String> 
             "aien-worker",
             ".",
             "worker",
-            "done",
+            "test",
             "local verification finished",
         ],
         &mut notes,
@@ -343,15 +426,11 @@ fn run_in_worktree(
     );
     let repository = plan::repository_name(clone, None);
 
-    // Plan against the base ref; a head that is the base is planned against
-    // its first parent so a push to main still verifies what it changed.
+    // Plan against the base ref; a head already on the base line is planned
+    // against its first parent so a push to main still verifies what it
+    // changed (the same rule `verify` uses).
     cfg.state.beat(repo, sha, "plan");
-    let base_sha = plan::resolve_first(wt, &[&cfg.base_ref, "main", &format!("{sha}~1")])?;
-    let base = if base_sha == sha {
-        plan::resolve(wt, &format!("{sha}~1")).unwrap_or(base_sha)
-    } else {
-        base_sha
-    };
+    let (base, on_main) = plan::base_for(wt, &cfg.base_ref, sha)?;
     let mut req = plan::Request::new(&base, sha);
     req.operator = cfg.operator;
     req.hardware_identity = cfg.hardware_identity.clone();
@@ -363,7 +442,7 @@ fn run_in_worktree(
     fs::create_dir_all(&evidence_dir).map_err(|e| format!("cannot create evidence dir: {e}"))?;
     let mut opts = Options::new(evidence_dir.clone());
     opts.sandbox = cfg.sandbox;
-    opts.cargo_target_dir = std::env::var_os("CARGO_TARGET_DIR").map(PathBuf::from);
+    opts.cargo_target_dir = target_dir_for(cfg, repo, on_main);
     let mut known: BTreeMap<String, Known> = BTreeMap::new();
     let mut notes_cache: BTreeMap<String, CacheNote> = BTreeMap::new();
     if plan.blocked.is_none() && !plan.entries.is_empty() {
@@ -488,15 +567,46 @@ fn run_in_worktree(
         .map_err(|e| format!("cannot create bundle dir: {e}"))?;
     fs::write(&bundle_path, &bytes).map_err(|e| format!("cannot write bundle: {e}"))?;
 
+    // The independent check of what was just written, exactly as `verify`
+    // does it: keys at BASE, signature, graph digest, receipts, manifests,
+    // crumb. Nothing is published as success unless this says READY.
+    cfg.state.beat(repo, sha, "verify");
+    let check = verify::run(
+        clone,
+        &verify::Ask {
+            state: cfg.state.clone(),
+            commit: sha.to_string(),
+            base: plan.base.clone(),
+            repository: Some(repository.clone()),
+            release: false,
+            operator: false,
+            hardware_identity: cfg.hardware_identity.clone(),
+            crumb: cfg.crumb.clone(),
+            keys_override: None,
+        },
+    );
+    let ready = check.ready;
+    let check_problems: Vec<String> = check
+        .lines
+        .iter()
+        .filter(|l| {
+            l.starts_with("Problem: ")
+                || l.starts_with("Evidence note: ")
+                || l.starts_with("Crumb note: ")
+        })
+        .cloned()
+        .collect();
+
     // Publication, then the journal.
     cfg.state.beat(repo, sha, "publish");
     let publication = if cfg.github {
         let status = Status {
             repository: repository.clone(),
             sha: sha.to_string(),
-            state: github_state(&bundle_verdict, judged.verdict).to_string(),
+            state: publish_state(ready, &bundle_verdict, judged.verdict).to_string(),
             description: format!(
-                "{} {}: bundle {}",
+                "{} {} {}: bundle {}",
+                if ready { "READY" } else { "BLOCKED" },
                 bundle_verdict,
                 judged.reason,
                 bundle_path.display()
@@ -531,6 +641,8 @@ fn run_in_worktree(
         "graph_digest": plan.graph_digest,
         "gates": gates.iter().map(|(g, s, v)| json!({ "gate": g, "status": s, "verdict": v.as_str() })).collect::<Vec<_>>(),
         "unmapped": unmapped,
+        "verify": if ready { "READY" } else { "BLOCKED" },
+        "verify_notes": check_problems,
         "publication": publication,
         "notes": notes,
     }))?;
@@ -545,8 +657,36 @@ fn run_in_worktree(
         bundle_digest,
         gates,
         publication,
+        ready,
         notes: Vec::new(),
     })
+}
+
+/// `CARGO_TARGET_DIR` for the gates of one head. Under the user sandbox it is
+/// the INFRA target dir of the head's trust class (A2):
+/// `<target_root>/<repo>/main` for a head on the base line, `.../pr`
+/// otherwise. The exec helper accepts only exactly those two paths under
+/// `/var/lib/aien-run/target` and creates the class dir on demand. Never the
+/// worker's own target dir, which `aien-run` cannot write. Without the
+/// sandbox, the worker's own `CARGO_TARGET_DIR`.
+fn target_dir_for(cfg: &Config, repo: &str, on_main: bool) -> Option<PathBuf> {
+    match cfg.sandbox {
+        Sandbox::None => std::env::var_os("CARGO_TARGET_DIR").map(PathBuf::from),
+        Sandbox::User => {
+            let class = if on_main { "main" } else { "pr" };
+            Some(cfg.target_root.join(repo).join(class))
+        }
+    }
+}
+
+/// The commit status for a head: `success` only when the independent check
+/// of the bundle just written says READY; `failure` when the bundle or the
+/// plan says FAIL; `error` otherwise.
+pub fn publish_state(ready: bool, bundle_verdict: &str, judged: Verdict) -> &'static str {
+    match github_state(bundle_verdict, judged) {
+        "success" if !ready => "error",
+        s => s,
+    }
 }
 
 fn bundle_verdict(v: Verdict) -> String {
@@ -611,72 +751,130 @@ pub fn post_status(gh: &str, s: &Status) -> Result<(), String> {
     }
 }
 
+/// Queue a status in the outbox. File names start with a strictly increasing
+/// 20-digit sequence (nanoseconds since the epoch, bumped past the newest
+/// queued file), so the outbox replays in the order statuses were queued. A
+/// newer status for the same head replaces the older one and takes its place
+/// at the end of the queue: the latest state is what GitHub must end with.
 fn queue_status(state: &StateDir, repo: &str, s: &Status) -> Result<(), String> {
     let dir = state.outbox_dir();
     fs::create_dir_all(&dir).map_err(|e| format!("cannot create outbox: {e}"))?;
+    let suffix = format!(".{repo}.{}.json", s.sha);
+    let mut newest: u128 = 0;
+    for f in outbox_files(state) {
+        let name = f
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        if let Some(seq) = name.split('.').next().and_then(|n| n.parse::<u128>().ok()) {
+            newest = newest.max(seq);
+        }
+        if name.ends_with(&suffix) || name == suffix.trim_start_matches('.') {
+            let _ = fs::remove_file(&f);
+        }
+    }
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let seq = now.max(newest + 1);
     let v = json!({ "repository": s.repository, "sha": s.sha, "state": s.state, "description": s.description });
-    fs::write(
-        dir.join(format!("{repo}.{}.json", s.sha)),
-        serde_json::to_string(&v).unwrap_or_default(),
-    )
-    .map_err(|e| format!("cannot write outbox: {e}"))
+    let tmp = dir.join(format!(".tmp{suffix}"));
+    fs::write(&tmp, serde_json::to_string(&v).unwrap_or_default())
+        .map_err(|e| format!("cannot write outbox: {e}"))?;
+    fs::rename(&tmp, dir.join(format!("{seq:020}{suffix}")))
+        .map_err(|e| format!("cannot write outbox: {e}"))
 }
 
-/// Try to post every queued status; a success removes the file. Returns
+/// The queued status files, in queue order (`*.json`, by name).
+pub fn outbox_files(state: &StateDir) -> Vec<PathBuf> {
+    let Ok(rd) = fs::read_dir(state.outbox_dir()) else {
+        return Vec::new();
+    };
+    let mut files: Vec<PathBuf> = rd
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| {
+            let n = p
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            n.ends_with(".json") && !n.starts_with('.')
+        })
+        .collect();
+    files.sort();
+    files
+}
+
+/// Post the queued statuses in queue order; a success removes the file. The
+/// first failure stops the replay so nothing overtakes an older status; the
+/// rest stay queued for the next round. A file that is not a status is
+/// renamed to `*.bad` (journaled) so it cannot block the queue. Returns
 /// (posted, still pending).
 pub fn flush_outbox(cfg: &Config) -> (usize, usize) {
-    let (mut posted, mut pending) = (0, 0);
-    let Ok(rd) = fs::read_dir(cfg.state.outbox_dir()) else {
-        return (0, 0);
-    };
-    let mut files: Vec<PathBuf> = rd.flatten().map(|e| e.path()).collect();
-    files.sort();
-    for f in files {
-        let Ok(text) = fs::read_to_string(&f) else {
+    let files = outbox_files(&cfg.state);
+    let mut posted = 0;
+    for (i, f) in files.iter().enumerate() {
+        let status = fs::read_to_string(f)
+            .ok()
+            .and_then(|t| serde_json::from_str::<Value>(&t).ok())
+            .and_then(|v| {
+                let s = Status {
+                    repository: v["repository"].as_str()?.to_string(),
+                    sha: v["sha"].as_str()?.to_string(),
+                    state: v["state"].as_str()?.to_string(),
+                    description: v["description"].as_str().unwrap_or("").to_string(),
+                };
+                (valid_sha(&s.sha)
+                    && ["success", "failure", "error", "pending"].contains(&s.state.as_str()))
+                .then_some(s)
+            });
+        let Some(s) = status else {
+            let _ = fs::rename(f, f.with_extension("bad"));
+            let _ = cfg.state.journal_append(&json!({
+                "utc": utc_string(now_secs()),
+                "publication": "dropped",
+                "note": format!("outbox file {} is not a status; renamed to .bad", f.display()),
+            }));
             continue;
-        };
-        let Ok(v) = serde_json::from_str::<Value>(&text) else {
-            continue;
-        };
-        let s = Status {
-            repository: v["repository"].as_str().unwrap_or("").to_string(),
-            sha: v["sha"].as_str().unwrap_or("").to_string(),
-            state: v["state"].as_str().unwrap_or("error").to_string(),
-            description: v["description"].as_str().unwrap_or("").to_string(),
         };
         match post_status(&cfg.gh, &s) {
             Ok(()) => {
-                let _ = fs::remove_file(&f);
+                let _ = fs::remove_file(f);
                 posted += 1;
                 let _ = cfg.state.journal_append(&json!({
                     "utc": utc_string(now_secs()),
                     "sha": s.sha,
                     "repository": s.repository,
+                    "state": s.state,
                     "publication": "posted",
                     "note": "flushed from outbox",
                 }));
             }
-            Err(_) => pending += 1,
+            Err(_) => return (posted, files.len() - i),
         }
     }
-    (posted, pending)
+    (posted, 0)
 }
 
-/// Pending trigger files as (repo, sha), oldest name first.
+/// Pending trigger files as (repo, sha), oldest first (modification time,
+/// then name). Names that are not `<repo>.<40-hex sha>` with a safe repo
+/// key are ignored.
 pub fn triggers(state: &StateDir) -> Vec<(String, String, PathBuf)> {
     let mut out = Vec::new();
     if let Ok(rd) = fs::read_dir(state.trigger_dir()) {
         let mut files: Vec<PathBuf> = rd.flatten().map(|e| e.path()).collect();
-        files.sort();
+        // Oldest first: by modification time, then by name.
+        files.sort_by_key(|f| (fs::metadata(f).and_then(|m| m.modified()).ok(), f.clone()));
         for f in files {
             let name = f
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_default();
             if let Some((repo, sha)) = name.rsplit_once('.') {
-                if sha.len() == 40 && sha.bytes().all(|b| b.is_ascii_hexdigit()) && !repo.is_empty()
-                {
-                    out.push((repo.to_string(), sha.to_ascii_lowercase(), f.clone()));
+                let sha = sha.to_ascii_lowercase();
+                if valid_sha(&sha) && valid_repo_key(repo) {
+                    out.push((repo.to_string(), sha, f.clone()));
                 }
             }
         }
@@ -705,9 +903,9 @@ pub fn github_heads(gh: &str, repository: &str) -> Result<Vec<String>, String> {
             return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
         }
         for l in String::from_utf8_lossy(&out.stdout).lines() {
-            let l = l.trim();
-            if l.len() == 40 {
-                shas.push(l.to_ascii_lowercase());
+            let l = l.trim().to_ascii_lowercase();
+            if valid_sha(&l) {
+                shas.push(l);
             }
         }
     }
@@ -819,6 +1017,38 @@ mod tests {
         );
         assert_eq!(owner_repo("aien-dev/x").as_deref(), Some("aien-dev/x"));
         assert_eq!(owner_repo("x"), None);
+        // success needs the independent check too.
+        assert_eq!(publish_state(true, "PASS", Verdict::Pass), "success");
+        assert_eq!(publish_state(false, "PASS", Verdict::Pass), "error");
+        assert_eq!(publish_state(false, "FAIL", Verdict::Fail), "failure");
+        assert_eq!(publish_state(true, "NOT_RUN", Verdict::NotRun), "error");
+    }
+
+    #[test]
+    fn names_and_sandbox_policy() {
+        assert!(valid_repo_key("aien-sovereign-core"));
+        assert!(valid_repo_key("a.b_c-1"));
+        for bad in ["", ".", "..", ".x", "a/b", "a b", "a\0b"] {
+            assert!(!valid_repo_key(bad), "{bad:?}");
+        }
+        assert!(valid_sha(&"a".repeat(40)));
+        assert!(!valid_sha(&"A".repeat(40)));
+        assert!(!valid_sha(&"a".repeat(39)));
+        assert!(!valid_sha(&"g".repeat(40)));
+        let mut cfg = Config::new(
+            StateDir::new(Path::new("/s")),
+            Path::new("/k"),
+            Path::new("/c"),
+            Path::new("/w"),
+        );
+        // The library default is the development sandbox, refused unless allowed.
+        assert_eq!(cfg.sandbox, Sandbox::None);
+        assert!(cfg.check_sandbox_policy_for(false).is_err());
+        cfg.allow_unsandboxed = true;
+        assert!(cfg.check_sandbox_policy_for(false).is_ok());
+        assert!(cfg.check_sandbox_policy_for(true).is_err());
+        cfg.sandbox = Sandbox::User;
+        assert!(cfg.check_sandbox_policy_for(true).is_ok());
     }
 
     #[test]
@@ -842,10 +1072,31 @@ mod tests {
             description: "d".into(),
         };
         queue_status(&s, "r", &st).unwrap();
-        assert!(s
-            .outbox_dir()
-            .join(format!("r.{}.json", "b".repeat(40)))
-            .exists());
+        let q = outbox_files(&s);
+        assert_eq!(q.len(), 1);
+        let name = q[0].file_name().unwrap().to_string_lossy().into_owned();
+        assert!(
+            name.ends_with(&format!(".r.{}.json", "b".repeat(40))),
+            "{name}"
+        );
+        assert_eq!(name.split('.').next().unwrap().len(), 20, "{name}");
+        // Queue order: c after b; a newer status for b replaces the older one
+        // and moves to the end.
+        let c = Status {
+            sha: "c".repeat(40),
+            ..st.clone()
+        };
+        queue_status(&s, "r", &c).unwrap();
+        let b2 = Status {
+            state: "failure".into(),
+            ..st.clone()
+        };
+        queue_status(&s, "r", &b2).unwrap();
+        let q = outbox_files(&s);
+        assert_eq!(q.len(), 2);
+        assert!(q[0].to_string_lossy().contains(&"c".repeat(40)));
+        assert!(q[1].to_string_lossy().contains(&"b".repeat(40)));
+        assert!(fs::read_to_string(&q[1]).unwrap().contains("failure"));
         s.journal_append(&json!({"a": 1})).unwrap();
         s.journal_append(&json!({"b": 2})).unwrap();
         let j = fs::read_to_string(s.journal()).unwrap();

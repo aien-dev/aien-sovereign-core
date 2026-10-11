@@ -206,7 +206,13 @@ pub fn run(root: &Path, ask: &Ask) -> Report {
     let commit_ok = plan::resolve(root, &commit)
         .map(|c| c == commit)
         .unwrap_or(false);
-    let base = plan::resolve(root, &ask.base);
+    // The worker's BASE rule: a commit already on the base line is checked
+    // against its first parent, any other against the base ref.
+    let base = if commit_ok {
+        plan::base_for(root, &ask.base, &commit).map(|(b, _)| b)
+    } else {
+        plan::resolve(root, &ask.base)
+    };
     lines.push(format!("Repository: {repository}"));
     lines.push(format!("Commit: {commit}"));
     if !commit_ok {
@@ -335,17 +341,52 @@ pub fn run(root: &Path, ask: &Ask) -> Report {
             let entry = by_gate.get(&gate);
             let mut reason = String::new();
             let mut verdict = v;
+            // The entry must name the check the plan computes for this gate
+            // at COMMIT; an entry for another check id never counts.
+            if let Some(e) = entry {
+                if c["check_id"].as_str() != Some(e.check_id.as_str()) {
+                    verdict = Verdict::NotRun;
+                    reason = "CHECK_ID_MISMATCH".into();
+                    problems.push(format!(
+                        "{gate}: CHECK_ID_MISMATCH bundle {} but the plan gives {}",
+                        c["check_id"].as_str().unwrap_or("?"),
+                        e.check_id
+                    ));
+                }
+            }
+            // The manifest digest of this gate at COMMIT, for the receipt check.
+            let manifest_digest = p
+                .graph
+                .index_of(&gate)
+                .map(|i| p.graph.node(i).manifest.digest.clone());
             match status {
                 "run" => {
                     let d = c["receipt"].as_str().unwrap_or("").to_string();
+                    let receipt_manifest = |s: &evidence::Stored| {
+                        s.value["core"]["manifest_digest"]
+                            .as_str()
+                            .map(str::to_string)
+                    };
                     match found.get(&d) {
                         Some(s)
                             if s.gate() == gate
                                 && s.commit() == commit
-                                && s.verdict() == Some(v) =>
+                                && s.verdict() == Some(v)
+                                && manifest_digest.is_some()
+                                && receipt_manifest(s) == manifest_digest =>
                         {
-                            executed.push(gate.clone());
-                            run_digests.push(d.clone());
+                            if reason.is_empty() {
+                                executed.push(gate.clone());
+                                run_digests.push(d.clone());
+                            }
+                        }
+                        Some(s) if s.gate() == gate && receipt_manifest(s) != manifest_digest => {
+                            verdict = Verdict::NotRun;
+                            reason = "MANIFEST_MISMATCH".into();
+                            problems.push(format!(
+                                "{gate}: MANIFEST_MISMATCH receipt {d} was made from another manifest than the one at {}",
+                                &commit[..12]
+                            ));
                         }
                         Some(_) => {
                             verdict = Verdict::NotRun;

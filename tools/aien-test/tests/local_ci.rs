@@ -4,8 +4,9 @@
 //! `--release`, and an executor whose key the repository does not trust.
 //! Each must leave MERGE ELIGIBILITY at BLOCKED; none may print PASS.
 //!
-//! The worker runs with `--sandbox none` here because the exec helper is the
-//! INFRA lane's file; the sandbox test at the end runs only when
+//! The worker runs with `--sandbox none` (development mode,
+//! `allow_unsandboxed`) here because the exec helper is the INFRA lane's
+//! file; the sandbox tests at the end run only when
 //! `/usr/local/sbin/aien-run-exec` exists.
 
 use aien_test::bundle;
@@ -32,6 +33,24 @@ impl Tmp {
         let n = COUNTER.fetch_add(1, Ordering::SeqCst);
         let p =
             std::env::temp_dir().join(format!("aien-local-ci-{tag}-{}-{n}", std::process::id()));
+        let _ = fs::remove_dir_all(&p);
+        fs::create_dir_all(&p).unwrap();
+        Tmp(p)
+    }
+    /// A directory the exec helper accepts as `--cwd`: the sandbox shares no
+    /// `/tmp` with the caller, so sandboxed checks run in
+    /// `/var/lib/aien-run/wt/aien-test-selftest/<40 hex>`.
+    fn sandbox_wt() -> Tmp {
+        let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let id = format!(
+            "{:0>40}",
+            format!("{:x}{:x}{n:x}", std::process::id(), nanos)
+        );
+        let p = Path::new("/var/lib/aien-run/wt/aien-test-selftest").join(&id[id.len() - 40..]);
         let _ = fs::remove_dir_all(&p);
         fs::create_dir_all(&p).unwrap();
         Tmp(p)
@@ -100,7 +119,7 @@ struct World {
     wt_root: PathBuf,
 }
 
-const REPO: &str = "repo";
+const REPO: &str = "aien-test-selftest";
 
 fn world() -> World {
     let root = Tmp::new("world");
@@ -113,7 +132,7 @@ fn world() -> World {
     write(
         r,
         "crumb",
-        "#!/bin/sh\necho \"crumb $1: OK\"\nexit 0\n",
+        "#!/bin/sh\nif [ \"$1\" = close ]; then case \"$5\" in create|modify|delete|audit|test|build) ;; *) echo \"crumb: action must be create|modify|delete|audit|test|build\" >&2; exit 2;; esac; fi\necho \"crumb $1: OK\"\nexit 0\n",
         true,
     );
 
@@ -188,6 +207,8 @@ impl World {
         );
         cfg.crumb = Some(self.crumb.display().to_string());
         cfg.gh = self.crumb.display().to_string(); // never called unless github
+                                                   // These scenarios run without the exec helper (development mode).
+        cfg.allow_unsandboxed = true;
         cfg
     }
 
@@ -248,6 +269,12 @@ fn verified_world() -> World {
     let s = worker::run_once(&w.config(), REPO, &w.head).expect("worker");
     assert_eq!(s.verdict, Verdict::Pass, "{} {:?}", s.reason, s.notes);
     assert_eq!(s.bundle_verdict, "PASS");
+    // The fake crumb rejects actions the real tool rejects; no crumb note.
+    assert!(
+        !s.notes.iter().any(|n| n.starts_with("crumb ")),
+        "{:?}",
+        s.notes
+    );
     assert!(w.bundle_path(&w.head).exists());
     assert_eq!(s.publication, "local");
     w
@@ -604,7 +631,7 @@ fn user_sandbox_when_the_helper_exists() {
         );
         return;
     }
-    let t = Tmp::new("sandbox");
+    let t = Tmp::sandbox_wt();
     let r = t.path();
     git(r, &["init", "-q", "-b", "main"]);
     write(r, "tools/a.sh", "#!/bin/sh\necho PASS\n", true);
@@ -623,4 +650,285 @@ fn user_sandbox_when_the_helper_exists() {
     let o = runner::run_gate(r, &r.join("tests/gates/A.gate"), &opts).unwrap();
     println!("sandbox user: {} {}", o.verdict.as_str(), o.reason);
     assert_eq!(o.verdict, Verdict::Pass, "{}", o.reason);
+}
+
+// ---------------------------------------------------------------- ENGINE-2 review fixes
+
+/// A fake `gh` that logs its arguments; `gh.down` makes every call fail and
+/// `fail-<sha>` makes calls about that commit fail.
+fn fake_gh(w: &World) -> (PathBuf, PathBuf, PathBuf) {
+    let fake = w.state.root.join("fake-gh");
+    let log = w.state.root.join("gh.log");
+    let down = w.state.root.join("gh.down");
+    fs::create_dir_all(&w.state.root).unwrap();
+    fs::write(
+        &fake,
+        format!(
+            "#!/bin/sh\nroot={}\nif [ -e \"$root/gh.down\" ]; then echo 'connect: network unreachable' >&2; exit 1; fi\nfor a in \"$@\"; do for f in \"$root\"/fail-*; do [ -e \"$f\" ] || continue; s=${{f##*/fail-}}; case \"$a\" in *\"$s\"*) echo 'refused' >&2; exit 1;; esac; done; done\necho \"$@\" >> {}\nexit 0\n",
+            w.state.root.display(),
+            log.display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&fake, fs::Permissions::from_mode(0o755)).unwrap();
+    (fake, log, down)
+}
+
+#[test]
+fn worker_refuses_unsandboxed_runs_and_bad_names() {
+    let w = world();
+    let mut cfg = w.config();
+    cfg.allow_unsandboxed = false;
+    let e = worker::run_once(&cfg, REPO, &w.head).unwrap_err();
+    assert!(e.contains("--dev-unsandboxed"), "{e}");
+    // Never with GitHub heads, even in development mode (the CLI applies it).
+    cfg.allow_unsandboxed = true;
+    let e = cfg.check_sandbox_policy_for(true).unwrap_err();
+    assert!(e.contains("--github"), "{e}");
+    let cfg = w.config();
+    for (repo, sha) in [
+        ("..", w.head.as_str()),
+        ("a/b", w.head.as_str()),
+        (".hidden", w.head.as_str()),
+        (REPO, "HEAD"),
+        (REPO, &w.head[..12]),
+    ] {
+        let e = worker::run_once(&cfg, repo, sha).unwrap_err();
+        assert!(e.starts_with("refusing"), "{repo} {sha}: {e}");
+    }
+    // Nothing was checked out, signed or journaled.
+    assert!(!w.wt_root.exists());
+    assert!(!w.bundle_path(&w.head).exists());
+    assert!(!w.state.journal().exists());
+}
+
+#[test]
+fn worker_refuses_a_key_others_can_read() {
+    let w = world();
+    fs::set_permissions(&w.key, fs::Permissions::from_mode(0o644)).unwrap();
+    let e = worker::run_once(&w.config(), REPO, &w.head).unwrap_err();
+    assert!(e.contains("mode 644"), "{e}");
+    assert!(!w.wt_root.exists());
+    assert!(!w.bundle_path(&w.head).exists());
+}
+
+#[test]
+fn github_success_needs_a_ready_verify() {
+    let w = world();
+    let (fake, log, _down) = fake_gh(&w);
+    let mut cfg = w.config();
+    cfg.github = true;
+    cfg.gh = fake.display().to_string();
+    // Signed by a key the repository does not list at BASE: the gates pass,
+    // the bundle algebra says PASS, and still no success is posted.
+    cfg.key = w.other_key.clone();
+    let s = worker::run_once(&cfg, REPO, &w.head).expect("worker");
+    assert_eq!(s.verdict, Verdict::Pass, "{}", s.reason);
+    assert_eq!(s.bundle_verdict, "PASS");
+    assert!(!s.ready);
+    assert_eq!(s.publication, "posted");
+    let l = fs::read_to_string(&log).unwrap();
+    assert!(l.contains("state=error"), "{l}");
+    assert!(!l.contains("state=success"), "{l}");
+    let j = fs::read_to_string(w.state.journal()).unwrap();
+    assert!(j.contains("\"verify\":\"BLOCKED\""), "{j}");
+    assert!(j.contains("UNKNOWN_KEY"), "{j}");
+    // With the trusted key the same head is READY and success is posted.
+    let mut cfg = cfg.clone();
+    cfg.key = w.key.clone();
+    let s = worker::run_once(&cfg, REPO, &w.head).expect("worker");
+    assert!(s.ready, "{:?}", s.notes);
+    let l = fs::read_to_string(&log).unwrap();
+    assert!(l.contains("state=success"), "{l}");
+}
+
+#[test]
+fn outbox_replays_in_queue_order() {
+    let w = world();
+    let (fake, log, down) = fake_gh(&w);
+    let mut cfg = w.config();
+    cfg.github = true;
+    cfg.gh = fake.display().to_string();
+    fs::write(&down, "").unwrap();
+    // Queue the heads so that queue order differs from name order.
+    let (first, second) = if w.head > w.head_h {
+        (w.head.clone(), w.head_h.clone())
+    } else {
+        (w.head_h.clone(), w.head.clone())
+    };
+    for sha in [&first, &second] {
+        let s = worker::run_once(&cfg, REPO, sha).expect("worker");
+        assert_eq!(s.publication, "pending");
+    }
+    let q = worker::outbox_files(&w.state);
+    assert_eq!(q.len(), 2);
+    assert!(q[0].to_string_lossy().contains(&first));
+    // Still down: nothing posted, both pending.
+    assert_eq!(worker::flush_outbox(&cfg), (0, 2));
+    // Up, but GitHub refuses the oldest: the replay stops there, the newer
+    // status does not overtake it.
+    fs::remove_file(&down).unwrap();
+    let block = w.state.root.join(format!("fail-{first}"));
+    fs::write(&block, "").unwrap();
+    assert_eq!(worker::flush_outbox(&cfg), (0, 2));
+    assert!(!log.exists() || fs::read_to_string(&log).unwrap().is_empty());
+    // Fully back: both posted, oldest first.
+    fs::remove_file(&block).unwrap();
+    assert_eq!(worker::flush_outbox(&cfg), (2, 0));
+    assert!(worker::outbox_files(&w.state).is_empty());
+    let l = fs::read_to_string(&log).unwrap();
+    let a = l.find(&format!("statuses/{first}")).expect("first posted");
+    let b = l
+        .find(&format!("statuses/{second}"))
+        .expect("second posted");
+    assert!(a < b, "{l}");
+}
+
+#[test]
+fn verify_rejects_another_check_id_or_manifest() {
+    let w = verified_world();
+    let key = bundle::load_signing_key(&w.key).unwrap();
+    let original = w.read_bundle(&w.head);
+
+    // A re-signed entry naming another check id.
+    let mut b = original.clone();
+    b.as_object_mut().unwrap().remove("signature");
+    b["checks"][0]["check_id"] = json!("0".repeat(64));
+    w.write_bundle(&w.head, &bundle::sign(&b, &key).unwrap());
+    let r = w.verify(&w.ask(&w.head));
+    assert_blocked(&r, "check id");
+    assert!(
+        r.lines.iter().any(|l| l.contains("CHECK_ID_MISMATCH")),
+        "{:#?}",
+        r.lines
+    );
+
+    // A receipt made from another manifest, stored under its own digest and
+    // named by a re-signed bundle.
+    let digest = original["checks"][0]["receipt"].as_str().unwrap();
+    let dir = w.state.evidence(REPO, &w.head);
+    let mut receipt: Value =
+        serde_json::from_slice(&fs::read(dir.join(format!("{digest}.json"))).unwrap()).unwrap();
+    receipt["core"]["manifest_digest"] = json!("1".repeat(64));
+    let (forged, _) = aien_test::evidence::Store::new(&dir)
+        .put_receipt(&receipt)
+        .unwrap();
+    let mut b = original.clone();
+    b.as_object_mut().unwrap().remove("signature");
+    b["checks"][0]["receipt"] = json!(forged);
+    w.write_bundle(&w.head, &bundle::sign(&b, &key).unwrap());
+    let r = w.verify(&w.ask(&w.head));
+    assert_blocked(&r, "manifest");
+    assert!(
+        r.lines.iter().any(|l| l.contains("MANIFEST_MISMATCH")),
+        "{:#?}",
+        r.lines
+    );
+    assert_eq!(line(&r, "Executed gates:"), "Executed gates: none");
+}
+
+#[test]
+fn main_head_is_verified_against_its_first_parent() {
+    let w = world();
+    // Land the topic on main: the head is now the tip of origin/main.
+    git(&w.origin, &["merge", "-q", "--ff-only", "topic"]);
+    git(&w.clone, &["fetch", "-q", "--all"]);
+    assert_eq!(git(&w.clone, &["rev-parse", "origin/main"]), w.head);
+    let s = worker::run_once(&w.config(), REPO, &w.head).expect("worker");
+    assert_eq!(s.verdict, Verdict::Pass, "{} {:?}", s.reason, s.notes);
+    assert!(s.ready, "{:?}", s.notes);
+    // `verify` with the default base reaches the same plan and is READY.
+    let r = w.verify(&w.ask(&w.head));
+    assert_eq!(
+        line(&r, "MERGE ELIGIBILITY:"),
+        "MERGE ELIGIBILITY: READY",
+        "{:#?}",
+        r.lines
+    );
+    assert_eq!(line(&r, "Executed gates:"), "Executed gates: 1 (A)");
+}
+
+#[test]
+fn symlinked_exec_out_of_the_tree_never_runs() {
+    let t = Tmp::new("symlink");
+    let r = t.path();
+    git(r, &["init", "-q", "-b", "main"]);
+    fs::create_dir_all(r.join("tools")).unwrap();
+    std::os::unix::fs::symlink("/bin/true", r.join("tools/run.sh")).unwrap();
+    write(
+        r,
+        "tests/gates/T.gate",
+        &gate("T", "a/", "tools/run.sh", ""),
+        false,
+    );
+    write(r, "a/a.txt", "1\n", false);
+    git(r, &["add", "-A"]);
+    git(r, &["commit", "-q", "-m", "init"]);
+    let ev = Tmp::new("symlink-ev");
+    let opts = Options::new(ev.path().join("out"));
+    let o = runner::run_gate(r, &r.join("tests/gates/T.gate"), &opts).unwrap();
+    assert_eq!(o.verdict, Verdict::MissingImplementation, "{}", o.reason);
+    assert_eq!(runner::exec_path(r, "tools/run.sh"), None);
+}
+
+#[test]
+fn worker_in_the_user_sandbox_is_ready() {
+    if !Path::new(aien_test::sandbox::EXEC_HELPER).exists() {
+        println!(
+            "SKIP: {} is not installed (INFRA lane)",
+            aien_test::sandbox::EXEC_HELPER
+        );
+        return;
+    }
+    let w = world();
+    let mut cfg = w.config();
+    cfg.allow_unsandboxed = false;
+    cfg.sandbox = Sandbox::User;
+    cfg.wt_root = PathBuf::from("/var/lib/aien-run/wt");
+    let s = worker::run_once(&cfg, REPO, &w.head).expect("worker");
+    println!(
+        "worker --sandbox user: {} {} {:?}",
+        s.verdict.as_str(),
+        s.reason,
+        s.notes
+    );
+    assert_eq!(s.verdict, Verdict::Pass, "{} {:?}", s.reason, s.notes);
+    assert!(s.ready, "{:?}", s.notes);
+    let r = w.verify(&w.ask(&w.head));
+    assert_eq!(
+        line(&r, "MERGE ELIGIBILITY:"),
+        "MERGE ELIGIBILITY: READY",
+        "{:#?}",
+        r.lines
+    );
+}
+
+#[test]
+fn worker_cli_refuses_unsandboxed_github_and_unflagged_none() {
+    let bin = env!("CARGO_BIN_EXE_aien-test");
+    let t = Tmp::new("cli");
+    let state = t.path().join("state");
+    let sha = "a".repeat(40);
+    let run = |extra: &[&str]| {
+        let mut args = vec![
+            "worker",
+            "--once",
+            "repo",
+            sha.as_str(),
+            "--state-dir",
+            state.to_str().unwrap(),
+            "--clones",
+            t.path().to_str().unwrap(),
+        ];
+        args.extend_from_slice(extra);
+        Command::new(bin).args(&args).output().unwrap()
+    };
+    let o = run(&["--sandbox", "none"]);
+    assert_eq!(o.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&o.stderr).contains("--dev-unsandboxed"));
+    let o = run(&["--sandbox", "none", "--dev-unsandboxed", "--github"]);
+    assert_eq!(o.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&o.stderr).contains("--github"));
+    // Nothing ran: no state was written.
+    assert!(!state.exists());
 }

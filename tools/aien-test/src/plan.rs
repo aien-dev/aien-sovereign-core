@@ -227,6 +227,22 @@ pub fn resolve_first(root: &Path, candidates: &[&str]) -> Result<String, String>
     Err(format!("none of {candidates:?} resolves to a commit"))
 }
 
+/// The BASE the worker and `verify` plan `head` against: `base_ref` (then
+/// `main`); when `head` is already on that line (the tip of main or an older
+/// main commit) its first parent, so a push to main verifies what it changed
+/// and both sides compute the same plan. The flag says whether `head` is on
+/// the base line (the `main` trust class).
+pub fn base_for(root: &Path, base_ref: &str, head: &str) -> Result<(String, bool), String> {
+    let first_parent = format!("{head}~1");
+    let base = resolve_first(root, &[base_ref, "main", &first_parent])?;
+    let on_base = base == head || git(root, &["merge-base", "--is-ancestor", head, &base]).is_ok();
+    if on_base {
+        Ok((resolve(root, &first_parent)?, true))
+    } else {
+        Ok((base, false))
+    }
+}
+
 fn is_hex(s: &str, n: usize) -> bool {
     s.len() == n
         && s.bytes()
@@ -829,7 +845,9 @@ pub fn probe_cached(root: &Path, graph: &Graph, opts: &crate::runner::Options) -
         if cache::policy(m.cache_allowed, opts.no_cache || opts.release) == cache::Mode::Allow
             && deps_ok
         {
-            if let Ok(id) = crate::runner::identity(root, &node.path, m, &opts.hardware) {
+            if let Ok(id) =
+                crate::runner::identity(root, &node.path, m, &opts.hardware, opts.sandbox)
+            {
                 let deps: Vec<(String, String)> = m
                     .depends_on
                     .iter()

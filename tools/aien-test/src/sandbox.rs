@@ -22,6 +22,9 @@ use std::path::{Path, PathBuf};
 
 pub const EXEC_HELPER: &str = "/usr/local/sbin/aien-run-exec";
 pub const SUDO: &str = "sudo";
+/// The PATH the exec helper sets for the `aien-run` user (`RUN_PATH` in
+/// `aien-run-exec`). Bare `run.exec` names resolve here under `--sandbox user`.
+pub const TRUSTED_PATH: &str = "/var/lib/aien-run/cargo/bin:/usr/local/bin:/usr/bin:/bin";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Sandbox {

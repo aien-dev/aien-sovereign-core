@@ -261,9 +261,7 @@ pub fn lines(state: &StateDir) -> Vec<String> {
             )
         }
     ));
-    let outbox = fs::read_dir(state.outbox_dir())
-        .map(|rd| rd.flatten().count())
-        .unwrap_or(0);
+    let outbox = worker::outbox_files(state).len();
     out.push(format!("Outbox pending: {outbox}"));
     let bundles = newest_bundles(state);
     if bundles.is_empty() {

@@ -11,7 +11,7 @@
 //! aien-test status [--state-dir DIR]
 //! aien-test verify COMMIT [--repo NAME] [--base REF] [--state-dir DIR] [--release]
 //! aien-test worker [--once REPO SHA] [--poll SECS] [--repos LIST] [--github] [--iterations N]
-//!                  [--state-dir DIR] [--key FILE] [--clones DIR] [--wt-root DIR] [--sandbox none|user]
+//!                  [--state-dir DIR] [--key FILE] [--clones DIR] [--wt-root DIR] [--sandbox user|none --dev-unsandboxed]
 //! ```
 //!
 //! `--host/--qemu/--gb10` and `--mutants` are later slices and are refused.
@@ -30,7 +30,7 @@ pub const USAGE: &str = "usage:
   aien-test status [--state-dir DIR]
   aien-test verify COMMIT [--repo NAME] [--base REF] [--state-dir DIR] [--release]
   aien-test worker [--once REPO SHA] [--poll SECS] [--repos A,B] [--github] [--iterations N]
-                   [--state-dir DIR] [--key FILE] [--clones DIR] [--wt-root DIR] [--sandbox none|user]
+                   [--state-dir DIR] [--key FILE] [--clones DIR] [--wt-root DIR] [--sandbox user|none --dev-unsandboxed]
 flags: --evidence-dir DIR  --allow-dirty  --no-cache  --release  --jobs host=N,qemu=M  --wait-gpu
        --sandbox none|user  --base REF  --operator";
 
@@ -85,6 +85,10 @@ pub struct Cli {
     pub hardware_identity: Option<String>,
     /// `--sandbox none|user` (C8), default none.
     pub sandbox: Sandbox,
+    /// Whether `--sandbox` was given (the worker defaults to `user`).
+    pub sandbox_given: bool,
+    /// worker: `--dev-unsandboxed`: allow `--sandbox none` (development only).
+    pub dev_unsandboxed: bool,
     /// `--base REF` for plan, test changed, verify.
     pub base: Option<String>,
     /// `--repo NAME`: the repository name for bundles.
@@ -135,7 +139,8 @@ fn parse_selection(s: &str) -> Result<Selection, String> {
 const COMMANDS: [&str; 9] = [
     "run", "test", "why", "list", "identity", "plan", "status", "verify", "worker",
 ];
-const WORKER_FLAGS: [&str; 10] = [
+const WORKER_FLAGS: [&str; 11] = [
+    "--dev-unsandboxed",
     "--key",
     "--clones",
     "--wt-root",
@@ -169,6 +174,8 @@ pub fn parse_args(argv: &[String]) -> Result<Cli, String> {
     let mut hardware_identity: Option<String> = None;
     let mut identity_flags = false;
     let mut sandbox = Sandbox::None;
+    let mut sandbox_given = false;
+    let mut dev_unsandboxed = false;
     let mut base: Option<String> = None;
     let mut repo: Option<String> = None;
     let mut operator = false;
@@ -222,6 +229,7 @@ pub fn parse_args(argv: &[String]) -> Result<Cli, String> {
             repo = Some(value(&mut i, a)?);
         } else if a == "--sandbox" {
             sandbox = Sandbox::parse(&value(&mut i, a)?)?;
+            sandbox_given = true;
         } else if a == "--state-dir" {
             state_dir = Some(PathBuf::from(value(&mut i, a)?));
         } else if a == "--key" {
@@ -262,6 +270,9 @@ pub fn parse_args(argv: &[String]) -> Result<Cli, String> {
                 .filter(|s| !s.is_empty())
                 .map(|s| s.to_string())
                 .collect();
+        } else if a == "--dev-unsandboxed" {
+            worker_flags.push("--dev-unsandboxed");
+            dev_unsandboxed = true;
         } else if a == "--github" {
             worker_flags.push("--github");
             github = true;
@@ -349,6 +360,8 @@ pub fn parse_args(argv: &[String]) -> Result<Cli, String> {
         flags,
         hardware_identity,
         sandbox,
+        sandbox_given,
+        dev_unsandboxed,
         base,
         repo,
         operator,

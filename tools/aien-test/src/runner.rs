@@ -321,15 +321,40 @@ fn collect_files(root: &Path, rel: &str, out: &mut BTreeSet<String>) {
     }
 }
 
-/// Where `run.exec` is. A name with a slash is repo-relative (the manifest
-/// already refuses absolute paths and `..`). A bare name is a program on the
-/// PATH, so a shared gate can say `exec: crumb`. None when it is not there.
+/// Where `run.exec` is, for a run without the sandbox (the runner's PATH).
+/// See [`exec_path_for`].
 pub fn exec_path(root: &Path, exec: &str) -> Option<PathBuf> {
+    exec_path_in(root, exec, std::env::var_os("PATH"))
+}
+
+/// Where `run.exec` is for a run under `sandbox`. A name with a slash is
+/// repo-relative (the manifest already refuses absolute paths and `..`) and
+/// must still be inside the repository after symlinks are followed. A bare
+/// name is a program on the PATH, so a shared gate can say `exec: crumb`:
+/// the runner's PATH without the sandbox, the exec helper's trusted PATH
+/// ([`sandbox::TRUSTED_PATH`]) under `--sandbox user`, so the program hashed
+/// into the receipt is the program that runs. None when it is not there.
+pub fn exec_path_for(root: &Path, exec: &str, sandbox: Sandbox) -> Option<PathBuf> {
+    match sandbox {
+        Sandbox::None => exec_path(root, exec),
+        Sandbox::User => exec_path_in(root, exec, Some(sandbox::TRUSTED_PATH.into())),
+    }
+}
+
+fn exec_path_in(root: &Path, exec: &str, path: Option<std::ffi::OsString>) -> Option<PathBuf> {
     if exec.contains('/') {
         let p = root.join(exec);
-        return p.is_file().then_some(p);
+        if !p.is_file() {
+            return None;
+        }
+        // A symlink in the tree must not lead out of it.
+        let inside = match (p.canonicalize(), root.canonicalize()) {
+            (Ok(cp), Ok(cr)) => cp.starts_with(cr),
+            _ => false,
+        };
+        return inside.then_some(p);
     }
-    let path = std::env::var_os("PATH")?;
+    let path = path?;
     std::env::split_paths(&path)
         .filter(|d| !d.as_os_str().is_empty())
         .map(|d| d.join(exec))
@@ -460,8 +485,9 @@ pub(crate) fn identity(
     manifest_path: &Path,
     m: &Manifest,
     hw: &Hardware,
+    sandbox: Sandbox,
 ) -> Result<Identity, crate::evidence::StoreError> {
-    let binary_sha = exec_path(root, &m.exec)
+    let binary_sha = exec_path_for(root, &m.exec, sandbox)
         .and_then(|p| fs::read(p).ok())
         .map(|b| sha256_hex(&b));
     let manifest_rel = manifest_path.strip_prefix(root).ok();
@@ -524,15 +550,11 @@ fn execute_gate(job: &Job<'_>, permit: Option<Permit<'_>>) -> Result<Outcome, Ru
         None
     };
 
-    let resolved = exec_path(root, &m.exec);
+    // Resolved where it will run: a bare name under the user sandbox on the
+    // helper's trusted PATH. The full path is what runs and what is hashed.
+    let resolved = exec_path_for(root, &m.exec, opts.sandbox);
     let exec_exists = resolved.is_some();
-    // A bare name under the user sandbox is left to the helper, which resolves
-    // it on the trusted PATH it sets; everything else runs by its full path.
-    let exec_path = match (&resolved, opts.sandbox) {
-        (_, Sandbox::User) if !m.exec.contains('/') => PathBuf::from(&m.exec),
-        (Some(p), _) => p.clone(),
-        (None, _) => root.join(&m.exec),
-    };
+    let exec_path = resolved.unwrap_or_else(|| root.join(&m.exec));
     let mut facts = Facts {
         refusal,
         exec_exists,
@@ -544,7 +566,7 @@ fn execute_gate(job: &Job<'_>, permit: Option<Permit<'_>>) -> Result<Outcome, Ru
 
     // Identify the experiment before anything runs, so the cache lookup and
     // the receipt agree on what was hashed (ADR Decision 7).
-    let id = identity(root, job.manifest_path, m, &opts.hardware).map_err(fatal)?;
+    let id = identity(root, job.manifest_path, m, &opts.hardware, opts.sandbox).map_err(fatal)?;
     let store = Store::new(&opts.evidence_dir);
     let tree_clean = before.is_empty();
     let mut mode = cache::policy(m.cache_allowed, opts.no_cache || opts.release);
