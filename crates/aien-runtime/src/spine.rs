@@ -1152,8 +1152,20 @@ pub fn compose_assistant_prefix(template: &aien_inference_abi::ChatTemplate) -> 
     }
 }
 
-/// The fixed proposal template of the production RunComposeTask path.
-pub fn proposal_prompt(goal: &str, workspace: &str) -> String {
+/// The logical name of the authorized workspace as the model sees it (sc#429).
+///
+/// A constant: the model-visible prompt never carries the machine-specific
+/// absolute path (host name, user name, job folder), so equal logical inputs
+/// give equal prompt bytes and token ids on every machine. The real path stays
+/// in the authorization, confinement, execution and evidence layers
+/// (`RunComposeTask` canonicalizes the workspace, the task id hashes it, the
+/// commit record stores it).
+pub const WORKSPACE_LABEL: &str = "workspace";
+
+/// The fixed proposal template of the production RunComposeTask path. The
+/// workspace is named by `WORKSPACE_LABEL`, never by its path (sc#429).
+pub fn proposal_prompt(goal: &str) -> String {
+    let workspace = WORKSPACE_LABEL;
     format!(
         "Goal: {goal}\nAuthorized workspace: {workspace}\n\
          Propose exactly one file change inside the workspace.\n\
@@ -1476,13 +1488,8 @@ pub fn task_prompt(goal: &str, ws: &Path) -> String {
 /// merges an edit reply into this same content, so the bytes the model saw
 /// are the bytes the merge keeps.
 pub fn task_prompt_and_target(goal: &str, ws: &Path) -> (String, Option<(String, String)>) {
-    let (prompt, target, _) = task_plan(goal, ws).unwrap_or_else(|_| {
-        (
-            proposal_prompt(goal, &ws.display().to_string()),
-            None,
-            ProposalKind::Document,
-        )
-    });
+    let (prompt, target, _) = task_plan(goal, ws)
+        .unwrap_or_else(|_| (proposal_prompt(goal), None, ProposalKind::Document));
     (prompt, target)
 }
 
@@ -1506,7 +1513,7 @@ pub type TaskDecisionInputs = (TaskPrompt, Option<String>, Vec<InputRef>, Vec<In
 /// out (sc#382). The prompt is the fixed template, the input block when the
 /// goal points at workspace files to read, then the edit or new-document block.
 pub fn task_decision_with_inputs(goal: &str, ws: &Path) -> Result<TaskDecisionInputs, String> {
-    let mut prompt = proposal_prompt(goal, &ws.display().to_string());
+    let mut prompt = proposal_prompt(goal);
     let (class, dest, named) = classify_with_inputs(goal, ws);
     let kind = class.kind();
     if let TargetClass::Refused(why) = class {

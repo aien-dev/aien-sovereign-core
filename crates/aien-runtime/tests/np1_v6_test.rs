@@ -120,7 +120,6 @@ fn token_ids_reach_the_attempt_record() {
 #[test]
 fn edit_block_only_when_the_goal_names_an_existing_file() {
     let (_d, ws) = ws();
-    let w = ws.display().to_string();
     // A new-document goal keeps the v5 prompt and gains the destination line
     // (issue #288); an unsafe destination is refused and keeps the plain prompt.
     for goal in [
@@ -135,8 +134,8 @@ fn edit_block_only_when_the_goal_names_an_existing_file() {
             .ok()
             .and_then(|(_, d)| d);
         let want = match dest {
-            Some(d) => format!("{}{}", proposal_prompt(goal, &w), aien_runtime::spine::new_document_block(&d)),
-            None => proposal_prompt(goal, &w),
+            Some(d) => format!("{}{}", proposal_prompt(goal), aien_runtime::spine::new_document_block(&d)),
+            None => proposal_prompt(goal),
         };
         assert_eq!(task_prompt(goal, &ws), want, "{goal}");
     }
@@ -153,7 +152,7 @@ fn edit_block_only_when_the_goal_names_an_existing_file() {
         p,
         format!(
             "{}{}",
-            proposal_prompt(goal, &w),
+            proposal_prompt(goal),
             edit_block("CHANGELOG.md", log)
         )
     );
