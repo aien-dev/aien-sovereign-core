@@ -1148,7 +1148,9 @@ pub fn compose_assistant_prefix(template: &aien_inference_abi::ChatTemplate) -> 
         ChatTemplate::Zephyr | ChatTemplate::Llama3 => COMPOSE_ASSISTANT_PREFIX,
         // A plain model never reaches generation (chat render is refused first).
         ChatTemplate::None => COMPOSE_ASSISTANT_PREFIX,
-        ChatTemplate::ChatMl { .. } | ChatTemplate::ChatMlQwen3 => "filename:",
+        ChatTemplate::ChatMl { .. }
+        | ChatTemplate::ChatMlQwen3
+        | ChatTemplate::ChatMlQwen3NoThink => "filename:",
     }
 }
 
