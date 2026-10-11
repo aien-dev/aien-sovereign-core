@@ -555,6 +555,8 @@ fn cmd_worker(cli: &Cli) -> i32 {
     cfg.poll = Duration::from_secs(cli.poll.unwrap_or(30));
     cfg.repos = cli.repos.clone();
     cfg.operator = cli.operator;
+    cfg.jobs = cli.jobs;
+    cfg.no_cache = cli.no_cache;
     cfg.hardware_identity = cli.hardware_identity.clone().unwrap_or_default();
     if let Some((repo, sha)) = &cli.once {
         return match worker::run_once(&cfg, repo, sha) {

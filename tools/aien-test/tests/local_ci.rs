@@ -586,6 +586,84 @@ fn github_down_queues_then_flushes() {
 }
 
 #[test]
+fn loop_without_github_keeps_the_outbox() {
+    // A status queued while GitHub was down must not be posted by a loop that
+    // was started without --github (`aien-local-ci start`): posting is the
+    // operator's choice, made with --github.
+    let w = world();
+    let fake = w.state.root.join("fake-gh");
+    let log = w.state.root.join("gh.log");
+    let down = w.state.root.join("gh.down");
+    fs::create_dir_all(&w.state.root).unwrap();
+    fs::write(
+        &fake,
+        format!(
+            "#!/bin/sh\nif [ -e {} ]; then echo 'connect: network unreachable' >&2; exit 1; fi\necho \"$@\" >> {}\nexit 0\n",
+            down.display(),
+            log.display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&fake, fs::Permissions::from_mode(0o755)).unwrap();
+    fs::write(&down, "").unwrap();
+    let mut cfg = w.config();
+    cfg.github = true;
+    cfg.gh = fake.display().to_string();
+    let s = worker::run_once(&cfg, REPO, &w.head).expect("worker");
+    assert_eq!(s.publication, "pending");
+    assert_eq!(worker::outbox_files(&w.state).len(), 1);
+    // GitHub is back, but this loop runs without --github: nothing is posted.
+    fs::remove_file(&down).unwrap();
+    cfg.github = false;
+    worker::run_loop(&cfg, Some(1));
+    assert_eq!(worker::outbox_files(&w.state).len(), 1);
+    assert!(!log.exists(), "{:?}", fs::read_to_string(&log));
+    // With --github the same loop drains it.
+    cfg.github = true;
+    cfg.repos = Vec::new();
+    worker::run_loop(&cfg, Some(1));
+    assert!(worker::outbox_files(&w.state).is_empty());
+    assert!(fs::read_to_string(&log)
+        .unwrap()
+        .contains(&format!("statuses/{}", w.head)));
+}
+
+#[test]
+fn worker_no_cache_reruns_every_gate() {
+    // The same head twice: the second run reuses the receipt; with
+    // `--no-cache` (cfg.no_cache) it runs the gate again.
+    let w = world();
+    let mut cfg = w.config();
+    let first = worker::run_once(&cfg, REPO, &w.head).expect("worker");
+    assert!(
+        first.gates.iter().any(|(g, st, _)| g == "A" && st == "run"),
+        "{:?}",
+        first.gates
+    );
+    let again = worker::run_once(&cfg, REPO, &w.head).expect("worker");
+    assert!(
+        again
+            .gates
+            .iter()
+            .any(|(g, st, _)| g == "A" && st == "cached"),
+        "{:?}",
+        again.gates
+    );
+    cfg.no_cache = true;
+    cfg.jobs = aien_test::resources::JobsSpec {
+        host: Some(1),
+        qemu: None,
+    };
+    let fresh = worker::run_once(&cfg, REPO, &w.head).expect("worker");
+    assert!(
+        fresh.gates.iter().any(|(g, st, _)| g == "A" && st == "run"),
+        "{:?}",
+        fresh.gates
+    );
+    assert_eq!(fresh.verdict, Verdict::Pass, "{}", fresh.reason);
+}
+
+#[test]
 fn trigger_file_is_served_by_the_loop() {
     let w = world();
     let cfg = w.config();

@@ -235,7 +235,8 @@ say PASS), `failure` when the bundle or the plan says FAIL, `error`
 otherwise; the description names the bundle path. When `gh` cannot reach
 GitHub the status is queued as `outbox/<seq>.<repo>.<sha>.json`, where `<seq>`
 is a 20-digit number that only grows, and the journal says `publication:
-pending`. Every later round replays the outbox first, in queue order; the
+pending`. Every later round of a loop started with `--github` replays the
+outbox first, in queue order (a loop without `--github` leaves it queued); the
 first status GitHub refuses stops the replay, so a newer status never
 overtakes an older one. A newer status for the same head replaces the queued
 one and moves to the end. A file that is not a status is renamed to `*.bad`
@@ -247,6 +248,28 @@ The loop (`worker` without `--once`) serves trigger files
 that has no bundle yet, then sleeps `--poll` seconds. `--iterations N`
 bounds the rounds (tests). Trigger names that are not a plain repository
 name and a 40-hex commit are ignored.
+
+What starts a run, and what does not (checked 2026-10-11 on the Spark):
+
+| trigger | how | covers today |
+|---|---|---|
+| operator | `aien-local-ci trigger <repo> <sha>` writes `trigger/<repo>.<sha>`; `aien-local-ci once` runs in the foreground | any repository with a trusted clone |
+| Forgejo push | `tools/aien-local-ci/forgejo-webhook.sh install <repo>` puts a post-receive hook in the Forgejo bare repository; a push there writes the trigger file, no network involved | installed for `aien-sovereign-core` only; Forgejo holds no copy of omega, aienos, physics or aien-architecture, and the copies it holds stopped at September commits because nothing pushes to them |
+| GitHub poll | the loop started with `--github` (`aien-local-ci start --github`) lists open pull request heads and `main` of every `--repos` entry each round | all nine repositories, but it also posts the `AIEN Verification (Spark)` status, so it is off until the operator switches it on |
+
+So a loop started without `--github` never picks up a new pull request head
+or a new `main` commit by itself: someone has to write a trigger (or push to
+Forgejo). Merging a pull request on GitHub does not wake it.
+
+`--jobs host=N,qemu=M` and `--no-cache` apply to the runs the worker starts,
+as they do for `aien-test test`. `--no-cache` runs every selected gate again
+(a head with sibling checkouts never uses the cache anyway). `--jobs host=1`
+runs one host gate at a time: omega's gates share one checkout's `build/`
+and pin clones, and on main 771af52 ten of them failed from parallel races
+("Text file busy" on `build/omegatool`, concurrent clones of
+`build/pins/aienos-src`); its operator runs use
+`aien-local-ci once omega <sha> --operator --jobs host=1` until the gates or
+a per-repository pool setting make them safe in parallel.
 
 ## verify-bundle and the vacuous PASS
 
