@@ -42,6 +42,9 @@ case "$cmd" in
       git -C "$m" config core.sharedRepository 0644
     fi
     git -C "$m" fetch --quiet --prune "$clone" '+refs/heads/*:refs/heads/*' '+refs/remotes/*:refs/remotes/*' '+refs/tags/*:refs/tags/*'
+    # Gates may read the origin URL (the sc tier-1 test f62 does, as on a GitHub runner). The mirror takes the
+    # trusted clone's URL; nothing fetches through it (the sandbox has no network and cannot write the mirror).
+    if u=$(git -C "$clone" remote get-url origin 2>/dev/null); then git -C "$m" config remote.origin.url "$u"; fi
     chmod -R o+rX,o-w "$m"
     printf 'mirror %s: %s refs\n' "$m" "$(git -C "$m" for-each-ref | wc -l)"
     ;;

@@ -117,10 +117,31 @@ if [[ -d $RUN_HOME/mirror/aien-protocols.git && -d $RUN_HOME/mirror/aien-archite
   fi
 fi
 
+# 14c mirror origin URL (PIPELINE-FINISH): `wt.sh sync` copies the trusted clone's origin URL into the mirror, so a
+# gate that reads `git remote get-url origin` in a sandbox checkout sees the GitHub URL, as on a GitHub runner.
+cl="$HOME/workspace/pipeline/clones/aien-architecture"
+if [[ -d $cl/.git ]]; then
+  bash "$here/../wt.sh" sync aien-architecture "$cl" >/dev/null
+  want=$(git -C "$cl" remote get-url origin)
+  got=$(git -C "$RUN_HOME/mirror/aien-architecture.git" remote get-url origin 2>&1)
+  [[ -n $want && $got == "$want" ]] && ok "mirror carries the trusted clone's origin URL ($got)" || bad "mirror origin" "want=$want got=$got"
+fi
+
 # ---- review fixes (INFRA-2): nothing a check writes can reach a later check ----
 refused() { [[ $1 -eq 2 ]]; }   # exit 2 = refused by aien-run-exec before anything ran
 T_PR="$RUN_HOME/target/aien-sovereign-core/pr"; T_MAIN="$RUN_HOME/target/aien-sovereign-core/main"
 
+# 14b the operator's ~/models is visible read-only at /var/lib/aien-run/models (model gates), never writable
+if [[ -d $HOME/models && -d /var/lib/aien-run/models ]]; then
+  probe=$(cd "$HOME/models" && ls | head -1)
+  out=$(run --cwd /tmp --timeout 20 --profile host -- sh -c "M=/var/lib/aien-run/models
+    [ -e \"\$M/$probe\" ] && echo SEEN
+    touch \$M/aien-run-probe 2>/dev/null && echo MODELS-WRITABLE
+    echo done" 2>&1 | tr '\n' ' ')
+  [[ $out == "SEEN done " ]] && ok "host: ~/models mounted read-only at /var/lib/aien-run/models" || bad "models read-only" "$out"
+else
+  printf 'SKIP 14b: no ~/models or no /var/lib/aien-run/models mount point\n'
+fi
 # 14 the sandbox home is read-only inside every profile: no ~/.cargo/config.toml, no CARGO_HOME config,
 #    no swapping the registry or the cargo proxies, no new dotfiles
 for p in host gb10; do

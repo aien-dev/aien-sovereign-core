@@ -27,6 +27,13 @@ if [ -n "${HOME:-}" ] && [ ! -w "$HOME" ]; then
   if [ -f "$ro_home/.gitconfig" ]; then cp "$ro_home/.gitconfig" "$HOME/.gitconfig"; fi
 fi
 obs() { printf 'AIEN-OBS %s %s\n' "$1" "$2"; }
+# Inside the user sandbox (AIEN_SANDBOX_NESTED=1, set by the worker) five aien-test self-tests that would
+# start a sandbox themselves skip (they cannot nest); the receipt says so for the two steps that run them.
+nested_obs() {
+  if [ "${AIEN_SANDBOX_NESTED:-}" = 1 ]; then
+    obs nested_sandbox_skips "\"5 aien-test self-tests skipped inside the user sandbox (AIEN_SANDBOX_NESTED=1)\""
+  fi
+}
 # Outside the worktree when CARGO_TARGET_DIR is, and under target/ otherwise: the hosted test job
 # has no pin checkouts in its tree, and test_t2_f65 scans the tree (minus target/) for *.pem files,
 # which the vendored crates of a pinned aienos ship as test fixtures.
@@ -69,6 +76,7 @@ case "$step" in
     # GitHub Actions sets CI=true in every job. Tests that reach live services or check the
     # branch name (spark-adapters tier1-4) skip themselves under CI, so the hosted job never runs
     # them; without it they fail here on any branch not named feat/, fix/... or on a detached head.
+    nested_obs
     CI=true AIEN_DEV_FALLBACK=1 cargo test --workspace --verbose -- --test-threads=1
     ;;
   strict-mode)
@@ -84,6 +92,7 @@ case "$step" in
   agent-preflight)
     # Hosted: developer context on pull requests, merged-tree on pushes to main.
     # CI=true as on GitHub (see the test step): the script runs cargo test --workspace.
+    nested_obs
     CI=true AIEN_PROOF_OFF=1 AIEN_DEV_FALLBACK=1 AIEN_PREFLIGHT_CONTEXT="${AIEN_PREFLIGHT_CONTEXT:-developer}" bash scripts/agent-preflight.sh
     ;;
   zero-disk-secrets)

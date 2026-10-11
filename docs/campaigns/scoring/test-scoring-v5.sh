@@ -5,6 +5,10 @@ set -u
 HERE=$(cd "$(dirname "$0")" && pwd)
 S=$HERE/score-rows.sh T=$HERE/tests-v5
 pass=0 fail=0
+# Scratch files go to a private temp dir, never into the tree: aien-test runs gates in parallel in one
+# checkout, and a file here, even for a moment, fails another gate's clean-tree check.
+W=$(mktemp -d) || exit 1
+trap 'rm -rf "$W"' EXIT
 # expect NAME FIXTURE CAMPAIGN_VERDICT EXPECTED_ROW_VERDICTS(ctl,A,B) [EXTRA_JQ_TEST]
 expect() {
   local name=$1 fx=$2 want=$3 rows=$4 out got grows
@@ -30,16 +34,16 @@ if [ "$rc" = 0 ] && [ "$(jq -r .verdict <<<"$out")" = PASS ] && [ "$(jq '.extras
   pass=$((pass + 1)); echo "ok   extra unrequested runs reported (2), not counted"
 else fail=$((fail + 1)); echo "FAIL extra runs: rc $rc"; fi
 # external control F0 absent counts as false (fail closed)
-printf '%s\n' '{"contract":"scoring-v5","campaign":"x","rows":[{"row":"Q","role":"case","reps":1,"expected":"PASS","control":"F0","not_applicable":false}]}' >"$T/.f0.decl"
-printf '%s\n' '{"row":"Q","rep":1,"verdict":"PASS","outcome":"ok"}' >"$T/.f0.res"
-echo '{"F0":true}' >"$T/.f0.ext"
-a=$("$S" "$T/.f0.decl" "$T/.f0.res" 2>/dev/null | jq -r .verdict); b=$("$S" "$T/.f0.decl" "$T/.f0.res" "$T/.f0.ext" 2>/dev/null | jq -r .verdict)
-rm -f "$T"/.f0.decl "$T"/.f0.res "$T"/.f0.ext
+printf '%s\n' '{"contract":"scoring-v5","campaign":"x","rows":[{"row":"Q","role":"case","reps":1,"expected":"PASS","control":"F0","not_applicable":false}]}' >"$W/.f0.decl"
+printf '%s\n' '{"row":"Q","rep":1,"verdict":"PASS","outcome":"ok"}' >"$W/.f0.res"
+echo '{"F0":true}' >"$W/.f0.ext"
+a=$("$S" "$W/.f0.decl" "$W/.f0.res" 2>/dev/null | jq -r .verdict); b=$("$S" "$W/.f0.decl" "$W/.f0.res" "$W/.f0.ext" 2>/dev/null | jq -r .verdict)
+rm -f "$W"/.f0.decl "$W"/.f0.res "$W"/.f0.ext
 if [ "$a" = NOT_RUN ] && [ "$b" = PASS ]; then pass=$((pass + 1)); echo "ok   external control F0 absent NOT_RUN, present PASS"
 else fail=$((fail + 1)); echo "FAIL external F0: absent=$a present=$b"; fi
 # a bad declaration is an error, never a PASS
-echo '{"contract":"scoring-v5","campaign":"x","rows":[{"row":"Q","reps":0,"expected":"PASS"}]}' >"$T/.bad.decl"
-v=$("$S" "$T/.bad.decl" "$T/pass.jsonl" 2>/dev/null | jq -r .verdict); rm -f "$T/.bad.decl"
+echo '{"contract":"scoring-v5","campaign":"x","rows":[{"row":"Q","reps":0,"expected":"PASS"}]}' >"$W/.bad.decl"
+v=$("$S" "$W/.bad.decl" "$T/pass.jsonl" 2>/dev/null | jq -r .verdict); rm -f "$W/.bad.decl"
 if [ "$v" = ERROR ]; then pass=$((pass + 1)); echo "ok   bad declaration (reps 0) is ERROR"; else fail=$((fail + 1)); echo "FAIL bad declaration: $v"; fi
 # the real NEXT-PHASE-2 v4 results (receipt e401fffe) scored with the v4 declaration
 R=$HERE/../next-phase-2/e401fffe189506ecc0152f82bfe895c1374842746ae7cf4b5ac83462ccafe13c.json

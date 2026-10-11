@@ -13,8 +13,9 @@
 #       release mode. Stops at the first failing stage with that stage's exit
 #       status (the forge uses &&).
 #   prefill_e2e2_run.sh mutant ID MARKER
-#       Apply prefill_e2e2_mutants/mutant_ID.patch, run the same test, restore
-#       the tree with `git checkout -- .`, and succeed only when the test
+#       Copy the tree to a private temp directory, apply the patch
+#       prefill_e2e2_mutants/mutant_ID.patch there and run the same test
+#       there (the checkout is never patched). Succeed only when the test
 #       failed and its output holds MARKER (the forge KILLED rule). A mutant
 #       that survives, or fails with another message, exits 1.
 #
@@ -32,7 +33,23 @@ cd "$here/../../.." || exit 3
 ckpt=${AIEN_E2E_CHECKPOINT:-$HOME/models/TinyLlama-1.1B-Chat-v1.0}
 out=${AIEN_E2E2_OUT_DIR:-$HOME/workspace/test-queue-logs}
 sha8=$(git rev-parse HEAD | cut -c1-8)
-mkdir -p "$out" || exit 3
+# The sandbox HOME is read-only: receipts then go to a fresh directory in the sandbox's private /tmp.
+if [ -z "${AIEN_E2E2_OUT_DIR:-}" ] && [ ! -w "$HOME" ]; then
+	out=$(mktemp -d) || exit 3
+fi
+# In the user sandbox, aien-run-exec mounts the operator's ~/models read-only at
+# /var/lib/aien-run/models, which is $HOME/models there, so the default above finds the checkpoint.
+# No checkpoint: NOT_RUN with reason model_missing (exit 77 + not_run_reason, see aien-test
+# verdict.rs SELF_NOT_RUN_EXIT), never PASS. The weights' sha256 is recorded either way it runs.
+model_check() {
+	if [ ! -f "$ckpt/model.safetensors" ] || [ ! -f "$ckpt/tokenizer.json" ]; then
+		echo "checkpoint not found: $ckpt (model.safetensors, tokenizer.json)" >&2
+		obs not_run_reason '"model_missing"'
+		exit 77
+	fi
+	obs model_sha256 "\"$(sha256sum "$ckpt/model.safetensors" | cut -c1-64)\""
+}
+mkdir -p "$out" && out=$(cd "$out" && pwd) || exit 3
 
 # The leading newline keeps the line whole when a test left a partial line.
 obs() {
@@ -45,6 +62,7 @@ run_test() {
 }
 
 run_main() {
+	model_check
 	cargo fmt --all -- --check
 	rc=$?
 	obs fmt_rc "$rc"
@@ -75,14 +93,23 @@ run_mutant() {
 		exit 2
 		;;
 	esac
+	model_check
 	patch="crates/aien-runtime/tests/prefill_e2e2_mutants/mutant_$id.patch"
 	lg="$out/AIENTEST-DOGFOOD-$sha8-$id.log"
+	# The patch goes into a private copy of the tree, never into the checkout: aien-test runs gates in
+	# parallel in one checkout, and a patched file there fails their clean-tree checks (and the main leg's
+	# fmt check). The copy shares CARGO_TARGET_DIR so dependencies build once.
+	work=$(mktemp -d) || exit 3
+	trap 'rm -rf "$work"' EXIT
+	trap 'rm -rf "$work"; exit 143' HUP INT TERM
+	git ls-files -z --cached --others --exclude-standard --deduplicate |
+		tar --null --ignore-failed-read -T - -cf - | tar -xf - -C "$work" || exit 3
+	CARGO_TARGET_DIR=${CARGO_TARGET_DIR:-$PWD/target}
+	export CARGO_TARGET_DIR
+	cd "$work" || exit 3
 	git apply "$patch" || exit 3
-	trap 'git checkout -- .; exit 143' HUP INT TERM
 	run_test "$out/AIENTEST-DOGFOOD-receipt-$sha8-$id.json" >"$lg" 2>&1
 	rc=$?
-	git checkout -- .
-	trap - HUP INT TERM
 	echo "LEG $id rc=$rc"
 	grep -n "$marker" "$lg" | head -3
 	obs mutant_test_rc "$rc"

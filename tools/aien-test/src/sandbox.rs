@@ -52,6 +52,11 @@ impl Sandbox {
     }
 }
 
+/// Set to `1` in every program the user sandbox runs (`--env` to the helper).
+/// Tests that start a sandbox themselves skip when they see it: aien-run
+/// cannot call the helper or write `/var/lib/aien-run/wt`.
+pub const NESTED_MARKER: &str = "AIEN_SANDBOX_NESTED";
+
 /// The program and arguments to spawn for `program ARGS` under `sandbox`.
 /// `profile` is the gate's pool name; `env` the `K=V` pairs to pass through.
 pub fn command(
@@ -76,6 +81,10 @@ pub fn command(
                 "--profile".to_string(),
                 profile.to_string(),
             ];
+            // Always set: the program knows it runs inside the sandbox, so self-tests
+            // that would need to start a sandbox themselves can skip (they cannot nest).
+            v.push("--env".to_string());
+            v.push(format!("{NESTED_MARKER}=1"));
             for (k, val) in env {
                 v.push("--env".to_string());
                 v.push(format!("{k}={val}"));
@@ -174,6 +183,8 @@ mod tests {
                 "--profile",
                 "qemu",
                 "--env",
+                "AIEN_SANDBOX_NESTED=1",
+                "--env",
                 "CARGO_TARGET_DIR=/tmp/t",
                 "--",
                 "/repo/tools/run.sh",
@@ -188,11 +199,17 @@ mod tests {
     }
 
     #[test]
-    fn no_env_means_no_env_flags_and_a_tiny_timeout_rounds_up_to_one() {
+    fn no_env_means_only_the_nested_marker_and_a_tiny_timeout_rounds_up_to_one() {
         let mut s = spec();
         s.timeout = Duration::from_millis(10);
         let w = wrap(Sandbox::User, s, "host", &[]);
-        assert!(!w.args.iter().any(|a| a == "--env"));
+        let envs: Vec<&String> = w
+            .args
+            .windows(2)
+            .filter(|p| p[0] == "--env")
+            .map(|p| &p[1])
+            .collect();
+        assert_eq!(envs, vec!["AIEN_SANDBOX_NESTED=1"]);
         let pos = w.args.iter().position(|a| a == "--timeout").unwrap();
         assert_eq!(w.args[pos + 1], "1");
         assert_eq!(env_pairs(None), Vec::<(String, String)>::new());

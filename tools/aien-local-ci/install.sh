@@ -61,7 +61,7 @@ for f in .bashrc .profile .bash_logout .config Desktop; do
 done
 
 # 2. directory layout (cargo/ and target/ root-owned; only target/<repo>/{pr,main} belong to aien-run)
-S install -d -o root -g root -m 0755 "$RUN_HOME/cargo" "$RUN_HOME/target"
+S install -d -o root -g root -m 0755 "$RUN_HOME/cargo" "$RUN_HOME/target" "$RUN_HOME/models"
 S chown root:root "$RUN_HOME/cargo" "$RUN_HOME/target"; S chmod 0755 "$RUN_HOME/cargo" "$RUN_HOME/target"
 for f in "$RUN_HOME"/cargo/.package-cache "$RUN_HOME"/cargo/.package-cache-mutate "$RUN_HOME"/cargo/.global-cache; do
   if S test -e "$f"; then S chown root:root "$f"; S chmod 0644 "$f"; fi

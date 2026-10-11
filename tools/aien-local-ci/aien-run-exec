@@ -18,6 +18,10 @@
 #     not even the host's own 127.0.0.1 services; no DNS);
 #   * a transient systemd scope under aien-run.slice with cgroup caps (memory, pids, cpu) and a
 #     device policy (host|qemu: standard pseudo devices only, qemu adds /dev/kvm; gb10: all devices);
+#   * the operator's model directory (~/models of the sudo caller) mounted READ-ONLY at /var/lib/aien-run/models
+#     when both exist (install.sh makes the empty root-owned mount point), so model gates such as PREFILL-E2E-2
+#     find their checkpoint at $HOME/models without any write access to it; without it the gate reports
+#     NOT_RUN model_missing;
 #   * rlimits (no core dumps, bounded open files);
 #   * `timeout --signal=TERM --kill-after=10 SECS` for host|qemu (exit 124 on expiry);
 #   * NO timeout for gb10: chip runs are never killed; the engine's advisory timeout only marks the receipt.
@@ -160,10 +164,11 @@ esac
 # shellcheck disable=SC2016
 NS_SETUP='
 set -euo pipefail
-home=$1 profile=$2 wtroot=$3 tdir=$4; shift 4
+home=$1 profile=$2 wtroot=$3 tdir=$4 models=$5; shift 5
 for p in "$wtroot" "$tdir"; do [[ -z $p ]] || mount --bind "$p" "$p"; done
 mount --rbind "$home" "$home"
 mount -o remount,bind,ro "$home"
+if [[ -n $models ]]; then mount --bind "$models" "$home/models"; mount -o remount,bind,ro "$home/models"; fi
 priv=(/var/tmp /var/crash /var/lib/BrlAPI)
 case $profile in host|qemu) priv+=(/tmp /dev/shm /run/lock /run/screen) ;; esac
 for d in "${priv[@]}"; do
@@ -175,12 +180,19 @@ case $profile in host|qemu) ip link set lo up ;; esac
 exec "$@"
 '
 
+# Model directory of the operator who called sudo, if any (read-only bind, see the header).
+models_src=""
+if [[ -n ${SUDO_USER:-} && $SUDO_USER != root ]]; then
+  op_home=$(getent passwd "$SUDO_USER" | cut -d: -f6)
+  if [[ -n $op_home && -d $op_home/models && -d $RUN_HOME/models ]]; then models_src=$(realpath -e -- "$op_home/models"); fi
+fi
+
 inner=()
 case "$profile" in
   host|qemu) inner+=(unshare -m -n -i --propagation private --) ;;
   gb10)      inner+=(unshare -m --propagation private --) ;;
 esac
-inner+=(bash -c "$NS_SETUP" aien-run-ns "$RUN_HOME" "$profile" "$wtroot" "$tdir")
+inner+=(bash -c "$NS_SETUP" aien-run-ns "$RUN_HOME" "$profile" "$wtroot" "$tdir" "$models_src")
 inner+=(prlimit --core=0 --nofile=65536 --)
 case "$profile" in
   host|qemu) inner+=(timeout --signal=TERM --kill-after="$KILL_AFTER" "$secs") ;;
