@@ -920,12 +920,37 @@ fn ctrl_e2(ctx: &Ctx) -> Row {
     })
 }
 
-fn ctrl_e5(ctx: &Ctx) -> Row {
-    ctrl_simple(ctx, "CTRL-E5", |j| {
-        let m = j.b("mutated_output_rejected")?;
-        let why = j.s("verifier_reason")?;
-        Some(if m && contains_ci(Some(why), "digest") { Ok("mutated output rejected on a digest mismatch".into()) } else { Err(format!("mutated_output_rejected {}, reason {:?}", m, why)) })
-    })
+// CTRL-E5 (v1.3-ctrl-e5): judged from the LAST CTRL-E5 receipt's facts. `pre_id` is the verdict id this verifier computes
+// from the folder with CTRL-E5 and E5 forced to NOT_RUN; the receipt's original_verdict_id must equal it.
+fn ctrl_e5(ctx: &Ctx, pre_id: &str) -> Row {
+    let Some(r) = ctx.recs.iter().rev().find(|r| r.step == "CTRL-E5") else { return row("CTRL-E5", V::NotRun, "no receipt for this step in the chain") };
+    let j = &r.j;
+    let (Some(rej), Some(mcu), Some(orig), Some(mutd), Some(why)) =
+        (j.b("mutated_output_rejected"), j.b("mutated_chain_unbroken"), j.s("original_verdict_id"), j.s("mutated_verdict_id"), j.s("verifier_reason"))
+    else {
+        return row("CTRL-E5", V::NotRun, "receipt lacks the facts this control needs");
+    };
+    let mut bad = vec![];
+    if !rej {
+        bad.push("mutated_output_rejected false".to_string());
+    }
+    if mcu {
+        bad.push("mutated copy's chain still unbroken".into());
+    }
+    if !why.contains("DIGEST_MISMATCH") {
+        bad.push(format!("reason {:?} does not name DIGEST_MISMATCH", why));
+    }
+    if !is_hex64(orig) || !is_hex64(mutd) || orig == mutd {
+        bad.push("mutated verdict id is not a different, well-formed id".into());
+    }
+    if orig != pre_id {
+        bad.push(format!("original_verdict_id {} is not the pre-CTRL-E5 id {} this verifier derives", orig, pre_id));
+    }
+    if bad.is_empty() {
+        row("CTRL-E5", V::Pass, "one byte of an output changed on a copy: rejected on DIGEST_MISMATCH, chain broken, verdict id changed")
+    } else {
+        row("CTRL-E5", V::Fail, bad.join("; "))
+    }
 }
 
 fn ctrl_e6(ctx: &Ctx) -> Row {
@@ -1074,12 +1099,15 @@ fn main() -> ExitCode {
     };
     rows.push(c3);
     rows.push(ctrl_e4(&ctx, e4_recalled));
-    rows.push(ctrl_e5(&ctx));
+    let c5_idx = rows.len();
+    rows.push(row("CTRL-E5", V::NotRun, "placeholder"));
     rows.push(ctrl_e6(&ctx));
     let mut supp = vec![pre_row(&ctx), doc_row(&ctx, "E3m"), a, b, net_row(&ctx)];
 
     // E5: base verdict id with E5 NOT_RUN, then the peer comparison
     let map = |rows: &Vec<Row>| rows.iter().map(|r| (r.name.clone(), r.v)).collect::<BTreeMap<_, _>>();
+    let pre_id = verdict_id(&chain.objective_id, &o.contract, &map(&rows));
+    rows[c5_idx] = ctrl_e5(&ctx, &pre_id);
     let base_id = verdict_id(&chain.objective_id, &o.contract, &map(&rows));
     rows[e5_idx] = match (&o.peer, chain_unbroken) {
         (None, _) => row("E5", V::NotRun, "no --peer-verdict-id: cross-machine agreement not shown"),

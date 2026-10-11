@@ -125,3 +125,9 @@ CTRL-E1, CTRL-E2, CTRL-E5 and CTRL-E6 field names are provisional until lanes L5
 second-machine agreement (E5) is a procedure (each machine passes the other's base id) that this folder has not yet been run
 through on a MacBook. Run folders are not signed: an adversary who rewrites receipts, links and manifest consistently
 defeats the chain check; the verifier still re-derives every row from facts and files, which is what this lane promises.
+
+## CTRL-E5 (v1.3-ctrl-e5, sc#403)
+
+The verifier judges CTRL-E5 from the last `CTRL-E5` receipt's facts (rule: `ACCEPTANCE-v1.3-ctrl-e5.md`). It also derives the
+pre-CTRL-E5 verdict id itself (CTRL-E5 and E5 forced to NOT_RUN) and requires the receipt's `original_verdict_id` to equal it.
+Folders without a facts-bearing receipt give NOT_RUN and the ids recorded before v1.3.

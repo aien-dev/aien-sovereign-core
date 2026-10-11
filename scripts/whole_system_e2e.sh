@@ -491,13 +491,46 @@ else rcpt CTRL-E4 NOT_RUN "E3m did not pass or no daemon" '{}'; fi
 rcpt E5 NOT_RUN "cross-machine agreement is R7 (second machine); this machine's verifier (tools/aien-verify, sc#389) runs over the closed chain after this receipt and writes VERIFIER_VERDICT.txt and VERIFIER_RECEIPT.json outside the manifest" \
   "$(jq -nc --arg v "$VER_SHA" --arg s "$VER_SRC_SHA" --arg c "$CONTRACT_SHA" '{verifier_sha256:$v, verifier_source_sha256:$s, verifier_build:"sh tools/aien-verify/build.sh (rustc --edition 2021 -O, std only)", contract_sha256:$c, cross_machine:"NOT_RUN (R7)"}')"
 rcpt CTRL-E1 NOT_RUN "no release artifact in RUN-1 (lane L5)" '{}'
-rcpt CTRL-E5 NOT_RUN "the mutation check runs with the second-machine verifier (lane L4, R7)" '{}'
 stop_graceful
 cp "$LOGS"/daemon-*.txt "$OUT/artifacts/" 2>/dev/null
-printf 'objective_id %s\ncontract_sha256 %s\n%s' "$OBJ_ID" "$CONTRACT_SHA" "$ROWS" >"$OUT/VERDICT_ROWS.txt"
+# ---- close the chain, run the verifier, then CTRL-E5 (ACCEPTANCE-v1.3-ctrl-e5.md) -----------------------------
+write_close() { # VERDICT_ROWS.txt and the manifest, from the current chain
+  printf 'objective_id %s\ncontract_sha256 %s\n%s' "$OBJ_ID" "$CONTRACT_SHA" "$ROWS" >"$OUT/VERDICT_ROWS.txt"
+  rm -f "$CHAIN/SHA256SUMS"
+  ( cd "$OUT" && find . -type f ! -name SHA256SUMS ! -name VERIFIER_VERDICT.txt ! -name VERIFIER_RECEIPT.json -print0 | LC_ALL=C sort -z | xargs -0 sha256sum >chain/SHA256SUMS )
+}
+verify_out() { "$VER" "$1" --contract-sha256 "$CONTRACT_SHA" --objective-id "$OBJ_ID" "${@:2}"; }
 echo "run folder written: $OUT ($(ls "$CHAIN" | wc -l) chain files); console closed; manifest and verifier follow" | tee -a "$OUT/console.txt"
-( cd "$OUT" && find . -type f ! -name SHA256SUMS -print0 | LC_ALL=C sort -z | xargs -0 sha256sum >chain/SHA256SUMS )
+write_close
 cat "$OUT/VERDICT_ROWS.txt"
-"$VER" "$OUT" --contract-sha256 "$CONTRACT_SHA" --objective-id "$OBJ_ID" --write >"$D/verify.out" 2>&1; VRC=$?
-echo "verifier exit $VRC: $(grep -E '^(verdict_id|chain_unbroken|base_verdict_id) ' "$OUT/VERIFIER_VERDICT.txt" 2>/dev/null | tr '\n' ' ')"
+verify_out "$OUT" --write >"$D/verify.out" 2>&1; VRC=$?
+echo "verifier exit $VRC (pre-CTRL-E5): $(grep -E '^(verdict_id|chain_unbroken|base_verdict_id) ' "$OUT/VERIFIER_VERDICT.txt" 2>/dev/null | tr '\n' ' ')"
+
+# CTRL-E5: one byte of artifacts/E3-report.md changed on a scratch copy; the verifier must reject the copy.
+ORIG_VID=$(sed -n 's/^verdict_id //p' "$OUT/VERIFIER_VERDICT.txt" 2>/dev/null)
+MUT=$OUT/artifacts/E3-report.md; MCOPY=$D/ctrl-e5-copy; rm -rf "$MCOPY"
+if [ -n "$ORIG_VID" ] && [ -f "$MUT" ] && [ "$(wc -c <"$MUT")" -ge 4 ]; then
+  cp -a "$OUT" "$MCOPY"
+  BEFORE_HEX=$(od -An -tx1 -j3 -N1 "$MCOPY/artifacts/E3-report.md" | tr -d ' \n')
+  AFTER_HEX=$([ "$BEFORE_HEX" = 58 ] && echo 59 || echo 58)
+  printf "\\x$AFTER_HEX" | dd of="$MCOPY/artifacts/E3-report.md" bs=1 seek=3 conv=notrunc 2>/dev/null
+  verify_out "$MCOPY" >"$OUT/artifacts/CTRL-E5-mutated-verdict.txt" 2>/dev/null
+  M_VID=$(sed -n 's/^verdict_id //p' "$OUT/artifacts/CTRL-E5-mutated-verdict.txt")
+  M_CU=$(sed -n 's/^chain_unbroken //p' "$OUT/artifacts/CTRL-E5-mutated-verdict.txt")
+  M_E3=$(grep -m1 '^# E3 ' "$OUT/artifacts/CTRL-E5-mutated-verdict.txt" | cut -c1-300)
+  M_REJ=$(case "$M_E3" in "# E3 FAIL"*DIGEST_MISMATCH*) [ "$M_CU" = false ] && echo true || echo false ;; *) echo false ;; esac)
+  M_WHY=$(printf '%s' "$M_E3" | cut -c1-120)
+  if [ "$M_REJ" = true ] && [ -n "$M_VID" ] && [ "$M_VID" != "$ORIG_VID" ]; then ST=PASS; else ST=FAIL; fi
+  rcpt CTRL-E5 $ST "byte 3 of artifacts/E3-report.md ($BEFORE_HEX to $AFTER_HEX) on a scratch copy: rejected=$M_REJ, chain_unbroken=$M_CU, verdict id ${ORIG_VID%"${ORIG_VID#????????}"} to ${M_VID%"${M_VID#????????}"}" \
+    "$(jq -nc --arg mf artifacts/E3-report.md --argjson off 3 --arg bh "$BEFORE_HEX" --arg ah "$AFTER_HEX" --arg ov "$ORIG_VID" --arg mv "$M_VID" --argjson mcu "$([ "$M_CU" = false ] && echo false || echo true)" \
+      --arg e3 "$M_E3" --argjson rej "$M_REJ" --arg why "$M_WHY" --arg v "$VER_SHA" --arg s "$VER_SRC_SHA" \
+      '{mutated_file:$mf, mutation:{offset:$off, before_byte_hex:$bh, after_byte_hex:$ah}, original_verdict_id:$ov, mutated_verdict_id:$mv, mutated_chain_unbroken:$mcu, mutated_e3_row:$e3, mutated_output_rejected:$rej, verifier_reason:$why, verifier_sha256:$v, verifier_source_sha256:$s}')"
+  rm -rf "$MCOPY"
+else
+  rcpt CTRL-E5 NOT_RUN "no pre-CTRL-E5 verdict or no usable artifacts/E3-report.md; the mutation check could not run" '{}'
+fi
+cp "$OUT/VERIFIER_VERDICT.txt" "$OUT/artifacts/VERIFIER_VERDICT.pre-ctrl-e5.txt" 2>/dev/null   # after the mutated copy is gone, so the copy is a clean copy of the closed folder
+write_close
+verify_out "$OUT" --write >"$D/verify-final.out" 2>&1; VRC=$?
+echo "verifier exit $VRC (final): $(grep -E '^(CTRL-E5|verdict_id|chain_unbroken|base_verdict_id) ' "$OUT/VERIFIER_VERDICT.txt" 2>/dev/null | tr '\n' ' ')"
 exit 0
