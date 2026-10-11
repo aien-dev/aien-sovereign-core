@@ -707,6 +707,9 @@ fn bare_exec_runs_and_escapes_are_refused() {
 
 #[test]
 fn user_sandbox_when_the_helper_exists() {
+    if nested_in_sandbox("user_sandbox_when_the_helper_exists") {
+        return;
+    }
     if !Path::new(aien_test::sandbox::EXEC_HELPER).exists() {
         println!(
             "SKIP: {} is not installed (INFRA lane)",
@@ -956,6 +959,9 @@ fn symlinked_exec_out_of_the_tree_never_runs() {
 
 #[test]
 fn worker_in_the_user_sandbox_is_ready() {
+    if nested_in_sandbox("worker_in_the_user_sandbox_is_ready") {
+        return;
+    }
     let _turn = USER_SANDBOX.lock().unwrap_or_else(|e| e.into_inner());
     if !Path::new(aien_test::sandbox::EXEC_HELPER).exists() {
         println!(
@@ -1110,6 +1116,9 @@ fn only_a_wt_sh_link_is_trusted() {
 
 #[test]
 fn a_wrong_target_dir_is_refused_by_the_helper() {
+    if nested_in_sandbox("a_wrong_target_dir_is_refused_by_the_helper") {
+        return;
+    }
     if !Path::new(aien_test::sandbox::EXEC_HELPER).exists() {
         println!(
             "SKIP: {} is not installed (INFRA lane)",
@@ -1235,6 +1244,9 @@ fn gate_verdict(s: &worker::Summary, id: &str) -> Verdict {
 
 #[test]
 fn worker_provides_a_sibling_checkout_and_removes_it() {
+    if nested_in_sandbox("worker_provides_a_sibling_checkout_and_removes_it") {
+        return;
+    }
     let w = world();
     let (head_s, sib_sha, map) = sibling_world(&w);
     let mut cfg = w.config();
@@ -1283,6 +1295,9 @@ fn a_broken_sibling_map_refuses_the_run_before_any_checkout() {
 
 #[test]
 fn worker_in_the_user_sandbox_reads_a_read_only_sibling() {
+    if nested_in_sandbox("worker_in_the_user_sandbox_reads_a_read_only_sibling") {
+        return;
+    }
     let _turn = USER_SANDBOX.lock().unwrap_or_else(|e| e.into_inner());
     if !Path::new(aien_test::sandbox::EXEC_HELPER).exists() || !wt_tool().is_file() {
         println!("SKIP: exec helper or wt.sh not present (INFRA lane)");
@@ -1316,4 +1331,21 @@ fn worker_in_the_user_sandbox_reads_a_read_only_sibling() {
             .exists(),
         "run directory left behind"
     );
+}
+
+/// True inside the user sandbox (`AIEN_SANDBOX_NESTED=1`, set by the worker's
+/// sandbox wrapper): the five tests that start a sandbox or provision sibling
+/// worktrees themselves cannot nest there (aien-run may not call the helper or
+/// write `/var/lib/aien-run/wt`), so they skip and say so. They run everywhere
+/// else: on GitHub runners and in operator runs. tests/gates/run.sh records
+/// the skip as an observation.
+fn nested_in_sandbox(test: &str) -> bool {
+    let nested = std::env::var(aien_test::sandbox::NESTED_MARKER).as_deref() == Ok("1");
+    if nested {
+        println!(
+            "SKIP-NESTED: {test}: inside the user sandbox ({}=1)",
+            aien_test::sandbox::NESTED_MARKER
+        );
+    }
+    nested
 }
