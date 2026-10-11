@@ -35,7 +35,7 @@
 //! compose-home lock, so the check and the intent append are one step.
 use crate::control::{
     ComposeControlReport, ComposeNoteReport, ComposeReconcileReport, ComposeRecordView,
-    ControlResponse, ReconcileDeclare, ReconcileOutcome,
+    ControlResponse, ObjectiveBinding, ReconcileDeclare, ReconcileOutcome,
 };
 use crate::spine::{record_view, ComposeBridge, ComposeHome};
 use aien_omega_compose::{hex, NoteKind};
@@ -123,6 +123,8 @@ pub struct Grant {
     pub approved: Option<ApprovedGrant>,
     /// Set on the grant `ComposeAuthorize` minted (#261).
     pub minted: Option<MintedGrant>,
+    /// sovereign-core #408: the objective record the grant was approved for.
+    pub objective: Option<GrantObjective>,
     /// The record's links.
     pub links: Vec<u64>,
 }
@@ -150,6 +152,16 @@ pub const MINTED_GRANT: &str = "minted_grant";
 /// COMMITTED a one-file proposal (sovereign-core #261). Reserved.
 pub const COMPOSE_COMMIT: &str = "compose_commit";
 
+/// sovereign-core #408: the objective a grant is bound to, as minted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GrantObjective {
+    pub id: String,
+    /// sha256 of the objective text the record held when the grant was minted.
+    pub text_sha256: String,
+    /// sha256 of the record file's bytes then.
+    pub record_sha256: String,
+}
+
 /// What a minted grant is backed by: the daemon's own compose-commit record.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MintedGrant {
@@ -166,6 +178,9 @@ pub struct CommitRow {
     pub path: String,
     pub content_sha256: String,
     pub workspace: String,
+    /// sovereign-core #408: sha256 of the goal the compose ran for (absent in
+    /// commit records written before #408).
+    pub goal_sha256: Option<String>,
 }
 
 /// What an approved grant must be backed by: a COMMITTED replay claim whose
@@ -214,6 +229,8 @@ pub struct IntentRow {
     /// Target digest of the newest UNRESOLVED record (so one is written per
     /// distinct digest, not one per daemon start).
     pub unresolved_digest: Option<Option<String>>,
+    /// sovereign-core #408: the objective of the grant, carried on the intent.
+    pub objective_id: Option<String>,
 }
 
 /// The effect ledger of one compose home, rebuilt from its host records.
@@ -266,6 +283,15 @@ fn opt_digest(v: &Value, k: &str, id: u64) -> Result<Option<Option<String>>, Ref
     }
 }
 
+/// Missing -> None, a string -> Some, anything else is damaged state.
+fn opt_str(v: &Value, k: &str, id: u64) -> Result<Option<String>, Refusal> {
+    match v.get(k) {
+        None => Ok(None),
+        Some(Value::String(x)) => Ok(Some(x.clone())),
+        Some(_) => Err(corrupt(id, format!("field {k:?} is not a string"))),
+    }
+}
+
 impl Ledger {
     /// Rebuild from host records, oldest first. Any unverified record, or a
     /// gated record that does not parse, refuses the whole ledger: effects
@@ -312,6 +338,14 @@ impl Ledger {
             v.get("content_sha256").and_then(Value::as_str),
         ) else {
             return Ok(());
+        };
+        let objective = match opt_str(&v, "objective_id", id)? {
+            None => None,
+            Some(oid) => Some(GrantObjective {
+                id: oid,
+                text_sha256: s(&v, "objective_text_sha256", id)?,
+                record_sha256: s(&v, "objective_record_sha256", id)?,
+            }),
         };
         self.grants.insert(
             id,
@@ -366,6 +400,7 @@ impl Ledger {
                         })
                     }
                 },
+                objective,
                 links: links.to_vec(),
             },
         );
@@ -387,6 +422,7 @@ impl Ledger {
                     path: s(&v, "path", id)?,
                     content_sha256: s(&v, "content_sha256", id)?,
                     workspace: s(&v, "workspace", id)?,
+                    goal_sha256: opt_str(&v, "goal_sha256", id)?,
                 },
             );
             return Ok(());
@@ -423,6 +459,7 @@ impl Ledger {
                     state: EffectState::Open,
                     state_record: 0,
                     unresolved_digest: None,
+                    objective_id: opt_str(&v, "objective_id", id)?,
                 };
                 self.spent.insert(a, id);
                 self.intents.insert(id, row);
@@ -581,13 +618,20 @@ impl Ledger {
             "stops": self.stops, "resumes": self.resumes,
             "revoked": self.revoked.iter().map(|(a, r)| json!({"authorization": a, "record": r})).collect::<Vec<_>>(),
             "legacy_spent": self.legacy_spent.iter().map(|(a, e)| json!({"authorization": a, "effect": e})).collect::<Vec<_>>(),
-            "intents": self.intents.values().map(|r| json!({
-                "intent": r.id, "authorization": r.authorization, "path": r.path,
-                "target": r.target, "content_sha256": r.content_sha256,
-                "prior_sha256": r.prior_sha256, "state": r.state.name(),
-                "state_record": r.state_record,
-                "executor": {"pid": r.executor_pid, "start": r.executor_start},
-            })).collect::<Vec<_>>(),
+            "intents": self.intents.values().map(|r| {
+                let mut row = json!({
+                    "intent": r.id, "authorization": r.authorization, "path": r.path,
+                    "target": r.target, "content_sha256": r.content_sha256,
+                    "prior_sha256": r.prior_sha256, "state": r.state.name(),
+                    "state_record": r.state_record,
+                    "executor": {"pid": r.executor_pid, "start": r.executor_start},
+                });
+                // #408: only when the intent names one, so older rows read as before.
+                if let Some(o) = &r.objective_id {
+                    row["objective_id"] = json!(o);
+                }
+                row
+            }).collect::<Vec<_>>(),
         })
     }
 }
@@ -1283,6 +1327,7 @@ pub(crate) fn write_compose_commit(
     proposal_sha256: &str,
     path: &str,
     content_sha256: &str,
+    goal_sha256: Option<&str>,
     prov: &crate::generation::Provenance,
 ) -> Result<u64, String> {
     // Refused at write time: a record never names a generation id that is not
@@ -1294,12 +1339,17 @@ pub(crate) fn write_compose_commit(
             ));
         }
     }
-    let text = json!({
+    let mut text = json!({
         COMPOSE_COMMIT: 1, "task": task, "cx_promotion": cx_promotion,
         "cx_evidence": cx_evidence, "proposal_sha256": proposal_sha256,
         "path": path, "content_sha256": content_sha256, "workspace": workspace,
         crate::generation::PROVENANCE: prov.to_json(),
     });
+    // #408: the goal digest, so a grant can be bound to the objective record
+    // whose text this compose ran for.
+    if let Some(g) = goal_sha256 {
+        text["goal_sha256"] = json!(g);
+    }
     append(home, NoteKind::Effect, &[cx_promotion, cx_evidence], &text).map(|n| n.id)
 }
 
@@ -1382,7 +1432,22 @@ pub fn authorize(
     req: &MintRequest,
     proof: Option<&crate::control::DeskProof>,
 ) -> ControlResponse {
-    let r = authorize_inner(b, req, proof);
+    authorize_with_objective(b, req, proof, None)
+}
+
+/// sovereign-core #408: [`authorize`] for an approval that names the objective
+/// record it is for. The daemon re-reads the record (crate::objective); its
+/// text must be the goal this daemon composed for (`goal_sha256` of the
+/// commit record). The grant then carries the objective id and both digests.
+/// A missing or different record is refused by name and nothing is written.
+/// `None` mints exactly as [`authorize`] always did.
+pub fn authorize_with_objective(
+    b: &ComposeBridge,
+    req: &MintRequest,
+    proof: Option<&crate::control::DeskProof>,
+    objective_id: Option<&str>,
+) -> ControlResponse {
+    let r = authorize_inner(b, req, proof, objective_id);
     if b.trace_enabled() {
         trace_response(
             b,
@@ -1403,6 +1468,7 @@ fn authorize_inner(
     b: &ComposeBridge,
     req: &MintRequest,
     proof: Option<&crate::control::DeskProof>,
+    objective_id: Option<&str>,
 ) -> ControlResponse {
     if let Err(e) = reconcile_gate(b) {
         return ControlResponse::Error(e);
@@ -1527,6 +1593,22 @@ fn authorize_inner(
                 }
             }
         }
+        // #408: judged after every older refusal, so those keep their order.
+        let objective = match objective_id {
+            None => None,
+            Some(oid) => {
+                let Some(goal) = c.goal_sha256.as_deref() else {
+                    return Err(no(
+                        crate::objective::MISMATCH,
+                        format!(
+                            "compose-commit #{} names no goal digest (written before sovereign-core #408); objective {oid} cannot be bound to it",
+                            c.id
+                        ),
+                    ));
+                };
+                Some(crate::objective::check(oid, goal).map_err(|(n, d)| no(n, d))?)
+            }
+        };
         let mut links = vec![c.id];
         links.extend(&req.constraints);
         let mut text = json!({
@@ -1538,6 +1620,11 @@ fn authorize_inner(
         if let Some((key, p)) = &desk {
             text["desk_nonce"] = json!(p.nonce);
             text["desk_key_id"] = json!(key.id());
+        }
+        if let Some(o) = &objective {
+            text["objective_id"] = json!(o.objective_id);
+            text["objective_text_sha256"] = json!(o.text_sha256);
+            text["objective_record_sha256"] = json!(o.record_sha256);
         }
         stamp(&mut text, &views, c.id);
         append(home, NoteKind::Authorization, &links, &text)
@@ -1710,12 +1797,30 @@ fn open_intent_inner(b: &ComposeBridge, req: &IntentRequest) -> ControlResponse 
         }
         check_approved_backing(&l, g, &views).map_err(|r| r.to_string())?;
         check_minted_backing(&l, g).map_err(|r| r.to_string())?;
+        // #408: an objective-bound grant opens an intent only while its record
+        // still holds the approved text (re-read now, after any restart).
+        if let Some(o) = &g.objective {
+            crate::objective::check(&o.id, &o.text_sha256).map_err(|(n, d)| {
+                Refusal::new(
+                    n,
+                    format!(
+                        "authorization #{} is bound to objective {}: {d}",
+                        g.id, o.id
+                    ),
+                )
+                .to_string()
+            })?;
+        }
         let mut text = json!({
             "phase": PHASE_INTENT, "tool": "write_file", "authorization": g.id,
             "proposal_sha256": req.proposal_sha256, "path": req.path, "target": req.target,
             "content_sha256": req.content_sha256, "prior_sha256": current,
             "executor": {"pid": req.executor_pid, "start": req.executor_start},
         });
+        if let Some(o) = &g.objective {
+            text["objective_id"] = json!(o.id);
+            text["objective_text_sha256"] = json!(o.text_sha256);
+        }
         stamp(&mut text, &views, g.id);
         append(home, NoteKind::Effect, &[g.id], &text)
     }))
@@ -1753,6 +1858,9 @@ pub fn ack(b: &ComposeBridge, intent: u64, reported: &Value) -> ControlResponse 
             "state": st.name(), "disk_sha256": disk.as_ref().ok().cloned().flatten(),
             "disk_error": disk.as_ref().err(), "executor_reported": reported,
         });
+        if let Some(o) = &row.objective_id {
+            text["objective_id"] = json!(o);
+        }
         stamp(&mut text, &views, intent);
         append(home, NoteKind::Effect, &[intent, row.authorization], &text)
     }));
@@ -1802,6 +1910,41 @@ pub fn ack(b: &ComposeBridge, intent: u64, reported: &Value) -> ControlResponse 
     r
 }
 
+/// sovereign-core #408: re-read the objective record of an objective-bound
+/// intent for a reconcile report. Never decides the effect's state.
+fn objective_binding(l: &Ledger, row: &IntentRow) -> Option<ObjectiveBinding> {
+    let id = row.objective_id.as_ref()?;
+    let refused = |name: &str, detail: String| ObjectiveBinding {
+        objective_id: id.clone(),
+        record: name.to_string(),
+        detail: Some(detail),
+        record_unchanged: None,
+    };
+    let approved = l
+        .grants
+        .get(&row.authorization)
+        .and_then(|g| g.objective.as_ref())
+        .filter(|a| &a.id == id);
+    let Some(a) = approved else {
+        return Some(refused(
+            crate::objective::MISMATCH,
+            format!(
+                "intent #{} names objective {id}; its grant #{} is not bound to it",
+                row.id, row.authorization
+            ),
+        ));
+    };
+    Some(match crate::objective::check(id, &a.text_sha256) {
+        Ok(s) => ObjectiveBinding {
+            objective_id: id.clone(),
+            record: "bound".into(),
+            detail: None,
+            record_unchanged: Some(s.record_sha256 == a.record_sha256),
+        },
+        Err((n, d)) => refused(n, d),
+    })
+}
+
 /// Reconcile every unsettled intent whose executor is gone, or record one
 /// operator declaration. `by` names who decided ("reconcile@start", ...).
 pub fn reconcile(
@@ -1832,6 +1975,7 @@ pub fn reconcile(
         };
         for row in rows {
             checked += 1;
+            let objective = objective_binding(&l, &row);
             if executor_alive(row.executor_pid, row.executor_start) {
                 out.push(ReconcileOutcome {
                     intent: row.id,
@@ -1843,6 +1987,7 @@ pub fn reconcile(
                         "executor pid {} still running; not decided",
                         row.executor_pid
                     ),
+                    objective: objective.clone(),
                 });
                 continue;
             }
@@ -1884,14 +2029,19 @@ pub fn reconcile(
                     disk_sha256: disk_hex,
                     record: None,
                     note: "still UNRESOLVED, already recorded for this target digest".into(),
+                    objective: objective.clone(),
                 });
                 continue;
             }
-            let text = json!({
+            let mut text = json!({
                 "phase": PHASE_RECONCILE, "intent": row.id, "authorization": row.authorization,
                 "state": st.name(), "world": world.name(), "disk_sha256": disk_hex,
                 "disk_error": disk.as_ref().err(), "by": who,
             });
+            if let Some(o) = &objective {
+                text["objective_id"] = json!(o.objective_id);
+                text["objective_record"] = json!(o.record);
+            }
             let n = append(home, NoteKind::Effect, &[row.id, row.authorization], &text)?;
             out.push(ReconcileOutcome {
                 intent: row.id,
@@ -1900,6 +2050,7 @@ pub fn reconcile(
                 disk_sha256: disk_hex,
                 record: Some(n.id),
                 note: who,
+                objective,
             });
         }
         Ok(ComposeReconcileReport {
@@ -2589,6 +2740,7 @@ mod tests {
                     "p",
                     "N.md",
                     "c",
+                    None,
                     &Provenance {
                         generation_record: g,
                         allen_agent: "none".into(),
@@ -2640,17 +2792,30 @@ mod tests {
         let mut i = json!({"phase": "intent", "tool": "write_file", "authorization": 2,
             "path": "N.md", "target": "/w/N.md", "content_sha256": "c", "prior_sha256": null,
             "proposal_sha256": "p", "executor": {"pid": 1, "start": 1}, "objective_id": oid});
-        let l = Ledger::from_records(&[rec(2, "authorization", g.clone()), rec(3, "effect", i.clone())])
-            .unwrap();
+        let l = Ledger::from_records(&[
+            rec(2, "authorization", g.clone()),
+            rec(3, "effect", i.clone()),
+        ])
+        .unwrap();
         let o = l.grants[&2].objective.as_ref().unwrap();
-        assert_eq!((o.id.as_str(), o.text_sha256.as_str()), (oid.as_str(), "b".repeat(64).as_str()));
+        assert_eq!(
+            (o.id.as_str(), o.text_sha256.as_str()),
+            (oid.as_str(), "b".repeat(64).as_str())
+        );
         assert_eq!(l.intents[&3].objective_id.as_deref(), Some(oid.as_str()));
         assert_eq!(l.view()["intents"][0]["objective_id"], json!(oid));
         // A commit without the goal digest (written before #408) still loads.
-        let c = rec(1, "effect", json!({"compose_commit": 1, "task": 1, "cx_promotion": 1,
+        let c = rec(
+            1,
+            "effect",
+            json!({"compose_commit": 1, "task": 1, "cx_promotion": 1,
             "cx_evidence": 1, "proposal_sha256": "p", "path": "N.md", "content_sha256": "c",
-            "workspace": "/w"}));
-        assert_eq!(Ledger::from_records(&[c]).unwrap().commits[&1].goal_sha256, None);
+            "workspace": "/w"}),
+        );
+        assert_eq!(
+            Ledger::from_records(&[c]).unwrap().commits[&1].goal_sha256,
+            None
+        );
         // A daemon-written grant naming an objective without its digest is damaged state.
         g.as_object_mut().unwrap().remove("objective_text_sha256");
         assert!(Ledger::from_records(&[rec(2, "authorization", g)]).is_err());
@@ -3068,6 +3233,7 @@ mod tests {
             state: EffectState::Open,
             state_record: 0,
             unresolved_digest: None,
+            objective_id: None,
         };
         assert_eq!(world_state(&row).0, EffectState::NotDone);
         std::fs::write(&t, b"new").unwrap();

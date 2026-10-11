@@ -931,6 +931,7 @@ async fn handle_connection(
                 ref approver,
                 ref constraints,
                 ref desk_proof,
+                ref objective_id,
             } => {
                 let req = crate::effects::MintRequest {
                     cx_promotion,
@@ -940,8 +941,14 @@ async fn handle_connection(
                     constraints: constraints.clone(),
                 };
                 let proof = desk_proof.clone();
+                let objective = objective_id.clone();
                 Some(Box::new(move |b: &Arc<ComposeBridge>| {
-                    crate::effects::authorize(b, &req, proof.as_ref())
+                    crate::effects::authorize_with_objective(
+                        b,
+                        &req,
+                        proof.as_ref(),
+                        objective.as_deref(),
+                    )
                 }))
             }
             ControlCommand::ComposeRecall { ref ids, prefix } => {

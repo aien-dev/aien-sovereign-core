@@ -193,7 +193,10 @@ fn objective_identity_survives_a_restart_and_is_re_read() {
     // The daemon's own commit record names the goal it composed for.
     let l = ledger(&b);
     let commit = l.commits.values().last().unwrap();
-    assert_eq!(commit.goal_sha256.as_deref(), Some(sha(GOAL.as_bytes()).as_str()));
+    assert_eq!(
+        commit.goal_sha256.as_deref(),
+        Some(sha(GOAL.as_bytes()).as_str())
+    );
 
     // 1. Refusals by name; nothing is minted.
     let missing = objective::objective_id("never recorded");
@@ -201,7 +204,10 @@ fn objective_identity_survives_a_restart_and_is_re_read() {
     let (other, _) = write_record(&prov, "some other objective");
     refused(f.mint(&b, Some(&other)), "ObjectiveMismatch");
     refused(f.mint(&b, Some("not-an-id")), "ObjectiveMissing");
-    assert!(ledger(&b).grants.is_empty(), "a refused authorize mints nothing");
+    assert!(
+        ledger(&b).grants.is_empty(),
+        "a refused authorize mints nothing"
+    );
 
     // 2. Bound grant, intent from an executor that dies: the id rides along.
     let (oid, rec_path) = write_record(&prov, GOAL);
@@ -222,7 +228,10 @@ fn objective_identity_survives_a_restart_and_is_re_read() {
     let o = outcome_for(&line, i);
     assert_eq!(o.state, "NOT_DONE", "{line}");
     let ob = o.objective.expect("binding reported");
-    assert_eq!((ob.objective_id.as_str(), ob.record.as_str()), (oid.as_str(), "bound"));
+    assert_eq!(
+        (ob.objective_id.as_str(), ob.record.as_str()),
+        (oid.as_str(), "bound")
+    );
     assert_eq!(ob.record_unchanged, Some(true));
     assert_eq!(text_of(&b, o.record.unwrap())["objective_id"], json!(oid));
     refused(effects::open_intent(&b, &f.req(g, true)), "AlreadySpent");
@@ -236,8 +245,14 @@ fn objective_identity_survives_a_restart_and_is_re_read() {
     // 5. Record altered after the grant: the intent is refused, nothing written.
     let saved = std::fs::read(&rec_path).unwrap();
     alter_record(&rec_path);
-    refused(effects::open_intent(&b, &f.req(g2, true)), "ObjectiveMismatch");
-    assert!(!ledger(&b).spent.contains_key(&g2), "no intent on a refusal");
+    refused(
+        effects::open_intent(&b, &f.req(g2, true)),
+        "ObjectiveMismatch",
+    );
+    assert!(
+        !ledger(&b).spent.contains_key(&g2),
+        "no intent on a refusal"
+    );
     std::fs::write(&rec_path, &saved).unwrap();
 
     // 6. Restored: the effect runs once and the ack names the objective.
@@ -245,7 +260,10 @@ fn objective_identity_survives_a_restart_and_is_re_read() {
     std::fs::write(&f.target, CONTENT).unwrap();
     let k = noted(effects::ack(&b, i2, &json!({})));
     let kt = text_of(&b, k.id);
-    assert_eq!((kt["state"].clone(), kt["objective_id"].clone()), (json!("DONE"), json!(oid)));
+    assert_eq!(
+        (kt["state"].clone(), kt["objective_id"].clone()),
+        (json!("DONE"), json!(oid))
+    );
 
     // 7. Restart with an open bound intent whose record is gone: the intent is
     // still settled by the world, and the missing record is named, not silent.

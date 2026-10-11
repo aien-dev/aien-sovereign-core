@@ -12,7 +12,6 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::path::PathBuf;
 
-pub const DOMAIN_TAG: &str = "AIEN_E2E_OBJECTIVE_V1";
 pub const MAX_TEXT_BYTES: usize = 2000;
 pub const FORBIDDEN_CLASS: &str = "EXTERNAL_IRREVERSIBLE";
 pub const DEFAULT_CLASS: &str = "WORKSPACE_WRITE";
@@ -41,14 +40,12 @@ fn sha256_hex(b: &[u8]) -> String {
 }
 
 pub fn objective_id(text: &str) -> String {
-    sha256_hex(format!("{DOMAIN_TAG}\n{text}").as_bytes())
+    aien_runtime::objective::objective_id(text)
 }
 
+/// The same directory the daemon re-reads (sovereign-core #408).
 fn dir() -> PathBuf {
-    std::env::var("AIEN_PROVENANCE_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from("/tmp/aien-provenance"))
-        .join("objectives")
+    aien_runtime::objective::dir()
 }
 
 fn valid_id(id: &str) -> bool {
