@@ -123,6 +123,41 @@ detect "M5 unlisted extra file" MANIFEST_UNLISTED
 mutant "$FB"; rm "$work/m/chain/007-E4.json"
 detect "M6 receipt file dropped" SEQUENCE_GAP
 
+# CTRL-E5 (v1.3-ctrl-e5): judged from the receipt's facts. Built on a copy of fixture B with a receipt appended and the manifest rewritten.
+mkE5() { # dir, fields json (merged over a good receipt)
+  rm -rf "$1"; cp -r "$FB" "$1"; rm -f "$1/chain/SHA256SUMS"
+  last=$(ls "$1"/chain/0*.json | LC_ALL=C sort | tail -1); num=$(basename "$last" | cut -c1-3); next=$(printf '%03d' $((1$num - 999)))
+  jq --arg prev "$(sha256sum "$last" | cut -d' ' -f1)" --arg step CTRL-E5 --argjson f "$2" \
+    '{objective_id, run_id, step:$step, status:"PASS", prev_receipt_sha256:$prev, evidence:"test"} + $f' "$last" >"$1/chain/$next-CTRL-E5.json"
+  (cd "$1" && find . -type f ! -name SHA256SUMS ! -name VERIFIER_VERDICT.txt ! -name VERIFIER_RECEIPT.json -print0 | LC_ALL=C sort -z | xargs -0 sha256sum >chain/SHA256SUMS)
+}
+GOOD="{\"mutated_output_rejected\":true,\"mutated_chain_unbroken\":false,\"original_verdict_id\":\"$B1\",\"mutated_verdict_id\":\"1111111111111111111111111111111111111111111111111111111111111111\",\"verifier_reason\":\"# E3 FAIL: DIGEST_MISMATCH: x\"}"
+c5() { "$bin" "$1" --contract-sha256 $CS 2>/dev/null; }
+mkE5 "$work/e5a" "$GOOD"
+c5 "$work/e5a" | grep -q "^CTRL-E5 PASS$" && ok "CTRL-E5 PASS from a good receipt" || { bad "CTRL-E5 PASS from a good receipt"; c5 "$work/e5a" | grep "CTRL-E5"; }
+c5 "$work/e5a" | grep -q '^chain_unbroken true$' && ok "CTRL-E5 fixture chain unbroken" || bad "CTRL-E5 fixture chain unbroken"
+[ "$(c5 "$work/e5a" | sed -n 's/^verdict_id //p')" != "$B1" ] && ok "CTRL-E5 PASS changes the final id" || bad "CTRL-E5 PASS changes the final id"
+mkE5 "$work/e5b" "$(printf '%s' "$GOOD" | jq -c '.mutated_output_rejected=false')"
+c5 "$work/e5b" | grep -q '^CTRL-E5 FAIL$' && ok "CTRL-E5 FAIL when mutated_output_rejected is false" || bad "CTRL-E5 FAIL when rejected false"
+mkE5 "$work/e5c" "$(printf '%s' "$GOOD" | jq -c '.original_verdict_id="2222222222222222222222222222222222222222222222222222222222222222"')"
+c5 "$work/e5c" | grep -q '^CTRL-E5 FAIL$' && ok "CTRL-E5 FAIL when original_verdict_id is not the derived pre id" || bad "CTRL-E5 FAIL on wrong original id"
+mkE5 "$work/e5d" "$(printf '%s' "$GOOD" | jq -c '.mutated_verdict_id=.original_verdict_id')"
+c5 "$work/e5d" | grep -q '^CTRL-E5 FAIL$' && ok "CTRL-E5 FAIL when the verdict id did not change" || bad "CTRL-E5 FAIL on unchanged id"
+mkE5 "$work/e5e" "$(printf '%s' "$GOOD" | jq -c '.mutated_chain_unbroken=true')"
+c5 "$work/e5e" | grep -q '^CTRL-E5 FAIL$' && ok "CTRL-E5 FAIL when the mutated chain stayed unbroken" || bad "CTRL-E5 FAIL on unbroken mutated chain"
+mkE5 "$work/e5f" "{}"
+c5 "$work/e5f" | grep -q '^CTRL-E5 NOT_RUN$' && ok "CTRL-E5 NOT_RUN when the receipt lacks facts" || bad "CTRL-E5 NOT_RUN without facts"
+c5 "$FB" | grep -q '^CTRL-E5 NOT_RUN$' && ok "CTRL-E5 NOT_RUN when no receipt" || bad "CTRL-E5 NOT_RUN absent"
+
+# regression: the recorded RUN-1 (no facts-bearing CTRL-E5 receipt) still verifies to its recorded ids
+R1=$runs/RUN-1-20261010T154724Z
+if [ -d "$R1" ]; then
+  C9=9e3d5f4e23d65ac17be8f2f4ca48355f0aaa486f67ff5a8a8044dcdd646d34e8
+  out=$("$bin" "$R1" --contract-sha256 $C9 --peer-verdict-id a50fccb63363ef9224a19bd8bf4f249754abf5d88667ba0fd6ce93dfb8d63d80 2>/dev/null)
+  printf '%s\n' "$out" | grep -q '^verdict_id 437467db4149b013738578c10ef68b7168dfb95feae8dea882de17a6118fc5fd$' && ok "RUN-1 verdict_id unchanged with the Spark base id as peer" || bad "RUN-1 verdict_id unchanged"
+  printf '%s\n' "$out" | grep -q '^base_verdict_id a50fccb63363ef9224a19bd8bf4f249754abf5d88667ba0fd6ce93dfb8d63d80$' && ok "RUN-1 base_verdict_id unchanged" || bad "RUN-1 base_verdict_id unchanged"
+fi
+
 after=$(tree_sum "$runs")
 [ "$before" = "$after" ] && ok "fixtures untouched" || bad "fixtures untouched"
 echo "passed $pass, failed $fail"
