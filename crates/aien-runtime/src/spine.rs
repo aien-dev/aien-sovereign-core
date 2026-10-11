@@ -810,7 +810,8 @@ fn outer_fence_close(body: &[&str], open_len: usize) -> Option<usize> {
 
 /// The model's answer in the fixed proposal template: the first nonempty
 /// line is `filename: <relative path>` (case-insensitive key; quotes,
-/// backticks and asterisks around it or the path are ignored), everything
+/// backticks and asterisks around it or the path are ignored, and so are leading
+/// `./` segments of the path, sc#402), everything
 /// after it is the complete content (blank lines around it and one
 /// surrounding code fence are dropped; it ends with one newline).
 /// Err names why the reply is refused. Deterministic: the Skill, the AEGIS
@@ -826,7 +827,8 @@ pub fn check_file_proposal(text: &str) -> Result<FileProposal, String> {
     if first.len() < KEY.len() || !first[..KEY.len()].eq_ignore_ascii_case(KEY) {
         return Err("no filename line: the first line must be 'filename: <relative path>'".into());
     }
-    let path = bare(&first[KEY.len()..]).to_string();
+    // sc#402: `./report.md` is `report.md`; the strict check then runs as before.
+    let path = crate::destination::strip_leading_curdir(bare(&first[KEY.len()..])).to_string();
     check_relative_path(&path)?;
     let mut body: Vec<&str> = lines[at + 1..].to_vec();
     while body.first().is_some_and(|l| l.trim().is_empty()) {
@@ -3479,7 +3481,10 @@ mod dotslash_tests {
             assert!(path_of(bad).is_err(), "{bad:?} must stay refused");
         }
         assert!(check_file_proposal("filename: \n# R\nbody\n").is_err());
-        assert!(check_relative_path("./report.md").is_err(), "the strict check stays strict");
+        assert!(
+            check_relative_path("./report.md").is_err(),
+            "the strict check stays strict"
+        );
     }
 
     #[test]

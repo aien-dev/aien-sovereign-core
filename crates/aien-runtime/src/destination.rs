@@ -291,11 +291,29 @@ impl std::fmt::Display for DestinationError {
     }
 }
 
+/// A path with its leading `./` segments removed, and nothing else changed
+/// (sc#402): `./report.md` and `report.md` name the same workspace file, so a
+/// path that enters from text (a goal word, a reply's `filename:` line) is
+/// read in its bare form. Inner `./` segments, `..`, absolute paths, `~`,
+/// empty results and every other form are left exactly as written, so the
+/// strict checks that follow (`spine::check_relative_path`,
+/// `effects::confine_shape`) refuse them as before. The one shared reading.
+pub fn strip_leading_curdir(path: &str) -> &str {
+    let mut p = path;
+    while let Some(rest) = p.strip_prefix("./") {
+        p = rest;
+    }
+    p
+}
+
 fn clean(w: &str) -> &str {
     const Q: fn(char) -> bool = |c| matches!(c, '"' | '\'' | '`' | '(' | ')' | '[' | ']');
-    w.trim_matches(Q)
-        .trim_end_matches(['.', ',', ';', ':', '!', '?'])
-        .trim_matches(Q)
+    // sc#402: a leading `./` is dropped once quotes and punctuation are gone.
+    strip_leading_curdir(
+        w.trim_matches(Q)
+            .trim_end_matches(['.', ',', ';', ':', '!', '?'])
+            .trim_matches(Q),
+    )
 }
 
 fn has_extension(w: &str) -> bool {
