@@ -2624,6 +2624,40 @@ mod tests {
         }
     }
 
+    /// sovereign-core #408: records written before the objective fields load
+    /// exactly as before (no objective), and the new fields are read back.
+    #[test]
+    fn objective_fields_are_additive_on_grants_and_intents() {
+        let old = Ledger::from_records(&[grant(2, Value::Null), intent(3, 2)]).unwrap();
+        assert_eq!(old.grants[&2].objective, None);
+        assert_eq!(old.intents[&3].objective_id, None);
+        assert!(old.view()["intents"][0].get("objective_id").is_none());
+        let oid = "a".repeat(64);
+        let mut g = json!({"minted_grant": 1, "compose_commit": 1, "proposal_sha256": "p",
+            "path": "N.md", "content_sha256": "c", "approver": "drake", "target": "/w/N.md",
+            "prior_sha256": null, "objective_id": oid, "objective_text_sha256": "b".repeat(64),
+            "objective_record_sha256": "c".repeat(64)});
+        let mut i = json!({"phase": "intent", "tool": "write_file", "authorization": 2,
+            "path": "N.md", "target": "/w/N.md", "content_sha256": "c", "prior_sha256": null,
+            "proposal_sha256": "p", "executor": {"pid": 1, "start": 1}, "objective_id": oid});
+        let l = Ledger::from_records(&[rec(2, "authorization", g.clone()), rec(3, "effect", i.clone())])
+            .unwrap();
+        let o = l.grants[&2].objective.as_ref().unwrap();
+        assert_eq!((o.id.as_str(), o.text_sha256.as_str()), (oid.as_str(), "b".repeat(64).as_str()));
+        assert_eq!(l.intents[&3].objective_id.as_deref(), Some(oid.as_str()));
+        assert_eq!(l.view()["intents"][0]["objective_id"], json!(oid));
+        // A commit without the goal digest (written before #408) still loads.
+        let c = rec(1, "effect", json!({"compose_commit": 1, "task": 1, "cx_promotion": 1,
+            "cx_evidence": 1, "proposal_sha256": "p", "path": "N.md", "content_sha256": "c",
+            "workspace": "/w"}));
+        assert_eq!(Ledger::from_records(&[c]).unwrap().commits[&1].goal_sha256, None);
+        // A daemon-written grant naming an objective without its digest is damaged state.
+        g.as_object_mut().unwrap().remove("objective_text_sha256");
+        assert!(Ledger::from_records(&[rec(2, "authorization", g)]).is_err());
+        i["objective_id"] = json!(7);
+        assert!(Ledger::from_records(&[grant(2, Value::Null), rec(3, "effect", i)]).is_err());
+    }
+
     #[test]
     fn fresh_grant_opens_once() {
         let l = Ledger::from_records(&[grant(2, Value::Null)]).unwrap();
