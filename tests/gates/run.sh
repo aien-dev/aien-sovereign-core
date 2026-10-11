@@ -49,7 +49,12 @@ case "$step" in
   scoring-v5)          bash docs/campaigns/scoring/test-scoring-v5.sh ;;
   check)               cargo check --workspace --all-targets ;;
   clippy)              cargo clippy --workspace --all-targets -- -D warnings ;;
-  test)                AIEN_DEV_FALLBACK=1 cargo test --workspace --verbose -- --test-threads=1 ;;
+  test)
+    # GitHub Actions sets CI=true in every job. Tests that reach live services or check the
+    # branch name (spark-adapters tier1-4) skip themselves under CI, so the hosted job never runs
+    # them; without it they fail here on any branch not named feat/, fix/... or on a detached head.
+    CI=true AIEN_DEV_FALLBACK=1 cargo test --workspace --verbose -- --test-threads=1
+    ;;
   strict-mode)
     cargo test -p aien-inference-abi --lib --test attention_wiring --test transformer_parity -- --test-threads=1
     cargo test -p aien-inference-runtime --test strict_real_model -- --test-threads=1
@@ -62,7 +67,8 @@ case "$step" in
   preflight-guard)     bash scripts/test-preflight-branch-guard.sh ;;
   agent-preflight)
     # Hosted: developer context on pull requests, merged-tree on pushes to main.
-    AIEN_PROOF_OFF=1 AIEN_DEV_FALLBACK=1 AIEN_PREFLIGHT_CONTEXT="${AIEN_PREFLIGHT_CONTEXT:-developer}" bash scripts/agent-preflight.sh
+    # CI=true as on GitHub (see the test step): the script runs cargo test --workspace.
+    CI=true AIEN_PROOF_OFF=1 AIEN_DEV_FALLBACK=1 AIEN_PREFLIGHT_CONTEXT="${AIEN_PREFLIGHT_CONTEXT:-developer}" bash scripts/agent-preflight.sh
     ;;
   zero-disk-secrets)
     echo "Auditing repository for prohibited plaintext secret files..."
