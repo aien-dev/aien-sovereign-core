@@ -57,11 +57,20 @@ CTRL-E5 FAIL; E1, E5, CTRL-E1 NOT_RUN.
 ## What follows (INFERRED)
 
 1. **E3's FAIL comes from a changed prompt, not from the repairs' logic.** The proposal prompt carries the absolute
-   workspace path (`spine::proposal_prompt`: `Authorized workspace: {workspace}`). RUN-1 to RUN-3 ran under the shared job
-   folder `.../jobs/ade3c837/...`; this run under `.../jobs/ade3c837-a2/...`. E3's prompt grew from 345 to 347 tokens
-   (`prompt_ids_sha256` ede9f1e8... to 6847127a...), consistent with the extra `-a2` (`-a` and `2` are each one token in this vocabulary; UNVERIFIED that the path tokenizes that way), and
-   greedy decoding then wrote a different 52-word report without the file names. The goal text, inputs (same sha256)
-   and pins are the same as RUN-3. Confidence high; NOT re-run with the old folder to prove it (one declared attempt).
+   workspace path (`spine::proposal_prompt`: `Authorized workspace: {workspace}`). RUN-2 and RUN-3 ran under the shared job
+   folder `.claude/jobs/ade3c837/tmp/e2e/run/ws-contract`, RUN-1 (CPU) under `.claude/jobs/85679b2b/...` (a folder name of
+   the same length; it wrote the same E3 report); this run under `.claude/jobs/ade3c837-a2/...`. OBSERVED after
+   the run, on the CPU only (no model, no chip): the E3 model input was rebuilt with the product's own functions on main
+   (the default ALLEN persona block, then `spine::task_prompt` on a scratch workspace holding the same three inbox files,
+   sha256 equal to the receipts, the scratch path replaced by each run's path, the chat template and the compose assistant
+   prefix, then the model tokenizer). It gives 345 tokens, `prompt_ids_sha256` ede9f1e8... for the RUN-3 path and 347
+   tokens, 6847127a... for the RUN-5 path: exactly the ids each run recorded. The path occurs once in the prompt. Model
+   weights digest 1ff795ff..., tokenizer 6b9e4e7f..., backend line, pins, objective text, inputs, persona (`default`),
+   memory (`work`, 0 items) and recognized requirements are equal in the two E3 receipts. So the only difference in the
+   model input is the workspace path; greedy decoding (RUN-2 and RUN-3 gave byte-identical E3 reports) then wrote a
+   different 52-word report without the file names. INFERRED: the path change caused the text change (greedy decoding
+   is deterministic on the same input and engine pins; the daemon binary differs from RUN-3 only by sc#425, which does
+   not touch generation; not re-run).
 2. So E3's D4 outcome depends on the workspace path text as well as on the goal: a 1B model's answer is sensitive
    to an incidental two-token prompt change (one same-length folder change, RUN-1 to RUN-2, did not change the report). That is the single remaining cause of this FAIL.
 3. CTRL-E5 failed only because E3 had already failed: the control changes one byte of `E3-report.md`, which turns E3
@@ -73,8 +82,8 @@ CTRL-E5 FAIL; E1, E5, CTRL-E1 NOT_RUN.
 
 ## Not claimed
 
-Program PASS; that the `./` repair was exercised on the chip; that the job-folder path is proven (by a run) to be the
-cause of E3's text change; an installed artifact (E1, CTRL-E1); cross-machine agreement (E5); numerical equality of
+Program PASS; that the `./` repair was exercised on the chip; that the job-folder path is proven by a run (rather than by the input
+reconstruction above) to be the cause of E3's text change; an installed artifact (E1, CTRL-E1); cross-machine agreement (E5); numerical equality of
 GB10 and CPU arithmetic; prose quality beyond the checks.
 
 ## Limits
