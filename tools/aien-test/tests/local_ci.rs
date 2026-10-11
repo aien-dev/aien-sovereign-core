@@ -629,6 +629,41 @@ fn loop_without_github_keeps_the_outbox() {
 }
 
 #[test]
+fn worker_no_cache_reruns_every_gate() {
+    // The same head twice: the second run reuses the receipt; with
+    // `--no-cache` (cfg.no_cache) it runs the gate again.
+    let w = world();
+    let mut cfg = w.config();
+    let first = worker::run_once(&cfg, REPO, &w.head).expect("worker");
+    assert!(
+        first.gates.iter().any(|(g, st, _)| g == "A" && st == "run"),
+        "{:?}",
+        first.gates
+    );
+    let again = worker::run_once(&cfg, REPO, &w.head).expect("worker");
+    assert!(
+        again
+            .gates
+            .iter()
+            .any(|(g, st, _)| g == "A" && st == "cached"),
+        "{:?}",
+        again.gates
+    );
+    cfg.no_cache = true;
+    cfg.jobs = aien_test::resources::JobsSpec {
+        host: Some(1),
+        qemu: None,
+    };
+    let fresh = worker::run_once(&cfg, REPO, &w.head).expect("worker");
+    assert!(
+        fresh.gates.iter().any(|(g, st, _)| g == "A" && st == "run"),
+        "{:?}",
+        fresh.gates
+    );
+    assert_eq!(fresh.verdict, Verdict::Pass, "{}", fresh.reason);
+}
+
+#[test]
 fn trigger_file_is_served_by_the_loop() {
     let w = world();
     let cfg = w.config();

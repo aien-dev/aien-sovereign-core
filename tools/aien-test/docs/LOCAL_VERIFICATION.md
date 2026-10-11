@@ -261,6 +261,16 @@ So a loop started without `--github` never picks up a new pull request head
 or a new `main` commit by itself: someone has to write a trigger (or push to
 Forgejo). Merging a pull request on GitHub does not wake it.
 
+`--jobs host=N,qemu=M` and `--no-cache` apply to the runs the worker starts,
+as they do for `aien-test test`. `--no-cache` runs every selected gate again
+(a head with sibling checkouts never uses the cache anyway). `--jobs host=1`
+runs one host gate at a time: omega's gates share one checkout's `build/`
+and pin clones, and on main 771af52 ten of them failed from parallel races
+("Text file busy" on `build/omegatool`, concurrent clones of
+`build/pins/aienos-src`); its operator runs use
+`aien-local-ci once omega <sha> --operator --jobs host=1` until the gates or
+a per-repository pool setting make them safe in parallel.
+
 ## verify-bundle and the vacuous PASS
 
 `aien-test verify-bundle` (the GitHub thin gate's command) prints and exits

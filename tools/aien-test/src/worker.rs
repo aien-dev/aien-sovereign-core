@@ -29,7 +29,7 @@ use crate::evidence::{canonical, canonical_digest, sha256_hex, utc_string};
 use crate::graph;
 use crate::plan::{self, Known, Section};
 use crate::process;
-use crate::resources::Hardware;
+use crate::resources::{Hardware, JobsSpec};
 use crate::runner::{self, CacheNote, Options};
 use crate::sandbox::Sandbox;
 use crate::verdict::Verdict;
@@ -225,6 +225,12 @@ pub struct Config {
     /// read-only sibling checkouts a repository's gates reach as `../<dir>`.
     /// None: no siblings.
     pub siblings: Option<PathBuf>,
+    /// `--jobs host=N,qemu=M` for the runs this worker starts (None: the
+    /// machine defaults). An operator run of a repository whose gates share
+    /// one checkout uses `--jobs host=1`.
+    pub jobs: JobsSpec,
+    /// `--no-cache`: run every selected gate, reuse no receipt.
+    pub no_cache: bool,
 }
 
 impl Config {
@@ -248,6 +254,8 @@ impl Config {
             wt_tool: None,
             mirror_root: PathBuf::from(MIRROR_ROOT),
             siblings: None,
+            jobs: JobsSpec::default(),
+            no_cache: false,
         }
     }
 
@@ -784,7 +792,8 @@ fn run_in_worktree(
     let mut opts = Options::new(evidence_dir.clone());
     opts.sandbox = cfg.sandbox;
     opts.cargo_target_dir = target_dir_for(cfg, repo, on_main);
-    if fresh {
+    opts.pool_sizes = opts.pool_sizes.with(cfg.jobs);
+    if fresh || cfg.no_cache {
         opts.no_cache = true;
     }
     let mut known: BTreeMap<String, Known> = BTreeMap::new();
