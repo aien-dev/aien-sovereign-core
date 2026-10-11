@@ -1,19 +1,23 @@
 #!/usr/bin/env bash
-# WHOLE-SYSTEM-E2E harness v1.2 (aien-architecture#190, lane L1).
-# Rows: docs/campaigns/whole-system-e2e/ACCEPTANCE-v1.md, -v1.1.md, -v1.2.md (each committed before the script
+# WHOLE-SYSTEM-E2E harness v1.3 (aien-architecture#190, lane L1; GB10 mode for milestone R6, sovereign-core#402).
+# Rows: docs/campaigns/whole-system-e2e/ACCEPTANCE-v1.md, -v1.1.md, -v1.2.md, -v1.3-gb10.md, -v1.3-ctrl-e5.md (each committed before the script
 # change that implements it; never edited by the script).
 # Contract: aien-architecture docs/plans/release-readiness/ACCEPTANCE_E2E.md, FROZEN at commit b2400fe,
 # sha256 9e3d5f4e23d65ac17be8f2f4ca48355f0aaa486f67ff5a8a8044dcdd646d34e8 (CONTRACT_SHA below).
 # v1.2: E2 and CTRL-E2 through `aien-cli objective record` (sc#388); the proposer reads the inbox files and the E3
 # receipt lists them (sc#392); memory under an engaged ALLEN (sc#391); CTRL-E6 and CTRL-E4b state-loss controls;
 # logs kept as .txt (the repo ignores *.log); the independent verifier (sc#389) runs over the closed chain.
+# v1.3: WSE2E_BACKEND=gb10 (default cpu, unchanged) builds from the pinned GPU engine (scripts/pins.sh --gpu), runs
+# the zero-CUDA gate, requires the native Omega GB10 backend line on every daemon start, and adds gpu_executions,
+# fallback_count, fallback_detected, pins, nvidia_driver and host_load to every receipt (ACCEPTANCE-v1.3-gb10.md).
 #
 #   scripts/whole_system_e2e.sh run        build the CLI, run the chain E2..E6 + controls, write one run folder
 #   scripts/whole_system_e2e.sh check F    the document checks of rows E3/E3m on file F (prints failed ids)
 #   scripts/whole_system_e2e.sh selftest   checks with positive and negative controls (no daemon)
 #
 # Shell plus jq. No Python, no systemd, no accelerator: the daemon must print the CPU-reference backend
-# line or the run stops. Needs CLAUDE_JOB_DIR (build target and run state under $CLAUDE_JOB_DIR/tmp/e2e),
+# line or the run stops. In gb10 mode no CUDA (zero-CUDA gate) and no CPU fallback: the daemon must print
+# the native Omega GB10 backend line or the run stops; any fallback marks the row FAIL. Needs CLAUDE_JOB_DIR (build target and run state under $CLAUDE_JOB_DIR/tmp/e2e),
 # the prebuilt compose archive at $CLAUDE_JOB_DIR/tmp/librx_compose.a, jq, sha256sum, ss, hostname, iconv.
 # Model: WSE2E_MODEL_DIR (default: the CAND-4 Llama 3.2 1B snapshot in the local Hugging Face cache);
 # its weights and tokenizer sha256 are compared with release/candidate.toml and written into every receipt.
@@ -46,6 +50,59 @@ allen_env() { # subject_path [agent_hex]: the env lines that engage the fixture 
   [ -z "${2:-}" ] || echo "AIEN_ALLEN_ADOPT=$2"
 }
 
+# ---- v1.3 (ACCEPTANCE-v1.3-gb10.md): the GB10 backend rule and the receipt counters ---------------------------
+# backend_ok MODE LINE: 0 when the daemon's Backend line is the one MODE requires (the stub name does not count).
+GB10_BACKEND_MARK='OmegaGb10Backend (native Omega engine, no CUDA'
+backend_ok() {
+  case $1 in
+    gb10) case $2 in *"$GB10_BACKEND_MARK"*) return 0 ;; esac ;;
+    *) case $2 in *CPU-reference*) return 0 ;; esac ;;
+  esac
+  return 1
+}
+strict_ok() { case $1 in *"strict=true dev_fallback_build=false"*) return 0 ;; esac; return 1; }
+# prop_ops PROPOSE_JSON: "attempts_with_ops max_gpu_total|null max_native_fallbacks omega_native(yes|no)" from
+# report.proposal_attempts[].ops (sc#337 fallbacks, sc#405 gpu_executions); "0 null 0 no" when absent or unreadable.
+prop_ops() {
+  jq -r --arg m "$GB10_BACKEND_MARK" '[.report.proposal_attempts[]?.ops // empty] as $o
+    | "\($o | length) \([$o[].gpu_executions // empty] | max // "null") \([$o[].native_fallbacks // 0] | max // 0) \(if ($o | length) > 0 and all($o[]; (.backend // "") | contains($m)) then "yes" else "no" end)"' \
+    "$1" 2>/dev/null | grep -E '^[0-9]+ ([0-9]+|null) [0-9]+ (yes|no)$' || echo "0 null 0 no"
+}
+FALLBACK_RE='STRICT_REAL_MODEL_VIOLATION|OMEGA_BACKEND chip error'
+fallback_lines() { cat "$@" 2>/dev/null | grep -c -E "$FALLBACK_RE"; true; }   # files..: count of fallback lines
+host_load() {
+  jq -nc --arg la "$(cat /proc/loadavg 2>/dev/null)" --arg mf "$(awk '/^MemFree:/{print $2}' /proc/meminfo)" \
+    --arg ma "$(awk '/^MemAvailable:/{print $2}' /proc/meminfo)" '{loadavg:$la, memfree_kb:($mf|tonumber? // null), memavailable_kb:($ma|tonumber? // null)}'
+}
+# gb10_receipt STEP: sets G_JSON (the v1.3 receipt fields) and G_WHY (G4/G5 problems, empty when none). Reads
+# $ART/STEP-propose.json, PROP_DN[STEP] (the daemon that served that propose) and every daemon log under $LOGS.
+declare -A PROP_DN=()
+GPU_SEEN_DN=""; GPU_SEEN_TOTAL=0; FALLBACK_SEEN=false; G_JSON='{}'; G_WHY=""
+gb10_receipt() {
+  local p=$ART/$1-propose.json n=0 tot=null nf=0 om=no delta=null since=null fl fc dn=${PROP_DN[$1]:-}
+  G_WHY=""
+  [ -f "$p" ] && read -r n tot nf om < <(prop_ops "$p")
+  if [ "$n" -gt 0 ]; then
+    if [ "$tot" = null ]; then G_WHY="$G_WHY model call without gpu_executions;"
+    else
+      if [ -n "$dn" ] && [ "$dn" = "$GPU_SEEN_DN" ]; then delta=$((tot - GPU_SEEN_TOTAL)); since="previous observation in daemon $dn"
+      else delta=$tot; since="daemon start"; fi
+      GPU_SEEN_DN=$dn; GPU_SEEN_TOTAL=$tot
+      [ "$delta" -ge 1 ] || G_WHY="$G_WHY gpu_executions $delta;"
+    fi
+    [ "$om" = yes ] || G_WHY="$G_WHY model call not on the native Omega GB10 backend;"
+  fi
+  fl=$(fallback_lines "$LOGS"/daemon-*.txt); fc=$((nf + fl))
+  [ "$fc" -eq 0 ] || { G_WHY="$G_WHY fallback_count $fc;"; FALLBACK_SEEN=true; }
+  G_JSON=$(jq -nc --argjson d "$delta" --argjson t "$tot" --arg s "$since" --argjson fc "$fc" --argjson fn "$nf" --argjson fl "$fl" \
+    --argjson fd "$FALLBACK_SEEN" --argjson pins "${PINS_JSON:-null}" --arg drv "${NVDRV:-}" --arg zc "${ZC:-}" --arg sl "${STRICT_LINE:-}" \
+    --argjson hl "$(host_load)" --arg why "${G_WHY# }" \
+    '{backend_mode:"gb10", gpu_executions:$d, gpu_executions_process_total:$t, gpu_executions_since:(if $d == null then null else $s end),
+      gpu_executions_source:"report.proposal_attempts[].ops.gpu_executions (sc#405, Omega chip_calls, process total)",
+      fallback_count:$fc, fallback_native_ops:$fn, fallback_log_lines:$fl, fallback_detected:$fd, pins:$pins, nvidia_driver:$drv,
+      zero_cuda_gate_exit:$zc, daemon_strict_line:$sl, host_load:$hl, gb10_problems:$why}')
+}
+
 selftest() {
   local t; t=$(mktemp -d); local rc=0
   printf '# Report\n\nabout alpha.txt, beta.txt and gamma.txt\n' >"$t/good.md"
@@ -59,6 +116,43 @@ selftest() {
   case ${E4_MAX_TOKENS:-} in ''|*[!0-9]*) echo "selftest: E4_MAX_TOKENS not a number"; rc=1 ;; *) { [ "$E4_MAX_TOKENS" -ge 48 ] && [ "$E4_MAX_TOKENS" -le 4096 ]; } || { echo "selftest: E4_MAX_TOKENS outside 48..4096"; rc=1; } ;; esac
   # The budget is passed on the E4 daemon start only.
   [ "$(grep -c 'AIEN_COMPOSE_MAX_TOKENS="\?\$E4_MAX_TOKENS' "$0")" = 2 ] || { echo "selftest: AIEN_COMPOSE_MAX_TOKENS must be set on exactly two starts (E4 and CTRL-E4b)"; rc=1; }
+  # v1.3 (gb10 mode): backend and strict lines, the propose-report counters, fallback lines, per-row deltas.
+  local og='NativeTransformerBackend/OmegaGb10Backend (native Omega engine, no CUDA, NVIDIA GB10 sm_121)'
+  local oc='NativeTransformerBackend/CPU-reference (Omega GPU engine not linked, explicit fallback)'
+  backend_ok gb10 "$og" || { echo "selftest: gb10 refused the native Omega line"; rc=1; }
+  ! backend_ok gb10 "$oc" || { echo "selftest: gb10 accepted the CPU line"; rc=1; }
+  ! backend_ok gb10 "NativeTransformerBackend/OmegaGb10Backend (stub, no chip)" || { echo "selftest: gb10 accepted the stub"; rc=1; }
+  backend_ok cpu "$oc" && ! backend_ok cpu "$og" || { echo "selftest: cpu backend rule changed"; rc=1; }
+  strict_ok "STRICT strict=true dev_fallback_build=false require_checkpoint=true backend=omega-gb10" \
+    && ! strict_ok "STRICT strict=false dev_fallback_build=true require_checkpoint=false backend=ReferenceCpuBackend" || { echo "selftest: strict line rule wrong"; rc=1; }
+  local ob='OmegaGb10Backend (native Omega engine, no CUDA, NVIDIA GB10 sm_121)'
+  jq -nc --arg b "$ob" '{report:{proposal_attempts:[{ops:{backend:$b,native_fallbacks:0,gpu_executions:40}},{ops:{backend:$b,native_fallbacks:0,gpu_executions:97}}]}}' >"$t/p1.json"
+  jq -nc '{report:{proposal_attempts:[{ops:{backend:"ReferenceCpuBackend",native_fallbacks:0,reference_runs:0}}]}}' >"$t/p2.json"
+  jq -nc '{report:{committed:false}}' >"$t/p3.json"
+  jq -nc --arg b "$ob" '{report:{proposal_attempts:[{ops:{backend:$b,native_fallbacks:2,gpu_executions:5}}]}}' >"$t/p4.json"
+  jq -nc '{report:{proposal_attempts:[{ops:{backend:"OmegaGb10Backend (stub, no chip)",native_fallbacks:0}}]}}' >"$t/p5.json"
+  [ "$(prop_ops "$t/p1.json")" = "2 97 0 yes" ] || { echo "selftest: prop_ops p1 gave '$(prop_ops "$t/p1.json")'"; rc=1; }
+  [ "$(prop_ops "$t/p2.json")" = "1 null 0 no" ] || { echo "selftest: prop_ops p2 gave '$(prop_ops "$t/p2.json")'"; rc=1; }
+  [ "$(prop_ops "$t/p3.json")" = "0 null 0 no" ] || { echo "selftest: prop_ops p3 gave '$(prop_ops "$t/p3.json")'"; rc=1; }
+  [ "$(prop_ops "$t/p4.json")" = "1 5 2 yes" ] || { echo "selftest: prop_ops p4 gave '$(prop_ops "$t/p4.json")'"; rc=1; }
+  [ "$(prop_ops "$t/p5.json")" = "1 null 0 no" ] || { echo "selftest: prop_ops p5 gave '$(prop_ops "$t/p5.json")'"; rc=1; }
+  [ "$(prop_ops "$t/absent.json")" = "0 null 0 no" ] || { echo "selftest: prop_ops on a missing file"; rc=1; }
+  mkdir -p "$t/logs"; printf 'ok\n' >"$t/logs/daemon-1.txt"
+  [ "$(fallback_lines "$t/logs"/daemon-*.txt)" = 0 ] || { echo "selftest: clean log counted"; rc=1; }
+  # per-row deltas and the strict fallback rule, on the fixtures above (state saved and restored)
+  local sv_art=${ART:-} sv_logs=${LOGS:-}; ART=$t; LOGS=$t/logs
+  cp "$t/p1.json" "$t/RA-propose.json"; jq -c '.report.proposal_attempts[1].ops.gpu_executions = 130' "$t/p1.json" >"$t/RB-propose.json"
+  jq -nc --arg b "$ob" '{report:{proposal_attempts:[{ops:{backend:$b,native_fallbacks:0,gpu_executions:12}}]}}' >"$t/RC-propose.json"
+  PROP_DN=([RA]=2 [RB]=2 [RC]=3)
+  gb10_receipt RA; [ "$(jq -c '[.gpu_executions,.gpu_executions_since,.fallback_count]' <<<"$G_JSON")" = '[97,"daemon start",0]' ] && [ -z "$G_WHY" ] || { echo "selftest: RA $G_JSON / $G_WHY"; rc=1; }
+  gb10_receipt RB; [ "$(jq -c '.gpu_executions' <<<"$G_JSON")" = 33 ] && [ -z "$G_WHY" ] || { echo "selftest: RB delta $G_JSON"; rc=1; }
+  gb10_receipt RC; [ "$(jq -c '.gpu_executions' <<<"$G_JSON")" = 12 ] || { echo "selftest: RC new daemon $G_JSON"; rc=1; }
+  gb10_receipt RC; [ "$(jq -c .gpu_executions <<<"$G_JSON")" = 0 ] && [ -n "$G_WHY" ] || { echo "selftest: a model row with no new chip call was not flagged"; rc=1; }
+  gb10_receipt NONE; [ "$(jq -c '[.gpu_executions,.fallback_detected]' <<<"$G_JSON")" = '[null,false]' ] && [ -z "$G_WHY" ] || { echo "selftest: no-model row $G_JSON / $G_WHY"; rc=1; }
+  printf 'x\nOMEGA_BACKEND chip error: boom\nthread panicked: STRICT_REAL_MODEL_VIOLATION: y\n' >"$t/logs/daemon-2.txt"
+  [ "$(fallback_lines "$t/logs"/daemon-*.txt)" = 2 ] || { echo "selftest: fallback lines not counted"; rc=1; }
+  gb10_receipt NONE; [ "$(jq -c '[.fallback_count,.fallback_detected]' <<<"$G_JSON")" = '[2,true]' ] && [ -n "$G_WHY" ] || { echo "selftest: fallback not flagged $G_JSON"; rc=1; }
+  ART=$sv_art; LOGS=$sv_logs; PROP_DN=(); GPU_SEEN_DN=""; GPU_SEEN_TOTAL=0; FALLBACK_SEEN=false
   rm -rf "$t"; [ $rc -eq 0 ] && echo "selftest PASS"; return $rc
 }
 case ${1:-} in
@@ -73,14 +167,18 @@ REPO=$(cd "$(dirname "$0")/.." && pwd)
 JOB=${CLAUDE_JOB_DIR:?CLAUDE_JOB_DIR must be set}
 LIB=$JOB/tmp/librx_compose.a
 D=$JOB/tmp/e2e
-BIN=$D/target/release/aien-cli
+MODE=${WSE2E_BACKEND:-cpu}   # v1.3: cpu (default, v1.2 behaviour) or gb10 (ACCEPTANCE-v1.3-gb10.md)
+case $MODE in cpu|gb10) ;; *) echo "WSE2E_BACKEND must be cpu or gb10, not '$MODE'" >&2; exit 2 ;; esac
+TGT=$D/target; RUN_NAME0=RUN-1
+[ "$MODE" = gb10 ] && { TGT=$D/target-gb10; RUN_NAME0=RUN-2-GB10; }
+BIN=$TGT/release/aien-cli
 MDIR=${WSE2E_MODEL_DIR:-$(ls -d "$HOME"/.cache/huggingface/hub/models--unsloth--Llama-3.2-1B-Instruct/snapshots/*/ 2>/dev/null | head -1)}
 UTC0=$(date -u +%Y%m%dT%H%M%SZ)
-OUT=${WSE2E_OUT:-$REPO/docs/campaigns/whole-system-e2e/runs/${WSE2E_RUN_NAME:-RUN-1}-$UTC0}
+OUT=${WSE2E_OUT:-$REPO/docs/campaigns/whole-system-e2e/runs/${WSE2E_RUN_NAME:-$RUN_NAME0}-$UTC0}
 CONTRACT_SHA=9e3d5f4e23d65ac17be8f2f4ca48355f0aaa486f67ff5a8a8044dcdd646d34e8
 VER_SRC=$REPO/tools/aien-verify/src/main.rs; VER=$D/aien-verify
 for t in jq sha256sum ss hostname iconv; do command -v $t >/dev/null || { echo "need $t" >&2; exit 2; }; done
-[ -f "$LIB" ] || { echo "missing $LIB" >&2; exit 2; }
+[ "$MODE" = gb10 ] || [ -f "$LIB" ] || { echo "missing $LIB" >&2; exit 2; }   # gb10 builds the composition from its pin
 [ -n "$MDIR" ] && [ -f "$MDIR/model.safetensors" ] && [ -f "$MDIR/tokenizer.json" ] || { echo "model dir '$MDIR' lacks model.safetensors or tokenizer.json" >&2; exit 2; }
 QUIET=$HOME/workspace/.spark-quiet
 while [ -s "$QUIET" ]; do echo "quiet flag set; waiting"; sleep 30; done
@@ -88,10 +186,33 @@ DIRTY=$(git -C "$REPO" status --porcelain -- . ":!docs/campaigns/whole-system-e2
 [ "$DIRTY" -eq 0 ] || [ -n "${WSE2E_ALLOW_DIRTY:-}" ] || { echo "working tree has $DIRTY uncommitted changes; commit them first" >&2; exit 2; }
 COMMIT=$(git -C "$REPO" rev-parse HEAD)
 mkdir -p "$D"
+GPUX=(); PINS=""; PINS_JSON=null; NVDRV=""; ZC=""; STRICT_LINE=""
+if [ "$MODE" = gb10 ]; then
+  # G1: the pinned GPU engine, as the sc#94 release golden path (sc#92, sc#375); env.sh sets AIEN_OMEGA_DIR and
+  # AIEN_REQUIRE_NATIVE_LIBS=1 (a stub engine is a build error) and unsets AIEN_DEV_FALLBACK and the archive overrides.
+  PINS=$D/pins
+  bash "$REPO/scripts/pins.sh" --gpu "$PINS" >"$D/pins.txt" 2>&1 || { echo "pins.sh --gpu failed, see $D/pins.txt" >&2; exit 2; }
+  ( cd "$REPO" && . "$PINS/env.sh" && CARGO_TARGET_DIR="$TGT" cargo build --release -p aien-cli ) >"$D/build.log" 2>&1 \
+    || { echo "build failed, see $D/build.log" >&2; exit 2; }
+  grep -q -E "building the (CPU )?stub|developer override" "$D/build.log" && { echo "stub or overridden engine build; refusing" >&2; exit 2; }
+  bash "$REPO/scripts/zero-cuda-gate.sh" "$BIN" >"$D/zero-cuda-gate.txt" 2>&1; ZC=$?
+  [ "$ZC" = 0 ] || { echo "zero-CUDA gate exit $ZC, see $D/zero-cuda-gate.txt; refusing" >&2; exit 2; }
+  pin_of() { git -C "$PINS/$1" rev-parse HEAD 2>/dev/null; }
+  lock_of() { tr -d '[:space:]' <"$1" 2>/dev/null; }
+  P_OM=$(pin_of omega); P_PH=$(pin_of physics); P_AO=$(pin_of aienos)
+  { [ -n "$P_OM" ] && [ "$P_OM" = "$(lock_of "$REPO/omega.lock")" ] && [ "$P_PH" = "$(lock_of "$PINS/omega/physics.lock")" ] \
+    && [ "$P_AO" = "$(lock_of "$PINS/omega/aienos.lock")" ]; } || { echo "pinned checkouts differ from their lock files" >&2; exit 2; }
+  PINS_JSON=$(jq -nc --arg o "$P_OM" --arg p "$P_PH" --arg a "$P_AO" '{omega:$o, physics:$p, aienos:$a, source:"scripts/pins.sh --gpu: omega.lock, then physics.lock and aienos.lock of that omega"}')
+  NVDRV=$(head -1 /proc/driver/nvidia/version 2>/dev/null | tr -s ' ' | cut -c1-200)
+  [ -n "$NVDRV" ] || { echo "no /proc/driver/nvidia/version: no NVIDIA driver loaded" >&2; exit 2; }
+  # G2: every daemon start: a missing engine is fatal (never a CPU fallback); launch tuning left at the daemon defaults.
+  GPUX=(env -u AIEN_DEV_FALLBACK -u AIEN_OMEGA_CTA_BUDGET -u AIEN_OMEGA_SPIN_US AIEN_GPU_BACKEND=omega AIEN_REQUIRE_BLACKWELL=1)
+else
 ( cd "$REPO" && env -u AIEN_OMEGA_DIR -u AIEN_OMEGA_COMPOSE_DIR -u AIEN_OMEGA_GPU_LIB -u AIEN_FORCE_CPU_STUB \
     AIEN_OMEGA_COMPOSE_LIB="$LIB" CARGO_TARGET_DIR="$D/target" cargo build --release -p aien-cli ) >"$D/build.log" 2>&1 \
   || { echo "build failed, see $D/build.log" >&2; exit 2; }
 grep -q "building the stub" "$D/build.log" && { echo "stub compose build; refusing" >&2; exit 2; }
+fi
 [ -f "$VER_SRC" ] || { echo "missing $VER_SRC (the verifier, sc#389)" >&2; exit 2; }
 sh "$REPO/tools/aien-verify/build.sh" "$VER" >"$D/verifier-build.log" 2>&1 || { echo "verifier build failed, see $D/verifier-build.log" >&2; exit 2; }
 VER_SHA=$(sha256sum "$VER" | cut -d' ' -f1); VER_SRC_SHA=$(sha256sum "$VER_SRC" | cut -d' ' -f1)
@@ -143,22 +264,27 @@ RUN_ID=$(printf '%s\n%s\n%s\n%s' "$OBJ_ID" "$BIN_SHA" "$W_SHA" "$HOST" | sha256s
 N=0; PREV=$(printf '0%.0s' $(seq 1 64)); CHAIN=$OUT/chain; ROWS=""
 rcpt() { # step status evidence [fields json]
   N=$((N + 1)); local f; f=$(printf '%s/%03d-%s.json' "$CHAIN" "$N" "$1")
-  jq -n --arg oid "$OBJ_ID" --arg rid "$RUN_ID" --arg step "$1" --arg status "$2" --arg ev "$3" --argjson fields "${4:-{\}}" \
+  local st=$2 ev=$3 gx='{}'
+  if [ "$MODE" = gb10 ]; then   # v1.3 G3-G5: counters in every receipt; a fallback or an off-chip model call is a FAIL
+    gb10_receipt "$1"; gx=$G_JSON
+    if [ -n "$G_WHY" ]; then case $st in PASS|RECORDED) st=FAIL ;; esac; ev="$ev | gb10: ${G_WHY# }"; fi
+  fi
+  jq -n --arg oid "$OBJ_ID" --arg rid "$RUN_ID" --arg step "$1" --arg status "$st" --arg ev "$ev" --argjson fields "${4:-{\}}" \
     --arg utc "$(utc)" --arg prev "$PREV" --arg commit "$COMMIT" --arg bin "$BIN_SHA" --arg w "$W_SHA" --arg t "$T_SHA" \
-    --arg backend "${CUR_BACKEND:-no daemon started}" --arg host "$HOST" \
+    --arg backend "${CUR_BACKEND:-no daemon started}" --arg host "$HOST" --argjson gx "$gx" \
     '{objective_id:$oid, run_id:$rid, step:$step, status:$status, utc:$utc, prev_receipt_sha256:$prev, evidence:$ev,
       repo_commit:$commit, daemon_sha256:$bin, cli_sha256:$bin, model_weights_digest:$w, tokenizer_sha256:$t,
-      backend_line:$backend, host:$host} + $fields' >"$f"
+      backend_line:$backend, host:$host} + $fields + $gx' >"$f"
   PREV=$(sha_of "$f")
-  case $1 in CTRL-*|E[0-9]*) ROWS="$ROWS$1 $2"$'\n' ;; esac
-  echo "[$(date -u +%H:%M:%S)] $1 $2: $3" | cut -c1-300 | tee -a "$OUT/console.txt"
+  case $1 in CTRL-*|E[0-9]*) ROWS="$ROWS$1 $st"$'\n' ;; esac
+  echo "[$(date -u +%H:%M:%S)] $1 $st: $ev" | cut -c1-300 | tee -a "$OUT/console.txt"
 }
 
 # ---- daemon control ----------------------------------------------------------------------------------------
 DN=0; DPID=""; CUR_BACKEND=""; RESTARTS=0; LAST_START_UTC=""; DLOG=/dev/null
 start_daemon_raw() { # [VAR=val ...]: one daemon start, no ALLEN subject unless the caller passes it
   DN=$((DN + 1)); DLOG=$LOGS/daemon-$DN.txt; rm -f "$SOCK"
-  "${E[@]}" AIEN_MODEL_PATH="$MDIR/model.safetensors" AIEN_TOKENIZER_PATH="$MDIR/tokenizer.json" "$@" "$BIN" daemon >"$DLOG" 2>&1 &
+  "${E[@]}" "${GPUX[@]}" AIEN_MODEL_PATH="$MDIR/model.safetensors" AIEN_TOKENIZER_PATH="$MDIR/tokenizer.json" "$@" "$BIN" daemon >"$DLOG" 2>&1 &
   DPID=$!
   local i
   for i in $(seq 1 600); do
@@ -169,15 +295,27 @@ start_daemon_raw() { # [VAR=val ...]: one daemon start, no ALLEN subject unless 
   [ -S "$SOCK" ] || { echo "daemon $DN not serving after 20 min"; return 1; }
   LAST_START_UTC=$(utc)
   CUR_BACKEND=$(grep -m1 '^  Backend:' "$DLOG" | sed 's/^ *//')
-  case $CUR_BACKEND in *CPU-reference*) ;; *) echo "not the CPU reference backend: '$CUR_BACKEND'"; kill -9 "$DPID" 2>/dev/null; wait "$DPID" 2>/dev/null; DPID=""; return 1 ;; esac
+  local want="CPU reference"; [ "$MODE" = gb10 ] && want="native Omega GB10"
+  if ! backend_ok "$MODE" "$CUR_BACKEND"; then echo "not the $want backend: '$CUR_BACKEND'"; kill -9 "$DPID" 2>/dev/null; wait "$DPID" 2>/dev/null; DPID=""; return 1; fi
+  if [ "$MODE" = gb10 ]; then   # G2: the production strict start line (a fallback panics instead of counting)
+    STRICT_LINE=$(grep -m1 'STRICT strict=' "$DLOG" | sed 's/^ *//' | cut -c1-200)
+    strict_ok "$STRICT_LINE" || { echo "daemon is not strict: '$STRICT_LINE'"; kill -9 "$DPID" 2>/dev/null; wait "$DPID" 2>/dev/null; DPID=""; return 1; }
+  fi
   return 0
 }
 ALLEN_REQUIRE=1; SUBJ=""; ALLEN_ADOPT=""; ALLEN_FP=""; ALLEN_LINE=""; SUBJ_N=0
 build_subject() { # lineage_hex: host-built fixture subject bound to record 1 of the current compose home (demo S1)
   SUBJ_N=$((SUBJ_N + 1)); SUBJ=$RUN/subject-$SUBJ_N.bin
-  local fx; fx=$(cd "$REPO" && env -u AIEN_OMEGA_DIR -u AIEN_OMEGA_COMPOSE_DIR AIEN_OMEGA_COMPOSE_LIB="$LIB" CARGO_TARGET_DIR="$D/target" \
+  local fx
+  if [ "$MODE" = gb10 ]; then   # the same pinned environment and target as the daemon build (G1)
+    fx=$(cd "$REPO" && . "$PINS/env.sh" && env CARGO_TARGET_DIR="$TGT" \
+      DEMO_SUBJECT_OUT="$SUBJ" DEMO_LINEAGE_HEX="$1" DEMO_SUBJECT_NAME="whole-system-e2e-$SUBJ_N" \
+      cargo test --release -p aien-allen --test e2e_demo_subject -- --ignored --nocapture 2>&1)
+  else
+  fx=$(cd "$REPO" && env -u AIEN_OMEGA_DIR -u AIEN_OMEGA_COMPOSE_DIR AIEN_OMEGA_COMPOSE_LIB="$LIB" CARGO_TARGET_DIR="$D/target" \
     DEMO_SUBJECT_OUT="$SUBJ" DEMO_LINEAGE_HEX="$1" DEMO_SUBJECT_NAME="whole-system-e2e-$SUBJ_N" \
     cargo test --release -p aien-allen --test e2e_demo_subject -- --ignored --nocapture 2>&1)
+  fi
   ALLEN_ADOPT=$(printf '%s\n' "$fx" | sed -n 's/^AGENT=//p')
   [ -n "$ALLEN_ADOPT" ] && [ -s "$SUBJ" ] || { echo "could not build the ALLEN fixture subject: $(printf '%s' "$fx" | tail -c 300)"; SUBJ=""; return 1; }
 }
@@ -217,6 +355,7 @@ task() {
   fi
   T_OID=$oid
   cli compose propose --goal "$goal" --workspace "$ws" --context "$ctx" --objective-id "$oid" >"$ART/$tag-propose.json" 2>"$ART/$tag-propose.err"
+  PROP_DN[$tag]=$DN   # v1.3: the daemon that served this propose (its gpu_executions are that process's totals)
   if [ "$(jq -r '.report.committed // false' "$ART/$tag-propose.json" 2>/dev/null)" != true ]; then
     T_EV="propose did not commit: $(jq -r '.report.proposer_error // .error // "no proposal"' "$ART/$tag-propose.json" 2>/dev/null | cut -c1-200)"; return 1
   fi
@@ -254,13 +393,17 @@ echo "run folder: $OUT" | tee "$OUT/console.txt"
 cp "$REPO/docs/campaigns/whole-system-e2e/ACCEPTANCE-v1.md" "$OUT/ACCEPTANCE-v1.as-run.md"
 cp "$REPO/docs/campaigns/whole-system-e2e/ACCEPTANCE-v1.1.md" "$OUT/ACCEPTANCE-v1.1.as-run.md" 2>/dev/null
 cp "$REPO/docs/campaigns/whole-system-e2e/ACCEPTANCE-v1.2.md" "$OUT/ACCEPTANCE-v1.2.as-run.md" 2>/dev/null
+if [ "$MODE" = gb10 ]; then   # v1.3: the gb10 rows as run, the zero-CUDA gate output and the pin log
+  cp "$REPO/docs/campaigns/whole-system-e2e/ACCEPTANCE-v1.3-gb10.md" "$OUT/ACCEPTANCE-v1.3-gb10.as-run.md"
+  cp "$D/zero-cuda-gate.txt" "$ART/zero-cuda-gate.txt"; cp "$D/pins.txt" "$ART/pins.txt"
+fi
 FIX=$(cd "$WS/inbox" && sha256sum -- * | LC_ALL=C sort -k2 | jq -R -s 'split("\n") | map(select(length>0) | split("  ") | {name:.[1], sha256:.[0]})')
 PRE_OK=1; PRE_EV="host $HOST; model $C_ID"
 [ "$W_SHA" = "$C_W" ] && [ "$T_SHA" = "$C_T" ] || { PRE_OK=0; PRE_EV="$PRE_EV; model digests differ from release/candidate.toml"; }
 
 # ---- CTRL-E3a: desk required, no key -> the daemon refuses to start ----------------------------------------
 DN=$((DN + 1)); DLOG=$LOGS/daemon-$DN-nokey.txt; rm -f "$SOCK"
-"${E[@]}" AIEN_MODEL_PATH="$MDIR/model.safetensors" AIEN_TOKENIZER_PATH="$MDIR/tokenizer.json" "$BIN" daemon >"$DLOG" 2>&1 &
+"${E[@]}" "${GPUX[@]}" AIEN_MODEL_PATH="$MDIR/model.safetensors" AIEN_TOKENIZER_PATH="$MDIR/tokenizer.json" "$BIN" daemon >"$DLOG" 2>&1 &
 NK=$!; for i in $(seq 1 300); do [ -d "/proc/$NK" ] || break; [ -S "$SOCK" ] && break; sleep 1; done
 if [ -d "/proc/$NK" ]; then kill -9 "$NK" 2>/dev/null; wait "$NK" 2>/dev/null; NK_RC=killed; else wait "$NK" 2>/dev/null; NK_RC=$?; fi
 NK_LINE=$(grep -i -m1 -E 'desk' "$DLOG" | cut -c1-200)
@@ -500,6 +643,16 @@ write_close() { # VERDICT_ROWS.txt and the manifest, from the current chain
   ( cd "$OUT" && find . -type f ! -name SHA256SUMS ! -name VERIFIER_VERDICT.txt ! -name VERIFIER_RECEIPT.json -print0 | LC_ALL=C sort -z | xargs -0 sha256sum >chain/SHA256SUMS )
 }
 verify_out() { "$VER" "$1" --contract-sha256 "$CONTRACT_SHA" --objective-id "$OBJ_ID" "${@:2}"; }
+gb10_summary() {   # v1.3 G4: the run-level fallback verdict over every daemon log, and the per-row counters (GB10_SUMMARY.json)
+  FL_END=$(fallback_lines "$LOGS"/daemon-*.txt); [ "$FL_END" -eq 0 ] || FALLBACK_SEEN=true
+  jq -s --argjson fd "$FALLBACK_SEEN" --argjson fl "$FL_END" --argjson pins "$PINS_JSON" --arg drv "$NVDRV" --arg zc "$ZC" --argjson dn "$DN" \
+    --argjson bl "$(grep -h -m1 '^  Backend:' "$LOGS"/daemon-*.txt 2>/dev/null | sed 's/^ *//' | sort -u | jq -R . | jq -sc .)" \
+    '{backend_mode:"gb10", fallback_detected:$fd, fallback_log_lines_all_daemons:$fl, daemon_starts:$dn, backend_lines:$bl, pins:$pins,
+      nvidia_driver:$drv, zero_cuda_gate_exit:$zc,
+      rows:[.[] | {step, status, gpu_executions, gpu_executions_process_total, gpu_executions_since, fallback_count, gb10_problems}]}' \
+    "$CHAIN"/*.json >"$OUT/GB10_SUMMARY.json"
+}
+if [ "$MODE" = gb10 ]; then gb10_summary; echo "gb10: fallback_detected $FALLBACK_SEEN; summary GB10_SUMMARY.json" | tee -a "$OUT/console.txt"; fi
 echo "run folder written: $OUT ($(ls "$CHAIN" | wc -l) chain files); console closed; manifest and verifier follow" | tee -a "$OUT/console.txt"
 write_close
 cat "$OUT/VERDICT_ROWS.txt"
@@ -530,6 +683,7 @@ else
   rcpt CTRL-E5 NOT_RUN "no pre-CTRL-E5 verdict or no usable artifacts/E3-report.md; the mutation check could not run" '{}'
 fi
 cp "$OUT/VERIFIER_VERDICT.txt" "$OUT/artifacts/VERIFIER_VERDICT.pre-ctrl-e5.txt" 2>/dev/null   # after the mutated copy is gone, so the copy is a clean copy of the closed folder
+[ "$MODE" = gb10 ] && gb10_summary   # v1.3: the summary also covers the CTRL-E5 receipt
 write_close
 verify_out "$OUT" --write >"$D/verify-final.out" 2>&1; VRC=$?
 echo "verifier exit $VRC (final): $(grep -E '^(CTRL-E5|verdict_id|chain_unbroken|base_verdict_id) ' "$OUT/VERIFIER_VERDICT.txt" 2>/dev/null | tr '\n' ' ')"
