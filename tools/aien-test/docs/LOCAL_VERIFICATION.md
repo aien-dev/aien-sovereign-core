@@ -219,6 +219,16 @@ NOT_RUN with reason `model_missing`, never PASS. Exit 77 with a plain
 lowercase `not_run_reason` is the general rule (`verdict::SELF_NOT_RUN_EXIT`);
 without that observation, or when a manifest itself expects 77, it is an
 ordinary exit.
+
+The mutant gates apply their patch to a private copy of the tree in `/tmp`,
+never to the checkout: the gates of one head run in parallel in one checkout,
+and a patched file there would fail every other gate's clean-tree check.
+
+`wt.sh sync` also copies the trusted clone's `origin` URL into the mirror, so
+`git remote get-url origin` in a sandbox checkout gives the GitHub URL, as on a
+GitHub runner (the sc tier-1 test f62 reads it). Nothing fetches through it:
+the sandbox has no network and cannot write the mirror.
+
 ## The worker
 
 For one head `REPO SHA`:
