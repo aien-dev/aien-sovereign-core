@@ -8,6 +8,7 @@ pass=0; fail=0
 ok()  { pass=$((pass+1)); printf 'PASS %s\n' "$1"; }
 bad() { fail=$((fail+1)); printf 'FAIL %s: %s\n' "$1" "$2"; }
 run() { sudo -n "$X" "$@"; }   # run [exec args]... -- cmd
+here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 
 uid=$(id -u aien-run)
 [[ -n $uid ]] || { echo "no aien-run user"; exit 1; }
@@ -28,6 +29,10 @@ run --cwd /tmp --timeout 10 --profile host --env LD_PRELOAD=x -- true >/dev/null
 # 4 no network for host profile
 out=$(run --cwd /tmp --timeout 20 --profile host -- sh -c 'curl -s -m 3 https://github.com >/dev/null 2>&1; echo curl=$?; getent hosts github.com >/dev/null 2>&1; echo getent=$?; ip -o link | cut -d: -f2 | tr -d " " | tr "\n" ","' 2>&1)
 out=$(tr "\n" " " <<<"$out"); [[ $out == *"curl="[1-9]* && $out == *"getent="[1-9]* && $out == *"lo,"* && $out != *"enP"* && $out != *"tailscale"* ]] && ok "host profile has no network ($out)" || bad "network" "$out"
+
+# 4b loopback is up inside the namespace (a local server works), the host's own 127.0.0.1 services stay unreachable
+out=$(run --cwd /tmp --timeout 20 --profile host -- bash -c 'ip -o link show lo | grep -q "state UNKNOWN\|,UP"; echo lo_up=$?; (exec 3<>/dev/tcp/127.0.0.1/9) 2>&1 | grep -o "refused\|unreachable" | head -1; (exec 3<>/dev/tcp/127.0.0.1/3443) 2>&1 | grep -o "refused\|unreachable" | head -1' 2>&1 | tr "\n" " ")
+[[ $out == "lo_up=0 refused refused " ]] && ok "host profile loopback up, host 127.0.0.1:3443 not reachable ($out)" || bad "loopback" "$out"
 
 # 5 timeout -> 124
 t0=$(date +%s); run --cwd /tmp --timeout 1 --profile host -- sleep 30 >/dev/null 2>&1; rc=$?; t1=$(date +%s)
@@ -81,7 +86,8 @@ scopes=$(systemctl list-units --no-legend --plain 'aien-run-exec-*.scope' 2>/dev
 # their own worktrees under wt/ while this runs; those are skipped.
 wt_sh_worktrees() {
   local d
-  for d in "$RUN_HOME"/wt/*/*/; do
+  # run directory layout wt/<repo>/<sha>/<repo>/ (siblings beside it), or the older flat wt/<repo>/<sha>/
+  for d in "$RUN_HOME"/wt/*/*/ "$RUN_HOME"/wt/*/*/*/; do
     d=${d%/}
     [[ -f $d/.git && $(stat -c %u "$d/.git" 2>/dev/null) == 0 ]] || continue
     grep -q "^gitdir: $RUN_HOME/mirror/" "$d/.git" 2>/dev/null && printf '%s\n' "$d"
@@ -91,6 +97,24 @@ wt=$(wt_sh_worktrees | head -1)
 if [[ -n $wt ]]; then
   out=$(run --cwd "$wt" --timeout 30 --profile host -- sh -c 'git rev-parse --short HEAD >/dev/null && echo git-ok; rm -f .git 2>/dev/null && echo REMOVED; m=$(sed "s|gitdir: ||;s|/worktrees/.*||" .git); touch "$m/refs/x" 2>/dev/null && echo MIRROR-WRITABLE; echo t > .probe && rm .probe && echo tree-writable' 2>&1 | tr '\n' ' ')
   [[ $out == *git-ok* && $out != *REMOVED* && $out != *MIRROR-WRITABLE* && $out == *tree-writable* ]] && ok "worktree: git reads, .git and mirror protected, tree writable" || bad "worktree" "$out"
+fi
+
+# sibling checkouts (SANDBOX lane): wt.sh sibling puts a read-only checkout at ../<dir> of the checkout under test;
+# aien-run reads it and its git history, cannot write it or the run directory; wt.sh remove takes both away.
+if [[ -d $RUN_HOME/mirror/aien-protocols.git && -d $RUN_HOME/mirror/aien-architecture.git ]]; then
+  sa=$(git -C "$RUN_HOME/mirror/aien-architecture.git" rev-parse --verify -q 'refs/remotes/origin/main^{commit}')
+  sp=$(git -C "$RUN_HOME/mirror/aien-protocols.git" rev-parse --verify -q 'refs/remotes/origin/main^{commit}')
+  rd="$RUN_HOME/wt/aien-architecture/$sa"
+  if [[ -e $rd ]]; then
+    printf 'SKIP sibling test: %s is in use\n' "$rd"
+  else
+    co=$(bash "$here/../wt.sh" add aien-architecture "$sa") && bash "$here/../wt.sh" sibling aien-architecture "$sa" aien-protocols aien-protocols "$sp" >/dev/null
+    out=$(run --cwd "$co" --timeout 30 --profile host -- sh -c 'git -C ../aien-protocols rev-parse HEAD; test -f ../aien-protocols/Cargo.toml && echo sib-read; touch ../aien-protocols/x 2>/dev/null && echo SIB-WRITABLE; touch ../x 2>/dev/null && echo RUNDIR-WRITABLE; echo t > .p && rm .p && echo tree-writable' 2>&1 | tr '\n' ' ')
+    bash "$here/../wt.sh" remove aien-architecture "$sa" >/dev/null
+    left=$(git -C "$RUN_HOME/mirror/aien-protocols.git" worktree list | grep -c "$rd" || true)
+    [[ $out == "$sp sib-read tree-writable " && ! -e $rd && $left -eq 0 ]] \
+      && ok "sibling checkout: readable with history, read-only, run dir closed, removed with the run" || bad "sibling" "$out left=$left"
+  fi
 fi
 
 # ---- review fixes (INFRA-2): nothing a check writes can reach a later check ----
@@ -164,7 +188,7 @@ if [[ -n $wt ]]; then
   for w in $(wt_sh_worktrees); do
     total=$((total+1))
     s_out=$(run --cwd "$w" --timeout 60 --profile host -- crumb verify . 2>&1); s_rc=$?
-    tc=$(mktemp -d); sha=$(basename "$w"); repo=$(basename "$(dirname "$w")")
+    tc=$(mktemp -d); rel=${w#"$RUN_HOME"/wt/}; repo=${rel%%/*}; rest=${rel#*/}; sha=${rest%%/*}
     git clone --quiet --shared --no-checkout "$RUN_HOME/mirror/$repo.git" "$tc/t" && git -C "$tc/t" checkout --quiet "$sha"
     t_out=$(cd "$tc/t" && /usr/local/bin/crumb verify . 2>&1); t_rc=$?
     rm -rf "$tc"
