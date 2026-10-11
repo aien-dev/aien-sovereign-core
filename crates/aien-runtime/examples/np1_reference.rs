@@ -8,7 +8,7 @@
 //!
 //! usage: np1_reference <model_dir> <goal> <workspace> <max_tokens> <new|task> [retry reason]
 //!   new  = the product's NEW-destination prompt (`spine::task_decision`, `TargetClass::New`):
-//!          `proposal_prompt(goal, workspace)` plus `new_document_block` for the destination the
+//!          `proposal_prompt(goal)` plus `new_document_block` for the destination the
 //!          goal names, from the product's own public pieces, so it still holds after the run wrote
 //!          that destination (the v5 template alone when the goal names none)
 //!   task = `task_prompt(goal, workspace)` on the workspace as it is now
@@ -158,7 +158,7 @@ fn reference_prompt(mode: &str, goal: &str, ws: &std::path::Path) -> String {
     };
     match mode {
         "new" => {
-            let mut prompt = proposal_prompt(goal, &ws.display().to_string());
+            let mut prompt = proposal_prompt(goal);
             if let Some(dest) = classify_destination(goal, ws).1 {
                 prompt.push_str(&new_document_block(&dest));
             }
@@ -227,10 +227,7 @@ mod tests {
         let goal = "Write a short note about brewing green tea.";
         let (want, kind) = product(goal, &ws);
         assert_eq!(kind, ProposalKind::Document);
-        assert_eq!(
-            want,
-            aien_runtime::spine::proposal_prompt(goal, &ws.display().to_string())
-        );
+        assert_eq!(want, aien_runtime::spine::proposal_prompt(goal));
         assert_eq!(reference_prompt("new", goal, &ws), want);
         assert_eq!(reference_prompt("task", goal, &ws), want);
     }

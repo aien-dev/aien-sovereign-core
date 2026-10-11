@@ -302,7 +302,7 @@ async fn cpu_reference_tokens_unchanged_by_warm_up() {
         "{}{}",
         format_chat(
             tok.template(),
-            &user(&aien_runtime::spine::proposal_prompt(goal, "/tmp/ws"))
+            &user(&aien_runtime::spine::proposal_prompt(goal))
         )
         .expect("chat"),
         aien_runtime::spine::COMPOSE_ASSISTANT_PREFIX
