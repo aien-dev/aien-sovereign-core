@@ -1527,6 +1527,31 @@ type DaemonBackendParts = (
     Option<aien_runtime::generation::ModelIdentity>,
 );
 
+/// Runtime switch for an explicitly CPU-only run (sc#384 preflight). `AIEN_FORCE_CPU_STUB=1`
+/// is a BUILD-time flag (crates/aien-omega-gpu/build.rs): it only stubs the GPU library when
+/// compiling, and a binary built earlier with the GPU library ignores it at run time.
+pub const CPU_ONLY_ENV: &str = "AIEN_BACKEND";
+
+/// Stable name of the refusal, so scripts and tests can match it.
+pub const CPU_ONLY_REFUSAL: &str = "CPU_ONLY_BUT_GPU_BUILD";
+
+/// True when `AIEN_BACKEND=cpu` (case-insensitive) is set.
+fn cpu_only_requested(value: Option<&str>) -> bool {
+    value.is_some_and(|v| v.trim().eq_ignore_ascii_case("cpu"))
+}
+
+/// Preflight: an explicitly CPU-only run either uses the CPU backend or refuses to start.
+/// Decided before any model load or GPU session is opened. `native_linked` is whether this
+/// binary carries the real GPU library.
+fn cpu_only_preflight(value: Option<&str>, native_linked: bool) -> Result<(), String> {
+    if cpu_only_requested(value) && native_linked {
+        return Err(format!(
+            "{CPU_ONLY_REFUSAL}: {CPU_ONLY_ENV}=cpu asks for a CPU-only run, but this binary has the GB10 GPU engine linked and would select it. Refusing to start. Use a CPU-stub build (AIEN_FORCE_CPU_STUB=1 at build time) or unset {CPU_ONLY_ENV}. Note AIEN_FORCE_CPU_STUB does nothing at run time."
+        ));
+    }
+    Ok(())
+}
+
 fn build_native_daemon_backend() -> Result<DaemonBackendParts, String> {
     let policy = CheckpointPolicy::from_env();
     let manifest = resolve_daemon_manifest_with(&policy);
@@ -1732,6 +1757,14 @@ pub async fn run_daemon_server() {
         "{}",
         "⚡ Starting AIEN Sovereign Runtime Daemon...".cyan().bold()
     );
+    // sc#384 preflight: an explicitly CPU-only run never reaches a GPU build.
+    if let Err(fatal) = cpu_only_preflight(
+        std::env::var(CPU_ONLY_ENV).ok().as_deref(),
+        aien_omega_gpu::is_native(),
+    ) {
+        eprintln!("Fatal: {}", fatal.red().bold());
+        std::process::exit(1);
+    }
     // NEXT-PHASE-2 (ACCEPTANCE-v2 2.8): damaged idempotency state refuses the
     // start; it is never reset silently.
     if let Err(fatal) = aien_runtime::control::RuntimeController::load() {
@@ -2236,6 +2269,21 @@ pub async fn handle_aegis_command() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cpu_only_switch_never_selects_gpu() {
+        // GPU-capable build: refuses with the named error.
+        let e = cpu_only_preflight(Some("cpu"), true).unwrap_err();
+        assert!(e.starts_with(CPU_ONLY_REFUSAL), "{e}");
+        assert!(cpu_only_preflight(Some(" CPU "), true).is_err());
+        // Stub build: allowed, the CPU reference backend is then the only one possible.
+        assert!(cpu_only_preflight(Some("cpu"), false).is_ok());
+        // Not requested: unchanged behaviour.
+        assert!(cpu_only_preflight(None, true).is_ok());
+        assert!(cpu_only_preflight(Some("gpu"), true).is_ok());
+        // AIEN_FORCE_CPU_STUB alone is not the switch.
+        assert!(!cpu_only_requested(Some("1")));
+    }
 
     #[test]
     fn start_refusal_names_the_exact_command() {
