@@ -2,8 +2,10 @@
 //!
 //! Offline: nothing is downloaded. Order:
 //!   1. `AIEN_FORCE_CPU_STUB=1`          -> stub (no library; every call returns
-//!      `ComposeError::Unavailable`).
-//!   2. `AIEN_OMEGA_COMPOSE_LIB=<file>`  -> link that prebuilt archive (not sha-checked).
+//!      `ComposeError::Unavailable`). Refused when `AIEN_REQUIRE_NATIVE_LIBS=1`.
+//!   2. `AIEN_OMEGA_COMPOSE_LIB=<file>`  -> link that prebuilt archive; `AIEN_OMEGA_COMPOSE_LIB_SHA256`
+//!      must name its sha256 (checked) and it must define every function in the ABI manifest.
+//!      A development override: its identity says `prebuilt` and it never qualifies.
 //!   3. `AIEN_OMEGA_COMPOSE_DIR=<checkout>`, else `AIEN_OMEGA_DIR` (the checkout
 //!      aien-omega-gpu builds from) -> its HEAD must equal omega.lock, then
 //!      `make <OUT_DIR>/librx_compose.a` runs in it. `AIEN_OMEGA_COMPOSE_SHA=<40-hex>`
@@ -16,8 +18,16 @@
 //! `AIEN_OMEGA_COMPOSE_DIR` exists so a developer override never touches the
 //! checkout aien-omega-gpu checks against omega.lock.
 //! `cfg(has_omega_compose)` is set only when the real library is linked.
+//!
+//! Before linking a checkout build, `aien_abi_conformance::build::qualify_built` checks the
+//! pinned `rxc_host_abi.h`, a compiled layout probe and the archive symbols against
+//! `abi/rxc_host_abi.manifest`, and the archive sha256 against `native-artifacts.lock`; any
+//! mismatch fails the build. The result is recorded for `native_identity()`.
+use aien_abi_conformance::build;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+
+const PREFIX: &str = "AIEN_OMEGA_COMPOSE";
 
 fn main() {
     println!("cargo:rustc-check-cfg=cfg(has_omega_compose)");
@@ -55,7 +65,14 @@ fn main() {
     };
     println!("cargo:rustc-env=AIEN_OMEGA_COMPOSE_EXPECTED_SHA={expected}");
 
+    let root = PathBuf::from(env("CARGO_MANIFEST_DIR"));
+    let manifest = root.join("abi/rxc_host_abi.manifest");
+    let artifacts_lock = root.join("../../native-artifacts.lock");
+    println!("cargo:rerun-if-env-changed=AIEN_OMEGA_COMPOSE_LIB_SHA256");
+
     if std::env::var("AIEN_FORCE_CPU_STUB").as_deref() == Ok("1") {
+        build::refuse_stub_if_required("aien-omega-compose");
+        build::Identity::stub(&expected).emit(PREFIX);
         return;
     }
     if let Ok(lib) = std::env::var("AIEN_OMEGA_COMPOSE_LIB") {
@@ -65,6 +82,14 @@ fn main() {
             "AIEN_OMEGA_COMPOSE_LIB {} is not a file",
             lib.display()
         );
+        build::qualify_prebuilt(
+            "aien-omega-compose",
+            &manifest,
+            &lib,
+            "AIEN_OMEGA_COMPOSE_LIB_SHA256",
+            "unverified",
+        )
+        .emit(PREFIX);
         require_wait_ms_symbol(&lib);
         link(&lib);
         return;
@@ -74,10 +99,11 @@ fn main() {
     else {
         // See aien-omega-gpu/build.rs: AIEN_REQUIRE_NATIVE_LIBS=1 refuses the stub.
         assert!(
-            std::env::var("AIEN_REQUIRE_NATIVE_LIBS").as_deref() != Ok("1"),
+            !build::require_native(),
             "aien-omega-compose: AIEN_REQUIRE_NATIVE_LIBS=1 but no AIEN_OMEGA_COMPOSE_DIR, AIEN_OMEGA_DIR or AIEN_OMEGA_COMPOSE_LIB is set (run scripts/pins.sh and source target/pins/env.sh)"
         );
         println!("cargo:warning=aien-omega-compose: no AIEN_OMEGA_COMPOSE_DIR, AIEN_OMEGA_DIR or AIEN_OMEGA_COMPOSE_LIB, building the stub");
+        build::Identity::stub(&expected).emit(PREFIX);
         return;
     };
     let dir = PathBuf::from(dir);
@@ -119,8 +145,20 @@ fn main() {
         dir.display()
     );
     detect_wait_ms(&dir);
-    require_wait_ms_symbol(&out.join("librx_compose.a"));
-    link(&out.join("librx_compose.a"));
+    let archive = out.join("librx_compose.a");
+    build::qualify_built(
+        "aien-omega-compose",
+        &manifest,
+        &artifacts_lock,
+        &dir,
+        &physics,
+        &archive,
+        &expected,
+        expected == pinned,
+    )
+    .emit(PREFIX);
+    require_wait_ms_symbol(&archive);
+    link(&archive);
 }
 
 /// Check the omega checkout's host header. omega.lock pins a commit that
