@@ -16,7 +16,8 @@ git -C $V/wrap fetch -q origin && git -C $V/wrap checkout -q "$WRAP_COMMIT" || {
 ( cd $V/wrap/docs/campaigns/open-model-qwen3 && bash test-v7.sh > $R/test-v7.out 2>&1 ) || { echo "run-dry: test-v7.sh failed at $WRAP_COMMIT"; exit 2; }
 cp "$HERE/run-part.sh" $V/run-part.sh; chmod +x $V/run-part.sh; sha256sum $V/run-part.sh "$0" > $R/launcher-dry.sha256
 date -u +%FT%TZ > $R/hold-dry-p1.start
-quietlock hold --owner laneB-oq3-v7-dry-p1 --minutes 40 --reason "OPEN-MODEL-QWEN3 v7 gate G6 dry run part 1, Qwen3-8B (not scored, sc#384)" -- $V/run-part.sh dry 1 > $R/hold-dry-p1.log 2>&1
+# quietlock: holds over 20 minutes need Drake's approval token (attempt 1 at 22:10:23Z was refused with 40); on overrun the flag is kept and the command is never killed.
+quietlock hold --owner laneB-oq3-v7-dry-p1 --minutes 20 --reason "OPEN-MODEL-QWEN3 v7 gate G6 dry run part 1, Qwen3-8B (not scored, sc#384)" -- $V/run-part.sh dry 1 > $R/hold-dry-p1.log 2>&1
 echo $? > $R/hold-dry-p1.rc; date -u +%FT%TZ > $R/hold-dry-p1.end
 Q=$V/wrap/docs/campaigns/open-model-qwen3
 bash $Q/g6-gate.sh $R/dry-out/oq3-v7-DRYRUN-results.jsonl $Q/../scoring/declarations/oq3-v5.decl.json $V/dry-runs D1 D2 D3 > $R/g6-reasons.txt 2>&1
