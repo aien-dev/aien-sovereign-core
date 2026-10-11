@@ -1,8 +1,3 @@
-    // The v5 regex reads the four bracketed fields and then ` backend=` directly;
-    // the same check without a regex dependency: the bracketed prefix is intact
-    // and ` backend=` follows `reference_runs=[]` immediately.
-    assert!(line.starts_with("OP_REPORT native=[matmul_vec] reference=[] native_fallbacks=[] reference_runs=[] backend=OmegaGb10"), "{line}");
-    assert!(!line[..line.find(" backend=").unwrap()].contains("gpu_executions"), "{line}");
 //! sc#337: "no silent fallback" must be shown by what a run keeps, not by the
 //! absence of a crash. The real submission path the daemon uses
 //! (`submit_work` -> scheduler -> `NativeTransformerBackend::execute_step`)
@@ -368,16 +363,23 @@ fn record_carries_gpu_executions_only_when_counted() {
 #[test]
 fn op_report_line_keeps_backend_right_after_reference_runs() {
     let mut ops = aien_abi_core::OpEvidence::default();
-    ops.report = "OP_REPORT native=[matmul_vec] reference=[] native_fallbacks=[] reference_runs=[]".into();
+    ops.report =
+        "OP_REPORT native=[matmul_vec] reference=[] native_fallbacks=[] reference_runs=[]".into();
     ops.backend = "OmegaGb10Backend (native Omega engine)".into();
     ops.gpu_executions = Some(7);
     let line = aien_runtime::generation::op_report_line(Some(&ops)).unwrap();
-    let v5 = regex_lite::Regex::new(
-        r"^OP_REPORT native=\[([^\]]*)\] reference=\[([^\]]*)\] native_fallbacks=\[([^\]]*)\] reference_runs=\[([^\]]*)\] backend=(.*)$",
-    )
-    .unwrap();
-    let caps = v5.captures(&line).unwrap_or_else(|| panic!("v5 -OPR regex must match: {line}"));
-    assert_eq!(&caps[3], "", "{line}");
-    assert!(caps[5].contains("OmegaGb10"), "{line}");
+    // The v5 regex reads the four bracketed fields and then ` backend=` directly;
+    // the same check without a regex dependency: the bracketed prefix is intact
+    // and ` backend=` follows `reference_runs=[]` immediately.
+    assert!(
+        line.starts_with(
+            "OP_REPORT native=[matmul_vec] reference=[] native_fallbacks=[] reference_runs=[] backend=OmegaGb10"
+        ),
+        "{line}"
+    );
+    assert!(
+        !line[..line.find(" backend=").unwrap()].contains("gpu_executions"),
+        "{line}"
+    );
     assert!(line.ends_with(" gpu_executions=7"), "{line}");
 }
