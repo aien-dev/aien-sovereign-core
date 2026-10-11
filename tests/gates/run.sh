@@ -14,6 +14,14 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT"
 step="${1:?usage: tests/gates/run.sh <step>}"
+# GitHub runners give every job a writable HOME; the sandbox's HOME (/var/lib/aien-run) is read-only on
+# purpose. Tools that write under HOME (Chrome's crash database in aien-cli's browser_mirror test, which
+# otherwise dies with SIGTRAP) get a fresh one for this step. CARGO_HOME and RUSTUP_HOME are set by the
+# sandbox and do not follow HOME.
+if [ -n "${HOME:-}" ] && [ ! -w "$HOME" ]; then
+  HOME="$(mktemp -d)"; export HOME
+  trap 'rm -rf "$HOME"' EXIT
+fi
 obs() { printf 'AIEN-OBS %s %s\n' "$1" "$2"; }
 # Outside the worktree when CARGO_TARGET_DIR is, and under target/ otherwise: the hosted test job
 # has no pin checkouts in its tree, and test_t2_f65 scans the tree (minus target/) for *.pem files,
