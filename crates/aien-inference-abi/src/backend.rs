@@ -156,6 +156,13 @@ pub trait TensorBackend: Send + Sync {
         crate::native_ops::OpReport::all_native()
     }
 
+    /// Operations this backend has run on its chip so far (process total), for
+    /// receipts (sc#402). Default: None, for a backend with no chip or that does
+    /// not count chip calls: an absent claim, never zero.
+    fn gpu_executions(&self) -> Option<u64> {
+        None
+    }
+
     /// In-place Root Mean Square Normalization:
     /// out[i] = x[i] * weight[i] / sqrt(mean(x^2) + eps)
     fn rmsnorm(&self, out: &mut [f32], x: &[f32], weight: &[f32], eps: f32);

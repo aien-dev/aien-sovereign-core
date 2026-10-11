@@ -132,6 +132,7 @@ counters (`TensorBackend::op_report`) when a sequence finishes
 | `reference_runs` | runs of ops on the reference CPU path by design (outside the backend's native mask) |
 | `scope` | always `process`: the counts are totals since the daemon built the backend, NOT per call |
 | `report` | the full `OP_REPORT native=[..] reference=[..] native_fallbacks=[..] reference_runs=[..]` line |
+| `gpu_executions` | sc#402: operations the backend ran on its chip (the Omega GB10 engine's `chip_calls`), process total like the rest; ABSENT, not zero, for a backend with no chip (the CPU reference backend, the Omega stub). The `OP_REPORT` log line then carries ` gpu_executions=<n>` before ` backend=` |
 
 Because the counts are process totals, a later record's counts include every
 earlier call's; a per-call figure is the difference between two records of the

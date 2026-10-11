@@ -135,6 +135,7 @@ impl OpReport {
             native_fallbacks: total(&self.native_fallbacks),
             reference_runs: total(&self.reference_runs),
             report: self.line(),
+            gpu_executions: None,
         }
     }
 

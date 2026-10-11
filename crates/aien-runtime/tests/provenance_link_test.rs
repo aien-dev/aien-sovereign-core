@@ -78,6 +78,7 @@ fn cpu_ops() -> aien_inference_abi::OpEvidence {
         native_fallbacks: 0,
         reference_runs: 0,
         report: "OP_REPORT native=[] reference=[] native_fallbacks=[] reference_runs=[]".into(),
+        gpu_executions: None,
     }
 }
 

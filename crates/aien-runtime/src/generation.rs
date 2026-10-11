@@ -112,13 +112,20 @@ fn with_ops(record: &mut Value, o: Option<&aien_abi_core::OpEvidence>) {
         "scope": "process",
         "report": o.report,
     });
+    if let Some(n) = o.gpu_executions {
+        record["ops"]["gpu_executions"] = json!(n); // sc#402, process total like the rest
+    }
 }
 
 /// The line the daemon logs at the end of every model call (sc#337): the
-/// backend's `OP_REPORT ...` line with ` backend=<name>` appended. None when
-/// the backend does not account its ops.
+/// backend's `OP_REPORT ...` line with ` backend=<name>` appended (and, before
+/// it, ` gpu_executions=<n>` when the backend counts chip calls, sc#402). None
+/// when the backend does not account its ops.
 pub fn op_report_line(o: Option<&aien_abi_core::OpEvidence>) -> Option<String> {
-    o.map(|o| format!("{} backend={}", o.report, o.backend))
+    o.map(|o| match o.gpu_executions {
+        Some(n) => format!("{} gpu_executions={n} backend={}", o.report, o.backend),
+        None => format!("{} backend={}", o.report, o.backend),
+    })
 }
 
 /// The record's JSON body (field list is documented in docs/DAEMON_GENERATION_RECORD.md).
