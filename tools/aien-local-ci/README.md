@@ -10,12 +10,12 @@ AIENOS.
 | file | role |
 |---|---|
 | `aien-run-exec` | source of truth for `/usr/local/sbin/aien-run-exec`, the C8 exec contract |
-| `install.sh` | idempotent host install (user, dirs, caches, rustup proxies, exec script, sudoers) |
+| `install.sh` | idempotent host install (user, dirs, caches, rustup proxies, trusted `crumb`, exec script, sudoers) |
 | `wt.sh` | trusted-side mirror + worktree management under `/var/lib/aien-run` |
 | `forgejo-webhook.sh` | push trigger: Forgejo post-receive hook that writes the worker trigger file (A3) |
-| `health.sh` | one-screen health (Forgejo, user, caches, worktrees, scopes, disk, GPU lock, quiet flag) |
+| `health.sh` | one-screen health (Forgejo, user, exec, crumb, home layout, caches, worktrees, scopes, disk, GPU lock, quiet flag) |
 | `gc.sh` | worktree age + target-dir quota cleanup, dry run by default |
-| `tests/run.sh` | proofs of the contract on this host (18 checks) |
+| `tests/run.sh` | proofs of the contract on this host (33 checks with two wt.sh worktrees present) |
 
 ## C8 exec contract
 
@@ -24,42 +24,71 @@ sudo -n /usr/local/sbin/aien-run-exec --cwd DIR --timeout SECS --profile host|qe
 ```
 
 Chain (all on the privileged side, then drop): `systemd-run --scope` under `aien-run.slice` with `MemoryMax`,
-`MemorySwapMax=0`, `TasksMax`, `CPUQuota`, `DevicePolicy` -> `unshare -n` (host|qemu) -> `prlimit --core=0
---nofile=65536` -> `timeout --signal=TERM --kill-after=10 SECS` (host|qemu) -> `setpriv --reuid aien-run --regid
-aien-run --init-groups --reset-env --no-new-privs` -> `env -i PATH HOME CARGO_HOME RUSTUP_HOME [K=V...] PROGRAM`.
-After PROGRAM exits the scope is killed and stopped, so a crashed check leaves no strays. Exit code passes through
-(124 timeout, 137 killed/OOM). Unprivileged user namespaces are refused on this kernel, which is why the namespace
-is created before dropping privileges.
+`MemorySwapMax=0`, `TasksMax`, `CPUQuota`, `DevicePolicy` -> `unshare -m [-n -i]` -> mount setup (below) ->
+`prlimit --core=0 --nofile=65536` -> `timeout --signal=TERM --kill-after=10 SECS` (host|qemu) -> `setpriv --reuid
+aien-run --regid aien-run --init-groups --reset-env --no-new-privs` -> `env -i -C DIR PATH HOME CARGO_HOME RUSTUP_HOME
+[K=V...] PROGRAM`. After PROGRAM exits the scope is killed and stopped, so a crashed check leaves no strays.
+Unprivileged user namespaces are refused on this host, which is why the namespaces are created as root before
+dropping privileges.
 
-| profile | memory | tasks | cpu | network | devices | timeout |
-|---|---|---|---|---|---|---|
-| host | 48G | 4096 | 1600% (16 cores) | none (fresh netns, only `lo`) | closed (null, zero, random, tty, ptmx) | yes |
-| qemu | 48G | 4096 | 1600% | none | closed + `/dev/kvm` | yes |
-| gb10 | 96G | 4096 | 1800% | host network | all (`/dev/nvidia*` are 0666; `/dev/dri/*` via groups video, render) | NO kill |
+Exit codes: PROGRAM's own code passes through; 124 = timeout (host|qemu); 137 = killed (OOM or SIGKILL);
+143 = the wrapper itself got TERM/INT/HUP (the scope is killed); 2 = refused by the wrapper before anything ran.
+
+Mount setup inside the private mount namespace (every profile): the whole sandbox home `/var/lib/aien-run` is
+read-only, except the worktree that contains `--cwd` and the target dir named by `CARGO_TARGET_DIR`, which stay
+writable. Private empty tmpfs on `/var/tmp`, `/var/crash`, `/var/lib/BrlAPI` (the world-writable places on the root
+disk). host|qemu also get private `/tmp`, `/dev/shm`, `/run/lock`, `/run/screen`, a fresh IPC namespace and a fresh
+`/dev/mqueue`.
+
+| profile | memory | tasks | cpu | network | IPC, /tmp, /dev/shm | devices | timeout |
+|---|---|---|---|---|---|---|---|
+| host | 48G | 4096 | 1600% (16 cores) | none (fresh netns, only a down `lo`) | private | closed (null, zero, random, tty, ptmx) | yes |
+| qemu | 48G | 4096 | 1600% | none | private | closed + `/dev/kvm` (aien-run is in group kvm) | yes |
+| gb10 | 96G | 4096 | 1800% | host network | shared with the host | all (`/dev/nvidia*` are 0666; `/dev/dri/*` via groups video, render) | NO kill |
+
+Argument rules (exit 2 when broken):
+* `--cwd` absolute, existing, canonical (no symlink, no `..`, no trailing slash). Inside `/var/lib/aien-run` only the
+  home itself or `wt/<repo>/<40-hex sha>[/...]`.
+* `--env K=V`: plain names; `PATH`, `HOME`, `CARGO_HOME`, `RUSTUP_HOME`, `LD_*`, `BASH_ENV`, `ENV` refused; each name at
+  most once. `CARGO_TARGET_DIR` must be exactly `/var/lib/aien-run/target/<repo>/pr` or `.../main` (trust class, A2);
+  it is created on demand (parent root-owned, class dir aien-run).
+* `PROGRAM` may not contain `=` or start with `-` (otherwise `env` would read it as one more variable assignment).
+* The wrapper refuses to run if the home, `cargo`, `cargo/bin`, `rustup`, `target`, `/usr/local/bin` or `/usr/bin`
+  is not root-owned or is group/other-writable.
 
 Optional flags `--memory-max`, `--tasks-max`, `--cpu-quota` override the profile defaults (tests use `--memory-max 64M`).
-`--env` refuses `PATH`, `HOME`, `CARGO_HOME`, `RUSTUP_HOME`, `LD_*`, `BASH_ENV`, `ENV`.
-Sandbox PATH is `/var/lib/aien-run/cargo/bin:/usr/local/bin:/usr/bin:/bin`; trusted copies of extra tools a gate needs
-(for example `crumb`) belong in `/usr/local/bin`, never in the operator's home.
+Sandbox PATH is `/var/lib/aien-run/cargo/bin:/usr/local/bin:/usr/bin:/bin` (all root-owned). A bare program name
+resolves only through it; a file of the same name inside the worktree is never used.
+
+## Trusted crumb on the sandbox PATH
+
+`/usr/local/bin/crumb` (root 0755) is built by `install.sh` from aien-architecture commit
+`94fffbcf88492c5a1c54211b5126c8a6c370a98d` (`tools/crumb/crumb.c`, git blob `841f5317...`, checked before building;
+source read from the git object store of `AIEN_ARCH_CLONE`, default `~/workspace/aien-architecture`) with
+`cc -O2 -Wall -std=c11`. With gcc 13.3.0 the binary's sha256 is `22015e6b156e038e...`, identical to the operator's
+`~/.local/bin/crumb` on 2026-10-11. To move the pin, change `CRUMB_COMMIT` and `CRUMB_BLOB` in `install.sh` in a PR.
 
 ## Egress decision
 
 No nftables rule for uid aien-run. host and qemu checks run in a fresh network namespace with no interfaces, which is
-stronger than a packet filter (no DNS, no loopback). gb10 keeps the host network per the contract; a later nft rule
-for uid aien-run would be the only way to close that and is deliberately not added by this lane.
+stronger than a packet filter (no DNS, no working loopback). gb10 is the only profile with network: it keeps the host
+network per the contract; a later nft rule for uid aien-run would be the way to close that and is deliberately not
+added by this lane.
 
-## Layout under /var/lib/aien-run (home of aien-run, 0750 aien-run:drakestapleton)
+## Layout under /var/lib/aien-run
 
 | path | owner / mode | purpose |
 |---|---|---|
-| `cargo/` | aien-run 0755 | CARGO_HOME (`.package-cache` lock lives here) |
+| `/var/lib/aien-run` | root:aien-run 0750, ACL `u:drakestapleton:r-x` | HOME of aien-run; no skeleton dotfiles |
+| `cargo/` | root 0755 | CARGO_HOME (cargo works with it read-only: `--locked --offline` builds need no writes there) |
 | `cargo/registry`, `cargo/git` | root, read-only | seeded once from `~/.cargo` (1.9 GB + 1.3 GB; the git cache is needed because `Cargo.lock` has 3 git sources) |
 | `cargo/bin` | root | the operator's `rustup` binary + proxy symlinks; no second rustup install |
 | `rustup/` | root, read-only | `settings.toml` (default 1.98.1) + `toolchains/1.98.1-aarch64-unknown-linux-gnu` copied (631 MB) |
 | `.gitconfig` | root 0644 | `safe.directory = *` (git 2.43 has no path globs; aien-run reaches nothing else) |
 | `mirror/<repo>.git` | drakestapleton 0755 | bare mirror of the trusted clone, refreshed by `wt.sh sync`; unwritable by aien-run |
 | `wt/<repo>/<sha>` | root dir drakestapleton:aien-run 1775, `.git` root 0644, files aien-run | checkouts; aien-run can add files, cannot replace `.git` or write the mirror |
-| `target/<repo>/{pr,main}` | aien-run | per trust class (A2); `main` is wiped after FAIL/timeout by the engine |
+| `target/`, `target/<repo>/` | root 0755 | parents cannot be swapped by aien-run |
+| `target/<repo>/{pr,main}` | aien-run | per trust class (A2); a run can write only the one it names; `main` is wiped after FAIL/timeout by the engine |
 
 ## Trigger file contract (A3)
 
@@ -67,11 +96,67 @@ for uid aien-run would be the only way to close that and is deliberately not add
 Forgejo post-receive hook (`forgejo-webhook.sh install <repo>`), consumed and deleted by `aien-test worker`.
 forgejo-runner stays off (its user unit is disabled); Forgejo is git hosting + PR UI + status display only.
 
+## Review (INFRA-2, 2026-10-11)
+
+Fixed in this branch (each has a test in `tests/run.sh`):
+1. The sandbox could write its own home and CARGO_HOME (both were owned by aien-run): a check could plant
+   `/var/lib/aien-run/.cargo/config.toml` or `cargo/config.toml` (for example a `build.rustc-wrapper`), or rename the
+   root-owned `cargo/registry` or `cargo/bin` aside and put poisoned crates or a fake `cargo` in their place. Every later
+   run, including a `main` qualification, would have used them. Now the home, `cargo/` and `target/` are root-owned and
+   the whole home is read-only inside every run.
+2. Cross trust class writes: a PR run could write `target/<repo>/main` and every other worktree (all owned by
+   aien-run). Now only the run's own worktree and the one target dir it names are writable.
+3. `/tmp`, `/var/tmp`, `/var/crash` were shared with the operator: a check could read the operator's temporary files
+   and leave files behind for later runs or for root crash tooling. Now private (see the profile table for gb10).
+4. SysV shared memory, semaphores and POSIX queues were shared with the host; host|qemu now get a fresh IPC namespace.
+5. `PROGRAM` of the form `NAME=VALUE` was read by `env` as one more variable, which bypassed the `--env` refusals
+   (for example `LD_PRELOAD`). Now refused.
+6. `CARGO_TARGET_DIR` and `--cwd` were not checked: a typo or a symlink planted by an earlier run inside a worktree
+   could point a run at another worktree or trust class. Now canonical paths only, target dir only `pr|main`.
+7. `install.sh` staged the sudoers line in a predictable `/tmp/aien-sudoers.<pid>` before installing it as root.
+   (`fs.protected_regular=2` on this host already blocked the race; now a private `mktemp -d` directory.)
+8. The wrapper ran with the caller's PATH via `/usr/bin/env bash`; it now uses `/bin/bash` and pins its own PATH.
+9. Skeleton dotfiles (`.bashrc`, `.profile`, `.config/autostart`, `Desktop`) in the home were aien-run-writable;
+   removed.
+10. The qemu profile allowed `/dev/kvm` in the cgroup policy, but aien-run was not in group `kvm` (`/dev/kvm` is
+    root:kvm 0660), so qemu checks could not use KVM. install.sh now adds the group; host still cannot open it.
+
+Checked and found sound (no change):
+* aien-run cannot read `~/.aien/verify.key`, `~/.config/gh/hosts.yml`, `~/.ssh/id_ed25519` or list `~/workspace`
+  (0600 files, 0700 workspace; tests 10). The trusted clone lives under `~/workspace`; the sandbox only sees the mirror.
+* sudoers: one exact command path, no wildcards; arguments are free by design and validated by the script; sudo's
+  `env_reset` plus `setpriv --reset-env` plus `env -i` clear the caller's environment (test 2).
+* `setpriv --no-new-privs`: setuid programs (sudo, crontab, at) gain nothing inside a run; the scope kills every
+  child at the end, so nothing outlives a run.
+* Repo-controlled files (`.cargo/config.toml`, `build.rs`, `rust-toolchain.toml`, test code) run as aien-run only and
+  cannot change the exec contract, which reads nothing from the tree. A toolchain pin other than 1.98.1 fails offline.
+* The environment whitelist is minimal: PATH, HOME, CARGO_HOME, RUSTUP_HOME (cargo and the rustup proxy need the last
+  two to find the sandbox caches) plus explicit `--env` pairs.
+* gb10 host network is the only network exception (`unshare -n` for host and qemu only).
+* Operator git refuses to run inside a sandbox worktree ("dubious ownership": the `.git` file is root-owned and the
+  files are aien-run-owned), so a `.git` directory planted by a check cannot run hooks or config as the operator.
+
+Accepted risks (recorded, not changed by this lane):
+* gb10 keeps host network, host `/tmp`, `/dev/shm` and IPC: a chip gate can reach local services on 127.0.0.1 (Forgejo
+  3443/2222, Cortex 18080 need credentials it cannot read) and the internet, and can leave files in `/tmp`.
+  Closing it needs either a nft rule for uid aien-run or a netns for gb10 after the chip gates are proven inside one.
+* If the caller kills the wrapper during a gb10 run, the trap kills the chip run too (no strays). The engine must not
+  signal a gb10 run; it only marks its advisory timeout in the receipt.
+* The operator account has `(ALL) NOPASSWD: ALL` in sudoers, so the narrow `aien-local-ci` rule is documentation of
+  intent, not a limit, until that broad rule is removed (operator decision, outside this lane).
+* The operator's home is 0755 (ACL user atlas `--x`); its secrets are 0600 and verified unreadable.
+* Same-SHA reuse: a PR run and a `main` qualification of the same commit share one worktree path. The engine should
+  remove and re-add the worktree (fresh checkout) before a `main` qualification.
+* `git` write operations as aien-run inside a worktree fail (the index lives in the read-only mirror). Gates must not
+  need them.
+* A run's HOME is read-only: a gate that writes to `$HOME` fails; write to `/tmp` (private for host|qemu) instead.
+* Worktree root dirs inherit setgid from the mirror layout (`drwxrwsr-t`); harmless.
+
 ## Operate
 
 ```
-tools/aien-local-ci/install.sh               # idempotent
-tools/aien-local-ci/tests/run.sh             # 18 proofs
+tools/aien-local-ci/install.sh               # idempotent; AIEN_ARCH_CLONE=<aien-architecture clone> for crumb
+tools/aien-local-ci/tests/run.sh             # all proofs, about 10 s
 tools/aien-local-ci/wt.sh sync aien-sovereign-core ~/workspace/aien-sovereign-core
 tools/aien-local-ci/wt.sh add aien-sovereign-core <sha>
 tools/aien-local-ci/health.sh
@@ -79,4 +164,6 @@ tools/aien-local-ci/gc.sh [--apply] [--days 3] [--target-quota-gb 120]
 ```
 
 Measured 2026-10-11 (sovereign-core 5ef7720, 20 cores, caches seeded): cold `cargo build --workspace --all-targets
---locked --offline` as aien-run 65.0 s (target dir 27 GB); warm rebuild after touching one crate 2.2 s.
+--locked --offline` as aien-run 65.0 s (target dir 27 GB); warm rebuild after touching one crate 2.2 s. After the
+read-only home change: full workspace build of worktree 62542eb into the existing `pr` target 49.9 s (new worktree
+path, so workspace crates rebuilt; dependencies reused), exit 0.

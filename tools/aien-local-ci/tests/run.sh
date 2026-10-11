@@ -50,6 +50,9 @@ out=$(run --cwd /tmp --timeout 10 --profile host -- sh -c 'exec 3<>/dev/nvidiact
 [[ $rc -ne 0 ]] && ok "host profile cannot open /dev/nvidiactl" || bad "host device policy" "opened nvidiactl"
 out=$(run --cwd /tmp --timeout 10 --profile gb10 -- sh -c 'exec 3<>/dev/nvidiactl && exec 4<>/dev/nvidia0 && exec 5<>/dev/nvidia-uvm && exec 6<>/dev/dri/renderD128 && echo opened' 2>&1)
 [[ $out == opened ]] && ok "gb10 profile opens /dev/nvidiactl, nvidia0, nvidia-uvm, dri/renderD128" || bad "gb10 devices" "$out"
+out=$(run --cwd /tmp --timeout 10 --profile qemu -- sh -c 'exec 3<>/dev/kvm && echo kvm' 2>&1)
+run --cwd /tmp --timeout 10 --profile host -- sh -c 'exec 3<>/dev/kvm' >/dev/null 2>&1; rc=$?
+[[ $out == kvm && $rc -ne 0 ]] && ok "qemu profile opens /dev/kvm, host profile cannot" || bad "kvm" "qemu=$out host_rc=$rc"
 
 # 10 secrets of the trusted side are unreadable (direct sudo -u, as the inventory demands)
 for f in "$OP_HOME/.aien/verify.key" "$OP_HOME/.config/gh/hosts.yml" "$OP_HOME/.ssh/id_ed25519"; do
@@ -73,12 +76,111 @@ strays=$(pgrep -u aien-run -f '^sleep 300$' | wc -l)
 scopes=$(systemctl list-units --no-legend --plain 'aien-run-exec-*.scope' 2>/dev/null | wc -l)
 [[ $rc -ne 0 && $strays -eq 0 && $scopes -eq 0 ]] && ok "crash recovery: rc=$rc, strays=0, scopes=0" || bad "crash recovery" "rc=$rc strays=$strays scopes=$scopes"
 
-# 13 worktree protection (if a worktree exists)
-wt=$(ls -d "$RUN_HOME"/wt/*/*/ 2>/dev/null | head -1)
+# 13 worktree protection (if a worktree exists; also used by the tests below)
+# Only worktrees made by wt.sh (root-owned .git pointing into the mirror). Other lanes may be creating and removing
+# their own worktrees under wt/ while this runs; those are skipped.
+wt_sh_worktrees() {
+  local d
+  for d in "$RUN_HOME"/wt/*/*/; do
+    d=${d%/}
+    [[ -f $d/.git && $(stat -c %u "$d/.git" 2>/dev/null) == 0 ]] || continue
+    grep -q "^gitdir: $RUN_HOME/mirror/" "$d/.git" 2>/dev/null && printf '%s\n' "$d"
+  done
+}
+wt=$(wt_sh_worktrees | head -1)
 if [[ -n $wt ]]; then
   out=$(run --cwd "$wt" --timeout 30 --profile host -- sh -c 'git rev-parse --short HEAD >/dev/null && echo git-ok; rm -f .git 2>/dev/null && echo REMOVED; m=$(sed "s|gitdir: ||;s|/worktrees/.*||" .git); touch "$m/refs/x" 2>/dev/null && echo MIRROR-WRITABLE; echo t > .probe && rm .probe && echo tree-writable' 2>&1 | tr '\n' ' ')
   [[ $out == *git-ok* && $out != *REMOVED* && $out != *MIRROR-WRITABLE* && $out == *tree-writable* ]] && ok "worktree: git reads, .git and mirror protected, tree writable" || bad "worktree" "$out"
 fi
 
+# ---- review fixes (INFRA-2): nothing a check writes can reach a later check ----
+refused() { [[ $1 -eq 2 ]]; }   # exit 2 = refused by aien-run-exec before anything ran
+T_PR="$RUN_HOME/target/aien-sovereign-core/pr"; T_MAIN="$RUN_HOME/target/aien-sovereign-core/main"
+
+# 14 the sandbox home is read-only inside every profile: no ~/.cargo/config.toml, no CARGO_HOME config,
+#    no swapping the registry or the cargo proxies, no new dotfiles
+for p in host gb10; do
+  out=$(run --cwd /tmp --timeout 20 --profile $p -- sh -c 'H=/var/lib/aien-run
+    mkdir -p $H/.cargo 2>/dev/null && echo HOME-WRITABLE
+    touch $H/cargo/config.toml 2>/dev/null && echo CARGO_HOME-WRITABLE
+    mv $H/cargo/bin $H/cargo/bin.x 2>/dev/null && echo BIN-RENAMED
+    mv $H/cargo/registry $H/cargo/r.x 2>/dev/null && echo REGISTRY-RENAMED
+    touch $H/.gitconfig 2>/dev/null && echo GITCONFIG-WRITABLE
+    echo done' 2>&1 | tr '\n' ' ')
+  [[ $out == "done " ]] && ok "$p: sandbox home, CARGO_HOME, registry, proxies, .gitconfig all read-only" || bad "$p home read-only" "$out"
+done
+
+# 15 trust classes: a PR run can write target/<repo>/pr only, never main; a main run never pr; a run whose cwd is not
+#    in a worktree can write no worktree
+out=$(run --cwd /tmp --timeout 20 --profile host --env CARGO_TARGET_DIR="$T_PR" -- sh -c "touch $T_PR/.p && rm $T_PR/.p && echo pr-rw; touch $T_MAIN/.p 2>/dev/null && echo MAIN-WRITABLE; echo end" 2>&1 | tr '\n' ' ')
+[[ $out == "pr-rw end " ]] && ok "class pr: target/pr writable, target/main read-only" || bad "class pr" "$out"
+out=$(run --cwd /tmp --timeout 20 --profile gb10 --env CARGO_TARGET_DIR="$T_MAIN" -- sh -c "touch $T_MAIN/.p && rm $T_MAIN/.p && echo main-rw; touch $T_PR/.p 2>/dev/null && echo PR-WRITABLE; echo end" 2>&1 | tr '\n' ' ')
+[[ $out == "main-rw end " ]] && ok "class main (gb10): target/main writable, target/pr read-only" || bad "class main" "$out"
+if [[ -n $wt ]]; then
+  out=$(run --cwd /tmp --timeout 20 --profile host -- sh -c "touch $wt/.p 2>/dev/null && echo WT-WRITABLE; echo end" 2>&1 | tr '\n' ' ')
+  [[ $out == "end " ]] && ok "a run outside a worktree cannot write any worktree" || bad "foreign worktree" "$out"
+fi
+
+# 16 argument refusals (exit 2, nothing runs)
+run --cwd /tmp --timeout 5 --profile host --env CARGO_TARGET_DIR=/tmp/t -- true >/dev/null 2>&1; r1=$?
+run --cwd /tmp --timeout 5 --profile host --env CARGO_TARGET_DIR="$RUN_HOME/target/../target/x/main" -- true >/dev/null 2>&1; r2=$?
+run --cwd /tmp --timeout 5 --profile host --env CARGO_TARGET_DIR="$RUN_HOME/target/aien-sovereign-core/other" -- true >/dev/null 2>&1; r3=$?
+run --cwd /tmp --timeout 5 --profile host --env FOO=1 --env FOO=2 -- true >/dev/null 2>&1; r4=$?
+refused $r1 && refused $r2 && refused $r3 && refused $r4 && ok "CARGO_TARGET_DIR outside target/<repo>/pr|main and duplicate --env refused" || bad "env refusals" "$r1 $r2 $r3 $r4"
+run --cwd "$RUN_HOME/target" --timeout 5 --profile host -- true >/dev/null 2>&1; r1=$?
+run --cwd "$RUN_HOME/cargo" --timeout 5 --profile host -- true >/dev/null 2>&1; r2=$?
+run --cwd "$RUN_HOME/wt/../wt" --timeout 5 --profile host -- true >/dev/null 2>&1; r3=$?
+r4=2
+if [[ -n $wt ]]; then   # a symlink planted by a check inside its worktree, pointing at another directory
+  run --cwd "$wt" --timeout 10 --profile host -- ln -sfn /tmp cwdlink >/dev/null 2>&1
+  run --cwd "$wt/cwdlink" --timeout 5 --profile host -- true >/dev/null 2>&1; r4=$?
+  run --cwd "$wt" --timeout 10 --profile host -- rm -f cwdlink >/dev/null 2>&1
+fi
+refused $r1 && refused $r2 && refused $r3 && refused $r4 && ok "--cwd outside wt/<repo>/<sha> inside the home, with .., or through a symlink refused" || bad "cwd refusals" "$r1 $r2 $r3 $r4"
+run --cwd /tmp --timeout 5 --profile host -- LD_PRELOAD=/nonexistent.so true >/dev/null 2>&1; r1=$?
+run --cwd /tmp --timeout 5 --profile host -- -i true >/dev/null 2>&1; r2=$?
+refused $r1 && refused $r2 && ok "PROGRAM shaped like an env assignment or option refused" || bad "program refusals" "$r1 $r2"
+
+# 17 private scratch dirs: host cannot see the operator's /tmp; every profile gets a private /var/tmp
+probe=/tmp/aien-infra-probe.$$; : > "$probe"; : > /var/tmp/aien-infra-probe.$$
+out=$(run --cwd /tmp --timeout 10 --profile host -- sh -c "test -e $probe && echo SEES-HOST-TMP; test -e /var/tmp/aien-infra-probe.$$ && echo SEES-VARTMP; ls -A /tmp | wc -l" 2>&1 | tr '\n' ' ')
+[[ $out == "0 " ]] && ok "host: private empty /tmp and /var/tmp" || bad "host private tmp" "$out"
+out=$(run --cwd /tmp --timeout 10 --profile gb10 -- sh -c "test -e $probe && echo sees-host-tmp; test -e /var/tmp/aien-infra-probe.$$ && echo SEES-VARTMP; echo end" 2>&1 | tr '\n' ' ')
+[[ $out == "sees-host-tmp end " ]] && ok "gb10: shares host /tmp (documented), private /var/tmp" || bad "gb10 tmp" "$out"
+rm -f "$probe" /var/tmp/aien-infra-probe.$$
+out=$(run --cwd /tmp --timeout 10 --profile host -- sh -c 'echo $(ls -A /run/lock /run/screen /dev/mqueue /dev/shm 2>/dev/null | grep -vc -e "^$" -e ":$") $(ipcs -m | grep -c "^0x") $(ipcs -s | grep -c "^0x")' 2>&1)
+host_ipc="$(ipcs -m | grep -c "^0x") $(ipcs -s | grep -c "^0x")"
+[[ $out == "0 0 0" ]] && ok "host: private /run/lock, /run/screen, /dev/shm, /dev/mqueue and IPC namespace (host has shm+sem: $host_ipc)" || bad "host ipc" "$out"
+
+# 18 trusted crumb on the sandbox PATH; `crumb verify .` runs as aien-run in a sandboxed worktree; a `crumb`
+#    planted inside the worktree is never picked up by a bare name
+out=$(run --cwd /tmp --timeout 10 --profile host -- sh -c 'command -v crumb; stat -c "%U %a" "$(command -v crumb)"' 2>&1 | tr '\n' ' ')
+[[ $out == "/usr/local/bin/crumb root 755 " ]] && ok "crumb on sandbox PATH: $out" || bad "crumb PATH" "$out"
+if [[ -n $wt ]]; then
+  # every worktree: the sandboxed verdict equals the trusted side's verdict on a clean trusted checkout of the same
+  # commit (operator git refuses to run inside a sandbox worktree: dubious ownership, by design); at least one
+  # worktree (a crumb-current commit) must verify OK, so the PASS path is exercised, not only the STALE path
+  agree=0; total=0; okrun=0
+  for w in $(wt_sh_worktrees); do
+    total=$((total+1))
+    s_out=$(run --cwd "$w" --timeout 60 --profile host -- crumb verify . 2>&1); s_rc=$?
+    tc=$(mktemp -d); sha=$(basename "$w"); repo=$(basename "$(dirname "$w")")
+    git clone --quiet --shared --no-checkout "$RUN_HOME/mirror/$repo.git" "$tc/t" && git -C "$tc/t" checkout --quiet "$sha"
+    t_out=$(cd "$tc/t" && /usr/local/bin/crumb verify . 2>&1); t_rc=$?
+    rm -rf "$tc"
+    [[ $s_rc -eq $t_rc && $s_out == "$t_out" ]] && agree=$((agree+1))
+    [[ $s_rc -eq 0 ]] && okrun=$((okrun+1))
+    printf '     %s: sandbox rc=%s, trusted rc=%s, %s\n' "$(basename "$w" | cut -c1-7)" "$s_rc" "$t_rc" "$(tail -1 <<<"$s_out")"
+  done
+  [[ $agree -eq $total && $okrun -ge 1 ]] && ok "crumb verify . as aien-run in $total sandboxed worktrees (agrees with trusted side; $okrun OK)" \
+    || bad "crumb verify" "agree=$agree/$total ok=$okrun"
+  run --cwd "$wt" --timeout 10 --profile host -- sh -c 'printf "#!/bin/sh\necho PLANTED\n" > crumb && chmod +x crumb' >/dev/null 2>&1
+  o1=$(run --cwd "$wt" --timeout 10 --profile host -- crumb status . 2>&1 | head -3)
+  o2=$(run --cwd "$wt" --timeout 10 --profile host -- sh -c 'exec crumb status .' 2>&1 | head -3)
+  o3=$(run --cwd "$wt" --timeout 10 --profile host -- sh -c 'test -x ./crumb && echo planted-present' 2>&1)
+  run --cwd "$wt" --timeout 10 --profile host -- rm -f crumb >/dev/null 2>&1
+  [[ $o3 == planted-present && $o1 != *PLANTED* && $o2 != *PLANTED* && -n $o1 && -n $o2 ]] \
+    && ok "planted ./crumb in the worktree ignored (PROGRAM and sh exec both use /usr/local/bin/crumb)" || bad "planted crumb" "o1=$o1 o2=$o2 o3=$o3"
+fi
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 [[ $fail -eq 0 ]]
