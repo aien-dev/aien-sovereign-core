@@ -85,17 +85,25 @@ running `crumb verify .` as `aien-run` in a worker checkout passed.
 sudo -n /usr/local/sbin/aien-run-exec --cwd CWD --timeout SECS --profile host|qemu|gb10 [--env CARGO_TARGET_DIR=...] -- PROGRAM ARGS
 ```
 
-Only `CARGO_TARGET_DIR` is passed through. The runner's own timeout and
+Only `CARGO_TARGET_DIR` is passed through. Under `--sandbox user` the
+receipt's `core.machine` also carries `sandbox_helper_sha256` (sha256 of
+the installed helper), so it is in `machine_digest` and the cache key: a
+result made under another helper (other network, mounts or limits) is
+never reused. The runner's own timeout and
 kill rules are unchanged; a gb10 timeout stays advisory. For `run` and
 `test`, `--sandbox none` (the default) leaves the launch exactly as it was.
 
 What the helper requires (INFRA, read from the installed script): `--cwd`
-canonical, and inside `/var/lib/aien-run` only a worktree
-`wt/<repo>/<40-hex>`; host and qemu checks get a private `/tmp`, so a tree
+canonical, and inside `/var/lib/aien-run` only a run directory
+`wt/<repo>/<40-hex>` or below it; host and qemu checks get a private `/tmp`, so a tree
 under `/tmp` is invisible to them; `CARGO_TARGET_DIR` only as
 `/var/lib/aien-run/target/<repo>/pr` or `.../main` (created on demand).
-Inside a run everything is read-only except the run's own worktree, its one
-target dir and a private `/tmp`. When the helper refuses a call it exits 2
+Inside a run everything is read-only except the run's own run directory (file
+ownership inside it still applies: siblings are not writable), its one
+target dir and a private `/tmp`. host and qemu checks have no network but
+their own loopback: `lo` is up inside their private network namespace, so a
+test may start a server on 127.0.0.1 and talk to it; the host's own
+127.0.0.1 services stay out of reach. When the helper refuses a call it exits 2
 and its stderr starts with `aien-run-exec:`; nothing ran. The runner records
 such a run with no exit status, so it is FAIL and can never meet
 `expects.exit`, not even `exit: 2` (`runner::sandbox_refused`).
@@ -115,7 +123,8 @@ Under `--sandbox user` every checkout is made with INFRA's worktree tool
 without it the worker refuses to run). `wt.sh sync` refreshes the bare mirror
 `/var/lib/aien-run/mirror/<repo>.git` from the trusted clone (a head no branch
 names is then fetched into the mirror by its id), and `wt.sh add` checks the
-head out at `/var/lib/aien-run/wt/<repo>/<sha>`: files owned by `aien-run`,
+head out at `/var/lib/aien-run/wt/<repo>/<sha>/<repo>` (the run directory
+`wt/<repo>/<sha>/` holds it and its siblings): files owned by `aien-run`,
 the `.git` link root-owned and pointing into the mirror. An older tree for
 the same head is removed first, never reused. The worker opens that tree
 with its own git only after checking the link (a regular root-owned file
@@ -123,12 +132,64 @@ nobody else can write, pointing into `<mirror>/worktrees/`), and then only
 through git's command-line `safe.directory` for that one path
 (`process::trust_worktree`): every git setting and hook git reads there is
 the operator's mirror, never the checked-out code. `wt.sh remove` deletes
-the tree afterwards.
+the run directory (checkout and siblings) afterwards.
 
 Before it fetches or runs anything the worker refuses a repository name that
 is not a plain name (letters, digits, `.`, `_`, `-`, not starting with a
 dot), a commit that is not 40 lowercase hex, and a signing key whose mode
 gives group or other any access (it must be 0600).
+
+## Sibling checkouts
+
+Some gates build or read a neighbouring repository: `tests/gates/run.sh`
+calls `need_sibling <dir>` or `pin <name> <repo> <sha>` and reads `../<dir>`,
+the way the hosted job checks that repository out beside the one under test.
+The one rule:
+
+1. **Where.** A sibling is always `../<dir>` of the checkout under test. The
+   worker runs a head in a run directory `<wt-root>/<repo>/<sha>/`: the
+   checkout at `<repo>/`, each sibling at `<dir>/`, so `..` from the checkout
+   is the run directory. Under `--sandbox user` the exec helper gets
+   `--cwd <wt-root>/<repo>/<sha>/<repo>`.
+2. **What.** A sibling is a read-only checkout of a trusted clone
+   `<clones>/<source>` at `refs/remotes/origin/<ref>` as that clone has it
+   when the run starts. The worker never fetches it for the run and never
+   uses the network for it. Under `--sandbox user` it is a worktree of the
+   `wt.sh` mirror (`wt.sh sync <source>`, then `wt.sh sibling`), owned by the
+   operator with no group or other write, so `aien-run` can read the files
+   and their git history (`git -C ../<dir> rev-parse HEAD` works) but cannot
+   change them or add entries to the run directory. Under `--sandbox none` it
+   is a `git worktree add --detach` from the clone.
+3. **Which.** The operator's sibling map decides, never the change under
+   test: `tools/aien-local-ci/siblings` in the trusted clone of
+   aien-sovereign-core (`--siblings FILE` overrides), one line
+   `<repo> <dir> <source-repo> <ref>`. Names are plain names, the ref a plain
+   branch name; one malformed line, or an explicit map that cannot be read,
+   refuses every run before anything is checked out. A repository the map
+   does not name gets no siblings. A sibling that cannot be made (no
+   `origin/<ref>` in its clone, a `wt.sh` failure) is a journal note and its
+   gates fail on the missing directory; they never pass without it.
+4. **Recorded.** The journal names every sibling with its commit
+   (`sibling ../<dir>: <source> origin/<ref> <sha>`), and `run.sh` records
+   the commit it used in the receipt as an `AIEN-OBS` observation.
+5. **Other commits.** A gate that needs a sibling at a commit other than its
+   head (a lock file, a pinned protocol version) materialises that commit
+   from the sibling's object store into a writable, ignored place:
+   `$CARGO_TARGET_DIR/aien-pins/<name>` (aien-sovereign-core) or a
+   gitignored build directory, never inside the sibling and never in a
+   tracked path. The mirror holds every branch of the trusted clone, so a
+   commit on any branch is there.
+6. **Manifests.** A gate that needs a sibling is `requires: host` (or a
+   stronger pool), never `portable`: `portable` means the tree alone, which
+   is what the hosted thin gate runs.
+7. **Cache.** A sibling lies outside the tree the cache key covers, so a
+   head whose repository has siblings never reuses an earlier result: every
+   gate runs fresh (`no_cache`).
+
+`wt.sh remove` takes the whole run directory away (checkout and siblings)
+and prunes every mirror's worktree list. An older `wt.sh` that still makes
+the flat layout (`<wt-root>/<repo>/<sha>` is the checkout) keeps working;
+the worker then journals that no siblings were provided.
 
 ## The worker
 
@@ -138,8 +199,10 @@ For one head `REPO SHA`:
 2. `git fetch --all` in the trusted clone `<clones>/<repo>` (default
    `~/workspace/<repo>`); its checkout is never touched.
 3. Under `--sandbox user`: `wt.sh sync` and `wt.sh add` (see above). Under
-   `--sandbox none`: `git worktree add --detach <wt-root>/<repo>/<sha>`
-   from the clone (default `/var/lib/aien-run/wt`).
+   `--sandbox none`: `git worktree add --detach <wt-root>/<repo>/<sha>/<repo>`
+   from the clone (default `/var/lib/aien-run/wt`). Then the siblings of
+   `<repo>` from the sibling map (see "Sibling checkouts"), each journaled
+   with its commit.
 4. `crumb claim` on the worktree when it has a `.crumb` (a missing one is a
    journal note, not an error).
 5. Plan against BASE: `origin/main` (`--base` overrides), or the head's first
@@ -251,7 +314,10 @@ unmapped path, no blocked gate, no problem line.
   outbox/<seq>.<repo>.<sha>.json         a commit status waiting for GitHub, in queue order
   journal.jsonl                          one line per finished head
   worker.heartbeat                       pid, phase, repo, sha, utc
-/var/lib/aien-run/wt/<repo>/<sha>        the worker's detached worktree
+/var/lib/aien-run/wt/<repo>/<sha>/       the run directory of one head (operator, 0755)
+  <repo>/                                the detached checkout under test
+  <dir>/                                 a read-only sibling checkout (../<dir> from the checkout)
+<clones>/aien-sovereign-core/tools/aien-local-ci/siblings   the operator's sibling map
 /var/lib/aien-run/target/<repo>/pr|main  cargo target dir per trust class (sandbox user)
 /usr/local/sbin/aien-run-exec            the exec helper (INFRA)
 ```
@@ -282,7 +348,12 @@ whole worker run in the user sandbox through `wt.sh` (in
 `/var/lib/aien-run/wt/aien-test-selftest`, because the sandbox does not share
 `/tmp`), a wrong target dir refused by the helper with exit 2 and never
 counted as the program's exit, only a root-owned `wt.sh` link trusted, and
-the user sandbox refused without the worktree tool. `mutations/run_mutants.sh` must
+the user sandbox refused without the worktree tool, and siblings: a gate
+that reads `../sib` fails without the map and passes with it, the run
+directory and both worktree lists are clean afterwards, a malformed or
+unreadable map refuses the run, and in the user sandbox the sibling is
+readable but neither it nor the run directory is writable.
+`mutations/run_mutants.sh` must
 kill every line of `mutations/aien-test.mutants`.
 
 ## Accepted limits (ENGINE-2 review, 2026-10-11)
@@ -311,3 +382,10 @@ kill every line of `mutations/aien-test.mutants`.
 - Build time is `n/a` in the report. Total time comes from the bundle's
   whole-second timestamps, so a run inside one second reports `0 ms`; the
   per-gate test time is exact.
+- A sibling is as fresh as its trusted clone: the worker fetches the clone
+  of the repository it serves, not the sibling's clone (SANDBOX lane,
+  2026-10-11). The commit used is journaled, so a stale sibling is visible.
+- The sibling map and `wt.sh` are read from the trusted clone of
+  aien-sovereign-core; after a change to either merges, that clone's
+  checkout must be moved to the new main by the operator before the worker
+  uses it (the worker never touches a clone's checkout).

@@ -220,6 +220,10 @@ pub struct Config {
     pub wt_tool: Option<PathBuf>,
     /// The mirrors `wt_tool` keeps (`<mirror_root>/<repo>.git`).
     pub mirror_root: PathBuf,
+    /// The operator's sibling map (`tools/aien-local-ci/siblings`): which
+    /// read-only sibling checkouts a repository's gates reach as `../<dir>`.
+    /// None: no siblings.
+    pub siblings: Option<PathBuf>,
 }
 
 impl Config {
@@ -242,6 +246,7 @@ impl Config {
             target_root: PathBuf::from(TARGET_ROOT),
             wt_tool: None,
             mirror_root: PathBuf::from(MIRROR_ROOT),
+            siblings: None,
         }
     }
 
@@ -302,6 +307,177 @@ fn git(cwd: &Path, args: &[&str]) -> Result<String, String> {
     run_cmd(cwd, "git", args)
 }
 
+/// One sibling checkout a repository's gates reach as `../<dir>`: a
+/// read-only checkout of `<clones>/<source>` at `refs/remotes/origin/<git_ref>`
+/// as that trusted clone has it when the run starts (never fetched for the
+/// run, never the network).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Sibling {
+    pub dir: String,
+    pub source: String,
+    pub git_ref: String,
+}
+
+/// A branch name the sibling map accepts: letters, digits, `.`, `_`, `-` and
+/// `/` between non-empty parts that do not start with a dot (so no `..`, no
+/// leading `-`, nothing git would read as an option or a path escape).
+pub fn valid_ref(r: &str) -> bool {
+    !r.is_empty()
+        && r.len() <= 200
+        && !r.starts_with('-')
+        && r.split('/').all(|p| !p.is_empty() && !p.starts_with('.'))
+        && r.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"._-/".contains(&b))
+}
+
+/// Parse the sibling map (`<repo> <dir> <source-repo> <ref>` per line, `#`
+/// comments) and return the siblings of `repo`. Every line is checked, not
+/// only `repo`'s: a malformed map is refused as a whole.
+pub fn parse_siblings(text: &str, repo: &str) -> Result<Vec<Sibling>, String> {
+    let mut out: Vec<Sibling> = Vec::new();
+    let mut seen = std::collections::BTreeSet::new();
+    for (n, raw) in text.lines().enumerate() {
+        let line = raw.split('#').next().unwrap_or("").trim();
+        if line.is_empty() {
+            continue;
+        }
+        let f: Vec<&str> = line.split_whitespace().collect();
+        let bad = |why: &str| format!("sibling map line {}: {why}: {raw:?}", n + 1);
+        if f.len() != 4 {
+            return Err(bad("needs <repo> <dir> <source-repo> <ref>"));
+        }
+        if !valid_repo_key(f[0]) || !valid_repo_key(f[1]) || !valid_repo_key(f[2]) {
+            return Err(bad("repo, dir and source must be plain names"));
+        }
+        if !valid_ref(f[3]) {
+            return Err(bad("bad ref"));
+        }
+        if f[1] == f[0] {
+            return Err(bad("a sibling cannot take the checkout's own name"));
+        }
+        if !seen.insert((f[0], f[1])) {
+            return Err(bad("the same dir twice for one repository"));
+        }
+        if f[0] != repo {
+            continue;
+        }
+        out.push(Sibling {
+            dir: f[1].to_string(),
+            source: f[2].to_string(),
+            git_ref: f[3].to_string(),
+        });
+    }
+    Ok(out)
+}
+
+/// The siblings of `repo` from `cfg.siblings` (none without a map). A map
+/// that cannot be read or parsed refuses the run: a gate must never run
+/// against a half-provided neighbourhood without anyone noticing.
+fn siblings_for(cfg: &Config, repo: &str) -> Result<Vec<Sibling>, String> {
+    let Some(path) = &cfg.siblings else {
+        return Ok(Vec::new());
+    };
+    let text = fs::read_to_string(path)
+        .map_err(|e| format!("cannot read the sibling map {}: {e}", path.display()))?;
+    parse_siblings(&text, repo)
+}
+
+/// Where a head runs: `<wt_root>/<repo>/<sha>/` holds the checkout under test
+/// at `<repo>/` and its siblings beside it, so `../<dir>` in the checkout is
+/// the sibling. `nested` is false only for an older `wt.sh` that still makes
+/// the checkout at the run directory itself (then no siblings are possible).
+struct Checkout {
+    clone: PathBuf,
+    wt: PathBuf,
+    run_dir: PathBuf,
+    nested: bool,
+}
+
+/// Make the read-only sibling checkouts of one head, each from its trusted
+/// clone at the clone's `origin/<ref>`. A sibling that cannot be made is a
+/// note (its gates then fail on the missing directory, never PASS); every
+/// sibling made is journaled with its commit. Returns what to remove later
+/// under `Sandbox::None`.
+fn provision_siblings(
+    cfg: &Config,
+    repo: &str,
+    sha: &str,
+    co: &Checkout,
+    sibs: &[Sibling],
+    notes: &mut Vec<String>,
+) -> Vec<(PathBuf, PathBuf)> {
+    let mut made = Vec::new();
+    if sibs.is_empty() {
+        return made;
+    }
+    if !co.nested {
+        notes.push(format!(
+            "siblings not provided: the worktree tool makes the old flat layout (update {})",
+            cfg.wt_tool
+                .as_ref()
+                .map(|t| t.display().to_string())
+                .unwrap_or_default()
+        ));
+        return made;
+    }
+    for s in sibs {
+        let src = cfg.clones.join(&s.source);
+        let want = format!("refs/remotes/origin/{}^{{commit}}", s.git_ref);
+        let sib_sha = match git(&src, &["rev-parse", "--verify", "--quiet", &want]) {
+            Ok(o) if valid_sha(o.trim()) => o.trim().to_string(),
+            _ => {
+                notes.push(format!(
+                    "sibling ../{}: {} has no origin/{}; not provided",
+                    s.dir,
+                    src.display(),
+                    s.git_ref
+                ));
+                continue;
+            }
+        };
+        let path = co.run_dir.join(&s.dir);
+        let res = if cfg.sandbox == Sandbox::User {
+            let tool = cfg
+                .wt_tool
+                .as_ref()
+                .map(|t| t.display().to_string())
+                .unwrap_or_default();
+            let src_s = src.display().to_string();
+            run_cmd(&src, &tool, &["sync", &s.source, &src_s]).and_then(|_| {
+                run_cmd(
+                    &src,
+                    &tool,
+                    &["sibling", repo, sha, &s.dir, &s.source, &sib_sha],
+                )
+            })
+        } else {
+            let _ = git(&src, &["worktree", "prune"]);
+            git(
+                &src,
+                &[
+                    "worktree",
+                    "add",
+                    "--detach",
+                    "--quiet",
+                    &path.display().to_string(),
+                    &sib_sha,
+                ],
+            )
+        };
+        match res {
+            Ok(_) => {
+                notes.push(format!(
+                    "sibling ../{}: {} origin/{} {}",
+                    s.dir, s.source, s.git_ref, sib_sha
+                ));
+                made.push((src, path));
+            }
+            Err(e) => notes.push(format!("sibling ../{}: not provided: {e}", s.dir)),
+        }
+    }
+    made
+}
+
 /// Under `Sandbox::User`: make the worktree with INFRA's `wt.sh` (`sync` the
 /// mirror from the trusted clone, `add` the head), so `aien-run` can read its
 /// git data and write its files while the `.git` link stays root-owned. An
@@ -312,7 +488,7 @@ fn checkout_for_sandbox(
     repo: &str,
     sha: &str,
     clone: &Path,
-) -> Result<PathBuf, String> {
+) -> Result<(PathBuf, PathBuf, bool), String> {
     let tool = cfg.wt_tool.as_ref().ok_or_else(|| {
         "--sandbox user needs INFRA's worktree tool (--wt-tool, tools/aien-local-ci/wt.sh): \
          a checkout made from the private clone is unreadable to aien-run"
@@ -330,23 +506,27 @@ fn checkout_for_sandbox(
     }
     git(&mirror, &["cat-file", "-e", &commit])
         .map_err(|_| format!("commit {sha} is not in {}", mirror.display()))?;
-    let wt = cfg.wt_root.join(repo).join(sha);
-    if fs::symlink_metadata(&wt).is_ok() {
+    let run_dir = cfg.wt_root.join(repo).join(sha);
+    if fs::symlink_metadata(&run_dir).is_ok() {
         run_cmd(clone, &tool, &["remove", repo, sha])?;
     }
     let made = run_cmd(clone, &tool, &["add", repo, sha])?;
-    if Path::new(made.trim()) != wt {
+    let made = PathBuf::from(made.trim());
+    // The run directory holds the checkout at `<repo>/` (siblings beside it);
+    // an older wt.sh still makes the checkout at the run directory itself.
+    let nested = made == run_dir.join(repo);
+    if !nested && made != run_dir {
         return Err(format!(
             "{tool} made {:?}, expected {}",
-            made.trim(),
-            wt.display()
+            made,
+            run_dir.join(repo).display()
         ));
     }
-    if let Err(e) = check_worktree_link(&wt, &mirror) {
+    if let Err(e) = check_worktree_link(&made, &mirror) {
         let _ = run_cmd(clone, &tool, &["remove", repo, sha]);
         return Err(e);
     }
-    Ok(wt)
+    Ok((made, run_dir, nested))
 }
 
 /// The checks that make a `wt.sh` worktree safe to open with the operator's
@@ -397,7 +577,7 @@ fn checkout(
     repo: &str,
     sha: &str,
     notes: &mut Vec<String>,
-) -> Result<(PathBuf, PathBuf), String> {
+) -> Result<Checkout, String> {
     let clone = cfg.clones.join(repo);
     if !clone.join(".git").exists() && !clone.join("HEAD").exists() {
         return Err(format!("no trusted clone at {}", clone.display()));
@@ -414,19 +594,26 @@ fn checkout(
         return Err(format!("commit {sha} is not in {}", clone.display()));
     }
     if cfg.sandbox == Sandbox::User {
-        let wt = checkout_for_sandbox(cfg, repo, sha, &clone)?;
-        return Ok((clone, wt));
+        let (wt, run_dir, nested) = checkout_for_sandbox(cfg, repo, sha, &clone)?;
+        return Ok(Checkout {
+            clone,
+            wt,
+            run_dir,
+            nested,
+        });
     }
-    let wt = cfg.wt_root.join(repo).join(sha);
-    if wt.exists() {
+    let run_dir = cfg.wt_root.join(repo).join(sha);
+    let wt = run_dir.join(repo);
+    if fs::symlink_metadata(&run_dir).is_ok() {
         let _ = git(
             &clone,
             &["worktree", "remove", "--force", &wt.display().to_string()],
         );
-        let _ = fs::remove_dir_all(&wt);
+        let _ = fs::remove_dir_all(&run_dir);
+        let _ = git(&clone, &["worktree", "prune"]);
     }
-    fs::create_dir_all(wt.parent().unwrap_or(&cfg.wt_root))
-        .map_err(|e| format!("cannot create {}: {e}", cfg.wt_root.display()))?;
+    fs::create_dir_all(&run_dir)
+        .map_err(|e| format!("cannot create {}: {e}", run_dir.display()))?;
     git(
         &clone,
         &[
@@ -438,16 +625,37 @@ fn checkout(
             sha,
         ],
     )?;
-    Ok((clone, wt))
+    Ok(Checkout {
+        clone,
+        wt,
+        run_dir,
+        nested: true,
+    })
 }
 
-fn remove_worktree(clone: &Path, wt: &Path) {
+/// `Sandbox::None`: remove the checkout, every sibling made for it and the
+/// run directory, and prune each clone's worktree list.
+fn remove_checkout(co: &Checkout, made: &[(PathBuf, PathBuf)]) {
     let _ = git(
-        clone,
-        &["worktree", "remove", "--force", &wt.display().to_string()],
+        &co.clone,
+        &[
+            "worktree",
+            "remove",
+            "--force",
+            &co.wt.display().to_string(),
+        ],
     );
-    let _ = fs::remove_dir_all(wt);
-    let _ = git(clone, &["worktree", "prune"]);
+    for (src, p) in made {
+        let _ = git(
+            src,
+            &["worktree", "remove", "--force", &p.display().to_string()],
+        );
+    }
+    let _ = fs::remove_dir_all(&co.run_dir);
+    let _ = git(&co.clone, &["worktree", "prune"]);
+    for (src, _) in made {
+        let _ = git(src, &["worktree", "prune"]);
+    }
 }
 
 fn crumb(cfg: &Config, wt: &Path, args: &[&str], notes: &mut Vec<String>) {
@@ -488,13 +696,21 @@ pub fn run_once(cfg: &Config, repo: &str, sha: &str) -> Result<Summary, String> 
                 .to_string(),
         );
     }
+    // The sibling map is read before anything is checked out: a broken map
+    // refuses the run instead of leaving a half-made neighbourhood.
+    let sibs = siblings_for(cfg, repo)?;
     let mut notes: Vec<String> = Vec::new();
     cfg.state.beat(repo, sha, "checkout");
-    let (clone, wt) = checkout(cfg, repo, sha, &mut notes)?;
+    let co = checkout(cfg, repo, sha, &mut notes)?;
+    let made = provision_siblings(cfg, repo, sha, &co, &sibs, &mut notes);
+    let (clone, wt) = (co.clone.clone(), co.wt.clone());
     // A wt.sh worktree belongs to aien-run; the operator's git opens it only
     // after `check_worktree_link` (see `process::trust_worktree`).
     let trust = (cfg.sandbox == Sandbox::User).then(|| process::trust_worktree(&wt));
-    let result = run_in_worktree(cfg, repo, sha, &clone, &wt, &mut notes);
+    // A sibling is outside the tree the cache key covers, so a head with
+    // siblings never reuses an earlier result: every gate runs fresh.
+    let fresh = !sibs.is_empty();
+    let result = run_in_worktree(cfg, repo, sha, &clone, &wt, fresh, &mut notes);
     crumb(
         cfg,
         &wt,
@@ -517,7 +733,7 @@ pub fn run_once(cfg: &Config, repo: &str, sha: &str) -> Result<Summary, String> 
             }
         }
     } else {
-        remove_worktree(&clone, &wt);
+        remove_checkout(&co, &made);
     }
     cfg.state.beat(repo, sha, "idle");
     let mut summary = result?;
@@ -531,6 +747,7 @@ fn run_in_worktree(
     sha: &str,
     clone: &Path,
     wt: &Path,
+    fresh: bool,
     notes: &mut Vec<String>,
 ) -> Result<Summary, String> {
     let started = now_secs();
@@ -566,6 +783,9 @@ fn run_in_worktree(
     let mut opts = Options::new(evidence_dir.clone());
     opts.sandbox = cfg.sandbox;
     opts.cargo_target_dir = target_dir_for(cfg, repo, on_main);
+    if fresh {
+        opts.no_cache = true;
+    }
     let mut known: BTreeMap<String, Known> = BTreeMap::new();
     let mut notes_cache: BTreeMap<String, CacheNote> = BTreeMap::new();
     if plan.blocked.is_none() && !plan.entries.is_empty() {
@@ -1108,6 +1328,56 @@ pub fn run_loop(cfg: &Config, iterations: Option<u64>) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sibling_map_selects_the_repository_and_refuses_bad_lines() {
+        let map = "# comment\n\
+                   aegis-runtime  aien-protocols  aien-protocols  main\n\
+                   benchmarks canonical-branch-native-runtime aien-sovereign-core feat/canonical-branch-native-runtime # trailing\n\
+                   physics aien-architecture aien-architecture main\n\
+                   physics omega omega main\n";
+        let p = parse_siblings(map, "physics").unwrap();
+        assert_eq!(
+            p.iter().map(|s| s.dir.as_str()).collect::<Vec<_>>(),
+            ["aien-architecture", "omega"]
+        );
+        let b = parse_siblings(map, "benchmarks").unwrap();
+        assert_eq!(b[0].source, "aien-sovereign-core");
+        assert_eq!(b[0].git_ref, "feat/canonical-branch-native-runtime");
+        assert!(parse_siblings(map, "omega").unwrap().is_empty());
+        assert!(parse_siblings("", "omega").unwrap().is_empty());
+        // Every line is checked, also lines for other repositories.
+        for bad in [
+            "x y z",
+            "x y z main extra",
+            "x .. z main",
+            "x y/z z main",
+            "x y ../z main",
+            ".x y z main",
+            "x y z -main",
+            "x y z a/../b",
+            "x y z a//b",
+            "x y z .hidden",
+            "x y z a;b",
+            "x x z main",
+            "physics omega omega main\nphysics omega physics main",
+        ] {
+            let e = parse_siblings(&format!("ok a b main\n{bad}\n"), "ok");
+            assert!(e.is_err(), "accepted {bad:?}");
+        }
+    }
+
+    #[test]
+    fn sibling_refs_are_plain_branch_names() {
+        for good in ["main", "feat/canonical-branch-native-runtime", "v1.2_x-y"] {
+            assert!(valid_ref(good), "{good}");
+        }
+        for bad in [
+            "", "-x", "/x", "x/", "a//b", "a/../b", ".x", "a/.b", "a b", "a~1", "a^", "a:b",
+        ] {
+            assert!(!valid_ref(bad), "{bad:?}");
+        }
+    }
 
     #[test]
     fn state_layout() {

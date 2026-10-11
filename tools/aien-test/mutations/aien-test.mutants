@@ -78,3 +78,9 @@ vacuous_pass_gates	bundle.rs	s#"PASS" if self.required == 0 => "NOT_RUN",#"PASS"
 crumb_close_bad_action	worker.rs	s#^            "test",$#            "done",#	the worker closes its crumb claim with an action crumb refuses, so the claim stays open
 sandbox_refusal_is_a_result	runner.rs	s#^                    facts.exit_status = None;$#                    let _ = ();#	a refusal by the exec helper (exit 2) counts as the program exiting 2
 wt_link_owner_ignored	worker.rs	s#|| md.uid() != 0 ##	a worktree whose .git link the sandbox user owns is opened with the operator git
+sibling_cache_reused	worker.rs	s#    if fresh {#    if false \&\& fresh {#	a head with siblings reuses a cached result made without them
+sibling_not_provided	worker.rs	s#let made = provision_siblings(cfg, repo, sha, \&co, \&sibs, \&mut notes);#let made: Vec<(PathBuf, PathBuf)> = Vec::new();#	the sibling map is read but no sibling is checked out
+sibling_self_name_accepted	worker.rs	s#if f\[1\] == f\[0\] {#if false {#	a sibling may take the name of the checkout under test
+sibling_bad_ref_accepted	worker.rs	s#if !valid_ref(f\[3\]) {#if false {#	any text is accepted as the sibling ref
+sibling_duplicate_dir_accepted	worker.rs	s#if !seen.insert((f\[0\], f\[1\])) {#if false \&\& !seen.insert((f[0], f[1])) {#	one repository may name the same sibling dir twice
+sandbox_helper_not_in_machine	runner.rs	s#    if sandbox == Sandbox::User {#    if false \&\& sandbox == Sandbox::User {#	a result made under another exec helper is reused

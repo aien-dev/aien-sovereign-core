@@ -496,7 +496,15 @@ pub(crate) fn identity(
         .and_then(|p| fs::read(p).ok())
         .map(|b| sha256_hex(&b));
     let manifest_rel = manifest_path.strip_prefix(root).ok();
-    let machine = machine(hw);
+    let mut machine = machine(hw);
+    // Under the user sandbox the exec helper is part of the machine a gate
+    // ran on (network, mounts, limits): a result made under another helper
+    // is not reused (SANDBOX lane: a FAIL made while the sandbox had no
+    // loopback was reused after loopback came up).
+    if sandbox == Sandbox::User {
+        machine["sandbox_helper_sha256"] =
+            json!(fs::read(sandbox::EXEC_HELPER).ok().map(|b| sha256_hex(&b)));
+    }
     let machine_digest = canonical_digest(&machine)?;
     Ok(Identity {
         binary_sha,
@@ -1436,6 +1444,20 @@ mod tests {
         let second = run(&fx, &fx.opts());
         assert_eq!(second.verdict, Verdict::Pass);
         assert_eq!(fs::read(&first).unwrap(), before);
+    }
+
+    #[test]
+    fn the_exec_helper_is_part_of_the_machine_only_under_the_user_sandbox() {
+        let fx = ok_fixture();
+        let m = manifest::parse(&fs::read(fx.manifest()).unwrap()).unwrap();
+        let hw = fx.opts().hardware;
+        let none = identity(fx.repo.path(), &fx.manifest(), &m, &hw, Sandbox::None).unwrap();
+        let user = identity(fx.repo.path(), &fx.manifest(), &m, &hw, Sandbox::User).unwrap();
+        assert!(none.machine.get("sandbox_helper_sha256").is_none());
+        let want = fs::read(sandbox::EXEC_HELPER).ok().map(|b| sha256_hex(&b));
+        assert_eq!(user.machine["sandbox_helper_sha256"], json!(want));
+        // Another helper is another machine: no cache entry carries over.
+        assert_ne!(none.machine_digest, user.machine_digest);
     }
 
     #[test]

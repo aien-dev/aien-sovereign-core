@@ -42,8 +42,8 @@ disk). host|qemu also get private `/tmp`, `/dev/shm`, `/run/lock`, `/run/screen`
 
 | profile | memory | tasks | cpu | network | IPC, /tmp, /dev/shm | devices | timeout |
 |---|---|---|---|---|---|---|---|
-| host | 48G | 4096 | 1600% (16 cores) | none (fresh netns, only a down `lo`) | private | closed (null, zero, random, tty, ptmx) | yes |
-| qemu | 48G | 4096 | 1600% | none | private | closed + `/dev/kvm` (aien-run is in group kvm) | yes |
+| host | 48G | 4096 | 1600% (16 cores) | none (fresh netns, only its own `lo`, up) | private | closed (null, zero, random, tty, ptmx) | yes |
+| qemu | 48G | 4096 | 1600% | none (as host) | private | closed + `/dev/kvm` (aien-run is in group kvm) | yes |
 | gb10 | 96G | 4096 | 1800% | host network | shared with the host | all (`/dev/nvidia*` are 0666; `/dev/dri/*` via groups video, render) | NO kill |
 
 Argument rules (exit 2 when broken):
@@ -70,8 +70,11 @@ source read from the git object store of `AIEN_ARCH_CLONE`, default `~/workspace
 
 ## Egress decision
 
-No nftables rule for uid aien-run. host and qemu checks run in a fresh network namespace with no interfaces, which is
-stronger than a packet filter (no DNS, no working loopback). gb10 is the only profile with network: it keeps the host
+No nftables rule for uid aien-run. host and qemu checks run in a fresh network namespace with no interface but its own loopback, which is
+stronger than a packet filter (no DNS). The namespace's own loopback is brought up (SANDBOX lane, 2026-10-11:
+aien-protocols tests start an HTTP server on 127.0.0.1 and failed with "Network is unreachable" while `lo` was down);
+it reaches only processes inside the same run, never the host's 127.0.0.1 services (tests/run.sh 4b: Forgejo on
+127.0.0.1:3443 is "refused" from inside). gb10 is the only profile with network: it keeps the host
 network per the contract; a later nft rule for uid aien-run would be the way to close that and is deliberately not
 added by this lane.
 

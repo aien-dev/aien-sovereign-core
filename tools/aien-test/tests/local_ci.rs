@@ -25,6 +25,9 @@ use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
+/// The user-sandbox scenarios share one mirror name under
+/// `/var/lib/aien-run/mirror` (`aien-test-selftest.git`): they take turns.
+static USER_SANDBOX: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 struct Tmp(PathBuf);
 
@@ -574,7 +577,9 @@ fn github_down_queues_then_flushes() {
         l.contains("state=success") && l.contains("context=AIEN Verification (Spark)"),
         "{l}"
     );
-    assert!(l.contains("bundle.json"), "{l}");
+    // The description names the bundle; GitHub caps it at 140 characters, so
+    // a long scratch path may cut the file name off (no assertion on ".json").
+    assert!(l.contains(": bundle /"), "{l}");
     assert!(fs::read_to_string(w.state.journal())
         .unwrap()
         .contains("flushed from outbox"));
@@ -873,6 +878,7 @@ fn symlinked_exec_out_of_the_tree_never_runs() {
 
 #[test]
 fn worker_in_the_user_sandbox_is_ready() {
+    let _turn = USER_SANDBOX.lock().unwrap_or_else(|e| e.into_inner());
     if !Path::new(aien_test::sandbox::EXEC_HELPER).exists() {
         println!(
             "SKIP: {} is not installed (INFRA lane)",
@@ -1000,8 +1006,17 @@ fn only_a_wt_sh_link_is_trusted() {
     let real = Path::new("/var/lib/aien-run/wt/aien-sovereign-core");
     let found = fs::read_dir(real).ok().and_then(|mut rd| {
         rd.find_map(|e| {
+            // The run directory layout (`<sha>/<repo>/`), or the older flat one.
             e.ok()
                 .map(|e| e.path())
+                .map(|p| {
+                    let nested = p.join("aien-sovereign-core");
+                    if nested.join(".git").is_file() {
+                        nested
+                    } else {
+                        p
+                    }
+                })
                 .filter(|p| p.join(".git").is_file())
         })
     });
@@ -1077,4 +1092,150 @@ fn a_wrong_target_dir_is_refused_by_the_helper() {
     let receipt: serde_json::Value =
         serde_json::from_slice(&fs::read(o.receipt_path.unwrap()).unwrap()).unwrap();
     assert_eq!(receipt["core"]["exit_status"], serde_json::Value::Null);
+}
+
+// ---------------------------------------------------------------- SANDBOX lane: sibling checkouts
+
+/// The sibling source repository of these scenarios (its trusted clone sits
+/// next to the world's clone, its mirror under `/var/lib/aien-run/mirror`).
+const SIB: &str = "aien-test-selftest-sib";
+
+/// A gate S that passes only when `../sib/lib/x.txt` says `hello`; as
+/// `aien-run` it also demands that neither the sibling nor the run directory
+/// is writable. Returns the head that adds S, the sibling's commit and a
+/// sibling map naming it.
+fn sibling_world(w: &World) -> (String, String, PathBuf) {
+    let root = w.origin.parent().unwrap().to_path_buf();
+    let so = root.join("sib-origin");
+    fs::create_dir_all(&so).unwrap();
+    git(&so, &["init", "-q", "-b", "main"]);
+    write(&so, "lib/x.txt", "hello\n", false);
+    git(&so, &["add", "-A"]);
+    git(&so, &["commit", "-q", "-m", "sib"]);
+    let sib_sha = git(&so, &["rev-parse", "HEAD"]);
+    let clones = w.clone.parent().unwrap();
+    git(clones, &["clone", "-q", so.to_str().unwrap(), SIB]);
+
+    git(&w.origin, &["checkout", "-q", "-b", "topic-s", "main"]);
+    write(
+        &w.origin,
+        "tools/s.sh",
+        "#!/bin/sh\n\
+         test \"$(cat ../sib/lib/x.txt)\" = hello || { echo 'no sibling' >&2; exit 1; }\n\
+         echo \"AIEN-OBS sibling_commit \\\"$(git -C ../sib rev-parse HEAD)\\\"\"\n\
+         if [ \"$(id -un)\" = aien-run ]; then\n\
+           [ -w ../sib/lib/x.txt ] && { echo 'sibling writable' >&2; exit 1; }\n\
+           [ -w .. ] && { echo 'run directory writable' >&2; exit 1; }\n\
+         fi\n\
+         echo PASS\n",
+        true,
+    );
+    write(
+        &w.origin,
+        "tests/gates/S.gate",
+        &gate("S", "tools/", "tools/s.sh", ""),
+        false,
+    );
+    git(&w.origin, &["add", "-A"]);
+    git(&w.origin, &["commit", "-q", "-m", "gate S reads ../sib"]);
+    let head_s = git(&w.origin, &["rev-parse", "HEAD"]);
+    git(&w.origin, &["checkout", "-q", "main"]);
+    git(&w.clone, &["fetch", "-q", "--all"]);
+
+    let map = root.join("siblings");
+    fs::write(&map, format!("# test map\n{REPO} sib {SIB} main\n")).unwrap();
+    (head_s, sib_sha, map)
+}
+
+fn gate_verdict(s: &worker::Summary, id: &str) -> Verdict {
+    s.gates
+        .iter()
+        .find(|g| g.0 == id)
+        .map(|g| g.2)
+        .unwrap_or_else(|| panic!("no gate {id} in {:?}", s.gates))
+}
+
+#[test]
+fn worker_provides_a_sibling_checkout_and_removes_it() {
+    let w = world();
+    let (head_s, sib_sha, map) = sibling_world(&w);
+    let mut cfg = w.config();
+    cfg.operator = true; // S is a new gate: a pipeline configuration change.
+
+    // Negative control: no sibling map, so ../sib is missing and S fails.
+    let s = worker::run_once(&cfg, REPO, &head_s).expect("worker");
+    assert_eq!(gate_verdict(&s, "S"), Verdict::Fail, "{:?}", s.notes);
+
+    cfg.siblings = Some(map);
+    let s = worker::run_once(&cfg, REPO, &head_s).expect("worker");
+    assert_eq!(
+        gate_verdict(&s, "S"),
+        Verdict::Pass,
+        "{} {:?}",
+        s.reason,
+        s.notes
+    );
+    let want = format!("sibling ../sib: {SIB} origin/main {sib_sha}");
+    assert!(s.notes.contains(&want), "{:?}", s.notes);
+    // The run directory (checkout and sibling) is gone, and neither clone
+    // still lists a worktree for it.
+    assert!(!w.wt_root.join(REPO).join(&head_s).exists());
+    let sib_clone = w.clone.parent().unwrap().join(SIB);
+    for c in [&w.clone, &sib_clone] {
+        let list = git(c, &["worktree", "list"]);
+        assert_eq!(list.lines().count(), 1, "{list}");
+    }
+}
+
+#[test]
+fn a_broken_sibling_map_refuses_the_run_before_any_checkout() {
+    let w = world();
+    let mut cfg = w.config();
+    let map = w.origin.parent().unwrap().join("bad-siblings");
+    fs::write(&map, format!("{REPO} ../escape {SIB} main\n")).unwrap();
+    cfg.siblings = Some(map.clone());
+    let e = worker::run_once(&cfg, REPO, &w.head).unwrap_err();
+    assert!(e.contains("sibling map line 1"), "{e}");
+    assert!(!w.wt_root.join(REPO).join(&w.head).exists());
+    // A map that cannot be read refuses too.
+    cfg.siblings = Some(map.with_extension("missing"));
+    let e = worker::run_once(&cfg, REPO, &w.head).unwrap_err();
+    assert!(e.contains("cannot read the sibling map"), "{e}");
+}
+
+#[test]
+fn worker_in_the_user_sandbox_reads_a_read_only_sibling() {
+    let _turn = USER_SANDBOX.lock().unwrap_or_else(|e| e.into_inner());
+    if !Path::new(aien_test::sandbox::EXEC_HELPER).exists() || !wt_tool().is_file() {
+        println!("SKIP: exec helper or wt.sh not present (INFRA lane)");
+        return;
+    }
+    let w = world();
+    let (head_s, sib_sha, map) = sibling_world(&w);
+    let mut cfg = w.config();
+    cfg.allow_unsandboxed = false;
+    cfg.sandbox = Sandbox::User;
+    cfg.operator = true;
+    cfg.wt_root = PathBuf::from("/var/lib/aien-run/wt");
+    cfg.wt_tool = Some(wt_tool());
+    cfg.siblings = Some(map);
+    let _m1 = MirrorCleanup(Path::new(worker::MIRROR_ROOT).join(format!("{REPO}.git")));
+    let _m2 = MirrorCleanup(Path::new(worker::MIRROR_ROOT).join(format!("{SIB}.git")));
+    let s = worker::run_once(&cfg, REPO, &head_s).expect("worker");
+    assert_eq!(
+        gate_verdict(&s, "S"),
+        Verdict::Pass,
+        "{} {:?}",
+        s.reason,
+        s.notes
+    );
+    let want = format!("sibling ../sib: {SIB} origin/main {sib_sha}");
+    assert!(s.notes.contains(&want), "{:?}", s.notes);
+    assert!(
+        !Path::new("/var/lib/aien-run/wt")
+            .join(REPO)
+            .join(&head_s)
+            .exists(),
+        "run directory left behind"
+    );
 }

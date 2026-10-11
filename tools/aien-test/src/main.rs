@@ -527,6 +527,14 @@ fn cmd_worker(cli: &Cli) -> i32 {
         None => Some(clones.join("aien-sovereign-core/tools/aien-local-ci/wt.sh"))
             .filter(|p| p.is_file()),
     };
+    // The operator's sibling map, from the same trusted clone. A missing default
+    // file means no siblings (the worker journals it); an explicit file that
+    // cannot be read makes every run refuse.
+    cfg.siblings = match &cli.siblings {
+        Some(f) => Some(f.clone()),
+        None => Some(clones.join("aien-sovereign-core/tools/aien-local-ci/siblings"))
+            .filter(|p| p.is_file()),
+    };
     // The worker runs other people's code: the user sandbox is its default.
     // `--sandbox none` is a development mode only, needs
     // `--dev-unsandboxed`, and is never allowed with `--github`.

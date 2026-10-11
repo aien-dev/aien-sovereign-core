@@ -13,7 +13,9 @@
 #   * private, empty /var/tmp, /var/crash, /var/lib/BrlAPI for every profile, and private /tmp, /dev/shm, /run/lock,
 #     /run/screen plus a fresh IPC namespace (SysV shm, semaphores, POSIX queues) for host|qemu (gb10 keeps the
 #     host /tmp, /dev/shm and IPC so chip tooling behaves as before);
-#   * a fresh network namespace for host|qemu (no interfaces except a down loopback, no DNS);
+#   * a fresh network namespace for host|qemu: only its own loopback `lo`, brought up so tests can talk to a
+#     server they start on 127.0.0.1 (the namespace has no other interface, so nothing outside it is reachable,
+#     not even the host's own 127.0.0.1 services; no DNS);
 #   * a transient systemd scope under aien-run.slice with cgroup caps (memory, pids, cpu) and a
 #     device policy (host|qemu: standard pseudo devices only, qemu adds /dev/kvm; gb10: all devices);
 #   * rlimits (no core dumps, bounded open files);
@@ -168,6 +170,8 @@ for d in "${priv[@]}"; do
   if [[ -d $d ]]; then mount -t tmpfs -o mode=1777,nosuid,nodev aien-run-tmp "$d"; fi
 done
 case $profile in host|qemu) mount -t mqueue -o nosuid,nodev,noexec aien-run-mqueue /dev/mqueue ;; esac
+# host|qemu run in their own network namespace (unshare -n above): raise its loopback, nothing else exists in it.
+case $profile in host|qemu) ip link set lo up ;; esac
 exec "$@"
 '
 
