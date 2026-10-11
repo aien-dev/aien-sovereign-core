@@ -191,6 +191,34 @@ and prunes every mirror's worktree list. An older `wt.sh` that still makes
 the flat layout (`<wt-root>/<repo>/<sha>` is the checkout) keeps working;
 the worker then journals that no siblings were provided.
 
+
+### Pinned sibling commits and model checkpoints
+
+Some gates check out a pinned commit of a sibling (`pin <dir> <repo> <sha>` in
+`tests/gates/run.sh`, cloned from `../<repo>`). The sandbox has no network,
+so a pinned commit that is on no fetched branch must already be in the
+sibling. `tools/aien-local-ci/pins` (beside `siblings`, read from the
+operator's trusted sc clone, never from the head) lists them as
+`<repo> <source-repo> <sha40>`. Before the siblings are made, the worker
+(`ensure_pins`, trusted side, provisioning time only) fetches a missing pinned
+commit by its sha from the trusted clone's own `origin` and holds it as
+`refs/remotes/aien-pins/<sha>`, so `wt.sh sync` copies it into the mirror and
+git never prunes it. A pin that cannot be made present is a journal note; the
+gate that needs it then fails, never PASS. Pins read from lock files (omega's
+`omega.lock` and the locks inside it) follow main and are not listed.
+
+Model gates (PREFILL-E2E-2 and its eight mutant gates, `requires: host`) read
+the TinyLlama-1.1B-Chat-v1.0 checkpoint at `$HOME/models/TinyLlama-1.1B-Chat-v1.0`
+(`model.safetensors`, `tokenizer.json`). Inside the sandbox `$HOME` is
+`/var/lib/aien-run`; `aien-run-exec` mounts the sudo caller's `~/models`
+read-only at `/var/lib/aien-run/models` (empty root-owned mount point made by
+`install.sh`), so the default path resolves there. The script records the
+weights' sha256 as the observation `model_sha256`. Without the checkpoint it
+prints `AIEN-OBS not_run_reason "model_missing"` and exits 77: the verdict is
+NOT_RUN with reason `model_missing`, never PASS. Exit 77 with a plain
+lowercase `not_run_reason` is the general rule (`verdict::SELF_NOT_RUN_EXIT`);
+without that observation, or when a manifest itself expects 77, it is an
+ordinary exit.
 ## The worker
 
 For one head `REPO SHA`:
@@ -412,3 +440,14 @@ kill every line of `mutations/aien-test.mutants`.
   aien-sovereign-core; after a change to either merges, that clone's
   checkout must be moved to the new main by the operator before the worker
   uses it (the worker never touches a clone's checkout).
+- Five aien-test self-tests (`a_wrong_target_dir_is_refused_by_the_helper`,
+  `user_sandbox_when_the_helper_exists`, `worker_in_the_user_sandbox_is_ready`,
+  `worker_in_the_user_sandbox_reads_a_read_only_sibling`,
+  `worker_provides_a_sibling_checkout_and_removes_it`) start a sandbox or
+  provision sibling worktrees themselves, which `aien-run` cannot do inside the
+  sandbox. They skip only when `AIEN_SANDBOX_NESTED=1`, which the sandbox
+  wrapper sets for every program it runs (`sandbox::NESTED_MARKER`); they run
+  on GitHub runners and in operator runs. SC-TEST and SC-AGENT-PREFLIGHT record
+  the skip as the observation `nested_sandbox_skips`.
+- The model mount exposes the whole of the operator's `~/models` read-only to
+  every sandboxed gate (all model files, and anything else kept there).
