@@ -52,4 +52,16 @@ sed -i 's|\("row":"D2/Q1","verdict":"\)PASS|\1FAIL|' "$T/e/res.jsonl"
 chk "G6 green: a launch whose model reply was refused (S5 not ok) is checked on product rows only" 'bash $G "$T/e/res.jsonl" $DECL "$T/e" D1 D2 D3 >"$T/o6"; [ $? = 0 ] && grep -q "D2 committed=false" "$T/o6"'
 mk "$T/f"; sed -i 's|\("row":"D1/D1-BE","verdict":"\)PASS|\1FAIL|' "$T/f/res.jsonl"
 chk "G6 red: a product row (BE) FAILs" 'bash $G "$T/f/res.jsonl" $DECL "$T/f" D1 D2 D3 >"$T/o7"; [ $? = 1 ]'
+# ---- gate G6 corrections after v7 dry attempt 2 (2026-10-11, evidence-v7/attempt-2-g6-fail/)
+mk "$T/h"; jq '(.steps[3].ok) = false | (.steps[4].ok) = false' "$T/h/D1/run.json" >"$T/h/x" && mv "$T/h/x" "$T/h/D1/run.json"
+sed -i 's|\("row":"D1/v1 Memory","verdict":"\)PASS|\1FAIL|' "$T/h/res.jsonl"
+chk "G6 green: v1 Memory FAILs on a launch that did not commit (no record to digest, v6 class (a))" 'bash $G "$T/h/res.jsonl" $DECL "$T/h" D1 D2 D3 >"$T/o8"; [ $? = 0 ] && grep -q "D1 committed=false" "$T/o8"'
+mk "$T/i"; sed -i 's|\("row":"D1/v1 Memory","verdict":"\)PASS|\1FAIL|' "$T/i/res.jsonl"
+chk "G6 red: v1 Memory FAILs on a committed launch" 'bash $G "$T/i/res.jsonl" $DECL "$T/i" D1 D2 D3 >"$T/o9"; [ $? = 1 ] && grep -q "D1 row .v1 Memory. = FAIL" "$T/o9"'
+mk "$T/j"; sed -i 's|\("row":"D3/D3-DEC","verdict":"\)PASS|\1FAIL|; s|\("row":"D3/D3-MEAS","verdict":"\)PASS|\1FAIL|' "$T/j/res.jsonl"
+jq -n '{proposal_attempts: [{attempt: 1, outcome: "refused"}, {attempt: 2, outcome: "timeout", tokens: 0}]}' >"$T/j/D3/s3-report.json"
+chk "G6 green with a NOTE: -DEC and -MEAS FAIL only because an attempt ended by timeout (model too slow for the budget)" 'bash $G "$T/j/res.jsonl" $DECL "$T/j" D1 D2 D3 >"$T/o10"; [ $? = 0 ] && grep -q "NOTE D3 attempt 2 ended by timeout" "$T/o10" && grep -q "D3 committed=true .* not_checked_timeout=2" "$T/o10"'
+mk "$T/k"; sed -i 's|\("row":"D3/D3-DEC","verdict":"\)PASS|\1FAIL|' "$T/k/res.jsonl"
+jq -n '{proposal_attempts: [{attempt: 1, outcome: "parsed"}]}' >"$T/k/D3/s3-report.json"
+chk "G6 red: -DEC FAILs with no timeout in the attempts" 'bash $G "$T/k/res.jsonl" $DECL "$T/k" D1 D2 D3 >"$T/o11"; [ $? = 1 ] && grep -q "D3 row .D3-DEC. = FAIL" "$T/o11"'
 echo "test-v7: $pass ok, $fail failed"; [ $fail = 0 ]

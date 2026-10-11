@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # OPEN-MODEL-QWEN3 v7 gate G6: dry run of part 1 on GB10 in its own hold, then g6-gate.sh over D1 D2 D3 (SPEC-v7-DRAFT.md
-# Section 5 item 7). Runs BEFORE the freeze (frozen-v7.json may still say DRAFT: a dry run lifts the pin checks and is never
-# a verdict). Start detached ONLY on the coordinator's go for the hold:
-#   setsid nohup bash run-dry.sh <sc main commit holding the v7 scripts> <oq3-v7-build-<commit> folder> > <log> 2>&1 < /dev/null &
+# Section 5 item 7). Runs AFTER the freeze, as v6 did (frozen-v7.json FROZEN at the wrap commit): the -PIN and -GR rows
+# compare the build and the generation record against the frozen pins and model hash, so a draft can only fail them (attempt 2,
+# 2026-10-11, evidence-v7/attempt-2-g6-fail/). A dry run is never a verdict. Start detached ONLY on the coordinator's go for the hold:
+#   setsid nohup bash run-dry.sh <freeze commit> <oq3-v7-build-<commit> folder> > <log> 2>&1 < /dev/null &
 set -u
-WRAP_COMMIT=${1:?sc main commit}; export OQ3_BUILD=${2:?build folder}
+WRAP_COMMIT=${1:?freeze commit}; export OQ3_BUILD=${2:?build folder}
 HERE=$(cd "$(dirname "$0")" && pwd)
 V=/home/drakestapleton/workspace/oq3-v7-real; R=$V/records
 [ ! -e $V/dry-runs ] || { echo "run-dry: $V/dry-runs exists already (one dry run per freeze candidate; move it aside to rerun)"; exit 2; }
@@ -13,6 +14,8 @@ quietlock check || { echo "run-dry: quiet flag held, not starting"; exit 2; }
 mkdir -p $R
 [ -d $V/wrap ] || git clone -q https://github.com/aien-dev/aien-sovereign-core $V/wrap || { echo "run-dry: wrapper clone failed"; exit 4; }
 git -C $V/wrap fetch -q origin && git -C $V/wrap checkout -q "$WRAP_COMMIT" || { echo "run-dry: checkout $WRAP_COMMIT failed"; exit 4; }
+Q=$V/wrap/docs/campaigns/open-model-qwen3
+[ "$(jq -r .status $Q/frozen-v7.json | cut -c1-6)" = FROZEN ] || { echo "run-dry: frozen-v7.json at $WRAP_COMMIT is not FROZEN; freeze first (the -PIN and -GR rows need the pins and the model hash)"; exit 2; }
 ( cd $V/wrap/docs/campaigns/open-model-qwen3 && bash test-v7.sh > $R/test-v7.out 2>&1 ) || { echo "run-dry: test-v7.sh failed at $WRAP_COMMIT"; exit 2; }
 cp "$HERE/run-part.sh" $V/run-part.sh; chmod +x $V/run-part.sh; sha256sum $V/run-part.sh "$0" > $R/launcher-dry.sha256
 date -u +%FT%TZ > $R/hold-dry-p1.start
