@@ -115,6 +115,71 @@ pub fn declared_dependencies(m: &Manifest) -> Vec<String> {
     set.into_iter().collect()
 }
 
+/// `input_blob_ids` computed from rows already read from a tree
+/// (`git ls-tree -r COMMIT`), so a planner can identify a check at a commit
+/// that is not checked out. Same shape and order as `input_blob_ids`.
+pub fn input_blob_ids_from_rows(m: &Manifest, tree: &BTreeMap<String, String>) -> Vec<Value> {
+    let mut rows: BTreeMap<String, Option<String>> = BTreeMap::new();
+    for input in &m.inputs {
+        let spec = input.trim_end_matches('/');
+        let prefix = format!("{spec}/");
+        let mut found = false;
+        for (path, blob) in tree.range(spec.to_string()..) {
+            if path == spec || path.starts_with(&prefix) {
+                rows.insert(path.clone(), Some(blob.clone()));
+                found = true;
+            } else if !path.starts_with(spec) {
+                break;
+            }
+        }
+        if !found {
+            rows.entry(spec.to_string()).or_insert(None);
+        }
+    }
+    rows.into_iter()
+        .map(|(path, blob)| json!({ "path": path, "blob_id": blob }))
+        .collect()
+}
+
+/// The identity object from parts already read: `inputs` as `input_blob_ids`
+/// gives them, `golden` the bytes of the oracle golden file if the manifest
+/// names one. `identity_object` and the planner both build on this so the
+/// hashed shape has one definition.
+pub fn identity_object_from_parts(
+    m: &Manifest,
+    input_blob_ids: Vec<Value>,
+    golden: Option<&[u8]>,
+    compiler_identity: &str,
+    flags: &[String],
+    dependency_check_ids: &[String],
+    binding: &Binding,
+) -> Result<Value, String> {
+    let mut deps: Vec<String> = dependency_check_ids.to_vec();
+    deps.sort();
+    let mut goldens: Vec<String> = Vec::new();
+    if m.oracle.golden.is_some() {
+        match golden {
+            Some(bytes) => goldens.push(sha256_hex(bytes)),
+            None => {
+                return Err(format!(
+                    "golden file {} is missing",
+                    m.oracle.golden.as_deref().unwrap_or("")
+                ))
+            }
+        }
+    }
+    goldens.sort();
+    Ok(json!({
+        "manifest_digest": m.digest,
+        "input_blob_ids": input_blob_ids,
+        "compiler_identity": compiler_identity,
+        "flags": flags,
+        "dependency_check_ids": deps,
+        "golden_digests": goldens,
+        "scope_binding": scope_binding(m.cache_scope, binding)?,
+    }))
+}
+
 /// The object that `check_id` hashes.
 pub fn identity_object(
     m: &Manifest,
@@ -124,23 +189,21 @@ pub fn identity_object(
     dependency_check_ids: &[String],
     binding: &Binding,
 ) -> Result<Value, String> {
-    let mut deps: Vec<String> = dependency_check_ids.to_vec();
-    deps.sort();
-    let mut goldens: Vec<String> = Vec::new();
-    if let Some(g) = &m.oracle.golden {
-        let bytes = fs::read(root.join(g)).map_err(|e| format!("cannot read golden {g}: {e}"))?;
-        goldens.push(sha256_hex(&bytes));
-    }
-    goldens.sort();
-    Ok(json!({
-        "manifest_digest": m.digest,
-        "input_blob_ids": input_blob_ids(m, root)?,
-        "compiler_identity": compiler_identity,
-        "flags": flags,
-        "dependency_check_ids": deps,
-        "golden_digests": goldens,
-        "scope_binding": scope_binding(m.cache_scope, binding)?,
-    }))
+    let golden = match &m.oracle.golden {
+        Some(g) => {
+            Some(fs::read(root.join(g)).map_err(|e| format!("cannot read golden {g}: {e}"))?)
+        }
+        None => None,
+    };
+    identity_object_from_parts(
+        m,
+        input_blob_ids(m, root)?,
+        golden.as_deref(),
+        compiler_identity,
+        flags,
+        dependency_check_ids,
+        binding,
+    )
 }
 
 pub fn id_of(object: &Value) -> Result<String, String> {
@@ -509,5 +572,54 @@ mod tests {
             manifest::parse(gate("A", "oracle:\n  compare: B\ndepends_on:\n  - C\n").as_bytes())
                 .unwrap();
         assert_eq!(declared_dependencies(&m), ["B", "C"]);
+    }
+}
+
+#[cfg(test)]
+mod rows_tests {
+    use super::*;
+    use crate::manifest;
+    use crate::testutil::init_repo;
+
+    #[test]
+    fn rows_from_a_tree_listing_give_the_same_identity_as_the_index() {
+        let g = "gate: A\nmanifest_version: 2\nowner: t\nrequires:\n  - host\ninputs:\n  - data/\n  - missing.txt\nrun:\n  exec: run.sh\nexpects:\n  exit: 0\n  verdict: PASS\ntimeout: 5s\n";
+        let t = init_repo(
+            "ident-rows",
+            &[
+                ("a.gate", g, false),
+                ("run.sh", "#!/bin/sh\n", true),
+                ("data/one.txt", "one\n", false),
+                ("data/sub/two.txt", "two\n", false),
+                ("data2/three.txt", "three\n", false),
+            ],
+        );
+        let m = manifest::parse(g.as_bytes()).unwrap();
+        let from_index = input_blob_ids(&m, t.path()).unwrap();
+        let mut cmd = Command::new("git");
+        cmd.arg("-C").arg(t.path()).args(["ls-tree", "-r", "HEAD"]);
+        let out = process::output_gated(&mut cmd).unwrap();
+        let mut tree = BTreeMap::new();
+        for line in String::from_utf8_lossy(&out.stdout).lines() {
+            let (meta, path) = line.split_once('\t').unwrap();
+            let blob = meta.split(' ').nth(2).unwrap();
+            tree.insert(path.to_string(), blob.to_string());
+        }
+        let from_rows = input_blob_ids_from_rows(&m, &tree);
+        assert_eq!(from_index, from_rows);
+        let paths: Vec<&str> = from_rows
+            .iter()
+            .map(|r| r["path"].as_str().unwrap())
+            .collect();
+        assert_eq!(paths, ["data/one.txt", "data/sub/two.txt", "missing.txt"]);
+        assert!(from_rows[2]["blob_id"].is_null());
+        let b = Binding {
+            arch: "a".into(),
+            machine_digest: "m".repeat(64),
+            hardware_identity: String::new(),
+        };
+        let a = identity_object(&m, t.path(), "c", &[], &[], &b).unwrap();
+        let r = identity_object_from_parts(&m, from_rows, None, "c", &[], &[], &b).unwrap();
+        assert_eq!(a, r);
     }
 }

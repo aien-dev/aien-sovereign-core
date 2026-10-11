@@ -1,27 +1,38 @@
-//! Argument parsing for the `aien-test` commands (ADR 0028 Decision 1 and 8).
-//! Hand-written; the surface is small.
+//! Argument parsing for the `aien-test` commands (ADR 0028 Decision 1 and 8,
+//! ADR 0033 Decisions 10 and 12). Hand-written; the surface is small.
 //!
 //! ```text
 //! aien-test run GATE_FILE_OR_NAME [flags] [-- ARGS...]
-//! aien-test test ./... | gate:NAME [flags]
+//! aien-test test ./... | gate:NAME | changed | crate:NAME [flags]
 //! aien-test why GATE_FILE_OR_NAME [flags]
 //! aien-test list [flags]
 //! aien-test identity GATE_FILE_OR_NAME [--compiler-identity S] [--flag F]... [--hardware-identity S]
+//! aien-test plan [--base REF] [--repo NAME] [--operator] [--allow-dirty]
+//! aien-test status [--state-dir DIR]
+//! aien-test verify COMMIT [--repo NAME] [--base REF] [--state-dir DIR] [--release]
+//! aien-test worker [--once REPO SHA] [--poll SECS] [--repos LIST] [--github] [--iterations N]
+//!                  [--state-dir DIR] [--key FILE] [--clones DIR] [--wt-root DIR] [--sandbox none|user]
 //! ```
 //!
-//! `test changed`, `test crate:NAME`, `--host/--qemu/--gb10`, `--mutants` and
-//! `--release` come in later slices and are refused here.
+//! `--host/--qemu/--gb10` and `--mutants` are later slices and are refused.
 
 use crate::resources::{parse_jobs, JobsSpec};
+use crate::sandbox::Sandbox;
 use std::path::PathBuf;
 
 pub const USAGE: &str = "usage:
   aien-test run GATE_FILE_OR_NAME [flags] [-- ARGS...]
-  aien-test test ./... | gate:NAME [flags]
+  aien-test test ./... | gate:NAME | changed | crate:NAME [flags]
   aien-test why GATE_FILE_OR_NAME [flags]
   aien-test list [flags]
   aien-test identity GATE_FILE_OR_NAME [--compiler-identity S] [--flag F]... [--hardware-identity S]
-flags: --evidence-dir DIR  --allow-dirty  --no-cache  --jobs host=N,qemu=M  --wait-gpu";
+  aien-test plan [--base REF] [--repo NAME] [--operator] [--allow-dirty]
+  aien-test status [--state-dir DIR]
+  aien-test verify COMMIT [--repo NAME] [--base REF] [--state-dir DIR] [--release]
+  aien-test worker [--once REPO SHA] [--poll SECS] [--repos A,B] [--github] [--iterations N]
+                   [--state-dir DIR] [--key FILE] [--clones DIR] [--wt-root DIR] [--sandbox none|user]
+flags: --evidence-dir DIR  --allow-dirty  --no-cache  --release  --jobs host=N,qemu=M  --wait-gpu
+       --sandbox none|user  --base REF  --operator";
 
 /// Which gates `test` runs.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -30,6 +41,10 @@ pub enum Selection {
     All,
     /// `gate:NAME`: that gate and everything it depends on.
     Gate(String),
+    /// `changed`: what the planner selects for BASE..HEAD.
+    Changed,
+    /// `crate:NAME`: the gates covering a workspace crate and its dependents.
+    Crate(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -39,6 +54,10 @@ pub enum Command {
     Why { gate: String },
     List,
     Identity { gate: String },
+    Plan,
+    Status,
+    Verify { commit: String },
+    Worker,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -48,6 +67,9 @@ pub struct Cli {
     pub allow_dirty: bool,
     /// `--no-cache`: never reuse an earlier result; run every gate fresh.
     pub no_cache: bool,
+    /// `--release`: qualification mode (no cache, clean tree, no
+    /// hardware-scoped cache entries accepted by `verify`).
+    pub release: bool,
     /// Arguments after `--`; they replace `run.args` (CR-061). `run` only.
     pub args: Option<Vec<String>>,
     /// `--jobs host=N,qemu=M`: the pool sizes that were named.
@@ -61,32 +83,84 @@ pub struct Cli {
     pub flags: Vec<String>,
     /// `identity` only: needed for `cache_scope: hardware`.
     pub hardware_identity: Option<String>,
+    /// `--sandbox none|user` (C8), default none.
+    pub sandbox: Sandbox,
+    /// `--base REF` for plan, test changed, verify.
+    pub base: Option<String>,
+    /// `--repo NAME`: the repository name for bundles.
+    pub repo: Option<String>,
+    /// `--operator`: allow a pipeline configuration change.
+    pub operator: bool,
+    /// `--state-dir DIR`: the local CI state (default `~/.local/state/aien-local-ci`).
+    pub state_dir: Option<PathBuf>,
+    /// worker: `--key FILE` (default `~/.aien/verify.key`).
+    pub key: Option<PathBuf>,
+    /// worker: `--clones DIR` where the trusted clones live (default `~/workspace`).
+    pub clones: Option<PathBuf>,
+    /// worker: `--wt-root DIR` where detached worktrees go (default `/var/lib/aien-run/wt`).
+    pub wt_root: Option<PathBuf>,
+    /// worker: `--once REPO SHA`.
+    pub once: Option<(String, String)>,
+    /// worker: `--poll SECS` (default 30).
+    pub poll: Option<u64>,
+    /// worker: `--repos A,B`.
+    pub repos: Vec<String>,
+    /// worker: `--github`: poll GitHub and post commit statuses.
+    pub github: bool,
+    /// worker: `--iterations N`: stop the loop after N rounds (0: forever).
+    pub iterations: Option<u64>,
 }
 
 fn parse_selection(s: &str) -> Result<Selection, String> {
     if s == "./..." {
         return Ok(Selection::All);
     }
+    if s == "changed" {
+        return Ok(Selection::Changed);
+    }
+    if let Some(name) = s.strip_prefix("crate:") {
+        if name.is_empty() {
+            return Err("crate: needs a crate name".to_string());
+        }
+        return Ok(Selection::Crate(name.to_string()));
+    }
     match s.strip_prefix("gate:") {
         Some(name) if !name.is_empty() => Ok(Selection::Gate(name.to_string())),
         _ => Err(format!(
-            "unsupported test selection {s:?}: only ./... and gate:NAME exist so far"
+            "unsupported test selection {s:?}: use ./..., gate:NAME, changed or crate:NAME"
         )),
     }
 }
+
+const COMMANDS: [&str; 9] = [
+    "run", "test", "why", "list", "identity", "plan", "status", "verify", "worker",
+];
+const WORKER_FLAGS: [&str; 10] = [
+    "--key",
+    "--clones",
+    "--wt-root",
+    "--once",
+    "--poll",
+    "--repos",
+    "--github",
+    "--iterations",
+    "--state-dir",
+    "--sandbox",
+];
 
 pub fn parse_args(argv: &[String]) -> Result<Cli, String> {
     let name = argv
         .first()
         .map(|s| s.as_str())
         .ok_or_else(|| "no command".to_string())?;
-    if !["run", "test", "why", "list", "identity"].contains(&name) {
+    if !COMMANDS.contains(&name) {
         return Err(format!("unknown command {name:?}"));
     }
     let mut positional: Option<String> = None;
     let mut evidence_dir: Option<PathBuf> = None;
     let mut allow_dirty = false;
     let mut no_cache = false;
+    let mut release = false;
     let mut args: Option<Vec<String>> = None;
     let mut jobs = JobsSpec::default();
     let mut wait_gpu = false;
@@ -94,31 +168,39 @@ pub fn parse_args(argv: &[String]) -> Result<Cli, String> {
     let mut flags: Vec<String> = Vec::new();
     let mut hardware_identity: Option<String> = None;
     let mut identity_flags = false;
+    let mut sandbox = Sandbox::None;
+    let mut base: Option<String> = None;
+    let mut repo: Option<String> = None;
+    let mut operator = false;
+    let mut state_dir: Option<PathBuf> = None;
+    let mut key: Option<PathBuf> = None;
+    let mut clones: Option<PathBuf> = None;
+    let mut wt_root: Option<PathBuf> = None;
+    let mut once: Option<(String, String)> = None;
+    let mut poll: Option<u64> = None;
+    let mut repos: Vec<String> = Vec::new();
+    let mut github = false;
+    let mut iterations: Option<u64> = None;
+    let mut worker_flags: Vec<&str> = Vec::new();
     let mut i = 1;
+    let value = |i: &mut usize, a: &str| -> Result<String, String> {
+        *i += 1;
+        argv.get(*i)
+            .cloned()
+            .ok_or_else(|| format!("{a} needs a value"))
+    };
     while i < argv.len() {
         let a = argv[i].as_str();
         if a == "--" {
             args = Some(argv[i + 1..].to_vec());
             break;
         } else if a == "--evidence-dir" {
-            i += 1;
-            match argv.get(i) {
-                Some(v) => evidence_dir = Some(PathBuf::from(v)),
-                None => return Err("--evidence-dir needs a value".to_string()),
-            }
+            evidence_dir = Some(PathBuf::from(value(&mut i, a)?));
         } else if a == "--jobs" {
-            i += 1;
-            match argv.get(i) {
-                Some(v) => jobs = parse_jobs(v)?,
-                None => return Err("--jobs needs a value".to_string()),
-            }
+            jobs = parse_jobs(&value(&mut i, a)?)?;
         } else if a == "--compiler-identity" || a == "--flag" || a == "--hardware-identity" {
             identity_flags = true;
-            i += 1;
-            let v = match argv.get(i) {
-                Some(v) => v.clone(),
-                None => return Err(format!("{a} needs a value")),
-            };
+            let v = value(&mut i, a)?;
             match a {
                 "--compiler-identity" => compiler_identity = v,
                 "--flag" => flags.push(v),
@@ -128,8 +210,61 @@ pub fn parse_args(argv: &[String]) -> Result<Cli, String> {
             allow_dirty = true;
         } else if a == "--no-cache" {
             no_cache = true;
+        } else if a == "--release" {
+            release = true;
         } else if a == "--wait-gpu" {
             wait_gpu = true;
+        } else if a == "--operator" {
+            operator = true;
+        } else if a == "--base" {
+            base = Some(value(&mut i, a)?);
+        } else if a == "--repo" {
+            repo = Some(value(&mut i, a)?);
+        } else if a == "--sandbox" {
+            sandbox = Sandbox::parse(&value(&mut i, a)?)?;
+        } else if a == "--state-dir" {
+            state_dir = Some(PathBuf::from(value(&mut i, a)?));
+        } else if a == "--key" {
+            worker_flags.push("--key");
+            key = Some(PathBuf::from(value(&mut i, a)?));
+        } else if a == "--clones" {
+            worker_flags.push("--clones");
+            clones = Some(PathBuf::from(value(&mut i, a)?));
+        } else if a == "--wt-root" {
+            worker_flags.push("--wt-root");
+            wt_root = Some(PathBuf::from(value(&mut i, a)?));
+        } else if a == "--once" {
+            worker_flags.push("--once");
+            let r = value(&mut i, a)?;
+            let s = value(&mut i, a)?;
+            if s.len() != 40 || !s.bytes().all(|b| b.is_ascii_hexdigit()) {
+                return Err("--once needs REPO and a 40-hex SHA".to_string());
+            }
+            once = Some((r, s.to_ascii_lowercase()));
+        } else if a == "--poll" {
+            worker_flags.push("--poll");
+            let v = value(&mut i, a)?;
+            poll = Some(
+                v.parse::<u64>()
+                    .map_err(|_| format!("--poll needs seconds, not {v:?}"))?,
+            );
+        } else if a == "--iterations" {
+            worker_flags.push("--iterations");
+            let v = value(&mut i, a)?;
+            iterations = Some(
+                v.parse::<u64>()
+                    .map_err(|_| format!("--iterations needs a number, not {v:?}"))?,
+            );
+        } else if a == "--repos" {
+            worker_flags.push("--repos");
+            repos = value(&mut i, a)?
+                .split(',')
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string())
+                .collect();
+        } else if a == "--github" {
+            worker_flags.push("--github");
+            github = true;
         } else if a.starts_with('-') {
             return Err(format!("unknown argument {a:?}"));
         } else if positional.is_none() {
@@ -142,11 +277,34 @@ pub fn parse_args(argv: &[String]) -> Result<Cli, String> {
     if args.is_some() && name != "run" {
         return Err("-- ARGS only apply to the run command".to_string());
     }
-    if identity_flags && name != "identity" {
+    if identity_flags && !["identity", "plan", "verify", "worker"].contains(&name) {
         return Err(
-            "--compiler-identity, --flag and --hardware-identity only apply to identity"
+            "--compiler-identity, --flag and --hardware-identity only apply to identity, plan, verify and worker"
                 .to_string(),
         );
+    }
+    if name != "worker" {
+        if let Some(f) = worker_flags
+            .iter()
+            .find(|f| WORKER_FLAGS.contains(f) && !["--state-dir", "--sandbox"].contains(f))
+        {
+            return Err(format!("{f} only applies to worker"));
+        }
+    }
+    if sandbox != Sandbox::None && !["run", "test", "worker"].contains(&name) {
+        return Err("--sandbox only applies to run, test and worker".to_string());
+    }
+    if base.is_some() && !["plan", "test", "verify", "worker"].contains(&name) {
+        return Err("--base only applies to plan, test, verify and worker".to_string());
+    }
+    if operator && !["plan", "test", "worker"].contains(&name) {
+        return Err("--operator only applies to plan, test and worker".to_string());
+    }
+    if repo.is_some() && !["plan", "verify", "worker"].contains(&name) {
+        return Err("--repo only applies to plan, verify and worker".to_string());
+    }
+    if state_dir.is_some() && !["status", "verify", "worker"].contains(&name) {
+        return Err("--state-dir only applies to status, verify and worker".to_string());
     }
     let command = match name {
         "identity" => Command::Identity {
@@ -159,14 +317,23 @@ pub fn parse_args(argv: &[String]) -> Result<Cli, String> {
             gate: positional.ok_or("missing GATE_FILE_OR_NAME")?,
         },
         "test" => {
-            let selection = positional.ok_or("missing ./... or gate:NAME")?;
+            let selection = positional.ok_or("missing ./..., gate:NAME, changed or crate:NAME")?;
             Command::Test(parse_selection(&selection)?)
+        }
+        "verify" => {
+            let commit = positional.ok_or("missing COMMIT")?;
+            Command::Verify { commit }
         }
         _ => {
             if let Some(p) = positional {
                 return Err(format!("unexpected argument {p:?}"));
             }
-            Command::List
+            match name {
+                "plan" => Command::Plan,
+                "status" => Command::Status,
+                "worker" => Command::Worker,
+                _ => Command::List,
+            }
         }
     };
     Ok(Cli {
@@ -174,12 +341,26 @@ pub fn parse_args(argv: &[String]) -> Result<Cli, String> {
         evidence_dir,
         allow_dirty,
         no_cache,
+        release,
         args,
         jobs,
         wait_gpu,
         compiler_identity,
         flags,
         hardware_identity,
+        sandbox,
+        base,
+        repo,
+        operator,
+        state_dir,
+        key,
+        clones,
+        wt_root,
+        once,
+        poll,
+        repos,
+        github,
+        iterations,
     })
 }
 
@@ -204,10 +385,14 @@ mod tests {
         assert_eq!(run_gate(&c), "G");
         assert!(!c.allow_dirty);
         assert!(!c.no_cache);
+        assert!(!c.release);
         assert!(!c.wait_gpu);
         assert_eq!(c.args, None);
         assert_eq!(c.evidence_dir, None);
         assert_eq!(c.jobs, JobsSpec::default());
+        assert_eq!(c.sandbox, Sandbox::None);
+        assert_eq!(c.base, None);
+        assert!(!c.operator);
     }
 
     #[test]
@@ -230,14 +415,16 @@ mod tests {
     }
 
     #[test]
-    fn no_cache_flag() {
+    fn no_cache_and_release_flags() {
         let c = parse_args(&v(&["run", "G", "--no-cache"])).unwrap();
         assert!(c.no_cache);
         let c = parse_args(&v(&["test", "--no-cache", "./..."])).unwrap();
         assert!(c.no_cache);
         assert_eq!(c.command, Command::Test(Selection::All));
-        // --release (qualification mode) is a later slice and stays refused.
-        assert!(parse_args(&v(&["run", "G", "--release"])).is_err());
+        let c = parse_args(&v(&["run", "G", "--release"])).unwrap();
+        assert!(c.release && !c.no_cache);
+        let c = parse_args(&v(&["verify", "a".repeat(40).as_str(), "--release"])).unwrap();
+        assert!(c.release);
     }
 
     #[test]
@@ -252,11 +439,19 @@ mod tests {
         assert_eq!(c.command, Command::Test(Selection::All));
         let c = parse_args(&v(&["test", "gate:G-1"])).unwrap();
         assert_eq!(c.command, Command::Test(Selection::Gate("G-1".to_string())));
+        let c = parse_args(&v(&["test", "changed", "--base", "origin/main"])).unwrap();
+        assert_eq!(c.command, Command::Test(Selection::Changed));
+        assert_eq!(c.base.as_deref(), Some("origin/main"));
+        let c = parse_args(&v(&["test", "crate:aien-runtime"])).unwrap();
+        assert_eq!(
+            c.command,
+            Command::Test(Selection::Crate("aien-runtime".into()))
+        );
     }
 
     #[test]
     fn unsupported_selections_are_refused() {
-        for bad in ["changed", "crate:x", "gate:", "G", "./", "."] {
+        for bad in ["crate:", "gate:", "G", "./", ".", "changed:x"] {
             assert!(parse_args(&v(&["test", bad])).is_err(), "{bad}");
         }
         assert!(parse_args(&v(&["test"])).is_err());
@@ -335,6 +530,96 @@ mod tests {
     fn override_args_only_for_run() {
         assert!(parse_args(&v(&["test", "./...", "--", "x"])).is_err());
         assert!(parse_args(&v(&["why", "G", "--", "x"])).is_err());
+    }
+
+    #[test]
+    fn sandbox_flag() {
+        let c = parse_args(&v(&["run", "G", "--sandbox", "user"])).unwrap();
+        assert_eq!(c.sandbox, Sandbox::User);
+        let c = parse_args(&v(&["test", "changed", "--sandbox", "none"])).unwrap();
+        assert_eq!(c.sandbox, Sandbox::None);
+        assert!(parse_args(&v(&["run", "G", "--sandbox", "root"])).is_err());
+        assert!(parse_args(&v(&["run", "G", "--sandbox"])).is_err());
+        assert!(parse_args(&v(&["list", "--sandbox", "user"])).is_err());
+    }
+
+    #[test]
+    fn plan_status_verify() {
+        let c = parse_args(&v(&[
+            "plan",
+            "--base",
+            "main",
+            "--repo",
+            "github.com/a/b",
+            "--operator",
+            "--allow-dirty",
+        ]))
+        .unwrap();
+        assert_eq!(c.command, Command::Plan);
+        assert_eq!(c.base.as_deref(), Some("main"));
+        assert_eq!(c.repo.as_deref(), Some("github.com/a/b"));
+        assert!(c.operator && c.allow_dirty);
+        assert!(parse_args(&v(&["plan", "extra"])).is_err());
+        let c = parse_args(&v(&["status", "--state-dir", "/s"])).unwrap();
+        assert_eq!(c.command, Command::Status);
+        assert_eq!(c.state_dir, Some(PathBuf::from("/s")));
+        let sha = "b".repeat(40);
+        let c = parse_args(&v(&["verify", &sha, "--repo", "x", "--base", "main"])).unwrap();
+        assert_eq!(
+            c.command,
+            Command::Verify {
+                commit: sha.clone()
+            }
+        );
+        assert!(parse_args(&v(&["verify"])).is_err());
+        assert!(parse_args(&v(&["run", "G", "--base", "x"])).is_err());
+        assert!(parse_args(&v(&["run", "G", "--operator"])).is_err());
+        assert!(parse_args(&v(&["run", "G", "--state-dir", "/s"])).is_err());
+        assert!(parse_args(&v(&["list", "--repo", "x"])).is_err());
+    }
+
+    #[test]
+    fn worker_flags() {
+        let sha = "c".repeat(40);
+        let c = parse_args(&v(&[
+            "worker",
+            "--once",
+            "repo",
+            &sha,
+            "--poll",
+            "5",
+            "--repos",
+            "a,b",
+            "--github",
+            "--iterations",
+            "3",
+            "--state-dir",
+            "/s",
+            "--key",
+            "/k",
+            "--clones",
+            "/c",
+            "--wt-root",
+            "/w",
+            "--sandbox",
+            "user",
+        ]))
+        .unwrap();
+        assert_eq!(c.command, Command::Worker);
+        assert_eq!(c.once, Some(("repo".to_string(), sha.clone())));
+        assert_eq!(c.poll, Some(5));
+        assert_eq!(c.repos, v(&["a", "b"]));
+        assert!(c.github);
+        assert_eq!(c.iterations, Some(3));
+        assert_eq!(c.key, Some(PathBuf::from("/k")));
+        assert_eq!(c.clones, Some(PathBuf::from("/c")));
+        assert_eq!(c.wt_root, Some(PathBuf::from("/w")));
+        assert_eq!(c.sandbox, Sandbox::User);
+        assert!(parse_args(&v(&["worker", "--once", "repo", "short"])).is_err());
+        assert!(parse_args(&v(&["worker", "--poll", "x"])).is_err());
+        assert!(parse_args(&v(&["run", "G", "--poll", "5"])).is_err());
+        assert!(parse_args(&v(&["plan", "--github"])).is_err());
+        assert!(parse_args(&v(&["worker", "extra"])).is_err());
     }
 
     #[test]

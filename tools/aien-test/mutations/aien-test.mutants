@@ -1,6 +1,6 @@
 # Mutations of tools/aien-test/src/*.rs. Format: id<TAB>file<TAB>sed expression<TAB>what it models.
 # Each must be KILLED (a unit test fails) for run_mutants.sh to pass.
-dirty_tree_not_refused	runner.rs	s#!before.is_empty() && !opts.allow_dirty#false#	a dirty tree is no longer refused
+dirty_tree_not_refused	runner.rs	s#!before.is_empty() && (!opts.allow_dirty || opts.release)#false#	a dirty tree is no longer refused
 timeout_not_enforced	process.rs	s#rx.recv_timeout(spec.timeout)#rx.recv().map_err(|_| mpsc::RecvTimeoutError::Disconnected)#	the wall-clock timeout never fires
 rule_mismatch_passes	verdict.rs	s#position(|r| !r.1)#position(|_r| false)#	a failed expectation rule still yields PASS
 receipt_overwrite_allowed	evidence.rs	s#opts.write(true).create_new(true).mode(0o444);#opts.write(true).create(true).truncate(true).mode(0o444);#	an existing receipt can be overwritten

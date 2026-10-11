@@ -29,6 +29,7 @@ use crate::process::{self, RunSpec};
 use crate::resources::{
     acquire_gpu, lock, GpuConfig, GpuGuard, Hardware, Permit, Pool, PoolSizes, Pools,
 };
+use crate::sandbox::{self, Sandbox};
 use crate::verdict::{self, campaign_verdict, derive, parse_observations, DepFact, Facts, Verdict};
 use serde_json::{json, Map, Value};
 use std::collections::{BTreeMap, BTreeSet};
@@ -54,6 +55,15 @@ pub struct Options {
     pub hardware: Hardware,
     /// Lock files and refusal checks for gb10 gates.
     pub gpu: GpuConfig,
+    /// `--sandbox none|user` (contract C8). `None` keeps every earlier
+    /// behaviour unchanged.
+    pub sandbox: Sandbox,
+    /// `CARGO_TARGET_DIR` as the runner itself was given it; passed through
+    /// the sandbox as the only environment pair.
+    pub cargo_target_dir: Option<PathBuf>,
+    /// `--release`: qualification mode. No cache reuse and the tree must be
+    /// clean even with `--allow-dirty`.
+    pub release: bool,
 }
 
 impl Options {
@@ -69,6 +79,9 @@ impl Options {
             pool_sizes: PoolSizes::detect(),
             hardware: Hardware::detect(),
             gpu: GpuConfig::detect(),
+            sandbox: Sandbox::None,
+            cargo_target_dir: None,
+            release: false,
         }
     }
 }
@@ -308,6 +321,21 @@ fn collect_files(root: &Path, rel: &str, out: &mut BTreeSet<String>) {
     }
 }
 
+/// Where `run.exec` is. A name with a slash is repo-relative (the manifest
+/// already refuses absolute paths and `..`). A bare name is a program on the
+/// PATH, so a shared gate can say `exec: crumb`. None when it is not there.
+pub fn exec_path(root: &Path, exec: &str) -> Option<PathBuf> {
+    if exec.contains('/') {
+        let p = root.join(exec);
+        return p.is_file().then_some(p);
+    }
+    let path = std::env::var_os("PATH")?;
+    std::env::split_paths(&path)
+        .filter(|d| !d.as_os_str().is_empty())
+        .map(|d| d.join(exec))
+        .find(|p| p.is_file())
+}
+
 /// sha256 over the canonical list of (path, file sha256) for the explicit
 /// `inputs` plus the D3 convention-implied inputs of `tests/<dir>/<name>.gate`.
 /// A listed path that does not exist is recorded with a null digest. Compiler
@@ -433,12 +461,9 @@ pub(crate) fn identity(
     m: &Manifest,
     hw: &Hardware,
 ) -> Result<Identity, crate::evidence::StoreError> {
-    let exec_path = root.join(&m.exec);
-    let binary_sha = if exec_path.is_file() {
-        fs::read(&exec_path).ok().map(|b| sha256_hex(&b))
-    } else {
-        None
-    };
+    let binary_sha = exec_path(root, &m.exec)
+        .and_then(|p| fs::read(p).ok())
+        .map(|b| sha256_hex(&b));
     let manifest_rel = manifest_path.strip_prefix(root).ok();
     let machine = machine(hw);
     let machine_digest = canonical_digest(&machine)?;
@@ -493,14 +518,21 @@ fn execute_gate(job: &Job<'_>, permit: Option<Permit<'_>>) -> Result<Outcome, Ru
     let evidence_inside = resolve(&opts.evidence_dir).starts_with(resolve(root));
     let refusal: Option<String> = if evidence_inside {
         Some("evidence_inside".to_string())
-    } else if !before.is_empty() && !opts.allow_dirty {
+    } else if !before.is_empty() && (!opts.allow_dirty || opts.release) {
         Some("dirty_tree".to_string())
     } else {
         None
     };
 
-    let exec_path = root.join(&m.exec);
-    let exec_exists = exec_path.is_file();
+    let resolved = exec_path(root, &m.exec);
+    let exec_exists = resolved.is_some();
+    // A bare name under the user sandbox is left to the helper, which resolves
+    // it on the trusted PATH it sets; everything else runs by its full path.
+    let exec_path = match (&resolved, opts.sandbox) {
+        (_, Sandbox::User) if !m.exec.contains('/') => PathBuf::from(&m.exec),
+        (Some(p), _) => p.clone(),
+        (None, _) => root.join(&m.exec),
+    };
     let mut facts = Facts {
         refusal,
         exec_exists,
@@ -515,8 +547,10 @@ fn execute_gate(job: &Job<'_>, permit: Option<Permit<'_>>) -> Result<Outcome, Ru
     let id = identity(root, job.manifest_path, m, &opts.hardware).map_err(fatal)?;
     let store = Store::new(&opts.evidence_dir);
     let tree_clean = before.is_empty();
-    let mut mode = cache::policy(m.cache_allowed, opts.no_cache);
-    let off_reason: &str = if opts.no_cache {
+    let mut mode = cache::policy(m.cache_allowed, opts.no_cache || opts.release);
+    let off_reason: &str = if opts.release {
+        "--release"
+    } else if opts.no_cache {
         "--no-cache"
     } else if opts.args_override.is_some() {
         "replacement arguments were given after --"
@@ -607,7 +641,7 @@ fn execute_gate(job: &Job<'_>, permit: Option<Permit<'_>>) -> Result<Outcome, Ru
     let mut after = before.clone();
     let mut timeout_exceeded = false;
     if will_run {
-        let spec = RunSpec {
+        let direct = RunSpec {
             program: exec_path.clone(),
             args: opts.args_override.clone().unwrap_or_else(|| m.args.clone()),
             cwd: root.to_path_buf(),
@@ -617,6 +651,13 @@ fn execute_gate(job: &Job<'_>, permit: Option<Permit<'_>>) -> Result<Outcome, Ru
             // only marks the receipt.
             enforce_timeout: m.pool() != "gb10",
         };
+        // The sandbox seam (C8): `none` returns `direct` unchanged.
+        let spec = sandbox::wrap(
+            opts.sandbox,
+            direct,
+            m.pool(),
+            &sandbox::env_pairs(opts.cargo_target_dir.as_deref()),
+        );
         match process::run(&spec) {
             Ok(o) => {
                 facts.exit_status = o.exit_code.map(i64::from);
@@ -1895,6 +1936,80 @@ mod tests {
         let p = default_evidence_dir(Path::new("/some/where/my-repo"));
         if let Some(p) = p {
             assert!(p.ends_with("workspace/evidence-out/my-repo"), "{p:?}");
+        }
+    }
+
+    /// A repo whose gate names a bare program (no slash), resolved on PATH.
+    fn bare_fixture(exec: &str) -> Fx {
+        let scratch = TempDir::new("scratch");
+        let gate = gate_text(exec, &[], 0, &[], "20s", "");
+        let repo = init_repo(
+            "repo",
+            &[
+                ("tests/t.gate", gate.as_str(), false),
+                ("README", "hello\n", false),
+            ],
+        );
+        Fx {
+            repo,
+            ev: TempDir::new("ev"),
+            scratch,
+        }
+    }
+
+    #[test]
+    fn exec_path_rules() {
+        let fx = ok_fixture();
+        let root = fx.repo.path();
+        // A slash: repo-relative, present or not.
+        assert_eq!(
+            exec_path(root, "tools/run.sh"),
+            Some(root.join("tools/run.sh"))
+        );
+        assert_eq!(exec_path(root, "tools/missing.sh"), None);
+        // No slash: the PATH, never the repository root.
+        write_file(root, "true", "#!/bin/sh\nexit 1\n", true);
+        let p = exec_path(root, "true").expect("true is on PATH");
+        assert_ne!(p, root.join("true"));
+        assert!(p.is_absolute());
+        assert_eq!(exec_path(root, "aien-test-no-such-program-x"), None);
+    }
+
+    #[test]
+    fn bare_exec_runs_from_path() {
+        let fx = bare_fixture("true");
+        let o = run(&fx, &fx.opts());
+        assert_eq!(o.verdict, Verdict::Pass, "reason {}", o.reason);
+        let r = read_json(&o.receipt_path.unwrap());
+        assert_eq!(r["core"]["exit_status"], 0);
+        assert!(
+            r["core"]["binary_sha256"].is_string(),
+            "the PATH program is hashed"
+        );
+    }
+
+    #[test]
+    fn bare_exec_not_on_path_is_missing_implementation() {
+        let fx = bare_fixture("aien-test-no-such-program-x");
+        let o = run(&fx, &fx.opts());
+        assert_eq!(
+            o.verdict,
+            Verdict::MissingImplementation,
+            "reason {}",
+            o.reason
+        );
+    }
+
+    #[test]
+    fn escaping_exec_is_rejected_never_not_run() {
+        for bad in ["../../usr/bin/env", "/usr/bin/env", "tools/../../bin/true"] {
+            let fx = bare_fixture(bad);
+            match run_gate(fx.repo.path(), &fx.manifest(), &fx.opts()) {
+                Err(RunError::BadManifest(m)) => {
+                    assert!(m.contains("run.exec"), "{bad}: {m}")
+                }
+                other => panic!("{bad} must be a manifest reject, got {other:?}"),
+            }
         }
     }
 }
