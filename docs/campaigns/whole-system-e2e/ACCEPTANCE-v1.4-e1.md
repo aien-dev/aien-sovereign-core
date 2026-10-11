@@ -89,7 +89,6 @@ used and its run URL and main commit are recorded.
 | E4 | FAIL | UNVERIFIED (confidence moderate to high): RUN-3-GB10 E4 failed because the daemon refused the model's edit on a `./report.md` path rule; the fix is being made on a separate lane and cannot be in this older artifact. A finding about the artifact build, not about install |
 | CTRL-E4b | RECORDED, likely a path-rule refusal as in RUN-3-GB10 | same cause; not judged |
 | E6, CTRL-E6, CTRL-E4 | PASS or FAIL as measured | the older build lacks sc#412 and sc#418 behaviour (E6 and the restart refusals are the rows most exposed) |
-| CTRL-E4b | RECORDED | not judged |
 | E5 | NOT_RUN | R7 |
 | G4, G5 | `fallback_detected: false`, `gpu_executions >= 1` on model rows | as RUN-2/3-GB10; the engine in the artifact is whatever its build pinned (UNVERIFIED which) |
 | independent verifier | agrees with the harness on E1 and CTRL-E1 | the verifier already reads exactly these fields (`tools/aien-verify` `e1_row`, `ctrl_e1`) |
