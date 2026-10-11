@@ -46,6 +46,7 @@ rm -rf "$D/rows" "$D/fixture"; mkdir -p "$D/rows" "$D/fixture" "$OUT/chain" "$OU
 cp "$REPO/docs/campaigns/whole-system-e2e/FAULTS-v1.md" "$OUT/FAULTS-v1.as-run.md"
 cp "$REPO/docs/campaigns/whole-system-e2e/FAULTS-v1.1.md" "$OUT/FAULTS-v1.1.as-run.md"
 cp "$REPO/docs/campaigns/whole-system-e2e/FAULTS-v1.2.md" "$OUT/FAULTS-v1.2.as-run.md"
+cp "$REPO/docs/campaigns/whole-system-e2e/FAULTS-v1.2.1.md" "$OUT/FAULTS-v1.2.1.as-run.md"
 
 sha_of() { sha256sum "$1" | cut -d' ' -f1; }
 tstat() { stat -c '%i %s %.9Y' "$1" 2>/dev/null || echo absent; }
@@ -362,11 +363,11 @@ if [ -z "$ABORT" ]; then
       RL=$(reconcile_line); ledger L1; STOPPED=$(jq -c '.ledger.stopped' "$ART/L1.json" 2>/dev/null)
       execute s1 "$G"; R1=$T_REF; E1=$(count_effects)
       cli compose resume --approver drake >"$ART/resume.json" 2>&1; RES_OK=$(jq -r '.control.ok // .ok // "none"' "$ART/resume.json" 2>/dev/null)
-      execute s2 "$G"; ST2=$T_STATE; EA=$(count_effects); F=$(effect_file); S1=$(tstat "${F:-/nonexistent}")
-      execute s3 "$G"; R3=$T_REF; S2=$(tstat "${F:-/nonexistent}"); DUP=$(dupflag "$S1" "$S2" "$EA")
-      if [ "$DK" -eq 137 ] && [ "$STOPPED" != null ] && [ -n "$STOPPED" ] && [ -n "$R1" ] && [ "$E1" -eq 0 ] && [ "$ST2" = DONE ] && [ "$EA" -eq 1 ] && [ "$R3" = AlreadySpent ] && [ "$DUP" -eq 0 ]; then ST=PASS; else ST=FAIL; fi
-      rcpt E6-stop_durable $ST "stop ok=$STOP_OK, daemon SIGKILL (rc $DK), restart ($RL); ledger stopped=$STOPPED; execute refused '${R1:-none}', files $E1; resume ok=$RES_OK; same grant then $ST2; files $EA; next '${R3:-none}'; duplicates $DUP" \
-        "$(fields $KP 1 "$E1" "$EA" "$DUP" "$G" "$(jq -nc --arg r "$R1" --arg r3 "$R3" --arg s "$STOPPED" '{stopped_refusal:$r, ledger_stopped:$s, third_execute_refusal:$r3}')")"
+      execute s2 "$G"; R2=$T_REF; EA=$(count_effects)
+      # v1.2.1: a pre-stop grant never revives (Stale); no claim about a fresh grant after resume
+      if [ "$DK" -eq 137 ] && [ "$STOPPED" != null ] && [ -n "$STOPPED" ] && [ "$R1" = Stopped ] && [ "$E1" -eq 0 ] && [ "$R2" = Stale ] && [ "$EA" -eq 0 ]; then ST=PASS; else ST=FAIL; fi
+      rcpt E6-stop_durable $ST "stop ok=$STOP_OK, daemon SIGKILL (rc $DK), restart ($RL); ledger stopped=$STOPPED; execute refused '${R1:-none}', files $E1; resume ok=$RES_OK; same grant after resume: '${R2:-none}', files $EA" \
+        "$(fields $KP 1 "$E1" "$EA" 0 "$G" "$(jq -nc --arg r "$R1" --arg r2 "$R2" --arg s "$STOPPED" '{stopped_refusal:$r, after_resume_refusal:$r2, ledger_stopped:$s}')")"
     else rcpt E6-stop_durable FAIL "daemon did not restart: $(tail -c 300 "$DLOG" | tr '\n' ' ')" "$(fields $KP 1 0 0 0 "$G")"; fi
   else rcpt E6-stop_durable FAIL "setup failed (daemon or authorize)" "$(fields $KP 0 0 0 0 null)"; fi
   row_close
@@ -378,12 +379,15 @@ if [ -z "$ABORT" ]; then
       RL=$(reconcile_line)
       cli compose authorize --report "$REPORT" --workspace "$WS" --approver drake >"$ART/authorize-nodesk.json" 2>"$ART/authorize-nodesk.err"
       ND_OK=$(jq -r '.ok // false' "$ART/authorize-nodesk.json" 2>/dev/null); ND_TXT=$( { jq -r '.error // ""' "$ART/authorize-nodesk.json" 2>/dev/null; head -c 200 "$ART/authorize-nodesk.err"; } | tr '\n' ' ' | cut -c1-200)
-      G2=$(authorize authorize-desk)
+      ND_REF=$(printf '%s' "$ND_TXT" | sed -n 's/^EFFECT_REFUSED \([A-Za-z]*\).*/\1/p')
+      G2=$(authorize authorize-desk); D_TXT=$(jq -r '.error // ""' "$ART/authorize-desk.json" 2>/dev/null | cut -c1-200)
+      D_REF=$(printf '%s' "$D_TXT" | sed -n 's/^EFFECT_REFUSED \([A-Za-z]*\).*/\1/p')
       execute d1 "$G"; ST1=$T_STATE; EA=$(count_effects); F=$(effect_file); S1=$(tstat "${F:-/nonexistent}")
       execute d2 "$G"; R3=$T_REF; S2=$(tstat "${F:-/nonexistent}"); DUP=$(dupflag "$S1" "$S2" "$EA")
-      if [ "$DK" -eq 137 ] && [ "$ND_OK" != true ] && [ -n "$G2" ] && [ "$ST1" = DONE ] && [ "$EA" -eq 1 ] && [ "$R3" = AlreadySpent ] && [ "$DUP" -eq 0 ]; then ST=PASS; else ST=FAIL; fi
-      rcpt E6-desk_after_restart $ST "daemon SIGKILL (rc $DK), restart ($RL); authorize without desk proof: ok=$ND_OK ($ND_TXT); with the desk proof: new grant ${G2:-none}; first grant then $ST1; files $EA; next '${R3:-none}'; duplicates $DUP" \
-        "$(fields $KP 1 0 "$EA" "$DUP" "$G" "$(jq -nc --arg ok "$ND_OK" --arg t "$ND_TXT" --arg g2 "$G2" '{authorize_without_desk_ok:$ok, authorize_without_desk_text:$t, new_grant_with_desk:$g2}')")"
+      # v1.2.1: without desk proof -> DeskMacRequired; with it -> AlreadyAuthorized (the live grant survived the kill); the grant finishes once
+      if [ "$DK" -eq 137 ] && [ "$ND_REF" = DeskMacRequired ] && [ "$D_REF" = AlreadyAuthorized ] && [ "$ST1" = DONE ] && [ "$EA" -eq 1 ] && [ "$R3" = AlreadySpent ] && [ "$DUP" -eq 0 ]; then ST=PASS; else ST=FAIL; fi
+      rcpt E6-desk_after_restart $ST "daemon SIGKILL (rc $DK), restart ($RL); authorize without desk proof: '${ND_REF:-none}'; with the desk proof: '${D_REF:-none}' (${D_TXT}); first grant then $ST1; files $EA; next '${R3:-none}'; duplicates $DUP" \
+        "$(fields $KP 1 0 "$EA" "$DUP" "$G" "$(jq -nc --arg a "$ND_REF" --arg b "$D_REF" --arg t "$D_TXT" '{authorize_without_desk_refusal:$a, authorize_with_desk_refusal:$b, authorize_with_desk_text:$t}')")"
     else rcpt E6-desk_after_restart FAIL "daemon did not restart: $(tail -c 300 "$DLOG" | tr '\n' ' ')" "$(fields $KP 1 0 0 0 "$G")"; fi
   else rcpt E6-desk_after_restart FAIL "setup failed (daemon or authorize)" "$(fields $KP 0 0 0 0 null)"; fi
   row_close
