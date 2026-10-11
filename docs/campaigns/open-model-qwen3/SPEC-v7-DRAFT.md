@@ -69,21 +69,29 @@ model-behaviour rows `RQ<k>`, `CUT`, `F`, `SB`. A missing row is a failure. `tes
 
 ## 5. Freeze checklist (all must be true; each is a yes or no with evidence)
 
-1. [ ] Chat template gap closed on main: Qwen3-8B template pinned with fixture, provenance and render oracle; thinking off; new tests pass.
+1. [x] (2026-10-11, sc#436 merged 7cfc7a8; render oracle re-verified independently the same day, EVAL Section 8) Chat template gap closed on main: Qwen3-8B template pinned with fixture, provenance and render oracle; thinking off; new tests pass.
 2. [ ] Download hashes recorded in `frozen-v7.json` (done in this PR: OBSERVED) and re-hashed on the chip host within the freeze day.
-3. [ ] Engine smoke test PASS (EVAL Section 8, steps 2 to 5: template render, golden ids on CPU reference, GB10 equals CPU reference token for token;
+3. [x] (2026-10-11T16:02:55Z, SMOKE-8B-v1 attempt 2 on main c26f4d7, evidence under `evidence-smoke-8b/attempt-2/`, sc#440) Engine smoke test PASS (EVAL Section 8, steps 2 to 5: template render, golden ids on CPU reference, GB10 equals CPU reference token for token;
    the untied output head is exercised). Recorded under `evidence-v7/`.
 4. [ ] `model_sha256` filled from the daemon's `CHECKPOINT_SHARDS` line in a smoke run.
 5. [ ] Clean build at the freeze commit; every pin in `frozen-v7.json` filled; checkouts clean.
-6. [ ] `test-v7.sh` passes at the freeze commit; the v5 campaign file hashes still match (`evidence-v5/campaign-files.sha256`) for every file v7 reuses.
+6. [~] (pre-check on main c26f4d7: `evidence-v7/test-v7-c26f4d7.txt` 16 ok 0 failed; `evidence-v7/campaign-files-check-c26f4d7.txt` 63 OK; repeat at the freeze commit) `test-v7.sh` passes at the freeze commit; the v5 campaign file hashes still match (`evidence-v5/campaign-files.sha256`) for every file v7 reuses.
 7. [ ] G6 dry run of part 1 on GB10 in its own hold, then `g6-gate.sh` exit 0 over D1 D2 D3 (all product rows, ALLEN engaged). The dry
    run must also show the containment and identity rows PASS with the ALLEN state directories present beside the compose home (they are new
    since v6 and unproven against the unchanged row files; the proof run in the PR shows the directories exist, whether any row counts them
    is decided by the dry run, not assumed).
-8. [ ] Coordinator go for the chip window, quiet flag checked with `quietlock check`, `frozen-v7.json` status changed to FROZEN in the freeze PR, merged before any launch.
+8. [ ] Coordinator go for the chip window (Drake: a quiet hold is his approval; the 8B dry part 1 is one 40-minute hold, the real run four more), quiet flag checked with `quietlock check`, `frozen-v7.json` status changed to FROZEN in the freeze PR, merged before any launch.
 
 ## 6. What v7 does not prove
 
 A v7 PASS would qualify Qwen3-8B on these eleven launches, greedy decoding, thinking off, one run. It would not show the model is better than the 4B
 outside them, it would not promote it (promotion is a separate Drake decision, CAND-5 manifest in aien-architecture), and the ALLEN subject is a
 host-built fixture, not a provisioned identity.
+
+## 7. Launchers (added 2026-10-11, `evidence-v7/`)
+
+`build.sh <sc commit>` (clean clone + pinned release build, CPU only), `run-part.sh` (one part per hold; Qwen3-8B folder, v7 wrapper),
+`run-dry.sh <wrap commit> <build folder>` (gate G6: dry part 1 in one hold, then `g6-gate.sh` over D1 D2 D3, writes `records/g6.txt`
+and the daemon's `CHECKPOINT_SHARDS` line for checklist item 4), `run.sh <freeze commit> <build folder>` (four real parts, refuses
+without `G6 PASS` and without `frozen-v7.json` FROZEN). Each is the v6 launcher with the v7 names; the diff against `evidence-v6/`
+is the review. Holds are 40 minutes because the 8B is predicted to decode about half as fast as the 4B (v6 parts: 7 to 8 minutes).

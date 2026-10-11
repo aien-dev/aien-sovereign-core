@@ -42,3 +42,14 @@ The 8B differs from the qualified 4B in ways the engine had not been shown to ha
 ## Recorded after the CPU leg ran (2026-10-11, the only leg run so far)
 
 CPU leg on `~/models/qwen3-8b` (sha256 check passed), `ReferenceCpuBackend`, fallback_count 0, wall time 203 s for the whole script (load, warm-up, both turns). Prompt 1: 30 prompt tokens, reply `OK`, output ids `[3925]`, then eos. Prompt 2: 37 prompt tokens, 23 output tokens, reply the twelve month names one per line, then eos. Golden prompt ids, output ids and replies for both: `SMOKE-8B-v1.golden.json`. Prompt 1 ids are identical to the first recording. This does not change any verdict rule above. The GB10 leg has not been run.
+
+## Attempt record
+
+| attempt | started (UTC) | main | outcome |
+|---|---|---|---|
+| 1 | 2026-10-11T15:20:26Z | 7cfc7a8 | **harness defect, no verdict**: the gb10 leg ran (sha256 ok, GPU session opened, backend `OmegaGb10Backend`, both prompts generated, `fallback_count` 0) but the engine printed one informational line (`GPU session: open on attempt 1/3 ...`) to stdout ahead of the JSON result, so `jq` could not parse `gb10.json` and the script reported `gb10 result not well formed`. Diagnostic read of the JSON line by the coordinator (OBSERVED, informational, not the verdict): prompt and output ids equal the CPU golden on both prompts. Fix: the script now keeps raw stdout as `<leg>.raw` and extracts the JSON line into `<leg>.json`. The verdict comes only from a run under the fixed script. |
+| 2 | 2026-10-11T16:01:36Z | c26f4d7 | **PASS**: gb10 leg under the fixed script; sha256 ok (config + 5 shards), GPU session opened, backend `OmegaGb10Backend`, prompt 1 output ids `[3925]` and prompt 2 (23 ids, months) equal the committed CPU golden id for id, `fallback_count` 0, script exit 0 at 16:02:55Z. Independently re-checked by hashing the output-id arrays of `gb10.json` against `SMOKE-8B-v1.golden.json` (equal). Evidence: `evidence-smoke-8b/attempt-2/` (gb10.json, gb10.raw, gb10.err, build-gb10.log, pins.txt, SHA256SUMS). |
+
+## Verdict
+
+**SMOKE-8B-v1 PASS** (attempt 2, 2026-10-11T16:02:55Z, main c26f4d7): actual model load, CPU reference output (golden from sc#436), GB10 parity on both prompts, zero fallback. Scope limit unchanged: two prompts, greedy, 16 and 32 new tokens; this is the loader qualification, not the model-quality campaign (v7 stays DRAFT / NOT_RUN until the ALLEN driver and the full dry-run gate are verified).
