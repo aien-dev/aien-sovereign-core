@@ -459,9 +459,7 @@ pub(crate) fn record_effect_receipt(
         "policy": "default_sovereign_engine",
         "timestamp": chrono::Utc::now().to_rfc3339(),
     });
-    let dir = std::env::var("AIEN_PROVENANCE_DIR")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| std::path::PathBuf::from("/tmp/aien-provenance"));
+    let dir = aien_runtime::objective::provenance_root();
     if std::fs::create_dir_all(&dir).is_err() {
         return None;
     }

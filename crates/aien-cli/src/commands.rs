@@ -1318,6 +1318,20 @@ struct ResidentLoad<'a> {
     open_session: &'a dyn Fn() -> Result<(), String>,
 }
 
+/// Plain-English refusal printed by `aien start` when the approval desk key is
+/// missing or unusable (sc#414). The desk is mandatory, so this is a refusal,
+/// never a warning. `detail` is the runtime's own reason.
+pub fn start_refusal_text(detail: &str) -> String {
+    format!(
+        "AIEN will not start yet: the approval desk key has not been created.
+         The desk is how you approve what AIEN is allowed to do, and AIEN refuses to run without it.
+         Create it once, then start again:
+             aien compose desk-key --create 1
+             aien start
+         (detail: {detail})"
+    )
+}
+
 #[cfg(test)]
 fn load_daemon_model(
     manifest: DaemonModelManifest,
@@ -1874,6 +1888,12 @@ pub async fn handle_start_command() {
         return;
     }
 
+    // First-run guard (sc#414): the approval desk is mandatory, so refuse here in
+    // plain words instead of spawning a daemon that exits unseen.
+    if let Err(detail) = aien_runtime::spine::authorize_desk_at_start_from_env() {
+        eprintln!("{}", start_refusal_text(&detail).red().bold());
+        std::process::exit(1);
+    }
     println!(
         "{}",
         "⚡ Starting AIEN Sovereign Runtime Machine..."
@@ -2174,31 +2194,19 @@ pub async fn handle_cockpit_command() {
         .spawn();
 }
 
+/// `aien harness` is not shipped in this release (sc#414 defect 2). It used to
+/// call `spark-harness check`, a subcommand that never existed. The real
+/// `spark-harness test` needs data files (workflows.json, evals.json) that the
+/// installer does not copy, so nothing real backs this command on an installed
+/// machine. It refuses, with a non-zero exit, instead of faking a pass.
+pub fn harness_refusal_text() -> &'static str {
+    "`aien harness` is not shipped in this release, so nothing was checked or certified. \
+     Use `aien doctor` to probe this machine."
+}
+
 pub async fn handle_harness_command() {
-    println!(
-        "{}",
-        "⚡ Running AIEN 5-Layer Sovereign Harness Sweep..."
-            .cyan()
-            .bold()
-    );
-    let status = std::process::Command::new("spark-harness")
-        .arg("check")
-        .status();
-    match status {
-        Ok(s) if s.success() => println!(
-            "{}",
-            "\n✓ 5-Layer Verification PASS: All invariants certified."
-                .green()
-                .bold()
-        ),
-        _ => {
-            println!(
-                "{}",
-                "Running comprehensive fallback diagnostic...".yellow()
-            );
-            run_doctor().await;
-        }
-    }
+    eprintln!("{}", harness_refusal_text().red().bold());
+    std::process::exit(1);
 }
 
 pub async fn handle_aegis_command() {
@@ -2228,6 +2236,21 @@ pub async fn handle_aegis_command() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn start_refusal_names_the_exact_command() {
+        let t = start_refusal_text("no key at /x");
+        assert!(t.contains("aien compose desk-key --create 1"), "{t}");
+        assert!(t.contains("will not start"), "{t}");
+        assert!(t.contains("no key at /x"), "{t}");
+    }
+
+    #[test]
+    fn harness_refuses_plainly_instead_of_faking_a_pass() {
+        let t = harness_refusal_text();
+        assert!(t.contains("not shipped in this release"), "{t}");
+        assert!(!t.contains("PASS"), "{t}");
+    }
 
     #[test]
     fn strict_start_line_names_every_protection() {

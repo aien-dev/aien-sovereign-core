@@ -2,6 +2,15 @@ use crate::telemetry::get_gpu_telemetry;
 use colored::*;
 use std::io::{stdout, Write};
 
+/// Second banner line (sc#414): the runtime is the native Rust daemon. Modular
+/// MAX was left on 2026-10-02 and no model seat listens on port 18006 here.
+pub fn banner_runtime_line() -> String {
+    let text = "Grace Blackwell GB10 • Native Rust runtime • Local model, no cloud";
+    let inner = 76;
+    let pad = inner - 2 - text.chars().count();
+    format!("│  {text}{}│", " ".repeat(pad))
+}
+
 pub fn print_banner() {
     println!(
         "{}",
@@ -15,10 +24,7 @@ pub fn print_banner() {
             .cyan()
             .bold()
     );
-    println!(
-        "{}",
-        "│  Grace Blackwell GB10 • Modular MAX 26.5 • Resident Seat: Port 18006       │".cyan()
-    );
+    println!("{}", banner_runtime_line().cyan());
     println!(
         "{}",
         "╰────────────────────────────────────────────────────────────────────────────╯"
@@ -47,7 +53,7 @@ pub fn print_status_bar() {
     };
 
     let status = format!(
-        "[{}] • Seat: atlas-lightning-omni (:18006) • Mask: AIEN • Swarm: aien-hive",
+        "[{}] • Runtime: native AIEN daemon • Mask: AIEN • Swarm: aien-hive",
         gpu_status
     );
     println!("{}", status.black().on_cyan().bold());
@@ -98,4 +104,19 @@ pub fn print_safety_prompt(cmd: &str) -> bool {
         return trimmed == "y" || trimmed == "yes";
     }
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn banner_describes_native_runtime_not_max() {
+        let l = banner_runtime_line();
+        assert!(l.contains("Native Rust runtime"), "{l}");
+        for stale in ["MAX", "26.5", "18006"] {
+            assert!(!l.contains(stale), "stale banner text {stale}: {l}");
+        }
+        assert_eq!(l.chars().count(), 78, "box width: {l}");
+    }
 }
