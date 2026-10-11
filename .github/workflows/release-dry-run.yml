@@ -24,6 +24,9 @@ jobs:
       - name: Tag release gate stays fail-closed (static guard)
         run: bash scripts/test-release-gate-wiring.sh
 
+      - name: No release key in CI; release.yml only drafts; publish only after the offline-signature gate (static guard)
+        run: bash scripts/test-release-signing-workflow.sh
+
       # Report only: main may move ahead of the candidate's omega-commit. A release is cut from a commit whose tree
       # passes this gate; release.yml enforces it on tag push (guarded by scripts/test-release-gate-wiring.sh).
       - name: Tree gate on this revision (report, does not block)

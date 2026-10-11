@@ -4,7 +4,8 @@
 #   scripts/package-release.sh <output.tar.gz>
 #
 # Environment:
-#   AIEN_DRY_RUN=1        package even when the release gate fails (candidate "NOT-RELEASABLE"); never for a release
+#   AIEN_DRY_RUN=1        label the package dry-run (release.toml `dry-run = true`) and package even when the release
+#                         gate fails (candidate "NOT-RELEASABLE"); never for a release
 #   AIEN_RELEASE_BIN_DIR  directory holding the built binaries (default target/release)
 #   SOURCE_DATE_EPOCH     mtime for every entry (default 0)
 #
@@ -56,6 +57,8 @@ chmod 755 "$PACKAGE_DIR/bin/"* "$PACKAGE_DIR/install.sh"
     echo 'schema = "AienReleaseV1"'
     echo "candidate = \"$CANDIDATE\""
     echo "aien-cli-sha256 = \"$(sha "$PACKAGE_DIR/bin/aien")\""
+    # A dry-run package says so in its manifest; install.sh refuses it under the release key (sc#385).
+    [[ "${AIEN_DRY_RUN:-}" != 1 ]] || echo 'dry-run = true'
     if [[ -n "${AIEN_MODEL_INPUTS:-}" ]]; then
         echo
         grep -q '^\[model\]' "$AIEN_MODEL_INPUTS" || { echo "AIEN_MODEL_INPUTS must start with [model]" >&2; exit 1; }

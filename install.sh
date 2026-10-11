@@ -133,7 +133,7 @@ link_bins() {
 
 # write_record <current-id> <previous-id|""> <action>: rewrite installed.toml atomically.
 write_record() {
-    local cur="$1" prev="$2" action="$3" now id at tmp="$CONFIG_DIR/.installed.toml.new.$$"
+    local cur="$1" prev="$2" action="$3" now id at sc tmp="$CONFIG_DIR/.installed.toml.new.$$"
     now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     {
         echo 'schema = "AienInstalledV1"'
@@ -149,6 +149,9 @@ write_record() {
             echo "candidate = \"$(toml_get "$REL_DIR/$id/release.toml" "" candidate)\""
             echo "aien-cli-sha256 = \"$(toml_get "$REL_DIR/$id/release.toml" "" aien-cli-sha256)\""
             echo "installed-at = \"${at:-$now}\""
+            sc="$(toml_get "$RECORD" "version.$id" signature-check)"
+            [[ "$action" != install || "$id" != "$cur" || -z "${SIG_CHECK:-}" ]] || sc="$SIG_CHECK"
+            [[ -z "$sc" ]] || echo "signature-check = \"$sc\""
             if [[ -n "$(toml_lines "$REL_DIR/$id/release.toml" model)" ]]; then
                 echo
                 echo "[version.$id.model]"
@@ -247,10 +250,15 @@ if [[ "$ACTION" == "rollback" ]]; then
     exit 0
 fi
 
-# Release signing key, pinned here so a release can be verified with nothing but
-# this file and the assets (offline). Must equal docs/release/allowed_signers;
-# scripts/test-install-release.sh checks that they match.
-AIEN_PINNED_SIGNER='aien-release ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAID6WDVy2x8aV80ag10iPonS4J8k4seWrgsi5cuq8AIZJ'
+# Release signing keys, pinned here so a release can be verified with nothing but this file and the assets
+# (offline). scripts/test-install-release.sh checks both lines against their files in docs/release/.
+# AIEN_RELEASE_SIGNER is the dedicated offline public-release key (Drake ruling 1, sc#385). It equals the key line of
+# docs/release/allowed_signers. PLACEHOLDER: it is empty until the key ceremony (docs/release/KEY_CEREMONY.md)
+# produces the key, so until then nothing can verify, or be recorded, as a public release.
+AIEN_RELEASE_SIGNER=''
+# AIEN_INTERNAL_TEST_SIGNER is the old key that signed internal test release v0.1.1. It equals
+# docs/release/internal_test_signers. Anything it signs installs as signature_check internal-test-key, never release.
+AIEN_INTERNAL_TEST_SIGNER='aien-release ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAID6WDVy2x8aV80ag10iPonS4J8k4seWrgsi5cuq8AIZJ'
 
 # Run from a checkout, or bootstrap one when the script is piped to Bash for a
 # source build. Release mode runs without a checkout.
@@ -300,11 +308,51 @@ RELEASE_ARCH="$TARGET_ARCH"
 
 # Release mode (AIEN_RELEASE_TAG=vX.Y.Z): install a published, signed release
 # instead of building from source. Fails closed: nothing is installed unless
-# SHA256SUMS.txt carries a valid signature from the key pinned in
-# docs/release/allowed_signers and the archive matches its listed checksum.
+# SHA256SUMS.txt carries a valid signature and the archive matches its listed checksum.
+# The signature class is decided by WHICH key verified, never by what the artifact says:
+#   release            the public-release key pinned above (AIEN_RELEASE_SIGNER; empty until the key ceremony)
+#   internal-test-key  the old internal test key (AIEN_INTERNAL_TEST_SIGNER)
+#   dry-run-key        a throwaway signer file the caller names in AIEN_DRY_RUN_SIGNERS (AIEN_ALLOWED_SIGNERS is the
+#                      older name of the same switch); only for dry runs and tests
+# A package whose release.toml says dry-run = true is refused when it verifies as release.
+# The class is written to installed.toml (signature-check) and to $CONFIG_DIR/install-receipt.json.
+
+SIG_CHECK=""
+# verify_sums <signers-file> <dir>: true when SHA256SUMS.txt.sig is a valid aien-release signature for that file.
+verify_sums() {
+    ssh-keygen -Y verify -f "$1" -I aien-release -n aien-release -s "$2/SHA256SUMS.txt.sig" < "$2/SHA256SUMS.txt" >/dev/null 2>&1
+}
+
+# write_receipt <tag> <asset> <dir> <files-verified>: install-receipt.json for the live release (atomic).
+write_receipt() {
+    local tag="$1" asset="$2" d="$3" n="$4" id cli dry tmp="$CONFIG_DIR/.install-receipt.json.new.$$"
+    id="$(readlink "$REL_DIR/current")"
+    cli="$(toml_get "$REL_DIR/$id/release.toml" "" aien-cli-sha256)"
+    dry=false; [[ "$(toml_get "$REL_DIR/$id/release.toml" "" dry-run)" != true ]] || dry=true
+    {
+        echo '{'
+        echo '  "schema": "AienInstallReceiptV1",'
+        echo "  \"signature_check\": \"$SIG_CHECK\","
+        echo "  \"dry_run\": $dry,"
+        echo "  \"tag\": \"$tag\","
+        echo "  \"artifact\": \"$asset\","
+        echo "  \"artifact_sha256\": \"$(sha256_of "$d/$asset")\","
+        echo "  \"sha256sums_sha256\": \"$(sha256_of "$d/SHA256SUMS.txt")\","
+        echo "  \"signer_fingerprint\": \"$SIGNER_FP\","
+        echo "  \"release_id\": \"$id\","
+        echo "  \"candidate\": \"$(toml_get "$REL_DIR/$id/release.toml" "" candidate)\","
+        echo "  \"files_verified\": $n,"
+        echo "  \"cli_sha256\": \"$cli\","
+        echo "  \"daemon_sha256\": \"$cli\","
+        echo "  \"installed_at\": \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\""
+        echo '}'
+    } > "$tmp"
+    mv -f "$tmp" "$CONFIG_DIR/install-receipt.json"
+}
 
 install_release() {
     local tag="$1"
+    [[ "$tag" =~ ^[A-Za-z0-9._-]+$ ]] || { echo "Error: release tag '$tag' has characters other than letters, digits, dot, dash, underscore" >&2; exit 1; }
     command -v ssh-keygen >/dev/null 2>&1 || { echo "Error: ssh-keygen is required to verify the release signature" >&2; exit 1; }
     command -v curl >/dev/null 2>&1 || { echo "Error: curl is required to download the release" >&2; exit 1; }
     local base="${AIEN_RELEASE_BASE_URL:-https://github.com/aien-dev/aien-sovereign-core/releases/download/$tag}"
@@ -312,26 +360,38 @@ install_release() {
     DL_DIR=""
     DL_DIR="$(mktemp -d "${TMPDIR:-/tmp}/aien-release.XXXXXX")"
     trap 'rm -rf "$DL_DIR"; [[ -z "$INSTALL_WORKSPACE" ]] || rm -rf "$INSTALL_WORKSPACE"' EXIT
-    # Signer file: explicit override, else the checkout's copy, else the key pinned above.
-    local signers="${AIEN_ALLOWED_SIGNERS:-}"
-    if [[ -z "$signers" && -n "$SOURCE_ROOT" && -f "$SOURCE_ROOT/docs/release/allowed_signers" ]]; then
-        signers="$SOURCE_ROOT/docs/release/allowed_signers"
-    fi
-    if [[ -z "$signers" ]]; then
-        signers="$DL_DIR/allowed_signers"
-        printf '%s\n' "$AIEN_PINNED_SIGNER" > "$signers"
-    fi
-    [[ -f "$signers" ]] || { echo "Error: pinned signer file not found: $signers" >&2; exit 1; }
+    local dry_signers="${AIEN_DRY_RUN_SIGNERS:-${AIEN_ALLOWED_SIGNERS:-}}"
+    [[ -z "$dry_signers" || -f "$dry_signers" ]] || { echo "Error: dry-run signer file not found: $dry_signers" >&2; exit 1; }
     echo "[*] Downloading $tag: $asset, SHA256SUMS.txt, SHA256SUMS.txt.sig"
     local f
     for f in SHA256SUMS.txt SHA256SUMS.txt.sig "$asset"; do
-        curl --proto '=https,file' --fail --silent --show-error --location -o "$DL_DIR/$f" "$base/$f" \
-            || { echo "Error: could not download $f from $base" >&2; exit 1; }
+        if ! curl --proto '=https,file' --fail --silent --show-error --location -o "$DL_DIR/$f" "$base/$f" 2> "$DL_DIR/.curl.err"; then
+            [[ "$f" != SHA256SUMS.txt.sig ]] || { echo "Error: SHA256SUMS.txt.sig is missing: refusing an unsigned release (no signature). Nothing was installed." >&2; exit 1; }
+            cat "$DL_DIR/.curl.err" >&2; echo "Error: could not download $f from $base" >&2; exit 1
+        fi
     done
-    echo "[*] Verifying signature against $signers"
-    ssh-keygen -Y verify -f "$signers" -I aien-release -n aien-release \
-        -s "$DL_DIR/SHA256SUMS.txt.sig" < "$DL_DIR/SHA256SUMS.txt" >/dev/null \
-        || { echo "Error: SHA256SUMS.txt signature is NOT valid. Nothing was installed." >&2; exit 1; }
+    echo "[*] Verifying the signature on SHA256SUMS.txt"
+    SIG_CHECK=""; SIGNER_FP=""
+    local kf="$DL_DIR/.signer"
+    if [[ -n "$AIEN_RELEASE_SIGNER" ]]; then
+        printf '%s\n' "$AIEN_RELEASE_SIGNER" > "$kf"
+        ! verify_sums "$kf" "$DL_DIR" || SIG_CHECK=release
+    fi
+    if [[ -z "$SIG_CHECK" ]]; then
+        printf '%s\n' "$AIEN_INTERNAL_TEST_SIGNER" > "$kf"
+        ! verify_sums "$kf" "$DL_DIR" || SIG_CHECK=internal-test-key
+    fi
+    if [[ -z "$SIG_CHECK" && -n "$dry_signers" ]]; then
+        cp "$dry_signers" "$kf"
+        ! verify_sums "$kf" "$DL_DIR" || SIG_CHECK=dry-run-key
+    fi
+    if [[ -z "$SIG_CHECK" ]]; then
+        [[ -n "$AIEN_RELEASE_SIGNER" ]] || echo "    (no public-release key is pinned yet: the key ceremony has not happened, see docs/release/KEY_CEREMONY.md)" >&2
+        echo "Error: SHA256SUMS.txt signature is NOT valid for any accepted key. Nothing was installed." >&2; exit 1
+    fi
+    SIGNER_FP="$(awk 'NF >= 3 && $1 !~ /^#/ { print $2" "$3; exit }' "$kf" | ssh-keygen -lf - 2>/dev/null | awk '{ print $2 }' || true)"
+    rm -f "$kf"
+    echo "[+] signature_check: $SIG_CHECK"
     local want got
     want="$(awk -v a="$asset" '$2 == a || $2 == "*" a { print $1 }' "$DL_DIR/SHA256SUMS.txt")"
     [[ "$(printf '%s\n' "$want" | grep -c .)" -eq 1 ]] \
@@ -343,8 +403,15 @@ install_release() {
     mkdir -p "$DL_DIR/x" "$BIN_DIR"
     tar -xzf "$DL_DIR/$asset" -C "$DL_DIR/x"
     [[ -d "$DL_DIR/x/bin" ]] || { echo "Error: archive has no bin/ directory" >&2; exit 1; }
+    if [[ "$SIG_CHECK" == release && ( "$(toml_get "$DL_DIR/x/release.toml" "" dry-run)" == true \
+          || "$(toml_get "$DL_DIR/x/release.toml" "" candidate)" == NOT-RELEASABLE ) ]]; then
+        echo "Error: this package is labelled dry-run but carries a release signature; a dry run is never a release. Nothing was installed." >&2
+        exit 1
+    fi
     [[ ! -d "$DL_DIR/x/imprints/en2-trinity" ]] || IMPRINT_SRC="$DL_DIR/x/imprints/en2-trinity"
     activate_release "$DL_DIR/x"
+    write_receipt "$tag" "$asset" "$DL_DIR" "$(toml_lines "$REL_DIR/current/release.toml" files | grep -c .)"
+    echo "[+] Install receipt: $CONFIG_DIR/install-receipt.json (signature_check: $SIG_CHECK)"
 }
 
 # Verify Rust Toolchain (source builds only)

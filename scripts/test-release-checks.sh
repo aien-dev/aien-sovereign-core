@@ -86,6 +86,9 @@ if (cd "$T" && AIEN_RELEASE_BIN_DIR="$W/bins" bash scripts/package-release.sh "$
 (cd "$T" && AIEN_DRY_RUN=1 AIEN_RELEASE_BIN_DIR="$W/bins" bash scripts/package-release.sh "$W/dry.tar.gz" >/dev/null 2>&1) || fail "dry-run packaging failed"
 write_locks
 must_fail "names candidate 'NOT-RELEASABLE'" --package "$W/dry.tar.gz"; pass "dry-run package is not a releasable package"
+tar -xzOf "$W/dry.tar.gz" ./release.toml | grep -qx 'dry-run = true' || fail "dry-run package manifest is not labelled dry-run"
+! tar -xzOf "$W/good.tar.gz" ./release.toml | grep -q '^dry-run' || fail "release package manifest carries a dry-run label"
+pass "dry-run package manifest labelled dry-run = true; release package is not"
 
 # executable digest mismatch: a different aien binary against the candidate's pinned digest
 mkdir "$W/bins2"; cp "$W/bins/"* "$W/bins2/"; printf '#!/bin/sh\necho other build\n' > "$W/bins2/aien-cli"
@@ -133,6 +136,14 @@ assets; sign "$W/key"; echo tamper >> "$W/a/SHA256SUMS.txt"; vfail "NOT valid"; 
 assets; sign "$W/key"; echo x >> "$W/a/sovereign-linux-aarch64.tar.gz"; vfail "does not match the signed checksum"; pass "tampered archive rejected"
 assets; (cd "$W/a" && cp sovereign-linux-aarch64.tar.gz sovereign-macos-arm64.tar.gz); sign "$W/key"; vfail "not covered"; pass "archive missing from signed list rejected"
 assets; : > "$W/empty"; if bash "$ROOT/scripts/verify-release-assets.sh" "$W/a" "$W/empty" >/dev/null 2>&1; then fail "empty signer file accepted"; fi; pass "empty signer file rejected"
-# the production signer file is a real, non-empty key line
-grep -q '^aien-release ssh-ed25519 ' "$ROOT/docs/release/allowed_signers" || fail "docs/release/allowed_signers has no aien-release key"
+# the production signer file holds exactly one aien-release key, or (until the key ceremony) only a labelled
+# PLACEHOLDER that verify-release-assets.sh refuses by name; the internal test key is never in it
+PROD="$ROOT/docs/release/allowed_signers"; KEYS="$(grep -cvE '^[[:space:]]*(#|$)' "$PROD" || true)"
+if [[ "$KEYS" -eq 0 ]]; then
+    grep -q PLACEHOLDER "$PROD" || fail "allowed_signers has no key and no PLACEHOLDER label"
+    assets; sign "$W/key"; cp "$PROD" "$W/signers"; vfail "PLACEHOLDER"; pass "placeholder allowed_signers refuses a signed release by name"
+else
+    [[ "$KEYS" -eq 1 ]] && grep -qE '^aien-release ssh-ed25519 [A-Za-z0-9+/=]+$' "$PROD" || fail "allowed_signers must hold exactly one aien-release ed25519 key"
+fi
+! grep -qF "$(grep -vE '^[[:space:]]*(#|$)' "$ROOT/docs/release/internal_test_signers" | cut -d' ' -f3)" "$PROD" || fail "the internal test key is in allowed_signers"
 echo "PASS: release gate rejects inconsistent source pins, executable digest and model input mismatches, missing or invalid signatures"

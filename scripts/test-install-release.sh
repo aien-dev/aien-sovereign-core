@@ -21,18 +21,28 @@ case "$(uname -m)" in x86_64|amd64) ARCH=x86_64 ;; aarch64|arm64) ARCH=aarch64 ;
 [[ "$OS-$ARCH" != macos-aarch64 ]] || ARCH=arm64
 ASSET="sovereign-$OS-$ARCH.tar.gz"
 
-# 1. pinned key consistency
-PINNED="$(sed -n "s/^AIEN_PINNED_SIGNER='\(.*\)'\$/\1/p" "$ROOT/install.sh")"
-[[ -n "$PINNED" ]] || fail "install.sh has no AIEN_PINNED_SIGNER line"
-grep -qxF "$PINNED" "$ROOT/docs/release/allowed_signers" \
-    || fail "AIEN_PINNED_SIGNER in install.sh is not a line of docs/release/allowed_signers"
+# 1. pinned keys: install.sh AIEN_RELEASE_SIGNER equals the key lines of docs/release/allowed_signers (both empty
+#    while the placeholder stands); AIEN_INTERNAL_TEST_SIGNER equals docs/release/internal_test_signers; the
+#    internal test key is never in allowed_signers (Drake ruling 1, sc#385: the old key is not reused)
+keylines() { grep -vE "^[[:space:]]*(#|\$)" "$1" || true; }
+pinned() { sed -n "s/^$1='\(.*\)'\$/\1/p" "$ROOT/install.sh"; }
+grep -qE "^AIEN_RELEASE_SIGNER=" "$ROOT/install.sh" || fail "install.sh has no AIEN_RELEASE_SIGNER line"
+[[ "$(pinned AIEN_RELEASE_SIGNER)" == "$(keylines "$ROOT/docs/release/allowed_signers")" ]] \
+    || fail "AIEN_RELEASE_SIGNER in install.sh differs from the key lines of docs/release/allowed_signers"
+INTERNAL="$(pinned AIEN_INTERNAL_TEST_SIGNER)"
+[[ -n "$INTERNAL" && "$INTERNAL" == "$(keylines "$ROOT/docs/release/internal_test_signers")" ]] \
+    || fail "AIEN_INTERNAL_TEST_SIGNER in install.sh differs from docs/release/internal_test_signers"
+! grep -qF "${INTERNAL#aien-release }" "$ROOT/docs/release/allowed_signers" || fail "the internal test key is in allowed_signers"
+if [[ -z "$(pinned AIEN_RELEASE_SIGNER)" ]]; then
+    grep -q "PLACEHOLDER" "$ROOT/docs/release/allowed_signers" || fail "allowed_signers holds no key and no PLACEHOLDER label"
+fi
 
 ssh-keygen -q -t ed25519 -N '' -C test -f "$WORK/key"
 ssh-keygen -q -t ed25519 -N '' -C other -f "$WORK/other"
 printf 'aien-release %s\n' "$(cut -d' ' -f1,2 "$WORK/key.pub")" > "$WORK/allowed_signers"
 
-make_release() { # dir signing-key [candidate] [variant]
-    local d="$1" k="$2" cand="${3:-CAND-1}" variant="${4:-a}" f aien
+make_release() { # dir signing-key [candidate] [variant] [dry: label the manifest dry-run]
+    local d="$1" k="$2" cand="${3:-CAND-1}" variant="${4:-a}" dry="${5:-}" f aien
     rm -rf "$WORK/pkg"
     mkdir -p "$d" "$WORK/pkg/bin" "$WORK/pkg/imprints/en2-trinity"
     printf '#!/bin/sh\necho aien-%s\nexit 0\n' "$variant" > "$WORK/pkg/bin/aien"
@@ -41,7 +51,9 @@ make_release() { # dir signing-key [candidate] [variant]
     chmod 755 "$WORK/pkg/bin/"*
     aien="$(sha256sum "$WORK/pkg/bin/aien" 2>/dev/null | cut -d' ' -f1 || shasum -a 256 "$WORK/pkg/bin/aien" | cut -d' ' -f1)"
     {
-        printf 'schema = "AienReleaseV1"\ncandidate = "%s"\naien-cli-sha256 = "%s"\n\n[files]\n' "$cand" "$aien"
+        printf 'schema = "AienReleaseV1"\ncandidate = "%s"\naien-cli-sha256 = "%s"\n' "$cand" "$aien"
+        [[ -z "$dry" ]] || printf 'dry-run = true\n'
+        printf '\n[files]\n'
         (cd "$WORK/pkg" && find . -type f ! -name release.toml | LC_ALL=C sort | sed 's|^\./||') | while read -r f; do
             printf '"%s" = "%s"\n' "$f" "$(sha256sum "$WORK/pkg/$f" | cut -d' ' -f1)"
         done
@@ -62,7 +74,7 @@ run_install() { # release-dir bin-dir config-dir installer [VAR=value ...]
 # 2. valid release, from the checkout
 make_release "$WORK/good" "$WORK/key"
 run_install "$WORK/good" "$WORK/bin-good" "$WORK/cfg-good" "$ROOT/install.sh" \
-    AIEN_SOURCE_DIR="$ROOT" AIEN_ALLOWED_SIGNERS="$WORK/allowed_signers" \
+    AIEN_SOURCE_DIR="$ROOT" AIEN_DRY_RUN_SIGNERS="$WORK/allowed_signers" \
     || { cat "$WORK/log" >&2; fail "valid signed release did not install"; }
 [[ -x "$WORK/bin-good/aien" && -x "$WORK/bin-good/cortex" ]] || fail "binaries missing after valid install"
 
@@ -70,7 +82,7 @@ run_install "$WORK/good" "$WORK/bin-good" "$WORK/cfg-good" "$ROOT/install.sh" \
 make_release "$WORK/tamper" "$WORK/key"
 printf 'x' >> "$WORK/tamper/$ASSET"
 if run_install "$WORK/tamper" "$WORK/bin-tamper" "$WORK/cfg-tamper" "$ROOT/install.sh" \
-    AIEN_SOURCE_DIR="$ROOT" AIEN_ALLOWED_SIGNERS="$WORK/allowed_signers"; then
+    AIEN_SOURCE_DIR="$ROOT" AIEN_DRY_RUN_SIGNERS="$WORK/allowed_signers"; then
     fail "tampered archive was installed"
 fi
 grep -q "checksum mismatch" "$WORK/log" || fail "tampered archive not rejected for checksum"
@@ -79,7 +91,7 @@ grep -q "checksum mismatch" "$WORK/log" || fail "tampered archive not rejected f
 # 4. signature from another key
 make_release "$WORK/forged" "$WORK/other"
 if run_install "$WORK/forged" "$WORK/bin-forged" "$WORK/cfg-forged" "$ROOT/install.sh" \
-    AIEN_SOURCE_DIR="$ROOT" AIEN_ALLOWED_SIGNERS="$WORK/allowed_signers"; then
+    AIEN_SOURCE_DIR="$ROOT" AIEN_DRY_RUN_SIGNERS="$WORK/allowed_signers"; then
     fail "release signed by another key was installed"
 fi
 grep -q "signature is NOT valid" "$WORK/log" || fail "forged signature not rejected"
@@ -89,7 +101,7 @@ grep -q "signature is NOT valid" "$WORK/log" || fail "forged signature not rejec
 mkdir -p "$WORK/standalone" "$WORK/home"
 cp "$ROOT/install.sh" "$WORK/standalone/install.sh"
 run_install "$WORK/good" "$WORK/bin-alone" "$WORK/cfg-alone" "$WORK/standalone/install.sh" \
-    HOME="$WORK/home" AIEN_ALLOWED_SIGNERS="$WORK/allowed_signers" \
+    HOME="$WORK/home" AIEN_DRY_RUN_SIGNERS="$WORK/allowed_signers" \
     || { cat "$WORK/log" >&2; fail "standalone offline install did not install"; }
 grep -q "Release mode without a source tree" "$WORK/log" || fail "standalone install used a source tree"
 [[ -x "$WORK/bin-alone/aien" && -x "$WORK/bin-alone/cortex" ]] || fail "binaries missing after standalone install"
@@ -107,7 +119,7 @@ grep -q "signature is NOT valid" "$WORK/log" || fail "pinned-signer fallback did
 
 # 7. upgrade: a newer candidate installs over the first; one previous release is kept; the
 #    record names both; operator.toml is untouched
-SIGN_ENV=(AIEN_SOURCE_DIR="$ROOT" AIEN_ALLOWED_SIGNERS="$WORK/allowed_signers")
+SIGN_ENV=(AIEN_SOURCE_DIR="$ROOT" AIEN_DRY_RUN_SIGNERS="$WORK/allowed_signers")
 live() { readlink "$1/releases/current"; }
 inst_args() { # bin cfg args... : run install.sh with arguments in explicit dirs
     local bin="$1" cfg="$2"; shift 2
@@ -175,7 +187,7 @@ for point in mid-copy after-copy before-swap; do
     OLD="$(live "$WORK/cfg-good")"
     env AIEN_TEST_PAUSE_AT="$point" AIEN_RELEASE_TAG=v0.0.0-test AIEN_RELEASE_BASE_URL="file://$WORK/rel3" \
         AIEN_BIN_DIR="$WORK/bin-good" AIEN_CONFIG_DIR="$WORK/cfg-good" AIEN_INSTALL_NO_PROFILE=1 \
-        AIEN_SOURCE_DIR="$ROOT" AIEN_ALLOWED_SIGNERS="$WORK/allowed_signers" \
+        AIEN_SOURCE_DIR="$ROOT" AIEN_DRY_RUN_SIGNERS="$WORK/allowed_signers" \
         bash "$ROOT/install.sh" > "$WORK/log-int" 2>&1 &
     IPID=$!
     for _ in $(seq 1 100); do grep -q "paused at $point" "$WORK/log-int" 2>/dev/null && break; sleep 0.1; done
@@ -191,7 +203,7 @@ OLD="$(live "$WORK/cfg-good")"
 [[ "$OLD" != "$ID_NEW" ]] || fail "setup for the after-swap case failed"
 env AIEN_TEST_PAUSE_AT=after-swap AIEN_RELEASE_TAG=v0.0.0-test AIEN_RELEASE_BASE_URL="file://$WORK/rel3" \
     AIEN_BIN_DIR="$WORK/bin-good" AIEN_CONFIG_DIR="$WORK/cfg-good" AIEN_INSTALL_NO_PROFILE=1 \
-    AIEN_SOURCE_DIR="$ROOT" AIEN_ALLOWED_SIGNERS="$WORK/allowed_signers" \
+    AIEN_SOURCE_DIR="$ROOT" AIEN_DRY_RUN_SIGNERS="$WORK/allowed_signers" \
     bash "$ROOT/install.sh" > "$WORK/log-int" 2>&1 &
 IPID=$!
 for _ in $(seq 1 100); do grep -q "paused at after-swap" "$WORK/log-int" 2>/dev/null && break; sleep 0.1; done
@@ -227,7 +239,7 @@ kill_at() { # point release-dir [install.sh args...]: run install.sh held at poi
     shift 2
     env AIEN_TEST_PAUSE_AT="$point" AIEN_RELEASE_TAG=v0.0.0-test AIEN_RELEASE_BASE_URL="file://$rel" \
         AIEN_BIN_DIR="$WORK/bin-good" AIEN_CONFIG_DIR="$WORK/cfg-good" AIEN_INSTALL_NO_PROFILE=1 \
-        AIEN_SOURCE_DIR="$ROOT" AIEN_ALLOWED_SIGNERS="$WORK/allowed_signers" HOME="$WORK/home" \
+        AIEN_SOURCE_DIR="$ROOT" AIEN_DRY_RUN_SIGNERS="$WORK/allowed_signers" HOME="$WORK/home" \
         bash "$ROOT/install.sh" "$@" > "$WORK/log-int" 2>&1 &
     ipid=$!
     for _ in $(seq 1 100); do grep -q "paused at $point" "$WORK/log-int" 2>/dev/null && break; sleep 0.1; done
@@ -293,4 +305,67 @@ sed -i 's/^candidate = .*/candidate = "unknown"/' "$GT/release/candidate.toml"
 if gate; then fail "gate accepted candidate unknown"; fi
 rm "$GT/release/candidate.toml"
 if gate; then fail "gate accepted a missing candidate file"; fi
-echo "PASS: release gate fails closed, release install verifies signature, checksum and every package file, rejects tampered and forged releases, installs standalone offline, pinned key matches allowed_signers, upgrades atomically, keeps one previous release, rolls back, refuses downgrades, survives an interrupted install (including kill -9 just before the rename, just after it, and during rollback)"
+
+# 14. offline-signing handoff (sc#385): signature classes, labelled receipts, negative rows. Every key here is a
+#     throwaway made above; nothing in this section touches a real key.
+rcpt() { sed -n "s/^  \"$2\": \"\{0,1\}\([^\",]*\)\"\{0,1\},\{0,1\}\$/\1/p" "$1/install-receipt.json"; }
+#   A. a dry-run artifact (manifest labelled dry-run, signed by a throwaway key given explicitly) installs and is
+#      recorded as signature_check dry-run-key in installed.toml and in install-receipt.json
+make_release "$WORK/dry" "$WORK/key" CAND-1 a dry
+run_install "$WORK/dry" "$WORK/bin-dry" "$WORK/cfg-dry" "$ROOT/install.sh" "${SIGN_ENV[@]}" \
+    || { cat "$WORK/log" >&2; fail "dry-run artifact did not install with the throwaway signer"; }
+grep -q '^signature-check = "dry-run-key"$' "$WORK/cfg-dry/installed.toml" || fail "installed.toml does not record dry-run-key"
+[[ "$(rcpt "$WORK/cfg-dry" signature_check)" == dry-run-key ]] || fail "install receipt does not record signature_check dry-run-key"
+[[ "$(rcpt "$WORK/cfg-dry" dry_run)" == true ]] || fail "install receipt does not record the dry-run manifest label"
+[[ "$(rcpt "$WORK/cfg-dry" artifact_sha256)" == "$(sha256sum "$WORK/dry/$ASSET" | cut -d' ' -f1)" ]] || fail "receipt artifact_sha256 is not the artifact's digest"
+[[ "$(rcpt "$WORK/cfg-dry" files_verified)" =~ ^[1-9][0-9]*$ ]] || fail "receipt files_verified is not a positive count"
+[[ "$(rcpt "$WORK/cfg-dry" cli_sha256)" =~ ^[0-9a-f]{64}$ ]] || fail "receipt cli_sha256 missing"
+grep -q 'signature_check: dry-run-key' "$WORK/log" || fail "installer output does not say dry-run-key"
+#   B. one byte changed in the middle of the archive (same size): refused, names the checksum, nothing installed
+make_release "$WORK/flip" "$WORK/key" CAND-1 a dry
+SZ="$(wc -c < "$WORK/flip/$ASSET")"; OFF=$((SZ / 2))
+B="$(dd if="$WORK/flip/$ASSET" bs=1 skip="$OFF" count=1 2>/dev/null | od -An -tu1 | tr -d ' ')"
+printf "$(printf '\\%03o' $(( (B + 1) % 256 )))" | dd of="$WORK/flip/$ASSET" bs=1 seek="$OFF" count=1 conv=notrunc 2>/dev/null
+[[ "$(wc -c < "$WORK/flip/$ASSET")" == "$SZ" ]] || fail "byte flip changed the size"
+if run_install "$WORK/flip" "$WORK/bin-flip" "$WORK/cfg-flip" "$ROOT/install.sh" "${SIGN_ENV[@]}"; then fail "artifact with one byte changed was installed"; fi
+grep -qi "checksum" "$WORK/log" || fail "one-byte change not refused by name (checksum)"
+[[ ! -e "$WORK/bin-flip/aien" && ! -e "$WORK/cfg-flip/install-receipt.json" ]] || fail "one-byte refusal left a binary or a receipt"
+#   C. one byte changed in the signed checksum list: refused, names the signature
+make_release "$WORK/flipsum" "$WORK/key" CAND-1 a dry
+C1="$(head -c1 "$WORK/flipsum/SHA256SUMS.txt")"; [[ "$C1" == 0 ]] && R=1 || R=0; sed -i "1s/^./$R/" "$WORK/flipsum/SHA256SUMS.txt"
+if run_install "$WORK/flipsum" "$WORK/bin-fs" "$WORK/cfg-fs" "$ROOT/install.sh" "${SIGN_ENV[@]}"; then fail "edited checksum list was installed"; fi
+grep -q "signature" "$WORK/log" || fail "edited checksum list not refused by name (signature)"
+[[ ! -e "$WORK/bin-fs/aien" ]] || fail "edited checksum list left a binary"
+#   D. missing signature: refused, says unsigned, nothing installed
+make_release "$WORK/nosig" "$WORK/key" CAND-1 a dry
+rm -f "$WORK/nosig/SHA256SUMS.txt.sig"
+if run_install "$WORK/nosig" "$WORK/bin-ns" "$WORK/cfg-ns" "$ROOT/install.sh" "${SIGN_ENV[@]}"; then fail "release without a signature was installed"; fi
+grep -q "SHA256SUMS.txt.sig is missing" "$WORK/log" || fail "missing signature not refused by name"
+[[ ! -e "$WORK/bin-ns/aien" && ! -e "$WORK/cfg-ns/install-receipt.json" ]] || fail "missing-signature refusal left a binary or a receipt"
+#   E. wrong key: a dry-run artifact signed by another throwaway key is refused
+make_release "$WORK/wrong" "$WORK/other" CAND-1 a dry
+if run_install "$WORK/wrong" "$WORK/bin-wk" "$WORK/cfg-wk" "$ROOT/install.sh" "${SIGN_ENV[@]}"; then fail "wrong-key artifact was installed"; fi
+grep -q "signature is NOT valid" "$WORK/log" || fail "wrong key not refused by name"
+#   F. a dry-run artifact can never be recorded as a release. Simulate a pinned release key with a copy of install.sh
+#      whose AIEN_RELEASE_SIGNER is the throwaway key: an unlabelled package signed by it records release (positive
+#      control); a dry-run-labelled package signed by the same key is refused and leaves no receipt.
+mkdir -p "$WORK/pinned-sim"
+sed "s|^AIEN_RELEASE_SIGNER=.*|AIEN_RELEASE_SIGNER='$(cat "$WORK/allowed_signers")'|" "$ROOT/install.sh" > "$WORK/pinned-sim/install.sh"
+grep -q "^AIEN_RELEASE_SIGNER='aien-release ssh-ed25519 " "$WORK/pinned-sim/install.sh" || fail "release-key simulation did not apply"
+run_install "$WORK/good" "$WORK/bin-rel" "$WORK/cfg-rel" "$WORK/pinned-sim/install.sh" HOME="$WORK/home" \
+    || { cat "$WORK/log" >&2; fail "simulated release did not install"; }
+[[ "$(rcpt "$WORK/cfg-rel" signature_check)" == release ]] || fail "release-key signature not recorded as release (control)"
+if run_install "$WORK/dry" "$WORK/bin-dryrel" "$WORK/cfg-dryrel" "$WORK/pinned-sim/install.sh" HOME="$WORK/home"; then
+    fail "dry-run artifact signed by the release key was installed"
+fi
+grep -q "labelled dry-run" "$WORK/log" || fail "dry-run artifact under the release key not refused by name"
+[[ ! -e "$WORK/cfg-dryrel/install-receipt.json" ]] || fail "refused dry-run artifact left a receipt"
+#   G. with the placeholder in place (no release key pinned) and no throwaway signer, nothing verifies as a release
+if [[ -z "$(pinned AIEN_RELEASE_SIGNER)" ]]; then
+    if run_install "$WORK/good" "$WORK/bin-ph" "$WORK/cfg-ph" "$ROOT/install.sh" HOME="$WORK/home"; then fail "placeholder accepted a release"; fi
+    grep -q "no public-release key is pinned" "$WORK/log" || fail "placeholder refusal does not say no release key is pinned"
+fi
+#   H. a release signed by the internal test key would be labelled internal-test-key (classification is by the
+#      verifying key; checked by grepping the installer, because that private key is not on this machine)
+grep -q 'SIG_CHECK=internal-test-key' "$ROOT/install.sh" || fail "install.sh has no internal-test-key class"
+echo "PASS: release gate fails closed, release install verifies signature, checksum and every package file, labels the signature class (release, internal-test-key, dry-run-key) in installed.toml and install-receipt.json, never records a dry-run artifact as a release, refuses a one-byte change, an edited checksum list, a missing signature and a wrong key, rejects tampered and forged releases, installs standalone offline, pinned key matches allowed_signers, upgrades atomically, keeps one previous release, rolls back, refuses downgrades, survives an interrupted install (including kill -9 just before the rename, just after it, and during rollback)"

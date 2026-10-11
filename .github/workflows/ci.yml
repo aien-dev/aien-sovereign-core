@@ -30,6 +30,9 @@ jobs:
       - name: Verify Signed Release Install
         run: bash scripts/test-install-release.sh
 
+      - name: Offline-signing handoff (ceremony rehearsal, offline sign, publish gate; throwaway keys only)
+        run: bash scripts/test-offline-signing.sh
+
       - name: Release gate negative tests (pins, digests, model inputs, signatures)
         run: bash scripts/test-release-checks.sh
 
