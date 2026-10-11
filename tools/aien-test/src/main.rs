@@ -520,6 +520,13 @@ fn cmd_worker(cli: &Cli) -> i32 {
         .clone()
         .unwrap_or_else(|| PathBuf::from("/var/lib/aien-run/wt"));
     let mut cfg = worker::Config::new(state, &key, &clones, &wt_root);
+    // INFRA's worktree tool; the default is the copy in the trusted clone of
+    // this repository. A missing tool makes `--sandbox user` refuse to run.
+    cfg.wt_tool = match &cli.wt_tool {
+        Some(t) => Some(t.clone()),
+        None => Some(clones.join("aien-sovereign-core/tools/aien-local-ci/wt.sh"))
+            .filter(|p| p.is_file()),
+    };
     // The worker runs other people's code: the user sandbox is its default.
     // `--sandbox none` is a development mode only, needs
     // `--dev-unsandboxed`, and is never allowed with `--github`.

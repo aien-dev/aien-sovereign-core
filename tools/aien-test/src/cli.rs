@@ -11,7 +11,7 @@
 //! aien-test status [--state-dir DIR]
 //! aien-test verify COMMIT [--repo NAME] [--base REF] [--state-dir DIR] [--release]
 //! aien-test worker [--once REPO SHA] [--poll SECS] [--repos LIST] [--github] [--iterations N]
-//!                  [--state-dir DIR] [--key FILE] [--clones DIR] [--wt-root DIR] [--sandbox user|none --dev-unsandboxed]
+//!                  [--state-dir DIR] [--key FILE] [--clones DIR] [--wt-root DIR] [--wt-tool FILE] [--sandbox user|none --dev-unsandboxed]
 //! ```
 //!
 //! `--host/--qemu/--gb10` and `--mutants` are later slices and are refused.
@@ -30,7 +30,7 @@ pub const USAGE: &str = "usage:
   aien-test status [--state-dir DIR]
   aien-test verify COMMIT [--repo NAME] [--base REF] [--state-dir DIR] [--release]
   aien-test worker [--once REPO SHA] [--poll SECS] [--repos A,B] [--github] [--iterations N]
-                   [--state-dir DIR] [--key FILE] [--clones DIR] [--wt-root DIR] [--sandbox user|none --dev-unsandboxed]
+                   [--state-dir DIR] [--key FILE] [--clones DIR] [--wt-root DIR] [--wt-tool FILE] [--sandbox user|none --dev-unsandboxed]
 flags: --evidence-dir DIR  --allow-dirty  --no-cache  --release  --jobs host=N,qemu=M  --wait-gpu
        --sandbox none|user  --base REF  --operator";
 
@@ -103,6 +103,9 @@ pub struct Cli {
     pub clones: Option<PathBuf>,
     /// worker: `--wt-root DIR` where detached worktrees go (default `/var/lib/aien-run/wt`).
     pub wt_root: Option<PathBuf>,
+    /// worker: `--wt-tool FILE` INFRA's worktree tool (default
+    /// `<clones>/aien-sovereign-core/tools/aien-local-ci/wt.sh`).
+    pub wt_tool: Option<PathBuf>,
     /// worker: `--once REPO SHA`.
     pub once: Option<(String, String)>,
     /// worker: `--poll SECS` (default 30).
@@ -139,11 +142,12 @@ fn parse_selection(s: &str) -> Result<Selection, String> {
 const COMMANDS: [&str; 9] = [
     "run", "test", "why", "list", "identity", "plan", "status", "verify", "worker",
 ];
-const WORKER_FLAGS: [&str; 11] = [
+const WORKER_FLAGS: [&str; 12] = [
     "--dev-unsandboxed",
     "--key",
     "--clones",
     "--wt-root",
+    "--wt-tool",
     "--once",
     "--poll",
     "--repos",
@@ -183,6 +187,7 @@ pub fn parse_args(argv: &[String]) -> Result<Cli, String> {
     let mut key: Option<PathBuf> = None;
     let mut clones: Option<PathBuf> = None;
     let mut wt_root: Option<PathBuf> = None;
+    let mut wt_tool: Option<PathBuf> = None;
     let mut once: Option<(String, String)> = None;
     let mut poll: Option<u64> = None;
     let mut repos: Vec<String> = Vec::new();
@@ -241,6 +246,9 @@ pub fn parse_args(argv: &[String]) -> Result<Cli, String> {
         } else if a == "--wt-root" {
             worker_flags.push("--wt-root");
             wt_root = Some(PathBuf::from(value(&mut i, a)?));
+        } else if a == "--wt-tool" {
+            worker_flags.push("--wt-tool");
+            wt_tool = Some(PathBuf::from(value(&mut i, a)?));
         } else if a == "--once" {
             worker_flags.push("--once");
             let r = value(&mut i, a)?;
@@ -369,6 +377,7 @@ pub fn parse_args(argv: &[String]) -> Result<Cli, String> {
         key,
         clones,
         wt_root,
+        wt_tool,
         once,
         poll,
         repos,
@@ -614,6 +623,8 @@ mod tests {
             "/c",
             "--wt-root",
             "/w",
+            "--wt-tool",
+            "/t/wt.sh",
             "--sandbox",
             "user",
         ]))
@@ -627,6 +638,7 @@ mod tests {
         assert_eq!(c.key, Some(PathBuf::from("/k")));
         assert_eq!(c.clones, Some(PathBuf::from("/c")));
         assert_eq!(c.wt_root, Some(PathBuf::from("/w")));
+        assert_eq!(c.wt_tool, Some(PathBuf::from("/t/wt.sh")));
         assert_eq!(c.sandbox, Sandbox::User);
         assert!(parse_args(&v(&["worker", "--once", "repo", "short"])).is_err());
         assert!(parse_args(&v(&["worker", "--poll", "x"])).is_err());

@@ -177,7 +177,7 @@ pub struct Plan {
 // ---------------------------------------------------------------- git
 
 fn git(root: &Path, args: &[&str]) -> Result<Vec<u8>, String> {
-    let mut cmd = Command::new("git");
+    let mut cmd = process::git_command();
     cmd.env("GIT_OPTIONAL_LOCKS", "0")
         .arg("-C")
         .arg(root)

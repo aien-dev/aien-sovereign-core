@@ -884,7 +884,17 @@ fn worker_in_the_user_sandbox_is_ready() {
     let mut cfg = w.config();
     cfg.allow_unsandboxed = false;
     cfg.sandbox = Sandbox::User;
+    if !wt_tool().is_file() {
+        println!(
+            "SKIP: {} is not in this tree (INFRA lane)",
+            wt_tool().display()
+        );
+        return;
+    }
     cfg.wt_root = PathBuf::from("/var/lib/aien-run/wt");
+    cfg.wt_tool = Some(wt_tool());
+    let mirror = Path::new(worker::MIRROR_ROOT).join(format!("{REPO}.git"));
+    let _mirror = MirrorCleanup(mirror.clone());
     let s = worker::run_once(&cfg, REPO, &w.head).expect("worker");
     println!(
         "worker --sandbox user: {} {} {:?}",
@@ -892,6 +902,15 @@ fn worker_in_the_user_sandbox_is_ready() {
         s.reason,
         s.notes
     );
+    // The wt.sh worktree is gone again and no note says otherwise.
+    assert!(
+        !Path::new("/var/lib/aien-run/wt")
+            .join(REPO)
+            .join(&w.head)
+            .exists(),
+        "worktree left behind"
+    );
+    assert!(mirror.join("HEAD").exists(), "wt.sh keeps its mirror");
     assert_eq!(s.verdict, Verdict::Pass, "{} {:?}", s.reason, s.notes);
     assert!(s.ready, "{:?}", s.notes);
     let r = w.verify(&w.ask(&w.head));
@@ -931,4 +950,131 @@ fn worker_cli_refuses_unsandboxed_github_and_unflagged_none() {
     assert!(String::from_utf8_lossy(&o.stderr).contains("--github"));
     // Nothing ran: no state was written.
     assert!(!state.exists());
+}
+
+// ---------------------------------------------------------------- INFRA-2 alignment
+
+/// INFRA's worktree tool, from this repository.
+fn wt_tool() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../aien-local-ci/wt.sh")
+}
+
+/// Removes a test mirror under `/var/lib/aien-run/mirror` when dropped.
+struct MirrorCleanup(PathBuf);
+
+impl Drop for MirrorCleanup {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
+#[test]
+fn worker_refuses_the_user_sandbox_without_the_wt_tool() {
+    let w = world();
+    let mut cfg = w.config();
+    cfg.sandbox = Sandbox::User;
+    cfg.wt_tool = None;
+    let e = worker::run_once(&cfg, REPO, &w.head).unwrap_err();
+    assert!(e.contains("--wt-tool"), "{e}");
+    // Nothing was checked out.
+    assert!(!w.wt_root.join(REPO).join(&w.head).exists());
+}
+
+#[test]
+fn only_a_wt_sh_link_is_trusted() {
+    let t = Tmp::new("wt-link");
+    let wt = t.path().join("wt");
+    let mirror = t.path().join("m.git");
+    fs::create_dir_all(&wt).unwrap();
+    // Owned by the test user, not root: refused even with the right target.
+    fs::write(
+        wt.join(".git"),
+        format!("gitdir: {}/worktrees/x\n", mirror.display()),
+    )
+    .unwrap();
+    // Mode 0644 as wt.sh leaves it, so only the owner is wrong.
+    fs::set_permissions(wt.join(".git"), fs::Permissions::from_mode(0o644)).unwrap();
+    let e = worker::check_worktree_link(&wt, &mirror).unwrap_err();
+    assert!(e.contains("root-owned"), "{e}");
+    // A real wt.sh worktree passes when one is present on this host.
+    let real = Path::new("/var/lib/aien-run/wt/aien-sovereign-core");
+    let found = fs::read_dir(real).ok().and_then(|mut rd| {
+        rd.find_map(|e| {
+            e.ok()
+                .map(|e| e.path())
+                .filter(|p| p.join(".git").is_file())
+        })
+    });
+    if let Some(p) = found {
+        let m = Path::new(worker::MIRROR_ROOT).join("aien-sovereign-core.git");
+        worker::check_worktree_link(&p, &m).expect("wt.sh worktree");
+        let other = Path::new(worker::MIRROR_ROOT).join("elsewhere.git");
+        assert!(worker::check_worktree_link(&p, &other).is_err());
+    } else {
+        println!("SKIP real wt.sh worktree: none present");
+    }
+}
+
+#[test]
+fn a_wrong_target_dir_is_refused_by_the_helper() {
+    if !Path::new(aien_test::sandbox::EXEC_HELPER).exists() {
+        println!(
+            "SKIP: {} is not installed (INFRA lane)",
+            aien_test::sandbox::EXEC_HELPER
+        );
+        return;
+    }
+    // The helper itself: exit 2, its prefix on stderr, nothing ran.
+    let t = Tmp::sandbox_wt();
+    let r = t.path();
+    let bad = "/var/lib/aien-run/target/aien-test-selftest/other";
+    let (program, args) = aien_test::sandbox::command(
+        Sandbox::User,
+        Path::new("/bin/true"),
+        &[],
+        r,
+        10,
+        "host",
+        &[("CARGO_TARGET_DIR".to_string(), bad.to_string())],
+    );
+    let out = Command::new(program).args(&args).output().unwrap();
+    assert_eq!(out.status.code(), Some(2), "{out:?}");
+    assert!(out.stderr.starts_with(b"aien-run-exec:"), "{out:?}");
+    assert!(runner::sandbox_refused(
+        Sandbox::User,
+        out.status.code(),
+        &out.stderr
+    ));
+    assert!(!runner::sandbox_refused(
+        Sandbox::None,
+        out.status.code(),
+        &out.stderr
+    ));
+    assert!(!runner::sandbox_refused(
+        Sandbox::User,
+        Some(2),
+        b"own error\n"
+    ));
+
+    // Through the runner: a gate that expects exit 2 still never passes on
+    // a refusal, and its receipt has no exit status.
+    git(r, &["init", "-q", "-b", "main"]);
+    write(
+        r,
+        "tests/gates/R.gate",
+        &gate("R", "a/", "true", "").replace("exit: 0", "exit: 2"),
+        false,
+    );
+    write(r, "a/a.txt", "1\n", false);
+    git(r, &["add", "-A"]);
+    git(r, &["commit", "-q", "-m", "init"]);
+    let ev = Tmp::new("refused-ev");
+    let mut opts = Options::new(ev.path().join("out"));
+    opts.sandbox = Sandbox::User;
+    opts.cargo_target_dir = Some(PathBuf::from(bad));
+    let o = runner::run_gate(r, &r.join("tests/gates/R.gate"), &opts).unwrap();
+    assert_eq!(o.verdict, Verdict::Fail, "{}", o.reason);
+    let receipt: serde_json::Value =
+        serde_json::from_slice(&fs::read(o.receipt_path.unwrap()).unwrap()).unwrap();
+    assert_eq!(receipt["core"]["exit_status"], serde_json::Value::Null);
 }

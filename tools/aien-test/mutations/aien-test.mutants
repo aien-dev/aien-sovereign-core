@@ -76,3 +76,5 @@ check_id_mismatch_ignored	verify.rs	s#if c\["check_id"\].as_str() != Some(e.chec
 receipt_manifest_ignored	verify.rs	s#&& receipt_manifest(s) == manifest_digest =>#\&\& true =>#	verify counts a receipt made from another manifest
 vacuous_pass_gates	bundle.rs	s#"PASS" if self.required == 0 => "NOT_RUN",#"PASS" if false => "NOT_RUN",#	verify-bundle passes a bundle with no required checks
 crumb_close_bad_action	worker.rs	s#^            "test",$#            "done",#	the worker closes its crumb claim with an action crumb refuses, so the claim stays open
+sandbox_refusal_is_a_result	runner.rs	s#^                    facts.exit_status = None;$#                    let _ = ();#	a refusal by the exec helper (exit 2) counts as the program exiting 2
+wt_link_owner_ignored	worker.rs	s#|| md.uid() != 0 ##	a worktree whose .git link the sandbox user owns is opened with the operator git

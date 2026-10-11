@@ -45,6 +45,8 @@ pub const CONTEXT: &str = "AIEN Verification (Spark)";
 pub const EXECUTOR_CLASS: &str = "spark";
 /// Where INFRA keeps the per-repository cargo target dirs (A2).
 pub const TARGET_ROOT: &str = "/var/lib/aien-run/target";
+/// Where INFRA's `wt.sh` keeps the bare mirrors its worktrees point into.
+pub const MIRROR_ROOT: &str = "/var/lib/aien-run/mirror";
 
 /// A repository directory key the worker accepts: letters, digits, `.`, `_`
 /// and `-`, not starting with a dot (so never `.` or `..`).
@@ -212,6 +214,12 @@ pub struct Config {
     /// Per-repository cargo target directories by trust class
     /// (`<target_root>/<repo>/main|pr`), used under `Sandbox::User`.
     pub target_root: PathBuf,
+    /// INFRA's worktree tool (`tools/aien-local-ci/wt.sh`). Under
+    /// `Sandbox::User` every checkout is made and removed with it; without it
+    /// the worker refuses to run.
+    pub wt_tool: Option<PathBuf>,
+    /// The mirrors `wt_tool` keeps (`<mirror_root>/<repo>.git`).
+    pub mirror_root: PathBuf,
 }
 
 impl Config {
@@ -232,6 +240,8 @@ impl Config {
             hardware_identity: String::new(),
             allow_unsandboxed: false,
             target_root: PathBuf::from(TARGET_ROOT),
+            wt_tool: None,
+            mirror_root: PathBuf::from(MIRROR_ROOT),
         }
     }
 
@@ -272,6 +282,8 @@ pub struct Summary {
 fn run_cmd(cwd: &Path, program: &str, args: &[&str]) -> Result<String, String> {
     let mut cmd = Command::new(program);
     cmd.args(args).current_dir(cwd);
+    // git and crumb (which runs git) may open a trusted wt.sh worktree.
+    process::apply_git_trust(&mut cmd);
     if program == "git" {
         cmd.env("GIT_OPTIONAL_LOCKS", "0");
     }
@@ -288,6 +300,94 @@ fn run_cmd(cwd: &Path, program: &str, args: &[&str]) -> Result<String, String> {
 
 fn git(cwd: &Path, args: &[&str]) -> Result<String, String> {
     run_cmd(cwd, "git", args)
+}
+
+/// Under `Sandbox::User`: make the worktree with INFRA's `wt.sh` (`sync` the
+/// mirror from the trusted clone, `add` the head), so `aien-run` can read its
+/// git data and write its files while the `.git` link stays root-owned. An
+/// older tree for the same head is removed first and never reused (a `main`
+/// qualification must not inherit what a pull request run left behind).
+fn checkout_for_sandbox(
+    cfg: &Config,
+    repo: &str,
+    sha: &str,
+    clone: &Path,
+) -> Result<PathBuf, String> {
+    let tool = cfg.wt_tool.as_ref().ok_or_else(|| {
+        "--sandbox user needs INFRA's worktree tool (--wt-tool, tools/aien-local-ci/wt.sh): \
+         a checkout made from the private clone is unreadable to aien-run"
+            .to_string()
+    })?;
+    let tool = tool.display().to_string();
+    let clone_s = clone.display().to_string();
+    run_cmd(clone, &tool, &["sync", repo, &clone_s])?;
+    let mirror = cfg.mirror_root.join(format!("{repo}.git"));
+    let commit = format!("{sha}^{{commit}}");
+    if git(&mirror, &["cat-file", "-e", &commit]).is_err() {
+        // A head no branch names (a pull request head, a trigger for a
+        // detached commit): fetch that one commit into the mirror.
+        git(&mirror, &["fetch", "--quiet", &clone_s, sha])?;
+    }
+    git(&mirror, &["cat-file", "-e", &commit])
+        .map_err(|_| format!("commit {sha} is not in {}", mirror.display()))?;
+    let wt = cfg.wt_root.join(repo).join(sha);
+    if fs::symlink_metadata(&wt).is_ok() {
+        run_cmd(clone, &tool, &["remove", repo, sha])?;
+    }
+    let made = run_cmd(clone, &tool, &["add", repo, sha])?;
+    if Path::new(made.trim()) != wt {
+        return Err(format!(
+            "{tool} made {:?}, expected {}",
+            made.trim(),
+            wt.display()
+        ));
+    }
+    if let Err(e) = check_worktree_link(&wt, &mirror) {
+        let _ = run_cmd(clone, &tool, &["remove", repo, sha]);
+        return Err(e);
+    }
+    Ok(wt)
+}
+
+/// The checks that make a `wt.sh` worktree safe to open with the operator's
+/// git: the directory is no symlink, its `.git` is a regular root-owned file
+/// nobody else can write, and it points into `<mirror>/worktrees/`.
+pub fn check_worktree_link(wt: &Path, mirror: &Path) -> Result<(), String> {
+    use std::os::unix::fs::MetadataExt;
+    let canon = fs::canonicalize(wt).map_err(|e| format!("{}: {e}", wt.display()))?;
+    if canon != wt {
+        return Err(format!("{} is not a plain directory path", wt.display()));
+    }
+    let link = wt.join(".git");
+    let md = fs::symlink_metadata(&link).map_err(|e| format!("{}: {e}", link.display()))?;
+    if !md.file_type().is_file() || md.uid() != 0 || md.mode() & 0o022 != 0 {
+        return Err(format!(
+            "{} must be a root-owned file nobody else can write (uid {}, mode {:o})",
+            link.display(),
+            md.uid(),
+            md.mode() & 0o7777
+        ));
+    }
+    let text = fs::read_to_string(&link).map_err(|e| format!("{}: {e}", link.display()))?;
+    let target = text
+        .trim_end_matches('\n')
+        .strip_prefix("gitdir: ")
+        .ok_or_else(|| format!("{} has no gitdir line", link.display()))?;
+    let target = Path::new(target);
+    let want = mirror.join("worktrees");
+    if target.parent() != Some(want.as_path())
+        || target
+            .components()
+            .any(|c| c == std::path::Component::ParentDir)
+    {
+        return Err(format!(
+            "{} points to {}, not into {}",
+            link.display(),
+            target.display(),
+            want.display()
+        ));
+    }
+    Ok(())
 }
 
 /// Fetch the clone and add a detached worktree for `sha`. The clone's own
@@ -312,6 +412,10 @@ fn checkout(
     }
     if !present(&clone) {
         return Err(format!("commit {sha} is not in {}", clone.display()));
+    }
+    if cfg.sandbox == Sandbox::User {
+        let wt = checkout_for_sandbox(cfg, repo, sha, &clone)?;
+        return Ok((clone, wt));
     }
     let wt = cfg.wt_root.join(repo).join(sha);
     if wt.exists() {
@@ -378,9 +482,18 @@ pub fn run_once(cfg: &Config, repo: &str, sha: &str) -> Result<Summary, String> 
     // with `--github` (tests post to a fake `gh` without the helper).
     cfg.check_sandbox_policy_for(false)?;
     check_key_private(&cfg.key)?;
+    if cfg.sandbox == Sandbox::User && cfg.wt_tool.is_none() {
+        return Err(
+            "--sandbox user needs INFRA's worktree tool (--wt-tool, tools/aien-local-ci/wt.sh)"
+                .to_string(),
+        );
+    }
     let mut notes: Vec<String> = Vec::new();
     cfg.state.beat(repo, sha, "checkout");
     let (clone, wt) = checkout(cfg, repo, sha, &mut notes)?;
+    // A wt.sh worktree belongs to aien-run; the operator's git opens it only
+    // after `check_worktree_link` (see `process::trust_worktree`).
+    let trust = (cfg.sandbox == Sandbox::User).then(|| process::trust_worktree(&wt));
     let result = run_in_worktree(cfg, repo, sha, &clone, &wt, &mut notes);
     crumb(
         cfg,
@@ -395,7 +508,17 @@ pub fn run_once(cfg: &Config, repo: &str, sha: &str) -> Result<Summary, String> 
         ],
         &mut notes,
     );
-    remove_worktree(&clone, &wt);
+    drop(trust);
+    if cfg.sandbox == Sandbox::User {
+        if let Some(tool) = &cfg.wt_tool {
+            let tool = tool.display().to_string();
+            if let Err(e) = run_cmd(&clone, &tool, &["remove", repo, sha]) {
+                notes.push(format!("worktree not removed: {e}"));
+            }
+        }
+    } else {
+        remove_worktree(&clone, &wt);
+    }
     cfg.state.beat(repo, sha, "idle");
     let mut summary = result?;
     summary.notes.append(&mut notes);

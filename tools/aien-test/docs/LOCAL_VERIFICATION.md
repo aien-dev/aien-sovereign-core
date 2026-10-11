@@ -14,7 +14,7 @@ status when it can be reached; it is never asked for permission.
 | `aien-test test crate:NAME` | The gates covering a workspace crate (from `cargo metadata`) and every crate that depends on it. | campaign verdict |
 | `aien-test status [--state-dir DIR]` | Pools, GPU lock holder, aien-proof slots, quiet flag, worker heartbeat, pending triggers and outbox, newest bundle per repository. Read-only. | 0 |
 | `aien-test verify COMMIT [--repo NAME] [--base REF] [--state-dir DIR] [--release]` | The independent check of a bundle, printed as the fixed report block below. | 0 only on `MERGE ELIGIBILITY: READY`, else 1 |
-| `aien-test worker [--once REPO SHA] [--poll SECS] [--repos A,B] [--github] [--iterations N] [--state-dir DIR] [--key FILE] [--clones DIR] [--wt-root DIR] [--base REF] [--sandbox user\|none --dev-unsandboxed]` | The trusted worker: one head with `--once`, or the loop. Runs gates in the user sandbox unless told otherwise. | `--once`: the plan verdict; loop: 0; 2 on a refused sandbox mode |
+| `aien-test worker [--once REPO SHA] [--poll SECS] [--repos A,B] [--github] [--iterations N] [--state-dir DIR] [--key FILE] [--clones DIR] [--wt-root DIR] [--wt-tool FILE] [--base REF] [--sandbox user\|none --dev-unsandboxed]` | The trusted worker: one head with `--once`, or the loop. Runs gates in the user sandbox unless told otherwise. | `--once`: the plan verdict; loop: 0; 2 on a refused sandbox mode |
 | `aien-test run GATE --sandbox user`, `aien-test test ... --sandbox user` | Any run, with every gate program started through the exec helper. | as before |
 
 `--release` (run, test, verify): qualification mode. No cache reuse, the tree
@@ -73,8 +73,9 @@ manifests at COMMIT and rejects a bundle whose digest differs.
   there is `MISSING_IMPLEMENTATION`.
 
 This is what lets the shared gate template say `exec: crumb` with
-`args: [verify, .]`, once `crumb` is installed on the trusted PATH (INFRA;
-`~/.local/bin/crumb` is not on it).
+`args: [verify, .]`: INFRA installs a pinned `crumb` at `/usr/local/bin/crumb`
+(root-owned, on the trusted PATH). Proven end to end on 2026-10-11: a gate
+running `crumb verify .` as `aien-run` in a worker checkout passed.
 
 ## The sandbox seam (C8)
 
@@ -93,6 +94,11 @@ canonical, and inside `/var/lib/aien-run` only a worktree
 `wt/<repo>/<40-hex>`; host and qemu checks get a private `/tmp`, so a tree
 under `/tmp` is invisible to them; `CARGO_TARGET_DIR` only as
 `/var/lib/aien-run/target/<repo>/pr` or `.../main` (created on demand).
+Inside a run everything is read-only except the run's own worktree, its one
+target dir and a private `/tmp`. When the helper refuses a call it exits 2
+and its stderr starts with `aien-run-exec:`; nothing ran. The runner records
+such a run with no exit status, so it is FAIL and can never meet
+`expects.exit`, not even `exit: 2` (`runner::sandbox_refused`).
 
 ## The worker and the sandbox
 
@@ -103,6 +109,21 @@ given, and refuses it with `--github` in every case. The library has the same
 rule (`Config.allow_unsandboxed`, default false). Under `--sandbox user` the
 worker passes `CARGO_TARGET_DIR=/var/lib/aien-run/target/<repo>/main` for a
 head already on the base line and `.../pr` for any other head (A2).
+
+Under `--sandbox user` every checkout is made with INFRA's worktree tool
+(`--wt-tool`, default `<clones>/aien-sovereign-core/tools/aien-local-ci/wt.sh`;
+without it the worker refuses to run). `wt.sh sync` refreshes the bare mirror
+`/var/lib/aien-run/mirror/<repo>.git` from the trusted clone (a head no branch
+names is then fetched into the mirror by its id), and `wt.sh add` checks the
+head out at `/var/lib/aien-run/wt/<repo>/<sha>`: files owned by `aien-run`,
+the `.git` link root-owned and pointing into the mirror. An older tree for
+the same head is removed first, never reused. The worker opens that tree
+with its own git only after checking the link (a regular root-owned file
+nobody else can write, pointing into `<mirror>/worktrees/`), and then only
+through git's command-line `safe.directory` for that one path
+(`process::trust_worktree`): every git setting and hook git reads there is
+the operator's mirror, never the checked-out code. `wt.sh remove` deletes
+the tree afterwards.
 
 Before it fetches or runs anything the worker refuses a repository name that
 is not a plain name (letters, digits, `.`, `_`, `-`, not starting with a
@@ -116,8 +137,9 @@ For one head `REPO SHA`:
 1. The refusals above (names, key mode, sandbox mode).
 2. `git fetch --all` in the trusted clone `<clones>/<repo>` (default
    `~/workspace/<repo>`); its checkout is never touched.
-3. `git worktree add --detach <wt-root>/<repo>/<sha>` (default
-   `/var/lib/aien-run/wt`).
+3. Under `--sandbox user`: `wt.sh sync` and `wt.sh add` (see above). Under
+   `--sandbox none`: `git worktree add --detach <wt-root>/<repo>/<sha>`
+   from the clone (default `/var/lib/aien-run/wt`).
 4. `crumb claim` on the worktree when it has a `.crumb` (a missing one is a
    journal note, not an error).
 5. Plan against BASE: `origin/main` (`--base` overrides), or the head's first
@@ -140,7 +162,8 @@ For one head `REPO SHA`:
    receipts and their manifests, crumb). The journal records `verify: READY`
    or `BLOCKED` with the reasons.
 9. Heartbeat (`worker.heartbeat`), journal line (`journal.jsonl`), `crumb
-   close aien-worker . worker test`, remove the worktree. A crumb failure is
+   close aien-worker . worker test`, remove the worktree (`wt.sh remove`
+   under `--sandbox user`). A crumb failure is
    a journal note, never a verdict change.
 
 With `--github` the commit status `AIEN Verification (Spark)` is posted:
@@ -255,21 +278,26 @@ replays in queue order and stops at the first refusal, a trigger file served
 by the loop, a head on main checked against its first parent, a bare
 `exec: true` running, escaping exec paths refused and a symlinked exec that
 leaves the tree never run, and, when the helper is installed, a gate and a
-whole worker run in the user sandbox (in `/var/lib/aien-run/wt/aien-test-selftest`,
-because the sandbox does not share `/tmp`). `mutations/run_mutants.sh` must
+whole worker run in the user sandbox through `wt.sh` (in
+`/var/lib/aien-run/wt/aien-test-selftest`, because the sandbox does not share
+`/tmp`), a wrong target dir refused by the helper with exit 2 and never
+counted as the program's exit, only a root-owned `wt.sh` link trusted, and
+the user sandbox refused without the worktree tool. `mutations/run_mutants.sh` must
 kill every line of `mutations/aien-test.mutants`.
 
 ## Accepted limits (ENGINE-2 review, 2026-10-11)
 
-- The worker's worktree comes from the operator's clone under `~/workspace`
-  (mode 0700), so its `.git` link is unreadable to `aien-run`. Gates that run
-  git inside the sandbox (for example `exec: crumb` if crumb calls git) fail
-  until the worker uses INFRA's readable mirror (`wt.sh`,
-  `/var/lib/aien-run/mirror/<repo>.git`). Plain program and cargo gates work.
+- A head that no branch names is fetched into the `wt.sh` mirror by its id;
+  its objects stay there unreferenced until git prunes them. The mirror is
+  readable by `aien-run`, like every other object in it.
+- While a worktree is trusted, the worker sets `GIT_CONFIG_COUNT` and
+  `GIT_CONFIG_KEY_n` / `GIT_CONFIG_VALUE_n` on the git and crumb processes it
+  starts; a value of these variables in the worker's own environment is
+  replaced for those processes.
 - The `main` target dir is not wiped after a FAIL or timeout yet (A2 asks for
   it); the dir is owned by `aien-run`, so the wipe has to run through the
-  helper. Until then a poisoned `main` target dir is cleared by INFRA's
-  `gc.sh` or by hand.
+  helper or `sudo -n rm -rf`. Until then a poisoned `main` target dir is
+  cleared by INFRA's `gc.sh` or by hand.
 - `--dev-unsandboxed` runs are not marked in the bundle (the executor class
   stays `spark`); only the journal and the command line show it. Never use
   it on a machine whose bundles are published.
@@ -278,8 +306,6 @@ kill every line of `mutations/aien-test.mutants`.
 - `verify` has no `--operator`: a pipeline-configuration change is never
   READY, also after the operator ran it by hand with `worker --operator`. The
   operator merges such a change himself (A1).
-- `crumb` is not on the helper's trusted PATH yet (INFRA), so `exec: crumb`
-  gates are `MISSING_IMPLEMENTATION` under `--sandbox user`.
 - A head whose base is a root commit with no parent cannot be planned on the
   base line (the worker reports an error, never PASS).
 - Build time is `n/a` in the report. Total time comes from the bundle's

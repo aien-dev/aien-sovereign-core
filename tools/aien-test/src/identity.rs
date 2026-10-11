@@ -23,7 +23,6 @@ use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::Path;
-use std::process::Command;
 
 /// What the `scope_binding` member is built from. Only the part the manifest's
 /// `cache_scope` names is used.
@@ -39,7 +38,7 @@ pub struct Binding {
 }
 
 fn git_ls_files(root: &Path, spec: &str) -> Result<Vec<(String, String)>, String> {
-    let mut cmd = Command::new("git");
+    let mut cmd = process::git_command();
     cmd.env("GIT_OPTIONAL_LOCKS", "0")
         .arg("-C")
         .arg(root)
@@ -309,6 +308,7 @@ mod tests {
     use crate::graph;
     use crate::manifest;
     use crate::testutil::{git, init_repo, write_file, TempDir};
+    use std::process::Command;
 
     fn gate(id: &str, extra: &str) -> String {
         format!(
@@ -580,6 +580,7 @@ mod rows_tests {
     use super::*;
     use crate::manifest;
     use crate::testutil::init_repo;
+    use std::process::Command;
 
     #[test]
     fn rows_from_a_tree_listing_give_the_same_identity_as_the_index() {

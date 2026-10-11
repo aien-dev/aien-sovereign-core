@@ -37,7 +37,6 @@ use std::fmt;
 use std::fs;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Component, Path, PathBuf};
-use std::process::Command;
 use std::sync::{Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -125,10 +124,16 @@ pub enum CacheNote {
     Skipped(String),
 }
 
+/// The exec helper refused the call: exit 2 and stderr starting with its
+/// `aien-run-exec:` prefix (INFRA C8). Only under `Sandbox::User`.
+pub fn sandbox_refused(sandbox: Sandbox, exit: Option<i32>, stderr: &[u8]) -> bool {
+    sandbox == Sandbox::User && exit == Some(2) && stderr.starts_with(b"aien-run-exec:")
+}
+
 fn git_out(root: &Path, args: &[&str]) -> Result<String, String> {
     // Several jobs may ask for the status at once; the status command must
     // not take the index lock (and fail the other caller) to refresh it.
-    let mut cmd = Command::new("git");
+    let mut cmd = process::git_command();
     cmd.env("GIT_OPTIONAL_LOCKS", "0")
         .arg("-C")
         .arg(root)
@@ -683,6 +688,12 @@ fn execute_gate(job: &Job<'_>, permit: Option<Permit<'_>>) -> Result<Outcome, Ru
         match process::run(&spec) {
             Ok(o) => {
                 facts.exit_status = o.exit_code.map(i64::from);
+                // Exit 2 with the helper's prefix is the helper refusing the
+                // call (nothing ran): never a program result, so it can never
+                // meet `expects.exit`, not even `exit: 2`.
+                if sandbox_refused(opts.sandbox, o.exit_code, &o.stderr) {
+                    facts.exit_status = None;
+                }
                 facts.timed_out = o.timed_out;
                 timeout_exceeded = o.timeout_exceeded;
                 stdout = o.stdout;
