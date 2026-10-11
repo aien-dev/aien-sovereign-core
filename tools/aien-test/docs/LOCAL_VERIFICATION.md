@@ -248,6 +248,18 @@ that has no bundle yet, then sleeps `--poll` seconds. `--iterations N`
 bounds the rounds (tests). Trigger names that are not a plain repository
 name and a 40-hex commit are ignored.
 
+What starts a run, and what does not (checked 2026-10-11 on the Spark):
+
+| trigger | how | covers today |
+|---|---|---|
+| operator | `aien-local-ci trigger <repo> <sha>` writes `trigger/<repo>.<sha>`; `aien-local-ci once` runs in the foreground | any repository with a trusted clone |
+| Forgejo push | `tools/aien-local-ci/forgejo-webhook.sh install <repo>` puts a post-receive hook in the Forgejo bare repository; a push there writes the trigger file, no network involved | installed for `aien-sovereign-core` only; Forgejo holds no copy of omega, aienos, physics or aien-architecture, and the copies it holds stopped at September commits because nothing pushes to them |
+| GitHub poll | the loop started with `--github` (`aien-local-ci start --github`) lists open pull request heads and `main` of every `--repos` entry each round | all nine repositories, but it also posts the `AIEN Verification (Spark)` status, so it is off until the operator switches it on |
+
+So a loop started without `--github` never picks up a new pull request head
+or a new `main` commit by itself: someone has to write a trigger (or push to
+Forgejo). Merging a pull request on GitHub does not wake it.
+
 ## verify-bundle and the vacuous PASS
 
 `aien-test verify-bundle` (the GitHub thin gate's command) prints and exits
