@@ -49,12 +49,14 @@ for f in "$ROOT"/crates/aien-runtime/tests/*.rs; do
     RT+=(--test "$t")
 done
 [ "${#RT[@]}" -ge 90 ] || die "found only $((${#RT[@]} / 2)) aien-runtime test targets"
+# aien-omega-compose: the compose suite, callback safety (abi-qual) and the ABI manifest + native identity.
+OC=(--test compose --test callbacks --test abi_manifest)
 CLI=(--test compose_ordinary_flow_test --test allen_concurrency_test)
 ATT=$(count -p aien-runtime --test approved_attacks_test)
-ALL=$(( $(count -p aien-omega-compose --test compose) + $(count -p aien-runtime --lib) + $(count -p aien-runtime "${RT[@]}") + $(count -p aien-cli "${CLI[@]}") ))
+ALL=$(( $(count -p aien-omega-compose "${OC[@]}") + $(count -p aien-runtime --lib) + $(count -p aien-runtime "${RT[@]}") + $(count -p aien-cli "${CLI[@]}") ))
 [ "$ATT" -gt 0 ] && [ "$ALL" -gt "$ATT" ] || die "could not list the linked tests"
 : >"$LOG"
-run -p aien-omega-compose --test compose
+run -p aien-omega-compose "${OC[@]}"
 run -p aien-runtime --lib
 run -p aien-runtime "${RT[@]}"
 run -p aien-cli "${CLI[@]}"
@@ -69,4 +71,4 @@ want=$(( ALL + ATT * (REPEAT - 1) ))
 ran=$(grep -E '^test result: ok\. [0-9]+ passed' "$LOG" | awk '{s += $4} END {print s + 0}')
 [ "$ran" -ge "$want" ] || die "only $ran linked tests passed (expected $want: $ALL linked tests + approved_attacks $ATT x $((REPEAT - 1)) more)"
 if grep -E '^test result:.* [1-9][0-9]* ignored' "$LOG" >/dev/null; then die "tests were still ignored"; fi
-echo "test-linked-compose: PASS ($ran linked tests passed: $ALL across compose, aien-runtime library tests, every aien-runtime test target but prefill_e2e*, aien-cli ordinary flow + ALLEN concurrency; approved_attacks x$REPEAT)"
+echo "test-linked-compose: PASS ($ran linked tests passed: $ALL across compose + callbacks + abi_manifest, aien-runtime library tests, every aien-runtime test target but prefill_e2e*, aien-cli ordinary flow + ALLEN concurrency; approved_attacks x$REPEAT)"
