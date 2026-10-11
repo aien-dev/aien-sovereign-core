@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # WHOLE-SYSTEM-E2E harness v1.3 (aien-architecture#190, lane L1; GB10 mode for milestone R6, sovereign-core#402).
-# Rows: docs/campaigns/whole-system-e2e/ACCEPTANCE-v1.md, -v1.1.md, -v1.2.md, -v1.3-gb10.md, -v1.3-ctrl-e5.md (each committed before the script
+# Rows: docs/campaigns/whole-system-e2e/ACCEPTANCE-v1.md, -v1.1.md, -v1.2.md, -v1.3-gb10.md, -v1.3-ctrl-e5.md, -v1.3.1-e3m.md (each committed before the script
 # change that implements it; never edited by the script).
 # Contract: aien-architecture docs/plans/release-readiness/ACCEPTANCE_E2E.md, FROZEN at commit b2400fe,
 # sha256 9e3d5f4e23d65ac17be8f2f4ca48355f0aaa486f67ff5a8a8044dcdd646d34e8 (CONTRACT_SHA below).
@@ -10,6 +10,8 @@
 # v1.3: WSE2E_BACKEND=gb10 (default cpu, unchanged) builds from the pinned GPU engine (scripts/pins.sh --gpu), runs
 # the zero-CUDA gate, requires the native Omega GB10 backend line on every daemon start, and adds gpu_executions,
 # fallback_count, fallback_detected, pins, nvidia_driver and host_load to every receipt (ACCEPTANCE-v1.3-gb10.md).
+# v1.3.1: E3m topic words are matched case-insensitively as whole words; E3 file names stay exact
+# (ACCEPTANCE-v1.3.1-e3m.md); the gb10 run folder is RUN-3-GB10-<utc>.
 #
 #   scripts/whole_system_e2e.sh run        build the CLI, run the chain E2..E6 + controls, write one run folder
 #   scripts/whole_system_e2e.sh check F    the document checks of rows E3/E3m on file F (prints failed ids)
@@ -25,14 +27,19 @@ set -u
 
 # ---- document checks (rows E3, E3m) -----------------------------------------------------------------------
 # Prints failed ids, space separated: D1 missing/unreadable, D2 first line not "# ", D3 over 200 words,
-# D4 a required name missing. $1 file, $2.. required names.
+# D4 a required name missing. $1 file, $2.. required names, matched exactly and case-sensitively (E3 file names).
+# --topics as the first argument: the names are topic words, matched case-insensitively as whole words (E3m, v1.3.1).
+D4_TOPIC_RULE="case-insensitive whole word: LC_ALL=C grep -q -i -w (ACCEPTANCE-v1.3.1-e3m.md)"
 check_doc() {
+  local mode=exact; [ "${1:-}" = --topics ] && { mode=topics; shift; }
   local f=$1; shift; local failed=""
   [ -s "$f" ] || { echo "D1"; return; }
   iconv -f UTF-8 -t UTF-8 "$f" >/dev/null 2>&1 || failed="$failed D1"
   [ "$(head -c 2 "$f")" = "# " ] || failed="$failed D2"
   [ "$(wc -w <"$f")" -le 200 ] || failed="$failed D3"
-  local n; for n in "$@"; do grep -qF -- "$n" "$f" || { failed="$failed D4"; break; }; done
+  local n; for n in "$@"; do
+    if [ $mode = topics ]; then LC_ALL=C grep -q -i -w -- "$n" "$f"; else grep -qF -- "$n" "$f"; fi || { failed="$failed D4"; break; }
+  done
   echo "${failed# }"
 }
 # ---- sc#386: ALLEN engagement and the E4 token budget -------------------------------------------------------
@@ -110,6 +117,18 @@ selftest() {
   [ -z "$(check_doc "$t/good.md" alpha.txt beta.txt gamma.txt)" ] || { echo "selftest: good document failed: $(check_doc "$t/good.md" alpha.txt beta.txt gamma.txt)"; rc=1; }
   [ "$(check_doc "$t/bad.md" alpha.txt beta.txt gamma.txt)" = "D2 D4" ] || { echo "selftest: bad document gave '$(check_doc "$t/bad.md" alpha.txt beta.txt gamma.txt)', want 'D2 D4'"; rc=1; }
   [ "$(check_doc "$t/absent.md")" = "D1" ] || { echo "selftest: absent file not D1"; rc=1; }
+  # v1.3.1 (ACCEPTANCE-v1.3.1-e3m.md): E3m topic words, case-insensitive whole words; E3 file names stay exact.
+  printf '# Harbour, Orchard, and Windmill\n\nThe harbour is busy. The orchard is quiet.\n' >"$t/topic-heading.md"
+  printf '# Report\n\nThe harbour, the orchard and two windmills.\n' >"$t/topic-plural.md"
+  printf '# Report\n\nThe harbour and the orchard.\n' >"$t/topic-absent.md"
+  printf '# Report\n\nThe HARBOUR, the orchard, and the windmill.\n' >"$t/topic-punct.md"
+  printf '# Report\n\nabout Alpha.txt, beta.txt and gamma.txt\n' >"$t/name-case.md"
+  [ -z "$(check_doc --topics "$t/topic-heading.md" harbour orchard windmill)" ] || { echo "selftest: topic named only in a capitalised heading was not accepted"; rc=1; }
+  [ -z "$(check_doc --topics "$t/topic-punct.md" harbour orchard windmill)" ] || { echo "selftest: upper-case or punctuated topic words were not accepted"; rc=1; }
+  [ "$(check_doc --topics "$t/topic-plural.md" harbour orchard windmill)" = "D4" ] || { echo "selftest: plural 'windmills' was accepted as 'windmill'"; rc=1; }
+  [ "$(check_doc --topics "$t/topic-absent.md" harbour orchard windmill)" = "D4" ] || { echo "selftest: absent topic word was accepted"; rc=1; }
+  [ "$(check_doc "$t/name-case.md" alpha.txt beta.txt gamma.txt)" = "D4" ] || { echo "selftest: E3 file name with changed case was accepted"; rc=1; }
+  [ "$(check_doc "$t/topic-heading.md" harbour orchard windmill)" = "D4" ] || { echo "selftest: the exact rule no longer rejects 'Windmill' for 'windmill' (E3 rule changed)"; rc=1; }
   # sc#386: the ALLEN engagement lines and the E4 token budget are fixed, documented values.
   [ "$(allen_env /x/subject.bin abc123 | tr '\n' ' ')" = "AIEN_ALLEN_SUBJECT=/x/subject.bin AIEN_ALLEN_ADOPT=abc123 " ] || { echo "selftest: allen_env adopt lines wrong"; rc=1; }
   [ "$(allen_env /x/subject.bin | tr '\n' ' ')" = "AIEN_ALLEN_SUBJECT=/x/subject.bin " ] || { echo "selftest: allen_env without adopt wrong"; rc=1; }
@@ -170,7 +189,7 @@ D=$JOB/tmp/e2e
 MODE=${WSE2E_BACKEND:-cpu}   # v1.3: cpu (default, v1.2 behaviour) or gb10 (ACCEPTANCE-v1.3-gb10.md)
 case $MODE in cpu|gb10) ;; *) echo "WSE2E_BACKEND must be cpu or gb10, not '$MODE'" >&2; exit 2 ;; esac
 TGT=$D/target; RUN_NAME0=RUN-1
-[ "$MODE" = gb10 ] && { TGT=$D/target-gb10; RUN_NAME0=RUN-2-GB10; }
+[ "$MODE" = gb10 ] && { TGT=$D/target-gb10; RUN_NAME0=RUN-3-GB10; }
 BIN=$TGT/release/aien-cli
 MDIR=${WSE2E_MODEL_DIR:-$(ls -d "$HOME"/.cache/huggingface/hub/models--unsloth--Llama-3.2-1B-Instruct/snapshots/*/ 2>/dev/null | head -1)}
 UTC0=$(date -u +%Y%m%dT%H%M%SZ)
@@ -393,6 +412,7 @@ echo "run folder: $OUT" | tee "$OUT/console.txt"
 cp "$REPO/docs/campaigns/whole-system-e2e/ACCEPTANCE-v1.md" "$OUT/ACCEPTANCE-v1.as-run.md"
 cp "$REPO/docs/campaigns/whole-system-e2e/ACCEPTANCE-v1.1.md" "$OUT/ACCEPTANCE-v1.1.as-run.md" 2>/dev/null
 cp "$REPO/docs/campaigns/whole-system-e2e/ACCEPTANCE-v1.2.md" "$OUT/ACCEPTANCE-v1.2.as-run.md" 2>/dev/null
+cp "$REPO/docs/campaigns/whole-system-e2e/ACCEPTANCE-v1.3.1-e3m.md" "$OUT/ACCEPTANCE-v1.3.1-e3m.as-run.md"
 if [ "$MODE" = gb10 ]; then   # v1.3: the gb10 rows as run, the zero-CUDA gate output and the pin log
   cp "$REPO/docs/campaigns/whole-system-e2e/ACCEPTANCE-v1.3-gb10.md" "$OUT/ACCEPTANCE-v1.3-gb10.as-run.md"
   cp "$D/zero-cuda-gate.txt" "$ART/zero-cuda-gate.txt"; cp "$D/pins.txt" "$ART/pins.txt"
@@ -474,12 +494,12 @@ E3M_OK=0; REPORT=""
 if [ -z "$ABORT" ]; then
   if task E3m "$WS" "$OBJ_M"; then
     REPORT=$(find_written "$WS" report.md); [ -n "$REPORT" ] || REPORT=$WS/${T_PATH:-report.md}
-    FAILED=$(check_doc "$REPORT" "$T1" "$T2" "$T3"); DSHA=none; [ -f "$REPORT" ] && DSHA=$(sha_of "$REPORT")
+    FAILED=$(check_doc --topics "$REPORT" "$T1" "$T2" "$T3"); DSHA=none; [ -f "$REPORT" ] && DSHA=$(sha_of "$REPORT")
     G=$T_GRANT; CS=$T_CSHA; execute E3m "$WS" -again >/dev/null 2>&1; AGAIN=$T_REFUSAL
     [ -f "$REPORT" ] && cp "$REPORT" "$ART/E3m-report.md"
     if [ -z "$FAILED" ] && [ "$DSHA" = "$CS" ] && [ "$AGAIN" = AlreadySpent ]; then ST=PASS; E3M_OK=1; else ST=FAIL; fi
     rcpt E3m $ST "state DONE; written ${REPORT#$WS/}; checks failed [${FAILED:-none}]; second execute: ${AGAIN:-none}" \
-      "$(doc_fields "$REPORT" DONE "$CS" "$G" "$FAILED" | jq -c --arg a "$AGAIN" --arg o "$OBJ_M" '. + {second_execute_refusal:$a, objective_text:$o}')"
+      "$(doc_fields "$REPORT" DONE "$CS" "$G" "$FAILED" | jq -c --arg a "$AGAIN" --arg o "$OBJ_M" --arg dr "$D4_TOPIC_RULE" '. + {second_execute_refusal:$a, objective_text:$o, d4_rule:$dr}')"
   else
     rcpt E3m FAIL "$T_EV" "$(doc_fields none "$T_STATE" "" "$T_GRANT" "")"
   fi
