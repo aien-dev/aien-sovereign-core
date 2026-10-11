@@ -47,6 +47,7 @@ cp "$REPO/docs/campaigns/whole-system-e2e/FAULTS-v1.md" "$OUT/FAULTS-v1.as-run.m
 cp "$REPO/docs/campaigns/whole-system-e2e/FAULTS-v1.1.md" "$OUT/FAULTS-v1.1.as-run.md"
 cp "$REPO/docs/campaigns/whole-system-e2e/FAULTS-v1.2.md" "$OUT/FAULTS-v1.2.as-run.md"
 cp "$REPO/docs/campaigns/whole-system-e2e/FAULTS-v1.2.1.md" "$OUT/FAULTS-v1.2.1.as-run.md"
+cp "$REPO/docs/campaigns/whole-system-e2e/FAULTS-v1.3.md" "$OUT/FAULTS-v1.3.as-run.md"
 
 sha_of() { sha256sum "$1" | cut -d' ' -f1; }
 tstat() { stat -c '%i %s %.9Y' "$1" 2>/dev/null || echo absent; }
@@ -55,6 +56,9 @@ utc() { date -u +%Y-%m-%dT%H:%M:%SZ; }
 OBJ6='Write a file named done.md in the outbox folder containing one line: finished.'
 OBJ_ID=$(printf 'AIEN_E2E_FAULTS_OBJECTIVE_V1\n%s' "$OBJ6" | sha256sum | cut -d' ' -f1)
 RUN_ID=$(printf '%s\n%s\n%s\n%s' "$OBJ_ID" "$BIN_SHA" "$W_SHA" "$HOST" | sha256sum | cut -d' ' -f1)
+# v1.3 (FAULTS-v1.3.md, sc#408): the id `aien-cli objective record` gives OBJ6 (sc#388 formula); not the chain id above.
+REC_ID=$(printf 'AIEN_E2E_OBJECTIVE_V1\n%s' "$OBJ6" | sha256sum | cut -d' ' -f1)
+OBJ6_SHA=$(printf '%s' "$OBJ6" | sha256sum | cut -d' ' -f1)
 
 # ---- the receipt chain (same format as scripts/whole_system_e2e.sh) -----------------------------------------
 N=0; PREV=$(printf '0%.0s' $(seq 1 64)); CHAIN=$OUT/chain; ROWS=""; CUR_BACKEND=""
@@ -139,12 +143,16 @@ ledger() { cli compose effects >"$ART/$1.json" 2>/dev/null; }
 intent_state() { jq -r "[.ledger.intents[] | select(.authorization == $2)] | .[0].state // \"none\"" "$ART/$1.json" 2>/dev/null; }
 intent_count() { jq -r "[.ledger.intents[] | select(.authorization == $2)] | length" "$ART/$1.json" 2>/dev/null; }
 
-row_open() { # name: fresh row dir from the fixture, daemon 1 up, grant G minted
+row_open() { # name [obj]: fresh row dir from the fixture, daemon 1 up, grant G minted
   RN=$1; R=$D/rows/$RN; ART=$OUT/artifacts/$RN; DN=0
   rm -rf "$R"; mkdir -p "$R"/{state,prov,logs} "$ART"
   cp -a "$D/fixture/compose" "$D/fixture/home" "$R/"; rm -rf "$D/work/ws"; cp -a "$D/fixture/ws" "$D/work/ws"
   cp -a "$D/fixture/compose.machine-root" "$R/"; [ -e "$D/fixture/compose.cortex-mark" ] && cp -a "$D/fixture/compose.cortex-mark" "$R/"
   cp "$D/fixture/propose.json" "$ART/propose.json"; REPORT=$ART/propose.json
+  if [ "${2:-}" = obj ]; then   # v1.3: the report naming REC_ID, and the record in this row's provenance dir
+    cp "$D/fixture/propose-obj.json" "$ART/propose.json"; mkdir -p "$R/prov/objectives"
+    cp -a "$D/fixture/prov/objectives/$REC_ID.json" "$R/prov/objectives/" || return 2
+  fi
   mkenv
   start_daemon || return 1
   G=$(authorize authorize-1); [ -n "$G" ] || { echo "authorize refused: $(head -c 200 "$ART/authorize-1.json")"; return 2; }
@@ -165,15 +173,18 @@ R=$D/fixture; ART=$OUT/artifacts/fixture; rm -rf "$D/work"; mkdir -p "$R"/{state
 printf 'Harbour notes. Three boats came in before noon.\n' >"$WS/inbox/harbour-notes.txt"
 cli compose desk-key --create 1 >"$ART/deskkey.json" 2>&1   # prints id and path, never the key
 ABORT=""
+# v1.3 (FAULTS-v1.3.md): the objective is recorded before the propose, and the propose names it (sc#388 check).
+cli objective record --text "$OBJ6" >"$ART/objective-record.json" 2>"$ART/objective-record.err"
 if start_daemon; then
   PROP_OK=0
   for a in 1 2; do
-    cli compose propose --goal "$OBJ6" --workspace "$WS" --context work >"$ART/propose.json" 2>"$ART/propose.err"
+    cli compose propose --goal "$OBJ6" --workspace "$WS" --context work --objective-id "$REC_ID" >"$ART/propose.json" 2>"$ART/propose.err"
     [ "$(jq -r '.report.committed // false' "$ART/propose.json" 2>/dev/null)" = true ] && { PROP_OK=1; break; }
   done
   stop_graceful; cp "$R"/logs/daemon-*.log "$ART/" 2>/dev/null
   if [ $PROP_OK = 1 ]; then
-    cp "$ART/propose.json" "$D/fixture/propose.json"; cp -a "$WS" "$D/fixture/ws"
+    # v1 to v1.2 rows: the same report without the top-level objective_id (the legacy path, as before).
+    cp "$ART/propose.json" "$D/fixture/propose-obj.json"; jq -c 'del(.objective_id)' "$ART/propose.json" >"$D/fixture/propose.json"; cp -a "$WS" "$D/fixture/ws"
     PRE_ST=PASS; [ "$W_SHA" = "$C_W" ] && [ "$T_SHA" = "$C_T" ] || PRE_ST=FAIL
     rcpt PRE $PRE_ST "fault-hold build $BIN_SHA; backend '$CUR_BACKEND'; fixture proposal committed (path $(jq -r '.report.proposal_path // "?"' "$ART/propose.json")); model $C_ID" \
       "$(jq -nc --arg cw "$C_W" --arg ct "$C_T" --arg cid "$C_ID" --arg mdir "$MDIR" --arg q "$([ -s "$QUIET" ] && echo held || echo not-held)" --arg f "cargo feature aien-cli/fault-hold" --arg ok "$PRE_ST" \
@@ -249,8 +260,8 @@ if [ -z "$ABORT" ]; then
 fi
 
 # ---- E6-after_write and CTRL-E6 / CTRL-E6b (the controls reuse the after_write crash) ------------------------
-crash_after_write() { # name: row_open, hold after_write, kill both; sets G, EB, F, SW, DK, EK
-  row_open "$1" || return 1
+crash_after_write() { # name [obj]: row_open, hold after_write, kill both; sets G, EB, F, SW, DK, EK
+  row_open "$1" "${2:-}" || return 1
   hold_execute after_write held "$G" || return 1
   kill_daemon; DK=$KILL_RC; kill_executor; EK=$EKILL_RC
   EB=$(count_effects); F=$(effect_file); SW=$(tstat "${F:-/nonexistent}")
@@ -390,6 +401,108 @@ if [ -z "$ABORT" ]; then
         "$(fields $KP 1 0 "$EA" "$DUP" "$G" "$(jq -nc --arg a "$ND_REF" --arg b "$D_REF" --arg t "$D_TXT" '{authorize_without_desk_refusal:$a, authorize_with_desk_refusal:$b, authorize_with_desk_text:$t}')")"
     else rcpt E6-desk_after_restart FAIL "daemon did not restart: $(tail -c 300 "$DLOG" | tr '\n' ' ')" "$(fields $KP 1 0 0 0 "$G")"; fi
   else rcpt E6-desk_after_restart FAIL "setup failed (daemon or authorize)" "$(fields $KP 0 0 0 0 null)"; fi
+  row_close
+fi
+
+# ---- v1.3 (FAULTS-v1.3.md, sc#408): objective identity across a SIGKILL restart ---------------------------------
+recon_row() { # grant -> the restart reconcile outcome (JSON) for that grant's intent, or {}
+  local o; o=$(grep -m1 '^Reconcile:' "$DLOG" | sed 's/^[^[]*//' | jq -c --argjson g "$1" '[.[] | select(.authorization == $g)][0] // {}' 2>/dev/null)
+  if [ -n "$o" ]; then echo "$o"; else echo '{}'; fi
+}
+intent_obj() { jq -r "[.ledger.intents[] | select(.authorization == $2)] | .[0].objective_id // \"none\"" "$ART/$1.json" 2>/dev/null; }
+grant_obj() { # tag grant: the objective_id in the daemon's own grant text (compose recall), or none
+  cli compose recall --ids "$2" >"$ART/$1.json" 2>"$ART/$1.err"
+  local o; o=$(jq -r --argjson g "$2" '[(.recall.cited // [])[], (.authorizations // [])[]] | map(select(.id == $g and .text != null))[0].text | fromjson | .objective_id // "none"' "$ART/$1.json" 2>/dev/null)
+  if [ -n "$o" ]; then echo "$o"; else echo none; fi
+}
+refusal_of() { jq -r '.error // ""' "$1" 2>/dev/null | sed -n 's/^EFFECT_REFUSED \([A-Za-z]*\):.*/\1/p'; }
+if [ -z "$ABORT" ]; then
+  KP=after_intent
+  if row_open E6-objective_bound_after_intent obj && hold_execute $KP held "$G"; then
+    RECF=$R/prov/objectives/$REC_ID.json; RS0=$(sha_of "$RECF")
+    kill_daemon; DK=$KILL_RC; kill_executor; EK=$EKILL_RC; EB=$(count_effects)
+    if start_daemon; then
+      RO=$(recon_row "$G"); RO_ID=$(jq -r '.objective.objective_id // "none"' <<<"$RO"); RO_REC=$(jq -r '.objective.record // "none"' <<<"$RO"); RO_ST=$(jq -r '.state // "none"' <<<"$RO")
+      ledger L1; LOID=$(intent_obj L1 "$G"); GOID=$(grant_obj recall-G "$G")
+      RS1=$(sha_of "$RECF"); cli objective show "$REC_ID" >"$ART/objective-show.json" 2>&1; SHOW_SHA=$(jq -r '.objective_text_sha256 // "none"' "$ART/objective-show.json" 2>/dev/null)
+      execute r1 "$G"; R1=$T_REF
+      G2=$(authorize authorize-2); G2OID=none; NST=none; XOID=none; RCPT_OK=no
+      if [ -n "$G2" ]; then
+        G2OID=$(grant_obj recall-G2 "$G2")
+        execute new "$G2"; NST=$T_STATE; XOID=$(jq -r '.objective_id // "none"' "$ART/new.json" 2>/dev/null)
+        RP=$(jq -r '.receipt.path // ""' "$ART/new.json" 2>/dev/null); [ -f "$RP" ] && cp "$RP" "$ART/new-write_file-receipt.json"
+        # the receipt holds only digests: recompute the arguments digest with the objective id and compare
+        WANT=$(jq -cS --argjson a "$G2" '{path, content_sha256, authorization: $a, intent: .intent.id, objective_id}' "$ART/new.json" 2>/dev/null)
+        [ -f "$ART/new-write_file-receipt.json" ] && [ "sha256:$(printf '%s' "$WANT" | sha256sum | cut -d' ' -f1)" = "$(jq -r '.arguments_digest' "$ART/new-write_file-receipt.json")" ] && RCPT_OK=yes
+      fi
+      F=$(effect_file); S1=$(tstat "${F:-/nonexistent}"); execute newagain "${G2:-0}"; EA=$(count_effects); S2=$(tstat "${F:-/nonexistent}"); ledger L2
+      L2OID=$(intent_obj L2 "${G2:-0}"); DUP=$(dupflag "$S1" "$S2" "$EA")
+      if [ "$DK" -eq 137 ] && [ "$EK" -eq 137 ] && [ "$EB" -eq 0 ] && [ "$RO_ID" = "$REC_ID" ] && [ "$RO_REC" = bound ] && [ "$LOID" = "$REC_ID" ] && [ "$GOID" = "$REC_ID" ] \
+         && [ "$RS0" = "$RS1" ] && [ "$SHOW_SHA" = "$OBJ6_SHA" ] && [ "$R1" = AlreadySpent ] && [ -n "$G2" ] && [ "$G2OID" = "$REC_ID" ] && [ "$NST" = DONE ] \
+         && [ "$XOID" = "$REC_ID" ] && [ "$RCPT_OK" = yes ] && [ "$L2OID" = "$REC_ID" ] && [ "$EA" -eq 1 ] && [ "$DUP" -eq 0 ]; then ST=PASS; else ST=FAIL; fi
+      rcpt E6-objective_bound_after_intent $ST "daemon and executor SIGKILL (rc $DK, $EK) at $KP, files $EB; restart reconcile: intent state $RO_ST, objective $RO_ID record '$RO_REC'; ledger intent objective $LOID; grant G objective $GOID; record sha256 before/after equal=$([ "$RS0" = "$RS1" ] && echo yes || echo no), show text digest matches=$([ "$SHOW_SHA" = "$OBJ6_SHA" ] && echo yes || echo no); same grant '${R1:-none}'; new grant ${G2:-none} objective $G2OID: $NST, answer objective $XOID, receipt digest binds it=$RCPT_OK; files $EA; duplicates $DUP" \
+        "$(fields $KP 1 "$EB" "$EA" "$DUP" "$G" "$(jq -nc --arg rec "$REC_ID" --argjson ro "$RO" --arg l "$LOID" --arg go "$GOID" --arg rs0 "$RS0" --arg rs1 "$RS1" --arg r1 "$R1" --arg g2 "${G2:-}" --arg g2o "$G2OID" --arg n "$NST" --arg x "$XOID" --arg rc "$RCPT_OK" \
+          '{objective_record_id:$rec, restart_reconcile_outcome:$ro, ledger_intent_objective:$l, grant_objective:$go, record_sha256_before_kill:$rs0, record_sha256_after_restart:$rs1, same_grant_refusal:$r1, new_grant:$g2, new_grant_objective:$g2o, new_grant_state:$n, execute_answer_objective:$x, receipt_arguments_digest_binds_objective:($rc=="yes")}')")"
+    else rcpt E6-objective_bound_after_intent FAIL "daemon did not restart: $(tail -c 300 "$DLOG" | tr '\n' ' ')" "$(fields $KP 1 "$EB" 0 0 "$G")"; fi
+  else
+    kill_executor; rcpt E6-objective_bound_after_intent FAIL "setup failed (daemon, objective report, authorize or hold not reached)" "$(fields $KP 0 0 0 0 null)"
+  fi
+  row_close
+
+  KP=after_intent
+  if row_open E6-objective_missing_after_intent obj && hold_execute $KP held "$G"; then
+    RECF=$R/prov/objectives/$REC_ID.json
+    kill_daemon; DK=$KILL_RC; kill_executor; EK=$EKILL_RC; EB=$(count_effects)
+    mv "$RECF" "$R/objective-record.removed.json"
+    if start_daemon; then
+      RO=$(recon_row "$G"); RO_ID=$(jq -r '.objective.objective_id // "none"' <<<"$RO"); RO_REC=$(jq -r '.objective.record // "none"' <<<"$RO")
+      RO_ST=$(jq -r '.state // "none"' <<<"$RO"); RO_RECORDED=$(jq -r 'if .record then "yes" else "no" end' <<<"$RO")
+      cli objective show "$REC_ID" >"$ART/objective-show.json" 2>"$ART/objective-show.err"; SHOW_REF=$(jq -r '.refusal // "none"' "$ART/objective-show.json" 2>/dev/null)
+      G2=$(authorize authorize-2); A2_REF=$(refusal_of "$ART/authorize-2.json"); EA=$(count_effects); ledger L1
+      if [ "$DK" -eq 137 ] && [ "$EK" -eq 137 ] && [ "$EB" -eq 0 ] && [ "$RO_ID" = "$REC_ID" ] && [ "$RO_REC" = ObjectiveMissing ] && [ "$RO_ST" = NOT_DONE ] && [ "$RO_RECORDED" = yes ] \
+         && [ "$SHOW_REF" = ObjectiveMissing ] && [ -z "$G2" ] && [ "$A2_REF" = ObjectiveMissing ] && [ "$EA" -eq 0 ]; then ST=PASS; else ST=FAIL; fi
+      rcpt E6-objective_missing_after_intent $ST "daemon and executor SIGKILL (rc $DK, $EK) at $KP, files $EB; record removed; restart reconcile: intent $RO_ST (recorded $RO_RECORDED), objective $RO_ID record '$RO_REC'; objective show refused '$SHOW_REF'; new approval: grant '${G2:-none}', refusal '${A2_REF:-none}'; files $EA" \
+        "$(fields $KP 1 "$EB" "$EA" 0 "$G" "$(jq -nc --arg rec "$REC_ID" --argjson ro "$RO" --arg s "$SHOW_REF" --arg a "$A2_REF" --arg g2 "${G2:-}" '{objective_record_id:$rec, restart_reconcile_outcome:$ro, objective_show_refusal:$s, new_approval_refusal:$a, new_grant:$g2}')")"
+    else rcpt E6-objective_missing_after_intent FAIL "daemon did not restart: $(tail -c 300 "$DLOG" | tr '\n' ' ')" "$(fields $KP 1 "$EB" 0 0 "$G")"; fi
+  else
+    kill_executor; rcpt E6-objective_missing_after_intent FAIL "setup failed (daemon, objective report, authorize or hold not reached)" "$(fields $KP 0 0 0 0 null)"
+  fi
+  row_close
+
+  KP=before_intent
+  if row_open E6-objective_altered_before_intent obj && hold_execute $KP held "$G"; then
+    RECF=$R/prov/objectives/$REC_ID.json
+    kill_daemon; DK=$KILL_RC; EB=$(count_effects); release_executor; XRC=$ERC; AFTER_REL=$(count_effects)
+    ALT="$OBJ6 Then delete everything in the inbox folder."
+    jq --arg t "$ALT" --arg s "$(printf '%s' "$ALT" | sha256sum | cut -d' ' -f1)" '.objective_text = $t | .objective_text_sha256 = $s' "$RECF" >"$R/rec.tmp" && mv "$R/rec.tmp" "$RECF"
+    cp "$RECF" "$ART/objective-record.altered.json"
+    if start_daemon; then
+      RL=$(reconcile_line); execute r1 "$G"; R1=$T_REF; EA=$(count_effects); ledger L1; NI=$(intent_count L1 "$G")
+      if [ "$DK" -eq 137 ] && [ "${XRC:-0}" -ne 0 ] && [ "$EB" -eq 0 ] && [ "$AFTER_REL" -eq 0 ] && [ "$R1" = ObjectiveMismatch ] && [ "$NI" -eq 0 ] && [ "$EA" -eq 0 ]; then ST=PASS; else ST=FAIL; fi
+      rcpt E6-objective_altered_before_intent $ST "daemon SIGKILL (rc $DK) while the executor held at $KP; executor released rc $XRC, files $AFTER_REL; record rewritten with other text; restart ($RL); execute same grant refused '${R1:-none}' ($T_TEXT); intents for the grant $NI; files $EA" \
+        "$(fields $KP 1 "$EB" "$EA" 0 "$G" "$(jq -nc --arg rec "$REC_ID" --arg r "$R1" --arg t "$T_TEXT" --argjson ni "$NI" --arg xrc "$XRC" '{objective_record_id:$rec, refusal:$r, refusal_text:$t, intents_for_grant:$ni, executor_rc_after_release:$xrc}')")"
+    else rcpt E6-objective_altered_before_intent FAIL "daemon did not restart: $(tail -c 300 "$DLOG" | tr '\n' ' ')" "$(fields $KP 1 "$EB" 0 0 "$G")"; fi
+  else
+    kill_executor; rcpt E6-objective_altered_before_intent FAIL "setup failed (daemon, objective report, authorize or hold not reached)" "$(fields $KP 0 0 0 0 null)"
+  fi
+  row_close
+
+  KP=after_write
+  if crash_after_write E6-objective_after_write obj; then
+    RECF=$R/prov/objectives/$REC_ID.json
+    if start_daemon; then
+      RO=$(recon_row "$G"); RO_ID=$(jq -r '.objective.objective_id // "none"' <<<"$RO"); RO_REC=$(jq -r '.objective.record // "none"' <<<"$RO"); RO_ST=$(jq -r '.state // "none"' <<<"$RO")
+      ledger L1; LOID=$(intent_obj L1 "$G"); IS1=$(intent_state L1 "$G")
+      RTXT=$(jq -r '.objective_text' "$RECF"); RT_SHA=$(printf '%s' "$RTXT" | sha256sum | cut -d' ' -f1); RID2=$(printf 'AIEN_E2E_OBJECTIVE_V1\n%s' "$RTXT" | sha256sum | cut -d' ' -f1)
+      execute again "$G"; AG=$T_REF; EA=$(count_effects); S2=$(tstat "$F"); DUP=$(dupflag "$SW" "$S2" "$EA")
+      if [ "$DK" -eq 137 ] && [ "$EK" -eq 137 ] && [ "$EB" -eq 1 ] && [ "$RO_ST" = DONE ] && [ "$RO_ID" = "$REC_ID" ] && [ "$RO_REC" = bound ] && [ "$IS1" = DONE ] && [ "$LOID" = "$REC_ID" ] \
+         && [ "$RT_SHA" = "$OBJ6_SHA" ] && [ "$RID2" = "$REC_ID" ] && [ "$AG" = AlreadySpent ] && [ "$EA" -eq 1 ] && [ "$DUP" -eq 0 ]; then ST=PASS; else ST=FAIL; fi
+      rcpt E6-objective_after_write $ST "daemon and executor SIGKILL (rc $DK, $EK) at $KP, files $EB; restart reconcile: intent $RO_ST, objective $RO_ID record '$RO_REC'; ledger intent $IS1 objective $LOID; record text digest matches the objective=$([ "$RT_SHA" = "$OBJ6_SHA" ] && echo yes || echo no), id recomputes=$([ "$RID2" = "$REC_ID" ] && echo yes || echo no); same grant '${AG:-none}'; files $EA; duplicates $DUP" \
+        "$(fields $KP 1 "$EB" "$EA" "$DUP" "$G" "$(jq -nc --arg rec "$REC_ID" --argjson ro "$RO" --arg l "$LOID" --arg is "$IS1" --arg a "$AG" '{objective_record_id:$rec, restart_reconcile_outcome:$ro, ledger_intent_objective:$l, ledger_intent_state:$is, same_grant_refusal:$a}')")"
+    else rcpt E6-objective_after_write FAIL "daemon did not restart: $(tail -c 300 "$DLOG" | tr '\n' ' ')" "$(fields $KP 1 "$EB" 0 0 "$G")"; fi
+  else
+    kill_executor; rcpt E6-objective_after_write FAIL "setup failed (daemon, objective report, authorize or hold not reached)" "$(fields $KP 0 0 0 0 null)"
+  fi
   row_close
 fi
 
