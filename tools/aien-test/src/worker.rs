@@ -20,7 +20,8 @@
 //! the commit status `AIEN Verification (Spark)` is posted: success only on
 //! PASS, failure on FAIL, error otherwise. When GitHub cannot be reached the
 //! status goes to the outbox, the journal says `publication: pending`, and the
-//! next successful contact flushes it. GitHub being down is never a local
+//! next round of a loop started with `--github` flushes it (a loop without
+//! `--github` leaves it queued). GitHub being down is never a local
 //! failure.
 
 use crate::bundle;
@@ -1266,7 +1267,14 @@ pub fn run_loop(cfg: &Config, iterations: Option<u64>) -> usize {
     loop {
         round += 1;
         cfg.state.beat("-", "-", "poll");
-        let (posted, pending) = flush_outbox(cfg);
+        // Posting is the operator's choice (--github). A loop without it leaves
+        // queued statuses where they are, so `aien-local-ci start` after an
+        // offline --github run never posts them behind the operator's back.
+        let (posted, pending) = if cfg.github {
+            flush_outbox(cfg)
+        } else {
+            (0, outbox_files(&cfg.state).len())
+        };
         if posted + pending > 0 {
             println!("OUTBOX posted={posted} pending={pending}");
         }

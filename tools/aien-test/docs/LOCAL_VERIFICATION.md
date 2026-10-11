@@ -235,7 +235,8 @@ say PASS), `failure` when the bundle or the plan says FAIL, `error`
 otherwise; the description names the bundle path. When `gh` cannot reach
 GitHub the status is queued as `outbox/<seq>.<repo>.<sha>.json`, where `<seq>`
 is a 20-digit number that only grows, and the journal says `publication:
-pending`. Every later round replays the outbox first, in queue order; the
+pending`. Every later round of a loop started with `--github` replays the
+outbox first, in queue order (a loop without `--github` leaves it queued); the
 first status GitHub refuses stops the replay, so a newer status never
 overtakes an older one. A newer status for the same head replaces the queued
 one and moves to the end. A file that is not a status is renamed to `*.bad`
