@@ -26,6 +26,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "aien-abi-conformance"
+version = "0.1.0"
+
+[[package]]
 name = "aien-abi-core"
 version = "0.1.0"
 dependencies = [
@@ -245,6 +249,7 @@ dependencies = [
 name = "aien-omega-compose"
 version = "0.1.0"
 dependencies = [
+ "aien-abi-conformance",
  "sha2 0.10.9",
  "tempfile",
 ]
@@ -252,6 +257,9 @@ dependencies = [
 [[package]]
 name = "aien-omega-gpu"
 version = "0.1.0"
+dependencies = [
+ "aien-abi-conformance",
+]
 
 [[package]]
 name = "aien-platform"
