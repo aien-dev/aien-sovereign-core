@@ -43,11 +43,16 @@ pub mod evidence;
 pub mod graph;
 pub mod identity;
 pub mod manifest;
+pub mod plan;
 pub mod process;
 pub mod resources;
 pub mod runner;
+pub mod sandbox;
+pub mod status;
 pub mod verdict;
+pub mod verify;
 pub mod why;
+pub mod worker;
 
 #[cfg(test)]
 pub mod testutil;
