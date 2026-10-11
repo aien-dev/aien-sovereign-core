@@ -1,4 +1,4 @@
-# tests/gates/crumb-verify.gate
+# tests/gates/crumb.gate
 # Mirrors hosted: no hosted crumb job in this repository; crumb verify . is the always-run structural check
 # cache: never because crumbs live in many directories and inputs are literal paths; the check is sub-second.
 gate: CRUMB-VERIFY
