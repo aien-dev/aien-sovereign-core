@@ -36,6 +36,9 @@ jobs:
       - name: Release gate negative tests (pins, digests, model inputs, signatures)
         run: bash scripts/test-release-checks.sh
 
+      - name: Whole-system verifier tests (tools/aien-verify/tests/run.sh)
+        run: sh tools/aien-verify/tests/run.sh
+
       - name: Pin materializer self-test (scripts/pins.sh, offline)
         run: bash scripts/test-pins.sh
 
