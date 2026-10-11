@@ -118,12 +118,19 @@ fn with_ops(record: &mut Value, o: Option<&aien_abi_core::OpEvidence>) {
 }
 
 /// The line the daemon logs at the end of every model call (sc#337): the
-/// backend's `OP_REPORT ...` line with ` backend=<name>` appended (and, before
-/// it, ` gpu_executions=<n>` when the backend counts chip calls, sc#402). None
-/// when the backend does not account its ops.
+/// backend's `OP_REPORT ...` line with ` backend=<name>` appended and, after it,
+/// ` gpu_executions=<n>` when the backend counts chip calls (sc#402). None when
+/// the backend does not account its ops.
+///
+/// Layout contract (sc#384, 2026-10-11): the frozen OPEN-MODEL-QWEN3 v5 row
+/// `-OPR` parses `OP_REPORT native=[..] reference=[..] native_fallbacks=[..]
+/// reference_runs=[..] backend=<rest>` to the end of the line; any new field
+/// goes AFTER `backend=`, never between the bracketed fields and `backend=`.
+/// Putting `gpu_executions` before `backend=` (sc#405) made every v7 dry
+/// launch fail that row.
 pub fn op_report_line(o: Option<&aien_abi_core::OpEvidence>) -> Option<String> {
     o.map(|o| match o.gpu_executions {
-        Some(n) => format!("{} gpu_executions={n} backend={}", o.report, o.backend),
+        Some(n) => format!("{} backend={} gpu_executions={n}", o.report, o.backend),
         None => format!("{} backend={}", o.report, o.backend),
     })
 }
