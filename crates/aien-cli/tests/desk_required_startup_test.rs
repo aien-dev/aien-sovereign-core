@@ -255,3 +255,41 @@ fn a_failed_check_stops_its_daemon() {
         "the failed check left daemon(s) {left:?} running"
     );
 }
+
+/// sc#414 defect 1: `aien start` itself (not just the daemon it spawns) refuses
+/// without a desk key, in plain words, naming the exact command, and never
+/// leaves a daemon or a socket behind.
+#[test]
+fn s1_aien_start_without_desk_key_refuses_with_the_command() {
+    let rig = Rig::new();
+    let out = rig
+        .cmd(false, None)
+        .arg("start")
+        .stdin(Stdio::null())
+        .output()
+        .expect("run aien start");
+    let all = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(!out.status.success(), "start must refuse: {all}");
+    assert!(all.contains("AIEN will not start yet"), "{all}");
+    assert!(all.contains("aien compose desk-key --create 1"), "{all}");
+    assert!(!rig.sock().exists(), "no daemon may be left: {all}");
+}
+
+/// sc#414 defect 2: `aien harness` refuses with a non-zero exit; it never
+/// reports a pass, and never calls the non-existent `spark-harness check`.
+#[test]
+fn s2_aien_harness_refuses_not_shipped() {
+    let rig = Rig::new();
+    let out = rig.cmd(false, None).arg("harness").output().unwrap();
+    let all = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(!out.status.success(), "{all}");
+    assert!(all.contains("not shipped in this release"), "{all}");
+}

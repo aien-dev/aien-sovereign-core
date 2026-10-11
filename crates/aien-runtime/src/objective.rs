@@ -1,7 +1,7 @@
 //! sovereign-core #408: the operator's objective record, as the daemon reads it.
 //!
 //! `aien-cli objective record` (sc#388) writes `objectives/<objective_id>.json`
-//! under `AIEN_PROVENANCE_DIR`; the id is sha256 of [`DOMAIN_TAG`], LF, the
+//! under the provenance root (`AIEN_PROVENANCE_DIR`, default durable per-user state); the id is sha256 of [`DOMAIN_TAG`], LF, the
 //! text. The daemon never writes the record. It re-reads it when a grant is
 //! bound to it (`ComposeAuthorize` with an objective id), before every intent
 //! on such a grant, and at every reconcile of such an intent, so a record that
@@ -24,13 +24,39 @@ pub fn objective_id(text: &str) -> String {
     sha256_hex(format!("{DOMAIN_TAG}\n{text}").as_bytes())
 }
 
-/// `$AIEN_PROVENANCE_DIR/objectives` (default `/tmp/aien-provenance/objectives`),
-/// resolved exactly as the CLI resolves it.
+/// The provenance root, resolved from a variable lookup (sc#414 defect 3):
+/// `$AIEN_PROVENANCE_DIR`, else `$AIEN_RUNTIME_STATE_DIR/provenance`, else
+/// `$XDG_STATE_HOME/aien-runtime/provenance`, else
+/// `$HOME/.local/state/aien-runtime/provenance`, the same order as the compose
+/// home (`spine::compose_dir_from_env`). Never /tmp: a record that vanishes at
+/// reboot is not a durable record. With none of those set (no HOME at all), the
+/// absolute `/var/lib/aien-runtime/provenance`, so daemon and CLI still agree.
+pub fn provenance_root_with(get: impl Fn(&str) -> Option<String>) -> PathBuf {
+    let get = |k: &str| get(k).filter(|v| !v.trim().is_empty());
+    if let Some(d) = get("AIEN_PROVENANCE_DIR") {
+        return PathBuf::from(d.trim());
+    }
+    if let Some(d) = get("AIEN_RUNTIME_STATE_DIR") {
+        return PathBuf::from(d.trim()).join("provenance");
+    }
+    if let Some(d) = get("XDG_STATE_HOME") {
+        return PathBuf::from(d.trim()).join("aien-runtime/provenance");
+    }
+    if let Some(h) = get("HOME") {
+        return PathBuf::from(h.trim()).join(".local/state/aien-runtime/provenance");
+    }
+    PathBuf::from("/var/lib/aien-runtime/provenance")
+}
+
+/// [`provenance_root_with`] over the process environment. The daemon, the CLI
+/// and the effect receipts all call this one function.
+pub fn provenance_root() -> PathBuf {
+    provenance_root_with(|k| std::env::var(k).ok())
+}
+
+/// `<provenance root>/objectives`, resolved exactly as the CLI resolves it.
 pub fn dir() -> PathBuf {
-    std::env::var("AIEN_PROVENANCE_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from("/tmp/aien-provenance"))
-        .join("objectives")
+    provenance_root().join("objectives")
 }
 
 pub fn valid_id(id: &str) -> bool {
@@ -106,6 +132,55 @@ pub fn check(id: &str, text_sha256: &str) -> Result<Seen, Refused> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn env(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
+        let m: std::collections::HashMap<String, String> = pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        move |k| m.get(k).cloned()
+    }
+
+    #[test]
+    fn provenance_default_is_durable_and_never_tmp() {
+        let home = provenance_root_with(env(&[("HOME", "/home/u")]));
+        assert_eq!(
+            home,
+            PathBuf::from("/home/u/.local/state/aien-runtime/provenance")
+        );
+        for p in [
+            home,
+            provenance_root_with(env(&[])),
+            provenance_root_with(env(&[("XDG_STATE_HOME", "/x")])),
+            provenance_root_with(env(&[("AIEN_RUNTIME_STATE_DIR", "/s")])),
+        ] {
+            assert!(!p.starts_with("/tmp"), "{}", p.display());
+        }
+    }
+
+    #[test]
+    fn provenance_follows_the_compose_home_order_and_override_wins() {
+        let all = [
+            ("AIEN_PROVENANCE_DIR", "/p"),
+            ("AIEN_RUNTIME_STATE_DIR", "/s"),
+            ("XDG_STATE_HOME", "/x"),
+            ("HOME", "/h"),
+        ];
+        assert_eq!(provenance_root_with(env(&all)), PathBuf::from("/p"));
+        assert_eq!(
+            provenance_root_with(env(&all[1..])),
+            PathBuf::from("/s/provenance")
+        );
+        assert_eq!(
+            provenance_root_with(env(&all[2..])),
+            PathBuf::from("/x/aien-runtime/provenance")
+        );
+        // An empty override is not an override.
+        assert_eq!(
+            provenance_root_with(env(&[("AIEN_PROVENANCE_DIR", " "), ("HOME", "/h")])),
+            PathBuf::from("/h/.local/state/aien-runtime/provenance")
+        );
+    }
 
     #[test]
     fn id_is_the_cli_formula() {

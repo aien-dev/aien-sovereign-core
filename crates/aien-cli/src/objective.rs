@@ -213,3 +213,22 @@ mod tests {
         std::env::remove_var("AIEN_PROVENANCE_DIR");
     }
 }
+
+#[cfg(test)]
+mod default_dir_tests {
+    /// sc#414 defect 3: the CLI and the daemon must derive the same directory,
+    /// or approval refuses ObjectiveMissing. Both call the one runtime function.
+    #[test]
+    fn cli_and_daemon_agree_and_default_is_not_tmp() {
+        let with = |k: &str| {
+            if k == "HOME" {
+                Some("/home/op".to_string())
+            } else {
+                None
+            }
+        };
+        let root = aien_runtime::objective::provenance_root_with(with);
+        assert!(!root.starts_with("/tmp"), "{}", root.display());
+        assert_eq!(super::dir(), aien_runtime::objective::dir());
+    }
+}
