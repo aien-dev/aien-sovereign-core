@@ -48,6 +48,9 @@ jobs:
       - name: Pin materializer self-test (scripts/pins.sh, offline)
         run: bash scripts/test-pins.sh
 
+      - name: Native library identity refusals (scripts/test-native-identity.sh, no omega needed)
+        run: bash scripts/test-native-identity.sh
+
       - name: Verify Piped Installer Bootstrap
         run: bash scripts/test-install.sh
 

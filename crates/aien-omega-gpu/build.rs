@@ -4,15 +4,26 @@
 //!   1. `AIEN_FORCE_CPU_STUB=1`      -> stub (CI without the chip). BUILD-TIME ONLY: a binary already
 //!      built with the GPU library ignores it at run time. For a CPU-only RUN set `AIEN_BACKEND=cpu`:
 //!      the daemon refuses to start (`CPU_ONLY_BUT_GPU_BUILD`) if the binary would select the GB10 backend.
-//!   2. `AIEN_OMEGA_GPU_LIB=<file>`  -> link that prebuilt archive (not sha-checked).
+//!      Refused when `AIEN_REQUIRE_NATIVE_LIBS=1` (a required-native build is never a stub).
+//!   2. `AIEN_OMEGA_GPU_LIB=<file>`  -> link that prebuilt archive; `AIEN_OMEGA_GPU_LIB_SHA256` must
+//!      name its sha256 (checked) and it must define every function in the ABI manifest. A
+//!      development override: its identity says `prebuilt` and it never qualifies.
 //!   3. `AIEN_OMEGA_DIR=<checkout>`  -> its HEAD must equal omega.lock; built with
 //!      `make libomega_gpu` into OUT_DIR. `AIEN_PHYSICS_DIR` (default `<omega>/../physics`)
 //!      is passed as PHYSICS_DIR; omega's own physics.lock check still runs.
 //!   4. otherwise                    -> stub, with a build warning.
 //!
 //! `cfg(has_omega_gpu)` is set only when the real library is linked.
+//!
+//! Before linking a checkout build, `aien_abi_conformance::build::qualify_built` checks the
+//! pinned headers, a compiled layout probe and the archive symbols against
+//! `abi/omega_gpu.manifest`, and the archive sha256 against `native-artifacts.lock`; any mismatch
+//! fails the build. The result is recorded for `native_identity()`.
+use aien_abi_conformance::build;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+
+const PREFIX: &str = "AIEN_OMEGA_GPU";
 
 fn main() {
     println!("cargo:rustc-check-cfg=cfg(has_omega_gpu)");
@@ -37,7 +48,13 @@ fn main() {
     );
     println!("cargo:rustc-env=AIEN_OMEGA_PINNED_SHA={pinned}");
 
+    let root = PathBuf::from(env("CARGO_MANIFEST_DIR"));
+    let manifest = root.join("abi/omega_gpu.manifest");
+    let artifacts_lock = root.join("../../native-artifacts.lock");
+    println!("cargo:rerun-if-env-changed=AIEN_OMEGA_GPU_LIB_SHA256");
     if std::env::var("AIEN_FORCE_CPU_STUB").as_deref() == Ok("1") {
+        build::refuse_stub_if_required("aien-omega-gpu");
+        build::Identity::stub(&pinned).emit(PREFIX);
         return;
     }
     if let Ok(lib) = std::env::var("AIEN_OMEGA_GPU_LIB") {
@@ -47,6 +64,14 @@ fn main() {
             "AIEN_OMEGA_GPU_LIB {} is not a file",
             lib.display()
         );
+        build::qualify_prebuilt(
+            "aien-omega-gpu",
+            &manifest,
+            &lib,
+            "AIEN_OMEGA_GPU_LIB_SHA256",
+            "unverified",
+        )
+        .emit(PREFIX);
         link(&lib);
         return;
     }
@@ -59,6 +84,7 @@ fn main() {
             "aien-omega-gpu: AIEN_REQUIRE_NATIVE_LIBS=1 but neither AIEN_OMEGA_DIR nor AIEN_OMEGA_GPU_LIB is set (run scripts/pins.sh --gpu and source target/pins/env.sh)"
         );
         println!("cargo:warning=aien-omega-gpu: no AIEN_OMEGA_DIR or AIEN_OMEGA_GPU_LIB, building the CPU stub");
+        build::Identity::stub(&pinned).emit(PREFIX);
         return;
     };
     let dir = PathBuf::from(dir);
@@ -93,7 +119,19 @@ fn main() {
         "make libomega_gpu failed in {}",
         dir.display()
     );
-    link(&out.join("libomega_gpu.a"));
+    let archive = out.join("libomega_gpu.a");
+    build::qualify_built(
+        "aien-omega-gpu",
+        &manifest,
+        &artifacts_lock,
+        &dir,
+        &physics,
+        &archive,
+        &pinned,
+        true,
+    )
+    .emit(PREFIX);
+    link(&archive);
 }
 
 fn link(lib: &Path) {

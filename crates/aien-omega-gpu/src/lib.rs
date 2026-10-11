@@ -23,6 +23,24 @@ pub const fn is_native() -> bool {
     cfg!(has_omega_gpu)
 }
 
+/// What this binary linked for the omega GPU engine (stub, pinned source, developer override or
+/// prebuilt), the C ABI check result and the archive digest, as `build.rs` established them.
+/// Only `qualifies()` identities count as release-grade native qualification.
+pub fn native_identity() -> aien_abi_conformance::NativeIdentity {
+    aien_abi_conformance::NativeIdentity {
+        component: "libomega_gpu.a",
+        link: env!("AIEN_OMEGA_GPU_LINK"),
+        abi: env!("AIEN_OMEGA_GPU_ABI"),
+        digest: env!("AIEN_OMEGA_GPU_DIGEST"),
+        archive_sha256: env!("AIEN_OMEGA_GPU_ARCHIVE_SHA256"),
+        source_sha: env!("AIEN_OMEGA_GPU_SOURCE_SHA"),
+        aienos_lock: env!("AIEN_OMEGA_GPU_AIENOS_LOCK"),
+        physics_lock: env!("AIEN_OMEGA_GPU_PHYSICS_LOCK"),
+        target: env!("AIEN_OMEGA_GPU_TARGET"),
+        cc: env!("AIEN_OMEGA_GPU_CC"),
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OmegaGpuError {
     /// Stub build: no native library linked.
@@ -97,6 +115,18 @@ impl MatmulInfo {
     }
 }
 
+/// Element count of a shape, refused with `TOO_LARGE` (before any C call) if the product
+/// overflows `usize`: a wrapped product could let a short slice pass `check_len` and hand
+/// omega dimensions larger than the buffer behind the pointer.
+fn prod(dims: &[usize]) -> Result<usize, OmegaGpuError> {
+    dims.iter()
+        .try_fold(1usize, |acc, &d| acc.checked_mul(d))
+        .ok_or_else(|| OmegaGpuError::Rc {
+            rc: ffi::OMEGA_GPU_MATMUL_TOO_LARGE,
+            name: rc_name(ffi::OMEGA_GPU_MATMUL_TOO_LARGE),
+        })
+}
+
 fn check_len(what: &'static str, expected: usize, got: usize) -> Result<(), OmegaGpuError> {
     if expected == got {
         Ok(())
@@ -140,9 +170,9 @@ pub fn matmul_bf16(
     b: &[u16],
     c: &mut [f32],
 ) -> Result<MatmulInfo, OmegaGpuError> {
-    check_len("a", m * k, a.len())?;
-    check_len("b", k * n, b.len())?;
-    check_len("c", m * n, c.len())?;
+    check_len("a", prod(&[m, k])?, a.len())?;
+    check_len("b", prod(&[k, n])?, b.len())?;
+    check_len("c", prod(&[m, n])?, c.len())?;
     let (mu, ku, nu) = dims(m, k, n)?;
     #[cfg(has_omega_gpu)]
     {
@@ -178,9 +208,9 @@ pub fn matmul_f32(
     b: &[f32],
     c: &mut [f32],
 ) -> Result<MatmulInfo, OmegaGpuError> {
-    check_len("a", m * k, a.len())?;
-    check_len("b", k * n, b.len())?;
-    check_len("c", m * n, c.len())?;
+    check_len("a", prod(&[m, k])?, a.len())?;
+    check_len("b", prod(&[k, n])?, b.len())?;
+    check_len("c", prod(&[m, n])?, c.len())?;
     let (mu, ku, nu) = dims(m, k, n)?;
     #[cfg(has_omega_gpu)]
     {
@@ -239,7 +269,7 @@ impl fmt::Debug for ResidentTensor {
 impl ResidentTensor {
     /// Upload a row-major k x n f32 matrix (rounded to bf16 on the host by omega).
     pub fn upload_f32(k: usize, n: usize, b: &[f32]) -> Result<Self, OmegaGpuError> {
-        check_len("b", k * n, b.len())?;
+        check_len("b", prod(&[k, n])?, b.len())?;
         let (_, ku, nu) = dims(1, k, n)?;
         #[cfg(has_omega_gpu)]
         {
@@ -266,7 +296,7 @@ impl ResidentTensor {
     /// The resident data equals `upload_f32` of the widened values, except that omega's
     /// f32-to-bf16 step quiets signaling NaNs (see `aien-inference-abi` `resident.rs`).
     pub fn upload_bf16(k: usize, n: usize, b: &[u16]) -> Result<Self, OmegaGpuError> {
-        check_len("b", k * n, b.len())?;
+        check_len("b", prod(&[k, n])?, b.len())?;
         let (_, ku, nu) = dims(1, k, n)?;
         #[cfg(has_omega_gpu)]
         {
@@ -304,8 +334,8 @@ impl ResidentTensor {
         a: &[f32],
         c: &mut [f32],
     ) -> Result<MatmulInfo, OmegaGpuError> {
-        check_len("a", m * self.k, a.len())?;
-        check_len("c", m * self.n, c.len())?;
+        check_len("a", prod(&[m, self.k])?, a.len())?;
+        check_len("c", prod(&[m, self.n])?, c.len())?;
         let (mu, _, _) = dims(m, self.k, self.n)?;
         #[cfg(has_omega_gpu)]
         {
@@ -586,9 +616,9 @@ pub fn rmsnorm_f32(
     eps: f32,
     out: &mut [f32],
 ) -> Result<OmegaGpuEwInfo, OmegaGpuError> {
-    check_len("x", rows * dim, x.len())?;
+    check_len("x", prod(&[rows, dim])?, x.len())?;
     check_len("weight", dim, weight.len())?;
-    check_len("out", rows * dim, out.len())?;
+    check_len("out", prod(&[rows, dim])?, out.len())?;
     let (ru, du) = (ew_dim(rows)?, ew_dim(dim)?);
     #[cfg(has_omega_gpu)]
     {
@@ -625,10 +655,10 @@ pub fn rope_f32(
     sin_half: &[f32],
     out: &mut [f32],
 ) -> Result<OmegaGpuEwInfo, OmegaGpuError> {
-    check_len("v", heads * head_dim, v.len())?;
+    check_len("v", prod(&[heads, head_dim])?, v.len())?;
     check_len("cos_half", head_dim / 2, cos_half.len())?;
     check_len("sin_half", head_dim / 2, sin_half.len())?;
-    check_len("out", heads * head_dim, out.len())?;
+    check_len("out", prod(&[heads, head_dim])?, out.len())?;
     let (hu, du) = (ew_dim(heads)?, ew_dim(head_dim)?);
     #[cfg(has_omega_gpu)]
     {
@@ -741,10 +771,18 @@ pub fn gqa_attention_f32(
     head_dim: usize,
     out: &mut [f32],
 ) -> Result<OmegaGpuAttnInfo, OmegaGpuError> {
-    check_len("q", num_q_heads * head_dim, q.len())?;
-    check_len("k_cache", seq_len * num_kv_heads * head_dim, k_cache.len())?;
-    check_len("v_cache", seq_len * num_kv_heads * head_dim, v_cache.len())?;
-    check_len("out", num_q_heads * head_dim, out.len())?;
+    check_len("q", prod(&[num_q_heads, head_dim])?, q.len())?;
+    check_len(
+        "k_cache",
+        prod(&[seq_len, num_kv_heads, head_dim])?,
+        k_cache.len(),
+    )?;
+    check_len(
+        "v_cache",
+        prod(&[seq_len, num_kv_heads, head_dim])?,
+        v_cache.len(),
+    )?;
+    check_len("out", prod(&[num_q_heads, head_dim])?, out.len())?;
     let (su, qh, kh, hd) = (
         attn_dim(seq_len)?,
         attn_dim(num_q_heads)?,
@@ -793,8 +831,8 @@ pub fn paged_attention_bf16(
     head_dim: usize,
     out: &mut [f32],
 ) -> Result<OmegaGpuAttnInfo, OmegaGpuError> {
-    check_len("q", num_q_heads * head_dim, q.len())?;
-    check_len("out", num_q_heads * head_dim, out.len())?;
+    check_len("q", prod(&[num_q_heads, head_dim])?, q.len())?;
+    check_len("out", prod(&[num_q_heads, head_dim])?, out.len())?;
     check_pool(pool, layout)?;
     let (nb, cl, li, qh, kh, hd) = (
         attn_dim(block_ids.len())?,
@@ -811,7 +849,7 @@ pub fn paged_attention_bf16(
         let rc = unsafe {
             ffi::omega_gpu_paged_attention_bf16(
                 q.as_ptr(),
-                pool.as_ptr(),
+                pool.as_ptr().cast(),
                 layout,
                 block_ids.as_ptr(),
                 nb,
@@ -851,12 +889,12 @@ pub fn paged_attention_batch_bf16(
     head_dim: usize,
     out: &mut [f32],
 ) -> Result<OmegaGpuAttnInfo, OmegaGpuError> {
-    check_len("q", num_seqs * num_q_heads * head_dim, q.len())?;
-    check_len("out", num_seqs * num_q_heads * head_dim, out.len())?;
+    check_len("q", prod(&[num_seqs, num_q_heads, head_dim])?, q.len())?;
+    check_len("out", prod(&[num_seqs, num_q_heads, head_dim])?, out.len())?;
     check_len("context_lens", num_seqs, context_lens.len())?;
     check_len(
         "block_tables",
-        num_seqs * max_blocks_per_seq,
+        prod(&[num_seqs, max_blocks_per_seq])?,
         block_tables.len(),
     )?;
     check_pool(pool, layout)?;
@@ -875,7 +913,7 @@ pub fn paged_attention_batch_bf16(
         let rc = unsafe {
             ffi::omega_gpu_paged_attention_batch_bf16(
                 q.as_ptr(),
-                pool.as_ptr(),
+                pool.as_ptr().cast(),
                 layout,
                 block_tables.as_ptr(),
                 context_lens.as_ptr(),

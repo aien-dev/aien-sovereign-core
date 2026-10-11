@@ -23,6 +23,24 @@ pub static LAST_WAIT_MS: std::sync::atomic::AtomicU32 = std::sync::atomic::Atomi
 pub const LINKED: bool = cfg!(has_omega_compose);
 /// The omega commit this build expected (omega.lock or `AIEN_OMEGA_COMPOSE_SHA`).
 pub const EXPECTED_OMEGA_SHA: &str = env!("AIEN_OMEGA_COMPOSE_EXPECTED_SHA");
+
+/// What this binary linked for the omega composition library (stub, pinned source, developer override or
+/// prebuilt), the C ABI check result and the archive digest, as `build.rs` established them.
+/// Only `qualifies()` identities count as release-grade native qualification.
+pub fn native_identity() -> aien_abi_conformance::NativeIdentity {
+    aien_abi_conformance::NativeIdentity {
+        component: "librx_compose.a",
+        link: env!("AIEN_OMEGA_COMPOSE_LINK"),
+        abi: env!("AIEN_OMEGA_COMPOSE_ABI"),
+        digest: env!("AIEN_OMEGA_COMPOSE_DIGEST"),
+        archive_sha256: env!("AIEN_OMEGA_COMPOSE_ARCHIVE_SHA256"),
+        source_sha: env!("AIEN_OMEGA_COMPOSE_SOURCE_SHA"),
+        aienos_lock: env!("AIEN_OMEGA_COMPOSE_AIENOS_LOCK"),
+        physics_lock: env!("AIEN_OMEGA_COMPOSE_PHYSICS_LOCK"),
+        target: env!("AIEN_OMEGA_COMPOSE_TARGET"),
+        cc: env!("AIEN_OMEGA_COMPOSE_CC"),
+    }
+}
 pub use ffi::{RXC_HOST_SUBJECT_GOAL as SUBJECT_GOAL, RXC_HOST_SUBJECT_STATE as SUBJECT_STATE};
 /// No winner / no Skill.
 pub const NONE: u32 = ffi::RXC_HOST_NONE;
@@ -193,6 +211,9 @@ mod linked {
     }
 
     unsafe extern "C" fn skill_tramp(ctx: *mut c_void, task: u64, result: *mut u64) -> c_int {
+        if ctx.is_null() || result.is_null() {
+            return 1;
+        }
         let f = &*(ctx as *const Box<SkillFn>);
         match catch_unwind(AssertUnwindSafe(|| f(task))) {
             Ok(Some(r)) if r != 0 => {
@@ -204,6 +225,9 @@ mod linked {
     }
 
     unsafe extern "C" fn verify_tramp(ctx: *mut c_void, task: u64, result: u64) -> c_int {
+        if ctx.is_null() {
+            return 0;
+        }
         let f = &*(ctx as *const Box<VerifyFn>);
         matches!(catch_unwind(AssertUnwindSafe(|| f(task, result))), Ok(true)) as c_int
     }

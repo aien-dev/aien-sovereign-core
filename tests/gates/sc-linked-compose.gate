@@ -7,6 +7,7 @@ owner: aien-sovereign-core
 requires:
   - host
 inputs:
+  - native-artifacts.lock
   - omega.lock
   - scripts/test-linked-compose.sh
   - scripts/pins.sh

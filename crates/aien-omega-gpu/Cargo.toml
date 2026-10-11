@@ -8,3 +8,7 @@ license.workspace = true
 build = "build.rs"
 
 [dependencies]
+aien-abi-conformance = { path = "../aien-abi-conformance" }
+
+[build-dependencies]
+aien-abi-conformance = { path = "../aien-abi-conformance" }

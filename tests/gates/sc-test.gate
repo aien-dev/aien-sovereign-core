@@ -6,6 +6,7 @@ owner: aien-sovereign-core
 requires:
   - host
 inputs:
+  - native-artifacts.lock
   - Cargo.toml
   - Cargo.lock
   - rust-toolchain.toml

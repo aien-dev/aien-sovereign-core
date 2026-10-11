@@ -1,9 +1,19 @@
-//! Raw declarations, written by hand from omega `src/omega_gpu_matmul_api.h`
-//! at the commit pinned in `omega.lock` (e5593ae; matmul header unchanged since 6b940fa, attention header
-//! extended by OM-2 e5593ae: staging counters appended to `OmegaGpuAttnInfo`). Nothing generated.
-//! Includes the resident-weights handles added by omega FB-1 cut 1b.
+//! Raw declarations, written by hand from omega `src/omega_gpu_matmul_api.h`,
+//! `omega_gpu_session.h`, `omega_gpu_serving.h`, `omega_gpu_elementwise_api.h` and
+//! `omega_gpu_attention_api.h` at the commit pinned in `omega.lock`. Nothing generated.
+//!
+//! Hand-written, but not unchecked: every mirrored constant, struct and function is declared
+//! through the `aien-abi-conformance` macros, and `abi/omega_gpu.manifest` is the contract.
+//! `tests/abi_manifest.rs` checks these declarations against it in every build (stub included);
+//! `build.rs` checks the pinned C headers (field names and order, prototypes), a compiled layout
+//! probe (sizes, alignments, offsets, widths, signedness, constant values) and the archive's
+//! symbols against it before linking.
+use aien_abi_conformance::{abi_consts, abi_externs, abi_struct};
+#[cfg(has_omega_gpu)]
+use std::os::raw::c_void;
 use std::os::raw::{c_char, c_int};
 
+abi_consts! { MATMUL_CONSTS;
 pub const OMEGA_GPU_MATMUL_OK: c_int = 0;
 pub const OMEGA_GPU_MATMUL_BAD_ARGS: c_int = -1;
 pub const OMEGA_GPU_MATMUL_TOO_LARGE: c_int = -2;
@@ -15,7 +25,9 @@ pub const OMEGA_GPU_MATMUL_TILE_M: u32 = 16;
 pub const OMEGA_GPU_MATMUL_TILE_N: u32 = 8;
 pub const OMEGA_GPU_MATMUL_TILE_K: u32 = 16;
 pub const OMEGA_GPU_MATMUL_MAX_CTAS: u32 = 64;
+}
 
+abi_struct! {
 /// Mirrors `OmegaGpuMatmulInfo` field for field, same order.
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
@@ -44,6 +56,7 @@ pub struct OmegaGpuMatmulInfo {
     pub resident: bool,
     pub oracle_ran: bool,
     pub call_ns: u64,
+}
 }
 
 impl OmegaGpuMatmulInfo {
@@ -81,6 +94,7 @@ impl OmegaGpuMatmulInfo {
 pub struct OmegaGpuTensor {
     _private: [u8; 0],
 }
+abi_struct! {
 /// omega `OmegaGpuAllocStats` (`src/omega_gpu_session.h`), field for field.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -90,7 +104,9 @@ pub struct OmegaGpuAllocStats {
     pub alloc_failures: u64,
     pub frees: u64,
 }
+}
 
+abi_struct! {
 /// omega `OmegaGpuServingBounds` (`src/omega_gpu_serving.h`), field for field.
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
@@ -107,7 +123,9 @@ pub struct OmegaGpuServingBounds {
     pub max_n_one_row: u32,
     pub kernel_slots: u32,
 }
+}
 
+abi_externs! { MATMUL_FNS;
 #[cfg(has_omega_gpu)]
 extern "C" {
     pub fn omega_gpu_matmul_bf16(
@@ -182,15 +200,19 @@ extern "C" {
     // omega c1/lib-serving bc9fa71 `src/omega_gpu_session.h`: process-wide driver allocation counters.
     pub fn omega_gpu_session_alloc_stats(out: *mut OmegaGpuAllocStats);
 }
+}
 
 // ---- omega `src/omega_gpu_elementwise_api.h` (FB-1 cut 4, pinned 2636409) ----
+abi_consts! { EW_CONSTS;
 pub const OMEGA_GPU_EW_OK: c_int = 0;
 pub const OMEGA_GPU_EW_BAD_ARGS: c_int = -1;
 pub const OMEGA_GPU_EW_TOO_LARGE: c_int = -2;
 pub const OMEGA_GPU_EW_CODEGEN_FAIL: c_int = -3;
 pub const OMEGA_GPU_EW_CHIP_FAIL: c_int = -4;
 pub const OMEGA_GPU_EW_UNWRITTEN: c_int = -5;
+}
 
+abi_struct! {
 /// Mirrors `OmegaGpuEwInfo` field for field, same order.
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
@@ -207,6 +229,7 @@ pub struct OmegaGpuEwInfo {
     pub target_chip: [c_char; 64],
     pub sm_architecture: u32,
     pub call_ns: u64,
+}
 }
 
 impl OmegaGpuEwInfo {
@@ -228,6 +251,7 @@ impl OmegaGpuEwInfo {
     }
 }
 
+abi_externs! { EW_FNS;
 #[cfg(has_omega_gpu)]
 extern "C" {
     pub fn omega_gpu_rmsnorm_f32(
@@ -257,8 +281,10 @@ extern "C" {
     ) -> c_int;
     pub fn omega_gpu_elementwise_rc_name(rc: c_int) -> *const c_char;
 }
+}
 
 // ---- omega `src/omega_gpu_attention_api.h` (FB-1 cut 5 + 4b + OM-1/OM-2, pinned e5593ae) ----
+abi_consts! { ATTN_CONSTS;
 pub const OMEGA_GPU_ATTN_OK: c_int = 0;
 pub const OMEGA_GPU_ATTN_BAD_ARGS: c_int = -1;
 pub const OMEGA_GPU_ATTN_TOO_LARGE: c_int = -2;
@@ -267,7 +293,9 @@ pub const OMEGA_GPU_ATTN_CHIP_FAIL: c_int = -4;
 pub const OMEGA_GPU_ATTN_UNWRITTEN: c_int = -5;
 /// `OmegaGpuAttnInfo::kv_source`: KV reached the kernel through the per-call staging copy.
 pub const OMEGA_GPU_ATTN_KV_STAGED: u32 = 0;
+}
 
+abi_struct! {
 /// Mirrors `OmegaGpuAttnInfo` field for field, same order (note `call_ns` is third).
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
@@ -298,6 +326,7 @@ pub struct OmegaGpuAttnInfo {
     pub out_bytes: u64,
     /// `OMEGA_GPU_ATTN_KV_STAGED` (0): the only source in this cut; there is no resident KV.
     pub kv_source: u32,
+}
 }
 
 impl OmegaGpuAttnInfo {
@@ -337,6 +366,7 @@ const _: () = assert!(std::mem::offset_of!(OmegaGpuAttnInfo, kv_blocks_logical) 
 const _: () = assert!(std::mem::offset_of!(OmegaGpuAttnInfo, q_bytes) == 144);
 const _: () = assert!(std::mem::offset_of!(OmegaGpuAttnInfo, kv_source) == 168);
 
+abi_struct! {
 /// Mirrors `OmegaGpuKvLayout` (itself a mirror of aien-kv-cache `KvLayoutDesc`),
 /// field for field, strides in bytes.
 #[repr(C)]
@@ -352,7 +382,9 @@ pub struct OmegaGpuKvLayout {
     pub num_layers: u32,
     pub block_size: u32,
 }
+}
 
+abi_externs! { ATTN_FNS;
 #[cfg(has_omega_gpu)]
 extern "C" {
     pub fn omega_gpu_gqa_attention_f32(
@@ -368,7 +400,7 @@ extern "C" {
     ) -> c_int;
     pub fn omega_gpu_paged_attention_bf16(
         q: *const f32,
-        pool: *const u8,
+        pool: *const c_void,
         layout: *const OmegaGpuKvLayout,
         block_ids: *const u32,
         num_block_ids: u32,
@@ -382,7 +414,7 @@ extern "C" {
     ) -> c_int;
     pub fn omega_gpu_paged_attention_batch_bf16(
         q: *const f32,
-        pool: *const u8,
+        pool: *const c_void,
         layout: *const OmegaGpuKvLayout,
         block_tables: *const i32,
         context_lens: *const i32,
@@ -397,4 +429,22 @@ extern "C" {
     ) -> c_int;
     pub fn omega_gpu_attention_rc_name(rc: c_int) -> *const c_char;
     pub fn omega_gpu_attention_last_error() -> *const c_char;
+}
+}
+
+/// The Rust side of the omega GPU contract, for the manifest check.
+pub fn rust_abi() -> aien_abi_conformance::RustAbi {
+    aien_abi_conformance::RustAbi::default()
+        .with_struct::<OmegaGpuMatmulInfo>()
+        .with_struct::<OmegaGpuAllocStats>()
+        .with_struct::<OmegaGpuServingBounds>()
+        .with_struct::<OmegaGpuEwInfo>()
+        .with_struct::<OmegaGpuAttnInfo>()
+        .with_struct::<OmegaGpuKvLayout>()
+        .with_consts(MATMUL_CONSTS)
+        .with_consts(EW_CONSTS)
+        .with_consts(ATTN_CONSTS)
+        .with_fns(MATMUL_FNS)
+        .with_fns(EW_FNS)
+        .with_fns(ATTN_FNS)
 }
