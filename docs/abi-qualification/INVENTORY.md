@@ -90,6 +90,8 @@ callbacks, explicit stub, required-native with no library (`scripts/test-native-
 16 cases, in the required CI job), CPU vs GPU path identity (`native_identity()`), GPU
 parity (existing chip suites, run by `scripts/abi-qualify.sh --chip`).
 Entry point: `scripts/abi-qualify.sh [--chip]`, exit 0 PASS, 1 FAIL, 2 INCOMPLETE.
-Partial: evidence.json is a standalone record; registering it as an aien-test/aien-proof
-gate waits for the pipeline/local-verification lane to land, to avoid two competing changes.
+Registered in the local verification gates (ADR 0033): `tests/gates/sc-native-identity.gate`
+(step `native-identity` in `tests/gates/run.sh`), and `native-artifacts.lock` is an input of
+SC-TEST and SC-LINKED-COMPOSE. Partial: the GB10 part of `abi-qualify.sh --chip` stays an
+operator run with its own evidence.json (no GB10 gate class exists in the manifests yet).
 Not wired: the GPU C-side check on hosted CI (the GPU archive builds only on the Spark).
