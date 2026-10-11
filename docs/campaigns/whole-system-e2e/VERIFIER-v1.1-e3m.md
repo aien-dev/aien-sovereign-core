@@ -47,3 +47,20 @@ The harness (ACCEPTANCE-v1.2.md CTRL-E4) passes CTRL-E4 on a refusal by name wit
 | RUN-1-20261010T154724Z | base `a50fccb6...`; with that base as peer `437467db...` | same, E3m PASS as before |
 | RUN-2-GB10-20261011T030554Z | `af9e744c...` | same, E3m FAIL as before (no `d4_rule`, exact rule) |
 | RUN-3-GB10-20261011T045450Z | `9ca9b7af...` | same; E3m PASS under its `d4_rule`, its E3m disagreement gone, CTRL-E4 disagreement stays |
+
+## Results (2026-10-11, branch e2e/r6-verify, verifier built with `tools/aien-verify/build.sh`, rustc only, 0 warnings)
+
+| check | result |
+|---|---|
+| `tools/aien-verify/tests/run.sh` | passed 51, failed 0 (was 43; eight new checks below plus one new unit test) |
+| the same tests against the main verifier (8c09217) | 3 FAIL: RUN-3 E3m PASS under its `d4_rule`, RUN-3 E3m disagreement gone, unknown `d4_rule` NOT_RUN (red before green) |
+| `rustc --test` unit tests | 3 passed (new: `whole_word_ci_is_grep_i_w`) |
+| `scripts/whole_system_e2e.sh selftest` | PASS |
+| RUN-1-20261010T154724Z, scratch copy | `verdict_id a50fccb63363ef9224a19bd8bf4f249754abf5d88667ba0fd6ce93dfb8d63d80`; with it as peer `verdict_id 437467db4149b013738578c10ef68b7168dfb95feae8dea882de17a6118fc5fd`; E3m PASS (unchanged) |
+| RUN-2-GB10-20261011T030554Z, scratch copy | `verdict_id af9e744cc3187400e00599159999f357f53c1df867556f62c8f71a552662800c` (as recorded); E3m FAIL `["windmill"]` (unchanged) |
+| RUN-3-GB10-20261011T045450Z, scratch copy | `verdict_id 9ca9b7af6f9255fc7247acae33492768252d5f2017b40c29c159e04fbca833d5` (as recorded); E3m PASS under its `d4_rule`; the E3m disagreement is gone; the CTRL-E4 disagreement stays |
+| RUN-3 copy with `d4_rule` removed, links and manifest repaired | chain unbroken, E3m FAIL `windmill` (exact rule) |
+| RUN-3 copy with an unknown `d4_rule`, repaired | E3m NOT_RUN naming the unknown rule |
+
+`runs/` was not modified (the test's tree digest before and after is equal). The recorded `VERIFIER_VERDICT.txt` files keep
+the text the older verifier wrote; they are evidence of that run and are not regenerated.

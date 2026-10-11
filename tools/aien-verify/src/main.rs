@@ -622,6 +622,22 @@ fn required_names(ctx: &Ctx, step: &str) -> Vec<String> {
     }
 }
 
+/// The E3m D4 rule of ACCEPTANCE-v1.3.1-e3m.md, as the harness writes it into the E3m receipt's `d4_rule`.
+const D4_RULE_V131: &str = "case-insensitive whole word: LC_ALL=C grep -q -i -w (ACCEPTANCE-v1.3.1-e3m.md)";
+
+/// GNU `grep -i -w` under `LC_ALL=C`: `word` occurs in `text` in any ASCII letter case with no ASCII letter, digit or
+/// underscore directly before or after that occurrence (VERIFIER-v1.1-e3m.md).
+fn contains_word_ci(text: &str, word: &str) -> bool {
+    let (t, w) = (text.as_bytes(), word.as_bytes());
+    if w.is_empty() || w.len() > t.len() {
+        return false;
+    }
+    let wc = |c: u8| c.is_ascii_alphanumeric() || c == b'_';
+    (0..=t.len() - w.len()).any(|i| {
+        t[i..i + w.len()].eq_ignore_ascii_case(w) && (i == 0 || !wc(t[i - 1])) && (i + w.len() == t.len() || !wc(t[i + w.len()]))
+    })
+}
+
 fn base(p: &str) -> &str {
     p.rsplit('/').next().unwrap_or(p)
 }
@@ -675,7 +691,14 @@ fn doc_row(ctx: &Ctx, step: &str) -> Row {
     if names.is_empty() {
         return row(step, V::NotRun, "no required names or topics can be read from the receipts");
     }
-    let missing: Vec<&String> = names.iter().filter(|n| !text.contains(n.as_str())).collect();
+    // D4: E3m topic words follow the rule its receipt was judged under (VERIFIER-v1.1-e3m.md); E3 file names stay exact.
+    let whole_word = match (step, j.s("d4_rule")) {
+        ("E3m", Some(D4_RULE_V131)) => true,
+        ("E3m", Some(other)) => return row(step, V::NotRun, format!("unknown d4_rule {:?} in the receipt", other)),
+        _ => false,
+    };
+    let missing: Vec<&String> =
+        names.iter().filter(|n| if whole_word { !contains_word_ci(&text, n) } else { !text.contains(n.as_str()) }).collect();
     if !missing.is_empty() {
         failed.push(format!("D4 required name(s) missing: {:?}", missing));
     }
@@ -1201,6 +1224,17 @@ mod tests {
     #[test]
     fn sha256_vectors() {
         selftest().unwrap();
+    }
+    #[test]
+    fn whole_word_ci_is_grep_i_w() {
+        for yes in ["# Windmill\n", "WINDMILL", "the windmill.", "windmill,", "windmill's", "a windmill", "x-windmill"] {
+            assert!(contains_word_ci(yes, "windmill"), "{yes:?}");
+        }
+        for no in ["windmills", "windmill_x", "wind-mill", "awindmill", "windmill9", "", "windmil"] {
+            assert!(!contains_word_ci(no, "windmill"), "{no:?}");
+        }
+        assert!(contains_word_ci("windmills and a Windmill", "windmill"), "a later occurrence counts");
+        assert!(contains_word_ci("caf\u{e9} windmill", "windmill"));
     }
     #[test]
     fn topics() {
