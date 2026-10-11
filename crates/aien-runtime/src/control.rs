@@ -228,6 +228,12 @@ pub enum ControlCommand {
         /// Required only when the daemon runs with the desk switch ON.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         desk_proof: Option<DeskProof>,
+        /// sovereign-core #408: the objective record this approval is for
+        /// (`compose propose --objective-id`). Optional on the wire; `None` is
+        /// not written and mints exactly as before. When given, the daemon
+        /// re-reads the record and binds the grant to it, or refuses by name.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        objective_id: Option<String>,
     },
     /// NEXT-PHASE-2: operator `stop`, `resume`, `revoke` (ACCEPTANCE-v2 2.5, 2.6).
     ComposeControl {
@@ -871,6 +877,27 @@ pub struct ReconcileOutcome {
     pub record: Option<u64>,
     /// Who decided, or why nothing was decided.
     pub note: String,
+    /// sovereign-core #408: for an intent on an objective-bound grant, what
+    /// re-reading the objective record found. Absent for every other intent
+    /// (and in reports written before #408).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub objective: Option<ObjectiveBinding>,
+}
+
+/// sovereign-core #408: an effect's objective as one reconcile re-read it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ObjectiveBinding {
+    pub objective_id: String,
+    /// `bound` (the record exists and holds the approved text), or the
+    /// refusal name: `ObjectiveMissing`, `ObjectiveMismatch`.
+    pub record: String,
+    /// Why, when not `bound`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+    /// When `bound`: whether the record file is byte-for-byte the one the
+    /// grant was approved against (false: re-recorded with the same text).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub record_unchanged: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

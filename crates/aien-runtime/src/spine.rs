@@ -2657,6 +2657,7 @@ impl ComposeBridge {
                 &hex(&Sha256::digest(text.as_bytes())),
                 &p.path,
                 &hex(&Sha256::digest(p.content.as_bytes())),
+                Some(&hex(&Sha256::digest(goal.as_bytes()))),
                 &prov,
             )
             .map_err(|e| {

@@ -202,6 +202,18 @@ fn read_report(path: &str) -> Result<ComposeTaskReport, String> {
     serde_json::from_value(r).map_err(|e| format!("{path}: not a compose report: {e}"))
 }
 
+/// sovereign-core #408: the `objective_id` that `compose propose
+/// --objective-id` put beside the report (absent: the approval names none).
+fn report_objective_id(path: &str) -> Result<Option<String>, String> {
+    let bytes = std::fs::read(path).map_err(|e| format!("read {path}: {e}"))?;
+    let v: Value = serde_json::from_slice(&bytes).map_err(|e| format!("{path}: {e}"))?;
+    match v.get("objective_id") {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(s)) => Ok(Some(s.clone())),
+        Some(_) => Err(format!("{path}: objective_id is not a string")),
+    }
+}
+
 /// The committed proposal of an S3 report, re-parsed and re-hashed here.
 fn committed_proposal(r: &ComposeTaskReport) -> Result<(String, String, String), String> {
     if !r.committed {
@@ -382,6 +394,9 @@ async fn step(sub: &str, m: &HashMap<String, String>) -> Result<Value, String> {
                     _ => None,
                 }
             };
+            // sovereign-core #408: the objective `compose propose --objective-id`
+            // attached; the daemon re-reads that record and binds the grant to it.
+            let objective_id = report_objective_id(need(m, "report")?)?;
             let n = match send(ControlCommand::ComposeAuthorize {
                 cx_promotion: r.cx_promotion,
                 proposal_sha256: psha.clone(),
@@ -389,6 +404,7 @@ async fn step(sub: &str, m: &HashMap<String, String>) -> Result<Value, String> {
                 approver: approver.to_string(),
                 constraints: constraints.clone(),
                 desk_proof,
+                objective_id: objective_id.clone(),
             })
             .await?
             {
@@ -399,12 +415,19 @@ async fn step(sub: &str, m: &HashMap<String, String>) -> Result<Value, String> {
                 other => return Err(format!("unexpected response {other:?}")),
             };
             let tgt = target.display().to_string();
-            let args = json!({"proposal_sha256": psha, "path": path, "content_sha256": csha,
+            let mut args = json!({"proposal_sha256": psha, "path": path, "content_sha256": csha,
                 "approver": approver, "cx_promotion": r.cx_promotion, "target": tgt,
                 "constraints": constraints});
+            if let Some(o) = &objective_id {
+                args["objective_id"] = json!(o);
+            }
             let result = json!({"approved": true, "target": tgt, "authorization": n["id"]});
             let rc = receipt("authorize", &args, &result, true)?;
-            Ok(json!({"step": "S4", "receipt": rc, "authorization": n, "approvals": 1}))
+            let mut out = json!({"step": "S4", "receipt": rc, "authorization": n, "approvals": 1});
+            if let Some(o) = objective_id {
+                out["objective_id"] = json!(o);
+            }
+            Ok(out)
         }
         "execute" => {
             let r = read_report(need(m, "report")?)?;
@@ -458,13 +481,19 @@ async fn step(sub: &str, m: &HashMap<String, String>) -> Result<Value, String> {
                 reported: reported.clone(),
             })
             .await;
+            // sc#408: the ack record names the objective of an objective-bound grant.
+            let mut objective: Option<String> = None;
             let (state, ack_id, ack_err) = match &ack {
                 Ok(ControlResponse::ComposeNoted(n)) => {
                     let rec = recall(vec![n.id], None).await.ok();
-                    let st = rec
+                    let v = rec
                         .and_then(|r| r.cited.into_iter().next())
                         .and_then(|c| c.text)
-                        .and_then(|t| serde_json::from_str::<Value>(&t).ok())
+                        .and_then(|t| serde_json::from_str::<Value>(&t).ok());
+                    objective = v
+                        .as_ref()
+                        .and_then(|v| v["objective_id"].as_str().map(str::to_string));
+                    let st = v
                         .and_then(|v| v["state"].as_str().map(str::to_string))
                         .unwrap_or_else(|| "UNRESOLVED".into());
                     (st, Some(n.id), None)
@@ -473,15 +502,21 @@ async fn step(sub: &str, m: &HashMap<String, String>) -> Result<Value, String> {
                 Err(e) => ("UNRESOLVED".to_string(), None, Some(e.clone())),
             };
             let ok = state == "DONE";
-            let args = json!({"path": target.display().to_string(), "content_sha256": csha,
+            let mut args = json!({"path": target.display().to_string(), "content_sha256": csha,
                 "authorization": auth, "intent": intent.id});
+            if let Some(o) = &objective {
+                args["objective_id"] = json!(o);
+            }
             let result = json!({"bytes": bytes, "disk_sha256": disk_sha, "error": written.err(),
                 "state": state, "ack": ack_id, "ack_error": ack_err});
             let rc = receipt("write_file", &args, &result, ok)?;
-            let out = json!({"step": "S5", "receipt": rc, "intent": intent,
+            let mut out = json!({"step": "S5", "receipt": rc, "intent": intent,
                 "effect": {"id": ack_id}, "state": state, "path": target.display().to_string(),
                 "content_sha256": csha, "disk_sha256": disk_sha, "bytes": bytes,
                 "ack_error": ack_err});
+            if let Some(o) = objective {
+                out["objective_id"] = json!(o);
+            }
             // handle_compose_command turns a state other than DONE into
             // "ok": false (exit 3 for UNRESOLVED, 1 otherwise).
             Ok(out)

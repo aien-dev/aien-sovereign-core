@@ -273,6 +273,7 @@ async fn ordinary_flow(d: &Daemon) -> Flow {
                 "NOTES.md",
                 &sha(CONTENT.as_bytes()),
             ),
+            objective_id: None,
         })
         .await,
         "authorize",
@@ -476,6 +477,7 @@ async fn an_old_ledger_without_provenance_still_opens_and_runs() {
             approver: "drake".into(),
             constraints: vec![],
             desk_proof: d.desk(777, &sha(b"old proposal"), "OLD.md", &sha(b"old\n")),
+            objective_id: None,
         })
         .await,
         "authorize on an old commit",

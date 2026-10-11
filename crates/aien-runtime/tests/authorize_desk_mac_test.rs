@@ -387,6 +387,7 @@ fn the_wire_field_is_optional_and_old_clients_parse() {
         approver: "a".into(),
         constraints: vec![],
         desk_proof: None,
+        objective_id: None,
     };
     assert_eq!(serde_json::to_string(&none).unwrap(), old);
     // A new line with the proof round-trips.
@@ -400,6 +401,7 @@ fn the_wire_field_is_optional_and_old_clients_parse() {
             nonce: "n".into(),
             mac: "m".into(),
         }),
+        objective_id: None,
     };
     let s = serde_json::to_string(&with).unwrap();
     assert!(s.contains("desk_proof"));
