@@ -49,7 +49,8 @@ case "${1:-}" in
     verify; build cpu
     [ -e "$GOLDEN" ] && fail "golden file exists ($GOLDEN); delete it deliberately to re-record"
     T0=$(date +%s)
-    "$BIN" "$MODEL_DIR" cpu >"$OUT/cpu.json" 2>"$OUT/cpu.err" || fail "cpu leg exit $?, see $OUT/cpu.err"
+    "$BIN" "$MODEL_DIR" cpu >"$OUT/cpu.raw" 2>"$OUT/cpu.err" || fail "cpu leg exit $?, see $OUT/cpu.err"
+    grep "^{" "$OUT/cpu.raw" >"$OUT/cpu.json" || fail "no JSON result line in $OUT/cpu.raw"
     echo "cpu leg wall seconds: $(( $(date +%s) - T0 ))"
     jq -e '(.leg=="cpu") and (.prompts|length==2) and (all(.prompts[]; .output_ids|length>0)) and (.prompts[1].output_ids|length>=16) and (.fallback_count==0)' "$OUT/cpu.json" >/dev/null || fail "cpu result not well formed"
     jq '{golden_for:"SMOKE-8B-v1", source:"CPU reference leg", prompts:[.prompts[]|{name,prompt_sha256,prompt_ids,output_ids,reply}]}' "$OUT/cpu.json" >"$GOLDEN"
@@ -63,7 +64,8 @@ case "${1:-}" in
     pgrep -f whole_system_e2e.sh >/dev/null && fail "a whole-system run is live; the chip is not free"
     build gb10
     env -u AIEN_DEV_FALLBACK -u AIEN_OMEGA_CTA_BUDGET -u AIEN_OMEGA_SPIN_US AIEN_GPU_BACKEND=omega AIEN_REQUIRE_BLACKWELL=1 \
-      "$BIN" "$MODEL_DIR" gb10 >"$OUT/gb10.json" 2>"$OUT/gb10.err" || fail "gb10 leg exit $?, see $OUT/gb10.err"
+      "$BIN" "$MODEL_DIR" gb10 >"$OUT/gb10.raw" 2>"$OUT/gb10.err" || fail "gb10 leg exit $?, see $OUT/gb10.err"
+    grep "^{" "$OUT/gb10.raw" >"$OUT/gb10.json" || fail "no JSON result line in $OUT/gb10.raw (engine notes on stdout are kept there)"
     jq -e '.leg=="gb10"' "$OUT/gb10.json" >/dev/null || fail "gb10 result not well formed"
     [ "$(jq -c '[.prompts[]|[.name,.prompt_ids,.output_ids]]' "$OUT/gb10.json")" = "$(jq -c '[.prompts[]|[.name,.prompt_ids,.output_ids]]' "$GOLDEN")" ] || fail "prompt or output ids differ from the CPU golden (both prompts must be equal)"
     [ "$(jq .fallback_count "$OUT/gb10.json")" = 0 ] || fail "fallback_count is $(jq .fallback_count "$OUT/gb10.json"), not 0"
