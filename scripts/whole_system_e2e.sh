@@ -12,6 +12,10 @@
 # fallback_count, fallback_detected, pins, nvidia_driver and host_load to every receipt (ACCEPTANCE-v1.3-gb10.md).
 # v1.3.1: E3m topic words are matched case-insensitively as whole words; E3 file names stay exact
 # (ACCEPTANCE-v1.3.1-e3m.md); the gb10 run folder is RUN-3-GB10-<utc>.
+# v1.4: WSE2E_ARTIFACT=<sovereign-OS-ARCH.tar.gz> installs the release artifact offline into the run's clean HOME (row E1), runs the whole chain on
+# the INSTALLED binaries, and adds the CTRL-E1 refused copies (ACCEPTANCE-v1.4-e1.md). ENGINEERING READINESS only for a dry-run-key install.
+# Without the variable nothing changes. Needs the archive's SHA256SUMS.txt and SHA256SUMS.txt.sig beside it; WSE2E_DRY_RUN_SIGNERS names the
+# signer file (default: dry-run-signers beside the archive, when present); WSE2E_RELEASE_TAG names the install (default e2e-artifact).
 #
 #   scripts/whole_system_e2e.sh run        build the CLI, run the chain E2..E6 + controls, write one run folder
 #   scripts/whole_system_e2e.sh check F    the document checks of rows E3/E3m on file F (prints failed ids)
@@ -110,6 +114,107 @@ gb10_receipt() {
       zero_cuda_gate_exit:$zc, daemon_strict_line:$sl, host_load:$hl, gb10_problems:$why}')
 }
 
+# ---- v1.4 (ACCEPTANCE-v1.4-e1.md): install from a release artifact (E1) and the refused copies (CTRL-E1) --------
+# ENGINEERING READINESS only: a dry-run-key install is never a public PASS. The functions take every input as an
+# argument so selftest can run them on a throwaway fixture release with no daemon.
+sha_of() { sha256sum "$1" | cut -d' ' -f1; }
+OFFLINE_ENV=(http_proxy=http://127.0.0.1:9 https_proxy=http://127.0.0.1:9 all_proxy=http://127.0.0.1:9
+             HTTP_PROXY=http://127.0.0.1:9 HTTPS_PROXY=http://127.0.0.1:9 ALL_PROXY=http://127.0.0.1:9)
+OFFLINE_METHOD="the only URL is file://; http(s)/all proxy variables point at a closed local port, so any network fetch would fail and show in the install log"
+# map_sig CLASS: the installer's signature class in the contract's vocabulary (release is written verified).
+map_sig() { case $1 in release) echo verified ;; *) echo "$1" ;; esac; }
+# run_installer INSTALLER ARCHIVE_DIR HOME SIGNERS TAG LOG: runs install.sh release mode in an empty environment; prints its exit status.
+run_installer() {
+  local inst=$1 adir=$2 h=$3 sg=$4 tag=$5 log=$6 sgv=()
+  [ -f "$sg" ] && sgv=(AIEN_DRY_RUN_SIGNERS="$sg")
+  mkdir -p "$h" "$h.tmp"
+  env -i PATH="$PATH" HOME="$h" TMPDIR="$h.tmp" LANG=C "${OFFLINE_ENV[@]}" AIEN_RELEASE_TAG="$tag" \
+    AIEN_RELEASE_BASE_URL="file://$adir" "${sgv[@]}" bash "$inst" >"$log" 2>&1
+  echo $?
+}
+# files_recheck RELEASE_DIR: "OK TOTAL": every [files] entry of release.toml re-hashed here, independently of the installer.
+files_recheck() {
+  local d=$1 ok=0 n=0 line f h
+  while IFS= read -r line; do
+    f=${line#\"}; f=${f%%\"*}; h=${line##* = \"}; h=${h%\"}
+    n=$((n + 1))
+    case $f in /*|*..*) continue ;; esac
+    [ "$(sha256sum "$d/$f" 2>/dev/null | cut -d' ' -f1)" = "$h" ] && ok=$((ok + 1))
+  done < <(awk '/^\[.*\]$/ { s = $0; next } s == "[files]" && NF' "$d/release.toml" 2>/dev/null)
+  echo "$ok $n"
+}
+INST_OK=0; INST_WHY=""; INST_JSON='{}'; INST_RC=""
+# install_artifact ARCHIVE HOME SIGNERS TAG WORK: the archive's own install.sh, run offline into HOME. Sets INST_OK (1/0),
+# INST_WHY (problems), INST_RC, INST_JSON (the E1 receipt fields). The log is $WORK/install-log.txt.
+install_artifact() {
+  local arc=$1 h=$2 sg=$3 tag=$4 w=$5 adir cfg rec id rel fo ft raw sc bs as pass dry
+  INST_OK=0; INST_WHY=""; INST_JSON='{}'; INST_RC=""
+  adir=$(cd "$(dirname "$arc")" && pwd); mkdir -p "$w/x"
+  tar -xzf "$arc" -C "$w/x" ./install.sh 2>"$w/tar.err" && [ -s "$w/x/install.sh" ] || { INST_WHY="no install.sh in the archive;"; return 1; }
+  cp "$w/x/install.sh" "$w/install.sh"
+  INST_RC=$(run_installer "$w/install.sh" "$adir" "$h" "$sg" "$tag" "$w/install-log.txt")
+  cfg=$h/.config/sovereign; rec=$cfg/install-receipt.json
+  [ "$INST_RC" = 0 ] || { INST_WHY="installer exit $INST_RC: $(grep -m1 '^Error:' "$w/install-log.txt" | cut -c1-200);"; return 1; }
+  [ -f "$rec" ] || { INST_WHY="no install-receipt.json;"; return 1; }
+  id=$(readlink "$cfg/releases/current"); rel=$cfg/releases/$id
+  read -r fo ft < <(files_recheck "$rel")
+  raw=$(jq -r '.signature_check // "none"' "$rec"); sc=$(map_sig "$raw")
+  bs=$(sha256sum "$h/.local/bin/aien" 2>/dev/null | cut -d' ' -f1); as=$(sha256sum "$arc" | cut -d' ' -f1)
+  [ "$sc" = verified ] || [ "$sc" = dry-run-key ] || INST_WHY="$INST_WHY signature_check '$raw' is outside the contract set;"
+  [ "$(jq -r '.artifact_sha256' "$rec")" = "$as" ] || INST_WHY="$INST_WHY receipt artifact_sha256 differs from the archive sha256;"
+  [ "$ft" -gt 0 ] && [ "$fo" = "$ft" ] && [ "$(jq -r '.files_verified' "$rec")" = "$ft" ] || INST_WHY="$INST_WHY files: recheck $fo of $ft, installer says $(jq -r '.files_verified' "$rec");"
+  [ -n "$bs" ] && [ "$bs" = "$(jq -r '.cli_sha256' "$rec")" ] && [ "$bs" = "$(jq -r '.daemon_sha256' "$rec")" ] || INST_WHY="$INST_WHY installed bin/aien sha256 is not the receipt cli_sha256 and daemon_sha256;"
+  dry=$(jq -c '.dry_run' "$rec"); pass=false; [ "$sc" = verified ] && [ "$dry" = false ] && pass=true
+  INST_JSON=$(jq -nc --slurpfile r "$rec" --arg sc "$sc" --arg raw "$raw" --arg bs "$bs" --arg as "$as" --arg fr "$fo of $ft" \
+    --arg rs "$(sha256sum "$rec" | cut -d' ' -f1)" --arg is "$(sha256sum "$w/install.sh" | cut -d' ' -f1)" --argjson rc "$INST_RC" \
+    --argjson pass "$pass" --arg om "$OFFLINE_METHOD" \
+    '$r[0] as $x | {artifact_sha256:$x.artifact_sha256, signature_check:$sc, signer:$x.signer_fingerprint, files_verified:$x.files_verified,
+      daemon_sha256:$x.daemon_sha256, cli_sha256:$x.cli_sha256, installer_signature_check:$raw, dry_run:$x.dry_run, candidate:$x.candidate,
+      tag:$x.tag, release_id:$x.release_id, install_receipt_sha256:$rs, installer_sha256:$is, install_exit:$rc,
+      install_log:"artifacts/install/install-log.txt", files_recheck:$fr, installed_binary:"home/.local/bin/aien", installed_binary_sha256:$bs,
+      archive_sha256_recomputed:$as, offline_method:$om, public_pass:$pass,
+      readiness_scope:(if $pass then "release artifact installed with the pinned public key" else "ENGINEERING READINESS only, not a public PASS" end)}')
+  INST_WHY=${INST_WHY# }; [ -z "$INST_WHY" ] && INST_OK=1
+  [ $INST_OK = 1 ]
+}
+C1_OK=0; C1_JSON='{}'
+# ctrl_e1_parts ARCHIVE SIGNERS WORK TAG [INSTALLER]: CTRL-E1 on three scratch copies (a: one archive byte changed, b: one byte of
+# SHA256SUMS.txt changed, c: signature removed), each into its own empty home. INSTALLER overrides the archive's install.sh (selftest only).
+ctrl_e1_parts() {
+  local arc=$1 sg=$2 w=$3 tag=$4 inst=${5:-} adir asset p d h file off bh ah rc line word ni ok parts='[]' mut='{}' all=1 reason=""
+  adir=$(cd "$(dirname "$arc")" && pwd); asset=$(basename "$arc"); mkdir -p "$w/x"
+  if [ -z "$inst" ]; then
+    tar -xzf "$arc" -C "$w/x" ./install.sh 2>/dev/null && [ -s "$w/x/install.sh" ] && inst=$w/x/install.sh || inst=/nonexistent-installer
+  fi
+  for p in a b c; do
+    d=$w/c1-$p/art; h=$w/c1-$p/home; mkdir -p "$d"
+    cp "$adir/$asset" "$adir/SHA256SUMS.txt" "$adir/SHA256SUMS.txt.sig" "$d/"
+    case $p in a) file=$asset; off=100 ;; b) file=SHA256SUMS.txt; off=0 ;; c) file=SHA256SUMS.txt.sig; off=-1 ;; esac
+    bh=""; ah=""
+    if [ $off -ge 0 ]; then
+      bh=$(od -An -tx1 -j$off -N1 "$d/$file" | tr -d ' \n'); ah=$([ "$bh" = 58 ] && echo 59 || echo 58)
+      printf "\\x$ah" | dd of="$d/$file" bs=1 seek=$off conv=notrunc 2>/dev/null
+      mut=$(jq -c --arg p "$p" --arg f "$file" --argjson o $off --arg b "$bh" --arg a "$ah" '. + {($p):{file:$f, offset:$o, before_byte_hex:$b, after_byte_hex:$a}}' <<<"$mut")
+    else rm -f "$d/$file"; mut=$(jq -c --arg p "$p" --arg f "$file" '. + {($p):{file:$f, removed:true}}' <<<"$mut"); fi
+    rc=$(run_installer "$inst" "$d" "$h" "$sg" "$tag" "$w/c1-$p/install-log.txt")
+    line=$(grep -m1 '^Error:' "$w/c1-$p/install-log.txt" | cut -c1-240)
+    word=$(printf '%s' "$line" | grep -o -i -E 'checksum|signature' | head -1 | tr 'A-Z' 'a-z')
+    ni=yes
+    [ ! -e "$h/.config/sovereign/releases" ] && [ ! -e "$h/.config/sovereign/installed.toml" ] && [ ! -e "$h/.config/sovereign/install-receipt.json" ] \
+      && [ -z "$(ls -A "$h/.local/bin" 2>/dev/null)" ] || ni=no
+    ok=0; [ "$rc" != 0 ] && [ -n "$word" ] && [ $ni = yes ] && ok=1
+    [ $ok = 1 ] || all=0
+    [ $p != a ] || reason=$line
+    parts=$(jq -c --arg p "$p" --argjson rc "$rc" --arg l "$line" --arg w "$word" --arg ni "$ni" --argjson ok "$ok" \
+      '. + [{part:$p, installer_exit:$rc, refusal_line:$l, names:$w, nothing_installed:($ni == "yes"), refused_correctly:($ok == 1)}]' <<<"$parts")
+  done
+  C1_JSON=$(jq -nc --argjson all "$all" --arg r "$reason" --argjson parts "$parts" --argjson mut "$mut" \
+    '{install_refused:($all == 1), refusal_reason:$r, nothing_installed:($parts | all(.nothing_installed)), mutation:$mut, parts:$parts,
+      parts_described:"a: one byte of the archive changed; b: one byte of SHA256SUMS.txt changed; c: SHA256SUMS.txt.sig removed"}')
+  C1_OK=$all
+  [ $C1_OK = 1 ]
+}
+
 selftest() {
   local t; t=$(mktemp -d); local rc=0
   printf '# Report\n\nabout alpha.txt, beta.txt and gamma.txt\n' >"$t/good.md"
@@ -172,6 +277,47 @@ selftest() {
   [ "$(fallback_lines "$t/logs"/daemon-*.txt)" = 2 ] || { echo "selftest: fallback lines not counted"; rc=1; }
   gb10_receipt NONE; [ "$(jq -c '[.fallback_count,.fallback_detected]' <<<"$G_JSON")" = '[2,true]' ] && [ -n "$G_WHY" ] || { echo "selftest: fallback not flagged $G_JSON"; rc=1; }
   ART=$sv_art; LOGS=$sv_logs; PROP_DN=(); GPU_SEEN_DN=""; GPU_SEEN_TOTAL=0; FALLBACK_SEEN=false
+  # v1.4 (ACCEPTANCE-v1.4-e1.md): E1 and CTRL-E1 on a throwaway signed fixture release (no daemon, no network).
+  [ "$(map_sig release)" = verified ] && [ "$(map_sig dry-run-key)" = dry-run-key ] && [ "$(map_sig internal-test-key)" = internal-test-key ] || { echo "selftest: map_sig wrong"; rc=1; }
+  if command -v ssh-keygen >/dev/null 2>&1; then
+    local fx=$t/fx os arch asset repo; repo=$(cd "$(dirname "$0")/.." && pwd)
+    case "$(uname -s)" in Darwin) os=macos ;; *) os=linux ;; esac
+    case "$(uname -m)" in x86_64|amd64) arch=x86_64 ;; *) arch=aarch64 ;; esac
+    [ "$os-$arch" != macos-aarch64 ] || arch=arm64
+    asset=sovereign-$os-$arch.tar.gz
+    mkdir -p "$fx/art" "$fx/pkg/bin"
+    ssh-keygen -q -t ed25519 -N '' -C test -f "$fx/key"; ssh-keygen -q -t ed25519 -N '' -C other -f "$fx/other"
+    printf 'aien-release %s\n' "$(cut -d' ' -f1,2 "$fx/key.pub")" >"$fx/signers"
+    printf 'aien-release %s\n' "$(cut -d' ' -f1,2 "$fx/other.pub")" >"$fx/wrong-signers"
+    printf '#!/bin/sh\necho fixture aien\n' >"$fx/pkg/bin/aien"; chmod 755 "$fx/pkg/bin/aien"; cp "$repo/install.sh" "$fx/pkg/install.sh"
+    { printf 'schema = "AienReleaseV1"\ncandidate = "NOT-RELEASABLE"\naien-cli-sha256 = "%s"\ndry-run = true\n\n[files]\n' "$(sha_of "$fx/pkg/bin/aien")"
+      for f in bin/aien install.sh; do printf '"%s" = "%s"\n' "$f" "$(sha_of "$fx/pkg/$f")"; done; } >"$fx/pkg/release.toml"
+    tar -czf "$fx/art/$asset" -C "$fx/pkg" . && ( cd "$fx/art" && sha256sum "$asset" >SHA256SUMS.txt ) \
+      && ssh-keygen -q -Y sign -f "$fx/key" -n aien-release "$fx/art/SHA256SUMS.txt" && [ -s "$fx/art/SHA256SUMS.txt.sig" ] || { echo "selftest: could not build the fixture release"; rc=1; }
+    mkdir -p "$fx/w1"
+    if install_artifact "$fx/art/$asset" "$fx/home1" "$fx/signers" fixture "$fx/w1"; then
+      [ "$(jq -r '[.signature_check, .files_recheck, .public_pass, .dry_run, (.readiness_scope | startswith("ENGINEERING READINESS only"))] | map(tostring) | join(",")' <<<"$INST_JSON")" = "dry-run-key,2 of 2,false,true,true" ] \
+        || { echo "selftest: E1 fields wrong: $INST_JSON"; rc=1; }
+      [ "$(jq -r '.artifact_sha256' <<<"$INST_JSON")" = "$(sha_of "$fx/art/$asset")" ] || { echo "selftest: E1 artifact_sha256 is not the archive's"; rc=1; }
+      # negative control: a file changed after the install is seen by the independent recheck
+      chmod u+w "$fx/home1/.config/sovereign/releases/current/bin/aien"; echo x >>"$fx/home1/.config/sovereign/releases/current/bin/aien"
+      [ "$(files_recheck "$fx/home1/.config/sovereign/releases/current")" = "1 2" ] || { echo "selftest: files_recheck did not see a changed installed file"; rc=1; }
+    else echo "selftest: fixture install failed: $INST_WHY"; rc=1; fi
+    mkdir -p "$fx/w2"   # negative control: a signer that did not sign it installs nothing and the row is not OK
+    ! install_artifact "$fx/art/$asset" "$fx/home2" "$fx/wrong-signers" fixture "$fx/w2" && [ "$INST_OK" = 0 ] && [ ! -e "$fx/home2/.local/bin/aien" ] \
+      || { echo "selftest: an install with the wrong signer was accepted"; rc=1; }
+    mkdir -p "$fx/w3"
+    if ctrl_e1_parts "$fx/art/$asset" "$fx/signers" "$fx/w3" fixture; then
+      [ "$(jq -r '[.install_refused, .nothing_installed, (.refusal_reason | test("checksum|signature"; "i")), (.parts | length)] | map(tostring) | join(",")' <<<"$C1_JSON")" = "true,true,true,3" ] \
+        || { echo "selftest: CTRL-E1 fields wrong: $C1_JSON"; rc=1; }
+      [ "$(jq -r '[.parts[].names] | join(",")' <<<"$C1_JSON")" = "checksum,signature,signature" ] || { echo "selftest: CTRL-E1 refusal words: $(jq -c '[.parts[].names]' <<<"$C1_JSON")"; rc=1; }
+    else echo "selftest: CTRL-E1 on the fixture did not pass: $C1_JSON"; rc=1; fi
+    # negative control for the control: an installer that accepts everything must make CTRL-E1 FAIL
+    printf '#!/bin/sh\nmkdir -p "$HOME/.config/sovereign/releases" "$HOME/.local/bin"; touch "$HOME/.local/bin/aien"; exit 0\n' >"$fx/accept-all.sh"
+    mkdir -p "$fx/w4"
+    ! ctrl_e1_parts "$fx/art/$asset" "$fx/signers" "$fx/w4" fixture "$fx/accept-all.sh" && [ "$(jq -r '.install_refused' <<<"$C1_JSON")" = false ] \
+      || { echo "selftest: CTRL-E1 passed against an installer that installs mutated artifacts"; rc=1; }
+  else echo "selftest: ssh-keygen is required for the install controls"; rc=1; fi
   rm -rf "$t"; [ $rc -eq 0 ] && echo "selftest PASS"; return $rc
 }
 case ${1:-} in
@@ -188,8 +334,10 @@ LIB=$JOB/tmp/librx_compose.a
 D=$JOB/tmp/e2e
 MODE=${WSE2E_BACKEND:-cpu}   # v1.3: cpu (default, v1.2 behaviour) or gb10 (ACCEPTANCE-v1.3-gb10.md)
 case $MODE in cpu|gb10) ;; *) echo "WSE2E_BACKEND must be cpu or gb10, not '$MODE'" >&2; exit 2 ;; esac
+ARTIFACT=${WSE2E_ARTIFACT:-}   # v1.4: install from a release artifact instead of building the system under test
 TGT=$D/target; RUN_NAME0=RUN-1
 [ "$MODE" = gb10 ] && { TGT=$D/target-gb10; RUN_NAME0=RUN-3-GB10; }
+[ -n "$ARTIFACT" ] && RUN_NAME0=RUN-4-INSTALL
 BIN=$TGT/release/aien-cli
 MDIR=${WSE2E_MODEL_DIR:-$(ls -d "$HOME"/.cache/huggingface/hub/models--unsloth--Llama-3.2-1B-Instruct/snapshots/*/ 2>/dev/null | head -1)}
 UTC0=$(date -u +%Y%m%dT%H%M%SZ)
@@ -197,7 +345,7 @@ OUT=${WSE2E_OUT:-$REPO/docs/campaigns/whole-system-e2e/runs/${WSE2E_RUN_NAME:-$R
 CONTRACT_SHA=9e3d5f4e23d65ac17be8f2f4ca48355f0aaa486f67ff5a8a8044dcdd646d34e8
 VER_SRC=$REPO/tools/aien-verify/src/main.rs; VER=$D/aien-verify
 for t in jq sha256sum ss hostname iconv; do command -v $t >/dev/null || { echo "need $t" >&2; exit 2; }; done
-[ "$MODE" = gb10 ] || [ -f "$LIB" ] || { echo "missing $LIB" >&2; exit 2; }   # gb10 builds the composition from its pin
+{ [ "$MODE" = gb10 ] && [ -z "$ARTIFACT" ]; } || [ -f "$LIB" ] || { echo "missing $LIB" >&2; exit 2; }   # gb10 builds the composition from its pin; artifact mode still builds the test-only ALLEN fixture subject from the CPU archive
 [ -n "$MDIR" ] && [ -f "$MDIR/model.safetensors" ] && [ -f "$MDIR/tokenizer.json" ] || { echo "model dir '$MDIR' lacks model.safetensors or tokenizer.json" >&2; exit 2; }
 QUIET=$HOME/workspace/.spark-quiet
 while [ -s "$QUIET" ]; do echo "quiet flag set; waiting"; sleep 30; done
@@ -206,7 +354,19 @@ DIRTY=$(git -C "$REPO" status --porcelain -- . ":!docs/campaigns/whole-system-e2
 COMMIT=$(git -C "$REPO" rev-parse HEAD)
 mkdir -p "$D"
 GPUX=(); PINS=""; PINS_JSON=null; NVDRV=""; ZC=""; STRICT_LINE=""
-if [ "$MODE" = gb10 ]; then
+if [ -n "$ARTIFACT" ]; then
+  # v1.4 (ACCEPTANCE-v1.4-e1.md): no build of the system under test; the installer provides the CLI and the daemon (installed after RUN is made).
+  ADIR=$(cd "$(dirname "$ARTIFACT")" 2>/dev/null && pwd); AASSET=$(basename "$ARTIFACT")
+  for f in "$AASSET" SHA256SUMS.txt SHA256SUMS.txt.sig; do [ -s "$ADIR/$f" ] || { echo "artifact mode: missing $ADIR/$f (the archive and its SHA256SUMS.txt and SHA256SUMS.txt.sig)" >&2; exit 2; }; done
+  RELTAG=${WSE2E_RELEASE_TAG:-e2e-artifact}
+  SIGNERS=${WSE2E_DRY_RUN_SIGNERS:-$ADIR/dry-run-signers}
+  PINS_JSON=null
+  if [ "$MODE" = gb10 ]; then   # the GB10 rules G2 to G5 apply to the installed daemon (the release build links the native engine)
+    NVDRV=$(head -1 /proc/driver/nvidia/version 2>/dev/null | tr -s ' ' | cut -c1-200)
+    [ -n "$NVDRV" ] || { echo "no /proc/driver/nvidia/version: no NVIDIA driver loaded" >&2; exit 2; }
+    GPUX=(env -u AIEN_DEV_FALLBACK -u AIEN_OMEGA_CTA_BUDGET -u AIEN_OMEGA_SPIN_US AIEN_GPU_BACKEND=omega AIEN_REQUIRE_BLACKWELL=1)
+  fi
+elif [ "$MODE" = gb10 ]; then
   # G1: the pinned GPU engine, as the sc#94 release golden path (sc#92, sc#375); env.sh sets AIEN_OMEGA_DIR and
   # AIEN_REQUIRE_NATIVE_LIBS=1 (a stub engine is a build error) and unsets AIEN_DEV_FALLBACK and the archive overrides.
   PINS=$D/pins
@@ -235,7 +395,7 @@ fi
 [ -f "$VER_SRC" ] || { echo "missing $VER_SRC (the verifier, sc#389)" >&2; exit 2; }
 sh "$REPO/tools/aien-verify/build.sh" "$VER" >"$D/verifier-build.log" 2>&1 || { echo "verifier build failed, see $D/verifier-build.log" >&2; exit 2; }
 VER_SHA=$(sha256sum "$VER" | cut -d' ' -f1); VER_SRC_SHA=$(sha256sum "$VER_SRC" | cut -d' ' -f1)
-BIN_SHA=$(sha256sum "$BIN" | cut -d' ' -f1)
+BIN_SHA=""; [ -n "$ARTIFACT" ] || BIN_SHA=$(sha256sum "$BIN" | cut -d' ' -f1)   # artifact mode: the installed file, after the install
 W_SHA=$(sha256sum "$(readlink -f "$MDIR/model.safetensors")" | cut -d' ' -f1)
 T_SHA=$(sha256sum "$(readlink -f "$MDIR/tokenizer.json")" | cut -d' ' -f1)
 C_W=$(sed -n 's/^model-safetensors-sha256 = "\(.*\)"/\1/p' "$REPO/release/candidate.toml")
@@ -257,6 +417,28 @@ cli() { "${E[@]}" "$BIN" "$@"; }
 sha_of() { sha256sum "$1" | cut -d' ' -f1; }
 tstat() { stat -c '%i %s %Y' "$1" 2>/dev/null || echo absent; }
 utc() { date -u +%Y-%m-%dT%H:%M:%SZ; }
+
+# ---- v1.4 (ACCEPTANCE-v1.4-e1.md): E1 install from the release artifact, before any daemon ------------------------
+# The installed binary replaces the built one for every later step; its sha256 is the daemon_sha256 and cli_sha256 of every receipt.
+RCPT_EXTRA='{}'; E1_ST=FAIL; E1_EV=""; E1_FIELDS='{}'; ZC_ART=""
+if [ -n "$ARTIFACT" ]; then
+  mkdir -p "$ART/install"
+  install_artifact "$ARTIFACT" "$RUN/home" "$SIGNERS" "$RELTAG" "$RUN/install"; E1_INST_OK=$INST_OK
+  cp "$RUN/install/install-log.txt" "$ART/install/" 2>/dev/null
+  for f in SHA256SUMS.txt SHA256SUMS.txt.sig dry-run-signers DRY-RUN-NOT-A-RELEASE.txt "DRY-RUN-STATUS-"*.txt aien-cli-digests.txt; do
+    [ -f "$ADIR/$f" ] && cp "$ADIR/$f" "$ART/install/"; done
+  for f in install-receipt.json installed.toml; do cp "$RUN/home/.config/sovereign/$f" "$ART/install/" 2>/dev/null; done
+  cp "$RUN/home/.config/sovereign/releases/current/release.toml" "$ART/install/release.toml" 2>/dev/null
+  BIN=$RUN/home/.local/bin/aien
+  BIN_SHA=$(sha256sum "$BIN" 2>/dev/null | cut -d' ' -f1)
+  E1_FIELDS=$INST_JSON; E1_WHY=$INST_WHY
+  if [ "$MODE" = gb10 ] && [ -f "$BIN" ]; then   # the zero-CUDA gate on the installed binary
+    bash "$REPO/scripts/zero-cuda-gate.sh" "$(readlink -f "$BIN")" >"$ART/zero-cuda-gate.txt" 2>&1; ZC=$?
+    [ "$ZC" = 0 ] || E1_WHY="$E1_WHY zero-CUDA gate exit $ZC on the installed binary;"
+  fi
+  RCPT_EXTRA=$(jq -nc --arg a "$AASSET" --arg as "$(sha_of "$ARTIFACT")" --arg b "home/.local/bin/aien" --arg t "$RELTAG" \
+    '{installed_from_artifact:{archive:$a, archive_sha256:$as, binary:$b, tag:$t, scope:"ENGINEERING READINESS only for a dry-run-key install; never a public PASS"}}')
+fi
 
 # ---- the fixture and the identities ------------------------------------------------------------------------
 F1=harbour-notes.txt; F2=orchard-ledger.txt; F3=windmill-log.txt
@@ -290,10 +472,10 @@ rcpt() { # step status evidence [fields json]
   fi
   jq -n --arg oid "$OBJ_ID" --arg rid "$RUN_ID" --arg step "$1" --arg status "$st" --arg ev "$ev" --argjson fields "${4:-{\}}" \
     --arg utc "$(utc)" --arg prev "$PREV" --arg commit "$COMMIT" --arg bin "$BIN_SHA" --arg w "$W_SHA" --arg t "$T_SHA" \
-    --arg backend "${CUR_BACKEND:-no daemon started}" --arg host "$HOST" --argjson gx "$gx" \
+    --arg backend "${CUR_BACKEND:-no daemon started}" --arg host "$HOST" --argjson gx "$gx" --argjson rx "${RCPT_EXTRA:-{\}}" \
     '{objective_id:$oid, run_id:$rid, step:$step, status:$status, utc:$utc, prev_receipt_sha256:$prev, evidence:$ev,
       repo_commit:$commit, daemon_sha256:$bin, cli_sha256:$bin, model_weights_digest:$w, tokenizer_sha256:$t,
-      backend_line:$backend, host:$host} + $fields + $gx' >"$f"
+      backend_line:$backend, host:$host} + $fields + $gx + $rx' >"$f"
   PREV=$(sha_of "$f")
   case $1 in CTRL-*|E[0-9]*) ROWS="$ROWS$1 $st"$'\n' ;; esac
   echo "[$(date -u +%H:%M:%S)] $1 $st: $ev" | cut -c1-300 | tee -a "$OUT/console.txt"
@@ -326,7 +508,7 @@ ALLEN_REQUIRE=1; SUBJ=""; ALLEN_ADOPT=""; ALLEN_FP=""; ALLEN_LINE=""; SUBJ_N=0
 build_subject() { # lineage_hex: host-built fixture subject bound to record 1 of the current compose home (demo S1)
   SUBJ_N=$((SUBJ_N + 1)); SUBJ=$RUN/subject-$SUBJ_N.bin
   local fx
-  if [ "$MODE" = gb10 ]; then   # the same pinned environment and target as the daemon build (G1)
+  if [ "$MODE" = gb10 ] && [ -z "$ARTIFACT" ]; then   # the same pinned environment and target as the daemon build (G1)
     fx=$(cd "$REPO" && . "$PINS/env.sh" && env CARGO_TARGET_DIR="$TGT" \
       DEMO_SUBJECT_OUT="$SUBJ" DEMO_LINEAGE_HEX="$1" DEMO_SUBJECT_NAME="whole-system-e2e-$SUBJ_N" \
       cargo test --release -p aien-allen --test e2e_demo_subject -- --ignored --nocapture 2>&1)
@@ -415,8 +597,9 @@ cp "$REPO/docs/campaigns/whole-system-e2e/ACCEPTANCE-v1.2.md" "$OUT/ACCEPTANCE-v
 cp "$REPO/docs/campaigns/whole-system-e2e/ACCEPTANCE-v1.3.1-e3m.md" "$OUT/ACCEPTANCE-v1.3.1-e3m.as-run.md"
 if [ "$MODE" = gb10 ]; then   # v1.3: the gb10 rows as run, the zero-CUDA gate output and the pin log
   cp "$REPO/docs/campaigns/whole-system-e2e/ACCEPTANCE-v1.3-gb10.md" "$OUT/ACCEPTANCE-v1.3-gb10.as-run.md"
-  cp "$D/zero-cuda-gate.txt" "$ART/zero-cuda-gate.txt"; cp "$D/pins.txt" "$ART/pins.txt"
+  [ -n "$ARTIFACT" ] || { cp "$D/zero-cuda-gate.txt" "$ART/zero-cuda-gate.txt"; cp "$D/pins.txt" "$ART/pins.txt"; }   # artifact mode wrote its own gate output at the install
 fi
+[ -z "$ARTIFACT" ] || cp "$REPO/docs/campaigns/whole-system-e2e/ACCEPTANCE-v1.4-e1.md" "$OUT/ACCEPTANCE-v1.4-e1.as-run.md"
 FIX=$(cd "$WS/inbox" && sha256sum -- * | LC_ALL=C sort -k2 | jq -R -s 'split("\n") | map(select(length>0) | split("  ") | {name:.[1], sha256:.[0]})')
 PRE_OK=1; PRE_EV="host $HOST; model $C_ID"
 [ "$W_SHA" = "$C_W" ] && [ "$T_SHA" = "$C_T" ] || { PRE_OK=0; PRE_EV="$PRE_EV; model digests differ from release/candidate.toml"; }
@@ -446,7 +629,14 @@ if [ "$NK_RC" != killed ] && [ "$NK_RC" != 0 ] && [ -n "$NK_LINE" ]; then
 else
   rcpt CTRL-E3a FAIL "daemon without a desk key: exit '$NK_RC', desk line '$NK_LINE'" "$(jq -nc --arg rc "$NK_RC" --arg l "$NK_LINE" '{exit:$rc, log_line:$l}')"
 fi
+if [ -n "$ARTIFACT" ]; then   # v1.4: the install happened before the daemon; this is its receipt (ACCEPTANCE-v1.4-e1.md)
+  [ -z "$ABORT" ] || E1_WHY="$E1_WHY the daemon did not start from the installed binary;"
+  [ "$E1_FIELDS" != '{}' ] || E1_FIELDS=$(jq -nc --argjson rc "${INST_RC:-null}" '{signature_check:"none", artifact_sha256:null, install_exit:$rc, install_log:"artifacts/install/install-log.txt", public_pass:false, readiness_scope:"ENGINEERING READINESS only, not a public PASS"}')
+  E1_WHY=${E1_WHY# }; E1_ST=FAIL; [ "${E1_INST_OK:-0}" = 1 ] && [ -z "$E1_WHY" ] && [ -z "$ABORT" ] && E1_ST=PASS
+  rcpt E1 $E1_ST "offline install of $AASSET (offline: $OFFLINE_METHOD): signature_check $(jq -r '.signature_check' <<<"$E1_FIELDS"), files recheck $(jq -r '.files_recheck // "none"' <<<"$E1_FIELDS"), installed bin/aien sha256 ${BIN_SHA:-none}, daemon up=$([ -z "$ABORT" ] && echo yes || echo no); problems [${E1_WHY:-none}]; ENGINEERING READINESS only, not a public PASS unless signature_check is verified" "$E1_FIELDS"
+else
 rcpt E1 NOT_RUN "RUN-1 runs from a release build of this tree; nothing installed; RUN-3 measures E1" '{"signature_check":"none","artifact_sha256":null}'
+fi
 
 # ---- E2: the installation records the objective before any work (v1.2, sc#388) -----------------------------
 cli objective record --text "$OBJ" >"$ART/E2-objective-record.json" 2>"$ART/E2-objective-record.err"; E2_RC=$?
@@ -653,7 +843,13 @@ else rcpt CTRL-E4 NOT_RUN "E3m did not pass or no daemon" '{}'; fi
 # ---- E5 and the rows that belong to other runs --------------------------------------------------------------
 rcpt E5 NOT_RUN "cross-machine agreement is R7 (second machine); this machine's verifier (tools/aien-verify, sc#389) runs over the closed chain after this receipt and writes VERIFIER_VERDICT.txt and VERIFIER_RECEIPT.json outside the manifest" \
   "$(jq -nc --arg v "$VER_SHA" --arg s "$VER_SRC_SHA" --arg c "$CONTRACT_SHA" '{verifier_sha256:$v, verifier_source_sha256:$s, verifier_build:"sh tools/aien-verify/build.sh (rustc --edition 2021 -O, std only)", contract_sha256:$c, cross_machine:"NOT_RUN (R7)"}')"
+if [ -n "$ARTIFACT" ]; then   # v1.4: three refused copies of the artifact, each into an empty home (ACCEPTANCE-v1.4-e1.md)
+  mkdir -p "$RUN/ctrl-e1" "$ART/ctrl-e1"; ctrl_e1_parts "$ARTIFACT" "$SIGNERS" "$RUN/ctrl-e1" "$RELTAG"
+  for p in a b c; do cp "$RUN/ctrl-e1/c1-$p/install-log.txt" "$ART/ctrl-e1/install-log-$p.txt" 2>/dev/null; done
+  rcpt CTRL-E1 "$([ "$C1_OK" = 1 ] && echo PASS || echo FAIL)" "copies of the artifact: $(jq -r '[.parts[] | "\(.part): exit \(.installer_exit), names \(.names), nothing installed \(.nothing_installed)"] | join("; ")' <<<"$C1_JSON"); refusal: $(jq -r '.refusal_reason' <<<"$C1_JSON" | cut -c1-160)" "$C1_JSON"
+else
 rcpt CTRL-E1 NOT_RUN "no release artifact in RUN-1 (lane L5)" '{}'
+fi
 stop_graceful
 cp "$LOGS"/daemon-*.txt "$OUT/artifacts/" 2>/dev/null
 # ---- close the chain, run the verifier, then CTRL-E5 (ACCEPTANCE-v1.3-ctrl-e5.md) -----------------------------
