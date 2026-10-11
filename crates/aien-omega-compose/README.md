@@ -25,7 +25,7 @@ cargo test -p aien-omega-compose
 | `AIEN_PHYSICS_DIR` | physics checkout at omega's `physics.lock` (default `<omega>/../physics`) |
 | `AIEN_AIENOS_LOCK_REPO` | aienos clone holding omega's `aienos.lock` commit (passed as `AIENOS_LOCK_REPO`) |
 | `AIEN_OMEGA_COMPOSE_LIB` | link a prebuilt `librx_compose.a` instead (not sha-checked) |
-| `AIEN_FORCE_CPU_STUB=1` | stub: every call returns `ComposeError::Unavailable` |
+| `AIEN_FORCE_CPU_STUB=1` | stub: every call returns `ComposeError::Unavailable` (build time only; for a CPU-only run use `AIEN_BACKEND=cpu`, which makes the daemon refuse a GPU build) |
 
 With no checkout and no library set the crate builds the stub and prints a warning.
 Use `AIEN_OMEGA_COMPOSE_DIR` together with `AIEN_OMEGA_COMPOSE_SHA`, so an override

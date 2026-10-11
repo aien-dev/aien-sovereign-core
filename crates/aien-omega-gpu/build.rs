@@ -1,7 +1,9 @@
 //! Links `libomega_gpu.a` from the omega commit pinned in `omega.lock`.
 //!
 //! Offline by design: nothing is downloaded and no CUDA/nvcc is used. Order:
-//!   1. `AIEN_FORCE_CPU_STUB=1`      -> stub (CI without the chip).
+//!   1. `AIEN_FORCE_CPU_STUB=1`      -> stub (CI without the chip). BUILD-TIME ONLY: a binary already
+//!      built with the GPU library ignores it at run time. For a CPU-only RUN set `AIEN_BACKEND=cpu`:
+//!      the daemon refuses to start (`CPU_ONLY_BUT_GPU_BUILD`) if the binary would select the GB10 backend.
 //!   2. `AIEN_OMEGA_GPU_LIB=<file>`  -> link that prebuilt archive (not sha-checked).
 //!   3. `AIEN_OMEGA_DIR=<checkout>`  -> its HEAD must equal omega.lock; built with
 //!      `make libomega_gpu` into OUT_DIR. `AIEN_PHYSICS_DIR` (default `<omega>/../physics`)
