@@ -291,11 +291,29 @@ impl std::fmt::Display for DestinationError {
     }
 }
 
+/// A path with its leading `./` segments removed, and nothing else changed
+/// (sc#402): `./report.md` and `report.md` name the same workspace file, so a
+/// path that enters from text (a goal word, a reply's `filename:` line) is
+/// read in its bare form. Inner `./` segments, `..`, absolute paths, `~`,
+/// empty results and every other form are left exactly as written, so the
+/// strict checks that follow (`spine::check_relative_path`,
+/// `effects::confine_shape`) refuse them as before. The one shared reading.
+pub fn strip_leading_curdir(path: &str) -> &str {
+    let mut p = path;
+    while let Some(rest) = p.strip_prefix("./") {
+        p = rest;
+    }
+    p
+}
+
 fn clean(w: &str) -> &str {
     const Q: fn(char) -> bool = |c| matches!(c, '"' | '\'' | '`' | '(' | ')' | '[' | ']');
-    w.trim_matches(Q)
-        .trim_end_matches(['.', ',', ';', ':', '!', '?'])
-        .trim_matches(Q)
+    // sc#402: a leading `./` is dropped once quotes and punctuation are gone.
+    strip_leading_curdir(
+        w.trim_matches(Q)
+            .trim_end_matches(['.', ',', ';', ':', '!', '?'])
+            .trim_matches(Q),
+    )
 }
 
 fn has_extension(w: &str) -> bool {
@@ -890,5 +908,34 @@ mod tests {
         );
         assert_eq!(d("Edit /etc/passwd"), Ok(Some("/etc/passwd".into())));
         assert_eq!(d("Edit ~/secret.txt"), Ok(Some("~/secret.txt".into())));
+    }
+}
+
+/// sc#402: a goal that writes `./report.md` names `report.md`; unsafe forms
+/// keep their old reading (and are refused downstream as before).
+#[cfg(test)]
+mod dotslash_tests {
+    use super::*;
+
+    #[test]
+    fn strip_leading_curdir_removes_only_leading_dot_slash() {
+        assert_eq!(strip_leading_curdir("./report.md"), "report.md");
+        assert_eq!(strip_leading_curdir("././a/b.md"), "a/b.md");
+        assert_eq!(strip_leading_curdir("a/./b"), "a/./b");
+        assert_eq!(strip_leading_curdir("./../x"), "../x");
+        assert_eq!(strip_leading_curdir(".//x"), "/x");
+        assert_eq!(strip_leading_curdir("./"), "");
+        assert_eq!(strip_leading_curdir("."), ".");
+        assert_eq!(strip_leading_curdir(""), "");
+        assert_eq!(strip_leading_curdir("../x"), "../x");
+        assert_eq!(strip_leading_curdir(".hidden"), ".hidden");
+    }
+
+    #[test]
+    fn a_goal_naming_dot_slash_names_the_bare_path() {
+        let d = |g: &str| named_destination(g, &|_| false);
+        assert_eq!(d("Edit ./report.md"), Ok(Some("report.md".into())));
+        assert_eq!(d("Write ././docs/a.md"), Ok(Some("docs/a.md".into())));
+        assert_eq!(d("Edit ./../x.md"), Ok(Some("../x.md".into())));
     }
 }

@@ -810,7 +810,8 @@ fn outer_fence_close(body: &[&str], open_len: usize) -> Option<usize> {
 
 /// The model's answer in the fixed proposal template: the first nonempty
 /// line is `filename: <relative path>` (case-insensitive key; quotes,
-/// backticks and asterisks around it or the path are ignored), everything
+/// backticks and asterisks around it or the path are ignored, and so are leading
+/// `./` segments of the path, sc#402), everything
 /// after it is the complete content (blank lines around it and one
 /// surrounding code fence are dropped; it ends with one newline).
 /// Err names why the reply is refused. Deterministic: the Skill, the AEGIS
@@ -826,7 +827,8 @@ pub fn check_file_proposal(text: &str) -> Result<FileProposal, String> {
     if first.len() < KEY.len() || !first[..KEY.len()].eq_ignore_ascii_case(KEY) {
         return Err("no filename line: the first line must be 'filename: <relative path>'".into());
     }
-    let path = bare(&first[KEY.len()..]).to_string();
+    // sc#402: `./report.md` is `report.md`; the strict check then runs as before.
+    let path = crate::destination::strip_leading_curdir(bare(&first[KEY.len()..])).to_string();
     check_relative_path(&path)?;
     let mut body: Vec<&str> = lines[at + 1..].to_vec();
     while body.first().is_some_and(|l| l.trim().is_empty()) {
@@ -3450,5 +3452,53 @@ mod append_placement_tests {
         assert!(!at_end("Add a line under the heading of report.md"));
         assert!(!at_end("Write the appendix"));
         assert!(!at_end("The appended line"));
+    }
+}
+
+/// sc#402 (RUN-3-GB10 E4): a leading `./` names the same workspace file as
+/// the bare relative path; every other unsafe or non-plain form stays refused.
+#[cfg(test)]
+mod dotslash_tests {
+    use super::*;
+
+    fn path_of(name: &str) -> Result<String, String> {
+        check_file_proposal(&format!("filename: {name}\n# Report\nbody\n")).map(|p| p.path)
+    }
+
+    #[test]
+    fn leading_dot_slash_names_the_bare_path() {
+        assert_eq!(path_of("./report.md"), Ok("report.md".into()));
+        assert_eq!(path_of("././a/b.md"), Ok("a/b.md".into()));
+        assert_eq!(path_of("`./report.md`"), Ok("report.md".into()));
+        assert_eq!(path_of("report.md"), Ok("report.md".into()));
+    }
+
+    #[test]
+    fn every_other_form_is_refused_as_before() {
+        for bad in [
+            "../x", "./../x", "/x", "a/../b", "a/./b", ".", "./", "~/x", ".//x", "a//b", "a\\b",
+        ] {
+            assert!(path_of(bad).is_err(), "{bad:?} must stay refused");
+        }
+        assert!(check_file_proposal("filename: \n# R\nbody\n").is_err());
+        assert!(
+            check_relative_path("./report.md").is_err(),
+            "the strict check stays strict"
+        );
+    }
+
+    #[test]
+    fn an_edit_reply_naming_dot_slash_merges_into_the_named_file() {
+        let prior = "# Report\n\nOne.\n";
+        let out = edit_proposal_placed(
+            "filename: ./report.md\n# Report\n\nOne.\nThe topic is harbours.\n",
+            Some(("report.md", prior)),
+            EditPlacement::for_goal("Append one line to report.md naming the topic."),
+        )
+        .unwrap();
+        assert_eq!(
+            out,
+            "filename: report.md\n# Report\n\nOne.\nThe topic is harbours.\n"
+        );
     }
 }
