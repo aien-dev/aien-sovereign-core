@@ -39,7 +39,11 @@ scripts/repro-build.sh -p aien-cli   # release build with machine-local paths re
 cargo run -p aien-scheduler --features max-yardstick --bin bench_inference_stack
 ```
 
-`install.sh` builds release binaries from source but performs no signature verification; signed releases are not yet available, so prefer building from a clone.
+Installing a release (state on 2026-10-11, from `install.sh` and the dry-run artifact of Actions run 38105672607, nothing else):
+
+- `install.sh` with no arguments builds from source and verifies no signature. With `AIEN_RELEASE_TAG=vX.Y.Z` it installs a published release instead: it downloads the archive, `SHA256SUMS.txt` and `SHA256SUMS.txt.sig`, checks the signature with `ssh-keygen`, then the archive checksum, and writes `install-receipt.json` with a `signature_check` of `release`, `internal-test-key` or `dry-run-key` (see [docs/release/RELEASE_SIGNING.md](docs/release/RELEASE_SIGNING.md)).
+- No public release exists. The public release key is not pinned yet (`AIEN_RELEASE_SIGNER` is empty until the key ceremony in [docs/release/KEY_CEREMONY.md](docs/release/KEY_CEREMONY.md)), so nothing can install as `release`. v0.1.0 and v0.1.1 are internal test releases. The release gate (`scripts/check-release-candidate.sh`) fails on current main (omega.lock differs from the CAND-4 manifest), see [#414](https://github.com/aien-dev/aien-sovereign-core/issues/414).
+- After a release install, the daemon refuses to start until an approval desk key exists: run `aien compose desk-key --create 1` first. `aien objective record --text "..."` then records an objective; the record is written under `$AIEN_PROVENANCE_DIR/objectives`, which defaults to `/tmp/aien-provenance`, so set `AIEN_PROVENANCE_DIR` to keep records across reboots. The installer does not provision a model (the harness sets `AIEN_MODEL_PATH`); `aien harness` is not usable from a release install (it calls `spark-harness check`, which is not shipped).
 
 ## Contributing
 
