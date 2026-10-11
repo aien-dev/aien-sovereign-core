@@ -8,14 +8,17 @@
 #
 # Pinned sibling sources: the hosted jobs check out omega at omega.lock, physics and aienos at
 # omega's own locks, and aien-protocols at two fixed commits (TRN1 and CRB1 vector corpora).
-# Here the same commits are materialised under target-pins/ (gitignored by /target-*/) from
+# Here the same commits are materialised under $CARGO_TARGET_DIR/aien-pins (default target/aien-pins) from
 # the sibling local clones ../omega ../physics ../aienos ../aien-protocols, offline.
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT"
 step="${1:?usage: tests/gates/run.sh <step>}"
 obs() { printf 'AIEN-OBS %s %s\n' "$1" "$2"; }
-PINS="$ROOT/target-pins"
+# Outside the worktree when CARGO_TARGET_DIR is, and under target/ otherwise: the hosted test job
+# has no pin checkouts in its tree, and test_t2_f65 scans the tree (minus target/) for *.pem files,
+# which the vendored crates of a pinned aienos ship as test fixtures.
+PINS="${CARGO_TARGET_DIR:-$ROOT/target}/aien-pins"
 TARGET="${CARGO_TARGET_DIR:-$ROOT/target}"
 
 pin() {  # pin <dir-name> <sibling repo> <sha40>
