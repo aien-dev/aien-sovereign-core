@@ -892,3 +892,32 @@ mod tests {
         assert_eq!(d("Edit ~/secret.txt"), Ok(Some("~/secret.txt".into())));
     }
 }
+
+/// sc#402: a goal that writes `./report.md` names `report.md`; unsafe forms
+/// keep their old reading (and are refused downstream as before).
+#[cfg(test)]
+mod dotslash_tests {
+    use super::*;
+
+    #[test]
+    fn strip_leading_curdir_removes_only_leading_dot_slash() {
+        assert_eq!(strip_leading_curdir("./report.md"), "report.md");
+        assert_eq!(strip_leading_curdir("././a/b.md"), "a/b.md");
+        assert_eq!(strip_leading_curdir("a/./b"), "a/./b");
+        assert_eq!(strip_leading_curdir("./../x"), "../x");
+        assert_eq!(strip_leading_curdir(".//x"), "/x");
+        assert_eq!(strip_leading_curdir("./"), "");
+        assert_eq!(strip_leading_curdir("."), ".");
+        assert_eq!(strip_leading_curdir(""), "");
+        assert_eq!(strip_leading_curdir("../x"), "../x");
+        assert_eq!(strip_leading_curdir(".hidden"), ".hidden");
+    }
+
+    #[test]
+    fn a_goal_naming_dot_slash_names_the_bare_path() {
+        let d = |g: &str| named_destination(g, &|_| false);
+        assert_eq!(d("Edit ./report.md"), Ok(Some("report.md".into())));
+        assert_eq!(d("Write ././docs/a.md"), Ok(Some("docs/a.md".into())));
+        assert_eq!(d("Edit ./../x.md"), Ok(Some("../x.md".into())));
+    }
+}

@@ -3452,3 +3452,48 @@ mod append_placement_tests {
         assert!(!at_end("The appended line"));
     }
 }
+
+/// sc#402 (RUN-3-GB10 E4): a leading `./` names the same workspace file as
+/// the bare relative path; every other unsafe or non-plain form stays refused.
+#[cfg(test)]
+mod dotslash_tests {
+    use super::*;
+
+    fn path_of(name: &str) -> Result<String, String> {
+        check_file_proposal(&format!("filename: {name}\n# Report\nbody\n")).map(|p| p.path)
+    }
+
+    #[test]
+    fn leading_dot_slash_names_the_bare_path() {
+        assert_eq!(path_of("./report.md"), Ok("report.md".into()));
+        assert_eq!(path_of("././a/b.md"), Ok("a/b.md".into()));
+        assert_eq!(path_of("`./report.md`"), Ok("report.md".into()));
+        assert_eq!(path_of("report.md"), Ok("report.md".into()));
+    }
+
+    #[test]
+    fn every_other_form_is_refused_as_before() {
+        for bad in [
+            "../x", "./../x", "/x", "a/../b", "a/./b", ".", "./", "~/x", ".//x", "a//b", "a\\b",
+        ] {
+            assert!(path_of(bad).is_err(), "{bad:?} must stay refused");
+        }
+        assert!(check_file_proposal("filename: \n# R\nbody\n").is_err());
+        assert!(check_relative_path("./report.md").is_err(), "the strict check stays strict");
+    }
+
+    #[test]
+    fn an_edit_reply_naming_dot_slash_merges_into_the_named_file() {
+        let prior = "# Report\n\nOne.\n";
+        let out = edit_proposal_placed(
+            "filename: ./report.md\n# Report\n\nOne.\nThe topic is harbours.\n",
+            Some(("report.md", prior)),
+            EditPlacement::for_goal("Append one line to report.md naming the topic."),
+        )
+        .unwrap();
+        assert_eq!(
+            out,
+            "filename: report.md\n# Report\n\nOne.\nThe topic is harbours.\n"
+        );
+    }
+}
