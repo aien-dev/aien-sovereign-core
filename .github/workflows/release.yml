@@ -65,7 +65,9 @@ jobs:
       - name: Read physics pin and checkout physics
         if: matrix.native_engine
         id: physpin
-        run: echo "physics=$(tr -d '[:space:]' < omega/physics.lock)" >> "$GITHUB_OUTPUT"
+        run: |
+          echo "physics=$(tr -d '[:space:]' < omega/physics.lock)" >> "$GITHUB_OUTPUT"
+          echo "aienos=$(tr -d '[:space:]' < omega/aienos.lock)" >> "$GITHUB_OUTPUT"
 
       - name: Checkout physics at omega's physics.lock
         if: matrix.native_engine
@@ -75,13 +77,22 @@ jobs:
           ref: ${{ steps.physpin.outputs.physics }}
           path: physics
 
+      # omega builds its aienos authority capability from the aienos commit pinned in omega/aienos.lock (as ci.yml does).
+      - name: Checkout aienos at omega's aienos.lock
+        if: matrix.native_engine
+        uses: actions/checkout@v4
+        with:
+          repository: aien-dev/aienos
+          ref: ${{ steps.physpin.outputs.aienos }}
+          path: aienos
+
       - name: Build the candidate way (scripts/repro-build.sh, fresh CARGO_HOME, no mojo)
         env:
           CARGO_HOME: ${{ runner.temp }}/cargo-home
         run: |
           if command -v mojo >/dev/null 2>&1; then echo "mojo is on PATH; the candidate build runs without it" >&2; exit 1; fi
           if [ "${{ matrix.native_engine }}" = "true" ]; then
-            export AIEN_OMEGA_DIR="$GITHUB_WORKSPACE/omega" AIEN_PHYSICS_DIR="$GITHUB_WORKSPACE/physics"
+            export AIEN_OMEGA_DIR="$GITHUB_WORKSPACE/omega" AIEN_PHYSICS_DIR="$GITHUB_WORKSPACE/physics" AIEN_AIENOS_LOCK_REPO="$GITHUB_WORKSPACE/aienos"
           fi
           rm -rf "$CARGO_HOME"
           cargo fetch --locked
