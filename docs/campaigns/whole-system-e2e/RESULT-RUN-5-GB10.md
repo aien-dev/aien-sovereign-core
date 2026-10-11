@@ -62,8 +62,8 @@ CTRL-E5 FAIL; E1, E5, CTRL-E1 NOT_RUN.
    (`prompt_ids_sha256` ede9f1e8... to 6847127a...), consistent with the extra `-a2` (`-a` and `2` are each one token in this vocabulary; UNVERIFIED that the path tokenizes that way), and
    greedy decoding then wrote a different 52-word report without the file names. The goal text, inputs (same sha256)
    and pins are the same as RUN-3. Confidence high; NOT re-run with the old folder to prove it (one declared attempt).
-2. So E3's pass in RUN-1 to RUN-3 depended on the workspace path text as well as on the goal: a 1B model's outcome on D4
-   is sensitive to an incidental two-token prompt change. That is the single remaining cause of this FAIL.
+2. So E3's D4 outcome depends on the workspace path text as well as on the goal: a 1B model's answer is sensitive
+   to an incidental two-token prompt change (one same-length folder change, RUN-1 to RUN-2, did not change the report). That is the single remaining cause of this FAIL.
 3. CTRL-E5 failed only because E3 had already failed: the control changes one byte of `E3-report.md`, which turns E3
    from FAIL (D4) into FAIL (DIGEST_MISMATCH), so the verdict id cannot change. The verifier did reject the copy and
    the chain did break. With E3 passing (RUN-3), the same control passed.
