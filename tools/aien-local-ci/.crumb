@@ -1,0 +1,6 @@
+{
+  "schema_version": "1.0.0",
+  "name": "aien-local-ci",
+  "layer": "infra",
+  "purpose": "Local CI sandbox exec contract (C8), aien-run user/caches install, Forgejo trigger hook, health and gc scripts (lane INFRA)"
+}

@@ -1,0 +1,108 @@
+#!/usr/bin/env bash
+# aien-run-exec: the C8 exec contract of the sovereign local pipeline (lane INFRA).
+#
+#   aien-run-exec --cwd DIR --timeout SECS --profile host|qemu|gb10 [--env K=V]... -- PROGRAM [ARGS...]
+#
+# Runs PROGRAM as the unprivileged system user `aien-run` with:
+#   * a cleared environment: only PATH, HOME, CARGO_HOME, RUSTUP_HOME, CARGO_TARGET_DIR (if given
+#     with --env) and the explicit --env pairs survive;
+#   * a fresh network namespace for host|qemu (no interfaces, no DNS, no loopback);
+#   * a transient systemd scope under aien-run.slice with cgroup caps (memory, pids, cpu) and a
+#     device policy (host|qemu: standard pseudo devices only, qemu adds /dev/kvm; gb10: all devices);
+#   * rlimits (no core dumps, bounded open files);
+#   * `timeout --signal=TERM --kill-after=10 SECS` for host|qemu (exit 124 on expiry);
+#   * NO timeout for gb10: chip runs are never killed; the engine's advisory timeout only marks the receipt.
+# stdout/stderr pass through. The exit code of PROGRAM passes through (124 = timeout, 137 = killed).
+# When the command finishes the whole scope is stopped, so a crashed check leaves no stray processes.
+#
+# Optional extensions (not required by C8, used by tests and the engine):
+#   --memory-max BYTES|NUM[KMG]   override the per-profile MemoryMax (tests use a small cap)
+#   --tasks-max N                 override TasksMax
+#   --cpu-quota PCT               override CPUQuota (percent, 100 = one core)
+#
+# Installed root-owned 0755 at /usr/local/sbin/aien-run-exec by tools/aien-local-ci/install.sh.
+# Invoked by the trusted side as: sudo -n /usr/local/sbin/aien-run-exec ... (see /etc/sudoers.d/aien-local-ci).
+set -euo pipefail
+
+RUN_USER=aien-run
+RUN_HOME=/var/lib/aien-run
+RUN_PATH=/var/lib/aien-run/cargo/bin:/usr/local/bin:/usr/bin:/bin
+SLICE=aien-run.slice
+KILL_AFTER=10
+
+die() { printf 'aien-run-exec: %s\n' "$*" >&2; exit 2; }
+usage() {
+  printf 'usage: aien-run-exec --cwd DIR --timeout SECS --profile host|qemu|gb10 [--env K=V]... -- PROGRAM [ARGS...]\n' >&2
+  exit 2
+}
+
+[[ $(id -u) -eq 0 ]] || die "must run as root (via sudo -n)"
+
+cwd=""; secs=""; profile=""; envs=(); mem_max=""; tasks_max=""; cpu_quota=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --cwd)        [[ $# -ge 2 ]] || usage; cwd=$2; shift 2 ;;
+    --timeout)    [[ $# -ge 2 ]] || usage; secs=$2; shift 2 ;;
+    --profile)    [[ $# -ge 2 ]] || usage; profile=$2; shift 2 ;;
+    --env)        [[ $# -ge 2 ]] || usage; envs+=("$2"); shift 2 ;;
+    --memory-max) [[ $# -ge 2 ]] || usage; mem_max=$2; shift 2 ;;
+    --tasks-max)  [[ $# -ge 2 ]] || usage; tasks_max=$2; shift 2 ;;
+    --cpu-quota)  [[ $# -ge 2 ]] || usage; cpu_quota=$2; shift 2 ;;
+    --)           shift; break ;;
+    -h|--help)    usage ;;
+    *)            die "unknown argument: $1" ;;
+  esac
+done
+[[ $# -ge 1 ]] || usage
+[[ -n $cwd && -n $secs && -n $profile ]] || usage
+[[ $cwd == /* && -d $cwd ]] || die "--cwd must be an existing absolute directory: $cwd"
+[[ $secs =~ ^[0-9]+$ && $secs -gt 0 ]] || die "--timeout must be a positive integer of seconds: $secs"
+case "$profile" in host|qemu|gb10) ;; *) die "--profile must be host|qemu|gb10: $profile" ;; esac
+[[ -z $mem_max  || $mem_max  =~ ^[0-9]+[KMGT]?$ ]] || die "--memory-max must be NUM[KMGT]: $mem_max"
+[[ -z $tasks_max || $tasks_max =~ ^[0-9]+$ ]] || die "--tasks-max must be an integer: $tasks_max"
+[[ -z $cpu_quota || $cpu_quota =~ ^[0-9]+$ ]] || die "--cpu-quota must be an integer percent: $cpu_quota"
+for kv in "${envs[@]}"; do
+  [[ $kv =~ ^[A-Za-z_][A-Za-z0-9_]*= ]] || die "--env needs K=V with a valid name: $kv"
+  k=${kv%%=*}
+  case "$k" in
+    LD_*|BASH_ENV|ENV|HOME|CARGO_HOME|RUSTUP_HOME|PATH) die "--env may not set $k" ;;
+  esac
+done
+getent passwd "$RUN_USER" >/dev/null || die "user $RUN_USER does not exist (run tools/aien-local-ci/install.sh)"
+
+# Per-profile caps. Machine: 20 cores, 121 GB RAM. host/qemu leave headroom for the trusted side;
+# gb10 may use most of the unified memory but still cannot take the whole machine.
+case "$profile" in
+  host) : "${mem_max:=48G}"; : "${tasks_max:=4096}"; : "${cpu_quota:=1600}" ;;
+  qemu) : "${mem_max:=48G}"; : "${tasks_max:=4096}"; : "${cpu_quota:=1600}" ;;
+  gb10) : "${mem_max:=96G}"; : "${tasks_max:=4096}"; : "${cpu_quota:=1800}" ;;
+esac
+
+unit="aien-run-exec-$$-$(date +%s%N | tail -c 7)"
+props=(-p "MemoryMax=$mem_max" -p "MemorySwapMax=0" -p "TasksMax=$tasks_max" -p "CPUQuota=${cpu_quota}%")
+case "$profile" in
+  host) props+=(-p DevicePolicy=closed) ;;
+  qemu) props+=(-p DevicePolicy=closed -p "DeviceAllow=/dev/kvm rw") ;;
+  gb10) props+=(-p DevicePolicy=auto) ;;
+esac
+
+inner=()
+case "$profile" in
+  host|qemu) inner+=(unshare -n --) ;;
+esac
+inner+=(prlimit --core=0 --nofile=65536 --)
+case "$profile" in
+  host|qemu) inner+=(timeout --signal=TERM --kill-after="$KILL_AFTER" "$secs") ;;
+esac
+inner+=(setpriv --reuid "$RUN_USER" --regid "$RUN_USER" --init-groups --reset-env --no-new-privs --)
+inner+=(env -i "PATH=$RUN_PATH" "HOME=$RUN_HOME" "CARGO_HOME=$RUN_HOME/cargo" "RUSTUP_HOME=$RUN_HOME/rustup")
+for kv in "${envs[@]}"; do inner+=("$kv"); done
+
+cleanup() { systemctl kill --signal=KILL "$unit.scope" >/dev/null 2>&1 || true; systemctl stop "$unit.scope" >/dev/null 2>&1 || true; }
+trap 'cleanup; exit 143' TERM INT HUP
+
+rc=0
+cd "$cwd"
+systemd-run --scope --quiet --collect --unit "$unit" --slice "$SLICE" "${props[@]}" -- "${inner[@]}" "$@" || rc=$?
+cleanup
+exit "$rc"
