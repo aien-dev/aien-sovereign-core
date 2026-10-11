@@ -122,8 +122,13 @@ jobs:
             aien-cli-sha256-${{ matrix.target }}.txt
             DRY-RUN-STATUS-${{ matrix.target }}.txt
 
+  # Offline-signing handoff (Drake ruling 1, sc#385; docs/release/RELEASE_SIGNING.md). No private release key is ever
+  # in CI, a secret, or this repository. Stage 1 (draft-release, below) builds and publishes checksums to a DRAFT
+  # release. Stage 2 is the operator, offline: sign SHA256SUMS.txt and upload SHA256SUMS.txt.sig to the draft.
+  # Stage 3 (.github/workflows/release-publish.yml) verifies that signature against docs/release/allowed_signers and
+  # only then publishes. Static guard: scripts/test-release-signing-workflow.sh.
   dry-run-sign:
-    name: "Dry run: sign with a throwaway key and verify"
+    name: "Dry run: label, sign with a throwaway key made in this job, verify (signature_check dry-run-key)"
     needs: build-release
     if: github.event_name == 'workflow_dispatch' && inputs.dry_run
     runs-on: ubuntu-latest
@@ -139,17 +144,32 @@ jobs:
           path: release-artifacts
           merge-multiple: true
 
-      - name: Checksums, throwaway signature, verification
+      - name: "Label, checksums, throwaway signature, verification (DRY RUN, not a release)"
         working-directory: release-artifacts
         run: |
+          for a in sovereign-*.tar.gz; do
+            tar -xzOf "$a" ./release.toml | grep -qx 'dry-run = true' || { echo "$a: release.toml is not labelled dry-run" >&2; exit 1; }
+          done
+          echo "DRY RUN: signed with a throwaway key generated in this job and deleted (signature_check dry-run-key). Not the AIEN release key. Not a release. Never publish." > DRY-RUN-NOT-A-RELEASE.txt
           cat aien-cli-sha256-*.txt > aien-cli-digests.txt
-          sha256sum sovereign-* aien-cli-digests.txt > SHA256SUMS.txt
-          ssh-keygen -q -t ed25519 -N "" -C aien-dry-run-throwaway -f ../dry_key
-          printf "aien-release %s\n" "$(cut -d" " -f1,2 ../dry_key.pub)" > ../dry_signers
-          ssh-keygen -Y sign -f ../dry_key -n aien-release SHA256SUMS.txt
-          ../scripts/verify-release-assets.sh . ../dry_signers
-          rm -f ../dry_key
-          echo "DRY RUN: signed with a throwaway key generated in this job. Not the AIEN release key. Not a release." > DRY-RUN-NOT-A-RELEASE.txt
+          sha256sum sovereign-* aien-cli-digests.txt DRY-RUN-*.txt > SHA256SUMS.txt
+          umask 077
+          ssh-keygen -q -t ed25519 -N "" -C aien-dry-run-throwaway -f "$RUNNER_TEMP/dry_key"
+          printf "aien-release %s\n" "$(cut -d" " -f1,2 "$RUNNER_TEMP/dry_key.pub")" > dry-run-signers
+          ssh-keygen -Y sign -f "$RUNNER_TEMP/dry_key" -n aien-release SHA256SUMS.txt
+          rm -f "$RUNNER_TEMP/dry_key" "$RUNNER_TEMP/dry_key.pub"
+          ../scripts/verify-release-assets.sh . dry-run-signers
+          cat SHA256SUMS.txt
+
+      - name: "Negative control: the publish gate refuses this dry run, under the pinned key and under its own key"
+        run: |
+          if bash scripts/release-publish-gate.sh release-artifacts docs/release/allowed_signers; then
+            echo "publish gate accepted a dry run under docs/release/allowed_signers" >&2; exit 1
+          fi
+          if bash scripts/release-publish-gate.sh release-artifacts release-artifacts/dry-run-signers; then
+            echo "publish gate accepted a dry run under its own throwaway key" >&2; exit 1
+          fi
+          echo "publish gate refused the dry run, as it must"
 
       - name: Upload dry-run artifacts (workflow artifacts only, no release)
         uses: actions/upload-artifact@v4
@@ -157,14 +177,22 @@ jobs:
           name: dry-run-signed-assets
           path: release-artifacts
 
-  publish-release:
-    name: Publish Release and Checksums
+  # Stage 1. Never signs and never publishes: it creates a DRAFT release holding the archives and SHA256SUMS.txt.
+  draft-release:
+    name: "Stage 1: checksums and a draft release (unsigned; the operator signs offline)"
     needs: build-release
     if: github.event_name == 'push' || inputs.dry_run == false
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Source
         uses: actions/checkout@v4
+
+      - name: Refuse anything but a v* tag
+        run: |
+          if [ "$GITHUB_REF_TYPE" != tag ] || [ "${GITHUB_REF_NAME#v}" = "$GITHUB_REF_NAME" ]; then
+            echo "A release is drafted only from a v* tag (this run is on $GITHUB_REF_TYPE $GITHUB_REF_NAME). Nothing was drafted." >&2
+            exit 1
+          fi
 
       - name: Download Build Artifacts
         uses: actions/download-artifact@v4
@@ -179,39 +207,19 @@ jobs:
           sha256sum sovereign-* aien-cli-digests.txt > SHA256SUMS.txt
           cat SHA256SUMS.txt
 
-      - name: Sign Checksums (fails the job when the release key secret is absent)
-        working-directory: release-artifacts
-        env:
-          AIEN_RELEASE_SIGNING_KEY: ${{ secrets.AIEN_RELEASE_SIGNING_KEY }}
-        run: |
-          if [ -z "$AIEN_RELEASE_SIGNING_KEY" ]; then
-            echo "AIEN_RELEASE_SIGNING_KEY secret is not configured. Refusing to publish an unsigned release." >&2
-            exit 1
-          fi
-          umask 077
-          printf "%s\n" "$AIEN_RELEASE_SIGNING_KEY" > ../release_key
-          ssh-keygen -Y sign -f ../release_key -n aien-release SHA256SUMS.txt
-          rm -f ../release_key
-          ../scripts/verify-release-assets.sh . ../docs/release/allowed_signers
-
-      - name: Publish GitHub Release
+      - name: Create the draft release (no signature; not public until release-publish.yml verifies the offline signature)
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
         run: |
-          TAG="${GITHUB_REF_NAME}"
-          if [ -z "$TAG" ] || [ "$TAG" = "main" ]; then
-            TAG="v0.1.0"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "A release named $TAG already exists. Refusing to replace it." >&2
+            exit 1
           fi
-
-          NOTES_FILE="RELEASE_NOTES.md"
-          if [ ! -f "$NOTES_FILE" ]; then
-            echo "# AIEN Sovereign Core ${TAG}" > "$NOTES_FILE"
-            echo "" >> "$NOTES_FILE"
-            echo "Official release of the AIEN Sovereign Native Systems Architecture." >> "$NOTES_FILE"
-          fi
-
           {
-            cat "$NOTES_FILE"
+            echo "> DRAFT, AWAITING THE OFFLINE SIGNATURE. Not published. See docs/release/RELEASE_SIGNING.md."
+            echo
+            if [ -f RELEASE_NOTES.md ]; then cat RELEASE_NOTES.md; else echo "# AIEN Sovereign Core ${TAG}"; fi
             echo
             echo "## aien-cli digests (compare with the candidate manifest [executables] aien-cli-native-release)"
             echo
@@ -221,15 +229,7 @@ jobs:
             cat release-artifacts/aien-cli-digests.txt
             echo '```'
           } > release-notes-with-digests.md
-          NOTES_FILE=release-notes-with-digests.md
-
           cd release-artifacts
-          SIG=""
-          [ -f SHA256SUMS.txt.sig ] || { echo "SHA256SUMS.txt.sig is missing; refusing to publish" >&2; exit 1; }
-          SIG="SHA256SUMS.txt.sig"
-          gh release create "$TAG" sovereign-* aien-cli-digests.txt SHA256SUMS.txt $SIG \
+          gh release create "$TAG" --draft --verify-tag sovereign-* aien-cli-digests.txt SHA256SUMS.txt \
             --title "AIEN Sovereign Core ${TAG}" \
-            --notes-file ../"$NOTES_FILE" \
-            --draft=false \
-            --prerelease=false || \
-          gh release upload "$TAG" sovereign-* aien-cli-digests.txt SHA256SUMS.txt $SIG --clobber
+            --notes-file ../release-notes-with-digests.md

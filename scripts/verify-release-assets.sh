@@ -10,6 +10,7 @@ die() { echo "release assets: $*" >&2; exit 1; }
 [[ -f "$d/SHA256SUMS.txt" ]] || die "SHA256SUMS.txt is missing"
 [[ -f "$d/SHA256SUMS.txt.sig" ]] || die "SHA256SUMS.txt.sig is missing: refusing an unsigned release"
 [[ -s "$signers" ]] || die "allowed signers file $signers is missing or empty"
+grep -qvE '^[[:space:]]*(#|$)' "$signers" || die "no key is pinned in $signers (PLACEHOLDER until the key ceremony, docs/release/KEY_CEREMONY.md): refusing"
 ssh-keygen -Y verify -f "$signers" -I aien-release -n aien-release -s "$d/SHA256SUMS.txt.sig" < "$d/SHA256SUMS.txt" >/dev/null 2>&1 \
     || die "SHA256SUMS.txt signature is NOT valid for $signers"
 n=0

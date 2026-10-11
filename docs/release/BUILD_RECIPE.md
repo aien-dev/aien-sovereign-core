@@ -45,18 +45,26 @@ package aien-proof or aien-test.
   `[executables] aien-cli-native-release`, and each helper binary must equal its `sc-<name>` entry. A package without `--native` is refused (no candidate digest for that kind); the release matrix builds only the native target.
 - `scripts/verify-release-assets.sh <dir> <allowed_signers>`: signature on `SHA256SUMS.txt` valid for the pinned
   signer, every listed file matches, every `sovereign-*` archive is covered.
+- `scripts/release-publish-gate.sh <dir> <allowed_signers>`: the stage-3 publish decision (see `RELEASE_SIGNING.md`).
 - `scripts/test-release-checks.sh` (also in CI) proves each of these rejects: wrong omega.lock or Cargo.lock pins,
   executable digest mismatch, model input mismatch, missing, corrupt or foreign signature, tampered files.
 
 ## Release workflow modes
 
-- Tag push `v*`: build, check, sign with the `AIEN_RELEASE_SIGNING_KEY` secret (job fails if absent), verify against
-  `docs/release/allowed_signers`, publish. Until the public-release key steps in `RELEASE_SIGNING.md` are done, what this
-  publishes is an internal test release signed with the old key, never a public release.
-- Manual run (`workflow_dispatch`): input `dry_run`, default true. Builds, packages, checks, signs with a throwaway key
-  generated in the job (labelled in `DRY-RUN-NOT-A-RELEASE.txt`), verifies, uploads workflow artifacts only. Gate or
-  package-check failures are recorded in `DRY-RUN-STATUS-<target>.txt` instead of stopping the run. It never creates a
-  release. With `dry_run` set to false a manual run publishes like a tag push.
+- Tag push `v*` (stage 1 of the offline-signing handoff, `RELEASE_SIGNING.md`): build, check, write `SHA256SUMS.txt`
+  and create a DRAFT release holding the archives and checksums. No signature is made in CI and no key is in CI or a
+  secret. The draft is not public. A manual run with `dry_run` false does the same, and only from a `v*` tag.
+- Stage 2, the operator, offline: sign `SHA256SUMS.txt` with the public-release key (`scripts/key-ceremony.sh sign`)
+  and attach `SHA256SUMS.txt.sig` to the draft.
+- Stage 3, `release-publish.yml` (manual, input `tag`): checks out the tag, downloads the draft, runs
+  `scripts/release-publish-gate.sh` against that commit's `docs/release/allowed_signers` and publishes only if it
+  passes. It refuses unsigned, mismatched, dry-run, internal-test-key and placeholder-key releases.
+- Manual run (`workflow_dispatch`): input `dry_run`, default true. Builds, packages with the manifest labelled
+  `dry-run = true`, checks, writes `DRY-RUN-NOT-A-RELEASE.txt` into the signed checksum list, signs with a throwaway
+  key generated in the job (public half uploaded as `dry-run-signers`, private half deleted), verifies, shows that the
+  publish gate refuses it, uploads workflow artifacts only. Gate or package-check failures are recorded in
+  `DRY-RUN-STATUS-<target>.txt` instead of stopping the run. It never creates a release. Installed with
+  `AIEN_DRY_RUN_SIGNERS=dry-run-signers`, it is recorded as `signature_check: dry-run-key`.
 - Pull requests (`release-dry-run.yml`): the publish guard, `scripts/test-release-gate-wiring.sh` and the refusal suite
   (`scripts/test-release-real-tree.sh`, run on a fixture tree pinned to the candidate) block. The tree gate on the PR's
   own revision only reports "IS / is NOT releasable as <candidate>" in the step summary: main may move ahead of the
