@@ -105,6 +105,9 @@ fn native_with(
 struct ForcedFallback {
     cpu: ReferenceCpuBackend,
     acct: OpAccounting,
+    /// sc#402: when Some, every `matmul_vec` counts as one chip call, the way the
+    /// Omega GB10 backend counts `chip_calls`; None is a backend with no chip.
+    chip_calls: Option<std::sync::atomic::AtomicU64>,
 }
 
 impl TensorBackend for ForcedFallback {
@@ -113,6 +116,11 @@ impl TensorBackend for ForcedFallback {
     }
     fn op_report(&self) -> aien_inference_abi::native_ops::OpReport {
         self.acct.report()
+    }
+    fn gpu_executions(&self) -> Option<u64> {
+        self.chip_calls
+            .as_ref()
+            .map(|c| c.load(std::sync::atomic::Ordering::Relaxed))
     }
     fn rmsnorm(&self, out: &mut [f32], x: &[f32], weight: &[f32], eps: f32) {
         self.acct.record_reference(TensorOp::Rmsnorm);
@@ -143,6 +151,9 @@ impl TensorBackend for ForcedFallback {
         out_dim: usize,
         in_dim: usize,
     ) {
+        if let Some(c) = &self.chip_calls {
+            c.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
         self.cpu.matmul_vec(out, x, weight, out_dim, in_dim)
     }
     fn swiglu(&self, out: &mut [f32], gate: &[f32], up: &[f32]) {
@@ -202,6 +213,7 @@ async fn a_forced_fallback_shows_a_non_zero_count() {
     let tensors = Arc::new(ForcedFallback {
         cpu: ReferenceCpuBackend::new(),
         acct: OpAccounting::new(NativeOpMask::ALL),
+        chip_calls: None,
     });
     let ops = run(native_with(tensors))
         .await
@@ -242,6 +254,7 @@ fn record_field_matches_the_evidence_and_is_absent_without_it() {
         native_fallbacks: 0,
         reference_runs: 7,
         report: "OP_REPORT native=[matmul_vec] reference=[rmsnorm] native_fallbacks=[] reference_runs=[rmsnorm:7]".into(),
+        gpu_executions: None,
     };
     let ev = |o| aien_runtime::generation::TurnEvidence {
         prompt_ids: &[1, 2],
@@ -268,4 +281,77 @@ fn record_field_matches_the_evidence_and_is_absent_without_it() {
     );
     let without = aien_runtime::generation::build_record(&id, &ev(None), start);
     assert!(without.get("ops").is_none(), "{without}");
+}
+
+/// sc#402: a backend that counts chip calls reports them with the call
+/// (`gpu_executions`, process total), in the record and in the log line; the
+/// CPU reference backend has no chip and makes no claim (None, never zero).
+#[tokio::test]
+async fn chip_calls_are_reported_and_absent_without_a_chip() {
+    let tensors = Arc::new(ForcedFallback {
+        cpu: ReferenceCpuBackend::new(),
+        acct: OpAccounting::new(NativeOpMask::from_ops(&[TensorOp::MatmulVec])),
+        chip_calls: Some(std::sync::atomic::AtomicU64::new(0)),
+    });
+    let ops = run(native_with(tensors.clone()))
+        .await
+        .expect("the native backend reports its op evidence");
+    let counted = tensors.gpu_executions().unwrap();
+    assert!(counted > 0, "the micro model runs matmul_vec");
+    assert_eq!(ops.gpu_executions, Some(counted), "{ops:?}");
+    assert_eq!(ops.native_fallbacks, 0, "{ops:?}");
+    let line = aien_runtime::generation::op_report_line(Some(&ops)).unwrap();
+    assert!(
+        line.ends_with(&format!(
+            " gpu_executions={counted} backend=forced-fallback"
+        )),
+        "{line}"
+    );
+    let json = serde_json::to_value(&ops).unwrap();
+    assert_eq!(json["gpu_executions"], serde_json::json!(counted));
+
+    let cpu = run(native_with(Arc::new(ReferenceCpuBackend::new())))
+        .await
+        .expect("the native backend reports its op evidence");
+    assert_eq!(cpu.gpu_executions, None);
+    let cpu_json = serde_json::to_value(&cpu).unwrap();
+    assert!(cpu_json.get("gpu_executions").is_none(), "{cpu_json}");
+    assert!(!aien_runtime::generation::op_report_line(Some(&cpu))
+        .unwrap()
+        .contains("gpu_executions"));
+}
+
+/// sc#402: the record carries `ops.gpu_executions` only when the evidence has it.
+#[test]
+fn record_carries_gpu_executions_only_when_counted() {
+    let id = aien_runtime::generation::ModelIdentity {
+        model_sha256: "m".repeat(64),
+        model_digest_kind: "file".into(),
+        model_path: "/m".into(),
+        tokenizer_sha256: "t".repeat(64),
+        tokenizer_path: "/t".into(),
+    };
+    let ops = OpEvidence {
+        backend: "omega-gb10".into(),
+        native_fallbacks: 0,
+        reference_runs: 0,
+        report: "OP_REPORT native=[matmul_vec] reference=[] native_fallbacks=[] reference_runs=[]"
+            .into(),
+        gpu_executions: Some(156),
+    };
+    let ev = aien_runtime::generation::TurnEvidence {
+        prompt_ids: &[1, 2],
+        output_ids: &[3, 4, 5],
+        text: "abc",
+        total_tokens: 5,
+        finish_reason: "eos",
+        request_id: 1,
+        operation_id: 1,
+        decoding: None,
+        ops: Some(&ops),
+    };
+    let start = aien_runtime::generation::DaemonStart(1);
+    let rec = aien_runtime::generation::build_record(&id, &ev, start);
+    assert_eq!(rec["ops"]["gpu_executions"], serde_json::json!(156));
+    assert_eq!(rec["ops"]["scope"], serde_json::json!("process"));
 }

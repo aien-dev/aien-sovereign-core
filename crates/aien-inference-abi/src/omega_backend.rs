@@ -699,6 +699,12 @@ impl TensorBackend for OmegaGb10Backend {
         self.acct.report()
     }
 
+    /// sc#402: the chip calls so far, only when the real engine is linked (the stub has
+    /// no chip, so it makes no claim).
+    fn gpu_executions(&self) -> Option<u64> {
+        self.is_available().then(|| self.chip_calls())
+    }
+
     fn rmsnorm(&self, out: &mut [f32], x: &[f32], weight: &[f32], eps: f32) {
         if !self.chip_rmsnorm(out, x, weight, eps) {
             self.reference_for(TensorOp::Rmsnorm);
@@ -1406,6 +1412,19 @@ mod tests {
         assert_eq!(rot(&k0), kr);
         // cached: same allocation on the second ask
         assert!(Arc::ptr_eq(&t, &b.rope_table(head_dim, theta, pos)));
+    }
+
+    /// sc#402: the chip-call total is reported only when the real engine is linked; the
+    /// stub has no chip and makes no claim (None, never a zero that reads as "ran, no calls").
+    #[test]
+    fn gpu_executions_is_the_chip_call_total_or_absent() {
+        let b = OmegaGb10Backend::new();
+        let got = TensorBackend::gpu_executions(&b);
+        if b.is_available() {
+            assert_eq!(got, Some(b.chip_calls()));
+        } else {
+            assert_eq!(got, None);
+        }
     }
 
     /// Stub build only: each newly native elementwise op is a counted fallback with the

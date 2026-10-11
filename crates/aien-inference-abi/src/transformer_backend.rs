@@ -1881,11 +1881,12 @@ impl AienInferenceBackend for NativeTransformerBackend {
 
     /// sc#337: the tensor backend's name and op counters so far.
     fn op_evidence(&self) -> Option<crate::OpEvidence> {
-        Some(
-            self.tensor_backend
-                .op_report()
-                .evidence(self.tensor_backend.name()),
-        )
+        let mut e = self
+            .tensor_backend
+            .op_report()
+            .evidence(self.tensor_backend.name());
+        e.gpu_executions = self.tensor_backend.gpu_executions(); // sc#402
+        Some(e)
     }
 
     async fn execute_step(

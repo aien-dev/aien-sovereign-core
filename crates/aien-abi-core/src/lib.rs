@@ -515,6 +515,12 @@ pub struct OpEvidence {
     /// The full `OP_REPORT native=[..] reference=[..] native_fallbacks=[..]
     /// reference_runs=[..]` line.
     pub report: String,
+    /// Operations the backend ran on its chip, as a process total (sc#402: the
+    /// Omega GB10 engine's `chip_calls`). ABSENT, not zero, for a backend that
+    /// has no chip or does not count its chip calls; serialized only when present,
+    /// so records of such backends are unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gpu_executions: Option<u64>,
 }
 
 impl DecodeObservation {
