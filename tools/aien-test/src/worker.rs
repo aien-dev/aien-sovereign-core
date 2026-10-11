@@ -391,6 +391,108 @@ fn siblings_for(cfg: &Config, repo: &str) -> Result<Vec<Sibling>, String> {
     parse_siblings(&text, repo)
 }
 
+/// One commit a repository's gates check out from a sibling (`pin` in its
+/// `tests/gates/run.sh`): the sibling's source repository and the commit.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Pin {
+    pub source: String,
+    pub sha: String,
+}
+
+/// Parse the pin list (`tools/aien-local-ci/pins` beside the sibling map;
+/// `<repo> <source-repo> <sha40>` per line, `#` comments) and return the
+/// pins of `repo`. Every line is checked, as in the sibling map.
+pub fn parse_pins(text: &str, repo: &str) -> Result<Vec<Pin>, String> {
+    let mut out = Vec::new();
+    for (n, raw) in text.lines().enumerate() {
+        let line = raw.split('#').next().unwrap_or("").trim();
+        if line.is_empty() {
+            continue;
+        }
+        let f: Vec<&str> = line.split_whitespace().collect();
+        let bad = |why: &str| format!("pin list line {}: {why}: {raw:?}", n + 1);
+        if f.len() != 3 {
+            return Err(bad("needs <repo> <source-repo> <sha40>"));
+        }
+        if !valid_repo_key(f[0]) || !valid_repo_key(f[1]) {
+            return Err(bad("repo and source must be plain names"));
+        }
+        if !valid_sha(f[2]) {
+            return Err(bad("the commit must be a full lowercase sha"));
+        }
+        if f[0] == repo {
+            out.push(Pin {
+                source: f[1].to_string(),
+                sha: f[2].to_string(),
+            });
+        }
+    }
+    Ok(out)
+}
+
+/// The pins of `repo` from the `pins` file beside the sibling map (none
+/// without a map or without the file). A file that exists but cannot be read
+/// or parsed refuses the run, like a broken sibling map.
+fn pins_for(cfg: &Config, repo: &str) -> Result<Vec<Pin>, String> {
+    let Some(map) = &cfg.siblings else {
+        return Ok(Vec::new());
+    };
+    let path = map.with_file_name("pins");
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let text = fs::read_to_string(&path)
+        .map_err(|e| format!("cannot read the pin list {}: {e}", path.display()))?;
+    parse_pins(&text, repo)
+}
+
+/// Make every pinned commit of a sibling present in that sibling's trusted
+/// clone before the siblings are made, so the sandbox (which has no network)
+/// finds it. Runs on the trusted side at provisioning time only: a missing
+/// commit is fetched by its sha from the clone's own `origin`, then held by
+/// `refs/remotes/aien-pins/<sha>` so `wt.sh sync` copies it into the mirror and
+/// `git gc` keeps it. A pin that cannot be made present is a note; the gate
+/// that needs it then fails on the missing commit, never PASS.
+pub fn ensure_pins(clones: &Path, pins: &[Pin], sibs: &[Sibling], notes: &mut Vec<String>) {
+    for p in pins {
+        if !sibs.iter().any(|s| s.source == p.source) {
+            notes.push(format!(
+                "pin {}@{}: {} is not a sibling of this repository; not provided",
+                p.source, p.sha, p.source
+            ));
+            continue;
+        }
+        let src = clones.join(&p.source);
+        let want = format!("{}^{{commit}}", p.sha);
+        let present = |src: &Path| git(src, &["cat-file", "-e", &want]).is_ok();
+        if !present(&src) {
+            match git(&src, &["fetch", "--quiet", "origin", &p.sha]) {
+                Ok(_) if present(&src) => {
+                    notes.push(format!("pin {}@{}: fetched from origin", p.source, p.sha))
+                }
+                Ok(_) => {
+                    notes.push(format!(
+                        "pin {}@{}: fetch gave no such commit; not provided",
+                        p.source, p.sha
+                    ));
+                    continue;
+                }
+                Err(e) => {
+                    notes.push(format!("pin {}@{}: not provided: {e}", p.source, p.sha));
+                    continue;
+                }
+            }
+        }
+        let r = format!("refs/remotes/aien-pins/{}", p.sha);
+        if let Err(e) = git(&src, &["update-ref", &r, &p.sha]) {
+            notes.push(format!(
+                "pin {}@{}: cannot hold it in {r}: {e}",
+                p.source, p.sha
+            ));
+        }
+    }
+}
+
 /// Where a head runs: `<wt_root>/<repo>/<sha>/` holds the checkout under test
 /// at `<repo>/` and its siblings beside it, so `../<dir>` in the checkout is
 /// the sibling. `nested` is false only for an older `wt.sh` that still makes
@@ -708,9 +810,11 @@ pub fn run_once(cfg: &Config, repo: &str, sha: &str) -> Result<Summary, String> 
     // The sibling map is read before anything is checked out: a broken map
     // refuses the run instead of leaving a half-made neighbourhood.
     let sibs = siblings_for(cfg, repo)?;
+    let pins = pins_for(cfg, repo)?;
     let mut notes: Vec<String> = Vec::new();
     cfg.state.beat(repo, sha, "checkout");
     let co = checkout(cfg, repo, sha, &mut notes)?;
+    ensure_pins(&cfg.clones, &pins, &sibs, &mut notes);
     let made = provision_siblings(cfg, repo, sha, &co, &sibs, &mut notes);
     let (clone, wt) = (co.clone.clone(), co.wt.clone());
     // A wt.sh worktree belongs to aien-run; the operator's git opens it only
@@ -1346,6 +1450,135 @@ pub fn run_loop(cfg: &Config, iterations: Option<u64>) -> usize {
 mod tests {
     use super::*;
 
+    #[test]
+    fn pin_list_selects_the_repository_and_refuses_bad_lines() {
+        let sha = "353b7d4be3f00169545caec1615cffa61f7d311a";
+        let list =
+            format!("# c\naien-sovereign-core aien-protocols {sha} # t\nomega physics {sha}\n");
+        let p = parse_pins(&list, "aien-sovereign-core").unwrap();
+        assert_eq!(
+            p,
+            vec![Pin {
+                source: "aien-protocols".into(),
+                sha: sha.into()
+            }]
+        );
+        assert!(parse_pins(&list, "physics").unwrap().is_empty());
+        for bad in [
+            "a b".to_string(),
+            format!("a b {sha} extra"),
+            format!("a ../b {sha}"),
+            "a b 353b7d4".to_string(),
+            format!("a b {}", sha.to_uppercase()),
+        ] {
+            assert!(parse_pins(&bad, "a").is_err(), "{bad}");
+        }
+    }
+
+    fn sh_git(dir: &Path, args: &[&str]) -> String {
+        git(dir, args).unwrap_or_else(|e| panic!("git {args:?}: {e}"))
+    }
+
+    /// The trusted clone lacks a pinned commit that only its origin has (on a
+    /// branch the clone never fetched): ensure_pins fetches it by sha and holds
+    /// it under refs/remotes/aien-pins/. Negative controls: a pin of a
+    /// repository that is not a sibling, and a commit origin does not have.
+    #[test]
+    fn ensure_pins_fetches_a_missing_pinned_commit_from_origin() {
+        let t = crate::testutil::TempDir::new("pins");
+        let origin = t.path().join("origin");
+        fs::create_dir_all(&origin).unwrap();
+        sh_git(&origin, &["init", "-q", "-b", "main"]);
+        for (k, v) in [
+            ("user.name", "t"),
+            ("user.email", "t@t"),
+            ("uploadpack.allowAnySHA1InWant", "true"),
+        ] {
+            sh_git(&origin, &["config", k, v]);
+        }
+        fs::write(origin.join("f"), "1").unwrap();
+        sh_git(&origin, &["add", "-A"]);
+        sh_git(&origin, &["commit", "-q", "-m", "one"]);
+        sh_git(&origin, &["checkout", "-q", "-b", "side"]);
+        fs::write(origin.join("f"), "2").unwrap();
+        sh_git(&origin, &["commit", "-q", "-am", "two"]);
+        let pinned = sh_git(&origin, &["rev-parse", "HEAD"]).trim().to_string();
+        sh_git(&origin, &["checkout", "-q", "main"]);
+        let clones = t.path().join("clones");
+        fs::create_dir_all(&clones).unwrap();
+        sh_git(
+            &clones,
+            &[
+                "clone",
+                "-q",
+                "--single-branch",
+                "--no-local",
+                "-b",
+                "main",
+                origin.to_str().unwrap(),
+                "src",
+            ],
+        );
+        let src = clones.join("src");
+        let want = format!("{pinned}^{{commit}}");
+        assert!(
+            git(&src, &["cat-file", "-e", &want]).is_err(),
+            "the clone must lack the pin first"
+        );
+
+        let sibs = vec![Sibling {
+            dir: "src".into(),
+            source: "src".into(),
+            git_ref: "main".into(),
+        }];
+        let absent = "0123456789abcdef0123456789abcdef01234567".to_string();
+        let pins = vec![
+            Pin {
+                source: "src".into(),
+                sha: pinned.clone(),
+            },
+            Pin {
+                source: "other".into(),
+                sha: pinned.clone(),
+            },
+            Pin {
+                source: "src".into(),
+                sha: absent.clone(),
+            },
+        ];
+        let mut notes = Vec::new();
+        ensure_pins(&clones, &pins, &sibs, &mut notes);
+        assert!(git(&src, &["cat-file", "-e", &want]).is_ok(), "{notes:?}");
+        let held = sh_git(
+            &src,
+            &["rev-parse", &format!("refs/remotes/aien-pins/{pinned}")],
+        );
+        assert_eq!(held.trim(), pinned);
+        assert!(
+            notes.iter().any(|n| n.contains("fetched from origin")),
+            "{notes:?}"
+        );
+        assert!(
+            notes.iter().any(|n| n.contains("other is not a sibling")),
+            "{notes:?}"
+        );
+        assert!(
+            notes
+                .iter()
+                .any(|n| n.contains(&absent) && n.contains("not provided")),
+            "{notes:?}"
+        );
+        assert!(git(
+            &src,
+            &[
+                "rev-parse",
+                "--verify",
+                "--quiet",
+                &format!("refs/remotes/aien-pins/{absent}")
+            ]
+        )
+        .is_err());
+    }
     #[test]
     fn sibling_map_selects_the_repository_and_refuses_bad_lines() {
         let map = "# comment\n\
