@@ -133,6 +133,23 @@ pub struct Verified {
     pub checks: usize,
     pub required: usize,
     pub cached: usize,
+    /// The worker's `plan.verdict` member when the bundle carries one (signed
+    /// with the rest). None for a bundle without a plan member.
+    pub plan_verdict: Option<String>,
+}
+
+impl Verified {
+    /// What a gate may act on: PASS only when the algebra says PASS, at least
+    /// one required check exists (zero required checks is PASS only
+    /// vacuously: nothing vouches for the commit), and the plan member, when
+    /// present, says PASS too (an UNMAPPED or BLOCKED plan is NOT_RUN).
+    pub fn gate_verdict(&self) -> &str {
+        match self.verdict.as_str() {
+            "PASS" if self.required == 0 => "NOT_RUN",
+            "PASS" if self.plan_verdict.as_deref().is_some_and(|p| p != "PASS") => "NOT_RUN",
+            v => v,
+        }
+    }
 }
 
 /// What the gate expects the bundle to be about.
@@ -493,6 +510,9 @@ pub fn verify(bundle: &Value, expect: &Expect) -> Result<Verified, Reject> {
         checks: entries.len(),
         required: entries.iter().filter(|e| e.1).count(),
         cached: entries.iter().filter(|e| e.2 == "cached").count(),
+        plan_verdict: o
+            .get("plan")
+            .map(|p| p["verdict"].as_str().unwrap_or("NOT_RUN").to_string()),
     })
 }
 
@@ -594,11 +614,20 @@ fn cli_inner(argv: &[String]) -> Result<i32, String> {
             };
             match verify(&bundle, &expect) {
                 Ok(v) => {
+                    let why = match (v.verdict.as_str(), v.gate_verdict()) {
+                        ("PASS", "NOT_RUN") if v.required == 0 => {
+                            " (no required checks: PASS only vacuously)".to_string()
+                        }
+                        ("PASS", "NOT_RUN") => {
+                            format!(" (plan {})", v.plan_verdict.as_deref().unwrap_or("?"))
+                        }
+                        _ => String::new(),
+                    };
                     println!(
-                        "AIEN Verification: {} ({} checks, {} required, {} from cache) bundle {}",
-                        v.verdict, v.checks, v.required, v.cached, v.digest
+                        "AIEN Verification: {}{why} ({} checks, {} required, {} from cache) bundle {}",
+                        v.gate_verdict(), v.checks, v.required, v.cached, v.digest
                     );
-                    Ok(match v.verdict.as_str() {
+                    Ok(match v.gate_verdict() {
                         "PASS" => 0,
                         "FAIL" => 1,
                         _ => 2,
@@ -902,5 +931,30 @@ mod tests {
         );
         assert!(hex_decode("abc").is_none());
         assert!(hex_decode("zz").is_none());
+    }
+
+    #[test]
+    fn gate_verdict_is_never_a_vacuous_pass() {
+        let v = |verdict: &str, required: usize, plan: Option<&str>| Verified {
+            verdict: verdict.to_string(),
+            digest: String::new(),
+            checks: required,
+            required,
+            cached: 0,
+            plan_verdict: plan.map(str::to_string),
+        };
+        assert_eq!(v("PASS", 1, None).gate_verdict(), "PASS");
+        assert_eq!(v("PASS", 1, Some("PASS")).gate_verdict(), "PASS");
+        // Nothing required: PASS only vacuously.
+        assert_eq!(v("PASS", 0, None).gate_verdict(), "NOT_RUN");
+        assert_eq!(v("PASS", 0, Some("PASS")).gate_verdict(), "NOT_RUN");
+        // The worker's plan says UNMAPPED or BLOCKED.
+        assert_eq!(v("PASS", 2, Some("NOT_RUN")).gate_verdict(), "NOT_RUN");
+        assert_eq!(
+            v("PASS", 2, Some("BLOCKED_OPERATOR")).gate_verdict(),
+            "NOT_RUN"
+        );
+        assert_eq!(v("FAIL", 2, Some("NOT_RUN")).gate_verdict(), "FAIL");
+        assert_eq!(v("NOT_RUN", 2, Some("PASS")).gate_verdict(), "NOT_RUN");
     }
 }

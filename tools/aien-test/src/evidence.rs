@@ -409,6 +409,44 @@ pub fn utc_string(secs: u64) -> String {
     )
 }
 
+/// The inverse of `utc_string`: seconds since the Unix epoch for a
+/// `YYYY-MM-DDTHH:MM:SSZ` string; None for anything else.
+pub fn utc_secs(s: &str) -> Option<u64> {
+    let b = s.as_bytes();
+    if b.len() != 20
+        || b[4] != b'-'
+        || b[7] != b'-'
+        || b[10] != b'T'
+        || b[13] != b':'
+        || b[16] != b':'
+        || b[19] != b'Z'
+    {
+        return None;
+    }
+    let num = |from: usize, to: usize| -> Option<i64> {
+        let t = &s[from..to];
+        if !t.bytes().all(|c| c.is_ascii_digit()) {
+            return None;
+        }
+        t.parse::<i64>().ok()
+    };
+    let (y, m, d) = (num(0, 4)?, num(5, 7)?, num(8, 10)?);
+    let (hh, mm, ss) = (num(11, 13)?, num(14, 16)?, num(17, 19)?);
+    if !(1..=12).contains(&m) || !(1..=31).contains(&d) || hh > 23 || mm > 59 || ss > 59 {
+        return None;
+    }
+    // Howard Hinnant's days-from-civil algorithm.
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = y.div_euclid(400);
+    let yoe = y.rem_euclid(400);
+    let mp = if m > 2 { m - 3 } else { m + 9 };
+    let doy = (153 * mp + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146_097 + doe - 719_468;
+    let secs = days * 86_400 + hh * 3600 + mm * 60 + ss;
+    u64::try_from(secs).ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -643,5 +681,37 @@ mod tests {
             .filter(|e| e.file_name().to_string_lossy().starts_with(".tmp-"))
             .count();
         assert_eq!(leftovers, 0, "no temp file may be left behind");
+    }
+}
+
+#[cfg(test)]
+mod utc_tests {
+    use super::*;
+
+    #[test]
+    fn utc_secs_inverts_utc_string() {
+        for secs in [
+            0u64,
+            1,
+            86_399,
+            86_400,
+            951_782_400,
+            1_700_000_000,
+            1_791_000_000,
+            4_102_444_800,
+        ] {
+            assert_eq!(utc_secs(&utc_string(secs)), Some(secs), "{secs}");
+        }
+        assert_eq!(utc_secs("2026-10-11T00:00:00Z"), Some(1_791_676_800));
+        for bad in [
+            "",
+            "2026-10-11",
+            "2026-10-11T00:00:00",
+            "2026-13-11T00:00:00Z",
+            "x026-10-11T00:00:00Z",
+            "2026-10-11T24:00:00Z",
+        ] {
+            assert_eq!(utc_secs(bad), None, "{bad}");
+        }
     }
 }

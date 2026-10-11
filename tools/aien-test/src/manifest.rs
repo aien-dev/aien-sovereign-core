@@ -825,7 +825,7 @@ pub fn parse(bytes: &[u8]) -> Result<Manifest, ManifestError> {
         let exec = child_str(c, "exec")?.ok_or_else(|| ManifestError("run.exec missing".into()))?;
         if !valid_rel_path(&exec) {
             return Err(ManifestError(
-                "run.exec must be a repo-relative path".into(),
+                "run.exec must be a bare program name or a repo-relative path".into(),
             ));
         }
         let args = match child(c, "args") {
@@ -1077,6 +1077,20 @@ mod tests {
     fn paths_must_be_relative() {
         assert!(parse(GOOD.replace("tools/run.sh", "/bin/sh").as_bytes()).is_err());
         assert!(parse(GOOD.replace("tools/run.sh", "../x").as_bytes()).is_err());
+        // An exec that escapes the repository is a reject, never a run.
+        for bad in [
+            "../../usr/bin/env",
+            "/usr/bin/env",
+            "tools/../../x",
+            "tools/..",
+            "",
+        ] {
+            let e = parse(GOOD.replace("tools/run.sh", bad).as_bytes());
+            assert!(e.is_err(), "{bad:?} must be rejected");
+        }
+        // A bare program name is allowed: it resolves on the PATH.
+        let m = parse(GOOD.replace("tools/run.sh", "crumb").as_bytes()).unwrap();
+        assert_eq!(m.exec, "crumb");
     }
 
     #[test]

@@ -5,7 +5,7 @@
 
 use std::io::{self, Read};
 use std::os::unix::process::{CommandExt, ExitStatusExt};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Output, Stdio};
 use std::sync::{mpsc, Mutex, MutexGuard};
 use std::thread;
@@ -75,6 +75,55 @@ fn lost() -> io::Error {
 /// copied by spawns that start after the descriptors are already closed.
 /// A genuinely held lock is still refused at once (ADR 0028 Decision 6).
 static SPAWN_GATE: Mutex<()> = Mutex::new(());
+
+/// Worktrees the operator's git may open although `aien-run` owns their
+/// files. The worker adds one only after checking that it was made by INFRA's
+/// `wt.sh`: its `.git` file is root-owned, not writable by anyone else, and
+/// points into the operator's mirror, so every git setting and hook that git
+/// reads there is the operator's, never the checked-out code's.
+static TRUSTED_WORKTREES: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+
+/// Trust `dir` for git (git's `safe.directory`) until the guard is dropped.
+pub fn trust_worktree(dir: &Path) -> TrustGuard {
+    let mut v = TRUSTED_WORKTREES.lock().unwrap_or_else(|p| p.into_inner());
+    v.push(dir.to_path_buf());
+    TrustGuard(dir.to_path_buf())
+}
+
+/// Removes its directory from the trusted list when dropped.
+pub struct TrustGuard(PathBuf);
+
+impl Drop for TrustGuard {
+    fn drop(&mut self) {
+        let mut v = TRUSTED_WORKTREES.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(i) = v.iter().position(|d| d == &self.0) {
+            v.remove(i);
+        }
+    }
+}
+
+/// Give `cmd` the trusted worktrees as `safe.directory` entries through
+/// git's command-line configuration (`GIT_CONFIG_COUNT`), which git honours
+/// for that setting. Children that run git themselves (crumb) inherit it. With
+/// no trusted worktree the command is left exactly as it was.
+pub fn apply_git_trust(cmd: &mut Command) {
+    let v = TRUSTED_WORKTREES.lock().unwrap_or_else(|p| p.into_inner());
+    if v.is_empty() {
+        return;
+    }
+    cmd.env("GIT_CONFIG_COUNT", v.len().to_string());
+    for (i, d) in v.iter().enumerate() {
+        cmd.env(format!("GIT_CONFIG_KEY_{i}"), "safe.directory");
+        cmd.env(format!("GIT_CONFIG_VALUE_{i}"), d);
+    }
+}
+
+/// `git` with the trusted worktrees applied (see [`apply_git_trust`]).
+pub fn git_command() -> Command {
+    let mut cmd = Command::new("git");
+    apply_git_trust(&mut cmd);
+    cmd
+}
 
 /// Take the spawn gate. It is a leaf lock: nothing else is taken while it is
 /// held, and a poisoned gate is still usable (it guards no data).

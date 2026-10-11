@@ -385,7 +385,7 @@ pub fn explain_chain(
                         "cache: miss, it depends on {first}, which would run again, so its receipt would change"
                     ));
                 } else {
-                    match runner::identity(root, &node.path, m, &opts.hardware) {
+                    match runner::identity(root, &node.path, m, &opts.hardware, opts.sandbox) {
                         Err(e) => lines.push(format!("cache: miss, cannot digest the inputs ({e})")),
                         Ok(id) => {
                             let deps: Vec<(String, String)> = m

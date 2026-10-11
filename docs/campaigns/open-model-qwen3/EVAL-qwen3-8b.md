@@ -11,11 +11,11 @@ estimate, with a confidence. Revision pinned for every Hugging Face fact: `b9688
 ## 0. Verdict
 
 ```text
-engine compatibility = NEEDS WORK, one code gap that blocks the daemon: the chat template. Everything else the loader reads is supported.
+engine compatibility = SUPPORTED (updated 2026-10-11 16:10Z): template pinned sc#436, SMOKE-8B-v1 PASS attempt 2 (GB10 ids equal CPU golden, fallback 0).
 license              = Apache-2.0, redistribution allowed
 size                 = 16.38 GB of bf16 weights in 5 shards (2.04 times the 4B)
 weights on disk      = ~/models/qwen3-8b, all five shards re-hashed and equal to Hugging Face's own sha256 (Section 1)
-next step            = pin the Qwen3-8B template as a second Qwen layout with thinking off (Section 5), then the smoke test (Section 8)
+next step            = v7 campaign driver with ALLEN engaged + complete dry-run gate, then freeze v7 (334 rows unchanged)
 ```
 
 ## 1. Provenance and license
@@ -81,12 +81,12 @@ OBSERVED from `~/models/qwen3-4b-instruct-2507-cdbee75/config.json` and the 8B `
 - The engine refuses it today: `parse_chatml` accepts exactly the pinned 4B-2507 text, the two plain ChatML layouts, or one plain-text default system message, and returns "unsupported ChatML chat template" for anything else. SOURCE(`crates/aien-inference-abi/src/tokenizer.rs`, `parse_chatml`). The engine also has no `enable_thinking` input at all (OBSERVED: no `think` in `tokenizer.rs`). So the daemon would fail at model load, before any token.
 - How the product must disable thinking: render with `enable_thinking=false`, which for a conversation without tools and without prior assistant thinking is exactly the plain ChatML turns followed by `<|im_start|>assistant\n<think>\n\n</think>\n\n`. UNVERIFIED (derived by reading the template text; confidence 90 percent for the no-tools, no-prior-assistant case the campaigns use). The prior-assistant-turn branch (`reasoning_content`, `last_query_index`) is not needed by the campaign prompts (single user turn plus optional system turn, see the task files) but the tool-response branch is identical to the 4B's.
 
-## 5. Engine compatibility verdict: NEEDS WORK
+## 5. Engine compatibility verdict: NEEDS WORK (at writing; CLOSED 2026-10-11, see the update under each gap)
 
 Gaps, each with the code place:
 
 1. **Chat template (blocks the daemon).** `tokenizer.rs` `parse_chatml` and the `ChatTemplate` enum need a second pinned Qwen layout, for example `ChatMlQwen3Hybrid` (name open), that (a) pins the 8B template text byte for byte as a fixture next to the 4B's with a `PROVENANCE.md` and a render oracle, (b) always appends `<think>\n\n</think>\n\n` after the generation prompt (thinking off as a fixed product setting, no per-call switch), and (c) refuses prior assistant turns that carry `<think>` blocks rather than approximating. Tests: extend `tests/qwen3_chat_template.rs` and `tests/tool_boundary.rs`. Also `spine.rs` line 1151 matches `ChatMlQwen3` by name for the "filename:" prompt label and needs the new variant.
-2. **Untied output head on the qualified GB10 path (UNVERIFIED, may be nothing).** `weights.rs`/`resident.rs` handle `lm_head.weight` generally; the Qwen3 parity and GB10 tests were written with the tied 4B. Needs the smoke test of Section 8 to turn this into OBSERVED either way. Extra resident bytes if streamed: vocab 151936 x 4096 x 2 = 1.24 GB (arithmetic).
+2. **Untied output head on the qualified GB10 path (OBSERVED fine 2026-10-11: SMOKE-8B-v1 attempt 2 PASS, GB10 ids equal CPU golden on both prompts).** `weights.rs`/`resident.rs` handle `lm_head.weight` generally; the Qwen3 parity and GB10 tests were written with the tied 4B. Needs the smoke test of Section 8 to turn this into OBSERVED either way. Extra resident bytes if streamed: vocab 151936 x 4096 x 2 = 1.24 GB (arithmetic).
 3. **Sampling mismatch (not a code gap).** The model card advises against greedy decoding; the campaigns are greedy. This can only be measured by running, and cannot be a reason to change a threshold.
 
 Not gaps (OBSERVED or SOURCE): `Qwen3ForCausalLM` accepted; all config keys known; 36 layers, 8 KV heads, head_dim 128 same as the 4B; GB10 serving bounds computed from the config (`gb10_serving_bounds`); safetensors sharded checkpoints with an index are the engine's format (the 4B is loaded that way, three shards, OBSERVED in its folder and in the v6 evidence).
@@ -123,7 +123,7 @@ Not gaps (OBSERVED or SOURCE): `Qwen3ForCausalLM` accepted; all config keys know
 Goal: show that the 8B produces correct tokens on the native engine, with the evidence kinds of the 4B work (`examples/qwen3_parity_check.rs`, `tests/qwen3_forward_parity.rs`, R1 reference leg of the campaign).
 
 1. **Tokenizer ids.** Encode 3 fixed strings (an ASCII sentence, a code line, a multi-byte string) with the engine and compare to ids produced once by the Hugging Face tokenizer for the same `tokenizer.json`. Since `tokenizer.json` equals the 4B's, the existing tokenizer tests already cover it: only the template differs.
-2. **Template render.** The golden conversation `[system "You are a careful assistant.", user "Say OK."]` must render to `<|im_start|>system\nYou are a careful assistant.<|im_end|>\n<|im_start|>user\nSay OK.<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n` (derived from the template, UNVERIFIED until compared with the publisher's template run through Jinja off-repo, as the 4B oracle was).
+2. **Template render.** The golden conversation `[system "You are a careful assistant.", user "Say OK."]` must render to `<|im_start|>system\nYou are a careful assistant.<|im_end|>\n<|im_start|>user\nSay OK.<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n` (OBSERVED 2026-10-11: render_oracle.json produced by jinja2 3.1.6 off-repo from the publisher template, 10/10 cases byte-equal to the engine in `qwen3_8b_chat_template.rs`; re-rendered independently from ~/models/qwen3-8b/tokenizer_config.json the same day, 10/10 equal).
 3. **Golden prompt to ids.** Off-repo, once, with the Hugging Face reference (scratch Python allowed outside the repo, `enable_thinking=False`, greedy, 16 new tokens, bf16) record the 16 token ids for the prompt "Reply with the single word OK." Commit them as the expected ids.
 4. **Engine CPU reference.** Run the CPU reference leg (`np1_reference` style, no GPU) for the same 16 tokens: expected equal to step 3 token for token or equal up to a bf16 near-tie, which is then reported with the logit margin (as `qwen3_noise_floor.rs` does for the 4B). Do not accept a mismatch by raising a tolerance.
 5. **GB10 leg, quiet hold only.** Same prompt on the GB10 backend: tokens must equal the CPU reference leg (the R1 identity rule). Record `VmHWM`, warm-up ms, decode ms per token.

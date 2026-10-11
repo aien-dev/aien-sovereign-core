@@ -1,6 +1,6 @@
 # Mutations of tools/aien-test/src/*.rs. Format: id<TAB>file<TAB>sed expression<TAB>what it models.
 # Each must be KILLED (a unit test fails) for run_mutants.sh to pass.
-dirty_tree_not_refused	runner.rs	s#!before.is_empty() && !opts.allow_dirty#false#	a dirty tree is no longer refused
+dirty_tree_not_refused	runner.rs	s#!before.is_empty() && (!opts.allow_dirty || opts.release)#false#	a dirty tree is no longer refused
 timeout_not_enforced	process.rs	s#rx.recv_timeout(spec.timeout)#rx.recv().map_err(|_| mpsc::RecvTimeoutError::Disconnected)#	the wall-clock timeout never fires
 rule_mismatch_passes	verdict.rs	s#position(|r| !r.1)#position(|_r| false)#	a failed expectation rule still yields PASS
 receipt_overwrite_allowed	evidence.rs	s#opts.write(true).create_new(true).mode(0o444);#opts.write(true).create(true).truncate(true).mode(0o444);#	an existing receipt can be overwritten
@@ -50,14 +50,14 @@ cache_blob_check_removed	cache.rs	s#Some(sha) if store.blob_exists(sha) => {}#So
 cache_never_ignored	cache.rs	s#if !cache_allowed {#if false {#	a gate that says cache: never is reused anyway
 cache_reuse_keeps_old_commit	cache.rs	s#core\["commit"\] = json!(commit);#let _ = commit;#	a reuse receipt still names the old commit, so the new commit looks unchecked
 cache_dirty_tree_looks_up	runner.rs	s#if mode == cache::Mode::Allow \&\& (opts.args_override.is_some() || !tree_clean) {#if false {#	a tree with uncommitted changes (or replacement args) still consults the cache
-cache_no_cache_ignored	runner.rs	s#cache::policy(m.cache_allowed, opts.no_cache)#cache::policy(m.cache_allowed, false)#	--no-cache does not force a fresh run
+cache_no_cache_ignored	runner.rs	s#cache::policy(m.cache_allowed, opts.no_cache || opts.release)#cache::policy(m.cache_allowed, opts.release)#	--no-cache does not force a fresh run
 identity_machine_scope_ignored	identity.rs	s#CacheScope::Machine => b.machine_digest.clone(),#CacheScope::Machine => String::new(),#	a machine-scoped check id no longer depends on the machine, so a result from another machine is reused
 identity_dependencies_dropped	identity.rs	s#"dependency_check_ids": deps,#"dependency_check_ids": Vec::<String>::new(),#	a check id ignores the checks it declares it depends on, so a changed dependency leaves it unchanged
 identity_compiler_ignored	identity.rs	s#"compiler_identity": compiler_identity,#"compiler_identity": "",#	a different compiler gives the same check id
 identity_flags_ignored	identity.rs	s#"flags": flags,#"flags": Vec::<String>::new(),#	different build flags give the same check id
 identity_dependency_ids_unsorted	identity.rs	s#^    deps.sort();#    let _ = \&deps;#	the order the dependency ids are given in changes the check id
 identity_missing_input_dropped	identity.rs	s#rows.entry(spec.to_string()).or_insert(None);#let _ = spec;#	a declared input that matches no tracked file leaves no trace in the identity
-identity_golden_not_hashed	identity.rs	s#goldens.push(sha256_hex(&bytes));#let _ = \&bytes;#	editing the golden file does not change the check id
+identity_golden_not_hashed	identity.rs	s#Some(bytes) => goldens.push(sha256_hex(bytes)),#Some(bytes) => { let _ = bytes; }#	editing the golden file does not change the check id
 planner_drops_dependencies	identity.rs	s#graph.with_dependencies(&seeds)#seeds.into_iter().collect()#	path filtering selects the changed gate but drops the gates it declares it depends on
 v2_tolerance_without_bounded_allowed	manifest.rs	s#if tolerance.is_some() \&\& exactness != Exactness::Bounded {#if false {#	a tolerance is accepted on an EXACT check
 v2_analog_eligible_for_exact	manifest.rs	s#if is_analog(b) \&\& exactness == Exactness::Exact {#if false {#	an analog backend may be eligible for an EXACT check
@@ -68,3 +68,13 @@ commit_not_checked	bundle.rs	s#if commit != expect.commit {#if false {#	a bundle
 repo_not_checked	bundle.rs	s#if repo != expect.repository {#if false {#	a bundle for another repository is accepted
 key_not_checked	bundle.rs	s#if pubkey != expect.pubkey_hex.trim() {#if false {#	a bundle signed by an unknown key is accepted
 not_run_counts_as_pass	bundle.rs	s#if !(ran \&\& verdict == "PASS") {#if verdict == "FAIL" {#	a required check that did not run no longer blocks PASS
+success_without_ready	worker.rs	s#"success" if !ready => "error",#"success" if false => "error",#	a bundle the independent check did not find READY is still posted as success
+outbox_overtakes	worker.rs	s#Err(_) => return (posted, files.len() - i),#Err(_) => continue,#	a newer queued status is posted before an older one that GitHub refused
+key_mode_ignored	worker.rs	s#if mode & 0o077 != 0 {#if false {#	the worker signs with a key other users can read
+symlink_exec_escapes	runner.rs	s#(Ok(cp), Ok(cr)) => cp.starts_with(cr),#(Ok(_cp), Ok(_cr)) => true,#	a symlinked run.exec that leads out of the repository is run
+check_id_mismatch_ignored	verify.rs	s#if c\["check_id"\].as_str() != Some(e.check_id.as_str()) {#if false {#	verify accepts a bundle entry for another check id
+receipt_manifest_ignored	verify.rs	s#&& receipt_manifest(s) == manifest_digest =>#\&\& true =>#	verify counts a receipt made from another manifest
+vacuous_pass_gates	bundle.rs	s#"PASS" if self.required == 0 => "NOT_RUN",#"PASS" if false => "NOT_RUN",#	verify-bundle passes a bundle with no required checks
+crumb_close_bad_action	worker.rs	s#^            "test",$#            "done",#	the worker closes its crumb claim with an action crumb refuses, so the claim stays open
+sandbox_refusal_is_a_result	runner.rs	s#^                    facts.exit_status = None;$#                    let _ = ();#	a refusal by the exec helper (exit 2) counts as the program exiting 2
+wt_link_owner_ignored	worker.rs	s#|| md.uid() != 0 ##	a worktree whose .git link the sandbox user owns is opened with the operator git

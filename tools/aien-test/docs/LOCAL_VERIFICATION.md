@@ -1,0 +1,313 @@
+# Local verification with aien-test
+
+ADR 0033 Slices E and H: the planner, the trusted worker, the status and
+verify commands, and the sandbox seam. Everything here runs on the Spark,
+offline, with no outside service in the loop. GitHub only receives a commit
+status when it can be reached; it is never asked for permission.
+
+## Commands
+
+| Command | What it does | Exit |
+|---|---|---|
+| `aien-test plan [--base REF] [--repo NAME] [--operator] [--allow-dirty]` | Which gates BASE..HEAD needs, by section, with the graph digest. BASE defaults to `origin/main`, then `main`. | 0 runnable, 2 NOT_RUN (unmapped path or removed gate), 4 BLOCKED_OPERATOR |
+| `aien-test test changed [--base REF]` | Prints the plan, then runs the non-blocked selection through the normal runner. | the campaign verdict (PASS 0, FAIL 1, NOT_RUN 2, BLOCKED 3/4, MISSING 5) |
+| `aien-test test crate:NAME` | The gates covering a workspace crate (from `cargo metadata`) and every crate that depends on it. | campaign verdict |
+| `aien-test status [--state-dir DIR]` | Pools, GPU lock holder, aien-proof slots, quiet flag, worker heartbeat, pending triggers and outbox, newest bundle per repository. Read-only. | 0 |
+| `aien-test verify COMMIT [--repo NAME] [--base REF] [--state-dir DIR] [--release]` | The independent check of a bundle, printed as the fixed report block below. | 0 only on `MERGE ELIGIBILITY: READY`, else 1 |
+| `aien-test worker [--once REPO SHA] [--poll SECS] [--repos A,B] [--github] [--iterations N] [--state-dir DIR] [--key FILE] [--clones DIR] [--wt-root DIR] [--wt-tool FILE] [--base REF] [--sandbox user\|none --dev-unsandboxed]` | The trusted worker: one head with `--once`, or the loop. Runs gates in the user sandbox unless told otherwise. | `--once`: the plan verdict; loop: 0; 2 on a refused sandbox mode |
+| `aien-test run GATE --sandbox user`, `aien-test test ... --sandbox user` | Any run, with every gate program started through the exec helper. | as before |
+
+`--release` (run, test, verify): qualification mode. No cache reuse, the tree
+must be clean even with `--allow-dirty`, and in `verify` a cached result of a
+gate whose `cache_scope` is `hardware` cannot count.
+
+## The plan
+
+Selection is the set of gates whose watched paths (declared `inputs`, the
+D3 implied inputs, the manifest file, the golden file) cover a changed path,
+plus the always set, closed over dependents and then dependencies. Sections:
+
+- **Required**: runs on this machine now.
+- **Cached**: an evidence receipt already settles it (`plan` only; `verify` takes cached entries from the bundle).
+- **Needs Spark**: pool `qemu`, or `arch`/`bare_metal` requirements.
+- **Needs GB10**: pool `gb10`.
+- **Advisory**: exactness ADVISORY; never required, never moves the verdict.
+- **Blocked**: `PIPELINE_CONFIG_CHANGED` or `OPERATOR_STEP_PENDING`.
+
+A changed path no gate covers is listed under `UNMAPPED` and the verdict is
+`NOT_RUN UNMAPPED_PATH`. A gate that exists at BASE and is gone at HEAD is
+`NOT_RUN GATE_REMOVED`. Both are refusals, not failures: nothing vouches for
+that change.
+
+### Trust rules A1 and A4
+
+- **A1**: the always set (`.aien/always`), the unmapped allow-list
+  (`.aien/unmapped-ok`) and the trusted keys (`.aien/verify.pub`) are read
+  from BASE through git objects, never from the working tree or from HEAD. A
+  change under test cannot widen its own allow-list or add its own key.
+- **A4**: a change under `.aien/`, `tests/gates/`, `.github/workflows/`,
+  `.forgejo/` or `tools/aien-test/` is a pipeline configuration change. The
+  whole plan is `BLOCKED_OPERATOR PIPELINE_CONFIG_CHANGED` unless the operator
+  passes `--operator`.
+
+`graph_digest` is sha256 over the canonical `[{gate, check_id, depends_on}]`
+of the selected gates, sorted by gate. `verify` recomputes it from the
+manifests at COMMIT and rejects a bundle whose digest differs.
+
+## Manifests: `run.exec`
+
+`run.exec` is either a repo-relative path or a bare program name:
+
+- A name **with a slash** (`tools/run.sh`) is resolved against the repository
+  root. Absolute paths and any `..` component are a manifest reject
+  (`BAD_MANIFEST`, exit 1), never NOT_RUN and never a silent run. A path that
+  leaves the repository through a symlink (`tools/run.sh -> /bin/true`) is
+  treated as absent: `MISSING_IMPLEMENTATION`, never run, never PASS.
+- A name **without a slash** (`crumb`, `true`) is a program on a PATH. Under
+  `--sandbox none` that is the runner's own PATH. Under `--sandbox user` it
+  is the exec helper's trusted PATH
+  (`/var/lib/aien-run/cargo/bin:/usr/local/bin:/usr/bin:/bin`, the
+  `TRUSTED_PATH` constant); the runner resolves the name there itself and
+  hands the helper the full path, so the program hashed into the receipt and
+  the cache key (`binary_sha256`) is the program that runs. A name not found
+  there is `MISSING_IMPLEMENTATION`.
+
+This is what lets the shared gate template say `exec: crumb` with
+`args: [verify, .]`: INFRA installs a pinned `crumb` at `/usr/local/bin/crumb`
+(root-owned, on the trusted PATH). Proven end to end on 2026-10-11: a gate
+running `crumb verify .` as `aien-run` in a worker checkout passed.
+
+## The sandbox seam (C8)
+
+`--sandbox user` rewrites every gate launch into
+
+```
+sudo -n /usr/local/sbin/aien-run-exec --cwd CWD --timeout SECS --profile host|qemu|gb10 [--env CARGO_TARGET_DIR=...] -- PROGRAM ARGS
+```
+
+Only `CARGO_TARGET_DIR` is passed through. The runner's own timeout and
+kill rules are unchanged; a gb10 timeout stays advisory. For `run` and
+`test`, `--sandbox none` (the default) leaves the launch exactly as it was.
+
+What the helper requires (INFRA, read from the installed script): `--cwd`
+canonical, and inside `/var/lib/aien-run` only a worktree
+`wt/<repo>/<40-hex>`; host and qemu checks get a private `/tmp`, so a tree
+under `/tmp` is invisible to them; `CARGO_TARGET_DIR` only as
+`/var/lib/aien-run/target/<repo>/pr` or `.../main` (created on demand).
+Inside a run everything is read-only except the run's own worktree, its one
+target dir and a private `/tmp`. When the helper refuses a call it exits 2
+and its stderr starts with `aien-run-exec:`; nothing ran. The runner records
+such a run with no exit status, so it is FAIL and can never meet
+`expects.exit`, not even `exit: 2` (`runner::sandbox_refused`).
+
+## The worker and the sandbox
+
+The worker runs other people's code, so it uses `--sandbox user` unless told
+otherwise. `--sandbox none` runs gates as the worker's own user, who can read
+the signing key: the worker refuses it (exit 2) unless `--dev-unsandboxed` is
+given, and refuses it with `--github` in every case. The library has the same
+rule (`Config.allow_unsandboxed`, default false). Under `--sandbox user` the
+worker passes `CARGO_TARGET_DIR=/var/lib/aien-run/target/<repo>/main` for a
+head already on the base line and `.../pr` for any other head (A2).
+
+Under `--sandbox user` every checkout is made with INFRA's worktree tool
+(`--wt-tool`, default `<clones>/aien-sovereign-core/tools/aien-local-ci/wt.sh`;
+without it the worker refuses to run). `wt.sh sync` refreshes the bare mirror
+`/var/lib/aien-run/mirror/<repo>.git` from the trusted clone (a head no branch
+names is then fetched into the mirror by its id), and `wt.sh add` checks the
+head out at `/var/lib/aien-run/wt/<repo>/<sha>`: files owned by `aien-run`,
+the `.git` link root-owned and pointing into the mirror. An older tree for
+the same head is removed first, never reused. The worker opens that tree
+with its own git only after checking the link (a regular root-owned file
+nobody else can write, pointing into `<mirror>/worktrees/`), and then only
+through git's command-line `safe.directory` for that one path
+(`process::trust_worktree`): every git setting and hook git reads there is
+the operator's mirror, never the checked-out code. `wt.sh remove` deletes
+the tree afterwards.
+
+Before it fetches or runs anything the worker refuses a repository name that
+is not a plain name (letters, digits, `.`, `_`, `-`, not starting with a
+dot), a commit that is not 40 lowercase hex, and a signing key whose mode
+gives group or other any access (it must be 0600).
+
+## The worker
+
+For one head `REPO SHA`:
+
+1. The refusals above (names, key mode, sandbox mode).
+2. `git fetch --all` in the trusted clone `<clones>/<repo>` (default
+   `~/workspace/<repo>`); its checkout is never touched.
+3. Under `--sandbox user`: `wt.sh sync` and `wt.sh add` (see above). Under
+   `--sandbox none`: `git worktree add --detach <wt-root>/<repo>/<sha>`
+   from the clone (default `/var/lib/aien-run/wt`).
+4. `crumb claim` on the worktree when it has a `.crumb` (a missing one is a
+   journal note, not an error).
+5. Plan against BASE: `origin/main` (`--base` overrides), or the head's first
+   parent when the head is already on that line (the tip of main or an older
+   main commit). `verify` applies the same rule, so both compute one plan.
+6. Run the non-blocked selection with the pools and the sandbox; receipts go
+   to `evidence/<repo>/<sha>/`.
+7. Build the bundle: one `checks[]` entry per planned gate with status
+   `run`, `cached`, `blocked` or `not_run`; `tree_digest` is sha256 of the
+   commit's tree id; the executor is the key's fingerprint with class
+   `spark`. Sign with `~/.aien/verify.key` and write
+   `bundles/<repo>/<sha>/bundle.json` (canonical bytes). The bundle also
+   carries a `plan` member (`verdict`, `reason`, `unmapped`, `removed`,
+   `blocked`): the bundle algebra says PASS when no required check failed,
+   which is vacuously true for an unmapped change with no checks. The plan
+   member is signed with the rest, so a reader can tell the vacuous case
+   apart: `verify-bundle` reports such a bundle as NOT_RUN (see below).
+8. Run the independent check on the bundle just written, exactly as
+   `aien-test verify` does (keys at BASE, signature, graph digest, check ids,
+   receipts and their manifests, crumb). The journal records `verify: READY`
+   or `BLOCKED` with the reasons.
+9. Heartbeat (`worker.heartbeat`), journal line (`journal.jsonl`), `crumb
+   close aien-worker . worker test`, remove the worktree (`wt.sh remove`
+   under `--sandbox user`). A crumb failure is
+   a journal note, never a verdict change.
+
+With `--github` the commit status `AIEN Verification (Spark)` is posted:
+`success` only when step 8 said READY (which needs the bundle and the plan to
+say PASS), `failure` when the bundle or the plan says FAIL, `error`
+otherwise; the description names the bundle path. When `gh` cannot reach
+GitHub the status is queued as `outbox/<seq>.<repo>.<sha>.json`, where `<seq>`
+is a 20-digit number that only grows, and the journal says `publication:
+pending`. Every later round replays the outbox first, in queue order; the
+first status GitHub refuses stops the replay, so a newer status never
+overtakes an older one. A newer status for the same head replaces the queued
+one and moves to the end. A file that is not a status is renamed to `*.bad`
+and journaled. GitHub being down never fails a local verification.
+
+The loop (`worker` without `--once`) serves trigger files
+`trigger/<repo>.<sha>` oldest first (by modification time), then, with
+`--github`, the open pull request heads and `main` of each `--repos` entry
+that has no bundle yet, then sleeps `--poll` seconds. `--iterations N`
+bounds the rounds (tests). Trigger names that are not a plain repository
+name and a 40-hex commit are ignored.
+
+## verify-bundle and the vacuous PASS
+
+`aien-test verify-bundle` (the GitHub thin gate's command) prints and exits
+with the gate verdict, not the raw algebra: a bundle with no required check,
+or whose signed `plan.verdict` is not PASS, is `NOT_RUN` (exit 2) with the
+reason in brackets, even though its `verdict` member says PASS.
+
+## The verify report
+
+```
+AIEN LOCAL VERIFICATION
+Repository: github.com/aien-dev/<repo>
+Commit: <40 hex>
+Changed files: N
+Affected gates: N (names) | none
+Executed gates: ...
+Cached gates: ...
+Failed gates: ...
+Blocked gates: ...
+Crumb status: CURRENT | STALE
+Evidence status: VERIFIED | INVALID
+Hardware status: QUALIFIED | NOT_REQUIRED | BLOCKED
+Final verdict: PASS | FAIL | NOT_RUN | BLOCKED
+Queue time: N ms | n/a
+Build time: n/a
+Test time: N ms | n/a
+Total time: N ms | n/a
+MERGE ELIGIBILITY: READY | BLOCKED
+```
+
+Lines after the block (`Evidence note`, `Crumb note`, `Verdict reason`,
+`Unmapped`, `Problem`, `Bundle`) say why. Checks, in order: the bundle's
+shape and signature against the keys at BASE (several keys allowed, one hex
+per line, `#` comments; the key the bundle names must be one of them, else
+`UNKNOWN_KEY`), repository, commit, executor fingerprint, every required
+gate present, the verdict algebra; then the graph digest against a fresh
+plan (BASE by the worker's rule above); then every entry's `check_id` must
+be the one the plan computes at COMMIT (`CHECK_ID_MISMATCH`); then every
+`run` entry's receipt must exist under `evidence/<repo>/<commit>/` with the
+same gate, commit and verdict (an altered receipt no longer matches its
+digest and is reported missing) and with the `manifest_digest` of the gate's
+manifest at COMMIT (`MANIFEST_MISMATCH`); then the plan judge. Every
+rejection is a `Problem` or `Evidence note` line and leaves READY out of
+reach; no path defaults to PASS. Crumb status comes from `crumb verify .` in a temporary
+detached worktree at COMMIT, removed afterwards. Queue time is the sum of
+`pool_wait_ms`, test time the sum of `duration_ms` over the executed
+receipts, total time the bundle's `finished_utc - started_utc`; build time
+is not measured yet.
+
+`READY` requires: evidence VERIFIED, final verdict PASS, crumb CURRENT, no
+unmapped path, no blocked gate, no problem line.
+
+## File layout
+
+```
+~/.aien/verify.key                       the worker's signing seed, mode 0600
+<repo>/.aien/verify.pub                  trusted public keys, read at BASE
+<repo>/.aien/always                      gates that always run, read at BASE
+<repo>/.aien/unmapped-ok                 paths no gate needs to cover, read at BASE
+~/.local/state/aien-local-ci/
+  evidence/<repo>/<sha>/<digest>.json    receipts of that run
+  bundles/<repo>/<sha>/bundle.json       the signed bundle
+  trigger/<repo>.<sha>                   a run request (removed when served)
+  outbox/<seq>.<repo>.<sha>.json         a commit status waiting for GitHub, in queue order
+  journal.jsonl                          one line per finished head
+  worker.heartbeat                       pid, phase, repo, sha, utc
+/var/lib/aien-run/wt/<repo>/<sha>        the worker's detached worktree
+/var/lib/aien-run/target/<repo>/pr|main  cargo target dir per trust class (sandbox user)
+/usr/local/sbin/aien-run-exec            the exec helper (INFRA)
+```
+
+`<repo>` is the last segment of the repository name
+(`github.com/aien-dev/aien-sovereign-core` gives `aien-sovereign-core`).
+
+## Tests
+
+`cargo test -p aien-test` covers the planner (selection, sections, A1, A4,
+removed gates, verdict algebra), the sandbox rewrite, status parsing, the
+gate verdict of `verify-bundle`, the worker's name and sandbox rules, and in
+`tests/local_ci.rs` the pipeline end to end on a throwaway repository: a
+worker run that `verify` reports READY, then the refusals: an altered
+receipt, a bad signature, a bundle presented for another commit, a required
+check left out of a re-signed bundle, a hardware-scoped cached result under
+`--release`, an executor whose key is not in `verify.pub`, a signing key
+another uid cannot read, a signing key with mode 0644, an entry for another
+check id, a receipt made from another manifest, `--sandbox none` without
+`--dev-unsandboxed` or with `--github` (library and CLI), unsafe repository
+names and commit ids, a status that is never `success` when the independent
+check is not READY, GitHub down then back (fake `gh`), an outbox that
+replays in queue order and stops at the first refusal, a trigger file served
+by the loop, a head on main checked against its first parent, a bare
+`exec: true` running, escaping exec paths refused and a symlinked exec that
+leaves the tree never run, and, when the helper is installed, a gate and a
+whole worker run in the user sandbox through `wt.sh` (in
+`/var/lib/aien-run/wt/aien-test-selftest`, because the sandbox does not share
+`/tmp`), a wrong target dir refused by the helper with exit 2 and never
+counted as the program's exit, only a root-owned `wt.sh` link trusted, and
+the user sandbox refused without the worktree tool. `mutations/run_mutants.sh` must
+kill every line of `mutations/aien-test.mutants`.
+
+## Accepted limits (ENGINE-2 review, 2026-10-11)
+
+- A head that no branch names is fetched into the `wt.sh` mirror by its id;
+  its objects stay there unreferenced until git prunes them. The mirror is
+  readable by `aien-run`, like every other object in it.
+- While a worktree is trusted, the worker sets `GIT_CONFIG_COUNT` and
+  `GIT_CONFIG_KEY_n` / `GIT_CONFIG_VALUE_n` on the git and crumb processes it
+  starts; a value of these variables in the worker's own environment is
+  replaced for those processes.
+- The `main` target dir is not wiped after a FAIL or timeout yet (A2 asks for
+  it); the dir is owned by `aien-run`, so the wipe has to run through the
+  helper or `sudo -n rm -rf`. Until then a poisoned `main` target dir is
+  cleared by INFRA's `gc.sh` or by hand.
+- `--dev-unsandboxed` runs are not marked in the bundle (the executor class
+  stays `spark`); only the journal and the command line show it. Never use
+  it on a machine whose bundles are published.
+- A `cached` entry is trusted through the bundle signature; `verify` does not
+  reopen the receipt it was resolved from.
+- `verify` has no `--operator`: a pipeline-configuration change is never
+  READY, also after the operator ran it by hand with `worker --operator`. The
+  operator merges such a change himself (A1).
+- A head whose base is a root commit with no parent cannot be planned on the
+  base line (the worker reports an error, never PASS).
+- Build time is `n/a` in the report. Total time comes from the bundle's
+  whole-second timestamps, so a run inside one second reports `0 ms`; the
+  per-gate test time is exact.
