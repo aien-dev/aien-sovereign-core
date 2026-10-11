@@ -240,6 +240,31 @@ pub fn pre_run(m: &Manifest, f: &Facts) -> Option<(Verdict, String)> {
     None
 }
 
+/// Exit status with which a program says it could not run because an input it
+/// does not own is absent (a model checkpoint, say), together with a
+/// `not_run_reason` observation holding a plain lowercase name. The verdict is
+/// then NOT_RUN with that reason: a refusal, never PASS. Without a valid
+/// reason, or when the manifest itself expects 77, it is an ordinary exit.
+pub const SELF_NOT_RUN_EXIT: i64 = 77;
+
+fn self_not_run(m: &Manifest, f: &Facts) -> Option<String> {
+    if f.timed_out || f.exit_status != Some(SELF_NOT_RUN_EXIT) || m.expect_exit == SELF_NOT_RUN_EXIT
+    {
+        return None;
+    }
+    let o = f
+        .observations
+        .iter()
+        .rev()
+        .find(|o| o.name == "not_run_reason")?;
+    let s = o.value.as_str()?;
+    let plain = !s.is_empty()
+        && s.len() <= 64
+        && s.bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_');
+    plain.then(|| s.to_string())
+}
+
 pub fn derive(m: &Manifest, f: &Facts) -> Derived {
     if let Some((verdict, reason)) = pre_run(m, f) {
         return Derived {
@@ -255,6 +280,8 @@ pub fn derive(m: &Manifest, f: &Facts) -> Derived {
         .collect();
     let (verdict, reason) = if f.timed_out {
         (Verdict::Fail, "timeout".to_string())
+    } else if let Some(r) = self_not_run(m, f) {
+        (Verdict::NotRun, r)
     } else if f.exit_status != Some(m.expect_exit) {
         (Verdict::Fail, "rc_nonzero".to_string())
     } else if let Some(idx) = rules.iter().position(|r| !r.1) {
@@ -362,6 +389,43 @@ mod tests {
         assert_eq!(derive(&m(None), &f).reason, "rule:0");
     }
 
+    #[test]
+    fn exit_77_with_a_reason_is_not_run_and_nothing_else_is() {
+        let reason = |v: Value| Observation {
+            name: "not_run_reason".into(),
+            value: v,
+        };
+        let mut f = good_facts();
+        f.exit_status = Some(77);
+        f.observations.push(reason(json!("model_missing")));
+        let d = derive(&m(None), &f);
+        assert_eq!(
+            (d.verdict, d.reason.as_str()),
+            (Verdict::NotRun, "model_missing")
+        );
+        // No reason, or a reason that is not a plain name: an ordinary failure.
+        f.observations.retain(|o| o.name != "not_run_reason");
+        assert_eq!(derive(&m(None), &f).reason, "rc_nonzero");
+        for bad in [json!("Model Missing"), json!(""), json!(3), json!("a;b")] {
+            let mut g = f.clone();
+            g.observations.push(reason(bad));
+            assert_eq!(derive(&m(None), &g).reason, "rc_nonzero");
+        }
+        // The reason never turns another exit into NOT_RUN, and a timeout stays a timeout.
+        let mut g = good_facts();
+        g.exit_status = Some(1);
+        g.observations.push(reason(json!("model_missing")));
+        assert_eq!(derive(&m(None), &g).reason, "rc_nonzero");
+        let mut g = f.clone();
+        g.observations.push(reason(json!("model_missing")));
+        g.timed_out = true;
+        assert_eq!(derive(&m(None), &g).reason, "timeout");
+        // A manifest that expects 77 keeps its own meaning.
+        let m77 = m(Some(("exit: 0", "exit: 77")));
+        assert_eq!(derive(&m77, &g.clone()).reason, "timeout");
+        g.timed_out = false;
+        assert_eq!(derive(&m77, &g).verdict, Verdict::Pass);
+    }
     #[test]
     fn exit_status_must_match_expectation() {
         let mut f = good_facts();

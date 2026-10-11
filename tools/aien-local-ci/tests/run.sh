@@ -121,6 +121,17 @@ fi
 refused() { [[ $1 -eq 2 ]]; }   # exit 2 = refused by aien-run-exec before anything ran
 T_PR="$RUN_HOME/target/aien-sovereign-core/pr"; T_MAIN="$RUN_HOME/target/aien-sovereign-core/main"
 
+# 14b the operator's ~/models is visible read-only at /var/lib/aien-run/models (model gates), never writable
+if [[ -d $HOME/models && -d /var/lib/aien-run/models ]]; then
+  probe=$(cd "$HOME/models" && ls | head -1)
+  out=$(run --cwd /tmp --timeout 20 --profile host -- sh -c "M=/var/lib/aien-run/models
+    [ -e \"\$M/$probe\" ] && echo SEEN
+    touch \$M/aien-run-probe 2>/dev/null && echo MODELS-WRITABLE
+    echo done" 2>&1 | tr '\n' ' ')
+  [[ $out == "SEEN done " ]] && ok "host: ~/models mounted read-only at /var/lib/aien-run/models" || bad "models read-only" "$out"
+else
+  printf 'SKIP 14b: no ~/models or no /var/lib/aien-run/models mount point\n'
+fi
 # 14 the sandbox home is read-only inside every profile: no ~/.cargo/config.toml, no CARGO_HOME config,
 #    no swapping the registry or the cargo proxies, no new dotfiles
 for p in host gb10; do

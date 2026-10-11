@@ -32,6 +32,22 @@ cd "$here/../../.." || exit 3
 ckpt=${AIEN_E2E_CHECKPOINT:-$HOME/models/TinyLlama-1.1B-Chat-v1.0}
 out=${AIEN_E2E2_OUT_DIR:-$HOME/workspace/test-queue-logs}
 sha8=$(git rev-parse HEAD | cut -c1-8)
+# The sandbox HOME is read-only: receipts then go to a fresh directory in the sandbox's private /tmp.
+if [ -z "${AIEN_E2E2_OUT_DIR:-}" ] && [ ! -w "$HOME" ]; then
+	out=$(mktemp -d) || exit 3
+fi
+# In the user sandbox, aien-run-exec mounts the operator's ~/models read-only at
+# /var/lib/aien-run/models, which is $HOME/models there, so the default above finds the checkpoint.
+# No checkpoint: NOT_RUN with reason model_missing (exit 77 + not_run_reason, see aien-test
+# verdict.rs SELF_NOT_RUN_EXIT), never PASS. The weights' sha256 is recorded either way it runs.
+model_check() {
+	if [ ! -f "$ckpt/model.safetensors" ] || [ ! -f "$ckpt/tokenizer.json" ]; then
+		echo "checkpoint not found: $ckpt (model.safetensors, tokenizer.json)" >&2
+		obs not_run_reason '"model_missing"'
+		exit 77
+	fi
+	obs model_sha256 "\"$(sha256sum "$ckpt/model.safetensors" | cut -c1-64)\""
+}
 mkdir -p "$out" || exit 3
 
 # The leading newline keeps the line whole when a test left a partial line.
@@ -45,6 +61,7 @@ run_test() {
 }
 
 run_main() {
+	model_check
 	cargo fmt --all -- --check
 	rc=$?
 	obs fmt_rc "$rc"
@@ -75,6 +92,7 @@ run_mutant() {
 		exit 2
 		;;
 	esac
+	model_check
 	patch="crates/aien-runtime/tests/prefill_e2e2_mutants/mutant_$id.patch"
 	lg="$out/AIENTEST-DOGFOOD-$sha8-$id.log"
 	git apply "$patch" || exit 3
