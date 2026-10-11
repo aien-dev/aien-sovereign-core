@@ -1,0 +1,47 @@
+{
+  "status": "DRAFT NOT FROZEN (D1, sc#384): v7 candidate Qwen/Qwen3-8B rev b968826d9c46dd6066d109eabc6255188de91218. Hashes below were computed 2026-10-11 from the downloaded files (OBSERVED) and match the Hugging Face LFS oids for the five shards and tokenizer.json (SOURCE https://huggingface.co/api/models/Qwen/Qwen3-8B/tree/b968826d9c46dd6066d109eabc6255188de91218). model_sha256 and all pins are NOT filled; they are filled at freeze.",
+  "placeholder": "TO FILL AT FREEZE",
+  "model": {
+    "model_revision": "b968826d9c46dd6066d109eabc6255188de91218",
+    "model_sha256": "TO FILL AT FREEZE",
+    "model_sha256_note": "TO FILL AT FREEZE: the daemon prints it on the CHECKPOINT_SHARDS line; the freeze checklist (SPEC-v7-DRAFT.md Section 5) requires an engine smoke run first.",
+    "model_digest_kind": "index+shards",
+    "index_sha256": "f9fdbcb91c23971c13ec5d5f2573d2349e8f61f2f049371ec699281748fdb1bc",
+    "shards": [
+      [
+        "model-00001-of-00005.safetensors",
+        "31d6a825ae35f11fb85b195b4c42c146c051e446433125a215336abdf95cbf5f"
+      ],
+      [
+        "model-00002-of-00005.safetensors",
+        "5991236cea6fe21f3d43cab0f0e84448734fbbe0789816202989f2ddc9d18282"
+      ],
+      [
+        "model-00003-of-00005.safetensors",
+        "c5185c4794be2d8a9784d5753c9922db38df478ce11f9ed0b415b7304d896836"
+      ],
+      [
+        "model-00004-of-00005.safetensors",
+        "b5ee7de71fbf17db3d5704e0c8f2bc7d005ca9e1d7ca2aeb19827b0cfcaa917a"
+      ],
+      [
+        "model-00005-of-00005.safetensors",
+        "20c2d6366ab85c90786ccdd829cd2b9e7d30ef3b2ebbb998280e7e4014b542ff"
+      ]
+    ],
+    "tokenizer_sha256": "aeb13307a71acd8fe81861d94ad54ab689df773318809eed3cbe794b4492dae4",
+    "config_sha256": "f7c4eadfbbf522470667b797a3c89be2524832d2d599797248dc304fff447c30",
+    "generation_config_sha256": "2325da0f15bb848e018c5ae071b7943332e9f871d6b60e2ed22ca97d4cb993d2",
+    "tokenizer_config_sha256": "d5d09f07b48c3086c508b30d1c9114bd1189145b74e982a265350c923acd8101"
+  },
+  "pins": {
+    "sovereign_core_commit": "TO FILL AT FREEZE",
+    "omega_lock_commit": "TO FILL AT FREEZE",
+    "physics_lock_commit": "TO FILL AT FREEZE",
+    "aienos_lock_commit": "TO FILL AT FREEZE",
+    "cargo_lock_sha256": "TO FILL AT FREEZE",
+    "aien_cli_sha256": "TO FILL AT FREEZE",
+    "np1_reference_sha256": "TO FILL AT FREEZE",
+    "np1_edit_merge_sha256": "TO FILL AT FREEZE"
+  }
+}
