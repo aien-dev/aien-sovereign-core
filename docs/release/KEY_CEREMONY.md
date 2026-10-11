@@ -57,6 +57,8 @@ It makes a throwaway key labelled REHEARSAL everywhere. It is never a release ke
 
 ## After the ceremony
 
+Step-by-step version for the operator: `CEREMONY-RUNBOOK-DRAKE.md`.
+
 - Hand `public/allowed_signers` and `public/ceremony-record.txt` to the orchestrator. It opens one pull request that
   puts that key line into `docs/release/allowed_signers` and `install.sh` (`AIEN_RELEASE_SIGNER`), and the tests prove
   a release sealed with it installs as `signature_check: release`. You check the fingerprint in that pull request

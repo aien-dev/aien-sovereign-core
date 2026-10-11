@@ -33,6 +33,12 @@ jobs:
       - name: Offline-signing handoff (ceremony rehearsal, offline sign, publish gate; throwaway keys only)
         run: bash scripts/test-offline-signing.sh
 
+      - name: Public-key integration (ceremony public record to trust config; throwaway keys only)
+        run: bash scripts/test-public-key-integration.sh
+
+      - name: Release trust config is consistent (placeholder or pinned with matching ceremony record)
+        run: bash scripts/check-release-trust-config.sh
+
       - name: Release gate negative tests (pins, digests, model inputs, signatures)
         run: bash scripts/test-release-checks.sh
 

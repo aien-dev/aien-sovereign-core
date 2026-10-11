@@ -77,4 +77,6 @@ listed in `SHA256SUMS.txt` and therefore covered by the signature.
 - `scripts/test-install-release.sh`: signature classes, receipts, negative install rows.
 - `scripts/test-offline-signing.sh`: ceremony rehearsal, offline sign, publish gate refusals.
 - `scripts/test-release-signing-workflow.sh`: no release key in CI; release.yml only drafts; publish only after the gate.
+- `scripts/test-public-key-integration.sh`: from only the ceremony's public folder: the trust-config change is a reviewable 3-file diff, the record fingerprint matches the pinned key, matching key installs as `release`, other key / tampered archive / tampered checksums refused.
+- `scripts/check-release-trust-config.sh`: run in CI; passes in the PLACEHOLDER state and, after the ceremony, only if `allowed_signers`, `install.sh` and `ceremony-record.txt` agree.
 - `scripts/test-release-checks.sh`: signature and checksum verification, placeholder refusal.
