@@ -1,5 +1,5 @@
 //! Qwen3-8B correctness smoke driver (docs/campaigns/open-model-qwen3/SMOKE-8B-v1.md, sc#384).
-//! One fixed conversation, thinking off, greedy, 16 new tokens, on the daemon's path (strict
+//! Two fixed conversations (PROMPTS), thinking off, greedy, on the daemon's path (strict
 //! safetensors load, shared-KV runtime, `ChatTokenizer::from_model_dir`, one warm-up turn).
 //! Prints ONE JSON object: prompt text and ids, output ids, finish reason, fallback_count.
 //!
@@ -16,9 +16,17 @@ use sha2::Digest;
 use std::sync::Arc;
 
 const SYSTEM: &str = "You are a careful assistant.";
-const USER: &str = "Reply with the single word OK.";
-const EXPECTED_PROMPT: &str = "<|im_start|>system\nYou are a careful assistant.<|im_end|>\n<|im_start|>user\nReply with the single word OK.<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n";
-const MAX_TOKENS: usize = 16;
+const GEN_PROMPT: &str = "<|im_start|>assistant\n<think>\n\n</think>\n\n";
+/// (name, user text, max new tokens). Prompt 1 is the original one-token check; prompt 2 must reply with
+/// at least 16 tokens before eos (SMOKE-8B-v1.md).
+const PROMPTS: &[(&str, &str, usize)] = &[
+    ("p1", "Reply with the single word OK.", 16),
+    (
+        "p2",
+        "List the months of the year, one per line, nothing else.",
+        48,
+    ),
+];
 
 async fn turn(
     spine: &mut aien_runtime::AienRuntimeSpine,
@@ -132,42 +140,51 @@ async fn main() {
     turn(&mut spine, &mut backend, &wids, 1, &stop)
         .await
         .expect("warm-up");
-    let msgs = vec![
-        aien_runtime::ChatTurn {
-            role: "system".into(),
-            content: SYSTEM.into(),
-        },
-        aien_runtime::ChatTurn {
-            role: "user".into(),
-            content: USER.into(),
-        },
-    ];
-    let text = aien_runtime::format_chat(tok.template(), &msgs).expect("chat");
-    if text != EXPECTED_PROMPT {
-        die(
-            4,
-            &format!("rendered prompt differs from the golden text: {text:?}"),
-        );
-    }
-    let ids = tok.encode(&text).expect("encode");
-    let (out, finish, ms) = turn(&mut spine, &mut backend, &ids, MAX_TOKENS, &stop)
-        .await
-        .expect("turn");
-    let reply = tok.decode_opts(&out, true).expect("decode");
     let sha = |b: &[u8]| -> String {
         sha2::Sha256::digest(b)
             .iter()
             .map(|x| format!("{x:02x}"))
             .collect()
     };
+    let mut results = Vec::new();
+    for (name, user, max_tokens) in PROMPTS {
+        let msgs = vec![
+            aien_runtime::ChatTurn {
+                role: "system".into(),
+                content: SYSTEM.into(),
+            },
+            aien_runtime::ChatTurn {
+                role: "user".into(),
+                content: (*user).into(),
+            },
+        ];
+        let text = aien_runtime::format_chat(tok.template(), &msgs).expect("chat");
+        let expected = format!(
+            "<|im_start|>system\n{SYSTEM}<|im_end|>\n<|im_start|>user\n{user}<|im_end|>\n{GEN_PROMPT}"
+        );
+        if text != expected {
+            die(
+                4,
+                &format!("rendered prompt {name} differs from the golden text: {text:?}"),
+            );
+        }
+        let ids = tok.encode(&text).expect("encode");
+        let (out, finish, ms) = turn(&mut spine, &mut backend, &ids, *max_tokens, &stop)
+            .await
+            .expect("turn");
+        let reply = tok.decode_opts(&out, true).expect("decode");
+        results.push(serde_json::json!({
+            "name": name, "prompt_sha256": sha(text.as_bytes()), "prompt_ids": ids,
+            "max_tokens": max_tokens, "output_ids": out, "finish": finish, "ms": ms,
+            "reply": reply,
+        }));
+    }
     println!(
         "{}",
         serde_json::json!({
             "leg": a[2], "backend": TensorBackend::name(tb.as_ref()),
             "model_dir": dir, "model_id": config.model_id, "template": tok.template().name(),
-            "prompt_sha256": sha(text.as_bytes()), "prompt_ids": ids,
-            "max_tokens": MAX_TOKENS, "output_ids": out, "finish": finish, "ms": ms,
-            "reply": reply, "fallback_count": tb.fallback_count(),
+            "prompts": results, "fallback_count": tb.fallback_count(),
         })
     );
 }

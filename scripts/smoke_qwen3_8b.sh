@@ -51,9 +51,9 @@ case "${1:-}" in
     T0=$(date +%s)
     "$BIN" "$MODEL_DIR" cpu >"$OUT/cpu.json" 2>"$OUT/cpu.err" || fail "cpu leg exit $?, see $OUT/cpu.err"
     echo "cpu leg wall seconds: $(( $(date +%s) - T0 ))"
-    jq -e '(.leg=="cpu") and (.output_ids|length>0) and (.fallback_count==0)' "$OUT/cpu.json" >/dev/null || fail "cpu result not well formed"
-    jq '{golden_for:"SMOKE-8B-v1", source:"CPU reference leg", prompt_sha256, prompt_ids, output_ids, reply}' "$OUT/cpu.json" >"$GOLDEN"
-    echo "golden output_ids: $(jq -c .output_ids "$GOLDEN")"
+    jq -e '(.leg=="cpu") and (.prompts|length==2) and (all(.prompts[]; .output_ids|length>0)) and (.prompts[1].output_ids|length>=16) and (.fallback_count==0)' "$OUT/cpu.json" >/dev/null || fail "cpu result not well formed"
+    jq '{golden_for:"SMOKE-8B-v1", source:"CPU reference leg", prompts:[.prompts[]|{name,prompt_sha256,prompt_ids,output_ids,reply}]}' "$OUT/cpu.json" >"$GOLDEN"
+    echo "golden output_ids: $(jq -c '[.prompts[].output_ids]' "$GOLDEN")"
     echo "CPU leg done: golden recorded in $GOLDEN (not a chip verdict)"
     ;;
   gb10)
@@ -65,8 +65,7 @@ case "${1:-}" in
     env -u AIEN_DEV_FALLBACK -u AIEN_OMEGA_CTA_BUDGET -u AIEN_OMEGA_SPIN_US AIEN_GPU_BACKEND=omega AIEN_REQUIRE_BLACKWELL=1 \
       "$BIN" "$MODEL_DIR" gb10 >"$OUT/gb10.json" 2>"$OUT/gb10.err" || fail "gb10 leg exit $?, see $OUT/gb10.err"
     jq -e '.leg=="gb10"' "$OUT/gb10.json" >/dev/null || fail "gb10 result not well formed"
-    [ "$(jq -c .output_ids "$OUT/gb10.json")" = "$(jq -c .output_ids "$GOLDEN")" ] || fail "token ids differ from the CPU golden: $(jq -c .output_ids "$OUT/gb10.json") vs $(jq -c .output_ids "$GOLDEN")"
-    [ "$(jq -c .prompt_ids "$OUT/gb10.json")" = "$(jq -c .prompt_ids "$GOLDEN")" ] || fail "prompt ids differ from the golden"
+    [ "$(jq -c '[.prompts[]|[.name,.prompt_ids,.output_ids]]' "$OUT/gb10.json")" = "$(jq -c '[.prompts[]|[.name,.prompt_ids,.output_ids]]' "$GOLDEN")" ] || fail "prompt or output ids differ from the CPU golden (both prompts must be equal)"
     [ "$(jq .fallback_count "$OUT/gb10.json")" = 0 ] || fail "fallback_count is $(jq .fallback_count "$OUT/gb10.json"), not 0"
     echo "SMOKE-8B PASS (GB10 token ids equal the CPU golden, fallback_count 0)"
     ;;
