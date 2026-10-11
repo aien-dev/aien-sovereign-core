@@ -94,4 +94,4 @@ host-built fixture, not a provisioned identity.
 `run-dry.sh <wrap commit> <build folder>` (gate G6: dry part 1 in one hold, then `g6-gate.sh` over D1 D2 D3, writes `records/g6.txt`
 and the daemon's `CHECKPOINT_SHARDS` line for checklist item 4), `run.sh <freeze commit> <build folder>` (four real parts, refuses
 without `G6 PASS` and without `frozen-v7.json` FROZEN). Each is the v6 launcher with the v7 names; the diff against `evidence-v6/`
-is the review. Holds are 40 minutes because the 8B is predicted to decode about half as fast as the 4B (v6 parts: 7 to 8 minutes).
+is the review. Holds are 20 minutes: quietlock refuses longer holds without Drake's approval token (attempt 1, 2026-10-11T22:10:23Z, rc 77, refused with 40; recorded in `evidence-v7/attempt-1-hold-refused/`) and on overrun keeps the flag until the command exits without killing it, so a part that runs past 20 minutes (the 8B is predicted to take about twice the v6 7 to 8 minutes) completes under the kept flag.
