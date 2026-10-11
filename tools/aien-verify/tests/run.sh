@@ -158,6 +158,40 @@ if [ -d "$R1" ]; then
   printf '%s\n' "$out" | grep -q '^base_verdict_id a50fccb63363ef9224a19bd8bf4f249754abf5d88667ba0fd6ce93dfb8d63d80$' && ok "RUN-1 base_verdict_id unchanged" || bad "RUN-1 base_verdict_id unchanged"
 fi
 
+
+# VERIFIER-v1.1-e3m (sc#423): E3m D4 follows the receipt's d4_rule; recorded GB10 folders keep their verdict ids
+C9=9e3d5f4e23d65ac17be8f2f4ca48355f0aaa486f67ff5a8a8044dcdd646d34e8
+R2=$runs/RUN-2-GB10-20261011T030554Z
+R3=$runs/RUN-3-GB10-20261011T045450Z
+g9() { "$bin" "$1" --contract-sha256 $C9 2>/dev/null; }
+if [ -d "$R2" ]; then
+  out=$(g9 "$R2")
+  printf '%s\n' "$out" | grep -q '^verdict_id af9e744cc3187400e00599159999f357f53c1df867556f62c8f71a552662800c$' && ok "RUN-2-GB10 verdict_id unchanged" || bad "RUN-2-GB10 verdict_id unchanged"
+  printf '%s\n' "$out" | grep -q '^# (supplementary) E3m FAIL: .*D4 required name(s) missing: \["windmill"\]' && ok "RUN-2-GB10 E3m FAIL (no d4_rule: exact rule)" || bad "RUN-2-GB10 E3m exact rule"
+fi
+if [ -d "$R3" ]; then
+  out=$(g9 "$R3")
+  printf '%s\n' "$out" | grep -q '^verdict_id 9ca9b7af6f9255fc7247acae33492768252d5f2017b40c29c159e04fbca833d5$' && ok "RUN-3-GB10 verdict_id unchanged" || bad "RUN-3-GB10 verdict_id unchanged"
+  printf '%s\n' "$out" | grep -q '^# (supplementary) E3m PASS' && ok "RUN-3-GB10 E3m PASS under its d4_rule" || bad "RUN-3-GB10 E3m PASS under its d4_rule"
+  printf '%s\n' "$out" | grep -q 'status_disagreement: E3m' && bad "RUN-3-GB10 E3m disagreement gone" || ok "RUN-3-GB10 E3m disagreement gone"
+  printf '%s\n' "$out" | grep -q 'status_disagreement: CTRL-E4 receipt says PASS but the facts derive NOT_RUN' && ok "RUN-3-GB10 CTRL-E4 disagreement kept" || bad "RUN-3-GB10 CTRL-E4 disagreement kept"
+  relink() { # repair every link and manifest line of $work/m after an edit, so only the edited fact differs
+    p=0000000000000000000000000000000000000000000000000000000000000000
+    for f in $(ls "$work/m/chain"/0*.json | LC_ALL=C sort); do
+      sed -i "s/\"prev_receipt_sha256\": \"[0-9a-f]*\"/\"prev_receipt_sha256\": \"$p\"/" "$f"; p=$(sha256sum "$f" | cut -d' ' -f1)
+    done
+    : >"$work/newsums"
+    while read -r h q; do
+      if [ -f "$work/m/$q" ]; then printf '%s  %s\n' "$(sha256sum "$work/m/$q" | cut -d' ' -f1)" "$q" >>"$work/newsums"; else printf '%s  %s\n' "$h" "$q" >>"$work/newsums"; fi
+    done <"$work/m/chain/SHA256SUMS"
+    cp "$work/newsums" "$work/m/chain/SHA256SUMS"
+  }
+  mutant "$R3"; jq -c 'del(.d4_rule)' "$work/m/chain/007-E3m.json" >"$work/e" && cp "$work/e" "$work/m/chain/007-E3m.json"; relink
+  out=$(g9 "$work/m")
+  printf '%s\n' "$out" | grep -q '^chain_unbroken true$' && printf '%s\n' "$out" | grep -q '^# (supplementary) E3m FAIL: .*windmill' && ok "RUN-3 copy without d4_rule: exact rule, E3m FAIL" || bad "RUN-3 copy without d4_rule"
+  mutant "$R3"; jq -c '.d4_rule="case-insensitive substring"' "$work/m/chain/007-E3m.json" >"$work/e" && cp "$work/e" "$work/m/chain/007-E3m.json"; relink
+  g9 "$work/m" | grep -q '^# (supplementary) E3m NOT_RUN: unknown d4_rule' && ok "RUN-3 copy with an unknown d4_rule: E3m NOT_RUN" || bad "RUN-3 copy unknown d4_rule"
+fi
 after=$(tree_sum "$runs")
 [ "$before" = "$after" ] && ok "fixtures untouched" || bad "fixtures untouched"
 echo "passed $pass, failed $fail"
