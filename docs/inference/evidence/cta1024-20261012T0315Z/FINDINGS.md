@@ -359,7 +359,7 @@ and the native-artifacts.lock lines at that sha). Host-scope abi-qualify at the 
 abi-qual-host-247f3522.json (PASS, dirty=false). Kernel battery receipts (sim and chip, including the first
 version's failures) in the decode-speed investigation folder, receipts/cut-f.
 
-## Single-token norms and rope on the host (09:58-10:02Z, N=smoke-ctx-host)
+## Single-token norms and rope on the host (09:28-09:30Z, N=smoke-ctx-host)
 
 Sovereign-core only (no engine change, pin unchanged at omega 247f3522). The GB10 backend routes an elementwise
 op to the reference implementation by size (`HOST_ELEMENTWISE_MAX` = 16384 f32 values): a one-row rmsnorm (the
@@ -387,3 +387,36 @@ swiglu 1.0, host ops 0.4, the rest host time between calls.
 Receipts: smoke-ctx-host.{start,end,rc,raw,err,json,binary.sha256}; abi-qualify host scope at the pin on the
 committed tree: abi-qual-host-247f3522-hostroute.json. Unit tests: `single_token_norms_and_rope_run_on_the_host_without_a_fallback`
 (reference equality, host_ops 4, fallback 0, chip calls 0) and the updated `elementwise_chip_errors_are_counted_fallbacks`.
+
+## One-row activation pack straight into the chip buffer (09:51-09:53Z, N=smoke-ctx-row0)
+
+Pin moved to omega dec2577d (omega#413, cut H). Every matmul call used to pack the activation rows into a
+malloc'd block, copy it into the uncached activation buffer and free it; at one row (145 calls per decode token)
+that moved 128 KB per call to carry 8 KB, because the 15 padding rows of each 16-row block are zero on every
+call. Now the pack writes straight into the buffer, and a one-row call whose buffer already holds a one-row pack
+of the same width rewrites row 0 only. ABI unchanged; omega's chip battery 25/25 and host battery 136/136 before
+the pin (omega#413). Same binary settings as the previous leg (CTA budget 1024, spin 2000 us); the clock times in
+this heading come from the leg's own `.start`/`.end` files (the previous heading was corrected to its files as
+well: 09:28-09:30Z, not 09:58-10:02Z).
+
+| leg | p1 | p2 | p3 (37 + 256) | p4 (1268-token prompt + 64) | replies |
+|---|---|---|---|---|---|
+| smoke-ctx-host (omega 247f3522) | 276 ms | 2364 ms | 20233 ms | 16480 ms | golden |
+| smoke-ctx-row0 (omega dec2577d) | 283 ms | 2355 ms | 19944 ms | 16272 ms | identical, all four |
+
+Per-call wall minus chip on the one-row matmuls in p3 (9180 calls each; the lm_head 256 calls), microseconds:
+
+| shape | host leg | row0 leg |
+|---|---|---|
+| k 4096, n 24576 | 19.2 | 17.4 |
+| k 12288, n 4096 | 15.9 | 11.8 |
+| k 4096, n 6144 | 8.8 | 7.2 |
+| k 4096, n 4096 | 7.5 | 5.4 |
+| k 4096, n 151936 (lm_head) | 105 | 103 |
+
+One-row matmul wall per p3 token 72.8 -> 72.2 ms; p3 overall 79.0 -> 77.9 ms per token; fallback 0,
+`host_ops` unchanged from the host leg. One run per leg: the 1 ms per token is consistent with the per-call
+gaps but is not a rate. ABI requalification on the committed pin: `abi-qual-host-dec2577d.json` PASS, scope
+host, tree clean. What remains of the per-call gap (5 to 17 us) is the launch protocol and the result readback,
+not the pack. Next levers are on the chip side: more splits (8) or two warps per CTA in decode attention, and a
+k-split for the latency-bound small shapes (n 4096 and 6144, 512 and 768 CTAs for 1024 seats).
