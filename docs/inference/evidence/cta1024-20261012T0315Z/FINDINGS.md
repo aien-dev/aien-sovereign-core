@@ -214,3 +214,32 @@ Next by size: the prefill matmul kernel.
 
 Receipts: smoke-ctx-rows.{start,end,rc,raw,err,json,binary.sha256}; built against omega 6b524626 (omega.lock
 at that sha for the leg; re-pinned to the squash-merge sha of omega#406, same tree, before this PR merges).
+
+## Prefill matmuls on the blocked kernel (06:53-06:54Z, N=smoke-ctx-mmblock)
+
+omega#407 (`omega_blackwell_codegen_matmul_frag_block`, branch head 0e11df67): for row counts whose 16-row tile
+count divides by 2 or 4, one warp owns 4 row tiles x 4 column tiles of the output over all of K (4x4 at m = 128),
+so each loaded weight fragment feeds four tensor ops and each activation fragment four, instead of one each.
+Decode rows (m = 1) keep the single-tile kernel byte for byte. No sovereign-core code change: the pin moved.
+Same binary source as N=smoke-ctx-rows. Replies identical on p1-p4 (output_ids equal).
+
+| leg | p4 (1268-token prompt + 64) | p4 m=128 matmuls (wall / chip) | p3 (37 + 256) |
+|---|---|---|---|
+| smoke-ctx-rows (before) | 36.4 s | 18.2 s / 12.2 s | 22.5 s |
+| smoke-ctx-mmblock (after) | 23.1 s | 8.9 s / 2.0 s | 23.0 s |
+
+Per shape at p4 (324 calls each): k=12288 n=4096 6.2 s / 3.0 s -> 3.7 s / 0.56 s; k=4096 n=24576 8.8 / 7.2 -> 2.6 / 1.0;
+k=4096 n=6144 3.2 / 2.0 -> 1.4 / 0.26; k=4096 n=4096 (not timed before) 1.3 / 0.21. Standalone
+(`gpu_matmul_api_test --timing --cta-budget 1024`, median of 100): 128x4096x24576 20.9 -> 5.7 ms, 128x12288x4096
+11.7 -> 3.2 ms, 128x4096x6144 5.6 -> 2.0 ms; parity sweep 18/18, mutant killed on every shape (omega#407 receipts).
+
+The chip side of the prefill matmuls is now 2.0 s; the 6.9 s above it is the host side of every m=128 call
+(packing the 1 MB activation block into fragment order, poisoning and copying out the f32 result, up to
+12.6 MB per call). p4 now: prefill matmul host side 6.9 s, chunk attention rows 3.1 s (2.9 s chip), decode m=1
+matmuls ~4.4 s for 64 tokens, elementwise (swiglu, rope, two rmsnorm families) 2.7 s, decode paged attention 1.0 s,
+prefill matmul chip 2.0 s. Next by size: the host side of the m=128 matmul calls, then elementwise.
+
+Receipts: smoke-ctx-mmblock.{start,end,rc,raw,err,json,binary.sha256}; built against omega 0e11df67 (omega.lock
+at that sha for the leg; re-pinned to the squash-merge sha aa1c4af2 of omega#407, same tree 38409d6d). Host-scope
+abi-qualify PASS at the pin: abi-qual-host-aa1c4af2.json (records sovereign-core 4c551f34, the commit before this
+evidence file and the crumb data were folded in).
