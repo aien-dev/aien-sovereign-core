@@ -324,3 +324,37 @@ launch), and the host side of each launch.
 
 Receipts: smoke-ctx-resident.{start,end,rc,raw,err,json,binary.sha256}; built against omega 809c0aa6 (omega.lock and
 the native-artifacts.lock lines at that sha). Host-scope abi-qualify at the pin: abi-qual-host-809c0aa6.json.
+
+## Decode attention split over several CTAs per head (09:14-09:18Z, N=smoke-ctx-split)
+
+omega#412 (squash 247f3522, cut F): the paged attention call no longer walks the whole context with one CTA of
+128 threads per query head (32 CTAs per layer call at any context). Each (sequence, head) is split over up to 8
+CTAs along the context; each sequence derives its own split count from its own context inside the kernel
+(largest power of two <= min(8, chunks / 2), chunks = ceil(ctx / hd)), every CTA writes an unnormalised partial
+(acc[hd], running max, running sum) and the host combines the partials in the log2 domain without the math
+library. A sequence's result never depends on its batch-mates (extra CTAs of shorter sequences write empty
+partials that add exact zeros). ABI unchanged (`OmegaGpuAttnInfo` 176 bytes; `ctas_last_launch` shows the
+split). Sovereign-core side: pin only. Output tokens identical on p1-p4 (output_ids equal to smoke-ctx-resident).
+
+| leg | p4 (1268-token prompt + 64) | p4 decode paged attention (wall / chip) | p3 (37 + 256) | p3 decode paged attention (wall / chip) |
+|---|---|---|---|---|
+| smoke-ctx-resident (before) | 17.1 s | 0.61 s / 0.60 s | 21.0 s | 0.41 s / 0.38 s |
+| smoke-ctx-split (after) | 16.4 s | 0.38 s / 0.34 s | 21.1 s | 0.46 s / 0.40 s |
+
+At 1268 tokens of context the kernel takes 4 splits of 384 tokens (128 CTAs per layer call): chip time per call
+266 -> 150 us, about 35 GB/s of KV reads instead of 20; per token the decode attention falls from 9.6 to 6.0 ms of
+wall (chip 9.4 -> 5.3). The 40 ms between wall and chip on the 2268 p4 calls is the host combine (32 heads x 4
+partials of 130 floats, about 18 us per call). At short context (p3, at most 3 chunks, one split) the call pays
+the partial write and the combine for nothing: +0.1 ms per token of chip and +0.2 ms of wall over 256 tokens,
+run-to-run noise aside [OBSERVED, one leg each]. The other operations match the previous leg to 1%.
+
+Correction to the previous section: the "elementwise launches about 42 ms per token" figure was read from the
+p4 table, which also holds the 1268-token prompt read (10 chunks x 36 layers of rope, head norms and swiglu).
+Per decode token the elementwise cost is small: on p3 (37 + 256 tokens, decode-dominated) rmsnorm 2.5 ms,
+swiglu 1.0, rmsnorm_heads 0.8, rope 0.5 per token, against 73.5 ms of m=1 matmuls (187-220 GB/s against the
+273 GB/s roof, about 27 us fixed per launch). The next lever is the m=1 matmul bandwidth, not the launches.
+
+Receipts: smoke-ctx-split.{start,end,rc,raw,err,json,binary.sha256}; built against omega 247f3522 (omega.lock
+and the native-artifacts.lock lines at that sha). Host-scope abi-qualify at the pin, clean tree:
+abi-qual-host-247f3522.json (PASS, dirty=false). Kernel battery receipts (sim and chip, including the first
+version's failures) in the decode-speed investigation folder, receipts/cut-f.
