@@ -144,3 +144,35 @@ is decode at about 110 ms per token. The 13 tok/s target from the speed-bound me
 not by itself bring D1 inside its budget. The fixes that move the campaign, in order of size: (1) the attention kernel's memory
 access pattern (prompt read 24.5 s -> about 1 s, decode attention 30 ms -> about 2 ms per token at 1000 context); (2) batched
 elementwise launches in the prompt read (about 6 s); (3) a prefill matmul kernel with B reuse (15.7 s -> a few s).
+
+## Attention kernel with batched loads, on the real model (05:32-05:34Z, one hold, `N=smoke-ctx-attn ctx-leg.sh`)
+
+Same smoke binary source as the long-context leg, omega pin 6c6180cf -> c74fe6e5 (omega#405: the attention kernel generator issues its
+global and shared loads in batches of up to four per scoreboard instead of waiting after each one; between the two pins only the omega
+Makefile changed among the GPU library sources). Build from the pinned checkout, fallback 0, CTA budget 1024. Every reply is identical
+to the previous leg: p1, p2, p3 (256 tokens) and p4 (64 tokens) output ids equal, so the kernel change is numerically silent here.
+
+| prompt | prompt tokens | new tokens | wall before | wall after |
+|---|---|---|---|---|
+| p3 | 37 | 256 | 23.2 s | 23.0 s |
+| p4 | 1268 | 64 | 63.7 s | 51.6 s |
+
+Attention launches, before -> after (wall, chip in brackets):
+
+| op | prompt | calls | before | after | per call after |
+|---|---|---|---|---|---|
+| `paged_attention_bf16` (decode at 1268 context) | p4 | 2268 | 1884 ms (1446) | 925 ms (481) | 0.41 ms wall, 0.21 ms chip |
+| `paged_attention_bf16` (decode at 37 to 293 context) | p3 | 9180 | 1238 ms (988) | 803 ms (555) | 0.087 ms wall |
+| `gqa_attention` (prompt read, one launch per token) | p4 | 45648 | 24.5 s (18.8) | 15.5 s (9.9) | 0.34 ms wall, 0.22 ms chip |
+
+Decode attention at 1268 context went from 30 ms to 14.7 ms per token (chip time 3.0x faster, wall 2.0x: the fixed launch and wait
+cost, about 0.2 ms per call, is now half of the wall time, so the next gain in decode attention comes from fewer launches, not a faster
+kernel). The prompt read went from about 56 s to about 45 s. [INFERRED, high] decode at campaign context is now about 95 ms per token
+(110 ms minus the attention saving); the matmuls (71 ms) dominate again.
+
+Where the 45 s prompt read goes now (p4, wall): m=128 prefill matmuls 20.2 s (8.8 + 6.1 + 3.0 + 2.3; the fragment kernel re-reads B per
+16-row tile), per-token `gqa_attention` 15.5 s (9.9 s chip; the rest is the host K/V upload each call makes), per-token elementwise
+6.0 s (rmsnorm 3.2, swiglu 1.3, rmsnorm_heads 1.0, rope 0.6). For v7 D1 (95.8 s first reply) this leg predicts about 88 s
+[INFERRED, medium]: inside the 120 s budget but leaving under the 30 s a second attempt needs, so v8 stays cut. Next fixes, by size:
+(1) a prefill matmul with B reuse (20 s -> a few s); (2) prompt-read attention over the chip-resident bf16 pool in one launch per chunk
+per layer instead of one per token (15.5 s -> about 1 s); (3) batched elementwise launches per chunk (6 s -> under 1 s).
