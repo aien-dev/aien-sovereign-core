@@ -76,6 +76,43 @@ async fn main() {
     }
     let dir = std::path::PathBuf::from(&a[1]);
     let gb10 = a[2] == "gb10";
+    // The matmul CTA budget the daemon serves with (AIEN_OMEGA_CTA_BUDGET, else the AIEN default),
+    // applied before the first chip call; omega's own library default (64) is never what the smoke
+    // measures. Set after the GPU session opens, below.
+    let cta_budget: Option<aien_omega_gpu::CtaBudget> = if gb10 {
+        let raw = std::env::var(aien_omega_gpu::CTA_BUDGET_ENV).ok();
+        Some(
+            aien_omega_gpu::parse_cta_budget(raw.as_deref())
+                .unwrap_or_else(|e| die(2, &e))
+                .unwrap_or(aien_omega_gpu::DAEMON_DEFAULT_CTA_BUDGET),
+        )
+    } else {
+        None
+    };
+    // The daemon's marker-wait spin window as well (AIEN_OMEGA_SPIN_US, else the daemon default):
+    // without it every launch pays the 50 us sleep-poll floor and the smoke does not time the daemon's path.
+    let spin_us: Option<u32> = if gb10 {
+        let raw = std::env::var(aien_omega_gpu::SPIN_US_ENV).ok();
+        Some(
+            aien_omega_gpu::parse_spin_us(raw.as_deref())
+                .unwrap_or_else(|e| die(2, &e))
+                .unwrap_or(aien_omega_gpu::DAEMON_DEFAULT_SPIN_US),
+        )
+    } else {
+        None
+    };
+    // AIEN_SMOKE_LONG=1 adds a third, longer prompt (not part of the golden; for decode timing only).
+    let mut prompts: Vec<(&str, &str, usize)> = PROMPTS.to_vec();
+    if std::env::var("AIEN_SMOKE_LONG")
+        .map(|v| v == "1")
+        .unwrap_or(false)
+    {
+        prompts.push((
+            "p3",
+            "Describe how a bicycle works, in about 250 words.",
+            256,
+        ));
+    }
     let config = aien_inference_abi::load_model_config(&dir).expect("config.json");
     let (weights, tb): (_, Arc<dyn TensorBackend>) = if gb10 {
         if !aien_inference_abi::strict::production_strict() {
@@ -98,6 +135,16 @@ async fn main() {
             &aien_runtime::shared_kv::read_mem_available,
         )
         .unwrap_or_else(|e| die(3, &format!("GPU session: {e}")));
+        if let Some(b) = cta_budget {
+            aien_omega_gpu::set_cta_budget(b)
+                .unwrap_or_else(|e| die(3, &format!("CTA budget {}: {e}", b.get())));
+            eprintln!("  matmul CTA budget {} (daemon setting)", b.get());
+        }
+        if let Some(us) = spin_us {
+            aien_omega_gpu::set_spin_us(us)
+                .unwrap_or_else(|e| die(3, &format!("spin window {us} us: {e}")));
+            eprintln!("  marker spin window {us} us (daemon setting)");
+        }
         let weights = aien_inference_abi::load_resident_weights(
             &dir,
             &config,
@@ -147,7 +194,7 @@ async fn main() {
             .collect()
     };
     let mut results = Vec::new();
-    for (name, user, max_tokens) in PROMPTS {
+    for (name, user, max_tokens) in prompts.iter() {
         let msgs = vec![
             aien_runtime::ChatTurn {
                 role: "system".into(),
@@ -183,6 +230,7 @@ async fn main() {
         "{}",
         serde_json::json!({
             "leg": a[2], "backend": TensorBackend::name(tb.as_ref()),
+            "cta_budget": cta_budget.map(|b| b.get()), "spin_us": spin_us,
             "model_dir": dir, "model_id": config.model_id, "template": tok.template().name(),
             "prompts": results, "fallback_count": tb.fallback_count(),
         })

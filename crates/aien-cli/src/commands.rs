@@ -1643,7 +1643,7 @@ fn build_native_daemon_backend() -> Result<DaemonBackendParts, String> {
 }
 
 /// The budget the daemon uses and where it came from: the explicit
-/// `AIEN_OMEGA_CTA_BUDGET`, else the AIEN daemon default (256, sealed GB10
+/// `AIEN_OMEGA_CTA_BUDGET`, else the AIEN daemon default (1024, sealed GB10
 /// evidence in `aien_omega_gpu::DAEMON_DEFAULT_CTA_BUDGET_EVIDENCE`). Omega's
 /// own library default (64) is never relied on by the daemon.
 fn daemon_cta_budget(
@@ -2580,12 +2580,12 @@ mod tests {
     /// the log names it as the AIEN default with the evidence dir, and an
     /// explicit setting wins.
     #[test]
-    fn daemon_cta_budget_defaults_to_256_with_evidence() {
+    fn daemon_cta_budget_defaults_to_1024_with_evidence() {
         let (b, source) = daemon_cta_budget(None);
-        assert_eq!(b.get(), 256);
+        assert_eq!(b.get(), 1024);
         assert!(source.contains("AIEN default"), "{source}");
         assert!(
-            source.contains("docs/inference/evidence/t4fix-20261006T2254Z"),
+            source.contains("docs/inference/evidence/cta1024-20261012T0315Z"),
             "{source}"
         );
         let explicit = aien_omega_gpu::parse_cta_budget(Some("64"))
@@ -2608,7 +2608,7 @@ mod tests {
         }
         let none = apply_omega_cta_budget(None).expect_err("stub cannot set the default");
         assert!(
-            none.contains("Omega CTA budget 256 (AIEN default"),
+            none.contains("Omega CTA budget 1024 (AIEN default"),
             "{none}"
         );
         assert!(none.contains("stub"), "{none}");
