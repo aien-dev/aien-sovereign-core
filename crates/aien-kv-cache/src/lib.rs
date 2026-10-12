@@ -1456,7 +1456,11 @@ impl<B: aien_platform::UnifiedBuffer> AienKvManager<B> {
         let bs = self.block_size;
         let keep = new_total.div_ceil(bs);
         // Blocks touched: every freed block, plus the tail kept block when it loses tokens.
-        let first_touched = if new_total.is_multiple_of(bs) { keep } else { keep - 1 };
+        let first_touched = if new_total.is_multiple_of(bs) {
+            keep
+        } else {
+            keep - 1
+        };
         for &b in &table.block_ids[first_touched.min(table.block_ids.len())..] {
             let blk = &self.blocks[b];
             if blk.is_shared || blk.ref_count > 1 {
@@ -1467,7 +1471,10 @@ impl<B: aien_platform::UnifiedBuffer> AienKvManager<B> {
             }
         }
         let table = self.sequence_tables.get_mut(&seq_id).unwrap();
-        let freed: Vec<BlockId> = table.block_ids.drain(keep.min(table.block_ids.len())..).collect();
+        let freed: Vec<BlockId> = table
+            .block_ids
+            .drain(keep.min(table.block_ids.len())..)
+            .collect();
         if keep > 0 {
             let tail = table.block_ids[keep - 1];
             self.blocks[tail].num_tokens = new_total - (keep - 1) * bs;

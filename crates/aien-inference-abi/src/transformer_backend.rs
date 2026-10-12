@@ -759,10 +759,16 @@ impl NativeTransformerBackend {
             let mut slots = Vec::with_capacity(n);
             for t in 0..n {
                 slots.push(w.append_token_with_slot(seq_id).map_err(|e| {
-                    format!("{KV_POOL_EXHAUSTED_PREFIX} verify append of position {} failed: {e}", offset + t)
+                    format!(
+                        "{KV_POOL_EXHAUSTED_PREFIX} verify append of position {} failed: {e}",
+                        offset + t
+                    )
                 })?);
             }
-            let ids = w.get_block_table(seq_id).map(|t| t.block_ids.clone()).unwrap_or_default();
+            let ids = w
+                .get_block_table(seq_id)
+                .map(|t| t.block_ids.clone())
+                .unwrap_or_default();
             (offset, slots, ids)
         };
         let run = || -> Result<Vec<f32>, String> {
@@ -798,7 +804,8 @@ impl NativeTransformerBackend {
             let mut ctx = vec![0i32; n];
             for t in 0..n {
                 for (j, &b) in block_ids.iter().enumerate() {
-                    tables[t * max_blocks + j] = i32::try_from(b).map_err(|_| "block id past i32")?;
+                    tables[t * max_blocks + j] =
+                        i32::try_from(b).map_err(|_| "block id past i32")?;
                 }
                 ctx[t] = i32::try_from(offset + t + 1).map_err(|_| "context past i32")?;
             }
@@ -810,34 +817,85 @@ impl NativeTransformerBackend {
                     for t in 0..n {
                         let row = &qkv_b[t * qkv_dim..(t + 1) * qkv_dim];
                         q_b[t * q_dim..(t + 1) * q_dim].copy_from_slice(&row[..q_dim]);
-                        k_b[t * kv_dim..(t + 1) * kv_dim].copy_from_slice(&row[q_dim..q_dim + kv_dim]);
+                        k_b[t * kv_dim..(t + 1) * kv_dim]
+                            .copy_from_slice(&row[q_dim..q_dim + kv_dim]);
                         v_b[t * kv_dim..(t + 1) * kv_dim].copy_from_slice(&row[q_dim + kv_dim..]);
                     }
                 } else {
-                    backend.matmul_batch_w(&mut q_b, &x_norm, layer_w.q_proj.as_ref(), n, hidden_dim, q_dim);
-                    backend.matmul_batch_w(&mut k_b, &x_norm, layer_w.k_proj.as_ref(), n, hidden_dim, kv_dim);
-                    backend.matmul_batch_w(&mut v_b, &x_norm, layer_w.v_proj.as_ref(), n, hidden_dim, kv_dim);
+                    backend.matmul_batch_w(
+                        &mut q_b,
+                        &x_norm,
+                        layer_w.q_proj.as_ref(),
+                        n,
+                        hidden_dim,
+                        q_dim,
+                    );
+                    backend.matmul_batch_w(
+                        &mut k_b,
+                        &x_norm,
+                        layer_w.k_proj.as_ref(),
+                        n,
+                        hidden_dim,
+                        kv_dim,
+                    );
+                    backend.matmul_batch_w(
+                        &mut v_b,
+                        &x_norm,
+                        layer_w.v_proj.as_ref(),
+                        n,
+                        hidden_dim,
+                        kv_dim,
+                    );
                 }
                 layer_w.apply_qk_norm_on(backend, &mut q_b, &mut k_b, head_dim, eps);
                 for t in 0..n {
                     let q_t = &mut q_b[t * q_dim..(t + 1) * q_dim];
                     let k_t = &mut k_b[t * kv_dim..(t + 1) * kv_dim];
                     let v_t = &v_b[t * kv_dim..(t + 1) * kv_dim];
-                    backend.apply_rope(q_t, k_t, offset + t, head_dim, num_heads, num_kv_heads, &rope);
+                    backend.apply_rope(
+                        q_t,
+                        k_t,
+                        offset + t,
+                        head_dim,
+                        num_heads,
+                        num_kv_heads,
+                        &rope,
+                    );
                     let (block_id, slot) = slots[t];
                     mgr.write()
                         .write_explicit_token_kv(block_id, layer_idx, slot, k_t, v_t)
-                        .map_err(|e| format!("verify KV write layer {layer_idx} position {}: {e}", offset + t))?;
+                        .map_err(|e| {
+                            format!(
+                                "verify KV write layer {layer_idx} position {}: {e}",
+                                offset + t
+                            )
+                        })?;
                 }
                 {
                     let r = mgr.read();
                     let pool = r.tensor_pool().ok_or("pool vanished")?;
                     backend.paged_attention_batch(
-                        &mut attn_b, &q_b, pool, &tables, &ctx, max_blocks, n, layer_idx,
-                        num_heads, num_kv_heads, head_dim,
+                        &mut attn_b,
+                        &q_b,
+                        pool,
+                        &tables,
+                        &ctx,
+                        max_blocks,
+                        n,
+                        layer_idx,
+                        num_heads,
+                        num_kv_heads,
+                        head_dim,
                     );
                 }
-                backend.matmul_batch_w(&mut proj_b, &attn_b, layer_w.o_proj.as_ref(), n, q_dim, hidden_dim);
+                backend.matmul_batch_w(
+                    &mut proj_b,
+                    &attn_b,
+                    layer_w.o_proj.as_ref(),
+                    n,
+                    q_dim,
+                    hidden_dim,
+                );
                 for t in 0..n {
                     let p = &proj_b[t * hidden_dim..(t + 1) * hidden_dim];
                     for i in 0..hidden_dim {
@@ -845,21 +903,50 @@ impl NativeTransformerBackend {
                     }
                 }
                 flatten(&mut x_flat, &states);
-                backend.rmsnorm_rows(&mut post_b, &x_flat, &layer_w.post_attention_layernorm, n, eps);
+                backend.rmsnorm_rows(
+                    &mut post_b,
+                    &x_flat,
+                    &layer_w.post_attention_layernorm,
+                    n,
+                    eps,
+                );
                 if let Some(w) = layer_w.gate_up_proj.as_ref() {
                     let gu = 2 * intermediate_dim;
                     backend.matmul_batch_w(&mut gu_b, &post_b, w.as_ref(), n, hidden_dim, gu);
                     for t in 0..n {
                         let row = &gu_b[t * gu..(t + 1) * gu];
-                        gate_b[t * intermediate_dim..(t + 1) * intermediate_dim].copy_from_slice(&row[..intermediate_dim]);
-                        up_b[t * intermediate_dim..(t + 1) * intermediate_dim].copy_from_slice(&row[intermediate_dim..]);
+                        gate_b[t * intermediate_dim..(t + 1) * intermediate_dim]
+                            .copy_from_slice(&row[..intermediate_dim]);
+                        up_b[t * intermediate_dim..(t + 1) * intermediate_dim]
+                            .copy_from_slice(&row[intermediate_dim..]);
                     }
                 } else {
-                    backend.matmul_batch_w(&mut gate_b, &post_b, layer_w.gate_proj.as_ref(), n, hidden_dim, intermediate_dim);
-                    backend.matmul_batch_w(&mut up_b, &post_b, layer_w.up_proj.as_ref(), n, hidden_dim, intermediate_dim);
+                    backend.matmul_batch_w(
+                        &mut gate_b,
+                        &post_b,
+                        layer_w.gate_proj.as_ref(),
+                        n,
+                        hidden_dim,
+                        intermediate_dim,
+                    );
+                    backend.matmul_batch_w(
+                        &mut up_b,
+                        &post_b,
+                        layer_w.up_proj.as_ref(),
+                        n,
+                        hidden_dim,
+                        intermediate_dim,
+                    );
                 }
                 backend.swiglu(&mut act_b, &gate_b, &up_b);
-                backend.matmul_batch_w(&mut mlp_b, &act_b, layer_w.down_proj.as_ref(), n, intermediate_dim, hidden_dim);
+                backend.matmul_batch_w(
+                    &mut mlp_b,
+                    &act_b,
+                    layer_w.down_proj.as_ref(),
+                    n,
+                    intermediate_dim,
+                    hidden_dim,
+                );
                 for t in 0..n {
                     let m = &mlp_b[t * hidden_dim..(t + 1) * hidden_dim];
                     for i in 0..hidden_dim {
@@ -871,7 +958,14 @@ impl NativeTransformerBackend {
             let mut final_b = vec![0.0f32; n * hidden_dim];
             backend.rmsnorm_rows(&mut final_b, &x_flat, &weights.final_norm, n, eps);
             let mut logits = vec![0.0f32; n * vocab];
-            backend.matmul_batch_w(&mut logits, &final_b, weights.output_matrix(), n, hidden_dim, vocab);
+            backend.matmul_batch_w(
+                &mut logits,
+                &final_b,
+                weights.output_matrix(),
+                n,
+                hidden_dim,
+                vocab,
+            );
             Ok(logits)
         };
         let out = run();
@@ -921,7 +1015,11 @@ impl NativeTransformerBackend {
             seq_id,
             self.kv_manager.as_ref(),
         )?;
-        Ok(Self::compute_logits_impl(&self.weights, &*self.tensor_backend, &hidden))
+        Ok(Self::compute_logits_impl(
+            &self.weights,
+            &*self.tensor_backend,
+            &hidden,
+        ))
     }
 
     pub fn forward_token_impl(

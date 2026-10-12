@@ -71,7 +71,10 @@ fn propose(draft: &[u32], out: &[u32], want: usize) -> Option<Vec<u32>> {
 fn main() {
     let a: Vec<String> = std::env::args().collect();
     if a.len() != 4 || !matches!(a[3].as_str(), "cpu" | "gb10") {
-        die(2, "usage: qwen3_8b_specverify <model_dir> <v7 run receipt json> <cpu|gb10>");
+        die(
+            2,
+            "usage: qwen3_8b_specverify <model_dir> <v7 run receipt json> <cpu|gb10>",
+        );
     }
     let dir = std::path::PathBuf::from(&a[1]);
     let gb10 = a[3] == "gb10";
@@ -80,8 +83,12 @@ fn main() {
     )
     .unwrap_or_else(|e| die(2, &format!("receipt json: {e}")));
     let att = &receipt["runs"][0]["proposal_attempts"][0];
-    let refused_text = att["text"].as_str().unwrap_or_else(|| die(2, "receipt .text"));
-    let reason = att["reason"].as_str().unwrap_or_else(|| die(2, "receipt .reason"));
+    let refused_text = att["text"]
+        .as_str()
+        .unwrap_or_else(|| die(2, "receipt .text"));
+    let reason = att["reason"]
+        .as_str()
+        .unwrap_or_else(|| die(2, "receipt .reason"));
     let draft: Vec<u32> = att["token_ids"]
         .as_array()
         .unwrap_or_else(|| die(2, "receipt .token_ids"))
@@ -112,7 +119,10 @@ fn main() {
     let config = aien_inference_abi::load_model_config(&dir).expect("config.json");
     let (weights, tb): (_, Arc<dyn TensorBackend>) = if gb10 {
         if !aien_inference_abi::strict::production_strict() {
-            die(3, "gb10 leg needs a production-strict build (no dev fallback)");
+            die(
+                3,
+                "gb10 leg needs a production-strict build (no dev fallback)",
+            );
         }
         let omega = aien_inference_abi::OmegaGb10Backend::new();
         if !omega.is_available() {
@@ -147,7 +157,10 @@ fn main() {
     } else {
         let weights = aien_inference_abi::TransformerWeights::load_from_safetensors(&dir, &config)
             .expect("weights");
-        (weights, Arc::new(aien_inference_abi::ReferenceCpuBackend::new()))
+        (
+            weights,
+            Arc::new(aien_inference_abi::ReferenceCpuBackend::new()),
+        )
     };
     let tok = ChatTokenizer::from_model_dir(&dir, None).expect("tokenizer");
     let cfg = aien_scheduler::SchedulerConfig {
@@ -174,12 +187,22 @@ fn main() {
         Some(refused_text),
     );
     let msgs = vec![
-        aien_runtime::ChatTurn { role: "system".into(), content: SYSTEM.into() },
-        aien_runtime::ChatTurn { role: "user".into(), content: user.clone() },
+        aien_runtime::ChatTurn {
+            role: "system".into(),
+            content: SYSTEM.into(),
+        },
+        aien_runtime::ChatTurn {
+            role: "user".into(),
+            content: user.clone(),
+        },
     ];
     let text = aien_runtime::format_chat(tok.template(), &msgs).expect("chat");
     let ids = tok.encode(&text).expect("encode");
-    eprintln!("  prompt {} tokens, draft {} tokens", ids.len(), draft.len());
+    eprintln!(
+        "  prompt {} tokens, draft {} tokens",
+        ids.len(),
+        draft.len()
+    );
 
     // Warm-up (one token, discarded), same as serving.
     let wm = vec![aien_runtime::ChatTurn {
@@ -189,7 +212,9 @@ fn main() {
     let wids = tok
         .encode(&aien_runtime::format_chat(tok.template(), &wm).expect("chat"))
         .expect("encode");
-    backend.generate_tokens(1, &wids, 1, 0.0, &stop).expect("warm-up");
+    backend
+        .generate_tokens(1, &wids, 1, 0.0, &stop)
+        .expect("warm-up");
 
     // Tie check (AIEN_SPECVERIFY_TIE=<pos>, AIEN_SPECVERIFY_BASE=<earlier receipt>): no runs; the
     // prompt plus the earlier baseline's first `pos` tokens are read, then the next position is
@@ -197,7 +222,9 @@ fn main() {
     // top two token ids and scores of each, so a divergence between the paths can be told apart
     // from a fault: a near-tie flipped by summation order shows as a tiny gap.
     if let Ok(pos) = std::env::var("AIEN_SPECVERIFY_TIE") {
-        let pos: usize = pos.parse().unwrap_or_else(|_| die(2, "AIEN_SPECVERIFY_TIE=<pos>"));
+        let pos: usize = pos
+            .parse()
+            .unwrap_or_else(|_| die(2, "AIEN_SPECVERIFY_TIE=<pos>"));
         let prev: serde_json::Value = serde_json::from_str(
             &std::fs::read_to_string(std::env::var("AIEN_SPECVERIFY_BASE").unwrap_or_default())
                 .unwrap_or_else(|e| die(2, &format!("AIEN_SPECVERIFY_BASE: {e}"))),
@@ -221,11 +248,20 @@ fn main() {
         let seq = 400u64;
         let mut ctx_ids = ids.clone();
         ctx_ids.extend_from_slice(&base[..pos]);
-        backend.prefill_sequence(seq, &ctx_ids).unwrap_or_else(|e| die(4, &format!("tie prefill: {e}")));
+        backend
+            .prefill_sequence(seq, &ctx_ids)
+            .unwrap_or_else(|e| die(4, &format!("tie prefill: {e}")));
         let offset = ctx_ids.len();
         let mut rows_out = Vec::new();
-        backend.sequences.get_mut(&seq).expect("seq").tokens.push(base[pos]);
-        let l1 = backend.decode_pending(seq).unwrap_or_else(|e| die(4, &format!("tie decode: {e}")));
+        backend
+            .sequences
+            .get_mut(&seq)
+            .expect("seq")
+            .tokens
+            .push(base[pos]);
+        let l1 = backend
+            .decode_pending(seq)
+            .unwrap_or_else(|e| die(4, &format!("tie decode: {e}")));
         backend.sequences.get_mut(&seq).expect("seq").tokens.pop();
         backend.truncate_kv(seq, offset).unwrap();
         rows_out.push(serde_json::json!({ "path": "plain m=1", "row0": top2(&l1) }));
@@ -270,9 +306,15 @@ fn main() {
         let mut finished = stop.contains(&first);
         if !finished {
             out.push(first);
-            backend.sequences.get_mut(&seq).expect("seq").tokens.push(first);
+            backend
+                .sequences
+                .get_mut(&seq)
+                .expect("seq")
+                .tokens
+                .push(first);
         }
-        let (mut verify_calls, mut proposed, mut accepted, mut plain_steps) = (0usize, 0usize, 0usize, 0usize);
+        let (mut verify_calls, mut proposed, mut accepted, mut plain_steps) =
+            (0usize, 0usize, 0usize, 0usize);
         let mut verify_ms: Vec<f64> = Vec::new();
         let mut plain_ms: Vec<f64> = Vec::new();
         while !finished && out.len() < MAX_TOKENS {
@@ -331,7 +373,13 @@ fn main() {
         let ms = t0.elapsed().as_secs_f64() * 1e3;
         backend.release_sequence(seq);
         let identical = out == base;
-        let mean = |v: &[f64]| if v.is_empty() { 0.0 } else { v.iter().sum::<f64>() / v.len() as f64 };
+        let mean = |v: &[f64]| {
+            if v.is_empty() {
+                0.0
+            } else {
+                v.iter().sum::<f64>() / v.len() as f64
+            }
+        };
         eprintln!(
             "  M2 B={b}: {} tokens in {:.0} ms ({:.2}x baseline), identical={identical}, verify {verify_calls} calls mean {:.1} ms, accepted {accepted}/{proposed}, plain {plain_steps} steps mean {:.1} ms",
             out.len(), ms, ms / base_ms, mean(&verify_ms), mean(&plain_ms)
@@ -363,7 +411,12 @@ fn main() {
             for _ in 0..3 {
                 let t = Instant::now();
                 if rows == 1 {
-                    backend.sequences.get_mut(&seq).expect("seq").tokens.push(base[cut]);
+                    backend
+                        .sequences
+                        .get_mut(&seq)
+                        .expect("seq")
+                        .tokens
+                        .push(base[cut]);
                     backend
                         .decode_pending(seq)
                         .unwrap_or_else(|e| die(4, &format!("M3 decode: {e}")));
@@ -378,7 +431,10 @@ fn main() {
                     .truncate_kv(seq, offset)
                     .unwrap_or_else(|e| die(4, &format!("M3 truncate: {e}")));
             }
-            eprintln!("  M3 rows={rows} at ctx {offset}: {:?} ms", ms.iter().map(|v| v.round()).collect::<Vec<_>>());
+            eprintln!(
+                "  M3 rows={rows} at ctx {offset}: {:?} ms",
+                ms.iter().map(|v| v.round()).collect::<Vec<_>>()
+            );
             m3.push(serde_json::json!({ "rows": rows, "context": offset, "ms": ms }));
         }
         backend.release_sequence(seq);
@@ -399,6 +455,9 @@ fn main() {
         })
     );
     if fallback > 0 {
-        die(5, &format!("{fallback} CPU fallback(s): not a chip measurement"));
+        die(
+            5,
+            &format!("{fallback} CPU fallback(s): not a chip measurement"),
+        );
     }
 }

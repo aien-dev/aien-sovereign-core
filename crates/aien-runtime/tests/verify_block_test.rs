@@ -71,13 +71,19 @@ fn verify_block_matches_plain_greedy_and_rolls_back_rejections() {
         out.push(t);
         b.sequences.get_mut(&2).unwrap().tokens.push(t);
     }
-    assert_eq!(out, base, "decoding after a rolled-back block must match the plain path");
+    assert_eq!(
+        out, base,
+        "decoding after a rolled-back block must match the plain path"
+    );
 
     // The pool is back to the plain path's footprint after release.
     b.release_sequence(2);
     let free_after = b.kv_manager.as_ref().unwrap().read().free_block_count();
     b.release_sequence(1);
-    assert_eq!(b.kv_manager.as_ref().unwrap().read().free_block_count(), free_after);
+    assert_eq!(
+        b.kv_manager.as_ref().unwrap().read().free_block_count(),
+        free_after
+    );
 }
 
 #[test]
@@ -87,6 +93,18 @@ fn verify_block_errors_leave_the_pool_unchanged() {
     let free0 = b.kv_manager.as_ref().unwrap().read().free_block_count();
     assert!(b.verify_block(3, &[]).is_err());
     assert!(b.verify_block(4, &[1, 2]).is_err());
-    assert_eq!(b.kv_manager.as_ref().unwrap().read().free_block_count(), free0);
-    assert_eq!(b.kv_manager.as_ref().unwrap().read().get_block_table(3).unwrap().total_tokens, PROMPT.len());
+    assert_eq!(
+        b.kv_manager.as_ref().unwrap().read().free_block_count(),
+        free0
+    );
+    assert_eq!(
+        b.kv_manager
+            .as_ref()
+            .unwrap()
+            .read()
+            .get_block_table(3)
+            .unwrap()
+            .total_tokens,
+        PROMPT.len()
+    );
 }
