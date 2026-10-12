@@ -2608,7 +2608,7 @@ mod tests {
         }
         let none = apply_omega_cta_budget(None).expect_err("stub cannot set the default");
         assert!(
-            none.contains("Omega CTA budget 256 (AIEN default"),
+            none.contains("Omega CTA budget 1024 (AIEN default"),
             "{none}"
         );
         assert!(none.contains("stub"), "{none}");
