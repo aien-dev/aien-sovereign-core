@@ -688,6 +688,340 @@ impl NativeTransformerBackend {
     }
 
     /// Internal forward pass executing one token forward pass through the transformer.
+    /// sc draft-verify (2026-10-12): the speculative-verification primitive.
+    /// Forwards `block` (block[0] = the sequence's pending token, the one whose
+    /// K/V is not computed yet; block[1..] = draft tokens) at positions
+    /// offset..offset+n, offset = the K/V length of `seq_id` in the paged pool,
+    /// in ONE row-batched pass per layer: the matmuls take all n rows (as the
+    /// prompt read does), attention is the existing paged batch call with the
+    /// sequence's block table n times and context lengths offset+1..offset+n
+    /// (causal, pool read in place, no staging), the lm_head runs on every row.
+    /// Returns the greedy argmax of each row: row t predicts position
+    /// offset+t+1, so draft token block[t+1] is accepted while it equals row t.
+    /// The K/V of every row is left in the pool: the caller truncates to
+    /// offset + accepted + 1 (`truncate_kv`) and keeps its own token list
+    /// (`sequences[seq].tokens` is NOT touched here). On any error after the
+    /// slots were appended the pool is truncated back to `offset`. Needs the
+    /// paged pool (the GB10 serving construction); refused otherwise.
+    pub fn verify_block(&mut self, seq_id: u64, block: &[u32]) -> Result<Vec<u32>, String> {
+        let n = block.len();
+        let vocab = self.weights.config.vocab_size();
+        let logits = self.verify_block_logits(seq_id, block)?;
+        Ok((0..n)
+            .map(|t| sample_argmax(&logits[t * vocab..(t + 1) * vocab]).0)
+            .collect())
+    }
+
+    /// `verify_block` before the argmax: the full logits of every row, `n * vocab` f32.
+    pub fn verify_block_logits(&mut self, seq_id: u64, block: &[u32]) -> Result<Vec<f32>, String> {
+        let n = block.len();
+        if n == 0 || n > 64 {
+            return Err(format!("verify_block: {n} rows (1 to 64)"));
+        }
+        let mgr = self
+            .kv_manager
+            .clone()
+            .ok_or_else(|| "verify_block needs the paged KV pool".to_string())?;
+        let weights = &self.weights;
+        let backend: &dyn TensorBackend = &*self.tensor_backend;
+        let geom = weights
+            .config
+            .attention_geometry()
+            .map_err(|e| e.to_string())?;
+        backend.check_model(&weights.config)?;
+        let (num_heads, num_kv_heads, head_dim) =
+            (geom.num_q_heads(), geom.num_kv_heads(), geom.head_dim());
+        let (q_dim, kv_dim) = (geom.q_dim(), geom.kv_dim());
+        let hidden_dim = weights.config.hidden_dim();
+        let intermediate_dim = weights.config.intermediate_dim();
+        let vocab = weights.config.vocab_size();
+        let eps = weights.config.rms_norm_eps;
+        let rope = weights.config.rope();
+        // Slots for the n positions, appended up front (as the prompt read does).
+        let (offset, slots, block_ids) = {
+            let mut w = mgr.write();
+            if w.tensor_pool().is_none() {
+                return Err("verify_block needs the paged KV pool (tensor pool)".into());
+            }
+            let tbl = w
+                .get_block_table(seq_id)
+                .cloned()
+                .ok_or_else(|| format!("verify_block: sequence {seq_id} has no block table"))?;
+            let offset = tbl.total_tokens;
+            if let Some((needed, available)) = Self::kv_pool_shortfall(&w, seq_id, n) {
+                return Err(Self::kv_pool_exhausted_error(
+                    &format!("verify block of {n} tokens at position {offset}"),
+                    seq_id,
+                    needed,
+                    available,
+                ));
+            }
+            let mut slots = Vec::with_capacity(n);
+            for t in 0..n {
+                slots.push(w.append_token_with_slot(seq_id).map_err(|e| {
+                    format!(
+                        "{KV_POOL_EXHAUSTED_PREFIX} verify append of position {} failed: {e}",
+                        offset + t
+                    )
+                })?);
+            }
+            let ids = w
+                .get_block_table(seq_id)
+                .map(|t| t.block_ids.clone())
+                .unwrap_or_default();
+            (offset, slots, ids)
+        };
+        let run = || -> Result<Vec<f32>, String> {
+            let mut states: Vec<Vec<f32>> = block
+                .iter()
+                .map(|&tok| {
+                    let i = (tok as usize) % vocab;
+                    weights.embed_tokens[i * hidden_dim..(i + 1) * hidden_dim].to_vec()
+                })
+                .collect();
+            let mut x_flat = vec![0.0f32; n * hidden_dim];
+            let flatten = |x_flat: &mut [f32], states: &[Vec<f32>]| {
+                for (t, s) in states.iter().enumerate() {
+                    x_flat[t * hidden_dim..(t + 1) * hidden_dim].copy_from_slice(s);
+                }
+            };
+            let mut x_norm = vec![0.0f32; n * hidden_dim];
+            let mut q_b = vec![0.0f32; n * q_dim];
+            let mut k_b = vec![0.0f32; n * kv_dim];
+            let mut v_b = vec![0.0f32; n * kv_dim];
+            let qkv_dim = q_dim + 2 * kv_dim;
+            let mut qkv_b = vec![0.0f32; n * qkv_dim];
+            let mut attn_b = vec![0.0f32; n * q_dim];
+            let mut proj_b = vec![0.0f32; n * hidden_dim];
+            let mut post_b = vec![0.0f32; n * hidden_dim];
+            let mut gate_b = vec![0.0f32; n * intermediate_dim];
+            let mut up_b = vec![0.0f32; n * intermediate_dim];
+            let mut act_b = vec![0.0f32; n * intermediate_dim];
+            let mut gu_b = vec![0.0f32; n * 2 * intermediate_dim];
+            let mut mlp_b = vec![0.0f32; n * hidden_dim];
+            let max_blocks = block_ids.len().max(1);
+            let mut tables = vec![-1i32; n * max_blocks];
+            let mut ctx = vec![0i32; n];
+            for t in 0..n {
+                for (j, &b) in block_ids.iter().enumerate() {
+                    tables[t * max_blocks + j] =
+                        i32::try_from(b).map_err(|_| "block id past i32")?;
+                }
+                ctx[t] = i32::try_from(offset + t + 1).map_err(|_| "context past i32")?;
+            }
+            for (layer_idx, layer_w) in weights.layers.iter().enumerate() {
+                flatten(&mut x_flat, &states);
+                backend.rmsnorm_rows(&mut x_norm, &x_flat, &layer_w.input_layernorm, n, eps);
+                if let Some(w) = layer_w.qkv_proj.as_ref() {
+                    backend.matmul_batch_w(&mut qkv_b, &x_norm, w.as_ref(), n, hidden_dim, qkv_dim);
+                    for t in 0..n {
+                        let row = &qkv_b[t * qkv_dim..(t + 1) * qkv_dim];
+                        q_b[t * q_dim..(t + 1) * q_dim].copy_from_slice(&row[..q_dim]);
+                        k_b[t * kv_dim..(t + 1) * kv_dim]
+                            .copy_from_slice(&row[q_dim..q_dim + kv_dim]);
+                        v_b[t * kv_dim..(t + 1) * kv_dim].copy_from_slice(&row[q_dim + kv_dim..]);
+                    }
+                } else {
+                    backend.matmul_batch_w(
+                        &mut q_b,
+                        &x_norm,
+                        layer_w.q_proj.as_ref(),
+                        n,
+                        hidden_dim,
+                        q_dim,
+                    );
+                    backend.matmul_batch_w(
+                        &mut k_b,
+                        &x_norm,
+                        layer_w.k_proj.as_ref(),
+                        n,
+                        hidden_dim,
+                        kv_dim,
+                    );
+                    backend.matmul_batch_w(
+                        &mut v_b,
+                        &x_norm,
+                        layer_w.v_proj.as_ref(),
+                        n,
+                        hidden_dim,
+                        kv_dim,
+                    );
+                }
+                layer_w.apply_qk_norm_on(backend, &mut q_b, &mut k_b, head_dim, eps);
+                for t in 0..n {
+                    let q_t = &mut q_b[t * q_dim..(t + 1) * q_dim];
+                    let k_t = &mut k_b[t * kv_dim..(t + 1) * kv_dim];
+                    let v_t = &v_b[t * kv_dim..(t + 1) * kv_dim];
+                    backend.apply_rope(
+                        q_t,
+                        k_t,
+                        offset + t,
+                        head_dim,
+                        num_heads,
+                        num_kv_heads,
+                        &rope,
+                    );
+                    let (block_id, slot) = slots[t];
+                    mgr.write()
+                        .write_explicit_token_kv(block_id, layer_idx, slot, k_t, v_t)
+                        .map_err(|e| {
+                            format!(
+                                "verify KV write layer {layer_idx} position {}: {e}",
+                                offset + t
+                            )
+                        })?;
+                }
+                {
+                    let r = mgr.read();
+                    let pool = r.tensor_pool().ok_or("pool vanished")?;
+                    backend.paged_attention_batch(
+                        &mut attn_b,
+                        &q_b,
+                        pool,
+                        &tables,
+                        &ctx,
+                        max_blocks,
+                        n,
+                        layer_idx,
+                        num_heads,
+                        num_kv_heads,
+                        head_dim,
+                    );
+                }
+                backend.matmul_batch_w(
+                    &mut proj_b,
+                    &attn_b,
+                    layer_w.o_proj.as_ref(),
+                    n,
+                    q_dim,
+                    hidden_dim,
+                );
+                for t in 0..n {
+                    let p = &proj_b[t * hidden_dim..(t + 1) * hidden_dim];
+                    for i in 0..hidden_dim {
+                        states[t][i] += p[i];
+                    }
+                }
+                flatten(&mut x_flat, &states);
+                backend.rmsnorm_rows(
+                    &mut post_b,
+                    &x_flat,
+                    &layer_w.post_attention_layernorm,
+                    n,
+                    eps,
+                );
+                if let Some(w) = layer_w.gate_up_proj.as_ref() {
+                    let gu = 2 * intermediate_dim;
+                    backend.matmul_batch_w(&mut gu_b, &post_b, w.as_ref(), n, hidden_dim, gu);
+                    for t in 0..n {
+                        let row = &gu_b[t * gu..(t + 1) * gu];
+                        gate_b[t * intermediate_dim..(t + 1) * intermediate_dim]
+                            .copy_from_slice(&row[..intermediate_dim]);
+                        up_b[t * intermediate_dim..(t + 1) * intermediate_dim]
+                            .copy_from_slice(&row[intermediate_dim..]);
+                    }
+                } else {
+                    backend.matmul_batch_w(
+                        &mut gate_b,
+                        &post_b,
+                        layer_w.gate_proj.as_ref(),
+                        n,
+                        hidden_dim,
+                        intermediate_dim,
+                    );
+                    backend.matmul_batch_w(
+                        &mut up_b,
+                        &post_b,
+                        layer_w.up_proj.as_ref(),
+                        n,
+                        hidden_dim,
+                        intermediate_dim,
+                    );
+                }
+                backend.swiglu(&mut act_b, &gate_b, &up_b);
+                backend.matmul_batch_w(
+                    &mut mlp_b,
+                    &act_b,
+                    layer_w.down_proj.as_ref(),
+                    n,
+                    intermediate_dim,
+                    hidden_dim,
+                );
+                for t in 0..n {
+                    let m = &mlp_b[t * hidden_dim..(t + 1) * hidden_dim];
+                    for i in 0..hidden_dim {
+                        states[t][i] += m[i];
+                    }
+                }
+            }
+            flatten(&mut x_flat, &states);
+            let mut final_b = vec![0.0f32; n * hidden_dim];
+            backend.rmsnorm_rows(&mut final_b, &x_flat, &weights.final_norm, n, eps);
+            let mut logits = vec![0.0f32; n * vocab];
+            backend.matmul_batch_w(
+                &mut logits,
+                &final_b,
+                weights.output_matrix(),
+                n,
+                hidden_dim,
+                vocab,
+            );
+            Ok(logits)
+        };
+        let out = run();
+        if out.is_err() {
+            let _ = mgr.write().truncate_sequence(seq_id, offset);
+        }
+        out
+    }
+
+    /// Drops the K/V at or past `new_total` (pool and dense copies). The token
+    /// list is the caller's.
+    pub fn truncate_kv(&mut self, seq_id: u64, new_total: usize) -> Result<(), String> {
+        if let Some(m) = &self.kv_manager {
+            m.write().truncate_sequence(seq_id, new_total)?;
+        }
+        if let Some(seq) = self.sequences.get_mut(&seq_id) {
+            for l in &mut seq.layers {
+                let kvd = l.cached_k.first().map_or(0, |r| r.len());
+                l.cached_k.truncate(new_total);
+                l.cached_v.truncate(new_total);
+                l.flat_k.truncate(new_total * kvd);
+                l.flat_v.truncate(new_total * kvd);
+            }
+        }
+        Ok(())
+    }
+
+    /// Forwards the sequence's last token (the pending one) at its position and
+    /// returns the logits of the next position; the token list is untouched.
+    pub fn decode_pending(&mut self, seq_id: u64) -> Result<Vec<f32>, String> {
+        let seq = self
+            .sequences
+            .get_mut(&seq_id)
+            .ok_or_else(|| format!("decode_pending: sequence {seq_id} not found"))?;
+        let pos = seq
+            .tokens
+            .len()
+            .checked_sub(1)
+            .ok_or_else(|| "decode_pending: empty sequence".to_string())?;
+        let tok = seq.tokens[pos];
+        let hidden = Self::try_forward_token_impl_paged(
+            &self.weights,
+            &*self.tensor_backend,
+            tok,
+            pos,
+            seq,
+            seq_id,
+            self.kv_manager.as_ref(),
+        )?;
+        Ok(Self::compute_logits_impl(
+            &self.weights,
+            &*self.tensor_backend,
+            &hidden,
+        ))
+    }
+
     pub fn forward_token_impl(
         weights: &TransformerWeights,
         backend: &dyn TensorBackend,
