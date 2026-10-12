@@ -125,7 +125,9 @@ fn main() {
         .map(PathBuf::from)
         .unwrap_or_else(|_| dir.join("../physics"));
     let out = PathBuf::from(env("OUT_DIR")).join("omega-compose-build");
-    std::fs::create_dir_all(&out).expect("create omega build dir");
+    if build::fresh_out_dir(&out, &expected) {
+        println!("cargo:warning=aien-omega-compose: build dir was for another omega commit, rebuilt from clean");
+    }
     let mut make = Command::new("make");
     make.current_dir(&dir)
         .env_remove("MAKEFLAGS")
