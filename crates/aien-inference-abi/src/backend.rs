@@ -136,6 +136,14 @@ pub trait TensorBackend: Send + Sync {
         Ok(())
     }
 
+    /// Memory for the shared paged KV pool, when this backend can read KV in place from an
+    /// allocation of its own (omega: a GPU-uncached, host-visible pool; the paged attention then
+    /// stages nothing per call). `None`, the default: the caller maps ordinary host memory and
+    /// the backend copies the referenced slices for every call.
+    fn alloc_kv_pool(&self, _bytes: usize) -> Option<aien_kv_cache::DefaultUnifiedBuffer> {
+        None
+    }
+
     /// How many operations this backend ran on a software fallback instead of
     /// the device it was bound to. Zero for pure CPU backends; a production
     /// build treats a non-zero count as a strict real-model violation.

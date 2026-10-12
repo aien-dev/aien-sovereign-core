@@ -1053,6 +1053,38 @@ impl TensorBackend for OmegaGb10Backend {
         );
     }
 
+    fn alloc_kv_pool(&self, bytes: usize) -> Option<aien_kv_cache::DefaultUnifiedBuffer> {
+        // omega's resident KV pool: the paged attention reads it in place (no per-call staging of
+        // the layer slices). A refusal falls back to the host-mapped pool, which stays correct.
+        let (ptr, len) = match aien_omega_gpu::resident_kv_pool_alloc(bytes) {
+            Ok(p) => p,
+            Err(e) => {
+                self.fail(format!(
+                    "resident KV pool of {bytes} bytes: {e:?}; host-mapped pool, staged attention"
+                ));
+                return None;
+            }
+        };
+        // SAFETY: omega owns `len` bytes at `ptr` until `resident_kv_pool_free`, which the release
+        // callback runs exactly once; omega's allocations have chip address == host address.
+        let wrapped = unsafe {
+            aien_kv_cache::external_default_buffer(
+                ptr,
+                len,
+                ptr as u64,
+                Box::new(aien_omega_gpu::resident_kv_pool_free),
+            )
+        };
+        match wrapped {
+            Ok(b) => Some(b),
+            Err(e) => {
+                aien_omega_gpu::resident_kv_pool_free();
+                self.fail(e);
+                None
+            }
+        }
+    }
+
     fn paged_attention(
         &self,
         out: &mut [f32],

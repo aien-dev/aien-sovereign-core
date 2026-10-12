@@ -9,6 +9,9 @@ use core::ptr::NonNull;
 pub enum LinuxMemoryKind {
     AtsSystem,
     HmmSystem,
+    /// Memory another allocator owns (the GPU engine's uncached, host-visible pool): released
+    /// through its callback when the buffer drops, never unmapped here.
+    External,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -26,6 +29,8 @@ pub struct LinuxUnifiedBuffer {
     align: usize,
     kind: LinuxMemoryKind,
     device_address: DeviceAddress,
+    /// `External` memory: runs once on drop instead of the unmap.
+    release: Option<Box<dyn FnOnce() + Send + Sync>>,
 }
 
 unsafe impl Send for LinuxUnifiedBuffer {}
@@ -87,6 +92,37 @@ impl LinuxUnifiedBuffer {
             align,
             kind: actual_kind,
             device_address,
+            release: None,
+        })
+    }
+
+    /// A buffer over memory another allocator owns (`LinuxMemoryKind::External`): `len` bytes at
+    /// `ptr`, reachable by the device at `device_address`. `release` runs exactly once, when the
+    /// buffer drops; nothing is unmapped here.
+    ///
+    /// # Safety
+    /// `ptr` must be non-null and stay valid, readable and writable for `len` bytes until
+    /// `release` runs, and nothing else may free it.
+    pub unsafe fn from_external(
+        ptr: *mut u8,
+        len: usize,
+        device_address: DeviceAddress,
+        release: Box<dyn FnOnce() + Send + Sync>,
+    ) -> Result<Self, PlatformError> {
+        if len == 0 {
+            return Err(PlatformError::InvalidLayout);
+        }
+        let ptr = NonNull::new(ptr).ok_or(PlatformError::InvalidLayout)?;
+        let align = 1usize << (ptr.as_ptr() as usize).trailing_zeros().min(12);
+        Ok(Self {
+            ptr,
+            mapping_base: ptr,
+            mapping_len: len,
+            len,
+            align,
+            kind: LinuxMemoryKind::External,
+            device_address,
+            release: Some(release),
         })
     }
 
@@ -119,6 +155,10 @@ impl UnifiedBuffer for LinuxUnifiedBuffer {
 
 impl Drop for LinuxUnifiedBuffer {
     fn drop(&mut self) {
+        if let Some(release) = self.release.take() {
+            release();
+            return;
+        }
         unsafe {
             libc::munmap(
                 self.mapping_base.as_ptr() as *mut libc::c_void,

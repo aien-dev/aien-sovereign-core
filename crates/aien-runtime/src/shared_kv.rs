@@ -16,7 +16,10 @@
 use std::sync::Arc;
 
 use aien_inference_abi::{NativeTransformerBackend, TensorBackend, TransformerWeights};
-use aien_kv_cache::{create_shared_kv_manager_with_pool, KvDType, KvPoolConfig, SharedKvManager};
+use aien_kv_cache::{
+    create_shared_kv_manager_with_pool, create_shared_kv_manager_with_pool_buffer, KvDType,
+    KvPoolConfig, SharedKvManager,
+};
 use aien_scheduler::SchedulerConfig;
 
 use crate::spine::AienRuntimeSpine;
@@ -53,6 +56,38 @@ pub fn build_model_kv_manager(
     create_shared_kv_manager_with_pool(total_blocks, cfg.block_size, pool_cfg)
 }
 
+/// `build_model_kv_manager` with the pool memory `backend` offers when it has some
+/// (`TensorBackend::alloc_kv_pool`: omega's resident pool, which its paged attention reads in
+/// place instead of staging the KV slices on every call); otherwise the host-mapped pool as before.
+pub fn build_model_kv_manager_for(
+    weights: &TransformerWeights,
+    total_blocks: usize,
+    backend: &dyn TensorBackend,
+) -> Result<SharedKvManager, String> {
+    let cfg = &weights.config;
+    if cfg.block_size == 0 {
+        return Err("shared KV: model config block_size is 0".to_string());
+    }
+    let pool_cfg = KvPoolConfig::for_model(
+        total_blocks,
+        cfg.block_size,
+        cfg.num_layers,
+        cfg.num_kv_heads,
+        cfg.head_dim,
+        SHARED_KV_DTYPE,
+    );
+    let bytes = aien_kv_cache::KvLayout::from_config(&pool_cfg)?.total_bytes;
+    match backend.alloc_kv_pool(bytes) {
+        Some(buffer) => create_shared_kv_manager_with_pool_buffer(
+            total_blocks,
+            cfg.block_size,
+            pool_cfg,
+            buffer,
+        ),
+        None => create_shared_kv_manager_with_pool(total_blocks, cfg.block_size, pool_cfg),
+    }
+}
+
 /// Builds the runtime spine and the native backend over ONE pooled KV
 /// manager. The returned backend's `kv_manager` is the same `Arc` as the
 /// spine's `kv_manager` (`Arc::ptr_eq`).
@@ -62,7 +97,8 @@ pub fn build_shared_kv_runtime(
     scheduler_config: SchedulerConfig,
     sizing: SharedKvSizing,
 ) -> Result<(AienRuntimeSpine, NativeTransformerBackend), String> {
-    let kv_manager = build_model_kv_manager(&weights, sizing.total_blocks)?;
+    let kv_manager =
+        build_model_kv_manager_for(&weights, sizing.total_blocks, tensor_backend.as_ref())?;
     let spine = AienRuntimeSpine::new(sizing.arena_capacity, scheduler_config, kv_manager.clone());
     let backend =
         NativeTransformerBackend::with_shared_kv_and_backend(weights, tensor_backend, kv_manager);

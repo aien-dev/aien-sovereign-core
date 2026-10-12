@@ -287,6 +287,30 @@ pub type DefaultUnifiedBuffer = aien_platform_linux::LinuxUnifiedBuffer;
 #[cfg(not(target_os = "linux"))]
 pub type DefaultUnifiedBuffer = HeapUnifiedBuffer;
 
+/// Wraps memory another allocator owns (the omega GPU engine's resident KV pool: GPU-uncached,
+/// host-visible, chip address equal to the host address) as the default unified buffer, so the
+/// pooled KV manager can live in it and the paged attention can read it in place. `release` runs
+/// exactly once, when the buffer is dropped.
+///
+/// # Safety
+/// `ptr` must stay valid, readable and writable for `len` bytes until `release` runs, and nothing
+/// else may free it.
+#[cfg(target_os = "linux")]
+pub unsafe fn external_default_buffer(
+    ptr: *mut u8,
+    len: usize,
+    device_address: u64,
+    release: Box<dyn FnOnce() + Send + Sync>,
+) -> Result<DefaultUnifiedBuffer, String> {
+    aien_platform_linux::LinuxUnifiedBuffer::from_external(
+        ptr,
+        len,
+        aien_platform::DeviceAddress(device_address),
+        release,
+    )
+    .map_err(|e| format!("external KV buffer: {e:?}"))
+}
+
 /// Fallback standard host buffer implementing UnifiedBuffer for testing.
 pub struct HeapUnifiedBuffer {
     ptr: *mut u8,
@@ -835,6 +859,19 @@ impl AienKvManager<DefaultUnifiedBuffer> {
         let pool = UnifiedKvTensorPool::allocate(config)?;
         self.tensor_pool = Some(pool);
         Ok(())
+    }
+
+    /// `new_with_pool` over a buffer the caller already holds (the GPU engine's resident KV
+    /// pool, see `external_default_buffer`); `buffer.len()` must cover the layout.
+    pub fn new_with_pool_buffer(
+        total_blocks: usize,
+        block_size: usize,
+        config: KvPoolConfig,
+        buffer: DefaultUnifiedBuffer,
+    ) -> Result<Self, String> {
+        let mut mgr = Self::new(total_blocks, block_size);
+        mgr.tensor_pool = Some(UnifiedKvTensorPool::new(config, buffer)?);
+        Ok(mgr)
     }
 }
 
@@ -1598,6 +1635,18 @@ pub fn create_shared_kv_manager_with_pool(
     config: KvPoolConfig,
 ) -> Result<SharedKvManager<DefaultUnifiedBuffer>, String> {
     let mgr = AienKvManager::new_with_pool(total_blocks, block_size, config)?;
+    Ok(Arc::new(RwLock::new(mgr)))
+}
+
+/// `create_shared_kv_manager_with_pool` over a buffer the caller already holds
+/// (`AienKvManager::new_with_pool_buffer`).
+pub fn create_shared_kv_manager_with_pool_buffer(
+    total_blocks: usize,
+    block_size: usize,
+    config: KvPoolConfig,
+    buffer: DefaultUnifiedBuffer,
+) -> Result<SharedKvManager<DefaultUnifiedBuffer>, String> {
+    let mgr = AienKvManager::new_with_pool_buffer(total_blocks, block_size, config, buffer)?;
     Ok(Arc::new(RwLock::new(mgr)))
 }
 
