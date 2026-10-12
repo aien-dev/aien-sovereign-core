@@ -163,6 +163,16 @@ pub trait TensorBackend: Send + Sync {
         None
     }
 
+    /// Per-operation wall and chip time since the last reset, one line per kind
+    /// ("key calls=N wall_ms=W chip_ms=C", sorted by wall time), for timing receipts.
+    /// Default: None, for a backend that does not keep the table.
+    fn op_timing_report(&self) -> Option<String> {
+        None
+    }
+
+    /// Clear the per-operation timing table (no-op without one).
+    fn reset_op_timing(&self) {}
+
     /// In-place Root Mean Square Normalization:
     /// out[i] = x[i] * weight[i] / sqrt(mean(x^2) + eps)
     fn rmsnorm(&self, out: &mut [f32], x: &[f32], weight: &[f32], eps: f32);

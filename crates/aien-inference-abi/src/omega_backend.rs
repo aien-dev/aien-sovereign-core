@@ -36,6 +36,7 @@ use aien_omega_gpu::ResidentTensor;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 /// `AIEN_GPU_BACKEND=omega` demands this backend: a build without the Omega engine linked
 /// refuses to start instead of falling back to the CPU reference. It is the only GPU backend.
@@ -79,6 +80,17 @@ pub struct OmegaGb10Backend {
     kv_bytes_staged: AtomicU64,
     kv_bytes_naive: AtomicU64,
     last_error: Mutex<String>,
+    /// Wall and chip time per operation kind (resident matmul keyed by shape), for the
+    /// decode-speed receipts (sc#384); read with `op_timing_lines`, cleared with `reset_op_times`.
+    op_times: Mutex<HashMap<String, OpTime>>,
+}
+
+/// One row of the per-operation timing table.
+#[derive(Default, Clone, Copy, Debug)]
+pub struct OpTime {
+    pub calls: u64,
+    pub wall_ns: u64,
+    pub chip_ns: u64,
 }
 
 impl Default for OmegaGb10Backend {
@@ -126,6 +138,43 @@ impl OmegaGb10Backend {
             kv_bytes_staged: AtomicU64::new(0),
             kv_bytes_naive: AtomicU64::new(0),
             last_error: Mutex::new(String::new()),
+            op_times: Mutex::new(HashMap::new()),
+        }
+    }
+
+    fn tally(&self, key: String, wall_ns: u64, chip_ns: u64) {
+        if let Ok(mut m) = self.op_times.lock() {
+            let e = m.entry(key).or_default();
+            e.calls += 1;
+            e.wall_ns += wall_ns;
+            e.chip_ns += chip_ns;
+        }
+    }
+
+    /// The per-operation timing table as text, heaviest wall time first.
+    pub fn op_timing_lines(&self) -> String {
+        let mut rows: Vec<(String, OpTime)> = self
+            .op_times
+            .lock()
+            .map(|m| m.iter().map(|(k, v)| (k.clone(), *v)).collect())
+            .unwrap_or_default();
+        rows.sort_by(|a, b| b.1.wall_ns.cmp(&a.1.wall_ns));
+        rows.iter()
+            .map(|(k, t)| {
+                format!(
+                    "{k} calls={} wall_ms={:.1} chip_ms={:.1}",
+                    t.calls,
+                    t.wall_ns as f64 / 1e6,
+                    t.chip_ns as f64 / 1e6
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("; ")
+    }
+
+    pub fn reset_op_times(&self) {
+        if let Ok(mut m) = self.op_times.lock() {
+            m.clear();
         }
     }
 
@@ -276,12 +325,18 @@ impl OmegaGb10Backend {
             Ok(g) => g,
             Err(_) => refuse(self, "chip lock poisoned".into()),
         };
+        let t0 = Instant::now();
         let res = w.matmul_f32(m, x, out);
         drop(guard);
         match res {
             Ok(ns) => {
                 self.chip_calls.fetch_add(1, Ordering::Relaxed);
                 self.chip_ns.fetch_add(ns, Ordering::Relaxed);
+                self.tally(
+                    format!("matmul m={m} k={in_dim} n={out_dim}"),
+                    t0.elapsed().as_nanos() as u64,
+                    ns,
+                );
             }
             Err(e) => refuse(
                 self,
@@ -321,12 +376,18 @@ impl OmegaGb10Backend {
             Ok(g) => g,
             Err(_) => return self.fail("chip lock poisoned".into()),
         };
+        let t0 = Instant::now();
         let res = call();
         drop(guard);
         match res {
             Ok(info) => {
                 self.chip_calls.fetch_add(1, Ordering::Relaxed);
                 self.chip_ns.fetch_add(info.elapsed_ns, Ordering::Relaxed);
+                self.tally(
+                    what.split_whitespace().next().unwrap_or(what).to_string(),
+                    t0.elapsed().as_nanos() as u64,
+                    info.elapsed_ns,
+                );
                 true
             }
             Err(e) => self.fail(format!("{what}: {e}")),
@@ -420,12 +481,18 @@ impl OmegaGb10Backend {
             Ok(g) => g,
             Err(_) => return self.fail("chip lock poisoned".into()),
         };
+        let t0 = Instant::now();
         let res = call();
         drop(guard);
         match res {
             Ok(info) => {
                 self.chip_calls.fetch_add(1, Ordering::Relaxed);
                 self.chip_ns.fetch_add(info.elapsed_ns, Ordering::Relaxed);
+                self.tally(
+                    what.split_whitespace().next().unwrap_or(what).to_string(),
+                    t0.elapsed().as_nanos() as u64,
+                    info.elapsed_ns,
+                );
                 self.kv_bytes_staged
                     .fetch_add(info.kv_bytes_staged, Ordering::Relaxed);
                 self.kv_bytes_naive
@@ -703,6 +770,14 @@ impl TensorBackend for OmegaGb10Backend {
     /// no chip, so it makes no claim).
     fn gpu_executions(&self) -> Option<u64> {
         self.is_available().then(|| self.chip_calls())
+    }
+
+    fn op_timing_report(&self) -> Option<String> {
+        Some(self.op_timing_lines())
+    }
+
+    fn reset_op_timing(&self) {
+        self.reset_op_times()
     }
 
     fn rmsnorm(&self, out: &mut [f32], x: &[f32], weight: &[f32], eps: f32) {
@@ -1416,6 +1491,22 @@ mod tests {
 
     /// sc#402: the chip-call total is reported only when the real engine is linked; the
     /// stub has no chip and makes no claim (None, never a zero that reads as "ran, no calls").
+    #[test]
+    fn op_timing_table_tallies_sorts_and_resets() {
+        let b = OmegaGb10Backend::new();
+        assert_eq!(b.op_timing_lines(), "");
+        assert_eq!(b.op_timing_report(), Some(String::new()));
+        b.tally("rmsnorm".into(), 2_000_000, 1_500_000);
+        b.tally("matmul m=1 k=4096 n=4096".into(), 10_000_000, 9_000_000);
+        b.tally("rmsnorm".into(), 1_000_000, 500_000);
+        assert_eq!(
+            b.op_timing_lines(),
+            "matmul m=1 k=4096 n=4096 calls=1 wall_ms=10.0 chip_ms=9.0; rmsnorm calls=2 wall_ms=3.0 chip_ms=2.0"
+        );
+        b.reset_op_timing();
+        assert_eq!(b.op_timing_lines(), "");
+    }
+
     #[test]
     fn gpu_executions_is_the_chip_call_total_or_absent() {
         let b = OmegaGb10Backend::new();

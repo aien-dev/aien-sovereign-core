@@ -195,6 +195,10 @@ async fn main() {
     };
     let mut results = Vec::new();
     for (name, user, max_tokens) in prompts.iter() {
+        if *name == "p3" {
+            // The timing table then covers p3 only (its prompt read and 256 decode steps).
+            tb.reset_op_timing();
+        }
         let msgs = vec![
             aien_runtime::ChatTurn {
                 role: "system".into(),
@@ -226,11 +230,16 @@ async fn main() {
             "reply": reply,
         }));
     }
+    // Per-operation wall and chip time for p3 (AIEN_SMOKE_LONG=1), from the GPU backend's table.
+    let op_timing = tb.op_timing_report();
+    if let Some(t) = &op_timing {
+        eprintln!("  p3 op timing: {t}");
+    }
     println!(
         "{}",
         serde_json::json!({
             "leg": a[2], "backend": TensorBackend::name(tb.as_ref()),
-            "cta_budget": cta_budget.map(|b| b.get()), "spin_us": spin_us,
+            "cta_budget": cta_budget.map(|b| b.get()), "spin_us": spin_us, "op_timing": op_timing,
             "model_dir": dir, "model_id": config.model_id, "template": tok.template().name(),
             "prompts": results, "fallback_count": tb.fallback_count(),
         })

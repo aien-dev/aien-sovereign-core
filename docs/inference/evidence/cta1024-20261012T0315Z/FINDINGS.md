@@ -42,3 +42,34 @@ The smoke example now applies both daemon defaults (budget and spin) and records
 Verdict: 256 -> 1024 gives +17% decode on the real model (116 -> 100 ms/token), answers unchanged. The 13 tok/s target (77 ms/token) is
 not reached by this change alone; the next candidates are fusing the q/k/v and gate/up launches (the k/v shape sits on the launch floor)
 and the n=4096 shapes whose grid is capped at n/8 = 512 blocks. `stub-attempt/` is an INVALID record (binary without the engine, rc 3, no chip time).
+
+## Where a decode token's time goes (per-op timing, 03:43-03:47Z, one hold, `timing-leg.sh`)
+
+Same binary plus a per-operation timing table in the GPU backend (wall time around each chip call and the chip's own
+launch-to-completion time), reset before p3. Budget 1024, spin 2000 us, fallback 0, p1/p2 equal to the golden, p3 26 666 ms for
+37 prompt tokens + 256 generated (255 decode steps after the prefill token). Full table: `smoke-timing-ops.txt`.
+
+| op (per decode step, 36 layers) | calls/step | wall ms/step | chip ms/step | effective GB/s (chip) |
+|---|---|---|---|---|
+| matmul gate+up 4096x12288 (2/layer, 100.7 MB each) | 72 | 36.4 | 34.0 | 213 |
+| matmul down 12288x4096 (100.7 MB) | 36 | 19.5 | 16.6 | 218 |
+| matmul q+o 4096x4096 (2/layer, 33.5 MB each) | 72 | 14.2 | 12.2 | 198 |
+| matmul k+v 4096x1024 (2/layer, 8.4 MB each) | 72 | 9.3 | 7.4 | 82 (grid 128 blocks: too small to fill the chip) |
+| lm_head 4096x151936 (1245 MB) | 1 | 6.6 | 6.5 | 192 |
+| paged_attention (gathered: Fp32 pool, host gathers K/V every call) | 36 | 6.6 | 5.2 | grows with context |
+| rmsnorm (2/layer + final) | 83 | 2.9 | 2.5 | |
+| swiglu | 36 | 1.0 | 0.6 | |
+| rmsnorm_heads (q/k norm) | 72 | 0.9 | 0.7 | |
+| rope | 36 | 0.5 | 0.3 | |
+| sum | 516 | 97.9 | 86.0 | |
+
+Decode wall per step (p3 minus the p1 prompt read, over 255 steps) is 101.8 ms, so the chip calls account for 98 of it; host work outside
+the backend is about 4 ms. Matmuls are 86 ms wall (80 chip) for 15.1 GB per token: 176 GB/s average against the 273 GB/s ceiling and
+the 240 GB/s the kernel reaches on a well-filled grid. The 13 tok/s target needs 77 ms per step: 25 ms to find.
+
+Prefill (37 tokens) runs attention per token (gqa_attention 1332 = 37 x 36 calls, 46 ms) and the m=37 matmuls at 2 to 4x the m=1 time;
+the prompt read is about 0.7 s and is not the bound here.
+
+Next fixes, in order of ms saved: (1) one fused q/k/v matmul per layer (n=6144, 50.3 MB at ~213 GB/s = 0.24 ms vs 0.46 ms now: ~8 ms/step);
+(2) one fused gate+up matmul (n=24576: ~6 ms/step at 240 GB/s); (3) bf16 KV pool so attention uses the paged kernel instead of the host
+gather (5 ms here, much more on the 700 to 1000-token document tasks of the campaign); (4) split-K for the n=4096 shapes (grid capped at 512).
