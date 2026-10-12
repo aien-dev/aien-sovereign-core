@@ -244,7 +244,7 @@ at that sha for the leg; re-pinned to the squash-merge sha aa1c4af2 of omega#407
 abi-qualify PASS at the pin: abi-qual-host-aa1c4af2.json (records sovereign-core 4c551f34, the commit before this
 evidence file and the crumb data were folded in).
 
-## Prefill activations packed on the host in one pass (07:45-07:46Z, N=smoke-ctx-mmpack)
+## Prefill activations packed on the host in one pass (08:02-08:03Z, N=smoke-ctx-mmpack)
 
 omega#409 (`omega_matmul_frag_pack_a_f32`, squash 1339759c): the f32 activation rows of every m = 128 prompt-read
 matmul call are packed straight into HMMA fragment order with an inline round-to-nearest-even bf16 conversion that is
@@ -258,16 +258,16 @@ sovereign-core code change: the pin moved. Same binary source as N=smoke-ctx-mmb
 | leg | p4 (1268-token prompt + 64) | p4 m=128 matmuls (wall / chip) | p3 (37 + 256) |
 |---|---|---|---|
 | smoke-ctx-mmblock (before) | 23.1 s | 8.9 s / 2.0 s | 23.0 s |
-| smoke-ctx-mmpack (after) | 17.1 s | 3.8 s / 2.1 s | 21.6 s |
+| smoke-ctx-mmpack (after) | 16.9 s | 3.8 s / 2.1 s | 21.3 s |
 
 Per shape at p4 (324 calls each, wall / chip): k=12288 n=4096 3.7 s / 0.56 s -> 1.08 s / 0.59 s; k=4096 n=24576
-2.6 / 1.0 -> 1.76 / 1.03; k=4096 n=6144 1.4 / 0.26 -> 0.55 / 0.28; k=4096 n=4096 1.3 / 0.21 -> 0.44 / 0.22. Host
+2.6 / 1.0 -> 1.73 / 1.00; k=4096 n=6144 1.4 / 0.26 -> 0.54 / 0.27; k=4096 n=4096 1.3 / 0.21 -> 0.42 / 0.21. Host
 stopwatch of the packer alone (omega#409 receipts, best of 20): 128 x 4096 2.94 -> 0.68 ms, 128 x 12288 8.82 -> 0.91 ms.
 
-p4 now: chunk attention rows 2.9 s (2.7 s chip), decode m=1 matmuls ~5.9 s for 64 tokens (chip 5.7 s, the weight
+p4 now: chunk attention rows 2.9 s (2.7 s chip), decode m=1 matmuls 4.7 s for 64 tokens (chip 4.6 s, the weight
 read near the memory roof), prefill matmuls 3.8 s (2.1 s chip; the remaining host side is the f32 result poison and
-copy-out, up to 12.6 MB per call), swiglu 1.1 s (0.54 s chip), decode paged attention 1.0 s (0.53 s chip), rope
-0.59 s over 47916 launches, rmsnorm 0.52 s, rmsnorm_heads 0.51 s. The prompt read is now about 10 s of the 17.1 s;
+copy-out, up to 12.6 MB per call), swiglu 1.1 s (0.53 s chip), decode paged attention 0.92 s (0.47 s chip), rope
+0.58 s over 47916 launches, rmsnorm 0.52 s, rmsnorm_heads 0.51 s. The prompt read is now about 10 s of the 16.9 s;
 the decode token at this context is about 110 ms, of which the paged-attention call stages the layer's KV slices
 into scratch on every call (about 5 MB per layer at 1268 tokens) and the small elementwise launches cost about
 90 us of wall each. Next by size for the campaign rows: a resident KV pool for the paged attention (no per-call
@@ -275,3 +275,14 @@ staging), then fewer and cheaper elementwise launches per token.
 
 Receipts: smoke-ctx-mmpack.{start,end,rc,raw,err,json,binary.sha256}; built against omega 1339759c (omega.lock and
 the native-artifacts.lock lines at that sha). Host-scope abi-qualify PASS at the pin: abi-qual-host-1339759c.json.
+
+Stale archive found at this pin, and the rerun. The first leg (07:45Z, p4 17.1 s, same replies) was linked while the
+crate build dir reused across pins still held two compose objects (rx_compose.o, rxc_host_abi.o) compiled at the
+previous pin: omega#408 grew a Cortex struct in rx_cortex.h and omega's compose-library rule did not include its
+objects' dependency files, so they were not rebuilt. The mixed archive failed abi-qualify's compose step (first
+rxc_host_run refused with RX_ERR_AUTHORITY, five callbacks tests Code -4); clean rebuilds of the same commit pass
+(archive digest 209b95bd reproduced twice from detached checkouts, now the lock line). The smoke example links none
+of the compose objects, so its binary digest is the same before and after (d93f117e) and the leg was rerun against
+the clean archive for the record: p1-p4 301, 2546, 21337, 16885 ms. Fixes: omega#410 includes the dependency
+files; here, both omega crate build scripts stamp the build dir with the omega commit and wipe it when the stamp
+differs (fresh_out_dir in aien-abi-conformance, unit-tested), so a reused dir cannot carry objects across pins.
