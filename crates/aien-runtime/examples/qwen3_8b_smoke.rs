@@ -102,6 +102,23 @@ async fn main() {
         None
     };
     // AIEN_SMOKE_LONG=1 adds a third, longer prompt (not part of the golden; for decode timing only).
+    // AIEN_SMOKE_CTX=1 adds a fourth with a long prompt (32 numbered rules, about 900 tokens: the
+    // campaign's document tasks decode at 700 to 1000 tokens of context) and 64 new tokens, so the
+    // timing table shows what attention costs at that context. Not part of the golden.
+    let long_user: String = {
+        let rules: Vec<String> = (1..=32)
+            .map(|i| {
+                format!(
+                    "Rule {i}: a book borrowed on day {} of the month is due back after {} days, and the fine for a late return is {} cents per day.",
+                    i, i % 7 + 3, i * 3 % 50 + 5
+                )
+            })
+            .collect();
+        format!(
+            "Here are the rules of a small library.\n{}\nSummarize these rules in two sentences.",
+            rules.join("\n")
+        )
+    };
     let mut prompts: Vec<(&str, &str, usize)> = PROMPTS.to_vec();
     if std::env::var("AIEN_SMOKE_LONG")
         .map(|v| v == "1")
@@ -112,6 +129,12 @@ async fn main() {
             "Describe how a bicycle works, in about 250 words.",
             256,
         ));
+    }
+    if std::env::var("AIEN_SMOKE_CTX")
+        .map(|v| v == "1")
+        .unwrap_or(false)
+    {
+        prompts.push(("p4", long_user.as_str(), 64));
     }
     let config = aien_inference_abi::load_model_config(&dir).expect("config.json");
     let (weights, tb): (_, Arc<dyn TensorBackend>) = if gb10 {
@@ -194,11 +217,10 @@ async fn main() {
             .collect()
     };
     let mut results = Vec::new();
+    let mut p3_timing: Option<String> = None;
     for (name, user, max_tokens) in prompts.iter() {
-        if *name == "p3" {
-            // The timing table then covers p3 only (its prompt read and 256 decode steps).
-            tb.reset_op_timing();
-        }
+        // The timing table covers one prompt at a time (its prompt read and its decode steps).
+        tb.reset_op_timing();
         let msgs = vec![
             aien_runtime::ChatTurn {
                 role: "system".into(),
@@ -224,17 +246,22 @@ async fn main() {
             .await
             .expect("turn");
         let reply = tok.decode_opts(&out, true).expect("decode");
+        let prompt_timing = tb.op_timing_report();
+        if let Some(t) = &prompt_timing {
+            eprintln!("  {name} op timing: {t}");
+        }
+        if *name == "p3" {
+            p3_timing = prompt_timing.clone();
+        }
         results.push(serde_json::json!({
             "name": name, "prompt_sha256": sha(text.as_bytes()), "prompt_ids": ids,
             "max_tokens": max_tokens, "output_ids": out, "finish": finish, "ms": ms,
-            "reply": reply,
+            "reply": reply, "op_timing": prompt_timing,
         }));
     }
-    // Per-operation wall and chip time for p3 (AIEN_SMOKE_LONG=1), from the GPU backend's table.
-    let op_timing = tb.op_timing_report();
-    if let Some(t) = &op_timing {
-        eprintln!("  p3 op timing: {t}");
-    }
+    // Per-operation wall and chip time for p3 (AIEN_SMOKE_LONG=1), from the GPU backend's table;
+    // every prompt also carries its own table.
+    let op_timing = p3_timing;
     println!(
         "{}",
         serde_json::json!({

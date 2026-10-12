@@ -118,3 +118,29 @@ declared numerics change, recorded here; the campaign golden covers p1/p2 and st
 The attention saving grows with context (37-token prompt here; the campaign's document tasks run 700 to 1000 tokens, where the host gather
 was linear in context). Cumulative today: 116 -> 88.7 ms/step (8.4 -> 11.3 tok/s on p3). Remaining to the 77 ms target: the n=4096
 shapes (o, down: grid capped at 512 blocks, ~5 ms at 240 GB/s), the small elementwise launches (~5 ms), lm_head (~1 ms).
+
+## Long context: where a campaign token's time goes (04:55-05:00Z, one hold, `N=smoke-ctx-cta1024 ctx-leg.sh`)
+
+Same build as the bf16 KV leg plus a fourth smoke prompt (`AIEN_SMOKE_CTX=1`: 32 numbered library rules, 1268 prompt tokens, 64 new
+tokens; the campaign's document tasks decode at 700 to 1000 tokens of context). Golden p1/p2 equal, p3 ids identical to the bf16 KV leg,
+fallback 0. The smoke's p3 (37-token prompt) does not measure what the campaign pays; p4 does.
+
+| prompt | prompt tokens | new tokens | wall | per decode token |
+|---|---|---|---|---|
+| p3 | 37 | 256 | 23.2 s | 88.7 ms |
+| p4 | 1268 | 64 | 63.7 s (prompt read about 56 s, decode about 7 s) | about 110 ms |
+
+Decode at 1268 context (per token): matmuls about 71 ms (unchanged), `paged_attention_bf16` 2268 calls, 1884 ms wall: 0.83 ms per
+call, 30 ms per token (4.6 ms at 37 tokens). The call reads 1268 keys x 8 kv heads x 128 x 2 (K and V) bf16 = 5.2 MB in 0.83 ms:
+about 6 GB/s against a 273 GB/s memory. The kernel launches one CTA per q head (32 CTAs of 128 threads, thread t owns token t), so a
+warp's K loads touch 32 different token rows per instruction; it is latency and sector bound, not bandwidth bound.
+
+Prompt read of 1268 tokens (about 56 s, 44 ms per prompt token): `gqa_attention` 45 648 calls (one per token per layer) 24.5 s wall;
+matmuls at m=128 15.7 s chip (the fragment kernel re-reads B once per 16-row tile: 8x the weight traffic, no reuse, about 1 TFLOP/s);
+per-token elementwise launches: rmsnorm 95 905 calls 3.2 s, swiglu 47 916 calls 1.3 s, rmsnorm_heads 95 832 calls 1.0 s, rope 0.6 s.
+
+What this means for the campaign (v7 D1: first reply 95.8 s of the 120 s budget): about 45 s of that is the prompt read and the rest
+is decode at about 110 ms per token. The 13 tok/s target from the speed-bound memo was computed on the short-context decode and would
+not by itself bring D1 inside its budget. The fixes that move the campaign, in order of size: (1) the attention kernel's memory
+access pattern (prompt read 24.5 s -> about 1 s, decode attention 30 ms -> about 2 ms per token at 1000 context); (2) batched
+elementwise launches in the prompt read (about 6 s); (3) a prefill matmul kernel with B reuse (15.7 s -> a few s).
