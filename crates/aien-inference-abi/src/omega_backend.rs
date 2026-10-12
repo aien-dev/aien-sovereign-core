@@ -988,6 +988,71 @@ impl TensorBackend for OmegaGb10Backend {
         );
     }
 
+    fn gqa_attention_rows(
+        &self,
+        out: &mut [f32],
+        q: &[f32],
+        k_cache: &[f32],
+        v_cache: &[f32],
+        base_len: usize,
+        num_rows: usize,
+        num_q_heads: usize,
+        num_kv_heads: usize,
+        head_dim: usize,
+    ) {
+        if num_rows == 0 {
+            return;
+        }
+        // omega wants exactly base_len + num_rows tokens of cache; the prompt read hands the
+        // sequence's whole cache, which is that long right after the chunk's KV writes.
+        let geom = aien_abi_core::AttentionGeometry::new(num_q_heads, num_kv_heads, head_dim);
+        let total = base_len + num_rows;
+        let need = geom.as_ref().map_or(0, |g| total * g.kv_dim());
+        let shapes_ok = match &geom {
+            Ok(g) => {
+                q.len() == num_rows * g.q_dim()
+                    && out.len() == num_rows * g.q_dim()
+                    && k_cache.len() >= need
+                    && v_cache.len() >= need
+            }
+            Err(e) => self.fail(format!("gqa_attention_rows geometry refused: {e}")),
+        };
+        let k_rows = &k_cache[..need.min(k_cache.len())];
+        let v_rows = &v_cache[..need.min(v_cache.len())];
+        let native = shapes_ok
+            && self.chip_attention(
+                &format!("gqa_attention_rows base={base_len} rows={num_rows}"),
+                || {
+                    aien_omega_gpu::gqa_attention_rows_f32(
+                        q,
+                        k_rows,
+                        v_rows,
+                        base_len,
+                        num_rows,
+                        num_q_heads,
+                        num_kv_heads,
+                        head_dim,
+                        out,
+                    )
+                },
+            );
+        if native {
+            return;
+        }
+        self.reference_for(TensorOp::GqaAttention);
+        self.reference.gqa_attention_rows(
+            out,
+            q,
+            k_cache,
+            v_cache,
+            base_len,
+            num_rows,
+            num_q_heads,
+            num_kv_heads,
+            head_dim,
+        );
+    }
+
     fn paged_attention(
         &self,
         out: &mut [f32],

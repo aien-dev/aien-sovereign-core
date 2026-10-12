@@ -821,6 +821,75 @@ pub fn gqa_attention_f32(
     }
 }
 
+/// Prompt-read attention over a contiguous f32 KV cache, many query rows in one call
+/// (omega#406). `q`, `out`: `[num_rows][num_q_heads][head_dim]`; `k_cache`, `v_cache`:
+/// `[base_len + num_rows][num_kv_heads][head_dim]`. Row `i` attends over the first
+/// `base_len + i + 1` tokens (causal). The KV is staged once; the rows go in launches of up to
+/// 1024 CTAs. One row is bit-identical to [`gqa_attention_f32`].
+#[allow(clippy::too_many_arguments)]
+pub fn gqa_attention_rows_f32(
+    q: &[f32],
+    k_cache: &[f32],
+    v_cache: &[f32],
+    base_len: usize,
+    num_rows: usize,
+    num_q_heads: usize,
+    num_kv_heads: usize,
+    head_dim: usize,
+    out: &mut [f32],
+) -> Result<OmegaGpuAttnInfo, OmegaGpuError> {
+    let total = base_len
+        .checked_add(num_rows)
+        .ok_or_else(|| OmegaGpuError::Rc {
+            rc: ffi::OMEGA_GPU_MATMUL_TOO_LARGE,
+            name: rc_name(ffi::OMEGA_GPU_MATMUL_TOO_LARGE),
+        })?;
+    check_len("q", prod(&[num_rows, num_q_heads, head_dim])?, q.len())?;
+    check_len(
+        "k_cache",
+        prod(&[total, num_kv_heads, head_dim])?,
+        k_cache.len(),
+    )?;
+    check_len(
+        "v_cache",
+        prod(&[total, num_kv_heads, head_dim])?,
+        v_cache.len(),
+    )?;
+    check_len("out", prod(&[num_rows, num_q_heads, head_dim])?, out.len())?;
+    let (bl, nr, qh, kh, hd) = (
+        attn_dim(base_len)?,
+        attn_dim(num_rows)?,
+        attn_dim(num_q_heads)?,
+        attn_dim(num_kv_heads)?,
+        attn_dim(head_dim)?,
+    );
+    #[cfg(has_omega_gpu)]
+    {
+        let mut info = OmegaGpuAttnInfo::zeroed();
+        // SAFETY: lengths checked above; pointers valid for the call; info is an out-pointer.
+        let rc = unsafe {
+            ffi::omega_gpu_gqa_attention_rows_f32(
+                q.as_ptr(),
+                k_cache.as_ptr(),
+                v_cache.as_ptr(),
+                bl,
+                nr,
+                qh,
+                kh,
+                hd,
+                out.as_mut_ptr(),
+                &mut info,
+            )
+        };
+        attn_finish(rc, info)
+    }
+    #[cfg(not(has_omega_gpu))]
+    {
+        let _ = (bl, nr, qh, kh, hd);
+        Err(OmegaGpuError::Unavailable)
+    }
+}
+
 /// Decode attention over the bf16 paged KV pool (`TensorBackend::paged_attention`).
 /// `pool` is the whole pool (at least `layout.pool_bytes` bytes); `block_ids` lists the
 /// sequence's blocks in token order. `q`, `out`: `[num_q_heads][head_dim]`.

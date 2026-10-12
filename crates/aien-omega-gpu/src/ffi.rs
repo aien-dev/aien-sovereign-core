@@ -398,6 +398,20 @@ extern "C" {
         out: *mut f32,
         info: *mut OmegaGpuAttnInfo,
     ) -> c_int;
+    // omega#406 (2026-10-12): the prompt read's rows path. q/out [num_rows][num_q_heads][head_dim];
+    // k/v hold base_len + num_rows tokens; row i attends over base_len + i + 1 of them.
+    pub fn omega_gpu_gqa_attention_rows_f32(
+        q: *const f32,
+        k_cache: *const f32,
+        v_cache: *const f32,
+        base_len: u32,
+        num_rows: u32,
+        num_q_heads: u32,
+        num_kv_heads: u32,
+        head_dim: u32,
+        out: *mut f32,
+        info: *mut OmegaGpuAttnInfo,
+    ) -> c_int;
     pub fn omega_gpu_paged_attention_bf16(
         q: *const f32,
         pool: *const c_void,

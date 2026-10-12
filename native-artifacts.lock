@@ -4,5 +4,5 @@
 # this digest, or build.rs fails. A combination not listed builds with a warning and its
 # native_identity() reports digest "unrecorded", which does not qualify.
 # Update only from a qualification run (scripts/abi-qualify.sh prints the lines to add).
-librx_compose.a c74fe6e53403167ba56d438854f284aba6788ae6 aarch64-unknown-linux-gnu a701a0db5e396acc1a0898d19acefcaf199556cf7f81b0c57a6b7c8402a02cc4 cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0
-libomega_gpu.a c74fe6e53403167ba56d438854f284aba6788ae6 aarch64-unknown-linux-gnu 8937c38a66ef255cffd077e4ef2c99d9cd56ba36135772c4218e86fe8454820f cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0
+librx_compose.a 41f8813a25357256da9b078fe6533a0be1487b6d aarch64-unknown-linux-gnu a701a0db5e396acc1a0898d19acefcaf199556cf7f81b0c57a6b7c8402a02cc4 cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0
+libomega_gpu.a 41f8813a25357256da9b078fe6533a0be1487b6d aarch64-unknown-linux-gnu a687ffa0fe94916ac127b1a704f5df5c078cfba19f6f0132d83999cf2f7af059 cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0

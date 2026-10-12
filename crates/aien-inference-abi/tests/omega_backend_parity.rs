@@ -344,6 +344,31 @@ fn chip_attention_parity_on_tinyllama_shapes() {
         );
         gqa_worst = gqa_worst.max(r);
     }
+    // omega#406: the prompt read's rows path. 40 rows after a 300-token base is 2 launches at
+    // 32 q heads; every row against the reference at its own causal length.
+    {
+        let (base, rows) = (300usize, 40usize);
+        let q: Vec<f32> = (0..rows * nq * hd).map(|_| lcg(&mut seed) * 2.0).collect();
+        let k: Vec<f32> = (0..(base + rows) * nkv * hd)
+            .map(|_| lcg(&mut seed) * 2.0)
+            .collect();
+        let v: Vec<f32> = (0..(base + rows) * nkv * hd)
+            .map(|_| lcg(&mut seed) * 2.0)
+            .collect();
+        let (mut got, mut want) = (vec![0.0f32; rows * nq * hd], vec![0.0f32; rows * nq * hd]);
+        omega.gqa_attention_rows(&mut got, &q, &k, &v, base, rows, nq, nkv, hd);
+        reference.gqa_attention_rows(&mut want, &q, &k, &v, base, rows, nq, nkv, hd);
+        let r = worst_attn_ratio(&got, &want);
+        println!("PARITY gqa_rows base={base} rows={rows} err/tol={r:.3e}");
+        gqa_worst = gqa_worst.max(r);
+        let mut one = vec![0.0f32; nq * hd];
+        omega.gqa_attention(&mut one, &q[..nq * hd], &k, &v, base + 1, nq, nkv, hd);
+        assert_eq!(
+            &got[..nq * hd],
+            &one[..],
+            "row 0 of the rows path == the single-row call"
+        );
+    }
     println!(
         "PARITY gqa_attention seq 1..2048 worst err/tolerance = {gqa_worst:.3e} (must be <= 1)"
     );
