@@ -133,8 +133,9 @@ impl ResidentHandle for FakeDevice {
 #[derive(Default)]
 struct FakeUploader {
     shapes: Mutex<Vec<(usize, usize)>>,
-    /// Zero the first uploaded matrix (negative control).
-    corrupt_first: bool,
+    /// Zero the Nth uploaded matrix (0-based; negative control). Layer 0 uploads q, k, v, o,
+    /// gate, up, down, then the fused q|k|v (7) and gate|up (8) the forward paths read.
+    corrupt_at: Option<usize>,
     /// Fail on the Nth upload (0-based).
     fail_at: Option<usize>,
 }
@@ -156,7 +157,7 @@ impl ResidentUploader for FakeUploader {
                 w[o * k + i] = f32::from_bits((bits[i * n + o] as u32) << 16);
             }
         }
-        if self.corrupt_first && idx == 0 {
+        if self.corrupt_at == Some(idx) {
             w.iter_mut().for_each(|v| *v = 0.0);
         }
         Ok(ResidentWeight::new(
@@ -308,10 +309,16 @@ fn resident_load_holds_no_host_matmul_weight_and_matches_host_logits_exactly() {
         ] {
             assert!(m.is_resident());
         }
+        // The fused q|k|v and gate|up matrices (sc#384) are resident too, 2 more uploads per layer.
+        assert!(l.qkv_proj.as_ref().is_some_and(MatrixWeight::is_resident));
+        assert!(l
+            .gate_up_proj
+            .as_ref()
+            .is_some_and(MatrixWeight::is_resident));
     }
     assert!(w.config.tie_word_embeddings);
     assert!(matches!(w.lm_head, Some(MatrixWeight::Resident(_))));
-    assert_eq!(up.shapes.lock().unwrap().len(), layers * 7 + 1);
+    assert_eq!(up.shapes.lock().unwrap().len(), layers * 9 + 1);
     // The host keeps what the host reads: embedding rows and norms (readers: see the PR text).
     assert_eq!(w.embed_tokens, host_weights().embed_tokens);
     assert_eq!(w.final_norm, host_weights().final_norm);
@@ -327,7 +334,9 @@ fn resident_load_holds_no_host_matmul_weight_and_matches_host_logits_exactly() {
 #[test]
 fn negative_control_a_wrong_resident_matrix_moves_the_logits() {
     let up = FakeUploader {
-        corrupt_first: true,
+        // The fused q|k|v of layer 0: the matrix the prefill really reads (a zeroed single
+        // q_proj would move nothing, which is the point of the fused path).
+        corrupt_at: Some(7),
         ..Default::default()
     };
     let got = prefill_logits(resident_weights(&up).unwrap());
@@ -352,7 +361,9 @@ fn uploads_run_layer_by_layer_then_the_head() {
         "model.layers.0.self_attn.q_proj.weight"
     );
     assert_eq!(names.last().unwrap(), "model.embed_tokens.weight");
-    assert_eq!(names.len(), config.num_layers * 7 + 1);
+    // 7 single matrices + the fused q|k|v and gate|up per layer, then the head.
+    assert_eq!(names.len(), config.num_layers * 9 + 1);
+    assert!(names.iter().any(|n| n.ends_with("q_proj.weight+model.layers.0.self_attn.k_proj.weight+model.layers.0.self_attn.v_proj.weight")));
 }
 
 #[test]

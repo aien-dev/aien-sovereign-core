@@ -33,6 +33,12 @@ pub struct TransformerLayerWeights {
     pub gate_proj: MatrixWeight,
     pub up_proj: MatrixWeight,
     pub down_proj: MatrixWeight,
+    /// Resident loader only (sc#384 decode speed): q, k and v rows in one device matrix
+    /// `[q_dim + 2*kv_dim, hidden]`. The forward paths use it when present (one launch
+    /// instead of three), else the three matrices above. Same kernel, same arithmetic per row.
+    pub qkv_proj: Option<MatrixWeight>,
+    /// Resident loader only: gate rows then up rows, `[2*inter, hidden]`, one launch.
+    pub gate_up_proj: Option<MatrixWeight>,
     /// Qwen3 per-head RMSNorm weights `[head_dim]` for Q and K (`config.qk_norm`); `None` for
     /// Llama-architecture models.
     pub q_norm: Option<Vec<f32>>,
@@ -208,6 +214,8 @@ impl TransformerWeights {
                 gate_proj: gate_proj.into(),
                 up_proj: up_proj.into(),
                 down_proj: down_proj.into(),
+                qkv_proj: None,
+                gate_up_proj: None,
                 q_norm: config.qk_norm.then(|| vec![1.0f32; config.head_dim]),
                 k_norm: config.qk_norm.then(|| vec![1.0f32; config.head_dim]),
             });
@@ -813,6 +821,8 @@ impl TransformerWeights {
                 gate_proj: gate_proj.into(),
                 up_proj: up_proj.into(),
                 down_proj: down_proj.into(),
+                qkv_proj: None,
+                gate_up_proj: None,
                 q_norm,
                 k_norm,
             });

@@ -212,19 +212,39 @@ pub fn load_resident_weights<P: AsRef<std::path::Path>>(
     let catalog = crate::checkpoint::llama_catalog(config);
     let ckpt = StreamedCheckpoint::open(path, &catalog)?;
     let mut raw: Vec<u8> = Vec::new();
+    let mut part: Vec<u8> = Vec::new();
     let mut bits: Vec<u16> = Vec::new();
-    let mut upload = |name: &str, n: usize, k: usize| -> Result<MatrixWeight, CheckpointError> {
-        ckpt.read_bf16_bytes(name, &mut raw)?;
-        transpose_bf16_for_upload(&raw, n, k, &mut bits);
-        let w = uploader.upload_bf16(k, n, &bits).map_err(|message| {
-            CheckpointError::ResidentUpload {
-                tensor: name.to_string(),
-                message,
+    // One device matrix from one tensor, or from several `[n_i, k]` tensors stacked row-wise
+    // (the fused q/k/v and gate/up matrices, sc#384): bf16 rows are contiguous, so stacking is
+    // appending bytes; `n` is the total row count.
+    let mut upload =
+        |names: &[&str], n: usize, k: usize| -> Result<MatrixWeight, CheckpointError> {
+            raw.clear();
+            for name in names {
+                ckpt.read_bf16_bytes(name, &mut part)?;
+                raw.extend_from_slice(&part);
             }
-        })?;
-        progress(name);
-        Ok(MatrixWeight::Resident(w))
-    };
+            let label = names.join("+");
+            if raw.len() != n * k * 2 {
+                return Err(CheckpointError::ResidentUpload {
+                    tensor: label,
+                    message: format!(
+                        "{} bf16 bytes read, {} expected for {n}x{k}",
+                        raw.len(),
+                        n * k * 2
+                    ),
+                });
+            }
+            transpose_bf16_for_upload(&raw, n, k, &mut bits);
+            let w = uploader.upload_bf16(k, n, &bits).map_err(|message| {
+                CheckpointError::ResidentUpload {
+                    tensor: label.clone(),
+                    message,
+                }
+            })?;
+            progress(&label);
+            Ok(MatrixWeight::Resident(w))
+        };
     let hidden = config.hidden_dim();
     let inter = config.intermediate_dim();
     let q_dim = config.num_heads * config.head_dim;
@@ -234,14 +254,23 @@ pub fn load_resident_weights<P: AsRef<std::path::Path>>(
     let mut mats = Vec::with_capacity(config.num_layers);
     for idx in 0..config.num_layers {
         let p = format!("model.layers.{idx}");
+        let q = format!("{p}.self_attn.q_proj.weight");
+        let k = format!("{p}.self_attn.k_proj.weight");
+        let v = format!("{p}.self_attn.v_proj.weight");
+        let gate = format!("{p}.mlp.gate_proj.weight");
+        let up = format!("{p}.mlp.up_proj.weight");
         mats.push([
-            upload(&format!("{p}.self_attn.q_proj.weight"), q_dim, hidden)?,
-            upload(&format!("{p}.self_attn.k_proj.weight"), kv_dim, hidden)?,
-            upload(&format!("{p}.self_attn.v_proj.weight"), kv_dim, hidden)?,
-            upload(&format!("{p}.self_attn.o_proj.weight"), hidden, q_dim)?,
-            upload(&format!("{p}.mlp.gate_proj.weight"), inter, hidden)?,
-            upload(&format!("{p}.mlp.up_proj.weight"), inter, hidden)?,
-            upload(&format!("{p}.mlp.down_proj.weight"), hidden, inter)?,
+            upload(&[&q], q_dim, hidden)?,
+            upload(&[&k], kv_dim, hidden)?,
+            upload(&[&v], kv_dim, hidden)?,
+            upload(&[&format!("{p}.self_attn.o_proj.weight")], hidden, q_dim)?,
+            upload(&[&gate], inter, hidden)?,
+            upload(&[&up], inter, hidden)?,
+            upload(&[&format!("{p}.mlp.down_proj.weight")], hidden, inter)?,
+            // The fused matrices the forward paths prefer (one launch each): q|k|v rows and
+            // gate|up rows. The single matrices above stay for every other reader.
+            upload(&[&q, &k, &v], q_dim + 2 * kv_dim, hidden)?,
+            upload(&[&gate, &up], 2 * inter, hidden)?,
         ]);
     }
     let vocab = config.vocab_size();
@@ -251,7 +280,7 @@ pub fn load_resident_weights<P: AsRef<std::path::Path>>(
     } else {
         "lm_head.weight"
     };
-    let head = upload(head_name, vocab, hidden)?;
+    let head = upload(&[head_name], vocab, hidden)?;
     // Release the big transient buffers before the f32 embedding is allocated.
     raw = Vec::new();
     drop(bits);
@@ -264,7 +293,8 @@ pub fn load_resident_weights<P: AsRef<std::path::Path>>(
     let mut layers = Vec::with_capacity(config.num_layers);
     for (idx, m) in mats.into_iter().enumerate() {
         let p = format!("model.layers.{idx}");
-        let [q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj] = m;
+        let [q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj, qkv_proj, gate_up_proj] =
+            m;
         let (q_norm, k_norm) = if config.qk_norm {
             (
                 Some(decode(&format!("{p}.self_attn.q_norm.weight"), &mut raw)?),
@@ -286,6 +316,8 @@ pub fn load_resident_weights<P: AsRef<std::path::Path>>(
             gate_proj,
             up_proj,
             down_proj,
+            qkv_proj: Some(qkv_proj),
+            gate_up_proj: Some(gate_up_proj),
             q_norm,
             k_norm,
         });
