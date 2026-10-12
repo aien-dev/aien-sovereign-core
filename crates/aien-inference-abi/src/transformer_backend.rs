@@ -785,12 +785,15 @@ impl NativeTransformerBackend {
         let mut q = vec![0.0f32; q_dim];
         let mut k = vec![0.0f32; kv_dim];
         let mut v = vec![0.0f32; kv_dim];
+        let qkv_dim = q_dim + 2 * kv_dim;
+        let mut qkv = vec![0.0f32; qkv_dim];
         let mut attn_out = vec![0.0f32; q_dim];
         let mut attn_proj = vec![0.0f32; hidden_dim];
         let mut post_norm = vec![0.0f32; hidden_dim];
         let mut gate = vec![0.0f32; intermediate_dim];
         let mut up = vec![0.0f32; intermediate_dim];
         let mut activated = vec![0.0f32; intermediate_dim];
+        let mut gate_up = vec![0.0f32; 2 * intermediate_dim];
         let mut mlp_out = vec![0.0f32; hidden_dim];
 
         // Reserve this token's slot. A full pool is a loud error (checked before
@@ -825,9 +828,16 @@ impl NativeTransformerBackend {
 
         for (layer_idx, layer_w) in weights.layers.iter().enumerate() {
             backend.rmsnorm(&mut x_norm, &x, &layer_w.input_layernorm, eps);
-            backend.matmul_vec_w(&mut q, &x_norm, layer_w.q_proj.as_ref(), q_dim, hidden_dim);
-            backend.matmul_vec_w(&mut k, &x_norm, layer_w.k_proj.as_ref(), kv_dim, hidden_dim);
-            backend.matmul_vec_w(&mut v, &x_norm, layer_w.v_proj.as_ref(), kv_dim, hidden_dim);
+            if let Some(w) = layer_w.qkv_proj.as_ref() {
+                backend.matmul_vec_w(&mut qkv, &x_norm, w.as_ref(), qkv_dim, hidden_dim);
+                q.copy_from_slice(&qkv[..q_dim]);
+                k.copy_from_slice(&qkv[q_dim..q_dim + kv_dim]);
+                v.copy_from_slice(&qkv[q_dim + kv_dim..]);
+            } else {
+                backend.matmul_vec_w(&mut q, &x_norm, layer_w.q_proj.as_ref(), q_dim, hidden_dim);
+                backend.matmul_vec_w(&mut k, &x_norm, layer_w.k_proj.as_ref(), kv_dim, hidden_dim);
+                backend.matmul_vec_w(&mut v, &x_norm, layer_w.v_proj.as_ref(), kv_dim, hidden_dim);
+            }
 
             layer_w.apply_qk_norm_on(backend, &mut q, &mut k, head_dim, eps);
             backend.apply_rope(
@@ -906,21 +916,36 @@ impl NativeTransformerBackend {
             }
 
             backend.rmsnorm(&mut post_norm, &x, &layer_w.post_attention_layernorm, eps);
-            backend.matmul_vec_w(
-                &mut gate,
-                &post_norm,
-                layer_w.gate_proj.as_ref(),
-                intermediate_dim,
-                hidden_dim,
-            );
-            backend.matmul_vec_w(
-                &mut up,
-                &post_norm,
-                layer_w.up_proj.as_ref(),
-                intermediate_dim,
-                hidden_dim,
-            );
-            backend.swiglu(&mut activated, &gate, &up);
+            if let Some(w) = layer_w.gate_up_proj.as_ref() {
+                backend.matmul_vec_w(
+                    &mut gate_up,
+                    &post_norm,
+                    w.as_ref(),
+                    2 * intermediate_dim,
+                    hidden_dim,
+                );
+                backend.swiglu(
+                    &mut activated,
+                    &gate_up[..intermediate_dim],
+                    &gate_up[intermediate_dim..],
+                );
+            } else {
+                backend.matmul_vec_w(
+                    &mut gate,
+                    &post_norm,
+                    layer_w.gate_proj.as_ref(),
+                    intermediate_dim,
+                    hidden_dim,
+                );
+                backend.matmul_vec_w(
+                    &mut up,
+                    &post_norm,
+                    layer_w.up_proj.as_ref(),
+                    intermediate_dim,
+                    hidden_dim,
+                );
+                backend.swiglu(&mut activated, &gate, &up);
+            }
             backend.matmul_vec_w(
                 &mut mlp_out,
                 &activated,
@@ -1091,12 +1116,15 @@ impl NativeTransformerBackend {
         let mut q_batch = vec![0.0f32; n * q_dim];
         let mut k_batch = vec![0.0f32; n * kv_dim];
         let mut v_batch = vec![0.0f32; n * kv_dim];
+        let qkv_dim = q_dim + 2 * kv_dim;
+        let mut qkv_batch = vec![0.0f32; n * qkv_dim];
         let mut attn_out_batch = vec![0.0f32; n * q_dim];
         let mut attn_proj_batch = vec![0.0f32; n * hidden_dim];
         let mut post_norm_batch = vec![0.0f32; n * hidden_dim];
         let mut gate_batch = vec![0.0f32; n * intermediate_dim];
         let mut up_batch = vec![0.0f32; n * intermediate_dim];
         let mut act_batch = vec![0.0f32; n * intermediate_dim];
+        let mut gate_up_batch = vec![0.0f32; n * 2 * intermediate_dim];
         let mut mlp_out_batch = vec![0.0f32; n * hidden_dim];
 
         // The dense per-layer cache must hold K/V for positions 0..offset before this
@@ -1130,30 +1158,48 @@ impl NativeTransformerBackend {
                 backend.rmsnorm(out_slice, &states[t], &layer_w.input_layernorm, eps);
             }
 
-            backend.matmul_batch_w(
-                &mut q_batch,
-                &x_norm_batch,
-                layer_w.q_proj.as_ref(),
-                n,
-                hidden_dim,
-                q_dim,
-            );
-            backend.matmul_batch_w(
-                &mut k_batch,
-                &x_norm_batch,
-                layer_w.k_proj.as_ref(),
-                n,
-                hidden_dim,
-                kv_dim,
-            );
-            backend.matmul_batch_w(
-                &mut v_batch,
-                &x_norm_batch,
-                layer_w.v_proj.as_ref(),
-                n,
-                hidden_dim,
-                kv_dim,
-            );
+            if let Some(w) = layer_w.qkv_proj.as_ref() {
+                backend.matmul_batch_w(
+                    &mut qkv_batch,
+                    &x_norm_batch,
+                    w.as_ref(),
+                    n,
+                    hidden_dim,
+                    qkv_dim,
+                );
+                for t in 0..n {
+                    let row = &qkv_batch[t * qkv_dim..(t + 1) * qkv_dim];
+                    q_batch[t * q_dim..(t + 1) * q_dim].copy_from_slice(&row[..q_dim]);
+                    k_batch[t * kv_dim..(t + 1) * kv_dim]
+                        .copy_from_slice(&row[q_dim..q_dim + kv_dim]);
+                    v_batch[t * kv_dim..(t + 1) * kv_dim].copy_from_slice(&row[q_dim + kv_dim..]);
+                }
+            } else {
+                backend.matmul_batch_w(
+                    &mut q_batch,
+                    &x_norm_batch,
+                    layer_w.q_proj.as_ref(),
+                    n,
+                    hidden_dim,
+                    q_dim,
+                );
+                backend.matmul_batch_w(
+                    &mut k_batch,
+                    &x_norm_batch,
+                    layer_w.k_proj.as_ref(),
+                    n,
+                    hidden_dim,
+                    kv_dim,
+                );
+                backend.matmul_batch_w(
+                    &mut v_batch,
+                    &x_norm_batch,
+                    layer_w.v_proj.as_ref(),
+                    n,
+                    hidden_dim,
+                    kv_dim,
+                );
+            }
 
             for t in 0..n {
                 let q_t = &mut q_batch[t * q_dim..(t + 1) * q_dim];
@@ -1225,28 +1271,44 @@ impl NativeTransformerBackend {
                 );
             }
 
-            backend.matmul_batch_w(
-                &mut gate_batch,
-                &post_norm_batch,
-                layer_w.gate_proj.as_ref(),
-                n,
-                hidden_dim,
-                intermediate_dim,
-            );
-            backend.matmul_batch_w(
-                &mut up_batch,
-                &post_norm_batch,
-                layer_w.up_proj.as_ref(),
-                n,
-                hidden_dim,
-                intermediate_dim,
-            );
-
-            for t in 0..n {
-                let gate_t = &gate_batch[t * intermediate_dim..(t + 1) * intermediate_dim];
-                let up_t = &up_batch[t * intermediate_dim..(t + 1) * intermediate_dim];
-                let act_t = &mut act_batch[t * intermediate_dim..(t + 1) * intermediate_dim];
-                backend.swiglu(act_t, gate_t, up_t);
+            if let Some(w) = layer_w.gate_up_proj.as_ref() {
+                let gu = 2 * intermediate_dim;
+                backend.matmul_batch_w(
+                    &mut gate_up_batch,
+                    &post_norm_batch,
+                    w.as_ref(),
+                    n,
+                    hidden_dim,
+                    gu,
+                );
+                for t in 0..n {
+                    let row = &gate_up_batch[t * gu..(t + 1) * gu];
+                    let act_t = &mut act_batch[t * intermediate_dim..(t + 1) * intermediate_dim];
+                    backend.swiglu(act_t, &row[..intermediate_dim], &row[intermediate_dim..]);
+                }
+            } else {
+                backend.matmul_batch_w(
+                    &mut gate_batch,
+                    &post_norm_batch,
+                    layer_w.gate_proj.as_ref(),
+                    n,
+                    hidden_dim,
+                    intermediate_dim,
+                );
+                backend.matmul_batch_w(
+                    &mut up_batch,
+                    &post_norm_batch,
+                    layer_w.up_proj.as_ref(),
+                    n,
+                    hidden_dim,
+                    intermediate_dim,
+                );
+                for t in 0..n {
+                    let gate_t = &gate_batch[t * intermediate_dim..(t + 1) * intermediate_dim];
+                    let up_t = &up_batch[t * intermediate_dim..(t + 1) * intermediate_dim];
+                    let act_t = &mut act_batch[t * intermediate_dim..(t + 1) * intermediate_dim];
+                    backend.swiglu(act_t, gate_t, up_t);
+                }
             }
 
             backend.matmul_batch_w(
@@ -1425,12 +1487,15 @@ impl NativeTransformerBackend {
         let mut q_batch = vec![0.0f32; d * q_dim];
         let mut k_batch = vec![0.0f32; d * kv_dim];
         let mut v_batch = vec![0.0f32; d * kv_dim];
+        let qkv_dim = q_dim + 2 * kv_dim;
+        let mut qkv_batch = vec![0.0f32; d * qkv_dim];
         let mut attn_out_batch = vec![0.0f32; d * q_dim];
         let mut attn_proj_batch = vec![0.0f32; d * hidden_dim];
         let mut post_norm_batch = vec![0.0f32; d * hidden_dim];
         let mut gate_batch = vec![0.0f32; d * intermediate_dim];
         let mut up_batch = vec![0.0f32; d * intermediate_dim];
         let mut act_batch = vec![0.0f32; d * intermediate_dim];
+        let mut gate_up_batch = vec![0.0f32; d * 2 * intermediate_dim];
         let mut mlp_out_batch = vec![0.0f32; d * hidden_dim];
         let mut logits_batch = vec![0.0f32; d * vocab_size];
 
@@ -1455,30 +1520,48 @@ impl NativeTransformerBackend {
             }
 
             // b. Batched Q, K, V projections (M = D)
-            self.tensor_backend.matmul_batch_w(
-                &mut q_batch,
-                &x_norm,
-                layer_w.q_proj.as_ref(),
-                d,
-                hidden_dim,
-                q_dim,
-            );
-            self.tensor_backend.matmul_batch_w(
-                &mut k_batch,
-                &x_norm,
-                layer_w.k_proj.as_ref(),
-                d,
-                hidden_dim,
-                kv_dim,
-            );
-            self.tensor_backend.matmul_batch_w(
-                &mut v_batch,
-                &x_norm,
-                layer_w.v_proj.as_ref(),
-                d,
-                hidden_dim,
-                kv_dim,
-            );
+            if let Some(w) = layer_w.qkv_proj.as_ref() {
+                self.tensor_backend.matmul_batch_w(
+                    &mut qkv_batch,
+                    &x_norm,
+                    w.as_ref(),
+                    d,
+                    hidden_dim,
+                    qkv_dim,
+                );
+                for t in 0..d {
+                    let row = &qkv_batch[t * qkv_dim..(t + 1) * qkv_dim];
+                    q_batch[t * q_dim..(t + 1) * q_dim].copy_from_slice(&row[..q_dim]);
+                    k_batch[t * kv_dim..(t + 1) * kv_dim]
+                        .copy_from_slice(&row[q_dim..q_dim + kv_dim]);
+                    v_batch[t * kv_dim..(t + 1) * kv_dim].copy_from_slice(&row[q_dim + kv_dim..]);
+                }
+            } else {
+                self.tensor_backend.matmul_batch_w(
+                    &mut q_batch,
+                    &x_norm,
+                    layer_w.q_proj.as_ref(),
+                    d,
+                    hidden_dim,
+                    q_dim,
+                );
+                self.tensor_backend.matmul_batch_w(
+                    &mut k_batch,
+                    &x_norm,
+                    layer_w.k_proj.as_ref(),
+                    d,
+                    hidden_dim,
+                    kv_dim,
+                );
+                self.tensor_backend.matmul_batch_w(
+                    &mut v_batch,
+                    &x_norm,
+                    layer_w.v_proj.as_ref(),
+                    d,
+                    hidden_dim,
+                    kv_dim,
+                );
+            }
 
             // c. RoPE across all D sequences at their respective positions
             for (i, &(_seq_id, _tok, pos)) in valid_reqs.iter().enumerate() {
@@ -1620,30 +1703,50 @@ impl NativeTransformerBackend {
             }
 
             // i. MLP Gate & Up projections (M = D)
-            self.tensor_backend.matmul_batch_w(
-                &mut gate_batch,
-                &post_norm_batch,
-                layer_w.gate_proj.as_ref(),
-                d,
-                hidden_dim,
-                intermediate_dim,
-            );
-            self.tensor_backend.matmul_batch_w(
-                &mut up_batch,
-                &post_norm_batch,
-                layer_w.up_proj.as_ref(),
-                d,
-                hidden_dim,
-                intermediate_dim,
-            );
-
-            // j. SwiGLU activation
-            for i in 0..d {
-                self.tensor_backend.swiglu(
-                    &mut act_batch[i * intermediate_dim..(i + 1) * intermediate_dim],
-                    &gate_batch[i * intermediate_dim..(i + 1) * intermediate_dim],
-                    &up_batch[i * intermediate_dim..(i + 1) * intermediate_dim],
+            if let Some(w) = layer_w.gate_up_proj.as_ref() {
+                let gu = 2 * intermediate_dim;
+                self.tensor_backend.matmul_batch_w(
+                    &mut gate_up_batch,
+                    &post_norm_batch,
+                    w.as_ref(),
+                    d,
+                    hidden_dim,
+                    gu,
                 );
+                // j. SwiGLU activation on the fused rows
+                for i in 0..d {
+                    let row = &gate_up_batch[i * gu..(i + 1) * gu];
+                    self.tensor_backend.swiglu(
+                        &mut act_batch[i * intermediate_dim..(i + 1) * intermediate_dim],
+                        &row[..intermediate_dim],
+                        &row[intermediate_dim..],
+                    );
+                }
+            } else {
+                self.tensor_backend.matmul_batch_w(
+                    &mut gate_batch,
+                    &post_norm_batch,
+                    layer_w.gate_proj.as_ref(),
+                    d,
+                    hidden_dim,
+                    intermediate_dim,
+                );
+                self.tensor_backend.matmul_batch_w(
+                    &mut up_batch,
+                    &post_norm_batch,
+                    layer_w.up_proj.as_ref(),
+                    d,
+                    hidden_dim,
+                    intermediate_dim,
+                );
+                // j. SwiGLU activation
+                for i in 0..d {
+                    self.tensor_backend.swiglu(
+                        &mut act_batch[i * intermediate_dim..(i + 1) * intermediate_dim],
+                        &gate_batch[i * intermediate_dim..(i + 1) * intermediate_dim],
+                        &up_batch[i * intermediate_dim..(i + 1) * intermediate_dim],
+                    );
+                }
             }
 
             // k. MLP Down projection (M = D)

@@ -28,11 +28,23 @@ use aien_inference_abi::{
     DecodeOutput, FinishReason, ModelConfig, NativeTransformerBackend, ReferenceCpuBackend,
     TransformerWeights,
 };
+use aien_kv_cache::{bf16_bits_to_f32, f32_to_bf16_bits, KvDType};
+use aien_runtime::shared_kv::SHARED_KV_DTYPE;
 use aien_runtime::shared_kv::{build_model_kv_manager, build_shared_kv_runtime, SharedKvSizing};
 use aien_runtime::swarm::SwarmConfig;
 use aien_scheduler::SchedulerConfig;
 
 const TOL: f32 = 1e-6;
+
+/// The unpaged backend keeps f32 K/V; the spine pool stores `SHARED_KV_DTYPE`. The pool value
+/// must equal the unpaged value rounded to the pool dtype, exactly (bf16 round-to-nearest-even),
+/// so a pool that stored something other than the rounded f32 still fails this check.
+fn pool_rounded(x: f32) -> f32 {
+    match SHARED_KV_DTYPE {
+        KvDType::Bf16 => bf16_bits_to_f32(f32_to_bf16_bits(x)),
+        _ => x,
+    }
+}
 
 fn small_config() -> ModelConfig {
     ModelConfig {
@@ -183,14 +195,16 @@ async fn shared_kv_root_prefill_lands_in_spine_pool_and_matches_unpaged_backend(
         );
         for (i, (a, b)) in k.iter().zip(ck.iter()).enumerate() {
             assert!(
-                (a - b).abs() <= TOL,
-                "K mismatch layer {layer} idx {i}: spine pool {a} vs unpaged {b}"
+                (a - pool_rounded(*b)).abs() <= TOL,
+                "K mismatch layer {layer} idx {i}: spine pool {a} vs unpaged {b} (rounded {})",
+                pool_rounded(*b)
             );
         }
         for (i, (a, b)) in v.iter().zip(cv.iter()).enumerate() {
             assert!(
-                (a - b).abs() <= TOL,
-                "V mismatch layer {layer} idx {i}: spine pool {a} vs unpaged {b}"
+                (a - pool_rounded(*b)).abs() <= TOL,
+                "V mismatch layer {layer} idx {i}: spine pool {a} vs unpaged {b} (rounded {})",
+                pool_rounded(*b)
             );
         }
     }

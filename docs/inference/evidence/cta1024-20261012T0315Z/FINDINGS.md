@@ -42,3 +42,105 @@ The smoke example now applies both daemon defaults (budget and spin) and records
 Verdict: 256 -> 1024 gives +17% decode on the real model (116 -> 100 ms/token), answers unchanged. The 13 tok/s target (77 ms/token) is
 not reached by this change alone; the next candidates are fusing the q/k/v and gate/up launches (the k/v shape sits on the launch floor)
 and the n=4096 shapes whose grid is capped at n/8 = 512 blocks. `stub-attempt/` is an INVALID record (binary without the engine, rc 3, no chip time).
+
+## Where a decode token's time goes (per-op timing, 03:43-03:47Z, one hold, `timing-leg.sh`)
+
+Same binary plus a per-operation timing table in the GPU backend (wall time around each chip call and the chip's own
+launch-to-completion time), reset before p3. Budget 1024, spin 2000 us, fallback 0, p1/p2 equal to the golden, p3 26 666 ms for
+37 prompt tokens + 256 generated (255 decode steps after the prefill token). Full table: `smoke-timing-ops.txt`.
+
+| op (per decode step, 36 layers) | calls/step | wall ms/step | chip ms/step | effective GB/s (chip) |
+|---|---|---|---|---|
+| matmul gate+up 4096x12288 (2/layer, 100.7 MB each) | 72 | 36.4 | 34.0 | 213 |
+| matmul down 12288x4096 (100.7 MB) | 36 | 19.5 | 16.6 | 218 |
+| matmul q+o 4096x4096 (2/layer, 33.5 MB each) | 72 | 14.2 | 12.2 | 198 |
+| matmul k+v 4096x1024 (2/layer, 8.4 MB each) | 72 | 9.3 | 7.4 | 82 (grid 128 blocks: too small to fill the chip) |
+| lm_head 4096x151936 (1245 MB) | 1 | 6.6 | 6.5 | 192 |
+| paged_attention (gathered: Fp32 pool, host gathers K/V every call) | 36 | 6.6 | 5.2 | grows with context |
+| rmsnorm (2/layer + final) | 83 | 2.9 | 2.5 | |
+| swiglu | 36 | 1.0 | 0.6 | |
+| rmsnorm_heads (q/k norm) | 72 | 0.9 | 0.7 | |
+| rope | 36 | 0.5 | 0.3 | |
+| sum | 516 | 97.9 | 86.0 | |
+
+Decode wall per step (p3 minus the p1 prompt read, over 255 steps) is 101.8 ms, so the chip calls account for 98 of it; host work outside
+the backend is about 4 ms. Matmuls are 86 ms wall (80 chip) for 15.1 GB per token: 176 GB/s average against the 273 GB/s ceiling and
+the 240 GB/s the kernel reaches on a well-filled grid. The 13 tok/s target needs 77 ms per step: 25 ms to find.
+
+Prefill (37 tokens) runs attention per token (gqa_attention 1332 = 37 x 36 calls, 46 ms) and the m=37 matmuls at 2 to 4x the m=1 time;
+the prompt read is about 0.7 s and is not the bound here.
+
+Next fixes, in order of ms saved: (1) one fused q/k/v matmul per layer (n=6144, 50.3 MB at ~213 GB/s = 0.24 ms vs 0.46 ms now: ~8 ms/step);
+(2) one fused gate+up matmul (n=24576: ~6 ms/step at 240 GB/s); (3) bf16 KV pool so attention uses the paged kernel instead of the host
+gather (5 ms here, much more on the 700 to 1000-token document tasks of the campaign); (4) split-K for the n=4096 shapes (grid capped at 512).
+
+## Fused q|k|v and gate|up launches (03:51-03:55Z, one hold, `N=smoke-fused-cta1024 timing-leg.sh`)
+
+Same settings (budget 1024, spin 2000 us), the resident loader also uploads one stacked q|k|v matrix (n=6144) and one gate|up matrix
+(n=24576) per layer and the forward paths launch those (`smoke-fused-cta1024.json`, binary sha in `smoke-fused-cta1024-binary.sha256`).
+p1/p2 equal to the golden, p3 ids identical to every earlier leg, fallback 0. p3 24 260 ms (was 26 666): decode 92.4 ms/step (was 101.8).
+
+| op (per decode step) | before: wall ms | after: wall ms | chip GB/s after |
+|---|---|---|---|
+| q, k, v -> q\|k\|v (n=6144, 50.3 MB) | 7.1 + 9.3 = 16.4 | 10.1 | 224 |
+| gate, up -> gate\|up (n=24576, 201 MB) | 36.4 | 34.8 | 219 |
+| o (4096x4096) | 7.1 | 7.2 | 196 |
+| down (12288x4096) | 19.5 | 19.6 | 217 |
+| lm_head | 6.6 | 6.4 | 199 |
+| paged_attention (gathered) | 6.6 | 6.0 | |
+| rmsnorm + swiglu + rmsnorm_heads + rope | 5.3 | 5.3 | |
+| matmul total | 86.0 | 78.1 | 15.1 GB at 193 GB/s average |
+
+Launches per step 516 -> 408. The two matrices that still lag are the n=4096 shapes (o, down: grid capped at 512 blocks) and the
+host-gathered attention. Cumulative today: 116 -> 92 ms/step (8.4 -> 10.8 tok/s on p3), replies unchanged.
+
+## bf16 KV pool: paged attention kernel instead of the host gather (04:02-04:07Z, one hold, `N=smoke-bf16kv-cta1024 timing-leg.sh`)
+
+Same settings and fused launches; the shared KV pool is now stored as bf16 (`SHARED_KV_DTYPE = Bf16` in `aien-runtime/src/shared_kv.rs`),
+so decode attention runs `paged_attention_bf16` on the chip instead of gathering an f32 pool on the host, and the pool takes half the
+bytes (`smoke-bf16kv-cta1024.json`, binary sha in `smoke-bf16kv-cta1024-binary.sha256`). p1/p2 equal to the golden, fallback 0.
+p3 23 275 ms (was 24 260): decode 88.7 ms/step (was 92.4), 11.3 tok/s.
+
+Numerics: K and V are rounded to bf16 when written, so a long greedy reply may take a different branch. p3's 256 ids equal the fused leg
+for the first 158 tokens, then diverge at token 159 (both replies stay on topic; the pinned golden p1/p2 are unchanged). This is a
+declared numerics change, recorded here; the campaign golden covers p1/p2 and still holds.
+
+| op (per decode step) | before: wall ms | after: wall ms |
+|---|---|---|
+| attention: gathered f32 -> paged_attention_bf16 (9180 calls) | 6.0 | 4.6 (chip 3.7) |
+| gate\|up (n=24576) | 34.8 | 34.6 |
+| down (12288x4096) | 19.6 | 19.6 |
+| q\|k\|v (n=6144) | 10.1 | 10.1 |
+| o (4096x4096) | 7.2 | 7.2 |
+| lm_head | 6.4 | 6.7 |
+| rmsnorm + swiglu + rmsnorm_heads + rope | 5.3 | 5.2 |
+
+The attention saving grows with context (37-token prompt here; the campaign's document tasks run 700 to 1000 tokens, where the host gather
+was linear in context). Cumulative today: 116 -> 88.7 ms/step (8.4 -> 11.3 tok/s on p3). Remaining to the 77 ms target: the n=4096
+shapes (o, down: grid capped at 512 blocks, ~5 ms at 240 GB/s), the small elementwise launches (~5 ms), lm_head (~1 ms).
+
+## Long context: where a campaign token's time goes (04:55-05:00Z, one hold, `N=smoke-ctx-cta1024 ctx-leg.sh`)
+
+Same build as the bf16 KV leg plus a fourth smoke prompt (`AIEN_SMOKE_CTX=1`: 32 numbered library rules, 1268 prompt tokens, 64 new
+tokens; the campaign's document tasks decode at 700 to 1000 tokens of context). Golden p1/p2 equal, p3 ids identical to the bf16 KV leg,
+fallback 0. The smoke's p3 (37-token prompt) does not measure what the campaign pays; p4 does.
+
+| prompt | prompt tokens | new tokens | wall | per decode token |
+|---|---|---|---|---|
+| p3 | 37 | 256 | 23.2 s | 88.7 ms |
+| p4 | 1268 | 64 | 63.7 s (prompt read about 56 s, decode about 7 s) | about 110 ms |
+
+Decode at 1268 context (per token): matmuls about 71 ms (unchanged), `paged_attention_bf16` 2268 calls, 1884 ms wall: 0.83 ms per
+call, 30 ms per token (4.6 ms at 37 tokens). The call reads 1268 keys x 8 kv heads x 128 x 2 (K and V) bf16 = 5.2 MB in 0.83 ms:
+about 6 GB/s against a 273 GB/s memory. The kernel launches one CTA per q head (32 CTAs of 128 threads, thread t owns token t), so a
+warp's K loads touch 32 different token rows per instruction; it is latency and sector bound, not bandwidth bound.
+
+Prompt read of 1268 tokens (about 56 s, 44 ms per prompt token): `gqa_attention` 45 648 calls (one per token per layer) 24.5 s wall;
+matmuls at m=128 15.7 s chip (the fragment kernel re-reads B once per 16-row tile: 8x the weight traffic, no reuse, about 1 TFLOP/s);
+per-token elementwise launches: rmsnorm 95 905 calls 3.2 s, swiglu 47 916 calls 1.3 s, rmsnorm_heads 95 832 calls 1.0 s, rope 0.6 s.
+
+What this means for the campaign (v7 D1: first reply 95.8 s of the 120 s budget): about 45 s of that is the prompt read and the rest
+is decode at about 110 ms per token. The 13 tok/s target from the speed-bound memo was computed on the short-context decode and would
+not by itself bring D1 inside its budget. The fixes that move the campaign, in order of size: (1) the attention kernel's memory
+access pattern (prompt read 24.5 s -> about 1 s, decode attention 30 ms -> about 2 ms per token at 1000 context); (2) batched
+elementwise launches in the prompt read (about 6 s); (3) a prefill matmul kernel with B reuse (15.7 s -> a few s).
