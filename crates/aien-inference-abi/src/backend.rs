@@ -177,6 +177,18 @@ pub trait TensorBackend: Send + Sync {
     /// out[i] = x[i] * weight[i] / sqrt(mean(x^2) + eps)
     fn rmsnorm(&self, out: &mut [f32], x: &[f32], weight: &[f32], eps: f32);
 
+    /// `rows` rows of `weight.len()` values normalized independently with the same `weight`
+    /// (`x` and `out` are `[rows][dim]`). The prompt read calls this once per chunk and layer
+    /// instead of `rmsnorm` once per token; the default is that per-row loop, a chip backend
+    /// makes it one launch. `rows == 0` is a no-op.
+    fn rmsnorm_rows(&self, out: &mut [f32], x: &[f32], weight: &[f32], rows: usize, eps: f32) {
+        let dim = weight.len();
+        for r in 0..rows {
+            let (lo, hi) = (r * dim, (r + 1) * dim);
+            self.rmsnorm(&mut out[lo..hi], &x[lo..hi], weight, eps);
+        }
+    }
+
     /// Per-head RMS normalization in place (Qwen3 q/k norm): `x` is `[heads][head_dim]` and every
     /// head is normalized on its own with the same `weight` (`head_dim` values).
     fn rmsnorm_heads(&self, x: &mut [f32], weight: &[f32], head_dim: usize, eps: f32);
@@ -592,6 +604,28 @@ impl TensorBackend for ReferenceCpuBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The default `rmsnorm_rows` is the per-row loop: 3 rows in one call equal 3 single calls,
+    /// and 0 rows touches nothing.
+    #[test]
+    fn test_rmsnorm_rows_default_equals_per_row() {
+        let b = ReferenceCpuBackend::new();
+        let dim = 8;
+        let w: Vec<f32> = (0..dim).map(|i| 1.0 + i as f32 * 0.25).collect();
+        let x: Vec<f32> = (0..3 * dim)
+            .map(|i| (i as f32 * 0.37).sin() * 3.0)
+            .collect();
+        let mut got = vec![0.0f32; 3 * dim];
+        b.rmsnorm_rows(&mut got, &x, &w, 3, 1e-5);
+        for r in 0..3 {
+            let mut want = vec![0.0f32; dim];
+            b.rmsnorm(&mut want, &x[r * dim..(r + 1) * dim], &w, 1e-5);
+            assert_eq!(&got[r * dim..(r + 1) * dim], &want[..], "row {r}");
+        }
+        let mut untouched = vec![7.0f32; dim];
+        b.rmsnorm_rows(&mut untouched, &x, &w, 0, 1e-5);
+        assert!(untouched.iter().all(|&v| v == 7.0));
+    }
 
     #[test]
     fn test_reference_backend_name() {

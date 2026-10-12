@@ -176,3 +176,21 @@ Where the 45 s prompt read goes now (p4, wall): m=128 prefill matmuls 20.2 s (8.
 [INFERRED, medium]: inside the 120 s budget but leaving under the 30 s a second attempt needs, so v8 stays cut. Next fixes, by size:
 (1) a prefill matmul with B reuse (20 s -> a few s); (2) prompt-read attention over the chip-resident bf16 pool in one launch per chunk
 per layer instead of one per token (15.5 s -> about 1 s); (3) batched elementwise launches per chunk (6 s -> under 1 s).
+
+## Batched prompt-read norms and SwiGLU (05:50-05:52Z, one hold, `N=smoke-ctx-ew ctx-leg.sh`)
+
+Same pins as the leg above; the chunked prompt read now normalizes a chunk's rows in one `rmsnorm_rows` launch per layer (two per
+layer: input and post-attention), runs the q/k head norm once per tensor per chunk, and the SwiGLU once per chunk (the fused
+gate|up rows are un-interleaved into two planes first). Every reply identical to the leg above (p1, p2, p3, p4), fallback 0.
+
+| op (p4) | calls before | calls after | wall before | wall after |
+|---|---|---|---|---|
+| rmsnorm | 95905 | 5329 | 3.19 s | 0.52 s |
+| rmsnorm_heads | 95832 | 5256 | 1.01 s | 0.51 s |
+| swiglu | 47916 | 2628 | 1.26 s | 1.12 s |
+| rope (still per token) | 47916 | 47916 | 0.58 s | 0.59 s |
+
+p4 51.6 -> 50.2 s. The remaining elementwise cost is not launches: a chunk SwiGLU (128 x 12288 values, 6 MB in and out) takes about
+3 ms, a chunk rmsnorm (2 MB) about 1.4 ms, which is the host-to-chip copy each elementwise call makes on both sides (about 4 GB/s), not
+chip time (swiglu chip 0.54 s of 1.12 s wall). Keeping those tensors on the chip between launches is a later cut. The prompt read is
+now about 44 s: per-token `gqa_attention` 15.9 s, m=128 matmuls 21.4 s, elementwise 2.7 s.
