@@ -249,6 +249,39 @@ pub trait TensorBackend: Send + Sync {
         head_dim: usize,
     );
 
+    /// Prompt-read attention: `num_rows` query rows in one call over a contiguous cache that
+    /// holds `base_len + num_rows` tokens. Row `i` (`q[i * q_dim..]`) attends over the first
+    /// `base_len + i + 1` tokens, which is causal prefill. Default: one `gqa_attention` per
+    /// row. The omega backend sends the whole chunk to the chip in a few launches (omega#406).
+    #[allow(clippy::too_many_arguments)]
+    fn gqa_attention_rows(
+        &self,
+        out: &mut [f32],
+        q: &[f32],
+        k_cache: &[f32],
+        v_cache: &[f32],
+        base_len: usize,
+        num_rows: usize,
+        num_q_heads: usize,
+        num_kv_heads: usize,
+        head_dim: usize,
+    ) {
+        let q_dim = num_q_heads * head_dim;
+        for i in 0..num_rows {
+            let (lo, hi) = (i * q_dim, (i + 1) * q_dim);
+            self.gqa_attention(
+                &mut out[lo..hi],
+                &q[lo..hi],
+                k_cache,
+                v_cache,
+                base_len + i + 1,
+                num_q_heads,
+                num_kv_heads,
+                head_dim,
+            );
+        }
+    }
+
     /// Grouped-Query Paged Attention directly over a physical Copy-on-Write page pool.
     /// Default implementation evaluates online softmax token-by-token across physical blocks
     /// with zero intermediate array allocation or contiguous gathering.
@@ -627,6 +660,44 @@ mod tests {
         assert!(untouched.iter().all(|&v| v == 7.0));
     }
 
+    /// The default `gqa_attention_rows` is causal prefill: row i of a 4-row call over a cache
+    /// of 2 + 4 tokens equals `gqa_attention` with seq_len 2 + i + 1; 0 rows touches nothing.
+    #[test]
+    fn test_gqa_attention_rows_default_is_causal_per_row() {
+        let b = ReferenceCpuBackend::new();
+        let (nq, nkv, hd, base, rows) = (4usize, 2usize, 8usize, 2usize, 4usize);
+        let (q_dim, kv_dim) = (nq * hd, nkv * hd);
+        let q: Vec<f32> = (0..rows * q_dim).map(|i| (i as f32 * 0.31).sin()).collect();
+        let k: Vec<f32> = (0..(base + rows) * kv_dim)
+            .map(|i| (i as f32 * 0.17).cos())
+            .collect();
+        let v: Vec<f32> = (0..(base + rows) * kv_dim)
+            .map(|i| (i as f32 * 0.23).sin())
+            .collect();
+        let mut got = vec![0.0f32; rows * q_dim];
+        b.gqa_attention_rows(&mut got, &q, &k, &v, base, rows, nq, nkv, hd);
+        for i in 0..rows {
+            let mut want = vec![0.0f32; q_dim];
+            b.gqa_attention(
+                &mut want,
+                &q[i * q_dim..(i + 1) * q_dim],
+                &k,
+                &v,
+                base + i + 1,
+                nq,
+                nkv,
+                hd,
+            );
+            assert_eq!(&got[i * q_dim..(i + 1) * q_dim], &want[..], "row {i}");
+        }
+        // the last row must differ from a non-causal read over the whole cache of the first row
+        let mut whole = vec![0.0f32; q_dim];
+        b.gqa_attention(&mut whole, &q[..q_dim], &k, &v, base + rows, nq, nkv, hd);
+        assert_ne!(&got[..q_dim], &whole[..], "row 0 must not see later tokens");
+        let mut untouched = vec![7.0f32; q_dim];
+        b.gqa_attention_rows(&mut untouched, &q, &k, &v, base, 0, nq, nkv, hd);
+        assert!(untouched.iter().all(|&x| x == 7.0));
+    }
     #[test]
     fn test_reference_backend_name() {
         let backend = ReferenceCpuBackend::new();

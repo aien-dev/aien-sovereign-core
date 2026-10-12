@@ -194,3 +194,23 @@ p4 51.6 -> 50.2 s. The remaining elementwise cost is not launches: a chunk SwiGL
 3 ms, a chunk rmsnorm (2 MB) about 1.4 ms, which is the host-to-chip copy each elementwise call makes on both sides (about 4 GB/s), not
 chip time (swiglu chip 0.54 s of 1.12 s wall). Keeping those tensors on the chip between launches is a later cut. The prompt read is
 now about 44 s: per-token `gqa_attention` 15.9 s, m=128 matmuls 21.4 s, elementwise 2.7 s.
+
+## Prompt-read attention as one rows call per chunk and layer (06:10-06:12Z, N=smoke-ctx-rows)
+
+omega#406 (`omega_gpu_gqa_attention_rows_f32`, branch head 6b524626, tree be9cad0d) plus the sovereign-core
+`TensorBackend::gqa_attention_rows`: the paged prompt read hands each chunk's query rows to the chip in one
+call per layer (the KV staged once, rows in launches of 1024 CTAs = 32 rows) instead of one `gqa_attention`
+call per token. Same binary otherwise as N=smoke-ctx-ew. Replies identical on p1-p4 (output_ids equal).
+
+| leg | p4 (1268-token prompt + 64) | p4 prompt-read attention | p3 (37 + 256) |
+|---|---|---|---|
+| smoke-ctx-ew (before) | 50.2 s | gqa_attention 45648 calls, 15.9 s wall, 10.4 s chip | 23.0 s |
+| smoke-ctx-rows (after) | 36.4 s | gqa_attention_rows 360 calls, 3.0 s wall, 2.8 s chip | 22.5 s |
+
+The launch and staging overhead is gone (wall - chip 5.6 s -> 0.2 s); what is left is the kernel itself at
+1268 rows x causal context (2.8 s). p4 now: the three m=128 prefill matmuls 18.2 s wall (12.2 s chip),
+attention 3.0 s, elementwise (swiglu + rope + two rmsnorm families) 2.8 s, decode paged attention 1.0 s.
+Next by size: the prefill matmul kernel.
+
+Receipts: smoke-ctx-rows.{start,end,rc,raw,err,json,binary.sha256}; built against omega 6b524626 (omega.lock
+at that sha for the leg; re-pinned to the squash-merge sha of omega#406, same tree, before this PR merges).

@@ -1238,23 +1238,20 @@ impl NativeTransformerBackend {
                 kv_cache.flat_k.extend_from_slice(k_t);
                 kv_cache.flat_v.extend_from_slice(v_t);
             }
-
-            for t in 0..n {
-                let q_t = &q_batch[t * q_dim..(t + 1) * q_dim];
-                let attn_t = &mut attn_out_batch[t * q_dim..(t + 1) * q_dim];
-                let seq_len = offset + t + 1;
-
-                backend.gqa_attention(
-                    attn_t,
-                    q_t,
-                    &kv_cache.flat_k,
-                    &kv_cache.flat_v,
-                    seq_len,
-                    num_heads,
-                    num_kv_heads,
-                    head_dim,
-                );
-            }
+            // The chunk's attention in one call: the cache now holds offset + n tokens and row
+            // t attends over the first offset + t + 1 of them (omega stages the KV once and
+            // sends the rows in a few launches, omega#406, instead of one launch per token).
+            backend.gqa_attention_rows(
+                &mut attn_out_batch,
+                &q_batch,
+                &kv_cache.flat_k,
+                &kv_cache.flat_v,
+                offset,
+                n,
+                num_heads,
+                num_kv_heads,
+                head_dim,
+            );
 
             backend.matmul_batch_w(
                 &mut attn_proj_batch,
