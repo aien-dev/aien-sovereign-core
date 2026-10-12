@@ -1431,6 +1431,61 @@ impl<B: aien_platform::UnifiedBuffer> AienKvManager<B> {
         Ok(())
     }
 
+    /// Drops the K/V of every position at or past `new_total` of `seq_id`: the
+    /// cleanup after a speculative verification (sc draft-verify, 2026-10-12)
+    /// that forwarded draft tokens the model then rejected. Trailing blocks that
+    /// no longer hold a token go back to the free list (and leave the prefix
+    /// cache), the tail block's token count and the table's `total_tokens` become
+    /// `new_total`. Refused, nothing changed, when the sequence is unknown, when
+    /// `new_total` is past the current length, or when a block to shrink or free
+    /// is shared with another sequence (a fork still owns those tokens).
+    pub fn truncate_sequence(&mut self, seq_id: u64, new_total: usize) -> Result<(), String> {
+        let table = self
+            .sequence_tables
+            .get(&seq_id)
+            .ok_or_else(|| format!("Sequence {} not found", seq_id))?;
+        if new_total > table.total_tokens {
+            return Err(format!(
+                "truncate_sequence: {new_total} is past the {} tokens of sequence {seq_id}",
+                table.total_tokens
+            ));
+        }
+        if new_total == table.total_tokens {
+            return Ok(());
+        }
+        let bs = self.block_size;
+        let keep = new_total.div_ceil(bs);
+        // Blocks touched: every freed block, plus the tail kept block when it loses tokens.
+        let first_touched = if new_total.is_multiple_of(bs) { keep } else { keep - 1 };
+        for &b in &table.block_ids[first_touched.min(table.block_ids.len())..] {
+            let blk = &self.blocks[b];
+            if blk.is_shared || blk.ref_count > 1 {
+                return Err(format!(
+                    "truncate_sequence: block {b} of sequence {seq_id} is shared (ref_count {})",
+                    blk.ref_count
+                ));
+            }
+        }
+        let table = self.sequence_tables.get_mut(&seq_id).unwrap();
+        let freed: Vec<BlockId> = table.block_ids.drain(keep.min(table.block_ids.len())..).collect();
+        if keep > 0 {
+            let tail = table.block_ids[keep - 1];
+            self.blocks[tail].num_tokens = new_total - (keep - 1) * bs;
+        }
+        table.total_tokens = new_total;
+        for b in &freed {
+            let blk = &mut self.blocks[*b];
+            blk.ref_count = 0;
+            blk.is_shared = false;
+            blk.num_tokens = 0;
+            self.free_blocks.push(*b);
+        }
+        if !freed.is_empty() {
+            self.prefix_cache.retain(|_, b| !freed.contains(b));
+        }
+        Ok(())
+    }
+
     pub fn get_block_table(&self, seq_id: u64) -> Option<&BlockTable> {
         self.sequence_tables.get(&seq_id)
     }
