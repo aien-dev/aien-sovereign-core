@@ -1,0 +1,24 @@
+pins rc=0
+AIEN_AIENOS_LOCK_REPO=/home/drakestapleton/workspace/oq3-v8-build-c7d4051/pins/aienos
+AIEN_OMEGA_DIR=/home/drakestapleton/workspace/oq3-v8-build-c7d4051/pins/omega
+AIEN_PHYSICS_DIR=/home/drakestapleton/workspace/oq3-v8-build-c7d4051/pins/physics
+AIEN_REQUIRE_NATIVE_LIBS=1
+2026-10-12T02:34:12Z
+cargo build -vv --release -p aien-cli
+aien-cli rc=0
+cargo build -vv --release -p aien-runtime --example np1_reference --example np1_edit_merge
+examples rc=0
+2026-10-12T02:36:13Z
+has_omega_compose
+has_omega_gpu
+has_omega_wait_ms
+sc c7d4051b99a918c2b2ffbc29b7366ae3de661659 dirty=0
+omega 6c6180cf378075b61291f4565d226eba38b4decd dirty=0
+physics 6d7cf0d4d8eb2cda7b512100ff6058e25dbb3ddf dirty=0
+aienos b84c0a67590a934f3f3e001b12ec85ebc086a9eb dirty=0
+6d7cf0d4d8eb2cda7b512100ff6058e25dbb3ddf
+b84c0a67590a934f3f3e001b12ec85ebc086a9eb
+113be13783b6eacf995af125cc5edb09a69d127fb9990477885d098f7ff78f33  /home/drakestapleton/workspace/oq3-v8-build-c7d4051/sc/Cargo.lock
+d722b9f70aa40a83520baf74e1697d79be53bada9e86d1f68eeef4c5e3e569fb  /home/drakestapleton/workspace/oq3-v8-build-c7d4051/target/release/aien-cli
+70ad92900d930f54b8e251fe634a0cc41d84f173614a1ffb832bd0e434b0d9b0  /home/drakestapleton/workspace/oq3-v8-build-c7d4051/target/release/examples/np1_reference
+0f393f7f69f06755a008de6464956ba1b240e107d1769d887da6fcb9b74d30db  /home/drakestapleton/workspace/oq3-v8-build-c7d4051/target/release/examples/np1_edit_merge

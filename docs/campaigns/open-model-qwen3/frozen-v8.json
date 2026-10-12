@@ -1,5 +1,5 @@
 {
-  "status": "DRAFT NOT FROZEN (sc#384, SPEC-v8.md): v8 = v7 model Qwen/Qwen3-8B rev b968826d9c46dd6066d109eabc6255188de91218 with the corrective retry (sc#460) and the repaired R1 CPU replay (sc#459). Model hashes copied from frozen-v7.json (same weights) and re-hashed on the chip host on the freeze day (SPEC-v8 Section 6 item 2). Pins are filled from the clean freeze build.",
+  "status": "FROZEN 2026-10-12 (SPEC-v8 Section 6 checklist items 1 to 6; item 7 (G6 dry) is proven after this freeze, before run.sh; sc#384). v8 = v7 model Qwen/Qwen3-8B rev b968826d9c46dd6066d109eabc6255188de91218 with the corrective retry (sc#460) and the repaired R1 CPU replay (sc#459); download hashes re-hashed on the chip host 2026-10-12 (evidence-v8/model-rehash-2026-10-12.txt, equal to frozen-v7.json), model_sha256 from the daemon CHECKPOINT_SHARDS line; pins filled at sovereign-core c7d4051 from the clean build evidence-v8/build.sh (evidence-v8/build-summary-c7d4051.txt); aien-runtime tests and Section 4 replay checks at the freeze build in evidence-v8/freeze-tests-c7d4051.txt. 334 v5 rows, thresholds, task budgets and scoring unchanged.",
   "placeholder": "TO FILL AT FREEZE",
   "model": {
     "model_revision": "b968826d9c46dd6066d109eabc6255188de91218",
@@ -35,13 +35,13 @@
     "tokenizer_config_sha256": "d5d09f07b48c3086c508b30d1c9114bd1189145b74e982a265350c923acd8101"
   },
   "pins": {
-    "sovereign_core_commit": "TO FILL AT FREEZE",
-    "omega_lock_commit": "TO FILL AT FREEZE",
-    "physics_lock_commit": "TO FILL AT FREEZE",
-    "aienos_lock_commit": "TO FILL AT FREEZE",
-    "cargo_lock_sha256": "TO FILL AT FREEZE",
-    "aien_cli_sha256": "TO FILL AT FREEZE",
-    "np1_reference_sha256": "TO FILL AT FREEZE",
-    "np1_edit_merge_sha256": "TO FILL AT FREEZE"
+    "sovereign_core_commit": "c7d4051b99a918c2b2ffbc29b7366ae3de661659",
+    "omega_lock_commit": "6c6180cf378075b61291f4565d226eba38b4decd",
+    "physics_lock_commit": "6d7cf0d4d8eb2cda7b512100ff6058e25dbb3ddf",
+    "aienos_lock_commit": "b84c0a67590a934f3f3e001b12ec85ebc086a9eb",
+    "cargo_lock_sha256": "113be13783b6eacf995af125cc5edb09a69d127fb9990477885d098f7ff78f33",
+    "aien_cli_sha256": "d722b9f70aa40a83520baf74e1697d79be53bada9e86d1f68eeef4c5e3e569fb",
+    "np1_reference_sha256": "70ad92900d930f54b8e251fe634a0cc41d84f173614a1ffb832bd0e434b0d9b0",
+    "np1_edit_merge_sha256": "0f393f7f69f06755a008de6464956ba1b240e107d1769d887da6fcb9b74d30db"
   }
 }

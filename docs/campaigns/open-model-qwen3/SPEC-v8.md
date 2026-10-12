@@ -92,13 +92,13 @@ the same timeout). So the attempt-1 replies are predicted to equal v7's (90 perc
 
 ## 6. Freeze checklist (all must be true; each is a yes or no with evidence)
 
-1. [ ] sc#459 (replay repair) and sc#460 (corrective retry) merged on main; this spec and its launchers merged.
-2. [ ] Model files re-hashed on the chip host on the freeze day and equal to the `model` block of `frozen-v8.json` (= `frozen-v7.json`).
-3. [ ] Clean build at the freeze commit (`evidence-v8/build.sh`), every pin in `frozen-v8.json` filled, checkouts clean.
-4. [ ] `test-v8.sh` passes at the freeze commit; the v5 campaign file hashes still match (`evidence-v5/campaign-files.sha256`).
-5. [ ] At the freeze build: aien-runtime tests pass with `librx_compose` linked (including `corrective_retry_test`), and the
+1. [x] (sc#459 merged 384d341, sc#460 merged 1a4c810, this spec sc#461 merged c7d4051, 2026-10-12) sc#459 (replay repair) and sc#460 (corrective retry) merged on main; this spec and its launchers merged.
+2. [x] (re-hashed on the chip host 2026-10-12, `evidence-v8/model-rehash-2026-10-12.txt`, 10 of 10 equal) Model files re-hashed on the chip host on the freeze day and equal to the `model` block of `frozen-v8.json` (= `frozen-v7.json`).
+3. [x] (clean build at main c7d4051, `evidence-v8/build-summary-c7d4051.txt`, sc/omega/physics/aienos dirty=0, all pins filled) Clean build at the freeze commit (`evidence-v8/build.sh`), every pin in `frozen-v8.json` filled, checkouts clean.
+4. [x] (at c7d4051: `evidence-v8/test-v8-c7d4051.txt` 29 ok 0 failed; `evidence-v8/campaign-files-check-c7d4051.txt` 63 OK) `test-v8.sh` passes at the freeze commit; the v5 campaign file hashes still match (`evidence-v5/campaign-files.sha256`).
+5. [x] (`evidence-v8/freeze-tests-c7d4051.txt`: aien-runtime 522 passed 0 failed, corrective_retry_test 11 of 11, R1 exact-ids ok, v8 replay 14 exact + 8 fit) At the freeze build: aien-runtime tests pass with `librx_compose` linked (including `corrective_retry_test`), and the
    deterministic replay checks of Section 4 and the R1 exact-ids test pass; outputs recorded in `evidence-v8/`.
-6. [ ] `frozen-v8.json` status FROZEN in the freeze PR, merged before any launch; `quietlock check` clear.
+6. [x] (this freeze PR; `quietlock check` clear 2026-10-12) `frozen-v8.json` status FROZEN in the freeze PR, merged before any launch; `quietlock check` clear.
 7. [ ] Gate G6 dry run of part 1 on GB10 in its own 20-minute hold AFTER the freeze (`evidence-v8/run-dry.sh`): `g6-gate.sh` exit 0 over
    D1 D2 D3 and `v8-checks.sh` PASS on the dry launches; `model_sha256` from the daemon's `CHECKPOINT_SHARDS` line equals `frozen-v8.json`.
 8. [ ] Real run (`evidence-v8/run.sh`): four parts, each in its own 20-minute hold; it refuses without G6 PASS and V8 CHECKS PASS on the dry
