@@ -195,7 +195,9 @@ async fn main() {
     };
     let sizing = SharedKvSizing {
         arena_capacity: 4096,
-        total_blocks: 8192,
+        // 24k tokens of KV. Every block id then passes the resident pool's 32-bit rule (block
+        // 1819 is the edge for this geometry), so the paged attention reads the pool in place.
+        total_blocks: 1536,
     };
     let (mut spine, mut backend) =
         build_shared_kv_runtime(weights, tb.clone(), cfg, sizing).expect("shared KV");

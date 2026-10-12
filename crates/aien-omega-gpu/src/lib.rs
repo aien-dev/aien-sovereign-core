@@ -1162,6 +1162,59 @@ pub fn alloc_stats() -> Option<AllocStats> {
     None
 }
 
+/// `OmegaGpuAttnInfo.kv_source`: the KV layer slices were copied into staging for the call.
+pub const KV_SOURCE_STAGED: u32 = 0;
+/// `OmegaGpuAttnInfo.kv_source`: the paged attention read the resident pool in place.
+pub const KV_SOURCE_RESIDENT: u32 = 1;
+
+/// Allocate omega's resident KV pool (omega `omega_gpu_attention_pool_alloc`): one GPU-uncached,
+/// host-visible allocation of `bytes` whose chip address equals its host address. A paged
+/// attention call whose pool is this memory reads it in place (nothing staged) whenever every
+/// referenced block fits the kernel's 32-bit block arithmetic; otherwise it stages as before.
+/// One per process; free with `resident_kv_pool_free`. Returns the host pointer and the length.
+/// Stub: `Unavailable`.
+pub fn resident_kv_pool_alloc(bytes: usize) -> Result<(*mut u8, usize), OmegaGpuError> {
+    if bytes == 0 {
+        return Err(OmegaGpuError::ShapeMismatch {
+            what: "resident KV pool bytes",
+            expected: 1,
+            got: 0,
+        });
+    }
+    #[cfg(has_omega_gpu)]
+    {
+        let mut cpu: *mut std::ffi::c_void = std::ptr::null_mut();
+        // SAFETY: omega writes the host pointer; the allocation lives until resident_kv_pool_free.
+        let rc = unsafe { ffi::omega_gpu_attention_pool_alloc(bytes, &mut cpu) };
+        if rc != ffi::OMEGA_GPU_ATTN_OK {
+            return Err(OmegaGpuError::Rc {
+                rc,
+                name: attn_rc_name(rc),
+            });
+        }
+        if cpu.is_null() {
+            return Err(OmegaGpuError::Rc {
+                rc: ffi::OMEGA_GPU_ATTN_CHIP_FAIL,
+                name: "pool alloc returned OK with a null pointer".to_string(),
+            });
+        }
+        Ok((cpu.cast(), bytes))
+    }
+    #[cfg(not(has_omega_gpu))]
+    Err(OmegaGpuError::Unavailable)
+}
+
+/// Free the resident KV pool (omega `omega_gpu_attention_pool_free`). No-op when none is
+/// allocated or in the stub.
+pub fn resident_kv_pool_free() {
+    #[cfg(has_omega_gpu)]
+    // SAFETY: omega checks for a live allocation itself; no call may be in flight (the pool
+    // buffer that owns it is dropped after the backend's last use).
+    unsafe {
+        ffi::omega_gpu_attention_pool_free()
+    };
+}
+
 /// Build and pin the matmul kernel a call of `m` rows over a `k` x `n` weight will use (omega
 /// `omega_gpu_matmul_prepare`). Stub: `Unavailable`.
 pub fn matmul_prepare(m: u32, k: u32, n: u32) -> Result<(), OmegaGpuError> {

@@ -412,6 +412,8 @@ extern "C" {
         out: *mut f32,
         info: *mut OmegaGpuAttnInfo,
     ) -> c_int;
+    pub fn omega_gpu_attention_pool_alloc(bytes: usize, cpu: *mut *mut c_void) -> c_int;
+    pub fn omega_gpu_attention_pool_free();
     pub fn omega_gpu_paged_attention_bf16(
         q: *const f32,
         pool: *const c_void,

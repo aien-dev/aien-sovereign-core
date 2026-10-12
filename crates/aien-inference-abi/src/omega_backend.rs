@@ -79,6 +79,8 @@ pub struct OmegaGb10Backend {
     /// OM-2 staging counters summed over every chip attention call.
     kv_bytes_staged: AtomicU64,
     kv_bytes_naive: AtomicU64,
+    /// Chip attention calls that read the resident KV pool in place (cut E, omega#411).
+    kv_resident_calls: AtomicU64,
     last_error: Mutex<String>,
     /// Wall and chip time per operation kind (resident matmul keyed by shape), for the
     /// decode-speed receipts (sc#384); read with `op_timing_lines`, cleared with `reset_op_times`.
@@ -137,6 +139,7 @@ impl OmegaGb10Backend {
             chip_ns: AtomicU64::new(0),
             kv_bytes_staged: AtomicU64::new(0),
             kv_bytes_naive: AtomicU64::new(0),
+            kv_resident_calls: AtomicU64::new(0),
             last_error: Mutex::new(String::new()),
             op_times: Mutex::new(HashMap::new()),
         }
@@ -159,6 +162,9 @@ impl OmegaGb10Backend {
             .map(|m| m.iter().map(|(k, v)| (k.clone(), *v)).collect())
             .unwrap_or_default();
         rows.sort_by_key(|(_, t)| std::cmp::Reverse(t.wall_ns));
+        if rows.is_empty() {
+            return String::new();
+        }
         rows.iter()
             .map(|(k, t)| {
                 format!(
@@ -170,6 +176,11 @@ impl OmegaGb10Backend {
             })
             .collect::<Vec<_>>()
             .join("; ")
+            + &format!(
+                "; kv_staged_bytes_total={} kv_resident_calls_total={}",
+                self.kv_bytes_staged(),
+                self.kv_resident_calls()
+            )
     }
 
     pub fn reset_op_times(&self) {
@@ -205,6 +216,11 @@ impl OmegaGb10Backend {
 
     pub fn kv_bytes_naive(&self) -> u64 {
         self.kv_bytes_naive.load(Ordering::Relaxed)
+    }
+
+    /// Chip attention calls whose KV came from the resident pool (no staging copy).
+    pub fn kv_resident_calls(&self) -> u64 {
+        self.kv_resident_calls.load(Ordering::Relaxed)
     }
 
     pub fn last_error(&self) -> String {
@@ -519,6 +535,9 @@ impl OmegaGb10Backend {
                     .fetch_add(info.kv_bytes_staged, Ordering::Relaxed);
                 self.kv_bytes_naive
                     .fetch_add(info.kv_bytes_naive, Ordering::Relaxed);
+                if info.kv_source == aien_omega_gpu::KV_SOURCE_RESIDENT {
+                    self.kv_resident_calls.fetch_add(1, Ordering::Relaxed);
+                }
                 true
             }
             Err(e) => self.fail(format!("{what}: {e}")),
@@ -1051,6 +1070,38 @@ impl TensorBackend for OmegaGb10Backend {
             num_kv_heads,
             head_dim,
         );
+    }
+
+    fn alloc_kv_pool(&self, bytes: usize) -> Option<aien_kv_cache::DefaultUnifiedBuffer> {
+        // omega's resident KV pool: the paged attention reads it in place (no per-call staging of
+        // the layer slices). A refusal falls back to the host-mapped pool, which stays correct.
+        let (ptr, len) = match aien_omega_gpu::resident_kv_pool_alloc(bytes) {
+            Ok(p) => p,
+            Err(e) => {
+                self.fail(format!(
+                    "resident KV pool of {bytes} bytes: {e:?}; host-mapped pool, staged attention"
+                ));
+                return None;
+            }
+        };
+        // SAFETY: omega owns `len` bytes at `ptr` until `resident_kv_pool_free`, which the release
+        // callback runs exactly once; omega's allocations have chip address == host address.
+        let wrapped = unsafe {
+            aien_kv_cache::external_default_buffer(
+                ptr,
+                len,
+                ptr as u64,
+                Box::new(aien_omega_gpu::resident_kv_pool_free),
+            )
+        };
+        match wrapped {
+            Ok(b) => Some(b),
+            Err(e) => {
+                aien_omega_gpu::resident_kv_pool_free();
+                self.fail(e);
+                None
+            }
+        }
     }
 
     fn paged_attention(
@@ -1598,7 +1649,7 @@ mod tests {
         b.tally("rmsnorm".into(), 1_000_000, 500_000);
         assert_eq!(
             b.op_timing_lines(),
-            "matmul m=1 k=4096 n=4096 calls=1 wall_ms=10.0 chip_ms=9.0; rmsnorm calls=2 wall_ms=3.0 chip_ms=2.0"
+            "matmul m=1 k=4096 n=4096 calls=1 wall_ms=10.0 chip_ms=9.0; rmsnorm calls=2 wall_ms=3.0 chip_ms=2.0; kv_staged_bytes_total=0 kv_resident_calls_total=0"
         );
         b.reset_op_timing();
         assert_eq!(b.op_timing_lines(), "");

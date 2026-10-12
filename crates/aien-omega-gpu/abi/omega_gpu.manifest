@@ -146,6 +146,8 @@ fn omega_gpu_swiglu_f32 fn(u32, *const f32, *const f32, *mut f32, *mut OmegaGpuE
 fn omega_gpu_elementwise_rc_name fn(i32) -> *const c_char
 fn omega_gpu_gqa_attention_f32 fn(*const f32, *const f32, *const f32, u32, u32, u32, u32, *mut f32, *mut OmegaGpuAttnInfo) -> i32
 fn omega_gpu_gqa_attention_rows_f32 fn(*const f32, *const f32, *const f32, u32, u32, u32, u32, u32, *mut f32, *mut OmegaGpuAttnInfo) -> i32
+fn omega_gpu_attention_pool_alloc fn(usize, *mut *mut c_void) -> i32
+fn omega_gpu_attention_pool_free fn() -> ()
 fn omega_gpu_paged_attention_bf16 fn(*const f32, *const c_void, *const OmegaGpuKvLayout, *const u32, u32, u32, u32, u32, u32, u32, *mut f32, *mut OmegaGpuAttnInfo) -> i32
 fn omega_gpu_paged_attention_batch_bf16 fn(*const f32, *const c_void, *const OmegaGpuKvLayout, *const i32, *const i32, u32, u32, u32, u32, u32, u32, *mut f32, *mut OmegaGpuAttnInfo) -> i32
 fn omega_gpu_attention_rc_name fn(i32) -> *const c_char
