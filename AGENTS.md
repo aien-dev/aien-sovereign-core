@@ -1,3 +1,7 @@
+## Issue-first delivery
+
+For each new feature, substantial fix, research experiment or cross-repo initiative, open or reuse a GitHub tracking issue **before implementation**, with executive summary, ownership, dependencies, acceptance gates and evidence expectations. Use the [AIEN issue-first delivery protocol](https://github.com/aien-dev/aien-architecture/blob/main/docs/process/ISSUE_FIRST_DELIVERY.md). PRs reference the issue and report executed versus not-run checks; record merged commits and qualification in the issue. This tracks the work without replacing Honeycomb task claims, required worktrees/PRs, existing preflight tests or the authoritative master plan.
+
 # Planning authority
 
 Before using any project roadmap or architecture plan, read:
