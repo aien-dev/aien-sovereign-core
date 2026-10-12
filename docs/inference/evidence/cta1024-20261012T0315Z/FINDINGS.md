@@ -457,3 +457,30 @@ p4 overall moved 15502 -> 16308 ms, inside the spread of the f32 prefill attenti
 1268-token prompt across the last three legs, one run each). Fallback 0. ABI requalification on the committed pin:
 `abi-qual-host-3d3d7cfc.json` PASS, scope host, tree clean. Conclusion: at campaign context the decode attention
 is traffic-bound by the four-fold GQA read of the same K and V; the next cut reads them once per group.
+
+## Attention: one CTA per GQA group, K and V read once (11:21-11:22Z, N=smoke-ctx-gqa)
+
+Pin moved to omega aa9b7c5c (omega#417, cut K). Qwen3-8B has 32 query heads over 8 kv heads (GQA 4). Every
+attention CTA used to serve one query head and read the whole K and V of its kv head, so each kv head's data
+crossed the memory bus four times per call; at 1268 tokens of context that is 21 MB per decode call from a
+GPU-uncached pool that L2 cannot share. Now, at head_dim 128, one CTA serves the four query heads of a kv head
+(grid 8 CTAs per split instead of 32), keeps four running maxima, sums and accumulators, and reads K and V
+once. The same group kernel serves the f32 prefill attention rows call. Shared memory per CTA 6656 B, 84
+registers (budget raised 64 -> 96; the blocked prefill matmul already launches at 108). head_dim 64 and GQA 1
+emit the old program unchanged (the hd64 digest fixtures still pass). Omega batteries before the pin: host
+107/107, simulator hd64 219/219 and hd128 227/227, chip hd128 225/225 and hd64 219/219; standalone chip
+split-timing at 1268 tokens 180 -> 64 us per call. One run per leg, same binary settings.
+
+| leg | p1 | p2 | p3 (37 + 256) | p4 (1268-token prompt + 64) | replies |
+|---|---|---|---|---|---|
+| smoke-ctx-chunk (omega 3d3d7cfc) | 267 ms | 2519 ms | 20053 ms | 16308 ms | golden |
+| smoke-ctx-gqa (omega aa9b7c5c) | 265 ms | 2519 ms | 20318 ms | 13345 ms | identical, all four |
+
+p4 chip time per call: prefill attention rows (360 calls) 8578 -> 2018 us, decode attention at 1268 context
+(2268 calls) 151.9 -> 78.2 us. p3 decode attention at short context 36.9 -> 39.4 us per call (8 CTAs per
+split instead of 32 at 37 to 293 tokens of context: fewer seats busy, inside the one-run spread). Fallback 0,
+`host_ops` unchanged. ABI requalification on the committed pin: `abi-qual-host-aa9b7c5c.json` PASS, scope host,
+tree clean. The campaign-context token now costs about 73 ms of one-row matmul plus 2 ms of attention; the
+prompt read of 1268 tokens costs about 1 s of attention instead of 3 s. Next levers: the one-row matmul
+itself (A re-read per column tile, launch gaps of 5 to 17 us on 145 calls per token) and the prefill
+elementwise gaps (swiglu and rmsnorm_heads wall about twice their chip time in p4).
