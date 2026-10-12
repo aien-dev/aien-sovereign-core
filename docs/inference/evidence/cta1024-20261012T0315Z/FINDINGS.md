@@ -286,3 +286,41 @@ of the compose objects, so its binary digest is the same before and after (d93f1
 the clean archive for the record: p1-p4 301, 2546, 21337, 16885 ms. Fixes: omega#410 includes the dependency
 files; here, both omega crate build scripts stamp the build dir with the omega commit and wipe it when the stamp
 differs (fresh_out_dir in aien-abi-conformance, unit-tested), so a reused dir cannot carry objects across pins.
+
+## Decode attention reads a resident KV pool (08:33-08:34Z, N=smoke-ctx-resident)
+
+omega#411 (squash 809c0aa6): the engine hands out one GPU-uncached, host-visible pool
+(`omega_gpu_attention_pool_alloc`) and a paged attention call whose pool pointer is that allocation reads the KV
+blocks where they live (slot table = physical block ids, slot stride = block stride, base = pool + layer offset).
+The kernel is unchanged; its slot offset math is 32-bit, so the engine checks every referenced block id against
+that limit per call and stages as before when it does not fit (`info.kv_source` RESIDENT 1 / STAGED 0; for this
+model's geometry block 1819 fits and 1820 does not). Sovereign-core side (this branch): the GPU backend asks the
+engine for the pool when the shared KV runtime is built (`TensorBackend::alloc_kv_pool`, a `LinuxMemoryKind::External`
+buffer released through the engine), with the host-mapped pool and staged attention as the recorded fallback; the
+smoke's pool is 1536 blocks (24k tokens) so every id passes. The timing line now ends with
+`kv_staged_bytes_total` and `kv_resident_calls_total`. Replies identical on p1-p4 (output_ids equal).
+
+| leg | p4 (1268-token prompt + 64) | p4 decode paged attention (wall / chip) | p3 (37 + 256) |
+|---|---|---|---|
+| smoke-ctx-mmpack (before) | 16.9 s | 0.92 s / 0.47 s | 21.3 s |
+| smoke-ctx-resident (after) | 17.1 s | 0.61 s / 0.60 s | 21.0 s |
+
+Every decode attention call of the run read the pool in place: `kv_resident_calls_total=12312` (342 decode steps
+x 36 layers), `fallback_count` 0. The 2.14 GB of `kv_staged_bytes_total` is the prompt-read rows path
+(`gqa_attention_rows`, host-gathered contiguous K/V per chunk), which cut E does not touch. The wall saving on the
+2268 p4 decode calls is 0.31 s (about 4.8 ms per token at this context); the chip time of the same calls rose from
+0.47 to 0.60 s because the kernel now reads GPU-uncached memory instead of the staging scratch, which gives back
+part of the copy saved. The p4 total did not move (16.9 -> 17.1 s): the prompt-read rows attention (2.9 -> 3.1 s,
+chip 2.7 -> 2.9 s) and the small m=128 matmuls drifted up by about the same amount while the decode m=1 matmul chip
+times match to 0.5%, so that drift reads as run-to-run noise [INFERRED, one leg each]. A GPU-cached pool would need
+an L2 invalidate before every read because the host writes the new K/V each token (the E1 trap, nvos.h
+`NVOS32_ATTR2_GPU_CACHEABLE`); not taken here.
+
+Decode at 1268 tokens of context is now about 105 ms per token, of which the m=1 weight reads are 73 ms (near the
+memory roof) and the elementwise launches (swiglu 1.1 s, rope 0.59 s, rmsnorm 0.52 s, rmsnorm_heads 0.52 s over
+64 tokens, about 42 ms per token, each launch about 90 us of wall for a few us of chip time) are the largest
+remaining lever. Next: fewer launches per token (q+k rope in one launch, q+k head norms in one launch, one swiglu
+launch), and the host side of each launch.
+
+Receipts: smoke-ctx-resident.{start,end,rc,raw,err,json,binary.sha256}; built against omega 809c0aa6 (omega.lock and
+the native-artifacts.lock lines at that sha). Host-scope abi-qualify at the pin: abi-qual-host-809c0aa6.json.
