@@ -295,7 +295,10 @@ async fn prefill_gate_swarm_branches_never_decode_before_root_prompt_prefill() {
 // through spine + scheduler + one pooled KV.
 // ---------------------------------------------------------------------------
 
-const PARITY_TOL: f32 = 1e-5;
+/// Branch and root decode through the shared KV pool, which stores K/V as `SHARED_KV_DTYPE` (bf16 since
+/// the Qwen3-8B decode-speed lane, sc#464), while the teacher-forced controls below keep f32 K/V. The
+/// rounding shows as about 7e-5 on this test model's logits; a real fork or isolation bug shows as O(1).
+const POOL_VS_F32_TOL: f32 = 5e-4;
 
 fn c4_config() -> ModelConfig {
     ModelConfig {
@@ -634,12 +637,12 @@ async fn branch_first_decode_logits_equal_root_continuation_logits() {
             .map(|(a, c)| (a - c).abs())
             .fold(0.0f32, f32::max);
         assert!(
-            max_diff <= PARITY_TOL,
+            max_diff <= POOL_VS_F32_TOL,
             "BACKEND_FORK_VIOLATION: branch {} step-1 logits differ from the root's own \
              continuation by {} (> {})",
             b,
             max_diff,
-            PARITY_TOL
+            POOL_VS_F32_TOL
         );
     }
 }
@@ -864,13 +867,13 @@ async fn sampled_branches_diverge_and_each_matches_its_own_teacher_forced_contro
                 .map(|(a, c)| (a - c).abs())
                 .fold(0.0f32, f32::max);
             assert!(
-                max_diff <= PARITY_TOL,
+                max_diff <= POOL_VS_F32_TOL,
                 "BRANCH_ISOLATION_VIOLATION: branch {} step {} logits differ from its own \
                  teacher-forced control by {} (> {})",
                 b,
                 k + 1,
                 max_diff,
-                PARITY_TOL
+                POOL_VS_F32_TOL
             );
             // Teacher forcing: replace the control's own pick with the token
             // this branch actually generated at this step.

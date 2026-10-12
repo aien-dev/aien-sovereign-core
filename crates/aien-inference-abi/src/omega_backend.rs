@@ -158,7 +158,7 @@ impl OmegaGb10Backend {
             .lock()
             .map(|m| m.iter().map(|(k, v)| (k.clone(), *v)).collect())
             .unwrap_or_default();
-        rows.sort_by(|a, b| b.1.wall_ns.cmp(&a.1.wall_ns));
+        rows.sort_by_key(|(_, t)| std::cmp::Reverse(t.wall_ns));
         rows.iter()
             .map(|(k, t)| {
                 format!(
