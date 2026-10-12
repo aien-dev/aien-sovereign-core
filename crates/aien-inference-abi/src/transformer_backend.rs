@@ -1150,13 +1150,20 @@ impl NativeTransformerBackend {
             }
         }
 
+        // Contiguous copy of the residual rows for the row-batched norms (one launch per
+        // chunk and layer instead of one per token).
+        let mut x_flat = vec![0.0f32; n * hidden_dim];
+        let flatten = |x_flat: &mut [f32], states: &[Vec<f32>]| {
+            for (t, s) in states.iter().enumerate() {
+                x_flat[t * hidden_dim..(t + 1) * hidden_dim].copy_from_slice(s);
+            }
+        };
+
         for (layer_idx, layer_w) in weights.layers.iter().enumerate() {
             let kv_cache = &mut seq_state.layers[layer_idx];
 
-            for t in 0..n {
-                let out_slice = &mut x_norm_batch[t * hidden_dim..(t + 1) * hidden_dim];
-                backend.rmsnorm(out_slice, &states[t], &layer_w.input_layernorm, eps);
-            }
+            flatten(&mut x_flat, &states);
+            backend.rmsnorm_rows(&mut x_norm_batch, &x_flat, &layer_w.input_layernorm, n, eps);
 
             if let Some(w) = layer_w.qkv_proj.as_ref() {
                 backend.matmul_batch_w(
@@ -1201,13 +1208,16 @@ impl NativeTransformerBackend {
                 );
             }
 
+            // q/k norm is per head with one weight, so the whole chunk is one `heads` run
+            // per tensor (n * num_heads rows for q, n * num_kv_heads for k).
+            layer_w.apply_qk_norm_on(backend, &mut q_batch, &mut k_batch, head_dim, eps);
+
             for t in 0..n {
                 let q_t = &mut q_batch[t * q_dim..(t + 1) * q_dim];
                 let k_t = &mut k_batch[t * kv_dim..(t + 1) * kv_dim];
                 let v_t = &v_batch[t * kv_dim..(t + 1) * kv_dim];
 
                 let pos = offset + t;
-                layer_w.apply_qk_norm_on(backend, q_t, k_t, head_dim, eps);
                 backend.apply_rope(q_t, k_t, pos, head_dim, num_heads, num_kv_heads, &rope);
 
                 if let (Some((block_id, slot)), Some(mgr)) = (paged_slots[t], kv_manager) {
@@ -1261,15 +1271,14 @@ impl NativeTransformerBackend {
                 }
             }
 
-            for t in 0..n {
-                let out_slice = &mut post_norm_batch[t * hidden_dim..(t + 1) * hidden_dim];
-                backend.rmsnorm(
-                    out_slice,
-                    &states[t],
-                    &layer_w.post_attention_layernorm,
-                    eps,
-                );
-            }
+            flatten(&mut x_flat, &states);
+            backend.rmsnorm_rows(
+                &mut post_norm_batch,
+                &x_flat,
+                &layer_w.post_attention_layernorm,
+                n,
+                eps,
+            );
 
             if let Some(w) = layer_w.gate_up_proj.as_ref() {
                 let gu = 2 * intermediate_dim;
@@ -1281,11 +1290,16 @@ impl NativeTransformerBackend {
                     hidden_dim,
                     gu,
                 );
+                // Un-interleave the fused rows into the gate and up planes so the whole
+                // chunk is one elementwise launch.
                 for t in 0..n {
                     let row = &gate_up_batch[t * gu..(t + 1) * gu];
-                    let act_t = &mut act_batch[t * intermediate_dim..(t + 1) * intermediate_dim];
-                    backend.swiglu(act_t, &row[..intermediate_dim], &row[intermediate_dim..]);
+                    gate_batch[t * intermediate_dim..(t + 1) * intermediate_dim]
+                        .copy_from_slice(&row[..intermediate_dim]);
+                    up_batch[t * intermediate_dim..(t + 1) * intermediate_dim]
+                        .copy_from_slice(&row[intermediate_dim..]);
                 }
+                backend.swiglu(&mut act_batch, &gate_batch, &up_batch);
             } else {
                 backend.matmul_batch_w(
                     &mut gate_batch,
@@ -1303,12 +1317,7 @@ impl NativeTransformerBackend {
                     hidden_dim,
                     intermediate_dim,
                 );
-                for t in 0..n {
-                    let gate_t = &gate_batch[t * intermediate_dim..(t + 1) * intermediate_dim];
-                    let up_t = &up_batch[t * intermediate_dim..(t + 1) * intermediate_dim];
-                    let act_t = &mut act_batch[t * intermediate_dim..(t + 1) * intermediate_dim];
-                    backend.swiglu(act_t, gate_t, up_t);
-                }
+                backend.swiglu(&mut act_batch, &gate_batch, &up_batch);
             }
 
             backend.matmul_batch_w(

@@ -486,9 +486,10 @@ impl TensorBackend for HeadsSpy {
 }
 
 /// The q/k norm goes through `TensorBackend::rmsnorm_heads` on every forward path (prefill,
-/// batch decode, single-token decode): two calls (q, k) per layer per token, and the logits still
-/// match transformers. A device backend therefore runs and accounts for it; before this, the
-/// norm was host math outside the backend.
+/// batch decode, single-token decode): two calls (q, k) per layer per token on the decode
+/// paths, and two per layer per chunk on the prompt read (the whole chunk's heads in one run),
+/// and the logits still match transformers. A device backend therefore runs and accounts for
+/// it; before this, the norm was host math outside the backend.
 #[test]
 fn qwen3_qk_norm_runs_through_the_tensor_backend() {
     let (weights, r) = tiny();
@@ -498,14 +499,15 @@ fn qwen3_qk_norm_runs_through_the_tensor_backend() {
     let calls = || spy.heads_calls.load(Ordering::Relaxed);
     let mut b = NativeTransformerBackend::with_backend(weights, spy.clone());
 
+    // One chunk (the prompt is shorter than a chunk): q and k once per layer.
     b.prefill_sequence(1, &r.ids[..n - 1]).expect("prefill");
-    assert_eq!(calls(), per_token * (n as u64 - 1), "prefill");
+    assert_eq!(calls(), per_token, "prefill (one chunk)");
 
     b.pending_prefill_token.insert(1, r.ids[n - 1]);
     let (_out, logits) = b
         .forward_decode_batch_with_logits(&[1])
         .expect("batch decode");
-    assert_eq!(calls(), per_token * n as u64, "batch decode");
+    assert_eq!(calls(), 2 * per_token, "batch decode");
     let d = max_abs(&logits[0], &r.logits);
     assert!(d <= ABSOLUTE_TOLERANCE, "batch decode max abs diff {d:e}");
 

@@ -137,6 +137,18 @@ fn chip_elementwise_parity_on_tinyllama_shapes() {
     println!("PARITY rmsnorm 2048 worst err/tolerance = {rms_worst:.3e} (must be <= 1)");
     assert!(rms_worst <= 1.0, "rmsnorm outside tolerance");
 
+    // rmsnorm_rows: 20 rows in one launch equal the 20 single-row references.
+    let rows = 20usize;
+    let x: Vec<f32> = (0..rows * dim).map(|_| lcg(&mut seed) * 2.0).collect();
+    let (mut got, mut want) = (vec![0.0f32; rows * dim], vec![0.0f32; rows * dim]);
+    omega.rmsnorm_rows(&mut got, &x, &w, rows, 1e-5);
+    for r in 0..rows {
+        reference.rmsnorm(&mut want[r * dim..(r + 1) * dim], &x[r * dim..(r + 1) * dim], &w, 1e-5);
+    }
+    let rows_worst = worst_tol_ratio(&got, &want);
+    println!("PARITY rmsnorm_rows 20x2048 worst err/tolerance = {rows_worst:.3e} (must be <= 1)");
+    assert!(rows_worst <= 1.0, "rmsnorm_rows outside tolerance");
+
     // rope, 32 q heads + 4 kv heads of 64, several positions.
     let (hd, nq, nkv) = (64usize, 32usize, 4usize);
     let theta = &aien_inference_abi::RopeParams::plain(10000.0);

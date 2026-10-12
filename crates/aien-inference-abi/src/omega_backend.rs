@@ -401,6 +401,28 @@ impl OmegaGb10Backend {
         })
     }
 
+    /// `rows` rows of `weight.len()` in one launch (omega's rmsnorm is row-wise already).
+    fn chip_rmsnorm_rows(
+        &self,
+        out: &mut [f32],
+        x: &[f32],
+        weight: &[f32],
+        rows: usize,
+        eps: f32,
+    ) -> bool {
+        let dim = weight.len();
+        if dim == 0 || x.len() != rows * dim || out.len() != rows * dim {
+            return self.fail(format!(
+                "rmsnorm_rows shape mismatch: x={} out={} rows={rows} dim={dim}",
+                x.len(),
+                out.len()
+            ));
+        }
+        self.chip_elementwise(&format!("rmsnorm rows={rows} dim={dim}"), || {
+            aien_omega_gpu::rmsnorm_f32(rows, dim, x, weight, eps, out)
+        })
+    }
+
     /// Every head is one row of omega's row-wise rmsnorm (same weight for each row), one launch.
     fn chip_rmsnorm_heads(&self, x: &mut [f32], weight: &[f32], head_dim: usize, eps: f32) -> bool {
         if head_dim == 0 || !x.len().is_multiple_of(head_dim) || weight.len() != head_dim {
@@ -784,6 +806,16 @@ impl TensorBackend for OmegaGb10Backend {
         if !self.chip_rmsnorm(out, x, weight, eps) {
             self.reference_for(TensorOp::Rmsnorm);
             self.reference.rmsnorm(out, x, weight, eps);
+        }
+    }
+
+    fn rmsnorm_rows(&self, out: &mut [f32], x: &[f32], weight: &[f32], rows: usize, eps: f32) {
+        if rows == 0 {
+            return;
+        }
+        if !self.chip_rmsnorm_rows(out, x, weight, rows, eps) {
+            self.reference_for(TensorOp::Rmsnorm);
+            self.reference.rmsnorm_rows(out, x, weight, rows, eps);
         }
     }
 
