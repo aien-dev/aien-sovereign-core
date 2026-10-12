@@ -85,6 +85,31 @@ fn env_or(k: &str, d: &str) -> String {
     std::env::var(k).unwrap_or_else(|_| d.to_string())
 }
 
+/// Makes `out` a build directory for the omega commit `pinned`: when the directory was last
+/// used for another commit (or carries no stamp) it is removed first, so `make` never reuses
+/// objects compiled from the other commit's sources. The omega Makefile tracks header
+/// dependencies per object, but a reused directory also survives Makefile fixes and rule gaps
+/// (2026-10-12: `librx_compose.a` mixed objects of two layouts of a Cortex struct after a
+/// repin, and the host seal refused with RX_ERR_AUTHORITY). Returns `true` when it wiped.
+pub fn fresh_out_dir(out: &Path, pinned: &str) -> bool {
+    let stamp = out.join(".omega-commit");
+    let same = std::fs::read_to_string(&stamp)
+        .map(|s| s.trim() == pinned)
+        .unwrap_or(false);
+    let wiped = !same && out.exists();
+    if !same {
+        if wiped {
+            std::fs::remove_dir_all(out)
+                .unwrap_or_else(|e| panic!("remove stale build dir {}: {e}", out.display()));
+        }
+        std::fs::create_dir_all(out)
+            .unwrap_or_else(|e| panic!("create build dir {}: {e}", out.display()));
+        std::fs::write(&stamp, format!("{pinned}\n"))
+            .unwrap_or_else(|e| panic!("write {}: {e}", stamp.display()));
+    }
+    wiped
+}
+
 /// `true` when `AIEN_REQUIRE_NATIVE_LIBS=1` (release and qualification builds).
 pub fn require_native() -> bool {
     std::env::var("AIEN_REQUIRE_NATIVE_LIBS").as_deref() == Ok("1")
@@ -256,5 +281,39 @@ pub fn qualify_prebuilt(
         physics_lock: String::new(),
         target: env_or("TARGET", ""),
         cc: String::new(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::fresh_out_dir;
+
+    #[test]
+    fn fresh_out_dir_wipes_only_on_another_commit() {
+        let out = std::env::temp_dir().join(format!("aien-fresh-out-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&out);
+        assert!(!fresh_out_dir(&out, "aaaa"), "nothing to wipe on first use");
+        std::fs::write(out.join("obj.o"), b"x").unwrap();
+        assert!(
+            !fresh_out_dir(&out, "aaaa"),
+            "same commit keeps the directory"
+        );
+        assert!(out.join("obj.o").exists());
+        assert!(fresh_out_dir(&out, "bbbb"), "another commit wipes it");
+        assert!(!out.join("obj.o").exists());
+        assert_eq!(
+            std::fs::read_to_string(out.join(".omega-commit"))
+                .unwrap()
+                .trim(),
+            "bbbb"
+        );
+        std::fs::remove_file(out.join(".omega-commit")).unwrap();
+        std::fs::write(out.join("obj.o"), b"x").unwrap();
+        assert!(
+            fresh_out_dir(&out, "bbbb"),
+            "no stamp: the directory is of unknown origin, wiped"
+        );
+        assert!(!out.join("obj.o").exists());
+        let _ = std::fs::remove_dir_all(&out);
     }
 }
