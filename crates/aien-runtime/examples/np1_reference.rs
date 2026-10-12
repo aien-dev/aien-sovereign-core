@@ -104,6 +104,8 @@ async fn main() {
         Some(why) => aien_runtime::spine::retry_prompt(&base, why),
         None => base,
     };
+    let allen = std::env::var("NP1_REFERENCE_ALLEN").unwrap_or_else(|_| "none".into());
+    let prompt = allen_prompt(&prompt, &allen);
     let msgs = vec![aien_runtime::ChatTurn {
         role: "user".into(),
         content: prompt.clone(),
@@ -131,7 +133,7 @@ async fn main() {
     println!(
         "{}",
         serde_json::json!({
-            "backend": aien_inference_abi::TensorBackend::name(tb.as_ref()),
+            "backend": aien_inference_abi::TensorBackend::name(tb.as_ref()), "allen": allen,
             "model_dir": dir, "model_id": config.model_id, "template": tok.template().name(),
             "stop_ids": stop, "warm_up_ids": w, "mode": mode, "retry_reason": retry, "goal": goal, "workspace": ws,
             "prompt_sha256": hex(prompt.as_bytes()),
@@ -230,5 +232,92 @@ mod tests {
         assert_eq!(want, aien_runtime::spine::proposal_prompt(goal));
         assert_eq!(reference_prompt("new", goal, &ws), want);
         assert_eq!(reference_prompt("task", goal, &ws), want);
+    }
+}
+
+/// The model-visible prompt with the ALLEN context the product adds in front of
+/// the task prompt (sc#384, v7 row R1-P): `NP1_REFERENCE_ALLEN=default` repeats
+/// `spine` exactly, `persona::prefix_prompt` with `PersonaContext::defaults()`
+/// (an engaged subject with no saved profile: persona state "default", revision
+/// 0, as the campaign's fixture subject reports). `none` (the default) adds
+/// nothing, the v6 prompt. Any other value is refused: a replay must say what
+/// it replays. A saved profile (state "applied") is not replayed by this tool.
+fn allen_prompt(prompt: &str, allen: &str) -> String {
+    match allen {
+        "none" => prompt.to_string(),
+        "default" => aien_runtime::persona::prefix_prompt(
+            prompt,
+            Some(&aien_allen_profile::PersonaContext::defaults()),
+        ),
+        other => {
+            eprintln!("NP1_REFERENCE_ALLEN={other}: only \"none\" or \"default\" is replayed");
+            std::process::exit(2);
+        }
+    }
+}
+
+#[cfg(test)]
+mod allen_tests {
+    use super::{allen_prompt, reference_prompt};
+    use aien_allen_profile::PersonaContext;
+
+    const R1_GOAL: &str = "Save a one-sentence reminder about stretching the shoulders before swimming into notes/swim-tip.txt.";
+
+    // The default ALLEN block goes in front of the whole task prompt, as the
+    // product does it (persona::prefix_prompt after the plan is built), not
+    // in front of the goal inside the "Goal:" line. v7 R1-P failed because the
+    // replay carried no block at all.
+    #[test]
+    fn default_allen_block_prefixes_the_whole_task_prompt() {
+        let t = tempfile::tempdir().unwrap();
+        let ws = std::fs::canonicalize(t.path()).unwrap();
+        let base = reference_prompt("new", R1_GOAL, &ws);
+        let got = allen_prompt(&base, "default");
+        let want = aien_runtime::persona::prefix_prompt(&base, Some(&PersonaContext::defaults()));
+        assert_eq!(got, want);
+        assert!(
+            got.starts_with("[ALLEN style preferences saved by the user]\n"),
+            "{got}"
+        );
+        assert!(
+            got.contains("[end of style preferences]\n\nGoal: Save a one-sentence"),
+            "{got}"
+        );
+        assert_eq!(allen_prompt(&base, "none"), base);
+    }
+
+    // Deterministic replay check against the v7 GB10 run (evidence-v7/run/
+    // s3-reports/s3-report-R1.json, attempt 1: prompt_tokens 164,
+    // prompt_ids_sha256 eee4e094...): the bytes this tool sends for R1 with
+    // the default block, through the product's template and assistant prefix,
+    // tokenize to exactly those ids. Needs the Qwen3-8B tokenizer:
+    // AIEN_QWEN3_MODEL_DIR=<folder with tokenizer.json>; skipped otherwise.
+    #[test]
+    fn v7_r1_prompt_ids_are_reproduced_exactly() {
+        let Ok(dir) = std::env::var("AIEN_QWEN3_MODEL_DIR") else {
+            eprintln!("AIEN_QWEN3_MODEL_DIR not set: v7 R1 replay check skipped");
+            return;
+        };
+        let tok =
+            aien_inference_abi::ChatTokenizer::from_model_dir(std::path::Path::new(&dir), None)
+                .expect("tokenizer");
+        let t = tempfile::tempdir().unwrap();
+        let ws = std::fs::canonicalize(t.path()).unwrap();
+        let prompt = allen_prompt(&reference_prompt("new", R1_GOAL, &ws), "default");
+        let msgs = vec![aien_runtime::ChatTurn {
+            role: "user".into(),
+            content: prompt,
+        }];
+        let text = format!(
+            "{}{}",
+            aien_runtime::format_chat(tok.template(), &msgs).expect("chat"),
+            aien_runtime::spine::COMPOSE_ASSISTANT_PREFIX
+        );
+        let ids = tok.encode(&text).expect("encode");
+        assert_eq!(ids.len(), 164, "prompt tokens");
+        assert_eq!(
+            aien_runtime::spine::token_ids_sha256(&ids),
+            "eee4e094335087285f3c4ff52fda6f9ecc946c3f145abbe9fbbccf403a6adfe6"
+        );
     }
 }
