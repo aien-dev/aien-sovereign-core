@@ -73,3 +73,23 @@ the prompt read is about 0.7 s and is not the bound here.
 Next fixes, in order of ms saved: (1) one fused q/k/v matmul per layer (n=6144, 50.3 MB at ~213 GB/s = 0.24 ms vs 0.46 ms now: ~8 ms/step);
 (2) one fused gate+up matmul (n=24576: ~6 ms/step at 240 GB/s); (3) bf16 KV pool so attention uses the paged kernel instead of the host
 gather (5 ms here, much more on the 700 to 1000-token document tasks of the campaign); (4) split-K for the n=4096 shapes (grid capped at 512).
+
+## Fused q|k|v and gate|up launches (03:51-03:55Z, one hold, `N=smoke-fused-cta1024 timing-leg.sh`)
+
+Same settings (budget 1024, spin 2000 us), the resident loader also uploads one stacked q|k|v matrix (n=6144) and one gate|up matrix
+(n=24576) per layer and the forward paths launch those (`smoke-fused-cta1024.json`, binary sha in `smoke-fused-cta1024-binary.sha256`).
+p1/p2 equal to the golden, p3 ids identical to every earlier leg, fallback 0. p3 24 260 ms (was 26 666): decode 92.4 ms/step (was 101.8).
+
+| op (per decode step) | before: wall ms | after: wall ms | chip GB/s after |
+|---|---|---|---|
+| q, k, v -> q\|k\|v (n=6144, 50.3 MB) | 7.1 + 9.3 = 16.4 | 10.1 | 224 |
+| gate, up -> gate\|up (n=24576, 201 MB) | 36.4 | 34.8 | 219 |
+| o (4096x4096) | 7.1 | 7.2 | 196 |
+| down (12288x4096) | 19.5 | 19.6 | 217 |
+| lm_head | 6.6 | 6.4 | 199 |
+| paged_attention (gathered) | 6.6 | 6.0 | |
+| rmsnorm + swiglu + rmsnorm_heads + rope | 5.3 | 5.3 | |
+| matmul total | 86.0 | 78.1 | 15.1 GB at 193 GB/s average |
+
+Launches per step 516 -> 408. The two matrices that still lag are the n=4096 shapes (o, down: grid capped at 512 blocks) and the
+host-gathered attention. Cumulative today: 116 -> 92 ms/step (8.4 -> 10.8 tok/s on p3), replies unchanged.
