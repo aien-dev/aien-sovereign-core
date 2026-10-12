@@ -484,3 +484,29 @@ tree clean. The campaign-context token now costs about 73 ms of one-row matmul p
 prompt read of 1268 tokens costs about 1 s of attention instead of 3 s. Next levers: the one-row matmul
 itself (A re-read per column tile, launch gaps of 5 to 17 us on 145 calls per token) and the prefill
 elementwise gaps (swiglu and rmsnorm_heads wall about twice their chip time in p4).
+
+## Elementwise launch cap 64 -> 1024 CTAs (11:57-11:58Z, N=smoke-ctx-ewcap)
+
+Pin moved to omega 4d0bb369 (omega#418, cut L). A perf profile of the cut K binary (one run, same phase times
+as its leg) showed the decode host 96% spin-waiting on the chip with no host hot spot, and the prompt-read
+side paying for launch count: omega's elementwise launcher capped a launch at 64 CTAs (the 2026-10-03 lost-tile
+envelope, whose root cause, the GPU-cached completion marker, has been fixed since), so one prefill swiglu
+(128 x 12288) was 192 launches (1.4 ms chip + 1.5 ms host per call, 360 calls per 1268-token prompt),
+rmsnorm_heads 64 launches per call, decode swiglu 2. The cap is now 1024, the CTA budget the matmul path has
+run every serving leg at through the same session launcher; the poison scan of every output word stays as the
+lost-tile detector. Omega batteries before the pin: host-only 24/24 + 119/119, chip 35/35 (swiglu 1572864 =
+12 launches, mutant caught) + reconvergence 235/235. One run per leg, same binary settings.
+
+| leg | p1 | p2 | p3 (37 + 256) | p4 (1268-token prompt + 64) | replies |
+|---|---|---|---|---|---|
+| smoke-ctx-gqa (omega aa9b7c5c) | 265 ms | 2519 ms | 20318 ms | 13345 ms | golden |
+| smoke-ctx-ewcap (omega 4d0bb369) | 248 ms | 2444 ms | 20053 ms | 12829 ms | identical, all four |
+
+p4 chip time per 1268-token prompt: swiglu 551 -> 99 ms (wall 1132 -> 656), rmsnorm_heads 282 -> 26 ms (wall
+473 -> 210), rmsnorm 52 -> 37 ms. p3 decode swiglu 29 -> 20 us wall per call (one launch instead of two), about
+1 ms per token over the 36 layers. Fallback 0, `host_ops` unchanged. ABI requalification on the committed pin:
+`abi-qual-host-4d0bb369.json` PASS, scope host, tree clean. What remains of the elementwise wall is the host
+side of the API (staging copies in, poison fill, copy out, scan: ~1.5 ms per 128 x 12288 call). The D1 estimate
+from these legs is 2 x (969 x 6.1 ms + 655 x 82 ms) = 2 x (5.9 + 53.7) = 119 s against the 120 s budget: no margin.
+The decode matmul (73 ms of the 82) runs at 207 to 218 GB/s, the same ceiling three other kernels reach on this
+chip (about 220 GB/s observed); the levers left on the bf16 candidate are each worth 1 to 4 s of the 119.
