@@ -150,7 +150,13 @@ fn retry_names_the_unmet_requirement_and_second_attempt_passes() {
     let p = prompts.lock().unwrap();
     assert!(!p[0].contains("unmet requirement"));
     assert!(
-        p[1].contains("refused (unmet requirement: at least 20 non-empty lines, found 13)"),
+        p[1].contains("refused before anything was written (unmet requirement: at least 20 non-empty lines, found 13)"),
+        "{}",
+        p[1]
+    );
+    // sc#384 v8: the refused reply itself is quoted back for correction.
+    assert!(
+        p[1].contains(&format!("<<<REFUSED ANSWER\n{}", doc(13))),
         "{}",
         p[1]
     );
