@@ -420,3 +420,67 @@ gaps but is not a rate. ABI requalification on the committed pin: `abi-qual-host
 host, tree clean. What remains of the per-call gap (5 to 17 us) is the launch protocol and the result readback,
 not the pack. Next levers are on the chip side: more splits (8) or two warps per CTA in decode attention, and a
 k-split for the latency-bound small shapes (n 4096 and 6144, 512 and 768 CTAs for 1024 seats).
+
+## Matmul result sentinels: one poison word per tile (10:29-10:30Z, N=smoke-ctx-sent)
+
+Pin moved to omega 536870f1 (omega#414, cut I). Before each matmul launch the host wrote a poison word into
+every result word it would later check (m x n words), and after the launch read every one of them back before
+accepting the result. With one row that was 24576 host writes and reads on the widest shape, per call. Now the
+host poisons and checks one word per 16x8 tile (the last word the kernel writes in that tile), so the check
+still catches a tile that never ran, with 128x fewer host words. ABI unchanged; omega chip battery and host
+battery green before the pin. One run per leg, same binary settings (CTA budget 1024, spin 2000 us).
+
+| leg | p1 | p2 | p3 (37 + 256) | p4 (1268-token prompt + 64) | replies |
+|---|---|---|---|---|---|
+| smoke-ctx-row0 (omega dec2577d) | 283 ms | 2355 ms | 19944 ms | 16272 ms | golden |
+| smoke-ctx-sent (omega 536870f1) | 265 ms | 2392 ms | 20137 ms | 15502 ms | identical, all four |
+
+p4 gained 770 ms (the prefill matmuls carry m up to 256 rows, so their poison sets were the largest); p3 moved
+within the run-to-run spread of the one-row path (one run, not a rate). Fallback 0. ABI requalification on the
+committed pin: `abi-qual-host-536870f1.json` PASS, scope host, tree clean.
+
+## Decode attention: one whole chunk per context split, cap 16 (10:44-10:45Z, N=smoke-ctx-chunk)
+
+Pin moved to omega 3d3d7cfc (omega#415, cut J). The split-context decode attention kernel used to hand each
+CTA a span that could straddle KV chunks, so every CTA walked chunk boundaries; now each split is exactly one
+resident chunk and the split count is capped at 16. Chip split-timing in the standalone harness showed the
+kernel at 180 us per call at 1268 tokens of context either way: the time is in reading K and V (21 MB per call,
+once per query head, from a GPU-uncached pool that L2 cannot dedupe), not in the walk.
+
+| leg | p1 | p2 | p3 (37 + 256) | p4 (1268-token prompt + 64) | replies |
+|---|---|---|---|---|---|
+| smoke-ctx-sent (omega 536870f1) | 265 ms | 2392 ms | 20137 ms | 15502 ms | golden |
+| smoke-ctx-chunk (omega 3d3d7cfc) | 267 ms | 2519 ms | 20053 ms | 16308 ms | identical, all four |
+
+Decode attention chip time per call: p3 (short context) 44.9 -> 36.9 us, p4 (1268 context) 154.6 -> 151.9 us.
+p4 overall moved 15502 -> 16308 ms, inside the spread of the f32 prefill attention rows kernel (2.7 to 3.3 s per
+1268-token prompt across the last three legs, one run each). Fallback 0. ABI requalification on the committed pin:
+`abi-qual-host-3d3d7cfc.json` PASS, scope host, tree clean. Conclusion: at campaign context the decode attention
+is traffic-bound by the four-fold GQA read of the same K and V; the next cut reads them once per group.
+
+## Attention: one CTA per GQA group, K and V read once (11:21-11:22Z, N=smoke-ctx-gqa)
+
+Pin moved to omega aa9b7c5c (omega#417, cut K). Qwen3-8B has 32 query heads over 8 kv heads (GQA 4). Every
+attention CTA used to serve one query head and read the whole K and V of its kv head, so each kv head's data
+crossed the memory bus four times per call; at 1268 tokens of context that is 21 MB per decode call from a
+GPU-uncached pool that L2 cannot share. Now, at head_dim 128, one CTA serves the four query heads of a kv head
+(grid 8 CTAs per split instead of 32), keeps four running maxima, sums and accumulators, and reads K and V
+once. The same group kernel serves the f32 prefill attention rows call. Shared memory per CTA 6656 B, 84
+registers (budget raised 64 -> 96; the blocked prefill matmul already launches at 108). head_dim 64 and GQA 1
+emit the old program unchanged (the hd64 digest fixtures still pass). Omega batteries before the pin: host
+107/107, simulator hd64 219/219 and hd128 227/227, chip hd128 225/225 and hd64 219/219; standalone chip
+split-timing at 1268 tokens 180 -> 64 us per call. One run per leg, same binary settings.
+
+| leg | p1 | p2 | p3 (37 + 256) | p4 (1268-token prompt + 64) | replies |
+|---|---|---|---|---|---|
+| smoke-ctx-chunk (omega 3d3d7cfc) | 267 ms | 2519 ms | 20053 ms | 16308 ms | golden |
+| smoke-ctx-gqa (omega aa9b7c5c) | 265 ms | 2519 ms | 20318 ms | 13345 ms | identical, all four |
+
+p4 chip time per call: prefill attention rows (360 calls) 8578 -> 2018 us, decode attention at 1268 context
+(2268 calls) 151.9 -> 78.2 us. p3 decode attention at short context 36.9 -> 39.4 us per call (8 CTAs per
+split instead of 32 at 37 to 293 tokens of context: fewer seats busy, inside the one-run spread). Fallback 0,
+`host_ops` unchanged. ABI requalification on the committed pin: `abi-qual-host-aa9b7c5c.json` PASS, scope host,
+tree clean. The campaign-context token now costs about 73 ms of one-row matmul plus 2 ms of attention; the
+prompt read of 1268 tokens costs about 1 s of attention instead of 3 s. Next levers: the one-row matmul
+itself (A re-read per column tile, launch gaps of 5 to 17 us on 145 calls per token) and the prefill
+elementwise gaps (swiglu and rmsnorm_heads wall about twice their chip time in p4).
