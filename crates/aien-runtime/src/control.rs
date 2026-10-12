@@ -779,6 +779,12 @@ pub struct ProposalAttempt {
     /// (crate::requirements); empty when none failed or none were recognized.
     #[serde(default)]
     pub unmet_requirements: Vec<String>,
+    /// sc#384 v8 corrective retry: `text_sha256` of the refused reply this
+    /// attempt's prompt quoted back to the model (the previous attempt's
+    /// reply). None on attempt 1 and when the previous attempt had no reply
+    /// (timeout, error): that prompt carries the refusal reason only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shown_refused_text_sha256: Option<String>,
 }
 
 /// The record `ComposeNote` appended.

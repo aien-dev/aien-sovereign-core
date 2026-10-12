@@ -1744,6 +1744,46 @@ pub fn retry_prompt(base: &str, reason: &str) -> String {
     )
 }
 
+/// Largest refused reply quoted back by [`corrective_retry_prompt`]; a longer
+/// one is cut at a character boundary and marked. A reply is at most the
+/// document token cap (1024 tokens in the v5 tasks), far under this.
+pub const COMPOSE_FEEDBACK_MAX_BYTES: usize = 8192;
+
+/// The markers around the quoted refused reply.
+pub const REFUSED_REPLY_BEGIN: &str = "<<<REFUSED ANSWER";
+pub const REFUSED_REPLY_END: &str = "REFUSED ANSWER>>>";
+
+/// sc#384 v8 (Drake 2026-10-12, Option 3): the retry prompt that shows the
+/// model its own refused reply next to the exact validation failure. The
+/// goal, the requirements, the budgets and the attempt limit are untouched;
+/// the quoted reply is prompt text only and never reaches the write path
+/// (only a reply that passes every check becomes a proposal). Without a reply
+/// (the previous attempt timed out or failed) it is [`retry_prompt`] byte for
+/// byte, the v7 prompt.
+pub fn corrective_retry_prompt(base: &str, reason: &str, refused: Option<&str>) -> String {
+    let Some(text) = refused else {
+        return retry_prompt(base, reason);
+    };
+    let mut shown = text.replace(REFUSED_REPLY_END, "[marker removed]");
+    let mut cut = "";
+    if shown.len() > COMPOSE_FEEDBACK_MAX_BYTES {
+        let mut end = COMPOSE_FEEDBACK_MAX_BYTES;
+        while !shown.is_char_boundary(end) {
+            end -= 1;
+        }
+        shown.truncate(end);
+        cut = "\n[the rest of the refused answer is not shown]";
+    }
+    let nl = if shown.ends_with('\n') { "" } else { "\n" };
+    format!(
+        "{base}\nYour previous answer was refused before anything was written ({reason}). \
+         Here it is, between the markers, so you can see what to fix:\n\
+         {REFUSED_REPLY_BEGIN}\n{shown}{nl}{REFUSED_REPLY_END}{cut}\n\
+         Write a new complete answer that meets every requirement of the goal. \
+         Start your answer with the line \"filename: <relative path>\"."
+    )
+}
+
 /// Runs up to `max_attempts` proposals within `budget`: attempt 1 always
 /// starts; attempt k > 1 starts only if the remaining budget is at least
 /// `attempt_budget` (the measured cost of one full attempt), and gets the
@@ -1799,6 +1839,7 @@ fn new_attempt(k: u32) -> ProposalAttempt {
         decoding: None,
         ops: None,
         unmet_requirements: Vec::new(),
+        shown_refused_text_sha256: None,
     }
 }
 
@@ -1926,6 +1967,9 @@ pub fn propose_task_placed(
         }
     }
     let mut last_reason = "no attempt made".to_string();
+    // The previous attempt's refused reply (sc#384 v8), quoted in the next
+    // prompt; None after a timeout or error, which leave no reply.
+    let mut last_refused: Option<String> = None;
     let need_ms = (attempt_budget.as_millis() as u64).max(1);
     for k in 1..=max_attempts {
         let remaining = budget.saturating_sub(start.elapsed());
@@ -1939,12 +1983,17 @@ pub fn propose_task_placed(
         let prompt = if k == 1 {
             base.to_string()
         } else {
-            retry_prompt(base, &last_reason)
+            corrective_retry_prompt(base, &last_reason, last_refused.as_deref())
         };
+        let shown = last_refused
+            .take()
+            .filter(|_| k > 1)
+            .map(|t| hex(&Sha256::digest(t.as_bytes())));
         let t0 = std::time::Instant::now();
         let out = proposer(&prompt, remaining);
         let last_ms = t0.elapsed().as_millis() as u64;
         let mut a = new_attempt(k);
+        a.shown_refused_text_sha256 = shown;
         a.ms = last_ms;
         match out {
             Ok(g) => {
@@ -1982,6 +2031,7 @@ pub fn propose_task_placed(
                         a.outcome = "refused".into();
                         a.reason = Some(e.clone());
                         last_reason = e;
+                        last_refused = Some(g.text.clone());
                     }
                 }
             }
