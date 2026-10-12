@@ -60,6 +60,15 @@ type RopeTable = Arc<(Vec<f32>, Vec<f32>)>;
 type RopeKey = (usize, [u64; 5], usize);
 const ROPE_CACHE_MAX: usize = 16384;
 
+/// Single-token elementwise ops run on the host (sc#384 decode speed): a one-row rmsnorm, one
+/// token's q/k head norms and its rope are 1 to 4 us of arithmetic on the host (measured on the
+/// X925) against 11 to 34 us as a chip launch with its copies, and their data already lives in
+/// host memory. At or under this many f32 values the op runs on the reference implementation
+/// (the golden maths), tallied as `<op>_host` in the timing table and counted in `host_ops`,
+/// not a fallback. Prefill rows (128 x 4096 and more) stay on the chip. swiglu stays on the chip
+/// at every size (host f64 exp over 12288 values 26 us against 28 us on the chip: no gain).
+pub const HOST_ELEMENTWISE_MAX: usize = 16384;
+
 struct Resident {
     fingerprint: u64,
     tensor: ResidentTensor,
@@ -74,6 +83,8 @@ pub struct OmegaGb10Backend {
     chip: Mutex<HashMap<Key, Resident>>,
     rope_tables: Mutex<HashMap<RopeKey, RopeTable>>,
     chip_errors: AtomicU64,
+    /// Elementwise ops routed to the host by size (`HOST_ELEMENTWISE_MAX`), not fallbacks.
+    host_ops: AtomicU64,
     chip_calls: AtomicU64,
     chip_ns: AtomicU64,
     /// OM-2 staging counters summed over every chip attention call.
@@ -135,6 +146,7 @@ impl OmegaGb10Backend {
             chip: Mutex::new(HashMap::new()),
             rope_tables: Mutex::new(HashMap::new()),
             chip_errors: AtomicU64::new(0),
+            host_ops: AtomicU64::new(0),
             chip_calls: AtomicU64::new(0),
             chip_ns: AtomicU64::new(0),
             kv_bytes_staged: AtomicU64::new(0),
@@ -152,6 +164,14 @@ impl OmegaGb10Backend {
             e.wall_ns += wall_ns;
             e.chip_ns += chip_ns;
         }
+    }
+
+    /// One host-routed elementwise op: run it, tally its wall time under `key` (chip time 0).
+    fn host_op(&self, key: &str, op: impl FnOnce()) {
+        let t0 = Instant::now();
+        op();
+        self.host_ops.fetch_add(1, Ordering::Relaxed);
+        self.tally(key.to_string(), t0.elapsed().as_nanos() as u64, 0);
     }
 
     /// The per-operation timing table as text, heaviest wall time first.
@@ -221,6 +241,11 @@ impl OmegaGb10Backend {
     /// Chip attention calls whose KV came from the resident pool (no staging copy).
     pub fn kv_resident_calls(&self) -> u64 {
         self.kv_resident_calls.load(Ordering::Relaxed)
+    }
+
+    /// Elementwise ops routed to the host by size (`HOST_ELEMENTWISE_MAX`), never fallbacks.
+    pub fn host_ops(&self) -> u64 {
+        self.host_ops.load(Ordering::Relaxed)
     }
 
     pub fn last_error(&self) -> String {
@@ -822,6 +847,12 @@ impl TensorBackend for OmegaGb10Backend {
     }
 
     fn rmsnorm(&self, out: &mut [f32], x: &[f32], weight: &[f32], eps: f32) {
+        if x.len() <= HOST_ELEMENTWISE_MAX {
+            self.host_op("rmsnorm_host", || {
+                self.reference.rmsnorm(out, x, weight, eps)
+            });
+            return;
+        }
         if !self.chip_rmsnorm(out, x, weight, eps) {
             self.reference_for(TensorOp::Rmsnorm);
             self.reference.rmsnorm(out, x, weight, eps);
@@ -832,6 +863,12 @@ impl TensorBackend for OmegaGb10Backend {
         if rows == 0 {
             return;
         }
+        if x.len() <= HOST_ELEMENTWISE_MAX {
+            self.host_op("rmsnorm_host", || {
+                self.reference.rmsnorm_rows(out, x, weight, rows, eps)
+            });
+            return;
+        }
         if !self.chip_rmsnorm_rows(out, x, weight, rows, eps) {
             self.reference_for(TensorOp::Rmsnorm);
             self.reference.rmsnorm_rows(out, x, weight, rows, eps);
@@ -839,6 +876,12 @@ impl TensorBackend for OmegaGb10Backend {
     }
 
     fn rmsnorm_heads(&self, x: &mut [f32], weight: &[f32], head_dim: usize, eps: f32) {
+        if x.len() <= HOST_ELEMENTWISE_MAX {
+            self.host_op("rmsnorm_heads_host", || {
+                self.reference.rmsnorm_heads(x, weight, head_dim, eps)
+            });
+            return;
+        }
         if !self.chip_rmsnorm_heads(x, weight, head_dim, eps) {
             self.reference_for(TensorOp::RmsnormHeads);
             self.reference.rmsnorm_heads(x, weight, head_dim, eps);
@@ -855,6 +898,13 @@ impl TensorBackend for OmegaGb10Backend {
         num_kv_heads: usize,
         rope: &RopeParams,
     ) {
+        if q.len() + k.len() <= HOST_ELEMENTWISE_MAX {
+            self.host_op("rope_host", || {
+                self.reference
+                    .apply_rope(q, k, pos, head_dim, num_q_heads, num_kv_heads, rope)
+            });
+            return;
+        }
         if !self.chip_rope(q, k, pos, head_dim, num_q_heads, num_kv_heads, rope) {
             self.reference_for(TensorOp::ApplyRope);
             self.reference
@@ -1669,6 +1719,42 @@ mod tests {
     /// Stub build only: each newly native elementwise op is a counted fallback with the
     /// reference result when the chip is unavailable, never silent.
     #[test]
+    fn single_token_norms_and_rope_run_on_the_host_without_a_fallback() {
+        // Any build: the host route never touches the chip. One row of 4096 (the model width),
+        // 32 + 8 heads of 128, one token of rope: reference results, host_ops counts, no fallback.
+        let b = OmegaGb10Backend::new();
+        let r = ReferenceCpuBackend::new();
+        let mut s = 9u32;
+        let x: Vec<f32> = (0..4096).map(|_| lcg(&mut s)).collect();
+        let w: Vec<f32> = (0..4096).map(|_| lcg(&mut s)).collect();
+        let (mut got, mut want) = (vec![0.0f32; 4096], vec![0.0f32; 4096]);
+        b.rmsnorm(&mut got, &x, &w, 1e-6);
+        r.rmsnorm(&mut want, &x, &w, 1e-6);
+        assert_eq!(got, want);
+        b.rmsnorm_rows(&mut got, &x, &w, 1, 1e-6);
+        assert_eq!(got, want);
+        let wh: Vec<f32> = (0..128).map(|_| lcg(&mut s)).collect();
+        let (mut hq, mut hw) = (x.clone(), x.clone());
+        b.rmsnorm_heads(&mut hq, &wh, 128, 1e-6);
+        r.rmsnorm_heads(&mut hw, &wh, 128, 1e-6);
+        assert_eq!(hq, hw);
+        let (mut q, mut k) = (x.clone(), x[..1024].to_vec());
+        let (mut qw, mut kw) = (q.clone(), k.clone());
+        let rope = RopeParams::plain(1_000_000.0);
+        b.apply_rope(&mut q, &mut k, 1268, 128, 32, 8, &rope);
+        r.apply_rope(&mut qw, &mut kw, 1268, 128, 32, 8, &rope);
+        assert_eq!((q, k), (qw, kw));
+        assert_eq!(b.host_ops(), 4);
+        assert_eq!(b.fallback_count(), 0);
+        assert_eq!(b.gpu_executions().unwrap_or(0), 0);
+        let table = b.op_timing_lines();
+        assert!(
+            table.contains("rmsnorm_host calls=2") && table.contains("rope_host calls=1"),
+            "{table}"
+        );
+    }
+
+    #[test]
     fn elementwise_chip_errors_are_counted_fallbacks() {
         if aien_omega_gpu::is_native() || !crate::strict::dev_fallback_active() {
             return;
@@ -1690,12 +1776,12 @@ mod tests {
         b.apply_rope(&mut q, &mut k, 3, 32, 2, 2, &RopeParams::plain(10000.0));
         r.apply_rope(&mut qw, &mut kw, 3, 32, 2, 2, &RopeParams::plain(10000.0));
         assert_eq!((q, k), (qw, kw));
-        assert_eq!(b.fallback_count(), 3);
+        // the one-row rmsnorm and the one-token rope run on the host by size (HOST_ELEMENTWISE_MAX):
+        // the golden maths, not fallbacks; swiglu stays a chip op and is the one counted fallback
+        assert_eq!(b.host_ops(), 2);
+        assert_eq!(b.fallback_count(), 1);
         let line = b.op_report().line();
-        assert!(
-            line.contains("native_fallbacks=[rmsnorm:1,apply_rope:1,swiglu:1]"),
-            "{line}"
-        );
+        assert!(line.contains("native_fallbacks=[swiglu:1]"), "{line}");
     }
 
     #[test]

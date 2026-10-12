@@ -358,3 +358,32 @@ Receipts: smoke-ctx-split.{start,end,rc,raw,err,json,binary.sha256}; built again
 and the native-artifacts.lock lines at that sha). Host-scope abi-qualify at the pin, clean tree:
 abi-qual-host-247f3522.json (PASS, dirty=false). Kernel battery receipts (sim and chip, including the first
 version's failures) in the decode-speed investigation folder, receipts/cut-f.
+
+## Single-token norms and rope on the host (09:58-10:02Z, N=smoke-ctx-host)
+
+Sovereign-core only (no engine change, pin unchanged at omega 247f3522). The GB10 backend routes an elementwise
+op to the reference implementation by size (`HOST_ELEMENTWISE_MAX` = 16384 f32 values): a one-row rmsnorm (the
+model width, 4096), one token's q/k head norms (32 + 8 heads of 128) and one token's rope (5120 values). Measured
+on the host (X925, release build): rmsnorm 4.2 us, head norms 1.1 to 4.3 us, rope 4.1 us including its table,
+against 34.2 / 11.3 / 12.2 us of wall per chip launch in the previous leg (the chip launches copy the row in and
+out of uncached memory for a few microseconds of arithmetic; the rmsnorm kernel itself took 29.7 us of chip
+time). The routed ops are the golden maths (the reference backend defines the smoke golden), tallied as
+`<op>_host` in the timing table and counted in `host_ops`; they are not fallbacks (`fallback_count` stays 0,
+`native_fallbacks` unchanged). Prefill rows (`rmsnorm_rows` at 128 x 4096 and more) and swiglu at every size
+stay on the chip (host f64 exp over 12288 values 25.8 us against 28.2 us wall on the chip: no gain, not routed).
+
+| leg | p3 (37 + 256) | p3 rmsnorm + head norms + rope per token | p4 (1268-token prompt + 64) |
+|---|---|---|---|
+| smoke-ctx-split (before) | 21.1 s | 2.49 + 0.81 + 0.50 = 3.80 ms (chip) | 16.4 s |
+| smoke-ctx-host (after) | 20.2 s | 0.19 + 0.12 + 0.07 = 0.38 ms (host) | 16.5 s |
+
+p3 falls by 0.89 s over 256 tokens (3.5 ms per token, the predicted 3.1 plus the chip lock and tally overhead
+the launches carried). In the table the host rows cost 2.6 / 1.7 / 1.7 us per call. The remaining chip rows of
+those names are the prefill-sized calls (72 `rmsnorm` of 128 rows at 160 us, 72 `rmsnorm_heads` at 197 us).
+Output tokens identical on p1-p4 (output_ids equal to smoke-ctx-split and smoke-ctx-resident). p4 within noise
+(prefill-dominated). Decode at short context is now about 79 ms per token: m=1 matmuls 73.5, attention 1.8,
+swiglu 1.0, host ops 0.4, the rest host time between calls.
+
+Receipts: smoke-ctx-host.{start,end,rc,raw,err,json,binary.sha256}; abi-qualify host scope at the pin on the
+committed tree: abi-qual-host-247f3522-hostroute.json. Unit tests: `single_token_norms_and_rope_run_on_the_host_without_a_fallback`
+(reference equality, host_ops 4, fallback 0, chip calls 0) and the updated `elementwise_chip_errors_are_counted_fallbacks`.
