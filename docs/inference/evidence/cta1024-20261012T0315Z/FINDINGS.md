@@ -93,3 +93,28 @@ p1/p2 equal to the golden, p3 ids identical to every earlier leg, fallback 0. p3
 
 Launches per step 516 -> 408. The two matrices that still lag are the n=4096 shapes (o, down: grid capped at 512 blocks) and the
 host-gathered attention. Cumulative today: 116 -> 92 ms/step (8.4 -> 10.8 tok/s on p3), replies unchanged.
+
+## bf16 KV pool: paged attention kernel instead of the host gather (04:02-04:07Z, one hold, `N=smoke-bf16kv-cta1024 timing-leg.sh`)
+
+Same settings and fused launches; the shared KV pool is now stored as bf16 (`SHARED_KV_DTYPE = Bf16` in `aien-runtime/src/shared_kv.rs`),
+so decode attention runs `paged_attention_bf16` on the chip instead of gathering an f32 pool on the host, and the pool takes half the
+bytes (`smoke-bf16kv-cta1024.json`, binary sha in `smoke-bf16kv-cta1024-binary.sha256`). p1/p2 equal to the golden, fallback 0.
+p3 23 275 ms (was 24 260): decode 88.7 ms/step (was 92.4), 11.3 tok/s.
+
+Numerics: K and V are rounded to bf16 when written, so a long greedy reply may take a different branch. p3's 256 ids equal the fused leg
+for the first 158 tokens, then diverge at token 159 (both replies stay on topic; the pinned golden p1/p2 are unchanged). This is a
+declared numerics change, recorded here; the campaign golden covers p1/p2 and still holds.
+
+| op (per decode step) | before: wall ms | after: wall ms |
+|---|---|---|
+| attention: gathered f32 -> paged_attention_bf16 (9180 calls) | 6.0 | 4.6 (chip 3.7) |
+| gate\|up (n=24576) | 34.8 | 34.6 |
+| down (12288x4096) | 19.6 | 19.6 |
+| q\|k\|v (n=6144) | 10.1 | 10.1 |
+| o (4096x4096) | 7.2 | 7.2 |
+| lm_head | 6.4 | 6.7 |
+| rmsnorm + swiglu + rmsnorm_heads + rope | 5.3 | 5.2 |
+
+The attention saving grows with context (37-token prompt here; the campaign's document tasks run 700 to 1000 tokens, where the host gather
+was linear in context). Cumulative today: 116 -> 88.7 ms/step (8.4 -> 11.3 tok/s on p3). Remaining to the 77 ms target: the n=4096
+shapes (o, down: grid capped at 512 blocks, ~5 ms at 240 GB/s), the small elementwise launches (~5 ms), lm_head (~1 ms).

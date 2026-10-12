@@ -48,7 +48,7 @@ pub fn build_model_kv_manager(
         cfg.num_layers,
         cfg.num_kv_heads,
         cfg.head_dim,
-        KvDType::Fp32,
+        SHARED_KV_DTYPE,
     );
     create_shared_kv_manager_with_pool(total_blocks, cfg.block_size, pool_cfg)
 }
@@ -71,7 +71,13 @@ pub fn build_shared_kv_runtime(
 
 /// Element type of the shared pool. `build_model_kv_manager` lays the pool out
 /// in this dtype, and [`KvPoolPlan`] prices it with the same value.
-pub const SHARED_KV_DTYPE: KvDType = KvDType::Fp32;
+///
+/// Bf16 since sc#384 (2026-10-12): the Omega GB10 backend runs its paged attention
+/// kernel straight on a bf16 pool, while any other dtype makes it gather the
+/// whole context on the host every call (6 ms of a 92 ms decode step at 300
+/// tokens, growing with context). K/V are rounded to bf16 on write; the
+/// reference CPU path reads bf16 pools too, and the pool costs half the bytes.
+pub const SHARED_KV_DTYPE: KvDType = KvDType::Bf16;
 
 /// The daemon's KV pool, sized from the loaded model (issue #239).
 ///
@@ -417,7 +423,7 @@ mod tests {
             c.num_layers,
             c.num_kv_heads,
             c.head_dim,
-            KvDType::Fp32,
+            SHARED_KV_DTYPE,
         )
         .total_bytes()
     }
@@ -433,9 +439,9 @@ mod tests {
             (16, 8, 64)
         );
         assert_eq!(plan.total_blocks, OLD_FIXED_DAEMON_BLOCKS);
-        // 2 * 16 * 8 * 64 * 4
-        assert_eq!(plan.bytes_per_token, 65_536);
-        assert_eq!(plan.total_bytes, 8_589_934_592); // 8.00 GiB
+        // 2 * 16 * 8 * 64 * 2 (bf16 pool, SHARED_KV_DTYPE)
+        assert_eq!(plan.bytes_per_token, 32_768);
+        assert_eq!(plan.total_bytes, 4_294_967_296); // 4.00 GiB
         assert_eq!(plan.total_bytes, old_fixed_bytes(&c));
         assert_eq!(plan.total_bytes, plan.pool_config().total_bytes());
     }
@@ -450,12 +456,12 @@ mod tests {
             (24, 32, 64)
         );
         assert_eq!(plan.total_blocks, 512);
-        // 2 * 24 * 32 * 64 * 4
-        assert_eq!(plan.bytes_per_token, 393_216);
-        assert_eq!(plan.total_bytes, 3_221_225_472); // 3.00 GiB
+        // 2 * 24 * 32 * 64 * 2 (bf16)
+        assert_eq!(plan.bytes_per_token, 196_608);
+        assert_eq!(plan.total_bytes, 1_610_612_736); // 1.50 GiB
         assert_eq!(plan.total_bytes, plan.pool_config().total_bytes());
-        // The old fixed pool was 16x larger: 48.00 GiB (51.5 GB).
-        assert_eq!(old_fixed_bytes(&c), 51_539_607_552);
+        // The old fixed pool was 16x larger: 24.00 GiB (25.8 GB) at the same bf16 element.
+        assert_eq!(old_fixed_bytes(&c), 25_769_803_776);
         assert_eq!(old_fixed_bytes(&c), 16 * plan.total_bytes);
     }
 
@@ -464,7 +470,7 @@ mod tests {
         let mut c = cfg("unsloth/Llama-3.2-1B-Instruct", LLAMA32_1B_CONFIG);
         let plan = KvPoolPlan::for_context(&c, 17, "test").unwrap();
         assert_eq!(plan.total_blocks, 2);
-        assert_eq!(plan.total_bytes, 2 * 16 * 65_536);
+        assert_eq!(plan.total_bytes, 2 * 16 * 32_768);
         assert!(KvPoolPlan::for_context(&c, 0, "test")
             .unwrap_err()
             .contains("context_tokens is 0"));
@@ -477,14 +483,14 @@ mod tests {
         let c = cfg("unsloth/Llama-3.2-1B-Instruct", LLAMA32_1B_CONFIG);
         let line = KvPoolPlan::for_model(&c).unwrap().log_line();
         for want in [
-            "8589934592 bytes",
-            "8.00 GiB",
+            "4294967296 bytes",
+            "4.00 GiB",
             "8192 blocks",
             "16 tokens",
             "16 layers",
             "8 kv heads",
             "64 head_dim",
-            "4 bytes",
+            "2 bytes",
             "context 131072 tokens",
             "max_position_embeddings",
         ] {
@@ -586,9 +592,9 @@ mod tests {
 
         let plan =
             plan_checked_model_kv(&cfg, None, &|| Ok(1 << 30), false).expect("enough memory");
-        // ceil(40 / 16) = 3 blocks of 16 tokens * (2 * 2 * 2 * 16 * 4) bytes per token.
+        // ceil(40 / 16) = 3 blocks of 16 tokens * (2 * 2 * 2 * 16 * 2) bytes per token (bf16).
         assert_eq!(plan.total_blocks, 3);
-        assert_eq!(plan.total_bytes, 3 * 16 * 512);
+        assert_eq!(plan.total_bytes, 3 * 16 * 256);
 
         let weights = TransformerWeights::reference_test_weights(&cfg);
         let mgr = build_model_kv_manager(&weights, plan.total_blocks).expect("pool built");
