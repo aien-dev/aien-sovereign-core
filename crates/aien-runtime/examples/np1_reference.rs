@@ -321,3 +321,127 @@ mod allen_tests {
         );
     }
 }
+
+/// SPEC-v8 Section 5 deterministic replay checks (tokenizer only, no model run;
+/// `AIEN_QWEN3_MODEL_DIR=<qwen3-8b folder>`, skipped otherwise). Every prompt of
+/// the v7 GB10 run is rebuilt from the frozen task file and seeds with the
+/// product's own functions and the default ALLEN block, and its token ids must
+/// equal the v7 record: attempt 1 of every model launch, and every retry
+/// (`retry_prompt` with the previous attempt's recorded reason). Then each v7
+/// refused reply is put through the v8 `corrective_retry_prompt`, and that
+/// prompt plus the task's token cap must fit the 4096-token KV context.
+#[cfg(test)]
+mod v8_replay {
+    use super::allen_prompt;
+    use aien_runtime::spine::{
+        corrective_retry_prompt, retry_prompt, task_decision, token_ids_sha256,
+    };
+    use serde_json::Value;
+    use std::path::{Path, PathBuf};
+
+    const KV_CONTEXT_TOKENS: usize = 4096;
+
+    fn read(p: &Path) -> Value {
+        serde_json::from_slice(&std::fs::read(p).unwrap_or_else(|e| panic!("{p:?}: {e}"))).unwrap()
+    }
+
+    fn copy_dir(from: &Path, to: &Path) {
+        for e in std::fs::read_dir(from).unwrap() {
+            let e = e.unwrap();
+            let t = to.join(e.file_name());
+            if e.file_type().unwrap().is_dir() {
+                std::fs::create_dir_all(&t).unwrap();
+                copy_dir(&e.path(), &t);
+            } else {
+                std::fs::copy(e.path(), &t).unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn v7_prompts_replay_exactly_and_v8_corrective_prompts_fit() {
+        let Ok(dir) = std::env::var("AIEN_QWEN3_MODEL_DIR") else {
+            eprintln!("AIEN_QWEN3_MODEL_DIR not set: v8 replay checks skipped");
+            return;
+        };
+        let tok = aien_inference_abi::ChatTokenizer::from_model_dir(Path::new(&dir), None)
+            .expect("tokenizer");
+        let ids = |prompt: &str| {
+            let msgs = vec![aien_runtime::ChatTurn {
+                role: "user".into(),
+                content: prompt.to_string(),
+            }];
+            let text = format!(
+                "{}{}",
+                aien_runtime::format_chat(tok.template(), &msgs).expect("chat"),
+                aien_runtime::spine::COMPOSE_ASSISTANT_PREFIX
+            );
+            tok.encode(&text).expect("encode")
+        };
+        let camp: PathBuf =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/campaigns/open-model-qwen3");
+        let tasks = read(&camp.join("tasks-oq3-v5.json"));
+        let (mut checked, mut fits, mut bad) = (0, 0, Vec::<String>::new());
+        for t in tasks["tasks"].as_array().unwrap() {
+            let id = t["id"].as_str().unwrap();
+            let rep = read(&camp.join(format!("evidence-v7/run/s3-reports/s3-report-{id}.json")));
+            let attempts = rep["proposal_attempts"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default();
+            if attempts.is_empty() {
+                continue; // N1: refused before any model call
+            }
+            let tmp = tempfile::tempdir().unwrap();
+            let ws = std::fs::canonicalize(tmp.path()).unwrap();
+            if let Some(seed) = t["seed"].as_str() {
+                copy_dir(&camp.join(seed), &ws);
+            }
+            let ((base, _, _), _) = task_decision(t["goal"].as_str().unwrap(), &ws).unwrap();
+            let base = allen_prompt(&base, "default");
+            let cap = t["max_tokens"].as_u64().unwrap() as usize;
+            for (k, a) in attempts.iter().enumerate() {
+                let prompt = if k == 0 {
+                    base.clone()
+                } else {
+                    retry_prompt(&base, attempts[k - 1]["reason"].as_str().unwrap())
+                };
+                if let (Some(n), Some(h)) =
+                    (a["prompt_tokens"].as_u64(), a["prompt_ids_sha256"].as_str())
+                {
+                    let got = ids(&prompt);
+                    checked += 1;
+                    if got.len() as u64 != n || token_ids_sha256(&got) != h {
+                        bad.push(format!(
+                            "{id} attempt {}: {} tokens vs v7 {n}",
+                            k + 1,
+                            got.len()
+                        ));
+                    }
+                }
+                if a["outcome"] == "refused" {
+                    if let Some(text) = a["text"].as_str() {
+                        let reason = a["reason"].as_str().unwrap();
+                        let n = ids(&corrective_retry_prompt(&base, reason, Some(text))).len();
+                        eprintln!(
+                            "{id} after attempt {}: corrective prompt {n} tokens + cap {cap} = {}",
+                            k + 1,
+                            n + cap
+                        );
+                        if n + cap <= KV_CONTEXT_TOKENS {
+                            fits += 1;
+                        } else {
+                            bad.push(format!(
+                                "{id} after attempt {}: {n} + {cap} > {KV_CONTEXT_TOKENS}",
+                                k + 1
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+        eprintln!("v8 replay: {checked} v7 prompts checked, {fits} corrective prompts fit");
+        assert!(checked >= 10, "{checked}");
+        assert!(bad.is_empty(), "{bad:#?}");
+    }
+}
