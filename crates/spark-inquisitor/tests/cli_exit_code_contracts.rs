@@ -68,7 +68,7 @@ fn test_cli_audit_telemetry_diff_exit_nonzero() {
     assert!(!output.status.success());
     assert_eq!(output.status.code(), Some(1));
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("Constitutional audit failed"));
+    assert!(stderr.contains("Doctrine audit failed"));
     assert!(stderr.contains("google-analytics"));
 }
 
@@ -94,7 +94,7 @@ fn test_cli_audit_em_dash_diff_exit_nonzero() {
     assert!(!output.status.success());
     assert_eq!(output.status.code(), Some(1));
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("Constitutional audit failed"));
+    assert!(stderr.contains("Doctrine audit failed"));
     assert!(stderr.contains("Em/En dash detected"));
 }
 
@@ -150,7 +150,7 @@ fn test_cli_review_clean_diff_exit_zero() {
 
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("Constitutional Diff Audit: PASS"));
+    assert!(stdout.contains("Doctrine Diff Audit: PASS"));
     assert!(stdout.contains("Contributor Alignment Interview"));
 }
 
@@ -182,7 +182,7 @@ fn test_cli_review_violating_diff_exit_nonzero() {
     assert!(!output.status.success());
     assert_eq!(output.status.code(), Some(1));
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("Constitutional Diff Audit: FAILED"));
+    assert!(stdout.contains("Doctrine Diff Audit: FAILED"));
 }
 
 #[test]

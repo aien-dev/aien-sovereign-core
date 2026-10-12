@@ -9,7 +9,7 @@ use std::path::PathBuf;
 
 #[derive(Parser, Debug)]
 #[command(name = "spark-inquisitor")]
-#[command(author = "Drake Stapleton <aien@aienos.com> & AIEN <aien@aienos.com>")]
+#[command(author = "Drake Stapleton <drake@aienos.com> & AIEN <aien@aienos.com>")]
 #[command(version = "0.2.0")]
 #[command(about = "Autonomous Sovereign Inquisitor & Pull Request Alignment Gatekeeper")]
 struct Cli {
@@ -99,7 +99,7 @@ enum Commands {
         file: PathBuf,
     },
 
-    /// Evaluate contributor testimony against the Sovereign Constitution
+    /// Evaluate contributor testimony against the project standards
     Evaluate {
         #[arg(long, help = "Path to testimony text file")]
         testimony: PathBuf,
@@ -262,7 +262,7 @@ fn main() {
                     println!("  * {}", u.yellow());
                 }
             } else {
-                eprintln!("{} Constitutional audit failed:", "failure:".red().bold());
+                eprintln!("{} Doctrine audit failed:", "failure:".red().bold());
                 for v in &report.violations {
                     eprintln!("  * {}", v.red());
                 }
