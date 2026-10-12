@@ -41,6 +41,7 @@ fault-hold = []
 test-support = []
 
 [dev-dependencies]
+aien-omega-gpu = { path = "../aien-omega-gpu" }
 tempfile = "3.10"
 aien-runtime = { path = ".", features = ["test-support"] }
 

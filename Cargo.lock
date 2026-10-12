@@ -344,6 +344,7 @@ dependencies = [
  "aien-inference-abi",
  "aien-kv-cache",
  "aien-omega-compose",
+ "aien-omega-gpu",
  "aien-platform",
  "aien-runtime",
  "aien-scheduler",
