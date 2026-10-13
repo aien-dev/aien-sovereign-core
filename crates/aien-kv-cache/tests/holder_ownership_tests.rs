@@ -467,7 +467,12 @@ fn fork_block_range_refusals_change_nothing() {
     let active = m.debug_active_blocks();
     assert!(m.fork_block_range(1, 3, 0..0).is_err(), "empty range");
     assert!(m.fork_block_range(1, 3, 1..3).is_err(), "past the table");
-    assert!(m.fork_block_range(1, 3, 2..1).is_err(), "reversed range");
+    #[allow(clippy::reversed_empty_ranges)]
+    let reversed = 2..1;
+    assert!(
+        m.fork_block_range(1, 3, reversed).is_err(),
+        "reversed range"
+    );
     assert!(m.fork_block_range(9, 3, 0..1).is_err(), "unknown parent");
     assert!(m.fork_block_range(1, 1, 0..1).is_err(), "onto itself");
     assert!(m.fork_block_range(1, 2, 0..1).is_err(), "live child kept");
