@@ -33,6 +33,42 @@ pub const fn has_device_tables() -> bool {
     cfg!(has_omega_fp8_dev)
 }
 
+/// True when the prefill grouped GEMM (`omega_gpu_fp8gemm_f32`, `src/omega_gpu_fp8gemm_api.h`) is linked.
+pub const fn has_gemm() -> bool {
+    cfg!(has_omega_fp8gemm)
+}
+
+/// Most rows one GEMM launch takes (`OMEGA_GPU_FP8GEMM_MAX_ROWS`).
+pub const GEMM_MAX_ROWS: usize = 1024;
+/// Most distinct experts (segments) one GEMM launch takes (`OMEGA_GPU_FP8GEMM_MAX_SEGMENTS`).
+pub const GEMM_MAX_SEGMENTS: usize = 256;
+
+/// Mirror of `OmegaGpuFp8GemmInfo`: what the chip did for one GEMM call.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct GemmInfo {
+    pub rows: u32,
+    pub segments: u32,
+    pub n: u32,
+    pub k: u32,
+    pub mt: u32,
+    pub warps_per_cta: u32,
+    pub lane_bytes: u32,
+    pub grid_x: u32,
+    pub grid_y: u32,
+    pub passes_max: u32,
+    /// e4m3 bytes of the distinct experts, one pass each.
+    pub weight_bytes: u64,
+    /// Bytes the launch reads from the weights (sum over segments of passes x n x k).
+    pub streamed_bytes: u64,
+    /// Chip submit-to-second-marker.
+    pub elapsed_ns: u64,
+    /// Whole API call (host permute, launch, copy back).
+    pub call_ns: u64,
+    pub completion_marker: u32,
+    pub kernel_cache_hit: bool,
+}
+
 /// Mirror of `OmegaGpuFp8Info`: what the chip did for one call.
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
@@ -110,6 +146,23 @@ mod ffi {
             info: *mut Fp8Info,
         ) -> i32;
         pub fn omega_gpu_fp8_tensor_entry(t: *const OmegaGpuFp8Tensor, expert: u32, w_va: *mut u64, s_va: *mut u64) -> i32;
+    }
+    #[cfg(has_omega_fp8gemm)]
+    extern "C" {
+        pub fn omega_gpu_fp8gemm_f32(
+            t: *const OmegaGpuFp8Tensor,
+            m: u32,
+            expert_ids: *const u32,
+            token_rows: *const u32,
+            x: *const f32,
+            x_rows: u32,
+            y: *mut f32,
+            info: *mut super::GemmInfo,
+        ) -> i32;
+        pub fn omega_gpu_fp8gemm_prepare(k: u32) -> i32;
+        pub fn omega_gpu_fp8gemm_rc_name(rc: i32) -> *const std::os::raw::c_char;
+        pub fn omega_gpu_fp8gemm_last_error() -> *const std::os::raw::c_char;
+        pub fn omega_gpu_fp8gemm_test_set_mutant(mutant: i32);
     }
     extern "C" {
         pub fn omega_gpu_fp8_prepare(k: u32) -> i32;
@@ -327,6 +380,68 @@ impl Fp8Tensor {
             Err(OmegaGpuError::Unavailable)
         }
     }
+
+    /// Prefill grouped GEMM, one launch (`omega_gpu_fp8gemm_f32`). Row `i` computes expert
+    /// `expert_ids[i]` on activation row `x[token_rows[i]]` (`x` is `x_rows * k` values);
+    /// `expert_ids` must be non-decreasing (sorted by expert). `y` is `M * n`, in row-table
+    /// order, bit-identical to calling the GEMV once per row. Dense projections are tensors
+    /// with `experts == 1`.
+    pub fn gemm_f32(&self, expert_ids: &[u32], token_rows: &[u32], x: &[f32], y: &mut [f32]) -> Result<GemmInfo, OmegaGpuError> {
+        let m = expert_ids.len();
+        if m == 0 || m > GEMM_MAX_ROWS {
+            return Err(bad(format!("fp8 gemm rows {m} outside 1..={GEMM_MAX_ROWS}")));
+        }
+        check_len("fp8 gemm token rows", m, token_rows.len())?;
+        if !x.len().is_multiple_of(self.k) || x.is_empty() {
+            return Err(bad(format!("fp8 gemm x length {} is not a positive multiple of k={}", x.len(), self.k)));
+        }
+        let x_rows = x.len() / self.k;
+        if let Some(&id) = expert_ids.iter().find(|&&id| id as usize >= self.experts) {
+            return Err(bad(format!("fp8 gemm expert id {id} >= experts {}", self.experts)));
+        }
+        if expert_ids.windows(2).any(|w| w[0] > w[1]) {
+            return Err(bad("fp8 gemm expert ids must be sorted (non-decreasing)".into()));
+        }
+        let mut segments = 1;
+        for w in expert_ids.windows(2) {
+            if w[0] != w[1] {
+                segments += 1;
+            }
+        }
+        if segments > GEMM_MAX_SEGMENTS {
+            return Err(bad(format!("fp8 gemm segments {segments} > {GEMM_MAX_SEGMENTS}")));
+        }
+        if let Some(&r) = token_rows.iter().find(|&&r| r as usize >= x_rows) {
+            return Err(bad(format!("fp8 gemm token row {r} >= x rows {x_rows}")));
+        }
+        check_len("fp8 gemm y (rows*n)", m * self.n, y.len())?;
+        #[cfg(has_omega_fp8gemm)]
+        {
+            let mut info = GemmInfo::default();
+            // SAFETY: lengths, ranges and sort order checked above; the tensor is live for &self.
+            let rc = unsafe {
+                ffi::omega_gpu_fp8gemm_f32(
+                    self.ptr,
+                    m as u32,
+                    expert_ids.as_ptr(),
+                    token_rows.as_ptr(),
+                    x.as_ptr(),
+                    x_rows as u32,
+                    y.as_mut_ptr(),
+                    &mut info,
+                )
+            };
+            if rc != 0 {
+                return Err(gemm_rc_err(rc));
+            }
+            Ok(info)
+        }
+        #[cfg(not(has_omega_fp8gemm))]
+        {
+            let _ = (x_rows, y);
+            Err(OmegaGpuError::Unavailable)
+        }
+    }
 }
 
 impl Drop for Fp8Tensor {
@@ -337,6 +452,52 @@ impl Drop for Fp8Tensor {
             ffi::omega_gpu_fp8_tensor_free(self.ptr)
         }
     }
+}
+
+#[cfg(has_omega_fp8gemm)]
+fn gemm_rc_err(rc: i32) -> OmegaGpuError {
+    // SAFETY: both return static NUL-terminated strings (or NULL for last_error).
+    let name = unsafe {
+        let n = ffi::omega_gpu_fp8gemm_rc_name(rc);
+        let n = if n.is_null() { String::from("?") } else { std::ffi::CStr::from_ptr(n).to_string_lossy().into_owned() };
+        let e = ffi::omega_gpu_fp8gemm_last_error();
+        if e.is_null() {
+            n
+        } else {
+            format!("{n}: {}", std::ffi::CStr::from_ptr(e).to_string_lossy())
+        }
+    };
+    OmegaGpuError::Rc { rc, name }
+}
+
+/// Serving: build and pin the GEMM kernel for width `k`.
+pub fn gemm_prepare(k: usize) -> Result<(), OmegaGpuError> {
+    #[cfg(has_omega_fp8gemm)]
+    {
+        // SAFETY: plain integer argument.
+        let rc = unsafe { ffi::omega_gpu_fp8gemm_prepare(k as u32) };
+        if rc != 0 {
+            return Err(gemm_rc_err(rc));
+        }
+        Ok(())
+    }
+    #[cfg(not(has_omega_fp8gemm))]
+    {
+        let _ = k;
+        Err(OmegaGpuError::Unavailable)
+    }
+}
+
+/// TEST ONLY: deliberately wrong GEMM kernel (0 off; 1 scale dropped; 2 scale pointer never
+/// advances; 3 neighbour row's x). Clears the GEMM kernel cache.
+pub fn gemm_test_set_mutant(mutant: i32) {
+    #[cfg(has_omega_fp8gemm)]
+    // SAFETY: plain integer argument.
+    unsafe {
+        ffi::omega_gpu_fp8gemm_test_set_mutant(mutant)
+    }
+    #[cfg(not(has_omega_fp8gemm))]
+    let _ = mutant;
 }
 
 /// Serving: build and pin the kernel for width `k`.
@@ -451,5 +612,20 @@ mod tests {
         assert_eq!(std::mem::offset_of!(Fp8Info, weight_bytes), 48);
         assert_eq!(std::mem::offset_of!(Fp8Info, kernel_cache_hit), 84);
         assert_eq!(std::mem::offset_of!(Fp8Info, sm_architecture), 152);
+    }
+
+    #[test]
+    fn gemm_info_layout_matches_the_c_struct() {
+        // Measured with cc against omega_gpu_fp8gemm_api.h (own30b/integration 967b14c5):
+        // sizeof 80, passes_max at 36, weight_bytes at 40, streamed_bytes at 48, elapsed_ns at 56,
+        // call_ns at 64, completion_marker at 72, kernel_cache_hit at 76.
+        assert_eq!(std::mem::size_of::<GemmInfo>(), 80);
+        assert_eq!(std::mem::offset_of!(GemmInfo, passes_max), 36);
+        assert_eq!(std::mem::offset_of!(GemmInfo, weight_bytes), 40);
+        assert_eq!(std::mem::offset_of!(GemmInfo, streamed_bytes), 48);
+        assert_eq!(std::mem::offset_of!(GemmInfo, elapsed_ns), 56);
+        assert_eq!(std::mem::offset_of!(GemmInfo, call_ns), 64);
+        assert_eq!(std::mem::offset_of!(GemmInfo, completion_marker), 72);
+        assert_eq!(std::mem::offset_of!(GemmInfo, kernel_cache_hit), 76);
     }
 }

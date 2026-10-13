@@ -393,6 +393,17 @@ pub trait Fp8Gemv: Send + Sync + std::fmt::Debug {
         let _ = (groups, tab_va, x_va, y);
         Err("this FP8 tensor takes no device-resident group table".into())
     }
+    /// Whether [`Self::gemm_f32`] (the prefill grouped GEMM) is available on this tensor.
+    fn has_gemm(&self) -> bool {
+        false
+    }
+    /// Prefill grouped GEMM, one launch: row `i` computes expert `expert_ids[i]` on activation
+    /// row `token_rows[i]` of `x` (`x.len() / k` rows); `expert_ids` is sorted (non-decreasing);
+    /// `y` is `rows * n` in row-table order and equals one GEMV per row. Returns chip nanoseconds.
+    fn gemm_f32(&self, expert_ids: &[u32], token_rows: &[u32], x: &[f32], y: &mut [f32]) -> Result<u64, String> {
+        let _ = (expert_ids, token_rows, x, y);
+        Err("this FP8 tensor has no prefill GEMM".into())
+    }
 }
 
 /// Device addresses the router left its outputs at (valid until the next `route`).
@@ -679,6 +690,14 @@ impl Fp8Gemv for OmegaFp8 {
     fn grouped_dev(&self, groups: usize, tab_va: u64, x_va: u64, y: &mut [f32]) -> Result<u64, String> {
         let t = self.0.lock().map_err(|_| "fp8 tensor lock poisoned".to_string())?;
         let info = t.gemv_grouped_dev(groups, tab_va, x_va, y).map_err(|e| e.to_string())?;
+        Ok(info.elapsed_ns)
+    }
+    fn has_gemm(&self) -> bool {
+        aien_omega_fp8::has_gemm()
+    }
+    fn gemm_f32(&self, expert_ids: &[u32], token_rows: &[u32], x: &[f32], y: &mut [f32]) -> Result<u64, String> {
+        let t = self.0.lock().map_err(|_| "fp8 tensor lock poisoned".to_string())?;
+        let info = t.gemm_f32(expert_ids, token_rows, x, y).map_err(|e| e.to_string())?;
         Ok(info.elapsed_ns)
     }
 }
@@ -1345,6 +1364,8 @@ pub(crate) mod test_support {
         pub matrices: Mutex<Vec<Arc<HostMatrix>>>,
         /// Offer a host-computed device router and lm_head GEMV (the real uploader offers omega's).
         pub device_fakes: bool,
+        /// Offer the prefill GEMM on the FP8 tensors (host-computed, checks the row table).
+        pub gemm_fakes: bool,
         pub dev: Arc<Mutex<FakeDevice>>,
     }
 
@@ -1356,6 +1377,8 @@ pub(crate) mod test_support {
         pub routes: usize,
         pub grouped_dev_calls: usize,
         pub gemv_calls: usize,
+        pub gemm_calls: usize,
+        pub gemm_rows: usize,
     }
 
     pub const FAKE_X_VA: u64 = 0xA000;
@@ -1442,9 +1465,30 @@ pub(crate) mod test_support {
         pub scales: Vec<u16>,
         /// Set by the uploader when it offers the fake router: serves `tensor_entry` / `grouped_dev`.
         pub dev: Option<Arc<Mutex<FakeDevice>>>,
+        /// Set by the uploader when it offers the prefill GEMM: counts the calls and rows.
+        pub gemm: Option<Arc<Mutex<FakeDevice>>>,
     }
 
     impl Fp8Gemv for HostFp8 {
+        fn has_gemm(&self) -> bool {
+            self.gemm.is_some()
+        }
+        fn gemm_f32(&self, expert_ids: &[u32], token_rows: &[u32], x: &[f32], y: &mut [f32]) -> Result<u64, String> {
+            let dev = self.gemm.as_ref().ok_or_else(|| "no gemm".to_string())?;
+            let (m, k, n) = (expert_ids.len(), self.k, self.n);
+            assert_eq!(token_rows.len(), m);
+            assert_eq!(y.len(), m * n);
+            assert!(expert_ids.windows(2).all(|w| w[0] <= w[1]), "the row table must be sorted by expert");
+            let x_rows = x.len() / k;
+            for (i, &tr) in token_rows.iter().enumerate() {
+                assert!((tr as usize) < x_rows);
+                self.grouped_f32(&expert_ids[i..=i], &x[tr as usize * k..(tr as usize + 1) * k], &mut y[i * n..(i + 1) * n])?;
+            }
+            let mut d = dev.lock().unwrap();
+            d.gemm_calls += 1;
+            d.gemm_rows += m;
+            Ok(0)
+        }
         fn tensor_entry(&self, expert: usize) -> Result<(u64, u64), String> {
             self.dev.as_ref().map(|_| (expert as u64 + 1, 0)).ok_or_else(|| "no device".to_string())
         }
@@ -1512,7 +1556,7 @@ pub(crate) mod test_support {
             assert_eq!(w.len(), experts * n * k);
             assert_eq!(scales.len(), experts * (n / FP8_BLOCK) * (k / FP8_BLOCK));
             self.uploads.lock().unwrap().push(("fp8", experts * n, k, w.len() + scales.len() * 4));
-            Ok(Arc::new(HostFp8 { experts, n, k, w: w.to_vec(), scales: scales.to_vec(), dev: self.device_fakes.then(|| self.dev.clone()) }))
+            Ok(Arc::new(HostFp8 { experts, n, k, w: w.to_vec(), scales: scales.to_vec(), dev: self.device_fakes.then(|| self.dev.clone()), gemm: self.gemm_fakes.then(|| self.dev.clone()) }))
         }
         fn new_router(&self, config: &Qwen3MoeConfig) -> Result<Option<Arc<dyn DeviceRouter>>, String> {
             Ok(self.device_fakes.then(|| {
@@ -1986,10 +2030,16 @@ pub struct StepTiming {
     pub host_ns: u64,
     pub chip_ns: u64,
     pub launches: u64,
+    /// Batched prefill only (both are inside `experts_ns`): routing (host logits and top-k, or the
+    /// device router launches) and the host work around the expert GEMMs (sort, SwiGLU, combine).
+    pub route_ns: u64,
+    pub moe_host_ns: u64,
 }
 
 impl StepTiming {
     pub fn add(&mut self, o: &StepTiming) {
+        self.route_ns += o.route_ns;
+        self.moe_host_ns += o.moe_host_ns;
         self.total_ns += o.total_ns;
         self.attention_ns += o.attention_ns;
         self.experts_ns += o.experts_ns;
@@ -2056,9 +2106,16 @@ pub struct Qwen3MoeOmegaEngine {
     /// routing mutant forces the host path for its steps.
     pub device_routing: bool,
     pub last_timing: StepTiming,
-    /// Prompt tokens per prefill step (1 = token-at-a-time; up to [`PREFILL_CHUNK`] when the
-    /// FP8 grouped GEMV is in use for attention and experts, else `step_batch` falls back).
+    /// Prompt tokens per prefill step (1 = token-at-a-time). Batched prefill needs FP8 attention
+    /// and experts; with the grouped GEMM a step takes up to 128 tokens, with the grouped GEMV 8
+    /// (`step_batch` splits a larger chunk to fit).
     pub prefill_chunk: usize,
+    /// Batched prefill uses the FP8 grouped GEMM (when every projection has it) instead of the
+    /// grouped GEMV.
+    pub prefill_gemm: bool,
+    /// GEMM prefill routes with the device router (one launch per token and layer) instead of
+    /// the host.
+    pub prefill_device_routing: bool,
     pos: usize,
     /// Tokens whose KV is stored at positions `0..pos` (prefix reuse across generations).
     history: Vec<u32>,
@@ -2067,6 +2124,7 @@ pub struct Qwen3MoeOmegaEngine {
 impl Qwen3MoeOmegaEngine {
     pub fn new(weights: Qwen3MoeOmegaWeights, kv: Box<dyn KvAttention>) -> Self {
         let device_routing = weights.device_router.is_some();
+        let prefill_gemm = gemm_everywhere(&weights);
         Self {
             weights,
             kv,
@@ -2076,6 +2134,8 @@ impl Qwen3MoeOmegaEngine {
             device_routing,
             last_timing: StepTiming::default(),
             prefill_chunk: PREFILL_CHUNK,
+            prefill_gemm,
+            prefill_device_routing: false,
             pos: 0,
             history: Vec::new(),
         }
@@ -2103,7 +2163,7 @@ impl Qwen3MoeOmegaEngine {
             return Err("step_batch: empty batch".into());
         }
         let top_k = self.weights.config.top_k;
-        if m == 1 || !self.trace_layers.is_empty() || !self.batched_prefill_possible() || m * top_k > aien_omega_fp8::MAX_GROUPS {
+        if m == 1 || !self.trace_layers.is_empty() || !self.batched_prefill_possible() {
             let mut hidden = Vec::new();
             let mut timing = StepTiming::default();
             for &t in tokens {
@@ -2112,6 +2172,22 @@ impl Qwen3MoeOmegaEngine {
             }
             self.last_timing = timing;
             return Ok(hidden);
+        }
+        let gemm = self.prefill_gemm && gemm_everywhere(&self.weights);
+        let limit = if gemm { aien_omega_fp8::GEMM_MAX_ROWS / top_k } else { aien_omega_fp8::MAX_GROUPS / top_k };
+        if m > limit {
+            // A chunk wider than one launch takes: run it as consecutive launches-sized pieces.
+            let mut hidden = Vec::new();
+            let mut timing = StepTiming::default();
+            for piece in tokens.chunks(limit) {
+                hidden = self.step_batch(piece)?;
+                timing.add(&self.last_timing);
+            }
+            self.last_timing = timing;
+            return Ok(hidden);
+        }
+        if gemm {
+            return self.step_batch_gemm(tokens);
         }
         let t_step = Instant::now();
         let mut timing = StepTiming::default();
@@ -2224,6 +2300,164 @@ impl Qwen3MoeOmegaEngine {
                 }
             }
             timing.host_ns += th.elapsed().as_nanos() as u64;
+            timing.experts_ns += t4.elapsed().as_nanos() as u64;
+        }
+        let t5 = Instant::now();
+        let mut hidden = vec![0.0f32; h];
+        rmsnorm(&x[(m - 1) * h..], &self.weights.final_norm, eps, &mut hidden);
+        timing.host_ns += t5.elapsed().as_nanos() as u64;
+        self.pos = pos0 + m;
+        self.history.extend_from_slice(tokens);
+        timing.total_ns = t_step.elapsed().as_nanos() as u64;
+        self.last_timing = timing;
+        Ok(hidden)
+    }
+
+    /// Batched prefill on the FP8 grouped GEMM (OWN-30B cut 10): the same layer-major maths as the
+    /// GEMV path above, but q|k|v, o, gate|up and down are each ONE launch for the whole chunk
+    /// (up to 128 tokens = 1024 expert rows), and every distinct expert's weights are streamed
+    /// once per pass of rows instead of once per row. Attention stays one fused launch per token.
+    /// The expert rows are sorted by expert (a counting sort on the host); the GEMM output comes
+    /// back in sorted order and the per-token MoE sum is accumulated in slot order, exactly as
+    /// before, so the result is bit-identical to the GEMV path. Routing is the host's (logits on
+    /// worker threads) or, with `prefill_device_routing`, the device router per token.
+    fn step_batch_gemm(&mut self, tokens: &[u32]) -> Result<Vec<f32>, String> {
+        let m = tokens.len();
+        let t_step = Instant::now();
+        let mut timing = StepTiming::default();
+        let c = &self.weights.config;
+        let top_k = c.top_k;
+        let (h, qd, kvd, hd, eps) = (c.hidden, c.q_dim(), c.kv_dim(), c.head_dim, c.rms_eps);
+        let (e, i, qkv_n) = (c.experts, c.moe_intermediate, c.qkv_n());
+        let pos0 = self.pos;
+        if pos0 + m > self.kv.capacity() {
+            return Err(format!("context full: {pos0} + {m} of {}", self.kv.capacity()));
+        }
+        let g = m * top_k;
+        let mut x: Vec<f32> = tokens.iter().flat_map(|&t| self.weights.embed_row(t)).collect();
+        let mut x_norm = vec![0.0f32; m * h];
+        let mut qkv_all = vec![0.0f32; m * qkv_n];
+        let mut qn = vec![0.0f32; qd];
+        let mut kn = vec![0.0f32; kvd];
+        let mut attn_all = vec![0.0f32; m * qd];
+        let mut proj_all = vec![0.0f32; m * h];
+        let mut post = vec![0.0f32; m * h];
+        let mut logits = vec![0.0f32; m * e];
+        let mut ids = vec![0u32; g];
+        let mut wts = vec![0.0f32; g];
+        let mut sorted_expert = vec![0u32; g];
+        let mut sorted_token = vec![0u32; g];
+        let mut inv = vec![0u32; g];
+        let mut gu_all = vec![0.0f32; g * 2 * i];
+        let mut act_all = vec![0.0f32; g * i];
+        let mut down_all = vec![0.0f32; g * h];
+        let dense_ids = vec![0u32; m];
+        let rows_m: Vec<u32> = (0..m as u32).collect();
+        let rows_g: Vec<u32> = (0..g as u32).collect();
+        let device_router = match &self.weights.device_router {
+            Some(r) if self.prefill_device_routing && !self.routing_mutant => Some(r.clone()),
+            _ => None,
+        };
+
+        for (layer_idx, layer) in self.weights.layers.iter().enumerate() {
+            let (AttnWeights::Fp8 { qkv, o }, ExpertWeights::Fp8 { gate_up, down }) = (&layer.attn, &layer.experts) else {
+                return Err(format!("layer {layer_idx}: batched prefill needs FP8 attention and experts"));
+            };
+            // --- attention: one q|k|v GEMM, one fused attention launch per token, one o GEMM ---
+            let t0 = Instant::now();
+            for r in 0..m {
+                rmsnorm(&x[r * h..(r + 1) * h], &layer.input_norm, eps, &mut x_norm[r * h..(r + 1) * h]);
+            }
+            timing.host_ns += t0.elapsed().as_nanos() as u64;
+            let t1 = Instant::now();
+            timing.chip_ns += qkv.gemm_f32(&dense_ids, &rows_m, &x_norm, &mut qkv_all).map_err(|e| format!("layer {layer_idx} qkv gemm x{m}: {e}"))?;
+            timing.launches += 1;
+            for r in 0..m {
+                let pos = pos0 + r;
+                let qkv_r = &qkv_all[r * qkv_n..(r + 1) * qkv_n];
+                let out_r = &mut attn_all[r * qd..(r + 1) * qd];
+                match self.kv.fused_attend(layer_idx, pos, qkv_r, eps, out_r) {
+                    Some(res) => timing.chip_ns += res?,
+                    None => {
+                        let t2 = Instant::now();
+                        rmsnorm_per_head(&qkv_r[..qd], &layer.q_norm, eps, c.q_heads, hd, &mut qn);
+                        rmsnorm_per_head(&qkv_r[qd..qd + kvd], &layer.k_norm, eps, c.kv_heads, hd, &mut kn);
+                        apply_rope(&mut qn, &mut kn, pos, c.q_heads, c.kv_heads, hd, c.rope_theta);
+                        self.kv.append(layer_idx, pos, &kn, &qkv_r[qd + kvd..])?;
+                        timing.host_ns += t2.elapsed().as_nanos() as u64;
+                        timing.chip_ns += self.kv.attend(layer_idx, &qn, pos + 1, out_r)?;
+                    }
+                }
+                timing.launches += 1;
+            }
+            timing.chip_ns += o.gemm_f32(&dense_ids, &rows_m, &attn_all, &mut proj_all).map_err(|e| format!("layer {layer_idx} o gemm x{m}: {e}"))?;
+            timing.launches += 1;
+            timing.attention_ns += t1.elapsed().as_nanos() as u64;
+
+            // --- residual and post norm for every token, then routing ---
+            let t3 = Instant::now();
+            for r in 0..m {
+                let xr = &mut x[r * h..(r + 1) * h];
+                for (xi, p) in xr.iter_mut().zip(&proj_all[r * h..(r + 1) * h]) {
+                    *xi += p;
+                }
+                rmsnorm(xr, &layer.post_norm, eps, &mut post[r * h..(r + 1) * h]);
+            }
+            timing.host_ns += t3.elapsed().as_nanos() as u64;
+            let t4 = Instant::now();
+            let tr = Instant::now();
+            if let Some(router) = &device_router {
+                for r in 0..m {
+                    let (a, b) = (r * top_k, (r + 1) * top_k);
+                    let (ns, _) = router
+                        .route(layer_idx, &x[r * h..(r + 1) * h], eps, &mut ids[a..b], &mut wts[a..b])
+                        .map_err(|e| format!("layer {layer_idx} device router (token {r} of {m}): {e}"))?;
+                    timing.chip_ns += ns;
+                    timing.launches += 1;
+                }
+            } else {
+                router_logits(&layer.router, &post, h, e, &mut logits);
+                let plan = MoeBatchPlan::from_logits(&logits, m, e, top_k).map_err(|e| format!("layer {layer_idx} routing: {e}"))?;
+                for (dst, &ex) in ids.iter_mut().zip(&plan.topk_experts) {
+                    *dst = if self.routing_mutant { (ex + 1) % e as u32 } else { ex };
+                }
+                wts.copy_from_slice(&plan.topk_weights);
+            }
+            timing.route_ns += tr.elapsed().as_nanos() as u64;
+
+            // --- the (expert, row) table sorted by expert (stable counting sort) ---
+            let ts = Instant::now();
+            let mut start = vec![0u32; e + 1];
+            for &ex in &ids {
+                start[ex as usize + 1] += 1;
+            }
+            for ex in 0..e {
+                start[ex + 1] += start[ex];
+            }
+            for (gi, &ex) in ids.iter().enumerate() {
+                let slot = &mut start[ex as usize];
+                sorted_expert[*slot as usize] = ex;
+                sorted_token[*slot as usize] = (gi / top_k) as u32;
+                inv[gi] = *slot;
+                *slot += 1;
+            }
+            timing.moe_host_ns += ts.elapsed().as_nanos() as u64;
+
+            // --- experts: one gate|up GEMM, SwiGLU, one down GEMM, over every (token, expert) row ---
+            timing.chip_ns += gate_up
+                .gemm_f32(&sorted_expert, &sorted_token, &post, &mut gu_all)
+                .map_err(|e| format!("layer {layer_idx} gate_up gemm x{g}: {e}"))?;
+            timing.launches += 1;
+            let th = Instant::now();
+            swiglu_rows(&gu_all, &mut act_all, i);
+            timing.moe_host_ns += th.elapsed().as_nanos() as u64;
+            timing.chip_ns += down
+                .gemm_f32(&sorted_expert, &rows_g, &act_all, &mut down_all)
+                .map_err(|e| format!("layer {layer_idx} down gemm x{g}: {e}"))?;
+            timing.launches += 1;
+            let th = Instant::now();
+            combine_rows(&mut x, &down_all, &wts, &inv, h, top_k);
+            timing.moe_host_ns += th.elapsed().as_nanos() as u64;
             timing.experts_ns += t4.elapsed().as_nanos() as u64;
         }
         let t5 = Instant::now();
@@ -2887,6 +3121,68 @@ mod forward_tests {
         assert_eq!(up.dev.lock().unwrap().routes, routes_before, "device_routing=false is host routing");
     }
 
+    fn engine_gemm(gemm: bool, device: bool) -> (Qwen3MoeOmegaEngine, RecordingUploader, Qwen3MoeConfig) {
+        let c = tiny_config();
+        let mut src = MemorySource::for_config(&c);
+        let up = RecordingUploader { device_fakes: device, gemm_fakes: gemm, ..Default::default() };
+        let paths = if device { DevicePaths::default() } else { DevicePaths { router: PathChoice::Host, lm_head: PathChoice::Host } };
+        let (w, _) = load_qwen3_moe_omega_from_paths(&c, &mut src, &up, WeightFormat::Fp8All, paths, &mut |_| {}).unwrap();
+        let kv = HostKv::new(&c, 32);
+        (Qwen3MoeOmegaEngine::new(w, Box::new(kv)), up, c)
+    }
+
+    #[test]
+    fn gemm_prefill_matches_the_gemv_and_per_token_paths_with_one_launch_per_projection() {
+        let tokens = [5u32, 17, 42, 3, 9, 60, 7, 1, 33, 12, 25];
+        let (mut per_token, _, c) = engine_gemm(false, false);
+        let mut want = Vec::new();
+        for &t in &tokens {
+            want = per_token.step(t).unwrap();
+        }
+        // The GEMV batch path (no GEMM offered), chunks of 4.
+        let (mut gemv, _, _) = engine_gemm(false, false);
+        assert!(!gemv.prefill_gemm);
+        let mut got = Vec::new();
+        for chunk in tokens.chunks(4) {
+            got = gemv.step_batch(chunk).unwrap();
+        }
+        assert_eq!(got, want, "GEMV batch differs from per-token");
+        // The GEMM batch path, host routing and device routing, several chunk sizes.
+        for device in [false, true] {
+            for chunk_len in [11usize, 4, 3] {
+                let (mut eng, up, _) = engine_gemm(true, device);
+                assert!(eng.prefill_gemm, "the offered GEMM is used by default");
+                eng.prefill_device_routing = device;
+                let mut hidden = Vec::new();
+                for chunk in tokens.chunks(chunk_len) {
+                    hidden = eng.step_batch(chunk).unwrap();
+                    // q|k|v, o, gate|up, down once per layer, attention per token, and one router launch per token when device-routed.
+                    let m = chunk.len();
+                    assert_eq!(eng.last_timing.launches as usize, c.layers * (4 + m + if device { m } else { 0 }));
+                }
+                assert_eq!(hidden, want, "GEMM batch (device routing {device}, chunk {chunk_len}) differs from per-token");
+                assert_eq!(eng.position(), tokens.len());
+                let d = up.dev.lock().unwrap();
+                assert_eq!(d.gemm_calls, tokens.chunks(chunk_len).count() * c.layers * 4);
+                assert_eq!(d.gemm_rows, tokens.len() * c.layers * (2 + 2 * c.top_k));
+                assert_eq!(d.routes, if device { tokens.len() * c.layers } else { 0 });
+            }
+        }
+    }
+
+    #[test]
+    fn gemm_prefill_routing_mutant_changes_the_result_and_forces_host_routing() {
+        let tokens = [5u32, 17, 42, 3, 9];
+        let (mut clean, _, _) = engine_gemm(true, true);
+        let want = clean.step_batch(&tokens).unwrap();
+        let (mut bad, up, _) = engine_gemm(true, true);
+        bad.prefill_device_routing = true;
+        bad.routing_mutant = true;
+        let got = bad.step_batch(&tokens).unwrap();
+        assert_ne!(got, want, "swapped experts must change the hidden state");
+        assert_eq!(up.dev.lock().unwrap().routes, 0, "mutant steps are host-routed");
+    }
+
     #[test]
     fn fp8_paths_match_the_naive_reference_with_fewer_launches() {
         let tokens = [5u32, 17, 42, 3, 9, 60];
@@ -3220,4 +3516,47 @@ fn swiglu(gu: &[f32], i: usize, act: &mut [f32]) {
         let g = gu[j];
         act[j] = g / (1.0 + (-g).exp()) * gu[i + j];
     }
+}
+
+/// True when every layer's FP8 projections (q|k|v, o, gate|up, down) carry the prefill GEMM.
+fn gemm_everywhere(weights: &Qwen3MoeOmegaWeights) -> bool {
+    !weights.layers.is_empty()
+        && weights.layers.iter().all(|l| match (&l.attn, &l.experts) {
+            (AttnWeights::Fp8 { qkv, o }, ExpertWeights::Fp8 { gate_up, down }) => qkv.has_gemm() && o.has_gemm() && gate_up.has_gemm() && down.has_gemm(),
+            _ => false,
+        })
+}
+
+/// Router logits for every row of `post` (`m x h`): `logits[r][ex] = dot(router[ex], post[r])`,
+/// each dot summed in index order (so the value does not depend on the thread count).
+fn router_logits(router: &[f32], post: &[f32], h: usize, e: usize, logits: &mut [f32]) {
+    logits.par_chunks_mut(e).zip(post.par_chunks(h)).for_each(|(lr, pr)| {
+        for (ex, l) in lr.iter_mut().enumerate() {
+            *l = router[ex * h..(ex + 1) * h].iter().zip(pr).map(|(a, b)| a * b).sum();
+        }
+    });
+}
+
+/// SwiGLU of every gate|up row (`gu`: rows x 2i) into `act` (rows x i).
+fn swiglu_rows(gu: &[f32], act: &mut [f32], i: usize) {
+    act.par_chunks_mut(i).zip(gu.par_chunks(2 * i)).for_each(|(a, g)| swiglu(g, i, a));
+}
+
+/// MoE combine and residual add per token: `x[r] += sum_slot wts[r*top_k+slot] * down[inv[..]]`,
+/// accumulated in slot order from zero (the order the per-token path uses).
+fn combine_rows(x: &mut [f32], down_sorted: &[f32], wts: &[f32], inv: &[u32], h: usize, top_k: usize) {
+    x.par_chunks_mut(h).enumerate().for_each(|(r, xr)| {
+        let mut acc = vec![0.0f32; h];
+        for slot in 0..top_k {
+            let gi = r * top_k + slot;
+            let w = wts[gi];
+            let row = inv[gi] as usize;
+            for (a, d) in acc.iter_mut().zip(&down_sorted[row * h..(row + 1) * h]) {
+                *a += w * d;
+            }
+        }
+        for (xi, a) in xr.iter_mut().zip(&acc) {
+            *xi += a;
+        }
+    });
 }
