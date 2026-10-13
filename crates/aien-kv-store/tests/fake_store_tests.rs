@@ -1,3 +1,4 @@
+#![cfg(feature = "std")]
 // Test cases adapted (re-expressed in Rust, none copied) from LMCache
 // tests/v1/distributed/test_nixl_store_dynamic_l2_adapter.py at 4d69cdc4,
 // Apache-2.0, Copyright LMCache contributors:

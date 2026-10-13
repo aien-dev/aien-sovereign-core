@@ -124,4 +124,5 @@ pub fn sample_record() -> (aien_kv_store::RecordHeader, Vec<[u8; 32]>) {
     };
     (rec, digests)
 }
+#[cfg(feature = "std")]
 pub mod rig;
