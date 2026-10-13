@@ -2,7 +2,8 @@
 //!
 //! An [`EffectIntent`] carries no authority. It becomes an `AuthorizedEffect` only when
 //! [`crate::EffectLane::authorize`] (or `authorize_and_execute`) asks an [`EffectAuthority`] and
-//! the answer is `Allow` or `AllowRestricted`. The mint is crate-private, so a caller cannot
+//! the answer is `Allow` (or `AllowRestricted` with an empty list; a non-empty restriction list
+//! is denied because the lane cannot enforce it). The mint is crate-private, so a caller cannot
 //! build the value, and the lane, not the caller, supplies the live tool descriptor the
 //! authority decides from.
 //!
@@ -24,7 +25,8 @@ use crate::{EffectIntent, Error};
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AuthorityDecision {
     Allow,
-    /// Allowed under the listed restrictions (recorded in the policy digest).
+    /// Allowed under the listed restrictions. The lane cannot enforce restrictions, so it denies a
+    /// non-empty list (fail closed) and treats an empty list as `Allow`.
     AllowRestricted(Vec<String>),
     /// A human or approval authority must decide. Nothing runs and nothing is consumed until an approval is spent.
     RequireApproval(String),
