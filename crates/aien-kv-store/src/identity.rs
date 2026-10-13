@@ -8,8 +8,10 @@
 //! (ADR 0003 section 1). Pure functions, no I/O, no heap use while hashing.
 
 use crate::error::KvError;
+use crate::record::{ChunkHeader, FLAG_PARTIAL_TAIL, FORMAT_VERSION};
 use aien_platform::ObjectId;
 use alloc::vec::Vec;
+use sha2::{Digest, Sha256};
 
 /// Fingerprint of everything that must be equal for stored bytes to be reusable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -127,17 +129,157 @@ pub struct NamespaceFields<'a> {
 
 pub const MAX_SHARING_NAMESPACE_BYTES: usize = 64;
 
+const NS_DOMAIN: &[u8] = b"AIEN-PKV-NS-V1\0";
+const CHUNK_DOMAIN: &[u8] = b"AIEN-PKV-CHUNK-V1\0";
+
+fn put_u8_len_str(h: &mut Sha256, name: &'static str, s: &str) -> Result<(), KvError> {
+    let len = u8::try_from(s.len()).map_err(|_| KvError::FieldTooLong(name))?;
+    h.update([len]);
+    h.update(s.as_bytes());
+    Ok(())
+}
+
+fn put_u16_len_str(h: &mut Sha256, name: &'static str, s: &str) -> Result<(), KvError> {
+    let len = u16::try_from(s.len()).map_err(|_| KvError::FieldTooLong(name))?;
+    h.update(len.to_le_bytes());
+    h.update(s.as_bytes());
+    Ok(())
+}
+
 impl NamespaceFields<'_> {
+    fn check_geometry(&self) -> Result<(), KvError> {
+        if self.block_size == 0
+            || self.chunk_tokens == 0
+            || self.num_layers == 0
+            || self.num_kv_heads == 0
+            || self.head_dim == 0
+            || !self.chunk_tokens.is_multiple_of(self.block_size)
+        {
+            return Err(KvError::InvalidGeometry);
+        }
+        Ok(())
+    }
+
     /// `SHA-256("AIEN-PKV-NS-V1\0" || fields)` (ADR 1.2).
     pub fn namespace_id(&self) -> Result<NamespaceId, KvError> {
-        unimplemented!("C1 green")
+        self.check_geometry()?;
+        if self.sharing_namespace.len() > MAX_SHARING_NAMESPACE_BYTES {
+            return Err(KvError::FieldTooLong("sharing_namespace"));
+        }
+        let mut h = Sha256::new();
+        h.update(NS_DOMAIN);
+        h.update(FORMAT_VERSION.to_le_bytes()); // 1
+        h.update(self.model_sha256); // 2
+        put_u8_len_str(&mut h, "model_digest_kind", self.model_digest_kind)?; // 3
+        put_u16_len_str(&mut h, "model_id", self.model_id)?; // 4
+        for v in [
+            self.num_layers,
+            self.num_kv_heads,
+            self.head_dim,
+            self.block_size,
+        ] {
+            h.update(v.to_le_bytes()); // 5
+        }
+        h.update(self.rope_theta.to_bits().to_le_bytes()); // 6
+        match &self.rope_scaling {
+            // 7
+            None => h.update([0u8]),
+            Some(r) => {
+                h.update([1u8]);
+                h.update(r.factor.to_bits().to_le_bytes());
+                h.update(r.low_freq_factor.to_bits().to_le_bytes());
+                h.update(r.high_freq_factor.to_bits().to_le_bytes());
+                h.update(r.original_max_position_embeddings.to_le_bytes());
+            }
+        }
+        h.update([u8::from(self.qk_norm)]); // 8
+        h.update([self.dtype as u8]); // 9
+        let l = &self.layout; // 10
+        for v in [
+            l.head_stride,
+            l.token_stride,
+            l.kv_plane_stride,
+            l.layer_stride,
+            l.block_stride,
+            l.element_bytes,
+        ] {
+            h.update(v.to_le_bytes());
+        }
+        h.update([self.backend_format as u8]); // 11
+        h.update(self.chunk_tokens.to_le_bytes()); // 12
+        put_u16_len_str(&mut h, "sharing_namespace", self.sharing_namespace)?; // 13
+        Ok(NamespaceId(h.finalize().into()))
     }
 
     /// Payload size the writer must produce for `token_count` positions
     /// (ADR 2.2 and 2.3). Checked arithmetic, no allocation.
+    ///
+    /// Host: `ceil(token_count / block_size) * block_stride`. Native: per layer,
+    /// K rows then V rows of `token_count * kv_dim` elements.
     pub fn expected_payload_len(&self, token_count: u32) -> Result<u64, KvError> {
-        let _ = token_count;
-        unimplemented!("C1 green")
+        self.check_geometry()?;
+        if token_count == 0 || token_count > self.chunk_tokens {
+            return Err(KvError::TokenCountOutOfRange);
+        }
+        match self.backend_format {
+            BackendFormat::HostPagedPoolV1 => {
+                let blocks = u64::from(token_count.div_ceil(self.block_size));
+                blocks
+                    .checked_mul(self.layout.block_stride)
+                    .ok_or(KvError::Overflow)
+            }
+            BackendFormat::NativeF32DecodeStateV1 => {
+                let kv_dim = u64::from(self.num_kv_heads)
+                    .checked_mul(u64::from(self.head_dim))
+                    .ok_or(KvError::Overflow)?;
+                u64::from(self.num_layers)
+                    .checked_mul(2)
+                    .and_then(|v| v.checked_mul(u64::from(token_count)))
+                    .and_then(|v| v.checked_mul(kv_dim))
+                    .and_then(|v| v.checked_mul(self.layout.element_bytes))
+                    .ok_or(KvError::Overflow)
+            }
+        }
+    }
+
+    /// Build the header a writer would emit (or a reader would expect) for one
+    /// chunk. Sets `partial_tail` when `token_count < chunk_tokens`; fills
+    /// `payload_len` from `expected_payload_len`.
+    pub fn chunk_header(
+        &self,
+        namespace_id: &NamespaceId,
+        chunk_key: ChunkKey,
+        parent: Option<&ChunkKey>,
+        first_position: u32,
+        token_count: u32,
+        written_unix_ns: u64,
+    ) -> Result<ChunkHeader, KvError> {
+        let payload_len = self.expected_payload_len(token_count)?;
+        if !first_position.is_multiple_of(self.chunk_tokens) {
+            return Err(KvError::PositionMismatch);
+        }
+        Ok(ChunkHeader {
+            namespace_id: *namespace_id,
+            chunk_key,
+            parent_key: parent.map_or([0u8; 32], |p| *p.as_bytes()),
+            model_sha256: self.model_sha256,
+            first_position,
+            token_count,
+            chunk_tokens: self.chunk_tokens,
+            block_size: self.block_size,
+            num_layers: self.num_layers,
+            num_kv_heads: self.num_kv_heads,
+            head_dim: self.head_dim,
+            dtype: self.dtype as u8,
+            backend_format: self.backend_format as u8,
+            flags: if token_count < self.chunk_tokens {
+                FLAG_PARTIAL_TAIL
+            } else {
+                0
+            },
+            payload_len,
+            written_unix_ns,
+        })
     }
 }
 
@@ -150,8 +292,23 @@ pub fn chunk_key(
     first_position: u32,
     tokens: &[u32],
 ) -> Result<ChunkKey, KvError> {
-    let _ = (namespace, parent, first_position, tokens);
-    unimplemented!("C1 green")
+    let token_count = u32::try_from(tokens.len()).map_err(|_| KvError::Overflow)?;
+    if token_count == 0 {
+        return Err(KvError::TokenCountOutOfRange);
+    }
+    first_position
+        .checked_add(token_count)
+        .ok_or(KvError::Overflow)?;
+    let mut h = Sha256::new();
+    h.update(CHUNK_DOMAIN);
+    h.update(namespace.0);
+    h.update(parent.map_or([0u8; 32], |p| *p.as_bytes()));
+    h.update(first_position.to_le_bytes());
+    h.update(token_count.to_le_bytes());
+    for t in tokens {
+        h.update(t.to_le_bytes());
+    }
+    Ok(ChunkKey(ObjectId(h.finalize().into())))
 }
 
 /// Keys for every chunk of `tokens`: full chunks of `chunk_tokens`, then an
@@ -161,31 +318,18 @@ pub fn chunk_chain(
     chunk_tokens: u32,
     tokens: &[u32],
 ) -> Result<Vec<ChunkKey>, KvError> {
-    let _ = (namespace, chunk_tokens, tokens);
-    unimplemented!("C1 green")
-}
-
-impl NamespaceFields<'_> {
-    /// Build the header a writer would emit (or a reader would expect) for one
-    /// chunk. Sets `partial_tail` when `token_count < chunk_tokens`; fills
-    /// `payload_len` from `expected_payload_len`.
-    pub fn chunk_header(
-        &self,
-        namespace_id: &NamespaceId,
-        chunk_key: ChunkKey,
-        parent: Option<&ChunkKey>,
-        first_position: u32,
-        token_count: u32,
-        written_unix_ns: u64,
-    ) -> Result<crate::record::ChunkHeader, KvError> {
-        let _ = (
-            namespace_id,
-            chunk_key,
-            parent,
-            first_position,
-            token_count,
-            written_unix_ns,
-        );
-        unimplemented!("C1 green")
+    if chunk_tokens == 0 {
+        return Err(KvError::InvalidGeometry);
     }
+    let per = chunk_tokens as usize;
+    let mut keys: Vec<ChunkKey> = Vec::with_capacity(tokens.len().div_ceil(per));
+    for (i, chunk) in tokens.chunks(per).enumerate() {
+        let first_position = u32::try_from(i)
+            .ok()
+            .and_then(|i| i.checked_mul(chunk_tokens))
+            .ok_or(KvError::Overflow)?;
+        let key = chunk_key(namespace, keys.last(), first_position, chunk)?;
+        keys.push(key);
+    }
+    Ok(keys)
 }
