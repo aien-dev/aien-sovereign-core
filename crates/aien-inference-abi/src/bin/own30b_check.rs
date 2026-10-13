@@ -115,12 +115,16 @@ fn prefill_line(head: &str, n_tokens: usize, r: &PromptRun) -> String {
     )
 }
 
-/// A chat prompt of at least `min_tokens` tokens: numbered log blocks (each block differs) and a final question.
+/// A chat prompt of at least `min_tokens` tokens: numbered log blocks (each block differs) and a
+/// final question. The tokenizer refuses more than 2048 tokens per call, so the prompt is encoded
+/// piece by piece (each piece ends on a newline) and the ids are joined.
 fn long_prompt_ids(tok: &Tokenizer, min_tokens: usize) -> Vec<u32> {
-    let mut text = String::from("You are a careful engineering assistant. Read the log below and say, in plain words, which block number has the largest decode time.\n\n");
+    let enc = |t: &str| tok.encode_with_special(t, false).expect("encode");
+    let mut ids = enc("<|im_start|>user\nYou are a careful engineering assistant. Read the log below and say, in plain words, which block number has the largest decode time.\n\n");
+    let tail = enc("\nAnswer with the block number only.<|im_end|>\n<|im_start|>assistant\n");
     let mut b = 0usize;
-    loop {
-        text.push_str(&format!(
+    while ids.len() + tail.len() < min_tokens {
+        ids.extend(enc(&format!(
             "[block {b}] loaded 48 layers in {} s, resident {}.{} GB\n[block {b}] prompt {} tokens, prefill {}.{} s\n[block {b}] decode 16 tokens, {} ms/token\n[block {b}] parity layer {} cosine 0.9999{}\n",
             200 + (b * 7) % 23,
             58 + b % 5,
@@ -131,13 +135,11 @@ fn long_prompt_ids(tok: &Tokenizer, min_tokens: usize) -> Vec<u32> {
             50 + (b * 11) % 37,
             (b * 5) % 48,
             b % 10
-        ));
-        let ids = tok.encode_with_special(&chatml(&text), false).expect("encode");
-        if ids.len() >= min_tokens {
-            return ids;
-        }
+        )));
         b += 1;
     }
+    ids.extend(tail);
+    ids
 }
 
 fn top2_margin(logits: &[f32]) -> (u32, f32) {
