@@ -352,6 +352,7 @@ dependencies = [
  "aien-allen-profile",
  "aien-inference-abi",
  "aien-kv-cache",
+ "aien-kv-store",
  "aien-omega-compose",
  "aien-omega-gpu",
  "aien-platform",
