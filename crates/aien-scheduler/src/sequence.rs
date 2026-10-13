@@ -822,6 +822,15 @@ mod tests {
     }
 
     #[test]
+    fn next_slot_index_stops_below_the_holder_slot() {
+        // Slot u32::MAX is reserved for storage holders (ADR 0003 section 5.2).
+        assert_eq!(next_slot_index(0), Ok(0));
+        assert_eq!(next_slot_index(u32::MAX as usize - 1), Ok(u32::MAX - 1));
+        assert!(next_slot_index(u32::MAX as usize).is_err());
+        assert!(next_slot_index(u32::MAX as usize + 1).is_err());
+    }
+
+    #[test]
     fn test_completion_router_registration_and_dispatch() {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let sink = Arc::new(ChannelCompletionSink::new(tx));
