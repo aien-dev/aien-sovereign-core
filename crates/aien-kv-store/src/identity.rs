@@ -212,6 +212,14 @@ impl NamespaceFields<'_> {
         {
             return Err(KvError::InvalidGeometry);
         }
+        // A zero byte factor makes every payload zero bytes long.
+        let zero_bytes = match self.backend_format {
+            BackendFormat::HostPagedPoolV1 => self.layout.block_stride == 0,
+            BackendFormat::NativeF32DecodeStateV1 => self.layout.element_bytes == 0,
+        };
+        if zero_bytes {
+            return Err(KvError::InvalidGeometry);
+        }
         // A host chunk is one segment per pool block and the digest table holds
         // at most 120 (ADR 2.1 item 3): `chunk_blocks` is capped at 120 there.
         if self.backend_format == BackendFormat::HostPagedPoolV1

@@ -1238,3 +1238,159 @@ fn counting_guard_for(
         }
     })
 }
+
+// ---- fixes after the independent review ------------------------------------
+
+/// A small host object (one 64-byte block, partial tail of 4 tokens): costs
+/// `4096 + BLOCK` of quota, less than a full `OBJ`.
+fn inject_small(r: &Rig, n: u32) -> aien_kv_store::ChunkKey {
+    let (k, h) = r.chunk_of(n, 4);
+    r.fake.inject_object(h, pattern(n as u8, BLOCK), BLOCK);
+    k
+}
+
+#[test]
+fn fake_max_objects_is_never_exceeded_after_store() {
+    let r = rig_with(|c| c.max_objects = 2);
+    let a = r.inject(1);
+    let b = r.inject(2);
+    let job = r.store(3).unwrap();
+    let v = r.settle();
+    assert_eq!(only_terminal(&v).job, job);
+    assert_eq!(
+        *terminal_of(only_terminal(&v)),
+        Terminal::Done(JobStage::Durable)
+    );
+    let (c3, _) = r.chunk(3);
+    assert_eq!(r.fake.lookup(&[c3]), vec![Some(PAYLOAD)]);
+    let c = r.fake.capacity();
+    assert_eq!(
+        c.objects, 2,
+        "the object cap holds after the store publishes"
+    );
+    // The oldest object paid for it.
+    assert_eq!(r.fake.lookup(&[a, b]), vec![None, Some(PAYLOAD)]);
+}
+
+#[test]
+fn fake_cancel_during_reclaim_keeps_victims() {
+    // DOCS SILENT on undoing an eviction (ADR 7.4): the narrowest rule is that a
+    // victim whose unlink has not run yet returns to service when its job ends
+    // before publishing.
+    let r = rig_with(|c| {
+        c.quota_bytes = OBJ;
+        c.unlink_us = 10;
+    });
+    let a = r.inject(1);
+    r.script(JobScript::latency(100, 0).with(Fault::StallEviction(1_000)));
+    let job = r.store(2).unwrap();
+    r.fake.advance(100);
+    assert_eq!(r.fake.lookup(&[a]), vec![None], "victim is being evicted");
+    assert_eq!(r.fake.cancel(job), CancelOutcome::Cancelled);
+    let v = r.settle();
+    assert_eq!(*terminal_of(only_terminal(&v)), Terminal::Cancelled);
+    assert_eq!(r.fake.lookup(&[a]), vec![Some(PAYLOAD)], "victim kept");
+    let c = r.fake.capacity();
+    assert_eq!(
+        (c.used_bytes, c.reserved_bytes, c.evicting_bytes, c.objects),
+        (OBJ, 0, 0, 1)
+    );
+    assert_eq!(r.fake.stats().unlinks, 0);
+
+    // The shutdown variant: the cancelled job leaves its victim visible and resident.
+    let r = rig_with(|c| {
+        c.quota_bytes = OBJ;
+        c.unlink_us = 10;
+    });
+    let a = r.inject(1);
+    r.script(JobScript::latency(100, 0).with(Fault::StallEviction(1_000)));
+    let job = r.store(2).unwrap();
+    r.fake.advance(100);
+    let report = r.fake.shutdown(0);
+    assert!(report.unfinished.is_empty());
+    let v = r.settle();
+    assert_eq!(only_terminal(&v).job, job);
+    assert_eq!(*terminal_of(only_terminal(&v)), Terminal::Cancelled);
+    assert_eq!(r.fake.lookup(&[a]), vec![Some(PAYLOAD)]);
+    let c = r.fake.capacity();
+    assert_eq!((c.used_bytes, c.evicting_bytes, c.objects), (OBJ, 0, 1));
+}
+
+#[test]
+fn fake_unlink_fail_stops_remaining_evictions() {
+    // Two small victims are needed for one full object.
+    let small = 4096 + BLOCK as u64;
+    let r = rig_with(|c| {
+        c.quota_bytes = 2 * small;
+        c.unlink_us = 10;
+    });
+    let a = inject_small(&r, 1);
+    let b = inject_small(&r, 2);
+    r.script(JobScript::fault(Fault::UnlinkFail));
+    let job = r.store(3).unwrap();
+    let v = r.settle();
+    let t = only_terminal(&v);
+    assert_eq!(t.job, job);
+    assert!(matches!(
+        terminal_of(t),
+        Terminal::Failed(PlatformError::HardwareFault(_))
+    ));
+    assert_eq!(
+        r.fake.lookup(&[a, b]),
+        vec![Some(BLOCK as u64), Some(BLOCK as u64)],
+        "the failed job evicts nothing"
+    );
+    let c = r.fake.capacity();
+    assert_eq!(
+        (c.used_bytes, c.reserved_bytes, c.evicting_bytes, c.objects),
+        (2 * small, 0, 0, 2)
+    );
+    assert_eq!(r.fake.stats().unlinks, 0);
+}
+
+#[test]
+fn fake_store_after_cancel_of_same_key_is_published() {
+    let r = rig();
+    let (k, _) = r.chunk(1);
+    let j1 = r.store(1).unwrap();
+    assert_eq!(r.fake.cancel(j1), CancelOutcome::Cancelled);
+    let j2 = r.store(1).unwrap();
+    assert_ne!(j1, j2, "a cancelling job is never a dedup target");
+    let v = r.settle();
+    assert_eq!(
+        v.iter().filter(|c| c.terminal.is_some()).count(),
+        2,
+        "one terminal per job"
+    );
+    let t1 = v
+        .iter()
+        .find(|c| c.job == j1 && c.terminal.is_some())
+        .unwrap();
+    let t2 = v
+        .iter()
+        .find(|c| c.job == j2 && c.terminal.is_some())
+        .unwrap();
+    assert_eq!(*terminal_of(t1), Terminal::Cancelled);
+    assert_eq!(*terminal_of(t2), Terminal::Done(JobStage::Durable));
+    assert_eq!(r.fake.lookup(&[k]), vec![Some(PAYLOAD)]);
+    assert_eq!(r.fake.terminal_count(j1), 1);
+    assert_eq!(r.fake.terminal_count(j2), 1);
+    assert_eq!(r.fake.capacity().reserved_bytes, 0);
+}
+
+#[test]
+fn fake_store_refuses_more_than_max_segments_blocks() {
+    let r = rig();
+    let (_, mut h) = r.chunk(1);
+    // 121 blocks of 4 tokens: one more segment than a record can describe.
+    h.payload_len = 121 * BLOCK as u64;
+    h.token_count = 121 * 4;
+    let mem = Mem::new(121, 1);
+    let (src, _handle) = mem.source(121, 4);
+    assert_eq!(
+        r.fake.submit_store(h, src, Incarnation(1)),
+        Err(PlatformError::InvalidLayout)
+    );
+    assert_eq!(r.fake.capacity().reserved_bytes, 0);
+    assert!(r.fake.live_jobs().is_empty());
+}
