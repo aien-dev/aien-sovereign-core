@@ -960,6 +960,7 @@ impl Inner {
             publish,
             bytes: job.payload_len,
             elapsed_us: job.submitted_at.elapsed().as_micros() as u64,
+            holder: None,
         };
         self.push_completion(c);
         if let Some(s) = job.src.take() {
@@ -2085,6 +2086,7 @@ fn execute_store_job(shared: &Shared, job_id: u64) {
                 publish: PublishOutcome::NotApplicable,
                 bytes: job.payload_len,
                 elapsed_us: job.submitted_at.elapsed().as_micros() as u64,
+                holder: None,
             };
             g.push_completion(snap);
         }

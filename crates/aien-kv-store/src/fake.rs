@@ -546,6 +546,7 @@ impl Inner {
             publish: PublishOutcome::NotApplicable,
             bytes: job.payload_len,
             elapsed_us: self.now - job.submitted_at,
+            holder: None,
         };
         self.push(c.clone());
         if job.has(Fault::DuplicateCompletion) {
@@ -602,6 +603,7 @@ impl Inner {
             publish,
             bytes: job.payload_len,
             elapsed_us: self.now - job.submitted_at,
+            holder: None,
         };
         for _ in 0..copies {
             self.push(c.clone());

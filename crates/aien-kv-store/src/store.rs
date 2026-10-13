@@ -19,9 +19,10 @@
 //!   still running; nothing is freed to meet the deadline (section 7.5).
 
 use crate::identity::{ChunkKey, NamespaceId};
-use crate::pin::{PinnedDest, PinnedSource};
+use crate::pin::{HolderGuard, HolderHandle, PinnedDest, PinnedSource};
 use crate::record::ChunkHeader;
 use aien_platform::PlatformError;
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 /// Never reused within a store lifetime.
@@ -118,7 +119,41 @@ pub struct Completion {
     pub publish: PublishOutcome,
     pub bytes: u64,
     pub elapsed_us: u64,
+    /// Load terminals from the [`crate::worker::StorageWorker`]: the landing
+    /// holder, handed back so it outlives the terminal the caller sees (Grok
+    /// C5 P1-2). Every waiter of a coalesced load gets a copy; the holder is
+    /// released when the last copy is dropped (after S3 adopted its blocks,
+    /// or on any failure). Raw stores release at the terminal: `None`.
+    pub holder: Option<LandingHolder>,
 }
+
+/// A shared landing holder (see [`Completion::holder`]).
+#[derive(Clone)]
+pub struct LandingHolder(Arc<HolderGuard>);
+
+impl LandingHolder {
+    pub fn new(guard: HolderGuard) -> Self {
+        Self(Arc::new(guard))
+    }
+
+    pub fn handle(&self) -> HolderHandle {
+        self.0.handle()
+    }
+}
+
+impl core::fmt::Debug for LandingHolder {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("LandingHolder")
+    }
+}
+
+impl PartialEq for LandingHolder {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl Eq for LandingHolder {}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Capacity {

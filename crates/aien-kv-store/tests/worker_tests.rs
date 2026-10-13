@@ -770,6 +770,7 @@ fn worker_stale_completion_is_dropped_by_incarnation() {
         publish: PublishOutcome::Durable,
         bytes: PAYLOAD,
         elapsed_us: 1,
+        holder: None,
     });
     wait_for("forged completion dropped", || {
         w.worker.stats().stale_completions_total >= 1
@@ -2055,6 +2056,7 @@ fn stale_completion_with_reused_seq_id_but_new_epoch_is_rejected() {
         publish: PublishOutcome::Durable,
         bytes: PAYLOAD,
         elapsed_us: 1,
+        holder: None,
     });
     wait_for("forged completion dropped", || {
         w.worker.stats().stale_completions_total >= 1

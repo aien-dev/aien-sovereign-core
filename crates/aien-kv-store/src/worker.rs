@@ -12,6 +12,7 @@ use crate::pin::{HolderGuard, PinnedDest, PinnedSource};
 use crate::record::{ChunkHeader, HEADER_REGION_LEN, MAX_SEGMENTS};
 use crate::store::{
     CancelOutcome, Capacity, Completion, DrainReport, Incarnation, JobId, JobStage, KvStore,
+    LandingHolder,
     PinToken, PublishOutcome, RecoveryProgress, StoreState, Terminal, UnfinishedJob,
 };
 use aien_platform::{ObjectId, PlatformError};
@@ -224,6 +225,23 @@ enum Payload {
 }
 
 impl Payload {
+    /// Lend the blocks to the inner store: the store gets a view on a lease,
+    /// the worker keeps the caller's guard. `on_return` runs when the store
+    /// drops the lease.
+    fn lend(self, on_return: impl FnOnce() + Send + 'static) -> (Payload, Option<HolderGuard>) {
+        match self {
+            Payload::Store { header, src } => {
+                let (src, real) = src.lend(on_return);
+                (Payload::Store { header, src }, Some(real))
+            }
+            Payload::Load { expect, dst } => {
+                let (dst, real) = dst.lend(on_return);
+                (Payload::Load { expect, dst }, Some(real))
+            }
+            Payload::Flush => (Payload::Flush, None),
+        }
+    }
+
     fn into_guard(self) -> Option<HolderGuard> {
         match self {
             Payload::Store { src, .. } => Some(src.into_guard()),
@@ -261,6 +279,15 @@ struct WorkerJob {
     /// I/O ended, so "my terminal arrived" always means "nothing more will
     /// touch the landing holder on my behalf" (ADR 5.5, 7.3).
     waiters: Vec<Waiter>,
+    /// The caller's own guard while the inner store holds a lease on the
+    /// same blocks (Grok C5 P1-2, P1-3). Loads hand it back with their
+    /// terminals; stores release it at the terminal.
+    landing: Option<HolderGuard>,
+    /// The inner store still holds the lease: it may still touch the blocks.
+    lent: bool,
+    /// The worker thread died while the store held the lease: the job ends
+    /// (Failed) only when the store gives the lease back.
+    orphaned: bool,
 }
 
 /// One request riding a job.
@@ -302,6 +329,9 @@ struct State {
     dispatched_count: u32,
     jobs: BTreeMap<JobId, WorkerJob>,
     by_inner: BTreeMap<JobId, JobId>,
+    /// The live store job of each key: at most one, so the inner store can
+    /// never merge two worker jobs into one (Grok C5 P1-1).
+    store_by_key: BTreeMap<[u8; 32], JobId>,
     coalesce: CoalesceTable,
     completions: VecDeque<Completion>,
     dispatch_log: Vec<(JobId, Class)>,
@@ -343,6 +373,7 @@ impl State {
             dispatched_count: 0,
             jobs: BTreeMap::new(),
             by_inner: BTreeMap::new(),
+            store_by_key: BTreeMap::new(),
             coalesce: CoalesceTable::new(limits),
             completions: VecDeque::new(),
             dispatch_log: Vec::new(),
@@ -514,6 +545,9 @@ impl State {
         if job.kind != JobKind::Flush {
             self.coalesce.close(job.id);
         }
+        if job.kind == JobKind::Store && self.store_by_key.get(&job.key.0 .0) == Some(&job.id) {
+            self.store_by_key.remove(&job.key.0 .0);
+        }
         if publish == PublishOutcome::Indeterminate {
             self.stats.indeterminate_total += 1;
         }
@@ -530,11 +564,22 @@ impl State {
                 }
             }
         }
-        if let Some(p) = job.payload.take() {
-            if let Some(g) = p.into_guard() {
+        // The caller's guard: lent to the store (`landing`) or never dispatched
+        // (`payload`). A load hands it back with every waiter's terminal, so
+        // the landing blocks stay alive until the caller has adopted them and
+        // dropped its completion; a store releases its source now.
+        let guard = job
+            .landing
+            .take()
+            .or_else(|| job.payload.take().and_then(Payload::into_guard));
+        let holder = match (job.kind, guard) {
+            (JobKind::Load, Some(g)) => Some(LandingHolder::new(g)),
+            (_, Some(g)) => {
                 self.graveyard.push(g);
+                None
             }
-        }
+            (_, None) => None,
+        };
         let elapsed = elapsed_us.unwrap_or_else(|| job.submitted_at.elapsed().as_micros() as u64);
         // One terminal per waiter, each carrying that waiter's own token. The
         // job's I/O has ended here (inner terminal, or never dispatched).
@@ -553,6 +598,7 @@ impl State {
                 publish,
                 bytes: job.payload_len,
                 elapsed_us: elapsed,
+                holder: holder.clone(),
             });
         }
     }
@@ -854,6 +900,7 @@ fn worker_loop(
                                             publish: c.publish,
                                             bytes: c.bytes,
                                             elapsed_us: c.elapsed_us,
+                                            holder: None,
                                         });
                                     }
                                 }
@@ -1043,6 +1090,9 @@ impl StorageWorker {
                     }),
                     progress_seen: false,
                     waiters: alloc::vec![Waiter::new(inc)],
+                    landing: None,
+                    lent: false,
+                    orphaned: false,
                 },
             );
             self.shared.cv.notify_all();
@@ -1167,6 +1217,9 @@ impl KvStore for StorageWorker {
                     payload: Some(Payload::Store { header, src }),
                     progress_seen: false,
                     waiters: alloc::vec![Waiter::new(inc)],
+                    landing: None,
+                    lent: false,
+                    orphaned: false,
                 },
             );
             self.shared.cv.notify_all();
@@ -1224,6 +1277,9 @@ impl KvStore for StorageWorker {
                     }),
                     progress_seen: false,
                     waiters: alloc::vec![Waiter::new(inc)],
+                    landing: None,
+                    lent: false,
+                    orphaned: false,
                 },
             );
             self.shared.cv.notify_all();
@@ -1262,6 +1318,9 @@ impl KvStore for StorageWorker {
                     payload: Some(Payload::Flush),
                     progress_seen: false,
                     waiters: alloc::vec![Waiter::new(inc)],
+                    landing: None,
+                    lent: false,
+                    orphaned: false,
                 },
             );
             self.shared.cv.notify_all();
