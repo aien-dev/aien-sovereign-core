@@ -7,6 +7,8 @@
 //!                     [--max-context 8192] [--prompts 1,2,3,4] [--force-memory]
 //!                     [--weights bf16|fp8-experts|fp8]
 //!                     [--router auto|host|device] [--lm-head auto|dense|gemv] [--router-mutants 1,2,3,4]
+//!                     [--prefill auto|gemv|gemm] [--prefill-routing host|device] [--prefill-chunk N]
+//!                     [--gemm-mutants 1,2,3] [--long-prompt N] [--tokens-only]
 //!       Omega: loads the resident model, per-layer parity (attention replay + exact MoE oracle)
 //!       with the routing mutant and the chip-side window-skew mutant as negative controls,
 //!       whole-model greedy tokens against the golden file, decode tok/s and load time.
@@ -22,7 +24,7 @@ use aien_inference_abi::qwen3_coder::{compute_logits, forward_token, load_qwen3_
 use aien_inference_abi::qwen3_moe::load_qwen3_fp8_moe_layer;
 use aien_inference_abi::qwen3_moe_omega::{
     current_rss_bytes, load_attention_layer_f32, peak_rss_bytes, replay_attention, replay_moe, AttnPath, DevicePaths, GenerateParams, LmHead,
-    OmegaModelUploader, PathChoice, Qwen3MoeConfig, Qwen3MoeOmegaEngine, WeightFormat,
+    OmegaModelUploader, PathChoice, Qwen3MoeConfig, Qwen3MoeOmegaEngine, StepTiming, WeightFormat,
 };
 use aien_inference_abi::tokenizer::ChatTokenizer as Tokenizer;
 
@@ -55,6 +57,87 @@ fn prompts(tok: &Tokenizer) -> Vec<(String, Vec<u32>)> {
             (name.to_string(), ids)
         })
         .collect()
+}
+
+/// One greedy run from an empty engine at a given prefill chunk: tokens, the first step's logits
+/// (captured by the sampler), and the prefill wall time and timing.
+struct PromptRun {
+    tokens: Vec<u32>,
+    logits0: Vec<f32>,
+    prefill_ms: u64,
+    pt: StepTiming,
+}
+
+fn run_prompt(engine: &mut Qwen3MoeOmegaEngine, ids: &[u32], chunk: usize, new_tokens: usize, eos: &[u32]) -> Result<PromptRun, String> {
+    engine.reset();
+    engine.prefill_chunk = chunk;
+    let mut tokens = Vec::new();
+    let mut logits0: Vec<f32> = Vec::new();
+    let o = engine.generate_with(
+        ids,
+        &GenerateParams::greedy(new_tokens, eos.to_vec()),
+        &mut |logits, step| {
+            if step == 0 {
+                logits0 = logits.to_vec();
+            }
+            aien_inference_abi::tensor::sample_argmax(logits).0
+        },
+        &mut |t| {
+            tokens.push(t);
+            true
+        },
+    )?;
+    Ok(PromptRun { tokens, logits0, prefill_ms: o.prefill_ms, pt: o.prefill_timing })
+}
+
+/// Cosine and largest absolute difference between two logits vectors.
+fn logits_agreement(a: &[f32], b: &[f32]) -> (f64, f32) {
+    let s = aien_inference_abi::qwen3_moe::parity_stats(a, b);
+    let maxd = a.iter().zip(b).map(|(x, y)| (x - y).abs()).fold(0.0f32, f32::max);
+    (s.cosine, maxd)
+}
+
+fn prefill_line(head: &str, n_tokens: usize, r: &PromptRun) -> String {
+    let n = n_tokens as f64;
+    let pt = &r.pt;
+    format!(
+        "{head}, {n_tokens} tokens): {:.2}s = {:.1} ms/token; per token: attention {:.1} ms experts {:.1} ms (routing {:.2} ms, sort+swiglu+combine {:.2} ms) host {:.1} ms chip-reported {:.1} ms launches {:.1}; first tokens {:?}",
+        r.prefill_ms as f64 / 1000.0,
+        r.prefill_ms as f64 / n,
+        pt.attention_ns as f64 / 1e6 / n,
+        pt.experts_ns as f64 / 1e6 / n,
+        pt.route_ns as f64 / 1e6 / n,
+        pt.moe_host_ns as f64 / 1e6 / n,
+        pt.host_ns as f64 / 1e6 / n,
+        pt.chip_ns as f64 / 1e6 / n,
+        pt.launches as f64 / n,
+        r.tokens
+    )
+}
+
+/// A chat prompt of at least `min_tokens` tokens: numbered log blocks (each block differs) and a final question.
+fn long_prompt_ids(tok: &Tokenizer, min_tokens: usize) -> Vec<u32> {
+    let mut text = String::from("You are a careful engineering assistant. Read the log below and say, in plain words, which block number has the largest decode time.\n\n");
+    let mut b = 0usize;
+    loop {
+        text.push_str(&format!(
+            "[block {b}] loaded 48 layers in {} s, resident {}.{} GB\n[block {b}] prompt {} tokens, prefill {}.{} s\n[block {b}] decode 16 tokens, {} ms/token\n[block {b}] parity layer {} cosine 0.9999{}\n",
+            200 + (b * 7) % 23,
+            58 + b % 5,
+            (b * 3) % 10,
+            20 + (b * 37) % 700,
+            1 + (b * 5) % 40,
+            (b * 7) % 10,
+            50 + (b * 11) % 37,
+            (b * 5) % 48,
+            b % 10
+        ));
+        let ids = tok.encode_with_special(&chatml(&text), false).expect("encode");
+        if ids.len() >= min_tokens {
+            return ids;
+        }
+        b += 1;
+    }
 }
 
 fn top2_margin(logits: &[f32]) -> (u32, f32) {
@@ -107,6 +190,15 @@ struct Args {
     router_mutants: Vec<i32>,
     /// Skip parity, controls and the prefill check: tokens against the golden and timing only.
     tokens_only: bool,
+    /// Batched prefill kernel: auto (GEMM when linked), gemv (the grouped GEMV) or gemm (required).
+    prefill: PathChoice,
+    /// Batched prefill routing: false = host (default), true = the device router per token.
+    prefill_device_routing: bool,
+    /// Prefill GEMM mutants run as negative controls through the real prefill path (omega_gpu_fp8gemm_api.h:
+    /// 1 scale dropped, 2 scale pointer never advances, 3 neighbour row's x).
+    gemm_mutants: Vec<i32>,
+    /// Also run a prompt of at least this many tokens: chunk 1 against the batched chunk, tokens and hidden state.
+    long_prompt: usize,
 }
 
 fn parse_choice(v: &str, host_word: &str, flag: &str) -> PathChoice {
@@ -139,6 +231,10 @@ fn parse_args() -> Args {
         paths: DevicePaths::default(),
         router_mutants: vec![1, 2, 3, 4],
         tokens_only: false,
+        prefill: PathChoice::Auto,
+        prefill_device_routing: false,
+        gemm_mutants: vec![1, 2, 3],
+        long_prompt: 0,
     };
     while let Some(arg) = it.next() {
         match arg.as_str() {
@@ -168,6 +264,19 @@ fn parse_args() -> Args {
             "--router" => a.paths.router = parse_choice(&it.next().expect("--router auto|host|device"), "host", "--router"),
             "--lm-head" => a.paths.lm_head = parse_choice(&it.next().expect("--lm-head auto|dense|gemv"), "dense", "--lm-head"),
             "--tokens-only" => a.tokens_only = true,
+            "--prefill" => a.prefill = parse_choice(&it.next().expect("--prefill auto|gemv|gemm"), "gemv", "--prefill"),
+            "--prefill-routing" => {
+                a.prefill_device_routing = match it.next().expect("--prefill-routing host|device").as_str() {
+                    "host" => false,
+                    "device" => true,
+                    other => panic!("--prefill-routing {other}: host or device"),
+                }
+            }
+            "--gemm-mutants" => {
+                let v = it.next().expect("--gemm-mutants a,b (empty for none)");
+                a.gemm_mutants = v.split(',').filter(|s| !s.is_empty()).map(|s| s.parse().expect("mutant")).collect();
+            }
+            "--long-prompt" => a.long_prompt = it.next().expect("--long-prompt N").parse().expect("number"),
             "--router-mutants" => {
                 let v = it.next().expect("--router-mutants a,b (empty for none)");
                 a.router_mutants = v.split(',').filter(|s| !s.is_empty()).map(|s| s.parse().expect("mutant")).collect();
@@ -275,9 +384,24 @@ fn chip(a: &Args) {
         }
     })
     .expect("load on Omega");
+    match a.prefill {
+        PathChoice::Host => engine.prefill_gemm = false,
+        PathChoice::Device => assert!(engine.prefill_gemm, "--prefill gemm: the prefill GEMM is not linked or not offered for every projection"),
+        PathChoice::Auto => {}
+    }
+    engine.prefill_device_routing = a.prefill_device_routing;
+    if !engine.prefill_gemm {
+        engine.prefill_chunk = aien_inference_abi::qwen3_moe_omega::PREFILL_CHUNK;
+    }
     if let Some(chunk) = a.prefill_chunk {
         engine.prefill_chunk = chunk;
     }
+    say(format!(
+        "prefill path {} routing {} (gemm_api={})",
+        if engine.prefill_gemm { "gemm" } else { "gemv" },
+        if engine.prefill_device_routing { "device" } else { "host" },
+        aien_omega_fp8::has_gemm()
+    ));
     say(format!("attention path {} prefill_chunk {} batched_prefill_possible {}", engine.attention_path(), engine.prefill_chunk, engine.batched_prefill_possible()));
     let router_path = if engine.device_routing { "device" } else { "host" };
     let lm_head_path = if matches!(engine.weights().lm_head, LmHead::Gemv(_)) { "gemv" } else { "dense" };
@@ -465,45 +589,73 @@ fn chip(a: &Args) {
     engine.trace_layers.clear();
     }
 
-    // ---- batched prefill against token-at-a-time on the 204-token prompt: same hidden state, same tokens ----
+    // ---- batched prefill against token-at-a-time on the 204-token prompt: same logits, same tokens ----
     let mut prefill_json = serde_json::Value::Null;
     if !a.tokens_only && engine.batched_prefill_possible() && engine.prefill_chunk > 1 {
         let (pname, pids) = &ps[2];
         let chunk = engine.prefill_chunk;
         let mut outs = Vec::new();
         for c in [1usize, chunk] {
-            engine.reset();
-            engine.prefill_chunk = c;
-            let mut got = Vec::new();
-            let o = engine
-                .generate(pids, &GenerateParams::greedy(8, config.eos_token_ids.clone()), &mut |t| {
-                    got.push(t);
-                    true
-                })
-                .expect("generate");
-            let pt = &o.prefill_timing;
-            let n = pids.len() as f64;
-            say(format!(
-                "PREFILL chunk {c} ({pname}, {} tokens): {:.2}s = {:.1} ms/token; per token: attention {:.1} ms experts {:.1} ms host {:.1} ms chip-reported {:.1} ms launches {:.1}; first 8 tokens {:?}",
-                pids.len(),
-                o.prefill_ms as f64 / 1000.0,
-                o.prefill_ms as f64 / n,
-                pt.attention_ns as f64 / 1e6 / n,
-                pt.experts_ns as f64 / 1e6 / n,
-                pt.host_ns as f64 / 1e6 / n,
-                pt.chip_ns as f64 / 1e6 / n,
-                pt.launches as f64 / n,
-                got
-            ));
-            outs.push((c, o.prefill_ms, got, pt.launches as f64 / n));
+            let r = run_prompt(&mut engine, pids, c, 8, &config.eos_token_ids).expect("generate");
+            say(prefill_line(&format!("PREFILL chunk {c} ({pname}"), pids.len(), &r));
+            outs.push(r);
         }
         engine.prefill_chunk = chunk;
-        let same = outs[0].2 == outs[1].2;
-        say(format!("PREFILL chunk {chunk} vs 1: tokens {} ; {:.1} -> {:.1} ms/token", if same { "IDENTICAL" } else { "DIFFER (FAIL)" }, outs[0].1 as f64 / pids.len() as f64, outs[1].1 as f64 / pids.len() as f64));
-        tokens_pass_prefill = same;
+        let same = outs[0].tokens == outs[1].tokens;
+        let (cos, maxd) = logits_agreement(&outs[1].logits0, &outs[0].logits0);
+        let ok = same && cos > 0.99999;
+        say(format!(
+            "PREFILL chunk {chunk} vs 1: tokens {} ; first-step logits cosine {cos:.7} max abs diff {maxd:.2e} ; {:.1} -> {:.1} ms/token -> {}",
+            if same { "IDENTICAL" } else { "DIFFER (FAIL)" },
+            outs[0].prefill_ms as f64 / pids.len() as f64,
+            outs[1].prefill_ms as f64 / pids.len() as f64,
+            if ok { "PASS" } else { "FAIL" }
+        ));
+        tokens_pass_prefill = ok;
         prefill_json = serde_json::json!({"prompt": pname, "prompt_tokens": pids.len(), "chunk": chunk,
-            "prefill_ms_chunk1": outs[0].1, "prefill_ms_chunk": outs[1].1, "launches_per_token_chunk1": outs[0].3, "launches_per_token_chunk": outs[1].3,
-            "tokens_identical": same});
+            "prefill_ms_chunk1": outs[0].prefill_ms, "prefill_ms_chunk": outs[1].prefill_ms,
+            "launches_per_token_chunk1": outs[0].pt.launches as f64 / pids.len() as f64, "launches_per_token_chunk": outs[1].pt.launches as f64 / pids.len() as f64,
+            "tokens_identical": same, "logits_cosine": cos, "logits_max_abs_diff": maxd});
+    }
+
+    // ---- prefill GEMM negative controls through the real batched path ----
+    // Each deliberately wrong GEMM kernel (omega_gpu_fp8gemm_api.h) runs a whole chunked prefill; the
+    // first-step logits must then disagree with the clean chunked prefill of the same prompt.
+    let mut gemm_controls = Vec::new();
+    if !a.tokens_only && engine.prefill_gemm && engine.batched_prefill_possible() && !a.gemm_mutants.is_empty() {
+        let (pname, pids) = &ps[2];
+        let ids = &pids[..pids.len().min(80)];
+        let chunk = engine.prefill_chunk.max(2);
+        let clean = run_prompt(&mut engine, ids, chunk, 1, &config.eos_token_ids).expect("clean gemm prefill");
+        for &m in &a.gemm_mutants {
+            let name = format!("gemm-mutant-{m}");
+            aien_omega_fp8::gemm_test_set_mutant(m);
+            let r = run_prompt(&mut engine, ids, chunk, 1, &config.eos_token_ids);
+            aien_omega_fp8::gemm_test_set_mutant(0);
+            match r {
+                Err(e) => {
+                    say(format!("CONTROL {name}: prefill of {} tokens ({pname}) refused: {e} -> CAUGHT (refused)", ids.len()));
+                    gemm_controls.push(serde_json::json!({"control": name, "refused": e, "caught": true}));
+                }
+                Ok(r) => {
+                    let (cos, maxd) = logits_agreement(&r.logits0, &clean.logits0);
+                    let caught = !cos.is_finite() || cos < 0.999 || r.tokens != clean.tokens;
+                    say(format!(
+                        "CONTROL {name}: prefill of {} tokens ({pname}, chunk {chunk}) first-step logits cosine {cos:.4} max abs diff {maxd:.2e} tokens {:?} vs clean {:?} -> {}",
+                        ids.len(), r.tokens, clean.tokens, if caught { "CAUGHT" } else { "NOT CAUGHT (FAIL)" }
+                    ));
+                    gemm_controls.push(serde_json::json!({"control": name, "logits_cosine": cos, "max_abs_diff": maxd, "caught": caught}));
+                    parity_pass &= caught;
+                }
+            }
+        }
+        // The kernel cache is back to the clean kernel: the same prefill again is bit-identical.
+        let again = run_prompt(&mut engine, ids, chunk, 1, &config.eos_token_ids).expect("clean gemm prefill again");
+        let restored = again.logits0 == clean.logits0;
+        say(format!("CONTROL gemm-mutants-off: the clean prefill after the mutants is bit-identical to before -> {}", if restored { "PASS" } else { "FAIL" }));
+        parity_pass &= restored;
+        controls.extend(gemm_controls.iter().cloned());
+        engine.prefill_chunk = chunk;
     }
 
     // ---- whole-model greedy tokens vs golden, with timing ----
@@ -582,16 +734,45 @@ fn chip(a: &Args) {
                 "launches": dt.launches as f64 / steps},
         }));
     }
+    // ---- a long prompt (new territory past 673 tokens): chunk 1 against the batched chunk ----
+    let mut long_json = serde_json::Value::Null;
+    if a.long_prompt > 0 && engine.batched_prefill_possible() {
+        let ids = long_prompt_ids(&tok, a.long_prompt);
+        let chunk = engine.prefill_chunk.max(2);
+        let mut outs = Vec::new();
+        for c in [chunk, 1usize] {
+            let r = run_prompt(&mut engine, &ids, c, a.new_tokens, &config.eos_token_ids).expect("long prompt generate");
+            say(prefill_line(&format!("LONG chunk {c}"), ids.len(), &r));
+            outs.push(r);
+        }
+        engine.prefill_chunk = chunk;
+        let same = outs[0].tokens == outs[1].tokens;
+        let (cos, maxd) = logits_agreement(&outs[0].logits0, &outs[1].logits0);
+        let (_, margin) = top2_margin(&outs[1].logits0);
+        let ok = same && cos > 0.99999;
+        say(format!(
+            "LONG chunk {chunk} vs 1 ({} tokens): tokens {} ; first-step logits cosine {cos:.7} max abs diff {maxd:.2e} (chunk-1 top-2 margin {margin:.4}) ; {:.1} -> {:.1} ms/token -> {}",
+            ids.len(),
+            if same { "IDENTICAL" } else { "DIFFER (FAIL)" },
+            outs[1].prefill_ms as f64 / ids.len() as f64,
+            outs[0].prefill_ms as f64 / ids.len() as f64,
+            if ok { "PASS" } else { "FAIL" }
+        ));
+        say(format!("  long chip text: {:?}", tok.decode(&outs[0].tokens).unwrap_or_default()));
+        tokens_pass &= ok;
+        long_json = serde_json::json!({"prompt_tokens": ids.len(), "chunk": chunk, "tokens_identical": same, "logits_cosine": cos, "logits_max_abs_diff": maxd,
+            "prefill_ms_chunk": outs[0].prefill_ms, "prefill_ms_chunk1": outs[1].prefill_ms, "top2_margin_chunk1": margin});
+    }
     say(format!("SUMMARY parity={} tokens={} peak_rss={:.2} GB", if parity_pass { "PASS" } else { "FAIL" }, if tokens_pass { "PASS" } else { "FAIL" }, peak_rss_bytes().unwrap_or(0) as f64 / 1e9));
     let doc = serde_json::json!({
         "checkpoint": a.checkpoint.display().to_string(),
         "golden": a.golden.display().to_string(),
         "engine": {"native": aien_omega_gpu::is_native(), "window_api": OmegaModelUploader::uses_window_api(),
             "fp8_api": OmegaModelUploader::uses_fp8_api(), "router_api": OmegaModelUploader::uses_router_api(), "bf16_api": OmegaModelUploader::uses_bf16_api(), "dattn_api": OmegaModelUploader::uses_dattn_api(),
-            "weights": format!("{:?}", a.format), "attention": engine.attention_path(), "router": router_path, "lm_head": lm_head_path, "prefill_chunk": engine.prefill_chunk,
+            "weights": format!("{:?}", a.format), "attention": engine.attention_path(), "router": router_path, "lm_head": lm_head_path, "prefill_chunk": engine.prefill_chunk, "prefill_path": if engine.prefill_gemm { "gemm" } else { "gemv" }, "prefill_routing": if engine.prefill_device_routing { "device" } else { "host" },
             "spin_us": aien_omega_gpu::spin_us(), "cta_budget": aien_omega_gpu::cta_budget(), "kv_resident": engine.kv_resident(),
             "max_context": engine.max_context_tokens()},
-        "prefill": prefill_json,
+        "prefill": prefill_json, "long_prompt": long_json,
         "load": {"seconds": report.seconds, "resident_bytes": report.resident_bytes, "host_bytes": report.host_bytes,
             "peak_rss_bytes": report.peak_rss_bytes, "peak_rss_before_bytes": report.peak_rss_before_bytes, "transient_gb": transient},
         "parity": parity_json, "controls": controls, "prompts": results,

@@ -102,16 +102,17 @@ impl OmegaDoor {
             }
         })?;
         let r = &engine.load_report;
-        let (attn_path, prefill_chunk, router_path, lm_head_path) = engine.with_engine(|e| {
+        let (attn_path, prefill_chunk, router_path, lm_head_path, prefill_path) = engine.with_engine(|e| {
             (
                 e.attention_path(),
                 e.prefill_chunk,
                 if e.device_routing { "device" } else { "host" },
                 if matches!(e.weights().lm_head, omega::LmHead::Gemv(_)) { "gemv" } else { "dense" },
+                if e.prefill_gemm { "gemm" } else { "gemv" },
             )
         })?;
         eprintln!(
-            "aien-serve-http: omega engine ready in {:.1} s: {:?} weights, {:.2} GB resident, {:.2} GB host, peak rss {:.2} GB, window_api={} fp8_api={} dattn_api={} attention={attn_path} router={router_path} lm_head={lm_head_path} prefill_chunk={prefill_chunk} spin_us={:?}",
+            "aien-serve-http: omega engine ready in {:.1} s: {:?} weights, {:.2} GB resident, {:.2} GB host, peak rss {:.2} GB, window_api={} fp8_api={} dattn_api={} attention={attn_path} router={router_path} lm_head={lm_head_path} prefill={prefill_path} prefill_chunk={prefill_chunk} spin_us={:?}",
             r.seconds,
             r.format,
             r.resident_bytes as f64 / 1e9,

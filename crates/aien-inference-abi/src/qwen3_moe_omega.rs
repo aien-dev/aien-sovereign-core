@@ -1847,6 +1847,10 @@ pub const KV_BLOCK_SIZE: usize = 16;
 /// fit one grouped FP8 launch (`aien_omega_fp8::MAX_GROUPS` = 64, top_k = 8).
 pub const PREFILL_CHUNK: usize = 8;
 
+/// Default prompt tokens per batched prefill step on the FP8 grouped GEMM (64 x top_k = 512 expert
+/// rows, the size the kernel was measured at; the GEMM takes up to 128 tokens = 1024 rows).
+pub const PREFILL_CHUNK_GEMM: usize = 64;
+
 /// Omega's paged bf16 KV: one sequence, blocks `0..n` in order, the pool in the engine's resident
 /// allocation when the driver grants it (attention reads in place), a host-mapped pool otherwise.
 pub struct OmegaPagedKv {
@@ -2133,7 +2137,7 @@ impl Qwen3MoeOmegaEngine {
             routing_mutant: false,
             device_routing,
             last_timing: StepTiming::default(),
-            prefill_chunk: PREFILL_CHUNK,
+            prefill_chunk: if prefill_gemm { PREFILL_CHUNK_GEMM } else { PREFILL_CHUNK },
             prefill_gemm,
             prefill_device_routing: false,
             pos: 0,
