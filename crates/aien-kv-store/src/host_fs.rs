@@ -1,21 +1,61 @@
-//! RED STUB (cut C4): the public surface of the host filesystem adapter with
-//! unimplemented bodies. The implementation lands in the green commit.
+// The publication protocol (temp write, file fsync, atomic rename, directory
+// fsync, index insert) and the startup walk are written from ADR 0003 sections
+// 2.4, 3.4, 4.1 and 7.4. LMCache fs_l2_adapter.py (4d69cdc4, Apache-2.0,
+// Copyright LMCache contributors) informed two ideas only: a completed object
+// is published by writing a temporary file and renaming it, and a store of a
+// key that already exists on disk is skipped. No code was copied. See
+// THIRD_PARTY.md and ADR 0003 context item 24.
 
-use crate::identity::{ChunkKey, LayoutStrides, NamespaceFields, NamespaceId};
-use crate::pin::{PinnedDest, PinnedSource};
-use crate::record::ChunkHeader;
-use crate::store::{
-    CancelOutcome, Capacity, Completion, DrainReport, Incarnation, JobId, KvStore, PinToken,
-    RecoveryProgress,
+//! Host filesystem `KvStore` adapter (cut C4, `sovereign-core#484`).
+//!
+//! Layout under `<root>` (ADR 0003 section 2.4):
+//!
+//! ```text
+//! <root>/
+//!   STORE_ID
+//!   objects/00/ .. objects/ff/
+//!   tmp/
+//! ```
+//!
+//! All 256 shard directories and `tmp/` are created at [`HostFsStore::open`]
+//! with a parent-directory `fsync`; the hot path never creates a directory.
+
+use crate::identity::{BackendFormat, ChunkKey, LayoutStrides, NamespaceFields, NamespaceId};
+use crate::index::{Index, IndexEntry, FLAG_FOREIGN, FLAG_INDETERMINATE};
+use crate::pin::{HolderGuard, PinnedDest, PinnedSource};
+use crate::record::{
+    payload_root, ChunkHeader, RecordHeader, FLAG_PARTIAL_TAIL, HEADER_REGION_LEN, MAX_SEGMENTS,
 };
-use aien_platform::PlatformError;
-use std::collections::BTreeMap;
+use crate::store::{
+    CancelOutcome, Capacity, Completion, DrainReport, Incarnation, JobId, JobStage, KvStore,
+    PinToken, PublishOutcome, RecoveryProgress, StoreState, Terminal, UnfinishedJob,
+};
+use crate::validate::validate_record;
+use aien_platform::{ObjectId, PlatformError};
+use sha2::{Digest, Sha256};
+use std::collections::{BTreeMap, VecDeque};
+use std::fs::{File, OpenOptions};
+use std::io::{Read, Write};
+use std::os::unix::fs::{FileExt, MetadataExt};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard};
+use std::thread::JoinHandle;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+/// Raw `ENOSPC` for [`FaultAction::Fail`].
 pub const ENOSPC: i32 = 28;
+/// Raw `EIO` for [`FaultAction::Fail`].
 pub const EIO: i32 = 5;
+
+const DEFAULT_QUOTA_BYTES: u64 = 8 << 30;
+const DEFAULT_MAX_OBJECTS: u64 = 65_536;
+const DEFAULT_MAX_RESTORE_OPS: u32 = 48;
+const DEFAULT_MAX_PARK_OPS: u32 = 16;
+const DEFAULT_MAX_INFLIGHT_BYTES: u64 = 256 << 20;
+const DEFAULT_MAX_WAITERS_PER_JOB: u32 = 16;
+const DEFAULT_MAX_WAITERS_TOTAL: u32 = 1024;
+const DEFAULT_RECOVERY_SLICE_MS: u64 = 50;
 
 /// Who runs the worker steps.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -68,14 +108,14 @@ impl ScriptedFaults {
     }
 
     pub fn arm(&self, boundary: Boundary, action: FaultAction) {
-        let mut s = self.inner.lock().unwrap();
+        let mut s = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         s.armed.entry(boundary).or_default().push(action);
     }
 
     pub fn fired(&self, boundary: Boundary) -> u64 {
         self.inner
             .lock()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .fired
             .get(&boundary)
             .copied()
@@ -84,13 +124,17 @@ impl ScriptedFaults {
 
     /// Every boundary the adapter consulted, in order.
     pub fn seen(&self) -> Vec<Boundary> {
-        self.inner.lock().unwrap().seen.clone()
+        self.inner
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .seen
+            .clone()
     }
 
     pub fn armed(&self, boundary: Boundary) -> usize {
         self.inner
             .lock()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .armed
             .get(&boundary)
             .map_or(0, Vec::len)
@@ -99,7 +143,7 @@ impl ScriptedFaults {
 
 impl FaultHook for ScriptedFaults {
     fn at(&self, boundary: Boundary, _key: &ChunkKey) -> Option<FaultAction> {
-        let mut s = self.inner.lock().unwrap();
+        let mut s = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         s.seen.push(boundary);
         let list = s.armed.get_mut(&boundary)?;
         if list.is_empty() {
@@ -137,16 +181,138 @@ pub struct HostFsConfig {
     pub faults: Option<Arc<dyn FaultHook>>,
 }
 
+impl std::fmt::Debug for HostFsConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HostFsConfig")
+            .field("root", &self.root)
+            .field("namespace", &self.namespace)
+            .field("quota_bytes", &self.quota_bytes)
+            .field("max_objects", &self.max_objects)
+            .field("worker", &self.worker)
+            .finish()
+    }
+}
+
 impl HostFsConfig {
-    #[allow(unused_variables)]
     pub fn from_fields(root: PathBuf, f: &NamespaceFields<'_>) -> Result<Self, PlatformError> {
-        unimplemented!("C4 red stub")
+        if f.backend_format != BackendFormat::HostPagedPoolV1 {
+            return Err(PlatformError::InvalidLayout);
+        }
+        let namespace = f.namespace_id().map_err(|_| PlatformError::InvalidLayout)?;
+        let cfg = Self {
+            root,
+            namespace,
+            model_sha256: f.model_sha256,
+            layout: f.layout,
+            num_layers: f.num_layers,
+            num_kv_heads: f.num_kv_heads,
+            head_dim: f.head_dim,
+            block_size: f.block_size,
+            chunk_tokens: f.chunk_tokens,
+            dtype: f.dtype as u8,
+            backend_format: f.backend_format as u8,
+            quota_bytes: DEFAULT_QUOTA_BYTES,
+            max_objects: DEFAULT_MAX_OBJECTS,
+            max_restore_ops: DEFAULT_MAX_RESTORE_OPS,
+            max_park_ops: DEFAULT_MAX_PARK_OPS,
+            max_inflight_bytes: DEFAULT_MAX_INFLIGHT_BYTES,
+            max_waiters_per_job: DEFAULT_MAX_WAITERS_PER_JOB,
+            max_waiters_total: DEFAULT_MAX_WAITERS_TOTAL,
+            recovery_slice_ms: DEFAULT_RECOVERY_SLICE_MS,
+            purge_after_recovery: true,
+            worker: WorkerMode::Thread,
+            faults: None,
+        };
+        validate_config(&cfg)?;
+        Ok(cfg)
     }
 
-    #[allow(unused_variables)]
     pub fn apply_env(&mut self, get: impl Fn(&str) -> Option<String>) -> Result<(), PlatformError> {
-        unimplemented!("C4 red stub")
+        fn parse_pos(val: Option<String>) -> Result<Option<u64>, PlatformError> {
+            let Some(s) = val else {
+                return Ok(None);
+            };
+            let v: u64 = s.parse().map_err(|_| PlatformError::InvalidLayout)?;
+            if v == 0 {
+                return Err(PlatformError::InvalidLayout);
+            }
+            Ok(Some(v))
+        }
+
+        let q = parse_pos(get("AIEN_KV_STORE_QUOTA_BYTES"))?;
+        let m = parse_pos(get("AIEN_KV_STORE_MAX_OBJECTS"))?;
+        let sl = parse_pos(get("AIEN_KV_STORE_RECOVERY_SLICE_MS"))?;
+
+        if let Some(v) = q {
+            self.quota_bytes = v;
+        }
+        if let Some(v) = m {
+            self.max_objects = v;
+        }
+        if let Some(v) = sl {
+            self.recovery_slice_ms = v;
+        }
+        Ok(())
     }
+}
+
+fn validate_config(c: &HostFsConfig) -> Result<(), PlatformError> {
+    if c.quota_bytes == 0
+        || c.max_objects == 0
+        || c.max_restore_ops == 0
+        || c.max_park_ops == 0
+        || c.max_inflight_bytes == 0
+        || c.max_waiters_per_job == 0
+        || c.max_waiters_total == 0
+        || c.block_size == 0
+        || c.chunk_tokens == 0
+        || !c.chunk_tokens.is_multiple_of(c.block_size)
+        || (c.chunk_tokens / c.block_size) as usize > MAX_SEGMENTS
+        || c.num_layers == 0
+        || c.num_kv_heads == 0
+        || c.head_dim == 0
+        || c.layout.block_stride == 0
+        || c.layout.element_bytes == 0
+    {
+        return Err(PlatformError::InvalidLayout);
+    }
+
+    let head_bytes = (c.head_dim as u64)
+        .checked_mul(c.layout.element_bytes)
+        .ok_or(PlatformError::InvalidLayout)?;
+    if head_bytes > c.layout.head_stride {
+        return Err(PlatformError::InvalidLayout);
+    }
+    let row_span = (c.num_kv_heads as u64 - 1)
+        .checked_mul(c.layout.head_stride)
+        .and_then(|x| x.checked_add(head_bytes))
+        .ok_or(PlatformError::InvalidLayout)?;
+    if row_span > c.layout.token_stride {
+        return Err(PlatformError::InvalidLayout);
+    }
+    let plane_span = (c.block_size as u64 - 1)
+        .checked_mul(c.layout.token_stride)
+        .and_then(|x| x.checked_add(row_span))
+        .ok_or(PlatformError::InvalidLayout)?;
+    if plane_span > c.layout.kv_plane_stride {
+        return Err(PlatformError::InvalidLayout);
+    }
+    let two_planes = c
+        .layout
+        .kv_plane_stride
+        .checked_add(plane_span)
+        .ok_or(PlatformError::InvalidLayout)?;
+    if two_planes > c.layout.layer_stride {
+        return Err(PlatformError::InvalidLayout);
+    }
+    let total_span = (c.num_layers as u64 - 1)
+        .checked_mul(c.layout.layer_stride)
+        .and_then(|x| x.checked_add(two_planes))
+        .ok_or(PlatformError::InvalidLayout)?;
+    if total_span > c.layout.block_stride {
+        return Err(PlatformError::InvalidLayout);
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -188,66 +354,2448 @@ pub struct HostFsStats {
     pub shutdown_unfinished_bytes: u64,
 }
 
-pub struct HostFsStore {
-    _private: (),
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Kind {
+    Store,
+    Load,
+    Flush,
+    Noop,
 }
 
-#[allow(unused_variables)]
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Phase {
+    Queued,
+    Reclaiming,
+    Writing,
+    Syncing,
+    Publishing,
+    Reading,
+    Flushing,
+}
+
+struct Job {
+    id: u64,
+    kind: Kind,
+    inc: Incarnation,
+    key: ChunkKey,
+    park: bool,
+    bytes: u64,
+    payload_len: u64,
+    reserved: u64,
+    submitted_at: Instant,
+    stage: JobStage,
+    phase: Phase,
+    in_step: bool,
+    cancelling: bool,
+    crashed: bool,
+    header: Option<ChunkHeader>,
+    src: Option<PinnedSource>,
+    dst: Option<PinnedDest>,
+    attached: u32,
+    busy_held: bool,
+}
+
+#[derive(Clone)]
+struct Unlink {
+    key: [u8; 32],
+    job: Option<u64>,
+    evict: bool,
+}
+
+struct RecoveryCursor {
+    tmp_entries: Option<Vec<PathBuf>>,
+    tmp_idx: usize,
+    shard: u16,
+    shard_entries: Option<Vec<PathBuf>>,
+    shard_idx: usize,
+}
+
+impl RecoveryCursor {
+    fn new() -> Self {
+        Self {
+            tmp_entries: None,
+            tmp_idx: 0,
+            shard: 0,
+            shard_entries: None,
+            shard_idx: 0,
+        }
+    }
+}
+
+struct Inner {
+    cfg: HostFsConfig,
+    store_id: Option<[u8; 16]>,
+    state: StoreState,
+    closed: bool,
+    stop_worker: bool,
+    next_job: u64,
+    next_pin: u64,
+    last_clock_ns: u64,
+    index: Index,
+    unindexed_bytes: u64,
+    unindexed_objects: u64,
+    unindexed_paths: VecDeque<(PathBuf, u64)>,
+    reserved: u64,
+    jobs: BTreeMap<u64, Job>,
+    inflight_store: BTreeMap<[u8; 32], u64>,
+    unlinks: VecDeque<Unlink>,
+    pins: BTreeMap<u64, Vec<[u8; 32]>>,
+    restore_ops: u32,
+    park_ops: u32,
+    restore_bytes: u64,
+    park_bytes: u64,
+    restore_streak: u32,
+    attached_total: u32,
+    queue: VecDeque<Completion>,
+    stats: HostFsStats,
+    recovery: RecoveryProgress,
+    cursor: RecoveryCursor,
+    purge_pending: bool,
+    purge_evict_quota: bool,
+    graveyard: Vec<HolderGuard>,
+}
+
+struct Shared {
+    root: PathBuf,
+    inner: Mutex<Inner>,
+    cv: Condvar,
+    tail_scratch: Mutex<Vec<u8>>,
+}
+
+/// Host filesystem `KvStore` implementation.
+pub struct HostFsStore {
+    shared: Arc<Shared>,
+    worker: Mutex<Option<JoinHandle<()>>>,
+}
+
+static STORE_ID_COUNTER: AtomicU64 = AtomicU64::new(1);
+
+fn generate_store_id() -> [u8; 16] {
+    let mut buf = [0u8; 16];
+    if let Ok(mut f) = File::open("/dev/urandom") {
+        if f.read_exact(&mut buf).is_ok() && buf != [0u8; 16] {
+            return buf;
+        }
+    }
+    let mut h = Sha256::new();
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    h.update(now.to_le_bytes());
+    h.update(std::process::id().to_le_bytes());
+    h.update(
+        STORE_ID_COUNTER
+            .fetch_add(1, Ordering::Relaxed)
+            .to_le_bytes(),
+    );
+    let digest = h.finalize();
+    buf.copy_from_slice(&digest[..16]);
+    buf
+}
+
+fn fsync_dir(path: &Path) -> std::io::Result<()> {
+    let f = File::open(path)?;
+    f.sync_all()
+}
+
+fn phys_bytes_of(meta: &std::fs::Metadata) -> u64 {
+    meta.len().max(meta.blocks().saturating_mul(512))
+}
+
+fn meta_mtime_ns(meta: &std::fs::Metadata) -> u64 {
+    meta.modified()
+        .ok()
+        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+        .map_or(0, |d| d.as_nanos().min(u64::MAX as u128) as u64)
+}
+
+fn system_now_ns() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos().min(u64::MAX as u128) as u64)
+}
+
+fn hex_encode(bytes: &[u8; 32]) -> String {
+    let mut s = String::with_capacity(64);
+    for b in bytes {
+        use std::fmt::Write;
+        let _ = write!(&mut s, "{b:02x}");
+    }
+    s
+}
+
+fn object_path_for(root: &Path, key: &[u8; 32]) -> PathBuf {
+    let hex = hex_encode(key);
+    root.join("objects")
+        .join(&hex[..2])
+        .join(format!("{hex}.kvc"))
+}
+
+fn tmp_path_for(root: &Path, key: &[u8; 32], job_id: u64, inc: u64) -> PathBuf {
+    let hex = hex_encode(key);
+    root.join("tmp").join(format!("{hex}.{job_id}.{inc}.part"))
+}
+
+fn parse_kvc_filename(name: &str, expected_shard: u8) -> Option<[u8; 32]> {
+    let hex = name.strip_suffix(".kvc")?;
+    if hex.len() != 64 {
+        return None;
+    }
+    if !hex
+        .bytes()
+        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    {
+        return None;
+    }
+    let mut out = [0u8; 32];
+    for (i, chunk) in hex.as_bytes().as_chunks::<2>().0.iter().enumerate() {
+        let hi = match chunk[0] {
+            b'0'..=b'9' => chunk[0] - b'0',
+            b'a'..=b'f' => chunk[0] - b'a' + 10,
+            _ => return None,
+        };
+        let lo = match chunk[1] {
+            b'0'..=b'9' => chunk[1] - b'0',
+            b'a'..=b'f' => chunk[1] - b'a' + 10,
+            _ => return None,
+        };
+        out[i] = (hi << 4) | lo;
+    }
+    if out[0] != expected_shard {
+        return None;
+    }
+    Some(out)
+}
+
+fn errno_to_error(errno: i32, context: &str) -> PlatformError {
+    if errno == ENOSPC {
+        PlatformError::OutOfMemory
+    } else {
+        PlatformError::HardwareFault(format!("{context}: errno {errno}"))
+    }
+}
+
+fn io_to_error(err: &std::io::Error, context: &str) -> PlatformError {
+    if err.raw_os_error() == Some(ENOSPC) {
+        PlatformError::OutOfMemory
+    } else {
+        PlatformError::HardwareFault(format!("{context}: {err}"))
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn zero_tail_block(
+    scratch: &mut [u8],
+    src_block: &[u8],
+    layout: &LayoutStrides,
+    num_layers: u32,
+    num_kv_heads: u32,
+    head_dim: u32,
+    block_size: u32,
+    valid_tokens: u32,
+) {
+    scratch.copy_from_slice(src_block);
+    let head_bytes = (head_dim as usize) * (layout.element_bytes as usize);
+    let row_bytes = (num_kv_heads as usize - 1) * (layout.head_stride as usize) + head_bytes;
+    for layer in 0..(num_layers as usize) {
+        for plane in 0..2usize {
+            for tok in (valid_tokens as usize)..(block_size as usize) {
+                let off = layer * (layout.layer_stride as usize)
+                    + plane * (layout.kv_plane_stride as usize)
+                    + tok * (layout.token_stride as usize);
+                scratch[off..off + row_bytes].fill(0);
+            }
+        }
+    }
+}
+
+enum RecoveredHeader {
+    Ours { payload_len: u32 },
+    Foreign { payload_len: u32 },
+    Corrupt,
+}
+
+fn classify_recovered_header(
+    buf: &[u8],
+    file_size: u64,
+    file_key: &[u8; 32],
+    cfg: &HostFsConfig,
+) -> RecoveredHeader {
+    let Ok(rec) = RecordHeader::decode(buf) else {
+        return RecoveredHeader::Corrupt;
+    };
+    let h = &rec.chunk;
+    if &h.chunk_key.0 .0 != file_key {
+        return RecoveredHeader::Corrupt;
+    }
+    if h.namespace_id == cfg.namespace {
+        if h.model_sha256 != cfg.model_sha256
+            || h.chunk_tokens != cfg.chunk_tokens
+            || h.block_size != cfg.block_size
+            || h.num_layers != cfg.num_layers
+            || h.num_kv_heads != cfg.num_kv_heads
+            || h.head_dim != cfg.head_dim
+            || h.dtype != cfg.dtype
+            || h.backend_format != cfg.backend_format
+            || !h.first_position.is_multiple_of(cfg.chunk_tokens)
+            || h.token_count == 0
+            || h.token_count > cfg.chunk_tokens
+        {
+            return RecoveredHeader::Corrupt;
+        }
+        let want_flags = if h.token_count < cfg.chunk_tokens {
+            FLAG_PARTIAL_TAIL
+        } else {
+            0
+        };
+        if h.flags != want_flags {
+            return RecoveredHeader::Corrupt;
+        }
+        let expected_blocks = h.token_count.div_ceil(cfg.block_size) as u64;
+        if h.payload_len != expected_blocks.saturating_mul(cfg.layout.block_stride) {
+            return RecoveredHeader::Corrupt;
+        }
+        if validate_record(buf, file_size, h, cfg.layout.block_stride).is_err() {
+            return RecoveredHeader::Corrupt;
+        }
+        let Ok(payload_len) = u32::try_from(h.payload_len) else {
+            return RecoveredHeader::Corrupt;
+        };
+        RecoveredHeader::Ours { payload_len }
+    } else {
+        if h.payload_len == 0
+            || (HEADER_REGION_LEN as u64).checked_add(h.payload_len) != Some(file_size)
+        {
+            return RecoveredHeader::Corrupt;
+        }
+        let payload_len = h.payload_len.min(u32::MAX as u64) as u32;
+        RecoveredHeader::Foreign { payload_len }
+    }
+}
+
+impl Inner {
+    fn used_bytes(&self) -> u64 {
+        self.index.total_bytes() + self.unindexed_bytes
+    }
+
+    fn evicting_bytes(&self) -> u64 {
+        self.index.evicting().0
+    }
+
+    fn store_reservations(&self) -> u64 {
+        self.jobs
+            .values()
+            .filter(|j| j.kind == Kind::Store && j.reserved > 0 && !j.crashed)
+            .count() as u64
+    }
+
+    fn bytes_after(&self) -> u64 {
+        self.used_bytes()
+            .saturating_sub(self.evicting_bytes())
+            .saturating_add(self.reserved)
+    }
+
+    fn count_after(&self) -> u64 {
+        let (_, evicting_count) = self.index.evicting();
+        let live = (self.index.len() as u64).saturating_sub(evicting_count);
+        live + self.unindexed_objects + self.store_reservations()
+    }
+
+    fn completion_capacity(&self) -> usize {
+        3 * (self.cfg.max_restore_ops as usize + self.cfg.max_park_ops as usize)
+    }
+
+    fn park_byte_limit(&self) -> u64 {
+        self.cfg.max_inflight_bytes / 4
+    }
+
+    fn restore_byte_limit(&self) -> u64 {
+        self.cfg.max_inflight_bytes - self.park_byte_limit()
+    }
+
+    fn capacity(&self) -> Capacity {
+        Capacity {
+            state: self.state,
+            quota_bytes: self.cfg.quota_bytes,
+            used_bytes: self.used_bytes(),
+            reserved_bytes: self.reserved,
+            evicting_bytes: self.evicting_bytes(),
+            unindexed_bytes: self.unindexed_bytes,
+            unindexed_objects: self.unindexed_objects,
+            objects: self.index.len() as u64,
+            max_objects: self.cfg.max_objects,
+            restore_ops: self.restore_ops,
+            max_restore_ops: self.cfg.max_restore_ops,
+            park_ops: self.park_ops,
+            max_park_ops: self.cfg.max_park_ops,
+            inflight_bytes: self.restore_bytes + self.park_bytes,
+            max_inflight_bytes: self.cfg.max_inflight_bytes,
+            max_waiters_per_job: self.cfg.max_waiters_per_job,
+        }
+    }
+
+    fn set_degraded(&mut self) {
+        if self.state == StoreState::Open {
+            self.state = StoreState::Degraded;
+        }
+    }
+
+    fn next_timestamp_ns(&mut self, floor_ns: u64) -> u64 {
+        let now = system_now_ns()
+            .max(floor_ns)
+            .max(self.last_clock_ns.saturating_add(1));
+        self.last_clock_ns = now;
+        now
+    }
+
+    fn queue_full(&mut self) -> PlatformError {
+        self.stats.queue_full_total += 1;
+        PlatformError::QueueFull
+    }
+
+    fn gate(&mut self, needs_open: bool) -> Result<(), PlatformError> {
+        if self.state == StoreState::Recovering {
+            return Err(self.queue_full());
+        }
+        if self.closed
+            || self.state == StoreState::Failed
+            || (needs_open && self.state == StoreState::Degraded)
+        {
+            return Err(PlatformError::DeviceUnavailable);
+        }
+        Ok(())
+    }
+
+    fn active_job_count(&self) -> usize {
+        self.jobs.values().filter(|j| !j.crashed).count()
+    }
+
+    fn credit_check(&mut self, park: bool, bytes: u64) -> Result<(), PlatformError> {
+        let (ops, max_ops, used_bytes, limit) = if park {
+            (
+                self.park_ops,
+                self.cfg.max_park_ops,
+                self.park_bytes,
+                self.park_byte_limit(),
+            )
+        } else {
+            (
+                self.restore_ops,
+                self.cfg.max_restore_ops,
+                self.restore_bytes,
+                self.restore_byte_limit(),
+            )
+        };
+        let slots = self.queue.len() + 3 * self.active_job_count() + 3;
+        if ops >= max_ops || used_bytes + bytes > limit || slots > self.completion_capacity() {
+            return Err(self.queue_full());
+        }
+        Ok(())
+    }
+
+    fn push_completion(&mut self, c: Completion) {
+        self.queue.push_back(c);
+        self.stats.peak_completion_queue = self
+            .stats
+            .peak_completion_queue
+            .max(self.queue.len() as u64);
+    }
+
+    fn abort_evictions(&mut self, job_id: u64) {
+        let mut kept = VecDeque::with_capacity(self.unlinks.len());
+        while let Some(u) = self.unlinks.pop_front() {
+            if u.job == Some(job_id) && u.evict {
+                self.index.clear_evicting(&u.key);
+            } else {
+                kept.push_back(u);
+            }
+        }
+        self.unlinks = kept;
+    }
+
+    fn finish(
+        &mut self,
+        mut job: Job,
+        terminal: Terminal,
+        stage: JobStage,
+        publish: PublishOutcome,
+    ) {
+        if job.park {
+            self.park_ops = self.park_ops.saturating_sub(1);
+            self.park_bytes = self.park_bytes.saturating_sub(job.bytes);
+        } else {
+            self.restore_ops = self.restore_ops.saturating_sub(1);
+            self.restore_bytes = self.restore_bytes.saturating_sub(job.bytes);
+        }
+        self.reserved = self.reserved.saturating_sub(job.reserved);
+        job.reserved = 0;
+        if job.kind == Kind::Store {
+            self.abort_evictions(job.id);
+            if self.inflight_store.get(&job.key.0 .0) == Some(&job.id) {
+                self.inflight_store.remove(&job.key.0 .0);
+            }
+        }
+        if job.busy_held {
+            self.index.busy_dec(&job.key.0 .0);
+            job.busy_held = false;
+        }
+        self.attached_total = self.attached_total.saturating_sub(job.attached);
+        match &terminal {
+            Terminal::Done(_) => self.stats.terminal_done += 1,
+            Terminal::Failed(_) => self.stats.terminal_failed += 1,
+            Terminal::Cancelled => {
+                self.stats.terminal_cancelled += 1;
+                self.stats.cancelled_total += 1;
+            }
+        }
+        let c = Completion {
+            job: JobId(job.id),
+            incarnation: job.inc,
+            key: job.key,
+            stage,
+            terminal: Some(terminal),
+            publish,
+            bytes: job.payload_len,
+            elapsed_us: job.submitted_at.elapsed().as_micros() as u64,
+        };
+        self.push_completion(c);
+        if let Some(s) = job.src.take() {
+            self.graveyard.push(s.into_guard());
+        }
+        if let Some(d) = job.dst.take() {
+            self.graveyard.push(d.into_guard());
+        }
+    }
+
+    fn fail_job(&mut self, job: Job, e: PlatformError) {
+        let stage = job.stage;
+        self.finish(
+            job,
+            Terminal::Failed(e),
+            stage,
+            PublishOutcome::NotApplicable,
+        );
+    }
+
+    fn mark_crashed(&mut self, mut job: Job) {
+        if job.park {
+            self.park_ops = self.park_ops.saturating_sub(1);
+            self.park_bytes = self.park_bytes.saturating_sub(job.bytes);
+        } else {
+            self.restore_ops = self.restore_ops.saturating_sub(1);
+            self.restore_bytes = self.restore_bytes.saturating_sub(job.bytes);
+        }
+        self.reserved = self.reserved.saturating_sub(job.reserved);
+        job.reserved = 0;
+        if job.kind == Kind::Store {
+            self.abort_evictions(job.id);
+            if self.inflight_store.get(&job.key.0 .0) == Some(&job.id) {
+                self.inflight_store.remove(&job.key.0 .0);
+            }
+        }
+        if job.busy_held {
+            self.index.busy_dec(&job.key.0 .0);
+            job.busy_held = false;
+        }
+        self.attached_total = self.attached_total.saturating_sub(job.attached);
+        if let Some(s) = job.src.take() {
+            self.graveyard.push(s.into_guard());
+        }
+        if let Some(d) = job.dst.take() {
+            self.graveyard.push(d.into_guard());
+        }
+        job.crashed = true;
+        job.in_step = false;
+    }
+
+    fn validate_chunk_header_against_config(&self, h: &ChunkHeader) -> Result<(), PlatformError> {
+        if h.namespace_id != self.cfg.namespace
+            || h.model_sha256 != self.cfg.model_sha256
+            || h.chunk_tokens != self.cfg.chunk_tokens
+            || h.block_size != self.cfg.block_size
+            || h.num_layers != self.cfg.num_layers
+            || h.num_kv_heads != self.cfg.num_kv_heads
+            || h.head_dim != self.cfg.head_dim
+            || h.dtype != self.cfg.dtype
+            || h.backend_format != self.cfg.backend_format
+            || !h.first_position.is_multiple_of(self.cfg.chunk_tokens)
+            || h.token_count == 0
+            || h.token_count > self.cfg.chunk_tokens
+            || h.payload_len == 0
+        {
+            return Err(PlatformError::InvalidLayout);
+        }
+        let want_flags = if h.token_count < self.cfg.chunk_tokens {
+            FLAG_PARTIAL_TAIL
+        } else {
+            0
+        };
+        if h.flags != want_flags {
+            return Err(PlatformError::InvalidLayout);
+        }
+        let expected_blocks = h.token_count.div_ceil(self.cfg.block_size) as u64;
+        if expected_blocks as usize > MAX_SEGMENTS
+            || h.payload_len != expected_blocks.saturating_mul(self.cfg.layout.block_stride)
+        {
+            return Err(PlatformError::InvalidLayout);
+        }
+        Ok(())
+    }
+
+    fn submit_store(
+        &mut self,
+        header: ChunkHeader,
+        slot: &mut Option<PinnedSource>,
+        inc: Incarnation,
+    ) -> Result<JobId, PlatformError> {
+        self.gate(true)?;
+        let src = slot.as_ref().ok_or(PlatformError::InvalidLayout)?;
+        self.validate_chunk_header_against_config(&header)?;
+        if src.total_bytes() != Some(header.payload_len)
+            || src.block_count() == 0
+            || src.block_count() > MAX_SEGMENTS
+            || src.block_bytes() as u64 != self.cfg.layout.block_stride
+        {
+            return Err(PlatformError::InvalidLayout);
+        }
+        let full = (src.block_count() as u64 - 1) * header.block_size as u64;
+        let tail = (header.token_count as u64).checked_sub(full);
+        match tail {
+            Some(t)
+                if t >= 1
+                    && t <= header.block_size as u64
+                    && t == src.tail_valid_tokens() as u64 => {}
+            _ => return Err(PlatformError::InvalidLayout),
+        }
+
+        let key = header.chunk_key;
+        let k = key.0 .0;
+        if let Some(&jid) = self.inflight_store.get(&k).filter(|jid| {
+            self.jobs
+                .get(jid)
+                .is_some_and(|j| !j.cancelling && !j.crashed)
+        }) {
+            self.stats.dedup_total += 1;
+            return Ok(JobId(jid));
+        }
+        if let Some(e) = self
+            .index
+            .get(&k)
+            .filter(|e| !e.is_evicting() && !e.is_foreign())
+        {
+            let _ = e;
+            self.credit_check(true, 0)?;
+            let id = self.next_job;
+            self.next_job += 1;
+            self.park_ops += 1;
+            let job = Job {
+                id,
+                kind: Kind::Noop,
+                inc,
+                key,
+                park: true,
+                bytes: 0,
+                payload_len: 0,
+                reserved: 0,
+                submitted_at: Instant::now(),
+                stage: JobStage::Submitted,
+                phase: Phase::Queued,
+                in_step: false,
+                cancelling: false,
+                crashed: false,
+                header: None,
+                src: None,
+                dst: None,
+                attached: 0,
+                busy_held: false,
+            };
+            self.stats.dedup_total += 1;
+            self.jobs.insert(id, job);
+            return Ok(JobId(id));
+        }
+
+        let bytes = header.payload_len + HEADER_REGION_LEN as u64;
+        self.credit_check(true, bytes)?;
+        let (eb, en) = self.index.evictable();
+        if self.unindexed_objects > 0
+            || self.bytes_after() + bytes > self.cfg.quota_bytes + eb
+            || self.count_after() + 1 > self.cfg.max_objects + en
+        {
+            self.stats.disk_full_total += 1;
+            return Err(PlatformError::OutOfMemory);
+        }
+
+        let id = self.next_job;
+        self.next_job += 1;
+        self.park_ops += 1;
+        self.park_bytes += bytes;
+        self.reserved += bytes;
+        let job = Job {
+            id,
+            kind: Kind::Store,
+            inc,
+            key,
+            park: true,
+            bytes,
+            payload_len: header.payload_len,
+            reserved: bytes,
+            submitted_at: Instant::now(),
+            stage: JobStage::Submitted,
+            phase: Phase::Queued,
+            in_step: false,
+            cancelling: false,
+            crashed: false,
+            header: Some(header),
+            src: slot.take(),
+            dst: None,
+            attached: 0,
+            busy_held: false,
+        };
+        self.inflight_store.insert(k, id);
+        self.jobs.insert(id, job);
+        Ok(JobId(id))
+    }
+
+    fn submit_load(
+        &mut self,
+        key: ChunkKey,
+        expect: &ChunkHeader,
+        slot: &mut Option<PinnedDest>,
+        inc: Incarnation,
+    ) -> Result<JobId, PlatformError> {
+        self.gate(false)?;
+        let dst = slot.as_ref().ok_or(PlatformError::InvalidLayout)?;
+        let k = key.0 .0;
+        let entry = self
+            .index
+            .get(&k)
+            .filter(|e| !e.is_evicting() && !e.is_foreign())
+            .ok_or(PlatformError::ObjectNotFound(key.0))?;
+        if expect.chunk_key != key {
+            return Err(PlatformError::InvalidLayout);
+        }
+        self.validate_chunk_header_against_config(expect)?;
+        if entry.payload_len as u64 != expect.payload_len
+            || dst.total_bytes() != Some(expect.payload_len)
+            || dst.block_bytes() as u64 != self.cfg.layout.block_stride
+        {
+            return Err(PlatformError::InvalidLayout);
+        }
+        let bytes = entry.phys_bytes;
+        let payload_len = expect.payload_len;
+        self.credit_check(false, bytes)?;
+        let ok = self.index.busy_inc(&k);
+        debug_assert!(ok);
+        let id = self.next_job;
+        self.next_job += 1;
+        self.restore_ops += 1;
+        self.restore_bytes += bytes;
+        let job = Job {
+            id,
+            kind: Kind::Load,
+            inc,
+            key,
+            park: false,
+            bytes,
+            payload_len,
+            reserved: 0,
+            submitted_at: Instant::now(),
+            stage: JobStage::Submitted,
+            phase: Phase::Queued,
+            in_step: false,
+            cancelling: false,
+            crashed: false,
+            header: Some(*expect),
+            src: None,
+            dst: slot.take(),
+            attached: 0,
+            busy_held: true,
+        };
+        self.jobs.insert(id, job);
+        Ok(JobId(id))
+    }
+
+    fn submit_flush(&mut self, inc: Incarnation) -> Result<JobId, PlatformError> {
+        self.gate(false)?;
+        self.credit_check(true, 0)?;
+        let id = self.next_job;
+        self.next_job += 1;
+        self.park_ops += 1;
+        let job = Job {
+            id,
+            kind: Kind::Flush,
+            inc,
+            key: ChunkKey(ObjectId([0; 32])),
+            park: true,
+            bytes: 0,
+            payload_len: 0,
+            reserved: 0,
+            submitted_at: Instant::now(),
+            stage: JobStage::Submitted,
+            phase: Phase::Queued,
+            in_step: false,
+            cancelling: false,
+            crashed: false,
+            header: None,
+            src: None,
+            dst: None,
+            attached: 0,
+            busy_held: false,
+        };
+        self.jobs.insert(id, job);
+        Ok(JobId(id))
+    }
+
+    fn reap_cancels(&mut self) -> bool {
+        let ids: Vec<u64> = self
+            .jobs
+            .iter()
+            .filter(|(_, j)| j.cancelling && !j.in_step && !j.crashed)
+            .map(|(id, _)| *id)
+            .collect();
+        let any = !ids.is_empty();
+        for id in ids {
+            let job = self.jobs.remove(&id).expect("cancelling job");
+            let stage = job.stage;
+            self.finish(
+                job,
+                Terminal::Cancelled,
+                stage,
+                PublishOutcome::NotApplicable,
+            );
+        }
+        any
+    }
+}
+
+fn check_fault(
+    hook: &Option<Arc<dyn FaultHook>>,
+    boundary: Boundary,
+    key: &ChunkKey,
+) -> Option<FaultAction> {
+    hook.as_ref().and_then(|h| h.at(boundary, key))
+}
+
+fn recover_step_on(shared: &Shared, slice_ms: u64) -> RecoveryProgress {
+    let start = Instant::now();
+    let budget = Duration::from_millis(slice_ms);
+    let mut processed = 0usize;
+
+    loop {
+        let mut g = shared.inner.lock().unwrap_or_else(|e| e.into_inner());
+        if g.state == StoreState::Failed || g.recovery.done {
+            return g.recovery;
+        }
+        let root = g.cfg.root.clone();
+
+        if g.cursor.tmp_entries.is_none() {
+            let tmp_dir = root.join("tmp");
+            let mut entries: Vec<PathBuf> = std::fs::read_dir(&tmp_dir)
+                .ok()
+                .into_iter()
+                .flatten()
+                .filter_map(|e| e.ok().map(|x| x.path()))
+                .collect();
+            entries.sort();
+            g.stats.dir_entries += entries.len() as u64;
+            g.cursor.tmp_entries = Some(entries);
+            g.cursor.tmp_idx = 0;
+        }
+
+        if let Some(entries) = g.cursor.tmp_entries.as_ref() {
+            if g.cursor.tmp_idx < entries.len() {
+                let path = entries[g.cursor.tmp_idx].clone();
+                g.cursor.tmp_idx += 1;
+                processed += 1;
+                g.stats.metadata_calls += 1;
+                g.stats.io_ops += 1;
+                if let Ok(meta) = std::fs::symlink_metadata(&path) {
+                    let is_part = meta.is_file()
+                        && path
+                            .file_name()
+                            .and_then(|n| n.to_str())
+                            .is_some_and(|n| n.ends_with(".part"));
+                    if is_part {
+                        let len = meta.len();
+                        if std::fs::remove_file(&path).is_ok() {
+                            g.stats.unlinks += 1;
+                            g.stats.io_ops += 1;
+                            g.recovery.tmp_deleted += 1;
+                            g.stats.tmp_bytes_deleted += len;
+                        }
+                    } else {
+                        g.stats.foreign_files += 1;
+                        g.stats.foreign_file_bytes += meta.len();
+                    }
+                }
+                if processed >= 1 && start.elapsed() >= budget {
+                    break;
+                }
+                continue;
+            }
+        }
+
+        while g.cursor.shard < 256 {
+            let shard_u8 = g.cursor.shard as u8;
+            if g.cursor.shard_entries.is_none() {
+                let shard_dir = root.join("objects").join(format!("{shard_u8:02x}"));
+                let mut entries: Vec<PathBuf> = std::fs::read_dir(&shard_dir)
+                    .ok()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|e| e.ok().map(|x| x.path()))
+                    .collect();
+                entries.sort();
+                g.stats.dir_entries += entries.len() as u64;
+                g.cursor.shard_entries = Some(entries);
+                g.cursor.shard_idx = 0;
+            }
+            let entries = g.cursor.shard_entries.as_ref().expect("shard entries");
+            if g.cursor.shard_idx >= entries.len() {
+                g.cursor.shard += 1;
+                g.cursor.shard_entries = None;
+                g.cursor.shard_idx = 0;
+                continue;
+            }
+            let path = entries[g.cursor.shard_idx].clone();
+            g.cursor.shard_idx += 1;
+            processed += 1;
+
+            g.stats.metadata_calls += 1;
+            g.stats.io_ops += 1;
+            if let Ok(meta) = std::fs::symlink_metadata(&path) {
+                let parsed_key = if meta.is_file() {
+                    path.file_name()
+                        .and_then(|n| n.to_str())
+                        .and_then(|n| parse_kvc_filename(n, shard_u8))
+                } else {
+                    None
+                };
+                match parsed_key {
+                    None => {
+                        g.stats.foreign_files += 1;
+                        g.stats.foreign_file_bytes += meta.len();
+                    }
+                    Some(file_key) => {
+                        let phys_bytes = phys_bytes_of(&meta);
+                        let file_size = meta.len();
+                        let mtime_ns = meta_mtime_ns(&meta);
+                        g.last_clock_ns = g.last_clock_ns.max(mtime_ns);
+                        if (g.index.len() as u64) >= g.cfg.max_objects {
+                            g.unindexed_objects += 1;
+                            g.unindexed_bytes += phys_bytes;
+                            g.unindexed_paths.push_back((path, phys_bytes));
+                            g.recovery.unindexed_objects += 1;
+                            g.recovery.unindexed_bytes += phys_bytes;
+                            g.recovery.bytes += phys_bytes;
+                            g.stats.over_cap = true;
+                        } else if file_size < HEADER_REGION_LEN as u64 {
+                            if std::fs::remove_file(&path).is_ok() {
+                                g.stats.unlinks += 1;
+                                g.stats.io_ops += 1;
+                                g.recovery.corrupt_deleted += 1;
+                                g.stats.corrupt_deleted_total += 1;
+                                g.stats.corrupt_bytes_deleted += phys_bytes;
+                            }
+                        } else {
+                            let mut buf = [0u8; HEADER_REGION_LEN];
+                            let read_ok = File::open(&path)
+                                .and_then(|mut f| f.read_exact(&mut buf))
+                                .is_ok();
+                            g.stats.reads += 1;
+                            g.stats.read_bytes += HEADER_REGION_LEN as u64;
+                            g.stats.io_ops += 1;
+                            let kind = if read_ok {
+                                classify_recovered_header(&buf, file_size, &file_key, &g.cfg)
+                            } else {
+                                RecoveredHeader::Corrupt
+                            };
+                            match kind {
+                                RecoveredHeader::Ours { payload_len } => {
+                                    g.index.insert(IndexEntry {
+                                        key: file_key,
+                                        phys_bytes,
+                                        mtime_ns,
+                                        payload_len,
+                                        flags: 0,
+                                    });
+                                    g.recovery.indexed += 1;
+                                    g.recovery.bytes += phys_bytes;
+                                }
+                                RecoveredHeader::Foreign { payload_len } => {
+                                    g.index.insert(IndexEntry {
+                                        key: file_key,
+                                        phys_bytes,
+                                        mtime_ns,
+                                        payload_len,
+                                        flags: FLAG_FOREIGN,
+                                    });
+                                    g.recovery.foreign_namespace += 1;
+                                    g.recovery.bytes += phys_bytes;
+                                }
+                                RecoveredHeader::Corrupt => {
+                                    if std::fs::remove_file(&path).is_ok() {
+                                        g.stats.unlinks += 1;
+                                        g.stats.io_ops += 1;
+                                        g.recovery.corrupt_deleted += 1;
+                                        g.stats.corrupt_deleted_total += 1;
+                                        g.stats.corrupt_bytes_deleted += phys_bytes;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            break;
+        }
+
+        if g.cursor.shard >= 256 {
+            g.recovery.done = true;
+            if g.state == StoreState::Recovering {
+                g.state = StoreState::Open;
+            }
+            if g.cfg.purge_after_recovery
+                && (g.unindexed_objects > 0 || g.used_bytes() > g.cfg.quota_bytes)
+            {
+                g.purge_pending = true;
+                g.purge_evict_quota = g.used_bytes() > g.cfg.quota_bytes;
+            }
+            break;
+        }
+
+        if processed >= 1 && start.elapsed() >= budget {
+            break;
+        }
+    }
+
+    let mut g = shared.inner.lock().unwrap_or_else(|e| e.into_inner());
+    g.recovery.elapsed_us += start.elapsed().as_micros() as u64;
+    let res = g.recovery;
+    let garbage = std::mem::take(&mut g.graveyard);
+    drop(g);
+    drop(garbage);
+    shared.cv.notify_all();
+    res
+}
+
+fn run_one_unlink(shared: &Shared, u: Unlink) {
+    let (root, hook) = {
+        let g = shared.inner.lock().unwrap_or_else(|e| e.into_inner());
+        (g.cfg.root.clone(), g.cfg.faults.clone())
+    };
+    let k = ChunkKey(ObjectId(u.key));
+    let action = check_fault(&hook, Boundary::Unlink, &k);
+    if let Some(FaultAction::Stall(d)) = action {
+        std::thread::sleep(d);
+    }
+    let path = object_path_for(&root, &u.key);
+    let outcome: Result<(), PlatformError> = match action {
+        Some(FaultAction::Fail(errno)) => Err(errno_to_error(errno, "unlink failed")),
+        Some(FaultAction::Crash) => return,
+        _ => std::fs::remove_file(&path).map_err(|e| io_to_error(&e, "unlink failed")),
+    };
+
+    let garbage = {
+        let mut g = shared.inner.lock().unwrap_or_else(|e| e.into_inner());
+        g.stats.io_ops += 1;
+        match outcome {
+            Err(err) => {
+                g.index.clear_evicting(&u.key);
+                if let Some(jid) = u.job {
+                    if let Some(job) = g.jobs.remove(&jid) {
+                        if job.cancelling {
+                            g.jobs.insert(jid, job);
+                        } else {
+                            g.fail_job(job, err);
+                        }
+                    }
+                }
+            }
+            Ok(()) => {
+                if let Some(removed) = g.index.remove(&u.key) {
+                    g.stats.unlinks += 1;
+                    if u.evict {
+                        g.stats.evicted_bytes_total += removed.phys_bytes;
+                    }
+                }
+                if let Some(jid) = u.job {
+                    let still_waiting = g.unlinks.iter().any(|x| x.job == Some(jid));
+                    if !still_waiting {
+                        if let Some(job) = g.jobs.get_mut(&jid) {
+                            if job.phase == Phase::Reclaiming && !job.cancelling {
+                                job.phase = Phase::Queued;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        std::mem::take(&mut g.graveyard)
+    };
+    drop(garbage);
+    shared.cv.notify_all();
+}
+
+fn run_one_purge_step(shared: &Shared) -> bool {
+    let mut g = shared.inner.lock().unwrap_or_else(|e| e.into_inner());
+    if !g.purge_pending || !g.recovery.done {
+        return false;
+    }
+    let root = g.cfg.root.clone();
+
+    if let Some((path, phys)) = g.unindexed_paths.pop_front() {
+        g.unindexed_objects = g.unindexed_objects.saturating_sub(1);
+        g.unindexed_bytes = g.unindexed_bytes.saturating_sub(phys);
+        g.stats.over_cap = g.unindexed_objects > 0;
+        drop(g);
+        let ok = std::fs::remove_file(&path).is_ok();
+        let mut g = shared.inner.lock().unwrap_or_else(|e| e.into_inner());
+        if ok {
+            g.stats.unlinks += 1;
+            g.stats.io_ops += 1;
+            g.stats.purge_unlinked += 1;
+        }
+        if g.unindexed_paths.is_empty() && !g.purge_evict_quota {
+            g.purge_pending = false;
+        }
+        drop(g);
+        shared.cv.notify_all();
+        return true;
+    }
+
+    if g.purge_evict_quota && (g.used_bytes() as u128) * 10 > (g.cfg.quota_bytes as u128) * 9 {
+        if let Some(victim) = g.index.pick_victim() {
+            g.index.mark_evicting(&victim);
+            let path = object_path_for(&root, &victim);
+            drop(g);
+            let ok = std::fs::remove_file(&path).is_ok();
+            let mut g = shared.inner.lock().unwrap_or_else(|e| e.into_inner());
+            g.stats.io_ops += 1;
+            if ok {
+                if let Some(removed) = g.index.remove(&victim) {
+                    g.stats.unlinks += 1;
+                    g.stats.evicted_bytes_total += removed.phys_bytes;
+                }
+            } else {
+                g.index.clear_evicting(&victim);
+                g.purge_pending = false;
+                g.purge_evict_quota = false;
+            }
+            if (g.used_bytes() as u128) * 10 <= (g.cfg.quota_bytes as u128) * 9 {
+                g.purge_pending = false;
+                g.purge_evict_quota = false;
+            }
+            drop(g);
+            shared.cv.notify_all();
+            return true;
+        }
+    }
+
+    g.purge_pending = false;
+    g.purge_evict_quota = false;
+    drop(g);
+    shared.cv.notify_all();
+    false
+}
+
+fn execute_store_job(shared: &Shared, job_id: u64) {
+    let (root, hook, key, inc, file_bytes) = {
+        let mut g = shared.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(job) = g.jobs.get(&job_id) else {
+            return;
+        };
+        if job.cancelling {
+            let job = g.jobs.remove(&job_id).unwrap();
+            let stage = job.stage;
+            g.finish(
+                job,
+                Terminal::Cancelled,
+                stage,
+                PublishOutcome::NotApplicable,
+            );
+            let garbage = std::mem::take(&mut g.graveyard);
+            drop(g);
+            drop(garbage);
+            shared.cv.notify_all();
+            return;
+        }
+
+        let mut chosen = false;
+        while g.bytes_after() > g.cfg.quota_bytes || g.count_after() > g.cfg.max_objects {
+            let Some(victim) = g.index.pick_victim() else {
+                let job = g.jobs.remove(&job_id).unwrap();
+                g.fail_job(job, PlatformError::OutOfMemory);
+                let garbage = std::mem::take(&mut g.graveyard);
+                drop(g);
+                drop(garbage);
+                shared.cv.notify_all();
+                return;
+            };
+            g.index.mark_evicting(&victim);
+            g.unlinks.push_back(Unlink {
+                key: victim,
+                job: Some(job_id),
+                evict: true,
+            });
+            chosen = true;
+        }
+        if chosen {
+            let job = g.jobs.get_mut(&job_id).unwrap();
+            job.phase = Phase::Reclaiming;
+            job.in_step = false;
+            return;
+        }
+
+        let cfg_layout = g.cfg.layout;
+        let num_layers = g.cfg.num_layers;
+        let num_kv_heads = g.cfg.num_kv_heads;
+        let head_dim = g.cfg.head_dim;
+        let block_size = g.cfg.block_size;
+
+        let job = g.jobs.get(&job_id).unwrap();
+        let header = job.header.expect("store header");
+        let key = job.key;
+        let inc = job.inc;
+        let src = job.src.as_ref().expect("store source");
+        let n_blocks = src.block_count();
+        let tail_valid = src.tail_valid_tokens();
+        let mut payload = Vec::with_capacity(header.payload_len as usize);
+        let mut digests = Vec::with_capacity(n_blocks);
+
+        for i in 0..n_blocks {
+            match src.block(i) {
+                Ok(b) => {
+                    if i + 1 == n_blocks && tail_valid < block_size {
+                        let mut scratch = shared
+                            .tail_scratch
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner());
+                        zero_tail_block(
+                            &mut scratch,
+                            b,
+                            &cfg_layout,
+                            num_layers,
+                            num_kv_heads,
+                            head_dim,
+                            block_size,
+                            tail_valid,
+                        );
+                        let mut h = Sha256::new();
+                        h.update(&*scratch);
+                        digests.push(h.finalize().into());
+                        payload.extend_from_slice(&scratch);
+                    } else {
+                        let mut h = Sha256::new();
+                        h.update(b);
+                        digests.push(h.finalize().into());
+                        payload.extend_from_slice(b);
+                    }
+                }
+                Err(e) => {
+                    g.stats.released_source_violations += 1;
+                    let job = g.jobs.remove(&job_id).unwrap();
+                    g.fail_job(job, e);
+                    let garbage = std::mem::take(&mut g.graveyard);
+                    drop(g);
+                    drop(garbage);
+                    shared.cv.notify_all();
+                    return;
+                }
+            }
+        }
+
+        let rec = RecordHeader {
+            chunk: header,
+            payload_sha256: payload_root(&digests),
+        };
+        let region = match rec.encode_region(&digests) {
+            Ok(r) => r,
+            Err(_) => {
+                let job = g.jobs.remove(&job_id).unwrap();
+                g.fail_job(job, PlatformError::InvalidLayout);
+                let garbage = std::mem::take(&mut g.graveyard);
+                drop(g);
+                drop(garbage);
+                shared.cv.notify_all();
+                return;
+            }
+        };
+        let mut file_bytes = Vec::with_capacity(HEADER_REGION_LEN + payload.len());
+        file_bytes.extend_from_slice(&region);
+        file_bytes.extend_from_slice(&payload);
+
+        let job = g.jobs.get_mut(&job_id).unwrap();
+        job.phase = Phase::Writing;
+        job.in_step = true;
+        (
+            g.cfg.root.clone(),
+            g.cfg.faults.clone(),
+            key,
+            inc,
+            file_bytes,
+        )
+    };
+
+    let tpath = tmp_path_for(&root, &key.0 .0, job_id, inc.0);
+    let opath = object_path_for(&root, &key.0 .0);
+    let shard_dir = opath.parent().expect("shard dir").to_path_buf();
+
+    // P1: Write temporary file.
+    let p1 = check_fault(&hook, Boundary::P1Write, &key);
+    if let Some(FaultAction::Stall(d)) = p1 {
+        std::thread::sleep(d);
+    }
+    match p1 {
+        Some(FaultAction::Crash) => {
+            let _ = std::fs::write(&tpath, &file_bytes);
+            let garbage = {
+                let mut g = shared.inner.lock().unwrap_or_else(|e| e.into_inner());
+                if let Some(job) = g.jobs.remove(&job_id) {
+                    g.mark_crashed(job);
+                }
+                std::mem::take(&mut g.graveyard)
+            };
+            drop(garbage);
+            shared.cv.notify_all();
+            return;
+        }
+        Some(FaultAction::TornWrite { after_bytes, crash }) => {
+            let cut = (after_bytes as usize).min(file_bytes.len());
+            let _ = std::fs::write(&tpath, &file_bytes[..cut]);
+            if crash {
+                let garbage = {
+                    let mut g = shared.inner.lock().unwrap_or_else(|e| e.into_inner());
+                    if let Some(job) = g.jobs.remove(&job_id) {
+                        g.mark_crashed(job);
+                    }
+                    std::mem::take(&mut g.graveyard)
+                };
+                drop(garbage);
+                shared.cv.notify_all();
+                return;
+            }
+            let _ = std::fs::remove_file(&tpath);
+            let garbage = {
+                let mut g = shared.inner.lock().unwrap_or_else(|e| e.into_inner());
+                g.stats.writes += 1;
+                g.stats.write_bytes += cut as u64;
+                g.stats.unlinks += 1;
+                g.stats.io_ops += 2;
+                if let Some(job) = g.jobs.remove(&job_id) {
+                    g.fail_job(job, PlatformError::HardwareFault("torn write".into()));
+                }
+                std::mem::take(&mut g.graveyard)
+            };
+            drop(garbage);
+            shared.cv.notify_all();
+            return;
+        }
+        Some(FaultAction::Fail(errno)) => {
+            let _ = std::fs::write(&tpath, &file_bytes[..HEADER_REGION_LEN]);
+            let _ = std::fs::remove_file(&tpath);
+            let garbage = {
+                let mut g = shared.inner.lock().unwrap_or_else(|e| e.into_inner());
+                g.stats.unlinks += 1;
+                g.stats.io_ops += 2;
+                if errno == ENOSPC {
+                    g.stats.disk_full_total += 1;
+                }
+                if let Some(job) = g.jobs.remove(&job_id) {
+                    g.fail_job(job, errno_to_error(errno, "write temp failed"));
+                }
+                std::mem::take(&mut g.graveyard)
+            };
+            drop(garbage);
+            shared.cv.notify_all();
+            return;
+        }
+        _ => {}
+    }
+
+    let write_res = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(&tpath)
+        .and_then(|mut f| {
+            f.write_all(&file_bytes)?;
+            Ok(f)
+        });
+    let tmp_file = match write_res {
+        Ok(f) => f,
+        Err(e) => {
+            let _ = std::fs::remove_file(&tpath);
+            let garbage = {
+                let mut g = shared.inner.lock().unwrap_or_else(|e| e.into_inner());
+                g.stats.io_ops += 1;
+                if e.raw_os_error() == Some(ENOSPC) {
+                    g.stats.disk_full_total += 1;
+                }
+                if let Some(job) = g.jobs.remove(&job_id) {
+                    g.fail_job(job, io_to_error(&e, "write temp failed"));
+                }
+                std::mem::take(&mut g.graveyard)
+            };
+            drop(garbage);
+            shared.cv.notify_all();
+            return;
+        }
+    };
+
+    {
+        let mut g = shared.inner.lock().unwrap_or_else(|e| e.into_inner());
+        g.stats.writes += 1;
+        g.stats.write_bytes += file_bytes.len() as u64;
+        g.stats.io_ops += 1;
+        let cancelled = g.jobs.get(&job_id).is_none_or(|j| j.cancelling);
+        if cancelled {
+            drop(tmp_file);
+            let _ = std::fs::remove_file(&tpath);
+            g.stats.unlinks += 1;
+            g.stats.io_ops += 1;
+            if let Some(job) = g.jobs.remove(&job_id) {
+                let stage = job.stage;
+                g.finish(
+                    job,
+                    Terminal::Cancelled,
+                    stage,
+                    PublishOutcome::NotApplicable,
+                );
+            }
+            let garbage = std::mem::take(&mut g.graveyard);
+            drop(g);
+            drop(garbage);
+            shared.cv.notify_all();
+            return;
+        }
+        if let Some(job) = g.jobs.get_mut(&job_id) {
+            job.phase = Phase::Syncing;
+        }
+    }
+
+    // P2: fsync temporary file.
+    let p2 = check_fault(&hook, Boundary::P2FsyncFile, &key);
+    if let Some(FaultAction::Stall(d)) = p2 {
+        std::thread::sleep(d);
+    }
+    match p2 {
+        Some(FaultAction::Crash) => {
+            drop(tmp_file);
+            let garbage = {
+                let mut g = shared.inner.lock().unwrap_or_else(|e| e.into_inner());
+                if let Some(job) = g.jobs.remove(&job_id) {
+                    g.mark_crashed(job);
+                }
+                std::mem::take(&mut g.graveyard)
+            };
+            drop(garbage);
+            shared.cv.notify_all();
+            return;
+        }
+        Some(FaultAction::Fail(errno)) => {
+            drop(tmp_file);
+            let _ = std::fs::remove_file(&tpath);
+            let garbage = {
+                let mut g = shared.inner.lock().unwrap_or_else(|e| e.into_inner());
+                g.stats.file_fsyncs += 1;
+                g.stats.unlinks += 1;
+                g.stats.io_ops += 2;
+                g.set_degraded();
+                if let Some(job) = g.jobs.remove(&job_id) {
+                    g.fail_job(job, errno_to_error(errno, "fsync(file) failed"));
+                }
+                std::mem::take(&mut g.graveyard)
+            };
+            drop(garbage);
+            shared.cv.notify_all();
+            return;
+        }
+        _ => {}
+    }
+
+    if let Err(e) = tmp_file.sync_all() {
+        drop(tmp_file);
+        let _ = std::fs::remove_file(&tpath);
+        let garbage = {
+            let mut g = shared.inner.lock().unwrap_or_else(|e| e.into_inner());
+            g.stats.file_fsyncs += 1;
+            g.stats.unlinks += 1;
+            g.stats.io_ops += 2;
+            g.set_degraded();
+            if let Some(job) = g.jobs.remove(&job_id) {
+                g.fail_job(job, io_to_error(&e, "fsync(file) failed"));
+            }
+            std::mem::take(&mut g.graveyard)
+        };
+        drop(garbage);
+        shared.cv.notify_all();
+        return;
+    }
+    drop(tmp_file);
+
+    {
+        let mut g = shared.inner.lock().unwrap_or_else(|e| e.into_inner());
+        g.stats.file_fsyncs += 1;
+        g.stats.io_ops += 1;
+        if let Some(job) = g.jobs.get_mut(&job_id) {
+            job.stage = JobStage::Completed;
+            job.phase = Phase::Publishing;
+            let snap = Completion {
+                job: JobId(job.id),
+                incarnation: job.inc,
+                key: job.key,
+                stage: JobStage::Completed,
+                terminal: None,
+                publish: PublishOutcome::NotApplicable,
+                bytes: job.payload_len,
+                elapsed_us: job.submitted_at.elapsed().as_micros() as u64,
+            };
+            g.push_completion(snap);
+        }
+    }
+
+    // P3: atomic rename of temporary file into shard directory.
+    let p3 = check_fault(&hook, Boundary::P3Rename, &key);
+    if let Some(FaultAction::Stall(d)) = p3 {
+        std::thread::sleep(d);
+    }
+    match p3 {
+        Some(FaultAction::Crash) => {
+            let garbage = {
+                let mut g = shared.inner.lock().unwrap_or_else(|e| e.into_inner());
+                if let Some(job) = g.jobs.remove(&job_id) {
+                    g.mark_crashed(job);
+                }
+                std::mem::take(&mut g.graveyard)
+            };
+            drop(garbage);
+            shared.cv.notify_all();
+            return;
+        }
+        Some(FaultAction::Fail(errno)) => {
+            let _ = std::fs::remove_file(&tpath);
+            let garbage = {
+                let mut g = shared.inner.lock().unwrap_or_else(|e| e.into_inner());
+                g.stats.unlinks += 1;
+                g.stats.io_ops += 2;
+                if let Some(job) = g.jobs.remove(&job_id) {
+                    g.fail_job(job, errno_to_error(errno, "rename failed"));
+                }
+                std::mem::take(&mut g.graveyard)
+            };
+            drop(garbage);
+            shared.cv.notify_all();
+            return;
+        }
+        _ => {}
+    }
+
+    if let Err(e) = std::fs::rename(&tpath, &opath) {
+        let _ = std::fs::remove_file(&tpath);
+        let garbage = {
+            let mut g = shared.inner.lock().unwrap_or_else(|e| e.into_inner());
+            g.stats.unlinks += 1;
+            g.stats.io_ops += 2;
+            if let Some(job) = g.jobs.remove(&job_id) {
+                g.fail_job(job, io_to_error(&e, "rename failed"));
+            }
+            std::mem::take(&mut g.graveyard)
+        };
+        drop(garbage);
+        shared.cv.notify_all();
+        return;
+    }
+
+    let (phys_bytes, file_mtime_ns) = match std::fs::metadata(&opath) {
+        Ok(m) => (phys_bytes_of(&m), meta_mtime_ns(&m)),
+        Err(_) => (file_bytes.len() as u64, system_now_ns()),
+    };
+
+    {
+        let mut g = shared.inner.lock().unwrap_or_else(|e| e.into_inner());
+        g.stats.renames += 1;
+        g.stats.metadata_calls += 1;
+        g.stats.io_ops += 2;
+        if let Some(job) = g.jobs.get_mut(&job_id) {
+            job.stage = JobStage::Published;
+        }
+    }
+
+    // P4: fsync parent shard directory.
+    let p4 = check_fault(&hook, Boundary::P4FsyncDir, &key);
+    if let Some(FaultAction::Stall(d)) = p4 {
+        std::thread::sleep(d);
+    }
+    let dir_sync_res: Result<(), PlatformError> = match p4 {
+        Some(FaultAction::Crash) => {
+            let garbage = {
+                let mut g = shared.inner.lock().unwrap_or_else(|e| e.into_inner());
+                if let Some(job) = g.jobs.remove(&job_id) {
+                    g.mark_crashed(job);
+                }
+                std::mem::take(&mut g.graveyard)
+            };
+            drop(garbage);
+            shared.cv.notify_all();
+            return;
+        }
+        Some(FaultAction::Fail(errno)) => Err(errno_to_error(errno, "fsync(dir) failed")),
+        _ => fsync_dir(&shard_dir).map_err(|e| io_to_error(&e, "fsync(dir) failed")),
+    };
+
+    if let Err(err) = dir_sync_res {
+        let garbage = {
+            let mut g = shared.inner.lock().unwrap_or_else(|e| e.into_inner());
+            g.stats.dir_fsyncs += 1;
+            g.stats.io_ops += 1;
+            g.stats.published_total += 1;
+            g.stats.indeterminate_total += 1;
+            g.set_degraded();
+            let mtime_ns = g.next_timestamp_ns(file_mtime_ns);
+            if let Some(job) = g.jobs.remove(&job_id) {
+                g.index.insert(IndexEntry {
+                    key: key.0 .0,
+                    phys_bytes,
+                    mtime_ns,
+                    payload_len: job.payload_len as u32,
+                    flags: FLAG_INDETERMINATE,
+                });
+                g.finish(
+                    job,
+                    Terminal::Failed(err),
+                    JobStage::Published,
+                    PublishOutcome::Indeterminate,
+                );
+            }
+            std::mem::take(&mut g.graveyard)
+        };
+        drop(garbage);
+        shared.cv.notify_all();
+        return;
+    }
+
+    {
+        let mut g = shared.inner.lock().unwrap_or_else(|e| e.into_inner());
+        g.stats.dir_fsyncs += 1;
+        g.stats.io_ops += 1;
+    }
+
+    // P5: insert entry into in-memory index.
+    let p5 = check_fault(&hook, Boundary::P5IndexInsert, &key);
+    if let Some(FaultAction::Stall(d)) = p5 {
+        std::thread::sleep(d);
+    }
+    if matches!(p5, Some(FaultAction::Crash)) {
+        let garbage = {
+            let mut g = shared.inner.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(job) = g.jobs.remove(&job_id) {
+                g.mark_crashed(job);
+            }
+            std::mem::take(&mut g.graveyard)
+        };
+        drop(garbage);
+        shared.cv.notify_all();
+        return;
+    }
+
+    let garbage = {
+        let mut g = shared.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let mtime_ns = g.next_timestamp_ns(file_mtime_ns);
+        g.stats.published_total += 1;
+        if let Some(mut job) = g.jobs.remove(&job_id) {
+            g.index.insert(IndexEntry {
+                key: key.0 .0,
+                phys_bytes,
+                mtime_ns,
+                payload_len: job.payload_len as u32,
+                flags: 0,
+            });
+            job.stage = JobStage::Durable;
+            g.finish(
+                job,
+                Terminal::Done(JobStage::Durable),
+                JobStage::Durable,
+                PublishOutcome::Durable,
+            );
+        }
+        std::mem::take(&mut g.graveyard)
+    };
+    drop(garbage);
+    shared.cv.notify_all();
+}
+
+fn execute_load_job(shared: &Shared, job_id: u64) {
+    let (root, hook, key, expect, block_stride) = {
+        let mut g = shared.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(job) = g.jobs.get_mut(&job_id) else {
+            return;
+        };
+        if job.cancelling {
+            let job = g.jobs.remove(&job_id).unwrap();
+            let stage = job.stage;
+            g.finish(
+                job,
+                Terminal::Cancelled,
+                stage,
+                PublishOutcome::NotApplicable,
+            );
+            let garbage = std::mem::take(&mut g.graveyard);
+            drop(g);
+            drop(garbage);
+            shared.cv.notify_all();
+            return;
+        }
+        job.phase = Phase::Reading;
+        job.in_step = true;
+        let key = job.key;
+        let expect = job.header.expect("load expect");
+        (
+            g.cfg.root.clone(),
+            g.cfg.faults.clone(),
+            key,
+            expect,
+            g.cfg.layout.block_stride,
+        )
+    };
+
+    let lr = check_fault(&hook, Boundary::LoadRead, &key);
+    if let Some(FaultAction::Stall(d)) = lr {
+        std::thread::sleep(d);
+    }
+    match lr {
+        Some(FaultAction::Crash) => {
+            let garbage = {
+                let mut g = shared.inner.lock().unwrap_or_else(|e| e.into_inner());
+                if let Some(job) = g.jobs.remove(&job_id) {
+                    g.mark_crashed(job);
+                }
+                std::mem::take(&mut g.graveyard)
+            };
+            drop(garbage);
+            shared.cv.notify_all();
+            return;
+        }
+        Some(FaultAction::Fail(errno)) => {
+            let garbage = {
+                let mut g = shared.inner.lock().unwrap_or_else(|e| e.into_inner());
+                g.stats.io_ops += 1;
+                if let Some(job) = g.jobs.remove(&job_id) {
+                    g.fail_job(job, errno_to_error(errno, "load read failed"));
+                }
+                std::mem::take(&mut g.graveyard)
+            };
+            drop(garbage);
+            shared.cv.notify_all();
+            return;
+        }
+        _ => {}
+    }
+
+    let opath = object_path_for(&root, &key.0 .0);
+    let meta = match std::fs::metadata(&opath) {
+        Ok(m) => m,
+        Err(_) => {
+            let garbage = {
+                let mut g = shared.inner.lock().unwrap_or_else(|e| e.into_inner());
+                g.stats.metadata_calls += 1;
+                g.stats.io_ops += 1;
+                if let Some(mut job) = g.jobs.remove(&job_id) {
+                    if job.busy_held {
+                        g.index.busy_dec(&key.0 .0);
+                        job.busy_held = false;
+                    }
+                    g.index.remove(&key.0 .0);
+                    g.fail_job(job, PlatformError::ObjectNotFound(key.0));
+                }
+                std::mem::take(&mut g.graveyard)
+            };
+            drop(garbage);
+            shared.cv.notify_all();
+            return;
+        }
+    };
+
+    let file_size = meta.len();
+    if file_size < HEADER_REGION_LEN as u64 {
+        let _ = std::fs::remove_file(&opath);
+        let garbage = {
+            let mut g = shared.inner.lock().unwrap_or_else(|e| e.into_inner());
+            g.stats.metadata_calls += 1;
+            g.stats.unlinks += 1;
+            g.stats.io_ops += 2;
+            g.stats.corrupt_deleted_total += 1;
+            if let Some(mut job) = g.jobs.remove(&job_id) {
+                if job.busy_held {
+                    g.index.busy_dec(&key.0 .0);
+                    job.busy_held = false;
+                }
+                if let Some(rem) = g.index.remove(&key.0 .0) {
+                    g.stats.corrupt_bytes_deleted += rem.phys_bytes;
+                }
+                g.fail_job(job, PlatformError::InvalidLayout);
+            }
+            std::mem::take(&mut g.graveyard)
+        };
+        drop(garbage);
+        shared.cv.notify_all();
+        return;
+    }
+
+    let file = match File::open(&opath) {
+        Ok(f) => f,
+        Err(e) => {
+            let garbage = {
+                let mut g = shared.inner.lock().unwrap_or_else(|e| e.into_inner());
+                g.stats.metadata_calls += 1;
+                g.stats.io_ops += 1;
+                if let Some(job) = g.jobs.remove(&job_id) {
+                    g.fail_job(job, io_to_error(&e, "open object failed"));
+                }
+                std::mem::take(&mut g.graveyard)
+            };
+            drop(garbage);
+            shared.cv.notify_all();
+            return;
+        }
+    };
+
+    let mut header_buf = [0u8; HEADER_REGION_LEN];
+    if file.read_exact_at(&mut header_buf, 0).is_err()
+        || validate_record(&header_buf, file_size, &expect, block_stride).is_err()
+    {
+        drop(file);
+        let _ = std::fs::remove_file(&opath);
+        let garbage = {
+            let mut g = shared.inner.lock().unwrap_or_else(|e| e.into_inner());
+            g.stats.metadata_calls += 1;
+            g.stats.reads += 1;
+            g.stats.read_bytes += HEADER_REGION_LEN as u64;
+            g.stats.unlinks += 1;
+            g.stats.io_ops += 3;
+            g.stats.corrupt_deleted_total += 1;
+            if let Some(mut job) = g.jobs.remove(&job_id) {
+                if job.busy_held {
+                    g.index.busy_dec(&key.0 .0);
+                    job.busy_held = false;
+                }
+                if let Some(rem) = g.index.remove(&key.0 .0) {
+                    g.stats.corrupt_bytes_deleted += rem.phys_bytes;
+                }
+                g.fail_job(job, PlatformError::InvalidLayout);
+            }
+            std::mem::take(&mut g.graveyard)
+        };
+        drop(garbage);
+        shared.cv.notify_all();
+        return;
+    }
+
+    let n_seg = (expect.payload_len / block_stride) as usize;
+    let seg_len = block_stride as usize;
+    let mut seg_buf = vec![0u8; seg_len];
+    let mut reads_done = 1u64;
+    let mut bytes_read = HEADER_REGION_LEN as u64;
+
+    for i in 0..n_seg {
+        let off = HEADER_REGION_LEN as u64 + (i as u64) * block_stride;
+        if file.read_exact_at(&mut seg_buf, off).is_err() {
+            drop(file);
+            let _ = std::fs::remove_file(&opath);
+            let garbage = {
+                let mut g = shared.inner.lock().unwrap_or_else(|e| e.into_inner());
+                g.stats.metadata_calls += 1;
+                g.stats.reads += reads_done;
+                g.stats.read_bytes += bytes_read;
+                g.stats.unlinks += 1;
+                g.stats.io_ops += 2 + reads_done;
+                g.stats.corrupt_deleted_total += 1;
+                if let Some(mut job) = g.jobs.remove(&job_id) {
+                    if job.busy_held {
+                        g.index.busy_dec(&key.0 .0);
+                        job.busy_held = false;
+                    }
+                    if let Some(rem) = g.index.remove(&key.0 .0) {
+                        g.stats.corrupt_bytes_deleted += rem.phys_bytes;
+                    }
+                    g.fail_job(job, PlatformError::InvalidLayout);
+                }
+                std::mem::take(&mut g.graveyard)
+            };
+            drop(garbage);
+            shared.cv.notify_all();
+            return;
+        }
+        reads_done += 1;
+        bytes_read += block_stride;
+
+        let mut h = Sha256::new();
+        h.update(&seg_buf);
+        let digest: [u8; 32] = h.finalize().into();
+        let want = &header_buf[256 + 32 * i..256 + 32 * (i + 1)];
+        if digest != want {
+            drop(file);
+            let _ = std::fs::remove_file(&opath);
+            let garbage = {
+                let mut g = shared.inner.lock().unwrap_or_else(|e| e.into_inner());
+                g.stats.metadata_calls += 1;
+                g.stats.reads += reads_done;
+                g.stats.read_bytes += bytes_read;
+                g.stats.unlinks += 1;
+                g.stats.io_ops += 2 + reads_done;
+                g.stats.corrupt_deleted_total += 1;
+                if let Some(mut job) = g.jobs.remove(&job_id) {
+                    if job.busy_held {
+                        g.index.busy_dec(&key.0 .0);
+                        job.busy_held = false;
+                    }
+                    if let Some(rem) = g.index.remove(&key.0 .0) {
+                        g.stats.corrupt_bytes_deleted += rem.phys_bytes;
+                    }
+                    g.fail_job(job, PlatformError::InvalidLayout);
+                }
+                std::mem::take(&mut g.graveyard)
+            };
+            drop(garbage);
+            shared.cv.notify_all();
+            return;
+        }
+
+        let write_err = {
+            let mut g = shared.inner.lock().unwrap_or_else(|e| e.into_inner());
+            let dst = g
+                .jobs
+                .get_mut(&job_id)
+                .and_then(|j| j.dst.as_mut())
+                .expect("load dst");
+            dst.write_block(i, &seg_buf).err()
+        };
+        if let Some(err) = write_err {
+            drop(file);
+            let garbage = {
+                let mut g = shared.inner.lock().unwrap_or_else(|e| e.into_inner());
+                g.stats.metadata_calls += 1;
+                g.stats.reads += reads_done;
+                g.stats.read_bytes += bytes_read;
+                g.stats.io_ops += 1 + reads_done;
+                if let Some(job) = g.jobs.remove(&job_id) {
+                    g.fail_job(job, err);
+                }
+                std::mem::take(&mut g.graveyard)
+            };
+            drop(garbage);
+            shared.cv.notify_all();
+            return;
+        }
+    }
+    drop(file);
+
+    let garbage = {
+        let mut g = shared.inner.lock().unwrap_or_else(|e| e.into_inner());
+        g.stats.metadata_calls += 1;
+        g.stats.reads += reads_done;
+        g.stats.read_bytes += bytes_read;
+        g.stats.io_ops += 1 + reads_done;
+        let ts = g.next_timestamp_ns(0);
+        g.index.touch(&key.0 .0, ts);
+        if let Some(mut job) = g.jobs.remove(&job_id) {
+            job.stage = JobStage::Completed;
+            g.finish(
+                job,
+                Terminal::Done(JobStage::Completed),
+                JobStage::Completed,
+                PublishOutcome::NotApplicable,
+            );
+        }
+        std::mem::take(&mut g.graveyard)
+    };
+    drop(garbage);
+    shared.cv.notify_all();
+}
+
+fn execute_flush_job(shared: &Shared, job_id: u64) {
+    let (root, hook, key) = {
+        let mut g = shared.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(job) = g.jobs.get_mut(&job_id) else {
+            return;
+        };
+        job.phase = Phase::Flushing;
+        job.in_step = true;
+        let key = job.key;
+        (g.cfg.root.clone(), g.cfg.faults.clone(), key)
+    };
+
+    let fs = check_fault(&hook, Boundary::FlushSync, &key);
+    if let Some(FaultAction::Stall(d)) = fs {
+        std::thread::sleep(d);
+    }
+    let res: Result<(), PlatformError> = match fs {
+        Some(FaultAction::Crash) => {
+            let garbage = {
+                let mut g = shared.inner.lock().unwrap_or_else(|e| e.into_inner());
+                if let Some(job) = g.jobs.remove(&job_id) {
+                    g.mark_crashed(job);
+                }
+                std::mem::take(&mut g.graveyard)
+            };
+            drop(garbage);
+            shared.cv.notify_all();
+            return;
+        }
+        Some(FaultAction::Fail(errno)) => Err(errno_to_error(errno, "flush failed")),
+        _ => fsync_dir(&root.join("objects"))
+            .and_then(|()| fsync_dir(&root))
+            .map_err(|e| io_to_error(&e, "flush failed")),
+    };
+
+    let garbage = {
+        let mut g = shared.inner.lock().unwrap_or_else(|e| e.into_inner());
+        g.stats.dir_fsyncs += 1;
+        g.stats.io_ops += 1;
+        match res {
+            Err(e) => {
+                g.set_degraded();
+                if let Some(job) = g.jobs.remove(&job_id) {
+                    g.fail_job(job, e);
+                }
+            }
+            Ok(()) => {
+                if let Some(mut job) = g.jobs.remove(&job_id) {
+                    job.stage = JobStage::Durable;
+                    g.finish(
+                        job,
+                        Terminal::Done(JobStage::Durable),
+                        JobStage::Durable,
+                        PublishOutcome::Durable,
+                    );
+                }
+            }
+        }
+        std::mem::take(&mut g.graveyard)
+    };
+    drop(garbage);
+    shared.cv.notify_all();
+}
+
+fn pump_one(shared: &Shared) -> bool {
+    let reaped = {
+        let mut g = shared.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let r = g.reap_cancels();
+        let garbage = std::mem::take(&mut g.graveyard);
+        drop(g);
+        drop(garbage);
+        r
+    };
+    if reaped {
+        shared.cv.notify_all();
+        return true;
+    }
+
+    let unlink = {
+        let mut g = shared.inner.lock().unwrap_or_else(|e| e.into_inner());
+        g.unlinks.pop_front()
+    };
+    if let Some(u) = unlink {
+        run_one_unlink(shared, u);
+        return true;
+    }
+
+    if run_one_purge_step(shared) {
+        return true;
+    }
+
+    let picked: Option<(u64, Kind)> = {
+        let mut g = shared.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let next_restore = g
+            .jobs
+            .iter()
+            .find(|(_, j)| {
+                !j.park && !j.cancelling && !j.in_step && !j.crashed && j.phase == Phase::Queued
+            })
+            .map(|(id, j)| (*id, j.kind));
+        let next_park = g
+            .jobs
+            .iter()
+            .find(|(_, j)| {
+                j.park && !j.cancelling && !j.in_step && !j.crashed && j.phase == Phase::Queued
+            })
+            .map(|(id, j)| (*id, j.kind));
+        match (next_restore, next_park) {
+            (Some(r), Some(p)) => {
+                if g.restore_streak < 3 {
+                    g.restore_streak += 1;
+                    Some(r)
+                } else {
+                    g.restore_streak = 0;
+                    Some(p)
+                }
+            }
+            (Some(r), None) => {
+                g.restore_streak = g.restore_streak.saturating_add(1);
+                Some(r)
+            }
+            (None, Some(p)) => {
+                g.restore_streak = 0;
+                Some(p)
+            }
+            (None, None) => None,
+        }
+    };
+
+    let Some((job_id, kind)) = picked else {
+        return false;
+    };
+
+    match kind {
+        Kind::Noop => {
+            let garbage = {
+                let mut g = shared.inner.lock().unwrap_or_else(|e| e.into_inner());
+                if let Some(mut job) = g.jobs.remove(&job_id) {
+                    job.stage = JobStage::Durable;
+                    g.finish(
+                        job,
+                        Terminal::Done(JobStage::Durable),
+                        JobStage::Durable,
+                        PublishOutcome::NotApplicable,
+                    );
+                }
+                std::mem::take(&mut g.graveyard)
+            };
+            drop(garbage);
+            shared.cv.notify_all();
+        }
+        Kind::Store => execute_store_job(shared, job_id),
+        Kind::Load => execute_load_job(shared, job_id),
+        Kind::Flush => execute_flush_job(shared, job_id),
+    }
+    true
+}
+
+fn worker_loop(shared: Arc<Shared>) {
+    loop {
+        let (need_recover, slice_ms, stop) = {
+            let g = shared.inner.lock().unwrap_or_else(|e| e.into_inner());
+            (
+                g.state == StoreState::Recovering && !g.recovery.done,
+                g.cfg.recovery_slice_ms,
+                g.stop_worker,
+            )
+        };
+        if stop {
+            break;
+        }
+        if need_recover {
+            recover_step_on(&shared, slice_ms);
+            continue;
+        }
+        if pump_one(&shared) {
+            continue;
+        }
+        let mut g = shared.inner.lock().unwrap_or_else(|e| e.into_inner());
+        if g.stop_worker {
+            break;
+        }
+        let has_work = (g.state == StoreState::Recovering && !g.recovery.done)
+            || !g.unlinks.is_empty()
+            || (g.purge_pending && g.recovery.done)
+            || g.jobs
+                .values()
+                .any(|j| !j.in_step && !j.crashed && (j.cancelling || j.phase == Phase::Queued));
+        if !has_work {
+            g = shared.cv.wait(g).unwrap_or_else(|e| e.into_inner());
+        }
+        drop(g);
+    }
+}
+
 impl HostFsStore {
     pub fn open(config: HostFsConfig) -> Result<Self, PlatformError> {
-        unimplemented!("C4 red stub")
+        validate_config(&config)?;
+        let mut stats = HostFsStats {
+            tail_scratch_bytes: config.layout.block_stride,
+            ..HostFsStats::default()
+        };
+
+        let root = &config.root;
+        if !root.is_dir() {
+            std::fs::create_dir_all(root).map_err(|e| io_to_error(&e, "create root"))?;
+            stats.mkdirs += 1;
+            stats.io_ops += 1;
+        }
+        let objects_dir = root.join("objects");
+        if !objects_dir.is_dir() {
+            std::fs::create_dir(&objects_dir).map_err(|e| io_to_error(&e, "create objects"))?;
+            stats.mkdirs += 1;
+            stats.io_ops += 1;
+        }
+        let tmp_dir = root.join("tmp");
+        if !tmp_dir.is_dir() {
+            std::fs::create_dir(&tmp_dir).map_err(|e| io_to_error(&e, "create tmp"))?;
+            stats.mkdirs += 1;
+            stats.io_ops += 1;
+        }
+
+        let mut created_shard = false;
+        for b in 0..=255u8 {
+            let shard = objects_dir.join(format!("{b:02x}"));
+            if !shard.is_dir() {
+                std::fs::create_dir(&shard).map_err(|e| io_to_error(&e, "create shard"))?;
+                stats.mkdirs += 1;
+                stats.io_ops += 1;
+                created_shard = true;
+            }
+        }
+        if created_shard {
+            fsync_dir(&objects_dir).map_err(|e| io_to_error(&e, "fsync objects"))?;
+            stats.dir_fsyncs += 1;
+            stats.io_ops += 1;
+        }
+
+        let store_id_path = root.join("STORE_ID");
+        let (store_id, state, recovery_done) = if store_id_path.exists() {
+            stats.reads += 1;
+            stats.io_ops += 1;
+            match std::fs::read(&store_id_path) {
+                Ok(bytes) => {
+                    stats.read_bytes += bytes.len() as u64;
+                    if let Ok(arr) = <[u8; 16]>::try_from(bytes.as_slice()) {
+                        (Some(arr), StoreState::Recovering, false)
+                    } else {
+                        (None, StoreState::Failed, true)
+                    }
+                }
+                Err(_) => (None, StoreState::Failed, true),
+            }
+        } else {
+            let id = generate_store_id();
+            let part = tmp_dir.join("STORE_ID.part");
+            {
+                let mut f = OpenOptions::new()
+                    .create(true)
+                    .write(true)
+                    .truncate(true)
+                    .open(&part)
+                    .map_err(|e| io_to_error(&e, "create STORE_ID.part"))?;
+                f.write_all(&id)
+                    .map_err(|e| io_to_error(&e, "write STORE_ID.part"))?;
+                stats.writes += 1;
+                stats.write_bytes += 16;
+                stats.io_ops += 1;
+                f.sync_all()
+                    .map_err(|e| io_to_error(&e, "fsync STORE_ID.part"))?;
+                stats.file_fsyncs += 1;
+                stats.io_ops += 1;
+            }
+            std::fs::rename(&part, &store_id_path)
+                .map_err(|e| io_to_error(&e, "rename STORE_ID"))?;
+            stats.renames += 1;
+            stats.io_ops += 1;
+            fsync_dir(root).map_err(|e| io_to_error(&e, "fsync root"))?;
+            stats.dir_fsyncs += 1;
+            stats.io_ops += 1;
+            (Some(id), StoreState::Recovering, false)
+        };
+
+        let scratch_len = config.layout.block_stride as usize;
+        let worker_mode = config.worker;
+        let root_buf = config.root.clone();
+        let recovery = RecoveryProgress {
+            done: recovery_done,
+            ..RecoveryProgress::default()
+        };
+        let inner = Inner {
+            cfg: config,
+            store_id,
+            state,
+            closed: false,
+            stop_worker: false,
+            next_job: 1,
+            next_pin: 1,
+            last_clock_ns: 0,
+            index: Index::new(),
+            unindexed_bytes: 0,
+            unindexed_objects: 0,
+            unindexed_paths: VecDeque::new(),
+            reserved: 0,
+            jobs: BTreeMap::new(),
+            inflight_store: BTreeMap::new(),
+            unlinks: VecDeque::new(),
+            pins: BTreeMap::new(),
+            restore_ops: 0,
+            park_ops: 0,
+            restore_bytes: 0,
+            park_bytes: 0,
+            restore_streak: 0,
+            attached_total: 0,
+            queue: VecDeque::new(),
+            stats,
+            recovery,
+            cursor: RecoveryCursor::new(),
+            purge_pending: false,
+            purge_evict_quota: false,
+            graveyard: Vec::new(),
+        };
+
+        let shared = Arc::new(Shared {
+            root: root_buf,
+            inner: Mutex::new(inner),
+            cv: Condvar::new(),
+            tail_scratch: Mutex::new(vec![0u8; scratch_len]),
+        });
+
+        let handle = if worker_mode == WorkerMode::Thread {
+            let s2 = Arc::clone(&shared);
+            Some(std::thread::spawn(move || worker_loop(s2)))
+        } else {
+            None
+        };
+
+        Ok(Self {
+            shared,
+            worker: Mutex::new(handle),
+        })
     }
-    pub fn pump(&self) -> bool {
-        unimplemented!("C4 red stub")
+
+    fn lock(&self) -> MutexGuard<'_, Inner> {
+        self.shared.inner.lock().unwrap_or_else(|e| e.into_inner())
     }
-    pub fn run_until_idle(&self) {
-        unimplemented!("C4 red stub")
+
+    fn with<R>(&self, f: impl FnOnce(&mut Inner) -> R) -> R {
+        let (r, garbage) = {
+            let mut g = self.lock();
+            let r = f(&mut g);
+            (r, std::mem::take(&mut g.graveyard))
+        };
+        drop(garbage);
+        r
     }
-    pub fn stats(&self) -> HostFsStats {
-        unimplemented!("C4 red stub")
-    }
-    pub fn store_id(&self) -> Option<[u8; 16]> {
-        unimplemented!("C4 red stub")
-    }
+
     pub fn root(&self) -> &Path {
-        unimplemented!("C4 red stub")
+        &self.shared.root
     }
+
     pub fn object_path(&self, key: &ChunkKey) -> PathBuf {
-        unimplemented!("C4 red stub")
+        object_path_for(&self.shared.root, &key.0 .0)
     }
+
     pub fn tmp_dir(&self) -> PathBuf {
-        unimplemented!("C4 red stub")
+        self.shared.root.join("tmp")
     }
-    pub fn purge_pending(&self) -> bool {
-        unimplemented!("C4 red stub")
+
+    pub fn store_id(&self) -> Option<[u8; 16]> {
+        self.with(|i| i.store_id)
     }
+
+    pub fn stats(&self) -> HostFsStats {
+        self.with(|i| i.stats)
+    }
+
+    pub fn pump(&self) -> bool {
+        pump_one(&self.shared)
+    }
+
+    pub fn run_until_idle(&self) {
+        while self.pump() {}
+    }
+
     pub fn start_purge(&self) {
-        unimplemented!("C4 red stub")
+        self.with(|i| {
+            i.purge_pending = true;
+            i.purge_evict_quota = i.used_bytes() > i.cfg.quota_bytes;
+        });
+        self.shared.cv.notify_all();
     }
+
+    pub fn purge_pending(&self) -> bool {
+        self.with(|i| i.purge_pending)
+    }
+
     pub fn audit(&self) -> Result<(), String> {
-        unimplemented!("C4 red stub")
+        self.with(|i| {
+            i.index.audit()?;
+            let expected_res: u64 = i
+                .jobs
+                .values()
+                .filter(|j| !j.crashed)
+                .map(|j| j.reserved)
+                .sum();
+            if i.reserved != expected_res {
+                return Err(format!(
+                    "reserved_bytes {} != job sum {}",
+                    i.reserved, expected_res
+                ));
+            }
+            Ok(())
+        })
     }
 }
 
-#[allow(unused_variables)]
+impl Drop for HostFsStore {
+    fn drop(&mut self) {
+        {
+            let mut g = self.lock();
+            g.stop_worker = true;
+        }
+        self.shared.cv.notify_all();
+        if let Some(h) = self.worker.lock().unwrap_or_else(|e| e.into_inner()).take() {
+            let _ = h.join();
+        }
+        let garbage = {
+            let mut g = self.lock();
+            let mut guards = std::mem::take(&mut g.graveyard);
+            for (_, mut j) in std::mem::take(&mut g.jobs) {
+                if let Some(s) = j.src.take() {
+                    guards.push(s.into_guard());
+                }
+                if let Some(d) = j.dst.take() {
+                    guards.push(d.into_guard());
+                }
+            }
+            guards
+        };
+        drop(garbage);
+    }
+}
+
 impl KvStore for HostFsStore {
     fn namespace(&self) -> NamespaceId {
-        unimplemented!("C4 red stub")
+        self.with(|i| i.cfg.namespace)
     }
+
     fn capacity(&self) -> Capacity {
-        unimplemented!("C4 red stub")
+        self.with(|i| i.capacity())
     }
+
     fn lookup(&self, keys: &[ChunkKey]) -> Vec<Option<u64>> {
-        unimplemented!("C4 red stub")
+        self.with(|i| {
+            let serving = !matches!(i.state, StoreState::Recovering | StoreState::Failed);
+            keys.iter()
+                .map(|k| {
+                    i.index
+                        .get(&k.0 .0)
+                        .filter(|e| serving && !e.is_evicting() && !e.is_foreign())
+                        .map(|e| e.payload_len as u64)
+                })
+                .collect()
+        })
     }
+
     fn submit_store(
         &self,
         header: ChunkHeader,
         src: PinnedSource,
         inc: Incarnation,
     ) -> Result<JobId, PlatformError> {
-        unimplemented!("C4 red stub")
+        let mut slot = Some(src);
+        let res = self.with(|i| i.submit_store(header, &mut slot, inc));
+        drop(slot);
+        if res.is_ok() {
+            self.shared.cv.notify_all();
+        }
+        res
     }
+
     fn submit_load(
         &self,
         key: ChunkKey,
@@ -255,33 +2803,436 @@ impl KvStore for HostFsStore {
         dst: PinnedDest,
         inc: Incarnation,
     ) -> Result<JobId, PlatformError> {
-        unimplemented!("C4 red stub")
+        let mut slot = Some(dst);
+        let res = self.with(|i| i.submit_load(key, expect, &mut slot, inc));
+        drop(slot);
+        if res.is_ok() {
+            self.shared.cv.notify_all();
+        }
+        res
     }
+
     fn submit_flush(&self, inc: Incarnation) -> Result<JobId, PlatformError> {
-        unimplemented!("C4 red stub")
+        let res = self.with(|i| i.submit_flush(inc));
+        if res.is_ok() {
+            self.shared.cv.notify_all();
+        }
+        res
     }
+
     fn attach_waiter(&self, job: JobId) -> Result<(), PlatformError> {
-        unimplemented!("C4 red stub")
+        self.with(|i| {
+            let per_job = i.cfg.max_waiters_per_job;
+            let total = i.cfg.max_waiters_total;
+            let attached_total = i.attached_total;
+            let j = match i.jobs.get_mut(&job.0) {
+                Some(j) if j.kind == Kind::Load && !j.cancelling && !j.crashed => j,
+                _ => {
+                    return Err(PlatformError::TaskRejected(String::from(
+                        "not an in-flight load",
+                    )))
+                }
+            };
+            if 1 + j.attached >= per_job || attached_total >= total {
+                i.stats.queue_full_total += 1;
+                return Err(PlatformError::QueueFull);
+            }
+            j.attached += 1;
+            i.attached_total += 1;
+            Ok(())
+        })
     }
+
     fn poll(&self, max: usize) -> Vec<Completion> {
-        unimplemented!("C4 red stub")
+        self.with(|i| {
+            let n = max.min(i.queue.len());
+            i.queue.drain(..n).collect()
+        })
     }
+
     fn cancel(&self, job: JobId) -> CancelOutcome {
-        unimplemented!("C4 red stub")
+        let out = self.with(|i| match i.jobs.get_mut(&job.0) {
+            None => CancelOutcome::TooLate,
+            Some(j) if j.crashed => CancelOutcome::TooLate,
+            Some(j) if j.cancelling => CancelOutcome::Cancelled,
+            Some(j) => {
+                let cancellable = !matches!(
+                    (j.kind, j.phase),
+                    (Kind::Flush | Kind::Noop, _)
+                        | (Kind::Store, Phase::Syncing | Phase::Publishing)
+                );
+                if cancellable {
+                    j.cancelling = true;
+                    CancelOutcome::Cancelled
+                } else {
+                    CancelOutcome::TooLate
+                }
+            }
+        });
+        if out == CancelOutcome::Cancelled {
+            self.shared.cv.notify_all();
+        }
+        out
     }
+
     fn pin(&self, keys: &[ChunkKey]) -> Result<PinToken, PlatformError> {
-        unimplemented!("C4 red stub")
+        self.with(|i| {
+            if i.state == StoreState::Recovering {
+                return Err(i.queue_full());
+            }
+            if i.state == StoreState::Failed || i.closed {
+                return Err(PlatformError::DeviceUnavailable);
+            }
+            if i.pins.len() as u32 >= i.cfg.max_restore_ops {
+                return Err(i.queue_full());
+            }
+            for k in keys {
+                if !i
+                    .index
+                    .get(&k.0 .0)
+                    .is_some_and(|e| !e.is_evicting() && !e.is_foreign())
+                {
+                    return Err(PlatformError::ObjectNotFound(k.0));
+                }
+            }
+            let id = i.next_pin;
+            i.next_pin += 1;
+            let list: Vec<[u8; 32]> = keys.iter().map(|k| k.0 .0).collect();
+            for k in &list {
+                let ok = i.index.busy_inc(k);
+                debug_assert!(ok);
+            }
+            i.pins.insert(id, list);
+            Ok(PinToken(id))
+        })
     }
+
     fn unpin(&self, token: PinToken) {
-        unimplemented!("C4 red stub")
+        self.with(|i| {
+            if let Some(list) = i.pins.remove(&token.0) {
+                for k in list {
+                    i.index.busy_dec(&k);
+                }
+            }
+        });
     }
+
     fn delete(&self, keys: &[ChunkKey]) -> u64 {
-        unimplemented!("C4 red stub")
+        let marked = self.with(|i| {
+            if matches!(i.state, StoreState::Recovering | StoreState::Failed) {
+                return 0;
+            }
+            let mut marked = 0;
+            for k in keys {
+                let kb = k.0 .0;
+                if i.index.is_busy(&kb) || i.inflight_store.contains_key(&kb) {
+                    continue;
+                }
+                if i.index.mark_evicting(&kb) {
+                    i.unlinks.push_back(Unlink {
+                        key: kb,
+                        job: None,
+                        evict: false,
+                    });
+                    marked += 1;
+                }
+            }
+            marked
+        });
+        if marked > 0 {
+            self.shared.cv.notify_all();
+        }
+        marked
     }
+
     fn recover_step(&self, slice_ms: u64) -> RecoveryProgress {
-        unimplemented!("C4 red stub")
+        recover_step_on(&self.shared, slice_ms)
     }
+
     fn shutdown(&self, intake_deadline_ms: u64) -> DrainReport {
-        unimplemented!("C4 red stub")
+        let deadline = Instant::now() + Duration::from_millis(intake_deadline_ms);
+        let (published_before, cancelled, worker_mode) = self.with(|i| {
+            i.closed = true;
+            let published_before = i.stats.published_total;
+            let mut cancelled = 0;
+            for j in i.jobs.values_mut() {
+                if j.crashed {
+                    continue;
+                }
+                let cancellable = !matches!(
+                    (j.kind, j.phase),
+                    (Kind::Flush | Kind::Noop, _)
+                        | (Kind::Store, Phase::Syncing | Phase::Publishing)
+                );
+                if cancellable {
+                    if !j.cancelling {
+                        j.cancelling = true;
+                    }
+                    cancelled += 1;
+                }
+            }
+            i.reap_cancels();
+            (published_before, cancelled, i.cfg.worker)
+        });
+        self.shared.cv.notify_all();
+
+        if worker_mode == WorkerMode::Manual {
+            while Instant::now() < deadline {
+                if !self.pump() {
+                    break;
+                }
+            }
+        } else {
+            let mut g = self.lock();
+            loop {
+                g.reap_cancels();
+                let busy = g.jobs.values().any(|j| !j.crashed) || !g.unlinks.is_empty();
+                if !busy {
+                    break;
+                }
+                let now = Instant::now();
+                if now >= deadline {
+                    break;
+                }
+                let wait = deadline - now;
+                let (g2, _) = self
+                    .shared
+                    .cv
+                    .wait_timeout(g, wait)
+                    .unwrap_or_else(|e| e.into_inner());
+                g = g2;
+            }
+            let garbage = std::mem::take(&mut g.graveyard);
+            drop(g);
+            drop(garbage);
+        }
+
+        self.with(|i| {
+            i.reap_cancels();
+            let unfinished: Vec<UnfinishedJob> = i
+                .jobs
+                .values()
+                .filter(|j| !j.crashed)
+                .map(|j| UnfinishedJob {
+                    job: JobId(j.id),
+                    key: j.key,
+                    bytes: j.bytes,
+                    stage: j.stage,
+                })
+                .collect();
+            i.stats.shutdown_unfinished_jobs = unfinished.len() as u64;
+            i.stats.shutdown_unfinished_bytes = unfinished.iter().map(|u| u.bytes).sum();
+            DrainReport {
+                published: i.stats.published_total - published_before,
+                cancelled,
+                unfinished,
+            }
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::identity::{chunk_chain, ComputeConfig, HiddenAct, KvDtype};
+    use crate::pin::HolderGuard;
+
+    const BS: usize = 8192;
+
+    fn test_fields() -> NamespaceFields<'static> {
+        let compute = ComputeConfig {
+            num_heads: 32,
+            hidden_dim: 2048,
+            intermediate_dim: 8192,
+            vocab_size: 128_256,
+            rms_norm_eps: 1e-5,
+            tie_word_embeddings: true,
+            hidden_act: HiddenAct::Silu,
+            arith_id: "ReferenceCpuBackend",
+            arith_epoch: 1,
+        };
+        NamespaceFields {
+            model_sha256: [0xAB; 32],
+            model_digest_kind: "sha256-file",
+            model_id: "llama-3.2-1b-instruct",
+            num_layers: 2,
+            num_kv_heads: 4,
+            head_dim: 64,
+            block_size: 4,
+            rope_theta: 500000.0,
+            rope_scaling: None,
+            qk_norm: false,
+            dtype: KvDtype::Bf16,
+            layout: LayoutStrides {
+                head_stride: 128,
+                token_stride: 512,
+                kv_plane_stride: 2048,
+                layer_stride: 4096,
+                block_stride: BS as u64,
+                element_bytes: 2,
+            },
+            backend_format: BackendFormat::HostPagedPoolV1,
+            chunk_tokens: 8,
+            sharing_namespace: "default",
+            compute_config_digest: compute.digest().unwrap(),
+        }
+    }
+
+    fn make_src(blocks: usize, tail_valid: u32) -> (PinnedSource, Box<[u8]>) {
+        let mut buf = vec![0x33u8; blocks * BS].into_boxed_slice();
+        let ptr = buf.as_mut_ptr();
+        let guard = HolderGuard::detached();
+        let src = unsafe { PinnedSource::new(ptr, BS, (0..blocks).collect(), tail_valid, guard) };
+        (src, buf)
+    }
+
+    fn temp_root(tag: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let p = std::env::temp_dir().join(format!(
+            "aien-kv-hostfs-unit-{tag}-{}-{nanos}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&p).unwrap();
+        p
+    }
+
+    #[test]
+    fn host_fs_max_objects_includes_starting_job_reservation() {
+        let root = temp_root("max-obj");
+        let f = test_fields();
+        let ns = f.namespace_id().unwrap();
+        let mut cfg = HostFsConfig::from_fields(root.clone(), &f).unwrap();
+        cfg.max_objects = 2;
+        cfg.worker = WorkerMode::Manual;
+        let s = HostFsStore::open(cfg).unwrap();
+        while !s.recover_step(50).done {}
+
+        for n in 1..=3u32 {
+            let toks: Vec<u32> = (0..8).map(|i| n * 100 + i).collect();
+            let key = chunk_chain(&ns, 8, &toks).unwrap()[0];
+            let h = f.chunk_header(&ns, key, None, 0, 8, 1).unwrap();
+            let (src, _buf) = make_src(2, 4);
+            s.submit_store(h, src, Incarnation(n as u64)).unwrap();
+            s.run_until_idle();
+            let _ = s.poll(16);
+        }
+        assert_eq!(s.capacity().objects, 2);
+        s.audit().unwrap();
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn host_fs_cancel_and_failed_unlink_abort_pending_evictions() {
+        let root = temp_root("abort-evict");
+        let f = test_fields();
+        let ns = f.namespace_id().unwrap();
+        let small_phys = HEADER_REGION_LEN as u64 + BS as u64;
+        let faults = ScriptedFaults::new();
+        let mut cfg = HostFsConfig::from_fields(root.clone(), &f).unwrap();
+        cfg.quota_bytes = 2 * small_phys;
+        cfg.worker = WorkerMode::Manual;
+        cfg.faults = Some(faults.clone());
+        let s = HostFsStore::open(cfg).unwrap();
+        while !s.recover_step(50).done {}
+
+        // Store two 1-block objects.
+        let mut small_keys = Vec::new();
+        for n in 1..=2u32 {
+            let toks: Vec<u32> = (0..4).map(|i| n * 100 + i).collect();
+            let key = chunk_chain(&ns, 8, &toks).unwrap()[0];
+            let h = f.chunk_header(&ns, key, None, 0, 4, 1).unwrap();
+            let (src, _buf) = make_src(1, 4);
+            s.submit_store(h, src, Incarnation(n as u64)).unwrap();
+            s.run_until_idle();
+            let _ = s.poll(16);
+            small_keys.push(key);
+        }
+
+        // Submit a 2-block object that requires evicting both small objects;
+        // fail the first unlink and verify the second unlink does not run.
+        faults.arm(Boundary::Unlink, FaultAction::Fail(EIO));
+        let toks: Vec<u32> = (0..8).map(|i| 300 + i).collect();
+        let key3 = chunk_chain(&ns, 8, &toks).unwrap()[0];
+        let h3 = f.chunk_header(&ns, key3, None, 0, 8, 1).unwrap();
+        let (src3, _buf3) = make_src(2, 4);
+        let j3 = s.submit_store(h3, src3, Incarnation(3)).unwrap();
+        s.run_until_idle();
+        let comps = s.poll(16);
+        assert!(comps
+            .iter()
+            .any(|c| c.job == j3 && matches!(c.terminal, Some(Terminal::Failed(_)))));
+        assert_eq!(
+            s.lookup(&small_keys),
+            vec![Some(BS as u64), Some(BS as u64)]
+        );
+        assert_eq!(s.stats().unlinks, 0);
+
+        // Submit another 2-block store, step once to queue the two eviction
+        // unlinks, then cancel before any unlink executes.
+        let (src4, _buf4) = make_src(2, 4);
+        let j4 = s.submit_store(h3, src4, Incarnation(4)).unwrap();
+        assert!(s.pump());
+        assert_eq!(s.lookup(&small_keys), vec![None, None]);
+        assert_eq!(s.cancel(j4), CancelOutcome::Cancelled);
+        s.run_until_idle();
+        assert_eq!(
+            s.lookup(&small_keys),
+            vec![Some(BS as u64), Some(BS as u64)]
+        );
+        assert_eq!(s.stats().unlinks, 0);
+        s.audit().unwrap();
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn host_fs_never_dedups_into_cancelling_job_and_checks_segments_and_strides() {
+        let root = temp_root("dedup-cancel");
+        let f = test_fields();
+        let ns = f.namespace_id().unwrap();
+        let mut cfg = HostFsConfig::from_fields(root.clone(), &f).unwrap();
+        cfg.worker = WorkerMode::Manual;
+        let s = HostFsStore::open(cfg.clone()).unwrap();
+        while !s.recover_step(50).done {}
+
+        let toks: Vec<u32> = (0..8).collect();
+        let key = chunk_chain(&ns, 8, &toks).unwrap()[0];
+        let h = f.chunk_header(&ns, key, None, 0, 8, 1).unwrap();
+        let (src1, _b1) = make_src(2, 4);
+        let j1 = s.submit_store(h, src1, Incarnation(1)).unwrap();
+        assert_eq!(s.cancel(j1), CancelOutcome::Cancelled);
+        let (src2, _b2) = make_src(2, 4);
+        let j2 = s.submit_store(h, src2, Incarnation(2)).unwrap();
+        assert_ne!(j1, j2);
+        s.run_until_idle();
+        assert_eq!(s.lookup(&[key]), vec![Some(2 * BS as u64)]);
+
+        // Refuse > MAX_SEGMENTS blocks at submit time.
+        let mut h_many = h;
+        h_many.payload_len = 121 * BS as u64;
+        h_many.token_count = 121 * 4;
+        let (src_many, _bm) = make_src(121, 4);
+        assert_eq!(
+            s.submit_store(h_many, src_many, Incarnation(3)),
+            Err(PlatformError::InvalidLayout)
+        );
+
+        // Refuse zero block_stride and zero element_bytes in config validation.
+        let mut bad1 = cfg.clone();
+        bad1.layout.block_stride = 0;
+        assert!(matches!(
+            HostFsStore::open(bad1),
+            Err(PlatformError::InvalidLayout)
+        ));
+        let mut bad2 = cfg;
+        bad2.layout.element_bytes = 0;
+        assert!(matches!(
+            HostFsStore::open(bad2),
+            Err(PlatformError::InvalidLayout)
+        ));
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

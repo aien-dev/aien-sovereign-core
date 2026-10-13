@@ -1,3 +1,4 @@
+#![cfg(feature = "std")]
 // Recovery follows ADR 0003 section 4.1 (review finding 8); the temp-file and
 // foreign-file rules come from the same section. LMCache fs_l2_adapter.py
 // (4d69cdc4, Apache-2.0, Copyright LMCache contributors) informed only the
@@ -122,7 +123,11 @@ fn recovery_deletes_tmp_and_corrupt_headers_only() {
     let mut corrupt = Vec::new();
     for n in 10..15u32 {
         let (_, path) = plant_ours(&fx, n);
-        let f = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+        let f = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
         match n {
             10 => f.write_all_at(b"XXXX", 0).unwrap(), // magic
             11 => {

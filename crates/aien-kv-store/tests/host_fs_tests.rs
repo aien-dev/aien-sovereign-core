@@ -1,3 +1,4 @@
+#![cfg(feature = "std")]
 // The publication protocol, fault hooks and cache behaviour are written from
 // ADR 0003 sections 2.4, 3.4 and 7.4. LMCache fs_l2_adapter.py (4d69cdc4,
 // Apache-2.0, Copyright LMCache contributors) informed two ideas only: a
@@ -651,7 +652,11 @@ fn corrupt_header_region_on_load_is_refused_and_deleted() {
         let s = fx.open();
         let a = fx.put_full(&s, 1);
         let path = fx.object_file(&a.key);
-        let f = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+        let f = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
         let mut b = [0u8; 1];
         std::os::unix::fs::FileExt::read_exact_at(&f, &mut b, off).unwrap();
         f.write_all_at(&[b[0] ^ 0xFF], off).unwrap();
