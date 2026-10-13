@@ -994,7 +994,7 @@ fn fake_duplicate_and_after_cancel_faults_exist_to_test_callers() {
 }
 
 #[test]
-fn fake_stall_eviction_keeps_victims_unservable_until_the_unlink_returns() {
+fn fake_stall_eviction_delays_only_the_victim_unlink_after_publish() {
     let r = rig_with(|c| {
         c.quota_bytes = OBJ;
         c.unlink_us = 10;
@@ -1004,15 +1004,15 @@ fn fake_stall_eviction_keeps_victims_unservable_until_the_unlink_returns() {
     let job = r.store(2).unwrap();
     let (b, _) = r.chunk(2);
     r.fake.advance(500);
-    // The victim is selected and unservable, its bytes still count, the write
-    // has not started.
-    assert_eq!(r.fake.lookup(&[a]), vec![None]);
+    // The new object is published first; the victim is unservable but still
+    // on disk and counted until its (stalled) unlink returns.
+    assert_eq!(r.fake.lookup(&[a, b]), vec![None, Some(PAYLOAD)]);
     let c = r.fake.capacity();
     assert_eq!(c.evicting_bytes, OBJ);
-    assert_eq!(c.used_bytes, OBJ);
-    assert_eq!(c.reserved_bytes, OBJ);
-    assert_eq!(r.fake.stats().writes, 0);
-    assert_eq!(r.fake.job_stage(job), Some(JobStage::Submitted));
+    assert_eq!(c.used_bytes, 2 * OBJ);
+    assert_eq!(c.reserved_bytes, 0);
+    let v = r.poll_all();
+    assert_eq!(only_terminal(&v).job, job);
     r.fake.advance(10_000);
     assert_eq!(r.fake.lookup(&[a, b]), vec![None, Some(PAYLOAD)]);
     let c = r.fake.capacity();
@@ -1021,32 +1021,29 @@ fn fake_stall_eviction_keeps_victims_unservable_until_the_unlink_returns() {
         (0, OBJ, 0)
     );
     assert_eq!(r.fake.stats().evicted_bytes_total, OBJ);
-    let v = r.poll_all();
-    assert_eq!(only_terminal(&v).job, job);
 }
 
 #[test]
-fn fake_unlink_failure_fails_the_job_and_keeps_the_victim() {
+fn fake_unlink_failure_keeps_the_victim_and_the_published_store() {
     let r = rig_with(|c| c.quota_bytes = OBJ);
     let a = r.inject(1);
     r.script(JobScript::fault(Fault::UnlinkFail));
     let job = r.store(2).unwrap();
+    let (b, _) = r.chunk(2);
     let v = r.settle();
     let t = only_terminal(&v);
     assert_eq!(t.job, job);
-    assert!(matches!(
-        terminal_of(t),
-        Terminal::Failed(PlatformError::HardwareFault(_))
-    ));
+    assert_eq!(*terminal_of(t), Terminal::Done(JobStage::Durable));
     assert_eq!(
-        r.fake.lookup(&[a]),
-        vec![Some(PAYLOAD)],
-        "victim restored to service"
+        r.fake.lookup(&[a, b]),
+        vec![Some(PAYLOAD), Some(PAYLOAD)],
+        "victim restored to service, new object published"
     );
     let c = r.fake.capacity();
     assert_eq!(
         (c.used_bytes, c.reserved_bytes, c.evicting_bytes),
-        (OBJ, 0, 0)
+        (2 * OBJ, 0, 0),
+        "over quota until a later eviction"
     );
     assert_eq!(c.state, StoreState::Open);
 }
@@ -1280,19 +1277,17 @@ fn fake_max_objects_is_never_exceeded_after_store() {
 }
 
 #[test]
-fn fake_cancel_during_reclaim_keeps_victims() {
-    // DOCS SILENT on undoing an eviction (ADR 7.4): the narrowest rule is that a
-    // victim whose unlink has not run yet returns to service when its job ends
-    // before publishing.
+fn fake_cancel_before_publish_keeps_victims() {
+    // ADR 3.4 as amended: a store that does not become durable removes nothing.
     let r = rig_with(|c| {
         c.quota_bytes = OBJ;
         c.unlink_us = 10;
     });
     let a = r.inject(1);
-    r.script(JobScript::latency(100, 0).with(Fault::StallEviction(1_000)));
+    r.script(JobScript::latency(1_000, 0));
     let job = r.store(2).unwrap();
     r.fake.advance(100);
-    assert_eq!(r.fake.lookup(&[a]), vec![None], "victim is being evicted");
+    assert_eq!(r.fake.lookup(&[a]), vec![None], "victim is marked");
     assert_eq!(r.fake.cancel(job), CancelOutcome::Cancelled);
     let v = r.settle();
     assert_eq!(*terminal_of(only_terminal(&v)), Terminal::Cancelled);
@@ -1310,7 +1305,7 @@ fn fake_cancel_during_reclaim_keeps_victims() {
         c.unlink_us = 10;
     });
     let a = r.inject(1);
-    r.script(JobScript::latency(100, 0).with(Fault::StallEviction(1_000)));
+    r.script(JobScript::latency(1_000, 0));
     let job = r.store(2).unwrap();
     r.fake.advance(100);
     let report = r.fake.shutdown(0);
@@ -1324,7 +1319,7 @@ fn fake_cancel_during_reclaim_keeps_victims() {
 }
 
 #[test]
-fn fake_unlink_fail_stops_remaining_evictions() {
+fn fake_failed_victim_unlink_keeps_only_that_victim() {
     // Two small victims are needed for one full object.
     let small = 4096 + BLOCK as u64;
     let r = rig_with(|c| {
@@ -1335,24 +1330,22 @@ fn fake_unlink_fail_stops_remaining_evictions() {
     let b = inject_small(&r, 2);
     r.script(JobScript::fault(Fault::UnlinkFail));
     let job = r.store(3).unwrap();
+    let (k3, _) = r.chunk(3);
     let v = r.settle();
     let t = only_terminal(&v);
     assert_eq!(t.job, job);
-    assert!(matches!(
-        terminal_of(t),
-        Terminal::Failed(PlatformError::HardwareFault(_))
-    ));
+    assert_eq!(*terminal_of(t), Terminal::Done(JobStage::Durable));
     assert_eq!(
-        r.fake.lookup(&[a, b]),
-        vec![Some(BLOCK as u64), Some(BLOCK as u64)],
-        "the failed job evicts nothing"
+        r.fake.lookup(&[a, b, k3]),
+        vec![Some(BLOCK as u64), None, Some(PAYLOAD)],
+        "the first unlink failed, the second ran"
     );
     let c = r.fake.capacity();
     assert_eq!(
         (c.used_bytes, c.reserved_bytes, c.evicting_bytes, c.objects),
-        (2 * small, 0, 0, 2)
+        (small + OBJ, 0, 0, 2)
     );
-    assert_eq!(r.fake.stats().unlinks, 0);
+    assert_eq!(r.fake.stats().unlinks, 1);
 }
 
 #[test]
