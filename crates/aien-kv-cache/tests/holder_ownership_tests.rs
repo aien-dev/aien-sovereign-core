@@ -243,7 +243,10 @@ fn owner_append_on_shared_partial_block_copies_not_holder() {
     }
 
     assert_eq!(m.cow_faults(), faults_before + 1, "exactly one COW fault");
-    assert_ne!(new_block, blocks[1], "owner copied the shared partial block");
+    assert_ne!(
+        new_block, blocks[1],
+        "owner copied the shared partial block"
+    );
     let owner_blocks = table_blocks(&m, 1);
     assert_eq!(owner_blocks[0], blocks[0], "full prefix block stays shared");
     assert_eq!(owner_blocks[1], new_block);
@@ -339,7 +342,11 @@ fn holder_block_count_counts_distinct_blocks_of_holders_only() {
     assert_eq!(m.holder_block_count(), 0);
     admit(&mut m, 1, &vals(8, 1.0)); // 2 blocks
     admit(&mut m, 2, &vals(4, 5.0)); // 1 block
-    assert_eq!(m.holder_block_count(), 0, "ordinary sequences are not holders");
+    assert_eq!(
+        m.holder_block_count(),
+        0,
+        "ordinary sequences are not holders"
+    );
 
     let h1 = holder_id(1).unwrap();
     let h2 = holder_id(2).unwrap();
@@ -375,7 +382,9 @@ fn holder_partial_failure_keeps_inflight_destinations() {
 
     let jobs: Vec<u64> = (0..4).map(|i| holder_id(101 + i).unwrap()).collect();
     for (i, &job) in jobs.iter().enumerate() {
-        let got = m.fork_block_range(parent, job, i..i + 1).expect("sub-holder");
+        let got = m
+            .fork_block_range(parent, job, i..i + 1)
+            .expect("sub-holder");
         assert_eq!(got, vec![blocks[i]]);
         assert_eq!(m.get_block_table(job).unwrap().total_tokens, BS);
     }
@@ -387,7 +396,11 @@ fn holder_partial_failure_keeps_inflight_destinations() {
     m.free_sequence(jobs[2]).unwrap();
     m.free_sequence(parent).unwrap();
 
-    assert_eq!(m.free_block_count(), total - 3, "only the failed chunk returned");
+    assert_eq!(
+        m.free_block_count(),
+        total - 3,
+        "only the failed chunk returned"
+    );
     for (i, &b) in blocks.iter().enumerate() {
         let expect = if i == 2 { 0 } else { 1 };
         assert_eq!(ref_count(&m, b), expect, "block {i}");
