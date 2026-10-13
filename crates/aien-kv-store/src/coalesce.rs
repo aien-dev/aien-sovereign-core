@@ -84,65 +84,115 @@ pub struct CoalesceTable {
 
 impl CoalesceTable {
     pub fn new(limits: CoalesceLimits) -> Self {
-        let _ = limits;
-        unimplemented!("C5 green")
+        Self {
+            limits,
+            by_key: BTreeMap::new(),
+            jobs: BTreeMap::new(),
+            attached_total: 0,
+        }
     }
 
     pub fn limits(&self) -> CoalesceLimits {
-        unimplemented!("C5 green")
+        self.limits
     }
 
     /// Register `job` as the owner of `(share, key)` with its opener as waiter 1.
     /// If another job with waiters already owns the key, that job stays the
     /// coalescing target; `job` is still tracked for `attach`/`detach`/`close`.
     pub fn open(&mut self, share: Share, key: &ChunkKey, job: JobId) {
-        let _ = (share, key, job);
-        unimplemented!("C5 green")
+        let k = (share, key.0 .0);
+        let taken = self
+            .by_key
+            .get(&k)
+            .and_then(|j| self.jobs.get(j))
+            .is_some_and(|e| e.waiters > 0);
+        if !taken {
+            self.by_key.insert(k, job);
+        }
+        self.jobs.insert(
+            job,
+            Entry {
+                share,
+                key: k.1,
+                waiters: 1,
+            },
+        );
     }
 
     /// The job a new request for `(share, key)` may join: it exists and still
     /// has at least one waiter.
     pub fn find(&self, share: Share, key: &ChunkKey) -> Option<JobId> {
-        let _ = (share, key);
-        unimplemented!("C5 green")
+        let job = *self.by_key.get(&(share, key.0 .0))?;
+        (self.jobs.get(&job)?.waiters > 0).then_some(job)
     }
 
     /// True while any job (even one whose waiters all left) is registered for the key.
     pub fn has(&self, share: Share, key: &ChunkKey) -> bool {
-        let _ = (share, key);
-        unimplemented!("C5 green")
+        self.by_key.contains_key(&(share, key.0 .0))
     }
 
     /// Add one waiter; returns the waiter count now. Bounded.
     pub fn attach(&mut self, job: JobId) -> Result<u32, AttachRefused> {
-        let _ = job;
-        unimplemented!("C5 green")
+        let max_job = self.limits.max_waiters_per_job;
+        let max_total = self.limits.max_waiters_total;
+        let attached = self.attached_total;
+        let e = match self.jobs.get_mut(&job) {
+            Some(e) if e.waiters > 0 => e,
+            _ => return Err(AttachRefused::NoSuchJob),
+        };
+        if e.waiters >= max_job {
+            return Err(AttachRefused::JobFull);
+        }
+        if attached >= max_total {
+            return Err(AttachRefused::TotalFull);
+        }
+        e.waiters += 1;
+        self.attached_total += 1;
+        Ok(e.waiters)
     }
 
     /// Remove one waiter (the caller cancelled its own interest).
     pub fn detach(&mut self, job: JobId) -> Detach {
-        let _ = job;
-        unimplemented!("C5 green")
+        let Some(e) = self.jobs.get_mut(&job) else {
+            return Detach::Unknown;
+        };
+        match e.waiters {
+            0 | 1 => {
+                e.waiters = 0;
+                Detach::Last
+            }
+            n => {
+                e.waiters = n - 1;
+                self.attached_total -= 1;
+                Detach::Remaining(n - 1)
+            }
+        }
     }
 
     /// The job reached its terminal completion: forget it and release its
     /// attached waiters from the total.
     pub fn close(&mut self, job: JobId) {
-        let _ = job;
-        unimplemented!("C5 green")
+        let Some(e) = self.jobs.remove(&job) else {
+            return;
+        };
+        self.attached_total -= e.waiters.saturating_sub(1);
+        let k = (e.share, e.key);
+        if self.by_key.get(&k) == Some(&job) {
+            self.by_key.remove(&k);
+        }
     }
 
     pub fn waiters(&self, job: JobId) -> u32 {
-        let _ = job;
-        unimplemented!("C5 green")
+        self.jobs.get(&job).map_or(0, |e| e.waiters)
     }
 
     /// Attached waiters (beyond each job's first) over all jobs.
     pub fn attached_total(&self) -> u32 {
-        unimplemented!("C5 green")
+        self.attached_total
     }
 
+    /// Jobs currently tracked.
     pub fn jobs(&self) -> usize {
-        unimplemented!("C5 green")
+        self.jobs.len()
     }
 }
