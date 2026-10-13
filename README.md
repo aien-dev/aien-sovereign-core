@@ -28,13 +28,13 @@ Language rule: Rust is scaffolding, Omega is the destination, and C or assembly 
 
 ## Build and test
 
-Needs a Rust toolchain (1.85 or newer) on the DGX Spark or another Linux machine.
+Needs Rust 1.98.1, the version pinned in `rust-toolchain.toml` (rustup installs it on first use), on the DGX Spark or another Linux machine.
 
 ```bash
 git clone https://github.com/aien-dev/aien-sovereign-core
 cd aien-sovereign-core
-cargo test --workspace
-scripts/repro-build.sh -p aien-cli   # release build with machine-local paths removed (same digest on any machine/directory)
+cargo test --workspace -- --test-threads=1   # one test thread, as CI runs it
+scripts/repro-build.sh -p aien-cli   # release build with machine-local paths removed; build aien-cli on its own, because its digest changes with the other packages in the same cargo command (docs/release/F1-binary-digest-difference.md)
 # Comparison yardstick only (Modular MAX bridge, needs `mojo`); not part of any default or qualified build:
 cargo run -p aien-scheduler --features max-yardstick --bin bench_inference_stack
 ```
