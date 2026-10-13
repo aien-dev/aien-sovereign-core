@@ -382,9 +382,7 @@ fn holder_partial_failure_keeps_inflight_destinations() {
 
     let jobs: Vec<u64> = (0..4).map(|i| holder_id(101 + i).unwrap()).collect();
     for (i, &job) in jobs.iter().enumerate() {
-        let got = m
-            .fork_range(parent, i, 1, job)
-            .expect("sub-holder");
+        let got = m.fork_range(parent, i, 1, job).expect("sub-holder");
         assert_eq!(got, vec![blocks[i]]);
         assert_eq!(m.get_block_table(job).unwrap().total_tokens, BS);
     }
@@ -594,12 +592,12 @@ fn assemble_table_failure_leaves_every_holder_untouched() {
     let mut m = new_mgr(16);
     let (holders, blocks) = chunk_holders(&mut m);
     admit(&mut m, 9, &vals(4, 1.0));
-    let free = m.free_block_count();
-    let active = m.debug_active_blocks();
     let counts: Vec<usize> = (0..16).map(|b| ref_count(&m, b)).collect();
     let unknown = holder_id(77).unwrap();
     let pending = holder_id(78).unwrap();
     m.allocate_sequence(pending, &[0, 1, 2, 3]).unwrap(); // still loading
+    let free = m.free_block_count();
+    let active = m.debug_active_blocks();
     let counts_p: Vec<usize> = (0..16).map(|b| ref_count(&m, b)).collect();
 
     let allow = SuffixPolicy::AllowPartialTail;
@@ -612,15 +610,15 @@ fn assemble_table_failure_leaves_every_holder_untouched() {
     // A real sequence id is not a holder.
     assert!(m.assemble_table(5, &[holders[0], 9], allow).is_err());
     // A holder that is not complete (prefill never fenced).
-    assert!(m
-        .assemble_table(5, &[holders[0], pending], allow)
-        .is_err());
+    assert!(m.assemble_table(5, &[holders[0], pending], allow).is_err());
     // A holder listed twice would double its blocks.
     assert!(m
         .assemble_table(5, &[holders[0], holders[0]], allow)
         .is_err());
     // A partial block in the middle leaves a gap in positions.
-    assert!(m.assemble_table(5, &[holders[2], holders[0]], allow).is_err());
+    assert!(m
+        .assemble_table(5, &[holders[2], holders[0]], allow)
+        .is_err());
     // The suffix policy: a partial tail is refused under FullBlocksOnly.
     assert!(m
         .assemble_table(5, &holders, SuffixPolicy::FullBlocksOnly)
