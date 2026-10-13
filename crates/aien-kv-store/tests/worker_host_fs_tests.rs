@@ -251,3 +251,94 @@ fn worker_over_host_fs_shutdown_drains_and_the_directory_reopens() {
     }
     reopened.audit().unwrap();
 }
+
+#[test]
+fn worker_over_host_fs_shutdown_with_a_stalled_job_then_restart_recovers() {
+    let r = start(|_| {});
+    let (done, _h0, _m0) = submit_store(&r, 40);
+    collect_terminals(&r.worker, &[done]);
+    // The next write stalls inside fsync(file) for longer than the deadline.
+    r.fx.faults.arm(
+        aien_kv_store::host_fs::Boundary::P2FsyncFile,
+        aien_kv_store::host_fs::FaultAction::Stall(Duration::from_millis(1_500)),
+    );
+    let (stalled, handle, _m) = submit_store(&r, 41);
+    wait_for("the write reaches fsync", || {
+        r.fx.faults
+            .fired(aien_kv_store::host_fs::Boundary::P2FsyncFile)
+            == 1
+    });
+    let t0 = Instant::now();
+    let report = r.worker.shutdown(100);
+    assert!(
+        t0.elapsed() < Duration::from_millis(1_200),
+        "shutdown returns by its deadline, not after the stall"
+    );
+    assert!(
+        report.unfinished.iter().any(|u| u.job == stalled),
+        "the stalled job is reported unfinished: {report:?}"
+    );
+    assert!(
+        handle.is_held(),
+        "its source is not released while I/O may run"
+    );
+    // Once the stall ends the job ends too, with exactly one terminal, and the
+    // source is released.
+    let v = collect_terminals(&r.worker, &[stalled]);
+    assert_eq!(
+        v.iter()
+            .filter(|c| c.job == stalled && c.terminal.is_some())
+            .count(),
+        1
+    );
+    wait_for("source released", || !handle.is_held());
+
+    // Restart: leave debris a crash would leave, reopen, recover, restore.
+    let Rigged { fx, store, worker } = r;
+    drop(worker);
+    drop(store);
+    std::fs::write(fx.root().join("tmp").join("leftover.1.2.3.part"), b"x").unwrap();
+    let (junk, _) = fx.chunk(42, 8);
+    std::fs::write(fx.object_file(&junk), vec![0xAB; 5000]).unwrap();
+    let reopened = Arc::new(fx.open_raw(|_| {}));
+    let p = recover_all(&reopened);
+    assert!(p.done && !p.failed, "{p:?}");
+    assert_eq!((p.tmp_deleted, p.corrupt_deleted), (1, 1));
+    assert_eq!(reopened.capacity().state, StoreState::Open);
+    assert!(tmp_files(fx.root()).is_empty());
+    let drive = {
+        let s = reopened.clone();
+        move || {
+            s.pump();
+        }
+    };
+    let worker = StorageWorker::spawn(
+        reopened.clone(),
+        WorkerConfig {
+            idle_poll: Duration::from_micros(200),
+            start_paused: false,
+            ..WorkerConfig::default()
+        },
+        drive,
+    )
+    .expect("spawn");
+    for n in [40u32, 41] {
+        let (key, header) = fx.chunk(n, 8);
+        let mem = Mem::new(2, 0xEE);
+        let (dst, _) = mem.dest(2);
+        let job = worker
+            .submit_load(key, &header, dst, Incarnation::new(7000 + n as u64, 1))
+            .expect("restore after restart");
+        let v = collect_terminals(&worker, &[job]);
+        assert_eq!(
+            v.iter()
+                .find(|c| c.job == job && c.terminal.is_some())
+                .unwrap()
+                .terminal,
+            Some(Terminal::Done(JobStage::Completed)),
+            "object {n}"
+        );
+        assert_eq!(mem.bytes(), expected_payload(n, 8), "object {n} bytes");
+    }
+    reopened.audit().unwrap();
+}
