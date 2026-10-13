@@ -44,3 +44,33 @@ command, free -g), `<name>.raw`, `<name>.err`, `<name>.rc`, `<name>.end`, `<name
 - One checkpoint, greedy only, 16 new tokens, 3 traced layers; no long-context parity beyond
   657 + 16 tokens; no batched prefill; no serving reservation/prepare/seal in these runs.
 - A's archive is linked through the AIEN_OMEGA_GPU_LIB development override (not a qualified build).
+
+# Cut 7 (builder F): experts and attention projections as FP8 on omega's grouped GEMV
+
+Omega: own30b/integration da9a3d67 (moe-window + fp8-kernels), built with PHYSICS_DIR =
+physics-own30b-k (6d7cf0d4), archive sha256 c3df6d12... linked through AIEN_OMEGA_GPU_LIB
+(development override). sc commits cfbb388 (engine FP8 path), b2168a9 (check `--weights`).
+`--weights fp8-experts`: experts as the checkpoint's e4m3 bytes + bf16 block-128 scales,
+one grouped gate|up launch (8 experts, shared row) and one grouped down launch (8 rows) per
+layer. `--weights fp8`: also q|k|v (one [5120][2048] FP8 GEMV) and o ([2048][4096]).
+Control for the kernel: `omega_gpu_fp8_test_set_mutant(1)` (scales dropped).
+
+| run | weights | spin us | parity attn cosine(min) L0/23/47 | moe cosine(min) | controls | tokens | decode | resident | load |
+|---|---|---|---|---|---|---|---|---|---|
+| int-bf16 | bf16 (control: merged archive, old path) | 0 | 0.999986 / 0.999780 / 0.999997 | 0.999993+ | routing 0.37, skew -0.02 CAUGHT | IDENTICAL x2 | 6.8-7.8 tok/s | 60.42 GB | 63.8 s |
+| fp8-experts | FP8 experts, bf16 attention | 0 | same as bf16 | 1.000000 (p95_rel 0.0000) | routing 0.37, scales-dropped 0.85 CAUGHT | IDENTICAL x4 | 14.3-16.5 tok/s | 31.43 GB | 42.4 s |
+| fp8-all | FP8 experts + q/k/v/o | 0 | 0.999999 / 0.999957 / 0.999998 | 1.000000 | routing 0.37, scales-dropped 0.86 CAUGHT | IDENTICAL x4 | 19.3-23.3 tok/s | 30.53 GB | 16.2 s |
+| fp8-all-spin2000 | same | 2000 | same | 1.000000 | both CAUGHT | IDENTICAL x4 | 28.8-31.7 tok/s | 30.53 GB | 16.6 s |
+
+Per step (p4-long, 657-token context, spin 0): bf16 path attention 40.7 ms + experts 87.8 ms;
+fp8-experts attention 36.1 + experts 16.7; fp8-all attention 16.8 + experts 17.0; lm_head 5.4-5.8;
+host 7-14 ms. Launches per token 913 -> 241 (48 x (3 attention + 2 expert) + lm_head).
+With spin 2000 us: attention 8.3-10.8 ms, experts 12.9-14.7 ms, 31.5-34.7 ms/token.
+
+The MoE parity against the exact FP8 oracle is 1.000000 because the kernel multiplies the same
+e4m3 x bf16-scale products in f32 that the oracle does (the bf16 path carried a bf16 rounding
+of every weight). Attention parity improved for the same reason. Greedy tokens unchanged.
+
+Limits: same as cut 3 (greedy, 16 new tokens, 3 traced layers, up to 673 tokens of context);
+the FP8 kernel's own shape/depth/CTA sweep is A's evidence in omega (OWN30B-FP8-GEMV-*), not
+re-measured here; lm_head stays bf16 (the checkpoint ships it bf16).
