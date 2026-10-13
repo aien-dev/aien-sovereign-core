@@ -751,7 +751,18 @@ fn chip(a: &Args) {
         let same = outs[0].tokens == outs[1].tokens;
         let (cos, maxd) = logits_agreement(&outs[0].logits0, &outs[1].logits0);
         let (_, margin) = top2_margin(&outs[1].logits0);
-        let ok = same && cos > 0.99999;
+        // The batched path routes on the host and chunk 1 on the device, so their logits drift a little
+        // with context (tokens must still agree); the GEMM itself must equal the grouped GEMV bit for bit.
+        let mut gemm_eq_gemv = true;
+        if engine.prefill_gemm {
+            engine.prefill_gemm = false;
+            let g = run_prompt(&mut engine, &ids, aien_inference_abi::qwen3_moe_omega::PREFILL_CHUNK, a.new_tokens, &config.eos_token_ids).expect("long prompt gemv");
+            engine.prefill_gemm = true;
+            say(prefill_line("LONG gemv chunk 8", ids.len(), &g));
+            gemm_eq_gemv = g.logits0 == outs[0].logits0 && g.tokens == outs[0].tokens;
+            say(format!("LONG GEMM chunk {chunk} vs GEMV chunk 8: first-step logits and tokens bit-identical -> {}", if gemm_eq_gemv { "PASS" } else { "FAIL" }));
+        }
+        let ok = same && cos > 0.999 && gemm_eq_gemv;
         say(format!(
             "LONG chunk {chunk} vs 1 ({} tokens): tokens {} ; first-step logits cosine {cos:.7} max abs diff {maxd:.2e} (chunk-1 top-2 margin {margin:.4}) ; {:.1} -> {:.1} ms/token -> {}",
             ids.len(),
