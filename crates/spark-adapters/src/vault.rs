@@ -10,20 +10,24 @@ static RESOLVED_SECRETS_CACHE: OnceLock<RwLock<HashMap<String, (Instant, String)
 static SCRUB_TARGETS_CACHE: OnceLock<RwLock<(Instant, Vec<String>)>> = OnceLock::new();
 static TEST_SECRETS: OnceLock<RwLock<HashMap<String, String>>> = OnceLock::new();
 
+/// How long vault key lists, resolved secrets and scrub targets are cached before the TPM vault
+/// is asked again.
+const CACHE_TTL: Duration = Duration::from_secs(60);
+
 /// List all secret keys currently registered in the hardware TPM vault.
-/// Results are cached for 10 seconds to eliminate redundant TPM query latency.
+/// Results are cached for `CACHE_TTL` (60 seconds) to avoid repeated TPM queries.
 pub fn list_vault_keys() -> Vec<String> {
-    let cache_lock = VAULT_CACHE
-        .get_or_init(|| RwLock::new((Instant::now() - Duration::from_secs(60), Vec::new())));
+    let cache_lock =
+        VAULT_CACHE.get_or_init(|| RwLock::new((Instant::now() - CACHE_TTL, Vec::new())));
 
     if let Ok(read_guard) = cache_lock.read() {
-        if read_guard.0.elapsed() < Duration::from_secs(60) {
+        if read_guard.0.elapsed() < CACHE_TTL {
             return read_guard.1.clone();
         }
     }
 
     if let Ok(mut write_guard) = cache_lock.write() {
-        if write_guard.0.elapsed() < Duration::from_secs(60) {
+        if write_guard.0.elapsed() < CACHE_TTL {
             return write_guard.1.clone();
         }
         let keys = fetch_vault_keys_raw();
@@ -60,7 +64,7 @@ fn fetch_secret_raw(key_name: &str) -> Option<String> {
 }
 
 /// Dynamically resolve a secret token.
-/// Checks process environment first, then in-memory test secrets, then cache (10s TTL), then hardware TPM vault.
+/// Checks process environment first, then in-memory test secrets, then cache (`CACHE_TTL`, 60 seconds), then hardware TPM vault.
 pub fn resolve_secret(key_name: &str) -> Option<String> {
     if key_name.trim().is_empty() {
         return None;
@@ -88,11 +92,11 @@ pub fn resolve_secret(key_name: &str) -> Option<String> {
         }
     }
 
-    // 3. Cache lookup with 10s TTL
+    // 3. Cache lookup (`CACHE_TTL`)
     let cache_lock = RESOLVED_SECRETS_CACHE.get_or_init(|| RwLock::new(HashMap::new()));
     if let Ok(guard) = cache_lock.read() {
         if let Some((fetched_at, val)) = guard.get(key_name) {
-            if fetched_at.elapsed() < Duration::from_secs(60) {
+            if fetched_at.elapsed() < CACHE_TTL {
                 return Some(val.clone());
             }
         }
@@ -156,7 +160,7 @@ pub fn register_test_secret(key_name: &str, value: &str) {
     // Incremental update to scrub targets cache so valid cached TPM keys are preserved
     if let Some(scrub_lock) = SCRUB_TARGETS_CACHE.get() {
         if let Ok(mut guard) = scrub_lock.write() {
-            if guard.0.elapsed() < Duration::from_secs(60) {
+            if guard.0.elapsed() < CACHE_TTL {
                 let trimmed = value.trim();
                 if trimmed.len() >= 6 {
                     if !guard.1.contains(&trimmed.to_string()) {
@@ -170,7 +174,7 @@ pub fn register_test_secret(key_name: &str, value: &str) {
                 }
                 guard.0 = Instant::now();
             } else {
-                guard.0 = Instant::now() - Duration::from_secs(60);
+                guard.0 = Instant::now() - CACHE_TTL;
                 guard.1.clear();
             }
         }
@@ -192,19 +196,19 @@ pub fn remove_test_secret(key_name: &str) {
 }
 
 /// Retrieve all active secret values of length >= 6 for outbound scrubbing.
-/// Cached in memory with a 10-second TTL.
+/// Cached in memory for `CACHE_TTL` (60 seconds).
 pub fn get_scrub_targets() -> Vec<String> {
-    let cache_lock = SCRUB_TARGETS_CACHE
-        .get_or_init(|| RwLock::new((Instant::now() - Duration::from_secs(60), Vec::new())));
+    let cache_lock =
+        SCRUB_TARGETS_CACHE.get_or_init(|| RwLock::new((Instant::now() - CACHE_TTL, Vec::new())));
 
     if let Ok(read_guard) = cache_lock.read() {
-        if read_guard.0.elapsed() < Duration::from_secs(60) {
+        if read_guard.0.elapsed() < CACHE_TTL {
             return read_guard.1.clone();
         }
     }
 
     if let Ok(mut write_guard) = cache_lock.write() {
-        if write_guard.0.elapsed() < Duration::from_secs(60) {
+        if write_guard.0.elapsed() < CACHE_TTL {
             return write_guard.1.clone();
         }
 
