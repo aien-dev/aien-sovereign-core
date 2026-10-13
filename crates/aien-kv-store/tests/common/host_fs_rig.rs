@@ -469,7 +469,7 @@ pub fn completion_of(v: &[Completion], job: JobId) -> Completion {
 pub fn recover_all(s: &HostFsStore) -> aien_kv_store::RecoveryProgress {
     for _ in 0..1_000_000 {
         let p = s.recover_step(50);
-        if p.done {
+        if p.done || p.failed {
             return p;
         }
     }

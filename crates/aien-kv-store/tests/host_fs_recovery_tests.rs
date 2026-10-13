@@ -368,7 +368,11 @@ fn recovery_keeps_admission_closed_until_walk_completes() {
 }
 
 #[test]
-fn deleting_one_indexed_object_does_not_reopen_admission_with_unscanned_remainder() {
+fn unindexed_files_never_refuse_a_store_and_are_never_evicted_for_one() {
+    // ADR 4.1 as amended (Grok C4 P2-5): unindexed files count toward bytes,
+    // not toward the index cap, and their presence alone never refuses a
+    // store. With no purge pending, room comes from evicting indexed objects
+    // (LRU); the unindexed remainder is left to the purge.
     let fx = Fx::new();
     fx.prime();
     let keys: Vec<ChunkKey> = (1..=4).map(|n| plant_ours(&fx, n).0).collect();
@@ -388,41 +392,31 @@ fn deleting_one_indexed_object_does_not_reopen_admission_with_unscanned_remainde
         .find(|k| s.lookup(&[*k])[0].is_some())
         .expect("one indexed key");
 
-    assert_eq!(s.delete(&[indexed]), 1);
-    // Marked, not yet unlinked: the bytes are still there and still counted.
-    let cap = s.capacity();
-    assert_eq!(cap.used_bytes, 4 * OBJ);
-    assert_eq!(cap.evicting_bytes, OBJ);
-    let (job, _) = fx.submit(&s, 50, 8);
-    assert_eq!(
-        job.unwrap_err(),
-        PlatformError::OutOfMemory,
-        "removing the entry does not reopen admission"
-    );
-
-    // After the unlink returned, the bytes are free, but the unindexed remainder
-    // still holds the object cap: admission stays closed until it is accounted away.
-    s.run_until_idle();
-    let cap = s.capacity();
-    assert_eq!(cap.used_bytes, 3 * OBJ);
-    assert_eq!(cap.unindexed_bytes, 3 * OBJ);
-    assert_eq!((cap.objects, cap.unindexed_objects), (0, 3));
-    assert_eq!(cap.state, StoreState::Open);
-    let (job, _) = fx.submit(&s, 50, 8);
-    assert_eq!(job.unwrap_err(), PlatformError::OutOfMemory);
-    // Two objects' worth would not fit the bytes either: the remainder is not evictable.
-    assert!(cap.used_bytes + 2 * OBJ > cap.quota_bytes);
-
-    // The purge pass removes the remainder; then it admits.
-    s.start_purge();
-    s.run_until_idle();
-    let cap = s.capacity();
-    assert_eq!((cap.used_bytes, cap.unindexed_objects), (0, 0));
     let put = fx.put_full(&s, 50);
     assert_eq!(
         terminal_of(&put.completions, put.job.unwrap()),
-        Terminal::Done(JobStage::Durable)
+        Terminal::Done(JobStage::Durable),
+        "the indexed object is the victim"
     );
+    assert_eq!(
+        s.lookup(&[indexed, put.key]),
+        vec![None, Some(FULL_PAYLOAD)]
+    );
+    let cap = s.capacity();
+    assert_eq!(cap.used_bytes, 4 * OBJ);
+    assert_eq!((cap.objects, cap.unindexed_objects), (1, 3));
+    assert_eq!(cap.unindexed_bytes, 3 * OBJ, "the remainder is untouched");
+
+    // While a purge is pending only free headroom admits: none here.
+    s.start_purge();
+    let (job, _) = fx.submit(&s, 51, 8);
+    assert_eq!(job.unwrap_err(), PlatformError::OutOfMemory);
+
+    // The purge pass removes the remainder and nothing else.
+    s.run_until_idle();
+    let cap = s.capacity();
+    assert_eq!((cap.used_bytes, cap.unindexed_objects), (OBJ, 0));
+    assert_eq!(s.lookup(&[put.key])[0], Some(FULL_PAYLOAD));
     s.audit().unwrap();
 }
 

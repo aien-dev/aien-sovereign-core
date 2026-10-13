@@ -147,7 +147,10 @@ pub struct Capacity {
 /// Where a resumable recovery pass stands (ADR 4.1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct RecoveryProgress {
+    /// The walk finished and admission opened (or the store is `Degraded`).
     pub done: bool,
+    /// The store is `Failed`: recovery stopped and is never `done` (Grok C4 P2-6).
+    pub failed: bool,
     pub indexed: u64,
     pub bytes: u64,
     pub unindexed_objects: u64,

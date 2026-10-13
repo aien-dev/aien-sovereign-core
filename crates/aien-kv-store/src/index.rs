@@ -1,8 +1,8 @@
 //! The in-memory object index of the host filesystem adapter (ADR 0003
 //! section 4.1, finding 8).
 //!
-//! One entry per published or recovered object file: 56 bytes of state
-//! (`IndexEntry`), capped by `max_objects` (65536 by default, 3 670 016 bytes
+//! One entry per published or recovered object file: 64 bytes of state
+//! (`IndexEntry`), capped by `max_objects` (65536 by default, 4 194 304 bytes
 //! of entries). The index also keeps the aggregates admission needs in O(1):
 //! total physical bytes, bytes marked for removal, and bytes that are busy
 //! (pinned or being loaded), so `evictable()` never scans.
@@ -22,8 +22,8 @@ pub const FLAG_EVICTING: u32 = 2;
 /// Renamed into place but the directory sync failed (ADR 2.4 P4).
 pub const FLAG_INDETERMINATE: u32 = 4;
 
-/// Bytes of one index entry (ADR 4.1: "56 bytes per entry").
-pub const INDEX_ENTRY_BYTES: usize = 56;
+/// Bytes of one index entry (ADR 4.1 as amended: 64 bytes per entry, payload length 64-bit).
+pub const INDEX_ENTRY_BYTES: usize = 64;
 
 /// What the index knows about one object file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -35,9 +35,8 @@ pub struct IndexEntry {
     /// Nanoseconds since the Unix epoch: file mtime at recovery or publish
     /// time, raised to the load time by a successful load (in memory only).
     pub mtime_ns: u64,
-    /// Payload bytes (`lookup`'s answer). Saturated for foreign objects, whose
-    /// payload size is not interpreted.
-    pub payload_len: u32,
+    /// Payload bytes (`lookup`'s answer), the record header's u64 `payload_len`.
+    pub payload_len: u64,
     pub flags: u32,
 }
 
@@ -60,7 +59,7 @@ impl IndexEntry {
 struct Body {
     phys_bytes: u64,
     mtime_ns: u64,
-    payload_len: u32,
+    payload_len: u64,
     flags: u32,
 }
 

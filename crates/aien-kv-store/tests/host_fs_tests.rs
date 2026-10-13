@@ -104,8 +104,9 @@ fn malformed_store_id_opens_failed_and_serves_nothing() {
     assert_eq!(s.lookup(&[h.chunk_key]), vec![None]);
     let (job, _) = fx.submit(&s, 1, 8);
     assert_eq!(job.unwrap_err(), PlatformError::DeviceUnavailable);
-    // A caller looping on recovery must terminate.
-    assert!(s.recover_step(1).done);
+    // A caller looping on recovery must stop: Failed is reported, never done.
+    let p = s.recover_step(1);
+    assert!(p.failed && !p.done);
     assert_eq!(s.capacity().state, StoreState::Failed);
 }
 
@@ -1417,9 +1418,9 @@ fn entry(k: u8, phys: u64, mtime: u64, flags: u32) -> IndexEntry {
 }
 
 #[test]
-fn index_entry_is_56_bytes_and_the_cap_is_3670016() {
+fn index_entry_is_64_bytes_and_the_cap_is_4_mib() {
     assert_eq!(std::mem::size_of::<IndexEntry>(), INDEX_ENTRY_BYTES);
-    assert_eq!(INDEX_ENTRY_BYTES * 65536, 3_670_016);
+    assert_eq!(INDEX_ENTRY_BYTES * 65536, 4_194_304);
 }
 
 #[test]
