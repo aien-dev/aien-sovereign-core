@@ -65,19 +65,19 @@
       "children": [
         {
           "digest": "4e7f370019e67f6c71565d1544530851eb1b3b1bed61c2712f4ac7d9614a89bf",
-          "last_commit": "6bbe2ec",
+          "last_commit": "cb15198",
           "name": "crates/aien-allen",
           "purpose": "ALLEN identity gate: resolve-only subject check, host pin record, deployment record (ADR 0035). "
         },
         {
           "digest": "6c37f78b1de14405138ced998758a131ea3d061f11ac588faaa4f343a6417dee",
-          "last_commit": "72f0d0d",
+          "last_commit": "cb15198",
           "name": "crates/aien-allen-memory",
           "purpose": "ALLEN scoped memory store: scopes enforced at recall, inspect/correct/export, key-destroying for"
         },
         {
           "digest": "cd47dee5280a769dfc65a68275cc8a78b68392024f4d2bf25bd57383bce5c32a",
-          "last_commit": "37039ec",
+          "last_commit": "cb15198",
           "name": "crates/aien-allen-profile",
           "purpose": "ALLEN persona profile v1: versioned, user-editable profile bound to the engaged ALLEN identity; "
         },
@@ -89,13 +89,13 @@
         },
         {
           "digest": "01512835323cb9b9c7033f1fbf440873db0b8cd6304e55f031b61ebcf4ceda7b",
-          "last_commit": "536eb93",
+          "last_commit": "cb15198",
           "name": "crates/aien-scheduler/src/bin",
           "purpose": ""
         },
         {
           "digest": "09b15b5a4f946ac42c3e538c852bf8a3e870b72e07efd4686b423113c6fa1260",
-          "last_commit": "885e42f",
+          "last_commit": "cb15198",
           "name": "crates/spark-cockpit-rs",
           "purpose": ""
         },
@@ -107,7 +107,7 @@
         },
         {
           "digest": "f432725dc4aef6ecd69eea043123fbb7593a9d29af97d70a561f5f355a8ad180",
-          "last_commit": "f97dc90",
+          "last_commit": "cb15198",
           "name": "skills",
           "purpose": ""
         },
@@ -119,14 +119,14 @@
         }
       ],
       "children_root": "sha256:7310addc6b1f1e92a092020e6b6d98ddd17592bfc102b5ce6a656ff99c0133e5",
-      "compiled_at": "2026-10-13T03:32:51Z",
+      "compiled_at": "2026-10-13T11:01:04Z",
       "compiler": "crumb-compile/1",
-      "digest": "sha256:ce3d3d532cecfec523a751345a87f586b298df76ca935977c552b717563a1ca5",
+      "digest": "sha256:718579aad926814ee45a0d268347838e5eb8f750d5623a8936b772da3ffdbeac",
       "evidence_files": 439,
       "evidence_root": "sha256:342c5ebcb210cb45fa14616a90393f4872b4a086c7e58810a03aef42064ea1df",
       "files": 4301,
-      "generated_at_commit": "a593e352ac03e6333a0a1cd0020280155f875110",
-      "source_tree": "sha256:795ed91af5c49cfbcd3787b225d242f4a809463e0f0c296f7e47b6f2ef5ba733"
+      "generated_at_commit": "3d42fd1ed14b054015f046f48130db05f00b999c",
+      "source_tree": "sha256:e82125cf396203484b334e6cf12727b4d6b4c7a6abff575e4dc120ab468835b8"
     }
   },
   "history": [],
