@@ -520,3 +520,236 @@ Every row is **PLANNED** until its cut merges with a green run and a receipt; no
 - `arith_id` is a coarse label and `KV_ARITH_EPOCH` is a human-bumped counter backed by a pinned-bytes test; a numeric change the pinned test does not exercise could slip through (UNKNOWN residual risk; the test model should cover every op the production path uses).
 - `Indeterminate` publication means a power loss right after may lose the object; that is a cache miss, never a wrong answer.
 
+
+## 12. C1 delta (exact changes to the implemented crate)
+
+C1 is implemented in `crates/aien-kv-store` at ce5d9eb (identity.rs, record.rs, validate.rs, error.rs, tests/golden/kv_record_v1.json, 4 vectors, `vectors_sha256 = 7c532a54...b89c` in tests/golden/README.md; all VERIFIED by reading the files). The delta below is the whole list; it lands as one red-first cut **C1b** (CUTS.md) before any later cut builds on C1. `format_version` stays 1 and the domain strings `AIEN-PKV-NS-V1\0`, `AIEN-PKV-CHUNK-V1\0` stay: no object has ever been written (the crate has no filesystem adapter, VERIFIED by listing `src/`) and the aienos pin does not exist yet (no `native/kv` in aienos at 5429602, VERIFIED), so no stored byte can be misread. The golden vectors are regenerated and the vectors hash changes.
+
+### Identity changes
+
+| # | change | file |
+|---|---|---|
+| I1 | `NamespaceFields` gains `compute_config_digest: [u8; 32]` | identity.rs |
+| I2 | `namespace_id()` appends `compute_config_digest` (32 raw bytes) after field 13 (`sharing_namespace`, u16 length + bytes); every earlier field keeps its position and encoding | identity.rs |
+| I3 | new `ComputeConfig { num_heads: u32, hidden_dim: u64, intermediate_dim: u64, vocab_size: u64, rms_norm_eps: f32, tie_word_embeddings: bool, hidden_act: HiddenAct, arith_id: &str (at most 255 bytes), arith_epoch: u32 }` and `ComputeConfig::digest() -> Result<[u8; 32], KvError>` = `SHA-256("AIEN-PKV-CFG-V1\0" || num_heads u32le || hidden_dim u64le || intermediate_dim u64le || vocab_size u64le || rms_norm_eps.to_bits() u32le || tie u8 || hidden_act u8 || arith_id u8-len + bytes || arith_epoch u32le)` | identity.rs |
+| I4 | new `HiddenAct` enum, `Silu = 1` | identity.rs |
+| I5 | `NamespaceFields` stays `Copy`; `rope_theta` encoding is unchanged | identity.rs |
+| I6 | golden vectors: each of the 4 inputs gains the 9 `ComputeConfig` values and the digest; 2 new vectors: `rms-norm-eps-1e-6-only` (identical to a 1e-5 vector except `rms_norm_eps`, namespace differs) and `arith-epoch-2` | tests/golden/kv_record_v1.json |
+| I7 | `vectors_sha256` re-pinned in `tests/golden/README.md` | tests/golden/README.md |
+
+The conversion from `ModelConfig` is **not** in C1 (the crate has no dependency on `aien-abi-core`); it is `ComputeConfig::from(&ModelConfig)` in `aien-runtime`, exhaustive with no `..` (section 1.2.1), delivered in C6a/C6.
+
+### Header and record byte changes
+
+| # | change | offsets / sizes | file |
+|---|---|---|---|
+| H1 | the 256-byte header struct is **unchanged**: offsets 0 to 255, every field, `header_sha256 = SHA-256(bytes 0..224)`, `header_len = 256` | 0..256 | record.rs |
+| H2 | a record file is `header region (4096 B) || payload`; new consts `HEADER_REGION_LEN = 4096`, `PAYLOAD_OFFSET = 4096`, `MAX_SEGMENTS = 120`; `HEADER_LEN` stays 256 | file layout | record.rs |
+| H3 | bytes `256 .. 256 + 32 * n_seg` of the region hold the segment digest table (SHA-256 of each segment); all other bytes up to 4095 are zero | 256..4096 | record.rs |
+| H4 | `payload_sha256` (offset 184) becomes the root `SHA-256("AIEN-PKV-PAYLOAD-V1\0" || seg_digest_0 || ... )`; new `payload_root(&[[u8;32]]) -> [u8;32]` | 184..216 meaning | record.rs |
+| H5 | `RecordHeader::encode` keeps returning 256 bytes; new `encode_region(&self, seg_digests: &[[u8;32]]) -> Result<[u8; 4096], KvError>` | n/a | record.rs |
+| H6 | `RecordHeader::decode` and `validate_record` take at least 4096 bytes (`Truncated` below that); file size rule becomes `4096 + payload_len` | n/a | record.rs, validate.rs |
+| H7 | new `KvError` variants, in check order: `BadPadding` (nonzero byte in the region outside struct and table), `SegmentRootMismatch` (root recomputed from the table differs from offset 184), `TooManySegments` (`n_seg > 120`); inserted after `BadFlags`; `FileSizeMismatch` stays last | n/a | error.rs, validate.rs |
+| H8 | new `segment_bytes(&NamespaceFields) -> u64` (host: `layout.block_stride`; native: `payload_len`, one segment) and `segment_count(...)`; `expected_payload_len` is unchanged | n/a | identity.rs |
+| H9 | validation still performs zero heap allocations (the root is streamed through one `Sha256`) | n/a | validate.rs |
+
+Red tests for C1b (PLANNED): `golden_vectors_include_compute_config_digest`, `rms_norm_eps_alone_changes_the_namespace`, `compute_config_digest_changes_with_each_field` (9 mutators), `namespace_changes_when_any_field_changes` (now 14 mutators), `header_struct_bytes_0_to_255_unchanged_by_the_region` (the old 256-byte vectors still match at offsets 0..255 except the re-derived namespace and root fields), `header_region_roundtrip_4096`, `validate_refuses_nonzero_padding`, `validate_refuses_segment_root_mismatch`, `validate_refuses_more_than_120_segments`, `file_size_is_4096_plus_payload`, `validate_refuses_before_any_allocation` (extended to the three new errors, still zero allocations).
+
+## 13. C2 delta (KvStore trait and fake adapter)
+
+The trait is not implemented yet, so this lists changes against the sketch of the first ADR revision; the sketch in section 3.2 is the revised one.
+
+| # | change | finding |
+|---|---|---|
+| T1 | `submit_store` does no eviction and no I/O: it only reserves (`reserved_bytes += payload + 4096`) under the index mutex; reclamation is a worker state `Reclaiming` that precedes publication | 7 |
+| T2 | `delete` only marks keys; the unlink runs on the worker; bytes are subtracted after the unlink returns | 7 |
+| T3 | `Capacity` gains `state`, `reserved_bytes`, `evicting_bytes`, `unindexed_bytes`, `unindexed_objects`, per-class `restore_ops/park_ops` and caps, `max_waiters_per_job`; `inflight_ops/max_inflight_ops` are replaced by the per-class pair | 8, 9 |
+| T4 | `recover(budget) -> RecoveryReport` becomes `recover_step(slice_ms) -> RecoveryProgress`; `lookup` returns misses and `submit_*` refuses with `QueueFull` while `state == Recovering` | 8 |
+| T5 | `Completion` gains `terminal: Option<Terminal>` and `publish: PublishOutcome`; **exactly one terminal completion per accepted job**, including cancelled and failed ones | 5, 9 |
+| T6 | `cancel` returns immediately but the destination is releasable only after the terminal completion is polled | 5 |
+| T7 | publication semantics: rename succeeded and `fsync(dir)` failed yields `Published` with `PublishOutcome::Indeterminate`, the object is indexed and served, the adapter enters `Degraded` (no new stores until reopen); a failure before the rename publishes nothing | 10 |
+| T8 | `attach_waiter(job)` with a per-job and a total bound | 9 |
+| T9 | completion slots (three per job) are reserved at submit; `poll` never overflows | 9 |
+| T10 | `shutdown(intake_deadline_ms) -> DrainReport { published, cancelled, unfinished }`; the worker keeps `Arc`s of the manager and buffers until each job is terminal; nothing is freed to meet the deadline | 11 |
+| T11 | `PinnedSource` gains `tail_valid_tokens: u32` (rows at or above it in the last block are written as zero, section 2.2) | 3 |
+| T12 | `StoreState { Recovering, Open, Degraded, Failed }` in `Capacity` | 8, 10 |
+
+Fake adapter (`src/fake.rs`) additions: a deterministic virtual clock with an explicit `advance(dt)` that is the **only** place I/O and eviction happen (so a test can assert `submit_*` did zero I/O by counting calls inside the submit); scripted faults `rename_ok_dirsync_fail`, `fsync_file_fail`, `stall_fsync(duration)`, `stall_eviction(duration)`, `unlink_fail`; a **poison-on-free** destination check (every destination handed to a load is registered; after its holder is freed any write to it is recorded and the test fails); a recorder of which terminal completion each job produced. Red tests for C2 (PLANNED): `fake_submit_store_performs_no_io_and_no_eviction`, `fake_reservation_prevents_overcommit_by_concurrent_stores`, `fake_every_job_yields_exactly_one_terminal_completion` (including cancelled), `fake_rename_ok_dirsync_fail_reports_indeterminate_and_serves_object`, `fake_lookup_misses_and_submit_refused_while_recovering`, `fake_poll_never_overflows_at_max_inflight`, plus the cases already listed in CUTS.md.
+
+## 14. Acceptance boxes the review found uncovered
+
+| box | gap named by the review | closed by | red test (all PLANNED) |
+|---|---|---|---|
+| #484 A4 | host interruption at publication boundaries | C4 | `fault_at_each_publication_boundary_leaves_consistent_outcome` (P1 to P5, section 2.4) |
+| #484 A6 | accounting after recovery limits | C4 | `recovery_keeps_admission_closed_until_walk_completes`, `deleting_one_indexed_object_does_not_reopen_admission_with_unscanned_remainder`, `used_bytes_counts_header_region_and_physical_blocks`, `inflight_temp_bytes_are_reserved` |
+| #485 B3 | sibling-job cancellation case | C5, C6 | `restore_txn_holder_survives_sibling_failure_until_all_jobs_terminal`, `multi_chunk_restore_failure_does_not_free_destination_in_use` |
+| #485 B4 | sustained admission starvation, completion credits | C5 | `sustained_restores_cannot_starve_parks`, `completion_queue_never_overflows_at_max_inflight`, `coalesced_waiters_are_bounded` |
+| #485 B6 | completed-request counts, request-latency p50/p95, allocation and staging peaks | C9 | `bench_output_requires_completed_requests_latency_percentiles_and_peaks` |
+| #367 D3 | explicit Cortex, boot, update, recovery regression gates | N2, N5 | existing gates re-run on an image that also holds a slab: `scripts/qemu_ck_store_test.sh`, `qemu_ck_lifecycle_test.sh`, `qemu_ck_continuity_test.sh`, `qemu_ck_boot_test.sh`, `qemu_ck_slot_loader_test.sh`, `qemu_ck_recovery_test.sh`, `qemu_ck_rollback_test.sh`, `qemu_ck_disk_layout_test.sh` (all exist, VERIFIED by `ls scripts`; QEMU gates run only through the heavy forge, per their headers); `n5_existing_gates_pass_with_slab_present` is the wrapper that runs them and records pass/fail |
+| #367 D4 | session reset/close between pump calls | N4 | `park_survives_next_prompt_reset`, `session_close_with_queued_park_keeps_staging_until_job_terminal`, `reset_between_pump_calls_leaves_only_whole_slots` |
+| #367 D6 | complete native staging accounting | N3, N4, N5 | `staging_report_lists_export_cipher_env_plain_scratch_bounce_peak_separately` |
+
+## 15. Native performance track: beating the Linux path
+
+Drake's rule (memory, 2026-10-13): the native design must outperform Linux and be differentiated, not match it. This section turns that into measurable work. Everything here is **PLANNED** or **UNKNOWN**; no ratio below has been measured and none is a promise. Each item names the cut that either earns the claim with a receipt or deletes it. The correctness contract of sections 1 to 11 is never traded for speed: every optimization below keeps the same validation order, the same integrity check over every payload byte, and the same ownership proofs.
+
+### 15.1 The baseline to beat: the Linux host adapter, measured honestly
+
+Cut **X1** builds the baseline first, because "beating Linux" is meaningless without a Linux number taken the same way. The host adapter (C4) is run through the C9 benchmark harness in four labelled modes, on the same machine, the same model and the same chunks:
+
+| mode | how | label in the output |
+|---|---|---|
+| buffered, page-cache hit | `pread` after the file was just written or read; no cache drop | `cache_state = page_cache` |
+| buffered, device read | `posix_fadvise(DONTNEED)` on the file, then (optional, recorded as done or not done) `echo 3 > /proc/sys/vm/drop_caches`; the harness verifies it by comparing `mincore` residency before the read (0 pages resident) | `cache_state = device` only when residency was verified, else `unknown` |
+| `O_DIRECT`, device read | aligned reads (section 15.3) into pool memory; never served from the page cache | `cache_state = device` |
+| `O_DIRECT` with a sector-aligned queue depth sweep (1, 2, 4, 8) | same, to expose the device's own parallelism | `cache_state = device`, `queue_depth` |
+
+Page-cache hits and device reads are **never averaged together**; the harness refuses to emit a latency summary that mixes labels (red test `bench_refuses_mixed_cache_state_summary`, PLANNED). The Linux baseline for a native comparison is the best of the four modes for the same bytes on the same device, not the buffered default, so native cannot "win" against a deliberately slow Linux configuration. Reported per mode: p50 and p95 restore latency per chunk and per 2048-token restore, bytes per second, CPU time per MiB (user plus system, from `getrusage`), and peak resident memory. The device ceiling is measured separately with a raw sequential read of the same LBA span so every result can be stated as a fraction of what the device can do (UNKNOWN until X1 runs).
+
+### 15.2 Zero-copy DMA into KV pool memory on GB10 unified memory, with an ownership proof
+
+The GB10 CPU and GPU share one physical memory pool (INFERRED from the Spark platform description; the exact coherency and IOMMU rules for a device writing into memory that the GPU later reads are **UNKNOWN** here and must be read from the NVIDIA documentation through the `spark-hardware-manual` skill and recorded with `docs-read` before cut X3 touches a driver, per the machine-debugging rule). Today the native disk contract copies through a driver-owned bounce buffer (section 9 item 1; native/disk/disk_nvme.h:17-19 VERIFIED), then through the envelope and decrypt scratch (section 10). The design goal is that restored bytes are written by the NVMe controller **directly into the destination KV memory**, with the decrypt/verify step reading them in place.
+
+Ownership proof (the part that makes zero copy safe), as a state machine over a destination region `R`:
+
+1. `Free`: nobody references `R`.
+2. `DmaTarget(job)`: `R` is reserved to one restore job; the session cannot see it (rows are invisible until `restore_commit`, section 9 item 6); the allocator will not reuse it; the device may write it. The adapter holds the region until the **terminal completion** of every command that targets it (T5, T6 of section 13). A cancel or shutdown cannot release it earlier (D4 of #367).
+3. `Verifying(job)`: all commands completed; the CPU reads `R` to verify the tag and digests; the device has no outstanding command on `R`.
+4. `Committed`: `restore_commit` adopts `R`; the session owns it.
+5. a failed verification returns `R` to `Free` after zeroing is not required (the contents were never visible), but the job is terminal exactly once.
+
+A region is in at most one state; transitions are checked by a `region_state` table in the native adapter and by the fake in the host emulation. Red tests (PLANNED, cut X3): `dma_target_region_not_reused_until_terminal_completion`, `cancel_while_dma_pending_keeps_region_reserved`, `verify_failure_never_exposes_rows_to_session`, `region_state_transitions_are_exclusive` (a mutant that skips the state check must fail), and in the emulator `disk_file` with a poisoning check on release (the same method as C2's poison-on-free).
+
+### 15.3 On-disk layout equal to the in-memory block layout, so restore is pure DMA
+
+Two layout facts decide how much copying is unavoidable.
+
+- **Host**: the object payload is already the pool's own block layout (section 2.2: `[layer][K plane | V plane][token][head][dim]` bf16, one `block_stride_bytes` per block). Placing the payload at file offset 4096 (section 2.1) makes each segment (one block, `block_stride` = 524288 for the test geometry, calc:666b7ba6) a multiple of 4096, so an `O_DIRECT` read of a segment into the destination pool block needs no bounce and no reshaping. This is what X2 builds and what makes the Linux baseline of 15.1 the strongest possible one.
+- **Native**: the payload is a strided gather from `[layer][capacity][kv_dim]` f32 arrays (section 2.3), so restore today needs a copy per layer. Pure DMA needs the native session KV to be stored **block-major** (a native paged KV: one contiguous region per chunk holding all layers' K and V rows for that token range) so the on-disk chunk and the in-memory chunk are the same bytes. This is a new `backend_format` value (3, "native paged f32"), not a change to format 2; it changes `aienos-infer-kernel` session memory layout, so it is its own cut **X4** with its own namespace, vectors and a measured cost on decode (a paged layout can slow attention; X4 refuses to merge if native decode throughput drops by more than 2 percent on the PI5-6 golden run, a threshold PLANNED here and to be revised only with data). Until X4 merges, native restore keeps the gather copy and the report states it (`kv_restore_copy_bytes`, METRICS_AND_SETTINGS.md).
+- **Alignment rule** shared by both: payload offset 4096, segment length a multiple of 4096 (host segments are blocks; native one segment padded by the existing unit rule), destination addresses 4096-aligned. The adapter checks alignment at submit and falls back to the buffered path with a counter (`kv_odirect_fallback_total`) if the filesystem or the destination refuses `O_DIRECT`; the fallback is a correctness-preserving slow path, never an error.
+
+Red tests (PLANNED): X2 `odirect_read_lands_in_pool_block_without_intermediate_copy` (counting allocator proves no staging buffer larger than the tail scratch), `misaligned_destination_falls_back_and_counts`; X4 `native_paged_chunk_bytes_equal_disk_bytes` (memcmp of the DMA'd region against the session rows) and `native_paged_decode_matches_strided_decode_bitwise` (golden tokens identical).
+
+### 15.4 Integrity pipelined with transfer, not weakened
+
+The integrity rule does not change: every payload byte is covered by a digest verified before the bytes are visible to a session (section 1.4, 2.1). What changes is **when** the digest is computed.
+
+- **Per-segment digests** (section 2.1) let verification of segment `i` overlap the transfer of segment `i+1`: the worker verifies a segment as soon as its command completes while the device fills the next one. The root over the table is checked last and gates `Published`/adoption. A flat payload hash cannot do this (it needs all bytes in order).
+- **Hash function**: SHA-256 stays the format hash. Justification: it is already the identity hash everywhere (namespace, chunk key, header, M5 envelope on native uses `argus sha256`, section 2.5), one primitive means one set of vectors and one audited implementation on both platforms, and the Pi 5 CPU has the Arm SHA-2 instructions that make it fast (INFERRED from the Cortex-A76 feature set; to be confirmed by a measurement in X5). BLAKE3 is faster on large inputs and parallelizes inside one hash, but it would add a second hash primitive to a freestanding native tree that has none (no BLAKE3 anywhere in aienos `.c`, `.h` or `.rs` files, VERIFIED by grep), a second vector set, and no benefit once per-segment digests already give inter-segment parallelism. Per-block hashing is exactly the per-segment design on the host (segment = block). Decision: **SHA-256 over segments**; a different hash is considered only if X5 shows verification, not the device, is the bottleneck after pipelining, and would be a new `format_version`.
+- **Native**: the AEAD tag already authenticates the envelope; the digest table is not stored on native (one segment). Pipelining there means decrypt-and-verify of chunk `i` overlapping the read of chunk `i+1` across pump calls, bounded by `KV_PARK_STAGE_BYTES` and the staging peaks of section 10.
+
+Red tests (PLANNED, X5): `pipelined_verify_never_adopts_before_root_checked`, `corrupt_segment_k_detected_while_segment_k_plus_1_in_flight` (fault injection flips a byte in segment k, nothing is adopted), `pipelining_does_not_reorder_digest_checks_before_header_checks` (validation order of 1.4 holds), `verify_cpu_time_per_mib_reported`.
+
+### 15.5 Predictive restore on application and Interplane signals
+
+Today restore starts at `submit_request` (section 6.3). A native system knows more than a Linux page cache does: the application layer or Interplane (the AIEN message plane) can announce "conversation X is about to continue" before the user's text arrives. Design (cut **X6**): a `prefetch_hint(chain_head_key, expected_tokens)` call that is a **hint, never a command**: it may start a restore job into a holder with `class = Restore`, lowest priority, under the same per-class bounds (section 7.1), and it is cancelled and its holder freed if the real request does not arrive within `AIEN_KV_PREFETCH_TTL_MS` (default 30000, PLANNED) or memory pressure needs the blocks. A hint can only make a later restore faster; a wrong hint costs bounded I/O and holder blocks and is counted (`kv_prefetch_hint_total`, `kv_prefetch_hit_total`, `kv_prefetch_wasted_bytes_total`). Which signals Interplane actually emits is **UNKNOWN** (not read in this revision); X6 starts by reading the Interplane sources and records the real signal list, and only then writes the hook. Red tests: `prefetch_hint_never_blocks_step`, `unused_prefetch_expires_and_frees_holder`, `prefetch_respects_restore_bound`, `real_request_adopts_prefetched_prefix_without_second_read`.
+
+### 15.6 Streaming park during decode
+
+Today a park starts when the turn finishes (section 6.2). Full chunks of the prompt and of generated output are immutable the moment they are computed (their keys depend only on tokens and parents), so they can be parked **while decode continues**, hiding write latency and shrinking the work at `Finished` to the partial tail. Design (cut **X6b**, host first, native after X4): at the end of a step, for each running sequence whose computed prefix gained a full chunk, take a per-chunk holder with `fork_range` (section 5), submit a Park job, and release the holder at its terminal completion. Rules: the chunk is complete (all `chunk_tokens` computed, `computed_prefix` of section 6.1), the sequence is not in a state where its blocks can still be rewritten (rows below the computed prefix are never rewritten, INFERRED from append-only decode and COW on partial shared blocks, to be proven by the C3 test `owner_append_on_shared_partial_block_copies_not_holder`), and admission obeys the park class bound so streaming cannot starve restores. A sequence cancelled mid-decode leaves its already-published chunks in place (they are valid prefixes). Red tests (PLANNED): `streaming_park_publishes_full_chunks_before_finish`, `streaming_park_never_reads_rows_that_decode_still_writes` (poison the tail block, assert no streamed chunk includes it), `cancel_after_streamed_chunks_keeps_them_valid`, `streaming_park_respects_park_bound`. Metrics: `kv_park_streamed_chunks_total`, `kv_park_bytes_at_finish` (to show the finish-time work shrank).
+
+### 15.7 Multi-command NVMe queue: only if profiling justifies it
+
+The native contract is one command at a time through one bounce buffer (native/disk/disk_nvme.h:17-19 VERIFIED). Lifting it adds real risk: command ids, wraparound, DMA lifetime, reset and flush ordering. The rule is therefore: **no multi-command work until the X1/X3 profile shows the single-command contract is the bottleneck**, meaning in the native restore profile the device is idle for more than 30 percent of the restore wall time between commands (threshold PLANNED) while pump budget and verification are not limiting. If, and only if, that holds, cut **X7** implements a bounded submission window (`KV_QUEUE_DEPTH` is already the request bound, disk.h, section 9 item 7) and must pass, before any benchmark is run:
+
+- `command_ids_are_unique_among_inflight_commands` and `command_id_wraparound_never_aliases_an_inflight_command` (drive the id counter across the wrap with commands pending);
+- `dma_buffer_lifetime_covers_every_inflight_command` (region state of 15.2 stays `DmaTarget` until its own completion, with out-of-order completion in the emulator);
+- `controller_reset_fails_every_inflight_job_terminal_once_and_releases_regions_after_reset_ack`;
+- `cancel_with_commands_inflight_waits_for_their_completions_before_release`;
+- `flush_ordering_header_flush_issued_only_after_all_payload_completions` (the header-last rule of section 2.5 and 9 item 2 holds under reordering; a mutant that issues the header write early must fail);
+- the existing power-cut injector at every unit boundary (N2) re-run with more than one command in flight.
+
+If the profile does not justify X7, the cut is closed as REJECTED with the profile as evidence and the single-command path remains.
+
+### 15.8 Target ratios against the Linux baseline
+
+These are design targets to be confirmed or revised by X1 and the later cuts; they are not results. Ratios are native divided by the best Linux mode of 15.1 for the same bytes on the same device, on the same machine class (Spark-native results stay NOT_RUN until aienos#336 is authorized; the emulator can only test logic).
+
+| quantity | target | earned by | if missed |
+|---|---|---|---|
+| device-read restore throughput | at least 0.95 of the device ceiling (15.1) and at least 1.0 of `O_DIRECT` Linux | X3, X4, X5 | report the gap and its cause (copy count, verify, single command) |
+| restore CPU time per MiB | at most 0.5 of Linux `O_DIRECT` (no kernel crossing, no page cache copy) | X3, X5 | report; target dropped if the measured Linux figure is already near the hash cost |
+| restore bytes copied by the CPU | 0 for payload after X4 (only verify reads) versus 1 for Linux buffered | X3, X4 | the count is a direct measurement (`kv_restore_copy_bytes`), pass or fail |
+| time to first token after a hint | restore fully overlapped with the user typing: 0 restore latency on the critical path when the hint arrives at least `restore_latency` earlier | X6 | `kv_prefetch_hit_total` shows the hit rate; no claim without it |
+| work left at `Finished` | one partial chunk plus the last flush | X6b | `kv_park_bytes_at_finish` shows it |
+| decode throughput during park | within 2 percent of no-park decode | X6b, N4 | the existing C8/N4 interleaving evidence |
+
+A target met on the emulator or on the host is labelled `native_emulator` or `hosted`; only a run on the target hardware earns `native_physical` (METRICS_AND_SETTINGS.md `platform`).
+
+### 15.9 Cuts for this track
+
+X1 Linux baseline harness; X2 `O_DIRECT` host adapter path and alignment; X3 native zero-copy DMA ownership proof (emulator first); X4 native paged KV (`backend_format` 3) with pure-DMA restore; X5 pipelined integrity and the hash decision receipt; X6 predictive restore; X6b streaming park; X7 multi-command queue (conditional, closed as REJECTED unless the profile justifies it). Dependencies and tests are in `docs/persistent-kv/CUTS.md`.
+
+## 16. Pi 5 physical lane
+
+The Spark-native physical run is NOT_RUN and blocked on aienos#336. A Raspberry Pi 5 with a dedicated test card is available now (`~/handoffs/2026-10-13-pi5-roadmap-ledger.md`: PI5-6 inference ran on the Pi, #364 merged; pi5-agent #366 merged), so the first **real cold boot** evidence for native persistent KV can come from there. This lane is kept strictly separate from the Spark-native and the hosted results (section 16.5).
+
+### 16.1 What exists (VERIFIED by reading the ledger, `pi5-run.sh` and aienos sources)
+
+- The Pi boots AIENOS through a one-shot firmware setting: `pi5-run.sh` appends a `[tryboot]` block to the boot partition config and reboots with `reboot '0 tryboot'`; normal boots never read it (pi5-run.sh:11-15, 144-177). The AIENOS image on the card has an ESP and a raw model partition `p3` (784 MiB, `AIENOS-MODEL`) located through `MODEL.MAP` sectors (ledger line 60; `native/boot/model_map.h`).
+- The Pi kernel writes only inside the AIENOS partition view (`native/kernel/dev/disk_part.h` header comment, lines 1 to 28). A raw range outside it cannot be written by the kernel.
+- The Pi inference run proved 8 of 8 golden tokens ("The capital of France is Paris."), 17 prompt ids, 1.20 tok/s and a prefill of 17 tokens in 11.1 s (ledger line 60). One decode token is about 0.83 s, so prefill of the 17 tokens costs about 10.4 s more than a restore plus one suffix token would (calc:5a26db0a), which is the visible saving a restore must show.
+- The pi5-agent stage persists the reply, the model hash and ids in the Store first, then loads the model (ledger line 62, #366).
+
+### 16.2 Where the KV slab lives on the card (no repartitioning)
+
+The test card is not repartitioned. The slab is carved from the **tail of the AIENOS partition's own Store region**, not from free space after `p3`, because the kernel cannot write outside its partition view (16.1). Concretely: `kv_disk_bind` receives the partition view and two disjoint ranges inside it (the Store region and anchor, and a 128 MiB slab = 32768 units of 4096 bytes, calc:9193e870). The Store region therefore shrinks by 128 MiB and the Store needs **one reformat** to take the smaller size (it is a test card; the Store holds only test facts and replies, so the cost is a re-run of the PI5-5 fact stage; this is recorded as the one irreversible step of the lane and needs the Store contents to be re-creatable, UNKNOWN until P1 checks what the card holds). The slab superblock records the region size; no Store byte is moved.
+
+A new **`KV.MAP`** file on the ESP, written next to `MODEL.MAP` by the same tool path in `pi5-run.sh`, tells the kernel at boot that a slab exists, its first partition-relative unit, its unit count, and the sc ADR hash of the record format. `KV.MAP` is advisory: the kernel validates the slab superblock and refuses on disagreement, so a stale or missing map means "no KV slab", never a corrupt read. The state region question the review raised (a restore needs a durable record of "which chain head is the latest" across the cold boot): the agent writes a small **state record** (the latest chain head key and token count, sealed like a Store record) into the Store first, exactly as #366 persists the reply, and the slab holds the chunks; boot 2 reads the state record, finds the head, and restores.
+
+### 16.3 Native CPU park and restore in the Pi agent session
+
+The Pi runs the native CPU path (`aienos-infer-kernel`, NEON dotprod, VERIFIED by the ledger). The same N4 mechanics apply: `park_point` callback after `STEP_LAST` (section 9 item 7), synchronous export into adapter-owned buffers, pump between steps and an idle pump after the reply, then on boot 2 `kv_import`, `restore_commit`, and the suffix prefill. SD card speed is the constraint on Pi (own SD driver in PIO mode per the ledger); the park cost and restore cost are measured, not assumed, and a 1B-model KV of 17 tokens is small, so the lane also runs a longer prompt (KV 64, listed as a PI5-6 follow-up in the ledger) to make the saving visible.
+
+### 16.4 The run, and what it proves
+
+Cut **P3** is the run, in this order, each step logged by the stage:
+
+1. Boot 1 (tryboot): prompt, reply, park chunks into the slab, flush, state record into the Store, print the park report. Golden continuation is the reply tokens already proven for this prompt.
+2. **Real cold boot**: the hub reboots through the firmware (tryboot is a firmware restart that clears RAM; it is **not** a power cut, ledger line 52 says the real power-cut test needs Drake unplugging the Pi, and this lane does not claim power-cut behavior).
+3. Boot 2: slab recovery (bounded header scan), state record read, restore the chunks, `restore_commit`, prefill only the suffix, generate. Pass condition: the generated ids equal the golden 8 ids **and** the stage reports restored tokens greater than zero **and** prefill time is lower than the cold prefill measured on the same boot by a control prompt run without restore.
+4. Negative control: a second boot 2' with the slab superblock flipped by one byte must refuse the restore and fall back to plain prefill (proves the check is live).
+
+The result is labelled **"native physical (Pi 5)"** in the evidence ledger, with the card, the commit of both repos and the cache-free nature of the device (an SD card has no host page cache in the native path). It proves: a restart of the AIENOS kernel preserves and correctly restores KV bytes on real hardware. It does **not** prove: power-loss safety, Spark behavior, GB10 DMA, NVMe performance, or any hosted result.
+
+### 16.5 Separation of results
+
+| label | meaning | may stand in for |
+|---|---|---|
+| `hosted` | Linux host adapter (C4 to C9) | nothing native |
+| `native_emulator` | QEMU or `disk_file` (N2 to N5) | logic only, not hardware |
+| `native physical (Pi 5)` | this lane (P3) | nothing on the Spark |
+| `native_physical` (Spark) | NOT_RUN, aienos#336 | n/a |
+
+The evidence ledger `docs/evidence/kv-native.md` keeps one row per label; a row with no receipt says NOT_RUN. The harness is shared with the Pi roadmap (the Pi 5 tryboot harness is owned by the Pi lane; a mind map message from the persistent-KV program already says it will ask to share it later, so P3 coordinates with that owner before using the Pi, and never runs while another lane has it).
+
+### 16.6 Cuts for this lane
+
+P1 (slab inside the partition view, `KV.MAP`, Store reformat plan, QEMU/aarch64 emulation of the card layout); P2 (native CPU park and restore in the pi5-agent session, emulator run with the golden ids); P3 (the physical run above, authorized by Drake because it reformats the Store on the test card and occupies the Pi). Dependencies are in CUTS.md.
+
+## 17. Review disposition
+
+The independent review (Codex GPT-6 Astra, 16 findings plus uncovered acceptance boxes) was checked finding by finding against source (sc-pkv for sovereign-core, aienos-pkv for native). Result: **all 16 findings were valid; none was rejected.** "Section" is where this ADR changed; "cut" and "red test" are where the proof will land (all tests PLANNED, no receipts yet).
+
+| # | finding | verdict | design change | cut | named red test |
+|---|---|---|---|---|---|
+| 1 | `rms_norm_eps` and other compute config not bound by identity | RESOLVED | compute digest in namespace field 14 (1.2, 1.2.1, 12) | C1b, C6a | `rms_norm_eps_alone_changes_the_namespace`, `modelconfig_field_mutation_changes_compute_digest`, `arith_epoch_pinned_bytes` |
+| 2 | scheduler frees KV before `Finished` reaches the spine | RESOLVED | park inside the finish transaction before `free_sequence` (6.1) | C6a | `finish_transaction_forks_holder_before_free` |
+| 3 | last token has no KV; partial block tail not zero | RESOLVED | `computed_prefix`, tail zeroing (2.2, 6.1) | C6a, C4 | `computed_prefix_excludes_uncomputed_last_token`, `tail_rows_above_token_count_are_zero_in_object` |
+| 4 | restored prefix could enter decode before the remaining prompt is prefilled | RESOLVED | `admit_restored_prefix` into Prefill phase (6.3) | C6a | `restored_prefix_does_not_enter_decode_before_remaining_prompt_prefilled` |
+| 5 | restore job failure frees a destination another job still uses | RESOLVED | `RestoreTxn` holder with `Draining` until all jobs terminal (5.5) | C5, C6 | `restore_txn_holder_survives_sibling_failure_until_all_jobs_terminal` |
+| 6 | per-chunk holders and coalescing cannot be built on `fork_sequence` | RESOLVED | `fork_range`, `assemble_table`, landing-buffer coalescing (5.2, 7.3) | C3, C5, C8 | `assemble_table_orders_holders_and_refcounts`, `coalesced_waiters_with_different_suffixes_get_independent_tables` |
+| 7 | eviction and unlink under the spine lock or at submit | RESOLVED | worker-side `Reclaiming`, `submit_store` only reserves (7.4, 13) | C2, C4, C5 | `fake_submit_store_performs_no_io_and_no_eviction`, `eviction_runs_on_worker_not_in_submit` |
+| 8 | recovery accounting reopens admission with an unscanned remainder | RESOLVED | resumable `recover_step`, admission closed until walk completes (4.1) | C4 | `recovery_keeps_admission_closed_until_walk_completes`, `deleting_one_indexed_object_does_not_reopen_admission_with_unscanned_remainder` |
+| 9 | restores could starve parks; completion queue overflow; unbounded waiters | RESOLVED | per-class reservation, reserved completion slots, waiter bounds (7.1) | C5 | `sustained_restores_cannot_starve_parks`, `completion_queue_never_overflows_at_max_inflight`, `coalesced_waiters_are_bounded` |
+| 10 | publication when rename succeeds but dir fsync fails | RESOLVED | P1 to P5 boundaries, `Indeterminate`, `Degraded` (2.4, 13) | C2, C4 | `fault_at_each_publication_boundary_leaves_consistent_outcome`, `fake_rename_ok_dirsync_fail_reports_indeterminate_and_serves_object` |
+| 11 | shutdown with a stalled fsync cannot meet its deadline | RESOLVED | `shutdown(intake_deadline)` with `DrainReport`, buffers kept until terminal (7.5) | C5 | `shutdown_with_stalled_fsync_returns_by_deadline_and_reports_unfinished` |
+| 12 | native slot layout unspecified; M5 mapping unproven | RESOLVED | slot wire layout and authenticated envelope mapping (2.5) | N1, N2, N3 | `slot_header_golden_vectors_match`, `slot_binding_wrong_slot_or_incarnation_fails_tag`, `slot_bounds_refused_before_decrypt` |
+| 13 | `set_pos` alone cannot restore a native session | RESOLVED | `kv_import` rows only plus `restore_commit` after prompt (9 item 6) | N4 | `restore_commit_after_prompt_prefills_only_the_suffix`, `import_before_commit_is_invisible_to_step` |
+| 14 | native park source is reused by the next prompt; no idle pump | RESOLVED | `park_point`, synchronous export and seal, idle pump (9 item 7, 3) | N4 | `park_snapshot_survives_next_prompt_reset`, `idle_pump_drains_without_new_prompt` |
+| 15 | native staging accounting incomplete; "only staging memory" claim false | RESOLVED | separate staging counters (10), METRICS fixed | N3, N5 | `staging_report_lists_export_cipher_env_plain_scratch_bounce_peak_separately` |
+| 16 | evidence labels and citations wrong (trait release line, OWN-30B pin, wording) | RESOLVED | citations re-verified by grep; PLANNED label; matrix labelled | doc, C7 | `guarantee_matrix_rows_are_labelled` |
+
+Uncovered acceptance boxes: A4, A6, B3, B4, B6, D3, D4, D6 are closed in section 14.
+
+What the review did not change: the chunk-key chain, the 256-byte header byte layout, SHA-256 as the format hash, "storage never blocks the step", and "a miss or a failed restore is plain prefill". What remains UNKNOWN: GB10 coherency for device DMA into the pool (15.2), Interplane's real signal list (15.5), what the Pi test card's Store holds (16.2), and every measured number in 15.8.
