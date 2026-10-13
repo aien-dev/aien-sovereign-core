@@ -59,6 +59,8 @@ pub enum EngineError {
     PromptTooLong { len: usize, max: usize },
     /// Anything else; the message is returned to the client verbatim.
     Failed(String),
+    /// The shared chip is held by another job; the server answers 503 and the client retries.
+    Busy(String),
 }
 
 impl fmt::Display for EngineError {
@@ -68,6 +70,7 @@ impl fmt::Display for EngineError {
                 write!(f, "prompt of {len} tokens exceeds the context window of {max}")
             }
             Self::Failed(m) => write!(f, "engine failed: {m}"),
+            Self::Busy(m) => write!(f, "GPU busy with another job: {m}"),
         }
     }
 }

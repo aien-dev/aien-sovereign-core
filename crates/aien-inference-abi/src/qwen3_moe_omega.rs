@@ -1344,6 +1344,8 @@ pub trait KvAttention: Send {
     /// Tokens the cache can hold.
     fn capacity(&self) -> usize;
     fn reset(&mut self);
+    /// Drops every position at or past `len` (the next append is at `len`). Prefix reuse.
+    fn truncate(&mut self, len: usize);
     /// Stores the roped key and the value of position `pos` for `layer`.
     fn append(&mut self, layer: usize, pos: usize, k: &[f32], v: &[f32]) -> Result<(), String>;
     /// `out[q_heads x head_dim]` = attention of the (unscaled) query over positions `0..context_len`.
@@ -1383,6 +1385,12 @@ impl KvAttention for HostKv {
         for (k, v) in self.keys.iter_mut().zip(self.values.iter_mut()) {
             k.clear();
             v.clear();
+        }
+    }
+    fn truncate(&mut self, len: usize) {
+        for (k, v) in self.keys.iter_mut().zip(self.values.iter_mut()) {
+            k.truncate(len);
+            v.truncate(len);
         }
     }
     fn append(&mut self, layer: usize, pos: usize, k: &[f32], v: &[f32]) -> Result<(), String> {
@@ -1493,6 +1501,12 @@ impl KvAttention for OmegaPagedKv {
     fn reset(&mut self) {
         self.filled.iter_mut().for_each(|f| *f = 0);
     }
+    fn truncate(&mut self, len: usize) {
+        // The pool keeps its bytes; positions past `len` are rewritten by later appends.
+        for f in self.filled.iter_mut() {
+            *f = (*f).min(len);
+        }
+    }
     fn append(&mut self, layer: usize, pos: usize, k: &[f32], v: &[f32]) -> Result<(), String> {
         if pos != self.filled[layer] || pos >= self.capacity {
             return Err(format!("paged kv: append at {pos}, have {} (capacity {})", self.filled[layer], self.capacity));
@@ -1571,6 +1585,8 @@ pub struct GenerateOutcome {
     pub prefill_ms: u64,
     pub decode_ms: u64,
     pub prompt_tokens: usize,
+    /// Prompt tokens whose KV was still valid from the previous generation (not re-prefilled).
+    pub reused_prompt_tokens: usize,
     /// Sum of the per-step timings over the decode steps.
     pub decode_timing: StepTiming,
 }
@@ -1651,6 +1667,8 @@ pub struct Qwen3MoeOmegaEngine {
     pub routing_mutant: bool,
     pub last_timing: StepTiming,
     pos: usize,
+    /// Tokens whose KV is stored at positions `0..pos` (prefix reuse across generations).
+    history: Vec<u32>,
 }
 
 impl Qwen3MoeOmegaEngine {
@@ -1663,6 +1681,7 @@ impl Qwen3MoeOmegaEngine {
             routing_mutant: false,
             last_timing: StepTiming::default(),
             pos: 0,
+            history: Vec::new(),
         }
     }
 
@@ -1706,7 +1725,21 @@ impl Qwen3MoeOmegaEngine {
     pub fn reset(&mut self) {
         self.kv.reset();
         self.pos = 0;
+        self.history.clear();
         self.traces.clear();
+    }
+
+    /// Tokens whose KV is stored (positions `0..position()`).
+    pub fn history(&self) -> &[u32] {
+        &self.history
+    }
+
+    /// Keeps the first `len` stored tokens and forgets the rest; the next step is at `len`.
+    pub fn rewind(&mut self, len: usize) {
+        let len = len.min(self.pos);
+        self.kv.truncate(len);
+        self.history.truncate(len);
+        self.pos = len;
     }
 
     /// Runs `token` at the next position through every layer. Returns the final-normed hidden
@@ -1861,6 +1894,7 @@ impl Qwen3MoeOmegaEngine {
         rmsnorm(&x, &self.weights.final_norm, eps, &mut hidden);
         timing.host_ns += t5.elapsed().as_nanos() as u64;
         self.pos = pos + 1;
+        self.history.push(token);
         timing.total_ns = t_step.elapsed().as_nanos() as u64;
         self.last_timing = timing;
         Ok(hidden)
@@ -1895,10 +1929,18 @@ impl Qwen3MoeOmegaEngine {
         if prompt.len() >= self.kv.capacity() {
             return Err(format!("prompt of {} tokens, context is {}", prompt.len(), self.kv.capacity()));
         }
-        self.reset();
+        // Prefix reuse: the KV of the longest common prefix with the stored history stays; at
+        // least the last prompt token is always stepped so the logits come from this prompt.
+        let common = self.history.iter().zip(prompt).take_while(|(a, b)| a == b).count();
+        let reused = common.min(prompt.len() - 1);
+        if reused > 0 {
+            self.rewind(reused);
+        } else {
+            self.reset();
+        }
         let t0 = Instant::now();
         let mut hidden = Vec::new();
-        for &t in prompt {
+        for &t in &prompt[reused..] {
             hidden = self.step(t)?;
         }
         let prefill_ms = t0.elapsed().as_millis() as u64;
@@ -1935,6 +1977,7 @@ impl Qwen3MoeOmegaEngine {
             prefill_ms,
             decode_ms: t1.elapsed().as_millis() as u64,
             prompt_tokens: prompt.len(),
+            reused_prompt_tokens: reused,
             decode_timing,
         })
     }
@@ -2138,6 +2181,38 @@ mod forward_tests {
             };
             assert_eq!(report.resident_bytes, c.layers * (experts + attn) + 2 * h * c.vocab, "{format:?}");
         }
+    }
+
+    #[test]
+    fn prefix_reuse_prefills_only_the_new_tokens_and_matches_a_cold_run() {
+        let (mut cold, _, c, _) = engine_with(WeightFormat::Fp8All);
+        let (mut warm, _, _, _) = engine_with(WeightFormat::Fp8All);
+        let p = GenerateParams::greedy(4, vec![]);
+        let turn1 = [5u32, 17, 42, 3, 9, 60];
+        let mut reply1 = Vec::new();
+        let o1 = warm.generate(&turn1, &p, &mut |t| { reply1.push(t); true }).unwrap();
+        assert_eq!(o1.reused_prompt_tokens, 0);
+        assert_eq!(warm.history().len(), turn1.len() + 3, "prompt plus every stepped reply token");
+        // Turn 2 resends turn 1, the reply, and new user tokens (a chat app resending the thread).
+        let mut turn2 = turn1.to_vec();
+        turn2.extend_from_slice(&reply1);
+        turn2.extend_from_slice(&[11, 23, 8]);
+        let mut warm_out = Vec::new();
+        let o2 = warm.generate(&turn2, &p, &mut |t| { warm_out.push(t); true }).unwrap();
+        assert_eq!(o2.reused_prompt_tokens, turn1.len() + 3, "prompt + stepped reply tokens reused");
+        let mut cold_out = Vec::new();
+        let o3 = cold.generate(&turn2, &p, &mut |t| { cold_out.push(t); true }).unwrap();
+        assert_eq!(o3.reused_prompt_tokens, 0);
+        assert_eq!(warm_out, cold_out, "warm (prefix reused) and cold runs must agree token for token");
+        assert_eq!(warm.position(), cold.position());
+        // A prompt equal to the whole history still steps its last token (fresh logits).
+        let hist = warm.history().to_vec();
+        let o4 = warm.generate(&hist, &p, &mut |_| true).unwrap();
+        assert_eq!(o4.reused_prompt_tokens, hist.len() - 1);
+        // An unrelated prompt starts cold.
+        let o5 = warm.generate(&[1, 2, 3], &p, &mut |_| true).unwrap();
+        assert_eq!(o5.reused_prompt_tokens, 0);
+        assert!(c.layers > 0);
     }
 
     #[test]

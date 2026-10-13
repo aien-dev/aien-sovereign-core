@@ -1,10 +1,14 @@
 //! `aien-serve-http`: OpenAI-compatible door on 127.0.0.1 for the OWN-30B model.
 //!
-//!   aien-serve-http [--engine cpu|stub] [--model-dir DIR] [--port 18091]
+//!   aien-serve-http [--engine cpu|stub|omega] [--weights bf16|fp8-experts|fp8] [--spin-us N]
+//!                   [--model-dir DIR] [--port 18091]
 //!                   [--bind 127.0.0.1] [--model-id ID] [--max-context N]
 //!                   [--max-tokens-cap N] [--stub-reply TEXT]
 //!
 //! `cpu` (default) loads the checkpoint into the CPU reference forward (slow, real).
+//! `omega` loads the checkpoint onto AIEN's own GPU engine (FP8 by default, spin 2000 us
+//! unless `--spin-us` or `AIEN_OMEGA_SPIN_US` says otherwise) and takes the shared chip lock
+//! only around each generation.
 //! `stub` replays `--stub-reply` for every request, using the model directory's
 //! tokenizer when it exists (so Odysseus can be wired before the weights load).
 
@@ -15,7 +19,9 @@ use std::sync::Arc;
 
 use aien_serve_http::codec::{ByteCodec, Codec, HfCodec};
 use aien_serve_http::cpu_engine::CpuReferenceEngine;
+use aien_inference_abi::qwen3_moe_omega::WeightFormat;
 use aien_serve_http::engine::{Engine, StubEngine};
+use aien_serve_http::omega_engine::OmegaDoor;
 use aien_serve_http::server::{serve, ServerConfig};
 
 const DEFAULT_MODEL_DIR: &str = "models/qwen3-30b-a3b-instruct-2507-fp8";
@@ -25,11 +31,14 @@ struct Args {
     model_dir: PathBuf,
     cfg: ServerConfig,
     stub_reply: String,
+    weights: WeightFormat,
+    spin_us: Option<u32>,
 }
 
 fn usage() -> String {
-    "usage: aien-serve-http [--engine cpu|stub] [--model-dir DIR] [--port N] [--bind ADDR] \
-     [--model-id ID] [--max-context N] [--max-tokens-cap N] [--stub-reply TEXT]"
+    "usage: aien-serve-http [--engine cpu|stub|omega] [--weights bf16|fp8-experts|fp8] [--spin-us N] \
+     [--model-dir DIR] [--port N] [--bind ADDR] [--model-id ID] [--max-context N] \
+     [--max-tokens-cap N] [--stub-reply TEXT]"
         .to_string()
 }
 
@@ -43,6 +52,8 @@ fn parse_args() -> Result<Args, String> {
             ..ServerConfig::default()
         },
         stub_reply: "Hello from the AIEN stub engine.".into(),
+        weights: WeightFormat::Fp8All,
+        spin_us: None,
     };
     let mut it = std::env::args().skip(1);
     while let Some(flag) = it.next() {
@@ -66,12 +77,26 @@ fn parse_args() -> Result<Args, String> {
                     val()?.parse().map_err(|e| format!("--max-tokens-cap: {e}"))?
             }
             "--stub-reply" => a.stub_reply = val()?,
+            "--weights" => {
+                a.weights = match val()?.as_str() {
+                    "bf16" => WeightFormat::Bf16,
+                    "fp8-experts" => WeightFormat::Fp8Experts,
+                    "fp8" => WeightFormat::Fp8All,
+                    other => return Err(format!("--weights must be bf16, fp8-experts or fp8, got {other}")),
+                }
+            }
+            "--spin-us" => a.spin_us = Some(val()?.parse().map_err(|e| format!("--spin-us: {e}"))?),
             "-h" | "--help" => return Err(usage()),
             other => return Err(format!("unknown flag {other}\n{}", usage())),
         }
     }
-    if a.engine != "cpu" && a.engine != "stub" {
-        return Err(format!("--engine must be cpu or stub, got {}", a.engine));
+    if !matches!(a.engine.as_str(), "cpu" | "stub" | "omega") {
+        return Err(format!("--engine must be cpu, stub or omega, got {}", a.engine));
+    }
+    if a.spin_us.is_none() {
+        // Flag beats environment beats the omega default (2000 us, the cut 7 number).
+        let env = std::env::var("AIEN_OMEGA_SPIN_US").ok();
+        a.spin_us = Some(aien_omega_gpu::parse_spin_us(env.as_deref())?.unwrap_or(2000));
     }
     Ok(a)
 }
@@ -140,6 +165,20 @@ fn main() -> ExitCode {
             }
         };
         Arc::new(StubEngine::new(reply).with_max_context(args.cfg.max_context_tokens.unwrap_or(4096)))
+    } else if args.engine == "omega" {
+        eprintln!(
+            "aien-serve-http: loading {:?} weights onto the Omega engine from {} (spin {:?} us)",
+            args.weights,
+            args.model_dir.display(),
+            args.spin_us
+        );
+        match OmegaDoor::load(&args.model_dir, args.cfg.max_context_tokens.unwrap_or(32768), args.weights, args.spin_us) {
+            Ok(e) => Arc::new(e),
+            Err(e) => {
+                eprintln!("aien-serve-http: omega load failed: {e}");
+                return ExitCode::from(1);
+            }
+        }
     } else {
         let t0 = std::time::Instant::now();
         eprintln!("aien-serve-http: loading CPU reference weights from {} (this takes minutes)", args.model_dir.display());

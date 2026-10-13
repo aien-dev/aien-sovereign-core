@@ -22,7 +22,7 @@ use tokio::task::JoinHandle;
 use tokio_stream::wrappers::ReceiverStream;
 
 use crate::codec::{Codec, CodecError};
-use crate::engine::{Engine, FinishReason, GenerateParams};
+use crate::engine::{Engine, EngineError, FinishReason, GenerateParams};
 use crate::openai::{chunk_json, completion_json, ChatRequest, ErrorBody, ModelCard, ModelList, Usage};
 use crate::text::{Push, TextAssembler};
 
@@ -164,6 +164,8 @@ enum Ev {
         completion_tokens: usize,
     },
     Error(String),
+    /// The engine could not get the shared chip: 503 before any token.
+    Busy(String),
 }
 
 fn unix_now() -> (u64, u128) {
@@ -293,7 +295,7 @@ async fn handle_chat(
     let id = format!("chatcmpl-{nanos:x}{n:04x}");
     let prompt_tokens = prepared.prompt_tokens.len();
     let stream = prepared.stream;
-    let (tx, rx) = mpsc::channel::<Ev>(64);
+    let (tx, mut rx) = mpsc::channel::<Ev>(64);
     let engine = Arc::clone(&state.engine);
     let codec = Arc::clone(&state.codec);
     let model = state.cfg.model_id.clone();
@@ -302,6 +304,28 @@ async fn handle_chat(
         run_generation(engine, codec, prepared, tx, guard, &log_id);
     });
 
+    // The first event decides the status: a busy chip is a 503 with a plain body, before any
+    // headers go out (streaming included). Everything else is forwarded unchanged.
+    let first = rx.recv().await;
+    if let Some(Ev::Busy(_)) = first {
+        let mut resp = (StatusCode::SERVICE_UNAVAILABLE, Json(serde_json::json!({"error": "GPU busy with another job"}))).into_response();
+        resp.headers_mut().insert(header::RETRY_AFTER, HeaderValue::from_static("5"));
+        return Ok(resp);
+    }
+    let (ftx, frx) = mpsc::channel::<Ev>(64);
+    tokio::spawn(async move {
+        if let Some(ev) = first {
+            if ftx.send(ev).await.is_err() {
+                return;
+            }
+        }
+        while let Some(ev) = rx.recv().await {
+            if ftx.send(ev).await.is_err() {
+                return;
+            }
+        }
+    });
+    let rx = frx;
     if stream {
         Ok(stream_response(id, created, model, prompt_tokens, rx))
     } else {
@@ -513,6 +537,10 @@ fn run_generation(
         }
     });
     match result {
+        Err(EngineError::Busy(m)) => {
+            eprintln!("aien-serve-http: {id}: GPU busy: {m}");
+            let _ = tx.blocking_send(Ev::Busy(m));
+        }
         Err(e) => {
             eprintln!("aien-serve-http: {id}: {e}");
             let _ = tx.blocking_send(Ev::Error(e.to_string()));
@@ -582,6 +610,7 @@ async fn collect_response(
                 .into_response());
             }
             Ev::Error(m) => return Err(ApiError::internal(m)),
+            Ev::Busy(m) => return Err(ApiError::internal(m)),
         }
     }
     Err(ApiError::internal("generation ended without a result"))
@@ -620,7 +649,7 @@ fn stream_response(
                     let _ = etx.send(Ok(Event::default().data("[DONE]"))).await;
                     return;
                 }
-                Ev::Error(m) => {
+                Ev::Error(m) | Ev::Busy(m) => {
                     let err = serde_json::to_value(ErrorBody::new("server_error", m))
                         .expect("error serializes");
                     if etx.send(data(err)).await.is_err() {

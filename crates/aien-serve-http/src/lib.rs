@@ -7,6 +7,7 @@
 pub mod codec;
 pub mod cpu_engine;
 pub mod engine;
+pub mod omega_engine;
 pub mod openai;
 pub mod sampling;
 pub mod server;

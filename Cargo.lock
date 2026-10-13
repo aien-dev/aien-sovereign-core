@@ -414,7 +414,9 @@ name = "aien-serve-http"
 version = "0.1.0"
 dependencies = [
  "aien-inference-abi",
+ "aien-omega-gpu",
  "axum 0.7.9",
+ "libc",
  "serde",
  "serde_json",
  "tokio",
