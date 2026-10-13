@@ -12,7 +12,10 @@ extern crate alloc;
 pub mod error;
 #[cfg(feature = "std")]
 pub mod fake;
+#[cfg(all(feature = "std", unix))]
+pub mod host_fs;
 pub mod identity;
+pub mod index;
 pub mod pin;
 pub mod record;
 pub mod store;
