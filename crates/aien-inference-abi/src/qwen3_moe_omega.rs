@@ -2174,6 +2174,9 @@ impl Qwen3MoeOmegaEngine {
             prefill_timing.add(&self.last_timing);
         }
         let prefill_ms = t0.elapsed().as_millis() as u64;
+        // The first decode step is the lm_head of the prefill's hidden state: start its timing
+        // from zero, so the last prefill step is not counted twice (once here, once in decode).
+        self.last_timing = StepTiming::default();
         let t1 = Instant::now();
         let mut decode_timing = StepTiming::default();
         let mut emitted = 0usize;
