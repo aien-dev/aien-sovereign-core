@@ -9,6 +9,7 @@
 
 extern crate alloc;
 
+pub mod coalesce;
 pub mod error;
 #[cfg(feature = "std")]
 pub mod fake;
@@ -17,6 +18,8 @@ pub mod pin;
 pub mod record;
 pub mod store;
 pub mod validate;
+#[cfg(feature = "std")]
+pub mod worker;
 
 pub use error::KvError;
 pub use identity::{
