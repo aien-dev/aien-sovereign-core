@@ -373,10 +373,48 @@ pub trait ExpertMatmul: Send + Sync + std::fmt::Debug {
     fn windows_f32(&self, m: usize, a: &[f32], col0s: &[u32], cols: usize, c: &mut [f32]) -> Result<u64, String>;
 }
 
+/// `experts` resident FP8 projections of `[n][k]` with block-128 scales (the checkpoint bytes as
+/// they are). `grouped_f32(ids, x, y)`: one launch for `ids.len()` experts; `x` is `k` values
+/// shared by every group or `ids.len() * k` (one row per group); `y` is `ids.len() * n`,
+/// group-major. A single projection is `ids == [0]`. Returns chip nanoseconds.
+pub trait Fp8Gemv: Send + Sync + std::fmt::Debug {
+    fn experts(&self) -> usize;
+    fn n(&self) -> usize;
+    fn k(&self) -> usize;
+    fn grouped_f32(&self, ids: &[u32], x: &[f32], y: &mut [f32]) -> Result<u64, String>;
+}
+
+/// How the loader hands weights to the device.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WeightFormat {
+    /// Everything dequantised to bf16 (Stage A): about 60.4 GB resident.
+    Bf16,
+    /// Experts as FP8 with the checkpoint scales (grouped GEMV, one launch per projection per
+    /// layer); attention and lm_head bf16. About 31.5 GB resident.
+    Fp8Experts,
+    /// Experts and the q/k/v/o projections as FP8; lm_head bf16. About 30.6 GB resident.
+    Fp8All,
+}
+
+impl WeightFormat {
+    pub fn fp8_experts(self) -> bool {
+        self != WeightFormat::Bf16
+    }
+    pub fn fp8_attention(self) -> bool {
+        self == WeightFormat::Fp8All
+    }
+}
+
 /// Makes `[k][n]` bf16 matrices resident. The real one is [`OmegaModelUploader`].
 pub trait ModelUploader {
     fn upload_dense(&self, k: usize, n: usize, bits: &[u16]) -> Result<Arc<dyn DenseMatmul>, String>;
     fn upload_experts(&self, k: usize, n: usize, bits: &[u16]) -> Result<Arc<dyn ExpertMatmul>, String>;
+    /// FP8 projections as in the checkpoint: `w` is `experts * n * k` e4m3 bytes `[expert][n][k]`,
+    /// `scales` is `experts * (n/128) * (k/128)` bf16 bits. Uploaders without FP8 refuse.
+    fn upload_fp8(&self, experts: usize, n: usize, k: usize, w: &[u8], scales: &[u16]) -> Result<Arc<dyn Fp8Gemv>, String> {
+        let _ = (experts, n, k, w, scales);
+        Err("this uploader has no FP8 path".into())
+    }
 }
 
 /// Omega's whole-tensor resident matmul behind a lock.
@@ -463,6 +501,9 @@ impl OmegaModelUploader {
     pub fn uses_window_api() -> bool {
         aien_omega_moe::is_native()
     }
+    pub fn uses_fp8_api() -> bool {
+        aien_omega_fp8::is_native()
+    }
 }
 
 impl ModelUploader for OmegaModelUploader {
@@ -482,6 +523,34 @@ impl ModelUploader for OmegaModelUploader {
             }))
         }
     }
+    fn upload_fp8(&self, experts: usize, n: usize, k: usize, w: &[u8], scales: &[u16]) -> Result<Arc<dyn Fp8Gemv>, String> {
+        if !Self::uses_fp8_api() {
+            return Err("this binary carries no FP8 GEMV (omega before OWN-30B cut 5, or AIEN_OMEGA_GPU_LIB without it)".into());
+        }
+        let t = aien_omega_fp8::Fp8Tensor::upload(experts, n, k, w, scales).map_err(|e| e.to_string())?;
+        Ok(Arc::new(OmegaFp8(Mutex::new(t), experts, n, k)))
+    }
+}
+
+/// Omega's FP8 grouped GEMV behind a lock.
+#[derive(Debug)]
+pub struct OmegaFp8(Mutex<aien_omega_fp8::Fp8Tensor>, usize, usize, usize);
+
+impl Fp8Gemv for OmegaFp8 {
+    fn experts(&self) -> usize {
+        self.1
+    }
+    fn n(&self) -> usize {
+        self.2
+    }
+    fn k(&self) -> usize {
+        self.3
+    }
+    fn grouped_f32(&self, ids: &[u32], x: &[f32], y: &mut [f32]) -> Result<u64, String> {
+        let t = self.0.lock().map_err(|_| "fp8 tensor lock poisoned".to_string())?;
+        let info = t.gemv_grouped_f32(ids, x, y).map_err(|e| e.to_string())?;
+        Ok(info.elapsed_ns)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -496,10 +565,22 @@ pub struct OmegaLayer {
     pub k_norm: Vec<f32>,
     /// Router `[experts][hidden]` f32.
     pub router: Vec<f32>,
-    pub qkv: Arc<dyn DenseMatmul>,
-    pub o: Arc<dyn DenseMatmul>,
-    pub gate_up: Arc<dyn ExpertMatmul>,
-    pub down: Arc<dyn ExpertMatmul>,
+    pub attn: AttnWeights,
+    pub experts: ExpertWeights,
+}
+
+/// The q|k|v and o projections of one layer, in the format the loader chose.
+#[derive(Debug)]
+pub enum AttnWeights {
+    Bf16 { qkv: Arc<dyn DenseMatmul>, o: Arc<dyn DenseMatmul> },
+    Fp8 { qkv: Arc<dyn Fp8Gemv>, o: Arc<dyn Fp8Gemv> },
+}
+
+/// The expert projections of one layer, in the format the loader chose.
+#[derive(Debug)]
+pub enum ExpertWeights {
+    Bf16 { gate_up: Arc<dyn ExpertMatmul>, down: Arc<dyn ExpertMatmul> },
+    Fp8 { gate_up: Arc<dyn Fp8Gemv>, down: Arc<dyn Fp8Gemv> },
 }
 
 /// The whole model: resident matmuls on the device, bf16 embedding and f32 norms/routers on the host.
@@ -535,6 +616,7 @@ impl Qwen3MoeOmegaWeights {
 #[derive(Debug, Clone, PartialEq)]
 pub struct LoadReport {
     pub resident_bytes: usize,
+    pub format: WeightFormat,
     pub host_bytes: usize,
     /// Process peak resident set (VmHWM) after the load, if `/proc` is readable.
     pub peak_rss_bytes: Option<u64>,
@@ -567,9 +649,19 @@ pub fn load_qwen3_moe_omega(
     uploader: &dyn ModelUploader,
     progress: &mut dyn FnMut(&str),
 ) -> Result<(Qwen3MoeOmegaWeights, LoadReport), String> {
+    load_qwen3_moe_omega_with(dir, uploader, WeightFormat::Bf16, progress)
+}
+
+/// As [`load_qwen3_moe_omega`] with a chosen [`WeightFormat`].
+pub fn load_qwen3_moe_omega_with(
+    dir: &Path,
+    uploader: &dyn ModelUploader,
+    format: WeightFormat,
+    progress: &mut dyn FnMut(&str),
+) -> Result<(Qwen3MoeOmegaWeights, LoadReport), String> {
     let config = Qwen3MoeConfig::from_checkpoint(dir)?;
     let mut source = ShardSource::open(dir)?;
-    load_qwen3_moe_omega_from(&config, &mut source, uploader, progress)
+    load_qwen3_moe_omega_from_with(&config, &mut source, uploader, format, progress)
 }
 
 /// The loader proper, over any tensor source (tests use an in-memory one).
@@ -579,7 +671,20 @@ pub fn load_qwen3_moe_omega_from(
     uploader: &dyn ModelUploader,
     progress: &mut dyn FnMut(&str),
 ) -> Result<(Qwen3MoeOmegaWeights, LoadReport), String> {
+    load_qwen3_moe_omega_from_with(config, source, uploader, WeightFormat::Bf16, progress)
+}
+
+/// The loader proper with a chosen [`WeightFormat`]. FP8 projections go up as the checkpoint
+/// bytes (`[n][k]` per expert, scales `[n/128][k/128]`), bf16 ones through the exact dequant.
+pub fn load_qwen3_moe_omega_from_with(
+    config: &Qwen3MoeConfig,
+    source: &mut dyn TensorSource,
+    uploader: &dyn ModelUploader,
+    format: WeightFormat,
+    progress: &mut dyn FnMut(&str),
+) -> Result<(Qwen3MoeOmegaWeights, LoadReport), String> {
     config.validate()?;
+    let mut resident = 0usize;
     let t0 = Instant::now();
     let peak_before = peak_rss_bytes();
     let (h, i, e) = (config.hidden, config.moe_intermediate, config.experts);
@@ -625,20 +730,40 @@ pub fn load_qwen3_moe_omega_from(
             .iter()
             .map(|(w, s, rows, col0)| Fp8Source { weights: &fp8[w.clone()], scales: &scales[s.clone()], rows: *rows, col0: *col0 })
             .collect();
-        dequant_fp8_sources_to_bf16_cols(&sources, h, &mut bits[..h * qkv_n], qkv_n)?;
-        let qkv = uploader.upload_dense(h, qkv_n, &bits[..h * qkv_n])?;
+        let qkv_fp8 = if format.fp8_attention() {
+            // q, k, v rows stacked: [qkv_n][h] with scales [qkv_n/128][kb], exactly the chip layout.
+            resident += w_off + s_off * 4;
+            Some(uploader.upload_fp8(1, qkv_n, h, &fp8[..w_off], &scales[..s_off])?)
+        } else {
+            None
+        };
+        let qkv = if qkv_fp8.is_none() {
+            dequant_fp8_sources_to_bf16_cols(&sources, h, &mut bits[..h * qkv_n], qkv_n)?;
+            resident += 2 * h * qkv_n;
+            Some(uploader.upload_dense(h, qkv_n, &bits[..h * qkv_n])?)
+        } else {
+            None
+        };
         progress(&format!("{p}.self_attn.qkv"));
 
         // --- o: [h][qd] -> dst [qd][h] ---
         source.read_into(&format!("{p}.self_attn.o_proj.weight"), "F8_E4M3", &[h, qd], &mut fp8[..h * qd])?;
         read_scales(source, &format!("{p}.self_attn.o_proj.weight_scale_inv"), &[kb, qd / FP8_BLOCK], &mut scales[..kb * (qd / FP8_BLOCK)])?;
-        dequant_fp8_sources_to_bf16_cols(
-            &[Fp8Source { weights: &fp8[..h * qd], scales: &scales[..kb * (qd / FP8_BLOCK)], rows: h, col0: 0 }],
-            qd,
-            &mut bits[..qd * h],
-            h,
-        )?;
-        let o = uploader.upload_dense(qd, h, &bits[..qd * h])?;
+        let attn = if format.fp8_attention() {
+            resident += h * qd + kb * (qd / FP8_BLOCK) * 4;
+            let o = uploader.upload_fp8(1, h, qd, &fp8[..h * qd], &scales[..kb * (qd / FP8_BLOCK)])?;
+            AttnWeights::Fp8 { qkv: qkv_fp8.expect("fp8 qkv"), o }
+        } else {
+            dequant_fp8_sources_to_bf16_cols(
+                &[Fp8Source { weights: &fp8[..h * qd], scales: &scales[..kb * (qd / FP8_BLOCK)], rows: h, col0: 0 }],
+                qd,
+                &mut bits[..qd * h],
+                h,
+            )?;
+            resident += 2 * qd * h;
+            let o = uploader.upload_dense(qd, h, &bits[..qd * h])?;
+            AttnWeights::Bf16 { qkv: qkv.expect("bf16 qkv"), o }
+        };
         progress(&format!("{p}.self_attn.o_proj"));
 
         // --- experts gate|up: per expert gate [i][h] then up [i][h]; columns e*2i (gate), e*2i+i (up) ---
@@ -667,8 +792,20 @@ pub fn load_qwen3_moe_omega_from(
                 }
             })
             .collect();
-        dequant_fp8_sources_to_bf16_cols(&sources, h, &mut bits[..h * gu_n], gu_n)?;
-        let gate_up = uploader.upload_experts(h, gu_n, &bits[..h * gu_n])?;
+        let gate_up_fp8 = if format.fp8_experts() {
+            // [e][2i][h] bytes with scales [e][2ib][kb]: the capsule GATE_UP layout, as the chip wants it.
+            resident += e * 2 * i * h + e * 2 * ib * kb * 4;
+            Some(uploader.upload_fp8(e, 2 * i, h, &fp8[..e * 2 * i * h], &scales[..e * 2 * ib * kb])?)
+        } else {
+            None
+        };
+        let gate_up = if gate_up_fp8.is_none() {
+            dequant_fp8_sources_to_bf16_cols(&sources, h, &mut bits[..h * gu_n], gu_n)?;
+            resident += 2 * h * gu_n;
+            Some(uploader.upload_experts(h, gu_n, &bits[..h * gu_n])?)
+        } else {
+            None
+        };
         progress(&format!("{p}.mlp.experts.gate_up"));
 
         // --- experts down: per expert [h][i]; columns e*h ---
@@ -686,8 +823,16 @@ pub fn load_qwen3_moe_omega_from(
                 col0: config.down_col0(ex),
             })
             .collect();
-        dequant_fp8_sources_to_bf16_cols(&sources, i, &mut bits[..i * dn_n], dn_n)?;
-        let down = uploader.upload_experts(i, dn_n, &bits[..i * dn_n])?;
+        let experts = if format.fp8_experts() {
+            resident += e * h * i + e * kb * ib * 4;
+            let down = uploader.upload_fp8(e, h, i, &fp8[..e * h * i], &scales[..e * kb * ib])?;
+            ExpertWeights::Fp8 { gate_up: gate_up_fp8.expect("fp8 gate_up"), down }
+        } else {
+            dequant_fp8_sources_to_bf16_cols(&sources, i, &mut bits[..i * dn_n], dn_n)?;
+            resident += 2 * i * dn_n;
+            let down = uploader.upload_experts(i, dn_n, &bits[..i * dn_n])?;
+            ExpertWeights::Bf16 { gate_up: gate_up.expect("bf16 gate_up"), down }
+        };
         progress(&format!("{p}.mlp.experts.down"));
 
         layers.push(OmegaLayer {
@@ -696,10 +841,8 @@ pub fn load_qwen3_moe_omega_from(
             q_norm: read_bf16_f32(source, &format!("{p}.self_attn.q_norm.weight"), &[hd], &mut small)?,
             k_norm: read_bf16_f32(source, &format!("{p}.self_attn.k_norm.weight"), &[hd], &mut small)?,
             router: read_bf16_f32(source, &format!("{p}.mlp.gate.weight"), &[e, h], &mut small)?,
-            qkv,
-            o,
-            gate_up,
-            down,
+            attn,
+            experts,
         });
     }
     drop(fp8);
@@ -712,6 +855,7 @@ pub fn load_qwen3_moe_omega_from(
     bits.clear();
     transpose_bf16_for_upload(&raw, vocab, h, &mut bits);
     let lm_head = uploader.upload_dense(h, vocab, &bits)?;
+    resident += 2 * h * vocab;
     progress("lm_head");
     drop(bits);
 
@@ -729,7 +873,8 @@ pub fn load_qwen3_moe_omega_from(
         lm_head,
     };
     let report = LoadReport {
-        resident_bytes: config.model_resident_bytes(),
+        resident_bytes: resident,
+        format,
         host_bytes: weights.host_bytes(),
         peak_rss_bytes: peak_rss_bytes(),
         peak_rss_before_bytes: peak_before,
@@ -951,6 +1096,51 @@ pub(crate) mod test_support {
         pub matrices: Mutex<Vec<Arc<HostMatrix>>>,
     }
 
+    /// Exact host FP8 GEMV (`e4m3(w) * bf16(scale)` in f32) over the checkpoint bytes, the
+    /// oracle the chip path is measured against in `own30b_check` and the fake for host tests.
+    #[derive(Debug)]
+    pub struct HostFp8 {
+        pub experts: usize,
+        pub n: usize,
+        pub k: usize,
+        pub w: Vec<u8>,
+        pub scales: Vec<u16>,
+    }
+
+    impl Fp8Gemv for HostFp8 {
+        fn experts(&self) -> usize {
+            self.experts
+        }
+        fn n(&self) -> usize {
+            self.n
+        }
+        fn k(&self) -> usize {
+            self.k
+        }
+        fn grouped_f32(&self, ids: &[u32], x: &[f32], y: &mut [f32]) -> Result<u64, String> {
+            let (n, k) = (self.n, self.k);
+            let kb = k / FP8_BLOCK;
+            let lut = fp8_table();
+            assert!(x.len() == k || x.len() == ids.len() * k);
+            assert_eq!(y.len(), ids.len() * n);
+            for (g, &id) in ids.iter().enumerate() {
+                let id = id as usize;
+                assert!(id < self.experts);
+                let xr = if x.len() == k { x } else { &x[g * k..(g + 1) * k] };
+                let w = &self.w[id * n * k..(id + 1) * n * k];
+                let s = &self.scales[id * (n / FP8_BLOCK) * kb..(id + 1) * (n / FP8_BLOCK) * kb];
+                for r in 0..n {
+                    let mut acc = 0.0f32;
+                    for c in 0..k {
+                        acc += lut[w[r * k + c] as usize] * bf16_to_f32(s[(r / FP8_BLOCK) * kb + c / FP8_BLOCK]) * xr[c];
+                    }
+                    y[g * n + r] = acc;
+                }
+            }
+            Ok(0)
+        }
+    }
+
     impl ModelUploader for RecordingUploader {
         fn upload_dense(&self, k: usize, n: usize, bits: &[u16]) -> Result<Arc<dyn DenseMatmul>, String> {
             assert_eq!(bits.len(), k * n);
@@ -965,6 +1155,12 @@ pub(crate) mod test_support {
             let m = Arc::new(HostMatrix { k, n, bits: bits.to_vec() });
             self.matrices.lock().unwrap().push(m.clone());
             Ok(m)
+        }
+        fn upload_fp8(&self, experts: usize, n: usize, k: usize, w: &[u8], scales: &[u16]) -> Result<Arc<dyn Fp8Gemv>, String> {
+            assert_eq!(w.len(), experts * n * k);
+            assert_eq!(scales.len(), experts * (n / FP8_BLOCK) * (k / FP8_BLOCK));
+            self.uploads.lock().unwrap().push(("fp8", experts * n, k, w.len() + scales.len() * 4));
+            Ok(Arc::new(HostFp8 { experts, n, k, w: w.to_vec(), scales: scales.to_vec() }))
         }
     }
 }
@@ -1472,10 +1668,15 @@ impl Qwen3MoeOmegaEngine {
 
     /// The production constructor: loads the checkpoint onto Omega and allocates the paged KV.
     pub fn load_omega(dir: &Path, max_context: usize, progress: &mut dyn FnMut(&str)) -> Result<(Self, LoadReport), String> {
+        Self::load_omega_with(dir, max_context, WeightFormat::Bf16, progress)
+    }
+
+    /// As [`Self::load_omega`] with a chosen weight format (FP8 needs omega's FP8 GEMV linked).
+    pub fn load_omega_with(dir: &Path, max_context: usize, format: WeightFormat, progress: &mut dyn FnMut(&str)) -> Result<(Self, LoadReport), String> {
         if !aien_omega_gpu::is_native() {
             return Err("this binary carries the CPU stub of the Omega engine (build with AIEN_OMEGA_DIR or AIEN_OMEGA_GPU_LIB)".into());
         }
-        let (weights, report) = load_qwen3_moe_omega(dir, &OmegaModelUploader, progress)?;
+        let (weights, report) = load_qwen3_moe_omega_with(dir, &OmegaModelUploader, format, progress)?;
         let kv = OmegaPagedKv::new(&weights.config, max_context)?;
         progress(&format!("kv pool {} MB resident={}", kv.pool_bytes() >> 20, kv.resident()));
         Ok((Self::new(weights, Box::new(kv)), report))
@@ -1534,6 +1735,9 @@ impl Qwen3MoeOmegaEngine {
         let mut down_out = vec![0.0f32; h];
         let mut moe_out = vec![0.0f32; h];
         let mut col0s: Vec<u32> = vec![0; top_k];
+        // FP8 grouped path: all top_k activations and down outputs in one buffer each.
+        let mut act_all = vec![0.0f32; top_k * i];
+        let mut down_all = vec![0.0f32; top_k * h];
 
         for (layer_idx, layer) in self.weights.layers.iter().enumerate() {
             let traced = self.trace_layers.contains(&layer_idx);
@@ -1544,7 +1748,11 @@ impl Qwen3MoeOmegaEngine {
             rmsnorm(&x, &layer.input_norm, eps, &mut x_norm);
             timing.host_ns += t0.elapsed().as_nanos() as u64;
             let t1 = Instant::now();
-            timing.chip_ns += layer.qkv.matmul_f32(1, &x_norm, &mut qkv_out).map_err(|e| format!("layer {layer_idx} qkv: {e}"))?;
+            timing.chip_ns += match &layer.attn {
+                AttnWeights::Bf16 { qkv, .. } => qkv.matmul_f32(1, &x_norm, &mut qkv_out),
+                AttnWeights::Fp8 { qkv, .. } => qkv.grouped_f32(&[0], &x_norm, &mut qkv_out),
+            }
+            .map_err(|e| format!("layer {layer_idx} qkv: {e}"))?;
             timing.launches += 1;
             let t2 = Instant::now();
             rmsnorm_per_head(&qkv_out[..qd], &layer.q_norm, eps, c.q_heads, hd, &mut qn);
@@ -1554,7 +1762,11 @@ impl Qwen3MoeOmegaEngine {
             timing.host_ns += t2.elapsed().as_nanos() as u64;
             timing.chip_ns += self.kv.attend(layer_idx, &qn, pos + 1, &mut attn_out)?;
             timing.launches += 1;
-            timing.chip_ns += layer.o.matmul_f32(1, &attn_out, &mut attn_proj).map_err(|e| format!("layer {layer_idx} o: {e}"))?;
+            timing.chip_ns += match &layer.attn {
+                AttnWeights::Bf16 { o, .. } => o.matmul_f32(1, &attn_out, &mut attn_proj),
+                AttnWeights::Fp8 { o, .. } => o.grouped_f32(&[0], &attn_out, &mut attn_proj),
+            }
+            .map_err(|e| format!("layer {layer_idx} o: {e}"))?;
             timing.launches += 1;
             timing.attention_ns += t1.elapsed().as_nanos() as u64;
 
@@ -1577,31 +1789,52 @@ impl Qwen3MoeOmegaEngine {
             }
             timing.host_ns += t3.elapsed().as_nanos() as u64;
 
-            // --- experts: 1 gate|up call over top_k windows, top_k down calls ---
             let t4 = Instant::now();
-            timing.chip_ns += layer
-                .gate_up
-                .windows_f32(1, &post, &col0s, 2 * i, &mut gu_out)
-                .map_err(|e| format!("layer {layer_idx} gate_up: {e}"))?;
-            timing.launches += top_k as u64;
             moe_out.iter_mut().for_each(|v| *v = 0.0);
-            for (slot, &ex) in experts.iter().enumerate() {
-                let th = Instant::now();
-                let gu = &gu_out[slot * 2 * i..(slot + 1) * 2 * i];
-                for j in 0..i {
-                    let g = gu[j];
-                    act[j] = g / (1.0 + (-g).exp()) * gu[i + j];
+            match &layer.experts {
+                // --- bf16 windows: 1 gate|up call over top_k windows, top_k down calls ---
+                ExpertWeights::Bf16 { gate_up, down } => {
+                    timing.chip_ns += gate_up
+                        .windows_f32(1, &post, &col0s, 2 * i, &mut gu_out)
+                        .map_err(|e| format!("layer {layer_idx} gate_up: {e}"))?;
+                    timing.launches += top_k as u64;
+                    for (slot, &ex) in experts.iter().enumerate() {
+                        let th = Instant::now();
+                        swiglu(&gu_out[slot * 2 * i..(slot + 1) * 2 * i], i, &mut act);
+                        timing.host_ns += th.elapsed().as_nanos() as u64;
+                        let col0 = c.down_col0(ex as usize) as u32;
+                        timing.chip_ns += down
+                            .windows_f32(1, &act, std::slice::from_ref(&col0), h, &mut down_out)
+                            .map_err(|e| format!("layer {layer_idx} down expert {ex}: {e}"))?;
+                        timing.launches += 1;
+                        let w = plan.topk_weights[slot];
+                        for (m, d) in moe_out.iter_mut().zip(&down_out) {
+                            *m += w * d;
+                        }
+                    }
                 }
-                timing.host_ns += th.elapsed().as_nanos() as u64;
-                let col0 = c.down_col0(ex as usize) as u32;
-                timing.chip_ns += layer
-                    .down
-                    .windows_f32(1, &act, std::slice::from_ref(&col0), h, &mut down_out)
-                    .map_err(|e| format!("layer {layer_idx} down expert {ex}: {e}"))?;
-                timing.launches += 1;
-                let w = plan.topk_weights[slot];
-                for (m, d) in moe_out.iter_mut().zip(&down_out) {
-                    *m += w * d;
+                // --- FP8 grouped: one gate|up launch (shared row), one down launch (a row per expert) ---
+                ExpertWeights::Fp8 { gate_up, down } => {
+                    timing.chip_ns += gate_up
+                        .grouped_f32(&experts, &post, &mut gu_out)
+                        .map_err(|e| format!("layer {layer_idx} gate_up fp8: {e}"))?;
+                    timing.launches += 1;
+                    let th = Instant::now();
+                    for slot in 0..top_k {
+                        swiglu(&gu_out[slot * 2 * i..(slot + 1) * 2 * i], i, &mut act_all[slot * i..(slot + 1) * i]);
+                    }
+                    timing.host_ns += th.elapsed().as_nanos() as u64;
+                    timing.chip_ns += down
+                        .grouped_f32(&experts, &act_all, &mut down_all)
+                        .map_err(|e| format!("layer {layer_idx} down fp8: {e}"))?;
+                    timing.launches += 1;
+                    let th = Instant::now();
+                    for (slot, &w) in plan.topk_weights.iter().enumerate() {
+                        for (m, d) in moe_out.iter_mut().zip(&down_all[slot * h..(slot + 1) * h]) {
+                            *m += w * d;
+                        }
+                    }
+                    timing.host_ns += th.elapsed().as_nanos() as u64;
                 }
             }
             for (xi, m) in x.iter_mut().zip(&moe_out) {
@@ -1729,7 +1962,12 @@ pub struct OmegaEngine {
 impl OmegaEngine {
     /// Loads the checkpoint at `dir` onto Omega with a KV for `max_context` tokens.
     pub fn load(dir: &Path, max_context: usize, progress: &mut dyn FnMut(&str)) -> Result<Self, String> {
-        let (engine, load_report) = Qwen3MoeOmegaEngine::load_omega(dir, max_context, progress)?;
+        Self::load_with(dir, max_context, WeightFormat::Bf16, progress)
+    }
+
+    /// As [`Self::load`] with a chosen [`WeightFormat`].
+    pub fn load_with(dir: &Path, max_context: usize, format: WeightFormat, progress: &mut dyn FnMut(&str)) -> Result<Self, String> {
+        let (engine, load_report) = Qwen3MoeOmegaEngine::load_omega_with(dir, max_context, format, progress)?;
         let max_context = engine.max_context_tokens();
         Ok(Self {
             inner: Mutex::new(engine),
@@ -1865,6 +2103,73 @@ mod forward_tests {
         (Qwen3MoeOmegaEngine::new(w, Box::new(kv)), src, c)
     }
 
+    fn engine_with(format: WeightFormat) -> (Qwen3MoeOmegaEngine, MemorySource, Qwen3MoeConfig, LoadReport) {
+        let c = tiny_config();
+        let mut src = MemorySource::for_config(&c);
+        let up = RecordingUploader::default();
+        let (w, report) = load_qwen3_moe_omega_from_with(&c, &mut src, &up, format, &mut |_| {}).unwrap();
+        let kv = HostKv::new(&c, 32);
+        (Qwen3MoeOmegaEngine::new(w, Box::new(kv)), src, c, report)
+    }
+
+    #[test]
+    fn fp8_paths_match_the_naive_reference_with_fewer_launches() {
+        let tokens = [5u32, 17, 42, 3, 9, 60];
+        for format in [WeightFormat::Fp8Experts, WeightFormat::Fp8All] {
+            let (mut eng, src, c, report) = engine_with(format);
+            assert_eq!(report.format, format);
+            let want = naive_forward(&src, &c, &tokens);
+            for (pos, &t) in tokens.iter().enumerate() {
+                let hid = eng.step(t).unwrap();
+                let got = eng.logits(&hid).unwrap();
+                let s = parity_stats(&got, &want[pos]);
+                assert!(s.cosine > 0.9999 && s.non_finite == 0, "{format:?} pos {pos}: {s:?}");
+                assert_eq!(crate::tensor::sample_argmax(&got).0, crate::tensor::sample_argmax(&want[pos]).0, "{format:?} pos {pos}");
+            }
+            // Experts: 2 launches per layer instead of 2 * top_k; attention still 3.
+            assert_eq!(eng.last_timing.launches as usize, c.layers * (3 + 2) + 1, "{format:?}");
+            // Resident bytes: FP8 experts are 1 byte + f32 block scales, attention per format.
+            let (h, i, e) = (c.hidden, c.moe_intermediate, c.experts);
+            let experts = e * (2 * i * h + h * i) + e * 4 * (2 * (i / 128) * (h / 128) + (h / 128) * (i / 128));
+            let attn = if format == WeightFormat::Fp8All {
+                c.qkv_n() * h + 4 * (c.qkv_n() / 128) * (h / 128) + h * c.q_dim() + 4 * (h / 128) * (c.q_dim() / 128)
+            } else {
+                2 * (h * c.qkv_n() + c.q_dim() * h)
+            };
+            assert_eq!(report.resident_bytes, c.layers * (experts + attn) + 2 * h * c.vocab, "{format:?}");
+        }
+    }
+
+    #[test]
+    fn fp8_experts_path_agrees_with_the_bf16_path_and_catches_the_routing_mutant() {
+        let tokens = [7u32, 1, 33, 12];
+        let (mut a, _, _, _) = engine_with(WeightFormat::Bf16);
+        let (mut b, _, c, _) = engine_with(WeightFormat::Fp8Experts);
+        a.trace_layers = vec![0];
+        b.trace_layers = vec![0];
+        for &t in &tokens {
+            let ha = a.step(t).unwrap();
+            let la = a.logits(&ha).unwrap();
+            let hb = b.step(t).unwrap();
+            let lb = b.logits(&hb).unwrap();
+            let s = parity_stats(&lb, &la);
+            assert!(s.cosine > 0.9999, "{s:?}");
+        }
+        for (ta, tb) in a.traces.iter().zip(&b.traces) {
+            assert_eq!(ta.experts, tb.experts, "same routing at pos {}", ta.pos);
+            let s = parity_stats(&tb.moe_out, &ta.moe_out);
+            assert!(s.cosine > 0.9999, "moe_out pos {}: {s:?}", ta.pos);
+        }
+        let mut m = Qwen3MoeOmegaEngine::new(engine_with(WeightFormat::Fp8Experts).0.weights, Box::new(HostKv::new(&c, 32)));
+        m.trace_layers = vec![0];
+        m.routing_mutant = true;
+        for &t in &tokens {
+            m.step(t).unwrap();
+        }
+        let worst = m.traces.iter().zip(&b.traces).map(|(x, y)| parity_stats(&x.moe_out, &y.moe_out).cosine).fold(1.0, f64::min);
+        assert!(worst < 0.99, "routing mutant must break the FP8 path too: {worst}");
+    }
+
     #[test]
     fn engine_forward_matches_a_naive_reference_at_every_position() {
         let (mut eng, src, c) = engine();
@@ -1926,6 +2231,7 @@ mod forward_tests {
         fn assert_sync<T: Send + Sync>(_: &T) {}
         let report = LoadReport {
             resident_bytes: 0,
+            format: WeightFormat::Bf16,
             host_bytes: 0,
             peak_rss_bytes: None,
             peak_rss_before_bytes: None,
@@ -2056,5 +2362,13 @@ pub fn replay_moe(layer: &Qwen3MoeLayer, trace: &LayerTrace, top_k: usize) -> Mo
         stats: parity_stats(&trace.moe_out, &want),
         routing_agrees: chip_sorted == oracle_sorted,
         oracle_experts: plan.topk_experts,
+    }
+}
+
+/// SwiGLU of one expert's gate|up row: `act[j] = silu(gu[j]) * gu[i + j]`.
+fn swiglu(gu: &[f32], i: usize, act: &mut [f32]) {
+    for j in 0..i {
+        let g = gu[j];
+        act[j] = g / (1.0 + (-g).exp()) * gu[i + j];
     }
 }
