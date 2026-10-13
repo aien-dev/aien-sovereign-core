@@ -156,12 +156,14 @@ impl Engine for OmegaDoor {
             seed: p.seed,
             stop_token_ids: p.stop_token_ids.clone(),
         };
+        let t_lock = Instant::now();
         let _lock = GpuLock::acquire(self.lock_wait).map_err(EngineError::Busy)?;
+        let lock_wait_ms = t_lock.elapsed().as_millis();
         // The server's own sampler, so CPU and Omega engines pick tokens the same way.
         let mut sampler = |logits: &[f32], step: usize| sample_next(logits, p, step);
         let o = self.engine.generate_with(prompt, &q, &mut sampler, on_token).map_err(EngineError::Failed)?;
         eprintln!(
-            "aien-serve-http: omega: prompt {} tok, {} reused from the previous turn, prefill {} ms, decode {} tok in {} ms",
+            "aien-serve-http: omega: lock wait {lock_wait_ms} ms, prompt {} tok, {} reused from the previous turn, prefill {} ms, decode {} tok in {} ms",
             o.prompt_tokens, o.reused_prompt_tokens, o.prefill_ms, o.emitted_tokens, o.decode_ms
         );
         Ok(GenerateOutcome {
