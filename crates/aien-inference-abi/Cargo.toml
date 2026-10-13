@@ -20,6 +20,7 @@ aien-kv-cache = { path = "../aien-kv-cache" }
 aien-platform = { path = "../aien-platform" }
 aien-omega-gpu = { path = "../aien-omega-gpu" }
 aien-omega-moe = { path = "../aien-omega-moe" }
+aien-omega-fp8 = { path = "../aien-omega-fp8" }
 parking_lot = "0.12"
 sha2 = "0.10"
 
