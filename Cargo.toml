@@ -35,6 +35,7 @@ members = [
     "crates/cortex-path-m1",
     "crates/aien-abi-conformance",
     "crates/aien-omega-gpu",
+    "crates/aien-omega-moe",
     "crates/aien-omega-compose",
     "crates/aien-campaign-verifier",
     "crates/aien-proof",
