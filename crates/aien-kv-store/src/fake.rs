@@ -8,7 +8,7 @@
 
 use crate::identity::{ChunkKey, NamespaceId};
 use crate::pin::{HolderGuard, PinnedDest, PinnedSource};
-use crate::record::ChunkHeader;
+use crate::record::{ChunkHeader, MAX_SEGMENTS};
 use crate::store::{
     CancelOutcome, Capacity, Completion, DrainReport, Incarnation, JobId, JobStage, KvStore,
     PinToken, PublishOutcome, RecoveryProgress, StoreState, Terminal, UnfinishedJob,
@@ -570,8 +570,11 @@ impl Inner {
         }
         self.reserved -= job.reserved;
         job.reserved = 0;
-        if job.kind == Kind::Store && self.inflight_store.get(&kb(&job.key)) == Some(&job.id) {
-            self.inflight_store.remove(&kb(&job.key));
+        if job.kind == Kind::Store {
+            self.abort_evictions(job.id);
+            if self.inflight_store.get(&kb(&job.key)) == Some(&job.id) {
+                self.inflight_store.remove(&kb(&job.key));
+            }
         }
         self.attached_total -= job.attached;
         match &terminal {
@@ -613,6 +616,23 @@ impl Inner {
         }
         if let Some(d) = job.dst.take() {
             self.graveyard.push(d.into_guard());
+        }
+    }
+
+    /// A store job ended (any terminal): the evictions it queued but the worker
+    /// has not run yet are dropped and their victims return to service.
+    ///
+    /// DOCS SILENT (ADR 7.4) on undoing an eviction. Narrowest rule: only
+    /// unlinks that have not run are dropped; an unlink that already ran is final.
+    fn abort_evictions(&mut self, job: u64) {
+        let (mine, rest): (Vec<Unlink>, Vec<Unlink>) = std::mem::take(&mut self.unlinks)
+            .into_iter()
+            .partition(|u| u.job == Some(job) && u.evict);
+        self.unlinks = rest;
+        for u in mine {
+            if let Some(o) = self.objects.get_mut(&u.key).filter(|o| o.seq == u.seq) {
+                o.evicting = false;
+            }
         }
     }
 
@@ -754,6 +774,7 @@ impl Inner {
             || src.total_bytes() != Some(header.payload_len)
             || header.block_size == 0
             || src.block_count() == 0
+            || src.block_count() > MAX_SEGMENTS
         {
             return Err(PlatformError::InvalidLayout);
         }
@@ -768,7 +789,12 @@ impl Inner {
         }
         let key = header.chunk_key;
         let k = kb(&key);
-        if let Some(&jid) = self.inflight_store.get(&k) {
+        // Never dedup into a job that is being cancelled: it will never publish.
+        if let Some(&jid) = self
+            .inflight_store
+            .get(&k)
+            .filter(|jid| self.jobs.get(jid).is_some_and(|j| !j.cancelling))
+        {
             self.stats.dedup_total += 1;
             return Ok(JobId(jid));
         }
@@ -1022,9 +1048,11 @@ impl Inner {
     fn start_store(&mut self, mut job: Job) {
         let mut first = true;
         let mut chosen = false;
-        while self.bytes_after() > self.cfg.quota_bytes || self.count_after() > self.cfg.max_objects
+        while self.bytes_after() > self.cfg.quota_bytes
+            || self.count_after() + 1 > self.cfg.max_objects
         {
-            // `job` is not in the map: its own reservation must be counted.
+            // `job` is not in the map, so `count_after` misses its own reservation
+            // (bytes use the scalar `self.reserved`, which already holds it): add 1.
             let Some(victim) = self.pick_victim() else {
                 // Nothing evictable (everything pinned or in flight): the need cannot be met.
                 self.fail(job, PlatformError::OutOfMemory);

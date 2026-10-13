@@ -418,3 +418,18 @@ fn host_chunk_blocks_are_capped_at_120() {
     f.backend_format = BackendFormat::NativeF32DecodeStateV1;
     assert!(f.namespace_id().is_ok());
 }
+
+#[test]
+fn zero_byte_factors_in_the_layout_are_refused() {
+    let mut f = sample();
+    f.backend_format = BackendFormat::HostPagedPoolV1;
+    f.layout.block_stride = 0;
+    assert_eq!(f.namespace_id(), Err(KvError::InvalidGeometry));
+    assert_eq!(f.expected_payload_len(16), Err(KvError::InvalidGeometry));
+
+    let mut f = sample();
+    f.backend_format = BackendFormat::NativeF32DecodeStateV1;
+    f.layout.element_bytes = 0;
+    assert_eq!(f.namespace_id(), Err(KvError::InvalidGeometry));
+    assert_eq!(f.expected_payload_len(16), Err(KvError::InvalidGeometry));
+}
