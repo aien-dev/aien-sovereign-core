@@ -1,8 +1,25 @@
 #![allow(dead_code)]
 
 use aien_kv_store::{
-    BackendFormat, ChunkHeader, ChunkKey, KvDtype, LayoutStrides, NamespaceFields, RopeScaling,
+    BackendFormat, ChunkHeader, ChunkKey, ComputeConfig, HiddenAct, KvDtype, LayoutStrides,
+    NamespaceFields, RopeScaling,
 };
+
+/// Llama-3.2-1B-like compute configuration (ADR 1.2.1), the base of every
+/// `sample()`.
+pub fn sample_compute() -> ComputeConfig<'static> {
+    ComputeConfig {
+        num_heads: 32,
+        hidden_dim: 2048,
+        intermediate_dim: 8192,
+        vocab_size: 128_256,
+        rms_norm_eps: 1e-5,
+        tie_word_embeddings: true,
+        hidden_act: HiddenAct::Silu,
+        arith_id: "ReferenceCpuBackend",
+        arith_epoch: 1,
+    }
+}
 
 /// Llama-3.2-1B-like host geometry (16 layers, 8 kv heads, head_dim 64, bf16,
 /// 16-token blocks, 16-block chunks = 256 tokens).
@@ -35,6 +52,7 @@ pub fn sample() -> NamespaceFields<'static> {
         backend_format: BackendFormat::HostPagedPoolV1,
         chunk_tokens: 256,
         sharing_namespace: "default",
+        compute_config_digest: sample_compute().digest().unwrap(),
     }
 }
 
@@ -84,4 +102,25 @@ pub fn sample_chunk_header() -> ChunkHeader {
 
 pub fn key(b: u8) -> ChunkKey {
     ChunkKey(aien_platform::ObjectId([b; 32]))
+}
+
+/// Deterministic segment digests: SHA-256 of "<tag>/seg/<j>".
+pub fn seg_digests(tag: &str, n: u32) -> Vec<[u8; 32]> {
+    use sha2::{Digest, Sha256};
+    (0..n)
+        .map(|j| Sha256::digest(format!("{tag}/seg/{j}").as_bytes()).into())
+        .collect()
+}
+
+/// A consistent record for the `sample()` geometry: 16 segments of one pool
+/// block each, `payload_sha256` = the root over them.
+pub fn sample_record() -> (aien_kv_store::RecordHeader, Vec<[u8; 32]>) {
+    let chunk = sample_chunk_header();
+    let n = sample().segment_count(chunk.token_count).unwrap();
+    let digests = seg_digests("sample", n);
+    let rec = aien_kv_store::RecordHeader {
+        chunk,
+        payload_sha256: aien_kv_store::payload_root(&digests),
+    };
+    (rec, digests)
 }

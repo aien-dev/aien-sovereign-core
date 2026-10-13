@@ -125,9 +125,49 @@ pub struct NamespaceFields<'a> {
     pub chunk_tokens: u32,
     /// At most 64 bytes (METRICS_AND_SETTINGS `AIEN_KV_STORE_NAMESPACE`).
     pub sharing_namespace: &'a str,
+    /// `ComputeConfig::digest()` (ADR 1.2 field 14, section 1.2.1): every other
+    /// number that changes what the forward pass computes.
+    pub compute_config_digest: [u8; 32],
 }
 
 pub const MAX_SHARING_NAMESPACE_BYTES: usize = 64;
+/// At most 255 bytes (u8 length prefix).
+pub const MAX_ARITH_ID_BYTES: usize = 255;
+
+/// Activation function code (ADR 1.2.1 field 7). The loader refuses everything
+/// but silu today; the byte exists so a future activation cannot alias.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum HiddenAct {
+    Silu = 1,
+}
+
+/// Computation-affecting settings not already in the namespace fields (ADR
+/// 1.2.1). Built from the resolved `ModelConfig` by `aien-runtime` (cut C6a),
+/// never from raw `config.json`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ComputeConfig<'a> {
+    pub num_heads: u32,
+    pub hidden_dim: u64,
+    pub intermediate_dim: u64,
+    pub vocab_size: u64,
+    pub rms_norm_eps: f32,
+    pub tie_word_embeddings: bool,
+    pub hidden_act: HiddenAct,
+    /// `TensorBackend::name()`; at most 255 bytes.
+    pub arith_id: &'a str,
+    /// `KV_ARITH_EPOCH`: bumped by any change that alters forward-pass numbers.
+    pub arith_epoch: u32,
+}
+
+impl ComputeConfig<'_> {
+    /// `SHA-256("AIEN-PKV-CFG-V1\0" || num_heads u32le || hidden_dim u64le ||
+    /// intermediate_dim u64le || vocab_size u64le || rms_norm_eps bits u32le ||
+    /// tie u8 || hidden_act u8 || arith_id u8-len + bytes || arith_epoch u32le)`.
+    pub fn digest(&self) -> Result<[u8; 32], KvError> {
+        unimplemented!("C1b red stub")
+    }
+}
 
 const NS_DOMAIN: &[u8] = b"AIEN-PKV-NS-V1\0";
 const CHUNK_DOMAIN: &[u8] = b"AIEN-PKV-CHUNK-V1\0";
@@ -240,6 +280,21 @@ impl NamespaceFields<'_> {
                     .ok_or(KvError::Overflow)
             }
         }
+    }
+
+    /// Bytes per payload segment for a chunk of `token_count` positions (ADR
+    /// 12 H8): host = `layout.block_stride` (one pool block); native = the whole
+    /// payload (one segment).
+    pub fn segment_bytes(&self, token_count: u32) -> Result<u64, KvError> {
+        let _ = token_count;
+        unimplemented!("C1b red stub")
+    }
+
+    /// Number of payload segments for `token_count` positions; at most
+    /// `MAX_SEGMENTS`.
+    pub fn segment_count(&self, token_count: u32) -> Result<u32, KvError> {
+        let _ = token_count;
+        unimplemented!("C1b red stub")
     }
 
     /// Build the header a writer would emit (or a reader would expect) for one

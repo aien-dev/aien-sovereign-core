@@ -7,7 +7,8 @@ use aien_platform::PlatformError;
 /// `validate_record` checks them (ADR 0003 section 1.4).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KvError {
-    /// Fewer than 256 bytes were supplied for the header.
+    /// Fewer than 4096 bytes were supplied for the header region (256 for
+    /// `RecordHeader::decode_struct`).
     Truncated,
     BadMagic,
     UnsupportedVersion,
@@ -17,6 +18,14 @@ pub enum KvError {
     HeaderChecksum,
     /// A reserved flag bit is set, or `partial_tail` disagrees with `token_count`.
     BadFlags,
+    /// A nonzero byte in the header region outside the 256-byte struct and the
+    /// segment digest table (ADR 0003 section 2.1, H7).
+    BadPadding,
+    /// The root recomputed from the segment digest table differs from
+    /// `payload_sha256` (offset 184).
+    SegmentRootMismatch,
+    /// More than `MAX_SEGMENTS` (120) segments: the table would not fit the region.
+    TooManySegments,
     NamespaceMismatch,
     KeyMismatch,
     ParentMismatch,
@@ -27,7 +36,7 @@ pub enum KvError {
     /// Model digest, chunk size, block size, layers, heads, head dim, dtype or backend differ.
     GeometryMismatch,
     PayloadLenMismatch,
-    /// File size is not `256 + payload_len`.
+    /// File size is not `4096 + payload_len`.
     FileSizeMismatch,
     // Construction errors (identity), not validation outcomes.
     /// A length-prefixed identity field is longer than its prefix can express or its cap.

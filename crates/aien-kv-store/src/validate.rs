@@ -16,7 +16,9 @@ pub fn validate_record(
     buf: &[u8],
     file_size: u64,
     expect: &ChunkHeader,
+    segment_bytes: u64,
 ) -> Result<RecordHeader, KvError> {
+    let _ = segment_bytes;
     let rec = RecordHeader::decode(buf)?;
     let h = &rec.chunk;
     if h.namespace_id != expect.namespace_id {

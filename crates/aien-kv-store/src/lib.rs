@@ -16,8 +16,11 @@ pub mod validate;
 
 pub use error::KvError;
 pub use identity::{
-    chunk_chain, chunk_key, BackendFormat, ChunkKey, KvDtype, LayoutStrides, NamespaceFields,
-    NamespaceId, RopeScaling,
+    chunk_chain, chunk_key, BackendFormat, ChunkKey, ComputeConfig, HiddenAct, KvDtype,
+    LayoutStrides, NamespaceFields, NamespaceId, RopeScaling,
 };
-pub use record::{ChunkHeader, RecordHeader, HEADER_LEN, MAGIC};
+pub use record::{
+    payload_root, segment_count, ChunkHeader, RecordHeader, HEADER_LEN, HEADER_REGION_LEN, MAGIC,
+    MAX_SEGMENTS, PAYLOAD_OFFSET, SEGMENT_TABLE_OFFSET,
+};
 pub use validate::validate_record;

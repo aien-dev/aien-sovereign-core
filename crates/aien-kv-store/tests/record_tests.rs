@@ -1,7 +1,11 @@
 mod common;
 
-use aien_kv_store::{KvError, RecordHeader, HEADER_LEN, MAGIC};
+use aien_kv_store::{
+    payload_root, segment_count, KvError, RecordHeader, HEADER_LEN, HEADER_REGION_LEN, MAGIC,
+    MAX_SEGMENTS, PAYLOAD_OFFSET,
+};
 use common::*;
+use sha2::{Digest, Sha256};
 
 fn record() -> RecordHeader {
     RecordHeader {
@@ -24,14 +28,14 @@ fn header_roundtrip_256_bytes() {
     let bytes = r.encode();
     assert_eq!(bytes.len(), 256);
     assert_eq!(HEADER_LEN, 256);
-    let back = RecordHeader::decode(&bytes).unwrap();
+    let back = RecordHeader::decode_struct(&bytes).unwrap();
     assert_eq!(back, r);
     // Re-encoding is byte for byte identical.
     assert_eq!(back.encode(), bytes);
-    // Extra trailing bytes (the payload) do not matter to decode.
-    let mut with_payload = bytes.to_vec();
-    with_payload.extend_from_slice(&[1, 2, 3]);
-    assert_eq!(RecordHeader::decode(&with_payload).unwrap(), r);
+    // Extra trailing bytes do not matter to the struct decode.
+    let mut with_tail = bytes.to_vec();
+    with_tail.extend_from_slice(&[1, 2, 3]);
+    assert_eq!(RecordHeader::decode_struct(&with_tail).unwrap(), r);
 }
 
 /// Every field sits at the offset ADR 0003 section 2.1 gives.
@@ -63,23 +67,102 @@ fn header_fields_sit_at_adr_offsets() {
     assert_eq!(&b[184..216], &r.payload_sha256);
     assert_eq!(u64_at(&b, 216), c.written_unix_ns);
     // header_sha256 covers bytes 0..224.
-    use sha2::{Digest, Sha256};
     let digest = Sha256::digest(&b[0..224]);
     assert_eq!(&b[224..256], digest.as_slice());
 }
 
 #[test]
 fn decode_refuses_short_input_and_structural_damage() {
-    let b = record().encode();
-    assert_eq!(RecordHeader::decode(&b[..255]), Err(KvError::Truncated));
+    let (rec, digests) = sample_record();
+    let region = rec.encode_region(&digests).unwrap();
+    // The region decode needs the whole 4096 bytes; the struct decode needs 256.
+    assert_eq!(
+        RecordHeader::decode(&region[..4095]),
+        Err(KvError::Truncated)
+    );
+    assert_eq!(
+        RecordHeader::decode(&region[..256]),
+        Err(KvError::Truncated)
+    );
     assert_eq!(RecordHeader::decode(&[]), Err(KvError::Truncated));
-    let mut bad = b;
+    assert_eq!(
+        RecordHeader::decode_struct(&region[..255]),
+        Err(KvError::Truncated)
+    );
+    let mut bad = region;
     bad[3] ^= 0xFF;
     assert_eq!(RecordHeader::decode(&bad), Err(KvError::BadMagic));
-    let mut bad = b;
+    let mut bad = region;
     bad[100] ^= 1; // inside the hashed prefix, magic untouched
     assert_eq!(RecordHeader::decode(&bad), Err(KvError::HeaderChecksum));
-    let mut bad = b;
+    let mut bad = region;
     bad[240] ^= 1; // inside the stored hash itself
     assert_eq!(RecordHeader::decode(&bad), Err(KvError::HeaderChecksum));
+}
+
+#[test]
+fn header_region_roundtrip_4096() {
+    let (rec, digests) = sample_record();
+    assert_eq!(digests.len(), 16);
+    assert_eq!(HEADER_REGION_LEN, 4096);
+    assert_eq!(PAYLOAD_OFFSET, 4096);
+    assert_eq!(MAX_SEGMENTS, 120);
+    let region = rec.encode_region(&digests).unwrap();
+    assert_eq!(region.len(), 4096);
+    // Struct first, then the digest table, then zeros to the end.
+    assert_eq!(&region[..256], &rec.encode());
+    for (i, d) in digests.iter().enumerate() {
+        assert_eq!(&region[256 + 32 * i..256 + 32 * (i + 1)], d, "digest {i}");
+    }
+    assert!(region[256 + 32 * 16..].iter().all(|b| *b == 0));
+    // Decode reads the struct back; the root in the struct is the root of the table.
+    let back = RecordHeader::decode(&region).unwrap();
+    assert_eq!(back, rec);
+    assert_eq!(back.payload_sha256, payload_root(&digests));
+    // Re-encoding is byte for byte identical.
+    assert_eq!(back.encode_region(&digests).unwrap(), region);
+
+    // The table can fill the region exactly: 120 digests, no padding left.
+    let full = seg_digests("full", 120);
+    let region = rec.encode_region(&full).unwrap();
+    assert_eq!(&region[256 + 32 * 119..], full[119].as_slice());
+    // 121 digests do not fit.
+    let over = seg_digests("over", 121);
+    assert_eq!(rec.encode_region(&over), Err(KvError::TooManySegments));
+}
+
+#[test]
+fn payload_root_is_domain_separated_and_order_dependent() {
+    let d = seg_digests("root", 3);
+    let mut h = Sha256::new();
+    h.update(b"AIEN-PKV-PAYLOAD-V1\0");
+    for x in &d {
+        h.update(x);
+    }
+    let want: [u8; 32] = h.finalize().into();
+    assert_eq!(payload_root(&d), want);
+    let mut swapped = d.clone();
+    swapped.swap(0, 1);
+    assert_ne!(payload_root(&swapped), want);
+    assert_ne!(payload_root(&d[..2]), want);
+    // Not the bare hash of the concatenation.
+    let mut bare = Sha256::new();
+    for x in &d {
+        bare.update(x);
+    }
+    let bare: [u8; 32] = bare.finalize().into();
+    assert_ne!(bare, want);
+}
+
+#[test]
+fn segment_count_is_ceil_and_bounded() {
+    assert_eq!(segment_count(524_288, 524_288), Ok(1));
+    assert_eq!(segment_count(524_289, 524_288), Ok(2));
+    assert_eq!(segment_count(120 * 4096, 4096), Ok(120));
+    assert_eq!(
+        segment_count(120 * 4096 + 1, 4096),
+        Err(KvError::TooManySegments)
+    );
+    assert_eq!(segment_count(4096, 0), Err(KvError::InvalidGeometry));
+    assert_eq!(segment_count(0, 4096), Err(KvError::InvalidGeometry));
 }

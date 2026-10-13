@@ -7,6 +7,14 @@ use sha2::{Digest, Sha256};
 
 pub const MAGIC: [u8; 8] = *b"AIENKVC1";
 pub const HEADER_LEN: usize = 256;
+/// A record file is `header region (4096 B) || payload` (ADR 0003 section 2.1, H2).
+pub const HEADER_REGION_LEN: usize = 4096;
+/// File offset of the first payload byte.
+pub const PAYLOAD_OFFSET: usize = 4096;
+/// Segment digests that fit between the struct and the end of the region: (4096 - 256) / 32.
+pub const MAX_SEGMENTS: usize = 120;
+/// Region offset of the segment digest table.
+pub const SEGMENT_TABLE_OFFSET: usize = HEADER_LEN;
 pub const FORMAT_VERSION: u16 = 1;
 pub const RECORD_KIND_CHUNK: u16 = 1;
 /// `flags` bit 0: the chunk holds fewer than `chunk_tokens` positions.
@@ -173,5 +181,37 @@ impl RecordHeader {
             },
             payload_sha256: get32(buf, O_PAYLOAD_SHA),
         })
+    }
+}
+
+/// `SHA-256("AIEN-PKV-PAYLOAD-V1\0" || seg_digest_0 || ... || seg_digest_{n-1})`,
+/// the value stored at header offset 184 (ADR 0003 section 2.1, H4).
+pub fn payload_root(seg_digests: &[[u8; 32]]) -> [u8; 32] {
+    let _ = seg_digests;
+    unimplemented!("C1b red stub")
+}
+
+/// Number of segments of a payload: `ceil(payload_len / segment_bytes)`.
+/// `InvalidGeometry` for a zero size, `TooManySegments` above `MAX_SEGMENTS`.
+pub fn segment_count(payload_len: u64, segment_bytes: u64) -> Result<u32, KvError> {
+    let _ = (payload_len, segment_bytes);
+    unimplemented!("C1b red stub")
+}
+
+impl RecordHeader {
+    /// Serialize the 4096-byte header region: the 256-byte struct, then the
+    /// segment digest table, then zeros (ADR 0003 section 2.1, H5). Does not
+    /// check that `payload_sha256` is the root of `seg_digests`; validation does.
+    pub fn encode_region(
+        &self,
+        seg_digests: &[[u8; 32]],
+    ) -> Result<[u8; HEADER_REGION_LEN], KvError> {
+        let _ = seg_digests;
+        unimplemented!("C1b red stub")
+    }
+
+    /// Structural decode of the 256-byte struct only (at least 256 bytes).
+    pub fn decode_struct(buf: &[u8]) -> Result<RecordHeader, KvError> {
+        Self::decode(buf)
     }
 }
