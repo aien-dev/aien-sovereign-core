@@ -3183,6 +3183,10 @@ pub struct MoeParity {
     pub stats: ParityStats,
     pub oracle_experts: Vec<u32>,
     pub routing_agrees: bool,
+    /// Largest |chip weight - oracle weight| over the chip's experts (an expert the oracle did
+    /// not pick counts as its full weight). Cosine of `moe_out` is blind to a common scale, so the
+    /// weights are compared directly.
+    pub max_weight_err: f32,
 }
 
 pub fn replay_moe(layer: &Qwen3MoeLayer, trace: &LayerTrace, top_k: usize) -> MoeParity {
@@ -3193,10 +3197,20 @@ pub fn replay_moe(layer: &Qwen3MoeLayer, trace: &LayerTrace, top_k: usize) -> Mo
     chip_sorted.sort_unstable();
     let mut oracle_sorted = plan.topk_experts.clone();
     oracle_sorted.sort_unstable();
+    let max_weight_err = trace
+        .experts
+        .iter()
+        .zip(&trace.weights)
+        .map(|(id, w)| {
+            let want = plan.topk_experts.iter().position(|e| e == id).map_or(0.0, |p| plan.topk_weights[p]);
+            (w - want).abs()
+        })
+        .fold(0.0f32, f32::max);
     MoeParity {
         stats: parity_stats(&trace.moe_out, &want),
         routing_agrees: chip_sorted == oracle_sorted,
         oracle_experts: plan.topk_experts,
+        max_weight_err,
     }
 }
 

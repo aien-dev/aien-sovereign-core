@@ -105,6 +105,8 @@ struct Args {
     /// Device router mutants run as negative controls (omega_gpu_router_api.h: 1 RMSNorm without
     /// the weight, 2 wrong mask, 3 wrong directory entry, 4 weights not normalised).
     router_mutants: Vec<i32>,
+    /// Skip parity, controls and the prefill check: tokens against the golden and timing only.
+    tokens_only: bool,
 }
 
 fn parse_choice(v: &str, host_word: &str, flag: &str) -> PathChoice {
@@ -136,6 +138,7 @@ fn parse_args() -> Args {
         prefill_chunk: None,
         paths: DevicePaths::default(),
         router_mutants: vec![1, 2, 3, 4],
+        tokens_only: false,
     };
     while let Some(arg) = it.next() {
         match arg.as_str() {
@@ -164,6 +167,7 @@ fn parse_args() -> Args {
             "--prefill-chunk" => a.prefill_chunk = Some(it.next().expect("--prefill-chunk N").parse().expect("number")),
             "--router" => a.paths.router = parse_choice(&it.next().expect("--router auto|host|device"), "host", "--router"),
             "--lm-head" => a.paths.lm_head = parse_choice(&it.next().expect("--lm-head auto|dense|gemv"), "dense", "--lm-head"),
+            "--tokens-only" => a.tokens_only = true,
             "--router-mutants" => {
                 let v = it.next().expect("--router-mutants a,b (empty for none)");
                 a.router_mutants = v.split(',').filter(|s| !s.is_empty()).map(|s| s.parse().expect("mutant")).collect();
@@ -297,6 +301,12 @@ fn chip(a: &Args) {
     let ps = prompts(&tok);
     let mut results = Vec::new();
 
+    let mut parity_json = Vec::new();
+    let mut parity_pass = true;
+    let mut controls = Vec::new();
+    let mut tokens_pass_prefill = true;
+    // --tokens-only skips parity, controls and the prefill check (speed and token runs only).
+    if !a.tokens_only {
     // ---- layer parity on the short prompt (prompt 2), chip traces replayed on the host ----
     let (pname, pids) = &ps[1];
     engine.trace_layers = a.layers.clone();
@@ -305,8 +315,6 @@ fn chip(a: &Args) {
         engine.step(t).expect("step");
     }
     let traces = std::mem::take(&mut engine.traces);
-    let mut parity_json = Vec::new();
-    let mut parity_pass = true;
     for &l in &a.layers {
         let lt: Vec<_> = traces.iter().filter(|t| t.layer == l).cloned().collect();
         let attn = load_attention_layer_f32(&a.checkpoint, &config, l).expect("attention weights");
@@ -316,6 +324,7 @@ fn chip(a: &Args) {
         let mut worst_moe = 1.0f64;
         let mut worst_p95 = 0.0f32;
         let mut routing_ok = true;
+        let mut worst_wt = 0.0f32;
         let mut worst_xprime = 0.0f32;
         for (t, h) in lt.iter().zip(&host) {
             // The device router's own x' against the host RMSNorm of the same residual row.
@@ -328,23 +337,22 @@ fn chip(a: &Args) {
             worst_moe = worst_moe.min(m.stats.cosine);
             worst_p95 = worst_p95.max(m.stats.p95_rel);
             routing_ok &= m.routing_agrees;
+            worst_wt = worst_wt.max(m.max_weight_err);
         }
-        let pass = worst_attn >= 0.999 && worst_moe >= 0.999 && routing_ok && worst_xprime <= 1e-4;
+        let pass = worst_attn >= 0.999 && worst_moe >= 0.999 && routing_ok && worst_wt <= 1e-4 && worst_xprime <= 1e-4;
         parity_pass &= pass;
         say(format!(
-            "PARITY layer {l} over {} positions ({pname}): attention cosine(min) {worst_attn:.6} moe cosine(min) {worst_moe:.6} moe p95_rel(max) {worst_p95:.4} routing_agrees={routing_ok} router x' rel(max) {worst_xprime:.2e} -> {}",
+            "PARITY layer {l} over {} positions ({pname}): attention cosine(min) {worst_attn:.6} moe cosine(min) {worst_moe:.6} moe p95_rel(max) {worst_p95:.4} routing_agrees={routing_ok} routing weights err(max) {worst_wt:.2e} router x' rel(max) {worst_xprime:.2e} -> {}",
             lt.len(),
             if pass { "PASS" } else { "FAIL" }
         ));
-        parity_json.push(serde_json::json!({"layer": l, "positions": lt.len(), "attn_cosine_min": worst_attn, "moe_cosine_min": worst_moe, "moe_p95_rel_max": worst_p95, "routing_agrees": routing_ok, "router_xprime_rel_max": worst_xprime, "pass": pass}));
+        parity_json.push(serde_json::json!({"layer": l, "positions": lt.len(), "attn_cosine_min": worst_attn, "moe_cosine_min": worst_moe, "moe_p95_rel_max": worst_p95, "routing_agrees": routing_ok, "routing_weight_err_max": worst_wt, "router_xprime_rel_max": worst_xprime, "pass": pass}));
     }
     // Negative controls on the first traced layer: host routing mutant, then the chip-side mutant
     // of the expert kernel in use (bf16: window skew of one tile; FP8: scales dropped, kernel
     // mutant 1 of omega_gpu_fp8_api.h).
     let l0 = a.layers[0];
     let capsule = load_qwen3_fp8_moe_layer(&a.checkpoint, l0).expect("capsule");
-    let mut controls = Vec::new();
-    let mut tokens_pass_prefill = true;
     let fp8 = a.format.fp8_experts();
     let chip_control = if fp8 { "fp8-scales-dropped" } else { "window-skew-1-tile" };
     for (name, set) in [("routing-mutant", 0), (chip_control, 1)] {
@@ -433,19 +441,21 @@ fn chip(a: &Args) {
                     let mut worst = 1.0f64;
                     let mut routing_ok = true;
                     let mut xprime = 0.0f32;
+                    let mut wt_err = 0.0f32;
                     for t in &engine.traces {
                         let r = replay_moe(&capsule, t, config.top_k);
                         worst = worst.min(r.stats.cosine);
                         routing_ok &= r.routing_agrees;
+                        wt_err = wt_err.max(r.max_weight_err);
                         xprime = t.post_device.iter().zip(&t.post).map(|(d, p)| (d - p).abs() / (1.0 + p.abs())).fold(xprime, f32::max);
                     }
-                    let caught = worst < 0.99 || !routing_ok || xprime > 1e-4;
+                    let caught = worst < 0.99 || !routing_ok || wt_err > 1e-3 || xprime > 1e-4;
                     say(format!(
-                        "CONTROL {name}: layer {l0} moe cosine(min) {worst:.4} routing_agrees={routing_ok} router x' rel(max) {xprime:.2e} over {} positions -> {}",
+                        "CONTROL {name}: layer {l0} moe cosine(min) {worst:.4} routing_agrees={routing_ok} routing weights err(max) {wt_err:.2e} router x' rel(max) {xprime:.2e} over {} positions -> {}",
                         engine.traces.len(),
                         if caught { "CAUGHT" } else { "NOT CAUGHT (FAIL)" }
                     ));
-                    controls.push(serde_json::json!({"control": name, "moe_cosine_min": worst, "routing_agrees": routing_ok, "router_xprime_rel_max": xprime, "caught": caught}));
+                    controls.push(serde_json::json!({"control": name, "moe_cosine_min": worst, "routing_agrees": routing_ok, "routing_weight_err_max": wt_err, "router_xprime_rel_max": xprime, "caught": caught}));
                     parity_pass &= caught;
                 }
             }
@@ -453,10 +463,11 @@ fn chip(a: &Args) {
         }
     }
     engine.trace_layers.clear();
+    }
 
     // ---- batched prefill against token-at-a-time on the 204-token prompt: same hidden state, same tokens ----
     let mut prefill_json = serde_json::Value::Null;
-    if engine.batched_prefill_possible() && engine.prefill_chunk > 1 {
+    if !a.tokens_only && engine.batched_prefill_possible() && engine.prefill_chunk > 1 {
         let (pname, pids) = &ps[2];
         let chunk = engine.prefill_chunk;
         let mut outs = Vec::new();

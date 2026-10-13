@@ -23,7 +23,7 @@ repo=$(cd "$(dirname "$0")/.." && pwd)
 	free -g | head -2
 	uname -r
 } > "$ev/$name.start"
-crumb whisper odysseus-9e "$repo" - "OWN-30B cut 3 (F): chip run $name, ~10 min" >/dev/null 2>&1 || true
+crumb whisper odysseus-9e "$repo" - "${OWN30B_WHISPER:-OWN-30B (F): chip run $name, ~10 min}" >/dev/null 2>&1 || true
 flock /tmp/aien-gb10.lock "$bin" chip "$ckpt" "$golden" "$ev/$name" "$@" > "$ev/$name.raw" 2> "$ev/$name.err"
 rc=$?
 echo "$rc" > "$ev/$name.rc"
