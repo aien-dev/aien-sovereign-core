@@ -1522,29 +1522,30 @@ fn worker_submit_latency_is_independent_of_store_latency() {
     for n in 1..=8 {
         w.inject(n);
     }
-    w.probe.slow_us.store(20_000, Ordering::SeqCst); // every store call takes 20 ms
+    // Deterministic (Grok C5 P2-5): the store is stuck for the whole run, so
+    // a caller that touched it would hang here instead of being merely slow.
     w.resume();
-    let mut worst = Duration::ZERO;
-    let t0 = Instant::now();
-    for i in 0..300u32 {
-        let t = Instant::now();
-        let _ = w.load(1 + i % 8);
-        let _ = w.store(100 + i);
-        let _ = w.worker.poll(8);
-        let _ = w.worker.capacity();
-        worst = worst.max(t.elapsed());
-    }
-    assert!(
-        worst < Duration::from_millis(10),
-        "slowest caller pass {worst:?}"
-    );
-    assert!(t0.elapsed() < Duration::from_secs(5));
-    assert!(
-        w.probe.submitted().len() < 20,
-        "the store really was slow: only {} calls so far",
-        w.probe.submitted().len()
-    );
-    w.probe.slow_us.store(0, Ordering::SeqCst);
+    w.stall_store();
+    let (tx, rx) = mpsc::channel();
+    thread::scope(|sc| {
+        sc.spawn(|| {
+            for i in 0..300u32 {
+                let _ = w.load(1 + i % 8);
+                let _ = w.store(100 + i);
+                let _ = w.worker.poll(8);
+                let _ = w.worker.capacity();
+            }
+            let _ = tx.send(());
+        });
+        let finished = rx.recv_timeout(Duration::from_secs(30)).is_ok();
+        let stuck_calls = w.probe.submitted().len();
+        w.unstall_store();
+        assert!(finished, "a caller blocked on the stalled store");
+        assert!(
+            stuck_calls <= 1,
+            "the store really was stuck: {stuck_calls} submits"
+        );
+    });
     w.settle();
 }
 
@@ -1955,7 +1956,15 @@ fn worker_panic_in_the_store_fails_live_jobs_once() {
     let h = fields.chunk_header(&ns, key, None, 0, 8, 1).unwrap();
     let job = worker.submit_store(h, src, Incarnation::seq(1)).unwrap();
     wait_for("dispatch", || worker.inner_job(job).is_some());
+    let inner = worker.inner_job(job).unwrap();
     boom.store(true, Ordering::SeqCst);
+    wait_for("the worker failed", || {
+        worker.capacity().state == aien_kv_store::StoreState::Failed
+    });
+    // The store still holds the source (Hold): the job may fail only once
+    // the store lets go (Grok C5 P1-3).
+    assert_eq!(fake.cancel(inner), CancelOutcome::Cancelled);
+    fake.advance(0);
     let mut v = Vec::new();
     wait_for("terminal after the panic", || {
         v.extend(worker.poll(8));
@@ -2274,20 +2283,22 @@ fn a_dedup_merge_by_the_store_never_strands_a_job() {
     // P1-1 through the other door: the live job's only waiter cancels too late
     // (the store already holds it), then a new store of the key arrives.
     let w = rig();
-    w.fake.script(JobScript::latency(5_000, 0));
+    // The worker never moves the clock (step 0); the test moves the fake into
+    // its file sync, which it stalls and where cancel is too late.
+    w.fake
+        .script(JobScript::latency(5_000, 0).with(Fault::StallFsync(1_000_000)));
     w.step.store(0, Ordering::SeqCst);
     let a = w.store(1).unwrap();
     w.resume();
     wait_for("dispatch", || w.dispatched(a));
-    w.step.store(100, Ordering::SeqCst);
-    wait_for("the store holds it past cancel", || {
-        w.fake.job_stage(w.worker.inner_job(a).unwrap()) >= Some(JobStage::Completed)
-    });
+    w.fake.advance(10_000);
+    assert!(w.dispatched(a), "still in the store");
     assert_eq!(w.worker.cancel(a), CancelOutcome::TooLate);
     let (_, h) = w.chunk(1);
     let mem = Mem::new(2, 0);
     let (src, _keep) = mem.source(2, 4);
     let b = w.worker.submit_store(h, src, Incarnation::seq(902));
+    w.step.store(1_000_000, Ordering::SeqCst);
     let v = w.settle();
     let jobs: BTreeSet<JobId> = terminals(&v).iter().map(|c| c.job).collect();
     assert!(jobs.contains(&a), "the first job ends: {v:?}");
@@ -2431,5 +2442,9 @@ fn shutdown_cancels_a_job_that_is_still_being_handed_to_the_store() {
         "{v:?}"
     );
     assert_eq!(w.fake.stats().reads, 0, "no read after shutdown");
+    assert!(
+        !w.probe.threads_of("cancel").is_empty(),
+        "the worker forwards the cancel itself, not relying on the store's shutdown"
+    );
     assert_eq!(mem.bytes(), vec![0xEE; 2 * BLOCK]);
 }

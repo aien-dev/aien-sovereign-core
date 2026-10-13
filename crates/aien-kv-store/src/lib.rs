@@ -37,7 +37,6 @@ pub use record::{
 };
 pub use store::{
     CancelOutcome, Capacity, Completion, DrainReport, Incarnation, JobId, JobStage, KvStore,
-    LandingHolder,
-    PinToken, PublishOutcome, RecoveryProgress, StoreState, Terminal, UnfinishedJob,
+    LandingHolder, PinToken, PublishOutcome, RecoveryProgress, StoreState, Terminal, UnfinishedJob,
 };
 pub use validate::validate_record;

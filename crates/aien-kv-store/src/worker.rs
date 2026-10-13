@@ -12,13 +12,13 @@ use crate::pin::{HolderGuard, PinnedDest, PinnedSource};
 use crate::record::{ChunkHeader, HEADER_REGION_LEN, MAX_SEGMENTS};
 use crate::store::{
     CancelOutcome, Capacity, Completion, DrainReport, Incarnation, JobId, JobStage, KvStore,
-    LandingHolder,
-    PinToken, PublishOutcome, RecoveryProgress, StoreState, Terminal, UnfinishedJob,
+    LandingHolder, PinToken, PublishOutcome, RecoveryProgress, StoreState, Terminal, UnfinishedJob,
 };
 use aien_platform::{ObjectId, PlatformError};
 use std::collections::{BTreeMap, VecDeque};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::string::String;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, TryLockError};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -283,11 +283,23 @@ struct WorkerJob {
     /// same blocks (Grok C5 P1-2, P1-3). Loads hand it back with their
     /// terminals; stores release it at the terminal.
     landing: Option<HolderGuard>,
-    /// The inner store still holds the lease: it may still touch the blocks.
-    lent: bool,
-    /// The worker thread died while the store held the lease: the job ends
-    /// (Failed) only when the store gives the lease back.
-    orphaned: bool,
+    /// Set when the blocks were lent; becomes true when the inner store drops
+    /// its lease (it can no longer touch the blocks).
+    lease_back: Option<Arc<AtomicBool>>,
+    /// The job lost its link to the inner store (the worker thread panicked,
+    /// or the store answered with an id another live job already holds). It
+    /// ends with this failure only once the store gave the lease back, so a
+    /// caller never reuses blocks the store may still write (Grok C5 P1-3).
+    orphaned: Option<PlatformError>,
+}
+
+impl WorkerJob {
+    /// The inner store may still read or write this job's blocks.
+    fn store_holds_lease(&self) -> bool {
+        self.lease_back
+            .as_ref()
+            .is_some_and(|b| !b.load(Ordering::SeqCst))
+    }
 }
 
 /// One request riding a job.
@@ -540,7 +552,9 @@ impl State {
             self.dispatched_count -= 1;
         }
         if let Status::Dispatched(inner_id) = job.status {
-            self.by_inner.remove(&inner_id);
+            if self.by_inner.get(&inner_id) == Some(&job.id) {
+                self.by_inner.remove(&inner_id);
+            }
         }
         if job.kind != JobKind::Flush {
             self.coalesce.close(job.id);
@@ -565,15 +579,17 @@ impl State {
             }
         }
         // The caller's guard: lent to the store (`landing`) or never dispatched
-        // (`payload`). A load hands it back with every waiter's terminal, so
-        // the landing blocks stay alive until the caller has adopted them and
-        // dropped its completion; a store releases its source now.
+        // (`payload`). A completed load hands it back with every waiter's
+        // terminal, so the landing blocks stay alive until the caller has
+        // adopted them and dropped its completion (Grok C5 P1-2). Any other
+        // terminal releases it now: there is nothing to adopt.
         let guard = job
             .landing
             .take()
             .or_else(|| job.payload.take().and_then(Payload::into_guard));
+        let done = matches!(terminal, Terminal::Done(_));
         let holder = match (job.kind, guard) {
-            (JobKind::Load, Some(g)) => Some(LandingHolder::new(g)),
+            (JobKind::Load, Some(g)) if done => Some(LandingHolder::new(g)),
             (_, Some(g)) => {
                 self.graveyard.push(g);
                 None
@@ -601,6 +617,74 @@ impl State {
                 holder: holder.clone(),
             });
         }
+    }
+
+    /// End every orphaned job whose lease the store has given back.
+    fn reap_orphans(&mut self) {
+        let ids: Vec<JobId> = self
+            .jobs
+            .values()
+            .filter(|j| j.orphaned.is_some() && !j.store_holds_lease())
+            .map(|j| j.id)
+            .collect();
+        for id in ids {
+            let mut job = self.jobs.remove(&id).expect("orphan");
+            let err = job.orphaned.take().expect("orphan error");
+            let stage = job.stage;
+            self.finish_job(
+                job,
+                Terminal::Failed(err),
+                stage,
+                PublishOutcome::NotApplicable,
+                None,
+            );
+        }
+    }
+
+    /// Shutdown and drop: cancel every job the store has not been given yet
+    /// (queued, or handed over but not yet submitted) and mark jobs that are
+    /// inside a submit call right now, so the worker forwards the cancel as
+    /// soon as the store has them (Grok C5 P2-4). Returns the handed payloads
+    /// so their leases drop outside the lock, and the dispatched jobs to
+    /// cancel in the store.
+    fn cancel_unstarted(&mut self) -> (Vec<HandedJob>, Vec<(JobId, JobId)>) {
+        let mut ids = Vec::new();
+        ids.extend(self.restore_queue.drain(..));
+        ids.extend(self.park_queue.drain(..));
+        let handed: Vec<HandedJob> = self.handed.drain(..).collect();
+        ids.extend(handed.iter().map(|h| h.0));
+        for id in ids {
+            if let Some(job) = self.jobs.remove(&id) {
+                let stage = job.stage;
+                self.finish_job(
+                    job,
+                    Terminal::Cancelled,
+                    stage,
+                    PublishOutcome::NotApplicable,
+                    None,
+                );
+            }
+        }
+        let mut disp = Vec::new();
+        for j in self.jobs.values_mut() {
+            let cancellable = match j.kind {
+                JobKind::Flush => false,
+                JobKind::Load => true,
+                JobKind::Store => j.stage < JobStage::Completed,
+            };
+            if !cancellable || j.cancelling || j.orphaned.is_some() {
+                continue;
+            }
+            match j.status {
+                Status::Dispatching => j.cancelling = true,
+                Status::Dispatched(inner_id) => {
+                    j.cancelling = true;
+                    disp.push((j.id, inner_id));
+                }
+                Status::Queued => {}
+            }
+        }
+        (handed, disp)
     }
 
     /// Move queued jobs into the hand-over slot, as many as the dispatch depth
@@ -652,7 +736,20 @@ impl State {
             let Some(job) = self.jobs.get_mut(&id) else {
                 continue;
             };
-            let payload = job.payload.take().expect("queued job payload");
+            // The store gets a lease on the blocks; the worker keeps the
+            // caller's guard, so the store dropping the view (at any time,
+            // even before its terminal is polled) never frees them.
+            let back = Arc::new(AtomicBool::new(false));
+            let flag = back.clone();
+            let (payload, real) = job
+                .payload
+                .take()
+                .expect("queued job payload")
+                .lend(move || flag.store(true, Ordering::SeqCst));
+            if real.is_some() {
+                job.landing = real;
+                job.lease_back = Some(back);
+            }
             job.status = Status::Dispatching;
             self.dispatched_count += 1;
             match class {
@@ -693,51 +790,16 @@ pub struct StorageWorker {
 
 impl Drop for StorageWorker {
     fn drop(&mut self) {
-        let to_cancel = self.shared.with(|s| {
+        let (handed, to_cancel) = self.shared.with(|s| {
             s.worker_dropped = true;
             s.closed = true;
             s.inner_shutdown_requested = true;
-            let mut queued = Vec::new();
-            while let Some(id) = s.restore_queue.pop_front() {
-                queued.push(id);
-            }
-            while let Some(id) = s.park_queue.pop_front() {
-                queued.push(id);
-            }
-            for id in queued {
-                if let Some(job) = s.jobs.remove(&id) {
-                    let stage = job.stage;
-                    s.finish_job(
-                        job,
-                        Terminal::Cancelled,
-                        stage,
-                        PublishOutcome::NotApplicable,
-                        None,
-                    );
-                }
-            }
-            let mut disp = Vec::new();
-            for j in s.jobs.values_mut() {
-                if j.kind != JobKind::Flush && !j.cancelling {
-                    if let Status::Dispatched(inner_id) = j.status {
-                        j.cancelling = true;
-                        disp.push((j.id, inner_id));
-                    }
-                }
-            }
+            let r = s.cancel_unstarted();
             self.shared.cv.notify_all();
-            disp
+            r
         });
-        for (w_id, inner_id) in to_cancel {
-            if self.inner.cancel(inner_id) == CancelOutcome::TooLate {
-                self.shared.with(|s| {
-                    if let Some(j) = s.jobs.get_mut(&w_id) {
-                        j.cancelling = false;
-                    }
-                });
-            }
-        }
-        self.shared.cv.notify_all();
+        drop(handed);
+        self.forward_cancels(to_cancel);
     }
 }
 
@@ -804,13 +866,26 @@ fn worker_loop(
                 let mut cancel_inner = None;
                 shared.with(|s| match res {
                     Ok(inner_id) => {
+                        let taken = s.by_inner.get(&inner_id).is_some_and(|o| *o != w_id);
+                        if taken {
+                            s.stats.inner_protocol_errors += 1;
+                        }
                         let Some(job) = s.jobs.get_mut(&w_id) else {
                             return;
                         };
                         job.status = Status::Dispatched(inner_id);
+                        if taken {
+                            // The store merged this job into another live
+                            // one: its completions belong to that job. This
+                            // one fails once the store drops its lease.
+                            job.orphaned = Some(PlatformError::HardwareFault(String::from(
+                                "store merged two jobs",
+                            )));
+                            return;
+                        }
                         s.by_inner.insert(inner_id, w_id);
                         if job.cancelling {
-                            cancel_inner = Some(inner_id);
+                            cancel_inner = Some((w_id, inner_id));
                         }
                     }
                     Err(e) => {
@@ -828,8 +903,14 @@ fn worker_loop(
                         shared.cv.notify_all();
                     }
                 });
-                if let Some(inner_id) = cancel_inner {
-                    let _ = inner.cancel(inner_id);
+                if let Some((w_id, inner_id)) = cancel_inner {
+                    if inner.cancel(inner_id) == CancelOutcome::TooLate {
+                        shared.with(|s| {
+                            if let Some(j) = s.jobs.get_mut(&w_id) {
+                                j.cancelling = false;
+                            }
+                        });
+                    }
                 }
             }
 
@@ -928,26 +1009,25 @@ fn worker_loop(
         }));
 
         if step.is_err() {
-            shared.with(|s| {
+            // Jobs the store never got: their leases drop here, outside the lock.
+            let handed: Vec<HandedJob> = shared.with(|s| {
                 s.panicked = true;
                 s.closed = true;
                 s.restore_queue.clear();
                 s.park_queue.clear();
-                let ids: Vec<JobId> = s.jobs.keys().copied().collect();
-                for id in ids {
-                    if let Some(job) = s.jobs.remove(&id) {
-                        let stage = job.stage;
-                        s.finish_job(
-                            job,
-                            Terminal::Failed(PlatformError::HardwareFault(String::from(
-                                "storage worker panicked",
-                            ))),
-                            stage,
-                            PublishOutcome::NotApplicable,
-                            None,
-                        );
-                    }
+                s.handed.drain(..).collect()
+            });
+            drop(handed);
+            // A job whose blocks the store still holds stays unfinished (its
+            // guard kept) until the store lets go; `poll` and `shutdown` reap
+            // it then (Grok C5 P1-3). The rest fail now, once.
+            shared.with(|s| {
+                for j in s.jobs.values_mut() {
+                    j.orphaned = Some(PlatformError::HardwareFault(String::from(
+                        "storage worker panicked",
+                    )));
                 }
+                s.reap_orphans();
                 shared.cv.notify_all();
             });
             return;
@@ -955,6 +1035,7 @@ fn worker_loop(
 
         // Exit once dropped and all dispatched jobs have finished.
         let (done, idle_wait) = shared.with(|s| {
+            s.reap_orphans();
             if s.worker_dropped && s.dispatched_count == 0 {
                 return (true, None);
             }
@@ -1091,8 +1172,8 @@ impl StorageWorker {
                     progress_seen: false,
                     waiters: alloc::vec![Waiter::new(inc)],
                     landing: None,
-                    lent: false,
-                    orphaned: false,
+                    lease_back: None,
+                    orphaned: None,
                 },
             );
             self.shared.cv.notify_all();
@@ -1171,7 +1252,11 @@ impl KvStore for StorageWorker {
             let src_ref = src_slot.as_ref().ok_or(PlatformError::InvalidLayout)?;
             validate_store_header(&ns, &header, src_ref)?;
             let key = header.chunk_key;
-            if let Some(existing) = s.coalesce.find(Share::Store, &key) {
+            // At most one live store job per key (Grok C5 P1-1): the inner
+            // store dedups a second store of a key into the first, so a second
+            // worker job would lose its completions to the first and leak its
+            // park slot. A request joins the live job or is told to retry.
+            if let Some(&existing) = s.store_by_key.get(&key.0 .0) {
                 let job_ok = s.jobs.get(&existing).is_some_and(|j| !j.cancelling);
                 let already = s
                     .jobs
@@ -1182,10 +1267,17 @@ impl KvStore for StorageWorker {
                     s.stats.store_dedup_total += 1;
                     return Ok(existing);
                 }
-                if job_ok && s.try_attach(existing, inc).is_ok() {
-                    s.stats.store_dedup_total += 1;
-                    return Ok(existing);
+                if job_ok && s.coalesce.find(Share::Store, &key) == Some(existing) {
+                    match s.try_attach(existing, inc) {
+                        Ok(()) => {
+                            s.stats.store_dedup_total += 1;
+                            return Ok(existing);
+                        }
+                        Err(PlatformError::QueueFull) => return Err(PlatformError::QueueFull),
+                        Err(_) => {}
+                    }
                 }
+                return Err(s.queue_full());
             }
             let bytes = header.payload_len + HEADER_REGION;
             s.credit_check(Class::Park, bytes)?;
@@ -1198,6 +1290,7 @@ impl KvStore for StorageWorker {
             s.park_queue.push_back(id);
             s.stats.peak_park_queue = s.stats.peak_park_queue.max(s.park_queue.len() as u64);
             s.coalesce.open(Share::Store, &key, id);
+            s.store_by_key.insert(key.0 .0, id);
             let src = src_slot.take().expect("src");
             s.jobs.insert(
                 id,
@@ -1218,8 +1311,8 @@ impl KvStore for StorageWorker {
                     progress_seen: false,
                     waiters: alloc::vec![Waiter::new(inc)],
                     landing: None,
-                    lent: false,
-                    orphaned: false,
+                    lease_back: None,
+                    orphaned: None,
                 },
             );
             self.shared.cv.notify_all();
@@ -1278,8 +1371,8 @@ impl KvStore for StorageWorker {
                     progress_seen: false,
                     waiters: alloc::vec![Waiter::new(inc)],
                     landing: None,
-                    lent: false,
-                    orphaned: false,
+                    lease_back: None,
+                    orphaned: None,
                 },
             );
             self.shared.cv.notify_all();
@@ -1319,8 +1412,8 @@ impl KvStore for StorageWorker {
                     progress_seen: false,
                     waiters: alloc::vec![Waiter::new(inc)],
                     landing: None,
-                    lent: false,
-                    orphaned: false,
+                    lease_back: None,
+                    orphaned: None,
                 },
             );
             self.shared.cv.notify_all();
@@ -1345,6 +1438,7 @@ impl KvStore for StorageWorker {
 
     fn poll(&self, max: usize) -> Vec<Completion> {
         self.shared.with(|s| {
+            s.reap_orphans();
             let n = max.min(s.completions.len());
             s.completions.drain(..n).collect()
         })
@@ -1471,6 +1565,21 @@ impl StorageWorker {
         }
     }
 
+    /// Ask the store to cancel dispatched jobs (outside the state lock); a job
+    /// the store refuses goes on and keeps accepting nothing new.
+    fn forward_cancels(&self, to_cancel: Vec<(JobId, JobId)>) {
+        for (w_id, inner_id) in to_cancel {
+            if self.inner.cancel(inner_id) == CancelOutcome::TooLate {
+                self.shared.with(|s| {
+                    if let Some(j) = s.jobs.get_mut(&w_id) {
+                        j.cancelling = false;
+                    }
+                });
+            }
+        }
+        self.shared.cv.notify_all();
+    }
+
     fn shutdown_impl(&self, intake_deadline_ms: u64) -> DrainReport {
         let deadline = Instant::now() + Duration::from_millis(intake_deadline_ms);
         let to_cancel = self.shared.with(|s| {
@@ -1479,59 +1588,19 @@ impl StorageWorker {
             if s.shutdown_published_before.is_none() {
                 s.shutdown_published_before = Some(s.published_total);
             }
-            let mut queued = Vec::new();
-            while let Some(id) = s.restore_queue.pop_front() {
-                queued.push(id);
-            }
-            while let Some(id) = s.park_queue.pop_front() {
-                queued.push(id);
-            }
-            for id in queued {
-                if let Some(job) = s.jobs.remove(&id) {
-                    let stage = job.stage;
-                    s.finish_job(
-                        job,
-                        Terminal::Cancelled,
-                        stage,
-                        PublishOutcome::NotApplicable,
-                        None,
-                    );
-                }
-            }
-            let mut disp = Vec::new();
-            for j in s.jobs.values() {
-                if let Status::Dispatched(inner_id) = j.status {
-                    let cancellable = match j.kind {
-                        JobKind::Flush => false,
-                        JobKind::Load => true,
-                        JobKind::Store => j.stage < JobStage::Completed,
-                    };
-                    if cancellable && !j.cancelling {
-                        disp.push((j.id, inner_id));
-                    }
-                }
-            }
+            let r = s.cancel_unstarted();
             self.shared.cv.notify_all();
-            disp
+            r
         });
-
-        for (w_id, inner_id) in to_cancel {
-            if self.inner.cancel(inner_id) == CancelOutcome::Cancelled {
-                self.shared.with(|s| {
-                    if let Some(j) = s.jobs.get_mut(&w_id) {
-                        if !j.cancelling {
-                            j.cancelling = true;
-                        }
-                    }
-                });
-            }
-        }
-        self.shared.cv.notify_all();
+        let (handed, to_cancel) = to_cancel;
+        drop(handed);
+        self.forward_cancels(to_cancel);
 
         loop {
-            let done = self
-                .shared
-                .with(|s| s.jobs.is_empty() && s.inner_shutdown_called);
+            let done = self.shared.with(|s| {
+                s.reap_orphans();
+                s.jobs.is_empty() && (s.inner_shutdown_called || s.panicked)
+            });
             if done {
                 break;
             }
