@@ -27,6 +27,12 @@ pub const fn is_native() -> bool {
     cfg!(has_omega_fp8)
 }
 
+/// True when the device-table entry points (`omega_gpu_fp8_gemv_grouped_dev`,
+/// `omega_gpu_fp8_tensor_entry`, OWN-30B router cut) are linked.
+pub const fn has_device_tables() -> bool {
+    cfg!(has_omega_fp8_dev)
+}
+
 /// Mirror of `OmegaGpuFp8Info`: what the chip did for one call.
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
@@ -92,6 +98,20 @@ mod ffi {
             y: *mut f32,
             info: *mut Fp8Info,
         ) -> i32;
+    }
+    #[cfg(has_omega_fp8_dev)]
+    extern "C" {
+        pub fn omega_gpu_fp8_gemv_grouped_dev(
+            t: *const OmegaGpuFp8Tensor,
+            groups: u32,
+            tab_va: u64,
+            x_va: u64,
+            y: *mut f32,
+            info: *mut Fp8Info,
+        ) -> i32;
+        pub fn omega_gpu_fp8_tensor_entry(t: *const OmegaGpuFp8Tensor, expert: u32, w_va: *mut u64, s_va: *mut u64) -> i32;
+    }
+    extern "C" {
         pub fn omega_gpu_fp8_prepare(k: u32) -> i32;
         pub fn omega_gpu_fp8_seal(on: i32);
         pub fn omega_gpu_fp8_rc_name(rc: i32) -> *const std::os::raw::c_char;
@@ -221,6 +241,57 @@ impl Fp8Tensor {
         #[cfg(not(has_omega_fp8))]
         {
             let _ = (x, y);
+            Err(OmegaGpuError::Unavailable)
+        }
+    }
+
+    /// Device addresses `(weights, scales)` of one expert, for a directory the router copies
+    /// group-table entries from (`omega_gpu_fp8_tensor_entry`).
+    pub fn entry(&self, expert: usize) -> Result<(u64, u64), OmegaGpuError> {
+        if expert >= self.experts {
+            return Err(bad(format!("fp8 expert {expert} >= experts {}", self.experts)));
+        }
+        #[cfg(has_omega_fp8_dev)]
+        {
+            let (mut w, mut s) = (0u64, 0u64);
+            // SAFETY: expert is in range; both out pointers are valid for a write.
+            let rc = unsafe { ffi::omega_gpu_fp8_tensor_entry(self.ptr, expert as u32, &mut w, &mut s) };
+            if rc != 0 {
+                return Err(rc_err(rc));
+            }
+            Ok((w, s))
+        }
+        #[cfg(not(has_omega_fp8_dev))]
+        {
+            Err(OmegaGpuError::Unavailable)
+        }
+    }
+
+    /// `groups` experts in one launch whose group table and single activation row are already
+    /// on the device (written by the router launch): `tab_va` holds `groups` `{w_va, s_va}`
+    /// entries, `x_va` the f32 row already multiplied by 2^64. No host copy of either.
+    pub fn gemv_grouped_dev(&self, groups: usize, tab_va: u64, x_va: u64, y: &mut [f32]) -> Result<Fp8Info, OmegaGpuError> {
+        if groups == 0 || groups > MAX_GROUPS {
+            return Err(bad(format!("fp8 groups {groups} outside 1..={MAX_GROUPS}")));
+        }
+        if tab_va == 0 || x_va == 0 {
+            return Err(bad("fp8 device table or row address is 0".into()));
+        }
+        check_len("fp8 y (groups*n)", groups * self.n, y.len())?;
+        #[cfg(has_omega_fp8_dev)]
+        {
+            let mut info = Fp8Info::default();
+            // SAFETY: y length checked; the addresses come from the router that wrote them; the
+            // tensor is live for &self.
+            let rc = unsafe { ffi::omega_gpu_fp8_gemv_grouped_dev(self.ptr, groups as u32, tab_va, x_va, y.as_mut_ptr(), &mut info) };
+            if rc != 0 {
+                return Err(rc_err(rc));
+            }
+            Ok(info)
+        }
+        #[cfg(not(has_omega_fp8_dev))]
+        {
+            let _ = y;
             Err(OmegaGpuError::Unavailable)
         }
     }

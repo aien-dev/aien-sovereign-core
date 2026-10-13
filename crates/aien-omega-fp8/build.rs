@@ -15,6 +15,7 @@ use std::process::Command;
 
 fn main() {
     println!("cargo:rustc-check-cfg=cfg(has_omega_fp8)");
+    println!("cargo:rustc-check-cfg=cfg(has_omega_fp8_dev)");
     for v in ["AIEN_FORCE_CPU_STUB", "AIEN_OMEGA_GPU_LIB", "AIEN_OMEGA_DIR"] {
         println!("cargo:rerun-if-env-changed={v}");
     }
@@ -25,6 +26,9 @@ fn main() {
         println!("cargo:rerun-if-changed={lib}");
         if archive_defines(Path::new(&lib), "omega_gpu_fp8_gemv_grouped_f32") {
             println!("cargo:rustc-cfg=has_omega_fp8");
+            if archive_defines(Path::new(&lib), "omega_gpu_fp8_gemv_grouped_dev") && archive_defines(Path::new(&lib), "omega_gpu_fp8_tensor_entry") {
+                println!("cargo:rustc-cfg=has_omega_fp8_dev");
+            }
         } else {
             println!("cargo:warning=aien-omega-fp8: {lib} does not define the FP8 GEMV API; FP8 calls are stubbed");
         }
@@ -35,6 +39,9 @@ fn main() {
         println!("cargo:rerun-if-changed={}", header.display());
         if header.is_file() {
             println!("cargo:rustc-cfg=has_omega_fp8");
+            if std::fs::read_to_string(&header).is_ok_and(|t| t.contains("omega_gpu_fp8_gemv_grouped_dev") && t.contains("omega_gpu_fp8_tensor_entry")) {
+                println!("cargo:rustc-cfg=has_omega_fp8_dev");
+            }
         } else {
             println!("cargo:warning=aien-omega-fp8: {dir} has no src/omega_gpu_fp8_api.h (omega before OWN-30B cut 5); FP8 calls are stubbed");
         }

@@ -382,6 +382,75 @@ pub trait Fp8Gemv: Send + Sync + std::fmt::Debug {
     fn n(&self) -> usize;
     fn k(&self) -> usize;
     fn grouped_f32(&self, ids: &[u32], x: &[f32], y: &mut [f32]) -> Result<u64, String>;
+    /// Device addresses `(weights, scales)` of one expert (for the router's directory).
+    fn tensor_entry(&self, expert: usize) -> Result<(u64, u64), String> {
+        let _ = expert;
+        Err("this FP8 tensor has no device addresses".into())
+    }
+    /// `groups` experts in one launch whose group table and single activation row are already
+    /// on the device (written by the [`DeviceRouter`] launch). Returns chip nanoseconds.
+    fn grouped_dev(&self, groups: usize, tab_va: u64, x_va: u64, y: &mut [f32]) -> Result<u64, String> {
+        let _ = (groups, tab_va, x_va, y);
+        Err("this FP8 tensor takes no device-resident group table".into())
+    }
+}
+
+/// Device addresses the router left its outputs at (valid until the next `route`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RouteAddrs {
+    /// `x' = RMSNorm(x) * 2^64`, f32 `[hidden]`: the gate|up launch's activation row.
+    pub x_va: u64,
+    /// The gate|up group table (`top_k` entries of `{w_va, s_va}`).
+    pub tab_gu_va: u64,
+}
+
+/// The MoE router as one device launch: RMSNorm of the residual row, router logits, softmax,
+/// top-k and renormalised weights, with the gate|up group table and the normed row left on the
+/// device for the grouped FP8 GEMV (no host round trip for either).
+pub trait DeviceRouter: Send + Sync + std::fmt::Debug {
+    /// The layer's `mlp.gate.weight` as bf16 bits `[experts][hidden]` and its
+    /// `post_attention_layernorm` weight.
+    fn set_layer(&self, layer: usize, gate_bf16: &[u16], norm_w: &[f32]) -> Result<(), String>;
+    /// `{w_va, s_va}` per expert of the layer's gate|up and down FP8 tensors (flat, 2 words per expert).
+    fn set_directory(&self, layer: usize, gu: &[u64], dn: &[u64]) -> Result<(), String>;
+    /// Routes the residual row `x`: writes `top_k` ids (descending by logit) and weights, returns
+    /// chip nanoseconds and where the device outputs are.
+    fn route(&self, layer: usize, x: &[f32], eps: f32, ids: &mut [u32], weights: &mut [f32]) -> Result<(u64, RouteAddrs), String>;
+    /// Trace helper: the last call's `RMSNorm(x)` read back from the device (undoing the 2^64).
+    fn read_post(&self, out: &mut [f32]) -> Result<(), String>;
+}
+
+/// The lm_head as one streaming launch over the checkpoint's `[vocab][hidden]` bf16 rows.
+pub trait LmHeadGemv: Send + Sync + std::fmt::Debug {
+    fn logits_f32(&self, hidden: &[f32], out: &mut [f32]) -> Result<u64, String>;
+}
+
+/// The lm_head in the form the loader chose.
+#[derive(Debug, Clone)]
+pub enum LmHead {
+    /// `[hidden][vocab]` bf16 through the generic matmul (Stage A / cut 7 path).
+    Dense(Arc<dyn DenseMatmul>),
+    /// `[vocab][hidden]` bf16 through the streaming GEMV.
+    Gemv(Arc<dyn LmHeadGemv>),
+}
+
+/// Which implementation to use for a step the device can take over.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PathChoice {
+    /// The device one when the uploader offers it, else the host/dense one.
+    #[default]
+    Auto,
+    /// Always the host/dense one.
+    Host,
+    /// The device one; the load fails when the uploader cannot offer it.
+    Device,
+}
+
+/// Router and lm_head choices for a load.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct DevicePaths {
+    pub router: PathChoice,
+    pub lm_head: PathChoice,
 }
 
 /// How the loader hands weights to the device.
@@ -414,6 +483,18 @@ pub trait ModelUploader {
     fn upload_fp8(&self, experts: usize, n: usize, k: usize, w: &[u8], scales: &[u16]) -> Result<Arc<dyn Fp8Gemv>, String> {
         let _ = (experts, n, k, w, scales);
         Err("this uploader has no FP8 path".into())
+    }
+    /// The device router for `config` (its kernel is fixed at 128 experts, hidden 2048, top-8),
+    /// or `None` when this uploader has none.
+    fn new_router(&self, config: &Qwen3MoeConfig) -> Result<Option<Arc<dyn DeviceRouter>>, String> {
+        let _ = config;
+        Ok(None)
+    }
+    /// The lm_head as a streaming GEMV over `bits` = `[vocab = n][hidden = k]` bf16 (the
+    /// checkpoint layout), or `None` when this uploader has none.
+    fn upload_lm_head_gemv(&self, n: usize, k: usize, bits: &[u16]) -> Result<Option<Arc<dyn LmHeadGemv>>, String> {
+        let _ = (n, k, bits);
+        Ok(None)
     }
 }
 
@@ -519,6 +600,14 @@ impl OmegaModelUploader {
     pub fn uses_fp8_api() -> bool {
         aien_omega_fp8::is_native()
     }
+    /// True when the one-launch MoE router and the FP8 device-table entry points are linked.
+    pub fn uses_router_api() -> bool {
+        aien_omega_router::is_native() && aien_omega_fp8::has_device_tables()
+    }
+    /// True when the bf16 streaming GEMV (the lm_head kernel) is linked.
+    pub fn uses_bf16_api() -> bool {
+        aien_omega_bf16::is_native()
+    }
 }
 
 impl ModelUploader for OmegaModelUploader {
@@ -545,6 +634,23 @@ impl ModelUploader for OmegaModelUploader {
         let t = aien_omega_fp8::Fp8Tensor::upload(experts, n, k, w, scales).map_err(|e| e.to_string())?;
         Ok(Arc::new(OmegaFp8(Mutex::new(t), experts, n, k)))
     }
+    fn new_router(&self, config: &Qwen3MoeConfig) -> Result<Option<Arc<dyn DeviceRouter>>, String> {
+        if !Self::uses_router_api() {
+            return Ok(None);
+        }
+        if config.experts != aien_omega_router::EXPERTS || config.hidden != aien_omega_router::HIDDEN || config.top_k != aien_omega_router::TOP_K {
+            return Ok(None);
+        }
+        let r = aien_omega_router::Router::alloc(config.layers).map_err(|e| e.to_string())?;
+        Ok(Some(Arc::new(OmegaRouter(Mutex::new(r)))))
+    }
+    fn upload_lm_head_gemv(&self, n: usize, k: usize, bits: &[u16]) -> Result<Option<Arc<dyn LmHeadGemv>>, String> {
+        if !Self::uses_bf16_api() {
+            return Ok(None);
+        }
+        let t = aien_omega_bf16::Bf16Tensor::upload(n, k, bits).map_err(|e| e.to_string())?;
+        Ok(Some(Arc::new(OmegaLmHead(Mutex::new(t)))))
+    }
 }
 
 /// Omega's FP8 grouped GEMV behind a lock.
@@ -564,6 +670,58 @@ impl Fp8Gemv for OmegaFp8 {
     fn grouped_f32(&self, ids: &[u32], x: &[f32], y: &mut [f32]) -> Result<u64, String> {
         let t = self.0.lock().map_err(|_| "fp8 tensor lock poisoned".to_string())?;
         let info = t.gemv_grouped_f32(ids, x, y).map_err(|e| e.to_string())?;
+        Ok(info.elapsed_ns)
+    }
+    fn tensor_entry(&self, expert: usize) -> Result<(u64, u64), String> {
+        let t = self.0.lock().map_err(|_| "fp8 tensor lock poisoned".to_string())?;
+        t.entry(expert).map_err(|e| e.to_string())
+    }
+    fn grouped_dev(&self, groups: usize, tab_va: u64, x_va: u64, y: &mut [f32]) -> Result<u64, String> {
+        let t = self.0.lock().map_err(|_| "fp8 tensor lock poisoned".to_string())?;
+        let info = t.gemv_grouped_dev(groups, tab_va, x_va, y).map_err(|e| e.to_string())?;
+        Ok(info.elapsed_ns)
+    }
+}
+
+/// Omega's one-launch MoE router behind a lock.
+#[derive(Debug)]
+pub struct OmegaRouter(Mutex<aien_omega_router::Router>);
+
+impl DeviceRouter for OmegaRouter {
+    fn set_layer(&self, layer: usize, gate_bf16: &[u16], norm_w: &[f32]) -> Result<(), String> {
+        let mut r = self.0.lock().map_err(|_| "router lock poisoned".to_string())?;
+        r.set_layer(layer, gate_bf16, norm_w).map_err(|e| e.to_string())
+    }
+    fn set_directory(&self, layer: usize, gu: &[u64], dn: &[u64]) -> Result<(), String> {
+        let mut r = self.0.lock().map_err(|_| "router lock poisoned".to_string())?;
+        r.set_directory(layer, gu, dn).map_err(|e| e.to_string())
+    }
+    fn route(&self, layer: usize, x: &[f32], eps: f32, ids: &mut [u32], weights: &mut [f32]) -> Result<(u64, RouteAddrs), String> {
+        let mut r = self.0.lock().map_err(|_| "router lock poisoned".to_string())?;
+        // norm_topk_prob is true (the config check refuses false); out_scale 2^64 gives the FP8
+        // GEMV its activation row.
+        let info = r.route(layer, x, eps, true, aien_omega_router::OUT_SCALE_FP8, ids, weights).map_err(|e| e.to_string())?;
+        let o = r.device_outputs();
+        Ok((info.elapsed_ns, RouteAddrs { x_va: o.xout_va, tab_gu_va: o.tab_gu_va }))
+    }
+    fn read_post(&self, out: &mut [f32]) -> Result<(), String> {
+        let mut r = self.0.lock().map_err(|_| "router lock poisoned".to_string())?;
+        r.read_xout(out).map_err(|e| e.to_string())?;
+        for v in out.iter_mut() {
+            *v /= aien_omega_router::OUT_SCALE_FP8;
+        }
+        Ok(())
+    }
+}
+
+/// Omega's bf16 streaming GEMV (the lm_head) behind a lock.
+#[derive(Debug)]
+pub struct OmegaLmHead(Mutex<aien_omega_bf16::Bf16Tensor>);
+
+impl LmHeadGemv for OmegaLmHead {
+    fn logits_f32(&self, hidden: &[f32], out: &mut [f32]) -> Result<u64, String> {
+        let t = self.0.lock().map_err(|_| "lm_head lock poisoned".to_string())?;
+        let info = t.gemv_f32(hidden, out).map_err(|e| e.to_string())?;
         Ok(info.elapsed_ns)
     }
 }
@@ -605,7 +763,9 @@ pub struct Qwen3MoeOmegaWeights {
     pub embed_bf16: Vec<u16>,
     pub layers: Vec<OmegaLayer>,
     pub final_norm: Vec<f32>,
-    pub lm_head: Arc<dyn DenseMatmul>,
+    pub lm_head: LmHead,
+    /// The one-launch router, set up for every layer (None: host routing only).
+    pub device_router: Option<Arc<dyn DeviceRouter>>,
 }
 
 impl Qwen3MoeOmegaWeights {
@@ -674,9 +834,20 @@ pub fn load_qwen3_moe_omega_with(
     format: WeightFormat,
     progress: &mut dyn FnMut(&str),
 ) -> Result<(Qwen3MoeOmegaWeights, LoadReport), String> {
+    load_qwen3_moe_omega_paths(dir, uploader, format, DevicePaths::default(), progress)
+}
+
+/// As [`load_qwen3_moe_omega_with`] with the router and lm_head paths chosen.
+pub fn load_qwen3_moe_omega_paths(
+    dir: &Path,
+    uploader: &dyn ModelUploader,
+    format: WeightFormat,
+    paths: DevicePaths,
+    progress: &mut dyn FnMut(&str),
+) -> Result<(Qwen3MoeOmegaWeights, LoadReport), String> {
     let config = Qwen3MoeConfig::from_checkpoint(dir)?;
     let mut source = ShardSource::open(dir)?;
-    load_qwen3_moe_omega_from_with(&config, &mut source, uploader, format, progress)
+    load_qwen3_moe_omega_from_paths(&config, &mut source, uploader, format, paths, progress)
 }
 
 /// The loader proper, over any tensor source (tests use an in-memory one).
@@ -698,7 +869,36 @@ pub fn load_qwen3_moe_omega_from_with(
     format: WeightFormat,
     progress: &mut dyn FnMut(&str),
 ) -> Result<(Qwen3MoeOmegaWeights, LoadReport), String> {
+    load_qwen3_moe_omega_from_paths(config, source, uploader, format, DevicePaths::default(), progress)
+}
+
+/// As [`load_qwen3_moe_omega_from_with`] with the router and lm_head implementations chosen:
+/// [`PathChoice::Auto`] takes the device router / streaming lm_head GEMV when the uploader
+/// offers them (the router also needs FP8 experts), [`PathChoice::Host`] keeps host routing
+/// and the dense lm_head matmul, [`PathChoice::Device`] fails the load when unavailable.
+pub fn load_qwen3_moe_omega_from_paths(
+    config: &Qwen3MoeConfig,
+    source: &mut dyn TensorSource,
+    uploader: &dyn ModelUploader,
+    format: WeightFormat,
+    paths: DevicePaths,
+    progress: &mut dyn FnMut(&str),
+) -> Result<(Qwen3MoeOmegaWeights, LoadReport), String> {
     config.validate()?;
+    let device_router: Option<Arc<dyn DeviceRouter>> = if paths.router == PathChoice::Host {
+        None
+    } else if !format.fp8_experts() {
+        if paths.router == PathChoice::Device {
+            return Err("the device router needs FP8 experts (--weights fp8-experts or fp8)".into());
+        }
+        None
+    } else {
+        let r = uploader.new_router(config)?;
+        if r.is_none() && paths.router == PathChoice::Device {
+            return Err("the device router was asked for but is not available (omega before the router cut, or a model shape the kernel does not take)".into());
+        }
+        r
+    };
     let mut resident = 0usize;
     let t0 = Instant::now();
     let peak_before = peak_rss_bytes();
@@ -859,17 +1059,50 @@ pub fn load_qwen3_moe_omega_from_with(
             attn,
             experts,
         });
+        if let (Some(router), Some(layer)) = (&device_router, layers.last()) {
+            let li = layers.len() - 1;
+            let ExpertWeights::Fp8 { gate_up, down } = &layer.experts else {
+                return Err(format!("layer {li}: the device router needs FP8 experts"));
+            };
+            // The router carries the bf16 gate weights; the host copy is an exact widening of them.
+            let gate_bf16: Vec<u16> = layer.router.iter().map(|v| (v.to_bits() >> 16) as u16).collect();
+            router.set_layer(li, &gate_bf16, &layer.post_norm).map_err(|e| format!("router layer {li}: {e}"))?;
+            let (mut gu, mut dn) = (Vec::with_capacity(2 * e), Vec::with_capacity(2 * e));
+            for ex in 0..e {
+                let (w, s) = gate_up.tensor_entry(ex)?;
+                gu.extend([w, s]);
+                let (w, s) = down.tensor_entry(ex)?;
+                dn.extend([w, s]);
+            }
+            router.set_directory(li, &gu, &dn).map_err(|e| format!("router directory layer {li}: {e}"))?;
+        }
     }
     drop(fp8);
     drop(scales);
 
-    // lm_head: bf16 [vocab][h] -> [h][vocab].
+    // lm_head: bf16 [vocab][h]. The streaming GEMV takes the rows as they are; the dense matmul
+    // takes them transposed to [h][vocab].
     let vocab = config.vocab;
     let mut raw = vec![0u8; vocab * h * 2];
     source.read_into("lm_head.weight", "BF16", &[vocab, h], &mut raw)?;
-    bits.clear();
-    transpose_bf16_for_upload(&raw, vocab, h, &mut bits);
-    let lm_head = uploader.upload_dense(h, vocab, &bits)?;
+    let gemv = if paths.lm_head == PathChoice::Host {
+        None
+    } else {
+        let rows: Vec<u16> = raw.chunks_exact(2).map(|b| u16::from_le_bytes([b[0], b[1]])).collect();
+        let g = uploader.upload_lm_head_gemv(vocab, h, &rows)?;
+        if g.is_none() && paths.lm_head == PathChoice::Device {
+            return Err("the lm_head GEMV was asked for but is not available (omega before the bf16 GEMV cut)".into());
+        }
+        g
+    };
+    let lm_head = match gemv {
+        Some(g) => LmHead::Gemv(g),
+        None => {
+            bits.clear();
+            transpose_bf16_for_upload(&raw, vocab, h, &mut bits);
+            LmHead::Dense(uploader.upload_dense(h, vocab, &bits)?)
+        }
+    };
     resident += 2 * h * vocab;
     progress("lm_head");
     drop(bits);
@@ -886,6 +1119,7 @@ pub fn load_qwen3_moe_omega_from_with(
         layers,
         final_norm,
         lm_head,
+        device_router,
     };
     let report = LoadReport {
         resident_bytes: resident,
@@ -1109,6 +1343,92 @@ pub(crate) mod test_support {
     pub struct RecordingUploader {
         pub uploads: Mutex<Vec<(&'static str, usize, usize, usize)>>,
         pub matrices: Mutex<Vec<Arc<HostMatrix>>>,
+        /// Offer a host-computed device router and lm_head GEMV (the real uploader offers omega's).
+        pub device_fakes: bool,
+        pub dev: Arc<Mutex<FakeDevice>>,
+    }
+
+    /// What the fake router "left on the device" for the next grouped launch.
+    #[derive(Debug, Default)]
+    pub struct FakeDevice {
+        pub post: Vec<f32>,
+        pub ids: Vec<u32>,
+        pub routes: usize,
+        pub grouped_dev_calls: usize,
+        pub gemv_calls: usize,
+    }
+
+    pub const FAKE_X_VA: u64 = 0xA000;
+    pub const FAKE_TAB_VA: u64 = 0xB000;
+
+    /// Host router with the device router's contract: RMSNorm, router logits over the bf16 gate,
+    /// top-k with renormalised weights; the normed row and the chosen ids stay in `FakeDevice`.
+    #[derive(Debug)]
+    pub struct FakeRouter {
+        pub dev: Arc<Mutex<FakeDevice>>,
+        pub experts: usize,
+        pub hidden: usize,
+        pub layers: Mutex<Vec<(Vec<f32>, Vec<f32>)>>,
+        pub directories: Mutex<Vec<usize>>,
+    }
+
+    impl DeviceRouter for FakeRouter {
+        fn set_layer(&self, layer: usize, gate_bf16: &[u16], norm_w: &[f32]) -> Result<(), String> {
+            assert_eq!(gate_bf16.len(), self.experts * self.hidden);
+            let gate: Vec<f32> = gate_bf16.iter().map(|&b| bf16_to_f32(b)).collect();
+            let mut l = self.layers.lock().unwrap();
+            assert_eq!(l.len(), layer, "layers are set in order");
+            l.push((gate, norm_w.to_vec()));
+            Ok(())
+        }
+        fn set_directory(&self, layer: usize, gu: &[u64], dn: &[u64]) -> Result<(), String> {
+            assert_eq!((gu.len(), dn.len()), (2 * self.experts, 2 * self.experts));
+            // tensor_entry of expert x is (x + 1, 0): the directory must list them in order.
+            assert!(gu.chunks(2).enumerate().all(|(x, p)| p == [x as u64 + 1, 0]));
+            self.directories.lock().unwrap().push(layer);
+            Ok(())
+        }
+        fn route(&self, layer: usize, x: &[f32], eps: f32, ids: &mut [u32], weights: &mut [f32]) -> Result<(u64, RouteAddrs), String> {
+            let l = self.layers.lock().unwrap();
+            let (gate, norm) = &l[layer];
+            let mut post = vec![0.0f32; self.hidden];
+            rmsnorm(x, norm, eps, &mut post);
+            let logits: Vec<f32> = (0..self.experts)
+                .map(|e| gate[e * self.hidden..(e + 1) * self.hidden].iter().zip(&post).map(|(a, b)| a * b).sum())
+                .collect();
+            let plan = MoeBatchPlan::from_logits(&logits, 1, self.experts, ids.len()).map_err(|e| e.to_string())?;
+            ids.copy_from_slice(&plan.topk_experts);
+            weights.copy_from_slice(&plan.topk_weights);
+            let mut d = self.dev.lock().unwrap();
+            d.post = post;
+            d.ids = plan.topk_experts;
+            d.routes += 1;
+            Ok((0, RouteAddrs { x_va: FAKE_X_VA, tab_gu_va: FAKE_TAB_VA }))
+        }
+        fn read_post(&self, out: &mut [f32]) -> Result<(), String> {
+            out.copy_from_slice(&self.dev.lock().unwrap().post);
+            Ok(())
+        }
+    }
+
+    /// `[vocab][hidden]` bf16 rows on the host; f32 dot products.
+    #[derive(Debug)]
+    pub struct FakeLmHead {
+        pub dev: Arc<Mutex<FakeDevice>>,
+        pub n: usize,
+        pub k: usize,
+        pub bits: Vec<u16>,
+    }
+
+    impl LmHeadGemv for FakeLmHead {
+        fn logits_f32(&self, hidden: &[f32], out: &mut [f32]) -> Result<u64, String> {
+            assert_eq!((hidden.len(), out.len()), (self.k, self.n));
+            for (r, o) in out.iter_mut().enumerate() {
+                *o = self.bits[r * self.k..(r + 1) * self.k].iter().zip(hidden).map(|(&w, &x)| bf16_to_f32(w) * x).sum();
+            }
+            self.dev.lock().unwrap().gemv_calls += 1;
+            Ok(0)
+        }
     }
 
     /// Exact host FP8 GEMV (`e4m3(w) * bf16(scale)` in f32) over the checkpoint bytes, the
@@ -1120,9 +1440,26 @@ pub(crate) mod test_support {
         pub k: usize,
         pub w: Vec<u8>,
         pub scales: Vec<u16>,
+        /// Set by the uploader when it offers the fake router: serves `tensor_entry` / `grouped_dev`.
+        pub dev: Option<Arc<Mutex<FakeDevice>>>,
     }
 
     impl Fp8Gemv for HostFp8 {
+        fn tensor_entry(&self, expert: usize) -> Result<(u64, u64), String> {
+            self.dev.as_ref().map(|_| (expert as u64 + 1, 0)).ok_or_else(|| "no device".to_string())
+        }
+        fn grouped_dev(&self, groups: usize, tab_va: u64, x_va: u64, y: &mut [f32]) -> Result<u64, String> {
+            let dev = self.dev.as_ref().ok_or_else(|| "no device".to_string())?;
+            assert_eq!((tab_va, x_va), (FAKE_TAB_VA, FAKE_X_VA), "the engine must pass the router's addresses");
+            let (ids, post) = {
+                let mut d = dev.lock().unwrap();
+                d.grouped_dev_calls += 1;
+                (d.ids.clone(), d.post.clone())
+            };
+            assert_eq!(ids.len(), groups);
+            self.grouped_f32(&ids, &post, y)
+        }
+
         fn experts(&self) -> usize {
             self.experts
         }
@@ -1175,7 +1512,22 @@ pub(crate) mod test_support {
             assert_eq!(w.len(), experts * n * k);
             assert_eq!(scales.len(), experts * (n / FP8_BLOCK) * (k / FP8_BLOCK));
             self.uploads.lock().unwrap().push(("fp8", experts * n, k, w.len() + scales.len() * 4));
-            Ok(Arc::new(HostFp8 { experts, n, k, w: w.to_vec(), scales: scales.to_vec() }))
+            Ok(Arc::new(HostFp8 { experts, n, k, w: w.to_vec(), scales: scales.to_vec(), dev: self.device_fakes.then(|| self.dev.clone()) }))
+        }
+        fn new_router(&self, config: &Qwen3MoeConfig) -> Result<Option<Arc<dyn DeviceRouter>>, String> {
+            Ok(self.device_fakes.then(|| {
+                Arc::new(FakeRouter {
+                    dev: self.dev.clone(),
+                    experts: config.experts,
+                    hidden: config.hidden,
+                    layers: Mutex::new(Vec::new()),
+                    directories: Mutex::new(Vec::new()),
+                }) as Arc<dyn DeviceRouter>
+            }))
+        }
+        fn upload_lm_head_gemv(&self, n: usize, k: usize, bits: &[u16]) -> Result<Option<Arc<dyn LmHeadGemv>>, String> {
+            assert_eq!(bits.len(), n * k);
+            Ok(self.device_fakes.then(|| Arc::new(FakeLmHead { dev: self.dev.clone(), n, k, bits: bits.to_vec() }) as Arc<dyn LmHeadGemv>))
         }
     }
 }
@@ -1656,6 +2008,9 @@ pub struct LayerTrace {
     pub x_in: Vec<f32>,
     pub attn_proj: Vec<f32>,
     pub post: Vec<f32>,
+    /// The device router's own x' (RMSNorm(x), read back), empty on the host-routing path. `post`
+    /// is always the host's independent RMSNorm, so the MoE oracle checks the router too.
+    pub post_device: Vec<f32>,
     pub experts: Vec<u32>,
     pub weights: Vec<f32>,
     pub moe_out: Vec<f32>,
@@ -1697,6 +2052,9 @@ pub struct Qwen3MoeOmegaEngine {
     /// Negative control: every chosen expert id is replaced by its neighbour (weights stay), so
     /// every expert window is a wrong expert. The layer oracle must then disagree loudly.
     pub routing_mutant: bool,
+    /// Route decode steps with the device router launch when the weights carry one. The host
+    /// routing mutant forces the host path for its steps.
+    pub device_routing: bool,
     pub last_timing: StepTiming,
     /// Prompt tokens per prefill step (1 = token-at-a-time; up to [`PREFILL_CHUNK`] when the
     /// FP8 grouped GEMV is in use for attention and experts, else `step_batch` falls back).
@@ -1708,12 +2066,14 @@ pub struct Qwen3MoeOmegaEngine {
 
 impl Qwen3MoeOmegaEngine {
     pub fn new(weights: Qwen3MoeOmegaWeights, kv: Box<dyn KvAttention>) -> Self {
+        let device_routing = weights.device_router.is_some();
         Self {
             weights,
             kv,
             trace_layers: Vec::new(),
             traces: Vec::new(),
             routing_mutant: false,
+            device_routing,
             last_timing: StepTiming::default(),
             prefill_chunk: PREFILL_CHUNK,
             pos: 0,
@@ -1896,10 +2256,23 @@ impl Qwen3MoeOmegaEngine {
         attn: AttnPath,
         progress: &mut dyn FnMut(&str),
     ) -> Result<(Self, LoadReport), String> {
+        Self::load_omega_paths(dir, max_context, format, attn, DevicePaths::default(), progress)
+    }
+
+    /// As [`Self::load_omega_with_attn`] with the router and lm_head paths chosen
+    /// ([`DevicePaths::default`] takes the device ones when linked).
+    pub fn load_omega_paths(
+        dir: &Path,
+        max_context: usize,
+        format: WeightFormat,
+        attn: AttnPath,
+        paths: DevicePaths,
+        progress: &mut dyn FnMut(&str),
+    ) -> Result<(Self, LoadReport), String> {
         if !aien_omega_gpu::is_native() {
             return Err("this binary carries the CPU stub of the Omega engine (build with AIEN_OMEGA_DIR or AIEN_OMEGA_GPU_LIB)".into());
         }
-        let (weights, report) = load_qwen3_moe_omega_with(dir, &OmegaModelUploader, format, progress)?;
+        let (weights, report) = load_qwen3_moe_omega_paths(dir, &OmegaModelUploader, format, paths, progress)?;
         let fused = match attn {
             AttnPath::Split => false,
             AttnPath::Fused => true,
@@ -2036,21 +2409,51 @@ impl Qwen3MoeOmegaEngine {
             for (xi, p) in x.iter_mut().zip(&attn_proj) {
                 *xi += p;
             }
-            rmsnorm(&x, &layer.post_norm, eps, &mut post);
-            for (ex, l) in logits.iter_mut().enumerate() {
-                *l = layer.router[ex * h..(ex + 1) * h].iter().zip(&post).map(|(a, b)| a * b).sum();
-            }
-            let plan = MoeBatchPlan::from_logits(&logits, 1, e, top_k).map_err(|e| format!("layer {layer_idx} routing: {e}"))?;
-            let mut experts: Vec<u32> = plan.topk_experts.clone();
-            if self.routing_mutant {
-                experts.iter_mut().for_each(|ex| *ex = (*ex + 1) % e as u32);
-            }
-            for (slot, &ex) in experts.iter().enumerate() {
-                col0s[slot] = c.gate_up_col0(ex as usize) as u32;
-            }
-            timing.host_ns += t3.elapsed().as_nanos() as u64;
+            // The device router takes the residual row and leaves the normed row and the gate|up
+            // group table on the chip: no host RMSNorm, router matmul, top-k or table build.
+            // The host routing mutant (a host-side swap of the chosen ids) needs the host path.
+            let device_router = match (&self.weights.device_router, &layer.experts) {
+                (Some(r), ExpertWeights::Fp8 { .. }) if self.device_routing && !self.routing_mutant => Some(r),
+                _ => None,
+            };
+            let mut addrs: Option<RouteAddrs> = None;
+            let mut post_device: Vec<f32> = Vec::new();
+            let t4;
+            let (experts, topk_weights): (Vec<u32>, Vec<f32>) = if let Some(router) = device_router {
+                timing.host_ns += t3.elapsed().as_nanos() as u64;
+                t4 = Instant::now();
+                let (mut ids, mut wts) = ([0u32; 16], [0.0f32; 16]);
+                let (ns, a) = router
+                    .route(layer_idx, &x, eps, &mut ids[..top_k], &mut wts[..top_k])
+                    .map_err(|e| format!("layer {layer_idx} device router: {e}"))?;
+                timing.chip_ns += ns;
+                timing.launches += 1;
+                addrs = Some(a);
+                if traced {
+                    // The oracle input is the host's own RMSNorm; the device x' is kept beside it.
+                    rmsnorm(&x, &layer.post_norm, eps, &mut post);
+                    post_device = vec![0.0f32; h];
+                    router.read_post(&mut post_device).map_err(|e| format!("layer {layer_idx} router readback: {e}"))?;
+                }
+                (ids[..top_k].to_vec(), wts[..top_k].to_vec())
+            } else {
+                rmsnorm(&x, &layer.post_norm, eps, &mut post);
+                for (ex, l) in logits.iter_mut().enumerate() {
+                    *l = layer.router[ex * h..(ex + 1) * h].iter().zip(&post).map(|(a, b)| a * b).sum();
+                }
+                let plan = MoeBatchPlan::from_logits(&logits, 1, e, top_k).map_err(|e| format!("layer {layer_idx} routing: {e}"))?;
+                let mut experts: Vec<u32> = plan.topk_experts.clone();
+                if self.routing_mutant {
+                    experts.iter_mut().for_each(|ex| *ex = (*ex + 1) % e as u32);
+                }
+                for (slot, &ex) in experts.iter().enumerate() {
+                    col0s[slot] = c.gate_up_col0(ex as usize) as u32;
+                }
+                timing.host_ns += t3.elapsed().as_nanos() as u64;
+                t4 = Instant::now();
+                (experts, plan.topk_weights.clone())
+            };
 
-            let t4 = Instant::now();
             moe_out.iter_mut().for_each(|v| *v = 0.0);
             match &layer.experts {
                 // --- bf16 windows: 1 gate|up call over top_k windows, top_k down calls ---
@@ -2068,7 +2471,7 @@ impl Qwen3MoeOmegaEngine {
                             .windows_f32(1, &act, std::slice::from_ref(&col0), h, &mut down_out)
                             .map_err(|e| format!("layer {layer_idx} down expert {ex}: {e}"))?;
                         timing.launches += 1;
-                        let w = plan.topk_weights[slot];
+                        let w = topk_weights[slot];
                         for (m, d) in moe_out.iter_mut().zip(&down_out) {
                             *m += w * d;
                         }
@@ -2076,9 +2479,12 @@ impl Qwen3MoeOmegaEngine {
                 }
                 // --- FP8 grouped: one gate|up launch (shared row), one down launch (a row per expert) ---
                 ExpertWeights::Fp8 { gate_up, down } => {
-                    timing.chip_ns += gate_up
-                        .grouped_f32(&experts, &post, &mut gu_out)
-                        .map_err(|e| format!("layer {layer_idx} gate_up fp8: {e}"))?;
+                    timing.chip_ns += match addrs {
+                        // The router left the normed row and the group table on the chip.
+                        Some(a) => gate_up.grouped_dev(top_k, a.tab_gu_va, a.x_va, &mut gu_out),
+                        None => gate_up.grouped_f32(&experts, &post, &mut gu_out),
+                    }
+                    .map_err(|e| format!("layer {layer_idx} gate_up fp8: {e}"))?;
                     timing.launches += 1;
                     let th = Instant::now();
                     for slot in 0..top_k {
@@ -2090,7 +2496,7 @@ impl Qwen3MoeOmegaEngine {
                         .map_err(|e| format!("layer {layer_idx} down fp8: {e}"))?;
                     timing.launches += 1;
                     let th = Instant::now();
-                    for (slot, &w) in plan.topk_weights.iter().enumerate() {
+                    for (slot, &w) in topk_weights.iter().enumerate() {
                         for (m, d) in moe_out.iter_mut().zip(&down_all[slot * h..(slot + 1) * h]) {
                             *m += w * d;
                         }
@@ -2110,8 +2516,9 @@ impl Qwen3MoeOmegaEngine {
                     x_in,
                     attn_proj: attn_proj.clone(),
                     post: post.clone(),
+                    post_device,
                     experts: experts.clone(),
-                    weights: plan.topk_weights.clone(),
+                    weights: topk_weights.clone(),
                     moe_out: moe_out.clone(),
                     x_out: x.clone(),
                 });
@@ -2132,7 +2539,11 @@ impl Qwen3MoeOmegaEngine {
     pub fn logits(&mut self, hidden: &[f32]) -> Result<Vec<f32>, String> {
         let t0 = Instant::now();
         let mut logits = vec![0.0f32; self.weights.config.vocab];
-        let ns = self.weights.lm_head.matmul_f32(1, hidden, &mut logits).map_err(|e| format!("lm_head: {e}"))?;
+        let ns = match &self.weights.lm_head {
+            LmHead::Dense(m) => m.matmul_f32(1, hidden, &mut logits),
+            LmHead::Gemv(g) => g.logits_f32(hidden, &mut logits),
+        }
+        .map_err(|e| format!("lm_head: {e}"))?;
         let dt = t0.elapsed().as_nanos() as u64;
         self.last_timing.lm_head_ns += dt;
         self.last_timing.total_ns += dt;
@@ -2387,6 +2798,93 @@ mod forward_tests {
         let (w, report) = load_qwen3_moe_omega_from_with(&c, &mut src, &up, format, &mut |_| {}).unwrap();
         let kv = HostKv::new(&c, 32);
         (Qwen3MoeOmegaEngine::new(w, Box::new(kv)), src, c, report)
+    }
+
+    fn engine_fakes(format: WeightFormat, paths: DevicePaths, fakes: bool) -> Result<(Qwen3MoeOmegaEngine, RecordingUploader, Qwen3MoeConfig), String> {
+        let c = tiny_config();
+        let mut src = MemorySource::for_config(&c);
+        let up = RecordingUploader { device_fakes: fakes, ..Default::default() };
+        let (w, _) = load_qwen3_moe_omega_from_paths(&c, &mut src, &up, format, paths, &mut |_| {})?;
+        let kv = HostKv::new(&c, 32);
+        Ok((Qwen3MoeOmegaEngine::new(w, Box::new(kv)), up, c))
+    }
+
+    #[test]
+    fn device_router_and_lm_head_match_the_host_paths_and_add_one_launch_per_layer() {
+        let tokens = [5u32, 17, 42, 3, 9, 60];
+        for format in [WeightFormat::Fp8Experts, WeightFormat::Fp8All] {
+            let (mut host, _, c) = engine_fakes(format, DevicePaths { router: PathChoice::Host, lm_head: PathChoice::Host }, true).unwrap();
+            let (mut dev, up, _) = engine_fakes(format, DevicePaths::default(), true).unwrap();
+            assert!(host.weights().device_router.is_none() && matches!(host.weights().lm_head, LmHead::Dense(_)));
+            assert!(dev.weights().device_router.is_some() && matches!(dev.weights().lm_head, LmHead::Gemv(_)));
+            for &t in &tokens {
+                let hh = host.step(t).unwrap();
+                let hd = dev.step(t).unwrap();
+                // Same maths in the same order: the hidden state is bit-identical.
+                assert_eq!(hh, hd, "{format:?}: hidden state differs between host and device routing");
+                let (lh, ld) = (host.logits(&hh).unwrap(), dev.logits(&hd).unwrap());
+                let s = crate::qwen3_moe::parity_stats(&ld, &lh);
+                assert!(s.cosine > 0.99999 && s.non_finite == 0, "{format:?}: {s:?}");
+                assert_eq!(crate::tensor::sample_argmax(&ld).0, crate::tensor::sample_argmax(&lh).0);
+            }
+            let attn_launches = 3;
+            // Device routing: attention 3 + router 1 + gate|up 1 + down 1 per layer, plus the lm_head.
+            assert_eq!(dev.last_timing.launches as usize, c.layers * (attn_launches + 1 + 2) + 1);
+            assert_eq!(host.last_timing.launches as usize, c.layers * (attn_launches + 2) + 1);
+            let d = up.dev.lock().unwrap();
+            assert_eq!(d.routes, tokens.len() * c.layers);
+            assert_eq!(d.grouped_dev_calls, tokens.len() * c.layers);
+            assert_eq!(d.gemv_calls, tokens.len());
+        }
+    }
+
+    #[test]
+    fn device_paths_are_refused_when_asked_for_and_missing_and_fall_back_on_auto() {
+        let dev = DevicePaths { router: PathChoice::Device, lm_head: PathChoice::Auto };
+        let e = engine_fakes(WeightFormat::Fp8All, dev, false).err().expect("no router offered");
+        assert!(e.contains("device router"), "{e}");
+        let e = engine_fakes(WeightFormat::Bf16, dev, true).err().expect("router needs FP8 experts");
+        assert!(e.contains("FP8 experts"), "{e}");
+        let head = DevicePaths { router: PathChoice::Auto, lm_head: PathChoice::Device };
+        let e = engine_fakes(WeightFormat::Fp8All, head, false).err().expect("no gemv offered");
+        assert!(e.contains("lm_head GEMV"), "{e}");
+        // Auto without an offer is the host/dense path, with FP8 or bf16 experts alike.
+        for format in [WeightFormat::Bf16, WeightFormat::Fp8All] {
+            let (eng, _, _) = engine_fakes(format, DevicePaths::default(), false).unwrap();
+            assert!(eng.weights().device_router.is_none() && matches!(eng.weights().lm_head, LmHead::Dense(_)));
+            assert!(!eng.device_routing);
+        }
+        // Auto with bf16 experts and an offering uploader: no router (it needs FP8 experts), but the GEMV.
+        let (eng, _, _) = engine_fakes(WeightFormat::Bf16, DevicePaths::default(), true).unwrap();
+        assert!(eng.weights().device_router.is_none() && matches!(eng.weights().lm_head, LmHead::Gemv(_)));
+    }
+
+    #[test]
+    fn device_router_trace_keeps_the_host_post_as_oracle_input_and_the_mutant_forces_host_routing() {
+        let (mut eng, up, c) = engine_fakes(WeightFormat::Fp8All, DevicePaths::default(), true).unwrap();
+        eng.trace_layers = vec![0, 1];
+        for &t in &[7u32, 1, 33] {
+            eng.step(t).unwrap();
+        }
+        assert_eq!(eng.traces.len(), 6);
+        for t in &eng.traces {
+            assert_eq!(t.post_device.len(), c.hidden);
+            assert_eq!(t.post, t.post_device, "fake router computes the same RMSNorm as the host");
+            assert_eq!(t.experts.len(), c.top_k);
+        }
+        let routes_before = up.dev.lock().unwrap().routes;
+        // The host routing mutant swaps ids on the host: it must take the host path (no router call).
+        eng.traces.clear();
+        eng.reset();
+        eng.routing_mutant = true;
+        eng.step(7).unwrap();
+        assert_eq!(up.dev.lock().unwrap().routes, routes_before, "mutant steps are host-routed");
+        assert_eq!(eng.last_timing.launches as usize, c.layers * (3 + 2));
+        eng.routing_mutant = false;
+        eng.device_routing = false;
+        eng.reset();
+        eng.step(7).unwrap();
+        assert_eq!(up.dev.lock().unwrap().routes, routes_before, "device_routing=false is host routing");
     }
 
     #[test]

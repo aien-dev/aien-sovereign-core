@@ -173,10 +173,12 @@ version = "0.1.0"
 dependencies = [
  "aien-abi-core",
  "aien-kv-cache",
+ "aien-omega-bf16",
  "aien-omega-dattn",
  "aien-omega-fp8",
  "aien-omega-gpu",
  "aien-omega-moe",
+ "aien-omega-router",
  "aien-platform",
  "async-trait",
  "libloading 0.8.9",
@@ -249,6 +251,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "aien-omega-bf16"
+version = "0.1.0"
+dependencies = [
+ "aien-omega-gpu",
+]
+
+[[package]]
 name = "aien-omega-compose"
 version = "0.1.0"
 dependencies = [
@@ -280,6 +289,13 @@ dependencies = [
 
 [[package]]
 name = "aien-omega-moe"
+version = "0.1.0"
+dependencies = [
+ "aien-omega-gpu",
+]
+
+[[package]]
+name = "aien-omega-router"
 version = "0.1.0"
 dependencies = [
  "aien-omega-gpu",

@@ -38,6 +38,8 @@ members = [
     "crates/aien-omega-moe",
     "crates/aien-omega-fp8",
     "crates/aien-omega-dattn",
+    "crates/aien-omega-router",
+    "crates/aien-omega-bf16",
     "crates/aien-omega-compose",
     "crates/aien-campaign-verifier",
     "crates/aien-proof",
