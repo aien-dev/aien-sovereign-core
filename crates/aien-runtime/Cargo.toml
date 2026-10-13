@@ -10,6 +10,7 @@ description = "Canonical single-process runtime spine for AIEN persistent branch
 [dependencies]
 aien-platform = { path = "../aien-platform" }
 aien-kv-cache = { path = "../aien-kv-cache" }
+aien-kv-store = { path = "../aien-kv-store" }
 aien-scheduler = { path = "../aien-scheduler" }
 aien-trace = { path = "../aien-trace" }
 aien-abi-core = { path = "../aien-abi-core" }

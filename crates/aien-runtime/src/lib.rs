@@ -5,6 +5,7 @@ pub mod approved;
 pub mod approved_auth;
 pub mod approved_replay;
 pub mod client;
+pub mod compute_config;
 pub mod context;
 pub mod control;
 pub mod cortex_mark;
