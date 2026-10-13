@@ -6,6 +6,7 @@
 //!   own30b_check chip <checkpoint> <golden.json> <receipt-dir> [--new N] [--layers 0,23,47]
 //!                     [--max-context 8192] [--prompts 1,2,3,4] [--force-memory]
 //!                     [--weights bf16|fp8-experts|fp8]
+//!                     [--router auto|host|device] [--lm-head auto|dense|gemv] [--router-mutants 1,2,3,4]
 //!       Omega: loads the resident model, per-layer parity (attention replay + exact MoE oracle)
 //!       with the routing mutant and the chip-side window-skew mutant as negative controls,
 //!       whole-model greedy tokens against the golden file, decode tok/s and load time.
@@ -20,8 +21,8 @@ use std::time::Instant;
 use aien_inference_abi::qwen3_coder::{compute_logits, forward_token, load_qwen3_coder, Qwen3CoderState};
 use aien_inference_abi::qwen3_moe::load_qwen3_fp8_moe_layer;
 use aien_inference_abi::qwen3_moe_omega::{
-    current_rss_bytes, load_attention_layer_f32, peak_rss_bytes, replay_attention, replay_moe, AttnPath, GenerateParams,
-    OmegaModelUploader, Qwen3MoeConfig, Qwen3MoeOmegaEngine, WeightFormat,
+    current_rss_bytes, load_attention_layer_f32, peak_rss_bytes, replay_attention, replay_moe, AttnPath, DevicePaths, GenerateParams, LmHead,
+    OmegaModelUploader, PathChoice, Qwen3MoeConfig, Qwen3MoeOmegaEngine, WeightFormat,
 };
 use aien_inference_abi::tokenizer::ChatTokenizer as Tokenizer;
 
@@ -99,6 +100,20 @@ struct Args {
     attn_mutant: i32,
     /// Prompt tokens per prefill step for the TOKENS runs (None = the engine default).
     prefill_chunk: Option<usize>,
+    /// Router and lm_head implementations (auto = device ones when linked).
+    paths: DevicePaths,
+    /// Device router mutants run as negative controls (omega_gpu_router_api.h: 1 RMSNorm without
+    /// the weight, 2 wrong mask, 3 wrong directory entry, 4 weights not normalised).
+    router_mutants: Vec<i32>,
+}
+
+fn parse_choice(v: &str, host_word: &str, flag: &str) -> PathChoice {
+    match v {
+        "auto" => PathChoice::Auto,
+        w if w == host_word => PathChoice::Host,
+        "device" | "gemv" => PathChoice::Device,
+        other => panic!("{flag} {other}: auto, {host_word} or device"),
+    }
 }
 
 fn parse_args() -> Args {
@@ -119,6 +134,8 @@ fn parse_args() -> Args {
         attn: AttnPath::Auto,
         attn_mutant: 1,
         prefill_chunk: None,
+        paths: DevicePaths::default(),
+        router_mutants: vec![1, 2, 3, 4],
     };
     while let Some(arg) = it.next() {
         match arg.as_str() {
@@ -145,6 +162,12 @@ fn parse_args() -> Args {
             }
             "--attn-mutant" => a.attn_mutant = it.next().expect("--attn-mutant N").parse().expect("number"),
             "--prefill-chunk" => a.prefill_chunk = Some(it.next().expect("--prefill-chunk N").parse().expect("number")),
+            "--router" => a.paths.router = parse_choice(&it.next().expect("--router auto|host|device"), "host", "--router"),
+            "--lm-head" => a.paths.lm_head = parse_choice(&it.next().expect("--lm-head auto|dense|gemv"), "dense", "--lm-head"),
+            "--router-mutants" => {
+                let v = it.next().expect("--router-mutants a,b (empty for none)");
+                a.router_mutants = v.split(',').filter(|s| !s.is_empty()).map(|s| s.parse().expect("mutant")).collect();
+            }
             other => pos.push(other.to_string()),
         }
     }
@@ -241,7 +264,7 @@ fn chip(a: &Args) {
     // ---- load ----
     let t0 = Instant::now();
     let mut n = 0usize;
-    let (mut engine, report) = Qwen3MoeOmegaEngine::load_omega_with_attn(&a.checkpoint, a.max_context, a.format, a.attn, &mut |s| {
+    let (mut engine, report) = Qwen3MoeOmegaEngine::load_omega_paths(&a.checkpoint, a.max_context, a.format, a.attn, a.paths, &mut |s| {
         n += 1;
         if n.is_multiple_of(20) || s.starts_with("kv") || s == "lm_head" {
             eprintln!("  [{:.0}s] {s}", t0.elapsed().as_secs_f64());
@@ -252,6 +275,9 @@ fn chip(a: &Args) {
         engine.prefill_chunk = chunk;
     }
     say(format!("attention path {} prefill_chunk {} batched_prefill_possible {}", engine.attention_path(), engine.prefill_chunk, engine.batched_prefill_possible()));
+    let router_path = if engine.device_routing { "device" } else { "host" };
+    let lm_head_path = if matches!(engine.weights().lm_head, LmHead::Gemv(_)) { "gemv" } else { "dense" };
+    say(format!("router path {router_path} lm_head path {lm_head_path} (router_api={} bf16_api={})", OmegaModelUploader::uses_router_api(), OmegaModelUploader::uses_bf16_api()));
     let peak = report.peak_rss_bytes.unwrap_or(0) as f64 / 1e9;
     say(format!(
         "LOAD: {:.1}s resident {:.2} GB host {:.2} GB peak_rss {:.2} GB (before {:.2} GB) kv_resident={} mem_available_after {:.1} GB",
@@ -290,7 +316,12 @@ fn chip(a: &Args) {
         let mut worst_moe = 1.0f64;
         let mut worst_p95 = 0.0f32;
         let mut routing_ok = true;
+        let mut worst_xprime = 0.0f32;
         for (t, h) in lt.iter().zip(&host) {
+            // The device router's own x' against the host RMSNorm of the same residual row.
+            if !t.post_device.is_empty() {
+                worst_xprime = t.post_device.iter().zip(&t.post).map(|(d, p)| (d - p).abs() / (1.0 + p.abs())).fold(worst_xprime, f32::max);
+            }
             let s = aien_inference_abi::qwen3_moe::parity_stats(&t.attn_proj, h);
             worst_attn = worst_attn.min(s.cosine);
             let m = replay_moe(&capsule, t, config.top_k);
@@ -298,14 +329,14 @@ fn chip(a: &Args) {
             worst_p95 = worst_p95.max(m.stats.p95_rel);
             routing_ok &= m.routing_agrees;
         }
-        let pass = worst_attn >= 0.999 && worst_moe >= 0.999 && routing_ok;
+        let pass = worst_attn >= 0.999 && worst_moe >= 0.999 && routing_ok && worst_xprime <= 1e-4;
         parity_pass &= pass;
         say(format!(
-            "PARITY layer {l} over {} positions ({pname}): attention cosine(min) {worst_attn:.6} moe cosine(min) {worst_moe:.6} moe p95_rel(max) {worst_p95:.4} routing_agrees={routing_ok} -> {}",
+            "PARITY layer {l} over {} positions ({pname}): attention cosine(min) {worst_attn:.6} moe cosine(min) {worst_moe:.6} moe p95_rel(max) {worst_p95:.4} routing_agrees={routing_ok} router x' rel(max) {worst_xprime:.2e} -> {}",
             lt.len(),
             if pass { "PASS" } else { "FAIL" }
         ));
-        parity_json.push(serde_json::json!({"layer": l, "positions": lt.len(), "attn_cosine_min": worst_attn, "moe_cosine_min": worst_moe, "moe_p95_rel_max": worst_p95, "routing_agrees": routing_ok, "pass": pass}));
+        parity_json.push(serde_json::json!({"layer": l, "positions": lt.len(), "attn_cosine_min": worst_attn, "moe_cosine_min": worst_moe, "moe_p95_rel_max": worst_p95, "routing_agrees": routing_ok, "router_xprime_rel_max": worst_xprime, "pass": pass}));
     }
     // Negative controls on the first traced layer: host routing mutant, then the chip-side mutant
     // of the expert kernel in use (bf16: window skew of one tile; FP8: scales dropped, kernel
@@ -380,6 +411,46 @@ fn chip(a: &Args) {
             }
         }
         engine.traces.clear();
+    }
+    // Router controls on the device path: each deliberately wrong router kernel (omega_gpu_router_api.h)
+    // over the parity prompt must make the first traced layer disagree with the host oracle: the
+    // oracle input is the host's own RMSNorm of the same residual row, the chip's choice and MoE
+    // output come from the wrong router.
+    if engine.device_routing {
+        for &m in &a.router_mutants {
+            let name = format!("router-mutant-{m}");
+            engine.reset();
+            engine.trace_layers = vec![l0];
+            aien_omega_router::test_set_mutant(m);
+            let stepped: Result<Vec<_>, _> = pids[..pids.len().min(4)].iter().map(|&t| engine.step(t)).collect();
+            aien_omega_router::test_set_mutant(0);
+            match stepped {
+                Err(e) => {
+                    say(format!("CONTROL {name}: layer {l0} step refused: {e} -> CAUGHT (refused)"));
+                    controls.push(serde_json::json!({"control": name, "refused": e, "caught": true}));
+                }
+                Ok(_) => {
+                    let mut worst = 1.0f64;
+                    let mut routing_ok = true;
+                    let mut xprime = 0.0f32;
+                    for t in &engine.traces {
+                        let r = replay_moe(&capsule, t, config.top_k);
+                        worst = worst.min(r.stats.cosine);
+                        routing_ok &= r.routing_agrees;
+                        xprime = t.post_device.iter().zip(&t.post).map(|(d, p)| (d - p).abs() / (1.0 + p.abs())).fold(xprime, f32::max);
+                    }
+                    let caught = worst < 0.99 || !routing_ok || xprime > 1e-4;
+                    say(format!(
+                        "CONTROL {name}: layer {l0} moe cosine(min) {worst:.4} routing_agrees={routing_ok} router x' rel(max) {xprime:.2e} over {} positions -> {}",
+                        engine.traces.len(),
+                        if caught { "CAUGHT" } else { "NOT CAUGHT (FAIL)" }
+                    ));
+                    controls.push(serde_json::json!({"control": name, "moe_cosine_min": worst, "routing_agrees": routing_ok, "router_xprime_rel_max": xprime, "caught": caught}));
+                    parity_pass &= caught;
+                }
+            }
+            engine.traces.clear();
+        }
     }
     engine.trace_layers.clear();
 
@@ -505,8 +576,8 @@ fn chip(a: &Args) {
         "checkpoint": a.checkpoint.display().to_string(),
         "golden": a.golden.display().to_string(),
         "engine": {"native": aien_omega_gpu::is_native(), "window_api": OmegaModelUploader::uses_window_api(),
-            "fp8_api": OmegaModelUploader::uses_fp8_api(), "dattn_api": OmegaModelUploader::uses_dattn_api(),
-            "weights": format!("{:?}", a.format), "attention": engine.attention_path(), "prefill_chunk": engine.prefill_chunk,
+            "fp8_api": OmegaModelUploader::uses_fp8_api(), "router_api": OmegaModelUploader::uses_router_api(), "bf16_api": OmegaModelUploader::uses_bf16_api(), "dattn_api": OmegaModelUploader::uses_dattn_api(),
+            "weights": format!("{:?}", a.format), "attention": engine.attention_path(), "router": router_path, "lm_head": lm_head_path, "prefill_chunk": engine.prefill_chunk,
             "spin_us": aien_omega_gpu::spin_us(), "cta_budget": aien_omega_gpu::cta_budget(), "kv_resident": engine.kv_resident(),
             "max_context": engine.max_context_tokens()},
         "prefill": prefill_json,
