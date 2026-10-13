@@ -897,7 +897,7 @@ fn sustained_restores_cannot_starve_parks() {
             }
             Err(e) => panic!("{e:?}"),
         }
-        if restores % 4 == 0 && last_park_at != restores {
+        if restores.is_multiple_of(4) && last_park_at != restores {
             last_park_at = restores;
             // Only this thread adds park ops, so a park class below its bound
             // must admit, however saturated the restore class is.
@@ -1862,7 +1862,12 @@ fn dropping_the_worker_does_not_wait_for_a_stalled_store() {
     wait_for("dispatch", || w.dispatched(j));
     w.stall_store();
     let probe = w.probe.clone();
-    let W { worker, .. } = w;
+    let W {
+        worker,
+        probe: rig_probe,
+        ..
+    } = w;
+    drop(rig_probe);
     within(10, "drop of the worker", move || drop(worker));
     assert_eq!(
         rel.load(Ordering::SeqCst),
