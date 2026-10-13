@@ -1,0 +1,59 @@
+//! Error vocabulary for identity, codec and validation. Every variant is a
+//! plain value (no allocation to build or report one).
+
+use aien_platform::PlatformError;
+
+/// Why a key, header or record was refused. Variants are listed in the order
+/// `validate_record` checks them (ADR 0003 section 1.4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KvError {
+    /// Fewer than 256 bytes were supplied for the header.
+    Truncated,
+    BadMagic,
+    UnsupportedVersion,
+    BadRecordKind,
+    BadHeaderLen,
+    /// `header_sha256` does not match bytes 0..224.
+    HeaderChecksum,
+    /// A reserved flag bit is set, or `partial_tail` disagrees with `token_count`.
+    BadFlags,
+    NamespaceMismatch,
+    KeyMismatch,
+    ParentMismatch,
+    PositionMismatch,
+    /// `token_count` is 0 or larger than `chunk_tokens`.
+    TokenCountOutOfRange,
+    TokenCountMismatch,
+    /// Model digest, chunk size, block size, layers, heads, head dim, dtype or backend differ.
+    GeometryMismatch,
+    PayloadLenMismatch,
+    /// File size is not `256 + payload_len`.
+    FileSizeMismatch,
+    // Construction errors (identity), not validation outcomes.
+    /// A length-prefixed identity field is longer than its prefix can express or its cap.
+    FieldTooLong(&'static str),
+    /// Zero sizes, or `chunk_tokens` not a multiple of `block_size`.
+    InvalidGeometry,
+    /// A count, position or length does not fit its on-disk integer width.
+    Overflow,
+}
+
+impl core::fmt::Display for KvError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::FieldTooLong(name) => write!(f, "kv identity field {name} is too long"),
+            other => write!(f, "kv record refused: {other:?}"),
+        }
+    }
+}
+
+#[cfg(feature = "std")]
+impl std::error::Error for KvError {}
+
+impl From<KvError> for PlatformError {
+    /// Every validation failure is an `InvalidLayout` at the platform boundary
+    /// (ADR 0003 section 3.1).
+    fn from(_: KvError) -> Self {
+        PlatformError::InvalidLayout
+    }
+}

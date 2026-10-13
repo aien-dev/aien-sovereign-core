@@ -233,6 +233,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "aien-kv-store"
+version = "0.1.0"
+dependencies = [
+ "aien-platform",
+ "serde_json",
+ "sha2 0.10.9",
+]
+
+[[package]]
 name = "aien-mcp"
 version = "0.1.0"
 dependencies = [
