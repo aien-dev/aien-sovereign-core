@@ -9,7 +9,7 @@
 
 use aien_kv_cache::{
     holder_id, is_holder_id, AienKvManager, HeapUnifiedBuffer, KvDType, KvPoolConfig, PrefillState,
-    HOLDER_SLOT,
+    SuffixPolicy, HOLDER_SLOT,
 };
 
 const BS: usize = 4;
@@ -383,7 +383,7 @@ fn holder_partial_failure_keeps_inflight_destinations() {
     let jobs: Vec<u64> = (0..4).map(|i| holder_id(101 + i).unwrap()).collect();
     for (i, &job) in jobs.iter().enumerate() {
         let got = m
-            .fork_block_range(parent, job, i..i + 1)
+            .fork_range(parent, i, 1, job)
             .expect("sub-holder");
         assert_eq!(got, vec![blocks[i]]);
         assert_eq!(m.get_block_table(job).unwrap().total_tokens, BS);
@@ -435,7 +435,7 @@ fn fork_of_prefix_chunk_does_not_share_suffix_blocks() {
     assert_eq!(blocks.len(), 4);
 
     let child = 2u64;
-    let got = m.fork_block_range(1, child, 0..2).expect("prefix fork");
+    let got = m.fork_range(1, 0, 2, child).expect("prefix fork");
     assert_eq!(got, blocks[..2].to_vec());
     let t = m.get_block_table(child).unwrap();
     assert_eq!(t.block_ids, blocks[..2].to_vec());
@@ -454,34 +454,190 @@ fn fork_of_prefix_chunk_does_not_share_suffix_blocks() {
     // A range ending at the tail block carries the partial token count.
     let mut m = new_mgr(total);
     admit(&mut m, 1, &vals(14, 1.0));
-    m.fork_block_range(1, 3, 2..4).unwrap();
+    m.fork_range(1, 2, 2, 3).unwrap();
     assert_eq!(m.get_block_table(3).unwrap().total_tokens, 14 - 2 * BS);
 }
 
 #[test]
-fn fork_block_range_refusals_change_nothing() {
+fn fork_range_refusals_change_nothing() {
     let mut m = new_mgr(12);
     admit(&mut m, 1, &vals(8, 1.0));
     admit(&mut m, 2, &vals(4, 5.0));
     let free = m.free_block_count();
     let active = m.debug_active_blocks();
-    assert!(m.fork_block_range(1, 3, 0..0).is_err(), "empty range");
-    assert!(m.fork_block_range(1, 3, 1..3).is_err(), "past the table");
-    #[allow(clippy::reversed_empty_ranges)]
-    let reversed = 2..1;
+    assert!(m.fork_range(1, 0, 0, 3).is_err(), "empty range");
+    assert!(m.fork_range(1, 1, 2, 3).is_err(), "past the table");
     assert!(
-        m.fork_block_range(1, 3, reversed).is_err(),
-        "reversed range"
+        m.fork_range(1, usize::MAX, 2, 3).is_err(),
+        "overflowing range"
     );
-    assert!(m.fork_block_range(9, 3, 0..1).is_err(), "unknown parent");
-    assert!(m.fork_block_range(1, 1, 0..1).is_err(), "onto itself");
-    assert!(m.fork_block_range(1, 2, 0..1).is_err(), "live child kept");
+    assert!(m.fork_range(9, 0, 1, 3).is_err(), "unknown parent");
+    assert!(m.fork_range(1, 0, 1, 1).is_err(), "onto itself");
+    assert!(m.fork_range(1, 0, 1, 2).is_err(), "live child kept");
     assert_eq!(m.free_block_count(), free);
     assert_eq!(m.debug_active_blocks(), active);
     // Readiness travels with the blocks, like fork_sequence: an unready parent
     // (a restore destination still loading) gives an unready sub-holder.
     m.allocate_sequence(7, &[0, 1, 2, 3]).unwrap();
-    m.fork_block_range(7, 8, 0..1).unwrap();
+    m.fork_range(7, 0, 1, 8).unwrap();
     assert_eq!(m.prefill_state(8), Some(PrefillState::Allocated));
     assert_eq!(m.prefill_state(7), Some(PrefillState::Allocated));
+}
+
+#[test]
+fn fork_range_forks_only_the_named_blocks_and_does_not_replace_a_live_child() {
+    let total = 16;
+    let mut m = new_mgr(total);
+    admit(&mut m, 1, &vals(16, 1.0)); // 4 full blocks
+    let blocks = table_blocks(&m, 1);
+    assert_eq!(m.prefill_state(1), Some(PrefillState::PrefillReady));
+
+    // Only the two middle blocks, and the parent's state is left alone.
+    let h = holder_id(1).unwrap();
+    let got = m.fork_range(1, 1, 2, h).expect("middle range");
+    assert_eq!(got, blocks[1..3].to_vec());
+    assert_eq!(table_blocks(&m, h), blocks[1..3].to_vec());
+    assert_eq!(m.get_block_table(h).unwrap().total_tokens, 2 * BS);
+    assert_eq!(ref_count(&m, blocks[0]), 1);
+    assert_eq!(ref_count(&m, blocks[1]), 2);
+    assert_eq!(ref_count(&m, blocks[2]), 2);
+    assert_eq!(ref_count(&m, blocks[3]), 1);
+    assert_eq!(
+        m.prefill_state(1),
+        Some(PrefillState::PrefillReady),
+        "fork_range leaves the parent's state alone"
+    );
+
+    // A live child is refused and untouched (fork_sequence would free it).
+    admit(&mut m, 2, &vals(8, 50.0));
+    let own = table_blocks(&m, 2);
+    let free = m.free_block_count();
+    let before: Vec<Vec<f32>> = own.iter().map(|&b| raw_block(&m, b)).collect();
+    assert!(m.fork_range(1, 0, 1, 2).is_err());
+    assert_eq!(table_blocks(&m, 2), own);
+    assert_eq!(m.free_block_count(), free);
+    for (i, &b) in own.iter().enumerate() {
+        assert_eq!(ref_count(&m, b), 1);
+        assert_eq!(raw_block(&m, b), before[i]);
+    }
+    // A live holder is refused the same way.
+    assert!(m.fork_range(1, 0, 1, h).is_err());
+    assert_eq!(table_blocks(&m, h), blocks[1..3].to_vec());
+    assert_eq!(ref_count(&m, blocks[0]), 1);
+}
+
+/// Three chunk holders over a 14-token prefix: 8 tokens (2 blocks), 4 tokens
+/// (1 block), 2 tokens (1 partial block). Returns (holders, their blocks).
+fn chunk_holders(m: &mut Mgr) -> (Vec<u64>, Vec<Vec<usize>>) {
+    let specs = [(1u64, 8usize), (2, 4), (3, 2)];
+    let mut holders = Vec::new();
+    let mut blocks = Vec::new();
+    for (job, n) in specs {
+        let h = holder_id(job).unwrap();
+        let prompt: Vec<u32> = (0..n as u32).collect();
+        m.allocate_sequence(h, &prompt).unwrap();
+        m.mark_prefill_pending(h).unwrap();
+        m.complete_prefill(h).unwrap();
+        blocks.push(table_blocks(m, h));
+        holders.push(h);
+    }
+    (holders, blocks)
+}
+
+#[test]
+fn assemble_table_orders_holders_and_refcounts() {
+    let total = 16;
+    let mut m = new_mgr(total);
+    let (holders, blocks) = chunk_holders(&mut m);
+    let free = m.free_block_count();
+
+    // Holders given out of storage order are laid out in the given order.
+    let order = [holders[0], holders[1], holders[2]];
+    let got = m
+        .assemble_table(5, &order, SuffixPolicy::AllowPartialTail)
+        .expect("assemble");
+    let expect: Vec<usize> = blocks.iter().flatten().copied().collect();
+    assert_eq!(got, expect);
+    let t = m.get_block_table(5).unwrap();
+    assert_eq!(t.sequence_id, 5);
+    assert_eq!(t.block_ids, expect);
+    assert_eq!(t.total_tokens, 14);
+    assert_eq!(t.prefill_state, PrefillState::PrefillPending);
+    assert_eq!(m.free_block_count(), free, "no block allocated or freed");
+    for &b in &expect {
+        assert_eq!(ref_count(&m, b), 2, "holder plus the new table");
+    }
+    // Holders are untouched, and still hold their blocks.
+    for (h, bl) in holders.iter().zip(&blocks) {
+        assert_eq!(&table_blocks(&m, *h), bl);
+    }
+
+    // Two requests assemble from the same chunk holder: refcounts add up, and
+    // each table is independent.
+    m.assemble_table(6, &holders[..2], SuffixPolicy::FullBlocksOnly)
+        .expect("second request, full blocks only");
+    assert_eq!(ref_count(&m, blocks[0][0]), 3);
+    assert_eq!(m.get_block_table(6).unwrap().total_tokens, 12);
+
+    // Freeing holders then tables returns everything exactly once.
+    for &h in &holders {
+        m.free_sequence(h).unwrap();
+    }
+    assert_eq!(m.free_block_count(), free);
+    m.free_sequence(5).unwrap();
+    m.free_sequence(6).unwrap();
+    assert_eq!(m.free_block_count(), total);
+}
+
+#[test]
+fn assemble_table_failure_leaves_every_holder_untouched() {
+    let mut m = new_mgr(16);
+    let (holders, blocks) = chunk_holders(&mut m);
+    admit(&mut m, 9, &vals(4, 1.0));
+    let free = m.free_block_count();
+    let active = m.debug_active_blocks();
+    let counts: Vec<usize> = (0..16).map(|b| ref_count(&m, b)).collect();
+    let unknown = holder_id(77).unwrap();
+    let pending = holder_id(78).unwrap();
+    m.allocate_sequence(pending, &[0, 1, 2, 3]).unwrap(); // still loading
+    let counts_p: Vec<usize> = (0..16).map(|b| ref_count(&m, b)).collect();
+
+    let allow = SuffixPolicy::AllowPartialTail;
+    // Seq already has a table: never replaced.
+    assert!(m.assemble_table(9, &holders, allow).is_err());
+    // Unknown holder in the last position: the good ones must not be touched.
+    assert!(m
+        .assemble_table(5, &[holders[0], holders[1], unknown], allow)
+        .is_err());
+    // A real sequence id is not a holder.
+    assert!(m.assemble_table(5, &[holders[0], 9], allow).is_err());
+    // A holder that is not complete (prefill never fenced).
+    assert!(m
+        .assemble_table(5, &[holders[0], pending], allow)
+        .is_err());
+    // A holder listed twice would double its blocks.
+    assert!(m
+        .assemble_table(5, &[holders[0], holders[0]], allow)
+        .is_err());
+    // A partial block in the middle leaves a gap in positions.
+    assert!(m.assemble_table(5, &[holders[2], holders[0]], allow).is_err());
+    // The suffix policy: a partial tail is refused under FullBlocksOnly.
+    assert!(m
+        .assemble_table(5, &holders, SuffixPolicy::FullBlocksOnly)
+        .is_err());
+    // Empty list and a holder id as the destination.
+    assert!(m.assemble_table(5, &[], allow).is_err());
+    assert!(m.assemble_table(unknown, &holders, allow).is_err());
+
+    assert!(m.get_block_table(5).is_none());
+    assert!(m.get_block_table(unknown).is_none());
+    assert_eq!(m.free_block_count(), free);
+    assert_eq!(m.debug_active_blocks(), active);
+    let after: Vec<usize> = (0..16).map(|b| ref_count(&m, b)).collect();
+    assert_eq!(after, counts_p);
+    assert_ne!(counts, counts_p);
+    for (h, bl) in holders.iter().zip(&blocks) {
+        assert_eq!(&table_blocks(&m, *h), bl);
+    }
+    assert_eq!(m.get_block_table(9).unwrap().sequence_id, 9);
 }
