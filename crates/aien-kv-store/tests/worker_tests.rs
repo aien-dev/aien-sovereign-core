@@ -68,6 +68,8 @@ impl Gate {
 struct Probe {
     fake: Arc<FakeKvStore>,
     gate: Arc<Gate>,
+    /// Passed only inside `submit_*`: holds a job in `Dispatching`.
+    submit_gate: Arc<Gate>,
     threads: Mutex<BTreeMap<&'static str, HashSet<ThreadId>>>,
     seq: Mutex<Vec<char>>,
     forged: Mutex<Vec<Completion>>,
@@ -130,6 +132,7 @@ impl KvStore for Probe {
         inc: Incarnation,
     ) -> Result<JobId, PlatformError> {
         self.enter("submit");
+        self.submit_gate.pass();
         self.seq.lock().unwrap().push('S');
         self.fake.submit_store(header, src, inc)
     }
@@ -141,11 +144,13 @@ impl KvStore for Probe {
         inc: Incarnation,
     ) -> Result<JobId, PlatformError> {
         self.enter("submit");
+        self.submit_gate.pass();
         self.seq.lock().unwrap().push('L');
         self.fake.submit_load(key, expect, dst, inc)
     }
     fn submit_flush(&self, inc: Incarnation) -> Result<JobId, PlatformError> {
         self.enter("submit");
+        self.submit_gate.pass();
         self.seq.lock().unwrap().push('F');
         self.fake.submit_flush(inc)
     }
@@ -210,6 +215,7 @@ fn w_with(fake_cfg: impl FnOnce(&mut FakeConfig), worker_cfg: impl FnOnce(&mut W
     let probe = Arc::new(Probe {
         fake: fake.clone(),
         gate: gate.clone(),
+        submit_gate: Arc::new(Gate::new()),
         threads: Mutex::new(BTreeMap::new()),
         seq: Mutex::new(Vec::new()),
         forged: Mutex::new(Vec::new()),
@@ -2233,4 +2239,195 @@ fn attach_is_refused_when_completion_slots_are_exhausted() {
         4,
         "every admitted waiter gets its terminal"
     );
+}
+
+// ---- Grok C5 review fixes -------------------------------------------------
+
+#[test]
+fn a_second_store_of_a_live_key_never_takes_over_the_first_jobs_completions() {
+    // P1-1: the 17th owner (here the 2nd, with one waiter per job) must not
+    // open a second worker job the inner store would merge into the first.
+    let w = w_with(|_| {}, |c| c.max_waiters_per_job = 1);
+    w.fake.script(JobScript::fault(Fault::Hold));
+    let a = w.store(1).unwrap();
+    w.resume();
+    wait_for("dispatch", || w.dispatched(a));
+    let (_, h) = w.chunk(1);
+    let mem = Mem::new(2, 0);
+    let (src, _keep) = mem.source(2, 4);
+    let second = w.worker.submit_store(h, src, Incarnation::seq(901));
+    match second {
+        Ok(j) => assert_eq!(j, a, "it may only join the live job"),
+        Err(e) => assert_eq!(e, PlatformError::QueueFull),
+    }
+    assert_eq!(w.worker.cancel(a), CancelOutcome::Cancelled);
+    let v = w.settle();
+    let t = terminals(&v);
+    assert!(t.iter().any(|c| c.job == a), "the first job ends: {v:?}");
+    assert_eq!(w.worker.capacity().park_ops, 0, "no park slot leaks");
+}
+
+#[test]
+fn a_dedup_merge_by_the_store_never_strands_a_job() {
+    // P1-1 through the other door: the live job's only waiter cancels too late
+    // (the store already holds it), then a new store of the key arrives.
+    let w = rig();
+    w.fake.script(JobScript::latency(5_000, 0));
+    w.step.store(0, Ordering::SeqCst);
+    let a = w.store(1).unwrap();
+    w.resume();
+    wait_for("dispatch", || w.dispatched(a));
+    w.step.store(100, Ordering::SeqCst);
+    wait_for("the store holds it past cancel", || {
+        w.fake.job_stage(w.worker.inner_job(a).unwrap()) >= Some(JobStage::Completed)
+    });
+    assert_eq!(w.worker.cancel(a), CancelOutcome::TooLate);
+    let (_, h) = w.chunk(1);
+    let mem = Mem::new(2, 0);
+    let (src, _keep) = mem.source(2, 4);
+    let b = w.worker.submit_store(h, src, Incarnation::seq(902));
+    let v = w.settle();
+    let jobs: BTreeSet<JobId> = terminals(&v).iter().map(|c| c.job).collect();
+    assert!(jobs.contains(&a), "the first job ends: {v:?}");
+    if let Ok(b) = b {
+        assert!(jobs.contains(&b), "the second job ends: {v:?}");
+    }
+    assert_eq!(w.worker.capacity().park_ops, 0);
+}
+
+#[test]
+fn a_restored_landing_holder_outlives_the_terminal_the_caller_sees() {
+    // P1-2: the caller adopts the landing blocks after it sees Completed, so
+    // the holder must still be alive then; it goes when the caller drops the
+    // completion (and every copy of it).
+    let w = rig();
+    w.inject(7);
+    let released = Arc::new(AtomicU64::new(0));
+    let (job, _mem, handle) = w.load_with(7, released_guard(&released));
+    let job = job.unwrap();
+    w.resume();
+    let v = w.collect(1);
+    let t = terminals(&v)[0].clone();
+    assert_eq!(t.job, job);
+    assert_eq!(t.terminal, Some(Terminal::Done(JobStage::Completed)));
+    assert!(handle.is_held(), "alive when the caller sees Completed");
+    assert_eq!(released.load(Ordering::SeqCst), 0);
+    assert!(t.holder.is_some(), "handed back with the terminal");
+    drop(v);
+    assert!(handle.is_held(), "a copy still holds it");
+    drop(t);
+    assert!(!handle.is_held());
+    assert_eq!(released.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn coalesced_waiters_share_one_landing_holder_until_the_last_drops_it() {
+    let w = rig();
+    let k = w.inject(7);
+    let (_, h) = w.chunk(7);
+    let mem = Mem::new(2, 0xEE);
+    let released = Arc::new(AtomicU64::new(0));
+    let (dst, handle) = mem.dest_with(2, released_guard(&released));
+    let mut dst = Some(dst);
+    let job = w
+        .worker
+        .submit_load_coalesced(k, &h, || dst.take().unwrap(), Incarnation::seq(1))
+        .unwrap()
+        .job();
+    w.worker.attach_waiter(job, Incarnation::seq(2)).unwrap();
+    w.resume();
+    let v = w.collect(2);
+    let mut t: Vec<Completion> = terminals(&v).into_iter().cloned().collect();
+    drop(v);
+    assert!(t.iter().all(|c| c.holder.is_some()));
+    t.pop();
+    assert!(handle.is_held(), "one waiter still holds it");
+    t.clear();
+    assert!(!handle.is_held());
+    assert_eq!(released.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn a_panic_never_reports_a_job_whose_buffer_the_store_still_owns() {
+    // P1-3: after the worker thread panics, a job the store still holds stays
+    // unfinished (its source held) until the store lets go; then it fails once.
+    let boom = Arc::new(AtomicBool::new(false));
+    let fields = tiny();
+    let ns = fields.namespace_id().unwrap();
+    let fake = Arc::new(FakeKvStore::new(FakeConfig::new(ns)));
+    let b = boom.clone();
+    let f2 = fake.clone();
+    let worker = StorageWorker::spawn(
+        fake.clone(),
+        WorkerConfig {
+            idle_poll: Duration::ZERO,
+            ..WorkerConfig::default()
+        },
+        move || {
+            if b.load(Ordering::SeqCst) {
+                panic!("injected store failure");
+            }
+            f2.advance(0);
+        },
+    )
+    .unwrap();
+    fake.script(JobScript::fault(Fault::Hold));
+    let mem = Mem::new(2, 1);
+    let released = Arc::new(AtomicU64::new(0));
+    let (src, handle) = mem.source_with(2, 4, released_guard(&released));
+    let tokens: Vec<u32> = (0..8).collect();
+    let key = aien_kv_store::chunk_chain(&ns, 8, &tokens).unwrap()[0];
+    let h = fields.chunk_header(&ns, key, None, 0, 8, 1).unwrap();
+    let job = worker.submit_store(h, src, Incarnation::seq(1)).unwrap();
+    wait_for("dispatch", || worker.inner_job(job).is_some());
+    let inner = worker.inner_job(job).unwrap();
+    boom.store(true, Ordering::SeqCst);
+    wait_for("the worker failed", || {
+        worker.capacity().state == aien_kv_store::StoreState::Failed
+    });
+    assert!(
+        worker.poll(8).is_empty(),
+        "no terminal while the store owns the buffer"
+    );
+    assert!(handle.is_held());
+    // The store lets go (its own cancel); only now the job fails, once.
+    assert_eq!(fake.cancel(inner), CancelOutcome::Cancelled);
+    fake.advance(0);
+    let mut v = Vec::new();
+    wait_for("terminal after the store let go", || {
+        v.extend(worker.poll(8));
+        !terminals(&v).is_empty()
+    });
+    assert_eq!(terminals(&v).len(), 1);
+    assert!(matches!(
+        terminals(&v)[0].terminal,
+        Some(Terminal::Failed(PlatformError::HardwareFault(_)))
+    ));
+    wait_for("source released", || !handle.is_held());
+    assert_eq!(released.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn shutdown_cancels_a_job_that_is_still_being_handed_to_the_store() {
+    // P2-4: a load in Dispatching when shutdown starts must not go on to write
+    // its destination.
+    let w = rig();
+    w.inject(7);
+    w.probe.submit_gate.set(false);
+    let (job, mem, _h) = w.load_h(7);
+    let job = job.unwrap();
+    w.resume();
+    let g = w.probe.submit_gate.clone();
+    wait_for("blocked inside submit_load", move || g.waiting() >= 1);
+    assert!(w.worker.inner_job(job).is_none(), "still Dispatching");
+    let _ = w.worker.shutdown(0);
+    w.probe.submit_gate.set(true);
+    let v = w.settle();
+    assert_eq!(
+        terminals(&v)[0].terminal,
+        Some(Terminal::Cancelled),
+        "{v:?}"
+    );
+    assert_eq!(w.fake.stats().reads, 0, "no read after shutdown");
+    assert_eq!(mem.bytes(), vec![0xEE; 2 * BLOCK]);
 }
