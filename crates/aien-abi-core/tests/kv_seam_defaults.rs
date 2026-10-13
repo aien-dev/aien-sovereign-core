@@ -5,9 +5,7 @@
 //! (so a restored prefix can never be admitted on a backend that cannot honour
 //! it).
 
-use aien_abi_core::{
-    AienInferenceBackend, DecodeOutput, ModelConfig, ScheduledBatch, StepMetrics,
-};
+use aien_abi_core::{AienInferenceBackend, DecodeOutput, ModelConfig, ScheduledBatch, StepMetrics};
 use async_trait::async_trait;
 
 struct Bare;
