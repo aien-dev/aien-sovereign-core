@@ -14,8 +14,8 @@
 use aien_abi_core::{Llama3RopeScaling, ModelConfig};
 use aien_inference_abi::{
     f32_to_bf16_bits, AienInferenceBackend, DecodeOutput, KvDType, KvPoolConfig,
-    NativeTransformerBackend, ReferenceCpuBackend, SamplingParams, ScheduledBatch,
-    SequenceRequest, TransformerWeights, KV_ARITH_EPOCH,
+    NativeTransformerBackend, ReferenceCpuBackend, SamplingParams, ScheduledBatch, SequenceRequest,
+    TransformerWeights, KV_ARITH_EPOCH,
 };
 use aien_kv_cache::create_shared_kv_manager_with_pool;
 use aien_kv_store::{BackendFormat, KvDtype, LayoutStrides};
@@ -222,7 +222,10 @@ fn modelconfig_field_mutation_changes_compute_digest() {
         "eos_token_ids",
         "qk_norm",
     ] {
-        assert!(cases.iter().any(|c| c.0 == field), "no mutation for {field}");
+        assert!(
+            cases.iter().any(|c| c.0 == field),
+            "no mutation for {field}"
+        );
     }
 
     let (base_digest, base_ns) = ids(&b, ARITH_ID);
@@ -256,10 +259,17 @@ fn arith_identity_and_epoch_change_the_compute_digest() {
     assert_ne!(d0, d1, "a different tensor backend is a different digest");
     assert_ne!(n0, n1);
     let mut cc = compute_config_from(&b, ARITH_ID).unwrap();
-    assert_eq!(cc.arith_epoch, KV_ARITH_EPOCH, "the epoch comes from the constant");
+    assert_eq!(
+        cc.arith_epoch, KV_ARITH_EPOCH,
+        "the epoch comes from the constant"
+    );
     let before = cc.digest().unwrap();
     cc.arith_epoch += 1;
-    assert_ne!(cc.digest().unwrap(), before, "bumping the epoch changes the digest");
+    assert_ne!(
+        cc.digest().unwrap(),
+        before,
+        "bumping the epoch changes the digest"
+    );
 }
 
 #[test]
@@ -277,7 +287,7 @@ fn conversion_refuses_values_that_do_not_fit_the_wire_width() {
 
 /// The epoch the pin below was taken at, and the SHA-256 of the K/V bytes.
 const PINNED_EPOCH: u32 = 1;
-const PINNED_KV_SHA256: &str = "0000000000000000000000000000000000000000000000000000000000000000";
+const PINNED_KV_SHA256: &str = "9b29d964da18f2fb47584bdf7b42932996bfc05d53e6071c7af89a9ce5a80fa2";
 
 fn pin_model() -> ModelConfig {
     ModelConfig {
