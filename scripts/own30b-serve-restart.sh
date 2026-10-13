@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
-# (Re)start the OWN-30B Omega server in the background (OWN-30B cut 8; cut 9 default binary:
-# the build with the fused one-launch attention and batched prefill).
+# (Re)start the OWN-30B Omega server in the background (OWN-30B cut 8; default binary: the cut 10 build with the device router and bf16 lm_head GEMV,
+# on top of the fused one-launch attention and batched prefill).
 #   scripts/own30b-serve-restart.sh [binary]
 # Stops the previous server only if /tmp/own30b-serve.pid names a live aien-serve-http,
 # then starts a fresh one detached: log /tmp/own30b-serve.log, PID /tmp/own30b-serve.pid.
 # The server loads FP8-all weights (about 18 s, 30.5 GB resident), serves 127.0.0.1:18091,
 # and takes /tmp/aien-gb10.lock only while loading and around each generation.
 set -euo pipefail
-BIN=${1:-/tmp/own30b-f/target-dattn/release/aien-serve-http}
+BIN=${1:-/tmp/own30b-f/target-router/release/aien-serve-http}
 MODEL=${OWN30B_MODEL_DIR:-$HOME/models/qwen3-30b-a3b-instruct-2507-fp8}
 PIDF=/tmp/own30b-serve.pid LOG=/tmp/own30b-serve.log
 if [ -f "$PIDF" ]; then
