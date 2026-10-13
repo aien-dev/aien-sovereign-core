@@ -20,8 +20,7 @@ use aien_abi_core::{
 };
 use aien_inference_abi::MockInferenceBackend;
 use aien_kv_cache::{
-    create_shared_kv_manager, holder_id, AienKvManager, PrefillState, SharedKvManager,
-    SuffixPolicy,
+    create_shared_kv_manager, holder_id, AienKvManager, PrefillState, SharedKvManager, SuffixPolicy,
 };
 use aien_scheduler::{
     AienScheduler, FinishContext, FinishHook, SchedulerConfig, SequenceId, SequencePhase,
@@ -256,7 +255,11 @@ async fn finish_transaction_forks_holder_before_free() {
     let r = kv.read();
     assert!(r.get_block_table(id).is_none(), "the sequence is freed");
     let holder = r.get_block_table(holder_id(7).unwrap()).expect("holder");
-    assert_eq!(holder.block_ids.len(), 2, "prompt 4 + 2 appended = 2 blocks");
+    assert_eq!(
+        holder.block_ids.len(),
+        2,
+        "prompt 4 + 2 appended = 2 blocks"
+    );
     for &b in &holder.block_ids {
         assert_eq!(
             r.get_block(b).unwrap().ref_count,
@@ -296,7 +299,10 @@ async fn finish_hook_runs_at_the_backend_originated_finish_site_too() {
 
     let seen = hook.seen();
     assert_eq!(seen.calls, 1);
-    assert!(seen.table_present_during_hook, "hook ran before free_sequence");
+    assert!(
+        seen.table_present_during_hook,
+        "hook ran before free_sequence"
+    );
     assert_eq!(seen.reason, Some(FinishReason::StopToken));
     let r = kv.read();
     assert!(r.get_block_table(seq.to_u64()).is_none());
@@ -354,7 +360,11 @@ async fn finish_hook_is_not_run_for_a_preempted_finish() {
 
     s.step(&mut backend).await.unwrap().unwrap();
 
-    assert_eq!(s.metrics().preempted_requests, 1, "the request was preempted");
+    assert_eq!(
+        s.metrics().preempted_requests,
+        1,
+        "the request was preempted"
+    );
     assert_eq!(hook.seen().calls, 0, "a preempted finish is never parked");
     assert_eq!(kv.read().available_blocks(), 1);
 }
@@ -383,7 +393,11 @@ async fn computed_prefix_excludes_uncomputed_last_token() {
     let prompt = [1u32, 2, 3, 4];
     let seq = s.submit_request(request(0, &prompt, 8));
 
-    assert_eq!(s.computed_prefix(seq), None, "nothing generated yet, nothing computed");
+    assert_eq!(
+        s.computed_prefix(seq),
+        None,
+        "nothing generated yet, nothing computed"
+    );
 
     // After prefill the sampled token (100) is pending: it has no K/V.
     s.step(&mut backend).await.unwrap().unwrap();
@@ -397,7 +411,11 @@ async fn computed_prefix_excludes_uncomputed_last_token() {
     assert_eq!(s.computed_prefix(seq), Some(vec![1, 2, 3, 4, 100, 101]));
 
     let stale = SequenceId::new(seq.slot, seq.generation + 5).unwrap();
-    assert_eq!(s.computed_prefix(stale), None, "an id from another incarnation");
+    assert_eq!(
+        s.computed_prefix(stale),
+        None,
+        "an id from another incarnation"
+    );
 }
 
 #[tokio::test]
@@ -497,17 +515,28 @@ async fn restored_prefix_does_not_enter_decode_before_remaining_prompt_prefilled
 
     // Remaining prompt: 8 tokens in chunks of 4. Two prefill steps, no decode.
     let batch = s.build_scheduled_batch().unwrap().unwrap();
-    assert!(batch.decode_requests.is_empty(), "no decode on a restored-only table");
+    assert!(
+        batch.decode_requests.is_empty(),
+        "no decode on a restored-only table"
+    );
     assert_eq!(batch.prefill_requests.len(), 1);
-    assert_eq!(batch.prefill_requests[0].prompt_tokens, prompt[32..36].to_vec());
+    assert_eq!(
+        batch.prefill_requests[0].prompt_tokens,
+        prompt[32..36].to_vec()
+    );
     // Building a batch changes no sequence state; the real step below runs it.
     let (outs, m) = s.step(&mut backend).await.unwrap().unwrap();
     assert_eq!(m.prefill_tokens_processed, 4);
-    assert!(outs.iter().all(|o| !matches!(o, DecodeOutput::Token { .. })));
+    assert!(outs
+        .iter()
+        .all(|o| !matches!(o, DecodeOutput::Token { .. })));
     assert!(!kv.read().prefill_state(seq.to_u64()).unwrap().is_ready());
 
     let (_, m) = s.step(&mut backend).await.unwrap().unwrap();
-    assert_eq!(m.prefill_tokens_processed, 4, "the final chunk of the prompt");
+    assert_eq!(
+        m.prefill_tokens_processed, 4,
+        "the final chunk of the prompt"
+    );
     assert!(
         kv.read().prefill_state(seq.to_u64()).unwrap().is_ready(),
         "the completion fence ran after the last chunk, and only then"
@@ -535,7 +564,10 @@ fn restored_prefix_counts_in_running_sequences() {
     let before: Vec<usize> = {
         let r = kv.read();
         let t = r.get_block_table(seq.to_u64()).unwrap();
-        t.block_ids.iter().map(|&b| r.get_block(b).unwrap().ref_count).collect()
+        t.block_ids
+            .iter()
+            .map(|&b| r.get_block(b).unwrap().ref_count)
+            .collect()
     };
 
     s.admit_restored_prefix(seq, 32).unwrap();
@@ -545,7 +577,11 @@ fn restored_prefix_counts_in_running_sequences() {
     assert_eq!(s.awaiting_restore_count(), 0);
     let r = kv.read();
     let t = r.get_block_table(seq.to_u64()).unwrap();
-    let after: Vec<usize> = t.block_ids.iter().map(|&b| r.get_block(b).unwrap().ref_count).collect();
+    let after: Vec<usize> = t
+        .block_ids
+        .iter()
+        .map(|&b| r.get_block(b).unwrap().ref_count)
+        .collect();
     assert_eq!(before, after, "admission changes no reference count");
     assert_eq!(t.total_tokens, 32);
 }
@@ -566,7 +602,10 @@ fn admit_restored_prefix_refusals_change_nothing() {
 
     // 0, a count that leaves no token to compute (prompt_len), and one past it.
     for bad in [0usize, 40, 41] {
-        assert!(s.admit_restored_prefix(seq, bad).is_err(), "restored = {bad}");
+        assert!(
+            s.admit_restored_prefix(seq, bad).is_err(),
+            "restored = {bad}"
+        );
     }
     // Count different from what the table holds.
     assert!(s.admit_restored_prefix(seq, 16).is_err());
@@ -613,7 +652,10 @@ async fn awaiting_restore_is_not_admitted_until_released() {
     // Alone and held: nothing to schedule, and no "pool exhausted" refusal.
     let a = s.submit_request(request(0, &[1, 2, 3, 4], 2));
     s.hold_for_restore(a).unwrap();
-    assert!(s.step(&mut backend).await.unwrap().is_none(), "held request is not admitted");
+    assert!(
+        s.step(&mut backend).await.unwrap().is_none(),
+        "held request is not admitted"
+    );
     assert!(kv.read().get_block_table(a.to_u64()).is_none());
 
     // A request queued behind the held one is not blocked by it.
@@ -624,17 +666,27 @@ async fn awaiting_restore_is_not_admitted_until_released() {
         o,
         DecodeOutput::Token { request_id, .. } if *request_id == b.to_u64()
     )));
-    assert_eq!(s.arena().get(a).unwrap().phase, SequencePhase::AwaitingRestore);
+    assert_eq!(
+        s.arena().get(a).unwrap().phase,
+        SequencePhase::AwaitingRestore
+    );
     assert!(kv.read().get_block_table(a.to_u64()).is_none());
     assert_eq!(s.awaiting_restore_count(), 1);
-    assert_eq!(s.waiting_count(), 1, "still queued, still first in line once released");
+    assert_eq!(
+        s.waiting_count(),
+        1,
+        "still queued, still first in line once released"
+    );
 
     // Released: plain prefill from zero (the restore failed or missed).
     s.release_restore(a).unwrap();
     assert_eq!(s.arena().get(a).unwrap().phase, SequencePhase::Waiting);
     assert_eq!(s.awaiting_restore_count(), 0);
     let (_, m) = s.step(&mut backend).await.unwrap().unwrap();
-    assert_eq!(m.prefill_tokens_processed, 4, "released request is admitted with its whole prompt");
+    assert_eq!(
+        m.prefill_tokens_processed, 4,
+        "released request is admitted with its whole prompt"
+    );
     assert!(kv.read().get_block_table(a.to_u64()).is_some());
 }
 
