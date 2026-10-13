@@ -279,8 +279,9 @@ fn restore_sequence_refuses_wrong_token_counts_and_double_restore() {
 
 /// The A2 prerequisite at the backend: a prefix parked behind a holder and
 /// restored into a new sequence continues exactly like an uninterrupted prefill.
-#[tokio::test]
-async fn restored_prefix_continues_like_uninterrupted_prefill() {
+/// `restored` is the parked prefix length; a value inside a block exercises the
+/// partial tail, which the first suffix append copies on write.
+async fn restore_and_continue(restored: usize, policy: SuffixPolicy) {
     let p = prompt(40);
 
     // Control: one backend, one pool, the whole prompt in one chunk.
@@ -294,7 +295,7 @@ async fn restored_prefix_continues_like_uninterrupted_prefill() {
     let kv = shared_pool();
     let mut cold = backend_on(&kv);
     let pid = 0x4_0000_0001u64;
-    cold.execute_step(&prefill_batch(pid, &p[..32]))
+    cold.execute_step(&prefill_batch(pid, &p[..restored]))
         .await
         .unwrap();
     let holder = holder_id(1).unwrap();
@@ -302,7 +303,8 @@ async fn restored_prefix_continues_like_uninterrupted_prefill() {
         let mut w = kv.write();
         w.mark_prefill_pending(pid).unwrap();
         w.complete_prefill(pid).unwrap();
-        w.fork_range(pid, 0, 2, holder).unwrap();
+        w.fork_range(pid, 0, restored.div_ceil(BLOCK), holder)
+            .unwrap();
         w.free_sequence(pid).unwrap();
     }
     AienInferenceBackend::release_sequence(&mut cold, pid).unwrap();
@@ -310,13 +312,11 @@ async fn restored_prefix_continues_like_uninterrupted_prefill() {
     // Restore: assemble the request's own table from the holder, give the
     // backend the restored tokens, prefill only the suffix.
     let rid = 0x5_0000_0001u64;
-    kv.write()
-        .assemble_table(rid, &[holder], SuffixPolicy::FullBlocksOnly)
-        .unwrap();
+    kv.write().assemble_table(rid, &[holder], policy).unwrap();
     let mut warm = backend_on(&kv);
-    warm.restore_sequence(rid, &p[..32]).unwrap();
+    warm.restore_sequence(rid, &p[..restored]).unwrap();
     let (out, _) = warm
-        .execute_step(&prefill_batch(rid, &p[32..]))
+        .execute_step(&prefill_batch(rid, &p[restored..]))
         .await
         .unwrap();
     assert_eq!(
@@ -325,6 +325,12 @@ async fn restored_prefix_continues_like_uninterrupted_prefill() {
         "greedy token after restore equals the uninterrupted run"
     );
     assert_eq!(kv.read().total_tokens(rid), Some(40));
+    if !restored.is_multiple_of(BLOCK) {
+        assert!(
+            kv.read().cow_faults() >= 1,
+            "the shared partial tail was copied on write, not mutated in place"
+        );
+    }
 
     // K/V of every position matches the control within the chunking tolerance.
     for layer in 0..2 {
@@ -339,4 +345,14 @@ async fn restored_prefix_continues_like_uninterrupted_prefill() {
             .fold(0.0f32, f32::max);
         assert!(worst <= 1e-4, "layer {layer}: K/V differs by {worst}");
     }
+}
+
+#[tokio::test]
+async fn restored_prefix_continues_like_uninterrupted_prefill() {
+    restore_and_continue(32, SuffixPolicy::FullBlocksOnly).await;
+}
+
+#[tokio::test]
+async fn restored_partial_tail_continues_like_uninterrupted_prefill() {
+    restore_and_continue(20, SuffixPolicy::AllowPartialTail).await;
 }

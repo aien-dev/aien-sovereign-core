@@ -2296,6 +2296,104 @@ impl AienInferenceBackend for NativeTransformerBackend {
         Ok(())
     }
 
+    /// ADR 0003 section 6.2 (review finding 3): the tokens whose K/V is written
+    /// in the shared pool. VERIFIED rule, from the decode and prefill code above:
+    /// prefill leaves `tokens` holding exactly the cached positions and the
+    /// sampled token apart in `pending_prefill_token`, so `computed = tokens`;
+    /// every decode step first commits the pending token (or feeds the last
+    /// token), computes K/V for the LAST entry of `tokens`, then appends the
+    /// newly sampled token, which has no K/V, so `computed = tokens[..len - 1]`.
+    /// The answer is also capped at the block table's `total_tokens`, so it can
+    /// never claim a position the table does not cover. `None` for an unknown
+    /// sequence, without a shared manager and pool (K/V is then in the dense
+    /// per-sequence cache, which no holder can pin), or without a block table.
+    fn computed_prefix(&self, seq_id: u64) -> Option<Vec<u32>> {
+        let mgr = self.kv_manager.as_ref()?;
+        let table_tokens = {
+            let kv = mgr.read();
+            kv.tensor_pool()?;
+            kv.total_tokens(seq_id)?
+        };
+        let seq = self.sequences.get(&seq_id)?;
+        let computed = if self.pending_prefill_token.contains_key(&seq_id) {
+            seq.tokens.len()
+        } else {
+            seq.tokens.len().checked_sub(1)?
+        };
+        Some(seq.tokens[..computed.min(table_tokens)].to_vec())
+    }
+
+    /// ADR 0003 section 6.3: backend state for a prefix whose K/V a restore put
+    /// in `seq_id`'s block table. Same refusals as `fork_sequence` where they
+    /// apply, nothing changed on any refusal:
+    /// - no shared KV manager, or one with no physical tensor pool;
+    /// - no block table for `seq_id` (the restored table is assembled first);
+    /// - the table is not `PrefillPending` (DOCS SILENT: `fork_sequence` demands
+    ///   a ready parent because it shares finished K/V; here the table is the
+    ///   request's own and the suffix prefill must still run, so the narrowest
+    ///   rule is the exact state `assemble_table` leaves, and a ready table is
+    ///   refused because decode could start on it);
+    /// - empty `tokens`, or a count different from the table's `total_tokens`;
+    /// - `seq_id` already has backend state.
+    ///
+    /// On success `tokens` is the restored prefix, so the next prefill chunk
+    /// sits at position `tokens.len()`. No pending sampled token exists.
+    fn restore_sequence(&mut self, seq_id: u64, tokens: &[u32]) -> Result<(), String> {
+        let kv_mgr = self.kv_manager.as_ref().ok_or_else(|| {
+            format!(
+                "restore_sequence {seq_id} refused: backend has no shared KV manager \
+                 (unpaged restore would copy dense K/V)"
+            )
+        })?;
+        {
+            let kv = kv_mgr.read();
+            if kv.tensor_pool().is_none() {
+                return Err(format!(
+                    "restore_sequence {seq_id} refused: KV manager has no physical tensor pool"
+                ));
+            }
+            let table = kv.get_block_table(seq_id).ok_or_else(|| {
+                format!(
+                    "restore_sequence {seq_id} refused: sequence has no KV block table \
+                     (the restored table must be assembled first)"
+                )
+            })?;
+            if table.prefill_state != aien_kv_cache::PrefillState::PrefillPending {
+                return Err(format!(
+                    "restore_sequence {seq_id} refused: prefill state {:?} is not PrefillPending",
+                    table.prefill_state
+                ));
+            }
+            if tokens.is_empty() {
+                return Err(format!(
+                    "restore_sequence {seq_id} refused: empty token list"
+                ));
+            }
+            if tokens.len() != table.total_tokens {
+                return Err(format!(
+                    "restore_sequence {seq_id} refused: block table covers {} tokens, \
+                     {} were given",
+                    table.total_tokens,
+                    tokens.len()
+                ));
+            }
+        }
+        if self.sequences.contains_key(&seq_id) {
+            return Err(format!(
+                "restore_sequence {seq_id} refused: sequence already has backend state"
+            ));
+        }
+        self.sequences.insert(
+            seq_id,
+            SequenceState {
+                tokens: tokens.to_vec(),
+                // Paged mode: K/V lives in the shared pool, never in per-sequence layers.
+                layers: Vec::new(),
+            },
+        );
+        Ok(())
+    }
+
     /// PREFILL-E2E C5 (bullet 12): removes this request's entry from the
     /// per-sequence map (tokens and, unpaged, dense K/V layers) and any pending
     /// prefill token (C3). The map is the
