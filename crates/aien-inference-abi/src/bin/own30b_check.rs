@@ -5,6 +5,7 @@
 //!       runs greedy continuations of the 4 fixed prompts, writes tokens and top-2 margins.
 //!   own30b_check chip <checkpoint> <golden.json> <receipt-dir> [--new N] [--layers 0,23,47]
 //!                     [--max-context 8192] [--prompts 1,2,3,4] [--force-memory]
+//!                     [--weights bf16|fp8-experts|fp8]
 //!       Omega: loads the resident model, per-layer parity (attention replay + exact MoE oracle)
 //!       with the routing mutant and the chip-side window-skew mutant as negative controls,
 //!       whole-model greedy tokens against the golden file, decode tok/s and load time.
@@ -20,7 +21,7 @@ use aien_inference_abi::qwen3_coder::{compute_logits, forward_token, load_qwen3_
 use aien_inference_abi::qwen3_moe::load_qwen3_fp8_moe_layer;
 use aien_inference_abi::qwen3_moe_omega::{
     current_rss_bytes, load_attention_layer_f32, peak_rss_bytes, replay_attention, replay_moe, GenerateParams,
-    OmegaModelUploader, Qwen3MoeConfig, Qwen3MoeOmegaEngine,
+    OmegaModelUploader, Qwen3MoeConfig, Qwen3MoeOmegaEngine, WeightFormat,
 };
 use aien_inference_abi::tokenizer::ChatTokenizer as Tokenizer;
 
@@ -92,6 +93,7 @@ struct Args {
     max_context: usize,
     prompt_ids: Vec<usize>,
     force_memory: bool,
+    format: WeightFormat,
 }
 
 fn parse_args() -> Args {
@@ -108,6 +110,7 @@ fn parse_args() -> Args {
         max_context: 8192,
         prompt_ids: vec![1, 2, 3, 4],
         force_memory: false,
+        format: WeightFormat::Bf16,
     };
     while let Some(arg) = it.next() {
         match arg.as_str() {
@@ -116,6 +119,14 @@ fn parse_args() -> Args {
             "--layers" => a.layers = it.next().expect("--layers a,b").split(',').map(|s| s.parse().expect("layer")).collect(),
             "--prompts" => a.prompt_ids = it.next().expect("--prompts a,b").split(',').map(|s| s.parse().expect("prompt")).collect(),
             "--force-memory" => a.force_memory = true,
+            "--weights" => {
+                a.format = match it.next().expect("--weights bf16|fp8-experts|fp8").as_str() {
+                    "bf16" => WeightFormat::Bf16,
+                    "fp8-experts" => WeightFormat::Fp8Experts,
+                    "fp8" => WeightFormat::Fp8All,
+                    other => panic!("--weights {other}: bf16, fp8-experts or fp8"),
+                }
+            }
             other => pos.push(other.to_string()),
         }
     }
@@ -198,9 +209,11 @@ fn chip(a: &Args) {
     }
     let config = Qwen3MoeConfig::from_checkpoint(&a.checkpoint).expect("config");
     say(format!(
-        "engine native={} window_api={} spin_us={:?} cta_budget={:?}",
+        "engine native={} window_api={} fp8_api={} weights={:?} spin_us={:?} cta_budget={:?}",
         aien_omega_gpu::is_native(),
         OmegaModelUploader::uses_window_api(),
+        OmegaModelUploader::uses_fp8_api(),
+        a.format,
         aien_omega_gpu::spin_us(),
         aien_omega_gpu::cta_budget()
     ));
@@ -208,7 +221,7 @@ fn chip(a: &Args) {
     // ---- load ----
     let t0 = Instant::now();
     let mut n = 0usize;
-    let (mut engine, report) = Qwen3MoeOmegaEngine::load_omega(&a.checkpoint, a.max_context, &mut |s| {
+    let (mut engine, report) = Qwen3MoeOmegaEngine::load_omega_with(&a.checkpoint, a.max_context, a.format, &mut |s| {
         n += 1;
         if n.is_multiple_of(20) || s.starts_with("kv") || s == "lm_head" {
             eprintln!("  [{:.0}s] {s}", t0.elapsed().as_secs_f64());
@@ -270,25 +283,38 @@ fn chip(a: &Args) {
         ));
         parity_json.push(serde_json::json!({"layer": l, "positions": lt.len(), "attn_cosine_min": worst_attn, "moe_cosine_min": worst_moe, "moe_p95_rel_max": worst_p95, "routing_agrees": routing_ok, "pass": pass}));
     }
-    // Negative controls on the first traced layer: host routing mutant, then the chip's window skew.
+    // Negative controls on the first traced layer: host routing mutant, then the chip-side mutant
+    // of the expert kernel in use (bf16: window skew of one tile; FP8: scales dropped, kernel
+    // mutant 1 of omega_gpu_fp8_api.h).
     let l0 = a.layers[0];
     let capsule = load_qwen3_fp8_moe_layer(&a.checkpoint, l0).expect("capsule");
     let mut controls = Vec::new();
-    for (name, set) in [("routing-mutant", 0), ("window-skew-1-tile", 1)] {
+    let fp8 = a.format.fp8_experts();
+    let chip_control = if fp8 { "fp8-scales-dropped" } else { "window-skew-1-tile" };
+    for (name, set) in [("routing-mutant", 0), (chip_control, 1)] {
         engine.reset();
         engine.trace_layers = vec![l0];
         engine.routing_mutant = set == 0;
-        if set == 1 {
+        if set == 1 && fp8 {
+            aien_omega_fp8::test_set_mutant(1);
+        } else if set == 1 {
             aien_omega_moe::test_set_window_skew(1);
         }
-        for &t in &pids[..pids.len().min(4)] {
-            engine.step(t).expect("step");
-        }
+        let stepped: Result<Vec<_>, _> = pids[..pids.len().min(4)].iter().map(|&t| engine.step(t)).collect();
+        aien_omega_fp8::test_set_mutant(0);
         aien_omega_moe::test_set_window_skew(0);
         engine.routing_mutant = false;
+        if let Err(e) = stepped {
+            // A mutant kernel the chip refuses (poison survived) is also caught, by name.
+            say(format!("CONTROL {name}: layer {l0} step refused: {e} -> CAUGHT (refused)"));
+            controls.push(serde_json::json!({"control": name, "refused": e, "caught": true}));
+            engine.traces.clear();
+            continue;
+        }
         let worst = engine.traces.iter().map(|t| replay_moe(&capsule, t, config.top_k).stats.cosine).fold(1.0f64, f64::min);
-        let caught = worst < 0.99 || (set == 1 && !OmegaModelUploader::uses_window_api());
-        let note = if set == 1 && !OmegaModelUploader::uses_window_api() { " (window API not linked: control not applicable)" } else { "" };
+        let not_applicable = set == 1 && !fp8 && !OmegaModelUploader::uses_window_api();
+        let caught = worst < 0.99 || not_applicable;
+        let note = if not_applicable { " (window API not linked: control not applicable)" } else { "" };
         say(format!("CONTROL {name}: layer {l0} moe cosine(min) {worst:.4} -> {}{note}", if caught { "CAUGHT" } else { "NOT CAUGHT (FAIL)" }));
         controls.push(serde_json::json!({"control": name, "moe_cosine_min": worst, "caught": caught}));
         parity_pass &= caught;
@@ -371,6 +397,7 @@ fn chip(a: &Args) {
         "checkpoint": a.checkpoint.display().to_string(),
         "golden": a.golden.display().to_string(),
         "engine": {"native": aien_omega_gpu::is_native(), "window_api": OmegaModelUploader::uses_window_api(),
+            "fp8_api": OmegaModelUploader::uses_fp8_api(), "weights": format!("{:?}", a.format),
             "spin_us": aien_omega_gpu::spin_us(), "cta_budget": aien_omega_gpu::cta_budget(), "kv_resident": engine.kv_resident(),
             "max_context": engine.max_context_tokens()},
         "load": {"seconds": report.seconds, "resident_bytes": report.resident_bytes, "host_bytes": report.host_bytes,
