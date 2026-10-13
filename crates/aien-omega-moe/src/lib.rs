@@ -10,7 +10,9 @@
 //! Alignment rule (omega refuses otherwise, `BAD_ARGS`): `col0 % 8 == 0`, `1 <= cols`,
 //! `col0 + cols <= n`, `1 <= m <= 8192`, at most [`MAX_WINDOWS`] windows per call.
 //! Without the native library (`is_native()` false) every call returns `Unavailable`.
-use aien_omega_gpu::{rc_name, MatmulInfo, OmegaGpuError, OmegaGpuMatmulInfo};
+use aien_omega_gpu::{rc_name, MatmulInfo, OmegaGpuError};
+#[cfg(has_omega_moe)]
+use aien_omega_gpu::OmegaGpuMatmulInfo;
 use std::fmt;
 
 /// Column tile width: a window must start on a multiple of this (`OMEGA_GPU_MATMUL_TILE_N`).
@@ -98,7 +100,7 @@ fn check_len(what: &'static str, expected: usize, got: usize) -> Result<(), Omeg
 /// Checks the window alignment rule on the host, before any chip call, so a wrong offset is
 /// refused by name even in the stub.
 pub fn check_window(n: usize, col0: usize, cols: usize) -> Result<(), OmegaGpuError> {
-    if col0 % TILE_N != 0 || cols == 0 || col0.checked_add(cols).is_none_or(|end| end > n) {
+    if !col0.is_multiple_of(TILE_N) || cols == 0 || col0.checked_add(cols).is_none_or(|end| end > n) {
         return Err(OmegaGpuError::Rc {
             rc: aien_omega_gpu::ffi::OMEGA_GPU_MATMUL_BAD_ARGS,
             name: format!(

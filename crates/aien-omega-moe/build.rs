@@ -7,6 +7,7 @@
 //!     `omega_gpu_matmul_resident_windows_f32` defined in that archive.
 //!   * `AIEN_OMEGA_DIR=<checkout>`: native when the checkout has `src/omega_gpu_moe_api.h`.
 //!   * otherwise: stub (every call returns `Unavailable`).
+//!
 //! `cfg(has_omega_moe)` is set only when native. A stub never fails the build: the whole-tensor
 //! fallback in the model code stays usable, and `is_native()` says which one a binary carries.
 use std::path::Path;
