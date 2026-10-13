@@ -8,7 +8,7 @@
 //! (ADR 0003 section 1). Pure functions, no I/O, no heap use while hashing.
 
 use crate::error::KvError;
-use crate::record::{ChunkHeader, FLAG_PARTIAL_TAIL, FORMAT_VERSION};
+use crate::record::{segment_count, ChunkHeader, FLAG_PARTIAL_TAIL, FORMAT_VERSION, MAX_SEGMENTS};
 use aien_platform::ObjectId;
 use alloc::vec::Vec;
 use sha2::{Digest, Sha256};
@@ -165,12 +165,27 @@ impl ComputeConfig<'_> {
     /// intermediate_dim u64le || vocab_size u64le || rms_norm_eps bits u32le ||
     /// tie u8 || hidden_act u8 || arith_id u8-len + bytes || arith_epoch u32le)`.
     pub fn digest(&self) -> Result<[u8; 32], KvError> {
-        unimplemented!("C1b red stub")
+        let mut h = Sha256::new();
+        h.update(CFG_DOMAIN);
+        h.update(self.num_heads.to_le_bytes()); // 1
+        h.update(self.hidden_dim.to_le_bytes()); // 2
+        h.update(self.intermediate_dim.to_le_bytes()); // 3
+        h.update(self.vocab_size.to_le_bytes()); // 4
+        h.update(self.rms_norm_eps.to_bits().to_le_bytes()); // 5
+        h.update([u8::from(self.tie_word_embeddings)]); // 6
+        h.update([self.hidden_act as u8]); // 7
+        if self.arith_id.len() > MAX_ARITH_ID_BYTES {
+            return Err(KvError::FieldTooLong("arith_id"));
+        }
+        put_u8_len_str(&mut h, "arith_id", self.arith_id)?; // 8
+        h.update(self.arith_epoch.to_le_bytes()); // 9
+        Ok(h.finalize().into())
     }
 }
 
 const NS_DOMAIN: &[u8] = b"AIEN-PKV-NS-V1\0";
 const CHUNK_DOMAIN: &[u8] = b"AIEN-PKV-CHUNK-V1\0";
+const CFG_DOMAIN: &[u8] = b"AIEN-PKV-CFG-V1\0";
 
 fn put_u8_len_str(h: &mut Sha256, name: &'static str, s: &str) -> Result<(), KvError> {
     let len = u8::try_from(s.len()).map_err(|_| KvError::FieldTooLong(name))?;
@@ -196,6 +211,13 @@ impl NamespaceFields<'_> {
             || !self.chunk_tokens.is_multiple_of(self.block_size)
         {
             return Err(KvError::InvalidGeometry);
+        }
+        // A host chunk is one segment per pool block and the digest table holds
+        // at most 120 (ADR 2.1 item 3): `chunk_blocks` is capped at 120 there.
+        if self.backend_format == BackendFormat::HostPagedPoolV1
+            && self.chunk_tokens / self.block_size > MAX_SEGMENTS as u32
+        {
+            return Err(KvError::TooManySegments);
         }
         Ok(())
     }
@@ -248,6 +270,7 @@ impl NamespaceFields<'_> {
         h.update([self.backend_format as u8]); // 11
         h.update(self.chunk_tokens.to_le_bytes()); // 12
         put_u16_len_str(&mut h, "sharing_namespace", self.sharing_namespace)?; // 13
+        h.update(self.compute_config_digest); // 14
         Ok(NamespaceId(h.finalize().into()))
     }
 
@@ -286,15 +309,23 @@ impl NamespaceFields<'_> {
     /// 12 H8): host = `layout.block_stride` (one pool block); native = the whole
     /// payload (one segment).
     pub fn segment_bytes(&self, token_count: u32) -> Result<u64, KvError> {
-        let _ = token_count;
-        unimplemented!("C1b red stub")
+        match self.backend_format {
+            BackendFormat::HostPagedPoolV1 => {
+                self.check_geometry()?;
+                if token_count == 0 || token_count > self.chunk_tokens {
+                    return Err(KvError::TokenCountOutOfRange);
+                }
+                Ok(self.layout.block_stride)
+            }
+            BackendFormat::NativeF32DecodeStateV1 => self.expected_payload_len(token_count),
+        }
     }
 
     /// Number of payload segments for `token_count` positions; at most
     /// `MAX_SEGMENTS`.
     pub fn segment_count(&self, token_count: u32) -> Result<u32, KvError> {
-        let _ = token_count;
-        unimplemented!("C1b red stub")
+        let payload_len = self.expected_payload_len(token_count)?;
+        segment_count(payload_len, self.segment_bytes(token_count)?)
     }
 
     /// Build the header a writer would emit (or a reader would expect) for one

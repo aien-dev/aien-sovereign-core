@@ -1,14 +1,26 @@
 //! Validation before any allocation or copy (ADR 0003 section 1.4).
 
 use crate::error::KvError;
-use crate::record::{ChunkHeader, RecordHeader, FLAG_PARTIAL_TAIL, HEADER_LEN};
+use crate::record::{
+    segment_count, ChunkHeader, RecordHeader, FLAG_PARTIAL_TAIL, HEADER_REGION_LEN, PAYLOAD_DOMAIN,
+    PAYLOAD_OFFSET, SEGMENT_TABLE_OFFSET,
+};
+use sha2::{Digest, Sha256};
 
-/// Check `buf` (at least the first 256 bytes of a record) and the total
-/// `file_size` against what the caller expects. Order: length, magic, version,
-/// kind, header_len, header checksum, reserved flags (all in
-/// `RecordHeader::decode`), then namespace, key, parent, position, token
-/// count, geometry, partial flag, payload_len, file size. Performs no heap
-/// allocation and copies no payload; the first failure is returned.
+/// Check `buf` (the first 4096 bytes of a record, the header region) and the
+/// total `file_size` against what the caller expects. `segment_bytes` is the
+/// payload segment size the caller derived from its own geometry
+/// (`NamespaceFields::segment_bytes`; the file does not store it, ADR 2.1 item
+/// 3). Order: length (4096), magic, version, kind, header_len, header
+/// checksum, reserved flags (all in `RecordHeader::decode`), then namespace,
+/// key, parent, position, token count, geometry, partial flag, payload_len,
+/// segment count (`TooManySegments`), region padding (`BadPadding`), segment
+/// root (`SegmentRootMismatch`), file size (`4096 + payload_len`). Performs no
+/// heap allocation and copies no payload; the first failure is returned.
+///
+/// `TooManySegments` is checked before the padding and the root because both
+/// need the table length; the error enum lists the three in a different order
+/// (ADR 12 H7), which only matters for source order.
 ///
 /// `expect` is the header the caller derived for the chunk it asked for
 /// (`NamespaceFields::chunk_header`); its `written_unix_ns` is ignored.
@@ -18,7 +30,6 @@ pub fn validate_record(
     expect: &ChunkHeader,
     segment_bytes: u64,
 ) -> Result<RecordHeader, KvError> {
-    let _ = segment_bytes;
     let rec = RecordHeader::decode(buf)?;
     let h = &rec.chunk;
     if h.namespace_id != expect.namespace_id {
@@ -60,7 +71,22 @@ pub fn validate_record(
     if h.payload_len != expect.payload_len {
         return Err(KvError::PayloadLenMismatch);
     }
-    match (HEADER_LEN as u64).checked_add(h.payload_len) {
+
+    // Header region: the segment digest table, zero padding, and the root.
+    let n_seg = segment_count(h.payload_len, segment_bytes)? as usize;
+    let table_end = SEGMENT_TABLE_OFFSET + 32 * n_seg;
+    let region = &buf[..HEADER_REGION_LEN];
+    if region[table_end..].iter().any(|b| *b != 0) {
+        return Err(KvError::BadPadding);
+    }
+    let mut root = Sha256::new();
+    root.update(PAYLOAD_DOMAIN);
+    root.update(&region[SEGMENT_TABLE_OFFSET..table_end]);
+    if root.finalize().as_slice() != rec.payload_sha256 {
+        return Err(KvError::SegmentRootMismatch);
+    }
+
+    match (PAYLOAD_OFFSET as u64).checked_add(h.payload_len) {
         Some(total) if total == file_size => Ok(rec),
         _ => Err(KvError::FileSizeMismatch),
     }

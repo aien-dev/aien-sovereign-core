@@ -102,7 +102,7 @@ fn valid_record_passes_with_zero_allocations() {
     assert_eq!(n, 0);
     let r = r.expect("valid record");
     assert_eq!(r.chunk, f.expect);
-    assert_eq!(r.payload_sha256, [7; 32]);
+    assert_eq!(r.payload_sha256, sample_record().0.payload_sha256);
 }
 
 #[test]
@@ -200,7 +200,7 @@ fn validate_refuses_before_any_allocation() {
             "121 segments of the derived size",
             KvError::TooManySegments,
             |f| {
-                f.segment_bytes = 69_906;
+                f.segment_bytes = 69_905;
             },
         ),
         (
@@ -324,7 +324,7 @@ fn validate_refuses_more_than_120_segments() {
     };
     assert!(check(&edge).is_ok(), "exactly 120 segments is valid");
     // One more segment is refused before the table is read.
-    let sb121 = 69_906;
+    let sb121 = 69_905;
     assert_eq!(n_at(sb121), 121);
     let over = Fixture {
         segment_bytes: sb121,

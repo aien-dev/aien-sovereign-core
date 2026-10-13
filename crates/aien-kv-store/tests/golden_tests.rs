@@ -513,3 +513,20 @@ fn header_struct_bytes_0_to_255_unchanged_by_the_region() {
     assert_eq!(&region[..256], old.as_slice());
     assert_eq!(&region[..256], rec.encode().as_slice());
 }
+
+/// `tests/golden/README.md` records the vectors hash that the aienos
+/// `CONTRACT.lock` pins; changing the file without re-pinning fails here.
+#[test]
+fn readme_pins_the_current_vectors_hash() {
+    let text = std::fs::read(GOLDEN).unwrap();
+    let want = hex(&Sha256::digest(&text));
+    let readme = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/golden/README.md"
+    ))
+    .unwrap();
+    assert!(
+        readme.contains(&format!("vectors_sha256 = `{want}`")),
+        "README.md vectors_sha256 is stale; expected {want}"
+    );
+}

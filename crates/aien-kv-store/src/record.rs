@@ -21,6 +21,7 @@ pub const RECORD_KIND_CHUNK: u16 = 1;
 pub const FLAG_PARTIAL_TAIL: u16 = 1;
 /// Header bytes covered by `header_sha256`.
 pub const HASHED_PREFIX_LEN: usize = 224;
+pub(crate) const PAYLOAD_DOMAIN: &[u8] = b"AIEN-PKV-PAYLOAD-V1\0";
 
 /// The header fields a caller sets: section 2.1 minus the constants (magic,
 /// version, kind, header_len) and minus the two hashes. `payload_sha256` is
@@ -133,10 +134,21 @@ impl RecordHeader {
         b
     }
 
-    /// Structural decode: length, magic, version, kind, header_len, header
-    /// checksum, reserved flag bits. Identity checks are in `validate_record`.
-    /// No allocation.
+    /// Structural decode of a record's header region: needs the whole 4096
+    /// bytes (`Truncated` below that, ADR 0003 section 12 H6), then decodes the
+    /// 256-byte struct. Padding and the segment root are checked by
+    /// `validate_record`, which knows the segment count. No allocation.
     pub fn decode(buf: &[u8]) -> Result<RecordHeader, KvError> {
+        if buf.len() < HEADER_REGION_LEN {
+            return Err(KvError::Truncated);
+        }
+        Self::decode_struct(buf)
+    }
+
+    /// Structural decode of the 256-byte struct only (at least 256 bytes):
+    /// length, magic, version, kind, header_len, header checksum, reserved flag
+    /// bits. Identity checks are in `validate_record`. No allocation.
+    pub fn decode_struct(buf: &[u8]) -> Result<RecordHeader, KvError> {
         if buf.len() < HEADER_LEN {
             return Err(KvError::Truncated);
         }
@@ -187,15 +199,25 @@ impl RecordHeader {
 /// `SHA-256("AIEN-PKV-PAYLOAD-V1\0" || seg_digest_0 || ... || seg_digest_{n-1})`,
 /// the value stored at header offset 184 (ADR 0003 section 2.1, H4).
 pub fn payload_root(seg_digests: &[[u8; 32]]) -> [u8; 32] {
-    let _ = seg_digests;
-    unimplemented!("C1b red stub")
+    let mut h = Sha256::new();
+    h.update(PAYLOAD_DOMAIN);
+    for d in seg_digests {
+        h.update(d);
+    }
+    h.finalize().into()
 }
 
 /// Number of segments of a payload: `ceil(payload_len / segment_bytes)`.
 /// `InvalidGeometry` for a zero size, `TooManySegments` above `MAX_SEGMENTS`.
 pub fn segment_count(payload_len: u64, segment_bytes: u64) -> Result<u32, KvError> {
-    let _ = (payload_len, segment_bytes);
-    unimplemented!("C1b red stub")
+    if payload_len == 0 || segment_bytes == 0 {
+        return Err(KvError::InvalidGeometry);
+    }
+    let n = payload_len.div_ceil(segment_bytes);
+    if n > MAX_SEGMENTS as u64 {
+        return Err(KvError::TooManySegments);
+    }
+    Ok(n as u32)
 }
 
 impl RecordHeader {
@@ -206,12 +228,15 @@ impl RecordHeader {
         &self,
         seg_digests: &[[u8; 32]],
     ) -> Result<[u8; HEADER_REGION_LEN], KvError> {
-        let _ = seg_digests;
-        unimplemented!("C1b red stub")
-    }
-
-    /// Structural decode of the 256-byte struct only (at least 256 bytes).
-    pub fn decode_struct(buf: &[u8]) -> Result<RecordHeader, KvError> {
-        Self::decode(buf)
+        if seg_digests.len() > MAX_SEGMENTS {
+            return Err(KvError::TooManySegments);
+        }
+        let mut region = [0u8; HEADER_REGION_LEN];
+        region[..HEADER_LEN].copy_from_slice(&self.encode());
+        for (i, d) in seg_digests.iter().enumerate() {
+            let at = SEGMENT_TABLE_OFFSET + 32 * i;
+            region[at..at + 32].copy_from_slice(d);
+        }
+        Ok(region)
     }
 }
