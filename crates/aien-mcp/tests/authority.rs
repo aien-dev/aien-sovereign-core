@@ -116,14 +116,25 @@ async fn allow_executes_and_returns_receipt() {
 }
 
 #[tokio::test]
-async fn allow_restricted_mints() {
+async fn allow_restricted_with_restrictions_is_denied_and_nothing_runs() {
+    // The lane cannot enforce a restriction list, so it must not mint as if it were `Allow`.
     let h = harness(ToolEffects::PURE).await;
     let a = Fixed(AuthorityDecision::AllowRestricted(vec!["x".into()]));
+    let r = h.lane.authorize_and_execute(h.intent, scope("r"), &a).await;
+    assert!(matches!(r.unwrap_err(), AuthorityOutcome::Denied(_)));
+    assert_eq!(h.calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn allow_restricted_without_restrictions_mints() {
+    let h = harness(ToolEffects::PURE).await;
+    let a = Fixed(AuthorityDecision::AllowRestricted(Vec::new()));
     assert!(h
         .lane
         .authorize_and_execute(h.intent, scope("r"), &a)
         .await
         .is_ok());
+    assert_eq!(h.calls.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test]
