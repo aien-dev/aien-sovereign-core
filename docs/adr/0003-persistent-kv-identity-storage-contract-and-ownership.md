@@ -1,10 +1,10 @@
 # ADR 0003: Persistent KV cache: versioned chunk identity, storage contract, ownership and recovery
 
-- **Status**: Proposed (2026-10-13). Binding design for sovereign-core #484 and #485 and aienos #367. Implementation cuts: `docs/persistent-kv/CUTS.md`. Metrics and settings: `docs/persistent-kv/METRICS_AND_SETTINGS.md`.
+- **Status**: Proposed (2026-10-13), revised 2026-10-13 after the independent review (section 17). Binding design for sovereign-core #484 and #485 and aienos #367. Implementation cuts: `docs/persistent-kv/CUTS.md`. Metrics and settings: `docs/persistent-kv/METRICS_AND_SETTINGS.md`.
 - **Date**: 2026-10-13
 - **Author**: Drake Stapleton <aien@aienos.com> (design drafted by the persistent-KV design owner, Fable 5.1)
 - **Source read at**: sovereign-core `origin/main` f560be4; aienos `origin/main` 5429602; LMCache `4d69cdc4` (Apache-2.0).
-- **Evidence labels**: VERIFIED (read in source at the cited line), INFERRED (follows from source, not run), UNKNOWN (not established). Nothing in this ADR was run on hardware.
+- **Evidence labels**: VERIFIED (read in source at the cited line, or run and the output seen), INFERRED (follows from source, not run), UNKNOWN (not established), PLANNED (a test or measurement that is designed here and has no receipt yet). Nothing in this ADR was run on hardware, and no proposed test has a receipt: every test name below is PLANNED until its cut merges with a green run.
 
 ## In plain words
 
@@ -21,7 +21,7 @@ Today the runtime computes the model's "working memory" (the KV cache) for every
 5. The manager is shared as `Arc<parking_lot::RwLock<AienKvManager>>` (lib.rs:1685, VERIFIED) between the spine (spine.rs:23) and the backend (`NativeTransformerBackend.kv_manager`, transformer_backend.rs:130).
 6. The daemon steps one spine under a `tokio::sync::Mutex` (server.rs:27, 196-230, VERIFIED): one worker, `step` per iteration, 5 ms sleep when idle. `AienScheduler::step` calls `backend.execute_step` with no KV lock held (aien-scheduler/src/lib.rs:1005-1015, VERIFIED) and takes the KV write lock only for short commits (`complete_prefill` at 1027-1032, `append_token` at 1070, `free_sequence` at 1097-1106, VERIFIED).
 7. Sequence ids are `slot: u32 << 32 | generation: u32`, generation 0 invalid (aien-scheduler/src/sequence.rs:7-50, VERIFIED). The arena reuses slots with a bumped generation (sequence.rs:329-370, VERIFIED). `SequenceRecord` has `prompt_tokens_prefilled` and `is_prefilled` (sequence.rs:221-222, VERIFIED), which the step uses to drive chunked prefill (lib.rs:1018-1033, VERIFIED).
-8. Backend per-sequence state is `SequenceState { tokens, layers }` (aien-inference-abi/src/weights.rs:20-23, VERIFIED); in paged mode `layers` is empty and `tokens.len()` equals the number of cached positions while prefilling (transformer_backend.rs:136-143, VERIFIED). `pending_prefill_token` holds the token sampled after the last prefill chunk (same lines). Sampling is seeded by `decode_sampling_seed(request_id, position)` (transformer_backend.rs:43-45, VERIFIED). `release_sequence` drops backend state and calls `release_branch` (transformer_backend.rs:613-622, VERIFIED).
+8. Backend per-sequence state is `SequenceState { tokens, layers }` (aien-inference-abi/src/weights.rs:20-23, VERIFIED); in paged mode `layers` is empty and `tokens.len()` equals the number of cached positions while prefilling (transformer_backend.rs:136-143, VERIFIED). `pending_prefill_token` holds the token sampled after the last prefill chunk (same lines). Sampling is seeded by `decode_sampling_seed(request_id, position)` (transformer_backend.rs:43-45, VERIFIED). The runtime calls the **trait** method `release_sequence` (transformer_backend.rs:2307, VERIFIED), which drops backend state only and never touches the KV manager (its doc comment says the scheduler and swarm manager free the block tables, VERIFIED at 2300-2306); the inherent `NativeTransformerBackend::release_sequence` at 613-622, which also calls `release_branch`, is the standalone-generation path and is not used by the runtime. Two more facts that the park path depends on, both VERIFIED: a decode step appends the sampled token to `SequenceState.tokens` after computing the previous token's K/V (transformer_backend.rs:1776-1782 reads `pos = tokens.len() - 1`, 2158 pushes the sample), so the last token of a finished sequence has no K/V; and `fork_sequence` copies the parent's whole table and replaces a live child id (aien-kv-cache/src/lib.rs:1165-1210).
 9. `ModelConfig` carries `model_id, max_sequence_length, block_size, num_layers, num_heads, head_dim, num_kv_heads, rope_theta, rope_scaling: Option<Llama3RopeScaling { factor, low_freq_factor, high_freq_factor, original_max_position_embeddings }>, qk_norm, ...` (aien-abi-core/src/lib.rs:123-160, 45-50, VERIFIED). The daemon records `ModelIdentity { model_sha256, model_digest_kind, model_path, tokenizer_sha256, tokenizer_path }` (aien-runtime/src/generation.rs:24-30, VERIFIED).
 10. Memory planning from #239 (PRs #246 and #270): `KvPoolPlan` (shared_kv.rs:130-145), `plan_checked_model_kv` (shared_kv.rs:368-388), operator cap `AIEN_KV_CONTEXT_TOKENS` (shared_kv.rs:306), `AIEN_ALLOW_UNCHECKED_KV_MEMORY` (shared_kv.rs:295), all VERIFIED. This design reuses the plan and adds no second sizing path.
 11. Platform traits: `ObjectStore { read(ObjectId) -> ObjectRef, commit(ObjectWrite) -> ObjectId }` (aien-platform/src/objects.rs:17-20), `UnifiedBuffer` (compute.rs:18-28), `PlatformError` (lib.rs:31-43), `WorkQueue` (queue.rs:47-55), all VERIFIED, all `no_std`. `ObjectStore` is synchronous and copies through a borrowed slice; it has no submit/complete split, no capacity, no delete. It is reused as the *identifier and error vocabulary* (`ObjectId`, `PlatformError`), not as the KV store trait (section 3 says why).
@@ -47,7 +47,7 @@ Today the runtime computes the model's "working memory" (the KV cache) for every
 
 ### Prior art in this repository (not depended on)
 
-25. OWN-30B serve branch `own30b/serve` (sc-own30b, unmerged): in-memory prefix reuse for one conversation, `reused = common.min(prompt.len() - 1)` so at least the last prompt token is always recomputed to produce logits (crates/aien-inference-abi/src/qwen3_moe_omega.rs:1932-1935, VERIFIED on that branch), test `prefix_reuse_prefills_only_the_new_tokens_and_matches_a_cold_run` (2187). This ADR adopts the same "never restore the last prompt token" rule (section 6.5) and the same warm-equals-cold test shape. Nothing else overlaps: that branch has no disk, no identity, no sharing across requests.
+25. OWN-30B serve branch `own30b/serve` (sc-own30b, unmerged, pinned at commit 69459db): in-memory prefix reuse for one conversation, `reused = common.min(prompt.len() - 1)` so at least the last prompt token is always recomputed to produce logits (crates/aien-inference-abi/src/qwen3_moe_omega.rs:2163 at 69459db, VERIFIED), test `prefix_reuse_prefills_only_the_new_tokens_and_matches_a_cold_run` (fn at 2421 at 69459db, VERIFIED). Line numbers move on that branch; the pin is the commit. This ADR adopts the same "never restore the last prompt token" rule (section 6.5) and the same warm-equals-cold test shape. Nothing else overlaps: that branch has no disk, no identity, no sharing across requests.
 
 ## Decision drivers
 
@@ -84,8 +84,33 @@ Today the runtime computes the model's "working memory" (the KV cache) for every
 | 11 | backend_format | u8 (1 = host paged pool v1; 2 = native f32 decode state v1) | section 2.3 |
 | 12 | chunk_tokens | u32 | setting |
 | 13 | sharing_namespace | u16 len + bytes | setting `AIEN_KV_STORE_NAMESPACE` (host); sealed Store uuid + identity class + subject id (native, section 9) |
+| 14 | compute_config_digest | [u8;32] | `ComputeConfig::digest()`, section 1.2.1 (added by the review, C1 delta in section 12) |
 
-Rationale: fields 2-8 cover "which weights, which geometry, which RoPE"; 9-11 cover "which bytes"; 13 is the authorization scope. Two runtimes with different `block_size` or `chunk_tokens` cannot share objects, by design: positions and chunk boundaries are part of identity.
+Rationale: fields 2-8 cover "which weights, which geometry, which RoPE"; 9-11 cover "which bytes"; 13 is the authorization scope; 14 covers every other number that changes what the forward pass computes. Two runtimes with different `block_size` or `chunk_tokens` cannot share objects, by design: positions and chunk boundaries are part of identity.
+
+#### 1.2.1 Compute configuration digest (review finding 1)
+
+The review showed (VERIFIED by the orchestrator) that two model directories with the same weights digest and the same fields 1-13 but a different `rms_norm_eps` in `config.json` produce different K/V: the backend reads `weights.config.rms_norm_eps` for every RMSNorm (transformer_backend.rs:738, 1111, 1391, 1760) and the value comes from `config.json` (model_dir.rs:112, 239). The weights digest covers the safetensors bytes only, not `config.json`.
+
+`compute_config_digest = SHA-256("AIEN-PKV-CFG-V1\0" || ComputeConfig)` where `ComputeConfig` is, little-endian and in this order:
+
+| # | field | type | source |
+|---|---|---|---|
+| 1 | num_heads | u32 | `ModelConfig.num_heads` |
+| 2 | hidden_dim | u64 | `ModelConfig.hidden_dim` |
+| 3 | intermediate_dim | u64 | `ModelConfig.intermediate_dim` |
+| 4 | vocab_size | u64 | `ModelConfig.vocab_size` |
+| 5 | rms_norm_eps | u32 (f32 bits) | `ModelConfig.rms_norm_eps` |
+| 6 | tie_word_embeddings | u8 | `ModelConfig.tie_word_embeddings` |
+| 7 | hidden_act | u8 (1 = silu) | `config.json` `hidden_act`; the loader refuses everything but silu (model_dir.rs:198-199, VERIFIED), so the byte is a constant today and exists so a future activation cannot alias |
+| 8 | arith_id | u8 len + bytes | `TensorBackend::name()` (backend.rs:131, VERIFIED trait method; implementations return `"ReferenceCpuBackend"` at backend.rs:509-511, `"NativeCpuBackend (Rayon Multi-Core)"` at mojo_backend.rs:242-244, and an availability-dependent string at omega_backend.rs:815-820, all VERIFIED) |
+| 9 | arith_epoch | u32 | a constant `KV_ARITH_EPOCH` in `aien-inference-abi`, bumped by any change that alters numeric results of the forward pass |
+
+Fields not listed and why (each is a decision, not an omission): `model_id` (field 4 of the namespace), `num_layers`, `num_kv_heads`, `head_dim`, `block_size`, `rope_theta`, `rope_scaling`, `qk_norm` (namespace fields 5-8), `max_sequence_length` (caps context, does not change a K/V value; the cap is applied to the restorable prefix, section 6.3), `eos_token_ids` (decides when to stop, not what is computed), `attention_bias` and `mlp_bias` (the loader refuses true, model_dir.rs:201-203, so they cannot vary).
+
+**Why the resolved `ModelConfig` and not a digest of the raw `config.json`** (INFERRED, decision): (a) the raw file carries fields that cannot change a K/V value (`torch_dtype`, `transformers_version`, `use_cache`, `initializer_range`; model_dir.rs:22-52 lists them for Qwen3), so a raw digest would orphan every cached object on a harmless edit; (b) JSON has no canonical form (key order, `1e-05` versus `0.00001`, duplicate keys), and a hand-written canonicalizer is an attack and bug surface; (c) serde defaults (`default_rms_norm_eps`, `default_rope_theta`) mean the effective value is the resolved one, not the one in the file. The omission risk of an explicit list is closed mechanically: the conversion `ComputeConfig::from(&ModelConfig)` lives in `aien-runtime` and destructures `ModelConfig` **exhaustively, with no `..`**, so adding a field to `ModelConfig` is a compile error until its author decides "bound" or "excluded with a reason". A test (C6, PLANNED) additionally mutates every field of `ModelConfig` one at a time and asserts the namespace id changes for every field not in the written exclusion list.
+
+`arith_epoch` is guarded by a pinned-bytes test (C6, PLANNED): a fixed tiny model and prompt run on the reference backend; the SHA-256 of the resulting K/V pool bytes is pinned in the repository. A numeric change fails the test until the author bumps `KV_ARITH_EPOCH` and re-pins. `arith_id` is a coarse label (VERIFIED that the Omega name changes with availability, omega_backend.rs:815-820); mixing backends is therefore refused by identity, and the greedy guarantee of section 6.5 is stated per backend.
 
 ### 1.3 Chunk key (prefix chaining, adapted from LMCache TokenHasher)
 
@@ -98,7 +123,7 @@ chunk_key_i = SHA-256("AIEN-PKV-CHUNK-V1\0" || namespace_id || chunk_key_{i-1} |
 
 ### 1.4 Validation order (before any allocation or copy)
 
-On lookup: compute keys from tokens (pure, no I/O), consult the in-memory index. On load, after the header is read (256 bytes) and before a destination block is allocated: magic, format_version, header_sha256, `namespace_id == ours`, `chunk_key == requested`, `parent_key == expected`, `first_position`, `token_count` in `1..=chunk_tokens`, geometry fields equal to ours, `payload_len == expected_blocks * block_stride_bytes`, file size equals `256 + payload_len`. Only then are destination blocks allocated and the payload read; `payload_sha256` is verified over the bytes as they land in a *staging* region or, on the host, over the destination blocks before the table is published (section 5.4). A failing payload hash deletes the object and reports a miss. A header that fails validation is counted and the object is deleted (it is a cache). Nothing is ever partially published.
+On lookup: compute keys from tokens (pure, no I/O), consult the in-memory index. On load, after the header region is read (4096 bytes, one aligned read; section 2.1) and before a destination block is allocated: magic, format_version, header_sha256, `namespace_id == ours`, `chunk_key == requested`, `parent_key == expected`, `first_position`, `token_count` in `1..=chunk_tokens`, geometry fields equal to ours, `payload_len == expected_blocks * block_stride_bytes`, the header region's padding is all zero, file size equals `4096 + payload_len`. Only then are destination blocks allocated and the payload read; each segment's SHA-256 is checked against the segment digest table as the segment lands (section 15.4), and the root over the table must equal `payload_sha256`; on the host this happens over the destination blocks before the table is published (section 5.4). A failing segment or root hash deletes the object and reports a miss. A header that fails validation is counted and the object is deleted (it is a cache). Nothing is ever partially published.
 
 ## 2. On-disk record format (shared header; payload per backend)
 
@@ -129,9 +154,16 @@ On lookup: compute keys from tokens (pure, no I/O), consult the in-memory index.
 | 216 | 8 | written_unix_ns (informational, not identity) |
 | 224 | 32 | header_sha256 = SHA-256(bytes 0..224) |
 
+**Header bytes unchanged by the review, record layout changed (C1 delta, section 12).** Offsets 0 to 255 are all assigned, so there is no room for a new field and none is needed for finding 1: `namespace_id` at offset 16 already commits to `compute_config_digest` (section 1.2.1). Two meanings change and one rule is added:
+
+1. **Header region.** A record file is `header region (4096 bytes) || payload (payload_len bytes)`. Bytes 0 to 255 are the table above. Bytes 256 to `256 + 32 * n_seg - 1` are the **segment digest table**: `SHA-256` of each payload segment in order (section 15.4). Every remaining byte up to 4095 is zero and a nonzero byte is a validation failure (`BadPadding`). The payload starts at file offset 4096 (`PAYLOAD_OFFSET`; native slots do not use the file layout), so a pool block can be read straight from the file with `O_DIRECT` (section 15.3). File size is `4096 + payload_len`, not `256 + payload_len`.
+2. **`payload_sha256` (offset 184)** is the root `SHA-256("AIEN-PKV-PAYLOAD-V1\0" || seg_digest_0 || ... || seg_digest_{n-1})`, not a flat hash of the payload bytes. Integrity is not weakened: every payload byte is covered by exactly one segment digest, and the root covers every digest (section 15.4 argues this).
+3. **Segment size** is derived, not stored: host = `block_stride_bytes` (one pool block); native = the whole payload (one segment, so no stored table; the AEAD tags already authenticate every 4080-byte chunk, section 2.5). On the host `n_seg = ceil(payload_len / block_stride_bytes)` must be at most 120, so `chunk_blocks` is capped at 120 on the host (calc:12f9efaa: `(4096 - 256) / 32 = 120`).
+4. `header_len` (offset 12) stays 256: it is the length of the structure, not of the header region.
+
 ### 2.2 Host payload (backend_format 1)
 
-`ceil(token_count / block_size)` blocks, each exactly `block_stride_bytes`, in the pool's own layout (context item 2): `[layer][K plane | V plane][token][head][dim]` bf16. Positions beyond `token_count` in the last block are zero. The writer reads straight from the pinned pool blocks; the reader writes straight into freshly allocated pool blocks. No reshaping, so a load is a sequence of `block_stride_bytes` copies.
+`ceil(token_count / block_size)` blocks, each exactly `block_stride_bytes`, in the pool's own layout (context item 2): `[layer][K plane | V plane][token][head][dim]` bf16. Positions beyond `token_count` in the last block are zero **in the object**, and the writer enforces it: the pool does not (a block recycled from a finished sequence keeps its old rows, and the last position of a finished decode sequence has no K/V at all, context item 8). Full blocks are written straight from the pinned pool blocks; the one partial last block goes through a one-block scratch copy in which, for every layer and for K and V, the token rows at index `token_count mod block_size` and above are zeroed. Without that, a restore could expose rows another conversation left in a recycled block. The reader writes straight into freshly allocated pool blocks. No reshaping, so a load is a sequence of `block_stride_bytes` transfers.
 
 ### 2.3 Native payload (backend_format 2)
 
@@ -146,16 +178,48 @@ For each layer `l` in `0..num_layers`: K rows for positions `first..first+token_
   STORE_ID                   16 random bytes written once at first open (recovery sanity)
 ```
 
-Publication (adapted from LMCache dynamic adapter, with the fsync it lacks): write header + payload to `tmp/...part`, `fsync(file)`, `rename` to `objects/aa/<key>.kvc`, `fsync(objects/aa)`. The job reports **Published** only after the directory fsync returned, so on the host Published and Durable coincide (section 3.3).
+**Directory creation (review finding 10).** All 256 shard directories are created at first open, not lazily: `mkdir` each `objects/<aa>`, then `fsync(objects)`, write `STORE_ID` to a temp name, `fsync` it, `rename`, `fsync(root)`. After that a publication never creates a directory, so no parent-directory durability is owed on the hot path. A store that finds a missing shard directory at open recreates it with the same `mkdir`, `fsync(parent)` pair; one that cannot opens `Failed`.
+
+**Publication** (adapted from LMCache dynamic adapter, with the fsync it lacks), with the five fault boundaries named because each is a PLANNED fault-injection test (C4):
+
+| step | boundary | if it fails | what exists afterwards | outcome reported |
+|---|---|---|---|---|
+| P1 | write header region + payload to `tmp/...part` | write error / ENOSPC | partial temp, unlinked by the worker | job `Err`, nothing published |
+| P2 | `fsync(file)` | fsync error | temp, unlinked | job `Err`, nothing published; adapter enters `Degraded` (Linux may drop dirty pages after a failed fsync, so the same fd is never retried) |
+| P3 | `rename` to `objects/aa/<key>.kvc` | rename error | temp, unlinked | job `Err`, nothing published |
+| P4 | `fsync(objects/aa)` | fsync error **after a successful rename** | a complete, valid object under its final name; durability across power loss unknown | **`Published` with `PublishOutcome::Indeterminate`**: the object is indexed and served, the job result is `Err(HardwareFault)` for the durability claim only, the adapter enters `Degraded` (no new stores until reopen) |
+| P5 | index insert | cannot fail (capacity was reserved at submit, section 7.1) | n/a | n/a |
+
+The job reports **Published** only after P4 returned success, in which case Published and Durable coincide on the host (section 3.3). In the P4 failure case the caller is told the truth: the object exists, is complete and verified, and may not survive power loss. Recovery after a restart finds the object and indexes it like any other (it passed P1 to P3, so it is whole). This replaces the earlier claim that a failed job always leaves nothing visible.
 
 ### 2.5 Native slot layout (slab region)
 
-The KV region is a dedicated contiguous range of 4096-byte units, outside the sealed Store region and its anchor, bound through a `kv_disk_bind(disk, base_lba, units, store_range, anchor_range)` that refuses any overlap with the Store or anchor ranges (same refusal style as `st_disk_bind`, store_engine.h:90-92). It holds `N` fixed slots of `slot_units` each (sized at format time from the namespace geometry: `1 header unit + ceil(max_chunk_bytes / 4080)` units). Slot `s`:
+The KV region is a dedicated contiguous range of 4096-byte units, outside the sealed Store region and its anchor, bound through a `kv_disk_bind(disk, base_lba, units, store_range, anchor_range)` that refuses any overlap with the Store or anchor ranges (same refusal style as `st_disk_bind`, store_engine.h:90-92). On the Pi the range is inside the AIENOS partition view (section 16.2), because the kernel writes nothing outside that view (dev/disk_part.h:1-27, VERIFIED). It holds `N` fixed slots of `slot_units` each, `slot_units = 1 + sealed_units`, `sealed_units = ceil(sealed_len / 4096)`, `sealed_len = payload_len + 16 * ceil(payload_len / 4080)` (the M5 envelope without its 64-byte header). Slot `s`, complete wire layout (review finding 12), little-endian:
 
 ```
-unit 0        : slot header: the 256-byte record header (section 2.1) || slot_incarnation u64 || sealed_units u32 || zero padding || unit_sha256 at 4064..4096
-units 1..k    : M5 envelope of the payload, chunk_size = 4080 plaintext bytes so each sealed chunk (4080 + 16 tag = 4096, calc:aaeafb55) is exactly one unit
+unit 0 (slot header unit, 4096 bytes)
+  0    256  record header (section 2.1)
+  256   64  M5 envelope header, exactly as m5.h:160-169 lays it out (magic "AIENENV1", version 1, suite 1, flags 0, chunk_size = 4080,
+            total_plaintext_len = payload_len, envelope_id[16], nonce_prefix[8], key_epoch u64, reserved 0)
+  320    8  slot_incarnation u64
+  328    4  sealed_units u32
+  332    4  envelope_len u32  (= 64 + sealed_len, must equal m5_envelope_len(payload_len, 4080), m5.h:186)
+  336    4  slot_index u32    (must equal the slot's position in the slab)
+  340 3724  zero (a nonzero byte makes the slot empty)
+  4064  32  unit_sha256 = SHA-256(bytes 0..4064)
+units 1..sealed_units
+  the M5 envelope chunks, each (plaintext_n + 16 tag) bytes, back to back, chunk_size 4080 so every chunk but the last is exactly 4096 bytes = one unit;
+  the last chunk is (n_last + 16) bytes followed by zero padding to the unit boundary (nonzero padding makes the slot empty)
 ```
+
+Exact bounds: `payload_len` in `1 ..= 16711680` (`M5_ENV_MAX_CHUNKS` 4096 times 4080, m5.h:164, VERIFIED comment "C-only cap"; calc:76bfb969). Native has one segment (the whole payload), so there is no stored digest table on native: `payload_sha256` is `SHA-256("AIEN-PKV-PAYLOAD-V1\0" || SHA-256(plaintext payload))`, recomputed after the tag-verified decrypt and compared with the header.
+
+**Authenticated mapping from the KV identity into M5 inputs.** `m5_object_binding` (m5.h:61-68) has no namespace or chunk-key fields, so the mapping goes through the envelope id, which is in every chunk's AAD (m5.h:164-168) and in the per-object key derivation (m5.h:70-73), the same way the Store does it (store_sealed.c:443-455, VERIFIED):
+
+- `k_kv = HKDF-Expand(k_domain, "AIENOS-PKV-SLOT-KEY-V1\0", 32)` and `k_envid_kv = HKDF-Expand(k_domain, "AIENOS-PKV-ENVID-KEY-V1\0", 32)` (`m5_hkdf_expand`, m5.h:36).
+- `envelope_id[16] || nonce_prefix[8]` = first 24 bytes of `HMAC-SHA256(k_envid_kv, "AIENOS-PKV-ENVID-V1\0" || store_uuid || namespace_id || chunk_key || slot_index u32 || slot_incarnation u64 || key_generation u64 || identity_class u8 || payload_len u64 || payload_sha256)`.
+- `m5_object_binding`: `store_uuid` = the sealed Store uuid, `object_kind` = `0x0520` (a grep of the aienos tree finds no other use of `0x052x`, VERIFIED; the Store uses 0x0510 and 0x0511, store_sealed.h:43-44), `object_version` = 1, `envelope_id` as above, `key_generation` = the Store's current key generation, `identity_class` = the Store's class.
+- Open recomputes the binding from the header fields it validated; a slot copied under another header, another slot index, another namespace or another chunk key fails `M5_ERR_BINDING` or `M5_ERR_AUTH` before any byte reaches the session. Because the plaintext hash is inside the envelope id, a rewritten slot with different bytes never repeats a (key, nonce) pair, so `slot_incarnation` is not load-bearing for nonce safety (INFERRED from the Store's own argument at store_sealed.c:450-455); it identifies the write instance for stale-completion checks and is recovered as `1 + max(valid incarnations seen)`.
 
 Write order per slot (section 3.4 gives the states): zero the header unit, flush (the slot is now provably empty), write payload units, flush, write the header unit, flush. A header whose `unit_sha256` or record header fails is an empty slot. Recovery reads `N` header units and nothing else (section 4.2). No catalog, no journal, no generation counter: the slab is a cache and claims nothing about history. Why not Store v1: it is append-only with no reclaim (context 16), so a cache in it could only grow or be reformatted; and the sealed Store caps objects at 16 KiB (context 17) while one native chunk of 64 positions of Llama-3.2-1B is 65536 bytes per position (16 layers x 8 kv heads x 64 dims x K and V x 4 bytes, calc:e2ace192) x 64 = 4 MiB (calc:3df1c283). The slab reuses `disk_dev`, `disk_queue`, the torn-write discipline of writing a self-checking header last, and M5 chunk sealing. It is not a competing identity or journal: it stores nothing authoritative.
 
@@ -182,42 +246,65 @@ pub struct PinnedDest   { pub base: *mut u8,   pub block_bytes: usize, pub block
 pub struct ChunkHeader { /* exactly the fields of section 2.1 minus the two hashes */ }
 
 pub enum JobStage { Submitted, Completed, Published, Durable }
+/// How a store job ended with respect to durability (section 2.4, P4).
+pub enum PublishOutcome { NotApplicable, Durable, Indeterminate }
+pub enum StoreState { Recovering, Open, Degraded, Failed }
+/// Exactly one terminal completion is produced for every accepted job (done, failed or cancelled).
+pub enum Terminal { Done(JobStage), Failed(aien_platform::PlatformError), Cancelled }
 pub struct Completion { pub job: JobId, pub incarnation: Incarnation, pub key: ChunkKey, pub stage: JobStage,
-                        pub result: Result<(), aien_platform::PlatformError>, pub bytes: u64, pub elapsed_us: u64 }
+                        pub terminal: Option<Terminal>, pub publish: PublishOutcome,
+                        pub bytes: u64, pub elapsed_us: u64 }
 
-pub struct Capacity { pub quota_bytes: u64, pub used_bytes: u64, pub objects: u64, pub max_objects: u64,
-                      pub inflight_ops: u32, pub max_inflight_ops: u32, pub inflight_bytes: u64, pub max_inflight_bytes: u64 }
+pub struct Capacity { pub state: StoreState,
+                      pub quota_bytes: u64, pub used_bytes: u64, pub reserved_bytes: u64, pub evicting_bytes: u64,
+                      pub unindexed_bytes: u64, pub unindexed_objects: u64,
+                      pub objects: u64, pub max_objects: u64,
+                      pub restore_ops: u32, pub max_restore_ops: u32, pub park_ops: u32, pub max_park_ops: u32,
+                      pub inflight_bytes: u64, pub max_inflight_bytes: u64, pub max_waiters_per_job: u32 }
 
-pub struct RecoveryReport { pub indexed: u64, pub bytes: u64, pub foreign_namespace: u64, pub corrupt_deleted: u64,
-                            pub tmp_deleted: u64, pub over_cap: bool, pub elapsed_us: u64 }
+pub struct RecoveryProgress { pub done: bool, pub indexed: u64, pub bytes: u64, pub unindexed_objects: u64, pub unindexed_bytes: u64,
+                              pub foreign_namespace: u64, pub corrupt_deleted: u64, pub tmp_deleted: u64, pub elapsed_us: u64 }
+
+pub struct DrainReport { pub published: u64, pub cancelled: u64, pub unfinished: Vec<UnfinishedJob> }
 
 pub trait KvStore: Send + Sync {
     fn namespace(&self) -> NamespaceId;
     fn capacity(&self) -> Capacity;
-    /// Index only, no I/O, O(keys). `Some(len)` means a published object exists.
+    /// Index only, no I/O, O(keys). `Some(len)` means a published object exists. While `state` is
+    /// `Recovering` every key is a miss.
     fn lookup(&self, keys: &[ChunkKey]) -> Vec<Option<u64>>;
-    /// Bounded: refuses with QueueFull when ops or bytes would exceed the limits,
-    /// OutOfMemory when quota (after eviction of unpinned, unneeded objects) cannot fit it.
+    /// Bounded and non-blocking, never evicts and never touches the filesystem. Reserves
+    /// `payload + 4096` bytes of quota (section 7.4); refuses with QueueFull when the class's ops or the bytes
+    /// would exceed their limits, OutOfMemory when used + reserved + request exceeds quota plus the
+    /// bytes that are evictable (unpinned, not in flight). Reclamation happens on the worker (section 7.4).
     fn submit_store(&self, header: ChunkHeader, src: PinnedSource, inc: Incarnation) -> Result<JobId, PlatformError>;
     fn submit_load(&self, key: ChunkKey, expect: &ChunkHeader, dst: PinnedDest, inc: Incarnation) -> Result<JobId, PlatformError>;
     /// Durability barrier for everything Published before the call.
     fn submit_flush(&self, inc: Incarnation) -> Result<JobId, PlatformError>;
-    /// Non-blocking: drains at most `max` completions.
+    /// Coalescing: register one more waiter on an in-flight load; QueueFull past `max_waiters_per_job`.
+    fn attach_waiter(&self, job: JobId) -> Result<(), PlatformError>;
+    /// Non-blocking: drains at most `max` completions. Completion capacity is reserved at submit
+    /// (three slots per job), so the worker never blocks or drops on a full queue.
     fn poll(&self, max: usize) -> Vec<Completion>;
     /// Cancelled: the job never touched the destination/published nothing. TooLate: it will complete; ignore by incarnation.
+    /// Either way the job later yields its one terminal completion; the destination is safe to free
+    /// only after that completion has been polled (section 5.5).
     fn cancel(&self, job: JobId) -> CancelOutcome;
-    /// Pins against eviction while a restore chain is being assembled (bounded by max_inflight_ops).
+    /// Pins against eviction while a restore chain is being assembled (bounded by max_restore_ops).
     fn pin(&self, keys: &[ChunkKey]) -> Result<PinToken, PlatformError>;
     fn unpin(&self, token: PinToken);
-    fn delete(&self, keys: &[ChunkKey]) -> u64;   // skips pinned and in-flight keys
-    /// At open, bounded memory and time (section 4).
-    fn recover(&self, budget: RecoveryBudget) -> RecoveryReport;
-    /// Stops intake, drains or cancels within `deadline` (section 7.5).
-    fn shutdown(&self, deadline_ms: u64) -> DrainReport;
+    /// Marks keys for deletion; skips pinned and in-flight keys; the unlink runs on the worker.
+    fn delete(&self, keys: &[ChunkKey]) -> u64;
+    /// Resumable recovery (section 4): call until `done`, each call bounded by `slice_ms`. Admission of
+    /// stores stays closed until `done`.
+    fn recover_step(&self, slice_ms: u64) -> RecoveryProgress;
+    /// Stops intake and drains or cancels until `intake_deadline_ms`. Never frees a buffer an I/O may
+    /// still use; jobs still running at the deadline are listed in `unfinished` (section 7.5).
+    fn shutdown(&self, intake_deadline_ms: u64) -> DrainReport;
 }
 ```
 
-A **deterministic fake adapter** implements the same trait in memory with scripted latencies and faults (slow I/O, queue-full, disk-full, flush failure, torn write, stale completion) so #485 develops against it before the host adapter lands (cuts C3, C5 in CUTS.md).
+A **deterministic fake adapter** implements the same trait in memory with scripted latencies and faults (slow I/O, queue-full, disk-full, flush failure, torn write, stale completion, rename-ok-dir-fsync-fail, stalled fsync, stalled eviction) so #485 develops against it before the host adapter lands (cuts C3, C5 in CUTS.md).
 
 ### 3.3 Stage semantics
 
@@ -225,16 +312,17 @@ A **deterministic fake adapter** implements the same trait in memory with script
 |---|---|---|---|
 | Submitted | job accepted; `inflight_ops += 1`, `inflight_bytes += payload_len`; source blocks are pinned | same; bounce buffer not yet touched | nothing; may cancel |
 | Completed | bytes written to `tmp/...part` and `fsync(file)` returned | payload units written and `flush` returned | still not visible to lookup; may cancel (temp is unlinked / header stays zero) |
-| Published | `rename` + `fsync(dir)` returned; index updated; visible to lookup and to recovery after restart | header unit written; index updated; visible to lookup; **not yet durable** | release the source pins; too late to cancel |
+| Published | `rename` returned and `fsync(dir)` returned (if `fsync(dir)` fails after the rename: Published with `PublishOutcome::Indeterminate`, section 2.4 P4); index updated; visible to lookup and to recovery after restart | header unit written; index updated; visible to lookup; **not yet durable** | release the source pins; too late to cancel |
 | Durable | same instant as Published (reported as one completion carrying `Durable`) | `flush` after the header returned | claim persistence |
 
-A load reports `Completed` when the payload landed and its hash verified, then `Published` when the caller's table was committed under the KV lock (section 5.4); `Durable` is not a load stage.
+A load reports `Completed` (terminal for the store) when every segment landed and verified. The caller's table commit under the KV lock (section 5.4) is the caller's step, not a store stage; `Durable` is not a load stage. Every accepted job, store or load, yields exactly one terminal completion (done, failed or cancelled); a caller that cancels or abandons a job must still poll that terminal completion before it frees the job's memory.
 
 ### 3.4 Failure semantics
 
-- Any failure before Published leaves the store exactly as it was: no index change, no visible object, temp unlinked, slot header still zero. The last usable published object is never touched by a failing write.
+- Any failure before the host rename (P1 to P3 of section 2.4) or before the native header write leaves the store exactly as it was: no index change, no visible object, temp unlinked, slot header still zero. The last usable published object is never touched by a failing write.
 - Disk full (`ENOSPC` on host, no free slot on native) is reported as `PlatformError::OutOfMemory` on submit when the quota says so, or as a Completion with `Err` when the filesystem refuses despite the quota (host). Either way existing objects stay.
 - A flush failure (native `flush` error, host `fsync` error) fails the job; on native it also fail-stops the queue (disk.h:69-72) and the adapter enters `Failed` until re-opened; metrics say so.
+- Host `fsync(dir)` failing after a successful rename is **indeterminate**, not failed-and-absent: the object is whole and indexed, only its survival across power loss is unknown, and the caller is told so through `PublishOutcome::Indeterminate`. This keeps the rule "a failed job published nothing" true for every case where it can be true, and names the one case where it cannot.
 
 ## 4. Recovery algorithm
 
