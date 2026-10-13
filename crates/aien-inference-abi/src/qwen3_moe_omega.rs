@@ -26,6 +26,7 @@ use std::time::Instant;
 use rayon::prelude::*;
 
 use crate::qwen3_moe::{bf16_to_f32, f32_to_bf16, fp8_table, shard_path, Shard, FP8_BLOCK};
+use crate::moe_plan::MoeBatchPlan;
 use crate::resident::transpose_bf16_for_upload;
 
 /// Column tile of the engine's tile-major B layout: every expert window must start on one.
@@ -1129,5 +1130,826 @@ mod loader_tests {
         // With the fake uploader the process holds the matrices itself, so only the report's
         // bookkeeping is checked here; the real-load assertion is in own30b_check.
         assert!(peak_rss_bytes().is_some_and(|b| b > 0));
+    }
+}
+
+// ===========================================================================
+// Cut 3: the Stage A forward.
+// ===========================================================================
+
+use crate::qwen3_coder::rmsnorm_per_head;
+use crate::tensor::{apply_rope, rmsnorm, scaled_dot_product_attention_single};
+use crate::transformer_backend::{decode_sampling_seed, sample_with_params};
+use aien_abi_core::SamplingParams;
+
+/// The KV cache of one sequence plus the attention over it. Omega's paged bf16 pool in
+/// production; a host f32 cache in tests.
+pub trait KvAttention: Send {
+    /// Tokens the cache can hold.
+    fn capacity(&self) -> usize;
+    fn reset(&mut self);
+    /// Stores the roped key and the value of position `pos` for `layer`.
+    fn append(&mut self, layer: usize, pos: usize, k: &[f32], v: &[f32]) -> Result<(), String>;
+    /// `out[q_heads x head_dim]` = attention of the (unscaled) query over positions `0..context_len`.
+    fn attend(&mut self, layer: usize, q: &[f32], context_len: usize, out: &mut [f32]) -> Result<u64, String>;
+    /// Whether the chip reads the pool in place (no per-call staging).
+    fn resident(&self) -> bool;
+}
+
+/// Host f32 cache with the reference attention (tests, and the oracle side of parity runs).
+pub struct HostKv {
+    q_heads: usize,
+    kv_heads: usize,
+    head_dim: usize,
+    capacity: usize,
+    keys: Vec<Vec<Vec<f32>>>,
+    values: Vec<Vec<Vec<f32>>>,
+}
+
+impl HostKv {
+    pub fn new(config: &Qwen3MoeConfig, capacity: usize) -> Self {
+        Self {
+            q_heads: config.q_heads,
+            kv_heads: config.kv_heads,
+            head_dim: config.head_dim,
+            capacity,
+            keys: vec![Vec::new(); config.layers],
+            values: vec![Vec::new(); config.layers],
+        }
+    }
+}
+
+impl KvAttention for HostKv {
+    fn capacity(&self) -> usize {
+        self.capacity
+    }
+    fn reset(&mut self) {
+        for (k, v) in self.keys.iter_mut().zip(self.values.iter_mut()) {
+            k.clear();
+            v.clear();
+        }
+    }
+    fn append(&mut self, layer: usize, pos: usize, k: &[f32], v: &[f32]) -> Result<(), String> {
+        if pos != self.keys[layer].len() || pos >= self.capacity {
+            return Err(format!("host kv: append at {pos}, have {} (capacity {})", self.keys[layer].len(), self.capacity));
+        }
+        self.keys[layer].push(k.to_vec());
+        self.values[layer].push(v.to_vec());
+        Ok(())
+    }
+    fn attend(&mut self, layer: usize, q: &[f32], context_len: usize, out: &mut [f32]) -> Result<u64, String> {
+        scaled_dot_product_attention_single(
+            q,
+            &self.keys[layer][..context_len],
+            &self.values[layer][..context_len],
+            self.q_heads,
+            self.kv_heads,
+            self.head_dim,
+            out,
+        );
+        Ok(0)
+    }
+    fn resident(&self) -> bool {
+        false
+    }
+}
+
+/// Paged KV block size (tokens): the size the 8B daemon runs (`gb10_serving`), a power of two.
+pub const KV_BLOCK_SIZE: usize = 16;
+
+/// Omega's paged bf16 KV: one sequence, blocks `0..n` in order, the pool in the engine's resident
+/// allocation when the driver grants it (attention reads in place), a host-mapped pool otherwise.
+pub struct OmegaPagedKv {
+    pool: aien_kv_cache::UnifiedKvTensorPool,
+    layout: aien_omega_gpu::OmegaGpuKvLayout,
+    block_ids: Vec<u32>,
+    capacity: usize,
+    q_heads: usize,
+    kv_heads: usize,
+    head_dim: usize,
+    resident: bool,
+    filled: Vec<usize>,
+}
+
+impl OmegaPagedKv {
+    pub fn new(config: &Qwen3MoeConfig, max_context: usize) -> Result<Self, String> {
+        let num_blocks = max_context.div_ceil(KV_BLOCK_SIZE).max(1);
+        let cfg = aien_kv_cache::KvPoolConfig::for_model(
+            num_blocks,
+            KV_BLOCK_SIZE,
+            config.layers,
+            config.kv_heads,
+            config.head_dim,
+            aien_kv_cache::KvDType::Bf16,
+        );
+        let bytes = cfg.layout()?.total_bytes;
+        let (pool, resident) = match aien_omega_gpu::resident_kv_pool_alloc(bytes) {
+            Ok((ptr, len)) => {
+                // SAFETY: omega owns `len` bytes at `ptr` until `resident_kv_pool_free`, which the
+                // release callback runs exactly once; chip address == host address for this memory.
+                let buf = unsafe {
+                    aien_kv_cache::external_default_buffer(ptr, len, ptr as u64, Box::new(aien_omega_gpu::resident_kv_pool_free))
+                };
+                match buf {
+                    Ok(b) => (aien_kv_cache::UnifiedKvTensorPool::new(cfg.clone(), b)?, true),
+                    Err(e) => {
+                        aien_omega_gpu::resident_kv_pool_free();
+                        return Err(e);
+                    }
+                }
+            }
+            Err(_) => (aien_kv_cache::UnifiedKvTensorPool::allocate(cfg.clone())?, false),
+        };
+        let d = pool.layout_desc();
+        let layout = aien_omega_gpu::OmegaGpuKvLayout {
+            block_stride_bytes: d.block_stride_bytes,
+            layer_stride_bytes: d.layer_stride_bytes,
+            kv_plane_stride_bytes: d.kv_plane_stride_bytes,
+            token_stride_bytes: d.token_stride_bytes,
+            head_stride_bytes: d.head_stride_bytes,
+            pool_bytes: d.pool_bytes,
+            num_blocks: d.num_blocks,
+            num_layers: d.num_layers,
+            block_size: d.block_size,
+        };
+        Ok(Self {
+            pool,
+            layout,
+            block_ids: (0..num_blocks as u32).collect(),
+            capacity: num_blocks * KV_BLOCK_SIZE,
+            q_heads: config.q_heads,
+            kv_heads: config.kv_heads,
+            head_dim: config.head_dim,
+            resident,
+            filled: vec![0; config.layers],
+        })
+    }
+
+    pub fn pool_bytes(&self) -> usize {
+        self.pool.total_bytes()
+    }
+}
+
+impl KvAttention for OmegaPagedKv {
+    fn capacity(&self) -> usize {
+        self.capacity
+    }
+    fn reset(&mut self) {
+        self.filled.iter_mut().for_each(|f| *f = 0);
+    }
+    fn append(&mut self, layer: usize, pos: usize, k: &[f32], v: &[f32]) -> Result<(), String> {
+        if pos != self.filled[layer] || pos >= self.capacity {
+            return Err(format!("paged kv: append at {pos}, have {} (capacity {})", self.filled[layer], self.capacity));
+        }
+        self.pool.write_token_kv(pos / KV_BLOCK_SIZE, layer, pos % KV_BLOCK_SIZE, k, v);
+        self.filled[layer] = pos + 1;
+        Ok(())
+    }
+    fn attend(&mut self, layer: usize, q: &[f32], context_len: usize, out: &mut [f32]) -> Result<u64, String> {
+        if context_len > self.filled[layer] {
+            return Err(format!("paged kv: attend over {context_len}, only {} stored", self.filled[layer]));
+        }
+        let nblocks = context_len.div_ceil(KV_BLOCK_SIZE);
+        // SAFETY: the pool owns total_bytes() readable bytes at base_ptr() for its lifetime.
+        let bytes = unsafe { std::slice::from_raw_parts(self.pool.base_ptr(), self.pool.total_bytes()) };
+        let info = aien_omega_gpu::paged_attention_bf16(
+            q,
+            bytes,
+            &self.layout,
+            &self.block_ids[..nblocks],
+            context_len,
+            layer,
+            self.q_heads,
+            self.kv_heads,
+            self.head_dim,
+            out,
+        )
+        .map_err(|e| format!("paged attention layer {layer} ctx {context_len}: {e}; {}", aien_omega_gpu::last_error()))?;
+        Ok(info.elapsed_ns)
+    }
+    fn resident(&self) -> bool {
+        self.resident
+    }
+}
+
+/// Generation request (field for field what the HTTP door's `GenerateParams` carries).
+#[derive(Debug, Clone, PartialEq)]
+pub struct GenerateParams {
+    /// Hard cap on emitted tokens; stop tokens do not count.
+    pub max_new_tokens: usize,
+    /// `<= 0.001` means greedy.
+    pub temperature: f32,
+    /// `(0, 1]`; 1.0 disables nucleus filtering.
+    pub top_p: f32,
+    /// 0 disables.
+    pub top_k: usize,
+    /// Request seed; per-step seeds are `decode_sampling_seed(seed, step)`.
+    pub seed: u64,
+    pub stop_token_ids: Vec<u32>,
+}
+
+impl GenerateParams {
+    pub fn greedy(max_new_tokens: usize, stop_token_ids: Vec<u32>) -> Self {
+        Self {
+            max_new_tokens,
+            temperature: 0.0,
+            top_p: 1.0,
+            top_k: 0,
+            seed: 0,
+            stop_token_ids,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FinishReason {
+    Stop,
+    Length,
+    Cancelled,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct GenerateOutcome {
+    pub emitted_tokens: usize,
+    pub finish: FinishReason,
+    pub prefill_ms: u64,
+    pub decode_ms: u64,
+    pub prompt_tokens: usize,
+    /// Sum of the per-step timings over the decode steps.
+    pub decode_timing: StepTiming,
+}
+
+/// Where one step's time went. `*_ns` are host wall-clock sections; `chip_ns` is the sum of the
+/// chip-reported kernel times; `launches` counts engine calls.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct StepTiming {
+    pub total_ns: u64,
+    pub attention_ns: u64,
+    pub experts_ns: u64,
+    pub lm_head_ns: u64,
+    pub host_ns: u64,
+    pub chip_ns: u64,
+    pub launches: u64,
+}
+
+impl StepTiming {
+    pub fn add(&mut self, o: &StepTiming) {
+        self.total_ns += o.total_ns;
+        self.attention_ns += o.attention_ns;
+        self.experts_ns += o.experts_ns;
+        self.lm_head_ns += o.lm_head_ns;
+        self.host_ns += o.host_ns;
+        self.chip_ns += o.chip_ns;
+        self.launches += o.launches;
+    }
+}
+
+/// What one traced layer did for one token (the parity harness replays it on the host).
+#[derive(Debug, Clone, PartialEq)]
+pub struct LayerTrace {
+    pub layer: usize,
+    pub pos: usize,
+    pub x_in: Vec<f32>,
+    pub attn_proj: Vec<f32>,
+    pub post: Vec<f32>,
+    pub experts: Vec<u32>,
+    pub weights: Vec<f32>,
+    pub moe_out: Vec<f32>,
+    pub x_out: Vec<f32>,
+}
+
+/// Samples like the HTTP door's `sample_next`: top-k mask, then the workspace sampler with a
+/// per-step seed, so greedy and seeded replies match across engines.
+pub fn sample_next(logits: &[f32], params: &GenerateParams, step: usize) -> u32 {
+    let masked;
+    let logits = if params.top_k > 0 && params.top_k < logits.len() && params.temperature > 0.001 {
+        let mut order: Vec<usize> = (0..logits.len()).collect();
+        order.sort_by(|&a, &b| logits[b].partial_cmp(&logits[a]).unwrap_or(std::cmp::Ordering::Equal).then(a.cmp(&b)));
+        let mut out = vec![f32::NEG_INFINITY; logits.len()];
+        for &i in &order[..params.top_k] {
+            out[i] = logits[i];
+        }
+        masked = out;
+        masked.as_slice()
+    } else {
+        logits
+    };
+    let sp = SamplingParams {
+        temperature: params.temperature,
+        top_p: params.top_p,
+        max_tokens: 1,
+        stop_token_ids: Vec::new(),
+    };
+    sample_with_params(logits, &sp, decode_sampling_seed(params.seed, step)).0
+}
+
+/// The Stage A engine: one sequence, token-at-a-time prefill and decode.
+pub struct Qwen3MoeOmegaEngine {
+    weights: Qwen3MoeOmegaWeights,
+    kv: Box<dyn KvAttention>,
+    /// Layers whose activations are recorded into `traces` (parity harness).
+    pub trace_layers: Vec<usize>,
+    pub traces: Vec<LayerTrace>,
+    /// Negative control: every chosen expert id is replaced by its neighbour (weights stay), so
+    /// every expert window is a wrong expert. The layer oracle must then disagree loudly.
+    pub routing_mutant: bool,
+    pub last_timing: StepTiming,
+    pos: usize,
+}
+
+impl Qwen3MoeOmegaEngine {
+    pub fn new(weights: Qwen3MoeOmegaWeights, kv: Box<dyn KvAttention>) -> Self {
+        Self {
+            weights,
+            kv,
+            trace_layers: Vec::new(),
+            traces: Vec::new(),
+            routing_mutant: false,
+            last_timing: StepTiming::default(),
+            pos: 0,
+        }
+    }
+
+    /// The production constructor: loads the checkpoint onto Omega and allocates the paged KV.
+    pub fn load_omega(dir: &Path, max_context: usize, progress: &mut dyn FnMut(&str)) -> Result<(Self, LoadReport), String> {
+        if !aien_omega_gpu::is_native() {
+            return Err("this binary carries the CPU stub of the Omega engine (build with AIEN_OMEGA_DIR or AIEN_OMEGA_GPU_LIB)".into());
+        }
+        let (weights, report) = load_qwen3_moe_omega(dir, &OmegaModelUploader, progress)?;
+        let kv = OmegaPagedKv::new(&weights.config, max_context)?;
+        progress(&format!("kv pool {} MB resident={}", kv.pool_bytes() >> 20, kv.resident()));
+        Ok((Self::new(weights, Box::new(kv)), report))
+    }
+
+    pub fn config(&self) -> &Qwen3MoeConfig {
+        &self.weights.config
+    }
+
+    pub fn weights(&self) -> &Qwen3MoeOmegaWeights {
+        &self.weights
+    }
+
+    pub fn max_context_tokens(&self) -> usize {
+        self.kv.capacity()
+    }
+
+    pub fn kv_resident(&self) -> bool {
+        self.kv.resident()
+    }
+
+    /// Current sequence length (tokens already in the KV).
+    pub fn position(&self) -> usize {
+        self.pos
+    }
+
+    pub fn reset(&mut self) {
+        self.kv.reset();
+        self.pos = 0;
+        self.traces.clear();
+    }
+
+    /// Runs `token` at the next position through every layer. Returns the final-normed hidden
+    /// state (feed it to `logits`). Records `last_timing`.
+    pub fn step(&mut self, token: u32) -> Result<Vec<f32>, String> {
+        let t_step = Instant::now();
+        let mut timing = StepTiming::default();
+        let c = &self.weights.config;
+        let (h, qd, kvd, hd, eps) = (c.hidden, c.q_dim(), c.kv_dim(), c.head_dim, c.rms_eps);
+        let (e, top_k, i) = (c.experts, c.top_k, c.moe_intermediate);
+        let pos = self.pos;
+        if pos >= self.kv.capacity() {
+            return Err(format!("context full: {pos} of {}", self.kv.capacity()));
+        }
+        let mut x = self.weights.embed_row(token);
+        let mut x_norm = vec![0.0f32; h];
+        let mut qkv_out = vec![0.0f32; c.qkv_n()];
+        let mut qn = vec![0.0f32; qd];
+        let mut kn = vec![0.0f32; kvd];
+        let mut attn_out = vec![0.0f32; qd];
+        let mut attn_proj = vec![0.0f32; h];
+        let mut post = vec![0.0f32; h];
+        let mut logits = vec![0.0f32; e];
+        let mut gu_out = vec![0.0f32; top_k * 2 * i];
+        let mut act = vec![0.0f32; i];
+        let mut down_out = vec![0.0f32; h];
+        let mut moe_out = vec![0.0f32; h];
+        let mut col0s: Vec<u32> = vec![0; top_k];
+
+        for (layer_idx, layer) in self.weights.layers.iter().enumerate() {
+            let traced = self.trace_layers.contains(&layer_idx);
+            let x_in = if traced { x.clone() } else { Vec::new() };
+
+            // --- attention ---
+            let t0 = Instant::now();
+            rmsnorm(&x, &layer.input_norm, eps, &mut x_norm);
+            timing.host_ns += t0.elapsed().as_nanos() as u64;
+            let t1 = Instant::now();
+            timing.chip_ns += layer.qkv.matmul_f32(1, &x_norm, &mut qkv_out).map_err(|e| format!("layer {layer_idx} qkv: {e}"))?;
+            timing.launches += 1;
+            let t2 = Instant::now();
+            rmsnorm_per_head(&qkv_out[..qd], &layer.q_norm, eps, c.q_heads, hd, &mut qn);
+            rmsnorm_per_head(&qkv_out[qd..qd + kvd], &layer.k_norm, eps, c.kv_heads, hd, &mut kn);
+            apply_rope(&mut qn, &mut kn, pos, c.q_heads, c.kv_heads, hd, c.rope_theta);
+            self.kv.append(layer_idx, pos, &kn, &qkv_out[qd + kvd..])?;
+            timing.host_ns += t2.elapsed().as_nanos() as u64;
+            timing.chip_ns += self.kv.attend(layer_idx, &qn, pos + 1, &mut attn_out)?;
+            timing.launches += 1;
+            timing.chip_ns += layer.o.matmul_f32(1, &attn_out, &mut attn_proj).map_err(|e| format!("layer {layer_idx} o: {e}"))?;
+            timing.launches += 1;
+            timing.attention_ns += t1.elapsed().as_nanos() as u64;
+
+            // --- residual, post norm, routing (host) ---
+            let t3 = Instant::now();
+            for (xi, p) in x.iter_mut().zip(&attn_proj) {
+                *xi += p;
+            }
+            rmsnorm(&x, &layer.post_norm, eps, &mut post);
+            for (ex, l) in logits.iter_mut().enumerate() {
+                *l = layer.router[ex * h..(ex + 1) * h].iter().zip(&post).map(|(a, b)| a * b).sum();
+            }
+            let plan = MoeBatchPlan::from_logits(&logits, 1, e, top_k).map_err(|e| format!("layer {layer_idx} routing: {e}"))?;
+            let mut experts: Vec<u32> = plan.topk_experts.clone();
+            if self.routing_mutant {
+                experts.iter_mut().for_each(|ex| *ex = (*ex + 1) % e as u32);
+            }
+            for (slot, &ex) in experts.iter().enumerate() {
+                col0s[slot] = c.gate_up_col0(ex as usize) as u32;
+            }
+            timing.host_ns += t3.elapsed().as_nanos() as u64;
+
+            // --- experts: 1 gate|up call over top_k windows, top_k down calls ---
+            let t4 = Instant::now();
+            timing.chip_ns += layer
+                .gate_up
+                .windows_f32(1, &post, &col0s, 2 * i, &mut gu_out)
+                .map_err(|e| format!("layer {layer_idx} gate_up: {e}"))?;
+            timing.launches += top_k as u64;
+            moe_out.iter_mut().for_each(|v| *v = 0.0);
+            for (slot, &ex) in experts.iter().enumerate() {
+                let th = Instant::now();
+                let gu = &gu_out[slot * 2 * i..(slot + 1) * 2 * i];
+                for j in 0..i {
+                    let g = gu[j];
+                    act[j] = g / (1.0 + (-g).exp()) * gu[i + j];
+                }
+                timing.host_ns += th.elapsed().as_nanos() as u64;
+                let col0 = c.down_col0(ex as usize) as u32;
+                timing.chip_ns += layer
+                    .down
+                    .windows_f32(1, &act, std::slice::from_ref(&col0), h, &mut down_out)
+                    .map_err(|e| format!("layer {layer_idx} down expert {ex}: {e}"))?;
+                timing.launches += 1;
+                let w = plan.topk_weights[slot];
+                for (m, d) in moe_out.iter_mut().zip(&down_out) {
+                    *m += w * d;
+                }
+            }
+            for (xi, m) in x.iter_mut().zip(&moe_out) {
+                *xi += m;
+            }
+            timing.experts_ns += t4.elapsed().as_nanos() as u64;
+
+            if traced {
+                self.traces.push(LayerTrace {
+                    layer: layer_idx,
+                    pos,
+                    x_in,
+                    attn_proj: attn_proj.clone(),
+                    post: post.clone(),
+                    experts: experts.clone(),
+                    weights: plan.topk_weights.clone(),
+                    moe_out: moe_out.clone(),
+                    x_out: x.clone(),
+                });
+            }
+        }
+        let t5 = Instant::now();
+        let mut hidden = vec![0.0f32; h];
+        rmsnorm(&x, &self.weights.final_norm, eps, &mut hidden);
+        timing.host_ns += t5.elapsed().as_nanos() as u64;
+        self.pos = pos + 1;
+        timing.total_ns = t_step.elapsed().as_nanos() as u64;
+        self.last_timing = timing;
+        Ok(hidden)
+    }
+
+    /// Vocabulary logits of a final hidden state (one lm_head launch), added to `last_timing`.
+    pub fn logits(&mut self, hidden: &[f32]) -> Result<Vec<f32>, String> {
+        let t0 = Instant::now();
+        let mut logits = vec![0.0f32; self.weights.config.vocab];
+        let ns = self.weights.lm_head.matmul_f32(1, hidden, &mut logits).map_err(|e| format!("lm_head: {e}"))?;
+        let dt = t0.elapsed().as_nanos() as u64;
+        self.last_timing.lm_head_ns += dt;
+        self.last_timing.total_ns += dt;
+        self.last_timing.chip_ns += ns;
+        self.last_timing.launches += 1;
+        Ok(logits)
+    }
+
+    /// Prefill `prompt` then decode with `sampler(logits, step)`; `on_token` gets every emitted
+    /// token and may return `false` to cancel. Stop ids are consumed, never emitted. The engine
+    /// is reset first (one sequence at a time).
+    pub fn generate_with(
+        &mut self,
+        prompt: &[u32],
+        params: &GenerateParams,
+        sampler: &mut dyn FnMut(&[f32], usize) -> u32,
+        on_token: &mut dyn FnMut(u32) -> bool,
+    ) -> Result<GenerateOutcome, String> {
+        if prompt.is_empty() {
+            return Err("empty prompt".into());
+        }
+        if prompt.len() >= self.kv.capacity() {
+            return Err(format!("prompt of {} tokens, context is {}", prompt.len(), self.kv.capacity()));
+        }
+        self.reset();
+        let t0 = Instant::now();
+        let mut hidden = Vec::new();
+        for &t in prompt {
+            hidden = self.step(t)?;
+        }
+        let prefill_ms = t0.elapsed().as_millis() as u64;
+        let t1 = Instant::now();
+        let mut decode_timing = StepTiming::default();
+        let mut emitted = 0usize;
+        let mut finish = FinishReason::Length;
+        let mut step = 0usize;
+        loop {
+            if emitted >= params.max_new_tokens {
+                break;
+            }
+            let logits = self.logits(&hidden)?;
+            decode_timing.add(&self.last_timing);
+            let next = sampler(&logits, step);
+            step += 1;
+            if params.stop_token_ids.contains(&next) {
+                finish = FinishReason::Stop;
+                break;
+            }
+            emitted += 1;
+            if !on_token(next) {
+                finish = FinishReason::Cancelled;
+                break;
+            }
+            if emitted >= params.max_new_tokens || self.pos >= self.kv.capacity() {
+                break;
+            }
+            hidden = self.step(next)?;
+        }
+        Ok(GenerateOutcome {
+            emitted_tokens: emitted,
+            finish,
+            prefill_ms,
+            decode_ms: t1.elapsed().as_millis() as u64,
+            prompt_tokens: prompt.len(),
+            decode_timing,
+        })
+    }
+
+    /// `generate_with` using [`sample_next`] (the door's sampling rule).
+    pub fn generate(
+        &mut self,
+        prompt: &[u32],
+        params: &GenerateParams,
+        on_token: &mut dyn FnMut(u32) -> bool,
+    ) -> Result<GenerateOutcome, String> {
+        let p = params.clone();
+        self.generate_with(prompt, params, &mut |logits, step| sample_next(logits, &p, step), on_token)
+    }
+}
+
+/// The library entry for the HTTP door: `&self` generation behind one lock (one sequence at a
+/// time, as the door's contract says). `Send + Sync`.
+pub struct OmegaEngine {
+    inner: Mutex<Qwen3MoeOmegaEngine>,
+    max_context: usize,
+    pub load_report: LoadReport,
+}
+
+impl OmegaEngine {
+    /// Loads the checkpoint at `dir` onto Omega with a KV for `max_context` tokens.
+    pub fn load(dir: &Path, max_context: usize, progress: &mut dyn FnMut(&str)) -> Result<Self, String> {
+        let (engine, load_report) = Qwen3MoeOmegaEngine::load_omega(dir, max_context, progress)?;
+        let max_context = engine.max_context_tokens();
+        Ok(Self {
+            inner: Mutex::new(engine),
+            max_context,
+            load_report,
+        })
+    }
+
+    pub fn from_engine(engine: Qwen3MoeOmegaEngine, load_report: LoadReport) -> Self {
+        let max_context = engine.max_context_tokens();
+        Self {
+            inner: Mutex::new(engine),
+            max_context,
+            load_report,
+        }
+    }
+
+    pub fn kind(&self) -> &str {
+        "omega"
+    }
+
+    pub fn max_context_tokens(&self) -> usize {
+        self.max_context
+    }
+
+    pub fn generate(
+        &self,
+        prompt: &[u32],
+        params: &GenerateParams,
+        on_token: &mut dyn FnMut(u32) -> bool,
+    ) -> Result<GenerateOutcome, String> {
+        let mut g = self.inner.lock().map_err(|_| "engine lock poisoned".to_string())?;
+        g.generate(prompt, params, on_token)
+    }
+
+    /// Same with the caller's sampler (the door passes its `sample_next`).
+    pub fn generate_with(
+        &self,
+        prompt: &[u32],
+        params: &GenerateParams,
+        sampler: &mut dyn FnMut(&[f32], usize) -> u32,
+        on_token: &mut dyn FnMut(u32) -> bool,
+    ) -> Result<GenerateOutcome, String> {
+        let mut g = self.inner.lock().map_err(|_| "engine lock poisoned".to_string())?;
+        g.generate_with(prompt, params, sampler, on_token)
+    }
+
+    pub fn with_engine<R>(&self, f: impl FnOnce(&mut Qwen3MoeOmegaEngine) -> R) -> Result<R, String> {
+        let mut g = self.inner.lock().map_err(|_| "engine lock poisoned".to_string())?;
+        Ok(f(&mut g))
+    }
+}
+
+#[cfg(test)]
+mod forward_tests {
+    use super::test_support::*;
+    use super::*;
+    use crate::qwen3_moe::parity_stats;
+
+    /// Plain f32 forward over the dequantised weights (rounded to bf16 as uploaded), no engine
+    /// code shared: embedding, GQA attention with q/k norms and rope, top-k routing, swiglu
+    /// experts, lm_head. Returns the logits at every position.
+    fn naive_forward(src: &MemorySource, c: &Qwen3MoeConfig, tokens: &[u32]) -> Vec<Vec<f32>> {
+        let r = |v: f32| bf16_to_f32(f32_to_bf16(v));
+        let bf = |name: &str| -> Vec<f32> {
+            let (_, _, b) = &src.tensors[name];
+            b.chunks_exact(2).map(|x| bf16_to_f32(u16::from_le_bytes([x[0], x[1]]))).collect()
+        };
+        let fp8 = |name: &str| -> Vec<f32> { src.fp8_f32(name).0.into_iter().map(r).collect() };
+        let (h, qd, kvd, hd, i) = (c.hidden, c.q_dim(), c.kv_dim(), c.head_dim, c.moe_intermediate);
+        let matvec = |x: &[f32], w: &[f32], out_dim: usize| -> Vec<f32> {
+            let x: Vec<f32> = x.iter().map(|&v| r(v)).collect();
+            (0..out_dim).map(|o| x.iter().zip(&w[o * x.len()..(o + 1) * x.len()]).map(|(a, b)| a * b).sum()).collect()
+        };
+        let embed = bf("model.embed_tokens.weight");
+        let lm = bf("lm_head.weight");
+        let fnorm = bf("model.norm.weight");
+        let mut keys = vec![Vec::<Vec<f32>>::new(); c.layers];
+        let mut vals = vec![Vec::<Vec<f32>>::new(); c.layers];
+        let mut out = Vec::new();
+        for (pos, &t) in tokens.iter().enumerate() {
+            let mut x = embed[t as usize * h..(t as usize + 1) * h].to_vec();
+            for l in 0..c.layers {
+                let p = format!("model.layers.{l}");
+                let mut xn = vec![0.0; h];
+                rmsnorm(&x, &bf(&format!("{p}.input_layernorm.weight")), c.rms_eps, &mut xn);
+                let q = matvec(&xn, &fp8(&format!("{p}.self_attn.q_proj.weight")), qd);
+                let k = matvec(&xn, &fp8(&format!("{p}.self_attn.k_proj.weight")), kvd);
+                let v = matvec(&xn, &fp8(&format!("{p}.self_attn.v_proj.weight")), kvd);
+                let mut qn = vec![0.0; qd];
+                let mut kn = vec![0.0; kvd];
+                rmsnorm_per_head(&q, &bf(&format!("{p}.self_attn.q_norm.weight")), c.rms_eps, c.q_heads, hd, &mut qn);
+                rmsnorm_per_head(&k, &bf(&format!("{p}.self_attn.k_norm.weight")), c.rms_eps, c.kv_heads, hd, &mut kn);
+                apply_rope(&mut qn, &mut kn, pos, c.q_heads, c.kv_heads, hd, c.rope_theta);
+                keys[l].push(kn.clone());
+                vals[l].push(v);
+                let mut att = vec![0.0; qd];
+                scaled_dot_product_attention_single(&qn, &keys[l], &vals[l], c.q_heads, c.kv_heads, hd, &mut att);
+                let o = matvec(&att, &fp8(&format!("{p}.self_attn.o_proj.weight")), h);
+                for j in 0..h {
+                    x[j] += o[j];
+                }
+                let mut post = vec![0.0; h];
+                rmsnorm(&x, &bf(&format!("{p}.post_attention_layernorm.weight")), c.rms_eps, &mut post);
+                let router = bf(&format!("{p}.mlp.gate.weight"));
+                let logits: Vec<f32> = (0..c.experts).map(|e| post.iter().zip(&router[e * h..(e + 1) * h]).map(|(a, b)| a * b).sum()).collect();
+                let plan = MoeBatchPlan::from_logits(&logits, 1, c.experts, c.top_k).unwrap();
+                for slot in 0..c.top_k {
+                    let e = plan.topk_experts[slot] as usize;
+                    let b = format!("{p}.mlp.experts.{e}");
+                    let g = matvec(&post, &fp8(&format!("{b}.gate_proj.weight")), i);
+                    let u = matvec(&post, &fp8(&format!("{b}.up_proj.weight")), i);
+                    let a: Vec<f32> = (0..i).map(|j| g[j] / (1.0 + (-g[j]).exp()) * u[j]).collect();
+                    let d = matvec(&a, &fp8(&format!("{b}.down_proj.weight")), h);
+                    for j in 0..h {
+                        x[j] += plan.topk_weights[slot] * d[j];
+                    }
+                }
+            }
+            let mut hid = vec![0.0; h];
+            rmsnorm(&x, &fnorm, c.rms_eps, &mut hid);
+            out.push(matvec(&hid, &lm, c.vocab));
+        }
+        out
+    }
+
+    fn engine() -> (Qwen3MoeOmegaEngine, MemorySource, Qwen3MoeConfig) {
+        let c = tiny_config();
+        let mut src = MemorySource::for_config(&c);
+        let up = RecordingUploader::default();
+        let (w, _) = load_qwen3_moe_omega_from(&c, &mut src, &up, &mut |_| {}).unwrap();
+        let kv = HostKv::new(&c, 32);
+        (Qwen3MoeOmegaEngine::new(w, Box::new(kv)), src, c)
+    }
+
+    #[test]
+    fn engine_forward_matches_a_naive_reference_at_every_position() {
+        let (mut eng, src, c) = engine();
+        let tokens = [5u32, 17, 42, 3, 9, 60];
+        let want = naive_forward(&src, &c, &tokens);
+        for (pos, &t) in tokens.iter().enumerate() {
+            let hid = eng.step(t).unwrap();
+            let got = eng.logits(&hid).unwrap();
+            let s = parity_stats(&got, &want[pos]);
+            assert!(s.cosine > 0.9999 && s.non_finite == 0, "pos {pos}: {s:?}");
+            assert_eq!(crate::tensor::sample_argmax(&got).0, crate::tensor::sample_argmax(&want[pos]).0, "pos {pos}");
+        }
+        assert_eq!(eng.position(), tokens.len());
+        assert_eq!(eng.last_timing.launches as usize, c.layers * (3 + c.top_k + c.top_k) + 1);
+    }
+
+    #[test]
+    fn routing_mutant_breaks_the_layer_and_the_trace_records_it() {
+        let (mut eng, _, _) = engine();
+        eng.trace_layers = vec![0];
+        eng.step(5).unwrap();
+        let good = eng.traces[0].clone();
+        eng.reset();
+        eng.routing_mutant = true;
+        eng.step(5).unwrap();
+        let bad = eng.traces[0].clone();
+        assert_eq!(good.layer, 0);
+        assert_eq!(good.post, bad.post, "attention is untouched by the routing mutant");
+        assert_ne!(good.experts, bad.experts);
+        let s = parity_stats(&bad.moe_out, &good.moe_out);
+        assert!(s.cosine < 0.99, "mutant must be caught: {s:?}");
+    }
+
+    #[test]
+    fn generate_stops_on_stop_ids_caps_length_and_cancels() {
+        let (mut eng, src, c) = engine();
+        let prompt = [5u32, 17, 42];
+        let want = naive_forward(&src, &c, &prompt);
+        let first = crate::tensor::sample_argmax(&want[2]).0;
+        // Length cap.
+        let mut got = Vec::new();
+        let o = eng.generate(&prompt, &GenerateParams::greedy(3, vec![]), &mut |t| {
+            got.push(t);
+            true
+        })
+        .unwrap();
+        assert_eq!(o.finish, FinishReason::Length);
+        assert_eq!(o.emitted_tokens, 3);
+        assert_eq!(got[0], first);
+        assert_eq!(o.prompt_tokens, 3);
+        assert_eq!(eng.position(), 3 + 2, "the last emitted token is not stepped");
+        // Stop id: the first greedy token is a stop id, nothing emitted.
+        let o = eng.generate(&prompt, &GenerateParams::greedy(3, vec![first]), &mut |_| true).unwrap();
+        assert_eq!((o.finish, o.emitted_tokens), (FinishReason::Stop, 0));
+        // Cancel after the first token.
+        let o = eng.generate(&prompt, &GenerateParams::greedy(3, vec![]), &mut |_| false).unwrap();
+        assert_eq!((o.finish, o.emitted_tokens), (FinishReason::Cancelled, 1));
+        // The locked wrapper behaves the same and is Send + Sync.
+        fn assert_sync<T: Send + Sync>(_: &T) {}
+        let report = LoadReport {
+            resident_bytes: 0,
+            host_bytes: 0,
+            peak_rss_bytes: None,
+            peak_rss_before_bytes: None,
+            seconds: 0.0,
+            window_api: false,
+        };
+        let shared = OmegaEngine::from_engine(eng, report);
+        assert_sync(&shared);
+        let o = shared.generate(&prompt, &GenerateParams::greedy(2, vec![]), &mut |_| true).unwrap();
+        assert_eq!(o.emitted_tokens, 2);
+        assert_eq!(shared.kind(), "omega");
+    }
+
+    #[test]
+    fn seeded_sampling_replays_and_greedy_is_argmax() {
+        let logits: Vec<f32> = (0..50).map(|i| ((i * 7919) % 50) as f32 / 10.0).collect();
+        let p = GenerateParams { max_new_tokens: 1, temperature: 0.7, top_p: 0.8, top_k: 20, seed: 42, stop_token_ids: vec![] };
+        assert_eq!(sample_next(&logits, &p, 3), sample_next(&logits, &p, 3));
+        let g = GenerateParams::greedy(1, vec![]);
+        assert_eq!(sample_next(&logits, &g, 0), crate::tensor::sample_argmax(&logits).0);
+        let mut seen = std::collections::HashSet::new();
+        for step in 0..64 {
+            seen.insert(sample_next(&logits, &p, step));
+        }
+        assert!(seen.len() > 1 && seen.len() <= 20, "{}", seen.len());
     }
 }
