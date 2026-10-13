@@ -173,6 +173,7 @@ version = "0.1.0"
 dependencies = [
  "aien-abi-core",
  "aien-kv-cache",
+ "aien-omega-fp8",
  "aien-omega-gpu",
  "aien-omega-moe",
  "aien-platform",
@@ -253,6 +254,13 @@ dependencies = [
  "aien-abi-conformance",
  "sha2 0.10.9",
  "tempfile",
+]
+
+[[package]]
+name = "aien-omega-fp8"
+version = "0.1.0"
+dependencies = [
+ "aien-omega-gpu",
 ]
 
 [[package]]
