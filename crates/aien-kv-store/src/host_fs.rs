@@ -519,6 +519,11 @@ struct Inner {
     recovery: RecoveryProgress,
     purge_pending: bool,
     purge_evict_quota: bool,
+    /// Reservations are rounded up to this many bytes (the objects
+    /// directory's `st_blksize`, at least 512), so a reservation is not
+    /// smaller than what publication later charges from `st_blocks`
+    /// (Codex re-review 2, partial 8).
+    alloc_unit: u64,
     graveyard: Vec<HolderGuard>,
 }
 
@@ -1125,7 +1130,8 @@ impl Inner {
             return Ok(JobId(id));
         }
 
-        let bytes = header.payload_len + HEADER_REGION_LEN as u64;
+        let bytes =
+            (header.payload_len + HEADER_REGION_LEN as u64).next_multiple_of(self.alloc_unit);
         self.credit_check(true, bytes)?;
         // While a purge is pending only free headroom admits a store: evicting
         // a good object for bytes the purge is about to free would lose data
@@ -2772,6 +2778,11 @@ impl HostFsStore {
             stats.io_ops += 1;
         }
 
+        let alloc_unit = std::fs::metadata(&objects_dir)
+            .map(|m| m.blksize())
+            .unwrap_or(4096)
+            .max(512);
+
         let mut created_shard = false;
         for b in 0..=255u8 {
             let shard = objects_dir.join(format!("{b:02x}"));
@@ -2873,6 +2884,7 @@ impl HostFsStore {
             recovery,
             purge_pending: false,
             purge_evict_quota: false,
+            alloc_unit,
             graveyard: Vec::new(),
         };
 
@@ -3343,6 +3355,53 @@ mod tests {
         ));
         std::fs::create_dir_all(&p).unwrap();
         p
+    }
+
+    #[test]
+    fn host_fs_reservation_covers_the_physical_bytes_publication_charges() {
+        // Codex re-review 2, partial 8: three KV heads give 6144-byte blocks,
+        // so payload plus header (10240) is not a filesystem-block multiple.
+        // The reservation taken at submit must not be smaller than what the
+        // published file is charged (st_blocks).
+        const BS3: usize = 6144;
+        let root = temp_root("alloc-round");
+        let mut f = test_fields();
+        f.num_kv_heads = 3;
+        f.layout = LayoutStrides {
+            head_stride: 128,
+            token_stride: 384,
+            kv_plane_stride: 1536,
+            layer_stride: 3072,
+            block_stride: BS3 as u64,
+            element_bytes: 2,
+        };
+        let ns = f.namespace_id().unwrap();
+        let mut cfg = HostFsConfig::from_fields(root.clone(), &f).unwrap();
+        cfg.worker = WorkerMode::Manual;
+        let s = HostFsStore::open(cfg).unwrap();
+        while !s.recover_step(50).done {}
+        let toks: Vec<u32> = (0..4).collect();
+        let key = chunk_chain(&ns, 8, &toks).unwrap()[0];
+        let h = f.chunk_header(&ns, key, None, 0, 4, 1).unwrap();
+        let mut buf = vec![0x33u8; BS3].into_boxed_slice();
+        let src = unsafe {
+            PinnedSource::new(buf.as_mut_ptr(), BS3, vec![0], 4, HolderGuard::detached())
+        };
+        s.submit_store(h, src, Incarnation::seq(1)).unwrap();
+        let reserved = s.capacity().reserved_bytes;
+        s.run_until_idle();
+        let comps = s.poll(16);
+        assert!(comps
+            .iter()
+            .any(|c| c.terminal == Some(Terminal::Done(JobStage::Durable))));
+        let used = s.capacity().used_bytes;
+        assert!(
+            reserved >= used,
+            "reserved {reserved} < charged {used} at publication"
+        );
+        s.audit().unwrap();
+        drop(buf);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
