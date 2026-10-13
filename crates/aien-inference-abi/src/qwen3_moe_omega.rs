@@ -1953,3 +1953,108 @@ mod forward_tests {
         assert!(seen.len() > 1 && seen.len() <= 20, "{}", seen.len());
     }
 }
+
+// ===========================================================================
+// Parity harness support: host replays of a traced layer.
+// ===========================================================================
+
+use crate::qwen3_coder::{bf16_words, CoderShardCache, Qwen3CoderAttention};
+use crate::qwen3_moe::{parity_stats, reference_moe_forward, reference_router_logits, ParityStats, Qwen3MoeLayer};
+
+/// One layer's attention weights decoded exactly (FP8 x bf16 scale) to f32 row-major, for the
+/// host replay. About 75 MB per layer.
+pub fn load_attention_layer_f32(dir: &Path, config: &Qwen3MoeConfig, layer: usize) -> Result<Qwen3CoderAttention, String> {
+    let mut cache = CoderShardCache::open(dir).map_err(|e| e.to_string())?;
+    let (h, qd, kvd, hd) = (config.hidden, config.q_dim(), config.kv_dim(), config.head_dim);
+    let p = format!("model.layers.{layer}");
+    let lut = fp8_table();
+    let mut fp8_f32 = |name: &str, rows: usize, cols: usize| -> Result<Vec<f32>, String> {
+        let w = cache.read_raw(name, "F8_E4M3", &[rows, cols], 1).map_err(|e| e.to_string())?;
+        let s = cache
+            .read_raw(&format!("{name}_scale_inv"), "BF16", &[rows / FP8_BLOCK, cols / FP8_BLOCK], 2)
+            .map_err(|e| e.to_string())?;
+        let s = bf16_words(&s);
+        let kb = cols / FP8_BLOCK;
+        Ok((0..rows * cols)
+            .map(|idx| lut[w[idx] as usize] * bf16_to_f32(s[(idx / cols / FP8_BLOCK) * kb + (idx % cols) / FP8_BLOCK]))
+            .collect())
+    };
+    let q_proj = fp8_f32(&format!("{p}.self_attn.q_proj.weight"), qd, h)?;
+    let k_proj = fp8_f32(&format!("{p}.self_attn.k_proj.weight"), kvd, h)?;
+    let v_proj = fp8_f32(&format!("{p}.self_attn.v_proj.weight"), kvd, h)?;
+    let o_proj = fp8_f32(&format!("{p}.self_attn.o_proj.weight"), h, qd)?;
+    let mut bf16_f32 = |name: &str, n: usize| -> Result<Vec<f32>, String> {
+        let b = cache.read_raw(name, "BF16", &[n], 2).map_err(|e| e.to_string())?;
+        Ok(bf16_words(&b).iter().map(|&x| bf16_to_f32(x)).collect())
+    };
+    Ok(Qwen3CoderAttention {
+        q_proj,
+        k_proj,
+        v_proj,
+        o_proj,
+        q_norm: bf16_f32(&format!("{p}.self_attn.q_norm.weight"), hd)?,
+        k_norm: bf16_f32(&format!("{p}.self_attn.k_norm.weight"), hd)?,
+        input_norm: bf16_f32(&format!("{p}.input_layernorm.weight"), h)?,
+        post_norm: bf16_f32(&format!("{p}.post_attention_layernorm.weight"), h)?,
+    })
+}
+
+fn matvec_rows(x: &[f32], w: &[f32], out_dim: usize) -> Vec<f32> {
+    let k = x.len();
+    (0..out_dim)
+        .into_par_iter()
+        .map(|o| w[o * k..(o + 1) * k].iter().zip(x).map(|(a, b)| a * b).sum())
+        .collect()
+}
+
+/// Host replay of one layer's attention over consecutive traces (positions 0..n of one
+/// sequence) with exact f32 weights and an f32 KV: returns the `attn_proj` the host computes
+/// for each trace, to compare with the chip's `trace.attn_proj`.
+pub fn replay_attention(config: &Qwen3MoeConfig, attn: &Qwen3CoderAttention, traces: &[LayerTrace]) -> Vec<Vec<f32>> {
+    let (h, qd, kvd, hd, eps) = (config.hidden, config.q_dim(), config.kv_dim(), config.head_dim, config.rms_eps);
+    let mut keys: Vec<Vec<f32>> = Vec::new();
+    let mut vals: Vec<Vec<f32>> = Vec::new();
+    let mut out = Vec::new();
+    for t in traces {
+        let mut xn = vec![0.0; h];
+        rmsnorm(&t.x_in, &attn.input_norm, eps, &mut xn);
+        let q = matvec_rows(&xn, &attn.q_proj, qd);
+        let k = matvec_rows(&xn, &attn.k_proj, kvd);
+        let v = matvec_rows(&xn, &attn.v_proj, kvd);
+        let mut qn = vec![0.0; qd];
+        let mut kn = vec![0.0; kvd];
+        rmsnorm_per_head(&q, &attn.q_norm, eps, config.q_heads, hd, &mut qn);
+        rmsnorm_per_head(&k, &attn.k_norm, eps, config.kv_heads, hd, &mut kn);
+        apply_rope(&mut qn, &mut kn, t.pos, config.q_heads, config.kv_heads, hd, config.rope_theta);
+        keys.push(kn);
+        vals.push(v);
+        let mut att = vec![0.0; qd];
+        scaled_dot_product_attention_single(&qn, &keys, &vals, config.q_heads, config.kv_heads, hd, &mut att);
+        out.push(matvec_rows(&att, &attn.o_proj, h));
+    }
+    out
+}
+
+/// Host oracle of one traced MoE: routes `trace.post` with the capsule's router, runs the exact
+/// FP8 oracle, and reports the parity of the chip's `moe_out` plus whether the chip's expert
+/// choice equals the oracle's.
+pub struct MoeParity {
+    pub stats: ParityStats,
+    pub oracle_experts: Vec<u32>,
+    pub routing_agrees: bool,
+}
+
+pub fn replay_moe(layer: &Qwen3MoeLayer, trace: &LayerTrace, top_k: usize) -> MoeParity {
+    let logits = reference_router_logits(layer, &trace.post, 1);
+    let plan = MoeBatchPlan::from_logits(&logits, 1, layer.router_bf16().len() / layer.hidden, top_k).expect("plan");
+    let want = reference_moe_forward(layer, &trace.post, &plan);
+    let mut chip_sorted = trace.experts.clone();
+    chip_sorted.sort_unstable();
+    let mut oracle_sorted = plan.topk_experts.clone();
+    oracle_sorted.sort_unstable();
+    MoeParity {
+        stats: parity_stats(&trace.moe_out, &want),
+        routing_agrees: chip_sorted == oracle_sorted,
+        oracle_experts: plan.topk_experts,
+    }
+}

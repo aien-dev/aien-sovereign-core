@@ -1,0 +1,394 @@
+//! OWN-30B check: Qwen3-30B-A3B on Omega against the CPU oracle (design section 4).
+//!
+//!   own30b_check golden <checkpoint> <golden.json> [--new N]
+//!       CPU only: loads the f32/FP8 reference model (`load_qwen3_coder`, about 35 GB host),
+//!       runs greedy continuations of the 4 fixed prompts, writes tokens and top-2 margins.
+//!   own30b_check chip <checkpoint> <golden.json> <receipt-dir> [--new N] [--layers 0,23,47]
+//!                     [--max-context 8192] [--prompts 1,2,3,4] [--force-memory]
+//!       Omega: loads the resident model, per-layer parity (attention replay + exact MoE oracle)
+//!       with the routing mutant and the chip-side window-skew mutant as negative controls,
+//!       whole-model greedy tokens against the golden file, decode tok/s and load time.
+//!       Writes <receipt-dir>/run.json and a plain text log; the shell seals SHA256SUMS.
+//!
+//! Memory: the chip load refuses to start with less than 70 GB available (another 30 GB model
+//! may be running) unless --force-memory.
+
+use std::path::{Path, PathBuf};
+use std::time::Instant;
+
+use aien_inference_abi::qwen3_coder::{compute_logits, forward_token, load_qwen3_coder, Qwen3CoderState};
+use aien_inference_abi::qwen3_moe::load_qwen3_fp8_moe_layer;
+use aien_inference_abi::qwen3_moe_omega::{
+    current_rss_bytes, load_attention_layer_f32, peak_rss_bytes, replay_attention, replay_moe, GenerateParams,
+    OmegaModelUploader, Qwen3MoeConfig, Qwen3MoeOmegaEngine,
+};
+use aien_inference_abi::tokenizer::ChatTokenizer as Tokenizer;
+
+const PROMPT_TEXTS: [(&str, &str); 4] = [
+    ("p1-one-token", "Hello"),
+    ("p2-short", "What is the capital of France? Answer in one sentence."),
+    (
+        "p3-medium",
+        "Summarise the following in three bullet points.\n\nThe DGX Spark is a compact workstation built around the GB10 Grace Blackwell superchip. It pairs an Arm CPU with a Blackwell GPU over a coherent link, sharing one pool of unified memory, so a model that is loaded once can be read by both sides without copies. The design trades peak bandwidth for capacity: a large mixture-of-experts model fits in memory whole, and each generated token only touches the experts the router selects. Engineers who write their own kernels for this chip have to think about launch overhead, about which memory is cached on the GPU side, and about how the host polls for completion. Small launches add up quickly when a layer needs many of them, so grouping work per layer matters more than raw arithmetic throughput. The practical outcome is that bandwidth per token, not compute, sets the speed of decoding, and that the fastest path keeps weights in the narrowest format the kernels can read directly.",
+    ),
+    (
+        "p4-long",
+        "You are a careful engineering assistant. Read the log below and say, in plain words, what went wrong and what to check first.\n\n[run 1] loaded 48 layers in 212 s, resident 60.4 GB\n[run 1] prompt 23 tokens, prefill 1.9 s\n[run 1] decode 16 tokens, 58 ms/token\n[run 1] parity layer 0 cosine 0.99998 p95_rel 0.0021\n[run 1] parity layer 23 cosine 0.99997 p95_rel 0.0024\n[run 1] parity layer 47 cosine 0.99995 p95_rel 0.0031\n[run 2] loaded 48 layers in 208 s, resident 60.4 GB\n[run 2] prompt 256 tokens, prefill 15.1 s\n[run 2] decode 16 tokens, 61 ms/token\n[run 2] token 9 differs from golden (margin 0.0007)\n[run 3] loaded 48 layers in 215 s\n[run 3] prompt 700 tokens, prefill 41 s\n[run 3] decode 16 tokens, 66 ms/token\n[run 3] parity layer 23 cosine 0.99996\n[run 4] mutant control: routing shifted, layer 23 cosine 0.41 (caught)\n[run 4] mutant control: window skew 1 tile, layer 23 cosine 0.12 (caught)\n[run 5] kv pool resident, attention 1.1 ms/layer at 700 context\n[run 5] experts 0.61 ms/layer, lm_head 3.2 ms\n[run 5] host ops 1.4 ms/token\n[run 6] free memory before load 101 GB, after 39 GB\n[run 6] peak host rss 64.1 GB\n[run 7] seal on: unprepared kernel refused by name\n[run 7] seal off: same tokens\n[run 8] spin window 2000 us, launch floor 6 us\n[run 8] 913 launches per token, 14 ms launch tax\n[run 9] prompt 1 token, prefill 0.07 s\n[run 9] decode 16 tokens, 57 ms/token\n[run 10] golden tokens identical on p1, p2, p3; p4 diverges at 12 (margin 0.0003)\n\nThe log repeats the same measurements across several days; treat each run as independent. Mention the numbers that matter and nothing else.",
+    ),
+];
+
+fn chatml(user: &str) -> String {
+    format!("<|im_start|>user\n{user}<|im_end|>\n<|im_start|>assistant\n")
+}
+
+fn prompts(tok: &Tokenizer) -> Vec<(String, Vec<u32>)> {
+    PROMPT_TEXTS
+        .iter()
+        .map(|(name, text)| {
+            let ids = if *name == "p1-one-token" {
+                tok.encode_with_special(text, false).expect("encode")
+            } else {
+                tok.encode_with_special(&chatml(text), false).expect("encode")
+            };
+            (name.to_string(), ids)
+        })
+        .collect()
+}
+
+fn top2_margin(logits: &[f32]) -> (u32, f32) {
+    let (mut b0, mut v0, mut v1) = (0usize, f32::NEG_INFINITY, f32::NEG_INFINITY);
+    for (i, &v) in logits.iter().enumerate() {
+        if v > v0 {
+            v1 = v0;
+            v0 = v;
+            b0 = i;
+        } else if v > v1 {
+            v1 = v;
+        }
+    }
+    (b0 as u32, v0 - v1)
+}
+
+fn mem_available_gb() -> f64 {
+    std::fs::read_to_string("/proc/meminfo")
+        .ok()
+        .and_then(|t| {
+            t.lines()
+                .find(|l| l.starts_with("MemAvailable:"))
+                .and_then(|l| l.split_whitespace().nth(1))
+                .and_then(|v| v.parse::<f64>().ok())
+        })
+        .map(|kb| kb / 1024.0 / 1024.0)
+        .unwrap_or(0.0)
+}
+
+struct Args {
+    mode: String,
+    checkpoint: PathBuf,
+    golden: PathBuf,
+    receipt: Option<PathBuf>,
+    new_tokens: usize,
+    layers: Vec<usize>,
+    max_context: usize,
+    prompt_ids: Vec<usize>,
+    force_memory: bool,
+}
+
+fn parse_args() -> Args {
+    let mut it = std::env::args().skip(1);
+    let mode = it.next().unwrap_or_default();
+    let mut pos: Vec<String> = Vec::new();
+    let mut a = Args {
+        mode: mode.clone(),
+        checkpoint: PathBuf::new(),
+        golden: PathBuf::new(),
+        receipt: None,
+        new_tokens: 16,
+        layers: vec![0, 23, 47],
+        max_context: 8192,
+        prompt_ids: vec![1, 2, 3, 4],
+        force_memory: false,
+    };
+    while let Some(arg) = it.next() {
+        match arg.as_str() {
+            "--new" => a.new_tokens = it.next().expect("--new N").parse().expect("number"),
+            "--max-context" => a.max_context = it.next().expect("--max-context N").parse().expect("number"),
+            "--layers" => a.layers = it.next().expect("--layers a,b").split(',').map(|s| s.parse().expect("layer")).collect(),
+            "--prompts" => a.prompt_ids = it.next().expect("--prompts a,b").split(',').map(|s| s.parse().expect("prompt")).collect(),
+            "--force-memory" => a.force_memory = true,
+            other => pos.push(other.to_string()),
+        }
+    }
+    if mode != "golden" && mode != "chip" || pos.len() < 2 {
+        eprintln!("usage: own30b_check golden <checkpoint> <golden.json> | chip <checkpoint> <golden.json> <receipt-dir>");
+        std::process::exit(2);
+    }
+    a.checkpoint = PathBuf::from(&pos[0]);
+    a.golden = PathBuf::from(&pos[1]);
+    a.receipt = pos.get(2).map(PathBuf::from);
+    a
+}
+
+fn golden(a: &Args) {
+    let tok = Tokenizer::from_file(a.checkpoint.join("tokenizer.json")).expect("tokenizer");
+    let config = Qwen3MoeConfig::from_checkpoint(&a.checkpoint).expect("config");
+    let t0 = Instant::now();
+    let weights = load_qwen3_coder(&a.checkpoint).expect("load CPU reference");
+    eprintln!("cpu reference loaded in {:.0}s, rss {:.1} GB", t0.elapsed().as_secs_f64(), current_rss_bytes().unwrap_or(0) as f64 / 1e9);
+    let mut out = Vec::new();
+    for (idx, (name, ids)) in prompts(&tok).into_iter().enumerate() {
+        if !a.prompt_ids.contains(&(idx + 1)) {
+            continue;
+        }
+        let t1 = Instant::now();
+        let mut state = Qwen3CoderState::new();
+        let mut hidden = Vec::new();
+        for (pos, &t) in ids.iter().enumerate() {
+            hidden = forward_token(&weights, t, pos, &mut state);
+        }
+        let mut tokens = Vec::new();
+        let mut margins = Vec::new();
+        for pos in (ids.len()..).take(a.new_tokens) {
+            let logits = compute_logits(&weights, &hidden);
+            let (next, margin) = top2_margin(&logits);
+            tokens.push(next);
+            margins.push(margin);
+            if config.eos_token_ids.contains(&next) {
+                break;
+            }
+            hidden = forward_token(&weights, next, pos, &mut state);
+        }
+        let secs = t1.elapsed().as_secs_f64();
+        let text = tok.decode(&tokens).unwrap_or_default();
+        eprintln!("{name}: {} prompt tokens, {} new in {secs:.0}s: {text:?}", ids.len(), tokens.len());
+        out.push(serde_json::json!({
+            "name": name, "prompt_tokens": ids, "golden": tokens, "margins": margins,
+            "text": text, "cpu_seconds": secs,
+        }));
+    }
+    let doc = serde_json::json!({
+        "checkpoint": a.checkpoint.display().to_string(), "max_new": a.new_tokens,
+        "oracle": "qwen3_coder::forward_token (f32 attention, exact FP8 MoE) + compute_logits, greedy",
+        "prompts": out,
+    });
+    std::fs::write(&a.golden, serde_json::to_string_pretty(&doc).unwrap()).expect("write golden");
+    eprintln!("wrote {}", a.golden.display());
+}
+
+fn chip(a: &Args) {
+    let receipt = a.receipt.clone().expect("receipt dir");
+    std::fs::create_dir_all(&receipt).expect("receipt dir");
+    let mut log: Vec<String> = Vec::new();
+    let mut say = |s: String| {
+        println!("{s}");
+        log.push(s);
+    };
+    let avail = mem_available_gb();
+    say(format!("mem available before load: {avail:.1} GB"));
+    if avail < 70.0 && !a.force_memory {
+        say("REFUSED: less than 70 GB available (another model may be loaded); --force-memory to override".into());
+        std::process::exit(3);
+    }
+    let golden: serde_json::Value = serde_json::from_slice(&std::fs::read(&a.golden).expect("golden file")).expect("golden json");
+    let tok = Tokenizer::from_file(a.checkpoint.join("tokenizer.json")).expect("tokenizer");
+    let config = Qwen3MoeConfig::from_checkpoint(&a.checkpoint).expect("config");
+    say(format!(
+        "engine native={} window_api={} spin_us={:?} cta_budget={:?}",
+        aien_omega_gpu::is_native(),
+        OmegaModelUploader::uses_window_api(),
+        aien_omega_gpu::spin_us(),
+        aien_omega_gpu::cta_budget()
+    ));
+
+    // ---- load ----
+    let t0 = Instant::now();
+    let mut n = 0usize;
+    let (mut engine, report) = Qwen3MoeOmegaEngine::load_omega(&a.checkpoint, a.max_context, &mut |s| {
+        n += 1;
+        if n.is_multiple_of(20) || s.starts_with("kv") || s == "lm_head" {
+            eprintln!("  [{:.0}s] {s}", t0.elapsed().as_secs_f64());
+        }
+    })
+    .expect("load on Omega");
+    let peak = report.peak_rss_bytes.unwrap_or(0) as f64 / 1e9;
+    say(format!(
+        "LOAD: {:.1}s resident {:.2} GB host {:.2} GB peak_rss {:.2} GB (before {:.2} GB) kv_resident={} mem_available_after {:.1} GB",
+        report.seconds,
+        report.resident_bytes as f64 / 1e9,
+        report.host_bytes as f64 / 1e9,
+        peak,
+        report.peak_rss_before_bytes.unwrap_or(0) as f64 / 1e9,
+        engine.kv_resident(),
+        mem_available_gb()
+    ));
+    // Transient budget: whatever the resident mapping counts, the extra over resident + host must
+    // stay within one layer's transients plus slack (design: peak near the 60 GB resident size).
+    let transient = peak - (report.resident_bytes + report.host_bytes) as f64 / 1e9;
+    say(format!("LOAD peak over resident+host: {transient:.2} GB (budget 6 GB) -> {}", if transient <= 6.0 { "PASS" } else { "FAIL" }));
+
+    let ps = prompts(&tok);
+    let mut results = Vec::new();
+
+    // ---- layer parity on the short prompt (prompt 2), chip traces replayed on the host ----
+    let (pname, pids) = &ps[1];
+    engine.trace_layers = a.layers.clone();
+    engine.reset();
+    for &t in pids {
+        engine.step(t).expect("step");
+    }
+    let traces = std::mem::take(&mut engine.traces);
+    let mut parity_json = Vec::new();
+    let mut parity_pass = true;
+    for &l in &a.layers {
+        let lt: Vec<_> = traces.iter().filter(|t| t.layer == l).cloned().collect();
+        let attn = load_attention_layer_f32(&a.checkpoint, &config, l).expect("attention weights");
+        let host = replay_attention(&config, &attn, &lt);
+        let capsule = load_qwen3_fp8_moe_layer(&a.checkpoint, l).expect("capsule");
+        let mut worst_attn = 1.0f64;
+        let mut worst_moe = 1.0f64;
+        let mut worst_p95 = 0.0f32;
+        let mut routing_ok = true;
+        for (t, h) in lt.iter().zip(&host) {
+            let s = aien_inference_abi::qwen3_moe::parity_stats(&t.attn_proj, h);
+            worst_attn = worst_attn.min(s.cosine);
+            let m = replay_moe(&capsule, t, config.top_k);
+            worst_moe = worst_moe.min(m.stats.cosine);
+            worst_p95 = worst_p95.max(m.stats.p95_rel);
+            routing_ok &= m.routing_agrees;
+        }
+        let pass = worst_attn >= 0.999 && worst_moe >= 0.999 && routing_ok;
+        parity_pass &= pass;
+        say(format!(
+            "PARITY layer {l} over {} positions ({pname}): attention cosine(min) {worst_attn:.6} moe cosine(min) {worst_moe:.6} moe p95_rel(max) {worst_p95:.4} routing_agrees={routing_ok} -> {}",
+            lt.len(),
+            if pass { "PASS" } else { "FAIL" }
+        ));
+        parity_json.push(serde_json::json!({"layer": l, "positions": lt.len(), "attn_cosine_min": worst_attn, "moe_cosine_min": worst_moe, "moe_p95_rel_max": worst_p95, "routing_agrees": routing_ok, "pass": pass}));
+    }
+    // Negative controls on the first traced layer: host routing mutant, then the chip's window skew.
+    let l0 = a.layers[0];
+    let capsule = load_qwen3_fp8_moe_layer(&a.checkpoint, l0).expect("capsule");
+    let mut controls = Vec::new();
+    for (name, set) in [("routing-mutant", 0), ("window-skew-1-tile", 1)] {
+        engine.reset();
+        engine.trace_layers = vec![l0];
+        engine.routing_mutant = set == 0;
+        if set == 1 {
+            aien_omega_moe::test_set_window_skew(1);
+        }
+        for &t in &pids[..pids.len().min(4)] {
+            engine.step(t).expect("step");
+        }
+        aien_omega_moe::test_set_window_skew(0);
+        engine.routing_mutant = false;
+        let worst = engine.traces.iter().map(|t| replay_moe(&capsule, t, config.top_k).stats.cosine).fold(1.0f64, f64::min);
+        let caught = worst < 0.99 || (set == 1 && !OmegaModelUploader::uses_window_api());
+        let note = if set == 1 && !OmegaModelUploader::uses_window_api() { " (window API not linked: control not applicable)" } else { "" };
+        say(format!("CONTROL {name}: layer {l0} moe cosine(min) {worst:.4} -> {}{note}", if caught { "CAUGHT" } else { "NOT CAUGHT (FAIL)" }));
+        controls.push(serde_json::json!({"control": name, "moe_cosine_min": worst, "caught": caught}));
+        parity_pass &= caught;
+        engine.traces.clear();
+    }
+    engine.trace_layers.clear();
+
+    // ---- whole-model greedy tokens vs golden, with timing ----
+    let mut tokens_pass = true;
+    for (idx, (name, ids)) in ps.iter().enumerate() {
+        if !a.prompt_ids.contains(&(idx + 1)) {
+            continue;
+        }
+        let g = golden["prompts"].as_array().and_then(|arr| arr.iter().find(|p| p["name"] == *name));
+        let Some(g) = g else {
+            say(format!("{name}: no golden entry, skipped"));
+            continue;
+        };
+        let want: Vec<u32> = g["golden"].as_array().unwrap().iter().map(|v| v.as_u64().unwrap() as u32).collect();
+        let margins: Vec<f32> = g["margins"].as_array().unwrap().iter().map(|v| v.as_f64().unwrap() as f32).collect();
+        let golden_prompt: Vec<u32> = g["prompt_tokens"].as_array().unwrap().iter().map(|v| v.as_u64().unwrap() as u32).collect();
+        if golden_prompt != *ids {
+            say(format!("{name}: prompt tokens differ from the golden file's ({} vs {}), FAIL", ids.len(), golden_prompt.len()));
+            tokens_pass = false;
+            continue;
+        }
+        let mut got = Vec::new();
+        let params = GenerateParams::greedy(a.new_tokens, config.eos_token_ids.clone());
+        let o = engine
+            .generate(ids, &params, &mut |t| {
+                got.push(t);
+                true
+            })
+            .expect("generate");
+        // The golden list includes a final stop id when the CPU stopped; ours consumed it.
+        let want_cmp: Vec<u32> = want.iter().copied().filter(|t| !config.eos_token_ids.contains(t)).collect();
+        let first_diff = got.iter().zip(&want_cmp).position(|(x, y)| x != y).or(if got.len() != want_cmp.len() { Some(got.len().min(want_cmp.len())) } else { None });
+        let verdict = match first_diff {
+            None => "IDENTICAL".to_string(),
+            Some(i) => {
+                let m = margins.get(i).copied().unwrap_or(f32::NAN);
+                format!("DIVERGES at {i} (cpu top-2 margin {m:.4}; {})", if m < 1e-3 { "below the 1e-3 floor: recorded, not waved" } else { "FAIL" })
+            }
+        };
+        if let Some(i) = first_diff {
+            if margins.get(i).copied().unwrap_or(0.0) >= 1e-3 {
+                tokens_pass = false;
+            }
+        }
+        let dt = &o.decode_timing;
+        let steps = o.emitted_tokens.max(1) as f64;
+        let tok_s = if o.decode_ms > 0 { o.emitted_tokens as f64 * 1000.0 / o.decode_ms as f64 } else { 0.0 };
+        say(format!(
+            "TOKENS {name}: {} prompt tokens, prefill {:.2}s ({:.1} ms/token), decode {} tokens in {} ms = {:.1} ms/token = {tok_s:.1} tok/s; per step: attention {:.1} ms experts {:.1} ms lm_head {:.1} ms host {:.1} ms chip-reported {:.1} ms launches {}; {verdict}",
+            ids.len(),
+            o.prefill_ms as f64 / 1000.0,
+            o.prefill_ms as f64 / ids.len() as f64,
+            o.emitted_tokens,
+            o.decode_ms,
+            o.decode_ms as f64 / steps,
+            dt.attention_ns as f64 / 1e6 / steps,
+            dt.experts_ns as f64 / 1e6 / steps,
+            dt.lm_head_ns as f64 / 1e6 / steps,
+            dt.host_ns as f64 / 1e6 / steps,
+            dt.chip_ns as f64 / 1e6 / steps,
+            dt.launches as f64 / steps,
+        ));
+        say(format!("  chip text: {:?}", tok.decode(&got).unwrap_or_default()));
+        say(format!("  cpu  text: {:?}", g["text"].as_str().unwrap_or("")));
+        results.push(serde_json::json!({
+            "name": name, "prompt_tokens": ids.len(), "chip": got, "golden": want, "first_diff": first_diff,
+            "prefill_ms": o.prefill_ms, "decode_ms": o.decode_ms, "emitted": o.emitted_tokens, "tok_s": tok_s,
+            "per_step_ms": {"attention": dt.attention_ns as f64 / 1e6 / steps, "experts": dt.experts_ns as f64 / 1e6 / steps,
+                "lm_head": dt.lm_head_ns as f64 / 1e6 / steps, "host": dt.host_ns as f64 / 1e6 / steps, "chip_reported": dt.chip_ns as f64 / 1e6 / steps,
+                "launches": dt.launches as f64 / steps},
+        }));
+    }
+    say(format!("SUMMARY parity={} tokens={} peak_rss={:.2} GB", if parity_pass { "PASS" } else { "FAIL" }, if tokens_pass { "PASS" } else { "FAIL" }, peak_rss_bytes().unwrap_or(0) as f64 / 1e9));
+    let doc = serde_json::json!({
+        "checkpoint": a.checkpoint.display().to_string(),
+        "golden": a.golden.display().to_string(),
+        "engine": {"native": aien_omega_gpu::is_native(), "window_api": OmegaModelUploader::uses_window_api(),
+            "spin_us": aien_omega_gpu::spin_us(), "cta_budget": aien_omega_gpu::cta_budget(), "kv_resident": engine.kv_resident(),
+            "max_context": engine.max_context_tokens()},
+        "load": {"seconds": report.seconds, "resident_bytes": report.resident_bytes, "host_bytes": report.host_bytes,
+            "peak_rss_bytes": report.peak_rss_bytes, "peak_rss_before_bytes": report.peak_rss_before_bytes, "transient_gb": transient},
+        "parity": parity_json, "controls": controls, "prompts": results,
+        "pass": parity_pass && tokens_pass,
+    });
+    std::fs::write(receipt.join("run.json"), serde_json::to_string_pretty(&doc).unwrap()).expect("write run.json");
+    std::fs::write(receipt.join("run.log"), log.join("\n") + "\n").expect("write run.log");
+    println!("receipt: {}", receipt.display());
+    if !(parity_pass && tokens_pass) {
+        std::process::exit(1);
+    }
+}
+
+fn main() {
+    let a = parse_args();
+    if !Path::new(&a.checkpoint).join("config.json").is_file() {
+        eprintln!("no config.json in {}", a.checkpoint.display());
+        std::process::exit(2);
+    }
+    match a.mode.as_str() {
+        "golden" => golden(&a),
+        _ => chip(&a),
+    }
+}
