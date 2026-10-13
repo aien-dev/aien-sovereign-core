@@ -149,8 +149,8 @@ impl KvStore for Probe {
         self.seq.lock().unwrap().push('F');
         self.fake.submit_flush(inc)
     }
-    fn attach_waiter(&self, job: JobId) -> Result<(), PlatformError> {
-        self.fake.attach_waiter(job)
+    fn attach_waiter(&self, job: JobId, inc: Incarnation) -> Result<(), PlatformError> {
+        self.fake.attach_waiter(job, inc)
     }
     fn poll(&self, max: usize) -> Vec<Completion> {
         self.enter("poll");
@@ -299,7 +299,7 @@ impl W {
         mem.fill_with(|i| p[i]);
         let (src, handle) = mem.source_with(2, 4, guard);
         (
-            self.worker.submit_store(h, src, Incarnation(n as u64)),
+            self.worker.submit_store(h, src, Incarnation::seq(n as u64)),
             handle,
             mem,
         )
@@ -323,7 +323,7 @@ impl W {
         let (dst, handle) = mem.dest_with(2, guard);
         (
             self.worker
-                .submit_load(k, &h, dst, Incarnation(1000 + n as u64)),
+                .submit_load(k, &h, dst, Incarnation::seq(1000 + n as u64)),
             mem,
             handle,
         )
@@ -548,7 +548,7 @@ fn worker_coalesces_same_key_loads_into_one_io() {
                     made.fetch_add(1, Ordering::SeqCst);
                     mem.dest(2).0
                 },
-                Incarnation(500 + i),
+                Incarnation::seq(500 + i),
             )
             .unwrap();
         tickets.push(t);
@@ -570,13 +570,13 @@ fn worker_coalesces_same_key_loads_into_one_io() {
     );
     assert_eq!(w.worker.stats().coalesced_total, 4);
     // The trait-level attach joins the same job.
-    assert_eq!(w.worker.attach_waiter(job), Ok(()));
+    assert_eq!(w.worker.attach_waiter(job, Incarnation::seq(77)), Ok(()));
 
     w.resume();
-    let v = w.collect(1);
+    let v = w.collect(6);
     let t = terminals(&v);
-    assert_eq!(t.len(), 1, "one terminal for all waiters: {v:?}");
-    assert_eq!(t[0].job, job);
+    assert_eq!(t.len(), 6, "one terminal per waiter (5 requests + 1 attach): {v:?}");
+    assert!(t.iter().all(|c| c.job == job));
     assert_eq!(t[0].terminal, Some(Terminal::Done(JobStage::Completed)));
     assert_eq!(w.fake.stats().reads, 1, "one read of the object");
     assert_eq!(w.probe.submitted(), vec!['L'], "one submit to the store");
@@ -594,7 +594,7 @@ fn worker_coalesces_same_key_loads_into_one_io() {
     let mem = Mem::new(2, 0xEE);
     let t = w
         .worker
-        .submit_load_coalesced(k, &h, || mem.dest(2).0, Incarnation(9))
+        .submit_load_coalesced(k, &h, || mem.dest(2).0, Incarnation::seq(9))
         .unwrap();
     assert!(matches!(t, LoadTicket::Started(_)));
 }
@@ -608,11 +608,11 @@ fn worker_cancel_removes_only_own_waiter() {
     let mem = Mem::new(2, 0xEE);
     let job = w
         .worker
-        .submit_load_coalesced(k, &h, || mem.dest(2).0, Incarnation(1))
+        .submit_load_coalesced(k, &h, || mem.dest(2).0, Incarnation::seq(1))
         .unwrap()
         .job();
     for _ in 0..2 {
-        w.worker.attach_waiter(job).unwrap();
+        w.worker.attach_waiter(job, Incarnation::seq(77)).unwrap();
     }
     assert_eq!(
         w.worker.cancel(job),
@@ -646,10 +646,10 @@ fn worker_cancel_removes_only_own_waiter() {
     let mem = Mem::new(2, 0xEE);
     let job = w
         .worker
-        .submit_load_coalesced(k, &h, || mem.dest(2).0, Incarnation(1))
+        .submit_load_coalesced(k, &h, || mem.dest(2).0, Incarnation::seq(1))
         .unwrap()
         .job();
-    w.worker.attach_waiter(job).unwrap();
+    w.worker.attach_waiter(job, Incarnation::seq(77)).unwrap();
     assert_eq!(w.worker.cancel(job), CancelOutcome::TooLate);
     assert_eq!(w.worker.cancel(job), CancelOutcome::Cancelled);
     let v = w.collect(1);
@@ -666,10 +666,10 @@ fn worker_cancel_removes_only_own_waiter() {
     w.fake.script(JobScript::fault(Fault::Hold));
     let job = w
         .worker
-        .submit_load_coalesced(k, &h, || mem.dest(2).0, Incarnation(1))
+        .submit_load_coalesced(k, &h, || mem.dest(2).0, Incarnation::seq(1))
         .unwrap()
         .job();
-    w.worker.attach_waiter(job).unwrap();
+    w.worker.attach_waiter(job, Incarnation::seq(77)).unwrap();
     w.resume();
     wait_for("dispatch", || w.dispatched(job));
     assert_eq!(
@@ -741,7 +741,7 @@ fn worker_stale_completion_is_dropped_by_incarnation() {
     let inner = w.worker.inner_job(job).unwrap();
     w.probe.forge(Completion {
         job: inner,
-        incarnation: Incarnation(9999),
+        incarnation: Incarnation::seq(9999),
         key: k,
         stage: JobStage::Durable,
         terminal: Some(Terminal::Done(JobStage::Durable)),
@@ -763,7 +763,7 @@ fn worker_stale_completion_is_dropped_by_incarnation() {
     assert_eq!(t[0].job, job);
     assert_eq!(
         t[0].incarnation,
-        Incarnation(3),
+        Incarnation::seq(3),
         "the caller's own token is echoed"
     );
     assert_eq!(t[0].terminal, Some(Terminal::Done(JobStage::Durable)));
@@ -1019,15 +1019,15 @@ fn coalesced_waiters_are_bounded() {
         let mem = Mem::new(2, 0xEE);
         let t = w
             .worker
-            .submit_load_coalesced(k, &h, || mem.dest(2).0, Incarnation(n as u64))
+            .submit_load_coalesced(k, &h, || mem.dest(2).0, Incarnation::seq(n as u64))
             .unwrap();
         jobs.push((k, h, t.job()));
     }
     let (a, b, c) = (jobs[0].2, jobs[1].2, jobs[2].2);
     // Per job: the opener counts as waiter 1, so 3 means two attaches.
-    assert_eq!(w.worker.attach_waiter(a), Ok(()));
-    assert_eq!(w.worker.attach_waiter(a), Ok(()));
-    assert_eq!(w.worker.attach_waiter(a), Err(PlatformError::QueueFull));
+    assert_eq!(w.worker.attach_waiter(a, Incarnation::seq(77)), Ok(()));
+    assert_eq!(w.worker.attach_waiter(a, Incarnation::seq(77)), Ok(()));
+    assert_eq!(w.worker.attach_waiter(a, Incarnation::seq(77)), Err(PlatformError::QueueFull));
     // Coalesced submit is refused the same way, and allocates nothing.
     {
         let made2 = made.clone();
@@ -1038,7 +1038,7 @@ fn coalesced_waiters_are_bounded() {
                 made2.fetch_add(1, Ordering::SeqCst);
                 Mem::new(2, 0).dest(2).0
             },
-            Incarnation(77),
+            Incarnation::seq(77),
         );
         assert_eq!(r, Err(PlatformError::QueueFull));
         assert_eq!(
@@ -1048,10 +1048,10 @@ fn coalesced_waiters_are_bounded() {
         );
     }
     // Total: 4 attached waiters over all jobs.
-    assert_eq!(w.worker.attach_waiter(b), Ok(()));
-    assert_eq!(w.worker.attach_waiter(b), Ok(()));
+    assert_eq!(w.worker.attach_waiter(b, Incarnation::seq(77)), Ok(()));
+    assert_eq!(w.worker.attach_waiter(b, Incarnation::seq(77)), Ok(()));
     assert_eq!(
-        w.worker.attach_waiter(c),
+        w.worker.attach_waiter(c, Incarnation::seq(77)),
         Err(PlatformError::QueueFull),
         "total bound"
     );
@@ -1059,11 +1059,11 @@ fn coalesced_waiters_are_bounded() {
     // Only loads accept waiters.
     let st = w.store(40).unwrap();
     assert!(matches!(
-        w.worker.attach_waiter(st),
+        w.worker.attach_waiter(st, Incarnation::seq(77)),
         Err(PlatformError::TaskRejected(_))
     ));
     assert!(matches!(
-        w.worker.attach_waiter(JobId(9999)),
+        w.worker.attach_waiter(JobId(9999), Incarnation::seq(77)),
         Err(PlatformError::TaskRejected(_))
     ));
     // When a job ends its waiters leave the total.
@@ -1074,10 +1074,10 @@ fn coalesced_waiters_are_bounded() {
     let mem = Mem::new(2, 0xEE);
     let job = w
         .worker
-        .submit_load_coalesced(k, &h, || mem.dest(2).0, Incarnation(1))
+        .submit_load_coalesced(k, &h, || mem.dest(2).0, Incarnation::seq(1))
         .unwrap()
         .job();
-    assert_eq!(w.worker.attach_waiter(job), Ok(()));
+    assert_eq!(w.worker.attach_waiter(job, Incarnation::seq(77)), Ok(()));
 }
 
 #[test]
@@ -1321,7 +1321,7 @@ fn worker_shutdown_cancels_queued_and_closes_intake() {
         .all(|c| c.terminal == Some(Terminal::Cancelled)));
     assert_eq!(w.load(1), Err(PlatformError::DeviceUnavailable));
     assert_eq!(
-        w.worker.submit_flush(Incarnation(1)),
+        w.worker.submit_flush(Incarnation::seq(1)),
         Err(PlatformError::DeviceUnavailable)
     );
     // A second call reports the same facts.
@@ -1437,7 +1437,7 @@ fn worker_submit_and_poll_never_block_on_a_stalled_store() {
                 let h = fields.chunk_header(&ns, key, None, 0, 8, 1).unwrap();
                 let mem = Mem::new(2, 1);
                 let (src, _) = mem.source(2, 4);
-                if let Ok(j) = worker.submit_store(h, src, Incarnation(i as u64)) {
+                if let Ok(j) = worker.submit_store(h, src, Incarnation::seq(i as u64)) {
                     accepted.push(j);
                 }
                 let _ = worker.poll(8);
@@ -1529,7 +1529,7 @@ fn worker_inner_io_runs_only_on_the_worker_thread() {
     let main = thread::current().id();
     let _ = w.load(1).unwrap();
     let _ = w.store(2).unwrap();
-    let _ = w.worker.submit_flush(Incarnation(3)).unwrap();
+    let _ = w.worker.submit_flush(Incarnation::seq(3)).unwrap();
     w.resume();
     w.collect(3);
     let _ = w.worker.shutdown(50);
@@ -1646,7 +1646,7 @@ fn worker_every_job_yields_exactly_one_terminal_completion() {
                     0 | 1 => {
                         let mem = Mem::new(2, 3);
                         let (src, _) = mem.source(2, 4);
-                        worker.submit_store(h, src, Incarnation(n as u64))
+                        worker.submit_store(h, src, Incarnation::seq(n as u64))
                     }
                     2 | 3 => {
                         let k = 1 + (n % 16);
@@ -1655,9 +1655,9 @@ fn worker_every_job_yields_exactly_one_terminal_completion() {
                         let h = fields.chunk_header(&ns, key, None, 0, 8, 1).unwrap();
                         let mem = Mem::new(2, 0xEE);
                         let dst = mem.dest(2).0;
-                        worker.submit_load(key, &h, dst, Incarnation(n as u64))
+                        worker.submit_load(key, &h, dst, Incarnation::seq(n as u64))
                     }
-                    _ => worker.submit_flush(Incarnation(n as u64)),
+                    _ => worker.submit_flush(Incarnation::seq(n as u64)),
                 };
                 match r {
                     Ok(j) => {
@@ -1805,7 +1805,7 @@ fn worker_store_dedup_makes_every_owner_cancel_safe() {
 #[test]
 fn worker_flush_is_a_zero_byte_park_job() {
     let w = rig();
-    let f = w.worker.submit_flush(Incarnation(5)).unwrap();
+    let f = w.worker.submit_flush(Incarnation::seq(5)).unwrap();
     let cap = w.worker.capacity();
     assert_eq!((cap.park_ops, cap.inflight_bytes), (1, 0));
     w.resume();
@@ -1845,7 +1845,7 @@ fn worker_rejects_header_and_source_that_disagree() {
     let mem = Mem::new(2, 0);
     let (src, _) = mem.source(2, 4);
     assert_eq!(
-        w.worker.submit_store(h, src, Incarnation(1)),
+        w.worker.submit_store(h, src, Incarnation::seq(1)),
         Err(PlatformError::InvalidLayout)
     );
     assert_eq!(w.worker.capacity().park_ops, 0);
@@ -1910,7 +1910,7 @@ fn worker_panic_in_the_store_fails_live_jobs_once() {
     let tokens: Vec<u32> = (0..8).collect();
     let key = aien_kv_store::chunk_chain(&ns, 8, &tokens).unwrap()[0];
     let h = fields.chunk_header(&ns, key, None, 0, 8, 1).unwrap();
-    let job = worker.submit_store(h, src, Incarnation(1)).unwrap();
+    let job = worker.submit_store(h, src, Incarnation::seq(1)).unwrap();
     wait_for("dispatch", || worker.inner_job(job).is_some());
     boom.store(true, Ordering::SeqCst);
     let mut v = Vec::new();
@@ -1928,7 +1928,7 @@ fn worker_panic_in_the_store_fails_live_jobs_once() {
     let (src, _) = mem.source(2, 4);
     let h = fields.chunk_header(&ns, key, None, 0, 8, 1).unwrap();
     assert_eq!(
-        worker.submit_store(h, src, Incarnation(2)),
+        worker.submit_store(h, src, Incarnation::seq(2)),
         Err(PlatformError::DeviceUnavailable)
     );
 }
@@ -1973,4 +1973,166 @@ fn worker_config_reads_the_documented_settings() {
             .is_ok(),
         "a zero drain deadline is allowed"
     );
+}
+
+// ------------------------------------------------- incarnation (ADR 5.3, P1)
+
+#[test]
+fn incarnation_keeps_the_full_64_bit_sequence_id_and_the_epoch() {
+    // The scheduler's sequence id is slot << 32 | generation: all 64 bits are used.
+    let id = (7u64 << 32) | 9;
+    let a = Incarnation::new(id, 1);
+    assert_eq!(a.seq_id, id);
+    assert_eq!(a.epoch, 1);
+    assert_ne!(a, Incarnation::new(id, 2), "same sequence, later epoch");
+    assert_ne!(a, Incarnation::new(id & 0xFFFF_FFFF, 1), "high bits matter");
+    assert_ne!(a, Incarnation::new(id ^ (1 << 63), 1));
+}
+
+#[test]
+fn stale_completion_with_reused_seq_id_but_new_epoch_is_rejected() {
+    // The job belongs to (seq 3, epoch 1). A completion for (seq 3, epoch 2) is a
+    // different residency of the same sequence id: it must never be committed.
+    let w = rig();
+    w.fake.script(JobScript::fault(Fault::Hold));
+    let (k, h) = w.chunk(3);
+    let (src_mem, inc) = (Mem::new(2, 0), Incarnation::new(3, 1));
+    let p = pattern(3, PAYLOAD as usize);
+    src_mem.fill_with(|i| p[i]);
+    let (src, _handle) = src_mem.source(2, 4);
+    let job = w.worker.submit_store(h, src, inc).unwrap();
+    w.resume();
+    wait_for("dispatch", || w.dispatched(job));
+    let inner = w.worker.inner_job(job).unwrap();
+    w.probe.forge(Completion {
+        job: inner,
+        incarnation: Incarnation::new(3, 2),
+        key: k,
+        stage: JobStage::Durable,
+        terminal: Some(Terminal::Done(JobStage::Durable)),
+        publish: PublishOutcome::Durable,
+        bytes: PAYLOAD,
+        elapsed_us: 1,
+    });
+    wait_for("forged completion dropped", || {
+        w.worker.stats().stale_completions_total >= 1
+    });
+    assert!(w.poll_all().is_empty(), "the other epoch's completion is dropped");
+    assert_eq!(w.worker.capacity().park_ops, 1, "the job is still live");
+    assert!(w.fake.release(inner));
+    let v = w.collect(1);
+    assert_eq!(terminals(&v)[0].incarnation, inc, "the caller's own token comes back");
+}
+
+#[test]
+fn coalesced_waiters_each_get_a_terminal_with_their_own_incarnation() {
+    // Three requests, two of them from the same sequence id in different epochs,
+    // plus one trait-level attach. One I/O, four terminals, each carrying its
+    // own waiter's token: the completion never exposes one token for all.
+    let w = rig();
+    let k = w.inject(7);
+    let (_, h) = w.chunk(7);
+    let mem = Mem::new(2, 0xEE);
+    let leader = Incarnation::new(10, 1);
+    let job = w
+        .worker
+        .submit_load_coalesced(k, &h, || mem.dest(2).0, leader)
+        .unwrap()
+        .job();
+    let followers = [Incarnation::new(10, 2), Incarnation::new(11, 1)];
+    for inc in followers {
+        let t = w
+            .worker
+            .submit_load_coalesced(k, &h, || panic!("a follower needs no buffer"), inc)
+            .unwrap();
+        assert_eq!(t, LoadTicket::Attached(job));
+    }
+    let extra = Incarnation::new(12, 5);
+    assert_eq!(w.worker.attach_waiter(job, extra), Ok(()));
+    w.resume();
+    let v = w.collect(4);
+    let t = terminals(&v);
+    assert_eq!(t.len(), 4, "one terminal per waiter: {v:?}");
+    assert!(t.iter().all(|c| c.job == job));
+    assert!(t
+        .iter()
+        .all(|c| c.terminal == Some(Terminal::Done(JobStage::Completed))));
+    let mut got: Vec<Incarnation> = t.iter().map(|c| c.incarnation).collect();
+    got.sort();
+    let mut want = vec![leader, followers[0], followers[1], extra];
+    want.sort();
+    assert_eq!(got, want, "each waiter gets exactly its own token back");
+    assert_eq!(w.fake.stats().reads, 1, "still one read");
+}
+
+#[test]
+fn cancel_waiter_removes_exactly_that_incarnation() {
+    let w = rig();
+    let k = w.inject(7);
+    let (_, h) = w.chunk(7);
+    let mem = Mem::new(2, 0xEE);
+    let (a, b, c) = (
+        Incarnation::new(1, 1),
+        Incarnation::new(1, 2),
+        Incarnation::new(2, 1),
+    );
+    let job = w
+        .worker
+        .submit_load_coalesced(k, &h, || mem.dest(2).0, a)
+        .unwrap()
+        .job();
+    w.worker.attach_waiter(job, b).unwrap();
+    w.worker.attach_waiter(job, c).unwrap();
+    assert_eq!(w.worker.cancel_waiter(job, b), CancelOutcome::TooLate, "others remain");
+    assert_eq!(
+        w.worker.cancel_waiter(job, b),
+        CancelOutcome::TooLate,
+        "a token that is not waiting changes nothing"
+    );
+    assert_eq!(w.worker.capacity().restore_ops, 1);
+    w.resume();
+    let v = w.collect(2);
+    let mut got: Vec<Incarnation> = terminals(&v).iter().map(|x| x.incarnation).collect();
+    got.sort();
+    let mut want = vec![a, c];
+    want.sort();
+    assert_eq!(got, want, "the cancelled waiter gets nothing, the others their data");
+}
+
+#[test]
+fn attach_is_refused_when_completion_slots_are_exhausted() {
+    // ADR 7.1 item 9: every waiter will need a terminal completion slot, held
+    // until the caller polls it. With room for 6 completions, one job holds 3
+    // and three waiters take the rest; the next waiter is refused, not queued.
+    let w = w_with(
+        |_| {},
+        |c| {
+            c.max_restore_ops = 1;
+            c.max_park_ops = 1;
+            c.max_waiters_per_job = 16;
+            c.max_waiters_total = 1024;
+        },
+    );
+    let k = w.inject(7);
+    let (_, h) = w.chunk(7);
+    let mem = Mem::new(2, 0xEE);
+    let job = w
+        .worker
+        .submit_load_coalesced(k, &h, || mem.dest(2).0, Incarnation::seq(1))
+        .unwrap()
+        .job();
+    for n in 0..3 {
+        assert_eq!(
+            w.worker.attach_waiter(job, Incarnation::seq(100 + n)),
+            Ok(()),
+            "waiter {n} fits"
+        );
+    }
+    assert_eq!(
+        w.worker.attach_waiter(job, Incarnation::seq(200)),
+        Err(PlatformError::QueueFull)
+    );
+    w.resume();
+    let v = w.collect(4);
+    assert_eq!(terminals(&v).len(), 4, "every admitted waiter gets its terminal");
 }

@@ -717,7 +717,7 @@ fn load_with_wrong_expectation_is_refused_without_io() {
     let mem = Mem::new(1, 0xEE);
     let (dst, _) = mem.dest(1);
     assert_eq!(
-        s.submit_load(a.key, &a.header, dst, Incarnation(1))
+        s.submit_load(a.key, &a.header, dst, Incarnation::seq(1))
             .unwrap_err(),
         PlatformError::InvalidLayout
     );
@@ -791,7 +791,7 @@ fn tail_rows_above_token_count_are_zero_in_object() {
         // The pool holds garbage everywhere, including rows another conversation left.
         let mem = Mem::new(blocks, 0xFF);
         let (src, _) = mem.source(blocks, tail_valid(tokens));
-        let job = s.submit_store(header, src, Incarnation(1)).unwrap();
+        let job = s.submit_store(header, src, Incarnation::seq(1)).unwrap();
         s.run_until_idle();
         assert_eq!(
             terminal_of(&drain(&s), job),
@@ -979,17 +979,20 @@ fn delete_marks_at_once_and_unlinks_on_the_worker() {
 }
 
 #[test]
-fn unlink_failure_returns_the_victim_to_service_and_fails_the_job() {
+fn unlink_failure_returns_the_victim_to_service_and_the_new_object_stays_published() {
     let fx = Fx::new();
     let s = fx.open_with(|c| c.quota_bytes = OBJ);
     let a = fx.put_full(&s, 1);
     fx.faults.arm(Boundary::Unlink, FaultAction::Fail(EIO));
     let b = fx.put_full(&s, 2);
     let t = terminal_of(&b.completions, b.job.unwrap());
-    assert!(is_hw(failed(&t)), "{t:?}");
-    assert_eq!(s.lookup(&[a.key, b.key]), vec![Some(FULL_PAYLOAD), None]);
+    assert_eq!(t, Terminal::Done(JobStage::Durable), "the write already succeeded");
+    assert_eq!(
+        s.lookup(&[a.key, b.key]),
+        vec![Some(FULL_PAYLOAD), Some(FULL_PAYLOAD)]
+    );
     assert!(fx.object_file(&a.key).is_file());
-    assert_eq!(s.capacity().used_bytes, OBJ);
+    assert_eq!(s.capacity().used_bytes, 2 * OBJ, "over quota until a later purge");
     assert_eq!(s.capacity().evicting_bytes, 0);
     assert_eq!(s.capacity().reserved_bytes, 0);
     assert!(tmp_files(fx.root()).is_empty());
@@ -1140,7 +1143,7 @@ fn every_job_yields_exactly_one_terminal_completion() {
         jobs.push(fx.submit(&s, n, 8).0.unwrap());
     }
     jobs.push(fx.submit_load(&s, a.key, &a.header).0.unwrap());
-    jobs.push(s.submit_flush(Incarnation(5)).unwrap());
+    jobs.push(s.submit_flush(Incarnation::seq(5)).unwrap());
     let cancelled = fx.submit(&s, 9, 8).0.unwrap();
     s.cancel(cancelled);
     jobs.push(cancelled);
@@ -1194,12 +1197,12 @@ fn attach_waiter_is_bounded_per_job() {
     let a = fx.put_full(&s, 1);
     let (l, _) = fx.submit_load(&s, a.key, &a.header);
     let l = l.unwrap();
-    s.attach_waiter(l).unwrap();
-    s.attach_waiter(l).unwrap(); // requester + 2 attached = 3
-    assert_eq!(s.attach_waiter(l).unwrap_err(), PlatformError::QueueFull);
+    s.attach_waiter(l, Incarnation::seq(77)).unwrap();
+    s.attach_waiter(l, Incarnation::seq(77)).unwrap(); // requester + 2 attached = 3
+    assert_eq!(s.attach_waiter(l, Incarnation::seq(77)).unwrap_err(), PlatformError::QueueFull);
     let st = fx.submit(&s, 2, 8).0.unwrap();
     assert!(matches!(
-        s.attach_waiter(st),
+        s.attach_waiter(st, Incarnation::seq(77)),
         Err(PlatformError::TaskRejected(_))
     ));
     s.run_until_idle();
@@ -1229,7 +1232,7 @@ fn flush_job_syncs_directories_and_reports_durable() {
     let s = fx.open();
     fx.put_full(&s, 1);
     let before = s.stats();
-    let j = s.submit_flush(Incarnation(7)).unwrap();
+    let j = s.submit_flush(Incarnation::seq(7)).unwrap();
     s.run_until_idle();
     let c = completion_of(&drain(&s), j);
     assert_eq!(c.terminal, Some(Terminal::Done(JobStage::Durable)));
@@ -1237,13 +1240,13 @@ fn flush_job_syncs_directories_and_reports_durable() {
     assert!(s.stats().dir_fsyncs > before.dir_fsyncs);
 
     fx.faults.arm(Boundary::FlushSync, FaultAction::Fail(EIO));
-    let j = s.submit_flush(Incarnation(8)).unwrap();
+    let j = s.submit_flush(Incarnation::seq(8)).unwrap();
     s.run_until_idle();
     let t = terminal_of(&drain(&s), j);
     assert!(is_hw(failed(&t)));
     assert_eq!(s.capacity().state, StoreState::Degraded);
     // A degraded store may still run a flush.
-    s.submit_flush(Incarnation(9)).unwrap();
+    s.submit_flush(Incarnation::seq(9)).unwrap();
     s.run_until_idle();
 }
 
@@ -1464,4 +1467,66 @@ fn index_victim_prefers_foreign_then_oldest_and_never_busy_or_marked() {
     assert!(i.busy_inc(&[1; 32]));
     assert!(i.busy_inc(&[2; 32]));
     assert_eq!(i.pick_victim(), None);
+}
+
+// ---- victims are removed only after the new object is durable (C4 open item) -----
+
+#[test]
+fn failed_write_keeps_the_victim_it_would_have_evicted() {
+    for boundary in [Boundary::P1Write, Boundary::P2FsyncFile] {
+        let fx = Fx::new();
+        let s = fx.open_with(|c| c.quota_bytes = OBJ);
+        let a = fx.put_full(&s, 1);
+        fx.faults.arm(boundary, FaultAction::Fail(EIO));
+        let b = fx.put_full(&s, 2);
+        let t = terminal_of(&b.completions, b.job.unwrap());
+        assert!(matches!(t, Terminal::Failed(_)), "{boundary:?}: {t:?}");
+        assert_eq!(
+            s.lookup(&[a.key, b.key]),
+            vec![Some(FULL_PAYLOAD), None],
+            "{boundary:?}: the old object is still served"
+        );
+        assert!(fx.object_file(&a.key).is_file(), "{boundary:?}");
+        let cap = s.capacity();
+        assert_eq!(cap.used_bytes, OBJ, "{boundary:?}");
+        assert_eq!(cap.evicting_bytes, 0, "{boundary:?}");
+        assert_eq!(cap.reserved_bytes, 0, "{boundary:?}");
+        assert_loads(&fx, &s, a.key, 1, 8);
+        s.audit().unwrap();
+    }
+}
+
+#[test]
+fn indeterminate_publish_keeps_the_victim_until_the_new_object_is_known_durable() {
+    let fx = Fx::new();
+    let s = fx.open_with(|c| c.quota_bytes = OBJ);
+    let a = fx.put_full(&s, 1);
+    fx.faults.arm(Boundary::P4FsyncDir, FaultAction::Fail(EIO));
+    let b = fx.put_full(&s, 2);
+    let c = completion_of(&b.completions, b.job.unwrap());
+    assert_eq!(c.publish, PublishOutcome::Indeterminate);
+    assert_eq!(
+        s.lookup(&[a.key, b.key]),
+        vec![Some(FULL_PAYLOAD), Some(FULL_PAYLOAD)],
+        "both survive: the new one may not outlive a power cut"
+    );
+    assert!(fx.object_file(&a.key).is_file());
+    assert_eq!(s.capacity().evicting_bytes, 0);
+    s.audit().unwrap();
+}
+
+#[test]
+fn cancel_before_the_write_ends_leaves_every_victim_in_service() {
+    let fx = Fx::new();
+    let s = fx.open_with(|c| c.quota_bytes = OBJ);
+    let a = fx.put_full(&s, 1);
+    let (job, _) = fx.submit(&s, 2, 8);
+    let job = job.unwrap();
+    assert_eq!(s.cancel(job), CancelOutcome::Cancelled);
+    s.run_until_idle();
+    assert_eq!(terminal_of(&drain(&s), job), Terminal::Cancelled);
+    assert_eq!(s.lookup(&[a.key]), vec![Some(FULL_PAYLOAD)]);
+    assert!(fx.object_file(&a.key).is_file());
+    assert_eq!(s.capacity().evicting_bytes, 0);
+    s.audit().unwrap();
 }

@@ -295,7 +295,7 @@ impl Fx {
         let data = pattern(n, blocks * BS);
         mem.fill_with(|i| data[i]);
         let (src, handle) = mem.source(blocks, tail_valid(tokens));
-        (s.submit_store(h, src, Incarnation(n as u64)), handle)
+        (s.submit_store(h, src, Incarnation::seq(n as u64)), handle)
     }
 
     /// Store object `n` and run the worker to idle.
@@ -329,7 +329,7 @@ impl Fx {
         let blocks = blocks_for(expect.token_count);
         let mem = Mem::new(blocks, 0xEE);
         let (dst, _) = mem.dest(blocks);
-        (s.submit_load(key, expect, dst, Incarnation(9000)), mem)
+        (s.submit_load(key, expect, dst, Incarnation::seq(9000)), mem)
     }
 
     /// Load and run to idle; returns the terminal completion and the memory.

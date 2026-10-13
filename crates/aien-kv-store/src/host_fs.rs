@@ -3115,7 +3115,7 @@ mod tests {
             let key = chunk_chain(&ns, 8, &toks).unwrap()[0];
             let h = f.chunk_header(&ns, key, None, 0, 8, 1).unwrap();
             let (src, _buf) = make_src(2, 4);
-            s.submit_store(h, src, Incarnation(n as u64)).unwrap();
+            s.submit_store(h, src, Incarnation::seq(n as u64)).unwrap();
             s.run_until_idle();
             let _ = s.poll(16);
         }
@@ -3145,7 +3145,7 @@ mod tests {
             let key = chunk_chain(&ns, 8, &toks).unwrap()[0];
             let h = f.chunk_header(&ns, key, None, 0, 4, 1).unwrap();
             let (src, _buf) = make_src(1, 4);
-            s.submit_store(h, src, Incarnation(n as u64)).unwrap();
+            s.submit_store(h, src, Incarnation::seq(n as u64)).unwrap();
             s.run_until_idle();
             let _ = s.poll(16);
             small_keys.push(key);
@@ -3158,7 +3158,7 @@ mod tests {
         let key3 = chunk_chain(&ns, 8, &toks).unwrap()[0];
         let h3 = f.chunk_header(&ns, key3, None, 0, 8, 1).unwrap();
         let (src3, _buf3) = make_src(2, 4);
-        let j3 = s.submit_store(h3, src3, Incarnation(3)).unwrap();
+        let j3 = s.submit_store(h3, src3, Incarnation::seq(3)).unwrap();
         s.run_until_idle();
         let comps = s.poll(16);
         assert!(comps
@@ -3173,7 +3173,7 @@ mod tests {
         // Submit another 2-block store, step once to queue the two eviction
         // unlinks, then cancel before any unlink executes.
         let (src4, _buf4) = make_src(2, 4);
-        let j4 = s.submit_store(h3, src4, Incarnation(4)).unwrap();
+        let j4 = s.submit_store(h3, src4, Incarnation::seq(4)).unwrap();
         assert!(s.pump());
         assert_eq!(s.lookup(&small_keys), vec![None, None]);
         assert_eq!(s.cancel(j4), CancelOutcome::Cancelled);
@@ -3201,10 +3201,10 @@ mod tests {
         let key = chunk_chain(&ns, 8, &toks).unwrap()[0];
         let h = f.chunk_header(&ns, key, None, 0, 8, 1).unwrap();
         let (src1, _b1) = make_src(2, 4);
-        let j1 = s.submit_store(h, src1, Incarnation(1)).unwrap();
+        let j1 = s.submit_store(h, src1, Incarnation::seq(1)).unwrap();
         assert_eq!(s.cancel(j1), CancelOutcome::Cancelled);
         let (src2, _b2) = make_src(2, 4);
-        let j2 = s.submit_store(h, src2, Incarnation(2)).unwrap();
+        let j2 = s.submit_store(h, src2, Incarnation::seq(2)).unwrap();
         assert_ne!(j1, j2);
         s.run_until_idle();
         assert_eq!(s.lookup(&[key]), vec![Some(2 * BS as u64)]);
@@ -3215,7 +3215,7 @@ mod tests {
         h_many.token_count = 121 * 4;
         let (src_many, _bm) = make_src(121, 4);
         assert_eq!(
-            s.submit_store(h_many, src_many, Incarnation(3)),
+            s.submit_store(h_many, src_many, Incarnation::seq(3)),
             Err(PlatformError::InvalidLayout)
         );
 

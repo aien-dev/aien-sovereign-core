@@ -176,7 +176,7 @@ impl Rig {
         mem.fill_with(|i| pattern(n as u8, PAYLOAD as usize)[i]);
         let (src, handle) = mem.source(2, 4);
         (
-            self.fake.submit_store(h, src, Incarnation(n as u64)),
+            self.fake.submit_store(h, src, Incarnation::seq(n as u64)),
             handle,
             mem,
         )
@@ -189,7 +189,7 @@ impl Rig {
         let (dst, handle) = mem.dest(2);
         (
             self.fake
-                .submit_load(k, &h, dst, Incarnation(1000 + n as u64)),
+                .submit_load(k, &h, dst, Incarnation::seq(1000 + n as u64)),
             mem,
             handle,
         )

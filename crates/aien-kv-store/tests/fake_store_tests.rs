@@ -84,7 +84,7 @@ fn fake_stages_published_is_not_durable_until_a_flush_on_flush_adapters() {
     assert_eq!(r.fake.is_durable(&k), Some(false), "published, not durable");
 
     // A flush submitted now covers it, and only it.
-    let f = r.fake.submit_flush(Incarnation(9)).unwrap();
+    let f = r.fake.submit_flush(Incarnation::seq(9)).unwrap();
     r.store(2).unwrap();
     let v = r.settle();
     let fl = v.iter().find(|c| c.job == f).unwrap();
@@ -303,7 +303,7 @@ fn fake_same_key_store_dedups() {
     let mem = Mem::new(2, 5);
     let guard = counting_guard_for(&r, &released, &free_at_release);
     let (src, _handle) = mem.source_with(2, 4, guard);
-    let second = r.fake.submit_store(h, src, Incarnation(2)).unwrap();
+    let second = r.fake.submit_store(h, src, Incarnation::seq(2)).unwrap();
     assert_eq!(second, first, "same key in flight returns the existing job");
     assert_eq!(
         released.load(Ordering::SeqCst),
@@ -510,7 +510,7 @@ fn fake_every_job_yields_exactly_one_terminal_completion() {
     let (cl, _m3, _h3) = r.load(40);
     jobs.push(("load cancelled", cl.unwrap()));
     let cancelled_load = jobs.last().unwrap().1;
-    jobs.push(("flush", r.fake.submit_flush(Incarnation(5)).unwrap()));
+    jobs.push(("flush", r.fake.submit_flush(Incarnation::seq(5)).unwrap()));
 
     assert_eq!(r.fake.cancel(cancelled_queued), CancelOutcome::Cancelled);
     assert_eq!(r.fake.cancel(cancelled_load), CancelOutcome::Cancelled);
@@ -618,7 +618,7 @@ fn fake_lookup_misses_and_submit_refused_while_recovering() {
     );
     assert_eq!(r.store(9), Err(PlatformError::QueueFull));
     assert_eq!(
-        r.fake.submit_flush(Incarnation(1)),
+        r.fake.submit_flush(Incarnation::seq(1)),
         Err(PlatformError::QueueFull)
     );
     let (l, _m, _h) = r.load(1);
@@ -863,14 +863,14 @@ fn fake_load_and_store_validate_at_submit() {
     let mem = Mem::new(2, 0xEE);
     let (d, _h) = mem.dest(2);
     assert_eq!(
-        r.fake.submit_load(k, &wrong, d, Incarnation(1)),
+        r.fake.submit_load(k, &wrong, d, Incarnation::seq(1)),
         Err(PlatformError::InvalidLayout)
     );
     // Wrong destination size.
     let (_, h) = r.chunk(1);
     let (d, _h) = mem.dest(1);
     assert_eq!(
-        r.fake.submit_load(k, &h, d, Incarnation(1)),
+        r.fake.submit_load(k, &h, d, Incarnation::seq(1)),
         Err(PlatformError::InvalidLayout)
     );
     assert_eq!(mem.bytes(), vec![0xEE; 2 * BLOCK], "nothing written");
@@ -879,7 +879,7 @@ fn fake_load_and_store_validate_at_submit() {
     let m1 = Mem::new(1, 0);
     let (s, _h) = m1.source(1, 4);
     assert_eq!(
-        r.fake.submit_store(h2, s, Incarnation(2)),
+        r.fake.submit_store(h2, s, Incarnation::seq(2)),
         Err(PlatformError::InvalidLayout)
     );
     // A foreign-namespace header.
@@ -888,7 +888,7 @@ fn fake_load_and_store_validate_at_submit() {
     let m2 = Mem::new(2, 0);
     let (s, _h) = m2.source(2, 4);
     assert_eq!(
-        r.fake.submit_store(foreign, s, Incarnation(3)),
+        r.fake.submit_store(foreign, s, Incarnation::seq(3)),
         Err(PlatformError::InvalidLayout)
     );
     assert_eq!(
@@ -912,7 +912,7 @@ fn fake_tail_valid_tokens_must_match_the_header() {
         let m = Mem::new(2, 3);
         let (s, _h) = m.source(2, tail);
         let r2 = rig();
-        let got = r2.fake.submit_store(h6, s, Incarnation(1));
+        let got = r2.fake.submit_store(h6, s, Incarnation::seq(1));
         assert_eq!(got.is_ok(), ok, "tail_valid_tokens {tail}");
         if !ok {
             assert_eq!(got, Err(PlatformError::InvalidLayout));
@@ -923,7 +923,7 @@ fn fake_tail_valid_tokens_must_match_the_header() {
     let m = Mem::new(2, 3);
     let (s, _h) = m.source(2, 3);
     assert_eq!(
-        r.fake.submit_store(h8, s, Incarnation(2)),
+        r.fake.submit_store(h8, s, Incarnation::seq(2)),
         Err(PlatformError::InvalidLayout)
     );
 }
@@ -943,7 +943,7 @@ fn fake_queue_full_and_flush_faults() {
     let r = rig_with(|c| c.durability = DurabilityMode::OnFlush);
     r.inject(2);
     r.script(JobScript::fault(Fault::FlushFail));
-    let f = r.fake.submit_flush(Incarnation(1)).unwrap();
+    let f = r.fake.submit_flush(Incarnation::seq(1)).unwrap();
     let v = r.settle();
     let t = only_terminal(&v);
     assert_eq!(t.job, f);
@@ -1071,7 +1071,7 @@ fn fake_shutdown_returns_at_the_deadline_and_keeps_buffers_of_unfinished_jobs() 
     mem2.fill_with(|i| pattern(2, PAYLOAD as usize)[i]);
     let (src2, handle2) = mem2.source_with(2, 4, guard);
     r.script(JobScript::latency(100, 100).with(Fault::StallFsync(1_000_000)));
-    let s2 = r.fake.submit_store(h2, src2, Incarnation(2)).unwrap();
+    let s2 = r.fake.submit_store(h2, src2, Incarnation::seq(2)).unwrap();
     // s3 is held (never started), l1 is a load that has not landed.
     r.script(JobScript::fault(Fault::Hold));
     let s3 = r.store(3).unwrap();
@@ -1142,25 +1142,25 @@ fn fake_attach_waiter_is_bounded_per_job_and_in_total() {
     r.script(JobScript::latency(1_000, 0));
     let (b, _mb, _hb) = r.load(2);
     let b = b.unwrap();
-    assert!(r.fake.attach_waiter(a).is_ok()); // job a: 2 waiters
-    assert!(r.fake.attach_waiter(a).is_ok()); // job a: 3 waiters, the per-job limit
-    assert_eq!(r.fake.attach_waiter(a), Err(PlatformError::QueueFull));
-    assert!(r.fake.attach_waiter(b).is_ok()); // 3 attached in total
-    assert!(r.fake.attach_waiter(b).is_ok()); // 4: the total bound
-    assert_eq!(r.fake.attach_waiter(b), Err(PlatformError::QueueFull));
+    assert!(r.fake.attach_waiter(a, Incarnation::seq(77)).is_ok()); // job a: 2 waiters
+    assert!(r.fake.attach_waiter(a, Incarnation::seq(77)).is_ok()); // job a: 3 waiters, the per-job limit
+    assert_eq!(r.fake.attach_waiter(a, Incarnation::seq(77)), Err(PlatformError::QueueFull));
+    assert!(r.fake.attach_waiter(b, Incarnation::seq(77)).is_ok()); // 3 attached in total
+    assert!(r.fake.attach_waiter(b, Incarnation::seq(77)).is_ok()); // 4: the total bound
+    assert_eq!(r.fake.attach_waiter(b, Incarnation::seq(77)), Err(PlatformError::QueueFull));
     // Waiters end with their job; the total is released.
     r.fake.advance(1_000);
     let (c, _mc, _hc) = r.load(1);
     let c = c.unwrap();
-    assert!(r.fake.attach_waiter(c).is_ok());
+    assert!(r.fake.attach_waiter(c, Incarnation::seq(77)).is_ok());
     // Only an in-flight load can take a waiter.
     assert!(matches!(
-        r.fake.attach_waiter(a),
+        r.fake.attach_waiter(a, Incarnation::seq(77)),
         Err(PlatformError::TaskRejected(_))
     ));
     let sj = r.store(5).unwrap();
     assert!(matches!(
-        r.fake.attach_waiter(sj),
+        r.fake.attach_waiter(sj, Incarnation::seq(77)),
         Err(PlatformError::TaskRejected(_))
     ));
 }
@@ -1202,7 +1202,7 @@ fn fake_releases_holders_outside_its_lock() {
         let (_, h) = r.chunk(n);
         let mem = Mem::new(2, 1);
         let (s, _handle) = mem.source_with(2, 4, guard);
-        r.fake.submit_store(h, s, Incarnation(n as u64))
+        r.fake.submit_store(h, s, Incarnation::seq(n as u64))
     };
     let ok = mk(1).unwrap();
     let cancelled = mk(2).unwrap();
@@ -1389,7 +1389,7 @@ fn fake_store_refuses_more_than_max_segments_blocks() {
     let mem = Mem::new(121, 1);
     let (src, _handle) = mem.source(121, 4);
     assert_eq!(
-        r.fake.submit_store(h, src, Incarnation(1)),
+        r.fake.submit_store(h, src, Incarnation::seq(1)),
         Err(PlatformError::InvalidLayout)
     );
     assert_eq!(r.fake.capacity().reserved_bytes, 0);

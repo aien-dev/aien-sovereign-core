@@ -345,7 +345,7 @@ fn recovery_keeps_admission_closed_until_walk_completes() {
         assert_eq!(s.pin(&keys[..1]).unwrap_err(), PlatformError::QueueFull);
         assert_eq!(s.delete(&keys), 0);
         assert_eq!(
-            s.submit_flush(Incarnation(1)).unwrap_err(),
+            s.submit_flush(Incarnation::seq(1)).unwrap_err(),
             PlatformError::QueueFull
         );
         // Progress is monotone and the bytes seen so far are already counted.
