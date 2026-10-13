@@ -191,6 +191,11 @@ fn chip(a: &Args) {
     }
     let golden: serde_json::Value = serde_json::from_slice(&std::fs::read(&a.golden).expect("golden file")).expect("golden json");
     let tok = Tokenizer::from_file(a.checkpoint.join("tokenizer.json")).expect("tokenizer");
+    // Spin window: honour AIEN_OMEGA_SPIN_US (one knob, one variable per run); unset keeps
+    // whatever the session default is, and the value actually in force is printed below.
+    if let Some(us) = aien_omega_gpu::parse_spin_us(std::env::var(aien_omega_gpu::SPIN_US_ENV).ok().as_deref()).expect("spin env") {
+        aien_omega_gpu::set_spin_us(us).expect("set spin window");
+    }
     let config = Qwen3MoeConfig::from_checkpoint(&a.checkpoint).expect("config");
     say(format!(
         "engine native={} window_api={} spin_us={:?} cta_budget={:?}",
