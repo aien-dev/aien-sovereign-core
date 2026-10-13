@@ -21,6 +21,7 @@ aien-platform = { path = "../aien-platform" }
 aien-omega-gpu = { path = "../aien-omega-gpu" }
 aien-omega-moe = { path = "../aien-omega-moe" }
 aien-omega-fp8 = { path = "../aien-omega-fp8" }
+aien-omega-dattn = { path = "../aien-omega-dattn" }
 parking_lot = "0.12"
 sha2 = "0.10"
 

@@ -20,7 +20,7 @@ use std::time::Instant;
 use aien_inference_abi::qwen3_coder::{compute_logits, forward_token, load_qwen3_coder, Qwen3CoderState};
 use aien_inference_abi::qwen3_moe::load_qwen3_fp8_moe_layer;
 use aien_inference_abi::qwen3_moe_omega::{
-    current_rss_bytes, load_attention_layer_f32, peak_rss_bytes, replay_attention, replay_moe, GenerateParams,
+    current_rss_bytes, load_attention_layer_f32, peak_rss_bytes, replay_attention, replay_moe, AttnPath, GenerateParams,
     OmegaModelUploader, Qwen3MoeConfig, Qwen3MoeOmegaEngine, WeightFormat,
 };
 use aien_inference_abi::tokenizer::ChatTokenizer as Tokenizer;
@@ -94,6 +94,11 @@ struct Args {
     prompt_ids: Vec<usize>,
     force_memory: bool,
     format: WeightFormat,
+    attn: AttnPath,
+    /// Chip-side decode attention mutant for the attention control (omega_gpu_decode_attn_api.h).
+    attn_mutant: i32,
+    /// Prompt tokens per prefill step for the TOKENS runs (None = the engine default).
+    prefill_chunk: Option<usize>,
 }
 
 fn parse_args() -> Args {
@@ -111,6 +116,9 @@ fn parse_args() -> Args {
         prompt_ids: vec![1, 2, 3, 4],
         force_memory: false,
         format: WeightFormat::Bf16,
+        attn: AttnPath::Auto,
+        attn_mutant: 1,
+        prefill_chunk: None,
     };
     while let Some(arg) = it.next() {
         match arg.as_str() {
@@ -127,6 +135,16 @@ fn parse_args() -> Args {
                     other => panic!("--weights {other}: bf16, fp8-experts or fp8"),
                 }
             }
+            "--attn" => {
+                a.attn = match it.next().expect("--attn auto|split|fused").as_str() {
+                    "auto" => AttnPath::Auto,
+                    "split" => AttnPath::Split,
+                    "fused" => AttnPath::Fused,
+                    other => panic!("--attn {other}: auto, split or fused"),
+                }
+            }
+            "--attn-mutant" => a.attn_mutant = it.next().expect("--attn-mutant N").parse().expect("number"),
+            "--prefill-chunk" => a.prefill_chunk = Some(it.next().expect("--prefill-chunk N").parse().expect("number")),
             other => pos.push(other.to_string()),
         }
     }
@@ -209,11 +227,13 @@ fn chip(a: &Args) {
     }
     let config = Qwen3MoeConfig::from_checkpoint(&a.checkpoint).expect("config");
     say(format!(
-        "engine native={} window_api={} fp8_api={} weights={:?} spin_us={:?} cta_budget={:?}",
+        "engine native={} window_api={} fp8_api={} dattn_api={} weights={:?} attn={:?} spin_us={:?} cta_budget={:?}",
         aien_omega_gpu::is_native(),
         OmegaModelUploader::uses_window_api(),
         OmegaModelUploader::uses_fp8_api(),
+        OmegaModelUploader::uses_dattn_api(),
         a.format,
+        a.attn,
         aien_omega_gpu::spin_us(),
         aien_omega_gpu::cta_budget()
     ));
@@ -221,13 +241,17 @@ fn chip(a: &Args) {
     // ---- load ----
     let t0 = Instant::now();
     let mut n = 0usize;
-    let (mut engine, report) = Qwen3MoeOmegaEngine::load_omega_with(&a.checkpoint, a.max_context, a.format, &mut |s| {
+    let (mut engine, report) = Qwen3MoeOmegaEngine::load_omega_with_attn(&a.checkpoint, a.max_context, a.format, a.attn, &mut |s| {
         n += 1;
         if n.is_multiple_of(20) || s.starts_with("kv") || s == "lm_head" {
             eprintln!("  [{:.0}s] {s}", t0.elapsed().as_secs_f64());
         }
     })
     .expect("load on Omega");
+    if let Some(chunk) = a.prefill_chunk {
+        engine.prefill_chunk = chunk;
+    }
+    say(format!("attention path {} prefill_chunk {} batched_prefill_possible {}", engine.attention_path(), engine.prefill_chunk, engine.batched_prefill_possible()));
     let peak = report.peak_rss_bytes.unwrap_or(0) as f64 / 1e9;
     say(format!(
         "LOAD: {:.1}s resident {:.2} GB host {:.2} GB peak_rss {:.2} GB (before {:.2} GB) kv_resident={} mem_available_after {:.1} GB",
@@ -289,6 +313,7 @@ fn chip(a: &Args) {
     let l0 = a.layers[0];
     let capsule = load_qwen3_fp8_moe_layer(&a.checkpoint, l0).expect("capsule");
     let mut controls = Vec::new();
+    let mut tokens_pass_prefill = true;
     let fp8 = a.format.fp8_experts();
     let chip_control = if fp8 { "fp8-scales-dropped" } else { "window-skew-1-tile" };
     for (name, set) in [("routing-mutant", 0), (chip_control, 1)] {
@@ -320,10 +345,87 @@ fn chip(a: &Args) {
         parity_pass &= caught;
         engine.traces.clear();
     }
+    // Third control on the fused path: the chip-side decode attention mutant (default 1 = no
+    // RoPE on q and k; omega_gpu_decode_attn_api.h) over the parity prompt; the host attention
+    // replay of the first traced layer must then disagree.
+    if engine.attention_path() == "fused" {
+        let name = format!("attention-mutant-{}", a.attn_mutant);
+        engine.reset();
+        engine.trace_layers = vec![l0];
+        aien_omega_dattn::test_set_mutant(a.attn_mutant);
+        let stepped: Result<Vec<_>, _> = pids.iter().map(|&t| engine.step(t)).collect();
+        aien_omega_dattn::test_set_mutant(0);
+        match stepped {
+            Err(e) => {
+                say(format!("CONTROL {name}: layer {l0} step refused: {e} -> CAUGHT (refused)"));
+                controls.push(serde_json::json!({"control": name, "refused": e, "caught": true}));
+            }
+            Ok(_) => {
+                let attn = load_attention_layer_f32(&a.checkpoint, &config, l0).expect("attention weights");
+                let host = replay_attention(&config, &attn, &engine.traces);
+                let worst = engine
+                    .traces
+                    .iter()
+                    .zip(&host)
+                    .map(|(t, h)| aien_inference_abi::qwen3_moe::parity_stats(&t.attn_proj, h).cosine)
+                    .fold(1.0f64, f64::min);
+                let caught = worst < 0.99;
+                say(format!(
+                    "CONTROL {name}: layer {l0} attention cosine(min) {worst:.4} over {} positions -> {}",
+                    engine.traces.len(),
+                    if caught { "CAUGHT" } else { "NOT CAUGHT (FAIL)" }
+                ));
+                controls.push(serde_json::json!({"control": name, "attn_cosine_min": worst, "caught": caught}));
+                parity_pass &= caught;
+            }
+        }
+        engine.traces.clear();
+    }
     engine.trace_layers.clear();
 
+    // ---- batched prefill against token-at-a-time on the 204-token prompt: same hidden state, same tokens ----
+    let mut prefill_json = serde_json::Value::Null;
+    if engine.batched_prefill_possible() && engine.prefill_chunk > 1 {
+        let (pname, pids) = &ps[2];
+        let chunk = engine.prefill_chunk;
+        let mut outs = Vec::new();
+        for c in [1usize, chunk] {
+            engine.reset();
+            engine.prefill_chunk = c;
+            let mut got = Vec::new();
+            let o = engine
+                .generate(pids, &GenerateParams::greedy(8, config.eos_token_ids.clone()), &mut |t| {
+                    got.push(t);
+                    true
+                })
+                .expect("generate");
+            let pt = &o.prefill_timing;
+            let n = pids.len() as f64;
+            say(format!(
+                "PREFILL chunk {c} ({pname}, {} tokens): {:.2}s = {:.1} ms/token; per token: attention {:.1} ms experts {:.1} ms host {:.1} ms chip-reported {:.1} ms launches {:.1}; first 8 tokens {:?}",
+                pids.len(),
+                o.prefill_ms as f64 / 1000.0,
+                o.prefill_ms as f64 / n,
+                pt.attention_ns as f64 / 1e6 / n,
+                pt.experts_ns as f64 / 1e6 / n,
+                pt.host_ns as f64 / 1e6 / n,
+                pt.chip_ns as f64 / 1e6 / n,
+                pt.launches as f64 / n,
+                got
+            ));
+            outs.push((c, o.prefill_ms, got, pt.launches as f64 / n));
+        }
+        engine.prefill_chunk = chunk;
+        let same = outs[0].2 == outs[1].2;
+        say(format!("PREFILL chunk {chunk} vs 1: tokens {} ; {:.1} -> {:.1} ms/token", if same { "IDENTICAL" } else { "DIFFER (FAIL)" }, outs[0].1 as f64 / pids.len() as f64, outs[1].1 as f64 / pids.len() as f64));
+        tokens_pass_prefill = same;
+        prefill_json = serde_json::json!({"prompt": pname, "prompt_tokens": pids.len(), "chunk": chunk,
+            "prefill_ms_chunk1": outs[0].1, "prefill_ms_chunk": outs[1].1, "launches_per_token_chunk1": outs[0].3, "launches_per_token_chunk": outs[1].3,
+            "tokens_identical": same});
+    }
+
     // ---- whole-model greedy tokens vs golden, with timing ----
-    let mut tokens_pass = true;
+    let mut tokens_pass = tokens_pass_prefill;
     for (idx, (name, ids)) in ps.iter().enumerate() {
         if !a.prompt_ids.contains(&(idx + 1)) {
             continue;
@@ -367,11 +469,17 @@ fn chip(a: &Args) {
         let dt = &o.decode_timing;
         let steps = o.emitted_tokens.max(1) as f64;
         let tok_s = if o.decode_ms > 0 { o.emitted_tokens as f64 * 1000.0 / o.decode_ms as f64 } else { 0.0 };
+        let pt = &o.prefill_timing;
         say(format!(
-            "TOKENS {name}: {} prompt tokens, prefill {:.2}s ({:.1} ms/token), decode {} tokens in {} ms = {:.1} ms/token = {tok_s:.1} tok/s; per step: attention {:.1} ms experts {:.1} ms lm_head {:.1} ms host {:.1} ms chip-reported {:.1} ms launches {}; {verdict}",
+            "TOKENS {name}: {} prompt tokens, prefill {:.2}s ({:.1} ms/token; chunk {}, per token attention {:.1} ms experts {:.1} ms host {:.1} ms launches {:.1}), decode {} tokens in {} ms = {:.1} ms/token = {tok_s:.1} tok/s; per step: attention {:.1} ms experts {:.1} ms lm_head {:.1} ms host {:.1} ms chip-reported {:.1} ms launches {}; {verdict}",
             ids.len(),
             o.prefill_ms as f64 / 1000.0,
             o.prefill_ms as f64 / ids.len() as f64,
+            engine.prefill_chunk,
+            pt.attention_ns as f64 / 1e6 / ids.len() as f64,
+            pt.experts_ns as f64 / 1e6 / ids.len() as f64,
+            pt.host_ns as f64 / 1e6 / ids.len() as f64,
+            pt.launches as f64 / ids.len() as f64,
             o.emitted_tokens,
             o.decode_ms,
             o.decode_ms as f64 / steps,
@@ -397,9 +505,11 @@ fn chip(a: &Args) {
         "checkpoint": a.checkpoint.display().to_string(),
         "golden": a.golden.display().to_string(),
         "engine": {"native": aien_omega_gpu::is_native(), "window_api": OmegaModelUploader::uses_window_api(),
-            "fp8_api": OmegaModelUploader::uses_fp8_api(), "weights": format!("{:?}", a.format),
+            "fp8_api": OmegaModelUploader::uses_fp8_api(), "dattn_api": OmegaModelUploader::uses_dattn_api(),
+            "weights": format!("{:?}", a.format), "attention": engine.attention_path(), "prefill_chunk": engine.prefill_chunk,
             "spin_us": aien_omega_gpu::spin_us(), "cta_budget": aien_omega_gpu::cta_budget(), "kv_resident": engine.kv_resident(),
             "max_context": engine.max_context_tokens()},
+        "prefill": prefill_json,
         "load": {"seconds": report.seconds, "resident_bytes": report.resident_bytes, "host_bytes": report.host_bytes,
             "peak_rss_bytes": report.peak_rss_bytes, "peak_rss_before_bytes": report.peak_rss_before_bytes, "transient_gb": transient},
         "parity": parity_json, "controls": controls, "prompts": results,

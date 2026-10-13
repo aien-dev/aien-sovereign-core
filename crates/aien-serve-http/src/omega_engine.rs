@@ -102,8 +102,9 @@ impl OmegaDoor {
             }
         })?;
         let r = &engine.load_report;
+        let (attn_path, prefill_chunk) = engine.with_engine(|e| (e.attention_path(), e.prefill_chunk))?;
         eprintln!(
-            "aien-serve-http: omega engine ready in {:.1} s: {:?} weights, {:.2} GB resident, {:.2} GB host, peak rss {:.2} GB, window_api={} fp8_api={} spin_us={:?}",
+            "aien-serve-http: omega engine ready in {:.1} s: {:?} weights, {:.2} GB resident, {:.2} GB host, peak rss {:.2} GB, window_api={} fp8_api={} dattn_api={} attention={attn_path} prefill_chunk={prefill_chunk} spin_us={:?}",
             r.seconds,
             r.format,
             r.resident_bytes as f64 / 1e9,
@@ -111,6 +112,7 @@ impl OmegaDoor {
             r.peak_rss_bytes.unwrap_or(0) as f64 / 1e9,
             r.window_api,
             omega::OmegaModelUploader::uses_fp8_api(),
+            omega::OmegaModelUploader::uses_dattn_api(),
             aien_omega_gpu::spin_us(),
         );
         Ok(Self { engine, lock_wait: LOCK_WAIT })

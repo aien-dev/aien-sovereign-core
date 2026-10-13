@@ -497,7 +497,22 @@ pub fn copy_windows_out(full: &[f32], m: usize, n: usize, col0s: &[u32], cols: u
 /// the whole-tensor fallback otherwise (`uses_window_api` says which).
 pub struct OmegaModelUploader;
 
+/// Which attention path the engine runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AttnPath {
+    /// Fused when omega's decode attention is linked and the model has its shape, else split.
+    Auto,
+    /// Host norms and rope, paged bf16 KV, omega's paged attention launch.
+    Split,
+    /// omega's one-launch decode attention (refused when not linked).
+    Fused,
+}
+
 impl OmegaModelUploader {
+    /// True when omega's one-launch decode attention (OWN-30B cut 8/9) is linked.
+    pub fn uses_dattn_api() -> bool {
+        aien_omega_dattn::is_native()
+    }
     pub fn uses_window_api() -> bool {
         aien_omega_moe::is_native()
     }
@@ -1352,6 +1367,17 @@ pub trait KvAttention: Send {
     fn attend(&mut self, layer: usize, q: &[f32], context_len: usize, out: &mut [f32]) -> Result<u64, String>;
     /// Whether the chip reads the pool in place (no per-call staging).
     fn resident(&self) -> bool;
+    /// The fused path (OWN-30B cut 9): from the raw fused q|k|v projection row of position
+    /// `pos`, do the q/k per-head norms, RoPE, the K/V append and the attention over
+    /// `0..=pos` on the chip in one launch, writing `out[q_heads x head_dim]`. `None` means
+    /// this cache has no fused kernel and the engine runs the split path (`append` + `attend`).
+    fn fused_attend(&mut self, _layer: usize, _pos: usize, _qkv: &[f32], _eps: f32, _out: &mut [f32]) -> Option<Result<u64, String>> {
+        None
+    }
+    /// "split" (host norm/rope, `append` + `attend`) or "fused" (one launch per layer).
+    fn path_name(&self) -> &'static str {
+        "split"
+    }
 }
 
 /// Host f32 cache with the reference attention (tests, and the oracle side of parity runs).
@@ -1420,6 +1446,10 @@ impl KvAttention for HostKv {
 
 /// Paged KV block size (tokens): the size the 8B daemon runs (`gb10_serving`), a power of two.
 pub const KV_BLOCK_SIZE: usize = 16;
+
+/// Most prompt tokens one batched prefill step takes: `PREFILL_CHUNK x top_k` expert rows must
+/// fit one grouped FP8 launch (`aien_omega_fp8::MAX_GROUPS` = 64, top_k = 8).
+pub const PREFILL_CHUNK: usize = 8;
 
 /// Omega's paged bf16 KV: one sequence, blocks `0..n` in order, the pool in the engine's resident
 /// allocation when the driver grants it (attention reads in place), a host-mapped pool otherwise.
@@ -1589,6 +1619,8 @@ pub struct GenerateOutcome {
     pub reused_prompt_tokens: usize,
     /// Sum of the per-step timings over the decode steps.
     pub decode_timing: StepTiming,
+    /// Sum of the per-step timings over the prefill steps (batched steps count once).
+    pub prefill_timing: StepTiming,
 }
 
 /// Where one step's time went. `*_ns` are host wall-clock sections; `chip_ns` is the sum of the
@@ -1666,6 +1698,9 @@ pub struct Qwen3MoeOmegaEngine {
     /// every expert window is a wrong expert. The layer oracle must then disagree loudly.
     pub routing_mutant: bool,
     pub last_timing: StepTiming,
+    /// Prompt tokens per prefill step (1 = token-at-a-time; up to [`PREFILL_CHUNK`] when the
+    /// FP8 grouped GEMV is in use for attention and experts, else `step_batch` falls back).
+    pub prefill_chunk: usize,
     pos: usize,
     /// Tokens whose KV is stored at positions `0..pos` (prefix reuse across generations).
     history: Vec<u32>,
@@ -1680,9 +1715,166 @@ impl Qwen3MoeOmegaEngine {
             traces: Vec::new(),
             routing_mutant: false,
             last_timing: StepTiming::default(),
+            prefill_chunk: PREFILL_CHUNK,
             pos: 0,
             history: Vec::new(),
         }
+    }
+
+    /// Whether every layer runs attention and experts on the FP8 grouped GEMV (the only
+    /// kernels that take one activation row per group, which batched prefill needs).
+    pub fn batched_prefill_possible(&self) -> bool {
+        self.weights
+            .layers
+            .iter()
+            .all(|l| matches!(l.attn, AttnWeights::Fp8 { .. }) && matches!(l.experts, ExpertWeights::Fp8 { .. }))
+    }
+
+    /// Runs `tokens` (consecutive positions) through every layer, layer-major: one grouped
+    /// q|k|v GEMV with a row per token, one attention launch per token, one grouped o GEMV,
+    /// then one gate|up and one down launch for all `tokens x top_k` expert rows. Returns the
+    /// final-normed hidden state of the LAST token (the earlier ones are prefill only). The
+    /// maths per token is the same as [`Self::step`] in the same order (the MoE sum is
+    /// accumulated per token before the residual add), so greedy tokens must not change.
+    /// Falls back to `step` per token when tracing, for one token, or without the FP8 kernels.
+    pub fn step_batch(&mut self, tokens: &[u32]) -> Result<Vec<f32>, String> {
+        let m = tokens.len();
+        if m == 0 {
+            return Err("step_batch: empty batch".into());
+        }
+        let top_k = self.weights.config.top_k;
+        if m == 1 || !self.trace_layers.is_empty() || !self.batched_prefill_possible() || m * top_k > aien_omega_fp8::MAX_GROUPS {
+            let mut hidden = Vec::new();
+            let mut timing = StepTiming::default();
+            for &t in tokens {
+                hidden = self.step(t)?;
+                timing.add(&self.last_timing);
+            }
+            self.last_timing = timing;
+            return Ok(hidden);
+        }
+        let t_step = Instant::now();
+        let mut timing = StepTiming::default();
+        let c = &self.weights.config;
+        let (h, qd, kvd, hd, eps) = (c.hidden, c.q_dim(), c.kv_dim(), c.head_dim, c.rms_eps);
+        let (e, i, qkv_n) = (c.experts, c.moe_intermediate, c.qkv_n());
+        let pos0 = self.pos;
+        if pos0 + m > self.kv.capacity() {
+            return Err(format!("context full: {pos0} + {m} of {}", self.kv.capacity()));
+        }
+        let g = m * top_k;
+        let mut x: Vec<f32> = tokens.iter().flat_map(|&t| self.weights.embed_row(t)).collect();
+        let mut x_norm = vec![0.0f32; m * h];
+        let mut qkv_all = vec![0.0f32; m * qkv_n];
+        let mut qn = vec![0.0f32; qd];
+        let mut kn = vec![0.0f32; kvd];
+        let mut attn_all = vec![0.0f32; m * qd];
+        let mut proj_all = vec![0.0f32; m * h];
+        let mut post = vec![0.0f32; m * h];
+        let mut logits = vec![0.0f32; e];
+        let mut ids = vec![0u32; g];
+        let mut wts = vec![0.0f32; g];
+        let mut post_rep = vec![0.0f32; g * h];
+        let mut gu_all = vec![0.0f32; g * 2 * i];
+        let mut act_all = vec![0.0f32; g * i];
+        let mut down_all = vec![0.0f32; g * h];
+        let mut moe_out = vec![0.0f32; h];
+        let dense_ids = vec![0u32; m];
+
+        for (layer_idx, layer) in self.weights.layers.iter().enumerate() {
+            let (AttnWeights::Fp8 { qkv, o }, ExpertWeights::Fp8 { gate_up, down }) = (&layer.attn, &layer.experts) else {
+                return Err(format!("layer {layer_idx}: batched prefill needs FP8 attention and experts"));
+            };
+            // --- attention: one grouped q|k|v launch (a row per token), one attention launch per token, one grouped o launch ---
+            let t0 = Instant::now();
+            for r in 0..m {
+                rmsnorm(&x[r * h..(r + 1) * h], &layer.input_norm, eps, &mut x_norm[r * h..(r + 1) * h]);
+            }
+            timing.host_ns += t0.elapsed().as_nanos() as u64;
+            let t1 = Instant::now();
+            timing.chip_ns += qkv.grouped_f32(&dense_ids, &x_norm, &mut qkv_all).map_err(|e| format!("layer {layer_idx} qkv x{m}: {e}"))?;
+            timing.launches += 1;
+            for r in 0..m {
+                let pos = pos0 + r;
+                let qkv_r = &qkv_all[r * qkv_n..(r + 1) * qkv_n];
+                let out_r = &mut attn_all[r * qd..(r + 1) * qd];
+                match self.kv.fused_attend(layer_idx, pos, qkv_r, eps, out_r) {
+                    Some(res) => timing.chip_ns += res?,
+                    None => {
+                        let t2 = Instant::now();
+                        rmsnorm_per_head(&qkv_r[..qd], &layer.q_norm, eps, c.q_heads, hd, &mut qn);
+                        rmsnorm_per_head(&qkv_r[qd..qd + kvd], &layer.k_norm, eps, c.kv_heads, hd, &mut kn);
+                        apply_rope(&mut qn, &mut kn, pos, c.q_heads, c.kv_heads, hd, c.rope_theta);
+                        self.kv.append(layer_idx, pos, &kn, &qkv_r[qd + kvd..])?;
+                        timing.host_ns += t2.elapsed().as_nanos() as u64;
+                        timing.chip_ns += self.kv.attend(layer_idx, &qn, pos + 1, out_r)?;
+                    }
+                }
+                timing.launches += 1;
+            }
+            timing.chip_ns += o.grouped_f32(&dense_ids, &attn_all, &mut proj_all).map_err(|e| format!("layer {layer_idx} o x{m}: {e}"))?;
+            timing.launches += 1;
+            timing.attention_ns += t1.elapsed().as_nanos() as u64;
+
+            // --- residual, post norm, routing per token (host); the expert row table for the chunk ---
+            let t3 = Instant::now();
+            for r in 0..m {
+                let xr = &mut x[r * h..(r + 1) * h];
+                for (xi, p) in xr.iter_mut().zip(&proj_all[r * h..(r + 1) * h]) {
+                    *xi += p;
+                }
+                let pr = &mut post[r * h..(r + 1) * h];
+                rmsnorm(xr, &layer.post_norm, eps, pr);
+                for (ex, l) in logits.iter_mut().enumerate() {
+                    *l = layer.router[ex * h..(ex + 1) * h].iter().zip(pr.iter()).map(|(a, b)| a * b).sum();
+                }
+                let plan = MoeBatchPlan::from_logits(&logits, 1, e, top_k).map_err(|e| format!("layer {layer_idx} routing: {e}"))?;
+                for (slot, (&ex, &w)) in plan.topk_experts.iter().zip(&plan.topk_weights).enumerate() {
+                    let gi = r * top_k + slot;
+                    ids[gi] = if self.routing_mutant { (ex + 1) % e as u32 } else { ex };
+                    wts[gi] = w;
+                    post_rep[gi * h..(gi + 1) * h].copy_from_slice(pr);
+                }
+            }
+            timing.host_ns += t3.elapsed().as_nanos() as u64;
+
+            // --- experts: one gate|up launch and one down launch for every (token, expert) row ---
+            let t4 = Instant::now();
+            timing.chip_ns += gate_up.grouped_f32(&ids, &post_rep, &mut gu_all).map_err(|e| format!("layer {layer_idx} gate_up fp8 x{g}: {e}"))?;
+            timing.launches += 1;
+            let th = Instant::now();
+            for gi in 0..g {
+                swiglu(&gu_all[gi * 2 * i..(gi + 1) * 2 * i], i, &mut act_all[gi * i..(gi + 1) * i]);
+            }
+            timing.host_ns += th.elapsed().as_nanos() as u64;
+            timing.chip_ns += down.grouped_f32(&ids, &act_all, &mut down_all).map_err(|e| format!("layer {layer_idx} down fp8 x{g}: {e}"))?;
+            timing.launches += 1;
+            let th = Instant::now();
+            for r in 0..m {
+                moe_out.iter_mut().for_each(|v| *v = 0.0);
+                for slot in 0..top_k {
+                    let gi = r * top_k + slot;
+                    let w = wts[gi];
+                    for (mo, d) in moe_out.iter_mut().zip(&down_all[gi * h..(gi + 1) * h]) {
+                        *mo += w * d;
+                    }
+                }
+                for (xi, mo) in x[r * h..(r + 1) * h].iter_mut().zip(&moe_out) {
+                    *xi += mo;
+                }
+            }
+            timing.host_ns += th.elapsed().as_nanos() as u64;
+            timing.experts_ns += t4.elapsed().as_nanos() as u64;
+        }
+        let t5 = Instant::now();
+        let mut hidden = vec![0.0f32; h];
+        rmsnorm(&x[(m - 1) * h..], &self.weights.final_norm, eps, &mut hidden);
+        timing.host_ns += t5.elapsed().as_nanos() as u64;
+        self.pos = pos0 + m;
+        self.history.extend_from_slice(tokens);
+        timing.total_ns = t_step.elapsed().as_nanos() as u64;
+        self.last_timing = timing;
+        Ok(hidden)
     }
 
     /// The production constructor: loads the checkpoint onto Omega and allocates the paged KV.
@@ -1691,14 +1883,43 @@ impl Qwen3MoeOmegaEngine {
     }
 
     /// As [`Self::load_omega`] with a chosen weight format (FP8 needs omega's FP8 GEMV linked).
+    /// Attention takes the fused one-launch path when it is linked ([`AttnPath::Auto`]).
     pub fn load_omega_with(dir: &Path, max_context: usize, format: WeightFormat, progress: &mut dyn FnMut(&str)) -> Result<(Self, LoadReport), String> {
+        Self::load_omega_with_attn(dir, max_context, format, AttnPath::Auto, progress)
+    }
+
+    /// As [`Self::load_omega_with`] with the attention path chosen explicitly.
+    pub fn load_omega_with_attn(
+        dir: &Path,
+        max_context: usize,
+        format: WeightFormat,
+        attn: AttnPath,
+        progress: &mut dyn FnMut(&str),
+    ) -> Result<(Self, LoadReport), String> {
         if !aien_omega_gpu::is_native() {
             return Err("this binary carries the CPU stub of the Omega engine (build with AIEN_OMEGA_DIR or AIEN_OMEGA_GPU_LIB)".into());
         }
         let (weights, report) = load_qwen3_moe_omega_with(dir, &OmegaModelUploader, format, progress)?;
-        let kv = OmegaPagedKv::new(&weights.config, max_context)?;
-        progress(&format!("kv pool {} MB resident={}", kv.pool_bytes() >> 20, kv.resident()));
-        Ok((Self::new(weights, Box::new(kv)), report))
+        let fused = match attn {
+            AttnPath::Split => false,
+            AttnPath::Fused => true,
+            AttnPath::Auto => OmegaModelUploader::uses_dattn_api() && crate::qwen3_moe_omega_dattn::OmegaFusedKv::fits(&weights.config),
+        };
+        let kv: Box<dyn KvAttention> = if fused {
+            let kv = crate::qwen3_moe_omega_dattn::OmegaFusedKv::new(&weights.config, max_context, &weights.layers)?;
+            progress(&format!("kv fused cache {} MB resident=true", kv.kv_bytes() >> 20));
+            Box::new(kv)
+        } else {
+            let kv = OmegaPagedKv::new(&weights.config, max_context)?;
+            progress(&format!("kv pool {} MB resident={}", kv.pool_bytes() >> 20, kv.resident()));
+            Box::new(kv)
+        };
+        Ok((Self::new(weights, kv), report))
+    }
+
+    /// "split" or "fused": which attention path this engine runs.
+    pub fn attention_path(&self) -> &'static str {
+        self.kv.path_name()
     }
 
     pub fn config(&self) -> &Qwen3MoeConfig {
@@ -1787,13 +2008,20 @@ impl Qwen3MoeOmegaEngine {
             }
             .map_err(|e| format!("layer {layer_idx} qkv: {e}"))?;
             timing.launches += 1;
-            let t2 = Instant::now();
-            rmsnorm_per_head(&qkv_out[..qd], &layer.q_norm, eps, c.q_heads, hd, &mut qn);
-            rmsnorm_per_head(&qkv_out[qd..qd + kvd], &layer.k_norm, eps, c.kv_heads, hd, &mut kn);
-            apply_rope(&mut qn, &mut kn, pos, c.q_heads, c.kv_heads, hd, c.rope_theta);
-            self.kv.append(layer_idx, pos, &kn, &qkv_out[qd + kvd..])?;
-            timing.host_ns += t2.elapsed().as_nanos() as u64;
-            timing.chip_ns += self.kv.attend(layer_idx, &qn, pos + 1, &mut attn_out)?;
+            match self.kv.fused_attend(layer_idx, pos, &qkv_out, eps, &mut attn_out) {
+                // One launch: norms, rope, KV append and attention on the chip.
+                Some(r) => timing.chip_ns += r?,
+                // Split path: host norms and rope, KV write, then the paged attention launch.
+                None => {
+                    let t2 = Instant::now();
+                    rmsnorm_per_head(&qkv_out[..qd], &layer.q_norm, eps, c.q_heads, hd, &mut qn);
+                    rmsnorm_per_head(&qkv_out[qd..qd + kvd], &layer.k_norm, eps, c.kv_heads, hd, &mut kn);
+                    apply_rope(&mut qn, &mut kn, pos, c.q_heads, c.kv_heads, hd, c.rope_theta);
+                    self.kv.append(layer_idx, pos, &kn, &qkv_out[qd + kvd..])?;
+                    timing.host_ns += t2.elapsed().as_nanos() as u64;
+                    timing.chip_ns += self.kv.attend(layer_idx, &qn, pos + 1, &mut attn_out)?;
+                }
+            }
             timing.launches += 1;
             timing.chip_ns += match &layer.attn {
                 AttnWeights::Bf16 { o, .. } => o.matmul_f32(1, &attn_out, &mut attn_proj),
@@ -1940,8 +2168,10 @@ impl Qwen3MoeOmegaEngine {
         }
         let t0 = Instant::now();
         let mut hidden = Vec::new();
-        for &t in &prompt[reused..] {
-            hidden = self.step(t)?;
+        let mut prefill_timing = StepTiming::default();
+        for chunk in prompt[reused..].chunks(self.prefill_chunk.max(1)) {
+            hidden = self.step_batch(chunk)?;
+            prefill_timing.add(&self.last_timing);
         }
         let prefill_ms = t0.elapsed().as_millis() as u64;
         let t1 = Instant::now();
@@ -1979,6 +2209,7 @@ impl Qwen3MoeOmegaEngine {
             prompt_tokens: prompt.len(),
             reused_prompt_tokens: reused,
             decode_timing,
+            prefill_timing,
         })
     }
 
@@ -2213,6 +2444,34 @@ mod forward_tests {
         let o5 = warm.generate(&[1, 2, 3], &p, &mut |_| true).unwrap();
         assert_eq!(o5.reused_prompt_tokens, 0);
         assert!(c.layers > 0);
+    }
+
+    #[test]
+    fn batched_prefill_matches_token_at_a_time_bit_for_bit_with_fewer_launches() {
+        let argmax = |lg: &[f32]| lg.iter().enumerate().max_by(|a, b| a.1.partial_cmp(b.1).unwrap()).unwrap().0 as u32;
+        let (mut one, _, c, _) = engine_with(WeightFormat::Fp8All);
+        let (mut batched, _, _, _) = engine_with(WeightFormat::Fp8All);
+        assert!(batched.batched_prefill_possible());
+        one.prefill_chunk = 1;
+        batched.prefill_chunk = PREFILL_CHUNK;
+        // 12 tokens: one full chunk of 8 and a tail of 4.
+        let prompt = [5u32, 17, 42, 3, 9, 60, 11, 23, 8, 2, 7, 19];
+        let p = GenerateParams::greedy(3, vec![]);
+        let (mut l1, mut l2, mut t1, mut t2) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+        let o1 = one.generate_with(&prompt, &p, &mut |lg, _| { l1.push(lg.to_vec()); argmax(lg) }, &mut |t| { t1.push(t); true }).unwrap();
+        let o2 = batched.generate_with(&prompt, &p, &mut |lg, _| { l2.push(lg.to_vec()); argmax(lg) }, &mut |t| { t2.push(t); true }).unwrap();
+        assert_eq!(t1, t2, "greedy tokens after batched prefill");
+        assert_eq!(l1, l2, "logits after batched prefill must equal token-at-a-time bit for bit");
+        assert_eq!(one.history(), batched.history());
+        // Launches: 5 per layer per token at chunk 1; 4 + tokens per layer per chunk when batched.
+        assert_eq!(o1.prefill_timing.launches as usize, prompt.len() * c.layers * 5);
+        assert_eq!(o2.prefill_timing.launches as usize, c.layers * ((4 + 8) + (4 + 4)));
+        // A bf16 engine has no batched path: chunk 8 falls back to token-at-a-time, same launches as chunk 1.
+        let (mut bf, _, _, _) = engine_with(WeightFormat::Bf16);
+        assert!(!bf.batched_prefill_possible());
+        bf.prefill_chunk = PREFILL_CHUNK;
+        let o3 = bf.generate(&prompt, &p, &mut |_| true).unwrap();
+        assert_eq!(o3.prefill_timing.launches as usize, prompt.len() * c.layers * (3 + 2 * c.top_k));
     }
 
     #[test]
