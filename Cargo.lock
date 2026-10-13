@@ -410,6 +410,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "aien-serve-http"
+version = "0.1.0"
+dependencies = [
+ "aien-inference-abi",
+ "axum 0.7.9",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-stream",
+]
+
+[[package]]
 name = "aien-switchboard"
 version = "0.1.0"
 dependencies = [
