@@ -194,7 +194,7 @@ The job reports **Published** only after P4 returned success, in which case Publ
 
 ### 2.5 Native slot layout (slab region)
 
-The KV region is a dedicated contiguous range of 4096-byte units, outside the sealed Store region and its anchor, bound through a `kv_disk_bind(disk, base_lba, units, store_range, anchor_range)` that refuses any overlap with the Store or anchor ranges (same refusal style as `st_disk_bind`, store_engine.h:90-92). On the Pi the range is inside the AIENOS partition view (section 16.2), because the kernel writes nothing outside that view (dev/disk_part.h:1-27, VERIFIED). It holds `N` fixed slots of `slot_units` each, `slot_units = 1 + sealed_units`, `sealed_units = ceil(sealed_len / 4096)`, `sealed_len = payload_len + 16 * ceil(payload_len / 4080)` (the M5 envelope without its 64-byte header). Slot `s`, complete wire layout (review finding 12), little-endian:
+The KV region is a dedicated contiguous range of 4096-byte units, outside the sealed Store region and its anchor, bound through a `kv_disk_bind(disk, base_lba, units, store_range, anchor_range)` that refuses any overlap with the Store or anchor ranges (same refusal style as `st_disk_bind`, store_engine.h:90-92). On the Pi the range is inside the AIENOS partition view (section 16.2), because the kernel writes nothing outside that view (dev/disk_part.h:1-27, VERIFIED). It holds `N` fixed slots of `slot_units` each. `slot_units` is fixed at format time and never depends on the record being written (review 2, new finding 1): `slot_units = 1 + max_sealed_units`, with `max_sealed_units` the `sealed_units` of the largest payload the namespace can produce. Each record carries its own `sealed_units = ceil(sealed_len / 4096)`, `sealed_len = payload_len + 16 * ceil(payload_len / 4080)` (the M5 envelope without its 64-byte header), and is refused unless `sealed_units <= slot_units - 1` (implemented in aienos `native/kv/kv_slab.h:87` and the decode check of `native/kv/README.md:86`, VERIFIED at aienos-pkv 8e34b63). Slot `s`, complete wire layout (review finding 12), little-endian:
 
 ```
 unit 0 (slot header unit, 4096 bytes)
@@ -385,7 +385,7 @@ Every job carries `Incarnation = (seq_id u64 as issued by the arena, residency_e
 |---|---|---|---|
 | S1 finish-fork | KV write, **inside the scheduler's finish transaction, before `free_sequence`** (section 6.1) | `fork_range(seq, holder_i, range_i)` per chunk; push a `ParkIntent` to a lock-free outbox | O(blocks) |
 | S2 restore-alloc | KV write | `allocate_sequence(holder_i, tokens_i)` per chunk; refuse if `free < watermark + needed` | O(blocks) |
-| S3 restore-commit | KV write | verify incarnation and that **every** job of the txn is `Completed`; `assemble_table(seq, holders)`; scheduler `admit_restored_prefix` (section 6.3) | O(blocks) |
+| S3 restore-commit | KV write, **on the spine thread** while it handles polled completions, never on the storage worker (review 2, new finding 2) | verify incarnation and that **every** job of the txn is `Completed`; `assemble_table(seq, holders)`; scheduler `admit_restored_prefix` (section 6.3) | O(blocks) |
 | S4 holder-release | KV write | `free_sequence(holder_i)`, only when the txn has no non-terminal job | O(blocks) |
 | S5 queue | store index mutex | push/pop/complete | O(1) |
 
@@ -461,7 +461,7 @@ Two separate promises. **Intake and drain deadline** (default 2000 ms, `shutdown
 Locks, in the only allowed nesting order: spine `tokio::Mutex` (server.rs:27) -> KV `RwLock` (lib.rs:1685) -> store index `std::Mutex`. Rules:
 
 1. No storage I/O, no `fsync`, no `unlink`, no sleep and no `poll` wait happens while the spine lock or the KV lock is held. The worker thread never takes the spine lock. `submit_store` performs no eviction (section 7.4); eviction, unlink and native slot invalidation run only on the worker.
-2. The worker takes the KV lock only in S2, S3, S4 and never while holding the index mutex; it releases the index mutex before any I/O.
+2. S1, S2 and S3 run on the spine thread (S3 needs `&mut` scheduler access, which only the spine has: spine.rs:24, server.rs:204). The storage worker takes the KV lock only in S4, when a holder guard it owns is released, and never while holding its own state mutex or the index mutex (the worker drops released guards after its state lock, worker.rs `Shared::with`); it releases the index mutex before any I/O.
 3. The spine takes the index mutex only through `submit_*`, `poll`, `cancel`, `lookup`, `attach_waiter`, which are O(1)/O(keys) and never block on I/O.
 4. The KV lock is held across S1..S4 for O(blocks) bookkeeping; the existing scheduler already holds it for the same order of work (`complete_prefill`, `free_sequence`). S1 runs inside the scheduler's own finish transaction under the guard it already takes for `free_sequence`; it adds only `fork_range` and an outbox push and takes no other lock (the outbox mutex is a leaf lock held for one `Vec::push`).
 
@@ -521,7 +521,7 @@ Every row is **PLANNED** until its cut merges with a green run and a receipt; no
 - `Indeterminate` publication means a power loss right after may lose the object; that is a cache miss, never a wrong answer.
 
 
-## 12. C1 delta (exact changes to the implemented crate)
+## 12. C1 delta (exact changes to the implemented crate) (validation layers amended by 18.2)
 
 C1 is implemented in `crates/aien-kv-store` at ce5d9eb (identity.rs, record.rs, validate.rs, error.rs, tests/golden/kv_record_v1.json, 4 vectors, `vectors_sha256 = 7c532a54...b89c` in tests/golden/README.md; all VERIFIED by reading the files). The delta below is the whole list; it lands as one red-first cut **C1b** (CUTS.md) before any later cut builds on C1. `format_version` stays 1 and the domain strings `AIEN-PKV-NS-V1\0`, `AIEN-PKV-CHUNK-V1\0` stay: no object has ever been written (the crate has no filesystem adapter, VERIFIED by listing `src/`) and the aienos pin does not exist yet (no `native/kv` in aienos at 5429602, VERIFIED), so no stored byte can be misread. The golden vectors are regenerated and the vectors hash changes.
 
@@ -606,7 +606,7 @@ Cut **X1** builds the baseline first, because "beating Linux" is meaningless wit
 
 Page-cache hits and device reads are **never averaged together**; the harness refuses to emit a latency summary that mixes labels (red test `bench_refuses_mixed_cache_state_summary`, PLANNED). The Linux baseline for a native comparison is the best of the four modes for the same bytes on the same device, not the buffered default, so native cannot "win" against a deliberately slow Linux configuration. Reported per mode: p50 and p95 restore latency per chunk and per 2048-token restore, bytes per second, CPU time per MiB (user plus system, from `getrusage`), and peak resident memory. The device ceiling is measured separately with a raw sequential read of the same LBA span so every result can be stated as a fraction of what the device can do (UNKNOWN until X1 runs).
 
-### 15.2 Zero-copy DMA into KV pool memory on GB10 unified memory, with an ownership proof
+### 15.2 Zero-copy DMA into KV pool memory on GB10 unified memory, with an ownership proof (amended by 18.2)
 
 The GB10 CPU and GPU share one physical memory pool (INFERRED from the Spark platform description; the exact coherency and IOMMU rules for a device writing into memory that the GPU later reads are **UNKNOWN** here and must be read from the NVIDIA documentation through the `spark-hardware-manual` skill and recorded with `docs-read` before cut X3 touches a driver, per the machine-debugging rule). Today the native disk contract copies through a driver-owned bounce buffer (section 9 item 1; native/disk/disk_nvme.h:17-19 VERIFIED), then through the envelope and decrypt scratch (section 10). The design goal is that restored bytes are written by the NVMe controller **directly into the destination KV memory**, with the decrypt/verify step reading them in place.
 
@@ -620,7 +620,7 @@ Ownership proof (the part that makes zero copy safe), as a state machine over a 
 
 A region is in at most one state; transitions are checked by a `region_state` table in the native adapter and by the fake in the host emulation. Red tests (PLANNED, cut X3): `dma_target_region_not_reused_until_terminal_completion`, `cancel_while_dma_pending_keeps_region_reserved`, `verify_failure_never_exposes_rows_to_session`, `region_state_transitions_are_exclusive` (a mutant that skips the state check must fail), and in the emulator `disk_file` with a poisoning check on release (the same method as C2's poison-on-free).
 
-### 15.3 On-disk layout equal to the in-memory block layout, so restore is pure DMA
+### 15.3 On-disk layout equal to the in-memory block layout, so restore is pure DMA (amended by 18.2)
 
 Two layout facts decide how much copying is unavoidable.
 
@@ -630,7 +630,7 @@ Two layout facts decide how much copying is unavoidable.
 
 Red tests (PLANNED): X2 `odirect_read_lands_in_pool_block_without_intermediate_copy` (counting allocator proves no staging buffer larger than the tail scratch), `misaligned_destination_falls_back_and_counts`; X4 `native_paged_chunk_bytes_equal_disk_bytes` (memcmp of the DMA'd region against the session rows) and `native_paged_decode_matches_strided_decode_bitwise` (golden tokens identical).
 
-### 15.4 Integrity pipelined with transfer, not weakened
+### 15.4 Integrity pipelined with transfer, not weakened (amended by 18.2)
 
 The integrity rule does not change: every payload byte is covered by a digest verified before the bytes are visible to a session (section 1.4, 2.1). What changes is **when** the digest is computed.
 
@@ -753,3 +753,51 @@ The independent review (Codex GPT-6 Astra, 16 findings plus uncovered acceptance
 Uncovered acceptance boxes: A4, A6, B3, B4, B6, D3, D4, D6 are closed in section 14.
 
 What the review did not change: the chunk-key chain, the 256-byte header byte layout, SHA-256 as the format hash, "storage never blocks the step", and "a miss or a failed restore is plain prefill". What remains UNKNOWN: GB10 coherency for device DMA into the pool (15.2), Interplane's real signal list (15.5), what the Pi test card's Store holds (16.2), and every measured number in 15.8.
+
+## 18. Review 2 disposition and implementation reviews (2026-10-13)
+
+Codex re-review 2 (`d6669ed..b654f0a`, summary in the program handoff) and the Grok 4.7 reviews of C4 and C5. Each row was checked against source; "VERIFIED" means the cited line or test was read or run on `pkv/integration`, host only. Native rows were checked against aienos-pkv `8e34b63`.
+
+### 18.1 Codex re-review 2
+
+| item | verdict | where | evidence |
+|---|---|---|---|
+| partial 6: shared landing holder freed while another waiter still needs it | RESOLVED (C5) | 7.3 | a completed load hands the caller's guard back as `Completion::holder` (`LandingHolder`), one copy per waiter; the blocks are released when the last copy drops. Tests `a_restored_landing_holder_outlives_the_terminal_the_caller_sees`, `coalesced_waiters_share_one_landing_holder_until_the_last_drops_it` (VERIFIED) |
+| partial 8: logical reservation vs physical charge | RESOLVED (host) | 7.4 | reservations round up to the objects directory's `st_blksize`; publication and recovery charge `st_blocks` (host_fs.rs `phys_bytes_of`). `st_blksize` as allocation unit is INFERRED for ext4/xfs. Test `host_fs_reservation_covers_the_physical_bytes_publication_charges` (red before, green after, VERIFIED). Native: fixed slots, does not arise |
+| partial 9: completion capacity retained until polled | RESOLVED (C5) | 7.1 | worker admission counts unpolled completions + 3 per live job + extra-waiter slots (worker.rs `credit_check`, `try_attach`). Test `completion_queue_never_overflows_at_max_inflight` (VERIFIED) |
+| partial 12 | split into new findings 1 and 4 | 2.5, 18.2 | below |
+| new 1 (P1): native slot stride depends on payload | RESOLVED | 2.5 | format-time `slot_units`, per-record `sealed_units` bound; implemented by N2 (kv_slab.h:87, VERIFIED) |
+| new 2 (P1): S3 on a worker that may not take the spine | RESOLVED (design; C6 implements) | 5.4 S3, 8 rule 2 | S3 runs on the spine thread after polling; the worker only reports completions |
+| new 3 (P1): terminal failure treated as proof DMA stopped | RESOLVED (design; X3 implements) | 18.2 X3 | |
+| new 4 (P2): one validation contract for host region and native slot | RESOLVED (design) | 18.2 | |
+| new 5 (P2): X4 zero copy ignores encryption | RESOLVED (claim narrowed) | 18.2 X4 | |
+| new 6 (P2): X5 overlap without an async path | RESOLVED (relabelled) | 18.2 X5 | |
+| retained P1: `Incarnation(u64)` too small | RESOLVED (C2/C5) | 5.3 | `Incarnation { seq_id: u64, epoch: u32 }` (store.rs:39); per-waiter routing. Tests `incarnation_keeps_the_full_64_bit_sequence_id_and_the_epoch`, `stale_completion_with_reused_seq_id_but_new_epoch_is_rejected`, `coalesced_waiters_each_get_a_terminal_with_their_own_incarnation` (VERIFIED) |
+| retained: `job_id as u32` holder ids wrap | RESOLVED | 5.2 | holder.rs `HolderGenerations` skips live ids and refuses on exhaustion; `generation_for_job` refuses ids that do not fit. Tests in holder_tests.rs (VERIFIED) |
+
+### 18.2 Binding amendments (supersede the cited text where they differ)
+
+- **Validation layers (new 4; amends 12 H6/H7).** Three validators with their own error order: (a) shared structural validation of the 256-byte header struct (H1, header hash, field checks, namespace), identical on host and native and the only part N1 mirrors; (b) host-region validation of bytes 256..4096 (H3 digest table, `BadPadding`, `SegmentRootMismatch`, `TooManySegments`) and the file size rule, host only; (c) native-slot validation of the slot unit (`unit_sha256`, slot fields, `sealed_units <= slot_units - 1`, then the M5 tag), native only. The M5 envelope at byte 256 of a native slot is nonzero by construction (m5_envelope.c, VERIFIED), so (b) never runs on a native slot. Each layer has its own vectors.
+- **X3 DMA ownership (new 3; amends 15.2).** A terminal failure does not end `DmaTarget`. The NVMe timeout path only marks the controller failed (disk_nvme.c:86-88, 151, VERIFIED); the device may still write. A region leaves `DmaTarget` only on successful completion of every command that targets it, or after controller quiescence is acknowledged. Until then a region whose command failed or timed out is `Quarantined`: never reused, counted in `kv_quarantined_bytes`, released only after quiescence. The quiescence mechanism is DOCS NOT READ here; it must be read from the NVMe and GB10 documentation (`spark-hardware-manual`, `docs-read`) before X3.
+- **X4 copies (new 5; amends 15.3).** Disk holds ciphertext with interleaved tags. The current open path wipes the output, authenticates each chunk into scratch and copies plaintext out (m5_envelope.c:152-153, 176-184, VERIFIED), so a paged layout alone cannot make restore copy-free. X4 claims only "ciphertext lands by DMA without the bounce buffer" and keeps reporting `kv_restore_copy_bytes` for the decrypt copy. An in-place authenticated decrypt is a separate future design, not part of X4.
+- **X5 wording (new 6; amends 15.4).** The native disk driver keeps one command outstanding and waits for it before returning (disk_nvme.h:17-19, VERIFIED). Native verify-while-read is therefore **interleaving** across pump calls on one core, not overlap. True overlap needs an asynchronous submit/poll path or a second execution context, which is a dependency X5 does not have; until it exists, X5 reports interleaving.
+
+### 18.3 Grok 4.7 implementation reviews
+
+| review item | status | commit (pkv/integration) |
+|---|---|---|
+| C4 P1-1 failed store loses already-unlinked victims | FIXED: victims marked, unlinked only after the store is durable | 120b58d (red d22336c) |
+| C4 P1-2 recovery memory unbounded, index lock across listing | FIXED: one streaming `ReadDir` under its own mutex | 120b58d |
+| C4 P1-3 `read_dir().ok()` hides I/O errors; purge accounting | FIXED: listing/stat errors fail the store; purge subtracts only after unlink | 120b58d |
+| C4 P2-4 foreign objects skip padding/root checks | FIXED | 120b58d |
+| C4 P2-5 stores refused while unindexed files exist | FIXED: free headroom admits | 120b58d |
+| C4 P2-6 `recover_step` done on a Failed store | FIXED (`recover_step_on_a_failed_store_is_not_done`) | 120b58d |
+| C4 P2-7 `payload_len` narrowed to u32 | FIXED: u64 index entry | 120b58d |
+| C4 P2-8 missing tests | FIXED: host_fs_hardening_tests, host_fs_stream_tests | d22336c |
+| C5 P1-1 second store of a live key steals completions | FIXED: one live store job per key; by_inner never overwrites a live mapping | 00c8aab (red c1d4046) |
+| C5 P1-2 landing holder freed before the caller sees Completed | FIXED: store gets a lease, worker keeps the guard, `Completion::holder` | 00c8aab |
+| C5 P1-3 panic reports Failed while the store owns the buffer | FIXED: such jobs stay unfinished until the lease returns | 00c8aab |
+| C5 P2-4 cancel/shutdown miss `Dispatching` | FIXED: shutdown/drop cancel handed jobs and mark in-submit jobs | 00c8aab |
+| C5 P2-5 wall-clock test bounds | FIXED for the caller-latency test (store stalled indefinitely); deadline tests keep lower bounds tied to the deadline and 5 s upper bounds | 00c8aab |
+
+Waiter default conflict (ADR 7.1 says 16, METRICS_AND_SETTINGS said 8): the ADR is binding; METRICS now says 16, matching `WorkerConfig::default` (worker.rs).

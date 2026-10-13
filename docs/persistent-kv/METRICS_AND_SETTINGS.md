@@ -12,7 +12,7 @@ Companion to ADR 0003 (revised after the independent review). Names are final; v
 | `AIEN_KV_STORE_MAX_OBJECTS` | count | 65536 | index cap at recovery and at runtime (ADR 4.1) | `host_fs.rs` |
 | `AIEN_KV_STORE_MAX_RESTORE_OPS` | count | 48 | restore-class jobs between Submitted and terminal completion (per-class reservation, ADR 7.1); `restore_ops + park_ops` never exceeds the total cap | `worker.rs` |
 | `AIEN_KV_STORE_MAX_PARK_OPS` | count | 16 | park-class jobs, reserved so restores cannot starve parks (ADR 7.1) | `worker.rs` |
-| `AIEN_KV_STORE_MAX_WAITERS_PER_JOB` | count | 8 | coalesced waiters on one in-flight load; past it `attach_waiter` returns QueueFull (ADR 7.3) | `coalesce.rs` |
+| `AIEN_KV_STORE_MAX_WAITERS_PER_JOB` | count | 16 | coalesced waiters on one in-flight load; past it `attach_waiter` returns QueueFull (ADR 7.3) | `coalesce.rs` |
 | `AIEN_KV_STORE_MAX_INFLIGHT_BYTES` | bytes | 256 MiB | payload bytes between Submitted and Published | `worker.rs` |
 | `AIEN_KV_CHUNK_BLOCKS` | blocks | 16 | chunk size in KV blocks (part of the namespace; changing it orphans objects) | `shared_kv.rs` |
 | `AIEN_KV_RESTORE_MAX_BLOCKS` | blocks | pool / 4 | upper bound on holder blocks allocated for restores at once | `kv_residency.rs` |
