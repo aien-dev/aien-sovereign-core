@@ -116,32 +116,42 @@ fn fake_refuses_over_ops_and_over_bytes() {
     assert!(l.is_ok(), "a full park class must not refuse a restore");
     assert_eq!(r.fake.capacity().restore_ops, 1);
 
-    // Bytes: 16 ops each, but the park class owns half of 4 objects' bytes.
+    // Bytes: plenty of ops, but max_inflight_bytes is split 3:1 (ADR 7.1), so
+    // with 4 objects' worth the park class owns one and restores own three.
     let r = rig_with(|c| {
         c.max_park_ops = 8;
         c.max_restore_ops = 8;
         c.max_inflight_bytes = 4 * OBJ;
     });
     r.store(1).unwrap();
-    r.store(2).unwrap();
-    assert_eq!(r.fake.capacity().inflight_bytes, 2 * OBJ);
-    assert_eq!(r.store(3), Err(PlatformError::QueueFull), "park bytes full");
-    assert_eq!(r.fake.capacity().park_ops, 2);
-    r.inject(60);
-    r.inject(61);
-    r.inject(62);
+    assert_eq!(r.fake.capacity().inflight_bytes, OBJ);
+    assert_eq!(r.store(2), Err(PlatformError::QueueFull), "park bytes full");
+    assert_eq!(r.fake.capacity().park_ops, 1);
+    for n in 60..64 {
+        r.inject(n);
+    }
     assert!(r.load(60).0.is_ok());
-    assert!(r.load(61).0.is_ok(), "restores keep their own half");
-    assert!(r.load(62).0.is_err(), "restore bytes are bounded too");
+    assert!(r.load(61).0.is_ok());
+    assert!(
+        r.load(62).0.is_ok(),
+        "restores keep their own three quarters"
+    );
+    assert_eq!(r.fake.capacity().inflight_bytes, 4 * OBJ);
+    assert_eq!(
+        r.load(63).0,
+        Err(PlatformError::QueueFull),
+        "restore bytes are bounded"
+    );
     // Credits come back at the terminal completion, polled or not.
     r.fake.run_until_idle();
     assert_eq!(r.fake.capacity().inflight_bytes, 0);
-    assert!(r.store(3).is_ok());
+    assert!(r.store(2).is_ok());
 }
 
 #[test]
 fn fake_failed_store_leaves_index_unchanged() {
-    let cases: Vec<(&str, Fault, fn(&PlatformError) -> bool)> = vec![
+    type Case = (&'static str, Fault, fn(&PlatformError) -> bool);
+    let cases: Vec<Case> = vec![
         ("disk full", Fault::DiskFull, |e| {
             matches!(e, PlatformError::OutOfMemory)
         }),
@@ -628,7 +638,7 @@ fn fake_lookup_misses_and_submit_refused_while_recovering() {
     assert!(!p.done);
     let p = r.fake.recover_step(1);
     assert!(p.done, "five entries, two per millisecond");
-    assert_eq!(p.indexed, 3, "ours and the foreign object are indexed");
+    assert_eq!(p.indexed, 2, "only our namespace is indexed");
     assert_eq!(p.foreign_namespace, 1);
     assert_eq!(p.tmp_deleted, 1);
     assert_eq!(p.corrupt_deleted, 1);
