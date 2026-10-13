@@ -532,9 +532,10 @@ fn object_path_for(root: &Path, key: &[u8; 32]) -> PathBuf {
         .join(format!("{hex}.kvc"))
 }
 
-fn tmp_path_for(root: &Path, key: &[u8; 32], job_id: u64, inc: u64) -> PathBuf {
+fn tmp_path_for(root: &Path, key: &[u8; 32], job_id: u64, inc: Incarnation) -> PathBuf {
     let hex = hex_encode(key);
-    root.join("tmp").join(format!("{hex}.{job_id}.{inc}.part"))
+    root.join("tmp")
+        .join(format!("{hex}.{job_id}.{}.{}.part", inc.seq_id, inc.epoch))
 }
 
 fn parse_kvc_filename(name: &str, expected_shard: u8) -> Option<[u8; 32]> {
@@ -1638,7 +1639,7 @@ fn execute_store_job(shared: &Shared, job_id: u64) {
         )
     };
 
-    let tpath = tmp_path_for(&root, &key.0 .0, job_id, inc.0);
+    let tpath = tmp_path_for(&root, &key.0 .0, job_id, inc);
     let opath = object_path_for(&root, &key.0 .0);
     let shard_dir = opath.parent().expect("shard dir").to_path_buf();
 
@@ -2820,7 +2821,7 @@ impl KvStore for HostFsStore {
         res
     }
 
-    fn attach_waiter(&self, job: JobId) -> Result<(), PlatformError> {
+    fn attach_waiter(&self, job: JobId, _inc: Incarnation) -> Result<(), PlatformError> {
         self.with(|i| {
             let per_job = i.cfg.max_waiters_per_job;
             let total = i.cfg.max_waiters_total;

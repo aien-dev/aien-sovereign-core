@@ -986,13 +986,21 @@ fn unlink_failure_returns_the_victim_to_service_and_the_new_object_stays_publish
     fx.faults.arm(Boundary::Unlink, FaultAction::Fail(EIO));
     let b = fx.put_full(&s, 2);
     let t = terminal_of(&b.completions, b.job.unwrap());
-    assert_eq!(t, Terminal::Done(JobStage::Durable), "the write already succeeded");
+    assert_eq!(
+        t,
+        Terminal::Done(JobStage::Durable),
+        "the write already succeeded"
+    );
     assert_eq!(
         s.lookup(&[a.key, b.key]),
         vec![Some(FULL_PAYLOAD), Some(FULL_PAYLOAD)]
     );
     assert!(fx.object_file(&a.key).is_file());
-    assert_eq!(s.capacity().used_bytes, 2 * OBJ, "over quota until a later purge");
+    assert_eq!(
+        s.capacity().used_bytes,
+        2 * OBJ,
+        "over quota until a later purge"
+    );
     assert_eq!(s.capacity().evicting_bytes, 0);
     assert_eq!(s.capacity().reserved_bytes, 0);
     assert!(tmp_files(fx.root()).is_empty());
@@ -1199,7 +1207,10 @@ fn attach_waiter_is_bounded_per_job() {
     let l = l.unwrap();
     s.attach_waiter(l, Incarnation::seq(77)).unwrap();
     s.attach_waiter(l, Incarnation::seq(77)).unwrap(); // requester + 2 attached = 3
-    assert_eq!(s.attach_waiter(l, Incarnation::seq(77)).unwrap_err(), PlatformError::QueueFull);
+    assert_eq!(
+        s.attach_waiter(l, Incarnation::seq(77)).unwrap_err(),
+        PlatformError::QueueFull
+    );
     let st = fx.submit(&s, 2, 8).0.unwrap();
     assert!(matches!(
         s.attach_waiter(st, Incarnation::seq(77)),

@@ -61,7 +61,10 @@ fn releasing_something_not_live_is_reported() {
 fn job_id_mapping_refuses_to_wrap() {
     assert_eq!(generation_for_job(JobId(1)), Ok(1));
     assert_eq!(generation_for_job(JobId(u32::MAX as u64)), Ok(u32::MAX));
-    assert_eq!(generation_for_job(JobId(0)), Err(HolderError::JobIdOutOfRange));
+    assert_eq!(
+        generation_for_job(JobId(0)),
+        Err(HolderError::JobIdOutOfRange)
+    );
     assert_eq!(
         generation_for_job(JobId(u32::MAX as u64 + 1)),
         Err(HolderError::JobIdOutOfRange),

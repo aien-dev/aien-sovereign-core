@@ -1567,7 +1567,7 @@ impl KvStore for FakeKvStore {
         self.with(|i| i.submit_flush(inc))
     }
 
-    fn attach_waiter(&self, job: JobId) -> Result<(), PlatformError> {
+    fn attach_waiter(&self, job: JobId, _inc: Incarnation) -> Result<(), PlatformError> {
         self.with(|i| {
             let per_job = i.cfg.max_waiters_per_job;
             let total = i.cfg.max_waiters_total;

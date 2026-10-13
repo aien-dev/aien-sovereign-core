@@ -255,6 +255,30 @@ struct WorkerJob {
     cancelling: bool,
     payload: Option<Payload>,
     progress_seen: bool,
+    /// Every request riding this job, the opener first. Each gets its own
+    /// completions carrying its own token (ADR 5.3), including waiters that
+    /// withdrew their interest: a terminal is emitted only after the shared
+    /// I/O ended, so "my terminal arrived" always means "nothing more will
+    /// touch the landing holder on my behalf" (ADR 5.5, 7.3).
+    waiters: Vec<Waiter>,
+}
+
+/// One request riding a job.
+#[derive(Clone, Copy)]
+struct Waiter {
+    inc: Incarnation,
+    /// The request cancelled its interest. It still gets its one terminal when
+    /// the job ends; it no longer keeps the shared job alive.
+    detached: bool,
+}
+
+impl Waiter {
+    fn new(inc: Incarnation) -> Self {
+        Self {
+            inc,
+            detached: false,
+        }
+    }
 }
 
 type HandedJob = (JobId, Class, Incarnation, ChunkKey, Payload);
@@ -368,6 +392,68 @@ impl State {
         Ok(())
     }
 
+    /// Completion slots held for waiters beyond each job's opener: one terminal
+    /// per extra load waiter, a progress report and a terminal per extra store
+    /// waiter. Held until the caller polls (ADR 7.1).
+    fn waiter_slots(&self) -> usize {
+        self.jobs
+            .values()
+            .map(|j| {
+                let per = if j.kind == JobKind::Store { 2 } else { 1 };
+                j.waiters.len().saturating_sub(1) * per
+            })
+            .sum()
+    }
+
+    /// Add `inc` as a waiter of `job`. Refused when the waiter bounds or the
+    /// completion capacity (counting this waiter's slots) would be exceeded,
+    /// and when `inc` already rides the job: two completions with one token
+    /// could not be told apart.
+    fn try_attach(&mut self, job: JobId, inc: Incarnation) -> Result<(), PlatformError> {
+        let per = match self.jobs.get(&job) {
+            Some(j) if j.kind != JobKind::Flush && !j.cancelling => {
+                if j.waiters.iter().any(|w| w.inc == inc) {
+                    return Err(PlatformError::TaskRejected(String::from(
+                        "incarnation already waits on this job",
+                    )));
+                }
+                if j.kind == JobKind::Store {
+                    2
+                } else {
+                    1
+                }
+            }
+            _ => {
+                return Err(PlatformError::TaskRejected(String::from(
+                    "not an in-flight load",
+                )))
+            }
+        };
+        if self.completions.len() + 3 * self.jobs.len() + self.waiter_slots() + per
+            > self.completion_capacity()
+        {
+            self.stats.attach_refused_total += 1;
+            return Err(self.queue_full());
+        }
+        match self.coalesce.attach(job) {
+            Ok(_) => {
+                self.jobs
+                    .get_mut(&job)
+                    .expect("job")
+                    .waiters
+                    .push(Waiter::new(inc));
+                Ok(())
+            }
+            Err(AttachRefused::JobFull | AttachRefused::TotalFull) => {
+                self.stats.attach_refused_total += 1;
+                Err(self.queue_full())
+            }
+            Err(AttachRefused::NoSuchJob) => Err(PlatformError::TaskRejected(String::from(
+                "not an in-flight load",
+            ))),
+        }
+    }
+
     fn credit_check(&mut self, class: Class, bytes: u64) -> Result<(), PlatformError> {
         let (ops, max_ops, used_bytes, limit) = match class {
             Class::Park => (
@@ -383,7 +469,7 @@ impl State {
                 self.restore_byte_limit(),
             ),
         };
-        let slots = self.completions.len() + 3 * self.jobs.len() + 3;
+        let slots = self.completions.len() + 3 * self.jobs.len() + self.waiter_slots() + 3;
         if ops >= max_ops || used_bytes + bytes > limit || slots > self.completion_capacity() {
             return Err(self.queue_full());
         }
@@ -450,16 +536,25 @@ impl State {
             }
         }
         let elapsed = elapsed_us.unwrap_or_else(|| job.submitted_at.elapsed().as_micros() as u64);
-        self.push_completion(Completion {
-            job: job.id,
-            incarnation: job.inc,
-            key: job.key,
-            stage,
-            terminal: Some(terminal),
-            publish,
-            bytes: job.payload_len,
-            elapsed_us: elapsed,
-        });
+        // One terminal per waiter, each carrying that waiter's own token. The
+        // job's I/O has ended here (inner terminal, or never dispatched).
+        let waiters = if job.waiters.is_empty() {
+            alloc::vec![Waiter::new(job.inc)]
+        } else {
+            core::mem::take(&mut job.waiters)
+        };
+        for w in waiters {
+            self.push_completion(Completion {
+                job: job.id,
+                incarnation: w.inc,
+                key: job.key,
+                stage,
+                terminal: Some(terminal.clone()),
+                publish,
+                bytes: job.payload_len,
+                elapsed_us: elapsed,
+            });
+        }
     }
 
     /// Move queued jobs into the hand-over slot, as many as the dispatch depth
@@ -747,17 +842,20 @@ fn worker_loop(
                                         s.reserved_bytes -= job.reserved;
                                         job.reserved = 0;
                                     }
-                                    let out = Completion {
-                                        job: w_id,
-                                        incarnation: job.inc,
-                                        key: job.key,
-                                        stage: c.stage,
-                                        terminal: None,
-                                        publish: c.publish,
-                                        bytes: c.bytes,
-                                        elapsed_us: c.elapsed_us,
-                                    };
-                                    s.push_completion(out);
+                                    let waiters = job.waiters.clone();
+                                    let (key, c_stage) = (job.key, c.stage);
+                                    for w in waiters {
+                                        s.push_completion(Completion {
+                                            job: w_id,
+                                            incarnation: w.inc,
+                                            key,
+                                            stage: c_stage,
+                                            terminal: None,
+                                            publish: c.publish,
+                                            bytes: c.bytes,
+                                            elapsed_us: c.elapsed_us,
+                                        });
+                                    }
                                 }
                                 Some(term) => {
                                     let job = s.jobs.remove(&w_id).expect("job");
@@ -885,22 +983,17 @@ impl StorageWorker {
     ) -> Result<LoadTicket, PlatformError> {
         let cap = self.inner.capacity();
         // Fast path: attach to an in-flight load if one exists.
-        let attached = self.shared.with(|s| {
-            s.check_store_state(cap.state, false)?;
-            if let Some(job) = s.coalesce.find(Share::Load, &key) {
-                match s.coalesce.attach(job) {
-                    Ok(_) => {
-                        s.stats.coalesced_total += 1;
-                        return Ok(Some(LoadTicket::Attached(job)));
-                    }
-                    Err(_) => {
-                        s.stats.attach_refused_total += 1;
-                        return Err(s.queue_full());
-                    }
+        let attached = self
+            .shared
+            .with(|s| -> Result<Option<LoadTicket>, PlatformError> {
+                s.check_store_state(cap.state, false)?;
+                if let Some(job) = s.coalesce.find(Share::Load, &key) {
+                    s.try_attach(job, inc)?;
+                    s.stats.coalesced_total += 1;
+                    return Ok(Some(LoadTicket::Attached(job)));
                 }
-            }
-            Ok(None)
-        })?;
+                Ok(None)
+            })?;
         if let Some(t) = attached {
             return Ok(t);
         }
@@ -911,16 +1004,9 @@ impl StorageWorker {
         let res = self.shared.with(|s| {
             s.check_store_state(cap.state, false)?;
             if let Some(job) = s.coalesce.find(Share::Load, &key) {
-                match s.coalesce.attach(job) {
-                    Ok(_) => {
-                        s.stats.coalesced_total += 1;
-                        return Ok(LoadTicket::Attached(job));
-                    }
-                    Err(_) => {
-                        s.stats.attach_refused_total += 1;
-                        return Err(s.queue_full());
-                    }
-                }
+                s.try_attach(job, inc)?;
+                s.stats.coalesced_total += 1;
+                return Ok(LoadTicket::Attached(job));
             }
             let dst = dst_slot.as_ref().ok_or(PlatformError::InvalidLayout)?;
             let len = validate_load_dest(key, payload_len, expect, dst)?;
@@ -956,6 +1042,7 @@ impl StorageWorker {
                         dst,
                     }),
                     progress_seen: false,
+                    waiters: alloc::vec![Waiter::new(inc)],
                 },
             );
             self.shared.cv.notify_all();
@@ -1036,7 +1123,16 @@ impl KvStore for StorageWorker {
             let key = header.chunk_key;
             if let Some(existing) = s.coalesce.find(Share::Store, &key) {
                 let job_ok = s.jobs.get(&existing).is_some_and(|j| !j.cancelling);
-                if job_ok && s.coalesce.attach(existing).is_ok() {
+                let already = s
+                    .jobs
+                    .get(&existing)
+                    .is_some_and(|j| j.waiters.iter().any(|w| w.inc == inc && !w.detached));
+                if job_ok && already {
+                    // The same request asked twice: one ride, one terminal.
+                    s.stats.store_dedup_total += 1;
+                    return Ok(existing);
+                }
+                if job_ok && s.try_attach(existing, inc).is_ok() {
                     s.stats.store_dedup_total += 1;
                     return Ok(existing);
                 }
@@ -1070,6 +1166,7 @@ impl KvStore for StorageWorker {
                     cancelling: false,
                     payload: Some(Payload::Store { header, src }),
                     progress_seen: false,
+                    waiters: alloc::vec![Waiter::new(inc)],
                 },
             );
             self.shared.cv.notify_all();
@@ -1126,6 +1223,7 @@ impl KvStore for StorageWorker {
                         dst,
                     }),
                     progress_seen: false,
+                    waiters: alloc::vec![Waiter::new(inc)],
                 },
             );
             self.shared.cv.notify_all();
@@ -1163,6 +1261,7 @@ impl KvStore for StorageWorker {
                     cancelling: false,
                     payload: Some(Payload::Flush),
                     progress_seen: false,
+                    waiters: alloc::vec![Waiter::new(inc)],
                 },
             );
             self.shared.cv.notify_all();
@@ -1170,7 +1269,7 @@ impl KvStore for StorageWorker {
         })
     }
 
-    fn attach_waiter(&self, job: JobId) -> Result<(), PlatformError> {
+    fn attach_waiter(&self, job: JobId, inc: Incarnation) -> Result<(), PlatformError> {
         self.shared.with(|s| {
             let is_load = s
                 .jobs
@@ -1181,16 +1280,7 @@ impl KvStore for StorageWorker {
                     "not an in-flight load",
                 )));
             }
-            match s.coalesce.attach(job) {
-                Ok(_) => Ok(()),
-                Err(AttachRefused::JobFull | AttachRefused::TotalFull) => {
-                    s.stats.attach_refused_total += 1;
-                    Err(s.queue_full())
-                }
-                Err(AttachRefused::NoSuchJob) => Err(PlatformError::TaskRejected(String::from(
-                    "not an in-flight load",
-                ))),
-            }
+            s.try_attach(job, inc)
         })
     }
 
@@ -1201,25 +1291,82 @@ impl KvStore for StorageWorker {
         })
     }
 
+    /// Cancel on behalf of the request that opened the job (ADR 5.5: cancel
+    /// own waiter only). A request that attached later cancels with
+    /// [`StorageWorker::cancel_waiter`] and its own token; repeating a cancel
+    /// never removes someone else's interest.
     fn cancel(&self, job: JobId) -> CancelOutcome {
+        let Some(opener) = self.shared.with(|s| s.jobs.get(&job).map(|j| j.inc)) else {
+            return CancelOutcome::TooLate;
+        };
+        self.cancel_waiter(job, opener)
+    }
+
+    fn pin(&self, keys: &[ChunkKey]) -> Result<PinToken, PlatformError> {
+        self.inner.pin(keys)
+    }
+
+    fn unpin(&self, token: PinToken) {
+        self.inner.unpin(token);
+    }
+
+    fn delete(&self, keys: &[ChunkKey]) -> u64 {
+        let filtered: Vec<ChunkKey> = self.shared.with(|s| {
+            keys.iter()
+                .copied()
+                .filter(|k| !s.coalesce.has(Share::Load, k) && !s.coalesce.has(Share::Store, k))
+                .collect()
+        });
+        if filtered.is_empty() {
+            return 0;
+        }
+        self.inner.delete(&filtered)
+    }
+
+    fn recover_step(&self, slice_ms: u64) -> RecoveryProgress {
+        self.inner.recover_step(slice_ms)
+    }
+
+    fn shutdown(&self, intake_deadline_ms: u64) -> DrainReport {
+        self.shutdown_impl(intake_deadline_ms)
+    }
+}
+
+impl StorageWorker {
+    /// Withdraw the interest of the request named `inc` in `job`.
+    ///
+    /// * Other requests still want the job: `TooLate`, the job goes on.
+    /// * `inc` was the last interested request: the job itself is cancelled
+    ///   (`Cancelled` if it never reached the store or the store accepted the
+    ///   cancel, else `TooLate`).
+    /// * `inc` does not ride the job, or already withdrew: `TooLate`, nothing
+    ///   changes.
+    ///
+    /// Whatever the answer, every request that rode the job (including `inc`)
+    /// receives exactly one terminal completion, and only after the job's I/O
+    /// ended; a request releases what it owns only after polling it.
+    pub fn cancel_waiter(&self, job: JobId, inc: Incarnation) -> CancelOutcome {
         let action = self.shared.with(|s| {
-            let Some(j) = s.jobs.get(&job) else {
+            let Some(j) = s.jobs.get_mut(&job) else {
                 return Err(CancelOutcome::TooLate);
             };
             if j.kind == JobKind::Flush {
                 return Err(CancelOutcome::TooLate);
             }
-            if j.cancelling {
-                return Err(CancelOutcome::Cancelled);
-            }
-            if matches!(j.status, Status::Dispatching) {
+            let Some(w) = j.waiters.iter_mut().find(|w| w.inc == inc && !w.detached) else {
                 return Err(CancelOutcome::TooLate);
-            }
+            };
+            w.detached = true;
             match s.coalesce.detach(job) {
                 Detach::Remaining(_) => return Err(CancelOutcome::TooLate),
                 Detach::Unknown | Detach::Last => {}
             }
             let j = s.jobs.get_mut(&job).expect("job");
+            if matches!(j.status, Status::Dispatching) {
+                // The worker forwards the cancel once the store has the job.
+                j.cancelling = true;
+                return Err(CancelOutcome::TooLate);
+            }
             match j.status {
                 Status::Queued => {
                     let id = j.id;
@@ -1265,32 +1412,7 @@ impl KvStore for StorageWorker {
         }
     }
 
-    fn pin(&self, keys: &[ChunkKey]) -> Result<PinToken, PlatformError> {
-        self.inner.pin(keys)
-    }
-
-    fn unpin(&self, token: PinToken) {
-        self.inner.unpin(token);
-    }
-
-    fn delete(&self, keys: &[ChunkKey]) -> u64 {
-        let filtered: Vec<ChunkKey> = self.shared.with(|s| {
-            keys.iter()
-                .copied()
-                .filter(|k| !s.coalesce.has(Share::Load, k) && !s.coalesce.has(Share::Store, k))
-                .collect()
-        });
-        if filtered.is_empty() {
-            return 0;
-        }
-        self.inner.delete(&filtered)
-    }
-
-    fn recover_step(&self, slice_ms: u64) -> RecoveryProgress {
-        self.inner.recover_step(slice_ms)
-    }
-
-    fn shutdown(&self, intake_deadline_ms: u64) -> DrainReport {
+    fn shutdown_impl(&self, intake_deadline_ms: u64) -> DrainReport {
         let deadline = Instant::now() + Duration::from_millis(intake_deadline_ms);
         let to_cancel = self.shared.with(|s| {
             s.closed = true;

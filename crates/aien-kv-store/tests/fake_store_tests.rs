@@ -1144,10 +1144,16 @@ fn fake_attach_waiter_is_bounded_per_job_and_in_total() {
     let b = b.unwrap();
     assert!(r.fake.attach_waiter(a, Incarnation::seq(77)).is_ok()); // job a: 2 waiters
     assert!(r.fake.attach_waiter(a, Incarnation::seq(77)).is_ok()); // job a: 3 waiters, the per-job limit
-    assert_eq!(r.fake.attach_waiter(a, Incarnation::seq(77)), Err(PlatformError::QueueFull));
+    assert_eq!(
+        r.fake.attach_waiter(a, Incarnation::seq(77)),
+        Err(PlatformError::QueueFull)
+    );
     assert!(r.fake.attach_waiter(b, Incarnation::seq(77)).is_ok()); // 3 attached in total
     assert!(r.fake.attach_waiter(b, Incarnation::seq(77)).is_ok()); // 4: the total bound
-    assert_eq!(r.fake.attach_waiter(b, Incarnation::seq(77)), Err(PlatformError::QueueFull));
+    assert_eq!(
+        r.fake.attach_waiter(b, Incarnation::seq(77)),
+        Err(PlatformError::QueueFull)
+    );
     // Waiters end with their job; the total is released.
     r.fake.advance(1_000);
     let (c, _mc, _hc) = r.load(1);

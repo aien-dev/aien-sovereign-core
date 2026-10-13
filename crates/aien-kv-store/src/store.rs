@@ -29,9 +29,28 @@ use alloc::vec::Vec;
 pub struct JobId(pub u64);
 
 /// The caller's token, echoed in every completion so stale completions can be
-/// dropped (ADR 5.3).
+/// dropped (ADR 5.3). The full tuple `(seq_id, epoch)`: the scheduler's
+/// sequence id already uses all 64 bits (`slot << 32 | generation`,
+/// aien-scheduler/src/sequence.rs `to_u64`), so the residency epoch cannot be
+/// packed beside it. Two tokens name the same request only if both fields
+/// match; a reused sequence id in a later epoch is a different incarnation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct Incarnation(pub u64);
+pub struct Incarnation {
+    pub seq_id: u64,
+    pub epoch: u32,
+}
+
+impl Incarnation {
+    pub const fn new(seq_id: u64, epoch: u32) -> Self {
+        Self { seq_id, epoch }
+    }
+
+    /// Epoch 0: for callers that have no residency epoch (flush barriers,
+    /// fixtures).
+    pub const fn seq(seq_id: u64) -> Self {
+        Self { seq_id, epoch: 0 }
+    }
+}
 
 /// Returned by `pin`; hand it back to `unpin`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -203,9 +222,13 @@ pub trait KvStore: Send + Sync {
     ) -> Result<JobId, PlatformError>;
     /// Durability barrier for everything `Published` before the call.
     fn submit_flush(&self, inc: Incarnation) -> Result<JobId, PlatformError>;
-    /// Coalescing: register one more waiter on an in-flight load; `QueueFull`
-    /// past `max_waiters_per_job` waiters on the job or the total bound.
-    fn attach_waiter(&self, job: JobId) -> Result<(), PlatformError>;
+    /// Coalescing: register one more waiter, named by its own `inc`, on an
+    /// in-flight load; `QueueFull` past `max_waiters_per_job` waiters on the job
+    /// or the total bound. A raw store (fake, host adapter) runs one job and
+    /// yields one terminal carrying the opener's token; the storage worker
+    /// fans that out to one terminal per waiter, each with its own token
+    /// (ADR 5.3), so no completion ever stands for several incarnations.
+    fn attach_waiter(&self, job: JobId, inc: Incarnation) -> Result<(), PlatformError>;
     /// Non-blocking: drains at most `max` completions, oldest first.
     fn poll(&self, max: usize) -> Vec<Completion>;
     /// Returns immediately. The destination or source of the job is safe to

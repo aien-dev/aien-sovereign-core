@@ -13,6 +13,7 @@ pub mod coalesce;
 pub mod error;
 #[cfg(feature = "std")]
 pub mod fake;
+pub mod holder;
 #[cfg(all(feature = "std", unix))]
 pub mod host_fs;
 pub mod identity;

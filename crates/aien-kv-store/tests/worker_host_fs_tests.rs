@@ -4,6 +4,7 @@
 //! Covers store, restore, cancel and shutdown through the worker's own
 //! `KvStore` surface, and reopens the directory afterwards.
 
+mod common;
 #[path = "common/host_fs_rig.rs"]
 mod rig;
 
@@ -89,7 +90,10 @@ fn worker_over_host_fs_stores_then_restores_bytes_exactly() {
         .submit_load(key, &header, dst, Incarnation::new(2000, 3))
         .expect("submit load");
     let v = collect_terminals(&r.worker, &[lj]);
-    let c = v.iter().find(|c| c.job == lj && c.terminal.is_some()).unwrap();
+    let c = v
+        .iter()
+        .find(|c| c.job == lj && c.terminal.is_some())
+        .unwrap();
     assert!(matches!(c.terminal, Some(Terminal::Done(_))), "{c:?}");
     assert_eq!(c.incarnation, Incarnation::new(2000, 3));
     assert_eq!(mem.bytes(), pattern(1, 2 * BS), "restored bytes match");
@@ -123,7 +127,12 @@ fn worker_over_host_fs_routes_coalesced_restores_per_waiter() {
     // Wait for the second waiter's terminal too.
     let mut all = v;
     let t0 = Instant::now();
-    while all.iter().filter(|c| c.terminal.is_some() && c.job == first.job()).count() < 2 {
+    while all
+        .iter()
+        .filter(|c| c.terminal.is_some() && c.job == first.job())
+        .count()
+        < 2
+    {
         all.extend(r.worker.poll(64));
         assert!(t0.elapsed() < Duration::from_secs(20));
         std::thread::sleep(Duration::from_micros(300));
@@ -134,7 +143,11 @@ fn worker_over_host_fs_routes_coalesced_restores_per_waiter() {
         .map(|c| c.incarnation)
         .collect();
     incs.sort();
-    assert_eq!(incs, vec![a, b], "same sequence id, two epochs, two answers");
+    assert_eq!(
+        incs,
+        vec![a, b],
+        "same sequence id, two epochs, two answers"
+    );
     assert_eq!(mem.bytes(), pattern(2, 2 * BS));
 }
 
@@ -146,7 +159,10 @@ fn worker_over_host_fs_cancel_before_dispatch_writes_nothing() {
     let v = collect_terminals(&r.worker, &[job]);
     let c = v.iter().find(|c| c.terminal.is_some()).unwrap();
     assert_eq!(c.terminal, Some(Terminal::Cancelled));
-    assert!(!handle.is_held(), "the source is released after the terminal");
+    assert!(
+        !handle.is_held(),
+        "the source is released after the terminal"
+    );
     let (key, _) = r.fx.chunk(3, 8);
     assert_eq!(r.worker.lookup(&[key]), vec![None]);
     assert!(object_files(r.fx.root()).is_empty());
@@ -164,7 +180,10 @@ fn worker_over_host_fs_cancel_after_dispatch_still_ends_cleanly() {
         let (job, handle, _m) = submit_store(&r, n);
         let out = r.worker.cancel(job);
         let v = collect_terminals(&r.worker, &[job]);
-        let terms: Vec<_> = v.iter().filter(|c| c.job == job && c.terminal.is_some()).collect();
+        let terms: Vec<_> = v
+            .iter()
+            .filter(|c| c.job == job && c.terminal.is_some())
+            .collect();
         assert_eq!(terms.len(), 1, "{out:?}: {v:?}");
         let (key, _) = r.fx.chunk(n, 8);
         match terms[0].terminal.as_ref().unwrap() {
@@ -174,7 +193,10 @@ fn worker_over_host_fs_cancel_after_dispatch_still_ends_cleanly() {
         }
         let t0 = Instant::now();
         while handle.is_held() {
-            assert!(t0.elapsed() < Duration::from_secs(10), "source never released");
+            assert!(
+                t0.elapsed() < Duration::from_secs(10),
+                "source never released"
+            );
             std::thread::sleep(Duration::from_micros(300));
         }
         assert!(tmp_files(r.fx.root()).is_empty());
@@ -197,7 +219,10 @@ fn worker_over_host_fs_shutdown_drains_and_the_directory_reopens() {
     // Every accepted job has exactly one terminal.
     let v = collect_terminals(&r.worker, &jobs);
     for j in &jobs {
-        let n = v.iter().filter(|c| c.job == *j && c.terminal.is_some()).count();
+        let n = v
+            .iter()
+            .filter(|c| c.job == *j && c.terminal.is_some())
+            .count();
         assert_eq!(n, 1, "{j:?}");
     }
     assert!(keep.iter().all(|(h, _)| !h.is_held()), "sources released");
@@ -218,7 +243,11 @@ fn worker_over_host_fs_shutdown_drains_and_the_directory_reopens() {
     let reopened = fx.open();
     assert_eq!(reopened.capacity().state, StoreState::Open);
     for k in &published {
-        assert_eq!(reopened.lookup(&[*k]), vec![Some(FULL_PAYLOAD)], "survives reopen");
+        assert_eq!(
+            reopened.lookup(&[*k]),
+            vec![Some(FULL_PAYLOAD)],
+            "survives reopen"
+        );
     }
     reopened.audit().unwrap();
 }
