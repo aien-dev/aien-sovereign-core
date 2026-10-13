@@ -301,6 +301,10 @@ impl LaneTrace {
 
 const STALE_INTENT: &str = "intent was staged against a stale catalog";
 const NOT_ADMITTED: &str = "provider is not admitted";
+/// The lane has no way to enforce a restriction list, so a non-empty one is refused rather than
+/// minted as if it were a plain `Allow`.
+const UNENFORCED_RESTRICTIONS: &str =
+    "restricted allow refused: the lane cannot enforce restrictions";
 
 fn hex(bytes: &[u8]) -> String {
     const H: &[u8; 16] = b"0123456789abcdef";
@@ -425,7 +429,8 @@ impl EffectLane {
     }
 
     /// Ask `authority` whether `intent` may run, and mint an `AuthorizedEffect` only on
-    /// `Allow` or `AllowRestricted`. This is the only production path to an `AuthorizedEffect`.
+    /// `Allow` or an `AllowRestricted` with no restrictions. This is the only production path to
+    /// an `AuthorizedEffect`. A non-empty restriction list is denied: nothing here can enforce it.
     ///
     /// The lane, not the caller, reads the live descriptor for the authority. A stale intent
     /// (digest differs from the live catalog) is denied before the authority is asked.
@@ -542,6 +547,9 @@ impl EffectLane {
             Digest32::of(&bytes)
         };
         match decision {
+            AuthorityDecision::AllowRestricted(ref restrictions) if !restrictions.is_empty() => {
+                Err(AuthorityOutcome::Denied(UNENFORCED_RESTRICTIONS.into()))
+            }
             AuthorityDecision::Allow | AuthorityDecision::AllowRestricted(_) => Ok(mint(
                 intent,
                 scope.world_id,

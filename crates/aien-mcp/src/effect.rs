@@ -139,7 +139,7 @@ pub(crate) fn authorize_for_test<T>(
 }
 
 /// Production mint. Crate-private: reached only from `EffectLane::authorize` after an
-/// `EffectAuthority` returned `Allow` or `AllowRestricted`.
+/// `EffectAuthority` returned `Allow` or an empty `AllowRestricted`.
 pub(crate) fn mint<T>(
     intent: T,
     world_id: WorldId,
