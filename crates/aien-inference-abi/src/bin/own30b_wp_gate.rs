@@ -25,14 +25,16 @@
 //!   mutant) must FAIL that rule (their max relerr vs CTRL > B).
 //! Writes run.json (every per-layer number) and run.txt into the receipt dir.
 use std::path::PathBuf;
-use std::time::Instant;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Instant;
 
 /// `--devhost` (W-L1G-E): ON runs use the device router logits + MoE combine.
 static DEVHOST: AtomicBool = AtomicBool::new(false);
 
 use aien_inference_abi::qwen3_moe_omega::w8a8_control::ControlMode;
-use aien_inference_abi::qwen3_moe_omega::{AttnPath, DevicePaths, GenerateParams, Qwen3MoeOmegaEngine, WeightFormat};
+use aien_inference_abi::qwen3_moe_omega::{
+    AttnPath, DevicePaths, GenerateParams, Qwen3MoeOmegaEngine, WeightFormat,
+};
 use aien_inference_abi::qwen3_moe_omega_prefill::fake_quant::fake_quant_row;
 use aien_inference_abi::qwen3_moe_omega_prefill::{WpMutant, WpTrace};
 use aien_inference_abi::tokenizer::ChatTokenizer as Tokenizer;
@@ -40,7 +42,12 @@ use aien_inference_abi::tokenizer::ChatTokenizer as Tokenizer;
 fn mem_available_gb() -> f64 {
     std::fs::read_to_string("/proc/meminfo")
         .ok()
-        .and_then(|t| t.lines().find(|l| l.starts_with("MemAvailable:")).and_then(|l| l.split_whitespace().nth(1)).and_then(|v| v.parse::<f64>().ok()))
+        .and_then(|t| {
+            t.lines()
+                .find(|l| l.starts_with("MemAvailable:"))
+                .and_then(|l| l.split_whitespace().nth(1))
+                .and_then(|v| v.parse::<f64>().ok())
+        })
         .map(|kb| kb / 1024.0 / 1024.0)
         .unwrap_or(0.0)
 }
@@ -59,7 +66,10 @@ fn prompt_ids(tok: &Tokenizer, n: usize) -> Vec<u32> {
         return one;
     }
     if n <= ids.len() + tail.len() + 8 {
-        assert!(n <= ids.len(), "prompt length {n} too short for the preamble");
+        assert!(
+            n <= ids.len(),
+            "prompt length {n} too short for the preamble"
+        );
         ids.truncate(n);
         return ids;
     }
@@ -139,7 +149,10 @@ fn relerr_rows(a: &[f32], b: &[f32], row: usize, same: &[bool]) -> (f64, usize) 
 
 /// Per token: the two expert sets are equal.
 fn same_route(a: &[u32], b: &[u32], top_k: usize) -> Vec<bool> {
-    a.chunks(top_k).zip(b.chunks(top_k)).map(|(ra, rb)| ra.iter().all(|x| rb.contains(x))).collect()
+    a.chunks(top_k)
+        .zip(b.chunks(top_k))
+        .map(|(ra, rb)| ra.iter().all(|x| rb.contains(x)))
+        .collect()
 }
 
 /// Tokens whose expert SET differs, and the number of ids of `a` not in `b`'s set for that token.
@@ -166,10 +179,18 @@ fn cosine(a: &[f32], b: &[f32]) -> f64 {
 }
 
 fn argmax(l: &[f32]) -> usize {
-    (0..l.len()).max_by(|&a, &b| l[a].total_cmp(&l[b])).unwrap_or(0)
+    (0..l.len())
+        .max_by(|&a, &b| l[a].total_cmp(&l[b]))
+        .unwrap_or(0)
 }
 
-fn control_run(engine: &mut Qwen3MoeOmegaEngine, name: &str, ids: &[u32], mode: ControlMode, ops_layer: usize) -> Run {
+fn control_run(
+    engine: &mut Qwen3MoeOmegaEngine,
+    name: &str,
+    ids: &[u32],
+    mode: ControlMode,
+    ops_layer: usize,
+) -> Run {
     let c = engine.weights().config.clone();
     engine.set_whole_prompt(false).expect("off");
     engine.reset();
@@ -178,17 +199,36 @@ fn control_run(engine: &mut Qwen3MoeOmegaEngine, name: &str, ids: &[u32], mode: 
     let t0 = Instant::now();
     let mut hidden = Vec::new();
     for (row, &tok) in ids.iter().enumerate() {
-        hidden = engine.control_step(tok, mode, WpMutant::None, &mut trace, row).unwrap_or_else(|e| panic!("{name} token {row}: {e}"));
+        hidden = engine
+            .control_step(tok, mode, WpMutant::None, &mut trace, row)
+            .unwrap_or_else(|e| panic!("{name} token {row}: {e}"));
     }
     let logits0 = engine.logits(&hidden).expect("logits");
-    Run { name: name.to_string(), trace, logits0, secs: t0.elapsed().as_secs_f64() }
+    Run {
+        name: name.to_string(),
+        trace,
+        logits0,
+        secs: t0.elapsed().as_secs_f64(),
+    }
 }
 
-fn on_run(engine: &mut Qwen3MoeOmegaEngine, name: &str, ids: &[u32], mutant: WpMutant, ops_layer: usize) -> Run {
-    engine.set_whole_prompt(true).expect("whole-prompt prefill refused");
-    engine.set_whole_prompt_device_host(DEVHOST.load(Ordering::Relaxed)).expect("device router / combine refused");
+fn on_run(
+    engine: &mut Qwen3MoeOmegaEngine,
+    name: &str,
+    ids: &[u32],
+    mutant: WpMutant,
+    ops_layer: usize,
+) -> Run {
+    engine
+        .set_whole_prompt(true)
+        .expect("whole-prompt prefill refused");
+    engine
+        .set_whole_prompt_device_host(DEVHOST.load(Ordering::Relaxed))
+        .expect("device router / combine refused");
     engine.whole_prompt_set_mutant(mutant).expect("mutant");
-    engine.whole_prompt_set_trace(Some(WpTrace::new(Some(ops_layer)))).expect("trace");
+    engine
+        .whole_prompt_set_trace(Some(WpTrace::new(Some(ops_layer))))
+        .expect("trace");
     engine.reset();
     let mut logits0 = Vec::new();
     let t0 = Instant::now();
@@ -207,13 +247,38 @@ fn on_run(engine: &mut Qwen3MoeOmegaEngine, name: &str, ids: &[u32], mutant: WpM
         .unwrap_or_else(|e| panic!("{name}: {e}"));
     let secs = t0.elapsed().as_secs_f64();
     let trace = engine.whole_prompt_take_trace().expect("recorder");
-    engine.whole_prompt_set_mutant(WpMutant::None).expect("mutant off");
-    assert_eq!(trace.m, ids.len(), "{name}: the whole-prompt path did not run (recorder empty)");
+    engine
+        .whole_prompt_set_mutant(WpMutant::None)
+        .expect("mutant off");
+    assert_eq!(
+        trace.m,
+        ids.len(),
+        "{name}: the whole-prompt path did not run (recorder empty)"
+    );
     let st = engine.whole_prompt_stats().cloned().unwrap_or_default();
-    let want = if DEVHOST.load(Ordering::Relaxed) { st.layers } else { 0 };
-    assert!(st.router == want && st.combine == want, "{name}: device router / combine launches {} / {}, want {want} each", st.router, st.combine);
-    println!("{name}: routing path {} (router launches {}, combine launches {})", if want > 0 { "DEVICE" } else { "HOST" }, st.router, st.combine);
-    Run { name: name.to_string(), trace, logits0, secs }
+    let want = if DEVHOST.load(Ordering::Relaxed) {
+        st.layers
+    } else {
+        0
+    };
+    assert!(
+        st.router == want && st.combine == want,
+        "{name}: device router / combine launches {} / {}, want {want} each",
+        st.router,
+        st.combine
+    );
+    println!(
+        "{name}: routing path {} (router launches {}, combine launches {})",
+        if want > 0 { "DEVICE" } else { "HOST" },
+        st.router,
+        st.combine
+    );
+    Run {
+        name: name.to_string(),
+        trace,
+        logits0,
+        secs,
+    }
 }
 
 /// Per-layer comparison of `a` against `b`: x_mid / x_out relative errors, worst token, flips.
@@ -233,11 +298,21 @@ fn compare_layers(a: &Run, b: &Run) -> Vec<serde_json::Value> {
 
 fn compare_ops(a: &Run, b: &Run) -> serde_json::Value {
     let m = a.trace.m;
-    let one = |x: &[f32], y: &[f32]| if x.is_empty() || x.len() != y.len() { serde_json::Value::Null } else { serde_json::json!(relerr(x, y, x.len() / m).0) };
+    let one = |x: &[f32], y: &[f32]| {
+        if x.is_empty() || x.len() != y.len() {
+            serde_json::Value::Null
+        } else {
+            serde_json::json!(relerr(x, y, x.len() / m).0)
+        }
+    };
     let (oa, ob) = (&a.trace.ops, &b.trace.ops);
     let l = a.trace.ops_layer.unwrap_or(0);
     let same = same_route(&a.trace.experts[l], &b.trace.experts[l], a.trace.top_k);
-    let (moe_same, n_same) = if oa.moe_out.len() == ob.moe_out.len() && !oa.moe_out.is_empty() { relerr_rows(&oa.moe_out, &ob.moe_out, oa.moe_out.len() / m, &same) } else { (f64::NAN, 0) };
+    let (moe_same, n_same) = if oa.moe_out.len() == ob.moe_out.len() && !oa.moe_out.is_empty() {
+        relerr_rows(&oa.moe_out, &ob.moe_out, oa.moe_out.len() / m, &same)
+    } else {
+        (f64::NAN, 0)
+    };
     // How far apart the two runs' QUANTISED GEMM inputs are (host quantiser on the recorded pre-quant rows):
     // the rounding-decision flips a small input difference causes, the floor of any GEMM-output comparison.
     let quantised = |x: &[f32], y: &[f32]| {
@@ -259,18 +334,29 @@ fn compare_ops(a: &Run, b: &Run) -> serde_json::Value {
 }
 
 fn max_out(layers: &[serde_json::Value]) -> f64 {
-    layers.iter().map(|v| v["out"].as_f64().unwrap_or(0.0)).fold(0.0, f64::max)
+    layers
+        .iter()
+        .map(|v| v["out"].as_f64().unwrap_or(0.0))
+        .fold(0.0, f64::max)
 }
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let checkpoint = PathBuf::from(args.get(1).expect("checkpoint dir"));
     let receipt = PathBuf::from(args.get(2).expect("receipt dir"));
-    let (mut lens, mut ops_layer, mut mutants, mut max_context, mut force) = (vec![512usize, 2048], 0usize, false, 8192usize, false);
+    let (mut lens, mut ops_layer, mut mutants, mut max_context, mut force) =
+        (vec![512usize, 2048], 0usize, false, 8192usize, false);
     let mut it = args[3..].iter();
     while let Some(a) = it.next() {
         match a.as_str() {
-            "--lens" => lens = it.next().expect("--lens").split(',').map(|s| s.parse().expect("len")).collect(),
+            "--lens" => {
+                lens = it
+                    .next()
+                    .expect("--lens")
+                    .split(',')
+                    .map(|s| s.parse().expect("len"))
+                    .collect()
+            }
             "--ops-layer" => ops_layer = it.next().expect("--ops-layer").parse().expect("n"),
             "--mutants" => mutants = true,
             "--devhost" => DEVHOST.store(true, Ordering::Relaxed),
@@ -291,7 +377,10 @@ fn main() {
         say("REFUSED: less than 70 GB available; --force-memory to override".into());
         std::process::exit(3);
     }
-    if let Some(us) = aien_omega_gpu::parse_spin_us(std::env::var(aien_omega_gpu::SPIN_US_ENV).ok().as_deref()).expect("spin env") {
+    if let Some(us) =
+        aien_omega_gpu::parse_spin_us(std::env::var(aien_omega_gpu::SPIN_US_ENV).ok().as_deref())
+            .expect("spin env")
+    {
         aien_omega_gpu::set_spin_us(us).expect("set spin window");
     }
     say(format!(
@@ -303,22 +392,44 @@ fn main() {
     ));
     let tok = Tokenizer::from_file(checkpoint.join("tokenizer.json")).expect("tokenizer");
     let t0 = Instant::now();
-    let (mut engine, report) =
-        Qwen3MoeOmegaEngine::load_omega_paths(&checkpoint, max_context, WeightFormat::Fp8All, AttnPath::Fused, DevicePaths::default(), &mut |_| {})
-            .expect("load on Omega");
-    say(format!("LOAD {:.1}s resident {:.2} GB attention {} mem_available_after {:.1} GB", t0.elapsed().as_secs_f64(), report.resident_bytes as f64 / 1e9, engine.attention_path(), mem_available_gb()));
+    let (mut engine, report) = Qwen3MoeOmegaEngine::load_omega_paths(
+        &checkpoint,
+        max_context,
+        WeightFormat::Fp8All,
+        AttnPath::Fused,
+        DevicePaths::default(),
+        &mut |_| {},
+    )
+    .expect("load on Omega");
+    say(format!(
+        "LOAD {:.1}s resident {:.2} GB attention {} mem_available_after {:.1} GB",
+        t0.elapsed().as_secs_f64(),
+        report.resident_bytes as f64 / 1e9,
+        engine.attention_path(),
+        mem_available_gb()
+    ));
 
     let mut docs = Vec::new();
     let mut all_pass = true;
     for &n in &lens {
         let ids = prompt_ids(&tok, n);
         let off = control_run(&mut engine, "OFF", &ids, ControlMode::Off, ops_layer);
-        say(format!("len {n} OFF  (per-token OFF kernels, f32 activations): {:.1} s", off.secs));
+        say(format!(
+            "len {n} OFF  (per-token OFF kernels, f32 activations): {:.1} s",
+            off.secs
+        ));
         let ctrl = control_run(&mut engine, "CTRL", &ids, ControlMode::W8A8, ops_layer);
-        say(format!("len {n} CTRL (OFF kernels + the ON quantiser at every GEMM input): {:.1} s", ctrl.secs));
+        say(format!(
+            "len {n} CTRL (OFF kernels + the ON quantiser at every GEMM input): {:.1} s",
+            ctrl.secs
+        ));
         let on = on_run(&mut engine, "ON", &ids, WpMutant::None, ops_layer);
-        say(format!("len {n} ON   (whole-prompt path): {:.1} s", on.secs));
-        let mut runs: Vec<(&str, &Run, &Run, Vec<serde_json::Value>, serde_json::Value)> = Vec::new();
+        say(format!(
+            "len {n} ON   (whole-prompt path): {:.1} s",
+            on.secs
+        ));
+        let mut runs: Vec<(&str, &Run, &Run, Vec<serde_json::Value>, serde_json::Value)> =
+            Vec::new();
         for (a, b) in [(&on, &off), (&ctrl, &off), (&on, &ctrl)] {
             let name = format!("{}_vs_{}", a.name, b.name);
             let layers = compare_layers(a, b);
@@ -326,14 +437,42 @@ fn main() {
             runs.push((Box::leak(name.into_boxed_str()), a, b, layers, ops));
         }
         say(format!("len {n} per-layer relative error on x_out (L2 over all {n} tokens) | expert-set flips (tokens/ids):"));
-        say(format!("{:>5} {:>12} {:>12} {:>12} | {:>11} {:>11} {:>11}", "layer", "ON-OFF", "CTRL-OFF", "ON-CTRL", "ON-OFF", "CTRL-OFF", "ON-CTRL"));
+        say(format!(
+            "{:>5} {:>12} {:>12} {:>12} | {:>11} {:>11} {:>11}",
+            "layer", "ON-OFF", "CTRL-OFF", "ON-CTRL", "ON-OFF", "CTRL-OFF", "ON-CTRL"
+        ));
         for l in 0..off.trace.layers() {
             let v = |i: usize, key: &str| runs[i].3[l][key].as_f64().unwrap_or(0.0);
-            let f = |i: usize| format!("{}/{}", runs[i].3[l]["flip_tokens"], runs[i].3[l]["flip_ids"]);
-            say(format!("{l:>5} {:>12.3e} {:>12.3e} {:>12.3e} | {:>11} {:>11} {:>11}", v(0, "out"), v(1, "out"), v(2, "out"), f(0), f(1), f(2)));
+            let f = |i: usize| {
+                format!(
+                    "{}/{}",
+                    runs[i].3[l]["flip_tokens"], runs[i].3[l]["flip_ids"]
+                )
+            };
+            say(format!(
+                "{l:>5} {:>12.3e} {:>12.3e} {:>12.3e} | {:>11} {:>11} {:>11}",
+                v(0, "out"),
+                v(1, "out"),
+                v(2, "out"),
+                f(0),
+                f(1),
+                f(2)
+            ));
         }
-        say(format!("len {n} ops at layer {ops_layer} (relative error): {}", ["ON-OFF", "CTRL-OFF", "ON-CTRL"].iter().zip(&runs).map(|(nm, r)| format!("{nm} {}", r.4)).collect::<Vec<_>>().join(" ; ")));
-        let (c_on_off, c_ctrl_off, c_on_ctrl) = (cosine(&on.logits0, &off.logits0), cosine(&ctrl.logits0, &off.logits0), cosine(&on.logits0, &ctrl.logits0));
+        say(format!(
+            "len {n} ops at layer {ops_layer} (relative error): {}",
+            ["ON-OFF", "CTRL-OFF", "ON-CTRL"]
+                .iter()
+                .zip(&runs)
+                .map(|(nm, r)| format!("{nm} {}", r.4))
+                .collect::<Vec<_>>()
+                .join(" ; ")
+        ));
+        let (c_on_off, c_ctrl_off, c_on_ctrl) = (
+            cosine(&on.logits0, &off.logits0),
+            cosine(&ctrl.logits0, &off.logits0),
+            cosine(&on.logits0, &ctrl.logits0),
+        );
         say(format!(
             "len {n} first-step logits cosine: ON-OFF {c_on_off:.6} CTRL-OFF {c_ctrl_off:.6} ON-CTRL {c_on_ctrl:.6}; top-1 OFF {} CTRL {} ON {}",
             argmax(&off.logits0),
@@ -345,14 +484,24 @@ fn main() {
         let ops_ok: Vec<(String, bool)> = ["qkv", "oproj", "moe_out"]
             .iter()
             .map(|k| {
-                let (a, b) = (runs[2].4[*k].as_f64().unwrap_or(f64::NAN), runs[1].4[*k].as_f64().unwrap_or(f64::NAN));
+                let (a, b) = (
+                    runs[2].4[*k].as_f64().unwrap_or(f64::NAN),
+                    runs[1].4[*k].as_f64().unwrap_or(f64::NAN),
+                );
                 (format!("{k} ON-CTRL {a:.3e} <= CTRL-OFF {b:.3e}"), a <= b)
             })
             .collect();
         let pass = on_ctrl <= budget && ops_ok.iter().all(|o| o.1);
         all_pass &= pass;
         say(format!("len {n} RULE: budget B = max_l relerr(CTRL,OFF) = {budget:.3e}; max_l relerr(ON,CTRL) = {on_ctrl:.3e} ({:.2} x B); ops: {}", on_ctrl / budget, ops_ok.iter().map(|o| format!("{} {}", o.0, if o.1 { "ok" } else { "VIOLATED" })).collect::<Vec<_>>().join(", ")));
-        say(format!("len {n} VERDICT: {}", if pass { "PASS (ON within the control's rounding budget: drift = activation rounding)" } else { "FAIL (ON differs from the W8A8 control beyond the rounding budget)" }));
+        say(format!(
+            "len {n} VERDICT: {}",
+            if pass {
+                "PASS (ON within the control's rounding budget: drift = activation rounding)"
+            } else {
+                "FAIL (ON differs from the W8A8 control beyond the rounding budget)"
+            }
+        ));
         let mut doc = serde_json::json!({
             "len": n, "ops_layer": ops_layer, "secs": {"off": off.secs, "ctrl": ctrl.secs, "on": on.secs},
             "layers": runs.iter().map(|r| (r.0, &r.3)).collect::<std::collections::BTreeMap<_, _>>(),
@@ -362,7 +511,10 @@ fn main() {
         });
         if mutants {
             let mut mres = Vec::new();
-            for (mutant, name) in [(WpMutant::Routing, "MUT_ROUTING"), (WpMutant::GateUpScales, "MUT_GUSCALES")] {
+            for (mutant, name) in [
+                (WpMutant::Routing, "MUT_ROUTING"),
+                (WpMutant::GateUpScales, "MUT_GUSCALES"),
+            ] {
                 let mu = on_run(&mut engine, name, &ids, mutant, ops_layer);
                 let layers = compare_layers(&mu, &ctrl);
                 let worst = max_out(&layers);
@@ -384,8 +536,15 @@ fn main() {
         }
         docs.push(doc);
     }
-    say(format!("SUMMARY {}", if all_pass { "PASS" } else { "FAIL" }));
+    say(format!(
+        "SUMMARY {}",
+        if all_pass { "PASS" } else { "FAIL" }
+    ));
     let out = serde_json::json!({"checkpoint": checkpoint, "lens": lens, "ops_layer": ops_layer, "mutants": mutants, "runs": docs});
-    std::fs::write(receipt.join("run.json"), serde_json::to_string_pretty(&out).unwrap()).expect("run.json");
+    std::fs::write(
+        receipt.join("run.json"),
+        serde_json::to_string_pretty(&out).unwrap(),
+    )
+    .expect("run.json");
     std::fs::write(receipt.join("run.txt"), log.join("\n") + "\n").expect("run.txt");
 }

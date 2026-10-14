@@ -21,13 +21,16 @@
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use aien_inference_abi::qwen3_coder::{compute_logits, forward_token, load_qwen3_coder, Qwen3CoderState};
-use aien_inference_abi::qwen3_moe::load_qwen3_fp8_moe_layer;
-use aien_inference_abi::qwen3_moe_omega::{
-    current_rss_bytes, load_attention_layer_f32, peak_rss_bytes, replay_attention, replay_moe, AttnPath, DevicePaths, GenerateParams, LmHead,
-    OmegaModelUploader, PathChoice, Qwen3MoeConfig, Qwen3MoeOmegaEngine, StepTiming, WeightFormat,
+use aien_inference_abi::qwen3_coder::{
+    compute_logits, forward_token, load_qwen3_coder, Qwen3CoderState,
 };
+use aien_inference_abi::qwen3_moe::load_qwen3_fp8_moe_layer;
 use aien_inference_abi::qwen3_moe_omega::dgraph;
+use aien_inference_abi::qwen3_moe_omega::{
+    current_rss_bytes, load_attention_layer_f32, peak_rss_bytes, replay_attention, replay_moe,
+    AttnPath, DevicePaths, GenerateParams, LmHead, OmegaModelUploader, PathChoice, Qwen3MoeConfig,
+    Qwen3MoeOmegaEngine, StepTiming, WeightFormat,
+};
 use aien_inference_abi::tokenizer::ChatTokenizer as Tokenizer;
 
 const PROMPT_TEXTS: [(&str, &str); 4] = [
@@ -54,7 +57,8 @@ fn prompts(tok: &Tokenizer) -> Vec<(String, Vec<u32>)> {
             let ids = if *name == "p1-one-token" {
                 tok.encode_with_special(text, false).expect("encode")
             } else {
-                tok.encode_with_special(&chatml(text), false).expect("encode")
+                tok.encode_with_special(&chatml(text), false)
+                    .expect("encode")
             };
             (name.to_string(), ids)
         })
@@ -70,7 +74,13 @@ struct PromptRun {
     pt: StepTiming,
 }
 
-fn run_prompt(engine: &mut Qwen3MoeOmegaEngine, ids: &[u32], chunk: usize, new_tokens: usize, eos: &[u32]) -> Result<PromptRun, String> {
+fn run_prompt(
+    engine: &mut Qwen3MoeOmegaEngine,
+    ids: &[u32],
+    chunk: usize,
+    new_tokens: usize,
+    eos: &[u32],
+) -> Result<PromptRun, String> {
     engine.reset();
     engine.prefill_chunk = chunk;
     let mut tokens = Vec::new();
@@ -89,13 +99,22 @@ fn run_prompt(engine: &mut Qwen3MoeOmegaEngine, ids: &[u32], chunk: usize, new_t
             true
         },
     )?;
-    Ok(PromptRun { tokens, logits0, prefill_ms: o.prefill_ms, pt: o.prefill_timing })
+    Ok(PromptRun {
+        tokens,
+        logits0,
+        prefill_ms: o.prefill_ms,
+        pt: o.prefill_timing,
+    })
 }
 
 /// Cosine and largest absolute difference between two logits vectors.
 fn logits_agreement(a: &[f32], b: &[f32]) -> (f64, f32) {
     let s = aien_inference_abi::qwen3_moe::parity_stats(a, b);
-    let maxd = a.iter().zip(b).map(|(x, y)| (x - y).abs()).fold(0.0f32, f32::max);
+    let maxd = a
+        .iter()
+        .zip(b)
+        .map(|(x, y)| (x - y).abs())
+        .fold(0.0f32, f32::max);
     (s.cosine, maxd)
 }
 
@@ -248,9 +267,25 @@ fn parse_args() -> Args {
     while let Some(arg) = it.next() {
         match arg.as_str() {
             "--new" => a.new_tokens = it.next().expect("--new N").parse().expect("number"),
-            "--max-context" => a.max_context = it.next().expect("--max-context N").parse().expect("number"),
-            "--layers" => a.layers = it.next().expect("--layers a,b").split(',').map(|s| s.parse().expect("layer")).collect(),
-            "--prompts" => a.prompt_ids = it.next().expect("--prompts a,b").split(',').map(|s| s.parse().expect("prompt")).collect(),
+            "--max-context" => {
+                a.max_context = it.next().expect("--max-context N").parse().expect("number")
+            }
+            "--layers" => {
+                a.layers = it
+                    .next()
+                    .expect("--layers a,b")
+                    .split(',')
+                    .map(|s| s.parse().expect("layer"))
+                    .collect()
+            }
+            "--prompts" => {
+                a.prompt_ids = it
+                    .next()
+                    .expect("--prompts a,b")
+                    .split(',')
+                    .map(|s| s.parse().expect("prompt"))
+                    .collect()
+            }
             "--force-memory" => a.force_memory = true,
             "--weights" => {
                 a.format = match it.next().expect("--weights bf16|fp8-experts|fp8").as_str() {
@@ -268,29 +303,67 @@ fn parse_args() -> Args {
                     other => panic!("--attn {other}: auto, split or fused"),
                 }
             }
-            "--attn-mutant" => a.attn_mutant = it.next().expect("--attn-mutant N").parse().expect("number"),
-            "--prefill-chunk" => a.prefill_chunk = Some(it.next().expect("--prefill-chunk N").parse().expect("number")),
-            "--router" => a.paths.router = parse_choice(&it.next().expect("--router auto|host|device"), "host", "--router"),
-            "--lm-head" => a.paths.lm_head = parse_choice(&it.next().expect("--lm-head auto|dense|gemv"), "dense", "--lm-head"),
+            "--attn-mutant" => {
+                a.attn_mutant = it.next().expect("--attn-mutant N").parse().expect("number")
+            }
+            "--prefill-chunk" => {
+                a.prefill_chunk = Some(
+                    it.next()
+                        .expect("--prefill-chunk N")
+                        .parse()
+                        .expect("number"),
+                )
+            }
+            "--router" => {
+                a.paths.router = parse_choice(
+                    &it.next().expect("--router auto|host|device"),
+                    "host",
+                    "--router",
+                )
+            }
+            "--lm-head" => {
+                a.paths.lm_head = parse_choice(
+                    &it.next().expect("--lm-head auto|dense|gemv"),
+                    "dense",
+                    "--lm-head",
+                )
+            }
             "--tokens-only" => a.tokens_only = true,
             "--whole-prompt" => a.whole_prompt = true,
             "--prefill-device-host" => a.wp_device_host = true,
-            "--prefill" => a.prefill = parse_choice(&it.next().expect("--prefill auto|gemv|gemm"), "gemv", "--prefill"),
+            "--prefill" => {
+                a.prefill = parse_choice(
+                    &it.next().expect("--prefill auto|gemv|gemm"),
+                    "gemv",
+                    "--prefill",
+                )
+            }
             "--prefill-routing" => {
-                a.prefill_device_routing = match it.next().expect("--prefill-routing host|device").as_str() {
-                    "host" => false,
-                    "device" => true,
-                    other => panic!("--prefill-routing {other}: host or device"),
-                }
+                a.prefill_device_routing =
+                    match it.next().expect("--prefill-routing host|device").as_str() {
+                        "host" => false,
+                        "device" => true,
+                        other => panic!("--prefill-routing {other}: host or device"),
+                    }
             }
             "--gemm-mutants" => {
                 let v = it.next().expect("--gemm-mutants a,b (empty for none)");
-                a.gemm_mutants = v.split(',').filter(|s| !s.is_empty()).map(|s| s.parse().expect("mutant")).collect();
+                a.gemm_mutants = v
+                    .split(',')
+                    .filter(|s| !s.is_empty())
+                    .map(|s| s.parse().expect("mutant"))
+                    .collect();
             }
-            "--long-prompt" => a.long_prompt = it.next().expect("--long-prompt N").parse().expect("number"),
+            "--long-prompt" => {
+                a.long_prompt = it.next().expect("--long-prompt N").parse().expect("number")
+            }
             "--router-mutants" => {
                 let v = it.next().expect("--router-mutants a,b (empty for none)");
-                a.router_mutants = v.split(',').filter(|s| !s.is_empty()).map(|s| s.parse().expect("mutant")).collect();
+                a.router_mutants = v
+                    .split(',')
+                    .filter(|s| !s.is_empty())
+                    .map(|s| s.parse().expect("mutant"))
+                    .collect();
             }
             other => pos.push(other.to_string()),
         }
@@ -310,7 +383,11 @@ fn golden(a: &Args) {
     let config = Qwen3MoeConfig::from_checkpoint(&a.checkpoint).expect("config");
     let t0 = Instant::now();
     let weights = load_qwen3_coder(&a.checkpoint).expect("load CPU reference");
-    eprintln!("cpu reference loaded in {:.0}s, rss {:.1} GB", t0.elapsed().as_secs_f64(), current_rss_bytes().unwrap_or(0) as f64 / 1e9);
+    eprintln!(
+        "cpu reference loaded in {:.0}s, rss {:.1} GB",
+        t0.elapsed().as_secs_f64(),
+        current_rss_bytes().unwrap_or(0) as f64 / 1e9
+    );
     let mut out = Vec::new();
     for (idx, (name, ids)) in prompts(&tok).into_iter().enumerate() {
         if !a.prompt_ids.contains(&(idx + 1)) {
@@ -336,7 +413,11 @@ fn golden(a: &Args) {
         }
         let secs = t1.elapsed().as_secs_f64();
         let text = tok.decode(&tokens).unwrap_or_default();
-        eprintln!("{name}: {} prompt tokens, {} new in {secs:.0}s: {text:?}", ids.len(), tokens.len());
+        eprintln!(
+            "{name}: {} prompt tokens, {} new in {secs:.0}s: {text:?}",
+            ids.len(),
+            tokens.len()
+        );
         out.push(serde_json::json!({
             "name": name, "prompt_tokens": ids, "golden": tokens, "margins": margins,
             "text": text, "cpu_seconds": secs,
@@ -365,11 +446,16 @@ fn chip(a: &Args) {
         say("REFUSED: less than 70 GB available (another model may be loaded); --force-memory to override".into());
         std::process::exit(3);
     }
-    let golden: serde_json::Value = serde_json::from_slice(&std::fs::read(&a.golden).expect("golden file")).expect("golden json");
+    let golden: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&a.golden).expect("golden file"))
+            .expect("golden json");
     let tok = Tokenizer::from_file(a.checkpoint.join("tokenizer.json")).expect("tokenizer");
     // Spin window: honour AIEN_OMEGA_SPIN_US (one knob, one variable per run); unset keeps
     // whatever the session default is, and the value actually in force is printed below.
-    if let Some(us) = aien_omega_gpu::parse_spin_us(std::env::var(aien_omega_gpu::SPIN_US_ENV).ok().as_deref()).expect("spin env") {
+    if let Some(us) =
+        aien_omega_gpu::parse_spin_us(std::env::var(aien_omega_gpu::SPIN_US_ENV).ok().as_deref())
+            .expect("spin env")
+    {
         aien_omega_gpu::set_spin_us(us).expect("set spin window");
     }
     let config = Qwen3MoeConfig::from_checkpoint(&a.checkpoint).expect("config");
@@ -388,16 +474,26 @@ fn chip(a: &Args) {
     // ---- load ----
     let t0 = Instant::now();
     let mut n = 0usize;
-    let (mut engine, report) = Qwen3MoeOmegaEngine::load_omega_paths(&a.checkpoint, a.max_context, a.format, a.attn, a.paths, &mut |s| {
-        n += 1;
-        if n.is_multiple_of(20) || s.starts_with("kv") || s == "lm_head" {
-            eprintln!("  [{:.0}s] {s}", t0.elapsed().as_secs_f64());
-        }
-    })
+    let (mut engine, report) = Qwen3MoeOmegaEngine::load_omega_paths(
+        &a.checkpoint,
+        a.max_context,
+        a.format,
+        a.attn,
+        a.paths,
+        &mut |s| {
+            n += 1;
+            if n.is_multiple_of(20) || s.starts_with("kv") || s == "lm_head" {
+                eprintln!("  [{:.0}s] {s}", t0.elapsed().as_secs_f64());
+            }
+        },
+    )
     .expect("load on Omega");
     match a.prefill {
         PathChoice::Host => engine.prefill_gemm = false,
-        PathChoice::Device => assert!(engine.prefill_gemm, "--prefill gemm: the prefill GEMM is not linked or not offered for every projection"),
+        PathChoice::Device => assert!(
+            engine.prefill_gemm,
+            "--prefill gemm: the prefill GEMM is not linked or not offered for every projection"
+        ),
         PathChoice::Auto => {}
     }
     engine.prefill_device_routing = a.prefill_device_routing;
@@ -410,17 +506,42 @@ fn chip(a: &Args) {
     say(format!(
         "prefill path {} routing {} (gemm_api={})",
         if engine.prefill_gemm { "gemm" } else { "gemv" },
-        if engine.prefill_device_routing { "device" } else { "host" },
+        if engine.prefill_device_routing {
+            "device"
+        } else {
+            "host"
+        },
         aien_omega_fp8::has_gemm()
     ));
-    say(format!("attention path {} prefill_chunk {} batched_prefill_possible {}", engine.attention_path(), engine.prefill_chunk, engine.batched_prefill_possible()));
-    let router_path = if engine.device_routing { "device" } else { "host" };
-    let lm_head_path = if matches!(engine.weights().lm_head, LmHead::Gemv(_)) { "gemv" } else { "dense" };
-    say(format!("router path {router_path} lm_head path {lm_head_path} (router_api={} bf16_api={})", OmegaModelUploader::uses_router_api(), OmegaModelUploader::uses_bf16_api()));
+    say(format!(
+        "attention path {} prefill_chunk {} batched_prefill_possible {}",
+        engine.attention_path(),
+        engine.prefill_chunk,
+        engine.batched_prefill_possible()
+    ));
+    let router_path = if engine.device_routing {
+        "device"
+    } else {
+        "host"
+    };
+    let lm_head_path = if matches!(engine.weights().lm_head, LmHead::Gemv(_)) {
+        "gemv"
+    } else {
+        "dense"
+    };
+    say(format!(
+        "router path {router_path} lm_head path {lm_head_path} (router_api={} bf16_api={})",
+        OmegaModelUploader::uses_router_api(),
+        OmegaModelUploader::uses_bf16_api()
+    ));
     // One command list per decode token (OWN30B_DECODE_GRAPH=1): built now so a load that cannot
     // run it is refused before any generation, never run on the old path in its place.
     if dgraph::stamps_requested() && !engine.decode_graph_on() {
-        say(format!("REFUSED: {}=1 measures the one-list decode; it needs {}=1 as well", dgraph::STAMPS_ENV, dgraph::ENV));
+        say(format!(
+            "REFUSED: {}=1 measures the one-list decode; it needs {}=1 as well",
+            dgraph::STAMPS_ENV,
+            dgraph::ENV
+        ));
         std::process::exit(4);
     }
     if engine.decode_graph_on() {
@@ -431,7 +552,11 @@ fn chip(a: &Args) {
     }
     say(format!(
         "decode graph {} (dgraph_api={}, {}=1 to turn on) mutant {}",
-        if engine.decode_graph_on() { "ON" } else { "OFF" },
+        if engine.decode_graph_on() {
+            "ON"
+        } else {
+            "OFF"
+        },
         aien_omega_dgraph::is_native(),
         aien_inference_abi::qwen3_moe_omega::dgraph::ENV,
         engine.decode_graph_mutant()
@@ -452,8 +577,16 @@ fn chip(a: &Args) {
     }
     say(format!(
         "whole-prompt prefill {} device router/combine {}",
-        if engine.whole_prompt_on() { "ON" } else { "OFF" },
-        if engine.whole_prompt_device_host_on() { "ON" } else { "OFF" }
+        if engine.whole_prompt_on() {
+            "ON"
+        } else {
+            "OFF"
+        },
+        if engine.whole_prompt_device_host_on() {
+            "ON"
+        } else {
+            "OFF"
+        }
     ));
     let peak = report.peak_rss_bytes.unwrap_or(0) as f64 / 1e9;
     say(format!(
@@ -469,7 +602,10 @@ fn chip(a: &Args) {
     // Transient budget: whatever the resident mapping counts, the extra over resident + host must
     // stay within one layer's transients plus slack (design: peak near the 60 GB resident size).
     let transient = peak - (report.resident_bytes + report.host_bytes) as f64 / 1e9;
-    say(format!("LOAD peak over resident+host: {transient:.2} GB (budget 6 GB) -> {}", if transient <= 6.0 { "PASS" } else { "FAIL" }));
+    say(format!(
+        "LOAD peak over resident+host: {transient:.2} GB (budget 6 GB) -> {}",
+        if transient <= 6.0 { "PASS" } else { "FAIL" }
+    ));
 
     let ps = prompts(&tok);
     let mut results = Vec::new();
@@ -480,162 +616,216 @@ fn chip(a: &Args) {
     let mut tokens_pass_prefill = true;
     // --tokens-only skips parity, controls and the prefill check (speed and token runs only).
     if !a.tokens_only {
-    // ---- layer parity on the short prompt (prompt 2), chip traces replayed on the host ----
-    let (pname, pids) = &ps[1];
-    engine.trace_layers = a.layers.clone();
-    engine.reset();
-    for &t in pids {
-        engine.step(t).expect("step");
-    }
-    let traces = std::mem::take(&mut engine.traces);
-    for &l in &a.layers {
-        let lt: Vec<_> = traces.iter().filter(|t| t.layer == l).cloned().collect();
-        let attn = load_attention_layer_f32(&a.checkpoint, &config, l).expect("attention weights");
-        let host = replay_attention(&config, &attn, &lt);
-        let capsule = load_qwen3_fp8_moe_layer(&a.checkpoint, l).expect("capsule");
-        let mut worst_attn = 1.0f64;
-        let mut worst_moe = 1.0f64;
-        let mut worst_p95 = 0.0f32;
-        let mut routing_ok = true;
-        let mut worst_wt = 0.0f32;
-        let mut worst_xprime = 0.0f32;
-        for (t, h) in lt.iter().zip(&host) {
-            // The device router's own x' against the host RMSNorm of the same residual row.
-            if !t.post_device.is_empty() {
-                worst_xprime = t.post_device.iter().zip(&t.post).map(|(d, p)| (d - p).abs() / (1.0 + p.abs())).fold(worst_xprime, f32::max);
-            }
-            let s = aien_inference_abi::qwen3_moe::parity_stats(&t.attn_proj, h);
-            worst_attn = worst_attn.min(s.cosine);
-            let m = replay_moe(&capsule, t, config.top_k);
-            worst_moe = worst_moe.min(m.stats.cosine);
-            worst_p95 = worst_p95.max(m.stats.p95_rel);
-            routing_ok &= m.routing_agrees;
-            worst_wt = worst_wt.max(m.max_weight_err);
+        // ---- layer parity on the short prompt (prompt 2), chip traces replayed on the host ----
+        let (pname, pids) = &ps[1];
+        engine.trace_layers = a.layers.clone();
+        engine.reset();
+        for &t in pids {
+            engine.step(t).expect("step");
         }
-        let pass = worst_attn >= 0.999 && worst_moe >= 0.999 && routing_ok && worst_wt <= 1e-4 && worst_xprime <= 1e-4;
-        parity_pass &= pass;
-        say(format!(
+        let traces = std::mem::take(&mut engine.traces);
+        for &l in &a.layers {
+            let lt: Vec<_> = traces.iter().filter(|t| t.layer == l).cloned().collect();
+            let attn =
+                load_attention_layer_f32(&a.checkpoint, &config, l).expect("attention weights");
+            let host = replay_attention(&config, &attn, &lt);
+            let capsule = load_qwen3_fp8_moe_layer(&a.checkpoint, l).expect("capsule");
+            let mut worst_attn = 1.0f64;
+            let mut worst_moe = 1.0f64;
+            let mut worst_p95 = 0.0f32;
+            let mut routing_ok = true;
+            let mut worst_wt = 0.0f32;
+            let mut worst_xprime = 0.0f32;
+            for (t, h) in lt.iter().zip(&host) {
+                // The device router's own x' against the host RMSNorm of the same residual row.
+                if !t.post_device.is_empty() {
+                    worst_xprime = t
+                        .post_device
+                        .iter()
+                        .zip(&t.post)
+                        .map(|(d, p)| (d - p).abs() / (1.0 + p.abs()))
+                        .fold(worst_xprime, f32::max);
+                }
+                let s = aien_inference_abi::qwen3_moe::parity_stats(&t.attn_proj, h);
+                worst_attn = worst_attn.min(s.cosine);
+                let m = replay_moe(&capsule, t, config.top_k);
+                worst_moe = worst_moe.min(m.stats.cosine);
+                worst_p95 = worst_p95.max(m.stats.p95_rel);
+                routing_ok &= m.routing_agrees;
+                worst_wt = worst_wt.max(m.max_weight_err);
+            }
+            let pass = worst_attn >= 0.999
+                && worst_moe >= 0.999
+                && routing_ok
+                && worst_wt <= 1e-4
+                && worst_xprime <= 1e-4;
+            parity_pass &= pass;
+            say(format!(
             "PARITY layer {l} over {} positions ({pname}): attention cosine(min) {worst_attn:.6} moe cosine(min) {worst_moe:.6} moe p95_rel(max) {worst_p95:.4} routing_agrees={routing_ok} routing weights err(max) {worst_wt:.2e} router x' rel(max) {worst_xprime:.2e} -> {}",
             lt.len(),
             if pass { "PASS" } else { "FAIL" }
         ));
-        parity_json.push(serde_json::json!({"layer": l, "positions": lt.len(), "attn_cosine_min": worst_attn, "moe_cosine_min": worst_moe, "moe_p95_rel_max": worst_p95, "routing_agrees": routing_ok, "routing_weight_err_max": worst_wt, "router_xprime_rel_max": worst_xprime, "pass": pass}));
-    }
-    // Negative controls on the first traced layer: host routing mutant, then the chip-side mutant
-    // of the expert kernel in use (bf16: window skew of one tile; FP8: scales dropped, kernel
-    // mutant 1 of omega_gpu_fp8_api.h).
-    let l0 = a.layers[0];
-    let capsule = load_qwen3_fp8_moe_layer(&a.checkpoint, l0).expect("capsule");
-    let fp8 = a.format.fp8_experts();
-    let chip_control = if fp8 { "fp8-scales-dropped" } else { "window-skew-1-tile" };
-    for (name, set) in [("routing-mutant", 0), (chip_control, 1)] {
-        engine.reset();
-        engine.trace_layers = vec![l0];
-        engine.routing_mutant = set == 0;
-        if set == 1 && fp8 {
-            aien_omega_fp8::test_set_mutant(1);
-        } else if set == 1 {
-            aien_omega_moe::test_set_window_skew(1);
+            parity_json.push(serde_json::json!({"layer": l, "positions": lt.len(), "attn_cosine_min": worst_attn, "moe_cosine_min": worst_moe, "moe_p95_rel_max": worst_p95, "routing_agrees": routing_ok, "routing_weight_err_max": worst_wt, "router_xprime_rel_max": worst_xprime, "pass": pass}));
         }
-        let stepped: Result<Vec<_>, _> = pids[..pids.len().min(4)].iter().map(|&t| engine.step(t)).collect();
-        aien_omega_fp8::test_set_mutant(0);
-        aien_omega_moe::test_set_window_skew(0);
-        engine.routing_mutant = false;
-        if let Err(e) = stepped {
-            // A mutant kernel the chip refuses (poison survived) is also caught, by name.
-            say(format!("CONTROL {name}: layer {l0} step refused: {e} -> CAUGHT (refused)"));
-            controls.push(serde_json::json!({"control": name, "refused": e, "caught": true}));
-            engine.traces.clear();
-            continue;
-        }
-        let worst = engine.traces.iter().map(|t| replay_moe(&capsule, t, config.top_k).stats.cosine).fold(1.0f64, f64::min);
-        let not_applicable = set == 1 && !fp8 && !OmegaModelUploader::uses_window_api();
-        let caught = worst < 0.99 || not_applicable;
-        let note = if not_applicable { " (window API not linked: control not applicable)" } else { "" };
-        say(format!("CONTROL {name}: layer {l0} moe cosine(min) {worst:.4} -> {}{note}", if caught { "CAUGHT" } else { "NOT CAUGHT (FAIL)" }));
-        controls.push(serde_json::json!({"control": name, "moe_cosine_min": worst, "caught": caught}));
-        parity_pass &= caught;
-        engine.traces.clear();
-    }
-    // Third control on the fused path: the chip-side decode attention mutant (default 1 = no
-    // RoPE on q and k; omega_gpu_decode_attn_api.h) over the parity prompt; the host attention
-    // replay of the first traced layer must then disagree.
-    if engine.attention_path() == "fused" {
-        let name = format!("attention-mutant-{}", a.attn_mutant);
-        engine.reset();
-        engine.trace_layers = vec![l0];
-        aien_omega_dattn::test_set_mutant(a.attn_mutant);
-        let stepped: Result<Vec<_>, _> = pids.iter().map(|&t| engine.step(t)).collect();
-        aien_omega_dattn::test_set_mutant(0);
-        match stepped {
-            Err(e) => {
-                say(format!("CONTROL {name}: layer {l0} step refused: {e} -> CAUGHT (refused)"));
-                controls.push(serde_json::json!({"control": name, "refused": e, "caught": true}));
+        // Negative controls on the first traced layer: host routing mutant, then the chip-side mutant
+        // of the expert kernel in use (bf16: window skew of one tile; FP8: scales dropped, kernel
+        // mutant 1 of omega_gpu_fp8_api.h).
+        let l0 = a.layers[0];
+        let capsule = load_qwen3_fp8_moe_layer(&a.checkpoint, l0).expect("capsule");
+        let fp8 = a.format.fp8_experts();
+        let chip_control = if fp8 {
+            "fp8-scales-dropped"
+        } else {
+            "window-skew-1-tile"
+        };
+        for (name, set) in [("routing-mutant", 0), (chip_control, 1)] {
+            engine.reset();
+            engine.trace_layers = vec![l0];
+            engine.routing_mutant = set == 0;
+            if set == 1 && fp8 {
+                aien_omega_fp8::test_set_mutant(1);
+            } else if set == 1 {
+                aien_omega_moe::test_set_window_skew(1);
             }
-            Ok(_) => {
-                let attn = load_attention_layer_f32(&a.checkpoint, &config, l0).expect("attention weights");
-                let host = replay_attention(&config, &attn, &engine.traces);
-                let worst = engine
-                    .traces
-                    .iter()
-                    .zip(&host)
-                    .map(|(t, h)| aien_inference_abi::qwen3_moe::parity_stats(&t.attn_proj, h).cosine)
-                    .fold(1.0f64, f64::min);
-                let caught = worst < 0.99;
+            let stepped: Result<Vec<_>, _> = pids[..pids.len().min(4)]
+                .iter()
+                .map(|&t| engine.step(t))
+                .collect();
+            aien_omega_fp8::test_set_mutant(0);
+            aien_omega_moe::test_set_window_skew(0);
+            engine.routing_mutant = false;
+            if let Err(e) = stepped {
+                // A mutant kernel the chip refuses (poison survived) is also caught, by name.
                 say(format!(
+                    "CONTROL {name}: layer {l0} step refused: {e} -> CAUGHT (refused)"
+                ));
+                controls.push(serde_json::json!({"control": name, "refused": e, "caught": true}));
+                engine.traces.clear();
+                continue;
+            }
+            let worst = engine
+                .traces
+                .iter()
+                .map(|t| replay_moe(&capsule, t, config.top_k).stats.cosine)
+                .fold(1.0f64, f64::min);
+            let not_applicable = set == 1 && !fp8 && !OmegaModelUploader::uses_window_api();
+            let caught = worst < 0.99 || not_applicable;
+            let note = if not_applicable {
+                " (window API not linked: control not applicable)"
+            } else {
+                ""
+            };
+            say(format!(
+                "CONTROL {name}: layer {l0} moe cosine(min) {worst:.4} -> {}{note}",
+                if caught {
+                    "CAUGHT"
+                } else {
+                    "NOT CAUGHT (FAIL)"
+                }
+            ));
+            controls.push(
+                serde_json::json!({"control": name, "moe_cosine_min": worst, "caught": caught}),
+            );
+            parity_pass &= caught;
+            engine.traces.clear();
+        }
+        // Third control on the fused path: the chip-side decode attention mutant (default 1 = no
+        // RoPE on q and k; omega_gpu_decode_attn_api.h) over the parity prompt; the host attention
+        // replay of the first traced layer must then disagree.
+        if engine.attention_path() == "fused" {
+            let name = format!("attention-mutant-{}", a.attn_mutant);
+            engine.reset();
+            engine.trace_layers = vec![l0];
+            aien_omega_dattn::test_set_mutant(a.attn_mutant);
+            let stepped: Result<Vec<_>, _> = pids.iter().map(|&t| engine.step(t)).collect();
+            aien_omega_dattn::test_set_mutant(0);
+            match stepped {
+                Err(e) => {
+                    say(format!(
+                        "CONTROL {name}: layer {l0} step refused: {e} -> CAUGHT (refused)"
+                    ));
+                    controls
+                        .push(serde_json::json!({"control": name, "refused": e, "caught": true}));
+                }
+                Ok(_) => {
+                    let attn = load_attention_layer_f32(&a.checkpoint, &config, l0)
+                        .expect("attention weights");
+                    let host = replay_attention(&config, &attn, &engine.traces);
+                    let worst = engine
+                        .traces
+                        .iter()
+                        .zip(&host)
+                        .map(|(t, h)| {
+                            aien_inference_abi::qwen3_moe::parity_stats(&t.attn_proj, h).cosine
+                        })
+                        .fold(1.0f64, f64::min);
+                    let caught = worst < 0.99;
+                    say(format!(
                     "CONTROL {name}: layer {l0} attention cosine(min) {worst:.4} over {} positions -> {}",
                     engine.traces.len(),
                     if caught { "CAUGHT" } else { "NOT CAUGHT (FAIL)" }
                 ));
-                controls.push(serde_json::json!({"control": name, "attn_cosine_min": worst, "caught": caught}));
-                parity_pass &= caught;
-            }
-        }
-        engine.traces.clear();
-    }
-    // Router controls on the device path: each deliberately wrong router kernel (omega_gpu_router_api.h)
-    // over the parity prompt must make the first traced layer disagree with the host oracle: the
-    // oracle input is the host's own RMSNorm of the same residual row, the chip's choice and MoE
-    // output come from the wrong router.
-    if engine.device_routing {
-        for &m in &a.router_mutants {
-            let name = format!("router-mutant-{m}");
-            engine.reset();
-            engine.trace_layers = vec![l0];
-            aien_omega_router::test_set_mutant(m);
-            let stepped: Result<Vec<_>, _> = pids[..pids.len().min(4)].iter().map(|&t| engine.step(t)).collect();
-            aien_omega_router::test_set_mutant(0);
-            match stepped {
-                Err(e) => {
-                    say(format!("CONTROL {name}: layer {l0} step refused: {e} -> CAUGHT (refused)"));
-                    controls.push(serde_json::json!({"control": name, "refused": e, "caught": true}));
-                }
-                Ok(_) => {
-                    let mut worst = 1.0f64;
-                    let mut routing_ok = true;
-                    let mut xprime = 0.0f32;
-                    let mut wt_err = 0.0f32;
-                    for t in &engine.traces {
-                        let r = replay_moe(&capsule, t, config.top_k);
-                        worst = worst.min(r.stats.cosine);
-                        routing_ok &= r.routing_agrees;
-                        wt_err = wt_err.max(r.max_weight_err);
-                        xprime = t.post_device.iter().zip(&t.post).map(|(d, p)| (d - p).abs() / (1.0 + p.abs())).fold(xprime, f32::max);
-                    }
-                    let caught = worst < 0.99 || !routing_ok || wt_err > 1e-3 || xprime > 1e-4;
-                    say(format!(
-                        "CONTROL {name}: layer {l0} moe cosine(min) {worst:.4} routing_agrees={routing_ok} routing weights err(max) {wt_err:.2e} router x' rel(max) {xprime:.2e} over {} positions -> {}",
-                        engine.traces.len(),
-                        if caught { "CAUGHT" } else { "NOT CAUGHT (FAIL)" }
-                    ));
-                    controls.push(serde_json::json!({"control": name, "moe_cosine_min": worst, "routing_agrees": routing_ok, "routing_weight_err_max": wt_err, "router_xprime_rel_max": xprime, "caught": caught}));
+                    controls.push(serde_json::json!({"control": name, "attn_cosine_min": worst, "caught": caught}));
                     parity_pass &= caught;
                 }
             }
             engine.traces.clear();
         }
-    }
-    engine.trace_layers.clear();
+        // Router controls on the device path: each deliberately wrong router kernel (omega_gpu_router_api.h)
+        // over the parity prompt must make the first traced layer disagree with the host oracle: the
+        // oracle input is the host's own RMSNorm of the same residual row, the chip's choice and MoE
+        // output come from the wrong router.
+        if engine.device_routing {
+            for &m in &a.router_mutants {
+                let name = format!("router-mutant-{m}");
+                engine.reset();
+                engine.trace_layers = vec![l0];
+                aien_omega_router::test_set_mutant(m);
+                let stepped: Result<Vec<_>, _> = pids[..pids.len().min(4)]
+                    .iter()
+                    .map(|&t| engine.step(t))
+                    .collect();
+                aien_omega_router::test_set_mutant(0);
+                match stepped {
+                    Err(e) => {
+                        say(format!(
+                            "CONTROL {name}: layer {l0} step refused: {e} -> CAUGHT (refused)"
+                        ));
+                        controls.push(
+                            serde_json::json!({"control": name, "refused": e, "caught": true}),
+                        );
+                    }
+                    Ok(_) => {
+                        let mut worst = 1.0f64;
+                        let mut routing_ok = true;
+                        let mut xprime = 0.0f32;
+                        let mut wt_err = 0.0f32;
+                        for t in &engine.traces {
+                            let r = replay_moe(&capsule, t, config.top_k);
+                            worst = worst.min(r.stats.cosine);
+                            routing_ok &= r.routing_agrees;
+                            wt_err = wt_err.max(r.max_weight_err);
+                            xprime = t
+                                .post_device
+                                .iter()
+                                .zip(&t.post)
+                                .map(|(d, p)| (d - p).abs() / (1.0 + p.abs()))
+                                .fold(xprime, f32::max);
+                        }
+                        let caught = worst < 0.99 || !routing_ok || wt_err > 1e-3 || xprime > 1e-4;
+                        say(format!(
+                        "CONTROL {name}: layer {l0} moe cosine(min) {worst:.4} routing_agrees={routing_ok} routing weights err(max) {wt_err:.2e} router x' rel(max) {xprime:.2e} over {} positions -> {}",
+                        engine.traces.len(),
+                        if caught { "CAUGHT" } else { "NOT CAUGHT (FAIL)" }
+                    ));
+                        controls.push(serde_json::json!({"control": name, "moe_cosine_min": worst, "routing_agrees": routing_ok, "routing_weight_err_max": wt_err, "router_xprime_rel_max": xprime, "caught": caught}));
+                        parity_pass &= caught;
+                    }
+                }
+                engine.traces.clear();
+            }
+        }
+        engine.trace_layers.clear();
     }
 
     // ---- batched prefill against token-at-a-time on the 204-token prompt: same logits, same tokens ----
@@ -646,7 +836,11 @@ fn chip(a: &Args) {
         let mut outs = Vec::new();
         for c in [1usize, chunk] {
             let r = run_prompt(&mut engine, pids, c, 8, &config.eos_token_ids).expect("generate");
-            say(prefill_line(&format!("PREFILL chunk {c} ({pname}"), pids.len(), &r));
+            say(prefill_line(
+                &format!("PREFILL chunk {c} ({pname}"),
+                pids.len(),
+                &r,
+            ));
             outs.push(r);
         }
         engine.prefill_chunk = chunk;
@@ -671,11 +865,16 @@ fn chip(a: &Args) {
     // Each deliberately wrong GEMM kernel (omega_gpu_fp8gemm_api.h) runs a whole chunked prefill; the
     // first-step logits must then disagree with the clean chunked prefill of the same prompt.
     let mut gemm_controls = Vec::new();
-    if !a.tokens_only && engine.prefill_gemm && engine.batched_prefill_possible() && !a.gemm_mutants.is_empty() {
+    if !a.tokens_only
+        && engine.prefill_gemm
+        && engine.batched_prefill_possible()
+        && !a.gemm_mutants.is_empty()
+    {
         let (pname, pids) = &ps[2];
         let ids = &pids[..pids.len().min(80)];
         let chunk = engine.prefill_chunk.max(2);
-        let clean = run_prompt(&mut engine, ids, chunk, 1, &config.eos_token_ids).expect("clean gemm prefill");
+        let clean = run_prompt(&mut engine, ids, chunk, 1, &config.eos_token_ids)
+            .expect("clean gemm prefill");
         for &m in &a.gemm_mutants {
             let name = format!("gemm-mutant-{m}");
             aien_omega_fp8::gemm_test_set_mutant(m);
@@ -684,7 +883,8 @@ fn chip(a: &Args) {
             match r {
                 Err(e) => {
                     say(format!("CONTROL {name}: prefill of {} tokens ({pname}) refused: {e} -> CAUGHT (refused)", ids.len()));
-                    gemm_controls.push(serde_json::json!({"control": name, "refused": e, "caught": true}));
+                    gemm_controls
+                        .push(serde_json::json!({"control": name, "refused": e, "caught": true}));
                 }
                 Ok(r) => {
                     let (cos, maxd) = logits_agreement(&r.logits0, &clean.logits0);
@@ -699,7 +899,8 @@ fn chip(a: &Args) {
             }
         }
         // The kernel cache is back to the clean kernel: the same prefill again is bit-identical.
-        let again = run_prompt(&mut engine, ids, chunk, 1, &config.eos_token_ids).expect("clean gemm prefill again");
+        let again = run_prompt(&mut engine, ids, chunk, 1, &config.eos_token_ids)
+            .expect("clean gemm prefill again");
         let restored = again.logits0 == clean.logits0;
         say(format!("CONTROL gemm-mutants-off: the clean prefill after the mutants is bit-identical to before -> {}", if restored { "PASS" } else { "FAIL" }));
         parity_pass &= restored;
@@ -713,16 +914,37 @@ fn chip(a: &Args) {
         if !a.prompt_ids.contains(&(idx + 1)) {
             continue;
         }
-        let g = golden["prompts"].as_array().and_then(|arr| arr.iter().find(|p| p["name"] == *name));
+        let g = golden["prompts"]
+            .as_array()
+            .and_then(|arr| arr.iter().find(|p| p["name"] == *name));
         let Some(g) = g else {
             say(format!("{name}: no golden entry, skipped"));
             continue;
         };
-        let want: Vec<u32> = g["golden"].as_array().unwrap().iter().map(|v| v.as_u64().unwrap() as u32).collect();
-        let margins: Vec<f32> = g["margins"].as_array().unwrap().iter().map(|v| v.as_f64().unwrap() as f32).collect();
-        let golden_prompt: Vec<u32> = g["prompt_tokens"].as_array().unwrap().iter().map(|v| v.as_u64().unwrap() as u32).collect();
+        let want: Vec<u32> = g["golden"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_u64().unwrap() as u32)
+            .collect();
+        let margins: Vec<f32> = g["margins"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_f64().unwrap() as f32)
+            .collect();
+        let golden_prompt: Vec<u32> = g["prompt_tokens"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_u64().unwrap() as u32)
+            .collect();
         if golden_prompt != *ids {
-            say(format!("{name}: prompt tokens differ from the golden file's ({} vs {}), FAIL", ids.len(), golden_prompt.len()));
+            say(format!(
+                "{name}: prompt tokens differ from the golden file's ({} vs {}), FAIL",
+                ids.len(),
+                golden_prompt.len()
+            ));
             tokens_pass = false;
             continue;
         }
@@ -737,13 +959,30 @@ fn chip(a: &Args) {
             })
             .expect("generate");
         // The golden list includes a final stop id when the CPU stopped; ours consumed it.
-        let want_cmp: Vec<u32> = want.iter().copied().filter(|t| !config.eos_token_ids.contains(t)).collect();
-        let first_diff = got.iter().zip(&want_cmp).position(|(x, y)| x != y).or(if got.len() != want_cmp.len() { Some(got.len().min(want_cmp.len())) } else { None });
+        let want_cmp: Vec<u32> = want
+            .iter()
+            .copied()
+            .filter(|t| !config.eos_token_ids.contains(t))
+            .collect();
+        let first_diff = got.iter().zip(&want_cmp).position(|(x, y)| x != y).or(
+            if got.len() != want_cmp.len() {
+                Some(got.len().min(want_cmp.len()))
+            } else {
+                None
+            },
+        );
         let verdict = match first_diff {
             None => "IDENTICAL".to_string(),
             Some(i) => {
                 let m = margins.get(i).copied().unwrap_or(f32::NAN);
-                format!("DIVERGES at {i} (cpu top-2 margin {m:.4}; {})", if m < 1e-3 { "below the 1e-3 floor: recorded, not waved" } else { "FAIL" })
+                format!(
+                    "DIVERGES at {i} (cpu top-2 margin {m:.4}; {})",
+                    if m < 1e-3 {
+                        "below the 1e-3 floor: recorded, not waved"
+                    } else {
+                        "FAIL"
+                    }
+                )
             }
         };
         if let Some(i) = first_diff {
@@ -753,7 +992,11 @@ fn chip(a: &Args) {
         }
         let dt = &o.decode_timing;
         let steps = o.emitted_tokens.max(1) as f64;
-        let tok_s = if o.decode_ms > 0 { o.emitted_tokens as f64 * 1000.0 / o.decode_ms as f64 } else { 0.0 };
+        let tok_s = if o.decode_ms > 0 {
+            o.emitted_tokens as f64 * 1000.0 / o.decode_ms as f64
+        } else {
+            0.0
+        };
         let pt = &o.prefill_timing;
         say(format!(
             "TOKENS {name}: {} prompt tokens, prefill {:.2}s ({:.1} ms/token; chunk {}, per token attention {:.1} ms experts {:.1} ms host {:.1} ms launches {:.1}), decode {} tokens in {} ms = {:.1} ms/token = {tok_s:.1} tok/s; per step: attention {:.1} ms experts {:.1} ms lm_head {:.1} ms host {:.1} ms chip-reported {:.1} ms launches {}; {verdict}",
@@ -778,7 +1021,13 @@ fn chip(a: &Args) {
         // Every old-path launch is its own synchronous submission; a one-list token is one
         // submission for all its launches.
         let submits = dt.launches - dt.graph_launches + dt.graph_submits;
-        let per_graph = |v: u64| if dt.graph_tokens > 0 { v as f64 / dt.graph_tokens as f64 } else { 0.0 };
+        let per_graph = |v: u64| {
+            if dt.graph_tokens > 0 {
+                v as f64 / dt.graph_tokens as f64
+            } else {
+                0.0
+            }
+        };
         say(format!(
             "  DECODE GRAPH {}: {} of {} decode steps as one list (the first step is the prefill's lm_head); per step launches {:.1} submits {:.1}; per graph token launches {:.1} submits {:.1} record {:.1} us",
             if engine.decode_graph_on() { "ON" } else { "OFF" },
@@ -798,8 +1047,14 @@ fn chip(a: &Args) {
             }
             timeline_json = serde_json::json!({"steps": t.steps, "launches": t.launches, "ns": t.ns, "span_ns": t.span_ns, "chip_ns": t.chip_ns, "table": lines});
         }
-        say(format!("  chip text: {:?}", tok.decode(&got).unwrap_or_default()));
-        say(format!("  cpu  text: {:?}", g["text"].as_str().unwrap_or("")));
+        say(format!(
+            "  chip text: {:?}",
+            tok.decode(&got).unwrap_or_default()
+        ));
+        say(format!(
+            "  cpu  text: {:?}",
+            g["text"].as_str().unwrap_or("")
+        ));
         results.push(serde_json::json!({
             "name": name, "prompt_tokens": ids.len(), "chip": got, "golden": want, "first_diff": first_diff,
             "prefill_ms": o.prefill_ms, "decode_ms": o.decode_ms, "emitted": o.emitted_tokens, "tok_s": tok_s,
@@ -817,7 +1072,8 @@ fn chip(a: &Args) {
         let chunk = engine.prefill_chunk.max(2);
         let mut outs = Vec::new();
         for c in [chunk, 1usize] {
-            let r = run_prompt(&mut engine, &ids, c, a.new_tokens, &config.eos_token_ids).expect("long prompt generate");
+            let r = run_prompt(&mut engine, &ids, c, a.new_tokens, &config.eos_token_ids)
+                .expect("long prompt generate");
             say(prefill_line(&format!("LONG chunk {c}"), ids.len(), &r));
             outs.push(r);
         }
@@ -830,7 +1086,14 @@ fn chip(a: &Args) {
         let mut gemm_eq_gemv = true;
         if engine.prefill_gemm {
             engine.prefill_gemm = false;
-            let g = run_prompt(&mut engine, &ids, aien_inference_abi::qwen3_moe_omega::PREFILL_CHUNK, a.new_tokens, &config.eos_token_ids).expect("long prompt gemv");
+            let g = run_prompt(
+                &mut engine,
+                &ids,
+                aien_inference_abi::qwen3_moe_omega::PREFILL_CHUNK,
+                a.new_tokens,
+                &config.eos_token_ids,
+            )
+            .expect("long prompt gemv");
             engine.prefill_gemm = true;
             say(prefill_line("LONG gemv chunk 8", ids.len(), &g));
             gemm_eq_gemv = g.logits0 == outs[0].logits0 && g.tokens == outs[0].tokens;
@@ -845,12 +1108,20 @@ fn chip(a: &Args) {
             outs[0].prefill_ms as f64 / ids.len() as f64,
             if ok { "PASS" } else { "FAIL" }
         ));
-        say(format!("  long chip text: {:?}", tok.decode(&outs[0].tokens).unwrap_or_default()));
+        say(format!(
+            "  long chip text: {:?}",
+            tok.decode(&outs[0].tokens).unwrap_or_default()
+        ));
         tokens_pass &= ok;
         long_json = serde_json::json!({"prompt_tokens": ids.len(), "chunk": chunk, "tokens_identical": same, "logits_cosine": cos, "logits_max_abs_diff": maxd,
             "prefill_ms_chunk": outs[0].prefill_ms, "prefill_ms_chunk1": outs[1].prefill_ms, "top2_margin_chunk1": margin});
     }
-    say(format!("SUMMARY parity={} tokens={} peak_rss={:.2} GB", if parity_pass { "PASS" } else { "FAIL" }, if tokens_pass { "PASS" } else { "FAIL" }, peak_rss_bytes().unwrap_or(0) as f64 / 1e9));
+    say(format!(
+        "SUMMARY parity={} tokens={} peak_rss={:.2} GB",
+        if parity_pass { "PASS" } else { "FAIL" },
+        if tokens_pass { "PASS" } else { "FAIL" },
+        peak_rss_bytes().unwrap_or(0) as f64 / 1e9
+    ));
     let doc = serde_json::json!({
         "checkpoint": a.checkpoint.display().to_string(),
         "golden": a.golden.display().to_string(),
@@ -865,7 +1136,11 @@ fn chip(a: &Args) {
         "parity": parity_json, "controls": controls, "prompts": results,
         "pass": parity_pass && tokens_pass,
     });
-    std::fs::write(receipt.join("run.json"), serde_json::to_string_pretty(&doc).unwrap()).expect("write run.json");
+    std::fs::write(
+        receipt.join("run.json"),
+        serde_json::to_string_pretty(&doc).unwrap(),
+    )
+    .expect("write run.json");
     std::fs::write(receipt.join("run.log"), log.join("\n") + "\n").expect("write run.log");
     println!("receipt: {}", receipt.display());
     if !(parity_pass && tokens_pass) {
@@ -901,7 +1176,10 @@ fn timeline_table(t: &dgraph::Timeline, c: &Qwen3MoeConfig) -> Vec<String> {
             _ => None,
         }
     };
-    let mut out = vec![format!("TIMELINE over {} graph tokens: {:<12} {:>9} {:>10} {:>14} {:>9}", t.steps, "kind", "launches", "us/step", "bytes/step", "GB/s")];
+    let mut out = vec![format!(
+        "TIMELINE over {} graph tokens: {:<12} {:>9} {:>10} {:>14} {:>9}",
+        t.steps, "kind", "launches", "us/step", "bytes/step", "GB/s"
+    )];
     let mut sum_ns = 0u64;
     for k in 0..12 {
         let name = aien_omega_dgraph::kind_name(k as u8);
@@ -909,11 +1187,21 @@ fn timeline_table(t: &dgraph::Timeline, c: &Qwen3MoeConfig) -> Vec<String> {
         let us = t.ns[k] as f64 / 1e3 / steps;
         let (b, gbs) = match bytes(&name) {
             // bytes per ns = GB/s
-            Some(b) if t.ns[k] > 0 => (format!("{b:.0}"), format!("{:.1}", b * steps / t.ns[k] as f64)),
+            Some(b) if t.ns[k] > 0 => (
+                format!("{b:.0}"),
+                format!("{:.1}", b * steps / t.ns[k] as f64),
+            ),
             Some(b) => (format!("{b:.0}"), "-".into()),
             None => ("-".into(), "-".into()),
         };
-        out.push(format!("TIMELINE {:<12} {:>9.1} {:>10.1} {:>14} {:>9}", name, t.launches[k] as f64 / steps, us, b, gbs));
+        out.push(format!(
+            "TIMELINE {:<12} {:>9.1} {:>10.1} {:>14} {:>9}",
+            name,
+            t.launches[k] as f64 / steps,
+            us,
+            b,
+            gbs
+        ));
     }
     out.push(format!(
         "TIMELINE span {:.1} us/step (sum of kinds {:.1}) vs graph chip_ns {:.1} us/step",

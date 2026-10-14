@@ -19,12 +19,18 @@ pub struct OmegaFusedKv {
 impl OmegaFusedKv {
     /// Whether the kernel's fixed shape matches `config` (32 query heads, 4 KV heads, 128 wide).
     pub fn fits(config: &Qwen3MoeConfig) -> bool {
-        config.q_heads == aien_omega_dattn::Q_HEADS && config.kv_heads == aien_omega_dattn::KV_HEADS && config.head_dim == aien_omega_dattn::HEAD_DIM
+        config.q_heads == aien_omega_dattn::Q_HEADS
+            && config.kv_heads == aien_omega_dattn::KV_HEADS
+            && config.head_dim == aien_omega_dattn::HEAD_DIM
     }
 
     /// Allocates the cache for `max_context` tokens (rounded up to 256) and uploads every
     /// layer's q_norm / k_norm weights.
-    pub fn new(config: &Qwen3MoeConfig, max_context: usize, layers: &[OmegaLayer]) -> Result<Self, String> {
+    pub fn new(
+        config: &Qwen3MoeConfig,
+        max_context: usize,
+        layers: &[OmegaLayer],
+    ) -> Result<Self, String> {
         if !aien_omega_dattn::is_native() {
             return Err("this binary has no decode attention linked (omega before cut 8)".into());
         }
@@ -35,15 +41,34 @@ impl OmegaFusedKv {
             ));
         }
         if layers.len() != config.layers {
-            return Err(format!("fused attention: {} layers of weights, config says {}", layers.len(), config.layers));
+            return Err(format!(
+                "fused attention: {} layers of weights, config says {}",
+                layers.len(),
+                config.layers
+            ));
         }
         let max_pos = aien_omega_dattn::round_max_pos(max_context);
-        let mut cache = aien_omega_dattn::DecodeAttnCache::alloc(config.layers, max_pos, config.rope_theta as f64)
-            .map_err(|e| format!("decode attn cache alloc ({} layers x {max_pos}): {e}", config.layers))?;
+        let mut cache = aien_omega_dattn::DecodeAttnCache::alloc(
+            config.layers,
+            max_pos,
+            config.rope_theta as f64,
+        )
+        .map_err(|e| {
+            format!(
+                "decode attn cache alloc ({} layers x {max_pos}): {e}",
+                config.layers
+            )
+        })?;
         for (l, layer) in layers.iter().enumerate() {
-            cache.set_norms(l, &layer.q_norm, &layer.k_norm).map_err(|e| format!("decode attn norms layer {l}: {e}"))?;
+            cache
+                .set_norms(l, &layer.q_norm, &layer.k_norm)
+                .map_err(|e| format!("decode attn norms layer {l}: {e}"))?;
         }
-        Ok(Self { cache, capacity: max_pos, filled: vec![0; config.layers] })
+        Ok(Self {
+            cache,
+            capacity: max_pos,
+            filled: vec![0; config.layers],
+        })
     }
 
     /// Bytes the chip holds for the K and V planes.
@@ -76,14 +101,34 @@ impl KvAttention for OmegaFusedKv {
         }
     }
     fn append(&mut self, _layer: usize, pos: usize, _k: &[f32], _v: &[f32]) -> Result<(), String> {
-        Err(format!("fused kv: split append at {pos} is not a path here (use fused_attend)"))
+        Err(format!(
+            "fused kv: split append at {pos} is not a path here (use fused_attend)"
+        ))
     }
-    fn attend(&mut self, _layer: usize, _q: &[f32], context_len: usize, _out: &mut [f32]) -> Result<u64, String> {
-        Err(format!("fused kv: split attend over {context_len} is not a path here (use fused_attend)"))
+    fn attend(
+        &mut self,
+        _layer: usize,
+        _q: &[f32],
+        context_len: usize,
+        _out: &mut [f32],
+    ) -> Result<u64, String> {
+        Err(format!(
+            "fused kv: split attend over {context_len} is not a path here (use fused_attend)"
+        ))
     }
-    fn fused_attend(&mut self, layer: usize, pos: usize, qkv: &[f32], eps: f32, out: &mut [f32]) -> Option<Result<u64, String>> {
+    fn fused_attend(
+        &mut self,
+        layer: usize,
+        pos: usize,
+        qkv: &[f32],
+        eps: f32,
+        out: &mut [f32],
+    ) -> Option<Result<u64, String>> {
         if pos != self.filled[layer] || pos >= self.capacity {
-            return Some(Err(format!("fused kv: step at {pos}, have {} (capacity {})", self.filled[layer], self.capacity)));
+            return Some(Err(format!(
+                "fused kv: step at {pos}, have {} (capacity {})",
+                self.filled[layer], self.capacity
+            )));
         }
         // out_scale 1.0: the linked FP8 GEMV takes a plain f32 row (no x_prescaled entry in
         // omega_gpu_fp8_api.h at own30b/integration 831001cc).
@@ -108,10 +153,15 @@ impl KvAttention for OmegaFusedKv {
     }
     fn dgraph_cache(&mut self, pos: usize) -> Option<Result<*mut std::ffi::c_void, String>> {
         if pos >= self.capacity {
-            return Some(Err(format!("fused kv (decode graph): step at {pos}, capacity {}", self.capacity)));
+            return Some(Err(format!(
+                "fused kv (decode graph): step at {pos}, capacity {}",
+                self.capacity
+            )));
         }
         if let Some((l, &f)) = self.filled.iter().enumerate().find(|(_, &f)| f != pos) {
-            return Some(Err(format!("fused kv (decode graph): step at {pos}, layer {l} holds {f} positions")));
+            return Some(Err(format!(
+                "fused kv (decode graph): step at {pos}, layer {l} holds {f} positions"
+            )));
         }
         Some(Ok(self.cache.as_raw()))
     }

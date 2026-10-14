@@ -145,7 +145,12 @@ mod ffi {
             y: *mut f32,
             info: *mut Fp8Info,
         ) -> i32;
-        pub fn omega_gpu_fp8_tensor_entry(t: *const OmegaGpuFp8Tensor, expert: u32, w_va: *mut u64, s_va: *mut u64) -> i32;
+        pub fn omega_gpu_fp8_tensor_entry(
+            t: *const OmegaGpuFp8Tensor,
+            expert: u32,
+            w_va: *mut u64,
+            s_va: *mut u64,
+        ) -> i32;
     }
     #[cfg(has_omega_fp8gemm)]
     extern "C" {
@@ -182,7 +187,11 @@ fn rc_err(rc: i32) -> OmegaGpuError {
     // SAFETY: both return static NUL-terminated strings (or NULL for last_error).
     let name = unsafe {
         let n = ffi::omega_gpu_fp8_rc_name(rc);
-        let n = if n.is_null() { String::from("?") } else { std::ffi::CStr::from_ptr(n).to_string_lossy().into_owned() };
+        let n = if n.is_null() {
+            String::from("?")
+        } else {
+            std::ffi::CStr::from_ptr(n).to_string_lossy().into_owned()
+        };
         let e = ffi::omega_gpu_fp8_last_error();
         if e.is_null() {
             n
@@ -197,7 +206,11 @@ fn check_len(what: &'static str, expected: usize, got: usize) -> Result<(), Omeg
     if expected == got {
         Ok(())
     } else {
-        Err(OmegaGpuError::ShapeMismatch { what, expected, got })
+        Err(OmegaGpuError::ShapeMismatch {
+            what,
+            expected,
+            got,
+        })
     }
 }
 
@@ -207,7 +220,12 @@ fn bad(name: String) -> OmegaGpuError {
 
 /// Host check of the upload shape rule, before any chip call (also in the stub).
 pub fn check_shape(experts: usize, n: usize, k: usize) -> Result<(), OmegaGpuError> {
-    if experts == 0 || n == 0 || !n.is_multiple_of(BLOCK) || !k.is_multiple_of(BLOCK) || !(BLOCK..=MAX_K).contains(&k) {
+    if experts == 0
+        || n == 0
+        || !n.is_multiple_of(BLOCK)
+        || !k.is_multiple_of(BLOCK)
+        || !(BLOCK..=MAX_K).contains(&k)
+    {
         return Err(bad(format!(
             "fp8 shape experts={experts} n={n} k={k} refused: experts >= 1, n and k multiples of {BLOCK}, {BLOCK} <= k <= {MAX_K}"
         )));
@@ -230,7 +248,11 @@ unsafe impl Send for Fp8Tensor {}
 
 impl fmt::Debug for Fp8Tensor {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "Fp8Tensor {{ experts: {}, n: {}, k: {} }}", self.experts, self.n, self.k)
+        write!(
+            f,
+            "Fp8Tensor {{ experts: {}, n: {}, k: {} }}",
+            self.experts, self.n, self.k
+        )
     }
 }
 
@@ -252,16 +274,33 @@ impl Fp8Tensor {
 
     /// Upload `experts * n * k` e4m3 bytes (`[expert][n][k]`) and
     /// `experts * (n/128) * (k/128)` bf16 scale bits (`[expert][n/128][k/128]`).
-    pub fn upload(experts: usize, n: usize, k: usize, w: &[u8], scale_inv_bf16: &[u16]) -> Result<Self, OmegaGpuError> {
+    pub fn upload(
+        experts: usize,
+        n: usize,
+        k: usize,
+        w: &[u8],
+        scale_inv_bf16: &[u16],
+    ) -> Result<Self, OmegaGpuError> {
         check_shape(experts, n, k)?;
         check_len("fp8 weight bytes", experts * n * k, w.len())?;
-        check_len("fp8 scale words", experts * (n / BLOCK) * (k / BLOCK), scale_inv_bf16.len())?;
+        check_len(
+            "fp8 scale words",
+            experts * (n / BLOCK) * (k / BLOCK),
+            scale_inv_bf16.len(),
+        )?;
         #[cfg(has_omega_fp8)]
         {
             let mut ptr = std::ptr::null_mut();
             // SAFETY: lengths checked above; omega copies the bytes before returning.
             let rc = unsafe {
-                ffi::omega_gpu_fp8_tensor_upload(experts as u32, n as u32, k as u32, w.as_ptr(), scale_inv_bf16.as_ptr(), &mut ptr)
+                ffi::omega_gpu_fp8_tensor_upload(
+                    experts as u32,
+                    n as u32,
+                    k as u32,
+                    w.as_ptr(),
+                    scale_inv_bf16.as_ptr(),
+                    &mut ptr,
+                )
             };
             if rc != 0 || ptr.is_null() {
                 return Err(rc_err(rc));
@@ -290,17 +329,33 @@ impl Fp8Tensor {
     }
 
     /// One projection, one launch: `y[n] = W[expert] * x[k]`.
-    pub fn gemv_f32(&self, expert: usize, x: &[f32], y: &mut [f32]) -> Result<Fp8Info, OmegaGpuError> {
+    pub fn gemv_f32(
+        &self,
+        expert: usize,
+        x: &[f32],
+        y: &mut [f32],
+    ) -> Result<Fp8Info, OmegaGpuError> {
         check_len("fp8 x", self.k, x.len())?;
         check_len("fp8 y", self.n, y.len())?;
         if expert >= self.experts {
-            return Err(bad(format!("fp8 expert {expert} >= experts {}", self.experts)));
+            return Err(bad(format!(
+                "fp8 expert {expert} >= experts {}",
+                self.experts
+            )));
         }
         #[cfg(has_omega_fp8)]
         {
             let mut info = Fp8Info::default();
             // SAFETY: lengths checked; the tensor is live for &self.
-            let rc = unsafe { ffi::omega_gpu_fp8_gemv_f32(self.ptr, expert as u32, x.as_ptr(), y.as_mut_ptr(), &mut info) };
+            let rc = unsafe {
+                ffi::omega_gpu_fp8_gemv_f32(
+                    self.ptr,
+                    expert as u32,
+                    x.as_ptr(),
+                    y.as_mut_ptr(),
+                    &mut info,
+                )
+            };
             if rc != 0 {
                 return Err(rc_err(rc));
             }
@@ -317,13 +372,17 @@ impl Fp8Tensor {
     /// group-table entries from (`omega_gpu_fp8_tensor_entry`).
     pub fn entry(&self, expert: usize) -> Result<(u64, u64), OmegaGpuError> {
         if expert >= self.experts {
-            return Err(bad(format!("fp8 expert {expert} >= experts {}", self.experts)));
+            return Err(bad(format!(
+                "fp8 expert {expert} >= experts {}",
+                self.experts
+            )));
         }
         #[cfg(has_omega_fp8_dev)]
         {
             let (mut w, mut s) = (0u64, 0u64);
             // SAFETY: expert is in range; both out pointers are valid for a write.
-            let rc = unsafe { ffi::omega_gpu_fp8_tensor_entry(self.ptr, expert as u32, &mut w, &mut s) };
+            let rc =
+                unsafe { ffi::omega_gpu_fp8_tensor_entry(self.ptr, expert as u32, &mut w, &mut s) };
             if rc != 0 {
                 return Err(rc_err(rc));
             }
@@ -338,7 +397,13 @@ impl Fp8Tensor {
     /// `groups` experts in one launch whose group table and single activation row are already
     /// on the device (written by the router launch): `tab_va` holds `groups` `{w_va, s_va}`
     /// entries, `x_va` the f32 row already multiplied by 2^64. No host copy of either.
-    pub fn gemv_grouped_dev(&self, groups: usize, tab_va: u64, x_va: u64, y: &mut [f32]) -> Result<Fp8Info, OmegaGpuError> {
+    pub fn gemv_grouped_dev(
+        &self,
+        groups: usize,
+        tab_va: u64,
+        x_va: u64,
+        y: &mut [f32],
+    ) -> Result<Fp8Info, OmegaGpuError> {
         if groups == 0 || groups > MAX_GROUPS {
             return Err(bad(format!("fp8 groups {groups} outside 1..={MAX_GROUPS}")));
         }
@@ -351,7 +416,16 @@ impl Fp8Tensor {
             let mut info = Fp8Info::default();
             // SAFETY: y length checked; the addresses come from the router that wrote them; the
             // tensor is live for &self.
-            let rc = unsafe { ffi::omega_gpu_fp8_gemv_grouped_dev(self.ptr, groups as u32, tab_va, x_va, y.as_mut_ptr(), &mut info) };
+            let rc = unsafe {
+                ffi::omega_gpu_fp8_gemv_grouped_dev(
+                    self.ptr,
+                    groups as u32,
+                    tab_va,
+                    x_va,
+                    y.as_mut_ptr(),
+                    &mut info,
+                )
+            };
             if rc != 0 {
                 return Err(rc_err(rc));
             }
@@ -366,13 +440,21 @@ impl Fp8Tensor {
 
     /// `groups = ids.len()` experts in one launch. `x` is `k` values shared by every group, or
     /// `groups * k` values (one row per group). `y` is `groups * n`, group-major.
-    pub fn gemv_grouped_f32(&self, ids: &[u32], x: &[f32], y: &mut [f32]) -> Result<Fp8Info, OmegaGpuError> {
+    pub fn gemv_grouped_f32(
+        &self,
+        ids: &[u32],
+        x: &[f32],
+        y: &mut [f32],
+    ) -> Result<Fp8Info, OmegaGpuError> {
         let groups = ids.len();
         if groups == 0 || groups > MAX_GROUPS {
             return Err(bad(format!("fp8 groups {groups} outside 1..={MAX_GROUPS}")));
         }
         if let Some(&id) = ids.iter().find(|&&id| id as usize >= self.experts) {
-            return Err(bad(format!("fp8 expert id {id} >= experts {}", self.experts)));
+            return Err(bad(format!(
+                "fp8 expert id {id} >= experts {}",
+                self.experts
+            )));
         }
         let x_rows = if x.len() == self.k { 1 } else { groups };
         check_len("fp8 x (k or groups*k)", x_rows * self.k, x.len())?;
@@ -382,7 +464,15 @@ impl Fp8Tensor {
             let mut info = Fp8Info::default();
             // SAFETY: lengths checked; ids are in range; the tensor is live for &self.
             let rc = unsafe {
-                ffi::omega_gpu_fp8_gemv_grouped_f32(self.ptr, groups as u32, ids.as_ptr(), x.as_ptr(), x_rows as u32, y.as_mut_ptr(), &mut info)
+                ffi::omega_gpu_fp8_gemv_grouped_f32(
+                    self.ptr,
+                    groups as u32,
+                    ids.as_ptr(),
+                    x.as_ptr(),
+                    x_rows as u32,
+                    y.as_mut_ptr(),
+                    &mut info,
+                )
             };
             if rc != 0 {
                 return Err(rc_err(rc));
@@ -401,21 +491,38 @@ impl Fp8Tensor {
     /// `expert_ids` must be non-decreasing (sorted by expert). `y` is `M * n`, in row-table
     /// order, bit-identical to calling the GEMV once per row. Dense projections are tensors
     /// with `experts == 1`.
-    pub fn gemm_f32(&self, expert_ids: &[u32], token_rows: &[u32], x: &[f32], y: &mut [f32]) -> Result<GemmInfo, OmegaGpuError> {
+    pub fn gemm_f32(
+        &self,
+        expert_ids: &[u32],
+        token_rows: &[u32],
+        x: &[f32],
+        y: &mut [f32],
+    ) -> Result<GemmInfo, OmegaGpuError> {
         let m = expert_ids.len();
         if m == 0 || m > GEMM_MAX_ROWS {
-            return Err(bad(format!("fp8 gemm rows {m} outside 1..={GEMM_MAX_ROWS}")));
+            return Err(bad(format!(
+                "fp8 gemm rows {m} outside 1..={GEMM_MAX_ROWS}"
+            )));
         }
         check_len("fp8 gemm token rows", m, token_rows.len())?;
         if !x.len().is_multiple_of(self.k) || x.is_empty() {
-            return Err(bad(format!("fp8 gemm x length {} is not a positive multiple of k={}", x.len(), self.k)));
+            return Err(bad(format!(
+                "fp8 gemm x length {} is not a positive multiple of k={}",
+                x.len(),
+                self.k
+            )));
         }
         let x_rows = x.len() / self.k;
         if let Some(&id) = expert_ids.iter().find(|&&id| id as usize >= self.experts) {
-            return Err(bad(format!("fp8 gemm expert id {id} >= experts {}", self.experts)));
+            return Err(bad(format!(
+                "fp8 gemm expert id {id} >= experts {}",
+                self.experts
+            )));
         }
         if expert_ids.windows(2).any(|w| w[0] > w[1]) {
-            return Err(bad("fp8 gemm expert ids must be sorted (non-decreasing)".into()));
+            return Err(bad(
+                "fp8 gemm expert ids must be sorted (non-decreasing)".into()
+            ));
         }
         let mut segments = 1;
         for w in expert_ids.windows(2) {
@@ -424,7 +531,9 @@ impl Fp8Tensor {
             }
         }
         if segments > GEMM_MAX_SEGMENTS {
-            return Err(bad(format!("fp8 gemm segments {segments} > {GEMM_MAX_SEGMENTS}")));
+            return Err(bad(format!(
+                "fp8 gemm segments {segments} > {GEMM_MAX_SEGMENTS}"
+            )));
         }
         if let Some(&r) = token_rows.iter().find(|&&r| r as usize >= x_rows) {
             return Err(bad(format!("fp8 gemm token row {r} >= x rows {x_rows}")));
@@ -474,7 +583,11 @@ fn gemm_rc_err(rc: i32) -> OmegaGpuError {
     // SAFETY: both return static NUL-terminated strings (or NULL for last_error).
     let name = unsafe {
         let n = ffi::omega_gpu_fp8gemm_rc_name(rc);
-        let n = if n.is_null() { String::from("?") } else { std::ffi::CStr::from_ptr(n).to_string_lossy().into_owned() };
+        let n = if n.is_null() {
+            String::from("?")
+        } else {
+            std::ffi::CStr::from_ptr(n).to_string_lossy().into_owned()
+        };
         let e = ffi::omega_gpu_fp8gemm_last_error();
         if e.is_null() {
             n
@@ -614,9 +727,21 @@ mod tests {
     #[test]
     fn lengths_are_checked_before_the_chip() {
         let r = Fp8Tensor::upload(1, 128, 128, &[0u8; 100], &[0u16; 1]);
-        assert!(matches!(r, Err(OmegaGpuError::ShapeMismatch { what: "fp8 weight bytes", .. })));
+        assert!(matches!(
+            r,
+            Err(OmegaGpuError::ShapeMismatch {
+                what: "fp8 weight bytes",
+                ..
+            })
+        ));
         let r = Fp8Tensor::upload(1, 128, 128, &[0u8; 128 * 128], &[0u16; 2]);
-        assert!(matches!(r, Err(OmegaGpuError::ShapeMismatch { what: "fp8 scale words", .. })));
+        assert!(matches!(
+            r,
+            Err(OmegaGpuError::ShapeMismatch {
+                what: "fp8 scale words",
+                ..
+            })
+        ));
     }
 
     #[test]

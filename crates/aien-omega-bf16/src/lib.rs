@@ -60,10 +60,25 @@ mod ffi {
         _private: [u8; 0],
     }
     extern "C" {
-        pub fn omega_gpu_bf16_tensor_upload(n: u32, k: u32, w_bf16: *const u16, out: *mut *mut OmegaGpuBf16Tensor) -> i32;
+        pub fn omega_gpu_bf16_tensor_upload(
+            n: u32,
+            k: u32,
+            w_bf16: *const u16,
+            out: *mut *mut OmegaGpuBf16Tensor,
+        ) -> i32;
         pub fn omega_gpu_bf16_tensor_free(t: *mut OmegaGpuBf16Tensor);
-        pub fn omega_gpu_bf16_gemv_f32(t: *const OmegaGpuBf16Tensor, x: *const f32, y: *mut f32, info: *mut Bf16Info) -> i32;
-        pub fn omega_gpu_bf16_gemv_bf16(t: *const OmegaGpuBf16Tensor, x: *const u16, y: *mut f32, info: *mut Bf16Info) -> i32;
+        pub fn omega_gpu_bf16_gemv_f32(
+            t: *const OmegaGpuBf16Tensor,
+            x: *const f32,
+            y: *mut f32,
+            info: *mut Bf16Info,
+        ) -> i32;
+        pub fn omega_gpu_bf16_gemv_bf16(
+            t: *const OmegaGpuBf16Tensor,
+            x: *const u16,
+            y: *mut f32,
+            info: *mut Bf16Info,
+        ) -> i32;
         pub fn omega_gpu_bf16_prepare(k: u32) -> i32;
         pub fn omega_gpu_bf16_rc_name(rc: i32) -> *const std::os::raw::c_char;
         pub fn omega_gpu_bf16_last_error() -> *const std::os::raw::c_char;
@@ -76,7 +91,11 @@ fn rc_err(rc: i32) -> OmegaGpuError {
     // SAFETY: both return static NUL-terminated strings (or NULL for last_error).
     let name = unsafe {
         let n = ffi::omega_gpu_bf16_rc_name(rc);
-        let n = if n.is_null() { String::from("?") } else { std::ffi::CStr::from_ptr(n).to_string_lossy().into_owned() };
+        let n = if n.is_null() {
+            String::from("?")
+        } else {
+            std::ffi::CStr::from_ptr(n).to_string_lossy().into_owned()
+        };
         let e = ffi::omega_gpu_bf16_last_error();
         if e.is_null() {
             n
@@ -91,7 +110,11 @@ fn check_len(what: &'static str, expected: usize, got: usize) -> Result<(), Omeg
     if expected == got {
         Ok(())
     } else {
-        Err(OmegaGpuError::ShapeMismatch { what, expected, got })
+        Err(OmegaGpuError::ShapeMismatch {
+            what,
+            expected,
+            got,
+        })
     }
 }
 
@@ -149,7 +172,9 @@ impl Bf16Tensor {
         {
             let mut ptr = std::ptr::null_mut();
             // SAFETY: shape and length checked; omega copies the bytes before returning.
-            let rc = unsafe { ffi::omega_gpu_bf16_tensor_upload(n as u32, k as u32, w_bf16.as_ptr(), &mut ptr) };
+            let rc = unsafe {
+                ffi::omega_gpu_bf16_tensor_upload(n as u32, k as u32, w_bf16.as_ptr(), &mut ptr)
+            };
             if rc != 0 || ptr.is_null() {
                 return Err(rc_err(rc));
             }
@@ -181,7 +206,9 @@ impl Bf16Tensor {
         {
             let mut info = Bf16Info::default();
             // SAFETY: lengths checked; the tensor is live for &self.
-            let rc = unsafe { ffi::omega_gpu_bf16_gemv_f32(self.ptr, x.as_ptr(), y.as_mut_ptr(), &mut info) };
+            let rc = unsafe {
+                ffi::omega_gpu_bf16_gemv_f32(self.ptr, x.as_ptr(), y.as_mut_ptr(), &mut info)
+            };
             if rc != 0 {
                 return Err(rc_err(rc));
             }
@@ -202,7 +229,9 @@ impl Bf16Tensor {
         {
             let mut info = Bf16Info::default();
             // SAFETY: lengths checked; the tensor is live for &self.
-            let rc = unsafe { ffi::omega_gpu_bf16_gemv_bf16(self.ptr, x.as_ptr(), y.as_mut_ptr(), &mut info) };
+            let rc = unsafe {
+                ffi::omega_gpu_bf16_gemv_bf16(self.ptr, x.as_ptr(), y.as_mut_ptr(), &mut info)
+            };
             if rc != 0 {
                 return Err(rc_err(rc));
             }
@@ -272,7 +301,13 @@ mod tests {
     #[test]
     fn lengths_are_checked_before_the_chip() {
         let r = Bf16Tensor::upload(4, 256, &[0u16; 100]);
-        assert!(matches!(r, Err(OmegaGpuError::ShapeMismatch { what: "bf16 gemv weight words", .. })));
+        assert!(matches!(
+            r,
+            Err(OmegaGpuError::ShapeMismatch {
+                what: "bf16 gemv weight words",
+                ..
+            })
+        ));
     }
 
     #[test]

@@ -70,7 +70,9 @@ fn mutant() -> Result<Mutant, String> {
         Ok("norm-shift") => Ok(Mutant::NormShift),
         Ok("skip-final-norm") => Ok(Mutant::SkipFinalNorm),
         Ok(v @ ("1" | "2" | "3")) => Ok(Mutant::Omega(v.parse().unwrap_or(0))),
-        Ok(v) => Err(format!("{MUTANT_ENV}={v} is not one of norm-shift, skip-final-norm, 1, 2, 3")),
+        Ok(v) => Err(format!(
+            "{MUTANT_ENV}={v} is not one of norm-shift, skip-final-norm, 1, 2, 3"
+        )),
     }
 }
 
@@ -86,40 +88,65 @@ pub(super) struct GraphState {
 
 impl std::fmt::Debug for GraphState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "GraphState {{ {:?}, pending: {}, mutant: {} }}", self.graph, self.pending, self.mutant)
+        write!(
+            f,
+            "GraphState {{ {:?}, pending: {}, mutant: {} }}",
+            self.graph, self.pending, self.mutant
+        )
     }
 }
 
 const NEEDS: &str = "OWN30B_DECODE_GRAPH=1 needs the load --weights fp8 --attn fused --router device --lm-head gemv";
 
 /// Every handle the graph takes, or the plain reason this load cannot run it.
-fn handles(w: &Qwen3MoeOmegaWeights) -> Result<(GraphConfig, Vec<[*mut std::ffi::c_void; 4]>), String> {
+fn handles(
+    w: &Qwen3MoeOmegaWeights,
+) -> Result<(GraphConfig, Vec<[*mut std::ffi::c_void; 4]>), String> {
     let c = &w.config;
     if !aien_omega_dgraph::is_native() {
         return Err(format!("{ENV}=1 but this binary has no one-list decode linked (omega before d3f465dc, or a CPU stub build)"));
     }
     if c.hidden != aien_omega_dgraph::HIDDEN {
-        return Err(format!("{NEEDS}; and hidden {} (the graph is built for {})", c.hidden, aien_omega_dgraph::HIDDEN));
+        return Err(format!(
+            "{NEEDS}; and hidden {} (the graph is built for {})",
+            c.hidden,
+            aien_omega_dgraph::HIDDEN
+        ));
     }
     let router = match &w.device_router {
         Some(r) => r.omega_raw(),
-        None => return Err(format!("{NEEDS}; this load routes on the host (no device router)")),
+        None => {
+            return Err(format!(
+                "{NEEDS}; this load routes on the host (no device router)"
+            ))
+        }
     };
     let lm_head = match &w.lm_head {
         LmHead::Gemv(g) => g.omega_raw(),
         LmHead::Dense(_) => return Err(format!("{NEEDS}; this load has the dense lm_head")),
     };
     if router.is_null() || lm_head.is_null() {
-        return Err(format!("{NEEDS}; the router or lm_head is not an omega object"));
+        return Err(format!(
+            "{NEEDS}; the router or lm_head is not an omega object"
+        ));
     }
     let mut layers = Vec::with_capacity(w.layers.len());
     for (l, layer) in w.layers.iter().enumerate() {
-        let (AttnWeights::Fp8 { qkv, o }, ExpertWeights::Fp8 { gate_up, down }) = (&layer.attn, &layer.experts) else {
+        let (AttnWeights::Fp8 { qkv, o }, ExpertWeights::Fp8 { gate_up, down }) =
+            (&layer.attn, &layer.experts)
+        else {
             return Err(format!("{NEEDS}; layer {l} has bf16 attention or experts"));
         };
-        let h = [qkv.omega_raw(), o.omega_raw(), gate_up.omega_raw(), down.omega_raw()];
+        let h = [
+            qkv.omega_raw(),
+            o.omega_raw(),
+            gate_up.omega_raw(),
+            down.omega_raw(),
+        ];
         if h.iter().any(|p| p.is_null()) {
-            return Err(format!("{NEEDS}; layer {l} has a projection that is not an omega FP8 tensor"));
+            return Err(format!(
+                "{NEEDS}; layer {l} has a projection that is not an omega FP8 tensor"
+            ));
         }
         layers.push(h);
     }
@@ -150,7 +177,12 @@ impl Qwen3MoeOmegaEngine {
         let (mut cfg, layers) = handles(&self.weights)?;
         cfg.attn = match self.kv.dgraph_cache(self.pos) {
             Some(r) => r?,
-            None => return Err(format!("{NEEDS}; this load has the {} attention path", self.kv.path_name())),
+            None => {
+                return Err(format!(
+                    "{NEEDS}; this load has the {} attention path",
+                    self.kv.path_name()
+                ))
+            }
         };
         if cfg.attn.is_null() {
             return Err(format!("{NEEDS}; the KV cache is not an omega object"));
@@ -158,16 +190,32 @@ impl Qwen3MoeOmegaEngine {
         let m = mutant()?;
         // SAFETY: every handle is an omega object owned by self.weights / self.kv, which live as
         // long as the engine; `dgraph` is declared before them, so it is dropped first.
-        let mut graph = unsafe { DecodeGraph::create(&cfg) }.map_err(|e| format!("decode graph create: {e}"))?;
+        let mut graph = unsafe { DecodeGraph::create(&cfg) }
+            .map_err(|e| format!("decode graph create: {e}"))?;
         let n = layers.len();
         for (l, h) in layers.iter().enumerate() {
-            let norm_from = if m == Mutant::NormShift { (l + 1) % n } else { l };
+            let norm_from = if m == Mutant::NormShift {
+                (l + 1) % n
+            } else {
+                l
+            };
             // SAFETY: as above.
-            unsafe { graph.set_layer(l, h[0], h[1], h[2], h[3], &self.weights.layers[norm_from].input_norm) }
-                .map_err(|e| format!("decode graph layer {l}: {e}"))?;
+            unsafe {
+                graph.set_layer(
+                    l,
+                    h[0],
+                    h[1],
+                    h[2],
+                    h[3],
+                    &self.weights.layers[norm_from].input_norm,
+                )
+            }
+            .map_err(|e| format!("decode graph layer {l}: {e}"))?;
         }
         if m != Mutant::SkipFinalNorm {
-            graph.set_final_norm(&self.weights.final_norm).map_err(|e| format!("decode graph final norm: {e}"))?;
+            graph
+                .set_final_norm(&self.weights.final_norm)
+                .map_err(|e| format!("decode graph final norm: {e}"))?;
         }
         if let Mutant::Omega(k) = m {
             graph.test_set_mutant(k);
@@ -178,7 +226,14 @@ impl Qwen3MoeOmegaEngine {
             Mutant::None => "none".to_string(),
             other => format!("{other:?} (TEST ONLY: wrong on purpose)"),
         };
-        self.dgraph = Some(GraphState { graph, pending: false, pending_token: 0, mutant, stamps, timeline: Timeline::default() });
+        self.dgraph = Some(GraphState {
+            graph,
+            pending: false,
+            pending_token: 0,
+            mutant,
+            stamps,
+            timeline: Timeline::default(),
+        });
         Ok(())
     }
 
@@ -210,11 +265,22 @@ impl Qwen3MoeOmegaEngine {
             Some(r) => {
                 r?;
             }
-            None => return Err(format!("{NEEDS}; this load has the {} attention path", self.kv.path_name())),
+            None => {
+                return Err(format!(
+                    "{NEEDS}; this load has the {} attention path",
+                    self.kv.path_name()
+                ))
+            }
         }
         let x = self.weights.embed_row(token);
-        let g = self.dgraph.as_mut().ok_or("decode graph missing after prepare")?;
-        let (next, st): (u32, GraphStats) = g.graph.token(&x, pos).map_err(|e| format!("decode graph token at {pos}: {e}"))?;
+        let g = self
+            .dgraph
+            .as_mut()
+            .ok_or("decode graph missing after prepare")?;
+        let (next, st): (u32, GraphStats) = g
+            .graph
+            .token(&x, pos)
+            .map_err(|e| format!("decode graph token at {pos}: {e}"))?;
         g.pending = true;
         g.pending_token = next;
         // The token ran and wrote this position's KV: book it before reporting a timeline error.
@@ -230,7 +296,11 @@ impl Qwen3MoeOmegaEngine {
                         t.launches[k] += 1;
                         t.ns[k] += stamps[i + 1].saturating_sub(stamps[i]);
                     }
-                    t.span_ns += stamps.last().copied().unwrap_or(0).saturating_sub(stamps.first().copied().unwrap_or(0));
+                    t.span_ns += stamps
+                        .last()
+                        .copied()
+                        .unwrap_or(0)
+                        .saturating_sub(stamps.first().copied().unwrap_or(0));
                     t.chip_ns += st.chip_ns;
                 }
             }
@@ -276,7 +346,12 @@ impl Qwen3MoeOmegaEngine {
         }
         g.pending = false;
         let mut logits = vec![0.0f32; g.graph.vocab()];
-        Some(g.graph.read(None, None, Some(&mut logits)).map(|_| logits).map_err(|e| format!("decode graph logits: {e}")))
+        Some(
+            g.graph
+                .read(None, None, Some(&mut logits))
+                .map(|_| logits)
+                .map_err(|e| format!("decode graph logits: {e}")),
+        )
     }
 
     /// Forgets a pending graph token (reset, rewind, a new generation).

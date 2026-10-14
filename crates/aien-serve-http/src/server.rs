@@ -23,7 +23,9 @@ use tokio_stream::wrappers::ReceiverStream;
 
 use crate::codec::{Codec, CodecError};
 use crate::engine::{Engine, EngineError, FinishReason, GenerateParams};
-use crate::openai::{chunk_json, completion_json, ChatRequest, ErrorBody, ModelCard, ModelList, Usage};
+use crate::openai::{
+    chunk_json, completion_json, ChatRequest, ErrorBody, ModelCard, ModelList, Usage,
+};
 use crate::text::{Push, TextAssembler};
 
 #[derive(Debug, Clone)]
@@ -259,7 +261,9 @@ async fn health(State(state): State<Arc<AppState>>) -> Json<Value> {
 }
 
 async fn not_found() -> ApiError {
-    ApiError::not_found("no such route; this server exposes /v1/models, /v1/chat/completions and /health")
+    ApiError::not_found(
+        "no such route; this server exposes /v1/models, /v1/chat/completions and /health",
+    )
 }
 
 async fn chat_completions(
@@ -308,8 +312,13 @@ async fn handle_chat(
     // headers go out (streaming included). Everything else is forwarded unchanged.
     let first = rx.recv().await;
     if let Some(Ev::Busy(_)) = first {
-        let mut resp = (StatusCode::SERVICE_UNAVAILABLE, Json(serde_json::json!({"error": "GPU busy with another job"}))).into_response();
-        resp.headers_mut().insert(header::RETRY_AFTER, HeaderValue::from_static("5"));
+        let mut resp = (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({"error": "GPU busy with another job"})),
+        )
+            .into_response();
+        resp.headers_mut()
+            .insert(header::RETRY_AFTER, HeaderValue::from_static("5"));
         return Ok(resp);
     }
     let (ftx, frx) = mpsc::channel::<Ev>(64);
@@ -404,7 +413,9 @@ fn prepare(state: &AppState, req: ChatRequest) -> Result<Prepared, ApiError> {
                 ))
             }
             other => {
-                return Err(ApiError::bad_request(format!("unknown message role '{other}'")))
+                return Err(ApiError::bad_request(format!(
+                    "unknown message role '{other}'"
+                )))
             }
         };
         turns.push((role.to_string(), text_of_content(&m.content)?));
@@ -470,7 +481,9 @@ fn prepare(state: &AppState, req: ChatRequest) -> Result<Prepared, ApiError> {
             .into_iter()
             .map(|v| match v {
                 Value::String(s) => Ok(s),
-                _ => Err(ApiError::bad_request("stop must be a string or an array of strings")),
+                _ => Err(ApiError::bad_request(
+                    "stop must be a string or an array of strings",
+                )),
             })
             .collect::<Result<Vec<_>, _>>()?,
         Some(_) => {
@@ -516,8 +529,10 @@ fn run_generation(
     let mut asm = TextAssembler::new(codec, prepared.stop_strings);
     let mut stopped_by_string = false;
     let mut client_gone = false;
-    let result = engine.generate(&prepared.prompt_tokens, &prepared.params, &mut |tok| {
-        match asm.push(tok) {
+    let result = engine.generate(
+        &prepared.prompt_tokens,
+        &prepared.params,
+        &mut |tok| match asm.push(tok) {
             Push::Hold => true,
             Push::Delta(d) => {
                 if tx.blocking_send(Ev::Delta(d)).is_err() {
@@ -534,8 +549,8 @@ fn run_generation(
                 }
                 false
             }
-        }
-    });
+        },
+    );
     match result {
         Err(EngineError::Busy(m)) => {
             eprintln!("aien-serve-http: {id}: GPU busy: {m}");
@@ -626,7 +641,15 @@ fn stream_response(
     let (etx, erx) = mpsc::channel::<Result<Event, Infallible>>(64);
     tokio::spawn(async move {
         let data = |v: Value| Ok(Event::default().data(v.to_string()));
-        let first = chunk_json(&id, created, &model, Some("assistant"), Some(""), None, None);
+        let first = chunk_json(
+            &id,
+            created,
+            &model,
+            Some("assistant"),
+            Some(""),
+            None,
+            None,
+        );
         if etx.send(data(first)).await.is_err() {
             return;
         }
@@ -642,7 +665,8 @@ fn stream_response(
                         completion_tokens,
                         total_tokens: prompt_tokens + completion_tokens,
                     };
-                    let last = chunk_json(&id, created, &model, None, None, Some(finish), Some(&usage));
+                    let last =
+                        chunk_json(&id, created, &model, None, None, Some(finish), Some(&usage));
                     if etx.send(data(last)).await.is_err() {
                         return;
                     }

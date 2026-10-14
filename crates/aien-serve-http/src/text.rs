@@ -161,7 +161,10 @@ mod tests {
 
     #[test]
     fn stop_string_truncates_and_holds_back_prefix() {
-        assert_eq!(run(asm(&["world"]), "hello world!"), ("hello ".into(), true));
+        assert_eq!(
+            run(asm(&["world"]), "hello world!"),
+            ("hello ".into(), true)
+        );
         assert_eq!(run(asm(&["<|end|>"]), "a<|en"), ("a<|en".into(), false));
         assert_eq!(run(asm(&["xx", "b"]), "aaxxb"), ("aa".into(), true));
     }

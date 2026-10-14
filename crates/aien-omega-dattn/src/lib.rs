@@ -105,7 +105,11 @@ fn rc_err(rc: i32) -> OmegaGpuError {
     // SAFETY: both return static NUL-terminated strings (or NULL for last_error).
     let name = unsafe {
         let n = ffi::omega_gpu_decode_attn_rc_name(rc);
-        let n = if n.is_null() { String::from("?") } else { std::ffi::CStr::from_ptr(n).to_string_lossy().into_owned() };
+        let n = if n.is_null() {
+            String::from("?")
+        } else {
+            std::ffi::CStr::from_ptr(n).to_string_lossy().into_owned()
+        };
         let e = ffi::omega_gpu_decode_attn_last_error();
         if e.is_null() {
             n
@@ -120,7 +124,11 @@ fn check_len(what: &'static str, expected: usize, got: usize) -> Result<(), Omeg
     if expected == got {
         Ok(())
     } else {
-        Err(OmegaGpuError::ShapeMismatch { what, expected, got })
+        Err(OmegaGpuError::ShapeMismatch {
+            what,
+            expected,
+            got,
+        })
     }
 }
 
@@ -130,7 +138,12 @@ fn bad(name: String) -> OmegaGpuError {
 
 /// Host check of the allocation rule, before any chip call (also in the stub).
 pub fn check_shape(layers: usize, max_pos: usize) -> Result<(), OmegaGpuError> {
-    if layers == 0 || layers > MAX_LAYERS || max_pos == 0 || max_pos > MAX_POS || !max_pos.is_multiple_of(POS_ROUND) {
+    if layers == 0
+        || layers > MAX_LAYERS
+        || max_pos == 0
+        || max_pos > MAX_POS
+        || !max_pos.is_multiple_of(POS_ROUND)
+    {
         return Err(bad(format!(
             "decode attn cache layers={layers} max_pos={max_pos} refused: 1 <= layers <= {MAX_LAYERS}, max_pos a multiple of {POS_ROUND} up to {MAX_POS}"
         )));
@@ -140,7 +153,10 @@ pub fn check_shape(layers: usize, max_pos: usize) -> Result<(), OmegaGpuError> {
 
 /// Rounds a context length up to the cache granule, capped at [`MAX_POS`].
 pub fn round_max_pos(max_context: usize) -> usize {
-    max_context.div_ceil(POS_ROUND).clamp(1, MAX_POS / POS_ROUND) * POS_ROUND
+    max_context
+        .div_ceil(POS_ROUND)
+        .clamp(1, MAX_POS / POS_ROUND)
+        * POS_ROUND
 }
 
 /// Bytes the chip holds for a cache of `layers` x `max_pos` (K and V planes, without the
@@ -163,7 +179,11 @@ unsafe impl Send for DecodeAttnCache {}
 
 impl fmt::Debug for DecodeAttnCache {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "DecodeAttnCache {{ layers: {}, max_pos: {} }}", self.layers, self.max_pos)
+        write!(
+            f,
+            "DecodeAttnCache {{ layers: {}, max_pos: {} }}",
+            self.layers, self.max_pos
+        )
     }
 }
 
@@ -187,17 +207,30 @@ impl DecodeAttnCache {
     pub fn alloc(layers: usize, max_pos: usize, rope_theta: f64) -> Result<Self, OmegaGpuError> {
         check_shape(layers, max_pos)?;
         if rope_theta.partial_cmp(&0.0) != Some(std::cmp::Ordering::Greater) {
-            return Err(bad(format!("decode attn rope_theta {rope_theta} must be positive")));
+            return Err(bad(format!(
+                "decode attn rope_theta {rope_theta} must be positive"
+            )));
         }
         #[cfg(has_omega_dattn)]
         {
             let mut ptr = std::ptr::null_mut();
             // SAFETY: arguments checked above; omega writes the handle on success.
-            let rc = unsafe { ffi::omega_gpu_decode_attn_cache_alloc(layers as u32, max_pos as u32, rope_theta, &mut ptr) };
+            let rc = unsafe {
+                ffi::omega_gpu_decode_attn_cache_alloc(
+                    layers as u32,
+                    max_pos as u32,
+                    rope_theta,
+                    &mut ptr,
+                )
+            };
             if rc != 0 || ptr.is_null() {
                 return Err(rc_err(rc));
             }
-            Ok(Self { ptr, layers, max_pos })
+            Ok(Self {
+                ptr,
+                layers,
+                max_pos,
+            })
         }
         #[cfg(not(has_omega_dattn))]
         {
@@ -213,16 +246,31 @@ impl DecodeAttnCache {
     }
 
     /// The per-head RMSNorm weights of `layer` (`q_norm`, `k_norm`: 128 f32 each).
-    pub fn set_norms(&mut self, layer: usize, q_norm: &[f32], k_norm: &[f32]) -> Result<(), OmegaGpuError> {
+    pub fn set_norms(
+        &mut self,
+        layer: usize,
+        q_norm: &[f32],
+        k_norm: &[f32],
+    ) -> Result<(), OmegaGpuError> {
         check_len("decode attn q_norm", HEAD_DIM, q_norm.len())?;
         check_len("decode attn k_norm", HEAD_DIM, k_norm.len())?;
         if layer >= self.layers {
-            return Err(bad(format!("decode attn layer {layer} >= layers {}", self.layers)));
+            return Err(bad(format!(
+                "decode attn layer {layer} >= layers {}",
+                self.layers
+            )));
         }
         #[cfg(has_omega_dattn)]
         {
             // SAFETY: lengths checked; the cache is live for &mut self.
-            let rc = unsafe { ffi::omega_gpu_decode_attn_set_norms(self.ptr, layer as u32, q_norm.as_ptr(), k_norm.as_ptr()) };
+            let rc = unsafe {
+                ffi::omega_gpu_decode_attn_set_norms(
+                    self.ptr,
+                    layer as u32,
+                    q_norm.as_ptr(),
+                    k_norm.as_ptr(),
+                )
+            };
             if rc != 0 {
                 return Err(rc_err(rc));
             }
@@ -248,17 +296,32 @@ impl DecodeAttnCache {
         check_len("decode attn qkv", QKV_WORDS, qkv.len())?;
         check_len("decode attn out", OUT_WORDS, out.len())?;
         if layer >= self.layers {
-            return Err(bad(format!("decode attn layer {layer} >= layers {}", self.layers)));
+            return Err(bad(format!(
+                "decode attn layer {layer} >= layers {}",
+                self.layers
+            )));
         }
         if pos >= self.max_pos {
-            return Err(bad(format!("decode attn pos {pos} >= max_pos {}", self.max_pos)));
+            return Err(bad(format!(
+                "decode attn pos {pos} >= max_pos {}",
+                self.max_pos
+            )));
         }
         #[cfg(has_omega_dattn)]
         {
             let mut info = DecodeAttnInfo::default();
             // SAFETY: lengths and ranges checked; the cache is live for &mut self.
             let rc = unsafe {
-                ffi::omega_gpu_decode_attn(self.ptr, layer as u32, pos as u32, qkv.as_ptr(), eps, out_scale, out.as_mut_ptr(), &mut info)
+                ffi::omega_gpu_decode_attn(
+                    self.ptr,
+                    layer as u32,
+                    pos as u32,
+                    qkv.as_ptr(),
+                    eps,
+                    out_scale,
+                    out.as_mut_ptr(),
+                    &mut info,
+                )
             };
             if rc != 0 {
                 return Err(rc_err(rc));

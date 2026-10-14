@@ -10,9 +10,9 @@
 //! Alignment rule (omega refuses otherwise, `BAD_ARGS`): `col0 % 8 == 0`, `1 <= cols`,
 //! `col0 + cols <= n`, `1 <= m <= 8192`, at most [`MAX_WINDOWS`] windows per call.
 //! Without the native library (`is_native()` false) every call returns `Unavailable`.
-use aien_omega_gpu::{rc_name, MatmulInfo, OmegaGpuError};
 #[cfg(has_omega_moe)]
 use aien_omega_gpu::OmegaGpuMatmulInfo;
+use aien_omega_gpu::{rc_name, MatmulInfo, OmegaGpuError};
 use std::fmt;
 
 /// Column tile width: a window must start on a multiple of this (`OMEGA_GPU_MATMUL_TILE_N`).
@@ -61,7 +61,12 @@ mod ffi {
             c: *mut f32,
             info: *mut OmegaGpuMatmulInfo,
         ) -> i32;
-        pub fn omega_gpu_moe_reserve(max_rows: u32, max_k: u32, max_cols: u32, kernel_slots: u32) -> i32;
+        pub fn omega_gpu_moe_reserve(
+            max_rows: u32,
+            max_k: u32,
+            max_cols: u32,
+            kernel_slots: u32,
+        ) -> i32;
         pub fn omega_gpu_moe_prepare(m: u32, k: u32, cols: u32) -> i32;
         pub fn omega_gpu_moe_seal(on: i32);
         pub fn omega_gpu_moe_unreserve();
@@ -100,7 +105,8 @@ fn check_len(what: &'static str, expected: usize, got: usize) -> Result<(), Omeg
 /// Checks the window alignment rule on the host, before any chip call, so a wrong offset is
 /// refused by name even in the stub.
 pub fn check_window(n: usize, col0: usize, cols: usize) -> Result<(), OmegaGpuError> {
-    if !col0.is_multiple_of(TILE_N) || cols == 0 || col0.checked_add(cols).is_none_or(|end| end > n) {
+    if !col0.is_multiple_of(TILE_N) || cols == 0 || col0.checked_add(cols).is_none_or(|end| end > n)
+    {
         return Err(OmegaGpuError::Rc {
             rc: aien_omega_gpu::ffi::OMEGA_GPU_MATMUL_BAD_ARGS,
             name: format!(
@@ -272,7 +278,12 @@ fn finish(rc: i32, info: OmegaGpuMatmulInfo) -> Result<MatmulInfo, OmegaGpuError
 
 /// Serving reservation for the window API (its own staging buffers and kernel cache; a server
 /// reserves the whole-tensor API too). Stub: `Unavailable`.
-pub fn reserve(max_rows: u32, max_k: u32, max_cols: u32, kernel_slots: u32) -> Result<(), OmegaGpuError> {
+pub fn reserve(
+    max_rows: u32,
+    max_k: u32,
+    max_cols: u32,
+    kernel_slots: u32,
+) -> Result<(), OmegaGpuError> {
     #[cfg(has_omega_moe)]
     {
         // SAFETY: plain integers; omega takes its own lock.
@@ -400,7 +411,10 @@ mod tests {
         assert!(check_window(262144, 0, 2048).is_ok());
         assert!(check_window(262144, 127 * 2048, 2048).is_ok());
         assert!(check_window(196608, 5 * 1536, 1536).is_ok());
-        assert!(check_window(196608, 4, 8).is_err(), "col0 not a tile multiple");
+        assert!(
+            check_window(196608, 4, 8).is_err(),
+            "col0 not a tile multiple"
+        );
         assert!(check_window(196608, 0, 0).is_err(), "empty window");
         assert!(check_window(196608, 196608 - 8, 16).is_err(), "past n");
     }

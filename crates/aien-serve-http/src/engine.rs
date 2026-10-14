@@ -67,7 +67,10 @@ impl fmt::Display for EngineError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::PromptTooLong { len, max } => {
-                write!(f, "prompt of {len} tokens exceeds the context window of {max}")
+                write!(
+                    f,
+                    "prompt of {len} tokens exceeds the context window of {max}"
+                )
             }
             Self::Failed(m) => write!(f, "engine failed: {m}"),
             Self::Busy(m) => write!(f, "GPU busy with another job: {m}"),

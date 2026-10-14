@@ -13,14 +13,21 @@
 use std::path::PathBuf;
 use std::time::Instant;
 
-use aien_inference_abi::qwen3_moe_omega::{AttnPath, DevicePaths, GenerateParams, Qwen3MoeOmegaEngine, StepTiming, WeightFormat};
-use aien_inference_abi::tokenizer::ChatTokenizer as Tokenizer;
+use aien_inference_abi::qwen3_moe_omega::{
+    AttnPath, DevicePaths, GenerateParams, Qwen3MoeOmegaEngine, StepTiming, WeightFormat,
+};
 use aien_inference_abi::qwen3_moe_omega_prefill::WpTrace;
+use aien_inference_abi::tokenizer::ChatTokenizer as Tokenizer;
 
 fn mem_available_gb() -> f64 {
     std::fs::read_to_string("/proc/meminfo")
         .ok()
-        .and_then(|t| t.lines().find(|l| l.starts_with("MemAvailable:")).and_then(|l| l.split_whitespace().nth(1)).and_then(|v| v.parse::<f64>().ok()))
+        .and_then(|t| {
+            t.lines()
+                .find(|l| l.starts_with("MemAvailable:"))
+                .and_then(|l| l.split_whitespace().nth(1))
+                .and_then(|v| v.parse::<f64>().ok())
+        })
         .map(|kb| kb / 1024.0 / 1024.0)
         .unwrap_or(0.0)
 }
@@ -31,7 +38,10 @@ fn prompt_ids(tok: &Tokenizer, n: usize) -> Vec<u32> {
     let enc = |t: &str| tok.encode_with_special(t, false).expect("encode");
     let mut ids = enc("<|im_start|>user\nYou are a careful engineering assistant. Read the log below and say, in plain words, which block number has the largest decode time.\n\n");
     let tail = enc("\nAnswer with the block number only.<|im_end|>\n<|im_start|>assistant\n");
-    assert!(n > ids.len() + tail.len() + 8, "prompt length {n} too short");
+    assert!(
+        n > ids.len() + tail.len() + 8,
+        "prompt length {n} too short"
+    );
     let mut b = 0usize;
     while ids.len() + tail.len() < n {
         ids.extend(enc(&format!(
@@ -86,7 +96,14 @@ fn run(engine: &mut Qwen3MoeOmegaEngine, ids: &[u32], new_tokens: usize) -> Run 
             },
         )
         .expect("generate");
-    Run { tokens, logits0, ttft_ms: first.expect("no token"), prefill_ms: o.prefill_ms, decode_ms: o.decode_ms, pt: o.prefill_timing }
+    Run {
+        tokens,
+        logits0,
+        ttft_ms: first.expect("no token"),
+        prefill_ms: o.prefill_ms,
+        decode_ms: o.decode_ms,
+        pt: o.prefill_timing,
+    }
 }
 
 fn top2(l: &[f32]) -> (usize, f32) {
@@ -109,12 +126,26 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     let checkpoint = PathBuf::from(args.get(1).expect("checkpoint dir"));
     let receipt = PathBuf::from(args.get(2).expect("receipt dir"));
-    let (mut lens, mut new_tokens, mut reps, mut max_context, mut force, mut cached) = (vec![512usize, 2048], 32usize, 2usize, 8192usize, false, false);
+    let (mut lens, mut new_tokens, mut reps, mut max_context, mut force, mut cached) = (
+        vec![512usize, 2048],
+        32usize,
+        2usize,
+        8192usize,
+        false,
+        false,
+    );
     let (mut devhost, mut devhost_exact) = (false, true);
     let mut it = args[3..].iter();
     while let Some(a) = it.next() {
         match a.as_str() {
-            "--lens" => lens = it.next().expect("--lens").split(',').map(|s| s.parse().expect("len")).collect(),
+            "--lens" => {
+                lens = it
+                    .next()
+                    .expect("--lens")
+                    .split(',')
+                    .map(|s| s.parse().expect("len"))
+                    .collect()
+            }
             "--new-tokens" => new_tokens = it.next().expect("--new-tokens").parse().expect("n"),
             "--reps" => reps = it.next().expect("--reps").parse().expect("n"),
             "--max-context" => max_context = it.next().expect("--max-context").parse().expect("n"),
@@ -136,7 +167,10 @@ fn main() {
         say("REFUSED: less than 70 GB available; --force-memory to override".into());
         std::process::exit(3);
     }
-    if let Some(us) = aien_omega_gpu::parse_spin_us(std::env::var(aien_omega_gpu::SPIN_US_ENV).ok().as_deref()).expect("spin env") {
+    if let Some(us) =
+        aien_omega_gpu::parse_spin_us(std::env::var(aien_omega_gpu::SPIN_US_ENV).ok().as_deref())
+            .expect("spin env")
+    {
         aien_omega_gpu::set_spin_us(us).expect("set spin window");
     }
     say(format!(
@@ -149,9 +183,15 @@ fn main() {
     ));
     let tok = Tokenizer::from_file(checkpoint.join("tokenizer.json")).expect("tokenizer");
     let t0 = Instant::now();
-    let (mut engine, report) =
-        Qwen3MoeOmegaEngine::load_omega_paths(&checkpoint, max_context, WeightFormat::Fp8All, AttnPath::Fused, DevicePaths::default(), &mut |_| {})
-            .expect("load on Omega");
+    let (mut engine, report) = Qwen3MoeOmegaEngine::load_omega_paths(
+        &checkpoint,
+        max_context,
+        WeightFormat::Fp8All,
+        AttnPath::Fused,
+        DevicePaths::default(),
+        &mut |_| {},
+    )
+    .expect("load on Omega");
     say(format!(
         "LOAD {:.1}s resident {:.2} GB attention {} prefill_gemm {} chunk {} mem_available_after {:.1} GB",
         t0.elapsed().as_secs_f64(),
@@ -169,12 +209,25 @@ fn main() {
         for rep in 0..reps {
             engine.set_whole_prompt(false).expect("off");
             let off = run(&mut engine, &ids, new_tokens);
-            engine.set_whole_prompt(true).expect("whole-prompt prefill refused");
+            engine
+                .set_whole_prompt(true)
+                .expect("whole-prompt prefill refused");
             let on = run(&mut engine, &ids, new_tokens);
             let st = engine.whole_prompt_stats().cloned().unwrap_or_default();
-            let diff = off.tokens.iter().zip(&on.tokens).position(|(a, b)| a != b).or((off.tokens.len() != on.tokens.len()).then_some(off.tokens.len().min(on.tokens.len())));
+            let diff = off
+                .tokens
+                .iter()
+                .zip(&on.tokens)
+                .position(|(a, b)| a != b)
+                .or((off.tokens.len() != on.tokens.len())
+                    .then_some(off.tokens.len().min(on.tokens.len())));
             let cos = cosine(&off.logits0, &on.logits0);
-            let maxd = off.logits0.iter().zip(&on.logits0).map(|(a, b)| (a - b).abs()).fold(0.0f32, f32::max);
+            let maxd = off
+                .logits0
+                .iter()
+                .zip(&on.logits0)
+                .map(|(a, b)| (a - b).abs())
+                .fold(0.0f32, f32::max);
             let (ta, ma) = top2(&off.logits0);
             let (tb, mb) = top2(&on.logits0);
             all_identical &= diff.is_none();
@@ -224,12 +277,22 @@ fn main() {
             }));
             if devhost {
                 // Phase D (W-L1G-E): the same ON run with the router logits + MoE combine on the chip.
-                engine.set_whole_prompt_device_host(true).expect("device router / combine refused");
+                engine
+                    .set_whole_prompt_device_host(true)
+                    .expect("device router / combine refused");
                 let dv = run(&mut engine, &ids, new_tokens);
                 let sd = engine.whole_prompt_stats().cloned().unwrap_or_default();
-                engine.set_whole_prompt_device_host(false).expect("device host work off");
+                engine
+                    .set_whole_prompt_device_host(false)
+                    .expect("device host work off");
                 let same_tokens = dv.tokens == on.tokens;
-                let bits_differ = dv.logits0.iter().zip(&on.logits0).filter(|(a, b)| a.to_bits() != b.to_bits()).count() + dv.logits0.len().abs_diff(on.logits0.len());
+                let bits_differ = dv
+                    .logits0
+                    .iter()
+                    .zip(&on.logits0)
+                    .filter(|(a, b)| a.to_bits() != b.to_bits())
+                    .count()
+                    + dv.logits0.len().abs_diff(on.logits0.len());
                 let diff_off = off.tokens.iter().zip(&dv.tokens).position(|(a, b)| a != b);
                 all_identical &= diff_off.is_none();
                 devhost_exact &= same_tokens && bits_differ == 0;
@@ -261,19 +324,43 @@ fn main() {
             // Expert agreement (W-L1G-E), untimed: one traced ON run per routing path, every layer's expert ids compared.
             engine.set_whole_prompt(true).expect("on");
             engine.set_whole_prompt_device_host(false).expect("host");
-            engine.whole_prompt_set_trace(Some(WpTrace::new(None))).expect("trace");
+            engine
+                .whole_prompt_set_trace(Some(WpTrace::new(None)))
+                .expect("trace");
             let _ = run(&mut engine, &ids, 1);
             let th = engine.whole_prompt_take_trace().expect("host trace");
             engine.set_whole_prompt_device_host(true).expect("dev");
-            engine.whole_prompt_set_trace(Some(WpTrace::new(None))).expect("trace");
+            engine
+                .whole_prompt_set_trace(Some(WpTrace::new(None)))
+                .expect("trace");
             let _ = run(&mut engine, &ids, 1);
             let td = engine.whole_prompt_take_trace().expect("device trace");
             engine.set_whole_prompt_device_host(false).expect("host");
             let slots: usize = th.experts.iter().map(Vec::len).sum();
-            let flips: usize = th.experts.iter().zip(&td.experts).map(|(a, b)| a.iter().zip(b).filter(|(x, y)| x != y).count() + a.len().abs_diff(b.len())).sum();
+            let flips: usize = th
+                .experts
+                .iter()
+                .zip(&td.experts)
+                .map(|(a, b)| {
+                    a.iter().zip(b).filter(|(x, y)| x != y).count() + a.len().abs_diff(b.len())
+                })
+                .sum();
             let first_layer = th.experts.iter().zip(&td.experts).position(|(a, b)| a != b);
-            let resid_bits: usize = th.x_out.iter().zip(&td.x_out).map(|(a, b)| a.iter().zip(b).filter(|(x, y)| x.to_bits() != y.to_bits()).count()).sum();
-            devhost_exact &= flips == 0 && resid_bits == 0 && th.experts.len() == td.experts.len() && !th.experts.is_empty();
+            let resid_bits: usize = th
+                .x_out
+                .iter()
+                .zip(&td.x_out)
+                .map(|(a, b)| {
+                    a.iter()
+                        .zip(b)
+                        .filter(|(x, y)| x.to_bits() != y.to_bits())
+                        .count()
+                })
+                .sum();
+            devhost_exact &= flips == 0
+                && resid_bits == 0
+                && th.experts.len() == td.experts.len()
+                && !th.experts.is_empty();
             say(format!(
                 "len {n} EXPERTS host vs device routing: {} layers, {slots} expert slots, flips {flips}, first differing layer {:?}; residual stream bits differ {resid_bits}",
                 th.experts.len(),
@@ -286,8 +373,15 @@ fn main() {
         // Phase B: the whole-prompt GEMMs read a GPU-cached copy of the weights (the OFF runs above are the baseline).
         engine.set_whole_prompt(true).expect("on");
         let t = Instant::now();
-        let bytes = engine.whole_prompt_cache_weights().expect("cached weight copy");
-        say(format!("CACHED copy {:.2} GB in {:.2} s, mem_available {:.1} GB", bytes as f64 / 1e9, t.elapsed().as_secs_f64(), mem_available_gb()));
+        let bytes = engine
+            .whole_prompt_cache_weights()
+            .expect("cached weight copy");
+        say(format!(
+            "CACHED copy {:.2} GB in {:.2} s, mem_available {:.1} GB",
+            bytes as f64 / 1e9,
+            t.elapsed().as_secs_f64(),
+            mem_available_gb()
+        ));
         for (n, off_tokens, off_logits, off_ttft) in &offs {
             let ids = prompt_ids(&tok, *n);
             for rep in 0..reps {
@@ -295,7 +389,11 @@ fn main() {
                 let st = engine.whole_prompt_stats().cloned().unwrap_or_default();
                 let diff = off_tokens.iter().zip(&on.tokens).position(|(a, b)| a != b);
                 let cos = cosine(off_logits, &on.logits0);
-                let maxd = off_logits.iter().zip(&on.logits0).map(|(a, b)| (a - b).abs()).fold(0.0f32, f32::max);
+                let maxd = off_logits
+                    .iter()
+                    .zip(&on.logits0)
+                    .map(|(a, b)| (a - b).abs())
+                    .fold(0.0f32, f32::max);
                 all_identical &= diff.is_none();
                 say(format!(
                     "len {n} rep {rep} CACHED: TTFT off {off_ttft:.1} ms on {:.1} ms (x{:.2}); prefill_ms on {}; tokens {} ; logits0 cosine {cos:.7} maxdiff {maxd:.3e}; launches {} chip(GEMM+quant) {:.1} ms attention {:.1} ms host {:.1} ms",
@@ -313,11 +411,25 @@ fn main() {
             }
         }
     }
-    say(format!("SUMMARY tokens {}", if all_identical { "IDENTICAL" } else { "DIFFER" }));
+    say(format!(
+        "SUMMARY tokens {}",
+        if all_identical { "IDENTICAL" } else { "DIFFER" }
+    ));
     if devhost {
-        say(format!("SUMMARY devhost vs host routing+combine {}", if devhost_exact { "BIT-IDENTICAL" } else { "DIFFER" }));
+        say(format!(
+            "SUMMARY devhost vs host routing+combine {}",
+            if devhost_exact {
+                "BIT-IDENTICAL"
+            } else {
+                "DIFFER"
+            }
+        ));
     }
     let doc = serde_json::json!({"checkpoint": checkpoint, "lens": lens, "new_tokens": new_tokens, "reps": reps, "rows": rows});
-    std::fs::write(receipt.join("run.json"), serde_json::to_string_pretty(&doc).unwrap()).expect("run.json");
+    std::fs::write(
+        receipt.join("run.json"),
+        serde_json::to_string_pretty(&doc).unwrap(),
+    )
+    .expect("run.json");
     std::fs::write(receipt.join("run.txt"), log.join("\n") + "\n").expect("run.txt");
 }

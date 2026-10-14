@@ -12,8 +12,7 @@ use crate::engine::GenerateParams;
 /// tokens already generated in this request).
 pub fn sample_next(logits: &[f32], params: &GenerateParams, step: usize) -> u32 {
     let masked;
-    let logits = if params.top_k > 0 && params.top_k < logits.len() && params.temperature > 0.001
-    {
+    let logits = if params.top_k > 0 && params.top_k < logits.len() && params.temperature > 0.001 {
         masked = top_k_mask(logits, params.top_k);
         masked.as_slice()
     } else {

@@ -30,7 +30,20 @@ pub const fn is_native() -> bool {
 }
 
 /// Launch kinds of the timeline (`OMEGA_GPU_DGRAPH_K_*`), in enum order.
-pub const KIND_NAMES: [&str; 12] = ["norm", "qkv", "attn", "o_proj", "res_add", "router", "gate_up", "swiglu", "down", "combine_norm", "lm_head", "argmax"];
+pub const KIND_NAMES: [&str; 12] = [
+    "norm",
+    "qkv",
+    "attn",
+    "o_proj",
+    "res_add",
+    "router",
+    "gate_up",
+    "swiglu",
+    "down",
+    "combine_norm",
+    "lm_head",
+    "argmax",
+];
 
 /// omega's own name for a launch kind (`omega_gpu_decode_graph_kind_name`); the table above
 /// in the stub.
@@ -41,10 +54,14 @@ pub fn kind_name(kind: u8) -> String {
         let p = unsafe { ffi::omega_gpu_decode_graph_kind_name(kind) };
         if !p.is_null() {
             // SAFETY: non-null static string.
-            return unsafe { std::ffi::CStr::from_ptr(p) }.to_string_lossy().into_owned();
+            return unsafe { std::ffi::CStr::from_ptr(p) }
+                .to_string_lossy()
+                .into_owned();
         }
     }
-    KIND_NAMES.get(kind as usize).map_or_else(|| format!("kind{kind}"), |s| s.to_string())
+    KIND_NAMES
+        .get(kind as usize)
+        .map_or_else(|| format!("kind{kind}"), |s| s.to_string())
 }
 
 /// Mirror of `OmegaGpuDecodeGraphStats`: what one token cost.
@@ -87,7 +104,10 @@ mod ffi {
         _private: [u8; 0],
     }
     extern "C" {
-        pub fn omega_gpu_decode_graph_create(cfg: *const GraphConfig, out: *mut *mut OmegaGpuDecodeGraph) -> i32;
+        pub fn omega_gpu_decode_graph_create(
+            cfg: *const GraphConfig,
+            out: *mut *mut OmegaGpuDecodeGraph,
+        ) -> i32;
         pub fn omega_gpu_decode_graph_free(g: *mut OmegaGpuDecodeGraph);
         pub fn omega_gpu_decode_graph_set_layer(
             g: *mut OmegaGpuDecodeGraph,
@@ -98,7 +118,10 @@ mod ffi {
             down: *const c_void,
             input_norm: *const f32,
         ) -> i32;
-        pub fn omega_gpu_decode_graph_set_final_norm(g: *mut OmegaGpuDecodeGraph, final_norm: *const f32) -> i32;
+        pub fn omega_gpu_decode_graph_set_final_norm(
+            g: *mut OmegaGpuDecodeGraph,
+            final_norm: *const f32,
+        ) -> i32;
         pub fn omega_gpu_decode_graph_token(
             g: *mut OmegaGpuDecodeGraph,
             x_embed: *const f32,
@@ -106,11 +129,21 @@ mod ffi {
             token: *mut u32,
             st: *mut GraphStats,
         ) -> i32;
-        pub fn omega_gpu_decode_graph_read(g: *mut OmegaGpuDecodeGraph, x: *mut f32, hidden: *mut f32, logits: *mut f32) -> i32;
+        pub fn omega_gpu_decode_graph_read(
+            g: *mut OmegaGpuDecodeGraph,
+            x: *mut f32,
+            hidden: *mut f32,
+            logits: *mut f32,
+        ) -> i32;
         pub fn omega_gpu_decode_graph_set_flush_each(g: *mut OmegaGpuDecodeGraph, on: i32);
         pub fn omega_gpu_decode_graph_test_set_mutant(g: *mut OmegaGpuDecodeGraph, mutant: i32);
         pub fn omega_gpu_decode_graph_set_stamps(g: *mut OmegaGpuDecodeGraph, on: i32);
-        pub fn omega_gpu_decode_graph_stamps(g: *const OmegaGpuDecodeGraph, stamps: *mut u64, kinds: *mut u8, cap: u32) -> i32;
+        pub fn omega_gpu_decode_graph_stamps(
+            g: *const OmegaGpuDecodeGraph,
+            stamps: *mut u64,
+            kinds: *mut u8,
+            cap: u32,
+        ) -> i32;
         pub fn omega_gpu_decode_graph_kind_name(kind: u8) -> *const std::os::raw::c_char;
         pub fn omega_gpu_session_last_error() -> *const std::os::raw::c_char;
     }
@@ -133,14 +166,21 @@ fn rc_err(stage: &str, rc: i32) -> OmegaGpuError {
             std::ffi::CStr::from_ptr(e).to_string_lossy().into_owned()
         }
     };
-    OmegaGpuError::Rc { rc, name: format!("decode graph {stage}: {name}: {detail}") }
+    OmegaGpuError::Rc {
+        rc,
+        name: format!("decode graph {stage}: {name}: {detail}"),
+    }
 }
 
 fn check_len(what: &'static str, expected: usize, got: usize) -> Result<(), OmegaGpuError> {
     if expected == got {
         Ok(())
     } else {
-        Err(OmegaGpuError::ShapeMismatch { what, expected, got })
+        Err(OmegaGpuError::ShapeMismatch {
+            what,
+            expected,
+            got,
+        })
     }
 }
 
@@ -151,13 +191,22 @@ fn bad(name: String) -> OmegaGpuError {
 /// Host check of the configuration, before any chip call (also in the stub).
 pub fn check_config(cfg: &GraphConfig) -> Result<(), OmegaGpuError> {
     if cfg.layers == 0 || cfg.layers as usize > MAX_LAYERS {
-        return Err(bad(format!("decode graph: {} layers, 1..={MAX_LAYERS} supported", cfg.layers)));
+        return Err(bad(format!(
+            "decode graph: {} layers, 1..={MAX_LAYERS} supported",
+            cfg.layers
+        )));
     }
     if cfg.vocab == 0 || cfg.vocab as usize > MAX_VOCAB {
-        return Err(bad(format!("decode graph: vocab {} outside 1..={MAX_VOCAB}", cfg.vocab)));
+        return Err(bad(format!(
+            "decode graph: vocab {} outside 1..={MAX_VOCAB}",
+            cfg.vocab
+        )));
     }
     if cfg.router.is_null() || cfg.attn.is_null() || cfg.lm_head.is_null() {
-        return Err(bad("decode graph: the router, the KV cache and the lm_head must all be device objects".into()));
+        return Err(bad(
+            "decode graph: the router, the KV cache and the lm_head must all be device objects"
+                .into(),
+        ));
     }
     Ok(())
 }
@@ -175,7 +224,11 @@ unsafe impl Send for DecodeGraph {}
 
 impl fmt::Debug for DecodeGraph {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "DecodeGraph {{ layers: {}, vocab: {} }}", self.layers, self.vocab)
+        write!(
+            f,
+            "DecodeGraph {{ layers: {}, vocab: {} }}",
+            self.layers, self.vocab
+        )
     }
 }
 
@@ -194,7 +247,11 @@ impl DecodeGraph {
             if rc != 0 || ptr.is_null() {
                 return Err(rc_err("create", rc));
             }
-            Ok(Self { ptr, layers: cfg.layers as usize, vocab: cfg.vocab as usize })
+            Ok(Self {
+                ptr,
+                layers: cfg.layers as usize,
+                vocab: cfg.vocab as usize,
+            })
         }
         #[cfg(not(has_omega_dgraph))]
         Err(OmegaGpuError::Unavailable)
@@ -224,14 +281,27 @@ impl DecodeGraph {
     ) -> Result<(), OmegaGpuError> {
         check_len("decode graph input_norm", HIDDEN, input_norm.len())?;
         if layer >= self.layers {
-            return Err(bad(format!("decode graph: layer {layer} of {}", self.layers)));
+            return Err(bad(format!(
+                "decode graph: layer {layer} of {}",
+                self.layers
+            )));
         }
         if qkv.is_null() || o.is_null() || gate_up.is_null() || down.is_null() {
-            return Err(bad(format!("decode graph layer {layer}: a projection has no device handle")));
+            return Err(bad(format!(
+                "decode graph layer {layer}: a projection has no device handle"
+            )));
         }
         #[cfg(has_omega_dgraph)]
         {
-            let rc = ffi::omega_gpu_decode_graph_set_layer(self.ptr, layer as u32, qkv, o, gate_up, down, input_norm.as_ptr());
+            let rc = ffi::omega_gpu_decode_graph_set_layer(
+                self.ptr,
+                layer as u32,
+                qkv,
+                o,
+                gate_up,
+                down,
+                input_norm.as_ptr(),
+            );
             if rc != 0 {
                 return Err(rc_err("set_layer", rc));
             }
@@ -247,7 +317,9 @@ impl DecodeGraph {
         #[cfg(has_omega_dgraph)]
         {
             // SAFETY: ptr is live; the slice holds HIDDEN f32 (checked).
-            let rc = unsafe { ffi::omega_gpu_decode_graph_set_final_norm(self.ptr, final_norm.as_ptr()) };
+            let rc = unsafe {
+                ffi::omega_gpu_decode_graph_set_final_norm(self.ptr, final_norm.as_ptr())
+            };
             if rc != 0 {
                 return Err(rc_err("set_final_norm", rc));
             }
@@ -260,15 +332,28 @@ impl DecodeGraph {
     /// One whole token as one command list: `x_embed` (the token's embedding row, f32
     /// `[HIDDEN]`) at position `pos` -> the greedy token (lowest index of the max logit) and
     /// what it cost. The KV cache gets this position's K/V for every layer.
-    pub fn token(&mut self, x_embed: &[f32], pos: usize) -> Result<(u32, GraphStats), OmegaGpuError> {
+    pub fn token(
+        &mut self,
+        x_embed: &[f32],
+        pos: usize,
+    ) -> Result<(u32, GraphStats), OmegaGpuError> {
         check_len("decode graph x_embed", HIDDEN, x_embed.len())?;
-        let pos = u32::try_from(pos).map_err(|_| bad(format!("decode graph: pos {pos} too large")))?;
+        let pos =
+            u32::try_from(pos).map_err(|_| bad(format!("decode graph: pos {pos} too large")))?;
         #[cfg(has_omega_dgraph)]
         {
             let mut token = 0u32;
             let mut st = GraphStats::default();
             // SAFETY: ptr is live; x_embed holds HIDDEN f32 (checked); token and st are local.
-            let rc = unsafe { ffi::omega_gpu_decode_graph_token(self.ptr, x_embed.as_ptr(), pos, &mut token, &mut st) };
+            let rc = unsafe {
+                ffi::omega_gpu_decode_graph_token(
+                    self.ptr,
+                    x_embed.as_ptr(),
+                    pos,
+                    &mut token,
+                    &mut st,
+                )
+            };
             if rc != 0 {
                 return Err(rc_err("token", rc));
             }
@@ -283,7 +368,12 @@ impl DecodeGraph {
 
     /// Copies the last token's device residual `x`, final-normed `hidden` (both `[HIDDEN]`)
     /// and `logits` (`[vocab]`); any of them may be `None`. Costs a device read.
-    pub fn read(&mut self, x: Option<&mut [f32]>, hidden: Option<&mut [f32]>, logits: Option<&mut [f32]>) -> Result<(), OmegaGpuError> {
+    pub fn read(
+        &mut self,
+        x: Option<&mut [f32]>,
+        hidden: Option<&mut [f32]>,
+        logits: Option<&mut [f32]>,
+    ) -> Result<(), OmegaGpuError> {
         if let Some(x) = &x {
             check_len("decode graph read x", HIDDEN, x.len())?;
         }
@@ -297,7 +387,8 @@ impl DecodeGraph {
         {
             let p = |s: Option<&mut [f32]>| s.map_or(std::ptr::null_mut(), |s| s.as_mut_ptr());
             // SAFETY: ptr is live; each non-null buffer has the length omega copies (checked).
-            let rc = unsafe { ffi::omega_gpu_decode_graph_read(self.ptr, p(x), p(hidden), p(logits)) };
+            let rc =
+                unsafe { ffi::omega_gpu_decode_graph_read(self.ptr, p(x), p(hidden), p(logits)) };
             if rc != 0 {
                 return Err(rc_err("read", rc));
             }
@@ -329,7 +420,14 @@ impl DecodeGraph {
             let mut stamps = vec![0u64; cap as usize + 1];
             let mut kinds = vec![0u8; cap as usize + 1];
             // SAFETY: ptr is live; both buffers hold cap + 1 entries.
-            let n = unsafe { ffi::omega_gpu_decode_graph_stamps(self.ptr, stamps.as_mut_ptr(), kinds.as_mut_ptr(), cap + 1) };
+            let n = unsafe {
+                ffi::omega_gpu_decode_graph_stamps(
+                    self.ptr,
+                    stamps.as_mut_ptr(),
+                    kinds.as_mut_ptr(),
+                    cap + 1,
+                )
+            };
             if n < 0 {
                 return Err(rc_err("stamps", n));
             }
@@ -382,8 +480,20 @@ mod tests {
     use super::*;
 
     fn cfg(layers: u32, vocab: u32, live: bool) -> GraphConfig {
-        let p = if live { 8usize as *mut c_void } else { std::ptr::null_mut() };
-        GraphConfig { layers, vocab, eps: 1e-6, norm_topk: 1, router: p, attn: p, lm_head: p }
+        let p = if live {
+            8usize as *mut c_void
+        } else {
+            std::ptr::null_mut()
+        };
+        GraphConfig {
+            layers,
+            vocab,
+            eps: 1e-6,
+            norm_topk: 1,
+            router: p,
+            attn: p,
+            lm_head: p,
+        }
     }
 
     #[test]
@@ -435,7 +545,12 @@ mod tests {
         assert!(out.is_null());
         let norm = [0.0f32; HIDDEN];
         // SAFETY: a NULL graph is refused first.
-        assert_eq!(unsafe { ffi::omega_gpu_decode_graph_set_final_norm(std::ptr::null_mut(), norm.as_ptr()) }, -1);
+        assert_eq!(
+            unsafe {
+                ffi::omega_gpu_decode_graph_set_final_norm(std::ptr::null_mut(), norm.as_ptr())
+            },
+            -1
+        );
         let e = rc_err("smoke", -1).to_string();
         assert!(e.contains("BAD_ARGS"), "{e}");
         // omega's kind names are the table's, in enum order.
