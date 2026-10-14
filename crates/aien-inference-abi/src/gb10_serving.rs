@@ -15,7 +15,7 @@
 //! calls omega; tests record). It applies only to Qwen3 on the GB10, which is enabled by
 //! default since #277 on a production-strict run (`AIEN_GB10_QWEN3_DECLARED_ATTEMPT=0` refuses it;
 //! `1` also enables it under `AIEN_DEV_FALLBACK=1`). Evidence: #277 attempt 3 passed
-//! (https://github.com/aien-dev/aien-sovereign-core/issues/277#issuecomment-6059774846), limited to a
+//! (https://github.com/aien-spark/aien-sovereign-core/issues/277#issuecomment-6059774846), limited to a
 //! Linux-hosted GB10 (not native AIENOS), one prompt, context 4096, no endurance run and no
 //! failing baseline. It does not claim to fix #277 beyond that, and omega's header lists what is
 //! still not covered (elementwise scratch, the attention kernel).

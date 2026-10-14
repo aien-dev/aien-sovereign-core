@@ -9,7 +9,7 @@ classes       = (a) model output 70, (b) runtime/harness 17, (c) prompt or templ
 public bundle = BLOCKED. Qwen3-4B-Instruct-2507 is not qualified; the model decision goes back to Drake (ruling 2, arch#190).
 ```
 
-Owning issue: aien-dev/aien-sovereign-core#384. Nothing here changes QUALIFICATION-v6.md, any v5 file, any row, limit or goal.
+Owning issue: aien-spark/aien-sovereign-core#384. Nothing here changes QUALIFICATION-v6.md, any v5 file, any row, limit or goal.
 No launch was repeated. Every number below is read from the files of Section 6.
 
 ## 1. Run
