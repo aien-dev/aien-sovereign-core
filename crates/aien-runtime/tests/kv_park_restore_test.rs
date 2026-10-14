@@ -21,8 +21,11 @@ use aien_kv_cache::{create_shared_kv_manager_with_pool, KvDType, KvPoolConfig, S
 use aien_kv_store::fake::{FakeConfig, FakeKvStore, Fault, JobScript};
 use aien_kv_store::worker::{StorageWorker, WorkerConfig};
 use aien_kv_store::{
-    chunk_chain, BackendFormat, ChunkKey, JobId, KvDtype, NamespaceFields, NamespaceId,
+    chunk_chain, BackendFormat, CancelOutcome, Capacity, ChunkHeader, ChunkKey, Completion,
+    DrainReport, Incarnation, JobId, KvDtype, KvStore, NamespaceFields, NamespaceId, PinToken,
+    PinnedDest, PinnedSource, RecoveryProgress,
 };
+use aien_platform::PlatformError;
 use aien_runtime::kv_residency::{
     layout_strides, KvIdentity, KvResidency, KvResidencyConfig, KvResidencyStatus, ResidencyState,
 };
@@ -31,6 +34,7 @@ use aien_runtime::spine::AienRuntimeSpine;
 use aien_scheduler::{SchedulerConfig, SequenceId, SequencePhase};
 use async_trait::async_trait;
 use parking_lot::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -113,6 +117,7 @@ struct Rig {
     rec: Arc<Mutex<Rec>>,
     kv: SharedKvManager,
     fake: Arc<FakeKvStore>,
+    store: Arc<LateCancel>,
     worker: Arc<StorageWorker>,
     ns: NamespaceId,
 }
@@ -150,19 +155,91 @@ fn fields(kv: &SharedKvManager) -> NamespaceFields<'static> {
     }
 }
 
+/// The fake store, plus one switch: while `refuse_cancel` is set, `cancel`
+/// answers `TooLate` (the transfer is past the point where it can be stopped,
+/// ADR 5.5), so the job runs to its own terminal. Everything else delegates.
+struct LateCancel {
+    inner: Arc<FakeKvStore>,
+    refuse_cancel: AtomicBool,
+}
+
+impl KvStore for LateCancel {
+    fn namespace(&self) -> NamespaceId {
+        self.inner.namespace()
+    }
+    fn capacity(&self) -> Capacity {
+        self.inner.capacity()
+    }
+    fn lookup(&self, keys: &[ChunkKey]) -> Vec<Option<u64>> {
+        self.inner.lookup(keys)
+    }
+    fn submit_store(
+        &self,
+        header: ChunkHeader,
+        src: PinnedSource,
+        inc: Incarnation,
+    ) -> Result<JobId, PlatformError> {
+        self.inner.submit_store(header, src, inc)
+    }
+    fn submit_load(
+        &self,
+        key: ChunkKey,
+        expect: &ChunkHeader,
+        dst: PinnedDest,
+        inc: Incarnation,
+    ) -> Result<JobId, PlatformError> {
+        self.inner.submit_load(key, expect, dst, inc)
+    }
+    fn submit_flush(&self, inc: Incarnation) -> Result<JobId, PlatformError> {
+        self.inner.submit_flush(inc)
+    }
+    fn attach_waiter(&self, job: JobId, inc: Incarnation) -> Result<(), PlatformError> {
+        self.inner.attach_waiter(job, inc)
+    }
+    fn poll(&self, max: usize) -> Vec<Completion> {
+        self.inner.poll(max)
+    }
+    fn cancel(&self, job: JobId) -> CancelOutcome {
+        if self.refuse_cancel.load(Ordering::SeqCst) {
+            CancelOutcome::TooLate
+        } else {
+            self.inner.cancel(job)
+        }
+    }
+    fn pin(&self, keys: &[ChunkKey]) -> Result<PinToken, PlatformError> {
+        self.inner.pin(keys)
+    }
+    fn unpin(&self, token: PinToken) {
+        self.inner.unpin(token)
+    }
+    fn delete(&self, keys: &[ChunkKey]) -> u64 {
+        self.inner.delete(keys)
+    }
+    fn recover_step(&self, slice_ms: u64) -> RecoveryProgress {
+        self.inner.recover_step(slice_ms)
+    }
+    fn shutdown(&self, intake_deadline_ms: u64) -> DrainReport {
+        self.inner.shutdown(intake_deadline_ms)
+    }
+}
+
 fn rig_with(watermark_blocks: usize, worker_paused: bool) -> Rig {
     let kv = create_shared_kv_manager_with_pool(TOTAL_BLOCKS, BLOCK, pool_config()).expect("pool");
     let f = fields(&kv);
     let identity = KvIdentity::new(&f).expect("identity");
     let ns = identity.namespace();
     let fake = Arc::new(FakeKvStore::new(FakeConfig::new(ns)));
+    let store = Arc::new(LateCancel {
+        inner: fake.clone(),
+        refuse_cancel: AtomicBool::new(false),
+    });
     let drive = {
         let fake = fake.clone();
         move || fake.advance(1000)
     };
     let worker = Arc::new(
         StorageWorker::spawn(
-            fake.clone(),
+            store.clone(),
             WorkerConfig {
                 idle_poll: Duration::from_micros(200),
                 start_paused: worker_paused,
@@ -202,6 +279,7 @@ fn rig_with(watermark_blocks: usize, worker_paused: bool) -> Rig {
         rec,
         kv,
         fake,
+        store,
         worker,
         ns,
     }
@@ -227,7 +305,10 @@ fn request(prompt: &[u32], max_tokens: usize) -> SequenceRequest {
 }
 
 fn status(r: &Rig) -> KvResidencyStatus {
-    r.spine.kv_residency().expect("residency installed").status()
+    r.spine
+        .kv_residency()
+        .expect("residency installed")
+        .status()
 }
 
 fn state_of(r: &Rig, seq: u64) -> ResidencyState {
@@ -374,7 +455,10 @@ async fn inner_of(r: &mut Rig, job: JobId) -> JobId {
         if let Some(inner) = r.worker.inner_job(job) {
             return inner;
         }
-        assert!(t0.elapsed() < Duration::from_secs(10), "job never dispatched");
+        assert!(
+            t0.elapsed() < Duration::from_secs(10),
+            "job never dispatched"
+        );
         std::thread::sleep(Duration::from_millis(1));
     }
 }
@@ -413,14 +497,21 @@ async fn finished_turn_publishes_full_chunks_and_partial_tail() {
     let mut all = computed.clone();
     all.push(101);
     let over = keys(&r, &all);
-    assert!(r.fake.payload_of(&over[2]).is_none(), "uncomputed tail stored");
+    assert!(
+        r.fake.payload_of(&over[2]).is_none(),
+        "uncomputed tail stored"
+    );
 
     let s = status(&r);
     assert_eq!(s.stats.park_jobs_total, 3);
     assert_eq!(s.stats.park_published_total, 3);
     assert_eq!(s.stats.park_failed_total, 0);
     assert_eq!(holder_blocks(&r), 0, "holders released after publication");
-    assert_eq!(free_blocks(&r), TOTAL_BLOCKS, "every block back in the pool");
+    assert_eq!(
+        free_blocks(&r),
+        TOTAL_BLOCKS,
+        "every block back in the pool"
+    );
 }
 
 /// ADR 5.4 / 8 rule 1: a park never makes `step` wait for storage. With the
@@ -448,10 +539,17 @@ async fn park_never_blocks_step() {
     for _ in 0..5 {
         let t = Instant::now();
         step(&mut r).await;
-        assert!(t.elapsed() < Duration::from_secs(1), "step waited on storage");
+        assert!(
+            t.elapsed() < Duration::from_secs(1),
+            "step waited on storage"
+        );
     }
     let decodes_after = r.rec.lock().decodes.iter().filter(|&&d| d == other).count();
-    assert_eq!(decodes_after, decodes_before + 5, "other request kept decoding");
+    assert_eq!(
+        decodes_after,
+        decodes_before + 5,
+        "other request kept decoding"
+    );
     assert_eq!(status(&r).parking_jobs, 2, "parks still in flight");
 
     r.worker.resume_dispatch();
@@ -511,6 +609,7 @@ async fn restore_failure_frees_holder_and_prefills() {
     park_turn(&mut r, &prompt14(), 3).await;
     let ks = keys(&r, &computed16());
     assert!(r.fake.corrupt_payload(&ks[0]), "corrupt chunk 0");
+    let fallbacks = status(&r).stats.restore_fallback_prefill_total;
 
     let mut prompt = computed16();
     prompt.extend_from_slice(&[500, 501, 502, 503]);
@@ -522,10 +621,14 @@ async fn restore_failure_frees_holder_and_prefills() {
     .await;
 
     assert!(restores_of(&r, seq).is_empty(), "nothing restored");
-    assert_eq!(first_prefill_len(&r, seq), Some(prompt.len()), "plain prefill");
+    assert_eq!(
+        first_prefill_len(&r, seq),
+        Some(prompt.len()),
+        "plain prefill"
+    );
     let s = status(&r);
     assert_eq!(s.stats.restore_failed_total, 1);
-    assert_eq!(s.stats.restore_fallback_prefill_total, 1);
+    assert_eq!(s.stats.restore_fallback_prefill_total, fallbacks + 1);
     assert_eq!(s.restore_inflight_blocks, 0);
     assert_eq!(holder_blocks(&r), 0, "restore holders freed");
     assert_eq!(free_blocks(&r), TOTAL_BLOCKS, "no block leaked");
@@ -568,18 +671,31 @@ async fn stale_completion_cannot_touch_reused_sequence_id() {
     }
     let t0 = Instant::now();
     while !finished(&r, b) {
-        assert!(r.kv.read().get_block_table(a).is_none(), "stale id got a table");
+        assert!(
+            r.kv.read().get_block_table(a).is_none(),
+            "stale id got a table"
+        );
         assert!(t0.elapsed() < Duration::from_secs(10), "b never finished");
         step(&mut r).await;
         std::thread::sleep(Duration::from_millis(1));
     }
     step_until(&mut r, "parks terminal", |r| status(r).parking_jobs == 0).await;
 
-    assert!(restores_of(&r, a).is_empty(), "the old request restored nothing");
+    assert!(
+        restores_of(&r, a).is_empty(),
+        "the old request restored nothing"
+    );
     assert_eq!(restores_of(&r, b), vec![16]);
     assert_eq!(first_prefill_len(&r, b), Some(3));
     let s = status(&r);
-    assert_eq!(s.stats.store_stale_completions_total, 2, "a's two terminals");
+    assert_eq!(
+        s.stats.store_stale_completions_total, 2,
+        "a's two terminals"
+    );
+    assert_eq!(
+        s.restore_inflight_blocks, 0,
+        "a's restore accounting closed"
+    );
     assert_eq!(s.stats.restore_committed_total, 1);
     assert_eq!(holder_blocks(&r), 0);
     assert_eq!(free_blocks(&r), TOTAL_BLOCKS);
@@ -636,13 +752,14 @@ async fn restore_refused_below_watermark_falls_back() {
 
     let mut prompt = computed16();
     prompt.extend_from_slice(&[800, 801, 802]);
+    let fallbacks = status(&r).stats.restore_fallback_prefill_total;
     let seq = r.spine.submit_request(request(&prompt, 2));
     assert_eq!(state_of(&r, seq), ResidencyState::Resident);
     assert_eq!(phase_of(&r, seq), Some(SequencePhase::Waiting));
     let s = status(&r);
     assert_eq!(s.stats.restore_jobs_total, 0, "nothing submitted");
     assert_eq!(s.stats.restore_refused_watermark_total, 1);
-    assert_eq!(s.stats.restore_fallback_prefill_total, 1);
+    assert_eq!(s.stats.restore_fallback_prefill_total, fallbacks + 1);
     assert_eq!(holder_blocks(&r), 0, "nothing allocated");
     assert_eq!(free_blocks(&r), 6);
 
@@ -655,13 +772,18 @@ async fn restore_refused_below_watermark_falls_back() {
 /// ADR 5.5 (B3, review finding 5): chunk 1 fails while chunk 0 is still in
 /// transfer. The transaction drains: the request stays held, chunk 0's
 /// destination stays allocated until chunk 0's own terminal arrives, and only
-/// then the holders are freed and the request prefills from zero.
+/// then the holders are freed and the request prefills from zero. Chunk 0's
+/// cancel is answered `TooLate`, so its terminal is a successful load whose
+/// bytes are discarded.
 #[tokio::test]
 async fn multi_chunk_restore_failure_does_not_free_destination_in_use() {
     let mut r = rig();
     park_turn(&mut r, &prompt14(), 3).await;
     let ks = keys(&r, &computed16());
     assert!(r.fake.corrupt_payload(&ks[1]), "corrupt chunk 1");
+    // Chunk 0 is mid-transfer: its cancel comes too late, so it must run to
+    // its own terminal before its destination may be released.
+    r.store.refuse_cancel.store(true, Ordering::SeqCst);
 
     let mut prompt = computed16();
     prompt.extend_from_slice(&[900, 901, 902]);
@@ -735,19 +857,22 @@ async fn restore_txn_adopts_assembled_table_only_after_all_jobs_terminal() {
         !restores_of(r, seq).is_empty()
     })
     .await;
-    let table = r
-        .kv
-        .read()
-        .get_block_table(seq)
-        .expect("assembled table")
-        .block_ids
-        .clone();
+    let table =
+        r.kv.read()
+            .get_block_table(seq)
+            .expect("assembled table")
+            .block_ids
+            .clone();
     assert!(table.len() >= 4);
     let bb = block_len(&r);
     for (j, &b) in table.iter().take(4).enumerate() {
         assert_eq!(read_block(&r, b), pattern(j, bb), "restored block {j}");
     }
-    assert_eq!(holder_blocks(&r), 0, "landing holders released after adoption");
+    assert_eq!(
+        holder_blocks(&r),
+        0,
+        "landing holders released after adoption"
+    );
     assert_eq!(state_of(&r, seq), ResidencyState::Prefilling);
     assert_eq!(restores_of(&r, seq), vec![16]);
     assert_eq!(first_prefill_len(&r, seq), Some(3));

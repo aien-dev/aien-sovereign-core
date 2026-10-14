@@ -411,6 +411,172 @@ pub fn build_shared_kv_runtime_for_model(
     Ok((spine, backend, plan))
 }
 
+// ---------------------------------------------------------------------------
+// Persistent KV settings and store construction (ADR 0003, cut C6;
+// docs/persistent-kv/METRICS_AND_SETTINGS.md)
+// ---------------------------------------------------------------------------
+
+/// Root of the host object store. Unset: persistence off, no behaviour change.
+pub const KV_STORE_DIR_ENV: &str = "AIEN_KV_STORE_DIR";
+pub const KV_STORE_NAMESPACE_ENV: &str = "AIEN_KV_STORE_NAMESPACE";
+pub const KV_CHUNK_BLOCKS_ENV: &str = "AIEN_KV_CHUNK_BLOCKS";
+pub const KV_RESTORE_MAX_BLOCKS_ENV: &str = "AIEN_KV_RESTORE_MAX_BLOCKS";
+pub const KV_PARK_ENV: &str = "AIEN_KV_PARK";
+pub const KV_RESTORE_ENV: &str = "AIEN_KV_RESTORE";
+
+/// Persistent KV settings read from the environment (or any lookup in tests).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KvPersistSettings {
+    pub store_dir: Option<std::path::PathBuf>,
+    /// Sharing namespace (ADR 1.2 field 13), at most 64 bytes. Default `default`.
+    pub namespace: String,
+    /// Chunk size in pool blocks. Default 16.
+    pub chunk_blocks: u32,
+    /// Restore holder blocks in flight at once. `None`: a quarter of the pool.
+    pub restore_max_blocks: Option<usize>,
+    /// Default on when the store dir is set.
+    pub park: bool,
+    pub restore: bool,
+}
+
+fn parse_switch(name: &str, v: Option<String>) -> Result<bool, String> {
+    match v.as_deref() {
+        None | Some("1") => Ok(true),
+        Some("0") => Ok(false),
+        Some(other) => Err(format!("{name}={other:?}: must be 1 or 0")),
+    }
+}
+
+fn parse_positive(name: &str, v: &str) -> Result<u64, String> {
+    if v.is_empty() || !v.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(format!("{name}={v:?} is not a positive decimal integer"));
+    }
+    match v.parse::<u64>() {
+        Ok(0) => Err(format!("{name}=0: must be greater than zero")),
+        Ok(n) => Ok(n),
+        Err(e) => Err(format!("{name}={v:?}: {e}")),
+    }
+}
+
+impl KvPersistSettings {
+    /// Every value is checked; a bad value is refused, never defaulted.
+    pub fn from_lookup(get: impl Fn(&str) -> Option<String>) -> Result<Self, String> {
+        let store_dir = get(KV_STORE_DIR_ENV)
+            .filter(|s| !s.is_empty())
+            .map(std::path::PathBuf::from);
+        let namespace = get(KV_STORE_NAMESPACE_ENV).unwrap_or_else(|| "default".to_string());
+        if namespace.is_empty()
+            || namespace.len() > aien_kv_store::identity::MAX_SHARING_NAMESPACE_BYTES
+        {
+            return Err(format!(
+                "{KV_STORE_NAMESPACE_ENV}: must be 1 to {} bytes",
+                aien_kv_store::identity::MAX_SHARING_NAMESPACE_BYTES
+            ));
+        }
+        let chunk_blocks = match get(KV_CHUNK_BLOCKS_ENV) {
+            None => 16,
+            Some(v) => u32::try_from(parse_positive(KV_CHUNK_BLOCKS_ENV, &v)?)
+                .map_err(|_| format!("{KV_CHUNK_BLOCKS_ENV}={v:?} is too large"))?,
+        };
+        let restore_max_blocks = match get(KV_RESTORE_MAX_BLOCKS_ENV) {
+            None => None,
+            Some(v) => Some(
+                usize::try_from(parse_positive(KV_RESTORE_MAX_BLOCKS_ENV, &v)?)
+                    .map_err(|_| format!("{KV_RESTORE_MAX_BLOCKS_ENV}={v:?} is too large"))?,
+            ),
+        };
+        Ok(Self {
+            store_dir,
+            namespace,
+            chunk_blocks,
+            restore_max_blocks,
+            park: parse_switch(KV_PARK_ENV, get(KV_PARK_ENV))?,
+            restore: parse_switch(KV_RESTORE_ENV, get(KV_RESTORE_ENV))?,
+        })
+    }
+
+    pub fn from_env() -> Result<Self, String> {
+        Self::from_lookup(|n| std::env::var(n).ok())
+    }
+
+    /// Persistence is on only when a store directory is configured.
+    pub fn enabled(&self) -> bool {
+        self.store_dir.is_some()
+    }
+
+    /// The residency settings for a pool of `total_blocks`, capped at the
+    /// operator context `context_cap` (`AIEN_KV_CONTEXT_TOKENS`).
+    pub fn residency_config(
+        &self,
+        total_blocks: usize,
+        context_cap: Option<usize>,
+    ) -> crate::kv_residency::KvResidencyConfig {
+        crate::kv_residency::KvResidencyConfig {
+            chunk_blocks: self.chunk_blocks,
+            context_cap,
+            restore_max_blocks: self
+                .restore_max_blocks
+                .unwrap_or_else(|| (total_blocks / 4).max(1)),
+            park: self.park,
+            restore: self.restore,
+        }
+    }
+}
+
+/// Opens the host object store under `settings.store_dir` for `fields` (whose
+/// `chunk_tokens` must be `chunk_blocks * block_size`), puts the storage worker
+/// in front of it, and builds the residency layer over `kv`. `Ok(None)` when
+/// persistence is off. The worker's drive runs the resumable recovery until it
+/// is done; until then every lookup misses (ADR 4.1), so a cold start only
+/// costs plain prefills.
+pub fn open_host_kv_residency(
+    settings: &KvPersistSettings,
+    fields: &aien_kv_store::NamespaceFields<'_>,
+    kv: SharedKvManager,
+    context_cap: Option<usize>,
+) -> Result<Option<crate::kv_residency::KvResidency>, String> {
+    use aien_kv_store::host_fs::{HostFsConfig, HostFsStore};
+    use aien_kv_store::worker::{StorageWorker, WorkerConfig};
+    use aien_kv_store::KvStore;
+
+    let Some(root) = settings.store_dir.clone() else {
+        return Ok(None);
+    };
+    let identity = crate::kv_residency::KvIdentity::new(fields)
+        .map_err(|e| format!("persistent KV identity: {e}"))?;
+    let mut cfg = HostFsConfig::from_fields(root, fields)
+        .map_err(|e| format!("persistent KV store config: {e:?}"))?;
+    cfg.apply_env(|n| std::env::var(n).ok())
+        .map_err(|e| format!("persistent KV store settings: {e:?}"))?;
+    let slice_ms = cfg.recovery_slice_ms;
+    let store =
+        Arc::new(HostFsStore::open(cfg).map_err(|e| format!("persistent KV store open: {e:?}"))?);
+    let worker_cfg =
+        WorkerConfig::from_env().map_err(|e| format!("persistent KV worker settings: {e}"))?;
+    let drive = {
+        let store = store.clone();
+        let mut recovered = false;
+        move || {
+            if !recovered {
+                let p = store.recover_step(slice_ms);
+                recovered = p.done || p.failed;
+            }
+        }
+    };
+    let worker = Arc::new(
+        StorageWorker::spawn(store, worker_cfg, drive)
+            .map_err(|e| format!("persistent KV worker: {e:?}"))?,
+    );
+    let total_blocks = kv.read().total_block_count();
+    let residency = crate::kv_residency::KvResidency::new(
+        settings.residency_config(total_blocks, context_cap),
+        identity,
+        worker,
+        kv,
+    )?;
+    Ok(Some(residency))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
