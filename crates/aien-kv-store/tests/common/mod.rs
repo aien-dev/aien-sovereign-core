@@ -1,8 +1,8 @@
 #![allow(dead_code)]
 
 use aien_kv_store::{
-    BackendFormat, ChunkHeader, ChunkKey, ComputeConfig, HiddenAct, KvDtype, LayoutStrides,
-    NamespaceFields, RopeScaling,
+    BackendFormat, ChunkHeader, ChunkKey, ComputeConfig, EngineConfig, EngineIdentity, HiddenAct,
+    KvDtype, LayoutStrides, NamespaceFields, RopeScaling, WeightFormat,
 };
 
 /// Llama-3.2-1B-like compute configuration (ADR 1.2.1), the base of every
@@ -18,6 +18,29 @@ pub fn sample_compute() -> ComputeConfig<'static> {
         hidden_act: HiddenAct::Silu,
         arith_id: "ReferenceCpuBackend",
         arith_epoch: 1,
+    }
+}
+
+/// A dense model on the host reference path (ADR 1.2.2): no experts, every
+/// run-time switch off.
+pub fn sample_engine_config() -> EngineConfig<'static> {
+    EngineConfig {
+        num_experts: 0,
+        experts_per_token: 0,
+        expert_intermediate_dim: 0,
+        whole_prompt_prefill: false,
+        device_router: false,
+        matmul_path: "host-tensor-backend",
+    }
+}
+
+/// The engine identity of every `sample()` (ADR 1.2.2).
+pub fn sample_engine() -> EngineIdentity<'static> {
+    EngineIdentity {
+        weight_format: WeightFormat::AsFile,
+        engine_build_id: "aien-runtime/0.1.0+git:test",
+        rounding_class: "ReferenceCpuBackend@kv-arith-epoch-1",
+        engine_config_digest: sample_engine_config().digest().unwrap(),
     }
 }
 
@@ -52,7 +75,9 @@ pub fn sample() -> NamespaceFields<'static> {
         backend_format: BackendFormat::HostPagedPoolV1,
         chunk_tokens: 256,
         sharing_namespace: "default",
-        compute_config_digest: sample_compute().digest().unwrap(),
+        compute_config_digest: sample_compute()
+            .digest_with_engine(&sample_engine())
+            .unwrap(),
     }
 }
 
@@ -124,4 +149,5 @@ pub fn sample_record() -> (aien_kv_store::RecordHeader, Vec<[u8; 32]>) {
     };
     (rec, digests)
 }
+#[cfg(feature = "std")]
 pub mod rig;

@@ -17,6 +17,10 @@ use core::sync::atomic::{AtomicBool, Ordering};
 /// (in the runtime: `free_sequence(holder)`, ADR critical section S4).
 pub struct HolderGuard {
     held: Arc<AtomicBool>,
+    /// Set on a lease: the guard it was lent from. A lease reports held only
+    /// while that guard is held too, so a revoke of the owner reaches the
+    /// borrower.
+    parent: Option<Arc<AtomicBool>>,
     release: Option<Box<dyn FnOnce() + Send>>,
 }
 
@@ -24,12 +28,14 @@ pub struct HolderGuard {
 #[derive(Clone)]
 pub struct HolderHandle {
     held: Arc<AtomicBool>,
+    parent: Option<Arc<AtomicBool>>,
 }
 
 impl HolderGuard {
     pub fn new(release: impl FnOnce() + Send + 'static) -> Self {
         Self {
             held: Arc::new(AtomicBool::new(true)),
+            parent: None,
             release: Some(Box::new(release)),
         }
     }
@@ -38,16 +44,36 @@ impl HolderGuard {
     pub fn detached() -> Self {
         Self {
             held: Arc::new(AtomicBool::new(true)),
+            parent: None,
             release: None,
+        }
+    }
+
+    /// A lease on the same blocks for a borrower (the storage worker lends
+    /// the caller's blocks to the inner store this way). Dropping the lease
+    /// runs `on_return`, never this guard's release: the owner keeps the
+    /// holder until it decides. The lease is held only while both it and this
+    /// guard are held.
+    pub fn lease(&self, on_return: impl FnOnce() + Send + 'static) -> HolderGuard {
+        HolderGuard {
+            held: Arc::new(AtomicBool::new(true)),
+            parent: Some(Arc::clone(&self.held)),
+            release: Some(Box::new(on_return)),
         }
     }
 
     pub fn handle(&self) -> HolderHandle {
         HolderHandle {
             held: Arc::clone(&self.held),
+            parent: self.parent.clone(),
         }
     }
 }
+
+// SAFETY: `release` is touched only through `&mut self` (in `drop`); every
+// `&self` method reads the atomics behind `Arc`s. Sharing `&HolderGuard`
+// across threads therefore exposes nothing that is not already `Sync`.
+unsafe impl Sync for HolderGuard {}
 
 impl Drop for HolderGuard {
     fn drop(&mut self) {
@@ -61,6 +87,10 @@ impl Drop for HolderGuard {
 impl HolderHandle {
     pub fn is_held(&self) -> bool {
         self.held.load(Ordering::SeqCst)
+            && self
+                .parent
+                .as_ref()
+                .is_none_or(|p| p.load(Ordering::SeqCst))
     }
 
     /// Mark the holder as released out of band, the bug case of ADR 3.2: the
@@ -162,6 +192,14 @@ impl PinnedSource {
     pub fn into_guard(self) -> HolderGuard {
         self.guard
     }
+
+    /// Lend the view: the returned view carries a lease (see
+    /// [`HolderGuard::lease`]) and the owner keeps the real guard.
+    pub fn lend(mut self, on_return: impl FnOnce() + Send + 'static) -> (Self, HolderGuard) {
+        let lease = self.guard.lease(on_return);
+        let real = core::mem::replace(&mut self.guard, lease);
+        (self, real)
+    }
 }
 
 /// Writable view of pinned pool blocks (load jobs).
@@ -230,5 +268,13 @@ impl PinnedDest {
 
     pub fn into_guard(self) -> HolderGuard {
         self.guard
+    }
+
+    /// Lend the view: the returned view carries a lease (see
+    /// [`HolderGuard::lease`]) and the owner keeps the real guard.
+    pub fn lend(mut self, on_return: impl FnOnce() + Send + 'static) -> (Self, HolderGuard) {
+        let lease = self.guard.lease(on_return);
+        let real = core::mem::replace(&mut self.guard, lease);
+        (self, real)
     }
 }

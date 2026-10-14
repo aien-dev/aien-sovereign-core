@@ -38,6 +38,8 @@ aien start
 
 This starts the runtime daemon and waits for its socket. Without the desk key (step 2) it stops with a plain message naming the command. A missing model (step 3) is refused by the daemon it starts, with the reason printed in its own output, and `aien start` then reports that the socket did not become ready. `aien status` shows whether it is running.
 
+Optional, persistent KV cache (off by default): set `AIEN_KV_STORE_DIR` to a folder before starting, and the daemon saves the key/value cache of each finished turn there and reuses it when a later prompt starts with the same text, also after a restart [`aien-runtime/src/shared_kv.rs`, `enable_persistent_kv`]. The daemon prints one `persistent KV:` line at start; the folder is scanned in the background, so the first requests after a start run as usual until the scan ends. A cache saved for other weights, another model configuration or another backend is never reused. A bad persistent-KV setting stops the start with the setting's name; the full list of settings is in `docs/persistent-kv/METRICS_AND_SETTINGS.md`. Leaving `AIEN_KV_STORE_DIR` unset changes nothing.
+
 ## 5. Record an objective
 
 ```

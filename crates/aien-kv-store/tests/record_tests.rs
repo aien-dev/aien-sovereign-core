@@ -106,7 +106,7 @@ fn header_region_roundtrip_4096() {
     assert_eq!(digests.len(), 16);
     assert_eq!(HEADER_REGION_LEN, 4096);
     assert_eq!(PAYLOAD_OFFSET, 4096);
-    assert_eq!(MAX_SEGMENTS, 120);
+    assert_eq!(MAX_SEGMENTS, 119);
     let region = rec.encode_region(&digests).unwrap();
     assert_eq!(region.len(), 4096);
     // Struct first, then the digest table, then zeros to the end.
@@ -122,12 +122,14 @@ fn header_region_roundtrip_4096() {
     // Re-encoding is byte for byte identical.
     assert_eq!(back.encode_region(&digests).unwrap(), region);
 
-    // The table can fill the region exactly: 120 digests, no padding left.
-    let full = seg_digests("full", 120);
+    // The table can fill the region up to the seal slot: 119 digests, no
+    // padding left, the 32-byte slot zero until sealed (ADR 0003 section 20).
+    let full = seg_digests("full", 119);
     let region = rec.encode_region(&full).unwrap();
-    assert_eq!(&region[256 + 32 * 119..], full[119].as_slice());
-    // 121 digests do not fit.
-    let over = seg_digests("over", 121);
+    assert_eq!(&region[256 + 32 * 118..4064], full[118].as_slice());
+    assert!(region[4064..].iter().all(|b| *b == 0));
+    // 120 digests do not fit.
+    let over = seg_digests("over", 120);
     assert_eq!(rec.encode_region(&over), Err(KvError::TooManySegments));
 }
 
@@ -158,9 +160,9 @@ fn payload_root_is_domain_separated_and_order_dependent() {
 fn segment_count_is_ceil_and_bounded() {
     assert_eq!(segment_count(524_288, 524_288), Ok(1));
     assert_eq!(segment_count(524_289, 524_288), Ok(2));
-    assert_eq!(segment_count(120 * 4096, 4096), Ok(120));
+    assert_eq!(segment_count(119 * 4096, 4096), Ok(119));
     assert_eq!(
-        segment_count(120 * 4096 + 1, 4096),
+        segment_count(119 * 4096 + 1, 4096),
         Err(KvError::TooManySegments)
     );
     assert_eq!(segment_count(4096, 0), Err(KvError::InvalidGeometry));

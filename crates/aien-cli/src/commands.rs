@@ -1813,7 +1813,17 @@ pub async fn run_daemon_server() {
         }
     };
     let gpu_native = aien_inference_abi::OmegaGb10Backend::new().is_available();
-    let (spine, backend, _kv_plan) =
+    // Persistent KV (ADR 0003, cut C7): settings are checked now, so a bad value
+    // stops the start with its name; persistence is off unless AIEN_KV_STORE_DIR is set.
+    let kv_persist = match aien_runtime::shared_kv::KvPersistSettings::from_env() {
+        Ok(s) => s,
+        Err(fatal) => {
+            eprintln!("Fatal: persistent KV: {}", fatal.red().bold());
+            std::process::exit(1);
+        }
+    };
+    let kv_arith_id = tensor_backend.name().to_string();
+    let (mut spine, backend, _kv_plan) =
         match aien_runtime::shared_kv::build_shared_kv_runtime_for_model(
             weights,
             tensor_backend,
@@ -1829,6 +1839,48 @@ pub async fn run_daemon_server() {
                 std::process::exit(1);
             }
         };
+    if kv_persist.enabled() {
+        // The namespace binds the weights digest; without it nothing could
+        // tell this model's K/V from another's, so the start is refused.
+        let digest = identity
+            .as_ref()
+            .ok_or_else(|| {
+                "AIEN_KV_STORE_DIR is set but the model weights digest is unknown".to_string()
+            })
+            .and_then(|id| {
+                aien_runtime::shared_kv::parse_sha256_hex(&id.model_sha256)
+                    .map(|sha| (sha, id.model_digest_kind.clone()))
+            });
+        // The host TensorBackend path: weights as the file holds them, this
+        // build, the backend name plus KV_ARITH_EPOCH as the rounding class, a
+        // dense engine config (ADR 0003 section 1.2.2).
+        let host_engine = aien_runtime::compute_config::HostEngineIdentity::reference(&kv_arith_id)
+            .map_err(|e| format!("persistent KV engine identity: {e}"));
+        let enabled = digest.and_then(|d| host_engine.map(|e| (d, e))).and_then(
+            |((sha, kind), host_engine)| {
+                aien_runtime::shared_kv::enable_persistent_kv(
+                    &mut spine,
+                    &kv_persist,
+                    &aien_runtime::shared_kv::ModelKvBinding {
+                        model: &model_config,
+                        arith_id: &kv_arith_id,
+                        model_sha256: sha,
+                        model_digest_kind: &kind,
+                        engine: host_engine.identity(),
+                    },
+                    kv_context_cap,
+                )
+            },
+        );
+        match enabled {
+            Ok(Some(line)) => println!("  {line}"),
+            Ok(None) => {}
+            Err(fatal) => {
+                eprintln!("Fatal: persistent KV: {}", fatal.red().bold());
+                std::process::exit(1);
+            }
+        }
+    }
     // Open the GPU session before serving, with a bounded retry, so a failed
     // channel open is a clear refusal with status and free memory per attempt
     // instead of the strict-fallback panic at warm-up (#239, #236).

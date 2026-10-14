@@ -634,6 +634,34 @@ pub trait AienInferenceBackend: Send + Sync {
         Ok(())
     }
 
+    /// Persistent KV (ADR 0003 section 6.2, review finding 3): the tokens of
+    /// `seq_id` whose K/V is actually written in the KV pool, in order. This is
+    /// never the whole token list: after a decode step the last token has been
+    /// sampled but not yet run through the model, so it has no K/V. `None` for
+    /// an unknown sequence or a backend that does not keep its K/V in the shared
+    /// pool. Read-only; the scheduler calls it at the finish transaction while
+    /// the backend still holds the sequence, before the KV lock is taken.
+    /// Default: `None` (no claim, so nothing is ever parked from this backend).
+    fn computed_prefix(&self, _seq_id: u64) -> Option<Vec<u32>> {
+        None
+    }
+
+    /// Persistent KV (ADR 0003 section 6.3): gives `seq_id` backend state for a
+    /// prefix whose K/V a restore already placed in its KV block table, so the
+    /// next prefill chunk starts at position `tokens.len()`. `tokens` is the
+    /// restored prefix. Never copies or computes K/V. Called by the runtime
+    /// after the restored table was assembled and before the scheduler admits
+    /// the remaining prompt. Default: `Err`, because a backend that does not
+    /// override this cannot continue from restored K/V and the caller must fall
+    /// back to a plain prefill.
+    fn restore_sequence(&mut self, seq_id: u64, tokens: &[u32]) -> Result<(), String> {
+        Err(format!(
+            "restore_sequence {} ({} tokens) refused: this backend does not support restoring a persisted KV prefix",
+            seq_id,
+            tokens.len()
+        ))
+    }
+
     /// Takes (and forgets) how the backend chose `request_id`'s tokens so
     /// far. The scheduler calls it once, when the request finishes, and
     /// attaches it to `CompletionEvent::Finished`. Default: None, for a

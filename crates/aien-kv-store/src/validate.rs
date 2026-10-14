@@ -3,7 +3,7 @@
 use crate::error::KvError;
 use crate::record::{
     segment_count, ChunkHeader, RecordHeader, FLAG_PARTIAL_TAIL, HEADER_REGION_LEN, PAYLOAD_DOMAIN,
-    PAYLOAD_OFFSET, SEGMENT_TABLE_OFFSET,
+    PAYLOAD_OFFSET, SEAL_SLOT_OFFSET, SEGMENT_TABLE_OFFSET,
 };
 use sha2::{Digest, Sha256};
 
@@ -72,11 +72,13 @@ pub fn validate_record(
         return Err(KvError::PayloadLenMismatch);
     }
 
-    // Header region: the segment digest table, zero padding, and the root.
+    // Header region: the segment digest table, zero padding up to the seal
+    // slot, and the root. The seal slot (last 32 bytes) is not padding: the
+    // seal module checks and authenticates it (ADR 0003 section 20).
     let n_seg = segment_count(h.payload_len, segment_bytes)? as usize;
     let table_end = SEGMENT_TABLE_OFFSET + 32 * n_seg;
     let region = &buf[..HEADER_REGION_LEN];
-    if region[table_end..].iter().any(|b| *b != 0) {
+    if region[table_end..SEAL_SLOT_OFFSET].iter().any(|b| *b != 0) {
         return Err(KvError::BadPadding);
     }
     let mut root = Sha256::new();
