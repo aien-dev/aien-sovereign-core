@@ -445,7 +445,7 @@ pub fn definitions() -> BTreeMap<String, String> {
         ("resident-only", "single_turn: one request per conversation (prompt, turn2_max_tokens), store off; nothing ever leaves memory"),
         ("cold-prefill", "second_turn: turn 1 then turn 2 = turn-1 prompt + turn-1 output + suffix, store off; turn 2 prefills everything"),
         ("restore-from-page-cache", "second_turn with the host store on: turn 1 parks, turn 2 restores the stored prefix (objects written moments before, no cache drop) and prefills the rest; every measured request must commit a restore"),
-        ("store bounds", "restore-from-page-cache sets AIEN_KV_STORE_MAX_RESTORE_OPS and AIEN_KV_STORE_MAX_PARK_OPS to concurrency x (chunks of the longest turn + 1), never below the defaults 48 and 16 (run::store_op_bounds); with the defaults, 8 conversations finishing in one step overflow the park class and their parks are refused QueueFull"),
+        ("store bounds", "restore-from-page-cache sets AIEN_KV_STORE_MAX_RESTORE_OPS and AIEN_KV_STORE_MAX_PARK_OPS to concurrency x (chunks of the longest turn + 1), never below the defaults 48 and 64 (run::store_op_bounds); the old park default of 16 refused 8 of 24 parks at 8 conversations (ADR 0003 section 18.4)"),
         ("timing", "token and finish times are taken when the bench drains the completion channel after each spine step (step granularity)"),
     ]
     .into_iter()

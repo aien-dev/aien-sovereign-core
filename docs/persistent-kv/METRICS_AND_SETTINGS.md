@@ -11,7 +11,7 @@ Companion to ADR 0003 (revised after the independent review). Names are final; v
 | `AIEN_KV_STORE_QUOTA_BYTES` | bytes, decimal integer | 8 GiB | disk quota counting every object found at recovery | `shared_kv.rs` (checked by name, applied to `HostFsConfig`; default in `host_fs.rs`) |
 | `AIEN_KV_STORE_MAX_OBJECTS` | count | 65536 | index cap at recovery and at runtime (ADR 4.1) | `shared_kv.rs` (checked by name, applied to `HostFsConfig`; default in `host_fs.rs`) |
 | `AIEN_KV_STORE_MAX_RESTORE_OPS` | count | 48 | restore-class jobs between Submitted and terminal completion (per-class reservation, ADR 7.1); `restore_ops + park_ops` never exceeds the total cap | `worker.rs` |
-| `AIEN_KV_STORE_MAX_PARK_OPS` | count | 16 | park-class jobs, reserved so restores cannot starve parks (ADR 7.1) | `worker.rs` |
+| `AIEN_KV_STORE_MAX_PARK_OPS` | count | 64 | park-class jobs, reserved so restores cannot starve parks (ADR 7.1); 64 admits 8 conversations finishing together with up to 8 chunk parks each (ADR 18.4) | `worker.rs` |
 | `AIEN_KV_STORE_MAX_WAITERS_PER_JOB` | count | 16 | coalesced waiters on one in-flight load; past it `attach_waiter` returns QueueFull (ADR 7.3) | `worker.rs` (`WorkerConfig::from_lookup`, enforced in `coalesce.rs`) |
 | `AIEN_KV_STORE_MAX_INFLIGHT_BYTES` | bytes | 256 MiB | payload bytes between Submitted and Published | `worker.rs` |
 | `AIEN_KV_CHUNK_BLOCKS` | blocks | 16 | chunk size in KV blocks (part of the namespace; changing it orphans objects) | `shared_kv.rs` |

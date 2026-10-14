@@ -874,8 +874,9 @@ fn worker_backpressure_refuses_not_grows() {
             okp += 1;
         }
     }
-    assert_eq!(okp, 16, "the park class is bounded on its own");
-    assert_eq!(w.worker.stats().peak_park_queue, 16);
+    let park_bound = WorkerConfig::default().max_park_ops;
+    assert_eq!(okp, park_bound, "the park class is bounded on its own");
+    assert_eq!(w.worker.stats().peak_park_queue, park_bound as u64);
     // Once everything ends the bound is available again.
     w.resume();
     w.settle();
@@ -2010,7 +2011,7 @@ fn worker_config_reads_the_documented_settings() {
             d.max_inflight_bytes,
             d.drain_ms
         ),
-        (48, 16, 256 << 20, 2000)
+        (48, 64, 256 << 20, 2000)
     );
     // Garbage is refused, naming the setting; it is not silently replaced.
     for bad in ["abc", "-1", "0", "", "1.5"] {
