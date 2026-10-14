@@ -330,7 +330,6 @@ fn non_loopback_bind_is_refused() {
     };
     let err = rt
         .block_on(serve(cfg, Arc::new(stub("x")), Arc::new(ByteCodec)))
-        .err()
-        .expect("must refuse");
+        .expect_err("must refuse");
     assert!(err.to_string().contains("loopback"), "{err}");
 }

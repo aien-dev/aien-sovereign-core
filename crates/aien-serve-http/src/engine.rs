@@ -153,10 +153,9 @@ impl Engine for StubEngine {
         }
         let t0 = Instant::now();
         let mut emitted = 0usize;
-        let mut pos = prompt.len();
         let mut finish = FinishReason::Stop;
         for &tok in &self.reply {
-            if emitted >= params.max_new_tokens || pos >= self.max_context {
+            if emitted >= params.max_new_tokens || prompt.len() + emitted >= self.max_context {
                 finish = FinishReason::Length;
                 break;
             }
@@ -168,7 +167,6 @@ impl Engine for StubEngine {
                 std::thread::sleep(self.per_token_delay);
             }
             emitted += 1;
-            pos += 1;
             if !on_token(tok) {
                 finish = FinishReason::Cancelled;
                 break;
