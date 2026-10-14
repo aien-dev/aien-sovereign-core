@@ -147,6 +147,16 @@ fn scheduler() -> SchedulerConfig {
     }
 }
 
+/// A 0700 temp dir: the host store refuses a root others can reach and
+/// `tempfile` follows the umask (ADR 0003 section 19).
+fn private_tempdir() -> tempfile::TempDir {
+    use std::os::unix::fs::PermissionsExt;
+    tempfile::Builder::new()
+        .permissions(std::fs::Permissions::from_mode(0o700))
+        .tempdir()
+        .expect("tempdir")
+}
+
 fn settings(dir: &Path) -> KvPersistSettings {
     let dir = dir.to_string_lossy().to_string();
     KvPersistSettings::from_lookup(|k| match k {
@@ -612,7 +622,7 @@ fn run_child(role: &str, dir: &Path, env: &[(&str, &str)]) -> bool {
 /// different byte pattern must fail, so the comparison is not vacuous.
 #[test]
 fn process_restart_rediscovers_and_restores_identical_bytes() {
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = private_tempdir();
     assert!(
         run_child("paint-park", dir.path(), &[]),
         "child 1 (park) failed"
@@ -633,7 +643,7 @@ fn process_restart_rediscovers_and_restores_identical_bytes() {
 /// The in-process run without persistence is the uninterrupted baseline.
 #[tokio::test]
 async fn greedy_continuation_after_restart_matches_uninterrupted_baseline() {
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = private_tempdir();
     assert!(
         run_child("greedy-park", dir.path(), &[]),
         "cold child failed"
@@ -660,7 +670,7 @@ async fn greedy_continuation_after_restart_matches_uninterrupted_baseline() {
 /// serves them (plain prefill). Positive control: the right digest restores.
 #[test]
 fn wrong_model_digest_namespace_is_never_served_after_restart() {
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = private_tempdir();
     assert!(run_child("paint-park", dir.path(), &[("KV_RS_SHA", "7")]));
     assert!(
         run_child(
@@ -681,7 +691,7 @@ fn wrong_model_digest_namespace_is_never_served_after_restart() {
 /// different namespace, never served after a restart.
 #[test]
 fn different_rms_norm_eps_namespace_is_never_served_after_restart() {
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = private_tempdir();
     assert!(run_child(
         "paint-park",
         dir.path(),
@@ -706,7 +716,7 @@ fn different_rms_norm_eps_namespace_is_never_served_after_restart() {
 /// block counts, and the persistent-KV fields when persistence is on.
 #[tokio::test]
 async fn metrics_report_allocated_bytes_separately_from_free_blocks() {
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = private_tempdir();
     let mut r = paint_rig(dir.path(), 7, 1e-5);
     wait_store_open(&r.spine);
     let pool_bytes = r.kv.read().pool().expect("pool").layout().total_bytes as u64;

@@ -50,12 +50,13 @@ fn refused(r: Result<HostFsStore, PlatformError>) -> bool {
 
 #[test]
 fn a_store_created_from_nothing_is_private_whatever_the_umask() {
+    let fx = Fx::new();
+    // After the fixture: the umask applies to what the store creates.
     if let Ok(m) = std::env::var("AIEN_KV_UMASK") {
         let m = u32::from_str_radix(&m, 8).unwrap();
         // SAFETY: umask only swaps the process file-creation mask.
         unsafe { libc::umask(m as libc::mode_t) };
     }
-    let fx = Fx::new();
     let root = fx.root().join("fresh");
     let mut cfg = fx.config();
     cfg.root = root.clone();

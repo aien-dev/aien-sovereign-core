@@ -15,20 +15,22 @@ use rig::*;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
-/// Sets a directory's mode and puts 0o755 back on drop (so the temp dir can
-/// be removed even when an assertion fails).
-struct Mode(PathBuf);
+/// Sets a directory's mode and puts the saved original back on drop (so the
+/// temp dir can be removed even when an assertion fails, and the store still
+/// sees a private directory afterwards).
+struct Mode(PathBuf, std::fs::Permissions);
 
 impl Mode {
     fn set(path: &Path, mode: u32) -> Mode {
+        let saved = std::fs::metadata(path).unwrap().permissions();
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
-        Mode(path.to_path_buf())
+        Mode(path.to_path_buf(), saved)
     }
 }
 
 impl Drop for Mode {
     fn drop(&mut self) {
-        let _ = std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(0o755));
+        let _ = std::fs::set_permissions(&self.0, self.1.clone());
     }
 }
 
@@ -126,7 +128,7 @@ fn a_corrupt_file_that_cannot_be_unlinked_stays_counted_and_degrades_the_store()
     let path = fx.object_file(&key);
     std::fs::write(&path, vec![0xAB; 5000]).unwrap();
     let phys = phys_of(&path);
-    let _m = Mode::set(&shard_of(&path), 0o555);
+    let _m = Mode::set(&shard_of(&path), 0o500);
     let s = fx.open_raw(|c| c.purge_after_recovery = false);
     let p = settle(&s);
     assert!(p.done);
@@ -155,7 +157,7 @@ fn a_failed_purge_unlink_keeps_the_unindexed_accounting() {
     assert_eq!(s.capacity().unindexed_objects, 1);
     let modes: Vec<Mode> = planted
         .iter()
-        .map(|(_, p)| Mode::set(&shard_of(p), 0o555))
+        .map(|(_, p)| Mode::set(&shard_of(p), 0o500))
         .collect();
     s.start_purge();
     s.run_until_idle();

@@ -571,8 +571,173 @@ fn generate_store_id() -> [u8; 16] {
 }
 
 fn fsync_dir(path: &Path) -> std::io::Result<()> {
-    let f = File::open(path)?;
+    use std::os::unix::fs::OpenOptionsExt;
+    let f = OpenOptions::new()
+        .read(true)
+        .custom_flags(OPEN_FLAGS | libc::O_DIRECTORY)
+        .open(path)?;
     f.sync_all()
+}
+
+// ---- at-rest privacy (ADR 0003 section 19) -------------------------------
+//
+// The objects hold K/V derived from user prompts. Every directory of the store
+// is 0700 and every file 0600, owned by the effective uid; existing
+// directories are checked (never silently chmodded) and refused with
+// `AccessDenied` when others could reach them. Once the root is a verified
+// private directory under a trusted parent, only our own uid (or root) can
+// change anything inside it, so per-operation dirfd/openat is not needed
+// (same-uid attackers are out of scope, section 19.1).
+
+const PRIVATE_DIR_MODE: u32 = 0o700;
+const PRIVATE_FILE_MODE: u32 = 0o600;
+/// Every open of a store file: never follow a symlink in the last component,
+/// never leak the descriptor into a child process.
+const OPEN_FLAGS: i32 = libc::O_NOFOLLOW | libc::O_CLOEXEC;
+
+fn euid() -> u32 {
+    // SAFETY: geteuid has no preconditions and cannot fail.
+    unsafe { libc::geteuid() }
+}
+
+/// `Ok(true)`: a private directory of ours. `Ok(false)`: nothing there.
+/// `AccessDenied`: a symlink, not a directory, another owner, or any group or
+/// other permission bit.
+fn check_private_dir(path: &Path) -> Result<bool, PlatformError> {
+    let meta = match std::fs::symlink_metadata(path) {
+        Ok(m) => m,
+        Err(e) if is_not_found(&e) => return Ok(false),
+        Err(e) => return Err(io_to_error(&e, "stat store directory")),
+    };
+    if !meta.file_type().is_dir() || meta.uid() != euid() || meta.mode() & 0o077 != 0 {
+        return Err(PlatformError::AccessDenied);
+    }
+    Ok(true)
+}
+
+/// The directory that will hold the root (the root's parent, or the nearest
+/// existing ancestor when the root is still to be created) must be owned by
+/// us or by root and, if group or others can write it, carry the sticky bit
+/// (like /tmp): otherwise another user could rename the root away and put
+/// their own directory in its place.
+fn check_trusted_parent(root: &Path) -> Result<(), PlatformError> {
+    let mut cur = root.parent();
+    while let Some(dir) = cur {
+        let dir = if dir.as_os_str().is_empty() {
+            Path::new(".")
+        } else {
+            dir
+        };
+        match std::fs::metadata(dir) {
+            Ok(m) => {
+                let shared_write = m.mode() & 0o022 != 0;
+                let sticky = m.mode() & 0o1000 != 0;
+                let owner_ok = m.uid() == euid() || m.uid() == 0;
+                if !m.is_dir() || !owner_ok || (shared_write && !sticky) {
+                    return Err(PlatformError::AccessDenied);
+                }
+                return Ok(());
+            }
+            Err(e) if is_not_found(&e) => cur = dir.parent(),
+            Err(e) => return Err(io_to_error(&e, "stat store parent")),
+        }
+    }
+    Ok(())
+}
+
+/// Create one store directory 0700 (the explicit chmod undoes a umask that
+/// narrowed it), or verify an existing one. Returns true when it was created.
+fn make_private_dir(path: &Path, recursive: bool) -> Result<bool, PlatformError> {
+    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+    // An existing directory is verified, never chmodded (a recursive
+    // DirBuilder would report success for it).
+    if check_private_dir(path)? {
+        return Ok(false);
+    }
+    match std::fs::DirBuilder::new()
+        .recursive(recursive)
+        .mode(PRIVATE_DIR_MODE)
+        .create(path)
+    {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            check_private_dir(path)?;
+            return Ok(false);
+        }
+        Err(e) => return Err(io_to_error(&e, "create store directory")),
+    }
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(PRIVATE_DIR_MODE))
+        .map_err(|e| io_to_error(&e, "chmod store directory"))?;
+    check_private_dir(path)?;
+    Ok(true)
+}
+
+/// The one way the adapter creates a file: 0600, no symlink followed, no
+/// descriptor leaked. Truncates a leftover of ours (a crash temp in the
+/// verified tmp/ directory) instead of failing on it, so a crash never blocks
+/// the next attempt; the mode is forced to 0600 through the descriptor so a
+/// leftover with an old mode, or a narrowing umask, cannot survive.
+fn create_private_file(path: &Path) -> std::io::Result<File> {
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    let f = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(PRIVATE_FILE_MODE)
+        .custom_flags(OPEN_FLAGS)
+        .open(path)?;
+    let meta = f.metadata()?;
+    if !meta.is_file() || meta.uid() != euid() {
+        return Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied));
+    }
+    if meta.mode() & 0o777 != PRIVATE_FILE_MODE {
+        f.set_permissions(std::fs::Permissions::from_mode(PRIVATE_FILE_MODE))?;
+    }
+    Ok(f)
+}
+
+/// `create_private_file` plus the bytes (fault injection, temps).
+fn write_private_file(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    create_private_file(path)?.write_all(bytes)
+}
+
+/// What a no-follow open of a store file found.
+enum PrivateOpen {
+    /// A regular file of ours, with its descriptor's metadata.
+    Ours(File, std::fs::Metadata),
+    /// A symlink, a non-regular file, or another owner's file: not ours,
+    /// never read or served, left alone (ADR 0003 section 4.1 `foreign_file`).
+    NotOurs(u64),
+}
+
+/// Open a store file for reading without following a symlink and check it
+/// through the descriptor (no window between check and use). A file of ours
+/// that group or others can read (written before section 19) is tightened to
+/// 0600 with fchmod.
+fn open_private_read(path: &Path) -> std::io::Result<PrivateOpen> {
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    let f = match OpenOptions::new()
+        .read(true)
+        // O_NONBLOCK: a planted FIFO must not hang the worker; no effect on
+        // regular files.
+        .custom_flags(OPEN_FLAGS | libc::O_NONBLOCK)
+        .open(path)
+    {
+        Ok(f) => f,
+        Err(e) if e.raw_os_error() == Some(libc::ELOOP) => {
+            let len = std::fs::symlink_metadata(path).map_or(0, |m| m.len());
+            return Ok(PrivateOpen::NotOurs(len));
+        }
+        Err(e) => return Err(e),
+    };
+    let meta = f.metadata()?;
+    if !meta.is_file() || meta.uid() != euid() {
+        return Ok(PrivateOpen::NotOurs(meta.len()));
+    }
+    if meta.mode() & 0o077 != 0 {
+        f.set_permissions(std::fs::Permissions::from_mode(PRIVATE_FILE_MODE))?;
+    }
+    Ok(PrivateOpen::Ours(f, meta))
 }
 
 fn phys_bytes_of(meta: &std::fs::Metadata) -> u64 {
@@ -1363,7 +1528,9 @@ fn recover_entry(
             Err(_) => EntryOutcome::TmpStuck(phys),
         });
     }
-    let Some(file_key) = parsed.filter(|_| meta.is_file()) else {
+    // A symlink, a non-regular file or another owner's file is not ours:
+    // `foreign_file`, left alone, never read (ADR 0003 sections 4.1 and 19).
+    let Some(file_key) = parsed.filter(|_| meta.is_file() && meta.uid() == euid()) else {
         return Ok(EntryOutcome::Foreign(meta.len()));
     };
     let full = {
@@ -1373,19 +1540,29 @@ fn recover_entry(
     if full {
         return Ok(EntryOutcome::Unindexed(phys));
     }
+    // Re-check through the descriptor: what is read is what was checked.
+    let (file, meta) = match open_private_read(path) {
+        Ok(PrivateOpen::Ours(f, m)) => (f, m),
+        Ok(PrivateOpen::NotOurs(len)) => return Ok(EntryOutcome::Foreign(len)),
+        Err(e) if is_not_found(&e) => return Ok(EntryOutcome::Skip),
+        // Cannot open or tighten it: do not delete what might be good data;
+        // count it.
+        Err(_) => return Ok(EntryOutcome::Unreadable(phys)),
+    };
+    let phys = phys_bytes_of(&meta);
     let file_size = meta.len();
     let kind = if file_size < HEADER_REGION_LEN as u64 {
         RecoveredHeader::Corrupt
     } else {
         let mut buf = [0u8; HEADER_REGION_LEN];
-        match File::open(path).and_then(|mut f| f.read_exact(&mut buf)) {
+        match file.read_exact_at(&mut buf, 0) {
             Ok(()) => classify_recovered_header(&buf, file_size, &file_key, cfg),
-            Err(e) if is_not_found(&e) => return Ok(EntryOutcome::Skip),
             Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => RecoveredHeader::Corrupt,
             // Cannot read it: do not delete what might be good data; count it.
             Err(_) => return Ok(EntryOutcome::Unreadable(phys)),
         }
     };
+    drop(file);
     let mtime_ns = meta_mtime_ns(&meta);
     Ok(match kind {
         RecoveredHeader::Ours { payload_len } => EntryOutcome::Index(
@@ -1890,7 +2067,7 @@ fn execute_store_job(shared: &Shared, job_id: u64) {
     }
     match p1 {
         Some(FaultAction::Crash) => {
-            let _ = std::fs::write(&tpath, &file_bytes);
+            let _ = write_private_file(&tpath, &file_bytes);
             let garbage = {
                 let mut g = shared.inner.lock().unwrap_or_else(|e| e.into_inner());
                 if let Some(job) = g.jobs.remove(&job_id) {
@@ -1904,7 +2081,7 @@ fn execute_store_job(shared: &Shared, job_id: u64) {
         }
         Some(FaultAction::TornWrite { after_bytes, crash }) => {
             let cut = (after_bytes as usize).min(file_bytes.len());
-            let _ = std::fs::write(&tpath, &file_bytes[..cut]);
+            let wrote = write_private_file(&tpath, &file_bytes[..cut]).is_ok();
             if crash {
                 let garbage = {
                     let mut g = shared.inner.lock().unwrap_or_else(|e| e.into_inner());
@@ -1917,7 +2094,9 @@ fn execute_store_job(shared: &Shared, job_id: u64) {
                 shared.cv.notify_all();
                 return;
             }
-            let _ = std::fs::remove_file(&tpath);
+            if wrote {
+                let _ = std::fs::remove_file(&tpath);
+            }
             let garbage = {
                 let mut g = shared.inner.lock().unwrap_or_else(|e| e.into_inner());
                 g.stats.writes += 1;
@@ -1934,8 +2113,11 @@ fn execute_store_job(shared: &Shared, job_id: u64) {
             return;
         }
         Some(FaultAction::Fail(errno)) => {
-            let _ = std::fs::write(&tpath, &file_bytes[..HEADER_REGION_LEN]);
-            let _ = std::fs::remove_file(&tpath);
+            // Only remove what this call created: a failed create (say, a
+            // planted symlink) leaves the path alone.
+            if write_private_file(&tpath, &file_bytes[..HEADER_REGION_LEN]).is_ok() {
+                let _ = std::fs::remove_file(&tpath);
+            }
             let garbage = {
                 let mut g = shared.inner.lock().unwrap_or_else(|e| e.into_inner());
                 g.stats.unlinks += 1;
@@ -1955,19 +2137,21 @@ fn execute_store_job(shared: &Shared, job_id: u64) {
         _ => {}
     }
 
-    let write_res = OpenOptions::new()
-        .create(true)
-        .write(true)
-        .truncate(true)
-        .open(&tpath)
-        .and_then(|mut f| {
-            f.write_all(&file_bytes)?;
-            Ok(f)
-        });
+    // `created`: the open succeeded, so a failed write leaves a temp of ours
+    // to remove. A failed open (a planted symlink: O_NOFOLLOW gives ELOOP)
+    // created nothing and the path is left alone.
+    let mut created = false;
+    let write_res = create_private_file(&tpath).and_then(|mut f| {
+        created = true;
+        f.write_all(&file_bytes)?;
+        Ok(f)
+    });
     let tmp_file = match write_res {
         Ok(f) => f,
         Err(e) => {
-            let _ = std::fs::remove_file(&tpath);
+            if created {
+                let _ = std::fs::remove_file(&tpath);
+            }
             let garbage = {
                 let mut g = shared.inner.lock().unwrap_or_else(|e| e.into_inner());
                 g.stats.io_ops += 1;
@@ -2150,7 +2334,7 @@ fn execute_store_job(shared: &Shared, job_id: u64) {
         return;
     }
 
-    let (phys_bytes, file_mtime_ns) = match std::fs::metadata(&opath) {
+    let (phys_bytes, file_mtime_ns) = match std::fs::symlink_metadata(&opath) {
         Ok(m) => (phys_bytes_of(&m), meta_mtime_ns(&m)),
         Err(_) => (file_bytes.len() as u64, system_now_ns()),
     };
@@ -2336,9 +2520,26 @@ fn execute_load_job(shared: &Shared, job_id: u64) {
     }
 
     let opath = object_path_for(&root, &key.0 .0);
-    let meta = match std::fs::metadata(&opath) {
-        Ok(m) => m,
-        Err(_) => {
+    // No symlink followed, checked through the descriptor: a link, a
+    // non-regular file or another owner's file is never served; it leaves
+    // the index as not found and the file is left alone (ADR 0003 section 19).
+    let (file, meta) = match open_private_read(&opath) {
+        Ok(PrivateOpen::Ours(f, m)) => (f, m),
+        Err(e) if !is_not_found(&e) => {
+            let garbage = {
+                let mut g = shared.inner.lock().unwrap_or_else(|e| e.into_inner());
+                g.stats.metadata_calls += 1;
+                g.stats.io_ops += 1;
+                if let Some(job) = g.jobs.remove(&job_id) {
+                    g.fail_job(job, io_to_error(&e, "open object failed"));
+                }
+                std::mem::take(&mut g.graveyard)
+            };
+            drop(garbage);
+            shared.cv.notify_all();
+            return;
+        }
+        Ok(PrivateOpen::NotOurs(_)) | Err(_) => {
             let garbage = {
                 let mut g = shared.inner.lock().unwrap_or_else(|e| e.into_inner());
                 g.stats.metadata_calls += 1;
@@ -2384,24 +2585,6 @@ fn execute_load_job(shared: &Shared, job_id: u64) {
         shared.cv.notify_all();
         return;
     }
-
-    let file = match File::open(&opath) {
-        Ok(f) => f,
-        Err(e) => {
-            let garbage = {
-                let mut g = shared.inner.lock().unwrap_or_else(|e| e.into_inner());
-                g.stats.metadata_calls += 1;
-                g.stats.io_ops += 1;
-                if let Some(job) = g.jobs.remove(&job_id) {
-                    g.fail_job(job, io_to_error(&e, "open object failed"));
-                }
-                std::mem::take(&mut g.graveyard)
-            };
-            drop(garbage);
-            shared.cv.notify_all();
-            return;
-        }
-    };
 
     let mut header_buf = [0u8; HEADER_REGION_LEN];
     if file.read_exact_at(&mut header_buf, 0).is_err()
@@ -2760,22 +2943,29 @@ impl HostFsStore {
         };
 
         let root = &config.root;
-        if !root.is_dir() {
-            std::fs::create_dir_all(root).map_err(|e| io_to_error(&e, "create root"))?;
-            stats.mkdirs += 1;
-            stats.io_ops += 1;
-        }
         let objects_dir = root.join("objects");
-        if !objects_dir.is_dir() {
-            std::fs::create_dir(&objects_dir).map_err(|e| io_to_error(&e, "create objects"))?;
-            stats.mkdirs += 1;
-            stats.io_ops += 1;
-        }
         let tmp_dir = root.join("tmp");
-        if !tmp_dir.is_dir() {
-            std::fs::create_dir(&tmp_dir).map_err(|e| io_to_error(&e, "create tmp"))?;
-            stats.mkdirs += 1;
-            stats.io_ops += 1;
+        let shard_dirs: Vec<PathBuf> = (0..=255u8)
+            .map(|b| objects_dir.join(format!("{b:02x}")))
+            .collect();
+
+        // Check everything that already exists before creating anything, so
+        // a refused store is left exactly as it was (ADR 0003 section 19.3).
+        check_trusted_parent(root)?;
+        if check_private_dir(root)? {
+            check_private_dir(&tmp_dir)?;
+            if check_private_dir(&objects_dir)? {
+                for shard in &shard_dirs {
+                    check_private_dir(shard)?;
+                }
+            }
+        }
+
+        for (dir, recursive) in [(root, true), (&objects_dir, false), (&tmp_dir, false)] {
+            if make_private_dir(dir, recursive)? {
+                stats.mkdirs += 1;
+                stats.io_ops += 1;
+            }
         }
 
         let alloc_unit = std::fs::metadata(&objects_dir)
@@ -2784,10 +2974,8 @@ impl HostFsStore {
             .max(512);
 
         let mut created_shard = false;
-        for b in 0..=255u8 {
-            let shard = objects_dir.join(format!("{b:02x}"));
-            if !shard.is_dir() {
-                std::fs::create_dir(&shard).map_err(|e| io_to_error(&e, "create shard"))?;
+        for shard in &shard_dirs {
+            if make_private_dir(shard, false)? {
                 stats.mkdirs += 1;
                 stats.io_ops += 1;
                 created_shard = true;
@@ -2800,29 +2988,32 @@ impl HostFsStore {
         }
 
         let store_id_path = root.join("STORE_ID");
-        let (store_id, state, recovery_done) = if store_id_path.exists() {
+        let (store_id, state, recovery_done) = if std::fs::symlink_metadata(&store_id_path).is_ok()
+        {
             stats.reads += 1;
             stats.io_ops += 1;
-            match std::fs::read(&store_id_path) {
-                Ok(bytes) => {
-                    stats.read_bytes += bytes.len() as u64;
-                    if let Ok(arr) = <[u8; 16]>::try_from(bytes.as_slice()) {
-                        (Some(arr), StoreState::Recovering, false)
-                    } else {
-                        (None, StoreState::Failed, false)
-                    }
+            // No symlink followed, a regular file of ours, exactly 16 bytes;
+            // anything else fails the store (as an unreadable STORE_ID did).
+            let mut arr = [0u8; 16];
+            let read = match open_private_read(&store_id_path) {
+                Ok(PrivateOpen::Ours(mut f, meta)) if meta.len() == 16 => {
+                    f.read_exact(&mut arr).is_ok()
                 }
-                Err(_) => (None, StoreState::Failed, false),
+                _ => false,
+            };
+            if read {
+                stats.read_bytes += 16;
+                (Some(arr), StoreState::Recovering, false)
+            } else {
+                (None, StoreState::Failed, false)
             }
         } else {
             let id = generate_store_id();
             let part = tmp_dir.join("STORE_ID.part");
             {
-                let mut f = OpenOptions::new()
-                    .create(true)
-                    .write(true)
-                    .truncate(true)
-                    .open(&part)
+                // A STORE_ID.part left by a crash is ours (tmp/ is verified
+                // private) and is truncated, so it never blocks reopening.
+                let mut f = create_private_file(&part)
                     .map_err(|e| io_to_error(&e, "create STORE_ID.part"))?;
                 f.write_all(&id)
                     .map_err(|e| io_to_error(&e, "write STORE_ID.part"))?;
@@ -3353,7 +3544,10 @@ mod tests {
             "aien-kv-hostfs-unit-{tag}-{}-{nanos}",
             std::process::id()
         ));
-        std::fs::create_dir_all(&p).unwrap();
+        // The store refuses a root others can reach (ADR 0003 section 19).
+        std::os::unix::fs::DirBuilderExt::mode(std::fs::DirBuilder::new().recursive(true), 0o700)
+            .create(&p)
+            .unwrap();
         p
     }
 

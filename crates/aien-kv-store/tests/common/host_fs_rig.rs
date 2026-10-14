@@ -71,7 +71,10 @@ impl TempDir {
             "aien-kv-c4-{tag}-{}-{n}-{nanos}",
             std::process::id()
         ));
-        std::fs::create_dir_all(&p).unwrap();
+        // The store refuses a root others can reach (ADR 0003 section 19).
+        std::os::unix::fs::DirBuilderExt::mode(std::fs::DirBuilder::new().recursive(true), 0o700)
+            .create(&p)
+            .unwrap();
         TempDir(p)
     }
 }
