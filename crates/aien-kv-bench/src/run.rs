@@ -374,7 +374,7 @@ fn build(spec: &RunSpec, mode: Mode, c: u32, prompt: u32) -> Result<Bench, Strin
         let restore_max = total_blocks.to_string();
         let (restore_ops, park_ops) = store_op_bounds(spec, c, turn2_len);
         let (restore_ops, park_ops) = (restore_ops.to_string(), park_ops.to_string());
-        let settings = KvPersistSettings::from_lookup(|k| match k {
+        let mut settings = KvPersistSettings::from_lookup(|k| match k {
             KV_STORE_DIR_ENV => Some(dir_s.clone()),
             KV_CHUNK_BLOCKS_ENV => Some(chunk.clone()),
             KV_RESTORE_MAX_BLOCKS_ENV => Some(restore_max.clone()),
@@ -382,7 +382,17 @@ fn build(spec: &RunSpec, mode: Mode, c: u32, prompt: u32) -> Result<Bench, Strin
             "AIEN_KV_STORE_MAX_PARK_OPS" => Some(park_ops.clone()),
             _ => None,
         })?;
+        // A fresh random store key per run: objects are sealed as in the daemon
+        // (ADR 0003 section 20), so restore timings include decryption.
+        settings.store_key = Some(Ok(std::sync::Arc::new(
+            aien_kv_store::seal::SealKey::generate()
+                .map_err(|e| format!("bench store key: {e:?}"))?,
+        )));
         queue_depth = settings.worker.dispatch_depth;
+        let host_engine = aien_runtime::compute_config::HostEngineIdentity::reference(
+            ReferenceCpuBackend::new().name(),
+        )
+        .map_err(|e| format!("engine identity: {e}"))?;
         enable_persistent_kv(
             &mut spine,
             &settings,
@@ -392,6 +402,7 @@ fn build(spec: &RunSpec, mode: Mode, c: u32, prompt: u32) -> Result<Bench, Strin
                 // Synthetic weights have no file; a fixed digest names them.
                 model_sha256: [0xB9; 32],
                 model_digest_kind: "sha256",
+                engine: host_engine.identity(),
             },
             None,
         )?

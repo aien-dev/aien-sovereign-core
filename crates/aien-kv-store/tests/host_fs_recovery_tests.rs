@@ -442,7 +442,11 @@ fn used_bytes_counts_header_region_and_physical_blocks() {
         payload_sha256: aien_kv_store::payload_root(&[digest]),
     };
     let sparse = fx.object_file(&skey);
-    std::fs::write(&sparse, rec.encode_region(&[digest]).unwrap()).unwrap();
+    // Sealed-format marker only: recovery reads no payload, so a sparse file
+    // needs no ciphertext (ADR 0003 section 20).
+    let mut region = rec.encode_region(&[digest]).unwrap();
+    mark_sealed(&mut region);
+    std::fs::write(&sparse, region).unwrap();
     std::fs::OpenOptions::new()
         .write(true)
         .open(&sparse)
