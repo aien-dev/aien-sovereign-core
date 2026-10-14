@@ -34,6 +34,9 @@ pub mod w8a8_control;
 /// The one-list decode token (OWN-30B L2 cut 2), off unless `OWN30B_DECODE_GRAPH=1`.
 #[path = "qwen3_moe_omega_dgraph.rs"]
 pub mod dgraph;
+/// Persistent KV export and import (sc#505): the `HostPagedPoolV1` payload of a token prefix.
+#[path = "qwen3_moe_omega_kvio.rs"]
+pub mod kvio;
 
 /// Column tile of the engine's tile-major B layout: every expert window must start on one.
 pub const WINDOW_TILE: usize = aien_omega_moe::TILE_N;
@@ -1198,7 +1201,8 @@ pub fn loader_transient_bytes(config: &Qwen3MoeConfig) -> usize {
     bits + fp8 + scales + raw
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "host-test-engine"))]
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) mod test_support {
     //! An in-memory checkpoint and a recording uploader with host matmuls, so the loader and the
     //! forward can be exercised end to end without a chip.
@@ -1814,6 +1818,149 @@ pub trait KvAttention: Send {
     }
     /// The graph wrote position `pos` of every layer.
     fn dgraph_commit(&mut self, _pos: usize) {}
+    /// Persistent KV park (sc#505): the K/V of positions `start..start + len` as the
+    /// `HostPagedPoolV1` payload of [`kvio`] (`start` a multiple of [`KV_BLOCK_SIZE`]; every
+    /// layer must hold those positions). `None`: this cache cannot export, nothing is parked.
+    fn export_blocks(&mut self, _start: usize, _len: usize) -> Option<Result<Vec<u8>, String>> {
+        None
+    }
+    /// Persistent KV restore (sc#505): writes a [`kvio`] payload for positions `start..start +
+    /// len`; every layer must hold exactly `0..start` before the call and holds `0..start + len`
+    /// after it. `None`: this cache cannot import, the caller prefills instead. On `Err` the
+    /// cache may hold part of the payload: the caller must reset it.
+    fn import_blocks(&mut self, _start: usize, _len: usize, _bytes: &[u8]) -> Option<Result<(), String>> {
+        None
+    }
+}
+
+/// Positions `start..start + len` of a bf16 `aien_kv_cache` pool (blocks `0..n` in order, block
+/// size [`KV_BLOCK_SIZE`]) as a [`kvio`] payload: the pool layout is the payload layout, so the
+/// blocks are copied as they are and the rows past `len` in the last block are zeroed in the copy.
+fn pool_export(pool: &aien_kv_cache::UnifiedKvTensorPool, filled: &[usize], start: usize, len: usize) -> Result<Vec<u8>, String> {
+    let c = pool.config();
+    let g = kvio::PoolBlockGeometry { layers: c.num_layers, kv_heads: c.num_kv_heads, head_dim: c.head_dim, block_size: c.block_size };
+    if c.dtype != aien_kv_cache::KvDType::Bf16 || g.block_stride() != pool.block_bytes() {
+        return Err(format!("kv export: pool {:?} with {} byte blocks is not the bf16 payload layout", c.dtype, pool.block_bytes()));
+    }
+    if len == 0 || !start.is_multiple_of(g.block_size) {
+        return Err(format!("kv export {start}+{len}: start must be a multiple of {}, len non-zero", g.block_size));
+    }
+    if let Some((l, f)) = filled.iter().enumerate().find(|(_, &f)| f < start + len) {
+        return Err(format!("kv export {start}+{len}: layer {l} holds only {f} positions"));
+    }
+    let off = (start / g.block_size) * g.block_stride();
+    let n = g.payload_len(len);
+    if off + n > pool.total_bytes() {
+        return Err(format!("kv export {start}+{len}: past the pool ({} bytes)", pool.total_bytes()));
+    }
+    // SAFETY: the pool owns total_bytes() readable bytes at base_ptr(); the range is checked.
+    let mut out = unsafe { std::slice::from_raw_parts(pool.base_ptr().add(off), n) }.to_vec();
+    kvio::zero_padding(&g, len, &mut out);
+    Ok(out)
+}
+
+/// The inverse of [`pool_export`]: writes the payload's blocks into the pool and marks
+/// `0..start + len` filled in every layer.
+fn pool_import(pool: &mut aien_kv_cache::UnifiedKvTensorPool, filled: &mut [usize], start: usize, len: usize, bytes: &[u8]) -> Result<(), String> {
+    let c = pool.config();
+    let g = kvio::PoolBlockGeometry { layers: c.num_layers, kv_heads: c.num_kv_heads, head_dim: c.head_dim, block_size: c.block_size };
+    if c.dtype != aien_kv_cache::KvDType::Bf16 || g.block_stride() != pool.block_bytes() {
+        return Err(format!("kv import: pool {:?} with {} byte blocks is not the bf16 payload layout", c.dtype, pool.block_bytes()));
+    }
+    if len == 0 || !start.is_multiple_of(g.block_size) {
+        return Err(format!("kv import {start}+{len}: start must be a multiple of {}, len non-zero", g.block_size));
+    }
+    if let Some((l, f)) = filled.iter().enumerate().find(|(_, &f)| f != start) {
+        return Err(format!("kv import at {start}: layer {l} holds {f} positions"));
+    }
+    kvio::check_payload(&g, len, bytes)?;
+    let off = (start / g.block_size) * g.block_stride();
+    if off + bytes.len() > pool.total_bytes() {
+        return Err(format!("kv import {start}+{len}: past the pool ({} bytes)", pool.total_bytes()));
+    }
+    // SAFETY: the pool owns total_bytes() writable bytes at base_mut_ptr(); the range is checked
+    // and `bytes` is a separate allocation.
+    unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr(), pool.base_mut_ptr().add(off), bytes.len()) };
+    filled.iter_mut().for_each(|f| *f = start + len);
+    Ok(())
+}
+
+/// A host bf16 pool with the reference attention over the bf16 values: the same bytes as
+/// [`OmegaPagedKv`] (append rounds to bf16 in the pool, export/import copy blocks), with no chip.
+/// Host tests of the persistent KV path (sc#505) run the real engine over it.
+pub struct HostPoolKv {
+    pool: aien_kv_cache::UnifiedKvTensorPool,
+    capacity: usize,
+    q_heads: usize,
+    kv_heads: usize,
+    head_dim: usize,
+    filled: Vec<usize>,
+}
+
+impl HostPoolKv {
+    pub fn new(config: &Qwen3MoeConfig, max_context: usize) -> Result<Self, String> {
+        let num_blocks = max_context.div_ceil(KV_BLOCK_SIZE).max(1);
+        let cfg = aien_kv_cache::KvPoolConfig::for_model(num_blocks, KV_BLOCK_SIZE, config.layers, config.kv_heads, config.head_dim, aien_kv_cache::KvDType::Bf16);
+        Ok(Self {
+            pool: aien_kv_cache::UnifiedKvTensorPool::allocate(cfg)?,
+            capacity: num_blocks * KV_BLOCK_SIZE,
+            q_heads: config.q_heads,
+            kv_heads: config.kv_heads,
+            head_dim: config.head_dim,
+            filled: vec![0; config.layers],
+        })
+    }
+
+    fn row(&self, layer: usize, pos: usize, value: bool) -> Vec<f32> {
+        let kv_dim = self.kv_heads * self.head_dim;
+        let off = self.pool.element_offset(pos / KV_BLOCK_SIZE, layer, value, pos % KV_BLOCK_SIZE);
+        // SAFETY: the offset is inside the pool (pos < filled <= capacity), kv_dim bf16 values.
+        let b = unsafe { std::slice::from_raw_parts(self.pool.base_ptr().add(off), kv_dim * 2) };
+        b.chunks_exact(2).map(|w| bf16_to_f32(u16::from_le_bytes([w[0], w[1]]))).collect()
+    }
+}
+
+impl KvAttention for HostPoolKv {
+    fn capacity(&self) -> usize {
+        self.capacity
+    }
+    fn reset(&mut self) {
+        self.filled.iter_mut().for_each(|f| *f = 0);
+    }
+    fn truncate(&mut self, len: usize) {
+        for f in self.filled.iter_mut() {
+            *f = (*f).min(len);
+        }
+    }
+    fn append(&mut self, layer: usize, pos: usize, k: &[f32], v: &[f32]) -> Result<(), String> {
+        if pos != self.filled[layer] || pos >= self.capacity {
+            return Err(format!("host pool kv: append at {pos}, have {} (capacity {})", self.filled[layer], self.capacity));
+        }
+        self.pool.write_token_kv(pos / KV_BLOCK_SIZE, layer, pos % KV_BLOCK_SIZE, k, v);
+        self.filled[layer] = pos + 1;
+        Ok(())
+    }
+    fn attend(&mut self, layer: usize, q: &[f32], context_len: usize, out: &mut [f32]) -> Result<u64, String> {
+        if context_len > self.filled[layer] {
+            return Err(format!("host pool kv: attend over {context_len}, only {} stored", self.filled[layer]));
+        }
+        let keys: Vec<Vec<f32>> = (0..context_len).map(|p| self.row(layer, p, false)).collect();
+        let values: Vec<Vec<f32>> = (0..context_len).map(|p| self.row(layer, p, true)).collect();
+        scaled_dot_product_attention_single(q, &keys, &values, self.q_heads, self.kv_heads, self.head_dim, out);
+        Ok(0)
+    }
+    fn resident(&self) -> bool {
+        false
+    }
+    fn path_name(&self) -> &'static str {
+        "host-pool"
+    }
+    fn export_blocks(&mut self, start: usize, len: usize) -> Option<Result<Vec<u8>, String>> {
+        Some(pool_export(&self.pool, &self.filled, start, len))
+    }
+    fn import_blocks(&mut self, start: usize, len: usize, bytes: &[u8]) -> Option<Result<(), String>> {
+        Some(pool_import(&mut self.pool, &mut self.filled, start, len, bytes))
+    }
 }
 
 /// Host f32 cache with the reference attention (tests, and the oracle side of parity runs).
@@ -2010,6 +2157,15 @@ impl KvAttention for OmegaPagedKv {
     fn resident(&self) -> bool {
         self.resident
     }
+    // The chip reads and writes this pool in place (GPU-uncached host-visible memory when
+    // resident) and no launch is in flight between steps, so the host copies see the bytes the
+    // attention reads.
+    fn export_blocks(&mut self, start: usize, len: usize) -> Option<Result<Vec<u8>, String>> {
+        Some(pool_export(&self.pool, &self.filled, start, len))
+    }
+    fn import_blocks(&mut self, start: usize, len: usize, bytes: &[u8]) -> Option<Result<(), String>> {
+        Some(pool_import(&mut self.pool, &mut self.filled, start, len, bytes))
+    }
 }
 
 /// Generation request (field for field what the HTTP door's `GenerateParams` carries).
@@ -2144,6 +2300,37 @@ pub fn sample_next(logits: &[f32], params: &GenerateParams, step: usize) -> u32 
         stop_token_ids: Vec::new(),
     };
     sample_with_params(logits, &sp, decode_sampling_seed(params.seed, step)).0
+}
+
+/// Every run setting of a [`Qwen3MoeOmegaEngine`] that can change a K/V byte (persistent KV
+/// engine identity, sc#505). When unsure whether a setting moves a byte it is listed (fail
+/// closed: a needless entry only costs a cache miss). The caller adds the settings that live
+/// outside the engine (weight format, the omega environment switches, the build).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OmegaKvSwitches {
+    /// "fused" (one-launch attention, bf16 RNE on the chip), "split" (host norm and RoPE, the
+    /// paged pool), or a test cache's name.
+    pub attention_path: &'static str,
+    /// Decode steps route with the device router.
+    pub device_routing: bool,
+    /// Prompt tokens per batched prefill step (the batch shape of the activation rounding).
+    pub prefill_chunk: usize,
+    /// Batched prefill on the FP8 grouped GEMM instead of the grouped GEMV.
+    pub prefill_gemm: bool,
+    /// GEMM prefill routes with the device router.
+    pub prefill_device_routing: bool,
+    /// Whole-prompt prefill (changes activation rounding, chip gate W-RC).
+    pub whole_prompt: bool,
+    /// Router logits and MoE combine of the whole-prompt prefill on the chip.
+    pub whole_prompt_device_host: bool,
+    /// The one-list decode graph (`OWN30B_DECODE_GRAPH=1`).
+    pub decode_graph: bool,
+    /// lm_head on the bf16 GEMV (logits only; listed anyway).
+    pub lm_head_gemv: bool,
+    /// Negative control: routing deliberately wrong. Persistence must refuse it.
+    pub routing_mutant: bool,
+    /// Parity tracing on (records activations; listed anyway).
+    pub trace_layers: bool,
 }
 
 /// The Stage A engine: one sequence, token-at-a-time prefill and decode.
@@ -2634,6 +2821,68 @@ impl Qwen3MoeOmegaEngine {
         self.kv.truncate(len);
         self.history.truncate(len);
         self.pos = len;
+    }
+
+    /// Tokens `generate` would keep from the stored history for `prompt`: the longest common
+    /// prefix, capped at `prompt.len() - 1` (the last prompt token is always stepped). The same
+    /// rule as `generate_inner`; persistent KV (sc#505) restores only when the store beats it.
+    pub fn reusable_prefix(&self, prompt: &[u32]) -> usize {
+        let common = self.history.iter().zip(prompt).take_while(|(a, b)| a == b).count();
+        common.min(prompt.len().saturating_sub(1))
+    }
+
+    /// Persistent KV park (sc#505): the K/V of stored positions `start..start + len` as the
+    /// [`kvio`] payload (`start` a multiple of [`KV_BLOCK_SIZE`], `start + len <= position()`).
+    pub fn export_kv(&mut self, start: usize, len: usize) -> Result<Vec<u8>, String> {
+        if start + len > self.pos {
+            return Err(format!("kv export {start}+{len}: only {} positions stored", self.pos));
+        }
+        self.kv.export_blocks(start, len).unwrap_or_else(|| Err(format!("the {} attention cache cannot export its KV", self.kv.path_name())))
+    }
+
+    /// Persistent KV restore (sc#505): replaces the stored sequence by `tokens` with the K/V of
+    /// `payload` (a [`kvio`] payload of `tokens.len()` positions from position 0). On success the
+    /// engine is exactly as if it had stepped `tokens` itself and kept them in its history, so the
+    /// next `generate` reuses them by the usual prefix rule. On any error the engine is reset
+    /// (empty history): the next `generate` prefills from position 0, never from a partial prefix.
+    pub fn restore_kv(&mut self, tokens: &[u32], payload: &[u8]) -> Result<(), String> {
+        self.reset();
+        if tokens.is_empty() || tokens.len() >= self.kv.capacity() {
+            return Err(format!("kv restore of {} tokens, context is {}", tokens.len(), self.kv.capacity()));
+        }
+        let r = self
+            .kv
+            .import_blocks(0, tokens.len(), payload)
+            .unwrap_or_else(|| Err(format!("the {} attention cache cannot import KV", self.kv.path_name())));
+        match r {
+            Ok(()) => {
+                self.history = tokens.to_vec();
+                self.pos = tokens.len();
+                Ok(())
+            }
+            Err(e) => {
+                self.reset();
+                Err(e)
+            }
+        }
+    }
+
+    /// Every setting of this engine that can change a K/V byte, for the persistent KV engine
+    /// identity (sc#505). See [`OmegaKvSwitches`].
+    pub fn kv_switches(&self) -> OmegaKvSwitches {
+        OmegaKvSwitches {
+            attention_path: self.kv.path_name(),
+            device_routing: self.device_routing,
+            prefill_chunk: self.prefill_chunk,
+            prefill_gemm: self.prefill_gemm,
+            prefill_device_routing: self.prefill_device_routing,
+            whole_prompt: self.whole_prompt_on(),
+            whole_prompt_device_host: self.whole_prompt_device_host_on(),
+            decode_graph: self.decode_graph,
+            lm_head_gemv: matches!(self.weights.lm_head, LmHead::Gemv(_)),
+            routing_mutant: self.routing_mutant,
+            trace_layers: !self.trace_layers.is_empty(),
+        }
     }
 
     /// Runs `token` at the next position through every layer. Returns the final-normed hidden
@@ -3678,4 +3927,182 @@ fn combine_rows(x: &mut [f32], down_sorted: &[f32], wts: &[f32], inv: &[u32], h:
             *xi += a;
         }
     });
+}
+
+/// Host-only test engine (sc#505, feature `host-test-engine`): a real [`OmegaEngine`] over the
+/// tiny in-memory Qwen3-MoE checkpoint, host matmuls and a [`HostPoolKv`] (bf16 pool, the
+/// `HostPagedPoolV1` bytes), so the persistent KV path of the HTTP door can be tested end to end
+/// without a chip. Never in a server build.
+#[cfg(feature = "host-test-engine")]
+pub mod host_test_engine {
+    use super::test_support::{tiny_config, MemorySource, RecordingUploader};
+    use super::*;
+
+    /// The tiny checkpoint's config (2 layers, 1 KV head of 128, 4 experts, top 2, vocab 64).
+    pub fn config() -> Qwen3MoeConfig {
+        tiny_config()
+    }
+
+    /// A fresh engine (same weights every call, so two calls stand for one server restarted) with
+    /// room for `max_context` tokens.
+    pub fn engine(format: WeightFormat, max_context: usize) -> Result<OmegaEngine, String> {
+        let c = tiny_config();
+        let mut src = MemorySource::for_config(&c);
+        let up = RecordingUploader::default();
+        let (w, report) = load_qwen3_moe_omega_from_with(&c, &mut src, &up, format, &mut |_| {})?;
+        let kv = HostPoolKv::new(&c, max_context)?;
+        Ok(OmegaEngine::from_engine(Qwen3MoeOmegaEngine::new(w, Box::new(kv)), report))
+    }
+}
+
+/// Persistent KV export and import on the engine (sc#505), host only.
+#[cfg(test)]
+mod kv_persist_tests {
+    use super::test_support::*;
+    use super::*;
+
+    fn pool_engine(cap: usize) -> Qwen3MoeOmegaEngine {
+        let c = tiny_config();
+        let mut src = MemorySource::for_config(&c);
+        let up = RecordingUploader::default();
+        let (w, _) = load_qwen3_moe_omega_from_with(&c, &mut src, &up, WeightFormat::Fp8All, &mut |_| {}).unwrap();
+        Qwen3MoeOmegaEngine::new(w, Box::new(HostPoolKv::new(&c, cap).unwrap()))
+    }
+
+    fn argmax(lg: &[f32]) -> u32 {
+        lg.iter().enumerate().max_by(|a, b| a.1.partial_cmp(b.1).unwrap()).unwrap().0 as u32
+    }
+
+    /// Greedy turn: (tokens, every logit vector, reused prompt tokens).
+    fn turn(e: &mut Qwen3MoeOmegaEngine, prompt: &[u32], n: usize) -> (Vec<u32>, Vec<Vec<f32>>, usize) {
+        let (mut toks, mut logits) = (Vec::new(), Vec::new());
+        let o = e
+            .generate_with(prompt, &GenerateParams::greedy(n, vec![]), &mut |lg, _| {
+                logits.push(lg.to_vec());
+                argmax(lg)
+            }, &mut |t| {
+                toks.push(t);
+                true
+            })
+            .unwrap();
+        (toks, logits, o.reused_prompt_tokens)
+    }
+
+    fn rows(seed: u64, n: usize) -> Vec<f32> {
+        (0..n).map(|i| prand(seed, i)).collect()
+    }
+
+    #[test]
+    fn paged_and_host_pool_caches_export_the_same_bytes_and_round_trip() {
+        let c = tiny_config();
+        let kvd = c.kv_heads * c.head_dim;
+        let mut paged = OmegaPagedKv::new(&c, 64).unwrap();
+        assert!(!paged.resident(), "the stub build has no resident pool: a host pool, same bytes");
+        let mut host = HostPoolKv::new(&c, 64).unwrap();
+        for pos in 0..37 {
+            for l in 0..c.layers {
+                let (k, v) = (rows(pos as u64 * 10 + l as u64, kvd), rows(pos as u64 * 10 + l as u64 + 5, kvd));
+                paged.append(l, pos, &k, &v).unwrap();
+                host.append(l, pos, &k, &v).unwrap();
+            }
+        }
+        let g = kvio::PoolBlockGeometry::for_config(&c);
+        for (start, len) in [(0usize, 37usize), (0, 16), (16, 21), (32, 1)] {
+            let a = paged.export_blocks(start, len).unwrap().unwrap();
+            let b = host.export_blocks(start, len).unwrap().unwrap();
+            assert_eq!(a, b, "{start}+{len}");
+            assert_eq!(a.len(), g.payload_len(len));
+            kvio::check_payload(&g, len, &a).unwrap();
+        }
+        // Past what is stored: refused.
+        assert!(paged.export_blocks(32, 6).unwrap().is_err());
+        // Import into a fresh cache in two pieces, export again: identical bytes.
+        let whole = host.export_blocks(0, 37).unwrap().unwrap();
+        let mut fresh = OmegaPagedKv::new(&c, 64).unwrap();
+        assert!(fresh.import_blocks(16, 21, &host.export_blocks(16, 21).unwrap().unwrap()).unwrap().is_err(), "must start where the cache ends");
+        fresh.import_blocks(0, 16, &host.export_blocks(0, 16).unwrap().unwrap()).unwrap().unwrap();
+        fresh.import_blocks(16, 21, &host.export_blocks(16, 21).unwrap().unwrap()).unwrap().unwrap();
+        assert_eq!(fresh.export_blocks(0, 37).unwrap().unwrap(), whole);
+        // The f32 test cache cannot export: None, never a guess.
+        assert!(HostKv::new(&c, 8).export_blocks(0, 1).is_none());
+    }
+
+    #[test]
+    fn restored_prefix_continues_exactly_like_the_uninterrupted_engine() {
+        let turn1 = [5u32, 17, 42, 3, 9, 60, 11, 23, 8, 2, 7, 19, 33, 40, 1, 6, 14, 29];
+        // Uninterrupted: turn 1, then turn 2 reusing the in-RAM prefix.
+        let mut live = pool_engine(128);
+        let (reply1, _, r1) = turn(&mut live, &turn1, 5);
+        assert_eq!(r1, 0);
+        let history = live.history().to_vec();
+        let snapshot = live.export_kv(0, history.len()).unwrap();
+        let mut turn2 = turn1.to_vec();
+        turn2.extend_from_slice(&reply1);
+        turn2.extend_from_slice(&[12, 31, 4]);
+        let (want, want_logits, reused_live) = turn(&mut live, &turn2, 6);
+        assert_eq!(reused_live, history.len(), "turn 2 reuses every stepped token of turn 1");
+
+        // Restarted: a fresh engine (same weights), the parked prefix restored, then turn 2.
+        let mut restarted = pool_engine(128);
+        restarted.restore_kv(&history, &snapshot).unwrap();
+        assert_eq!(restarted.history(), &history[..]);
+        assert_eq!(restarted.position(), history.len());
+        assert_eq!(restarted.export_kv(0, history.len()).unwrap(), snapshot, "import then export is byte-identical");
+        assert_eq!(restarted.reusable_prefix(&turn2), reused_live);
+        let (got, got_logits, reused_restored) = turn(&mut restarted, &turn2, 6);
+        assert_eq!(reused_restored, reused_live, "the restore point is the uninterrupted reuse point");
+        assert_eq!(got, want, "restored continuation equals the uninterrupted one");
+        assert_eq!(got_logits, want_logits, "bit for bit");
+    }
+
+    #[test]
+    fn a_damaged_or_impossible_restore_leaves_a_clean_engine_that_prefills_from_zero() {
+        let prompt = [5u32, 17, 42, 3, 9, 60, 11, 23, 8, 2];
+        let mut a = pool_engine(64);
+        let _ = turn(&mut a, &prompt, 3);
+        let history = a.history().to_vec();
+        let mut snap = a.export_kv(0, history.len()).unwrap();
+        let mut cold = pool_engine(64);
+        let (want, _, _) = turn(&mut cold, &prompt, 3);
+
+        let mut b = pool_engine(64);
+        let _ = turn(&mut b, &[1, 2, 3, 4], 2);
+        // Wrong length, a padding byte set, an empty or oversized token list: all refused.
+        assert!(b.restore_kv(&history, &snap[..snap.len() - 2]).is_err());
+        assert_eq!((b.position(), b.history().len()), (0, 0), "reset, not a partial prefix");
+        let last = snap.len() - 1;
+        snap[last] ^= 1;
+        assert!(b.restore_kv(&history, &snap).is_err());
+        assert!(b.restore_kv(&[], &[]).is_err());
+        assert!(b.restore_kv(&[1u32; 64], &snap).is_err());
+        assert_eq!((b.position(), b.history().len()), (0, 0));
+        let (got, _, reused) = turn(&mut b, &prompt, 3);
+        assert_eq!(reused, 0);
+        assert_eq!(got, want, "plain prefill after a refused restore");
+        // An engine whose cache cannot export refuses the park.
+        let (mut f32_engine, _, _, _) = {
+            let c = tiny_config();
+            let mut src = MemorySource::for_config(&c);
+            let up = RecordingUploader::default();
+            let (w, r) = load_qwen3_moe_omega_from_with(&c, &mut src, &up, WeightFormat::Fp8All, &mut |_| {}).unwrap();
+            (Qwen3MoeOmegaEngine::new(w, Box::new(HostKv::new(&c, 32))), (), (), r)
+        };
+        let _ = turn(&mut f32_engine, &prompt, 2);
+        assert!(f32_engine.export_kv(0, 4).is_err());
+        assert!(f32_engine.export_kv(0, 99).is_err());
+    }
+
+    #[test]
+    fn kv_switches_report_every_run_setting() {
+        let mut e = pool_engine(32);
+        let s = e.kv_switches();
+        assert_eq!(s.attention_path, "host-pool");
+        assert!(!s.whole_prompt && !s.decode_graph && !s.routing_mutant);
+        e.prefill_chunk = 3;
+        e.routing_mutant = true;
+        let t = e.kv_switches();
+        assert_eq!(t.prefill_chunk, 3);
+        assert!(t.routing_mutant);
+        assert_ne!(s, t);
+    }
 }
