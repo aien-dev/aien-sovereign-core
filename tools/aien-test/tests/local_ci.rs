@@ -1491,3 +1491,59 @@ fn worker_reuses_cached_receipt_across_commits_and_sibling_pins() {
         r4.gates
     );
 }
+
+/// Cache safety across commits: gate U declares only `u/` as its input but
+/// its program also reads `other/flag.txt`, the way SC-TEST's tests read the
+/// root README.md and COVENANT.md and scan the whole tree for key files. A
+/// later commit that changes only that file makes U fail when it really runs,
+/// so the worker must never hand that commit the earlier commit's PASS.
+#[test]
+fn worker_never_reuses_a_pass_when_an_undeclared_file_changed_across_commits() {
+    if nested_in_sandbox(
+        "worker_never_reuses_a_pass_when_an_undeclared_file_changed_across_commits",
+    ) {
+        return;
+    }
+    let w = world();
+    let mut cfg = w.config();
+    cfg.operator = true; // U is a new gate: a pipeline configuration change.
+
+    git(&w.origin, &["checkout", "-q", "-b", "topic-u", "main"]);
+    write(
+        &w.origin,
+        "tools/u.sh",
+        "#!/bin/sh\ntest \"$(cat other/flag.txt)\" = ok || { echo 'flag is not ok' >&2; exit 1; }\necho PASS\n",
+        true,
+    );
+    write(&w.origin, "u/u.txt", "1\n", false);
+    write(&w.origin, "other/flag.txt", "ok\n", false);
+    write(
+        &w.origin,
+        "tests/gates/U.gate",
+        &gate("U", "u/", "tools/u.sh", ""),
+        false,
+    );
+    git(&w.origin, &["add", "-A"]);
+    git(
+        &w.origin,
+        &["commit", "-q", "-m", "gate U reads other/flag.txt"],
+    );
+    let head_u1 = git(&w.origin, &["rev-parse", "HEAD"]);
+    write(&w.origin, "other/flag.txt", "bad\n", false);
+    git(&w.origin, &["add", "-A"]);
+    git(&w.origin, &["commit", "-q", "-m", "break the flag U reads"]);
+    let head_u2 = git(&w.origin, &["rev-parse", "HEAD"]);
+    git(&w.origin, &["checkout", "-q", "main"]);
+    git(&w.clone, &["fetch", "-q", "--all"]);
+
+    let r1 = worker::run_once(&cfg, REPO, &head_u1).expect("worker u1");
+    assert_eq!(gate_verdict(&r1, "U"), Verdict::Pass, "{:?}", r1.notes);
+
+    let r2 = worker::run_once(&cfg, REPO, &head_u2).expect("worker u2");
+    assert_eq!(
+        gate_verdict(&r2, "U"),
+        Verdict::Fail,
+        "a PASS from {head_u1} was handed to {head_u2} although U fails there: {:?}",
+        r2.gates
+    );
+}
