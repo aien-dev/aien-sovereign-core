@@ -1,118 +1,66 @@
 #!/usr/bin/env bash
-# Persistent KV acceptance check on the chip (sc#505, locked by #499). CHIP-ONLY: never run by
-# CI or cargo test. It starts its OWN servers on 127.0.0.1:18097 (PKV_CHECK_PORT; never touches :18091, the live
-# server, or its PID/log files) and loads the 30B checkpoint each time (~30.5 GB resident, about
-# 18 s load plus the checkpoint digest when persistence is on).
+# Persistent KV acceptance check on the chip (sc#505/#507, locked by #499). CHIP-ONLY: never run
+# by CI or cargo test. It starts its OWN servers on 127.0.0.1:18097 (PKV_CHECK_PORT; never
+# touches :18091, the live server, or its PID/log files) and loads the 30B checkpoint each time
+# (~30.5 GB resident, about 18 s load plus the checkpoint digest when persistence is on).
 #
-#   scripts/own30b-pkv-chip-check.sh <evidence-dir> <aien-serve-http binary>
+#   scripts/own30b-pkv-chip-check.sh [--dry-run] <evidence-dir> <aien-serve-http binary>
 #
+# --dry-run prints the plan and checks the prerequisites; it starts no server.
 # The binary must be a native release build of this branch from a clean checkout (dirty or
 # unknown builds refuse persistence by design), e.g.
 #   AIEN_OMEGA_DIR=<omega checkout at the omega.lock pin> cargo build --release -p aien-serve-http
 #
-# Key: by default the store key comes from atlas-vault (`atlas-vault run AIEN_KV_STORE_KEY --`);
-# PKV_CHECK_EPHEMERAL_KEY=1 instead makes a throwaway key that lives only in this script's
-# memory and the child's environment (never printed or saved). The store is a private temp dir.
-#
-# Refuses to start while :18091 answers, because two omega processes sharing the chip at once is
-# UNKNOWN territory: pause the live server first, or set PKV_CHECK_WITH_LIVE=1 to accept the risk.
+# Key: atlas-vault entry AIEN_KV_STORE_KEY by default; PKV_CHECK_EPHEMERAL_KEY=1 makes a
+# throwaway key (never printed or saved). Stores are private temp dirs. Refuses while :18091
+# answers. Helpers and rules: scripts/own30b-pkv-lib.sh.
 #
 # Phases (same greedy two-turn conversation, temperature 0, seed 1):
-#   off    persistence off, one server kept running          -> turn2 = T_off (uninterrupted)
-#   on     persistence on (fresh store), one server running   -> turn2 = T_on
-#   park   persistence on (fresh store S): turn 1, wait for the parks, stop the server
-#   restore restart on S: turn 2 must restore (restores == 1)  -> turn2 = T_restored
+#   off        persistence off, one server kept running -> T_off, T2b_off (other turn 2), A_off (other chat)
+#   on         persistence on (fresh store), one server running   -> turn2 = T_on
+#   park       persistence on (fresh store S): turn 1, wait for the parks, stop
+#   restore    restart on S: turn 2 must restore (restores == 1)  -> T_restored
 #   neg-switch restart on S with --prefill-device-host off: restores == 0 (another identity)
+#   torn       fresh store W, AIEN_KV_TEST_FAULT=p3:600000 (every park stalls before its publish
+#              rename): turn 1, wait for a temp file, kill -9, cut every temp file in half, restart
+#              plain on W: nothing published, recovery removes the temps, turn 2 == T_off, restores 0
+#   late-load  fresh store L parked normally; restart with AIEN_KV_TEST_FAULT=load:15000:1 (the
+#              first restore read stalls past the 10 s load timeout): turn 2 == T_off with
+#              restores 0 and one timeout miss; after the late completion lands restores is still
+#              0 and another chat == A_off; restart plain on L: turn 2 restores 1 and == T_off
+#   late-park  fresh store P, AIEN_KV_TEST_FAULT=p3:20000:1 (the first park stalls 20 s): turn 1,
+#              turn 2 and another turn 2 run while it is in flight (== T_off, == T2b_off); parks
+#              settle with none failed; restart plain on P: turn 2 restores 1 and == T_off
 #   neg-corrupt flip one byte in every stored object of S, restart: restores == 0, still answers
-# PASS when T_on == T_off and T_restored == T_off and both negative controls restore nothing.
-# Rough duration: 6 server starts, 5 to 8 minutes.
+# PASS when every answer equals its uninterrupted twin and every negative control restores nothing.
+# Not covered: a conversation "deleted" before its park lands; the server has no delete API, and
+# chunks are content addressed, so a late park can only serve the exact same token prefix.
+# Rough duration: 13 server starts, 14 to 20 minutes.
 set -euo pipefail
-dir=$1 BIN=$2
-MODEL=${OWN30B_MODEL_DIR:-$HOME/models/qwen3-30b-a3b-instruct-2507-fp8}
-PORT=${PKV_CHECK_PORT:-18097}
-base="http://127.0.0.1:$PORT"
-mkdir -p "$dir"
-work=$(mktemp -d /tmp/pkv505-chip.XXXXXX)
-chmod 700 "$work"
-PIDF="$work/server.pid"
-trap 'stop_server; rm -rf "$work"' EXIT
+. "$(dirname "$0")/own30b-pkv-lib.sh"
+pkv_usage_args "$(basename "$0")" "$@"
 
-if curl -s -m 2 http://127.0.0.1:18091/health >/dev/null 2>&1 && [ "${PKV_CHECK_WITH_LIVE:-0}" != 1 ]; then
-	echo "refusing: the live server on :18091 is up (pause it first, or PKV_CHECK_WITH_LIVE=1)" >&2
-	exit 2
-fi
-if ss -Hltn "sport = :$PORT" | grep -q . || curl -s -m 2 "$base/health" >/dev/null 2>&1; then
-	echo "refusing: something already listens on :$PORT (18095 is spark-cockpit; pick a free PKV_CHECK_PORT)" >&2
-	exit 2
-fi
-if [ "${PKV_CHECK_EPHEMERAL_KEY:-0}" = 1 ]; then
-	KEY=$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')
-fi
-
-stop_server() {
-	if [ -f "$PIDF" ]; then
-		local p
-		p=$(cat "$PIDF")
-		if [ -n "$p" ] && [ "$(ps -o comm= -p "$p" 2>/dev/null || true)" = aien-serve-http ]; then
-			kill "$p"
-			for _ in $(seq 1 100); do kill -0 "$p" 2>/dev/null || break; sleep 0.1; done
-		fi
-		rm -f "$PIDF"
-	fi
-}
-
-# start <log-name> <store-dir or -> [extra server flags...]
-start_server() {
-	local name=$1 store=$2
-	shift 2
-	local log="$dir/$name.log"
-	local cmd="echo \$\$ > '$PIDF'; exec '$BIN' --engine omega --model-dir '$MODEL' --port $PORT $*"
-	if [ "$store" = - ]; then
-		setsid env -u AIEN_KV_STORE_DIR -u AIEN_KV_STORE_KEY sh -c "$cmd" >"$log" 2>&1 </dev/null &
-	elif [ -n "${KEY:-}" ]; then
-		setsid env AIEN_KV_STORE_DIR="$store" AIEN_KV_STORE_KEY="$KEY" sh -c "$cmd" >"$log" 2>&1 </dev/null &
-	else
-		setsid atlas-vault run AIEN_KV_STORE_KEY -- env AIEN_KV_STORE_DIR="$store" sh -c "$cmd" >"$log" 2>&1 </dev/null &
-	fi
-	for _ in $(seq 1 300); do
-		grep -q "serving \|load failed\|bind failed" "$log" 2>/dev/null && break
-		sleep 1
-	done
-	grep -q "serving " "$log" || { echo "server $name did not start; see $log" >&2; exit 1; }
-	grep "persistent KV" "$log" || true
-}
-
-SYS="You are the OWN-30B assistant on the AIEN Spark. Answer briefly."
-for i in $(seq 1 40); do SYS="$SYS Rule $i: keep answers short, never invent facts, say UNKNOWN when unsure."; done
-Q1="Name three uses of a torque wrench."
-Q2="Which of those matters most on a bicycle, and why?"
-
-chat() { # <out-name> <messages-json>
-	jq -n --argjson m "$2" '{model:"x", messages:$m, max_tokens:64, temperature:0, seed:1, stream:false}' |
-		curl -s -m 600 "$base/v1/chat/completions" -H 'content-type: application/json' -d @- >"$dir/$1.json"
-	jq -r '.choices[0].message.content' "$dir/$1.json"
-}
-m1=$(jq -n --arg s "$SYS" --arg q "$Q1" '[{role:"system",content:$s},{role:"user",content:$q}]')
-turn2_msgs() { jq -n --argjson m "$m1" --arg a "$1" --arg q "$Q2" '$m + [{role:"assistant",content:$a},{role:"user",content:$q}]'; }
-health() { curl -s -m 10 "$base/health" >"$dir/$1-health.json"; cat "$dir/$1-health.json"; }
-pk() { jq -r ".persistent_kv.$2" "$dir/$1-health.json"; }
-
-wait_parks() { # until parked_chunks > 0 and unchanged for 3 s
-	local last=-1 now
-	for _ in $(seq 1 60); do
-		now=$(curl -s -m 5 "$base/health" | jq -r '.persistent_kv.parked_chunks')
-		[ "$now" != 0 ] && [ "$now" = "$last" ] && return 0
-		last=$now
-		sleep 3
-	done
-	echo "parks did not settle" >&2
+if [ $DRY = 1 ]; then
+	echo "PLAN own30b-pkv-chip-check (#507): off, on, park, restore, neg-switch, torn (kill -9 mid-write),"
+	echo "     late-load (restore past its timeout), late-park (park lands after the chat moved on), neg-corrupt"
+	echo "     13 server starts on :$PORT, estimate 14 to 20 minutes; evidence -> $dir"
+	echo "PREREQUISITES"
+	if pkv_prereqs 1; then echo "DRY RUN: ready"; exit 0; fi
+	echo "DRY RUN: NOT ready"
 	exit 1
-}
+fi
+pkv_begin
+
+Q2B="Which of those is least useful at home?"
+QA="Explain in two sentences what a bearing preload is."
+mA=$(jq -n --arg s "$SYS" --arg q "$QA" '[{role:"system",content:$s},{role:"user",content:$q}]')
 
 echo "== off: persistence off, uninterrupted"
 start_server off -
 a1_off=$(chat off-turn1 "$m1")
 t_off=$(chat off-turn2 "$(turn2_msgs "$a1_off")")
+t2b_off=$(chat off-turn2b "$(turn2_msgs "$a1_off" "$Q2B")")
+aA_off=$(chat off-other "$mA")
 health off >/dev/null
 stop_server
 
@@ -143,27 +91,106 @@ chat neg-switch-turn2 "$(turn2_msgs "$a1")" >/dev/null
 health neg-switch >/dev/null
 stop_server
 
-echo "== neg-corrupt: flip one byte in every stored object, restart"
-find "$S/objects" -type f | while read -r f; do
-	sz=$(stat -c %s "$f")
-	off=$((sz / 2))
-	b=$(dd if="$f" bs=1 skip=$off count=1 2>/dev/null | od -An -tu1 | tr -d ' ')
-	printf "$(printf '\\%03o' $(((b ^ 64) & 255)))" | dd of="$f" bs=1 seek=$off count=1 conv=notrunc 2>/dev/null
+wait_store_open() { # <name>: until store_state is open (recovery done)
+	for _ in $(seq 1 120); do
+		[ "$(curl -s -m 5 "$base/health" | jq -r '.persistent_kv.store_state')" = open ] && return 0
+		sleep 1
+	done
+	echo "store did not open after recovery ($1)" >&2
+	exit 1
+}
+
+echo "== torn: kill -9 while every park is stalled before its publish rename"
+W="$work/store-torn"
+PKV_SERVER_ENV="AIEN_KV_TEST_FAULT=p3:600000" start_server torn-a "$W"
+a1_torn=$(chat torn-turn1 "$m1")
+for _ in $(seq 1 120); do
+	[ -n "$(find "$W/tmp" -type f 2>/dev/null | head -1)" ] && break
+	sleep 0.5
 done
+health torn-a >/dev/null
+kill9_server
+find "$W" -type f -printf '%P %s\n' | sort >"$dir/torn-files-at-kill.txt"
+torn_tmp=$(find "$W/tmp" -type f | wc -l)
+torn_obj=$(find "$W/objects" -type f | wc -l)
+find "$W/tmp" -type f | while read -r f; do truncate -s $(($(stat -c %s "$f") / 2)) "$f"; done
+start_server torn-b "$W"
+wait_store_open torn-b
+torn_tmp_after=$(find "$W/tmp" -type f | wc -l)
+t_torn=$(chat torn-turn2 "$(turn2_msgs "$a1_torn")")
+health torn-b >/dev/null
+stop_server
+
+echo "== late-load: the first restore read stalls past the load timeout"
+L="$work/store-late-load"
+start_server late-load-park "$L"
+a1_ll=$(chat late-load-turn1 "$m1")
+wait_parks
+stop_server
+PKV_SERVER_ENV="AIEN_KV_TEST_FAULT=load:15000:1" start_server late-load-a "$L"
+wait_store_open late-load-a
+t_ll=$(chat late-load-turn2 "$(turn2_msgs "$a1_ll")")
+health late-load-a1 >/dev/null
+sleep 8 # the stalled read completes about 5 s after the 10 s timeout
+aA_ll=$(chat late-load-other "$mA")
+health late-load-a2 >/dev/null
+stop_server
+start_server late-load-b "$L"
+t_ll_b=$(chat late-load-b-turn2 "$(turn2_msgs "$a1_ll")")
+health late-load-b >/dev/null
+stop_server
+
+echo "== late-park: the first park stalls 20 s while the chat moves on"
+P="$work/store-late-park"
+PKV_SERVER_ENV="AIEN_KV_TEST_FAULT=p3:20000:1" start_server late-park-a "$P"
+a1_lp=$(chat late-park-turn1 "$m1")
+health late-park-inflight >/dev/null
+t_lp=$(chat late-park-turn2 "$(turn2_msgs "$a1_lp")")
+t2b_lp=$(chat late-park-turn2b "$(turn2_msgs "$a1_lp" "$Q2B")")
+wait_parks
+health late-park-a >/dev/null
+stop_server
+start_server late-park-b "$P"
+t_lp_b=$(chat late-park-b-turn2 "$(turn2_msgs "$a1_lp")")
+health late-park-b >/dev/null
+stop_server
+
+echo "== neg-corrupt: flip one byte in every stored object, restart"
+find "$S/objects" -type f | while read -r f; do flip_byte "$f"; done
 start_server neg-corrupt "$S"
 chat neg-corrupt-turn2 "$(turn2_msgs "$a1")" >/dev/null
 health neg-corrupt >/dev/null
 stop_server
 
-fail=0
-check() { if [ "$2" = "$3" ]; then echo "PASS $1"; else echo "FAIL $1 ($2 != $3)"; fail=1; fi; }
-check "turn 1 identical off/on/park" "$a1_off|$a1_on" "$a1|$a1"
-check "T_on == T_off (persistence changes no token)" "$t_on" "$t_off"
-check "T_restored == T_off (restored = uninterrupted)" "$t_restored" "$t_off"
-check "restore served once" "$(pk restore restores)" 1
-check "neg-switch restores nothing" "$(pk neg-switch restores)" 0
-check "neg-corrupt restores nothing" "$(pk neg-corrupt restores)" 0
-check "off health has no persistent_kv" "$(jq -r 'has("persistent_kv")' "$dir/off-health.json")" false
-(cd "$dir" && sha256sum ./*.json ./*.log >SHA256SUMS)
-[ $fail = 0 ] && echo "PKV CHIP CHECK: PASS" || echo "PKV CHIP CHECK: FAIL"
+{
+	check "turn 1 identical off/on/park/torn/late" "$a1_off|$a1_on|$a1_torn|$a1_ll|$a1_lp" "$a1|$a1|$a1|$a1|$a1"
+	check "T_on == T_off (persistence changes no token)" "$t_on" "$t_off"
+	check "T_restored == T_off (restored = uninterrupted)" "$t_restored" "$t_off"
+	check "restore served once" "$(pk restore restores)" 1
+	check "neg-switch restores nothing" "$(pk neg-switch restores)" 0
+	check "torn: a temp file was in flight at the kill" "$([ "$torn_tmp" -gt 0 ] && echo yes || echo "no ($torn_tmp)")" yes
+	check "torn: nothing was published before the kill" "$torn_obj" 0
+	check "torn: recovery removed every temp file" "$torn_tmp_after" 0
+	check "torn: health counts the removed temps" "$(jq -r '.persistent_kv.recovery.tmp_deleted >= 1' "$dir/torn-b-health.json")" true
+	check "torn: restores nothing" "$(pk torn-b restores)" 0
+	check "torn: T == T_off" "$t_torn" "$t_off"
+	check "late-load: timed out once" "$(jq -r '.persistent_kv.restore_misses.timeout // 0' "$dir/late-load-a1-health.json")" 1
+	check "late-load: restores nothing" "$(pk late-load-a1 restores)" 0
+	check "late-load: T == T_off" "$t_ll" "$t_off"
+	check "late-load: the late completion is never served" "$(pk late-load-a2 restores)" 0
+	check "late-load: another chat == A_off" "$aA_ll" "$aA_off"
+	check "late-load: the store still restores after" "$(pk late-load-b restores)" 1
+	check "late-load: restored T == T_off" "$t_ll_b" "$t_off"
+	check "late-park: the park was in flight during turn 2" "$([ "$(pk late-park-inflight parked_chunks)" -eq 0 ] && echo yes || echo no)" yes
+	check "late-park: T == T_off" "$t_lp" "$t_off"
+	check "late-park: other turn 2 == T2b_off" "$t2b_lp" "$t2b_off"
+	check "late-park: no park failed" "$(pk late-park-a park_failed)" 0
+	check "late-park: restores once after restart" "$(pk late-park-b restores)" 1
+	check "late-park: restored T == T_off" "$t_lp_b" "$t_off"
+	check "neg-corrupt restores nothing" "$(pk neg-corrupt restores)" 0
+	check "off health has no persistent_kv" "$(jq -r 'has("persistent_kv")' "$dir/off-health.json")" false
+	[ $fail = 0 ] && echo "PKV CHIP CHECK: PASS" || echo "PKV CHIP CHECK: FAIL"
+} | tee "$dir/summary.txt"
+grep -q "PKV CHIP CHECK: PASS" "$dir/summary.txt" || fail=1
+pkv_seal
 exit $fail

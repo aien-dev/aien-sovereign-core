@@ -454,9 +454,19 @@ fn health_reports_the_persistence_counters_when_on() {
         "restore_bytes",
         "restore_misses",
         "refusals",
+        "seal",
+        "recovery",
+        "io",
     ] {
         assert!(!pk[k].is_null(), "missing {k}: {pk}");
     }
+    for k in ["done", "failed", "corrupt_deleted", "tmp_deleted", "unlink_failures", "foreign_files"] {
+        assert!(!pk["recovery"][k].is_null(), "missing recovery.{k}: {pk}");
+    }
+    for k in ["read_bytes", "write_bytes", "published", "failed", "disk_full"] {
+        assert!(!pk["io"][k].is_null(), "missing io.{k}: {pk}");
+    }
+    assert!(pk["io"]["write_bytes"].as_u64().unwrap() > 0, "the park wrote: {pk}");
 }
 
 #[test]
@@ -652,6 +662,13 @@ fn a_write_interrupted_before_publish_is_never_served() {
     assert_eq!(c.restores, 0, "{c:?}");
     assert_eq!(r2, plain_turn2(&scratch, &h1), "a torn write must be a plain recompute");
     assert!(files_under(&image.join("tmp")).is_empty(), "recovery removes the torn temp");
+    if let PersistState::On(pk) = b.persistence() {
+        let v = pk.status_json();
+        assert!(v["recovery"]["tmp_deleted"].as_u64().unwrap() >= 1, "health counts the removed temp: {v}");
+        assert_eq!(v["recovery"]["done"], true, "{v}");
+    } else {
+        panic!("persistence should be on");
+    }
 }
 
 #[test]

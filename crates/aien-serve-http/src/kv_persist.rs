@@ -48,7 +48,7 @@ use aien_kv_store::worker::StorageWorker;
 use aien_kv_store::{
     chunk_chain, chunk_key, BackendFormat, ChunkHeader, ChunkKey, ComputeConfig, EngineConfig,
     EngineIdentity, HiddenAct, HolderGuard, Incarnation, JobId, KvDtype, KvStore, LayoutStrides,
-    NamespaceFields, NamespaceId, PinnedDest, PinnedSource, StoreState, Terminal,
+    NamespaceFields, NamespaceId, PinnedDest, PinnedSource, RecoveryProgress, StoreState, Terminal,
 };
 use aien_runtime::shared_kv::{KvPersistSettings, KV_STORE_DIR_ENV};
 use sha2::{Digest, Sha256};
@@ -663,6 +663,10 @@ struct Inner {
 /// An open store with its worker, for one omega door.
 pub struct KvPersistence {
     worker: Arc<StorageWorker>,
+    /// The store itself, read only for its I/O and recovery counters in `/health` (#509).
+    store: Arc<HostFsStore>,
+    /// The last recovery step's progress (startup recovery, #509).
+    recovery: Arc<Mutex<RecoveryProgress>>,
     identity: OmegaKvIdentity,
     sharing: String,
     chunk_tokens: usize,
@@ -752,6 +756,8 @@ impl KvPersistence {
     pub fn status_json(&self) -> serde_json::Value {
         let c = self.counters();
         let t = aien_kv_store::seal::seal_timing();
+        let r = *self.recovery.lock().unwrap_or_else(|p| p.into_inner());
+        let s = self.store.stats();
         let state = match self.worker.capacity().state {
             StoreState::Recovering => "recovering",
             StoreState::Open => "open",
@@ -786,6 +792,31 @@ impl KvPersistence {
                 "open_calls": t.open_calls,
                 "open_bytes": t.open_bytes,
                 "open_ns": t.open_ns,
+            },
+            "recovery": {
+                "done": r.done,
+                "failed": r.failed,
+                "indexed": r.indexed,
+                "indexed_bytes": r.bytes,
+                "foreign_namespace": r.foreign_namespace,
+                "corrupt_deleted": r.corrupt_deleted,
+                "tmp_deleted": r.tmp_deleted,
+                "elapsed_us": r.elapsed_us,
+                "unlink_failures": s.recovery_unlink_failures,
+                "foreign_files": s.foreign_files,
+            },
+            "io": {
+                "reads": s.reads,
+                "read_bytes": s.read_bytes,
+                "writes": s.writes,
+                "write_bytes": s.write_bytes,
+                "file_fsyncs": s.file_fsyncs,
+                "published": s.published_total,
+                "disk_full": s.disk_full_total,
+                "queue_full": s.queue_full_total,
+                "indeterminate": s.indeterminate_total,
+                "failed": s.terminal_failed,
+                "corrupt_deleted": s.corrupt_deleted_total,
             },
             "test_fault": self.test_fault,
         })
@@ -1222,19 +1253,22 @@ fn open_inner(
         cfg.faults = Some(f.clone() as Arc<dyn FaultHook>);
     }
     let slice_ms = cfg.recovery_slice_ms;
+    let recovery = Arc::new(Mutex::new(RecoveryProgress::default()));
     let store = Arc::new(HostFsStore::open(cfg).map_err(|e| format!("store open at {}: {e:?} (the directory must be private, under a parent only you can write)", root.display()))?);
     let drive = {
         let store = store.clone();
+        let progress = recovery.clone();
         let mut recovered = false;
         move || {
             if !recovered {
                 let p = store.recover_step(slice_ms);
+                *progress.lock().unwrap_or_else(|e| e.into_inner()) = p;
                 recovered = p.done || p.failed;
             }
         }
     };
     let worker = Arc::new(
-        StorageWorker::spawn(store, settings.worker.clone(), drive)
+        StorageWorker::spawn(store.clone(), settings.worker.clone(), drive)
             .map_err(|e| format!("storage worker: {e:?}"))?,
     );
     let line = format!(
@@ -1256,6 +1290,8 @@ fn open_inner(
     Ok((
         KvPersistence {
             worker,
+            store,
+            recovery,
             identity,
             sharing: settings.namespace.clone(),
             chunk_tokens,
