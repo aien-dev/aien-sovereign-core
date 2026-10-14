@@ -98,6 +98,7 @@ Parallel lanes once C2 is merged: {C3, C4} and {C5} in parallel; {N1, N2} in par
 - Output schema (B6): per mode and concurrency, `completed_requests`, `failed_requests`, request latency `p50_us` and `p95_us`, `ttft_us` p50 and p95, `decode_tokens_per_s`, `peak_allocated_bytes` (pool constant plus holders), `peak_staging_bytes`, `peak_rss_bytes`, `cache_state`, `platform`, `queue_depth`.
 - Red tests: `bench_output_requires_completed_requests_latency_percentiles_and_peaks` (B6), `bench_binary_refuses_to_report_without_mode_and_cache_state_labels` (B7), `bench_refuses_mixed_cache_state_summary`, `bench_records_not_run_rows_for_native_physical` (B8).
 - Acceptance: B6, B7, B8.
+- Status (pkv/c9-bench, host only): red eca335c, green a2cfd1e and 5a07c36; the four red tests exist and pass in `crates/aien-kv-bench/tests/bench_persistent_kv_test.rs`. Deviation: the binary is `crates/aien-kv-bench/src/bin/bench_persistent_kv.rs` (its own crate), because it drives aien-runtime, which depends on aien-scheduler. One host run is recorded in `BENCH.md`; restore-from-device and the native physical rows are NOT_RUN.
 
 ## aienos cuts
 

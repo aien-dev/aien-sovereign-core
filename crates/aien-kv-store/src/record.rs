@@ -11,10 +11,15 @@ pub const HEADER_LEN: usize = 256;
 pub const HEADER_REGION_LEN: usize = 4096;
 /// File offset of the first payload byte.
 pub const PAYLOAD_OFFSET: usize = 4096;
-/// Segment digests that fit between the struct and the end of the region: (4096 - 256) / 32.
-pub const MAX_SEGMENTS: usize = 120;
+/// Segment digests that fit between the struct and the seal slot:
+/// (4064 - 256) / 32 = 119 (ADR 0003 section 20; 120 before the seal slot).
+pub const MAX_SEGMENTS: usize = 119;
 /// Region offset of the segment digest table.
 pub const SEGMENT_TABLE_OFFSET: usize = HEADER_LEN;
+/// Region offset of the 32-byte seal slot of a host object (ADR 0003 section
+/// 19): `"AKS"`, sealed format version, 12-byte nonce, 16-byte tag. Zero in
+/// a region `encode_region` returns; `seal::SealKey::seal_file` fills it.
+pub const SEAL_SLOT_OFFSET: usize = HEADER_REGION_LEN - 32;
 pub const FORMAT_VERSION: u16 = 1;
 pub const RECORD_KIND_CHUNK: u16 = 1;
 /// `flags` bit 0: the chunk holds fewer than `chunk_tokens` positions.

@@ -19,9 +19,10 @@
 //!   still running; nothing is freed to meet the deadline (section 7.5).
 
 use crate::identity::{ChunkKey, NamespaceId};
-use crate::pin::{PinnedDest, PinnedSource};
+use crate::pin::{HolderGuard, HolderHandle, PinnedDest, PinnedSource};
 use crate::record::ChunkHeader;
 use aien_platform::PlatformError;
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 /// Never reused within a store lifetime.
@@ -29,9 +30,28 @@ use alloc::vec::Vec;
 pub struct JobId(pub u64);
 
 /// The caller's token, echoed in every completion so stale completions can be
-/// dropped (ADR 5.3).
+/// dropped (ADR 5.3). The full tuple `(seq_id, epoch)`: the scheduler's
+/// sequence id already uses all 64 bits (`slot << 32 | generation`,
+/// aien-scheduler/src/sequence.rs `to_u64`), so the residency epoch cannot be
+/// packed beside it. Two tokens name the same request only if both fields
+/// match; a reused sequence id in a later epoch is a different incarnation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct Incarnation(pub u64);
+pub struct Incarnation {
+    pub seq_id: u64,
+    pub epoch: u32,
+}
+
+impl Incarnation {
+    pub const fn new(seq_id: u64, epoch: u32) -> Self {
+        Self { seq_id, epoch }
+    }
+
+    /// Epoch 0: for callers that have no residency epoch (flush barriers,
+    /// fixtures).
+    pub const fn seq(seq_id: u64) -> Self {
+        Self { seq_id, epoch: 0 }
+    }
+}
 
 /// Returned by `pin`; hand it back to `unpin`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -99,7 +119,41 @@ pub struct Completion {
     pub publish: PublishOutcome,
     pub bytes: u64,
     pub elapsed_us: u64,
+    /// Load terminals from the [`crate::worker::StorageWorker`]: the landing
+    /// holder, handed back so it outlives the terminal the caller sees (Grok
+    /// C5 P1-2). Every waiter of a coalesced load gets a copy; the holder is
+    /// released when the last copy is dropped (after S3 adopted its blocks,
+    /// or on any failure). Raw stores release at the terminal: `None`.
+    pub holder: Option<LandingHolder>,
 }
+
+/// A shared landing holder (see [`Completion::holder`]).
+#[derive(Clone)]
+pub struct LandingHolder(Arc<HolderGuard>);
+
+impl LandingHolder {
+    pub fn new(guard: HolderGuard) -> Self {
+        Self(Arc::new(guard))
+    }
+
+    pub fn handle(&self) -> HolderHandle {
+        self.0.handle()
+    }
+}
+
+impl core::fmt::Debug for LandingHolder {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("LandingHolder")
+    }
+}
+
+impl PartialEq for LandingHolder {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl Eq for LandingHolder {}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Capacity {
@@ -128,7 +182,10 @@ pub struct Capacity {
 /// Where a resumable recovery pass stands (ADR 4.1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct RecoveryProgress {
+    /// The walk finished and admission opened (or the store is `Degraded`).
     pub done: bool,
+    /// The store is `Failed`: recovery stopped and is never `done` (Grok C4 P2-6).
+    pub failed: bool,
     pub indexed: u64,
     pub bytes: u64,
     pub unindexed_objects: u64,
@@ -203,9 +260,13 @@ pub trait KvStore: Send + Sync {
     ) -> Result<JobId, PlatformError>;
     /// Durability barrier for everything `Published` before the call.
     fn submit_flush(&self, inc: Incarnation) -> Result<JobId, PlatformError>;
-    /// Coalescing: register one more waiter on an in-flight load; `QueueFull`
-    /// past `max_waiters_per_job` waiters on the job or the total bound.
-    fn attach_waiter(&self, job: JobId) -> Result<(), PlatformError>;
+    /// Coalescing: register one more waiter, named by its own `inc`, on an
+    /// in-flight load; `QueueFull` past `max_waiters_per_job` waiters on the job
+    /// or the total bound. A raw store (fake, host adapter) runs one job and
+    /// yields one terminal carrying the opener's token; the storage worker
+    /// fans that out to one terminal per waiter, each with its own token
+    /// (ADR 5.3), so no completion ever stands for several incarnations.
+    fn attach_waiter(&self, job: JobId, inc: Incarnation) -> Result<(), PlatformError>;
     /// Non-blocking: drains at most `max` completions, oldest first.
     fn poll(&self, max: usize) -> Vec<Completion>;
     /// Returns immediately. The destination or source of the job is safe to

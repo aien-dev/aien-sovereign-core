@@ -104,8 +104,9 @@ fn malformed_store_id_opens_failed_and_serves_nothing() {
     assert_eq!(s.lookup(&[h.chunk_key]), vec![None]);
     let (job, _) = fx.submit(&s, 1, 8);
     assert_eq!(job.unwrap_err(), PlatformError::DeviceUnavailable);
-    // A caller looping on recovery must terminate.
-    assert!(s.recover_step(1).done);
+    // A caller looping on recovery must stop: Failed is reported, never done.
+    let p = s.recover_step(1);
+    assert!(p.failed && !p.done);
     assert_eq!(s.capacity().state, StoreState::Failed);
 }
 
@@ -623,15 +624,11 @@ fn corrupt_payload_byte_fails_segment_hash_and_deletes() {
     drop(f);
     let (t, mem) = fx.load(&s, a.key, &a.header);
     assert_eq!(*failed(&t.unwrap()), PlatformError::InvalidLayout);
-    let b = mem.bytes();
-    assert_eq!(
-        &b[..BS],
-        &expected_payload(1, 8)[..BS],
-        "segment 0 verified and landed"
-    );
+    // The whole object is authenticated before any segment lands (ADR 0003
+    // section 20), so not even the good first segment reaches the destination.
     assert!(
-        b[BS..].iter().all(|x| *x == 0xEE),
-        "the bad segment never reaches the destination"
+        mem.bytes().iter().all(|x| *x == 0xEE),
+        "nothing reaches the destination from a refused object"
     );
     assert!(!path.exists());
     assert_eq!(s.lookup(&[a.key]), vec![None]);
@@ -717,7 +714,7 @@ fn load_with_wrong_expectation_is_refused_without_io() {
     let mem = Mem::new(1, 0xEE);
     let (dst, _) = mem.dest(1);
     assert_eq!(
-        s.submit_load(a.key, &a.header, dst, Incarnation(1))
+        s.submit_load(a.key, &a.header, dst, Incarnation::seq(1))
             .unwrap_err(),
         PlatformError::InvalidLayout
     );
@@ -782,7 +779,6 @@ fn released_source_fails_the_job_and_writes_nothing() {
 
 #[test]
 fn tail_rows_above_token_count_are_zero_in_object() {
-    use std::os::unix::fs::FileExt;
     for tokens in [6u32, 1, 3, 5, 8, 4] {
         let fx = Fx::new();
         let s = fx.open();
@@ -791,7 +787,7 @@ fn tail_rows_above_token_count_are_zero_in_object() {
         // The pool holds garbage everywhere, including rows another conversation left.
         let mem = Mem::new(blocks, 0xFF);
         let (src, _) = mem.source(blocks, tail_valid(tokens));
-        let job = s.submit_store(header, src, Incarnation(1)).unwrap();
+        let job = s.submit_store(header, src, Incarnation::seq(1)).unwrap();
         s.run_until_idle();
         assert_eq!(
             terminal_of(&drain(&s), job),
@@ -804,9 +800,9 @@ fn tail_rows_above_token_count_are_zero_in_object() {
         );
 
         let path = fx.object_file(&key);
-        let f = std::fs::File::open(&path).unwrap();
-        let mut payload = vec![0u8; blocks * BS];
-        f.read_exact_at(&mut payload, 4096).unwrap();
+        let plain = read_object_plain(&path);
+        let payload = plain[4096..].to_vec();
+        assert_eq!(payload.len(), blocks * BS);
         let mut expect = vec![0xFFu8; blocks * BS];
         let tail = tail_valid(tokens);
         if tail < BLOCK_TOKENS {
@@ -824,8 +820,7 @@ fn tail_rows_above_token_count_are_zero_in_object() {
             assert_eq!(payload[off - 1], 0xFF);
         }
         // The segment digests cover the zeroed bytes.
-        let mut region = vec![0u8; 4096];
-        f.read_exact_at(&mut region, 0).unwrap();
+        let region = &plain[..4096];
         for (i, seg) in payload.chunks(BS).enumerate() {
             assert_eq!(
                 &region[256 + 32 * i..256 + 32 * i + 32],
@@ -979,17 +974,28 @@ fn delete_marks_at_once_and_unlinks_on_the_worker() {
 }
 
 #[test]
-fn unlink_failure_returns_the_victim_to_service_and_fails_the_job() {
+fn unlink_failure_returns_the_victim_to_service_and_the_new_object_stays_published() {
     let fx = Fx::new();
     let s = fx.open_with(|c| c.quota_bytes = OBJ);
     let a = fx.put_full(&s, 1);
     fx.faults.arm(Boundary::Unlink, FaultAction::Fail(EIO));
     let b = fx.put_full(&s, 2);
     let t = terminal_of(&b.completions, b.job.unwrap());
-    assert!(is_hw(failed(&t)), "{t:?}");
-    assert_eq!(s.lookup(&[a.key, b.key]), vec![Some(FULL_PAYLOAD), None]);
+    assert_eq!(
+        t,
+        Terminal::Done(JobStage::Durable),
+        "the write already succeeded"
+    );
+    assert_eq!(
+        s.lookup(&[a.key, b.key]),
+        vec![Some(FULL_PAYLOAD), Some(FULL_PAYLOAD)]
+    );
     assert!(fx.object_file(&a.key).is_file());
-    assert_eq!(s.capacity().used_bytes, OBJ);
+    assert_eq!(
+        s.capacity().used_bytes,
+        2 * OBJ,
+        "over quota until a later purge"
+    );
     assert_eq!(s.capacity().evicting_bytes, 0);
     assert_eq!(s.capacity().reserved_bytes, 0);
     assert!(tmp_files(fx.root()).is_empty());
@@ -1140,7 +1146,7 @@ fn every_job_yields_exactly_one_terminal_completion() {
         jobs.push(fx.submit(&s, n, 8).0.unwrap());
     }
     jobs.push(fx.submit_load(&s, a.key, &a.header).0.unwrap());
-    jobs.push(s.submit_flush(Incarnation(5)).unwrap());
+    jobs.push(s.submit_flush(Incarnation::seq(5)).unwrap());
     let cancelled = fx.submit(&s, 9, 8).0.unwrap();
     s.cancel(cancelled);
     jobs.push(cancelled);
@@ -1194,12 +1200,15 @@ fn attach_waiter_is_bounded_per_job() {
     let a = fx.put_full(&s, 1);
     let (l, _) = fx.submit_load(&s, a.key, &a.header);
     let l = l.unwrap();
-    s.attach_waiter(l).unwrap();
-    s.attach_waiter(l).unwrap(); // requester + 2 attached = 3
-    assert_eq!(s.attach_waiter(l).unwrap_err(), PlatformError::QueueFull);
+    s.attach_waiter(l, Incarnation::seq(77)).unwrap();
+    s.attach_waiter(l, Incarnation::seq(77)).unwrap(); // requester + 2 attached = 3
+    assert_eq!(
+        s.attach_waiter(l, Incarnation::seq(77)).unwrap_err(),
+        PlatformError::QueueFull
+    );
     let st = fx.submit(&s, 2, 8).0.unwrap();
     assert!(matches!(
-        s.attach_waiter(st),
+        s.attach_waiter(st, Incarnation::seq(77)),
         Err(PlatformError::TaskRejected(_))
     ));
     s.run_until_idle();
@@ -1229,7 +1238,7 @@ fn flush_job_syncs_directories_and_reports_durable() {
     let s = fx.open();
     fx.put_full(&s, 1);
     let before = s.stats();
-    let j = s.submit_flush(Incarnation(7)).unwrap();
+    let j = s.submit_flush(Incarnation::seq(7)).unwrap();
     s.run_until_idle();
     let c = completion_of(&drain(&s), j);
     assert_eq!(c.terminal, Some(Terminal::Done(JobStage::Durable)));
@@ -1237,13 +1246,13 @@ fn flush_job_syncs_directories_and_reports_durable() {
     assert!(s.stats().dir_fsyncs > before.dir_fsyncs);
 
     fx.faults.arm(Boundary::FlushSync, FaultAction::Fail(EIO));
-    let j = s.submit_flush(Incarnation(8)).unwrap();
+    let j = s.submit_flush(Incarnation::seq(8)).unwrap();
     s.run_until_idle();
     let t = terminal_of(&drain(&s), j);
     assert!(is_hw(failed(&t)));
     assert_eq!(s.capacity().state, StoreState::Degraded);
     // A degraded store may still run a flush.
-    s.submit_flush(Incarnation(9)).unwrap();
+    s.submit_flush(Incarnation::seq(9)).unwrap();
     s.run_until_idle();
 }
 
@@ -1367,7 +1376,7 @@ fn apply_env_parses_quota_max_objects_and_slice_and_rejects_garbage() {
     assert_eq!(fresh.quota_bytes, 8 << 30);
     assert_eq!(fresh.max_objects, 65536);
     assert_eq!(fresh.recovery_slice_ms, 50);
-    assert_eq!((fresh.max_restore_ops, fresh.max_park_ops), (48, 16));
+    assert_eq!((fresh.max_restore_ops, fresh.max_park_ops), (48, 64));
     assert_eq!(fresh.max_inflight_bytes, 256 << 20);
     // Garbage and zero are refused, and leave the config unchanged.
     for bad in ["abc", "", "-5", "0", "1.5"] {
@@ -1403,9 +1412,9 @@ fn entry(k: u8, phys: u64, mtime: u64, flags: u32) -> IndexEntry {
 }
 
 #[test]
-fn index_entry_is_56_bytes_and_the_cap_is_3670016() {
+fn index_entry_is_64_bytes_and_the_cap_is_4_mib() {
     assert_eq!(std::mem::size_of::<IndexEntry>(), INDEX_ENTRY_BYTES);
-    assert_eq!(INDEX_ENTRY_BYTES * 65536, 3_670_016);
+    assert_eq!(INDEX_ENTRY_BYTES * 65536, 4_194_304);
 }
 
 #[test]
@@ -1464,4 +1473,66 @@ fn index_victim_prefers_foreign_then_oldest_and_never_busy_or_marked() {
     assert!(i.busy_inc(&[1; 32]));
     assert!(i.busy_inc(&[2; 32]));
     assert_eq!(i.pick_victim(), None);
+}
+
+// ---- victims are removed only after the new object is durable (C4 open item) -----
+
+#[test]
+fn failed_write_keeps_the_victim_it_would_have_evicted() {
+    for boundary in [Boundary::P1Write, Boundary::P2FsyncFile] {
+        let fx = Fx::new();
+        let s = fx.open_with(|c| c.quota_bytes = OBJ);
+        let a = fx.put_full(&s, 1);
+        fx.faults.arm(boundary, FaultAction::Fail(EIO));
+        let b = fx.put_full(&s, 2);
+        let t = terminal_of(&b.completions, b.job.unwrap());
+        assert!(matches!(t, Terminal::Failed(_)), "{boundary:?}: {t:?}");
+        assert_eq!(
+            s.lookup(&[a.key, b.key]),
+            vec![Some(FULL_PAYLOAD), None],
+            "{boundary:?}: the old object is still served"
+        );
+        assert!(fx.object_file(&a.key).is_file(), "{boundary:?}");
+        let cap = s.capacity();
+        assert_eq!(cap.used_bytes, OBJ, "{boundary:?}");
+        assert_eq!(cap.evicting_bytes, 0, "{boundary:?}");
+        assert_eq!(cap.reserved_bytes, 0, "{boundary:?}");
+        assert_loads(&fx, &s, a.key, 1, 8);
+        s.audit().unwrap();
+    }
+}
+
+#[test]
+fn indeterminate_publish_keeps_the_victim_until_the_new_object_is_known_durable() {
+    let fx = Fx::new();
+    let s = fx.open_with(|c| c.quota_bytes = OBJ);
+    let a = fx.put_full(&s, 1);
+    fx.faults.arm(Boundary::P4FsyncDir, FaultAction::Fail(EIO));
+    let b = fx.put_full(&s, 2);
+    let c = completion_of(&b.completions, b.job.unwrap());
+    assert_eq!(c.publish, PublishOutcome::Indeterminate);
+    assert_eq!(
+        s.lookup(&[a.key, b.key]),
+        vec![Some(FULL_PAYLOAD), Some(FULL_PAYLOAD)],
+        "both survive: the new one may not outlive a power cut"
+    );
+    assert!(fx.object_file(&a.key).is_file());
+    assert_eq!(s.capacity().evicting_bytes, 0);
+    s.audit().unwrap();
+}
+
+#[test]
+fn cancel_before_the_write_ends_leaves_every_victim_in_service() {
+    let fx = Fx::new();
+    let s = fx.open_with(|c| c.quota_bytes = OBJ);
+    let a = fx.put_full(&s, 1);
+    let (job, _) = fx.submit(&s, 2, 8);
+    let job = job.unwrap();
+    assert_eq!(s.cancel(job), CancelOutcome::Cancelled);
+    s.run_until_idle();
+    assert_eq!(terminal_of(&drain(&s), job), Terminal::Cancelled);
+    assert_eq!(s.lookup(&[a.key]), vec![Some(FULL_PAYLOAD)]);
+    assert!(fx.object_file(&a.key).is_file());
+    assert_eq!(s.capacity().evicting_bytes, 0);
+    s.audit().unwrap();
 }

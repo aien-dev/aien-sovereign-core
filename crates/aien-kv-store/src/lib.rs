@@ -9,22 +9,28 @@
 
 extern crate alloc;
 
+pub mod coalesce;
 pub mod error;
 #[cfg(feature = "std")]
 pub mod fake;
+pub mod holder;
 #[cfg(all(feature = "std", unix))]
 pub mod host_fs;
 pub mod identity;
 pub mod index;
 pub mod pin;
 pub mod record;
+#[cfg(feature = "std")]
+pub mod seal;
 pub mod store;
 pub mod validate;
+#[cfg(feature = "std")]
+pub mod worker;
 
 pub use error::KvError;
 pub use identity::{
-    chunk_chain, chunk_key, BackendFormat, ChunkKey, ComputeConfig, HiddenAct, KvDtype,
-    LayoutStrides, NamespaceFields, NamespaceId, RopeScaling,
+    chunk_chain, chunk_key, BackendFormat, ChunkKey, ComputeConfig, EngineConfig, EngineIdentity,
+    HiddenAct, KvDtype, LayoutStrides, NamespaceFields, NamespaceId, RopeScaling, WeightFormat,
 };
 pub use pin::{HolderGuard, HolderHandle, PinnedDest, PinnedSource};
 pub use record::{
@@ -33,6 +39,6 @@ pub use record::{
 };
 pub use store::{
     CancelOutcome, Capacity, Completion, DrainReport, Incarnation, JobId, JobStage, KvStore,
-    PinToken, PublishOutcome, RecoveryProgress, StoreState, Terminal, UnfinishedJob,
+    LandingHolder, PinToken, PublishOutcome, RecoveryProgress, StoreState, Terminal, UnfinishedJob,
 };
 pub use validate::validate_record;

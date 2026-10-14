@@ -25,6 +25,7 @@ use crate::index::{Index, IndexEntry, FLAG_FOREIGN, FLAG_INDETERMINATE};
 use crate::pin::{HolderGuard, PinnedDest, PinnedSource};
 use crate::record::{
     payload_root, ChunkHeader, RecordHeader, FLAG_PARTIAL_TAIL, HEADER_REGION_LEN, MAX_SEGMENTS,
+    PAYLOAD_DOMAIN, SEGMENT_TABLE_OFFSET,
 };
 use crate::store::{
     CancelOutcome, Capacity, Completion, DrainReport, Incarnation, JobId, JobStage, KvStore,
@@ -51,7 +52,7 @@ pub const EIO: i32 = 5;
 const DEFAULT_QUOTA_BYTES: u64 = 8 << 30;
 const DEFAULT_MAX_OBJECTS: u64 = 65_536;
 const DEFAULT_MAX_RESTORE_OPS: u32 = 48;
-const DEFAULT_MAX_PARK_OPS: u32 = 16;
+const DEFAULT_MAX_PARK_OPS: u32 = 64;
 const DEFAULT_MAX_INFLIGHT_BYTES: u64 = 256 << 20;
 const DEFAULT_MAX_WAITERS_PER_JOB: u32 = 16;
 const DEFAULT_MAX_WAITERS_TOTAL: u32 = 1024;
@@ -75,6 +76,9 @@ pub enum Boundary {
     Unlink,
     LoadRead,
     FlushSync,
+    /// Once per directory entry of the recovery walk, before its stat, with
+    /// the index lock NOT held. `Fail(errno)` stands for a stat I/O error.
+    RecoverEntry,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -179,6 +183,9 @@ pub struct HostFsConfig {
     pub purge_after_recovery: bool,
     pub worker: WorkerMode,
     pub faults: Option<Arc<dyn FaultHook>>,
+    /// The key every object is sealed with (ADR 0003 section 20). `None`:
+    /// `open` refuses (fail closed); there is no plaintext mode.
+    pub seal_key: Option<Arc<crate::seal::SealKey>>,
 }
 
 impl std::fmt::Debug for HostFsConfig {
@@ -222,6 +229,7 @@ impl HostFsConfig {
             purge_after_recovery: true,
             worker: WorkerMode::Thread,
             faults: None,
+            seal_key: None,
         };
         validate_config(&cfg)?;
         Ok(cfg)
@@ -352,6 +360,14 @@ pub struct HostFsStats {
     pub over_cap: bool,
     pub shutdown_unfinished_jobs: u64,
     pub shutdown_unfinished_bytes: u64,
+    /// Most directory entries the recovery or purge walk held in memory at
+    /// once. The walk streams one entry at a time (ADR 4.1), so this is 0 or 1.
+    pub walk_peak_buffered: u64,
+    /// Recovery unlinks (temp or corrupt files) that failed; the file's bytes
+    /// stay counted and recovery ends `Degraded`.
+    pub recovery_unlink_failures: u64,
+    /// Purge unlinks that failed; the purge stopped with its accounting intact.
+    pub purge_unlink_failures: u64,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -365,7 +381,6 @@ enum Kind {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Phase {
     Queued,
-    Reclaiming,
     Writing,
     Syncing,
     Publishing,
@@ -393,31 +408,79 @@ struct Job {
     dst: Option<PinnedDest>,
     attached: u32,
     busy_held: bool,
+    /// Objects this store marked evicting to make room. They stay on disk and
+    /// in the index until the new object is durable (P5); then their unlinks
+    /// are queued. Any other ending clears the marks (Grok C4 P1-1).
+    victims: Vec<[u8; 32]>,
 }
 
 #[derive(Clone)]
 struct Unlink {
     key: [u8; 32],
-    job: Option<u64>,
     evict: bool,
 }
 
-struct RecoveryCursor {
-    tmp_entries: Option<Vec<PathBuf>>,
-    tmp_idx: usize,
-    shard: u16,
-    shard_entries: Option<Vec<PathBuf>>,
-    shard_idx: usize,
+/// Which directory a walk is listing.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum WalkStage {
+    Tmp,
+    Shard(u16),
+    Done,
 }
 
-impl RecoveryCursor {
-    fn new() -> Self {
-        Self {
-            tmp_entries: None,
-            tmp_idx: 0,
-            shard: 0,
-            shard_entries: None,
-            shard_idx: 0,
+/// A streaming directory walk: one open `ReadDir` and the stage it lists.
+/// Holds no listing, so memory is constant however many files exist (ADR
+/// 4.1, Grok C4 P1-2). Lives behind its own mutex, never the index lock.
+struct Walk {
+    stage: WalkStage,
+    dir: Option<std::fs::ReadDir>,
+}
+
+impl Walk {
+    fn new(stage: WalkStage) -> Self {
+        Self { stage, dir: None }
+    }
+
+    fn advance(&mut self) {
+        self.dir = None;
+        self.stage = match self.stage {
+            WalkStage::Tmp => WalkStage::Shard(0),
+            WalkStage::Shard(s) if s < 255 => WalkStage::Shard(s + 1),
+            _ => WalkStage::Done,
+        };
+    }
+
+    fn dir_path(&self, root: &Path) -> Option<PathBuf> {
+        match self.stage {
+            WalkStage::Tmp => Some(root.join("tmp")),
+            WalkStage::Shard(s) => Some(root.join("objects").join(format!("{s:02x}"))),
+            WalkStage::Done => None,
+        }
+    }
+
+    /// The next entry, or `None` when every directory has been listed. A
+    /// directory that does not exist is empty; any other listing error is
+    /// returned (never read as an empty directory, Grok C4 P1-3).
+    fn next(&mut self, root: &Path) -> std::io::Result<Option<(WalkStage, PathBuf)>> {
+        loop {
+            let Some(path) = self.dir_path(root) else {
+                return Ok(None);
+            };
+            if self.dir.is_none() {
+                match std::fs::read_dir(&path) {
+                    Ok(rd) => self.dir = Some(rd),
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                        self.advance();
+                        continue;
+                    }
+                    Err(e) => return Err(e),
+                }
+            }
+            match self.dir.as_mut().and_then(Iterator::next) {
+                None => self.advance(),
+                Some(Err(e)) => return Err(e),
+                Some(Ok(entry)) => return Ok(Some((self.stage, entry.path()))),
+            }
         }
     }
 }
@@ -434,7 +497,16 @@ struct Inner {
     index: Index,
     unindexed_bytes: u64,
     unindexed_objects: u64,
-    unindexed_paths: VecDeque<(PathBuf, u64)>,
+    /// Bytes of temp files recovery could not unlink: still on disk, so
+    /// counted in `used_bytes` until a restart removes them.
+    stuck_bytes: u64,
+    /// A recovery unlink failed: recovery ends `Degraded`, not `Open`.
+    recovery_stuck: bool,
+    /// The purge is walking the shards for unindexed files.
+    purge_walking: bool,
+    /// The one key the purge is unlinking right now: stores of it are refused
+    /// until the unlink returns, so the purge never deletes a fresh object.
+    purging: Option<[u8; 32]>,
     reserved: u64,
     jobs: BTreeMap<u64, Job>,
     inflight_store: BTreeMap<[u8; 32], u64>,
@@ -449,9 +521,13 @@ struct Inner {
     queue: VecDeque<Completion>,
     stats: HostFsStats,
     recovery: RecoveryProgress,
-    cursor: RecoveryCursor,
     purge_pending: bool,
     purge_evict_quota: bool,
+    /// Reservations are rounded up to this many bytes (the objects
+    /// directory's `st_blksize`, at least 512), so a reservation is not
+    /// smaller than what publication later charges from `st_blocks`
+    /// (Codex re-review 2, partial 8).
+    alloc_unit: u64,
     graveyard: Vec<HolderGuard>,
 }
 
@@ -460,6 +536,12 @@ struct Shared {
     inner: Mutex<Inner>,
     cv: Condvar,
     tail_scratch: Mutex<Vec<u8>>,
+    /// The recovery walk. Taken before (never while holding) `inner`.
+    walk: Mutex<Walk>,
+    /// The purge walk over the shards. Taken before (never while holding) `inner`.
+    purge_walk: Mutex<Walk>,
+    /// SEAL SEAM (#506): the key every object is sealed and opened with.
+    seal_key: Arc<crate::seal::SealKey>,
 }
 
 /// Host filesystem `KvStore` implementation.
@@ -495,8 +577,173 @@ fn generate_store_id() -> [u8; 16] {
 }
 
 fn fsync_dir(path: &Path) -> std::io::Result<()> {
-    let f = File::open(path)?;
+    use std::os::unix::fs::OpenOptionsExt;
+    let f = OpenOptions::new()
+        .read(true)
+        .custom_flags(OPEN_FLAGS | libc::O_DIRECTORY)
+        .open(path)?;
     f.sync_all()
+}
+
+// ---- at-rest privacy (ADR 0003 section 19) -------------------------------
+//
+// The objects hold K/V derived from user prompts. Every directory of the store
+// is 0700 and every file 0600, owned by the effective uid; existing
+// directories are checked (never silently chmodded) and refused with
+// `AccessDenied` when others could reach them. Once the root is a verified
+// private directory under a trusted parent, only our own uid (or root) can
+// change anything inside it, so per-operation dirfd/openat is not needed
+// (same-uid attackers are out of scope, section 19.1).
+
+const PRIVATE_DIR_MODE: u32 = 0o700;
+const PRIVATE_FILE_MODE: u32 = 0o600;
+/// Every open of a store file: never follow a symlink in the last component,
+/// never leak the descriptor into a child process.
+const OPEN_FLAGS: i32 = libc::O_NOFOLLOW | libc::O_CLOEXEC;
+
+fn euid() -> u32 {
+    // SAFETY: geteuid has no preconditions and cannot fail.
+    unsafe { libc::geteuid() }
+}
+
+/// `Ok(true)`: a private directory of ours. `Ok(false)`: nothing there.
+/// `AccessDenied`: a symlink, not a directory, another owner, or any group or
+/// other permission bit.
+fn check_private_dir(path: &Path) -> Result<bool, PlatformError> {
+    let meta = match std::fs::symlink_metadata(path) {
+        Ok(m) => m,
+        Err(e) if is_not_found(&e) => return Ok(false),
+        Err(e) => return Err(io_to_error(&e, "stat store directory")),
+    };
+    if !meta.file_type().is_dir() || meta.uid() != euid() || meta.mode() & 0o077 != 0 {
+        return Err(PlatformError::AccessDenied);
+    }
+    Ok(true)
+}
+
+/// The directory that will hold the root (the root's parent, or the nearest
+/// existing ancestor when the root is still to be created) must be owned by
+/// us or by root and, if group or others can write it, carry the sticky bit
+/// (like /tmp): otherwise another user could rename the root away and put
+/// their own directory in its place.
+fn check_trusted_parent(root: &Path) -> Result<(), PlatformError> {
+    let mut cur = root.parent();
+    while let Some(dir) = cur {
+        let dir = if dir.as_os_str().is_empty() {
+            Path::new(".")
+        } else {
+            dir
+        };
+        match std::fs::metadata(dir) {
+            Ok(m) => {
+                let shared_write = m.mode() & 0o022 != 0;
+                let sticky = m.mode() & 0o1000 != 0;
+                let owner_ok = m.uid() == euid() || m.uid() == 0;
+                if !m.is_dir() || !owner_ok || (shared_write && !sticky) {
+                    return Err(PlatformError::AccessDenied);
+                }
+                return Ok(());
+            }
+            Err(e) if is_not_found(&e) => cur = dir.parent(),
+            Err(e) => return Err(io_to_error(&e, "stat store parent")),
+        }
+    }
+    Ok(())
+}
+
+/// Create one store directory 0700 (the explicit chmod undoes a umask that
+/// narrowed it), or verify an existing one. Returns true when it was created.
+fn make_private_dir(path: &Path, recursive: bool) -> Result<bool, PlatformError> {
+    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+    // An existing directory is verified, never chmodded (a recursive
+    // DirBuilder would report success for it).
+    if check_private_dir(path)? {
+        return Ok(false);
+    }
+    match std::fs::DirBuilder::new()
+        .recursive(recursive)
+        .mode(PRIVATE_DIR_MODE)
+        .create(path)
+    {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            check_private_dir(path)?;
+            return Ok(false);
+        }
+        Err(e) => return Err(io_to_error(&e, "create store directory")),
+    }
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(PRIVATE_DIR_MODE))
+        .map_err(|e| io_to_error(&e, "chmod store directory"))?;
+    check_private_dir(path)?;
+    Ok(true)
+}
+
+/// The one way the adapter creates a file: 0600, no symlink followed, no
+/// descriptor leaked. Truncates a leftover of ours (a crash temp in the
+/// verified tmp/ directory) instead of failing on it, so a crash never blocks
+/// the next attempt; the mode is forced to 0600 through the descriptor so a
+/// leftover with an old mode, or a narrowing umask, cannot survive.
+fn create_private_file(path: &Path) -> std::io::Result<File> {
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    let f = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(PRIVATE_FILE_MODE)
+        .custom_flags(OPEN_FLAGS)
+        .open(path)?;
+    let meta = f.metadata()?;
+    if !meta.is_file() || meta.uid() != euid() {
+        return Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied));
+    }
+    if meta.mode() & 0o777 != PRIVATE_FILE_MODE {
+        f.set_permissions(std::fs::Permissions::from_mode(PRIVATE_FILE_MODE))?;
+    }
+    Ok(f)
+}
+
+/// `create_private_file` plus the bytes (fault injection, temps).
+fn write_private_file(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    create_private_file(path)?.write_all(bytes)
+}
+
+/// What a no-follow open of a store file found.
+enum PrivateOpen {
+    /// A regular file of ours, with its descriptor's metadata.
+    Ours(File, std::fs::Metadata),
+    /// A symlink, a non-regular file, or another owner's file: not ours,
+    /// never read or served, left alone (ADR 0003 section 4.1 `foreign_file`).
+    NotOurs(u64),
+}
+
+/// Open a store file for reading without following a symlink and check it
+/// through the descriptor (no window between check and use). A file of ours
+/// that group or others can read (written before section 19) is tightened to
+/// 0600 with fchmod.
+fn open_private_read(path: &Path) -> std::io::Result<PrivateOpen> {
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    let f = match OpenOptions::new()
+        .read(true)
+        // O_NONBLOCK: a planted FIFO must not hang the worker; no effect on
+        // regular files.
+        .custom_flags(OPEN_FLAGS | libc::O_NONBLOCK)
+        .open(path)
+    {
+        Ok(f) => f,
+        Err(e) if e.raw_os_error() == Some(libc::ELOOP) => {
+            let len = std::fs::symlink_metadata(path).map_or(0, |m| m.len());
+            return Ok(PrivateOpen::NotOurs(len));
+        }
+        Err(e) => return Err(e),
+    };
+    let meta = f.metadata()?;
+    if !meta.is_file() || meta.uid() != euid() {
+        return Ok(PrivateOpen::NotOurs(meta.len()));
+    }
+    if meta.mode() & 0o077 != 0 {
+        f.set_permissions(std::fs::Permissions::from_mode(PRIVATE_FILE_MODE))?;
+    }
+    Ok(PrivateOpen::Ours(f, meta))
 }
 
 fn phys_bytes_of(meta: &std::fs::Metadata) -> u64 {
@@ -532,9 +779,10 @@ fn object_path_for(root: &Path, key: &[u8; 32]) -> PathBuf {
         .join(format!("{hex}.kvc"))
 }
 
-fn tmp_path_for(root: &Path, key: &[u8; 32], job_id: u64, inc: u64) -> PathBuf {
+fn tmp_path_for(root: &Path, key: &[u8; 32], job_id: u64, inc: Incarnation) -> PathBuf {
     let hex = hex_encode(key);
-    root.join("tmp").join(format!("{hex}.{job_id}.{inc}.part"))
+    root.join("tmp")
+        .join(format!("{hex}.{job_id}.{}.{}.part", inc.seq_id, inc.epoch))
 }
 
 fn parse_kvc_filename(name: &str, expected_shard: u8) -> Option<[u8; 32]> {
@@ -611,8 +859,8 @@ fn zero_tail_block(
 }
 
 enum RecoveredHeader {
-    Ours { payload_len: u32 },
-    Foreign { payload_len: u32 },
+    Ours { payload_len: u64 },
+    Foreign { payload_len: u64 },
     Corrupt,
 }
 
@@ -622,6 +870,11 @@ fn classify_recovered_header(
     file_key: &[u8; 32],
     cfg: &HostFsConfig,
 ) -> RecoveredHeader {
+    // SEAL SEAM (#506): an object without the sealed-format marker (an old
+    // plaintext file) is discarded, never read.
+    if !crate::seal::is_sealed_region(buf) {
+        return RecoveredHeader::Corrupt;
+    }
     let Ok(rec) = RecordHeader::decode(buf) else {
         return RecoveredHeader::Corrupt;
     };
@@ -659,24 +912,51 @@ fn classify_recovered_header(
         if validate_record(buf, file_size, h, cfg.layout.block_stride).is_err() {
             return RecoveredHeader::Corrupt;
         }
-        let Ok(payload_len) = u32::try_from(h.payload_len) else {
-            return RecoveredHeader::Corrupt;
-        };
-        RecoveredHeader::Ours { payload_len }
+        RecoveredHeader::Ours {
+            payload_len: h.payload_len,
+        }
     } else {
         if h.payload_len == 0
             || (HEADER_REGION_LEN as u64).checked_add(h.payload_len) != Some(file_size)
+            || !foreign_region_is_clean(buf, &rec)
         {
             return RecoveredHeader::Corrupt;
         }
-        let payload_len = h.payload_len.min(u32::MAX as u64) as u32;
-        RecoveredHeader::Foreign { payload_len }
+        RecoveredHeader::Foreign {
+            payload_len: h.payload_len,
+        }
     }
+}
+
+/// Padding and segment-root check for an object of another namespace (Grok
+/// C4 P2-4). Its segment size is not ours to know (the file does not store
+/// it, ADR 2.1 item 3), but the region does: the digest table ends at the
+/// last nonzero byte after the 256-byte header, everything after it must be
+/// zero, and the root over exactly that table must match. A table whose last
+/// digest is 32 zero bytes is the only false negative (probability 2^-256).
+fn foreign_region_is_clean(buf: &[u8], rec: &RecordHeader) -> bool {
+    let region = &buf[..HEADER_REGION_LEN];
+    // SEAL SEAM (#506): the table and padding end where the seal slot starts.
+    let Some(last) = region[SEGMENT_TABLE_OFFSET..crate::record::SEAL_SLOT_OFFSET]
+        .iter()
+        .rposition(|b| *b != 0)
+    else {
+        return false;
+    };
+    let n_seg = (last + 1).div_ceil(32);
+    if n_seg == 0 || n_seg > MAX_SEGMENTS || n_seg as u64 > rec.chunk.payload_len {
+        return false;
+    }
+    let table_end = SEGMENT_TABLE_OFFSET + 32 * n_seg;
+    let mut root = Sha256::new();
+    root.update(PAYLOAD_DOMAIN);
+    root.update(&region[SEGMENT_TABLE_OFFSET..table_end]);
+    root.finalize().as_slice() == rec.payload_sha256
 }
 
 impl Inner {
     fn used_bytes(&self) -> u64 {
-        self.index.total_bytes() + self.unindexed_bytes
+        self.index.total_bytes() + self.unindexed_bytes + self.stuck_bytes
     }
 
     fn evicting_bytes(&self) -> u64 {
@@ -699,7 +979,7 @@ impl Inner {
     fn count_after(&self) -> u64 {
         let (_, evicting_count) = self.index.evicting();
         let live = (self.index.len() as u64).saturating_sub(evicting_count);
-        live + self.unindexed_objects + self.store_reservations()
+        live + self.store_reservations()
     }
 
     fn completion_capacity(&self) -> usize {
@@ -802,16 +1082,21 @@ impl Inner {
             .max(self.queue.len() as u64);
     }
 
-    fn abort_evictions(&mut self, job_id: u64) {
-        let mut kept = VecDeque::with_capacity(self.unlinks.len());
-        while let Some(u) = self.unlinks.pop_front() {
-            if u.job == Some(job_id) && u.evict {
-                self.index.clear_evicting(&u.key);
+    /// Settle a store's victims: queue their unlinks only when the new object
+    /// is durable; otherwise (failure, cancel, crash, indeterminate publish)
+    /// return them to service. The store therefore never loses an old object
+    /// unless the new one is known to survive (ADR 3.4, Grok C4 P1-1).
+    fn settle_victims(&mut self, job: &mut Job, durable: bool) {
+        for v in std::mem::take(&mut job.victims) {
+            if durable {
+                self.unlinks.push_back(Unlink {
+                    key: v,
+                    evict: true,
+                });
             } else {
-                kept.push_back(u);
+                self.index.clear_evicting(&v);
             }
         }
-        self.unlinks = kept;
     }
 
     fn finish(
@@ -831,7 +1116,9 @@ impl Inner {
         self.reserved = self.reserved.saturating_sub(job.reserved);
         job.reserved = 0;
         if job.kind == Kind::Store {
-            self.abort_evictions(job.id);
+            let durable =
+                publish == PublishOutcome::Durable && matches!(terminal, Terminal::Done(_));
+            self.settle_victims(&mut job, durable);
             if self.inflight_store.get(&job.key.0 .0) == Some(&job.id) {
                 self.inflight_store.remove(&job.key.0 .0);
             }
@@ -858,6 +1145,7 @@ impl Inner {
             publish,
             bytes: job.payload_len,
             elapsed_us: job.submitted_at.elapsed().as_micros() as u64,
+            holder: None,
         };
         self.push_completion(c);
         if let Some(s) = job.src.take() {
@@ -889,7 +1177,7 @@ impl Inner {
         self.reserved = self.reserved.saturating_sub(job.reserved);
         job.reserved = 0;
         if job.kind == Kind::Store {
-            self.abort_evictions(job.id);
+            self.settle_victims(&mut job, false);
             if self.inflight_store.get(&job.key.0 .0) == Some(&job.id) {
                 self.inflight_store.remove(&job.key.0 .0);
             }
@@ -979,6 +1267,12 @@ impl Inner {
             self.stats.dedup_total += 1;
             return Ok(JobId(jid));
         }
+        // A key whose file is being unlinked (a victim, a delete, a purge) is
+        // refused until the unlink returns: publishing it now would let that
+        // unlink delete the new object.
+        if self.purging == Some(k) || self.index.get(&k).is_some_and(|e| e.is_evicting()) {
+            return Err(self.queue_full());
+        }
         if let Some(e) = self
             .index
             .get(&k)
@@ -1009,17 +1303,25 @@ impl Inner {
                 dst: None,
                 attached: 0,
                 busy_held: false,
+                victims: Vec::new(),
             };
             self.stats.dedup_total += 1;
             self.jobs.insert(id, job);
             return Ok(JobId(id));
         }
 
-        let bytes = header.payload_len + HEADER_REGION_LEN as u64;
+        let bytes =
+            (header.payload_len + HEADER_REGION_LEN as u64).next_multiple_of(self.alloc_unit);
         self.credit_check(true, bytes)?;
-        let (eb, en) = self.index.evictable();
-        if self.unindexed_objects > 0
-            || self.bytes_after() + bytes > self.cfg.quota_bytes + eb
+        // While a purge is pending only free headroom admits a store: evicting
+        // a good object for bytes the purge is about to free would lose data
+        // for nothing (ADR 4.1, Grok C4 P2-5).
+        let (eb, en) = if self.purge_pending {
+            (0, 0)
+        } else {
+            self.index.evictable()
+        };
+        if self.bytes_after() + bytes > self.cfg.quota_bytes + eb
             || self.count_after() + 1 > self.cfg.max_objects + en
         {
             self.stats.disk_full_total += 1;
@@ -1051,6 +1353,7 @@ impl Inner {
             dst: None,
             attached: 0,
             busy_held: false,
+            victims: Vec::new(),
         };
         self.inflight_store.insert(k, id);
         self.jobs.insert(id, job);
@@ -1076,7 +1379,7 @@ impl Inner {
             return Err(PlatformError::InvalidLayout);
         }
         self.validate_chunk_header_against_config(expect)?;
-        if entry.payload_len as u64 != expect.payload_len
+        if entry.payload_len != expect.payload_len
             || dst.total_bytes() != Some(expect.payload_len)
             || dst.block_bytes() as u64 != self.cfg.layout.block_stride
         {
@@ -1111,6 +1414,7 @@ impl Inner {
             dst: slot.take(),
             attached: 0,
             busy_held: true,
+            victims: Vec::new(),
         };
         self.jobs.insert(id, job);
         Ok(JobId(id))
@@ -1142,6 +1446,7 @@ impl Inner {
             dst: None,
             attached: 0,
             busy_held: false,
+            victims: Vec::new(),
         };
         self.jobs.insert(id, job);
         Ok(JobId(id))
@@ -1177,202 +1482,281 @@ fn check_fault(
     hook.as_ref().and_then(|h| h.at(boundary, key))
 }
 
-fn recover_step_on(shared: &Shared, slice_ms: u64) -> RecoveryProgress {
-    let start = Instant::now();
-    let budget = Duration::from_millis(slice_ms);
-    let mut processed = 0usize;
+/// What one recovery entry came to, applied under a short index lock.
+enum EntryOutcome {
+    Skip,
+    TmpDeleted(u64),
+    TmpStuck(u64),
+    Foreign(u64),
+    Unindexed(u64),
+    CorruptDeleted(u64),
+    CorruptStuck(u64),
+    Unreadable(u64),
+    Index(IndexEntry, bool),
+}
 
-    loop {
-        let mut g = shared.inner.lock().unwrap_or_else(|e| e.into_inner());
-        if g.state == StoreState::Failed || g.recovery.done {
-            return g.recovery;
+fn is_not_found(e: &std::io::Error) -> bool {
+    e.kind() == std::io::ErrorKind::NotFound
+}
+
+/// Unlink with the outcome recovery and purge need: `Ok(true)` removed,
+/// `Ok(false)` already gone, `Err` still there.
+fn unlink_counted(path: &Path) -> std::io::Result<bool> {
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(true),
+        Err(e) if is_not_found(&e) => Ok(false),
+        Err(e) => Err(e),
+    }
+}
+
+/// Examine one directory entry of the recovery walk. Runs with the index lock
+/// NOT held (stat, header read, unlink); only the cap check takes it briefly.
+fn recover_entry(
+    shared: &Shared,
+    cfg: &HostFsConfig,
+    stage: WalkStage,
+    path: &Path,
+) -> std::io::Result<EntryOutcome> {
+    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+    let parsed = match stage {
+        WalkStage::Shard(s) => parse_kvc_filename(name, s as u8),
+        _ => None,
+    };
+    let hook_key = ChunkKey(ObjectId(parsed.unwrap_or([0; 32])));
+    match check_fault(&cfg.faults, Boundary::RecoverEntry, &hook_key) {
+        Some(FaultAction::Stall(d)) => std::thread::sleep(d),
+        Some(FaultAction::Fail(errno)) => return Err(std::io::Error::from_raw_os_error(errno)),
+        _ => {}
+    }
+    let meta = match std::fs::symlink_metadata(path) {
+        Ok(m) => m,
+        Err(e) if is_not_found(&e) => return Ok(EntryOutcome::Skip),
+        Err(e) => return Err(e),
+    };
+    let phys = phys_bytes_of(&meta);
+    if stage == WalkStage::Tmp {
+        if !(meta.is_file() && name.ends_with(".part")) {
+            return Ok(EntryOutcome::Foreign(meta.len()));
         }
-        let root = g.cfg.root.clone();
-
-        if g.cursor.tmp_entries.is_none() {
-            let tmp_dir = root.join("tmp");
-            let mut entries: Vec<PathBuf> = std::fs::read_dir(&tmp_dir)
-                .ok()
-                .into_iter()
-                .flatten()
-                .filter_map(|e| e.ok().map(|x| x.path()))
-                .collect();
-            entries.sort();
-            g.stats.dir_entries += entries.len() as u64;
-            g.cursor.tmp_entries = Some(entries);
-            g.cursor.tmp_idx = 0;
+        return Ok(match unlink_counted(path) {
+            Ok(_) => EntryOutcome::TmpDeleted(meta.len()),
+            Err(_) => EntryOutcome::TmpStuck(phys),
+        });
+    }
+    // A symlink, a non-regular file or another owner's file is not ours:
+    // `foreign_file`, left alone, never read (ADR 0003 sections 4.1 and 19).
+    let Some(file_key) = parsed.filter(|_| meta.is_file() && meta.uid() == euid()) else {
+        return Ok(EntryOutcome::Foreign(meta.len()));
+    };
+    let full = {
+        let g = shared.inner.lock().unwrap_or_else(|e| e.into_inner());
+        (g.index.len() as u64) >= g.cfg.max_objects
+    };
+    if full {
+        return Ok(EntryOutcome::Unindexed(phys));
+    }
+    // Re-check through the descriptor: what is read is what was checked.
+    let (file, meta) = match open_private_read(path) {
+        Ok(PrivateOpen::Ours(f, m)) => (f, m),
+        Ok(PrivateOpen::NotOurs(len)) => return Ok(EntryOutcome::Foreign(len)),
+        Err(e) if is_not_found(&e) => return Ok(EntryOutcome::Skip),
+        // Cannot open or tighten it: do not delete what might be good data;
+        // count it.
+        Err(_) => return Ok(EntryOutcome::Unreadable(phys)),
+    };
+    let phys = phys_bytes_of(&meta);
+    let file_size = meta.len();
+    let kind = if file_size < HEADER_REGION_LEN as u64 {
+        RecoveredHeader::Corrupt
+    } else {
+        let mut buf = [0u8; HEADER_REGION_LEN];
+        match file.read_exact_at(&mut buf, 0) {
+            Ok(()) => classify_recovered_header(&buf, file_size, &file_key, cfg),
+            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => RecoveredHeader::Corrupt,
+            // Cannot read it: do not delete what might be good data; count it.
+            Err(_) => return Ok(EntryOutcome::Unreadable(phys)),
         }
+    };
+    drop(file);
+    let mtime_ns = meta_mtime_ns(&meta);
+    Ok(match kind {
+        RecoveredHeader::Ours { payload_len } => EntryOutcome::Index(
+            IndexEntry {
+                key: file_key,
+                phys_bytes: phys,
+                mtime_ns,
+                payload_len,
+                flags: 0,
+            },
+            false,
+        ),
+        RecoveredHeader::Foreign { payload_len } => EntryOutcome::Index(
+            IndexEntry {
+                key: file_key,
+                phys_bytes: phys,
+                mtime_ns,
+                payload_len,
+                flags: FLAG_FOREIGN,
+            },
+            true,
+        ),
+        RecoveredHeader::Corrupt => match unlink_counted(path) {
+            Ok(_) => EntryOutcome::CorruptDeleted(phys),
+            Err(_) => EntryOutcome::CorruptStuck(phys),
+        },
+    })
+}
 
-        if let Some(entries) = g.cursor.tmp_entries.as_ref() {
-            if g.cursor.tmp_idx < entries.len() {
-                let path = entries[g.cursor.tmp_idx].clone();
-                g.cursor.tmp_idx += 1;
-                processed += 1;
-                g.stats.metadata_calls += 1;
-                g.stats.io_ops += 1;
-                if let Ok(meta) = std::fs::symlink_metadata(&path) {
-                    let is_part = meta.is_file()
-                        && path
-                            .file_name()
-                            .and_then(|n| n.to_str())
-                            .is_some_and(|n| n.ends_with(".part"));
-                    if is_part {
-                        let len = meta.len();
-                        if std::fs::remove_file(&path).is_ok() {
-                            g.stats.unlinks += 1;
-                            g.stats.io_ops += 1;
-                            g.recovery.tmp_deleted += 1;
-                            g.stats.tmp_bytes_deleted += len;
-                        }
-                    } else {
-                        g.stats.foreign_files += 1;
-                        g.stats.foreign_file_bytes += meta.len();
-                    }
+impl Inner {
+    fn apply_recovered(&mut self, out: EntryOutcome) {
+        self.stats.dir_entries += 1;
+        self.stats.metadata_calls += 1;
+        self.stats.io_ops += 1;
+        self.stats.walk_peak_buffered = self.stats.walk_peak_buffered.max(1);
+        let unindexed = |g: &mut Inner, phys: u64| {
+            g.unindexed_objects += 1;
+            g.unindexed_bytes += phys;
+            g.recovery.unindexed_objects += 1;
+            g.recovery.unindexed_bytes += phys;
+            g.recovery.bytes += phys;
+        };
+        match out {
+            EntryOutcome::Skip => {}
+            EntryOutcome::TmpDeleted(len) => {
+                self.stats.unlinks += 1;
+                self.stats.io_ops += 1;
+                self.recovery.tmp_deleted += 1;
+                self.stats.tmp_bytes_deleted += len;
+            }
+            EntryOutcome::TmpStuck(phys) => {
+                self.stats.recovery_unlink_failures += 1;
+                self.stuck_bytes += phys;
+                self.recovery_stuck = true;
+            }
+            EntryOutcome::Foreign(len) => {
+                self.stats.foreign_files += 1;
+                self.stats.foreign_file_bytes += len;
+            }
+            EntryOutcome::Unindexed(phys) => {
+                unindexed(self, phys);
+                self.stats.over_cap = true;
+            }
+            EntryOutcome::CorruptDeleted(phys) => {
+                self.stats.unlinks += 1;
+                self.stats.io_ops += 1;
+                self.recovery.corrupt_deleted += 1;
+                self.stats.corrupt_deleted_total += 1;
+                self.stats.corrupt_bytes_deleted += phys;
+            }
+            EntryOutcome::CorruptStuck(phys) | EntryOutcome::Unreadable(phys) => {
+                if matches!(out, EntryOutcome::CorruptStuck(_)) {
+                    self.stats.recovery_unlink_failures += 1;
                 }
-                if processed >= 1 && start.elapsed() >= budget {
-                    break;
-                }
-                continue;
+                unindexed(self, phys);
+                self.recovery_stuck = true;
             }
-        }
-
-        while g.cursor.shard < 256 {
-            let shard_u8 = g.cursor.shard as u8;
-            if g.cursor.shard_entries.is_none() {
-                let shard_dir = root.join("objects").join(format!("{shard_u8:02x}"));
-                let mut entries: Vec<PathBuf> = std::fs::read_dir(&shard_dir)
-                    .ok()
-                    .into_iter()
-                    .flatten()
-                    .filter_map(|e| e.ok().map(|x| x.path()))
-                    .collect();
-                entries.sort();
-                g.stats.dir_entries += entries.len() as u64;
-                g.cursor.shard_entries = Some(entries);
-                g.cursor.shard_idx = 0;
-            }
-            let entries = g.cursor.shard_entries.as_ref().expect("shard entries");
-            if g.cursor.shard_idx >= entries.len() {
-                g.cursor.shard += 1;
-                g.cursor.shard_entries = None;
-                g.cursor.shard_idx = 0;
-                continue;
-            }
-            let path = entries[g.cursor.shard_idx].clone();
-            g.cursor.shard_idx += 1;
-            processed += 1;
-
-            g.stats.metadata_calls += 1;
-            g.stats.io_ops += 1;
-            if let Ok(meta) = std::fs::symlink_metadata(&path) {
-                let parsed_key = if meta.is_file() {
-                    path.file_name()
-                        .and_then(|n| n.to_str())
-                        .and_then(|n| parse_kvc_filename(n, shard_u8))
+            EntryOutcome::Index(e, foreign) => {
+                self.stats.reads += 1;
+                self.stats.read_bytes += HEADER_REGION_LEN as u64;
+                self.stats.io_ops += 1;
+                self.last_clock_ns = self.last_clock_ns.max(e.mtime_ns);
+                self.index.insert(e);
+                if foreign {
+                    self.recovery.foreign_namespace += 1;
                 } else {
-                    None
-                };
-                match parsed_key {
-                    None => {
-                        g.stats.foreign_files += 1;
-                        g.stats.foreign_file_bytes += meta.len();
-                    }
-                    Some(file_key) => {
-                        let phys_bytes = phys_bytes_of(&meta);
-                        let file_size = meta.len();
-                        let mtime_ns = meta_mtime_ns(&meta);
-                        g.last_clock_ns = g.last_clock_ns.max(mtime_ns);
-                        if (g.index.len() as u64) >= g.cfg.max_objects {
-                            g.unindexed_objects += 1;
-                            g.unindexed_bytes += phys_bytes;
-                            g.unindexed_paths.push_back((path, phys_bytes));
-                            g.recovery.unindexed_objects += 1;
-                            g.recovery.unindexed_bytes += phys_bytes;
-                            g.recovery.bytes += phys_bytes;
-                            g.stats.over_cap = true;
-                        } else if file_size < HEADER_REGION_LEN as u64 {
-                            if std::fs::remove_file(&path).is_ok() {
-                                g.stats.unlinks += 1;
-                                g.stats.io_ops += 1;
-                                g.recovery.corrupt_deleted += 1;
-                                g.stats.corrupt_deleted_total += 1;
-                                g.stats.corrupt_bytes_deleted += phys_bytes;
-                            }
-                        } else {
-                            let mut buf = [0u8; HEADER_REGION_LEN];
-                            let read_ok = File::open(&path)
-                                .and_then(|mut f| f.read_exact(&mut buf))
-                                .is_ok();
-                            g.stats.reads += 1;
-                            g.stats.read_bytes += HEADER_REGION_LEN as u64;
-                            g.stats.io_ops += 1;
-                            let kind = if read_ok {
-                                classify_recovered_header(&buf, file_size, &file_key, &g.cfg)
-                            } else {
-                                RecoveredHeader::Corrupt
-                            };
-                            match kind {
-                                RecoveredHeader::Ours { payload_len } => {
-                                    g.index.insert(IndexEntry {
-                                        key: file_key,
-                                        phys_bytes,
-                                        mtime_ns,
-                                        payload_len,
-                                        flags: 0,
-                                    });
-                                    g.recovery.indexed += 1;
-                                    g.recovery.bytes += phys_bytes;
-                                }
-                                RecoveredHeader::Foreign { payload_len } => {
-                                    g.index.insert(IndexEntry {
-                                        key: file_key,
-                                        phys_bytes,
-                                        mtime_ns,
-                                        payload_len,
-                                        flags: FLAG_FOREIGN,
-                                    });
-                                    g.recovery.foreign_namespace += 1;
-                                    g.recovery.bytes += phys_bytes;
-                                }
-                                RecoveredHeader::Corrupt => {
-                                    if std::fs::remove_file(&path).is_ok() {
-                                        g.stats.unlinks += 1;
-                                        g.stats.io_ops += 1;
-                                        g.recovery.corrupt_deleted += 1;
-                                        g.stats.corrupt_deleted_total += 1;
-                                        g.stats.corrupt_bytes_deleted += phys_bytes;
-                                    }
-                                }
-                            }
-                        }
-                    }
+                    self.recovery.indexed += 1;
                 }
+                self.recovery.bytes += e.phys_bytes;
             }
-            break;
         }
-
-        if g.cursor.shard >= 256 {
-            g.recovery.done = true;
-            if g.state == StoreState::Recovering {
-                g.state = StoreState::Open;
-            }
-            if g.cfg.purge_after_recovery
-                && (g.unindexed_objects > 0 || g.used_bytes() > g.cfg.quota_bytes)
-            {
-                g.purge_pending = true;
-                g.purge_evict_quota = g.used_bytes() > g.cfg.quota_bytes;
-            }
-            break;
-        }
-
-        if processed >= 1 && start.elapsed() >= budget {
-            break;
+        if matches!(
+            out,
+            EntryOutcome::CorruptDeleted(_) | EntryOutcome::CorruptStuck(_)
+        ) {
+            self.stats.reads += 1;
+            self.stats.read_bytes += HEADER_REGION_LEN as u64;
         }
     }
 
+    fn fail_recovery(&mut self) {
+        self.state = StoreState::Failed;
+        self.recovery.failed = true;
+        self.recovery.done = false;
+    }
+
+    fn progress(&self) -> RecoveryProgress {
+        let mut p = self.recovery;
+        if self.state == StoreState::Failed {
+            p.failed = true;
+            p.done = false;
+        }
+        p
+    }
+}
+
+/// One slice of the resumable recovery walk (ADR 4.1). The walk streams one
+/// directory entry at a time from a `ReadDir` held under its own mutex; the
+/// index lock is taken only to apply each entry's outcome, never across a
+/// listing, stat, header read or unlink. A listing or stat error fails the
+/// store (`Failed`, never done, admission never opens on a partial walk);
+/// an unlink that fails leaves the file's bytes counted and the store
+/// `Degraded` when the walk ends (Grok C4 P1-2, P1-3, P2-6).
+fn recover_step_on(shared: &Shared, slice_ms: u64) -> RecoveryProgress {
+    let start = Instant::now();
+    let budget = Duration::from_millis(slice_ms);
+    let mut walk = shared.walk.lock().unwrap_or_else(|e| e.into_inner());
+    let (root, cfg) = {
+        let g = shared.inner.lock().unwrap_or_else(|e| e.into_inner());
+        if g.state == StoreState::Failed || g.recovery.done {
+            return g.progress();
+        }
+        (g.cfg.root.clone(), g.cfg.clone())
+    };
+    let mut processed = 0usize;
+    loop {
+        if processed >= 1 && start.elapsed() >= budget {
+            break;
+        }
+        let next = walk.next(&root);
+        let outcome = match next {
+            Ok(Some((stage, path))) => {
+                processed += 1;
+                recover_entry(shared, &cfg, stage, &path).map(Some)
+            }
+            Ok(None) => Ok(None),
+            Err(e) => Err(e),
+        };
+        let mut g = shared.inner.lock().unwrap_or_else(|e| e.into_inner());
+        match outcome {
+            Err(_) => {
+                g.fail_recovery();
+                break;
+            }
+            Ok(Some(out)) => g.apply_recovered(out),
+            Ok(None) => {
+                g.recovery.done = true;
+                if g.state == StoreState::Recovering {
+                    g.state = if g.recovery_stuck {
+                        StoreState::Degraded
+                    } else {
+                        StoreState::Open
+                    };
+                }
+                if g.cfg.purge_after_recovery
+                    && (g.unindexed_objects > 0 || g.used_bytes() > g.cfg.quota_bytes)
+                {
+                    g.purge_pending = true;
+                    g.purge_walking = g.unindexed_objects > 0;
+                    g.purge_evict_quota = g.used_bytes() > g.cfg.quota_bytes;
+                }
+                break;
+            }
+        }
+    }
+    drop(walk);
     let mut g = shared.inner.lock().unwrap_or_else(|e| e.into_inner());
     g.recovery.elapsed_us += start.elapsed().as_micros() as u64;
-    let res = g.recovery;
+    let res = g.progress();
     let garbage = std::mem::take(&mut g.graveyard);
     drop(g);
     drop(garbage);
@@ -1391,43 +1775,25 @@ fn run_one_unlink(shared: &Shared, u: Unlink) {
         std::thread::sleep(d);
     }
     let path = object_path_for(&root, &u.key);
-    let outcome: Result<(), PlatformError> = match action {
-        Some(FaultAction::Fail(errno)) => Err(errno_to_error(errno, "unlink failed")),
+    let outcome: std::io::Result<bool> = match action {
+        Some(FaultAction::Fail(errno)) => Err(std::io::Error::from_raw_os_error(errno)),
         Some(FaultAction::Crash) => return,
-        _ => std::fs::remove_file(&path).map_err(|e| io_to_error(&e, "unlink failed")),
+        _ => unlink_counted(&path),
     };
 
     let garbage = {
         let mut g = shared.inner.lock().unwrap_or_else(|e| e.into_inner());
         g.stats.io_ops += 1;
         match outcome {
-            Err(err) => {
-                g.index.clear_evicting(&u.key);
-                if let Some(jid) = u.job {
-                    if let Some(job) = g.jobs.remove(&jid) {
-                        if job.cancelling {
-                            g.jobs.insert(jid, job);
-                        } else {
-                            g.fail_job(job, err);
-                        }
-                    }
-                }
-            }
-            Ok(()) => {
+            // Still on disk: back in service, still counted. No job waits on
+            // an unlink, so nothing else changes (the store that chose this
+            // victim already published; quota is over until a later eviction).
+            Err(_) => g.index.clear_evicting(&u.key),
+            Ok(_) => {
                 if let Some(removed) = g.index.remove(&u.key) {
                     g.stats.unlinks += 1;
                     if u.evict {
                         g.stats.evicted_bytes_total += removed.phys_bytes;
-                    }
-                }
-                if let Some(jid) = u.job {
-                    let still_waiting = g.unlinks.iter().any(|x| x.job == Some(jid));
-                    if !still_waiting {
-                        if let Some(job) = g.jobs.get_mut(&jid) {
-                            if job.phase == Phase::Reclaiming && !job.cancelling {
-                                job.phase = Phase::Queued;
-                            }
-                        }
                     }
                 }
             }
@@ -1438,39 +1804,108 @@ fn run_one_unlink(shared: &Shared, u: Unlink) {
     shared.cv.notify_all();
 }
 
-fn run_one_purge_step(shared: &Shared) -> bool {
-    let mut g = shared.inner.lock().unwrap_or_else(|e| e.into_inner());
-    if !g.purge_pending || !g.recovery.done {
-        return false;
+impl Inner {
+    fn end_purge_walk(&mut self) {
+        self.purge_walking = false;
+        if !self.purge_evict_quota {
+            self.purge_pending = false;
+        }
     }
-    let root = g.cfg.root.clone();
+}
 
-    if let Some((path, phys)) = g.unindexed_paths.pop_front() {
-        g.unindexed_objects = g.unindexed_objects.saturating_sub(1);
-        g.unindexed_bytes = g.unindexed_bytes.saturating_sub(phys);
-        g.stats.over_cap = g.unindexed_objects > 0;
-        drop(g);
-        let ok = std::fs::remove_file(&path).is_ok();
+/// One step of the unindexed-file purge: stream the shards, unlink one `.kvc`
+/// file that is not indexed and not being stored. Accounting is subtracted
+/// only after the unlink succeeds; a failed unlink stops the purge with the
+/// counts intact (Grok C4 P1-3). A clean pass leaves nothing unindexed.
+fn purge_walk_step(shared: &Shared, root: &Path) -> bool {
+    let mut walk = shared.purge_walk.lock().unwrap_or_else(|e| e.into_inner());
+    let next = walk.next(root);
+    let (stage, path) = match next {
+        Ok(Some(x)) => x,
+        Ok(None) => {
+            *walk = Walk::new(WalkStage::Shard(0));
+            let mut g = shared.inner.lock().unwrap_or_else(|e| e.into_inner());
+            g.unindexed_objects = 0;
+            g.unindexed_bytes = 0;
+            g.stats.over_cap = false;
+            g.end_purge_walk();
+            return true;
+        }
+        Err(_) => {
+            *walk = Walk::new(WalkStage::Shard(0));
+            let mut g = shared.inner.lock().unwrap_or_else(|e| e.into_inner());
+            g.purge_pending = false;
+            g.purge_walking = false;
+            g.purge_evict_quota = false;
+            return true;
+        }
+    };
+    let WalkStage::Shard(s) = stage else {
+        return true;
+    };
+    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+    let Some(key) = parse_kvc_filename(name, s as u8) else {
+        return true;
+    };
+    {
         let mut g = shared.inner.lock().unwrap_or_else(|e| e.into_inner());
-        if ok {
+        g.stats.dir_entries += 1;
+        g.stats.walk_peak_buffered = g.stats.walk_peak_buffered.max(1);
+        if g.index.get(&key).is_some() || g.inflight_store.contains_key(&key) {
+            return true;
+        }
+        g.purging = Some(key);
+    }
+    let (phys, res) = match std::fs::symlink_metadata(&path) {
+        Ok(m) => (phys_bytes_of(&m), unlink_counted(&path)),
+        Err(e) if is_not_found(&e) => (0, Ok(false)),
+        Err(e) => (0, Err(e)),
+    };
+    let mut g = shared.inner.lock().unwrap_or_else(|e| e.into_inner());
+    g.purging = None;
+    g.stats.io_ops += 2;
+    g.stats.metadata_calls += 1;
+    match res {
+        Ok(true) => {
+            g.unindexed_objects = g.unindexed_objects.saturating_sub(1);
+            g.unindexed_bytes = g.unindexed_bytes.saturating_sub(phys);
             g.stats.unlinks += 1;
-            g.stats.io_ops += 1;
             g.stats.purge_unlinked += 1;
         }
-        if g.unindexed_paths.is_empty() && !g.purge_evict_quota {
+        Ok(false) => {}
+        Err(_) => {
+            g.stats.purge_unlink_failures += 1;
             g.purge_pending = false;
+            g.purge_walking = false;
+            g.purge_evict_quota = false;
+            drop(g);
+            *walk = Walk::new(WalkStage::Shard(0));
         }
-        drop(g);
+    }
+    true
+}
+
+fn run_one_purge_step(shared: &Shared) -> bool {
+    let (root, walking) = {
+        let g = shared.inner.lock().unwrap_or_else(|e| e.into_inner());
+        if !g.purge_pending || !g.recovery.done || g.state == StoreState::Failed {
+            return false;
+        }
+        (g.cfg.root.clone(), g.purge_walking)
+    };
+    if walking {
+        let did = purge_walk_step(shared, &root);
         shared.cv.notify_all();
-        return true;
+        return did;
     }
 
+    let mut g = shared.inner.lock().unwrap_or_else(|e| e.into_inner());
     if g.purge_evict_quota && (g.used_bytes() as u128) * 10 > (g.cfg.quota_bytes as u128) * 9 {
         if let Some(victim) = g.index.pick_victim() {
             g.index.mark_evicting(&victim);
             let path = object_path_for(&root, &victim);
             drop(g);
-            let ok = std::fs::remove_file(&path).is_ok();
+            let ok = unlink_counted(&path).is_ok();
             let mut g = shared.inner.lock().unwrap_or_else(|e| e.into_inner());
             g.stats.io_ops += 1;
             if ok {
@@ -1501,7 +1936,7 @@ fn run_one_purge_step(shared: &Shared) -> bool {
 }
 
 fn execute_store_job(shared: &Shared, job_id: u64) {
-    let (root, hook, key, inc, file_bytes) = {
+    let (root, hook, key, inc, mut file_bytes) = {
         let mut g = shared.inner.lock().unwrap_or_else(|e| e.into_inner());
         let Some(job) = g.jobs.get(&job_id) else {
             return;
@@ -1522,10 +1957,19 @@ fn execute_store_job(shared: &Shared, job_id: u64) {
             return;
         }
 
-        let mut chosen = false;
+        // Make room by marking victims. They are NOT unlinked yet: the write
+        // goes ahead at once, and `finish` queues their unlinks only when the
+        // new object is durable (or returns them to service on any other
+        // ending). While a purge is pending nothing is evicted for room.
         while g.bytes_after() > g.cfg.quota_bytes || g.count_after() > g.cfg.max_objects {
-            let Some(victim) = g.index.pick_victim() else {
+            let victim = if g.purge_pending {
+                None
+            } else {
+                g.index.pick_victim()
+            };
+            let Some(victim) = victim else {
                 let job = g.jobs.remove(&job_id).unwrap();
+                g.stats.disk_full_total += 1;
                 g.fail_job(job, PlatformError::OutOfMemory);
                 let garbage = std::mem::take(&mut g.graveyard);
                 drop(g);
@@ -1534,18 +1978,7 @@ fn execute_store_job(shared: &Shared, job_id: u64) {
                 return;
             };
             g.index.mark_evicting(&victim);
-            g.unlinks.push_back(Unlink {
-                key: victim,
-                job: Some(job_id),
-                evict: true,
-            });
-            chosen = true;
-        }
-        if chosen {
-            let job = g.jobs.get_mut(&job_id).unwrap();
-            job.phase = Phase::Reclaiming;
-            job.in_step = false;
-            return;
+            g.jobs.get_mut(&job_id).unwrap().victims.push(victim);
         }
 
         let cfg_layout = g.cfg.layout;
@@ -1638,7 +2071,22 @@ fn execute_store_job(shared: &Shared, job_id: u64) {
         )
     };
 
-    let tpath = tmp_path_for(&root, &key.0 .0, job_id, inc.0);
+    // SEAL SEAM (#506): encrypt the payload in place and fill the seal slot,
+    // off the lock. Nothing reaches the filesystem unsealed.
+    if shared.seal_key.seal_file(&mut file_bytes).is_err() {
+        let garbage = {
+            let mut g = shared.inner.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(job) = g.jobs.remove(&job_id) {
+                g.fail_job(job, PlatformError::HardwareFault("seal failed".into()));
+            }
+            std::mem::take(&mut g.graveyard)
+        };
+        drop(garbage);
+        shared.cv.notify_all();
+        return;
+    }
+
+    let tpath = tmp_path_for(&root, &key.0 .0, job_id, inc);
     let opath = object_path_for(&root, &key.0 .0);
     let shard_dir = opath.parent().expect("shard dir").to_path_buf();
 
@@ -1649,7 +2097,7 @@ fn execute_store_job(shared: &Shared, job_id: u64) {
     }
     match p1 {
         Some(FaultAction::Crash) => {
-            let _ = std::fs::write(&tpath, &file_bytes);
+            let _ = write_private_file(&tpath, &file_bytes);
             let garbage = {
                 let mut g = shared.inner.lock().unwrap_or_else(|e| e.into_inner());
                 if let Some(job) = g.jobs.remove(&job_id) {
@@ -1663,7 +2111,7 @@ fn execute_store_job(shared: &Shared, job_id: u64) {
         }
         Some(FaultAction::TornWrite { after_bytes, crash }) => {
             let cut = (after_bytes as usize).min(file_bytes.len());
-            let _ = std::fs::write(&tpath, &file_bytes[..cut]);
+            let wrote = write_private_file(&tpath, &file_bytes[..cut]).is_ok();
             if crash {
                 let garbage = {
                     let mut g = shared.inner.lock().unwrap_or_else(|e| e.into_inner());
@@ -1676,7 +2124,9 @@ fn execute_store_job(shared: &Shared, job_id: u64) {
                 shared.cv.notify_all();
                 return;
             }
-            let _ = std::fs::remove_file(&tpath);
+            if wrote {
+                let _ = std::fs::remove_file(&tpath);
+            }
             let garbage = {
                 let mut g = shared.inner.lock().unwrap_or_else(|e| e.into_inner());
                 g.stats.writes += 1;
@@ -1693,8 +2143,11 @@ fn execute_store_job(shared: &Shared, job_id: u64) {
             return;
         }
         Some(FaultAction::Fail(errno)) => {
-            let _ = std::fs::write(&tpath, &file_bytes[..HEADER_REGION_LEN]);
-            let _ = std::fs::remove_file(&tpath);
+            // Only remove what this call created: a failed create (say, a
+            // planted symlink) leaves the path alone.
+            if write_private_file(&tpath, &file_bytes[..HEADER_REGION_LEN]).is_ok() {
+                let _ = std::fs::remove_file(&tpath);
+            }
             let garbage = {
                 let mut g = shared.inner.lock().unwrap_or_else(|e| e.into_inner());
                 g.stats.unlinks += 1;
@@ -1714,19 +2167,21 @@ fn execute_store_job(shared: &Shared, job_id: u64) {
         _ => {}
     }
 
-    let write_res = OpenOptions::new()
-        .create(true)
-        .write(true)
-        .truncate(true)
-        .open(&tpath)
-        .and_then(|mut f| {
-            f.write_all(&file_bytes)?;
-            Ok(f)
-        });
+    // `created`: the open succeeded, so a failed write leaves a temp of ours
+    // to remove. A failed open (a planted symlink: O_NOFOLLOW gives ELOOP)
+    // created nothing and the path is left alone.
+    let mut created = false;
+    let write_res = create_private_file(&tpath).and_then(|mut f| {
+        created = true;
+        f.write_all(&file_bytes)?;
+        Ok(f)
+    });
     let tmp_file = match write_res {
         Ok(f) => f,
         Err(e) => {
-            let _ = std::fs::remove_file(&tpath);
+            if created {
+                let _ = std::fs::remove_file(&tpath);
+            }
             let garbage = {
                 let mut g = shared.inner.lock().unwrap_or_else(|e| e.into_inner());
                 g.stats.io_ops += 1;
@@ -1851,6 +2306,7 @@ fn execute_store_job(shared: &Shared, job_id: u64) {
                 publish: PublishOutcome::NotApplicable,
                 bytes: job.payload_len,
                 elapsed_us: job.submitted_at.elapsed().as_micros() as u64,
+                holder: None,
             };
             g.push_completion(snap);
         }
@@ -1908,7 +2364,7 @@ fn execute_store_job(shared: &Shared, job_id: u64) {
         return;
     }
 
-    let (phys_bytes, file_mtime_ns) = match std::fs::metadata(&opath) {
+    let (phys_bytes, file_mtime_ns) = match std::fs::symlink_metadata(&opath) {
         Ok(m) => (phys_bytes_of(&m), meta_mtime_ns(&m)),
         Err(_) => (file_bytes.len() as u64, system_now_ns()),
     };
@@ -1959,7 +2415,7 @@ fn execute_store_job(shared: &Shared, job_id: u64) {
                     key: key.0 .0,
                     phys_bytes,
                     mtime_ns,
-                    payload_len: job.payload_len as u32,
+                    payload_len: job.payload_len,
                     flags: FLAG_INDETERMINATE,
                 });
                 g.finish(
@@ -2009,7 +2465,7 @@ fn execute_store_job(shared: &Shared, job_id: u64) {
                 key: key.0 .0,
                 phys_bytes,
                 mtime_ns,
-                payload_len: job.payload_len as u32,
+                payload_len: job.payload_len,
                 flags: 0,
             });
             job.stage = JobStage::Durable;
@@ -2094,9 +2550,26 @@ fn execute_load_job(shared: &Shared, job_id: u64) {
     }
 
     let opath = object_path_for(&root, &key.0 .0);
-    let meta = match std::fs::metadata(&opath) {
-        Ok(m) => m,
-        Err(_) => {
+    // No symlink followed, checked through the descriptor: a link, a
+    // non-regular file or another owner's file is never served; it leaves
+    // the index as not found and the file is left alone (ADR 0003 section 19).
+    let (file, meta) = match open_private_read(&opath) {
+        Ok(PrivateOpen::Ours(f, m)) => (f, m),
+        Err(e) if !is_not_found(&e) => {
+            let garbage = {
+                let mut g = shared.inner.lock().unwrap_or_else(|e| e.into_inner());
+                g.stats.metadata_calls += 1;
+                g.stats.io_ops += 1;
+                if let Some(job) = g.jobs.remove(&job_id) {
+                    g.fail_job(job, io_to_error(&e, "open object failed"));
+                }
+                std::mem::take(&mut g.graveyard)
+            };
+            drop(garbage);
+            shared.cv.notify_all();
+            return;
+        }
+        Ok(PrivateOpen::NotOurs(_)) | Err(_) => {
             let garbage = {
                 let mut g = shared.inner.lock().unwrap_or_else(|e| e.into_inner());
                 g.stats.metadata_calls += 1;
@@ -2143,24 +2616,6 @@ fn execute_load_job(shared: &Shared, job_id: u64) {
         return;
     }
 
-    let file = match File::open(&opath) {
-        Ok(f) => f,
-        Err(e) => {
-            let garbage = {
-                let mut g = shared.inner.lock().unwrap_or_else(|e| e.into_inner());
-                g.stats.metadata_calls += 1;
-                g.stats.io_ops += 1;
-                if let Some(job) = g.jobs.remove(&job_id) {
-                    g.fail_job(job, io_to_error(&e, "open object failed"));
-                }
-                std::mem::take(&mut g.graveyard)
-            };
-            drop(garbage);
-            shared.cv.notify_all();
-            return;
-        }
-    };
-
     let mut header_buf = [0u8; HEADER_REGION_LEN];
     if file.read_exact_at(&mut header_buf, 0).is_err()
         || validate_record(&header_buf, file_size, &expect, block_stride).is_err()
@@ -2194,44 +2649,58 @@ fn execute_load_job(shared: &Shared, job_id: u64) {
 
     let n_seg = (expect.payload_len / block_stride) as usize;
     let seg_len = block_stride as usize;
-    let mut seg_buf = vec![0u8; seg_len];
     let mut reads_done = 1u64;
     let mut bytes_read = HEADER_REGION_LEN as u64;
 
-    for i in 0..n_seg {
-        let off = HEADER_REGION_LEN as u64 + (i as u64) * block_stride;
-        if file.read_exact_at(&mut seg_buf, off).is_err() {
-            drop(file);
-            let _ = std::fs::remove_file(&opath);
-            let garbage = {
-                let mut g = shared.inner.lock().unwrap_or_else(|e| e.into_inner());
-                g.stats.metadata_calls += 1;
-                g.stats.reads += reads_done;
-                g.stats.read_bytes += bytes_read;
-                g.stats.unlinks += 1;
-                g.stats.io_ops += 2 + reads_done;
-                g.stats.corrupt_deleted_total += 1;
-                if let Some(mut job) = g.jobs.remove(&job_id) {
-                    if job.busy_held {
-                        g.index.busy_dec(&key.0 .0);
-                        job.busy_held = false;
-                    }
-                    if let Some(rem) = g.index.remove(&key.0 .0) {
-                        g.stats.corrupt_bytes_deleted += rem.phys_bytes;
-                    }
-                    g.fail_job(job, PlatformError::InvalidLayout);
-                }
-                std::mem::take(&mut g.graveyard)
-            };
-            drop(garbage);
-            shared.cv.notify_all();
-            return;
-        }
+    // SEAL SEAM (#506): read the whole ciphertext, then authenticate and
+    // decrypt it before any segment reaches the destination. A refusal (wrong
+    // key, tampered bytes, swapped header, no seal) discards the object like
+    // any corrupt one; the caller recomputes.
+    let mut payload = vec![0u8; expect.payload_len as usize];
+    let read_ok = file
+        .read_exact_at(&mut payload, crate::record::PAYLOAD_OFFSET as u64)
+        .is_ok();
+    if read_ok {
         reads_done += 1;
-        bytes_read += block_stride;
+        bytes_read += expect.payload_len;
+    }
+    if !read_ok
+        || shared
+            .seal_key
+            .open_payload(&header_buf, &mut payload)
+            .is_err()
+    {
+        drop(file);
+        let _ = std::fs::remove_file(&opath);
+        let garbage = {
+            let mut g = shared.inner.lock().unwrap_or_else(|e| e.into_inner());
+            g.stats.metadata_calls += 1;
+            g.stats.reads += reads_done;
+            g.stats.read_bytes += bytes_read;
+            g.stats.unlinks += 1;
+            g.stats.io_ops += 2 + reads_done;
+            g.stats.corrupt_deleted_total += 1;
+            if let Some(mut job) = g.jobs.remove(&job_id) {
+                if job.busy_held {
+                    g.index.busy_dec(&key.0 .0);
+                    job.busy_held = false;
+                }
+                if let Some(rem) = g.index.remove(&key.0 .0) {
+                    g.stats.corrupt_bytes_deleted += rem.phys_bytes;
+                }
+                g.fail_job(job, PlatformError::InvalidLayout);
+            }
+            std::mem::take(&mut g.graveyard)
+        };
+        drop(garbage);
+        shared.cv.notify_all();
+        return;
+    }
 
+    for i in 0..n_seg {
+        let seg_buf = &payload[i * seg_len..(i + 1) * seg_len];
         let mut h = Sha256::new();
-        h.update(&seg_buf);
+        h.update(seg_buf);
         let digest: [u8; 32] = h.finalize().into();
         let want = &header_buf[256 + 32 * i..256 + 32 * (i + 1)];
         if digest != want {
@@ -2269,7 +2738,7 @@ fn execute_load_job(shared: &Shared, job_id: u64) {
                 .get_mut(&job_id)
                 .and_then(|j| j.dst.as_mut())
                 .expect("load dst");
-            dst.write_block(i, &seg_buf).err()
+            dst.write_block(i, seg_buf).err()
         };
         if let Some(err) = write_err {
             drop(file);
@@ -2512,35 +2981,47 @@ fn worker_loop(shared: Arc<Shared>) {
 impl HostFsStore {
     pub fn open(config: HostFsConfig) -> Result<Self, PlatformError> {
         validate_config(&config)?;
+        // SEAL SEAM (#506): no key, no store (fail closed, nothing touched).
+        let seal_key = config.seal_key.clone().ok_or(PlatformError::AccessDenied)?;
         let mut stats = HostFsStats {
             tail_scratch_bytes: config.layout.block_stride,
             ..HostFsStats::default()
         };
 
         let root = &config.root;
-        if !root.is_dir() {
-            std::fs::create_dir_all(root).map_err(|e| io_to_error(&e, "create root"))?;
-            stats.mkdirs += 1;
-            stats.io_ops += 1;
-        }
         let objects_dir = root.join("objects");
-        if !objects_dir.is_dir() {
-            std::fs::create_dir(&objects_dir).map_err(|e| io_to_error(&e, "create objects"))?;
-            stats.mkdirs += 1;
-            stats.io_ops += 1;
-        }
         let tmp_dir = root.join("tmp");
-        if !tmp_dir.is_dir() {
-            std::fs::create_dir(&tmp_dir).map_err(|e| io_to_error(&e, "create tmp"))?;
-            stats.mkdirs += 1;
-            stats.io_ops += 1;
+        let shard_dirs: Vec<PathBuf> = (0..=255u8)
+            .map(|b| objects_dir.join(format!("{b:02x}")))
+            .collect();
+
+        // Check everything that already exists before creating anything, so
+        // a refused store is left exactly as it was (ADR 0003 section 19.3).
+        check_trusted_parent(root)?;
+        if check_private_dir(root)? {
+            check_private_dir(&tmp_dir)?;
+            if check_private_dir(&objects_dir)? {
+                for shard in &shard_dirs {
+                    check_private_dir(shard)?;
+                }
+            }
         }
 
+        for (dir, recursive) in [(root, true), (&objects_dir, false), (&tmp_dir, false)] {
+            if make_private_dir(dir, recursive)? {
+                stats.mkdirs += 1;
+                stats.io_ops += 1;
+            }
+        }
+
+        let alloc_unit = std::fs::metadata(&objects_dir)
+            .map(|m| m.blksize())
+            .unwrap_or(4096)
+            .max(512);
+
         let mut created_shard = false;
-        for b in 0..=255u8 {
-            let shard = objects_dir.join(format!("{b:02x}"));
-            if !shard.is_dir() {
-                std::fs::create_dir(&shard).map_err(|e| io_to_error(&e, "create shard"))?;
+        for shard in &shard_dirs {
+            if make_private_dir(shard, false)? {
                 stats.mkdirs += 1;
                 stats.io_ops += 1;
                 created_shard = true;
@@ -2553,29 +3034,32 @@ impl HostFsStore {
         }
 
         let store_id_path = root.join("STORE_ID");
-        let (store_id, state, recovery_done) = if store_id_path.exists() {
+        let (store_id, state, recovery_done) = if std::fs::symlink_metadata(&store_id_path).is_ok()
+        {
             stats.reads += 1;
             stats.io_ops += 1;
-            match std::fs::read(&store_id_path) {
-                Ok(bytes) => {
-                    stats.read_bytes += bytes.len() as u64;
-                    if let Ok(arr) = <[u8; 16]>::try_from(bytes.as_slice()) {
-                        (Some(arr), StoreState::Recovering, false)
-                    } else {
-                        (None, StoreState::Failed, true)
-                    }
+            // No symlink followed, a regular file of ours, exactly 16 bytes;
+            // anything else fails the store (as an unreadable STORE_ID did).
+            let mut arr = [0u8; 16];
+            let read = match open_private_read(&store_id_path) {
+                Ok(PrivateOpen::Ours(mut f, meta)) if meta.len() == 16 => {
+                    f.read_exact(&mut arr).is_ok()
                 }
-                Err(_) => (None, StoreState::Failed, true),
+                _ => false,
+            };
+            if read {
+                stats.read_bytes += 16;
+                (Some(arr), StoreState::Recovering, false)
+            } else {
+                (None, StoreState::Failed, false)
             }
         } else {
             let id = generate_store_id();
             let part = tmp_dir.join("STORE_ID.part");
             {
-                let mut f = OpenOptions::new()
-                    .create(true)
-                    .write(true)
-                    .truncate(true)
-                    .open(&part)
+                // A STORE_ID.part left by a crash is ours (tmp/ is verified
+                // private) and is truncated, so it never blocks reopening.
+                let mut f = create_private_file(&part)
                     .map_err(|e| io_to_error(&e, "create STORE_ID.part"))?;
                 f.write_all(&id)
                     .map_err(|e| io_to_error(&e, "write STORE_ID.part"))?;
@@ -2602,6 +3086,7 @@ impl HostFsStore {
         let root_buf = config.root.clone();
         let recovery = RecoveryProgress {
             done: recovery_done,
+            failed: state == StoreState::Failed,
             ..RecoveryProgress::default()
         };
         let inner = Inner {
@@ -2616,7 +3101,10 @@ impl HostFsStore {
             index: Index::new(),
             unindexed_bytes: 0,
             unindexed_objects: 0,
-            unindexed_paths: VecDeque::new(),
+            stuck_bytes: 0,
+            recovery_stuck: false,
+            purge_walking: false,
+            purging: None,
             reserved: 0,
             jobs: BTreeMap::new(),
             inflight_store: BTreeMap::new(),
@@ -2631,9 +3119,9 @@ impl HostFsStore {
             queue: VecDeque::new(),
             stats,
             recovery,
-            cursor: RecoveryCursor::new(),
             purge_pending: false,
             purge_evict_quota: false,
+            alloc_unit,
             graveyard: Vec::new(),
         };
 
@@ -2642,6 +3130,9 @@ impl HostFsStore {
             inner: Mutex::new(inner),
             cv: Condvar::new(),
             tail_scratch: Mutex::new(vec![0u8; scratch_len]),
+            walk: Mutex::new(Walk::new(WalkStage::Tmp)),
+            purge_walk: Mutex::new(Walk::new(WalkStage::Shard(0))),
+            seal_key,
         });
 
         let handle = if worker_mode == WorkerMode::Thread {
@@ -2700,8 +3191,14 @@ impl HostFsStore {
     }
 
     pub fn start_purge(&self) {
+        *self
+            .shared
+            .purge_walk
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Walk::new(WalkStage::Shard(0));
         self.with(|i| {
             i.purge_pending = true;
+            i.purge_walking = i.unindexed_objects > 0;
             i.purge_evict_quota = i.used_bytes() > i.cfg.quota_bytes;
         });
         self.shared.cv.notify_all();
@@ -2775,7 +3272,7 @@ impl KvStore for HostFsStore {
                     i.index
                         .get(&k.0 .0)
                         .filter(|e| serving && !e.is_evicting() && !e.is_foreign())
-                        .map(|e| e.payload_len as u64)
+                        .map(|e| e.payload_len)
                 })
                 .collect()
         })
@@ -2820,7 +3317,7 @@ impl KvStore for HostFsStore {
         res
     }
 
-    fn attach_waiter(&self, job: JobId) -> Result<(), PlatformError> {
+    fn attach_waiter(&self, job: JobId, _inc: Incarnation) -> Result<(), PlatformError> {
         self.with(|i| {
             let per_job = i.cfg.max_waiters_per_job;
             let total = i.cfg.max_waiters_total;
@@ -2931,7 +3428,6 @@ impl KvStore for HostFsStore {
                 if i.index.mark_evicting(&kb) {
                     i.unlinks.push_back(Unlink {
                         key: kb,
-                        job: None,
                         evict: false,
                     });
                     marked += 1;
@@ -3086,6 +3582,10 @@ mod tests {
         (src, buf)
     }
 
+    fn test_key() -> Arc<crate::seal::SealKey> {
+        Arc::new(crate::seal::SealKey::generate().unwrap())
+    }
+
     fn temp_root(tag: &str) -> PathBuf {
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -3095,8 +3595,59 @@ mod tests {
             "aien-kv-hostfs-unit-{tag}-{}-{nanos}",
             std::process::id()
         ));
-        std::fs::create_dir_all(&p).unwrap();
+        // The store refuses a root others can reach (ADR 0003 section 19).
+        std::os::unix::fs::DirBuilderExt::mode(std::fs::DirBuilder::new().recursive(true), 0o700)
+            .create(&p)
+            .unwrap();
         p
+    }
+
+    #[test]
+    fn host_fs_reservation_covers_the_physical_bytes_publication_charges() {
+        // Codex re-review 2, partial 8: three KV heads give 6144-byte blocks,
+        // so payload plus header (10240) is not a filesystem-block multiple.
+        // The reservation taken at submit must not be smaller than what the
+        // published file is charged (st_blocks).
+        const BS3: usize = 6144;
+        let root = temp_root("alloc-round");
+        let mut f = test_fields();
+        f.num_kv_heads = 3;
+        f.layout = LayoutStrides {
+            head_stride: 128,
+            token_stride: 384,
+            kv_plane_stride: 1536,
+            layer_stride: 3072,
+            block_stride: BS3 as u64,
+            element_bytes: 2,
+        };
+        let ns = f.namespace_id().unwrap();
+        let mut cfg = HostFsConfig::from_fields(root.clone(), &f).unwrap();
+        cfg.seal_key = Some(test_key());
+        cfg.worker = WorkerMode::Manual;
+        let s = HostFsStore::open(cfg).unwrap();
+        while !s.recover_step(50).done {}
+        let toks: Vec<u32> = (0..4).collect();
+        let key = chunk_chain(&ns, 8, &toks).unwrap()[0];
+        let h = f.chunk_header(&ns, key, None, 0, 4, 1).unwrap();
+        let mut buf = vec![0x33u8; BS3].into_boxed_slice();
+        let src = unsafe {
+            PinnedSource::new(buf.as_mut_ptr(), BS3, vec![0], 4, HolderGuard::detached())
+        };
+        s.submit_store(h, src, Incarnation::seq(1)).unwrap();
+        let reserved = s.capacity().reserved_bytes;
+        s.run_until_idle();
+        let comps = s.poll(16);
+        assert!(comps
+            .iter()
+            .any(|c| c.terminal == Some(Terminal::Done(JobStage::Durable))));
+        let used = s.capacity().used_bytes;
+        assert!(
+            reserved >= used,
+            "reserved {reserved} < charged {used} at publication"
+        );
+        s.audit().unwrap();
+        drop(buf);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
@@ -3105,6 +3656,7 @@ mod tests {
         let f = test_fields();
         let ns = f.namespace_id().unwrap();
         let mut cfg = HostFsConfig::from_fields(root.clone(), &f).unwrap();
+        cfg.seal_key = Some(test_key());
         cfg.max_objects = 2;
         cfg.worker = WorkerMode::Manual;
         let s = HostFsStore::open(cfg).unwrap();
@@ -3115,7 +3667,7 @@ mod tests {
             let key = chunk_chain(&ns, 8, &toks).unwrap()[0];
             let h = f.chunk_header(&ns, key, None, 0, 8, 1).unwrap();
             let (src, _buf) = make_src(2, 4);
-            s.submit_store(h, src, Incarnation(n as u64)).unwrap();
+            s.submit_store(h, src, Incarnation::seq(n as u64)).unwrap();
             s.run_until_idle();
             let _ = s.poll(16);
         }
@@ -3125,13 +3677,14 @@ mod tests {
     }
 
     #[test]
-    fn host_fs_cancel_and_failed_unlink_abort_pending_evictions() {
+    fn host_fs_victims_are_unlinked_after_publish_and_a_failed_unlink_keeps_one() {
         let root = temp_root("abort-evict");
         let f = test_fields();
         let ns = f.namespace_id().unwrap();
         let small_phys = HEADER_REGION_LEN as u64 + BS as u64;
         let faults = ScriptedFaults::new();
         let mut cfg = HostFsConfig::from_fields(root.clone(), &f).unwrap();
+        cfg.seal_key = Some(test_key());
         cfg.quota_bytes = 2 * small_phys;
         cfg.worker = WorkerMode::Manual;
         cfg.faults = Some(faults.clone());
@@ -3145,44 +3698,34 @@ mod tests {
             let key = chunk_chain(&ns, 8, &toks).unwrap()[0];
             let h = f.chunk_header(&ns, key, None, 0, 4, 1).unwrap();
             let (src, _buf) = make_src(1, 4);
-            s.submit_store(h, src, Incarnation(n as u64)).unwrap();
+            s.submit_store(h, src, Incarnation::seq(n as u64)).unwrap();
             s.run_until_idle();
             let _ = s.poll(16);
             small_keys.push(key);
         }
 
-        // Submit a 2-block object that requires evicting both small objects;
-        // fail the first unlink and verify the second unlink does not run.
+        // A 2-block object needs both small ones evicted. The victims are
+        // unlinked only after it is durable; the first unlink fails, so that
+        // victim returns to service and stays counted, and the store is Done.
         faults.arm(Boundary::Unlink, FaultAction::Fail(EIO));
         let toks: Vec<u32> = (0..8).map(|i| 300 + i).collect();
         let key3 = chunk_chain(&ns, 8, &toks).unwrap()[0];
         let h3 = f.chunk_header(&ns, key3, None, 0, 8, 1).unwrap();
         let (src3, _buf3) = make_src(2, 4);
-        let j3 = s.submit_store(h3, src3, Incarnation(3)).unwrap();
+        let j3 = s.submit_store(h3, src3, Incarnation::seq(3)).unwrap();
         s.run_until_idle();
         let comps = s.poll(16);
         assert!(comps
             .iter()
-            .any(|c| c.job == j3 && matches!(c.terminal, Some(Terminal::Failed(_)))));
+            .any(|c| c.job == j3 && c.terminal == Some(Terminal::Done(JobStage::Durable))));
+        assert_eq!(s.lookup(&small_keys), vec![Some(BS as u64), None]);
+        assert_eq!(s.lookup(&[key3]), vec![Some(2 * BS as u64)]);
+        let cap = s.capacity();
+        assert_eq!(cap.evicting_bytes, 0);
         assert_eq!(
-            s.lookup(&small_keys),
-            vec![Some(BS as u64), Some(BS as u64)]
+            cap.used_bytes,
+            small_phys + HEADER_REGION_LEN as u64 + 2 * BS as u64
         );
-        assert_eq!(s.stats().unlinks, 0);
-
-        // Submit another 2-block store, step once to queue the two eviction
-        // unlinks, then cancel before any unlink executes.
-        let (src4, _buf4) = make_src(2, 4);
-        let j4 = s.submit_store(h3, src4, Incarnation(4)).unwrap();
-        assert!(s.pump());
-        assert_eq!(s.lookup(&small_keys), vec![None, None]);
-        assert_eq!(s.cancel(j4), CancelOutcome::Cancelled);
-        s.run_until_idle();
-        assert_eq!(
-            s.lookup(&small_keys),
-            vec![Some(BS as u64), Some(BS as u64)]
-        );
-        assert_eq!(s.stats().unlinks, 0);
         s.audit().unwrap();
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -3193,6 +3736,7 @@ mod tests {
         let f = test_fields();
         let ns = f.namespace_id().unwrap();
         let mut cfg = HostFsConfig::from_fields(root.clone(), &f).unwrap();
+        cfg.seal_key = Some(test_key());
         cfg.worker = WorkerMode::Manual;
         let s = HostFsStore::open(cfg.clone()).unwrap();
         while !s.recover_step(50).done {}
@@ -3201,10 +3745,10 @@ mod tests {
         let key = chunk_chain(&ns, 8, &toks).unwrap()[0];
         let h = f.chunk_header(&ns, key, None, 0, 8, 1).unwrap();
         let (src1, _b1) = make_src(2, 4);
-        let j1 = s.submit_store(h, src1, Incarnation(1)).unwrap();
+        let j1 = s.submit_store(h, src1, Incarnation::seq(1)).unwrap();
         assert_eq!(s.cancel(j1), CancelOutcome::Cancelled);
         let (src2, _b2) = make_src(2, 4);
-        let j2 = s.submit_store(h, src2, Incarnation(2)).unwrap();
+        let j2 = s.submit_store(h, src2, Incarnation::seq(2)).unwrap();
         assert_ne!(j1, j2);
         s.run_until_idle();
         assert_eq!(s.lookup(&[key]), vec![Some(2 * BS as u64)]);
@@ -3215,7 +3759,7 @@ mod tests {
         h_many.token_count = 121 * 4;
         let (src_many, _bm) = make_src(121, 4);
         assert_eq!(
-            s.submit_store(h_many, src_many, Incarnation(3)),
+            s.submit_store(h_many, src_many, Incarnation::seq(3)),
             Err(PlatformError::InvalidLayout)
         );
 

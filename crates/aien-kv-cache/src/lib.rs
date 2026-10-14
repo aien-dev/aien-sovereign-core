@@ -8,6 +8,38 @@ use std::sync::Arc;
 
 pub type BlockId = usize;
 
+/// Reserved arena slot for storage holders: the high 32 bits of a sequence id.
+/// The scheduler arena grows one slot at a time from 0, so it never reaches
+/// this slot in practice (ADR 0003 section 5.2).
+pub const HOLDER_SLOT: u32 = u32::MAX;
+
+/// Sequence id of the holder for storage job `job` (`HOLDER_SLOT << 32 | job`).
+/// Refused for job 0 (generation zero is invalid) and for jobs past `u32::MAX`
+/// (they would wrap onto another live holder).
+pub fn holder_id(job: u64) -> Result<u64, String> {
+    if job == 0 || job > u32::MAX as u64 {
+        return Err(format!("holder job id {job} outside 1..=u32::MAX"));
+    }
+    Ok(((HOLDER_SLOT as u64) << 32) | job)
+}
+
+/// True when `id` lies in the reserved holder slot.
+pub fn is_holder_id(id: u64) -> bool {
+    (id >> 32) as u32 == HOLDER_SLOT
+}
+
+/// What `assemble_table` does with a partial block at the end of the last
+/// holder. DOCS SILENT in ADR 0003: the ADR names the parameter only in
+/// CUTS.md; this is the narrowest rule that is well defined. Only the last
+/// holder may end in a partial block; earlier ones never may.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SuffixPolicy {
+    /// Refuse an assembly whose last holder ends in a partial block.
+    FullBlocksOnly,
+    /// Accept a partial block at the end of the last holder (a parked tail).
+    AllowPartialTail,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum KvDType {
     Fp4,
@@ -1207,6 +1239,179 @@ impl<B: aien_platform::UnifiedBuffer> AienKvManager<B> {
         );
 
         Ok(parent_table.block_ids)
+    }
+
+    /// Like `fork_sequence`, but `holder` shares only `n_blocks` blocks of `src`
+    /// starting at table index `first_block`, never the whole table. This is the
+    /// per-chunk storage reference (ADR 0003 section 5.2): a park takes one
+    /// holder per chunk, a restore job gets one over its destination blocks, so
+    /// freeing a holder (or a failed sibling job) can never return blocks
+    /// another job still targets. Refused, nothing changed, for an unknown
+    /// `src`, `src == holder`, a live `holder` table (never replaced, unlike
+    /// `fork_sequence`), or an empty or out-of-range block span. Readiness
+    /// travels with the blocks (a ready source gives a `SharedFrozen` holder),
+    /// but the source's own state is left alone. `total_tokens` counts only the
+    /// tokens inside the span.
+    pub fn fork_range(
+        &mut self,
+        parent_id: u64,
+        first_block: usize,
+        n_blocks: usize,
+        child_id: u64,
+    ) -> Result<Vec<BlockId>, String> {
+        let blocks = first_block
+            .checked_add(n_blocks)
+            .map(|end| first_block..end)
+            .ok_or_else(|| "Block range overflows".to_string())?;
+        if parent_id == child_id {
+            return Err(format!("Cannot fork sequence {} onto itself", parent_id));
+        }
+        if self.sequence_tables.contains_key(&child_id) {
+            return Err(format!("Sequence {} already has a table", child_id));
+        }
+        let parent = self
+            .sequence_tables
+            .get(&parent_id)
+            .ok_or_else(|| format!("Parent sequence {} not found", parent_id))?;
+        if blocks.start >= blocks.end || blocks.end > parent.block_ids.len() {
+            return Err(format!(
+                "Block range {}..{} invalid for sequence {} with {} blocks",
+                blocks.start,
+                blocks.end,
+                parent_id,
+                parent.block_ids.len()
+            ));
+        }
+        let shared: Vec<BlockId> = parent.block_ids[blocks.clone()].to_vec();
+        let covered_end = (blocks.end * self.block_size).min(parent.total_tokens);
+        let total_tokens = covered_end.saturating_sub(blocks.start * self.block_size);
+        let state = parent.prefill_state;
+        for &b in &shared {
+            self.blocks[b].ref_count += 1;
+            self.blocks[b].is_shared = true;
+        }
+        let child_state = if state.is_ready() {
+            PrefillState::SharedFrozen
+        } else {
+            state
+        };
+        self.sequence_tables.insert(
+            child_id,
+            BlockTable {
+                sequence_id: child_id,
+                block_ids: shared.clone(),
+                total_tokens,
+                prefill_state: child_state,
+            },
+        );
+        Ok(shared)
+    }
+
+    /// Builds the request's own table `seq` from chunk holders, in the order
+    /// given: block lists are concatenated, one reference is added per block,
+    /// and the table is `PrefillPending` (the suffix prefill and its fence
+    /// follow; ADR 0003 section 5.2 and S3). The holders are not modified; the
+    /// caller frees them afterwards. Everything is checked before anything
+    /// changes, so any refusal leaves every holder and the pool untouched.
+    /// Refused when `seq` is a holder id or already has a table (never
+    /// replaced), when the list is empty or repeats a holder or a block, when an
+    /// entry is not a live holder or its prefill is not complete (not yet
+    /// `PrefillReady`/`SharedFrozen`), when a holder before the last ends in a
+    /// partial block (it would leave a gap in positions), or when the last one
+    /// does and `suffix_policy` is `FullBlocksOnly`.
+    pub fn assemble_table(
+        &mut self,
+        seq: u64,
+        holders: &[u64],
+        suffix_policy: SuffixPolicy,
+    ) -> Result<Vec<BlockId>, String> {
+        if is_holder_id(seq) {
+            return Err(format!("{seq} is a holder id, not a sequence"));
+        }
+        if self.sequence_tables.contains_key(&seq) {
+            return Err(format!("Sequence {seq} already has a table"));
+        }
+        if holders.is_empty() {
+            return Err("assemble_table needs at least one holder".to_string());
+        }
+        let bs = self.block_size;
+        let mut ids = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        let mut total_tokens = 0usize;
+        for (i, &h) in holders.iter().enumerate() {
+            if !is_holder_id(h) {
+                return Err(format!("{h} is not a holder id"));
+            }
+            let t = self
+                .sequence_tables
+                .get(&h)
+                .ok_or_else(|| format!("Holder {h} not found"))?;
+            if !t.prefill_state.is_ready() || t.block_ids.is_empty() {
+                return Err(format!("Holder {h} is not complete"));
+            }
+            let full = t.total_tokens == t.block_ids.len() * bs;
+            let last = i + 1 == holders.len();
+            if !full && (!last || suffix_policy == SuffixPolicy::FullBlocksOnly) {
+                return Err(format!("Holder {h} ends in a partial block"));
+            }
+            for &b in &t.block_ids {
+                if !seen.insert(b) {
+                    return Err(format!("Block {b} appears twice in the assembly"));
+                }
+            }
+            ids.extend_from_slice(&t.block_ids);
+            total_tokens += t.total_tokens;
+        }
+        for &b in &ids {
+            self.blocks[b].ref_count += 1;
+            self.blocks[b].is_shared = true;
+        }
+        self.sequence_tables.insert(
+            seq,
+            BlockTable {
+                sequence_id: seq,
+                block_ids: ids.clone(),
+                total_tokens,
+                prefill_state: PrefillState::PrefillPending,
+            },
+        );
+        Ok(ids)
+    }
+
+    /// Moves the table of `holder` to the real sequence id `seq`, keeping every
+    /// reference count, the free list and the readiness state exactly as they
+    /// are (restore commit, ADR 0003 S3). Refused, nothing changed, when
+    /// `holder` is not a holder id or has no table, when `seq` is a holder id
+    /// or is `holder`, or when `seq` already has a table (never replaced).
+    pub fn adopt_table(&mut self, holder: u64, seq: u64) -> Result<(), String> {
+        if !is_holder_id(holder) {
+            return Err(format!("{holder} is not a holder id"));
+        }
+        if is_holder_id(seq) || seq == holder {
+            return Err(format!("{seq} cannot adopt a holder table"));
+        }
+        if self.sequence_tables.contains_key(&seq) {
+            return Err(format!("Sequence {seq} already has a table"));
+        }
+        let mut table = self
+            .sequence_tables
+            .remove(&holder)
+            .ok_or_else(|| format!("Holder {holder} not found"))?;
+        table.sequence_id = seq;
+        self.sequence_tables.insert(seq, table);
+        Ok(())
+    }
+
+    /// Distinct pool blocks referenced by at least one holder table, for the
+    /// `kv_pool_holder_blocks` metric. A block shared by two holders counts once.
+    pub fn holder_block_count(&self) -> usize {
+        let mut seen = std::collections::HashSet::new();
+        for (id, table) in &self.sequence_tables {
+            if is_holder_id(*id) {
+                seen.extend(table.block_ids.iter().copied());
+            }
+        }
+        seen.len()
     }
 
     pub fn append_token(&mut self, seq_id: u64) -> Result<BlockId, String> {
