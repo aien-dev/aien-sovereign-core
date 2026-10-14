@@ -9,6 +9,7 @@
 //!                     [--router auto|host|device] [--lm-head auto|dense|gemv] [--router-mutants 1,2,3,4]
 //!                     [--prefill auto|gemv|gemm] [--prefill-routing host|device] [--prefill-chunk N]
 //!                     [--gemm-mutants 1,2,3] [--long-prompt N] [--tokens-only]
+//!                     [--whole-prompt] [--prefill-device-host]
 //!       Omega: loads the resident model, per-layer parity (attention replay + exact MoE oracle)
 //!       with the routing mutant and the chip-side window-skew mutant as negative controls,
 //!       whole-model greedy tokens against the golden file, decode tok/s and load time.
@@ -193,6 +194,9 @@ struct Args {
     router_mutants: Vec<i32>,
     /// Skip parity, controls and the prefill check: tokens against the golden and timing only.
     tokens_only: bool,
+    /// Whole-prompt prefill (W-RC: the RC server default) and its device router/combine.
+    whole_prompt: bool,
+    wp_device_host: bool,
     /// Batched prefill kernel: auto (GEMM when linked), gemv (the grouped GEMV) or gemm (required).
     prefill: PathChoice,
     /// Batched prefill routing: false = host (default), true = the device router per token.
@@ -234,6 +238,8 @@ fn parse_args() -> Args {
         paths: DevicePaths::default(),
         router_mutants: vec![1, 2, 3, 4],
         tokens_only: false,
+        whole_prompt: false,
+        wp_device_host: false,
         prefill: PathChoice::Auto,
         prefill_device_routing: false,
         gemm_mutants: vec![1, 2, 3],
@@ -267,6 +273,8 @@ fn parse_args() -> Args {
             "--router" => a.paths.router = parse_choice(&it.next().expect("--router auto|host|device"), "host", "--router"),
             "--lm-head" => a.paths.lm_head = parse_choice(&it.next().expect("--lm-head auto|dense|gemv"), "dense", "--lm-head"),
             "--tokens-only" => a.tokens_only = true,
+            "--whole-prompt" => a.whole_prompt = true,
+            "--prefill-device-host" => a.wp_device_host = true,
             "--prefill" => a.prefill = parse_choice(&it.next().expect("--prefill auto|gemv|gemm"), "gemv", "--prefill"),
             "--prefill-routing" => {
                 a.prefill_device_routing = match it.next().expect("--prefill-routing host|device").as_str() {
@@ -427,6 +435,25 @@ fn chip(a: &Args) {
         aien_omega_dgraph::is_native(),
         aien_inference_abi::qwen3_moe_omega::dgraph::ENV,
         engine.decode_graph_mutant()
+    ));
+    // Whole-prompt prefill (W-RC): the release-candidate server turns both on. The per-layer
+    // parity replays set trace layers, which the whole-prompt path declines (chunked there).
+    if a.whole_prompt {
+        if let Err(e) = engine.set_whole_prompt(true) {
+            say(format!("REFUSED: whole-prompt prefill: {e}"));
+            std::process::exit(4);
+        }
+        if a.wp_device_host {
+            if let Err(e) = engine.set_whole_prompt_device_host(true) {
+                say(format!("REFUSED: whole-prompt device router/combine: {e}"));
+                std::process::exit(4);
+            }
+        }
+    }
+    say(format!(
+        "whole-prompt prefill {} device router/combine {}",
+        if engine.whole_prompt_on() { "ON" } else { "OFF" },
+        if engine.whole_prompt_device_host_on() { "ON" } else { "OFF" }
     ));
     let peak = report.peak_rss_bytes.unwrap_or(0) as f64 / 1e9;
     say(format!(
