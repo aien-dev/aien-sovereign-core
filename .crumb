@@ -70,20 +70,20 @@
           "purpose": "ALLEN identity gate: resolve-only subject check, host pin record, deployment record (ADR 0035). "
         },
         {
-          "digest": "6c37f78b1de14405138ced998758a131ea3d061f11ac588faaa4f343a6417dee",
-          "last_commit": "72f0d0d",
+          "digest": "40a231c50dba92af7de2527ab33879c5d1eaaa6e7ea5d6a5ebaa9d60c7542075",
+          "last_commit": "b9b52f9",
           "name": "crates/aien-allen-memory",
           "purpose": "ALLEN scoped memory store: scopes enforced at recall, inspect/correct/export, key-destroying for"
         },
         {
-          "digest": "cd47dee5280a769dfc65a68275cc8a78b68392024f4d2bf25bd57383bce5c32a",
-          "last_commit": "37039ec",
+          "digest": "44dc482b8c9db8919a68ec69b019cd77967232a6ec8b1910c0dfe3cd4d71f141",
+          "last_commit": "b9b52f9",
           "name": "crates/aien-allen-profile",
           "purpose": "ALLEN persona profile v1: versioned, user-editable profile bound to the engaged ALLEN identity; "
         },
         {
-          "digest": "2985ccdc88912ebb02e48b3631f48dd8fff582ef34fb83a9d54470e4ae85765e",
-          "last_commit": "82cef89",
+          "digest": "216615cfca5074a879fc4dd141fea075dcc3c20a99b71ae3b24633d74586b21a",
+          "last_commit": "d002832",
           "name": "crates/aien-cli",
           "purpose": ""
         },
@@ -100,8 +100,8 @@
           "purpose": ""
         },
         {
-          "digest": "55ca26451010e0ffcd7c54e1af55130f2b09a3094141937477c5131389ff8bdb",
-          "last_commit": "de68062",
+          "digest": "28345afbeacc6f3fde9b5456d6d76eb02d280c37adb2492a95420f829e563dd8",
+          "last_commit": "2c26d2b",
           "name": "scripts",
           "purpose": ""
         },
@@ -118,15 +118,15 @@
           "purpose": "Local CI sandbox exec contract (C8), aien-run user/caches install, Forgejo trigger hook, health "
         }
       ],
-      "children_root": "sha256:c8130306377ab42e25804853660026a96fbccfbd49f6499ba89cf5cde16a3146",
-      "compiled_at": "2026-10-14T04:13:30Z",
+      "children_root": "sha256:3d0421c8693b073355e2829d4a7fa60c666d75d582b7d93780318cab2e0b3dd6",
+      "compiled_at": "2026-10-14T05:33:56Z",
       "compiler": "crumb-compile/1",
-      "digest": "sha256:49858caaab4aae3552234549bd0da564b2ab2bf2e589a50ae2f2b5a315b9e127",
+      "digest": "sha256:bf05c0fc1c21fb13aae9bfb8f3b5e22dc56ad626c59bf1a95cfb23c0d3313386",
       "evidence_files": 779,
       "evidence_root": "sha256:71b21f0d08294a967db74dc610acba03f114f03501363f3243901bb25c578a5f",
-      "files": 4693,
-      "generated_at_commit": "8c47c84058f6e1d94eef23bd42ea983854e69ff8",
-      "source_tree": "sha256:87159cb724cff125bdce55e6199a92d5d2150526de7268a922fe709d3abb3112"
+      "files": 4757,
+      "generated_at_commit": "2c26d2bd8fe263563e263dd3d3a9aa342a47f306",
+      "source_tree": "sha256:1869595799213fda18b61628b2135aacae9216c99cd97cb58cf3d4ca86732a5e"
     }
   },
   "history": [],
