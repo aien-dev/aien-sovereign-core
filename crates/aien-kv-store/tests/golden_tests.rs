@@ -9,8 +9,9 @@
 mod common;
 
 use aien_kv_store::{
-    chunk_chain, validate_record, BackendFormat, ChunkKey, ComputeConfig, HiddenAct, KvDtype,
-    LayoutStrides, NamespaceFields, RecordHeader, RopeScaling,
+    chunk_chain, validate_record, BackendFormat, ChunkKey, ComputeConfig, EngineConfig,
+    EngineIdentity, HiddenAct, KvDtype, LayoutStrides, NamespaceFields, RecordHeader, RopeScaling,
+    WeightFormat,
 };
 use common::*;
 use serde_json::{json, Value};
@@ -50,7 +51,55 @@ fn parse_cc(v: &Value) -> ComputeConfig<'_> {
     }
 }
 
-fn ns_to_json(f: &NamespaceFields, c: &ComputeConfig) -> Value {
+fn ec_to_json(c: &EngineConfig) -> Value {
+    json!({
+        "num_experts": c.num_experts,
+        "experts_per_token": c.experts_per_token,
+        "expert_intermediate_dim": c.expert_intermediate_dim,
+        "whole_prompt_prefill": c.whole_prompt_prefill,
+        "device_router": c.device_router,
+        "matmul_path": c.matmul_path,
+    })
+}
+
+fn parse_ec(v: &Value) -> EngineConfig<'_> {
+    EngineConfig {
+        num_experts: u(v, "num_experts") as u32,
+        experts_per_token: u(v, "experts_per_token") as u32,
+        expert_intermediate_dim: u(v, "expert_intermediate_dim"),
+        whole_prompt_prefill: v["whole_prompt_prefill"].as_bool().unwrap(),
+        device_router: v["device_router"].as_bool().unwrap(),
+        matmul_path: v["matmul_path"].as_str().unwrap(),
+    }
+}
+
+fn engine_to_json(e: &EngineIdentity, ec: &EngineConfig) -> Value {
+    assert_eq!(e.engine_config_digest, ec.digest().unwrap());
+    json!({
+        "weight_format": e.weight_format as u8,
+        "weight_format_name": e.weight_format.as_str(),
+        "engine_build_id": e.engine_build_id,
+        "rounding_class": e.rounding_class,
+        "engine_config": ec_to_json(ec),
+        "engine_config_digest": hex(&e.engine_config_digest),
+    })
+}
+
+fn parse_engine(v: &Value) -> EngineIdentity<'_> {
+    EngineIdentity {
+        weight_format: WeightFormat::from_u8(u(v, "weight_format") as u8).unwrap(),
+        engine_build_id: v["engine_build_id"].as_str().unwrap(),
+        rounding_class: v["rounding_class"].as_str().unwrap(),
+        engine_config_digest: unhex32(v["engine_config_digest"].as_str().unwrap()),
+    }
+}
+
+fn ns_to_json(
+    f: &NamespaceFields,
+    c: &ComputeConfig,
+    e: &EngineIdentity,
+    ec: &EngineConfig,
+) -> Value {
     json!({
         "model_sha256": hex(&f.model_sha256),
         "model_digest_kind": f.model_digest_kind,
@@ -80,6 +129,7 @@ fn ns_to_json(f: &NamespaceFields, c: &ComputeConfig) -> Value {
         "chunk_tokens": f.chunk_tokens,
         "sharing_namespace": f.sharing_namespace,
         "compute_config": cc_to_json(c),
+        "engine": engine_to_json(e, ec),
         "compute_config_digest": hex(&f.compute_config_digest),
     })
 }
@@ -184,6 +234,7 @@ type VectorInput = (
     &'static str,
     NamespaceFields<'static>,
     ComputeConfig<'static>,
+    (EngineIdentity<'static>, EngineConfig<'static>),
     Vec<u32>,
 );
 
@@ -249,48 +300,92 @@ fn vector_inputs() -> Vec<VectorInput> {
     };
 
     let real_tokens: Vec<u32> = (0..300u32).map(|i| (i * 37 + 11) % 128_256).collect();
-    let with_digest = |mut f: NamespaceFields<'static>, c: &ComputeConfig| {
-        f.compute_config_digest = c.digest().unwrap();
-        f
+    let engine = (sample_engine(), sample_engine_config());
+    let fp8_experts = (
+        EngineIdentity {
+            weight_format: WeightFormat::Fp8Experts,
+            ..sample_engine()
+        },
+        sample_engine_config(),
+    );
+    let whole_prompt_cfg = EngineConfig {
+        whole_prompt_prefill: true,
+        ..sample_engine_config()
     };
+    let whole_prompt = (
+        EngineIdentity {
+            engine_config_digest: whole_prompt_cfg.digest().unwrap(),
+            ..sample_engine()
+        },
+        whole_prompt_cfg,
+    );
+    let with_digest =
+        |mut f: NamespaceFields<'static>, c: &ComputeConfig, e: &(EngineIdentity, EngineConfig)| {
+            f.compute_config_digest = c.digest_with_engine(&e.0).unwrap();
+            f
+        };
     vec![
         (
             "host-small-partial-tail",
-            with_digest(small_f, &llama),
+            with_digest(small_f, &llama, &engine),
             llama,
+            engine,
             (0..20).collect(),
         ),
         (
             "host-llama32-1b-full-and-partial",
-            with_digest(sample(), &llama),
+            with_digest(sample(), &llama, &engine),
             llama,
+            engine,
             real_tokens,
         ),
         (
             "native-f32-partial-tail",
-            with_digest(native, &native_cc),
+            with_digest(native, &native_cc, &engine),
             native_cc,
+            engine,
             (1000..1070).collect(),
         ),
         (
             "qk-norm-empty-sharing-one-full-chunk",
-            with_digest(qk, &qwen),
+            with_digest(qk, &qwen, &engine),
             qwen,
+            engine,
             (50..58).collect(),
         ),
         // Review finding 1: identical to `host-small-partial-tail` except
         // rms_norm_eps (1e-5 there, 1e-6 here); the namespace id must differ.
         (
             "rms-norm-eps-1e-6-only",
-            with_digest(small_f, &eps_1e6),
+            with_digest(small_f, &eps_1e6, &engine),
             eps_1e6,
+            engine,
             (0..20).collect(),
         ),
         // Identical to `host-small-partial-tail` except arith_epoch 2.
         (
             "arith-epoch-2",
-            with_digest(small_f, &epoch_2),
+            with_digest(small_f, &epoch_2, &engine),
             epoch_2,
+            engine,
+            (0..20).collect(),
+        ),
+        // sc#504: identical to `host-small-partial-tail` except the weight
+        // format as loaded (same file, fp8 experts).
+        (
+            "weight-format-fp8-experts-only",
+            with_digest(small_f, &llama, &fp8_experts),
+            llama,
+            fp8_experts,
+            (0..20).collect(),
+        ),
+        // sc#504: identical except the whole-prompt prefill switch of the
+        // engine config (it changes activation rounding).
+        (
+            "whole-prompt-prefill-only",
+            with_digest(small_f, &llama, &whole_prompt),
+            llama,
+            whole_prompt,
             (0..20).collect(),
         ),
     ]
@@ -303,8 +398,8 @@ fn regenerate_golden() {
     }
     let vectors: Vec<Value> = vector_inputs()
         .into_iter()
-        .map(|(name, f, c, tokens)| {
-            let ns_v = ns_to_json(&f, &c);
+        .map(|(name, f, c, (e, ec), tokens)| {
+            let ns_v = ns_to_json(&f, &c, &e, &ec);
             let out = outputs(name, &ns_v, &tokens);
             json!({
                 "name": name,
@@ -316,7 +411,7 @@ fn regenerate_golden() {
         .collect();
     let doc = json!({
         "format_version": 1,
-        "about": "ADR 0003 sections 1, 2.1 and 12 (C1b). compute_config_digest = SHA-256('AIEN-PKV-CFG-V1\\0' || num_heads u32le || hidden_dim u64le || intermediate_dim u64le || vocab_size u64le || rms_norm_eps f32 bits u32le || tie u8 || hidden_act u8 || arith_id u8-len + bytes || arith_epoch u32le); namespace_id = SHA-256('AIEN-PKV-NS-V1\\0' || fields 1 to 13 || compute_config_digest); chunk_key = SHA-256('AIEN-PKV-CHUNK-V1\\0' || namespace_id || parent_key || first_position u32le || token_count u32le || tokens u32le). header_hex is the 256-byte record header; the record file starts with a 4096-byte region = header_hex || segment digests (32 bytes each, segment_count of them) || zeros; the payload starts at file offset 4096. payload_sha256 = SHA-256('AIEN-PKV-PAYLOAD-V1\\0' || segment digests). Segment digests are SHA-256 of the ASCII string segment_digests_of_ascii with <j> replaced by the segment index. region_sha256 is the SHA-256 of the whole 4096-byte region. f32/f64 inputs are given as IEEE bit patterns.",
+        "about": "ADR 0003 sections 1 (1.2.2, sc#504), 2.1 and 12 (C1b). engine_config_digest = SHA-256('AIEN-PKV-ENG-V1\\0' || num_experts u32le || experts_per_token u32le || expert_intermediate_dim u64le || whole_prompt_prefill u8 || device_router u8 || matmul_path u8-len + bytes); compute_config_digest (field 14) = SHA-256('AIEN-PKV-CFG-V2\\0' || num_heads u32le || hidden_dim u64le || intermediate_dim u64le || vocab_size u64le || rms_norm_eps f32 bits u32le || tie u8 || hidden_act u8 || arith_id u8-len + bytes || arith_epoch u32le || weight_format u8 (1 as-file, 2 bf16, 3 fp8-experts, 4 fp8-all) || engine_build_id u8-len + bytes || rounding_class u8-len + bytes || engine_config_digest); namespace_id = SHA-256('AIEN-PKV-NS-V2\\0' || fields 1 to 13 || compute_config_digest); chunk_key = SHA-256('AIEN-PKV-CHUNK-V1\\0' || namespace_id || parent_key || first_position u32le || token_count u32le || tokens u32le). header_hex is the 256-byte record header; the record file starts with a 4096-byte region = header_hex || segment digests (32 bytes each, segment_count of them) || zeros; the payload starts at file offset 4096. payload_sha256 = SHA-256('AIEN-PKV-PAYLOAD-V1\\0' || segment digests). Segment digests are SHA-256 of the ASCII string segment_digests_of_ascii with <j> replaced by the segment index. region_sha256 is the SHA-256 of the whole 4096-byte region. f32/f64 inputs are given as IEEE bit patterns.",
         "vectors": vectors,
     });
     let mut text = serde_json::to_string_pretty(&doc).unwrap();
@@ -335,8 +430,8 @@ fn identity_vectors_match_golden() {
     assert_eq!(doc["format_version"], 1);
     let vectors = doc["vectors"].as_array().unwrap();
     assert!(
-        vectors.len() >= 6,
-        "golden file must carry the six vectors of C1b"
+        vectors.len() >= 8,
+        "golden file must carry the six vectors of C1b and the two engine vectors of sc#504"
     );
     let mut checked_headers = 0;
     for v in vectors {
@@ -398,7 +493,7 @@ fn identity_vectors_match_golden() {
 fn golden_vectors_include_compute_config_digest() {
     let doc = golden();
     let vectors = doc["vectors"].as_array().unwrap();
-    assert!(vectors.len() >= 6);
+    assert!(vectors.len() >= 8);
     for v in vectors {
         let name = v["name"].as_str().unwrap();
         let ns_v = &v["namespace"];
@@ -418,7 +513,14 @@ fn golden_vectors_include_compute_config_digest() {
             assert!(!cc_v[k].is_null(), "{name}: compute_config.{k} missing");
         }
         let cc = parse_cc(cc_v);
-        let digest = hex(&cc.digest().unwrap());
+        let engine = parse_engine(&ns_v["engine"]);
+        let ec = parse_ec(&ns_v["engine"]["engine_config"]);
+        assert_eq!(
+            hex(&ec.digest().unwrap()),
+            ns_v["engine"]["engine_config_digest"].as_str().unwrap(),
+            "{name}: engine config digest"
+        );
+        let digest = hex(&cc.digest_with_engine(&engine).unwrap());
         assert_eq!(
             ns_v["compute_config_digest"].as_str().unwrap(),
             digest,
@@ -476,6 +578,43 @@ fn golden_vectors_include_compute_config_digest() {
         ),
         u64::from(1e-6f32.to_bits())
     );
+}
+
+/// sc#504: the two engine vectors differ from `host-small-partial-tail` in one
+/// engine input only, and their namespace ids differ.
+#[test]
+fn golden_engine_vectors_differ_in_one_engine_field_only() {
+    let doc = golden();
+    let vectors = doc["vectors"].as_array().unwrap();
+    let by_name = |n: &str| vectors.iter().find(|v| v["name"] == n).unwrap();
+    let base = by_name("host-small-partial-tail");
+    for (sibling, path) in [
+        ("weight-format-fp8-experts-only", &["weight_format"][..]),
+        (
+            "whole-prompt-prefill-only",
+            &["engine_config", "whole_prompt_prefill"][..],
+        ),
+    ] {
+        let s = by_name(sibling);
+        assert_eq!(base["tokens"], s["tokens"], "{sibling}: same tokens");
+        assert_ne!(
+            base["expected"]["namespace_id"], s["expected"]["namespace_id"],
+            "{sibling}: namespace must differ"
+        );
+        let mut a = base["namespace"].clone();
+        let mut b = s["namespace"].clone();
+        for side in [&mut a, &mut b] {
+            let mut node = &mut side["engine"];
+            for k in path {
+                node = &mut node[*k];
+            }
+            *node = Value::Null;
+            side["engine"]["weight_format_name"] = Value::Null;
+            side["engine"]["engine_config_digest"] = Value::Null;
+            side["compute_config_digest"] = Value::Null;
+        }
+        assert_eq!(a, b, "{sibling}: differs from the base in {path:?} only");
+    }
 }
 
 /// The 256-byte struct of C1 (commit ce5d9eb, vector

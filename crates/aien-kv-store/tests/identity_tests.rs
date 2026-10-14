@@ -7,8 +7,9 @@
 mod common;
 
 use aien_kv_store::{
-    chunk_chain, chunk_key, BackendFormat, ComputeConfig, KvDtype, KvError, NamespaceFields,
-    NamespaceId, RopeScaling,
+    chunk_chain, chunk_key, validate_record, BackendFormat, ComputeConfig, EngineConfig,
+    EngineIdentity, KvDtype, KvError, NamespaceFields, NamespaceId, RecordHeader, RopeScaling,
+    WeightFormat,
 };
 use common::*;
 use sha2::{Digest, Sha256};
@@ -315,7 +316,7 @@ fn rms_norm_eps_alone_changes_the_namespace() {
         let mut c = sample_compute();
         c.rms_norm_eps = eps;
         let mut f = sample();
-        f.compute_config_digest = c.digest().unwrap();
+        f.compute_config_digest = c.digest_with_engine(&sample_engine()).unwrap();
         f.namespace_id().unwrap()
     };
     let a = ns_for(1e-5);
@@ -327,7 +328,7 @@ fn rms_norm_eps_alone_changes_the_namespace() {
     f1.compute_config_digest = {
         let mut c = sample_compute();
         c.rms_norm_eps = 1e-5;
-        c.digest().unwrap()
+        c.digest_with_engine(&sample_engine()).unwrap()
     };
     assert_eq!(f1, sample());
     // And the chunk keys derived from them differ, so no object can be found.
@@ -340,11 +341,9 @@ fn rms_norm_eps_alone_changes_the_namespace() {
 
 /// ADR 1.2: field 14 is appended after field 13 and every earlier field keeps
 /// its position, so the namespace id equals a hand-assembled hash.
-#[test]
-fn namespace_id_appends_compute_digest_after_sharing_namespace() {
-    let f = sample();
+fn manual_namespace(f: &NamespaceFields, domain: &[u8]) -> [u8; 32] {
     let mut h = Sha256::new();
-    h.update(b"AIEN-PKV-NS-V1\0");
+    h.update(domain);
     h.update(1u16.to_le_bytes());
     h.update(f.model_sha256);
     h.update([f.model_digest_kind.len() as u8]);
@@ -379,7 +378,13 @@ fn namespace_id_appends_compute_digest_after_sharing_namespace() {
     h.update((f.sharing_namespace.len() as u16).to_le_bytes());
     h.update(f.sharing_namespace.as_bytes());
     h.update(f.compute_config_digest); // field 14, raw 32 bytes
-    let want: [u8; 32] = h.finalize().into();
+    h.finalize().into()
+}
+
+#[test]
+fn namespace_id_appends_compute_digest_after_sharing_namespace() {
+    let f = sample();
+    let want = manual_namespace(&f, b"AIEN-PKV-NS-V2\0");
     assert_eq!(f.namespace_id().unwrap().0, want);
 }
 
@@ -433,4 +438,276 @@ fn zero_byte_factors_in_the_layout_are_refused() {
     f.layout.element_bytes = 0;
     assert_eq!(f.namespace_id(), Err(KvError::InvalidGeometry));
     assert_eq!(f.expected_payload_len(16), Err(KvError::InvalidGeometry));
+}
+
+// ---------------------------------------------------------------------------
+// sc#504: the engine that computed the bytes is part of their identity
+// (ADR 1.2.2). Each engine field changed alone gives a different namespace,
+// and a record written under the old namespace is refused by validation.
+// ---------------------------------------------------------------------------
+
+type EngineMutator = (&'static str, fn(&mut EngineIdentity<'static>));
+
+/// One mutator per `EngineIdentity` field.
+fn engine_mutators() -> Vec<EngineMutator> {
+    vec![
+        ("weight_format", |e| {
+            e.weight_format = WeightFormat::Fp8Experts
+        }),
+        ("engine_build_id", |e| {
+            e.engine_build_id = "omega@0123abcd+kernels:feedf00d"
+        }),
+        ("rounding_class", |e| {
+            e.rounding_class = "omega-gb10@whole-prompt-v1"
+        }),
+        ("engine_config_digest", |e| e.engine_config_digest[0] ^= 1),
+    ]
+}
+
+fn fields_with_engine(e: &EngineIdentity) -> NamespaceFields<'static> {
+    let mut f = sample();
+    f.compute_config_digest = sample_compute().digest_with_engine(e).unwrap();
+    f
+}
+
+/// A record written under `old` and read back by a runtime whose identity is
+/// `new` must be refused: same tokens, same position, other namespace.
+fn assert_old_record_refused(old: &NamespaceFields, new: &NamespaceFields, name: &str) {
+    let toks: Vec<u32> = (0..old.chunk_tokens).collect();
+    let old_ns = old.namespace_id().unwrap();
+    let new_ns = new.namespace_id().unwrap();
+    let old_key = chunk_key(&old_ns, None, 0, &toks).unwrap();
+    let new_key = chunk_key(&new_ns, None, 0, &toks).unwrap();
+    assert_ne!(old_key, new_key, "{name}: chunk key must differ");
+    let stored = old
+        .chunk_header(&old_ns, old_key, None, 0, old.chunk_tokens, 1)
+        .unwrap();
+    let n_seg = old.segment_count(old.chunk_tokens).unwrap() as usize;
+    let digests = vec![[0x5Au8; 32]; n_seg];
+    let rec = RecordHeader {
+        chunk: stored,
+        payload_sha256: aien_kv_store::payload_root(&digests),
+    };
+    let region = rec.encode_region(&digests).unwrap();
+    let file_size = 4096 + stored.payload_len;
+    let seg = old.segment_bytes(old.chunk_tokens).unwrap();
+    // Positive control: the writer's own identity accepts the record.
+    validate_record(&region, file_size, &stored, seg).unwrap();
+    // The new identity expects its own namespace and key: refused.
+    let expected = new
+        .chunk_header(&new_ns, old_key, None, 0, new.chunk_tokens, 1)
+        .unwrap();
+    assert_eq!(
+        validate_record(&region, file_size, &expected, seg),
+        Err(KvError::NamespaceMismatch),
+        "{name}: a record of the old namespace was accepted"
+    );
+}
+
+#[test]
+fn each_engine_field_alone_changes_the_namespace_and_refuses_old_records() {
+    let base = fields_with_engine(&sample_engine());
+    assert_eq!(base, sample(), "sample() carries sample_engine()");
+    let mut seen = vec![("base", base.namespace_id().unwrap())];
+    for (name, mutate) in engine_mutators() {
+        let mut e = sample_engine();
+        mutate(&mut e);
+        let f = fields_with_engine(&e);
+        let id = f.namespace_id().unwrap();
+        for (other, other_id) in &seen {
+            assert_ne!(id, *other_id, "{name} collides with {other}");
+        }
+        seen.push((name, id));
+        assert_old_record_refused(&base, &f, name);
+        assert_old_record_refused(&f, &base, name);
+    }
+    assert_eq!(seen.len(), 5, "4 engine fields + base");
+}
+
+#[test]
+fn weight_format_alone_changes_the_namespace() {
+    let mut ids = Vec::new();
+    for wf in [
+        WeightFormat::AsFile,
+        WeightFormat::Bf16,
+        WeightFormat::Fp8Experts,
+        WeightFormat::Fp8All,
+    ] {
+        let mut e = sample_engine();
+        e.weight_format = wf;
+        let id = fields_with_engine(&e).namespace_id().unwrap();
+        assert!(!ids.contains(&id), "{wf:?} aliases another weight format");
+        ids.push(id);
+        assert_eq!(WeightFormat::from_u8(wf as u8), Some(wf));
+    }
+    assert_eq!(WeightFormat::Fp8Experts.as_str(), "fp8-experts");
+    assert_eq!(WeightFormat::from_u8(0), None);
+}
+
+#[test]
+fn engine_build_id_alone_changes_the_namespace() {
+    let mut e = sample_engine();
+    e.engine_build_id = "aien-runtime/0.1.0+git:other";
+    let f = fields_with_engine(&e);
+    assert_ne!(f.namespace_id().unwrap(), sample().namespace_id().unwrap());
+    assert_old_record_refused(&sample(), &f, "engine_build_id");
+}
+
+#[test]
+fn rounding_class_alone_changes_the_namespace() {
+    let mut e = sample_engine();
+    e.rounding_class = "ReferenceCpuBackend@kv-arith-epoch-2";
+    let f = fields_with_engine(&e);
+    assert_ne!(f.namespace_id().unwrap(), sample().namespace_id().unwrap());
+    assert_old_record_refused(&sample(), &f, "rounding_class");
+}
+
+#[test]
+fn engine_config_digest_alone_changes_the_namespace() {
+    let mut e = sample_engine();
+    e.engine_config_digest[31] ^= 0x80;
+    let f = fields_with_engine(&e);
+    assert_ne!(f.namespace_id().unwrap(), sample().namespace_id().unwrap());
+    assert_old_record_refused(&sample(), &f, "engine_config_digest");
+}
+
+type EngCfgMutator = (&'static str, fn(&mut EngineConfig<'static>));
+
+/// MoE shape and run-time numeric switches (ADR 1.2.2): whole-prompt prefill
+/// changes activation rounding, so it changes the K/V bytes.
+fn engine_config_mutators() -> Vec<EngCfgMutator> {
+    vec![
+        ("num_experts", |c| c.num_experts = 128),
+        ("experts_per_token", |c| c.experts_per_token = 8),
+        ("expert_intermediate_dim", |c| {
+            c.expert_intermediate_dim = 768
+        }),
+        ("whole_prompt_prefill", |c| c.whole_prompt_prefill = true),
+        ("device_router", |c| c.device_router = true),
+        ("matmul_path", |c| c.matmul_path = "gemv"),
+    ]
+}
+
+fn manual_engine_config_digest(c: &EngineConfig) -> [u8; 32] {
+    let mut h = Sha256::new();
+    h.update(b"AIEN-PKV-ENG-V1\0");
+    h.update(c.num_experts.to_le_bytes());
+    h.update(c.experts_per_token.to_le_bytes());
+    h.update(c.expert_intermediate_dim.to_le_bytes());
+    h.update([u8::from(c.whole_prompt_prefill)]);
+    h.update([u8::from(c.device_router)]);
+    h.update([c.matmul_path.len() as u8]);
+    h.update(c.matmul_path.as_bytes());
+    h.finalize().into()
+}
+
+#[test]
+fn engine_config_digest_changes_with_each_moe_field_and_switch() {
+    let base = sample_engine_config();
+    let base_d = base.digest().unwrap();
+    assert_eq!(base_d, manual_engine_config_digest(&base));
+    let mut seen = vec![("base", base_d)];
+    for (name, mutate) in engine_config_mutators() {
+        let mut c = sample_engine_config();
+        mutate(&mut c);
+        let d = c.digest().unwrap();
+        assert_eq!(d, manual_engine_config_digest(&c), "{name}: formula");
+        for (other, od) in &seen {
+            assert_ne!(d, *od, "{name} collides with {other}");
+        }
+        seen.push((name, d));
+        // And through field 14 the namespace differs too.
+        let mut e = sample_engine();
+        e.engine_config_digest = d;
+        assert_ne!(
+            fields_with_engine(&e).namespace_id().unwrap(),
+            sample().namespace_id().unwrap(),
+            "{name}: namespace ignores the switch"
+        );
+    }
+    assert_eq!(seen.len(), 7);
+}
+
+/// Field 14 equals the byte-by-byte formula of ADR 1.2.2.
+#[test]
+fn field_14_binds_compute_config_then_engine_identity() {
+    let c = sample_compute();
+    let e = sample_engine();
+    let mut h = Sha256::new();
+    h.update(b"AIEN-PKV-CFG-V2\0");
+    h.update(c.num_heads.to_le_bytes());
+    h.update(c.hidden_dim.to_le_bytes());
+    h.update(c.intermediate_dim.to_le_bytes());
+    h.update(c.vocab_size.to_le_bytes());
+    h.update(c.rms_norm_eps.to_bits().to_le_bytes());
+    h.update([u8::from(c.tie_word_embeddings)]);
+    h.update([1u8]);
+    h.update([c.arith_id.len() as u8]);
+    h.update(c.arith_id.as_bytes());
+    h.update(c.arith_epoch.to_le_bytes());
+    h.update([e.weight_format as u8]);
+    h.update([e.engine_build_id.len() as u8]);
+    h.update(e.engine_build_id.as_bytes());
+    h.update([e.rounding_class.len() as u8]);
+    h.update(e.rounding_class.as_bytes());
+    h.update(e.engine_config_digest);
+    let want: [u8; 32] = h.finalize().into();
+    assert_eq!(c.digest_with_engine(&e).unwrap(), want);
+    assert_eq!(sample().compute_config_digest, want);
+    // The compute-only digest is not field 14 any more.
+    assert_ne!(c.digest().unwrap(), want);
+}
+
+/// The engine build id and the rounding class are required: an empty string
+/// would let every engine alias, so it is refused, as is an oversized one.
+#[test]
+fn empty_or_oversized_engine_strings_are_refused() {
+    let c = sample_compute();
+    let mut e = sample_engine();
+    e.engine_build_id = "";
+    assert_eq!(
+        c.digest_with_engine(&e),
+        Err(KvError::FieldEmpty("engine_build_id"))
+    );
+    let mut e = sample_engine();
+    e.rounding_class = "";
+    assert_eq!(
+        c.digest_with_engine(&e),
+        Err(KvError::FieldEmpty("rounding_class"))
+    );
+    let mut e = sample_engine();
+    e.engine_build_id = Box::leak("b".repeat(256).into_boxed_str());
+    assert_eq!(
+        c.digest_with_engine(&e),
+        Err(KvError::FieldTooLong("engine_build_id"))
+    );
+    let mut e = sample_engine();
+    e.rounding_class = Box::leak("r".repeat(256).into_boxed_str());
+    assert_eq!(
+        c.digest_with_engine(&e),
+        Err(KvError::FieldTooLong("rounding_class"))
+    );
+    let mut ec = sample_engine_config();
+    ec.matmul_path = "";
+    assert_eq!(ec.digest(), Err(KvError::FieldEmpty("matmul_path")));
+}
+
+/// The namespace domain moved to V2 with the engine identity: the V1
+/// derivation over the very same 14 field values no longer matches, so no
+/// object written before sc#504 can be found.
+#[test]
+fn v1_namespace_domain_no_longer_matches() {
+    let f = sample();
+    let v1 = manual_namespace(&f, b"AIEN-PKV-NS-V1\0");
+    let v2 = manual_namespace(&f, b"AIEN-PKV-NS-V2\0");
+    let got = f.namespace_id().unwrap().0;
+    assert_ne!(got, v1, "the V1 domain still matches");
+    assert_eq!(got, v2);
+    // Also with the old (compute-only) field 14 the V1 id is not reproduced.
+    let mut old = sample();
+    old.compute_config_digest = sample_compute().digest().unwrap();
+    assert_ne!(
+        old.namespace_id().unwrap().0,
+        manual_namespace(&old, b"AIEN-PKV-NS-V1\0")
+    );
 }

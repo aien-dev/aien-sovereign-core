@@ -20,7 +20,8 @@ use aien_abi_core::{
 use aien_inference_abi::backend::TensorBackend;
 use aien_inference_abi::{ReferenceCpuBackend, TransformerWeights};
 use aien_kv_cache::{create_shared_kv_manager_with_pool, KvDType, KvPoolConfig, SharedKvManager};
-use aien_kv_store::StoreState;
+use aien_kv_store::{EngineConfig, EngineIdentity, StoreState, WeightFormat};
+use aien_runtime::compute_config::HostEngineIdentity;
 use aien_runtime::kv_residency::KvResidencyStatus;
 use aien_runtime::shared_kv::{
     build_shared_kv_runtime, enable_persistent_kv, KvPersistSettings, ModelKvBinding,
@@ -204,10 +205,56 @@ fn paint_pool() -> SharedKvManager {
 }
 
 /// The daemon path: spine over one pool, then `enable_persistent_kv`.
+/// The engine identity of the painted runs (ADR 1.2.2, sc#504). Each input can
+/// be overridden by the parent through `KV_RS_WF`, `KV_RS_BUILD`, `KV_RS_ROUND`
+/// and `KV_RS_WHOLE_PROMPT`, so one restart test changes exactly one of them.
+struct PaintEngine {
+    build: String,
+    round: String,
+    weight_format: WeightFormat,
+    config_digest: [u8; 32],
+}
+
+impl PaintEngine {
+    fn from_env() -> Self {
+        let weight_format = match env_or("KV_RS_WF", "as-file").as_str() {
+            "as-file" => WeightFormat::AsFile,
+            "bf16" => WeightFormat::Bf16,
+            "fp8-experts" => WeightFormat::Fp8Experts,
+            "fp8-all" => WeightFormat::Fp8All,
+            other => panic!("KV_RS_WF {other:?}"),
+        };
+        let config = EngineConfig {
+            num_experts: 0,
+            experts_per_token: 0,
+            expert_intermediate_dim: 0,
+            whole_prompt_prefill: env_or("KV_RS_WHOLE_PROMPT", "0") == "1",
+            device_router: false,
+            matmul_path: "c7-paint",
+        };
+        Self {
+            build: env_or("KV_RS_BUILD", "c7-paint-build"),
+            round: env_or("KV_RS_ROUND", "c7-paint@epoch-1"),
+            weight_format,
+            config_digest: config.digest().expect("engine config digest"),
+        }
+    }
+
+    fn identity(&self) -> EngineIdentity<'_> {
+        EngineIdentity {
+            weight_format: self.weight_format,
+            engine_build_id: &self.build,
+            rounding_class: &self.round,
+            engine_config_digest: self.config_digest,
+        }
+    }
+}
+
 fn paint_rig(dir: &Path, sha: u8, eps: f32) -> PaintRig {
     let kv = paint_pool();
     let mut spine = AienRuntimeSpine::new(64, scheduler(), kv.clone());
     let model = paint_model(eps);
+    let engine = PaintEngine::from_env();
     let line = enable_persistent_kv(
         &mut spine,
         &settings(dir),
@@ -216,6 +263,7 @@ fn paint_rig(dir: &Path, sha: u8, eps: f32) -> PaintRig {
             arith_id: "c7-paint-backend",
             model_sha256: [sha; 32],
             model_digest_kind: "sha256",
+            engine: engine.identity(),
         },
         None,
     )
@@ -475,6 +523,8 @@ async fn greedy_run(dir: Option<&Path>) -> (Vec<u32>, AienRuntimeSpine) {
         },
     )
     .expect("runtime");
+    let host_engine =
+        HostEngineIdentity::reference(ReferenceCpuBackend::new().name()).expect("engine identity");
     if let Some(dir) = dir {
         enable_persistent_kv(
             &mut spine,
@@ -484,6 +534,7 @@ async fn greedy_run(dir: Option<&Path>) -> (Vec<u32>, AienRuntimeSpine) {
                 arith_id: ReferenceCpuBackend::new().name(),
                 model_sha256: [3u8; 32],
                 model_digest_kind: "sha256",
+                engine: host_engine.identity(),
             },
             None,
         )
@@ -716,6 +767,47 @@ fn different_rms_norm_eps_namespace_is_never_served_after_restart() {
     );
 }
 
+/// sc#504 (ADR 1.2.2): park under one engine identity, restart with exactly
+/// one engine input changed: the parked objects are rediscovered and counted,
+/// never served (plain prefill from position zero). Positive control: the
+/// parking identity restores.
+fn engine_change_is_never_served_after_restart(var: &str, parked: &str, changed: &str) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    assert!(run_child("paint-park", dir.path(), &[(var, parked)]));
+    assert!(
+        run_child(
+            "paint-restore",
+            dir.path(),
+            &[(var, changed), ("KV_RS_EXPECT", "miss")]
+        ),
+        "{var}={changed} served objects parked with {var}={parked}"
+    );
+    assert!(
+        run_child("paint-restore", dir.path(), &[(var, parked)]),
+        "positive control: {var}={parked} must restore"
+    );
+}
+
+#[test]
+fn weight_format_change_is_never_served_after_restart() {
+    engine_change_is_never_served_after_restart("KV_RS_WF", "bf16", "fp8-experts");
+}
+
+#[test]
+fn engine_build_change_is_never_served_after_restart() {
+    engine_change_is_never_served_after_restart("KV_RS_BUILD", "omega@aaaa", "omega@bbbb");
+}
+
+#[test]
+fn rounding_class_change_is_never_served_after_restart() {
+    engine_change_is_never_served_after_restart("KV_RS_ROUND", "class-a", "class-b");
+}
+
+#[test]
+fn whole_prompt_prefill_change_is_never_served_after_restart() {
+    engine_change_is_never_served_after_restart("KV_RS_WHOLE_PROMPT", "0", "1");
+}
+
 /// A8 (METRICS_AND_SETTINGS): the status report carries the pool allocation
 /// in bytes, which never changes when blocks are freed, separately from the
 /// block counts, and the persistent-KV fields when persistence is on.
@@ -781,6 +873,7 @@ async fn persistence_off_when_store_dir_unset_changes_nothing() {
             arith_id: "x",
             model_sha256: [7; 32],
             model_digest_kind: "sha256",
+            engine: PaintEngine::from_env().identity(),
         },
         None,
     )

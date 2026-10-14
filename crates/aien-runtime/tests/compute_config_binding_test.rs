@@ -19,7 +19,9 @@ use aien_inference_abi::{
 };
 use aien_kv_cache::create_shared_kv_manager_with_pool;
 use aien_kv_store::{BackendFormat, KvDtype, LayoutStrides};
-use aien_runtime::compute_config::{compute_config_from, ModelBinding, StoreInputs};
+use aien_runtime::compute_config::{
+    compute_config_from, HostEngineIdentity, ModelBinding, StoreInputs,
+};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -75,8 +77,18 @@ fn store() -> StoreInputs<'static> {
 fn ids(cfg: &ModelConfig, arith_id: &str) -> ([u8; 32], [u8; 32]) {
     let binding = ModelBinding::from_model(cfg, arith_id).expect("binding");
     let digest = binding.compute.digest().expect("digest");
-    let fields = binding.namespace_fields(&store()).expect("fields");
-    assert_eq!(fields.compute_config_digest, digest, "digest is field 14");
+    let engine = HostEngineIdentity::reference(arith_id).expect("engine identity");
+    let fields = binding
+        .namespace_fields(&store(), &engine.identity())
+        .expect("fields");
+    assert_eq!(
+        fields.compute_config_digest,
+        binding
+            .compute
+            .digest_with_engine(&engine.identity())
+            .expect("bound digest"),
+        "compute config plus engine identity is field 14"
+    );
     (digest, fields.namespace_id().expect("namespace").0)
 }
 
@@ -383,4 +395,73 @@ async fn arith_epoch_pinned_bytes() {
          bump KV_ARITH_EPOCH in aien-inference-abi (every stored chunk becomes a different \
          namespace) and pin the new epoch and hash here."
     );
+}
+
+/// sc#504 (ADR 1.2.2): the host reference path fills the engine identity
+/// honestly: weights used as the file holds them, a build id naming this
+/// crate's version and commit, a rounding class naming the backend and
+/// `KV_ARITH_EPOCH`, and a dense engine config with every switch off.
+#[test]
+fn host_reference_engine_identity_names_backend_epoch_and_build() {
+    let e = HostEngineIdentity::reference(ARITH_ID).expect("engine identity");
+    let id = e.identity();
+    assert_eq!(id.weight_format, aien_kv_store::WeightFormat::AsFile);
+    assert!(
+        id.engine_build_id
+            .starts_with(&format!("aien-runtime/{}+git:", env!("CARGO_PKG_VERSION"))),
+        "build id {:?}",
+        id.engine_build_id
+    );
+    assert_eq!(
+        id.rounding_class,
+        format!("{ARITH_ID}@kv-arith-epoch-{KV_ARITH_EPOCH}")
+    );
+    let dense = aien_kv_store::EngineConfig {
+        num_experts: 0,
+        experts_per_token: 0,
+        expert_intermediate_dim: 0,
+        whole_prompt_prefill: false,
+        device_router: false,
+        matmul_path: "host-tensor-backend",
+    };
+    assert_eq!(id.engine_config_digest, dense.digest().unwrap());
+    // Another backend is another rounding class.
+    let other = HostEngineIdentity::reference("NativeCpuBackend (Rayon Multi-Core)").unwrap();
+    assert_ne!(other.identity().rounding_class, id.rounding_class);
+}
+
+/// Each engine input changed alone moves the namespace bound by
+/// `ModelBinding::namespace_fields` (the daemon path).
+#[test]
+fn each_engine_input_changes_the_bound_namespace() {
+    let b = base();
+    let binding = ModelBinding::from_model(&b, ARITH_ID).expect("binding");
+    let host = HostEngineIdentity::reference(ARITH_ID).expect("engine identity");
+    let ns = |e: &aien_kv_store::EngineIdentity| {
+        binding
+            .namespace_fields(&store(), e)
+            .expect("fields")
+            .namespace_id()
+            .expect("namespace")
+    };
+    let base_ns = ns(&host.identity());
+    let mut wf = host.identity();
+    wf.weight_format = aien_kv_store::WeightFormat::Fp8All;
+    let mut build = host.identity();
+    build.engine_build_id = "aien-runtime/0.0.0+git:other";
+    let mut round = host.identity();
+    round.rounding_class = "ReferenceCpuBackend@kv-arith-epoch-999";
+    let mut cfg = host.identity();
+    cfg.engine_config_digest[0] ^= 1;
+    let mut seen = vec![base_ns];
+    for (name, e) in [
+        ("weight_format", wf),
+        ("engine_build_id", build),
+        ("rounding_class", round),
+        ("engine_config_digest", cfg),
+    ] {
+        let got = ns(&e);
+        assert!(!seen.contains(&got), "{name} did not move the namespace");
+        seen.push(got);
+    }
 }
