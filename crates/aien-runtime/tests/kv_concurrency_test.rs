@@ -1287,3 +1287,69 @@ async fn queue_full_and_disk_full_under_load_never_lose_resident_progress() {
     assert_eq!(toks(&r, qc), cold(&qc_prompt, 3).await, "qc");
     assert_refcounts_match_tables(&r, &[], "end");
 }
+
+// ---------------------------------------------------------------------------
+// Preemption under KV pressure with persistence off: resume must not re-emit
+// ---------------------------------------------------------------------------
+
+/// A sequence preempted by the watermark check and resumed later must deliver
+/// every token to its sink exactly once, and its output must equal a run that
+/// was never preempted. Persistence is off (no store, no worker): this is pure
+/// scheduler behaviour.
+///
+/// Geometry: a 10-block pool with a watermark of 3. Request A (15-token
+/// prompt, 4 blocks) decodes alone for a few steps. Request B (another 4
+/// blocks) is admitted while 3 or more blocks are free, which leaves fewer
+/// than the watermark, so the next step preempts A (the lowest-priority
+/// running sequence, first in running order). A needs 4 blocks plus the
+/// watermark headroom to come back, so it resumes only after B finishes.
+#[tokio::test]
+async fn preempted_sequence_resumes_without_re_emitting_tokens() {
+    let max_a = 12;
+    let max_b = 4;
+    let want_a = cold(&prompt_a(), max_a).await;
+    let want_b = cold(&prompt_b(), max_b).await;
+
+    let mut r = rig_with(Opts {
+        persist: false,
+        total_blocks: 10,
+        watermark_blocks: 3,
+        max_batch_size: 4,
+        ..Opts::default()
+    });
+    let a = submit(&mut r, &prompt_a(), max_a);
+    step_until(&mut r, "A emitted three tokens", 50, |r| emitted(r, a) >= 3).await;
+    let emitted_before = emitted(&r, a);
+    assert!(!finished(&r, a), "A still running");
+    let b = submit(&mut r, &prompt_b(), max_b);
+    step_until(&mut r, "A preempted", 50, |r| {
+        r.spine.scheduler.metrics().preempted_requests >= 1
+    })
+    .await;
+    assert_eq!(
+        phase_of(&r, a),
+        Some(SequencePhase::Preempted),
+        "A is the preempted sequence"
+    );
+    step_until(&mut r, "A and B finished", 500, |r| {
+        finished(r, a) && finished(r, b)
+    })
+    .await;
+
+    assert_eq!(toks(&r, b), want_b, "B greedy");
+    let got_a = toks(&r, a);
+    assert!(
+        emitted_before < got_a.len(),
+        "A emitted more after resuming"
+    );
+    assert_eq!(
+        got_a.len(),
+        max_a,
+        "every token of A reached the sink exactly once: {got_a:?}"
+    );
+    assert_eq!(
+        got_a, want_a,
+        "A after preemption equals the uninterrupted run"
+    );
+    assert_refcounts_match_tables(&r, &[], "end");
+}
