@@ -1,6 +1,5 @@
 # tests/gates/sc-crb1.gate
 # Mirrors hosted: crumb-visible-conformance.yml: crumbs visible_conformance with the aien-protocols corpus at b50c00d (hosted 26 s)
-# cache: never because the vector corpus is a pinned sibling checkout outside this repository.
 gate: SC-CRB1
 manifest_version: 2
 owner: aien-sovereign-core
@@ -19,4 +18,3 @@ expects:
 timeout: 15m
 exactness: EXACT
 cache_scope: machine
-cache: never

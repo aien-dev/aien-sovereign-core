@@ -75,7 +75,7 @@ struct Found {
 impl Found {
     fn load(dir: &Path) -> Found {
         Found {
-            index: Index::load(&Store::new(dir)),
+            index: Index::load_local(&Store::new(dir)),
         }
     }
     fn get(&self, digest: &str) -> Option<&evidence::Stored> {

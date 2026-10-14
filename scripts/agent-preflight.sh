@@ -44,18 +44,22 @@ fi
 # runs from other agents are joined, and real runs pass the CPU, memory, and GPU
 # gates. Set AIEN_PROOF_OFF=1 to fall back to a plain workspace test.
 echo "[4/5] Running Workspace Test Suite..."
-if [ "${AIEN_PROOF_OFF:-0}" = "1" ]; then
-    TEST_CMD=(cargo test --workspace)
-elif command -v aien-proof >/dev/null 2>&1; then
-    TEST_CMD=(aien-proof crates)
+if [ "${AIEN_TEST_GATE_VERIFIED:-0}" = "1" ]; then
+    echo "PASSED (Verified by SC-TEST gate dependency)"
 else
-    TEST_CMD=(cargo run -q -p aien-proof -- crates)
-fi
-if "${TEST_CMD[@]}"; then
-    echo "PASSED (100% test pass)"
-else
-    echo "FAILED (Test suite failed)"
-    FAILED=1
+    if [ "${AIEN_PROOF_OFF:-0}" = "1" ]; then
+        TEST_CMD=(cargo test --workspace)
+    elif command -v aien-proof >/dev/null 2>&1; then
+        TEST_CMD=(aien-proof crates)
+    else
+        TEST_CMD=(cargo run -q -p aien-proof -- crates)
+    fi
+    if "${TEST_CMD[@]}"; then
+        echo "PASSED (100% test pass)"
+    else
+        echo "FAILED (Test suite failed)"
+        FAILED=1
+    fi
 fi
 
 # Step 5: Vulnerability & Advisory Audit

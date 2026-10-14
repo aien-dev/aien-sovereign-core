@@ -6,6 +6,8 @@ manifest_version: 2
 owner: aien-sovereign-core
 requires:
   - host
+depends_on:
+  - SC-TEST
 inputs:
   - scripts/
   - Cargo.toml

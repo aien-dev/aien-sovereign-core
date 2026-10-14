@@ -192,14 +192,63 @@ impl Store {
         Ok(sha)
     }
 
-    /// True if the stdout/stderr blob `sha` is present in this store (it is
-    /// not read or re-hashed here).
+    /// True if the stdout/stderr blob `sha` is present in this store or a
+    /// sibling commit store under the same repository evidence directory.
     pub fn blob_exists(&self, sha: &str) -> bool {
-        sha.len() == 64
-            && sha
-                .bytes()
-                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-            && self.dir.join("blobs").join(format!("{sha}.log")).is_file()
+        if !is_sha256_hex(sha) {
+            return false;
+        }
+        let rel = Path::new("blobs").join(format!("{sha}.log"));
+        if self.dir.join(&rel).is_file() {
+            return true;
+        }
+        if is_commit_dir(&self.dir) {
+            if let Some(parent) = self.dir.parent() {
+                if let Ok(rd) = fs::read_dir(parent) {
+                    for e in rd.flatten() {
+                        if e.file_name().to_str().is_some_and(is_commit_sha_hex)
+                            && e.path().join(&rel).is_file()
+                        {
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    /// Ensure blob `sha` is present in `self.dir/blobs/<sha>.log`, copying and
+    /// verifying it from a sibling commit store if needed so each commit's
+    /// evidence directory stays self-contained.
+    pub fn ensure_local_blob(&self, sha: &str) {
+        if !is_sha256_hex(sha) {
+            return;
+        }
+        let rel = Path::new("blobs").join(format!("{sha}.log"));
+        if self.dir.join(&rel).is_file() || !is_commit_dir(&self.dir) {
+            return;
+        }
+        let Some(parent) = self.dir.parent() else {
+            return;
+        };
+        let Ok(rd) = fs::read_dir(parent) else {
+            return;
+        };
+        for e in rd.flatten() {
+            if !e.file_name().to_str().is_some_and(is_commit_sha_hex) {
+                continue;
+            }
+            let src = e.path().join(&rel);
+            if src.is_file() {
+                if let Ok(bytes) = fs::read(&src) {
+                    if sha256_hex(&bytes) == sha {
+                        let _ = self.put_blob(&bytes);
+                        return;
+                    }
+                }
+            }
+        }
     }
 
     /// Write `<digest>.json` exclusively, mode 0444, canonical bytes plus one
@@ -280,6 +329,18 @@ fn is_sha256_hex(s: &str) -> bool {
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
+fn is_commit_sha_hex(s: &str) -> bool {
+    s.len() == 40
+        && s.bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
+fn is_commit_dir(dir: &Path) -> bool {
+    dir.file_name()
+        .and_then(|n| n.to_str())
+        .is_some_and(is_commit_sha_hex)
+}
+
 /// All verified receipts of one store, oldest first.
 #[derive(Debug, Clone, Default)]
 pub struct Index {
@@ -287,16 +348,13 @@ pub struct Index {
 }
 
 impl Index {
-    /// Read every `<digest>.json` in the store. A file is skipped, never
-    /// trusted, if its bytes do not hash to its name, it is not JSON, or it
-    /// does not carry the receipt schema. Order is by recorded finish time,
-    /// then by file modification time (receipts finished in the same second),
-    /// then by digest.
-    pub fn load(store: &Store) -> Index {
-        let mut receipts = Vec::new();
-        let rd = match fs::read_dir(store.dir()) {
-            Ok(r) => r,
-            Err(_) => return Index::default(),
+    fn load_dir(
+        dir: &Path,
+        seen: &mut std::collections::BTreeSet<String>,
+        receipts: &mut Vec<Stored>,
+    ) {
+        let Ok(rd) = fs::read_dir(dir) else {
+            return;
         };
         for e in rd.flatten() {
             let name = e.file_name().to_string_lossy().into_owned();
@@ -304,6 +362,9 @@ impl Index {
                 Some(d) if is_sha256_hex(d) => d.to_string(),
                 _ => continue,
             };
+            if seen.contains(&digest) {
+                continue;
+            }
             let bytes = match fs::read(e.path()) {
                 Ok(b) => b,
                 Err(_) => continue,
@@ -320,12 +381,16 @@ impl Index {
                 continue;
             }
             let modified = e.metadata().and_then(|m| m.modified()).ok();
+            seen.insert(digest.clone());
             receipts.push(Stored {
                 digest,
                 value,
                 modified,
             });
         }
+    }
+
+    fn sort(mut receipts: Vec<Stored>) -> Index {
         receipts.sort_by(|a, b| {
             a.finished_utc()
                 .cmp(b.finished_utc())
@@ -333,6 +398,45 @@ impl Index {
                 .then_with(|| a.digest.cmp(&b.digest))
         });
         Index { receipts }
+    }
+
+    /// Read verified `<digest>.json` receipts only from `store.dir()` itself.
+    pub fn load_local(store: &Store) -> Index {
+        let mut seen = std::collections::BTreeSet::new();
+        let mut receipts = Vec::new();
+        Self::load_dir(store.dir(), &mut seen, &mut receipts);
+        Self::sort(receipts)
+    }
+
+    /// Read every `<digest>.json` in the store (and, when `store.dir()` is a
+    /// per-commit `<40-hex>` directory, sibling commit directories of the same
+    /// repository). A file is skipped, never trusted, if its bytes do not hash
+    /// to its name, it is not JSON, or it does not carry the receipt schema.
+    /// Order is by recorded finish time, then by file modification time
+    /// (receipts finished in the same second), then by digest.
+    pub fn load(store: &Store) -> Index {
+        let mut seen = std::collections::BTreeSet::new();
+        let mut receipts = Vec::new();
+        Self::load_dir(store.dir(), &mut seen, &mut receipts);
+        if is_commit_dir(store.dir()) {
+            if let Some(parent) = store.dir().parent() {
+                if let Ok(rd) = fs::read_dir(parent) {
+                    let mut sib_dirs: Vec<PathBuf> = rd
+                        .flatten()
+                        .filter(|e| {
+                            e.file_name().to_str().is_some_and(is_commit_sha_hex)
+                                && e.path() != store.dir()
+                        })
+                        .map(|e| e.path())
+                        .collect();
+                    sib_dirs.sort();
+                    for d in sib_dirs {
+                        Self::load_dir(&d, &mut seen, &mut receipts);
+                    }
+                }
+            }
+        }
+        Self::sort(receipts)
     }
 
     /// Every verified receipt, oldest first.
@@ -681,6 +785,39 @@ mod tests {
             .filter(|e| e.file_name().to_string_lossy().starts_with(".tmp-"))
             .count();
         assert_eq!(leftovers, 0, "no temp file may be left behind");
+    }
+    #[test]
+    fn commit_stores_share_receipts_and_blobs_while_load_local_stays_scoped() {
+        let t = TempDir::new("ev-cross-commit");
+        let c1 = "1".repeat(40);
+        let c2 = "2".repeat(40);
+        let s1 = Store::new(&t.path().join(&c1));
+        let s2 = Store::new(&t.path().join(&c2));
+
+        let blob_sha = s1.put_blob(b"cross-commit stdout\n").expect("put_blob");
+        let (r1, _) = s1
+            .put_receipt(&receipt("G", &c1, "PASS", "2026-10-02T01:00:00Z"))
+            .expect("put_receipt");
+
+        // Local index on s2 has nothing yet, while cross-commit Index::load sees r1.
+        assert!(Index::load_local(&s2).is_empty());
+        let ix = Index::load(&s2);
+        assert_eq!(ix.len(), 1);
+        assert_eq!(ix.get(&r1).unwrap().commit(), c1);
+
+        // s2 sees the blob in sibling commit store s1 and can materialize it locally.
+        assert!(s2.blob_exists(&blob_sha));
+        assert!(!s2
+            .dir()
+            .join("blobs")
+            .join(format!("{blob_sha}.log"))
+            .is_file());
+        s2.ensure_local_blob(&blob_sha);
+        assert!(s2
+            .dir()
+            .join("blobs")
+            .join(format!("{blob_sha}.log"))
+            .is_file());
     }
 }
 

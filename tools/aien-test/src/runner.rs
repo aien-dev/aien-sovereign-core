@@ -63,6 +63,9 @@ pub struct Options {
     /// `--release`: qualification mode. No cache reuse and the tree must be
     /// clean even with `--allow-dirty`.
     pub release: bool,
+    /// Pinned sibling commits and repository pins included in `core.pins` and
+    /// `cache.key`.
+    pub pins: Value,
 }
 
 impl Options {
@@ -81,6 +84,7 @@ impl Options {
             sandbox: Sandbox::None,
             cargo_target_dir: None,
             release: false,
+            pins: json!([]),
         }
     }
 }
@@ -609,7 +613,7 @@ fn execute_gate(job: &Job<'_>, permit: Option<Permit<'_>>) -> Result<Outcome, Ru
         build_inputs_digest: id.inputs_digest.clone(),
         machine_digest: id.machine_digest.clone(),
         dependencies,
-        pins: json!([]),
+        pins: opts.pins.clone(),
         args_override: opts.args_override.clone(),
     };
     let cache_key = cache::key(&experiment, &index).map_err(fatal)?;
@@ -639,6 +643,11 @@ fn execute_gate(job: &Job<'_>, permit: Option<Permit<'_>>) -> Result<Outcome, Ru
                     "cache": cache::cache_member(&cache_key, Some(&src.digest), mode),
                     "timeout_exceeded": false,
                 });
+                for member in ["stdout_sha256", "stderr_sha256"] {
+                    if let Some(bsha) = src.value["core"][member].as_str() {
+                        store.ensure_local_blob(bsha);
+                    }
+                }
                 let receipt = build_receipt(cache::reused_core(src, &commit), volatile);
                 let (digest, path) = store.put_receipt(&receipt).map_err(fatal)?;
                 drop(permit);
@@ -764,7 +773,7 @@ fn execute_gate(job: &Job<'_>, permit: Option<Permit<'_>>) -> Result<Outcome, Ru
     core.insert("owner".into(), json!(m.owner));
     core.insert("manifest_digest".into(), json!(m.digest));
     core.insert("commit".into(), json!(commit));
-    core.insert("pins".into(), json!([]));
+    core.insert("pins".into(), opts.pins.clone());
     core.insert("tree_clean_before".into(), json!(before.is_empty()));
     core.insert("tree_clean_after".into(), json!(after.is_empty()));
     core.insert("commit_unchanged_after".into(), json!(!facts.head_moved));

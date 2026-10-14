@@ -515,13 +515,12 @@ fn provision_siblings(
     sha: &str,
     co: &Checkout,
     sibs: &[Sibling],
+    pins: &[Pin],
     notes: &mut Vec<String>,
-) -> Vec<(PathBuf, PathBuf)> {
+) -> (Vec<(PathBuf, PathBuf)>, Value) {
     let mut made = Vec::new();
-    if sibs.is_empty() {
-        return made;
-    }
-    if !co.nested {
+    let mut pin_entries: Vec<(String, String, String, String)> = Vec::new();
+    if !sibs.is_empty() && !co.nested {
         notes.push(format!(
             "siblings not provided: the worktree tool makes the old flat layout (update {})",
             cfg.wt_tool
@@ -529,7 +528,7 @@ fn provision_siblings(
                 .map(|t| t.display().to_string())
                 .unwrap_or_default()
         ));
-        return made;
+        return (made, json!([]));
     }
     for s in sibs {
         let src = cfg.clones.join(&s.source);
@@ -582,11 +581,32 @@ fn provision_siblings(
                     s.dir, s.source, s.git_ref, sib_sha
                 ));
                 made.push((src, path));
+                pin_entries.push((s.dir.clone(), s.source.clone(), s.git_ref.clone(), sib_sha));
             }
             Err(e) => notes.push(format!("sibling ../{}: not provided: {e}", s.dir)),
         }
     }
-    made
+    for p in pins {
+        pin_entries.push((
+            String::new(),
+            p.source.clone(),
+            "pin".to_string(),
+            p.sha.clone(),
+        ));
+    }
+    pin_entries.sort();
+    let pin_json: Vec<Value> = pin_entries
+        .into_iter()
+        .map(|(dir, source, git_ref, commit)| {
+            json!({
+                "dir": dir,
+                "source": source,
+                "ref": git_ref,
+                "commit": commit,
+            })
+        })
+        .collect();
+    (made, Value::Array(pin_json))
 }
 
 /// Under `Sandbox::User`: make the worktree with INFRA's `wt.sh` (`sync` the
@@ -815,15 +835,16 @@ pub fn run_once(cfg: &Config, repo: &str, sha: &str) -> Result<Summary, String> 
     cfg.state.beat(repo, sha, "checkout");
     let co = checkout(cfg, repo, sha, &mut notes)?;
     ensure_pins(&cfg.clones, &pins, &sibs, &mut notes);
-    let made = provision_siblings(cfg, repo, sha, &co, &sibs, &mut notes);
+    let (made, pin_values) = provision_siblings(cfg, repo, sha, &co, &sibs, &pins, &mut notes);
     let (clone, wt) = (co.clone.clone(), co.wt.clone());
     // A wt.sh worktree belongs to aien-run; the operator's git opens it only
     // after `check_worktree_link` (see `process::trust_worktree`).
     let trust = (cfg.sandbox == Sandbox::User).then(|| process::trust_worktree(&wt));
-    // A sibling is outside the tree the cache key covers, so a head with
-    // siblings never reuses an earlier result: every gate runs fresh.
-    let fresh = !sibs.is_empty();
-    let result = run_in_worktree(cfg, repo, sha, &clone, &wt, fresh, &mut notes);
+    // Provisioned sibling commits are bound into `opts.pins` (`core.pins` and
+    // `cache.key`). Only disable the cache when a declared sibling could not be
+    // provisioned (`made.len() < sibs.len()`).
+    let fresh = made.len() < sibs.len();
+    let result = run_in_worktree(cfg, repo, sha, &co, fresh, pin_values, &mut notes);
     crumb(
         cfg,
         &wt,
@@ -858,11 +879,12 @@ fn run_in_worktree(
     cfg: &Config,
     repo: &str,
     sha: &str,
-    clone: &Path,
-    wt: &Path,
+    co: &Checkout,
     fresh: bool,
+    pins: Value,
     notes: &mut Vec<String>,
 ) -> Result<Summary, String> {
+    let (clone, wt) = (co.clone.as_path(), co.wt.as_path());
     let started = now_secs();
     crumb(
         cfg,
@@ -897,6 +919,7 @@ fn run_in_worktree(
     opts.sandbox = cfg.sandbox;
     opts.cargo_target_dir = target_dir_for(cfg, repo, on_main);
     opts.pool_sizes = opts.pool_sizes.with(cfg.jobs);
+    opts.pins = pins;
     if fresh || cfg.no_cache {
         opts.no_cache = true;
     }
