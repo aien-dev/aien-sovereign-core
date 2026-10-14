@@ -862,7 +862,7 @@ pub fn probe_cached(root: &Path, graph: &Graph, opts: &crate::runner::Options) -
                     build_inputs_digest: id.inputs_digest.clone(),
                     machine_digest: id.machine_digest.clone(),
                     dependencies: deps,
-                    pins: json!([]),
+                    pins: opts.pins.clone(),
                     args_override: None,
                 };
                 if let Ok(k) = cache::key(&now, &index) {

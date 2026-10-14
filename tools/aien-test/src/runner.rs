@@ -63,6 +63,9 @@ pub struct Options {
     /// `--release`: qualification mode. No cache reuse and the tree must be
     /// clean even with `--allow-dirty`.
     pub release: bool,
+    /// `core.pins` and part of `cache.key` (ADR 0028: `{name, commit}` sorted
+    /// by `name`). The worker sets the head's sibling and operator pins.
+    pub pins: Value,
 }
 
 impl Options {
@@ -81,6 +84,7 @@ impl Options {
             sandbox: Sandbox::None,
             cargo_target_dir: None,
             release: false,
+            pins: json!([]),
         }
     }
 }
@@ -609,7 +613,7 @@ fn execute_gate(job: &Job<'_>, permit: Option<Permit<'_>>) -> Result<Outcome, Ru
         build_inputs_digest: id.inputs_digest.clone(),
         machine_digest: id.machine_digest.clone(),
         dependencies,
-        pins: json!([]),
+        pins: opts.pins.clone(),
         args_override: opts.args_override.clone(),
     };
     let cache_key = cache::key(&experiment, &index).map_err(fatal)?;
@@ -764,7 +768,7 @@ fn execute_gate(job: &Job<'_>, permit: Option<Permit<'_>>) -> Result<Outcome, Ru
     core.insert("owner".into(), json!(m.owner));
     core.insert("manifest_digest".into(), json!(m.digest));
     core.insert("commit".into(), json!(commit));
-    core.insert("pins".into(), json!([]));
+    core.insert("pins".into(), opts.pins.clone());
     core.insert("tree_clean_before".into(), json!(before.is_empty()));
     core.insert("tree_clean_after".into(), json!(after.is_empty()));
     core.insert("commit_unchanged_after".into(), json!(!facts.head_moved));

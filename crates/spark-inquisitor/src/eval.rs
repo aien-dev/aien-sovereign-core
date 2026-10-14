@@ -10,13 +10,13 @@ impl EvalVerdict {
             format!(
                 r#"### 🌿 Sovereign Steward: Contributor Testimony Approved
 
-Greetings @{author}. Your affirmation has been evaluated against the Sovereign Constitution.
+Greetings @{author}. Your affirmation has been evaluated against the project standards.
 
 - **Alignment Score**: {score:.2}/1.00
-- **Constitutional Status**: Verified and Ratified
+- **Alignment Status**: Verified and Ratified
 - **Clearance**: `sovereign-interview-passed`
 
-Your affirmation of the Sovereign Contributor Oath and commitment to zero telemetry are accepted. Maintainers may proceed with technical review and merge.
+Your contributor certification and commitment to zero telemetry are accepted. Maintainers may proceed with technical review and merge.
 "#,
                 author = author,
                 score = self.score
@@ -25,13 +25,13 @@ Your affirmation of the Sovereign Contributor Oath and commitment to zero teleme
             format!(
                 r#"### 🌿 Sovereign Steward: Contributor Testimony Alignment Incomplete
 
-Greetings @{author}. Your affirmation has been evaluated against the Sovereign Constitution.
+Greetings @{author}. Your affirmation has been evaluated against the project standards.
 
 - **Alignment Score**: {score:.2}/1.00
-- **Constitutional Status**: Incomplete
+- **Alignment Status**: Incomplete
 - **Findings**: {reason}
 
-Please review the Sovereign Contributor Oath in `CONSTITUTION.md` and update your response addressing the flagged issues.
+Please review the contributor certification in the interview above and the project values in `COVENANT.md`, and update your response addressing the flagged issues.
 "#,
                 author = author,
                 score = self.score,
@@ -57,7 +57,7 @@ impl TestimonyEvaluator {
         if has_oath {
             score += 0.35;
         } else {
-            flags.push("Missing explicit oath affirmation");
+            flags.push("Missing explicit certification");
         }
 
         // 2. Checks for anti-surveillance / anti-telemetry commitment
@@ -113,7 +113,7 @@ impl TestimonyEvaluator {
 
         let approved = has_oath && has_anti_telemetry && has_sovereignty && score >= 0.70;
         let reason = if approved {
-            "Testimony aligns with the Sovereign Constitution. Oath ratified.".to_string()
+            "Testimony aligns with the project standards. Certification accepted.".to_string()
         } else {
             format!(
                 "Alignment insufficient (score {:.2}). Issues: {}",

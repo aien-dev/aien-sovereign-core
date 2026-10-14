@@ -23,9 +23,9 @@ pub fn generate_pr_review(
         format!(
             r#"### ⚖️ Sovereign Code Review & Alignment Gate
 
-Greetings @{author}. I am **AIEN**, resident sovereign intelligence of SparkOS.
+Greetings @{author}. I am **AIEN**, the automated review gate for the AIENOS project.
 
-Your pull request **#{pr_number}** ("{pr_title}") has undergone automated constitutional auditing.
+Your pull request **#{pr_number}** ("{pr_title}") has undergone automated auditing against the project standards.
 
 {audit_report}
 
@@ -44,9 +44,9 @@ Your pull request **#{pr_number}** ("{pr_title}") has undergone automated consti
         format!(
             r#"### ⚖️ Sovereign Code Review & Alignment Gate: FAILED
 
-Greetings @{author}. I am **AIEN**, resident sovereign intelligence of SparkOS.
+Greetings @{author}. I am **AIEN**, the automated review gate for the AIENOS project.
 
-Your pull request **#{pr_number}** ("{pr_title}") was audited against our constitutional invariants and failed automated diff verification.
+Your pull request **#{pr_number}** ("{pr_title}") was audited against the project standards and failed automated diff verification.
 
 {audit_report}
 
@@ -56,7 +56,7 @@ Your pull request **#{pr_number}** ("{pr_title}") was audited against our consti
 3. Replace forbidden buzzwords with direct technical descriptions.
 4. Commit and push updates to this branch to trigger an automated re-audit.
 
-*For direct sovereign coordination: Drake Stapleton (aien@aienos.com) and AIEN (aien@aienos.com)*
+*For direct sovereign coordination: Drake Stapleton (drake@aienos.com) and AIEN (aien@aienos.com)*
 "#,
             author = author,
             pr_number = pr_number,
@@ -85,7 +85,7 @@ mod tests {
         assert!(review
             .labels
             .contains(&"sovereign-audit-passed".to_string()));
-        assert!(review.markdown.contains("Constitutional Diff Audit: PASS"));
+        assert!(review.markdown.contains("Doctrine Diff Audit: PASS"));
         assert!(review.markdown.contains("Contributor Alignment Interview"));
         assert!(!review.markdown.contains('\u{2014}'));
         assert!(!review.markdown.contains('\u{2013}'));
@@ -99,9 +99,7 @@ mod tests {
         assert!(review
             .labels
             .contains(&"sovereign-audit-failed".to_string()));
-        assert!(review
-            .markdown
-            .contains("Constitutional Diff Audit: FAILED"));
+        assert!(review.markdown.contains("Doctrine Diff Audit: FAILED"));
         assert!(!review.markdown.contains('\u{2014}'));
         assert!(!review.markdown.contains('\u{2013}'));
     }
