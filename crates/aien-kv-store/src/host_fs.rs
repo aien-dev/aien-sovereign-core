@@ -183,6 +183,9 @@ pub struct HostFsConfig {
     pub purge_after_recovery: bool,
     pub worker: WorkerMode,
     pub faults: Option<Arc<dyn FaultHook>>,
+    /// The key every object is sealed with (ADR 0003 section 19). `None`:
+    /// `open` refuses (fail closed); there is no plaintext mode.
+    pub seal_key: Option<Arc<crate::seal::SealKey>>,
 }
 
 impl std::fmt::Debug for HostFsConfig {
@@ -226,6 +229,7 @@ impl HostFsConfig {
             purge_after_recovery: true,
             worker: WorkerMode::Thread,
             faults: None,
+            seal_key: None,
         };
         validate_config(&cfg)?;
         Ok(cfg)

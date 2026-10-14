@@ -334,6 +334,20 @@ pub struct KvPersistReport {
     pub kv_store_stale_completions_total: u64,
     pub kv_store_cancelled_total: u64,
     pub kv_store_queue_full_total: u64,
+    /// Empty unless persistence was refused at start (ADR 0003 section 19):
+    /// `key_missing` or `key_malformed` (`AIEN_KV_STORE_KEY`). With a reason the
+    /// state is `refused`: no park, no restore, every prompt is prefilled.
+    #[serde(default)]
+    pub kv_store_refused_reason: String,
+    /// Process total of store-key refusals (missing or malformed key).
+    #[serde(default)]
+    pub kv_store_key_refused_total: u64,
+    /// Process total of loads whose authenticated decryption failed (wrong
+    /// key, tampered bytes, swapped identity header); each object was
+    /// discarded and its prefix recomputed. Old plaintext-format files are
+    /// discarded at recovery and counted as corrupt there.
+    #[serde(default)]
+    pub kv_store_seal_rejected_total: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

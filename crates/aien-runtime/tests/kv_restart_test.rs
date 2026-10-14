@@ -157,10 +157,15 @@ fn private_tempdir() -> tempfile::TempDir {
         .expect("tempdir")
 }
 
+/// A generated test store key (ADR 0003 section 19), never a vault secret. The
+/// same key across "restarts" so restored objects open.
+const TEST_STORE_KEY: &str = "6b3f0c2d9a1e4f5b7c8d0e1f2a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d";
+
 fn settings(dir: &Path) -> KvPersistSettings {
     let dir = dir.to_string_lossy().to_string();
     KvPersistSettings::from_lookup(|k| match k {
         "AIEN_KV_STORE_DIR" => Some(dir.clone()),
+        "AIEN_KV_STORE_KEY" => Some(TEST_STORE_KEY.to_string()),
         "AIEN_KV_CHUNK_BLOCKS" => Some(CHUNK_BLOCKS.to_string()),
         _ => None,
     })
@@ -794,6 +799,90 @@ async fn persistence_off_when_store_dir_unset_changes_nothing() {
     assert!(finished(&spine, seq));
     assert_eq!(kv.read().free_block_count(), TOTAL_BLOCKS);
     assert_eq!(kv.read().holder_block_count(), 0, "nothing parked");
+}
+
+/// `AIEN_KV_STORE_DIR` set but `AIEN_KV_STORE_KEY` missing or malformed: fail
+/// closed (ADR 0003 section 19). No store is opened, nothing is written, no
+/// park and no restore; requests run as plain prefill, and the status says why.
+#[tokio::test]
+async fn persistence_refused_without_a_valid_store_key_runs_plain_and_says_why() {
+    let short = &TEST_STORE_KEY[..62];
+    let long = format!("{TEST_STORE_KEY}00");
+    for (label, key, reason) in [
+        ("missing", None, "key_missing"),
+        ("malformed", Some("not-a-key"), "key_malformed"),
+        ("short", Some(short), "key_malformed"),
+        ("long", Some(long.as_str()), "key_malformed"),
+    ] {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "aien-kv-c7-nokey-{label}-{}-{nanos}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let d = dir.to_string_lossy().to_string();
+        let s = KvPersistSettings::from_lookup(|k| match k {
+            "AIEN_KV_STORE_DIR" => Some(d.clone()),
+            "AIEN_KV_CHUNK_BLOCKS" => Some(CHUNK_BLOCKS.to_string()),
+            "AIEN_KV_STORE_KEY" => key.map(str::to_string),
+            _ => None,
+        })
+        .expect("a bad key is a refusal, not a start failure");
+        let kv = paint_pool();
+        let mut spine = AienRuntimeSpine::new(64, scheduler(), kv.clone());
+        let model = paint_model(1e-5);
+        let line = enable_persistent_kv(
+            &mut spine,
+            &s,
+            &ModelKvBinding {
+                model: &model,
+                arith_id: "c7-paint-backend",
+                model_sha256: [7; 32],
+                model_digest_kind: "sha256",
+            },
+            None,
+        )
+        .expect("refusal is not an error")
+        .expect("the refusal is announced");
+        assert!(
+            line.contains("REFUSED") && line.contains(reason),
+            "{label}: {line}"
+        );
+        assert!(spine.kv_residency().is_none(), "{label}: no store");
+        assert!(spine.kv_drain_handle().is_none());
+        let p = spine
+            .status_report()
+            .kv_persist
+            .expect("refusal is visible in the status");
+        assert_eq!(p.kv_store_state, "refused", "{label}");
+        assert_eq!(p.kv_store_refused_reason, reason, "{label}");
+        assert!(p.kv_store_key_refused_total >= 1, "{label}");
+        assert!(
+            std::fs::read_dir(&dir).unwrap().next().is_none(),
+            "{label}: nothing written under the store dir"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let rec = Arc::new(Mutex::new(Rec::default()));
+        let mut backend = PaintBackend { rec: rec.clone() };
+        let seq = spine.submit_request(request(&prompt14(), 2));
+        for _ in 0..5 {
+            spine.step(&mut backend).await.expect("step");
+        }
+        assert!(finished(&spine, seq), "{label}: plain prefill still serves");
+        assert_eq!(kv.read().holder_block_count(), 0, "{label}: nothing parked");
+    }
+}
+
+/// The settings Debug text never carries the store key.
+#[test]
+fn persistent_kv_settings_debug_never_shows_the_store_key() {
+    let s = settings(Path::new("/tmp/kv-c7-debug"));
+    let shown = format!("{s:?}");
+    assert!(!shown.contains(&TEST_STORE_KEY[..16]), "{shown}");
 }
 
 /// A bad persistent-KV setting stops the start, and the message names the

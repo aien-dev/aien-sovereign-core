@@ -15,6 +15,10 @@ pub const PAYLOAD_OFFSET: usize = 4096;
 pub const MAX_SEGMENTS: usize = 120;
 /// Region offset of the segment digest table.
 pub const SEGMENT_TABLE_OFFSET: usize = HEADER_LEN;
+/// Region offset of the 32-byte seal slot of a host object (ADR 0003 section
+/// 19): `"AKS"`, sealed format version, 12-byte nonce, 16-byte tag. Zero in
+/// a region `encode_region` returns; `seal::SealKey::seal_file` fills it.
+pub const SEAL_SLOT_OFFSET: usize = HEADER_REGION_LEN - 32;
 pub const FORMAT_VERSION: u16 = 1;
 pub const RECORD_KIND_CHUNK: u16 = 1;
 /// `flags` bit 0: the chunk holds fewer than `chunk_tokens` positions.

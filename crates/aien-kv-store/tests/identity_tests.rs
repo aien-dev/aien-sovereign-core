@@ -407,12 +407,13 @@ fn segments_follow_the_backend_format() {
 }
 
 #[test]
-fn host_chunk_blocks_are_capped_at_120() {
+fn host_chunk_blocks_are_capped_at_119() {
+    // (4064 - 256) / 32: the digest table ends where the seal slot starts.
     let mut f = sample();
-    f.chunk_tokens = 120 * f.block_size;
+    f.chunk_tokens = 119 * f.block_size;
     assert!(f.namespace_id().is_ok());
-    assert_eq!(f.segment_count(f.chunk_tokens).unwrap(), 120);
-    f.chunk_tokens = 121 * f.block_size;
+    assert_eq!(f.segment_count(f.chunk_tokens).unwrap(), 119);
+    f.chunk_tokens = 120 * f.block_size;
     assert_eq!(f.namespace_id(), Err(KvError::TooManySegments));
     // Native has one segment, so no block cap applies.
     f.backend_format = BackendFormat::NativeF32DecodeStateV1;

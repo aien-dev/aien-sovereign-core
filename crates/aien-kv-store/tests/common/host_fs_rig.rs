@@ -10,6 +10,7 @@
 use aien_kv_store::host_fs::{
     Boundary, FaultAction, FaultHook, HostFsConfig, HostFsStore, ScriptedFaults, WorkerMode,
 };
+use aien_kv_store::seal::SealKey;
 use aien_kv_store::{
     chunk_chain, payload_root, ChunkHeader, ChunkKey, Completion, HolderGuard, HolderHandle,
     Incarnation, JobId, KvStore, LayoutStrides, NamespaceFields, NamespaceId, PinnedDest,
@@ -241,6 +242,7 @@ impl Fx {
         c.max_objects = 1024;
         c.worker = WorkerMode::Manual;
         c.faults = Some(self.faults.clone());
+        c.seal_key = Some(test_key());
         c
     }
 
@@ -421,18 +423,42 @@ pub fn sha(data: &[u8]) -> [u8; 32] {
     Sha256::digest(data).into()
 }
 
-/// Write `region || payload` the way the adapter does; segment digests over
-/// `seg`-byte pieces.
-pub fn write_object_file(path: &Path, header: &ChunkHeader, payload: &[u8], seg: usize) {
+/// The store key every rig store and planted object uses: generated once per
+/// test process (ADR 0003 section 19), never a vault secret.
+pub fn test_key() -> Arc<SealKey> {
+    static KEY: OnceLock<Arc<SealKey>> = OnceLock::new();
+    KEY.get_or_init(|| Arc::new(SealKey::generate().expect("test key")))
+        .clone()
+}
+
+/// `region || payload` unsealed: the old (format 1) plaintext object bytes.
+pub fn plain_object_bytes(header: &ChunkHeader, payload: &[u8], seg: usize) -> Vec<u8> {
     let digests: Vec<[u8; 32]> = payload.chunks(seg).map(sha).collect();
     let rec = RecordHeader {
         chunk: *header,
         payload_sha256: payload_root(&digests),
     };
-    let region = rec.encode_region(&digests).unwrap();
-    let mut bytes = region.to_vec();
+    let mut bytes = rec.encode_region(&digests).unwrap().to_vec();
     bytes.extend_from_slice(payload);
+    bytes
+}
+
+/// Write a sealed object the way the adapter does (`region || ciphertext`,
+/// sealed with `test_key`); segment digests over `seg`-byte pieces.
+pub fn write_object_file(path: &Path, header: &ChunkHeader, payload: &[u8], seg: usize) {
+    let mut bytes = plain_object_bytes(header, payload, seg);
+    test_key().seal_file(&mut bytes).unwrap();
     std::fs::write(path, bytes).unwrap();
+}
+
+/// Decrypt an object file sealed with `test_key`: `region || payload`.
+pub fn read_object_plain(path: &Path) -> Vec<u8> {
+    let mut bytes = std::fs::read(path).unwrap();
+    let (region, payload) = bytes.split_at_mut(4096);
+    test_key()
+        .open_payload(region, payload)
+        .expect("object opens");
+    bytes
 }
 
 pub fn set_mtime(path: &Path, secs_after_epoch: u64) {

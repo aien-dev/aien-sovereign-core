@@ -660,6 +660,9 @@ impl KvResidency {
             kv_store_stale_completions_total: st.store_stale_completions_total,
             kv_store_cancelled_total: st.store_cancelled_total,
             kv_store_queue_full_total: st.store_queue_full_total,
+            kv_store_refused_reason: String::new(),
+            kv_store_key_refused_total: aien_kv_store::seal::key_refusals_total(),
+            kv_store_seal_rejected_total: aien_kv_store::seal::open_rejected_total(),
         }
     }
 

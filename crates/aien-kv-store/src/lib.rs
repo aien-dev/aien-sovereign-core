@@ -20,6 +20,8 @@ pub mod identity;
 pub mod index;
 pub mod pin;
 pub mod record;
+#[cfg(feature = "std")]
+pub mod seal;
 pub mod store;
 pub mod validate;
 #[cfg(feature = "std")]
