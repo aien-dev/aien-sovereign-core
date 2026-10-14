@@ -90,14 +90,25 @@ impl Tile {
     pub fn from_bytes(b: &[u8]) -> Self {
         let u64_at = |o: usize| u64::from_le_bytes(b[o..o + 8].try_into().expect("8 bytes"));
         let u32_at = |o: usize| u32::from_le_bytes(b[o..o + 4].try_into().expect("4 bytes"));
-        Self { w_va: u64_at(0), s_va: u64_at(8), row0: u32_at(16), cnt: u32_at(20), pad: u64_at(24) }
+        Self {
+            w_va: u64_at(0),
+            s_va: u64_at(8),
+            row0: u32_at(16),
+            cnt: u32_at(20),
+            pad: u64_at(24),
+        }
     }
 }
 
 /// The tile table for rows grouped by expert (`counts[e]` rows of expert `e`, experts in order),
 /// a Rust mirror of `omega_gpu_pf_qgemm_tiles_va`: experts with no rows get no tile, each tile
 /// covers up to `bm` rows of one expert, `row0` counts rows over all experts.
-pub fn build_tiles(bm: usize, w_va: &[u64], s_va: &[u64], counts: &[u32]) -> Result<Vec<Tile>, OmegaGpuError> {
+pub fn build_tiles(
+    bm: usize,
+    w_va: &[u64],
+    s_va: &[u64],
+    counts: &[u32],
+) -> Result<Vec<Tile>, OmegaGpuError> {
     if bm == 0 || w_va.len() != counts.len() || s_va.len() != counts.len() {
         return Err(bad(format!(
             "pf tiles: bm {bm}, {} weight / {} scale addresses for {} experts",
@@ -112,13 +123,22 @@ pub fn build_tiles(bm: usize, w_va: &[u64], s_va: &[u64], counts: &[u32]) -> Res
         let mut r = 0u32;
         while r < c {
             let cnt = (c - r).min(bm as u32);
-            tiles.push(Tile { w_va: w_va[e], s_va: s_va[e], row0: row + r, cnt, pad: 0 });
+            tiles.push(Tile {
+                w_va: w_va[e],
+                s_va: s_va[e],
+                row0: row + r,
+                cnt,
+                pad: 0,
+            });
             r += cnt;
         }
         row += c;
     }
     if tiles.len() > MAX_TILES {
-        return Err(bad(format!("pf tiles: {} tiles > {MAX_TILES}", tiles.len())));
+        return Err(bad(format!(
+            "pf tiles: {} tiles > {MAX_TILES}",
+            tiles.len()
+        )));
     }
     Ok(tiles)
 }
@@ -126,7 +146,9 @@ pub fn build_tiles(bm: usize, w_va: &[u64], s_va: &[u64], counts: &[u32]) -> Res
 /// Host check of the quantiser rule (`omega_pq_spec_ok`), before any chip call.
 pub fn check_quant(k: usize) -> Result<(), OmegaGpuError> {
     if !k.is_multiple_of(BLOCK) || !(BLOCK..=QUANT_MAX_K).contains(&k) {
-        return Err(bad(format!("pf quant k={k} refused: multiple of {BLOCK}, {BLOCK} <= k <= {QUANT_MAX_K}")));
+        return Err(bad(format!(
+            "pf quant k={k} refused: multiple of {BLOCK}, {BLOCK} <= k <= {QUANT_MAX_K}"
+        )));
     }
     Ok(())
 }
@@ -134,13 +156,19 @@ pub fn check_quant(k: usize) -> Result<(), OmegaGpuError> {
 /// Host check of the GEMM rule at the default shape (rt 4, 8 warps; `omega_qg_spec_ok`).
 pub fn check_qgemm(n: usize, k: usize, layout: Layout, ntiles: usize) -> Result<(), OmegaGpuError> {
     if !k.is_multiple_of(BLOCK) || !(BLOCK..=GEMM_MAX_K).contains(&k) {
-        return Err(bad(format!("pf qgemm k={k} refused: multiple of {BLOCK}, {BLOCK} <= k <= {GEMM_MAX_K}")));
+        return Err(bad(format!(
+            "pf qgemm k={k} refused: multiple of {BLOCK}, {BLOCK} <= k <= {GEMM_MAX_K}"
+        )));
     }
     if n == 0 || !n.is_multiple_of(DEFAULT_SPAN) || n * 4 * DEFAULT_BM >= 1 << 23 {
-        return Err(bad(format!("pf qgemm n={n} refused: positive multiple of {DEFAULT_SPAN}, n * 256 < 2^23")));
+        return Err(bad(format!(
+            "pf qgemm n={n} refused: positive multiple of {DEFAULT_SPAN}, n * 256 < 2^23"
+        )));
     }
     if layout == Layout::SwigluNat && !n.is_multiple_of(2 * BLOCK) {
-        return Err(bad(format!("pf qgemm SwiGLU n={n} refused: multiple of 256 (gate and up halves on scale blocks)")));
+        return Err(bad(format!(
+            "pf qgemm SwiGLU n={n} refused: multiple of 256 (gate and up halves on scale blocks)"
+        )));
     }
     if ntiles > MAX_TILES {
         return Err(bad(format!("pf qgemm {ntiles} tiles > {MAX_TILES}")));
@@ -187,7 +215,15 @@ pub trait PrefillDevice {
     /// Rows per GEMM tile (the GEMM reads activation rows up to `row0 + bm - 1` of every tile).
     fn qgemm_bm(&self) -> usize;
     /// Activation quantiser over `rows` rows of `k`.
-    fn quant(&mut self, k: usize, input: QuantIn, rows: usize, x_va: u64, q_va: u64, s_va: u64) -> Result<u64, String>;
+    fn quant(
+        &mut self,
+        k: usize,
+        input: QuantIn,
+        rows: usize,
+        x_va: u64,
+        q_va: u64,
+        s_va: u64,
+    ) -> Result<u64, String>;
     /// One grouped GEMM launch.
     fn qgemm(&mut self, call: &QgemmCall) -> Result<u64, String>;
     /// Device-to-device copy by address (16-byte multiples). Default: refused.
@@ -201,12 +237,29 @@ pub trait PrefillDevice {
     }
     /// Router logits for `rows` rows of `k` f32 at `x_va` against the packed weights at `wq_va`
     /// ([`pack_router`]) into f32 rows of `e` at `logits_va`; bit-identical to [`router_logits_ref`].
-    fn router_logits(&mut self, _k: usize, _e: usize, _rows: usize, _x_va: u64, _wq_va: u64, _logits_va: u64) -> Result<u64, String> {
+    fn router_logits(
+        &mut self,
+        _k: usize,
+        _e: usize,
+        _rows: usize,
+        _x_va: u64,
+        _wq_va: u64,
+        _logits_va: u64,
+    ) -> Result<u64, String> {
         Err("pf router logits: not offered by this device".into())
     }
     /// MoE weighted combine ([`moe_combine_ref`]): `out[r] = sum_slot wt[r][slot] * down[inv[r][slot]]`.
     #[allow(clippy::too_many_arguments)]
-    fn moe_combine(&mut self, _h: usize, _top_k: usize, _rows: usize, _down_va: u64, _inv_va: u64, _wt_va: u64, _out_va: u64) -> Result<u64, String> {
+    fn moe_combine(
+        &mut self,
+        _h: usize,
+        _top_k: usize,
+        _rows: usize,
+        _down_va: u64,
+        _inv_va: u64,
+        _wt_va: u64,
+        _out_va: u64,
+    ) -> Result<u64, String> {
         Err("pf moe combine: not offered by this device".into())
     }
 }
@@ -218,7 +271,16 @@ pub trait PrefillDevice {
 /// multiplied by `out_scale`. Returns chip nanoseconds.
 pub trait PrefillAttention {
     #[allow(clippy::too_many_arguments)]
-    fn attend(&mut self, layer: u32, pos0: u32, m: u32, qkv: &[f32], eps: f32, out_scale: f32, out: &mut [f32]) -> Result<u64, String>;
+    fn attend(
+        &mut self,
+        layer: u32,
+        pos0: u32,
+        m: u32,
+        qkv: &[f32],
+        eps: f32,
+        out_scale: f32,
+        out: &mut [f32],
+    ) -> Result<u64, String>;
     /// Whether [`Self::attend_dev`] is available.
     fn has_dev(&self) -> bool {
         false
@@ -226,7 +288,16 @@ pub trait PrefillAttention {
     /// The device-pointer variant (`omega_gpu_prefill_attn_dev`): `qkv_va` f32 `[m][5120]` and
     /// `out_va` f32 `[m][4096]` rows in session memory (no host copies). `None`: not offered.
     #[allow(clippy::too_many_arguments)]
-    fn attend_dev(&mut self, layer: u32, pos0: u32, m: u32, qkv_va: u64, eps: f32, out_scale: f32, out_va: u64) -> Option<Result<u64, String>> {
+    fn attend_dev(
+        &mut self,
+        layer: u32,
+        pos0: u32,
+        m: u32,
+        qkv_va: u64,
+        eps: f32,
+        out_scale: f32,
+        out_va: u64,
+    ) -> Option<Result<u64, String>> {
         let _ = (layer, pos0, m, qkv_va, eps, out_scale, out_va);
         None
     }
@@ -255,7 +326,14 @@ pub struct OmegaGpuMem {
 
 impl Default for OmegaGpuMem {
     fn default() -> Self {
-        Self { handle_index: 0, handle_generation: 0, kind: 0, cpu: std::ptr::null_mut(), va: 0, size: 0 }
+        Self {
+            handle_index: 0,
+            handle_generation: 0,
+            kind: 0,
+            cpu: std::ptr::null_mut(),
+            va: 0,
+            size: 0,
+        }
     }
 }
 
@@ -290,9 +368,24 @@ mod ffi {
         pub fn omega_gpu_pf_copy_va(dst_va: u64, src_va: u64, bytes: usize) -> i32;
         pub fn omega_gpu_pf_stats(chip_ns: *mut u64, launches: *mut u64);
         pub fn omega_gpu_pf_stats_reset();
-        pub fn omega_gpu_pf_quant(k: u32, in_type: u32, rows: u32, x_va: u64, q_va: u64, s_va: u64, ns: *mut u64) -> i32;
+        pub fn omega_gpu_pf_quant(
+            k: u32,
+            in_type: u32,
+            rows: u32,
+            x_va: u64,
+            q_va: u64,
+            s_va: u64,
+            ns: *mut u64,
+        ) -> i32;
         pub fn omega_gpu_pf_qgemm_bm() -> u32;
-        pub fn omega_gpu_pf_qgemm_tiles_va(experts: u32, w_va: *const u64, s_va: *const u64, counts: *const u32, tab: *mut c_void, max: u32) -> u32;
+        pub fn omega_gpu_pf_qgemm_tiles_va(
+            experts: u32,
+            w_va: *const u64,
+            s_va: *const u64,
+            counts: *const u32,
+            tab: *mut c_void,
+            max: u32,
+        ) -> u32;
         pub fn omega_gpu_pf_qgemm(
             n: u32,
             k: u32,
@@ -314,8 +407,25 @@ mod ffi_host {
     extern "C" {
         pub fn omega_gpu_pf_router_rows() -> u32;
         pub fn omega_gpu_pf_router_pack(e: u32, k: u32, w: *const f32, wq: *mut f32);
-        pub fn omega_gpu_pf_router_logits(k: u32, e: u32, rows: u32, x_va: u64, wq_va: u64, logits_va: u64, ns: *mut u64) -> i32;
-        pub fn omega_gpu_pf_moe_combine(h: u32, top_k: u32, rows: u32, down_va: u64, inv_va: u64, wt_va: u64, out_va: u64, ns: *mut u64) -> i32;
+        pub fn omega_gpu_pf_router_logits(
+            k: u32,
+            e: u32,
+            rows: u32,
+            x_va: u64,
+            wq_va: u64,
+            logits_va: u64,
+            ns: *mut u64,
+        ) -> i32;
+        pub fn omega_gpu_pf_moe_combine(
+            h: u32,
+            top_k: u32,
+            rows: u32,
+            down_va: u64,
+            inv_va: u64,
+            wt_va: u64,
+            out_va: u64,
+            ns: *mut u64,
+        ) -> i32;
     }
 }
 
@@ -332,11 +442,15 @@ pub fn router_packed_len(e: usize, k: usize) -> usize {
 /// Packs a router `w` (f32 `[e][k]`, row = expert) into the kernel's layout R4:
 /// `wq[g][ex][q] = w[ex][4g + q]`, then one zero pad group (omega_gpu_pf_router_pack).
 pub fn pack_router(e: usize, k: usize, w: &[f32]) -> Vec<f32> {
-    assert!(k.is_multiple_of(4) && w.len() == e * k, "pack_router: w must be e x k with k a multiple of 4");
+    assert!(
+        k.is_multiple_of(4) && w.len() == e * k,
+        "pack_router: w must be e x k with k a multiple of 4"
+    );
     let mut wq = vec![0.0f32; router_packed_len(e, k)];
     for g in 0..k / 4 {
         for ex in 0..e {
-            wq[(g * e + ex) * 4..(g * e + ex) * 4 + 4].copy_from_slice(&w[ex * k + 4 * g..ex * k + 4 * g + 4]);
+            wq[(g * e + ex) * 4..(g * e + ex) * 4 + 4]
+                .copy_from_slice(&w[ex * k + 4 * g..ex * k + 4 * g + 4]);
         }
     }
     wq
@@ -345,13 +459,17 @@ pub fn pack_router(e: usize, k: usize, w: &[f32]) -> Vec<f32> {
 /// The C packer (omega_gpu_pf_router_pack), for checking [`pack_router`] against it.
 pub fn pack_router_c(e: usize, k: usize, w: &[f32]) -> Result<Vec<f32>, OmegaGpuError> {
     if !k.is_multiple_of(4) || w.len() != e * k {
-        return Err(bad("pack_router_c: w must be e x k with k a multiple of 4".into()));
+        return Err(bad(
+            "pack_router_c: w must be e x k with k a multiple of 4".into()
+        ));
     }
     #[cfg(has_omega_pfhost)]
     {
         let mut wq = vec![f32::NAN; router_packed_len(e, k)];
         // SAFETY: w has e * k floats, wq router_packed_len(e, k) (the C packer's size).
-        unsafe { ffi_host::omega_gpu_pf_router_pack(e as u32, k as u32, w.as_ptr(), wq.as_mut_ptr()) };
+        unsafe {
+            ffi_host::omega_gpu_pf_router_pack(e as u32, k as u32, w.as_ptr(), wq.as_mut_ptr())
+        };
         Ok(wq)
     }
     #[cfg(not(has_omega_pfhost))]
@@ -376,7 +494,15 @@ pub fn router_logits_ref(k: usize, e: usize, rows: usize, x: &[f32], wq: &[f32],
 
 /// Host mirror of the combine kernel: `out[r][c]` = the sum from +0.0, in slot order, of
 /// `wt[r][slot] * down[inv[r][slot]][c]` (the driver's combine accumulator).
-pub fn moe_combine_ref(h: usize, top_k: usize, rows: usize, down: &[f32], inv: &[u32], wt: &[f32], out: &mut [f32]) {
+pub fn moe_combine_ref(
+    h: usize,
+    top_k: usize,
+    rows: usize,
+    down: &[f32],
+    inv: &[u32],
+    wt: &[f32],
+    out: &mut [f32],
+) {
     for r in 0..rows {
         for c in 0..h {
             let mut acc = 0.0f32;
@@ -429,7 +555,11 @@ fn bad(name: String) -> OmegaGpuError {
 #[cfg(any(has_omega_pf, has_omega_pattn))]
 fn cstr(p: *const std::os::raw::c_char) -> Option<String> {
     // SAFETY: omega returns static NUL-terminated strings or NULL.
-    (!p.is_null()).then(|| unsafe { std::ffi::CStr::from_ptr(p) }.to_string_lossy().into_owned())
+    (!p.is_null()).then(|| {
+        unsafe { std::ffi::CStr::from_ptr(p) }
+            .to_string_lossy()
+            .into_owned()
+    })
 }
 
 #[cfg(has_omega_pf)]
@@ -446,7 +576,8 @@ fn rc_err(rc: i32) -> OmegaGpuError {
 #[cfg(has_omega_pattn)]
 fn attn_rc_err(rc: i32) -> OmegaGpuError {
     // SAFETY: as rc_err.
-    let name = cstr(unsafe { ffi_attn::omega_gpu_decode_attn_rc_name(rc) }).unwrap_or_else(|| "?".into());
+    let name =
+        cstr(unsafe { ffi_attn::omega_gpu_decode_attn_rc_name(rc) }).unwrap_or_else(|| "?".into());
     let name = match cstr(unsafe { ffi_attn::omega_gpu_decode_attn_last_error() }) {
         Some(e) => format!("{name}: {e}"),
         None => name,
@@ -487,7 +618,9 @@ impl PfMem {
             if mem.va == 0 || (mem.size as usize) < bytes || (host && mem.cpu.is_null()) {
                 // SAFETY: the buffer came from the alloc above.
                 unsafe { ffi::omega_gpu_pf_free(&mut mem) };
-                return Err(bad(format!("pf alloc of {bytes} bytes returned no usable view")));
+                return Err(bad(format!(
+                    "pf alloc of {bytes} bytes returned no usable view"
+                )));
             }
             Ok(Self { mem, bytes, host })
         }
@@ -517,11 +650,13 @@ impl PfBuffer for PfMem {
     fn host(&self) -> Option<&[u8]> {
         // SAFETY: a host buffer's CPU view covers `bytes` and lives until drop; launches are
         // synchronous, so the GPU does not write it while this borrow is in use.
-        self.host.then(|| unsafe { std::slice::from_raw_parts(self.mem.cpu as *const u8, self.bytes) })
+        self.host
+            .then(|| unsafe { std::slice::from_raw_parts(self.mem.cpu as *const u8, self.bytes) })
     }
     fn host_mut(&mut self) -> Option<&mut [u8]> {
         // SAFETY: as host(); &mut self makes the view exclusive.
-        self.host.then(|| unsafe { std::slice::from_raw_parts_mut(self.mem.cpu as *mut u8, self.bytes) })
+        self.host
+            .then(|| unsafe { std::slice::from_raw_parts_mut(self.mem.cpu as *mut u8, self.bytes) })
     }
 }
 
@@ -562,9 +697,16 @@ impl OmegaPfDevice {
         }
     }
     /// The C tile builder (`omega_gpu_pf_qgemm_tiles_va`), for checking [`build_tiles`] against it.
-    pub fn tiles_va_c(&self, w_va: &[u64], s_va: &[u64], counts: &[u32]) -> Result<Vec<Tile>, OmegaGpuError> {
+    pub fn tiles_va_c(
+        &self,
+        w_va: &[u64],
+        s_va: &[u64],
+        counts: &[u32],
+    ) -> Result<Vec<Tile>, OmegaGpuError> {
         if w_va.len() != counts.len() || s_va.len() != counts.len() || counts.is_empty() {
-            return Err(bad("pf tiles_va: one weight and scale address per expert".into()));
+            return Err(bad(
+                "pf tiles_va: one weight and scale address per expert".into()
+            ));
         }
         #[cfg(has_omega_pf)]
         {
@@ -606,15 +748,39 @@ impl PrefillDevice for OmegaPfDevice {
             None
         }
     }
-    fn router_logits(&mut self, k: usize, e: usize, rows: usize, x_va: u64, wq_va: u64, logits_va: u64) -> Result<u64, String> {
-        if x_va == 0 || wq_va == 0 || logits_va == 0 || rows > u32::MAX as usize || k > u32::MAX as usize || e > u32::MAX as usize {
+    fn router_logits(
+        &mut self,
+        k: usize,
+        e: usize,
+        rows: usize,
+        x_va: u64,
+        wq_va: u64,
+        logits_va: u64,
+    ) -> Result<u64, String> {
+        if x_va == 0
+            || wq_va == 0
+            || logits_va == 0
+            || rows > u32::MAX as usize
+            || k > u32::MAX as usize
+            || e > u32::MAX as usize
+        {
             return Err(format!("pf router logits: null address or {rows} rows"));
         }
         #[cfg(has_omega_pfhost)]
         {
             let mut ns = 0u64;
             // SAFETY: plain values and one out pointer; the addresses are session buffers the caller owns.
-            let rc = unsafe { ffi_host::omega_gpu_pf_router_logits(k as u32, e as u32, rows as u32, x_va, wq_va, logits_va, &mut ns) };
+            let rc = unsafe {
+                ffi_host::omega_gpu_pf_router_logits(
+                    k as u32,
+                    e as u32,
+                    rows as u32,
+                    x_va,
+                    wq_va,
+                    logits_va,
+                    &mut ns,
+                )
+            };
             if rc != 0 {
                 return Err(rc_err(rc).to_string());
             }
@@ -625,15 +791,42 @@ impl PrefillDevice for OmegaPfDevice {
             Err(OmegaGpuError::Unavailable.to_string())
         }
     }
-    fn moe_combine(&mut self, h: usize, top_k: usize, rows: usize, down_va: u64, inv_va: u64, wt_va: u64, out_va: u64) -> Result<u64, String> {
-        if down_va == 0 || inv_va == 0 || wt_va == 0 || out_va == 0 || rows > u32::MAX as usize || h > u32::MAX as usize || top_k > u32::MAX as usize {
+    fn moe_combine(
+        &mut self,
+        h: usize,
+        top_k: usize,
+        rows: usize,
+        down_va: u64,
+        inv_va: u64,
+        wt_va: u64,
+        out_va: u64,
+    ) -> Result<u64, String> {
+        if down_va == 0
+            || inv_va == 0
+            || wt_va == 0
+            || out_va == 0
+            || rows > u32::MAX as usize
+            || h > u32::MAX as usize
+            || top_k > u32::MAX as usize
+        {
             return Err(format!("pf moe combine: null address or {rows} rows"));
         }
         #[cfg(has_omega_pfhost)]
         {
             let mut ns = 0u64;
             // SAFETY: plain values and one out pointer; the addresses are session buffers the caller owns.
-            let rc = unsafe { ffi_host::omega_gpu_pf_moe_combine(h as u32, top_k as u32, rows as u32, down_va, inv_va, wt_va, out_va, &mut ns) };
+            let rc = unsafe {
+                ffi_host::omega_gpu_pf_moe_combine(
+                    h as u32,
+                    top_k as u32,
+                    rows as u32,
+                    down_va,
+                    inv_va,
+                    wt_va,
+                    out_va,
+                    &mut ns,
+                )
+            };
             if rc != 0 {
                 return Err(rc_err(rc).to_string());
             }
@@ -646,7 +839,9 @@ impl PrefillDevice for OmegaPfDevice {
     }
     fn copy_va(&mut self, dst_va: u64, src_va: u64, bytes: usize) -> Result<(), String> {
         if dst_va == 0 || src_va == 0 || dst_va % 16 != 0 || src_va % 16 != 0 || bytes % 16 != 0 {
-            return Err(format!("pf copy: addresses and {bytes} bytes must be non-zero 16-byte multiples"));
+            return Err(format!(
+                "pf copy: addresses and {bytes} bytes must be non-zero 16-byte multiples"
+            ));
         }
         #[cfg(has_omega_pf)]
         {
@@ -679,7 +874,15 @@ impl PrefillDevice for OmegaPfDevice {
             DEFAULT_BM
         }
     }
-    fn quant(&mut self, k: usize, input: QuantIn, rows: usize, x_va: u64, q_va: u64, s_va: u64) -> Result<u64, String> {
+    fn quant(
+        &mut self,
+        k: usize,
+        input: QuantIn,
+        rows: usize,
+        x_va: u64,
+        q_va: u64,
+        s_va: u64,
+    ) -> Result<u64, String> {
         check_quant(k).map_err(|e| e.to_string())?;
         if x_va == 0 || q_va == 0 || s_va == 0 || rows > u32::MAX as usize {
             return Err(format!("pf quant: null address or {rows} rows"));
@@ -688,7 +891,17 @@ impl PrefillDevice for OmegaPfDevice {
         {
             let mut ns = 0u64;
             // SAFETY: plain values and one out pointer; the addresses are session buffers the caller owns.
-            let rc = unsafe { ffi::omega_gpu_pf_quant(k as u32, input as u32, rows as u32, x_va, q_va, s_va, &mut ns) };
+            let rc = unsafe {
+                ffi::omega_gpu_pf_quant(
+                    k as u32,
+                    input as u32,
+                    rows as u32,
+                    x_va,
+                    q_va,
+                    s_va,
+                    &mut ns,
+                )
+            };
             if rc != 0 {
                 return Err(rc_err(rc).to_string());
             }
@@ -743,7 +956,12 @@ pub struct OmegaPrefillAttention<'a> {
 
 impl std::fmt::Debug for OmegaPrefillAttention<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "OmegaPrefillAttention {{ layers: {}, max_pos: {} }}", self.cache.layers(), self.cache.max_pos())
+        write!(
+            f,
+            "OmegaPrefillAttention {{ layers: {}, max_pos: {} }}",
+            self.cache.layers(),
+            self.cache.max_pos()
+        )
     }
 }
 
@@ -752,7 +970,10 @@ impl<'a> OmegaPrefillAttention<'a> {
         Self { cache }
     }
     fn check(&self, layer: u32, pos0: u32, m: u32) -> Result<(), String> {
-        if m == 0 || layer as usize >= self.cache.layers() || pos0 as usize + m as usize > self.cache.max_pos() {
+        if m == 0
+            || layer as usize >= self.cache.layers()
+            || pos0 as usize + m as usize > self.cache.max_pos()
+        {
             return Err(format!(
                 "prefill attn layer {layer} pos0 {pos0} m {m} refused: m >= 1, layer < {}, pos0 + m <= {}",
                 self.cache.layers(),
@@ -764,7 +985,16 @@ impl<'a> OmegaPrefillAttention<'a> {
 }
 
 impl PrefillAttention for OmegaPrefillAttention<'_> {
-    fn attend(&mut self, layer: u32, pos0: u32, m: u32, qkv: &[f32], eps: f32, out_scale: f32, out: &mut [f32]) -> Result<u64, String> {
+    fn attend(
+        &mut self,
+        layer: u32,
+        pos0: u32,
+        m: u32,
+        qkv: &[f32],
+        eps: f32,
+        out_scale: f32,
+        out: &mut [f32],
+    ) -> Result<u64, String> {
         self.check(layer, pos0, m)?;
         let mu = m as usize;
         if qkv.len() != mu * ATTN_QKV_WORDS || out.len() != mu * ATTN_OUT_WORDS {
@@ -784,7 +1014,19 @@ impl PrefillAttention for OmegaPrefillAttention<'_> {
             }
             let mut info = PrefillAttnInfo::default();
             // SAFETY: lengths and ranges checked; the cache is exclusively borrowed for the call.
-            let rc = unsafe { ffi_attn::omega_gpu_prefill_attn(c, layer, pos0, m, qkv.as_ptr(), eps, out_scale, out.as_mut_ptr(), &mut info) };
+            let rc = unsafe {
+                ffi_attn::omega_gpu_prefill_attn(
+                    c,
+                    layer,
+                    pos0,
+                    m,
+                    qkv.as_ptr(),
+                    eps,
+                    out_scale,
+                    out.as_mut_ptr(),
+                    &mut info,
+                )
+            };
             if rc != 0 {
                 return Err(attn_rc_err(rc).to_string());
             }
@@ -799,24 +1041,45 @@ impl PrefillAttention for OmegaPrefillAttention<'_> {
     fn has_dev(&self) -> bool {
         has_attention_dev()
     }
-    fn attend_dev(&mut self, layer: u32, pos0: u32, m: u32, qkv_va: u64, eps: f32, out_scale: f32, out_va: u64) -> Option<Result<u64, String>> {
+    fn attend_dev(
+        &mut self,
+        layer: u32,
+        pos0: u32,
+        m: u32,
+        qkv_va: u64,
+        eps: f32,
+        out_scale: f32,
+        out_va: u64,
+    ) -> Option<Result<u64, String>> {
         #[cfg(has_omega_pattn_dev)]
         {
             if let Err(e) = self.check(layer, pos0, m) {
                 return Some(Err(e));
             }
             if qkv_va == 0 || out_va == 0 || qkv_va % 16 != 0 || out_va % 16 != 0 {
-                return Some(Err("prefill attn dev: addresses must be non-zero and 16-byte aligned".into()));
+                return Some(Err(
+                    "prefill attn dev: addresses must be non-zero and 16-byte aligned".into(),
+                ));
             }
             let c = self.cache.raw_handle();
             if c.is_null() {
-                return Some(Err("prefill attn: the decode attention cache is a stub".into()));
+                return Some(Err(
+                    "prefill attn: the decode attention cache is a stub".into()
+                ));
             }
             let mut info = PrefillAttnInfo::default();
             // SAFETY: ranges checked; the addresses are session buffers the caller owns; the cache is
             // exclusively borrowed for the call.
-            let rc = unsafe { ffi_attn::omega_gpu_prefill_attn_dev(c, layer, pos0, m, qkv_va, eps, out_scale, out_va, &mut info) };
-            Some(if rc != 0 { Err(attn_rc_err(rc).to_string()) } else { Ok(info.elapsed_ns) })
+            let rc = unsafe {
+                ffi_attn::omega_gpu_prefill_attn_dev(
+                    c, layer, pos0, m, qkv_va, eps, out_scale, out_va, &mut info,
+                )
+            };
+            Some(if rc != 0 {
+                Err(attn_rc_err(rc).to_string())
+            } else {
+                Ok(info.elapsed_ns)
+            })
         }
         #[cfg(not(has_omega_pattn_dev))]
         {
@@ -832,7 +1095,13 @@ mod tests {
 
     #[test]
     fn tile_bytes_match_the_c_layout() {
-        let t = Tile { w_va: 0x1122_3344_5566_7788, s_va: 0x99aa_bbcc_ddee_ff00, row0: 7, cnt: 64, pad: 0 };
+        let t = Tile {
+            w_va: 0x1122_3344_5566_7788,
+            s_va: 0x99aa_bbcc_ddee_ff00,
+            row0: 7,
+            cnt: 64,
+            pad: 0,
+        };
         let b = t.to_bytes();
         assert_eq!(&b[0..8], &0x1122_3344_5566_7788u64.to_le_bytes());
         assert_eq!(&b[16..20], &7u32.to_le_bytes());
@@ -847,7 +1116,10 @@ mod tests {
         // expert 0: 130 rows (3 tiles: 64, 64, 2), expert 1: none, expert 2: 64 rows (1 tile)
         let t = build_tiles(64, &[10, 20, 30], &[11, 21, 31], &[130, 0, 64]).unwrap();
         let rows: Vec<(u64, u32, u32)> = t.iter().map(|t| (t.w_va, t.row0, t.cnt)).collect();
-        assert_eq!(rows, vec![(10, 0, 64), (10, 64, 64), (10, 128, 2), (30, 130, 64)]);
+        assert_eq!(
+            rows,
+            vec![(10, 0, 64), (10, 64, 64), (10, 128, 2), (30, 130, 64)]
+        );
         assert!(t.iter().all(|t| t.s_va == t.w_va + 1 && t.pad == 0));
         assert!(build_tiles(64, &[1], &[1, 2], &[3]).is_err());
         assert!(build_tiles(0, &[1], &[1], &[3]).is_err());
@@ -861,9 +1133,15 @@ mod tests {
         assert!(check_qgemm(2048, 4096, Layout::Plain, 1).is_ok());
         assert!(check_qgemm(1536, 2048, Layout::SwigluNat, 1).is_ok());
         assert!(check_qgemm(2048, 768, Layout::Plain, 1).is_ok());
-        assert!(check_qgemm(384, 2048, Layout::SwigluNat, 1).is_err(), "SwiGLU n must be a multiple of 256");
+        assert!(
+            check_qgemm(384, 2048, Layout::SwigluNat, 1).is_err(),
+            "SwiGLU n must be a multiple of 256"
+        );
         assert!(check_qgemm(100, 2048, Layout::Plain, 1).is_err());
-        assert!(check_qgemm(32768, 2048, Layout::Plain, 1).is_err(), "n * 256 >= 2^23");
+        assert!(
+            check_qgemm(32768, 2048, Layout::Plain, 1).is_err(),
+            "n * 256 >= 2^23"
+        );
         assert!(check_qgemm(128, 2048, Layout::Plain, MAX_TILES + 1).is_err());
     }
 
@@ -886,15 +1164,24 @@ mod tests {
         let counts = [130u32, 0, 64, 1, 0, 200];
         let w: Vec<u64> = (0..6).map(|e| 0x1000 * (e + 1)).collect();
         let s: Vec<u64> = (0..6).map(|e| 0x10_0000 + e).collect();
-        assert_eq!(build_tiles(bm, &w, &s, &counts).unwrap(), d.tiles_va_c(&w, &s, &counts).unwrap());
+        assert_eq!(
+            build_tiles(bm, &w, &s, &counts).unwrap(),
+            d.tiles_va_c(&w, &s, &counts).unwrap()
+        );
     }
 
     #[cfg(not(has_omega_pf))]
     #[test]
     fn stub_refuses() {
         let mut d = OmegaPfDevice;
-        assert!(matches!(PfMem::alloc_dev(64), Err(OmegaGpuError::Unavailable)));
-        assert!(d.quant(2048, QuantIn::F32, 1, 1, 1, 1).unwrap_err().contains("unavailable"));
+        assert!(matches!(
+            PfMem::alloc_dev(64),
+            Err(OmegaGpuError::Unavailable)
+        ));
+        assert!(d
+            .quant(2048, QuantIn::F32, 1, 1, 1, 1)
+            .unwrap_err()
+            .contains("unavailable"));
         assert_eq!(d.qgemm_bm(), DEFAULT_BM);
     }
 
@@ -902,7 +1189,9 @@ mod tests {
     fn lcg_vec(seed: &mut u64, n: usize, scale: f32) -> Vec<f32> {
         (0..n)
             .map(|_| {
-                *seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                *seed = seed
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
                 ((*seed >> 40) as f32 / (1u64 << 24) as f32 * 2.0 - 1.0) * scale
             })
             .collect()
@@ -917,13 +1206,24 @@ mod tests {
         x[2 * k..3 * k].fill(-0.0); // signed-zero products: the sign of the sum depends on the -0.0 start
         let wq = pack_router(e, k, &w);
         assert_eq!(wq.len(), router_packed_len(e, k));
-        assert!(wq[(k / 4) * e * 4..].iter().all(|&v| v.to_bits() == 0), "pad group is zero");
+        assert!(
+            wq[(k / 4) * e * 4..].iter().all(|&v| v.to_bits() == 0),
+            "pad group is zero"
+        );
         let mut got = vec![0.0f32; rows * e];
         router_logits_ref(k, e, rows, &x, &wq, &mut got);
         for r in 0..rows {
             for ex in 0..e {
-                let want: f32 = w[ex * k..(ex + 1) * k].iter().zip(&x[r * k..(r + 1) * k]).map(|(a, b)| a * b).sum();
-                assert_eq!(got[r * e + ex].to_bits(), want.to_bits(), "row {r} expert {ex}");
+                let want: f32 = w[ex * k..(ex + 1) * k]
+                    .iter()
+                    .zip(&x[r * k..(r + 1) * k])
+                    .map(|(a, b)| a * b)
+                    .sum();
+                assert_eq!(
+                    got[r * e + ex].to_bits(),
+                    want.to_bits(),
+                    "row {r} expert {ex}"
+                );
             }
         }
     }

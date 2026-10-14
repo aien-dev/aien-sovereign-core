@@ -10,7 +10,9 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use aien_omega_pf::{Layout, PfBuffer, PrefillAttention, PrefillDevice, QgemmCall, QuantIn, Tile, TILE_BYTES};
+use aien_omega_pf::{
+    Layout, PfBuffer, PrefillAttention, PrefillDevice, QgemmCall, QuantIn, Tile, TILE_BYTES,
+};
 
 use super::*;
 use crate::qwen3_moe::{bf16_to_f32, f32_to_bf16};
@@ -22,12 +24,35 @@ use crate::qwen3_moe_omega::{DenseMatmul, LmHead, OmegaLayer};
 
 #[derive(Debug, Clone, PartialEq)]
 enum Ev {
-    Quant { k: usize, input: QuantIn, rows: usize },
-    Gemm { n: usize, k: usize, layout: Layout, ntiles: usize, gather: bool },
-    Attn { layer: u32, pos0: u32, m: u32, dev: bool },
+    Quant {
+        k: usize,
+        input: QuantIn,
+        rows: usize,
+    },
+    Gemm {
+        n: usize,
+        k: usize,
+        layout: Layout,
+        ntiles: usize,
+        gather: bool,
+    },
+    Attn {
+        layer: u32,
+        pos0: u32,
+        m: u32,
+        dev: bool,
+    },
     /// W-L1G-D device router logits / combine (tests/devhost.rs).
-    Router { k: usize, e: usize, rows: usize },
-    Combine { h: usize, top_k: usize, rows: usize },
+    Router {
+        k: usize,
+        e: usize,
+        rows: usize,
+    },
+    Combine {
+        h: usize,
+        top_k: usize,
+        rows: usize,
+    },
 }
 
 type Log = Rc<RefCell<Vec<Ev>>>;
@@ -36,8 +61,14 @@ type Log = Rc<RefCell<Vec<Ev>>>;
 type Reg = Rc<RefCell<HashMap<u64, usize>>>;
 
 fn check_range(reg: &Reg, va: u64, bytes: usize, what: &str) {
-    let ok = reg.borrow().iter().any(|(&s, &n)| va >= s && va + bytes as u64 <= s + n as u64);
-    assert!(ok, "{what}: {bytes} bytes at {va:#x} outside every live buffer");
+    let ok = reg
+        .borrow()
+        .iter()
+        .any(|(&s, &n)| va >= s && va + bytes as u64 <= s + n as u64);
+    assert!(
+        ok,
+        "{what}: {bytes} bytes at {va:#x} outside every live buffer"
+    );
 }
 
 fn read_f32(reg: &Reg, va: u64, n: usize, what: &str) -> Vec<f32> {
@@ -124,10 +155,22 @@ impl FakeDevice {
                 weights.insert(w, (s, t.n, t.k));
             }
         }
-        Self { bm, reg, log, weights, quant: HashMap::new(), mutant_ignore_rowidx: false }
+        Self {
+            bm,
+            reg,
+            log,
+            weights,
+            quant: HashMap::new(),
+            mutant_ignore_rowidx: false,
+        }
     }
     fn alloc(&mut self, bytes: usize, host: bool) -> FakeBuf {
-        let b = FakeBuf { mem: vec![0u64; bytes.div_ceil(8)], bytes, host, reg: self.reg.clone() };
+        let b = FakeBuf {
+            mem: vec![0u64; bytes.div_ceil(8)],
+            bytes,
+            host,
+            reg: self.reg.clone(),
+        };
         self.reg.borrow_mut().insert(b.va(), bytes);
         b
     }
@@ -152,7 +195,15 @@ impl PrefillDevice for FakeDevice {
     fn qgemm_bm(&self) -> usize {
         self.bm
     }
-    fn quant(&mut self, k: usize, input: QuantIn, rows: usize, x_va: u64, q_va: u64, s_va: u64) -> Result<u64, String> {
+    fn quant(
+        &mut self,
+        k: usize,
+        input: QuantIn,
+        rows: usize,
+        x_va: u64,
+        q_va: u64,
+        s_va: u64,
+    ) -> Result<u64, String> {
         self.log.borrow_mut().push(Ev::Quant { k, input, rows });
         check_range(&self.reg, q_va, rows * k, "quant q");
         check_range(&self.reg, s_va, rows * (k / 128) * 4, "quant s");
@@ -161,41 +212,92 @@ impl PrefillDevice for FakeDevice {
             QuantIn::Bf16 => {
                 check_range(&self.reg, x_va, rows * k * 2, "quant x bf16");
                 // SAFETY: range checked.
-                unsafe { std::slice::from_raw_parts(x_va as *const u16, rows * k) }.iter().map(|&b| bf16_to_f32(b)).collect()
+                unsafe { std::slice::from_raw_parts(x_va as *const u16, rows * k) }
+                    .iter()
+                    .map(|&b| bf16_to_f32(b))
+                    .collect()
             }
         };
-        self.quant.insert(q_va, QEntry { s_va, k, rows, data });
+        self.quant.insert(
+            q_va,
+            QEntry {
+                s_va,
+                k,
+                rows,
+                data,
+            },
+        );
         Ok(10)
     }
     fn qgemm(&mut self, c: &QgemmCall) -> Result<u64, String> {
         let gather = c.rowidx_va != 0 && !self.mutant_ignore_rowidx;
-        self.log.borrow_mut().push(Ev::Gemm { n: c.n, k: c.k, layout: c.layout, ntiles: c.ntiles, gather: c.rowidx_va != 0 });
+        self.log.borrow_mut().push(Ev::Gemm {
+            n: c.n,
+            k: c.k,
+            layout: c.layout,
+            ntiles: c.ntiles,
+            gather: c.rowidx_va != 0,
+        });
         check_range(&self.reg, c.tiles_va, c.ntiles * TILE_BYTES, "tile table");
-        let q = self.quant.get(&c.xq_va).expect("GEMM activations were quantised first");
+        let q = self
+            .quant
+            .get(&c.xq_va)
+            .expect("GEMM activations were quantised first");
         assert_eq!(q.s_va, c.xs_va, "GEMM scales are the quantiser's");
         assert_eq!(q.k, c.k, "GEMM k equals the quantised row width");
         let kb = c.k / 128;
         for ti in 0..c.ntiles {
             // SAFETY: tile table range checked above.
-            let tb = unsafe { std::slice::from_raw_parts((c.tiles_va + (ti * TILE_BYTES) as u64) as *const u8, TILE_BYTES) };
+            let tb = unsafe {
+                std::slice::from_raw_parts(
+                    (c.tiles_va + (ti * TILE_BYTES) as u64) as *const u8,
+                    TILE_BYTES,
+                )
+            };
             let t = Tile::from_bytes(tb);
             assert!(t.cnt >= 1 && t.cnt as usize <= self.bm, "tile row count");
-            let &(s_va, n, k) = self.weights.get(&t.w_va).expect("tile weight address is an FP8 tensor expert");
-            assert_eq!((s_va, n, k), (t.s_va, c.n, c.k), "tile scale address and tensor shape");
+            let &(s_va, n, k) = self
+                .weights
+                .get(&t.w_va)
+                .expect("tile weight address is an FP8 tensor expert");
+            assert_eq!(
+                (s_va, n, k),
+                (t.s_va, c.n, c.k),
+                "tile scale address and tensor shape"
+            );
             // SAFETY: registered weight range of n * k f32.
             let w = unsafe { std::slice::from_raw_parts(t.w_va as *const f32, n * k) };
             for r in 0..self.bm {
                 let idx = t.row0 as usize + r;
                 // the kernel reads every row of the tile (to row0 + bm - 1), stored or not
                 let src = if gather {
-                    check_range(&self.reg, c.rowidx_va + idx as u64 * 4, 4, "row index (tile padding)");
+                    check_range(
+                        &self.reg,
+                        c.rowidx_va + idx as u64 * 4,
+                        4,
+                        "row index (tile padding)",
+                    );
                     // SAFETY: range checked.
                     unsafe { *((c.rowidx_va + idx as u64 * 4) as *const u32) as usize }
                 } else {
-                    if c.rowidx_va != 0 { idx % q.rows } else { idx } // the mutant reads sorted row i % rows instead of its token
+                    if c.rowidx_va != 0 {
+                        idx % q.rows
+                    } else {
+                        idx
+                    } // the mutant reads sorted row i % rows instead of its token
                 };
-                check_range(&self.reg, c.xq_va + (src * c.k) as u64, c.k, "activation row (tile padding)");
-                check_range(&self.reg, c.xs_va + (src * kb * 4) as u64, kb * 4, "activation scales (tile padding)");
+                check_range(
+                    &self.reg,
+                    c.xq_va + (src * c.k) as u64,
+                    c.k,
+                    "activation row (tile padding)",
+                );
+                check_range(
+                    &self.reg,
+                    c.xs_va + (src * kb * 4) as u64,
+                    kb * 4,
+                    "activation scales (tile padding)",
+                );
                 if r >= t.cnt as usize {
                     continue;
                 }
@@ -203,8 +305,15 @@ impl PrefillDevice for FakeDevice {
                 let x = &q.data[src * c.k..(src + 1) * c.k];
                 match c.layout {
                     Layout::Plain => {
-                        let y: Vec<f32> = (0..n).map(|col| dot(&w[col * k..(col + 1) * k], x)).collect();
-                        write_f32(&self.reg, c.y_va + (idx * n * 4) as u64, &y, "GEMM output row");
+                        let y: Vec<f32> = (0..n)
+                            .map(|col| dot(&w[col * k..(col + 1) * k], x))
+                            .collect();
+                        write_f32(
+                            &self.reg,
+                            c.y_va + (idx * n * 4) as u64,
+                            &y,
+                            "GEMM output row",
+                        );
                     }
                     Layout::SwigluNat => {
                         let i = n / 2;
@@ -238,11 +347,21 @@ struct AttnCore {
 
 impl AttnCore {
     fn new(c: &Qwen3MoeConfig) -> Self {
-        Self { q_heads: c.q_heads, kv_heads: c.kv_heads, hd: c.head_dim, k: vec![Vec::new(); c.layers], v: vec![Vec::new(); c.layers] }
+        Self {
+            q_heads: c.q_heads,
+            kv_heads: c.kv_heads,
+            hd: c.head_dim,
+            k: vec![Vec::new(); c.layers],
+            v: vec![Vec::new(); c.layers],
+        }
     }
     fn step(&mut self, layer: usize, pos: usize, qkv: &[f32], out: &mut [f32]) {
         let (qd, kvd) = (self.q_heads * self.hd, self.kv_heads * self.hd);
-        assert_eq!(pos, self.v[layer].len(), "positions are consecutive and the prefix is cached");
+        assert_eq!(
+            pos,
+            self.v[layer].len(),
+            "positions are consecutive and the prefix is cached"
+        );
         self.k[layer].push(qkv[qd..qd + kvd].to_vec());
         self.v[layer].push(qkv[qd + kvd..qd + 2 * kvd].to_vec());
         let n = (pos + 1) as f32;
@@ -268,26 +387,67 @@ struct FakeAttn {
 }
 
 impl PrefillAttention for FakeAttn {
-    fn attend(&mut self, layer: u32, pos0: u32, m: u32, qkv: &[f32], _eps: f32, out_scale: f32, out: &mut [f32]) -> Result<u64, String> {
-        self.log.borrow_mut().push(Ev::Attn { layer, pos0, m, dev: false });
+    fn attend(
+        &mut self,
+        layer: u32,
+        pos0: u32,
+        m: u32,
+        qkv: &[f32],
+        _eps: f32,
+        out_scale: f32,
+        out: &mut [f32],
+    ) -> Result<u64, String> {
+        self.log.borrow_mut().push(Ev::Attn {
+            layer,
+            pos0,
+            m,
+            dev: false,
+        });
         assert_eq!(out_scale, 1.0);
-        assert_eq!((qkv.len(), out.len()), (m as usize * self.qkv_n, m as usize * self.qd));
+        assert_eq!(
+            (qkv.len(), out.len()),
+            (m as usize * self.qkv_n, m as usize * self.qd)
+        );
         for t in 0..m as usize {
-            self.core.step(layer as usize, pos0 as usize + t, &qkv[t * self.qkv_n..(t + 1) * self.qkv_n], &mut out[t * self.qd..(t + 1) * self.qd]);
+            self.core.step(
+                layer as usize,
+                pos0 as usize + t,
+                &qkv[t * self.qkv_n..(t + 1) * self.qkv_n],
+                &mut out[t * self.qd..(t + 1) * self.qd],
+            );
         }
         Ok(1000)
     }
     fn has_dev(&self) -> bool {
         self.dev.is_some()
     }
-    fn attend_dev(&mut self, layer: u32, pos0: u32, m: u32, qkv_va: u64, _eps: f32, _out_scale: f32, out_va: u64) -> Option<Result<u64, String>> {
+    fn attend_dev(
+        &mut self,
+        layer: u32,
+        pos0: u32,
+        m: u32,
+        qkv_va: u64,
+        _eps: f32,
+        _out_scale: f32,
+        out_va: u64,
+    ) -> Option<Result<u64, String>> {
         let reg = self.dev.clone()?;
-        self.log.borrow_mut().push(Ev::Attn { layer, pos0, m, dev: true });
+        self.log.borrow_mut().push(Ev::Attn {
+            layer,
+            pos0,
+            m,
+            dev: true,
+        });
         let mu = m as usize;
         let qkv = read_f32(&reg, qkv_va, mu * self.qkv_n, "attention q|k|v");
         let mut out = vec![0.0f32; mu * self.qd];
         for t in 0..mu {
-            self.core.step(layer as usize, pos0 as usize + t, &qkv[t * self.qkv_n..(t + 1) * self.qkv_n], &mut out[t * self.qd..(t + 1) * self.qd]);
+            self.core.step(
+                layer as usize,
+                pos0 as usize + t,
+                &qkv[t * self.qkv_n..(t + 1) * self.qkv_n],
+                &mut out[t * self.qd..(t + 1) * self.qd],
+            );
         }
         write_f32(&reg, out_va, &out, "attention out");
         Some(Ok(1000))
@@ -318,7 +478,10 @@ impl Fp8Gemv for FakeFp8 {
         Err("fake: the whole-prompt path never calls the GEMV".into())
     }
     fn tensor_entry(&self, expert: usize) -> Result<(u64, u64), String> {
-        Ok((self.w[expert].as_ptr() as u64, self.s[expert].as_ptr() as u64))
+        Ok((
+            self.w[expert].as_ptr() as u64,
+            self.s[expert].as_ptr() as u64,
+        ))
     }
 }
 
@@ -339,7 +502,10 @@ impl DenseMatmul for NoDense {
 struct Lcg(u64);
 impl Lcg {
     fn next(&mut self, scale: f32) -> f32 {
-        self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        self.0 = self
+            .0
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         ((self.0 >> 40) as f32 / (1u64 << 24) as f32 * 2.0 - 1.0) * scale
     }
     fn vec(&mut self, n: usize, scale: f32) -> Vec<f32> {
@@ -361,7 +527,9 @@ struct TestModel {
 
 impl TestModel {
     fn tensors(&self) -> impl Iterator<Item = &FakeFp8> {
-        self.layers.iter().flat_map(|l| [l.qkv.as_ref(), l.o.as_ref(), l.gu.as_ref(), l.dn.as_ref()])
+        self.layers
+            .iter()
+            .flat_map(|l| [l.qkv.as_ref(), l.o.as_ref(), l.gu.as_ref(), l.dn.as_ref()])
     }
 }
 
@@ -389,26 +557,47 @@ fn model(c: &Qwen3MoeConfig, seed: u64) -> TestModel {
     let (h, qd, e, i) = (c.hidden, c.q_dim(), c.experts, c.moe_intermediate);
     let tensor = |experts: usize, n: usize, k: usize, r: &mut Lcg| {
         let scale = 1.0 / (k as f32).sqrt();
-        Arc::new(FakeFp8 { experts, n, k, w: (0..experts).map(|_| r.vec(n * k, scale)).collect(), s: (0..experts).map(|_| vec![0u64; 2]).collect() })
+        Arc::new(FakeFp8 {
+            experts,
+            n,
+            k,
+            w: (0..experts).map(|_| r.vec(n * k, scale)).collect(),
+            s: (0..experts).map(|_| vec![0u64; 2]).collect(),
+        })
     };
     let mut layers = Vec::new();
     let mut omega_layers = Vec::new();
     for _ in 0..c.layers {
-        let tl = TestLayer { qkv: tensor(1, c.qkv_n(), h, &mut r), o: tensor(1, h, qd, &mut r), gu: tensor(e, 2 * i, h, &mut r), dn: tensor(e, h, i, &mut r) };
+        let tl = TestLayer {
+            qkv: tensor(1, c.qkv_n(), h, &mut r),
+            o: tensor(1, h, qd, &mut r),
+            gu: tensor(e, 2 * i, h, &mut r),
+            dn: tensor(e, h, i, &mut r),
+        };
         omega_layers.push(OmegaLayer {
             input_norm: r.vec(h, 0.2).iter().map(|v| 1.0 + v).collect(),
             post_norm: r.vec(h, 0.2).iter().map(|v| 1.0 + v).collect(),
             q_norm: vec![1.0; c.head_dim],
             k_norm: vec![1.0; c.head_dim],
             router: r.vec(e * h, 0.3),
-            attn: AttnWeights::Fp8 { qkv: tl.qkv.clone(), o: tl.o.clone() },
-            experts: ExpertWeights::Fp8 { gate_up: tl.gu.clone(), down: tl.dn.clone() },
+            attn: AttnWeights::Fp8 {
+                qkv: tl.qkv.clone(),
+                o: tl.o.clone(),
+            },
+            experts: ExpertWeights::Fp8 {
+                gate_up: tl.gu.clone(),
+                down: tl.dn.clone(),
+            },
         });
         layers.push(tl);
     }
     let weights = Qwen3MoeOmegaWeights {
         config: c.clone(),
-        embed_bf16: r.vec(c.vocab * h, 1.0).into_iter().map(f32_to_bf16).collect(),
+        embed_bf16: r
+            .vec(c.vocab * h, 1.0)
+            .into_iter()
+            .map(f32_to_bf16)
+            .collect(),
         layers: omega_layers,
         final_norm: r.vec(h, 0.2).iter().map(|v| 1.0 + v).collect(),
         lm_head: LmHead::Dense(Arc::new(NoDense)),
@@ -422,9 +611,20 @@ fn model(c: &Qwen3MoeConfig, seed: u64) -> TestModel {
 fn reference(tm: &TestModel, tokens: &[u32]) -> Vec<f32> {
     let w = &tm.weights;
     let c = &w.config;
-    let (h, qd, e, k, i, eps) = (c.hidden, c.q_dim(), c.experts, c.top_k, c.moe_intermediate, c.rms_eps);
+    let (h, qd, e, k, i, eps) = (
+        c.hidden,
+        c.q_dim(),
+        c.experts,
+        c.top_k,
+        c.moe_intermediate,
+        c.rms_eps,
+    );
     let mut core = AttnCore::new(c);
-    let matvec = |t: &FakeFp8, ex: usize, x: &[f32]| -> Vec<f32> { (0..t.n).map(|r| dot(&t.w[ex][r * t.k..(r + 1) * t.k], x)).collect() };
+    let matvec = |t: &FakeFp8, ex: usize, x: &[f32]| -> Vec<f32> {
+        (0..t.n)
+            .map(|r| dot(&t.w[ex][r * t.k..(r + 1) * t.k], x))
+            .collect()
+    };
     let mut last = Vec::new();
     for (pos, &tok) in tokens.iter().enumerate() {
         let mut x = w.embed_row(tok);
@@ -439,15 +639,22 @@ fn reference(tm: &TestModel, tokens: &[u32]) -> Vec<f32> {
             }
             let mut post = vec![0.0f32; h];
             rmsnorm(&x, &layer.post_norm, eps, &mut post);
-            let logits: Vec<f32> = (0..e).map(|ex| dot(&layer.router[ex * h..(ex + 1) * h], &post)).collect();
+            let logits: Vec<f32> = (0..e)
+                .map(|ex| dot(&layer.router[ex * h..(ex + 1) * h], &post))
+                .collect();
             let mut order: Vec<usize> = (0..e).collect();
             order.sort_by(|&a, &b| logits[b].total_cmp(&logits[a]).then(a.cmp(&b)));
-            let probs: Vec<f32> = order[..k].iter().map(|&ex| (logits[ex] - logits[order[0]]).exp()).collect();
+            let probs: Vec<f32> = order[..k]
+                .iter()
+                .map(|&ex| (logits[ex] - logits[order[0]]).exp())
+                .collect();
             let sum: f32 = probs.iter().sum();
             let mut acc = vec![0.0f32; h];
             for (slot, &ex) in order[..k].iter().enumerate() {
                 let gu = matvec(&tl.gu, ex, &post);
-                let act: Vec<f32> = (0..i).map(|j| bf16_to_f32(f32_to_bf16(silu(gu[j]) * gu[i + j]))).collect();
+                let act: Vec<f32> = (0..i)
+                    .map(|j| bf16_to_f32(f32_to_bf16(silu(gu[j]) * gu[i + j])))
+                    .collect();
                 let wt = probs[slot] / sum;
                 for (a, d) in acc.iter_mut().zip(matvec(&tl.dn, ex, &act)) {
                     *a += wt * d;
@@ -465,7 +672,10 @@ fn reference(tm: &TestModel, tokens: &[u32]) -> Vec<f32> {
 
 fn max_rel_diff(a: &[f32], b: &[f32]) -> f32 {
     assert_eq!(a.len(), b.len());
-    a.iter().zip(b).map(|(x, y)| (x - y).abs() / (1.0 + y.abs())).fold(0.0, f32::max)
+    a.iter()
+        .zip(b)
+        .map(|(x, y)| (x - y).abs() / (1.0 + y.abs()))
+        .fold(0.0, f32::max)
 }
 
 const TOKENS: [u32; 7] = [3, 9, 1, 14, 3, 7, 11];
@@ -478,7 +688,13 @@ fn setup(bm: usize, dev_attn: bool) -> (TestModel, WholePromptPrefill<FakeDevice
     let fd = FakeDevice::new(bm, &tm, log.clone());
     let reg = fd.reg.clone();
     let drv = WholePromptPrefill::new(fd, &tm.weights).unwrap();
-    let attn = FakeAttn { core: AttnCore::new(&c), log: log.clone(), dev: dev_attn.then_some(reg), qkv_n: c.qkv_n(), qd: c.q_dim() };
+    let attn = FakeAttn {
+        core: AttnCore::new(&c),
+        log: log.clone(),
+        dev: dev_attn.then_some(reg),
+        qkv_n: c.qkv_n(),
+        qd: c.q_dim(),
+    };
     (tm, drv, attn, log)
 }
 
@@ -496,24 +712,64 @@ fn call_order_and_launch_counts_per_layer() {
     let log = log.borrow();
     assert_eq!(log.len(), 9 * c.layers);
     for (l, ev) in log.chunks(9).enumerate() {
-        let f32q = |k| Ev::Quant { k, input: QuantIn::F32, rows: m };
-        let dense = |n, k| Ev::Gemm { n, k, layout: Layout::Plain, ntiles: m.div_ceil(4), gather: false };
+        let f32q = |k| Ev::Quant {
+            k,
+            input: QuantIn::F32,
+            rows: m,
+        };
+        let dense = |n, k| Ev::Gemm {
+            n,
+            k,
+            layout: Layout::Plain,
+            ntiles: m.div_ceil(4),
+            gather: false,
+        };
         assert_eq!(ev[0], f32q(h), "layer {l}: quantise normed x");
         assert_eq!(ev[1], dense(c.qkv_n(), h), "layer {l}: one q|k|v GEMM");
-        assert_eq!(ev[2], Ev::Attn { layer: l as u32, pos0: 0, m: m as u32, dev: false }, "layer {l}: ONE attention call");
+        assert_eq!(
+            ev[2],
+            Ev::Attn {
+                layer: l as u32,
+                pos0: 0,
+                m: m as u32,
+                dev: false
+            },
+            "layer {l}: ONE attention call"
+        );
         assert_eq!(ev[3], f32q(qd), "layer {l}: quantise attention out");
         assert_eq!(ev[4], dense(h, qd), "layer {l}: one o GEMM");
         assert_eq!(ev[5], f32q(h), "layer {l}: quantise post");
-        assert!(matches!(ev[6], Ev::Gemm { n, k, layout: Layout::SwigluNat, gather: true, .. } if n == 2 * i && k == h), "layer {l}: gate|up {:?}", ev[6]);
-        assert_eq!(ev[7], Ev::Quant { k: i, input: QuantIn::Bf16, rows: g }, "layer {l}: quantise bf16 act");
-        assert!(matches!(ev[8], Ev::Gemm { n, k, layout: Layout::Plain, gather: false, .. } if n == h && k == i), "layer {l}: down {:?}", ev[8]);
+        assert!(
+            matches!(ev[6], Ev::Gemm { n, k, layout: Layout::SwigluNat, gather: true, .. } if n == 2 * i && k == h),
+            "layer {l}: gate|up {:?}",
+            ev[6]
+        );
+        assert_eq!(
+            ev[7],
+            Ev::Quant {
+                k: i,
+                input: QuantIn::Bf16,
+                rows: g
+            },
+            "layer {l}: quantise bf16 act"
+        );
+        assert!(
+            matches!(ev[8], Ev::Gemm { n, k, layout: Layout::Plain, gather: false, .. } if n == h && k == i),
+            "layer {l}: down {:?}",
+            ev[8]
+        );
         // grouped tiles: ceil per expert, at least ceil(g / bm)
-        let (Ev::Gemm { ntiles: gu, .. }, Ev::Gemm { ntiles: dn, .. }) = (&ev[6], &ev[8]) else { unreachable!() };
+        let (Ev::Gemm { ntiles: gu, .. }, Ev::Gemm { ntiles: dn, .. }) = (&ev[6], &ev[8]) else {
+            unreachable!()
+        };
         assert_eq!(gu, dn);
         assert!(*gu >= g.div_ceil(4) && *gu <= g.div_ceil(4) + c.experts);
     }
     let s = &drv.stats;
-    assert_eq!((s.qkv, s.attn, s.o, s.gate_up, s.down, s.quant), (2, 2, 2, 2, 2, 8));
+    assert_eq!(
+        (s.qkv, s.attn, s.o, s.gate_up, s.down, s.quant),
+        (2, 2, 2, 2, 2, 8)
+    );
     assert_eq!(s.launches(), 18);
     assert!(!s.attn_dev);
     assert_eq!((s.tokens, s.layers), (m, 2));
@@ -525,7 +781,10 @@ fn whole_prompt_matches_token_by_token_reference() {
     let got = drv.run(&tm.weights, &mut attn, &TOKENS, 0).unwrap();
     let want = reference(&tm, &TOKENS);
     let d = max_rel_diff(&got, &want);
-    assert!(d <= TOL, "whole-prompt vs token-by-token reference: max rel diff {d}");
+    assert!(
+        d <= TOL,
+        "whole-prompt vs token-by-token reference: max rel diff {d}"
+    );
 }
 
 #[test]
@@ -533,10 +792,17 @@ fn device_attention_entry_gives_the_same_numbers() {
     let (tm, mut drv, mut attn, log) = setup(4, true);
     let got = drv.run(&tm.weights, &mut attn, &TOKENS, 0).unwrap();
     assert!(drv.stats.attn_dev);
-    assert!(log.borrow().iter().filter(|e| matches!(e, Ev::Attn { .. })).all(|e| matches!(e, Ev::Attn { dev: true, .. })));
+    assert!(log
+        .borrow()
+        .iter()
+        .filter(|e| matches!(e, Ev::Attn { .. }))
+        .all(|e| matches!(e, Ev::Attn { dev: true, .. })));
     let (tm2, mut drv2, mut attn2, _) = setup(4, false);
     let host_path = drv2.run(&tm2.weights, &mut attn2, &TOKENS, 0).unwrap();
-    assert_eq!(got, host_path, "device and host attention entries: same plumbing, same numbers");
+    assert_eq!(
+        got, host_path,
+        "device and host attention entries: same plumbing, same numbers"
+    );
     assert!(max_rel_diff(&got, &reference(&tm, &TOKENS)) <= TOL);
 }
 
@@ -545,9 +811,17 @@ fn prefix_then_continuation_matches_reference() {
     let (tm, mut drv, mut attn, log) = setup(4, false);
     drv.run(&tm.weights, &mut attn, &TOKENS[..3], 0).unwrap();
     let got = drv.run(&tm.weights, &mut attn, &TOKENS[3..], 3).unwrap();
-    assert!(log.borrow().contains(&Ev::Attn { layer: 1, pos0: 3, m: 4, dev: false }));
+    assert!(log.borrow().contains(&Ev::Attn {
+        layer: 1,
+        pos0: 3,
+        m: 4,
+        dev: false
+    }));
     let d = max_rel_diff(&got, &reference(&tm, &TOKENS));
-    assert!(d <= TOL, "prefix 3 + continuation 4 vs reference over 7: {d}");
+    assert!(
+        d <= TOL,
+        "prefix 3 + continuation 4 vs reference over 7: {d}"
+    );
 }
 
 #[test]
@@ -566,7 +840,10 @@ fn negative_control_ignoring_the_row_index_is_caught() {
     drv.dev.mutant_ignore_rowidx = true;
     let got = drv.run(&tm.weights, &mut attn, &TOKENS, 0).unwrap();
     let d = max_rel_diff(&got, &reference(&tm, &TOKENS));
-    assert!(d > 1e-2, "a gate|up GEMM that ignores the token gather must disagree, diff {d}");
+    assert!(
+        d > 1e-2,
+        "a gate|up GEMM that ignores the token gather must disagree, diff {d}"
+    );
 }
 
 #[test]
@@ -586,14 +863,24 @@ fn expert_sort_groups_rows_by_expert_stably() {
     // expert 0: tokens 0, 1, 3; expert 1: token 2; expert 2: tokens 0, 2; expert 4: tokens 1, 3
     assert_eq!(s.rows, vec![0, 1, 3, 2, 0, 2, 1, 3]);
     for (a, &row) in s.inv.iter().enumerate() {
-        assert_eq!(s.rows[row as usize] as usize, a / 2, "assignment {a} lands on its token's row");
+        assert_eq!(
+            s.rows[row as usize] as usize,
+            a / 2,
+            "assignment {a} lands on its token's row"
+        );
         let ex = plan.topk_experts[a] as usize;
         let start: u32 = s.counts[..ex].iter().sum();
-        assert!(row >= start && row < start + s.counts[ex], "assignment {a} lands in expert {ex}'s block");
+        assert!(
+            row >= start && row < start + s.counts[ex],
+            "assignment {a} lands in expert {ex}'s block"
+        );
     }
     let tiles = build_tiles(2, &[10, 11, 12, 13, 14], &[20, 21, 22, 23, 24], &s.counts).unwrap();
     let t: Vec<(u64, u32, u32)> = tiles.iter().map(|t| (t.w_va, t.row0, t.cnt)).collect();
-    assert_eq!(t, vec![(10, 0, 2), (10, 2, 1), (11, 3, 1), (12, 4, 2), (14, 6, 2)]);
+    assert_eq!(
+        t,
+        vec![(10, 0, 2), (10, 2, 1), (11, 3, 1), (12, 4, 2), (14, 6, 2)]
+    );
 }
 
 #[test]
@@ -602,7 +889,10 @@ fn refuses_an_empty_prompt_and_non_fp8_weights() {
     assert!(drv.run(&tm.weights, &mut attn, &[], 0).is_err());
     let mut bad = model(&config(), 3);
     let qkv = Arc::new(NoDense) as Arc<dyn DenseMatmul>;
-    bad.weights.layers[1].attn = AttnWeights::Bf16 { qkv: qkv.clone(), o: qkv };
+    bad.weights.layers[1].attn = AttnWeights::Bf16 {
+        qkv: qkv.clone(),
+        o: qkv,
+    };
     let err = layer_entries(&bad.weights).unwrap_err();
     assert!(err.contains("layer 1") && err.contains("FP8"), "{err}");
 }
@@ -610,7 +900,10 @@ fn refuses_an_empty_prompt_and_non_fp8_weights() {
 #[test]
 fn cache_weights_refusal_leaves_the_in_place_path_working() {
     let (tm, mut drv, mut attn, _) = setup(4, false);
-    assert!(drv.cache_weights(&tm.weights.config).is_err(), "the fake offers no device copy and its experts are not contiguous");
+    assert!(
+        drv.cache_weights(&tm.weights.config).is_err(),
+        "the fake offers no device copy and its experts are not contiguous"
+    );
     let got = drv.run(&tm.weights, &mut attn, &TOKENS, 0).unwrap();
     assert!(max_rel_diff(&got, &reference(&tm, &TOKENS)) <= TOL);
 }

@@ -26,12 +26,14 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
 
+use aien_inference_abi::qwen3_moe_omega::WeightFormat;
 use aien_serve_http::codec::{ByteCodec, Codec, HfCodec};
 use aien_serve_http::cpu_engine::CpuReferenceEngine;
-use aien_inference_abi::qwen3_moe_omega::WeightFormat;
 use aien_serve_http::engine::{Engine, StubEngine};
 use aien_serve_http::kv_persist;
-use aien_serve_http::omega_engine::{parse_switch, OmegaDoor, PrefillMode, WHOLE_PROMPT_ENV, WP_DEVICE_HOST_ENV};
+use aien_serve_http::omega_engine::{
+    parse_switch, OmegaDoor, PrefillMode, WHOLE_PROMPT_ENV, WP_DEVICE_HOST_ENV,
+};
 use aien_serve_http::server::{serve_until, ServerConfig};
 
 const DEFAULT_MODEL_DIR: &str = "models/qwen3-30b-a3b-instruct-2507-fp8";
@@ -73,7 +75,10 @@ fn parse_args() -> Result<Args, String> {
     };
     let mut it = std::env::args().skip(1);
     while let Some(flag) = it.next() {
-        let mut val = || it.next().ok_or_else(|| format!("{flag} needs a value\n{}", usage()));
+        let mut val = || {
+            it.next()
+                .ok_or_else(|| format!("{flag} needs a value\n{}", usage()))
+        };
         match flag.as_str() {
             "--engine" => a.engine = val()?,
             "--model-dir" => a.model_dir = PathBuf::from(val()?),
@@ -89,8 +94,9 @@ fn parse_args() -> Result<Args, String> {
                     Some(val()?.parse().map_err(|e| format!("--max-context: {e}"))?)
             }
             "--max-tokens-cap" => {
-                a.cfg.max_new_tokens_cap =
-                    val()?.parse().map_err(|e| format!("--max-tokens-cap: {e}"))?
+                a.cfg.max_new_tokens_cap = val()?
+                    .parse()
+                    .map_err(|e| format!("--max-tokens-cap: {e}"))?
             }
             "--stub-reply" => a.stub_reply = val()?,
             "--weights" => {
@@ -98,18 +104,27 @@ fn parse_args() -> Result<Args, String> {
                     "bf16" => WeightFormat::Bf16,
                     "fp8-experts" => WeightFormat::Fp8Experts,
                     "fp8" => WeightFormat::Fp8All,
-                    other => return Err(format!("--weights must be bf16, fp8-experts or fp8, got {other}")),
+                    other => {
+                        return Err(format!(
+                            "--weights must be bf16, fp8-experts or fp8, got {other}"
+                        ))
+                    }
                 }
             }
             "--spin-us" => a.spin_us = Some(val()?.parse().map_err(|e| format!("--spin-us: {e}"))?),
             "--whole-prompt" => a.whole_prompt = Some(parse_switch("--whole-prompt", &val()?)?),
-            "--prefill-device-host" => a.wp_device_host = Some(parse_switch("--prefill-device-host", &val()?)?),
+            "--prefill-device-host" => {
+                a.wp_device_host = Some(parse_switch("--prefill-device-host", &val()?)?)
+            }
             "-h" | "--help" => return Err(usage()),
             other => return Err(format!("unknown flag {other}\n{}", usage())),
         }
     }
     if !matches!(a.engine.as_str(), "cpu" | "stub" | "omega") {
-        return Err(format!("--engine must be cpu, stub or omega, got {}", a.engine));
+        return Err(format!(
+            "--engine must be cpu, stub or omega, got {}",
+            a.engine
+        ));
     }
     if a.spin_us.is_none() {
         // Flag beats environment beats the omega default (2000 us, the cut 7 number).
@@ -136,7 +151,10 @@ fn apply_generation_defaults(cfg: &mut ServerConfig, model_dir: &std::path::Path
         return;
     };
     let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else {
-        eprintln!("aien-serve-http: {} is not valid JSON; keeping built-in sampling defaults", path.display());
+        eprintln!(
+            "aien-serve-http: {} is not valid JSON; keeping built-in sampling defaults",
+            path.display()
+        );
         return;
     };
     if let Some(t) = v.get("temperature").and_then(|x| x.as_f64()) {
@@ -177,10 +195,16 @@ fn main() -> ExitCode {
             }
         }
     } else if args.engine == "stub" {
-        eprintln!("aien-serve-http: no tokenizer.json in {}; stub engine uses the byte codec", args.model_dir.display());
+        eprintln!(
+            "aien-serve-http: no tokenizer.json in {}; stub engine uses the byte codec",
+            args.model_dir.display()
+        );
         Arc::new(ByteCodec)
     } else {
-        eprintln!("aien-serve-http: no tokenizer.json in {}", args.model_dir.display());
+        eprintln!(
+            "aien-serve-http: no tokenizer.json in {}",
+            args.model_dir.display()
+        );
         return ExitCode::from(1);
     };
 
@@ -192,7 +216,9 @@ fn main() -> ExitCode {
                 return ExitCode::from(1);
             }
         };
-        Arc::new(StubEngine::new(reply).with_max_context(args.cfg.max_context_tokens.unwrap_or(4096)))
+        Arc::new(
+            StubEngine::new(reply).with_max_context(args.cfg.max_context_tokens.unwrap_or(4096)),
+        )
     } else if args.engine == "omega" {
         eprintln!(
             "aien-serve-http: loading {:?} weights onto the Omega engine from {} (spin {:?} us)",
@@ -200,10 +226,17 @@ fn main() -> ExitCode {
             args.model_dir.display(),
             args.spin_us
         );
-        match OmegaDoor::load(&args.model_dir, args.cfg.max_context_tokens.unwrap_or(32768), args.weights, args.spin_us, args.prefill) {
+        match OmegaDoor::load(
+            &args.model_dir,
+            args.cfg.max_context_tokens.unwrap_or(32768),
+            args.weights,
+            args.spin_us,
+            args.prefill,
+        ) {
             Ok(mut door) => {
                 // Persistent KV (sc#505): only when AIEN_KV_STORE_DIR is set; otherwise nothing else is read.
-                if let Some(settings) = kv_persist::settings_from_lookup(|n| std::env::var(n).ok()) {
+                if let Some(settings) = kv_persist::settings_from_lookup(|n| std::env::var(n).ok())
+                {
                     // The key lives on only in the settings; no child inherits it.
                     std::env::remove_var(aien_kv_store::seal::KEY_ENV);
                     let line = enable_persistence(&mut door, settings, &args);
@@ -218,10 +251,19 @@ fn main() -> ExitCode {
         }
     } else {
         let t0 = std::time::Instant::now();
-        eprintln!("aien-serve-http: loading CPU reference weights from {} (this takes minutes)", args.model_dir.display());
-        match CpuReferenceEngine::load(&args.model_dir, args.cfg.max_context_tokens.unwrap_or(32768)) {
+        eprintln!(
+            "aien-serve-http: loading CPU reference weights from {} (this takes minutes)",
+            args.model_dir.display()
+        );
+        match CpuReferenceEngine::load(
+            &args.model_dir,
+            args.cfg.max_context_tokens.unwrap_or(32768),
+        ) {
             Ok(e) => {
-                eprintln!("aien-serve-http: weights loaded in {:.1} s", t0.elapsed().as_secs_f64());
+                eprintln!(
+                    "aien-serve-http: weights loaded in {:.1} s",
+                    t0.elapsed().as_secs_f64()
+                );
                 Arc::new(e)
             }
             Err(e) => {
@@ -268,7 +310,11 @@ fn main() -> ExitCode {
 
 /// Opens the persistent KV store for the loaded omega engine (the checkpoint digest reads every
 /// weight file once). Returns the startup line; any problem refuses and the door runs plain.
-fn enable_persistence(door: &mut OmegaDoor, settings: Result<aien_runtime::shared_kv::KvPersistSettings, String>, args: &Args) -> String {
+fn enable_persistence(
+    door: &mut OmegaDoor,
+    settings: Result<aien_runtime::shared_kv::KvPersistSettings, String>,
+    args: &Args,
+) -> String {
     let t0 = std::time::Instant::now();
     let build = kv_persist::OmegaBuild::linked();
     let env: Vec<(String, String)> = std::env::vars().collect();
@@ -301,7 +347,10 @@ fn enable_persistence(door: &mut OmegaDoor, settings: Result<aien_runtime::share
 /// Installs the SIGTERM and SIGINT handlers now; the returned future resolves on the first one.
 fn shutdown_signals() -> impl std::future::Future<Output = ()> + Send + 'static {
     use tokio::signal::unix::{signal, SignalKind};
-    let handlers = (signal(SignalKind::terminate()), signal(SignalKind::interrupt()));
+    let handlers = (
+        signal(SignalKind::terminate()),
+        signal(SignalKind::interrupt()),
+    );
     async move {
         let (Ok(mut term), Ok(mut int)) = handlers else {
             eprintln!("aien-serve-http: cannot install the shutdown signal handlers; SIGTERM kills without draining");

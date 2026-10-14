@@ -135,7 +135,9 @@ fn door_with_fault(scratch: &Scratch, s: &Setup, fault: Option<&str>) -> (OmegaD
         env: &s.env,
     });
     let fault = kv_persist::TestFault::from_lookup(|n| {
-        (n == kv_persist::TEST_FAULT_ENV).then(|| fault.map(str::to_string)).flatten()
+        (n == kv_persist::TEST_FAULT_ENV)
+            .then(|| fault.map(str::to_string))
+            .flatten()
     });
     let (state, line) = kv_persist::open_with_test_fault(settings, identity, fault);
     if let PersistState::On(p) = &state {
@@ -460,13 +462,29 @@ fn health_reports_the_persistence_counters_when_on() {
     ] {
         assert!(!pk[k].is_null(), "missing {k}: {pk}");
     }
-    for k in ["done", "failed", "corrupt_deleted", "tmp_deleted", "unlink_failures", "foreign_files"] {
+    for k in [
+        "done",
+        "failed",
+        "corrupt_deleted",
+        "tmp_deleted",
+        "unlink_failures",
+        "foreign_files",
+    ] {
         assert!(!pk["recovery"][k].is_null(), "missing recovery.{k}: {pk}");
     }
-    for k in ["read_bytes", "write_bytes", "published", "failed", "disk_full"] {
+    for k in [
+        "read_bytes",
+        "write_bytes",
+        "published",
+        "failed",
+        "disk_full",
+    ] {
         assert!(!pk["io"][k].is_null(), "missing io.{k}: {pk}");
     }
-    assert!(pk["io"]["write_bytes"].as_u64().unwrap() > 0, "the park wrote: {pk}");
+    assert!(
+        pk["io"]["write_bytes"].as_u64().unwrap() > 0,
+        "the park wrote: {pk}"
+    );
 }
 
 #[test]
@@ -618,14 +636,19 @@ fn the_test_fault_spec_is_parsed_strictly() {
     for ok in ["p1:5", "p2:0", "p3:100:1", "p4:1:2", "p5:7", "load:12000:1"] {
         assert_eq!(parse(ok).unwrap().unwrap().spec(), ok);
     }
-    for bad in ["p3", "p6:5", "p3:x", "p3:5:y", "p3:5:1:2", "load:-1", "P3:5"] {
+    for bad in [
+        "p3", "p6:5", "p3:x", "p3:5:y", "p3:5:1:2", "load:-1", "P3:5",
+    ] {
         assert!(parse(bad).is_err(), "{bad} must refuse");
     }
     // A malformed spec refuses persistence (fail closed); the door runs plain.
     let scratch = Scratch::new("badfault");
     let s = Setup::new(&scratch.store(), &gen_key());
     let (d, line) = door_with_fault(&scratch, &s, Some("p9:1"));
-    assert!(line.contains("REFUSED") && line.contains("AIEN_KV_TEST_FAULT"), "{line}");
+    assert!(
+        line.contains("REFUSED") && line.contains("AIEN_KV_TEST_FAULT"),
+        "{line}"
+    );
     assert!(matches!(d.persistence(), PersistState::Refused(_)));
 }
 
@@ -652,19 +675,37 @@ fn a_write_interrupted_before_publish_is_never_served() {
     assert!(!torn.is_empty());
     for t in &torn {
         let len = std::fs::metadata(t).unwrap().len();
-        std::fs::OpenOptions::new().write(true).open(t).unwrap().set_len(len / 2).unwrap();
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(t)
+            .unwrap()
+            .set_len(len / 2)
+            .unwrap();
     }
-    assert!(files_under(&image.join("objects")).is_empty(), "nothing was published");
+    assert!(
+        files_under(&image.join("objects")).is_empty(),
+        "nothing was published"
+    );
     let si = Setup::new(&image, "").with_var("AIEN_KV_STORE_KEY", &s.store_vars[1].1);
     let (b, _) = door(&scratch, &si);
     let r2 = turn(&b, &prompt2(&h1));
     let c = counters(&b);
     assert_eq!(c.restores, 0, "{c:?}");
-    assert_eq!(r2, plain_turn2(&scratch, &h1), "a torn write must be a plain recompute");
-    assert!(files_under(&image.join("tmp")).is_empty(), "recovery removes the torn temp");
+    assert_eq!(
+        r2,
+        plain_turn2(&scratch, &h1),
+        "a torn write must be a plain recompute"
+    );
+    assert!(
+        files_under(&image.join("tmp")).is_empty(),
+        "recovery removes the torn temp"
+    );
     if let PersistState::On(pk) = b.persistence() {
         let v = pk.status_json();
-        assert!(v["recovery"]["tmp_deleted"].as_u64().unwrap() >= 1, "health counts the removed temp: {v}");
+        assert!(
+            v["recovery"]["tmp_deleted"].as_u64().unwrap() >= 1,
+            "health counts the removed temp: {v}"
+        );
         assert_eq!(v["recovery"]["done"], true, "{v}");
     } else {
         panic!("persistence should be on");
@@ -689,14 +730,21 @@ fn a_restore_that_completes_after_its_timeout_is_never_served() {
     assert_eq!(r2, plain);
     std::thread::sleep(Duration::from_secs(3));
     let c = counters(&b);
-    assert_eq!(c.restores, 0, "the late completion must not count as a restore: {c:?}");
+    assert_eq!(
+        c.restores, 0,
+        "the late completion must not count as a restore: {c:?}"
+    );
     // A new conversation on the same door is not touched by the stale completion.
     let fresh: Vec<u32> = (0..30u32).map(|i| (i * 5 + 1) % 64).collect();
     assert_eq!(turn(&b, &fresh), turn(&plain_door(&scratch), &fresh));
     drop(b);
     let (c2, _) = door(&scratch, &s);
     assert_eq!(turn(&c2, &prompt2(&h1)), plain);
-    assert_eq!(counters(&c2).restores, 1, "the store still serves after the stale load");
+    assert_eq!(
+        counters(&c2).restores,
+        1,
+        "the store still serves after the stale load"
+    );
 }
 
 #[test]
@@ -749,14 +797,25 @@ fn a_graceful_shutdown_releases_the_engine_and_flushes_the_parks() {
         }))
         .unwrap();
     assert_eq!(get_json(addr, "/health")["status"], "ok");
-    assert!(pk_of(&keep).counters().parked_chunks < 3, "the parks are still in flight");
+    assert!(
+        pk_of(&keep).counters().parked_chunks < 3,
+        "the parks are still in flight"
+    );
     tx.send(()).unwrap();
     rt.block_on(h).unwrap();
     assert!(TcpStream::connect(addr).is_err(), "the listener is closed");
-    wait_for("the server to release the engine", || Arc::strong_count(&keep) == 1);
+    wait_for("the server to release the engine", || {
+        Arc::strong_count(&keep) == 1
+    });
     drop(keep);
-    assert!(files_under(&scratch.store().join("tmp")).is_empty(), "no temp file left");
-    assert!(files_under(&scratch.store().join("objects")).len() >= 3, "the parks were flushed");
+    assert!(
+        files_under(&scratch.store().join("tmp")).is_empty(),
+        "no temp file left"
+    );
+    assert!(
+        files_under(&scratch.store().join("objects")).len() >= 3,
+        "the parks were flushed"
+    );
     let (b, _) = door(&scratch, &s);
     let _ = turn(&b, &prompt2(&h1));
     assert_eq!(counters(&b).restores, 1);

@@ -17,7 +17,11 @@ use std::process::Command;
 
 fn main() {
     println!("cargo:rustc-check-cfg=cfg(has_omega_router)");
-    for v in ["AIEN_FORCE_CPU_STUB", "AIEN_OMEGA_GPU_LIB", "AIEN_OMEGA_DIR"] {
+    for v in [
+        "AIEN_FORCE_CPU_STUB",
+        "AIEN_OMEGA_GPU_LIB",
+        "AIEN_OMEGA_DIR",
+    ] {
         println!("cargo:rerun-if-env-changed={v}");
     }
     if std::env::var("AIEN_FORCE_CPU_STUB").as_deref() == Ok("1") {

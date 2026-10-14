@@ -163,8 +163,14 @@ fn seal_and_open_time_is_counted_per_payload_byte() {
     let after = seal::seal_timing();
     let n = payload.len() as u64;
     assert!(after.seal_calls > before.seal_calls && after.open_calls > before.open_calls);
-    assert!(after.seal_bytes - before.seal_bytes >= n, "{before:?} {after:?}");
-    assert!(after.open_bytes - before.open_bytes >= n, "{before:?} {after:?}");
+    assert!(
+        after.seal_bytes - before.seal_bytes >= n,
+        "{before:?} {after:?}"
+    );
+    assert!(
+        after.open_bytes - before.open_bytes >= n,
+        "{before:?} {after:?}"
+    );
     assert!(after.seal_ns > before.seal_ns && after.open_ns > before.open_ns);
 }
 

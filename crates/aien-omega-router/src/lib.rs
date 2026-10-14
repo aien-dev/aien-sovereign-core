@@ -70,8 +70,18 @@ mod ffi {
     extern "C" {
         pub fn omega_gpu_router_alloc(layers: u32, out: *mut *mut OmegaGpuRouter) -> i32;
         pub fn omega_gpu_router_free(r: *mut OmegaGpuRouter);
-        pub fn omega_gpu_router_set_layer(r: *mut OmegaGpuRouter, layer: u32, gate_bf16: *const u16, norm_w: *const f32) -> i32;
-        pub fn omega_gpu_router_set_directory(r: *mut OmegaGpuRouter, layer: u32, gu: *const u64, dn: *const u64) -> i32;
+        pub fn omega_gpu_router_set_layer(
+            r: *mut OmegaGpuRouter,
+            layer: u32,
+            gate_bf16: *const u16,
+            norm_w: *const f32,
+        ) -> i32;
+        pub fn omega_gpu_router_set_directory(
+            r: *mut OmegaGpuRouter,
+            layer: u32,
+            gu: *const u64,
+            dn: *const u64,
+        ) -> i32;
         pub fn omega_gpu_router(
             r: *mut OmegaGpuRouter,
             layer: u32,
@@ -83,8 +93,18 @@ mod ffi {
             weights: *mut f32,
             info: *mut RouterInfo,
         ) -> i32;
-        pub fn omega_gpu_router_device_outputs(r: *const OmegaGpuRouter, xout_va: *mut u64, tab_gu_va: *mut u64, tab_dn_va: *mut u64);
-        pub fn omega_gpu_router_read_back(r: *mut OmegaGpuRouter, xout: *mut f32, tab_gu: *mut u64, tab_dn: *mut u64) -> i32;
+        pub fn omega_gpu_router_device_outputs(
+            r: *const OmegaGpuRouter,
+            xout_va: *mut u64,
+            tab_gu_va: *mut u64,
+            tab_dn_va: *mut u64,
+        );
+        pub fn omega_gpu_router_read_back(
+            r: *mut OmegaGpuRouter,
+            xout: *mut f32,
+            tab_gu: *mut u64,
+            tab_dn: *mut u64,
+        ) -> i32;
         pub fn omega_gpu_router_last_error() -> *const std::os::raw::c_char;
         pub fn omega_gpu_router_rc_name(rc: i32) -> *const std::os::raw::c_char;
         pub fn omega_gpu_router_test_set_mutant(mutant: i32);
@@ -96,7 +116,11 @@ fn rc_err(rc: i32) -> OmegaGpuError {
     // SAFETY: both return static NUL-terminated strings (or NULL for last_error).
     let name = unsafe {
         let n = ffi::omega_gpu_router_rc_name(rc);
-        let n = if n.is_null() { String::from("?") } else { std::ffi::CStr::from_ptr(n).to_string_lossy().into_owned() };
+        let n = if n.is_null() {
+            String::from("?")
+        } else {
+            std::ffi::CStr::from_ptr(n).to_string_lossy().into_owned()
+        };
         let e = ffi::omega_gpu_router_last_error();
         if e.is_null() {
             n
@@ -111,7 +135,11 @@ fn check_len(what: &'static str, expected: usize, got: usize) -> Result<(), Omeg
     if expected == got {
         Ok(())
     } else {
-        Err(OmegaGpuError::ShapeMismatch { what, expected, got })
+        Err(OmegaGpuError::ShapeMismatch {
+            what,
+            expected,
+            got,
+        })
     }
 }
 
@@ -122,7 +150,9 @@ fn bad(name: String) -> OmegaGpuError {
 /// Host check of the allocation rule, before any chip call (also in the stub).
 pub fn check_layers(layers: usize) -> Result<(), OmegaGpuError> {
     if layers == 0 || layers > MAX_LAYERS {
-        return Err(bad(format!("router layers={layers} refused: 1 <= layers <= {MAX_LAYERS}")));
+        return Err(bad(format!(
+            "router layers={layers} refused: 1 <= layers <= {MAX_LAYERS}"
+        )));
     }
     Ok(())
 }
@@ -185,21 +215,36 @@ impl Router {
 
     fn check_layer(&self, layer: usize) -> Result<(), OmegaGpuError> {
         if layer >= self.layers {
-            return Err(bad(format!("router layer {layer} >= layers {}", self.layers)));
+            return Err(bad(format!(
+                "router layer {layer} >= layers {}",
+                self.layers
+            )));
         }
         Ok(())
     }
 
     /// The layer's `mlp.gate.weight` (`[128][2048]` bf16 bits) and `post_attention_layernorm`
     /// weight (`[2048]` f32, widened by the caller).
-    pub fn set_layer(&mut self, layer: usize, gate_bf16: &[u16], norm_w: &[f32]) -> Result<(), OmegaGpuError> {
+    pub fn set_layer(
+        &mut self,
+        layer: usize,
+        gate_bf16: &[u16],
+        norm_w: &[f32],
+    ) -> Result<(), OmegaGpuError> {
         check_len("router gate words", EXPERTS * HIDDEN, gate_bf16.len())?;
         check_len("router norm weight", HIDDEN, norm_w.len())?;
         self.check_layer(layer)?;
         #[cfg(has_omega_router)]
         {
             // SAFETY: lengths and layer checked; omega copies before returning.
-            let rc = unsafe { ffi::omega_gpu_router_set_layer(self.ptr, layer as u32, gate_bf16.as_ptr(), norm_w.as_ptr()) };
+            let rc = unsafe {
+                ffi::omega_gpu_router_set_layer(
+                    self.ptr,
+                    layer as u32,
+                    gate_bf16.as_ptr(),
+                    norm_w.as_ptr(),
+                )
+            };
             if rc != 0 {
                 return Err(rc_err(rc));
             }
@@ -213,14 +258,26 @@ impl Router {
 
     /// The layer's expert directories: `gu` and `dn` are `[128][2]` `{w_va, s_va}` (flat, 256
     /// words each), one pair per expert of the resident gate|up and down FP8 tensors.
-    pub fn set_directory(&mut self, layer: usize, gu: &[u64], dn: &[u64]) -> Result<(), OmegaGpuError> {
+    pub fn set_directory(
+        &mut self,
+        layer: usize,
+        gu: &[u64],
+        dn: &[u64],
+    ) -> Result<(), OmegaGpuError> {
         check_len("router gate|up directory", EXPERTS * 2, gu.len())?;
         check_len("router down directory", EXPERTS * 2, dn.len())?;
         self.check_layer(layer)?;
         #[cfg(has_omega_router)]
         {
             // SAFETY: lengths and layer checked; omega copies before returning.
-            let rc = unsafe { ffi::omega_gpu_router_set_directory(self.ptr, layer as u32, gu.as_ptr(), dn.as_ptr()) };
+            let rc = unsafe {
+                ffi::omega_gpu_router_set_directory(
+                    self.ptr,
+                    layer as u32,
+                    gu.as_ptr(),
+                    dn.as_ptr(),
+                )
+            };
             if rc != 0 {
                 return Err(rc_err(rc));
             }
@@ -285,7 +342,14 @@ impl Router {
         {
             let mut o = DeviceOutputs::default();
             // SAFETY: the router is live for &self; the three out pointers are valid.
-            unsafe { ffi::omega_gpu_router_device_outputs(self.ptr, &mut o.xout_va, &mut o.tab_gu_va, &mut o.tab_dn_va) };
+            unsafe {
+                ffi::omega_gpu_router_device_outputs(
+                    self.ptr,
+                    &mut o.xout_va,
+                    &mut o.tab_gu_va,
+                    &mut o.tab_dn_va,
+                )
+            };
             o
         }
         #[cfg(not(has_omega_router))]
@@ -300,7 +364,14 @@ impl Router {
         #[cfg(has_omega_router)]
         {
             // SAFETY: length checked; the two table pointers are NULL (not wanted).
-            let rc = unsafe { ffi::omega_gpu_router_read_back(self.ptr, xout.as_mut_ptr(), std::ptr::null_mut(), std::ptr::null_mut()) };
+            let rc = unsafe {
+                ffi::omega_gpu_router_read_back(
+                    self.ptr,
+                    xout.as_mut_ptr(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                )
+            };
             if rc != 0 {
                 return Err(rc_err(rc));
             }

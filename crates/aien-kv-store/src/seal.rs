@@ -181,7 +181,11 @@ impl SealKey {
     pub fn seal_file(&self, file: &mut [u8]) -> Result<(), SealError> {
         let t0 = std::time::Instant::now();
         let got = self.seal_inner(file);
-        note_timing(&SEAL_TIMING, file.len().saturating_sub(HEADER_REGION_LEN), t0);
+        note_timing(
+            &SEAL_TIMING,
+            file.len().saturating_sub(HEADER_REGION_LEN),
+            t0,
+        );
         got
     }
 
@@ -308,8 +312,16 @@ struct Timing {
     ns: AtomicU64,
 }
 
-static SEAL_TIMING: Timing = Timing { calls: AtomicU64::new(0), bytes: AtomicU64::new(0), ns: AtomicU64::new(0) };
-static OPEN_TIMING: Timing = Timing { calls: AtomicU64::new(0), bytes: AtomicU64::new(0), ns: AtomicU64::new(0) };
+static SEAL_TIMING: Timing = Timing {
+    calls: AtomicU64::new(0),
+    bytes: AtomicU64::new(0),
+    ns: AtomicU64::new(0),
+};
+static OPEN_TIMING: Timing = Timing {
+    calls: AtomicU64::new(0),
+    bytes: AtomicU64::new(0),
+    ns: AtomicU64::new(0),
+};
 
 fn note_timing(t: &Timing, bytes: usize, t0: std::time::Instant) {
     let ns = u64::try_from(t0.elapsed().as_nanos()).unwrap_or(u64::MAX);

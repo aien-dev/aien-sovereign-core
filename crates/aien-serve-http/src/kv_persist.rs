@@ -437,7 +437,11 @@ impl TestFault {
         let Some(spec) = get(TEST_FAULT_ENV).filter(|s| !s.is_empty()) else {
             return Ok(None);
         };
-        let bad = || format!("{TEST_FAULT_ENV}={spec:?}: expected <p1|p2|p3|p4|p5|load>:<stall ms>[:<count>]");
+        let bad = || {
+            format!(
+                "{TEST_FAULT_ENV}={spec:?}: expected <p1|p2|p3|p4|p5|load>:<stall ms>[:<count>]"
+            )
+        };
         let parts: Vec<&str> = spec.split(':').collect();
         if !(2..=3).contains(&parts.len()) {
             return Err(bad());
@@ -1284,7 +1288,10 @@ fn open_inner(
         settings.worker.drain_ms,
     );
     let line = match &fault {
-        Some(f) => format!("{line}; TEST FAULT {TEST_FAULT_ENV}={} armed (chip check only)", f.spec()),
+        Some(f) => format!(
+            "{line}; TEST FAULT {TEST_FAULT_ENV}={} armed (chip check only)",
+            f.spec()
+        ),
         None => line,
     };
     Ok((

@@ -25,10 +25,15 @@
 //! host residual), the expert sort (O(m * top_k)) and the embedding gather.
 use std::time::Instant;
 
-use aien_omega_pf::{build_tiles, Layout, PfBuffer, PrefillAttention, PrefillDevice, QgemmCall, QuantIn, TILE_BYTES};
+use aien_omega_pf::{
+    build_tiles, Layout, PfBuffer, PrefillAttention, PrefillDevice, QgemmCall, QuantIn, TILE_BYTES,
+};
 use rayon::prelude::*;
 
-use super::{as_u32_mut, host, host_mut, read_dev, rotate_logits, ExpertSort, PrefillStats, Region, WholePromptPrefill, WpMutant, ATTN_OUT_SCALE};
+use super::{
+    as_u32_mut, host, host_mut, read_dev, rotate_logits, ExpertSort, PrefillStats, Region,
+    WholePromptPrefill, WpMutant, ATTN_OUT_SCALE,
+};
 use crate::moe_plan::{MoeBatchPlan, MoePlanError};
 use crate::qwen3_moe_omega::{Qwen3MoeConfig, Qwen3MoeOmegaWeights};
 use crate::tensor::rmsnorm;
@@ -62,7 +67,11 @@ impl<D: PrefillDevice> WholePromptPrefill<D> {
     /// Turns the device router logits + combine on (packs and uploads every layer's router once,
     /// about `layers x (hidden / 4 + 1) x experts x 16` bytes) or off. OFF is the default; with it
     /// off [`Self::run`] is exactly the host path.
-    pub fn set_device_host_work(&mut self, weights: &Qwen3MoeOmegaWeights, on: bool) -> Result<(), String> {
+    pub fn set_device_host_work(
+        &mut self,
+        weights: &Qwen3MoeOmegaWeights,
+        on: bool,
+    ) -> Result<(), String> {
         if !on {
             self.devhost = None;
             return Ok(());
@@ -70,7 +79,10 @@ impl<D: PrefillDevice> WholePromptPrefill<D> {
         if self.devhost.is_some() {
             return Ok(());
         }
-        let t = self.dev.router_rows().ok_or("device router logits / combine are not linked in this build")?;
+        let t = self
+            .dev
+            .router_rows()
+            .ok_or("device router logits / combine are not linked in this build")?;
         let c = &weights.config;
         let (h, e) = (c.hidden, c.experts);
         if t == 0 {
@@ -83,15 +95,25 @@ impl<D: PrefillDevice> WholePromptPrefill<D> {
         let mut routers = Vec::with_capacity(weights.layers.len());
         for (l, layer) in weights.layers.iter().enumerate() {
             if layer.router.len() != e * h {
-                return Err(format!("layer {l}: router has {} values, want {}", layer.router.len(), e * h));
+                return Err(format!(
+                    "layer {l}: router has {} values, want {}",
+                    layer.router.len(),
+                    e * h
+                ));
             }
             let wq = aien_omega_pf::pack_router(e, h, &layer.router);
             host_mut(&mut staging, "router staging")?[..wq.len()].copy_from_slice(&wq);
             let dst = self.dev.alloc_dev(bytes)?;
-            self.dev.copy_va(dst.va(), staging.va(), bytes).map_err(|err| format!("layer {l}: router upload: {err}"))?;
+            self.dev
+                .copy_va(dst.va(), staging.va(), bytes)
+                .map_err(|err| format!("layer {l}: router upload: {err}"))?;
             routers.push(dst);
         }
-        self.devhost = Some(DevHost { routers, t, bufs: None });
+        self.devhost = Some(DevHost {
+            routers,
+            t,
+            bufs: None,
+        });
         Ok(())
     }
 
@@ -124,7 +146,13 @@ impl<D: PrefillDevice> WholePromptPrefill<D> {
     }
 
     /// [`Self::run`] with the router logits and the combine on the chip (see the module docs).
-    pub(super) fn run_dev(&mut self, weights: &Qwen3MoeOmegaWeights, attn: &mut dyn PrefillAttention, tokens: &[u32], pos0: usize) -> Result<Vec<f32>, String> {
+    pub(super) fn run_dev(
+        &mut self,
+        weights: &Qwen3MoeOmegaWeights,
+        attn: &mut dyn PrefillAttention,
+        tokens: &[u32],
+        pos0: usize,
+    ) -> Result<Vec<f32>, String> {
         let c = &weights.config;
         let m = tokens.len();
         if m == 0 {
@@ -134,14 +162,31 @@ impl<D: PrefillDevice> WholePromptPrefill<D> {
             return Err(format!("positions {pos0} + {m} do not fit u32"));
         }
         if self.entries.len() != weights.layers.len() {
-            return Err(format!("driver built for {} layers, weights have {}", self.entries.len(), weights.layers.len()));
+            return Err(format!(
+                "driver built for {} layers, weights have {}",
+                self.entries.len(),
+                weights.layers.len()
+            ));
         }
-        let (h, qd, qkv_n, e, top_k, i, eps) = (c.hidden, c.q_dim(), c.qkv_n(), c.experts, c.top_k, c.moe_intermediate, c.rms_eps);
+        let (h, qd, qkv_n, e, top_k, i, eps) = (
+            c.hidden,
+            c.q_dim(),
+            c.qkv_n(),
+            c.experts,
+            c.top_k,
+            c.moe_intermediate,
+            c.rms_eps,
+        );
         let g = m * top_k;
         let dev_attn = attn.has_dev();
         self.ensure(c, m, dev_attn)?;
         self.dh_ensure(c, m)?;
-        let mut st = PrefillStats { tokens: m, layers: weights.layers.len(), attn_dev: dev_attn, ..Default::default() };
+        let mut st = PrefillStats {
+            tokens: m,
+            layers: weights.layers.len(),
+            attn_dev: dev_attn,
+            ..Default::default()
+        };
         let (dev, b) = (&mut self.dev, self.bufs.as_mut().expect("sized"));
         let dh = self.devhost.as_mut().expect("device host work on");
         let (routers, d) = (&dh.routers, dh.bufs.as_mut().expect("sized"));
@@ -156,20 +201,33 @@ impl<D: PrefillDevice> WholePromptPrefill<D> {
         }
 
         let t = Instant::now();
-        let mut x: Vec<f32> = tokens.iter().flat_map(|&tok| weights.embed_row(tok)).collect();
+        let mut x: Vec<f32> = tokens
+            .iter()
+            .flat_map(|&tok| weights.embed_row(tok))
+            .collect();
         let mut logits = vec![0.0f32; m * e];
         st.host_ns += t.elapsed().as_nanos() as u64;
         lap!(embed_ns);
 
-        let put_tiles = |tiles: &mut D::Buf, max: usize, region: Region, w: &[u64], s: &[u64], counts: &[u32]| -> Result<(u64, usize), String> {
+        let put_tiles = |tiles: &mut D::Buf,
+                         max: usize,
+                         region: Region,
+                         w: &[u64],
+                         s: &[u64],
+                         counts: &[u32]|
+         -> Result<(u64, usize), String> {
             let tab = build_tiles(bm, w, s, counts).map_err(|err| err.to_string())?;
             if tab.len() > max {
-                return Err(format!("tile table of {} entries > region of {max}", tab.len()));
+                return Err(format!(
+                    "tile table of {} entries > region of {max}",
+                    tab.len()
+                ));
             }
             let off = region as usize * max * TILE_BYTES;
             let bytes = tiles.host_mut().ok_or("tile table is not a host buffer")?;
             for (j, tl) in tab.iter().enumerate() {
-                bytes[off + j * TILE_BYTES..off + (j + 1) * TILE_BYTES].copy_from_slice(&tl.to_bytes());
+                bytes[off + j * TILE_BYTES..off + (j + 1) * TILE_BYTES]
+                    .copy_from_slice(&tl.to_bytes());
             }
             Ok((tiles.va() + off as u64, tab.len()))
         };
@@ -187,32 +245,66 @@ impl<D: PrefillDevice> WholePromptPrefill<D> {
             let t = Instant::now();
             {
                 let xin = host_mut(&mut b.xin, "xin")?;
-                xin[..m * h].par_chunks_mut(h).zip(x.par_chunks(h)).for_each(|(o, xr)| rmsnorm(xr, &layer.input_norm, eps, o));
+                xin[..m * h]
+                    .par_chunks_mut(h)
+                    .zip(x.par_chunks(h))
+                    .for_each(|(o, xr)| rmsnorm(xr, &layer.input_norm, eps, o));
                 lap!(norm_in_ns);
             }
             st.host_ns += t.elapsed().as_nanos() as u64;
             if let Some(t) = tr.as_deref_mut().filter(|t| t.ops_layer == Some(l)) {
                 t.ops.x_norm = host(&b.xin, "xin")?[..m * h].to_vec();
             }
-            st.chip_ns += dev.quant(h, QuantIn::F32, m, b.xin.va(), b.xq.va(), b.xs.va()).map_err(|err| format!("layer {l} quant x: {err}"))?;
+            st.chip_ns += dev
+                .quant(h, QuantIn::F32, m, b.xin.va(), b.xq.va(), b.xs.va())
+                .map_err(|err| format!("layer {l} quant x: {err}"))?;
             st.quant += 1;
 
             // --- q|k|v, attention, o: exactly as `run` ---
             lap!(dev_ns);
-            let (tv, nt) = put_tiles(&mut b.tiles, b.max_tiles, Region::Qkv, &[ent.qkv.0], &[ent.qkv.1], &dense)?;
+            let (tv, nt) = put_tiles(
+                &mut b.tiles,
+                b.max_tiles,
+                Region::Qkv,
+                &[ent.qkv.0],
+                &[ent.qkv.1],
+                &dense,
+            )?;
             lap!(tiles_ns);
             let qkv_y = match (&b.qkv_dev, &b.qkv_host) {
                 (Some(d), _) => d.va(),
                 (None, Some(hb)) => hb.va(),
                 (None, None) => unreachable!("ensure allocates one q|k|v buffer"),
             };
-            let call = QgemmCall { n: qkv_n, k: h, layout: Layout::Plain, tiles_va: tv, ntiles: nt, rowidx_va: 0, xq_va: b.xq.va(), xs_va: b.xs.va(), y_va: qkv_y };
-            st.chip_ns += dev.qgemm(&call).map_err(|err| format!("layer {l} q|k|v gemm x{m}: {err}"))?;
+            let call = QgemmCall {
+                n: qkv_n,
+                k: h,
+                layout: Layout::Plain,
+                tiles_va: tv,
+                ntiles: nt,
+                rowidx_va: 0,
+                xq_va: b.xq.va(),
+                xs_va: b.xs.va(),
+                y_va: qkv_y,
+            };
+            st.chip_ns += dev
+                .qgemm(&call)
+                .map_err(|err| format!("layer {l} q|k|v gemm x{m}: {err}"))?;
             st.qkv += 1;
             let att_va = if let (Some(qd_buf), Some(ad_buf)) = (&b.qkv_dev, &b.att_dev) {
                 let ns = attn
-                    .attend_dev(lu, pos0 as u32, m as u32, qd_buf.va(), eps, ATTN_OUT_SCALE, ad_buf.va())
-                    .ok_or_else(|| format!("layer {l}: attention offered the device entry, then refused it"))?
+                    .attend_dev(
+                        lu,
+                        pos0 as u32,
+                        m as u32,
+                        qd_buf.va(),
+                        eps,
+                        ATTN_OUT_SCALE,
+                        ad_buf.va(),
+                    )
+                    .ok_or_else(|| {
+                        format!("layer {l}: attention offered the device entry, then refused it")
+                    })?
                     .map_err(|err| format!("layer {l} attention (device) x{m}: {err}"))?;
                 st.attn_ns += ns;
                 ad_buf.va()
@@ -220,7 +312,15 @@ impl<D: PrefillDevice> WholePromptPrefill<D> {
                 let qkv = host(b.qkv_host.as_ref().expect("host q|k|v"), "q|k|v")?;
                 let out = host_mut(&mut b.xin, "xin")?;
                 let ns = attn
-                    .attend(lu, pos0 as u32, m as u32, &qkv[..m * qkv_n], eps, ATTN_OUT_SCALE, &mut out[..m * qd])
+                    .attend(
+                        lu,
+                        pos0 as u32,
+                        m as u32,
+                        &qkv[..m * qkv_n],
+                        eps,
+                        ATTN_OUT_SCALE,
+                        &mut out[..m * qd],
+                    )
                     .map_err(|err| format!("layer {l} attention x{m}: {err}"))?;
                 st.attn_ns += ns;
                 b.xin.va()
@@ -232,15 +332,40 @@ impl<D: PrefillDevice> WholePromptPrefill<D> {
                     (None, Some(hb)) => host(hb, "q|k|v")?[..m * qkv_n].to_vec(),
                     (None, None) => Vec::new(),
                 };
-                t.ops.attn = if b.att_dev.is_some() { read_dev(&mut *dev, att_va, m * qd)? } else { host(&b.xin, "xin")?[..m * qd].to_vec() };
+                t.ops.attn = if b.att_dev.is_some() {
+                    read_dev(&mut *dev, att_va, m * qd)?
+                } else {
+                    host(&b.xin, "xin")?[..m * qd].to_vec()
+                };
             }
-            st.chip_ns += dev.quant(qd, QuantIn::F32, m, att_va, b.xq.va(), b.xs.va()).map_err(|err| format!("layer {l} quant attn: {err}"))?;
+            st.chip_ns += dev
+                .quant(qd, QuantIn::F32, m, att_va, b.xq.va(), b.xs.va())
+                .map_err(|err| format!("layer {l} quant attn: {err}"))?;
             st.quant += 1;
             lap!(dev_ns);
-            let (tv, nt) = put_tiles(&mut b.tiles, b.max_tiles, Region::O, &[ent.o.0], &[ent.o.1], &dense)?;
+            let (tv, nt) = put_tiles(
+                &mut b.tiles,
+                b.max_tiles,
+                Region::O,
+                &[ent.o.0],
+                &[ent.o.1],
+                &dense,
+            )?;
             lap!(tiles_ns);
-            let call = QgemmCall { n: h, k: qd, layout: Layout::Plain, tiles_va: tv, ntiles: nt, rowidx_va: 0, xq_va: b.xq.va(), xs_va: b.xs.va(), y_va: b.oproj.va() };
-            st.chip_ns += dev.qgemm(&call).map_err(|err| format!("layer {l} o gemm x{m}: {err}"))?;
+            let call = QgemmCall {
+                n: h,
+                k: qd,
+                layout: Layout::Plain,
+                tiles_va: tv,
+                ntiles: nt,
+                rowidx_va: 0,
+                xq_va: b.xq.va(),
+                xs_va: b.xs.va(),
+                y_va: b.oproj.va(),
+            };
+            st.chip_ns += dev
+                .qgemm(&call)
+                .map_err(|err| format!("layer {l} o gemm x{m}: {err}"))?;
             st.o += 1;
             if let Some(t) = tr.as_deref_mut().filter(|t| t.ops_layer == Some(l)) {
                 t.ops.oproj = host(&b.oproj, "o projection")?[..m * h].to_vec();
@@ -251,11 +376,13 @@ impl<D: PrefillDevice> WholePromptPrefill<D> {
             let t = Instant::now();
             {
                 let oproj = host(&b.oproj, "o projection")?;
-                x.par_chunks_mut(h).zip(oproj[..m * h].par_chunks(h)).for_each(|(xr, pr)| {
-                    for (xi, p) in xr.iter_mut().zip(pr) {
-                        *xi += p;
-                    }
-                });
+                x.par_chunks_mut(h)
+                    .zip(oproj[..m * h].par_chunks(h))
+                    .for_each(|(xr, pr)| {
+                        for (xi, p) in xr.iter_mut().zip(pr) {
+                            *xi += p;
+                        }
+                    });
             }
             if let Some(t) = tr.as_deref_mut() {
                 t.x_mid[l].copy_from_slice(&x);
@@ -263,13 +390,18 @@ impl<D: PrefillDevice> WholePromptPrefill<D> {
             lap!(resid_ns);
             {
                 let post = host_mut(&mut d.post, "post")?;
-                post[..m * h].par_chunks_mut(h).zip(x.par_chunks(h)).for_each(|(o, xr)| rmsnorm(xr, &layer.post_norm, eps, o));
+                post[..m * h]
+                    .par_chunks_mut(h)
+                    .zip(x.par_chunks(h))
+                    .for_each(|(o, xr)| rmsnorm(xr, &layer.post_norm, eps, o));
             }
             lap!(norm_post_ns);
             st.host_ns += t.elapsed().as_nanos() as u64;
 
             // --- router logits on the chip (all m tokens, one launch) ---
-            st.chip_ns += dev.router_logits(h, e, m, d.post.va(), routers[l].va(), d.logits.va()).map_err(|err| format!("layer {l} router logits x{m}: {err}"))?;
+            st.chip_ns += dev
+                .router_logits(h, e, m, d.post.va(), routers[l].va(), d.logits.va())
+                .map_err(|err| format!("layer {l} router logits x{m}: {err}"))?;
             st.router += 1;
             let t = Instant::now();
             logits.copy_from_slice(&host(&d.logits, "logits")?[..m * e]);
@@ -282,52 +414,112 @@ impl<D: PrefillDevice> WholePromptPrefill<D> {
             }
             lap!(router_ns);
             // --- routing plan and sort (host, token-parallel exact replica) ---
-            let plan = plan_par(&logits, m, e, top_k).map_err(|err| format!("layer {l} routing: {err}"))?;
+            let plan = plan_par(&logits, m, e, top_k)
+                .map_err(|err| format!("layer {l} routing: {err}"))?;
             let sort = ExpertSort::from_plan(&plan);
             if let Some(t) = tr.as_deref_mut() {
                 t.experts[l].copy_from_slice(&plan.topk_experts);
             }
-            as_u32_mut(b.rowidx.host_mut().ok_or("row index is not a host buffer")?)?[..g].copy_from_slice(&sort.rows);
-            as_u32_mut(d.inv.host_mut().ok_or("inv is not a host buffer")?)?[..g].copy_from_slice(&sort.inv);
+            as_u32_mut(
+                b.rowidx
+                    .host_mut()
+                    .ok_or("row index is not a host buffer")?,
+            )?[..g]
+                .copy_from_slice(&sort.rows);
+            as_u32_mut(d.inv.host_mut().ok_or("inv is not a host buffer")?)?[..g]
+                .copy_from_slice(&sort.inv);
             host_mut(&mut d.wts, "weights")?[..g].copy_from_slice(&plan.topk_weights);
             st.host_ns += t.elapsed().as_nanos() as u64;
             lap!(plan_ns);
-            st.chip_ns += dev.quant(h, QuantIn::F32, m, d.post.va(), b.xq.va(), b.xs.va()).map_err(|err| format!("layer {l} quant post: {err}"))?;
+            st.chip_ns += dev
+                .quant(h, QuantIn::F32, m, d.post.va(), b.xq.va(), b.xs.va())
+                .map_err(|err| format!("layer {l} quant post: {err}"))?;
             st.quant += 1;
 
             // --- experts: gate|up (rows gathered by token), act quantised, down into DEVICE rows ---
             lap!(dev_ns);
-            let (tv, nt) = put_tiles(&mut b.tiles, b.max_tiles, Region::GateUp, &ent.gu_w, &ent.gu_s, &sort.counts)?;
+            let (tv, nt) = put_tiles(
+                &mut b.tiles,
+                b.max_tiles,
+                Region::GateUp,
+                &ent.gu_w,
+                &ent.gu_s,
+                &sort.counts,
+            )?;
             if mutant == WpMutant::GateUpScales {
                 let mut s = ent.gu_s.clone();
                 s.rotate_left(1);
-                put_tiles(&mut b.tiles, b.max_tiles, Region::GateUp, &ent.gu_w, &s, &sort.counts)?;
+                put_tiles(
+                    &mut b.tiles,
+                    b.max_tiles,
+                    Region::GateUp,
+                    &ent.gu_w,
+                    &s,
+                    &sort.counts,
+                )?;
             }
             lap!(tiles_ns);
-            let call = QgemmCall { n: 2 * i, k: h, layout: Layout::SwigluNat, tiles_va: tv, ntiles: nt, rowidx_va: b.rowidx.va(), xq_va: b.xq.va(), xs_va: b.xs.va(), y_va: b.act.va() };
-            st.chip_ns += dev.qgemm(&call).map_err(|err| format!("layer {l} gate|up gemm x{g}: {err}"))?;
+            let call = QgemmCall {
+                n: 2 * i,
+                k: h,
+                layout: Layout::SwigluNat,
+                tiles_va: tv,
+                ntiles: nt,
+                rowidx_va: b.rowidx.va(),
+                xq_va: b.xq.va(),
+                xs_va: b.xs.va(),
+                y_va: b.act.va(),
+            };
+            st.chip_ns += dev
+                .qgemm(&call)
+                .map_err(|err| format!("layer {l} gate|up gemm x{g}: {err}"))?;
             st.gate_up += 1;
-            st.chip_ns += dev.quant(i, QuantIn::Bf16, g, b.act.va(), b.aq.va(), b.a_s.va()).map_err(|err| format!("layer {l} quant act: {err}"))?;
+            st.chip_ns += dev
+                .quant(i, QuantIn::Bf16, g, b.act.va(), b.aq.va(), b.a_s.va())
+                .map_err(|err| format!("layer {l} quant act: {err}"))?;
             st.quant += 1;
             lap!(dev_ns);
-            let (tv, nt) = put_tiles(&mut b.tiles, b.max_tiles, Region::Down, &ent.dn_w, &ent.dn_s, &sort.counts)?;
+            let (tv, nt) = put_tiles(
+                &mut b.tiles,
+                b.max_tiles,
+                Region::Down,
+                &ent.dn_w,
+                &ent.dn_s,
+                &sort.counts,
+            )?;
             lap!(tiles_ns);
-            let call = QgemmCall { n: h, k: i, layout: Layout::Plain, tiles_va: tv, ntiles: nt, rowidx_va: 0, xq_va: b.aq.va(), xs_va: b.a_s.va(), y_va: d.down.va() };
-            st.chip_ns += dev.qgemm(&call).map_err(|err| format!("layer {l} down gemm x{g}: {err}"))?;
+            let call = QgemmCall {
+                n: h,
+                k: i,
+                layout: Layout::Plain,
+                tiles_va: tv,
+                ntiles: nt,
+                rowidx_va: 0,
+                xq_va: b.aq.va(),
+                xs_va: b.a_s.va(),
+                y_va: d.down.va(),
+            };
+            st.chip_ns += dev
+                .qgemm(&call)
+                .map_err(|err| format!("layer {l} down gemm x{g}: {err}"))?;
             st.down += 1;
             lap!(dev_ns);
 
             // --- combine on the chip, then the residual add on the host ---
-            st.chip_ns += dev.moe_combine(h, top_k, m, d.down.va(), d.inv.va(), d.wts.va(), d.moe.va()).map_err(|err| format!("layer {l} combine x{m}: {err}"))?;
+            st.chip_ns += dev
+                .moe_combine(h, top_k, m, d.down.va(), d.inv.va(), d.wts.va(), d.moe.va())
+                .map_err(|err| format!("layer {l} combine x{m}: {err}"))?;
             st.combine += 1;
             let t = Instant::now();
             {
                 let moe = host(&d.moe, "combine out")?;
-                x.par_chunks_mut(h).zip(moe[..m * h].par_chunks(h)).for_each(|(xr, ar)| {
-                    for (xi, a) in xr.iter_mut().zip(ar) {
-                        *xi += a;
-                    }
-                });
+                x.par_chunks_mut(h)
+                    .zip(moe[..m * h].par_chunks(h))
+                    .for_each(|(xr, ar)| {
+                        for (xi, a) in xr.iter_mut().zip(ar) {
+                            *xi += a;
+                        }
+                    });
             }
             if let Some(t) = tr.as_deref_mut() {
                 t.x_out[l].copy_from_slice(&x);
@@ -358,8 +550,21 @@ type TokenTopK = (Vec<u32>, Vec<f32>);
 /// same total order (`total_cmp` descending, then expert index ascending), so the selected
 /// experts, their order and the weights (`exp(l - max)` over the selection, summed in slot order)
 /// are the same values; the counting sort that follows is the same serial loop.
-pub fn plan_par(logits: &[f32], tokens: usize, experts: usize, top_k: usize) -> Result<MoeBatchPlan, MoePlanError> {
-    if experts == 0 || top_k == 0 || top_k > experts || tokens > u32::MAX as usize / top_k || logits.len() != tokens.checked_mul(experts).ok_or(MoePlanError::InvalidShape)? {
+pub fn plan_par(
+    logits: &[f32],
+    tokens: usize,
+    experts: usize,
+    top_k: usize,
+) -> Result<MoeBatchPlan, MoePlanError> {
+    if experts == 0
+        || top_k == 0
+        || top_k > experts
+        || tokens > u32::MAX as usize / top_k
+        || logits.len()
+            != tokens
+                .checked_mul(experts)
+                .ok_or(MoePlanError::InvalidShape)?
+    {
         return Err(MoePlanError::InvalidShape);
     }
     let assignments = tokens * top_k;
@@ -378,12 +583,18 @@ pub fn plan_par(logits: &[f32], tokens: usize, experts: usize, top_k: usize) -> 
             ranking.truncate(top_k);
             ranking.sort_unstable_by(cmp);
             let max_logit = row[ranking[0]];
-            let probs: Vec<f32> = ranking.iter().map(|&ex| (row[ex] - max_logit).exp()).collect();
+            let probs: Vec<f32> = ranking
+                .iter()
+                .map(|&ex| (row[ex] - max_logit).exp())
+                .collect();
             let mut sum = 0.0f32;
             for p in &probs {
                 sum += p;
             }
-            Ok((ranking.iter().map(|&ex| ex as u32).collect(), probs.iter().map(|p| p / sum).collect()))
+            Ok((
+                ranking.iter().map(|&ex| ex as u32).collect(),
+                probs.iter().map(|p| p / sum).collect(),
+            ))
         })
         .collect();
     let mut topk_experts = Vec::with_capacity(assignments);
@@ -414,5 +625,15 @@ pub fn plan_par(logits: &[f32], tokens: usize, experts: usize, top_k: usize) -> 
         assignment_to_grouped[assignment] = grouped as u32;
         grouped_token_ids[grouped] = (assignment / top_k) as u32;
     }
-    Ok(MoeBatchPlan { tokens, experts, top_k, topk_experts, topk_weights, expert_offsets, grouped_to_assignment, assignment_to_grouped, grouped_token_ids })
+    Ok(MoeBatchPlan {
+        tokens,
+        experts,
+        top_k,
+        topk_experts,
+        topk_weights,
+        expert_offsets,
+        grouped_to_assignment,
+        assignment_to_grouped,
+        grouped_token_ids,
+    })
 }

@@ -48,7 +48,11 @@ pub fn e4m3_rne_sat(f: f32) -> u8 {
 /// e4m3 code -> f32 (mirrors `qm_e4m3`).
 pub fn e4m3_to_f32(c: u8) -> f32 {
     let (s, e, mm) = (c >> 7, ((c >> 3) & 15) as i32, (c & 7) as f32);
-    let v = if e != 0 { (1.0 + mm / 8.0) * 2f32.powi(e - 7) } else { (mm / 8.0) * 2f32.powi(-6) };
+    let v = if e != 0 {
+        (1.0 + mm / 8.0) * 2f32.powi(e - 7)
+    } else {
+        (mm / 8.0) * 2f32.powi(-6)
+    };
     if s != 0 {
         -v
     } else {
@@ -61,14 +65,22 @@ pub fn block_scale(m: f32) -> (f32, f32) {
     let mb = m.to_bits();
     let (e, mant) = (mb >> 23, mb & 0x7f_ffff);
     let c = (mant + 0x1f_ffff) >> 23;
-    (f32::from_bits((e + c - 8) << 23), f32::from_bits((262 - e - c) << 23))
+    (
+        f32::from_bits((e + c - 8) << 23),
+        f32::from_bits((262 - e - c) << 23),
+    )
 }
 
 /// Quantises one row of `k` values (k a multiple of 128) exactly as `pq_ref`: writes the e4m3
 /// codes to `q` and the block scales to `s`.
 pub fn quant_row(x: &[f32], q: &mut [u8], s: &mut [f32]) {
     let k = x.len();
-    assert!(k % BLOCK == 0 && q.len() == k && s.len() == k / BLOCK, "quant_row: k {k} q {} s {}", q.len(), s.len());
+    assert!(
+        k % BLOCK == 0 && q.len() == k && s.len() == k / BLOCK,
+        "quant_row: k {k} q {} s {}",
+        q.len(),
+        s.len()
+    );
     for b in 0..k / BLOCK {
         let blk = &x[b * BLOCK..(b + 1) * BLOCK];
         let mut m = 2f32.powi(-100);
@@ -116,13 +128,25 @@ mod tests {
         assert_eq!(e4m3_rne_sat(1.0), 0x38);
         assert_eq!(e4m3_rne_sat(2f32.powi(-6)), 0x08);
         assert_eq!(e4m3_rne_sat(2f32.powi(-9)), 0x01);
-        assert_eq!(e4m3_rne_sat(1.0625), 0x38, "tie to even (1.0625 is halfway between 1.0 and 1.125)");
-        assert_eq!(e4m3_rne_sat(1.1875), 0x3a, "tie to even (halfway between 1.125 and 1.25)");
+        assert_eq!(
+            e4m3_rne_sat(1.0625),
+            0x38,
+            "tie to even (1.0625 is halfway between 1.0 and 1.125)"
+        );
+        assert_eq!(
+            e4m3_rne_sat(1.1875),
+            0x3a,
+            "tie to even (halfway between 1.125 and 1.25)"
+        );
         for c in 0u8..=255 {
             if c & 0x7f == 0x7f {
                 continue;
             }
-            assert_eq!(e4m3_rne_sat(e4m3_to_f32(c)), if c == 0x80 { 0x80 } else { c }, "round trip of code {c:#x}");
+            assert_eq!(
+                e4m3_rne_sat(e4m3_to_f32(c)),
+                if c == 0x80 { 0x80 } else { c },
+                "round trip of code {c:#x}"
+            );
         }
     }
 
@@ -167,10 +191,22 @@ mod tests {
         let mut q = vec![0u8; rows * k];
         let mut s = vec![0f32; rows * 2];
         for r in 0..rows {
-            quant_row(&x[r * k..(r + 1) * k], &mut q[r * k..(r + 1) * k], &mut s[r * 2..(r + 1) * 2]);
+            quant_row(
+                &x[r * k..(r + 1) * k],
+                &mut q[r * k..(r + 1) * k],
+                &mut s[r * 2..(r + 1) * 2],
+            );
         }
         let bad_q = q.iter().zip(&want_q).filter(|(a, b)| a != b).count();
-        let bad_s = s.iter().zip(&want_s).filter(|(a, b)| a.to_bits() != b.to_bits()).count();
-        assert_eq!((bad_q, bad_s), (0, 0), "codes / scales differing from the C reference");
+        let bad_s = s
+            .iter()
+            .zip(&want_s)
+            .filter(|(a, b)| a.to_bits() != b.to_bits())
+            .count();
+        assert_eq!(
+            (bad_q, bad_s),
+            (0, 0),
+            "codes / scales differing from the C reference"
+        );
     }
 }

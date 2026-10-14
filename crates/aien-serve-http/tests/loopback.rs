@@ -46,12 +46,11 @@ fn dechunk(raw: &[u8]) -> Vec<u8> {
         let line_end = raw[i..]
             .windows(2)
             .position(|w| w == b"\r\n")
-            .expect("chunk size line") + i;
-        let size = usize::from_str_radix(
-            std::str::from_utf8(&raw[i..line_end]).unwrap().trim(),
-            16,
-        )
-        .expect("hex chunk size");
+            .expect("chunk size line")
+            + i;
+        let size =
+            usize::from_str_radix(std::str::from_utf8(&raw[i..line_end]).unwrap().trim(), 16)
+                .expect("hex chunk size");
         if size == 0 {
             return out;
         }
@@ -82,7 +81,10 @@ fn request(addr: SocketAddr, method: &str, path: &str, body: Option<&str>) -> Re
         .and_then(|s| s.parse().ok())
         .expect("status code");
     let body_raw = &raw[split + 4..];
-    let body = if headers.to_ascii_lowercase().contains("transfer-encoding: chunked") {
+    let body = if headers
+        .to_ascii_lowercase()
+        .contains("transfer-encoding: chunked")
+    {
         String::from_utf8(dechunk(body_raw)).unwrap()
     } else {
         String::from_utf8(body_raw.to_vec()).unwrap()
@@ -155,7 +157,9 @@ fn stream_chunks_parse_and_end_with_done() {
     let r = chat(srv.addr, body);
     assert_eq!(r.status, 200, "{}", r.body);
     assert!(
-        r.headers.to_ascii_lowercase().contains("content-type: text/event-stream"),
+        r.headers
+            .to_ascii_lowercase()
+            .contains("content-type: text/event-stream"),
         "{}",
         r.headers
     );
@@ -166,7 +170,9 @@ fn stream_chunks_parse_and_end_with_done() {
         .iter()
         .map(|d| serde_json::from_str(d).unwrap_or_else(|e| panic!("chunk not JSON ({e}): {d}")))
         .collect();
-    assert!(chunks.iter().all(|c| c["object"] == "chat.completion.chunk"));
+    assert!(chunks
+        .iter()
+        .all(|c| c["object"] == "chat.completion.chunk"));
     assert_eq!(chunks[0]["choices"][0]["delta"]["role"], "assistant");
     let text: String = chunks
         .iter()
@@ -192,13 +198,20 @@ fn second_request_while_busy_is_rejected_then_accepted() {
     );
     let addr = srv.addr;
     let first = std::thread::spawn(move || {
-        chat(addr, r#"{"messages":[{"role":"user","content":"a"}],"stream":true}"#)
+        chat(
+            addr,
+            r#"{"messages":[{"role":"user","content":"a"}],"stream":true}"#,
+        )
     });
     std::thread::sleep(Duration::from_millis(300));
     let busy = chat(addr, PROMPT);
     assert_eq!(busy.status, 503, "{}", busy.body);
     assert_eq!(json(&busy)["error"]["type"], "server_busy");
-    assert!(busy.headers.to_ascii_lowercase().contains("retry-after: 1"), "{}", busy.headers);
+    assert!(
+        busy.headers.to_ascii_lowercase().contains("retry-after: 1"),
+        "{}",
+        busy.headers
+    );
     assert_eq!(json(&request(addr, "GET", "/health", None))["busy"], true);
     let first = first.join().unwrap();
     assert_eq!(first.status, 200);

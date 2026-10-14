@@ -42,7 +42,10 @@ pub struct PrefillMode {
 
 impl Default for PrefillMode {
     fn default() -> Self {
-        Self { whole_prompt: true, device_host: true }
+        Self {
+            whole_prompt: true,
+            device_host: true,
+        }
     }
 }
 
@@ -75,7 +78,10 @@ impl PrefillMode {
 
     /// What the engine runs: the device router/combine only exists inside the whole-prompt path.
     pub fn effective(self) -> Self {
-        Self { whole_prompt: self.whole_prompt, device_host: self.whole_prompt && self.device_host }
+        Self {
+            whole_prompt: self.whole_prompt,
+            device_host: self.whole_prompt && self.device_host,
+        }
     }
 }
 
@@ -109,7 +115,10 @@ impl GpuLock {
                 return Err(format!("flock {}: {err}", path.display()));
             }
             if t0.elapsed() >= wait {
-                return Err(format!("GPU lock held by another job for {} s", wait.as_secs()));
+                return Err(format!(
+                    "GPU lock held by another job for {} s",
+                    wait.as_secs()
+                ));
             }
             std::thread::sleep(Duration::from_millis(50));
         }
@@ -144,7 +153,13 @@ impl OmegaDoor {
     /// A door over an already built engine, taking the GPU lock at `lock_path` around each
     /// generation (tests: a private lock file and the host test engine). Persistence off.
     pub fn from_parts(engine: OmegaEngine, lock_path: PathBuf, lock_wait: Duration) -> Self {
-        Self { persist: PersistState::Off, engine, lock_wait, lock_path, reused_last: AtomicUsize::new(0) }
+        Self {
+            persist: PersistState::Off,
+            engine,
+            lock_wait,
+            lock_path,
+            reused_last: AtomicUsize::new(0),
+        }
     }
 
     /// Installs the persistence state (`kv_persist::open`), before the door is shared.
@@ -158,17 +173,23 @@ impl OmegaDoor {
 
     /// The engine's run settings that can change a K/V byte (persistent KV identity).
     pub fn kv_switches(&self) -> omega::OmegaKvSwitches {
-        self.engine.with_engine(|e| e.kv_switches()).expect("engine lock")
+        self.engine
+            .with_engine(|e| e.kv_switches())
+            .expect("engine lock")
     }
 
     /// The loaded model config.
     pub fn config(&self) -> omega::Qwen3MoeConfig {
-        self.engine.with_engine(|e| e.config().clone()).expect("engine lock")
+        self.engine
+            .with_engine(|e| e.config().clone())
+            .expect("engine lock")
     }
 
     /// Tokens whose KV the engine holds (the next turn's reuse candidates).
     pub fn history(&self) -> Vec<u32> {
-        self.engine.with_engine(|e| e.history().to_vec()).unwrap_or_default()
+        self.engine
+            .with_engine(|e| e.history().to_vec())
+            .unwrap_or_default()
     }
 
     /// Prompt tokens the last generation did not prefill (kept in RAM or restored).
@@ -189,7 +210,13 @@ impl OmegaDoor {
     }
     /// Loads the checkpoint onto Omega (under the GPU lock, released before returning) with a
     /// KV for `max_context` tokens. Refuses with less than [`LOAD_MIN_FREE_GB`] available.
-    pub fn load(model_dir: &Path, max_context: usize, format: WeightFormat, spin_us: Option<u32>, prefill: PrefillMode) -> Result<Self, String> {
+    pub fn load(
+        model_dir: &Path,
+        max_context: usize,
+        format: WeightFormat,
+        spin_us: Option<u32>,
+        prefill: PrefillMode,
+    ) -> Result<Self, String> {
         let avail = mem_available_gb();
         if avail < LOAD_MIN_FREE_GB {
             return Err(format!("{avail:.1} GB available, the load needs {LOAD_MIN_FREE_GB} GB free (another model may be loaded)"));
@@ -209,7 +236,10 @@ impl OmegaDoor {
         let engine = OmegaEngine::load_with(model_dir, max_context, format, &mut |what| {
             n += 1;
             if n.is_multiple_of(24) || what.starts_with("kv") || what == "lm_head" {
-                eprintln!("aien-serve-http: omega load [{:.0}s] {what}", t0.elapsed().as_secs_f64());
+                eprintln!(
+                    "aien-serve-http: omega load [{:.0}s] {what}",
+                    t0.elapsed().as_secs_f64()
+                );
             }
         })?;
         // Prefill path (W-RC): switched on while the load still holds the chip lock. A refusal is
@@ -225,7 +255,8 @@ impl OmegaDoor {
             }
             Ok(())
         })??;
-        let (wp_on, wp_dev) = engine.with_engine(|e| (e.whole_prompt_on(), e.whole_prompt_device_host_on()))?;
+        let (wp_on, wp_dev) =
+            engine.with_engine(|e| (e.whole_prompt_on(), e.whole_prompt_device_host_on()))?;
         eprintln!(
             "aien-serve-http: whole_prompt={} prefill_device_host={} (set in {:.2} s)",
             if wp_on { "on" } else { "off" },
@@ -233,15 +264,20 @@ impl OmegaDoor {
             t_wp.elapsed().as_secs_f64()
         );
         let r = &engine.load_report;
-        let (attn_path, prefill_chunk, router_path, lm_head_path, prefill_path) = engine.with_engine(|e| {
-            (
-                e.attention_path(),
-                e.prefill_chunk,
-                if e.device_routing { "device" } else { "host" },
-                if matches!(e.weights().lm_head, omega::LmHead::Gemv(_)) { "gemv" } else { "dense" },
-                if e.prefill_gemm { "gemm" } else { "gemv" },
-            )
-        })?;
+        let (attn_path, prefill_chunk, router_path, lm_head_path, prefill_path) = engine
+            .with_engine(|e| {
+                (
+                    e.attention_path(),
+                    e.prefill_chunk,
+                    if e.device_routing { "device" } else { "host" },
+                    if matches!(e.weights().lm_head, omega::LmHead::Gemv(_)) {
+                        "gemv"
+                    } else {
+                        "dense"
+                    },
+                    if e.prefill_gemm { "gemm" } else { "gemv" },
+                )
+            })?;
         eprintln!(
             "aien-serve-http: omega engine ready in {:.1} s: {:?} weights, {:.2} GB resident, {:.2} GB host, peak rss {:.2} GB, window_api={} fp8_api={} dattn_api={} attention={attn_path} router={router_path} lm_head={lm_head_path} prefill={prefill_path} prefill_chunk={prefill_chunk} spin_us={:?}",
             r.seconds,
@@ -254,7 +290,11 @@ impl OmegaDoor {
             omega::OmegaModelUploader::uses_dattn_api(),
             aien_omega_gpu::spin_us(),
         );
-        Ok(Self::from_parts(engine, PathBuf::from(GPU_LOCK_PATH), LOCK_WAIT))
+        Ok(Self::from_parts(
+            engine,
+            PathBuf::from(GPU_LOCK_PATH),
+            LOCK_WAIT,
+        ))
     }
 
     pub fn load_report(&self) -> &LoadReport {
@@ -287,7 +327,10 @@ impl Engine for OmegaDoor {
             return Err(EngineError::Failed("empty prompt".into()));
         }
         if prompt.len() >= max {
-            return Err(EngineError::PromptTooLong { len: prompt.len(), max });
+            return Err(EngineError::PromptTooLong {
+                len: prompt.len(),
+                max,
+            });
         }
         let q = omega::GenerateParams {
             max_new_tokens: p.max_new_tokens,
@@ -304,15 +347,22 @@ impl Engine for OmegaDoor {
             _ => None,
         };
         let fetched = persist.filter(|pk| pk.restore_on()).and_then(|pk| {
-            let in_ram = self.engine.with_engine(|e| e.reusable_prefix(prompt)).unwrap_or(0);
+            let in_ram = self
+                .engine
+                .with_engine(|e| e.reusable_prefix(prompt))
+                .unwrap_or(0);
             pk.fetch(prompt, in_ram)
         });
         let t_lock = Instant::now();
-        let lock = GpuLock::acquire_at(&self.lock_path, self.lock_wait).map_err(EngineError::Busy)?;
+        let lock =
+            GpuLock::acquire_at(&self.lock_path, self.lock_wait).map_err(EngineError::Busy)?;
         let lock_wait_ms = t_lock.elapsed().as_millis();
         if let (Some(pk), Some(f)) = (persist, fetched.as_ref()) {
             // All or nothing: on error the engine is reset and the prompt is prefilled.
-            match self.engine.with_engine(|e| e.restore_kv(&prompt[..f.tokens], &f.payload)) {
+            match self
+                .engine
+                .with_engine(|e| e.restore_kv(&prompt[..f.tokens], &f.payload))
+            {
                 Ok(Ok(())) => pk.note_restored(f),
                 Ok(Err(m)) | Err(m) => {
                     pk.note_import_failed();
@@ -323,10 +373,18 @@ impl Engine for OmegaDoor {
         drop(fetched);
         // The server's own sampler, so CPU and Omega engines pick tokens the same way.
         let mut sampler = |logits: &[f32], step: usize| sample_next(logits, p, step);
-        let o = self.engine.generate_with(prompt, &q, &mut sampler, on_token).map_err(EngineError::Failed)?;
-        self.reused_last.store(o.reused_prompt_tokens, Ordering::Relaxed);
+        let o = self
+            .engine
+            .generate_with(prompt, &q, &mut sampler, on_token)
+            .map_err(EngineError::Failed)?;
+        self.reused_last
+            .store(o.reused_prompt_tokens, Ordering::Relaxed);
         // Park: export under the chip lock, write after it is released.
-        let parked = persist.map(|pk| self.engine.with_engine(|e| pk.snapshot(e)).unwrap_or_default());
+        let parked = persist.map(|pk| {
+            self.engine
+                .with_engine(|e| pk.snapshot(e))
+                .unwrap_or_default()
+        });
         drop(lock);
         if let (Some(pk), Some(items)) = (persist, parked) {
             pk.submit(items);
@@ -350,7 +408,9 @@ impl Engine for OmegaDoor {
     fn persistence_status(&self) -> Option<serde_json::Value> {
         match &self.persist {
             PersistState::Off => None,
-            PersistState::Refused(why) => Some(serde_json::json!({ "state": "refused", "reason": why, "refusals": 1 })),
+            PersistState::Refused(why) => {
+                Some(serde_json::json!({ "state": "refused", "reason": why, "refusals": 1 }))
+            }
             PersistState::On(pk) => Some(pk.status_json()),
         }
     }
@@ -366,14 +426,33 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("own30b-lock-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("lock");
-        let open = || OpenOptions::new().read(true).write(true).create(true).truncate(false).open(&path).unwrap();
+        let open = || {
+            OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .open(&path)
+                .unwrap()
+        };
         let a = open();
         // SAFETY: valid descriptors, non-blocking flock.
-        assert_eq!(unsafe { libc::flock(a.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) }, 0);
+        assert_eq!(
+            unsafe { libc::flock(a.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
+            0
+        );
         let b = open();
-        assert_ne!(unsafe { libc::flock(b.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) }, 0, "second holder must be refused");
+        assert_ne!(
+            unsafe { libc::flock(b.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
+            0,
+            "second holder must be refused"
+        );
         drop(a);
-        assert_eq!(unsafe { libc::flock(b.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) }, 0, "released on drop");
+        assert_eq!(
+            unsafe { libc::flock(b.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
+            0,
+            "released on drop"
+        );
         drop(b);
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -385,14 +464,35 @@ mod tests {
 
     #[test]
     fn prefill_mode_defaults_on_and_env_switches_off() {
-        assert_eq!(PrefillMode::default(), PrefillMode { whole_prompt: true, device_host: true });
-        assert_eq!(PrefillMode::from_env(None, None).unwrap(), PrefillMode::default());
+        assert_eq!(
+            PrefillMode::default(),
+            PrefillMode {
+                whole_prompt: true,
+                device_host: true
+            }
+        );
+        assert_eq!(
+            PrefillMode::from_env(None, None).unwrap(),
+            PrefillMode::default()
+        );
         let m = PrefillMode::from_env(Some("0"), None).unwrap();
         assert!(!m.whole_prompt && m.device_host);
         // The device router/combine lives inside the whole-prompt path: off with it.
-        assert_eq!(m.effective(), PrefillMode { whole_prompt: false, device_host: false });
+        assert_eq!(
+            m.effective(),
+            PrefillMode {
+                whole_prompt: false,
+                device_host: false
+            }
+        );
         let m = PrefillMode::from_env(Some("on"), Some("off")).unwrap();
-        assert_eq!(m.effective(), PrefillMode { whole_prompt: true, device_host: false });
+        assert_eq!(
+            m.effective(),
+            PrefillMode {
+                whole_prompt: true,
+                device_host: false
+            }
+        );
         assert!(PrefillMode::from_env(Some("of"), None).is_err());
         assert!(parse_switch("--whole-prompt", "maybe").is_err());
         assert!(parse_switch("--whole-prompt", " TRUE ").unwrap());

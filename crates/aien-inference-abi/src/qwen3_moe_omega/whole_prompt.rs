@@ -31,9 +31,15 @@ impl Qwen3MoeOmegaEngine {
             return Err("whole-prompt prefill: omega's prefill GEMM / prefill attention are not linked in this build".into());
         }
         if self.kv.fused_kv().is_none() {
-            return Err(format!("whole-prompt prefill needs omega's fused KV cache, attention path is {}", self.kv.path_name()));
+            return Err(format!(
+                "whole-prompt prefill needs omega's fused KV cache, attention path is {}",
+                self.kv.path_name()
+            ));
         }
-        self.whole_prompt = Some(Box::new(WholePromptPrefill::new(aien_omega_pf::OmegaPfDevice, &self.weights)?));
+        self.whole_prompt = Some(Box::new(WholePromptPrefill::new(
+            aien_omega_pf::OmegaPfDevice,
+            &self.weights,
+        )?));
         Ok(())
     }
 
@@ -41,20 +47,28 @@ impl Qwen3MoeOmegaEngine {
     /// model's FP8 size again, held until the switch is turned off). Returns the bytes copied.
     pub fn whole_prompt_cache_weights(&mut self) -> Result<usize, String> {
         let c = self.weights.config.clone();
-        self.whole_prompt.as_mut().ok_or("whole-prompt prefill is off")?.cache_weights(&c)
+        self.whole_prompt
+            .as_mut()
+            .ok_or("whole-prompt prefill is off")?
+            .cache_weights(&c)
     }
 
     /// Moves the whole-prompt router logits and MoE combine to the chip (W-L1G-E; OFF by default,
     /// and dropped with the driver when the whole-prompt switch goes off). Needs the switch on and
     /// omega's router / combine kernels linked; the result is bit-identical to the host path.
     pub fn set_whole_prompt_device_host(&mut self, on: bool) -> Result<(), String> {
-        let wp = self.whole_prompt.as_mut().ok_or("whole-prompt prefill is off")?;
+        let wp = self
+            .whole_prompt
+            .as_mut()
+            .ok_or("whole-prompt prefill is off")?;
         wp.set_device_host_work(&self.weights, on)
     }
 
     /// Whether the whole-prompt path runs its router logits and combine on the chip.
     pub fn whole_prompt_device_host_on(&self) -> bool {
-        self.whole_prompt.as_ref().is_some_and(|w| w.device_host_work())
+        self.whole_prompt
+            .as_ref()
+            .is_some_and(|w| w.device_host_work())
     }
 
     /// Whether `generate_with` will take the whole-prompt path.
@@ -63,8 +77,14 @@ impl Qwen3MoeOmegaEngine {
     }
 
     /// Correctness gate (W-L1G-C): installs or removes the recorder on the whole-prompt driver.
-    pub fn whole_prompt_set_trace(&mut self, trace: Option<crate::qwen3_moe_omega_prefill::WpTrace>) -> Result<(), String> {
-        self.whole_prompt.as_mut().ok_or("whole-prompt prefill is off")?.trace = trace;
+    pub fn whole_prompt_set_trace(
+        &mut self,
+        trace: Option<crate::qwen3_moe_omega_prefill::WpTrace>,
+    ) -> Result<(), String> {
+        self.whole_prompt
+            .as_mut()
+            .ok_or("whole-prompt prefill is off")?
+            .trace = trace;
         Ok(())
     }
 
@@ -74,8 +94,14 @@ impl Qwen3MoeOmegaEngine {
     }
 
     /// Correctness gate (W-L1G-C): sets the negative-control mutant of the whole-prompt driver.
-    pub fn whole_prompt_set_mutant(&mut self, mutant: crate::qwen3_moe_omega_prefill::WpMutant) -> Result<(), String> {
-        self.whole_prompt.as_mut().ok_or("whole-prompt prefill is off")?.mutant = mutant;
+    pub fn whole_prompt_set_mutant(
+        &mut self,
+        mutant: crate::qwen3_moe_omega_prefill::WpMutant,
+    ) -> Result<(), String> {
+        self.whole_prompt
+            .as_mut()
+            .ok_or("whole-prompt prefill is off")?
+            .mutant = mutant;
         Ok(())
     }
 
@@ -87,7 +113,12 @@ impl Qwen3MoeOmegaEngine {
     /// Called by `generate_with` before its chunk loop. When the switch is on and the path
     /// applies, runs `tokens` (positions `self.pos ..`) as one whole prompt, stores them as
     /// history, sets `hidden` and adds the timing; returns how many tokens it consumed (all or 0).
-    pub(super) fn whole_prompt_prefill(&mut self, tokens: &[u32], hidden: &mut Vec<f32>, timing: &mut StepTiming) -> Result<usize, String> {
+    pub(super) fn whole_prompt_prefill(
+        &mut self,
+        tokens: &[u32],
+        hidden: &mut Vec<f32>,
+        timing: &mut StepTiming,
+    ) -> Result<usize, String> {
         if tokens.is_empty() || !self.trace_layers.is_empty() || self.routing_mutant {
             return Ok(0);
         }
@@ -99,7 +130,10 @@ impl Qwen3MoeOmegaEngine {
         };
         let (pos0, m) = (self.pos, tokens.len());
         if pos0 + m > fused.capacity() {
-            return Err(format!("whole-prompt prefill: {pos0} + {m} tokens > context {}", fused.capacity()));
+            return Err(format!(
+                "whole-prompt prefill: {pos0} + {m} tokens > context {}",
+                fused.capacity()
+            ));
         }
         let t = Instant::now();
         let out = wp.run(&self.weights, &mut fused.prefill_attention(), tokens, pos0);

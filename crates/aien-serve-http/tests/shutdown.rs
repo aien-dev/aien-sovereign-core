@@ -8,7 +8,14 @@ use std::time::{Duration, Instant};
 #[test]
 fn sigterm_shuts_down_cleanly_and_exits_zero() {
     let mut child = Command::new(env!("CARGO_BIN_EXE_aien-serve-http"))
-        .args(["--engine", "stub", "--port", "0", "--model-dir", "/nonexistent-pkv509"])
+        .args([
+            "--engine",
+            "stub",
+            "--port",
+            "0",
+            "--model-dir",
+            "/nonexistent-pkv509",
+        ])
         .env_remove("AIEN_KV_STORE_DIR")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -19,7 +26,10 @@ fn sigterm_shuts_down_cleanly_and_exits_zero() {
     let mut log = String::new();
     loop {
         let mut line = String::new();
-        assert!(err.read_line(&mut line).unwrap() > 0, "exited before serving: {log}");
+        assert!(
+            err.read_line(&mut line).unwrap() > 0,
+            "exited before serving: {log}"
+        );
         log.push_str(&line);
         if line.contains("serving ") {
             break;
@@ -32,12 +42,18 @@ fn sigterm_shuts_down_cleanly_and_exits_zero() {
         if let Some(s) = child.try_wait().unwrap() {
             break s;
         }
-        assert!(t0.elapsed() < Duration::from_secs(20), "no exit after SIGTERM");
+        assert!(
+            t0.elapsed() < Duration::from_secs(20),
+            "no exit after SIGTERM"
+        );
         std::thread::sleep(Duration::from_millis(10));
     };
     let mut rest = String::new();
     std::io::Read::read_to_string(&mut err, &mut rest).unwrap();
     log.push_str(&rest);
     assert!(status.success(), "{status:?}: {log}");
-    assert!(log.contains("SIGTERM received") && log.contains("shutdown complete"), "{log}");
+    assert!(
+        log.contains("SIGTERM received") && log.contains("shutdown complete"),
+        "{log}"
+    );
 }
