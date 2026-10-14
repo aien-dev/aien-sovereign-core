@@ -154,6 +154,21 @@ fn seal_refuses_an_old_plaintext_format_file() {
 }
 
 #[test]
+fn seal_and_open_time_is_counted_per_payload_byte() {
+    // Totals are process wide and other tests run in parallel: check growth by at least ours.
+    let key = SealKey::generate().unwrap();
+    let before = seal::seal_timing();
+    let (file, payload) = sealed_file(&key, 3);
+    open(&key, &file).unwrap();
+    let after = seal::seal_timing();
+    let n = payload.len() as u64;
+    assert!(after.seal_calls > before.seal_calls && after.open_calls > before.open_calls);
+    assert!(after.seal_bytes - before.seal_bytes >= n, "{before:?} {after:?}");
+    assert!(after.open_bytes - before.open_bytes >= n, "{before:?} {after:?}");
+    assert!(after.seal_ns > before.seal_ns && after.open_ns > before.open_ns);
+}
+
+#[test]
 fn seal_refusals_are_counted() {
     let key = SealKey::generate().unwrap();
     let other = SealKey::generate().unwrap();

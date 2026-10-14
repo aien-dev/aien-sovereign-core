@@ -19,7 +19,7 @@ use aien_serve_http::engine::{Engine, GenerateParams};
 use aien_serve_http::kv_persist::{self, OmegaBuild, PersistState};
 use aien_serve_http::omega_engine::OmegaDoor;
 use aien_serve_http::sampling::sample_next;
-use aien_serve_http::server::{serve, ServerConfig};
+use aien_serve_http::server::{serve, serve_until, ServerConfig};
 
 const CONTEXT: usize = 256;
 const WAIT: Duration = Duration::from_secs(20);
@@ -114,6 +114,11 @@ fn engine(weights: WeightFormat) -> OmegaEngine {
 
 /// A door with persistence started from `s` (the startup line is returned).
 fn door(scratch: &Scratch, s: &Setup) -> (OmegaDoor, String) {
+    door_with_fault(scratch, s, None)
+}
+
+/// [`door`] with the store's test-only stall (`AIEN_KV_TEST_FAULT`, sc#507).
+fn door_with_fault(scratch: &Scratch, s: &Setup, fault: Option<&str>) -> (OmegaDoor, String) {
     let mut d = OmegaDoor::from_parts(engine(s.weights), scratch.lock(), Duration::from_secs(5));
     let vars: HashMap<String, String> = s.store_vars.iter().cloned().collect();
     let settings =
@@ -129,7 +134,10 @@ fn door(scratch: &Scratch, s: &Setup) -> (OmegaDoor, String) {
         build: &s.build,
         env: &s.env,
     });
-    let (state, line) = kv_persist::open(settings, identity);
+    let fault = kv_persist::TestFault::from_lookup(|n| {
+        (n == kv_persist::TEST_FAULT_ENV).then(|| fault.map(str::to_string)).flatten()
+    });
+    let (state, line) = kv_persist::open_with_test_fault(settings, identity, fault);
     if let PersistState::On(p) = &state {
         assert!(p.wait_ready(WAIT), "store recovery did not finish");
     }
@@ -559,4 +567,180 @@ fn get_json(addr: std::net::SocketAddr, path: &str) -> serde_json::Value {
     let text = String::from_utf8(raw).unwrap();
     let body = text.split_once("\r\n\r\n").unwrap().1;
     serde_json::from_str(body).unwrap_or_else(|e| panic!("{e}: {body}"))
+}
+
+fn pk_of(d: &OmegaDoor) -> &kv_persist::KvPersistence {
+    match d.persistence() {
+        PersistState::On(p) => p,
+        _ => panic!("persistence is not on"),
+    }
+}
+
+/// Copies `src` to `dst` with its modes (a crash image of the store taken while a write is in
+/// flight: what a power cut or `kill -9` leaves on disk).
+fn copy_tree(src: &Path, dst: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::create_dir_all(dst).unwrap();
+    let mode = std::fs::metadata(src).unwrap().permissions().mode();
+    std::fs::set_permissions(dst, std::fs::Permissions::from_mode(mode)).unwrap();
+    for e in std::fs::read_dir(src).unwrap().flatten() {
+        let (p, q) = (e.path(), dst.join(e.file_name()));
+        if p.is_dir() {
+            copy_tree(&p, &q);
+        } else {
+            std::fs::copy(&p, &q).unwrap();
+        }
+    }
+}
+
+fn wait_for(what: &str, mut ok: impl FnMut() -> bool) {
+    let t0 = std::time::Instant::now();
+    while !ok() {
+        assert!(t0.elapsed() < WAIT, "timed out waiting for {what}");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+#[test]
+fn the_test_fault_spec_is_parsed_strictly() {
+    let parse = |v: &str| kv_persist::TestFault::from_lookup(|_| Some(v.to_string()));
+    assert!(parse("").unwrap().is_none(), "empty = unset");
+    for ok in ["p1:5", "p2:0", "p3:100:1", "p4:1:2", "p5:7", "load:12000:1"] {
+        assert_eq!(parse(ok).unwrap().unwrap().spec(), ok);
+    }
+    for bad in ["p3", "p6:5", "p3:x", "p3:5:y", "p3:5:1:2", "load:-1", "P3:5"] {
+        assert!(parse(bad).is_err(), "{bad} must refuse");
+    }
+    // A malformed spec refuses persistence (fail closed); the door runs plain.
+    let scratch = Scratch::new("badfault");
+    let s = Setup::new(&scratch.store(), &gen_key());
+    let (d, line) = door_with_fault(&scratch, &s, Some("p9:1"));
+    assert!(line.contains("REFUSED") && line.contains("AIEN_KV_TEST_FAULT"), "{line}");
+    assert!(matches!(d.persistence(), PersistState::Refused(_)));
+}
+
+#[test]
+fn a_write_interrupted_before_publish_is_never_served() {
+    // The park stalls before its rename; the store is imaged at that moment (the kill -9 of
+    // the chip check), the temp file is torn in half, and a new door opens the image.
+    let scratch = Scratch::new("torn");
+    let s = Setup::new(&scratch.store(), &gen_key());
+    let (a, line) = door_with_fault(&scratch, &s, Some("p3:60000"));
+    assert!(line.contains("TEST FAULT"), "{line}");
+    let h1 = {
+        let _ = turn(&a, &prompt1());
+        a.history()
+    };
+    let tmp = scratch.store().join("tmp");
+    wait_for("a temp file", || !files_under(&tmp).is_empty());
+    let image = scratch.0.join("image");
+    copy_tree(&scratch.store(), &image);
+    // The stalled worker would keep the first door alive for a minute: leave it behind, as
+    // the killed process would.
+    std::mem::forget(a);
+    let torn = files_under(&image.join("tmp"));
+    assert!(!torn.is_empty());
+    for t in &torn {
+        let len = std::fs::metadata(t).unwrap().len();
+        std::fs::OpenOptions::new().write(true).open(t).unwrap().set_len(len / 2).unwrap();
+    }
+    assert!(files_under(&image.join("objects")).is_empty(), "nothing was published");
+    let si = Setup::new(&image, "").with_var("AIEN_KV_STORE_KEY", &s.store_vars[1].1);
+    let (b, _) = door(&scratch, &si);
+    let r2 = turn(&b, &prompt2(&h1));
+    let c = counters(&b);
+    assert_eq!(c.restores, 0, "{c:?}");
+    assert_eq!(r2, plain_turn2(&scratch, &h1), "a torn write must be a plain recompute");
+    assert!(files_under(&image.join("tmp")).is_empty(), "recovery removes the torn temp");
+}
+
+#[test]
+fn a_restore_that_completes_after_its_timeout_is_never_served() {
+    // The load of turn 2 stalls past LOAD_TIMEOUT: the door gives up, prefills, and the late
+    // completion that arrives afterwards is dropped. The store itself stays good.
+    let scratch = Scratch::new("lateload");
+    let s = Setup::new(&scratch.store(), &gen_key());
+    let (_, h1) = park_turn1(&scratch, &s);
+    let late = kv_persist::LOAD_TIMEOUT + Duration::from_secs(2);
+    let spec = format!("load:{}:1", late.as_millis());
+    let (b, _) = door_with_fault(&scratch, &s, Some(&spec));
+    let r2 = turn(&b, &prompt2(&h1));
+    let c = counters(&b);
+    assert_eq!(c.restores, 0, "{c:?}");
+    assert_eq!(c.restore_misses.get("timeout"), Some(&1), "{c:?}");
+    let plain = plain_turn2(&scratch, &h1);
+    assert_eq!(r2, plain);
+    std::thread::sleep(Duration::from_secs(3));
+    let c = counters(&b);
+    assert_eq!(c.restores, 0, "the late completion must not count as a restore: {c:?}");
+    // A new conversation on the same door is not touched by the stale completion.
+    let fresh: Vec<u32> = (0..30u32).map(|i| (i * 5 + 1) % 64).collect();
+    assert_eq!(turn(&b, &fresh), turn(&plain_door(&scratch), &fresh));
+    drop(b);
+    let (c2, _) = door(&scratch, &s);
+    assert_eq!(turn(&c2, &prompt2(&h1)), plain);
+    assert_eq!(counters(&c2).restores, 1, "the store still serves after the stale load");
+}
+
+#[test]
+fn a_park_that_lands_after_the_conversation_moved_on_is_harmless() {
+    // The first park of turn 1 stalls; turn 2 and a diverging turn run while it is in flight
+    // (turn 2 resubmits the chunks the store does not hold yet). Every answer equals the
+    // uninterrupted run, and after a restart the late parks restore turn 2 exactly.
+    let scratch = Scratch::new("latepark");
+    let s = Setup::new(&scratch.store(), &gen_key());
+    let (u1, uh1, u2) = uninterrupted(&scratch);
+    let (a, _) = door_with_fault(&scratch, &s, Some("p3:1500:1"));
+    assert_eq!(turn(&a, &prompt1()), u1);
+    let h1 = a.history();
+    assert_eq!(h1, uh1);
+    assert_eq!(turn(&a, &prompt2(&h1)), u2);
+    let mut other = h1.clone();
+    other.extend([1, 2, 3, 4]);
+    let plain_other = turn(&plain_door(&scratch), &other);
+    assert_eq!(turn(&a, &other), plain_other);
+    assert!(pk_of(&a).wait_idle(WAIT), "parks did not finish");
+    let c = counters(&a);
+    assert!(c.parked_chunks >= 3 && c.park_failed == 0, "{c:?}");
+    drop(a);
+    let (b, _) = door(&scratch, &s);
+    assert_eq!(turn(&b, &prompt2(&h1)), u2);
+    assert_eq!(counters(&b).restores, 1);
+}
+
+#[test]
+fn a_graceful_shutdown_releases_the_engine_and_flushes_the_parks() {
+    // serve_until: on shutdown the server stops and lets go of the engine; dropping the door
+    // then drains the parks still in flight (each stalls 200 ms) and leaves no temp file.
+    let scratch = Scratch::new("shutdown");
+    let s = Setup::new(&scratch.store(), &gen_key());
+    let (d, _) = door_with_fault(&scratch, &s, Some("p3:200"));
+    let _ = turn(&d, &prompt1());
+    let h1 = d.history();
+    let keep = Arc::new(d);
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let cfg = ServerConfig {
+        port: 0,
+        model_id: "m".into(),
+        ..ServerConfig::default()
+    };
+    let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+    let engine: Arc<dyn Engine> = keep.clone();
+    let (addr, h) = rt
+        .block_on(serve_until(cfg, engine, Arc::new(ByteCodec), async {
+            let _ = rx.await;
+        }))
+        .unwrap();
+    assert_eq!(get_json(addr, "/health")["status"], "ok");
+    assert!(pk_of(&keep).counters().parked_chunks < 3, "the parks are still in flight");
+    tx.send(()).unwrap();
+    rt.block_on(h).unwrap();
+    assert!(TcpStream::connect(addr).is_err(), "the listener is closed");
+    wait_for("the server to release the engine", || Arc::strong_count(&keep) == 1);
+    drop(keep);
+    assert!(files_under(&scratch.store().join("tmp")).is_empty(), "no temp file left");
+    assert!(files_under(&scratch.store().join("objects")).len() >= 3, "the parks were flushed");
+    let (b, _) = door(&scratch, &s);
+    let _ = turn(&b, &prompt2(&h1));
+    assert_eq!(counters(&b).restores, 1);
 }

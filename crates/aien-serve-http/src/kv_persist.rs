@@ -43,7 +43,7 @@ use aien_inference_abi::qwen3_moe_omega::kvio::{self, PoolBlockGeometry};
 use aien_inference_abi::qwen3_moe_omega::{
     OmegaKvSwitches, Qwen3MoeConfig, Qwen3MoeOmegaEngine, WeightFormat, KV_BLOCK_SIZE,
 };
-use aien_kv_store::host_fs::{HostFsConfig, HostFsStore};
+use aien_kv_store::host_fs::{Boundary, FaultAction, FaultHook, HostFsConfig, HostFsStore};
 use aien_kv_store::worker::StorageWorker;
 use aien_kv_store::{
     chunk_chain, chunk_key, BackendFormat, ChunkHeader, ChunkKey, ComputeConfig, EngineConfig,
@@ -413,6 +413,79 @@ impl OmegaKvIdentity {
     }
 }
 
+/// Test-only fault hook of the chip acceptance checks (sc#507): `AIEN_KV_TEST_FAULT` =
+/// `<boundary>:<stall ms>[:<count>]` makes the store sleep at one point of its protocol so a
+/// fault lands deterministically: `p1` before the temp write, `p2` before the temp fsync, `p3`
+/// before the rename that publishes, `p4` before the directory fsync, `p5` before the index
+/// insert, `load` before a restore read. `count` stalls only the first N passes (default 0:
+/// every pass). It only delays I/O: no K/V byte changes, so it is not part of the identity.
+/// Unset in production; a malformed value refuses persistence (fail closed).
+pub const TEST_FAULT_ENV: &str = "AIEN_KV_TEST_FAULT";
+
+/// The parsed `AIEN_KV_TEST_FAULT` stall.
+pub struct TestFault {
+    boundary: Boundary,
+    stall: Duration,
+    /// Passes still to stall; `u64::MAX` = every pass.
+    left: AtomicU64,
+    spec: String,
+}
+
+impl TestFault {
+    /// `None` when the variable is unset or empty.
+    pub fn from_lookup(get: impl Fn(&str) -> Option<String>) -> Result<Option<Arc<Self>>, String> {
+        let Some(spec) = get(TEST_FAULT_ENV).filter(|s| !s.is_empty()) else {
+            return Ok(None);
+        };
+        let bad = || format!("{TEST_FAULT_ENV}={spec:?}: expected <p1|p2|p3|p4|p5|load>:<stall ms>[:<count>]");
+        let parts: Vec<&str> = spec.split(':').collect();
+        if !(2..=3).contains(&parts.len()) {
+            return Err(bad());
+        }
+        let boundary = match parts[0] {
+            "p1" => Boundary::P1Write,
+            "p2" => Boundary::P2FsyncFile,
+            "p3" => Boundary::P3Rename,
+            "p4" => Boundary::P4FsyncDir,
+            "p5" => Boundary::P5IndexInsert,
+            "load" => Boundary::LoadRead,
+            _ => return Err(bad()),
+        };
+        let ms: u64 = parts[1].parse().map_err(|_| bad())?;
+        let count: u64 = match parts.get(2) {
+            Some(c) => c.parse().map_err(|_| bad())?,
+            None => 0,
+        };
+        Ok(Some(Arc::new(Self {
+            boundary,
+            stall: Duration::from_millis(ms),
+            left: AtomicU64::new(if count == 0 { u64::MAX } else { count }),
+            spec,
+        })))
+    }
+
+    pub fn spec(&self) -> &str {
+        &self.spec
+    }
+}
+
+impl FaultHook for TestFault {
+    fn at(&self, boundary: Boundary, _key: &ChunkKey) -> Option<FaultAction> {
+        if boundary != self.boundary {
+            return None;
+        }
+        let took = self
+            .left
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| match n {
+                0 => None,
+                u64::MAX => Some(u64::MAX),
+                n => Some(n - 1),
+            })
+            .is_ok();
+        took.then_some(FaultAction::Stall(self.stall))
+    }
+}
+
 /// Persistence settings when `AIEN_KV_STORE_DIR` is set and not empty; `None` otherwise, having
 /// read nothing but that one variable (the switch-off path).
 pub fn settings_from_lookup(
@@ -600,6 +673,8 @@ pub struct KvPersistence {
     drain_ms: u64,
     inner: Mutex<Inner>,
     seq: AtomicU64,
+    /// The armed [`TEST_FAULT_ENV`] spec, if any.
+    test_fault: Option<String>,
 }
 
 fn miss_reason(e: &aien_platform::PlatformError) -> &'static str {
@@ -676,6 +751,7 @@ impl KvPersistence {
 
     pub fn status_json(&self) -> serde_json::Value {
         let c = self.counters();
+        let t = aien_kv_store::seal::seal_timing();
         let state = match self.worker.capacity().state {
             StoreState::Recovering => "recovering",
             StoreState::Open => "open",
@@ -703,6 +779,15 @@ impl KvPersistence {
             "restore_bytes": c.restore_bytes,
             "restore_misses": c.restore_misses,
             "refusals": c.refusals,
+            "seal": {
+                "seal_calls": t.seal_calls,
+                "seal_bytes": t.seal_bytes,
+                "seal_ns": t.seal_ns,
+                "open_calls": t.open_calls,
+                "open_bytes": t.open_bytes,
+                "open_ns": t.open_ns,
+            },
+            "test_fault": self.test_fault,
         })
     }
 
@@ -1073,7 +1158,16 @@ pub fn open(
     settings: Result<KvPersistSettings, String>,
     identity: Result<OmegaKvIdentity, String>,
 ) -> (PersistState, String) {
-    match open_inner(settings, identity) {
+    open_with_test_fault(settings, identity, Ok(None))
+}
+
+/// [`open`] with the store's test-only stall ([`TEST_FAULT_ENV`]); `Err` (a malformed value) refuses.
+pub fn open_with_test_fault(
+    settings: Result<KvPersistSettings, String>,
+    identity: Result<OmegaKvIdentity, String>,
+    fault: Result<Option<Arc<TestFault>>, String>,
+) -> (PersistState, String) {
+    match open_inner(settings, identity, fault) {
         Ok((p, line)) => (PersistState::On(Box::new(p)), line),
         Err(why) => {
             let line = format!("persistent KV: REFUSED ({why}); running without persistence: no park, no restore, every prompt is prefilled");
@@ -1085,8 +1179,10 @@ pub fn open(
 fn open_inner(
     settings: Result<KvPersistSettings, String>,
     identity: Result<OmegaKvIdentity, String>,
+    fault: Result<Option<Arc<TestFault>>, String>,
 ) -> Result<(KvPersistence, String), String> {
     let settings = settings?;
+    let fault = fault?;
     let root = settings.store_dir.clone().ok_or("no store directory")?;
     let key = match &settings.store_key {
         Some(Ok(k)) => k.clone(),
@@ -1122,6 +1218,9 @@ fn open_inner(
         cfg.recovery_slice_ms = v;
     }
     cfg.seal_key = Some(key);
+    if let Some(f) = &fault {
+        cfg.faults = Some(f.clone() as Arc<dyn FaultHook>);
+    }
     let slice_ms = cfg.recovery_slice_ms;
     let store = Arc::new(HostFsStore::open(cfg).map_err(|e| format!("store open at {}: {e:?} (the directory must be private, under a parent only you can write)", root.display()))?);
     let drive = {
@@ -1150,6 +1249,10 @@ fn open_inner(
         if settings.restore { "on" } else { "off" },
         settings.worker.drain_ms,
     );
+    let line = match &fault {
+        Some(f) => format!("{line}; TEST FAULT {TEST_FAULT_ENV}={} armed (chip check only)", f.spec()),
+        None => line,
+    };
     Ok((
         KvPersistence {
             worker,
@@ -1163,6 +1266,7 @@ fn open_inner(
             drain_ms: settings.worker.drain_ms,
             inner: Mutex::new(Inner::default()),
             seq: AtomicU64::new(0),
+            test_fault: fault.map(|f| f.spec().to_string()),
         },
         line,
     ))
