@@ -176,6 +176,13 @@ impl OmegaDoor {
         self.reused_last.load(Ordering::Relaxed)
     }
 
+    /// The K/V of positions `0..len` as the persistent KV payload, under the GPU lock (the chip
+    /// check compares the uninterrupted and the restored run byte for byte).
+    pub fn export_kv_for_check(&self, len: usize) -> Result<Vec<u8>, String> {
+        let _lock = GpuLock::acquire_at(&self.lock_path, self.lock_wait)?;
+        self.engine.with_engine(|e| e.export_kv(0, len))?
+    }
+
     /// Forgets the KV the engine holds (the next prompt is prefilled, or restored from the store).
     pub fn reset_kv(&self) {
         let _ = self.engine.with_engine(|e| e.reset());

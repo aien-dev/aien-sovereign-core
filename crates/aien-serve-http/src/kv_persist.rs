@@ -35,7 +35,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -595,7 +595,7 @@ pub struct KvPersistence {
     chunk_tokens: usize,
     ns: NamespaceId,
     store_dir: PathBuf,
-    park: bool,
+    park: AtomicBool,
     restore: bool,
     drain_ms: u64,
     inner: Mutex<Inner>,
@@ -688,7 +688,7 @@ impl KvPersistence {
             "store_dir": self.store_dir.display().to_string(),
             "namespace": hex(&self.ns.0[..8]),
             "chunk_tokens": self.chunk_tokens,
-            "park": self.park,
+            "park": self.park.load(Ordering::Relaxed),
             "restore": self.restore,
             "engine_build_id": self.identity.engine_build_id,
             "rounding_class": self.identity.rounding_class,
@@ -741,6 +741,11 @@ impl KvPersistence {
                 // `c.holder` (a load's landing holder) drops here, after the slot is set.
             }
         }
+    }
+
+    /// Pauses or resumes parking (the chip check freezes the store after turn 1).
+    pub fn set_park(&self, on: bool) {
+        self.park.store(on, Ordering::Relaxed);
     }
 
     pub fn restore_on(&self) -> bool {
@@ -950,7 +955,7 @@ impl KvPersistence {
     /// Under the GPU lock, after a generation: exports the chunks of the engine's history that
     /// the store does not hold. Submitting them is [`Self::submit`], after the lock is released.
     pub fn snapshot(&self, e: &mut Qwen3MoeOmegaEngine) -> Vec<ParkItem> {
-        if !self.park {
+        if !self.park.load(Ordering::Relaxed) {
             return Vec::new();
         }
         if self.worker.capacity().state != StoreState::Open {
@@ -1153,7 +1158,7 @@ fn open_inner(
             chunk_tokens,
             ns,
             store_dir: root,
-            park: settings.park,
+            park: AtomicBool::new(settings.park),
             restore: settings.restore,
             drain_ms: settings.worker.drain_ms,
             inner: Mutex::new(Inner::default()),
