@@ -9,12 +9,14 @@
 
 use std::fs::{File, OpenOptions};
 use std::os::fd::AsRawFd;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use aien_inference_abi::qwen3_moe_omega::{self as omega, LoadReport, OmegaEngine, WeightFormat};
 
 use crate::engine::{Engine, EngineError, FinishReason, GenerateOutcome, GenerateParams};
+use crate::kv_persist::PersistState;
 use crate::sampling::sample_next;
 
 pub const GPU_LOCK_PATH: &str = "/tmp/aien-gb10.lock";
@@ -83,13 +85,18 @@ pub struct GpuLock(#[allow(dead_code)] File);
 impl GpuLock {
     /// Takes the lock, polling until `wait` has passed. `Err` = still held by someone else.
     pub fn acquire(wait: Duration) -> Result<Self, String> {
+        Self::acquire_at(Path::new(GPU_LOCK_PATH), wait)
+    }
+
+    /// [`Self::acquire`] on the lock file at `path` (tests pass a private file).
+    pub fn acquire_at(path: &Path, wait: Duration) -> Result<Self, String> {
         let file = OpenOptions::new()
             .read(true)
             .write(true)
             .create(true)
             .truncate(false)
-            .open(GPU_LOCK_PATH)
-            .map_err(|e| format!("{GPU_LOCK_PATH}: {e}"))?;
+            .open(path)
+            .map_err(|e| format!("{}: {e}", path.display()))?;
         let t0 = Instant::now();
         loop {
             // SAFETY: flock on a valid open descriptor; non-blocking so the wait is bounded.
@@ -99,7 +106,7 @@ impl GpuLock {
             }
             let err = std::io::Error::last_os_error();
             if err.raw_os_error() != Some(libc::EWOULDBLOCK) {
-                return Err(format!("flock {GPU_LOCK_PATH}: {err}"));
+                return Err(format!("flock {}: {err}", path.display()));
             }
             if t0.elapsed() >= wait {
                 return Err(format!("GPU lock held by another job for {} s", wait.as_secs()));
@@ -124,11 +131,55 @@ pub fn mem_available_gb() -> f64 {
 }
 
 pub struct OmegaDoor {
+    /// Declared first: a running store drains its parks before the engine goes.
+    persist: PersistState,
     engine: OmegaEngine,
     lock_wait: Duration,
+    lock_path: PathBuf,
+    /// Prompt tokens the last generation reused (RAM or restored prefix).
+    reused_last: AtomicUsize,
 }
 
 impl OmegaDoor {
+    /// A door over an already built engine, taking the GPU lock at `lock_path` around each
+    /// generation (tests: a private lock file and the host test engine). Persistence off.
+    pub fn from_parts(engine: OmegaEngine, lock_path: PathBuf, lock_wait: Duration) -> Self {
+        Self { persist: PersistState::Off, engine, lock_wait, lock_path, reused_last: AtomicUsize::new(0) }
+    }
+
+    /// Installs the persistence state (`kv_persist::open`), before the door is shared.
+    pub fn set_persistence(&mut self, state: PersistState) {
+        self.persist = state;
+    }
+
+    pub fn persistence(&self) -> &PersistState {
+        &self.persist
+    }
+
+    /// The engine's run settings that can change a K/V byte (persistent KV identity).
+    pub fn kv_switches(&self) -> omega::OmegaKvSwitches {
+        self.engine.with_engine(|e| e.kv_switches()).expect("engine lock")
+    }
+
+    /// The loaded model config.
+    pub fn config(&self) -> omega::Qwen3MoeConfig {
+        self.engine.with_engine(|e| e.config().clone()).expect("engine lock")
+    }
+
+    /// Tokens whose KV the engine holds (the next turn's reuse candidates).
+    pub fn history(&self) -> Vec<u32> {
+        self.engine.with_engine(|e| e.history().to_vec()).unwrap_or_default()
+    }
+
+    /// Prompt tokens the last generation did not prefill (kept in RAM or restored).
+    pub fn reused_last(&self) -> usize {
+        self.reused_last.load(Ordering::Relaxed)
+    }
+
+    /// Forgets the KV the engine holds (the next prompt is prefilled, or restored from the store).
+    pub fn reset_kv(&self) {
+        let _ = self.engine.with_engine(|e| e.reset());
+    }
     /// Loads the checkpoint onto Omega (under the GPU lock, released before returning) with a
     /// KV for `max_context` tokens. Refuses with less than [`LOAD_MIN_FREE_GB`] available.
     pub fn load(model_dir: &Path, max_context: usize, format: WeightFormat, spin_us: Option<u32>, prefill: PrefillMode) -> Result<Self, String> {
@@ -196,7 +247,7 @@ impl OmegaDoor {
             omega::OmegaModelUploader::uses_dattn_api(),
             aien_omega_gpu::spin_us(),
         );
-        Ok(Self { engine, lock_wait: LOCK_WAIT })
+        Ok(Self::from_parts(engine, PathBuf::from(GPU_LOCK_PATH), LOCK_WAIT))
     }
 
     pub fn load_report(&self) -> &LoadReport {
@@ -239,12 +290,40 @@ impl Engine for OmegaDoor {
             seed: p.seed,
             stop_token_ids: p.stop_token_ids.clone(),
         };
+        // Persistent KV (sc#505), off unless AIEN_KV_STORE_DIR asked for it: look up and load
+        // the longest stored prefix that beats the RAM prefix, without the chip lock.
+        let persist = match &self.persist {
+            PersistState::On(pk) => Some(pk.as_ref()),
+            _ => None,
+        };
+        let fetched = persist.filter(|pk| pk.restore_on()).and_then(|pk| {
+            let in_ram = self.engine.with_engine(|e| e.reusable_prefix(prompt)).unwrap_or(0);
+            pk.fetch(prompt, in_ram)
+        });
         let t_lock = Instant::now();
-        let _lock = GpuLock::acquire(self.lock_wait).map_err(EngineError::Busy)?;
+        let lock = GpuLock::acquire_at(&self.lock_path, self.lock_wait).map_err(EngineError::Busy)?;
         let lock_wait_ms = t_lock.elapsed().as_millis();
+        if let (Some(pk), Some(f)) = (persist, fetched.as_ref()) {
+            // All or nothing: on error the engine is reset and the prompt is prefilled.
+            match self.engine.with_engine(|e| e.restore_kv(&prompt[..f.tokens], &f.payload)) {
+                Ok(Ok(())) => pk.note_restored(f),
+                Ok(Err(m)) | Err(m) => {
+                    pk.note_import_failed();
+                    eprintln!("aien-serve-http: persistent KV: restore of {} tokens refused ({m}); prefilling", f.tokens);
+                }
+            }
+        }
+        drop(fetched);
         // The server's own sampler, so CPU and Omega engines pick tokens the same way.
         let mut sampler = |logits: &[f32], step: usize| sample_next(logits, p, step);
         let o = self.engine.generate_with(prompt, &q, &mut sampler, on_token).map_err(EngineError::Failed)?;
+        self.reused_last.store(o.reused_prompt_tokens, Ordering::Relaxed);
+        // Park: export under the chip lock, write after it is released.
+        let parked = persist.map(|pk| self.engine.with_engine(|e| pk.snapshot(e)).unwrap_or_default());
+        drop(lock);
+        if let (Some(pk), Some(items)) = (persist, parked) {
+            pk.submit(items);
+        }
         eprintln!(
             "aien-serve-http: omega: lock wait {lock_wait_ms} ms, prompt {} tok, {} reused from the previous turn, prefill {} ms, decode {} tok in {} ms",
             o.prompt_tokens, o.reused_prompt_tokens, o.prefill_ms, o.emitted_tokens, o.decode_ms
@@ -259,6 +338,14 @@ impl Engine for OmegaDoor {
             prefill_ms: o.prefill_ms,
             decode_ms: o.decode_ms,
         })
+    }
+
+    fn persistence_status(&self) -> Option<serde_json::Value> {
+        match &self.persist {
+            PersistState::Off => None,
+            PersistState::Refused(why) => Some(serde_json::json!({ "state": "refused", "reason": why, "refusals": 1 })),
+            PersistState::On(pk) => Some(pk.status_json()),
+        }
     }
 }
 

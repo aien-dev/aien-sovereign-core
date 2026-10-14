@@ -12,6 +12,10 @@
 //! only around each generation. Its prefill runs the whole prompt in one pass with the router
 //! and MoE combine on the chip (ON by default; `--whole-prompt off`, `--prefill-device-host off`
 //! or `AIEN_SERVE_WHOLE_PROMPT=0` / `AIEN_SERVE_WP_DEVICE_HOST=0` turn them off).
+//! Persistent KV (omega only, opt in): with `AIEN_KV_STORE_DIR` set (and `AIEN_KV_STORE_KEY`,
+//! e.g. `atlas-vault run AIEN_KV_STORE_KEY -- aien-serve-http ...`) the door parks each turn's KV
+//! in the sealed store and restores the longest stored prefix after a restart; any problem
+//! refuses with a startup line and the door runs plain. Unset: nothing changes.
 //! `stub` replays `--stub-reply` for every request, using the model directory's
 //! tokenizer when it exists (so Odysseus can be wired before the weights load).
 
@@ -24,6 +28,7 @@ use aien_serve_http::codec::{ByteCodec, Codec, HfCodec};
 use aien_serve_http::cpu_engine::CpuReferenceEngine;
 use aien_inference_abi::qwen3_moe_omega::WeightFormat;
 use aien_serve_http::engine::{Engine, StubEngine};
+use aien_serve_http::kv_persist;
 use aien_serve_http::omega_engine::{parse_switch, OmegaDoor, PrefillMode, WHOLE_PROMPT_ENV, WP_DEVICE_HOST_ENV};
 use aien_serve_http::server::{serve, ServerConfig};
 
@@ -194,7 +199,16 @@ fn main() -> ExitCode {
             args.spin_us
         );
         match OmegaDoor::load(&args.model_dir, args.cfg.max_context_tokens.unwrap_or(32768), args.weights, args.spin_us, args.prefill) {
-            Ok(e) => Arc::new(e),
+            Ok(mut door) => {
+                // Persistent KV (sc#505): only when AIEN_KV_STORE_DIR is set; otherwise nothing else is read.
+                if let Some(settings) = kv_persist::settings_from_lookup(|n| std::env::var(n).ok()) {
+                    // The key lives on only in the settings; no child inherits it.
+                    std::env::remove_var(aien_kv_store::seal::KEY_ENV);
+                    let line = enable_persistence(&mut door, settings, &args);
+                    eprintln!("aien-serve-http: {line}");
+                }
+                Arc::new(door)
+            }
             Err(e) => {
                 eprintln!("aien-serve-http: omega load failed: {e}");
                 return ExitCode::from(1);
@@ -236,4 +250,35 @@ fn main() -> ExitCode {
             }
         }
     })
+}
+
+/// Opens the persistent KV store for the loaded omega engine (the checkpoint digest reads every
+/// weight file once). Returns the startup line; any problem refuses and the door runs plain.
+fn enable_persistence(door: &mut OmegaDoor, settings: Result<aien_runtime::shared_kv::KvPersistSettings, String>, args: &Args) -> String {
+    let t0 = std::time::Instant::now();
+    let build = kv_persist::OmegaBuild::linked();
+    let env: Vec<(String, String)> = std::env::vars().collect();
+    let config = door.config();
+    let identity = settings.as_ref().map_err(|e| e.clone()).and_then(|s| {
+        // No digest (minutes of reading) when the key already refuses: `open` reports the key.
+        if !matches!(s.store_key, Some(Ok(_))) {
+            return Err("the store key refused".to_string());
+        }
+        let rope_scaling = kv_persist::config_has_rope_scaling(&args.model_dir)?;
+        let (sha, kind) = kv_persist::checkpoint_digest(&args.model_dir)?;
+        kv_persist::OmegaKvIdentity::new(&kv_persist::IdentityInputs {
+            model_id: &args.cfg.model_id,
+            model_sha256: sha,
+            model_digest_kind: kind,
+            config: &config,
+            rope_scaling,
+            weights: args.weights,
+            switches: door.kv_switches(),
+            build: &build,
+            env: &env,
+        })
+    });
+    let (state, line) = kv_persist::open(settings, identity);
+    door.set_persistence(state);
+    format!("{line} [identity in {:.1} s]", t0.elapsed().as_secs_f64())
 }

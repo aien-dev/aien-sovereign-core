@@ -56,7 +56,10 @@ impl Drop for Scratch {
 /// 64 hex digits from /dev/urandom (a fresh key per test, never printed).
 fn gen_key() -> String {
     let mut b = [0u8; 32];
-    std::fs::File::open("/dev/urandom").unwrap().read_exact(&mut b).unwrap();
+    std::fs::File::open("/dev/urandom")
+        .unwrap()
+        .read_exact(&mut b)
+        .unwrap();
     b.iter().map(|x| format!("{x:02x}")).collect()
 }
 
@@ -113,7 +116,8 @@ fn engine(weights: WeightFormat) -> OmegaEngine {
 fn door(scratch: &Scratch, s: &Setup) -> (OmegaDoor, String) {
     let mut d = OmegaDoor::from_parts(engine(s.weights), scratch.lock(), Duration::from_secs(5));
     let vars: HashMap<String, String> = s.store_vars.iter().cloned().collect();
-    let settings = kv_persist::settings_from_lookup(|n| vars.get(n).cloned()).expect("store dir is set");
+    let settings =
+        kv_persist::settings_from_lookup(|n| vars.get(n).cloned()).expect("store dir is set");
     let identity = kv_persist::OmegaKvIdentity::new(&kv_persist::IdentityInputs {
         model_id: "tiny-qwen3-moe",
         model_sha256: [7u8; 32],
@@ -134,11 +138,22 @@ fn door(scratch: &Scratch, s: &Setup) -> (OmegaDoor, String) {
 }
 
 fn plain_door(scratch: &Scratch) -> OmegaDoor {
-    OmegaDoor::from_parts(engine(WeightFormat::Fp8All), scratch.lock(), Duration::from_secs(5))
+    OmegaDoor::from_parts(
+        engine(WeightFormat::Fp8All),
+        scratch.lock(),
+        Duration::from_secs(5),
+    )
 }
 
 fn greedy(n: usize) -> GenerateParams {
-    GenerateParams { max_new_tokens: n, temperature: 0.0, top_p: 1.0, top_k: 0, seed: 1, stop_token_ids: vec![] }
+    GenerateParams {
+        max_new_tokens: n,
+        temperature: 0.0,
+        top_p: 1.0,
+        top_k: 0,
+        seed: 1,
+        stop_token_ids: vec![],
+    }
 }
 
 fn turn(d: &OmegaDoor, prompt: &[u32]) -> Vec<u32> {
@@ -191,7 +206,10 @@ fn park_turn1(scratch: &Scratch, s: &Setup) -> (Vec<u32>, Vec<u32>) {
         _ => unreachable!(),
     }
     let c = counters(&a);
-    assert!(c.parked_chunks >= 3 && c.park_bytes > 0 && c.park_failed == 0, "{c:?}");
+    assert!(
+        c.parked_chunks >= 3 && c.park_bytes > 0 && c.park_failed == 0,
+        "{c:?}"
+    );
     drop(a);
     (o1, h1)
 }
@@ -202,16 +220,31 @@ fn park_then_restart_then_restore_equals_the_uninterrupted_run() {
     let s = Setup::new(&scratch.store(), &gen_key());
     let (o1, h1) = park_turn1(&scratch, &s);
     let (u1, uh1, u2) = uninterrupted(&scratch);
-    assert_eq!((&o1, &h1), (&u1, &uh1), "turn 1 differs with persistence on");
+    assert_eq!(
+        (&o1, &h1),
+        (&u1, &uh1),
+        "turn 1 differs with persistence on"
+    );
 
     // "Restart": a new engine and a new store handle on the same directory and key.
     let (b, _) = door(&scratch, &s);
     let r2 = turn(&b, &prompt2(&h1));
     let c = counters(&b);
     assert_eq!(c.restores, 1, "{c:?}");
-    assert_eq!(c.restored_tokens, h1.len() as u64, "restored up to the uninterrupted reuse point: {c:?}");
-    assert_eq!(r2, u2, "restored continuation differs from the uninterrupted run");
-    assert_eq!(b.reused_last(), h1.len(), "the engine reused the restored prefix");
+    assert_eq!(
+        c.restored_tokens,
+        h1.len() as u64,
+        "restored up to the uninterrupted reuse point: {c:?}"
+    );
+    assert_eq!(
+        r2, u2,
+        "restored continuation differs from the uninterrupted run"
+    );
+    assert_eq!(
+        b.reused_last(),
+        h1.len(),
+        "the engine reused the restored prefix"
+    );
 }
 
 #[test]
@@ -241,7 +274,10 @@ fn a_longer_ram_prefix_is_not_replaced_by_the_store() {
     }
     let _ = turn(&a, &prompt2(&h1));
     let c = counters(&a);
-    assert_eq!(c.restores, 0, "the RAM prefix is as long as the store's: {c:?}");
+    assert_eq!(
+        c.restores, 0,
+        "the RAM prefix is as long as the store's: {c:?}"
+    );
     assert_eq!(a.reused_last(), h1.len());
 }
 
@@ -272,16 +308,26 @@ fn each_identity_input_changed_alone_is_never_served() {
     v.env.push(("AIEN_OMEGA_FP8_GEMV".into(), "0".into()));
     variants.push(("omega fp8 gemv switch", v));
     let mut v = base.clone();
-    v.env.push(("AIEN_OMEGA_DGRAPH_PREFETCH".into(), "1".into()));
+    v.env
+        .push(("AIEN_OMEGA_DGRAPH_PREFETCH".into(), "1".into()));
     variants.push(("decode graph prefetch switch", v));
-    variants.push(("sharing namespace", base.clone().with_var("AIEN_KV_STORE_NAMESPACE", "other")));
+    variants.push((
+        "sharing namespace",
+        base.clone().with_var("AIEN_KV_STORE_NAMESPACE", "other"),
+    ));
     for (what, v) in variants {
         let (b, line) = door(&scratch, &v);
         assert!(line.contains("persistent KV: on"), "{what}: {line}");
         let _ = turn(&b, &prompt2(&h1));
         let c = counters(&b);
-        assert_eq!(c.restores, 0, "{what} changed, yet the parked prefix was served: {c:?}");
-        assert!(c.restore_misses.get("not-found").copied().unwrap_or(0) >= 1, "{what}: {c:?}");
+        assert_eq!(
+            c.restores, 0,
+            "{what} changed, yet the parked prefix was served: {c:?}"
+        );
+        assert!(
+            c.restore_misses.get("not-found").copied().unwrap_or(0) >= 1,
+            "{what}: {c:?}"
+        );
         assert!(b.reused_last() < h1.len(), "{what}");
     }
     // The base setup still restores (the store is intact).
@@ -294,7 +340,10 @@ fn each_identity_input_changed_alone_is_never_served() {
 fn unknown_omega_switches_and_the_mutants_refuse_persistence() {
     let scratch = Scratch::new("mutant");
     let base = Setup::new(&scratch.store(), &gen_key());
-    for (k, v) in [("OWN30B_DECODE_GRAPH_MUTANT", "skip-norm"), ("AIEN_OMEGA_SOMETHING_NEW", "1")] {
+    for (k, v) in [
+        ("OWN30B_DECODE_GRAPH_MUTANT", "skip-norm"),
+        ("AIEN_OMEGA_SOMETHING_NEW", "1"),
+    ] {
         let mut s = base.clone();
         s.env.push((k.into(), v.into()));
         let (d, line) = door(&scratch, &s);
@@ -338,10 +387,15 @@ fn switch_off_reads_only_the_store_dir_and_changes_nothing() {
     };
     let raw_turn = |prompt: &[u32]| {
         let mut out = Vec::new();
-        raw.generate_with(prompt, &q, &mut |lg: &[f32], step| sample_next(lg, &p, step), &mut |t| {
-            out.push(t);
-            true
-        })
+        raw.generate_with(
+            prompt,
+            &q,
+            &mut |lg: &[f32], step| sample_next(lg, &p, step),
+            &mut |t| {
+                out.push(t);
+                true
+            },
+        )
         .unwrap();
         out
     };
@@ -352,8 +406,14 @@ fn switch_off_reads_only_the_store_dir_and_changes_nothing() {
 
     // Health: the same keys as before persistence existed.
     let rt = tokio::runtime::Runtime::new().unwrap();
-    let cfg = ServerConfig { port: 0, model_id: "m".into(), ..ServerConfig::default() };
-    let (addr, _h) = rt.block_on(serve(cfg, Arc::new(d), Arc::new(ByteCodec))).unwrap();
+    let cfg = ServerConfig {
+        port: 0,
+        model_id: "m".into(),
+        ..ServerConfig::default()
+    };
+    let (addr, _h) = rt
+        .block_on(serve(cfg, Arc::new(d), Arc::new(ByteCodec)))
+        .unwrap();
     let v = get_json(addr, "/health");
     let mut keys: Vec<&str> = v.as_object().unwrap().keys().map(|s| s.as_str()).collect();
     keys.sort();
@@ -367,12 +427,26 @@ fn health_reports_the_persistence_counters_when_on() {
     let (d, _) = door(&scratch, &s);
     let _ = turn(&d, &prompt1());
     let rt = tokio::runtime::Runtime::new().unwrap();
-    let cfg = ServerConfig { port: 0, model_id: "m".into(), ..ServerConfig::default() };
-    let (addr, _h) = rt.block_on(serve(cfg, Arc::new(d), Arc::new(ByteCodec))).unwrap();
+    let cfg = ServerConfig {
+        port: 0,
+        model_id: "m".into(),
+        ..ServerConfig::default()
+    };
+    let (addr, _h) = rt
+        .block_on(serve(cfg, Arc::new(d), Arc::new(ByteCodec)))
+        .unwrap();
     let v = get_json(addr, "/health");
     let pk = &v["persistent_kv"];
     assert_eq!(pk["state"], "on", "{v}");
-    for k in ["parked_chunks", "park_bytes", "restores", "restored_tokens", "restore_bytes", "restore_misses", "refusals"] {
+    for k in [
+        "parked_chunks",
+        "park_bytes",
+        "restores",
+        "restored_tokens",
+        "restore_bytes",
+        "restore_misses",
+        "refusals",
+    ] {
         assert!(!pk[k].is_null(), "missing {k}: {pk}");
     }
 }
@@ -395,7 +469,11 @@ fn a_corrupted_store_file_is_never_served() {
     let r2 = turn(&b, &prompt2(&h1));
     let c = counters(&b);
     assert_eq!(c.restores, 0, "{c:?}");
-    assert_eq!(r2, plain_turn2(&scratch, &h1), "a refused restore must be a plain recompute");
+    assert_eq!(
+        r2,
+        plain_turn2(&scratch, &h1),
+        "a refused restore must be a plain recompute"
+    );
 }
 
 #[test]
@@ -416,7 +494,10 @@ fn a_wrong_key_is_never_served() {
 fn a_missing_or_malformed_key_refuses_and_runs_plain() {
     let scratch = Scratch::new("nokey");
     let base = Setup::new(&scratch.store(), &gen_key());
-    for s in [base.clone().without("AIEN_KV_STORE_KEY"), base.clone().with_var("AIEN_KV_STORE_KEY", "abc")] {
+    for s in [
+        base.clone().without("AIEN_KV_STORE_KEY"),
+        base.clone().with_var("AIEN_KV_STORE_KEY", "abc"),
+    ] {
         let (d, line) = door(&scratch, &s);
         assert!(line.contains("REFUSED"), "{line}");
         assert!(matches!(d.persistence(), PersistState::Refused(_)));
@@ -424,7 +505,10 @@ fn a_missing_or_malformed_key_refuses_and_runs_plain() {
         assert_eq!(st["state"], "refused");
         let _ = turn(&d, &prompt1());
     }
-    assert!(!scratch.store().exists(), "a refused start must not create the store");
+    assert!(
+        !scratch.store().exists(),
+        "a refused start must not create the store"
+    );
 }
 
 #[test]
@@ -448,7 +532,9 @@ fn plain_turn2(scratch: &Scratch, h1: &[u32]) -> Vec<u32> {
 
 fn files_under(dir: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
-    let Ok(rd) = std::fs::read_dir(dir) else { return out };
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return out;
+    };
     for e in rd.flatten() {
         let p = e.path();
         if p.is_dir() {
@@ -463,7 +549,11 @@ fn files_under(dir: &Path) -> Vec<PathBuf> {
 fn get_json(addr: std::net::SocketAddr, path: &str) -> serde_json::Value {
     let mut s = TcpStream::connect(addr).unwrap();
     s.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
-    write!(s, "GET {path} HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n").unwrap();
+    write!(
+        s,
+        "GET {path} HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n"
+    )
+    .unwrap();
     let mut raw = Vec::new();
     s.read_to_end(&mut raw).unwrap();
     let text = String::from_utf8(raw).unwrap();

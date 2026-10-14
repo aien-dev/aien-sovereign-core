@@ -249,13 +249,18 @@ async fn get_model(
 }
 
 async fn health(State(state): State<Arc<AppState>>) -> Json<Value> {
-    Json(serde_json::json!({
+    let mut v = serde_json::json!({
         "status": "ok",
         "model": state.cfg.model_id,
         "engine": state.engine.kind(),
         "busy": state.gate.try_lock().is_err(),
         "uptime_s": state.started.elapsed().as_secs(),
-    }))
+    });
+    // Persistent KV (sc#505): present only when AIEN_KV_STORE_DIR asked for it.
+    if let (Some(pk), Some(obj)) = (state.engine.persistence_status(), v.as_object_mut()) {
+        obj.insert("persistent_kv".into(), pk);
+    }
+    Json(v)
 }
 
 async fn not_found() -> ApiError {
