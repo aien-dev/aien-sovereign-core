@@ -1851,19 +1851,27 @@ pub async fn run_daemon_server() {
                 aien_runtime::shared_kv::parse_sha256_hex(&id.model_sha256)
                     .map(|sha| (sha, id.model_digest_kind.clone()))
             });
-        let enabled = digest.and_then(|(sha, kind)| {
-            aien_runtime::shared_kv::enable_persistent_kv(
-                &mut spine,
-                &kv_persist,
-                &aien_runtime::shared_kv::ModelKvBinding {
-                    model: &model_config,
-                    arith_id: &kv_arith_id,
-                    model_sha256: sha,
-                    model_digest_kind: &kind,
-                },
-                kv_context_cap,
-            )
-        });
+        // The host TensorBackend path: weights as the file holds them, this
+        // build, the backend name plus KV_ARITH_EPOCH as the rounding class, a
+        // dense engine config (ADR 0003 section 1.2.2).
+        let host_engine = aien_runtime::compute_config::HostEngineIdentity::reference(&kv_arith_id)
+            .map_err(|e| format!("persistent KV engine identity: {e}"));
+        let enabled = digest.and_then(|d| host_engine.map(|e| (d, e))).and_then(
+            |((sha, kind), host_engine)| {
+                aien_runtime::shared_kv::enable_persistent_kv(
+                    &mut spine,
+                    &kv_persist,
+                    &aien_runtime::shared_kv::ModelKvBinding {
+                        model: &model_config,
+                        arith_id: &kv_arith_id,
+                        model_sha256: sha,
+                        model_digest_kind: &kind,
+                        engine: host_engine.identity(),
+                    },
+                    kv_context_cap,
+                )
+            },
+        );
         match enabled {
             Ok(Some(line)) => println!("  {line}"),
             Ok(None) => {}

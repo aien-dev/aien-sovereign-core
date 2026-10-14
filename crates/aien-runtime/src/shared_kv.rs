@@ -651,8 +651,11 @@ pub fn open_host_kv_residency(
 }
 
 /// What the daemon knows about the loaded model that the namespace binds
-/// (ADR 1.2): the resolved config, the backend that computes the K/V, and the
-/// weights digest.
+/// (ADR 1.2): the resolved config, the backend that computes the K/V, the
+/// weights digest, and the engine identity (ADR 1.2.2, sc#504).
+/// `engine` has no default: the host path passes
+/// `compute_config::HostEngineIdentity::reference(arith_id).identity()`, an
+/// engine with its own build, weight format or run switches passes its own.
 #[derive(Debug, Clone, Copy)]
 pub struct ModelKvBinding<'a> {
     pub model: &'a aien_abi_core::ModelConfig,
@@ -660,6 +663,9 @@ pub struct ModelKvBinding<'a> {
     pub arith_id: &'a str,
     pub model_sha256: [u8; 32],
     pub model_digest_kind: &'a str,
+    /// Weight format as loaded, engine build, rounding class and engine config
+    /// digest of the engine that writes the K/V.
+    pub engine: aien_kv_store::EngineIdentity<'a>,
 }
 
 /// Parses a 64-hex-digit sha256 (the daemon's `ModelIdentity::model_sha256`).
@@ -730,21 +736,24 @@ pub fn enable_persistent_kv(
     let binding = ModelBinding::from_model(model.model, model.arith_id)
         .map_err(|e| format!("persistent KV model binding: {e}"))?;
     let fields = binding
-        .namespace_fields(&StoreInputs {
-            model_sha256: model.model_sha256,
-            model_digest_kind: model.model_digest_kind,
-            dtype,
-            layout,
-            backend_format: aien_kv_store::BackendFormat::HostPagedPoolV1,
-            chunk_tokens,
-            sharing_namespace: &settings.namespace,
-        })
+        .namespace_fields(
+            &StoreInputs {
+                model_sha256: model.model_sha256,
+                model_digest_kind: model.model_digest_kind,
+                dtype,
+                layout,
+                backend_format: aien_kv_store::BackendFormat::HostPagedPoolV1,
+                chunk_tokens,
+                sharing_namespace: &settings.namespace,
+            },
+            &model.engine,
+        )
         .map_err(|e| format!("persistent KV namespace: {e}"))?;
     let Some(residency) = open_host_kv_residency(settings, &fields, kv, context_cap)? else {
         return Ok(None);
     };
     let line = format!(
-        "persistent KV: store {} namespace {:?} chunk {} tokens, park {}, restore {}, retry window {} ms, drain {} ms (recovering in the background)",
+        "persistent KV: store {} namespace {:?} chunk {} tokens, weights {}, engine build {:?}, rounding {:?}, park {}, restore {}, retry window {} ms, drain {} ms (recovering in the background)",
         settings
             .store_dir
             .as_deref()
@@ -752,6 +761,9 @@ pub fn enable_persistent_kv(
             .unwrap_or_default(),
         settings.namespace,
         chunk_tokens,
+        model.engine.weight_format.as_str(),
+        model.engine.engine_build_id,
+        model.engine.rounding_class,
         if settings.park { "on" } else { "off" },
         if settings.restore { "on" } else { "off" },
         settings.restore_retry_window_ms,

@@ -389,6 +389,10 @@ fn build(spec: &RunSpec, mode: Mode, c: u32, prompt: u32) -> Result<Bench, Strin
                 .map_err(|e| format!("bench store key: {e:?}"))?,
         )));
         queue_depth = settings.worker.dispatch_depth;
+        let host_engine = aien_runtime::compute_config::HostEngineIdentity::reference(
+            ReferenceCpuBackend::new().name(),
+        )
+        .map_err(|e| format!("engine identity: {e}"))?;
         enable_persistent_kv(
             &mut spine,
             &settings,
@@ -398,6 +402,7 @@ fn build(spec: &RunSpec, mode: Mode, c: u32, prompt: u32) -> Result<Bench, Strin
                 // Synthetic weights have no file; a fixed digest names them.
                 model_sha256: [0xB9; 32],
                 model_digest_kind: "sha256",
+                engine: host_engine.identity(),
             },
             None,
         )?

@@ -42,6 +42,9 @@ pub enum KvError {
     // Construction errors (identity), not validation outcomes.
     /// A length-prefixed identity field is longer than its prefix can express or its cap.
     FieldTooLong(&'static str),
+    /// A required identity field is empty (ADR 1.2.2: an empty engine build id or
+    /// rounding class would let every engine alias).
+    FieldEmpty(&'static str),
     /// Zero sizes, or `chunk_tokens` not a multiple of `block_size`.
     InvalidGeometry,
     /// A count, position or length does not fit its on-disk integer width.
@@ -52,6 +55,7 @@ impl core::fmt::Display for KvError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::FieldTooLong(name) => write!(f, "kv identity field {name} is too long"),
+            Self::FieldEmpty(name) => write!(f, "kv identity field {name} is empty"),
             other => write!(f, "kv record refused: {other:?}"),
         }
     }
