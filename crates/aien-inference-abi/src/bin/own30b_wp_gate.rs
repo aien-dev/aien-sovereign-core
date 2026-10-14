@@ -27,6 +27,7 @@ use std::time::Instant;
 
 use aien_inference_abi::qwen3_moe_omega::w8a8_control::ControlMode;
 use aien_inference_abi::qwen3_moe_omega::{AttnPath, DevicePaths, GenerateParams, Qwen3MoeOmegaEngine, WeightFormat};
+use aien_inference_abi::qwen3_moe_omega_prefill::fake_quant::fake_quant_row;
 use aien_inference_abi::qwen3_moe_omega_prefill::{WpMutant, WpTrace};
 use aien_inference_abi::tokenizer::ChatTokenizer as Tokenizer;
 
@@ -215,8 +216,21 @@ fn compare_ops(a: &Run, b: &Run) -> serde_json::Value {
     let l = a.trace.ops_layer.unwrap_or(0);
     let same = same_route(&a.trace.experts[l], &b.trace.experts[l], a.trace.top_k);
     let (moe_same, n_same) = if oa.moe_out.len() == ob.moe_out.len() && !oa.moe_out.is_empty() { relerr_rows(&oa.moe_out, &ob.moe_out, oa.moe_out.len() / m, &same) } else { (f64::NAN, 0) };
+    // How far apart the two runs' QUANTISED GEMM inputs are (host quantiser on the recorded pre-quant rows):
+    // the rounding-decision flips a small input difference causes, the floor of any GEMM-output comparison.
+    let quantised = |x: &[f32], y: &[f32]| {
+        if x.is_empty() || x.len() != y.len() {
+            return serde_json::Value::Null;
+        }
+        let (mut qx, mut qy) = (x.to_vec(), y.to_vec());
+        let k = x.len() / m;
+        qx.chunks_mut(k).for_each(fake_quant_row);
+        qy.chunks_mut(k).for_each(fake_quant_row);
+        serde_json::json!(relerr(&qx, &qy, k).0)
+    };
     serde_json::json!({
         "moe_out_same_route": moe_same, "same_route_tokens": n_same,
+        "post_quantised": quantised(&oa.post, &ob.post), "attn_quantised": quantised(&oa.attn, &ob.attn), "x_norm_quantised": quantised(&oa.x_norm, &ob.x_norm),
         "x_norm": one(&oa.x_norm, &ob.x_norm), "qkv": one(&oa.qkv, &ob.qkv), "attn": one(&oa.attn, &ob.attn), "oproj": one(&oa.oproj, &ob.oproj),
         "post": one(&oa.post, &ob.post), "logits": one(&oa.logits, &ob.logits), "moe_out": one(&oa.moe_out, &ob.moe_out),
     })
