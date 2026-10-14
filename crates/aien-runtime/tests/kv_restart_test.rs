@@ -20,7 +20,8 @@ use aien_abi_core::{
 use aien_inference_abi::backend::TensorBackend;
 use aien_inference_abi::{ReferenceCpuBackend, TransformerWeights};
 use aien_kv_cache::{create_shared_kv_manager_with_pool, KvDType, KvPoolConfig, SharedKvManager};
-use aien_kv_store::StoreState;
+use aien_kv_store::{EngineConfig, EngineIdentity, StoreState, WeightFormat};
+use aien_runtime::compute_config::HostEngineIdentity;
 use aien_runtime::kv_residency::KvResidencyStatus;
 use aien_runtime::shared_kv::{
     build_shared_kv_runtime, enable_persistent_kv, KvPersistSettings, ModelKvBinding,
@@ -147,10 +148,25 @@ fn scheduler() -> SchedulerConfig {
     }
 }
 
+/// A 0700 temp dir: the host store refuses a root others can reach and
+/// `tempfile` follows the umask (ADR 0003 section 19).
+fn private_tempdir() -> tempfile::TempDir {
+    use std::os::unix::fs::PermissionsExt;
+    tempfile::Builder::new()
+        .permissions(std::fs::Permissions::from_mode(0o700))
+        .tempdir()
+        .expect("tempdir")
+}
+
+/// A generated test store key (ADR 0003 section 20), never a vault secret. The
+/// same key across "restarts" so restored objects open.
+const TEST_STORE_KEY: &str = "6b3f0c2d9a1e4f5b7c8d0e1f2a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d";
+
 fn settings(dir: &Path) -> KvPersistSettings {
     let dir = dir.to_string_lossy().to_string();
     KvPersistSettings::from_lookup(|k| match k {
         "AIEN_KV_STORE_DIR" => Some(dir.clone()),
+        "AIEN_KV_STORE_KEY" => Some(TEST_STORE_KEY.to_string()),
         "AIEN_KV_CHUNK_BLOCKS" => Some(CHUNK_BLOCKS.to_string()),
         _ => None,
     })
@@ -189,10 +205,56 @@ fn paint_pool() -> SharedKvManager {
 }
 
 /// The daemon path: spine over one pool, then `enable_persistent_kv`.
+/// The engine identity of the painted runs (ADR 1.2.2, sc#504). Each input can
+/// be overridden by the parent through `KV_RS_WF`, `KV_RS_BUILD`, `KV_RS_ROUND`
+/// and `KV_RS_WHOLE_PROMPT`, so one restart test changes exactly one of them.
+struct PaintEngine {
+    build: String,
+    round: String,
+    weight_format: WeightFormat,
+    config_digest: [u8; 32],
+}
+
+impl PaintEngine {
+    fn from_env() -> Self {
+        let weight_format = match env_or("KV_RS_WF", "as-file").as_str() {
+            "as-file" => WeightFormat::AsFile,
+            "bf16" => WeightFormat::Bf16,
+            "fp8-experts" => WeightFormat::Fp8Experts,
+            "fp8-all" => WeightFormat::Fp8All,
+            other => panic!("KV_RS_WF {other:?}"),
+        };
+        let config = EngineConfig {
+            num_experts: 0,
+            experts_per_token: 0,
+            expert_intermediate_dim: 0,
+            whole_prompt_prefill: env_or("KV_RS_WHOLE_PROMPT", "0") == "1",
+            device_router: false,
+            matmul_path: "c7-paint",
+        };
+        Self {
+            build: env_or("KV_RS_BUILD", "c7-paint-build"),
+            round: env_or("KV_RS_ROUND", "c7-paint@epoch-1"),
+            weight_format,
+            config_digest: config.digest().expect("engine config digest"),
+        }
+    }
+
+    fn identity(&self) -> EngineIdentity<'_> {
+        EngineIdentity {
+            weight_format: self.weight_format,
+            engine_build_id: &self.build,
+            rounding_class: &self.round,
+            engine_config_digest: self.config_digest,
+        }
+    }
+}
+
 fn paint_rig(dir: &Path, sha: u8, eps: f32) -> PaintRig {
     let kv = paint_pool();
     let mut spine = AienRuntimeSpine::new(64, scheduler(), kv.clone());
     let model = paint_model(eps);
+    let engine = PaintEngine::from_env();
     let line = enable_persistent_kv(
         &mut spine,
         &settings(dir),
@@ -201,6 +263,7 @@ fn paint_rig(dir: &Path, sha: u8, eps: f32) -> PaintRig {
             arith_id: "c7-paint-backend",
             model_sha256: [sha; 32],
             model_digest_kind: "sha256",
+            engine: engine.identity(),
         },
         None,
     )
@@ -460,6 +523,8 @@ async fn greedy_run(dir: Option<&Path>) -> (Vec<u32>, AienRuntimeSpine) {
         },
     )
     .expect("runtime");
+    let host_engine =
+        HostEngineIdentity::reference(ReferenceCpuBackend::new().name()).expect("engine identity");
     if let Some(dir) = dir {
         enable_persistent_kv(
             &mut spine,
@@ -469,6 +534,7 @@ async fn greedy_run(dir: Option<&Path>) -> (Vec<u32>, AienRuntimeSpine) {
                 arith_id: ReferenceCpuBackend::new().name(),
                 model_sha256: [3u8; 32],
                 model_digest_kind: "sha256",
+                engine: host_engine.identity(),
             },
             None,
         )
@@ -612,7 +678,7 @@ fn run_child(role: &str, dir: &Path, env: &[(&str, &str)]) -> bool {
 /// different byte pattern must fail, so the comparison is not vacuous.
 #[test]
 fn process_restart_rediscovers_and_restores_identical_bytes() {
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = private_tempdir();
     assert!(
         run_child("paint-park", dir.path(), &[]),
         "child 1 (park) failed"
@@ -633,7 +699,7 @@ fn process_restart_rediscovers_and_restores_identical_bytes() {
 /// The in-process run without persistence is the uninterrupted baseline.
 #[tokio::test]
 async fn greedy_continuation_after_restart_matches_uninterrupted_baseline() {
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = private_tempdir();
     assert!(
         run_child("greedy-park", dir.path(), &[]),
         "cold child failed"
@@ -660,7 +726,7 @@ async fn greedy_continuation_after_restart_matches_uninterrupted_baseline() {
 /// serves them (plain prefill). Positive control: the right digest restores.
 #[test]
 fn wrong_model_digest_namespace_is_never_served_after_restart() {
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = private_tempdir();
     assert!(run_child("paint-park", dir.path(), &[("KV_RS_SHA", "7")]));
     assert!(
         run_child(
@@ -681,7 +747,7 @@ fn wrong_model_digest_namespace_is_never_served_after_restart() {
 /// different namespace, never served after a restart.
 #[test]
 fn different_rms_norm_eps_namespace_is_never_served_after_restart() {
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = private_tempdir();
     assert!(run_child(
         "paint-park",
         dir.path(),
@@ -701,12 +767,53 @@ fn different_rms_norm_eps_namespace_is_never_served_after_restart() {
     );
 }
 
+/// sc#504 (ADR 1.2.2): park under one engine identity, restart with exactly
+/// one engine input changed: the parked objects are rediscovered and counted,
+/// never served (plain prefill from position zero). Positive control: the
+/// parking identity restores.
+fn engine_change_is_never_served_after_restart(var: &str, parked: &str, changed: &str) {
+    let dir = private_tempdir();
+    assert!(run_child("paint-park", dir.path(), &[(var, parked)]));
+    assert!(
+        run_child(
+            "paint-restore",
+            dir.path(),
+            &[(var, changed), ("KV_RS_EXPECT", "miss")]
+        ),
+        "{var}={changed} served objects parked with {var}={parked}"
+    );
+    assert!(
+        run_child("paint-restore", dir.path(), &[(var, parked)]),
+        "positive control: {var}={parked} must restore"
+    );
+}
+
+#[test]
+fn weight_format_change_is_never_served_after_restart() {
+    engine_change_is_never_served_after_restart("KV_RS_WF", "bf16", "fp8-experts");
+}
+
+#[test]
+fn engine_build_change_is_never_served_after_restart() {
+    engine_change_is_never_served_after_restart("KV_RS_BUILD", "omega@aaaa", "omega@bbbb");
+}
+
+#[test]
+fn rounding_class_change_is_never_served_after_restart() {
+    engine_change_is_never_served_after_restart("KV_RS_ROUND", "class-a", "class-b");
+}
+
+#[test]
+fn whole_prompt_prefill_change_is_never_served_after_restart() {
+    engine_change_is_never_served_after_restart("KV_RS_WHOLE_PROMPT", "0", "1");
+}
+
 /// A8 (METRICS_AND_SETTINGS): the status report carries the pool allocation
 /// in bytes, which never changes when blocks are freed, separately from the
 /// block counts, and the persistent-KV fields when persistence is on.
 #[tokio::test]
 async fn metrics_report_allocated_bytes_separately_from_free_blocks() {
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = private_tempdir();
     let mut r = paint_rig(dir.path(), 7, 1e-5);
     wait_store_open(&r.spine);
     let pool_bytes = r.kv.read().pool().expect("pool").layout().total_bytes as u64;
@@ -766,6 +873,7 @@ async fn persistence_off_when_store_dir_unset_changes_nothing() {
             arith_id: "x",
             model_sha256: [7; 32],
             model_digest_kind: "sha256",
+            engine: PaintEngine::from_env().identity(),
         },
         None,
     )
@@ -784,6 +892,91 @@ async fn persistence_off_when_store_dir_unset_changes_nothing() {
     assert!(finished(&spine, seq));
     assert_eq!(kv.read().free_block_count(), TOTAL_BLOCKS);
     assert_eq!(kv.read().holder_block_count(), 0, "nothing parked");
+}
+
+/// `AIEN_KV_STORE_DIR` set but `AIEN_KV_STORE_KEY` missing or malformed: fail
+/// closed (ADR 0003 section 20). No store is opened, nothing is written, no
+/// park and no restore; requests run as plain prefill, and the status says why.
+#[tokio::test]
+async fn persistence_refused_without_a_valid_store_key_runs_plain_and_says_why() {
+    let short = &TEST_STORE_KEY[..62];
+    let long = format!("{TEST_STORE_KEY}00");
+    for (label, key, reason) in [
+        ("missing", None, "key_missing"),
+        ("malformed", Some("not-a-key"), "key_malformed"),
+        ("short", Some(short), "key_malformed"),
+        ("long", Some(long.as_str()), "key_malformed"),
+    ] {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "aien-kv-c7-nokey-{label}-{}-{nanos}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let d = dir.to_string_lossy().to_string();
+        let s = KvPersistSettings::from_lookup(|k| match k {
+            "AIEN_KV_STORE_DIR" => Some(d.clone()),
+            "AIEN_KV_CHUNK_BLOCKS" => Some(CHUNK_BLOCKS.to_string()),
+            "AIEN_KV_STORE_KEY" => key.map(str::to_string),
+            _ => None,
+        })
+        .expect("a bad key is a refusal, not a start failure");
+        let kv = paint_pool();
+        let mut spine = AienRuntimeSpine::new(64, scheduler(), kv.clone());
+        let model = paint_model(1e-5);
+        let line = enable_persistent_kv(
+            &mut spine,
+            &s,
+            &ModelKvBinding {
+                model: &model,
+                arith_id: "c7-paint-backend",
+                model_sha256: [7; 32],
+                model_digest_kind: "sha256",
+                engine: PaintEngine::from_env().identity(),
+            },
+            None,
+        )
+        .expect("refusal is not an error")
+        .expect("the refusal is announced");
+        assert!(
+            line.contains("REFUSED") && line.contains(reason),
+            "{label}: {line}"
+        );
+        assert!(spine.kv_residency().is_none(), "{label}: no store");
+        assert!(spine.kv_drain_handle().is_none());
+        let p = spine
+            .status_report()
+            .kv_persist
+            .expect("refusal is visible in the status");
+        assert_eq!(p.kv_store_state, "refused", "{label}");
+        assert_eq!(p.kv_store_refused_reason, reason, "{label}");
+        assert!(p.kv_store_key_refused_total >= 1, "{label}");
+        assert!(
+            std::fs::read_dir(&dir).unwrap().next().is_none(),
+            "{label}: nothing written under the store dir"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let rec = Arc::new(Mutex::new(Rec::default()));
+        let mut backend = PaintBackend { rec: rec.clone() };
+        let seq = spine.submit_request(request(&prompt14(), 2));
+        for _ in 0..5 {
+            spine.step(&mut backend).await.expect("step");
+        }
+        assert!(finished(&spine, seq), "{label}: plain prefill still serves");
+        assert_eq!(kv.read().holder_block_count(), 0, "{label}: nothing parked");
+    }
+}
+
+/// The settings Debug text never carries the store key.
+#[test]
+fn persistent_kv_settings_debug_never_shows_the_store_key() {
+    let s = settings(Path::new("/tmp/kv-c7-debug"));
+    let shown = format!("{s:?}");
+    assert!(!shown.contains(&TEST_STORE_KEY[..16]), "{shown}");
 }
 
 /// A bad persistent-KV setting stops the start, and the message names the

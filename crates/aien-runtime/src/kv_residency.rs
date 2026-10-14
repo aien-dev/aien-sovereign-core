@@ -248,6 +248,11 @@ pub struct KvResidencyStatus {
     /// `kv_restore_inflight_blocks`: holder blocks of restores not yet adopted
     /// or drained.
     pub restore_inflight_blocks: usize,
+    /// Waiters of this runtime still expecting a terminal from an in-flight
+    /// restore load: the opener plus every attached waiter, summed over the
+    /// landings. Zero once every restore is terminal; anything else after that
+    /// is a leak of the attached-waiter count.
+    pub landing_waiters: usize,
 }
 
 /// What S1 hands the spine: one chunk's holder and header.
@@ -655,6 +660,9 @@ impl KvResidency {
             kv_store_stale_completions_total: st.store_stale_completions_total,
             kv_store_cancelled_total: st.store_cancelled_total,
             kv_store_queue_full_total: st.store_queue_full_total,
+            kv_store_refused_reason: String::new(),
+            kv_store_key_refused_total: aien_kv_store::seal::key_refusals_total(),
+            kv_store_seal_rejected_total: aien_kv_store::seal::open_rejected_total(),
         }
     }
 
@@ -748,6 +756,7 @@ impl KvResidency {
             parking_jobs: self.parks.len() + self.shared.outbox.lock().len(),
             holder_blocks: self.shared.kv.read().holder_block_count(),
             restore_inflight_blocks: self.restore_inflight_blocks,
+            landing_waiters: self.landings.values().map(|l| l.waiters as usize).sum(),
         }
     }
 

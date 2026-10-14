@@ -624,15 +624,11 @@ fn corrupt_payload_byte_fails_segment_hash_and_deletes() {
     drop(f);
     let (t, mem) = fx.load(&s, a.key, &a.header);
     assert_eq!(*failed(&t.unwrap()), PlatformError::InvalidLayout);
-    let b = mem.bytes();
-    assert_eq!(
-        &b[..BS],
-        &expected_payload(1, 8)[..BS],
-        "segment 0 verified and landed"
-    );
+    // The whole object is authenticated before any segment lands (ADR 0003
+    // section 20), so not even the good first segment reaches the destination.
     assert!(
-        b[BS..].iter().all(|x| *x == 0xEE),
-        "the bad segment never reaches the destination"
+        mem.bytes().iter().all(|x| *x == 0xEE),
+        "nothing reaches the destination from a refused object"
     );
     assert!(!path.exists());
     assert_eq!(s.lookup(&[a.key]), vec![None]);
@@ -783,7 +779,6 @@ fn released_source_fails_the_job_and_writes_nothing() {
 
 #[test]
 fn tail_rows_above_token_count_are_zero_in_object() {
-    use std::os::unix::fs::FileExt;
     for tokens in [6u32, 1, 3, 5, 8, 4] {
         let fx = Fx::new();
         let s = fx.open();
@@ -805,9 +800,9 @@ fn tail_rows_above_token_count_are_zero_in_object() {
         );
 
         let path = fx.object_file(&key);
-        let f = std::fs::File::open(&path).unwrap();
-        let mut payload = vec![0u8; blocks * BS];
-        f.read_exact_at(&mut payload, 4096).unwrap();
+        let plain = read_object_plain(&path);
+        let payload = plain[4096..].to_vec();
+        assert_eq!(payload.len(), blocks * BS);
         let mut expect = vec![0xFFu8; blocks * BS];
         let tail = tail_valid(tokens);
         if tail < BLOCK_TOKENS {
@@ -825,8 +820,7 @@ fn tail_rows_above_token_count_are_zero_in_object() {
             assert_eq!(payload[off - 1], 0xFF);
         }
         // The segment digests cover the zeroed bytes.
-        let mut region = vec![0u8; 4096];
-        f.read_exact_at(&mut region, 0).unwrap();
+        let region = &plain[..4096];
         for (i, seg) in payload.chunks(BS).enumerate() {
             assert_eq!(
                 &region[256 + 32 * i..256 + 32 * i + 32],
@@ -1382,7 +1376,7 @@ fn apply_env_parses_quota_max_objects_and_slice_and_rejects_garbage() {
     assert_eq!(fresh.quota_bytes, 8 << 30);
     assert_eq!(fresh.max_objects, 65536);
     assert_eq!(fresh.recovery_slice_ms, 50);
-    assert_eq!((fresh.max_restore_ops, fresh.max_park_ops), (48, 16));
+    assert_eq!((fresh.max_restore_ops, fresh.max_park_ops), (48, 64));
     assert_eq!(fresh.max_inflight_bytes, 256 << 20);
     // Garbage and zero are refused, and leave the config unchanged.
     for bad in ["abc", "", "-5", "0", "1.5"] {

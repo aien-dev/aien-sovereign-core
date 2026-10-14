@@ -1,19 +1,19 @@
 {
-  "about": "ADR 0003 sections 1, 2.1 and 12 (C1b). compute_config_digest = SHA-256('AIEN-PKV-CFG-V1\\0' || num_heads u32le || hidden_dim u64le || intermediate_dim u64le || vocab_size u64le || rms_norm_eps f32 bits u32le || tie u8 || hidden_act u8 || arith_id u8-len + bytes || arith_epoch u32le); namespace_id = SHA-256('AIEN-PKV-NS-V1\\0' || fields 1 to 13 || compute_config_digest); chunk_key = SHA-256('AIEN-PKV-CHUNK-V1\\0' || namespace_id || parent_key || first_position u32le || token_count u32le || tokens u32le). header_hex is the 256-byte record header; the record file starts with a 4096-byte region = header_hex || segment digests (32 bytes each, segment_count of them) || zeros; the payload starts at file offset 4096. payload_sha256 = SHA-256('AIEN-PKV-PAYLOAD-V1\\0' || segment digests). Segment digests are SHA-256 of the ASCII string segment_digests_of_ascii with <j> replaced by the segment index. region_sha256 is the SHA-256 of the whole 4096-byte region. f32/f64 inputs are given as IEEE bit patterns.",
+  "about": "ADR 0003 sections 1 (1.2.2, sc#504), 2.1 and 12 (C1b). engine_config_digest = SHA-256('AIEN-PKV-ENG-V1\\0' || num_experts u32le || experts_per_token u32le || expert_intermediate_dim u64le || whole_prompt_prefill u8 || device_router u8 || matmul_path u8-len + bytes); compute_config_digest (field 14) = SHA-256('AIEN-PKV-CFG-V2\\0' || num_heads u32le || hidden_dim u64le || intermediate_dim u64le || vocab_size u64le || rms_norm_eps f32 bits u32le || tie u8 || hidden_act u8 || arith_id u8-len + bytes || arith_epoch u32le || weight_format u8 (1 as-file, 2 bf16, 3 fp8-experts, 4 fp8-all) || engine_build_id u8-len + bytes || rounding_class u8-len + bytes || engine_config_digest); namespace_id = SHA-256('AIEN-PKV-NS-V2\\0' || fields 1 to 13 || compute_config_digest); chunk_key = SHA-256('AIEN-PKV-CHUNK-V1\\0' || namespace_id || parent_key || first_position u32le || token_count u32le || tokens u32le). header_hex is the 256-byte record header; the record file starts with a 4096-byte region = header_hex || segment digests (32 bytes each, segment_count of them) || zeros; the payload starts at file offset 4096. payload_sha256 = SHA-256('AIEN-PKV-PAYLOAD-V1\\0' || segment digests). Segment digests are SHA-256 of the ASCII string segment_digests_of_ascii with <j> replaced by the segment index. region_sha256 is the SHA-256 of the whole 4096-byte region. f32/f64 inputs are given as IEEE bit patterns.",
   "format_version": 1,
   "vectors": [
     {
       "expected": {
         "chunks": [
           {
-            "chunk_key": "1f4b16288a37e937f3ae0caf1fee4f51e84efa2d1acf1e86d02dbf14193bb8d8",
+            "chunk_key": "11544420ddbd61541cc43f1a7a1a419b12ea1d5ec203490be5554ee1921e6b40",
             "first_position": 0,
-            "header_hex": "4149454e4b5643310100010000010000b0d569a7d1cdd33a543046e9d8da6ae90912cffee2e907cef79f206ab56bb58c1f4b16288a37e937f3ae0caf1fee4f51e84efa2d1acf1e86d02dbf14193bb8d80000000000000000000000000000000000000000000000000000000000000000abababababababababababababababababababababababababababababababab000000000800000008000000040000001000000008000000400000000301000000000400000000009ad3f148e705d3c3c83356a63b3fa94b2c7108626d5b9d1da717a2a8552ecf5e00002a36fe9c97172b03ddaf41606f9f4faf5e7da9a143b7a78044b1bf05623ba89a68d20b2dcb2d",
+            "header_hex": "4149454e4b564331010001000001000040abe99f344db026720994b2b9e9ed765e0b5dacf06ef47e16d3ccb62534a1a811544420ddbd61541cc43f1a7a1a419b12ea1d5ec203490be5554ee1921e6b400000000000000000000000000000000000000000000000000000000000000000abababababababababababababababababababababababababababababababab000000000800000008000000040000001000000008000000400000000301000000000400000000009ad3f148e705d3c3c83356a63b3fa94b2c7108626d5b9d1da717a2a8552ecf5e00002a36fe9c9717b54b81800066273be843a3cb1f5c64e6f77367af1a4429d8a2289026c2894aae",
             "index": 0,
             "parent_key": "0000000000000000000000000000000000000000000000000000000000000000",
             "payload_len": 262144,
             "payload_sha256": "9ad3f148e705d3c3c83356a63b3fa94b2c7108626d5b9d1da717a2a8552ecf5e",
-            "region_sha256": "a4dae75e0b93dd239f70a9f9c65051063519ffd0622dcaca010b55aee87dfd12",
+            "region_sha256": "2f290247b2045a429b0abecaab29f8d2a06a4b187a1a9478f3a91e108e3bf163",
             "segment_bytes": 131072,
             "segment_count": 2,
             "segment_digests": [
@@ -25,14 +25,14 @@
             "written_unix_ns": 1700000000000000000
           },
           {
-            "chunk_key": "bbbd8d477edf6825714735d90171d4c5b384e3cce644be12c3e91afba1414041",
+            "chunk_key": "a1f581430f8c13f7f9122b0202a578ef0a6110cb4b709e3e52cbd7b4cf55db68",
             "first_position": 8,
-            "header_hex": "4149454e4b5643310100010000010000b0d569a7d1cdd33a543046e9d8da6ae90912cffee2e907cef79f206ab56bb58cbbbd8d477edf6825714735d90171d4c5b384e3cce644be12c3e91afba14140411f4b16288a37e937f3ae0caf1fee4f51e84efa2d1acf1e86d02dbf14193bb8d8abababababababababababababababababababababababababababababababab08000000080000000800000004000000100000000800000040000000030100000000040000000000673abbdb95aa72d4d44db468056367b48be2046fd57c0b989d005a07a8127f7201002a36fe9c9717bb1c116e47eb5a2f3efb4fed720cd3c296ba6587117cb564a60c4e0114f98f81",
+            "header_hex": "4149454e4b564331010001000001000040abe99f344db026720994b2b9e9ed765e0b5dacf06ef47e16d3ccb62534a1a8a1f581430f8c13f7f9122b0202a578ef0a6110cb4b709e3e52cbd7b4cf55db6811544420ddbd61541cc43f1a7a1a419b12ea1d5ec203490be5554ee1921e6b40abababababababababababababababababababababababababababababababab08000000080000000800000004000000100000000800000040000000030100000000040000000000673abbdb95aa72d4d44db468056367b48be2046fd57c0b989d005a07a8127f7201002a36fe9c971724cad3e9001137f2de49a52c78259a758a28d280fd9135e46f5dda6f0b846665",
             "index": 1,
-            "parent_key": "1f4b16288a37e937f3ae0caf1fee4f51e84efa2d1acf1e86d02dbf14193bb8d8",
+            "parent_key": "11544420ddbd61541cc43f1a7a1a419b12ea1d5ec203490be5554ee1921e6b40",
             "payload_len": 262144,
             "payload_sha256": "673abbdb95aa72d4d44db468056367b48be2046fd57c0b989d005a07a8127f72",
-            "region_sha256": "17cb02ca2c95baaa0b793a0f8ad6c14845e3f3929a6e241d1913985bace1d31b",
+            "region_sha256": "4cb2b961575fe67033350364bce81c599302f23f1a7c9230768580edd3f89400",
             "segment_bytes": 131072,
             "segment_count": 2,
             "segment_digests": [
@@ -44,14 +44,14 @@
             "written_unix_ns": 1700000000000000001
           },
           {
-            "chunk_key": "035663d01becaeef559f1e6494a8edb022b9ba7493707db54a8c4d6c322801ed",
+            "chunk_key": "691005e91a34c5ac733a712bfd7fdd7af819b89153de50c3d9be83805c74c25a",
             "first_position": 16,
-            "header_hex": "4149454e4b5643310100010000010000b0d569a7d1cdd33a543046e9d8da6ae90912cffee2e907cef79f206ab56bb58c035663d01becaeef559f1e6494a8edb022b9ba7493707db54a8c4d6c322801edbbbd8d477edf6825714735d90171d4c5b384e3cce644be12c3e91afba1414041abababababababababababababababababababababababababababababababab10000000040000000800000004000000100000000800000040000000030101000000020000000000fd35001fbc90adae0c88db7b174b6350cd1e11683875cdd0cee6f6b12e0e3c1002002a36fe9c9717c5457785197708d54c27f7c27fb1bd43684a9fff3de0235c8805dc98897a7ebd",
+            "header_hex": "4149454e4b564331010001000001000040abe99f344db026720994b2b9e9ed765e0b5dacf06ef47e16d3ccb62534a1a8691005e91a34c5ac733a712bfd7fdd7af819b89153de50c3d9be83805c74c25aa1f581430f8c13f7f9122b0202a578ef0a6110cb4b709e3e52cbd7b4cf55db68abababababababababababababababababababababababababababababababab10000000040000000800000004000000100000000800000040000000030101000000020000000000fd35001fbc90adae0c88db7b174b6350cd1e11683875cdd0cee6f6b12e0e3c1002002a36fe9c971753dd82936f9491e2ba0c62da44188ddb9ce36daba42f25192781604aedb3d42b",
             "index": 2,
-            "parent_key": "bbbd8d477edf6825714735d90171d4c5b384e3cce644be12c3e91afba1414041",
+            "parent_key": "a1f581430f8c13f7f9122b0202a578ef0a6110cb4b709e3e52cbd7b4cf55db68",
             "payload_len": 131072,
             "payload_sha256": "fd35001fbc90adae0c88db7b174b6350cd1e11683875cdd0cee6f6b12e0e3c10",
-            "region_sha256": "2db188534e8c2b9ec027f69eca6c639f33a0505251e0245f5be5575e86b99363",
+            "region_sha256": "adbf4d8453f2ae0ab03fae9a849fb9fa054f4b0123a5f405ba3c884e3529b07f",
             "segment_bytes": 131072,
             "segment_count": 1,
             "segment_digests": [
@@ -62,7 +62,7 @@
             "written_unix_ns": 1700000000000000002
           }
         ],
-        "namespace_id": "b0d569a7d1cdd33a543046e9d8da6ae90912cffee2e907cef79f206ab56bb58c"
+        "namespace_id": "40abe99f344db026720994b2b9e9ed765e0b5dacf06ef47e16d3ccb62534a1a8"
       },
       "name": "host-small-partial-tail",
       "namespace": {
@@ -80,8 +80,23 @@
           "tie_word_embeddings": true,
           "vocab_size": 128256
         },
-        "compute_config_digest": "0eba52665411d3ad2158415f730d2337880a148017083ad402d22d997066764c",
+        "compute_config_digest": "558c180731461b3438b7155e3fb8c146419c67f788c870d510b9194301bf6e6c",
         "dtype": 3,
+        "engine": {
+          "engine_build_id": "aien-runtime/0.1.0+git:test",
+          "engine_config": {
+            "device_router": false,
+            "expert_intermediate_dim": 0,
+            "experts_per_token": 0,
+            "matmul_path": "host-tensor-backend",
+            "num_experts": 0,
+            "whole_prompt_prefill": false
+          },
+          "engine_config_digest": "cb9627cf8f48d908f5362b60ae310add84b98c9517250a28b31d4a0a33df133c",
+          "rounding_class": "ReferenceCpuBackend@kv-arith-epoch-1",
+          "weight_format": 1,
+          "weight_format_name": "as-file"
+        },
         "head_dim": 64,
         "layout": {
           "block_stride": 131072,
@@ -133,14 +148,14 @@
       "expected": {
         "chunks": [
           {
-            "chunk_key": "0a92a1573022ae9546726b962ccef9aaede5c382e87fb76bea4596935e268030",
+            "chunk_key": "3041d6b224f33c99ddeb4e6393a1cea3719f8d32024439c052588757b8b0a4bb",
             "first_position": 0,
-            "header_hex": "4149454e4b5643310100010000010000f6e6ae5d788374d83e4dcf4dff24e389f21b4d0069d0ec4fa0fe8e9844ac10810a92a1573022ae9546726b962ccef9aaede5c382e87fb76bea4596935e2680300000000000000000000000000000000000000000000000000000000000000000abababababababababababababababababababababababababababababababab00000000000100000001000010000000100000000800000040000000030100000000800000000000f9506fb00b5039b7bbf056faebe0b6741adac44140a3ec32b02a81d86608e26a00002a36fe9c9717bc15559ecb56d1d22f0d5977fcaf39f49a45d566abffe3002c72890e14bd1718",
+            "header_hex": "4149454e4b56433101000100000100005d7a7223eb9706842f556eff3873050dcb6d4387bf46d09dec79cd8052f9b4ec3041d6b224f33c99ddeb4e6393a1cea3719f8d32024439c052588757b8b0a4bb0000000000000000000000000000000000000000000000000000000000000000abababababababababababababababababababababababababababababababab00000000000100000001000010000000100000000800000040000000030100000000800000000000f9506fb00b5039b7bbf056faebe0b6741adac44140a3ec32b02a81d86608e26a00002a36fe9c971739152bd871f8aa6bbe733d082a6a598523d729dd8064efba6a956c69c9faf7df",
             "index": 0,
             "parent_key": "0000000000000000000000000000000000000000000000000000000000000000",
             "payload_len": 8388608,
             "payload_sha256": "f9506fb00b5039b7bbf056faebe0b6741adac44140a3ec32b02a81d86608e26a",
-            "region_sha256": "66e8680033978697b57f80e391828dd05b59f01d6cab8e7680a667a910d68258",
+            "region_sha256": "847ec656164f13f72ef0d714b0a380526f47210209bf970febedfafd5fced91b",
             "segment_bytes": 524288,
             "segment_count": 16,
             "segment_digests": [
@@ -166,14 +181,14 @@
             "written_unix_ns": 1700000000000000000
           },
           {
-            "chunk_key": "f590d41c76ec4ca6f2a03f669065934d28121f48b626714961caef4a57f42ee3",
+            "chunk_key": "d40444300b4e95b1aca9ae19fbd3d183fffcdac909f0e5d4d0f40dd28e3cf1a7",
             "first_position": 256,
-            "header_hex": "4149454e4b5643310100010000010000f6e6ae5d788374d83e4dcf4dff24e389f21b4d0069d0ec4fa0fe8e9844ac1081f590d41c76ec4ca6f2a03f669065934d28121f48b626714961caef4a57f42ee30a92a1573022ae9546726b962ccef9aaede5c382e87fb76bea4596935e268030abababababababababababababababababababababababababababababababab000100002c0000000001000010000000100000000800000040000000030101000000180000000000985c82826f0f3cd5cb1feb17f13131e53bfe3d2bc6514aed9bce44d71b8a710d01002a36fe9c97174b3ae334f7cf77e6dbc85a93c925ca333211b1b4ce864588612eab1d9797a574",
+            "header_hex": "4149454e4b56433101000100000100005d7a7223eb9706842f556eff3873050dcb6d4387bf46d09dec79cd8052f9b4ecd40444300b4e95b1aca9ae19fbd3d183fffcdac909f0e5d4d0f40dd28e3cf1a73041d6b224f33c99ddeb4e6393a1cea3719f8d32024439c052588757b8b0a4bbabababababababababababababababababababababababababababababababab000100002c0000000001000010000000100000000800000040000000030101000000180000000000985c82826f0f3cd5cb1feb17f13131e53bfe3d2bc6514aed9bce44d71b8a710d01002a36fe9c9717227cccc8289302a2accb2194f3bb7c9fee5467d221a676f199c3435f85a9aec2",
             "index": 1,
-            "parent_key": "0a92a1573022ae9546726b962ccef9aaede5c382e87fb76bea4596935e268030",
+            "parent_key": "3041d6b224f33c99ddeb4e6393a1cea3719f8d32024439c052588757b8b0a4bb",
             "payload_len": 1572864,
             "payload_sha256": "985c82826f0f3cd5cb1feb17f13131e53bfe3d2bc6514aed9bce44d71b8a710d",
-            "region_sha256": "b96d8584e37d8543e5b1c698e9d8eef2f6ae6343dbfad484942b29bff44b797c",
+            "region_sha256": "52d947093257100a2edf01221f61773cbb2568f54e6c489730e8791f8b511f32",
             "segment_bytes": 524288,
             "segment_count": 3,
             "segment_digests": [
@@ -186,7 +201,7 @@
             "written_unix_ns": 1700000000000000001
           }
         ],
-        "namespace_id": "f6e6ae5d788374d83e4dcf4dff24e389f21b4d0069d0ec4fa0fe8e9844ac1081"
+        "namespace_id": "5d7a7223eb9706842f556eff3873050dcb6d4387bf46d09dec79cd8052f9b4ec"
       },
       "name": "host-llama32-1b-full-and-partial",
       "namespace": {
@@ -204,8 +219,23 @@
           "tie_word_embeddings": true,
           "vocab_size": 128256
         },
-        "compute_config_digest": "0eba52665411d3ad2158415f730d2337880a148017083ad402d22d997066764c",
+        "compute_config_digest": "558c180731461b3438b7155e3fb8c146419c67f788c870d510b9194301bf6e6c",
         "dtype": 3,
+        "engine": {
+          "engine_build_id": "aien-runtime/0.1.0+git:test",
+          "engine_config": {
+            "device_router": false,
+            "expert_intermediate_dim": 0,
+            "experts_per_token": 0,
+            "matmul_path": "host-tensor-backend",
+            "num_experts": 0,
+            "whole_prompt_prefill": false
+          },
+          "engine_config_digest": "cb9627cf8f48d908f5362b60ae310add84b98c9517250a28b31d4a0a33df133c",
+          "rounding_class": "ReferenceCpuBackend@kv-arith-epoch-1",
+          "weight_format": 1,
+          "weight_format_name": "as-file"
+        },
         "head_dim": 64,
         "layout": {
           "block_stride": 524288,
@@ -537,14 +567,14 @@
       "expected": {
         "chunks": [
           {
-            "chunk_key": "aa3175b3fffe8a0ecd9651e3455736f2ff2c20548c18b4ce00fa6897071d2df7",
+            "chunk_key": "c9dfc186f494741cee6c6d33687d3ac004acb7688e944240249e1b56607bedf9",
             "first_position": 0,
-            "header_hex": "4149454e4b5643310100010000010000a8bb7de9507f4fc2056d94bc89d7d8b64fcaa5d2824448faa7722e92b30a471eaa3175b3fffe8a0ecd9651e3455736f2ff2c20548c18b4ce00fa6897071d2df70000000000000000000000000000000000000000000000000000000000000000abababababababababababababababababababababababababababababababab00000000400000004000000010000000100000000800000040000000050200000000400000000000dbf4db3f5f28d1481c2e10ae39a55d8c24ae34b8858e3ad2a7bdc5a1773dca4d00002a36fe9c971745b15d38689b6c1660b42e579f0c9b13a0bfcdf8c2f1ed765b917d8cf8011603",
+            "header_hex": "4149454e4b56433101000100000100006135ba43de909a75973057f54b21893be852f6e4d5be85c58c9f8127082bf441c9dfc186f494741cee6c6d33687d3ac004acb7688e944240249e1b56607bedf90000000000000000000000000000000000000000000000000000000000000000abababababababababababababababababababababababababababababababab00000000400000004000000010000000100000000800000040000000050200000000400000000000dbf4db3f5f28d1481c2e10ae39a55d8c24ae34b8858e3ad2a7bdc5a1773dca4d00002a36fe9c9717e67fb4f1f0c7dfcdf6d51f7b683988304b422b3dbb3b967a07f3e2602cb66f9a",
             "index": 0,
             "parent_key": "0000000000000000000000000000000000000000000000000000000000000000",
             "payload_len": 4194304,
             "payload_sha256": "dbf4db3f5f28d1481c2e10ae39a55d8c24ae34b8858e3ad2a7bdc5a1773dca4d",
-            "region_sha256": "15c2aa1efaf409f070c1d2f2a943da6d172845ed32e42bd2458389ab24c4c197",
+            "region_sha256": "678ae5a362b048adb5a127003f160c6d7b5454bc7329d3cde084f287731d9833",
             "segment_bytes": 4194304,
             "segment_count": 1,
             "segment_digests": [
@@ -555,14 +585,14 @@
             "written_unix_ns": 1700000000000000000
           },
           {
-            "chunk_key": "1bc36528662191529d1c17a1010e62d4f6b570f84d8318e2db91efdbc60fb34c",
+            "chunk_key": "4c283fddca966f6384987ef5efbd16d7f8deee1162387f15149c8e856b577a83",
             "first_position": 64,
-            "header_hex": "4149454e4b5643310100010000010000a8bb7de9507f4fc2056d94bc89d7d8b64fcaa5d2824448faa7722e92b30a471e1bc36528662191529d1c17a1010e62d4f6b570f84d8318e2db91efdbc60fb34caa3175b3fffe8a0ecd9651e3455736f2ff2c20548c18b4ce00fa6897071d2df7abababababababababababababababababababababababababababababababab4000000006000000400000001000000010000000080000004000000005020100000006000000000066a6e4d1ca0cacfca2cffea7f269de56c86fed0e215c283a48a00465e39c03f201002a36fe9c97178993d1f240657f98506e420ca1dc24c9c93d0ffeda225f24d82c40794d982a81",
+            "header_hex": "4149454e4b56433101000100000100006135ba43de909a75973057f54b21893be852f6e4d5be85c58c9f8127082bf4414c283fddca966f6384987ef5efbd16d7f8deee1162387f15149c8e856b577a83c9dfc186f494741cee6c6d33687d3ac004acb7688e944240249e1b56607bedf9abababababababababababababababababababababababababababababababab4000000006000000400000001000000010000000080000004000000005020100000006000000000066a6e4d1ca0cacfca2cffea7f269de56c86fed0e215c283a48a00465e39c03f201002a36fe9c9717bb2d5232b4a1dd6f2914afaedfe69031d7f0433a3531a9233514f781fc7a6ee9",
             "index": 1,
-            "parent_key": "aa3175b3fffe8a0ecd9651e3455736f2ff2c20548c18b4ce00fa6897071d2df7",
+            "parent_key": "c9dfc186f494741cee6c6d33687d3ac004acb7688e944240249e1b56607bedf9",
             "payload_len": 393216,
             "payload_sha256": "66a6e4d1ca0cacfca2cffea7f269de56c86fed0e215c283a48a00465e39c03f2",
-            "region_sha256": "d8bd4214ccb915c74d5d29118718d555598d2ab9a5a79997b2c309e720751478",
+            "region_sha256": "4d8e953e4badef36f3fd306f4732b2480939ab312cf6d1ead7e1d3de95d828e7",
             "segment_bytes": 393216,
             "segment_count": 1,
             "segment_digests": [
@@ -573,7 +603,7 @@
             "written_unix_ns": 1700000000000000001
           }
         ],
-        "namespace_id": "a8bb7de9507f4fc2056d94bc89d7d8b64fcaa5d2824448faa7722e92b30a471e"
+        "namespace_id": "6135ba43de909a75973057f54b21893be852f6e4d5be85c58c9f8127082bf441"
       },
       "name": "native-f32-partial-tail",
       "namespace": {
@@ -591,8 +621,23 @@
           "tie_word_embeddings": true,
           "vocab_size": 128256
         },
-        "compute_config_digest": "21a7c01ba44c1b763f841044f2d940a9d6aa76e50fabb8cf25b0d0edad80e6f4",
+        "compute_config_digest": "eda44c17a40c1e6ef38639582faaf61207b74c7bd063cdc9f7d676f84fb8df0e",
         "dtype": 5,
+        "engine": {
+          "engine_build_id": "aien-runtime/0.1.0+git:test",
+          "engine_config": {
+            "device_router": false,
+            "expert_intermediate_dim": 0,
+            "experts_per_token": 0,
+            "matmul_path": "host-tensor-backend",
+            "num_experts": 0,
+            "whole_prompt_prefill": false
+          },
+          "engine_config_digest": "cb9627cf8f48d908f5362b60ae310add84b98c9517250a28b31d4a0a33df133c",
+          "rounding_class": "ReferenceCpuBackend@kv-arith-epoch-1",
+          "weight_format": 1,
+          "weight_format_name": "as-file"
+        },
         "head_dim": 64,
         "layout": {
           "block_stride": 1048576,
@@ -689,14 +734,14 @@
       "expected": {
         "chunks": [
           {
-            "chunk_key": "e33dc209ced80efafdaefd3eb1ff6ca744f4553af7042f15dd7ad6e018a98523",
+            "chunk_key": "35ea8fd75a642acd86125e86710135fcbbd9faf5a83ce299bf4faa36142f4d67",
             "first_position": 0,
-            "header_hex": "4149454e4b5643310100010000010000b8bcdb25448e7d13985c240e780282ab3c6c6148fa4c915595a9a33bf4cb52c0e33dc209ced80efafdaefd3eb1ff6ca744f4553af7042f15dd7ad6e018a985230000000000000000000000000000000000000000000000000000000000000000abababababababababababababababababababababababababababababababab00000000080000000800000004000000100000000800000040000000030100000000040000000000168602aaa63131d3123a45cc159ca3f234f479f3de5e40890ff91229634f27c700002a36fe9c9717c9fee4170967ca048acd55904792f5978cd317edc0be48efd61e5f42be8d42d9",
+            "header_hex": "4149454e4b564331010001000001000084b964e2e259ff36989bfdf1b6f3e88dcaf608196039083abfdc5653cf14a0be35ea8fd75a642acd86125e86710135fcbbd9faf5a83ce299bf4faa36142f4d670000000000000000000000000000000000000000000000000000000000000000abababababababababababababababababababababababababababababababab00000000080000000800000004000000100000000800000040000000030100000000040000000000168602aaa63131d3123a45cc159ca3f234f479f3de5e40890ff91229634f27c700002a36fe9c9717c67a5cb35da22530dea714918ba1b9ecee4f51764d9aa842b7fe1722ee0db2a8",
             "index": 0,
             "parent_key": "0000000000000000000000000000000000000000000000000000000000000000",
             "payload_len": 262144,
             "payload_sha256": "168602aaa63131d3123a45cc159ca3f234f479f3de5e40890ff91229634f27c7",
-            "region_sha256": "377f2fa7bfd7c2b9bdab0bcb951324fb2bb416cef561eed434b7b8d6014e8c5d",
+            "region_sha256": "d6450a5c3b26ee4cc3783f5b7bd960f591c5fb1b70dfa56a0ca77109298b4a59",
             "segment_bytes": 131072,
             "segment_count": 2,
             "segment_digests": [
@@ -708,7 +753,7 @@
             "written_unix_ns": 1700000000000000000
           }
         ],
-        "namespace_id": "b8bcdb25448e7d13985c240e780282ab3c6c6148fa4c915595a9a33bf4cb52c0"
+        "namespace_id": "84b964e2e259ff36989bfdf1b6f3e88dcaf608196039083abfdc5653cf14a0be"
       },
       "name": "qk-norm-empty-sharing-one-full-chunk",
       "namespace": {
@@ -726,8 +771,23 @@
           "tie_word_embeddings": true,
           "vocab_size": 151936
         },
-        "compute_config_digest": "cf378ec9159c72efcf456a1dda575203063cbb77eeed7a2678d280ed2679680f",
+        "compute_config_digest": "0f453b2d5b9e3ea30cbcdbaa6666d7fd865175a498df0150d10c8d63dd5657c6",
         "dtype": 3,
+        "engine": {
+          "engine_build_id": "aien-runtime/0.1.0+git:test",
+          "engine_config": {
+            "device_router": false,
+            "expert_intermediate_dim": 0,
+            "experts_per_token": 0,
+            "matmul_path": "host-tensor-backend",
+            "num_experts": 0,
+            "whole_prompt_prefill": false
+          },
+          "engine_config_digest": "cb9627cf8f48d908f5362b60ae310add84b98c9517250a28b31d4a0a33df133c",
+          "rounding_class": "ReferenceCpuBackend@kv-arith-epoch-1",
+          "weight_format": 1,
+          "weight_format_name": "as-file"
+        },
         "head_dim": 64,
         "layout": {
           "block_stride": 131072,
@@ -762,14 +822,14 @@
       "expected": {
         "chunks": [
           {
-            "chunk_key": "a055e4b0cfe38811635ca99775416ab5c79062e4a04a383628adbb5bc82eec18",
+            "chunk_key": "2be4ecdfaf9ca55920e15f4304ea1d87dee0cf7415854c6674a7220ccde33d0e",
             "first_position": 0,
-            "header_hex": "4149454e4b564331010001000001000044db90ff319475f16a8c31429c25a2191616360674093c8119cc0f9d64be5f1aa055e4b0cfe38811635ca99775416ab5c79062e4a04a383628adbb5bc82eec180000000000000000000000000000000000000000000000000000000000000000abababababababababababababababababababababababababababababababab0000000008000000080000000400000010000000080000004000000003010000000004000000000021d010d8b9bee5d106a0a0b4ac79d57e5dbd5b3564b8896aa9e107030826647b00002a36fe9c97174575457ab29d0d2d519ab1b8cd19c70e33d881ab9a6a673375062d8005c1068f",
+            "header_hex": "4149454e4b5643310100010000010000b0f57bb572229f644428ff55227e84603a45605e7fe658706f2d046efa03db252be4ecdfaf9ca55920e15f4304ea1d87dee0cf7415854c6674a7220ccde33d0e0000000000000000000000000000000000000000000000000000000000000000abababababababababababababababababababababababababababababababab0000000008000000080000000400000010000000080000004000000003010000000004000000000021d010d8b9bee5d106a0a0b4ac79d57e5dbd5b3564b8896aa9e107030826647b00002a36fe9c971761bfbb744345a228a810f9f4fd1ca3a79ec8e4711917e6fe39924fcc6101f400",
             "index": 0,
             "parent_key": "0000000000000000000000000000000000000000000000000000000000000000",
             "payload_len": 262144,
             "payload_sha256": "21d010d8b9bee5d106a0a0b4ac79d57e5dbd5b3564b8896aa9e107030826647b",
-            "region_sha256": "d6baeb987acd51dec60d571e52acea2424dc6b2ee898681abb070ba62185c926",
+            "region_sha256": "6650eef3a3477aed33dc9f7b8caf38b12bd2c4f24e1bfe8009aaf39c5b0c119a",
             "segment_bytes": 131072,
             "segment_count": 2,
             "segment_digests": [
@@ -781,14 +841,14 @@
             "written_unix_ns": 1700000000000000000
           },
           {
-            "chunk_key": "629295667bbe7df634802fb8df22c9a31724e9cacb616ae96d6352a0d0d893b2",
+            "chunk_key": "21daa691e62637ea75ed436927a1cd08e552d8e893c72d04f19fab60ddca9779",
             "first_position": 8,
-            "header_hex": "4149454e4b564331010001000001000044db90ff319475f16a8c31429c25a2191616360674093c8119cc0f9d64be5f1a629295667bbe7df634802fb8df22c9a31724e9cacb616ae96d6352a0d0d893b2a055e4b0cfe38811635ca99775416ab5c79062e4a04a383628adbb5bc82eec18abababababababababababababababababababababababababababababababab080000000800000008000000040000001000000008000000400000000301000000000400000000004cfa45115ae82ba862e2a77274ccb7aa0450d28250a49042442e95b06d95fc0b01002a36fe9c971740586ee1b17110747bd29dc98a6492916153b4f98ba1b8c9c0127b354fcb3884",
+            "header_hex": "4149454e4b5643310100010000010000b0f57bb572229f644428ff55227e84603a45605e7fe658706f2d046efa03db2521daa691e62637ea75ed436927a1cd08e552d8e893c72d04f19fab60ddca97792be4ecdfaf9ca55920e15f4304ea1d87dee0cf7415854c6674a7220ccde33d0eabababababababababababababababababababababababababababababababab080000000800000008000000040000001000000008000000400000000301000000000400000000004cfa45115ae82ba862e2a77274ccb7aa0450d28250a49042442e95b06d95fc0b01002a36fe9c9717f8b073c26e98ee081de928359f6a38ec1a4f42b1e7299d88bbde2d4e9f178947",
             "index": 1,
-            "parent_key": "a055e4b0cfe38811635ca99775416ab5c79062e4a04a383628adbb5bc82eec18",
+            "parent_key": "2be4ecdfaf9ca55920e15f4304ea1d87dee0cf7415854c6674a7220ccde33d0e",
             "payload_len": 262144,
             "payload_sha256": "4cfa45115ae82ba862e2a77274ccb7aa0450d28250a49042442e95b06d95fc0b",
-            "region_sha256": "85bef6f1f978b4ae2b3e19e7cc40b7cef126699ad56bfbcb32bad87f197cd679",
+            "region_sha256": "1862a92d2642a7cb6ae3dd242887b75129b7f6ee368826449287abc5c4b15ab6",
             "segment_bytes": 131072,
             "segment_count": 2,
             "segment_digests": [
@@ -800,14 +860,14 @@
             "written_unix_ns": 1700000000000000001
           },
           {
-            "chunk_key": "831803b5f4f2b5fbb3100a4436d2bd28bcb900ec5287520c61566a7ac62667cc",
+            "chunk_key": "606b5773d559793ad7a62ea5ad40d2cdd45a39e36049a107693122a54a03d94a",
             "first_position": 16,
-            "header_hex": "4149454e4b564331010001000001000044db90ff319475f16a8c31429c25a2191616360674093c8119cc0f9d64be5f1a831803b5f4f2b5fbb3100a4436d2bd28bcb900ec5287520c61566a7ac62667cc629295667bbe7df634802fb8df22c9a31724e9cacb616ae96d6352a0d0d893b2abababababababababababababababababababababababababababababababab10000000040000000800000004000000100000000800000040000000030101000000020000000000bc84f13e15db3f47bf0a9cc0bcd780d11524224d9184703fdfdfba559ac95f7502002a36fe9c9717d355776d312ad8fe2573a02243b4eebbd8fcf8669790415f95effe7b6d465dab",
+            "header_hex": "4149454e4b5643310100010000010000b0f57bb572229f644428ff55227e84603a45605e7fe658706f2d046efa03db25606b5773d559793ad7a62ea5ad40d2cdd45a39e36049a107693122a54a03d94a21daa691e62637ea75ed436927a1cd08e552d8e893c72d04f19fab60ddca9779abababababababababababababababababababababababababababababababab10000000040000000800000004000000100000000800000040000000030101000000020000000000bc84f13e15db3f47bf0a9cc0bcd780d11524224d9184703fdfdfba559ac95f7502002a36fe9c9717d15292c52e821e7b14c932b1dfe3c48e84d8a5d519f3a0d21bf00790eeedc0b8",
             "index": 2,
-            "parent_key": "629295667bbe7df634802fb8df22c9a31724e9cacb616ae96d6352a0d0d893b2",
+            "parent_key": "21daa691e62637ea75ed436927a1cd08e552d8e893c72d04f19fab60ddca9779",
             "payload_len": 131072,
             "payload_sha256": "bc84f13e15db3f47bf0a9cc0bcd780d11524224d9184703fdfdfba559ac95f75",
-            "region_sha256": "8f0861f1b75729ed7d9517d93a6c4ac8cb24711ac5989cc7356c64969471478a",
+            "region_sha256": "55b613f499291c670ba4a49ca20425cde97c3aceb85a3b232440dfd6e1bbc3c3",
             "segment_bytes": 131072,
             "segment_count": 1,
             "segment_digests": [
@@ -818,7 +878,7 @@
             "written_unix_ns": 1700000000000000002
           }
         ],
-        "namespace_id": "44db90ff319475f16a8c31429c25a2191616360674093c8119cc0f9d64be5f1a"
+        "namespace_id": "b0f57bb572229f644428ff55227e84603a45605e7fe658706f2d046efa03db25"
       },
       "name": "rms-norm-eps-1e-6-only",
       "namespace": {
@@ -836,8 +896,23 @@
           "tie_word_embeddings": true,
           "vocab_size": 128256
         },
-        "compute_config_digest": "2c32f815d6d048dfe40f04547178485d8089bc17b8b41c1a1ca151f702eecce2",
+        "compute_config_digest": "8d591df6e88cd3cd88a6bbfebce67faf19217ae7df182d5225330d7d267048fc",
         "dtype": 3,
+        "engine": {
+          "engine_build_id": "aien-runtime/0.1.0+git:test",
+          "engine_config": {
+            "device_router": false,
+            "expert_intermediate_dim": 0,
+            "experts_per_token": 0,
+            "matmul_path": "host-tensor-backend",
+            "num_experts": 0,
+            "whole_prompt_prefill": false
+          },
+          "engine_config_digest": "cb9627cf8f48d908f5362b60ae310add84b98c9517250a28b31d4a0a33df133c",
+          "rounding_class": "ReferenceCpuBackend@kv-arith-epoch-1",
+          "weight_format": 1,
+          "weight_format_name": "as-file"
+        },
         "head_dim": 64,
         "layout": {
           "block_stride": 131072,
@@ -889,14 +964,14 @@
       "expected": {
         "chunks": [
           {
-            "chunk_key": "98eac1911fbf58f474d1a9059e7832a95f1ad87380c267eadbdb5d3b410f867c",
+            "chunk_key": "2a623fb74491a02005f40eb011a5c9980ec6b6867026e765083086211b21f214",
             "first_position": 0,
-            "header_hex": "4149454e4b5643310100010000010000f087ccef26305bb0aa5a2935b857cd6d1ae7f641ec277b83e1d849cef6d6b92698eac1911fbf58f474d1a9059e7832a95f1ad87380c267eadbdb5d3b410f867c0000000000000000000000000000000000000000000000000000000000000000abababababababababababababababababababababababababababababababab00000000080000000800000004000000100000000800000040000000030100000000040000000000fc00e5a924e5b3107021ba0144174d08e44f2f9f6c54254450e49346e4f90eef00002a36fe9c9717c3bc62059323f135dea59c357b402815980b3b6b8bb9bf758f2fcf98aed89228",
+            "header_hex": "4149454e4b5643310100010000010000162c0290081d6ad747614688b4d20d345a1dc077fc45ed67ee9cb14e7a593cfd2a623fb74491a02005f40eb011a5c9980ec6b6867026e765083086211b21f2140000000000000000000000000000000000000000000000000000000000000000abababababababababababababababababababababababababababababababab00000000080000000800000004000000100000000800000040000000030100000000040000000000fc00e5a924e5b3107021ba0144174d08e44f2f9f6c54254450e49346e4f90eef00002a36fe9c971749fb5027a64665eaa4a678365c5f52545cc298c0ee1a51b6588e3fade51637c3",
             "index": 0,
             "parent_key": "0000000000000000000000000000000000000000000000000000000000000000",
             "payload_len": 262144,
             "payload_sha256": "fc00e5a924e5b3107021ba0144174d08e44f2f9f6c54254450e49346e4f90eef",
-            "region_sha256": "dfd4aa411a8a27e12cb153304aeba7f0288544703822fd6181a5d95f503c5753",
+            "region_sha256": "eefbff2759d3ad60d04a7e5f2d25adb5d0970cd08f50b1ebeb1a1c33b3924d84",
             "segment_bytes": 131072,
             "segment_count": 2,
             "segment_digests": [
@@ -908,14 +983,14 @@
             "written_unix_ns": 1700000000000000000
           },
           {
-            "chunk_key": "eda878f0961f8f7fdec365faed217de08e6750034ae58f75e66fcafe662f2228",
+            "chunk_key": "df7a976c61ea22880fcfec97a5e1b315b2f7a83d81d345bfca68bb709222d2dd",
             "first_position": 8,
-            "header_hex": "4149454e4b5643310100010000010000f087ccef26305bb0aa5a2935b857cd6d1ae7f641ec277b83e1d849cef6d6b926eda878f0961f8f7fdec365faed217de08e6750034ae58f75e66fcafe662f222898eac1911fbf58f474d1a9059e7832a95f1ad87380c267eadbdb5d3b410f867cabababababababababababababababababababababababababababababababab08000000080000000800000004000000100000000800000040000000030100000000040000000000716f581e6803b9c73a0271f9507e737fd1ca81d744320ed5798cda06ab00358a01002a36fe9c971792f13c67439e260404523646320176109ec2893680de67f73f5478add34b2bc0",
+            "header_hex": "4149454e4b5643310100010000010000162c0290081d6ad747614688b4d20d345a1dc077fc45ed67ee9cb14e7a593cfddf7a976c61ea22880fcfec97a5e1b315b2f7a83d81d345bfca68bb709222d2dd2a623fb74491a02005f40eb011a5c9980ec6b6867026e765083086211b21f214abababababababababababababababababababababababababababababababab08000000080000000800000004000000100000000800000040000000030100000000040000000000716f581e6803b9c73a0271f9507e737fd1ca81d744320ed5798cda06ab00358a01002a36fe9c971745dfec2aa35adc5bb30258944552bac88e249c41109617e09bc777520460df54",
             "index": 1,
-            "parent_key": "98eac1911fbf58f474d1a9059e7832a95f1ad87380c267eadbdb5d3b410f867c",
+            "parent_key": "2a623fb74491a02005f40eb011a5c9980ec6b6867026e765083086211b21f214",
             "payload_len": 262144,
             "payload_sha256": "716f581e6803b9c73a0271f9507e737fd1ca81d744320ed5798cda06ab00358a",
-            "region_sha256": "a0b9139efd4801cf0de670c1ceaf8f9fc0db12317db43d0ccb4d0302029393aa",
+            "region_sha256": "c6901f31433d06895108e9608bb919d0e4e3458988f5eb24d76d72b3c89742eb",
             "segment_bytes": 131072,
             "segment_count": 2,
             "segment_digests": [
@@ -927,14 +1002,14 @@
             "written_unix_ns": 1700000000000000001
           },
           {
-            "chunk_key": "f938a11645f92e8f8ac014049317f0f818a50108275d252f6b2d1880d81f4f8d",
+            "chunk_key": "bd32fbda5db23706bcd7aba8a6ab457b8323a87a8f1d6a35a18f293b37d8deae",
             "first_position": 16,
-            "header_hex": "4149454e4b5643310100010000010000f087ccef26305bb0aa5a2935b857cd6d1ae7f641ec277b83e1d849cef6d6b926f938a11645f92e8f8ac014049317f0f818a50108275d252f6b2d1880d81f4f8deda878f0961f8f7fdec365faed217de08e6750034ae58f75e66fcafe662f2228abababababababababababababababababababababababababababababababab1000000004000000080000000400000010000000080000004000000003010100000002000000000009c709964e75da423b73f917790f6f2833a1270d4a8aff1165a590d82b2ba02502002a36fe9c9717c2f1261e9276544bbd21d5b4cb6e34d1060a7d96a95e3325c908214e4b169bcf",
+            "header_hex": "4149454e4b5643310100010000010000162c0290081d6ad747614688b4d20d345a1dc077fc45ed67ee9cb14e7a593cfdbd32fbda5db23706bcd7aba8a6ab457b8323a87a8f1d6a35a18f293b37d8deaedf7a976c61ea22880fcfec97a5e1b315b2f7a83d81d345bfca68bb709222d2ddabababababababababababababababababababababababababababababababab1000000004000000080000000400000010000000080000004000000003010100000002000000000009c709964e75da423b73f917790f6f2833a1270d4a8aff1165a590d82b2ba02502002a36fe9c971765e475e1d1bc19e95fa480c376a3be8e8220a8986414f338b6dce74f07eb53b6",
             "index": 2,
-            "parent_key": "eda878f0961f8f7fdec365faed217de08e6750034ae58f75e66fcafe662f2228",
+            "parent_key": "df7a976c61ea22880fcfec97a5e1b315b2f7a83d81d345bfca68bb709222d2dd",
             "payload_len": 131072,
             "payload_sha256": "09c709964e75da423b73f917790f6f2833a1270d4a8aff1165a590d82b2ba025",
-            "region_sha256": "6246c9804875433d0a34f1f77ee53d462a6b7b435dfafac7b7c8c9935ebc0d83",
+            "region_sha256": "50d413f77062050a25fbf6a099ac96c1e9669d976ad6575033d639eff5a3788a",
             "segment_bytes": 131072,
             "segment_count": 1,
             "segment_digests": [
@@ -945,7 +1020,7 @@
             "written_unix_ns": 1700000000000000002
           }
         ],
-        "namespace_id": "f087ccef26305bb0aa5a2935b857cd6d1ae7f641ec277b83e1d849cef6d6b926"
+        "namespace_id": "162c0290081d6ad747614688b4d20d345a1dc077fc45ed67ee9cb14e7a593cfd"
       },
       "name": "arith-epoch-2",
       "namespace": {
@@ -963,8 +1038,307 @@
           "tie_word_embeddings": true,
           "vocab_size": 128256
         },
-        "compute_config_digest": "cc79e46dec357bcdd30b49569fc539ac1dcf6dc37711fa47829adf74b900bc4b",
+        "compute_config_digest": "fb07fcb150b906fe53d6fd86832c7d12eada760ac39ad146f0c348955d15e41f",
         "dtype": 3,
+        "engine": {
+          "engine_build_id": "aien-runtime/0.1.0+git:test",
+          "engine_config": {
+            "device_router": false,
+            "expert_intermediate_dim": 0,
+            "experts_per_token": 0,
+            "matmul_path": "host-tensor-backend",
+            "num_experts": 0,
+            "whole_prompt_prefill": false
+          },
+          "engine_config_digest": "cb9627cf8f48d908f5362b60ae310add84b98c9517250a28b31d4a0a33df133c",
+          "rounding_class": "ReferenceCpuBackend@kv-arith-epoch-1",
+          "weight_format": 1,
+          "weight_format_name": "as-file"
+        },
+        "head_dim": 64,
+        "layout": {
+          "block_stride": 131072,
+          "element_bytes": 2,
+          "head_stride": 128,
+          "kv_plane_stride": 4096,
+          "layer_stride": 8192,
+          "token_stride": 1024
+        },
+        "model_digest_kind": "sha256-file",
+        "model_id": "llama-3.2-1b-instruct",
+        "model_sha256": "abababababababababababababababababababababababababababababababab",
+        "num_kv_heads": 8,
+        "num_layers": 16,
+        "qk_norm": false,
+        "rope_scaling": {
+          "factor_f64_bits": 4629700416936869888,
+          "high_freq_factor_f64_bits": 4616189618054758400,
+          "low_freq_factor_f64_bits": 4607182418800017408,
+          "original_max_position_embeddings": 8192
+        },
+        "rope_theta_f32_bits": 1223959552,
+        "sharing_namespace": "default"
+      },
+      "tokens": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10,
+        11,
+        12,
+        13,
+        14,
+        15,
+        16,
+        17,
+        18,
+        19
+      ]
+    },
+    {
+      "expected": {
+        "chunks": [
+          {
+            "chunk_key": "37be6a672e02e77bbe1becd3db0eeb0cac6fd08d0a188371e4dff49102a80dde",
+            "first_position": 0,
+            "header_hex": "4149454e4b56433101000100000100007968c2f88b65df24347a36eaf5485f08dd79f754b94ae1795cafe2d0c4b7b71237be6a672e02e77bbe1becd3db0eeb0cac6fd08d0a188371e4dff49102a80dde0000000000000000000000000000000000000000000000000000000000000000abababababababababababababababababababababababababababababababab0000000008000000080000000400000010000000080000004000000003010000000004000000000032cd78ce821f86ce0ba2868b20a9684224ced5f1630503a94f3ce0905772e2b200002a36fe9c9717428dee24436381000c4d593bfb3a7bbf657317675b70408fe1b52f243e1ba2f9",
+            "index": 0,
+            "parent_key": "0000000000000000000000000000000000000000000000000000000000000000",
+            "payload_len": 262144,
+            "payload_sha256": "32cd78ce821f86ce0ba2868b20a9684224ced5f1630503a94f3ce0905772e2b2",
+            "region_sha256": "9d7a699bf671be9b144b689652da222b78e2da71ca433a4308f3f2de515b6cc3",
+            "segment_bytes": 131072,
+            "segment_count": 2,
+            "segment_digests": [
+              "da637413de85aff581824cdebbf6193c47cf1c16a8c4872d22c564838b389992",
+              "ec6f767d4ca016ded742deadaff16c528de96956f531a2d47f42aa25a7502c0d"
+            ],
+            "segment_digests_of_ascii": "weight-format-fp8-experts-only/0/seg/<j>",
+            "token_count": 8,
+            "written_unix_ns": 1700000000000000000
+          },
+          {
+            "chunk_key": "a4cd51746157fea3fdb4e752095c3a038be4cf61f5f69329d23c1424e6779f02",
+            "first_position": 8,
+            "header_hex": "4149454e4b56433101000100000100007968c2f88b65df24347a36eaf5485f08dd79f754b94ae1795cafe2d0c4b7b712a4cd51746157fea3fdb4e752095c3a038be4cf61f5f69329d23c1424e6779f0237be6a672e02e77bbe1becd3db0eeb0cac6fd08d0a188371e4dff49102a80ddeabababababababababababababababababababababababababababababababab08000000080000000800000004000000100000000800000040000000030100000000040000000000b17e44192a755111c540d4c8778e07bc4b1e047c3518567cee29053471b4342301002a36fe9c971740144da45d13442343ba7dea9402cd5361393c3c297f799864e752f14dd8cc4f",
+            "index": 1,
+            "parent_key": "37be6a672e02e77bbe1becd3db0eeb0cac6fd08d0a188371e4dff49102a80dde",
+            "payload_len": 262144,
+            "payload_sha256": "b17e44192a755111c540d4c8778e07bc4b1e047c3518567cee29053471b43423",
+            "region_sha256": "9cbd1e217699fdb283ddbaa3d785d3e50158b6e434394b5ba690a541cb7bb5c1",
+            "segment_bytes": 131072,
+            "segment_count": 2,
+            "segment_digests": [
+              "ccf45aeb318e82a231c814b7640bcb85e05e7739f548f092bd65e498789ec968",
+              "b1a09297dd3e7dab277ac203ba2640826c74b94d58c642ef9faf3aeb2c85794f"
+            ],
+            "segment_digests_of_ascii": "weight-format-fp8-experts-only/1/seg/<j>",
+            "token_count": 8,
+            "written_unix_ns": 1700000000000000001
+          },
+          {
+            "chunk_key": "4ebc065a20bc58bb8016cb78006e822a1f4df7cea4072270a012f82ccb36cb31",
+            "first_position": 16,
+            "header_hex": "4149454e4b56433101000100000100007968c2f88b65df24347a36eaf5485f08dd79f754b94ae1795cafe2d0c4b7b7124ebc065a20bc58bb8016cb78006e822a1f4df7cea4072270a012f82ccb36cb31a4cd51746157fea3fdb4e752095c3a038be4cf61f5f69329d23c1424e6779f02abababababababababababababababababababababababababababababababab100000000400000008000000040000001000000008000000400000000301010000000200000000004ae87a5c86e45eae6ce4905f79195895cc6a0fd63561ce7434e229deb46ed90902002a36fe9c9717c9921b6a80cbb7580d1061ebb4710d7ecaa7db2376ae6729310a2c24ba391be9",
+            "index": 2,
+            "parent_key": "a4cd51746157fea3fdb4e752095c3a038be4cf61f5f69329d23c1424e6779f02",
+            "payload_len": 131072,
+            "payload_sha256": "4ae87a5c86e45eae6ce4905f79195895cc6a0fd63561ce7434e229deb46ed909",
+            "region_sha256": "82b1f2825c9cd2125dc0ba168d964ffe8f28ed320e9e359a135400c364a76d30",
+            "segment_bytes": 131072,
+            "segment_count": 1,
+            "segment_digests": [
+              "d68b304e72f81c1099dbc701c04dfbc519453d792c72ac302e361bdb1d127047"
+            ],
+            "segment_digests_of_ascii": "weight-format-fp8-experts-only/2/seg/<j>",
+            "token_count": 4,
+            "written_unix_ns": 1700000000000000002
+          }
+        ],
+        "namespace_id": "7968c2f88b65df24347a36eaf5485f08dd79f754b94ae1795cafe2d0c4b7b712"
+      },
+      "name": "weight-format-fp8-experts-only",
+      "namespace": {
+        "backend_format": 1,
+        "block_size": 4,
+        "chunk_tokens": 8,
+        "compute_config": {
+          "arith_epoch": 1,
+          "arith_id": "ReferenceCpuBackend",
+          "hidden_act": 1,
+          "hidden_dim": 2048,
+          "intermediate_dim": 8192,
+          "num_heads": 32,
+          "rms_norm_eps_f32_bits": 925353388,
+          "tie_word_embeddings": true,
+          "vocab_size": 128256
+        },
+        "compute_config_digest": "d26454280aef82985e4ce6a63e3b5b8a674b4e0e16d60a0e472ddbd5deb60f85",
+        "dtype": 3,
+        "engine": {
+          "engine_build_id": "aien-runtime/0.1.0+git:test",
+          "engine_config": {
+            "device_router": false,
+            "expert_intermediate_dim": 0,
+            "experts_per_token": 0,
+            "matmul_path": "host-tensor-backend",
+            "num_experts": 0,
+            "whole_prompt_prefill": false
+          },
+          "engine_config_digest": "cb9627cf8f48d908f5362b60ae310add84b98c9517250a28b31d4a0a33df133c",
+          "rounding_class": "ReferenceCpuBackend@kv-arith-epoch-1",
+          "weight_format": 3,
+          "weight_format_name": "fp8-experts"
+        },
+        "head_dim": 64,
+        "layout": {
+          "block_stride": 131072,
+          "element_bytes": 2,
+          "head_stride": 128,
+          "kv_plane_stride": 4096,
+          "layer_stride": 8192,
+          "token_stride": 1024
+        },
+        "model_digest_kind": "sha256-file",
+        "model_id": "llama-3.2-1b-instruct",
+        "model_sha256": "abababababababababababababababababababababababababababababababab",
+        "num_kv_heads": 8,
+        "num_layers": 16,
+        "qk_norm": false,
+        "rope_scaling": {
+          "factor_f64_bits": 4629700416936869888,
+          "high_freq_factor_f64_bits": 4616189618054758400,
+          "low_freq_factor_f64_bits": 4607182418800017408,
+          "original_max_position_embeddings": 8192
+        },
+        "rope_theta_f32_bits": 1223959552,
+        "sharing_namespace": "default"
+      },
+      "tokens": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10,
+        11,
+        12,
+        13,
+        14,
+        15,
+        16,
+        17,
+        18,
+        19
+      ]
+    },
+    {
+      "expected": {
+        "chunks": [
+          {
+            "chunk_key": "f30b7fced47c953c4f78801a3297e223645b6ccedeea66440ceeb8b973dbe3c5",
+            "first_position": 0,
+            "header_hex": "4149454e4b56433101000100000100006ef05590c3fbae363d3ccaafdf45abcd030541222fa3510e6e22eeb09ad4e318f30b7fced47c953c4f78801a3297e223645b6ccedeea66440ceeb8b973dbe3c50000000000000000000000000000000000000000000000000000000000000000abababababababababababababababababababababababababababababababab0000000008000000080000000400000010000000080000004000000003010000000004000000000092eb116bd9ccab2e53a9ebbec049016ef411986318603b29716e973f6faa5ea200002a36fe9c9717ea871197c95b89017b727e5fa357c405376be8b810e2be5bef896ca9a59127c4",
+            "index": 0,
+            "parent_key": "0000000000000000000000000000000000000000000000000000000000000000",
+            "payload_len": 262144,
+            "payload_sha256": "92eb116bd9ccab2e53a9ebbec049016ef411986318603b29716e973f6faa5ea2",
+            "region_sha256": "85f65a92df00d3aabd1a911c6dc1671a2cca42e9578d40ace5b788127576b82a",
+            "segment_bytes": 131072,
+            "segment_count": 2,
+            "segment_digests": [
+              "21220157bd08663f9b4504db8c5c50b03787aaa240aaee7020820ae017363e14",
+              "011178b96e3d2e54d4aac574b2c24bcc9d2db7bf66db81290e5e453e836fd5e1"
+            ],
+            "segment_digests_of_ascii": "whole-prompt-prefill-only/0/seg/<j>",
+            "token_count": 8,
+            "written_unix_ns": 1700000000000000000
+          },
+          {
+            "chunk_key": "cac9145d14a7328d5ed3dcf567c8ed51c5ac5e2548348e55bc10b97291c4f492",
+            "first_position": 8,
+            "header_hex": "4149454e4b56433101000100000100006ef05590c3fbae363d3ccaafdf45abcd030541222fa3510e6e22eeb09ad4e318cac9145d14a7328d5ed3dcf567c8ed51c5ac5e2548348e55bc10b97291c4f492f30b7fced47c953c4f78801a3297e223645b6ccedeea66440ceeb8b973dbe3c5abababababababababababababababababababababababababababababababab080000000800000008000000040000001000000008000000400000000301000000000400000000009330e6fad5e00c12a4e2e1b9866994c78a0f784a16ab80c174d03a91b267aa8f01002a36fe9c9717637a291fdb48e0c99a36c16023e55ed91f92a8487f3991a128fc450848d22adf",
+            "index": 1,
+            "parent_key": "f30b7fced47c953c4f78801a3297e223645b6ccedeea66440ceeb8b973dbe3c5",
+            "payload_len": 262144,
+            "payload_sha256": "9330e6fad5e00c12a4e2e1b9866994c78a0f784a16ab80c174d03a91b267aa8f",
+            "region_sha256": "9d2e4e2e2e2d2571a38307a086e9a1a2d09b673ee84dd02869c34f48bb4c4ba1",
+            "segment_bytes": 131072,
+            "segment_count": 2,
+            "segment_digests": [
+              "66f340191c7591ad9bf942334fa72cb000d9ef9aca10b48f02fb5a08cd1a4d66",
+              "7b0265f96f5ce29bd446a623deb95df8c0909343dccd07a944d092b1c4c3ce8c"
+            ],
+            "segment_digests_of_ascii": "whole-prompt-prefill-only/1/seg/<j>",
+            "token_count": 8,
+            "written_unix_ns": 1700000000000000001
+          },
+          {
+            "chunk_key": "de4943f4d4e23b9f739ce77ed4eb6039ba603bce550520247a858d969f49ef8d",
+            "first_position": 16,
+            "header_hex": "4149454e4b56433101000100000100006ef05590c3fbae363d3ccaafdf45abcd030541222fa3510e6e22eeb09ad4e318de4943f4d4e23b9f739ce77ed4eb6039ba603bce550520247a858d969f49ef8dcac9145d14a7328d5ed3dcf567c8ed51c5ac5e2548348e55bc10b97291c4f492abababababababababababababababababababababababababababababababab10000000040000000800000004000000100000000800000040000000030101000000020000000000aef6fb86649b93966a9d6c7aa40542a8b071758ec75ecaec89ac4dbd8b2b566e02002a36fe9c9717d7ae29023500dfc3c7828b6a318c345931d1c39779de22cbb77631cd0f2482a6",
+            "index": 2,
+            "parent_key": "cac9145d14a7328d5ed3dcf567c8ed51c5ac5e2548348e55bc10b97291c4f492",
+            "payload_len": 131072,
+            "payload_sha256": "aef6fb86649b93966a9d6c7aa40542a8b071758ec75ecaec89ac4dbd8b2b566e",
+            "region_sha256": "84515c026d78b9c86a13447edb0a1465f7636e537209810a276b96ed8d9c18ab",
+            "segment_bytes": 131072,
+            "segment_count": 1,
+            "segment_digests": [
+              "3ef15140d4c4ddb4c155d3d39224bc26f43b9f95958abd13c226ea8e11835199"
+            ],
+            "segment_digests_of_ascii": "whole-prompt-prefill-only/2/seg/<j>",
+            "token_count": 4,
+            "written_unix_ns": 1700000000000000002
+          }
+        ],
+        "namespace_id": "6ef05590c3fbae363d3ccaafdf45abcd030541222fa3510e6e22eeb09ad4e318"
+      },
+      "name": "whole-prompt-prefill-only",
+      "namespace": {
+        "backend_format": 1,
+        "block_size": 4,
+        "chunk_tokens": 8,
+        "compute_config": {
+          "arith_epoch": 1,
+          "arith_id": "ReferenceCpuBackend",
+          "hidden_act": 1,
+          "hidden_dim": 2048,
+          "intermediate_dim": 8192,
+          "num_heads": 32,
+          "rms_norm_eps_f32_bits": 925353388,
+          "tie_word_embeddings": true,
+          "vocab_size": 128256
+        },
+        "compute_config_digest": "f82b1a2874abb2dd89aafe736f9e1bd350a17f0af8af316cd110500988926ff2",
+        "dtype": 3,
+        "engine": {
+          "engine_build_id": "aien-runtime/0.1.0+git:test",
+          "engine_config": {
+            "device_router": false,
+            "expert_intermediate_dim": 0,
+            "experts_per_token": 0,
+            "matmul_path": "host-tensor-backend",
+            "num_experts": 0,
+            "whole_prompt_prefill": true
+          },
+          "engine_config_digest": "3fddfe2dbc7b9d3b7933f6419512be1cd6a5df8d7b78c6b9d01f23293b018930",
+          "rounding_class": "ReferenceCpuBackend@kv-arith-epoch-1",
+          "weight_format": 1,
+          "weight_format_name": "as-file"
+        },
         "head_dim": 64,
         "layout": {
           "block_stride": 131072,

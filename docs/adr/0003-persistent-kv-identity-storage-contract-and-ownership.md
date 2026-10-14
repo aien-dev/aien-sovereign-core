@@ -67,7 +67,7 @@ Today the runtime computes the model's "working memory" (the KV cache) for every
 
 ### 1.2 Namespace id (binds everything that must be equal for bytes to be reusable)
 
-`namespace_id = SHA-256( "AIEN-PKV-NS-V1\0" || fields )` where `fields`, in this order, little-endian:
+`namespace_id = SHA-256( "AIEN-PKV-NS-V2\0" || fields )` (V1 until sc#504; the domain moved when field 14 started to bind the engine, section 1.2.2, so no V1 namespace can match) where `fields`, in this order, little-endian:
 
 | # | field | type | source |
 |---|---|---|---|
@@ -84,7 +84,7 @@ Today the runtime computes the model's "working memory" (the KV cache) for every
 | 11 | backend_format | u8 (1 = host paged pool v1; 2 = native f32 decode state v1) | section 2.3 |
 | 12 | chunk_tokens | u32 | setting |
 | 13 | sharing_namespace | u16 len + bytes | setting `AIEN_KV_STORE_NAMESPACE` (host); sealed Store uuid + identity class + subject id (native, section 9) |
-| 14 | compute_config_digest | [u8;32] | `ComputeConfig::digest()`, section 1.2.1 (added by the review, C1 delta in section 12) |
+| 14 | compute_config_digest | [u8;32] | `ComputeConfig::digest_with_engine(engine)`, sections 1.2.1 and 1.2.2 (added by the review, C1 delta in section 12; binds the engine since sc#504) |
 
 Rationale: fields 2-8 cover "which weights, which geometry, which RoPE"; 9-11 cover "which bytes"; 13 is the authorization scope; 14 covers every other number that changes what the forward pass computes. Two runtimes with different `block_size` or `chunk_tokens` cannot share objects, by design: positions and chunk boundaries are part of identity.
 
@@ -92,7 +92,7 @@ Rationale: fields 2-8 cover "which weights, which geometry, which RoPE"; 9-11 co
 
 The review showed (VERIFIED by the orchestrator) that two model directories with the same weights digest and the same fields 1-13 but a different `rms_norm_eps` in `config.json` produce different K/V: the backend reads `weights.config.rms_norm_eps` for every RMSNorm (transformer_backend.rs:738, 1111, 1391, 1760) and the value comes from `config.json` (model_dir.rs:112, 239). The weights digest covers the safetensors bytes only, not `config.json`.
 
-`compute_config_digest = SHA-256("AIEN-PKV-CFG-V1\0" || ComputeConfig)` where `ComputeConfig` is, little-endian and in this order:
+`ComputeConfig::digest() = SHA-256("AIEN-PKV-CFG-V1\0" || ComputeConfig)` (namespace field 14 until sc#504; field 14 is now the V2 digest of section 1.2.2, which hashes the same nine fields first) where `ComputeConfig` is, little-endian and in this order:
 
 | # | field | type | source |
 |---|---|---|---|
@@ -111,6 +111,23 @@ Fields not listed and why (each is a decision, not an omission): `model_id` (fie
 **Why the resolved `ModelConfig` and not a digest of the raw `config.json`** (INFERRED, decision): (a) the raw file carries fields that cannot change a K/V value (`torch_dtype`, `transformers_version`, `use_cache`, `initializer_range`; model_dir.rs:22-52 lists them for Qwen3), so a raw digest would orphan every cached object on a harmless edit; (b) JSON has no canonical form (key order, `1e-05` versus `0.00001`, duplicate keys), and a hand-written canonicalizer is an attack and bug surface; (c) serde defaults (`default_rms_norm_eps`, `default_rope_theta`) mean the effective value is the resolved one, not the one in the file. The omission risk of an explicit list is closed mechanically: the conversion `ComputeConfig::from(&ModelConfig)` lives in `aien-runtime` and destructures `ModelConfig` **exhaustively, with no `..`**, so adding a field to `ModelConfig` is a compile error until its author decides "bound" or "excluded with a reason". A test (C6, PLANNED) additionally mutates every field of `ModelConfig` one at a time and asserts the namespace id changes for every field not in the written exclusion list.
 
 `arith_epoch` is guarded by a pinned-bytes test (C6, PLANNED): a fixed tiny model and prompt run on the reference backend; the SHA-256 of the resulting K/V pool bytes is pinned in the repository. A numeric change fails the test until the author bumps `KV_ARITH_EPOCH` and re-pins. `arith_id` is a coarse label (VERIFIED that the Omega name changes with availability, omega_backend.rs:815-820); mixing backends is therefore refused by identity, and the greedy guarantee of section 6.5 is stated per backend.
+
+#### 1.2.2 Engine identity (sc#504)
+
+The same weights digest and the same `ComputeConfig` do not fix the K/V bytes when one checkpoint directory can be run by different engines and builds (research/pkv-omega-engine.md section 4, VERIFIED there): the omega engine loads one directory as bf16, fp8 experts or fp8 everywhere (same file hash), its kernels come from a separate build, `KV_ARITH_EPOCH` is pinned only on the CPU reference, and whole-prompt prefill changes activation rounding. So field 14 binds the engine too:
+
+`compute_config_digest = SHA-256("AIEN-PKV-CFG-V2\0" || ComputeConfig fields 1-9 (section 1.2.1, same encoding) || weight_format u8 || engine_build_id u8 len + bytes || rounding_class u8 len + bytes || engine_config_digest [u8;32])`
+
+`engine_config_digest = SHA-256("AIEN-PKV-ENG-V1\0" || num_experts u32 || experts_per_token u32 || expert_intermediate_dim u64 || whole_prompt_prefill u8 || device_router u8 || matmul_path u8 len + bytes)` (`EngineConfig::digest()`; an engine may supply its own 32-byte digest over its MoE shape and run switches instead).
+
+| field | type | what the caller must supply |
+|---|---|---|
+| weight_format | u8 (1 as-file, 2 bf16, 3 fp8-experts, 4 fp8-all) | the format the weights are computed in after load, not the file format |
+| engine_build_id | 1-255 bytes | engine plus kernel build, for example omega commit + linked kernel archive digest |
+| rounding_class | 1-255 bytes | numeric rounding class of the arithmetic |
+| engine_config_digest | [u8;32] | MoE shape and numeric run switches (whole-prompt prefill, device router, GEMM or GEMV path) |
+
+Rules: `EngineIdentity` has no default; `ModelBinding::namespace_fields` and the daemon's `ModelKvBinding` require it, so every caller that enables persistence states each value. Empty `engine_build_id`, `rounding_class` or `matmul_path` is refused (`KvError::FieldEmpty`). `ComputeConfig::digest()` stays as the compute-only V1 digest and is no longer field 14. The host `TensorBackend` path fills it with `HostEngineIdentity::reference(arith_id)` (aien-runtime `compute_config.rs`): weight format `as-file`, build `aien-runtime/<version>+git:<commit>` (commit from `build.rs`, `AIEN_BUILD_COMMIT` override, `unknown` without git), rounding class `<arith_id>@kv-arith-epoch-<KV_ARITH_EPOCH>`, engine config dense with every switch off and matmul path `host-tensor-backend`. The omega engine builds its own identity (sc#505). Tests: `each_engine_field_alone_changes_the_namespace_and_refuses_old_records`, `v1_namespace_domain_no_longer_matches`, `field_14_binds_compute_config_then_engine_identity` (kv-store) and the four `*_change_is_never_served_after_restart` restart tests (aien-runtime).
 
 ### 1.3 Chunk key (prefix chaining, adapted from LMCache TokenHasher)
 
@@ -438,7 +455,7 @@ Holds when the restored bf16 block bytes are identical, the remaining prefill ru
 
 ### 7.1 Bounds and per-class reservation (review finding 9)
 
-Two bounded intake classes (restore, park) and one completion queue, all behind the store's index mutex. Limits are **per class**, not shared: `max_inflight_ops` (default 64) is split 48 restore and 16 park (`max_restore_ops`, `max_park_ops`), and `max_inflight_bytes` (default 256 MiB) is split the same 3:1. A class can never consume the other's reservation, so continuous restores cannot make every park fail before the dispatcher runs. Bytes count the sum of `payload_len + 4096` of every job between Submitted and its terminal completion. `submit_*` refuses with `QueueFull`; the spine treats a refused park as "not parked this turn" (the holders are released) and a refused restore as a plain prefill. Restore destination blocks are counted against the pool: S2 refuses when `free_blocks < watermark_blocks + needed` (the scheduler's own watermark, aien-scheduler lib.rs:460-470), so restores can never starve admission. **Completion capacity** is reserved at submit: each accepted job reserves three completion slots (Completed, Published, terminal), so `poll` never overflows and the worker never blocks on a full queue. **Credit release** happens at the job's terminal completion as the store sees it, not when the caller later commits: a slow KV lock cannot hold store credits. **Bounded waiters**: at most `max_waiters_per_job` (default 16) per coalesced load and 1024 in total; the 17th request does a plain prefill instead of attaching. Holder metadata is bounded by the restore-block budget `AIEN_KV_RESTORE_MAX_BLOCKS`.
+Two bounded intake classes (restore, park) and one completion queue, all behind the store's index mutex. Limits are **per class**, not shared: `max_inflight_ops` (default 64) is split 48 restore and 64 park (`max_restore_ops`, `max_park_ops`; park raised from 16 after the C9 bench, section 18.4), and `max_inflight_bytes` (default 256 MiB) is split the same 3:1. A class can never consume the other's reservation, so continuous restores cannot make every park fail before the dispatcher runs. Bytes count the sum of `payload_len + 4096` of every job between Submitted and its terminal completion. `submit_*` refuses with `QueueFull`; the spine treats a refused park as "not parked this turn" (the holders are released) and a refused restore as a plain prefill. Restore destination blocks are counted against the pool: S2 refuses when `free_blocks < watermark_blocks + needed` (the scheduler's own watermark, aien-scheduler lib.rs:460-470), so restores can never starve admission. **Completion capacity** is reserved at submit: each accepted job reserves three completion slots (Completed, Published, terminal), so `poll` never overflows and the worker never blocks on a full queue. **Credit release** happens at the job's terminal completion as the store sees it, not when the caller later commits: a slow KV lock cannot hold store credits. **Bounded waiters**: at most `max_waiters_per_job` (default 16) per coalesced load and 1024 in total; the 17th request does a plain prefill instead of attaching. Holder metadata is bounded by the restore-block budget `AIEN_KV_RESTORE_MAX_BLOCKS`.
 
 ### 7.2 Fairness
 
@@ -518,6 +535,7 @@ Every cell carries one label: PLANNED, TESTED(receipt), NOT CLAIMED or NOT_RUN. 
 - Quota accounting counts foreign-namespace objects but does not read their payloads; an object with a valid header and a corrupt payload occupies quota until its first load deletes it or LRU evicts it.
 - `max_objects` default 65536 and the index are per store directory; two daemons sharing one directory are not supported (STORE_ID is advisory, there is no lock file in this milestone).
 - `arith_id` is a coarse label and `KV_ARITH_EPOCH` is a human-bumped counter backed by a pinned-bytes test; a numeric change the pinned test does not exercise could slip through (UNKNOWN residual risk; the test model should cover every op the production path uses).
+- The host engine build id names the aien-runtime commit, so every new host build starts with an empty namespace; a build from a tree without git and without `AIEN_BUILD_COMMIT` gets the build id `+git:unknown` and then relies on the rounding class (backend name and `KV_ARITH_EPOCH`) alone. Uncommitted edits do not change the build id.
 - `Indeterminate` publication means a power loss right after may lose the object; that is a cache miss, never a wrong answer.
 
 
@@ -801,3 +819,90 @@ Codex re-review 2 (`d6669ed..b654f0a`, summary in the program handoff) and the G
 | C5 P2-5 wall-clock test bounds | FIXED for the caller-latency test (store stalled indefinitely); deadline tests keep lower bounds tied to the deadline and 5 s upper bounds | 00c8aab |
 
 Waiter default conflict (ADR 7.1 says 16, METRICS_AND_SETTINGS said 8): the ADR is binding; METRICS now says 16, matching `WorkerConfig::default` (worker.rs).
+
+### 18.4 Park bound default (C9 bench finding)
+
+The first C9 host run showed 8 conversations finishing in one step submit 24 chunk parks; with `max_park_ops = 16`, 8 were refused `QueueFull` (by design: not parked, the next turn prefills). The default is now 64 (worker and host adapter), enough for 8 simultaneous finishes of up to 8 chunk parks each. Test: `default_park_bound_admits_eight_conversations_finishing_together` (red at 16, green at 64; host).
+Memory cost: the op bound is bookkeeping only (one job entry plus three reserved completion slots per op; completion capacity grows from 192 to 336 entries). Pool memory held by in-flight parks (forked holders keep finished turns' blocks referenced until written) stays bounded by the park byte limit, `max_inflight_bytes / 4` = 64 MiB by default (worker.rs `park_byte_limit`), which this change does not touch. With large real-model chunks the byte limit, not the op count, may refuse parks first (UNVERIFIED; to measure with OWN-30B geometry). The restore default stays 48: a refused restore falls back to prefill and loses nothing.
+
+## 19. Host filesystem at-rest security (2026-10-13)
+
+The host adapter (`host_fs.rs`) writes raw K/V blocks to disk. K/V is computed from user prompts, so an object file is sensitive user data. Before this section the adapter created directories `0755` and files `0644` (under the usual umask), accepted an existing root whatever its owner, mode or type, and followed symlinks on every open. Tests: `crates/aien-kv-store/tests/host_fs_security_tests.rs` (red before the fix, green after).
+
+### 19.1 Threat model
+
+- **In scope**: other local users on the same machine (other uids) reading, replacing or redirecting store files, including through symlinks or a shared parent directory.
+- **Out of scope**: a process running as the same uid as the runtime (it can read the runtime's memory anyway) and root. Physical theft of the disk is covered only by encryption at rest (19.6), which the host adapter does not provide.
+
+### 19.2 Modes
+
+Every store directory (root, `objects/`, `tmp/`, all 256 shards) is created `0700` through `DirBuilder` with mode `0700` and then chmodded to `0700`, so a permissive umask cannot widen it and a narrow umask cannot lock the runtime out. Every store file (temps, `STORE_ID.part`, fault-injection writes) is created through one helper, `create_private_file`: mode `0600`, `O_NOFOLLOW | O_CLOEXEC`, then `fchmod` to `0600` if the result differs. Missing ancestors of the root, when the root is created recursively, get `0700` subject to the umask. VERIFIED by the umask tests, which re-run the creation test in a child process under umask `000` and `277`.
+
+### 19.3 Ownership, symlink and refusal checks
+
+`check_private_dir` uses `lstat` and requires: a real directory (not a symlink), owner = effective uid, no group or other permission bit. An existing directory that fails is refused with `PlatformError::AccessDenied`; the adapter never chmods an existing directory. Every existing directory (root, `tmp/`, `objects/`, every existing shard) is checked **before anything is created**, so a refused store is left exactly as it was (test: a shared last shard `ff` leaves no new entry).
+
+### 19.4 Ancestor rule
+
+The root's parent (the nearest existing ancestor when the root does not exist yet) must be a directory owned by the effective uid or by root, and if group or others can write it, it must carry the sticky bit (like `/tmp`, `1777`). Otherwise `AccessDenied`. Reason: whoever can write the parent can rename the root away and put their own directory in its place; the sticky bit stops other users renaming or removing entries they do not own. Only the immediate parent is checked; ancestors above it need not be `0700`.
+
+### 19.5 Reads, foreign files and legacy objects
+
+Every read (`STORE_ID`, the recovery header read, the load path) opens with `O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK` and then checks the descriptor with `fstat`: regular file, owner = effective uid. `STORE_ID` must also be exactly 16 bytes; anything else puts the store in `Failed`, as an unreadable `STORE_ID` already did.
+
+A symlink, a non-regular file or another owner's file inside a shard is a `foreign_file` under the existing section 4.1 rule: counted, **left alone, never read, never served, never deleted** (we did not write it). The load path treats such a file as not found and drops it from the index. No new deletion policy is introduced.
+
+**Legacy objects**: an object of ours written before this section (owner = effective uid, mode `0644` or `0664`) is tightened to `0600` with `fchmod` on the descriptor during recovery, then validated and served as before. Rejecting them would throw away a valid cache for no security gain once the directories are private. If the `fchmod` fails, the file is counted as unreadable (kept, not served). `STORE_ID` is tightened the same way.
+
+Crash recovery is unchanged: a leftover temp or `STORE_ID.part` is ours in a verified private `tmp/`, so creation truncates it through `O_NOFOLLOW` instead of failing, and recovery still unlinks every `*.part` (4.1 step 2). A create that fails (for example on a planted symlink, `ELOOP`) leaves the path alone; the adapter only unlinks a temp its own successful create made.
+
+### 19.6 Residual race (why no per-operation dirfd/openat)
+
+Checks use paths, so a component could in principle be swapped between the check and the use. Once the root is verified as a real `0700` directory owned by the effective uid, under a trusted parent (19.4), no other non-root uid can create, rename or remove anything inside it, so only the same uid could perform the swap, and the same uid is out of scope (19.1). Final-component opens use `O_NOFOLLOW` and descriptor checks anyway. Per-operation `openat` on held directory descriptors is therefore not required; it becomes required if the threat model ever admits untrusted writers inside the root.
+
+### 19.7 Encryption at rest
+
+The host adapter does **not** encrypt. Object files are plaintext K/V protected only by file permissions; anyone with root, or with the raw disk, can read them. Encryption belongs in the record payload, as on the native path, where every slot is an M5 envelope bound to namespace, chunk key, slot and incarnation (section 2.5, section 9 item 5). A host equivalent (an encrypted payload format, `backend_format` other than 1, with a key that exists only while the runtime is unlocked) is **required before multi-tenant use** and before storing on media that leaves the operator's control. Encryption does not give tenant isolation by itself: one runtime key decrypts every tenant's objects; isolation needs per-tenant keys or namespaces (19.9) plus authorization at lookup.
+
+### 19.8 Lifecycle deletion (current behaviour, VERIFIED in `host_fs.rs`)
+
+- `delete`, eviction, purge of unindexed files and corrupt objects found by recovery or load: the file is unlinked on the worker.
+- Shutdown, drop and process exit: published objects stay on disk by design (the store is persistent); recovery re-indexes them at the next open.
+- Unlink only removes the name. The adapter does not overwrite or discard the blocks, so deleted K/V remains on the device until the filesystem reuses the space (and on SSDs possibly longer, because of wear levelling). Only encryption with key destruction (19.7) makes deletion final.
+- Uninstall: no code removes `AIEN_KV_STORE_DIR`; the operator must delete the directory. UNKNOWN/TODO: an uninstall or `kv-store wipe` command.
+
+### 19.9 Namespace isolation (known gap)
+
+The namespace id has no tenant or user field. Its `sharing_namespace` field (1.2 field 13) comes on the host from one process-wide setting, `AIEN_KV_STORE_NAMESPACE`, so every request served by one runtime shares one namespace and can hit another request's cached prefix (a timing and content side channel between users of the same runtime). The native mapping (section 9) binds the subject id; the host path does not. TODO: a per-tenant or per-subject namespace component on the host, decided before any multi-tenant deployment. Until then the supported deployment is one trust domain per runtime and store directory.
+
+## 20. Encryption at rest of saved KV files (#506, policy from the #498 resolution)
+
+**In plain words.** Every saved conversation memory file is locked with a secret key before it touches the disk. Without the key, or if a single byte was changed, or if a file was moved to pose as another conversation, the file is thrown away and the conversation is simply recomputed. Nothing is ever restored from a file that does not prove itself.
+
+**Policy (binding, locked by Drake in #498).** Authenticated encryption (AEAD), a fresh random nonce per file, the identity header bound as associated data, the key loaded from atlas-vault into process memory only (never written to disk or logs). On a decrypt failure, a wrong key, tampered bytes, a swapped identity header or a missing key: discard and recompute, never restore. Key rotation: old files are simply discarded.
+
+**Cipher: AES-256-GCM** (ring 0.17, already in the lock file). Host micro-benchmark (`tests/seal_bench.rs`, ignored test, release build, in place, one thread, this Spark's Grace CPU cores Cortex-X925/A725 with the ARMv8 AES and PMULL extensions; which core type ran it is UNKNOWN):
+
+| buffer | AES-256-GCM seal / open | ChaCha20-Poly1305 seal / open |
+|---|---|---|
+| 1 MiB | 7715 / 7847 MiB/s | 1956 / 1948 MiB/s |
+| 16 MiB | 7694 / 7839 MiB/s | 1955 / 1949 MiB/s |
+
+AES-256-GCM is about 4 times faster (VERIFIED on the host, 2026-10-13). What this adds to a real restore on the Spark under load is INFERRED (roughly 0.13 ms per MiB at the rate above) and is to be measured on the chip run, not claimed here.
+
+**Format (host objects; amends 2.1 and 2.4).** The file stays `header region (4096 B) || payload`, same size, payload still at offset 4096. The payload bytes are ciphertext (GCM is length-preserving). The last 32 bytes of the region are the **seal slot**: offset 4064 magic `AKS`, 4067 sealed format version `2` (format 1 was the plaintext layout), 4068 nonce (12 bytes, from the OS random source per file), 4080 tag (16 bytes). Associated data is region bytes 0 to 4067: the 256-byte identity header (namespace id, chunk key, parent, geometry, payload root, header checksum), the segment digest table, the padding, and the magic and version. Consequences:
+
+1. The digest table now ends at 4064, so **`MAX_SEGMENTS` is 119** on the host (`(4064 - 256) / 32`), not 120 (amends 2.1 item 3; the default chunk is 16 blocks). `BadPadding` covers bytes from the end of the table to 4063; the seal slot is checked by the seal module, not as padding.
+2. The 256-byte header, its version (hashed into every namespace id, 1.2) and the golden vectors are unchanged, so native and host still share them; the version bump lives in the seal slot.
+3. Recovery still reads only the region: a region without the sealed marker (an old plaintext file) is deleted as corrupt. Headers are not authenticated at recovery; an object sealed under another key, or tampered, is indexed and then deleted at its first load (same as the corrupt-payload limit above).
+4. A load reads the whole payload, authenticates and decrypts it, and only then checks the segment digests and writes blocks to the destination. Nothing from a refused object ever reaches the pool (this replaces the segment-by-segment landing of 15.4 on the host; the per-segment digests remain as a second check).
+
+**Key.** `AIEN_KV_STORE_KEY`, 64 hex digits (32 bytes), exactly; any other length or character is `key_malformed`. Started as `atlas-vault run AIEN_KV_STORE_KEY -- <daemon>`. `KvPersistSettings::from_env` reads it and removes it from the process environment (so child processes do not inherit it); `SealKey` holds it in a buffer zeroed on drop; its `Debug` prints `SealKey(redacted)` and refusals carry no key text. With `AIEN_KV_STORE_DIR` set and the key missing or malformed, persistence is refused: no store opened, nothing written, no park, no restore, plain prefill; the status reports `kv_store_state = refused`, `kv_store_refused_reason` and `kv_store_key_refused_total`. `HostFsStore::open` without a key refuses with `AccessDenied` before creating anything. With the store dir unset nothing changes. Loads refused by authentication count in `kv_store_seal_rejected_total`.
+
+**Tests** (red dc34c99, then green): `seal_tests` (round trip, fresh nonce per file over 512 seals, wrong key, tampered ciphertext byte, tampered tag or nonce, swapped identity header, old plaintext format and other version, malformed and missing key, redacted Debug, environment removal), `host_fs_seal_tests` (the same refusals end to end through the store: the load fails `InvalidLayout`, the destination is untouched, the object is deleted; old plaintext file deleted at recovery; a header rewritten in place, self-consistent, refused at load; open without a key refused), `persistence_refused_without_a_valid_store_key_runs_plain_and_says_why` (runtime).
+
+**Limits.**
+- Metadata stays visible: file names (chunk keys), sizes, timestamps, the header and the segment digests of the plaintext. Someone who can read the store and guess a prompt can confirm the guess through the chunk key (1.3) as before; what is protected is the K/V content itself.
+- Random 96-bit nonces under one key: the usual bound is about 2^32 files per key (NIST SP 800-38D); rotate the key long before that (a rotation discards the old files).
+- The key schedule `ring` builds per seal or open is not zeroed by ring (UNKNOWN residue on the worker's stack). `remove_var` does not erase the original process environment block, which `/proc/<pid>/environ` still shows to the same user (INFERRED from Linux behaviour; not tested here). `remove_var` runs at settings read, at daemon start before the storage worker exists; other threads reading the environment at that moment would race (INFERRED low risk).
+- File permissions, create-new temp files and no-follow opens are section 19 (#511); this section only covers encryption.
