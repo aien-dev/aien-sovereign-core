@@ -178,6 +178,7 @@ dependencies = [
  "aien-omega-fp8",
  "aien-omega-gpu",
  "aien-omega-moe",
+ "aien-omega-pf",
  "aien-omega-router",
  "aien-platform",
  "async-trait",

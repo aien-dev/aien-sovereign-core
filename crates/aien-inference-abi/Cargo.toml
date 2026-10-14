@@ -24,6 +24,7 @@ aien-omega-fp8 = { path = "../aien-omega-fp8" }
 aien-omega-dattn = { path = "../aien-omega-dattn" }
 aien-omega-router = { path = "../aien-omega-router" }
 aien-omega-bf16 = { path = "../aien-omega-bf16" }
+aien-omega-pf = { path = "../aien-omega-pf" }
 parking_lot = "0.12"
 sha2 = "0.10"
 

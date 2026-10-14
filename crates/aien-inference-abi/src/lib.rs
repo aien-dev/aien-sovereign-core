@@ -19,6 +19,7 @@ pub mod qwen3_coder;
 pub mod qwen3_moe;
 pub mod qwen3_moe_omega;
 pub mod qwen3_moe_omega_dattn;
+pub mod qwen3_moe_omega_prefill;
 pub mod qwen3_serve;
 pub mod resident;
 pub mod strict;
