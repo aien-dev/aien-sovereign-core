@@ -1,5 +1,6 @@
 //! Binding of the resolved `ModelConfig` to the persistent-KV identity (ADR
-//! 0003 section 1.2 fields 4 to 8 and 14, section 1.2.1, review finding 1).
+//! 0003 section 1.2 fields 4 to 8 and 14, section 1.2.1, review finding 1), and
+//! the host engine identity (section 1.2.2, sc#504).
 //!
 //! Two config.json files with the same weights but a different `rms_norm_eps`
 //! produce different K/V, and the weights digest does not cover `config.json`.
@@ -16,8 +17,8 @@
 use aien_abi_core::ModelConfig;
 use aien_inference_abi::KV_ARITH_EPOCH;
 use aien_kv_store::{
-    BackendFormat, ComputeConfig, HiddenAct, KvDtype, KvError, LayoutStrides, NamespaceFields,
-    RopeScaling,
+    BackendFormat, ComputeConfig, EngineConfig, EngineIdentity, HiddenAct, KvDtype, KvError,
+    LayoutStrides, NamespaceFields, RopeScaling, WeightFormat,
 };
 
 /// Everything a `ModelConfig` contributes to the namespace id: the compute
@@ -119,10 +120,13 @@ impl<'a> ModelBinding<'a> {
     }
 
     /// The full namespace inputs with field 14 filled from this binding's
-    /// compute digest. `NamespaceFields::namespace_id()` does the hashing.
+    /// compute configuration and the `engine` that computes the K/V (ADR 1.2.2;
+    /// required, there is no default). `NamespaceFields::namespace_id()` does
+    /// the hashing.
     pub fn namespace_fields(
         &self,
         store: &StoreInputs<'a>,
+        engine: &EngineIdentity<'_>,
     ) -> Result<NamespaceFields<'a>, KvError> {
         Ok(NamespaceFields {
             model_sha256: store.model_sha256,
@@ -140,7 +144,7 @@ impl<'a> ModelBinding<'a> {
             backend_format: store.backend_format,
             chunk_tokens: store.chunk_tokens,
             sharing_namespace: store.sharing_namespace,
-            compute_config_digest: self.compute.digest()?,
+            compute_config_digest: self.compute.digest_with_engine(engine)?,
         })
     }
 }
@@ -152,4 +156,66 @@ pub fn compute_config_from<'a>(
     arith_id: &'a str,
 ) -> Result<ComputeConfig<'a>, KvError> {
     Ok(ModelBinding::from_model(cfg, arith_id)?.compute)
+}
+
+/// The host engine build id: this crate's version and the commit it was built
+/// from (`build.rs`; `unknown` without git or `AIEN_BUILD_COMMIT`).
+pub const HOST_ENGINE_BUILD_ID: &str = concat!(
+    "aien-runtime/",
+    env!("CARGO_PKG_VERSION"),
+    "+git:",
+    env!("AIEN_RUNTIME_GIT_COMMIT")
+);
+
+/// Matrix-multiply path label of the host `TensorBackend` path.
+pub const HOST_MATMUL_PATH: &str = "host-tensor-backend";
+
+/// Owned engine identity of the host reference path (ADR 0003 section 1.2.2,
+/// sc#504): what the daemon binds when the K/V is computed by a host
+/// `TensorBackend` (CPU reference or the Mojo CPU backend).
+///
+/// - weight format `as-file`: the host loader computes with the element type
+///   the file stores;
+/// - build id [`HOST_ENGINE_BUILD_ID`];
+/// - rounding class `<arith_id>@kv-arith-epoch-<KV_ARITH_EPOCH>`;
+/// - engine config: dense (no experts), whole-prompt prefill off, device
+///   router off, matmul path [`HOST_MATMUL_PATH`].
+///
+/// An engine with its own build, weight format or switches (the omega engine)
+/// builds its own [`EngineIdentity`] instead.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostEngineIdentity {
+    rounding_class: String,
+    engine_config_digest: [u8; 32],
+}
+
+impl HostEngineIdentity {
+    /// `arith_id` is `TensorBackend::name()` of the backend that writes the K/V.
+    pub fn reference(arith_id: &str) -> Result<Self, KvError> {
+        if arith_id.is_empty() {
+            return Err(KvError::FieldEmpty("arith_id"));
+        }
+        let engine_config_digest = EngineConfig {
+            num_experts: 0,
+            experts_per_token: 0,
+            expert_intermediate_dim: 0,
+            whole_prompt_prefill: false,
+            device_router: false,
+            matmul_path: HOST_MATMUL_PATH,
+        }
+        .digest()?;
+        Ok(Self {
+            rounding_class: format!("{arith_id}@kv-arith-epoch-{KV_ARITH_EPOCH}"),
+            engine_config_digest,
+        })
+    }
+
+    pub fn identity(&self) -> EngineIdentity<'_> {
+        EngineIdentity {
+            weight_format: WeightFormat::AsFile,
+            engine_build_id: HOST_ENGINE_BUILD_ID,
+            rounding_class: &self.rounding_class,
+            engine_config_digest: self.engine_config_digest,
+        }
+    }
 }

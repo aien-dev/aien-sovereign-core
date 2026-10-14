@@ -67,7 +67,7 @@ Today the runtime computes the model's "working memory" (the KV cache) for every
 
 ### 1.2 Namespace id (binds everything that must be equal for bytes to be reusable)
 
-`namespace_id = SHA-256( "AIEN-PKV-NS-V1\0" || fields )` where `fields`, in this order, little-endian:
+`namespace_id = SHA-256( "AIEN-PKV-NS-V2\0" || fields )` (V1 until sc#504; the domain moved when field 14 started to bind the engine, section 1.2.2, so no V1 namespace can match) where `fields`, in this order, little-endian:
 
 | # | field | type | source |
 |---|---|---|---|
@@ -84,7 +84,7 @@ Today the runtime computes the model's "working memory" (the KV cache) for every
 | 11 | backend_format | u8 (1 = host paged pool v1; 2 = native f32 decode state v1) | section 2.3 |
 | 12 | chunk_tokens | u32 | setting |
 | 13 | sharing_namespace | u16 len + bytes | setting `AIEN_KV_STORE_NAMESPACE` (host); sealed Store uuid + identity class + subject id (native, section 9) |
-| 14 | compute_config_digest | [u8;32] | `ComputeConfig::digest()`, section 1.2.1 (added by the review, C1 delta in section 12) |
+| 14 | compute_config_digest | [u8;32] | `ComputeConfig::digest_with_engine(engine)`, sections 1.2.1 and 1.2.2 (added by the review, C1 delta in section 12; binds the engine since sc#504) |
 
 Rationale: fields 2-8 cover "which weights, which geometry, which RoPE"; 9-11 cover "which bytes"; 13 is the authorization scope; 14 covers every other number that changes what the forward pass computes. Two runtimes with different `block_size` or `chunk_tokens` cannot share objects, by design: positions and chunk boundaries are part of identity.
 
@@ -92,7 +92,7 @@ Rationale: fields 2-8 cover "which weights, which geometry, which RoPE"; 9-11 co
 
 The review showed (VERIFIED by the orchestrator) that two model directories with the same weights digest and the same fields 1-13 but a different `rms_norm_eps` in `config.json` produce different K/V: the backend reads `weights.config.rms_norm_eps` for every RMSNorm (transformer_backend.rs:738, 1111, 1391, 1760) and the value comes from `config.json` (model_dir.rs:112, 239). The weights digest covers the safetensors bytes only, not `config.json`.
 
-`compute_config_digest = SHA-256("AIEN-PKV-CFG-V1\0" || ComputeConfig)` where `ComputeConfig` is, little-endian and in this order:
+`ComputeConfig::digest() = SHA-256("AIEN-PKV-CFG-V1\0" || ComputeConfig)` (namespace field 14 until sc#504; field 14 is now the V2 digest of section 1.2.2, which hashes the same nine fields first) where `ComputeConfig` is, little-endian and in this order:
 
 | # | field | type | source |
 |---|---|---|---|
@@ -111,6 +111,23 @@ Fields not listed and why (each is a decision, not an omission): `model_id` (fie
 **Why the resolved `ModelConfig` and not a digest of the raw `config.json`** (INFERRED, decision): (a) the raw file carries fields that cannot change a K/V value (`torch_dtype`, `transformers_version`, `use_cache`, `initializer_range`; model_dir.rs:22-52 lists them for Qwen3), so a raw digest would orphan every cached object on a harmless edit; (b) JSON has no canonical form (key order, `1e-05` versus `0.00001`, duplicate keys), and a hand-written canonicalizer is an attack and bug surface; (c) serde defaults (`default_rms_norm_eps`, `default_rope_theta`) mean the effective value is the resolved one, not the one in the file. The omission risk of an explicit list is closed mechanically: the conversion `ComputeConfig::from(&ModelConfig)` lives in `aien-runtime` and destructures `ModelConfig` **exhaustively, with no `..`**, so adding a field to `ModelConfig` is a compile error until its author decides "bound" or "excluded with a reason". A test (C6, PLANNED) additionally mutates every field of `ModelConfig` one at a time and asserts the namespace id changes for every field not in the written exclusion list.
 
 `arith_epoch` is guarded by a pinned-bytes test (C6, PLANNED): a fixed tiny model and prompt run on the reference backend; the SHA-256 of the resulting K/V pool bytes is pinned in the repository. A numeric change fails the test until the author bumps `KV_ARITH_EPOCH` and re-pins. `arith_id` is a coarse label (VERIFIED that the Omega name changes with availability, omega_backend.rs:815-820); mixing backends is therefore refused by identity, and the greedy guarantee of section 6.5 is stated per backend.
+
+#### 1.2.2 Engine identity (sc#504)
+
+The same weights digest and the same `ComputeConfig` do not fix the K/V bytes when one checkpoint directory can be run by different engines and builds (research/pkv-omega-engine.md section 4, VERIFIED there): the omega engine loads one directory as bf16, fp8 experts or fp8 everywhere (same file hash), its kernels come from a separate build, `KV_ARITH_EPOCH` is pinned only on the CPU reference, and whole-prompt prefill changes activation rounding. So field 14 binds the engine too:
+
+`compute_config_digest = SHA-256("AIEN-PKV-CFG-V2\0" || ComputeConfig fields 1-9 (section 1.2.1, same encoding) || weight_format u8 || engine_build_id u8 len + bytes || rounding_class u8 len + bytes || engine_config_digest [u8;32])`
+
+`engine_config_digest = SHA-256("AIEN-PKV-ENG-V1\0" || num_experts u32 || experts_per_token u32 || expert_intermediate_dim u64 || whole_prompt_prefill u8 || device_router u8 || matmul_path u8 len + bytes)` (`EngineConfig::digest()`; an engine may supply its own 32-byte digest over its MoE shape and run switches instead).
+
+| field | type | what the caller must supply |
+|---|---|---|
+| weight_format | u8 (1 as-file, 2 bf16, 3 fp8-experts, 4 fp8-all) | the format the weights are computed in after load, not the file format |
+| engine_build_id | 1-255 bytes | engine plus kernel build, for example omega commit + linked kernel archive digest |
+| rounding_class | 1-255 bytes | numeric rounding class of the arithmetic |
+| engine_config_digest | [u8;32] | MoE shape and numeric run switches (whole-prompt prefill, device router, GEMM or GEMV path) |
+
+Rules: `EngineIdentity` has no default; `ModelBinding::namespace_fields` and the daemon's `ModelKvBinding` require it, so every caller that enables persistence states each value. Empty `engine_build_id`, `rounding_class` or `matmul_path` is refused (`KvError::FieldEmpty`). `ComputeConfig::digest()` stays as the compute-only V1 digest and is no longer field 14. The host `TensorBackend` path fills it with `HostEngineIdentity::reference(arith_id)` (aien-runtime `compute_config.rs`): weight format `as-file`, build `aien-runtime/<version>+git:<commit>` (commit from `build.rs`, `AIEN_BUILD_COMMIT` override, `unknown` without git), rounding class `<arith_id>@kv-arith-epoch-<KV_ARITH_EPOCH>`, engine config dense with every switch off and matmul path `host-tensor-backend`. The omega engine builds its own identity (sc#505). Tests: `each_engine_field_alone_changes_the_namespace_and_refuses_old_records`, `v1_namespace_domain_no_longer_matches`, `field_14_binds_compute_config_then_engine_identity` (kv-store) and the four `*_change_is_never_served_after_restart` restart tests (aien-runtime).
 
 ### 1.3 Chunk key (prefix chaining, adapted from LMCache TokenHasher)
 
@@ -518,6 +535,7 @@ Every cell carries one label: PLANNED, TESTED(receipt), NOT CLAIMED or NOT_RUN. 
 - Quota accounting counts foreign-namespace objects but does not read their payloads; an object with a valid header and a corrupt payload occupies quota until its first load deletes it or LRU evicts it.
 - `max_objects` default 65536 and the index are per store directory; two daemons sharing one directory are not supported (STORE_ID is advisory, there is no lock file in this milestone).
 - `arith_id` is a coarse label and `KV_ARITH_EPOCH` is a human-bumped counter backed by a pinned-bytes test; a numeric change the pinned test does not exercise could slip through (UNKNOWN residual risk; the test model should cover every op the production path uses).
+- The host engine build id names the aien-runtime commit, so every new host build starts with an empty namespace; a build from a tree without git and without `AIEN_BUILD_COMMIT` gets the build id `+git:unknown` and then relies on the rounding class (backend name and `KV_ARITH_EPOCH`) alone. Uncommitted edits do not change the build id.
 - `Indeterminate` publication means a power loss right after may lose the object; that is a cache miss, never a wrong answer.
 
 
