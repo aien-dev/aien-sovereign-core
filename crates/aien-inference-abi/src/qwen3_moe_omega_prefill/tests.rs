@@ -25,6 +25,9 @@ enum Ev {
     Quant { k: usize, input: QuantIn, rows: usize },
     Gemm { n: usize, k: usize, layout: Layout, ntiles: usize, gather: bool },
     Attn { layer: u32, pos0: u32, m: u32, dev: bool },
+    /// W-L1G-D device router logits / combine (tests/devhost.rs).
+    Router { k: usize, e: usize, rows: usize },
+    Combine { h: usize, top_k: usize, rows: usize },
 }
 
 type Log = Rc<RefCell<Vec<Ev>>>;
@@ -611,3 +614,6 @@ fn cache_weights_refusal_leaves_the_in_place_path_working() {
     let got = drv.run(&tm.weights, &mut attn, &TOKENS, 0).unwrap();
     assert!(max_rel_diff(&got, &reference(&tm, &TOKENS)) <= TOL);
 }
+
+/// W-L1G-D: the device router logits + combine path (fake device in tests/devhost.rs).
+mod devhost;
