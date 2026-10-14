@@ -1040,10 +1040,10 @@ async fn coalesced_waiters_with_different_suffixes_get_independent_tables() {
 /// and holder comes back.
 ///
 /// Two running sequences at a time (`max_batch_size = 2`) keep the scheduler
-/// from preempting: a preempted sequence re-emits its earlier tokens to the
-/// sink with persistence off as well (scheduler behaviour outside this cut,
-/// reported separately), which would make the greedy comparison meaningless.
-/// The test asserts that no preemption happened.
+/// from preempting, so every greedy comparison here is about restores, not
+/// resumes. The test asserts that no preemption happened. Resume after
+/// preemption has its own test below
+/// (`preempted_sequence_resumes_without_re_emitting_tokens`).
 #[tokio::test]
 async fn memory_pressure_restore_and_admission_make_progress_without_deadlock() {
     let opts = Opts {
