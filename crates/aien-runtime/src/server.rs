@@ -22,6 +22,51 @@ pub(crate) fn peer_is_current_user(stream: &UnixStream) -> bool {
     stream.peer_cred().map(|c| c.uid() == euid).unwrap_or(false)
 }
 
+/// The persistent-KV counters of the `AIEN_STEP_LOG=1` step line, under their
+/// METRICS_AND_SETTINGS names (cut C7).
+pub fn kv_step_log_fields(s: &crate::kv_residency::KvResidencyStatus) -> String {
+    let t = &s.stats;
+    format!(
+        "kv_park_jobs_total={} kv_park_failed_total={} kv_park_dedup_total={} \
+         kv_park_indeterminate_total={} kv_restore_jobs_total={} kv_restore_failed_total={} \
+         kv_restore_fallback_prefill_total={} kv_restore_retry_suppressed_total={} \
+         kv_store_stale_completions_total={} kv_pool_holder_blocks={} kv_restore_inflight_blocks={}",
+        t.park_jobs_total,
+        t.park_failed_total,
+        t.park_dedup_total,
+        t.park_indeterminate_total,
+        t.restore_jobs_total,
+        t.restore_failed_total,
+        t.restore_fallback_prefill_total,
+        t.restore_retry_suppressed_total,
+        t.store_stale_completions_total,
+        s.holder_blocks,
+        s.restore_inflight_blocks,
+    )
+}
+
+/// The shutdown log line of the persistent-KV drain (ADR 7.5): the counters
+/// `kv_store_shutdown_unfinished_jobs` and `kv_shutdown_unfinished_bytes`, then
+/// every unfinished job by key, size and stage.
+pub fn kv_shutdown_log_line(r: &aien_kv_store::DrainReport) -> String {
+    let bytes: u64 = r.unfinished.iter().map(|u| u.bytes).sum();
+    let mut line = format!(
+        "persistent KV drain: published={} cancelled={} kv_store_shutdown_unfinished_jobs={} kv_shutdown_unfinished_bytes={}",
+        r.published,
+        r.cancelled,
+        r.unfinished.len(),
+        bytes
+    );
+    for u in &r.unfinished {
+        let key: String = u.key.0 .0.iter().map(|b| format!("{b:02x}")).collect();
+        line.push_str(&format!(
+            "\n  unfinished job {} key {key} bytes {} stage {:?}",
+            u.job.0, u.bytes, u.stage
+        ));
+    }
+    line
+}
+
 pub struct AienRuntimeServer {
     socket_path: PathBuf,
     spine: Arc<Mutex<AienRuntimeSpine>>,
@@ -206,12 +251,16 @@ impl AienRuntimeServer {
                     match s.step(&mut backend).await {
                         // NEXT-PHASE-1 v3 observation: one line per engine step
                         // (AIEN_STEP_LOG=1) from the metrics the step already reports.
+                        // Persistent-KV counters are appended when it is on (C7).
                         Ok(Some(m)) if step_log => eprintln!(
-                            "step: prefill_tokens={} emitted={} backend_us={} spine_us={}",
+                            "step: prefill_tokens={} emitted={} backend_us={} spine_us={}{}",
                             m.prefill_tokens_processed,
                             m.decode_tokens_emitted,
                             m.step_latency_us,
-                            t_step.elapsed().as_micros()
+                            t_step.elapsed().as_micros(),
+                            s.kv_residency_status()
+                                .map(|k| format!(" {}", kv_step_log_fields(&k)))
+                                .unwrap_or_default()
                         ),
                         Ok(_) => {}
                         // A swallowed step error makes the daemon look alive
@@ -392,6 +441,16 @@ impl AienRuntimeServer {
 
         self.is_running.store(false, Ordering::SeqCst);
         let _ = worker_handle.await;
+
+        // Persistent KV (ADR 7.5): drain the store with its deadline after the
+        // step loop stopped. The worker keeps every buffer of an unfinished job
+        // until its terminal; nothing is freed to meet the deadline.
+        let drain = self.spine.lock().await.kv_drain_handle();
+        if let Some(handle) = drain {
+            if let Ok(report) = tokio::task::spawn_blocking(move || handle.drain()).await {
+                eprintln!("{}", kv_shutdown_log_line(&report));
+            }
+        }
 
         // Close the compose home now, not whenever the last connection task drops
         // its Arc (sovereign-core #306).

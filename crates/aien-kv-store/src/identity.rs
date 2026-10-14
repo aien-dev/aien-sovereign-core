@@ -125,8 +125,9 @@ pub struct NamespaceFields<'a> {
     pub chunk_tokens: u32,
     /// At most 64 bytes (METRICS_AND_SETTINGS `AIEN_KV_STORE_NAMESPACE`).
     pub sharing_namespace: &'a str,
-    /// `ComputeConfig::digest()` (ADR 1.2 field 14, section 1.2.1): every other
-    /// number that changes what the forward pass computes.
+    /// `ComputeConfig::digest_with_engine()` (ADR 1.2 field 14, sections 1.2.1
+    /// and 1.2.2): every other number that changes what the forward pass
+    /// computes, and the engine that computed it.
     pub compute_config_digest: [u8; 32],
 }
 
@@ -161,12 +162,36 @@ pub struct ComputeConfig<'a> {
 }
 
 impl ComputeConfig<'_> {
-    /// `SHA-256("AIEN-PKV-CFG-V1\0" || num_heads u32le || hidden_dim u64le ||
-    /// intermediate_dim u64le || vocab_size u64le || rms_norm_eps bits u32le ||
-    /// tie u8 || hidden_act u8 || arith_id u8-len + bytes || arith_epoch u32le)`.
+    /// Compute-only digest of ADR 1.2.1: `SHA-256("AIEN-PKV-CFG-V1\0" ||
+    /// num_heads u32le || hidden_dim u64le || intermediate_dim u64le ||
+    /// vocab_size u64le || rms_norm_eps bits u32le || tie u8 || hidden_act u8 ||
+    /// arith_id u8-len + bytes || arith_epoch u32le)`. Since sc#504 this is
+    /// **not** namespace field 14: field 14 is
+    /// [`ComputeConfig::digest_with_engine`], which also binds the engine.
     pub fn digest(&self) -> Result<[u8; 32], KvError> {
         let mut h = Sha256::new();
         h.update(CFG_DOMAIN);
+        self.put_fields(&mut h)?;
+        Ok(h.finalize().into())
+    }
+
+    /// Namespace field 14 (ADR 1.2.2): `SHA-256("AIEN-PKV-CFG-V2\0" || fields 1
+    /// to 9 exactly as in [`ComputeConfig::digest`] || weight_format u8 ||
+    /// engine_build_id u8-len + bytes || rounding_class u8-len + bytes ||
+    /// engine_config_digest)`. Refused when the build id or the rounding class
+    /// is empty (`FieldEmpty`) or longer than 255 bytes (`FieldTooLong`).
+    pub fn digest_with_engine(&self, engine: &EngineIdentity<'_>) -> Result<[u8; 32], KvError> {
+        let mut h = Sha256::new();
+        h.update(CFG_ENGINE_DOMAIN);
+        self.put_fields(&mut h)?;
+        h.update([engine.weight_format as u8]); // 10
+        put_required_u8_len_str(&mut h, "engine_build_id", engine.engine_build_id)?; // 11
+        put_required_u8_len_str(&mut h, "rounding_class", engine.rounding_class)?; // 12
+        h.update(engine.engine_config_digest); // 13
+        Ok(h.finalize().into())
+    }
+
+    fn put_fields(&self, h: &mut Sha256) -> Result<(), KvError> {
         h.update(self.num_heads.to_le_bytes()); // 1
         h.update(self.hidden_dim.to_le_bytes()); // 2
         h.update(self.intermediate_dim.to_le_bytes()); // 3
@@ -177,15 +202,114 @@ impl ComputeConfig<'_> {
         if self.arith_id.len() > MAX_ARITH_ID_BYTES {
             return Err(KvError::FieldTooLong("arith_id"));
         }
-        put_u8_len_str(&mut h, "arith_id", self.arith_id)?; // 8
+        put_u8_len_str(h, "arith_id", self.arith_id)?; // 8
         h.update(self.arith_epoch.to_le_bytes()); // 9
+        Ok(())
+    }
+}
+
+/// How the engine holds the weights it computes with (ADR 1.2.2). One
+/// checkpoint directory (one file digest) can be loaded several ways, and each
+/// gives different K/V bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum WeightFormat {
+    /// The weights are used in the element type the file stores them in.
+    AsFile = 1,
+    /// Converted to bf16 at load.
+    Bf16 = 2,
+    /// Expert (MoE) weights quantized to fp8 at load, the rest as loaded.
+    Fp8Experts = 3,
+    /// Every linear weight quantized to fp8 at load.
+    Fp8All = 4,
+}
+
+impl WeightFormat {
+    pub fn from_u8(v: u8) -> Option<Self> {
+        match v {
+            1 => Some(Self::AsFile),
+            2 => Some(Self::Bf16),
+            3 => Some(Self::Fp8Experts),
+            4 => Some(Self::Fp8All),
+            _ => None,
+        }
+    }
+
+    /// Stable name for logs and settings.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::AsFile => "as-file",
+            Self::Bf16 => "bf16",
+            Self::Fp8Experts => "fp8-experts",
+            Self::Fp8All => "fp8-all",
+        }
+    }
+}
+
+/// MoE shape and run-time numeric switches of the engine (ADR 1.2.2), built by
+/// the engine caller. A dense model has zero experts. Whole-prompt prefill
+/// changes activation rounding, so it changes the K/V bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EngineConfig<'a> {
+    pub num_experts: u32,
+    pub experts_per_token: u32,
+    pub expert_intermediate_dim: u64,
+    pub whole_prompt_prefill: bool,
+    pub device_router: bool,
+    /// Matrix-multiply path label (for example `gemm`, `gemv`); 1 to 255 bytes.
+    pub matmul_path: &'a str,
+}
+
+impl EngineConfig<'_> {
+    /// `SHA-256("AIEN-PKV-ENG-V1\0" || num_experts u32le || experts_per_token
+    /// u32le || expert_intermediate_dim u64le || whole_prompt_prefill u8 ||
+    /// device_router u8 || matmul_path u8-len + bytes)`.
+    pub fn digest(&self) -> Result<[u8; 32], KvError> {
+        let mut h = Sha256::new();
+        h.update(ENG_DOMAIN);
+        h.update(self.num_experts.to_le_bytes());
+        h.update(self.experts_per_token.to_le_bytes());
+        h.update(self.expert_intermediate_dim.to_le_bytes());
+        h.update([u8::from(self.whole_prompt_prefill)]);
+        h.update([u8::from(self.device_router)]);
+        put_required_u8_len_str(&mut h, "matmul_path", self.matmul_path)?;
         Ok(h.finalize().into())
     }
 }
 
-const NS_DOMAIN: &[u8] = b"AIEN-PKV-NS-V1\0";
+/// The engine that computes the K/V (ADR 1.2.2, sc#504). Required by
+/// [`ComputeConfig::digest_with_engine`] and by the runtime's persistence
+/// wiring: there is no default, so every caller states each value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EngineIdentity<'a> {
+    /// Weights as loaded, not as stored: one file digest can be loaded as
+    /// bf16 or fp8.
+    pub weight_format: WeightFormat,
+    /// Engine and kernel build (for example engine commit plus the linked
+    /// kernel archive digest); 1 to 255 bytes.
+    pub engine_build_id: &'a str,
+    /// Numeric rounding class of the arithmetic (for example backend name plus
+    /// `KV_ARITH_EPOCH`); 1 to 255 bytes.
+    pub rounding_class: &'a str,
+    /// [`EngineConfig::digest`], or the engine's own 32-byte digest over its
+    /// MoE shape and numeric run switches.
+    pub engine_config_digest: [u8; 32],
+}
+
+/// V2 since sc#504 (field 14 binds the engine), so no V1 namespace can match.
+const NS_DOMAIN: &[u8] = b"AIEN-PKV-NS-V2\0";
 const CHUNK_DOMAIN: &[u8] = b"AIEN-PKV-CHUNK-V1\0";
 const CFG_DOMAIN: &[u8] = b"AIEN-PKV-CFG-V1\0";
+const CFG_ENGINE_DOMAIN: &[u8] = b"AIEN-PKV-CFG-V2\0";
+const ENG_DOMAIN: &[u8] = b"AIEN-PKV-ENG-V1\0";
+
+/// A required string: empty is refused, so an unknown value cannot alias.
+fn put_required_u8_len_str(h: &mut Sha256, name: &'static str, s: &str) -> Result<(), KvError> {
+    if s.is_empty() {
+        return Err(KvError::FieldEmpty(name));
+    }
+    put_u8_len_str(h, name, s)
+}
 
 fn put_u8_len_str(h: &mut Sha256, name: &'static str, s: &str) -> Result<(), KvError> {
     let len = u8::try_from(s.len()).map_err(|_| KvError::FieldTooLong(name))?;
@@ -221,7 +345,8 @@ impl NamespaceFields<'_> {
             return Err(KvError::InvalidGeometry);
         }
         // A host chunk is one segment per pool block and the digest table holds
-        // at most 120 (ADR 2.1 item 3): `chunk_blocks` is capped at 120 there.
+        // at most `MAX_SEGMENTS` = 119 (ADR 2.1 item 3, amended by section 20):
+        // `chunk_blocks` is capped at 119 there.
         if self.backend_format == BackendFormat::HostPagedPoolV1
             && self.chunk_tokens / self.block_size > MAX_SEGMENTS as u32
         {
@@ -230,7 +355,7 @@ impl NamespaceFields<'_> {
         Ok(())
     }
 
-    /// `SHA-256("AIEN-PKV-NS-V1\0" || fields)` (ADR 1.2).
+    /// `SHA-256("AIEN-PKV-NS-V2\0" || fields)` (ADR 1.2).
     pub fn namespace_id(&self) -> Result<NamespaceId, KvError> {
         self.check_geometry()?;
         if self.sharing_namespace.len() > MAX_SHARING_NAMESPACE_BYTES {

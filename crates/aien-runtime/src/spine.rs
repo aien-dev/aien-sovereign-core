@@ -6,6 +6,7 @@ use crate::context::ContextComposer;
 use crate::control::{
     ControlCommand, ControlEnvelope, ControlResponse, RuntimeController, RuntimeStatusReport,
 };
+use crate::kv_residency::{KvDrainHandle, KvResidency, KvResidencyStatus};
 use crate::sequence::{SequenceArena, SequenceId, SequenceState};
 use crate::swarm::{SwarmConfig, SwarmManager, SwarmState};
 use crate::world::WorldStore;
@@ -36,6 +37,13 @@ pub struct AienRuntimeSpine {
     /// state is released by `release_pending_backend_sequences`, which `step`
     /// calls first.
     pending_backend_releases: Vec<u64>,
+    /// Persistent KV (ADR 0003 section 6): park at the finish transaction,
+    /// restore at submit. `None` (the default) is today's behaviour exactly.
+    kv_residency: Option<KvResidency>,
+    /// Why persistence was refused at start (ADR 0003 section 20: store key
+    /// missing or malformed). `Some` only with the store dir set; then there
+    /// is no residency and every prompt is prefilled.
+    kv_persist_refused: Option<&'static str>,
 }
 
 impl AienRuntimeSpine {
@@ -56,6 +64,8 @@ impl AienRuntimeSpine {
             step_counter: 0,
             pending_backend_forks: Vec::new(),
             pending_backend_releases: Vec::new(),
+            kv_residency: None,
+            kv_persist_refused: None,
         }
     }
 
@@ -100,7 +110,53 @@ impl AienRuntimeSpine {
         let assigned = self
             .scheduler
             .submit_work(work, prompt, Some(sampling_params), sink_id)?;
+        self.try_restore(assigned);
         Ok(assigned.to_u64())
+    }
+
+    /// Submits a plain `SequenceRequest` (the scheduler assigns the id) and,
+    /// with persistent KV enabled, starts the restore of its stored prefix
+    /// (ADR 0003 section 6.3). A miss or any refusal leaves a plain prefill;
+    /// a request is never refused because of the cache.
+    pub fn submit_request(&mut self, request: aien_abi_core::SequenceRequest) -> u64 {
+        let seq = self.scheduler.submit_request(request);
+        self.try_restore(seq);
+        seq.to_u64()
+    }
+
+    fn try_restore(&mut self, seq: aien_scheduler::SequenceId) {
+        if let Some(r) = self.kv_residency.as_mut() {
+            r.try_restore(&mut self.scheduler, seq);
+        }
+    }
+
+    /// Turns persistent KV on: installs the park hook in the scheduler's finish
+    /// transaction (S1) and hands S2 the scheduler's watermark.
+    pub fn enable_kv_residency(&mut self, mut residency: KvResidency) {
+        residency.set_watermark_blocks(self.scheduler.config().watermark_blocks);
+        self.scheduler
+            .set_finish_hook(Some(residency.finish_hook()));
+        self.kv_residency = Some(residency);
+    }
+
+    /// Records that persistence was refused (fail closed): no residency is
+    /// installed, and the status reports state `refused` with `reason`.
+    pub fn refuse_kv_persistence(&mut self, reason: &'static str) {
+        self.kv_persist_refused = Some(reason);
+    }
+
+    pub fn kv_residency(&self) -> Option<&KvResidency> {
+        self.kv_residency.as_ref()
+    }
+
+    /// Persistent-KV status fields (METRICS_AND_SETTINGS), `None` when off.
+    pub fn kv_residency_status(&self) -> Option<KvResidencyStatus> {
+        self.kv_residency.as_ref().map(KvResidency::status)
+    }
+
+    /// The shutdown drain of the persistent-KV store (ADR 7.5), `None` when off.
+    pub fn kv_drain_handle(&self) -> Option<KvDrainHandle> {
+        self.kv_residency.as_ref().map(KvResidency::drain_handle)
     }
 
     /// Registers a completion sink for streaming output events.
@@ -169,8 +225,23 @@ impl AienRuntimeSpine {
         // have not passed the completion fence.
         let root_prefill_tokens = self.prefill_pending_swarm_roots(backend).await?;
 
+        // Persistent KV (ADR 0003 sections 5.4 and 8): completions are polled on
+        // this thread, never waited for; S3 commits finished restores here,
+        // before the scheduler builds its batch, so a restored request's suffix
+        // can be scheduled in this very step.
+        if let Some(r) = self.kv_residency.as_mut() {
+            r.poll(&mut self.scheduler, backend);
+        }
+
         // Execute scheduler step via backend
-        let step_result = self.scheduler.step(backend).await?;
+        let step_result = self.scheduler.step(backend).await;
+
+        // Park what this step's finish transactions forked (S1), with no lock
+        // held; submit never blocks on I/O.
+        if let Some(r) = self.kv_residency.as_mut() {
+            r.drain_outbox();
+        }
+        let step_result = step_result?;
 
         if step_result.is_none() && root_prefill_tokens > 0 {
             return Ok(Some(StepMetrics {
@@ -470,6 +541,23 @@ impl AienRuntimeSpine {
     }
 
     pub fn status_report(&self) -> RuntimeStatusReport {
+        let mut report = self.pool_status_report();
+        // After the pool guard is released: the residency status takes the KV
+        // read lock itself (a nested read could wait behind a queued writer).
+        report.kv_persist = match (&self.kv_residency, self.kv_persist_refused) {
+            (Some(r), _) => Some(Box::new(r.persist_report())),
+            (None, Some(reason)) => Some(Box::new(crate::control::KvPersistReport {
+                kv_store_state: "refused".to_string(),
+                kv_store_refused_reason: reason.to_string(),
+                kv_store_key_refused_total: aien_kv_store::seal::key_refusals_total(),
+                ..Default::default()
+            })),
+            (None, None) => None,
+        };
+        report
+    }
+
+    fn pool_status_report(&self) -> RuntimeStatusReport {
         let kv = self.kv_manager.read();
         let metrics = kv.metrics();
         let free = kv.free_block_count();
@@ -492,6 +580,12 @@ impl AienRuntimeSpine {
             shared_kv_pages: metrics.shared_pages,
             cow_faults: metrics.cow_faults,
             gpu_utilization_pct: pressure_pct,
+            kv_pool_allocated_bytes: kv.pool().map_or(0, |p| p.layout().total_bytes as u64),
+            kv_pool_total_blocks: total,
+            kv_pool_free_blocks: free,
+            kv_pool_used_blocks: allocated,
+            kv_pool_holder_blocks: kv.holder_block_count(),
+            kv_persist: None,
         }
     }
 }

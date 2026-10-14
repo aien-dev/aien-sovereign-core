@@ -27,6 +27,14 @@ pub mod tool_boundary;
 pub mod transformer_backend;
 pub mod weights;
 
+/// Persistent-KV identity (ADR 0003 section 1.2.1, review finding 1): bumped by any
+/// change that alters the numeric results of the forward pass (kernels, summation
+/// order, activation, rounding). It is field 9 of the compute-config digest, so a
+/// bump orphans every stored chunk instead of serving K/V computed the old way.
+/// Guarded by `arith_epoch_pinned_bytes` in `aien-runtime`: a numeric change fails
+/// that test until this constant is bumped and the pin refreshed.
+pub const KV_ARITH_EPOCH: u32 = 1;
+
 pub use aien_abi_core::*;
 pub use aien_kv_cache::*;
 pub use backend::*;
