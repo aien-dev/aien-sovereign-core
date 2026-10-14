@@ -22,3 +22,6 @@ serde_json = "1.0"
 aien-inference-abi = { path = "../aien-inference-abi" }
 aien-omega-gpu = { path = "../aien-omega-gpu" }
 libc = "0.2"
+
+[dev-dependencies]
+aien-inference-abi = { path = "../aien-inference-abi", features = ["host-test-engine"] }
