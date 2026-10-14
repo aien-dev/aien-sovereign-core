@@ -772,7 +772,7 @@ fn different_rms_norm_eps_namespace_is_never_served_after_restart() {
 /// never served (plain prefill from position zero). Positive control: the
 /// parking identity restores.
 fn engine_change_is_never_served_after_restart(var: &str, parked: &str, changed: &str) {
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = private_tempdir();
     assert!(run_child("paint-park", dir.path(), &[(var, parked)]));
     assert!(
         run_child(
@@ -935,6 +935,7 @@ async fn persistence_refused_without_a_valid_store_key_runs_plain_and_says_why()
                 arith_id: "c7-paint-backend",
                 model_sha256: [7; 32],
                 model_digest_kind: "sha256",
+                engine: PaintEngine::from_env().identity(),
             },
             None,
         )
