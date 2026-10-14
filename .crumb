@@ -71,19 +71,19 @@
         },
         {
           "digest": "40a231c50dba92af7de2527ab33879c5d1eaaa6e7ea5d6a5ebaa9d60c7542075",
-          "last_commit": "72f0d0dd",
+          "last_commit": "b9b52f9c",
           "name": "crates/aien-allen-memory",
           "purpose": "ALLEN scoped memory store: scopes enforced at recall, inspect/correct/export, key-destroying for"
         },
         {
           "digest": "44dc482b8c9db8919a68ec69b019cd77967232a6ec8b1910c0dfe3cd4d71f141",
-          "last_commit": "37039ec0",
+          "last_commit": "b9b52f9c",
           "name": "crates/aien-allen-profile",
           "purpose": "ALLEN persona profile v1: versioned, user-editable profile bound to the engaged ALLEN identity; "
         },
         {
           "digest": "216615cfca5074a879fc4dd141fea075dcc3c20a99b71ae3b24633d74586b21a",
-          "last_commit": "82cef89b",
+          "last_commit": "d0028321",
           "name": "crates/aien-cli",
           "purpose": ""
         },
@@ -119,14 +119,14 @@
         }
       ],
       "children_root": "sha256:c28a6b94088f0d548612bbf3a996435a6c879cb94cf0f24539941f9db26ccd46",
-      "compiled_at": "2026-10-14T21:51:20Z",
+      "compiled_at": "2026-10-14T22:19:21Z",
       "compiler": "crumb-compile/1",
-      "digest": "sha256:652f9936634ea0a10858a2dc2540ced07e48a821b9142c0aeda53b0a1f9a8e56",
+      "digest": "sha256:91b7ec7f1aa1bbf9976154355672c9a38a08dd0f3ef941d4ac0ba1ab50e6fa0c",
       "evidence_files": 779,
       "evidence_root": "sha256:71b21f0d08294a967db74dc610acba03f114f03501363f3243901bb25c578a5f",
       "files": 4751,
-      "generated_at_commit": "816de6c3954cf14a42f873f474c4519ccd33a3fb",
-      "source_tree": "sha256:cc9ec1a2251ea8c92810dc69441160d581c75b302983f8fedb5f621f10619cfa"
+      "generated_at_commit": "192ae5c5b4da180f6a37f9e2a01410f70b10a80b",
+      "source_tree": "sha256:bc1b5b2eb625b80f990984ccecaef558e7aeba78395920c0f83a0c372f5f43a0"
     }
   },
   "history": [],
