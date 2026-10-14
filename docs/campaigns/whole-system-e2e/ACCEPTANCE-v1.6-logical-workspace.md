@@ -1,7 +1,7 @@
 # WHOLE-SYSTEM-E2E, harness v1.6: the logical workspace prompt baseline (RUN-7-CPU and RUN-7-GB10)
 
-Tracking: aien-dev/aien-sovereign-core#402 (R6, owning issue), #429 (product issue), #431 (product fix),
-aien-dev/aien-architecture#190 (Drake ruling D2, 2026-10-11). Contract: `ACCEPTANCE_E2E.md` FROZEN at
+Tracking: aien-spark/aien-sovereign-core#402 (R6, owning issue), #429 (product issue), #431 (product fix),
+aien-spark/aien-architecture#190 (Drake ruling D2, 2026-10-11). Contract: `ACCEPTANCE_E2E.md` FROZEN at
 aien-architecture b2400fe, sha256 `9e3d5f4e23d65ac17be8f2f4ca48355f0aaa486f67ff5a8a8044dcdd646d34e8`. This file is
 committed before any run under the changed product. `ACCEPTANCE-v1.md` to `-v1.5-fixed-root.md` stay as written; RUN-1
 to RUN-6 stay as recorded. No row, rule, score, threshold, objective text or input changes. The harness script is not

@@ -384,7 +384,7 @@ unmapped path, no blocked gate, no problem line.
 ```
 
 `<repo>` is the last segment of the repository name
-(`github.com/aien-dev/aien-sovereign-core` gives `aien-sovereign-core`).
+(`github.com/aien-spark/aien-sovereign-core` gives `aien-sovereign-core`).
 
 ## Tests
 
