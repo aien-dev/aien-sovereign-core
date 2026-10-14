@@ -1,0 +1,216 @@
+//! OWN-30B time-to-first-token, whole-prompt prefill OFF vs ON, in one process (W-L1G-W).
+//!
+//!   own30b_ttft <checkpoint> <receipt-dir> [--lens 512,2048] [--new-tokens 32] [--reps 2]
+//!               [--max-context 8192] [--force-memory]
+//!
+//! Loads the FP8 model once (fused attention), then for every prompt length runs, `--reps`
+//! times, OFF (the engine's chunked prefill) then ON (`set_whole_prompt(true)`), each from an
+//! empty KV (`reset`), greedy, no stop ids, so exactly `--new-tokens` tokens. TTFT = wall time
+//! from the `generate_with` call to the first emitted token (prefill + the first lm_head).
+//! Compares OFF vs ON tokens (first differing position) and the first-step logits (cosine, max
+//! abs diff, top-2 margins). Writes `run.json` and `run.txt` into the receipt dir.
+use std::path::PathBuf;
+use std::time::Instant;
+
+use aien_inference_abi::qwen3_moe_omega::{AttnPath, DevicePaths, GenerateParams, Qwen3MoeOmegaEngine, StepTiming, WeightFormat};
+use aien_inference_abi::tokenizer::ChatTokenizer as Tokenizer;
+
+fn mem_available_gb() -> f64 {
+    std::fs::read_to_string("/proc/meminfo")
+        .ok()
+        .and_then(|t| t.lines().find(|l| l.starts_with("MemAvailable:")).and_then(|l| l.split_whitespace().nth(1)).and_then(|v| v.parse::<f64>().ok()))
+        .map(|kb| kb / 1024.0 / 1024.0)
+        .unwrap_or(0.0)
+}
+
+/// A chat prompt of exactly `n` tokens: a fixed head, numbered log lines (each differs), cut so
+/// that head + body + tail = n. Encoded piecewise (the tokenizer refuses > 2048 tokens per call).
+fn prompt_ids(tok: &Tokenizer, n: usize) -> Vec<u32> {
+    let enc = |t: &str| tok.encode_with_special(t, false).expect("encode");
+    let mut ids = enc("<|im_start|>user\nYou are a careful engineering assistant. Read the log below and say, in plain words, which block number has the largest decode time.\n\n");
+    let tail = enc("\nAnswer with the block number only.<|im_end|>\n<|im_start|>assistant\n");
+    assert!(n > ids.len() + tail.len() + 8, "prompt length {n} too short");
+    let mut b = 0usize;
+    while ids.len() + tail.len() < n {
+        ids.extend(enc(&format!(
+            "[block {b}] loaded 48 layers in {} s, resident {}.{} GB\n[block {b}] prompt {} tokens, prefill {}.{} s\n[block {b}] decode 16 tokens, {} ms/token\n",
+            200 + (b * 7) % 23,
+            58 + b % 5,
+            (b * 3) % 10,
+            20 + (b * 37) % 700,
+            1 + (b * 5) % 40,
+            (b * 7) % 10,
+            50 + (b * 11) % 37,
+        )));
+        b += 1;
+    }
+    ids.truncate(n - tail.len());
+    ids.extend(tail);
+    assert_eq!(ids.len(), n);
+    ids
+}
+
+struct Run {
+    tokens: Vec<u32>,
+    logits0: Vec<f32>,
+    ttft_ms: f64,
+    prefill_ms: u64,
+    decode_ms: u64,
+    pt: StepTiming,
+}
+
+fn run(engine: &mut Qwen3MoeOmegaEngine, ids: &[u32], new_tokens: usize) -> Run {
+    engine.reset();
+    let mut tokens = Vec::new();
+    let mut logits0 = Vec::new();
+    let mut first: Option<f64> = None;
+    let t0 = Instant::now();
+    let o = engine
+        .generate_with(
+            ids,
+            &GenerateParams::greedy(new_tokens, Vec::new()),
+            &mut |logits, step| {
+                if step == 0 {
+                    logits0 = logits.to_vec();
+                }
+                aien_inference_abi::tensor::sample_argmax(logits).0
+            },
+            &mut |t| {
+                if first.is_none() {
+                    first = Some(t0.elapsed().as_secs_f64() * 1e3);
+                }
+                tokens.push(t);
+                true
+            },
+        )
+        .expect("generate");
+    Run { tokens, logits0, ttft_ms: first.expect("no token"), prefill_ms: o.prefill_ms, decode_ms: o.decode_ms, pt: o.prefill_timing }
+}
+
+fn top2(l: &[f32]) -> (usize, f32) {
+    let mut idx: Vec<usize> = (0..l.len()).collect();
+    idx.sort_by(|&a, &b| l[b].total_cmp(&l[a]));
+    (idx[0], l[idx[0]] - l[idx[1]])
+}
+
+fn cosine(a: &[f32], b: &[f32]) -> f64 {
+    let (mut ab, mut aa, mut bb) = (0.0f64, 0.0f64, 0.0f64);
+    for (x, y) in a.iter().zip(b) {
+        ab += *x as f64 * *y as f64;
+        aa += *x as f64 * *x as f64;
+        bb += *y as f64 * *y as f64;
+    }
+    ab / (aa.sqrt() * bb.sqrt())
+}
+
+fn main() {
+    let args: Vec<String> = std::env::args().collect();
+    let checkpoint = PathBuf::from(args.get(1).expect("checkpoint dir"));
+    let receipt = PathBuf::from(args.get(2).expect("receipt dir"));
+    let (mut lens, mut new_tokens, mut reps, mut max_context, mut force) = (vec![512usize, 2048], 32usize, 2usize, 8192usize, false);
+    let mut it = args[3..].iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--lens" => lens = it.next().expect("--lens").split(',').map(|s| s.parse().expect("len")).collect(),
+            "--new-tokens" => new_tokens = it.next().expect("--new-tokens").parse().expect("n"),
+            "--reps" => reps = it.next().expect("--reps").parse().expect("n"),
+            "--max-context" => max_context = it.next().expect("--max-context").parse().expect("n"),
+            "--force-memory" => force = true,
+            o => panic!("unknown argument {o}"),
+        }
+    }
+    std::fs::create_dir_all(&receipt).expect("receipt dir");
+    let mut log: Vec<String> = Vec::new();
+    let mut say = |s: String| {
+        println!("{s}");
+        log.push(s);
+    };
+    let avail = mem_available_gb();
+    say(format!("mem available before load: {avail:.1} GB"));
+    if avail < 70.0 && !force {
+        say("REFUSED: less than 70 GB available; --force-memory to override".into());
+        std::process::exit(3);
+    }
+    if let Some(us) = aien_omega_gpu::parse_spin_us(std::env::var(aien_omega_gpu::SPIN_US_ENV).ok().as_deref()).expect("spin env") {
+        aien_omega_gpu::set_spin_us(us).expect("set spin window");
+    }
+    say(format!(
+        "build native={} pf={} pattn={} pattn_dev={} spin_us={:?}",
+        aien_omega_gpu::is_native(),
+        aien_omega_pf::is_native(),
+        aien_omega_pf::has_attention(),
+        aien_omega_pf::has_attention_dev(),
+        aien_omega_gpu::spin_us()
+    ));
+    let tok = Tokenizer::from_file(checkpoint.join("tokenizer.json")).expect("tokenizer");
+    let t0 = Instant::now();
+    let (mut engine, report) =
+        Qwen3MoeOmegaEngine::load_omega_paths(&checkpoint, max_context, WeightFormat::Fp8All, AttnPath::Fused, DevicePaths::default(), &mut |_| {})
+            .expect("load on Omega");
+    say(format!(
+        "LOAD {:.1}s resident {:.2} GB attention {} prefill_gemm {} chunk {} mem_available_after {:.1} GB",
+        t0.elapsed().as_secs_f64(),
+        report.resident_bytes as f64 / 1e9,
+        engine.attention_path(),
+        engine.prefill_gemm,
+        engine.prefill_chunk,
+        mem_available_gb()
+    ));
+    let mut rows = Vec::new();
+    let mut all_identical = true;
+    for &n in &lens {
+        let ids = prompt_ids(&tok, n);
+        for rep in 0..reps {
+            engine.set_whole_prompt(false).expect("off");
+            let off = run(&mut engine, &ids, new_tokens);
+            engine.set_whole_prompt(true).expect("whole-prompt prefill refused");
+            let on = run(&mut engine, &ids, new_tokens);
+            let st = engine.whole_prompt_stats().cloned().unwrap_or_default();
+            let diff = off.tokens.iter().zip(&on.tokens).position(|(a, b)| a != b).or((off.tokens.len() != on.tokens.len()).then_some(off.tokens.len().min(on.tokens.len())));
+            let cos = cosine(&off.logits0, &on.logits0);
+            let maxd = off.logits0.iter().zip(&on.logits0).map(|(a, b)| (a - b).abs()).fold(0.0f32, f32::max);
+            let (ta, ma) = top2(&off.logits0);
+            let (tb, mb) = top2(&on.logits0);
+            all_identical &= diff.is_none();
+            say(format!(
+                "len {n} rep {rep}: TTFT off {:.1} ms on {:.1} ms (x{:.2}); prefill_ms off {} on {}; decode {} tokens off {} ms on {} ms; tokens {} ; logits0 cosine {cos:.7} maxdiff {maxd:.3e} top1 {ta}/{tb} margin {ma:.3}/{mb:.3}",
+                off.ttft_ms,
+                on.ttft_ms,
+                off.ttft_ms / on.ttft_ms,
+                off.prefill_ms,
+                on.prefill_ms,
+                new_tokens,
+                off.decode_ms,
+                on.decode_ms,
+                match diff {
+                    None => "IDENTICAL".to_string(),
+                    Some(p) => format!("DIFFER at {p}"),
+                }
+            ));
+            say(format!(
+                "  on: launches {} chip(GEMM+quant) {:.1} ms attention chip {:.1} ms host {:.1} ms attn_dev {} | off: chip {:.1} ms launches {}",
+                st.launches(),
+                st.chip_ns as f64 / 1e6,
+                st.attn_ns as f64 / 1e6,
+                st.host_ns as f64 / 1e6,
+                st.attn_dev,
+                off.pt.chip_ns as f64 / 1e6,
+                off.pt.launches
+            ));
+            rows.push(serde_json::json!({
+                "len": n, "rep": rep,
+                "ttft_ms_off": off.ttft_ms, "ttft_ms_on": on.ttft_ms,
+                "prefill_ms_off": off.prefill_ms, "prefill_ms_on": on.prefill_ms,
+                "decode_ms_off": off.decode_ms, "decode_ms_on": on.decode_ms,
+                "tokens_off": off.tokens, "tokens_on": on.tokens, "first_diff": diff,
+                "logits0_cosine": cos, "logits0_maxdiff": maxd, "top1_off": ta, "top1_on": tb, "margin_off": ma, "margin_on": mb,
+                "on_stats": {"launches": st.launches(), "chip_ns": st.chip_ns, "attn_ns": st.attn_ns, "host_ns": st.host_ns, "attn_dev": st.attn_dev},
+                "off_timing": {"chip_ns": off.pt.chip_ns, "launches": off.pt.launches, "total_ns": off.pt.total_ns},
+            }));
+        }
+    }
+    say(format!("SUMMARY tokens {}", if all_identical { "IDENTICAL" } else { "DIFFER" }));
+    let doc = serde_json::json!({"checkpoint": checkpoint, "lens": lens, "new_tokens": new_tokens, "reps": reps, "rows": rows});
+    std::fs::write(receipt.join("run.json"), serde_json::to_string_pretty(&doc).unwrap()).expect("run.json");
+    std::fs::write(receipt.join("run.txt"), log.join("\n") + "\n").expect("run.txt");
+}

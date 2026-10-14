@@ -28,6 +28,7 @@ use rayon::prelude::*;
 use crate::qwen3_moe::{bf16_to_f32, f32_to_bf16, fp8_table, shard_path, Shard, FP8_BLOCK};
 use crate::moe_plan::MoeBatchPlan;
 use crate::resident::transpose_bf16_for_upload;
+mod whole_prompt;
 
 /// Column tile of the engine's tile-major B layout: every expert window must start on one.
 pub const WINDOW_TILE: usize = aien_omega_moe::TILE_N;
@@ -1774,6 +1775,10 @@ pub trait KvAttention: Send {
     fn path_name(&self) -> &'static str {
         "split"
     }
+    /// omega's fused cache behind this attention, if any (the whole-prompt prefill drives it).
+    fn fused_kv(&mut self) -> Option<&mut crate::qwen3_moe_omega_dattn::OmegaFusedKv> {
+        None
+    }
 }
 
 /// Host f32 cache with the reference attention (tests, and the oracle side of parity runs).
@@ -2123,6 +2128,8 @@ pub struct Qwen3MoeOmegaEngine {
     pos: usize,
     /// Tokens whose KV is stored at positions `0..pos` (prefix reuse across generations).
     history: Vec<u32>,
+    /// Whole-prompt prefill driver (OFF = None; `set_whole_prompt`). See `whole_prompt.rs`.
+    whole_prompt: Option<Box<whole_prompt::EngineWholePrompt>>,
 }
 
 impl Qwen3MoeOmegaEngine {
@@ -2142,6 +2149,7 @@ impl Qwen3MoeOmegaEngine {
             prefill_device_routing: false,
             pos: 0,
             history: Vec::new(),
+            whole_prompt: None,
         }
     }
 
@@ -2818,7 +2826,8 @@ impl Qwen3MoeOmegaEngine {
         let t0 = Instant::now();
         let mut hidden = Vec::new();
         let mut prefill_timing = StepTiming::default();
-        for chunk in prompt[reused..].chunks(self.prefill_chunk.max(1)) {
+        let whole = self.whole_prompt_prefill(&prompt[reused..], &mut hidden, &mut prefill_timing)?;
+        for chunk in prompt[reused + whole..].chunks(self.prefill_chunk.max(1)) {
             hidden = self.step_batch(chunk)?;
             prefill_timing.add(&self.last_timing);
         }

@@ -50,6 +50,16 @@ impl OmegaFusedKv {
     pub fn kv_bytes(&self) -> usize {
         aien_omega_dattn::kv_bytes(self.cache.layers(), self.cache.max_pos())
     }
+
+    /// omega's prefill attention over this cache (whole-prompt prefill appends K/V for every layer).
+    pub fn prefill_attention(&mut self) -> aien_omega_pf::OmegaPrefillAttention<'_> {
+        aien_omega_pf::OmegaPrefillAttention::new(&mut self.cache)
+    }
+
+    /// Marks positions `0..upto` stored in every layer (after a whole-prompt prefill).
+    pub fn mark_filled(&mut self, upto: usize) {
+        self.filled.iter_mut().for_each(|f| *f = upto);
+    }
 }
 
 impl KvAttention for OmegaFusedKv {
@@ -92,5 +102,8 @@ impl KvAttention for OmegaFusedKv {
     }
     fn path_name(&self) -> &'static str {
         "fused"
+    }
+    fn fused_kv(&mut self) -> Option<&mut OmegaFusedKv> {
+        Some(self)
     }
 }
