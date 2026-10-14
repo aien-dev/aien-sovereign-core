@@ -10,7 +10,7 @@ classes       = (a) model output 70, (b) runtime/harness 1, (c) prompt or templa
 public bundle = BLOCKED. Qwen/Qwen3-8B is not qualified; the model decision goes back to Drake (ruling 2, arch#190). No CAND-5 manifest.
 ```
 
-Owning issue: aien-dev/aien-sovereign-core#384. Nothing here changes any v5 file, any row, limit, budget or goal. No launch was repeated.
+Owning issue: aien-spark/aien-sovereign-core#384. Nothing here changes any v5 file, any row, limit, budget or goal. No launch was repeated.
 Every number below is read from the files of Section 6. v6 comparison: RESULT-v6.md (Qwen3-4B-Instruct-2507, 245 PASS, 89 FAIL).
 
 ## 1. Run

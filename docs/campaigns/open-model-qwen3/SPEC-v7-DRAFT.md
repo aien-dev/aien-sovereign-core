@@ -1,7 +1,7 @@
 # OPEN-MODEL-QWEN3 v7: qualification specification for Qwen3-8B
 
 **Status: DRAFT NOT FROZEN. NOT RUN. This file freezes nothing; `frozen-v7.json` says DRAFT NOT FROZEN and every pin is a placeholder, so
-`run-qwen3-v7.sh` refuses a real run.** Owning issue: aien-dev/aien-sovereign-core#384 (Drake ruling 2026-10-11, aien-architecture#190
+`run-qwen3-v7.sh` refuses a real run.** Owning issue: aien-spark/aien-sovereign-core#384 (Drake ruling 2026-10-11, aien-architecture#190
 comment 6109731585 and sc#384 comment 6109731974: Qwen3-4B-Instruct-2507 retired after the frozen FAILs v5 and v6; next candidate to evaluate,
 not promote, is Qwen/Qwen3-8B). Evidence for the model facts: `EVAL-qwen3-8b.md`. Written by lane D1, 2026-10-11.
 

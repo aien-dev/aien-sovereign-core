@@ -1,7 +1,7 @@
 # OPEN-MODEL-QWEN3 v8: corrective retry, qualification specification for Qwen3-8B
 
 **Status: DRAFT NOT FROZEN. NOT RUN. `frozen-v8.json` says DRAFT NOT FROZEN and every pin is the placeholder, so `run-qwen3-v8.sh`
-refuses a real run.** Owning issue: aien-dev/aien-sovereign-core#384. Ruling: Drake 2026-10-12, aien-architecture#190 comment
+refuses a real run.** Owning issue: aien-spark/aien-sovereign-core#384. Ruling: Drake 2026-10-12, aien-architecture#190 comment
 6116159138 ("AIEN D1, Qwen3-8B Qualification v8": Option 3, validation-aware corrective feedback for rejected model replies).
 Preceding result: RESULT-v7.md (FAIL, 259 of 334, kept as is with all its evidence).
 
