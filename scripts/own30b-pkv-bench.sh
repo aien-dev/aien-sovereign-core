@@ -124,7 +124,7 @@ FLUSH=$(jq -n '[{role:"user",content:"Say one word about the weather."}]')
 # Writes <name>.sse (client time + SSE line) and one line of requests.tsv.
 send() {
 	local name=$1 body="$work/$1.body" h="$work/$1.h" raw="$dir/sse/$1.sse" t0 code retries=0
-	jq -n --argjson m "$2" --argjson n "$MAXTOK" '{model:"x", messages:$m, max_tokens:$n, temperature:0, seed:1, stream:true}' >"$body"
+	jq -n --arg model "$SERVED_MODEL" --argjson m "$2" --argjson n "$MAXTOK" '{model:$model, messages:$m, max_tokens:$n, temperature:0, seed:1, stream:true}' >"$body"
 	t0=$EPOCHREALTIME
 	while :; do
 		rm -f "$h"

@@ -103,6 +103,9 @@ pkv_begin() {
 	} >"$dir/run-info.txt"
 }
 
+# The name the server answers to (it refuses any other model name).
+SERVED_MODEL=${PKV_SERVED_MODEL:-qwen3-30b-a3b-instruct-2507}
+
 server_pid() { [ -f "$PIDF" ] && cat "$PIDF"; }
 
 # Exits the run if anything still owns our port after a stop: never start the next server
@@ -199,9 +202,15 @@ m1=$(jq -n --arg s "$SYS" --arg q "$Q1" '[{role:"system",content:$s},{role:"user
 turn2_msgs() { jq -n --argjson m "$m1" --arg a "$1" --arg q "${2:-$Q2}" '$m + [{role:"assistant",content:$a},{role:"user",content:$q}]'; }
 
 chat() { # <out-name> <messages-json>: prints the content
-	jq -n --argjson m "$2" '{model:"x", messages:$m, max_tokens:64, temperature:0, seed:1, stream:false}' |
+	jq -n --arg model "$SERVED_MODEL" --argjson m "$2" '{model:$model, messages:$m, max_tokens:64, temperature:0, seed:1, stream:false}' |
 		curl -s -m 600 "$base/v1/chat/completions" -H 'content-type: application/json' -d @- >"$dir/$1.json"
-	jq -r '.choices[0].message.content' "$dir/$1.json"
+	local c
+	c=$(jq -r '.choices[0].message.content // empty' "$dir/$1.json" 2>/dev/null)
+	if [ -z "$c" ]; then
+		echo "chat $1: no reply ($(head -c 200 "$dir/$1.json")); stopping the run" >&2
+		exit 1
+	fi
+	printf '%s\n' "$c"
 }
 
 wait_parks() { # until parked_chunks > 0 and unchanged for 3 s
@@ -217,7 +226,8 @@ wait_parks() { # until parked_chunks > 0 and unchanged for 3 s
 }
 
 fail=0
-check() { if [ "$2" = "$3" ]; then echo "PASS $1"; else echo "FAIL $1 ($2 != $3)"; fail=1; fi; }
+# Empty or null on either side is a FAIL: two failed requests must never compare equal.
+check() { if [ -n "$2" ] && [ "$2" != null ] && [ "$2" = "$3" ]; then echo "PASS $1"; else echo "FAIL $1 ($2 != $3)"; fail=1; fi; }
 
 pkv_seal() { # writes SHA256SUMS over every evidence file
 	local sums
