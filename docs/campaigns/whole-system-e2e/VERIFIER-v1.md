@@ -1,6 +1,6 @@
 # WHOLE-SYSTEM-E2E, verifier v1 (lane L4): pre-registration
 
-Tracking: aien-dev/aien-sovereign-core#381, aien-dev/aien-architecture#190. Contract read: `ACCEPTANCE_E2E.md` sections 1, 2, 3, 5
+Tracking: aien-spark/aien-sovereign-core#381, aien-spark/aien-architecture#190. Contract read: `ACCEPTANCE_E2E.md` sections 1, 2, 3, 5
 (aien-architecture main 3c584a49, sha256 `8ba653848287bc77db253466f6d3ff37c70a42be55601ad47eb1f838a41d20f0`). The
 frozen digest is passed on the command line (`--contract-sha256`), never compiled in. This file is committed before the
 verifier and its tests exist. The fixtures below are never edited and never written to.

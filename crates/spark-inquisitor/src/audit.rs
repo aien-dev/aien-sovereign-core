@@ -12,10 +12,10 @@ pub struct AuditReport {
 impl AuditReport {
     pub fn generate_markdown_report(&self) -> String {
         if self.clean {
-            return "#### ✅ Constitutional Diff Audit: PASS\n- **Telemetry Check**: Clean (zero tracking or surveillance hooks detected).\n- **Sovereign Voice & Formatting Check**: Clean (zero em/en dashes, zero banned buzzwords).\n- **Secrets & Credentials Check**: Clean (zero plaintext secrets, hardware vault only).\n- **Status**: Constitutional invariants verified.".to_string();
+            return "#### ✅ Doctrine Diff Audit: PASS\n- **Telemetry Check**: Clean (zero tracking or surveillance hooks detected).\n- **Sovereign Voice & Formatting Check**: Clean (zero em/en dashes, zero banned buzzwords).\n- **Secrets & Credentials Check**: Clean (zero plaintext secrets, hardware vault only).\n- **Status**: Project standards verified.".to_string();
         }
 
-        let mut out = String::from("#### ❌ Constitutional Diff Audit: FAILED\n\n");
+        let mut out = String::from("#### ❌ Doctrine Diff Audit: FAILED\n\n");
         if !self.violations.is_empty() {
             out.push_str("**Telemetry, Surveillance, and Environment Violations:**\n");
             for v in &self.violations {

@@ -1349,3 +1349,141 @@ fn nested_in_sandbox(test: &str) -> bool {
     }
     nested
 }
+
+/// A new commit `name` on `branch` of the world's origin that writes `files`,
+/// fetched into the trusted clone. Returns the commit.
+fn commit_on(w: &World, branch: &str, files: &[(&str, &str)], name: &str) -> String {
+    git(&w.origin, &["checkout", "-q", branch]);
+    for (rel, content) in files {
+        write(&w.origin, rel, content, false);
+    }
+    git(&w.origin, &["add", "-A"]);
+    git(&w.origin, &["commit", "-q", "-m", name]);
+    let sha = git(&w.origin, &["rev-parse", "HEAD"]);
+    git(&w.origin, &["checkout", "-q", "main"]);
+    git(&w.clone, &["fetch", "-q", "--all"]);
+    sha
+}
+
+fn gate_status(s: &worker::Summary, id: &str) -> (String, Verdict) {
+    s.gates
+        .iter()
+        .find(|g| g.0 == id)
+        .map(|g| (g.1.clone(), g.2))
+        .unwrap_or_else(|| panic!("no gate {id} in {:?}", s.gates))
+}
+
+/// With siblings, the worker reuses a result only for the same commit of
+/// the repository and only while every sibling is at the same commit: the
+/// sibling commits are in the cache key, and the evidence directory is the
+/// head's own.
+#[test]
+fn worker_reuses_only_the_same_commit_while_its_sibling_commits_match() {
+    if nested_in_sandbox("worker_reuses_only_the_same_commit_while_its_sibling_commits_match") {
+        return;
+    }
+    let w = world();
+    let (head_s, sib_sha, map) = sibling_world(&w);
+    let mut cfg = w.config();
+    cfg.operator = true; // S is a new gate: a pipeline configuration change.
+    cfg.siblings = Some(map);
+    let pass = |st: &str| (st.to_string(), Verdict::Pass);
+
+    let r1 = worker::run_once(&cfg, REPO, &head_s).expect("worker r1");
+    assert_eq!(gate_status(&r1, "S"), pass("run"), "{:?}", r1.notes);
+    assert!(
+        r1.notes.iter().any(|n| n.contains(&sib_sha)),
+        "{:?}",
+        r1.notes
+    );
+
+    // The same head again, sibling unchanged: reused.
+    let r2 = worker::run_once(&cfg, REPO, &head_s).expect("worker r2");
+    assert_eq!(gate_status(&r2, "S"), pass("cached"), "{:?}", r2.gates);
+
+    // A new commit that leaves S's declared inputs (tools/) alone still runs
+    // S: results never cross commits.
+    let head_s2 = commit_on(&w, "topic-s", &[("h/h.txt", "s2\n")], "change h");
+    let r3 = worker::run_once(&cfg, REPO, &head_s2).expect("worker r3");
+    assert_eq!(gate_status(&r3, "S"), pass("run"), "{:?}", r3.gates);
+
+    // The sibling moves to a new commit: the same head runs S again.
+    let so = w.origin.parent().unwrap().join("sib-origin");
+    write(&so, "lib/extra.txt", "world\n", false);
+    git(&so, &["add", "-A"]);
+    git(&so, &["commit", "-q", "-m", "sib v2"]);
+    let sib_sha2 = git(&so, &["rev-parse", "HEAD"]);
+    assert_ne!(sib_sha, sib_sha2);
+    git(
+        &w.clone.parent().unwrap().join(SIB),
+        &["fetch", "-q", "--all"],
+    );
+    let r4 = worker::run_once(&cfg, REPO, &head_s).expect("worker r4");
+    assert_eq!(gate_status(&r4, "S"), pass("run"), "{:?}", r4.gates);
+    assert!(
+        r4.notes.iter().any(|n| n.contains(&sib_sha2)),
+        "{:?}",
+        r4.notes
+    );
+
+    // Same head, sibling still at its new commit: reused again.
+    let r5 = worker::run_once(&cfg, REPO, &head_s).expect("worker r5");
+    assert_eq!(gate_status(&r5, "S"), pass("cached"), "{:?}", r5.gates);
+}
+
+/// Cache safety across commits: gate U declares only `u/` as its input but
+/// its program also reads the root `README.md`, as SC-TEST's
+/// `tier2_boundary` tests read the root `README.md` and `COVENANT.md`. A
+/// later commit that changes only `README.md` makes U fail when it really
+/// runs, so the worker must run U again, never hand it the earlier PASS.
+#[test]
+fn worker_never_reuses_a_pass_when_an_undeclared_file_changed_across_commits() {
+    if nested_in_sandbox(
+        "worker_never_reuses_a_pass_when_an_undeclared_file_changed_across_commits",
+    ) {
+        return;
+    }
+    let w = world();
+    let mut cfg = w.config();
+    cfg.operator = true; // U is a new gate: a pipeline configuration change.
+
+    git(&w.origin, &["checkout", "-q", "-b", "topic-u", "main"]);
+    write(
+        &w.origin,
+        "tools/u.sh",
+        "#!/bin/sh\ngrep -q 'AGPL-3.0' README.md || { echo 'README.md lost its licence' >&2; exit 1; }\necho PASS\n",
+        true,
+    );
+    git(&w.origin, &["checkout", "-q", "main"]);
+    let head_u1 = commit_on(
+        &w,
+        "topic-u",
+        &[
+            ("u/u.txt", "1\n"),
+            ("README.md", "Licence: AGPL-3.0\n"),
+            ("tests/gates/U.gate", &gate("U", "u/", "tools/u.sh", "")),
+        ],
+        "gate U reads README.md",
+    );
+    let head_u2 = commit_on(
+        &w,
+        "topic-u",
+        &[("README.md", "Licence: none\n")],
+        "README.md loses its licence",
+    );
+
+    let r1 = worker::run_once(&cfg, REPO, &head_u1).expect("worker u1");
+    assert_eq!(
+        gate_status(&r1, "U"),
+        ("run".to_string(), Verdict::Pass),
+        "{:?}",
+        r1.notes
+    );
+    let r2 = worker::run_once(&cfg, REPO, &head_u2).expect("worker u2");
+    assert_eq!(
+        gate_status(&r2, "U"),
+        ("run".to_string(), Verdict::Fail),
+        "a PASS from {head_u1} must not be handed to {head_u2}: {:?}",
+        r2.gates
+    );
+}

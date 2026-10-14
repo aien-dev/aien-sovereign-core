@@ -182,9 +182,17 @@ The one rule:
 6. **Manifests.** A gate that needs a sibling is `requires: host` (or a
    stronger pool), never `portable`: `portable` means the tree alone, which
    is what the hosted thin gate runs.
-7. **Cache.** A sibling lies outside the tree the cache key covers, so a
-   head whose repository has siblings never reuses an earlier result: every
-   gate runs fresh (`no_cache`).
+7. **Cache.** A sibling lies outside the tree the cache key covers, so the
+   worker records each sibling made (`name` = its `dir`) and each operator
+   pin (`name` = `pin:<source>`) with its commit in the receipt's `pins`,
+   which is part of the cache key. The worker's evidence directory is per
+   head (`evidence/<repo>/<sha>/`), so a result is reused only when the same
+   commit runs again with every sibling at the same commit; a sibling that
+   moved runs every gate fresh. A declared sibling that cannot be made turns
+   the cache off for the head (`no_cache`). Results are never reused across
+   commits in the worker: gates read files they do not declare as `inputs`
+   (SC-TEST reads the root `README.md` and `COVENANT.md`), so a key built
+   from declared inputs alone could hand a commit another commit's PASS.
 
 `wt.sh remove` takes the whole run directory away (checkout and siblings)
 and prunes every mirror's worktree list. An older `wt.sh` that still makes
@@ -301,7 +309,7 @@ Forgejo). Merging a pull request on GitHub does not wake it.
 
 `--jobs host=N,qemu=M` and `--no-cache` apply to the runs the worker starts,
 as they do for `aien-test test`. `--no-cache` runs every selected gate again
-(a head with sibling checkouts never uses the cache anyway). `--jobs host=1`
+(a head reuses only its own earlier results, see "Sibling checkouts"). `--jobs host=1`
 runs one host gate at a time: omega's gates share one checkout's `build/`
 and pin clones, and on main 771af52 ten of them failed from parallel races
 ("Text file busy" on `build/omegatool`, concurrent clones of
@@ -384,7 +392,7 @@ unmapped path, no blocked gate, no problem line.
 ```
 
 `<repo>` is the last segment of the repository name
-(`github.com/aien-dev/aien-sovereign-core` gives `aien-sovereign-core`).
+(`github.com/aien-spark/aien-sovereign-core` gives `aien-sovereign-core`).
 
 ## Tests
 

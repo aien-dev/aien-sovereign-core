@@ -1,6 +1,6 @@
 # DEV-MODEL-0 Phase A: Live Code Audit
 
-Repo: aien-dev/aien-sovereign-core. Audited commit: `7011f2be58a1a08e4774d79ae28db27ad5d17624` (main HEAD on 2026-10-01, unchanged from the brief). Read-only: no builds, no tests were run. All line numbers refer to that SHA. Paths are relative to the repo root; `abi` = `crates/aien-inference-abi/src`, `rt` = `crates/aien-inference-runtime/src`.
+Repo: aien-spark/aien-sovereign-core. Audited commit: `7011f2be58a1a08e4774d79ae28db27ad5d17624` (main HEAD on 2026-10-01, unchanged from the brief). Read-only: no builds, no tests were run. All line numbers refer to that SHA. Paths are relative to the repo root; `abi` = `crates/aien-inference-abi/src`, `rt` = `crates/aien-inference-runtime/src`.
 External review: Gemini (agy, plan mode); Codex was out of usage. Its citation corrections (weight cache, MaxServingBackend stub, extra template copies, line shifts) are folded in.
 Classes: GENERIC (reuse as is), GENERALIZABLE (right idea, hard-coded values to lift), MODEL-SPECIFIC (belongs to one family), LEGACY (remove or quarantine).
 
@@ -119,7 +119,7 @@ Tests that pin TinyLlama behavior and must keep passing through Phase B: `abi/te
 
 - D1 GPU path for Gemma (Phase F/I): (a) extend the existing CUDA/cuBLAS stack (fast to start, conflicts with the standing no-CUDA rule and with the sovereignty direction), (b) follow the Qwen precedent, a Mojo resident-weights library (no CUDA toolkit, matches rule; Mojo is available). Recommendation: (b). Needs a one-line orchestrator confirmation because brief section 15 says "reuse BlackwellGb10Backend".
 - D2 Oracle without Python: parity (Phase E/H) needs an independent reference. Options: generate artifacts outside the repo with an external tool and commit only digests/artifacts (brief section 4), or hand-derive a second C implementation. Recommendation: external offline artifacts, clearly recorded.
-  - Tie to ADR 0024 ("Rust is scaffolding, Omega is destination, C where hardware-justified", aien-dev/aien-architecture ADR 0024): a second C implementation is acceptable only where hardware justifies C; otherwise the oracle stays outside the repo as external offline artifacts.
+  - Tie to ADR 0024 ("Rust is scaffolding, Omega is destination, C where hardware-justified", aien-spark/aien-architecture ADR 0024): a second C implementation is acceptable only where hardware justifies C; otherwise the oracle stays outside the repo as external offline artifacts.
 - D3 Multimodal: the Gemma 4 12B checkpoint is `Gemma4UnifiedForConditionalGeneration` with audio and vision config (MODEL_DISCOVERY). Recommendation: text-only import that FAILS LOUDLY on unsupported modality tensors/features, never ignores them silently.
 
 ## 8. Phase B-I plan (file ownership, order, first PRs)

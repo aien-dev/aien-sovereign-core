@@ -57,9 +57,9 @@ pub fn triage_issue(author: &str, issue_number: u64, title: &str, body: &str) ->
         let markdown = format!(
             r#"### ⚖️ Sovereign Triage: Operational Feedback Registered
 
-Greetings @{author}. I am **AIEN**, resident sovereign intelligence of SparkOS.
+Greetings @{author}. I am **AIEN**, the automated review gate for the AIENOS project.
 
-Your report regarding **#{issue_number}** ("{title}") has been registered in the triage ledger. We operate under strict constitutional invariants, zero telemetry, and rigorous craftsmanship.
+Your report regarding **#{issue_number}** ("{title}") has been registered in the triage ledger. We operate under strict project standards, zero telemetry, and rigorous craftsmanship.
 
 To isolate and address this issue:
 1. Specify the exact commit hash, release version, or service endpoint involved.
@@ -93,7 +93,7 @@ We resolve concrete regressions directly. Thank you for holding the line on qual
             let markdown = format!(
                 r#"### ⚖️ Sovereign Triage: Bug Report Queued
 
-Greetings @{author}. I am **AIEN**, resident sovereign intelligence of SparkOS.
+Greetings @{author}. I am **AIEN**, the automated review gate for the AIENOS project.
 
 Your defect report **#{issue_number}** ("{title}") contains reproduction diagnostics and has been queued for verification.
 
@@ -117,7 +117,7 @@ Thank you for reporting this issue to maintain operational integrity.
             let markdown = format!(
                 r#"### ⚖️ Sovereign Triage: Bug Report Acknowledged
 
-Greetings @{author}. I am **AIEN**, resident sovereign intelligence of SparkOS.
+Greetings @{author}. I am **AIEN**, the automated review gate for the AIENOS project.
 
 Your defect report **#{issue_number}** ("{title}") has been logged in the triage queue.
 
@@ -152,11 +152,11 @@ Once these parameters are provided, automated verification will proceed.
         let markdown = format!(
             r#"### ⚖️ Sovereign Triage: Architectural Proposal Received
 
-Greetings @{author}. I am **AIEN**, resident sovereign intelligence of SparkOS.
+Greetings @{author}. I am **AIEN**, the automated review gate for the AIENOS project.
 
 Thank you for proposing this enhancement in **#{issue_number}** ("{title}").
 
-All prospective additions must satisfy our constitutional invariants:
+All prospective additions must satisfy our project standards:
 1. **Zero Telemetry**: No tracking hooks, external analytics, or surveillance telemetry.
 2. **Zero Commercial Lock-in**: No proprietary tollbooths, rent-seeking layers, or walled gardens.
 3. **Pure Native Discipline**: Implementations must adhere to compiled native Rust/Mojo architecture without unnecessary interpreter layers.
@@ -178,13 +178,13 @@ Maintainers will review the architectural fit and discuss implementation pathway
         let markdown = format!(
             r#"### ⚖️ Sovereign Triage: Community Inquiry Logged
 
-Greetings @{author}. I am **AIEN**, resident sovereign intelligence of SparkOS.
+Greetings @{author}. I am **AIEN**, the automated review gate for the AIENOS project.
 
 Your inquiry **#{issue_number}** ("{title}") has been registered.
 
-- **Founding Principles**: Consult `CONSTITUTION.md` for constitutional governance.
+- **Governing Standards**: Consult the Stapleton Doctrine for the project's governing standards and `COVENANT.md` for its values.
 - **Documentation**: Technical specifications reside in `docs/` and project manifests.
-- **Direct Sovereign Coordination**: Drake Stapleton (aien@aienos.com) and AIEN (aien@aienos.com)
+- **Direct Sovereign Coordination**: Drake Stapleton (drake@aienos.com) and AIEN (aien@aienos.com)
 
 A maintainer or sovereign agent will provide technical clarification shortly.
 "#,
