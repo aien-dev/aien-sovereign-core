@@ -40,6 +40,10 @@ pub struct AienRuntimeSpine {
     /// Persistent KV (ADR 0003 section 6): park at the finish transaction,
     /// restore at submit. `None` (the default) is today's behaviour exactly.
     kv_residency: Option<KvResidency>,
+    /// Why persistence was refused at start (ADR 0003 section 20: store key
+    /// missing or malformed). `Some` only with the store dir set; then there
+    /// is no residency and every prompt is prefilled.
+    kv_persist_refused: Option<&'static str>,
 }
 
 impl AienRuntimeSpine {
@@ -61,6 +65,7 @@ impl AienRuntimeSpine {
             pending_backend_forks: Vec::new(),
             pending_backend_releases: Vec::new(),
             kv_residency: None,
+            kv_persist_refused: None,
         }
     }
 
@@ -132,6 +137,12 @@ impl AienRuntimeSpine {
         self.scheduler
             .set_finish_hook(Some(residency.finish_hook()));
         self.kv_residency = Some(residency);
+    }
+
+    /// Records that persistence was refused (fail closed): no residency is
+    /// installed, and the status reports state `refused` with `reason`.
+    pub fn refuse_kv_persistence(&mut self, reason: &'static str) {
+        self.kv_persist_refused = Some(reason);
     }
 
     pub fn kv_residency(&self) -> Option<&KvResidency> {
@@ -533,10 +544,16 @@ impl AienRuntimeSpine {
         let mut report = self.pool_status_report();
         // After the pool guard is released: the residency status takes the KV
         // read lock itself (a nested read could wait behind a queued writer).
-        report.kv_persist = self
-            .kv_residency
-            .as_ref()
-            .map(|r| Box::new(r.persist_report()));
+        report.kv_persist = match (&self.kv_residency, self.kv_persist_refused) {
+            (Some(r), _) => Some(Box::new(r.persist_report())),
+            (None, Some(reason)) => Some(Box::new(crate::control::KvPersistReport {
+                kv_store_state: "refused".to_string(),
+                kv_store_refused_reason: reason.to_string(),
+                kv_store_key_refused_total: aien_kv_store::seal::key_refusals_total(),
+                ..Default::default()
+            })),
+            (None, None) => None,
+        };
         report
     }
 

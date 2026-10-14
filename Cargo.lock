@@ -252,8 +252,11 @@ name = "aien-kv-store"
 version = "0.1.0"
 dependencies = [
  "aien-platform",
+ "libc",
+ "ring",
  "serde_json",
  "sha2 0.10.9",
+ "zeroize",
 ]
 
 [[package]]

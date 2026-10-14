@@ -32,7 +32,7 @@ use aien_kv_store::{
     PinnedSource, RecoveryProgress,
 };
 use aien_platform::PlatformError;
-use aien_runtime::compute_config::{ModelBinding, StoreInputs};
+use aien_runtime::compute_config::{HostEngineIdentity, ModelBinding, StoreInputs};
 use aien_runtime::kv_residency::{
     layout_strides, KvIdentity, KvResidency, KvResidencyConfig, KvResidencyStatus, ResidencyState,
 };
@@ -341,16 +341,20 @@ fn install_store(spine: &mut AienRuntimeSpine, kv: &SharedKvManager, opts: &Opts
     let layout = layout_strides(kv.read().pool().expect("pool").layout());
     let arith = ReferenceCpuBackend::new().name();
     let binding = ModelBinding::from_model(&config, arith).expect("binding");
+    let engine = HostEngineIdentity::reference(arith).expect("engine identity");
     let fields = binding
-        .namespace_fields(&StoreInputs {
-            model_sha256: [8u8; 32],
-            model_digest_kind: "sha256",
-            dtype: KvDtype::Bf16,
-            layout,
-            backend_format: BackendFormat::HostPagedPoolV1,
-            chunk_tokens: CHUNK as u32,
-            sharing_namespace: "default",
-        })
+        .namespace_fields(
+            &StoreInputs {
+                model_sha256: [8u8; 32],
+                model_digest_kind: "sha256",
+                dtype: KvDtype::Bf16,
+                layout,
+                backend_format: BackendFormat::HostPagedPoolV1,
+                chunk_tokens: CHUNK as u32,
+                sharing_namespace: "default",
+            },
+            &engine.identity(),
+        )
         .expect("fields");
     let identity = KvIdentity::new(&fields).expect("identity");
     let ns = identity.namespace();

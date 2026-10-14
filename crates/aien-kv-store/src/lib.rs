@@ -20,6 +20,8 @@ pub mod identity;
 pub mod index;
 pub mod pin;
 pub mod record;
+#[cfg(feature = "std")]
+pub mod seal;
 pub mod store;
 pub mod validate;
 #[cfg(feature = "std")]
@@ -27,8 +29,8 @@ pub mod worker;
 
 pub use error::KvError;
 pub use identity::{
-    chunk_chain, chunk_key, BackendFormat, ChunkKey, ComputeConfig, HiddenAct, KvDtype,
-    LayoutStrides, NamespaceFields, NamespaceId, RopeScaling,
+    chunk_chain, chunk_key, BackendFormat, ChunkKey, ComputeConfig, EngineConfig, EngineIdentity,
+    HiddenAct, KvDtype, LayoutStrides, NamespaceFields, NamespaceId, RopeScaling, WeightFormat,
 };
 pub use pin::{HolderGuard, HolderHandle, PinnedDest, PinnedSource};
 pub use record::{
