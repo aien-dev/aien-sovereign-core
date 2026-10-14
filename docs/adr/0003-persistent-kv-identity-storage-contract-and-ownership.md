@@ -806,3 +806,53 @@ Waiter default conflict (ADR 7.1 says 16, METRICS_AND_SETTINGS said 8): the ADR 
 
 The first C9 host run showed 8 conversations finishing in one step submit 24 chunk parks; with `max_park_ops = 16`, 8 were refused `QueueFull` (by design: not parked, the next turn prefills). The default is now 64 (worker and host adapter), enough for 8 simultaneous finishes of up to 8 chunk parks each. Test: `default_park_bound_admits_eight_conversations_finishing_together` (red at 16, green at 64; host).
 Memory cost: the op bound is bookkeeping only (one job entry plus three reserved completion slots per op; completion capacity grows from 192 to 336 entries). Pool memory held by in-flight parks (forked holders keep finished turns' blocks referenced until written) stays bounded by the park byte limit, `max_inflight_bytes / 4` = 64 MiB by default (worker.rs `park_byte_limit`), which this change does not touch. With large real-model chunks the byte limit, not the op count, may refuse parks first (UNVERIFIED; to measure with OWN-30B geometry). The restore default stays 48: a refused restore falls back to prefill and loses nothing.
+
+## 19. Host filesystem at-rest security (2026-10-13)
+
+The host adapter (`host_fs.rs`) writes raw K/V blocks to disk. K/V is computed from user prompts, so an object file is sensitive user data. Before this section the adapter created directories `0755` and files `0644` (under the usual umask), accepted an existing root whatever its owner, mode or type, and followed symlinks on every open. Tests: `crates/aien-kv-store/tests/host_fs_security_tests.rs` (red before the fix, green after).
+
+### 19.1 Threat model
+
+- **In scope**: other local users on the same machine (other uids) reading, replacing or redirecting store files, including through symlinks or a shared parent directory.
+- **Out of scope**: a process running as the same uid as the runtime (it can read the runtime's memory anyway) and root. Physical theft of the disk is covered only by encryption at rest (19.6), which the host adapter does not provide.
+
+### 19.2 Modes
+
+Every store directory (root, `objects/`, `tmp/`, all 256 shards) is created `0700` through `DirBuilder` with mode `0700` and then chmodded to `0700`, so a permissive umask cannot widen it and a narrow umask cannot lock the runtime out. Every store file (temps, `STORE_ID.part`, fault-injection writes) is created through one helper, `create_private_file`: mode `0600`, `O_NOFOLLOW | O_CLOEXEC`, then `fchmod` to `0600` if the result differs. Missing ancestors of the root, when the root is created recursively, get `0700` subject to the umask. VERIFIED by the umask tests, which re-run the creation test in a child process under umask `000` and `277`.
+
+### 19.3 Ownership, symlink and refusal checks
+
+`check_private_dir` uses `lstat` and requires: a real directory (not a symlink), owner = effective uid, no group or other permission bit. An existing directory that fails is refused with `PlatformError::AccessDenied`; the adapter never chmods an existing directory. Every existing directory (root, `tmp/`, `objects/`, every existing shard) is checked **before anything is created**, so a refused store is left exactly as it was (test: a shared last shard `ff` leaves no new entry).
+
+### 19.4 Ancestor rule
+
+The root's parent (the nearest existing ancestor when the root does not exist yet) must be a directory owned by the effective uid or by root, and if group or others can write it, it must carry the sticky bit (like `/tmp`, `1777`). Otherwise `AccessDenied`. Reason: whoever can write the parent can rename the root away and put their own directory in its place; the sticky bit stops other users renaming or removing entries they do not own. Only the immediate parent is checked; ancestors above it need not be `0700`.
+
+### 19.5 Reads, foreign files and legacy objects
+
+Every read (`STORE_ID`, the recovery header read, the load path) opens with `O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK` and then checks the descriptor with `fstat`: regular file, owner = effective uid. `STORE_ID` must also be exactly 16 bytes; anything else puts the store in `Failed`, as an unreadable `STORE_ID` already did.
+
+A symlink, a non-regular file or another owner's file inside a shard is a `foreign_file` under the existing section 4.1 rule: counted, **left alone, never read, never served, never deleted** (we did not write it). The load path treats such a file as not found and drops it from the index. No new deletion policy is introduced.
+
+**Legacy objects**: an object of ours written before this section (owner = effective uid, mode `0644` or `0664`) is tightened to `0600` with `fchmod` on the descriptor during recovery, then validated and served as before. Rejecting them would throw away a valid cache for no security gain once the directories are private. If the `fchmod` fails, the file is counted as unreadable (kept, not served). `STORE_ID` is tightened the same way.
+
+Crash recovery is unchanged: a leftover temp or `STORE_ID.part` is ours in a verified private `tmp/`, so creation truncates it through `O_NOFOLLOW` instead of failing, and recovery still unlinks every `*.part` (4.1 step 2). A create that fails (for example on a planted symlink, `ELOOP`) leaves the path alone; the adapter only unlinks a temp its own successful create made.
+
+### 19.6 Residual race (why no per-operation dirfd/openat)
+
+Checks use paths, so a component could in principle be swapped between the check and the use. Once the root is verified as a real `0700` directory owned by the effective uid, under a trusted parent (19.4), no other non-root uid can create, rename or remove anything inside it, so only the same uid could perform the swap, and the same uid is out of scope (19.1). Final-component opens use `O_NOFOLLOW` and descriptor checks anyway. Per-operation `openat` on held directory descriptors is therefore not required; it becomes required if the threat model ever admits untrusted writers inside the root.
+
+### 19.7 Encryption at rest
+
+The host adapter does **not** encrypt. Object files are plaintext K/V protected only by file permissions; anyone with root, or with the raw disk, can read them. Encryption belongs in the record payload, as on the native path, where every slot is an M5 envelope bound to namespace, chunk key, slot and incarnation (section 2.5, section 9 item 5). A host equivalent (an encrypted payload format, `backend_format` other than 1, with a key that exists only while the runtime is unlocked) is **required before multi-tenant use** and before storing on media that leaves the operator's control. Encryption does not give tenant isolation by itself: one runtime key decrypts every tenant's objects; isolation needs per-tenant keys or namespaces (19.9) plus authorization at lookup.
+
+### 19.8 Lifecycle deletion (current behaviour, VERIFIED in `host_fs.rs`)
+
+- `delete`, eviction, purge of unindexed files and corrupt objects found by recovery or load: the file is unlinked on the worker.
+- Shutdown, drop and process exit: published objects stay on disk by design (the store is persistent); recovery re-indexes them at the next open.
+- Unlink only removes the name. The adapter does not overwrite or discard the blocks, so deleted K/V remains on the device until the filesystem reuses the space (and on SSDs possibly longer, because of wear levelling). Only encryption with key destruction (19.7) makes deletion final.
+- Uninstall: no code removes `AIEN_KV_STORE_DIR`; the operator must delete the directory. UNKNOWN/TODO: an uninstall or `kv-store wipe` command.
+
+### 19.9 Namespace isolation (known gap)
+
+The namespace id has no tenant or user field. Its `sharing_namespace` field (1.2 field 13) comes on the host from one process-wide setting, `AIEN_KV_STORE_NAMESPACE`, so every request served by one runtime shares one namespace and can hit another request's cached prefix (a timing and content side channel between users of the same runtime). The native mapping (section 9) binds the subject id; the host path does not. TODO: a per-tenant or per-subject namespace component on the host, decided before any multi-tenant deployment. Until then the supported deployment is one trust domain per runtime and store directory.

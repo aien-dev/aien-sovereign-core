@@ -6,7 +6,7 @@ Companion to ADR 0003 (revised after the independent review). Names are final; v
 
 | name | type and unit | default | effect | parsed in |
 |---|---|---|---|---|
-| `AIEN_KV_STORE_DIR` | path | unset = persistence off | root of the host object store (ADR 2.4). Unset: no store, no park, no restore, zero behaviour change | `shared_kv.rs` |
+| `AIEN_KV_STORE_DIR` | path | unset = persistence off | root of the host object store (ADR 2.4). Must be private: created 0700 if missing; an existing root, `tmp/`, `objects/` or shard that is a symlink, not ours, or reachable by group or others is refused (`AccessDenied`), and so is a root whose parent others can write unless the parent is sticky (ADR 19). Unset: no store, no park, no restore, zero behaviour change | `shared_kv.rs` |
 | `AIEN_KV_STORE_NAMESPACE` | string, at most 64 bytes | `default` | sharing namespace (ADR 1.2 field 13) | `shared_kv.rs` |
 | `AIEN_KV_STORE_QUOTA_BYTES` | bytes, decimal integer | 8 GiB | disk quota counting every object found at recovery | `shared_kv.rs` (checked by name, applied to `HostFsConfig`; default in `host_fs.rs`) |
 | `AIEN_KV_STORE_MAX_OBJECTS` | count | 65536 | index cap at recovery and at runtime (ADR 4.1) | `shared_kv.rs` (checked by name, applied to `HostFsConfig`; default in `host_fs.rs`) |
