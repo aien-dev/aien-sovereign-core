@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Persistent KV acceptance check on the chip (sc#505, locked by #499). CHIP-ONLY: never run by
-# CI or cargo test. It starts its OWN servers on 127.0.0.1:18095 (never touches :18091, the live
+# CI or cargo test. It starts its OWN servers on 127.0.0.1:18097 (PKV_CHECK_PORT; never touches :18091, the live
 # server, or its PID/log files) and loads the 30B checkpoint each time (~30.5 GB resident, about
 # 18 s load plus the checkpoint digest when persistence is on).
 #
@@ -29,7 +29,7 @@
 set -euo pipefail
 dir=$1 BIN=$2
 MODEL=${OWN30B_MODEL_DIR:-$HOME/models/qwen3-30b-a3b-instruct-2507-fp8}
-PORT=18095
+PORT=${PKV_CHECK_PORT:-18097}
 base="http://127.0.0.1:$PORT"
 mkdir -p "$dir"
 work=$(mktemp -d /tmp/pkv505-chip.XXXXXX)
@@ -41,8 +41,8 @@ if curl -s -m 2 http://127.0.0.1:18091/health >/dev/null 2>&1 && [ "${PKV_CHECK_
 	echo "refusing: the live server on :18091 is up (pause it first, or PKV_CHECK_WITH_LIVE=1)" >&2
 	exit 2
 fi
-if curl -s -m 2 "$base/health" >/dev/null 2>&1; then
-	echo "refusing: something already listens on :$PORT" >&2
+if ss -Hltn "sport = :$PORT" | grep -q . || curl -s -m 2 "$base/health" >/dev/null 2>&1; then
+	echo "refusing: something already listens on :$PORT (18095 is spark-cockpit; pick a free PKV_CHECK_PORT)" >&2
 	exit 2
 fi
 if [ "${PKV_CHECK_EPHEMERAL_KEY:-0}" = 1 ]; then
