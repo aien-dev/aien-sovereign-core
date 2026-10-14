@@ -99,9 +99,7 @@ mod tests {
         assert!(review
             .labels
             .contains(&"sovereign-audit-failed".to_string()));
-        assert!(review
-            .markdown
-            .contains("Doctrine Diff Audit: FAILED"));
+        assert!(review.markdown.contains("Doctrine Diff Audit: FAILED"));
         assert!(!review.markdown.contains('\u{2014}'));
         assert!(!review.markdown.contains('\u{2013}'));
     }
