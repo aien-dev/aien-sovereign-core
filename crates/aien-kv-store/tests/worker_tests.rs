@@ -2448,3 +2448,24 @@ fn shutdown_cancels_a_job_that_is_still_being_handed_to_the_store() {
     );
     assert_eq!(mem.bytes(), vec![0xEE; 2 * BLOCK]);
 }
+
+// ---- default park bound (C9 bench finding) ---------------------------------
+
+#[test]
+fn default_park_bound_admits_eight_conversations_finishing_together() {
+    // The C9 bench: 8 conversations finishing in one step park 3 chunks each
+    // (24) and the old default of 16 refused 8 of them. The default must
+    // admit 8 conversations of up to 8 parks each with no QueueFull.
+    let defaults = WorkerConfig::default();
+    let w = w_with(|_| {}, |_| {});
+    assert_eq!(w.worker.capacity().max_park_ops, defaults.max_park_ops);
+    let mut refused = 0;
+    for n in 0..64u32 {
+        if w.store(1000 + n).is_err() {
+            refused += 1;
+        }
+    }
+    assert_eq!(refused, 0, "parks refused at 8 conversations x 8 chunks");
+    w.resume();
+    w.settle();
+}
