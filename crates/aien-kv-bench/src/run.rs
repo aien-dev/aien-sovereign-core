@@ -303,6 +303,23 @@ impl Bench {
     }
 }
 
+/// Per-class store bounds (ADR 7.1) large enough that every chunk of every
+/// conversation finishing in the same step is admitted: `c` times the chunks of
+/// the longest turn plus one tail, never below the defaults (48 restore, 16
+/// park). With the defaults, 8 conversations of 512 tokens finishing together
+/// submit 24 parks and 8 are refused `QueueFull` (by design: not parked this
+/// turn), so their next turn prefills and the row could not be called a restore.
+pub fn store_op_bounds(spec: &RunSpec, c: u32, turn_tokens: usize) -> (u32, u32) {
+    let defaults = aien_kv_store::worker::WorkerConfig::default();
+    let chunk_tokens = spec.chunk_blocks as usize * spec.block_size;
+    let per_conv = turn_tokens.div_ceil(chunk_tokens.max(1)) as u32 + 1;
+    let need = c.saturating_mul(per_conv);
+    (
+        need.max(defaults.max_restore_ops),
+        need.max(defaults.max_park_ops),
+    )
+}
+
 fn build(spec: &RunSpec, mode: Mode, c: u32, prompt: u32) -> Result<Bench, String> {
     let turn2_len =
         prompt as usize + spec.turn1_max_tokens + spec.turn2_suffix_tokens + spec.turn2_max_tokens;
@@ -346,10 +363,14 @@ fn build(spec: &RunSpec, mode: Mode, c: u32, prompt: u32) -> Result<Bench, Strin
         let dir_s = dir.to_string_lossy().to_string();
         let chunk = spec.chunk_blocks.to_string();
         let restore_max = total_blocks.to_string();
+        let (restore_ops, park_ops) = store_op_bounds(spec, c, turn2_len);
+        let (restore_ops, park_ops) = (restore_ops.to_string(), park_ops.to_string());
         let settings = KvPersistSettings::from_lookup(|k| match k {
             KV_STORE_DIR_ENV => Some(dir_s.clone()),
             KV_CHUNK_BLOCKS_ENV => Some(chunk.clone()),
             KV_RESTORE_MAX_BLOCKS_ENV => Some(restore_max.clone()),
+            "AIEN_KV_STORE_MAX_RESTORE_OPS" => Some(restore_ops.clone()),
+            "AIEN_KV_STORE_MAX_PARK_OPS" => Some(park_ops.clone()),
             _ => None,
         })?;
         queue_depth = settings.worker.dispatch_depth;
@@ -445,9 +466,11 @@ pub async fn run_row(spec: &RunSpec, mode: Mode, c: u32, prompt: u32) -> Result<
                     let committed = after.restore_committed_total - before.restore_committed_total;
                     if committed != u64::from(c) {
                         return Err(format!(
-                            "round {round}: {committed} of {c} turn-2 requests committed a restore (fallbacks {}); refusing to label the row restore",
+                            "round {round}: {committed} of {c} turn-2 requests committed a restore (fallbacks {}); refusing to label the row restore; before {:?} after {:?}",
                             after.restore_fallback_prefill_total
-                                - before.restore_fallback_prefill_total
+                                - before.restore_fallback_prefill_total,
+                            before,
+                            after
                         ));
                     }
                     restored += after.restore_tokens_total - before.restore_tokens_total;
