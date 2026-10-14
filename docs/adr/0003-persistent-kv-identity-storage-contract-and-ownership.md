@@ -493,13 +493,13 @@ Reported separately, never conflated (names in METRICS_AND_SETTINGS.md):
 
 ## 11. Guarantee matrix
 
-Every row is **PLANNED** until its cut merges with a green run and a receipt; nothing here is TESTED today.
+Every cell carries one label: PLANNED, TESTED(receipt), NOT CLAIMED or NOT_RUN. A TESTED receipt is the name of the test that proves the cell (host only, `pkv/integration`); `kv_restart_test.rs::guarantee_matrix_rows_are_labelled` checks the labels and that every named test exists. A cell stays PLANNED until its cut merges with a green run.
 
 | scenario | host adapter | native adapter | claim |
 |---|---|---|---|
-| adapter recreation (same process, new `KvStore` over the same dir/slab) | PLANNED (C4: recover, lookup, load, bytes equal) | PLANNED, host emulation over `disk_file` (N3) | objects published before `close` are served |
-| process restart (real child process, `current_exe` pattern of `approved_crash_test.rs:80-89`) | PLANNED (C7) | PLANNED as emulator reboot on one image (N5) | greedy continuation equals baseline |
-| host fault at each publication boundary (P1 to P5, section 2.4) | PLANNED (C4, `FsOps` fault seam) | n/a | consistent outcome at every boundary; `Indeterminate` reported, never silent |
+| adapter recreation (same process, new `KvStore` over the same dir/slab) | TESTED(store_then_recreate_adapter_serves_same_bytes) (C4: recover, lookup, load, bytes equal) | PLANNED, host emulation over `disk_file` (N3) | objects published before `close` are served |
+| process restart (real child process, `current_exe` pattern of `approved_crash_test.rs:80-89`) | TESTED(process_restart_rediscovers_and_restores_identical_bytes, greedy_continuation_after_restart_matches_uninterrupted_baseline) (C7: real child processes on a temp-dir host store; greedy on the CPU reference backend only) | PLANNED as emulator reboot on one image (N5) | greedy continuation equals baseline |
+| host fault at each publication boundary (P1 to P5, section 2.4) | TESTED(fault_at_each_publication_boundary_leaves_consistent_outcome) (C4, `FsOps` fault seam) | NOT CLAIMED (no host publication boundaries natively; the slab write order belongs to cut N2) | consistent outcome at every boundary; `Indeterminate` reported, never silent |
 | clean reboot | NOT CLAIMED on the host (no reboot test; fsync + rename + dir fsync is the standard recipe, INFERRED sufficient) | PLANNED in QEMU only (N5 is a reboot); physical Spark NOT_RUN (aienos#336) | emulator only |
 | abrupt power loss | NOT CLAIMED on the host | PLANNED in emulation with the `disk_file` power-cut injector at every unit boundary (N2, same method as the store crash tests); physical NOT_RUN | no partial record is ever exposed; durability of `Published`-but-not-`Durable` slots is not claimed |
 | real cold boot on hardware | NOT CLAIMED | PLANNED on a Raspberry Pi 5, labelled "native physical (Pi 5)" (cut P3, section 16); Spark-native stays NOT_RUN (aienos#336) | reboot through tryboot is a firmware restart, not a power cut |

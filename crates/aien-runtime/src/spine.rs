@@ -6,7 +6,7 @@ use crate::context::ContextComposer;
 use crate::control::{
     ControlCommand, ControlEnvelope, ControlResponse, RuntimeController, RuntimeStatusReport,
 };
-use crate::kv_residency::{KvResidency, KvResidencyStatus};
+use crate::kv_residency::{KvDrainHandle, KvResidency, KvResidencyStatus};
 use crate::sequence::{SequenceArena, SequenceId, SequenceState};
 use crate::swarm::{SwarmConfig, SwarmManager, SwarmState};
 use crate::world::WorldStore;
@@ -141,6 +141,11 @@ impl AienRuntimeSpine {
     /// Persistent-KV status fields (METRICS_AND_SETTINGS), `None` when off.
     pub fn kv_residency_status(&self) -> Option<KvResidencyStatus> {
         self.kv_residency.as_ref().map(KvResidency::status)
+    }
+
+    /// The shutdown drain of the persistent-KV store (ADR 7.5), `None` when off.
+    pub fn kv_drain_handle(&self) -> Option<KvDrainHandle> {
+        self.kv_residency.as_ref().map(KvResidency::drain_handle)
     }
 
     /// Registers a completion sink for streaming output events.
@@ -525,6 +530,17 @@ impl AienRuntimeSpine {
     }
 
     pub fn status_report(&self) -> RuntimeStatusReport {
+        let mut report = self.pool_status_report();
+        // After the pool guard is released: the residency status takes the KV
+        // read lock itself (a nested read could wait behind a queued writer).
+        report.kv_persist = self
+            .kv_residency
+            .as_ref()
+            .map(|r| Box::new(r.persist_report()));
+        report
+    }
+
+    fn pool_status_report(&self) -> RuntimeStatusReport {
         let kv = self.kv_manager.read();
         let metrics = kv.metrics();
         let free = kv.free_block_count();
@@ -547,6 +563,12 @@ impl AienRuntimeSpine {
             shared_kv_pages: metrics.shared_pages,
             cow_faults: metrics.cow_faults,
             gpu_utilization_pct: pressure_pct,
+            kv_pool_allocated_bytes: kv.pool().map_or(0, |p| p.layout().total_bytes as u64),
+            kv_pool_total_blocks: total,
+            kv_pool_free_blocks: free,
+            kv_pool_used_blocks: allocated,
+            kv_pool_holder_blocks: kv.holder_block_count(),
+            kv_persist: None,
         }
     }
 }

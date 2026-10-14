@@ -1019,8 +1019,12 @@ async fn indeterminate_park_publication_is_counted() {
     let s = status(&r).stats;
     assert_eq!(s.park_jobs_total, 2);
     assert_eq!(s.park_indeterminate_total, 1, "{s:?}");
-    assert_eq!(
-        s.park_published_total, 2,
-        "an indeterminate object is published"
+    // The object is published and served, its durability unknown (the fake
+    // reports it on a failed terminal and the store goes Degraded).
+    let ks = keys(&r, &computed16());
+    let flags: Vec<Option<bool>> = ks.iter().map(|k| r.fake.is_indeterminate(k)).collect();
+    assert!(
+        flags.contains(&Some(true)),
+        "an indeterminate object exists: {flags:?}"
     );
 }

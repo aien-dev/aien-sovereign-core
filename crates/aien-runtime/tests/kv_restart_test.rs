@@ -372,9 +372,15 @@ async fn child_paint_restore(dir: &Path) {
     wait_store_open(&r.spine);
 
     // A6 (restart accounting): every object found at recovery is counted,
-    // whatever its namespace.
+    // whatever its namespace. The miss role runs right after the park, so it
+    // finds exactly the two parked chunks (of another namespace); later
+    // children also find what earlier restore children parked.
     let cap = r.spine.kv_residency().expect("residency").store_capacity();
-    assert_eq!(cap.objects, 2, "both parked chunks rediscovered: {cap:?}");
+    if expect == "miss" {
+        assert_eq!(cap.objects, 2, "both parked chunks rediscovered: {cap:?}");
+    } else {
+        assert!(cap.objects >= 2, "parked chunks rediscovered: {cap:?}");
+    }
     assert!(cap.used_bytes > 0, "{cap:?}");
 
     let prompt = restore_prompt();
@@ -417,6 +423,12 @@ async fn child_paint_restore(dir: &Path) {
             "plain prefill from position zero"
         );
     }
+    // Let this turn's own parks reach their terminals, so the drain has
+    // nothing to cancel.
+    paint_step_until(&mut r, "turn finished and parks terminal", |r| {
+        finished(&r.spine, seq) && kv_status(&r.spine).parking_jobs == 0
+    })
+    .await;
     drain(&r.spine);
 }
 
@@ -869,9 +881,7 @@ fn guarantee_matrix_rows_are_labelled() {
     assert_eq!(rows.len(), 6, "matrix rows");
 
     let mut sources = String::new();
-    for dir in ["crates"] {
-        collect_rs(&root.join(dir), &mut sources);
-    }
+    collect_rs(&root.join("crates"), &mut sources);
     let mut tested = Vec::new();
     for row in &rows {
         for cell in &row[1..3] {
