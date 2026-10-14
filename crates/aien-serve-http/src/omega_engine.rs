@@ -204,6 +204,14 @@ impl OmegaDoor {
         self.engine.with_engine(|e| e.export_kv(0, len))?
     }
 
+    /// Imports `payload` as the K/V of `tokens` (positions `0..tokens.len()`), under the GPU lock,
+    /// exactly as a restore does (the chip check times it and round-trips it against
+    /// [`Self::export_kv_for_check`]). On error the engine is reset.
+    pub fn restore_kv_for_check(&self, tokens: &[u32], payload: &[u8]) -> Result<(), String> {
+        let _lock = GpuLock::acquire_at(&self.lock_path, self.lock_wait)?;
+        self.engine.with_engine(|e| e.restore_kv(tokens, payload))?
+    }
+
     /// Forgets the KV the engine holds (the next prompt is prefilled, or restored from the store).
     pub fn reset_kv(&self) {
         let _ = self.engine.with_engine(|e| e.reset());
