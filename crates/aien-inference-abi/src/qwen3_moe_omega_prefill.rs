@@ -261,6 +261,10 @@ pub struct WholePromptPrefill<D: PrefillDevice> {
     pub stats: PrefillStats,
     /// GPU-cached copies of the FP8 weights ([`Self::cache_weights`]); empty = read in place.
     cached: Vec<D::Buf>,
+    /// Correctness-gate recorder (W-L1G-C, 2026-10-14): `None` = off. See [`WpTrace`].
+    pub trace: Option<WpTrace>,
+    /// Negative-control mutant (W-L1G-C): `WpMutant::None` in service.
+    pub mutant: WpMutant,
 }
 
 impl<D: PrefillDevice> std::fmt::Debug for WholePromptPrefill<D> {
@@ -272,7 +276,7 @@ impl<D: PrefillDevice> std::fmt::Debug for WholePromptPrefill<D> {
 impl<D: PrefillDevice> WholePromptPrefill<D> {
     /// Collects the in-place weight addresses of every layer (no weight copy).
     pub fn new(dev: D, weights: &Qwen3MoeOmegaWeights) -> Result<Self, String> {
-        Ok(Self { dev, entries: layer_entries(weights)?, bufs: None, stats: PrefillStats::default(), cached: Vec::new() })
+        Ok(Self { dev, entries: layer_entries(weights)?, bufs: None, stats: PrefillStats::default(), cached: Vec::new(), trace: None, mutant: WpMutant::None })
     }
 
     pub fn device(&self) -> &D {
@@ -412,6 +416,12 @@ impl<D: PrefillDevice> WholePromptPrefill<D> {
             Ok((tiles.va() + off as u64, tab.len()))
         };
         let dense = [m as u32];
+        // W-L1G-C gate hooks: the recorder (a field disjoint from dev / bufs) and the mutant switch.
+        let mutant = self.mutant;
+        let mut tr = self.trace.as_mut();
+        if let Some(t) = tr.as_deref_mut() {
+            t.begin(m, weights.layers.len(), h, top_k);
+        }
 
         for (l, layer) in weights.layers.iter().enumerate() {
             let ent = &self.entries[l];
@@ -423,6 +433,9 @@ impl<D: PrefillDevice> WholePromptPrefill<D> {
                 xin[..m * h].par_chunks_mut(h).zip(x.par_chunks(h)).for_each(|(o, xr)| rmsnorm(xr, &layer.input_norm, eps, o));
             }
             st.host_ns += t.elapsed().as_nanos() as u64;
+            if let Some(t) = tr.as_deref_mut().filter(|t| t.ops_layer == Some(l)) {
+                t.ops.x_norm = host(&b.xin, "xin")?[..m * h].to_vec();
+            }
             st.chip_ns += dev.quant(h, QuantIn::F32, m, b.xin.va(), b.xq.va(), b.xs.va()).map_err(|err| format!("layer {l} quant x: {err}"))?;
             st.quant += 1;
 
@@ -455,6 +468,14 @@ impl<D: PrefillDevice> WholePromptPrefill<D> {
                 b.xin.va()
             };
             st.attn += 1;
+            if let Some(t) = tr.as_deref_mut().filter(|t| t.ops_layer == Some(l)) {
+                t.ops.qkv = match (&b.qkv_dev, &b.qkv_host) {
+                    (Some(d), _) => read_dev(&mut *dev, d.va(), m * qkv_n)?,
+                    (None, Some(hb)) => host(hb, "q|k|v")?[..m * qkv_n].to_vec(),
+                    (None, None) => Vec::new(),
+                };
+                t.ops.attn = if b.att_dev.is_some() { read_dev(&mut *dev, att_va, m * qd)? } else { host(&b.xin, "xin")?[..m * qd].to_vec() };
+            }
             st.chip_ns += dev.quant(qd, QuantIn::F32, m, att_va, b.xq.va(), b.xs.va()).map_err(|err| format!("layer {l} quant attn: {err}"))?;
             st.quant += 1;
 
@@ -463,6 +484,9 @@ impl<D: PrefillDevice> WholePromptPrefill<D> {
             let call = QgemmCall { n: h, k: qd, layout: Layout::Plain, tiles_va: tv, ntiles: nt, rowidx_va: 0, xq_va: b.xq.va(), xs_va: b.xs.va(), y_va: b.oproj.va() };
             st.chip_ns += dev.qgemm(&call).map_err(|err| format!("layer {l} o gemm x{m}: {err}"))?;
             st.o += 1;
+            if let Some(t) = tr.as_deref_mut().filter(|t| t.ops_layer == Some(l)) {
+                t.ops.oproj = host(&b.oproj, "o projection")?[..m * h].to_vec();
+            }
 
             // --- residual, post norm (into the quantiser input), routing, sort ---
             let t = Instant::now();
@@ -473,11 +497,24 @@ impl<D: PrefillDevice> WholePromptPrefill<D> {
                         *xi += p;
                     }
                 });
+                if let Some(t) = tr.as_deref_mut() {
+                    t.x_mid[l].copy_from_slice(&x);
+                }
                 let post = host_mut(&mut b.xin, "xin")?;
                 post[..m * h].par_chunks_mut(h).zip(x.par_chunks(h)).for_each(|(o, xr)| rmsnorm(xr, &layer.post_norm, eps, o));
                 router_logits(&layer.router, &post[..m * h], h, e, &mut logits);
+                if mutant == WpMutant::Routing {
+                    rotate_logits(&mut logits, e);
+                }
+                if let Some(t) = tr.as_deref_mut().filter(|t| t.ops_layer == Some(l)) {
+                    t.ops.post = post[..m * h].to_vec();
+                    t.ops.logits = logits.clone();
+                }
                 let plan = MoeBatchPlan::from_logits(&logits, m, e, top_k).map_err(|err| format!("layer {l} routing: {err}"))?;
                 let sort = ExpertSort::from_plan(&plan);
+                if let Some(t) = tr.as_deref_mut() {
+                    t.experts[l].copy_from_slice(&plan.topk_experts);
+                }
                 as_u32_mut(b.rowidx.host_mut().ok_or("row index is not a host buffer")?)?[..g].copy_from_slice(&sort.rows);
                 (sort, plan.topk_weights)
             };
@@ -488,6 +525,12 @@ impl<D: PrefillDevice> WholePromptPrefill<D> {
 
             // --- experts: gate|up with the SwiGLU epilogue (rows gathered by token), act quantised, down ---
             let (tv, nt) = put_tiles(&mut b.tiles, b.max_tiles, Region::GateUp, &ent.gu_w, &ent.gu_s, &sort.counts)?;
+            if mutant == WpMutant::GateUpScales {
+                // GEMM mutant: every expert's weights with the NEXT expert's scale blocks (same table size, same region).
+                let mut s = ent.gu_s.clone();
+                s.rotate_left(1);
+                put_tiles(&mut b.tiles, b.max_tiles, Region::GateUp, &ent.gu_w, &s, &sort.counts)?;
+            }
             let call = QgemmCall { n: 2 * i, k: h, layout: Layout::SwigluNat, tiles_va: tv, ntiles: nt, rowidx_va: b.rowidx.va(), xq_va: b.xq.va(), xs_va: b.xs.va(), y_va: b.act.va() };
             st.chip_ns += dev.qgemm(&call).map_err(|err| format!("layer {l} gate|up gemm x{g}: {err}"))?;
             st.gate_up += 1;
@@ -500,6 +543,13 @@ impl<D: PrefillDevice> WholePromptPrefill<D> {
 
             let t = Instant::now();
             combine_rows(&mut x, &host(&b.down, "down rows")?[..g * h], &wts, &sort.inv, h, top_k);
+            if let Some(t) = tr.as_deref_mut() {
+                t.x_out[l].copy_from_slice(&x);
+                if t.ops_layer == Some(l) {
+                    let moe: Vec<f32> = x.iter().zip(&t.x_mid[l]).map(|(a, b)| a - b).collect();
+                    t.ops.moe_out = moe;
+                }
+            }
             st.host_ns += t.elapsed().as_nanos() as u64;
         }
         let t = Instant::now();
@@ -537,6 +587,96 @@ pub fn combine_rows(x: &mut [f32], down_sorted: &[f32], wts: &[f32], inv: &[u32]
             *xi += a;
         }
     });
+}
+
+/// Host mirror of the activation quantiser (W-L1G-C).
+pub mod fake_quant;
+
+/// Negative-control mutants of the whole-prompt path (W-L1G-C). Each must be caught by the gate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum WpMutant {
+    #[default]
+    None,
+    /// Every chosen expert id becomes its neighbour `(ex + 1) % e`, weights unchanged (the
+    /// engine's `routing_mutant`, done by rotating each token's router logits by one).
+    Routing,
+    /// The gate|up GEMM reads every expert's weights with the next expert's scale blocks.
+    GateUpScales,
+}
+
+/// One layer's intermediate values for every token (recorded at [`WpTrace::ops_layer`]).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct WpOps {
+    /// `m x hidden` input RMSNorm output (the q|k|v GEMM input before quantisation).
+    pub x_norm: Vec<f32>,
+    /// `m x qkv_n` fused projection rows.
+    pub qkv: Vec<f32>,
+    /// `m x q_dim` attention output (the o GEMM input before quantisation).
+    pub attn: Vec<f32>,
+    /// `m x hidden` o projection.
+    pub oproj: Vec<f32>,
+    /// `m x hidden` post RMSNorm output (the gate|up GEMM input before quantisation).
+    pub post: Vec<f32>,
+    /// `m x experts` router logits.
+    pub logits: Vec<f32>,
+    /// `m x hidden` weighted expert sum (what the experts add to the residual).
+    pub moe_out: Vec<f32>,
+}
+
+/// Correctness-gate recorder (W-L1G-C): per layer, every token's residual after the attention
+/// block (`x_mid`), after the experts (`x_out`) and the chosen experts (token-major, slot
+/// order); plus every op of one layer (`ops_layer`). The same shape is filled by the OFF path
+/// and the W8A8 control (`qwen3_moe_omega::w8a8_control`), so the three can be compared per
+/// layer and per op.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct WpTrace {
+    pub m: usize,
+    pub hidden: usize,
+    pub top_k: usize,
+    /// Per layer `m x hidden`.
+    pub x_mid: Vec<Vec<f32>>,
+    pub x_out: Vec<Vec<f32>>,
+    /// Per layer `m x top_k` expert ids.
+    pub experts: Vec<Vec<u32>>,
+    pub ops_layer: Option<usize>,
+    pub ops: WpOps,
+}
+
+impl WpTrace {
+    /// A recorder of every layer's residuals and the ops of `ops_layer`.
+    pub fn new(ops_layer: Option<usize>) -> Self {
+        Self { ops_layer, ..Default::default() }
+    }
+
+    /// Sizes the per-layer stores for `m` tokens (called by the run being recorded).
+    pub fn begin(&mut self, m: usize, layers: usize, hidden: usize, top_k: usize) {
+        self.m = m;
+        self.hidden = hidden;
+        self.top_k = top_k;
+        self.x_mid = vec![vec![0.0f32; m * hidden]; layers];
+        self.x_out = vec![vec![0.0f32; m * hidden]; layers];
+        self.experts = vec![vec![0u32; m * top_k]; layers];
+        self.ops = WpOps::default();
+    }
+
+    pub fn layers(&self) -> usize {
+        self.x_out.len()
+    }
+}
+
+/// Rotates every token's router logits right by one, so the top-k ids all move to `(ex + 1) % e`
+/// with the same softmax weights (the routing mutant on a whole-prompt batch).
+pub fn rotate_logits(logits: &mut [f32], e: usize) {
+    for row in logits.chunks_mut(e) {
+        row.rotate_right(1);
+    }
+}
+
+/// Reads `n` f32 of a device-private buffer through a temporary HOST buffer (gate recorder only).
+fn read_dev<D: PrefillDevice>(dev: &mut D, va: u64, n: usize) -> Result<Vec<f32>, String> {
+    let tmp = dev.alloc_host(n * 4)?;
+    dev.copy_va(tmp.va(), va, n * 4).map_err(|e| format!("recorder copy of {n} f32: {e}"))?;
+    Ok(host(&tmp, "recorder scratch")?[..n].to_vec())
 }
 
 #[cfg(test)]

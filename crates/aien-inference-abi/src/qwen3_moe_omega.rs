@@ -29,6 +29,7 @@ use crate::qwen3_moe::{bf16_to_f32, f32_to_bf16, fp8_table, shard_path, Shard, F
 use crate::moe_plan::MoeBatchPlan;
 use crate::resident::transpose_bf16_for_upload;
 mod whole_prompt;
+pub mod w8a8_control;
 
 /// Column tile of the engine's tile-major B layout: every expert window must start on one.
 pub const WINDOW_TILE: usize = aien_omega_moe::TILE_N;

@@ -49,6 +49,23 @@ impl Qwen3MoeOmegaEngine {
         self.whole_prompt.is_some()
     }
 
+    /// Correctness gate (W-L1G-C): installs or removes the recorder on the whole-prompt driver.
+    pub fn whole_prompt_set_trace(&mut self, trace: Option<crate::qwen3_moe_omega_prefill::WpTrace>) -> Result<(), String> {
+        self.whole_prompt.as_mut().ok_or("whole-prompt prefill is off")?.trace = trace;
+        Ok(())
+    }
+
+    /// Correctness gate (W-L1G-C): takes the recorder (and what it recorded) off the driver.
+    pub fn whole_prompt_take_trace(&mut self) -> Option<crate::qwen3_moe_omega_prefill::WpTrace> {
+        self.whole_prompt.as_mut().and_then(|w| w.trace.take())
+    }
+
+    /// Correctness gate (W-L1G-C): sets the negative-control mutant of the whole-prompt driver.
+    pub fn whole_prompt_set_mutant(&mut self, mutant: crate::qwen3_moe_omega_prefill::WpMutant) -> Result<(), String> {
+        self.whole_prompt.as_mut().ok_or("whole-prompt prefill is off")?.mutant = mutant;
+        Ok(())
+    }
+
     /// The last whole-prompt call's counters (launches, chip and host time).
     pub fn whole_prompt_stats(&self) -> Option<&crate::qwen3_moe_omega_prefill::PrefillStats> {
         self.whole_prompt.as_ref().map(|w| &w.stats)
