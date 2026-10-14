@@ -965,6 +965,7 @@ impl KvPersistence {
         let fields = self.fields();
         let mut jobs: Vec<(JobId, Arc<LandBuf>)> = Vec::new();
         let mut fail: Option<String> = None;
+        let t_fetch = Instant::now();
         for c in &chunks {
             let (key, tokens) = (c.key, c.stored);
             let header = match fields.chunk_header(
@@ -988,27 +989,46 @@ impl KvPersistence {
                 break;
             }
             let buf = LandBuf::new(len);
-            let keep = buf.clone();
-            // SAFETY: `buf` stays allocated while the guard (held by the job) lives, and nobody
-            // reads it until the job's terminal completion has been polled.
-            let dst = unsafe {
-                PinnedDest::new(
-                    buf.ptr,
-                    self.block_bytes(),
-                    (0..nb).collect(),
-                    HolderGuard::new(move || drop(keep)),
-                )
-            };
-            let mut g = self.inner.lock().unwrap_or_else(|p| p.into_inner());
-            match self.worker.submit_load(key, &header, dst, self.inc()) {
-                Ok(job) => {
-                    g.loads.insert(job, None);
-                    jobs.push((job, buf));
+            // A prefix larger than the worker's restore budget is normal on the real model (a
+            // 2079-token prefix of the 30B is 204 MB, the default restore budget 192 MB): on
+            // `QueueFull` the chunk waits for the earlier loads to land and free their credit,
+            // within [`LOAD_TIMEOUT`] of the fetch start (#514). The inner lock is not held
+            // while waiting.
+            loop {
+                let keep = buf.clone();
+                // SAFETY: `buf` stays allocated while the guard (held by the job) lives, and
+                // nobody reads it until the job's terminal completion has been polled. A refused
+                // submit drops its guard; `buf` itself stays alive for the retry.
+                let dst = unsafe {
+                    PinnedDest::new(
+                        buf.ptr,
+                        self.block_bytes(),
+                        (0..nb).collect(),
+                        HolderGuard::new(move || drop(keep)),
+                    )
+                };
+                let mut g = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+                self.pump(&mut g);
+                match self.worker.submit_load(key, &header, dst, self.inc()) {
+                    Ok(job) => {
+                        g.loads.insert(job, None);
+                        jobs.push((job, buf));
+                        break;
+                    }
+                    Err(aien_platform::PlatformError::QueueFull)
+                        if t_fetch.elapsed() < LOAD_TIMEOUT =>
+                    {
+                        drop(g);
+                        std::thread::sleep(Duration::from_micros(200));
+                    }
+                    Err(e) => {
+                        fail = Some(miss_reason(&e).to_string());
+                        break;
+                    }
                 }
-                Err(e) => {
-                    fail = Some(miss_reason(&e).to_string());
-                    break;
-                }
+            }
+            if fail.is_some() {
+                break;
             }
         }
         if fail.is_none() {

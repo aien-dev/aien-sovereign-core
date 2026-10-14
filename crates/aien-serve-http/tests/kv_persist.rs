@@ -821,20 +821,22 @@ fn a_graceful_shutdown_releases_the_engine_and_flushes_the_parks() {
     assert_eq!(counters(&b).restores, 1);
 }
 
-/// #514 chip finding: on the 30B model one 256-token chunk is 25 MB and the storage worker's
-/// park budget (a quarter of `AIEN_KV_STORE_MAX_INFLIGHT_BYTES`, 64 MB by default) holds two,
-/// so a 2079-token turn parked 2 of 9 chunks and refused the rest. Here the budget holds exactly
-/// one chunk: every chunk of the turn must still be parked (the door waits for credit), and a
-/// restart must restore the whole history.
+/// #514 chip findings: on the 30B model one 256-token chunk is 25 MB. The storage worker's park
+/// budget (a quarter of `AIEN_KV_STORE_MAX_INFLIGHT_BYTES`, 64 MB by default) holds two chunks,
+/// so a 2079-token turn parked 2 of 9 chunks and refused the rest; its restore budget (the other
+/// three quarters, 192 MB) is smaller than that turn's 204 MB, so the whole restore was refused.
+/// Here the park budget holds exactly one chunk and the restore budget three, for a 7-chunk
+/// history: every chunk must still be parked and the restart must restore the whole history.
 #[test]
-fn a_park_larger_than_the_park_budget_is_parked_in_full() {
+fn a_turn_larger_than_the_park_and_restore_budgets_is_parked_and_restored_in_full() {
+    let long: Vec<u32> = (0..100u32).map(|i| (i * 11 + 5) % 64).collect();
     let probe = Scratch::new("budget-probe");
     let (a, line) = door(&probe, &Setup::new(&probe.store(), &gen_key()));
     assert!(line.contains("persistent KV: on"), "{line}");
-    let _ = turn(&a, &prompt1());
+    let _ = turn(&a, &long);
     assert!(pk_of(&a).wait_idle(WAIT));
     let c = counters(&a);
-    assert!(c.parked_chunks >= 3 && c.park_refused == 0, "{c:?}");
+    assert!(c.parked_chunks >= 7 && c.park_refused == 0, "{c:?}");
     let (n, per_chunk) = (c.parked_chunks, c.park_bytes / c.parked_chunks);
     drop(a);
 
@@ -844,25 +846,27 @@ fn a_park_larger_than_the_park_budget_is_parked_in_full() {
         .with_var("AIEN_KV_STORE_MAX_INFLIGHT_BYTES", &budget.to_string());
     let (a, line) = door(&scratch, &s);
     assert!(line.contains("persistent KV: on"), "{line}");
-    let _ = turn(&a, &prompt1());
+    let _ = turn(&a, &long);
     let h1 = a.history();
     assert!(pk_of(&a).wait_idle(WAIT));
     let c = counters(&a);
     assert_eq!(
         (c.parked_chunks, c.park_refused, c.park_failed),
         (n, 0, 0),
-        "every chunk parked through a one-chunk budget: {c:?}"
+        "every chunk parked through a one-chunk park budget: {c:?}"
     );
     drop(a);
 
-    let (_, _, u2) = uninterrupted(&scratch);
+    let plain = plain_door(&scratch);
+    let _ = turn(&plain, &long);
+    let u2 = turn(&plain, &prompt2(&plain.history()));
     let (b, _) = door(&scratch, &s);
     let r2 = turn(&b, &prompt2(&h1));
     let c = counters(&b);
     assert_eq!(
         (c.restores, c.restored_tokens),
         (1, h1.len() as u64),
-        "{c:?}"
+        "the whole history restored through a three-chunk restore budget: {c:?}"
     );
     assert_eq!(
         r2, u2,
