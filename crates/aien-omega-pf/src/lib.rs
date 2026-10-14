@@ -190,6 +190,10 @@ pub trait PrefillDevice {
     fn quant(&mut self, k: usize, input: QuantIn, rows: usize, x_va: u64, q_va: u64, s_va: u64) -> Result<u64, String>;
     /// One grouped GEMM launch.
     fn qgemm(&mut self, call: &QgemmCall) -> Result<u64, String>;
+    /// Device-to-device copy by address (16-byte multiples). Default: refused.
+    fn copy_va(&mut self, _dst_va: u64, _src_va: u64, _bytes: usize) -> Result<(), String> {
+        Err("pf copy: not offered by this device".into())
+    }
 }
 
 /// The attention call boundary: `omega_gpu_prefill_attn` exactly. One call does layer `layer`
@@ -268,6 +272,7 @@ mod ffi {
         pub fn omega_gpu_pf_alloc_dev(bytes: usize, out: *mut OmegaGpuMem) -> i32;
         pub fn omega_gpu_pf_alloc_host(bytes: usize, out: *mut OmegaGpuMem) -> i32;
         pub fn omega_gpu_pf_free(m: *mut OmegaGpuMem);
+        pub fn omega_gpu_pf_copy_va(dst_va: u64, src_va: u64, bytes: usize) -> i32;
         pub fn omega_gpu_pf_stats(chip_ns: *mut u64, launches: *mut u64);
         pub fn omega_gpu_pf_stats_reset();
         pub fn omega_gpu_pf_quant(k: u32, in_type: u32, rows: u32, x_va: u64, q_va: u64, s_va: u64, ns: *mut u64) -> i32;
@@ -496,6 +501,24 @@ impl OmegaPfDevice {
 
 impl PrefillDevice for OmegaPfDevice {
     type Buf = PfMem;
+    fn copy_va(&mut self, dst_va: u64, src_va: u64, bytes: usize) -> Result<(), String> {
+        if dst_va == 0 || src_va == 0 || dst_va % 16 != 0 || src_va % 16 != 0 || bytes % 16 != 0 {
+            return Err(format!("pf copy: addresses and {bytes} bytes must be non-zero 16-byte multiples"));
+        }
+        #[cfg(has_omega_pf)]
+        {
+            // SAFETY: plain values; both ranges are session buffers the caller owns.
+            let rc = unsafe { ffi::omega_gpu_pf_copy_va(dst_va, src_va, bytes) };
+            if rc != 0 {
+                return Err(rc_err(rc).to_string());
+            }
+            Ok(())
+        }
+        #[cfg(not(has_omega_pf))]
+        {
+            Err(OmegaGpuError::Unavailable.to_string())
+        }
+    }
     fn alloc_dev(&mut self, bytes: usize) -> Result<PfMem, String> {
         PfMem::alloc_dev(bytes).map_err(|e| e.to_string())
     }

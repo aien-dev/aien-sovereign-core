@@ -603,3 +603,11 @@ fn refuses_an_empty_prompt_and_non_fp8_weights() {
     let err = layer_entries(&bad.weights).unwrap_err();
     assert!(err.contains("layer 1") && err.contains("FP8"), "{err}");
 }
+
+#[test]
+fn cache_weights_refusal_leaves_the_in_place_path_working() {
+    let (tm, mut drv, mut attn, _) = setup(4, false);
+    assert!(drv.cache_weights(&tm.weights.config).is_err(), "the fake offers no device copy and its experts are not contiguous");
+    let got = drv.run(&tm.weights, &mut attn, &TOKENS, 0).unwrap();
+    assert!(max_rel_diff(&got, &reference(&tm, &TOKENS)) <= TOL);
+}

@@ -259,6 +259,8 @@ pub struct WholePromptPrefill<D: PrefillDevice> {
     entries: Vec<LayerEntries>,
     bufs: Option<Bufs<D::Buf>>,
     pub stats: PrefillStats,
+    /// GPU-cached copies of the FP8 weights ([`Self::cache_weights`]); empty = read in place.
+    cached: Vec<D::Buf>,
 }
 
 impl<D: PrefillDevice> std::fmt::Debug for WholePromptPrefill<D> {
@@ -270,11 +272,59 @@ impl<D: PrefillDevice> std::fmt::Debug for WholePromptPrefill<D> {
 impl<D: PrefillDevice> WholePromptPrefill<D> {
     /// Collects the in-place weight addresses of every layer (no weight copy).
     pub fn new(dev: D, weights: &Qwen3MoeOmegaWeights) -> Result<Self, String> {
-        Ok(Self { dev, entries: layer_entries(weights)?, bufs: None, stats: PrefillStats::default() })
+        Ok(Self { dev, entries: layer_entries(weights)?, bufs: None, stats: PrefillStats::default(), cached: Vec::new() })
     }
 
     pub fn device(&self) -> &D {
         &self.dev
+    }
+
+    /// Copies every FP8 weight tensor into GPU-cached device memory (one copy kernel per tensor)
+    /// and points the tile tables at the copies (the in-place GEMV tensors are GPU-uncached; the
+    /// GEMM reuses each weight tile across row tiles, so it wants L2). Returns the bytes copied.
+    /// Per expert the omega_gpu_fp8 layout is w `n * k` e4m3 and s `(n / 128) * (k / 128)` f32,
+    /// experts contiguous (omega_gpu_fp8_tensor_entry); that contiguity is checked here.
+    pub fn cache_weights(&mut self, c: &Qwen3MoeConfig) -> Result<usize, String> {
+        if !self.cached.is_empty() {
+            return Ok(self.cached.iter().map(|b| b.bytes()).sum());
+        }
+        let (h, qd, qkv_n, i) = (c.hidden, c.q_dim(), c.qkv_n(), c.moe_intermediate);
+        let blk = aien_omega_pf::BLOCK;
+        let mut total = 0usize;
+        let mut new_entries = self.entries.clone();
+        let mut bufs = Vec::new();
+        for (l, ent) in new_entries.iter_mut().enumerate() {
+            let mut one = |w: &mut [u64], s: &mut [u64], n: usize, k: usize| -> Result<(), String> {
+                let (wb, sb) = (n * k, (n / blk) * (k / blk) * 4);
+                for ex in 0..w.len() {
+                    if w[ex] != w[0] + (ex * wb) as u64 || s[ex] != s[0] + (ex * sb) as u64 {
+                        return Err(format!("layer {l}: expert {ex} weights are not contiguous; cannot copy in one piece"));
+                    }
+                }
+                for (v, per) in [(w, wb), (s, sb)] {
+                    let bytes = per * v.len();
+                    let dst = self.dev.alloc_dev(bytes)?;
+                    self.dev.copy_va(dst.va(), v[0], bytes).map_err(|e| format!("layer {l}: weight copy of {bytes} bytes: {e}"))?;
+                    for (ex, x) in v.iter_mut().enumerate() {
+                        *x = dst.va() + (ex * per) as u64;
+                    }
+                    total += bytes;
+                    bufs.push(dst);
+                }
+                Ok(())
+            };
+            let (mut qw, mut qs) = ([ent.qkv.0], [ent.qkv.1]);
+            one(&mut qw, &mut qs, qkv_n, h)?;
+            ent.qkv = (qw[0], qs[0]);
+            let (mut ow, mut os) = ([ent.o.0], [ent.o.1]);
+            one(&mut ow, &mut os, h, qd)?;
+            ent.o = (ow[0], os[0]);
+            one(&mut ent.gu_w, &mut ent.gu_s, 2 * i, h)?;
+            one(&mut ent.dn_w, &mut ent.dn_s, h, i)?;
+        }
+        self.entries = new_entries;
+        self.cached = bufs;
+        Ok(total)
     }
 
     fn ensure(&mut self, c: &Qwen3MoeConfig, m: usize, dev_attn: bool) -> Result<(), String> {

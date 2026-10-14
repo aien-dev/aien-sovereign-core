@@ -107,7 +107,7 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     let checkpoint = PathBuf::from(args.get(1).expect("checkpoint dir"));
     let receipt = PathBuf::from(args.get(2).expect("receipt dir"));
-    let (mut lens, mut new_tokens, mut reps, mut max_context, mut force) = (vec![512usize, 2048], 32usize, 2usize, 8192usize, false);
+    let (mut lens, mut new_tokens, mut reps, mut max_context, mut force, mut cached) = (vec![512usize, 2048], 32usize, 2usize, 8192usize, false, false);
     let mut it = args[3..].iter();
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -116,6 +116,7 @@ fn main() {
             "--reps" => reps = it.next().expect("--reps").parse().expect("n"),
             "--max-context" => max_context = it.next().expect("--max-context").parse().expect("n"),
             "--force-memory" => force = true,
+            "--cached" => cached = true,
             o => panic!("unknown argument {o}"),
         }
     }
@@ -158,6 +159,7 @@ fn main() {
     ));
     let mut rows = Vec::new();
     let mut all_identical = true;
+    let mut offs: Vec<(usize, Vec<u32>, Vec<f32>, f64)> = Vec::new();
     for &n in &lens {
         let ids = prompt_ids(&tok, n);
         for rep in 0..reps {
@@ -172,6 +174,9 @@ fn main() {
             let (ta, ma) = top2(&off.logits0);
             let (tb, mb) = top2(&on.logits0);
             all_identical &= diff.is_none();
+            if rep + 1 == reps {
+                offs.push((n, off.tokens.clone(), off.logits0.clone(), off.ttft_ms));
+            }
             say(format!(
                 "len {n} rep {rep}: TTFT off {:.1} ms on {:.1} ms (x{:.2}); prefill_ms off {} on {}; decode {} tokens off {} ms on {} ms; tokens {} ; logits0 cosine {cos:.7} maxdiff {maxd:.3e} top1 {ta}/{tb} margin {ma:.3}/{mb:.3}",
                 off.ttft_ms,
@@ -207,6 +212,37 @@ fn main() {
                 "on_stats": {"launches": st.launches(), "chip_ns": st.chip_ns, "attn_ns": st.attn_ns, "host_ns": st.host_ns, "attn_dev": st.attn_dev},
                 "off_timing": {"chip_ns": off.pt.chip_ns, "launches": off.pt.launches, "total_ns": off.pt.total_ns},
             }));
+        }
+    }
+    if cached {
+        // Phase B: the whole-prompt GEMMs read a GPU-cached copy of the weights (the OFF runs above are the baseline).
+        engine.set_whole_prompt(true).expect("on");
+        let t = Instant::now();
+        let bytes = engine.whole_prompt_cache_weights().expect("cached weight copy");
+        say(format!("CACHED copy {:.2} GB in {:.2} s, mem_available {:.1} GB", bytes as f64 / 1e9, t.elapsed().as_secs_f64(), mem_available_gb()));
+        for (n, off_tokens, off_logits, off_ttft) in &offs {
+            let ids = prompt_ids(&tok, *n);
+            for rep in 0..reps {
+                let on = run(&mut engine, &ids, new_tokens);
+                let st = engine.whole_prompt_stats().cloned().unwrap_or_default();
+                let diff = off_tokens.iter().zip(&on.tokens).position(|(a, b)| a != b);
+                let cos = cosine(off_logits, &on.logits0);
+                let maxd = off_logits.iter().zip(&on.logits0).map(|(a, b)| (a - b).abs()).fold(0.0f32, f32::max);
+                all_identical &= diff.is_none();
+                say(format!(
+                    "len {n} rep {rep} CACHED: TTFT off {off_ttft:.1} ms on {:.1} ms (x{:.2}); prefill_ms on {}; tokens {} ; logits0 cosine {cos:.7} maxdiff {maxd:.3e}; launches {} chip(GEMM+quant) {:.1} ms attention {:.1} ms host {:.1} ms",
+                    on.ttft_ms,
+                    off_ttft / on.ttft_ms,
+                    on.prefill_ms,
+                    diff.map_or("IDENTICAL".to_string(), |p| format!("DIFFER at {p}")),
+                    st.launches(),
+                    st.chip_ns as f64 / 1e6,
+                    st.attn_ns as f64 / 1e6,
+                    st.host_ns as f64 / 1e6
+                ));
+                rows.push(serde_json::json!({"len": n, "rep": rep, "cached": true, "ttft_ms_on": on.ttft_ms, "prefill_ms_on": on.prefill_ms, "tokens_on": on.tokens, "first_diff": diff, "logits0_cosine": cos, "logits0_maxdiff": maxd,
+                    "on_stats": {"launches": st.launches(), "chip_ns": st.chip_ns, "attn_ns": st.attn_ns, "host_ns": st.host_ns}}));
+            }
         }
     }
     say(format!("SUMMARY tokens {}", if all_identical { "IDENTICAL" } else { "DIFFER" }));

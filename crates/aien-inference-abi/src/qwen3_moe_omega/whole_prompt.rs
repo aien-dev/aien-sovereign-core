@@ -37,6 +37,13 @@ impl Qwen3MoeOmegaEngine {
         Ok(())
     }
 
+    /// Gives the whole-prompt GEMMs their own GPU-cached copy of every FP8 weight (about the
+    /// model's FP8 size again, held until the switch is turned off). Returns the bytes copied.
+    pub fn whole_prompt_cache_weights(&mut self) -> Result<usize, String> {
+        let c = self.weights.config.clone();
+        self.whole_prompt.as_mut().ok_or("whole-prompt prefill is off")?.cache_weights(&c)
+    }
+
     /// Whether `generate_with` will take the whole-prompt path.
     pub fn whole_prompt_on(&self) -> bool {
         self.whole_prompt.is_some()
