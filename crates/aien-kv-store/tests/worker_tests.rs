@@ -670,7 +670,10 @@ fn worker_late_attach_after_dispatch_is_counted_and_released() {
     assert_eq!(w.worker.load_in_flight(&k), None);
 
     // The count is released with the job: a fresh load takes one waiter again.
+    // Hold the second load at the store so the worker thread cannot finish and
+    // reap `job2` before `attach_waiter` runs on a loaded runner.
     let mem2 = Mem::new(2, 0xEE);
+    w.fake.script(JobScript::fault(Fault::Hold));
     let job2 = w
         .worker
         .submit_load_coalesced(k, &h, || mem2.dest(2).0, c)
@@ -678,11 +681,13 @@ fn worker_late_attach_after_dispatch_is_counted_and_released() {
     let LoadTicket::Started(job2) = job2 else {
         panic!("a fresh load after the first closed: {job2:?}");
     };
+    wait_for("dispatch", || w.dispatched(job2));
     assert_eq!(
         w.worker.attach_waiter(job2, d),
         Ok(()),
         "the late waiter's count was released when its job closed"
     );
+    assert!(w.fake.release(job2), "the second held load starts");
     let v = w.collect(2);
     assert_eq!(terminals(&v).len(), 2);
     assert_eq!(w.worker.stats().attach_refused_total, 1);
@@ -1177,6 +1182,7 @@ fn coalesced_waiters_are_bounded() {
     // When a job ends its waiters leave the total.
     w.resume();
     w.settle();
+    w.worker.pause_dispatch();
     let k = w.inject(60);
     let (_, h) = w.chunk(60);
     let mem = Mem::new(2, 0xEE);
@@ -1186,6 +1192,8 @@ fn coalesced_waiters_are_bounded() {
         .unwrap()
         .job();
     assert_eq!(w.worker.attach_waiter(job, Incarnation::seq(77)), Ok(()));
+    w.resume();
+    w.settle();
 }
 
 #[test]
@@ -1319,10 +1327,11 @@ fn shutdown_with_stalled_fsync_returns_by_deadline_and_reports_unfinished() {
 #[test]
 fn worker_shutdown_lets_jobs_past_fsync_publish() {
     let w = rig();
-    w.fake.script(JobScript::latency(100, 500_000));
+    w.fake.script(JobScript::latency(100, 50_000_000));
     let j = w.store(1).unwrap();
     w.resume();
     wait_for("file synced", || w.fake.now_us() >= 300);
+    w.step.store(10_000_000, Ordering::SeqCst);
     let rep = w.worker.shutdown(2000);
     assert_eq!(rep.published, 1, "{rep:?}");
     assert!(rep.unfinished.is_empty());
