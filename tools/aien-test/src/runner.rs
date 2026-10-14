@@ -63,8 +63,8 @@ pub struct Options {
     /// `--release`: qualification mode. No cache reuse and the tree must be
     /// clean even with `--allow-dirty`.
     pub release: bool,
-    /// Pinned sibling commits and repository pins included in `core.pins` and
-    /// `cache.key`.
+    /// `core.pins` and part of `cache.key` (ADR 0028: `{name, commit}` sorted
+    /// by `name`). The worker sets the head's sibling and operator pins.
     pub pins: Value,
 }
 
@@ -643,11 +643,6 @@ fn execute_gate(job: &Job<'_>, permit: Option<Permit<'_>>) -> Result<Outcome, Ru
                     "cache": cache::cache_member(&cache_key, Some(&src.digest), mode),
                     "timeout_exceeded": false,
                 });
-                for member in ["stdout_sha256", "stderr_sha256"] {
-                    if let Some(bsha) = src.value["core"][member].as_str() {
-                        store.ensure_local_blob(bsha);
-                    }
-                }
                 let receipt = build_receipt(cache::reused_core(src, &commit), volatile);
                 let (digest, path) = store.put_receipt(&receipt).map_err(fatal)?;
                 drop(permit);

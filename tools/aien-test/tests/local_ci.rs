@@ -1350,153 +1350,92 @@ fn nested_in_sandbox(test: &str) -> bool {
     nested
 }
 
+/// A new commit `name` on `branch` of the world's origin that writes `files`,
+/// fetched into the trusted clone. Returns the commit.
+fn commit_on(w: &World, branch: &str, files: &[(&str, &str)], name: &str) -> String {
+    git(&w.origin, &["checkout", "-q", branch]);
+    for (rel, content) in files {
+        write(&w.origin, rel, content, false);
+    }
+    git(&w.origin, &["add", "-A"]);
+    git(&w.origin, &["commit", "-q", "-m", name]);
+    let sha = git(&w.origin, &["rev-parse", "HEAD"]);
+    git(&w.origin, &["checkout", "-q", "main"]);
+    git(&w.clone, &["fetch", "-q", "--all"]);
+    sha
+}
+
+fn gate_status(s: &worker::Summary, id: &str) -> (String, Verdict) {
+    s.gates
+        .iter()
+        .find(|g| g.0 == id)
+        .map(|g| (g.1.clone(), g.2))
+        .unwrap_or_else(|| panic!("no gate {id} in {:?}", s.gates))
+}
+
+/// With siblings, the worker reuses a result only for the same commit of
+/// the repository and only while every sibling is at the same commit: the
+/// sibling commits are in the cache key, and the evidence directory is the
+/// head's own.
 #[test]
-fn worker_reuses_cached_receipt_across_commits_and_sibling_pins() {
+fn worker_reuses_only_the_same_commit_while_its_sibling_commits_match() {
+    if nested_in_sandbox("worker_reuses_only_the_same_commit_while_its_sibling_commits_match") {
+        return;
+    }
     let w = world();
     let (head_s, sib_sha, map) = sibling_world(&w);
     let mut cfg = w.config();
-    cfg.operator = true;
+    cfg.operator = true; // S is a new gate: a pipeline configuration change.
     cfg.siblings = Some(map);
+    let pass = |st: &str| (st.to_string(), Verdict::Pass);
 
-    // 1. First commit on topic-s runs gate S fresh with sibling at sib_sha.
     let r1 = worker::run_once(&cfg, REPO, &head_s).expect("worker r1");
-    assert_eq!(r1.verdict, Verdict::Pass, "{} {:?}", r1.reason, r1.notes);
+    assert_eq!(gate_status(&r1, "S"), pass("run"), "{:?}", r1.notes);
     assert!(
-        r1.gates
-            .iter()
-            .any(|(g, st, v)| g == "S" && st == "run" && *v == Verdict::Pass),
-        "expected S to run fresh on head_s: {:?}",
-        r1.gates
+        r1.notes.iter().any(|n| n.contains(&sib_sha)),
+        "{:?}",
+        r1.notes
     );
 
-    // 2. Second commit on topic-s touches a/a.txt (gate A), leaving gate S inputs
-    //    and sibling commit sib_sha unchanged. Gate S must hit the cache across commits!
-    git(&w.origin, &["checkout", "-q", "topic-s"]);
-    write(&w.origin, "a/a.txt", "topic-s-2\n", false);
-    git(&w.origin, &["add", "-A"]);
-    git(&w.origin, &["commit", "-q", "-m", "change a on topic-s"]);
-    let head_s2 = git(&w.origin, &["rev-parse", "HEAD"]);
-    git(&w.origin, &["checkout", "-q", "main"]);
-    git(&w.clone, &["fetch", "-q", "--all"]);
+    // The same head again, sibling unchanged: reused.
+    let r2 = worker::run_once(&cfg, REPO, &head_s).expect("worker r2");
+    assert_eq!(gate_status(&r2, "S"), pass("cached"), "{:?}", r2.gates);
 
-    let r2 = worker::run_once(&cfg, REPO, &head_s2).expect("worker r2");
-    assert_eq!(r2.verdict, Verdict::Pass, "{} {:?}", r2.reason, r2.notes);
-    assert!(
-        r2.gates
-            .iter()
-            .any(|(g, st, v)| g == "S" && st == "cached" && *v == Verdict::Pass),
-        "expected S to be cached across commits on head_s2: {:?}",
-        r2.gates
-    );
-    assert!(
-        r2.gates
-            .iter()
-            .any(|(g, st, v)| g == "A" && st == "run" && *v == Verdict::Pass),
-        "expected A to run fresh on head_s2: {:?}",
-        r2.gates
-    );
+    // A new commit that leaves S's declared inputs (tools/) alone still runs
+    // S: results never cross commits.
+    let head_s2 = commit_on(&w, "topic-s", &[("h/h.txt", "s2\n")], "change h");
+    let r3 = worker::run_once(&cfg, REPO, &head_s2).expect("worker r3");
+    assert_eq!(gate_status(&r3, "S"), pass("run"), "{:?}", r3.gates);
 
-    // 2b. Third commit on topic-s touches h/h.txt (gate H), leaving both S and A
-    //     inputs and sibling commit sib_sha unchanged. Both S and A must be cached!
-    git(&w.origin, &["checkout", "-q", "topic-s"]);
-    write(&w.origin, "h/h.txt", "topic-s-2b\n", false);
-    git(&w.origin, &["add", "-A"]);
-    git(&w.origin, &["commit", "-q", "-m", "change h on topic-s"]);
-    let head_s2b = git(&w.origin, &["rev-parse", "HEAD"]);
-    git(&w.origin, &["checkout", "-q", "main"]);
-    git(&w.clone, &["fetch", "-q", "--all"]);
-
-    let r2b = worker::run_once(&cfg, REPO, &head_s2b).expect("worker r2b");
-    assert_eq!(r2b.verdict, Verdict::Pass, "{} {:?}", r2b.reason, r2b.notes);
-    assert!(
-        r2b.gates
-            .iter()
-            .any(|(g, st, v)| g == "S" && st == "cached" && *v == Verdict::Pass),
-        "expected S to be cached on head_s2b: {:?}",
-        r2b.gates
-    );
-    assert!(
-        r2b.gates
-            .iter()
-            .any(|(g, st, v)| g == "A" && st == "cached" && *v == Verdict::Pass),
-        "expected A to be cached on head_s2b: {:?}",
-        r2b.gates
-    );
-    assert!(
-        r2b.gates
-            .iter()
-            .any(|(g, st, v)| g == "H" && st == "run" && *v == Verdict::Pass),
-        "expected H to run fresh on head_s2b: {:?}",
-        r2b.gates
-    );
-
-    // 3. Advance the sibling repository origin/main to a new commit sib_sha2 and fetch into
-    //    the sibling trusted clone. A new commit on topic-s must invalidate S's cache
-    //    because the sibling pin changed, and then a subsequent commit at sib_sha2 must
-    //    cache again!
-    let root = w.origin.parent().unwrap();
-    let so = root.join("sib-origin");
+    // The sibling moves to a new commit: the same head runs S again.
+    let so = w.origin.parent().unwrap().join("sib-origin");
     write(&so, "lib/extra.txt", "world\n", false);
     git(&so, &["add", "-A"]);
     git(&so, &["commit", "-q", "-m", "sib v2"]);
     let sib_sha2 = git(&so, &["rev-parse", "HEAD"]);
     assert_ne!(sib_sha, sib_sha2);
-    let sib_clone = w.clone.parent().unwrap().join(SIB);
-    git(&sib_clone, &["fetch", "-q", "--all"]);
-
-    git(&w.origin, &["checkout", "-q", "topic-s"]);
-    write(&w.origin, "h/h.txt", "topic-s-3\n", false);
-    git(&w.origin, &["add", "-A"]);
-    git(&w.origin, &["commit", "-q", "-m", "change h with sib v2"]);
-    let head_s3 = git(&w.origin, &["rev-parse", "HEAD"]);
-    git(&w.origin, &["checkout", "-q", "main"]);
-    git(&w.clone, &["fetch", "-q", "--all"]);
-
-    let r3 = worker::run_once(&cfg, REPO, &head_s3).expect("worker r3");
-    assert_eq!(r3.verdict, Verdict::Pass, "{} {:?}", r3.reason, r3.notes);
-    assert!(
-        r3.gates
-            .iter()
-            .any(|(g, st, v)| g == "S" && st == "run" && *v == Verdict::Pass),
-        "expected S to re-run when sibling pin changed on head_s3: {:?}",
-        r3.gates
-    );
-
-    // 4. Another commit at the same sib_sha2 caches S and A again.
-    git(&w.origin, &["checkout", "-q", "topic-s"]);
-    write(&w.origin, "h/h.txt", "topic-s-4\n", false);
-    git(&w.origin, &["add", "-A"]);
     git(
-        &w.origin,
-        &["commit", "-q", "-m", "change h again at sib v2"],
+        &w.clone.parent().unwrap().join(SIB),
+        &["fetch", "-q", "--all"],
     );
-    let head_s4 = git(&w.origin, &["rev-parse", "HEAD"]);
-    git(&w.origin, &["checkout", "-q", "main"]);
-    git(&w.clone, &["fetch", "-q", "--all"]);
+    let r4 = worker::run_once(&cfg, REPO, &head_s).expect("worker r4");
+    assert_eq!(gate_status(&r4, "S"), pass("run"), "{:?}", r4.gates);
+    assert!(
+        r4.notes.iter().any(|n| n.contains(&sib_sha2)),
+        "{:?}",
+        r4.notes
+    );
 
-    let r4 = worker::run_once(&cfg, REPO, &head_s4).expect("worker r4");
-    assert_eq!(r4.verdict, Verdict::Pass, "{} {:?}", r4.reason, r4.notes);
-    assert!(
-        r4.gates
-            .iter()
-            .any(|(g, st, v)| g == "S" && st == "cached" && *v == Verdict::Pass),
-        "expected S to be cached on head_s4 at sib_sha2: {:?}",
-        r4.gates
-    );
-    assert!(
-        r4.gates
-            .iter()
-            .any(|(g, st, v)| g == "A" && st == "cached" && *v == Verdict::Pass),
-        "expected A to be cached on head_s4 at sib_sha2: {:?}",
-        r4.gates
-    );
+    // Same head, sibling still at its new commit: reused again.
+    let r5 = worker::run_once(&cfg, REPO, &head_s).expect("worker r5");
+    assert_eq!(gate_status(&r5, "S"), pass("cached"), "{:?}", r5.gates);
 }
 
 /// Cache safety across commits: gate U declares only `u/` as its input but
-/// its program also reads `other/flag.txt`, the way SC-TEST's tests read the
-/// root README.md and COVENANT.md and scan the whole tree for key files. A
-/// later commit that changes only that file makes U fail when it really runs,
-/// so the worker must never hand that commit the earlier commit's PASS.
+/// its program also reads the root `README.md`, as SC-TEST's
+/// `tier2_boundary` tests read the root `README.md` and `COVENANT.md`. A
+/// later commit that changes only `README.md` makes U fail when it really
+/// runs, so the worker must run U again, never hand it the earlier PASS.
 #[test]
 fn worker_never_reuses_a_pass_when_an_undeclared_file_changed_across_commits() {
     if nested_in_sandbox(
@@ -1512,38 +1451,39 @@ fn worker_never_reuses_a_pass_when_an_undeclared_file_changed_across_commits() {
     write(
         &w.origin,
         "tools/u.sh",
-        "#!/bin/sh\ntest \"$(cat other/flag.txt)\" = ok || { echo 'flag is not ok' >&2; exit 1; }\necho PASS\n",
+        "#!/bin/sh\ngrep -q 'AGPL-3.0' README.md || { echo 'README.md lost its licence' >&2; exit 1; }\necho PASS\n",
         true,
     );
-    write(&w.origin, "u/u.txt", "1\n", false);
-    write(&w.origin, "other/flag.txt", "ok\n", false);
-    write(
-        &w.origin,
-        "tests/gates/U.gate",
-        &gate("U", "u/", "tools/u.sh", ""),
-        false,
-    );
-    git(&w.origin, &["add", "-A"]);
-    git(
-        &w.origin,
-        &["commit", "-q", "-m", "gate U reads other/flag.txt"],
-    );
-    let head_u1 = git(&w.origin, &["rev-parse", "HEAD"]);
-    write(&w.origin, "other/flag.txt", "bad\n", false);
-    git(&w.origin, &["add", "-A"]);
-    git(&w.origin, &["commit", "-q", "-m", "break the flag U reads"]);
-    let head_u2 = git(&w.origin, &["rev-parse", "HEAD"]);
     git(&w.origin, &["checkout", "-q", "main"]);
-    git(&w.clone, &["fetch", "-q", "--all"]);
+    let head_u1 = commit_on(
+        &w,
+        "topic-u",
+        &[
+            ("u/u.txt", "1\n"),
+            ("README.md", "Licence: AGPL-3.0\n"),
+            ("tests/gates/U.gate", &gate("U", "u/", "tools/u.sh", "")),
+        ],
+        "gate U reads README.md",
+    );
+    let head_u2 = commit_on(
+        &w,
+        "topic-u",
+        &[("README.md", "Licence: none\n")],
+        "README.md loses its licence",
+    );
 
     let r1 = worker::run_once(&cfg, REPO, &head_u1).expect("worker u1");
-    assert_eq!(gate_verdict(&r1, "U"), Verdict::Pass, "{:?}", r1.notes);
-
+    assert_eq!(
+        gate_status(&r1, "U"),
+        ("run".to_string(), Verdict::Pass),
+        "{:?}",
+        r1.notes
+    );
     let r2 = worker::run_once(&cfg, REPO, &head_u2).expect("worker u2");
     assert_eq!(
-        gate_verdict(&r2, "U"),
-        Verdict::Fail,
-        "a PASS from {head_u1} was handed to {head_u2} although U fails there: {:?}",
+        gate_status(&r2, "U"),
+        ("run".to_string(), Verdict::Fail),
+        "a PASS from {head_u1} must not be handed to {head_u2}: {:?}",
         r2.gates
     );
 }

@@ -91,9 +91,9 @@ case "$step" in
   preflight-guard)     bash scripts/test-preflight-branch-guard.sh ;;
   agent-preflight)
     # Hosted: developer context on pull requests, merged-tree on pushes to main.
-    # SC-AGENT-PREFLIGHT depends on SC-TEST, which already verifies the workspace tests.
+    # CI=true as on GitHub (see the test step): the script runs cargo test --workspace.
     nested_obs
-    CI=true AIEN_TEST_GATE_VERIFIED=1 AIEN_PROOF_OFF=1 AIEN_DEV_FALLBACK=1 AIEN_PREFLIGHT_CONTEXT="${AIEN_PREFLIGHT_CONTEXT:-developer}" bash scripts/agent-preflight.sh
+    CI=true AIEN_PROOF_OFF=1 AIEN_DEV_FALLBACK=1 AIEN_PREFLIGHT_CONTEXT="${AIEN_PREFLIGHT_CONTEXT:-developer}" bash scripts/agent-preflight.sh
     ;;
   zero-disk-secrets)
     echo "Auditing repository for prohibited plaintext secret files..."

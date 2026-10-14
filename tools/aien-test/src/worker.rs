@@ -508,7 +508,10 @@ struct Checkout {
 /// clone at the clone's `origin/<ref>`. A sibling that cannot be made is a
 /// note (its gates then fail on the missing directory, never PASS); every
 /// sibling made is journaled with its commit. Returns what to remove later
-/// under `Sandbox::None`.
+/// under `Sandbox::None`, and the receipt `pins` (ADR 0028: `{name, commit}`
+/// sorted by `name`): each sibling made, named by its `dir`, and each operator
+/// pin, named `pin:<source>`. They enter `core.pins` and `cache.key`, so a
+/// result is reused only while every sibling is at the same commit.
 fn provision_siblings(
     cfg: &Config,
     repo: &str,
@@ -519,7 +522,7 @@ fn provision_siblings(
     notes: &mut Vec<String>,
 ) -> (Vec<(PathBuf, PathBuf)>, Value) {
     let mut made = Vec::new();
-    let mut pin_entries: Vec<(String, String, String, String)> = Vec::new();
+    let mut pin_entries: Vec<(String, String)> = Vec::new();
     if !sibs.is_empty() && !co.nested {
         notes.push(format!(
             "siblings not provided: the worktree tool makes the old flat layout (update {})",
@@ -581,30 +584,19 @@ fn provision_siblings(
                     s.dir, s.source, s.git_ref, sib_sha
                 ));
                 made.push((src, path));
-                pin_entries.push((s.dir.clone(), s.source.clone(), s.git_ref.clone(), sib_sha));
+                pin_entries.push((s.dir.clone(), sib_sha));
             }
             Err(e) => notes.push(format!("sibling ../{}: not provided: {e}", s.dir)),
         }
     }
     for p in pins {
-        pin_entries.push((
-            String::new(),
-            p.source.clone(),
-            "pin".to_string(),
-            p.sha.clone(),
-        ));
+        pin_entries.push((format!("pin:{}", p.source), p.sha.clone()));
     }
+    // ADR 0028 receipt member `pins`: `{name, commit}` sorted by `name`.
     pin_entries.sort();
     let pin_json: Vec<Value> = pin_entries
         .into_iter()
-        .map(|(dir, source, git_ref, commit)| {
-            json!({
-                "dir": dir,
-                "source": source,
-                "ref": git_ref,
-                "commit": commit,
-            })
-        })
+        .map(|(name, commit)| json!({ "name": name, "commit": commit }))
         .collect();
     (made, Value::Array(pin_json))
 }
@@ -840,9 +832,11 @@ pub fn run_once(cfg: &Config, repo: &str, sha: &str) -> Result<Summary, String> 
     // A wt.sh worktree belongs to aien-run; the operator's git opens it only
     // after `check_worktree_link` (see `process::trust_worktree`).
     let trust = (cfg.sandbox == Sandbox::User).then(|| process::trust_worktree(&wt));
-    // Provisioned sibling commits are bound into `opts.pins` (`core.pins` and
-    // `cache.key`). Only disable the cache when a declared sibling could not be
-    // provisioned (`made.len() < sibs.len()`).
+    // Every sibling's commit is in `opts.pins` (`core.pins` and `cache.key`),
+    // and the evidence directory is this head's own (`evidence/<repo>/<sha>`),
+    // so a result is reused only for this same commit with every sibling at
+    // the same commit. A declared sibling that could not be made turns the
+    // cache off for the whole head.
     let fresh = made.len() < sibs.len();
     let result = run_in_worktree(cfg, repo, sha, &co, fresh, pin_values, &mut notes);
     crumb(

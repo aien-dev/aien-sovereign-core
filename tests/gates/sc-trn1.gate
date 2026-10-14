@@ -1,5 +1,6 @@
 # tests/gates/sc-trn1.gate
 # Mirrors hosted: hardening.yml trn1: aien-replay trn1_conformance with the aien-protocols corpus at 353b7d4 + run_mutants.sh trn1 (hosted 50 s)
+# cache: never because the vector corpus is a pinned sibling checkout outside this repository.
 gate: SC-TRN1
 manifest_version: 2
 owner: aien-sovereign-core
@@ -18,3 +19,4 @@ expects:
 timeout: 15m
 exactness: EXACT
 cache_scope: machine
+cache: never
