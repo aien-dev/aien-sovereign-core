@@ -252,7 +252,6 @@ enum Kind {
 enum Phase {
     Held,
     Start { at: u64 },
-    Reclaiming,
     Writing { at: u64 },
     Syncing { at: u64 },
     Publishing { at: u64 },
@@ -264,7 +263,7 @@ enum Phase {
 impl Phase {
     fn at(&self) -> Option<u64> {
         match *self {
-            Phase::Held | Phase::Reclaiming => None,
+            Phase::Held => None,
             Phase::Start { at }
             | Phase::Writing { at }
             | Phase::Syncing { at }
@@ -304,6 +303,9 @@ struct Job {
     cover_seq: u64,
     attached: u32,
     noop_stage: JobStage,
+    /// Objects (key, generation) this store marked to make room; unlinked
+    /// only after it publishes, returned to service otherwise.
+    victims: Vec<(Kb, u64)>,
 }
 
 impl Job {
@@ -339,7 +341,6 @@ struct Unlink {
     /// The object generation being removed.
     seq: u64,
     at: u64,
-    job: Option<u64>,
     fail: bool,
     evict: bool,
 }
@@ -545,6 +546,7 @@ impl Inner {
             publish: PublishOutcome::NotApplicable,
             bytes: job.payload_len,
             elapsed_us: self.now - job.submitted_at,
+            holder: None,
         };
         self.push(c.clone());
         if job.has(Fault::DuplicateCompletion) {
@@ -571,7 +573,8 @@ impl Inner {
         self.reserved -= job.reserved;
         job.reserved = 0;
         if job.kind == Kind::Store {
-            self.abort_evictions(job.id);
+            let published = matches!(terminal, Terminal::Done(_));
+            self.settle_victims(&mut job, published);
             if self.inflight_store.get(&kb(&job.key)) == Some(&job.id) {
                 self.inflight_store.remove(&kb(&job.key));
             }
@@ -600,6 +603,7 @@ impl Inner {
             publish,
             bytes: job.payload_len,
             elapsed_us: self.now - job.submitted_at,
+            holder: None,
         };
         for _ in 0..copies {
             self.push(c.clone());
@@ -619,18 +623,24 @@ impl Inner {
         }
     }
 
-    /// A store job ended (any terminal): the evictions it queued but the worker
-    /// has not run yet are dropped and their victims return to service.
-    ///
-    /// DOCS SILENT (ADR 7.4) on undoing an eviction. Narrowest rule: only
-    /// unlinks that have not run are dropped; an unlink that already ran is final.
-    fn abort_evictions(&mut self, job: u64) {
-        let (mine, rest): (Vec<Unlink>, Vec<Unlink>) = std::mem::take(&mut self.unlinks)
-            .into_iter()
-            .partition(|u| u.job == Some(job) && u.evict);
-        self.unlinks = rest;
-        for u in mine {
-            if let Some(o) = self.objects.get_mut(&u.key).filter(|o| o.seq == u.seq) {
+    /// A store job ended. Its victims were only marked; queue their unlinks
+    /// when it published (`StallEviction` delays them, `UnlinkFail` fails the
+    /// first), otherwise return them to service (ADR 3.4, Grok C4 P1-1).
+    fn settle_victims(&mut self, job: &mut Job, published: bool) {
+        let victims = std::mem::take(&mut job.victims);
+        let mut first = true;
+        for (key, seq) in victims {
+            if published {
+                let fail = first && job.has(Fault::UnlinkFail);
+                first = false;
+                self.unlinks.push(Unlink {
+                    key,
+                    seq,
+                    at: self.now + self.cfg.unlink_us + job.stall_eviction(),
+                    fail,
+                    evict: true,
+                });
+            } else if let Some(o) = self.objects.get_mut(&key).filter(|o| o.seq == seq) {
                 o.evicting = false;
             }
         }
@@ -748,6 +758,7 @@ impl Inner {
             cover_seq: 0,
             attached: 0,
             noop_stage: JobStage::Submitted,
+            victims: Vec::new(),
         }
     }
 
@@ -979,17 +990,9 @@ impl Inner {
         self.stats.io_ops += 1;
         let present = self.objects.get(&u.key).is_some_and(|o| o.seq == u.seq);
         if u.fail {
+            // Still on disk: back in service, still counted. No job waits.
             if let Some(o) = self.objects.get_mut(&u.key).filter(|_| present) {
                 o.evicting = false;
-            }
-            if let Some(jid) = u.job {
-                if let Some(job) = self.jobs.remove(&jid) {
-                    if job.cancelling {
-                        self.jobs.insert(jid, job);
-                    } else {
-                        self.fail(job, hw("unlink failed"));
-                    }
-                }
             }
             return;
         }
@@ -998,17 +1001,6 @@ impl Inner {
             self.stats.unlinks += 1;
             if u.evict {
                 self.stats.evicted_bytes_total += o.phys();
-            }
-        }
-        if let Some(jid) = u.job {
-            let waiting = self.unlinks.iter().any(|x| x.job == Some(jid));
-            let now = self.now;
-            if let Some(job) = self.jobs.get_mut(&jid) {
-                if job.phase == Phase::Reclaiming && !waiting && !job.cancelling {
-                    job.phase = Phase::Writing {
-                        at: now + job.script.completed_after_us,
-                    };
-                }
             }
         }
     }
@@ -1044,10 +1036,9 @@ impl Inner {
         }
     }
 
-    /// Worker-side reclamation (ADR 7.4), then the write.
+    /// Worker-side reclamation (ADR 7.4): mark victims, then write at once.
+    /// The victims' unlinks wait for the publish (`settle_victims`).
     fn start_store(&mut self, mut job: Job) {
-        let mut first = true;
-        let mut chosen = false;
         while self.bytes_after() > self.cfg.quota_bytes
             || self.count_after() + 1 > self.cfg.max_objects
         {
@@ -1060,25 +1051,10 @@ impl Inner {
             };
             let o = self.objects.get_mut(&victim).expect("victim");
             o.evicting = true;
-            let seq = o.seq;
-            let fail = first && job.has(Fault::UnlinkFail);
-            first = false;
-            chosen = true;
-            self.unlinks.push(Unlink {
-                key: victim,
-                seq,
-                at: self.now + self.cfg.unlink_us + job.stall_eviction(),
-                job: Some(job.id),
-                fail,
-                evict: true,
-            });
+            job.victims.push((victim, o.seq));
         }
-        job.phase = if chosen {
-            Phase::Reclaiming
-        } else {
-            Phase::Writing {
-                at: self.now + job.script.completed_after_us,
-            }
+        job.phase = Phase::Writing {
+            at: self.now + job.script.completed_after_us,
         };
         self.jobs.insert(job.id, job);
     }
@@ -1567,7 +1543,7 @@ impl KvStore for FakeKvStore {
         self.with(|i| i.submit_flush(inc))
     }
 
-    fn attach_waiter(&self, job: JobId) -> Result<(), PlatformError> {
+    fn attach_waiter(&self, job: JobId, _inc: Incarnation) -> Result<(), PlatformError> {
         self.with(|i| {
             let per_job = i.cfg.max_waiters_per_job;
             let total = i.cfg.max_waiters_total;
@@ -1679,7 +1655,6 @@ impl KvStore for FakeKvStore {
                     key: k,
                     seq,
                     at: i.now + i.cfg.unlink_us,
-                    job: None,
                     fail: false,
                     evict: false,
                 });

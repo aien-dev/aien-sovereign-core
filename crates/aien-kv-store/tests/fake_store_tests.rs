@@ -1,3 +1,4 @@
+#![cfg(feature = "std")]
 // Test cases adapted (re-expressed in Rust, none copied) from LMCache
 // tests/v1/distributed/test_nixl_store_dynamic_l2_adapter.py at 4d69cdc4,
 // Apache-2.0, Copyright LMCache contributors:
@@ -83,7 +84,7 @@ fn fake_stages_published_is_not_durable_until_a_flush_on_flush_adapters() {
     assert_eq!(r.fake.is_durable(&k), Some(false), "published, not durable");
 
     // A flush submitted now covers it, and only it.
-    let f = r.fake.submit_flush(Incarnation(9)).unwrap();
+    let f = r.fake.submit_flush(Incarnation::seq(9)).unwrap();
     r.store(2).unwrap();
     let v = r.settle();
     let fl = v.iter().find(|c| c.job == f).unwrap();
@@ -302,7 +303,7 @@ fn fake_same_key_store_dedups() {
     let mem = Mem::new(2, 5);
     let guard = counting_guard_for(&r, &released, &free_at_release);
     let (src, _handle) = mem.source_with(2, 4, guard);
-    let second = r.fake.submit_store(h, src, Incarnation(2)).unwrap();
+    let second = r.fake.submit_store(h, src, Incarnation::seq(2)).unwrap();
     assert_eq!(second, first, "same key in flight returns the existing job");
     assert_eq!(
         released.load(Ordering::SeqCst),
@@ -509,7 +510,7 @@ fn fake_every_job_yields_exactly_one_terminal_completion() {
     let (cl, _m3, _h3) = r.load(40);
     jobs.push(("load cancelled", cl.unwrap()));
     let cancelled_load = jobs.last().unwrap().1;
-    jobs.push(("flush", r.fake.submit_flush(Incarnation(5)).unwrap()));
+    jobs.push(("flush", r.fake.submit_flush(Incarnation::seq(5)).unwrap()));
 
     assert_eq!(r.fake.cancel(cancelled_queued), CancelOutcome::Cancelled);
     assert_eq!(r.fake.cancel(cancelled_load), CancelOutcome::Cancelled);
@@ -617,7 +618,7 @@ fn fake_lookup_misses_and_submit_refused_while_recovering() {
     );
     assert_eq!(r.store(9), Err(PlatformError::QueueFull));
     assert_eq!(
-        r.fake.submit_flush(Incarnation(1)),
+        r.fake.submit_flush(Incarnation::seq(1)),
         Err(PlatformError::QueueFull)
     );
     let (l, _m, _h) = r.load(1);
@@ -862,14 +863,14 @@ fn fake_load_and_store_validate_at_submit() {
     let mem = Mem::new(2, 0xEE);
     let (d, _h) = mem.dest(2);
     assert_eq!(
-        r.fake.submit_load(k, &wrong, d, Incarnation(1)),
+        r.fake.submit_load(k, &wrong, d, Incarnation::seq(1)),
         Err(PlatformError::InvalidLayout)
     );
     // Wrong destination size.
     let (_, h) = r.chunk(1);
     let (d, _h) = mem.dest(1);
     assert_eq!(
-        r.fake.submit_load(k, &h, d, Incarnation(1)),
+        r.fake.submit_load(k, &h, d, Incarnation::seq(1)),
         Err(PlatformError::InvalidLayout)
     );
     assert_eq!(mem.bytes(), vec![0xEE; 2 * BLOCK], "nothing written");
@@ -878,7 +879,7 @@ fn fake_load_and_store_validate_at_submit() {
     let m1 = Mem::new(1, 0);
     let (s, _h) = m1.source(1, 4);
     assert_eq!(
-        r.fake.submit_store(h2, s, Incarnation(2)),
+        r.fake.submit_store(h2, s, Incarnation::seq(2)),
         Err(PlatformError::InvalidLayout)
     );
     // A foreign-namespace header.
@@ -887,7 +888,7 @@ fn fake_load_and_store_validate_at_submit() {
     let m2 = Mem::new(2, 0);
     let (s, _h) = m2.source(2, 4);
     assert_eq!(
-        r.fake.submit_store(foreign, s, Incarnation(3)),
+        r.fake.submit_store(foreign, s, Incarnation::seq(3)),
         Err(PlatformError::InvalidLayout)
     );
     assert_eq!(
@@ -911,7 +912,7 @@ fn fake_tail_valid_tokens_must_match_the_header() {
         let m = Mem::new(2, 3);
         let (s, _h) = m.source(2, tail);
         let r2 = rig();
-        let got = r2.fake.submit_store(h6, s, Incarnation(1));
+        let got = r2.fake.submit_store(h6, s, Incarnation::seq(1));
         assert_eq!(got.is_ok(), ok, "tail_valid_tokens {tail}");
         if !ok {
             assert_eq!(got, Err(PlatformError::InvalidLayout));
@@ -922,7 +923,7 @@ fn fake_tail_valid_tokens_must_match_the_header() {
     let m = Mem::new(2, 3);
     let (s, _h) = m.source(2, 3);
     assert_eq!(
-        r.fake.submit_store(h8, s, Incarnation(2)),
+        r.fake.submit_store(h8, s, Incarnation::seq(2)),
         Err(PlatformError::InvalidLayout)
     );
 }
@@ -942,7 +943,7 @@ fn fake_queue_full_and_flush_faults() {
     let r = rig_with(|c| c.durability = DurabilityMode::OnFlush);
     r.inject(2);
     r.script(JobScript::fault(Fault::FlushFail));
-    let f = r.fake.submit_flush(Incarnation(1)).unwrap();
+    let f = r.fake.submit_flush(Incarnation::seq(1)).unwrap();
     let v = r.settle();
     let t = only_terminal(&v);
     assert_eq!(t.job, f);
@@ -993,7 +994,7 @@ fn fake_duplicate_and_after_cancel_faults_exist_to_test_callers() {
 }
 
 #[test]
-fn fake_stall_eviction_keeps_victims_unservable_until_the_unlink_returns() {
+fn fake_stall_eviction_delays_only_the_victim_unlink_after_publish() {
     let r = rig_with(|c| {
         c.quota_bytes = OBJ;
         c.unlink_us = 10;
@@ -1003,15 +1004,15 @@ fn fake_stall_eviction_keeps_victims_unservable_until_the_unlink_returns() {
     let job = r.store(2).unwrap();
     let (b, _) = r.chunk(2);
     r.fake.advance(500);
-    // The victim is selected and unservable, its bytes still count, the write
-    // has not started.
-    assert_eq!(r.fake.lookup(&[a]), vec![None]);
+    // The new object is published first; the victim is unservable but still
+    // on disk and counted until its (stalled) unlink returns.
+    assert_eq!(r.fake.lookup(&[a, b]), vec![None, Some(PAYLOAD)]);
     let c = r.fake.capacity();
     assert_eq!(c.evicting_bytes, OBJ);
-    assert_eq!(c.used_bytes, OBJ);
-    assert_eq!(c.reserved_bytes, OBJ);
-    assert_eq!(r.fake.stats().writes, 0);
-    assert_eq!(r.fake.job_stage(job), Some(JobStage::Submitted));
+    assert_eq!(c.used_bytes, 2 * OBJ);
+    assert_eq!(c.reserved_bytes, 0);
+    let v = r.poll_all();
+    assert_eq!(only_terminal(&v).job, job);
     r.fake.advance(10_000);
     assert_eq!(r.fake.lookup(&[a, b]), vec![None, Some(PAYLOAD)]);
     let c = r.fake.capacity();
@@ -1020,32 +1021,29 @@ fn fake_stall_eviction_keeps_victims_unservable_until_the_unlink_returns() {
         (0, OBJ, 0)
     );
     assert_eq!(r.fake.stats().evicted_bytes_total, OBJ);
-    let v = r.poll_all();
-    assert_eq!(only_terminal(&v).job, job);
 }
 
 #[test]
-fn fake_unlink_failure_fails_the_job_and_keeps_the_victim() {
+fn fake_unlink_failure_keeps_the_victim_and_the_published_store() {
     let r = rig_with(|c| c.quota_bytes = OBJ);
     let a = r.inject(1);
     r.script(JobScript::fault(Fault::UnlinkFail));
     let job = r.store(2).unwrap();
+    let (b, _) = r.chunk(2);
     let v = r.settle();
     let t = only_terminal(&v);
     assert_eq!(t.job, job);
-    assert!(matches!(
-        terminal_of(t),
-        Terminal::Failed(PlatformError::HardwareFault(_))
-    ));
+    assert_eq!(*terminal_of(t), Terminal::Done(JobStage::Durable));
     assert_eq!(
-        r.fake.lookup(&[a]),
-        vec![Some(PAYLOAD)],
-        "victim restored to service"
+        r.fake.lookup(&[a, b]),
+        vec![Some(PAYLOAD), Some(PAYLOAD)],
+        "victim restored to service, new object published"
     );
     let c = r.fake.capacity();
     assert_eq!(
         (c.used_bytes, c.reserved_bytes, c.evicting_bytes),
-        (OBJ, 0, 0)
+        (2 * OBJ, 0, 0),
+        "over quota until a later eviction"
     );
     assert_eq!(c.state, StoreState::Open);
 }
@@ -1070,7 +1068,7 @@ fn fake_shutdown_returns_at_the_deadline_and_keeps_buffers_of_unfinished_jobs() 
     mem2.fill_with(|i| pattern(2, PAYLOAD as usize)[i]);
     let (src2, handle2) = mem2.source_with(2, 4, guard);
     r.script(JobScript::latency(100, 100).with(Fault::StallFsync(1_000_000)));
-    let s2 = r.fake.submit_store(h2, src2, Incarnation(2)).unwrap();
+    let s2 = r.fake.submit_store(h2, src2, Incarnation::seq(2)).unwrap();
     // s3 is held (never started), l1 is a load that has not landed.
     r.script(JobScript::fault(Fault::Hold));
     let s3 = r.store(3).unwrap();
@@ -1141,25 +1139,31 @@ fn fake_attach_waiter_is_bounded_per_job_and_in_total() {
     r.script(JobScript::latency(1_000, 0));
     let (b, _mb, _hb) = r.load(2);
     let b = b.unwrap();
-    assert!(r.fake.attach_waiter(a).is_ok()); // job a: 2 waiters
-    assert!(r.fake.attach_waiter(a).is_ok()); // job a: 3 waiters, the per-job limit
-    assert_eq!(r.fake.attach_waiter(a), Err(PlatformError::QueueFull));
-    assert!(r.fake.attach_waiter(b).is_ok()); // 3 attached in total
-    assert!(r.fake.attach_waiter(b).is_ok()); // 4: the total bound
-    assert_eq!(r.fake.attach_waiter(b), Err(PlatformError::QueueFull));
+    assert!(r.fake.attach_waiter(a, Incarnation::seq(77)).is_ok()); // job a: 2 waiters
+    assert!(r.fake.attach_waiter(a, Incarnation::seq(77)).is_ok()); // job a: 3 waiters, the per-job limit
+    assert_eq!(
+        r.fake.attach_waiter(a, Incarnation::seq(77)),
+        Err(PlatformError::QueueFull)
+    );
+    assert!(r.fake.attach_waiter(b, Incarnation::seq(77)).is_ok()); // 3 attached in total
+    assert!(r.fake.attach_waiter(b, Incarnation::seq(77)).is_ok()); // 4: the total bound
+    assert_eq!(
+        r.fake.attach_waiter(b, Incarnation::seq(77)),
+        Err(PlatformError::QueueFull)
+    );
     // Waiters end with their job; the total is released.
     r.fake.advance(1_000);
     let (c, _mc, _hc) = r.load(1);
     let c = c.unwrap();
-    assert!(r.fake.attach_waiter(c).is_ok());
+    assert!(r.fake.attach_waiter(c, Incarnation::seq(77)).is_ok());
     // Only an in-flight load can take a waiter.
     assert!(matches!(
-        r.fake.attach_waiter(a),
+        r.fake.attach_waiter(a, Incarnation::seq(77)),
         Err(PlatformError::TaskRejected(_))
     ));
     let sj = r.store(5).unwrap();
     assert!(matches!(
-        r.fake.attach_waiter(sj),
+        r.fake.attach_waiter(sj, Incarnation::seq(77)),
         Err(PlatformError::TaskRejected(_))
     ));
 }
@@ -1201,7 +1205,7 @@ fn fake_releases_holders_outside_its_lock() {
         let (_, h) = r.chunk(n);
         let mem = Mem::new(2, 1);
         let (s, _handle) = mem.source_with(2, 4, guard);
-        r.fake.submit_store(h, s, Incarnation(n as u64))
+        r.fake.submit_store(h, s, Incarnation::seq(n as u64))
     };
     let ok = mk(1).unwrap();
     let cancelled = mk(2).unwrap();
@@ -1273,19 +1277,17 @@ fn fake_max_objects_is_never_exceeded_after_store() {
 }
 
 #[test]
-fn fake_cancel_during_reclaim_keeps_victims() {
-    // DOCS SILENT on undoing an eviction (ADR 7.4): the narrowest rule is that a
-    // victim whose unlink has not run yet returns to service when its job ends
-    // before publishing.
+fn fake_cancel_before_publish_keeps_victims() {
+    // ADR 3.4 as amended: a store that does not become durable removes nothing.
     let r = rig_with(|c| {
         c.quota_bytes = OBJ;
         c.unlink_us = 10;
     });
     let a = r.inject(1);
-    r.script(JobScript::latency(100, 0).with(Fault::StallEviction(1_000)));
+    r.script(JobScript::latency(1_000, 0));
     let job = r.store(2).unwrap();
     r.fake.advance(100);
-    assert_eq!(r.fake.lookup(&[a]), vec![None], "victim is being evicted");
+    assert_eq!(r.fake.lookup(&[a]), vec![None], "victim is marked");
     assert_eq!(r.fake.cancel(job), CancelOutcome::Cancelled);
     let v = r.settle();
     assert_eq!(*terminal_of(only_terminal(&v)), Terminal::Cancelled);
@@ -1303,7 +1305,7 @@ fn fake_cancel_during_reclaim_keeps_victims() {
         c.unlink_us = 10;
     });
     let a = r.inject(1);
-    r.script(JobScript::latency(100, 0).with(Fault::StallEviction(1_000)));
+    r.script(JobScript::latency(1_000, 0));
     let job = r.store(2).unwrap();
     r.fake.advance(100);
     let report = r.fake.shutdown(0);
@@ -1317,7 +1319,7 @@ fn fake_cancel_during_reclaim_keeps_victims() {
 }
 
 #[test]
-fn fake_unlink_fail_stops_remaining_evictions() {
+fn fake_failed_victim_unlink_keeps_only_that_victim() {
     // Two small victims are needed for one full object.
     let small = 4096 + BLOCK as u64;
     let r = rig_with(|c| {
@@ -1328,24 +1330,22 @@ fn fake_unlink_fail_stops_remaining_evictions() {
     let b = inject_small(&r, 2);
     r.script(JobScript::fault(Fault::UnlinkFail));
     let job = r.store(3).unwrap();
+    let (k3, _) = r.chunk(3);
     let v = r.settle();
     let t = only_terminal(&v);
     assert_eq!(t.job, job);
-    assert!(matches!(
-        terminal_of(t),
-        Terminal::Failed(PlatformError::HardwareFault(_))
-    ));
+    assert_eq!(*terminal_of(t), Terminal::Done(JobStage::Durable));
     assert_eq!(
-        r.fake.lookup(&[a, b]),
-        vec![Some(BLOCK as u64), Some(BLOCK as u64)],
-        "the failed job evicts nothing"
+        r.fake.lookup(&[a, b, k3]),
+        vec![Some(BLOCK as u64), None, Some(PAYLOAD)],
+        "the first unlink failed, the second ran"
     );
     let c = r.fake.capacity();
     assert_eq!(
         (c.used_bytes, c.reserved_bytes, c.evicting_bytes, c.objects),
-        (2 * small, 0, 0, 2)
+        (small + OBJ, 0, 0, 2)
     );
-    assert_eq!(r.fake.stats().unlinks, 0);
+    assert_eq!(r.fake.stats().unlinks, 1);
 }
 
 #[test]
@@ -1388,7 +1388,7 @@ fn fake_store_refuses_more_than_max_segments_blocks() {
     let mem = Mem::new(121, 1);
     let (src, _handle) = mem.source(121, 4);
     assert_eq!(
-        r.fake.submit_store(h, src, Incarnation(1)),
+        r.fake.submit_store(h, src, Incarnation::seq(1)),
         Err(PlatformError::InvalidLayout)
     );
     assert_eq!(r.fake.capacity().reserved_bytes, 0);
