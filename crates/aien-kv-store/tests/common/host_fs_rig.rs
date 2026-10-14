@@ -424,7 +424,7 @@ pub fn sha(data: &[u8]) -> [u8; 32] {
 }
 
 /// The store key every rig store and planted object uses: generated once per
-/// test process (ADR 0003 section 19), never a vault secret.
+/// test process (ADR 0003 section 20), never a vault secret.
 pub fn test_key() -> Arc<SealKey> {
     static KEY: OnceLock<Arc<SealKey>> = OnceLock::new();
     KEY.get_or_init(|| Arc::new(SealKey::generate().expect("test key")))
@@ -449,6 +449,14 @@ pub fn write_object_file(path: &Path, header: &ChunkHeader, payload: &[u8], seg:
     let mut bytes = plain_object_bytes(header, payload, seg);
     test_key().seal_file(&mut bytes).unwrap();
     std::fs::write(path, bytes).unwrap();
+}
+
+/// Write only the sealed-format marker (magic and version) into a region, for
+/// files recovery classifies without reading the payload.
+pub fn mark_sealed(region: &mut [u8]) {
+    let at = aien_kv_store::record::SEAL_SLOT_OFFSET;
+    region[at..at + 3].copy_from_slice(&aien_kv_store::seal::SEAL_MAGIC);
+    region[at + 3] = aien_kv_store::seal::SEALED_FORMAT_VERSION;
 }
 
 /// Decrypt an object file sealed with `test_key`: `region || payload`.

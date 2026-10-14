@@ -1,5 +1,5 @@
 #![cfg(feature = "std")]
-//! Encryption at rest in the host filesystem adapter (ADR 0003 section 19, #506).
+//! Encryption at rest in the host filesystem adapter (ADR 0003 section 20, #506).
 //! Every refusal case must end with the object discarded and the destination
 //! untouched, so the caller recomputes; nothing is ever restored from it.
 
@@ -177,4 +177,29 @@ fn host_fs_config_debug_never_prints_the_key() {
     assert!(!shown.contains("SealKey("), "{shown}");
     let k = format!("{:?}", test_key());
     assert!(k.contains("redacted"), "{k}");
+}
+
+#[test]
+fn host_fs_identity_header_rewritten_in_place_discards() {
+    // The header of a sealed object is rewritten where it lies (same store,
+    // same file name) to a different but self-consistent header: a new
+    // `written_unix_ns` and a recomputed header checksum. Every structural and
+    // identity check still passes, so only the AEAD binding can refuse it.
+    let fx = Fx::new();
+    let (s, key) = stored_then_reopened(
+        &fx,
+        7,
+        |b| {
+            let mut rec = RecordHeader::decode(b).unwrap();
+            rec.chunk.written_unix_ns ^= 0xFFFF;
+            b[..HEADER_LEN].copy_from_slice(&rec.encode());
+        },
+        None,
+    );
+    assert_eq!(
+        s.lookup(&[key]),
+        vec![Some(FULL_PAYLOAD)],
+        "the rewritten header passes every check at recovery"
+    );
+    assert_discarded(&fx, &s, key, 7);
 }

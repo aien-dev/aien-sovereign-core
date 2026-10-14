@@ -183,7 +183,7 @@ pub struct HostFsConfig {
     pub purge_after_recovery: bool,
     pub worker: WorkerMode,
     pub faults: Option<Arc<dyn FaultHook>>,
-    /// The key every object is sealed with (ADR 0003 section 19). `None`:
+    /// The key every object is sealed with (ADR 0003 section 20). `None`:
     /// `open` refuses (fail closed); there is no plaintext mode.
     pub seal_key: Option<Arc<crate::seal::SealKey>>,
 }
@@ -540,6 +540,8 @@ struct Shared {
     walk: Mutex<Walk>,
     /// The purge walk over the shards. Taken before (never while holding) `inner`.
     purge_walk: Mutex<Walk>,
+    /// SEAL SEAM (#506): the key every object is sealed and opened with.
+    seal_key: Arc<crate::seal::SealKey>,
 }
 
 /// Host filesystem `KvStore` implementation.
@@ -868,6 +870,11 @@ fn classify_recovered_header(
     file_key: &[u8; 32],
     cfg: &HostFsConfig,
 ) -> RecoveredHeader {
+    // SEAL SEAM (#506): an object without the sealed-format marker (an old
+    // plaintext file) is discarded, never read.
+    if !crate::seal::is_sealed_region(buf) {
+        return RecoveredHeader::Corrupt;
+    }
     let Ok(rec) = RecordHeader::decode(buf) else {
         return RecoveredHeader::Corrupt;
     };
@@ -929,7 +936,11 @@ fn classify_recovered_header(
 /// digest is 32 zero bytes is the only false negative (probability 2^-256).
 fn foreign_region_is_clean(buf: &[u8], rec: &RecordHeader) -> bool {
     let region = &buf[..HEADER_REGION_LEN];
-    let Some(last) = region[SEGMENT_TABLE_OFFSET..].iter().rposition(|b| *b != 0) else {
+    // SEAL SEAM (#506): the table and padding end where the seal slot starts.
+    let Some(last) = region[SEGMENT_TABLE_OFFSET..crate::record::SEAL_SLOT_OFFSET]
+        .iter()
+        .rposition(|b| *b != 0)
+    else {
         return false;
     };
     let n_seg = (last + 1).div_ceil(32);
@@ -1925,7 +1936,7 @@ fn run_one_purge_step(shared: &Shared) -> bool {
 }
 
 fn execute_store_job(shared: &Shared, job_id: u64) {
-    let (root, hook, key, inc, file_bytes) = {
+    let (root, hook, key, inc, mut file_bytes) = {
         let mut g = shared.inner.lock().unwrap_or_else(|e| e.into_inner());
         let Some(job) = g.jobs.get(&job_id) else {
             return;
@@ -2059,6 +2070,21 @@ fn execute_store_job(shared: &Shared, job_id: u64) {
             file_bytes,
         )
     };
+
+    // SEAL SEAM (#506): encrypt the payload in place and fill the seal slot,
+    // off the lock. Nothing reaches the filesystem unsealed.
+    if shared.seal_key.seal_file(&mut file_bytes).is_err() {
+        let garbage = {
+            let mut g = shared.inner.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(job) = g.jobs.remove(&job_id) {
+                g.fail_job(job, PlatformError::HardwareFault("seal failed".into()));
+            }
+            std::mem::take(&mut g.graveyard)
+        };
+        drop(garbage);
+        shared.cv.notify_all();
+        return;
+    }
 
     let tpath = tmp_path_for(&root, &key.0 .0, job_id, inc);
     let opath = object_path_for(&root, &key.0 .0);
@@ -2623,44 +2649,58 @@ fn execute_load_job(shared: &Shared, job_id: u64) {
 
     let n_seg = (expect.payload_len / block_stride) as usize;
     let seg_len = block_stride as usize;
-    let mut seg_buf = vec![0u8; seg_len];
     let mut reads_done = 1u64;
     let mut bytes_read = HEADER_REGION_LEN as u64;
 
-    for i in 0..n_seg {
-        let off = HEADER_REGION_LEN as u64 + (i as u64) * block_stride;
-        if file.read_exact_at(&mut seg_buf, off).is_err() {
-            drop(file);
-            let _ = std::fs::remove_file(&opath);
-            let garbage = {
-                let mut g = shared.inner.lock().unwrap_or_else(|e| e.into_inner());
-                g.stats.metadata_calls += 1;
-                g.stats.reads += reads_done;
-                g.stats.read_bytes += bytes_read;
-                g.stats.unlinks += 1;
-                g.stats.io_ops += 2 + reads_done;
-                g.stats.corrupt_deleted_total += 1;
-                if let Some(mut job) = g.jobs.remove(&job_id) {
-                    if job.busy_held {
-                        g.index.busy_dec(&key.0 .0);
-                        job.busy_held = false;
-                    }
-                    if let Some(rem) = g.index.remove(&key.0 .0) {
-                        g.stats.corrupt_bytes_deleted += rem.phys_bytes;
-                    }
-                    g.fail_job(job, PlatformError::InvalidLayout);
-                }
-                std::mem::take(&mut g.graveyard)
-            };
-            drop(garbage);
-            shared.cv.notify_all();
-            return;
-        }
+    // SEAL SEAM (#506): read the whole ciphertext, then authenticate and
+    // decrypt it before any segment reaches the destination. A refusal (wrong
+    // key, tampered bytes, swapped header, no seal) discards the object like
+    // any corrupt one; the caller recomputes.
+    let mut payload = vec![0u8; expect.payload_len as usize];
+    let read_ok = file
+        .read_exact_at(&mut payload, crate::record::PAYLOAD_OFFSET as u64)
+        .is_ok();
+    if read_ok {
         reads_done += 1;
-        bytes_read += block_stride;
+        bytes_read += expect.payload_len;
+    }
+    if !read_ok
+        || shared
+            .seal_key
+            .open_payload(&header_buf, &mut payload)
+            .is_err()
+    {
+        drop(file);
+        let _ = std::fs::remove_file(&opath);
+        let garbage = {
+            let mut g = shared.inner.lock().unwrap_or_else(|e| e.into_inner());
+            g.stats.metadata_calls += 1;
+            g.stats.reads += reads_done;
+            g.stats.read_bytes += bytes_read;
+            g.stats.unlinks += 1;
+            g.stats.io_ops += 2 + reads_done;
+            g.stats.corrupt_deleted_total += 1;
+            if let Some(mut job) = g.jobs.remove(&job_id) {
+                if job.busy_held {
+                    g.index.busy_dec(&key.0 .0);
+                    job.busy_held = false;
+                }
+                if let Some(rem) = g.index.remove(&key.0 .0) {
+                    g.stats.corrupt_bytes_deleted += rem.phys_bytes;
+                }
+                g.fail_job(job, PlatformError::InvalidLayout);
+            }
+            std::mem::take(&mut g.graveyard)
+        };
+        drop(garbage);
+        shared.cv.notify_all();
+        return;
+    }
 
+    for i in 0..n_seg {
+        let seg_buf = &payload[i * seg_len..(i + 1) * seg_len];
         let mut h = Sha256::new();
-        h.update(&seg_buf);
+        h.update(seg_buf);
         let digest: [u8; 32] = h.finalize().into();
         let want = &header_buf[256 + 32 * i..256 + 32 * (i + 1)];
         if digest != want {
@@ -2698,7 +2738,7 @@ fn execute_load_job(shared: &Shared, job_id: u64) {
                 .get_mut(&job_id)
                 .and_then(|j| j.dst.as_mut())
                 .expect("load dst");
-            dst.write_block(i, &seg_buf).err()
+            dst.write_block(i, seg_buf).err()
         };
         if let Some(err) = write_err {
             drop(file);
@@ -2941,6 +2981,8 @@ fn worker_loop(shared: Arc<Shared>) {
 impl HostFsStore {
     pub fn open(config: HostFsConfig) -> Result<Self, PlatformError> {
         validate_config(&config)?;
+        // SEAL SEAM (#506): no key, no store (fail closed, nothing touched).
+        let seal_key = config.seal_key.clone().ok_or(PlatformError::AccessDenied)?;
         let mut stats = HostFsStats {
             tail_scratch_bytes: config.layout.block_stride,
             ..HostFsStats::default()
@@ -3090,6 +3132,7 @@ impl HostFsStore {
             tail_scratch: Mutex::new(vec![0u8; scratch_len]),
             walk: Mutex::new(Walk::new(WalkStage::Tmp)),
             purge_walk: Mutex::new(Walk::new(WalkStage::Shard(0))),
+            seal_key,
         });
 
         let handle = if worker_mode == WorkerMode::Thread {
@@ -3539,6 +3582,10 @@ mod tests {
         (src, buf)
     }
 
+    fn test_key() -> Arc<crate::seal::SealKey> {
+        Arc::new(crate::seal::SealKey::generate().unwrap())
+    }
+
     fn temp_root(tag: &str) -> PathBuf {
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -3575,6 +3622,7 @@ mod tests {
         };
         let ns = f.namespace_id().unwrap();
         let mut cfg = HostFsConfig::from_fields(root.clone(), &f).unwrap();
+        cfg.seal_key = Some(test_key());
         cfg.worker = WorkerMode::Manual;
         let s = HostFsStore::open(cfg).unwrap();
         while !s.recover_step(50).done {}
@@ -3608,6 +3656,7 @@ mod tests {
         let f = test_fields();
         let ns = f.namespace_id().unwrap();
         let mut cfg = HostFsConfig::from_fields(root.clone(), &f).unwrap();
+        cfg.seal_key = Some(test_key());
         cfg.max_objects = 2;
         cfg.worker = WorkerMode::Manual;
         let s = HostFsStore::open(cfg).unwrap();
@@ -3635,6 +3684,7 @@ mod tests {
         let small_phys = HEADER_REGION_LEN as u64 + BS as u64;
         let faults = ScriptedFaults::new();
         let mut cfg = HostFsConfig::from_fields(root.clone(), &f).unwrap();
+        cfg.seal_key = Some(test_key());
         cfg.quota_bytes = 2 * small_phys;
         cfg.worker = WorkerMode::Manual;
         cfg.faults = Some(faults.clone());
@@ -3686,6 +3736,7 @@ mod tests {
         let f = test_fields();
         let ns = f.namespace_id().unwrap();
         let mut cfg = HostFsConfig::from_fields(root.clone(), &f).unwrap();
+        cfg.seal_key = Some(test_key());
         cfg.worker = WorkerMode::Manual;
         let s = HostFsStore::open(cfg.clone()).unwrap();
         while !s.recover_step(50).done {}

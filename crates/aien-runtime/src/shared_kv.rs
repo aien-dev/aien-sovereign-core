@@ -459,6 +459,12 @@ pub struct KvPersistSettings {
     /// The storage worker's settings (`WorkerConfig::from_lookup`: the
     /// `AIEN_KV_STORE_MAX_*` bounds and `AIEN_KV_STORE_DRAIN_MS`).
     pub worker: aien_kv_store::worker::WorkerConfig,
+    /// The store key from `AIEN_KV_STORE_KEY` (ADR 0003 section 20), read only
+    /// when the store dir is set (`None` otherwise). A refusal (missing or
+    /// malformed) does not stop the start: persistence is refused (fail
+    /// closed) and the status says why. The key is redacted in `Debug`.
+    pub store_key:
+        Option<Result<Arc<aien_kv_store::seal::SealKey>, aien_kv_store::seal::KeyRefusal>>,
 }
 
 fn parse_switch(name: &str, v: Option<String>) -> Result<bool, String> {
@@ -519,6 +525,9 @@ impl KvPersistSettings {
                 .unwrap_or(DEFAULT_RESTORE_RETRY_WINDOW_MS);
         let worker = aien_kv_store::worker::WorkerConfig::from_lookup(&get)
             .map_err(|e| format!("persistent KV worker setting {e}"))?;
+        let store_key = store_dir
+            .is_some()
+            .then(|| aien_kv_store::seal::SealKey::from_lookup(&get).map(Arc::new));
         Ok(Self {
             store_dir,
             namespace,
@@ -531,11 +540,17 @@ impl KvPersistSettings {
             max_objects: parse_optional_positive(&get, KV_STORE_MAX_OBJECTS_ENV)?,
             recovery_slice_ms: parse_optional_positive(&get, KV_STORE_RECOVERY_SLICE_MS_ENV)?,
             worker,
+            store_key,
         })
     }
 
+    /// From the process environment. `AIEN_KV_STORE_KEY` is removed from the
+    /// environment once read (whatever its value), so no child process
+    /// inherits it; the key lives on only in the settings (ADR 0003 section 20).
     pub fn from_env() -> Result<Self, String> {
-        Self::from_lookup(|n| std::env::var(n).ok())
+        let got = Self::from_lookup(|n| std::env::var(n).ok());
+        std::env::remove_var(aien_kv_store::seal::KEY_ENV);
+        got
     }
 
     /// Persistence is on only when a store directory is configured.
@@ -585,6 +600,11 @@ pub fn open_host_kv_residency(
     let Some(root) = settings.store_dir.clone() else {
         return Ok(None);
     };
+    let seal_key = match &settings.store_key {
+        Some(Ok(k)) => k.clone(),
+        Some(Err(r)) => return Err(format!("persistent KV refused: {r}")),
+        None => return Err("persistent KV: the store key was not read".to_string()),
+    };
     let identity = crate::kv_residency::KvIdentity::new(fields)
         .map_err(|e| format!("persistent KV identity: {e}"))?;
     let mut cfg = HostFsConfig::from_fields(root.clone(), fields)
@@ -598,6 +618,7 @@ pub fn open_host_kv_residency(
     if let Some(v) = settings.recovery_slice_ms {
         cfg.recovery_slice_ms = v;
     }
+    cfg.seal_key = Some(seal_key);
     let slice_ms = cfg.recovery_slice_ms;
     let store = Arc::new(HostFsStore::open(cfg).map_err(|e| {
         format!(
@@ -680,6 +701,15 @@ pub fn enable_persistent_kv(
     use crate::compute_config::{ModelBinding, StoreInputs};
     if !settings.enabled() {
         return Ok(None);
+    }
+    // Fail closed without a valid store key (ADR 0003 section 20): no store is
+    // opened and nothing is written; the daemon serves with plain prefill.
+    if let Some(Err(refusal)) = &settings.store_key {
+        aien_kv_store::seal::note_key_refusal();
+        spine.refuse_kv_persistence(refusal.reason());
+        return Ok(Some(format!(
+            "persistent KV: REFUSED ({refusal}); running without persistence: no park, no restore, every prompt is prefilled"
+        )));
     }
     let kv = spine.kv_manager.clone();
     let (layout, dtype, block_size) = {

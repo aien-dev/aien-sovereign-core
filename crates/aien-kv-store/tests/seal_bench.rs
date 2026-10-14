@@ -1,5 +1,5 @@
 #![cfg(feature = "std")]
-//! Host micro-benchmark behind the cipher choice of ADR 0003 section 19:
+//! Host micro-benchmark behind the cipher choice of ADR 0003 section 20:
 //! AES-256-GCM against ChaCha20-Poly1305 (both from `ring`), sealing and
 //! opening 1 MiB and 16 MiB buffers in place, as the store does.
 //!

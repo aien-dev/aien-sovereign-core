@@ -157,7 +157,7 @@ fn private_tempdir() -> tempfile::TempDir {
         .expect("tempdir")
 }
 
-/// A generated test store key (ADR 0003 section 19), never a vault secret. The
+/// A generated test store key (ADR 0003 section 20), never a vault secret. The
 /// same key across "restarts" so restored objects open.
 const TEST_STORE_KEY: &str = "6b3f0c2d9a1e4f5b7c8d0e1f2a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d";
 
@@ -802,7 +802,7 @@ async fn persistence_off_when_store_dir_unset_changes_nothing() {
 }
 
 /// `AIEN_KV_STORE_DIR` set but `AIEN_KV_STORE_KEY` missing or malformed: fail
-/// closed (ADR 0003 section 19). No store is opened, nothing is written, no
+/// closed (ADR 0003 section 20). No store is opened, nothing is written, no
 /// park and no restore; requests run as plain prefill, and the status says why.
 #[tokio::test]
 async fn persistence_refused_without_a_valid_store_key_runs_plain_and_says_why() {

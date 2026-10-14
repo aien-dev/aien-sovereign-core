@@ -856,3 +856,35 @@ The host adapter does **not** encrypt. Object files are plaintext K/V protected 
 ### 19.9 Namespace isolation (known gap)
 
 The namespace id has no tenant or user field. Its `sharing_namespace` field (1.2 field 13) comes on the host from one process-wide setting, `AIEN_KV_STORE_NAMESPACE`, so every request served by one runtime shares one namespace and can hit another request's cached prefix (a timing and content side channel between users of the same runtime). The native mapping (section 9) binds the subject id; the host path does not. TODO: a per-tenant or per-subject namespace component on the host, decided before any multi-tenant deployment. Until then the supported deployment is one trust domain per runtime and store directory.
+
+## 20. Encryption at rest of saved KV files (#506, policy from the #498 resolution)
+
+**In plain words.** Every saved conversation memory file is locked with a secret key before it touches the disk. Without the key, or if a single byte was changed, or if a file was moved to pose as another conversation, the file is thrown away and the conversation is simply recomputed. Nothing is ever restored from a file that does not prove itself.
+
+**Policy (binding, locked by Drake in #498).** Authenticated encryption (AEAD), a fresh random nonce per file, the identity header bound as associated data, the key loaded from atlas-vault into process memory only (never written to disk or logs). On a decrypt failure, a wrong key, tampered bytes, a swapped identity header or a missing key: discard and recompute, never restore. Key rotation: old files are simply discarded.
+
+**Cipher: AES-256-GCM** (ring 0.17, already in the lock file). Host micro-benchmark (`tests/seal_bench.rs`, ignored test, release build, in place, one thread, this Spark's Grace CPU cores Cortex-X925/A725 with the ARMv8 AES and PMULL extensions; which core type ran it is UNKNOWN):
+
+| buffer | AES-256-GCM seal / open | ChaCha20-Poly1305 seal / open |
+|---|---|---|
+| 1 MiB | 7715 / 7847 MiB/s | 1956 / 1948 MiB/s |
+| 16 MiB | 7694 / 7839 MiB/s | 1955 / 1949 MiB/s |
+
+AES-256-GCM is about 4 times faster (VERIFIED on the host, 2026-10-13). What this adds to a real restore on the Spark under load is INFERRED (roughly 0.13 ms per MiB at the rate above) and is to be measured on the chip run, not claimed here.
+
+**Format (host objects; amends 2.1 and 2.4).** The file stays `header region (4096 B) || payload`, same size, payload still at offset 4096. The payload bytes are ciphertext (GCM is length-preserving). The last 32 bytes of the region are the **seal slot**: offset 4064 magic `AKS`, 4067 sealed format version `2` (format 1 was the plaintext layout), 4068 nonce (12 bytes, from the OS random source per file), 4080 tag (16 bytes). Associated data is region bytes 0 to 4067: the 256-byte identity header (namespace id, chunk key, parent, geometry, payload root, header checksum), the segment digest table, the padding, and the magic and version. Consequences:
+
+1. The digest table now ends at 4064, so **`MAX_SEGMENTS` is 119** on the host (`(4064 - 256) / 32`), not 120 (amends 2.1 item 3; the default chunk is 16 blocks). `BadPadding` covers bytes from the end of the table to 4063; the seal slot is checked by the seal module, not as padding.
+2. The 256-byte header, its version (hashed into every namespace id, 1.2) and the golden vectors are unchanged, so native and host still share them; the version bump lives in the seal slot.
+3. Recovery still reads only the region: a region without the sealed marker (an old plaintext file) is deleted as corrupt. Headers are not authenticated at recovery; an object sealed under another key, or tampered, is indexed and then deleted at its first load (same as the corrupt-payload limit above).
+4. A load reads the whole payload, authenticates and decrypts it, and only then checks the segment digests and writes blocks to the destination. Nothing from a refused object ever reaches the pool (this replaces the segment-by-segment landing of 15.4 on the host; the per-segment digests remain as a second check).
+
+**Key.** `AIEN_KV_STORE_KEY`, 64 hex digits (32 bytes), exactly; any other length or character is `key_malformed`. Started as `atlas-vault run AIEN_KV_STORE_KEY -- <daemon>`. `KvPersistSettings::from_env` reads it and removes it from the process environment (so child processes do not inherit it); `SealKey` holds it in a buffer zeroed on drop; its `Debug` prints `SealKey(redacted)` and refusals carry no key text. With `AIEN_KV_STORE_DIR` set and the key missing or malformed, persistence is refused: no store opened, nothing written, no park, no restore, plain prefill; the status reports `kv_store_state = refused`, `kv_store_refused_reason` and `kv_store_key_refused_total`. `HostFsStore::open` without a key refuses with `AccessDenied` before creating anything. With the store dir unset nothing changes. Loads refused by authentication count in `kv_store_seal_rejected_total`.
+
+**Tests** (red dc34c99, then green): `seal_tests` (round trip, fresh nonce per file over 512 seals, wrong key, tampered ciphertext byte, tampered tag or nonce, swapped identity header, old plaintext format and other version, malformed and missing key, redacted Debug, environment removal), `host_fs_seal_tests` (the same refusals end to end through the store: the load fails `InvalidLayout`, the destination is untouched, the object is deleted; old plaintext file deleted at recovery; a header rewritten in place, self-consistent, refused at load; open without a key refused), `persistence_refused_without_a_valid_store_key_runs_plain_and_says_why` (runtime).
+
+**Limits.**
+- Metadata stays visible: file names (chunk keys), sizes, timestamps, the header and the segment digests of the plaintext. Someone who can read the store and guess a prompt can confirm the guess through the chunk key (1.3) as before; what is protected is the K/V content itself.
+- Random 96-bit nonces under one key: the usual bound is about 2^32 files per key (NIST SP 800-38D); rotate the key long before that (a rotation discards the old files).
+- The key schedule `ring` builds per seal or open is not zeroed by ring (UNKNOWN residue on the worker's stack). `remove_var` does not erase the original process environment block, which `/proc/<pid>/environ` still shows to the same user (INFERRED from Linux behaviour; not tested here). `remove_var` runs at settings read, at daemon start before the storage worker exists; other threads reading the environment at that moment would race (INFERRED low risk).
+- File permissions, create-new temp files and no-follow opens are section 19 (#511); this section only covers encryption.

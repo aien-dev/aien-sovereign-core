@@ -334,7 +334,7 @@ pub struct KvPersistReport {
     pub kv_store_stale_completions_total: u64,
     pub kv_store_cancelled_total: u64,
     pub kv_store_queue_full_total: u64,
-    /// Empty unless persistence was refused at start (ADR 0003 section 19):
+    /// Empty unless persistence was refused at start (ADR 0003 section 20):
     /// `key_missing` or `key_malformed` (`AIEN_KV_STORE_KEY`). With a reason the
     /// state is `refused`: no park, no restore, every prompt is prefilled.
     #[serde(default)]

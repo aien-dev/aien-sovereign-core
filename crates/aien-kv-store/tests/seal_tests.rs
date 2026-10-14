@@ -1,5 +1,5 @@
 #![cfg(feature = "std")]
-//! The sealing module (ADR 0003 section 19): AEAD over the payload with the
+//! The sealing module (ADR 0003 section 20): AEAD over the payload with the
 //! record's header region bound as associated data. Every negative case must
 //! refuse; a refusal means the caller discards the object and recomputes.
 

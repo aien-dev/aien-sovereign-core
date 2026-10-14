@@ -24,7 +24,8 @@ pub enum KvError {
     /// The root recomputed from the segment digest table differs from
     /// `payload_sha256` (offset 184).
     SegmentRootMismatch,
-    /// More than `MAX_SEGMENTS` (120) segments: the table would not fit the region.
+    /// More than `MAX_SEGMENTS` (119) segments: the table would not fit the region
+    /// before the seal slot (ADR 0003 section 20).
     TooManySegments,
     NamespaceMismatch,
     KeyMismatch,

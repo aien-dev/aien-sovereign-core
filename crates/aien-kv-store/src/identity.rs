@@ -221,7 +221,8 @@ impl NamespaceFields<'_> {
             return Err(KvError::InvalidGeometry);
         }
         // A host chunk is one segment per pool block and the digest table holds
-        // at most 120 (ADR 2.1 item 3): `chunk_blocks` is capped at 120 there.
+        // at most `MAX_SEGMENTS` = 119 (ADR 2.1 item 3, amended by section 20):
+        // `chunk_blocks` is capped at 119 there.
         if self.backend_format == BackendFormat::HostPagedPoolV1
             && self.chunk_tokens / self.block_size > MAX_SEGMENTS as u32
         {
