@@ -24,7 +24,7 @@ Tags: VERIFIED = read in source, cited file:line. INFERRED = reasoned, from what
 2. `OmegaDoor` holds only an `OmegaEngine` and a lock wait (`omega_engine.rs:73-76` [own30b]). It loads weights via `OmegaEngine::load_with(model_dir, max_context, format, ...)` (`omega_engine.rs:98`). VERIFIED.
 3. Every request goes through `Engine::generate` (trait at `engine.rs:83-96`; omega impl `omega_engine.rs:139-189`), which takes the GPU lock (`:170`) and calls `OmegaEngine::generate_with` (`:174`). VERIFIED.
 4. The engine keeps one sequence's KV and a token list `history` (`qwen3_moe_omega.rs:2125` [own30b]). Reuse is in memory only: longest common prefix with `history`, then `rewind` (`qwen3_moe_omega.rs:2809-2818`, `rewind` at `:2570-2575`). A different conversation overwrites it. VERIFIED.
-5. The KV is `OmegaPagedKv`: one sequence, bf16 pool, block size 16, allocated by omega as a resident GPU-visible block when the driver grants it (`qwen3_moe_omega.rs:1844`, `:1856-1866`, `:1876-1890`). The trait it implements has only `capacity/reset/truncate/append/attend/resident` (`:1755-1768`): no export, no import, no park, no restore. VERIFIED.
+5. The KV is `OmegaPagedKv`: one sequence, bf16 pool, block size 16, allocated by omega as a resident GPU-visible block when the driver grants it (`qwen3_moe_omega.rs:1844`, `:1856-1866`, `:1876-1890`). The trait it implements has only `capacity/reset/truncate/append/attend/resident` (`:1754-1768`): no export, no import, no park, no restore. VERIFIED.
 6. Search: a grep over `crates/aien-serve-http` for `kv_store|KvStore|park|restore|residency|persistent|AIEN_KV|aien_runtime` finds nothing; `aien-serve-http/Cargo.toml` depends only on `aien-inference-abi` and `aien-omega-gpu` (no `aien-runtime`, no `aien-kv-store`). VERIFIED.
 7. Also `aien-inference-abi` on `own30b/serve` does not depend on `aien-kv-store` (its Cargo.toml lists abi-core, kv-cache, platform, omega crates only). VERIFIED.
 
@@ -62,7 +62,7 @@ So: model files and shape, yes; the exact weight format, omega build, FP8 roundi
 
 ## 5. What is missing to wire it on the omega path (a list, not a design)
 
-1. A KV export/import on `OmegaPagedKv` (today: `append/attend/truncate/reset` only, `qwen3_moe_omega.rs:1755-1768`).
+1. A KV export/import on `OmegaPagedKv` (today: `append/attend/truncate/reset` only, `qwen3_moe_omega.rs:1754-1768`).
 2. A park hook after each generation and a restore step at the start of `Engine::generate`, in or around `OmegaDoor` (`omega_engine.rs:148-189`). Today the only seam is the runtime-spine one in `aien-abi-core` (`:644-661`), which this engine does not implement.
 3. A store handle and settings in `aien-serve-http` (no `aien-kv-store` or `aien-runtime` dependency today).
 4. An identity builder for the omega path: weights digest of the directory plus the weight format; omega build id (`omega.lock` commit or the linked kernel build); a rounding class that the omega path, not the reference CPU, is pinned against; MoE shape; any numeric run settings. None exist.
