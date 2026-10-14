@@ -1,6 +1,6 @@
 # What forget does, and what it does not do
 
-Crate `aien-allen-memory`, tracking aien-dev/aien-architecture#159.
+Crate `aien-allen-memory`, tracking aien-spark/aien-architecture#159.
 
 ## The claim, stated narrowly
 

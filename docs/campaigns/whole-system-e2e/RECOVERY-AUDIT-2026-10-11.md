@@ -1,7 +1,7 @@
 # Recovery audit, 2026-10-11 (Lane E, Priority D of arch#190)
 
 Scope: what the campaign evidences about interruption and recovery, read from the committed receipts, not from the
-engine's design intent. Owning issue for new work: aien-dev/aien-sovereign-core#408. Evidence sources: `RESULT-FAULTS-1.md`
+engine's design intent. Owning issue for new work: aien-spark/aien-sovereign-core#408. Evidence sources: `RESULT-FAULTS-1.md`
 (`runs/FAULTS-20261010T144049Z`), the v1.2 re-run `runs/FAULTS-20261011T012434Z` (10 of 10 rows PASS; its first run
 `FAULTS-20261011T011317Z` scored two rows FAIL on wrong predictions, see `FAULTS-v1.2.1.md`), RUN-1
 `runs/RUN-1-20261010T154724Z` (E6, CTRL-E6, CTRL-E4), `RESULT-RUN-1-R7.md` and `ACCEPTANCE-v1.3-ctrl-e5.md` (sc#404).

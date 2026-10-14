@@ -50,7 +50,7 @@ stated and is not authoritative.
 *Hardware Reference: NVIDIA DGX Spark (NVIDIA Grace Blackwell (GB10, aarch64), 121 GB unified memory). All metrics measured under concurrency C=10 over 500 requests per endpoint.*
 <!-- AIEN:BENCHMARKS:END -->
 
-Canonical dataset and commit anchors: [aien-dev/benchmarks](https://github.com/aien-dev/benchmarks).
+Canonical dataset and commit anchors: [aien-spark/benchmarks](https://github.com/aien-spark/benchmarks).
 
 ## Deficit Inventory
 

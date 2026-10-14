@@ -180,4 +180,4 @@ benchmarks/
 - [x] Neutral benchmark orchestrator executes AIEN and MAX sequentially with thermal cool-downs (M6).
 - [x] Concurrency sweep (C=1 to C=64) captures TTFT, ITL, throughput, memory, and power telemetry (M6).
 - [x] Benchmark results and receipt committed to benchmarks/data/ and documented in walkthrough.md (M6).
-- [x] Clean PR opened on aien-dev/aien-sovereign-core, CI green, linear squash merge, Cortex receipt in atlas-memory (M7).
+- [x] Clean PR opened on aien-spark/aien-sovereign-core, CI green, linear squash merge, Cortex receipt in atlas-memory (M7).
