@@ -761,3 +761,59 @@ fn a_graceful_shutdown_releases_the_engine_and_flushes_the_parks() {
     let _ = turn(&b, &prompt2(&h1));
     assert_eq!(counters(&b).restores, 1);
 }
+
+/// The shard digests run on parallel threads; the digest must stay the serial manifest
+/// (`aien-checkpoint-digest v1`, the index sha256, one `<sha256>  <shard>` line per shard).
+#[test]
+fn sharded_checkpoint_digest_is_the_serial_manifest() {
+    use sha2::{Digest, Sha256};
+    let hex = |b: &[u8]| b.iter().map(|x| format!("{x:02x}")).collect::<String>();
+    let dir = std::env::temp_dir().join(format!("pkv-digest-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let shards = [
+        "model-00001-of-00003.safetensors",
+        "model-00002-of-00003.safetensors",
+        "model-00003-of-00003.safetensors",
+    ];
+    let index = format!(
+        r#"{{"metadata":{{}},"weight_map":{{"a.weight":"{}","b.weight":"{}","c.weight":"{}"}}}}"#,
+        shards[0], shards[1], shards[2]
+    );
+    std::fs::write(dir.join("model.safetensors.index.json"), &index).unwrap();
+    for (i, s) in shards.iter().enumerate() {
+        std::fs::write(dir.join(s), vec![i as u8 + 1; 3 << 20]).unwrap();
+    }
+    let (got, kind) = kv_persist::checkpoint_digest(&dir).unwrap();
+    let mut manifest = format!(
+        "aien-checkpoint-digest v1\nindex {}\n",
+        hex(&Sha256::digest(index.as_bytes()))
+    );
+    for s in shards {
+        manifest.push_str(&format!(
+            "{}  {s}\n",
+            hex(&Sha256::digest(std::fs::read(dir.join(s)).unwrap()))
+        ));
+    }
+    std::fs::remove_dir_all(&dir).unwrap();
+    assert_eq!(kind, "index+shards");
+    assert_eq!(got, <[u8; 32]>::from(Sha256::digest(manifest.as_bytes())));
+}
+
+/// Host-only timing of the digest on a real checkpoint (no chip): set AIEN_DIGEST_MODEL_DIR.
+#[test]
+#[ignore = "reads a real checkpoint; run with --ignored and AIEN_DIGEST_MODEL_DIR"]
+fn checkpoint_digest_timing_on_a_real_checkpoint() {
+    let Ok(dir) = std::env::var("AIEN_DIGEST_MODEL_DIR") else {
+        return;
+    };
+    let t = std::time::Instant::now();
+    let (d, kind) = kv_persist::checkpoint_digest(Path::new(&dir)).unwrap();
+    eprintln!(
+        "digest {kind} {:02x}{:02x}{:02x}{:02x}.. in {:.1} s",
+        d[0],
+        d[1],
+        d[2],
+        d[3],
+        t.elapsed().as_secs_f64()
+    );
+}

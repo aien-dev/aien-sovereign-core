@@ -200,13 +200,24 @@ fn main() -> ExitCode {
             args.model_dir.display(),
             args.spin_us
         );
+        // Persistent KV (sc#505): only when AIEN_KV_STORE_DIR is set; otherwise nothing else is read.
+        // The checkpoint digest reads every weight file, so it runs beside the load, not after it.
+        let persist = kv_persist::settings_from_lookup(|n| std::env::var(n).ok()).map(|settings| {
+            // The key lives on only in the settings; no child inherits it.
+            std::env::remove_var(aien_kv_store::seal::KEY_ENV);
+            let digest = matches!(&settings, Ok(s) if matches!(s.store_key, Some(Ok(_)))).then(|| {
+                let dir = args.model_dir.clone();
+                std::thread::spawn(move || {
+                    let t = std::time::Instant::now();
+                    kv_persist::checkpoint_digest(&dir).map(|d| (d, t.elapsed()))
+                })
+            });
+            (settings, digest)
+        });
         match OmegaDoor::load(&args.model_dir, args.cfg.max_context_tokens.unwrap_or(32768), args.weights, args.spin_us, args.prefill) {
             Ok(mut door) => {
-                // Persistent KV (sc#505): only when AIEN_KV_STORE_DIR is set; otherwise nothing else is read.
-                if let Some(settings) = kv_persist::settings_from_lookup(|n| std::env::var(n).ok()) {
-                    // The key lives on only in the settings; no child inherits it.
-                    std::env::remove_var(aien_kv_store::seal::KEY_ENV);
-                    let line = enable_persistence(&mut door, settings, &args);
+                if let Some((settings, digest)) = persist {
+                    let line = enable_persistence(&mut door, settings, digest, &args);
                     eprintln!("aien-serve-http: {line}");
                 }
                 Arc::new(door)
@@ -266,20 +277,32 @@ fn main() -> ExitCode {
     })
 }
 
-/// Opens the persistent KV store for the loaded omega engine (the checkpoint digest reads every
-/// weight file once). Returns the startup line; any problem refuses and the door runs plain.
-fn enable_persistence(door: &mut OmegaDoor, settings: Result<aien_runtime::shared_kv::KvPersistSettings, String>, args: &Args) -> String {
+/// The checkpoint digest running beside the load, with its own reading time.
+type DigestJob = std::thread::JoinHandle<Result<(([u8; 32], &'static str), std::time::Duration), String>>;
+
+/// Opens the persistent KV store for the loaded omega engine. `digest` is the checkpoint digest
+/// started beside the load (None when the key already refuses). Returns the startup line; any
+/// problem refuses and the door runs plain.
+fn enable_persistence(
+    door: &mut OmegaDoor,
+    settings: Result<aien_runtime::shared_kv::KvPersistSettings, String>,
+    digest: Option<DigestJob>,
+    args: &Args,
+) -> String {
     let t0 = std::time::Instant::now();
+    let mut digest_s = 0.0;
     let build = kv_persist::OmegaBuild::linked();
     let env: Vec<(String, String)> = std::env::vars().collect();
     let config = door.config();
     let identity = settings.as_ref().map_err(|e| e.clone()).and_then(|s| {
-        // No digest (minutes of reading) when the key already refuses: `open` reports the key.
+        // No digest was started when the key already refuses: `open` reports the key.
         if !matches!(s.store_key, Some(Ok(_))) {
             return Err("the store key refused".to_string());
         }
         let rope_scaling = kv_persist::config_has_rope_scaling(&args.model_dir)?;
-        let (sha, kind) = kv_persist::checkpoint_digest(&args.model_dir)?;
+        let job = digest.ok_or("the checkpoint digest was not started")?;
+        let ((sha, kind), took) = job.join().map_err(|_| "the checkpoint digest thread panicked".to_string())??;
+        digest_s = took.as_secs_f64();
         kv_persist::OmegaKvIdentity::new(&kv_persist::IdentityInputs {
             model_id: &args.cfg.model_id,
             model_sha256: sha,
@@ -295,7 +318,7 @@ fn enable_persistence(door: &mut OmegaDoor, settings: Result<aien_runtime::share
     let fault = kv_persist::TestFault::from_lookup(|n| std::env::var(n).ok());
     let (state, line) = kv_persist::open_with_test_fault(settings, identity, fault);
     door.set_persistence(state);
-    format!("{line} [identity in {:.1} s]", t0.elapsed().as_secs_f64())
+    format!("{line} [identity in {:.1} s after the load; digest {digest_s:.1} s beside it]", t0.elapsed().as_secs_f64())
 }
 
 /// Installs the SIGTERM and SIGINT handlers now; the returned future resolves on the first one.

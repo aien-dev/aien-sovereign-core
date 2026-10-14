@@ -551,8 +551,23 @@ pub fn checkpoint_digest(model_dir: &Path) -> Result<([u8; 32], &'static str), S
         "aien-checkpoint-digest v1\nindex {}\n",
         hex(&sha256_file(&index)?)
     );
-    for (name, file) in &files.weights {
-        manifest.push_str(&format!("{}  {name}\n", hex(&sha256_file(file)?)));
+    // One thread per shard: the shards are independent and each is gigabytes, so the digest
+    // takes the time of the largest shard, not the sum (57 s -> one shard's time on the Spark).
+    let digests: Vec<Result<[u8; 32], String>> = std::thread::scope(|s| {
+        let jobs: Vec<_> = files
+            .weights
+            .iter()
+            .map(|(_, file)| s.spawn(move || sha256_file(file)))
+            .collect();
+        jobs.into_iter()
+            .map(|j| {
+                j.join()
+                    .unwrap_or_else(|_| Err("a shard digest thread panicked".into()))
+            })
+            .collect()
+    });
+    for ((name, _), d) in files.weights.iter().zip(digests) {
+        manifest.push_str(&format!("{}  {name}\n", hex(&d?)));
     }
     Ok((Sha256::digest(manifest.as_bytes()).into(), "index+shards"))
 }

@@ -25,7 +25,7 @@ libc = "0.2"
 aien-kv-store = { path = "../aien-kv-store" }
 aien-platform = { path = "../aien-platform" }
 aien-runtime = { path = "../aien-runtime" }
-sha2 = "0.10"
+sha2 = { version = "0.10", features = ["asm"] }
 
 [dev-dependencies]
 aien-inference-abi = { path = "../aien-inference-abi", features = ["host-test-engine"] }
