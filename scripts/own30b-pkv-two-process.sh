@@ -88,6 +88,9 @@ kill -0 "$P2" 2>/dev/null && echo "proc2 still alive during the ram phase" | tee
 	check "proc1 turn 1 equals the uninterrupted turn 1" "$a1" "$a1_off"
 	check "proc2 restored turn 2 equals the uninterrupted turn 2" "$t2_proc2" "$t_off"
 	check "proc2 restored (restores == 1)" "$r2" 1
+	check "proc1 park refused no chunk" "$(pk proc1-after-turn1 park_refused)" 0
+	p1=$(jq -r .usage.prompt_tokens "$dir/proc1-turn1.json")
+	check "proc2 restore covered at least the turn-1 prompt ($p1 tokens)" "$([ "$(pk proc2 restored_tokens)" -ge "$p1" ] && echo yes)" yes
 	check "proc1 RAM turn 2 equals the uninterrupted turn 2" "$t2_proc1" "$t_off"
 	check "proc1 did not restore (restores == 0)" "$r1" 0
 	[ $fail = 0 ] && echo "VERDICT PASS" || echo "VERDICT FAIL"

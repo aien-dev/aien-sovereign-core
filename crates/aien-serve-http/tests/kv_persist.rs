@@ -820,3 +820,52 @@ fn a_graceful_shutdown_releases_the_engine_and_flushes_the_parks() {
     let _ = turn(&b, &prompt2(&h1));
     assert_eq!(counters(&b).restores, 1);
 }
+
+/// #514 chip finding: on the 30B model one 256-token chunk is 25 MB and the storage worker's
+/// park budget (a quarter of `AIEN_KV_STORE_MAX_INFLIGHT_BYTES`, 64 MB by default) holds two,
+/// so a 2079-token turn parked 2 of 9 chunks and refused the rest. Here the budget holds exactly
+/// one chunk: every chunk of the turn must still be parked (the door waits for credit), and a
+/// restart must restore the whole history.
+#[test]
+fn a_park_larger_than_the_park_budget_is_parked_in_full() {
+    let probe = Scratch::new("budget-probe");
+    let (a, line) = door(&probe, &Setup::new(&probe.store(), &gen_key()));
+    assert!(line.contains("persistent KV: on"), "{line}");
+    let _ = turn(&a, &prompt1());
+    assert!(pk_of(&a).wait_idle(WAIT));
+    let c = counters(&a);
+    assert!(c.parked_chunks >= 3 && c.park_refused == 0, "{c:?}");
+    let (n, per_chunk) = (c.parked_chunks, c.park_bytes / c.parked_chunks);
+    drop(a);
+
+    let scratch = Scratch::new("budget");
+    let budget = 4 * (per_chunk + aien_kv_store::record::HEADER_REGION_LEN as u64);
+    let s = Setup::new(&scratch.store(), &gen_key())
+        .with_var("AIEN_KV_STORE_MAX_INFLIGHT_BYTES", &budget.to_string());
+    let (a, line) = door(&scratch, &s);
+    assert!(line.contains("persistent KV: on"), "{line}");
+    let _ = turn(&a, &prompt1());
+    let h1 = a.history();
+    assert!(pk_of(&a).wait_idle(WAIT));
+    let c = counters(&a);
+    assert_eq!(
+        (c.parked_chunks, c.park_refused, c.park_failed),
+        (n, 0, 0),
+        "every chunk parked through a one-chunk budget: {c:?}"
+    );
+    drop(a);
+
+    let (_, _, u2) = uninterrupted(&scratch);
+    let (b, _) = door(&scratch, &s);
+    let r2 = turn(&b, &prompt2(&h1));
+    let c = counters(&b);
+    assert_eq!(
+        (c.restores, c.restored_tokens),
+        (1, h1.len() as u64),
+        "{c:?}"
+    );
+    assert_eq!(
+        r2, u2,
+        "restored continuation differs from the uninterrupted run"
+    );
+}

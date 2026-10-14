@@ -59,6 +59,10 @@ pub const ARITH_ID: &str = "omega-qwen3-moe";
 const OMEGA_ENG_DOMAIN: &[u8] = b"AIEN-PKV-OMEGA-ENG-V1\0";
 /// How long a restore waits for its chunks before giving up (plain prefill).
 pub const LOAD_TIMEOUT: Duration = Duration::from_secs(10);
+/// How long a park waits for the storage worker's park budget to free (its earlier chunks
+/// publishing) before it gives up on the rest of the chain. One 256-token chunk of the 30B model
+/// is 25 MB and the default park budget is 64 MB, so a long turn always waits for credit (#514).
+pub const PARK_CREDIT_WAIT: Duration = Duration::from_secs(10);
 
 /// Omega environment switches that are read at run time and can change what the chip computes
 /// (omega C `getenv` and the engine's own). Their values are part of the engine config digest.
@@ -1146,33 +1150,50 @@ impl KvPersistence {
 
     /// Hands exported chunks to the storage worker (no GPU lock held). Stops at the first
     /// refusal: a chain with a hole cannot be restored past it.
+    ///
+    /// A chain longer than the worker's park budget is normal on the real model (one 256-token
+    /// chunk of the 30B is 25 MB, the default budget 64 MB): on `QueueFull` the chunk waits, up to
+    /// [`PARK_CREDIT_WAIT`], for the earlier chunks to publish and free their credit, then retries.
+    /// Runs after the GPU lock is released; the inner lock is not held while waiting.
     pub fn submit(&self, items: Vec<ParkItem>) {
-        let mut g = self.inner.lock().unwrap_or_else(|p| p.into_inner());
-        self.pump(&mut g);
         for it in items {
             let nb = it.tokens.div_ceil(KV_BLOCK_SIZE);
             let tail_valid = (it.tokens - (nb - 1) * KV_BLOCK_SIZE) as u32;
-            let bytes = it.bytes.into_boxed_slice();
+            // Shared so a refused submit (which drops its guard) leaves the bytes for the retry.
+            let bytes: Arc<[u8]> = it.bytes.into();
             let len = bytes.len() as u64;
-            let ptr = bytes.as_ptr();
-            // SAFETY: the boxed bytes move into the guard, so they live and stay unwritten until
-            // the store releases the holder.
-            let src = unsafe {
-                PinnedSource::new(
-                    ptr,
-                    self.block_bytes(),
-                    (0..nb).collect(),
-                    tail_valid,
-                    HolderGuard::new(move || drop(bytes)),
-                )
-            };
-            match self.worker.submit_store(it.header, src, self.inc()) {
-                Ok(job) => {
-                    g.stores.insert(job, len);
-                }
-                Err(_) => {
-                    g.counters.park_refused += 1;
-                    break;
+            let t0 = Instant::now();
+            loop {
+                let mut g = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+                self.pump(&mut g);
+                let keep = bytes.clone();
+                // SAFETY: the guard owns a reference to the bytes, so they live and stay unwritten
+                // (nothing writes through an `Arc<[u8]>`) until the store releases the holder.
+                let src = unsafe {
+                    PinnedSource::new(
+                        bytes.as_ptr(),
+                        self.block_bytes(),
+                        (0..nb).collect(),
+                        tail_valid,
+                        HolderGuard::new(move || drop(keep)),
+                    )
+                };
+                match self.worker.submit_store(it.header, src, self.inc()) {
+                    Ok(job) => {
+                        g.stores.insert(job, len);
+                        break;
+                    }
+                    Err(aien_platform::PlatformError::QueueFull)
+                        if t0.elapsed() < PARK_CREDIT_WAIT =>
+                    {
+                        drop(g);
+                        std::thread::sleep(Duration::from_micros(500));
+                    }
+                    Err(_) => {
+                        g.counters.park_refused += 1;
+                        // A chain with a hole cannot be restored past it.
+                        return;
+                    }
                 }
             }
         }

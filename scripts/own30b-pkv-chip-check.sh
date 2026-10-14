@@ -167,6 +167,9 @@ stop_server
 	check "T_on == T_off (persistence changes no token)" "$t_on" "$t_off"
 	check "T_restored == T_off (restored = uninterrupted)" "$t_restored" "$t_off"
 	check "restore served once" "$(pk restore restores)" 1
+	check "park refused no chunk (whole turn 1 parked)" "$(pk park park_refused)" 0
+	p1=$(jq -r .usage.prompt_tokens "$dir/park-turn1.json")
+	check "restore covered at least the turn-1 prompt ($p1 tokens)" "$([ "$(pk restore restored_tokens)" -ge "$p1" ] && echo yes)" yes
 	check "neg-switch restores nothing" "$(pk neg-switch restores)" 0
 	check "torn: a temp file was in flight at the kill" "$([ "$torn_tmp" -gt 0 ] && echo yes || echo "no ($torn_tmp)")" yes
 	check "torn: nothing was published before the kill" "$torn_obj" 0
