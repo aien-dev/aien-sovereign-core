@@ -36,7 +36,14 @@ members = [
     "crates/cortex-path-m1",
     "crates/aien-abi-conformance",
     "crates/aien-omega-gpu",
+    "crates/aien-omega-moe",
+    "crates/aien-omega-fp8",
+    "crates/aien-omega-dattn",
+    "crates/aien-omega-router",
+    "crates/aien-omega-bf16",
+    "crates/aien-omega-dgraph",
     "crates/aien-omega-compose",
+    "crates/aien-omega-pf",
     "crates/aien-campaign-verifier",
     "crates/aien-proof",
     "crates/crumbs",
@@ -49,6 +56,7 @@ members = [
     "crates/aien-allen-memory",
     "tools/aien-test",
     "crates/aien-drive",
+    "crates/aien-serve-http",
     "crates/aien-kv-bench",
 ]
 

@@ -173,7 +173,14 @@ version = "0.1.0"
 dependencies = [
  "aien-abi-core",
  "aien-kv-cache",
+ "aien-omega-bf16",
+ "aien-omega-dattn",
+ "aien-omega-dgraph",
+ "aien-omega-fp8",
  "aien-omega-gpu",
+ "aien-omega-moe",
+ "aien-omega-pf",
+ "aien-omega-router",
  "aien-platform",
  "async-trait",
  "libloading 0.8.9",
@@ -273,6 +280,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "aien-omega-bf16"
+version = "0.1.0"
+dependencies = [
+ "aien-omega-gpu",
+]
+
+[[package]]
 name = "aien-omega-compose"
 version = "0.1.0"
 dependencies = [
@@ -282,10 +296,53 @@ dependencies = [
 ]
 
 [[package]]
+name = "aien-omega-dattn"
+version = "0.1.0"
+dependencies = [
+ "aien-omega-gpu",
+]
+
+[[package]]
+name = "aien-omega-dgraph"
+version = "0.1.0"
+dependencies = [
+ "aien-omega-gpu",
+]
+
+[[package]]
+name = "aien-omega-fp8"
+version = "0.1.0"
+dependencies = [
+ "aien-omega-gpu",
+]
+
+[[package]]
 name = "aien-omega-gpu"
 version = "0.1.0"
 dependencies = [
  "aien-abi-conformance",
+]
+
+[[package]]
+name = "aien-omega-moe"
+version = "0.1.0"
+dependencies = [
+ "aien-omega-gpu",
+]
+
+[[package]]
+name = "aien-omega-pf"
+version = "0.1.0"
+dependencies = [
+ "aien-omega-dattn",
+ "aien-omega-gpu",
+]
+
+[[package]]
+name = "aien-omega-router"
+version = "0.1.0"
+dependencies = [
+ "aien-omega-gpu",
 ]
 
 [[package]]
@@ -419,6 +476,20 @@ dependencies = [
  "thiserror 1.0.69",
  "tracing",
  "zeroize",
+]
+
+[[package]]
+name = "aien-serve-http"
+version = "0.1.0"
+dependencies = [
+ "aien-inference-abi",
+ "aien-omega-gpu",
+ "axum 0.7.9",
+ "libc",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-stream",
 ]
 
 [[package]]
