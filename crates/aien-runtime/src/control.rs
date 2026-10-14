@@ -275,11 +275,79 @@ pub struct RuntimeStatusReport {
     pub active_sequences: usize,
     pub active_swarms: usize,
     pub active_worlds: usize,
+    /// Alias of `kv_pool_free_blocks` (kept for existing clients).
     pub free_kv_blocks: usize,
+    /// Alias of `kv_pool_total_blocks` (kept for existing clients).
     pub total_kv_blocks: usize,
     pub shared_kv_pages: usize,
     pub cow_faults: usize,
     pub gpu_utilization_pct: f32,
+    /// The one pool allocation in bytes (`KvLayout::total_bytes`). Constant
+    /// after start: freeing blocks does not release RAM (METRICS_AND_SETTINGS).
+    /// 0 for a manager without a tensor pool.
+    #[serde(default)]
+    pub kv_pool_allocated_bytes: u64,
+    #[serde(default)]
+    pub kv_pool_total_blocks: usize,
+    #[serde(default)]
+    pub kv_pool_free_blocks: usize,
+    #[serde(default)]
+    pub kv_pool_used_blocks: usize,
+    /// Blocks referenced by storage holders (park sources, restore destinations).
+    #[serde(default)]
+    pub kv_pool_holder_blocks: usize,
+    /// Persistent KV (ADR 0003); `None` when `AIEN_KV_STORE_DIR` is unset.
+    #[serde(default)]
+    pub kv_persist: Option<Box<KvPersistReport>>,
+}
+
+/// Persistent-KV status fields, named as in docs/persistent-kv/METRICS_AND_SETTINGS.md.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KvPersistReport {
+    /// `recovering`, `open`, `degraded` or `failed`.
+    pub kv_store_state: String,
+    pub kv_store_persisted_bytes: u64,
+    pub kv_store_persisted_objects: u64,
+    pub kv_store_quota_bytes: u64,
+    pub kv_store_max_objects: u64,
+    pub kv_store_over_cap: bool,
+    pub kv_store_reserved_bytes: u64,
+    pub kv_store_unindexed_bytes: u64,
+    pub kv_store_unindexed_objects: u64,
+    pub kv_store_inflight_ops: u64,
+    pub kv_store_inflight_bytes: u64,
+    pub kv_store_restore_ops: u64,
+    pub kv_store_park_ops: u64,
+    pub kv_restore_inflight_blocks: u64,
+    pub kv_park_jobs_total: u64,
+    pub kv_park_bytes_total: u64,
+    pub kv_park_failed_total: u64,
+    pub kv_park_dedup_total: u64,
+    pub kv_park_indeterminate_total: u64,
+    pub kv_restore_jobs_total: u64,
+    pub kv_restore_bytes_total: u64,
+    pub kv_restore_failed_total: u64,
+    pub kv_restore_coalesced_total: u64,
+    pub kv_restore_fallback_prefill_total: u64,
+    pub kv_restore_retry_suppressed_total: u64,
+    pub kv_restore_tokens_total: u64,
+    pub kv_store_stale_completions_total: u64,
+    pub kv_store_cancelled_total: u64,
+    pub kv_store_queue_full_total: u64,
+    /// Empty unless persistence was refused at start (ADR 0003 section 20):
+    /// `key_missing` or `key_malformed` (`AIEN_KV_STORE_KEY`). With a reason the
+    /// state is `refused`: no park, no restore, every prompt is prefilled.
+    #[serde(default)]
+    pub kv_store_refused_reason: String,
+    /// Process total of store-key refusals (missing or malformed key).
+    #[serde(default)]
+    pub kv_store_key_refused_total: u64,
+    /// Process total of loads whose authenticated decryption failed (wrong
+    /// key, tampered bytes, swapped identity header); each object was
+    /// discarded and its prefix recomputed. Old plaintext-format files are
+    /// discarded at recovery and counted as corrupt there.
+    #[serde(default)]
+    pub kv_store_seal_rejected_total: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

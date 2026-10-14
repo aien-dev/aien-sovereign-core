@@ -1,6 +1,6 @@
 # WHOLE-SYSTEM-E2E, addendum v1.3-ctrl-e5: the verifier judges CTRL-E5 itself
 
-Tracking: aien-dev/aien-sovereign-core#403, aien-dev/aien-architecture#190 (L4). Contract `ACCEPTANCE_E2E.md` stays FROZEN
+Tracking: aien-spark/aien-sovereign-core#403, aien-spark/aien-architecture#190 (L4). Contract `ACCEPTANCE_E2E.md` stays FROZEN
 (aien-architecture b2400fe, sha256 `9e3d5f4e23d65ac17be8f2f4ca48355f0aaa486f67ff5a8a8044dcdd646d34e8`). `ACCEPTANCE-v1.md`,
 `-v1.1.md`, `-v1.2.md` and every recorded run stay as written. This file is committed before the code that implements it.
 

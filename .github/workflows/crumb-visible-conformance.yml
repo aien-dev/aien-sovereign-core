@@ -32,7 +32,7 @@ jobs:
       - name: Checkout pinned CRB1 contract corpus
         uses: actions/checkout@v4
         with:
-          repository: aien-dev/aien-protocols
+          repository: aien-spark/aien-protocols
           ref: b50c00d737fa5c57ea7280e2aa4b0354ff166cf5
           path: crb1-protocols
 
