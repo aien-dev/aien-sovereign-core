@@ -67,7 +67,7 @@ on_files=$(find "$D" -type f | wc -l)
 on_perm_bad=$(perm_bad "$D")
 
 echo "== sigterm: SIGTERM while a streamed chat is generating"
-jq -n --argjson m "$(turn2_msgs "$a1" "List ten uses of a torque wrench, one line each, with a reason for each.")" \
+jq -n --arg model "$SERVED_MODEL" --argjson m "$(turn2_msgs "$a1" "List ten uses of a torque wrench, one line each, with a reason for each.")" \
 	'{model:$model, messages:$m, max_tokens:256, temperature:0, seed:1, stream:true}' >"$work/long.body"
 curl -sN -m 600 "$base/v1/chat/completions" -H 'content-type: application/json' -d @"$work/long.body" >"$dir/sigterm-stream.sse" 2>&1 &
 cpid=$!
