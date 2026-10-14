@@ -58,7 +58,7 @@ jobs:
         if: matrix.native_engine
         uses: actions/checkout@v4
         with:
-          repository: aien-dev/omega
+          repository: aien-spark/omega
           ref: ${{ steps.pins.outputs.omega }}
           path: omega
 
@@ -73,7 +73,7 @@ jobs:
         if: matrix.native_engine
         uses: actions/checkout@v4
         with:
-          repository: aien-dev/physics
+          repository: aien-spark/physics
           ref: ${{ steps.physpin.outputs.physics }}
           path: physics
 
@@ -82,7 +82,7 @@ jobs:
         if: matrix.native_engine
         uses: actions/checkout@v4
         with:
-          repository: aien-dev/aienos
+          repository: aien-spark/aienos
           ref: ${{ steps.physpin.outputs.aienos }}
           path: aienos
 

@@ -40,3 +40,9 @@ Packages built after this change carry `LICENSE`, `NOTICE` and this file (sha256
 `release.toml`). `package-release.sh` refuses to package without them, but `install.sh` and
 `verify-release-assets.sh` do not yet require `LICENSE` in a package; that would also reject
 the published v0.1.x archives. Published v0.1.0 and v0.1.1 are unchanged.
+
+## Third-party code and ideas (not models)
+
+| Project | Licence | Reference | What was adapted | Where |
+|---|---|---|---|---|
+| LMCache | Apache-2.0 (reference clone `~/workspace/refs/lmcache` at `4d69cdc4`; the clone has a `LICENSE` and no `NOTICE` file) | https://github.com/LMCache/LMCache | Ideas only, no code copied: deterministic rolling prefix keys (`lmcache/v1/multiprocess/token_hasher.py`), completed-object publication by temp file plus rename and lazy disk recovery (`nixl_store_dynamic_l2_adapter.py`, `fs_l2_adapter.py`). Test cases re-expressed in Rust from `tests/v1/distributed/test_nixl_store_dynamic_l2_adapter.py` (names in ADR 0003 context item 24). | `crates/aien-kv-store/` (`src/identity.rs`, the test files that name each adapted case), `docs/adr/0003-persistent-kv-identity-storage-contract-and-ownership.md` |

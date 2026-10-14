@@ -1,6 +1,6 @@
 # Evaluation of Qwen/Qwen3-8B as the next public-model candidate (D1)
 
-Status: EVALUATION ONLY. Nothing here promotes the model. Owning issue: aien-dev/aien-sovereign-core#384 (Drake ruling 2026-10-11,
+Status: EVALUATION ONLY. Nothing here promotes the model. Owning issue: aien-spark/aien-sovereign-core#384 (Drake ruling 2026-10-11,
 aien-architecture#190 comment 6109731585, sc#384 comment 6109731974: Qwen3-4B-Instruct-2507 is retired after the frozen FAILs v5 and v6).
 Written 2026-10-11 on the sovereign-core main at 5886f91. No GPU use was intended; one slip is disclosed in Section 7.
 
