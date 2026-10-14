@@ -34,7 +34,7 @@ use aien_runtime::spine::AienRuntimeSpine;
 use aien_scheduler::{SchedulerConfig, SequenceId, SequencePhase};
 use async_trait::async_trait;
 use parking_lot::Mutex;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -54,6 +54,9 @@ struct Rec {
     decodes: Vec<u64>,
     /// (request id, restored prefix length) passed to `restore_sequence`.
     restores: Vec<(u64, usize)>,
+    /// When set, `restore_sequence` refuses (an S3 failure after every load
+    /// completed: the objects stay in the store).
+    fail_restore: bool,
 }
 
 struct TestBackend {
@@ -102,7 +105,11 @@ impl AienInferenceBackend for TestBackend {
     }
 
     fn restore_sequence(&mut self, seq_id: u64, tokens: &[u32]) -> Result<(), String> {
-        self.rec.lock().restores.push((seq_id, tokens.len()));
+        let mut rec = self.rec.lock();
+        if rec.fail_restore {
+            return Err("restore refused (test switch)".into());
+        }
+        rec.restores.push((seq_id, tokens.len()));
         Ok(())
     }
 }
@@ -120,6 +127,8 @@ struct Rig {
     store: Arc<LateCancel>,
     worker: Arc<StorageWorker>,
     ns: NamespaceId,
+    /// The residency clock (milliseconds), advanced by the test.
+    clock: Arc<AtomicU64>,
 }
 
 fn pool_config() -> KvPoolConfig {
@@ -265,12 +274,20 @@ fn rig_with(watermark_blocks: usize, worker_paused: bool) -> Rig {
             restore_max_blocks: TOTAL_BLOCKS,
             park: true,
             restore: true,
+            restore_retry_window_ms: 60_000,
+            drain_ms: 2000,
         },
         identity,
         worker.clone(),
         kv.clone(),
     )
     .expect("residency");
+    let clock = Arc::new(AtomicU64::new(0));
+    let mut residency = residency;
+    {
+        let clock = clock.clone();
+        residency.set_clock(Arc::new(move || clock.load(Ordering::SeqCst)));
+    }
     spine.enable_kv_residency(residency);
     let rec = Arc::new(Mutex::new(Rec::default()));
     Rig {
@@ -282,6 +299,7 @@ fn rig_with(watermark_blocks: usize, worker_paused: bool) -> Rig {
         store,
         worker,
         ns,
+        clock,
     }
 }
 
@@ -913,4 +931,100 @@ fn kv_persist_settings_are_off_by_default_and_refuse_bad_values() {
         let got = KvPersistSettings::from_lookup(|q| (q == k).then(|| v.to_string()));
         assert!(got.is_err(), "{k}={v} accepted");
     }
+}
+
+// ---------------------------------------------------------------------------
+// C7: retry window and indeterminate publications
+// ---------------------------------------------------------------------------
+
+/// Submits `prompt` and runs it to completion; returns the sequence id.
+async fn run_to_finish(r: &mut Rig, prompt: &[u32]) -> u64 {
+    let seq = r.spine.submit_request(request(prompt, 2));
+    step_until(r, "request finished", |r| finished(r, seq)).await;
+    seq
+}
+
+/// `AIEN_KV_RESTORE_RETRY_WINDOW_MS` (METRICS_AND_SETTINGS): after two failed
+/// restores of one chain head within the window, the next request with that
+/// head is prefilled without a lookup. Once the older failure leaves the
+/// window, one lookup is allowed again. The clock is injected; no wall-clock
+/// waits decide the outcome.
+#[tokio::test]
+async fn restore_retry_window_prefills_without_lookup_after_two_failures() {
+    let mut r = rig();
+    park_turn(&mut r, &prompt14(), 3).await;
+    let mut prompt = computed16();
+    prompt.extend_from_slice(&[500, 501, 502, 503]);
+    r.rec.lock().fail_restore = true;
+
+    // Failure 1 at t = 0 and failure 2 at t = 1 s: each looked up and loaded.
+    for t in [0u64, 1_000] {
+        r.clock.store(t, Ordering::SeqCst);
+        let jobs = status(&r).stats.restore_jobs_total;
+        let seq = run_to_finish(&mut r, &prompt).await;
+        assert_eq!(
+            first_prefill_len(&r, seq),
+            Some(prompt.len()),
+            "plain prefill"
+        );
+        let s = status(&r);
+        assert_eq!(
+            s.stats.restore_jobs_total,
+            jobs + 2,
+            "t={t}: lookup and load ran"
+        );
+    }
+    assert_eq!(status(&r).stats.restore_failed_total, 2);
+
+    // Third request at t = 2 s: inside the window, no lookup, no load.
+    r.clock.store(2_000, Ordering::SeqCst);
+    let before = status(&r).stats;
+    let seq = r.spine.submit_request(request(&prompt, 2));
+    assert_eq!(state_of(&r, seq), ResidencyState::Resident, "not restoring");
+    assert_eq!(phase_of(&r, seq), Some(SequencePhase::Waiting));
+    step_until(&mut r, "request finished", |r| finished(r, seq)).await;
+    let s = status(&r).stats;
+    assert_eq!(s.restore_jobs_total, before.restore_jobs_total, "no load");
+    assert_eq!(s.restore_retry_suppressed_total, 1);
+    assert_eq!(
+        s.restore_fallback_prefill_total,
+        before.restore_fallback_prefill_total + 1
+    );
+    assert_eq!(first_prefill_len(&r, seq), Some(prompt.len()));
+
+    // A different chain head is not affected.
+    let other: Vec<u32> = (900..920u32).collect();
+    run_to_finish(&mut r, &other).await;
+    assert_eq!(status(&r).stats.restore_retry_suppressed_total, 1);
+
+    // t = 60.5 s: the t = 0 failure left the 60 s window; one failure remains,
+    // so the lookup runs again, and with the backend healthy it restores.
+    r.clock.store(60_500, Ordering::SeqCst);
+    r.rec.lock().fail_restore = false;
+    let seq = r.spine.submit_request(request(&prompt, 2));
+    assert_eq!(state_of(&r, seq), ResidencyState::Restoring);
+    step_until(&mut r, "request finished", |r| finished(r, seq)).await;
+    assert_eq!(restores_of(&r, seq), vec![16], "restored after the window");
+    assert_eq!(status(&r).stats.restore_retry_suppressed_total, 1);
+    assert_eq!(holder_blocks(&r), 0);
+}
+
+/// ADR 2.4 / METRICS `kv_park_indeterminate_total`: a publication whose
+/// directory sync failed after the rename is served but counted indeterminate.
+#[tokio::test]
+async fn indeterminate_park_publication_is_counted() {
+    let mut r = rig();
+    r.fake.script(JobScript::fault(Fault::RenameOkDirsyncFail));
+    park_turn(&mut r, &prompt14(), 3).await;
+    let s = status(&r).stats;
+    assert_eq!(s.park_jobs_total, 2);
+    assert_eq!(s.park_indeterminate_total, 1, "{s:?}");
+    // The object is published and served, its durability unknown (the fake
+    // reports it on a failed terminal and the store goes Degraded).
+    let ks = keys(&r, &computed16());
+    let flags: Vec<Option<bool>> = ks.iter().map(|k| r.fake.is_indeterminate(k)).collect();
+    assert!(
+        flags.contains(&Some(true)),
+        "an indeterminate object exists: {flags:?}"
+    );
 }

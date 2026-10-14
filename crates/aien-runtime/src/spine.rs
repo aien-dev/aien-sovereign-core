@@ -6,7 +6,7 @@ use crate::context::ContextComposer;
 use crate::control::{
     ControlCommand, ControlEnvelope, ControlResponse, RuntimeController, RuntimeStatusReport,
 };
-use crate::kv_residency::{KvResidency, KvResidencyStatus};
+use crate::kv_residency::{KvDrainHandle, KvResidency, KvResidencyStatus};
 use crate::sequence::{SequenceArena, SequenceId, SequenceState};
 use crate::swarm::{SwarmConfig, SwarmManager, SwarmState};
 use crate::world::WorldStore;
@@ -40,6 +40,10 @@ pub struct AienRuntimeSpine {
     /// Persistent KV (ADR 0003 section 6): park at the finish transaction,
     /// restore at submit. `None` (the default) is today's behaviour exactly.
     kv_residency: Option<KvResidency>,
+    /// Why persistence was refused at start (ADR 0003 section 20: store key
+    /// missing or malformed). `Some` only with the store dir set; then there
+    /// is no residency and every prompt is prefilled.
+    kv_persist_refused: Option<&'static str>,
 }
 
 impl AienRuntimeSpine {
@@ -61,6 +65,7 @@ impl AienRuntimeSpine {
             pending_backend_forks: Vec::new(),
             pending_backend_releases: Vec::new(),
             kv_residency: None,
+            kv_persist_refused: None,
         }
     }
 
@@ -134,6 +139,12 @@ impl AienRuntimeSpine {
         self.kv_residency = Some(residency);
     }
 
+    /// Records that persistence was refused (fail closed): no residency is
+    /// installed, and the status reports state `refused` with `reason`.
+    pub fn refuse_kv_persistence(&mut self, reason: &'static str) {
+        self.kv_persist_refused = Some(reason);
+    }
+
     pub fn kv_residency(&self) -> Option<&KvResidency> {
         self.kv_residency.as_ref()
     }
@@ -141,6 +152,11 @@ impl AienRuntimeSpine {
     /// Persistent-KV status fields (METRICS_AND_SETTINGS), `None` when off.
     pub fn kv_residency_status(&self) -> Option<KvResidencyStatus> {
         self.kv_residency.as_ref().map(KvResidency::status)
+    }
+
+    /// The shutdown drain of the persistent-KV store (ADR 7.5), `None` when off.
+    pub fn kv_drain_handle(&self) -> Option<KvDrainHandle> {
+        self.kv_residency.as_ref().map(KvResidency::drain_handle)
     }
 
     /// Registers a completion sink for streaming output events.
@@ -525,6 +541,23 @@ impl AienRuntimeSpine {
     }
 
     pub fn status_report(&self) -> RuntimeStatusReport {
+        let mut report = self.pool_status_report();
+        // After the pool guard is released: the residency status takes the KV
+        // read lock itself (a nested read could wait behind a queued writer).
+        report.kv_persist = match (&self.kv_residency, self.kv_persist_refused) {
+            (Some(r), _) => Some(Box::new(r.persist_report())),
+            (None, Some(reason)) => Some(Box::new(crate::control::KvPersistReport {
+                kv_store_state: "refused".to_string(),
+                kv_store_refused_reason: reason.to_string(),
+                kv_store_key_refused_total: aien_kv_store::seal::key_refusals_total(),
+                ..Default::default()
+            })),
+            (None, None) => None,
+        };
+        report
+    }
+
+    fn pool_status_report(&self) -> RuntimeStatusReport {
         let kv = self.kv_manager.read();
         let metrics = kv.metrics();
         let free = kv.free_block_count();
@@ -547,6 +580,12 @@ impl AienRuntimeSpine {
             shared_kv_pages: metrics.shared_pages,
             cow_faults: metrics.cow_faults,
             gpu_utilization_pct: pressure_pct,
+            kv_pool_allocated_bytes: kv.pool().map_or(0, |p| p.layout().total_bytes as u64),
+            kv_pool_total_blocks: total,
+            kv_pool_free_blocks: free,
+            kv_pool_used_blocks: allocated,
+            kv_pool_holder_blocks: kv.holder_block_count(),
+            kv_persist: None,
         }
     }
 }

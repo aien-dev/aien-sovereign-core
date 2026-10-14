@@ -412,7 +412,7 @@ pub fn build_shared_kv_runtime_for_model(
 }
 
 // ---------------------------------------------------------------------------
-// Persistent KV settings and store construction (ADR 0003, cut C6;
+// Persistent KV settings and store construction (ADR 0003, cuts C6 and C7;
 // docs/persistent-kv/METRICS_AND_SETTINGS.md)
 // ---------------------------------------------------------------------------
 
@@ -423,8 +423,19 @@ pub const KV_CHUNK_BLOCKS_ENV: &str = "AIEN_KV_CHUNK_BLOCKS";
 pub const KV_RESTORE_MAX_BLOCKS_ENV: &str = "AIEN_KV_RESTORE_MAX_BLOCKS";
 pub const KV_PARK_ENV: &str = "AIEN_KV_PARK";
 pub const KV_RESTORE_ENV: &str = "AIEN_KV_RESTORE";
+pub const KV_RESTORE_RETRY_WINDOW_MS_ENV: &str = "AIEN_KV_RESTORE_RETRY_WINDOW_MS";
+/// Applied to the host store (`host_fs.rs` names); checked here so a bad value
+/// stops the start with its name.
+pub const KV_STORE_QUOTA_BYTES_ENV: &str = "AIEN_KV_STORE_QUOTA_BYTES";
+pub const KV_STORE_MAX_OBJECTS_ENV: &str = "AIEN_KV_STORE_MAX_OBJECTS";
+pub const KV_STORE_RECOVERY_SLICE_MS_ENV: &str = "AIEN_KV_STORE_RECOVERY_SLICE_MS";
+
+/// Default of `AIEN_KV_RESTORE_RETRY_WINDOW_MS`.
+pub const DEFAULT_RESTORE_RETRY_WINDOW_MS: u64 = 60_000;
 
 /// Persistent KV settings read from the environment (or any lookup in tests).
+/// Every value is checked when it is read, whether or not persistence is on,
+/// so a bad value stops the start with its name.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KvPersistSettings {
     pub store_dir: Option<std::path::PathBuf>,
@@ -437,6 +448,23 @@ pub struct KvPersistSettings {
     /// Default on when the store dir is set.
     pub park: bool,
     pub restore: bool,
+    /// `AIEN_KV_RESTORE_RETRY_WINDOW_MS`, default 60000.
+    pub restore_retry_window_ms: u64,
+    /// `AIEN_KV_STORE_QUOTA_BYTES`; `None`: the host store default.
+    pub quota_bytes: Option<u64>,
+    /// `AIEN_KV_STORE_MAX_OBJECTS`; `None`: the host store default.
+    pub max_objects: Option<u64>,
+    /// `AIEN_KV_STORE_RECOVERY_SLICE_MS`; `None`: the host store default.
+    pub recovery_slice_ms: Option<u64>,
+    /// The storage worker's settings (`WorkerConfig::from_lookup`: the
+    /// `AIEN_KV_STORE_MAX_*` bounds and `AIEN_KV_STORE_DRAIN_MS`).
+    pub worker: aien_kv_store::worker::WorkerConfig,
+    /// The store key from `AIEN_KV_STORE_KEY` (ADR 0003 section 20), read only
+    /// when the store dir is set (`None` otherwise). A refusal (missing or
+    /// malformed) does not stop the start: persistence is refused (fail
+    /// closed) and the status says why. The key is redacted in `Debug`.
+    pub store_key:
+        Option<Result<Arc<aien_kv_store::seal::SealKey>, aien_kv_store::seal::KeyRefusal>>,
 }
 
 fn parse_switch(name: &str, v: Option<String>) -> Result<bool, String> {
@@ -456,6 +484,13 @@ fn parse_positive(name: &str, v: &str) -> Result<u64, String> {
         Ok(n) => Ok(n),
         Err(e) => Err(format!("{name}={v:?}: {e}")),
     }
+}
+
+fn parse_optional_positive(
+    get: &impl Fn(&str) -> Option<String>,
+    name: &str,
+) -> Result<Option<u64>, String> {
+    get(name).map(|v| parse_positive(name, &v)).transpose()
 }
 
 impl KvPersistSettings {
@@ -485,6 +520,14 @@ impl KvPersistSettings {
                     .map_err(|_| format!("{KV_RESTORE_MAX_BLOCKS_ENV}={v:?} is too large"))?,
             ),
         };
+        let restore_retry_window_ms =
+            parse_optional_positive(&get, KV_RESTORE_RETRY_WINDOW_MS_ENV)?
+                .unwrap_or(DEFAULT_RESTORE_RETRY_WINDOW_MS);
+        let worker = aien_kv_store::worker::WorkerConfig::from_lookup(&get)
+            .map_err(|e| format!("persistent KV worker setting {e}"))?;
+        let store_key = store_dir
+            .is_some()
+            .then(|| aien_kv_store::seal::SealKey::from_lookup(&get).map(Arc::new));
         Ok(Self {
             store_dir,
             namespace,
@@ -492,11 +535,22 @@ impl KvPersistSettings {
             restore_max_blocks,
             park: parse_switch(KV_PARK_ENV, get(KV_PARK_ENV))?,
             restore: parse_switch(KV_RESTORE_ENV, get(KV_RESTORE_ENV))?,
+            restore_retry_window_ms,
+            quota_bytes: parse_optional_positive(&get, KV_STORE_QUOTA_BYTES_ENV)?,
+            max_objects: parse_optional_positive(&get, KV_STORE_MAX_OBJECTS_ENV)?,
+            recovery_slice_ms: parse_optional_positive(&get, KV_STORE_RECOVERY_SLICE_MS_ENV)?,
+            worker,
+            store_key,
         })
     }
 
+    /// From the process environment. `AIEN_KV_STORE_KEY` is removed from the
+    /// environment once read (whatever its value), so no child process
+    /// inherits it; the key lives on only in the settings (ADR 0003 section 20).
     pub fn from_env() -> Result<Self, String> {
-        Self::from_lookup(|n| std::env::var(n).ok())
+        let got = Self::from_lookup(|n| std::env::var(n).ok());
+        std::env::remove_var(aien_kv_store::seal::KEY_ENV);
+        got
     }
 
     /// Persistence is on only when a store directory is configured.
@@ -519,6 +573,8 @@ impl KvPersistSettings {
                 .unwrap_or_else(|| (total_blocks / 4).max(1)),
             park: self.park,
             restore: self.restore,
+            restore_retry_window_ms: self.restore_retry_window_ms,
+            drain_ms: self.worker.drain_ms,
         }
     }
 }
@@ -526,9 +582,11 @@ impl KvPersistSettings {
 /// Opens the host object store under `settings.store_dir` for `fields` (whose
 /// `chunk_tokens` must be `chunk_blocks * block_size`), puts the storage worker
 /// in front of it, and builds the residency layer over `kv`. `Ok(None)` when
-/// persistence is off. The worker's drive runs the resumable recovery until it
-/// is done; until then every lookup misses (ADR 4.1), so a cold start only
-/// costs plain prefills.
+/// persistence is off. The worker's drive runs the resumable recovery in
+/// `AIEN_KV_STORE_RECOVERY_SLICE_MS` slices on the worker thread until it is
+/// done; until then the store is `Recovering` and every lookup misses (ADR
+/// 4.1), so the step loop is never blocked and a cold start only costs plain
+/// prefills.
 pub fn open_host_kv_residency(
     settings: &KvPersistSettings,
     fields: &aien_kv_store::NamespaceFields<'_>,
@@ -536,23 +594,38 @@ pub fn open_host_kv_residency(
     context_cap: Option<usize>,
 ) -> Result<Option<crate::kv_residency::KvResidency>, String> {
     use aien_kv_store::host_fs::{HostFsConfig, HostFsStore};
-    use aien_kv_store::worker::{StorageWorker, WorkerConfig};
+    use aien_kv_store::worker::StorageWorker;
     use aien_kv_store::KvStore;
 
     let Some(root) = settings.store_dir.clone() else {
         return Ok(None);
     };
+    let seal_key = match &settings.store_key {
+        Some(Ok(k)) => k.clone(),
+        Some(Err(r)) => return Err(format!("persistent KV refused: {r}")),
+        None => return Err("persistent KV: the store key was not read".to_string()),
+    };
     let identity = crate::kv_residency::KvIdentity::new(fields)
         .map_err(|e| format!("persistent KV identity: {e}"))?;
-    let mut cfg = HostFsConfig::from_fields(root, fields)
+    let mut cfg = HostFsConfig::from_fields(root.clone(), fields)
         .map_err(|e| format!("persistent KV store config: {e:?}"))?;
-    cfg.apply_env(|n| std::env::var(n).ok())
-        .map_err(|e| format!("persistent KV store settings: {e:?}"))?;
+    if let Some(v) = settings.quota_bytes {
+        cfg.quota_bytes = v;
+    }
+    if let Some(v) = settings.max_objects {
+        cfg.max_objects = v;
+    }
+    if let Some(v) = settings.recovery_slice_ms {
+        cfg.recovery_slice_ms = v;
+    }
+    cfg.seal_key = Some(seal_key);
     let slice_ms = cfg.recovery_slice_ms;
-    let store =
-        Arc::new(HostFsStore::open(cfg).map_err(|e| format!("persistent KV store open: {e:?}"))?);
-    let worker_cfg =
-        WorkerConfig::from_env().map_err(|e| format!("persistent KV worker settings: {e}"))?;
+    let store = Arc::new(HostFsStore::open(cfg).map_err(|e| {
+        format!(
+            "persistent KV store open at {} ({KV_STORE_DIR_ENV}): {e:?}",
+            root.display()
+        )
+    })?);
     let drive = {
         let store = store.clone();
         let mut recovered = false;
@@ -564,7 +637,7 @@ pub fn open_host_kv_residency(
         }
     };
     let worker = Arc::new(
-        StorageWorker::spawn(store, worker_cfg, drive)
+        StorageWorker::spawn(store, settings.worker.clone(), drive)
             .map_err(|e| format!("persistent KV worker: {e:?}"))?,
     );
     let total_blocks = kv.read().total_block_count();
@@ -575,6 +648,139 @@ pub fn open_host_kv_residency(
         kv,
     )?;
     Ok(Some(residency))
+}
+
+/// What the daemon knows about the loaded model that the namespace binds
+/// (ADR 1.2): the resolved config, the backend that computes the K/V, the
+/// weights digest, and the engine identity (ADR 1.2.2, sc#504).
+/// `engine` has no default: the host path passes
+/// `compute_config::HostEngineIdentity::reference(arith_id).identity()`, an
+/// engine with its own build, weight format or run switches passes its own.
+#[derive(Debug, Clone, Copy)]
+pub struct ModelKvBinding<'a> {
+    pub model: &'a aien_abi_core::ModelConfig,
+    /// `TensorBackend::name()` of the backend that writes the K/V.
+    pub arith_id: &'a str,
+    pub model_sha256: [u8; 32],
+    pub model_digest_kind: &'a str,
+    /// Weight format as loaded, engine build, rounding class and engine config
+    /// digest of the engine that writes the K/V.
+    pub engine: aien_kv_store::EngineIdentity<'a>,
+}
+
+/// Parses a 64-hex-digit sha256 (the daemon's `ModelIdentity::model_sha256`).
+pub fn parse_sha256_hex(hex: &str) -> Result<[u8; 32], String> {
+    let hex = hex.trim();
+    if hex.len() != 64 || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(format!("model digest {hex:?} is not 64 hex digits"));
+    }
+    let mut out = [0u8; 32];
+    for (i, byte) in out.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&hex[2 * i..2 * i + 2], 16)
+            .map_err(|e| format!("model digest: {e}"))?;
+    }
+    Ok(out)
+}
+
+fn kv_dtype_of(d: KvDType) -> aien_kv_store::KvDtype {
+    match d {
+        KvDType::Fp4 => aien_kv_store::KvDtype::Fp4,
+        KvDType::Fp8 => aien_kv_store::KvDtype::Fp8,
+        KvDType::Bf16 => aien_kv_store::KvDtype::Bf16,
+        KvDType::Fp16 => aien_kv_store::KvDtype::Fp16,
+        KvDType::Fp32 => aien_kv_store::KvDtype::Fp32,
+    }
+}
+
+/// Daemon wiring (cut C7): with `AIEN_KV_STORE_DIR` set, binds the namespace
+/// to `model` and the spine's pool, opens the host store, starts the storage
+/// worker (recovery runs on it in slices), and installs the residency layer
+/// and its finish hook in the spine. Returns the startup log line, or
+/// `Ok(None)` with persistence off, in which case nothing at all is created or
+/// changed.
+pub fn enable_persistent_kv(
+    spine: &mut AienRuntimeSpine,
+    settings: &KvPersistSettings,
+    model: &ModelKvBinding<'_>,
+    context_cap: Option<usize>,
+) -> Result<Option<String>, String> {
+    use crate::compute_config::{ModelBinding, StoreInputs};
+    if !settings.enabled() {
+        return Ok(None);
+    }
+    // Fail closed without a valid store key (ADR 0003 section 20): no store is
+    // opened and nothing is written; the daemon serves with plain prefill.
+    if let Some(Err(refusal)) = &settings.store_key {
+        aien_kv_store::seal::note_key_refusal();
+        spine.refuse_kv_persistence(refusal.reason());
+        return Ok(Some(format!(
+            "persistent KV: REFUSED ({refusal}); running without persistence: no park, no restore, every prompt is prefilled"
+        )));
+    }
+    let kv = spine.kv_manager.clone();
+    let (layout, dtype, block_size) = {
+        let guard = kv.read();
+        let pool = guard
+            .pool()
+            .ok_or("persistent KV: the runtime KV manager has no tensor pool")?;
+        (
+            crate::kv_residency::layout_strides(pool.layout()),
+            kv_dtype_of(pool.config().dtype),
+            guard.block_size(),
+        )
+    };
+    let chunk_tokens = (settings.chunk_blocks as usize)
+        .checked_mul(block_size)
+        .and_then(|t| u32::try_from(t).ok())
+        .ok_or_else(|| format!("{KV_CHUNK_BLOCKS_ENV}: chunk size overflows"))?;
+    let binding = ModelBinding::from_model(model.model, model.arith_id)
+        .map_err(|e| format!("persistent KV model binding: {e}"))?;
+    let fields = binding
+        .namespace_fields(
+            &StoreInputs {
+                model_sha256: model.model_sha256,
+                model_digest_kind: model.model_digest_kind,
+                dtype,
+                layout,
+                backend_format: aien_kv_store::BackendFormat::HostPagedPoolV1,
+                chunk_tokens,
+                sharing_namespace: &settings.namespace,
+            },
+            &model.engine,
+        )
+        .map_err(|e| format!("persistent KV namespace: {e}"))?;
+    let Some(residency) = open_host_kv_residency(settings, &fields, kv, context_cap)? else {
+        return Ok(None);
+    };
+    let line = format!(
+        "persistent KV: store {} namespace {:?} chunk {} tokens, weights {}, engine build {:?}, rounding {:?}, park {}, restore {}, retry window {} ms, drain {} ms (recovering in the background)",
+        settings
+            .store_dir
+            .as_deref()
+            .map(|p| p.display().to_string())
+            .unwrap_or_default(),
+        settings.namespace,
+        chunk_tokens,
+        model.engine.weight_format.as_str(),
+        model.engine.engine_build_id,
+        model.engine.rounding_class,
+        if settings.park { "on" } else { "off" },
+        if settings.restore { "on" } else { "off" },
+        settings.restore_retry_window_ms,
+        settings.worker.drain_ms,
+    );
+    spine.enable_kv_residency(residency);
+    Ok(Some(line))
+}
+
+/// [`enable_persistent_kv`] with the settings read from the environment.
+pub fn enable_persistent_kv_from_env(
+    spine: &mut AienRuntimeSpine,
+    model: &ModelKvBinding<'_>,
+    context_cap: Option<usize>,
+) -> Result<Option<String>, String> {
+    let settings = KvPersistSettings::from_env()?;
+    enable_persistent_kv(spine, &settings, model, context_cap)
 }
 
 #[cfg(test)]

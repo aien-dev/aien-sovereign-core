@@ -47,9 +47,9 @@ use aien_kv_cache::{holder_id, AienKvManager, KvLayout, SharedKvManager, SuffixP
 use aien_kv_store::holder::HolderGenerations;
 use aien_kv_store::worker::{LoadTicket, StorageWorker};
 use aien_kv_store::{
-    chunk_chain, ChunkHeader, Completion, HolderGuard, Incarnation, JobId, KvError, KvStore,
-    LandingHolder, LayoutStrides, NamespaceFields, NamespaceId, PinToken, PinnedDest, PinnedSource,
-    Terminal,
+    chunk_chain, ChunkHeader, ChunkKey, Completion, HolderGuard, Incarnation, JobId, KvError,
+    KvStore, LandingHolder, LayoutStrides, NamespaceFields, NamespaceId, PinToken, PinnedDest,
+    PinnedSource, PublishOutcome, Terminal,
 };
 use aien_platform::PlatformError;
 use aien_scheduler::{AienScheduler, FinishContext, FinishHook, SequenceId, SequencePhase};
@@ -57,6 +57,43 @@ use parking_lot::Mutex;
 
 /// Completions drained per `poll` call; the loop repeats until the queue is empty.
 const POLL_BATCH: usize = 256;
+
+/// Chain heads remembered by the retry window at once. Past it a new failure
+/// is not recorded (that head keeps being looked up), so memory stays bounded
+/// whatever the request mix (DOCS SILENT on a bound; C7 choice).
+const RETRY_HEADS_MAX: usize = 4096;
+
+/// A monotonic millisecond clock. The daemon uses [`monotonic_ms_clock`];
+/// tests inject their own so no assertion depends on wall-clock sleeps.
+pub type Clock = Arc<dyn Fn() -> u64 + Send + Sync>;
+
+/// Milliseconds since the clock was made, from `std::time::Instant`.
+pub fn monotonic_ms_clock() -> Clock {
+    let t0 = std::time::Instant::now();
+    Arc::new(move || t0.elapsed().as_millis() as u64)
+}
+
+/// What the daemon needs at shutdown: the storage worker and the configured
+/// intake deadline. [`KvDrainHandle::drain`] blocks for at most about the
+/// deadline (ADR 7.5); run it off the async runtime's worker threads.
+pub struct KvDrainHandle {
+    store: Arc<StorageWorker>,
+    deadline_ms: u64,
+}
+
+impl KvDrainHandle {
+    /// Stops intake, cancels what has not started, lets jobs past the file
+    /// sync finish, and returns at the deadline with every unfinished job
+    /// named. Nothing is freed to meet the deadline: the worker keeps each
+    /// job's buffers until its terminal completion.
+    pub fn drain(&self) -> aien_kv_store::DrainReport {
+        self.store.shutdown(self.deadline_ms)
+    }
+
+    pub fn deadline_ms(&self) -> u64 {
+        self.deadline_ms
+    }
+}
 
 /// The byte strides of the pool layout as the namespace records them (ADR 1.2
 /// field 10).
@@ -84,6 +121,13 @@ pub struct KvResidencyConfig {
     pub park: bool,
     /// `AIEN_KV_RESTORE`.
     pub restore: bool,
+    /// `AIEN_KV_RESTORE_RETRY_WINDOW_MS`: after two failed restores of one
+    /// chain head within this many milliseconds, that head is prefilled
+    /// without a lookup until the older failure leaves the window.
+    pub restore_retry_window_ms: u64,
+    /// `AIEN_KV_STORE_DRAIN_MS` (parsed by `WorkerConfig`): the shutdown intake
+    /// deadline handed to the store (ADR 7.5).
+    pub drain_ms: u64,
 }
 
 /// The namespace inputs with owned strings, so the residency layer can live as
@@ -167,6 +211,13 @@ pub struct KvResidencyStats {
     pub restore_tokens_total: u64,
     /// Restore transactions abandoned because their request left the scheduler.
     pub restore_abandoned_total: u64,
+    /// Park publications reported `Indeterminate` (served, durability unknown;
+    /// ADR 2.4), whatever the terminal says (the adapters report it on a
+    /// failed terminal after the rename).
+    pub park_indeterminate_total: u64,
+    /// Requests prefilled without a lookup because their chain head failed
+    /// twice within the retry window. Also counted as fallbacks.
+    pub restore_retry_suppressed_total: u64,
     pub store_stale_completions_total: u64,
     pub store_cancelled_total: u64,
     pub store_queue_full_total: u64,
@@ -197,6 +248,11 @@ pub struct KvResidencyStatus {
     /// `kv_restore_inflight_blocks`: holder blocks of restores not yet adopted
     /// or drained.
     pub restore_inflight_blocks: usize,
+    /// Waiters of this runtime still expecting a terminal from an in-flight
+    /// restore load: the opener plus every attached waiter, summed over the
+    /// landings. Zero once every restore is terminal; anything else after that
+    /// is a leak of the attached-waiter count.
+    pub landing_waiters: usize,
 }
 
 /// What S1 hands the spine: one chunk's holder and header.
@@ -403,6 +459,8 @@ struct ChunkSlot {
 #[derive(Debug)]
 struct RestoreTxn {
     inc: Incarnation,
+    /// The first chunk key of the prompt chain (retry-window bookkeeping).
+    head: ChunkKey,
     restored: usize,
     blocks: usize,
     chunks: Vec<ChunkSlot>,
@@ -476,6 +534,10 @@ pub struct KvResidency {
     landings: HashMap<JobId, Landing>,
     restore_inflight_blocks: usize,
     stats: KvResidencyStats,
+    /// Milliseconds on a monotonic clock (injected by tests).
+    clock: Clock,
+    /// Chain head -> times (ms) of its failed restores still inside the window.
+    retry_failures: HashMap<ChunkKey, Vec<u64>>,
 }
 
 impl KvResidency {
@@ -534,6 +596,8 @@ impl KvResidency {
             landings: HashMap::new(),
             restore_inflight_blocks: 0,
             stats: KvResidencyStats::default(),
+            clock: monotonic_ms_clock(),
+            retry_failures: HashMap::new(),
         })
     }
 
@@ -542,6 +606,101 @@ impl KvResidency {
         Arc::new(ParkHook {
             shared: self.shared.clone(),
         })
+    }
+
+    /// Replaces the retry-window clock (tests).
+    pub fn set_clock(&mut self, clock: Clock) {
+        self.clock = clock;
+    }
+
+    /// The store's admission state and accounting (`kv_store_*` status fields).
+    pub fn store_capacity(&self) -> aien_kv_store::Capacity {
+        self.shared.store.capacity()
+    }
+
+    /// The `status` reply fields (METRICS_AND_SETTINGS names).
+    pub fn persist_report(&self) -> crate::control::KvPersistReport {
+        use aien_kv_store::StoreState;
+        let s = self.status();
+        let c = self.store_capacity();
+        let st = &s.stats;
+        crate::control::KvPersistReport {
+            kv_store_state: match c.state {
+                StoreState::Recovering => "recovering",
+                StoreState::Open => "open",
+                StoreState::Degraded => "degraded",
+                StoreState::Failed => "failed",
+            }
+            .to_string(),
+            kv_store_persisted_bytes: c.used_bytes,
+            kv_store_persisted_objects: c.objects + c.unindexed_objects,
+            kv_store_quota_bytes: c.quota_bytes,
+            kv_store_max_objects: c.max_objects,
+            kv_store_over_cap: c.unindexed_objects > 0 || c.used_bytes > c.quota_bytes,
+            kv_store_reserved_bytes: c.reserved_bytes,
+            kv_store_unindexed_bytes: c.unindexed_bytes,
+            kv_store_unindexed_objects: c.unindexed_objects,
+            kv_store_inflight_ops: u64::from(c.restore_ops) + u64::from(c.park_ops),
+            kv_store_inflight_bytes: c.inflight_bytes,
+            kv_store_restore_ops: u64::from(c.restore_ops),
+            kv_store_park_ops: u64::from(c.park_ops),
+            kv_restore_inflight_blocks: s.restore_inflight_blocks as u64,
+            kv_park_jobs_total: st.park_jobs_total,
+            kv_park_bytes_total: st.park_bytes_total,
+            kv_park_failed_total: st.park_failed_total,
+            kv_park_dedup_total: st.park_dedup_total,
+            kv_park_indeterminate_total: st.park_indeterminate_total,
+            kv_restore_jobs_total: st.restore_jobs_total,
+            kv_restore_bytes_total: st.restore_bytes_total,
+            kv_restore_failed_total: st.restore_failed_total,
+            kv_restore_coalesced_total: st.restore_coalesced_total,
+            kv_restore_fallback_prefill_total: st.restore_fallback_prefill_total,
+            kv_restore_retry_suppressed_total: st.restore_retry_suppressed_total,
+            kv_restore_tokens_total: st.restore_tokens_total,
+            kv_store_stale_completions_total: st.store_stale_completions_total,
+            kv_store_cancelled_total: st.store_cancelled_total,
+            kv_store_queue_full_total: st.store_queue_full_total,
+            kv_store_refused_reason: String::new(),
+            kv_store_key_refused_total: aien_kv_store::seal::key_refusals_total(),
+            kv_store_seal_rejected_total: aien_kv_store::seal::open_rejected_total(),
+        }
+    }
+
+    /// The shutdown drain (ADR 7.5) with the configured deadline.
+    pub fn drain_handle(&self) -> KvDrainHandle {
+        KvDrainHandle {
+            store: self.shared.store.clone(),
+            deadline_ms: self.config.drain_ms,
+        }
+    }
+
+    /// Failures of `head` still inside the window at `now`.
+    fn recent_failures(&self, head: &ChunkKey, now: u64) -> usize {
+        let window = self.config.restore_retry_window_ms;
+        self.retry_failures.get(head).map_or(0, |ts| {
+            ts.iter()
+                .filter(|&&t| now.saturating_sub(t) < window)
+                .count()
+        })
+    }
+
+    /// Records a failed restore of the chain starting at `head`. Only the two
+    /// newest failures matter; entries whose failures all left the window are
+    /// dropped first.
+    fn record_restore_failure(&mut self, head: ChunkKey) {
+        let now = (self.clock)();
+        let window = self.config.restore_retry_window_ms;
+        self.retry_failures
+            .retain(|_, ts| ts.iter().any(|&t| now.saturating_sub(t) < window));
+        if !self.retry_failures.contains_key(&head) && self.retry_failures.len() >= RETRY_HEADS_MAX
+        {
+            return;
+        }
+        let ts = self.retry_failures.entry(head).or_default();
+        ts.push(now);
+        if ts.len() > 2 {
+            ts.remove(0);
+        }
     }
 
     /// The scheduler's watermark, used by S2 (ADR 7.1).
@@ -597,6 +756,7 @@ impl KvResidency {
             parking_jobs: self.parks.len() + self.shared.outbox.lock().len(),
             holder_blocks: self.shared.kv.read().holder_block_count(),
             restore_inflight_blocks: self.restore_inflight_blocks,
+            landing_waiters: self.landings.values().map(|l| l.waiters as usize).sum(),
         }
     }
 
@@ -676,6 +836,14 @@ impl KvResidency {
         let Ok(keys) = chunk_chain(&ns, ct as u32, &prompt[..cap]) else {
             return self.fallback();
         };
+        // Retry window: a chain head whose restore failed twice within the
+        // window is prefilled without a lookup.
+        if let Some(head) = keys.first() {
+            if self.recent_failures(head, (self.clock)()) >= 2 {
+                self.stats.restore_retry_suppressed_total += 1;
+                return self.fallback();
+            }
+        }
         // Walk to the first miss. The chain's last key is a partial tail only
         // when `cap` is not a chunk multiple, and it was keyed with exactly the
         // tokens up to the cap, so a hit there is a tail of exactly that length.
@@ -834,6 +1002,7 @@ impl KvResidency {
             epoch: inc.epoch,
             txn: Some(RestoreTxn {
                 inc,
+                head: keys[0],
                 restored,
                 blocks: blocks_used,
                 chunks,
@@ -881,6 +1050,12 @@ impl KvResidency {
             return;
         };
         self.parks.remove(&c.job);
+        // ADR 2.4: published and served, durability unknown. Adapters report it
+        // on a failed terminal (the directory sync failed after the rename);
+        // counted whatever the terminal says.
+        if c.publish == PublishOutcome::Indeterminate {
+            self.stats.park_indeterminate_total += 1;
+        }
         match t {
             Terminal::Done(_) => self.stats.park_published_total += 1,
             Terminal::Failed(_) => self.stats.park_failed_total += 1,
@@ -1023,6 +1198,7 @@ impl KvResidency {
             let _ = sched.release_restore(seq);
             entry.transition(ResidencyState::Failed);
             self.stats.restore_failed_total += 1;
+            self.record_restore_failure(txn.head);
             self.fallback();
         }
     }
@@ -1089,6 +1265,7 @@ impl KvResidency {
                 ResidencyState::Draining if e.txn.as_ref().is_none_or(|t| t.pending() == 0) => {
                     if let Some(mut txn) = e.txn.take() {
                         garbage.extend(self.close_txn(&mut txn));
+                        self.record_restore_failure(txn.head);
                     }
                     let _ = sched.release_restore(e.seq);
                     e.transition(ResidencyState::Failed);

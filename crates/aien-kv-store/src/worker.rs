@@ -59,7 +59,7 @@ impl Default for WorkerConfig {
     fn default() -> Self {
         Self {
             max_restore_ops: 48,
-            max_park_ops: 16,
+            max_park_ops: 64,
             max_inflight_bytes: 256 << 20,
             max_waiters_per_job: 16,
             max_waiters_total: 1024,

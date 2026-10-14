@@ -168,10 +168,10 @@ fn validate_refuses_before_any_allocation() {
             },
         ),
         (
-            "nonzero byte at the end of the region",
+            "nonzero byte at the end of the padding",
             KvError::BadPadding,
             |f| {
-                f.bytes[4095] = 1;
+                f.bytes[4063] = 1;
             },
         ),
         (
@@ -275,7 +275,7 @@ fn validate_refuses_nonzero_padding() {
     // Every single byte outside the struct and the table must be zero.
     let f0 = fixture();
     let table_end = 256 + 32 * 16;
-    for off in [table_end, table_end + 1, 1000, 4094, 4095] {
+    for off in [table_end, table_end + 1, 1000, 4062, 4063] {
         let mut f = fixture();
         f.bytes[off] = 0x01;
         assert_eq!(check(&f), Err(KvError::BadPadding), "offset {off}");
@@ -284,6 +284,12 @@ fn validate_refuses_nonzero_padding() {
     let mut f = fixture();
     f.bytes[table_end - 1] ^= 1;
     assert_eq!(check(&f), Err(KvError::SegmentRootMismatch));
+    // The seal slot (4064..4096) is not padding: the seal module checks it.
+    for off in [4064, 4080, 4095] {
+        let mut f = fixture();
+        f.bytes[off] = 0x01;
+        assert!(check(&f).is_ok(), "seal slot offset {off}");
+    }
     assert!(check(&f0).is_ok());
 }
 
@@ -305,29 +311,30 @@ fn validate_refuses_segment_root_mismatch() {
 }
 
 #[test]
-fn validate_refuses_more_than_120_segments() {
+fn validate_refuses_more_than_119_segments() {
     let f = fixture();
     let n_at = |sb: u64| f.expect.payload_len.div_ceil(sb);
-    // 120 segments is the boundary and is accepted when the table is whole.
-    let sb120 = 70_000;
-    assert_eq!(n_at(sb120), 120);
-    let digests = seg_digests("edge", 120);
+    // 119 segments is the boundary (the table ends at the seal slot, 4064)
+    // and is accepted when the table is whole.
+    let sb119 = f.expect.payload_len.div_ceil(119);
+    assert_eq!(n_at(sb119), 119);
+    let digests = seg_digests("edge", 119);
     let rec = RecordHeader {
         chunk: f.expect,
         payload_sha256: aien_kv_store::payload_root(&digests),
     };
     let edge = Fixture {
         bytes: rec.encode_region(&digests).unwrap(),
-        segment_bytes: sb120,
+        segment_bytes: sb119,
         expect: f.expect,
         file_size: f.file_size,
     };
-    assert!(check(&edge).is_ok(), "exactly 120 segments is valid");
+    assert!(check(&edge).is_ok(), "exactly 119 segments is valid");
     // One more segment is refused before the table is read.
-    let sb121 = 69_905;
-    assert_eq!(n_at(sb121), 121);
+    let sb120 = f.expect.payload_len.div_ceil(120);
+    assert_eq!(n_at(sb120), 120);
     let over = Fixture {
-        segment_bytes: sb121,
+        segment_bytes: sb120,
         ..edge
     };
     let (got, allocs) = counted(|| check(&over));
