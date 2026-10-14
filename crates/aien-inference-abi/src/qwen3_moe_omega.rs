@@ -29,6 +29,10 @@ use crate::qwen3_moe::{bf16_to_f32, f32_to_bf16, fp8_table, shard_path, Shard, F
 use crate::moe_plan::MoeBatchPlan;
 use crate::resident::transpose_bf16_for_upload;
 
+/// The one-list decode token (OWN-30B L2 cut 2), off unless `OWN30B_DECODE_GRAPH=1`.
+#[path = "qwen3_moe_omega_dgraph.rs"]
+pub mod dgraph;
+
 /// Column tile of the engine's tile-major B layout: every expert window must start on one.
 pub const WINDOW_TILE: usize = aien_omega_moe::TILE_N;
 /// Engine limits for one resident tensor (`omega_blackwell_matmul.h` at omega.lock).
@@ -404,6 +408,11 @@ pub trait Fp8Gemv: Send + Sync + std::fmt::Debug {
         let _ = (expert_ids, token_rows, x, y);
         Err("this FP8 tensor has no prefill GEMM".into())
     }
+    /// The omega C handle (`OmegaGpuFp8Tensor *`) for the one-list decode graph; null when this
+    /// tensor is not an omega FP8 tensor.
+    fn omega_raw(&self) -> *mut std::ffi::c_void {
+        std::ptr::null_mut()
+    }
 }
 
 /// Device addresses the router left its outputs at (valid until the next `route`).
@@ -429,11 +438,19 @@ pub trait DeviceRouter: Send + Sync + std::fmt::Debug {
     fn route(&self, layer: usize, x: &[f32], eps: f32, ids: &mut [u32], weights: &mut [f32]) -> Result<(u64, RouteAddrs), String>;
     /// Trace helper: the last call's `RMSNorm(x)` read back from the device (undoing the 2^64).
     fn read_post(&self, out: &mut [f32]) -> Result<(), String>;
+    /// The omega C handle (`OmegaGpuRouter *`) for the one-list decode graph; null when none.
+    fn omega_raw(&self) -> *mut std::ffi::c_void {
+        std::ptr::null_mut()
+    }
 }
 
 /// The lm_head as one streaming launch over the checkpoint's `[vocab][hidden]` bf16 rows.
 pub trait LmHeadGemv: Send + Sync + std::fmt::Debug {
     fn logits_f32(&self, hidden: &[f32], out: &mut [f32]) -> Result<u64, String>;
+    /// The omega C handle (`OmegaGpuBf16Tensor *`) for the one-list decode graph; null when none.
+    fn omega_raw(&self) -> *mut std::ffi::c_void {
+        std::ptr::null_mut()
+    }
 }
 
 /// The lm_head in the form the loader chose.
@@ -700,6 +717,9 @@ impl Fp8Gemv for OmegaFp8 {
         let info = t.gemm_f32(expert_ids, token_rows, x, y).map_err(|e| e.to_string())?;
         Ok(info.elapsed_ns)
     }
+    fn omega_raw(&self) -> *mut std::ffi::c_void {
+        self.0.lock().map_or(std::ptr::null_mut(), |t| t.as_raw())
+    }
 }
 
 /// Omega's one-launch MoE router behind a lock.
@@ -731,6 +751,9 @@ impl DeviceRouter for OmegaRouter {
         }
         Ok(())
     }
+    fn omega_raw(&self) -> *mut std::ffi::c_void {
+        self.0.lock().map_or(std::ptr::null_mut(), |r| r.as_raw())
+    }
 }
 
 /// Omega's bf16 streaming GEMV (the lm_head) behind a lock.
@@ -742,6 +765,9 @@ impl LmHeadGemv for OmegaLmHead {
         let t = self.0.lock().map_err(|_| "lm_head lock poisoned".to_string())?;
         let info = t.gemv_f32(hidden, out).map_err(|e| e.to_string())?;
         Ok(info.elapsed_ns)
+    }
+    fn omega_raw(&self) -> *mut std::ffi::c_void {
+        self.0.lock().map_or(std::ptr::null_mut(), |t| t.as_raw())
     }
 }
 
@@ -1774,6 +1800,14 @@ pub trait KvAttention: Send {
     fn path_name(&self) -> &'static str {
         "split"
     }
+    /// The one-list decode graph (OWN-30B L2 cut 2): the omega C handle of the KV cache
+    /// (`OmegaGpuDecodeAttnCache *`) after checking every layer holds exactly `0..pos`. `None`:
+    /// this cache cannot take part in the graph.
+    fn dgraph_cache(&mut self, _pos: usize) -> Option<Result<*mut std::ffi::c_void, String>> {
+        None
+    }
+    /// The graph wrote position `pos` of every layer.
+    fn dgraph_commit(&mut self, _pos: usize) {}
 }
 
 /// Host f32 cache with the reference attention (tests, and the oracle side of parity runs).
@@ -2038,10 +2072,20 @@ pub struct StepTiming {
     /// device router launches) and the host work around the expert GEMMs (sort, SwiGLU, combine).
     pub route_ns: u64,
     pub moe_host_ns: u64,
+    /// One-list decode graph only (`OWN30B_DECODE_GRAPH=1`): tokens run as one command list,
+    /// their submissions and the host time spent recording the lists.
+    pub graph_tokens: u64,
+    pub graph_launches: u64,
+    pub graph_submits: u64,
+    pub graph_record_ns: u64,
 }
 
 impl StepTiming {
     pub fn add(&mut self, o: &StepTiming) {
+        self.graph_tokens += o.graph_tokens;
+        self.graph_launches += o.graph_launches;
+        self.graph_submits += o.graph_submits;
+        self.graph_record_ns += o.graph_record_ns;
         self.route_ns += o.route_ns;
         self.moe_host_ns += o.moe_host_ns;
         self.total_ns += o.total_ns;
@@ -2098,6 +2142,11 @@ pub fn sample_next(logits: &[f32], params: &GenerateParams, step: usize) -> u32 
 
 /// The Stage A engine: one sequence, token-at-a-time prefill and decode.
 pub struct Qwen3MoeOmegaEngine {
+    /// The one-list decode graph (built at the first graph decode step). Declared first so it is
+    /// dropped before the weights and KV cache whose omega handles it holds.
+    dgraph: Option<dgraph::GraphState>,
+    /// `OWN30B_DECODE_GRAPH=1` at creation: decode steps run as one command list.
+    decode_graph: bool,
     weights: Qwen3MoeOmegaWeights,
     kv: Box<dyn KvAttention>,
     /// Layers whose activations are recorded into `traces` (parity harness).
@@ -2130,6 +2179,8 @@ impl Qwen3MoeOmegaEngine {
         let device_routing = weights.device_router.is_some();
         let prefill_gemm = gemm_everywhere(&weights);
         Self {
+            dgraph: None,
+            decode_graph: dgraph::requested(),
             weights,
             kv,
             trace_layers: Vec::new(),
@@ -2555,6 +2606,7 @@ impl Qwen3MoeOmegaEngine {
     }
 
     pub fn reset(&mut self) {
+        self.dgraph_clear();
         self.kv.reset();
         self.pos = 0;
         self.history.clear();
@@ -2569,6 +2621,7 @@ impl Qwen3MoeOmegaEngine {
     /// Keeps the first `len` stored tokens and forgets the rest; the next step is at `len`.
     pub fn rewind(&mut self, len: usize) {
         let len = len.min(self.pos);
+        self.dgraph_clear();
         self.kv.truncate(len);
         self.history.truncate(len);
         self.pos = len;
@@ -2775,6 +2828,10 @@ impl Qwen3MoeOmegaEngine {
 
     /// Vocabulary logits of a final hidden state (one lm_head launch), added to `last_timing`.
     pub fn logits(&mut self, hidden: &[f32]) -> Result<Vec<f32>, String> {
+        // A one-list decode step already ran the lm_head on the chip: read its logits back.
+        if let Some(r) = self.dgraph_take_logits() {
+            return r;
+        }
         let t0 = Instant::now();
         let mut logits = vec![0.0f32; self.weights.config.vocab];
         let ns = match &self.weights.lm_head {
@@ -2800,6 +2857,20 @@ impl Qwen3MoeOmegaEngine {
         sampler: &mut dyn FnMut(&[f32], usize) -> u32,
         on_token: &mut dyn FnMut(u32) -> bool,
     ) -> Result<GenerateOutcome, String> {
+        self.generate_inner(prompt, params, sampler, false, on_token)
+    }
+
+    /// `generate_with`; `argmax_sampler` says the sampler is the plain argmax (a greedy
+    /// `sample_next`), so a one-list decode step's own chip argmax can stand in for it.
+    fn generate_inner(
+        &mut self,
+        prompt: &[u32],
+        params: &GenerateParams,
+        sampler: &mut dyn FnMut(&[f32], usize) -> u32,
+        argmax_sampler: bool,
+        on_token: &mut dyn FnMut(u32) -> bool,
+    ) -> Result<GenerateOutcome, String> {
+        self.dgraph_clear();
         if prompt.is_empty() {
             return Err("empty prompt".into());
         }
@@ -2835,9 +2906,18 @@ impl Qwen3MoeOmegaEngine {
             if emitted >= params.max_new_tokens {
                 break;
             }
-            let logits = self.logits(&hidden)?;
-            decode_timing.add(&self.last_timing);
-            let next = sampler(&logits, step);
+            let next = match self.dgraph_take_greedy(argmax_sampler) {
+                // The one-list step already took the argmax on the chip (same rule as sample_argmax).
+                Some(t) => {
+                    decode_timing.add(&self.last_timing);
+                    t
+                }
+                None => {
+                    let logits = self.logits(&hidden)?;
+                    decode_timing.add(&self.last_timing);
+                    sampler(&logits, step)
+                }
+            };
             step += 1;
             if params.stop_token_ids.contains(&next) {
                 finish = FinishReason::Stop;
@@ -2851,7 +2931,7 @@ impl Qwen3MoeOmegaEngine {
             if emitted >= params.max_new_tokens || self.pos >= self.kv.capacity() {
                 break;
             }
-            hidden = self.step(next)?;
+            hidden = self.decode_step(next)?;
         }
         Ok(GenerateOutcome {
             emitted_tokens: emitted,
@@ -2873,7 +2953,9 @@ impl Qwen3MoeOmegaEngine {
         on_token: &mut dyn FnMut(u32) -> bool,
     ) -> Result<GenerateOutcome, String> {
         let p = params.clone();
-        self.generate_with(prompt, params, &mut |logits, step| sample_next(logits, &p, step), on_token)
+        // sample_next is the plain argmax at temperature <= 0.001 (no top-k mask; sample_with_params greedy).
+        let argmax = params.temperature <= 0.001;
+        self.generate_inner(prompt, params, &mut |logits, step| sample_next(logits, &p, step), argmax, on_token)
     }
 }
 
@@ -3045,6 +3127,29 @@ mod forward_tests {
         let (w, _) = load_qwen3_moe_omega_from_paths(&c, &mut src, &up, format, paths, &mut |_| {})?;
         let kv = HostKv::new(&c, 32);
         Ok((Qwen3MoeOmegaEngine::new(w, Box::new(kv)), up, c))
+    }
+
+    #[test]
+    fn decode_graph_switch_refuses_a_load_it_cannot_run_instead_of_falling_back() {
+        // A host-KV, host-routed load: with the switch on, preparing and generating must both
+        // fail with the plain reason; with it off, the same engine generates as before.
+        let (mut e, _, c) = engine();
+        assert!(!e.decode_graph_on() || dgraph::requested());
+        e.decode_graph = true;
+        let err = e.prepare_decode_graph().unwrap_err();
+        assert!(err.contains("OWN30B_DECODE_GRAPH=1"), "{err}");
+        let p = GenerateParams::greedy(3, Vec::new());
+        let err = e.generate(&[1, 2, 3], &p, &mut |_| true).unwrap_err();
+        assert!(err.contains("OWN30B_DECODE_GRAPH=1"), "{err}");
+        e.decode_graph = false;
+        let mut got = Vec::new();
+        e.generate(&[1, 2, 3], &p, &mut |t| {
+            got.push(t);
+            true
+        })
+        .unwrap();
+        assert_eq!(got.len(), 3);
+        let _ = c;
     }
 
     #[test]

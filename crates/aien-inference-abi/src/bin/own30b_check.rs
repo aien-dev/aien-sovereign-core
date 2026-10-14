@@ -408,6 +408,21 @@ fn chip(a: &Args) {
     let router_path = if engine.device_routing { "device" } else { "host" };
     let lm_head_path = if matches!(engine.weights().lm_head, LmHead::Gemv(_)) { "gemv" } else { "dense" };
     say(format!("router path {router_path} lm_head path {lm_head_path} (router_api={} bf16_api={})", OmegaModelUploader::uses_router_api(), OmegaModelUploader::uses_bf16_api()));
+    // One command list per decode token (OWN30B_DECODE_GRAPH=1): built now so a load that cannot
+    // run it is refused before any generation, never run on the old path in its place.
+    if engine.decode_graph_on() {
+        if let Err(e) = engine.prepare_decode_graph() {
+            say(format!("REFUSED: {e}"));
+            std::process::exit(4);
+        }
+    }
+    say(format!(
+        "decode graph {} (dgraph_api={}, {}=1 to turn on) mutant {}",
+        if engine.decode_graph_on() { "ON" } else { "OFF" },
+        aien_omega_dgraph::is_native(),
+        aien_inference_abi::qwen3_moe_omega::dgraph::ENV,
+        engine.decode_graph_mutant()
+    ));
     let peak = report.peak_rss_bytes.unwrap_or(0) as f64 / 1e9;
     say(format!(
         "LOAD: {:.1}s resident {:.2} GB host {:.2} GB peak_rss {:.2} GB (before {:.2} GB) kv_resident={} mem_available_after {:.1} GB",
@@ -726,6 +741,21 @@ fn chip(a: &Args) {
             dt.chip_ns as f64 / 1e6 / steps,
             dt.launches as f64 / steps,
         ));
+        // Every old-path launch is its own synchronous submission; a one-list token is one
+        // submission for all its launches.
+        let submits = dt.launches - dt.graph_launches + dt.graph_submits;
+        let per_graph = |v: u64| if dt.graph_tokens > 0 { v as f64 / dt.graph_tokens as f64 } else { 0.0 };
+        say(format!(
+            "  DECODE GRAPH {}: {} of {} decode steps as one list (the first step is the prefill's lm_head); per step launches {:.1} submits {:.1}; per graph token launches {:.1} submits {:.1} record {:.1} us",
+            if engine.decode_graph_on() { "ON" } else { "OFF" },
+            dt.graph_tokens,
+            o.emitted_tokens,
+            dt.launches as f64 / steps,
+            submits as f64 / steps,
+            per_graph(dt.graph_launches),
+            per_graph(dt.graph_submits),
+            per_graph(dt.graph_record_ns) / 1e3,
+        ));
         say(format!("  chip text: {:?}", tok.decode(&got).unwrap_or_default()));
         say(format!("  cpu  text: {:?}", g["text"].as_str().unwrap_or("")));
         results.push(serde_json::json!({
@@ -734,6 +764,8 @@ fn chip(a: &Args) {
             "per_step_ms": {"attention": dt.attention_ns as f64 / 1e6 / steps, "experts": dt.experts_ns as f64 / 1e6 / steps,
                 "lm_head": dt.lm_head_ns as f64 / 1e6 / steps, "host": dt.host_ns as f64 / 1e6 / steps, "chip_reported": dt.chip_ns as f64 / 1e6 / steps,
                 "launches": dt.launches as f64 / steps},
+            "decode_graph": {"on": engine.decode_graph_on(), "graph_tokens": dt.graph_tokens, "graph_launches": dt.graph_launches,
+                "graph_submits": dt.graph_submits, "graph_record_ns": dt.graph_record_ns, "submits": submits, "mutant": engine.decode_graph_mutant()},
         }));
     }
     // ---- a long prompt (new territory past 673 tokens): chunk 1 against the batched chunk ----
