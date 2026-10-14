@@ -29,6 +29,28 @@ pub const ENV: &str = "OWN30B_DECODE_GRAPH";
 /// TEST ONLY: deliberate wrong wiring (see the module doc).
 pub const MUTANT_ENV: &str = "OWN30B_DECODE_GRAPH_MUTANT";
 
+/// Measurement: `1` (with [`ENV`]`=1`) records a GPU timestamp after every launch of every graph
+/// token and sums them per launch kind ([`Timeline`]). Costs a timestamp per launch plus a read.
+pub const STAMPS_ENV: &str = "OWN30B_DECODE_GRAPH_STAMPS";
+
+/// Whether the environment asks for the per-launch timeline.
+pub fn stamps_requested() -> bool {
+    std::env::var(STAMPS_ENV).as_deref() == Ok("1")
+}
+
+/// Per-kind GPU time of the graph tokens since the last [`Qwen3MoeOmegaEngine::take_decode_timeline`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Timeline {
+    /// Graph tokens summed.
+    pub steps: u64,
+    /// Launches and GPU ns per kind (`aien_omega_dgraph::KIND_NAMES` order).
+    pub launches: [u64; 12],
+    pub ns: [u64; 12],
+    /// Sum of each token's first-to-last stamp span, and of the graph's own chip_ns.
+    pub span_ns: u64,
+    pub chip_ns: u64,
+}
+
 /// Whether the environment asks for the one-list decode.
 pub fn requested() -> bool {
     std::env::var(ENV).as_deref() == Ok("1")
@@ -58,6 +80,8 @@ pub(super) struct GraphState {
     pending: bool,
     pending_token: u32,
     mutant: String,
+    stamps: bool,
+    timeline: Timeline,
 }
 
 impl std::fmt::Debug for GraphState {
@@ -148,12 +172,20 @@ impl Qwen3MoeOmegaEngine {
         if let Mutant::Omega(k) = m {
             graph.test_set_mutant(k);
         }
+        let stamps = stamps_requested();
+        graph.set_stamps(stamps);
         let mutant = match m {
             Mutant::None => "none".to_string(),
             other => format!("{other:?} (TEST ONLY: wrong on purpose)"),
         };
-        self.dgraph = Some(GraphState { graph, pending: false, pending_token: 0, mutant });
+        self.dgraph = Some(GraphState { graph, pending: false, pending_token: 0, mutant, stamps, timeline: Timeline::default() });
         Ok(())
+    }
+
+    /// The per-kind timeline summed since the last call (stamps on), reset to empty.
+    pub fn take_decode_timeline(&mut self) -> Option<Timeline> {
+        let g = self.dgraph.as_mut()?;
+        g.stamps.then(|| std::mem::take(&mut g.timeline))
     }
 
     /// The deliberate wrong wiring in force ("none" normally), for receipts.
@@ -185,6 +217,24 @@ impl Qwen3MoeOmegaEngine {
         let (next, st): (u32, GraphStats) = g.graph.token(&x, pos).map_err(|e| format!("decode graph token at {pos}: {e}"))?;
         g.pending = true;
         g.pending_token = next;
+        // The token ran and wrote this position's KV: book it before reporting a timeline error.
+        let mut timeline_err = None;
+        if g.stamps {
+            match g.graph.stamps() {
+                Err(e) => timeline_err = Some(format!("decode graph timeline at {pos}: {e}")),
+                Ok((stamps, kinds)) => {
+                    let t = &mut g.timeline;
+                    t.steps += 1;
+                    for (i, &k) in kinds.iter().enumerate() {
+                        let k = (k as usize).min(11);
+                        t.launches[k] += 1;
+                        t.ns[k] += stamps[i + 1].saturating_sub(stamps[i]);
+                    }
+                    t.span_ns += stamps.last().copied().unwrap_or(0).saturating_sub(stamps.first().copied().unwrap_or(0));
+                    t.chip_ns += st.chip_ns;
+                }
+            }
+        }
         self.kv.dgraph_commit(pos);
         self.pos = pos + 1;
         self.history.push(token);
@@ -200,7 +250,10 @@ impl Qwen3MoeOmegaEngine {
             graph_record_ns: st.record_ns,
             ..StepTiming::default()
         };
-        Ok(Vec::new())
+        match timeline_err {
+            Some(e) => Err(e),
+            None => Ok(Vec::new()),
+        }
     }
 
     /// The graph's greedy token of the last decode step, when the caller's sampler is the

@@ -26,6 +26,7 @@ use aien_inference_abi::qwen3_moe_omega::{
     current_rss_bytes, load_attention_layer_f32, peak_rss_bytes, replay_attention, replay_moe, AttnPath, DevicePaths, GenerateParams, LmHead,
     OmegaModelUploader, PathChoice, Qwen3MoeConfig, Qwen3MoeOmegaEngine, StepTiming, WeightFormat,
 };
+use aien_inference_abi::qwen3_moe_omega::dgraph;
 use aien_inference_abi::tokenizer::ChatTokenizer as Tokenizer;
 
 const PROMPT_TEXTS: [(&str, &str); 4] = [
@@ -410,6 +411,10 @@ fn chip(a: &Args) {
     say(format!("router path {router_path} lm_head path {lm_head_path} (router_api={} bf16_api={})", OmegaModelUploader::uses_router_api(), OmegaModelUploader::uses_bf16_api()));
     // One command list per decode token (OWN30B_DECODE_GRAPH=1): built now so a load that cannot
     // run it is refused before any generation, never run on the old path in its place.
+    if dgraph::stamps_requested() && !engine.decode_graph_on() {
+        say(format!("REFUSED: {}=1 measures the one-list decode; it needs {}=1 as well", dgraph::STAMPS_ENV, dgraph::ENV));
+        std::process::exit(4);
+    }
     if engine.decode_graph_on() {
         if let Err(e) = engine.prepare_decode_graph() {
             say(format!("REFUSED: {e}"));
@@ -696,6 +701,8 @@ fn chip(a: &Args) {
         }
         let mut got = Vec::new();
         let params = GenerateParams::greedy(a.new_tokens, config.eos_token_ids.clone());
+        // Start this prompt's timeline from zero (earlier sections also ran graph tokens).
+        let _ = engine.take_decode_timeline();
         let o = engine
             .generate(ids, &params, &mut |t| {
                 got.push(t);
@@ -756,6 +763,14 @@ fn chip(a: &Args) {
             per_graph(dt.graph_submits),
             per_graph(dt.graph_record_ns) / 1e3,
         ));
+        let mut timeline_json = serde_json::Value::Null;
+        if let Some(t) = engine.take_decode_timeline() {
+            let lines = timeline_table(&t, &config);
+            for l in &lines {
+                say(format!("  {l}"));
+            }
+            timeline_json = serde_json::json!({"steps": t.steps, "launches": t.launches, "ns": t.ns, "span_ns": t.span_ns, "chip_ns": t.chip_ns, "table": lines});
+        }
         say(format!("  chip text: {:?}", tok.decode(&got).unwrap_or_default()));
         say(format!("  cpu  text: {:?}", g["text"].as_str().unwrap_or("")));
         results.push(serde_json::json!({
@@ -765,7 +780,7 @@ fn chip(a: &Args) {
                 "lm_head": dt.lm_head_ns as f64 / 1e6 / steps, "host": dt.host_ns as f64 / 1e6 / steps, "chip_reported": dt.chip_ns as f64 / 1e6 / steps,
                 "launches": dt.launches as f64 / steps},
             "decode_graph": {"on": engine.decode_graph_on(), "graph_tokens": dt.graph_tokens, "graph_launches": dt.graph_launches,
-                "graph_submits": dt.graph_submits, "graph_record_ns": dt.graph_record_ns, "submits": submits, "mutant": engine.decode_graph_mutant()},
+                "graph_submits": dt.graph_submits, "graph_record_ns": dt.graph_record_ns, "submits": submits, "mutant": engine.decode_graph_mutant(), "timeline": timeline_json},
         }));
     }
     // ---- a long prompt (new territory past 673 tokens): chunk 1 against the batched chunk ----
@@ -841,4 +856,43 @@ fn main() {
         "golden" => golden(&a),
         _ => chip(&a),
     }
+}
+
+/// The one-list decode's per-kind timeline as table lines: kind, launches/step, us/step, FP8 (or
+/// bf16 for the lm_head) weight bytes/step and the achieved GB/s. Router, attention and the glue
+/// kernels get "-" for bytes (their traffic is not a fixed weight read; KV bytes are not guessed).
+fn timeline_table(t: &dgraph::Timeline, c: &Qwen3MoeConfig) -> Vec<String> {
+    let steps = t.steps.max(1) as f64;
+    let l = c.layers as f64;
+    let bytes = |kind: &str| -> Option<f64> {
+        match kind {
+            "qkv" => Some(5120.0 * 2048.0 * l),
+            "o_proj" => Some(2048.0 * 4096.0 * l),
+            "gate_up" => Some(8.0 * 1536.0 * 2048.0 * l),
+            "down" => Some(8.0 * 2048.0 * 768.0 * l),
+            "lm_head" => Some(151936.0 * 2048.0 * 2.0),
+            _ => None,
+        }
+    };
+    let mut out = vec![format!("TIMELINE over {} graph tokens: {:<12} {:>9} {:>10} {:>14} {:>9}", t.steps, "kind", "launches", "us/step", "bytes/step", "GB/s")];
+    let mut sum_ns = 0u64;
+    for k in 0..12 {
+        let name = aien_omega_dgraph::kind_name(k as u8);
+        sum_ns += t.ns[k];
+        let us = t.ns[k] as f64 / 1e3 / steps;
+        let (b, gbs) = match bytes(&name) {
+            // bytes per ns = GB/s
+            Some(b) if t.ns[k] > 0 => (format!("{b:.0}"), format!("{:.1}", b * steps / t.ns[k] as f64)),
+            Some(b) => (format!("{b:.0}"), "-".into()),
+            None => ("-".into(), "-".into()),
+        };
+        out.push(format!("TIMELINE {:<12} {:>9.1} {:>10.1} {:>14} {:>9}", name, t.launches[k] as f64 / steps, us, b, gbs));
+    }
+    out.push(format!(
+        "TIMELINE span {:.1} us/step (sum of kinds {:.1}) vs graph chip_ns {:.1} us/step",
+        t.span_ns as f64 / 1e3 / steps,
+        sum_ns as f64 / 1e3 / steps,
+        t.chip_ns as f64 / 1e3 / steps
+    ));
+    out
 }

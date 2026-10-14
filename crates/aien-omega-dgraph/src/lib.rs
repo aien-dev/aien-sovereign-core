@@ -29,6 +29,24 @@ pub const fn is_native() -> bool {
     cfg!(has_omega_dgraph)
 }
 
+/// Launch kinds of the timeline (`OMEGA_GPU_DGRAPH_K_*`), in enum order.
+pub const KIND_NAMES: [&str; 12] = ["norm", "qkv", "attn", "o_proj", "res_add", "router", "gate_up", "swiglu", "down", "combine_norm", "lm_head", "argmax"];
+
+/// omega's own name for a launch kind (`omega_gpu_decode_graph_kind_name`); the table above
+/// in the stub.
+pub fn kind_name(kind: u8) -> String {
+    #[cfg(has_omega_dgraph)]
+    {
+        // SAFETY: returns a static NUL-terminated string or NULL.
+        let p = unsafe { ffi::omega_gpu_decode_graph_kind_name(kind) };
+        if !p.is_null() {
+            // SAFETY: non-null static string.
+            return unsafe { std::ffi::CStr::from_ptr(p) }.to_string_lossy().into_owned();
+        }
+    }
+    KIND_NAMES.get(kind as usize).map_or_else(|| format!("kind{kind}"), |s| s.to_string())
+}
+
 /// Mirror of `OmegaGpuDecodeGraphStats`: what one token cost.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -91,6 +109,9 @@ mod ffi {
         pub fn omega_gpu_decode_graph_read(g: *mut OmegaGpuDecodeGraph, x: *mut f32, hidden: *mut f32, logits: *mut f32) -> i32;
         pub fn omega_gpu_decode_graph_set_flush_each(g: *mut OmegaGpuDecodeGraph, on: i32);
         pub fn omega_gpu_decode_graph_test_set_mutant(g: *mut OmegaGpuDecodeGraph, mutant: i32);
+        pub fn omega_gpu_decode_graph_set_stamps(g: *mut OmegaGpuDecodeGraph, on: i32);
+        pub fn omega_gpu_decode_graph_stamps(g: *const OmegaGpuDecodeGraph, stamps: *mut u64, kinds: *mut u8, cap: u32) -> i32;
+        pub fn omega_gpu_decode_graph_kind_name(kind: u8) -> *const std::os::raw::c_char;
         pub fn omega_gpu_session_last_error() -> *const std::os::raw::c_char;
     }
 }
@@ -286,6 +307,41 @@ impl DecodeGraph {
         Err(OmegaGpuError::Unavailable)
     }
 
+    /// Timeline (measurement): when on, every later token also records a GPU timestamp before
+    /// the first launch and after each launch. Call between tokens. Off by default.
+    pub fn set_stamps(&mut self, on: bool) {
+        #[cfg(has_omega_dgraph)]
+        // SAFETY: ptr is live; plain integer argument.
+        unsafe {
+            ffi::omega_gpu_decode_graph_set_stamps(self.ptr, on as i32)
+        }
+        #[cfg(not(has_omega_dgraph))]
+        let _ = on;
+    }
+
+    /// The last token's timeline: `launches + 1` GPU timestamps (ns) and one kind per launch
+    /// (launch `i` took `stamps[i + 1] - stamps[i]`). Refused when stamps are off or the token failed.
+    pub fn stamps(&self) -> Result<(Vec<u64>, Vec<u8>), OmegaGpuError> {
+        #[cfg(has_omega_dgraph)]
+        {
+            // 9 per layer + 4, with room to spare.
+            let cap = (MAX_LAYERS * 16 + 16) as u32;
+            let mut stamps = vec![0u64; cap as usize + 1];
+            let mut kinds = vec![0u8; cap as usize + 1];
+            // SAFETY: ptr is live; both buffers hold cap + 1 entries.
+            let n = unsafe { ffi::omega_gpu_decode_graph_stamps(self.ptr, stamps.as_mut_ptr(), kinds.as_mut_ptr(), cap + 1) };
+            if n < 0 {
+                return Err(rc_err("stamps", n));
+            }
+            let n = n as usize;
+            stamps.truncate(n + 1);
+            kinds.truncate(n);
+            Ok((stamps, kinds))
+        }
+        #[cfg(not(has_omega_dgraph))]
+        Err(OmegaGpuError::Unavailable)
+    }
+
     /// TEST ONLY: submit after every launch (the batching comparison).
     pub fn set_flush_each(&mut self, on: bool) {
         #[cfg(has_omega_dgraph)]
@@ -382,6 +438,11 @@ mod tests {
         assert_eq!(unsafe { ffi::omega_gpu_decode_graph_set_final_norm(std::ptr::null_mut(), norm.as_ptr()) }, -1);
         let e = rc_err("smoke", -1).to_string();
         assert!(e.contains("BAD_ARGS"), "{e}");
+        // omega's kind names are the table's, in enum order.
+        for (k, want) in KIND_NAMES.iter().enumerate() {
+            assert_eq!(kind_name(k as u8), *want);
+        }
+        assert_eq!(kind_name(12), "?");
     }
 
     #[test]
