@@ -14,6 +14,7 @@
 //! (`is_native()` false) every call returns `Unavailable`.
 use aien_omega_gpu::OmegaGpuError;
 use std::fmt;
+pub mod raw;
 
 /// Query heads the kernel is built for (`OMEGA_GPU_DATTN_Q_HEADS`).
 pub const Q_HEADS: usize = 32;

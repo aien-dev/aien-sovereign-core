@@ -295,6 +295,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "aien-omega-pf"
+version = "0.1.0"
+dependencies = [
+ "aien-omega-dattn",
+ "aien-omega-gpu",
+]
+
+[[package]]
 name = "aien-omega-router"
 version = "0.1.0"
 dependencies = [

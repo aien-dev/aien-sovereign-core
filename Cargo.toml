@@ -41,6 +41,7 @@ members = [
     "crates/aien-omega-router",
     "crates/aien-omega-bf16",
     "crates/aien-omega-compose",
+    "crates/aien-omega-pf",
     "crates/aien-campaign-verifier",
     "crates/aien-proof",
     "crates/crumbs",
