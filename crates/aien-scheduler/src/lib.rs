@@ -1730,6 +1730,10 @@ mod tests {
             .get_block_table(id)
             .unwrap()
             .is_prefill_ready());
+        // The step that completed the prefill also sampled (and emitted) the
+        // first token, so the sequence now carries one generated token.
+        let generated = scheduler.arena.get(seq).unwrap().generated_tokens.clone();
+        assert_eq!(generated.len(), 1, "prefill completion samples one token");
 
         // Counterexample: the running sequence's table is replaced by an
         // allocated-but-uncomputed one. It must be prefilled again, not decoded.
@@ -1743,9 +1747,52 @@ mod tests {
             !batch.decode_requests.contains(&id),
             "PREFILL_GATE_VIOLATION: running sequence decoded over an uncomputed table"
         );
+        // The re-prefill covers the prompt and the already-emitted token, so the
+        // next sample is a new token. Prompt-only would re-sample and re-emit it.
+        let expected: Vec<u32> = prompt.iter().copied().chain(generated).collect();
         assert!(batch
             .prefill_requests
             .iter()
-            .any(|r| r.request_id == id && r.prompt_tokens == prompt));
+            .any(|r| r.request_id == id && r.prompt_tokens == expected));
+    }
+
+    #[test]
+    fn test_prefill_gate_reprefill_without_generated_tokens_is_exactly_the_prompt() {
+        // A sequence refused by the gate before it generated anything must be
+        // re-prefilled with exactly its prompt, nothing more.
+        let kv_manager = create_shared_kv_manager(64, 16);
+        let mut scheduler = AienScheduler::new(SchedulerConfig::default(), kv_manager.clone());
+
+        let root = SequenceId::new(1, 1).unwrap().to_u64();
+        let child = SequenceId::new(2, 1).unwrap().to_u64();
+        let prompt: Vec<u32> = (0..20).collect();
+        {
+            let mut kv = kv_manager.write();
+            kv.allocate_sequence(root, &prompt).unwrap();
+            kv.mark_prefill_pending(root).unwrap();
+            kv.complete_prefill(root).unwrap();
+            kv.fork_prefilled(root, child).unwrap();
+        }
+        let seq = scheduler.submit_request(gate_request(child, prompt.clone(), 4));
+        let batch = scheduler.build_scheduled_batch().unwrap().unwrap();
+        assert!(batch.decode_requests.contains(&child));
+        assert!(scheduler
+            .arena
+            .get(seq)
+            .unwrap()
+            .generated_tokens
+            .is_empty());
+
+        {
+            let mut kv = kv_manager.write();
+            kv.free_sequence(child).unwrap();
+            kv.allocate_sequence(child, &prompt).unwrap();
+        }
+        let batch = scheduler.build_scheduled_batch().unwrap().unwrap();
+        assert!(!batch.decode_requests.contains(&child));
+        assert!(batch
+            .prefill_requests
+            .iter()
+            .any(|r| r.request_id == child && r.prompt_tokens == prompt));
     }
 }
