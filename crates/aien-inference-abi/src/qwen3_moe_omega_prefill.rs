@@ -171,6 +171,26 @@ pub struct PrefillStats {
     pub chip_ns: u64,
     pub attn_ns: u64,
     pub host_ns: u64,
+    /// Host-time breakdown by phase (W-L1G-D profile), summed over layers.
+    pub prof: HostProf,
+}
+
+/// Where the whole-prompt wall time goes (W-L1G-D, 2026-10-14): ns per phase, summed over layers.
+/// `dev_ns` is the wall time of the device calls (quantiser, GEMMs, attention) including launch
+/// overhead; the other fields are host work. `wall_ns` is the whole `run`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct HostProf {
+    pub embed_ns: u64,
+    pub norm_in_ns: u64,
+    pub resid_ns: u64,
+    pub norm_post_ns: u64,
+    pub router_ns: u64,
+    pub plan_ns: u64,
+    pub tiles_ns: u64,
+    pub combine_ns: u64,
+    pub final_ns: u64,
+    pub dev_ns: u64,
+    pub wall_ns: u64,
 }
 
 impl PrefillStats {
@@ -396,10 +416,20 @@ impl<D: PrefillDevice> WholePromptPrefill<D> {
         let mut st = PrefillStats { tokens: m, layers: weights.layers.len(), attn_dev: dev_attn, ..Default::default() };
         let (dev, b) = (&mut self.dev, self.bufs.as_mut().expect("sized"));
         let bm = b.bm;
+        let t_run = Instant::now();
+        let mut lap = Instant::now();
+        // W-L1G-D profile: adds the time since the last lap to one HostProf field.
+        macro_rules! lap {
+            ($f:ident) => {{
+                st.prof.$f += lap.elapsed().as_nanos() as u64;
+                lap = Instant::now();
+            }};
+        }
 
         let t = Instant::now();
         let mut x: Vec<f32> = tokens.iter().flat_map(|&tok| weights.embed_row(tok)).collect();
         let mut logits = vec![0.0f32; m * e];
+        lap!(embed_ns);
         st.host_ns += t.elapsed().as_nanos() as u64;
 
         // Writes a tile table into its region and returns (tiles_va, ntiles).
@@ -431,6 +461,7 @@ impl<D: PrefillDevice> WholePromptPrefill<D> {
             {
                 let xin = host_mut(&mut b.xin, "xin")?;
                 xin[..m * h].par_chunks_mut(h).zip(x.par_chunks(h)).for_each(|(o, xr)| rmsnorm(xr, &layer.input_norm, eps, o));
+                lap!(norm_in_ns);
             }
             st.host_ns += t.elapsed().as_nanos() as u64;
             if let Some(t) = tr.as_deref_mut().filter(|t| t.ops_layer == Some(l)) {
@@ -440,7 +471,9 @@ impl<D: PrefillDevice> WholePromptPrefill<D> {
             st.quant += 1;
 
             // --- q|k|v: one GEMM for all m tokens ---
+            lap!(dev_ns);
             let (tv, nt) = put_tiles(&mut b.tiles, b.max_tiles, Region::Qkv, &[ent.qkv.0], &[ent.qkv.1], &dense)?;
+            lap!(tiles_ns);
             let qkv_y = match (&b.qkv_dev, &b.qkv_host) {
                 (Some(d), _) => d.va(),
                 (None, Some(hb)) => hb.va(),
@@ -480,7 +513,9 @@ impl<D: PrefillDevice> WholePromptPrefill<D> {
             st.quant += 1;
 
             // --- o: one GEMM into HOST rows ---
+            lap!(dev_ns);
             let (tv, nt) = put_tiles(&mut b.tiles, b.max_tiles, Region::O, &[ent.o.0], &[ent.o.1], &dense)?;
+            lap!(tiles_ns);
             let call = QgemmCall { n: h, k: qd, layout: Layout::Plain, tiles_va: tv, ntiles: nt, rowidx_va: 0, xq_va: b.xq.va(), xs_va: b.xs.va(), y_va: b.oproj.va() };
             st.chip_ns += dev.qgemm(&call).map_err(|err| format!("layer {l} o gemm x{m}: {err}"))?;
             st.o += 1;
@@ -491,6 +526,7 @@ impl<D: PrefillDevice> WholePromptPrefill<D> {
             // --- residual, post norm (into the quantiser input), routing, sort ---
             let t = Instant::now();
             let sort = {
+                lap!(dev_ns);
                 let oproj = host(&b.oproj, "o projection")?;
                 x.par_chunks_mut(h).zip(oproj[..m * h].par_chunks(h)).for_each(|(xr, pr)| {
                     for (xi, p) in xr.iter_mut().zip(pr) {
@@ -500,9 +536,12 @@ impl<D: PrefillDevice> WholePromptPrefill<D> {
                 if let Some(t) = tr.as_deref_mut() {
                     t.x_mid[l].copy_from_slice(&x);
                 }
+                lap!(resid_ns);
                 let post = host_mut(&mut b.xin, "xin")?;
                 post[..m * h].par_chunks_mut(h).zip(x.par_chunks(h)).for_each(|(o, xr)| rmsnorm(xr, &layer.post_norm, eps, o));
+                lap!(norm_post_ns);
                 router_logits(&layer.router, &post[..m * h], h, e, &mut logits);
+                lap!(router_ns);
                 if mutant == WpMutant::Routing {
                     rotate_logits(&mut logits, e);
                 }
@@ -519,11 +558,13 @@ impl<D: PrefillDevice> WholePromptPrefill<D> {
                 (sort, plan.topk_weights)
             };
             let (sort, wts) = sort;
+            lap!(plan_ns);
             st.host_ns += t.elapsed().as_nanos() as u64;
             st.chip_ns += dev.quant(h, QuantIn::F32, m, b.xin.va(), b.xq.va(), b.xs.va()).map_err(|err| format!("layer {l} quant post: {err}"))?;
             st.quant += 1;
 
             // --- experts: gate|up with the SwiGLU epilogue (rows gathered by token), act quantised, down ---
+            lap!(dev_ns);
             let (tv, nt) = put_tiles(&mut b.tiles, b.max_tiles, Region::GateUp, &ent.gu_w, &ent.gu_s, &sort.counts)?;
             if mutant == WpMutant::GateUpScales {
                 // GEMM mutant: every expert's weights with the NEXT expert's scale blocks (same table size, same region).
@@ -531,18 +572,23 @@ impl<D: PrefillDevice> WholePromptPrefill<D> {
                 s.rotate_left(1);
                 put_tiles(&mut b.tiles, b.max_tiles, Region::GateUp, &ent.gu_w, &s, &sort.counts)?;
             }
+            lap!(tiles_ns);
             let call = QgemmCall { n: 2 * i, k: h, layout: Layout::SwigluNat, tiles_va: tv, ntiles: nt, rowidx_va: b.rowidx.va(), xq_va: b.xq.va(), xs_va: b.xs.va(), y_va: b.act.va() };
             st.chip_ns += dev.qgemm(&call).map_err(|err| format!("layer {l} gate|up gemm x{g}: {err}"))?;
             st.gate_up += 1;
             st.chip_ns += dev.quant(i, QuantIn::Bf16, g, b.act.va(), b.aq.va(), b.a_s.va()).map_err(|err| format!("layer {l} quant act: {err}"))?;
             st.quant += 1;
+            lap!(dev_ns);
             let (tv, nt) = put_tiles(&mut b.tiles, b.max_tiles, Region::Down, &ent.dn_w, &ent.dn_s, &sort.counts)?;
+            lap!(tiles_ns);
             let call = QgemmCall { n: h, k: i, layout: Layout::Plain, tiles_va: tv, ntiles: nt, rowidx_va: 0, xq_va: b.aq.va(), xs_va: b.a_s.va(), y_va: b.down.va() };
             st.chip_ns += dev.qgemm(&call).map_err(|err| format!("layer {l} down gemm x{g}: {err}"))?;
             st.down += 1;
 
             let t = Instant::now();
+            lap!(dev_ns);
             combine_rows(&mut x, &host(&b.down, "down rows")?[..g * h], &wts, &sort.inv, h, top_k);
+            lap!(combine_ns);
             if let Some(t) = tr.as_deref_mut() {
                 t.x_out[l].copy_from_slice(&x);
                 if t.ops_layer == Some(l) {
@@ -555,6 +601,9 @@ impl<D: PrefillDevice> WholePromptPrefill<D> {
         let t = Instant::now();
         let mut hidden = vec![0.0f32; h];
         rmsnorm(&x[(m - 1) * h..], &weights.final_norm, eps, &mut hidden);
+        lap!(final_ns);
+        let _ = lap;
+        st.prof.wall_ns = t_run.elapsed().as_nanos() as u64;
         st.host_ns += t.elapsed().as_nanos() as u64;
         self.stats = st;
         Ok(hidden)

@@ -202,6 +202,12 @@ fn main() {
                 off.pt.chip_ns as f64 / 1e6,
                 off.pt.launches
             ));
+            let p = &st.prof;
+            let ms = |v: u64| v as f64 / 1e6;
+            say(format!(
+                "  on profile ms: wall {:.1} dev(calls) {:.1} | host: embed {:.1} norm_in {:.1} resid {:.1} norm_post {:.1} router {:.1} plan {:.1} tiles {:.1} combine {:.1} final {:.1}",
+                ms(p.wall_ns), ms(p.dev_ns), ms(p.embed_ns), ms(p.norm_in_ns), ms(p.resid_ns), ms(p.norm_post_ns), ms(p.router_ns), ms(p.plan_ns), ms(p.tiles_ns), ms(p.combine_ns), ms(p.final_ns)
+            ));
             rows.push(serde_json::json!({
                 "len": n, "rep": rep,
                 "ttft_ms_off": off.ttft_ms, "ttft_ms_on": on.ttft_ms,
