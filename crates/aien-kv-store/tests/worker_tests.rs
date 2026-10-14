@@ -953,8 +953,9 @@ fn worker_backpressure_refuses_not_grows() {
             okp += 1;
         }
     }
-    assert_eq!(okp, 16, "the park class is bounded on its own");
-    assert_eq!(w.worker.stats().peak_park_queue, 16);
+    let park_bound = WorkerConfig::default().max_park_ops;
+    assert_eq!(okp, park_bound, "the park class is bounded on its own");
+    assert_eq!(w.worker.stats().peak_park_queue, park_bound as u64);
     // Once everything ends the bound is available again.
     w.resume();
     w.settle();
@@ -2089,7 +2090,7 @@ fn worker_config_reads_the_documented_settings() {
             d.max_inflight_bytes,
             d.drain_ms
         ),
-        (48, 16, 256 << 20, 2000)
+        (48, 64, 256 << 20, 2000)
     );
     // Garbage is refused, naming the setting; it is not silently replaced.
     for bad in ["abc", "-1", "0", "", "1.5"] {
@@ -2526,4 +2527,25 @@ fn shutdown_cancels_a_job_that_is_still_being_handed_to_the_store() {
         "the worker forwards the cancel itself, not relying on the store's shutdown"
     );
     assert_eq!(mem.bytes(), vec![0xEE; 2 * BLOCK]);
+}
+
+// ---- default park bound (C9 bench finding) ---------------------------------
+
+#[test]
+fn default_park_bound_admits_eight_conversations_finishing_together() {
+    // The C9 bench: 8 conversations finishing in one step park 3 chunks each
+    // (24) and the old default of 16 refused 8 of them. The default must
+    // admit 8 conversations of up to 8 parks each with no QueueFull.
+    let defaults = WorkerConfig::default();
+    let w = w_with(|_| {}, |_| {});
+    assert_eq!(w.worker.capacity().max_park_ops, defaults.max_park_ops);
+    let mut refused = 0;
+    for n in 0..64u32 {
+        if w.store(1000 + n).is_err() {
+            refused += 1;
+        }
+    }
+    assert_eq!(refused, 0, "parks refused at 8 conversations x 8 chunks");
+    w.resume();
+    w.settle();
 }

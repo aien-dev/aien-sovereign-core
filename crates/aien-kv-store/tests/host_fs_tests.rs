@@ -1382,7 +1382,7 @@ fn apply_env_parses_quota_max_objects_and_slice_and_rejects_garbage() {
     assert_eq!(fresh.quota_bytes, 8 << 30);
     assert_eq!(fresh.max_objects, 65536);
     assert_eq!(fresh.recovery_slice_ms, 50);
-    assert_eq!((fresh.max_restore_ops, fresh.max_park_ops), (48, 16));
+    assert_eq!((fresh.max_restore_ops, fresh.max_park_ops), (48, 64));
     assert_eq!(fresh.max_inflight_bytes, 256 << 20);
     // Garbage and zero are refused, and leave the config unchanged.
     for bad in ["abc", "", "-5", "0", "1.5"] {
