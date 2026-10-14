@@ -99,7 +99,7 @@ jobs:
       - name: Checkout pinned TRN1 contract corpus
         uses: actions/checkout@v4
         with:
-          repository: aien-dev/aien-protocols
+          repository: aien-spark/aien-protocols
           ref: 353b7d4be3f00169545caec1615cffa61f7d311a
           path: trn1-protocols
 

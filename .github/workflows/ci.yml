@@ -141,7 +141,7 @@ jobs:
       - name: Checkout omega at omega.lock
         uses: actions/checkout@v4
         with:
-          repository: aien-dev/omega
+          repository: aien-spark/omega
           ref: ${{ steps.pins.outputs.omega }}
           path: omega
 
@@ -154,14 +154,14 @@ jobs:
       - name: Checkout physics at omega's physics.lock
         uses: actions/checkout@v4
         with:
-          repository: aien-dev/physics
+          repository: aien-spark/physics
           ref: ${{ steps.sub.outputs.physics }}
           path: physics
 
       - name: Checkout aienos at omega's aienos.lock
         uses: actions/checkout@v4
         with:
-          repository: aien-dev/aienos
+          repository: aien-spark/aienos
           ref: ${{ steps.sub.outputs.aienos }}
           path: aienos
 
