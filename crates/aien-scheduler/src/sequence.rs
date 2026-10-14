@@ -1,4 +1,5 @@
 use aien_abi_core::{DecodeObservation, FinishReason, OpEvidence, SamplingParams, SequenceRequest};
+use aien_kv_cache::HOLDER_SLOT;
 use aien_platform::{InferenceWork, KvHandle, ModelHandle, Priority, Ticks};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -196,6 +197,11 @@ pub struct BatchPlan {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SequencePhase {
     Waiting,
+    /// Persistent KV (ADR 0003 section 6.3): queued like `Waiting`, but skipped by
+    /// admission while a restore of its prefix is in flight. Left by
+    /// `admit_restored_prefix` (into `Prefill`) or `release_restore` (back to
+    /// `Waiting`, a plain prefill).
+    AwaitingRestore,
     Prefill,
     PrefillInFlight,
     Decode,
@@ -341,6 +347,19 @@ pub struct SlotEntry {
     pub record: Option<SequenceRecord>,
 }
 
+/// Index for the next new arena slot when `len` slots exist. Slot `u32::MAX`
+/// belongs to storage holders (`aien_kv_cache::HOLDER_SLOT`, ADR 0003 section
+/// 5.2), so the arena refuses to grow into it and the reservation is a rule,
+/// not an assumption about how many sequences a process will ever create.
+pub(crate) fn next_slot_index(len: usize) -> Result<u32, String> {
+    match u32::try_from(len) {
+        Ok(idx) if idx < HOLDER_SLOT => Ok(idx),
+        _ => Err(format!(
+            "sequence arena is full: slot {HOLDER_SLOT} is reserved for storage holders"
+        )),
+    }
+}
+
 /// Central state arena managing active sequence records with slot/generation tracking.
 #[derive(Debug, Default)]
 pub struct SequenceArena {
@@ -411,7 +430,7 @@ impl SequenceArena {
             });
         }
 
-        let slot_idx = self.slots.len() as u32;
+        let slot_idx = next_slot_index(self.slots.len())?;
         let generation = 1; // Generation 0 is invalid
         self.slots.push(SlotEntry {
             generation,
@@ -475,6 +494,13 @@ impl SequenceArena {
         let slot_idx = seq_id.slot;
         if seq_id.generation == 0 {
             return Err("Generation zero is strictly invalid".to_string());
+        }
+        // Checked before the arena grows to fit: slot `u32::MAX` is the storage
+        // holder slot, and growing towards it would allocate billions of entries.
+        if slot_idx == HOLDER_SLOT {
+            return Err(format!(
+                "slot {slot_idx} is reserved for storage holders and cannot hold a sequence"
+            ));
         }
         while (slot_idx as usize) >= self.slots.len() {
             let next = self.slots.len() as u32;
@@ -836,6 +862,39 @@ mod tests {
         let child = arena.get(child_id).unwrap();
         assert_eq!(child.branch_parent, Some(parent_id));
         assert!(Arc::ptr_eq(&child.prompt, &handle));
+    }
+
+    #[test]
+    fn explicit_ids_in_the_holder_slot_are_refused_without_growing_the_arena() {
+        let mut arena = SequenceArena::new();
+        let holder_shaped = SequenceId::new(HOLDER_SLOT, 3).unwrap();
+        let handle: PromptHandle = Arc::from(vec![1u32, 2].into_boxed_slice());
+        let err = arena
+            .insert_with_id(
+                holder_shaped,
+                handle,
+                ModelHandle(0),
+                KvHandle(0),
+                Priority::Normal,
+                None,
+                None,
+                1,
+                SamplingParams::default(),
+                None,
+            )
+            .unwrap_err();
+        assert!(err.contains("reserved for storage holders"), "{err}");
+        assert_eq!(arena.active_count(), 0);
+        assert!(arena.is_stale(holder_shaped));
+    }
+
+    #[test]
+    fn next_slot_index_stops_below_the_holder_slot() {
+        // Slot u32::MAX is reserved for storage holders (ADR 0003 section 5.2).
+        assert_eq!(next_slot_index(0), Ok(0));
+        assert_eq!(next_slot_index(u32::MAX as usize - 1), Ok(u32::MAX - 1));
+        assert!(next_slot_index(u32::MAX as usize).is_err());
+        assert!(next_slot_index(u32::MAX as usize + 1).is_err());
     }
 
     #[test]
