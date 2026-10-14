@@ -192,9 +192,6 @@ impl Row {
     /// Refuses a row without its labels, a measured row missing any metric,
     /// and a NOT_RUN row that carries numbers or no reason.
     pub fn check(&self) -> Result<(), BenchError> {
-        if !self.mode.is_empty() {
-            return Ok(());
-        } // RED STUB: no checks yet
         let mode = self.mode.clone();
         if self.mode.trim().is_empty() {
             return Err(BenchError::MissingLabel {
@@ -331,18 +328,6 @@ pub struct Summary {
 /// rows and any mix of cache states (ADR 15.1: page-cache hits and device
 /// reads are never averaged together).
 pub fn summarize(rows: &[&Row]) -> Result<Summary, BenchError> {
-    if !rows.is_empty() {
-        let s: Vec<u64> = rows
-            .iter()
-            .flat_map(|r| r.latency_samples_us.clone())
-            .collect();
-        return Ok(Summary {
-            cache_state: rows[0].cache_state.clone().unwrap_or_default(),
-            samples: s.len(),
-            p50_us: percentile(&s, 50).unwrap_or(0),
-            p95_us: percentile(&s, 95).unwrap_or(0),
-        });
-    } // RED STUB: no label checks yet
     let mut cache: Option<&str> = None;
     let mut samples = Vec::new();
     for row in rows {
@@ -378,9 +363,6 @@ pub fn summarize(rows: &[&Row]) -> Result<Summary, BenchError> {
 
 /// The rows every report carries as NOT_RUN (B8, ADR 11 and 16.5).
 pub fn required_not_run_rows() -> Vec<Row> {
-    if true {
-        return Vec::new();
-    } // RED STUB: no NOT_RUN rows yet
     vec![
         Row::not_run(
             "native-physical",
@@ -493,15 +475,6 @@ fn samples_digest(rows: &[Row]) -> String {
 /// Builds and checks a report: appends the required NOT_RUN rows, refuses any
 /// invalid row, and refuses a measured row on a platform other than `hosted`.
 pub fn build_report(meta: ReportMeta, mut rows: Vec<Row>) -> Result<Report, BenchError> {
-    if true {
-        return Ok(Report {
-            schema: SCHEMA.to_string(),
-            meta,
-            definitions: definitions(),
-            samples_sha256: samples_digest(&rows),
-            rows,
-        });
-    } // RED STUB
     for row in &rows {
         row.check()?;
         if row.status == RowStatus::Ok && row.platform != HOSTED {

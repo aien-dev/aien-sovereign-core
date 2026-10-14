@@ -23,6 +23,9 @@ use std::time::{Duration, Instant};
 /// The vocabulary of the reference test model; every token id is below it.
 pub const VOCAB: u32 = 97;
 
+/// A stop id the model can never produce.
+const NO_EOS: u32 = u32::MAX;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
     ResidentOnly,
@@ -100,7 +103,10 @@ pub fn model_config(block_size: usize, max_sequence_length: usize) -> ModelConfi
         rope_theta: 10000.0,
         rope_scaling: None,
         tie_word_embeddings: false,
-        eos_token_ids: Vec::new(),
+        // Never emitted (above the vocabulary): every request runs to its
+        // max_tokens, so rows compare equal work (an empty list would use
+        // the legacy stop ids, which the reference weights do emit).
+        eos_token_ids: vec![NO_EOS],
         qk_norm: false,
     }
 }

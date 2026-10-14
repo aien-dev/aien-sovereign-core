@@ -239,3 +239,48 @@ fn bench_records_not_run_rows_for_native_physical() {
         "a measured native physical row from a host run is refused"
     );
 }
+
+/// The measuring path end to end on a small row (not a CUTS red test): the
+/// restore row really restores through the host store and the daemon wiring,
+/// the cold row restores nothing, and both rows pass the contract.
+#[tokio::test]
+async fn small_rows_measure_through_the_runtime_and_restore_from_the_host_store() {
+    use aien_kv_bench::run::{run_row, Mode, RunSpec};
+    let root = std::env::temp_dir().join(format!("pkv-c9-rows-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let spec = RunSpec {
+        modes: vec![Mode::ColdPrefill, Mode::RestorePageCache],
+        concurrency: vec![2],
+        prompt_tokens: vec![80],
+        rounds: 2,
+        turn1_max_tokens: 4,
+        turn2_suffix_tokens: 8,
+        turn2_max_tokens: 4,
+        block_size: 16,
+        chunk_blocks: 2,
+        store_root: root.clone(),
+    };
+    let restore = run_row(&spec, Mode::RestorePageCache, 2, 80)
+        .await
+        .expect("restore row");
+    restore.check().expect("restore row valid");
+    assert_eq!(restore.completed_requests, Some(4));
+    assert_eq!(restore.cache_state.as_deref(), Some("page_cache"));
+    // Turn 1 computes 80 + 4 - 1 = 83 tokens: two full 32-token chunks per
+    // conversation, restored by each of the 4 measured turn-2 requests.
+    assert_eq!(restore.restored_tokens, Some(4 * 64));
+    assert!(restore.peak_holder_bytes.unwrap() > 0, "park holders seen");
+    assert!(restore.peak_staging_bytes.unwrap() > 0);
+
+    let cold = run_row(&spec, Mode::ColdPrefill, 2, 80)
+        .await
+        .expect("cold row");
+    cold.check().expect("cold row valid");
+    assert_eq!(cold.restored_tokens, Some(0));
+    assert_eq!(cold.queue_depth, Some(0));
+    assert!(
+        run_row(&spec, Mode::RestoreDevice, 1, 80).await.is_err(),
+        "the device mode is never measured"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
