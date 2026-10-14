@@ -359,7 +359,16 @@ fn build(spec: &RunSpec, mode: Mode, c: u32, prompt: u32) -> Result<Bench, Strin
         if dir.exists() {
             std::fs::remove_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
         }
-        std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+        // The host store refuses a root group or others can reach (ADR 0003
+        // section 19), so the run directory is created 0700.
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            std::fs::DirBuilder::new()
+                .recursive(true)
+                .mode(0o700)
+                .create(&dir)
+                .map_err(|e| format!("{}: {e}", dir.display()))?;
+        }
         let dir_s = dir.to_string_lossy().to_string();
         let chunk = spec.chunk_blocks.to_string();
         let restore_max = total_blocks.to_string();
