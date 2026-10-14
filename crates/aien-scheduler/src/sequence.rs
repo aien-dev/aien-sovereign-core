@@ -288,9 +288,26 @@ impl SequenceRecord {
         }
     }
 
+    /// Tokens a prefill of this sequence must compute: the prompt, then every
+    /// token generated before a preemption (or a prefill-gate refusal) dropped
+    /// its K/V. A fresh request has no generated tokens, so this is the prompt.
+    /// A resumed sequence is prefilled through its newest generated token, so
+    /// the sample after the last chunk is the next new token and no token is
+    /// emitted twice.
+    pub fn prefill_input(&self) -> Vec<u32> {
+        let mut input = Vec::with_capacity(self.prefill_input_len());
+        input.extend_from_slice(&self.prompt);
+        input.extend_from_slice(&self.generated_tokens);
+        input
+    }
+
+    /// Length of [`Self::prefill_input`] without building it.
+    pub fn prefill_input_len(&self) -> usize {
+        self.prompt.len() + self.generated_tokens.len()
+    }
+
     pub fn remaining_prefill_tokens(&self) -> usize {
-        self.prompt
-            .len()
+        self.prefill_input_len()
             .saturating_sub(self.prompt_tokens_prefilled)
     }
 

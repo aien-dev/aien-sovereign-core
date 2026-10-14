@@ -78,6 +78,12 @@ pub struct AienScheduler {
     completion_router: CompletionRouter,
     waiting_queue: VecDeque<SequenceId>,
     preempted_queue: VecDeque<SequenceId>,
+    /// Sequences whose K/V this scheduler freed while they stay live (watermark
+    /// preemption, a failed append, a prefill-gate refusal). The backend still
+    /// holds their per-sequence state (positions, dense caches, a held sample),
+    /// which would make the re-prefill start at a stale position. `step` drops
+    /// that state through `release_sequence` before the next `execute_step`.
+    pending_backend_releases: Vec<SequenceId>,
     running_sequences: Vec<SequenceId>,
     step_id: u64,
     metrics: SchedulerMetrics,
@@ -95,6 +101,7 @@ impl AienScheduler {
             completion_router: CompletionRouter::new(),
             waiting_queue: VecDeque::new(),
             preempted_queue: VecDeque::new(),
+            pending_backend_releases: Vec::new(),
             running_sequences: Vec::new(),
             step_id: 0,
             metrics: SchedulerMetrics::default(),
@@ -147,6 +154,16 @@ impl AienScheduler {
 
     pub fn preempted_count(&self) -> usize {
         self.preempted_queue.len()
+    }
+
+    /// Takes the ids whose backend per-sequence state must be dropped through
+    /// `AienInferenceBackend::release_sequence` before the next `execute_step`
+    /// (see `pending_backend_releases`). `step` does this itself; a driver that
+    /// executes `build_scheduled_batch` or `build_batch_plan` on its own must
+    /// call it and release each id, or a resumed sequence computes at stale
+    /// positions.
+    pub fn take_pending_backend_releases(&mut self) -> Vec<SequenceId> {
+        std::mem::take(&mut self.pending_backend_releases)
     }
 
     pub fn running_count(&self) -> usize {
@@ -490,6 +507,7 @@ impl AienScheduler {
                         }
                         self.running_sequences.remove(pos);
                         let _ = self.kv_manager.write().free_sequence(preempt_id.to_u64());
+                        self.pending_backend_releases.push(preempt_id);
                         if let Some(rec) = self.arena.get_mut(preempt_id) {
                             rec.phase = SequencePhase::Preempted;
                             rec.prompt_tokens_prefilled = 0;
@@ -570,7 +588,7 @@ impl AienScheduler {
                 }
             } else {
                 // Continuing chunked prefill
-                let total_prompt_len = seq.prompt.len();
+                let total_prompt_len = seq.prefill_input_len();
                 let remaining = total_prompt_len.saturating_sub(seq.prompt_tokens_prefilled);
                 let chunk_size = std::cmp::min(remaining, self.config.prefill_chunk_size);
                 let chunk_size = std::cmp::min(chunk_size, prefill_budget);
@@ -578,7 +596,7 @@ impl AienScheduler {
                 if chunk_size > 0 {
                     let start = seq.prompt_tokens_prefilled;
                     let end = start + chunk_size;
-                    let chunk_tokens = seq.prompt[start..end].to_vec();
+                    let chunk_tokens = seq.prefill_input()[start..end].to_vec();
 
                     let chunk_req = SequenceRequest {
                         request_id: seq_id.to_u64(),
@@ -621,6 +639,7 @@ impl AienScheduler {
             }
             self.running_sequences.retain(|&x| x != seq_id);
             let _ = self.kv_manager.write().free_sequence(seq_id.to_u64());
+            self.pending_backend_releases.push(seq_id);
             self.waiting_queue.push_front(seq_id);
         }
 
@@ -657,7 +676,7 @@ impl AienScheduler {
                 }
 
                 let prompt_len = match self.arena.get(next_seq_id) {
-                    Some(s) => s.prompt.len(),
+                    Some(s) => s.prefill_input_len(),
                     None => {
                         if let Some(t) = trace.as_mut() {
                             t.alternatives
@@ -821,7 +840,7 @@ impl AienScheduler {
                 let assigned_blocks = self
                     .kv_manager
                     .write()
-                    .allocate_sequence(next_seq_id.to_u64(), &seq.prompt)?;
+                    .allocate_sequence(next_seq_id.to_u64(), &seq.prefill_input())?;
                 self.kv_manager
                     .write()
                     .mark_prefill_pending(next_seq_id.to_u64())
@@ -830,7 +849,7 @@ impl AienScheduler {
                 let new_blocks = assigned_blocks.len();
                 block_tables.insert(next_seq_id.to_u64(), assigned_blocks);
 
-                let chunk_tokens = seq.prompt[0..chunk_size].to_vec();
+                let chunk_tokens = seq.prefill_input()[0..chunk_size].to_vec();
                 let chunk_req = SequenceRequest {
                     request_id: next_seq_id.to_u64(),
                     prompt_tokens: chunk_tokens,
@@ -1006,9 +1025,16 @@ impl AienScheduler {
         &mut self,
         backend: &mut (dyn AienInferenceBackend + '_),
     ) -> Result<Option<(Vec<DecodeOutput>, StepMetrics)>, String> {
-        let batch = match self.build_scheduled_batch()? {
-            Some(b) => b,
-            None => return Ok(None),
+        let batch = self.build_scheduled_batch()?;
+        // Sequences preempted (or sent back for a fresh prefill) since the last
+        // step: their KV is freed and no step is executing, so the backend may
+        // drop its per-sequence state now. Done before `execute_step`, so a
+        // resumed sequence is prefilled from position 0, not a stale one.
+        for seq_id in self.take_pending_backend_releases() {
+            backend.release_sequence(seq_id.to_u64())?;
+        }
+        let Some(batch) = batch else {
+            return Ok(None);
         };
 
         let t0 = Instant::now();
@@ -1021,7 +1047,7 @@ impl AienScheduler {
                 if let Some(seq) = self.arena.get_mut(seq_id) {
                     if !seq.is_prefilled {
                         seq.prompt_tokens_prefilled += prefill_req.prompt_tokens.len();
-                        if seq.prompt_tokens_prefilled >= seq.prompt.len() {
+                        if seq.prompt_tokens_prefilled >= seq.prefill_input_len() {
                             seq.is_prefilled = true;
                             seq.phase = SequencePhase::Decode;
                             // PREFILL-GATE completion fence: execute_step returned Ok
@@ -1095,6 +1121,7 @@ impl AienScheduler {
                             let finished_sink = self.arena.get(seq_id).and_then(|seq| seq.sink_id);
                             if finish_reason == FinishReason::Preempted {
                                 let _ = self.kv_manager.write().free_sequence(request_id);
+                                self.pending_backend_releases.push(seq_id);
                                 if let Some(seq) = self.arena.get_mut(seq_id) {
                                     seq.phase = SequencePhase::Preempted;
                                     seq.prompt_tokens_prefilled = 0;
@@ -1454,6 +1481,10 @@ mod tests {
             .get_block_table(id)
             .unwrap()
             .is_prefill_ready());
+        // The step that completed the prefill also sampled (and emitted) the
+        // first token, so the sequence now carries one generated token.
+        let generated = scheduler.arena.get(seq).unwrap().generated_tokens.clone();
+        assert_eq!(generated.len(), 1, "prefill completion samples one token");
 
         // Counterexample: the running sequence's table is replaced by an
         // allocated-but-uncomputed one. It must be prefilled again, not decoded.
@@ -1467,9 +1498,52 @@ mod tests {
             !batch.decode_requests.contains(&id),
             "PREFILL_GATE_VIOLATION: running sequence decoded over an uncomputed table"
         );
+        // The re-prefill covers the prompt and the already-emitted token, so the
+        // next sample is a new token. Prompt-only would re-sample and re-emit it.
+        let expected: Vec<u32> = prompt.iter().copied().chain(generated).collect();
         assert!(batch
             .prefill_requests
             .iter()
-            .any(|r| r.request_id == id && r.prompt_tokens == prompt));
+            .any(|r| r.request_id == id && r.prompt_tokens == expected));
+    }
+
+    #[test]
+    fn test_prefill_gate_reprefill_without_generated_tokens_is_exactly_the_prompt() {
+        // A sequence refused by the gate before it generated anything must be
+        // re-prefilled with exactly its prompt, nothing more.
+        let kv_manager = create_shared_kv_manager(64, 16);
+        let mut scheduler = AienScheduler::new(SchedulerConfig::default(), kv_manager.clone());
+
+        let root = SequenceId::new(1, 1).unwrap().to_u64();
+        let child = SequenceId::new(2, 1).unwrap().to_u64();
+        let prompt: Vec<u32> = (0..20).collect();
+        {
+            let mut kv = kv_manager.write();
+            kv.allocate_sequence(root, &prompt).unwrap();
+            kv.mark_prefill_pending(root).unwrap();
+            kv.complete_prefill(root).unwrap();
+            kv.fork_prefilled(root, child).unwrap();
+        }
+        let seq = scheduler.submit_request(gate_request(child, prompt.clone(), 4));
+        let batch = scheduler.build_scheduled_batch().unwrap().unwrap();
+        assert!(batch.decode_requests.contains(&child));
+        assert!(scheduler
+            .arena
+            .get(seq)
+            .unwrap()
+            .generated_tokens
+            .is_empty());
+
+        {
+            let mut kv = kv_manager.write();
+            kv.free_sequence(child).unwrap();
+            kv.allocate_sequence(child, &prompt).unwrap();
+        }
+        let batch = scheduler.build_scheduled_batch().unwrap().unwrap();
+        assert!(!batch.decode_requests.contains(&child));
+        assert!(batch
+            .prefill_requests
+            .iter()
+            .any(|r| r.request_id == child && r.prompt_tokens == prompt));
     }
 }
