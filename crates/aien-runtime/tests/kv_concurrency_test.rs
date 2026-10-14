@@ -955,6 +955,79 @@ async fn duplicate_restore_requests_share_one_load() {
     assert_refcounts_match_tables(&r, &[], "end");
 }
 
+/// Late attach (C8 surviving mutant): the second request arrives only after
+/// the first request's loads were dispatched to the store and are held there.
+/// It attaches to the in-flight loads (never a third read), both requests get
+/// the cold greedy output, and the attached-waiter count on each landing is
+/// released with the terminals: no landing is left behind.
+#[tokio::test]
+async fn late_attach_after_dispatch_shares_the_load_and_releases_its_landing() {
+    let mut r = rig();
+    let prefix = park_prefix(&mut r, &prompt_a()).await;
+    let q_prompt = with_suffix(&prefix, &[13, 29, 51]);
+    let reads_before = st(&r).fake.stats().reads;
+    let loads_before = st(&r).gate.seen_count(Kind::Load);
+    // The park run itself was a plain prefill (counted as a fallback).
+    let fallback_before = status(&r).stats.restore_fallback_prefill_total;
+
+    st(&r).gate.hold_loads.store(true, Ordering::SeqCst);
+    let a = submit(&mut r, &q_prompt, 4);
+    assert_eq!(state_of(&r, a), ResidencyState::Restoring);
+    // Both loads are at the store (held) before b exists.
+    wait_held(&r, Kind::Load, 2);
+    assert_eq!(status(&r).stats.restore_coalesced_total, 0);
+    assert_eq!(
+        status(&r).landing_waiters,
+        2,
+        "one waiter (the opener) per in-flight load"
+    );
+
+    let b = submit(&mut r, &q_prompt, 4);
+    assert_eq!(state_of(&r, b), ResidencyState::Restoring);
+    let s = status(&r).stats;
+    assert_eq!(s.restore_coalesced_total, 2, "b attached late to a's loads");
+    assert_eq!(st(&r).worker.stats().coalesced_total, 2);
+    assert_eq!(
+        st(&r).gate.seen_count(Kind::Load) - loads_before,
+        2,
+        "no new load for b"
+    );
+    assert_eq!(
+        status(&r).landing_waiters,
+        4,
+        "the late attach adds one waiter to each of the two loads"
+    );
+
+    st(&r).gate.release(Kind::Load);
+    st(&r).gate.hold_loads.store(false, Ordering::SeqCst);
+    step_until(&mut r, "both finished, parks terminal", 300, |r| {
+        finished(r, a) && finished(r, b) && status(r).parking_jobs == 0
+    })
+    .await;
+
+    assert_eq!(
+        st(&r).fake.stats().reads - reads_before,
+        2,
+        "one read per chunk"
+    );
+    let want = cold(&q_prompt, 4).await;
+    assert_eq!(toks(&r, a), want);
+    assert_eq!(toks(&r, b), want);
+    let s = status(&r).stats;
+    assert_eq!(s.restore_committed_total, 2);
+    assert_eq!(
+        s.restore_fallback_prefill_total, fallback_before,
+        "neither fell back"
+    );
+    assert_eq!(
+        status(&r).landing_waiters,
+        0,
+        "every landing released once its opener and its late waiter saw a terminal"
+    );
+    assert_eq!(st(&r).worker.stats().stale_completions_total, 0);
+    assert_refcounts_match_tables(&r, &[], "end");
+}
+
 /// Review finding 6 (ADR 7.3): coalescing happens at the landing buffer, never
 /// at the request table. Two requests with the same stored prefix and
 /// different suffixes share the prefix blocks by reference count, each owns

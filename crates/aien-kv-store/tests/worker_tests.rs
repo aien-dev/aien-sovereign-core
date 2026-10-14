@@ -609,6 +609,85 @@ fn worker_coalesces_same_key_loads_into_one_io() {
     assert!(matches!(t, LoadTicket::Started(_)));
 }
 
+/// A waiter that attaches late, after the load is already dispatched to the
+/// store (held there), rides the same job: it gets its own terminal with the
+/// landing holder, it is counted against `max_waiters_total` while the job is
+/// in flight, and the count is released when the job closes.
+#[test]
+fn worker_late_attach_after_dispatch_is_counted_and_released() {
+    let (a, b, c, d) = (
+        Incarnation::seq(10),
+        Incarnation::seq(11),
+        Incarnation::seq(12),
+        Incarnation::seq(13),
+    );
+    let w = w_with(|_| {}, |wc| wc.max_waiters_total = 1);
+    let k = w.inject(10);
+    let (_, h) = w.chunk(10);
+    let mem = Mem::new(2, 0xEE);
+    w.fake.script(JobScript::fault(Fault::Hold));
+    let job = w
+        .worker
+        .submit_load_coalesced(k, &h, || mem.dest(2).0, a)
+        .unwrap()
+        .job();
+    w.resume();
+    wait_for("dispatch", || w.dispatched(job));
+    assert_eq!(w.probe.submitted(), vec!['L'], "the store holds the load");
+    assert_eq!(w.worker.capacity().restore_ops, 1);
+
+    // Late attach: the job is at the store, not in the worker queue.
+    assert_eq!(w.worker.attach_waiter(job, b), Ok(()));
+    assert_eq!(
+        w.worker.attach_waiter(job, c),
+        Err(PlatformError::QueueFull),
+        "the late waiter is counted: the total bound of one is reached"
+    );
+    assert_eq!(w.worker.stats().attach_refused_total, 1);
+    assert_eq!(w.worker.capacity().restore_ops, 1, "still one job");
+
+    assert!(w.fake.release(job), "the held load starts");
+    let v = w.collect(2);
+    let t = terminals(&v);
+    assert_eq!(t.len(), 2, "one terminal per waiter: {v:?}");
+    let mut incs: Vec<Incarnation> = t.iter().map(|x| x.incarnation).collect();
+    incs.sort();
+    assert_eq!(
+        incs,
+        vec![a, b],
+        "the opener and the late waiter, once each"
+    );
+    assert!(t.iter().all(|x| x.job == job));
+    assert!(t
+        .iter()
+        .all(|x| x.terminal == Some(Terminal::Done(JobStage::Completed))));
+    assert!(
+        t.iter().all(|x| x.holder.is_some()),
+        "every waiter of a completed load gets the landing holder"
+    );
+    assert_eq!(w.fake.stats().reads, 1, "one read of the object");
+    assert_eq!(mem.bytes(), pattern(10, PAYLOAD as usize));
+    assert_eq!(w.worker.load_in_flight(&k), None);
+
+    // The count is released with the job: a fresh load takes one waiter again.
+    let mem2 = Mem::new(2, 0xEE);
+    let job2 = w
+        .worker
+        .submit_load_coalesced(k, &h, || mem2.dest(2).0, c)
+        .unwrap();
+    let LoadTicket::Started(job2) = job2 else {
+        panic!("a fresh load after the first closed: {job2:?}");
+    };
+    assert_eq!(
+        w.worker.attach_waiter(job2, d),
+        Ok(()),
+        "the late waiter's count was released when its job closed"
+    );
+    let v = w.collect(2);
+    assert_eq!(terminals(&v).len(), 2);
+    assert_eq!(w.worker.stats().attach_refused_total, 1);
+}
+
 #[test]
 fn worker_cancel_removes_only_own_waiter() {
     // Queued, three requests: the opener and one follower withdraw, the third
