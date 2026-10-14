@@ -977,7 +977,6 @@ fn sustained_restores_cannot_starve_parks() {
     for n in 1..=32 {
         w.inject(n);
     }
-    w.resume();
     let mut restores = 0u64;
     let mut restore_refusals = 0u64;
     let mut parks = 0u64;
@@ -996,6 +995,9 @@ fn sustained_restores_cannot_starve_parks() {
             Ok(_) => restores += 1,
             Err(PlatformError::QueueFull) => {
                 restore_refusals += 1;
+                if restore_refusals == 1 {
+                    w.resume();
+                }
                 thread::yield_now();
             }
             Err(e) => panic!("{e:?}"),
