@@ -105,6 +105,14 @@ pkv_begin() {
 
 server_pid() { [ -f "$PIDF" ] && cat "$PIDF"; }
 
+# Exits the run if anything still owns our port after a stop: never start the next server
+# beside a leftover one (two 30 GB loads on the chip).
+port_released() {
+	for _ in $(seq 1 50); do ss -Hltn "sport = :$PORT" | grep -q . || return 0; sleep 0.2; done
+	echo "something still listens on :$PORT after the stop; stopping the run" >&2
+	exit 1
+}
+
 # Stops our server: SIGTERM (graceful drain, #509), SIGKILL after PKV_STOP_WAIT_S (default 120).
 stop_server() {
 	[ -n "${PIDF:-}" ] && [ -f "$PIDF" ] || return 0
@@ -119,6 +127,7 @@ stop_server() {
 		fi
 	fi
 	rm -f "$PIDF"
+	port_released
 }
 
 # kill -9 our server now (the interrupted-write case).
@@ -130,6 +139,7 @@ kill9_server() {
 		for _ in $(seq 1 100); do kill -0 "$p" 2>/dev/null || break; sleep 0.1; done
 	fi
 	rm -f "$PIDF"
+	port_released
 }
 
 # start_server <log-name> <store-dir | - (unset) | nokey:<dir> | badkey:<dir> | foreignkey:<dir>> [flags...]
@@ -165,6 +175,15 @@ start_server() {
 		sleep 1
 	done
 	grep -q "serving " "$log" || { echo "server $name did not start; see $log" >&2; exit 1; }
+	# The PID file can hold a wrapper, not the server: atlas-vault re-wraps the command in its own
+	# `sh -c "..."`, which expands $$ to the wrapper. Record the process that owns our port.
+	local lp
+	lp=$(ss -Hltnp "sport = :$PORT" | grep -o 'pid=[0-9]*' | head -1 | cut -d= -f2)
+	if [ -z "$lp" ] || [ "$(ps -o comm= -p "$lp" 2>/dev/null || true)" != aien-serve-http ]; then
+		echo "server $name: no aien-serve-http owns :$PORT" >&2
+		exit 1
+	fi
+	echo "$lp" >"$PIDF"
 	grep "persistent KV" "$log" || true
 }
 
