@@ -2,7 +2,7 @@
 
 **Status: FROZEN 2026-10-11 (content: rows, thresholds, tasks, limits, scoring, model, product commit). NOT RUN.**
 
-Owning issue: aien-dev/aien-sovereign-core#384 (lane L10, Drake ruling 2 of 2026-10-10 on aien-architecture#190: Qwen3-4B-Instruct-2507
+Owning issue: aien-spark/aien-sovereign-core#384 (lane L10, Drake ruling 2 of 2026-10-10 on aien-architecture#190: Qwen3-4B-Instruct-2507
 is the public-release candidate, conditional on a frozen qualification PASS; a FAIL blocks the public bundle; no silent substitution).
 Written by Lane B of the overnight program (coordinator session 61b069). This file is merged before any v6 launch.
 

@@ -136,7 +136,7 @@ Out of scope: frontier feeders (9), actual clean-room physics worlds (11), self-
 ## 16. Ownership (amendment 3)
 
 - `crumbs` (this crate, aien-sovereign-core `crates/crumbs`): contracts, identities, generators, mixer, verifier contract, protocol, trace schema, promotion evidence, ledger. It knows nothing of Omega internals and depends only on BLAKE3, UUID and serde.
-- `omega` (aien-dev/omega): the consumer adapter. `build/crumbline-learner` reads Crumb v1 bytes, runs Omega synthesis, submits CPG1 candidates, stores admitted operations in the OmegaLibrary.
+- `omega` (aien-spark/omega): the consumer adapter. `build/crumbline-learner` reads Crumb v1 bytes, runs Omega synthesis, submits CPG1 candidates, stores admitted operations in the OmegaLibrary.
 - `crumb-spec`, `spark-crumbs`: untouched.
 
 ## 17. Open questions resolved at acceptance
