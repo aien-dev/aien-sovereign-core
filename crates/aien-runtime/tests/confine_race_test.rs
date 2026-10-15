@@ -10,10 +10,10 @@
 mod home_guard;
 
 use aien_omega_compose::hex;
+use aien_runtime::compose::{ComposeBridge, ComposeProposer, Generation};
 use aien_runtime::control::{ComposeNoteReport, ComposeTaskReport, ControlResponse};
 use aien_runtime::effects::test_hooks;
 use aien_runtime::effects::{self, IntentRequest, MintRequest};
-use aien_runtime::spine::{ComposeBridge, ComposeProposer, Generation};
 use sha2::{Digest, Sha256};
 use std::path::PathBuf;
 use std::sync::Arc;

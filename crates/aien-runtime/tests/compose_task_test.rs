@@ -4,18 +4,27 @@
 //! With librx_compose.a linked (aien-omega-compose built with
 //! AIEN_OMEGA_COMPOSE_DIR, see its README) these run the real composition;
 //! in a stub build they check that the bridge reports the missing library.
+//!
+//! The retry loop, the budgets and the task kind are observed through
+//! `ComposeBridge::run_task` (tests/support/compose_harness.rs): the prompt and
+//! time limit each model call is handed, which proposer was asked, and the
+//! report. The rules under a short injected budget are in
+//! compose_budget_test.rs; the budget settings themselves in compose_env_test.rs.
+#[path = "support/compose_harness.rs"]
+mod compose_harness;
 #[path = "support/home_guard.rs"]
 mod home_guard;
 
 use aien_runtime::control::{ComposeRecallReport, ComposeTaskReport, ControlResponse};
-use aien_runtime::spine::{
-    check_file_proposal, compose_attempt_budget, parse_compose_budget,
-    parse_compose_doc_max_tokens, parse_file_proposal, propose_with_retries, wall_clock_reason,
-    ComposeBridge, ComposeBudgets, ComposeProposer, Generation, ProposalKind,
-    COMPOSE_ATTEMPT_BUDGET, COMPOSE_DOC_BUDGET, COMPOSE_MAX_ATTEMPTS, COMPOSE_SKILL_BUDGET,
-    COMPOSE_WAIT_MARGIN,
+use aien_runtime::{
+    check_file_proposal, parse_file_proposal, ComposeBridge, ComposeProposer, Generation,
 };
+use compose_harness::{reply, Asked, Harness};
 use std::sync::Arc;
+use std::time::Duration;
+
+/// A goal that names no destination: the model names the file.
+const NO_DEST_GOAL: &str = "remember the constraints and propose one change";
 
 fn proposer() -> ComposeProposer {
     Arc::new(|prompt: &str, _limit: std::time::Duration| {
@@ -315,148 +324,128 @@ z
 }
 
 #[test]
+#[cfg_attr(not(compose_linked), ignore = "needs librx_compose.a: stub build")]
 fn retry_is_capped_and_recorded() {
-    use std::sync::atomic::{AtomicU32, Ordering};
-    use std::time::Duration;
-    let budget = Duration::from_secs(25);
-    // never parses: exactly COMPOSE_MAX_ATTEMPTS calls, all refused
-    let calls = AtomicU32::new(0);
-    let chatty = |_: &str, _: Duration| {
-        calls.fetch_add(1, Ordering::SeqCst);
-        Ok(Generation {
-            text: "Sure!".into(),
-            tokens: 2,
-            finish_reason: None,
-            ..Default::default()
-        })
+    let _home = home_guard::home_slot();
+    let chatty = |text: &'static str, tokens: usize| {
+        move |_: usize, _: &str, _: Duration| {
+            Ok(Generation {
+                text: text.into(),
+                tokens,
+                finish_reason: None,
+                ..Default::default()
+            })
+        }
     };
-    let (out, a) = propose_with_retries(
-        &chatty,
-        "base",
-        budget,
-        COMPOSE_ATTEMPT_BUDGET,
-        COMPOSE_MAX_ATTEMPTS,
-    );
-    assert!(out.unwrap_err().contains("no filename line"));
-    assert_eq!(calls.load(Ordering::SeqCst), COMPOSE_MAX_ATTEMPTS);
-    assert_eq!(a.len(), 3);
-    assert!(a
-        .iter()
-        .all(|x| x.outcome == "refused" && x.tokens == 2 && x.text_sha256.is_some()));
-    assert_eq!(
-        a.iter().map(|x| x.attempt).collect::<Vec<_>>(),
-        vec![1, 2, 3]
-    );
+    // never parses: exactly 3 calls, all refused
+    {
+        let h = Harness::new(Arc::new(chatty("Sure!", 2)));
+        let r = h.run(NO_DEST_GOAL).unwrap();
+        assert!(r
+            .proposer_error
+            .as_deref()
+            .unwrap()
+            .contains("no filename line"));
+        assert!(r.proposal.is_none() && !r.committed, "{r:?}");
+        assert_eq!(h.calls().len(), 3);
+        let a = &r.proposal_attempts;
+        assert_eq!(a.len(), 3);
+        assert!(a
+            .iter()
+            .all(|x| x.outcome == "refused" && x.tokens == 2 && x.text_sha256.is_some()));
+        assert_eq!(
+            a.iter().map(|x| x.attempt).collect::<Vec<_>>(),
+            vec![1, 2, 3]
+        );
+    }
     // second attempt parses: stops there, and the retry prompt names the refusal
-    let prompts = parking_lot::Mutex::new(Vec::<String>::new());
-    let second = |p: &str, _: Duration| {
-        prompts.lock().push(p.to_string());
-        let text = if prompts.lock().len() == 1 {
-            "Sure!"
-        } else {
-            "filename: a.txt
-ok
-"
-        };
-        Ok(Generation {
-            text: text.into(),
-            tokens: 3,
-            finish_reason: None,
-            ..Default::default()
-        })
-    };
-    let (out, a) = propose_with_retries(
-        &second,
-        "base",
-        budget,
-        COMPOSE_ATTEMPT_BUDGET,
-        COMPOSE_MAX_ATTEMPTS,
-    );
-    assert_eq!(
-        out.unwrap(),
-        "filename: a.txt
-ok
-"
-    );
-    assert_eq!(a.len(), 2);
-    assert_eq!(
-        (a[0].outcome.as_str(), a[1].outcome.as_str()),
-        ("refused", "parsed")
-    );
-    let p = prompts.lock();
-    assert_eq!(p[0], "base");
-    assert!(
-        p[1].starts_with(
-            "base
-"
-        ) && p[1].contains("previous answer was refused")
-    );
-    drop(p);
-    // budget: attempt 2 does not start when less than the per-attempt budget is left
-    let slow = |_: &str, _: Duration| {
-        std::thread::sleep(Duration::from_millis(30));
-        Ok(Generation {
-            text: "Sure!".into(),
-            tokens: 2,
-            finish_reason: None,
-            ..Default::default()
-        })
-    };
-    let (out, a) = propose_with_retries(
-        &slow,
-        "base",
-        Duration::from_millis(40),
-        Duration::from_millis(30),
-        COMPOSE_MAX_ATTEMPTS,
-    );
-    assert_eq!(a.len(), 1);
-    assert!(out.unwrap_err().contains("no attempt 2"));
+    {
+        let h = Harness::new(Arc::new(|n, _: &str, _: Duration| {
+            Ok(Generation {
+                text: if n == 1 {
+                    "Sure!"
+                } else {
+                    "filename: a.txt\nok\n"
+                }
+                .into(),
+                tokens: 3,
+                finish_reason: None,
+                ..Default::default()
+            })
+        }));
+        let r = h.run(NO_DEST_GOAL).unwrap();
+        assert_eq!(
+            r.proposal.as_deref(),
+            Some("filename: a.txt\nok\n"),
+            "{r:?}"
+        );
+        let a = &r.proposal_attempts;
+        assert_eq!(a.len(), 2);
+        assert_eq!(
+            (a[0].outcome.as_str(), a[1].outcome.as_str()),
+            ("refused", "parsed")
+        );
+        let p: Vec<String> = h.calls().into_iter().map(|c| c.prompt).collect();
+        assert_eq!(p.len(), 2);
+        assert!(!p[0].contains("previous answer was refused"), "{}", p[0]);
+        assert!(
+            p[1].starts_with(&format!("{}\n", p[0]))
+                && p[1].contains("previous answer was refused"),
+            "{}",
+            p[1]
+        );
+    }
+    // The budget rule (attempt 2 does not start when less than the per-attempt
+    // budget is left) needs a short budget: compose_budget_test.rs, same name.
     // model errors are recorded, not retried past the cap
-    let err =
-        |_: &str, _: Duration| Err::<Generation, _>("model proposal exceeded 25000 ms".to_string());
-    let (_, a) = propose_with_retries(
-        &err,
-        "base",
-        budget,
-        COMPOSE_ATTEMPT_BUDGET,
-        COMPOSE_MAX_ATTEMPTS,
-    );
-    assert!(a.len() <= 3 && a.iter().all(|x| x.outcome == "timeout"));
+    {
+        let h = Harness::new(Arc::new(|_, _: &str, _: Duration| {
+            Err::<Generation, _>("model proposal exceeded 25000 ms".to_string())
+        }));
+        let r = h.run(NO_DEST_GOAL).unwrap();
+        let a = &r.proposal_attempts;
+        assert_eq!(h.calls().len(), a.len());
+        assert!(
+            a.len() <= 3 && a.iter().all(|x| x.outcome == "timeout"),
+            "{a:?}"
+        );
+    }
 }
 
-/// ACCEPTANCE-v3 Section 3b at 1/100 scale: a slow (cold) attempt 1 of 16.1 s
-/// no longer blocks attempt 2; attempt 2 of 11.6 s leaves too little for 3.
+/// ACCEPTANCE-v3 Section 3b at full scale, through the bridge with the default
+/// edit budget: a slow (cold) attempt 1 of 16.1 s no longer blocks attempt 2;
+/// attempt 2 of 11.6 s leaves too little for 3. Takes about 28 s.
 #[test]
+#[cfg_attr(not(compose_linked), ignore = "needs librx_compose.a: stub build")]
 fn measured_attempt_budget_admits_a_second_attempt() {
-    use std::time::Duration;
-    assert!(COMPOSE_SKILL_BUDGET < Duration::from_secs(30));
-    // the default (AIEN_COMPOSE_EDIT_BUDGET_MS unset): omega's 30 s wait less 1 s
-    assert_eq!(COMPOSE_SKILL_BUDGET, Duration::from_secs(29));
-    assert_eq!(COMPOSE_ATTEMPT_BUDGET, Duration::from_millis(12_000));
-    // 2 839 + 896 + 47 x 166.6 + 60 ms, the measured full retry attempt
+    let _home = home_guard::home_slot();
+    // 2 839 + 896 + 47 x 166.6 + 60 ms, the measured full retry attempt, fits
+    // the 12 000 ms per-attempt budget of an edit
     let measured: [f64; 4] = [2_839.0, 896.0, 47.0 * 166.6, 60.0];
-    assert!(measured.iter().sum::<f64>() <= COMPOSE_ATTEMPT_BUDGET.as_millis() as f64);
-    let n = std::sync::atomic::AtomicU32::new(0);
-    let cold_then_warm = |_: &str, _: Duration| {
-        let k = n.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        std::thread::sleep(Duration::from_millis(if k == 0 { 161 } else { 116 }));
+    assert!(measured.iter().sum::<f64>() <= 12_000.0);
+    let h = Harness::new(Arc::new(|n, _: &str, _: Duration| {
+        std::thread::sleep(Duration::from_millis(if n == 1 { 16_100 } else { 11_600 }));
         Ok(Generation {
             text: "Goal: echo".into(),
             tokens: 48,
             finish_reason: None,
             ..Default::default()
         })
-    };
-    let (out, a) = propose_with_retries(
-        &cold_then_warm,
-        "base",
-        COMPOSE_SKILL_BUDGET / 100,
-        COMPOSE_ATTEMPT_BUDGET / 100,
-        COMPOSE_MAX_ATTEMPTS,
+    }));
+    h.write("notes.md", "# notes\n");
+    let r = h.run("add a line to notes.md").unwrap();
+    let c = h.calls();
+    assert_eq!(c.len(), 2, "{r:?}");
+    assert!(c.iter().all(|c| c.asked == Asked::Edit));
+    // the default (AIEN_COMPOSE_EDIT_BUDGET_MS unset): omega's 30 s wait less 1 s
+    assert!(c[0].limit <= Duration::from_secs(29), "{:?}", c[0].limit);
+    assert!(c[0].limit > Duration::from_secs(28), "{:?}", c[0].limit);
+    assert_eq!(r.proposal_attempts.len(), 2, "{r:?}");
+    let reason = r.proposer_error.unwrap();
+    assert!(
+        reason.contains("no attempt 3") && reason.contains("< 12000 ms per-attempt budget"),
+        "{reason}"
     );
-    assert_eq!(a.len(), 2, "{a:?}");
-    let reason = out.unwrap_err();
-    assert!(reason.contains("no attempt 3") && reason.contains("120 ms per-attempt budget"));
 }
 
 #[test]
@@ -484,12 +473,8 @@ fn unparseable_proposal_fails_the_aegis_contract() {
     assert!(!r.committed, "{r:?}");
     assert_eq!(r.aegis_pass_mask & 1, 0);
     assert_eq!(r.proposal_path, None);
-    // Refused by the template parser before AEGIS, retried up to the cap.
-    assert_eq!(
-        r.proposal_attempts.len(),
-        COMPOSE_MAX_ATTEMPTS as usize,
-        "{r:?}"
-    );
+    // Refused by the template parser before AEGIS, retried up to the cap (3).
+    assert_eq!(r.proposal_attempts.len(), 3, "{r:?}");
     assert!(r
         .proposal_attempts
         .iter()
@@ -563,12 +548,11 @@ fn torn_home_is_refused_by_name_then_recovered() {
 /// ACCEPTANCE-v5 Q3: the proposer's stop reason reaches every attempt record,
 /// so the receipt can tell end of sequence from the token limit.
 #[test]
+#[cfg_attr(not(compose_linked), ignore = "needs librx_compose.a: stub build")]
 fn finish_reason_is_recorded_per_attempt() {
-    use std::time::Duration;
-    let n = std::sync::atomic::AtomicU32::new(0);
-    let truncated_then_eos = |_: &str, _: Duration| {
-        let k = n.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        Ok(if k == 0 {
+    let _home = home_guard::home_slot();
+    let h = Harness::new(Arc::new(|n, _: &str, _: Duration| {
+        Ok(if n == 1 {
             Generation {
                 text: "Goal: echo".into(),
                 tokens: 48,
@@ -583,15 +567,10 @@ fn finish_reason_is_recorded_per_attempt() {
                 ..Default::default()
             }
         })
-    };
-    let (out, a) = propose_with_retries(
-        &truncated_then_eos,
-        "base",
-        Duration::from_secs(5),
-        Duration::from_millis(1),
-        COMPOSE_MAX_ATTEMPTS,
-    );
-    assert!(out.is_ok(), "{out:?}");
+    }));
+    let r = h.run("write a short note into NOTES.md").unwrap();
+    assert!(r.proposal.is_some(), "{r:?}");
+    let a = &r.proposal_attempts;
     assert_eq!(a.len(), 2, "{a:?}");
     assert_eq!(a[0].finish_reason.as_deref(), Some("max_tokens"));
     assert_eq!(a[1].finish_reason.as_deref(), Some("eos"));
@@ -695,83 +674,41 @@ fn proposal_fence_many_examples_and_trailing_text_keep_every_byte() {
     assert_eq!(p.content, doc);
 }
 
-/// Both budget settings: unset gives the default; 1 000..=599 000 ms is
-/// accepted; anything else is refused with a message naming the setting.
-#[test]
-fn compose_budget_settings_parse_and_refuse() {
-    use std::time::Duration;
-    let edit = |v| parse_compose_budget("AIEN_COMPOSE_EDIT_BUDGET_MS", COMPOSE_SKILL_BUDGET, v);
-    let doc = |v| parse_compose_budget("AIEN_COMPOSE_DOC_BUDGET_MS", COMPOSE_DOC_BUDGET, v);
-    assert_eq!(edit(None), Ok(Duration::from_secs(29)));
-    assert_eq!(doc(None), Ok(Duration::from_secs(120)));
-    assert_eq!(edit(Some("29000")), Ok(COMPOSE_SKILL_BUDGET));
-    assert_eq!(doc(Some("90000")), Ok(Duration::from_secs(90)));
-    assert_eq!(doc(Some(" 1000 ")), Ok(Duration::from_secs(1)));
-    assert_eq!(doc(Some("599000")), Ok(Duration::from_millis(599_000)));
-    for bad in [
-        "",
-        "abc",
-        "-5",
-        "1.5",
-        "999",
-        "0",
-        "599001",
-        "600000",
-        "99999999999999999999",
-    ] {
-        let e = edit(Some(bad)).expect_err(bad);
-        assert!(e.contains("AIEN_COMPOSE_EDIT_BUDGET_MS"), "{bad}: {e}");
-        let e = doc(Some(bad)).expect_err(bad);
-        assert!(e.contains("AIEN_COMPOSE_DOC_BUDGET_MS"), "{bad}: {e}");
-    }
-}
-
-/// AIEN_COMPOSE_DOC_MAX_TOKENS: default 1024, 16..=4096, bad values refused.
-#[test]
-fn compose_doc_token_cap_parses_and_refuses() {
-    assert_eq!(parse_compose_doc_max_tokens(None), Ok(1024));
-    assert_eq!(parse_compose_doc_max_tokens(Some("16")), Ok(16));
-    assert_eq!(parse_compose_doc_max_tokens(Some(" 4096 ")), Ok(4096));
-    for bad in ["", "x", "-1", "15", "0", "4097", "1e3"] {
-        let e = parse_compose_doc_max_tokens(Some(bad)).expect_err(bad);
-        assert!(e.contains("AIEN_COMPOSE_DOC_MAX_TOKENS"), "{bad}: {e}");
-    }
-}
-
 /// A task that names an existing file is an edit (29 s); a task with no
 /// existing target creates a new document (120 s). Omega's wait follows by +1 s.
+/// The per-attempt budgets (edit 12 s; document 30 s, capped at half a small
+/// custom budget) need short budgets: compose_budget_test.rs, same name.
 #[test]
+#[cfg_attr(not(compose_linked), ignore = "needs librx_compose.a: stub build")]
 fn kind_selects_budget() {
-    use std::time::Duration;
-    let ws = tempfile::tempdir().expect("tempdir");
-    std::fs::write(ws.path().join("notes.md"), "# notes\n").expect("write");
-    let (_, _, edit_kind) =
-        aien_runtime::spine::task_plan("add a line to notes.md", ws.path()).expect("plan");
-    let (_, _, new_kind) =
-        aien_runtime::spine::task_plan("write a new file faq.md", ws.path()).expect("plan");
-    assert_eq!(edit_kind, ProposalKind::Edit);
-    assert_eq!(new_kind, ProposalKind::Document);
-    let b = ComposeBudgets::default();
-    assert_eq!(b.for_kind(ProposalKind::Edit), Duration::from_secs(29));
-    assert_eq!(b.for_kind(ProposalKind::Document), Duration::from_secs(120));
-    assert_eq!(
-        b.for_kind(ProposalKind::Document) + COMPOSE_WAIT_MARGIN,
-        Duration::from_millis(121_000)
+    use std::sync::atomic::Ordering;
+    let _home = home_guard::home_slot();
+    let waits: Arc<parking_lot::Mutex<Vec<u32>>> = Arc::default();
+    let w = waits.clone();
+    let h = Harness::new(Arc::new(move |_, p: &str, _: Duration| {
+        w.lock()
+            .push(aien_omega_compose::LAST_WAIT_MS.load(Ordering::SeqCst));
+        reply(if p.contains("The file notes.md already exists") {
+            "filename: notes.md\n# notes\nnew line\n"
+        } else {
+            "filename: faq.md\nq and a\n"
+        })
+    }));
+    h.write("notes.md", "# notes\n");
+    let edit = h.run("add a line to notes.md").unwrap();
+    let new = h.run("write a new file faq.md").unwrap();
+    assert!(
+        edit.proposal.is_some() && new.proposal.is_some(),
+        "{edit:?} {new:?}"
     );
-    // edits keep the measured 12 s attempt budget; documents need ~the shortest
-    // measured full document (30 s), capped at half a small custom budget
-    assert_eq!(
-        compose_attempt_budget(ProposalKind::Edit, b.edit),
-        COMPOSE_ATTEMPT_BUDGET
-    );
-    assert_eq!(
-        compose_attempt_budget(ProposalKind::Document, b.doc),
-        Duration::from_secs(30)
-    );
-    assert_eq!(
-        compose_attempt_budget(ProposalKind::Document, Duration::from_secs(20)),
-        Duration::from_secs(10)
-    );
+    let c = h.calls();
+    assert_eq!(c.len(), 2, "{c:?}");
+    assert_eq!((c[0].asked, c[1].asked), (Asked::Edit, Asked::Document));
+    assert!(c[0].limit <= Duration::from_secs(29), "{:?}", c[0].limit);
+    assert!(c[0].limit > Duration::from_secs(28), "{:?}", c[0].limit);
+    assert!(c[1].limit <= Duration::from_secs(120), "{:?}", c[1].limit);
+    assert!(c[1].limit > Duration::from_secs(119), "{:?}", c[1].limit);
+    assert_eq!(*waits.lock(), vec![30_000, 121_000]);
 }
 
 /// The two ways a long reply can fail leave different, stable reasons: a cut
@@ -779,44 +716,39 @@ fn kind_selects_budget() {
 /// finish_reason max_tokens"), a slow model times out ("model proposal
 /// exceeded N ms"). Neither text contains the other's marker.
 #[test]
+#[cfg_attr(not(compose_linked), ignore = "needs librx_compose.a: stub build")]
 fn token_cut_and_wall_clock_reasons_are_distinct() {
-    use std::time::Duration;
+    let _home = home_guard::home_slot();
+    let goal = "write a short note into a.md";
     // token-limit cut
-    let cut = |_: &str, _: Duration| {
+    let h = Harness::new(Arc::new(|_, _: &str, _: Duration| {
         Ok(Generation {
             text: "filename: a.md\nline\n".into(),
             tokens: 1024,
             finish_reason: Some("max_tokens".into()),
             ..Default::default()
         })
-    };
-    let (out, a) = propose_with_retries(
-        &cut,
-        "p",
-        Duration::from_secs(120),
-        Duration::from_secs(30),
-        1,
+    }));
+    let r = h.run(goal).unwrap();
+    assert!(
+        r.proposal.is_none() && r.uncommitted_proposal.is_none(),
+        "a cut reply is never a proposal: {r:?}"
     );
-    let why = out.expect_err("a cut reply is never a proposal");
-    assert_eq!(a[0].outcome, "refused");
+    let why = r.proposer_error.unwrap();
+    assert_eq!(r.proposal_attempts[0].outcome, "refused");
     assert!(
         why.contains("reply cut at the token limit after 1024 tokens (finish_reason max_tokens)"),
         "{why}"
     );
     assert!(!why.contains("exceeded"), "{why}");
+    drop(h);
     // wall-clock timeout (the text the daemon proposer emits)
-    let slow = |_: &str, limit: Duration| -> Result<Generation, String> {
-        Err(wall_clock_reason(limit.as_millis()))
-    };
-    let (out, a) = propose_with_retries(
-        &slow,
-        "p",
-        Duration::from_secs(120),
-        Duration::from_secs(30),
-        1,
-    );
-    let why = out.expect_err("timed out");
-    assert_eq!(a[0].outcome, "timeout");
+    let h = Harness::new(Arc::new(|_, _: &str, limit: Duration| {
+        Err(format!("model proposal exceeded {} ms", limit.as_millis()))
+    }));
+    let r = h.run(goal).unwrap();
+    let why = r.proposer_error.expect("timed out");
+    assert_eq!(r.proposal_attempts[0].outcome, "timeout");
     assert!(
         why.starts_with("model proposal exceeded ") && why.ends_with(" ms"),
         "{why}"

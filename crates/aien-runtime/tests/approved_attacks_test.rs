@@ -1159,13 +1159,18 @@ async fn c22_forged_approved_grant_via_socket() {
 /// writes records directly (no ComposeNote reserved-record check). This is
 /// an attacker who can already write the compose home; the tests check the
 /// ledger's own consistency rules, not the socket boundary.
-fn bridge(tmp: &Path) -> aien_runtime::spine::ComposeBridge {
-    let never: aien_runtime::spine::ComposeProposer =
+fn bridge(tmp: &Path) -> aien_runtime::compose::ComposeBridge {
+    let never: aien_runtime::compose::ComposeProposer =
         std::sync::Arc::new(|_: &str, _: Duration| Err("no model".to_string()));
-    aien_runtime::spine::ComposeBridge::new(home(tmp), never, "attack")
+    aien_runtime::compose::ComposeBridge::new(home(tmp), never, "attack")
 }
 
-fn raw_note(b: &aien_runtime::spine::ComposeBridge, kind: &str, text: &str, links: &[u64]) -> u64 {
+fn raw_note(
+    b: &aien_runtime::compose::ComposeBridge,
+    kind: &str,
+    text: &str,
+    links: &[u64],
+) -> u64 {
     match b.note_unchecked(kind, text, links) {
         ControlResponse::ComposeNoted(n) => n.id,
         other => panic!("raw note: {other:?}"),

@@ -1773,7 +1773,7 @@ pub async fn run_daemon_server() {
     }
     // sc#328: the approval desk is required by default; a missing desk key
     // refuses the start here, before any model or GPU work.
-    if let Err(fatal) = aien_runtime::spine::authorize_desk_at_start_from_env() {
+    if let Err(fatal) = aien_runtime::compose::authorize_desk_at_start_from_env() {
         eprintln!("Fatal: {}", fatal.red().bold());
         std::process::exit(1);
     }
@@ -1975,7 +1975,7 @@ pub async fn handle_start_command() {
 
     // First-run guard (sc#414): the approval desk is mandatory, so refuse here in
     // plain words instead of spawning a daemon that exits unseen.
-    if let Err(detail) = aien_runtime::spine::authorize_desk_at_start_from_env() {
+    if let Err(detail) = aien_runtime::compose::authorize_desk_at_start_from_env() {
         eprintln!("{}", start_refusal_text(&detail).red().bold());
         std::process::exit(1);
     }

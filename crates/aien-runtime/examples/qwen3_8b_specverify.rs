@@ -180,9 +180,9 @@ fn main() {
     let stop = tok.stop_token_ids().to_vec();
     let hwm_loaded = vm_hwm_kb();
 
-    // The prompt: exactly what the production second attempt sends (spine.rs, corrective path).
-    let user = aien_runtime::corrective_retry_prompt(
-        &aien_runtime::proposal_prompt(GOAL),
+    // The prompt: exactly what the production second attempt sends (compose/bridge.rs, corrective path).
+    let user = aien_runtime::compose::rederive::corrective_retry_prompt(
+        &aien_runtime::compose::rederive::proposal_prompt(GOAL),
         reason,
         Some(refused_text),
     );

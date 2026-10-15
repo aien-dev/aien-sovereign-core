@@ -38,9 +38,9 @@
 //! Limits: the ledger reads at most HOST_RECALL_MAX host records in one recall
 //! and refuses (fails closed) beyond that; liveness of a claiming process is
 //! pid + start ticks (effects::executor_alive).
+use crate::compose::{record_view, ComposeBridge, ComposeHome};
 use crate::control::ComposeRecordView;
 use crate::effects::{executor_alive, self_executor};
-use crate::spine::{record_view, ComposeBridge, ComposeHome};
 use aien_omega_compose::NoteKind;
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
