@@ -7,16 +7,19 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use spark_supervisor::config::{ServiceConfig, SupervisorConfig};
-use spark_supervisor::proc_telemetry::get_process_stats;
+use spark_supervisor::proc_telemetry::{get_process_stats, parse_stat_state};
 use spark_supervisor::supervisor::{
-    ManagedServiceState, ServiceState, Supervisor, SupervisorOptions,
+    probe_one, ManagedServiceState, ProbeOutcome, ProbeTicket, ServiceState, Supervisor,
+    SupervisorOptions,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
-use tokio::sync::oneshot;
+use tokio::sync::{oneshot, Semaphore};
 use tokio::task::JoinHandle;
 
 const WAIT: Duration = Duration::from_secs(5);
+/// No probe may hold the state lock: a snapshot that takes longer than this fails fast.
+const LOCK_BOUND: Duration = Duration::from_secs(2);
 
 /// Status code the responder answers with; 0 means hold the connection open, never answer.
 struct Responder {
@@ -26,6 +29,11 @@ struct Responder {
 }
 
 async fn responder(status: u16, delay: Duration) -> Responder {
+    responder_with(status, delay, None).await
+}
+
+/// With `gate`, each answer first takes one permit, so the test decides when it is sent.
+async fn responder_with(status: u16, delay: Duration, gate: Option<Arc<Semaphore>>) -> Responder {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}/health", listener.local_addr().unwrap());
     let status = Arc::new(AtomicU16::new(status));
@@ -36,7 +44,7 @@ async fn responder(status: u16, delay: Duration) -> Responder {
             let Ok((mut sock, _)) = listener.accept().await else {
                 return;
             };
-            let (s, h) = (s.clone(), h.clone());
+            let (s, h, gate) = (s.clone(), h.clone(), gate.clone());
             tokio::spawn(async move {
                 let mut buf = vec![0u8; 2048];
                 let mut got = Vec::new();
@@ -47,6 +55,9 @@ async fn responder(status: u16, delay: Duration) -> Responder {
                     }
                 }
                 h.fetch_add(1, Ordering::SeqCst);
+                if let Some(g) = gate {
+                    g.acquire().await.unwrap().forget();
+                }
                 tokio::time::sleep(delay).await;
                 let code = s.load(Ordering::SeqCst);
                 if code == 0 {
@@ -124,7 +135,10 @@ fn start(services: Vec<(&str, ServiceConfig)>, options: SupervisorOptions) -> Ru
 
 impl Running {
     async fn state(&self, name: &str) -> ManagedServiceState {
-        self.sup.snapshot().await[name].clone()
+        tokio::time::timeout(LOCK_BOUND, self.sup.snapshot())
+            .await
+            .expect("state lock held too long: is a probe awaiting HTTP under the mutex?")[name]
+            .clone()
     }
 
     /// Polls until `pred` holds; returns every state observed on the way (in order).
@@ -255,10 +269,16 @@ async fn spawned_process_not_ready_while_probe_in_flight_and_shutdown_mid_probe(
         vec![("svc", service(&["30"], "always", Some(&r.url)))],
         opts,
     );
-    let seen = run
-        .wait_for("svc", |_| r.hits.load(Ordering::SeqCst) >= 1)
-        .await;
-    let st = run.state("svc").await;
+    // The probe is now stuck in HTTP for up to 30 s. Reading state must still be quick;
+    // if the lock were held across the HTTP await this fails at LOCK_BOUND, not at 30 s.
+    let (seen, st) = tokio::time::timeout(LOCK_BOUND, async {
+        let seen = run
+            .wait_for("svc", |_| r.hits.load(Ordering::SeqCst) >= 1)
+            .await;
+        (seen, run.state("svc").await)
+    })
+    .await
+    .expect("state readable while a probe is in flight");
     assert_eq!(st.state, ServiceState::Probing, "seen {seen:?}");
     assert!(!seen.contains(&ServiceState::Ready));
     let pid = st.pid.unwrap();
@@ -274,24 +294,64 @@ async fn spawned_process_not_ready_while_probe_in_flight_and_shutdown_mid_probe(
 
 #[tokio::test]
 async fn stale_probe_after_rapid_restart_never_marks_ready() {
-    // Each child lives 150 ms; the health endpoint answers 200 only after 400 ms.
-    // Every successful answer therefore belongs to a generation that already exited,
-    // so the only way to report Ready would be to apply a stale result.
-    let r = responder(200, Duration::from_millis(400)).await;
+    // Event-driven, no timing margin: the responder holds every 200 until the test has
+    // seen the generation advance past the one that was alive when the request arrived.
+    // Every answer therefore belongs to a child that already exited, so the only way to
+    // report Ready would be to apply a stale result.
+    let gate = Arc::new(Semaphore::new(0));
+    let r = responder_with(200, Duration::ZERO, Some(gate.clone())).await;
+    let mut opts = fast_options();
+    opts.probe_timeout = Duration::from_secs(30);
     let run = start(
         vec![("svc", service(&["0.15"], "always", Some(&r.url)))],
-        fast_options(),
+        opts,
     );
-    // At least two answered probes (each answer takes 400 ms) across four generations.
-    let seen = run
-        .wait_for("svc", |s| {
-            s.generation >= 4 && r.hits.load(Ordering::SeqCst) >= 3
-        })
-        .await;
+    let mut seen = Vec::new();
+    for k in 1..=3 {
+        seen.extend(
+            run.wait_for("svc", |_| r.hits.load(Ordering::SeqCst) >= k)
+                .await,
+        );
+        let g = run.state("svc").await.generation;
+        seen.extend(run.wait_for("svc", |s| s.generation > g).await);
+        gate.add_permits(1);
+    }
+    // Rounds are serialized, so a 4th request means the 3rd answer was already handled.
+    seen.extend(
+        run.wait_for("svc", |_| r.hits.load(Ordering::SeqCst) >= 4)
+            .await,
+    );
     assert!(!seen.contains(&ServiceState::Ready), "seen {seen:?}");
     let st = run.state("svc").await;
-    assert!(st.restart_count >= 3);
+    assert!(st.generation >= 4 && st.restart_count >= 3, "{st:?}");
+    gate.add_permits(1000);
     run.shutdown().await;
+}
+
+#[tokio::test]
+async fn probe_of_unreaped_zombie_is_process_gone() {
+    // No health_url: liveness only. An exited child that is not yet reaped keeps its
+    // /proc entry; it must not count as alive.
+    let mut child = std::process::Command::new("true").spawn().unwrap();
+    let pid = child.id();
+    let deadline = Instant::now() + WAIT;
+    while std::fs::read_to_string(format!("/proc/{pid}/stat"))
+        .ok()
+        .and_then(|s| parse_stat_state(&s))
+        != Some('Z')
+    {
+        assert!(Instant::now() < deadline, "child never became a zombie");
+        tokio::time::sleep(Duration::from_millis(1)).await;
+    }
+    let ticket = ProbeTicket {
+        name: "svc".into(),
+        pid,
+        generation: 1,
+        health_url: None,
+    };
+    let report = probe_one(reqwest::Client::new(), ticket).await;
+    assert_eq!(report.outcome, ProbeOutcome::ProcessGone);
+    child.wait().unwrap();
 }
 
 #[tokio::test]
