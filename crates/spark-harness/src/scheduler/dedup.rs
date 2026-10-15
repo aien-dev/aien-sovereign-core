@@ -60,6 +60,9 @@ pub(crate) fn generation_scope(kind: &EventKind) -> Option<(&str, u64)> {
         }
         | EventKind::CommitOutcome {
             task, generation, ..
+        }
+        | EventKind::BindApproval {
+            task, generation, ..
         } => Some((task.as_str(), *generation)),
         EventKind::RegisterTask { .. }
         | EventKind::AddDependency { .. }

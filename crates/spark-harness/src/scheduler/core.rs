@@ -99,23 +99,72 @@ pub enum EventKind {
     },
     /// Lets time pass: expires leases.
     Tick,
-    /// `Committable -> Committing` (Headstart M3, issue #537). Freezes the
-    /// task at `generation` with its own accepted completion and every
+    /// `-> Committing` (Headstart M3, issue #537). Stage `commit` starts
+    /// from `Committable`; stage `authorize` starts from `Committed` once
+    /// the commit stage of the same generation committed. Freezes the task
+    /// at `generation` with its own accepted completion and every
     /// producer's accepted completion, all of which must equal the current
     /// state and verify in the store. Refused when another commit is
     /// running in the same dependency chain.
     BeginCommit {
         task: String,
         generation: u64,
+        stage: CommitStage,
         completion: ProofClaim,
         producers: BTreeMap<String, ProofClaim>,
     },
-    /// Ends a `Committing` task with the wrapped call's outcome.
+    /// Ends a `Committing` task with the wrapped call's outcome. `stage`
+    /// must be the stage that began.
     CommitOutcome {
         task: String,
         generation: u64,
+        stage: CommitStage,
         outcome: CommitResult,
     },
+    /// Bind an external request `key` (opaque to M2, at most
+    /// [`MAX_APPROVAL_KEY_LEN`] bytes) to the fence of `stage` for `task`
+    /// at `generation`. A later bind of the same key replaces it. Dropped
+    /// when that stage commits; kept after any other outcome, so the
+    /// request stays fenced and is refused. At most
+    /// [`MAX_APPROVAL_BINDINGS`] keys are held; a new key beyond that is
+    /// refused.
+    BindApproval {
+        key: String,
+        stage: CommitStage,
+        task: String,
+        generation: u64,
+    },
+}
+
+/// The two fenced calls of one task generation, in order: the commit
+/// itself, then the authorization grant against that commit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CommitStage {
+    Commit,
+    Authorize,
+}
+
+impl CommitStage {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            CommitStage::Commit => "commit",
+            CommitStage::Authorize => "authorize",
+        }
+    }
+}
+
+/// Most request keys [`EventKind::BindApproval`] holds at once.
+pub const MAX_APPROVAL_BINDINGS: usize = 1024;
+/// Longest request key [`EventKind::BindApproval`] accepts, in bytes.
+pub const MAX_APPROVAL_KEY_LEN: usize = 512;
+
+/// One bound request: the fence it must pass.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ApprovalBinding {
+    pub stage: CommitStage,
+    pub task: String,
+    pub generation: u64,
 }
 
 /// How a commit ended.
@@ -135,6 +184,7 @@ pub enum CommitResult {
 /// What a `BeginCommit` froze.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct CommitInputs {
+    pub stage: CommitStage,
     pub completion: ProofClaim,
     pub producers: BTreeMap<String, ProofClaim>,
     pub began_at: u64,
@@ -202,6 +252,8 @@ pub struct TaskEntry {
     /// Set by `BeginCommit`; kept after the outcome as the record of what
     /// the commit was checked against.
     pub commit: Option<CommitInputs>,
+    /// The last stage that reached `Committed` at this generation.
+    pub committed_stage: Option<CommitStage>,
 }
 
 impl TaskEntry {
@@ -220,6 +272,7 @@ impl TaskEntry {
             last_reason: None,
             timing: TaskTiming::new(at),
             commit: None,
+            committed_stage: None,
         }
     }
 
@@ -254,6 +307,8 @@ pub struct Core {
     pub(crate) pool: PermitPool,
     /// Bounded memory of applied event ids (`dedup.rs`).
     pub(crate) seen: Seen,
+    /// Bound requests by key ([`EventKind::BindApproval`]).
+    pub(crate) approvals: BTreeMap<String, ApprovalBinding>,
     pub(crate) seq: u64,
     pub(crate) last_at: u64,
 }
@@ -346,6 +401,7 @@ impl Core {
         t.completion = None;
         t.bindings.clear();
         t.provisional_result = None;
+        t.committed_stage = None;
         t.last_reason = Some(reason.to_string());
     }
 
@@ -458,6 +514,35 @@ impl Core {
             });
         }
         self.guard_descendants(id)
+    }
+
+    /// May `stage` begin for `id`? The commit stage needs `Committable`;
+    /// the authorize stage needs `Committed` with the commit stage (and not
+    /// yet the authorize stage) committed at this generation.
+    pub(crate) fn require_stage_ready(
+        &self,
+        id: &str,
+        stage: CommitStage,
+    ) -> Result<(), SchedError> {
+        let t = self.task(id)?;
+        let ready = match stage {
+            CommitStage::Commit => t.state == TaskState::Committable,
+            CommitStage::Authorize => {
+                t.state == TaskState::Committed && t.committed_stage == Some(CommitStage::Commit)
+            }
+        };
+        if ready {
+            Ok(())
+        } else {
+            Err(SchedError::WrongState {
+                task: id.to_string(),
+                state: t.state,
+                action: match stage {
+                    CommitStage::Commit => "begin the commit stage",
+                    CommitStage::Authorize => "begin the authorize stage",
+                },
+            })
+        }
     }
 
     /// A `Committing` task in the same chain as `id` (upstream or
@@ -788,11 +873,12 @@ impl Core {
             EventKind::BeginCommit {
                 task,
                 generation,
+                stage,
                 completion,
                 producers,
             } => {
                 self.require_generation(task, *generation)?;
-                self.require_state(task, |s| s == TaskState::Committable, "begin a commit")?;
+                self.require_stage_ready(task, *stage)?;
                 if let Some(committing) = self.commit_in_chain(task) {
                     return Err(SchedError::CommitInProgress {
                         task: task.clone(),
@@ -830,6 +916,7 @@ impl Core {
                 }
                 self.set_state(task, TaskState::Committing, at)?;
                 self.task_mut(task)?.commit = Some(CommitInputs {
+                    stage: *stage,
                     completion: completion.clone(),
                     producers: producers.clone(),
                     began_at: at,
@@ -838,6 +925,7 @@ impl Core {
             EventKind::CommitOutcome {
                 task,
                 generation,
+                stage,
                 outcome,
             } => {
                 self.require_generation(task, *generation)?;
@@ -846,24 +934,80 @@ impl Core {
                     |s| s == TaskState::Committing,
                     "record a commit outcome",
                 )?;
+                let began = self.task(task)?.commit.as_ref().map(|c| c.stage);
+                if began != Some(*stage) {
+                    return Err(bad(format!(
+                        "commit_outcome for '{task}' names stage {} but stage {began:?} is running",
+                        stage.as_str()
+                    )));
+                }
                 // BeginCommit refused any second commit in this chain, so
                 // no Committing task is reachable from here.
-                match outcome {
-                    CommitResult::Committed { detail } => {
+                match (outcome, stage) {
+                    (CommitResult::Committed { detail }, _) => {
                         self.set_state(task, TaskState::Committed, at)?;
-                        self.task_mut(task)?.last_reason = Some(format!("committed: {detail}"));
+                        let t = self.task_mut(task)?;
+                        t.committed_stage = Some(*stage);
+                        t.last_reason = Some(format!("{} committed: {detail}", stage.as_str()));
+                        // A committed stage needs no fence any more: the
+                        // canonical durable guards answer its retries.
+                        self.approvals
+                            .retain(|_, b| !(b.task == *task && b.stage == *stage));
                     }
-                    CommitResult::Failed { reason } => {
+                    (CommitResult::Failed { reason }, CommitStage::Commit) => {
                         self.abort(task, at, &format!("commit failed: {reason}"), &mut fx)?;
                         self.revoke_descendants(task, at, "producer commit failed", &mut fx)?;
                     }
-                    CommitResult::Uncertain { reason } => {
+                    // The grant was refused before any write; the commit
+                    // stands and the stage may begin again.
+                    (CommitResult::Failed { reason }, CommitStage::Authorize) => {
+                        self.set_state(task, TaskState::Committed, at)?;
+                        self.task_mut(task)?.last_reason =
+                            Some(format!("authorize failed: {reason}"));
+                    }
+                    (CommitResult::Uncertain { reason }, _) => {
                         self.revoke_descendants(task, at, "producer commit uncertain", &mut fx)?;
                         self.set_state(task, TaskState::CommitUncertain, at)?;
                         self.task_mut(task)?.last_reason =
-                            Some(format!("commit uncertain: {reason}"));
+                            Some(format!("{} uncertain: {reason}", stage.as_str()));
                     }
                 }
+            }
+            EventKind::BindApproval {
+                key,
+                stage,
+                task,
+                generation,
+            } => {
+                if key.is_empty() || key.len() > MAX_APPROVAL_KEY_LEN {
+                    return Err(bad(format!(
+                        "bind_approval key must be 1 to {MAX_APPROVAL_KEY_LEN} bytes"
+                    )));
+                }
+                self.require_generation(task, *generation)?;
+                let t = self.task(task)?;
+                if t.committed_stage >= Some(*stage) {
+                    return Err(SchedError::WrongState {
+                        task: task.clone(),
+                        state: t.state,
+                        action: "bind a request to a stage that already committed",
+                    });
+                }
+                if !self.approvals.contains_key(key)
+                    && self.approvals.len() >= MAX_APPROVAL_BINDINGS
+                {
+                    return Err(SchedError::BindingsFull {
+                        capacity: MAX_APPROVAL_BINDINGS,
+                    });
+                }
+                self.approvals.insert(
+                    key.clone(),
+                    ApprovalBinding {
+                        stage: *stage,
+                        task: task.clone(),
+                        generation: *generation,
+                    },
+                );
             }
         }
         self.pump(cfg, at, &mut fx)?;

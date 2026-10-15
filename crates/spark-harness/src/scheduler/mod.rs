@@ -68,8 +68,9 @@ pub mod timing;
 mod unit_tests;
 
 pub use self::core::{
-    Binding, BindingLevel, CommitInputs, CommitResult, Effects, Event, EventKind, JournalEntry,
-    Revocation, TaskEntry,
+    ApprovalBinding, Binding, BindingLevel, CommitInputs, CommitResult, CommitStage, Effects,
+    Event, EventKind, JournalEntry, Revocation, TaskEntry, MAX_APPROVAL_BINDINGS,
+    MAX_APPROVAL_KEY_LEN,
 };
 pub use self::error::SchedError;
 pub use self::permits::{PermitPool, ResourceLimits, ResourceRequest};
@@ -301,6 +302,16 @@ impl Scheduler {
 
     pub fn generation(&self, id: &str) -> Option<u64> {
         self.task(id).map(|t| t.generation)
+    }
+
+    /// The fence a bound request key must pass ([`EventKind::BindApproval`]).
+    pub fn approval(&self, key: &str) -> Option<&ApprovalBinding> {
+        self.core.approvals.get(key)
+    }
+
+    /// How many request keys are bound.
+    pub fn approvals_len(&self) -> usize {
+        self.core.approvals.len()
     }
 
     pub fn queue(&self) -> Vec<String> {

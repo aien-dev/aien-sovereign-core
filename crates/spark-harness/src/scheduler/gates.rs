@@ -6,7 +6,9 @@
 //! (which records what was accepted earlier) only says which receipt to
 //! re-check; it is never the authority on its own.
 
-use super::core::{Binding, BindingLevel, CommitResult, EventKind, Revocation, TaskEntry};
+use super::core::{
+    Binding, BindingLevel, CommitResult, CommitStage, EventKind, Revocation, TaskEntry,
+};
 use super::error::SchedError;
 use super::{Event, Outcome, Scheduler, RESERVED_ID_PREFIX};
 use crate::completion::CompletionError;
@@ -47,13 +49,17 @@ impl Scheduler {
             EventKind::BeginCommit {
                 task,
                 generation,
+                stage,
                 completion,
                 ..
             } => {
                 // Every producer re-verified (recursively), then the task's
                 // own completion; `apply` checks the claims equal the state.
                 self.core.require_generation(task, *generation)?;
-                self.may_finalize(task)?;
+                match stage {
+                    CommitStage::Commit => self.may_finalize(task)?,
+                    CommitStage::Authorize => self.may_authorize(task)?,
+                };
                 verify_final(&self.store, task, *generation, completion).map_err(proof(task))?;
             }
             _ => {}
@@ -122,6 +128,17 @@ impl Scheduler {
         self.finalize_check(task, 0)
     }
 
+    /// May the authorize stage begin for `task`? The same producer checks
+    /// as [`Scheduler::may_finalize`], on a task whose commit stage
+    /// committed at its current generation (`Committed`, authorize stage
+    /// not yet committed).
+    pub fn may_authorize(&self, task: &str) -> Result<Vec<ArtifactReadiness>, SchedError> {
+        self.core
+            .require_stage_ready(task, CommitStage::Authorize)?;
+        let t = self.core.task(task)?;
+        self.producers_final(task, t, 0)
+    }
+
     fn finalize_check(
         &self,
         task: &str,
@@ -145,6 +162,17 @@ impl Scheduler {
                 action: "finalize",
             });
         }
+        self.producers_final(task, t, depth)
+    }
+
+    /// Every producer of `task` bound at its current generation, its
+    /// interface binding still verifying, and final-verified (recursively).
+    fn producers_final(
+        &self,
+        task: &str,
+        t: &TaskEntry,
+        depth: usize,
+    ) -> Result<Vec<ArtifactReadiness>, SchedError> {
         let mut out = Vec::new();
         for p in self.core.graph.producers_of(task) {
             let b = self.binding(task, t, p)?;
@@ -325,19 +353,23 @@ impl Scheduler {
     /// is never run again (as `approved_replay` treats an in-flight claim).
     /// Returns those tasks.
     pub(crate) fn settle_interrupted_commits(&mut self) -> Result<Vec<String>, SchedError> {
-        let open: Vec<(String, u64)> = self
+        let open: Vec<(String, u64, CommitStage)> = self
             .core
             .tasks
             .iter()
             .filter(|(_, t)| t.state == TaskState::Committing)
-            .map(|(id, t)| (id.clone(), t.generation))
+            .map(|(id, t)| {
+                let stage = t.commit.as_ref().map_or(CommitStage::Commit, |c| c.stage);
+                (id.clone(), t.generation, stage)
+            })
             .collect();
-        for (task, generation) in &open {
+        for (task, generation, stage) in &open {
             let event = Event {
                 id: format!("{RESERVED_ID_PREFIX}commit-uncertain-{}", self.core.seq + 1),
                 kind: EventKind::CommitOutcome {
                     task: task.clone(),
                     generation: *generation,
+                    stage: *stage,
                     outcome: CommitResult::Uncertain {
                         reason: "restarted while committing; no outcome was recorded".to_string(),
                     },
@@ -345,7 +377,7 @@ impl Scheduler {
             };
             self.deliver_unchecked(event)?;
         }
-        Ok(open.into_iter().map(|(t, _)| t).collect())
+        Ok(open.into_iter().map(|(t, _, _)| t).collect())
     }
 }
 

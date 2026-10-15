@@ -1,7 +1,8 @@
 //! Headstart M3 (#537): the `Committing` state. A journaled `BeginCommit`
 //! freezes a `Committable` task and its inputs; nothing upstream may change
 //! them until a `CommitOutcome` is recorded; a replay that finds no outcome
-//! marks the task `CommitUncertain` and never runs it again.
+//! marks the task `CommitUncertain` and never runs it again. The authorize
+//! stage repeats this from `Committed`. Bound request keys are journaled.
 
 mod common;
 
@@ -9,9 +10,13 @@ use common::{enabled, H};
 use spark_harness::execution::TaskState;
 use spark_harness::readiness::ProofClaim;
 use spark_harness::scheduler::{
-    CommitResult, Effects, EventKind, Outcome, SchedError, RESERVED_ID_PREFIX,
+    CommitResult, CommitStage, Effects, EventKind, Outcome, SchedError, MAX_APPROVAL_BINDINGS,
+    MAX_APPROVAL_KEY_LEN, RESERVED_ID_PREFIX,
 };
 use std::collections::BTreeMap;
+
+const COMMIT: CommitStage = CommitStage::Commit;
+const AUTHORIZE: CommitStage = CommitStage::Authorize;
 
 fn remove_receipt(h: &H, receipt_id: &str) {
     std::fs::remove_file(
@@ -27,8 +32,8 @@ fn completion(h: &H, task: &str) -> ProofClaim {
     h.sched.task(task).unwrap().completion.clone().unwrap()
 }
 
-/// `BeginCommit` built from the task's current accepted state.
-fn begin_kind(h: &H, task: &str) -> EventKind {
+/// `BeginCommit` of `stage` built from the task's current accepted state.
+fn stage_kind(h: &H, task: &str, stage: CommitStage) -> EventKind {
     let producers: BTreeMap<String, ProofClaim> = h
         .sched
         .task(task)
@@ -40,24 +45,52 @@ fn begin_kind(h: &H, task: &str) -> EventKind {
     EventKind::BeginCommit {
         task: task.into(),
         generation: h.generation(task),
+        stage,
         completion: completion(h, task),
         producers,
     }
 }
 
-fn begin(h: &mut H, task: &str) -> Result<Outcome, SchedError> {
+fn begin_kind(h: &H, task: &str) -> EventKind {
+    stage_kind(h, task, COMMIT)
+}
+
+fn begin_stage(h: &mut H, task: &str, stage: CommitStage) -> Result<Outcome, SchedError> {
     h.advance(10);
-    let kind = begin_kind(h, task);
+    let kind = stage_kind(h, task, stage);
     h.send(kind)
 }
 
+fn begin(h: &mut H, task: &str) -> Result<Outcome, SchedError> {
+    begin_stage(h, task, COMMIT)
+}
+
+/// The outcome of the stage that is running.
 fn outcome(h: &mut H, task: &str, outcome: CommitResult) -> Effects {
     let generation = h.generation(task);
+    let stage = h.sched.task(task).unwrap().commit.as_ref().unwrap().stage;
     h.ok(EventKind::CommitOutcome {
         task: task.into(),
         generation,
+        stage,
         outcome,
     })
+}
+
+fn bind(h: &mut H, key: &str, stage: CommitStage, task: &str) -> Result<Outcome, SchedError> {
+    let generation = h.generation(task);
+    h.send(EventKind::BindApproval {
+        key: key.into(),
+        stage,
+        task: task.into(),
+        generation,
+    })
+}
+
+fn bound(h: &H, key: &str) -> Option<(CommitStage, String, u64)> {
+    h.sched
+        .approval(key)
+        .map(|b| (b.stage, b.task.clone(), b.generation))
 }
 
 fn committed() -> CommitResult {
@@ -107,6 +140,7 @@ fn begin_commit_freezes_the_inputs_and_the_outcome_ends_it() {
     let r = h.send(EventKind::CommitOutcome {
         task: "b".into(),
         generation: gen_b,
+        stage: COMMIT,
         outcome: committed(),
     });
     assert!(matches!(r, Err(SchedError::WrongState { .. })), "{r:?}");
@@ -225,6 +259,7 @@ fn begin_commit_refuses_inputs_that_differ_from_the_state() {
         |completion: ProofClaim, producers: BTreeMap<String, ProofClaim>| EventKind::BeginCommit {
             task: "b".into(),
             generation,
+            stage: COMMIT,
             completion,
             producers,
         };
@@ -244,6 +279,7 @@ fn begin_commit_refuses_inputs_that_differ_from_the_state() {
             EventKind::BeginCommit {
                 task: "b".into(),
                 generation: generation + 1,
+                stage: COMMIT,
                 completion: own.clone(),
                 producers: producers.clone(),
             },
@@ -258,6 +294,7 @@ fn begin_commit_refuses_inputs_that_differ_from_the_state() {
     let r = h.send(EventKind::BeginCommit {
         task: "c".into(),
         generation: h.generation("c"),
+        stage: COMMIT,
         completion: own.clone(),
         producers: BTreeMap::from([("b".to_string(), completion(&h, "b"))]),
     });
@@ -385,6 +422,7 @@ fn replayed_commit_without_an_outcome_becomes_uncertain_and_never_reruns() {
     let r = h.send(EventKind::CommitOutcome {
         task: "b".into(),
         generation: h.generation("b"),
+        stage: COMMIT,
         outcome: committed(),
     });
     assert!(matches!(r, Err(SchedError::WrongState { .. })), "{r:?}");
@@ -462,4 +500,242 @@ fn begin_commit_redelivery_is_a_duplicate() {
     let r = h.sched.deliver(event);
     assert!(matches!(r, Ok(Outcome::Duplicate)), "{r:?}");
     assert_eq!(h.sched.state("b"), Some(TaskState::Committing));
+}
+
+// ---------- the authorize stage ----------
+
+fn wrong_state(r: &Result<Outcome, SchedError>) -> bool {
+    matches!(r, Err(SchedError::WrongState { .. }))
+}
+
+#[test]
+fn the_authorize_stage_begins_only_after_the_commit_stage_committed() {
+    let mut h = chain();
+    let gen_a = h.generation("a");
+    let gen_b = h.generation("b");
+    // Committable: the grant cannot come before the commit.
+    assert!(wrong_state(&begin_stage(&mut h, "b", AUTHORIZE)));
+    begin(&mut h, "b").unwrap();
+    // Nor while the commit runs.
+    assert!(wrong_state(&begin_stage(&mut h, "b", AUTHORIZE)));
+    outcome(&mut h, "b", committed());
+    assert_eq!(h.sched.task("b").unwrap().committed_stage, Some(COMMIT));
+    assert!(matches!(
+        begin_stage(&mut h, "b", AUTHORIZE),
+        Ok(Outcome::Applied(_))
+    ));
+    assert_eq!(h.sched.state("b"), Some(TaskState::Committing));
+    let inputs = h.sched.task("b").unwrap().commit.clone().unwrap();
+    assert_eq!(inputs.stage, AUTHORIZE);
+    assert_eq!(inputs.producers.get("a"), Some(&completion(&h, "a")));
+    // The authorize stage freezes the upstream too.
+    let r = h.send(EventKind::Revoke {
+        task: "a".into(),
+        generation: gen_a,
+        reason: "test".into(),
+    });
+    assert!(in_progress(&r, "b"), "{r:?}");
+    outcome(&mut h, "b", committed());
+    let t = h.sched.task("b").unwrap();
+    assert_eq!((t.state, t.generation), (TaskState::Committed, gen_b));
+    assert_eq!(t.committed_stage, Some(AUTHORIZE));
+    // Once per generation: a second grant and a second commit are refused.
+    assert!(wrong_state(&begin_stage(&mut h, "b", AUTHORIZE)));
+    assert!(wrong_state(&begin(&mut h, "b")));
+}
+
+#[test]
+fn the_authorize_stage_re_verifies_the_producers() {
+    let mut h = chain();
+    begin(&mut h, "b").unwrap();
+    outcome(&mut h, "b", committed());
+    remove_receipt(&h, &completion(&h, "a").receipt_id);
+    let r = begin_stage(&mut h, "b", AUTHORIZE);
+    assert!(
+        matches!(r, Err(SchedError::Proof { ref task, .. }) if task == "a"),
+        "{r:?}"
+    );
+    assert_eq!(h.sched.state("b"), Some(TaskState::Committed));
+}
+
+#[test]
+fn an_outcome_must_name_the_running_stage() {
+    let mut h = chain();
+    begin(&mut h, "b").unwrap();
+    let r = h.send(EventKind::CommitOutcome {
+        task: "b".into(),
+        generation: h.generation("b"),
+        stage: AUTHORIZE,
+        outcome: committed(),
+    });
+    assert!(matches!(r, Err(SchedError::InvalidEvent(_))), "{r:?}");
+    assert_eq!(h.sched.state("b"), Some(TaskState::Committing));
+}
+
+#[test]
+fn a_refused_grant_keeps_the_commit_and_may_begin_again() {
+    let mut h = chain();
+    let gen_c = h.generation("c");
+    begin(&mut h, "b").unwrap();
+    outcome(&mut h, "b", committed());
+    begin_stage(&mut h, "b", AUTHORIZE).unwrap();
+    let fx = outcome(
+        &mut h,
+        "b",
+        CommitResult::Failed {
+            reason: "EFFECT_REFUSED DeskMacRequired".into(),
+        },
+    );
+    assert!(fx.revoked.is_empty() && fx.aborted.is_empty(), "{fx:?}");
+    let t = h.sched.task("b").unwrap();
+    assert_eq!(
+        (t.state, t.committed_stage),
+        (TaskState::Committed, Some(COMMIT))
+    );
+    assert_eq!(h.generation("c"), gen_c);
+    assert!(begin_stage(&mut h, "b", AUTHORIZE).is_ok());
+}
+
+#[test]
+fn an_uncertain_grant_is_terminal_and_revokes_consumers() {
+    let mut h = chain();
+    let gen_c = h.generation("c");
+    begin(&mut h, "b").unwrap();
+    outcome(&mut h, "b", committed());
+    begin_stage(&mut h, "b", AUTHORIZE).unwrap();
+    outcome(
+        &mut h,
+        "b",
+        CommitResult::Uncertain {
+            reason: "transport".into(),
+        },
+    );
+    assert_eq!(h.sched.state("b"), Some(TaskState::CommitUncertain));
+    assert_eq!(h.generation("c"), gen_c + 1);
+    assert!(begin_stage(&mut h, "b", AUTHORIZE).is_err());
+}
+
+#[test]
+fn a_replayed_grant_without_an_outcome_becomes_uncertain_and_never_reruns() {
+    let mut h = H::journaled(enabled());
+    h.register("a", 1, &[]);
+    h.register("b", 1, &["a"]);
+    h.publish("a", 1);
+    h.finish("a");
+    h.finish("b");
+    begin(&mut h, "b").unwrap();
+    outcome(&mut h, "b", committed());
+    begin_stage(&mut h, "b", AUTHORIZE).unwrap();
+    // Crash during the grant.
+    h.restart(enabled()).unwrap();
+    let t = h.sched.task("b").unwrap();
+    assert_eq!(t.state, TaskState::CommitUncertain);
+    assert_eq!(t.commit.as_ref().unwrap().stage, AUTHORIZE);
+    let journal = std::fs::read_to_string(h.fx.journal()).unwrap();
+    assert!(journal.contains(&format!("{RESERVED_ID_PREFIX}commit-uncertain-")));
+    assert!(begin_stage(&mut h, "b", AUTHORIZE).is_err());
+}
+
+// ---------- bound requests ----------
+
+#[test]
+fn bindings_survive_a_replay_and_are_dropped_when_their_stage_commits() {
+    let mut h = H::journaled(enabled());
+    h.register("a", 1, &[]);
+    h.register("b", 1, &["a"]);
+    let gen_b = h.generation("b");
+    bind(&mut h, "approval:x", COMMIT, "b").unwrap();
+    bind(&mut h, "proposal:y", AUTHORIZE, "b").unwrap();
+    h.restart(enabled()).unwrap();
+    assert_eq!(bound(&h, "approval:x"), Some((COMMIT, "b".into(), gen_b)));
+    assert_eq!(
+        bound(&h, "proposal:y"),
+        Some((AUTHORIZE, "b".into(), gen_b))
+    );
+    h.publish("a", 1);
+    h.finish("a");
+    h.finish("b");
+    begin(&mut h, "b").unwrap();
+    // Running: still bound.
+    assert!(bound(&h, "approval:x").is_some());
+    outcome(&mut h, "b", committed());
+    assert_eq!(bound(&h, "approval:x"), None);
+    assert!(bound(&h, "proposal:y").is_some());
+    h.restart(enabled()).unwrap();
+    assert_eq!(bound(&h, "approval:x"), None);
+    assert!(bound(&h, "proposal:y").is_some());
+    begin_stage(&mut h, "b", AUTHORIZE).unwrap();
+    outcome(&mut h, "b", committed());
+    assert_eq!(bound(&h, "proposal:y"), None);
+    assert_eq!(h.sched.approvals_len(), 0);
+}
+
+#[test]
+fn bindings_stay_after_a_failed_or_uncertain_commit() {
+    let mut h = chain();
+    let gen_b = h.generation("b");
+    bind(&mut h, "approval:x", COMMIT, "b").unwrap();
+    begin(&mut h, "b").unwrap();
+    outcome(
+        &mut h,
+        "b",
+        CommitResult::Failed {
+            reason: "refused".into(),
+        },
+    );
+    // Kept at the old generation: a request for it is still fenced (and
+    // refused as stale) until it is bound again.
+    assert_eq!(bound(&h, "approval:x"), Some((COMMIT, "b".into(), gen_b)));
+
+    let mut h = chain();
+    bind(&mut h, "approval:x", COMMIT, "b").unwrap();
+    begin(&mut h, "b").unwrap();
+    outcome(
+        &mut h,
+        "b",
+        CommitResult::Uncertain {
+            reason: "transport".into(),
+        },
+    );
+    assert!(bound(&h, "approval:x").is_some());
+}
+
+#[test]
+fn bind_refuses_bad_keys_stale_generations_and_committed_stages() {
+    let mut h = chain();
+    let gen_b = h.generation("b");
+    for key in [String::new(), "k".repeat(MAX_APPROVAL_KEY_LEN + 1)] {
+        let r = bind(&mut h, &key, COMMIT, "b");
+        assert!(matches!(r, Err(SchedError::InvalidEvent(_))), "{r:?}");
+    }
+    assert!(bind(&mut h, &"k".repeat(MAX_APPROVAL_KEY_LEN), COMMIT, "b").is_ok());
+    let r = h.send(EventKind::BindApproval {
+        key: "approval:old".into(),
+        stage: COMMIT,
+        task: "b".into(),
+        generation: gen_b + 1,
+    });
+    assert!(
+        matches!(r, Err(SchedError::FutureGeneration { .. })),
+        "{r:?}"
+    );
+    begin(&mut h, "b").unwrap();
+    outcome(&mut h, "b", committed());
+    assert!(wrong_state(&bind(&mut h, "approval:late", COMMIT, "b")));
+    assert!(bind(&mut h, "proposal:ok", AUTHORIZE, "b").is_ok());
+}
+
+#[test]
+fn the_binding_table_is_bounded_and_fails_closed() {
+    let mut h = chain();
+    for i in 0..MAX_APPROVAL_BINDINGS {
+        bind(&mut h, &format!("approval:{i}"), COMMIT, "c").unwrap();
+    }
+    assert_eq!(h.sched.approvals_len(), MAX_APPROVAL_BINDINGS);
+    let r = bind(&mut h, "approval:one-more", COMMIT, "c");
+    assert!(matches!(r, Err(SchedError::BindingsFull { .. })), "{r:?}");
+    assert_eq!(bound(&h, "approval:one-more"), None);
+    // Rebinding a held key replaces it.
+    assert!(bind(&mut h, "approval:0", COMMIT, "b").is_ok());
+    assert_eq!(h.sched.approvals_len(), MAX_APPROVAL_BINDINGS);
 }
