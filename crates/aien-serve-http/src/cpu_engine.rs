@@ -11,7 +11,7 @@ use aien_inference_abi::qwen3_coder::{
 };
 
 use crate::engine::{Engine, EngineError, FinishReason, GenerateOutcome, GenerateParams};
-use crate::sampling::sample_next;
+use crate::sampling::SamplingObserver;
 
 pub struct CpuReferenceEngine {
     weights: Qwen3CoderWeights,
@@ -64,6 +64,7 @@ impl Engine for CpuReferenceEngine {
         let prefill_ms = t0.elapsed().as_millis() as u64;
 
         let t1 = Instant::now();
+        let mut sampler = SamplingObserver::new(params);
         let mut pos = prompt.len();
         let mut emitted = 0usize;
         let finish = loop {
@@ -71,7 +72,7 @@ impl Engine for CpuReferenceEngine {
                 break FinishReason::Length;
             }
             let logits = compute_logits(&self.weights, &hidden);
-            let next = sample_next(&logits, params, emitted);
+            let next = sampler.sample(&logits, emitted);
             if params.stop_token_ids.contains(&next) {
                 break FinishReason::Stop;
             }
@@ -90,6 +91,7 @@ impl Engine for CpuReferenceEngine {
             finish,
             prefill_ms,
             decode_ms: t1.elapsed().as_millis() as u64,
+            sampling: Some(sampler.record()),
         })
     }
 }

@@ -17,7 +17,7 @@ use aien_inference_abi::qwen3_moe_omega::{self as omega, LoadReport, OmegaEngine
 
 use crate::engine::{Engine, EngineError, FinishReason, GenerateOutcome, GenerateParams};
 use crate::kv_persist::PersistState;
-use crate::sampling::sample_next;
+use crate::sampling::SamplingObserver;
 
 pub const GPU_LOCK_PATH: &str = "/tmp/aien-gb10.lock";
 /// How long `generate` waits for the chip lock before answering busy.
@@ -380,11 +380,13 @@ impl Engine for OmegaDoor {
         }
         drop(fetched);
         // The server's own sampler, so CPU and Omega engines pick tokens the same way.
-        let mut sampler = |logits: &[f32], step: usize| sample_next(logits, p, step);
+        let mut observer = SamplingObserver::new(p);
+        let mut sampler = |logits: &[f32], step: usize| observer.sample(logits, step);
         let o = self
             .engine
             .generate_with(prompt, &q, &mut sampler, on_token)
             .map_err(EngineError::Failed)?;
+        let sampling = observer.record();
         self.reused_last
             .store(o.reused_prompt_tokens, Ordering::Relaxed);
         // Park: export under the chip lock, write after it is released.
@@ -410,6 +412,7 @@ impl Engine for OmegaDoor {
             },
             prefill_ms: o.prefill_ms,
             decode_ms: o.decode_ms,
+            sampling: Some(sampling),
         })
     }
 
