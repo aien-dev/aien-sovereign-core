@@ -22,6 +22,24 @@ const IRREVERSIBLE: [OperationClass; 4] = [
     OperationClass::ExternalEffect,
 ];
 
+#[test]
+fn finalize_rechecks_the_interface_the_consumer_prepared_against() {
+    let mut h = H::new(enabled());
+    two_task(&mut h);
+    h.publish("a", 1);
+    h.work_done("b");
+    h.finish("a");
+    assert!(h.sched.may_finalize("b").is_ok());
+    // a's interface changes in the store; the event has not arrived yet.
+    h.mint_interface("a", 2);
+    assert!(matches!(
+        h.sched.may_finalize("b"),
+        Err(SchedError::Proof { .. })
+    ));
+    assert!(h.send(EventKind::Finalize { task: "b".into() }).is_err());
+    assert_eq!(state(&h, "b"), TaskState::AwaitingFinalProof);
+}
+
 fn state(h: &H, t: &str) -> TaskState {
     h.sched.state(t).unwrap()
 }
