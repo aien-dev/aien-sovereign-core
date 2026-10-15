@@ -251,6 +251,81 @@ fn cancel_redelivered_after_retry_and_window_rollover_is_refused() {
     assert_eq!(h.sched.state("b"), Some(TaskState::Blocked));
 }
 
+/// A late Retry must not undo a later Cancel of the retried generation.
+#[test]
+fn retry_redelivered_after_a_second_cancel_is_refused() {
+    let mut h = H::new(enabled());
+    h.register("a", 1, &[]);
+    h.ok(EventKind::Cancel {
+        task: "a".into(),
+        generation: 1,
+    });
+    let retry = Event {
+        id: "retry-a".into(),
+        kind: EventKind::Retry {
+            task: "a".into(),
+            generation: 1,
+        },
+    };
+    h.sched.deliver(retry.clone()).unwrap();
+    h.ok(EventKind::Cancel {
+        task: "a".into(),
+        generation: 2,
+    });
+    assert_eq!(h.sched.state("a"), Some(TaskState::Aborted));
+    let r = h.sched.deliver(retry);
+    assert!(
+        matches!(r, Err(SchedError::StaleGeneration { .. })),
+        "{r:?}"
+    );
+    assert_eq!(h.sched.state("a"), Some(TaskState::Aborted));
+    assert_eq!(h.generation("a"), 2);
+}
+
+/// Late Revoke and Finalize redeliveries must not act on a newer generation.
+#[test]
+fn revoke_and_finalize_redelivered_after_rerun_are_refused() {
+    let mut h = H::new(enabled());
+    h.register("a", 1, &[]);
+    h.register("b", 1, &["a"]);
+    h.publish("a", 1);
+    h.finish("a");
+    h.work_done("b");
+    let finalize = Event {
+        id: "fin-b".into(),
+        kind: EventKind::Finalize {
+            task: "b".into(),
+            generation: 1,
+        },
+    };
+    h.sched.deliver(finalize.clone()).unwrap();
+    let revoke = Event {
+        id: "rv-b".into(),
+        kind: EventKind::Revoke {
+            task: "b".into(),
+            generation: 1,
+            reason: "operator".into(),
+        },
+    };
+    h.sched.deliver(revoke.clone()).unwrap();
+    // b re-runs at generation 2 against the final a.
+    assert_eq!(h.sched.state("b"), Some(TaskState::Provisional));
+    let r = h.sched.deliver(revoke);
+    assert!(
+        matches!(r, Err(SchedError::StaleGeneration { .. })),
+        "{r:?}"
+    );
+    assert_eq!(h.sched.state("b"), Some(TaskState::Provisional));
+    h.work_done("b");
+    let r = h.sched.deliver(finalize);
+    assert!(
+        matches!(r, Err(SchedError::StaleGeneration { .. })),
+        "{r:?}"
+    );
+    assert_eq!(h.sched.state("b"), Some(TaskState::AwaitingFinalProof));
+    assert_eq!(h.generation("b"), 2);
+}
+
 #[test]
 fn interface_republished_at_a_new_commit_retires_the_old_receipt() {
     let mut h = H::new(enabled());
