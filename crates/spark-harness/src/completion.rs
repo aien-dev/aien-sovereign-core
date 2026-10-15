@@ -37,9 +37,16 @@
 //!   "the tree was verified clean".
 //! - The tier is `HOST_TEST`: deterministic checks executed on the host, no
 //!   hardware and no physical qualification.
-//! - If the process dies after the receipt is stored but before the consumed
-//!   record is written, a resubmission can mint a second receipt for the same
-//!   generation. The workflow state never moves to `done` in that window.
+//! - If writing the consumed record fails (or the process dies) after the
+//!   receipt is stored, an orphan PASS receipt stays in the store and a
+//!   resubmission can mint another one for the same generation. The workflow
+//!   never moves to `done` in that case, and [`verify_completion`] accepts
+//!   only the receipt the consumed record names, so at most one receipt per
+//!   task verifies at any time.
+//! - The consumed record is keyed by task and holds only the highest
+//!   completed generation. Completing a newer generation supersedes the older
+//!   one: its receipt stops verifying. Verification answers "is this the
+//!   task's current completion", which is what M2 needs.
 
 use crate::{HarnessEngine, WorkflowState, DONE_STATE};
 use aien_proof::evidence::{self, Assertion, Mutation, Receipt, Tier, Verdict};
@@ -152,6 +159,9 @@ pub enum CompletionError {
         expected: String,
         found: String,
     },
+    /// The receipt is not the task's current completion per the consumed
+    /// record (orphan receipt, superseded generation, or no record).
+    NotCurrentCompletion(String),
 }
 
 impl CompletionError {
@@ -170,6 +180,7 @@ impl CompletionError {
             CompletionError::ReceiptInvalid(_) => "receipt_invalid",
             CompletionError::NotPass(_) => "not_pass",
             CompletionError::BindingMismatch { .. } => "binding_mismatch",
+            CompletionError::NotCurrentCompletion(_) => "not_current_completion",
         }
     }
 
@@ -189,6 +200,7 @@ impl CompletionError {
             CompletionError::ReceiptInvalid(_) => -32009,
             CompletionError::NotPass(_) => -32010,
             CompletionError::BindingMismatch { .. } => -32011,
+            CompletionError::NotCurrentCompletion(_) => -32012,
         }
     }
 
@@ -254,6 +266,9 @@ impl fmt::Display for CompletionError {
             CompletionError::Store(m) => write!(f, "completion store error: {m}"),
             CompletionError::ReceiptInvalid(m) => write!(f, "receipt invalid: {m}"),
             CompletionError::NotPass(m) => write!(f, "receipt is not a PASS: {m}"),
+            CompletionError::NotCurrentCompletion(m) => {
+                write!(f, "receipt is not the current completion: {m}")
+            }
             CompletionError::BindingMismatch {
                 field,
                 expected,
@@ -733,8 +748,11 @@ fn require(field: &'static str, expected: &str, found: &str) -> Result<(), Compl
 
 /// Check that `receipt_id` in `store` is a PASS harness completion receipt
 /// bound to exactly this task, generation, source commit and artifact digest
-/// (bare BLAKE3 hex or `blake3:<hex>`). Identity is recomputed by aien-proof;
-/// see the module docs for what that does and does not prove.
+/// (bare BLAKE3 hex or `blake3:<hex>`), and that it is the task's current
+/// completion: the consumed record must name this receipt, generation and
+/// digest. Superseded generations and orphan receipts fail. Identity is
+/// recomputed by aien-proof; see the module docs for what that does and does
+/// not prove.
 pub fn verify_completion(
     store: &Path,
     receipt_id: &str,
@@ -789,13 +807,36 @@ pub fn verify_completion(
     let found_gen = single_ref(&receipt.external_refs, "generation:")?;
     require("generation", &generation.to_string(), found_gen)?;
     let workflow_id = single_ref(&receipt.external_refs, "workflow:")?;
+    // The consumed record is the authority on which receipt is the accepted
+    // completion. A PASS receipt it does not name (an orphan left by a failed
+    // record write, or a superseded generation) never verifies.
+    let digest_hex = want_digest.to_ascii_lowercase();
+    let record_path = store
+        .join(CONSUMED_DIR)
+        .join(format!("{}.json", task_key(task_id)));
+    let current = read_consumed(&record_path, task_id)?.ok_or_else(|| {
+        CompletionError::NotCurrentCompletion(format!(
+            "no consumed completion record for task '{task_id}'; receipt {} is an orphan",
+            receipt.id
+        ))
+    })?;
+    if current.receipt_id != receipt.id
+        || current.generation != generation
+        || current.artifact_digest != digest_hex
+    {
+        return Err(CompletionError::NotCurrentCompletion(format!(
+            "task '{task_id}' current completion is generation {} receipt {} digest {}; \
+             receipt {} generation {generation} digest {digest_hex} is not it",
+            current.generation, current.receipt_id, current.artifact_digest, receipt.id
+        )));
+    }
     Ok(VerifiedCompletion {
         receipt_id: receipt.id.clone(),
         task_id: task_id.to_string(),
         workflow_id: workflow_id.to_string(),
         generation,
         source_commit: receipt.commit.clone(),
-        artifact_digest: want_digest.to_ascii_lowercase(),
+        artifact_digest: digest_hex,
     })
 }
 

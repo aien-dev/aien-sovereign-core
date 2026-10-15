@@ -21,6 +21,8 @@ SOVEREIGN_CORE="$(cd "$SCRIPT_DIR/.." && pwd)"
 # Parent directory holding the <publish_dirname> checkouts. Override for a CI
 # runner or a scratch directory; defaults to the monorepo's parent.
 WORKSPACE="${AIEN_MIRROR_WORKSPACE:-$(cd "$SOVEREIGN_CORE/.." && pwd)}"
+# Git source used for monorepo path dependencies in mirrored manifests.
+MONOREPO_GIT_URL="https://github.com/aien-spark/aien-sovereign-core"
 
 # Repository mapping: <cli_name>:<crate_subpath>:<publish_dirname>
 REPOS=(
@@ -136,6 +138,8 @@ pkg_field() {
 
 # Bring the destination [package] table in line with the source: license from the
 # workspace root (single source of truth), version and edition from the source crate.
+# Also carry [dependencies] across: in-repo path deps become git deps, missing deps
+# are added (see below).
 # Pure awk, no Python. Exit 0 parity or synced, 2 disparity in check mode, 1 error.
 sync_manifest() {
   local src_manifest="$1"
@@ -174,6 +178,47 @@ sync_manifest() {
     END { flush_license() }
   ' "$dest_manifest" > "$tmp"
 
+  # [dependencies]: a source dep of the form `name = { path = "../<crate>" ... }`
+  # cannot build outside the monorepo, and Cargo refuses `path` and `git` on one
+  # dependency ("Only one of `git` or `path` is allowed", cargo 1.98.1). So it is
+  # rewritten to a git dep on this monorepo (branch main; the mirror's preserved
+  # Cargo.lock pins the exact commit) and replaces the mirror's entry. Source
+  # deps the mirror lacks are appended. Other mirror entries stay untouched.
+  local tmp_deps
+  tmp_deps=$(mktemp)
+  awk -v url="$MONOREPO_GIT_URL" '
+    function key_of(line,   k) { k = line; sub(/[[:space:]]*=.*/, "", k); gsub(/^[[:space:]]+/, "", k); return k }
+    function emit_missing(   i) { for (i = 1; i <= n; i++) if (!(keys[i] in seen)) print lines[i]; emitted = 1 }
+    FNR == NR {
+      if ($0 ~ /^[[:space:]]*\[/) { in_src = ($0 ~ /^[[:space:]]*\[dependencies\][[:space:]]*$/); next }
+      if (in_src && $0 ~ /^[[:space:]]*[A-Za-z0-9_-]+[[:space:]]*=/) {
+        line = $0
+        if (line ~ /path[[:space:]]*=[[:space:]]*"\.\.\//) {
+          gsub(/path[[:space:]]*=[[:space:]]*"\.\.\/[^"]*"/, "git = \"" url "\", branch = \"main\"", line)
+          rewritten[key_of(line)] = line
+        }
+        n++; keys[n] = key_of(line); lines[n] = line
+      }
+      next
+    }
+    /^[[:space:]]*\[/ {
+      if (in_dst && !emitted) emit_missing()
+      in_dst = ($0 ~ /^[[:space:]]*\[dependencies\][[:space:]]*$/)
+      if (in_dst) has_dst = 1
+      print; next
+    }
+    in_dst && /^[[:space:]]*[A-Za-z0-9_-]+[[:space:]]*=/ {
+      k = key_of($0); seen[k] = 1
+      if (k in rewritten) { print rewritten[k]; next }
+    }
+    { print }
+    END {
+      if (in_dst && !emitted) emit_missing()
+      else if (!has_dst && n > 0) { print ""; print "[dependencies]"; emit_missing() }
+    }
+  ' "$src_manifest" "$tmp" > "$tmp_deps"
+  mv "$tmp_deps" "$tmp"
+
   if cmp -s "$tmp" "$dest_manifest"; then
     rm -f "$tmp"
     echo "[PARITY OK] Manifest $dest_manifest in parity (license = $license_id)"
@@ -181,7 +226,7 @@ sync_manifest() {
   fi
   if [[ "$is_check" == "true" ]]; then
     rm -f "$tmp"
-    echo "[DISPARITY] $dest_manifest requires manifest update (license $license_id or version/edition)"
+    echo "[DISPARITY] $dest_manifest requires manifest update (license $license_id, version/edition or dependencies)"
     return 2
   fi
   mv "$tmp" "$dest_manifest"

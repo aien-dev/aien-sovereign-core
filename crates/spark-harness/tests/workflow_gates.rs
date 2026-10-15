@@ -835,3 +835,202 @@ fn mcp_success_returns_record_and_done_state() {
     let digest = out["record"]["artifact_digest"].as_str().unwrap();
     assert!(verify_completion(&engine.completion_store, id, "mcp-task", 1, COMMIT, digest).is_ok());
 }
+
+// ---------- consumed record is the authority (inspector finding 1) ----------
+
+fn consumed_records(engine: &HarnessEngine) -> Vec<PathBuf> {
+    let dir = engine.completion_store.join("completions");
+    fs::read_dir(&dir)
+        .map(|it| {
+            it.flatten()
+                .map(|e| e.path())
+                .filter(|p| p.extension().is_some_and(|e| e == "json"))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn assert_not_current(r: Result<spark_harness::completion::VerifiedCompletion, CompletionError>) {
+    match r {
+        Err(CompletionError::NotCurrentCompletion(_)) => {}
+        other => panic!("expected NotCurrentCompletion, got {other:?}"),
+    }
+}
+
+/// Real write failure: the consumed-record directory is read-only, so
+/// write_consumed fails after store_receipt succeeded.
+#[test]
+fn orphan_receipt_from_failed_record_write_never_verifies() {
+    use std::os::unix::fs::PermissionsExt;
+    let fx = Fixture::new();
+    let engine = fx.engine();
+    let dir = engine.completion_store.join("completions");
+    fs::create_dir_all(&dir).unwrap();
+    fs::File::create(dir.join(".lock")).unwrap();
+    fs::set_permissions(&dir, fs::Permissions::from_mode(0o555)).unwrap();
+    let probe = dir.join("probe");
+    if fs::File::create(&probe).is_ok() {
+        // Running with permission override (root): the injection cannot work.
+        let _ = fs::remove_file(&probe);
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).unwrap();
+        eprintln!("skipping permission injection: directory stayed writable");
+        return;
+    }
+
+    let art_a = python_result_artifact();
+    let mut wf = wf_at("python_pipeline", "deliver");
+    let err = engine
+        .complete_verified_workflow(&mut wf, &sub("orphan", 1, art_a.clone()))
+        .unwrap_err();
+    fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(matches!(err, CompletionError::Store(_)), "{err:?}");
+    assert_eq!(
+        wf.current_state, "deliver",
+        "no done without a consumed record"
+    );
+    let ids = evidence::list_receipts(&engine.completion_store);
+    assert_eq!(ids.len(), 1);
+    let orphan = ids[0].clone();
+    let r = evidence::load_receipt(&engine.completion_store, &orphan).unwrap();
+    assert_eq!(
+        r.result,
+        Verdict::Pass,
+        "the orphan is a well-formed PASS receipt"
+    );
+    assert_not_current(verify_completion(
+        &engine.completion_store,
+        &orphan,
+        "orphan",
+        1,
+        COMMIT,
+        &artifact_digest(&art_a),
+    ));
+
+    // Resubmit the same generation with a different artifact.
+    let mut art_b = python_result_artifact();
+    art_b["stdout"] = json!("six\n");
+    let mut wf2 = wf_at("python_pipeline", "deliver");
+    let rec = engine
+        .complete_verified_workflow(&mut wf2, &sub("orphan", 1, art_b.clone()))
+        .unwrap();
+    assert_eq!(receipt_count(&engine), 2);
+    // Exactly one of the two PASS receipts verifies.
+    assert_not_current(verify_completion(
+        &engine.completion_store,
+        &orphan,
+        "orphan",
+        1,
+        COMMIT,
+        &artifact_digest(&art_a),
+    ));
+    assert!(verify_completion(
+        &engine.completion_store,
+        &rec.receipt_id,
+        "orphan",
+        1,
+        COMMIT,
+        &artifact_digest(&art_b)
+    )
+    .is_ok());
+}
+
+/// Simulated write failure: the consumed record vanishes after a completion.
+#[test]
+fn receipt_without_consumed_record_never_verifies() {
+    let (_fx, engine, id, digest) = completed();
+    for p in consumed_records(&engine) {
+        fs::remove_file(p).unwrap();
+    }
+    assert_not_current(verify_completion(
+        &engine.completion_store,
+        &id,
+        "verify-me",
+        7,
+        COMMIT,
+        &digest,
+    ));
+}
+
+#[test]
+fn corrupt_consumed_record_blocks_verification() {
+    let (_fx, engine, id, digest) = completed();
+    for p in consumed_records(&engine) {
+        fs::write(p, "garbage").unwrap();
+    }
+    let err = verify_completion(
+        &engine.completion_store,
+        &id,
+        "verify-me",
+        7,
+        COMMIT,
+        &digest,
+    )
+    .unwrap_err();
+    assert!(matches!(err, CompletionError::Store(_)), "{err:?}");
+}
+
+#[test]
+fn superseded_generation_stops_verifying() {
+    let fx = Fixture::new();
+    let engine = fx.engine();
+    let art = engineering_fix_artifact();
+    let mut wf1 = wf_at("engineering_fix", "review");
+    let r1 = engine
+        .complete_verified_workflow(&mut wf1, &sub("super", 1, art.clone()))
+        .unwrap();
+    assert!(verify_completion(
+        &engine.completion_store,
+        &r1.receipt_id,
+        "super",
+        1,
+        COMMIT,
+        &r1.artifact_digest
+    )
+    .is_ok());
+    let mut wf2 = wf_at("engineering_fix", "review");
+    let r2 = engine
+        .complete_verified_workflow(&mut wf2, &sub("super", 2, art))
+        .unwrap();
+    assert_not_current(verify_completion(
+        &engine.completion_store,
+        &r1.receipt_id,
+        "super",
+        1,
+        COMMIT,
+        &r1.artifact_digest,
+    ));
+    assert!(verify_completion(
+        &engine.completion_store,
+        &r2.receipt_id,
+        "super",
+        2,
+        COMMIT,
+        &r2.artifact_digest
+    )
+    .is_ok());
+}
+
+// ---------- deterministic-kind guard (inspector finding 3) ----------
+
+#[test]
+fn executable_eval_marked_judgment_is_refused() {
+    let fx = Fixture::new();
+    let mut engine = fx.engine();
+    // run_eval can execute required_evidence and would pass this artifact;
+    // only the kind guard can refuse it.
+    let art = python_result_artifact();
+    assert!(engine.run_eval("required_evidence", &art).passed);
+    engine.evals.get_mut("required_evidence").unwrap()["kind"] = json!("judgment");
+    let mut wf = wf_at("python_pipeline", "deliver");
+    let err = engine
+        .complete_verified_workflow(&mut wf, &sub("kind", 1, art))
+        .unwrap_err();
+    let (_, failures) = gate_failures(err);
+    assert!(
+        failures
+            .iter()
+            .any(|f| f.starts_with("eval:required_evidence") && f.contains("judgment")),
+        "{failures:?}"
+    );
+    assert_eq!(wf.current_state, "deliver");
+}
