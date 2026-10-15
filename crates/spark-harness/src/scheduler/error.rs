@@ -33,6 +33,13 @@ pub enum SchedError {
     },
     Transition(IllegalTransition),
     LeaseExpired(String),
+    /// A heartbeat whose beat number is not above the last accepted one
+    /// for the current lease (a redelivery or a reordered beat).
+    StaleHeartbeat {
+        task: String,
+        beat: u64,
+        last: u64,
+    },
     /// The same event id was delivered with a different payload.
     EventIdConflict(String),
     UnknownOperation(UnknownOperation),
@@ -95,6 +102,10 @@ impl fmt::Display for SchedError {
             } => write!(f, "task '{task}' is {}; cannot {action}", state.as_str()),
             SchedError::Transition(e) => write!(f, "{e}"),
             SchedError::LeaseExpired(t) => write!(f, "lease of task '{t}' expired"),
+            SchedError::StaleHeartbeat { task, beat, last } => write!(
+                f,
+                "heartbeat {beat} for task '{task}' is not above the last accepted beat {last}"
+            ),
             SchedError::EventIdConflict(id) => {
                 write!(f, "event id '{id}' was already used for a different event")
             }

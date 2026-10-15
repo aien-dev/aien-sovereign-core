@@ -11,7 +11,7 @@ use spark_harness::readiness::{
     verify_interface, InterfaceSubmission, OperationClass, ReadinessLevel,
 };
 use spark_harness::scheduler::{
-    Event, EventKind, Outcome, Revocation, SchedError, RESERVED_ID_PREFIX,
+    Event, EventKind, Outcome, ProvisionalConfig, Revocation, SchedError, RESERVED_ID_PREFIX,
 };
 
 fn remove_receipt(h: &H, receipt_id: &str) {
@@ -30,7 +30,11 @@ fn heartbeat_after_lease_expiry_is_refused() {
     h.register("a", 1, &[]);
     h.advance(1_000);
     // No Tick has run yet, so a is still Provisional, but its lease is gone.
-    let r = h.send(EventKind::Heartbeat { task: "a".into() });
+    let r = h.send(EventKind::Heartbeat {
+        task: "a".into(),
+        generation: h.generation("a"),
+        beat: 1,
+    });
     assert!(matches!(r, Err(SchedError::LeaseExpired(_))), "{r:?}");
     assert_eq!(h.sched.state("a"), Some(TaskState::Provisional));
     let fx = h.ok(EventKind::Tick);
@@ -58,7 +62,12 @@ fn finalize_rechecks_the_whole_ancestor_chain() {
         matches!(r, Err(SchedError::Proof { ref task, .. }) if task == "a"),
         "{r:?}"
     );
-    assert!(h.send(EventKind::Finalize { task: "c".into() }).is_err());
+    assert!(h
+        .send(EventKind::Finalize {
+            task: "c".into(),
+            generation: h.generation("c")
+        })
+        .is_err());
     assert_eq!(h.sched.state("c"), Some(TaskState::AwaitingFinalProof));
 }
 
@@ -168,9 +177,22 @@ fn duplicate_memory_is_bounded() {
         Err(SchedError::StaleGeneration { .. })
     ));
     assert_eq!(h.sched.snapshot(), before);
-    // Generation-free events live in a window of `dedup_window` ids.
-    for _ in 0..500 {
-        h.ok(EventKind::Heartbeat { task: "a".into() });
+    // Heartbeats live in a window of `dedup_window` ids, however many come.
+    let first = Event {
+        id: "beat-1".into(),
+        kind: EventKind::Heartbeat {
+            task: "a".into(),
+            generation: 2,
+            beat: 1,
+        },
+    };
+    h.sched.deliver(first.clone()).unwrap();
+    for beat in 2..=500 {
+        h.ok(EventKind::Heartbeat {
+            task: "a".into(),
+            generation: 2,
+            beat,
+        });
     }
     let window = enabled().dedup_window;
     assert!(
@@ -178,6 +200,55 @@ fn duplicate_memory_is_bounded() {
         "{} ids remembered",
         h.sched.remembered_event_ids()
     );
+    // The first beat left the window long ago; redelivered, it is refused
+    // by its beat number and the lease is not renewed.
+    let before = h.sched.snapshot();
+    let r = h.sched.deliver(first);
+    assert!(matches!(r, Err(SchedError::StaleHeartbeat { .. })), "{r:?}");
+    assert_eq!(h.sched.snapshot(), before);
+}
+
+/// Inspector reproduction: with a tiny window, a Cancel redelivered after
+/// the task was retried and the window rolled over must not abort again.
+#[test]
+fn cancel_redelivered_after_retry_and_window_rollover_is_refused() {
+    let mut h = H::new(ProvisionalConfig {
+        dedup_window: 4,
+        ..enabled()
+    });
+    h.register("a", 1, &[]);
+    h.register("b", 1, &["a"]);
+    let cancel = Event {
+        id: "cancel-a".into(),
+        kind: EventKind::Cancel {
+            task: "a".into(),
+            generation: 1,
+        },
+    };
+    let fx = match h.sched.deliver(cancel.clone()) {
+        Ok(Outcome::Applied(fx)) => fx,
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(fx.aborted, vec!["a", "b"]);
+    for t in ["a", "b"] {
+        h.ok(EventKind::Retry {
+            task: t.into(),
+            generation: 1,
+        });
+    }
+    for _ in 0..6 {
+        h.ok(EventKind::Tick);
+    }
+    assert_eq!(h.sched.state("a"), Some(TaskState::Provisional));
+    let before = h.sched.snapshot();
+    let r = h.sched.deliver(cancel);
+    assert!(
+        matches!(r, Err(SchedError::StaleGeneration { .. })),
+        "{r:?}"
+    );
+    assert_eq!(h.sched.snapshot(), before);
+    assert_eq!(h.sched.state("a"), Some(TaskState::Provisional));
+    assert_eq!(h.sched.state("b"), Some(TaskState::Blocked));
 }
 
 #[test]

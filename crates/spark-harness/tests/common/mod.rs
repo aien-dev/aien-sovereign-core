@@ -281,7 +281,11 @@ impl H {
     }
 
     pub fn finalize(&mut self, task: &str) -> Effects {
-        self.ok(EventKind::Finalize { task: task.into() })
+        let generation = self.generation(task);
+        self.ok(EventKind::Finalize {
+            task: task.into(),
+            generation,
+        })
     }
 
     /// Work done, finalize, then the M1 completion: the task becomes final

@@ -63,20 +63,32 @@ pub enum EventKind {
         generation: u64,
         result_digest: String,
     },
+    // The task-directed events below carry the task's current generation,
+    // like the proof events above: a redelivery after the task moved on is
+    // refused as stale, so duplicate detection never depends on a window.
     Finalize {
         task: String,
+        generation: u64,
     },
+    /// `beat` must rise with every heartbeat of one lease (start at 1), so
+    /// a redelivered heartbeat is refused without remembering its id.
     Heartbeat {
         task: String,
+        generation: u64,
+        beat: u64,
     },
     Cancel {
         task: String,
+        generation: u64,
     },
+    /// `generation` is the aborted generation; the retry runs at the next.
     Retry {
         task: String,
+        generation: u64,
     },
     Revoke {
         task: String,
+        generation: u64,
         reason: String,
     },
     /// Emitted only by `Scheduler::audit` (callers cannot deliver it):
@@ -142,6 +154,8 @@ pub struct TaskEntry {
     pub completion: Option<ProofClaim>,
     pub bindings: BTreeMap<String, Binding>,
     pub lease_expires_at: Option<u64>,
+    /// Highest heartbeat beat accepted for the current lease.
+    pub last_beat: u64,
     pub provisional_result: Option<String>,
     pub queued: bool,
     pub last_reason: Option<String>,
@@ -158,6 +172,7 @@ impl TaskEntry {
             completion: None,
             bindings: BTreeMap::new(),
             lease_expires_at: None,
+            last_beat: 0,
             provisional_result: None,
             queued: false,
             last_reason: None,
@@ -426,6 +441,9 @@ impl Core {
                 t.queued = false;
                 t.bindings = bindings;
                 t.lease_expires_at = Some(at.saturating_add(cfg.lease_ttl));
+                // One lease per generation: leaving Provisional always ends
+                // in a new generation before the next dispatch.
+                t.last_beat = 0;
                 t.timing.dispatches += 1;
                 t.timing.first_dispatch_at.get_or_insert(at);
                 fx.dispatched.push(head);
@@ -551,7 +569,8 @@ impl Core {
                 self.set_state(task, TaskState::AwaitingFinalProof, at)?;
                 self.task_mut(task)?.provisional_result = Some(result_digest.clone());
             }
-            EventKind::Finalize { task } => {
+            EventKind::Finalize { task, generation } => {
+                self.require_generation(task, *generation)?;
                 self.require_state(task, |s| s == TaskState::AwaitingFinalProof, "finalize")?;
                 for p in self.graph.producers_of(task) {
                     let pt = self.task(p)?;
@@ -567,15 +586,29 @@ impl Core {
                 self.set_state(task, TaskState::Committable, at)?;
                 self.task_mut(task)?.timing.committable_at = Some(at);
             }
-            EventKind::Heartbeat { task } => {
+            EventKind::Heartbeat {
+                task,
+                generation,
+                beat,
+            } => {
+                self.require_generation(task, *generation)?;
                 self.require_state(task, |s| s == TaskState::Provisional, "heartbeat")?;
                 let t = self.task_mut(task)?;
                 if !t.lease_valid(at) {
                     return Err(SchedError::LeaseExpired(task.clone()));
                 }
+                if *beat <= t.last_beat {
+                    return Err(SchedError::StaleHeartbeat {
+                        task: task.clone(),
+                        beat: *beat,
+                        last: t.last_beat,
+                    });
+                }
+                t.last_beat = *beat;
                 t.lease_expires_at = Some(at.saturating_add(cfg.lease_ttl));
             }
-            EventKind::Cancel { task } => {
+            EventKind::Cancel { task, generation } => {
+                self.require_generation(task, *generation)?;
                 self.require_state(task, |s| s != TaskState::Aborted, "cancel")?;
                 self.abort(task, at, "cancelled", &mut fx)?;
                 for d in self.graph.descendants(task) {
@@ -584,14 +617,20 @@ impl Core {
                     }
                 }
             }
-            EventKind::Retry { task } => {
+            EventKind::Retry { task, generation } => {
+                self.require_generation(task, *generation)?;
                 self.require_state(task, |s| s == TaskState::Aborted, "retry")?;
                 self.set_state(task, TaskState::Blocked, at)?;
                 let t = self.task_mut(task)?;
                 t.generation += 1;
                 Self::clear_work(t, "retry");
             }
-            EventKind::Revoke { task, reason } => {
+            EventKind::Revoke {
+                task,
+                generation,
+                reason,
+            } => {
+                self.require_generation(task, *generation)?;
                 self.require_state(task, TaskState::is_active, "be revoked")?;
                 let next = self.task(task)?.generation + 1;
                 self.reset_to_blocked(task, next, at, reason, &mut fx)?;

@@ -40,7 +40,8 @@ impl Scheduler {
                 self.core.require_generation(task, *generation)?;
                 verify_final(&self.store, task, *generation, claim).map_err(proof(task))?;
             }
-            EventKind::Finalize { task } => {
+            EventKind::Finalize { task, generation } => {
+                self.core.require_generation(task, *generation)?;
                 self.may_finalize(task)?;
             }
             _ => {}

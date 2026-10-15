@@ -93,6 +93,10 @@ pub fn monotonic_clock() -> Clock {
 }
 
 pub const JOURNAL_FORMAT: &str = "spark-harness-provisional-journal";
+/// Version 2: task-directed events carry a generation and heartbeats a
+/// beat number. A version 1 journal
+/// fails the header check on open and is never replayed.
+pub const JOURNAL_VERSION: u64 = 2;
 pub const TRACE_SCHEMA: &str = "spark-harness-provisional-trace";
 /// Event ids starting with this are reserved for events the scheduler
 /// emits itself (the audit). [`Scheduler::deliver`] refuses them.
@@ -208,7 +212,8 @@ impl Scheduler {
         clock: Clock,
     ) -> Result<(Unaudited, ReplayReport), SchedError> {
         let mut s = Scheduler::new(cfg, store, clock)?;
-        let header = json!({ "format": JOURNAL_FORMAT, "version": 1, "config": s.cfg });
+        let header =
+            json!({ "format": JOURNAL_FORMAT, "version": JOURNAL_VERSION, "config": s.cfg });
         let opened =
             Journal::open::<JournalEntry>(journal, &header).map_err(SchedError::Journal)?;
         for entry in &opened.entries {

@@ -36,7 +36,12 @@ fn finalize_rechecks_the_interface_the_consumer_prepared_against() {
         h.sched.may_finalize("b"),
         Err(SchedError::Proof { .. })
     ));
-    assert!(h.send(EventKind::Finalize { task: "b".into() }).is_err());
+    assert!(h
+        .send(EventKind::Finalize {
+            task: "b".into(),
+            generation: h.generation("b")
+        })
+        .is_err());
     assert_eq!(state(&h, "b"), TaskState::AwaitingFinalProof);
 }
 
@@ -94,7 +99,10 @@ fn two_task_dag_overlaps_preparation_then_finalizes_on_final_proof() {
         Err(SchedError::ProducerNotFinal { .. })
     ));
     assert!(matches!(
-        h.send(EventKind::Finalize { task: "b".into() }),
+        h.send(EventKind::Finalize {
+            task: "b".into(),
+            generation: h.generation("b")
+        }),
         Err(SchedError::ProducerNotFinal { .. })
     ));
 
@@ -134,7 +142,12 @@ fn three_task_chain_prepares_concurrently_and_finalizes_in_order() {
     }
     // b finished and completed but a is not final: b is not final for c.
     h.work_done("b");
-    assert!(h.send(EventKind::Finalize { task: "b".into() }).is_err());
+    assert!(h
+        .send(EventKind::Finalize {
+            task: "b".into(),
+            generation: h.generation("b")
+        })
+        .is_err());
     h.finish("a");
     h.finalize("b");
     h.complete("b");
@@ -281,7 +294,10 @@ fn cancellation_propagates_to_descendants_and_frees_permits() {
     h.register("d", 1, &[]);
     h.publish("a", 1);
     h.publish("b", 1);
-    let fx = h.ok(EventKind::Cancel { task: "a".into() });
+    let fx = h.ok(EventKind::Cancel {
+        task: "a".into(),
+        generation: h.generation("a"),
+    });
     assert_eq!(fx.aborted, vec!["a", "b", "c"]);
     for t in ["a", "b", "c"] {
         assert_eq!(state(&h, t), TaskState::Aborted);
@@ -392,8 +408,16 @@ fn retry_after_failure_runs_to_committable() {
         generation: 1,
         reason: "flaky".into(),
     });
-    assert!(h.send(EventKind::Retry { task: "b".into() }).is_err());
-    let fx = h.ok(EventKind::Retry { task: "a".into() });
+    assert!(h
+        .send(EventKind::Retry {
+            task: "b".into(),
+            generation: h.generation("b")
+        })
+        .is_err());
+    let fx = h.ok(EventKind::Retry {
+        task: "a".into(),
+        generation: h.generation("a"),
+    });
     assert_eq!(fx.dispatched, vec!["a"]);
     assert_eq!(h.generation("a"), 2);
     h.publish("a", 1);
@@ -634,7 +658,11 @@ fn leases_expire_into_abort_and_heartbeats_renew() {
     two_task(&mut h);
     h.publish("a", 1);
     h.advance(900);
-    h.ok(EventKind::Heartbeat { task: "a".into() });
+    h.ok(EventKind::Heartbeat {
+        task: "a".into(),
+        generation: h.generation("a"),
+        beat: 1,
+    });
     h.advance(900);
     assert!(h.sched.may_start("a", OperationClass::Commit).is_ok());
     h.advance(200);

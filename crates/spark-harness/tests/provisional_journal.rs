@@ -70,6 +70,23 @@ fn torn_last_line_is_ignored_and_truncated() {
 }
 
 #[test]
+fn version_1_journal_is_refused() {
+    let mut h = H::journaled(enabled());
+    scenario(&mut h);
+    let path = h.fx.journal();
+    let text = fs::read_to_string(&path).unwrap();
+    assert!(text.lines().next().unwrap().contains("\"version\":2"));
+    let old = text.replacen("\"version\":2", "\"version\":1", 1);
+    fs::write(&path, &old).unwrap();
+    let r = h.reopen(enabled());
+    assert!(
+        matches!(r, Err(SchedError::Journal(ref m)) if m.contains("header mismatch")),
+        "{r:?}"
+    );
+    assert_eq!(fs::read_to_string(&path).unwrap(), old);
+}
+
+#[test]
 fn refused_journal_is_not_truncated() {
     let mut h = H::journaled(enabled());
     scenario(&mut h);
@@ -128,7 +145,7 @@ fn forged_finalize_in_the_journal_fails_replay() {
         "seq": last["seq"].as_u64().unwrap() + 1,
         "id": "forged",
         "at": last["at"],
-        "kind": { "type": "finalize", "task": "b" },
+        "kind": { "type": "finalize", "task": "b", "generation": 1 },
     });
     let mut f = OpenOptions::new().append(true).open(&path).unwrap();
     writeln!(f, "{forged}").unwrap();
@@ -199,7 +216,12 @@ fn replay_never_turns_provisional_work_committable() {
     h.reopen(enabled()).unwrap();
     assert_eq!(h.sched.state("b"), Some(TaskState::AwaitingFinalProof));
     assert!(h.sched.may_finalize("b").is_err());
-    assert!(h.send(EventKind::Finalize { task: "b".into() }).is_err());
+    assert!(h
+        .send(EventKind::Finalize {
+            task: "b".into(),
+            generation: h.generation("b")
+        })
+        .is_err());
     assert!(h.sched.audit().unwrap().is_empty());
 }
 

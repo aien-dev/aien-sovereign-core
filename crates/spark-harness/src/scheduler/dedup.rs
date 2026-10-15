@@ -1,17 +1,21 @@
 //! Bounded memory of applied event ids, for idempotent redelivery.
 //!
 //! Two scopes keep it bounded:
-//! - Generation-bound events (`InterfacePublished`, `CompletionVerified`,
-//!   `NewGeneration`, `ProducerFailed`, `WorkDone`) are remembered under
-//!   their task and generation. When the task moves to a higher generation
-//!   the older buckets are dropped: a redelivery of such an event is then
-//!   refused as a stale generation instead of reported as a duplicate, and
-//!   either way it changes nothing.
-//! - Every other event is remembered in a FIFO window of
-//!   `ProvisionalConfig::dedup_window` ids. A redelivery older than the
-//!   window is treated as a new event, so callers must not redeliver
-//!   generation-free events (`Cancel`, `Retry`, `Heartbeat`, ...) after more
-//!   than that many newer ones.
+//! - Every task-directed event carries the task's generation and is
+//!   remembered under that task and generation. When the task moves to a
+//!   higher generation the older buckets are dropped: a redelivery of such
+//!   an event is then refused as a stale generation instead of reported as
+//!   a duplicate, and either way it changes nothing. Each of these events
+//!   happens at most a few times per generation, so a bucket stays small.
+//! - The rest is remembered in a FIFO window of
+//!   `ProvisionalConfig::dedup_window` ids, and each stays safe when a
+//!   redelivery arrives after its id left the window: `RegisterTask` and
+//!   `AddDependency` are refused (duplicate node or edge), `Heartbeat` is
+//!   refused because its beat number is not above the last accepted one
+//!   (heartbeats are the one task-directed event that repeats without
+//!   bound, so they are not kept per generation), a repeated `Tick` only
+//!   re-checks leases, and `AuditRevoke` ids are reserved and never
+//!   redelivered.
 //!
 //! Pruning is deterministic, so a journal replay rebuilds the same memory.
 
@@ -44,8 +48,18 @@ pub(crate) fn generation_scope(kind: &EventKind) -> Option<(&str, u64)> {
         }
         | EventKind::WorkDone {
             task, generation, ..
+        }
+        | EventKind::Finalize { task, generation }
+        | EventKind::Cancel { task, generation }
+        | EventKind::Retry { task, generation }
+        | EventKind::Revoke {
+            task, generation, ..
         } => Some((task.as_str(), *generation)),
-        _ => None,
+        EventKind::RegisterTask { .. }
+        | EventKind::AddDependency { .. }
+        | EventKind::Heartbeat { .. }
+        | EventKind::AuditRevoke { .. }
+        | EventKind::Tick => None,
     }
 }
 
