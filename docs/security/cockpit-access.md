@@ -41,6 +41,6 @@ Store `AIEN_COCKPIT_TOKEN` and `AIEN_MAIL_API_TOKEN` with `atlas-vault add <NAME
 - Every route except `/login` and `/auth/session` needs either `Authorization: Bearer <token>` or a signed-in browser session. Browser sessions are random, HttpOnly, SameSite=Strict cookies with a server-enforced one-hour lifetime; HTTPS origins also get Secure cookies.
 - Browser mutations (anything other than GET/HEAD) and terminal upgrades additionally need an allowed Origin. A request carrying a foreign Origin gets 403.
 - The terminal (`/ws/terminal`) keeps its own check on top: exact loopback Origin and a loopback peer address. Remote origins cannot open a shell.
-- Health reads stay open for local monitors: `GET /api/pulse` and `GET /api/status` answer without a token, but only when the request's Host is `127.0.0.1`, `localhost` or `[::1]` (blocks DNS-rebinding pages) and it carries no foreign Origin. aien-cli, spark-debugger, spark-supervisor and bench_inference_stack only use these reads.
+- Health reads stay open for local monitors: `GET /api/pulse` and `GET /api/status` answer without a token, but only when the request's Host is `127.0.0.1`, `localhost` or `[::1]` (blocks DNS-rebinding pages) and it carries no foreign Origin. aien-cli, spark-debugger and spark-supervisor only use these reads.
 
 The token authorizes the operator's administrative surface, not an untrusted agent principal.

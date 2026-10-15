@@ -86,7 +86,7 @@ layers (cosine about 0.9991) than on layer 0 (about 0.9998).
 Official layer 0, seed 42, two warmups and five timed runs per point, median
 milliseconds for the whole routed layer (routing, grouping, both FP8 GEMMs,
 SwiGLU, quantization and reduction). Receipt:
-`receipts/gb10_qwen3_a3b_layer0_mojo_fp8_curve_2026-09-23.json`.
+`gb10_qwen3_a3b_layer0_mojo_fp8_curve_2026-09-23.json`.
 
 | Tokens | This library | Earlier MAX graph, FP8 | Earlier MAX graph, BF16 |
 | ---: | ---: | ---: | ---: |
@@ -105,7 +105,7 @@ device synchronize with input resident; the earlier driver also copied the
 BF16 output back to the host. Read the comparison as indicative. Tokens per
 second here is one layer only; the model has 48 plus attention.
 
-The receipt in `receipts/gb10_qwen3_a3b_layer0_fp8_curve_2026-09-23.json` is
+The receipt in `gb10_qwen3_a3b_layer0_fp8_curve_2026-09-23.json` is
 the earlier MAX-graph measurement, kept for its BF16 grouped-GEMM baseline.
 That baseline depended on the Python MAX graph API and is no longer built.
 

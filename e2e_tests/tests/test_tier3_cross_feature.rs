@@ -1,5 +1,5 @@
 //! Tier 3: Cross-Feature Interactions Test Suite.
-//! Tests pairwise integration and cross-module contracts across all 18 feature pairs (P1 to P18).
+//! Tests pairwise integration and cross-module contracts across the remaining feature pairs (P1 to P18; P11 and P13 to P15 were removed with Mojo).
 
 use aien_inference_abi::checkpoint::{
     encode_fp32_to_bf16, parse_safetensors_with_catalog, CheckpointError,

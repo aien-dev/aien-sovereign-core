@@ -134,7 +134,7 @@ pub fn render_walkthrough_tui() -> String {
         "[ JSpace Judge: 18082 ]".bold().yellow(),
         "[ Cortex Memory: 18080 ]".bold().magenta()
     ));
-    out.push_str("│   (Nemotron-3.5 30B BF16)        (Llama-3.2 1B CPU MAX)      (Postgres socket 15433) │\n");
+    out.push_str("│   (Nemotron-3.5 30B BF16)        (Llama-3.2 1B CPU)          (Postgres socket 15433) │\n");
     out.push_str(
         "│                                                                              │\n",
     );

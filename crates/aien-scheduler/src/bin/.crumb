@@ -8,11 +8,6 @@
   "below": [
     {
       "item_type": "file",
-      "name": "bench_inference_stack.rs",
-      "role": ""
-    },
-    {
-      "item_type": "file",
       "name": "stress_aien_live.rs",
       "role": ""
     }

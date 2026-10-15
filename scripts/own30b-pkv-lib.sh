@@ -4,7 +4,7 @@
 # Rules every caller inherits:
 #   - refuses while the live server on :18091 answers (no override: two omega processes on
 #     the chip at once is UNKNOWN territory), and refuses an occupied port (PKV_CHECK_PORT,
-#     default 18098; never 18091, 18092, 18095 or 18097, which belong to other services);
+#     default 18098; never 18091, 18092 or 18095, which belong to other services);
 #   - starts its own aien-serve-http only on 127.0.0.1:$PORT, stops only the PID it started;
 #   - key: atlas-vault entry AIEN_KV_STORE_KEY by default (`atlas-vault run AIEN_KV_STORE_KEY
 #     --`, the key never passes through this shell), or PKV_CHECK_EPHEMERAL_KEY=1 for a
@@ -15,7 +15,7 @@
 PKV_LIVE_PORT=18091
 MODEL=${OWN30B_MODEL_DIR:-$HOME/models/qwen3-30b-a3b-instruct-2507-fp8}
 PORT=${PKV_CHECK_PORT:-18098}
-PKV_RESERVED_PORTS="18091 18092 18095 18097" # live 30B, spark-mail, spark-cockpit, Qwen3-8B MAX
+PKV_RESERVED_PORTS="18091 18092 18095" # live 30B, spark-mail, spark-cockpit
 pkv_port_reserved() { case " $PKV_RESERVED_PORTS " in *" $1 "*) return 0 ;; esac; return 1; }
 base="http://127.0.0.1:$PORT"
 DRY=0

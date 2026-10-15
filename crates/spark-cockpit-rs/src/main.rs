@@ -2460,7 +2460,7 @@ async fn handle_chat_stream(
         Err(e) => {
             return (
                 StatusCode::BAD_GATEWAY,
-                Json(json!({"error": format!("MAX model seat error: {}", e)})),
+                Json(json!({"error": format!("Model seat error: {}", e)})),
             )
                 .into_response();
         }
@@ -3085,7 +3085,7 @@ async fn handle_engine_status(State(state): State<AppState>) -> Json<Value> {
     Json(json!({
         "status": if is_online { "online" } else { "offline" },
         "latency_ms": latency_ms,
-        "active_engine": "MAX Native Engine",
+        "active_engine": "Local model seat",
         "active_model": "nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16",
         "device": "Grace Blackwell GB10 (Dual GPU)",
         "port": 18006,
@@ -3634,7 +3634,7 @@ mod tests {
         let status_str = status["status"].as_str().unwrap();
         assert!(status_str == "online" || status_str == "offline");
         assert!(status["latency_ms"].as_u64().is_some());
-        assert_eq!(status["active_engine"], "MAX Native Engine");
+        assert_eq!(status["active_engine"], "Local model seat");
         assert_eq!(
             status["active_model"],
             "nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16"

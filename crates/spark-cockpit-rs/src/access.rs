@@ -119,7 +119,7 @@ impl Access {
 }
 
 /// Read-only health routes that local monitors (aien-cli, spark-debugger,
-/// spark-supervisor, bench_inference_stack) poll without credentials. GET/HEAD
+/// spark-supervisor) poll without credentials. GET/HEAD
 /// only, and only when the Host header names the loopback listener, so a
 /// DNS-rebinding page cannot read them through a foreign hostname.
 const PUBLIC_READ_ROUTES: &[&str] = &["/api/pulse", "/api/status"];
