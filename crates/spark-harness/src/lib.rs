@@ -5,6 +5,11 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 pub mod completion;
+pub mod dependency;
+pub mod execution;
+pub mod journal;
+pub mod readiness;
+pub mod scheduler;
 
 /// The terminal workflow state. Since Headstart M1 (#533) it is reachable
 /// only through [`HarnessEngine::complete_verified_workflow`], never through

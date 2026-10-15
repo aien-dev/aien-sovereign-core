@@ -337,14 +337,14 @@ pub fn artifact_digest(artifact: &Value) -> String {
 }
 
 /// File name key for a task's consumed record (task IDs are free text).
-fn task_key(task_id: &str) -> String {
+pub(crate) fn task_key(task_id: &str) -> String {
     let mut h = blake3::Hasher::new();
     h.update(b"spark-harness-task\0");
     h.update(task_id.as_bytes());
     h.finalize().to_hex().to_string()
 }
 
-fn check_identifier(what: &str, value: &str) -> Result<(), CompletionError> {
+pub(crate) fn check_identifier(what: &str, value: &str) -> Result<(), CompletionError> {
     if value.is_empty() || value.trim() != value {
         return Err(CompletionError::InvalidSubmission(format!(
             "{what} must be non-empty with no leading or trailing whitespace"
@@ -375,7 +375,7 @@ fn collect_strings<'a>(v: &'a Value, path: String, out: &mut Vec<(String, &'a st
     }
 }
 
-fn host_identity() -> String {
+pub(crate) fn host_identity() -> String {
     let from_proc = fs::read_to_string("/proc/sys/kernel/hostname")
         .map(|s| s.trim().to_string())
         .unwrap_or_default();
@@ -423,10 +423,22 @@ fn read_consumed(path: &Path, task_id: &str) -> Result<Option<ConsumedRecord>, C
 /// still be lost on power failure). A resubmission of the same generation
 /// is then refused as a duplicate.
 fn write_consumed(path: &Path, rec: &ConsumedRecord) -> Result<(), CompletionError> {
-    let store_err = |e: String| CompletionError::Store(e);
-    let dir = path
-        .parent()
-        .ok_or_else(|| store_err("consumed record has no parent dir".to_string()))?;
+    let text = serde_json::to_vec_pretty(rec).map_err(|e| CompletionError::Store(e.to_string()))?;
+    write_atomic(path, &text).map_err(|e| {
+        CompletionError::Store(format!(
+            "cannot write consumed record {}: {e}",
+            path.display()
+        ))
+    })
+}
+
+/// Atomic replace used by the consumed and interface records: write a temp
+/// file in the same directory, append a newline, fsync it, rename it over
+/// `path`, fsync the directory. The temp file is removed on failure.
+pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let dir = path.parent().ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "record has no parent dir")
+    })?;
     let name = path
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
@@ -436,23 +448,18 @@ fn write_consumed(path: &Path, rec: &ConsumedRecord) -> Result<(), CompletionErr
         std::process::id(),
         uuid::Uuid::new_v4()
     ));
-    let text = serde_json::to_vec_pretty(rec).map_err(|e| store_err(e.to_string()))?;
     let result = (|| -> std::io::Result<()> {
         let mut f = fs::File::create(&tmp)?;
-        f.write_all(&text)?;
+        f.write_all(bytes)?;
         f.write_all(b"\n")?;
         f.sync_all()?;
         fs::rename(&tmp, path)?;
         fs::File::open(dir)?.sync_all()
     })();
-    if let Err(e) = result {
+    if result.is_err() {
         let _ = fs::remove_file(&tmp);
-        return Err(store_err(format!(
-            "cannot write consumed record {}: {e}",
-            path.display()
-        )));
     }
-    Ok(())
+    result
 }
 
 fn failed_assertion(id: String, expected: &str, observed: String) -> Assertion {
@@ -731,7 +738,7 @@ impl HarnessEngine {
     }
 }
 
-fn single_ref<'a>(refs: &'a [String], prefix: &str) -> Result<&'a str, CompletionError> {
+pub(crate) fn single_ref<'a>(refs: &'a [String], prefix: &str) -> Result<&'a str, CompletionError> {
     let found: Vec<&str> = refs.iter().filter_map(|r| r.strip_prefix(prefix)).collect();
     match found.as_slice() {
         [one] => Ok(one),
@@ -742,7 +749,11 @@ fn single_ref<'a>(refs: &'a [String], prefix: &str) -> Result<&'a str, Completio
     }
 }
 
-fn require(field: &'static str, expected: &str, found: &str) -> Result<(), CompletionError> {
+pub(crate) fn require(
+    field: &'static str,
+    expected: &str,
+    found: &str,
+) -> Result<(), CompletionError> {
     if expected == found {
         Ok(())
     } else {
