@@ -17,9 +17,12 @@ use aien_runtime::approved::{
     ApprovedComposeReport, ApprovedProposal, ApprovedRefusal, ProposerHook,
 };
 use aien_runtime::approved_auth::{desk_key_path, DeskKey};
-use aien_runtime::control::ControlResponse;
+use aien_runtime::control::{ControlCommand, ControlResponse};
 use aien_runtime::effects::MintRequest;
-use aien_runtime::provisional::{FenceError, PrepAdapter, PrepError, PrepOperation};
+use aien_runtime::provisional::{
+    classify_approved, classify_authorize, FenceError, FenceKey, PrepAdapter, PrepError,
+    PrepOperation,
+};
 use aien_runtime::{ComposeBridge, ComposeProposer};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -27,8 +30,8 @@ use spark_harness::completion::CompletionSubmission;
 use spark_harness::execution::TaskState;
 use spark_harness::readiness::{InterfaceSubmission, OperationClass, ProofClaim, ReadinessLevel};
 use spark_harness::scheduler::{
-    Clock, Effects, Event, EventKind, Outcome, ProvisionalConfig, ResourceLimits, ResourceRequest,
-    SchedError,
+    Clock, CommitResult, Effects, Event, EventKind, Outcome, ProvisionalConfig, ResourceLimits,
+    ResourceRequest, SchedError,
 };
 use spark_harness::{HarnessEngine, WorkflowState};
 use std::collections::BTreeMap;
@@ -400,6 +403,13 @@ fn tree(dir: &Path) -> BTreeMap<PathBuf, String> {
     out
 }
 
+/// Classifier for `fenced_for_tests`: the call committed.
+fn committed<T>(_: &T) -> CommitResult {
+    CommitResult::Committed {
+        detail: "test".into(),
+    }
+}
+
 fn fence_err<T: std::fmt::Debug>(r: Result<T, FenceError>) -> FenceError {
     match r {
         Err(e) => e,
@@ -596,7 +606,7 @@ fn failed_producer_discards_the_dependent_result() {
         Err(PrepError::StaleGeneration { .. })
     ));
     assert!(matches!(
-        fence_err(h.adapter.fenced_for_tests("b", 1, |_| ())),
+        fence_err(h.adapter.fenced_for_tests("b", 1, |_| (), committed)),
         FenceError::StaleGeneration { .. }
     ));
 }
@@ -737,7 +747,10 @@ fn invalid_receipts_are_refused_by_the_event_gate_and_the_fence() {
     std::fs::write(&file, text.replacen("spark-harness", "spark-harnesz", 1)).unwrap();
     let mut ran = false;
     assert!(matches!(
-        fence_err(h.adapter.fenced_for_tests("b", 1, |_| ran = true)),
+        fence_err(
+            h.adapter
+                .fenced_for_tests("b", 1, |_| ran = true, committed)
+        ),
         FenceError::CompletionInvalid { .. }
     ));
     assert!(!ran);
@@ -756,12 +769,17 @@ fn invalid_receipts_are_refused_by_the_event_gate_and_the_fence() {
     )
     .unwrap();
     assert!(matches!(
-        fence_err(h.adapter.fenced_for_tests("b", 1, |_| ran = true)),
+        fence_err(
+            h.adapter
+                .fenced_for_tests("b", 1, |_| ran = true, committed)
+        ),
         FenceError::Scheduler(SchedError::Proof { .. })
     ));
     assert!(!ran);
     std::fs::write(&fa, &oa).unwrap();
-    h.adapter.fenced_for_tests("b", 1, |_| ran = true).unwrap();
+    h.adapter
+        .fenced_for_tests("b", 1, |_| ran = true, committed)
+        .unwrap();
     assert!(ran);
 }
 
@@ -857,6 +875,9 @@ fn unauthorized_effects_are_still_refused_by_the_canonical_path() {
         (e.refused_by.as_str(), e.name.as_str()),
         ("PROPOSAL_REFUSED", "Unauthenticated")
     );
+    // Refused before any replay claim: nothing durable, the task aborts.
+    assert!(matches!(out.result, CommitResult::Failed { .. }));
+    assert_eq!(h.state("b"), TaskState::Aborted);
     assert!(!h.ws().join(PATH).exists());
     // ComposeAuthorize through the fence, no desk proof and no compose
     // commit: refused by the existing authorize rules.
@@ -900,36 +921,61 @@ fn duplicate_commit_is_refused_and_a_restart_does_not_run_it_again() {
         .adapter
         .submit_approved("b", 1, &c.hook, &p, &c.ws)
         .unwrap();
+    // The stub refuses the replay claim itself (no claim was made, nothing
+    // ran): recorded as failed, the task aborts.
+    let want = if aien_omega_compose::LINKED {
+        assert!(matches!(first.result, CommitResult::Committed { .. }));
+        TaskState::Committed
+    } else {
+        match &first.result {
+            CommitResult::Failed { reason } => assert!(
+                reason.starts_with("REPLAY_REFUSED Journal: ")
+                    && reason.ends_with("is not linked (stub build)"),
+                "{reason}"
+            ),
+            other => panic!("want Failed, got {other:?}"),
+        }
+        TaskState::Aborted
+    };
+    assert!(first.record_error.is_none());
     let report = committed_or_stub(first.outcome);
+    assert_eq!(h.state("b"), want);
     // Same process, same task generation: refused before the hook runs.
     assert!(matches!(
         fence_err(h.adapter.submit_approved("b", 1, &c.hook, &p, &c.ws)),
         FenceError::AlreadySubmitted { .. }
     ));
-    // Restart: the journal replays, the audit passes, no result survives.
+    // Restart: the journal replays the outcome, the audit passes, no result
+    // survives.
     let revoked = h.restart(c0);
     c.bridge.close();
     drop(c);
     let c = Compose::reopen(&h);
     assert!(revoked.is_empty(), "{revoked:?}");
-    assert_eq!(h.state("b"), TaskState::Committable);
+    assert_eq!(h.state("b"), want);
     assert!(h.adapter.prepared("b").is_none());
-    // The new process has no memory of the call; the durable replay ledger
-    // answers the retry without a second compose run.
-    let again = h
-        .adapter
-        .submit_approved("b", 1, &c.hook, &p, &c.ws)
-        .unwrap();
+    // The new process has no in-memory record of the call, but the journaled
+    // outcome refuses a second run before the hook.
+    match fence_err(h.adapter.submit_approved("b", 1, &c.hook, &p, &c.ws)) {
+        FenceError::NotCommittable { state, .. } => assert_eq!(state, want),
+        other => panic!("want NotCommittable, got {other}"),
+    }
+    // Under the fence, the durable replay ledger still answers an exact retry
+    // without a second compose run.
+    let again = c.hook.submit(&p, &c.ws);
     if let Some(first) = report {
-        let r = again
-            .outcome
-            .expect("an exact retry gets the original result");
+        let r = again.expect("an exact retry gets the original result");
         assert_eq!(r.state, "ALREADY_COMMITTED");
         assert!(r.task.is_none(), "nothing ran again");
         assert_eq!(r.replay_claim, first.replay_claim);
         assert_eq!(r.grant_links, first.grant_links);
     } else {
-        assert!(again.outcome.is_err());
+        let e = again.expect_err("stub build must refuse the retry");
+        assert_eq!(
+            (e.refused_by.as_str(), e.name.as_str(), e.replay_claim),
+            ("REPLAY_REFUSED", "Journal", None),
+            "{e}"
+        );
     }
 }
 
@@ -1157,64 +1203,226 @@ fn concurrency_is_bounded_by_the_m2_permits() {
 }
 
 #[test]
-fn the_commit_decision_holds_out_revocations_and_store_writers() {
+fn the_commit_decision_freezes_the_inputs_without_holding_any_lock() {
     let mut h = H::new(cfg(true, 4));
     h.register("a", &[]);
     h.register("b", &["a"]);
     h.publish("a", 1);
     h.finish("a");
     h.finish("b");
-    let (done_tx, done_rx) = mpsc::channel::<&'static str>();
+    // An unrelated task with a live lease, heartbeating during the call.
+    h.register("x", &[]);
+    assert_eq!(h.state("x"), TaskState::Provisional);
     let adapter = Arc::clone(&h.adapter);
     let store_dir = h.tmp.path().join("harness");
-    let fenced = h.adapter.fenced_for_tests("b", 1, |_| {
-        let tx = done_tx.clone();
-        let revoker = std::thread::spawn(move || {
-            let r = adapter.deliver(Event {
-                id: "revoke-a-during-commit".into(),
-                kind: EventKind::Revoke {
-                    task: "a".into(),
+    let wait = Duration::from_secs(10);
+    let fenced = h.adapter.fenced_for_tests(
+        "b",
+        1,
+        |_| {
+            let during = adapter.state("b");
+            // Each probe runs on its own thread and must finish while the
+            // call is still running: neither the adapter mutex nor a store
+            // lock is held.
+            let (tx, rx) = mpsc::channel();
+            let a2 = Arc::clone(&adapter);
+            let t = tx.clone();
+            std::thread::spawn(move || {
+                let r = a2.deliver(Event {
+                    id: "revoke-a-during-commit".into(),
+                    kind: EventKind::Revoke {
+                        task: "a".into(),
+                        generation: 1,
+                        reason: "interface withdrawn".into(),
+                    },
+                });
+                t.send(format!("revoke {r:?}")).unwrap();
+            });
+            let revoke = rx.recv_timeout(wait).expect("revoke blocked by the call");
+            let a3 = Arc::clone(&adapter);
+            let t = tx.clone();
+            std::thread::spawn(move || {
+                let r = a3.deliver(Event {
+                    id: "beat-x-during-commit".into(),
+                    kind: EventKind::Heartbeat {
+                        task: "x".into(),
+                        generation: 1,
+                        beat: 1,
+                    },
+                });
+                t.send(format!("beat {r:?}")).unwrap();
+            });
+            let beat = rx
+                .recv_timeout(wait)
+                .expect("heartbeat blocked by the call");
+            std::thread::spawn(move || {
+                let mut e = HarnessEngine::load(&store_dir).unwrap();
+                e.completion_clock = fixed_receipt_clock;
+                let r = e.publish_interface(&InterfaceSubmission {
+                    task_id: "a".into(),
                     generation: 1,
-                    reason: "interface withdrawn".into(),
-                },
+                    source_commit: COMMIT.into(),
+                    interface: json!({ "task": "a", "api_version": 9 }),
+                });
+                tx.send(format!("store {:?}", r.map(|_| ()))).unwrap();
             });
-            tx.send("revoke").unwrap();
-            r
-        });
-        let tx = done_tx.clone();
-        let writer = std::thread::spawn(move || {
-            let mut e = HarnessEngine::load(&store_dir).unwrap();
-            e.completion_clock = fixed_receipt_clock;
-            let r = e.publish_interface(&InterfaceSubmission {
-                task_id: "a".into(),
-                generation: 1,
-                source_commit: COMMIT.into(),
-                interface: json!({ "task": "a", "api_version": 9 }),
+            let store = rx
+                .recv_timeout(wait)
+                .expect("store writer blocked by the call");
+            // A second fence for the same task generation while the first
+            // call runs: refused as already submitted, and it never runs.
+            let a4 = Arc::clone(&adapter);
+            let (tx2, rx2) = mpsc::channel();
+            std::thread::spawn(move || {
+                let r = a4.fenced_for_tests("b", 1, |_| (), committed);
+                tx2.send(format!("{:?}", r.map(|_| "ran"))).unwrap();
             });
-            tx.send("store").unwrap();
-            r.map(|_| ())
-        });
-        std::thread::sleep(Duration::from_millis(150));
-        let during: Vec<_> = done_rx.try_iter().collect();
-        (during, revoker, writer)
-    });
-    let out = fenced.expect("fence passes");
-    let (during, revoker, writer) = out.outcome;
-    assert!(
-        during.is_empty(),
-        "{during:?} ran inside the commit decision"
+            let second = rx2
+                .recv_timeout(wait)
+                .expect("second fence blocked by the call");
+            (during, revoke, beat, store, second)
+        },
+        committed,
     );
-    revoker.join().unwrap().unwrap();
-    writer.join().unwrap().unwrap();
-    // After the decision the revocation applies: the old generation is stale.
-    assert_eq!(h.gen("b"), 2);
+    let out = fenced.expect("fence passes");
+    let (during, revoke, beat, store, second) = out.outcome;
+    assert!(second.starts_with("Err(AlreadySubmitted"), "{second}");
+    assert_eq!(during, Some(TaskState::Committing));
+    assert!(
+        revoke.contains("CommitInProgress"),
+        "an upstream revoke must be refused while committing: {revoke}"
+    );
+    assert!(beat.contains("Ok(Applied"), "{beat}");
+    assert_eq!(store, "store Ok(())");
+    assert_eq!(out.result, committed(&()));
+    assert!(out.record_error.is_none());
+    assert_eq!((h.state("b"), h.gen("b")), (TaskState::Committed, 1));
+    // After the outcome the same revoke applies, and stops at the committed
+    // task.
+    h.ok(EventKind::Revoke {
+        task: "a".into(),
+        generation: 1,
+        reason: "interface withdrawn".into(),
+    });
+    assert_eq!((h.state("b"), h.gen("b")), (TaskState::Committed, 1));
     assert!(matches!(
-        fence_err(h.adapter.fenced_for_tests("b", 1, |_| ())),
-        FenceError::AlreadySubmitted { .. } | FenceError::StaleGeneration { .. }
+        fence_err(h.adapter.fenced_for_tests("b", 1, |_| (), committed)),
+        FenceError::AlreadySubmitted { .. }
+    ));
+}
+
+#[test]
+fn a_panicking_commit_is_uncertain_and_never_runs_again() {
+    let mut h = H::new(cfg(true, 4));
+    h.register("a", &[]);
+    h.register("b", &["a"]);
+    h.register("c", &["b"]);
+    h.publish("a", 1);
+    h.publish("b", 1);
+    h.finish("a");
+    h.finish("b");
+    assert_eq!(h.state("c"), TaskState::Provisional);
+    let adapter = Arc::clone(&h.adapter);
+    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        adapter.fenced_for_tests("b", 1, |_| panic!("commit blew up"), committed)
+    }));
+    assert!(r.is_err(), "the panic is resumed");
+    assert_eq!(h.state("b"), TaskState::CommitUncertain);
+    assert_eq!(h.state("c"), TaskState::Blocked, "consumers revoked");
+    let mut ran = false;
+    assert!(matches!(
+        fence_err(
+            h.adapter
+                .fenced_for_tests("b", 1, |_| ran = true, committed)
+        ),
+        FenceError::AlreadySubmitted { .. }
+    ));
+    assert!(!ran);
+}
+
+#[test]
+fn a_failed_commit_aborts_the_task_and_a_new_generation_may_commit() {
+    let mut h = H::new(cfg(true, 4));
+    h.register("a", &[]);
+    h.register("b", &["a"]);
+    h.publish("a", 1);
+    h.finish("a");
+    h.finish("b");
+    let failed = |_: &()| CommitResult::Failed {
+        reason: "refused before any write".into(),
+    };
+    let out = h.adapter.fenced_for_tests("b", 1, |_| (), failed).unwrap();
+    assert!(matches!(out.result, CommitResult::Failed { .. }));
+    assert_eq!(h.state("b"), TaskState::Aborted);
+    h.ok(EventKind::Retry {
+        task: "b".into(),
+        generation: 1,
+    });
+    assert_eq!(h.gen("b"), 2);
+    h.finish("b");
+    let out = h
+        .adapter
+        .fenced_for_tests("b", 2, |_| (), committed)
+        .unwrap();
+    assert!(out.record_error.is_none());
+    assert_eq!(h.state("b"), TaskState::Committed);
+}
+
+#[test]
+fn outcomes_are_classified_conservatively() {
+    let refusal = |name: &str, claim: Option<u64>| {
+        let e = ApprovedRefusal {
+            refused_by: "REPLAY_REFUSED".into(),
+            name: name.into(),
+            detail: "d".into(),
+            request_id: "r".into(),
+            trace_id: "t".into(),
+            approval_id: "a".into(),
+            replay_claim: claim,
+        };
+        classify_approved(&Err(Box::new(e)))
+    };
+    assert!(matches!(
+        refusal("Unauthenticated", None),
+        CommitResult::Failed { .. }
     ));
     assert!(matches!(
-        fence_err(h.adapter.fenced_for_tests("b", 2, |_| ())),
-        FenceError::NotCommittable { .. }
+        refusal("NotCommitted", Some(3)),
+        CommitResult::Failed { .. }
+    ));
+    assert!(matches!(
+        refusal("ComposeError", Some(3)),
+        CommitResult::Uncertain { .. }
+    ));
+    assert!(matches!(
+        refusal("Mismatch", Some(3)),
+        CommitResult::Uncertain { .. }
+    ));
+    assert!(matches!(
+        refusal("GrantNotWritten", Some(3)),
+        CommitResult::Uncertain { .. }
+    ));
+    let e = |s: &str| classify_authorize(&ControlResponse::Error(s.into()));
+    assert!(matches!(
+        e("EFFECT_REFUSED DeskMacRequired: none"),
+        CommitResult::Failed { .. }
+    ));
+    assert!(matches!(
+        e("effect record: re-read 7: io"),
+        CommitResult::Uncertain { .. }
+    ));
+    assert!(matches!(
+        classify_authorize(&ControlResponse::ComposeNoted(
+            aien_runtime::control::ComposeNoteReport {
+                machine_id: "m".into(),
+                id: 7,
+                kind: "authorization".into(),
+                digest: "d".into(),
+                text_sha256: "s".into(),
+                links: vec![],
+            }
+        )),
+        CommitResult::Committed { .. }
     ));
 }
 
@@ -1231,4 +1439,164 @@ fn disabled_flag_is_the_default_and_sequential() {
     h.finish("a");
     let r = h.prepare("b").unwrap();
     assert!(!r.is_provisional());
+}
+
+// ---------- through the daemon socket ----------
+
+async fn daemon(
+    socket: &Path,
+    bridge: Arc<ComposeBridge>,
+    adapter: Arc<PrepAdapter>,
+) -> (
+    aien_runtime::client::AienRuntimeClient,
+    tokio::task::JoinHandle<Result<(), String>>,
+) {
+    let cfg = aien_scheduler::SchedulerConfig {
+        max_batch_size: 8,
+        max_batch_tokens: 1024,
+        prefill_chunk_size: 64,
+        watermark_blocks: 4,
+        chunk_prefill: true,
+        max_prefill_tokens: 1024,
+    };
+    let spine = aien_runtime::spine::AienRuntimeSpine::new(
+        64,
+        cfg,
+        aien_kv_cache::create_shared_kv_manager(256, 16),
+    );
+    let server = aien_runtime::server::AienRuntimeServer::new(spine, socket)
+        .with_compose_bridge(bridge)
+        .with_prep_adapter(adapter);
+    let handle = tokio::spawn(async move {
+        server
+            .run(aien_inference_abi::MockInferenceBackend::new(1))
+            .await
+    });
+    let client = aien_runtime::client::AienRuntimeClient::new(socket);
+    for _ in 0..250 {
+        if client.is_alive().await {
+            return (client, handle);
+        }
+        if handle.is_finished() {
+            panic!("daemon stopped: {:?}", handle.await);
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    panic!("daemon did not come up");
+}
+
+fn fence_refused(r: &ControlResponse, name: &str) -> bool {
+    matches!(r, ControlResponse::Error(e) if e.starts_with(&format!("FENCE_REFUSED {name}")))
+}
+
+/// The original `ComposeApprovedProposal` answer: a result or a refusal from
+/// the canonical path, never a fence error.
+fn canonical_approved(r: &ControlResponse) -> bool {
+    matches!(
+        r,
+        ControlResponse::ComposeApprovedResult(_) | ControlResponse::ComposeApprovedRefused(_)
+    )
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_daemon_fences_bound_requests_and_runs_unbound_ones_unchanged() {
+    let _home = home_guard::home_slot();
+    let mut h = H::new(cfg(true, 4));
+    let c = Compose::new(&h);
+    let socket = h.tmp.path().join("d.sock");
+    let (client, server) = daemon(&socket, c.bridge.clone(), h.adapter.clone()).await;
+    let send = |cmd: ControlCommand| {
+        let client = &client;
+        async move { client.send_command(cmd).await.unwrap() }
+    };
+    let approved = |p: &ApprovedProposal| ControlCommand::ComposeApprovedProposal {
+        proposal: p.clone(),
+        workspace: c.ws.clone(),
+    };
+    let authorize = |digest: &str| ControlCommand::ComposeAuthorize {
+        cx_promotion: 1,
+        proposal_sha256: digest.into(),
+        workspace: c.ws.clone(),
+        approver: "drake".into(),
+        constraints: vec![],
+        desk_proof: None,
+        objective_id: None,
+    };
+
+    // Early overlap: B prepares while its producer A is only interface
+    // verified.
+    h.register("a", &[]);
+    h.register("b", &["a"]);
+    h.publish("a", 1);
+    assert!(h.prepare("b").unwrap().is_provisional());
+    let bound = c.approval("req-bound");
+    let free = c.approval("req-free");
+    h.adapter
+        .bind_approval(FenceKey::Approval(bound.approval_id.clone()), "b", 1);
+    h.adapter
+        .bind_approval(FenceKey::Proposal(sha(b"bound grant")), "b", 1);
+    assert!(h
+        .adapter
+        .binding(&FenceKey::Approval(free.approval_id.clone()))
+        .is_none());
+
+    // Bound, while B is provisional: the fence refuses and nothing runs.
+    let compose_dir = c.bridge.dir().to_path_buf();
+    let before = (tree(&h.ws()), tree(&compose_dir));
+    let r = send(approved(&bound)).await;
+    assert!(fence_refused(&r, "NotCommittable"), "{r:?}");
+    let r = send(authorize(&sha(b"bound grant"))).await;
+    assert!(fence_refused(&r, "NotCommittable"), "{r:?}");
+    assert_eq!(
+        (tree(&h.ws()), tree(&compose_dir)),
+        before,
+        "a fenced request wrote nothing"
+    );
+    assert_eq!(h.state("b"), TaskState::Provisional);
+
+    // Unbound: the original calls run, whatever the M2 state.
+    let r = send(authorize(&sha(b"never committed"))).await;
+    match &r {
+        ControlResponse::Error(e) if aien_omega_compose::LINKED => {
+            assert!(e.starts_with("EFFECT_REFUSED DeskMacRequired"), "{e}")
+        }
+        ControlResponse::Error(e) => assert!(
+            e.starts_with("compose home ") && e.ends_with("is not linked (stub build)"),
+            "{e}"
+        ),
+        other => panic!("the canonical authorize must refuse: {other:?}"),
+    }
+    let r = send(approved(&free)).await;
+    assert!(canonical_approved(&r), "{r:?}");
+    assert_eq!(
+        h.state("b"),
+        TaskState::Provisional,
+        "unbound runs touch no task"
+    );
+
+    // Once A and B are final the bound approval passes the fence and the
+    // canonical path decides.
+    h.finish("a");
+    h.finish("b");
+    let r = send(approved(&bound)).await;
+    assert!(canonical_approved(&r), "{r:?}");
+    let want = if aien_omega_compose::LINKED {
+        match &r {
+            ControlResponse::ComposeApprovedResult(rep) => assert_eq!(rep.state, "COMMITTED"),
+            other => panic!("want COMMITTED, got {other:?}"),
+        }
+        TaskState::Committed
+    } else {
+        // The stub refuses the replay claim itself: nothing durable.
+        TaskState::Aborted
+    };
+    assert_eq!(h.state("b"), want);
+    // A second bound request for the same task generation never runs.
+    let r = send(approved(&bound)).await;
+    assert!(fence_refused(&r, "AlreadySubmitted"), "{r:?}");
+    let r = send(authorize(&sha(b"bound grant"))).await;
+    assert!(fence_refused(&r, "AlreadySubmitted"), "{r:?}");
+
+    let _ = client.send_command(ControlCommand::Shutdown).await;
+    let _ = tokio::time::timeout(Duration::from_secs(5), server).await;
 }

@@ -68,7 +68,8 @@ pub mod timing;
 mod unit_tests;
 
 pub use self::core::{
-    Binding, BindingLevel, Effects, Event, EventKind, JournalEntry, Revocation, TaskEntry,
+    Binding, BindingLevel, CommitInputs, CommitResult, Effects, Event, EventKind, JournalEntry,
+    Revocation, TaskEntry,
 };
 pub use self::error::SchedError;
 pub use self::permits::{PermitPool, ResourceLimits, ResourceRequest};
@@ -178,9 +179,12 @@ pub struct Unaudited {
 }
 
 impl Unaudited {
-    /// Re-verify every replayed active task against the store, revoke the
-    /// ones that fail, and hand out the scheduler.
+    /// Mark every replayed `Committing` task `CommitUncertain` (its outcome
+    /// was lost; it is never run again), re-verify every replayed active
+    /// task against the store, revoke the ones that fail, and hand out the
+    /// scheduler.
     pub fn audit(mut self) -> Result<(Scheduler, Vec<String>), SchedError> {
+        self.sched.settle_interrupted_commits()?;
         let revoked = self.sched.audit()?;
         Ok((self.sched, revoked))
     }

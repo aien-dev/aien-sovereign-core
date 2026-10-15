@@ -99,6 +99,45 @@ pub enum EventKind {
     },
     /// Lets time pass: expires leases.
     Tick,
+    /// `Committable -> Committing` (Headstart M3, issue #537). Freezes the
+    /// task at `generation` with its own accepted completion and every
+    /// producer's accepted completion, all of which must equal the current
+    /// state and verify in the store. Refused when another commit is
+    /// running in the same dependency chain.
+    BeginCommit {
+        task: String,
+        generation: u64,
+        completion: ProofClaim,
+        producers: BTreeMap<String, ProofClaim>,
+    },
+    /// Ends a `Committing` task with the wrapped call's outcome.
+    CommitOutcome {
+        task: String,
+        generation: u64,
+        outcome: CommitResult,
+    },
+}
+
+/// How a commit ended.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "result", rename_all = "snake_case", deny_unknown_fields)]
+pub enum CommitResult {
+    /// The commit succeeded: `Committed`.
+    Committed { detail: String },
+    /// The commit was refused before any durable effect: `Aborted`
+    /// (retryable at the next generation); consumers are revoked.
+    Failed { reason: String },
+    /// The outcome is unknown: `CommitUncertain`, never run again;
+    /// consumers are revoked.
+    Uncertain { reason: String },
+}
+
+/// What a `BeginCommit` froze.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CommitInputs {
+    pub completion: ProofClaim,
+    pub producers: BTreeMap<String, ProofClaim>,
+    pub began_at: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -160,6 +199,9 @@ pub struct TaskEntry {
     pub queued: bool,
     pub last_reason: Option<String>,
     pub timing: TaskTiming,
+    /// Set by `BeginCommit`; kept after the outcome as the record of what
+    /// the commit was checked against.
+    pub commit: Option<CommitInputs>,
 }
 
 impl TaskEntry {
@@ -177,11 +219,14 @@ impl TaskEntry {
             queued: false,
             last_reason: None,
             timing: TaskTiming::new(at),
+            commit: None,
         }
     }
 
+    /// Final for consumers: `Committable`, `Committing` or `Committed`
+    /// with an accepted completion.
     pub(crate) fn final_ready(&self) -> bool {
-        self.state == TaskState::Committable && self.completion.is_some()
+        self.state.is_final() && self.completion.is_some()
     }
 
     pub(crate) fn interface_ready(&self) -> bool {
@@ -347,7 +392,8 @@ impl Core {
         reason: &str,
         fx: &mut Effects,
     ) -> Result<(), SchedError> {
-        for d in self.graph.descendants(producer) {
+        self.guard_descendants(producer)?;
+        for d in self.affected(producer) {
             let t = self.task(&d)?;
             if t.state.is_active() {
                 let next = t.generation + 1;
@@ -358,6 +404,74 @@ impl Core {
             }
         }
         Ok(())
+    }
+
+    /// Descendants of `id` that an upstream change reaches, breadth-first,
+    /// excluding `id`. A `Committed` or `CommitUncertain` task is done: it
+    /// is neither returned nor walked through (its consumers are reached
+    /// only along other paths).
+    pub(crate) fn affected(&self, id: &str) -> Vec<String> {
+        let mut seen = std::collections::BTreeSet::new();
+        let mut out = Vec::new();
+        let mut q: VecDeque<&String> = self.graph.consumers_of(id).collect();
+        while let Some(n) = q.pop_front() {
+            if !seen.insert(n.clone()) {
+                continue;
+            }
+            if self
+                .tasks
+                .get(n)
+                .is_some_and(|t| t.state.is_commit_terminal())
+            {
+                continue;
+            }
+            out.push(n.clone());
+            q.extend(self.graph.consumers_of(n));
+        }
+        out
+    }
+
+    /// The `Committing` task an upstream change of `id` would reach.
+    fn committing_below(&self, id: &str) -> Option<String> {
+        self.affected(id)
+            .into_iter()
+            .find(|d| self.tasks.get(d).map(|t| t.state) == Some(TaskState::Committing))
+    }
+
+    fn guard_descendants(&self, id: &str) -> Result<(), SchedError> {
+        match self.committing_below(id) {
+            Some(committing) => Err(SchedError::CommitInProgress {
+                task: id.to_string(),
+                committing,
+            }),
+            None => Ok(()),
+        }
+    }
+
+    /// Refuse an event that would change `id` itself while it is
+    /// `Committing`, or reach a `Committing` task below it.
+    pub(crate) fn guard_commit(&self, id: &str) -> Result<(), SchedError> {
+        if self.task(id)?.state == TaskState::Committing {
+            return Err(SchedError::CommitInProgress {
+                task: id.to_string(),
+                committing: id.to_string(),
+            });
+        }
+        self.guard_descendants(id)
+    }
+
+    /// A `Committing` task in the same chain as `id` (upstream or
+    /// downstream along [`Core::affected`] paths), other than `id`.
+    fn commit_in_chain(&self, id: &str) -> Option<String> {
+        if let Some(c) = self.committing_below(id) {
+            return Some(c);
+        }
+        self.tasks
+            .iter()
+            .filter(|(other, t)| t.state == TaskState::Committing && other.as_str() != id)
+            .map(|(other, _)| other)
+            .find(|other| self.affected(other).iter().any(|d| d == id))
+            .cloned()
     }
 
     fn eligible(&self, cfg: &ProvisionalConfig, id: &str) -> bool {
@@ -540,6 +654,7 @@ impl Core {
                     |s| s != TaskState::Aborted,
                     "start a new generation (use retry)",
                 )?;
+                self.guard_commit(task)?;
                 self.reset_to_blocked(task, *generation, at, "new generation", &mut fx)?;
                 self.revoke_descendants(task, at, "producer new generation", &mut fx)?;
             }
@@ -550,6 +665,7 @@ impl Core {
             } => {
                 self.require_generation(task, *generation)?;
                 self.require_state(task, |s| s != TaskState::Aborted, "fail")?;
+                self.guard_commit(task)?;
                 self.abort(task, at, &format!("failed: {reason}"), &mut fx)?;
                 self.revoke_descendants(task, at, "producer failed", &mut fx)?;
             }
@@ -610,8 +726,9 @@ impl Core {
             EventKind::Cancel { task, generation } => {
                 self.require_generation(task, *generation)?;
                 self.require_state(task, |s| s != TaskState::Aborted, "cancel")?;
+                self.guard_commit(task)?;
                 self.abort(task, at, "cancelled", &mut fx)?;
-                for d in self.graph.descendants(task) {
+                for d in self.affected(task) {
                     if self.task(&d)?.state != TaskState::Aborted {
                         self.abort(&d, at, &format!("ancestor '{task}' cancelled"), &mut fx)?;
                     }
@@ -657,11 +774,94 @@ impl Core {
                     .iter()
                     .filter(|(_, t)| t.state == TaskState::Provisional && !t.lease_valid(at))
                     .map(|(id, _)| id.clone())
+                    // An expiry that would reach a running commit waits for
+                    // its outcome (a later Tick expires it).
+                    .filter(|id| self.guard_commit(id).is_ok())
                     .collect();
                 for id in expired {
                     if self.task(&id)?.state == TaskState::Provisional {
                         self.abort(&id, at, "lease expired", &mut fx)?;
                         self.revoke_descendants(&id, at, "producer lease expired", &mut fx)?;
+                    }
+                }
+            }
+            EventKind::BeginCommit {
+                task,
+                generation,
+                completion,
+                producers,
+            } => {
+                self.require_generation(task, *generation)?;
+                self.require_state(task, |s| s == TaskState::Committable, "begin a commit")?;
+                if let Some(committing) = self.commit_in_chain(task) {
+                    return Err(SchedError::CommitInProgress {
+                        task: task.clone(),
+                        committing,
+                    });
+                }
+                if self.task(task)?.completion.as_ref() != Some(completion) {
+                    return Err(bad(format!(
+                        "begin_commit completion for '{task}' is not its accepted completion"
+                    )));
+                }
+                let expected: Vec<&String> = self.graph.producers_of(task).collect();
+                if expected.len() != producers.len()
+                    || expected.iter().any(|p| !producers.contains_key(*p))
+                {
+                    return Err(bad(format!(
+                        "begin_commit for '{task}' must name exactly its producers"
+                    )));
+                }
+                for (p, claim) in producers {
+                    let pt = self.task(p)?;
+                    // A producer that is itself committing is refused above.
+                    if !matches!(pt.state, TaskState::Committable | TaskState::Committed)
+                        || pt.completion.as_ref() != Some(claim)
+                    {
+                        return Err(SchedError::ProducerNotFinal {
+                            producer: p.clone(),
+                            detail: format!(
+                                "state {}, completion differs from the begin_commit input: {}",
+                                pt.state.as_str(),
+                                pt.completion.as_ref() != Some(claim)
+                            ),
+                        });
+                    }
+                }
+                self.set_state(task, TaskState::Committing, at)?;
+                self.task_mut(task)?.commit = Some(CommitInputs {
+                    completion: completion.clone(),
+                    producers: producers.clone(),
+                    began_at: at,
+                });
+            }
+            EventKind::CommitOutcome {
+                task,
+                generation,
+                outcome,
+            } => {
+                self.require_generation(task, *generation)?;
+                self.require_state(
+                    task,
+                    |s| s == TaskState::Committing,
+                    "record a commit outcome",
+                )?;
+                // BeginCommit refused any second commit in this chain, so
+                // no Committing task is reachable from here.
+                match outcome {
+                    CommitResult::Committed { detail } => {
+                        self.set_state(task, TaskState::Committed, at)?;
+                        self.task_mut(task)?.last_reason = Some(format!("committed: {detail}"));
+                    }
+                    CommitResult::Failed { reason } => {
+                        self.abort(task, at, &format!("commit failed: {reason}"), &mut fx)?;
+                        self.revoke_descendants(task, at, "producer commit failed", &mut fx)?;
+                    }
+                    CommitResult::Uncertain { reason } => {
+                        self.revoke_descendants(task, at, "producer commit uncertain", &mut fx)?;
+                        self.set_state(task, TaskState::CommitUncertain, at)?;
+                        self.task_mut(task)?.last_reason =
+                            Some(format!("commit uncertain: {reason}"));
                     }
                 }
             }
