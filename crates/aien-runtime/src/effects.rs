@@ -33,11 +33,11 @@
 //!
 //! The ledger is rebuilt from the journal on every call, under the
 //! compose-home lock, so the check and the intent append are one step.
+use crate::compose::{record_view, ComposeBridge, ComposeHome};
 use crate::control::{
     ComposeControlReport, ComposeNoteReport, ComposeReconcileReport, ComposeRecordView,
     ControlResponse, ObjectiveBinding, ReconcileDeclare, ReconcileOutcome,
 };
-use crate::spine::{record_view, ComposeBridge, ComposeHome};
 use aien_omega_compose::{hex, NoteKind};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -2242,9 +2242,9 @@ mod tests {
             return;
         }
         let t = tempfile::tempdir().unwrap();
-        let proposer: crate::spine::ComposeProposer =
+        let proposer: crate::compose::ComposeProposer =
             std::sync::Arc::new(|_: &str, _: std::time::Duration| {
-                Ok(crate::spine::Generation::default())
+                Ok(crate::compose::Generation::default())
             });
         let sink = std::sync::Arc::new(MemorySink::new());
         let b = ComposeBridge::new(t.path().join("compose"), proposer, "test:trace")
@@ -2613,11 +2613,22 @@ mod tests {
             }
         }
         // Everything else in the crate: the field's name and its reader appear
-        // only in generation.rs (definition), effects.rs (above), spine.rs
-        // (the writer of the commit) and server.rs/control.rs (plumbing).
-        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-        for e in std::fs::read_dir(dir).unwrap() {
-            let p = e.unwrap().path();
+        // only in generation.rs (definition), effects.rs (above), compose/bridge.rs
+        // (the writer of the commit) and server.rs/control.rs (plumbing). Every
+        // source file, subdirectories included.
+        let mut files = Vec::new();
+        let mut dirs = vec![std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src")];
+        while let Some(d) = dirs.pop() {
+            for e in std::fs::read_dir(d).unwrap() {
+                let p = e.unwrap().path();
+                if p.is_dir() {
+                    dirs.push(p);
+                } else {
+                    files.push(p);
+                }
+            }
+        }
+        for p in files {
             let name = p.file_name().unwrap().to_string_lossy().into_owned();
             if !name.ends_with(".rs") {
                 continue;
@@ -2715,14 +2726,14 @@ mod tests {
     #[test]
     fn a_commit_naming_no_generation_record_is_not_written() {
         let _home = crate::home_guard::home_slot();
+        use crate::compose::{ComposeBridge, Generation};
         use crate::generation::Provenance;
-        use crate::spine::{ComposeBridge, Generation};
         if !aien_omega_compose::LINKED {
             eprintln!("NOT_RUN: stub compose build");
             return;
         }
         let t = tempfile::tempdir().unwrap();
-        let proposer: crate::spine::ComposeProposer =
+        let proposer: crate::compose::ComposeProposer =
             std::sync::Arc::new(|_: &str, _: std::time::Duration| Ok(Generation::default()));
         let b = ComposeBridge::new(t.path().join("compose"), proposer, "test:fixed");
         let note = match b.note("constraint", "an ordinary note", &[]) {
@@ -2769,7 +2780,7 @@ mod tests {
         json!({"generation": 1, "v": 1, "model_sha256": "x"})
     }
 
-    fn host_count(b: &crate::spine::ComposeBridge) -> usize {
+    fn host_count(b: &crate::compose::ComposeBridge) -> usize {
         match b.recall(&[], None) {
             ControlResponse::ComposeRecalled(r) => r.host.len(),
             other => panic!("{other:?}"),
@@ -3000,7 +3011,7 @@ mod tests {
     #[test]
     fn write_approved_grant_records_the_prior_of_the_confined_file() {
         let _home = crate::home_guard::home_slot();
-        use crate::spine::{ComposeBridge, Generation};
+        use crate::compose::{ComposeBridge, Generation};
         if !aien_omega_compose::LINKED {
             eprintln!("NOT_RUN: stub compose build");
             return;
@@ -3012,7 +3023,7 @@ mod tests {
         std::fs::create_dir_all(&outside).unwrap();
         std::fs::write(ws.join("d/NOTES.md"), b"inside").unwrap();
         std::fs::write(outside.join("NOTES.md"), b"expected").unwrap();
-        let proposer: crate::spine::ComposeProposer =
+        let proposer: crate::compose::ComposeProposer =
             std::sync::Arc::new(|_: &str, _: std::time::Duration| {
                 Ok(Generation {
                     text: "filename: d/NOTES.md\nkeep it\n".to_string(),

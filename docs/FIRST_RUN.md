@@ -12,7 +12,7 @@ This is the order a new operator follows on a machine where AIEN was installed f
 aien compose desk-key --create 1
 ```
 
-The desk key is how you approve what AIEN is allowed to do. `aien start` refuses to run without it and tells you this exact command [`commands.rs: handle_start_command`, `spine.rs: check_desk_key_at_start`]. The key is stored in the compose home: `$AIEN_COMPOSE_DIR`, else `$AIEN_RUNTIME_STATE_DIR/compose`, else `$XDG_STATE_HOME/aien-runtime/compose`, else `~/.local/state/aien-runtime/compose` [`spine.rs: compose_dir_from_env`]. The command prints the key id and path, never the key.
+The desk key is how you approve what AIEN is allowed to do. `aien start` refuses to run without it and tells you this exact command [`commands.rs: handle_start_command`, `compose/bridge.rs: check_desk_key_at_start`]. The key is stored in the compose home: `$AIEN_COMPOSE_DIR`, else `$AIEN_RUNTIME_STATE_DIR/compose`, else `$XDG_STATE_HOME/aien-runtime/compose`, else `~/.local/state/aien-runtime/compose` [`spine.rs: compose_dir_from_env`]. The command prints the key id and path, never the key.
 
 ## 3. Provision the model
 

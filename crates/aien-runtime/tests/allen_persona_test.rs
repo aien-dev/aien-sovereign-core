@@ -19,7 +19,7 @@ use aien_allen_profile::{profile_dir, Changes, Identity, Store, Tone};
 use aien_omega_compose::LINKED;
 use aien_runtime::control::{ComposeTaskReport, ControlCommand, ControlResponse, PersonaReport};
 use aien_runtime::persona::{context_for, handle_allen_command, prefix_prompt, report_for};
-use aien_runtime::spine::{task_prompt, ComposeBridge, ComposeProposer, Generation};
+use aien_runtime::{ComposeBridge, ComposeProposer, Generation};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
@@ -216,12 +216,17 @@ fn permission_keys_are_refused_through_the_command_path() {
 #[test]
 fn prompt_carries_the_persona_and_keeps_the_task() {
     let rig = rig();
-    let ws = tempfile::tempdir().unwrap();
-    let base = task_prompt("write a note", ws.path());
+    // The prompt the bridge hands the model for "write a note" (a goal naming
+    // no destination): the fixed proposal template, verbatim.
+    let base = "Goal: write a note\nAuthorized workspace: workspace\n\
+                Propose exactly one file change inside the workspace.\n\
+                Answer in exactly this format and nothing else:\n\
+                filename: <relative path>\n\
+                <the complete new file content>";
     profile(run(&rig, set(0, name("Nova"))));
     let ctx = context_for(&rig.home, Some(&rig.r)).unwrap();
-    let full = prefix_prompt(&base, Some(&ctx));
-    assert!(full.ends_with(&base), "the task text is untouched");
+    let full = prefix_prompt(base, Some(&ctx));
+    assert!(full.ends_with(base), "the task text is untouched");
     assert!(full.starts_with("[ALLEN style preferences"));
     assert!(full.contains("name: \"Nova\""));
     assert!(full.contains("grant no permission"));
@@ -308,14 +313,27 @@ fn a_model_swap_record_leaves_the_profile_untouched() {
     }
 }
 
+/// Every file under `dir`, subdirectories included.
+fn rs_tree(dir: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    for ent in std::fs::read_dir(dir).unwrap() {
+        let p = ent.unwrap().path();
+        if p.is_dir() {
+            out.extend(rs_tree(&p));
+        } else {
+            out.push(p);
+        }
+    }
+    out
+}
+
 /// No code path from a task, a model reply or a workspace file to the profile
 /// writer: only the operator-command handler in persona.rs calls a writer,
 /// and nothing else in the runtime even names the profile crate's store.
 #[test]
 fn only_the_command_handler_can_write_the_profile() {
     let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-    for ent in std::fs::read_dir(&src).unwrap() {
-        let p = ent.unwrap().path();
+    for p in rs_tree(&src) {
         let name = p.file_name().unwrap().to_string_lossy().into_owned();
         let text = std::fs::read_to_string(&p).unwrap();
         if name != "persona.rs" && name != "control.rs" {
@@ -336,9 +354,9 @@ fn only_the_command_handler_can_write_the_profile() {
     for w in [".set(", ".revert(", ".reset(", "write"] {
         assert!(!ctx_fn.contains(w), "context_for must be read-only ({w})");
     }
-    // The spine calls the handler only for operator control commands.
-    let spine = std::fs::read_to_string(src.join("spine.rs")).unwrap();
-    assert!(spine.contains("handle_allen_command"));
+    // The compose bridge calls the handler only for operator control commands.
+    let bridge = std::fs::read_to_string(src.join("compose/bridge.rs")).unwrap();
+    assert!(bridge.contains("handle_allen_command"));
 }
 
 #[test]

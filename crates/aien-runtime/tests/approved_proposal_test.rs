@@ -16,11 +16,14 @@ use aien_runtime::approved_auth::{
 };
 use aien_runtime::control::{ComposeRecallReport, ControlResponse};
 use aien_runtime::effects::{self, IntentRequest, Ledger};
-use aien_runtime::spine::{ComposeBridge, ComposeProposer, APPROVED_PROPOSER_LABEL};
+use aien_runtime::{ComposeBridge, ComposeProposer};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::path::Path;
 use std::sync::Arc;
+
+/// The proposer label of a run whose proposal came from the approved-proposal hook.
+const APPROVED_PROPOSER_LABEL: &str = "hook:approved-proposal";
 
 const PATH: &str = "NOTES.md";
 const CONTENT: &str = "approved by the INTERPLANE desk\n";
@@ -741,7 +744,7 @@ fn approved_document_with_fences_is_saved_byte_exact_or_not_done() {
     let (_tmp, b, hook, ws) = setup();
     // The compose template keeps every byte (check_file_proposal reads it back).
     let text = format!("filename: {PATH}\n{FENCED_DOC}");
-    let back = aien_runtime::spine::check_file_proposal(&text).unwrap();
+    let back = aien_runtime::check_file_proposal(&text).unwrap();
     assert_eq!(back.content, FENCED_DOC);
     let mut p = unsigned("req-f1", "appr-f1");
     p.content = FENCED_DOC.into();

@@ -1,12 +1,15 @@
 //! #344: a second bound whose noun is left out ("at least 20 lines and no more
 //! than 40") is read with the earlier noun, or reported UNCERTAIN. It is never
 //! dropped silently.
+#[path = "support/compose_harness.rs"]
+mod compose_harness;
+#[path = "support/home_guard.rs"]
+mod home_guard;
+
 use aien_runtime::control::ControlResponse;
 use aien_runtime::requirements::{analyze, refusal_reason, Requirement};
-use aien_runtime::spine::{
-    check_file_proposal, propose_task_checked, ComposeBridge, ComposeProposer, Generation,
-    COMPOSE_MAX_ATTEMPTS,
-};
+use aien_runtime::{check_file_proposal, ComposeBridge, ComposeProposer, Generation};
+use compose_harness::{always, Harness};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -127,6 +130,7 @@ fn report(resp: ControlResponse) -> Option<aien_runtime::control::ComposeTaskRep
 
 #[test]
 fn linked_compose_does_not_commit_45_lines_but_commits_30() {
+    let _home = home_guard::home_slot();
     let tmp = tempfile::tempdir().unwrap();
     let ws = tmp.path().join("ws");
     std::fs::create_dir_all(&ws).unwrap();
@@ -134,7 +138,7 @@ fn linked_compose_does_not_commit_45_lines_but_commits_30() {
     if let Some(r) = r {
         assert!(!r.committed, "{r:?}");
         assert!(r.proposal.is_none());
-        assert_eq!(r.proposal_attempts.len(), COMPOSE_MAX_ATTEMPTS as usize);
+        assert_eq!(r.proposal_attempts.len(), 3);
         assert_eq!(std::fs::read_dir(&ws).unwrap().count(), 0);
     }
     let tmp = tempfile::tempdir().unwrap();
@@ -147,36 +151,34 @@ fn linked_compose_does_not_commit_45_lines_but_commits_30() {
     }
 }
 
-/// The real compose verification boundary (`propose_task_checked`), which does
-/// not need the linked omega build: the 45 line reply is refused on every
-/// attempt and nothing is approved; the 30 line reply is approved byte for byte.
+/// The compose verification boundary through `ComposeBridge::run_task`: the
+/// 45 line reply is refused on every attempt and nothing is approved; the 30
+/// line reply is approved byte for byte.
 #[test]
+#[cfg_attr(not(compose_linked), ignore = "needs librx_compose.a: stub build")]
 fn compose_boundary_refuses_45_lines_and_approves_30() {
+    let _home = home_guard::home_slot();
     let ex = analyze(GOAL);
     assert!(ex.uncertain.is_empty());
     let run = |lines: usize| {
-        let text = reply(lines);
-        let proposer = move |_: &str, _: Duration| gen(&text);
-        propose_task_checked(
-            &proposer,
-            "base",
-            None,
-            &ex.requirements,
-            Duration::from_secs(5),
-            Duration::from_millis(1),
-            COMPOSE_MAX_ATTEMPTS,
-        )
+        let h = Harness::new(always(&reply(lines)));
+        h.run(GOAL).unwrap()
     };
-    let (out, attempts) = run(45);
-    let why = out.unwrap_err();
+    let r = run(45);
+    assert!(
+        r.proposal.is_none() && r.uncommitted_proposal.is_none(),
+        "{r:?}"
+    );
+    let why = r.proposer_error.unwrap();
     assert!(why.contains("40"), "{why}");
-    assert_eq!(attempts.len(), COMPOSE_MAX_ATTEMPTS as usize);
+    let attempts = &r.proposal_attempts;
+    assert_eq!(attempts.len(), 3);
     assert!(attempts
         .iter()
         .all(|a| a.outcome == "refused" && a.aegis.is_none()));
-    let (out, attempts) = run(30);
-    assert_eq!(out.unwrap(), reply(30));
-    assert_eq!(attempts.len(), 1);
+    let r = run(30);
+    assert_eq!(r.proposal.as_deref(), Some(reply(30).as_str()), "{r:?}");
+    assert_eq!(r.proposal_attempts.len(), 1);
 }
 
 #[test]

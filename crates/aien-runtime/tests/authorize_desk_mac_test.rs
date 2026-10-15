@@ -10,9 +10,9 @@ mod home_guard;
 
 use aien_omega_compose::hex;
 use aien_runtime::approved_auth::{desk_key_path, AuthorizeBinding, DeskKey};
+use aien_runtime::compose::{ComposeBridge, ComposeProposer, Generation};
 use aien_runtime::control::{ComposeNoteReport, ComposeTaskReport, ControlResponse, DeskProof};
 use aien_runtime::effects::{self, IntentRequest, MintRequest};
-use aien_runtime::spine::{ComposeBridge, ComposeProposer, Generation};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::path::PathBuf;
@@ -418,7 +418,7 @@ fn the_wire_field_is_optional_and_old_clients_parse() {
 fn the_desk_is_required_unless_a_dev_run_opts_out() {
     // sc#328 (Drake decision b, 2026-10-08): REQUIRED by default. "0" is the
     // dev-only opt-out; a strict (release qualification) run refuses it.
-    use aien_runtime::spine::authorize_desk_setting;
+    use aien_runtime::compose::authorize_desk_setting;
     for dev in [false, true] {
         assert_eq!(
             authorize_desk_setting(None, dev),
@@ -452,7 +452,7 @@ fn the_env_switch_is_strict() {
     // The daemon's reader: same rules, this process's dev mode. Run in one
     // test so the process-wide env is not raced by another test.
     use aien_inference_abi::strict::dev_fallback_active;
-    use aien_runtime::spine::{authorize_requires_desk_from_env, AUTHORIZE_DESK_ENV};
+    use aien_runtime::compose::{authorize_requires_desk_from_env, AUTHORIZE_DESK_ENV};
     let _g = ONE_HOME.lock().unwrap_or_else(|e| e.into_inner());
     std::env::remove_var(AUTHORIZE_DESK_ENV);
     assert_eq!(authorize_requires_desk_from_env(), Ok(true));

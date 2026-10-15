@@ -7,12 +7,12 @@
 mod home_guard;
 
 use aien_omega_compose::hex;
+use aien_runtime::compose::{ComposeBridge, ComposeProposer, Generation};
 use aien_runtime::control::{
     ComposeControlReport, ComposeNoteReport, ComposeReconcileReport, ControlResponse,
     ReconcileDeclare,
 };
 use aien_runtime::effects::{self, IntentRequest, Ledger};
-use aien_runtime::spine::{ComposeBridge, ComposeProposer, Generation};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::path::Path;

@@ -2,7 +2,9 @@
 
 Scope: how an approved proposal from an upstream approval desk (INTERPLANE
 `ComposeLedgerAuthority`, interplane#77) enters the production compose path.
-Line numbers are for the commit that adds this note.
+Line numbers are for the commit that adds this note. Since 2026-10-15 the
+compose code cited as spine.rs lives in crates/aien-runtime/src/compose/bridge.rs
+(same function names).
 
 ## Entry point
 `ProposerHook::submit` (crates/aien-runtime/src/approved.rs:152) checks the
