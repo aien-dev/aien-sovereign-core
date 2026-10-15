@@ -20,6 +20,8 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 jsonschema = { version = "0.17", default-features = false }
+aien-proof = { path = "../aien-proof" }
+blake3 = "1.8"
 
 [[bin]]
 name = "spark-harness"
