@@ -4,7 +4,7 @@
 # Rules every caller inherits:
 #   - refuses while the live server on :18091 answers (no override: two omega processes on
 #     the chip at once is UNKNOWN territory), and refuses an occupied port (PKV_CHECK_PORT,
-#     default 18097; 18095 is spark-cockpit);
+#     default 18098; never 18091, 18092, 18095 or 18097, which belong to other services);
 #   - starts its own aien-serve-http only on 127.0.0.1:$PORT, stops only the PID it started;
 #   - key: atlas-vault entry AIEN_KV_STORE_KEY by default (`atlas-vault run AIEN_KV_STORE_KEY
 #     --`, the key never passes through this shell), or PKV_CHECK_EPHEMERAL_KEY=1 for a
@@ -14,7 +14,9 @@
 
 PKV_LIVE_PORT=18091
 MODEL=${OWN30B_MODEL_DIR:-$HOME/models/qwen3-30b-a3b-instruct-2507-fp8}
-PORT=${PKV_CHECK_PORT:-18097}
+PORT=${PKV_CHECK_PORT:-18098}
+PKV_RESERVED_PORTS="18091 18092 18095 18097" # live 30B, spark-mail, spark-cockpit, Qwen3-8B MAX
+pkv_port_reserved() { case " $PKV_RESERVED_PORTS " in *" $1 "*) return 0 ;; esac; return 1; }
 base="http://127.0.0.1:$PORT"
 DRY=0
 SERVER_JOB=
@@ -56,7 +58,7 @@ pkv_prereqs() {
 	else
 		echo "  ok   :$PKV_LIVE_PORT does not answer"
 	fi
-	if pkv_port_busy; then echo "  STOP something listens on :$PORT (pick a free PKV_CHECK_PORT)"; bad=1; else echo "  ok   :$PORT is free"; fi
+	if pkv_port_reserved "$PORT"; then echo "  STOP :$PORT belongs to another service (reserved: $PKV_RESERVED_PORTS)"; bad=1; elif pkv_port_busy; then echo "  STOP something listens on :$PORT (pick a free PKV_CHECK_PORT)"; bad=1; else echo "  ok   :$PORT is free"; fi
 	if [ "${1:-1}" = 1 ]; then
 		if [ "${PKV_CHECK_EPHEMERAL_KEY:-0}" = 1 ]; then
 			echo "  ok   key: ephemeral (PKV_CHECK_EPHEMERAL_KEY=1, lives only in this run)"
@@ -80,6 +82,10 @@ pkv_prereqs() {
 pkv_begin() {
 	if pkv_live_up; then
 		echo "refusing: the live server on :$PKV_LIVE_PORT is up (pause it first)" >&2
+		exit 2
+	fi
+	if pkv_port_reserved "$PORT"; then
+		echo "refusing: :$PORT belongs to another service (reserved: $PKV_RESERVED_PORTS)" >&2
 		exit 2
 	fi
 	if pkv_port_busy; then

@@ -29,13 +29,17 @@ if [ $DRY = 1 ]; then
 	bad=0
 	pkv_prereqs 1 || bad=1
 	PORT=$PORT2 base="http://127.0.0.1:$PORT2"
-	if pkv_port_busy; then echo "  STOP something listens on :$PORT2"; bad=1; else echo "  ok   :$PORT2 is free"; fi
+	if pkv_port_reserved "$PORT2"; then echo "  STOP :$PORT2 belongs to another service (reserved: $PKV_RESERVED_PORTS)"; bad=1; elif pkv_port_busy; then echo "  STOP something listens on :$PORT2"; bad=1; else echo "  ok   :$PORT2 is free"; fi
 	[ $bad = 0 ] && { echo "DRY RUN: ready"; exit 0; }
 	echo "DRY RUN: NOT ready"
 	exit 1
 fi
 
 PORT=$PORT2 base="http://127.0.0.1:$PORT2"
+if pkv_port_reserved "$PORT2"; then
+	echo "refusing: :$PORT2 belongs to another service (reserved: $PKV_RESERVED_PORTS)" >&2
+	exit 2
+fi
 if pkv_port_busy; then
 	echo "refusing: something already listens on :$PORT2 (pick a free PKV_CHECK_PORT2)" >&2
 	exit 2

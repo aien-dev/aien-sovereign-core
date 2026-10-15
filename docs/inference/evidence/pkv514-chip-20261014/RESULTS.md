@@ -42,4 +42,15 @@ persistence-off server run and the in-process uninterrupted turn.
   inter-process lock, issue #521); item 5 gives process 2 a copy.
 - Contexts longer than 2079 tokens, and concurrent requests, were not run on the chip.
 
+## After the chip runs (not rerun on the chip)
+
+- #510 merged into main first; the merge moved `omega.lock` from d0889a94 to 62833658. 62833658
+  contains d0889a94, and between them no engine source changes (only build plumbing in the
+  Makefile, a comment in `src/runtime/rx_argus.h`, and non-engine directories), so the chip
+  result carries over (INFERRED from the source diff; not rerun).
+- Independent review: no MUST items. The check scripts' default port moved from 18097 (the
+  Qwen3-8B server) to 18098, and 18091/18092/18095/18097 are now refused (the runs above
+  already used 18098). The other review items are issue #523; the Rust code is unchanged
+  from 8a4c36e9.
+
 CALC-EXEMPT: every number is copied from the run logs (SNAP lines, health JSON, memory.txt); none is derived.

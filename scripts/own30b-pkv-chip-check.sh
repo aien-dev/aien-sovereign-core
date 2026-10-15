@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Persistent KV acceptance check on the chip (sc#505/#507, locked by #499). CHIP-ONLY: never run
-# by CI or cargo test. It starts its OWN servers on 127.0.0.1:18097 (PKV_CHECK_PORT; never
+# by CI or cargo test. It starts its OWN servers on 127.0.0.1:18098 (PKV_CHECK_PORT; never
 # touches :18091, the live server, or its PID/log files) and loads the 30B checkpoint each time
 # (~30.5 GB resident, about 18 s load plus the checkpoint digest when persistence is on).
 #

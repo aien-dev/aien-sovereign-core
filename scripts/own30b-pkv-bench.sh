@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Persistent KV benchmark on the chip (sc#508, contract locked in #500). CHIP-ONLY: never run by
 # CI or cargo test. Same safety rules as own30b-pkv-chip-check.sh (see own30b-pkv-lib.sh): own
-# server on 127.0.0.1:18097 (PKV_CHECK_PORT), refuses while :18091 answers or the port is taken,
+# server on 127.0.0.1:18098 (PKV_CHECK_PORT), refuses while :18091 answers or the port is taken,
 # stops only the PID it started, key via `atlas-vault run AIEN_KV_STORE_KEY --` (never printed).
 #
 #   scripts/own30b-pkv-bench.sh [--dry-run] <evidence-dir> <aien-serve-http binary>
