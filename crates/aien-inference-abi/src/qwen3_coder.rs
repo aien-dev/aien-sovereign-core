@@ -15,8 +15,8 @@ use rayon::prelude::*;
 use crate::moe_plan::MoeBatchPlan;
 use crate::qwen3_moe::{
     bf16_to_f32, fp8_table, load_qwen3_fp8_moe_layer, reference_moe_forward,
-    reference_router_logits, shard_path, Qwen3MoeError, Qwen3MoeLayer, Shard,
-    FP8_BLOCK, QWEN3_A3B_HIDDEN, QWEN3_A3B_LAYERS,
+    reference_router_logits, shard_path, Qwen3MoeError, Qwen3MoeLayer, Shard, FP8_BLOCK,
+    QWEN3_A3B_HIDDEN, QWEN3_A3B_LAYERS,
 };
 use crate::tensor::{apply_rope, rmsnorm, sample_argmax, scaled_dot_product_attention_single};
 

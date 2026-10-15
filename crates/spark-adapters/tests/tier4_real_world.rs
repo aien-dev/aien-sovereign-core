@@ -63,10 +63,7 @@ async fn test_t4_02_resident_seat_live_inference_roundtrip() {
         .send()
         .await;
 
-    assert!(
-        res.is_ok(),
-        "Live model seat on 18006 must be reachable"
-    );
+    assert!(res.is_ok(), "Live model seat on 18006 must be reachable");
     let response = res.unwrap();
     assert_eq!(response.status(), 200, "model seat must return HTTP 200");
 

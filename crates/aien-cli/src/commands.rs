@@ -2089,11 +2089,7 @@ pub async fn handle_status_command() {
         .unwrap_or_default();
 
     let checks = [
-        (
-            "Model Seat",
-            "http://127.0.0.1:18006/health",
-            18006,
-        ),
+        ("Model Seat", "http://127.0.0.1:18006/health", 18006),
         (
             "Cortex Memory Store",
             "http://127.0.0.1:18080/health",
