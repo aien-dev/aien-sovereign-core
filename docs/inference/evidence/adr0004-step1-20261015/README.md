@@ -11,3 +11,5 @@ Branch `refactor/adr0004-step1-kv-geometry` (PR #543), rebased on main f87b63b (
 | G30-tokens `--tokens-only`: `own30b_check chip`, the baseline's flags plus `--tokens-only`, quiet flag, `/tmp/aien-gb10.lock`, `AIEN_OMEGA_SPIN_US=2000` | `tokens-only/`, `tokens-only.start` | IDENTICAL on all 4 prompts; the chip token lists (name, chip, first_diff, emitted) hash equal to the baseline's run.json |
 
 Decode tok/s (informational, G30-speed is not a step 1 gate): 38.1 / 35.5 / 36.9 / 36.0 against the step 0 floors 37.927 / 35.017 / 36.375 / 35.502; every prompt is above its floor.
+
+Machine state for the chip run: load average 4.16 / 3.81 / 4.05 at the start (`tokens-only.start`; the baseline was taken near 2); the end record has no load line, and `uptime` about two minutes after the run read 3.17 / 3.41 / 3.86. The idle exp445 server on :18091 (about 36 GB resident) was left running, so `own30b_check` needs `--force-memory` (the guard only refuses; it changes nothing), as in the baseline.

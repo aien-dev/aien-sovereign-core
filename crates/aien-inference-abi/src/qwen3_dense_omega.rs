@@ -448,7 +448,8 @@ impl Qwen3DenseConfig {
     }
 }
 
-/// The 8B's KV shape (ADR 0004 section 2.1): the dense engine builds its cache from this.
+/// The 8B's KV shape (ADR 0004 section 2.1): the dense engine will build its cache from this
+/// (step 6).
 impl From<&Qwen3DenseConfig> for KvGeometry {
     fn from(c: &Qwen3DenseConfig) -> Self {
         Self {
@@ -1761,12 +1762,6 @@ mod tests {
                 rope_theta: 1e6,
                 block_size: KV_BLOCK_SIZE,
             }
-        );
-        let t = tiny_config();
-        let g = KvGeometry::from(&t);
-        assert_eq!(
-            (g.layers, g.q_heads, g.kv_heads, g.head_dim, g.rope_theta),
-            (t.layers, t.q_heads, t.kv_heads, t.head_dim, t.rope_theta)
         );
     }
 

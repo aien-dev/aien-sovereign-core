@@ -2554,7 +2554,8 @@ pub trait KvStore: Send {
     fn is_empty(&self) -> bool {
         self.len() == 0
     }
-    /// "split" (host norm/rope, `append` + `attend`) or "fused" (one launch per layer).
+    /// "split" (host norm/rope, `append` + `attend`), "host-pool" (the host bf16 pool) or "fused"
+    /// (one launch per layer).
     fn path_name(&self) -> &'static str {
         "split"
     }
@@ -5578,8 +5579,8 @@ mod kv_persist_tests {
         (0..n).map(|i| prand(seed, i)).collect()
     }
 
-    /// The 30B's KV shape (`~/models/qwen3-30b-a3b` config.json: 48 layers, 32 q heads, 4 KV
-    /// heads, head_dim 128, rope_theta 1e7); the other fields do not reach the KV cache.
+    /// The 30B's KV shape (`~/models/qwen3-30b-a3b-instruct-2507-fp8` config.json: 48 layers, 32 q
+    /// heads, 4 KV heads, head_dim 128, rope_theta 1e7); the other fields do not reach the KV cache.
     fn qwen3_30b_kv_config() -> Qwen3MoeConfig {
         Qwen3MoeConfig {
             layers: 48,
@@ -5622,8 +5623,10 @@ mod kv_persist_tests {
         }
     }
 
+    // The three host-buildable caches; OmegaFusedKv needs the chip and real weights (its geometry,
+    // len and path are covered by the chip gates and `the_fused_cache_fits_only_the_kernel_shape`).
     #[test]
-    fn every_cache_reports_its_geometry_len_and_path_through_the_kv_store_view() {
+    fn every_host_buildable_cache_reports_its_geometry_len_and_path_through_the_kv_store_view() {
         let c = tiny_config();
         let g = KvGeometry::from(&c);
         let kvd = c.kv_heads * c.head_dim;
