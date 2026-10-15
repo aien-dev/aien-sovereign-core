@@ -588,7 +588,7 @@ struct ModelSwapPayload {
 }
 
 async fn handle_get_models(State(state): State<AppState>) -> Json<Value> {
-    // 1. Query local MAX seat models
+    // 1. Query local model seat models
     let mut active_models = Vec::new();
     if let Ok(resp) = state
         .client
