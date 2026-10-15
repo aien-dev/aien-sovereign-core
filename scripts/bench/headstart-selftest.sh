@@ -264,5 +264,74 @@ check "broken ON arm: runner still exits 0 (failure recorded)" test "$RC" -eq 0
 check "NEGATIVE: failing ON arm recorded as failures, never as time" jqt '.ab[] | select(.scenario == "ab_cold_build_ws") | .failed_on == 1 and .n_on == 0 and .wall_s_on.median == null and .saving_pct == null' "$T/out-brk/summary.json"
 check "NEGATIVE: wrong ON exit code gives verdict MISMATCH" jqt '.verdict == "MISMATCH" and (.check_exit_equal | not) and .arms.ON.check_exit != 0' "$T/out-brk/verify.json"
 
+# ------------------------------------------------ 6. per-sample quiet-flag hold, ICE reports, failure tails
+# The real quietlock on a private state dir (QUIETLOCK_DIR), never the host's
+# flag. The fake cargo records whether our hold is on the flag while the timed
+# command runs, and (with HS_FAKE_ICE=1) fails a check the way the SVH bug
+# does: an ICE report in the cwd, the error far above 100 warning lines.
+QL="$T/ql"; mkdir -p "$QL"
+cat > "$T/fake-cargo" <<'EOF'
+#!/usr/bin/env bash
+if [ -n "${HS_FAKE_FLAG_LOG:-}" ]; then
+  if grep -q hs-selftest "$QUIETLOCK_DIR/.spark-quiet" 2>/dev/null; then echo HELD; else echo FREE; fi >> "$HS_FAKE_FLAG_LOG"
+fi
+if [ "${HS_FAKE_ICE:-}" = 1 ] && [[ " $* " == *" check "* ]]; then
+  printf "thread 'rustc' panicked at compiler/selftest.rs:1:1:\nassertion failed: selftest svh\nstack backtrace:\n   0: selftest-backtrace-frame\n" > "rustc-ice-selftest-$$.txt"
+  echo 'error: could not compile `hsbase` (lib)'
+  for i in $(seq 100); do echo "warning: selftest noise $i"; done
+  exit 101
+fi
+exec cargo "$@"
+EOF
+chmod +x "$T/fake-cargo"
+QL_BIN=$(command -v quietlock || true)
+if [ -n "$QL_BIN" ]; then
+  export QUIETLOCK_DIR="$QL"
+  hrunner() {
+    HS_HOLD=1 HS_HOLD_OWNER=hs-selftest HS_HOLD_MINUTES=1 HS_HOLD_REASON=selftest \
+    HS_CARGO="$T/fake-cargo" HS_FAKE_FLAG_LOG="$T/flag.log" runner "$@"
+  }
+  hrunner "$FX" hold setup
+  # A foreign hold taken between stages: the first sample must queue behind it.
+  "$QL_BIN" hold --owner selftest-other --minutes 1 --reason selftest -- sleep 5 >/dev/null 2>&1 &
+  OTHER=$!; sleep 1
+  hrunner "$FX" hold cold
+  RC=$?; wait "$OTHER" 2>/dev/null
+  O="$T/out-hold"; N=$(jq -s length "$O/samples.jsonl")
+  check "hold: run exits 0 with samples" test "$RC" -eq 0 -a "$N" -ge 2
+  check "hold: every sample held, one distinct hold id each" jqs 'all(.[]; .quiet_hold.held and .quiet_hold.requested) and ([.[].quiet_hold.id] | unique | length) == length and all(.[]; .contamination_reasons | index("quiet_hold_not_taken") | not)' "$O/samples.jsonl"
+  check "hold: our hold is on the flag during every timed command" test "$(grep -c HELD "$T/flag.log")" -eq "$N"
+  check "hold: setup commands outside samples run unheld" grep -q FREE "$T/flag.log"
+  check "hold: every hold acquired and released (history)" test "$(grep -c 'hold acquired: hs-selftest' "$QL/.spark-quiet.history")" -eq "$N" -a "$(grep -c 'released' "$QL/.spark-quiet.history")" -ge "$((N + 1))"
+  check "hold: flag clear after the run" "$QL_BIN" check
+  check "NEGATIVE: foreign hold is waited out before our hold" jqs '.[0].quiet_flag_wait_s >= 2 and .[0].quiet_hold.held' "$O/samples.jsonl"
+  check "hold: manifest lists the held samples" jqt --argjson n "$N" '.protocol.quiet_hold.enabled and .protocol.quiet_hold.owner == "hs-selftest" and (.protocol.quiet_hold.samples_held | length) == $n and .protocol.quiet_hold.samples_unheld == []' "$O/manifest.json"
+  runner "$FX" hold cleanup
+
+  # A quietlock whose check says clear but whose hold is always refused.
+  printf '#!/usr/bin/env bash\n[ "$1" = check ] && exit 0\necho "quietlock: QUIETLOCK_REFUSED fake" >&2\nexit 75\n' > "$T/refusing-quietlock"
+  chmod +x "$T/refusing-quietlock"
+  T_QL_BIN="$T/refusing-quietlock" T_QL_CAP=2 HS_HOLD=1 runner "$FX" refused setup cold cleanup
+  RC=$?
+  check "NEGATIVE: refused hold does not hang the run (cap)" test "$RC" -eq 0
+  check "NEGATIVE: refused hold marks the sample contaminated, unheld" jqs '.[0].quiet_hold.held == false and .[0].quiet_hold.refused >= 1 and .[0].contaminated and (.[0].contamination_reasons | index("quiet_hold_not_taken"))' "$T/out-refused/samples.jsonl"
+  unset QUIETLOCK_DIR
+else
+  check "quietlock installed for the hold tests" false
+fi
+
+HS_CARGO="$T/fake-cargo" HS_ARM_ENV_OFF="HS_FAKE_ARM=off" HS_ARM_ENV_ON="HS_FAKE_ICE=1" runner "$FX" ice setup ab
+RC=$?
+ICE='.[] | select(.scenario == "ab_cold_check_ws" and .arm == "ON")'
+check "ICE ON arm: runner exits 0, failure recorded" test "$RC" -eq 0
+check "NEGATIVE: ICE sample has exit 101 and one ICE report" jqs "[$ICE] | length == 1 and .[0].exit_status == 101 and .[0].ice_reports == 1" "$T/out-ice/samples.jsonl"
+check "OFF samples report no ICE" jqs 'all(.[] | select(.arm == "OFF"); .ice_reports == 0)' "$T/out-ice/samples.jsonl"
+TAILF="$T/out-ice/$(jq -rs "[$ICE][0].log_tail" "$T/out-ice/samples.jsonl")"
+check "failure tail starts with the error lines" bash -c "head -1 '$TAILF' | grep -q '^== error lines' && sed -n 2p '$TAILF' | grep -q 'could not compile'"
+check "failure tail carries the ICE panic head" grep -q 'assertion failed: selftest svh' "$TAILF"
+check "NEGATIVE: ICE backtrace is not copied" bash -c "! grep -q selftest-backtrace-frame '$TAILF'"
+check "ICE report removed from the worktree root" bash -c "! ls '$T/work-ice/src'/rustc-ice-* 2>/dev/null"
+runner "$FX" ice cleanup
+
 echo "selftest: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

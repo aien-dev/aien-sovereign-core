@@ -36,7 +36,9 @@
 # HS_EDIT_REASON. Toolchain and A/B knobs: HS_CARGO [cargo], HS_RUSTC
 # [unset: cargo picks rustc], HS_ARM_ENV_OFF, HS_ARM_ENV_ON (space-separated
 # KEY=VALUE words), HS_AB_JOBS [empty], HS_AB_JOBS_SAMPLES [3],
-# HS_VERIFY_TEST_PKGS [spark-harness], HS_VERIFY_ENV_ON [empty].
+# HS_VERIFY_TEST_PKGS [spark-harness], HS_VERIFY_ENV_ON [empty]. Quiet-flag
+# hold: HS_HOLD [0], HS_HOLD_OWNER [headstart-runner], HS_HOLD_MINUTES [5],
+# HS_HOLD_REASON [headstart timing sample]. HS_KEEP_LOG [0] keeps full logs.
 # See benchmarks/headstart/README.md.
 set -euo pipefail
 
@@ -60,6 +62,12 @@ HS_INCR_SERIES=${HS_INCR_SERIES:-2}
 HS_QUIETLOCK=${HS_QUIETLOCK:-1}
 HS_QUIETLOCK_BIN=${HS_QUIETLOCK_BIN:-quietlock}
 HS_QUIET_WAIT_CAP_S=${HS_QUIET_WAIT_CAP_S:-3600}
+# Per-sample hold of the quiet flag (HS_HOLD=1): take it after the queue wait,
+# keep it through the load wait and the timed command, release it after.
+HS_HOLD=${HS_HOLD:-0}
+HS_HOLD_OWNER=${HS_HOLD_OWNER:-headstart-runner}
+HS_HOLD_MINUTES=${HS_HOLD_MINUTES:-5}
+HS_HOLD_REASON=${HS_HOLD_REASON:-headstart timing sample}
 # Edit targets (repo-relative paths). The anchor is a fixed string that must
 # match exactly one line, the opening line of a function body.
 HS_BODY_FILE=${HS_BODY_FILE:-}
@@ -84,13 +92,26 @@ RUN_ID=${HS_RUN_ID:-headstart-m0-$HS_DATE-$SHORT}
 TIME_BIN=/usr/bin/time
 MON_PID=""
 EDITED_FILE=""
+HOLD_PID=""
+HOLD_FILE=""
 
 say() { printf '[headstart %s] %s\n' "$(date -u +%H:%M:%S)" "$*" >&2; }
 die() { say "ABORT: $*"; exit 1; }
 
+# Release a per-sample quiet-flag hold (see hold_acquire): removing the want
+# file ends the held waiter, and quietlock releases the flag when it exits.
+hold_release() {
+  [ -n "$HOLD_PID" ] || return 0
+  rm -f "$HOLD_FILE.want"
+  wait "$HOLD_PID" 2>/dev/null || true
+  HOLD_PID=""
+  rm -f "$HOLD_FILE"
+}
+
 cleanup_on_exit() {
   local rc=$?
   [ -n "$MON_PID" ] && kill "$MON_PID" 2>/dev/null || true
+  hold_release
   if [ -n "$EDITED_FILE" ] && [ -d "$SRC" ]; then
     git -C "$SRC" checkout -- "$EDITED_FILE" 2>/dev/null || true
     say "reverted in-flight edit of $EDITED_FILE"
@@ -164,6 +185,64 @@ wait_quietlock() {
   echo "$(( $(date +%s) - start )) false true"
 }
 
+# hold_acquire: with HS_HOLD=1, take the quiet flag for one sample with
+# `quietlock hold`. The held command is a small waiter that writes the hold id
+# to $HOLD_FILE, then waits until hold_release removes $HOLD_FILE.want (or
+# this runner dies). A refusal (exit 75: someone took the flag after our
+# queue wait) queues again behind the holder, within HS_QUIET_WAIT_CAP_S.
+# Sets HOLD_HELD (true|false), HOLD_ID, HOLD_S and HOLD_REFUSED; it must not
+# run in a subshell, because the waiter has to outlive this call.
+hold_acquire() {
+  local start rc waited
+  HOLD_HELD=false; HOLD_ID=""; HOLD_S=0; HOLD_REFUSED=0
+  [ "$HS_HOLD" = 1 ] && quietlock_available || return 0
+  start=$(date +%s)
+  HOLD_FILE="$RAWLOG/.quiet-hold.$$"
+  while :; do
+    rm -f "$HOLD_FILE"; : > "$HOLD_FILE.want"
+    "$HS_QUIETLOCK_BIN" hold --owner "$HS_HOLD_OWNER" --minutes "$HS_HOLD_MINUTES" --reason "$HS_HOLD_REASON" -- \
+      sh -c 'printf "%s\n" "${QUIETLOCK_HOLD:-unknown}" > "$1"
+             while [ -e "$2" ] && kill -0 "$3" 2>/dev/null; do sleep 0.2; done' \
+      hold-waiter "$HOLD_FILE" "$HOLD_FILE.want" "$$" >> "$RAWLOG/quietlock-hold.log" 2>&1 &
+    HOLD_PID=$!
+    while [ ! -s "$HOLD_FILE" ] && kill -0 "$HOLD_PID" 2>/dev/null; do sleep 0.1; done
+    if [ -s "$HOLD_FILE" ]; then
+      HOLD_HELD=true; HOLD_ID=$(head -1 "$HOLD_FILE"); HOLD_S=$(( $(date +%s) - start )); return 0
+    fi
+    rc=0; wait "$HOLD_PID" || rc=$?
+    HOLD_PID=""; rm -f "$HOLD_FILE.want"
+    HOLD_S=$(( $(date +%s) - start ))
+    if [ "$rc" -ne 75 ]; then
+      say "quietlock hold failed (exit $rc, see $RAWLOG/quietlock-hold.log): sample runs unheld, marked contaminated"
+      return 0
+    fi
+    HOLD_REFUSED=$((HOLD_REFUSED + 1))
+    if [ "$HOLD_S" -ge "$HS_QUIET_WAIT_CAP_S" ]; then
+      say "quiet flag hold refused $HOLD_REFUSED times in ${HOLD_S}s (cap ${HS_QUIET_WAIT_CAP_S}s): sample runs unheld, marked contaminated"
+      return 0
+    fi
+    sleep 1
+    wait_quietlock > /dev/null
+  done
+}
+
+# Files rustc leaves in the worktree root when it panics (internal compiler
+# error). harvest_ice <tail file> appends each report's head (the panic lines,
+# up to the backtrace) to the tail file, removes the reports so the next
+# sample starts clean, and prints how many there were.
+harvest_ice() {
+  local out=$1 n=0 f
+  for f in "$SRC"/rustc-ice-*.txt; do
+    [ -e "$f" ] || continue
+    n=$((n + 1))
+    { printf '== %s (head, up to the backtrace) ==\n' "${f##*/}"
+      awk '/^stack backtrace:/ { exit } NR > 12 { exit } { print }' "$f" | LC_ALL=C tr -cd '\11\12\15\40-\176'
+    } >> "$out"
+    rm -f "$f"
+  done
+  echo "$n"
+}
+
 # Wait until 1-minute loadavg < HS_LOAD_MAX, at most HS_WAIT_CAP_S seconds.
 # Prints "<waited_s> <capped:true|false>".
 wait_quiet() {
@@ -226,8 +305,9 @@ run_sample() {
     local sid="${scenario}-${arm}-r${round}-s${step}-a${attempt}"
     [ "$prep" = cold ] && rm -rf "$tgt"
     local wq waited capped lb la fstart fend mon t0 t1 rc wall tv tf log tail_rel contaminated maxseen ticks memb
-    local qw qwait qcapped qchecked reasons
+    local qw qwait qcapped qchecked reasons ice
     qw=$(wait_quietlock); read -r qwait qcapped qchecked <<< "$qw"
+    hold_acquire
     wq=$(wait_quiet); waited=${wq% *}; capped=${wq#* }
     lb=$(loadavg_json); memb=$(mem_avail_kb)
     fstart=$(foreign_json)
@@ -248,22 +328,34 @@ run_sample() {
     t1=$(now_ns)
     fend=$(foreign_json)
     kill "$MON_PID" 2>/dev/null || true; wait "$MON_PID" 2>/dev/null || true; MON_PID=""
+    hold_release
     la=$(loadavg_json)
     wall=$(secs_between "$t0" "$t1")
     if [ -x "$TIME_BIN" ]; then tv=$(time_v_json "$tf"); else tv='{"available":false,"reason":"/usr/bin/time not found"}'; fi
     ticks=$(wc -l < "$mon")
     maxseen=$( { echo "$fstart"; cat "$mon"; echo "$fend"; } | jq -s 'map(length) | max')
     reasons=$(jq -cn --argjson s "$fstart" --argjson e "$fend" --slurpfile m "$mon" \
-      --argjson lc "$capped" --argjson qc "$qcapped" \
+      --argjson lc "$capped" --argjson qc "$qcapped" --arg hr "$HS_HOLD" --argjson hh "$HOLD_HELD" \
       '[ (if ($s | length) > 0 then "foreign_at_start" else empty end),
          (if any($m[]; length > 0) then "foreign_during" else empty end),
          (if ($e | length) > 0 then "foreign_at_end" else empty end),
          (if $lc then "load_wait_capped" else empty end),
-         (if $qc then "quiet_flag_wait_capped" else empty end) ]')
+         (if $qc then "quiet_flag_wait_capped" else empty end),
+         (if $hr == "1" and ($hh | not) then "quiet_hold_not_taken" else empty end) ]')
     contaminated=false; [ "$reasons" != '[]' ] && contaminated=true
     tail_rel="logs/$sid.tail.log"
     local nt=30; [ "$rc" -ne 0 ] && nt=80
-    tail -n "$nt" "$log" | LC_ALL=C tr -cd '\11\12\15\40-\176' > "$HS_OUT/$tail_rel"
+    : > "$HS_OUT/$tail_rel"
+    # A failure's cause can sit far above the last lines (cargo prints its
+    # manifest warnings last), so failed samples keep the error lines first.
+    if [ "$rc" -ne 0 ]; then
+      { echo '== error lines (first 30 of the full log) =='
+        grep -m 30 -E "^error|panicked at|internal compiler error|^thread '|^note: (please attach|compiler flags|we would appreciate)" "$log" || true
+        echo "== last $nt lines =="
+      } | LC_ALL=C tr -cd '\11\12\15\40-\176' >> "$HS_OUT/$tail_rel"
+    fi
+    tail -n "$nt" "$log" | LC_ALL=C tr -cd '\11\12\15\40-\176' >> "$HS_OUT/$tail_rel"
+    ice=$(harvest_ice "$HS_OUT/$tail_rel")
     final=true
     if [ "$contaminated" = true ] && [ "$attempt" -le "$HS_MAX_RERUNS" ]; then final=false; fi
     jq -cn \
@@ -277,7 +369,8 @@ run_sample() {
       --argjson qwait "$qwait" --argjson qcapped "$qcapped" --argjson qchecked "$qchecked" \
       --argjson fend "$fend" --argjson reasons "$reasons" --argjson memb "${memb:-null}" --argjson fstart "$fstart" --argjson maxseen "$maxseen" \
       --argjson ticks "$ticks" --argjson contaminated "$contaminated" --argjson final "$final" \
-      --arg tail "$tail_rel" --arg edit "${HS_CUR_EDIT:-}" \
+      --arg tail "$tail_rel" --arg edit "${HS_CUR_EDIT:-}" --argjson ice "$ice" \
+      --arg hr "$HS_HOLD" --argjson hh "$HOLD_HELD" --arg hid "$HOLD_ID" --argjson hs "$HOLD_S" --argjson hrf "$HOLD_REFUSED" \
       --slurpfile mon <(cat "$mon") \
       '{schema: "headstart-sample/v1", run_id: $run_id, sample_id: $sid, scenario: $scenario, arm: $arm,
         kind: $kind, round: $round, step: $step, attempt: $attempt,
@@ -287,11 +380,13 @@ run_sample() {
         wall_s: $wall, time_v: $tv, exit_status: $rc, ok: ($rc == 0),
         loadavg_before: $lb, loadavg_after: $la,
         quiet_flag_checked: $qchecked, quiet_flag_wait_s: $qwait, quiet_flag_wait_capped: $qcapped,
+        quiet_hold: {requested: ($hr == "1"), held: $hh, id: (if $hid == "" then null else $hid end),
+                     acquire_s: $hs, refused: $hrf},
         load_wait_s: $waited, load_wait_capped: $capped,
         mem_available_kb_before: $memb,
         foreign: {at_start: $fstart, at_end: $fend, monitor_ticks: $ticks, max_seen: $maxseen,
                   seen: ([$fstart[], ($mon[] | .[]), $fend[]] | unique | .[0:40])},
-        contaminated: $contaminated, contamination_reasons: $reasons,
+        contaminated: $contaminated, contamination_reasons: $reasons, ice_reports: $ice,
         final: $final, log_tail: $tail}' >> "$SAMPLES"
     [ "${HS_KEEP_LOG:-0}" = 1 ] || rm -f "$log"
     LAST_LOG=$log
@@ -399,6 +494,13 @@ stage_begin() {
 stage_end() {
   manifest_add '(.stages[] | select(.stage == $s and .ended_at == null)) |= . + {ended_at: $t}' \
     --arg s "$1" --arg t "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  # Which samples (all stages so far) ran under a per-sample quiet-flag hold.
+  if [ -s "$SAMPLES" ]; then
+    manifest_add '.protocol.quiet_hold += {
+        samples_held: [$x[] | select(.quiet_hold.held == true) | .sample_id],
+        samples_unheld: [$x[] | select(.quiet_hold.held != true) | .sample_id]}' \
+      --slurpfile x "$SAMPLES"
+  fi
 }
 scenario_add() { # scenario_add <id> <kind> <command>
   manifest_add 'if any(.scenarios[]; .id == $id) then . else .scenarios += [{id: $id, kind: $k, command: $c, cwd: "worktree root"}] end' \
@@ -417,6 +519,10 @@ require_setup() {
       how: "before each sample, wait while `quietlock check` reports the host quiet flag held by another job, at most wait_cap_s; a capped wait is logged and marks the sample contaminated; per-sample quiet_flag_checked / quiet_flag_wait_s / quiet_flag_wait_capped"})' \
     --arg q "$HS_QUIETLOCK" --arg s "$CUR_STAGE" --arg bin "$HS_QUIETLOCK_BIN" \
     --argjson qa "$qa" --argjson cap "$HS_QUIET_WAIT_CAP_S"
+  manifest_add '.protocol.quiet_hold = ((.protocol.quiet_hold // {}) + {
+      enabled: ($h == "1"), owner: $o, minutes: $m, reason: $r,
+      how: "with enabled, each sample runs: the quiet_flag queue wait, then `quietlock hold --owner <owner> --minutes <minutes> --reason <reason>` around the load wait and the timed command, released before the next sample; a refused hold queues again (within wait_cap_s); a hold not taken marks the sample contaminated (quiet_hold_not_taken). Per-sample quiet_hold {requested, held, id, acquire_s, refused}; samples_held / samples_unheld list sample ids"})' \
+    --arg h "$HS_HOLD" --arg o "$HS_HOLD_OWNER" --argjson m "$HS_HOLD_MINUTES" --arg r "$HS_HOLD_REASON"
 }
 
 stage_timings() {

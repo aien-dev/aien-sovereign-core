@@ -110,6 +110,24 @@ rustc sysroot under `manifest.toolchain.binaries`.
   `verdict` is `match` only when everything is equal, both arms exit 0 and
   that extra build exits 0.
 
+With `HS_HOLD=1` every sample also holds the host quiet flag for itself:
+after the usual `quietlock check` queue wait, the runner takes it with
+`quietlock hold --owner <HS_HOLD_OWNER> --minutes <HS_HOLD_MINUTES> --reason
+<HS_HOLD_REASON>`, keeps it through the load wait and the timed command, and
+releases it before the next sample, so other jobs (chip gates, a paused
+tokenizer) get the flag between samples. A refused hold (exit 75: another
+job took the flag first) queues again within `HS_QUIET_WAIT_CAP_S`; a hold
+that is not taken marks the sample contaminated (`quiet_hold_not_taken`).
+Each sample records `quiet_hold` (requested, held, hold id, seconds to
+acquire, refusals) and the manifest lists `protocol.quiet_hold.samples_held`
+and `samples_unheld`.
+
+A failed sample's log tail starts with the error lines of the full log
+(cargo prints its manifest warnings last, so the last lines alone can miss
+the cause). When rustc panics it leaves `rustc-ice-*.txt` in the worktree
+root; the runner appends each report's head (up to the backtrace) to the
+tail, deletes the file and records `ice_reports`.
+
 The summary gains an `ab` section (only when OFF/ON samples exist, so older
 summaries reproduce byte for byte): per scenario the OFF and ON wall time
 stats, `delta_s` (ON minus OFF), `saving_pct` ((OFF - ON) / OFF), failures
