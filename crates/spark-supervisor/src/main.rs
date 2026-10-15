@@ -9,12 +9,15 @@ use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
-mod config;
-mod proc_telemetry;
-mod supervisor;
+use spark_supervisor::config::SupervisorConfig;
+use spark_supervisor::supervisor::Supervisor;
 
-use config::SupervisorConfig;
-use supervisor::Supervisor;
+/// Exit code for `status`: live state is only held inside the running daemon.
+const EXIT_STATUS_UNAVAILABLE: i32 = 2;
+
+const STATUS_UNAVAILABLE_MSG: &str = "spark-supervisor status: live status is not available from a separate process. \
+The supervisor keeps service state in the memory of the `run` process and exposes no IPC or status endpoint, \
+so a new process cannot see it. Check the daemon's log output instead.";
 
 #[derive(Parser, Debug)]
 #[command(
@@ -32,6 +35,7 @@ struct Cli {
 #[derive(Subcommand, Debug)]
 enum Commands {
     Run,
+    /// Refuses with a non-zero exit: there is no channel to a running daemon.
     Status,
     Check,
 }
@@ -39,6 +43,13 @@ enum Commands {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
+    let command = cli.command.unwrap_or(Commands::Run);
+
+    // Refuse before touching the config so `status` never writes a default file.
+    if matches!(command, Commands::Status) {
+        eprintln!("{}", STATUS_UNAVAILABLE_MSG);
+        std::process::exit(EXIT_STATUS_UNAVAILABLE);
+    }
 
     tracing_subscriber::registry()
         .with(
@@ -66,15 +77,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let config = SupervisorConfig::load_from_file(&cli.config)?;
-    let supervisor = Supervisor::new(config);
 
-    match cli.command.unwrap_or(Commands::Run) {
+    match command {
         Commands::Run => {
-            supervisor.run_daemon().await?;
+            Supervisor::new(config).run_daemon().await?;
         }
-        Commands::Status => {
-            supervisor.print_status().await;
-        }
+        Commands::Status => unreachable!("handled above"),
         Commands::Check => {
             println!("Configuration {:?} is valid.", cli.config);
         }
