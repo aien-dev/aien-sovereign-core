@@ -77,6 +77,43 @@ Every command's exit status is recorded. A failed build is a failure
 (`ok: false`, with the last 80 log lines kept); it is never counted in a
 median and never replaced by a smaller workload.
 
+## A/B stages for one toolchain with two arm environments (M5, #536)
+
+The same runner measures one toolchain with a feature off and on. It takes
+the toolchain from `HS_CARGO` (replaces the leading `cargo` of every scenario
+command) and `HS_RUSTC` (exported as `RUSTC` to every sample), and the arm
+environments from `HS_ARM_ENV_OFF` and `HS_ARM_ENV_ON` (space-separated
+`KEY=VALUE` words, both required and different, or the stage aborts). Each
+arm has its own `CARGO_TARGET_DIR` (`<target>-<arm>`), so arms never share
+build state. Every sample records `cargo_bin` and `env_words`; `setup`
+records the sha256 of cargo, rustc and the `librustc_driver-*.so` in the
+rustc sysroot under `manifest.toolchain.binaries`.
+
+- `ab`: `HS_SAMPLES` rounds of cold check, cold build and cold
+  `test --no-run`, OFF and ON alternating (the arm that goes first swaps
+  every round), plus an A/A pair: cold check twice with the OFF environment
+  (arms A and B, `aa_noise` in the summary). `HS_AB_JOBS="4 8 16"` adds cold
+  workspace builds at those `-j` values, `HS_AB_JOBS_SAMPLES` rounds each.
+- `abincr`: the `incr` edit series, but both arms check the same source after
+  every edit (OFF first on odd steps, ON first on even steps), each on its own
+  incremental target dir. A failed check is recorded with its exit status and
+  log tail and the series continues; it is never counted as a time.
+- `abverify`: per arm, a cold `cargo check --workspace --all-targets
+  --message-format=json` and `cargo test -p <HS_VERIFY_TEST_PKGS> --
+  --test-threads=1`, compared in `verify.json`: exit codes, diagnostics
+  normalized for event order (each `compiler-message` reduced to level, code,
+  message and primary spans, then sorted) and test result lines (timing
+  suffix removed). With `HS_VERIFY_ENV_ON` set, one more cold
+  `cargo build --workspace` runs with the ON environment plus those words.
+  `verdict` is `match` only when everything is equal, both arms exit 0 and
+  that extra build exits 0.
+
+The summary gains an `ab` section (only when OFF/ON samples exist, so older
+summaries reproduce byte for byte): per scenario the OFF and ON wall time
+stats, `delta_s` (ON minus OFF), `saving_pct` ((OFF - ON) / OFF), failures
+per arm, median max RSS and median CPU seconds (user + sys) per arm and
+their deltas.
+
 ## Running it
 
 From the repository root, with the stable toolchain pinned by

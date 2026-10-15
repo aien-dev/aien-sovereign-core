@@ -92,7 +92,42 @@ cmd_samples() {
                 }
             )
         )
-      }' "$f"
+      }
+    # M5 (#536): OFF vs ON per scenario, present only when such arms exist,
+    # so summaries of runs without them stay byte-identical.
+    | ([ $all[] | select(.final == true and (.arm == "OFF" or .arm == "ON")) ]) as $abf
+    | if ($abf | length) == 0 then . else . + {ab: (
+        $abf | group_by(.scenario) | map(
+          . as $g
+          | (map(select(.arm == "OFF" and .ok == true))) as $off
+          | (map(select(.arm == "ON" and .ok == true))) as $on
+          | ($off | map(.wall_s) | median) as $mo
+          | ($on | map(.wall_s) | median) as $mn
+          | ($off | map(.time_v.max_rss_kb) | nn_median) as $ro
+          | ($on | map(.time_v.max_rss_kb) | nn_median) as $rn
+          | ($off | map(if .time_v.user_s == null then null else .time_v.user_s + .time_v.sys_s end) | nn_median) as $co
+          | ($on | map(if .time_v.user_s == null then null else .time_v.user_s + .time_v.sys_s end) | nn_median) as $cn
+          | {
+              scenario: $g[0].scenario,
+              n_off: ($off | length), n_on: ($on | length),
+              failed_off: (map(select(.arm == "OFF" and .ok == false)) | length),
+              failed_on: (map(select(.arm == "ON" and .ok == false)) | length),
+              failures: (map(select(.ok == false)) | map({sample_id, arm, exit_status})),
+              contaminated_counted: (($off + $on) | map(select(.contaminated == true)) | length),
+              wall_s_off: ($off | map(.wall_s) | stats),
+              wall_s_on: ($on | map(.wall_s) | stats),
+              delta_s: (if $mo == null or $mn == null then null else ($mn - $mo) | r3 end),
+              saving_pct: (if $mo == null or $mn == null or $mo == 0 then null
+                           else (($mo - $mn) / $mo * 100) | r3 end),
+              max_rss_kb_median_off: $ro, max_rss_kb_median_on: $rn,
+              max_rss_delta_pct: (if $ro == null or $rn == null or $ro == 0 then null
+                                  else (($rn - $ro) / $ro * 100) | r3 end),
+              cpu_s_median_off: $co, cpu_s_median_on: $cn,
+              cpu_s_delta_pct: (if $co == null or $cn == null or $co == 0 then null
+                                else (($cn - $co) / $co * 100) | r3 end)
+            }
+        )
+      )} end' "$f"
 }
 
 cmd_timings() {

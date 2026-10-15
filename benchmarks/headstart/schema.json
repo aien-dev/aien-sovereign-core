@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/aien-spark/aien-sovereign-core/benchmarks/headstart/schema.json",
-  "title": "Headstart M0 build-baseline records (#532)",
+  "title": "Headstart M0 build-baseline records (#532) and M5 A/B records (#536)",
   "description": "Schemas for manifest.json (headstart-manifest/v1) and each line of samples.jsonl (headstart-sample/v1) written by scripts/bench/headstart-aien.sh. summary.json (headstart-summary/v1) is derived from samples.jsonl by scripts/bench/headstart-summarize.sh.",
   "oneOf": [
     { "$ref": "#/$defs/manifest" },
@@ -164,8 +164,10 @@
         "run_id": { "type": "string" },
         "sample_id": { "type": "string", "description": "<scenario>-<arm>-r<round>-s<step>-a<attempt>" },
         "scenario": { "type": "string" },
-        "arm": { "enum": ["A", "B"], "description": "B exists only for the A/A pair" },
-        "kind": { "enum": ["timings", "cold", "prime", "incremental", "settle"] },
+        "arm": { "enum": ["A", "B", "OFF", "ON"], "description": "A/B: B exists only for an A/A pair (in the M5 ab stage A and B both run the OFF environment). OFF/ON: M5 (#536) arm environments HS_ARM_ENV_OFF and HS_ARM_ENV_ON of one toolchain" },
+        "kind": { "enum": ["timings", "cold", "prime", "incremental", "settle", "ab", "verify"] },
+        "cargo_bin": { "type": "string", "description": "M5: cargo binary that ran the command (HS_CARGO); absent in M0 samples" },
+        "env_words": { "type": "string", "description": "M5: KEY=VALUE words added to the command environment (RUSTC, arm environment, verify extras); absent in M0 samples" },
         "round": { "type": "integer" },
         "step": { "type": "integer", "description": "incremental edit step (1..steps), 0 otherwise" },
         "attempt": { "type": "integer", "minimum": 1 },

@@ -208,5 +208,61 @@ kill "$FAKE" 2>/dev/null; wait "$FAKE" 2>/dev/null
 check "NEGATIVE: foreign compiler process is detected at start and end" jqs --arg p "$FAKE:cargo:-" '.[0].contaminated == true and (.[0].foreign.at_start | index($p)) and (.[0].foreign.at_end | index($p)) and (.[0].contamination_reasons | index("foreign_at_end"))' "$T/out-foreign/samples.jsonl"
 check "timings stage writes the replay estimate" jqt '.deadlock == false and .units_without_package == 0 and .label == "ESTIMATE, not a measurement"' "$T/out-foreign/timings/replay.json"
 
+# ------------------------------------------------ 4. M5 (#536) OFF/ON summary, synthetic
+SAB="$T/ab.jsonl"
+mkab() { # mkab scenario arm wall rc rss user
+  jq -cn --arg s "$1" --arg a "$2" --argjson w "$3" --argjson rc "$4" --argjson rss "$5" --argjson u "$6" \
+    '{scenario: $s, arm: $a, kind: "ab", command: "cargo x", sample_id: ($s + "-" + $a + "-" + ($w|tostring)),
+      wall_s: $w, exit_status: $rc, ok: ($rc == 0), final: true, contaminated: false, aa_pair: null,
+      time_v: {available: true, max_rss_kb: $rss, cpu_percent: 100, user_s: $u, sys_s: 1}}' >> "$SAB"
+}
+mkab w OFF 10 0 1000 9; mkab w OFF 12 0 1000 9; mkab w ON 8 0 1100 10; mkab w ON 9 0 1100 10; mkab w ON 1 101 1 1
+"$SUM" samples "$SAB" > "$T/ab-summary.json"
+AB='.ab[] | select(.scenario == "w")'
+check "ab: medians, delta and saving" jqt "$AB | .wall_s_off.median == 11 and .wall_s_on.median == 8.5 and .delta_s == -2.5 and .saving_pct == 22.727" "$T/ab-summary.json"
+check "ab: failed ON sample counted as failure, not time" jqt "$AB | .failed_on == 1 and .n_on == 2 and .failures[0].arm == \"ON\" and .failures[0].exit_status == 101" "$T/ab-summary.json"
+check "ab: max RSS and CPU deltas" jqt "$AB | .max_rss_delta_pct == 10 and .cpu_s_median_off == 10 and .cpu_s_median_on == 11 and .cpu_s_delta_pct == 10" "$T/ab-summary.json"
+check "ab: section absent when no OFF/ON arms" jqt 'has("ab") | not' "$T/summary.json"
+
+# ------------------------------------------------ 5. M5 A/B stages end to end on the fixture
+ABSTAGES=(setup ab abincr abverify cleanup)
+HS_ARM_ENV_OFF="HS_FAKE_ARM=off" HS_ARM_ENV_ON="HS_FAKE_ARM=on" HS_AB_JOBS=2 HS_AB_JOBS_SAMPLES=1 \
+HS_VERIFY_TEST_PKGS=hsbase HS_VERIFY_ENV_ON="HS_FAKE_VERIFY=1" runner "$FX" ab "${ABSTAGES[@]}"
+RC=$?
+O="$T/out-ab"
+check "ab runner exits 0" test "$RC" -eq 0
+check "ab runner wrote 35 samples, all ok" jqs 'length == 35 and all(.[]; .ok)' "$O/samples.jsonl"
+check "ab arm environments reach the command" jqs 'all(.[] | select(.arm == "ON"); .env_words | test("HS_FAKE_ARM=on")) and all(.[] | select(.arm != "ON"); .env_words | test("HS_FAKE_ARM=off"))' "$O/samples.jsonl"
+check "ab arms use separate target dirs" jqs '[.[] | select(.kind == "ab")] | length == 10 and all(.[]; . as $x | $x.cargo_target_dir | endswith("-" + $x.arm))' "$O/samples.jsonl"
+check "ab A/A pair runs with the OFF environment" jqt '.aa_noise[] | select(.scenario == "ab_aa_check_ws") | .n_a == 1 and .n_b == 1' "$O/summary.json"
+check "ab summary covers cold, jobs and incremental scenarios" jqt '[.ab[] | select(.n_off >= 1 and .n_on >= 1) | .scenario] as $s | (["ab_cold_check_ws","ab_cold_build_ws","ab_cold_test_norun_ws","ab_cold_build_ws_j2","abincr_body_check","abincr_iface_check"] - $s) == []' "$O/summary.json"
+check "ab incremental: both arms check every edit" jqs '[.[] | select(.scenario == "abincr_body_check")] | (map(select(.arm == "OFF")) | length) == 2 and (map(select(.arm == "ON")) | length) == 2' "$O/samples.jsonl"
+check "ab verify: verdict match with test results" jqt '.verdict == "match" and .diagnostics_equal and .test_results_equal and (.arms.ON.test_results | length) >= 1 and .verify_build.exit == 0' "$O/verify.json"
+check "ab verify extra env added on top of the ON arm" jqs 'map(select(.scenario == "verify_build_extra")) | length == 1 and (.[0].env_words | test("HS_FAKE_ARM=on") and test("HS_FAKE_VERIFY=1"))' "$O/samples.jsonl"
+check "ab manifest records binaries digests and arm envs" jqt '(.toolchain.binaries.sha256 | length) >= 2 and .toolchain.binaries.arm_env.ON == "HS_FAKE_ARM=on"' "$O/manifest.json"
+check "ab summary reproducible from samples" bash -c "'$SUM' samples '$O/samples.jsonl' | cmp - '$O/summary.json'"
+check "ab caller fixture checkout untouched" git -C "$FX" diff --quiet
+
+HS_ARM_ENV_OFF="HS_FAKE_ARM=off" runner "$FX" noon setup ab
+RC=$?
+check "NEGATIVE: ab stage without HS_ARM_ENV_ON aborts" test "$RC" -ne 0
+check "NEGATIVE: abort message names the arm variables" grep -q 'HS_ARM_ENV_OFF and HS_ARM_ENV_ON' "$T/runner-noon.log"
+runner "$FX" noon cleanup
+HS_ARM_ENV_OFF="HS_FAKE_ARM=x" HS_ARM_ENV_ON="HS_FAKE_ARM=x" runner "$FX" same setup abverify
+RC=$?
+check "NEGATIVE: identical arm environments abort" test "$RC" -ne 0
+runner "$FX" same cleanup
+
+HS_ARM_ENV_OFF="HS_FAKE_ARM=off" HS_ARM_ENV_ON="RUSTFLAGS=-Wmissing-docs" HS_VERIFY_TEST_PKGS=hsbase \
+  runner "$FX" diag setup abverify cleanup
+check "NEGATIVE: changed diagnostics give verdict MISMATCH" jqt '.verdict == "MISMATCH" and (.diagnostics_equal | not) and .check_exit_equal and .arms.ON.diagnostics > .arms.OFF.diagnostics' "$T/out-diag/verify.json"
+
+HS_ARM_ENV_OFF="HS_FAKE_ARM=off" HS_ARM_ENV_ON="RUSTFLAGS=-Zheadstart-selftest-bogus" HS_VERIFY_TEST_PKGS=hsbase \
+  runner "$FX" brk setup ab abverify cleanup
+RC=$?
+check "broken ON arm: runner still exits 0 (failure recorded)" test "$RC" -eq 0
+check "NEGATIVE: failing ON arm recorded as failures, never as time" jqt '.ab[] | select(.scenario == "ab_cold_build_ws") | .failed_on == 1 and .n_on == 0 and .wall_s_on.median == null and .saving_pct == null' "$T/out-brk/summary.json"
+check "NEGATIVE: wrong ON exit code gives verdict MISMATCH" jqt '.verdict == "MISMATCH" and (.check_exit_equal | not) and .arms.ON.check_exit != 0' "$T/out-brk/verify.json"
+
 echo "selftest: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]
