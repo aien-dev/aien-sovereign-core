@@ -98,13 +98,15 @@ pub enum DenseWeightFormat {
 impl DenseWeightFormat {
     /// The format named by `config.json`'s `quantization_config` (absent or null: bf16). Only the
     /// exact FP8 block-128 recipe is taken; another method, format, block size or activation
-    /// scheme, an unknown key, or a `modules_to_not_convert` that names a projection is refused
+    /// scheme, an unknown key, or a `modules_to_not_convert` entry that could match a projection is refused
     /// by name.
     pub fn from_config(raw: &serde_json::Value) -> Result<Self, String> {
         let Some(q) = raw.get("quantization_config").filter(|q| !q.is_null()) else {
             return Ok(Self::Bf16);
         };
         let refuse = |what: String| Err(format!("config refused: quantization_config {what}"));
+        let shown =
+            |v: Option<&serde_json::Value>| v.map_or("absent".to_string(), |v| v.to_string());
         let Some(obj) = q.as_object() else {
             return refuse(format!("{q} is not an object"));
         };
@@ -113,7 +115,8 @@ impl DenseWeightFormat {
             Some(m) if m == "fp8" => {}
             other => {
                 return refuse(format!(
-                    "quant_method {other:?}: only \"fp8\" (Qwen's e4m3 block-128) is implemented"
+                    "quant_method {}: only \"fp8\" (Qwen's e4m3 block-128) is implemented",
+                    shown(other)
                 ))
             }
         }
@@ -128,7 +131,7 @@ impl DenseWeightFormat {
         for (key, value) in &want {
             match obj.get(*key) {
                 Some(v) if v == value => {}
-                other => return refuse(format!("{key} {other:?}, expected {value}")),
+                other => return refuse(format!("{key} {}, expected {value}", shown(other))),
             }
         }
         for (key, value) in obj {
@@ -138,12 +141,21 @@ impl DenseWeightFormat {
                     let names = value.as_array().ok_or_else(|| {
                         format!("config refused: quantization_config modules_to_not_convert {value} is not a list")
                     })?;
+                    // Hugging Face skips a module when an entry is a substring of its name, so
+                    // an entry is safe only if it cannot be a substring of any projection name
+                    // (`model.layers.N.{self_attn,mlp}.*_proj`). Those names contain none of
+                    // these words, so an entry containing one can only match a bf16 tensor.
+                    let bf16_only = |s: &str| {
+                        ["lm_head", "norm", "embed_tokens"]
+                            .iter()
+                            .any(|w| s.contains(w))
+                    };
                     if let Some(p) = names
                         .iter()
-                        .find(|n| n.as_str().is_none_or(|s| s.contains("_proj")))
+                        .find(|n| n.as_str().is_none_or(|s| !bf16_only(s)))
                     {
                         return refuse(format!(
-                            "modules_to_not_convert names {p}: every projection of this engine is FP8 in an FP8 checkpoint"
+                            "modules_to_not_convert names {p}: it could match a projection, and every projection of this engine is FP8 in an FP8 checkpoint"
                         ));
                     }
                 }
@@ -396,7 +408,9 @@ impl Qwen3DenseConfig {
             .sum()
     }
 
-    /// Bytes resident on the device for the whole model (layers plus lm_head).
+    /// Bytes handed to the uploader for the whole model (layers plus lm_head). For FP8 this
+    /// counts the bf16 scale grids as the checkpoint stores them; a device that widens the
+    /// scales to f32 holds slightly more.
     pub fn model_resident_bytes(&self) -> usize {
         self.layers * self.layer_resident_bytes()
             + self.matrix_bytes(DenseTensor::LmHead, self.vocab, self.hidden)
@@ -517,8 +531,10 @@ pub fn check_fp8_upload(n: usize, k: usize, w: &[u8], scales: &[u16]) -> Result<
 }
 
 /// The host reference of one FP8 projection (design section 2.2 item 4, the per-layer oracle of
-/// section 2.4): the checkpoint's e4m3 bytes and bf16 scales, multiplied as the chip does,
-/// `y[r] = sum_c e4m3(w[r][c]) * x[c] * scale[r/128][c/128]`, f32, columns in order. The
+/// section 2.4): the checkpoint's e4m3 bytes and bf16 scales in the chip's formula,
+/// `y[r] = sum_c e4m3(w[r][c]) * x[c] * scale[r/128][c/128]`, f32, columns in order, each
+/// product scaled. A kernel that sums a block before scaling rounds differently, so a chip
+/// comparison against this reference needs a tolerance, not bit equality. The
 /// [`HostFp8Gemv::dequantised_bf16`] variant first rounds every dequantised weight to bf16
 /// (`dequant_fp8_sources_to_bf16_cols`, the 30B engine's bf16 path) and then multiplies as the
 /// bf16 GEMV does.
@@ -2051,11 +2067,13 @@ mod tests {
     const RSS_CHILD_ENV: &str = "AIEN_OWN8B_RSS_CHILD";
     const RSS_CHILD_TEST: &str = "qwen3_dense_omega::tests::rss_probe_child";
 
-    /// The child side of [`measured_peak_growth_in_child`]: does nothing in a normal run; with
-    /// `AIEN_OWN8B_RSS_CHILD=<bf16|fp8>:<streaming|keeping>` it measures that one load and prints
-    /// `OWN8B-RSS-GROWTH <bytes>` (or `skipped`). The harness prints it after the test name on
+    /// The child side of [`measured_peak_growth_in_child`], ignored so it is not counted as a
+    /// passing test; the parent runs it with `--ignored --exact`. It does nothing unless
+    /// `AIEN_OWN8B_RSS_CHILD=<bf16|fp8>:<streaming|keeping>` is set; then it measures that one
+    /// load and prints `OWN8B-RSS-GROWTH <bytes>` (or `skipped`). The harness prints it after the test name on
     /// the same line.
     #[test]
+    #[ignore = "child process of the measured peak RSS gates; started by them"]
     fn rss_probe_child() {
         let Ok(case) = std::env::var(RSS_CHILD_ENV) else {
             return;
@@ -2082,7 +2100,13 @@ mod tests {
     /// thread. `None` when the child could not reset the mark.
     fn measured_peak_growth_in_child(case: &str) -> Option<u64> {
         let out = std::process::Command::new(std::env::current_exe().unwrap())
-            .args([RSS_CHILD_TEST, "--exact", "--nocapture", "--test-threads=1"])
+            .args([
+                RSS_CHILD_TEST,
+                "--ignored",
+                "--exact",
+                "--nocapture",
+                "--test-threads=1",
+            ])
             .env(RSS_CHILD_ENV, case)
             .output()
             .unwrap();
@@ -2108,6 +2132,11 @@ mod tests {
         let c = rss_config(format);
         let bound = (c.embed_host_bytes() + dense_loader_transient_bytes(&c) + (128 << 20)) as u64;
         let Some(streaming) = measured_peak_growth_in_child(&format!("{name}:streaming")) else {
+            // A CI runner is a plain Linux VM: the gate must run there, never skip silently.
+            assert!(
+                std::env::var_os("CI").is_none(),
+                "no /proc/self/clear_refs under CI: the measured peak RSS gate cannot run"
+            );
             println!("no /proc/self/clear_refs: measured peak RSS check skipped");
             return;
         };
@@ -2359,11 +2388,13 @@ mod tests {
         v["quantization_config"] = serde_json::Value::Null;
         let c = Qwen3DenseConfig::from_json(&v.to_string(), None).unwrap();
         assert_eq!(c.format, DenseWeightFormat::Bf16);
-        // The 30B's list names no projection: accepted (lm_head and norms are bf16 anyway).
+        // Entries that cannot match a projection name are accepted (lm_head, the embedding and the
+        // norms are bf16 anyway).
         let c = quant_variant(
             serde_json::json!({"activation_scheme": "dynamic", "fmt": "e4m3",
             "quant_method": "fp8", "weight_block_size": [128, 128],
-            "modules_to_not_convert": ["lm_head", "model.layers.0.input_layernorm"]}),
+            "modules_to_not_convert": ["lm_head", "model.layers.0.input_layernorm",
+                "model.norm", "model.embed_tokens"]}),
         )
         .unwrap();
         assert_eq!(c.format, DenseWeightFormat::Fp8Block128);
@@ -2387,7 +2418,7 @@ mod tests {
         );
         refused(
             fp8("weight_block_size", serde_json::Value::Null),
-            "weight_block_size",
+            "weight_block_size absent",
         );
         refused(fp8("fmt", "e5m2".into()), "fmt");
         refused(
@@ -2405,6 +2436,25 @@ mod tests {
             fp8("modules_to_not_convert", "lm_head".into()),
             "not a list",
         );
+        // Hugging Face skips a module when an entry is a substring of its name, so a layer or
+        // block prefix (the 30B's list really has "model.layers.0.mlp.gate") leaves projections
+        // unconverted: refused at config, not only at load.
+        for prefix in [
+            "model.layers.0.mlp.gate",
+            "model.layers.3.mlp",
+            "model.layers.3",
+            "self_attn",
+            "",
+        ] {
+            refused(
+                fp8("modules_to_not_convert", serde_json::json!([prefix])),
+                &format!("modules_to_not_convert names \"{prefix}\""),
+            );
+        }
+        refused(
+            fp8("modules_to_not_convert", serde_json::json!([3])),
+            "modules_to_not_convert names 3",
+        );
         refused(
             fp8("ignored_layers", serde_json::json!([])),
             "ignored_layers",
@@ -2414,11 +2464,11 @@ mod tests {
             quant_variant(
                 serde_json::json!({"quant_method": "gptq", "bits": 4, "group_size": 128}),
             ),
-            "quant_method Some(String(\"gptq\"))",
+            "quant_method \"gptq\": only",
         );
         refused(
             quant_variant(serde_json::json!({"quant_method": "awq", "bits": 4})),
-            "quant_method",
+            "quant_method \"awq\"",
         );
         refused(quant_variant("fp8".into()), "is not an object");
     }
