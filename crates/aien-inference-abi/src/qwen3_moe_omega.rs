@@ -5485,11 +5485,9 @@ mod kv_persist_tests {
     fn paged_and_host_pool_caches_export_the_same_bytes_and_round_trip() {
         let c = tiny_config();
         let kvd = c.kv_heads * c.head_dim;
+        // Stub build: a host pool. Linked native build (AIEN_REQUIRE_NATIVE_LIBS=1, abi-qualify
+        // chip-inference-linked): the resident chip pool. The exported bytes must match either way.
         let mut paged = OmegaPagedKv::new(&c, 64).unwrap();
-        assert!(
-            !paged.resident(),
-            "the stub build has no resident pool: a host pool, same bytes"
-        );
         let mut host = HostPoolKv::new(&c, 64).unwrap();
         for pos in 0..37 {
             for l in 0..c.layers {
