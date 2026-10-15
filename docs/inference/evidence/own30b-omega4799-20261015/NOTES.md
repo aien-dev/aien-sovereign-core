@@ -2,7 +2,7 @@
 
 CALC-EXEMPT: every number here is copied from a measured log in this folder (the `*.log` files are force-added past
 .gitignore so SHA256SUMS checks on a fresh clone) or in #524's and #514's folders
-(`own30b-requal-main-20261015`); none is derived.
+(`own30b-requal-main-20261015`, `pkv514-chip-20261014`); none is derived.
 
 ## What changed
 `omega.lock` 62833658 -> 4799f9eb (omega main after #459 GB10 stale-L2 invalidate + cmdlist prefix reserve,
