@@ -16,6 +16,7 @@ pub mod mojo_backend;
 pub mod native_ops;
 pub mod omega_backend;
 pub mod qwen3_coder;
+pub mod qwen3_dense_omega;
 pub mod qwen3_moe;
 pub mod qwen3_moe_omega;
 pub mod qwen3_moe_omega_dattn;
