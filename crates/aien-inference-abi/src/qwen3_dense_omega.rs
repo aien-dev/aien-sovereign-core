@@ -37,8 +37,8 @@ use std::time::Instant;
 use crate::model_dir::model_config_from_hf_json;
 use crate::qwen3_moe::{bf16_to_f32, fp8_table, FP8_BLOCK};
 use crate::qwen3_moe_omega::{
-    dequant_fp8_sources_to_bf16_cols, peak_rss_bytes, Fp8Source, ShardSource, TensorSource,
-    MAX_RESIDENT_K, MAX_RESIDENT_N,
+    dequant_fp8_sources_to_bf16_cols, peak_rss_bytes, Fp8Source, KvGeometry, ShardSource,
+    TensorSource, KV_BLOCK_SIZE, MAX_RESIDENT_K, MAX_RESIDENT_N,
 };
 
 // The loader reads little-endian bf16 words in place (see `read_bf16`).
@@ -445,6 +445,20 @@ impl Qwen3DenseConfig {
     /// Bytes of the bf16 embedding the host keeps.
     pub fn embed_host_bytes(&self) -> usize {
         2 * self.vocab * self.hidden
+    }
+}
+
+/// The 8B's KV shape (ADR 0004 section 2.1): the dense engine builds its cache from this.
+impl From<&Qwen3DenseConfig> for KvGeometry {
+    fn from(c: &Qwen3DenseConfig) -> Self {
+        Self {
+            layers: c.layers,
+            q_heads: c.q_heads,
+            kv_heads: c.kv_heads,
+            head_dim: c.head_dim,
+            rope_theta: c.rope_theta,
+            block_size: KV_BLOCK_SIZE,
+        }
     }
 }
 
@@ -1731,6 +1745,29 @@ mod tests {
     fn refused(r: Result<Qwen3DenseConfig, String>, needle: &str) {
         let e = r.expect_err("config must be refused");
         assert!(e.contains(needle), "refusal {e:?} does not name {needle:?}");
+    }
+
+    // ADR 0004 step 1: the 8B's KV cache is built from this geometry (36 layers, 32/8, 128).
+    #[test]
+    fn kv_geometry_from_the_qwen3_8b_config() {
+        let c = Qwen3DenseConfig::from_json(QWEN3_8B_CONFIG, Some(QWEN3_8B_GENERATION)).unwrap();
+        assert_eq!(
+            KvGeometry::from(&c),
+            KvGeometry {
+                layers: 36,
+                q_heads: 32,
+                kv_heads: 8,
+                head_dim: 128,
+                rope_theta: 1e6,
+                block_size: KV_BLOCK_SIZE,
+            }
+        );
+        let t = tiny_config();
+        let g = KvGeometry::from(&t);
+        assert_eq!(
+            (g.layers, g.q_heads, g.kv_heads, g.head_dim, g.rope_theta),
+            (t.layers, t.q_heads, t.kv_heads, t.head_dim, t.rope_theta)
+        );
     }
 
     #[test]

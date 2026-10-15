@@ -7,56 +7,63 @@
 //! The cache owns the KV of every layer by position, so prefix reuse works as before:
 //! `truncate(len)` forgets positions at or past `len` and the next step rewrites them.
 //! `append` / `attend` (the split path) are refused: the engine must take [`KvAttention::fused_attend`].
-use crate::qwen3_moe_omega::{kvio, KvAttention, OmegaLayer, Qwen3MoeConfig, KV_BLOCK_SIZE};
+use crate::qwen3_moe_omega::{kvio, KvAttention, KvGeometry, KvStore, OmegaLayer, KV_BLOCK_SIZE};
 
 /// Omega's one-launch decode attention with its GPU-resident KV, one sequence.
 pub struct OmegaFusedKv {
     cache: aien_omega_dattn::DecodeAttnCache,
     capacity: usize,
+    geometry: KvGeometry,
     filled: Vec<usize>,
 }
 
 impl OmegaFusedKv {
-    /// Whether the kernel's fixed shape matches `config` (32 query heads, 4 KV heads, 128 wide).
-    pub fn fits(config: &Qwen3MoeConfig) -> bool {
-        config.q_heads == aien_omega_dattn::Q_HEADS
-            && config.kv_heads == aien_omega_dattn::KV_HEADS
-            && config.head_dim == aien_omega_dattn::HEAD_DIM
+    /// Whether the kernel's fixed shape matches `geometry` (32 query heads, 4 KV heads, 128 wide).
+    pub fn fits(geometry: &KvGeometry) -> bool {
+        geometry.q_heads == aien_omega_dattn::Q_HEADS
+            && geometry.kv_heads == aien_omega_dattn::KV_HEADS
+            && geometry.head_dim == aien_omega_dattn::HEAD_DIM
     }
 
     /// Allocates the cache for `max_context` tokens (rounded up to 256) and uploads every
     /// layer's q_norm / k_norm weights.
     pub fn new(
-        config: &Qwen3MoeConfig,
+        geometry: &KvGeometry,
         max_context: usize,
         layers: &[OmegaLayer],
     ) -> Result<Self, String> {
         if !aien_omega_dattn::is_native() {
             return Err("this binary has no decode attention linked (omega before cut 8)".into());
         }
-        if !Self::fits(config) {
+        if !Self::fits(geometry) {
             return Err(format!(
                 "fused attention needs 32 q heads x 4 kv heads x 128, config has {} x {} x {}",
-                config.q_heads, config.kv_heads, config.head_dim
+                geometry.q_heads, geometry.kv_heads, geometry.head_dim
             ));
         }
-        if layers.len() != config.layers {
+        if geometry.block_size != KV_BLOCK_SIZE {
             return Err(format!(
-                "fused attention: {} layers of weights, config says {}",
+                "fused attention: block size {} is not the payload's ({KV_BLOCK_SIZE})",
+                geometry.block_size
+            ));
+        }
+        if layers.len() != geometry.layers {
+            return Err(format!(
+                "fused attention: {} layers of weights, geometry says {}",
                 layers.len(),
-                config.layers
+                geometry.layers
             ));
         }
         let max_pos = aien_omega_dattn::round_max_pos(max_context);
         let mut cache = aien_omega_dattn::DecodeAttnCache::alloc(
-            config.layers,
+            geometry.layers,
             max_pos,
-            config.rope_theta as f64,
+            geometry.rope_theta as f64,
         )
         .map_err(|e| {
             format!(
                 "decode attn cache alloc ({} layers x {max_pos}): {e}",
-                config.layers
+                geometry.layers
             )
         })?;
         for (l, layer) in layers.iter().enumerate() {
@@ -67,7 +74,8 @@ impl OmegaFusedKv {
         Ok(Self {
             cache,
             capacity: max_pos,
-            filled: vec![0; config.layers],
+            geometry: *geometry,
+            filled: vec![0; geometry.layers],
         })
     }
 
@@ -87,7 +95,7 @@ impl OmegaFusedKv {
     }
 
     /// The payload geometry of this cache (sc#505): every layer, omega's 4 KV heads x 128.
-    pub fn geometry(&self) -> kvio::PoolBlockGeometry {
+    pub fn pool_geometry(&self) -> kvio::PoolBlockGeometry {
         kvio::PoolBlockGeometry {
             layers: self.filled.len(),
             kv_heads: aien_omega_dattn::KV_HEADS,
@@ -97,12 +105,18 @@ impl OmegaFusedKv {
     }
 }
 
-impl KvAttention for OmegaFusedKv {
+impl KvStore for OmegaFusedKv {
+    fn geometry(&self) -> KvGeometry {
+        self.geometry
+    }
     fn capacity(&self) -> usize {
         self.capacity
     }
-    fn reset(&mut self) {
-        self.filled.iter_mut().for_each(|f| *f = 0);
+    fn len(&self) -> usize {
+        self.filled.iter().copied().min().unwrap_or(0)
+    }
+    fn path_name(&self) -> &'static str {
+        "fused"
     }
     fn truncate(&mut self, len: usize) {
         // The cache keeps its bytes; positions past `len` are rewritten by later steps.
@@ -110,6 +124,59 @@ impl KvAttention for OmegaFusedKv {
             *f = (*f).min(len);
         }
     }
+    // Persistent KV (sc#505): omega's row helpers move whole bf16 rows between this cache and the
+    // `HostPagedPoolV1` payload (`kvio`), no value is converted. Called between generations only.
+    fn export_blocks(&mut self, start: usize, len: usize) -> Option<Result<Vec<u8>, String>> {
+        if let Some((l, &f)) = self
+            .filled
+            .iter()
+            .enumerate()
+            .find(|(_, &f)| f < start + len)
+        {
+            return Some(Err(format!(
+                "fused kv export {start}+{len}: layer {l} holds only {f} positions"
+            )));
+        }
+        let g = self.pool_geometry();
+        let cache = &mut self.cache;
+        Some(kvio::rows_to_blocks(&g, start, len, |l, h, p, k, v| {
+            cache
+                .read_row(l, h, p, k, v)
+                .map_err(|e| format!("fused kv export layer {l} head {h} pos {p}: {e}"))
+        }))
+    }
+    fn import_blocks(
+        &mut self,
+        start: usize,
+        len: usize,
+        bytes: &[u8],
+    ) -> Option<Result<(), String>> {
+        if let Some((l, &f)) = self.filled.iter().enumerate().find(|(_, &f)| f != start) {
+            return Some(Err(format!(
+                "fused kv import at {start}: layer {l} holds {f} positions"
+            )));
+        }
+        if start + len > self.capacity {
+            return Some(Err(format!(
+                "fused kv import {start}+{len}: capacity {}",
+                self.capacity
+            )));
+        }
+        let g = self.pool_geometry();
+        let cache = &mut self.cache;
+        let r = kvio::blocks_to_rows(&g, start, len, bytes, |l, h, k, v| {
+            cache
+                .write_rows(l, h, start, k, v)
+                .map_err(|e| format!("fused kv import layer {l} head {h}: {e}"))
+        });
+        if r.is_ok() {
+            self.filled.iter_mut().for_each(|f| *f = start + len);
+        }
+        Some(r)
+    }
+}
+
+impl KvAttention for OmegaFusedKv {
     fn append(&mut self, _layer: usize, pos: usize, _k: &[f32], _v: &[f32]) -> Result<(), String> {
         Err(format!(
             "fused kv: split append at {pos} is not a path here (use fused_attend)"
@@ -155,9 +222,6 @@ impl KvAttention for OmegaFusedKv {
     fn resident(&self) -> bool {
         true
     }
-    fn path_name(&self) -> &'static str {
-        "fused"
-    }
     fn fused_kv(&mut self) -> Option<&mut OmegaFusedKv> {
         Some(self)
     }
@@ -177,55 +241,5 @@ impl KvAttention for OmegaFusedKv {
     }
     fn dgraph_commit(&mut self, pos: usize) {
         self.filled.iter_mut().for_each(|f| *f = pos + 1);
-    }
-    // Persistent KV (sc#505): omega's row helpers move whole bf16 rows between this cache and the
-    // `HostPagedPoolV1` payload (`kvio`), no value is converted. Called between generations only.
-    fn export_blocks(&mut self, start: usize, len: usize) -> Option<Result<Vec<u8>, String>> {
-        if let Some((l, &f)) = self
-            .filled
-            .iter()
-            .enumerate()
-            .find(|(_, &f)| f < start + len)
-        {
-            return Some(Err(format!(
-                "fused kv export {start}+{len}: layer {l} holds only {f} positions"
-            )));
-        }
-        let g = self.geometry();
-        let cache = &mut self.cache;
-        Some(kvio::rows_to_blocks(&g, start, len, |l, h, p, k, v| {
-            cache
-                .read_row(l, h, p, k, v)
-                .map_err(|e| format!("fused kv export layer {l} head {h} pos {p}: {e}"))
-        }))
-    }
-    fn import_blocks(
-        &mut self,
-        start: usize,
-        len: usize,
-        bytes: &[u8],
-    ) -> Option<Result<(), String>> {
-        if let Some((l, &f)) = self.filled.iter().enumerate().find(|(_, &f)| f != start) {
-            return Some(Err(format!(
-                "fused kv import at {start}: layer {l} holds {f} positions"
-            )));
-        }
-        if start + len > self.capacity {
-            return Some(Err(format!(
-                "fused kv import {start}+{len}: capacity {}",
-                self.capacity
-            )));
-        }
-        let g = self.geometry();
-        let cache = &mut self.cache;
-        let r = kvio::blocks_to_rows(&g, start, len, bytes, |l, h, k, v| {
-            cache
-                .write_rows(l, h, start, k, v)
-                .map_err(|e| format!("fused kv import layer {l} head {h}: {e}"))
-        });
-        if r.is_ok() {
-            self.filled.iter_mut().for_each(|f| *f = start + len);
-        }
-        Some(r)
     }
 }
