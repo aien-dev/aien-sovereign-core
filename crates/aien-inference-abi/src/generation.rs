@@ -473,7 +473,9 @@ impl<M: ForwardPass> GenerationController<M> {
 
     /// Every layer back to exactly `0..position()`, no unread head.
     fn rollback(&mut self) {
-        // Pre-rollback loop (R1 red): the error path leaves the cache as the model left it.
+        let n = self.history.len();
+        self.model.kv().truncate(n);
+        self.model.clear_pending();
     }
 }
 
