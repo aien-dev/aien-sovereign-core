@@ -4,8 +4,12 @@
 mod common;
 
 use common::{enabled, H};
+use serde_json::json;
+use spark_harness::completion::CompletionError;
 use spark_harness::execution::TaskState;
-use spark_harness::readiness::{OperationClass, ReadinessLevel};
+use spark_harness::readiness::{
+    verify_interface, InterfaceSubmission, OperationClass, ReadinessLevel,
+};
 use spark_harness::scheduler::{
     Event, EventKind, Outcome, Revocation, SchedError, RESERVED_ID_PREFIX,
 };
@@ -174,4 +178,30 @@ fn duplicate_memory_is_bounded() {
         "{} ids remembered",
         h.sched.remembered_event_ids()
     );
+}
+
+#[test]
+fn interface_republished_at_a_new_commit_retires_the_old_receipt() {
+    let mut h = H::new(enabled());
+    h.register("a", 1, &[]);
+    let old = h.mint_interface("a", 1);
+    // Same generation and interface, new commit: a new receipt replaces it.
+    let new = h
+        .engine
+        .publish_interface(&InterfaceSubmission {
+            task_id: "a".into(),
+            generation: 1,
+            source_commit: "2222222222222222222222222222222222222222".into(),
+            interface: json!({ "task": "a", "api_version": 1 }),
+        })
+        .unwrap()
+        .claim();
+    assert_eq!(old.digest, new.digest);
+    assert_ne!(old.receipt_id, new.receipt_id);
+    let store = &h.engine.completion_store;
+    assert!(verify_interface(store, "a", 1, &new).is_ok());
+    assert!(matches!(
+        verify_interface(store, "a", 1, &old),
+        Err(CompletionError::NotCurrentCompletion(_))
+    ));
 }
