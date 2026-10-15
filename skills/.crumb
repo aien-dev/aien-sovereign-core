@@ -13,11 +13,6 @@
     },
     {
       "item_type": "dir",
-      "name": "modular-upstream",
-      "role": ""
-    },
-    {
-      "item_type": "dir",
       "name": "radicle-sync",
       "role": "Radicle P2P synchronization skill folder."
     },
