@@ -7,7 +7,7 @@
 //! cache ([`KvStore`]).
 //!
 //! Step 2 of the ADR's migration: this module is pure addition. No production caller uses it
-//! yet; the 30B engine keeps its own loop until step 4. The host fake [`echo_chain`] (feature
+//! yet; the 30B engine keeps its own loop until step 4. The host fake `generation::echo_chain` (feature
 //! `host-test-engine`) is the only forward pass so far.
 
 use std::sync::Mutex;
@@ -436,13 +436,25 @@ impl<M: ForwardPass> GenerationController<M> {
                 for (&r, &v) in rows.iter().zip(&self.rows_buf) {
                     self.masked[r as usize] = v;
                 }
-                sampler.pick(&self.masked, step)
+                let t = sampler.pick(&self.masked, step);
+                // All-negative-infinity or NaN logits make an argmax fall back to token 0;
+                // whatever the sampler did, a token outside the set never leaves this step.
+                if rows.binary_search(&t).is_err() {
+                    return Err(format!(
+                        "the sampler picked token {t}, outside the {} allowed",
+                        rows.len()
+                    ));
+                }
+                t
             }
             StepRule::Any => {
                 let wants = sampler.wants_logits();
                 let want = if wants { Want::Logits } else { Want::Greedy };
                 match self.model.next(0, want, timing)? {
-                    Next::Token(t) => t,
+                    Next::Token(t) if !wants => t,
+                    Next::Token(_) => {
+                        return Err("the model answered Want::Logits with a token".into())
+                    }
                     Next::Logits(l) if wants => sampler.pick(l, step),
                     // Today's host path: the plain argmax over the host lm_head.
                     Next::Logits(l) => sample_argmax(l).0,
