@@ -172,16 +172,60 @@ impl EchoKv for CorruptRowKv {
     }
 }
 
+/// The cache as the fake lends it through `kv()`. Lending forgets nothing: pending heads stay
+/// pending until `clear_pending`, `prefill` or `decode` replaces them (like the 30B's held graph
+/// token), so a test sees every `clear_pending` the controller makes. A head is still refused
+/// after the cache changed under it (I2): a truncate that drops a row or an import moves `epoch`.
+struct Lent {
+    inner: Box<dyn EchoKv>,
+    epoch: u64,
+}
+
+impl KvStore for Lent {
+    fn geometry(&self) -> KvGeometry {
+        self.inner.geometry()
+    }
+    fn capacity(&self) -> usize {
+        self.inner.capacity()
+    }
+    fn len(&self) -> usize {
+        self.inner.len()
+    }
+    fn path_name(&self) -> &'static str {
+        self.inner.path_name()
+    }
+    fn truncate(&mut self, len: usize) {
+        if (0..LAYERS).any(|l| self.inner.layer_len(l) > len) {
+            self.epoch += 1;
+        }
+        self.inner.truncate(len);
+    }
+    fn export_blocks(&mut self, start: usize, len: usize) -> Option<Result<Vec<u8>, String>> {
+        self.inner.export_blocks(start, len)
+    }
+    fn import_blocks(
+        &mut self,
+        start: usize,
+        len: usize,
+        bytes: &[u8],
+    ) -> Option<Result<(), String>> {
+        self.epoch += 1;
+        self.inner.import_blocks(start, len, bytes)
+    }
+}
+
 /// One pending output.
 struct Head {
     h: u64,
+    /// The cache epoch it was made in: a truncate that drops a row, or an import, makes it stale.
+    epoch: u64,
     /// Graph mode: the argmax taken at `decode` and held, like the 30B's one-list graph.
     chip_token: Option<u32>,
 }
 
 /// The host fake forward pass. Switches and instruments are public fields.
 pub struct EchoChainModel {
-    kv: Box<dyn EchoKv>,
+    kv: Lent,
     heads: Vec<Option<Head>>,
     logits: Vec<f32>,
     log: Arc<Mutex<Vec<Call>>>,
@@ -211,7 +255,10 @@ impl EchoChainModel {
     /// The fake on any inspectable cache built for [`echo_geometry`] (a negative control).
     pub fn with_kv(kv: Box<dyn EchoKv>) -> Self {
         Self {
-            kv,
+            kv: Lent {
+                inner: kv,
+                epoch: 0,
+            },
             heads: Vec::new(),
             logits: vec![0.0; ECHO_VOCAB],
             log: Arc::new(Mutex::new(Vec::new())),
@@ -237,12 +284,12 @@ impl EchoChainModel {
 
     /// Positions held by each layer.
     pub fn layer_lens(&self) -> Vec<usize> {
-        (0..LAYERS).map(|l| self.kv.layer_len(l)).collect()
+        (0..LAYERS).map(|l| self.kv.inner.layer_len(l)).collect()
     }
 
     /// The cache's mutant reason, if any.
     pub fn kv_mutant(&self) -> Option<&'static str> {
-        self.kv.mutant()
+        self.kv.inner.mutant()
     }
 
     /// The `d`th element of the K (`s` 0) or V (`s` 1) row of token `t` at (`p`, `l`).
@@ -261,10 +308,10 @@ impl EchoChainModel {
             return Err(format!("echo-chain: token {t} outside the vocabulary"));
         }
         // I1: the ledger's position must be what every layer holds.
-        if self.kv.len() != pos {
+        if self.kv.inner.len() != pos {
             return Err(format!(
                 "echo-chain: asked to write at {pos}, the cache holds {}",
-                self.kv.len()
+                self.kv.inner.len()
             ));
         }
         let query: Vec<f32> = (0..HEAD_DIM)
@@ -283,8 +330,8 @@ impl EchoChainModel {
                 }
                 let k: Vec<f32> = (0..HEAD_DIM).map(|d| self.element(t, p, l, d, 0)).collect();
                 let v: Vec<f32> = (0..HEAD_DIM).map(|d| self.element(t, p, l, d, 1)).collect();
-                self.kv.append(l, p, &k, &v)?;
-                self.kv.attend(l, &query, p + 1, &mut out)?;
+                self.kv.inner.append(l, p, &k, &v)?;
+                self.kv.inner.attend(l, &query, p + 1, &mut out)?;
                 for x in &out {
                     h = mix(h, u64::from(x.to_bits()));
                 }
@@ -317,10 +364,8 @@ impl ForwardPass for EchoChainModel {
     fn vocab(&self) -> usize {
         ECHO_VOCAB
     }
-    /// Lending the cache forgets every head: a head never outlives a truncate, export or import.
     fn kv(&mut self) -> &mut dyn KvStore {
-        self.heads.clear();
-        &mut *self.kv
+        &mut self.kv
     }
     fn max_decode_batch(&self) -> usize {
         self.max_decode_batch
@@ -340,6 +385,7 @@ impl ForwardPass for EchoChainModel {
         let h = *hashes.last().expect("non-empty prefill");
         self.heads = vec![Some(Head {
             h,
+            epoch: self.kv.epoch,
             chip_token: None,
         })];
         Ok(())
@@ -375,7 +421,11 @@ impl ForwardPass for EchoChainModel {
             } else {
                 None
             };
-            heads.push(Some(Head { h, chip_token }));
+            heads.push(Some(Head {
+                h,
+                epoch: self.kv.epoch,
+                chip_token,
+            }));
         }
         self.heads = heads;
         Ok(())
@@ -391,6 +441,11 @@ impl ForwardPass for EchoChainModel {
             .get_mut(head)
             .and_then(Option::take)
             .ok_or_else(|| format!("echo-chain: head {head} is not pending"))?;
+        if hd.epoch != self.kv.epoch {
+            return Err(format!(
+                "echo-chain: head {head} is stale: the cache changed under it"
+            ));
+        }
         match (hd.chip_token, want) {
             (Some(t), Want::Greedy) => return Ok(Next::Token(t)),
             (Some(_), Want::Logits) => self.chip_reads += 1,
@@ -416,7 +471,7 @@ impl ForwardPass for EchoChainModel {
         self.heads.clear();
     }
     fn kv_identity(&self) -> Result<KvIdentityInputs, String> {
-        if let Some(why) = self.kv.mutant() {
+        if let Some(why) = self.kv.inner.mutant() {
             return Err(why.into());
         }
         // The fake's K/V bytes depend on the cache path and the salt only (graph_mode, the
@@ -424,7 +479,7 @@ impl ForwardPass for EchoChainModel {
         Ok(KvIdentityInputs {
             kind: self.kind(),
             entries: vec![
-                ("attention_path", self.kv.path_name().to_string()),
+                ("attention_path", self.kv.inner.path_name().to_string()),
                 ("salt", self.salt.to_string()),
             ],
         })

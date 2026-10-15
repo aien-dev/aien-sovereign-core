@@ -2,8 +2,9 @@
 //! run on the host fake `EchoChainModel`. Every sharpness test compares a run of at least 8
 //! tokens (a chance agreement of 8 tokens is about 1 in 64^8).
 
-use super::echo_chain::{Call, CorruptRowKv, EchoChainModel, ECHO_VOCAB};
+use super::echo_chain::{echo_geometry, Call, CorruptRowKv, EchoChainModel, EchoKv, ECHO_VOCAB};
 use super::*;
+use crate::qwen3_moe_omega::{HostPoolKv, KvAttention, KvGeometry};
 
 const CTX: usize = 128;
 
@@ -199,14 +200,34 @@ fn forward_pass_contract<M: ForwardPass>(make: &dyn Fn() -> M) {
         Next::Logits(l) => assert_eq!(l, &la2[..]),
     }
 
-    // A head read after truncate errors (I2), even a truncate that keeps every row.
+    // A head read after a truncate that drops a row errors (I2).
     let mut c = make();
     c.prefill(0, &p, &mut t).unwrap();
-    c.kv().truncate(n);
+    c.kv().truncate(n - 1);
     assert!(
         c.next(0, Want::Logits, &mut t).is_err(),
         "no head survives a truncate"
     );
+
+    // A head read after a new forward call gives the new call's head (I2): an unread decode
+    // head (on a graph, a held token) is replaced by the next prefill's head.
+    let mut g = make();
+    g.prefill(0, &p, &mut t).unwrap();
+    let _ = read_logits(&mut g, 0);
+    g.decode(n, &[first], &mut t).unwrap();
+    let _ = read_logits(&mut g, 0);
+    g.prefill(n + 1, &[7, 9], &mut t).unwrap();
+    let lg = read_logits(&mut g, 0);
+    let mut f = make();
+    f.prefill(0, &p, &mut t).unwrap();
+    let _ = read_logits(&mut f, 0);
+    f.decode(n, &[first], &mut t).unwrap();
+    f.prefill(n + 1, &[7, 9], &mut t).unwrap();
+    match f.next(0, Want::Greedy, &mut t).unwrap() {
+        Next::Token(x) => assert_eq!(x, sample_argmax(&lg).0),
+        Next::Logits(l) => assert_eq!(l, &lg[..]),
+    }
+    assert!(f.next(0, Want::Logits, &mut t).is_err());
 
     // A position the cache does not hold is refused (I1).
     let mut d = make();
@@ -255,6 +276,18 @@ fn forward_pass_contract<M: ForwardPass>(make: &dyn Fn() -> M) {
             assert_eq!(read_logits(&mut m, j), read_logits(&mut one, 0), "head {j}");
         }
         assert!(m.next(3, Want::Logits, &mut t).is_err());
+        // A new forward call replaces every unread head (I2).
+        m.decode(n + 3, &[1, 2, 3], &mut t).unwrap();
+        m.decode(n + 6, &[4], &mut t).unwrap();
+        assert!(
+            m.next(1, Want::Logits, &mut t).is_err(),
+            "head 1 of the old call"
+        );
+        assert!(
+            m.next(2, Want::Logits, &mut t).is_err(),
+            "head 2 of the old call"
+        );
+        assert!(m.next(0, Want::Logits, &mut t).is_ok());
     }
 }
 
@@ -328,6 +361,8 @@ fn greedy_with_chip_argmax_reads_no_logits() {
     let mut graph = ctl(true);
     let (g, _) = gen(&mut graph, &p, &greedy(8), None).unwrap();
     let m = graph.model();
+    // Every decode head here is a graph head (7 of them): asking it for Want::Logits would
+    // count 7 chip reads, so 0 shows the controller asked Want::Greedy and took the held token.
     assert_eq!(m.chip_reads, 0, "greedy on the graph reads no logits back");
     assert_eq!(m.lm_heads, 1, "only the prefill head is a host output head");
     let mut host = ctl(false);
@@ -723,6 +758,7 @@ fn finish_ends_with_finish_reason_constraint() {
     );
     assert_eq!(&c.history()[p.len()..], &chain[..3]);
     assert_at_ledger(&c);
+    assert_eq!(c.model().lm_heads, 3, "the finishing step reads no head");
 }
 
 #[test]
@@ -776,6 +812,12 @@ fn a_constraint_error_rolls_back_like_a_forward_error() {
         );
         assert_eq!(&c.history()[p.len()..], &chain[..2], "{bad:?}");
         assert_at_ledger(&c);
+        assert!(
+            c.model_mut()
+                .next(0, Want::Logits, &mut StepTiming::default())
+                .is_err(),
+            "the rollback forgets the pending head ({bad:?})"
+        );
         let mut q = c.history().to_vec();
         q.push(1);
         let (warm, _) = gen(&mut c, &q, &greedy(8), None).unwrap();
@@ -871,4 +913,147 @@ fn negative_control_restoring_a_under_b_continues_differently() {
         foreign, cold_b,
         "a foreign payload must continue differently"
     );
+}
+
+// ---------------------------------------------------------------------------------------------
+// Review additions: the controller's own clear_pending calls, a sampler that leaves the allowed
+// set, and a cache that cannot export or import.
+// ---------------------------------------------------------------------------------------------
+
+/// Whether head 0 is still pending (reading it consumes it).
+fn head_pending(c: &mut Ctl) -> bool {
+    c.model_mut()
+        .next(0, Want::Logits, &mut StepTiming::default())
+        .is_ok()
+}
+
+/// A generation that a constraint finishes leaves its last head unread.
+fn finished_with_a_pending_head(graph: bool) -> Ctl {
+    let mut c = ctl(graph);
+    let mut rule = Script::new(vec![Ok(StepRule::Any); 2], StepRule::Finish);
+    gen(&mut c, &prompt(12, 24), &greedy(8), Some(&mut rule)).unwrap();
+    c
+}
+
+#[test]
+fn rewind_a_new_generation_and_a_forced_token_forget_the_pending_head() {
+    for graph in [false, true] {
+        assert!(
+            head_pending(&mut finished_with_a_pending_head(graph)),
+            "precondition"
+        );
+
+        // rewind, even one that keeps every row.
+        let mut c = finished_with_a_pending_head(graph);
+        let n = c.position();
+        c.rewind(n);
+        assert!(!head_pending(&mut c), "rewind clears pending heads");
+
+        // The start of every generation, even one refused before it touches the cache.
+        let mut c = finished_with_a_pending_head(graph);
+        assert!(gen(&mut c, &[], &greedy(4), None).is_err());
+        assert!(!head_pending(&mut c), "generate clears pending heads first");
+
+        // A forced token discards the head it did not read.
+        let mut c = ctl(graph);
+        let mut rule = Script::always(StepRule::Force(3));
+        let (out, _) = gen(&mut c, &prompt(12, 25), &greedy(1), Some(&mut rule)).unwrap();
+        assert_eq!(out, vec![3]);
+        assert!(
+            !head_pending(&mut c),
+            "a forced step clears the unread head"
+        );
+    }
+}
+
+/// A sampler that always picks one token, whatever the logits say.
+struct Picks(u32);
+
+impl Sampler for Picks {
+    fn wants_logits(&self) -> bool {
+        true
+    }
+    fn pick(&mut self, _logits: &[f32], _step: usize) -> u32 {
+        self.0
+    }
+}
+
+#[test]
+fn a_pick_outside_the_allowed_set_is_an_error() {
+    let p = prompt(12, 26);
+    let mut c = ctl(false);
+    let mut rule = Script::new(
+        vec![Ok(StepRule::Any), Ok(StepRule::Allow(vec![1, 2, 3]))],
+        StepRule::Any,
+    );
+    let mut out = Vec::new();
+    let r = c.generate(&p, &greedy(8), &mut Picks(0), Some(&mut rule), &mut |t| {
+        out.push(t);
+        true
+    });
+    assert!(
+        r.is_err(),
+        "token 0 is outside the allowed set: {r:?} {out:?}"
+    );
+    assert_eq!(out, vec![0], "only the unconstrained step emitted");
+    assert_eq!(c.position(), p.len() + 1);
+    assert_at_ledger(&c);
+    assert!(!head_pending(&mut c));
+}
+
+/// The fake's pool with persistence switched off (export and import answer `None`).
+struct NoPersistKv(HostPoolKv);
+
+impl KvStore for NoPersistKv {
+    fn geometry(&self) -> KvGeometry {
+        self.0.geometry()
+    }
+    fn capacity(&self) -> usize {
+        self.0.capacity()
+    }
+    fn len(&self) -> usize {
+        self.0.len()
+    }
+    fn truncate(&mut self, len: usize) {
+        self.0.truncate(len)
+    }
+}
+
+impl KvAttention for NoPersistKv {
+    fn append(&mut self, layer: usize, pos: usize, k: &[f32], v: &[f32]) -> Result<(), String> {
+        self.0.append(layer, pos, k, v)
+    }
+    fn attend(
+        &mut self,
+        layer: usize,
+        q: &[f32],
+        context_len: usize,
+        out: &mut [f32],
+    ) -> Result<u64, String> {
+        self.0.attend(layer, q, context_len, out)
+    }
+    fn resident(&self) -> bool {
+        false
+    }
+}
+
+impl EchoKv for NoPersistKv {
+    fn layer_len(&self, layer: usize) -> usize {
+        self.0.layer_len(layer)
+    }
+}
+
+#[test]
+fn a_cache_that_cannot_persist_refuses_export_and_restore() {
+    let pool = HostPoolKv::new(&echo_geometry(), CTX).unwrap();
+    let mut c = GenerationController::new(EchoChainModel::with_kv(Box::new(NoPersistKv(pool))));
+    let p = prompt(20, 27);
+    gen(&mut c, &p, &greedy(4), None).unwrap();
+    let err = c.export_kv(0, 16).unwrap_err();
+    assert!(err.contains("cannot export"), "{err}");
+    let err = c.restore_kv(&p, &[0u8; 8]).unwrap_err();
+    assert!(err.contains("cannot import"), "{err}");
+    assert_eq!((c.position(), c.model().layer_lens()), (0, vec![0, 0]));
+    let (got, _) = gen(&mut c, &p, &greedy(8), None).unwrap();
+    assert_eq!(got, cold(&p, &greedy(8)));
 }
