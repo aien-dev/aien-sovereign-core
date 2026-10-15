@@ -1,17 +1,32 @@
 //! The destination parser over every campaign goal corpus in this repository
 //! (v5 G6 finding: two independently authored v5 goals were refused before
 //! the model). For each goal the probe records what `named_destination` reads
-//! and what `classify_destination` then decides, and compares the whole table
+//! and what the compose bridge then decides, and compares the whole table
 //! with the committed record
 //! `docs/campaigns/open-model-qwen3/evidence-v5/destination-probe.tsv`.
 //! Any change to how a real goal is read shows up here as a diff.
 //!
-//! The workspace is empty and `is_file` sees no files, so an edit goal whose
-//! file a campaign seeds reads as `New` here; the parse column is what matters.
-//! To rewrite the record: `DEST_PROBE_WRITE=<path> cargo test -p aien-runtime
-//! --test destination_corpus_test`, then review the diff.
+//! The verdict is observed through `ComposeBridge::run_task`
+//! (tests/support/compose_harness.rs) with a silent model:
+//! - `Refused(why)`: the bridge refused the goal before any model call; its
+//!   refusal text is `RunComposeTask: ` followed by `why`.
+//! - `Edit(path)`: the edit proposer was asked, and the prompt carries the
+//!   edit block of `path`.
+//! - `New`: the document proposer was asked; or the run was refused before the
+//!   model for a goal requirement it could not read (no call to look at), and
+//!   the workspace is empty, so no file exists that could have been an edit.
+//!
+//! The workspace is empty, so an edit goal whose file a campaign seeds reads
+//! as `New` here; the parse column is what matters. To rewrite the record:
+//! `DEST_PROBE_WRITE=<path> cargo test -p aien-runtime --test
+//! destination_corpus_test` (linked build), then review the diff.
+#[path = "support/compose_harness.rs"]
+mod compose_harness;
+#[path = "support/home_guard.rs"]
+mod home_guard;
+
 use aien_runtime::destination::named_destination;
-use aien_runtime::spine::{classify_destination, TargetClass};
+use compose_harness::{silent, Asked, Harness};
 use std::path::{Path, PathBuf};
 
 const CORPUS: &[&str] = &[
@@ -25,6 +40,9 @@ const CORPUS: &[&str] = &[
     "docs/campaigns/next-phase-1/tasks-v8.json",
 ];
 const RECORD: &str = "docs/campaigns/open-model-qwen3/evidence-v5/destination-probe.tsv";
+
+/// The prefix of a task refusal made before any model call.
+const REFUSAL_PREFIX: &str = "RunComposeTask: ";
 
 fn repo() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
@@ -50,15 +68,52 @@ fn goals() -> Vec<(String, String, String)> {
     out
 }
 
-fn verdict(c: &TargetClass) -> String {
-    match c {
-        TargetClass::New => "New".into(),
-        TargetClass::Edit(p, _) => format!("Edit({p})"),
-        TargetClass::Refused(why) => format!("Refused({why})"),
+/// The path of the edit block in `prompt`, if it carries one.
+fn edit_path(prompt: &str) -> Option<String> {
+    const HEAD: &str = "\nThe file ";
+    const TAIL: &str = " already exists. Its current content is:\n";
+    let end = prompt.rfind(TAIL)?;
+    let start = prompt[..end].rfind(HEAD)? + HEAD.len();
+    Some(prompt[start..end].to_string())
+}
+
+/// What the bridge decides for `goal` in the harness workspace.
+fn verdict(h: &Harness, goal: &str) -> String {
+    h.clear();
+    let r = match h.run(goal) {
+        Err(e) => {
+            assert!(
+                h.calls().is_empty(),
+                "{goal}: a refused goal reached the model"
+            );
+            let why = e
+                .strip_prefix(REFUSAL_PREFIX)
+                .unwrap_or_else(|| panic!("{goal}: not a task refusal: {e}"));
+            return format!("Refused({why})");
+        }
+        Ok(r) => r,
+    };
+    match h.calls().first() {
+        Some(c) if c.asked == Asked::Document => {
+            assert_eq!(edit_path(&c.prompt), None, "{goal}: {}", c.prompt);
+            "New".into()
+        }
+        Some(c) => format!(
+            "Edit({})",
+            edit_path(&c.prompt).unwrap_or_else(|| panic!("{goal}: no edit block: {}", c.prompt))
+        ),
+        None => {
+            // Refused before the model for a requirement it could not read:
+            // one refused attempt, and nothing in the workspace to edit.
+            assert_eq!(r.proposal_attempts.len(), 1, "{goal}: {r:?}");
+            assert_eq!(r.proposal_attempts[0].outcome, "refused", "{goal}: {r:?}");
+            assert_eq!(std::fs::read_dir(h.ws()).unwrap().count(), 0, "{goal}");
+            "New".into()
+        }
     }
 }
 
-fn table(ws: &Path) -> String {
+fn table(h: &Harness) -> String {
     let mut s = String::from("corpus\tid\tparse\tverdict\n");
     for (f, id, goal) in goals() {
         let parse = match named_destination(&goal, &|_| false) {
@@ -66,16 +121,17 @@ fn table(ws: &Path) -> String {
             Ok(None) => "none".into(),
             Err(e) => format!("error {e}"),
         };
-        let (class, _) = classify_destination(&goal, ws);
-        s.push_str(&format!("{f}\t{id}\t{parse}\t{}\n", verdict(&class)));
+        s.push_str(&format!("{f}\t{id}\t{parse}\t{}\n", verdict(h, &goal)));
     }
     s
 }
 
 #[test]
+#[cfg_attr(not(compose_linked), ignore = "needs librx_compose.a: stub build")]
 fn every_campaign_goal_reads_as_recorded() {
-    let ws = tempfile::tempdir().unwrap();
-    let now = table(ws.path());
+    let _home = home_guard::home_slot();
+    let h = Harness::new(silent());
+    let now = table(&h);
     assert!(goals().len() >= 60, "a corpus file went missing");
     if let Ok(p) = std::env::var("DEST_PROBE_WRITE") {
         std::fs::write(&p, &now).unwrap();
@@ -95,8 +151,10 @@ fn every_campaign_goal_reads_as_recorded() {
 
 /// The three v5 goals the G6 finding is about, by their declared destination.
 #[test]
+#[cfg_attr(not(compose_linked), ignore = "needs librx_compose.a: stub build")]
 fn v5_goals_resolve_to_their_declared_destinations() {
-    let ws = tempfile::tempdir().unwrap();
+    let _home = home_guard::home_slot();
+    let h = Harness::new(silent());
     let v5: Vec<_> = goals()
         .into_iter()
         .filter(|(f, _, _)| f.ends_with("tasks-oq3-v5.json"))
@@ -111,19 +169,16 @@ fn v5_goals_resolve_to_their_declared_destinations() {
             Ok(Some(want.to_string())),
             "{id}"
         );
-        assert_eq!(
-            classify_destination(&goal(id), ws.path()).0,
-            TargetClass::New,
-            "{id}"
-        );
+        assert_eq!(verdict(&h, &goal(id)), "New", "{id}");
     }
     // N1 is read, then refused as unsafe (outside the workspace).
     assert_eq!(
         named_destination(&goal("N1"), &|_| false),
         Ok(Some("../shared-stuff/reminder.txt".to_string()))
     );
-    assert!(matches!(
-        classify_destination(&goal("N1"), ws.path()).0,
-        TargetClass::Refused(why) if why.contains("cannot be written safely")
-    ));
+    let v = verdict(&h, &goal("N1"));
+    assert!(
+        v.starts_with("Refused(") && v.contains("cannot be written safely"),
+        "{v}"
+    );
 }

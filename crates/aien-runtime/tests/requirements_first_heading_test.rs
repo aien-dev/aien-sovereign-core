@@ -2,59 +2,32 @@
 //! (Requirement::FirstLineHeading). The ALLEN end-to-end demo v2 request was
 //! refused as uncertain because no recognizer read this wording (arch#162).
 //! Recognizing it must not loosen any other uncertain wording.
+#[path = "support/compose_harness.rs"]
+mod compose_harness;
+#[path = "support/home_guard.rs"]
+mod home_guard;
+
+use aien_runtime::check_file_proposal;
+use aien_runtime::control::ComposeTaskReport;
 use aien_runtime::requirements::{analyze, refusal_reason, Requirement};
-use aien_runtime::spine::{
-    check_file_proposal, propose_task_checked, Generation, COMPOSE_MAX_ATTEMPTS,
-};
-use std::sync::Mutex;
-use std::time::Duration;
+use compose_harness::Harness;
 
 use Requirement::*;
 
 /// The S3 request of docs/campaigns/allen-e2e/DEMO-v2.md, verbatim.
 const DEMO_V2_GOAL: &str = "Write garden.md in the workspace, a garden plan. Start with a Markdown heading line that begins with \"# \". Use at most 200 words.";
 
-fn gen(text: &str) -> Result<Generation, String> {
-    Ok(Generation {
-        text: text.to_string(),
-        tokens: 5,
-        finish_reason: Some("eos".into()),
-        ..Default::default()
-    })
-}
-
-fn run(
-    goal: &str,
-    replies: Vec<String>,
-) -> (
-    Result<String, String>,
-    Vec<aien_runtime::control::ProposalAttempt>,
-    Vec<String>,
-) {
-    let prompts = Mutex::new(Vec::new());
-    let queue = Mutex::new(replies);
-    let n = Mutex::new(0usize);
-    let proposer = |p: &str, _: Duration| {
-        prompts.lock().unwrap().push(p.to_string());
-        let q = queue.lock().unwrap();
-        let mut i = n.lock().unwrap();
-        let r = q[(*i).min(q.len() - 1)].clone();
-        *i += 1;
-        gen(&r)
-    };
+/// One compose task through `ComposeBridge::run_task`: the model answers call
+/// k with `replies[k - 1]` (the last one repeats). Returns the report and the
+/// prompts the model was handed.
+fn run(goal: &str, replies: Vec<String>) -> (ComposeTaskReport, Vec<String>) {
     let ex = analyze(goal);
     assert!(ex.uncertain.is_empty(), "{:?}", ex.uncertain);
-    let (out, a) = propose_task_checked(
-        &proposer,
-        "base",
-        None,
-        &ex.requirements,
-        Duration::from_secs(5),
-        Duration::from_millis(1),
-        COMPOSE_MAX_ATTEMPTS,
-    );
-    let p = prompts.lock().unwrap().clone();
-    (out, a, p)
+    let texts: Vec<&str> = replies.iter().map(String::as_str).collect();
+    let h = Harness::new(compose_harness::replies(&texts));
+    let r = h.run(goal).unwrap();
+    let p = h.calls().into_iter().map(|c| c.prompt).collect();
+    (r, p)
 }
 
 const NO_HEADING: &str =
@@ -176,13 +149,16 @@ fn the_first_line_is_checked() {
 }
 
 #[test]
+#[cfg_attr(not(compose_linked), ignore = "needs librx_compose.a: stub build")]
 fn a_reply_without_the_heading_is_refused_then_a_good_one_passes() {
+    let _home = home_guard::home_slot();
     let ex = analyze(DEMO_V2_GOAL);
     let content = check_file_proposal(NO_HEADING).unwrap().content;
     let why = refusal_reason(&ex.requirements, &content).unwrap();
     assert!(why.contains("first line"), "{why}");
-    let (out, a, prompts) = run(DEMO_V2_GOAL, vec![NO_HEADING.into(), GOOD.into()]);
-    assert_eq!(out.unwrap(), GOOD);
+    let (r, prompts) = run(DEMO_V2_GOAL, vec![NO_HEADING.into(), GOOD.into()]);
+    assert_eq!(r.proposal.as_deref(), Some(GOOD), "{r:?}");
+    let a = &r.proposal_attempts;
     assert_eq!(a[0].outcome, "refused");
     assert_eq!(a[1].outcome, "parsed");
     // the retry prompt names what was missed
@@ -190,10 +166,17 @@ fn a_reply_without_the_heading_is_refused_then_a_good_one_passes() {
 }
 
 #[test]
+#[cfg_attr(not(compose_linked), ignore = "needs librx_compose.a: stub build")]
 fn a_reply_that_never_has_the_heading_exhausts_with_nothing_approved() {
-    let (out, a, _) = run(DEMO_V2_GOAL, vec![NO_HEADING.into()]);
-    assert!(out.unwrap_err().contains("first line"));
-    assert_eq!(a.len(), COMPOSE_MAX_ATTEMPTS as usize);
+    let _home = home_guard::home_slot();
+    let (r, _) = run(DEMO_V2_GOAL, vec![NO_HEADING.into()]);
+    assert!(
+        r.proposal.is_none() && r.uncommitted_proposal.is_none(),
+        "{r:?}"
+    );
+    assert!(r.proposer_error.unwrap().contains("first line"));
+    let a = &r.proposal_attempts;
+    assert_eq!(a.len(), 3);
     assert!(a
         .iter()
         .all(|x| x.outcome == "refused" && x.aegis.is_none()));

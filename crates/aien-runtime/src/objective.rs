@@ -28,7 +28,7 @@ pub fn objective_id(text: &str) -> String {
 /// `$AIEN_PROVENANCE_DIR`, else `$AIEN_RUNTIME_STATE_DIR/provenance`, else
 /// `$XDG_STATE_HOME/aien-runtime/provenance`, else
 /// `$HOME/.local/state/aien-runtime/provenance`, the same order as the compose
-/// home (`spine::compose_dir_from_env`). Never /tmp: a record that vanishes at
+/// home (`compose::compose_dir_from_env`). Never /tmp: a record that vanishes at
 /// reboot is not a durable record. With none of those set (no HOME at all), the
 /// absolute `/var/lib/aien-runtime/provenance`, so daemon and CLI still agree.
 pub fn provenance_root_with(get: impl Fn(&str) -> Option<String>) -> PathBuf {

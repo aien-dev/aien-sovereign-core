@@ -2,9 +2,13 @@
 //! PR round 2: "Add 2 lines to README.md" is read, not refused; every goal of the
 //! campaign task files is classified (recognized, silent or uncertain) and the
 //! refused ones are listed with their reason.
+#[path = "support/compose_harness.rs"]
+mod compose_harness;
+#[path = "support/home_guard.rs"]
+mod home_guard;
+
 use aien_runtime::requirements::{analyze, refusal_reason, unmet, ItemKind, Requirement};
-use aien_runtime::spine::{propose_task_checked, Generation};
-use std::time::Duration;
+use compose_harness::{always, Asked, Harness};
 
 use Requirement::*;
 
@@ -163,40 +167,33 @@ fn the_new_checks_measure_the_right_thing() {
     assert!(blocks.check("```sh\na\n```\n").is_some());
 }
 
-fn gen(text: &str) -> Result<Generation, String> {
-    Ok(Generation {
-        text: text.to_string(),
-        tokens: 5,
-        finish_reason: Some("eos".into()),
-        ..Default::default()
-    })
-}
-
-/// One model reply through the retry loop with `prior` as the edit target.
+/// One compose task through `ComposeBridge::run_task` with `prior` as the
+/// content of `path` (None: `path` does not exist, a new document). The model
+/// always answers `reply`. Ok = the approved proposal, Err = the refusal.
 fn run_edit(goal: &str, path: &str, prior: Option<&str>, reply: &str) -> Result<String, String> {
-    let mut ex = analyze(goal);
+    let ex = analyze(goal);
     assert!(ex.uncertain.is_empty(), "{:?}", ex.uncertain);
-    if ex.needs_prior() {
-        ex = ex.resolved(prior.unwrap_or(""));
+    let h = Harness::new(always(reply));
+    if let Some(p) = prior {
+        h.write(path, p);
     }
-    let proposer = |_: &str, _: Duration| gen(reply);
-    let edit = prior.map(|p| (path, p));
-    propose_task_checked(
-        &proposer,
-        "base",
-        edit,
-        &ex.requirements,
-        Duration::from_secs(5),
-        Duration::from_millis(1),
-        1,
-    )
-    .0
+    let r = h.run(goal).unwrap();
+    let want = if prior.is_some() {
+        Asked::Edit
+    } else {
+        Asked::Document
+    };
+    assert!(h.calls().iter().all(|c| c.asked == want), "{goal}");
+    r.proposal
+        .ok_or_else(|| r.proposer_error.unwrap_or_default())
 }
 
 const PRIOR: &str = "# Notes\n\nfirst\nsecond\n";
 
 #[test]
+#[cfg_attr(not(compose_linked), ignore = "needs librx_compose.a: stub build")]
 fn counted_edits_are_judged_on_the_diff_of_the_exact_proposed_bytes() {
+    let _home = home_guard::home_slot();
     let g = "Add 2 lines to README.md";
     let two = "filename: README.md\n# Notes\n\nfirst\nnew a\nnew b\nsecond\n";
     let one = "filename: README.md\n# Notes\n\nfirst\nnew a\nsecond\n";

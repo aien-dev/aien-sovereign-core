@@ -32,9 +32,9 @@ use crate::approved_auth::{
     approval_key, check_confinement, desk_key_path, ApprovalIdentity, DeskKey,
 };
 use crate::approved_replay::{self, ClaimKeys, CommitEvidence};
+use crate::compose::{check_file_proposal, ComposeBridge};
 use crate::control::ComposeTaskReport;
 use crate::effects::{write_approved_grant, ApprovedLink};
-use crate::spine::{check_file_proposal, ComposeBridge};
 use aien_omega_compose::hex;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -250,14 +250,14 @@ fn check_bound_requirements(p: &ApprovedProposal, workspace: &Path) -> Result<()
     if ex.needs_prior() {
         // An added-line count is judged against the file these bytes replace.
         let class = if p.path.contains(char::is_whitespace) {
-            crate::spine::TargetClass::Refused(String::new())
+            crate::compose::TargetClass::Refused(String::new())
         } else {
-            crate::spine::classify_target(&p.path, workspace)
+            crate::compose::classify_target(&p.path, workspace)
         };
         let (prior, exists) =
             match class {
-                crate::spine::TargetClass::Edit(_, c) => (c, true),
-                crate::spine::TargetClass::New => (String::new(), false),
+                crate::compose::TargetClass::Edit(_, c) => (c, true),
+                crate::compose::TargetClass::New => (String::new(), false),
                 _ => return Err(refuse(
                     "RequirementsUnmet",
                     "the existing file cannot be read, so the added-line count cannot be measured",
@@ -489,7 +489,7 @@ impl ProposerHook {
                 .map_err(|e| format!("host records: {e}"))?;
             let views: Vec<_> = recs
                 .iter()
-                .map(|r| crate::spine::record_view(&mut home.compose, r))
+                .map(|r| crate::compose::record_view(&mut home.compose, r))
                 .collect();
             let l =
                 approved_replay::ReplayLedger::from_records(&views).map_err(|e| e.to_string())?;
@@ -591,7 +591,7 @@ mod toctou_tests {
         let tmp = tempfile::tempdir().unwrap();
         let ws = tmp.path().join("ws");
         std::fs::create_dir_all(&ws).unwrap();
-        let proposer: crate::spine::ComposeProposer =
+        let proposer: crate::compose::ComposeProposer =
             Arc::new(|_: &str, _: std::time::Duration| panic!("model ran"));
         let b = Arc::new(ComposeBridge::new(
             tmp.path().join("compose"),

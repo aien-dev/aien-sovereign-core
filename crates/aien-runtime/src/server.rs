@@ -1,9 +1,10 @@
 //! Local UNIX domain socket server for AienRuntimeSpine
 //! Exposes typed control RPC over local IPC to operator CLI tools.
 
+use crate::compose::{compose_dir_from_env, ComposeBridge, ComposeProposer};
 use crate::control::{ControlCommand, ControlEnvelope, ControlResponse};
 use crate::generation::{DaemonStart, ModelIdentity, TurnEvidence};
-use crate::spine::{compose_dir_from_env, AienRuntimeSpine, ComposeBridge, ComposeProposer};
+use crate::spine::AienRuntimeSpine;
 use aien_inference_abi::{AienInferenceBackend, ChatTokenizer, SamplingParams};
 use aien_scheduler::{ChannelCompletionSink, CompletionEvent};
 use std::path::{Path, PathBuf};
@@ -181,11 +182,11 @@ impl AienRuntimeServer {
         }
 
         // Bad compose limits stop the daemon here, loudly, before anything is served.
-        crate::spine::compose_budgets_from_env().map_err(|e| format!("compose limits: {e}"))?;
-        crate::spine::compose_doc_max_tokens_from_env()
+        crate::compose::compose_budgets_from_env().map_err(|e| format!("compose limits: {e}"))?;
+        crate::compose::compose_doc_max_tokens_from_env()
             .map_err(|e| format!("compose limits: {e}"))?;
 
-        let authorize_desk = crate::spine::authorize_requires_desk_from_env()?;
+        let authorize_desk = crate::compose::authorize_requires_desk_from_env()?;
         // sc#328: a bridge that requires the approval desk refuses to start
         // without a loadable desk key, before the socket exists. A bridge with
         // the desk off (code that embeds the runtime) is the same dev-only
@@ -197,7 +198,7 @@ impl AienRuntimeServer {
             .as_ref()
         {
             Some(b) if !b.authorize_requires_desk() => {
-                crate::spine::authorize_desk_setting(
+                crate::compose::authorize_desk_setting(
                     Some("0"),
                     aien_inference_abi::strict::dev_fallback_active(),
                 )
@@ -209,7 +210,7 @@ impl AienRuntimeServer {
             None => None,
         };
         if let Some(dir) = desk_home {
-            crate::spine::check_desk_key_at_start(&dir)?;
+            crate::compose::check_desk_key_at_start(&dir)?;
         }
         let listener = UnixListener::bind(&self.socket_path).map_err(|e| {
             format!(
@@ -334,7 +335,7 @@ impl AienRuntimeServer {
         // effect command refuses until an operator reconcile succeeds
         // (ACCEPTANCE-v3 2.5).
         if let Some(b) = compose.as_ref() {
-            let line = crate::spine::authorize_mac_line(b.authorize_requires_desk());
+            let line = crate::compose::authorize_mac_line(b.authorize_requires_desk());
             println!("{line}");
             if !b.authorize_requires_desk() {
                 tracing::warn!("{line}");
@@ -614,7 +615,7 @@ async fn generate_text(
     temperature: f32,
     limit: std::time::Duration,
     assistant_prefix: &str,
-) -> Result<crate::spine::Generation, String> {
+) -> Result<crate::compose::Generation, String> {
     let (tokenizer, mut events, prompt_ids) = submit_turn(
         spine,
         tokenizer,
@@ -640,13 +641,13 @@ async fn generate_text(
                     }
                     return tokenizer
                         .decode_opts(&produced, true)
-                        .map(|text| crate::spine::Generation {
+                        .map(|text| crate::compose::Generation {
                             text,
                             tokens: produced.len(),
                             finish_reason: Some(finish_reason_label(&finish_reason).to_string()),
                             token_ids: Some(produced.clone()),
                             prompt_tokens: Some(prompt_ids.len()),
-                            prompt_ids_sha256: Some(crate::spine::token_ids_sha256(&prompt_ids)),
+                            prompt_ids_sha256: Some(crate::compose::token_ids_sha256(&prompt_ids)),
                             decoding: decoding.clone(),
                             ops: ops.clone(),
                         })
@@ -659,7 +660,7 @@ async fn generate_text(
     };
     tokio::time::timeout(limit, collect)
         .await
-        .map_err(|_| crate::spine::wall_clock_reason(limit.as_millis()))?
+        .map_err(|_| crate::compose::wall_clock_reason(limit.as_millis()))?
 }
 
 /// The compose "model" Skill: real inference through `generate_text`, run
@@ -687,7 +688,7 @@ pub fn doc_model_proposer(
     tokenizer: Arc<RwLock<Option<ChatTokenizer>>>,
     handle: tokio::runtime::Handle,
 ) -> Result<ComposeProposer, String> {
-    let cap = crate::spine::compose_doc_max_tokens_from_env()?;
+    let cap = crate::compose::compose_doc_max_tokens_from_env()?;
     Ok(proposer_with_cap(spine, tokenizer, handle, cap))
 }
 
@@ -708,8 +709,8 @@ fn proposer_with_cap(
             .read()
             .expect("tokenizer lock")
             .as_ref()
-            .map(|t| crate::spine::compose_assistant_prefix(&t.template()))
-            .unwrap_or(crate::spine::COMPOSE_ASSISTANT_PREFIX);
+            .map(|t| crate::compose::compose_assistant_prefix(&t.template()))
+            .unwrap_or(crate::compose::COMPOSE_ASSISTANT_PREFIX);
         handle
             .block_on(generate_text(
                 spine.clone(),
@@ -720,7 +721,7 @@ fn proposer_with_cap(
                 limit,
                 prefix,
             ))
-            .map(|g| crate::spine::Generation {
+            .map(|g| crate::compose::Generation {
                 text: format!("{prefix}{}", g.text),
                 ..g
             })

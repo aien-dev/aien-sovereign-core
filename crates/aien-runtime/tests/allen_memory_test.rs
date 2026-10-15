@@ -21,8 +21,8 @@ use aien_allen::{hex, ENV_ADOPT, ENV_SUBJECT};
 use aien_allen_memory::{memory_dir, GOAL_LABEL};
 use aien_omega_compose::LINKED;
 use aien_runtime::allen_memory::{for_task, handle_command, MemoryState};
+use aien_runtime::compose::{ComposeBridge, ComposeProposer, Generation};
 use aien_runtime::control::{ControlCommand as C, ControlResponse, MemoryReport};
-use aien_runtime::spine::{ComposeBridge, ComposeProposer, Generation};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -601,14 +601,27 @@ fn rendered_block_is_bounded_and_cuts_are_reported() {
     );
 }
 
+/// Every file under `dir`, subdirectories included.
+fn rs_tree(dir: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    for ent in std::fs::read_dir(dir).unwrap() {
+        let p = ent.unwrap().path();
+        if p.is_dir() {
+            out.extend(rs_tree(&p));
+        } else {
+            out.push(p);
+        }
+    }
+    out
+}
+
 /// Structural: the only code that can change the store is `handle_command`;
 /// scopes are parsed only from command fields; nothing else in the runtime
 /// even names the memory crate.
 #[test]
 fn only_operator_commands_can_write_memory_or_choose_a_scope() {
     let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-    for ent in std::fs::read_dir(&src).unwrap() {
-        let p = ent.unwrap().path();
+    for p in rs_tree(&src) {
         let name = p.file_name().unwrap().to_string_lossy().into_owned();
         if !name.ends_with(".rs") || name == "allen_memory.rs" {
             continue;
@@ -642,10 +655,10 @@ fn only_operator_commands_can_write_memory_or_choose_a_scope() {
     // argument is the operator's command field (one call site, one argument).
     assert_eq!(read_side.matches("scope_of(").count(), 1);
     assert!(read_side.contains("scope_of(c)"));
-    let spine = std::fs::read_to_string(src.join("spine.rs")).unwrap();
-    assert_eq!(spine.matches("allen_memory::for_task(").count(), 1);
-    assert!(spine.contains("allen_memory::for_task(&home.memory, context)"));
-    assert_eq!(spine.matches("allen_memory::handle_command(").count(), 1);
+    let bridge = std::fs::read_to_string(src.join("compose/bridge.rs")).unwrap();
+    assert_eq!(bridge.matches("allen_memory::for_task(").count(), 1);
+    assert!(bridge.contains("allen_memory::for_task(&home.memory, context)"));
+    assert_eq!(bridge.matches("allen_memory::handle_command(").count(), 1);
     // The handler is reached only from the operator-command path.
     let server = std::fs::read_to_string(src.join("server.rs")).unwrap();
     assert!(server.contains("b.allen_command(&c)"));

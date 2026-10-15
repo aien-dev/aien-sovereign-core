@@ -6,9 +6,32 @@
 //! tokenizer, identical prompt token ids. The real path stays in the
 //! authorization and evidence layers (the canonical workspace is still
 //! resolved, and the task id still hashes it).
+//!
+//! The prompt is the one `ComposeBridge::run_task` hands the model
+//! (tests/support/compose_harness.rs), one harness running both workspaces.
+#[path = "support/compose_harness.rs"]
+mod compose_harness;
+#[path = "support/home_guard.rs"]
+mod home_guard;
 
-use aien_runtime::spine::{proposal_prompt, task_decision_with_inputs, WORKSPACE_LABEL};
+use compose_harness::{silent, Harness};
 use std::path::Path;
+
+/// The logical name the prompt gives the workspace.
+const WORKSPACE_LABEL: &str = "workspace";
+
+/// The first prompt the bridge hands the model for `goal` in `ws`.
+fn prompt(h: &Harness, goal: &str, ws: &Path) -> String {
+    h.clear();
+    let r = h
+        .run_in(goal, ws)
+        .unwrap_or_else(|e| panic!("{goal}: refused: {e}"));
+    h.calls()
+        .first()
+        .unwrap_or_else(|| panic!("{goal}: no model call: {r:?}"))
+        .prompt
+        .clone()
+}
 
 fn fill(ws: &Path) {
     std::fs::create_dir_all(ws.join("inbox")).unwrap();
@@ -51,40 +74,38 @@ const GOALS: &[&str] = &[
 ];
 
 #[test]
+#[cfg_attr(not(compose_linked), ignore = "needs librx_compose.a: stub build")]
 fn prompt_carries_the_label_and_never_the_path() {
+    let _home = home_guard::home_slot();
+    let h = Harness::new(silent());
     let (_ka, _kb, a, b) = pair();
     let a = std::fs::canonicalize(&a).unwrap();
     let b = std::fs::canonicalize(&b).unwrap();
     assert_ne!(a, b);
     for goal in GOALS {
-        let (pa, _, _, _) = task_decision_with_inputs(goal, &a).expect("task a");
-        let (pb, _, _, _) = task_decision_with_inputs(goal, &b).expect("task b");
-        assert_eq!(
-            pa.0, pb.0,
-            "prompt differs between workspaces for goal {goal}"
-        );
+        let pa = prompt(&h, goal, &a);
+        let pb = prompt(&h, goal, &b);
+        assert_eq!(pa, pb, "prompt differs between workspaces for goal {goal}");
         assert!(
-            pa.0.starts_with(&format!(
+            pa.starts_with(&format!(
                 "Goal: {goal}\nAuthorized workspace: {WORKSPACE_LABEL}\n"
             )),
-            "label missing in {}",
-            pa.0
+            "label missing in {pa}"
         );
         for p in [&a, &b] {
             let s = p.display().to_string();
-            assert!(
-                !pa.0.contains(&s),
-                "absolute path {s} leaked into the prompt"
-            );
+            assert!(!pa.contains(&s), "absolute path {s} leaked into the prompt");
             // not even the leaf folder name
             let leaf = p.file_name().unwrap().to_str().unwrap();
             assert!(
-                !pa.0.contains(leaf),
+                !pa.contains(leaf),
                 "folder name {leaf} leaked into the prompt"
             );
         }
     }
-    let base = proposal_prompt(GOALS[0]);
+    // The whole prompt of a plain new-document goal (the base template plus
+    // its destination line) carries no path separator at all.
+    let base = prompt(&h, GOALS[0], &a);
     assert!(
         !base.contains('/'),
         "no path separator in the base prompt: {base}"
@@ -95,7 +116,9 @@ fn prompt_carries_the_label_and_never_the_path() {
 /// prompt are equal across the two paths, for every chat template the product
 /// serves.
 #[test]
+#[cfg_attr(not(compose_linked), ignore = "needs librx_compose.a: stub build")]
 fn prompt_token_ids_equal_across_paths() {
+    let _home = home_guard::home_slot();
     let Ok(path) = std::env::var("AIEN_TOKENIZER_PATH") else {
         eprintln!("AIEN_TOKENIZER_PATH not set: token-id check skipped");
         return;
@@ -103,12 +126,13 @@ fn prompt_token_ids_equal_across_paths() {
     use aien_inference_abi::TinyLlamaTokenizer;
     use aien_runtime::control::{format_chat, ChatTurn};
     let tok = TinyLlamaTokenizer::from_file(path).expect("tokenizer");
+    let h = Harness::new(silent());
     let (_ka, _kb, a, b) = pair();
     let a = std::fs::canonicalize(&a).unwrap();
     let b = std::fs::canonicalize(&b).unwrap();
     for goal in GOALS {
-        let (pa, _, _, _) = task_decision_with_inputs(goal, &a).expect("task a");
-        let (pb, _, _, _) = task_decision_with_inputs(goal, &b).expect("task b");
+        let pa = prompt(&h, goal, &a);
+        let pb = prompt(&h, goal, &b);
         let ids = |p: &str| {
             let turn = ChatTurn {
                 role: "user".into(),
@@ -117,8 +141,8 @@ fn prompt_token_ids_equal_across_paths() {
             let text = format_chat(tok.template(), std::slice::from_ref(&turn)).expect("chat");
             tok.encode(&text).expect("encode")
         };
-        let ia = ids(&pa.0);
-        let ib = ids(&pb.0);
+        let ia = ids(&pa);
+        let ib = ids(&pb);
         assert_eq!(ia, ib, "token ids differ between paths for goal {goal}");
         eprintln!(
             "goal {:.40}...: {} prompt tokens, equal on both paths",

@@ -73,8 +73,8 @@ fn proposal_prompt_token_counts() {
     };
     let tok = TinyLlamaTokenizer::from_file(path).expect("tokenizer");
     let goal = "Create the file NOTES.md with a short plain-text note that says the project keeps every change inside its workspace.";
-    let base = aien_runtime::spine::proposal_prompt(goal);
-    let retry = aien_runtime::spine::retry_prompt(
+    let base = aien_runtime::compose::rederive::proposal_prompt(goal);
+    let retry = aien_runtime::compose::rederive::retry_prompt(
         &base,
         "no filename line: the first line must be 'filename: <relative path>'",
     );
@@ -94,9 +94,8 @@ fn proposal_prompt_token_counts() {
 #[test]
 fn assistant_prefix_follows_the_assistant_marker() {
     use aien_inference_abi::ChatTemplate;
-    use aien_runtime::spine::{
-        check_file_proposal, compose_assistant_prefix, COMPOSE_ASSISTANT_PREFIX,
-    };
+    use aien_runtime::check_file_proposal;
+    use aien_runtime::compose::rederive::{compose_assistant_prefix, COMPOSE_ASSISTANT_PREFIX};
     assert_eq!(COMPOSE_ASSISTANT_PREFIX, "filename:");
     // The per-template seam keeps Zephyr and Llama 3 byte-identical to the v5 value.
     assert_eq!(
@@ -188,8 +187,8 @@ fn llama3_model_dir_tokenizer_has_one_bos_and_eos_list() {
         return;
     };
     use aien_inference_abi::{ChatTemplate, ChatTokenizer};
+    use aien_runtime::compose::rederive::COMPOSE_ASSISTANT_PREFIX;
     use aien_runtime::control::format_chat;
-    use aien_runtime::spine::COMPOSE_ASSISTANT_PREFIX;
     let tok = ChatTokenizer::from_model_dir(std::path::Path::new(&dir), None).expect("tokenizer");
     assert_eq!(tok.template(), ChatTemplate::Llama3);
     assert_eq!(tok.stop_token_ids(), &[128001, 128008, 128009]);
@@ -213,8 +212,8 @@ fn llama3_model_dir_tokenizer_has_one_bos_and_eos_list() {
 #[test]
 fn chatml_compose_prefix_follows_the_im_start_assistant_marker() {
     use aien_inference_abi::ChatTemplate;
+    use aien_runtime::compose::rederive::compose_assistant_prefix;
     use aien_runtime::control::format_chat;
-    use aien_runtime::spine::compose_assistant_prefix;
     let chatml = ChatTemplate::ChatMl {
         default_system: Some(
             "You are a helpful AI assistant named SmolLM, trained by Hugging Face".into(),
@@ -250,8 +249,8 @@ fn smollm2_model_dir_tokenizer_matches_the_publisher_template_ids() {
         return;
     };
     use aien_inference_abi::ChatTokenizer;
+    use aien_runtime::compose::rederive::compose_assistant_prefix;
     use aien_runtime::control::format_chat;
-    use aien_runtime::spine::compose_assistant_prefix;
     let tok = ChatTokenizer::from_model_dir(std::path::Path::new(&dir), None).expect("tokenizer");
     assert!(tok.template().name().starts_with("chatml"));
     assert_eq!(

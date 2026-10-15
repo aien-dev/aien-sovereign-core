@@ -13,10 +13,11 @@ use aien_inference_abi::{
 use aien_kv_cache::create_shared_kv_manager;
 use aien_omega_compose::hex;
 use aien_runtime::client::AienRuntimeClient;
+use aien_runtime::compose::{token_ids_sha256, ComposeBridge, ComposeProposer};
 use aien_runtime::control::{ControlCommand, ControlResponse};
 use aien_runtime::generation::ModelIdentity;
 use aien_runtime::server::AienRuntimeServer;
-use aien_runtime::spine::{token_ids_sha256, AienRuntimeSpine, ComposeBridge, ComposeProposer};
+use aien_runtime::spine::AienRuntimeSpine;
 use aien_runtime::{format_chat, ChatTurn};
 use aien_scheduler::SchedulerConfig;
 use serde_json::Value;

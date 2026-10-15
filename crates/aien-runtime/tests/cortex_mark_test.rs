@@ -7,10 +7,10 @@
 #[path = "support/home_guard.rs"]
 mod home_guard;
 
+use aien_runtime::compose::{ComposeBridge, ComposeProposer, Generation};
 use aien_runtime::control::{ComposeNoteReport, ControlResponse};
 use aien_runtime::cortex_mark::{self, Mark};
 use aien_runtime::effects::{self, IntentRequest};
-use aien_runtime::spine::{ComposeBridge, ComposeProposer, Generation};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};

@@ -9,3 +9,17 @@
 mod bridge;
 
 pub use bridge::*;
+
+/// The exact bytes the bridge hands the model and the proposal it makes of a
+/// reply, for offline re-derivation tools that reproduce a recorded run
+/// without a compose home (examples/np1_reference.rs, np1_edit_merge.rs,
+/// qwen3_8b_specverify.rs) and for the prompt-size measurements. They
+/// reproduce; they do not run a task: callers and tests run tasks through
+/// [`ComposeBridge`](crate::compose::ComposeBridge).
+pub mod rederive {
+    pub use super::bridge::{
+        classify_destination, compose_assistant_prefix, corrective_retry_prompt, edit_proposal,
+        new_document_block, proposal_prompt, retry_prompt, task_decision, task_prompt,
+        ProposalKind, TargetClass, TaskPrompt, COMPOSE_ASSISTANT_PREFIX,
+    };
+}

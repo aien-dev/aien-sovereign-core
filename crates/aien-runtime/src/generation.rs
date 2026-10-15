@@ -146,8 +146,8 @@ pub fn build_record(id: &ModelIdentity, t: &TurnEvidence, start: DaemonStart) ->
         "model_path": id.model_path,
         "tokenizer_sha256": id.tokenizer_sha256,
         "tokenizer_path": id.tokenizer_path,
-        "prompt_ids_sha256": crate::spine::token_ids_sha256(t.prompt_ids),
-        "output_token_ids_sha256": crate::spine::token_ids_sha256(t.output_ids),
+        "prompt_ids_sha256": crate::compose::token_ids_sha256(t.prompt_ids),
+        "output_token_ids_sha256": crate::compose::token_ids_sha256(t.output_ids),
         "output_text_sha256": hex_sha256(t.text.as_bytes()),
         "total_tokens": t.total_tokens,
         "output_tokens": t.output_ids.len(),
@@ -168,7 +168,7 @@ pub fn build_record(id: &ModelIdentity, t: &TurnEvidence, start: DaemonStart) ->
 /// cannot add one. The marker field plays the role of a kind: `ComposeNote`
 /// refuses it and no ledger reader acts on it.
 /// Append `record` to the ledger; the id is returned only once it is written.
-pub(crate) fn write(home: &mut crate::spine::ComposeHome, record: &Value) -> Result<u64, String> {
+pub(crate) fn write(home: &mut crate::compose::ComposeHome, record: &Value) -> Result<u64, String> {
     crate::effects::append(home, aien_omega_compose::NoteKind::Effect, &[], record).map(|n| n.id)
 }
 
@@ -377,7 +377,7 @@ pub fn build_compose_record(id: &ModelIdentity, e: &ComposeEvidence, start: Daem
         "tokenizer_sha256": id.tokenizer_sha256,
         "tokenizer_path": id.tokenizer_path,
         "prompt_ids_sha256": e.prompt_ids_sha256,
-        "output_token_ids_sha256": crate::spine::token_ids_sha256(e.output_ids),
+        "output_token_ids_sha256": crate::compose::token_ids_sha256(e.output_ids),
         "output_text_sha256": hex_sha256(e.text.as_bytes()),
         "total_tokens": e.prompt_tokens + e.output_ids.len(),
         "output_tokens": e.output_ids.len(),

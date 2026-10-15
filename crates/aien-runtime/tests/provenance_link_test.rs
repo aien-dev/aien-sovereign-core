@@ -27,12 +27,11 @@ use aien_kv_cache::create_shared_kv_manager;
 use aien_omega_compose::{hex, Compose, RootKind};
 use aien_runtime::approved_auth::{desk_key_path, AuthorizeBinding, DeskKey};
 use aien_runtime::client::AienRuntimeClient;
+use aien_runtime::compose::{token_ids_sha256, ComposeBridge, ComposeProposer, Generation};
 use aien_runtime::control::{ControlCommand, ControlResponse, DeskProof};
 use aien_runtime::generation::ModelIdentity;
 use aien_runtime::server::AienRuntimeServer;
-use aien_runtime::spine::{
-    token_ids_sha256, AienRuntimeSpine, ComposeBridge, ComposeProposer, Generation,
-};
+use aien_runtime::spine::AienRuntimeSpine;
 use aien_scheduler::SchedulerConfig;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
