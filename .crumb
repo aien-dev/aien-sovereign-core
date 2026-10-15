@@ -78,31 +78,31 @@
         },
         {
           "digest": "a465a3baa617027d8691348299a41c84173db5c04339c611a861275e78fa926f",
-          "last_commit": "ab8127cb",
+          "last_commit": "e10a8b51",
           "name": "crates/aien-cli",
           "purpose": ""
         },
         {
           "digest": "993b935d7caf400fb82e46e89f0f5c931899405c9326c49cba08467d4ea058b7",
-          "last_commit": "42c5bd13",
+          "last_commit": "fa73e778",
           "name": "crates/aien-scheduler/src/bin",
           "purpose": ""
         },
         {
           "digest": "4373c3bab53d983d82429e6eabe0ac65d2376e4a82f0263a562c31983bb040e9",
-          "last_commit": "ab8127cb",
+          "last_commit": "e10a8b51",
           "name": "crates/spark-cockpit-rs",
           "purpose": ""
         },
         {
           "digest": "ca98a0cff790e51cc31788aa9a356253efe93852100dcce34cbeec948d43bed7",
-          "last_commit": "ab8127cb",
+          "last_commit": "e10a8b51",
           "name": "scripts",
           "purpose": ""
         },
         {
           "digest": "75e439cb2ae120e1807af894b70b6454971028f5527f56451f9d6558f503c88b",
-          "last_commit": "42c5bd13",
+          "last_commit": "fa73e778",
           "name": "skills",
           "purpose": ""
         },
@@ -114,14 +114,14 @@
         }
       ],
       "children_root": "sha256:3a2fabbf448b7018c54cda8c01bda20cf256884eb148feab6ade4668ada0984f",
-      "compiled_at": "2026-10-15T11:34:37Z",
+      "compiled_at": "2026-10-15T12:07:08Z",
       "compiler": "crumb-compile/1",
-      "digest": "sha256:be819e4da85e854c03a64a62c121c201331fdb791eac10dd26e9c0a522f0469a",
+      "digest": "sha256:c10b69fec6458bfed42049b81ae9772d4623da3d9049cb9878a2e59ce3d15e89",
       "evidence_files": 1255,
       "evidence_root": "sha256:995e9681e2e22bc07cb762dbd4189e6229f19592a13f4b917019f706bb0f35b4",
-      "files": 5206,
-      "generated_at_commit": "ab8127cb23bc7e9daf8feb4abee14cb4b34f1423",
-      "source_tree": "sha256:08644dc452a5289439325a589060fb9e2e3c2acc3930c85df24f28062868aef4"
+      "files": 5207,
+      "generated_at_commit": "9445bcdd612a28b3cffa2351ed511fe3a2bf70f1",
+      "source_tree": "sha256:749befca69845c4b7d54446006ee6b6d633b45e7ef889cf3b20f0432d50c3719"
     }
   },
   "history": [],
