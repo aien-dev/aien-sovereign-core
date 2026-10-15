@@ -539,7 +539,19 @@ mod sampling_gate {
             "{rec}"
         );
         assert!(rec["mutant"].is_null());
+        // Confidence: p_repeat = exp(reply_logprob), a probability in (0, 1].
+        let (p, lp) = (
+            rec["p_repeat"].as_f64().expect("p_repeat"),
+            rec["reply_logprob"].as_f64().expect("reply_logprob"),
+        );
+        assert!(p > 0.0 && p <= 1.0 && (p - lp.exp()).abs() < 1e-9, "{rec}");
+        let tp = rec["top_prob_min"].as_f64().expect("top_prob_min");
+        assert!(
+            tp > 0.0 && tp <= rec["top_prob_mean"].as_f64().unwrap(),
+            "{rec}"
+        );
         let (_, rec) = ask(srv.addr, &body(PROMPTS[0], 0.0, 1.0, 0, Some(1)));
+        assert_eq!(rec["p_repeat"], 1.0, "{rec}");
         assert_eq!(rec["mode"], "greedy", "{rec}");
         assert_eq!(
             (

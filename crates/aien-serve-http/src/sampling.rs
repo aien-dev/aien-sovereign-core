@@ -107,9 +107,11 @@ pub struct SamplingRecord {
     pub top_k: usize,
     /// Whether the top-k mask ran (`0 < top_k < vocab` and not greedy).
     pub top_k_applied: bool,
-    /// Tokens picked by argmax.
+    /// Draws decided by argmax. Every draw counts, including the one that picked a
+    /// stop token, so `greedy_tokens + sampled_tokens` can be one more than the reply's
+    /// `completion_tokens`.
     pub greedy_tokens: usize,
-    /// Tokens drawn at random.
+    /// Draws made at random (same counting as `greedy_tokens`).
     pub sampled_tokens: usize,
     /// Kept-set size of every sampled draw, in step order (empty when greedy).
     pub kept: Vec<usize>,
@@ -121,6 +123,18 @@ pub struct SamplingRecord {
     pub kept_mean: f64,
     /// Sampled draws whose kept set was a single token (the seed had no choice).
     pub kept_single: usize,
+    /// Smallest and mean probability of the most likely token at a sampled draw (after
+    /// temperature, before the nucleus cut); 1.0 when nothing was sampled. Shows confidence
+    /// where the kept set cannot (at top_p 1.0 every token is kept).
+    pub top_prob_min: f64,
+    pub top_prob_mean: f64,
+    /// Natural-log probability of this exact sequence of sampled draws under the kept
+    /// distributions (the sum of each chosen token's log-probability); 0 when nothing was sampled.
+    pub reply_logprob: f64,
+    /// `exp(reply_logprob)`: the chance that an honest sampler with another seed repeats these
+    /// draws exactly. Identical replies across seeds are expected when this is large and are a
+    /// sign of an ignored seed when it is small.
+    pub p_repeat: f64,
     /// The sampling mutant in force, if any (debug builds only).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mutant: Option<&'static str>,
@@ -130,7 +144,7 @@ impl SamplingRecord {
     /// One-line form for the server log.
     pub fn log_fields(&self) -> String {
         let mut s = format!(
-            "sampling mode={} seed={} temp={} top_p={} top_k={} greedy={} sampled={} kept={}/{}/{:.2}/{} kept1={}/{}",
+            "sampling mode={} seed={} temp={} top_p={} top_k={} greedy={} sampled={} kept(min/med/mean/max)={}/{}/{:.2}/{} kept1={}/{} top_prob(min/mean)={:.4}/{:.4} p_repeat={:.3e}",
             self.mode,
             self.seed,
             self.temperature,
@@ -143,7 +157,10 @@ impl SamplingRecord {
             self.kept_mean,
             self.kept_max,
             self.kept_single,
-            self.sampled_tokens
+            self.sampled_tokens,
+            self.top_prob_min,
+            self.top_prob_mean,
+            self.p_repeat
         );
         if let Some(m) = self.mutant {
             s.push_str(&format!(" MUTANT={m}"));
@@ -160,6 +177,9 @@ pub struct SamplingObserver {
     top_k_applied: bool,
     greedy: usize,
     kept: Vec<usize>,
+    top_prob_min: f64,
+    top_prob_sum: f64,
+    logprob_sum: f64,
     obs: DecodeObservation,
 }
 
@@ -177,6 +197,9 @@ impl SamplingObserver {
             top_k_applied: false,
             greedy: 0,
             kept: Vec::new(),
+            top_prob_min: 1.0,
+            top_prob_sum: 0.0,
+            logprob_sum: 0.0,
             obs: DecodeObservation::default(),
         }
     }
@@ -215,9 +238,12 @@ impl SamplingObserver {
             stop_token_ids: Vec::new(),
         };
         let seed = decode_sampling_seed(self.seed(), step);
-        let (token, _, trace) = sample_with_params_traced(logits, &sp, seed, &mut self.obs);
+        let (token, logprob, trace) = sample_with_params_traced(logits, &sp, seed, &mut self.obs);
         if temperature > 0.001 {
             self.kept.push(trace.kept);
+            self.top_prob_min = self.top_prob_min.min(trace.top_prob);
+            self.top_prob_sum += trace.top_prob;
+            self.logprob_sum += f64::from(logprob);
         } else {
             self.greedy += 1;
         }
@@ -257,6 +283,14 @@ impl SamplingObserver {
             kept_max: max,
             kept_mean: mean,
             kept_single: sorted.iter().take_while(|&&k| k == 1).count(),
+            top_prob_min: self.top_prob_min,
+            top_prob_mean: if n == 0 {
+                1.0
+            } else {
+                self.top_prob_sum / n as f64
+            },
+            reply_logprob: self.logprob_sum,
+            p_repeat: self.logprob_sum.exp(),
             kept: self.kept.clone(),
             mutant: self.mutant.map(SamplingMutant::name),
         }
@@ -376,8 +410,15 @@ mod tests {
         );
         assert!((r.kept_mean - 3.0).abs() < 1e-12);
         assert_eq!((r.greedy_tokens, r.sampled_tokens), (0, 3));
+        // Two flat draws of 4: the chance of repeating them is (1/4)^2.
+        assert!((r.p_repeat - 1.0 / 16.0).abs() < 1e-6, "{r:?}");
+        assert!((r.reply_logprob - 2.0 * 0.25f64.ln()).abs() < 1e-5);
+        assert!((r.top_prob_min - 0.25).abs() < 1e-12);
+        assert!((r.top_prob_mean - 0.5).abs() < 1e-3, "{r:?}");
         assert!(
-            r.log_fields().contains("kept=1/4/3.00/4 kept1=1/3"),
+            r.log_fields().contains(
+                "kept(min/med/mean/max)=1/4/3.00/4 kept1=1/3 top_prob(min/mean)=0.2500/0.5000 p_repeat=6.250e-2"
+            ),
             "{}",
             r.log_fields()
         );
@@ -390,6 +431,10 @@ mod tests {
             ("greedy", 1, 0)
         );
         assert!(!r.top_k_applied && r.kept.is_empty());
+        assert_eq!(
+            (r.p_repeat, r.top_prob_min, r.top_prob_mean),
+            (1.0, 1.0, 1.0)
+        );
 
         let mut m = SamplingObserver::with_mutant(&params, Some(SamplingMutant::IgnoreSeed));
         m.sample(&[0.0; 4], 0);
