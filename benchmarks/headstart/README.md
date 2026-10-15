@@ -1,0 +1,189 @@
+# Headstart M0: stable Rust build baselines
+
+Tracking issue: #532. This directory holds the instructions and the record
+schema for the stable-toolchain build baselines that later Headstart work
+(#536) compares against. It is measurement only: the runner never edits
+`Cargo.toml`, `rust-toolchain.toml`, CI, compiler flags or the caller's
+checkout.
+
+| Path | What it is |
+| --- | --- |
+| `scripts/bench/headstart-aien.sh` | the runner (bash) |
+| `scripts/bench/headstart-summarize.sh` | summarizer and Cargo timings extractor (bash + jq) |
+| `scripts/bench/headstart-selftest.sh` | self-test on a throwaway fixture workspace, with negative cases |
+| `benchmarks/headstart/schema.json` | JSON Schema for `manifest.json` and each `samples.jsonl` line |
+| `benchmarks/data/headstart/baseline-<date>-<short>/` | one run: raw samples, manifest, summary, timings extract, log tails |
+
+No Python is used anywhere. Requirements: bash, git, jq, awk, sed, pgrep,
+cargo through rustup, and GNU `/usr/bin/time` for max RSS and CPU% (when it
+is missing the samples record `time_v.available: false` instead of numbers).
+
+## How a run works
+
+1. `setup`: `git worktree add --detach $HS_WORK/src <commit>` outside the
+   caller checkout (refused when `HS_WORK` is inside it), its own
+   `CARGO_TARGET_DIR=$HS_WORK/target`, then `cargo fetch --locked` once so the
+   cargo registry and git caches are warm. Writes `manifest.json` (commit,
+   `rustc -vV`, `cargo -V`, arch, nproc, CPU models, MemTotal/MemAvailable,
+   features, profiles, target dir, jobs, build env, date).
+2. `timings`: one cold `cargo build --workspace --timings`. The `UNIT_DATA`
+   block of `cargo-timing.html` is cut out with sed and validated with jq
+   (`timings/units.json`), the observed critical path and the upper-bound
+   estimate are computed into `timings/critical-path.json`, the package graph
+   from `cargo metadata --filter-platform <host> --locked --offline` goes to
+   `timings/graph.json`, the realistic estimate (list-schedule replay) goes
+   to `timings/replay.json`, and the report is kept gzipped.
+3. `cold`: interleaved rounds. Each round runs, in order: cold check (arm A or
+   B), cold build workspace, cold build `spark-harness`, cold test
+   `--no-run`, cold check (the other arm), cold build `spark-supervisor`, cold
+   build `aien-runtime`. The A/B arm order swaps every round; the two arms of
+   the same command are the A/A noise estimate. "Cold" means the target dir
+   is deleted before every attempt while the registry stays warm. If a cold
+   workspace sample in round 1 exceeds 1200 s the run drops to 3 rounds and
+   says so in `manifest.protocol.samples_reduced`.
+4. `incr`: prime `cargo check --workspace --all-targets`, three no-op checks,
+   then for each series a 10-step body-only edit and a 10-step
+   interface-changing edit (each step reverts the previous edit first, so
+   every step is a fresh one-edit change). After every series the edit is
+   reverted, `git diff --quiet` is verified (abort when not clean) and an
+   untimed-for-stats `incr_settle` check brings the target dir back to the
+   pristine source. Two series per kind run as body, iface, body, iface.
+5. `cleanup`: deletes the target dir, the raw logs and the worktree.
+
+Before every sample the runner first waits while the host's shared quiet
+flag is held by another job (`quietlock check`, tool name `HS_QUIETLOCK_BIN`;
+disable with `HS_QUIETLOCK=0`). The wait is capped at `HS_QUIET_WAIT_CAP_S`
+(default 3600 s) so a stale flag cannot hang the run; on the cap the runner
+logs a line and proceeds. Each sample records `quiet_flag_checked`,
+`quiet_flag_wait_s` and `quiet_flag_wait_capped`. The manifest's
+`protocol.quiet_flag` records `enabled`, `tool`, `available` (the tool was
+found), `respected` (enabled and available) and `wait_cap_s`, so a host
+without the tool reads `respected: false`. Then the runner waits until the
+1-minute load average is below `HS_LOAD_MAX` (cap `HS_WAIT_CAP_S`), records
+load before and after, and lists foreign compiler processes at the start,
+every `HS_MON_INTERVAL_S` seconds (default 3) while the command runs, and once
+more right after it ends (`foreign.at_end`). A foreign process is a `cargo`
+process, or a `rustc` / `clippy-driver` / `rustdoc` process with
+`--crate-name` (an actual compile), that is not in the runner's process tree.
+
+A sample is `contaminated: true` when `contamination_reasons` is non-empty:
+`foreign_at_start`, `foreign_during`, `foreign_at_end`, `load_wait_capped`
+(the load never dropped below the limit within the cap) or
+`quiet_flag_wait_capped`. Contaminated samples are re-run up to
+`HS_MAX_RERUNS` times; earlier attempts stay in `samples.jsonl` with
+`final: false`.
+
+Every command's exit status is recorded. A failed build is a failure
+(`ok: false`, with the last 80 log lines kept); it is never counted in a
+median and never replaced by a smaller workload.
+
+## Running it
+
+From the repository root, with the stable toolchain pinned by
+`rust-toolchain.toml`:
+
+```bash
+bash scripts/bench/headstart-selftest.sh            # about a minute, must print 0 failed
+HS_COMMIT=<sha> \
+HS_BODY_FILE=<repo-relative .rs file> HS_BODY_ANCHOR='<exact fn opening line>' \
+HS_IFACE_FILE=<repo-relative lib.rs> HS_EDIT_REASON='<why these targets>' \
+bash scripts/bench/headstart-aien.sh                # setup timings cold incr cleanup
+```
+
+Stages can be run separately (`setup timings`, then `cold incr cleanup`)
+against the same `HS_WORK` and `HS_OUT`, which is how the edit targets were
+chosen from the measured critical path before the incremental stage. The
+other knobs are listed at the top of the runner.
+
+## Known quirks of the committed run (baseline-20261015-4c83e38)
+
+That run used the earlier runner (commit afa4316). Its data is kept as
+recorded; what it can and cannot show:
+
+- Foreign compiles were checked at sample start and then every 30 s
+  (`protocol.foreign_monitor_interval_s: 30`), with no end-of-sample check.
+  74 of the 84 counted samples finished before the first tick
+  (`foreign.monitor_ticks: 0`), so for them only the start was checked. The
+  data supports "no foreign compile at sample start, nor at any 30 s tick
+  that occurred", not "none during the sample".
+- `load_wait_capped` did not mark a sample contaminated then. Three attempts
+  hit the cap; all three were also contaminated by a foreign process and
+  re-run, so no counted sample has `load_wait_capped: true`. The highest
+  `loadavg_before` (1-minute) of a counted sample is 1.99.
+- The quiet-flag wait was uncapped and the manifest has only `respected:
+  true`; there is no `available` field. The tool was present on that host:
+  one sample waited 20 s for the flag (`quiet_flag_wait_s`), which only a
+  working `quietlock check` can produce.
+- The timings stage ran before the quiet-flag check was added, so its three
+  samples have no `quiet_flag_wait_s`.
+- `timings/graph.json` and `timings/replay.json` were derived after the run,
+  from `cargo metadata --filter-platform aarch64-unknown-linux-gnu --locked
+  --offline` in a checkout whose `Cargo.lock`, `Cargo.toml` files and crate
+  sources are identical to 4c83e38, and from the committed `units.json`. No
+  build was re-run. `critical-path.json` was regenerated from the same
+  `units.json` by the current summarizer; only its `estimate` block changed.
+- In that run both settle checks of a series shared one `sample_id` (step 0),
+  so the first settle log tail of each series was overwritten (85 tail files
+  for 87 lines). Settle samples are not measurements. The runner now numbers
+  them step 1 (after body) and 2 (after iface), and the self-test checks that
+  sample ids are unique.
+- Log tails are named `*.tail.log`, which the root `.gitignore` ignores; they
+  were committed with `git add -f`.
+
+## Reproducing the summary
+
+`summary.json` is a pure function of `samples.jsonl`:
+
+```bash
+D=benchmarks/data/headstart/baseline-<date>-<short>
+bash scripts/bench/headstart-summarize.sh samples $D/samples.jsonl | cmp - $D/summary.json && echo identical
+```
+
+Per scenario and arm it reports `wall_s` (counted samples: final attempt and
+exit 0) and `wall_s_clean` (counted and not contaminated), each with n,
+median, min, max, MAD (median absolute deviation) and sample stdev, plus
+failures with exit status, superseded attempts, median max RSS and median
+CPU%. `aa_noise` gives the A/A median difference in seconds and percent.
+
+Max RSS comes from `/usr/bin/time -v`, which reports `ru_maxrss` of the
+waited process tree: per getrusage(2) that is the largest single process, not
+the sum over parallel rustc jobs.
+
+## Critical path and the estimate
+
+`critical-path.json` walks back from the last unit to finish along the edge
+that unblocked each unit: cargo records, per unit, which units became
+runnable when it finished (`unblocked_units`) or when its metadata was ready
+(`unblocked_rmeta_units`), and `sections[frontend].end` marks when the
+metadata was ready. That chain is the observed critical path of that one
+build (scheduling delays included).
+
+Two estimates, both labeled ESTIMATE and both covering the cold
+`cargo build --workspace` only, of what a metadata-pipelining compiler change
+(removing the wait for a dependency's metadata) could save on that build:
+
+- upper bound (`critical-path.json`, `estimate`) = min(sum of predecessor
+  frontend time on rmeta-gated links of the chain, build end minus floor),
+  where floor = max(longest single unit, sum of unit durations / jobs).
+  Full-gated links (build scripts, proc macros, linked binaries) need
+  finished artifacts and are not shortened. This ignores that the critical
+  path may move to another chain.
+- realistic estimate (`replay.json`) = a list-schedule replay of the
+  measured unit durations at the build's job count (nproc), with unit edges
+  rebuilt from the package graph (`graph.json`). Stable cargo has no unit
+  graph (`--unit-graph` is unstable), so the edges follow cargo's rules: a
+  build-script compile needs its build-deps' libs; a build-script run needs
+  its own compile and the build-script run of any normal dependency that
+  declares `links`; a lib needs its own build-script run and its normal
+  dependencies' metadata (full artifact for proc macros); a bin needs its
+  own lib and its normal dependencies in full. Units start in observed start
+  order whenever a job slot is free. `baseline` treats a metadata edge as
+  ready at the dependency's frontend end; `no_rmeta_wait` treats it as ready
+  when the dependency starts. The saving is `baseline - no_rmeta_wait`, both
+  from the same model, and `model_error_pct` compares `baseline` with the
+  observed build end. Feature variants of one package are grouped
+  conservatively (every variant waits for every variant of its dependency).
+
+For the committed run: observed build 31.50 s, replay baseline 31.35 s
+(model error -0.48%), no-metadata-wait 26.79 s, realistic saving 4.56 s
+(14.5%); upper bound 4.94 s (15.7%).

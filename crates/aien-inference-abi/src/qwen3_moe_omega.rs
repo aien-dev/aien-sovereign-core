@@ -2495,14 +2495,96 @@ use crate::tensor::{apply_rope, rmsnorm, scaled_dot_product_attention_single};
 use crate::transformer_backend::{decode_sampling_seed, sample_with_params};
 use aien_abi_core::SamplingParams;
 
-/// The KV cache of one sequence plus the attention over it. Omega's paged bf16 pool in
-/// production; a host f32 cache in tests.
-pub trait KvAttention: Send {
+/// Model-independent KV shape (ADR 0004 section 2.1). Produced by a model config, consumed by
+/// every cache constructor and by persistence. bf16 elements, `HostPagedPoolV1` payload (ADR 0003).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct KvGeometry {
+    pub layers: usize,
+    /// Attend output width; the fused kernel's `fits` check.
+    pub q_heads: usize,
+    pub kv_heads: usize,
+    pub head_dim: usize,
+    /// The fused cache applies RoPE on the chip.
+    pub rope_theta: f32,
+    /// [`KV_BLOCK_SIZE`].
+    pub block_size: usize,
+}
+
+impl KvGeometry {
+    /// The byte geometry of one `HostPagedPoolV1` block of this shape.
+    pub fn pool_block(&self) -> kvio::PoolBlockGeometry {
+        kvio::PoolBlockGeometry::for_geometry(self)
+    }
+}
+
+impl From<&Qwen3MoeConfig> for KvGeometry {
+    fn from(c: &Qwen3MoeConfig) -> Self {
+        Self {
+            layers: c.layers,
+            q_heads: c.q_heads,
+            kv_heads: c.kv_heads,
+            head_dim: c.head_dim,
+            rope_theta: c.rope_theta,
+            block_size: KV_BLOCK_SIZE,
+        }
+    }
+}
+
+/// The pool caches index blocks by [`KV_BLOCK_SIZE`]; a geometry with another size is refused.
+fn check_block_size(who: &str, g: &KvGeometry) -> Result<(), String> {
+    if g.block_size != KV_BLOCK_SIZE {
+        return Err(format!(
+            "{who}: block size {} is not this cache's layout ({KV_BLOCK_SIZE})",
+            g.block_size
+        ));
+    }
+    Ok(())
+}
+
+/// The model-independent half of a KV cache (ADR 0004 section 2.1): what the generation
+/// controller may see. Split out of [`KvAttention`] as its supertrait.
+pub trait KvStore: Send {
+    /// The shape this cache was built for.
+    fn geometry(&self) -> KvGeometry;
     /// Tokens the cache can hold.
     fn capacity(&self) -> usize;
-    fn reset(&mut self);
-    /// Drops every position at or past `len` (the next append is at `len`). Prefix reuse.
+    /// Positions held in every layer (the smallest per-layer filled count).
+    fn len(&self) -> usize;
+    /// Whether no layer holds any position.
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+    /// "split" (host norm/rope, `append` + `attend`), "host-pool" (the host bf16 pool) or "fused"
+    /// (one launch per layer).
+    fn path_name(&self) -> &'static str {
+        "split"
+    }
+    /// Drops every position at or past `len` (the next append is at `len`). Prefix reuse;
+    /// `truncate(0)` empties the cache (what `reset` did, for all four caches).
     fn truncate(&mut self, len: usize);
+    /// Persistent KV park (sc#505): the K/V of positions `start..start + len` as the
+    /// `HostPagedPoolV1` payload of [`kvio`] (`start` a multiple of [`KV_BLOCK_SIZE`]; every
+    /// layer must hold those positions). `None`: this cache cannot export, nothing is parked.
+    fn export_blocks(&mut self, _start: usize, _len: usize) -> Option<Result<Vec<u8>, String>> {
+        None
+    }
+    /// Persistent KV restore (sc#505): writes a [`kvio`] payload for positions `start..start +
+    /// len`; every layer must hold exactly `0..start` before the call and holds `0..start + len`
+    /// after it. `None`: this cache cannot import, the caller prefills instead. On `Err` the
+    /// cache may hold part of the payload: the caller must reset it.
+    fn import_blocks(
+        &mut self,
+        _start: usize,
+        _len: usize,
+        _bytes: &[u8],
+    ) -> Option<Result<(), String>> {
+        None
+    }
+}
+
+/// The KV cache of one sequence plus the attention over it. Omega's paged bf16 pool in
+/// production; a host f32 cache in tests. Model-private: the controller sees only [`KvStore`].
+pub trait KvAttention: KvStore {
     /// Stores the roped key and the value of position `pos` for `layer`.
     fn append(&mut self, layer: usize, pos: usize, k: &[f32], v: &[f32]) -> Result<(), String>;
     /// `out[q_heads x head_dim]` = attention of the (unscaled) query over positions `0..context_len`.
@@ -2529,10 +2611,6 @@ pub trait KvAttention: Send {
     ) -> Option<Result<u64, String>> {
         None
     }
-    /// "split" (host norm/rope, `append` + `attend`) or "fused" (one launch per layer).
-    fn path_name(&self) -> &'static str {
-        "split"
-    }
     /// omega's fused cache behind this attention, if any (the whole-prompt prefill drives it).
     fn fused_kv(&mut self) -> Option<&mut crate::qwen3_moe_omega_dattn::OmegaFusedKv> {
         None
@@ -2545,24 +2623,6 @@ pub trait KvAttention: Send {
     }
     /// The graph wrote position `pos` of every layer.
     fn dgraph_commit(&mut self, _pos: usize) {}
-    /// Persistent KV park (sc#505): the K/V of positions `start..start + len` as the
-    /// `HostPagedPoolV1` payload of [`kvio`] (`start` a multiple of [`KV_BLOCK_SIZE`]; every
-    /// layer must hold those positions). `None`: this cache cannot export, nothing is parked.
-    fn export_blocks(&mut self, _start: usize, _len: usize) -> Option<Result<Vec<u8>, String>> {
-        None
-    }
-    /// Persistent KV restore (sc#505): writes a [`kvio`] payload for positions `start..start +
-    /// len`; every layer must hold exactly `0..start` before the call and holds `0..start + len`
-    /// after it. `None`: this cache cannot import, the caller prefills instead. On `Err` the
-    /// cache may hold part of the payload: the caller must reset it.
-    fn import_blocks(
-        &mut self,
-        _start: usize,
-        _len: usize,
-        _bytes: &[u8],
-    ) -> Option<Result<(), String>> {
-        None
-    }
 }
 
 /// Positions `start..start + len` of a bf16 `aien_kv_cache` pool (blocks `0..n` in order, block
@@ -2670,35 +2730,38 @@ fn pool_import(
 pub struct HostPoolKv {
     pool: aien_kv_cache::UnifiedKvTensorPool,
     capacity: usize,
-    q_heads: usize,
-    kv_heads: usize,
-    head_dim: usize,
+    geometry: KvGeometry,
     filled: Vec<usize>,
 }
 
 impl HostPoolKv {
-    pub fn new(config: &Qwen3MoeConfig, max_context: usize) -> Result<Self, String> {
+    pub fn new(geometry: &KvGeometry, max_context: usize) -> Result<Self, String> {
+        check_block_size("host pool kv", geometry)?;
         let num_blocks = max_context.div_ceil(KV_BLOCK_SIZE).max(1);
         let cfg = aien_kv_cache::KvPoolConfig::for_model(
             num_blocks,
             KV_BLOCK_SIZE,
-            config.layers,
-            config.kv_heads,
-            config.head_dim,
+            geometry.layers,
+            geometry.kv_heads,
+            geometry.head_dim,
             aien_kv_cache::KvDType::Bf16,
         );
         Ok(Self {
             pool: aien_kv_cache::UnifiedKvTensorPool::allocate(cfg)?,
             capacity: num_blocks * KV_BLOCK_SIZE,
-            q_heads: config.q_heads,
-            kv_heads: config.kv_heads,
-            head_dim: config.head_dim,
-            filled: vec![0; config.layers],
+            geometry: *geometry,
+            filled: vec![0; geometry.layers],
         })
     }
 
+    /// Positions held in `layer` alone (ADR 0004 test R1 checks every layer against the ledger;
+    /// [`KvStore::len`] is only the smallest of them).
+    pub fn layer_len(&self, layer: usize) -> usize {
+        self.filled[layer]
+    }
+
     fn row(&self, layer: usize, pos: usize, value: bool) -> Vec<f32> {
-        let kv_dim = self.kv_heads * self.head_dim;
+        let kv_dim = self.geometry.kv_heads * self.geometry.head_dim;
         let off = self
             .pool
             .element_offset(pos / KV_BLOCK_SIZE, layer, value, pos % KV_BLOCK_SIZE);
@@ -2710,18 +2773,44 @@ impl HostPoolKv {
     }
 }
 
-impl KvAttention for HostPoolKv {
+impl KvStore for HostPoolKv {
+    fn geometry(&self) -> KvGeometry {
+        self.geometry
+    }
     fn capacity(&self) -> usize {
         self.capacity
     }
-    fn reset(&mut self) {
-        self.filled.iter_mut().for_each(|f| *f = 0);
+    fn len(&self) -> usize {
+        self.filled.iter().copied().min().unwrap_or(0)
+    }
+    fn path_name(&self) -> &'static str {
+        "host-pool"
     }
     fn truncate(&mut self, len: usize) {
         for f in self.filled.iter_mut() {
             *f = (*f).min(len);
         }
     }
+    fn export_blocks(&mut self, start: usize, len: usize) -> Option<Result<Vec<u8>, String>> {
+        Some(pool_export(&self.pool, &self.filled, start, len))
+    }
+    fn import_blocks(
+        &mut self,
+        start: usize,
+        len: usize,
+        bytes: &[u8],
+    ) -> Option<Result<(), String>> {
+        Some(pool_import(
+            &mut self.pool,
+            &mut self.filled,
+            start,
+            len,
+            bytes,
+        ))
+    }
+}
+
+impl KvAttention for HostPoolKv {
     fn append(&mut self, layer: usize, pos: usize, k: &[f32], v: &[f32]) -> Result<(), String> {
         if pos != self.filled[layer] || pos >= self.capacity {
             return Err(format!(
@@ -2755,9 +2844,9 @@ impl KvAttention for HostPoolKv {
             q,
             &keys,
             &values,
-            self.q_heads,
-            self.kv_heads,
-            self.head_dim,
+            self.geometry.q_heads,
+            self.geometry.kv_heads,
+            self.geometry.head_dim,
             out,
         );
         Ok(0)
@@ -2765,60 +2854,36 @@ impl KvAttention for HostPoolKv {
     fn resident(&self) -> bool {
         false
     }
-    fn path_name(&self) -> &'static str {
-        "host-pool"
-    }
-    fn export_blocks(&mut self, start: usize, len: usize) -> Option<Result<Vec<u8>, String>> {
-        Some(pool_export(&self.pool, &self.filled, start, len))
-    }
-    fn import_blocks(
-        &mut self,
-        start: usize,
-        len: usize,
-        bytes: &[u8],
-    ) -> Option<Result<(), String>> {
-        Some(pool_import(
-            &mut self.pool,
-            &mut self.filled,
-            start,
-            len,
-            bytes,
-        ))
-    }
 }
 
 /// Host f32 cache with the reference attention (tests, and the oracle side of parity runs).
 pub struct HostKv {
-    q_heads: usize,
-    kv_heads: usize,
-    head_dim: usize,
+    geometry: KvGeometry,
     capacity: usize,
     keys: Vec<Vec<Vec<f32>>>,
     values: Vec<Vec<Vec<f32>>>,
 }
 
 impl HostKv {
-    pub fn new(config: &Qwen3MoeConfig, capacity: usize) -> Self {
+    pub fn new(geometry: &KvGeometry, capacity: usize) -> Self {
         Self {
-            q_heads: config.q_heads,
-            kv_heads: config.kv_heads,
-            head_dim: config.head_dim,
+            geometry: *geometry,
             capacity,
-            keys: vec![Vec::new(); config.layers],
-            values: vec![Vec::new(); config.layers],
+            keys: vec![Vec::new(); geometry.layers],
+            values: vec![Vec::new(); geometry.layers],
         }
     }
 }
 
-impl KvAttention for HostKv {
+impl KvStore for HostKv {
+    fn geometry(&self) -> KvGeometry {
+        self.geometry
+    }
     fn capacity(&self) -> usize {
         self.capacity
     }
-    fn reset(&mut self) {
-        for (k, v) in self.keys.iter_mut().zip(self.values.iter_mut()) {
-            k.clear();
-            v.clear();
-        }
+    fn len(&self) -> usize {
+        self.keys.iter().map(Vec::len).min().unwrap_or(0)
     }
     fn truncate(&mut self, len: usize) {
         for (k, v) in self.keys.iter_mut().zip(self.values.iter_mut()) {
@@ -2826,6 +2891,9 @@ impl KvAttention for HostKv {
             v.truncate(len);
         }
     }
+}
+
+impl KvAttention for HostKv {
     fn append(&mut self, layer: usize, pos: usize, k: &[f32], v: &[f32]) -> Result<(), String> {
         if pos != self.keys[layer].len() || pos >= self.capacity {
             return Err(format!(
@@ -2849,9 +2917,9 @@ impl KvAttention for HostKv {
             q,
             &self.keys[layer][..context_len],
             &self.values[layer][..context_len],
-            self.q_heads,
-            self.kv_heads,
-            self.head_dim,
+            self.geometry.q_heads,
+            self.geometry.kv_heads,
+            self.geometry.head_dim,
             out,
         );
         Ok(0)
@@ -2879,22 +2947,21 @@ pub struct OmegaPagedKv {
     layout: aien_omega_gpu::OmegaGpuKvLayout,
     block_ids: Vec<u32>,
     capacity: usize,
-    q_heads: usize,
-    kv_heads: usize,
-    head_dim: usize,
+    geometry: KvGeometry,
     resident: bool,
     filled: Vec<usize>,
 }
 
 impl OmegaPagedKv {
-    pub fn new(config: &Qwen3MoeConfig, max_context: usize) -> Result<Self, String> {
+    pub fn new(geometry: &KvGeometry, max_context: usize) -> Result<Self, String> {
+        check_block_size("paged kv", geometry)?;
         let num_blocks = max_context.div_ceil(KV_BLOCK_SIZE).max(1);
         let cfg = aien_kv_cache::KvPoolConfig::for_model(
             num_blocks,
             KV_BLOCK_SIZE,
-            config.layers,
-            config.kv_heads,
-            config.head_dim,
+            geometry.layers,
+            geometry.kv_heads,
+            geometry.head_dim,
             aien_kv_cache::KvDType::Bf16,
         );
         let bytes = cfg.layout()?.total_bytes;
@@ -2943,11 +3010,9 @@ impl OmegaPagedKv {
             layout,
             block_ids: (0..num_blocks as u32).collect(),
             capacity: num_blocks * KV_BLOCK_SIZE,
-            q_heads: config.q_heads,
-            kv_heads: config.kv_heads,
-            head_dim: config.head_dim,
+            geometry: *geometry,
             resident,
-            filled: vec![0; config.layers],
+            filled: vec![0; geometry.layers],
         })
     }
 
@@ -2956,12 +3021,15 @@ impl OmegaPagedKv {
     }
 }
 
-impl KvAttention for OmegaPagedKv {
+impl KvStore for OmegaPagedKv {
+    fn geometry(&self) -> KvGeometry {
+        self.geometry
+    }
     fn capacity(&self) -> usize {
         self.capacity
     }
-    fn reset(&mut self) {
-        self.filled.iter_mut().for_each(|f| *f = 0);
+    fn len(&self) -> usize {
+        self.filled.iter().copied().min().unwrap_or(0)
     }
     fn truncate(&mut self, len: usize) {
         // The pool keeps its bytes; positions past `len` are rewritten by later appends.
@@ -2969,6 +3037,29 @@ impl KvAttention for OmegaPagedKv {
             *f = (*f).min(len);
         }
     }
+    // The chip reads and writes this pool in place (GPU-uncached host-visible memory when
+    // resident) and no launch is in flight between steps, so the host copies see the bytes the
+    // attention reads.
+    fn export_blocks(&mut self, start: usize, len: usize) -> Option<Result<Vec<u8>, String>> {
+        Some(pool_export(&self.pool, &self.filled, start, len))
+    }
+    fn import_blocks(
+        &mut self,
+        start: usize,
+        len: usize,
+        bytes: &[u8],
+    ) -> Option<Result<(), String>> {
+        Some(pool_import(
+            &mut self.pool,
+            &mut self.filled,
+            start,
+            len,
+            bytes,
+        ))
+    }
+}
+
+impl KvAttention for OmegaPagedKv {
     fn append(&mut self, layer: usize, pos: usize, k: &[f32], v: &[f32]) -> Result<(), String> {
         if pos != self.filled[layer] || pos >= self.capacity {
             return Err(format!(
@@ -3005,9 +3096,9 @@ impl KvAttention for OmegaPagedKv {
             &self.block_ids[..nblocks],
             context_len,
             layer,
-            self.q_heads,
-            self.kv_heads,
-            self.head_dim,
+            self.geometry.q_heads,
+            self.geometry.kv_heads,
+            self.geometry.head_dim,
             out,
         )
         .map_err(|e| {
@@ -3020,26 +3111,6 @@ impl KvAttention for OmegaPagedKv {
     }
     fn resident(&self) -> bool {
         self.resident
-    }
-    // The chip reads and writes this pool in place (GPU-uncached host-visible memory when
-    // resident) and no launch is in flight between steps, so the host copies see the bytes the
-    // attention reads.
-    fn export_blocks(&mut self, start: usize, len: usize) -> Option<Result<Vec<u8>, String>> {
-        Some(pool_export(&self.pool, &self.filled, start, len))
-    }
-    fn import_blocks(
-        &mut self,
-        start: usize,
-        len: usize,
-        bytes: &[u8],
-    ) -> Option<Result<(), String>> {
-        Some(pool_import(
-            &mut self.pool,
-            &mut self.filled,
-            start,
-            len,
-            bytes,
-        ))
     }
 }
 
@@ -3077,6 +3148,8 @@ pub enum FinishReason {
     Stop,
     Length,
     Cancelled,
+    /// A constraint said the output is complete (`StepRule::Finish`, ADR 0004 section 2.3).
+    Constraint,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -3773,17 +3846,18 @@ impl Qwen3MoeOmegaEngine {
         }
         let (weights, report) =
             load_qwen3_moe_omega_paths(dir, &OmegaModelUploader, format, paths, progress)?;
+        let geometry = KvGeometry::from(&weights.config);
         let fused = match attn {
             AttnPath::Split => false,
             AttnPath::Fused => true,
             AttnPath::Auto => {
                 OmegaModelUploader::uses_dattn_api()
-                    && crate::qwen3_moe_omega_dattn::OmegaFusedKv::fits(&weights.config)
+                    && crate::qwen3_moe_omega_dattn::OmegaFusedKv::fits(&geometry)
             }
         };
         let kv: Box<dyn KvAttention> = if fused {
             let kv = crate::qwen3_moe_omega_dattn::OmegaFusedKv::new(
-                &weights.config,
+                &geometry,
                 max_context,
                 &weights.layers,
             )?;
@@ -3793,7 +3867,7 @@ impl Qwen3MoeOmegaEngine {
             ));
             Box::new(kv)
         } else {
-            let kv = OmegaPagedKv::new(&weights.config, max_context)?;
+            let kv = OmegaPagedKv::new(&geometry, max_context)?;
             progress(&format!(
                 "kv pool {} MB resident={}",
                 kv.pool_bytes() >> 20,
@@ -3832,7 +3906,7 @@ impl Qwen3MoeOmegaEngine {
 
     pub fn reset(&mut self) {
         self.dgraph_clear();
-        self.kv.reset();
+        self.kv.truncate(0);
         self.pos = 0;
         self.history.clear();
         self.traces.clear();
@@ -4547,7 +4621,7 @@ mod forward_tests {
         let mut src = MemorySource::for_config(&c);
         let up = RecordingUploader::default();
         let (w, _) = load_qwen3_moe_omega_from(&c, &mut src, &up, &mut |_| {}).unwrap();
-        let kv = HostKv::new(&c, 32);
+        let kv = HostKv::new(&KvGeometry::from(&c), 32);
         (Qwen3MoeOmegaEngine::new(w, Box::new(kv)), src, c)
     }
 
@@ -4564,7 +4638,7 @@ mod forward_tests {
         let up = RecordingUploader::default();
         let (w, report) =
             load_qwen3_moe_omega_from_with(&c, &mut src, &up, format, &mut |_| {}).unwrap();
-        let kv = HostKv::new(&c, 32);
+        let kv = HostKv::new(&KvGeometry::from(&c), 32);
         (Qwen3MoeOmegaEngine::new(w, Box::new(kv)), src, c, report)
     }
 
@@ -4581,7 +4655,7 @@ mod forward_tests {
         };
         let (w, _) =
             load_qwen3_moe_omega_from_paths(&c, &mut src, &up, format, paths, &mut |_| {})?;
-        let kv = HostKv::new(&c, 32);
+        let kv = HostKv::new(&KvGeometry::from(&c), 32);
         Ok((Qwen3MoeOmegaEngine::new(w, Box::new(kv)), up, c))
     }
 
@@ -4771,7 +4845,7 @@ mod forward_tests {
             &mut |_| {},
         )
         .unwrap();
-        let kv = HostKv::new(&c, 32);
+        let kv = HostKv::new(&KvGeometry::from(&c), 32);
         (Qwen3MoeOmegaEngine::new(w, Box::new(kv)), up, c)
     }
 
@@ -5036,7 +5110,7 @@ mod forward_tests {
         }
         let mut m = Qwen3MoeOmegaEngine::new(
             engine_with(WeightFormat::Fp8Experts).0.weights,
-            Box::new(HostKv::new(&c, 32)),
+            Box::new(HostKv::new(&KvGeometry::from(&c), 32)),
         );
         m.trace_layers = vec![0];
         m.routing_mutant = true;
@@ -5450,7 +5524,7 @@ pub mod host_test_engine {
         let mut src = MemorySource::for_config(&c);
         let up = RecordingUploader::default();
         let (w, report) = load_qwen3_moe_omega_from_with(&c, &mut src, &up, format, &mut |_| {})?;
-        let kv = HostPoolKv::new(&c, max_context)?;
+        let kv = HostPoolKv::new(&KvGeometry::from(&c), max_context)?;
         Ok(OmegaEngine::from_engine(
             Qwen3MoeOmegaEngine::new(w, Box::new(kv)),
             report,
@@ -5471,7 +5545,10 @@ mod kv_persist_tests {
         let (w, _) =
             load_qwen3_moe_omega_from_with(&c, &mut src, &up, WeightFormat::Fp8All, &mut |_| {})
                 .unwrap();
-        Qwen3MoeOmegaEngine::new(w, Box::new(HostPoolKv::new(&c, cap).unwrap()))
+        Qwen3MoeOmegaEngine::new(
+            w,
+            Box::new(HostPoolKv::new(&KvGeometry::from(&c), cap).unwrap()),
+        )
     }
 
     fn argmax(lg: &[f32]) -> u32 {
@@ -5510,14 +5587,158 @@ mod kv_persist_tests {
         (0..n).map(|i| prand(seed, i)).collect()
     }
 
+    /// The 30B's KV shape (`~/models/qwen3-30b-a3b-instruct-2507-fp8` config.json: 48 layers, 32 q
+    /// heads, 4 KV heads, head_dim 128, rope_theta 1e7); the other fields do not reach the KV cache.
+    fn qwen3_30b_kv_config() -> Qwen3MoeConfig {
+        Qwen3MoeConfig {
+            layers: 48,
+            q_heads: 32,
+            kv_heads: 4,
+            head_dim: 128,
+            rope_theta: 1e7,
+            ..tiny_config()
+        }
+    }
+
+    // ADR 0004 step 1: the geometry carries exactly the numbers the cache constructors and
+    // `PoolBlockGeometry::for_config` read from `Qwen3MoeConfig` before the split, so every cache
+    // and every exported byte is the same.
+    #[test]
+    fn kv_geometry_from_config_carries_the_numbers_for_config_read() {
+        for c in [tiny_config(), qwen3_30b_kv_config()] {
+            let g = KvGeometry::from(&c);
+            assert_eq!(
+                g,
+                KvGeometry {
+                    layers: c.layers,
+                    q_heads: c.q_heads,
+                    kv_heads: c.kv_heads,
+                    head_dim: c.head_dim,
+                    rope_theta: c.rope_theta,
+                    block_size: KV_BLOCK_SIZE,
+                }
+            );
+            // What `for_config` built before the split, field by field.
+            let before = kvio::PoolBlockGeometry {
+                layers: c.layers,
+                kv_heads: c.kv_heads,
+                head_dim: c.head_dim,
+                block_size: KV_BLOCK_SIZE,
+            };
+            assert_eq!(g.pool_block(), before);
+            assert_eq!(kvio::PoolBlockGeometry::for_geometry(&g), before);
+            assert_eq!(kvio::PoolBlockGeometry::for_config(&c), before);
+        }
+    }
+
+    // The three host-buildable caches; OmegaFusedKv needs the chip and real weights (its geometry,
+    // len and path are covered by the chip gates and `the_fused_cache_fits_only_the_kernel_shape`).
+    #[test]
+    fn every_host_buildable_cache_reports_its_geometry_len_and_path_through_the_kv_store_view() {
+        let c = tiny_config();
+        let g = KvGeometry::from(&c);
+        let kvd = c.kv_heads * c.head_dim;
+        let caches: Vec<(Box<dyn KvAttention>, &str)> = vec![
+            (Box::new(HostKv::new(&g, 32)), "split"),
+            (Box::new(HostPoolKv::new(&g, 32).unwrap()), "host-pool"),
+            (Box::new(OmegaPagedKv::new(&g, 32).unwrap()), "split"),
+        ];
+        for (mut kv, path) in caches {
+            let store: &mut dyn KvStore = &mut *kv;
+            assert_eq!(store.geometry(), g, "{path}");
+            assert_eq!(store.path_name(), path);
+            assert_eq!(store.capacity(), 32, "{path}");
+            assert_eq!(store.len(), 0, "{path}");
+            for pos in 0..5 {
+                kv.append(0, pos, &rows(pos as u64, kvd), &rows(pos as u64 + 1, kvd))
+                    .unwrap();
+            }
+            // Layer 1 still holds nothing: the smallest per-layer count.
+            assert_eq!(kv.len(), 0, "{path}");
+            for pos in 0..3 {
+                kv.append(1, pos, &rows(pos as u64, kvd), &rows(pos as u64 + 1, kvd))
+                    .unwrap();
+            }
+            assert_eq!(kv.len(), 3, "{path}");
+            kv.truncate(2);
+            assert_eq!(kv.len(), 2, "{path}");
+            // `truncate(0)` is what `reset` was: every layer empty, the next append is at 0.
+            kv.truncate(0);
+            assert_eq!(kv.len(), 0, "{path}");
+            kv.append(0, 0, &rows(9, kvd), &rows(10, kvd)).unwrap();
+            assert!(
+                kv.append(1, 1, &rows(9, kvd), &rows(10, kvd)).is_err(),
+                "{path}"
+            );
+        }
+    }
+
+    #[test]
+    fn pool_caches_refuse_a_block_size_their_layout_does_not_use() {
+        let g = KvGeometry {
+            block_size: KV_BLOCK_SIZE * 2,
+            ..KvGeometry::from(&tiny_config())
+        };
+        assert!(HostPoolKv::new(&g, 32).is_err());
+        assert!(OmegaPagedKv::new(&g, 32).is_err());
+    }
+
+    #[test]
+    fn the_fused_cache_fits_only_the_kernel_shape() {
+        use crate::qwen3_moe_omega_dattn::OmegaFusedKv;
+        assert!(OmegaFusedKv::fits(
+            &KvGeometry::from(&qwen3_30b_kv_config())
+        ));
+        assert!(!OmegaFusedKv::fits(&KvGeometry::from(&tiny_config())));
+        // The 8B's 8 KV heads wait for K2.
+        let dense = KvGeometry {
+            layers: 36,
+            kv_heads: 8,
+            ..KvGeometry::from(&qwen3_30b_kv_config())
+        };
+        assert!(!OmegaFusedKv::fits(&dense));
+    }
+
+    /// FNV-1a 64 of the `HostPagedPoolV1` export of positions `0..37` filled with `rows`.
+    fn export_digest(c: &Qwen3MoeConfig, kv: &mut dyn KvAttention) -> (usize, u64) {
+        let kvd = c.kv_heads * c.head_dim;
+        for pos in 0..37 {
+            for l in 0..c.layers {
+                let s = pos as u64 * 100 + l as u64;
+                kv.append(l, pos, &rows(s, kvd), &rows(s + 7, kvd)).unwrap();
+            }
+        }
+        let b = kv.export_blocks(0, 37).unwrap().unwrap();
+        let h = b.iter().fold(0xcbf2_9ce4_8422_2325u64, |h, &x| {
+            (h ^ x as u64).wrapping_mul(0x0000_0100_0000_01b3)
+        });
+        (b.len(), h)
+    }
+
+    // ADR 0004 step 1: the payload bytes are those main exported before the split. The digests were
+    // printed by this same fill and hash on origin/main 559f0f1e (constructors taking the config).
+    #[test]
+    fn exported_kv_bytes_match_the_digests_recorded_on_main() {
+        for (c, want) in [
+            (tiny_config(), (49_152usize, 0xbbf5_a8d4_5a90_9242u64)),
+            (qwen3_30b_kv_config(), (4_718_592, 0x60da_5a45_da83_5b1a)),
+        ] {
+            let g = KvGeometry::from(&c);
+            let host = export_digest(&c, &mut HostPoolKv::new(&g, 64).unwrap());
+            let paged = export_digest(&c, &mut OmegaPagedKv::new(&g, 64).unwrap());
+            assert_eq!(host, want, "host pool, {} layers", c.layers);
+            assert_eq!(paged, want, "paged, {} layers", c.layers);
+        }
+    }
+
     #[test]
     fn paged_and_host_pool_caches_export_the_same_bytes_and_round_trip() {
         let c = tiny_config();
         let kvd = c.kv_heads * c.head_dim;
         // Stub build: a host pool. Linked native build (AIEN_REQUIRE_NATIVE_LIBS=1, abi-qualify
         // chip-inference-linked): the resident chip pool. The exported bytes must match either way.
-        let mut paged = OmegaPagedKv::new(&c, 64).unwrap();
-        let mut host = HostPoolKv::new(&c, 64).unwrap();
+        let mut paged = OmegaPagedKv::new(&KvGeometry::from(&c), 64).unwrap();
+        let mut host = HostPoolKv::new(&KvGeometry::from(&c), 64).unwrap();
         for pos in 0..37 {
             for l in 0..c.layers {
                 let (k, v) = (
@@ -5540,7 +5761,7 @@ mod kv_persist_tests {
         assert!(paged.export_blocks(32, 6).unwrap().is_err());
         // Import into a fresh cache in two pieces, export again: identical bytes.
         let whole = host.export_blocks(0, 37).unwrap().unwrap();
-        let mut fresh = OmegaPagedKv::new(&c, 64).unwrap();
+        let mut fresh = OmegaPagedKv::new(&KvGeometry::from(&c), 64).unwrap();
         assert!(
             fresh
                 .import_blocks(16, 21, &host.export_blocks(16, 21).unwrap().unwrap())
@@ -5558,7 +5779,9 @@ mod kv_persist_tests {
             .unwrap();
         assert_eq!(fresh.export_blocks(0, 37).unwrap().unwrap(), whole);
         // The f32 test cache cannot export: None, never a guess.
-        assert!(HostKv::new(&c, 8).export_blocks(0, 1).is_none());
+        assert!(HostKv::new(&KvGeometry::from(&c), 8)
+            .export_blocks(0, 1)
+            .is_none());
     }
 
     #[test]
@@ -5647,7 +5870,7 @@ mod kv_persist_tests {
             )
             .unwrap();
             (
-                Qwen3MoeOmegaEngine::new(w, Box::new(HostKv::new(&c, 32))),
+                Qwen3MoeOmegaEngine::new(w, Box::new(HostKv::new(&KvGeometry::from(&c), 32))),
                 (),
                 (),
                 r,
