@@ -15,7 +15,9 @@ pub use bridge::{ComposeBridge, ComposeProposer, Generation};
 // Reading a model reply as a file proposal (the approval path re-checks one).
 pub use bridge::{check_file_proposal, parse_file_proposal, FileProposal};
 
-// Daemon start settings, read once from the environment.
+// Settings read from the environment: at daemon start (aien-cli, server.rs)
+// and, for the budgets, again when a compose home opens. Public so the env
+// tests check every accepted and refused value through these functions.
 pub use bridge::{
     authorize_desk_at_start_from_env, authorize_desk_setting, authorize_requires_desk_from_env,
     compose_budgets_from_env, compose_dir_from_env, compose_doc_max_tokens_from_env,

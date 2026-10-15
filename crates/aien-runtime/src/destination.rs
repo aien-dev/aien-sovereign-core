@@ -296,7 +296,7 @@ impl std::fmt::Display for DestinationError {
 /// path that enters from text (a goal word, a reply's `filename:` line) is
 /// read in its bare form. Inner `./` segments, `..`, absolute paths, `~`,
 /// empty results and every other form are left exactly as written, so the
-/// strict checks that follow (`compose::check_relative_path`,
+/// strict checks that follow (`check_relative_path` in compose/bridge.rs,
 /// `effects::confine_shape`) refuse them as before. The one shared reading.
 pub fn strip_leading_curdir(path: &str) -> &str {
     let mut p = path;

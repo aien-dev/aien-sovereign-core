@@ -428,7 +428,7 @@ impl Default for ComposeBudgets {
 }
 
 impl ComposeBudgets {
-    pub fn for_kind(&self, kind: ProposalKind) -> std::time::Duration {
+    pub(crate) fn for_kind(&self, kind: ProposalKind) -> std::time::Duration {
         match kind {
             ProposalKind::Edit => self.edit,
             ProposalKind::Document => self.doc,
@@ -2994,6 +2994,69 @@ mod dotslash_tests {
         assert_eq!(
             out,
             "filename: report.md\n# Report\n\nOne.\nThe topic is harbours.\n"
+        );
+    }
+}
+
+/// The daemon proposer's timeout text (server.rs `wall_clock_reason`) and the
+/// classifier that records an attempt as "timeout" share one prefix; a cut at
+/// the token limit never carries it. Internal seam: the interface tests feed
+/// the literal text, so this pins the daemon's own function to it.
+#[cfg(test)]
+mod wall_clock_reason_tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[test]
+    fn token_cut_and_wall_clock_reasons_are_distinct() {
+        assert_eq!(wall_clock_reason(5), "model proposal exceeded 5 ms");
+        let cut = |_: &str, _: Duration| {
+            Ok(Generation {
+                text: "filename: a.md\nline\n".into(),
+                tokens: 1024,
+                finish_reason: Some("max_tokens".into()),
+                ..Default::default()
+            })
+        };
+        let (out, a) = propose_task_checked(
+            &cut,
+            "p",
+            None,
+            &[],
+            Duration::from_secs(120),
+            Duration::from_secs(30),
+            1,
+        );
+        let why = out.expect_err("a cut reply is never a proposal");
+        assert_eq!(a[0].outcome, "refused");
+        assert!(
+            why.contains(
+                "reply cut at the token limit after 1024 tokens (finish_reason max_tokens)"
+            ),
+            "{why}"
+        );
+        assert!(!why.contains("exceeded"), "{why}");
+        let slow = |_: &str, limit: Duration| -> Result<Generation, String> {
+            Err(wall_clock_reason(limit.as_millis()))
+        };
+        let (out, a) = propose_task_checked(
+            &slow,
+            "p",
+            None,
+            &[],
+            Duration::from_secs(120),
+            Duration::from_secs(30),
+            1,
+        );
+        let why = out.expect_err("timed out");
+        assert_eq!(a[0].outcome, "timeout");
+        assert!(
+            why.starts_with("model proposal exceeded ") && why.ends_with(" ms"),
+            "{why}"
+        );
+        assert!(
+            !why.contains("token limit") && !why.contains("max_tokens"),
+            "{why}"
         );
     }
 }

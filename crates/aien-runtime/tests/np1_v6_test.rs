@@ -225,6 +225,20 @@ fn edit_block_only_when_the_goal_names_an_existing_file() {
 
 /// T5 boundary: the block never reads outside the workspace, a directory,
 /// a symlink leaving the workspace, a non-UTF-8 file or an oversized file.
+/// The offline re-derivation (`compose::rederive::task_prompt`, used by
+/// examples/np1_reference.rs) keeps the plain v5 prompt, byte for byte, for a
+/// goal whose destination is unsafe. The bridge itself refuses that goal
+/// before any model call (`edit_block_only_when_the_goal_names_an_existing_file`).
+#[test]
+fn rederive_keeps_the_plain_prompt_for_an_unsafe_destination() {
+    use aien_runtime::compose::rederive::{proposal_prompt, task_prompt};
+    let d = tempfile::tempdir().unwrap();
+    let goal =
+        "Create the file ../outside.txt with the single line: written outside the workspace.";
+    assert_eq!(proposal_prompt(goal), template(goal));
+    assert_eq!(task_prompt(goal, d.path()), template(goal));
+}
+
 #[test]
 #[cfg_attr(not(compose_linked), ignore = "needs librx_compose.a: stub build")]
 fn edit_block_never_reads_outside_or_oversized() {

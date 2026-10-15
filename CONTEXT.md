@@ -11,7 +11,7 @@ The long-running process started by `aien start` (it runs as `aien --daemon`). I
 _Avoid_: server, service
 
 **Approval desk**:
-The operator's approval step for effects. It is required by default; a desk key created by `aien compose desk-key --create 1` must exist before the daemon starts. Code: `aien-runtime/src/spine.rs`, `approved_auth.rs`.
+The operator's approval step for effects. It is required by default; a desk key created by `aien compose desk-key --create 1` must exist before the daemon starts. Code: `aien-runtime/src/compose/bridge.rs`, `approved_auth.rs`.
 _Avoid_: login, auth
 
 **Objective record**:
