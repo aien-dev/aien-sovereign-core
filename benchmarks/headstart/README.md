@@ -99,8 +99,10 @@ rustc sysroot under `manifest.toolchain.binaries`.
   incremental target dir. A failed check is recorded with its exit status and
   log tail and the series continues; it is never counted as a time.
 - `abverify`: per arm, a cold `cargo check --workspace --all-targets
-  --message-format=json` and `cargo test -p <HS_VERIFY_TEST_PKGS> --
-  --test-threads=1`, compared in `verify.json`: exit codes, diagnostics
+  --message-format=json` and `cargo test -p <HS_VERIFY_TEST_PKGS> --lib
+  --bins --tests -- --test-threads=1` (no doctests: those run `rustdoc`,
+  and a stage-1 `compiler library` build ships none, so the rustup rustdoc
+  would be mixed in), compared in `verify.json`: exit codes, diagnostics
   normalized for event order (each `compiler-message` reduced to level, code,
   message and primary spans, then sorted) and test result lines (timing
   suffix removed). With `HS_VERIFY_ENV_ON` set, one more cold

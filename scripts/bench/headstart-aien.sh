@@ -694,14 +694,14 @@ stage_abverify() {
   for p in $HS_VERIFY_TEST_PKGS; do pkgs+=(-p "$p"); done
   [ ${#pkgs[@]} -gt 0 ] || die "HS_VERIFY_TEST_PKGS is empty"
   local check=(cargo check --workspace --all-targets --message-format=json)
-  local test=(cargo test "${pkgs[@]}" -- --test-threads=1)
+  local test=(cargo test "${pkgs[@]}" --lib --bins --tests -- --test-threads=1)
   scenario_add verify_check_json verify "${check[*]}"
   scenario_add verify_test verify "${test[*]}"
   declare -A crc trc
   HS_KEEP_LOG=1
   for arm in OFF ON; do
     rm -rf "$TARGET-verify-$arm"
-    ab_sample verify_check_json "$arm" verify 1 0 - warm "verify-$arm" -- "${check[@]}"
+    ab_sample verify_check_json "$arm" verify 1 0 - cold "verify-$arm" -- "${check[@]}"
     crc[$arm]=$LAST_RC
     norm_diagnostics "$LAST_LOG" > "$vd/diagnostics-$arm.jsonl"
     { grep '^{' "$LAST_LOG" || true; } | jq -r '.reason' | LC_ALL=C sort | uniq -c | awk '{ print $2, $1 }' > "$vd/message-reasons-$arm.txt"
@@ -716,7 +716,7 @@ stage_abverify() {
     scenario_add verify_build_extra verify "cargo build --workspace (ON arm plus HS_VERIFY_ENV_ON)"
     CUR_ENV_EXTRA=$venv
     rm -rf "$TARGET-verify-ONX"
-    ab_sample verify_build_extra ON verify 1 0 - warm "verify-ONX" -- cargo build --workspace
+    ab_sample verify_build_extra ON verify 1 0 - cold "verify-ONX" -- cargo build --workspace
     CUR_ENV_EXTRA=""
     vrc=$LAST_RC
     ensure_clean "verify build extra"
@@ -736,7 +736,7 @@ stage_abverify() {
      | ($tron | split("\n") | map(select(length > 0))) as $tl_on
      | {schema: "headstart-verify/v1",
         check_command: "cargo check --workspace --all-targets --message-format=json",
-        test_command: ("cargo test -p " + ($pk | split(" ") | join(" -p ")) + " -- --test-threads=1"),
+        test_command: ("cargo test -p " + ($pk | split(" ") | join(" -p ")) + " --lib --bins --tests -- --test-threads=1 (no doctests: they run rustdoc, which the toolchain under test may not ship)"),
         normalization: "compiler-message records reduced to {level, code, message, primary spans}, sorted; test result lines with the timing suffix removed",
         arms: {OFF: {check_exit: $coff, diagnostics: $noff, diagnostics_sha256: $doff, test_exit: $toff, test_results: $tl_off},
                ON: {check_exit: $con, diagnostics: $non, diagnostics_sha256: $don, test_exit: $ton, test_results: $tl_on}},
