@@ -6,6 +6,7 @@
 //! replay rebuild the exact same state. Store checks happen before an event
 //! is journaled (`gates.rs`) and again at every `may_start` / `may_finalize`.
 
+use super::dedup::Seen;
 use super::error::SchedError;
 use super::permits::{PermitPool, ResourceRequest};
 use super::timing::TaskTiming;
@@ -78,8 +79,21 @@ pub enum EventKind {
         task: String,
         reason: String,
     },
+    /// Emitted only by `Scheduler::audit` (callers cannot deliver it):
+    /// revoke every listed task that is still active, then dispatch once,
+    /// so no consumer is dispatched between two audit revocations.
+    AuditRevoke {
+        revocations: Vec<Revocation>,
+    },
     /// Lets time pass: expires leases.
     Tick,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Revocation {
+    pub task: String,
+    pub reason: String,
 }
 
 /// One delivered event. Duplicate delivery is detected by `id`.
@@ -135,7 +149,7 @@ pub struct TaskEntry {
 }
 
 impl TaskEntry {
-    fn new(resources: ResourceRequest, at: u64) -> Self {
+    pub(crate) fn new(resources: ResourceRequest, at: u64) -> Self {
         TaskEntry {
             state: TaskState::Blocked,
             generation: 1,
@@ -178,8 +192,8 @@ pub struct Core {
     pub(crate) tasks: BTreeMap<String, TaskEntry>,
     pub(crate) queue: VecDeque<String>,
     pub(crate) pool: PermitPool,
-    /// event id -> digest of its payload, for idempotent redelivery.
-    pub(crate) seen: BTreeMap<String, String>,
+    /// Bounded memory of applied event ids (`dedup.rs`).
+    pub(crate) seen: Seen,
     pub(crate) seq: u64,
     pub(crate) last_at: u64,
 }
@@ -437,7 +451,7 @@ impl Core {
                 self.seq + 1
             )));
         }
-        if self.seen.contains_key(&e.id) {
+        if self.seen.contains(&e.id) {
             return Err(SchedError::EventIdConflict(e.id.clone()));
         }
         if e.at < self.last_at {
@@ -583,6 +597,21 @@ impl Core {
                 self.reset_to_blocked(task, next, at, reason, &mut fx)?;
                 self.revoke_descendants(task, at, reason, &mut fx)?;
             }
+            EventKind::AuditRevoke { revocations } => {
+                let first = revocations
+                    .first()
+                    .ok_or_else(|| bad("empty audit revoke"))?;
+                self.require_state(&first.task, TaskState::is_active, "be revoked")?;
+                for r in revocations {
+                    // Earlier entries may already have revoked this one.
+                    let t = self.task(&r.task)?;
+                    if t.state.is_active() {
+                        let next = t.generation + 1;
+                        self.reset_to_blocked(&r.task, next, at, &r.reason, &mut fx)?;
+                        self.revoke_descendants(&r.task, at, &r.reason, &mut fx)?;
+                    }
+                }
+            }
             EventKind::Tick => {
                 let expired: Vec<String> = self
                     .tasks
@@ -599,7 +628,10 @@ impl Core {
             }
         }
         self.pump(cfg, at, &mut fx)?;
-        self.seen.insert(e.id.clone(), payload_digest(&e.kind));
+        self.seen
+            .record(&e.id, payload_digest(&e.kind), &e.kind, cfg.dedup_window);
+        let tasks = &self.tasks;
+        self.seen.prune(|t| tasks.get(t).map(|x| x.generation));
         self.seq = e.seq;
         Ok(fx)
     }

@@ -6,9 +6,9 @@
 //! (which records what was accepted earlier) only says which receipt to
 //! re-check; it is never the authority on its own.
 
-use super::core::{Binding, BindingLevel, EventKind, TaskEntry};
+use super::core::{Binding, BindingLevel, EventKind, Revocation, TaskEntry};
 use super::error::SchedError;
-use super::{Event, Outcome, Scheduler};
+use super::{Event, Outcome, Scheduler, RESERVED_ID_PREFIX};
 use crate::completion::CompletionError;
 use crate::execution::TaskState;
 use crate::readiness::{verify_final, verify_interface, ArtifactReadiness, OperationClass};
@@ -212,66 +212,85 @@ impl Scheduler {
         }
     }
 
+    /// Active tasks whose own accepted interface or completion claim no
+    /// longer verifies.
+    fn own_claim_failures(&self) -> Vec<Revocation> {
+        let mut out = Vec::new();
+        for (id, t) in self.core.tasks.iter().filter(|(_, t)| t.state.is_active()) {
+            let g = t.generation;
+            let i = t
+                .interface
+                .as_ref()
+                .map(|c| verify_interface(&self.store, id, g, c));
+            let f = t
+                .completion
+                .as_ref()
+                .map(|c| verify_final(&self.store, id, g, c));
+            if let Some(e) = [i, f].into_iter().flatten().find_map(Result::err) {
+                out.push(revocation(id, proof(id)(e)));
+            }
+        }
+        out
+    }
+
+    /// Active tasks whose bindings or finalize check no longer verify.
+    fn binding_failures(&self) -> Vec<Revocation> {
+        let mut out = Vec::new();
+        for (id, t) in &self.core.tasks {
+            let check = match t.state {
+                TaskState::Provisional | TaskState::AwaitingFinalProof => self
+                    .core
+                    .graph
+                    .producers_of(id)
+                    .try_for_each(|p| self.bound_readiness(id, t, p).map(|_| ())),
+                TaskState::Committable => self.may_finalize(id).map(|_| ()),
+                TaskState::Blocked | TaskState::Aborted => Ok(()),
+            };
+            if let Err(e) = check {
+                out.push(revocation(id, e));
+            }
+        }
+        out
+    }
+
     /// Re-verify every active task against the store and revoke the ones
-    /// that no longer verify (journaled as `Revoke` events). Run after a
-    /// replay or whenever the store may have changed. Returns revoked tasks.
+    /// that no longer verify. Run whenever the store may have changed; a
+    /// replayed journal must pass through it (see [`super::Unaudited`]).
+    /// Returns the revoked tasks.
     ///
-    /// A task whose own accepted interface or completion claim fails is
-    /// revoked first (which cascades), so a consumer is never re-dispatched
-    /// against the same bad claim. Each round revokes at least one active
-    /// task; the round count is capped as a backstop.
+    /// Each round is one journaled `AuditRevoke`: first every task whose own
+    /// claim fails (which cascades to its consumers), and only when there
+    /// are none, every task whose bindings fail. One batch dispatches once,
+    /// after all of its revocations, so no consumer is dispatched against a
+    /// claim the same round is about to revoke. Each round revokes at least
+    /// one active task; the round count is capped as a backstop.
     pub fn audit(&mut self) -> Result<Vec<String>, SchedError> {
         let mut revoked = Vec::new();
         for _ in 0..=2 * self.core.tasks.len() {
-            let own = self.core.tasks.iter().find_map(|(id, t)| {
-                if !t.state.is_active() {
-                    return None;
-                }
-                let g = t.generation;
-                let i = t
-                    .interface
-                    .as_ref()
-                    .map(|c| verify_interface(&self.store, id, g, c));
-                let f = t
-                    .completion
-                    .as_ref()
-                    .map(|c| verify_final(&self.store, id, g, c));
-                [i, f]
-                    .into_iter()
-                    .flatten()
-                    .find_map(Result::err)
-                    .map(|e| (id.clone(), proof(id)(e)))
-            });
-            let failing = own.or_else(|| {
-                self.core.tasks.iter().find_map(|(id, t)| {
-                    let check = match t.state {
-                        TaskState::Provisional | TaskState::AwaitingFinalProof => self
-                            .core
-                            .graph
-                            .producers_of(id)
-                            .try_for_each(|p| self.bound_readiness(id, t, p).map(|_| ())),
-                        TaskState::Committable => self.may_finalize(id).map(|_| ()),
-                        TaskState::Blocked | TaskState::Aborted => Ok(()),
-                    };
-                    check.err().map(|e| (id.clone(), e))
-                })
-            });
-            let Some((id, e)) = failing else {
+            let mut batch = self.own_claim_failures();
+            if batch.is_empty() {
+                batch = self.binding_failures();
+            }
+            if batch.is_empty() {
                 return Ok(revoked);
-            };
+            }
             let event = Event {
-                id: format!("audit-{}-{id}", self.core.seq + 1),
-                kind: EventKind::Revoke {
-                    task: id,
-                    reason: format!("audit: {e}"),
-                },
+                id: format!("{RESERVED_ID_PREFIX}audit-{}", self.core.seq + 1),
+                kind: EventKind::AuditRevoke { revocations: batch },
             };
-            if let Outcome::Applied(fx) = self.deliver(event)? {
+            if let Outcome::Applied(fx) = self.deliver_unchecked(event)? {
                 revoked.extend(fx.revoked);
             }
         }
         Err(SchedError::InvalidEvent(
             "audit did not converge; refusing to continue".to_string(),
         ))
+    }
+}
+
+fn revocation(task: &str, e: SchedError) -> Revocation {
+    Revocation {
+        task: task.to_string(),
+        reason: format!("audit: {e}"),
     }
 }

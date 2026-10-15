@@ -566,6 +566,7 @@ fn resource_budget_bounds_queue_and_permits() {
             max_concurrency: 2,
         },
         lease_ttl: 1_000,
+        dedup_window: 64,
     });
     let r = h.send(EventKind::RegisterTask {
         task: "huge".into(),

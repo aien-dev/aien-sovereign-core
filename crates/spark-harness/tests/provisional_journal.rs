@@ -31,7 +31,7 @@ fn replay_reproduces_state_and_trace_exactly() {
     let trace = h.sched.timing_trace();
     // Move the clock: replay must use journaled times, not the clock.
     h.advance(500);
-    assert_eq!(h.reopen(enabled()).unwrap(), 0);
+    assert_eq!(h.reopen(enabled()).unwrap(), (0, vec![]));
     assert_eq!(h.sched.snapshot(), snap);
     assert_eq!(h.sched.timing_trace(), trace);
     h.sched.check_invariants().unwrap();
@@ -59,14 +59,82 @@ fn torn_last_line_is_ignored_and_truncated() {
         .unwrap()
         .write_all(torn)
         .unwrap();
-    assert_eq!(h.reopen(enabled()).unwrap(), torn.len());
+    assert_eq!(h.reopen(enabled()).unwrap().0, torn.len());
     assert_eq!(h.sched.snapshot(), snap);
     assert_eq!(fs::read(&path).unwrap(), before, "torn tail truncated");
     // Next append starts on a clean line and replays.
     h.work_done("b");
     let snap2 = h.sched.snapshot();
-    assert_eq!(h.reopen(enabled()).unwrap(), 0);
+    assert_eq!(h.reopen(enabled()).unwrap().0, 0);
     assert_eq!(h.sched.snapshot(), snap2);
+}
+
+#[test]
+fn refused_journal_is_not_truncated() {
+    let mut h = H::journaled(enabled());
+    scenario(&mut h);
+    let path = h.fx.journal();
+    OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap()
+        .write_all(br#"{"seq":999,"id":"ev-torn""#)
+        .unwrap();
+    let before = fs::read(&path).unwrap();
+    let other = ProvisionalConfig {
+        lease_ttl: 7,
+        ..enabled()
+    };
+    assert!(matches!(h.reopen(other), Err(SchedError::Journal(_))));
+    assert_eq!(
+        fs::read(&path).unwrap(),
+        before,
+        "refused journal untouched"
+    );
+}
+
+#[test]
+fn restart_rebases_the_clock_so_dead_leases_expire() {
+    let mut h = H::journaled(enabled());
+    h.advance(1_000_000); // the old process ran for a long time
+    h.register("a", 2, &[]);
+    assert_eq!(h.sched.state("a"), Some(TaskState::Provisional));
+    let lease_ends = h.sched.task("a").unwrap().lease_expires_at.unwrap();
+    // The worker dies with the process. The new process's clock starts at 0.
+    h.restart(enabled()).unwrap();
+    assert_eq!(h.sched.permits_in_use().cpu_in_use, 2);
+    let last = lease_ends - enabled().lease_ttl;
+    h.advance(enabled().lease_ttl - 11);
+    let fx = h.ok(EventKind::Tick); // at lease end - 1
+    assert!(fx.aborted.is_empty(), "{fx:?}");
+    let fx = h.ok(EventKind::Tick);
+    assert_eq!(fx.aborted, vec!["a"]);
+    assert_eq!(h.sched.permits_in_use().running, 0);
+    assert!(h.sched.timing_trace()["as_of"].as_u64().unwrap() > last);
+}
+
+#[test]
+fn forged_finalize_in_the_journal_fails_replay() {
+    let mut h = H::journaled(enabled());
+    h.register("a", 1, &[]);
+    h.register("b", 1, &["a"]);
+    h.publish("a", 1);
+    h.work_done("b");
+    // a is not final, so no Finalize for b could have been journaled.
+    let path = h.fx.journal();
+    let text = fs::read_to_string(&path).unwrap();
+    let last: serde_json::Value = serde_json::from_str(text.lines().last().unwrap()).unwrap();
+    let forged = serde_json::json!({
+        "seq": last["seq"].as_u64().unwrap() + 1,
+        "id": "forged",
+        "at": last["at"],
+        "kind": { "type": "finalize", "task": "b" },
+    });
+    let mut f = OpenOptions::new().append(true).open(&path).unwrap();
+    writeln!(f, "{forged}").unwrap();
+    drop(f);
+    let r = h.reopen(enabled());
+    assert!(matches!(r, Err(SchedError::Journal(_))), "{r:?}");
 }
 
 #[test]
@@ -154,18 +222,17 @@ fn replayed_committable_task_is_reverified_against_the_store() {
             .join(format!("{}.json", a_completion.receipt_id)),
     )
     .unwrap();
-    h.reopen(enabled()).unwrap();
-    // Replay is pure, so the state comes back as journaled...
-    assert_eq!(h.sched.state("b"), Some(TaskState::Committable));
-    // ...but the gate re-verifies and refuses, and the audit revokes.
-    assert!(matches!(
-        h.sched.may_finalize("b"),
-        Err(SchedError::Proof { .. })
-    ));
-    let revoked = h.sched.audit().unwrap();
-    assert!(revoked.contains(&"b".to_string()), "{revoked:?}");
+    // Replay is pure, so a and b come back Committable; `open` hands out
+    // only an unaudited handle, and its audit revokes both before any event
+    // or dispatch can run on them.
+    let (_, revoked) = h.reopen(enabled()).unwrap();
+    assert_eq!(revoked, vec!["a", "b"]);
     assert_eq!(h.sched.state("b"), Some(TaskState::Blocked));
+    // A consumer registered after the restart is not dispatched on a.
+    h.register("c", 1, &["a"]);
+    assert_eq!(h.sched.state("c"), Some(TaskState::Blocked));
+    assert!(h.sched.may_finalize("b").is_err());
     // The revocation itself is journaled.
-    h.reopen(enabled()).unwrap();
+    assert_eq!(h.reopen(enabled()).unwrap().1, Vec::<String>::new());
     assert_eq!(h.sched.state("b"), Some(TaskState::Blocked));
 }

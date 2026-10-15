@@ -34,22 +34,42 @@
 //! accepted events, opened with [`Scheduler::open`]. Replay re-applies the
 //! events through the same pure state machine, using the times recorded in
 //! the journal, so it rebuilds the same state (and the same timing trace).
-//! Replay does not re-read the store; instead every `may_start` and
-//! `may_finalize` re-verifies from the store at call time, and
-//! [`Scheduler::audit`] (call it after `open`) revokes any active task whose
-//! proofs no longer verify. A task becomes `Committable` only through a
-//! journaled `Finalize` event, which is journaled only after `may_finalize`
-//! passed, so replay cannot turn an unfinished provisional task into a
-//! committable one. The journal is trusted like the store itself
-//! (filesystem ownership); it is not signed.
+//! Replay does not re-read the store, so `open` returns an [`Unaudited`]
+//! handle whose only method is `audit`: no event, dispatch or gate query
+//! can run on replayed state until every active task was re-verified
+//! against the store. After that every `may_start` and `may_finalize`
+//! still re-verifies at call time. A task becomes `Committable` only
+//! through a journaled `Finalize` event, which is journaled only after
+//! `may_finalize` passed, so replay cannot turn an unfinished provisional
+//! task into a committable one. The journal is trusted like the store
+//! itself (filesystem ownership); it is not signed.
+//!
+//! Time after a restart: a new process gets a new clock, so `open` rebases
+//! it onto the last journaled time (`now = last_at + clock() - clock_at_open`).
+//! Leases of workers that died with the old process therefore expire at
+//! most `lease_ttl` ticks after the restart. The downtime itself is not
+//! counted.
+//!
+//! Cost per event: `deliver` applies the event to a copy of the state so a
+//! refused event changes nothing. The copy is O(tasks + edges +
+//! `dedup_window`), the same order as the dispatch scan every event already
+//! does; `deliver_cost_is_small_next_to_the_journal_fsync` (ignored test)
+//! measures it. Journal compaction (a snapshot header so replay does not
+//! start from the first event) is a follow-up; until then the journal and
+//! replay time grow with the event count.
 
 pub mod core;
+mod dedup;
 pub mod error;
 mod gates;
 pub mod permits;
 pub mod timing;
+#[cfg(test)]
+mod unit_tests;
 
-pub use self::core::{Binding, BindingLevel, Effects, Event, EventKind, JournalEntry, TaskEntry};
+pub use self::core::{
+    Binding, BindingLevel, Effects, Event, EventKind, JournalEntry, Revocation, TaskEntry,
+};
 pub use self::error::SchedError;
 pub use self::permits::{PermitPool, ResourceLimits, ResourceRequest};
 
@@ -65,9 +85,8 @@ use std::path::{Path, PathBuf};
 pub type Clock = Box<dyn Fn() -> u64 + Send + Sync>;
 
 /// Nanoseconds since this clock was created, from `std::time::Instant`.
-/// A new process starts a new base; the scheduler never lets event time go
-/// below the last journaled time, so time stays monotonic across restarts
-/// but the gap while the process was down is not counted.
+/// A new process starts a new base; [`Scheduler::open`] rebases it onto
+/// the last journaled time (see the module docs).
 pub fn monotonic_clock() -> Clock {
     let start = std::time::Instant::now();
     Box::new(move || u64::try_from(start.elapsed().as_nanos()).unwrap_or(u64::MAX))
@@ -75,6 +94,9 @@ pub fn monotonic_clock() -> Clock {
 
 pub const JOURNAL_FORMAT: &str = "spark-harness-provisional-journal";
 pub const TRACE_SCHEMA: &str = "spark-harness-provisional-trace";
+/// Event ids starting with this are reserved for events the scheduler
+/// emits itself (the audit). [`Scheduler::deliver`] refuses them.
+pub const RESERVED_ID_PREFIX: &str = "spark-harness:";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -86,6 +108,9 @@ pub struct ProvisionalConfig {
     pub limits: ResourceLimits,
     /// Lease length in clock ticks (at least 1).
     pub lease_ttl: u64,
+    /// How many generation-free event ids are remembered for duplicate
+    /// detection (at least 1). See `dedup.rs`.
+    pub dedup_window: usize,
 }
 
 impl Default for ProvisionalConfig {
@@ -95,15 +120,20 @@ impl Default for ProvisionalConfig {
             queue_capacity: 64,
             limits: ResourceLimits::default(),
             lease_ttl: 300_000_000_000,
+            dedup_window: 4096,
         }
     }
 }
 
 impl ProvisionalConfig {
     fn validate(&self) -> Result<(), SchedError> {
-        if self.queue_capacity == 0 || self.lease_ttl == 0 || self.limits.max_concurrency == 0 {
+        if self.queue_capacity == 0
+            || self.lease_ttl == 0
+            || self.limits.max_concurrency == 0
+            || self.dedup_window == 0
+        {
             return Err(SchedError::InvalidEvent(
-                "config needs queue_capacity, lease_ttl and max_concurrency of at least 1"
+                "config needs queue_capacity, lease_ttl, max_concurrency and dedup_window of at least 1"
                     .to_string(),
             ));
         }
@@ -129,8 +159,27 @@ pub struct Scheduler {
     cfg: ProvisionalConfig,
     store: PathBuf,
     clock: Clock,
+    /// `now = clock_base + clock() - clock_origin` (see the module docs).
+    clock_base: u64,
+    clock_origin: u64,
     core: Core,
     journal: Option<Journal>,
+}
+
+/// A replayed scheduler that has not been checked against the store yet.
+/// Its only method is [`Unaudited::audit`].
+#[must_use = "a replayed scheduler is usable only after audit()"]
+pub struct Unaudited {
+    sched: Scheduler,
+}
+
+impl Unaudited {
+    /// Re-verify every replayed active task against the store, revoke the
+    /// ones that fail, and hand out the scheduler.
+    pub fn audit(mut self) -> Result<(Scheduler, Vec<String>), SchedError> {
+        let revoked = self.sched.audit()?;
+        Ok((self.sched, revoked))
+    }
 }
 
 impl Scheduler {
@@ -142,6 +191,8 @@ impl Scheduler {
             cfg,
             store: store.to_path_buf(),
             clock,
+            clock_base: 0,
+            clock_origin: 0,
             core: Core::default(),
             journal: None,
         })
@@ -149,12 +200,13 @@ impl Scheduler {
 
     /// Journaled scheduler: create `journal` or replay it. The journal's
     /// header must carry the same config, because dispatch depends on it.
+    /// The replayed state must pass [`Unaudited::audit`] before use.
     pub fn open(
         cfg: ProvisionalConfig,
         store: &Path,
         journal: &Path,
         clock: Clock,
-    ) -> Result<(Self, ReplayReport), SchedError> {
+    ) -> Result<(Unaudited, ReplayReport), SchedError> {
         let mut s = Scheduler::new(cfg, store, clock)?;
         let header = json!({ "format": JOURNAL_FORMAT, "version": 1, "config": s.cfg });
         let opened =
@@ -164,12 +216,16 @@ impl Scheduler {
                 SchedError::Journal(format!("replay of entry {} failed: {e}", entry.seq))
             })?;
         }
+        if !opened.entries.is_empty() {
+            s.clock_base = s.core.last_at;
+            s.clock_origin = (s.clock)();
+        }
         let report = ReplayReport {
             entries: opened.entries.len(),
             torn_bytes: opened.torn_bytes,
         };
         s.journal = Some(opened.journal);
-        Ok((s, report))
+        Ok((Unaudited { sched: s }, report))
     }
 
     pub fn config(&self) -> &ProvisionalConfig {
@@ -177,11 +233,30 @@ impl Scheduler {
     }
 
     fn now(&self) -> u64 {
-        (self.clock)().max(self.core.last_at)
+        let elapsed = (self.clock)().saturating_sub(self.clock_origin);
+        self.clock_base
+            .saturating_add(elapsed)
+            .max(self.core.last_at)
     }
 
-    /// Validate, journal and apply one event. See the module docs.
+    /// Validate, journal and apply one event. See the module docs. Ids with
+    /// [`RESERVED_ID_PREFIX`] and `AuditRevoke` events are refused: only
+    /// the scheduler emits those.
     pub fn deliver(&mut self, event: Event) -> Result<Outcome, SchedError> {
+        if event.id.starts_with(RESERVED_ID_PREFIX) {
+            return Err(SchedError::InvalidEvent(format!(
+                "event ids starting with '{RESERVED_ID_PREFIX}' are reserved"
+            )));
+        }
+        if matches!(event.kind, EventKind::AuditRevoke { .. }) {
+            return Err(SchedError::InvalidEvent(
+                "audit_revoke is emitted only by audit()".to_string(),
+            ));
+        }
+        self.deliver_unchecked(event)
+    }
+
+    pub(crate) fn deliver_unchecked(&mut self, event: Event) -> Result<Outcome, SchedError> {
         check_identifier("event id", &event.id)
             .map_err(|e| SchedError::InvalidEvent(e.to_string()))?;
         if let Some(prev) = self.core.seen.get(&event.id) {
@@ -225,6 +300,11 @@ impl Scheduler {
 
     pub fn permits_in_use(&self) -> PermitPool {
         self.core.pool
+    }
+
+    /// How many event ids are remembered for duplicate detection.
+    pub fn remembered_event_ids(&self) -> usize {
+        self.core.seen.len()
     }
 
     /// Full scheduler state as JSON, for replay comparisons and debugging.

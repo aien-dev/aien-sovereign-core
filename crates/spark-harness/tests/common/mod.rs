@@ -73,6 +73,7 @@ pub fn enabled() -> ProvisionalConfig {
             max_concurrency: 8,
         },
         lease_ttl: 1_000,
+        dedup_window: 64,
     }
 }
 
@@ -122,9 +123,11 @@ impl H {
         let fx = Fixture::new();
         let engine = fx.engine();
         let ticks = Arc::new(AtomicU64::new(0));
-        let (sched, report) =
+        let (unaudited, report) =
             Scheduler::open(cfg, &engine.completion_store, &fx.journal(), clock(&ticks)).unwrap();
         assert_eq!(report.entries, 0);
+        let (sched, revoked) = unaudited.audit().unwrap();
+        assert!(revoked.is_empty());
         H {
             fx,
             engine,
@@ -134,22 +137,31 @@ impl H {
         }
     }
 
-    /// Drop the scheduler (closing the journal) and replay it from disk.
-    pub fn reopen(&mut self, cfg: ProvisionalConfig) -> Result<usize, SchedError> {
+    /// Drop the scheduler (closing the journal), replay it from disk and
+    /// audit it. Returns the torn bytes dropped and the tasks the audit
+    /// revoked.
+    pub fn reopen(&mut self, cfg: ProvisionalConfig) -> Result<(usize, Vec<String>), SchedError> {
         let placeholder = Scheduler::new(
             cfg.clone(),
             &self.engine.completion_store,
             clock(&self.ticks),
         )?;
         drop(std::mem::replace(&mut self.sched, placeholder));
-        let (sched, report) = Scheduler::open(
+        let (unaudited, report) = Scheduler::open(
             cfg,
             &self.engine.completion_store,
             &self.fx.journal(),
             clock(&self.ticks),
         )?;
+        let (sched, revoked) = unaudited.audit()?;
         self.sched = sched;
-        Ok(report.torn_bytes)
+        Ok((report.torn_bytes, revoked))
+    }
+
+    /// Simulate a process restart: the new process's clock starts at 0.
+    pub fn restart(&mut self, cfg: ProvisionalConfig) -> Result<(usize, Vec<String>), SchedError> {
+        self.ticks.store(0, Ordering::SeqCst);
+        self.reopen(cfg)
     }
 
     pub fn advance(&self, d: u64) {

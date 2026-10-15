@@ -14,7 +14,8 @@
 //! Crash handling:
 //! - A final segment with no trailing newline is a torn write. It is ignored
 //!   and truncated away on open (then fsynced), so the next append starts on
-//!   a clean line.
+//!   a clean line. Truncation happens only after the header and every
+//!   complete line validated; a refused journal is not modified.
 //! - A newline-terminated line that does not parse is corruption, not a torn
 //!   write (a torn write is always a prefix of one line), and open fails
 //!   closed.
@@ -72,6 +73,30 @@ impl Journal {
         };
         let complete = bytes.iter().rposition(|b| *b == b'\n').map_or(0, |i| i + 1);
         let torn_bytes = bytes.len() - complete;
+        // Validate everything before touching the file: a journal that is
+        // refused (wrong header, corrupt line) is left exactly as found.
+        let text = std::str::from_utf8(&bytes[..complete])
+            .map_err(|e| format!("journal {} is not UTF-8: {e}", path.display()))?;
+        let mut lines = text.lines();
+        let fresh = match lines.next() {
+            None => true,
+            Some(first) => {
+                let found: Value = serde_json::from_str(first)
+                    .map_err(|e| format!("journal header unreadable: {e}"))?;
+                if &found != header {
+                    return Err(format!(
+                        "journal header mismatch: journal has {found}, expected {header}"
+                    ));
+                }
+                false
+            }
+        };
+        let mut entries = Vec::new();
+        for (i, line) in lines.enumerate() {
+            let entry = serde_json::from_str(line)
+                .map_err(|e| format!("journal line {} is corrupt, refusing: {e}", i + 2))?;
+            entries.push(entry);
+        }
         let file = OpenOptions::new()
             .create(true)
             .append(true)
@@ -89,29 +114,9 @@ impl Journal {
             poisoned: false,
             _lock: lock,
         };
-        let text = std::str::from_utf8(&bytes[..complete])
-            .map_err(|e| format!("journal {} is not UTF-8: {e}", path.display()))?;
-        let mut lines = text.lines();
-        match lines.next() {
-            None => {
-                journal.append(header)?;
-                sync_dir(path).map_err(|e| format!("cannot fsync journal dir: {e}"))?;
-            }
-            Some(first) => {
-                let found: Value = serde_json::from_str(first)
-                    .map_err(|e| format!("journal header unreadable: {e}"))?;
-                if &found != header {
-                    return Err(format!(
-                        "journal header mismatch: journal has {found}, expected {header}"
-                    ));
-                }
-            }
-        }
-        let mut entries = Vec::new();
-        for (i, line) in lines.enumerate() {
-            let entry = serde_json::from_str(line)
-                .map_err(|e| format!("journal line {} is corrupt, refusing: {e}", i + 2))?;
-            entries.push(entry);
+        if fresh {
+            journal.append(header)?;
+            sync_dir(path).map_err(|e| format!("cannot fsync journal dir: {e}"))?;
         }
         Ok(Opened {
             journal,
