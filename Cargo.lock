@@ -483,11 +483,15 @@ name = "aien-serve-http"
 version = "0.1.0"
 dependencies = [
  "aien-inference-abi",
+ "aien-kv-store",
  "aien-omega-gpu",
+ "aien-platform",
+ "aien-runtime",
  "axum 0.7.9",
  "libc",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "tokio",
  "tokio-stream",
 ]

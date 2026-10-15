@@ -35,3 +35,7 @@ sha2 = "0.10"
 # Off by default: a production build fails closed (no reference weights, no
 # silent CPU fallback behind the GPU backend). Only dev/test builds turn it on.
 dev-fallback = []
+# Host-only test engine (sc#505): the tiny in-memory Qwen3-MoE checkpoint and host matmuls behind
+# a real `OmegaEngine` over a host bf16 pool, so other crates can test the persistent KV path
+# without a chip. Dev-dependencies only; never in a server build.
+host-test-engine = []

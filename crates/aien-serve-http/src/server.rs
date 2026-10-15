@@ -196,6 +196,18 @@ pub async fn serve(
     engine: Arc<dyn Engine>,
     codec: Arc<dyn Codec>,
 ) -> std::io::Result<(SocketAddr, JoinHandle<()>)> {
+    serve_until(cfg, engine, codec, std::future::pending()).await
+}
+
+/// [`serve`] until `shutdown` resolves: then no new connection is accepted, the requests in
+/// flight finish (a streaming generation runs to its end) and the task ends, releasing the
+/// server's hold on `engine`.
+pub async fn serve_until(
+    cfg: ServerConfig,
+    engine: Arc<dyn Engine>,
+    codec: Arc<dyn Codec>,
+    shutdown: impl std::future::Future<Output = ()> + Send + 'static,
+) -> std::io::Result<(SocketAddr, JoinHandle<()>)> {
     if !cfg.bind.is_loopback() {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
@@ -214,7 +226,10 @@ pub async fn serve(
     });
     let app = router(state);
     let handle = tokio::spawn(async move {
-        if let Err(e) = axum::serve(listener, app).await {
+        if let Err(e) = axum::serve(listener, app)
+            .with_graceful_shutdown(shutdown)
+            .await
+        {
             eprintln!("aien-serve-http: server stopped: {e}");
         }
     });
@@ -251,13 +266,18 @@ async fn get_model(
 }
 
 async fn health(State(state): State<Arc<AppState>>) -> Json<Value> {
-    Json(serde_json::json!({
+    let mut v = serde_json::json!({
         "status": "ok",
         "model": state.cfg.model_id,
         "engine": state.engine.kind(),
         "busy": state.gate.try_lock().is_err(),
         "uptime_s": state.started.elapsed().as_secs(),
-    }))
+    });
+    // Persistent KV (sc#505): present only when AIEN_KV_STORE_DIR asked for it.
+    if let (Some(pk), Some(obj)) = (state.engine.persistence_status(), v.as_object_mut()) {
+        obj.insert("persistent_kv".into(), pk);
+    }
+    Json(v)
 }
 
 async fn not_found() -> ApiError {

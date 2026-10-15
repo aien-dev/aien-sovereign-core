@@ -179,6 +179,17 @@ impl SealKey {
     /// version, fresh nonce, tag) and encrypts the payload. The file length is
     /// unchanged.
     pub fn seal_file(&self, file: &mut [u8]) -> Result<(), SealError> {
+        let t0 = std::time::Instant::now();
+        let got = self.seal_inner(file);
+        note_timing(
+            &SEAL_TIMING,
+            file.len().saturating_sub(HEADER_REGION_LEN),
+            t0,
+        );
+        got
+    }
+
+    fn seal_inner(&self, file: &mut [u8]) -> Result<(), SealError> {
         if file.len() < HEADER_REGION_LEN {
             return Err(SealError::Short);
         }
@@ -206,7 +217,9 @@ impl SealKey {
     /// sealed file) in place. On any error the payload buffer is zeroed and
     /// must be discarded; nothing in it may be used.
     pub fn open_payload(&self, region: &[u8], payload: &mut [u8]) -> Result<(), SealError> {
+        let t0 = std::time::Instant::now();
         let got = self.open_inner(region, payload);
+        note_timing(&OPEN_TIMING, payload.len(), t0);
         if got.is_err() {
             payload.fill(0);
             if got == Err(SealError::Rejected) {
@@ -290,4 +303,54 @@ pub fn key_refusals_total() -> u64 {
 /// Objects whose authentication failed in this process (each was discarded).
 pub fn open_rejected_total() -> u64 {
     OPEN_REJECTED.load(Ordering::Relaxed)
+}
+
+/// Calls, payload bytes and wall nanoseconds of one seal operation (#508 encryption cost).
+struct Timing {
+    calls: AtomicU64,
+    bytes: AtomicU64,
+    ns: AtomicU64,
+}
+
+static SEAL_TIMING: Timing = Timing {
+    calls: AtomicU64::new(0),
+    bytes: AtomicU64::new(0),
+    ns: AtomicU64::new(0),
+};
+static OPEN_TIMING: Timing = Timing {
+    calls: AtomicU64::new(0),
+    bytes: AtomicU64::new(0),
+    ns: AtomicU64::new(0),
+};
+
+fn note_timing(t: &Timing, bytes: usize, t0: std::time::Instant) {
+    let ns = u64::try_from(t0.elapsed().as_nanos()).unwrap_or(u64::MAX);
+    t.calls.fetch_add(1, Ordering::Relaxed);
+    t.bytes.fetch_add(bytes as u64, Ordering::Relaxed);
+    t.ns.fetch_add(ns, Ordering::Relaxed);
+}
+
+/// Totals of [`SealKey::seal_file`] and [`SealKey::open_payload`] in this process: every call
+/// (refused ones included), the payload bytes it covered and the wall time it took. The
+/// encryption cost of persistence is `seal_ns` per parked byte and `open_ns` per restored byte.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SealTiming {
+    pub seal_calls: u64,
+    pub seal_bytes: u64,
+    pub seal_ns: u64,
+    pub open_calls: u64,
+    pub open_bytes: u64,
+    pub open_ns: u64,
+}
+
+pub fn seal_timing() -> SealTiming {
+    let r = |a: &AtomicU64| a.load(Ordering::Relaxed);
+    SealTiming {
+        seal_calls: r(&SEAL_TIMING.calls),
+        seal_bytes: r(&SEAL_TIMING.bytes),
+        seal_ns: r(&SEAL_TIMING.ns),
+        open_calls: r(&OPEN_TIMING.calls),
+        open_bytes: r(&OPEN_TIMING.bytes),
+        open_ns: r(&OPEN_TIMING.ns),
+    }
 }

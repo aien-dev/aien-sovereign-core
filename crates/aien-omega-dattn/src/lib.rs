@@ -15,6 +15,7 @@
 use aien_omega_gpu::OmegaGpuError;
 use std::fmt;
 pub mod raw;
+pub mod rows;
 
 /// Query heads the kernel is built for (`OMEGA_GPU_DATTN_Q_HEADS`).
 pub const Q_HEADS: usize = 32;
@@ -97,6 +98,25 @@ mod ffi {
         pub fn omega_gpu_decode_attn_set_depth(depth: u32);
         pub fn omega_gpu_decode_attn_set_per_split(per_split: u32);
         pub fn omega_gpu_decode_attn_test_set_mutant(mutant: i32);
+        // Row access to the cache (omega src/omega_gpu_decode_attn_api.c, test helpers used by the
+        // persistent KV park/restore of sc#505).
+        pub fn omega_gpu_decode_attn_cache_write(
+            c: *mut OmegaGpuDecodeAttnCache,
+            layer: u32,
+            kv_head: u32,
+            pos: u32,
+            count: u32,
+            k_bf16: *const u16,
+            v_bf16: *const u16,
+        ) -> i32;
+        pub fn omega_gpu_decode_attn_cache_read(
+            c: *mut OmegaGpuDecodeAttnCache,
+            layer: u32,
+            kv_head: u32,
+            pos: u32,
+            k_bf16: *mut u16,
+            v_bf16: *mut u16,
+        ) -> i32;
     }
 }
 

@@ -12,6 +12,12 @@
 //! only around each generation. Its prefill runs the whole prompt in one pass with the router
 //! and MoE combine on the chip (ON by default; `--whole-prompt off`, `--prefill-device-host off`
 //! or `AIEN_SERVE_WHOLE_PROMPT=0` / `AIEN_SERVE_WP_DEVICE_HOST=0` turn them off).
+//! Persistent KV (omega only, opt in): with `AIEN_KV_STORE_DIR` set (and `AIEN_KV_STORE_KEY`,
+//! e.g. `atlas-vault run AIEN_KV_STORE_KEY -- aien-serve-http ...`) the door parks each turn's KV
+//! in the sealed store and restores the longest stored prefix after a restart; any problem
+//! refuses with a startup line and the door runs plain. Unset: nothing changes.
+//! SIGTERM/SIGINT: stop accepting, finish the request in flight, drain the parks, exit 0.
+//! `AIEN_KV_TEST_FAULT` (chip acceptance checks only) stalls one store step; see `kv_persist`.
 //! `stub` replays `--stub-reply` for every request, using the model directory's
 //! tokenizer when it exists (so Odysseus can be wired before the weights load).
 
@@ -24,10 +30,11 @@ use aien_inference_abi::qwen3_moe_omega::WeightFormat;
 use aien_serve_http::codec::{ByteCodec, Codec, HfCodec};
 use aien_serve_http::cpu_engine::CpuReferenceEngine;
 use aien_serve_http::engine::{Engine, StubEngine};
+use aien_serve_http::kv_persist;
 use aien_serve_http::omega_engine::{
     parse_switch, OmegaDoor, PrefillMode, WHOLE_PROMPT_ENV, WP_DEVICE_HOST_ENV,
 };
-use aien_serve_http::server::{serve, ServerConfig};
+use aien_serve_http::server::{serve_until, ServerConfig};
 
 const DEFAULT_MODEL_DIR: &str = "models/qwen3-30b-a3b-instruct-2507-fp8";
 
@@ -226,7 +233,17 @@ fn main() -> ExitCode {
             args.spin_us,
             args.prefill,
         ) {
-            Ok(e) => Arc::new(e),
+            Ok(mut door) => {
+                // Persistent KV (sc#505): only when AIEN_KV_STORE_DIR is set; otherwise nothing else is read.
+                if let Some(settings) = kv_persist::settings_from_lookup(|n| std::env::var(n).ok())
+                {
+                    // The key lives on only in the settings; no child inherits it.
+                    std::env::remove_var(aien_kv_store::seal::KEY_ENV);
+                    let line = enable_persistence(&mut door, settings, &args);
+                    eprintln!("aien-serve-http: {line}");
+                }
+                Arc::new(door)
+            }
             Err(e) => {
                 eprintln!("aien-serve-http: omega load failed: {e}");
                 return ExitCode::from(1);
@@ -265,13 +282,25 @@ fn main() -> ExitCode {
     };
     rt.block_on(async move {
         let model_id = args.cfg.model_id.clone();
-        match serve(args.cfg, engine, codec).await {
+        // SIGTERM or SIGINT: stop accepting, let the request in flight finish, then drop the
+        // engine, which drains the persistent KV parks before the process exits (sc#509).
+        let keep = Arc::clone(&engine);
+        // The handlers are installed here, before "serving" is printed, so an early SIGTERM drains too.
+        let signals = shutdown_signals();
+        match serve_until(args.cfg, engine, codec, signals).await {
             Ok((addr, handle)) => {
                 eprintln!(
                     "aien-serve-http: serving {model_id} at http://{addr}/v1 (engine {})",
                     args.engine
                 );
                 let _ = handle.await;
+                let t0 = std::time::Instant::now();
+                eprintln!("aien-serve-http: shutting down: no new requests; finishing the one in flight and draining persistent KV");
+                while Arc::strong_count(&keep) > 1 && t0.elapsed() < std::time::Duration::from_secs(600) {
+                    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                }
+                drop(keep);
+                eprintln!("aien-serve-http: shutdown complete in {} ms", t0.elapsed().as_millis());
                 ExitCode::SUCCESS
             }
             Err(e) => {
@@ -280,4 +309,59 @@ fn main() -> ExitCode {
             }
         }
     })
+}
+
+/// Opens the persistent KV store for the loaded omega engine (the checkpoint digest reads every
+/// weight file once). Returns the startup line; any problem refuses and the door runs plain.
+fn enable_persistence(
+    door: &mut OmegaDoor,
+    settings: Result<aien_runtime::shared_kv::KvPersistSettings, String>,
+    args: &Args,
+) -> String {
+    let t0 = std::time::Instant::now();
+    let build = kv_persist::OmegaBuild::linked();
+    let env: Vec<(String, String)> = std::env::vars().collect();
+    let config = door.config();
+    let identity = settings.as_ref().map_err(|e| e.clone()).and_then(|s| {
+        // No digest (minutes of reading) when the key already refuses: `open` reports the key.
+        if !matches!(s.store_key, Some(Ok(_))) {
+            return Err("the store key refused".to_string());
+        }
+        let rope_scaling = kv_persist::config_has_rope_scaling(&args.model_dir)?;
+        let (sha, kind) = kv_persist::checkpoint_digest(&args.model_dir)?;
+        kv_persist::OmegaKvIdentity::new(&kv_persist::IdentityInputs {
+            model_id: &args.cfg.model_id,
+            model_sha256: sha,
+            model_digest_kind: kind,
+            config: &config,
+            rope_scaling,
+            weights: args.weights,
+            switches: door.kv_switches(),
+            build: &build,
+            env: &env,
+        })
+    });
+    let fault = kv_persist::TestFault::from_lookup(|n| std::env::var(n).ok());
+    let (state, line) = kv_persist::open_with_test_fault(settings, identity, fault);
+    door.set_persistence(state);
+    format!("{line} [identity in {:.1} s]", t0.elapsed().as_secs_f64())
+}
+
+/// Installs the SIGTERM and SIGINT handlers now; the returned future resolves on the first one.
+fn shutdown_signals() -> impl std::future::Future<Output = ()> + Send + 'static {
+    use tokio::signal::unix::{signal, SignalKind};
+    let handlers = (
+        signal(SignalKind::terminate()),
+        signal(SignalKind::interrupt()),
+    );
+    async move {
+        let (Ok(mut term), Ok(mut int)) = handlers else {
+            eprintln!("aien-serve-http: cannot install the shutdown signal handlers; SIGTERM kills without draining");
+            return std::future::pending().await;
+        };
+        tokio::select! {
+            _ = term.recv() => eprintln!("aien-serve-http: SIGTERM received"),
+            _ = int.recv() => eprintln!("aien-serve-http: SIGINT received"),
+        }
+    }
 }
