@@ -1,12 +1,13 @@
 # OWN-30B on omega 4799f9eb (pin bump, 2026-10-15)
 
-CALC-EXEMPT: every number here is copied from a measured log in this folder or in #524's folder
+CALC-EXEMPT: every number here is copied from a measured log in this folder (the `*.log` files are force-added past
+.gitignore so SHA256SUMS checks on a fresh clone) or in #524's and #514's folders
 (`own30b-requal-main-20261015`); none is derived.
 
 ## What changed
 `omega.lock` 62833658 -> 4799f9eb (omega main after #459 GB10 stale-L2 invalidate + cmdlist prefix reserve,
 #460 wide bf16 matmul layout fix and platform ABI 1.1 -> 1.2, #461 test only, #463 evidence).
-physics.lock 6d7cf0d4 and aienos.lock b84c0a67 are unchanged.
+omega's physics.lock 6d7cf0d4 and aienos.lock b84c0a67 are the same at both omega commits.
 
 ABI 1.2 adds `OmegaGpuPlatformCaps.submit_prefix_words` and `omega_gpu_session_submit_prefix_words()`.
 sovereign-core mirrors no platform struct (no `OmegaGpuPlatformCaps`, no platform install, no direct ring
