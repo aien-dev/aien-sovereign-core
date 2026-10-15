@@ -366,3 +366,7 @@ Rules across all steps: the 30B is the running code until step 4 and keeps its m
 - The side door (`model_mut`) is a trust contract, not a type guarantee: a gate harness that touches the cache through it must call `reset()` afterwards.
 - The identity digest may change at step 7 if the entries are not reproduced in today's order; the step's gate forces a choice between pinning it and recording the bump.
 - The sparse output head is a default gather until a row-list lm_head kernel exists; the research note's speed gain (recommendation 5) is not claimed by this ADR.
+
+## Record
+
+- 2026-10-15, step 0 sealed: the frozen pre-migration baseline is `docs/inference/evidence/adr0004-step0-baseline-20261015/` on main 559f0f1e: `check-full-3/` for G30-tokens (IDENTICAL on all 4 prompts, parity and 10 of 10 mutants green) and G30-speed (39.1 / 36.1 / 37.5 / 36.6 tok/s, floors 37.927 calc:ca6917a169f4 / 35.017 calc:db0cafe07493 / 36.375 calc:0cc180e77663 / 35.502 calc:d0e63d84b0e7), and `door-2/` for the G30-door tokens (seed 1, temperature 1.0, top_p 1.0, max_tokens 64; content digests in that folder's README); the G30-door speed floor stays 32.95.
