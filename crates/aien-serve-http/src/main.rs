@@ -177,6 +177,22 @@ fn main() -> ExitCode {
         }
     };
     apply_generation_defaults(&mut args.cfg, &args.model_dir);
+    // OWN-8B stage S negative controls: read once, refused outright without debug assertions.
+    match aien_serve_http::sampling::install_mutant_from_env() {
+        Ok(None) => {}
+        Ok(Some(m)) => {
+            for _ in 0..3 {
+                eprintln!(
+                    "aien-serve-http: !!! SAMPLING MUTANT {} ACTIVE: this server samples WRONG on purpose (negative control) !!!",
+                    m.name()
+                );
+            }
+        }
+        Err(e) => {
+            eprintln!("aien-serve-http: {e}");
+            return ExitCode::from(2);
+        }
+    }
 
     let codec: Arc<dyn Codec> = if args.model_dir.join("tokenizer.json").exists() {
         match HfCodec::from_model_dir(&args.model_dir) {

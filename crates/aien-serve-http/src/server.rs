@@ -26,6 +26,7 @@ use crate::engine::{Engine, EngineError, FinishReason, GenerateParams};
 use crate::openai::{
     chunk_json, completion_json, ChatRequest, ErrorBody, ModelCard, ModelList, Usage,
 };
+use crate::sampling::SamplingRecord;
 use crate::text::{Push, TextAssembler};
 
 #[derive(Debug, Clone)]
@@ -164,6 +165,7 @@ enum Ev {
     Done {
         finish: &'static str,
         completion_tokens: usize,
+        sampling: Option<SamplingRecord>,
     },
     Error(String),
     /// The engine could not get the shared chip: 503 before any token.
@@ -537,13 +539,15 @@ fn prepare(state: &AppState, req: ChatRequest) -> Result<Prepared, ApiError> {
     })
 }
 
-/// Runs on a blocking thread holding the generation lock (`_guard`).
+/// Runs on a blocking thread holding the generation lock (`guard`). The lock is released as soon
+/// as the engine returns, before the final event is sent, so a client that sends its next request
+/// the moment it has the reply never meets a stale 503 `server_busy`.
 fn run_generation(
     engine: Arc<dyn Engine>,
     codec: Arc<dyn Codec>,
     prepared: Prepared,
     tx: mpsc::Sender<Ev>,
-    _guard: OwnedMutexGuard<()>,
+    guard: OwnedMutexGuard<()>,
     id: &str,
 ) {
     let mut asm = TextAssembler::new(codec, prepared.stop_strings);
@@ -571,6 +575,7 @@ fn run_generation(
             }
         },
     );
+    drop(guard);
     match result {
         Err(EngineError::Busy(m)) => {
             eprintln!("aien-serve-http: {id}: GPU busy: {m}");
@@ -604,8 +609,13 @@ fn run_generation(
             } else {
                 0.0
             };
+            let sampling_fields = out
+                .sampling
+                .as_ref()
+                .map(|s| format!(", {}", s.log_fields()))
+                .unwrap_or_default();
             eprintln!(
-                "aien-serve-http: {id}: prompt {} tok, reply {} tok, finish {finish}, prefill {} ms, decode {} ms ({tps:.2} tok/s)",
+                "aien-serve-http: {id}: prompt {} tok, reply {} tok, finish {finish}, prefill {} ms, decode {} ms ({tps:.2} tok/s){sampling_fields}",
                 prepared.prompt_tokens.len(),
                 out.emitted_tokens,
                 out.prefill_ms,
@@ -614,6 +624,7 @@ fn run_generation(
             let _ = tx.blocking_send(Ev::Done {
                 finish,
                 completion_tokens: out.emitted_tokens,
+                sampling: out.sampling,
             });
         }
     }
@@ -633,11 +644,13 @@ async fn collect_response(
             Ev::Done {
                 finish,
                 completion_tokens,
+                sampling,
             } => {
                 let usage = Usage {
                     prompt_tokens,
                     completion_tokens,
                     total_tokens: prompt_tokens + completion_tokens,
+                    aien_sampling: sampling,
                 };
                 return Ok(Json(completion_json(
                     &id, created, model, &content, finish, &usage,
@@ -679,11 +692,13 @@ fn stream_response(
                 Ev::Done {
                     finish,
                     completion_tokens,
+                    sampling,
                 } => {
                     let usage = Usage {
                         prompt_tokens,
                         completion_tokens,
                         total_tokens: prompt_tokens + completion_tokens,
+                        aien_sampling: sampling,
                     };
                     let last =
                         chunk_json(&id, created, &model, None, None, Some(finish), Some(&usage));

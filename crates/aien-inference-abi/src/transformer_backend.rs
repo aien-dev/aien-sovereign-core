@@ -66,9 +66,39 @@ pub fn sample_with_params_observed(
     seed: u64,
     obs: &mut DecodeObservation,
 ) -> (u32, f32) {
+    let (token, logprob, _) = sample_with_params_traced(logits, params, seed, obs);
+    (token, logprob)
+}
+
+/// What one draw had to choose from (OWN-8B stage S): the kept set after the
+/// temperature softmax and the nucleus cut, counted inside the sampler, so a
+/// confident model and a sampler that ignores its seed can be told apart.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DrawTrace {
+    /// Tokens with non-zero probability in the set the draw chose from. 1 for a
+    /// greedy pick; 1 for a sampled draw means the seed had nothing to choose.
+    pub kept: usize,
+    /// Probability of the most likely token after temperature, before the
+    /// nucleus cut. 1.0 for a greedy pick.
+    pub top_prob: f64,
+}
+
+/// `sample_with_params_observed` that also returns the [`DrawTrace`]. This is
+/// the one implementation of the sampling math; the other two call it.
+pub fn sample_with_params_traced(
+    logits: &[f32],
+    params: &SamplingParams,
+    seed: u64,
+    obs: &mut DecodeObservation,
+) -> (u32, f32, DrawTrace) {
     if params.temperature <= 0.001 {
         obs.greedy_tokens += 1;
-        return sample_argmax(logits);
+        let (token, logprob) = sample_argmax(logits);
+        let trace = DrawTrace {
+            kept: 1,
+            top_prob: 1.0,
+        };
+        return (token, logprob, trace);
     }
     obs.sampled_tokens += 1;
     obs.temperature = Some(params.temperature);
@@ -107,17 +137,23 @@ pub fn sample_with_params_observed(
     }
 
     let mass: f64 = kept.iter().map(|&i| probs[i]).sum();
+    let trace = DrawTrace {
+        kept: kept.iter().filter(|&&i| probs[i] > 0.0).count(),
+        // The largest logit contributed exp(0) = 1 to `sum`.
+        top_prob: 1.0 / sum,
+    };
     // 53 random bits -> uniform in [0, 1), scaled to the kept mass.
     let r = ((seed >> 11) as f64 / (1u64 << 53) as f64) * mass;
     let mut cum = 0.0f64;
     for &i in &kept {
         cum += probs[i];
         if r < cum {
-            return (i as u32, (probs[i] / mass).max(1e-300).ln() as f32);
+            return (i as u32, (probs[i] / mass).max(1e-300).ln() as f32, trace);
         }
     }
     let last = *kept.last().expect("kept set is never empty");
-    (last as u32, (probs[last] / mass).max(1e-300).ln() as f32)
+    let logprob = (probs[last] / mass).max(1e-300).ln() as f32;
+    (last as u32, logprob, trace)
 }
 
 /// Fully native Rust transformer backend executing real tensor forward computation.
@@ -2960,9 +2996,39 @@ mod tests {
                         sample_with_params(&logits, &p, seed),
                         sample_with_params_observed(&logits, &p, seed, &mut o)
                     );
+                    let (t, lp, _) = sample_with_params_traced(&logits, &p, seed, &mut o);
+                    assert_eq!(sample_with_params(&logits, &p, seed), (t, lp));
                 }
             }
         }
+    }
+
+    /// OWN-8B stage S: the kept set is counted where the draw happens.
+    #[test]
+    fn stage_s_trace_counts_the_kept_set() {
+        let mut o = DecodeObservation::default();
+        let p = |temperature: f32, top_p: f32| SamplingParams {
+            temperature,
+            top_p,
+            ..Default::default()
+        };
+        // Flat 4-way: everything is kept, top probability 1/4.
+        let flat = [0.0f32; 4];
+        let (_, _, tr) = sample_with_params_traced(&flat, &p(1.0, 1.0), 9, &mut o);
+        assert_eq!(tr.kept, 4);
+        assert!((tr.top_prob - 0.25).abs() < 1e-12, "{tr:?}");
+        // One token holds more than top_p of the mass: the nucleus keeps it alone.
+        let peaked = [10.0f32, 0.0, 0.0, 0.0];
+        let (t, _, tr) = sample_with_params_traced(&peaked, &p(0.7, 0.8), 9, &mut o);
+        assert_eq!((t, tr.kept), (0, 1));
+        assert!(tr.top_prob > 0.8, "{tr:?}");
+        // Masked (-inf) logits are not counted as kept.
+        let masked = [1.0f32, 1.0, f32::NEG_INFINITY, f32::NEG_INFINITY];
+        let (_, _, tr) = sample_with_params_traced(&masked, &p(1.0, 1.0), 9, &mut o);
+        assert_eq!(tr.kept, 2);
+        // Greedy: one candidate.
+        let (t, _, tr) = sample_with_params_traced(&flat, &p(0.0, 1.0), 9, &mut o);
+        assert_eq!((t, tr.kept, tr.top_prob), (0, 1, 1.0));
     }
 
     /// A decoding request with no recorded sampling params takes the argmax

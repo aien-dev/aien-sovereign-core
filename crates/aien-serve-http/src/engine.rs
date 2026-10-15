@@ -14,6 +14,8 @@
 use std::fmt;
 use std::time::{Duration, Instant};
 
+use crate::sampling::SamplingRecord;
+
 /// Sampling and stopping parameters for one generation. All fields are already
 /// validated and defaulted by the HTTP layer.
 #[derive(Debug, Clone, PartialEq)]
@@ -44,13 +46,16 @@ pub enum FinishReason {
 }
 
 /// What the engine reports when `generate` returns.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct GenerateOutcome {
     /// Tokens handed to `on_token`.
     pub emitted_tokens: usize,
     pub finish: FinishReason,
     pub prefill_ms: u64,
     pub decode_ms: u64,
+    /// How the tokens were sampled, observed at each draw (OWN-8B stage S). `None` for an
+    /// engine that does not sample (the stub replays a fixed list).
+    pub sampling: Option<SamplingRecord>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -182,6 +187,7 @@ impl Engine for StubEngine {
             finish,
             prefill_ms: 0,
             decode_ms: t0.elapsed().as_millis() as u64,
+            sampling: None,
         })
     }
 }

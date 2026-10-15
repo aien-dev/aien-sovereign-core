@@ -5,6 +5,8 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::sampling::SamplingRecord;
+
 #[derive(Debug, Deserialize)]
 pub struct ChatRequest {
     #[serde(default)]
@@ -83,6 +85,10 @@ pub struct Usage {
     pub prompt_tokens: usize,
     pub completion_tokens: usize,
     pub total_tokens: usize,
+    /// How the reply was sampled (OWN-8B stage S): an extra field, ignored by OpenAI clients.
+    /// Its `seed` replays the request. Absent for an engine that does not sample.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub aien_sampling: Option<SamplingRecord>,
 }
 
 #[derive(Debug, Serialize)]
