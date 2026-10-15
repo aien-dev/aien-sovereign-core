@@ -10,9 +10,9 @@ mod home_guard;
 use aien_runtime::approved_replay::{
     self as replay, ClaimKeys, ClaimState, CommitEvidence, ReplayLedger, FIELD,
 };
+use aien_runtime::compose::{ComposeBridge, ComposeProposer};
 use aien_runtime::control::ComposeRecordView;
 use aien_runtime::effects;
-use aien_runtime::spine::{ComposeBridge, ComposeProposer};
 use serde_json::json;
 use std::path::Path;
 use std::sync::{Arc, Barrier};

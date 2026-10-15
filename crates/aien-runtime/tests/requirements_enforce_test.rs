@@ -2,15 +2,15 @@
 //! (crate::requirements, crate::requirements_extract). Covers the two
 //! open-model-qwen3 v3 gaps (G3 "with" after a count, G2 "covers" topics),
 //! the uncertain-span refusal and the missing-record refusal (#289).
+#[path = "support/compose_harness.rs"]
+mod compose_harness;
 #[path = "support/home_guard.rs"]
 mod home_guard;
 
-use aien_runtime::control::ControlResponse;
+use aien_runtime::control::{ComposeTaskReport, ControlResponse};
 use aien_runtime::requirements::{analyze, extract, refusal_reason, ItemKind, Requirement};
-use aien_runtime::spine::{
-    check_file_proposal, propose_task_checked, ComposeBridge, ComposeProposer, Generation,
-    COMPOSE_MAX_ATTEMPTS,
-};
+use aien_runtime::{check_file_proposal, ComposeBridge, ComposeProposer, Generation};
+use compose_harness::Harness;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -36,38 +36,17 @@ fn content_of(reply: &str) -> String {
     check_file_proposal(reply).unwrap().content
 }
 
-fn run(
-    goal: &str,
-    replies: Vec<String>,
-) -> (
-    Result<String, String>,
-    Vec<aien_runtime::control::ProposalAttempt>,
-    Vec<String>,
-) {
-    let prompts = Mutex::new(Vec::new());
-    let queue = Mutex::new(replies);
-    let n = Mutex::new(0usize);
-    let proposer = |p: &str, _: Duration| {
-        prompts.lock().unwrap().push(p.to_string());
-        let q = queue.lock().unwrap();
-        let mut i = n.lock().unwrap();
-        let r = q[(*i).min(q.len() - 1)].clone();
-        *i += 1;
-        gen(&r)
-    };
+/// One compose task through `ComposeBridge::run_task`: the model answers call
+/// k with `replies[k - 1]` (the last one repeats). Returns the report and the
+/// prompts the model was handed.
+fn run(goal: &str, replies: Vec<String>) -> (ComposeTaskReport, Vec<String>) {
     let ex = analyze(goal);
     assert!(ex.uncertain.is_empty(), "{:?}", ex.uncertain);
-    let (out, a) = propose_task_checked(
-        &proposer,
-        "base",
-        None,
-        &ex.requirements,
-        Duration::from_secs(5),
-        Duration::from_millis(1),
-        COMPOSE_MAX_ATTEMPTS,
-    );
-    let p = prompts.lock().unwrap().clone();
-    (out, a, p)
+    let texts: Vec<&str> = replies.iter().map(String::as_str).collect();
+    let h = Harness::new(compose_harness::replies(&texts));
+    let r = h.run(goal).unwrap();
+    let p = h.calls().into_iter().map(|c| c.prompt).collect();
+    (r, p)
 }
 
 /// A reply that meets every requirement of the G3 goal.
@@ -383,15 +362,18 @@ fn word_counts_and_multiple_code_blocks() {
 // ---- the recorded v3 replies ----
 
 #[test]
+#[cfg_attr(not(compose_linked), ignore = "needs librx_compose.a: stub build")]
 fn recorded_g3_reply_is_refused_and_a_good_reply_passes() {
+    let _home = home_guard::home_slot();
     let ex = analyze(G3_GOAL);
     let why = refusal_reason(&ex.requirements, &content_of(G3_V3_REPLY)).unwrap();
     assert!(
         why.contains("at least 35 non-empty lines, found 13"),
         "{why}"
     );
-    let (out, a, prompts) = run(G3_GOAL, vec![G3_V3_REPLY.into(), g3_good()]);
-    assert_eq!(out.unwrap(), g3_good());
+    let (r, prompts) = run(G3_GOAL, vec![G3_V3_REPLY.into(), g3_good()]);
+    assert_eq!(r.proposal.as_deref(), Some(g3_good().as_str()), "{r:?}");
+    let a = &r.proposal_attempts;
     assert_eq!(a[0].outcome, "refused");
     assert!(a[0].unmet_requirements[0].contains("found 13"));
     assert_eq!(a[1].outcome, "parsed");
@@ -404,11 +386,18 @@ fn recorded_g3_reply_is_refused_and_a_good_reply_passes() {
 }
 
 #[test]
+#[cfg_attr(not(compose_linked), ignore = "needs librx_compose.a: stub build")]
 fn recorded_g3_reply_exhausts_with_nothing_approved() {
-    let (out, a, _) = run(G3_GOAL, vec![G3_V3_REPLY.into()]);
-    let why = out.unwrap_err();
+    let _home = home_guard::home_slot();
+    let (r, _) = run(G3_GOAL, vec![G3_V3_REPLY.into()]);
+    assert!(
+        r.proposal.is_none() && r.uncommitted_proposal.is_none(),
+        "{r:?}"
+    );
+    let why = r.proposer_error.unwrap();
     assert!(why.contains("found 13"), "{why}");
-    assert_eq!(a.len(), COMPOSE_MAX_ATTEMPTS as usize);
+    let a = &r.proposal_attempts;
+    assert_eq!(a.len(), 3);
     assert!(a
         .iter()
         .all(|x| x.outcome == "refused" && x.aegis.is_none()));
@@ -430,22 +419,24 @@ fn g3_wrong_headings_and_short_sections_are_named() {
 }
 
 #[test]
+#[cfg_attr(not(compose_linked), ignore = "needs librx_compose.a: stub build")]
 fn recorded_g2_reply_is_refused_and_a_good_reply_passes() {
+    let _home = home_guard::home_slot();
     let ex = analyze(G2_GOAL);
     let why = refusal_reason(&ex.requirements, &content_of(G2_V3_REPLY)).unwrap();
     assert!(why.contains("not covered: publishing"), "{why}");
-    let (out, a, prompts) = run(G2_GOAL, vec![G2_V3_REPLY.into(), g2_good()]);
-    assert_eq!(out.unwrap(), g2_good());
-    assert_eq!(a[0].outcome, "refused");
+    let (r, prompts) = run(G2_GOAL, vec![G2_V3_REPLY.into(), g2_good()]);
+    assert_eq!(r.proposal.as_deref(), Some(g2_good().as_str()), "{r:?}");
+    assert_eq!(r.proposal_attempts[0].outcome, "refused");
     assert!(
         prompts[1].contains("not covered: publishing"),
         "{}",
         prompts[1]
     );
     // the recorded reply is exhausted when the model keeps repeating it
-    let (out, a, _) = run(G2_GOAL, vec![G2_V3_REPLY.into()]);
-    assert!(out.is_err());
-    assert_eq!(a.len(), COMPOSE_MAX_ATTEMPTS as usize);
+    let (r, _) = run(G2_GOAL, vec![G2_V3_REPLY.into()]);
+    assert!(r.proposal.is_none() && r.proposer_error.is_some(), "{r:?}");
+    assert_eq!(r.proposal_attempts.len(), 3);
 }
 
 // ---- through the real compose run (linked build only) ----
@@ -533,7 +524,7 @@ fn linked_g2_original_reply_exhausts_and_nothing_is_written() {
     let Some(r) = result(resp) else { return };
     assert!(!r.committed, "{r:?}");
     assert!(r.proposal.is_none());
-    assert_eq!(r.proposal_attempts.len(), COMPOSE_MAX_ATTEMPTS as usize);
+    assert_eq!(r.proposal_attempts.len(), 3);
     assert!(r
         .proposer_error
         .unwrap()

@@ -21,6 +21,20 @@ SOVEREIGN_CORE="$(cd "$SCRIPT_DIR/.." && pwd)"
 # Parent directory holding the <publish_dirname> checkouts. Override for a CI
 # runner or a scratch directory; defaults to the monorepo's parent.
 WORKSPACE="${AIEN_MIRROR_WORKSPACE:-$(cd "$SOVEREIGN_CORE/.." && pwd)}"
+# Git source used for monorepo path dependencies in mirrored manifests.
+MONOREPO_GIT_URL="https://github.com/aien-spark/aien-sovereign-core"
+
+# Source [dependencies] that sync_manifest may APPEND to a mirror manifest that
+# lacks them, per repo (space-separated dep names). Repos not listed get no
+# appended deps. Keep this list explicit: appending a dep changes what the
+# mirror builds, so each entry must be a reviewed decision.
+#   spark-harness: aien-proof and blake3 back the verified completion gate (#533).
+manifest_append_deps() {
+  case "$1" in
+    spark-harness) echo "aien-proof blake3" ;;
+    *) echo "" ;;
+  esac
+}
 
 # Repository mapping: <cli_name>:<crate_subpath>:<publish_dirname>
 REPOS=(
@@ -136,11 +150,14 @@ pkg_field() {
 
 # Bring the destination [package] table in line with the source: license from the
 # workspace root (single source of truth), version and edition from the source crate.
+# Also: in-repo path deps become pinned git deps, and deps named by
+# manifest_append_deps for this repo are added when missing (see below).
 # Pure awk, no Python. Exit 0 parity or synced, 2 disparity in check mode, 1 error.
 sync_manifest() {
   local src_manifest="$1"
   local dest_manifest="$2"
   local is_check="$3"
+  local repo_name="$4"
   local ws_manifest="$SOVEREIGN_CORE/Cargo.toml"
 
   local license_id
@@ -174,6 +191,61 @@ sync_manifest() {
     END { flush_license() }
   ' "$dest_manifest" > "$tmp"
 
+  # [dependencies]: a source dep of the form `name = { path = "../<crate>" ... }`
+  # cannot build outside the monorepo, and Cargo refuses `path` and `git` on one
+  # dependency ("Only one of `git` or `path` is allowed", cargo 1.98.1). So it is
+  # rewritten to a git dep on this monorepo pinned to `rev = <monorepo HEAD at
+  # sync time>` and replaces the mirror's entry of the same name. The pin lives
+  # in the manifest itself: the aien-harness mirror ships no Cargo.lock, so a
+  # floating branch would build whatever main is at build time. Consequences:
+  # sync from a commit that is pushed to the monorepo (cargo fetches it), and
+  # `--check` reports disparity for a mirror with path deps after every
+  # monorepo commit until it is re-synced. Only deps named by
+  # manifest_append_deps are appended when missing; every other mirror line,
+  # and every mirror with no path deps and no list entry, is left byte-identical.
+  local mono_rev append_deps
+  mono_rev=$(git -C "$SOVEREIGN_CORE" rev-parse HEAD) || {
+    echo "[ERROR] Cannot resolve monorepo HEAD in $SOVEREIGN_CORE"
+    return 1
+  }
+  append_deps=$(manifest_append_deps "$repo_name")
+  local tmp_deps
+  tmp_deps=$(mktemp)
+  awk -v url="$MONOREPO_GIT_URL" -v rev="$mono_rev" -v allow="$append_deps" '
+    function key_of(line,   k) { k = line; sub(/[[:space:]]*=.*/, "", k); gsub(/^[[:space:]]+/, "", k); return k }
+    function emit_missing(   i) { for (i = 1; i <= n; i++) if (!(keys[i] in seen)) print lines[i]; emitted = 1 }
+    function missing_count(   i, c) { c = 0; for (i = 1; i <= n; i++) if (!(keys[i] in seen)) c++; return c }
+    BEGIN { na = split(allow, al, " "); for (i = 1; i <= na; i++) allowed[al[i]] = 1 }
+    FNR == NR {
+      if ($0 ~ /^[[:space:]]*\[/) { in_src = ($0 ~ /^[[:space:]]*\[dependencies\][[:space:]]*$/); next }
+      if (in_src && $0 ~ /^[[:space:]]*[A-Za-z0-9_-]+[[:space:]]*=/) {
+        line = $0
+        if (line ~ /path[[:space:]]*=[[:space:]]*"\.\.\//) {
+          gsub(/path[[:space:]]*=[[:space:]]*"\.\.\/[^"]*"/, "git = \"" url "\", rev = \"" rev "\"", line)
+          rewritten[key_of(line)] = line
+        }
+        if (key_of(line) in allowed) { n++; keys[n] = key_of(line); lines[n] = line }
+      }
+      next
+    }
+    /^[[:space:]]*\[/ {
+      if (in_dst && !emitted) emit_missing()
+      in_dst = ($0 ~ /^[[:space:]]*\[dependencies\][[:space:]]*$/)
+      if (in_dst) has_dst = 1
+      print; next
+    }
+    in_dst && /^[[:space:]]*[A-Za-z0-9_-]+[[:space:]]*=/ {
+      k = key_of($0); seen[k] = 1
+      if (k in rewritten) { print rewritten[k]; next }
+    }
+    { print }
+    END {
+      if (in_dst && !emitted) emit_missing()
+      else if (!has_dst && missing_count() > 0) { print ""; print "[dependencies]"; emit_missing() }
+    }
+  ' "$src_manifest" "$tmp" > "$tmp_deps"
+  mv "$tmp_deps" "$tmp"
+
   if cmp -s "$tmp" "$dest_manifest"; then
     rm -f "$tmp"
     echo "[PARITY OK] Manifest $dest_manifest in parity (license = $license_id)"
@@ -181,7 +253,7 @@ sync_manifest() {
   fi
   if [[ "$is_check" == "true" ]]; then
     rm -f "$tmp"
-    echo "[DISPARITY] $dest_manifest requires manifest update (license $license_id or version/edition)"
+    echo "[DISPARITY] $dest_manifest requires manifest update (license $license_id, version/edition or dependencies)"
     return 2
   fi
   mv "$tmp" "$dest_manifest"
@@ -308,7 +380,7 @@ process_repo() {
   # Step 4: Selective manifest synchronization
   if [[ -f "$src_dir/Cargo.toml" && -f "$dest_dir/Cargo.toml" ]]; then
     local manifest_code=0
-    if sync_manifest "$src_dir/Cargo.toml" "$dest_dir/Cargo.toml" "$CHECK_MODE"; then
+    if sync_manifest "$src_dir/Cargo.toml" "$dest_dir/Cargo.toml" "$CHECK_MODE" "$cli_name"; then
       manifest_code=0
     else
       manifest_code=$?

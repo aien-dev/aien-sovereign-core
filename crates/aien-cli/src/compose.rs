@@ -46,11 +46,11 @@
 use crate::safety::SafetyEngine;
 use crate::tools::record_effect_receipt;
 use aien_runtime::client::AienRuntimeClient;
+use aien_runtime::compose::parse_file_proposal;
 use aien_runtime::control::{
     ComposeRecallReport, ComposeTaskReport, ControlCommand, ControlResponse, ReconcileDeclare,
 };
 use aien_runtime::effects;
-use aien_runtime::spine::parse_file_proposal;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
@@ -371,7 +371,7 @@ async fn step(sub: &str, m: &HashMap<String, String>) -> Result<Value, String> {
                     (None, key_path, desk) if key_path.is_some() || desk => {
                         let key_file = match key_path {
                             Some(p) => std::path::PathBuf::from(p),
-                            None => desk_key_path(&aien_runtime::spine::compose_dir_from_env()?),
+                            None => desk_key_path(&aien_runtime::compose::compose_dir_from_env()?),
                         };
                         let key = DeskKey::load(&key_file)?;
                         let mut raw = [0u8; 16];
@@ -647,7 +647,7 @@ async fn step(sub: &str, m: &HashMap<String, String>) -> Result<Value, String> {
         }
         "desk-key" => {
             use aien_runtime::approved_auth::{desk_key_path, DeskKey};
-            let dir = aien_runtime::spine::compose_dir_from_env()?;
+            let dir = aien_runtime::compose::compose_dir_from_env()?;
             let path = desk_key_path(&dir);
             let key = match (DeskKey::load(&path), m.contains_key("create")) {
                 (Ok(k), _) => k,

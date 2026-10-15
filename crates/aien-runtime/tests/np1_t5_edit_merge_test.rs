@@ -4,12 +4,15 @@
 //! reply sha256 cd8e3b30...) answered the edit goal with only the changed
 //! part, `filename: CHANGELOG.md` / `## 0.1.0` / `- add contact file`, ending
 //! on eos after 16 of 96 tokens, and the Skill handed that fragment on as the
-//! complete new file. These tests run the exact v6 seed and reply through the
-//! Skill's proposal path on the CPU.
-use aien_runtime::spine::{
-    check_file_proposal, edit_proposal, merge_edit_reply, propose_task_with_retries,
-    task_prompt_and_target, Generation, COMPOSE_MAX_ATTEMPTS, COMPOSE_SKILL_BUDGET,
-};
+//! complete new file. These tests run the exact v6 seed and reply through
+//! `ComposeBridge::run_task` (tests/support/compose_harness.rs) on the CPU.
+#[path = "support/compose_harness.rs"]
+mod compose_harness;
+#[path = "support/home_guard.rs"]
+mod home_guard;
+
+use aien_runtime::check_file_proposal;
+use compose_harness::{replies, Asked, Harness};
 
 /// The v6 pre-seed, byte for byte (seed sha256 29e905c6...).
 const SEED: &str = include_str!("../../../docs/campaigns/next-phase-1/seed-v6/T5/CHANGELOG.md");
@@ -20,42 +23,31 @@ const V6_REPLY: &str = include_str!(
 const GOAL: &str =
     "Add the line \"- add contact file\" under the \"## 0.1.0\" heading in CHANGELOG.md.";
 
-fn seeded() -> (tempfile::TempDir, std::path::PathBuf) {
-    let d = tempfile::tempdir().unwrap();
-    let ws = d.path().join("ws");
-    std::fs::create_dir_all(&ws).unwrap();
-    std::fs::write(ws.join("CHANGELOG.md"), SEED).unwrap();
-    let ws = std::fs::canonicalize(ws).unwrap();
-    (d, ws)
-}
-
-/// Runs `replies` (one per attempt) through the Skill's proposal path for
-/// the T5 goal on the seeded workspace.
-fn run(replies: &[&str]) -> (Result<String, String>, Vec<aien_runtime::ProposalAttempt>) {
-    let (_d, ws) = seeded();
-    let (prompt, target) = task_prompt_and_target(GOAL, &ws);
-    assert!(prompt.contains(SEED), "the model is shown the whole seed");
-    let target = target.expect("edit mode");
-    assert_eq!(target, ("CHANGELOG.md".to_string(), SEED.to_string()));
-    let replies: Vec<String> = replies.iter().map(|s| s.to_string()).collect();
-    let n = std::sync::atomic::AtomicUsize::new(0);
-    let proposer = move |_p: &str, _l: std::time::Duration| {
-        let k = n.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        Ok(Generation {
-            text: replies[k.min(replies.len() - 1)].clone(),
-            tokens: 16,
-            finish_reason: Some("eos".into()),
-            ..Default::default()
-        })
+/// Runs `texts` (one per attempt) through the bridge for the T5 goal on the
+/// seeded workspace: the proposal (or the refusal) and every attempt.
+fn run(texts: &[&str]) -> (Result<String, String>, Vec<aien_runtime::ProposalAttempt>) {
+    let h = Harness::new(replies(texts));
+    h.write("CHANGELOG.md", SEED);
+    let r = h.run(GOAL).unwrap();
+    let first = &h.calls()[0];
+    assert_eq!(first.asked, Asked::Edit, "edit mode");
+    assert!(
+        first.prompt.contains(SEED),
+        "the model is shown the whole seed"
+    );
+    assert!(
+        first
+            .prompt
+            .contains("The file CHANGELOG.md already exists."),
+        "the edit target is CHANGELOG.md: {}",
+        first.prompt
+    );
+    let out = match (r.proposal, r.proposer_error) {
+        (Some(p), _) => Ok(p),
+        (None, Some(e)) => Err(e),
+        (None, None) => panic!("neither a proposal nor a refusal"),
     };
-    propose_task_with_retries(
-        &proposer,
-        &prompt,
-        Some((target.0.as_str(), target.1.as_str())),
-        COMPOSE_SKILL_BUDGET,
-        std::time::Duration::from_millis(1),
-        COMPOSE_MAX_ATTEMPTS,
-    )
+    (out, r.proposal_attempts)
 }
 
 fn lines(s: &str) -> Vec<&str> {
@@ -82,7 +74,9 @@ fn t5_rows(content: &str) -> (bool, bool) {
 /// The red-then-green test: the exact v6 reply keeps all three seed lines,
 /// byte-identical and in order, with the new line under the heading.
 #[test]
+#[cfg_attr(not(compose_linked), ignore = "needs librx_compose.a: stub build")]
 fn v6_t5_reply_keeps_every_seed_line() {
+    let _home = home_guard::home_slot();
     assert_eq!(SEED, "# Changelog\n\n## 0.1.0\n- initial release\n");
     assert_eq!(
         V6_REPLY,
@@ -111,7 +105,9 @@ fn v6_t5_reply_keeps_every_seed_line() {
 /// A whole-file reply that keeps every line (what the v6 prompt asks for)
 /// is proposed byte for byte: the merge adds nothing and drops nothing.
 #[test]
+#[cfg_attr(not(compose_linked), ignore = "needs librx_compose.a: stub build")]
 fn whole_file_reply_is_kept_byte_for_byte() {
+    let _home = home_guard::home_slot();
     let whole =
         "filename: CHANGELOG.md\n# Changelog\n\n## 0.1.0\n- add contact file\n- initial release\n";
     let (out, _) = run(&[whole]);
@@ -121,7 +117,9 @@ fn whole_file_reply_is_kept_byte_for_byte() {
 /// A fragment that puts the new line above an existing line lands right
 /// before that line, not at the top of the file.
 #[test]
+#[cfg_attr(not(compose_linked), ignore = "needs librx_compose.a: stub build")]
 fn new_line_above_its_anchor_lands_before_it() {
+    let _home = home_guard::home_slot();
     let (out, _) = run(&["filename: CHANGELOG.md\n- add contact file\n- initial release\n"]);
     let p = check_file_proposal(&out.unwrap()).unwrap();
     assert_eq!(
@@ -133,7 +131,9 @@ fn new_line_above_its_anchor_lands_before_it() {
 /// A reply sharing no line with the file has no place in it: refused (and
 /// retried) instead of replacing the file.
 #[test]
+#[cfg_attr(not(compose_linked), ignore = "needs librx_compose.a: stub build")]
 fn reply_without_an_anchor_is_refused_and_retried() {
+    let _home = home_guard::home_slot();
     let (out, attempts) = run(&["filename: CHANGELOG.md\n- add contact file\n", V6_REPLY]);
     assert_eq!(attempts[0].outcome, "refused", "{attempts:?}");
     assert!(
@@ -153,7 +153,9 @@ fn reply_without_an_anchor_is_refused_and_retried() {
 
 /// A reply that only repeats existing lines changes nothing: refused.
 #[test]
+#[cfg_attr(not(compose_linked), ignore = "needs librx_compose.a: stub build")]
 fn reply_that_changes_nothing_is_refused() {
+    let _home = home_guard::home_slot();
     let (out, attempts) = run(&["filename: CHANGELOG.md\n## 0.1.0\n"]);
     assert!(out.is_err());
     assert!(attempts.iter().all(|a| a
@@ -163,31 +165,46 @@ fn reply_that_changes_nothing_is_refused() {
         .contains("changes nothing")));
 }
 
-/// A reply naming another file keeps the v5 whole-file meaning; without an
-/// edit target the proposal is the reply.
+/// A reply naming another file keeps the v5 whole-file meaning (it is not
+/// merged into the edit target, so the bridge then refuses it for writing
+/// another path than the goal named); without an edit target the proposal is
+/// the reply.
 #[test]
+#[cfg_attr(not(compose_linked), ignore = "needs librx_compose.a: stub build")]
 fn other_path_and_no_target_keep_the_v5_proposal() {
+    let _home = home_guard::home_slot();
     let other = "filename: NOTES.md\nhello\n";
+    let (out, attempts) = run(&[other]);
+    assert_eq!(attempts[0].outcome, "parsed", "{attempts:?}");
+    assert_eq!(attempts[0].text.as_deref(), Some(other));
     assert_eq!(
-        edit_proposal(other, Some(("CHANGELOG.md", SEED))).unwrap(),
-        other
+        out.unwrap_err(),
+        "the proposal writes NOTES.md but the goal named the destination CHANGELOG.md"
     );
-    assert_eq!(edit_proposal(V6_REPLY, None).unwrap(), V6_REPLY);
-    let (out, _) = run(&[other]);
-    assert_eq!(out.unwrap(), other);
+    // No edit target: a new CHANGELOG.md, the v6 reply is the proposal byte for byte.
+    let h = Harness::new(replies(&[V6_REPLY]));
+    let r = h.run("Write a short changelog into CHANGELOG.md.").unwrap();
+    assert_eq!(h.calls()[0].asked, Asked::Document);
+    assert_eq!(r.proposal.as_deref(), Some(V6_REPLY), "{r:?}");
 }
 
 /// Merge unit cases: seed lines keep their exact bytes (trailing spaces
 /// included); a seed without a final newline gains one.
 #[test]
+#[cfg_attr(not(compose_linked), ignore = "needs librx_compose.a: stub build")]
 fn merge_keeps_seed_bytes() {
+    let _home = home_guard::home_slot();
     let prior = "a  \nb\nc";
-    assert_eq!(
-        merge_edit_reply(prior, "b\nnew\n").unwrap(),
-        "a  \nb\nnew\nc\n"
-    );
-    assert_eq!(
-        merge_edit_reply(prior, "a\nb\nc\nd\n").unwrap(),
-        "a  \nb\nc\nd\n"
-    );
+    let goal = "Add the line \"new\" below the line \"b\" in notes.txt.";
+    for (reply, want) in [
+        ("filename: notes.txt\nb\nnew\n", "a  \nb\nnew\nc\n"),
+        ("filename: notes.txt\na\nb\nc\nd\n", "a  \nb\nc\nd\n"),
+    ] {
+        let h = Harness::new(replies(&[reply]));
+        h.write("notes.txt", prior);
+        let r = h.run(goal).unwrap();
+        assert_eq!(h.calls()[0].asked, Asked::Edit);
+        let p = check_file_proposal(r.proposal.as_deref().expect("proposal")).unwrap();
+        assert_eq!(p.content, want, "{reply:?}");
+    }
 }

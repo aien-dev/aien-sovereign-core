@@ -4,6 +4,165 @@ use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+pub mod completion;
+pub mod dependency;
+pub mod execution;
+pub mod journal;
+pub mod readiness;
+pub mod scheduler;
+
+/// The terminal workflow state. Since Headstart M1 (#533) it is reachable
+/// only through [`HarnessEngine::complete_verified_workflow`], never through
+/// [`HarnessEngine::advance_workflow`]. `done` means "the harness ran the
+/// workflow's completion gates on the submitted artifact and stored a PASS
+/// receipt". It does not mean committed: World commit and authorization stay
+/// in aien-runtime and are not touched by this crate.
+pub const DONE_STATE: &str = "done";
+
+/// Default subdirectory of `base_path` holding the harness-owned completion
+/// store (receipts plus consumed completion records).
+pub const DEFAULT_COMPLETION_STORE: &str = "completion-store";
+
+/// Repo label written into completion receipts when the deployer has not set
+/// one. The harness does not know which repository a submitted commit lives
+/// in, so it says so instead of guessing.
+pub const UNSPECIFIED_REPO: &str = "unspecified";
+
+/// Slop scan shared by `run_eval("slop_gate")` and the completion gate.
+/// Returns the failure reason, or `None` when the text is clean.
+pub(crate) fn slop_violation(text: &str) -> Option<String> {
+    let lower = text.to_lowercase();
+
+    // Disallowed phrases
+    let forbidden = [
+        "this is the part where",
+        "the part everyone's missing",
+        "the part everyone is missing",
+        "in today's fast-paced",
+        "game-changer",
+        "delve into",
+        "unlock the power",
+        "at the end of the day",
+        "it is important to note",
+        "in conclusion,",
+    ];
+
+    for p in forbidden {
+        if lower.contains(p) {
+            return Some(format!("Forbidden AI trope detected: '{}'", p));
+        }
+    }
+
+    // Check antithesis pattern: "not X, it's Y"
+    let antithesis_re = Regex::new(r"(?i)\bnot\s+([a-z0-9_\-\s]+),\s*(it's|it\s+is)\s+").unwrap();
+    if antithesis_re.is_match(&lower) {
+        return Some("Formulaic antithesis trope detected ('not X, it's Y')".to_string());
+    }
+    None
+}
+
+fn read_definition_file(path: &Path) -> Result<HashMap<String, Value>, String> {
+    let content = std::fs::read_to_string(path)
+        .map_err(|e| format!("cannot read {}: {}", path.display(), e))?;
+    serde_json::from_str::<HashMap<String, Value>>(&content)
+        .map_err(|e| format!("invalid JSON object in {}: {}", path.display(), e))
+}
+
+/// Structural check of one workflow definition. Used at load time and again
+/// at completion time, because `workflows` is a public map callers can edit.
+pub fn validate_workflow_def(name: &str, def: &Value) -> Result<(), String> {
+    let states = def
+        .get("states")
+        .and_then(|v| v.as_object())
+        .ok_or_else(|| format!("workflow '{}': 'states' must be an object", name))?;
+    for (state, sdef) in states {
+        let next = sdef.get("next").and_then(|v| v.as_array()).ok_or_else(|| {
+            format!(
+                "workflow '{}': state '{}' needs a 'next' array",
+                name, state
+            )
+        })?;
+        for n in next {
+            let n = n.as_str().ok_or_else(|| {
+                format!(
+                    "workflow '{}': state '{}' has a non-string next entry",
+                    name, state
+                )
+            })?;
+            if !states.contains_key(n) {
+                return Err(format!(
+                    "workflow '{}': state '{}' points to undeclared state '{}'",
+                    name, state, n
+                ));
+            }
+        }
+    }
+    if let Some(initial) = def.get("initial") {
+        let initial = initial
+            .as_str()
+            .ok_or_else(|| format!("workflow '{}': 'initial' must be a string", name))?;
+        if !states.contains_key(initial) {
+            return Err(format!(
+                "workflow '{}': initial state '{}' is not declared",
+                name, initial
+            ));
+        }
+    }
+    def.get("required_schema")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| {
+            format!(
+                "workflow '{}': 'required_schema' must be a non-empty string",
+                name
+            )
+        })?;
+    let evals = def
+        .get("required_evals_on_done")
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| {
+            format!(
+                "workflow '{}': 'required_evals_on_done' must be an array",
+                name
+            )
+        })?;
+    let mut seen = std::collections::BTreeSet::new();
+    for e in evals {
+        let e = e
+            .as_str()
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| format!("workflow '{}': eval names must be non-empty strings", name))?;
+        if !seen.insert(e) {
+            return Err(format!("workflow '{}': eval '{}' listed twice", name, e));
+        }
+    }
+    Ok(())
+}
+
+fn validate_eval_def(name: &str, def: &Value) -> Result<(), String> {
+    def.get("kind")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(|_| ())
+        .ok_or_else(|| format!("eval '{}': 'kind' must be a non-empty string", name))
+}
+
+fn load_evals(base: &Path) -> Result<HashMap<String, Value>, String> {
+    let m = read_definition_file(&base.join("evals.json"))?;
+    for (k, v) in &m {
+        validate_eval_def(k, v)?;
+    }
+    Ok(m)
+}
+
+fn load_workflows(base: &Path) -> Result<HashMap<String, Value>, String> {
+    let m = read_definition_file(&base.join("workflows.json"))?;
+    for (k, v) in &m {
+        validate_workflow_def(k, v)?;
+    }
+    Ok(m)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EvalResult {
     pub name: String,
@@ -25,33 +184,70 @@ pub struct HarnessEngine {
     pub base_path: PathBuf,
     pub evals: HashMap<String, Value>,
     pub workflows: HashMap<String, Value>,
+    /// Errors from the last definition load. The verified completion API
+    /// refuses to run while this is non-empty, so a missing or broken
+    /// workflows.json or evals.json can never let a completion through.
+    pub load_errors: Vec<String>,
+    /// Harness-owned evidence store for completion receipts and consumed
+    /// completion records. Defaults to `<base_path>/completion-store`.
+    pub completion_store: PathBuf,
+    /// Repo identity recorded in completion receipts.
+    pub completion_repo: String,
+    /// Unix-seconds clock for receipt timestamps. Defaults to the system
+    /// clock; tests swap it to make receipt IDs deterministic.
+    pub completion_clock: fn() -> u64,
+}
+
+/// System clock in Unix seconds (0 if the clock is before the epoch).
+pub fn system_clock_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 impl HarnessEngine {
+    /// Compatibility constructor. Loads what it can, as before, but records
+    /// every load error in `load_errors` so the verified completion API
+    /// refuses to run on missing or broken definitions.
     pub fn new<P: AsRef<Path>>(base_path: P) -> Self {
         let base = base_path.as_ref().to_path_buf();
         let mut engine = Self {
+            completion_store: base.join(DEFAULT_COMPLETION_STORE),
             base_path: base,
             evals: HashMap::new(),
             workflows: HashMap::new(),
+            load_errors: Vec::new(),
+            completion_repo: UNSPECIFIED_REPO.to_string(),
+            completion_clock: system_clock_secs,
         };
         engine.reload();
         engine
     }
 
-    pub fn reload(&mut self) {
-        let evals_path = self.base_path.join("evals.json");
-        if let Ok(content) = std::fs::read_to_string(&evals_path) {
-            if let Ok(val) = serde_json::from_str::<HashMap<String, Value>>(&content) {
-                self.evals = val;
-            }
+    /// Fail-closed constructor: errors when workflows.json or evals.json is
+    /// missing, is not a JSON object, or holds a malformed definition.
+    pub fn load<P: AsRef<Path>>(base_path: P) -> Result<Self, String> {
+        let engine = Self::new(base_path);
+        if engine.load_errors.is_empty() {
+            Ok(engine)
+        } else {
+            Err(engine.load_errors.join("; "))
         }
+    }
 
-        let wf_path = self.base_path.join("workflows.json");
-        if let Ok(content) = std::fs::read_to_string(&wf_path) {
-            if let Ok(val) = serde_json::from_str::<HashMap<String, Value>>(&content) {
-                self.workflows = val;
-            }
+    /// Re-read both definition files. A file that fails to load keeps the
+    /// previous in-memory map (the old behavior) and adds an entry to
+    /// `load_errors`, which blocks verified completion until a clean reload.
+    pub fn reload(&mut self) {
+        self.load_errors.clear();
+        match load_evals(&self.base_path) {
+            Ok(m) => self.evals = m,
+            Err(e) => self.load_errors.push(e),
+        }
+        match load_workflows(&self.base_path) {
+            Ok(m) => self.workflows = m,
+            Err(e) => self.load_errors.push(e),
         }
     }
 
@@ -89,47 +285,17 @@ impl HarnessEngine {
         match eval_name {
             "slop_gate" => {
                 let text = payload.get("text").and_then(|v| v.as_str()).unwrap_or("");
-                let lower = text.to_lowercase();
-
-                // Disallowed phrases
-                let forbidden = [
-                    "this is the part where",
-                    "the part everyone's missing",
-                    "the part everyone is missing",
-                    "in today's fast-paced",
-                    "game-changer",
-                    "delve into",
-                    "unlock the power",
-                    "at the end of the day",
-                    "it is important to note",
-                    "in conclusion,",
-                ];
-
-                for p in forbidden {
-                    if lower.contains(p) {
-                        return EvalResult {
-                            name: eval_name.to_string(),
-                            passed: false,
-                            reason: format!("Forbidden AI trope detected: '{}'", p),
-                        };
-                    }
-                }
-
-                // Check antithesis pattern: "not X, it's Y"
-                let antithesis_re =
-                    Regex::new(r"(?i)\bnot\s+([a-z0-9_\-\s]+),\s*(it's|it\s+is)\s+").unwrap();
-                if antithesis_re.is_match(&lower) {
-                    return EvalResult {
+                match slop_violation(text) {
+                    Some(reason) => EvalResult {
                         name: eval_name.to_string(),
                         passed: false,
-                        reason: "Formulaic antithesis trope detected ('not X, it's Y')".to_string(),
-                    };
-                }
-
-                EvalResult {
-                    name: eval_name.to_string(),
-                    passed: true,
-                    reason: "Slop gate passed clean.".to_string(),
+                        reason,
+                    },
+                    None => EvalResult {
+                        name: eval_name.to_string(),
+                        passed: true,
+                        reason: "Slop gate passed clean.".to_string(),
+                    },
                 }
             }
 
@@ -179,7 +345,20 @@ impl HarnessEngine {
     }
 
     /// Layer 4: State Machine Workflow Engine
+    ///
+    /// Checks transition legality only. A transition into [`DONE_STATE`] is
+    /// always refused here: a legal transition by itself is not proof of
+    /// completion. Use [`HarnessEngine::complete_verified_workflow`], which
+    /// runs the workflow's completion gates on the real artifact and stores a
+    /// harness-minted receipt before moving to `done`.
     pub fn advance_workflow(&self, wf: &mut WorkflowState, next_state: &str) -> Result<(), String> {
+        if next_state == DONE_STATE {
+            return Err(format!(
+                "Refusing transition from '{}' to '{}': '{}' is reachable only through \
+                 verified completion (complete_verified_workflow / MCP harness_complete).",
+                wf.current_state, DONE_STATE, DONE_STATE
+            ));
+        }
         let wf_def = self
             .workflows
             .get(&wf.workflow_type)
@@ -309,9 +488,28 @@ mod tests {
 
         assert!(engine.advance_workflow(&mut wf, "in_progress").is_ok());
         assert_eq!(wf.current_state, "in_progress");
-        assert!(engine.advance_workflow(&mut wf, "done").is_ok());
-        assert_eq!(wf.current_state, "done");
+        // `done` is legal per the state table but only reachable through
+        // verified completion, so advance_workflow refuses it and leaves the
+        // state and history untouched.
+        let err = engine.advance_workflow(&mut wf, "done").unwrap_err();
+        assert!(err.contains("complete_verified_workflow"), "{err}");
+        assert_eq!(wf.current_state, "in_progress");
+        assert_eq!(wf.history, vec!["start".to_string()]);
         assert!(engine.advance_workflow(&mut wf, "start").is_err());
+    }
+
+    #[test]
+    fn test_shipped_definitions_load_clean() {
+        let engine = HarnessEngine::load(env!("CARGO_MANIFEST_DIR")).unwrap();
+        assert!(engine.load_errors.is_empty());
+        for wf in [
+            "engineering_fix",
+            "research_handoff",
+            "harness_change",
+            "python_pipeline",
+        ] {
+            assert!(engine.workflows.contains_key(wf), "{wf}");
+        }
     }
 
     #[test]

@@ -4,8 +4,13 @@
 //! line that says \"S\"" as exactly one line holding S. A goal whose
 //! destination is outside the workspace is refused for that destination
 //! first, before any requirement is read.
+#[path = "support/compose_harness.rs"]
+mod compose_harness;
+#[path = "support/home_guard.rs"]
+mod home_guard;
+
 use aien_runtime::requirements::{analyze, refusal_reason, Requirement};
-use aien_runtime::spine::task_decision;
+use compose_harness::{silent, Harness};
 
 use Requirement::*;
 
@@ -100,13 +105,13 @@ fn other_sentence_wordings_stay_uncertain() {
 
 #[test]
 fn an_outside_destination_is_refused_first_and_named() {
-    let d = tempfile::tempdir().unwrap();
-    let ws = d.path().join("ws");
-    std::fs::create_dir_all(&ws).unwrap();
-    let ws = std::fs::canonicalize(ws).unwrap();
-    // The destination is refused by `task_decision`, which runs before the
-    // requirement reader in `run_task_inner`.
-    let why = task_decision(V5_N1, &ws).expect_err("outside the workspace");
+    let _home = home_guard::home_slot();
+    let h = Harness::new(silent());
+    // The bridge refuses the destination before it reads any requirement and
+    // before any model call.
+    let why = h.run(V5_N1).expect_err("outside the workspace");
+    assert!(h.calls().is_empty(), "a refused goal reached the model");
+    assert!(why.starts_with("RunComposeTask: destination "), "{why}");
     assert!(why.contains("../shared-stuff/reminder.txt"), "{why}");
 }
 

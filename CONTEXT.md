@@ -11,7 +11,7 @@ The long-running process started by `aien start` (it runs as `aien --daemon`). I
 _Avoid_: server, service
 
 **Approval desk**:
-The operator's approval step for effects. It is required by default; a desk key created by `aien compose desk-key --create 1` must exist before the daemon starts. Code: `aien-runtime/src/spine.rs`, `approved_auth.rs`.
+The operator's approval step for effects. It is required by default; a desk key created by `aien compose desk-key --create 1` must exist before the daemon starts. Code: `aien-runtime/src/compose/bridge.rs`, `approved_auth.rs`.
 _Avoid_: login, auth
 
 **Objective record**:
@@ -23,6 +23,30 @@ The state folder holding the desk key and composition state (`AIEN_COMPOSE_DIR`,
 
 **Candidate**:
 The release candidate this tree may be released as, named in `release/candidate.toml` with its model digests and source pins. `omega.lock` pins the omega commit that is linked. Changed only with aien-architecture's candidate manifest.
+
+**Generation controller**:
+The one module that runs a generation for any model: it keeps the sequence ledger (history and position), reuses a prefix, rewinds, exports and restores the KV cache, picks each token, applies constraints, stops and streams. Written once; drives a forward pass through the `ForwardPass` trait (ADR 0004). Planned code: `aien-inference-abi`, type `GenerationController<M>`.
+_Avoid_: engine, sequence driver, inference loop, runtime (that word means the daemon)
+
+**Forward pass**:
+One model's implementation behind the seam: its weights, layer maths, kernels, attention path and cache, prefill strategy, decode graph, output head, traces and mutants. The 30B MoE, the 8B dense and the host fake are each one forward pass. It never loops over tokens itself.
+_Avoid_: engine, model (ambiguous with the weights file), backend
+
+**KV geometry**:
+The numbers that fix the KV cache's layout and payload bytes (layers, query heads, KV heads, head width, rope theta, block size), produced from a model's config and read by every cache constructor and by persistence. Type `KvGeometry` (ADR 0004). Model-independent: no cache code reads `Qwen3MoeConfig` directly.
+_Avoid_: config, shape, dims
+
+**Head**:
+The pending output a forward call leaves behind for one position, from which the next token is chosen. Read once, as either the chip's own argmax or the full logits. One after prefill, one per decoded token.
+_Avoid_: pending token, logits buffer, output (overloaded)
+
+**Step rule**:
+What a constraint allows at one decode step: anything, an allowed set of token ids, one forced token, or finish. Applied by the generation controller between the head and the sampler. Type `StepRule` (ADR 0004).
+_Avoid_: mask (that is one way to apply a rule, not the rule), grammar
+
+**Host fake**:
+The test-only forward pass that runs with no chip and no weights, on a real host KV cache, with tokens that depend on every stored KV row. Used to test the generation controller end to end, including constraints and persistence. Type `EchoChainModel` (ADR 0004).
+_Avoid_: mock, stub (the serve-http stub engine is a different thing)
 
 ## Components (from crate descriptions)
 

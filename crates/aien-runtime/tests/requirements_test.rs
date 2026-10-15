@@ -1,4 +1,8 @@
 //! Requirement validation for composed documents (crate::requirements).
+//! The retry loop is driven through `ComposeBridge::run_task`
+//! (tests/support/compose_harness.rs).
+#[path = "support/compose_harness.rs"]
+mod compose_harness;
 #[path = "support/home_guard.rs"]
 mod home_guard;
 
@@ -6,10 +10,8 @@ use aien_runtime::approved::{approved_proposal_sha256, proposal_text};
 use aien_runtime::control::ControlResponse;
 use aien_runtime::effects;
 use aien_runtime::requirements::{extract, refusal_reason, unmet, ItemKind, Requirement};
-use aien_runtime::spine::{
-    check_file_proposal, propose_task_checked, ComposeBridge, ComposeProposer, Generation,
-    COMPOSE_MAX_ATTEMPTS,
-};
+use aien_runtime::{check_file_proposal, ComposeBridge, ComposeProposer, Generation};
+use compose_harness::{always, replies, Asked, Harness};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -116,25 +118,17 @@ fn non_empty_blank_safe(s: &str) -> usize {
     s.lines().filter(|l| !l.trim().is_empty()).count()
 }
 
+/// The goal of the document tests below: a new DOC.md, at least 20 lines.
+const DOC_GOAL: &str = "write DOC.md in at least 20 lines";
+
 #[test]
+#[cfg_attr(not(compose_linked), ignore = "needs librx_compose.a: stub build")]
 fn retry_names_the_unmet_requirement_and_second_attempt_passes() {
-    let prompts: Mutex<Vec<String>> = Mutex::new(Vec::new());
-    let replies = Mutex::new(vec![doc(25), doc(13)]);
-    let proposer = |p: &str, _: Duration| {
-        prompts.lock().unwrap().push(p.to_string());
-        gen(replies.lock().unwrap().pop().unwrap())
-    };
-    let reqs = extract("write it in at least 20 lines");
-    let (out, a) = propose_task_checked(
-        &proposer,
-        "base",
-        None,
-        &reqs,
-        Duration::from_secs(5),
-        Duration::from_millis(1),
-        COMPOSE_MAX_ATTEMPTS,
-    );
-    assert_eq!(out.unwrap(), doc(25));
+    let _home = home_guard::home_slot();
+    let h = Harness::new(replies(&[&doc(13), &doc(25)]));
+    let r = h.run(DOC_GOAL).unwrap();
+    assert_eq!(r.proposal.as_deref(), Some(doc(25).as_str()), "{r:?}");
+    let a = &r.proposal_attempts;
     assert_eq!(a.len(), 2);
     assert_eq!(a[0].outcome, "refused");
     assert_eq!(
@@ -147,7 +141,7 @@ fn retry_names_the_unmet_requirement_and_second_attempt_passes() {
     );
     assert_eq!(a[1].outcome, "parsed");
     assert!(a[1].unmet_requirements.is_empty());
-    let p = prompts.lock().unwrap();
+    let p: Vec<String> = h.calls().into_iter().map(|c| c.prompt).collect();
     assert!(!p[0].contains("unmet requirement"));
     assert!(
         p[1].contains("refused before anything was written (unmet requirement: at least 20 non-empty lines, found 13)"),
@@ -163,89 +157,41 @@ fn retry_names_the_unmet_requirement_and_second_attempt_passes() {
 }
 
 #[test]
+#[cfg_attr(not(compose_linked), ignore = "needs librx_compose.a: stub build")]
 fn exhaustion_returns_no_proposal() {
-    let proposer = |_: &str, _: Duration| gen(doc(13));
-    let reqs = extract("in at least 20 lines");
-    let (out, a) = propose_task_checked(
-        &proposer,
-        "base",
-        None,
-        &reqs,
-        Duration::from_secs(5),
-        Duration::from_millis(1),
-        COMPOSE_MAX_ATTEMPTS,
+    let _home = home_guard::home_slot();
+    let h = Harness::new(always(&doc(13)));
+    let r = h.run(DOC_GOAL).unwrap();
+    assert!(
+        r.proposal.is_none() && r.uncommitted_proposal.is_none(),
+        "{r:?}"
     );
-    let why = out.unwrap_err();
+    let why = r.proposer_error.unwrap();
     assert!(
         why.contains("at least 20 non-empty lines, found 13"),
         "{why}"
     );
-    assert_eq!(a.len(), COMPOSE_MAX_ATTEMPTS as usize);
+    let a = &r.proposal_attempts;
+    assert_eq!(a.len(), 3);
     assert!(a
         .iter()
         .all(|x| x.outcome == "refused" && x.aegis.is_none()));
     assert!(a.iter().all(|x| x.unmet_requirements.len() == 1));
 }
 
-#[test]
-fn deadline_is_shared_across_attempts() {
-    // No tight margins: every assertion is a one-sided bound that sleeping
-    // longer than planned (a loaded machine) can only make easier to meet.
-    let seen: Mutex<Vec<Duration>> = Mutex::new(Vec::new());
-    let proposer = |_: &str, limit: Duration| {
-        seen.lock().unwrap().push(limit);
-        std::thread::sleep(Duration::from_millis(300));
-        gen(doc(1))
-    };
-    let reqs = extract("at least 20 lines");
-    let budget = Duration::from_millis(2000);
-    let (out, a) = propose_task_checked(
-        &proposer,
-        "base",
-        None,
-        &reqs,
-        budget,
-        Duration::from_millis(100),
-        100,
-    );
-    assert!(out.is_err());
-    let seen = seen.lock().unwrap();
-    assert_eq!(seen.len(), a.len());
-    // Per-attempt reset would allow all 100 attempts. One shared deadline
-    // stops attempt k > 1 unless 100 ms are left, and every earlier attempt
-    // took at least 300 ms, so k - 1 <= (2000 - 100) / 300 = 6: at most 7.
-    assert!(a.len() <= 7, "attempts {}", a.len());
-    assert!(a.len() >= 2, "attempts {}", a.len());
-    // Each attempt's limit is what is left of ONE budget: attempt k starts
-    // after k - 1 sleeps of at least 300 ms, so it is at least that far
-    // below the first limit.
-    for k in 1..seen.len() {
-        assert!(
-            seen[k] + Duration::from_millis(290 * k as u64) <= seen[0],
-            "attempt {} limit {:?} vs first {:?}",
-            k + 1,
-            seen[k],
-            seen[0]
-        );
-    }
-    assert!(seen[0] <= budget);
-    assert!(out.unwrap_err().contains("per-attempt budget"));
-}
+// deadline_is_shared_across_attempts needs a short document budget: it is in
+// compose_budget_test.rs (same name).
 
 #[test]
+#[cfg_attr(not(compose_linked), ignore = "needs librx_compose.a: stub build")]
 fn validated_document_is_the_one_approval_binds() {
+    let _home = home_guard::home_slot();
+    let goal = "write DOC.md with at least 4 lines";
     let reqs = extract("at least 4 lines");
-    let proposer = |_: &str, _: Duration| gen("filename: DOC.md\na\nb\nc\nd\n".into());
-    let (out, _) = propose_task_checked(
-        &proposer,
-        "base",
-        None,
-        &reqs,
-        Duration::from_secs(5),
-        Duration::from_millis(1),
-        3,
-    );
-    let text = out.unwrap();
+    assert_eq!(extract(goal), reqs);
+    let h = Harness::new(always("filename: DOC.md\na\nb\nc\nd\n"));
+    let r = h.run(goal).unwrap();
+    let text = r.proposal.unwrap();
     let saved = check_file_proposal(&text).unwrap();
     // The content that passed is the content that would be written ...
     assert!(refusal_reason(&reqs, &saved.content).is_none());
@@ -258,32 +204,27 @@ fn validated_document_is_the_one_approval_binds() {
 }
 
 #[test]
+#[cfg_attr(not(compose_linked), ignore = "needs librx_compose.a: stub build")]
 fn edit_mode_validates_the_merged_file_not_the_reply() {
+    let _home = home_guard::home_slot();
     // The prior file has 3 lines; the reply adds 2: the saved file has 5.
-    let prior = "# T\na\nb\n";
-    let proposer = |_: &str, _: Duration| gen("filename: N.md\n# T\na\nnew1\nnew2\nb\n".into());
-    let ok = |n: usize| {
-        propose_task_checked(
-            &proposer,
-            "base",
-            Some(("N.md", prior)),
-            &[Requirement::MinLines(n)],
-            Duration::from_secs(5),
-            Duration::from_millis(1),
-            1,
-        )
-    };
-    let (out, _) = ok(5);
+    let h = Harness::new(always("filename: N.md\n# T\na\nnew1\nnew2\nb\n"));
+    h.write("N.md", "# T\na\nb\n");
+    let goal = |n: usize| format!("Edit N.md so that it has at least {n} lines.");
+    assert_eq!(extract(&goal(5)), [Requirement::MinLines(5)]);
+    assert_eq!(extract(&goal(6)), [Requirement::MinLines(6)]);
+    let r = h.run(&goal(5)).unwrap();
     assert_eq!(
-        check_file_proposal(&out.unwrap()).unwrap().content,
+        check_file_proposal(&r.proposal.unwrap()).unwrap().content,
         "# T\na\nnew1\nnew2\nb\n"
     );
-    let (out, a) = ok(6);
-    assert!(out.is_err());
+    let r = h.run(&goal(6)).unwrap();
+    assert!(r.proposal.is_none() && r.proposer_error.is_some(), "{r:?}");
     assert_eq!(
-        a[0].unmet_requirements,
+        r.proposal_attempts[0].unmet_requirements,
         ["at least 6 non-empty lines, found 5"]
     );
+    assert!(h.calls().iter().all(|c| c.asked == Asked::Edit));
 }
 
 #[test]
@@ -306,7 +247,7 @@ fn unmet_requirement_leaves_nothing_committed_or_written() {
     assert!(!r.committed, "{r:?}");
     assert!(r.proposal.is_none());
     assert_eq!(r.requirements_recognized, ["at least 20 non-empty lines"]);
-    assert_eq!(r.proposal_attempts.len(), COMPOSE_MAX_ATTEMPTS as usize);
+    assert_eq!(r.proposal_attempts.len(), 3);
     assert!(r.proposer_error.unwrap().contains("found 13"));
     assert_eq!(std::fs::read_dir(&ws).unwrap().count(), 0);
 }
@@ -358,8 +299,8 @@ fn linked_exhaustion_leaves_ledger_state_and_files_untouched() {
     let ControlResponse::ComposeTaskResult(r) = resp else {
         panic!("{resp:?}")
     };
-    // The real model Skill ran COMPOSE_MAX_ATTEMPTS times, each refused.
-    assert_eq!(*calls.lock().unwrap(), COMPOSE_MAX_ATTEMPTS as usize);
+    // The real model Skill ran 3 times (the attempt cap), each refused.
+    assert_eq!(*calls.lock().unwrap(), 3);
     assert!(r
         .proposal_attempts
         .iter()
@@ -632,29 +573,25 @@ fn line_limits_count_every_non_empty_line_including_code_and_fences() {
 }
 
 #[test]
+#[cfg_attr(not(compose_linked), ignore = "needs librx_compose.a: stub build")]
 fn edit_whose_prior_file_already_breaks_a_max_is_refused_before_any_attempt() {
+    let _home = home_guard::home_slot();
     let prior: String = (0..10).map(|i| format!("l{i}\n")).collect();
-    let calls = Mutex::new(0u32);
-    let proposer = |_: &str, _: Duration| {
-        *calls.lock().unwrap() += 1;
-        gen("filename: N.md\nl0\nnew\n".into())
-    };
-    let (out, a) = propose_task_checked(
-        &proposer,
-        "base",
-        Some(("N.md", &prior)),
-        &[Requirement::MaxLines(5)],
-        Duration::from_secs(5),
-        Duration::from_millis(1),
-        3,
-    );
-    assert_eq!(*calls.lock().unwrap(), 0, "no attempt may be spent");
-    let why = out.unwrap_err();
+    let h = Harness::new(always("filename: N.md\nl0\nnew\n"));
+    h.write("N.md", &prior);
+    let goal = |n: usize| format!("Add a line to N.md and keep it to at most {n} lines.");
+    assert_eq!(extract(&goal(5)), [Requirement::MaxLines(5)]);
+    assert_eq!(extract(&goal(12)), [Requirement::MaxLines(12)]);
+    let r = h.run(&goal(5)).unwrap();
+    assert_eq!(h.calls().len(), 0, "no attempt may be spent");
+    assert!(r.proposal.is_none() && !r.committed, "{r:?}");
+    let why = r.proposer_error.unwrap();
     assert!(
         why.contains("N.md") && why.contains("at most 5 non-empty lines, found 10"),
         "{why}"
     );
     assert!(why.contains("an edit only adds lines"), "{why}");
+    let a = &r.proposal_attempts;
     assert_eq!(a.len(), 1);
     assert_eq!(a[0].outcome, "refused");
     assert_eq!(a[0].reason.as_deref(), Some(why.as_str()));
@@ -663,14 +600,7 @@ fn edit_whose_prior_file_already_breaks_a_max_is_refused_before_any_attempt() {
         ["at most 5 non-empty lines, found 10"]
     );
     // Min requirements and a prior file within the maximum are unaffected.
-    let (out, _) = propose_task_checked(
-        &proposer,
-        "base",
-        Some(("N.md", &prior)),
-        &[Requirement::MaxLines(12)],
-        Duration::from_secs(5),
-        Duration::from_millis(1),
-        1,
-    );
-    assert!(out.is_ok());
+    let r = h.run(&goal(12)).unwrap();
+    assert!(r.proposal.is_some(), "{r:?}");
+    assert_eq!(h.calls().len(), 1);
 }

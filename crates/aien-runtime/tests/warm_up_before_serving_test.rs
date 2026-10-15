@@ -1,6 +1,6 @@
 //! T4 fix cut, part (a): the declared warm-up (ACCEPTANCE-v4 Section 2(2),
 //! `server.rs` `run_warm_up`) runs before the daemon serves anything, so the
-//! skill budget B (started inside `propose_with_retries`, spine.rs) never pays
+//! skill budget B (started inside `propose_task_checked`, compose/bridge.rs) never pays
 //! the first-use cost, and the warm-up does not change a later turn's tokens.
 //!
 //! 1. `warm_up_runs_before_a_waiting_request_is_served` (always runs, mock
@@ -302,10 +302,10 @@ async fn cpu_reference_tokens_unchanged_by_warm_up() {
         "{}{}",
         format_chat(
             tok.template(),
-            &user(&aien_runtime::spine::proposal_prompt(goal))
+            &user(&aien_runtime::compose::rederive::proposal_prompt(goal))
         )
         .expect("chat"),
-        aien_runtime::spine::COMPOSE_ASSISTANT_PREFIX
+        aien_runtime::compose::rederive::COMPOSE_ASSISTANT_PREFIX
     );
     let ids = tok.encode(&text).expect("encode");
     let warm = tok

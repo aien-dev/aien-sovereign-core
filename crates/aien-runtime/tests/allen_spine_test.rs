@@ -1,4 +1,4 @@
-//! ALLEN identity gate wired into the compose-home open (spine.rs `allen_gate`).
+//! ALLEN identity gate wired into the compose-home open (compose/bridge.rs `allen_gate`).
 //!
 //! Refusals exit the process (merge-control condition b), so every case runs
 //! the daemon open path in a CHILD process: this test binary re-executes
@@ -15,7 +15,7 @@ mod support;
 use aien_allen::binding::{self, pin_path};
 use aien_allen::{hex, ENV_ADOPT, ENV_SUBJECT, EXIT_REFUSED, NOT_ENGAGED_LINE};
 use aien_omega_compose::{Compose, RootKind, LINKED};
-use aien_runtime::spine::{ComposeBridge, ComposeProposer, Generation};
+use aien_runtime::compose::{ComposeBridge, ComposeProposer, Generation};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;

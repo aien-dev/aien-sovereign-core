@@ -2,9 +2,15 @@
 //! A short plain phrase that runs to the end of its sentence (or to a trailing
 //! destination file) is a required phrase; anything wider is UNCERTAIN, never
 //! dropped. The one-line count is kept in every case.
+#[path = "support/compose_harness.rs"]
+mod compose_harness;
+#[path = "support/home_guard.rs"]
+mod home_guard;
+
 use aien_runtime::control::ControlResponse;
 use aien_runtime::requirements::{analyze, refusal_reason, Requirement};
-use aien_runtime::spine::{ComposeBridge, ComposeProposer, Generation};
+use aien_runtime::{ComposeBridge, ComposeProposer, Generation};
+use compose_harness::{always, Harness};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -79,6 +85,7 @@ fn the_check_refuses_a_line_without_the_phrase() {
 
 #[test]
 fn linked_compose_does_not_commit_a_line_without_the_phrase() {
+    let _home = home_guard::home_slot();
     let tmp = tempfile::tempdir().unwrap();
     let ws = tmp.path().join("ws");
     std::fs::create_dir_all(&ws).unwrap();
@@ -123,33 +130,18 @@ fn linked_compose_does_not_commit_a_line_without_the_phrase() {
     assert_eq!(ok.proposal.as_deref(), Some("filename: a.md\nhello\n"));
 }
 
-/// The compose verification boundary that runs without the linked compose
-/// library: a reply whose one line lacks the phrase is never approved.
+/// The compose verification boundary through `ComposeBridge::run_task`: a
+/// reply whose one line lacks the phrase is never approved.
 #[test]
+#[cfg_attr(not(compose_linked), ignore = "needs librx_compose.a: stub build")]
 fn the_proposal_boundary_approves_only_the_line_with_the_phrase() {
-    use aien_runtime::spine::{propose_task_checked, COMPOSE_MAX_ATTEMPTS};
-    let reqs = analyze("Create a.md containing one line saying hello.")
-        .resolved("")
-        .requirements;
-    let go = |reply: &'static str| {
-        let proposer = move |_: &str, _: Duration| {
-            Ok(Generation {
-                text: reply.to_string(),
-                tokens: 5,
-                finish_reason: Some("eos".into()),
-                ..Default::default()
-            })
-        };
-        propose_task_checked(
-            &proposer,
-            "base",
-            None,
-            &reqs,
-            Duration::from_secs(5),
-            Duration::from_millis(1),
-            COMPOSE_MAX_ATTEMPTS,
-        )
-        .0
+    let _home = home_guard::home_slot();
+    let goal = "Create a.md containing one line saying hello.";
+    let go = |text: &str| {
+        let h = Harness::new(always(text));
+        let r = h.run(goal).unwrap();
+        r.proposal
+            .ok_or_else(|| r.proposer_error.unwrap_or_default())
     };
     assert!(go("filename: a.md\ngoodbye\n").is_err());
     assert!(go("filename: a.md\nhello\n").is_ok());

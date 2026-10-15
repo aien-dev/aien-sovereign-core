@@ -7,7 +7,7 @@
 //! the model's stop set. Prints one JSON object.
 //!
 //! usage: np1_reference <model_dir> <goal> <workspace> <max_tokens> <new|task> [retry reason]
-//!   new  = the product's NEW-destination prompt (`spine::task_decision`, `TargetClass::New`):
+//!   new  = the product's NEW-destination prompt (`compose::rederive::task_decision`, `TargetClass::New`):
 //!          `proposal_prompt(goal)` plus `new_document_block` for the destination the
 //!          goal names, from the product's own public pieces, so it still holds after the run wrote
 //!          that destination (the v5 template alone when the goal names none)
@@ -101,7 +101,7 @@ async fn main() {
     let base = reference_prompt(mode, goal, &ws);
     let retry = a.get(6).cloned();
     let prompt = match &retry {
-        Some(why) => aien_runtime::spine::retry_prompt(&base, why),
+        Some(why) => aien_runtime::compose::rederive::retry_prompt(&base, why),
         None => base,
     };
     let allen = std::env::var("NP1_REFERENCE_ALLEN").unwrap_or_else(|_| "none".into());
@@ -113,7 +113,7 @@ async fn main() {
     let text = format!(
         "{}{}",
         aien_runtime::format_chat(tok.template(), &msgs).expect("chat"),
-        aien_runtime::spine::COMPOSE_ASSISTANT_PREFIX
+        aien_runtime::compose::rederive::COMPOSE_ASSISTANT_PREFIX
     );
     let ids = tok.encode(&text).expect("encode");
     let (out, finish, ms) = turn(&mut spine, &mut backend, &ids, max_tokens, &stop)
@@ -121,7 +121,7 @@ async fn main() {
         .expect("turn");
     let reply = format!(
         "{}{}",
-        aien_runtime::spine::COMPOSE_ASSISTANT_PREFIX,
+        aien_runtime::compose::rederive::COMPOSE_ASSISTANT_PREFIX,
         tok.decode_opts(&out, true).expect("decode")
     );
     let hex = |b: &[u8]| -> String {
@@ -137,7 +137,7 @@ async fn main() {
             "model_dir": dir, "model_id": config.model_id, "template": tok.template().name(),
             "stop_ids": stop, "warm_up_ids": w, "mode": mode, "retry_reason": retry, "goal": goal, "workspace": ws,
             "prompt_sha256": hex(prompt.as_bytes()),
-            "prompt_tokens": ids.len(), "prompt_ids_sha256": aien_runtime::spine::token_ids_sha256(&ids),
+            "prompt_tokens": ids.len(), "prompt_ids_sha256": aien_runtime::token_ids_sha256(&ids),
             "prompt_ids": ids, "max_tokens": max_tokens, "output_ids": out, "n_out": out.len(),
             "finish": finish, "ms": ms, "reply": reply, "reply_sha256": hex(reply.as_bytes()),
         })
@@ -145,7 +145,7 @@ async fn main() {
 }
 
 /// The prompt of one reference run. `new` repeats the `TargetClass::New` branch of
-/// `spine::task_decision` (the template plus `new_document_block` for the named
+/// `compose::rederive::task_decision` (the template plus `new_document_block` for the named
 /// destination) with the product's own functions; it does not call `task_decision`
 /// because the run being replayed may already have written that destination, which
 /// would turn the live decision into an edit. `task` is the product's `task_prompt`
@@ -155,7 +155,7 @@ async fn main() {
 /// after the run wrote `notes/tea`; name replayed destinations with an extension (v5 R1:
 /// `notes/swim-tip.txt`).
 fn reference_prompt(mode: &str, goal: &str, ws: &std::path::Path) -> String {
-    use aien_runtime::spine::{
+    use aien_runtime::compose::rederive::{
         classify_destination, new_document_block, proposal_prompt, task_prompt,
     };
     match mode {
@@ -173,7 +173,7 @@ fn reference_prompt(mode: &str, goal: &str, ws: &std::path::Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::reference_prompt;
-    use aien_runtime::spine::{task_decision, ProposalKind};
+    use aien_runtime::compose::rederive::{task_decision, ProposalKind};
     use std::path::{Path, PathBuf};
 
     fn workspace() -> (tempfile::TempDir, PathBuf) {
@@ -229,7 +229,7 @@ mod tests {
         let goal = "Write a short note about brewing green tea.";
         let (want, kind) = product(goal, &ws);
         assert_eq!(kind, ProposalKind::Document);
-        assert_eq!(want, aien_runtime::spine::proposal_prompt(goal));
+        assert_eq!(want, aien_runtime::compose::rederive::proposal_prompt(goal));
         assert_eq!(reference_prompt("new", goal, &ws), want);
         assert_eq!(reference_prompt("task", goal, &ws), want);
     }
@@ -311,12 +311,12 @@ mod allen_tests {
         let text = format!(
             "{}{}",
             aien_runtime::format_chat(tok.template(), &msgs).expect("chat"),
-            aien_runtime::spine::COMPOSE_ASSISTANT_PREFIX
+            aien_runtime::compose::rederive::COMPOSE_ASSISTANT_PREFIX
         );
         let ids = tok.encode(&text).expect("encode");
         assert_eq!(ids.len(), 164, "prompt tokens");
         assert_eq!(
-            aien_runtime::spine::token_ids_sha256(&ids),
+            aien_runtime::token_ids_sha256(&ids),
             "eee4e094335087285f3c4ff52fda6f9ecc946c3f145abbe9fbbccf403a6adfe6"
         );
     }
@@ -333,9 +333,8 @@ mod allen_tests {
 #[cfg(test)]
 mod v8_replay {
     use super::allen_prompt;
-    use aien_runtime::spine::{
-        corrective_retry_prompt, retry_prompt, task_decision, token_ids_sha256,
-    };
+    use aien_runtime::compose::rederive::{corrective_retry_prompt, retry_prompt, task_decision};
+    use aien_runtime::token_ids_sha256;
     use serde_json::Value;
     use std::path::{Path, PathBuf};
 
@@ -374,7 +373,7 @@ mod v8_replay {
             let text = format!(
                 "{}{}",
                 aien_runtime::format_chat(tok.template(), &msgs).expect("chat"),
-                aien_runtime::spine::COMPOSE_ASSISTANT_PREFIX
+                aien_runtime::compose::rederive::COMPOSE_ASSISTANT_PREFIX
             );
             tok.encode(&text).expect("encode")
         };
