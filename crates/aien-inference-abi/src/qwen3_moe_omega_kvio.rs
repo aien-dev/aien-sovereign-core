@@ -5,8 +5,8 @@
 //! [`PoolBlockGeometry::block_stride`] bytes, laid out `[layer][K plane | V plane][token][kv
 //! head][dim]` with every element a little-endian bf16 bit pattern. Rows at or past `len` in the
 //! last block are zero. This is byte for byte the layout of `aien_kv_cache::UnifiedKvTensorPool`
-//! with dtype bf16 and block size [`KV_BLOCK_SIZE`] (the pool [`super::OmegaPagedKv`] attends
-//! over), so the split path copies its blocks as they are.
+//! with dtype bf16 and block size [`KV_BLOCK_SIZE`](super::KV_BLOCK_SIZE) (the pool
+//! [`super::OmegaPagedKv`] attends over), so the split path copies its blocks as they are.
 //!
 //! The fused path ([`crate::qwen3_moe_omega_dattn::OmegaFusedKv`], what the live server runs) keeps
 //! its K/V differently on the chip: per layer one K plane and one V plane of bf16 rows, row
@@ -20,7 +20,7 @@
 //! Both rows of a position are the cached K (after the k norm and RoPE) and V, exactly what the
 //! attention reads; positions are absolute, so a restored prefix lines up with the next step.
 
-use super::{Qwen3MoeConfig, KV_BLOCK_SIZE};
+use super::{KvGeometry, Qwen3MoeConfig};
 
 /// The byte geometry of one `HostPagedPoolV1` block for a model (bf16 elements).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -35,13 +35,17 @@ pub struct PoolBlockGeometry {
 pub const ELEMENT_BYTES: usize = 2;
 
 impl PoolBlockGeometry {
-    pub fn for_config(c: &Qwen3MoeConfig) -> Self {
+    pub fn for_geometry(g: &KvGeometry) -> Self {
         Self {
-            layers: c.layers,
-            kv_heads: c.kv_heads,
-            head_dim: c.head_dim,
-            block_size: KV_BLOCK_SIZE,
+            layers: g.layers,
+            kv_heads: g.kv_heads,
+            head_dim: g.head_dim,
+            block_size: g.block_size,
         }
+    }
+    /// Shim until ADR 0004 step 5: the geometry of a 30B-family config.
+    pub fn for_config(c: &Qwen3MoeConfig) -> Self {
+        Self::for_geometry(&KvGeometry::from(c))
     }
     pub fn head_stride(&self) -> usize {
         self.head_dim * ELEMENT_BYTES

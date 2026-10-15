@@ -5,11 +5,12 @@
 //! builds or drops the driver. When it is set, `generate_with` hands the not-yet-stored part of
 //! the prompt to [`WholePromptPrefill::run`] in ONE call (a fixed launch count per layer) instead
 //! of the `prefill_chunk` loop, provided: no layer is traced, the routing mutant is off, and the
-//! KV is omega's fused cache ([`KvAttention::fused_kv`]). Otherwise the chunk loop runs as before.
+//! KV is omega's fused cache ([`KvAttention::fused_kv`](super::KvAttention::fused_kv)).
+//! Otherwise the chunk loop runs as before.
 //! Prefix reuse is kept: the driver starts at `pos0 = self.pos` after `rewind` / `reset`.
 use std::time::Instant;
 
-use super::{KvAttention, Qwen3MoeOmegaEngine, StepTiming};
+use super::{KvStore, Qwen3MoeOmegaEngine, StepTiming};
 use crate::qwen3_moe_omega_prefill::WholePromptPrefill;
 
 /// The real driver type the engine holds.
