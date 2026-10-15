@@ -14,7 +14,9 @@
 //!   bf16 GEMV takes, no transpose), and handed to a [`DenseUploader`]. q, k and v are read back to
 //!   back, so the fused `[q_dim + 2*kv_dim][hidden]` tensor is the three checkpoint tensors stacked
 //!   in that order with no copy; gate and up likewise give `[2*intermediate][hidden]`, gate rows
-//!   first. The host keeps the bf16 embedding (widened per row at lookup) and the f32 norms. Peak
+//!   first. The host keeps the bf16 embedding (widened per row at lookup; the design's section
+//!   2.2 says f32, which would add 1.24 GB at the 8B for the same values, so bf16 as in the 30B
+//!   engine and the design's section 0) and the f32 norms. Peak
 //!   host memory is the embedding plus one buffer the size of the largest matrix (the lm_head):
 //!   [`dense_loader_transient_bytes`].
 
@@ -120,6 +122,16 @@ impl Qwen3DenseConfig {
                 return Err(format!(
                     "config refused: model_type {other:?}, this loader is for dense \"qwen3\""
                 ))
+            }
+        }
+        // A checkpoint that is not bf16 is refused here, not at its first tensor read.
+        for key in ["torch_dtype", "dtype"] {
+            if let Some(d) = raw.get(key).filter(|d| !d.is_null()) {
+                if d.as_str() != Some("bfloat16") {
+                    return Err(format!(
+                        "config refused: {key} {d}, this loader streams bfloat16 weights"
+                    ));
+                }
             }
         }
         // Named before the general reader so the refusal says which field.
@@ -239,8 +251,9 @@ impl Qwen3DenseConfig {
 
     /// Bytes of one layer's four streamed bf16 tensors.
     pub fn layer_resident_bytes(&self) -> usize {
-        self.matrices()[..4]
+        self.matrices()
             .iter()
+            .filter(|m| m.0 != DenseTensor::LmHead)
             .map(|&(_, n, k)| 2 * n * k)
             .sum()
     }
@@ -266,7 +279,9 @@ pub fn dense_loader_transient_bytes(config: &Qwen3DenseConfig) -> usize {
 // The device side, behind a trait so the loader runs without a chip.
 // ---------------------------------------------------------------------------
 
-/// One resident `[n][k]` bf16 matrix: `y[r] = sum_c W[r][c] * x[c]` in f32.
+/// One resident `[n][k]` bf16 matrix: `y[r] = sum_c W[r][c] * x[c]` in f32. Shared across
+/// threads: an implementation over omega's `Bf16Tensor` (not `Sync`) holds it behind a lock, as
+/// `OmegaLmHead` does for the 30B.
 pub trait DenseGemv: Send + Sync + std::fmt::Debug {
     fn n(&self) -> usize;
     fn k(&self) -> usize;
@@ -425,13 +440,13 @@ pub fn load_qwen3_dense_omega_from(
                       bits: &[u16]|
      -> Result<Arc<dyn DenseGemv>, String> {
         debug_assert_eq!(bits.len(), n * k);
-        let m = uploader.upload_bf16(layer, what, n, k, bits).map_err(|e| {
-            let at = layer.map_or("lm_head".to_string(), |l| format!("layer {l}"));
-            format!("{at} {} [{n}][{k}] upload: {e}", what.name())
-        })?;
+        let at = layer.map_or("lm_head".to_string(), |l| format!("layer {l}"));
+        let m = uploader
+            .upload_bf16(layer, what, n, k, bits)
+            .map_err(|e| format!("{at} {} [{n}][{k}] upload: {e}", what.name()))?;
         if m.n() != n || m.k() != k {
             return Err(format!(
-                "{} upload returned [{}][{}], asked [{n}][{k}]",
+                "{at} {} upload returned [{}][{}], asked [{n}][{k}]",
                 what.name(),
                 m.n(),
                 m.k()
@@ -583,13 +598,14 @@ pub(crate) mod test_support {
     use crate::qwen3_moe_omega::test_support::{prand, MemorySource};
     use std::sync::Mutex;
 
-    /// 2 layers, hidden 256, 2 query heads over 1 kv head of 128, intermediate 512, vocab 64.
+    /// 2 layers, hidden 256, 4 query heads over 2 kv heads of 128 (q_dim 512 differs from hidden,
+    /// so a transposed o_proj fails), intermediate 512, vocab 64.
     pub fn tiny_config() -> Qwen3DenseConfig {
         Qwen3DenseConfig {
             layers: 2,
             hidden: 256,
-            q_heads: 2,
-            kv_heads: 1,
+            q_heads: 4,
+            kv_heads: 2,
             head_dim: 128,
             intermediate: 512,
             vocab: 64,
@@ -607,7 +623,7 @@ pub(crate) mod test_support {
             "attention_bias": false,
             "attention_dropout": 0.0,
             "bos_token_id": 1,
-            "eos_token_id": c.eos_token_ids[0],
+            "eos_token_id": c.eos_token_ids,
             "head_dim": c.head_dim,
             "hidden_act": "silu",
             "hidden_size": c.hidden,
@@ -805,6 +821,8 @@ pub(crate) mod test_support {
     pub enum UploadMutant {
         /// Stores q|k|v with the k rows and the v rows exchanged.
         SwapKv { q_rows: usize, kv_rows: usize },
+        /// Stores gate|up with the gate rows and the up rows exchanged.
+        SwapGateUp { rows: usize },
     }
 
     /// One upload as the recording fake saw it.
@@ -850,6 +868,15 @@ pub(crate) mod test_support {
                 ..Self::default()
             }
         }
+        pub fn swapping_gate_up(c: &Qwen3DenseConfig) -> Self {
+            Self {
+                keep: true,
+                mutant: Some(UploadMutant::SwapGateUp {
+                    rows: c.intermediate,
+                }),
+                ..Self::default()
+            }
+        }
     }
 
     impl DenseUploader for RecordingDenseUploader {
@@ -870,11 +897,16 @@ pub(crate) mod test_support {
             }
             let matrix = self.keep.then(|| {
                 let mut stored = bits.to_vec();
-                if let (Some(UploadMutant::SwapKv { q_rows, kv_rows }), DenseTensor::Qkv) =
-                    (self.mutant, what)
-                {
-                    let (kb, vb) = stored[q_rows * k..].split_at_mut(kv_rows * k);
-                    kb.swap_with_slice(&mut vb[..kv_rows * k]);
+                match (self.mutant, what) {
+                    (Some(UploadMutant::SwapKv { q_rows, kv_rows }), DenseTensor::Qkv) => {
+                        let (kb, vb) = stored[q_rows * k..].split_at_mut(kv_rows * k);
+                        kb.swap_with_slice(&mut vb[..kv_rows * k]);
+                    }
+                    (Some(UploadMutant::SwapGateUp { rows }), DenseTensor::GateUp) => {
+                        let (gb, ub) = stored.split_at_mut(rows * k);
+                        gb.swap_with_slice(ub);
+                    }
+                    _ => {}
                 }
                 Arc::new(HostGemv { n, k, bits: stored })
             });
@@ -993,12 +1025,14 @@ pub(crate) mod test_support {
 /// uploader, so other crates can load a dense model without a chip. Never in a server build.
 #[cfg(feature = "host-test-engine")]
 pub mod host_test_model {
-    use super::test_support::{
-        memory_source, tiny_config, write_checkpoint, RecordingDenseUploader,
-    };
+    use super::test_support::{memory_source, tiny_config, write_checkpoint};
+    /// The recording uploader (`keeping()` for host GEMVs), to load the written checkpoint
+    /// with [`load_qwen3_dense_omega`].
+    pub use super::test_support::{HostGemv, RecordingDenseUploader, UploadRecord};
     use super::*;
 
-    /// 2 layers, hidden 256, 2 query heads over 1 kv head of 128, intermediate 512, vocab 64.
+    /// 2 layers, hidden 256, 4 query heads over 2 kv heads of 128 (q_dim 512 differs from hidden,
+    /// so a transposed o_proj fails), intermediate 512, vocab 64.
     pub fn config() -> Qwen3DenseConfig {
         tiny_config()
     }
@@ -1173,6 +1207,8 @@ mod tests {
             "Qwen3ForCausalLM",
         );
         refused(variant("num_experts", 128.into()), "num_experts");
+        refused(variant("torch_dtype", "float16".into()), "torch_dtype");
+        refused(variant("dtype", "float32".into()), "dtype");
     }
 
     #[test]
@@ -1187,8 +1223,8 @@ mod tests {
             .collect();
         let mut want = Vec::new();
         for l in 0..c.layers {
-            want.push((Some(l), DenseTensor::Qkv, 512, 256, 2 * 512 * 256));
-            want.push((Some(l), DenseTensor::O, 256, 256, 2 * 256 * 256));
+            want.push((Some(l), DenseTensor::Qkv, 1024, 256, 2 * 1024 * 256));
+            want.push((Some(l), DenseTensor::O, 256, 512, 2 * 256 * 512));
             want.push((Some(l), DenseTensor::GateUp, 1024, 256, 2 * 1024 * 256));
             want.push((Some(l), DenseTensor::Down, 256, 512, 2 * 256 * 512));
         }
@@ -1264,7 +1300,23 @@ mod tests {
             .expect_err("a k/v row swap must fail the byte test");
         assert!(
             err.contains(
-                "upload Some(0) q|k|v: row 256 is not model.layers.0.self_attn.k_proj.weight row 0"
+                "upload Some(0) q|k|v: row 512 is not model.layers.0.self_attn.k_proj.weight row 0"
+            ),
+            "{err}"
+        );
+    }
+
+    /// Negative control for the MLP concat: gate and up rows exchanged must fail the byte test.
+    #[test]
+    fn negative_control_gate_up_swap_fails_the_byte_test() {
+        let c = tiny_config();
+        let up = RecordingDenseUploader::swapping_gate_up(&c);
+        load_tiny(&up).unwrap();
+        let err = check_upload_bytes(&c, &mut memory_source(&c), &up.records.lock().unwrap())
+            .expect_err("a gate/up row swap must fail the byte test");
+        assert!(
+            err.contains(
+                "upload Some(0) gate|up: row 0 is not model.layers.0.mlp.gate_proj.weight row 0"
             ),
             "{err}"
         );
@@ -1327,6 +1379,63 @@ mod tests {
             dense_loader_transient_bytes(&tiny_config())
         );
         assert!(report.peak_rss_bytes.is_some_and(|b| b > 0));
+    }
+
+    /// Fills every read with a finite bf16 pattern (0x3c3c), so a full-width model can be loaded
+    /// without a checkpoint on disk.
+    struct PatternSource;
+
+    impl TensorSource for PatternSource {
+        fn read_into(
+            &mut self,
+            _: &str,
+            dtype: &str,
+            _: &[usize],
+            dst: &mut [u8],
+        ) -> Result<(), String> {
+            assert_eq!(dtype, "BF16");
+            dst.fill(0x3c);
+            Ok(())
+        }
+    }
+
+    /// Process peak RSS growth over one load, with the high-water mark reset first
+    /// (`/proc/self/clear_refs` 5). `None` when `/proc` cannot do that.
+    fn measured_peak_growth(c: &Qwen3DenseConfig, up: &RecordingDenseUploader) -> Option<u64> {
+        std::fs::write("/proc/self/clear_refs", "5").ok()?;
+        let before = crate::qwen3_moe_omega::current_rss_bytes()?;
+        let (w, report) =
+            load_qwen3_dense_omega_from(c, &mut PatternSource, up, &mut |_| {}).unwrap();
+        drop(w);
+        Some(report.peak_rss_bytes?.saturating_sub(before))
+    }
+
+    /// The memory gate measured, not just computed: one layer at the 8B widths with a 32k
+    /// vocabulary (embedding 268 MB, model 654 MB) must raise the peak RSS by at most the
+    /// embedding plus the one buffer plus 128 MB slack. Control: the same load through the
+    /// keeping uploader (a full host copy of the model, as an f32 or bf16 image would be) must
+    /// break the same bound, so the check cannot pass vacuously.
+    #[test]
+    fn measured_peak_rss_is_the_embedding_plus_one_buffer() {
+        let mut c =
+            Qwen3DenseConfig::from_json(QWEN3_8B_CONFIG, Some(QWEN3_8B_GENERATION)).unwrap();
+        c.layers = 1;
+        c.vocab = 32768;
+        let bound = (c.embed_host_bytes() + dense_loader_transient_bytes(&c) + (128 << 20)) as u64;
+        let Some(streaming) = measured_peak_growth(&c, &RecordingDenseUploader::record_only())
+        else {
+            println!("no /proc/self/clear_refs: measured peak RSS check skipped");
+            return;
+        };
+        assert!(
+            streaming <= bound,
+            "streaming load grew peak RSS by {streaming}, bound {bound}"
+        );
+        let keeping = measured_peak_growth(&c, &RecordingDenseUploader::keeping()).unwrap();
+        assert!(
+            keeping > bound,
+            "control: a full host copy grew peak RSS by only {keeping}, bound {bound}"
+        );
     }
 
     /// The tiny model through the shard files: the loader's values equal
