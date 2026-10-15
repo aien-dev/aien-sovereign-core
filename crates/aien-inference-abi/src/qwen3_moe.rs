@@ -304,6 +304,11 @@ impl Shard {
         })
     }
 
+    /// The header's dtype of `name`, `None` when this shard does not hold it.
+    pub(crate) fn dtype(&self, name: &str) -> Option<&str> {
+        self.header.get(name)?.get("dtype")?.as_str()
+    }
+
     /// Reads one tensor into `dst` after checking dtype, shape and byte range.
     pub(crate) fn read(
         &self,
