@@ -28,9 +28,11 @@ is missing the samples record `time_v.available: false` instead of numbers).
    features, profiles, target dir, jobs, build env, date).
 2. `timings`: one cold `cargo build --workspace --timings`. The `UNIT_DATA`
    block of `cargo-timing.html` is cut out with sed and validated with jq
-   (`timings/units.json`), the observed critical path and the pipelining
-   estimate are computed into `timings/critical-path.json`, and the report is
-   kept gzipped.
+   (`timings/units.json`), the observed critical path and the upper-bound
+   estimate are computed into `timings/critical-path.json`, the package graph
+   from `cargo metadata --filter-platform <host> --locked --offline` goes to
+   `timings/graph.json`, the realistic estimate (list-schedule replay) goes
+   to `timings/replay.json`, and the report is kept gzipped.
 3. `cold`: interleaved rounds. Each round runs, in order: cold check (arm A or
    B), cold build workspace, cold build `spark-harness`, cold test
    `--no-run`, cold check (the other arm), cold build `spark-supervisor`, cold
@@ -48,18 +50,28 @@ is missing the samples record `time_v.available: false` instead of numbers).
    pristine source. Two series per kind run as body, iface, body, iface.
 5. `cleanup`: deletes the target dir, the raw logs and the worktree.
 
-Before every sample the runner first waits, uncapped, while the host's
-shared quiet flag is held by another job (`quietlock check`; disable with
-`HS_QUIETLOCK=0` on hosts without it), recording `quiet_flag_wait_s`. In the
-committed run the timings stage predates this check, so its three samples
-lack that field. Then it waits until the 1-minute load average is below
-`HS_LOAD_MAX` (cap `HS_WAIT_CAP_S`), records load before and after, and lists
-foreign compiler processes at the start and every `HS_MON_INTERVAL_S` seconds.
-A foreign process is a `cargo` process, or a `rustc` / `clippy-driver` /
-`rustdoc` process with `--crate-name` (an actual compile), that is not in the
-runner's process tree. A sample that saw one is `contaminated: true` and is
-re-run up to `HS_MAX_RERUNS` times; earlier attempts stay in `samples.jsonl`
-with `final: false`.
+Before every sample the runner first waits while the host's shared quiet
+flag is held by another job (`quietlock check`, tool name `HS_QUIETLOCK_BIN`;
+disable with `HS_QUIETLOCK=0`). The wait is capped at `HS_QUIET_WAIT_CAP_S`
+(default 3600 s) so a stale flag cannot hang the run; on the cap the runner
+logs a line and proceeds. Each sample records `quiet_flag_checked`,
+`quiet_flag_wait_s` and `quiet_flag_wait_capped`. The manifest's
+`protocol.quiet_flag` records `enabled`, `tool`, `available` (the tool was
+found), `respected` (enabled and available) and `wait_cap_s`, so a host
+without the tool reads `respected: false`. Then the runner waits until the
+1-minute load average is below `HS_LOAD_MAX` (cap `HS_WAIT_CAP_S`), records
+load before and after, and lists foreign compiler processes at the start,
+every `HS_MON_INTERVAL_S` seconds (default 3) while the command runs, and once
+more right after it ends (`foreign.at_end`). A foreign process is a `cargo`
+process, or a `rustc` / `clippy-driver` / `rustdoc` process with
+`--crate-name` (an actual compile), that is not in the runner's process tree.
+
+A sample is `contaminated: true` when `contamination_reasons` is non-empty:
+`foreign_at_start`, `foreign_during`, `foreign_at_end`, `load_wait_capped`
+(the load never dropped below the limit within the cap) or
+`quiet_flag_wait_capped`. Contaminated samples are re-run up to
+`HS_MAX_RERUNS` times; earlier attempts stay in `samples.jsonl` with
+`final: false`.
 
 Every command's exit status is recorded. A failed build is a failure
 (`ok: false`, with the last 80 log lines kept); it is never counted in a
@@ -85,8 +97,31 @@ other knobs are listed at the top of the runner.
 
 ## Known quirks of the committed run (baseline-20261015-4c83e38)
 
+That run used the earlier runner (commit afa4316). Its data is kept as
+recorded; what it can and cannot show:
+
+- Foreign compiles were checked at sample start and then every 30 s
+  (`protocol.foreign_monitor_interval_s: 30`), with no end-of-sample check.
+  74 of the 84 counted samples finished before the first tick
+  (`foreign.monitor_ticks: 0`), so for them only the start was checked. The
+  data supports "no foreign compile at sample start, nor at any 30 s tick
+  that occurred", not "none during the sample".
+- `load_wait_capped` did not mark a sample contaminated then. Three attempts
+  hit the cap; all three were also contaminated by a foreign process and
+  re-run, so no counted sample has `load_wait_capped: true`. The highest
+  `loadavg_before` (1-minute) of a counted sample is 1.99.
+- The quiet-flag wait was uncapped and the manifest has only `respected:
+  true`; there is no `available` field. The tool was present on that host:
+  one sample waited 20 s for the flag (`quiet_flag_wait_s`), which only a
+  working `quietlock check` can produce.
 - The timings stage ran before the quiet-flag check was added, so its three
   samples have no `quiet_flag_wait_s`.
+- `timings/graph.json` and `timings/replay.json` were derived after the run,
+  from `cargo metadata --filter-platform aarch64-unknown-linux-gnu --locked
+  --offline` in a checkout whose `Cargo.lock`, `Cargo.toml` files and crate
+  sources are identical to 4c83e38, and from the committed `units.json`. No
+  build was re-run. `critical-path.json` was regenerated from the same
+  `units.json` by the current summarizer; only its `estimate` block changed.
 - In that run both settle checks of a series shared one `sample_id` (step 0),
   so the first settle log tail of each series was overwritten (85 tail files
   for 87 lines). Settle samples are not measurements. The runner now numbers
@@ -123,13 +158,32 @@ runnable when it finished (`unblocked_units`) or when its metadata was ready
 metadata was ready. That chain is the observed critical path of that one
 build (scheduling delays included).
 
-The estimate (always labeled ESTIMATE) of what a metadata-pipelining compiler
-change could save on that build:
+Two estimates, both labeled ESTIMATE and both covering the cold
+`cargo build --workspace` only, of what a metadata-pipelining compiler change
+(removing the wait for a dependency's metadata) could save on that build:
 
-- upper bound = min(sum of predecessor frontend time on rmeta-gated links of
-  the chain, build end minus floor), where floor = max(longest single unit,
-  sum of unit durations / jobs). Full-gated links (build scripts, proc macros,
-  linked binaries) need finished artifacts and are not shortened.
-- lower bound = 0 s, because stable cargo exposes no unit graph
-  (`--unit-graph` is unstable), so the slack of the next-longest chain is
-  unknown and the critical path may simply move to another chain.
+- upper bound (`critical-path.json`, `estimate`) = min(sum of predecessor
+  frontend time on rmeta-gated links of the chain, build end minus floor),
+  where floor = max(longest single unit, sum of unit durations / jobs).
+  Full-gated links (build scripts, proc macros, linked binaries) need
+  finished artifacts and are not shortened. This ignores that the critical
+  path may move to another chain.
+- realistic estimate (`replay.json`) = a list-schedule replay of the
+  measured unit durations at the build's job count (nproc), with unit edges
+  rebuilt from the package graph (`graph.json`). Stable cargo has no unit
+  graph (`--unit-graph` is unstable), so the edges follow cargo's rules: a
+  build-script compile needs its build-deps' libs; a build-script run needs
+  its own compile and the build-script run of any normal dependency that
+  declares `links`; a lib needs its own build-script run and its normal
+  dependencies' metadata (full artifact for proc macros); a bin needs its
+  own lib and its normal dependencies in full. Units start in observed start
+  order whenever a job slot is free. `baseline` treats a metadata edge as
+  ready at the dependency's frontend end; `no_rmeta_wait` treats it as ready
+  when the dependency starts. The saving is `baseline - no_rmeta_wait`, both
+  from the same model, and `model_error_pct` compares `baseline` with the
+  observed build end. Feature variants of one package are grouped
+  conservatively (every variant waits for every variant of its dependency).
+
+For the committed run: observed build 31.50 s, replay baseline 31.35 s
+(model error -0.48%), no-metadata-wait 26.79 s, realistic saving 4.56 s
+(14.5%); upper bound 4.94 s (15.7%).

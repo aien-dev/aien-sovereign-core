@@ -19,7 +19,8 @@
 # Environment (defaults in brackets): HS_COMMIT [HEAD of this checkout],
 # HS_WORK [$HOME/workspace/headstart-m0-<short>], HS_OUT
 # [benchmarks/data/headstart/baseline-<date>-<short>], HS_SAMPLES [5],
-# HS_LOAD_MAX [2], HS_WAIT_CAP_S [600], HS_MON_INTERVAL_S [30],
+# HS_LOAD_MAX [2], HS_WAIT_CAP_S [600], HS_MON_INTERVAL_S [3],
+# HS_QUIETLOCK [1], HS_QUIETLOCK_BIN [quietlock], HS_QUIET_WAIT_CAP_S [3600],
 # HS_MAX_RERUNS [2], HS_SLOW_COLD_S [1200], HS_INCR_STEPS [10],
 # HS_INCR_SERIES [2], HS_BODY_FILE, HS_BODY_ANCHOR, HS_IFACE_FILE,
 # HS_EDIT_REASON. See benchmarks/headstart/README.md.
@@ -37,12 +38,14 @@ HS_OUT=${HS_OUT:-$REPO/benchmarks/data/headstart/baseline-$HS_DATE-$SHORT}
 HS_SAMPLES=${HS_SAMPLES:-5}
 HS_LOAD_MAX=${HS_LOAD_MAX:-2}
 HS_WAIT_CAP_S=${HS_WAIT_CAP_S:-600}
-HS_MON_INTERVAL_S=${HS_MON_INTERVAL_S:-30}
+HS_MON_INTERVAL_S=${HS_MON_INTERVAL_S:-3}
 HS_MAX_RERUNS=${HS_MAX_RERUNS:-2}
 HS_SLOW_COLD_S=${HS_SLOW_COLD_S:-1200}
 HS_INCR_STEPS=${HS_INCR_STEPS:-10}
 HS_INCR_SERIES=${HS_INCR_SERIES:-2}
 HS_QUIETLOCK=${HS_QUIETLOCK:-1}
+HS_QUIETLOCK_BIN=${HS_QUIETLOCK_BIN:-quietlock}
+HS_QUIET_WAIT_CAP_S=${HS_QUIET_WAIT_CAP_S:-3600}
 # Edit targets (repo-relative paths). The anchor is a fixed string that must
 # match exactly one line, the opening line of a function body.
 HS_BODY_FILE=${HS_BODY_FILE:-}
@@ -119,15 +122,24 @@ foreign_json() {
 }
 
 # Respect the host's shared quiet flag (`quietlock check` exits non-zero while
-# another job holds it for a quiet measurement). No cap: the holder publishes
-# an expected end. Prints the seconds waited.
+# another job holds it for a quiet measurement). Capped at HS_QUIET_WAIT_CAP_S
+# so a stale flag cannot hang the run; a capped wait is logged and the sample
+# is marked contaminated. Prints "<waited_s> <capped> <checked>", where
+# checked is false when the check is disabled or quietlock is not installed.
+quietlock_available() { [ "$HS_QUIETLOCK" = 1 ] && command -v "$HS_QUIETLOCK_BIN" >/dev/null 2>&1; }
 wait_quietlock() {
-  local start
+  local start waited
   start=$(date +%s)
-  if [ "$HS_QUIETLOCK" = 1 ] && command -v quietlock >/dev/null 2>&1; then
-    while ! quietlock check >/dev/null 2>&1; do sleep 10; done
-  fi
-  echo "$(( $(date +%s) - start ))"
+  if ! quietlock_available; then echo "0 false false"; return; fi
+  while ! "$HS_QUIETLOCK_BIN" check >/dev/null 2>&1; do
+    waited=$(( $(date +%s) - start ))
+    if [ "$waited" -ge "$HS_QUIET_WAIT_CAP_S" ]; then
+      say "quiet flag still held after ${waited}s (cap ${HS_QUIET_WAIT_CAP_S}s): proceeding, sample marked contaminated"
+      echo "$waited true true"; return
+    fi
+    sleep 5
+  done
+  echo "$(( $(date +%s) - start )) false true"
 }
 
 # Wait until 1-minute loadavg < HS_LOAD_MAX, at most HS_WAIT_CAP_S seconds.
@@ -178,8 +190,9 @@ run_sample() {
     attempt=$((attempt + 1))
     local sid="${scenario}-${arm}-r${round}-s${step}-a${attempt}"
     [ "$prep" = cold ] && rm -rf "$TARGET"
-    local wq waited capped lb la fstart mon t0 t1 rc wall tv tf log tail_rel contaminated maxseen ticks memb qwait
-    qwait=$(wait_quietlock)
+    local wq waited capped lb la fstart fend mon t0 t1 rc wall tv tf log tail_rel contaminated maxseen ticks memb
+    local qw qwait qcapped qchecked reasons
+    qw=$(wait_quietlock); read -r qwait qcapped qchecked <<< "$qw"
     wq=$(wait_quiet); waited=${wq% *}; capped=${wq#* }
     lb=$(loadavg_json); memb=$(mem_avail_kb)
     fstart=$(foreign_json)
@@ -198,13 +211,21 @@ run_sample() {
     rc=$?
     set -e
     t1=$(now_ns)
+    fend=$(foreign_json)
     kill "$MON_PID" 2>/dev/null || true; wait "$MON_PID" 2>/dev/null || true; MON_PID=""
     la=$(loadavg_json)
     wall=$(secs_between "$t0" "$t1")
     if [ -x "$TIME_BIN" ]; then tv=$(time_v_json "$tf"); else tv='{"available":false,"reason":"/usr/bin/time not found"}'; fi
     ticks=$(wc -l < "$mon")
-    maxseen=$( { echo "$fstart"; cat "$mon"; } | jq -s 'map(length) | max')
-    contaminated=false; [ "$maxseen" -gt 0 ] && contaminated=true
+    maxseen=$( { echo "$fstart"; cat "$mon"; echo "$fend"; } | jq -s 'map(length) | max')
+    reasons=$(jq -cn --argjson s "$fstart" --argjson e "$fend" --slurpfile m "$mon" \
+      --argjson lc "$capped" --argjson qc "$qcapped" \
+      '[ (if ($s | length) > 0 then "foreign_at_start" else empty end),
+         (if any($m[]; length > 0) then "foreign_during" else empty end),
+         (if ($e | length) > 0 then "foreign_at_end" else empty end),
+         (if $lc then "load_wait_capped" else empty end),
+         (if $qc then "quiet_flag_wait_capped" else empty end) ]')
+    contaminated=false; [ "$reasons" != '[]' ] && contaminated=true
     tail_rel="logs/$sid.tail.log"
     local nt=30; [ "$rc" -ne 0 ] && nt=80
     tail -n "$nt" "$log" | LC_ALL=C tr -cd '\11\12\15\40-\176' > "$HS_OUT/$tail_rel"
@@ -217,7 +238,8 @@ run_sample() {
       --arg started "$(date -u -d "@$((t0 / 1000000000))" +%Y-%m-%dT%H:%M:%SZ)" \
       --argjson wall "$wall" --argjson tv "$tv" --argjson rc "$rc" \
       --argjson lb "$lb" --argjson la "$la" --argjson waited "$waited" --argjson capped "$capped" \
-      --argjson qwait "$qwait" --argjson memb "${memb:-null}" --argjson fstart "$fstart" --argjson maxseen "$maxseen" \
+      --argjson qwait "$qwait" --argjson qcapped "$qcapped" --argjson qchecked "$qchecked" \
+      --argjson fend "$fend" --argjson reasons "$reasons" --argjson memb "${memb:-null}" --argjson fstart "$fstart" --argjson maxseen "$maxseen" \
       --argjson ticks "$ticks" --argjson contaminated "$contaminated" --argjson final "$final" \
       --arg tail "$tail_rel" --arg edit "${HS_CUR_EDIT:-}" \
       --slurpfile mon <(cat "$mon") \
@@ -226,12 +248,14 @@ run_sample() {
         aa_pair: (if $aa == "-" then null else $aa end), prep: $prep, edit: (if $edit == "" then null else $edit end),
         command: $cmdline, cwd: $cwd, cargo_target_dir: $target, started_at: $started,
         wall_s: $wall, time_v: $tv, exit_status: $rc, ok: ($rc == 0),
-        loadavg_before: $lb, loadavg_after: $la, quiet_flag_wait_s: $qwait,
+        loadavg_before: $lb, loadavg_after: $la,
+        quiet_flag_checked: $qchecked, quiet_flag_wait_s: $qwait, quiet_flag_wait_capped: $qcapped,
         load_wait_s: $waited, load_wait_capped: $capped,
         mem_available_kb_before: $memb,
-        foreign: {at_start: $fstart, monitor_ticks: $ticks, max_seen: $maxseen,
-                  seen: ([$fstart[], ($mon[] | .[])] | unique | .[0:40])},
-        contaminated: $contaminated, final: $final, log_tail: $tail}' >> "$SAMPLES"
+        foreign: {at_start: $fstart, at_end: $fend, monitor_ticks: $ticks, max_seen: $maxseen,
+                  seen: ([$fstart[], ($mon[] | .[]), $fend[]] | unique | .[0:40])},
+        contaminated: $contaminated, contamination_reasons: $reasons,
+        final: $final, log_tail: $tail}' >> "$SAMPLES"
     rm -f "$log"
     say "  -> rc=$rc wall=${wall}s contaminated=$contaminated final=$final"
     LAST_WALL=$wall
@@ -245,8 +269,8 @@ run_sample() {
 stage_setup() {
   say "setup: commit $HS_COMMIT, work $HS_WORK, out $HS_OUT"
   [ -x "$TIME_BIN" ] || say "WARNING: $TIME_BIN not found; max RSS and CPU% will be recorded as unavailable"
-  mkdir -p "$HS_WORK" "$RAWLOG" "$HS_OUT/logs" "$HS_OUT/timings"
   case "$HS_WORK/" in "$REPO/"*) die "HS_WORK must be outside the checkout ($REPO)";; esac
+  mkdir -p "$HS_WORK" "$RAWLOG" "$HS_OUT/logs" "$HS_OUT/timings"
   if [ ! -d "$SRC/.git" ] && [ ! -f "$SRC/.git" ]; then
     git -C "$REPO" worktree add --detach "$SRC" "$HS_COMMIT" >&2
   fi
@@ -299,7 +323,7 @@ stage_setup() {
                  foreign_monitor_interval_s: $mon, max_reruns_when_contaminated: $reruns,
                  slow_cold_threshold_s: $slow,
                  foreign_definition: "cargo processes, or rustc / clippy-driver / rustdoc processes with --crate-name (an actual compile), outside this runner process tree and whose command line does not mention the benchmark work dir",
-                 contaminated_definition: "a foreign process was seen at sample start or at any monitor tick",
+                 contaminated_definition: "any of: a foreign process at sample start, at any monitor tick or in the end-of-sample snapshot; the load wait hit its cap; the quiet-flag wait hit its cap (see contamination_reasons)",
                  time_v_available: $time_v},
       scenarios: [], stages: []}' > "$MANIFEST"
   say "manifest written: $MANIFEST"
@@ -329,9 +353,13 @@ require_setup() {
   [ -d "$SRC" ] || die "no worktree at $SRC; run the setup stage first"
   [ "$(git -C "$SRC" rev-parse HEAD)" = "$HS_COMMIT" ] || die "worktree HEAD moved"
   mkdir -p "$RAWLOG" "$HS_OUT/logs" "$HS_OUT/timings"
-  manifest_add '.protocol.quiet_flag //= {respected: ($q == "1"),
-      how: "before each sample, wait (uncapped) while `quietlock check` reports the host quiet flag held by another job; seconds waited are in quiet_flag_wait_s",
-      first_stage: $s}' --arg q "$HS_QUIETLOCK" --arg s "$CUR_STAGE"
+  local qa=false; quietlock_available && qa=true
+  manifest_add '.protocol.quiet_flag = ((.protocol.quiet_flag // {first_stage: $s}) + {
+      enabled: ($q == "1"), tool: $bin, available: $qa, respected: ($q == "1" and $qa),
+      wait_cap_s: $cap,
+      how: "before each sample, wait while `quietlock check` reports the host quiet flag held by another job, at most wait_cap_s; a capped wait is logged and marks the sample contaminated; per-sample quiet_flag_checked / quiet_flag_wait_s / quiet_flag_wait_capped"})' \
+    --arg q "$HS_QUIETLOCK" --arg s "$CUR_STAGE" --arg bin "$HS_QUIETLOCK_BIN" \
+    --argjson qa "$qa" --argjson cap "$HS_QUIET_WAIT_CAP_S"
 }
 
 stage_timings() {
@@ -344,6 +372,12 @@ stage_timings() {
   if [ "$LAST_RC" -eq 0 ] && [ -s "$html" ]; then
     "$SUMMARIZE" timings "$html" > "$HS_OUT/timings/units.json"
     "$SUMMARIZE" critical "$HS_OUT/timings/units.json" "$(nproc)" > "$HS_OUT/timings/critical-path.json"
+    local host
+    host=$(cd "$SRC" && rustc -vV | sed -n 's/^host: //p')
+    (cd "$SRC" && cargo metadata --format-version 1 --filter-platform "$host" --locked --offline) > "$RAWLOG/metadata.json"
+    "$SUMMARIZE" graph "$RAWLOG/metadata.json" > "$HS_OUT/timings/graph.json"
+    "$SUMMARIZE" replay "$HS_OUT/timings/units.json" "$HS_OUT/timings/graph.json" "$(nproc)" > "$HS_OUT/timings/replay.json"
+    say "replay estimate: $(jq -c '{baseline_model_end_s, no_rmeta_wait_model_end_s, realistic_saving_s, model_error_pct}' "$HS_OUT/timings/replay.json")"
     sed -n 's#.*<td>Max concurrency:</td><td>\(.*\)</td>.*#\1#p; s#.*<td>Total time:</td><td>\(.*\)</td>.*#\1#p' "$html" \
       | jq -R . | jq -s '{max_concurrency: .[0], total_time: .[1], source: "cargo-timing.html summary table"}' \
       > "$HS_OUT/timings/report-header.json"

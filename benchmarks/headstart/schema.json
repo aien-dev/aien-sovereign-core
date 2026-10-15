@@ -101,7 +101,16 @@
             "time_v_available": { "type": "boolean" },
             "quiet_flag": {
               "type": "object",
-              "properties": { "respected": { "type": "boolean" }, "how": { "type": "string" }, "first_stage": { "type": "string" } }
+              "description": "enabled, tool, available and wait_cap_s are absent in runs made before the quiet-flag cap (baseline-20261015-4c83e38)",
+              "properties": {
+                "enabled": { "type": "boolean", "description": "HS_QUIETLOCK=1" },
+                "tool": { "type": "string" },
+                "available": { "type": "boolean", "description": "the quietlock tool was found on PATH" },
+                "respected": { "type": "boolean", "description": "enabled and available; false means the flag was not checked" },
+                "wait_cap_s": { "type": "integer", "description": "longest wait for the flag before proceeding with the sample marked contaminated" },
+                "how": { "type": "string" },
+                "first_stage": { "type": "string" }
+              }
             }
           }
         },
@@ -188,6 +197,8 @@
         "loadavg_before": { "$ref": "#/$defs/loadavg" },
         "loadavg_after": { "$ref": "#/$defs/loadavg" },
         "quiet_flag_wait_s": { "type": "integer", "description": "seconds waited for the host quiet flag (quietlock); absent on samples taken before the runner checked it" },
+        "quiet_flag_checked": { "type": "boolean", "description": "false when the quiet flag was disabled or the tool was missing; absent in runs before the cap" },
+        "quiet_flag_wait_capped": { "type": "boolean", "description": "true when the flag was still held at protocol.quiet_flag.wait_cap_s; the sample is then contaminated" },
         "load_wait_s": { "type": "integer" },
         "load_wait_capped": { "type": "boolean", "description": "true when the 1-minute load never fell below protocol.load1_max within the cap" },
         "mem_available_kb_before": { "type": ["integer", "null"] },
@@ -196,12 +207,17 @@
           "required": ["at_start", "monitor_ticks", "max_seen", "seen"],
           "properties": {
             "at_start": { "type": "array", "items": { "type": "string", "description": "pid:comm:crate" } },
-            "monitor_ticks": { "type": "integer" },
+            "at_end": { "type": "array", "items": { "type": "string" }, "description": "snapshot right after the command ended; absent in runs before it was added" },
+            "monitor_ticks": { "type": "integer", "description": "checks made every protocol.foreign_monitor_interval_s while the command ran" },
             "max_seen": { "type": "integer" },
             "seen": { "type": "array", "items": { "type": "string" } }
           }
         },
-        "contaminated": { "type": "boolean" },
+        "contaminated": { "type": "boolean", "description": "true when contamination_reasons is non-empty (in older runs: a foreign process at start or at a tick)" },
+        "contamination_reasons": {
+          "type": "array",
+          "items": { "enum": ["foreign_at_start", "foreign_during", "foreign_at_end", "load_wait_capped", "quiet_flag_wait_capped"] }
+        },
         "final": { "type": "boolean", "description": "false when this attempt was contaminated and re-run" },
         "log_tail": { "type": "string", "description": "path, relative to the run directory, of the kept log tail" }
       }

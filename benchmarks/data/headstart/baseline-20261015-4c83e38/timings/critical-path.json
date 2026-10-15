@@ -3,9 +3,10 @@
     "floor_s": 17.302,
     "jobs": 20,
     "label": "ESTIMATE, not a measurement",
-    "lower_bound_saving_s": 0,
-    "method": "Walk back from the last unit to finish along the edge that unblocked each unit (cargo unblocked_units / unblocked_rmeta_units). On rmeta-gated links the dependent waited for the predecessor frontend (sections.frontend.end). A metadata-pipelining compiler change can at most remove those waits on this chain; full-gated links (build scripts, proc macros, linked binaries) need finished artifacts and are not shortened. Upper bound = min(sum of predecessor frontend time on rmeta-gated chain links, build_end - floor) where floor = max(longest unit, sum of unit durations / jobs). Lower bound = 0 s: without the full unit graph (stable cargo has no --unit-graph) the slack of the next-longest chain is unknown, so the chain may simply shift.",
+    "method": "Walk back from the last unit to finish along the edge that unblocked each unit (cargo unblocked_units / unblocked_rmeta_units). On rmeta-gated links the dependent waited for the predecessor frontend (sections.frontend.end). A metadata-pipelining compiler change can at most remove those waits on this chain; full-gated links (build scripts, proc macros, linked binaries) need finished artifacts and are not shortened. Upper bound = min(sum of predecessor frontend time on rmeta-gated chain links, build_end - floor) where floor = max(longest unit, sum of unit durations / jobs). This single-chain bound ignores that another chain may become critical; the realistic estimate that accounts for the whole graph and the job limit is the list-schedule replay (headstart-summarize.sh replay, timings/replay.json). Covers cold cargo build only.",
+    "realistic_estimate": "see timings/replay.json",
     "rmeta_wait_on_chain_s": 4.94,
+    "scope": "cold cargo build --workspace only",
     "upper_bound_saving_pct": 15.683,
     "upper_bound_saving_s": 4.94
   },
