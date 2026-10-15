@@ -602,9 +602,6 @@ fn branch_sampling_params(config: &SwarmConfig) -> SamplingParams {
     }
 }
 
-// The compose bridge lives in `crate::compose`; its items stay reachable here.
-pub use crate::compose::*;
-
 /// Records a processed operation id. The operation has already run, so a
 /// failed save does not change the reply; it is reported on stderr so the
 /// loss of durability is never silent (#299).

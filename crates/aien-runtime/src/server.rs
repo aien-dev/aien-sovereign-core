@@ -666,7 +666,7 @@ async fn generate_text(
 /// The compose "model" Skill: real inference through `generate_text`, run
 /// from an omega World worker thread (not a tokio thread) via `block_on`.
 /// Greedy, at most `AIEN_COMPOSE_MAX_TOKENS` (default 48) tokens per reply;
-/// each call gets the limit `propose_with_retries` passes (what is left of
+/// each call gets the limit `propose_task_checked` passes (what is left of
 /// the task budget: 29 s for an edit, 120 s for a document; omega waits that
 /// plus 1 s), so a slow model fails the Skill (no proposal) instead of failing the run.
 pub fn model_proposer(

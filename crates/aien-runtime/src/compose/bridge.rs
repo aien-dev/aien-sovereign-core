@@ -56,11 +56,11 @@ pub type ComposeProposer =
     Arc<dyn Fn(&str, std::time::Duration) -> Result<Generation, String> + Send + Sync>;
 
 /// The one Skill name; its procedure digest is sha256 of this name.
-pub const COMPOSE_MODEL_SKILL: &str = "aien.model.propose-file-change";
+const COMPOSE_MODEL_SKILL: &str = "aien.model.propose-file-change";
 
 /// `ComposeTaskReport::proposer` of a run driven by the proposer hook
 /// (crate::approved): the reply came from an approved proposal, not a model.
-pub const APPROVED_PROPOSER_LABEL: &str = "hook:approved-proposal";
+const APPROVED_PROPOSER_LABEL: &str = "hook:approved-proposal";
 
 /// Composition home: `$AIEN_COMPOSE_DIR`, else `$AIEN_RUNTIME_STATE_DIR/compose`,
 /// else `$XDG_STATE_HOME/aien-runtime/compose`, else
@@ -356,29 +356,29 @@ pub fn parse_file_proposal(text: &str) -> Option<FileProposal> {
 }
 
 /// At most this many proposals per task (ACCEPTANCE-v2 Section 3b).
-pub const COMPOSE_MAX_ATTEMPTS: u32 = 3;
+const COMPOSE_MAX_ATTEMPTS: u32 = 3;
 /// Wall budget for all attempts of one task: rx_compose_run's 30 s
 /// quiescence wait (not raised) less a 1 s margin (ACCEPTANCE-v3 Section 3b).
-pub const COMPOSE_SKILL_BUDGET: std::time::Duration = std::time::Duration::from_secs(29);
+const COMPOSE_SKILL_BUDGET: std::time::Duration = std::time::Duration::from_secs(29);
 /// Wall budget of a full-document task (one that creates a new file): 120 s.
-pub const COMPOSE_DOC_BUDGET: std::time::Duration = std::time::Duration::from_secs(120);
+const COMPOSE_DOC_BUDGET: std::time::Duration = std::time::Duration::from_secs(120);
 /// Env: wall budget of a small edit, in ms. Unset = `COMPOSE_SKILL_BUDGET` (29 s).
-pub const COMPOSE_EDIT_BUDGET_ENV: &str = "AIEN_COMPOSE_EDIT_BUDGET_MS";
+const COMPOSE_EDIT_BUDGET_ENV: &str = "AIEN_COMPOSE_EDIT_BUDGET_MS";
 /// Env: wall budget of a full-document task, in ms. Unset = `COMPOSE_DOC_BUDGET` (120 s).
-pub const COMPOSE_DOC_BUDGET_ENV: &str = "AIEN_COMPOSE_DOC_BUDGET_MS";
+const COMPOSE_DOC_BUDGET_ENV: &str = "AIEN_COMPOSE_DOC_BUDGET_MS";
 /// Env: output token cap of a full-document task. Unset = `COMPOSE_DOC_MAX_TOKENS_DEFAULT`.
 /// (Small edits keep `AIEN_COMPOSE_MAX_TOKENS`, read by the daemon, default 48.)
-pub const COMPOSE_DOC_MAX_TOKENS_ENV: &str = "AIEN_COMPOSE_DOC_MAX_TOKENS";
+const COMPOSE_DOC_MAX_TOKENS_ENV: &str = "AIEN_COMPOSE_DOC_MAX_TOKENS";
 /// The one-budget setting this replaced. Setting it is refused, never ignored.
-pub const COMPOSE_BUDGET_ENV_RETIRED: &str = "AIEN_COMPOSE_BUDGET_MS";
+const COMPOSE_BUDGET_ENV_RETIRED: &str = "AIEN_COMPOSE_BUDGET_MS";
 /// Default output token cap of a full-document task.
-pub const COMPOSE_DOC_MAX_TOKENS_DEFAULT: usize = 1024;
+const COMPOSE_DOC_MAX_TOKENS_DEFAULT: usize = 1024;
 /// Accepted range of `AIEN_COMPOSE_DOC_MAX_TOKENS`.
-pub const COMPOSE_DOC_MAX_TOKENS_RANGE: std::ops::RangeInclusive<usize> = 16..=4096;
+const COMPOSE_DOC_MAX_TOKENS_RANGE: std::ops::RangeInclusive<usize> = 16..=4096;
 /// Accepted range of both budget settings: omega waits budget + 1 000 ms and accepts at most 600 000 ms.
-pub const COMPOSE_BUDGET_MS_RANGE: std::ops::RangeInclusive<u64> = 1_000..=599_000;
+const COMPOSE_BUDGET_MS_RANGE: std::ops::RangeInclusive<u64> = 1_000..=599_000;
 /// Margin between the skill budget and omega's settle wait.
-pub const COMPOSE_WAIT_MARGIN: std::time::Duration = std::time::Duration::from_millis(1_000);
+const COMPOSE_WAIT_MARGIN: std::time::Duration = std::time::Duration::from_millis(1_000);
 
 /// What a compose task is, for limits: a small edit of an existing file, or
 /// the creation of a whole new document. Decided by `classify_target`.
@@ -438,7 +438,7 @@ impl ComposeBudgets {
 
 /// Parse one budget setting named `name`. `None` (unset) gives `default`; an
 /// empty, non-numeric or out-of-range value is refused, never replaced by the default.
-pub fn parse_compose_budget(
+fn parse_compose_budget(
     name: &str,
     default: std::time::Duration,
     v: Option<&str>,
@@ -461,7 +461,7 @@ pub fn parse_compose_budget(
 }
 
 /// Parse `AIEN_COMPOSE_DOC_MAX_TOKENS` (same refusal rule as the budgets).
-pub fn parse_compose_doc_max_tokens(v: Option<&str>) -> Result<usize, String> {
+fn parse_compose_doc_max_tokens(v: Option<&str>) -> Result<usize, String> {
     let Some(raw) = v else {
         return Ok(COMPOSE_DOC_MAX_TOKENS_DEFAULT);
     };
@@ -521,7 +521,7 @@ pub fn authorize_requires_desk_from_env() -> Result<bool, String> {
 /// Startup check (#328): a bridge that requires the desk must find a loadable
 /// desk key in its compose home, or the daemon refuses to start. Never creates
 /// a key: minting one is the operator's `aien compose desk-key --create`.
-pub fn check_desk_key_at_start(compose_dir: &Path) -> Result<(), String> {
+pub(crate) fn check_desk_key_at_start(compose_dir: &Path) -> Result<(), String> {
     let path = crate::approved_auth::desk_key_path(compose_dir);
     crate::approved_auth::DeskKey::load(&path).map(|_| ()).map_err(|e| {
         format!(
@@ -546,7 +546,7 @@ pub fn authorize_desk_at_start_from_env() -> Result<bool, String> {
 }
 
 /// The startup line that states the authorize rule this daemon enforces.
-pub fn authorize_mac_line(required: bool) -> &'static str {
+pub(crate) fn authorize_mac_line(required: bool) -> &'static str {
     if required {
         "Authorize MAC: on (aien compose authorize requires the approval desk key MAC)"
     } else {
@@ -582,12 +582,12 @@ pub fn compose_doc_max_tokens_from_env() -> Result<usize, String> {
     parse_compose_doc_max_tokens(env_opt(COMPOSE_DOC_MAX_TOKENS_ENV)?.as_deref())
 }
 
-/// Stable prefix of `wall_clock_reason`: `propose_task_with_retries` classes an
+/// Stable prefix of `wall_clock_reason`: `propose_task_checked` classes an
 /// attempt as "timeout" by it, and the token-limit cut (`length_cut_refusal`) never has it.
-pub const WALL_CLOCK_REASON_PREFIX: &str = "model proposal exceeded ";
+const WALL_CLOCK_REASON_PREFIX: &str = "model proposal exceeded ";
 
 /// Reason text of a wall-clock timeout.
-pub fn wall_clock_reason(limit_ms: u128) -> String {
+pub(crate) fn wall_clock_reason(limit_ms: u128) -> String {
     format!("{WALL_CLOCK_REASON_PREFIX}{limit_ms} ms")
 }
 
@@ -595,7 +595,7 @@ pub fn wall_clock_reason(limit_ms: u128) -> String {
 /// prompt prefill (2 839 + 896 ms) + 47 decode steps x 166.6 ms + 60 ms
 /// = 11 625 ms, rounded up (ACCEPTANCE-v3 Section 3b). Attempt k > 1 starts
 /// only if at least this much budget is left.
-pub const COMPOSE_ATTEMPT_BUDGET: std::time::Duration = std::time::Duration::from_millis(12_000);
+const COMPOSE_ATTEMPT_BUDGET: std::time::Duration = std::time::Duration::from_millis(12_000);
 /// Same rule for a full document. DIAGNOSTIC-LONG-1 (sovereign-core branch
 /// 031756/oq3-long-diag) measured replies of 313..649 tokens finishing by
 /// themselves in 28.6..61.9 s (~88 ms/token plus prefill), so a retry that
@@ -604,13 +604,10 @@ pub const COMPOSE_ATTEMPT_BUDGET: std::time::Duration = std::time::Duration::fro
 /// longest measured (61.9 s) leaves 58 s and still allows a retry; one that ran
 /// to the token cap (1024 tokens, ~90 s) leaves ~30 s and may not. Capped at
 /// half the budget so a small custom doc budget keeps the retry rule meaningful.
-pub const COMPOSE_DOC_ATTEMPT_BUDGET: std::time::Duration = std::time::Duration::from_secs(30);
+const COMPOSE_DOC_ATTEMPT_BUDGET: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// The per-attempt budget for `kind` under wall budget `budget`.
-pub fn compose_attempt_budget(
-    kind: ProposalKind,
-    budget: std::time::Duration,
-) -> std::time::Duration {
+fn compose_attempt_budget(kind: ProposalKind, budget: std::time::Duration) -> std::time::Duration {
     match kind {
         ProposalKind::Edit => COMPOSE_ATTEMPT_BUDGET,
         ProposalKind::Document => COMPOSE_DOC_ATTEMPT_BUDGET.min(budget / 2),
@@ -653,7 +650,7 @@ pub fn compose_assistant_prefix(template: &aien_inference_abi::ChatTemplate) -> 
 /// in the authorization, confinement, execution and evidence layers
 /// (`RunComposeTask` canonicalizes the workspace, the task id hashes it, the
 /// commit record stores it).
-pub const WORKSPACE_LABEL: &str = "workspace";
+const WORKSPACE_LABEL: &str = "workspace";
 
 /// The fixed proposal template of the production RunComposeTask path. The
 /// workspace is named by `WORKSPACE_LABEL`, never by its path (sc#429).
@@ -670,20 +667,7 @@ pub fn proposal_prompt(goal: &str) -> String {
 
 /// Largest existing file whose content the edit-mode block carries
 /// (NEXT-PHASE-1 v6 T5); a larger file gets no block.
-pub const COMPOSE_EDIT_MAX_BYTES: u64 = 8192;
-
-/// NEXT-PHASE-1 v6 edit mode: the goal's DESTINATION (see `destination.rs`,
-/// issue #288; paths the goal only reads are ignored) when it is a plain
-/// relative path naming an existing regular UTF-8 file of at most
-/// `COMPOSE_EDIT_MAX_BYTES` inside the canonical workspace `ws`. Returns that
-/// path and the file's content. None when the destination is missing, unsafe
-/// or ambiguous, so a new-file goal keeps the v5 prompt byte for byte.
-pub fn existing_target(goal: &str, ws: &Path) -> Option<(String, String)> {
-    match classify_target(goal, ws) {
-        TargetClass::Edit(p, c) => Some((p, c)),
-        _ => None,
-    }
-}
+const COMPOSE_EDIT_MAX_BYTES: u64 = 8192;
 
 /// Decide the task kind from the goal's DESTINATION only (issue #288): the
 /// path the goal asks to create or change, found by
@@ -695,7 +679,7 @@ pub fn existing_target(goal: &str, ws: &Path) -> Option<(String, String)> {
 /// the workspace, a directory, a file over `COMPOSE_EDIT_MAX_BYTES`, non-UTF-8
 /// or unreadable content, and an ambiguous destination (several candidates).
 /// A goal naming no destination is `New` (the model names the file).
-pub fn classify_target(goal: &str, ws: &Path) -> TargetClass {
+pub(crate) fn classify_target(goal: &str, ws: &Path) -> TargetClass {
     classify_destination(goal, ws).0
 }
 
@@ -961,7 +945,7 @@ pub fn new_document_block(path: &str) -> String {
 
 /// The additive edit-mode block (NEXT-PHASE-1 v6 T5), appended to the fixed
 /// proposal template only when the goal names an existing file.
-pub fn edit_block(path: &str, content: &str) -> String {
+fn edit_block(path: &str, content: &str) -> String {
     let nl = if content.ends_with('\n') { "" } else { "\n" };
     format!(
         "\nThe file {path} already exists. Its current content is:\n{content}{nl}\
@@ -980,7 +964,7 @@ pub fn task_prompt(goal: &str, ws: &Path) -> String {
 /// exact content of the block, read once (NEXT-PHASE-1 v7 T5). The Skill
 /// merges an edit reply into this same content, so the bytes the model saw
 /// are the bytes the merge keeps.
-pub fn task_prompt_and_target(goal: &str, ws: &Path) -> (String, Option<(String, String)>) {
+fn task_prompt_and_target(goal: &str, ws: &Path) -> (String, Option<(String, String)>) {
     let (prompt, target, _) = task_plan(goal, ws)
         .unwrap_or_else(|_| (proposal_prompt(goal), None, ProposalKind::Document));
     (prompt, target)
@@ -988,7 +972,7 @@ pub fn task_prompt_and_target(goal: &str, ws: &Path) -> (String, Option<(String,
 
 /// Prompt, edit target and kind of a task, or the refusal when the goal names
 /// an existing file that no edit block can be built for.
-pub fn task_plan(goal: &str, ws: &Path) -> Result<TaskPrompt, String> {
+fn task_plan(goal: &str, ws: &Path) -> Result<TaskPrompt, String> {
     task_decision(goal, ws).map(|(plan, _)| plan)
 }
 
@@ -1000,12 +984,12 @@ pub fn task_decision(goal: &str, ws: &Path) -> Result<(TaskPrompt, Option<String
 }
 
 /// A task decision with the inputs its prompt carries and the candidates left out.
-pub type TaskDecisionInputs = (TaskPrompt, Option<String>, Vec<InputRef>, Vec<InputOmitted>);
+type TaskDecisionInputs = (TaskPrompt, Option<String>, Vec<InputRef>, Vec<InputOmitted>);
 
 /// `task_decision` plus the inputs its prompt carries and the candidates left
 /// out (sc#382). The prompt is the fixed template, the input block when the
 /// goal points at workspace files to read, then the edit or new-document block.
-pub fn task_decision_with_inputs(goal: &str, ws: &Path) -> Result<TaskDecisionInputs, String> {
+fn task_decision_with_inputs(goal: &str, ws: &Path) -> Result<TaskDecisionInputs, String> {
     let mut prompt = proposal_prompt(goal);
     let (class, dest, named) = classify_with_inputs(goal, ws);
     let kind = class.kind();
@@ -1035,12 +1019,12 @@ pub fn task_decision_with_inputs(goal: &str, ws: &Path) -> Result<TaskDecisionIn
 }
 
 /// Total bytes of input text a proposal prompt carries (sc#382).
-pub const COMPOSE_INPUTS_MAX_BYTES: usize = 16384;
+const COMPOSE_INPUTS_MAX_BYTES: usize = 16384;
 /// Most input files a proposal prompt carries (sc#382).
-pub const COMPOSE_INPUTS_MAX_FILES: usize = 16;
+const COMPOSE_INPUTS_MAX_FILES: usize = 16;
 
 /// Largest prior-lines x reply-lines table `merge_edit_reply` builds.
-pub const COMPOSE_EDIT_MERGE_MAX_CELLS: usize = 4 << 20;
+const COMPOSE_EDIT_MERGE_MAX_CELLS: usize = 4 << 20;
 
 /// NEXT-PHASE-1 v7 T5: an edit-mode reply never removes an existing line.
 ///
@@ -1059,13 +1043,14 @@ pub const COMPOSE_EDIT_MERGE_MAX_CELLS: usize = 4 << 20;
 /// one). Err when the reply shares no non-blank line with `prior` (no place
 /// for the change), when it changes nothing, or when the table would exceed
 /// `COMPOSE_EDIT_MERGE_MAX_CELLS`. The result ends with one newline.
-pub fn merge_edit_reply(prior: &str, reply_content: &str) -> Result<String, String> {
+#[cfg(test)]
+fn merge_edit_reply(prior: &str, reply_content: &str) -> Result<String, String> {
     merge_edit_reply_placed(prior, reply_content, EditPlacement::NextToAnchor)
 }
 
 /// Where the reply lines that are not anchors go (sc#394).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum EditPlacement {
+enum EditPlacement {
     /// Next to the anchor above (before the first anchor when none is above).
     NextToAnchor,
     /// After the last non-blank prior line, in reply order.
@@ -1076,7 +1061,7 @@ impl EditPlacement {
     /// `AtEnd` when the goal contains the word `append` as a whole word,
     /// case-insensitive (split on every non-alphanumeric character, so
     /// `appendix` and `appended` do not match); otherwise `NextToAnchor`.
-    pub fn for_goal(goal: &str) -> Self {
+    fn for_goal(goal: &str) -> Self {
         let append = goal
             .split(|c: char| !c.is_ascii_alphanumeric())
             .any(|w| w.eq_ignore_ascii_case("append"));
@@ -1091,7 +1076,7 @@ impl EditPlacement {
 /// `merge_edit_reply` with the placement of the new lines chosen by the
 /// caller. Kept prior lines, the shared-line requirement, the cell limit and
 /// the single final newline are the same for both placements.
-pub fn merge_edit_reply_placed(
+fn merge_edit_reply_placed(
     prior: &str,
     reply_content: &str,
     placement: EditPlacement,
@@ -1197,7 +1182,7 @@ pub fn edit_proposal(reply: &str, edit: Option<(&str, &str)>) -> Result<String, 
 }
 
 /// `edit_proposal` with the placement of the goal (`EditPlacement::for_goal`).
-pub fn edit_proposal_placed(
+fn edit_proposal_placed(
     reply: &str,
     edit: Option<(&str, &str)>,
     placement: EditPlacement,
@@ -1218,7 +1203,7 @@ pub fn edit_proposal_placed(
 
 /// Why a reply that stopped at the token limit is never a proposal
 /// (NEXT-PHASE-1 v6 N2): its content may be cut anywhere.
-pub fn length_cut_refusal(g: &Generation) -> Option<String> {
+fn length_cut_refusal(g: &Generation) -> Option<String> {
     (g.finish_reason.as_deref() == Some("max_tokens")).then(|| {
         format!(
             "reply cut at the token limit after {} tokens (finish_reason max_tokens); a cut reply is never a proposal",
@@ -1238,11 +1223,11 @@ pub fn retry_prompt(base: &str, reason: &str) -> String {
 /// Largest refused reply quoted back by [`corrective_retry_prompt`]; a longer
 /// one is cut at a character boundary and marked. A reply is at most the
 /// document token cap (1024 tokens in the v5 tasks), far under this.
-pub const COMPOSE_FEEDBACK_MAX_BYTES: usize = 8192;
+const COMPOSE_FEEDBACK_MAX_BYTES: usize = 8192;
 
 /// The markers around the quoted refused reply.
-pub const REFUSED_REPLY_BEGIN: &str = "<<<REFUSED ANSWER";
-pub const REFUSED_REPLY_END: &str = "REFUSED ANSWER>>>";
+const REFUSED_REPLY_BEGIN: &str = "<<<REFUSED ANSWER";
+const REFUSED_REPLY_END: &str = "REFUSED ANSWER>>>";
 
 /// sc#384 v8 (Drake 2026-10-12, Option 3): the retry prompt that shows the
 /// model its own refused reply next to the exact validation failure. The
@@ -1272,44 +1257,6 @@ pub fn corrective_retry_prompt(base: &str, reason: &str, refused: Option<&str>) 
          {REFUSED_REPLY_BEGIN}\n{shown}{nl}{REFUSED_REPLY_END}{cut}\n\
          Write a new complete answer that meets every requirement of the goal. \
          Start your answer with the line \"filename: <relative path>\"."
-    )
-}
-
-/// Runs up to `max_attempts` proposals within `budget`: attempt 1 always
-/// starts; attempt k > 1 starts only if the remaining budget is at least
-/// `attempt_budget` (the measured cost of one full attempt), and gets the
-/// remaining budget as its limit. Returns the first reply that passes
-/// `check_file_proposal` (or the last refusal reason) and every attempt made.
-pub fn propose_with_retries(
-    proposer: &(dyn Fn(&str, std::time::Duration) -> Result<Generation, String> + Send + Sync),
-    base: &str,
-    budget: std::time::Duration,
-    attempt_budget: std::time::Duration,
-    max_attempts: u32,
-) -> (Result<String, String>, Vec<ProposalAttempt>) {
-    propose_task_with_retries(proposer, base, None, budget, attempt_budget, max_attempts)
-}
-
-/// `propose_with_retries` with the edit target of `task_prompt_and_target`:
-/// a parsed reply becomes `edit_proposal(reply, edit)`, so in edit mode the
-/// returned proposal is the merged file (NEXT-PHASE-1 v7 T5). Each attempt
-/// still records the model's own reply text.
-pub fn propose_task_with_retries(
-    proposer: &(dyn Fn(&str, std::time::Duration) -> Result<Generation, String> + Send + Sync),
-    base: &str,
-    edit: Option<(&str, &str)>,
-    budget: std::time::Duration,
-    attempt_budget: std::time::Duration,
-    max_attempts: u32,
-) -> (Result<String, String>, Vec<ProposalAttempt>) {
-    propose_task_checked(
-        proposer,
-        base,
-        edit,
-        &[],
-        budget,
-        attempt_budget,
-        max_attempts,
     )
 }
 
@@ -1393,7 +1340,14 @@ pub(crate) fn verify_task_result(
         })
 }
 
-/// `propose_task_with_retries` plus requirement validation: a parsed reply
+/// Runs up to `max_attempts` proposals within `budget`: attempt 1 always
+/// starts; attempt k > 1 starts only if the remaining budget is at least
+/// `attempt_budget` (the measured cost of one full attempt), and gets the
+/// remaining budget as its limit. A reply that passes `check_file_proposal`
+/// becomes `edit_proposal(reply, edit)`, so in edit mode the proposal is the
+/// merged file; each attempt still records the model's own reply text.
+///
+/// Requirement validation: a parsed reply
 /// whose COMPLETE content (the merged file in edit mode, i.e. the bytes that
 /// would be saved) fails any of `reqs` is refused like a parse failure, the
 /// unmet requirement(s) are recorded on the attempt, and the next attempt
@@ -1401,7 +1355,7 @@ pub(crate) fn verify_task_result(
 /// task, started when this function starts and never reset per attempt.
 /// Exhaustion returns Err: no proposal exists, so nothing is approved,
 /// committed or written.
-pub fn propose_task_checked(
+fn propose_task_checked(
     proposer: &(dyn Fn(&str, std::time::Duration) -> Result<Generation, String> + Send + Sync),
     base: &str,
     edit: Option<(&str, &str)>,
@@ -1424,7 +1378,7 @@ pub fn propose_task_checked(
 
 /// `propose_task_checked` with the placement of the goal's new lines.
 #[allow(clippy::too_many_arguments)]
-pub fn propose_task_placed(
+fn propose_task_placed(
     proposer: &(dyn Fn(&str, std::time::Duration) -> Result<Generation, String> + Send + Sync),
     base: &str,
     edit: Option<(&str, &str)>,
@@ -1710,7 +1664,7 @@ impl ComposeBridge {
     }
 
     /// Installs the correlation trace sink (#398). Default `NullSink`.
-    pub fn with_trace_sink(mut self, sink: Arc<dyn aien_trace::TraceSink>) -> Self {
+    pub(crate) fn with_trace_sink(mut self, sink: Arc<dyn aien_trace::TraceSink>) -> Self {
         self.trace = sink;
         self
     }
@@ -2342,7 +2296,7 @@ impl ComposeBridge {
 
     /// Append the daemon's generation record (evidence only; see
     /// `crate::generation`). Returns the record id only once it is written.
-    pub fn record_generation(&self, record: &serde_json::Value) -> Result<u64, String> {
+    pub(crate) fn record_generation(&self, record: &serde_json::Value) -> Result<u64, String> {
         self.with_home(|home| crate::generation::write(home, record))
     }
 
