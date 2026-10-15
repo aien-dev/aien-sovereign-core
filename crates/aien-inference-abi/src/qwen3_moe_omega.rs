@@ -274,6 +274,12 @@ pub trait TensorSource {
         shape: &[usize],
         dst: &mut [u8],
     ) -> Result<(), String>;
+
+    /// The dtype the checkpoint records for `name` (`"F8_E4M3"`, `"BF16"`, ...), `None` when the
+    /// checkpoint has no such tensor. A source that cannot tell refuses.
+    fn dtype_of(&mut self, name: &str) -> Result<Option<String>, String> {
+        Err(format!("{name}: this tensor source cannot report dtypes"))
+    }
 }
 
 /// The safetensors shards behind `model.safetensors.index.json` (the same validated reader as
@@ -304,6 +310,24 @@ impl ShardSource {
     }
 }
 
+impl ShardSource {
+    /// The opened shard the index names for `name`, `None` when the index has no entry.
+    fn shard_for(&mut self, name: &str) -> Result<Option<&Shard>, String> {
+        let Some(filename) = self.weight_map.get(name) else {
+            return Ok(None);
+        };
+        let filename = filename
+            .as_str()
+            .ok_or_else(|| format!("index: shard of {name} is not a string"))?;
+        if !self.shards.contains_key(filename) {
+            let path = shard_path(&self.dir, filename).map_err(|e| e.to_string())?;
+            let shard = Shard::open(&path).map_err(|e| e.to_string())?;
+            self.shards.insert(filename.to_string(), shard);
+        }
+        Ok(Some(&self.shards[filename]))
+    }
+}
+
 impl TensorSource for ShardSource {
     fn read_into(
         &mut self,
@@ -312,19 +336,20 @@ impl TensorSource for ShardSource {
         shape: &[usize],
         dst: &mut [u8],
     ) -> Result<(), String> {
-        let filename = self
-            .weight_map
-            .get(name)
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| format!("index: no shard for {name}"))?;
-        if !self.shards.contains_key(filename) {
-            let path = shard_path(&self.dir, filename).map_err(|e| e.to_string())?;
-            let shard = Shard::open(&path).map_err(|e| e.to_string())?;
-            self.shards.insert(filename.to_string(), shard);
-        }
-        self.shards[filename]
+        self.shard_for(name)?
+            .ok_or_else(|| format!("index: no shard for {name}"))?
             .read(name, dtype, shape, dst)
             .map_err(|e| e.to_string())
+    }
+
+    fn dtype_of(&mut self, name: &str) -> Result<Option<String>, String> {
+        match self.shard_for(name)? {
+            None => Ok(None),
+            Some(shard) => shard
+                .dtype(name)
+                .map(|d| Some(d.to_string()))
+                .ok_or_else(|| format!("{name}: in the index but not in its shard's header")),
+        }
     }
 }
 
@@ -1772,6 +1797,10 @@ pub(crate) mod test_support {
             dst.copy_from_slice(bytes);
             self.reads.push(name.to_string());
             Ok(())
+        }
+
+        fn dtype_of(&mut self, name: &str) -> Result<Option<String>, String> {
+            Ok(self.tensors.get(name).map(|t| t.0.clone()))
         }
     }
 
