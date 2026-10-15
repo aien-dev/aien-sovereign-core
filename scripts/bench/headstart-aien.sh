@@ -446,16 +446,19 @@ stage_incr() {
   [ "$LAST_RC" -eq 0 ] || die "prime check failed; incremental scenarios cannot run"
   local i; for i in 1 2 3; do run_sample incr_noop_check A incremental 0 "$i" - warm -- "${c[@]}"; done
   ensure_clean "noop"
-  local series kind k
+  local series kind k settle_step
   for series in $(seq 1 "$HS_INCR_SERIES"); do
+    settle_step=0
     for kind in body iface; do
+      settle_step=$((settle_step + 1))
       for k in $(seq 1 "$HS_INCR_STEPS"); do
         apply_edit "$kind" "$((series * 100 + k))"
         run_sample "incr_${kind}_check" A incremental "$series" "$k" - warm -- "${c[@]}"
       done
       revert_edit
       ensure_clean "incr_${kind} series $series"
-      run_sample incr_settle A settle "$series" 0 - warm -- "${c[@]}"
+      # step 1 = settle after the body series, 2 = after the iface series
+      run_sample incr_settle A settle "$series" "$settle_step" - warm -- "${c[@]}"
     done
   done
   ensure_clean incr

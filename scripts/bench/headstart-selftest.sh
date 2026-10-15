@@ -129,6 +129,8 @@ check "runner full matrix exits 0" test "$RC" -eq 0
 check "runner wrote 18 samples, all ok" jqs 'length == 18 and all(.[]; .ok)' "$O/samples.jsonl"
 check "runner manifest has commit, rustc and scenarios" jqt '(.source.commit | length) == 40 and (.toolchain.rustc_vV | test("rustc ")) and (.scenarios | length) >= 11 and .build.registry_cache.state == "warm"' "$O/manifest.json"
 check "runner records quiet-flag and load waits per sample" jqs 'all(.[]; (.quiet_flag_wait_s | type) == "number" and (.load_wait_s | type) == "number" and (.loadavg_before | length) == 3)' "$O/samples.jsonl"
+check "runner sample ids are unique" jqs 'map(.sample_id) | length == (unique | length)' "$O/samples.jsonl"
+check "runner keeps one log tail per sample" bash -c "[ \$(ls '$O/logs' | wc -l) -eq 18 ]"
 check "runner summary reproducible from samples" bash -c "'$SUM' samples '$O/samples.jsonl' | cmp - '$O/summary.json'"
 check "runner A/A arms present" jqt '.aa_noise[0].n_a == 1 and .aa_noise[0].n_b == 1' "$O/summary.json"
 check "runner critical path extracted" jqt '.observed.chain_length >= 2' "$O/timings/critical-path.json"

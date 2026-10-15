@@ -83,6 +83,18 @@ against the same `HS_WORK` and `HS_OUT`, which is how the edit targets were
 chosen from the measured critical path before the incremental stage. The
 other knobs are listed at the top of the runner.
 
+## Known quirks of the committed run (baseline-20261015-4c83e38)
+
+- The timings stage ran before the quiet-flag check was added, so its three
+  samples have no `quiet_flag_wait_s`.
+- In that run both settle checks of a series shared one `sample_id` (step 0),
+  so the first settle log tail of each series was overwritten (85 tail files
+  for 87 lines). Settle samples are not measurements. The runner now numbers
+  them step 1 (after body) and 2 (after iface), and the self-test checks that
+  sample ids are unique.
+- Log tails are named `*.tail.log`, which the root `.gitignore` ignores; they
+  were committed with `git add -f`.
+
 ## Reproducing the summary
 
 `summary.json` is a pure function of `samples.jsonl`:
