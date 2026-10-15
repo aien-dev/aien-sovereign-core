@@ -188,6 +188,17 @@ pub struct HarnessEngine {
     pub completion_store: PathBuf,
     /// Repo identity recorded in completion receipts.
     pub completion_repo: String,
+    /// Unix-seconds clock for receipt timestamps. Defaults to the system
+    /// clock; tests swap it to make receipt IDs deterministic.
+    pub completion_clock: fn() -> u64,
+}
+
+/// System clock in Unix seconds (0 if the clock is before the epoch).
+pub fn system_clock_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 impl HarnessEngine {
@@ -203,6 +214,7 @@ impl HarnessEngine {
             workflows: HashMap::new(),
             load_errors: Vec::new(),
             completion_repo: UNSPECIFIED_REPO.to_string(),
+            completion_clock: system_clock_secs,
         };
         engine.reload();
         engine

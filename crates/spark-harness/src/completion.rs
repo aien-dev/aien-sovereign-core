@@ -43,6 +43,11 @@
 //!   never moves to `done` in that case, and [`verify_completion`] accepts
 //!   only the receipt the consumed record names, so at most one receipt per
 //!   task verifies at any time.
+//! - One exception to "error means nothing verifies": if the record rename
+//!   succeeds but the following directory fsync fails, completion returns a
+//!   `Store` error and the workflow is not moved to `done`, yet the record is
+//!   already in place and the receipt it names verifies. The rename is not
+//!   guaranteed durable across a power loss in that case.
 //! - The consumed record is keyed by task and holds only the highest
 //!   completed generation. Completing a newer generation supersedes the older
 //!   one: its receipt stops verifying. Verification answers "is this the
@@ -411,6 +416,12 @@ fn read_consumed(path: &Path, task_id: &str) -> Result<Option<ConsumedRecord>, C
 }
 
 /// Write temp file, fsync, rename over the target, fsync the directory.
+///
+/// Known edge: if the rename succeeds but the directory fsync fails, this
+/// returns `Store` and the workflow stays un-done, yet the new record is
+/// already in place, so the just-minted receipt verifies (the rename may
+/// still be lost on power failure). A resubmission of the same generation
+/// is then refused as a duplicate.
 fn write_consumed(path: &Path, rec: &ConsumedRecord) -> Result<(), CompletionError> {
     let store_err = |e: String| CompletionError::Store(e);
     let dir = path
@@ -560,10 +571,7 @@ impl HarnessEngine {
             kind: COMPLETION_KIND.to_string(),
             tier: COMPLETION_TIER,
             result,
-            timestamp: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs())
-                .unwrap_or(0),
+            timestamp: (self.completion_clock)(),
             repo,
             commit: sub.source_commit.clone(),
             dirty: false,

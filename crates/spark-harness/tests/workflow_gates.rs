@@ -863,7 +863,8 @@ fn assert_not_current(r: Result<spark_harness::completion::VerifiedCompletion, C
 fn orphan_receipt_from_failed_record_write_never_verifies() {
     use std::os::unix::fs::PermissionsExt;
     let fx = Fixture::new();
-    let engine = fx.engine();
+    let mut engine = fx.engine();
+    engine.completion_clock = || 1_000;
     let dir = engine.completion_store.join("completions");
     fs::create_dir_all(&dir).unwrap();
     fs::File::create(dir.join(".lock")).unwrap();
@@ -906,15 +907,19 @@ fn orphan_receipt_from_failed_record_write_never_verifies() {
         &artifact_digest(&art_a),
     ));
 
-    // Resubmit the same generation with a different artifact.
-    let mut art_b = python_result_artifact();
-    art_b["stdout"] = json!("six\n");
+    // Retry: the SAME task, generation, commit and artifact, one second
+    // later. Every binding the verifier checks is identical for both
+    // receipts; only the timestamp (and therefore the ID) differs.
+    engine.completion_clock = || 1_001;
     let mut wf2 = wf_at("python_pipeline", "deliver");
     let rec = engine
-        .complete_verified_workflow(&mut wf2, &sub("orphan", 1, art_b.clone()))
+        .complete_verified_workflow(&mut wf2, &sub("orphan", 1, art_a.clone()))
         .unwrap();
+    assert_eq!(wf2.current_state, "done");
+    assert_ne!(rec.receipt_id, orphan, "retry must mint a distinct receipt");
     assert_eq!(receipt_count(&engine), 2);
-    // Exactly one of the two PASS receipts verifies.
+    // Exactly one of the two PASS receipts verifies: the receipt-id match
+    // against the consumed record is the only thing that separates them.
     assert_not_current(verify_completion(
         &engine.completion_store,
         &orphan,
@@ -929,7 +934,7 @@ fn orphan_receipt_from_failed_record_write_never_verifies() {
         "orphan",
         1,
         COMMIT,
-        &artifact_digest(&art_b)
+        &artifact_digest(&art_a)
     )
     .is_ok());
 }
