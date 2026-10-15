@@ -289,7 +289,10 @@ fn main() -> ExitCode {
         let signals = shutdown_signals();
         match serve_until(args.cfg, engine, codec, signals).await {
             Ok((addr, handle)) => {
-                eprintln!("aien-serve-http: serving {model_id} at http://{addr}/v1 (engine {})", args.engine);
+                eprintln!(
+                    "aien-serve-http: serving {model_id} at http://{addr}/v1 (engine {})",
+                    args.engine
+                );
                 let _ = handle.await;
                 let t0 = std::time::Instant::now();
                 eprintln!("aien-serve-http: shutting down: no new requests; finishing the one in flight and draining persistent KV");

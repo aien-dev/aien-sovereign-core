@@ -76,7 +76,7 @@ pub fn block_scale(m: f32) -> (f32, f32) {
 pub fn quant_row(x: &[f32], q: &mut [u8], s: &mut [f32]) {
     let k = x.len();
     assert!(
-        k % BLOCK == 0 && q.len() == k && s.len() == k / BLOCK,
+        k.is_multiple_of(BLOCK) && q.len() == k && s.len() == k / BLOCK,
         "quant_row: k {k} q {} s {}",
         q.len(),
         s.len()

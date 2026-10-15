@@ -838,7 +838,12 @@ impl PrefillDevice for OmegaPfDevice {
         }
     }
     fn copy_va(&mut self, dst_va: u64, src_va: u64, bytes: usize) -> Result<(), String> {
-        if dst_va == 0 || src_va == 0 || dst_va % 16 != 0 || src_va % 16 != 0 || bytes % 16 != 0 {
+        if dst_va == 0
+            || src_va == 0
+            || !dst_va.is_multiple_of(16)
+            || !src_va.is_multiple_of(16)
+            || !bytes.is_multiple_of(16)
+        {
             return Err(format!(
                 "pf copy: addresses and {bytes} bytes must be non-zero 16-byte multiples"
             ));
