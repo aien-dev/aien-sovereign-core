@@ -2754,6 +2754,12 @@ impl HostPoolKv {
         })
     }
 
+    /// Positions held in `layer` alone (ADR 0004 test R1 checks every layer against the ledger;
+    /// [`KvStore::len`] is only the smallest of them).
+    pub fn layer_len(&self, layer: usize) -> usize {
+        self.filled[layer]
+    }
+
     fn row(&self, layer: usize, pos: usize, value: bool) -> Vec<f32> {
         let kv_dim = self.geometry.kv_heads * self.geometry.head_dim;
         let off = self
@@ -3142,6 +3148,8 @@ pub enum FinishReason {
     Stop,
     Length,
     Cancelled,
+    /// A constraint said the output is complete (`StepRule::Finish`, ADR 0004 section 2.3).
+    Constraint,
 }
 
 #[derive(Debug, Clone, PartialEq)]

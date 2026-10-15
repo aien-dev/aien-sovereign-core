@@ -409,6 +409,8 @@ impl Engine for OmegaDoor {
                 omega::FinishReason::Stop => FinishReason::Stop,
                 omega::FinishReason::Length => FinishReason::Length,
                 omega::FinishReason::Cancelled => FinishReason::Cancelled,
+                // A constraint finished the output: complete, which HTTP clients read as "stop".
+                omega::FinishReason::Constraint => FinishReason::Stop,
             },
             prefill_ms: o.prefill_ms,
             decode_ms: o.decode_ms,

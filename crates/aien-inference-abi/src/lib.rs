@@ -10,6 +10,7 @@ pub mod backend;
 pub mod capsule;
 pub mod checkpoint;
 pub mod gb10_serving;
+pub mod generation;
 pub mod model_dir;
 pub mod moe_plan;
 pub mod native_ops;
