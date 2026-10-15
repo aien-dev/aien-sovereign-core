@@ -42,7 +42,7 @@ pub async fn audit_services(client: &Client) -> Vec<ServiceAuditResult> {
         ("Cortex Memory", "http://127.0.0.1:18080/health"),
         ("Sovereign Cockpit", "http://127.0.0.1:18095/api/pulse"),
         ("Cortex ONNX Encoder", "http://127.0.0.1:18081/health"),
-        ("Modular MAX LLM", "http://127.0.0.1:18006/v1/models"),
+        ("Local Model Seat", "http://127.0.0.1:18006/v1/models"),
         ("Matrix Conduit", "http://127.0.0.1:6167"),
     ];
 

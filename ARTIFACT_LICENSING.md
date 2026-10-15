@@ -11,7 +11,6 @@ AIEN software is licensed independently from AIEN model artifacts. Possession, c
 | Layer | Artifact Description | Canonical License | Identifier |
 | :--- | :--- | :--- | :--- |
 | **Core Software Runtime** | Rust crates (`aien-scheduler`, `aien-kv-cache`, `cortex-rs`, `spark-rsi`, `aien-harness`, CLI, web gateways) | GNU Affero General Public License v3.0 or later | `AGPL-3.0-or-later` |
-| **Compiler & Dynamic C-ABI** | Shared library bindings (`spark-max-cabi`, `libspark_max.so`) | GNU Affero General Public License v3.0 or later | `AGPL-3.0-or-later` |
 | **Protocols & Specifications** | Inference ABI specifications, Crumb protocol definitions, schemas, and formats | GNU Affero General Public License v3.0 or later | `AGPL-3.0-or-later` |
 | **Benchmark Harness Code** | Measurement driver, CLI, test generators, and harness binaries in `benchmarks/` | GNU Affero General Public License v3.0 or later | `AGPL-3.0-or-later` |
 | **Benchmark Datasets & Metrics** | Raw telemetry JSON, hardware timing records, power logs, and rendered SVG comparison charts | Creative Commons Zero 1.0 Universal | `CC0-1.0` |

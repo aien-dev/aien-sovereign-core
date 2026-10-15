@@ -172,7 +172,7 @@ pub const HOST_MATMUL_PATH: &str = "host-tensor-backend";
 
 /// Owned engine identity of the host reference path (ADR 0003 section 1.2.2,
 /// sc#504): what the daemon binds when the K/V is computed by a host
-/// `TensorBackend` (CPU reference or the Mojo CPU backend).
+/// `TensorBackend` (the CPU reference).
 ///
 /// - weight format `as-file`: the host loader computes with the element type
 ///   the file stores;

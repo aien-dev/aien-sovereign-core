@@ -1,3 +1,5 @@
+> Record only. Moved here on 2026-10-15 from `crates/aien-inference-abi/mojo/qwen3_moe/` when Modular MAX and Mojo were removed from the project. The Mojo sources, build scripts and tests it describes no longer exist in this tree; the receipts beside it are the 2026-09-23 runs.
+
 # Qwen3-Coder-30B-A3B routed expert layer on GB10
 
 One routed MoE layer of `Qwen/Qwen3-Coder-30B-A3B-Instruct-FP8`, executed

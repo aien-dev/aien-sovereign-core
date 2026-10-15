@@ -1,8 +1,7 @@
 //! Pure native Rust transformer inference backend executing real forward passes.
-//! Dispatches tensor math through the decoupled TensorBackend trait for CPU and Mojo/GB10 execution.
+//! Dispatches tensor math through the decoupled TensorBackend trait for CPU and Omega GB10 execution.
 
 use crate::backend::{ReferenceCpuBackend, TensorBackend};
-use crate::mojo_backend::MojoGb10Backend;
 use crate::tensor::{sample_argmax, sample_temperature};
 use crate::weights::{LayerKvCache, SequenceState, TransformerWeights};
 use crate::{
@@ -203,21 +202,10 @@ impl NativeTransformerBackend {
         Self::new(weights)
     }
 
-    /// Explicit constructor for Mojo GB10 hardware accelerated backend.
-    pub fn new_mojo(weights: TransformerWeights) -> Self {
-        Self::with_backend(weights, Arc::new(MojoGb10Backend::new()))
-    }
-
     /// Convenience constructor with deterministic reference weights and ReferenceCpuBackend.
     pub fn with_reference_weights(config: &ModelConfig) -> Self {
         let weights = TransformerWeights::reference_test_weights(config);
         Self::new(weights)
-    }
-
-    /// Convenience constructor with deterministic reference weights and MojoGb10Backend.
-    pub fn with_mojo_backend(config: &ModelConfig) -> Self {
-        let weights = TransformerWeights::reference_test_weights(config);
-        Self::new_mojo(weights)
     }
 
     /// Explicit constructor for the GB10 GPU backend (Omega native kernels, no CUDA).
@@ -2544,12 +2532,6 @@ mod tests {
 
         let cpu_backend = NativeTransformerBackend::with_reference_weights(&config);
         assert_eq!(cpu_backend.tensor_backend.name(), "ReferenceCpuBackend");
-
-        let mojo_backend = NativeTransformerBackend::with_mojo_backend(&config);
-        assert!(mojo_backend
-            .tensor_backend
-            .name()
-            .starts_with("NativeCpuBackend"));
 
         let blackwell_backend = NativeTransformerBackend::with_blackwell_backend(&config);
         assert!(blackwell_backend

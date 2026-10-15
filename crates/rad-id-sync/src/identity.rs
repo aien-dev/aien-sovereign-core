@@ -34,7 +34,7 @@ pub struct IdentityAnchor {
 impl IdentityAnchor {
     pub fn default_agent() -> Self {
         let mut meta = std::collections::HashMap::new();
-        meta.insert("harness".to_string(), "aien-mojo-1.0".to_string());
+        meta.insert("harness".to_string(), "aien-native-1.0".to_string());
         meta.insert("host".to_string(), "spark-gb10".to_string());
 
         Self {

@@ -1117,7 +1117,7 @@ mod tests {
         let args = json!({"action": "list"});
         let res = adapter_dispatch_tool(&args);
         assert_eq!(res.get("status").unwrap().as_str().unwrap(), "ok");
-        assert!(res.get("adapters").unwrap().as_array().unwrap().len() >= 10);
+        assert!(res.get("adapters").unwrap().as_array().unwrap().len() >= 7);
         assert_eq!(res.get("models").unwrap().as_array().unwrap().len(), 9);
     }
 

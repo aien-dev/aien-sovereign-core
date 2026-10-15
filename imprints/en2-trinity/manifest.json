@@ -7,8 +7,7 @@
   "author": "AIEN <aien@aienos.com>",
   "components": {
     "soul": "soul.md",
-    "cortex_seed": "cortex-seed.json",
-    "mojo_adapters": "mojo/en2_kv_adapter.mojo"
+    "cortex_seed": "cortex-seed.json"
   },
   "invariants": {
     "zero_telemetry": true,

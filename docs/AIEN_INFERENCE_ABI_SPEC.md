@@ -6,7 +6,7 @@ Modern inference engines expend substantial compute and memory overhead mitigati
 This research branch evaluates the thesis:
 > How much of modern LLM inference latency, memory pressure, and energy consumption belongs to forward tensor mathematics, and how much is an artifact of the software orchestration stack?
 
-By systematically replacing each layer of the inference engine with native compiled Rust and Mojo, we measure the empirical delta across each removal.
+By systematically replacing each layer of the inference engine with native compiled Rust and Omega kernels, we measure the empirical delta across each removal.
 
 ---
 
@@ -19,13 +19,13 @@ AIEN serves as the native compiled inference runtime. High-performance tensor ex
                              │
                      aien-inference-abi
                              │
-             ┌───────────────┼────────────────┐
-             │               │                │
-             ▼               ▼                ▼
-       Blackwell Native     Mojo/MAX       Native CPU
-       GB10 fast path       kernels         fallback
-             │               │                │
-             └───────────────┼────────────────┘
+             ┌───────────────┴────────────────┐
+             │                                │
+             ▼                                ▼
+       Blackwell Native                  Native CPU
+       GB10 fast path                     fallback
+             │                                │
+             └───────────────┬────────────────┘
                              │
                      AIEN Scheduler
                              │
@@ -34,13 +34,13 @@ AIEN serves as the native compiled inference runtime. High-performance tensor ex
                          Model State
 ```
 
-| Subsystem | Fast Path (Blackwell) | Accelerated Path (Mojo) | Fallback Path (Native CPU) | Test Oracle |
-| :--- | :--- | :--- | :--- | :--- |
-| **Scheduler** | AIEN Native Continuous Batching Scheduler | AIEN Native Continuous Batching Scheduler | AIEN Native Continuous Batching Scheduler | Deterministic Step Scheduler |
-| **KV Management** | AIEN Physical Unified CoW Pool | AIEN Physical Unified CoW Pool | In-process Paged Pool | Virtual Page Table |
-| **Execution Engine** | GB10 sm_121 Omega native kernels (`OmegaGb10Backend`, no CUDA) | Mojo C-ABI (`libaien_kernels.so`) | Rayon Multi-Core NEON/AVX | ReferenceCpuBackend (FP32 Oracle) |
-| **Inference Backend** | `BlackwellInferenceBackend` | `MojoInferenceBackend` | `NativeCpuInferenceBackend` | `MockInferenceBackend` |
-| **Memory Substrate** | DGX Spark 128 GB Unified Coherent Memory | DGX Spark 128 GB Unified Coherent Memory | Standard Host DRAM | Heap Slices |
+| Subsystem | Fast Path (Blackwell) | Fallback Path (Native CPU) | Test Oracle |
+| :--- | :--- | :--- | :--- |
+| **Scheduler** | AIEN Native Continuous Batching Scheduler | AIEN Native Continuous Batching Scheduler | Deterministic Step Scheduler |
+| **KV Management** | AIEN Physical Unified CoW Pool | In-process Paged Pool | Virtual Page Table |
+| **Execution Engine** | GB10 sm_121 Omega native kernels (`OmegaGb10Backend`, no CUDA) | Rayon Multi-Core NEON/AVX | ReferenceCpuBackend (FP32 Oracle) |
+| **Inference Backend** | `BlackwellInferenceBackend` | `NativeCpuInferenceBackend` | `MockInferenceBackend` |
+| **Memory Substrate** | DGX Spark 128 GB Unified Coherent Memory | Standard Host DRAM | Heap Slices |
 
 ### Monitored Telemetry per Stage
 1. **TTFT (Time To First Token)**: Prefill latency in milliseconds.
@@ -169,7 +169,7 @@ When a subagent forks from a parent agent:
 Execution Substrate: NVIDIA DGX Spark (NVIDIA Grace Blackwell GB10, aarch64, 121 GB Unified LPDDR5X Memory, Linux 7.0.0-1019-nvidia).
 
 ### 5.1 Paged KV Cache Block-Table Allocator Throughput (Control Plane)
-Benchmark binary: `target/release/bench_inference_stack` (built only with `--features max-yardstick`; a comparison yardstick, not part of a default build)
+Benchmark binary: `bench_inference_stack` (a Modular MAX comparison yardstick, removed from the tree on 2026-10-15; the results below are kept as a record)
 - Workload: 10,000 sequence allocations (160,000 block-table indices managed, block size = 16 tokens).
 
 | Metric | Result | Sub-unit Latency |

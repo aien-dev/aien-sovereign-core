@@ -1,7 +1,7 @@
 //! Branch-agnostic MoE routing plan for Qwen3-Coder-30B-A3B.
 //!
 //! This is the host-side correctness oracle and batch metadata contract for
-//! the Mojo GB10 layer (`qwen3_moe`). Expert GEMMs consume assignments in grouped order;
+//! the routed expert layer (`qwen3_moe` CPU oracle, Omega GB10 path). Expert GEMMs consume assignments in grouped order;
 //! the inverse map restores each token's original top-k slots.
 
 use std::fmt;
@@ -33,7 +33,7 @@ impl fmt::Display for MoePlanError {
 
 impl std::error::Error for MoePlanError {}
 
-/// Assignment offsets and maps use u32 to match the Mojo grouping kernel (`mojo/qwen3_moe`).
+/// Assignment offsets and maps use u32, the index width of the device routing ABI.
 #[derive(Debug, Clone, PartialEq)]
 pub struct MoeBatchPlan {
     pub tokens: usize,

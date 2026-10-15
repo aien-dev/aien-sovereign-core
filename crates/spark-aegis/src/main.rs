@@ -7,7 +7,7 @@ use serde_json::json;
 use spark_aegis::{
     audit, containment,
     doctrine::{all_invariants, DOCTRINE_STATEMENT},
-    mojo_bridge, pr_triage, scanner,
+    pr_triage, scanner,
 };
 use std::path::{Path, PathBuf};
 
@@ -62,7 +62,6 @@ async fn main() -> Result<()> {
         Commands::Scan { path } => {
             println!("SPARK-AEGIS DEEP SCAN");
             println!("Target: {}", path.display());
-            println!("Engine: {}", mojo_bridge::engine_name());
             println!("------------------------------------------------------------");
 
             let report = scanner::scan_path(&path)?;
@@ -97,7 +96,6 @@ async fn main() -> Result<()> {
 
         Commands::ReviewPr { diff_file } => {
             println!("SPARK-AEGIS AUTONOMOUS PR TRIAGE");
-            println!("Engine: {}", mojo_bridge::engine_name());
             println!("------------------------------------------------------------");
 
             let content = if diff_file == Path::new("-") {
@@ -159,7 +157,6 @@ async fn main() -> Result<()> {
 
         Commands::Audit => {
             println!("SPARK-AEGIS LIVE HOST & WORKSPACE CONFINEMENT AUDIT");
-            println!("Engine: {}", mojo_bridge::engine_name());
             println!("------------------------------------------------------------");
 
             let report = audit::audit_system().await?;
@@ -176,14 +173,6 @@ async fn main() -> Result<()> {
             if let Some(v) = report.cortex_version {
                 println!("Cortex Engine Version:   {}", v);
             }
-            println!(
-                "Mojo SIMD Hardware:      {}",
-                if report.mojo_simd_active {
-                    "ACTIVE"
-                } else {
-                    "STANDBY"
-                }
-            );
             println!(
                 "Workspace Path:          {}",
                 report.workspace.path.display()

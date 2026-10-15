@@ -20,8 +20,6 @@ inputs:
   - crates/aien-inference-abi/
   - crates/aien-security/
   - crates/cortex-rs/
-  - crates/spark-max-rs/
-  - crates/spark-max-cabi/
 run:
   exec: crates/aien-runtime/tests/prefill_e2e2_run.sh
   args: ["mutant", "m7", "BRANCH_ISOLATION_VIOLATION"]

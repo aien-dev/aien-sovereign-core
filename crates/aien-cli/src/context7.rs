@@ -248,18 +248,6 @@ fn sync_catalog() -> &'static [SyncTarget] {
             prefer: &["doc.rust-lang", "rust-lang"],
         },
         SyncTarget {
-            slug: "mojo",
-            library: "mojo",
-            query: "current Mojo struct syntax and calling Python from Mojo",
-            prefer: &["mojolang", "modular/mojo"],
-        },
-        SyncTarget {
-            slug: "max",
-            library: "modular max",
-            query: "max serve flags, custom architectures, and quantization encodings",
-            prefer: &["websites/modular", "modular"],
-        },
-        SyncTarget {
             slug: "tokio",
             library: "tokio",
             query: "spawn tasks on a multi-thread runtime and use select",
@@ -436,7 +424,7 @@ mod tests {
 
     #[test]
     fn library_ids_match_context7_shape() {
-        assert!(valid_library_id("/websites/modular"));
+        assert!(valid_library_id("/tokio-rs/tokio"));
         assert!(valid_library_id("/vercel/next.js"));
         assert!(valid_library_id("/vercel/next.js/14.2.5"));
         assert!(valid_library_id("/vercel/next.js@14.2.5"));
@@ -450,7 +438,7 @@ mod tests {
     fn resolve_payload_keeps_five_ids_and_drops_the_rest() {
         let body = json!({
             "results": [
-                {"id": "/websites/modular", "title": "Modular", "description": "x".repeat(400), "trustScore": 90, "totalSnippets": 12},
+                {"id": "/tokio-rs/tokio", "title": "Tokio", "description": "x".repeat(400), "trustScore": 90, "totalSnippets": 12},
                 {"id": "/a/two", "title": "Two"},
                 {"id": "/a/three", "title": "Three"},
                 {"id": "/a/four", "title": "Four"},
@@ -458,9 +446,9 @@ mod tests {
                 {"id": "/a/six", "title": "Six"}
             ]
         });
-        let compact = compact_libraries(&body, "modular", "serve a model");
+        let compact = compact_libraries(&body, "tokio", "spawn a task");
         assert_eq!(compact["libraries"].as_array().unwrap().len(), 5);
-        assert_eq!(compact["libraries"][0]["id"], "/websites/modular");
+        assert_eq!(compact["libraries"][0]["id"], "/tokio-rs/tokio");
         assert!(compact["libraries"][0]["description"]
             .as_str()
             .unwrap()
@@ -480,26 +468,26 @@ mod tests {
     fn query_payload_clips_code_and_keeps_the_library_id() {
         let body = json!({
             "codeSnippets": [{
-                "codeTitle": "Serve",
+                "codeTitle": "Spawn",
                 "codeLanguage": "bash",
-                "pageTitle": "MAX",
+                "pageTitle": "Tokio",
                 "codeList": [{"code": "m".repeat(2000)}]
             }],
-            "infoSnippets": [{"breadcrumb": "Serve", "content": "Run max serve."}]
+            "infoSnippets": [{"breadcrumb": "Spawn", "content": "Call tokio::spawn."}]
         });
-        let compact = compact_context(&body, "/websites/modular", "max serve flags");
-        assert_eq!(compact["library_id"], "/websites/modular");
+        let compact = compact_context(&body, "/tokio-rs/tokio", "spawn flags");
+        assert_eq!(compact["library_id"], "/tokio-rs/tokio");
         assert!(compact["code"][0]["code"]
             .as_str()
             .unwrap()
             .ends_with(" ..."));
-        assert_eq!(compact["info"][0]["content"], "Run max serve.");
+        assert_eq!(compact["info"][0]["content"], "Call tokio::spawn.");
     }
 
     #[test]
     fn sync_catalog_covers_the_stack_in_use() {
         let slugs: Vec<&str> = sync_catalog().iter().map(|target| target.slug).collect();
-        assert_eq!(slugs, vec!["rust", "mojo", "max", "tokio", "axum", "serde"]);
+        assert_eq!(slugs, vec!["rust", "tokio", "axum", "serde"]);
     }
 
     #[test]

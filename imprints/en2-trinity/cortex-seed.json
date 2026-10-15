@@ -1,11 +1,5 @@
 [
   {
-    "canonicalName": "en2-lesson-mojo-c-abi-bridge",
-    "entityType": "lesson",
-    "content": "Compiling pure Mojo via `mojo build --emit shared-lib` generates native C-ABI shared objects linkable directly from Rust via libloading, completely eliminating Python runtime overhead while retaining hardware tensor speed on Blackwell silicon.",
-    "confidence": 1.0
-  },
-  {
     "canonicalName": "en2-lesson-bit-exact-onnx-embeddings",
     "entityType": "lesson",
     "content": "Native Rust Axum service utilizing ort (ONNX Runtime C-API) and HuggingFace tokenizers achieves 9-decimal bit-for-bit mathematical parity with Python Uvicorn embeddings while dropping rerank latency from 254 ms to 22 ms and eliminating 1.08 GB RAM.",
@@ -38,7 +32,7 @@
   {
     "canonicalName": "en2-lesson-pure-compiled-native-priority",
     "entityType": "lesson",
-    "content": "Zero tolerance for unnecessary Python or Node interpreters across core services, verification harnesses, and background daemons. The runtime stack must be pure compiled native Rust and Mojo.",
+    "content": "Zero tolerance for unnecessary Python or Node interpreters across core services, verification harnesses, and background daemons. The runtime stack must be pure compiled native Rust.",
     "confidence": 1.0
   },
   {

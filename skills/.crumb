@@ -40,50 +40,44 @@
       "children": [
         {
           "digest": "7e3010879f3825cb16a0651afe37835aa9ba6ac4a1b1c2a7d03f4767dbd136a2",
-          "last_commit": "b2fef5c",
+          "last_commit": "b2fef5cb",
           "name": "gpu-telemetry",
           "purpose": ""
         },
         {
-          "digest": "1dcf80b2cf21432716ebaba932c1158acf26adff1ebccb53b0b1a66c0f462d58",
-          "last_commit": "8b5caed",
-          "name": "modular-upstream",
-          "purpose": ""
-        },
-        {
           "digest": "b6f288e41c637959bf1df32b28d9b8a2088f531681f6319f6587f8b62d19b8ba",
-          "last_commit": "b2fef5c",
+          "last_commit": "b2fef5cb",
           "name": "radicle-sync",
           "purpose": ""
         },
         {
           "digest": "9d5a5630ff03ffc43e893350b017638d6d39fbae9e537d565df217e037bfebf7",
-          "last_commit": "b2fef5c",
+          "last_commit": "b2fef5cb",
           "name": "scaffold-project",
           "purpose": ""
         },
         {
-          "digest": "ef4f65f16a7f6267935e22d7358b1a8bf842e823d6da698ea9230dab893f039d",
-          "last_commit": "8a48904",
+          "digest": "658199e445b94e279fac37311108efa89860c875fb469597a1a696b95eb76195",
+          "last_commit": "f97dc905",
           "name": "self-improvement",
           "purpose": ""
         },
         {
           "digest": "db3e90e6d686daed3e36254b4b540f0592ae526710a3b0fab7ee585c2a34c305",
-          "last_commit": "b2fef5c",
+          "last_commit": "b2fef5cb",
           "name": "unslop",
           "purpose": ""
         }
       ],
-      "children_root": "sha256:6de9b42dfb7b31f2399253cdc72b049c4457a68c0d140d5b2255cc478d062079",
-      "compiled_at": "2026-10-10T08:55:54Z",
+      "children_root": "sha256:fb9c1475432753af7a788bb3c8d7379c2feb4c1c626b3389efa24f033779dea2",
+      "compiled_at": "2026-10-15T11:09:25Z",
       "compiler": "crumb-compile/1",
-      "digest": "sha256:f432725dc4aef6ecd69eea043123fbb7593a9d29af97d70a561f5f355a8ad180",
+      "digest": "sha256:75e439cb2ae120e1807af894b70b6454971028f5527f56451f9d6558f503c88b",
       "evidence_files": 0,
       "evidence_root": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-      "files": 10,
-      "generated_at_commit": "8a48904fde00f3a182f9840aeb2acd23e3c79fa6",
-      "source_tree": "sha256:73a9a804b9e8f835e987f14a45f29bb816bdca24a5a8cb535ba7f84eb87ab682"
+      "files": 9,
+      "generated_at_commit": "7b88b1c4a03de5900578a43e90ce5733f86bbd9d",
+      "source_tree": "sha256:16bf6f03e2f4c6247f5119f03624e964d02605a1bfa4df3683bccc8548b86036"
     }
   },
   "history": [

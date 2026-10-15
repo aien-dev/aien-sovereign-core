@@ -6,6 +6,8 @@ This document catalogs code provenance across the AIEN project ecosystem, distin
 
 The following repositories under the aien-dev organization are forks of external open-source projects:
 
+AIEN no longer uses Modular MAX or Mojo (removed from the project on 2026-10-15). The Mojo-related forks below stay in the organization as records only.
+
 1. MojoLlama
    - Upstream Source: a730/MojoLlama (authored by Audrey)
    - Scope: Pure Mojo implementation of LLaMA transformer architecture and weight loading.
@@ -33,7 +35,6 @@ The following systems are original architectures authored and maintained within 
    - aien-inference-abi: Asynchronous native Rust inference trait decoupled from runtime engines, supporting continuous batching, chunked prefill, and dynamic scheduling.
    - aien-kv-cache: Sub-microsecond paged KV block-table allocator featuring radix-tree prefix deduplication, zero-copy subagent sequence branching, Copy-on-Write page copying, and physical unified memory pool (libc::mmap, libc::mlock) on NVIDIA Grace Blackwell.
    - aien-scheduler: Token-budgeted continuous batching scheduler with chunked prefill segmentation and watermark-based memory pressure preemption.
-   - spark-max-cabi and spark-max-rs: Zero-copy FFI bridge between native Rust orchestrators and compiled Mojo C-ABI dynamic libraries (libspark_max.so).
    - cortex-rs: Canonical memory store with SQLite WAL persistence, entity-relationship graphs, and sub-microsecond prefix indexing.
    - aegis-runtime: Compiled Rust sovereign control gateway, heartbeat daemon, and event multiplexer.
    - spark-cockpit-rs: Real-time high-frequency hardware monitor, thermal sensor aggregator, and terminal UI.

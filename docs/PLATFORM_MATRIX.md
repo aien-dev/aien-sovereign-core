@@ -36,7 +36,6 @@ AIEN follows an evidence-based verification standard. Platforms are labeled acco
 ### NVIDIA DGX Spark (Grace Blackwell GB10)
 - `aien-kv-cache`: Pinned contiguous page-locked unified memory (GB10 LPDDR5X): **Runtime Verified**
 - `aien-scheduler`: Continuous batching and chunked prefill: **Runtime Verified**
-- `spark-max-cabi`: Modular MAX C-ABI dynamic bridge (`libspark_max.so`): **Runtime Verified** (Tested against MAX 26.5)
 - `spark-cockpit-rs`: Axum web gateway and health endpoints: **Runtime & Benchmark Verified**
 
 ### Apple Silicon (macOS aarch64)

@@ -1,6 +1,6 @@
 // Integration tests for spark-aegis
 
-use spark_aegis::{audit, containment, doctrine, mojo_bridge, pr_triage, scanner};
+use spark_aegis::{audit, byte_scan, containment, doctrine, pr_triage, scanner};
 use std::fs;
 
 #[test]
@@ -18,13 +18,13 @@ fn test_doctrine_invariants() {
 }
 
 #[test]
-fn test_mojo_simd_bridge_integration() {
+fn test_byte_scan_integration() {
     let haystack = b"ATLAS_AIEN_SPARK_AEGIS_BOUNDARY_VERIFICATION";
     let pattern = b"SPARK_AEGIS";
-    let found = mojo_bridge::find_pattern(haystack, pattern);
+    let found = byte_scan::find_pattern(haystack, pattern);
     assert_eq!(found, Some(11));
 
-    let count = mojo_bridge::count_byte_matches(haystack, b'A');
+    let count = byte_scan::count_byte_matches(haystack, b'A');
     assert_eq!(count, 7);
 }
 

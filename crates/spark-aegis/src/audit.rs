@@ -1,7 +1,6 @@
 // spark-aegis Live System and Workspace Confinement Audit Engine
 // Inspects active listening sockets, workspace secrets, and host invariants
 
-use crate::mojo_bridge;
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -33,7 +32,6 @@ pub struct LiveAuditReport {
     pub workspace: WorkspaceAudit,
     pub cortex_online: bool,
     pub cortex_version: Option<String>,
-    pub mojo_simd_active: bool,
     pub blake3_digest: String,
     pub overall_safe: bool,
 }
@@ -53,16 +51,13 @@ pub async fn audit_system() -> Result<LiveAuditReport> {
     // 3. Audit Cortex memory engine
     let (cortex_online, cortex_version) = check_cortex_health().await;
 
-    // 4. Audit Mojo SIMD acceleration
-    let mojo_simd_active = mojo_bridge::is_simd_accelerated();
-
     // Overall safety: no plaintext secrets in workspace
     let overall_safe = workspace.secure_tpm_only;
 
     // Cryptographic hash of audit report
     let digest_seed = format!(
-        "{}:{}:{}:{}:{}",
-        ts, non_loopback_count, workspace.secure_tpm_only, cortex_online, mojo_simd_active
+        "{}:{}:{}:{}",
+        ts, non_loopback_count, workspace.secure_tpm_only, cortex_online
     );
     let blake3_digest = blake3::hash(digest_seed.as_bytes()).to_hex().to_string();
 
@@ -73,7 +68,6 @@ pub async fn audit_system() -> Result<LiveAuditReport> {
         workspace,
         cortex_online,
         cortex_version,
-        mojo_simd_active,
         blake3_digest,
         overall_safe,
     })

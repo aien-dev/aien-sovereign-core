@@ -11,7 +11,6 @@ pub struct BenchmarkConfig {
     pub prompt_token_count: usize,
     pub output_token_count: usize,
     pub concurrency_levels: Vec<usize>,
-    pub max_serve_port: u16,
     pub cool_down_target_power_watts: f64,
     pub cool_down_max_temp_c: f64,
 }
@@ -25,23 +24,10 @@ impl Default for BenchmarkConfig {
             prompt_token_count: 128,
             output_token_count: 128,
             concurrency_levels: vec![1, 2, 4, 8, 16, 32, 64],
-            max_serve_port: 18090,
             cool_down_target_power_watts: 12.0,
             cool_down_max_temp_c: 42.0,
         }
     }
-}
-
-/// Request-level latency and token generation record.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RequestRecord {
-    pub request_id: usize,
-    pub ttft_ms: f64,
-    pub itl_ms: Vec<f64>,
-    pub total_duration_ms: f64,
-    pub output_tokens_count: usize,
-    pub output_tokens: Vec<u32>,
-    pub text_preview: String,
 }
 
 /// Aggregated statistical and hardware telemetry for an engine run at a given concurrency.

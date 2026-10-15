@@ -50,8 +50,8 @@ The test matrix covers all 18 features across four structured tiers:
 - F10: Multi-Stage Parity Test
 - F11: Decoupled TensorBackend Trait
 - F12: ReferenceCpuBackend
-- F13: Mojo GB10 C-ABI Kernels
-- F14: MojoGb10Backend Implementation
+- F13: Mojo GB10 C-ABI Kernels (removed 2026-10-15)
+- F14: MojoGb10Backend Implementation (removed 2026-10-15)
 - F15: Neutral Benchmark Driver
 - F16: Concurrency Sweeps & Telemetry
 - F17: Hardware & Secrets Compliance
@@ -146,22 +146,14 @@ The test matrix covers all 18 features across four structured tiers:
 - TC-F12-05: Execute `compute_logits` and verify output dimension matches vocabulary size (32000).
 
 #### Feature F13: Mojo GB10 C-ABI Kernels
-- TC-F13-01: Verify Mojo compilation script `build.sh` exists and sets `MODULAR_CACHE_DIR`.
-- TC-F13-02: Verify C-ABI export symbols (`aien_rmsnorm_bf16`, `aien_rope_bf16`, `aien_gemv_bf16`).
-- TC-F13-03: Verify SIMD vector width aligns with 16-wide Float32 / BF16 execution on Grace Blackwell.
-- TC-F13-04: Verify persistent unified memory allocations without per-token host-device copies.
-- TC-F13-05: Verify compilation target produces valid ARM64 shared object (`.so`).
+- Removed on 2026-10-15 with Modular MAX and Mojo; its tests were deleted.
 
 #### Feature F14: MojoGb10Backend Implementation
-- TC-F14-01: Verify `MojoGb10Backend` dynamically loads `libaien_kernels.so` via `libloading`.
-- TC-F14-02: Verify graceful fallback or error reporting when shared library is absent.
-- TC-F14-03: Verify C-ABI parameter marshalling matches declared function signatures.
-- TC-F14-04: Verify numerical output parity between `MojoGb10Backend` and `ReferenceCpuBackend`.
-- TC-F14-05: Verify thread safety (`Send + Sync`) for `MojoGb10Backend`.
+- Removed on 2026-10-15 with Modular MAX and Mojo; its tests were deleted.
 
 #### Feature F15: Neutral Benchmark Driver
 - TC-F15-01: Verify benchmark crate `benchmarks/crates/bench_apples_to_apples` exists in workspace.
-- TC-F15-02: Verify benchmark driver accepts `--engines` argument for AIEN and MAX.
+- TC-F15-02: Verify benchmark driver accepts `--engines` argument (AIEN only since 2026-10-15).
 - TC-F15-03: Verify benchmark driver accepts `--concurrency` sweep argument.
 - TC-F15-04: Verify benchmark driver executes engines sequentially with cool-down pauses.
 - TC-F15-05: Verify benchmark driver verifies output token correctness against reference oracle.
@@ -276,18 +268,10 @@ The test matrix covers all 18 features across four structured tiers:
 - TC-F12-B05: Argmax sampling with uniform logits selecting lowest index deterministically.
 
 #### Feature F13 (Mojo GB10 Kernels Boundaries)
-- TC-F13-B01: Kernel launch with unaligned input pointer rejected or aligned internally.
-- TC-F13-B02: Kernel launch with vector size not divisible by 16 (tail processing check).
-- TC-F13-B03: Kernel execution under zero GPU memory headroom condition.
-- TC-F13-B04: RoPE theta parameter passed as negative float rejected.
-- TC-F13-B05: Shared library unload and reload cycle without memory leak or symbol collision.
+- Removed on 2026-10-15 with Modular MAX and Mojo; its tests were deleted.
 
 #### Feature F14 (MojoGb10Backend Boundaries)
-- TC-F14-B01: Invocation of backend when dynamic library is missing returns clean Err result.
-- TC-F14-B02: Concurrent calls to backend from 16 threads without race conditions.
-- TC-F14-B03: Repeated 10,000 forward token passes without process memory expansion.
-- TC-F14-B04: Handling corrupted C-ABI return code gracefully.
-- TC-F14-B05: Re-initialization of device buffers after sequence completion.
+- Removed on 2026-10-15 with Modular MAX and Mojo; its tests were deleted.
 
 #### Feature F15 (Neutral Benchmark Driver Boundaries)
 - TC-F15-B01: Target engine endpoint unreachable reports connection error and moves to next.
@@ -331,12 +315,12 @@ The test matrix covers all 18 features across four structured tiers:
 8. Pair P8 (F8 + F10): Multi-stage parity test loads oracle safetensors fixture and validates Stage 1 through Stage 5 sequentially.
 9. Pair P9 (F9 + F10): Aligned RoPE `rotate_half` and row-major matmul pass Stage 3 activation parity (cosine > 0.9999) without layer drift.
 10. Pair P10 (F9 + F12): Reference CPU backend executing aligned math passes all 5 parity stages against Hugging Face oracle.
-11. Pair P11 (F3 + F13): Raw BF16 buffers from dual storage passed directly into Mojo GB10 C-ABI kernels without runtime type conversion.
+11. Pair P11 (F3 + F13): removed 2026-10-15 with Mojo.
 12. Pair P12 (F11 + F12): `ReferenceCpuBackend` implements `TensorBackend` trait and processes full forward pass token evaluation.
-13. Pair P13 (F11 + F14): `MojoGb10Backend` implements `TensorBackend` trait and replaces CPU math transparently.
-14. Pair P14 (F13 + F14): Compiled `libaien_kernels.so` loaded by `MojoGb10Backend` executes on DGX Spark unified memory without per-token copies.
-15. Pair P15 (F10 + F14): Multi-stage parity test executed against `MojoGb10Backend` achieves identical greedy tokens and tolerances.
-16. Pair P16 (F15 + F16): Neutral benchmark driver executes concurrency sweep C=1..64 across AIEN and MAX collecting TTFT and ITL.
+13. Pair P13 (F11 + F14): removed 2026-10-15 with Mojo.
+14. Pair P14 (F13 + F14): removed 2026-10-15 with Mojo.
+15. Pair P15 (F10 + F14): removed 2026-10-15 with Mojo.
+16. Pair P16 (F15 + F16): Neutral benchmark driver executes concurrency sweep C=1..64 on AIEN collecting TTFT and ITL.
 17. Pair P17 (F16 + F17): Telemetry collection records GPU power and memory while maintaining zero disk secrets in memory.
 18. Pair P18 (F15 + F18): Benchmark completion writes structured results and triggers autonomous PR squash merge with Cortex memory receipt.
 
@@ -357,7 +341,7 @@ The test matrix covers all 18 features across four structured tiers:
 6. Scenario SC-06 (Automated Parity Gate):
    CI or operator runs `cargo test -p aien-inference-abi --test tinyllama_parity --verbose`. System validates Stages 1 to 5 against oracle fixture and reports zero regressions.
 7. Scenario SC-07 (Apples-to-Apples Multi-Engine Benchmark):
-   Operator launches neutral benchmark orchestrator. System tests AIEN, pauses for thermal cool-down, tests MAX, and outputs comparative TTFT/ITL telemetry.
+   Operator launches neutral benchmark orchestrator. System pauses for thermal cool-down, tests AIEN, and outputs TTFT/ITL telemetry.
 8. Scenario SC-08 (Zero-Disk-Secrets Invariant Audit):
    Automated auditor scans workspace. Verifies zero `.env` files, tests in-memory TPM vault resolution, and verifies compliance.
 9. Scenario SC-09 (Sovereign Voice & Git PR Lifecycle):

@@ -1,7 +1,7 @@
 // spark-aegis Deep Scanner
 // Scans files, directories, and git diffs for secrets, slop, and dangerous commands
 
-use crate::mojo_bridge;
+use crate::byte_scan;
 use anyhow::Result;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -232,11 +232,11 @@ pub fn scan_content(path: &Path, content: &str) -> Vec<Violation> {
         });
     }
 
-    // Fast check for em and en dashes using Mojo SIMD accelerated byte scanner if available
+    // Fast check for em and en dashes: skip the per-line scan when no E2 lead byte exists
     let bytes = content.as_bytes();
     // Em dash UTF-8: E2 80 94 (226, 128, 148)
     // En dash UTF-8: E2 80 93 (226, 128, 147)
-    let has_utf8_prefix = mojo_bridge::scan_byte(bytes, 0xE2).is_some();
+    let has_utf8_prefix = byte_scan::scan_byte(bytes, 0xE2).is_some();
 
     for (line_idx, line) in content.lines().enumerate() {
         let line_num = line_idx + 1;

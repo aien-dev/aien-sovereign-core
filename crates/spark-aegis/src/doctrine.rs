@@ -99,7 +99,7 @@ impl AegisInvariant {
                 "Strict zero em dash and en dash policy. Ban AI buzzwords, transitional filler, and antithesis tropes."
             }
             Self::PureCompiledArchitecture => {
-                "Core security and agent runtime engines must compile to native Rust and Mojo SIMD binaries."
+                "Core security and agent runtime engines must compile to native Rust binaries."
             }
             Self::ImmutableAuditTrail => {
                 "Every defensive incident and PR audit must commit Blake3 cryptographic proof into Cortex memory."

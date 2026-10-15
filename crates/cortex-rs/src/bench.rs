@@ -38,7 +38,7 @@ pub fn run_benchmark(records: usize) -> Result<(), Box<dyn std::error::Error>> {
         ("inference_scheduler", "Dynamic batching and continuous sequence allocation on Blackwell GB10 unified memory."),
         ("kv_cache", "Paged KV cache allocation with zero copy tensor memory reuse under high concurrency."),
         ("cortex_memory", "Lexical BM25 indexing with ONNX vector embeddings and sub-millisecond retrieval."),
-        ("kernel_optimization", "Mojo GPU kernel tile optimization for FP8 and BF16 GEMM matrix multiplication."),
+        ("kernel_optimization", "GPU kernel tile optimization for FP8 and BF16 GEMM matrix multiplication."),
         ("resilience_protocol", "Crash-only idempotency, WAL transaction rollbacks, and self-healing supervisory loops."),
         ("consensus_engine", "Decentralized state replication with cryptographic hash chained audit records."),
         ("compiler_pipeline", "AOT binary compilation with strict link-time optimization and zero runtime interpreter overhead."),

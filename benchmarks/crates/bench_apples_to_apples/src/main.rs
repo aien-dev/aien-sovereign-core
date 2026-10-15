@@ -1,9 +1,7 @@
-//! Standalone neutral apples-to-apples benchmark driver comparing
-//! AIEN (BlackwellBackend sm_121 GPU) and Modular MAX (max serve)
-//! under identical conditions on DGX Spark GB10.
+//! Standalone benchmark driver for the AIEN native reference engine on DGX Spark GB10:
+//! concurrency sweeps with thermal cooldown, telemetry and a token parity oracle.
 
 mod engine_aien;
-mod engine_max;
 mod metrics;
 mod oracle;
 mod telemetry;
@@ -11,7 +9,6 @@ mod types;
 
 use clap::Parser;
 use engine_aien::{run_aien_concurrency_sweep, AienEngineHandle};
-use engine_max::{run_max_concurrency_sweep, MaxServerHandle};
 use oracle::ORACLE_BENCHMARK_128_TOKENS;
 use std::fs;
 use std::path::Path;
@@ -21,11 +18,11 @@ use types::{BenchmarkConfig, BenchmarkReport, ConcurrencyRunResult};
 #[derive(Parser, Debug)]
 #[command(
     name = "bench_apples_to_apples",
-    about = "Neutral Apples-to-Apples LLM Inference Benchmark Suite on DGX Spark GB10"
+    about = "AIEN native reference LLM inference benchmark on DGX Spark GB10"
 )]
 struct Args {
-    /// Comma-separated list of engines to benchmark: aien,max
-    #[arg(short, long, default_value = "aien,max")]
+    /// Comma-separated list of engines to benchmark: aien
+    #[arg(short, long, default_value = "aien")]
     engines: String,
 
     /// Comma-separated list of concurrency levels to test
@@ -39,10 +36,6 @@ struct Args {
     /// Directory where JSON benchmark artifacts are written
     #[arg(long, default_value = "benchmarks/data")]
     output_dir: String,
-
-    /// Modular MAX serve port
-    #[arg(long, default_value_t = 18098)]
-    max_port: u16,
 
     /// Idle GPU power threshold for thermal cooldown envelope in Watts
     #[arg(long, default_value_t = 12.0)]
@@ -65,7 +58,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let config = BenchmarkConfig {
         output_token_count: args.output_tokens,
-        max_serve_port: args.max_port,
         cool_down_target_power_watts: args.target_power_watts,
         cool_down_max_temp_c: args.max_temp_c,
         concurrency_levels: concurrency_levels.clone(),
@@ -80,10 +72,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .collect();
 
     println!("================================================================================");
-    println!("   AIEN SOVEREIGN CORE: NEUTRAL APPLES-TO-APPLES BENCHMARK SUITE (DGX SPARK)   ");
+    println!("   AIEN SOVEREIGN CORE: NATIVE REFERENCE BENCHMARK SUITE (DGX SPARK)   ");
     println!("================================================================================");
     println!("Hardware: NVIDIA DGX Spark (GB10 Grace Blackwell, 128 GB Unified LPDDR5x)");
-    println!("Model: TinyLlama/TinyLlama-1.1B-Chat-v1.0 (BF16 for MAX GPU, FP32 for AIEN Native Reference)");
+    println!("Model: TinyLlama/TinyLlama-1.1B-Chat-v1.0 (FP32, AIEN Native Reference)");
     println!("Workload: 128 input tokens -> 128 output tokens (Greedy, Temp=0.0)");
     println!("Engines: {:?}", target_engines);
     println!("Concurrency levels: {:?}", concurrency_levels);
@@ -126,27 +118,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
 
-            "max" => {
-                let server = match MaxServerHandle::start(&config).await {
-                    Ok(s) => s,
-                    Err(e) => {
-                        eprintln!("Failed to start Modular MAX server: {}", e);
-                        continue;
-                    }
-                };
-
-                for &c in &concurrency_levels {
-                    match run_max_concurrency_sweep(&server, &config, c).await {
-                        Ok(res) => {
-                            print_sweep_result_line(&res);
-                            all_results.push(res);
-                        }
-                        Err(e) => eprintln!("MAX C={} sweep failed: {}", c, e),
-                    }
-                }
-                // Server process killed when `server` drops at end of block
-            }
-
             other => {
                 eprintln!("Unknown engine: '{}'. Skipping.", other);
             }
@@ -165,7 +136,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         benchmark_timestamp: chrono::Utc::now().to_rfc3339(),
         hardware: "NVIDIA DGX Spark GB10 Grace Blackwell 128GB Unified Memory".to_string(),
         model_id: "TinyLlama/TinyLlama-1.1B-Chat-v1.0".to_string(),
-        precision: "BF16 (MAX GPU) vs FP32 (AIEN Native Reference)".to_string(),
+        precision: "FP32 (AIEN Native Reference)".to_string(),
         prompt_tokens: config.prompt_token_count,
         target_output_tokens: config.output_token_count,
         results: all_results,

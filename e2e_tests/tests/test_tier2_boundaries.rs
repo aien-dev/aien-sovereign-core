@@ -634,83 +634,6 @@ fn test_f12_b05_argmax_equal_logits_selects_lowest_index() {
 }
 
 // ============================================================================
-// Feature F13: Mojo GB10 Kernels Boundaries
-// ============================================================================
-
-#[test]
-fn test_f13_b01_simd_vector_width_16_boundary() {
-    let simd_width = 16;
-    let hidden_dim = 2048;
-    assert_eq!(hidden_dim % simd_width, 0);
-}
-
-#[test]
-fn test_f13_b02_intermediate_dim_simd_divisibility() {
-    let simd_width = 16;
-    let intermediate_dim = 5632;
-    assert_eq!(intermediate_dim % simd_width, 0);
-}
-
-#[test]
-fn test_f13_b03_head_dim_simd_divisibility() {
-    let simd_width = 16;
-    let head_dim = 64;
-    assert_eq!(head_dim % simd_width, 0);
-}
-
-#[test]
-fn test_f13_b04_theta_parameter_positive_boundary() {
-    let theta = 10000.0f32;
-    assert!(theta > 0.0);
-}
-
-#[test]
-fn test_f13_b05_zero_copy_coherent_memory_bus_speed() {
-    let nvlink_c2c_gb_s = 900;
-    assert_eq!(nvlink_c2c_gb_s, 900);
-}
-
-// ============================================================================
-// Feature F14: MojoGb10Backend Boundaries
-// ============================================================================
-
-#[test]
-fn test_f14_b01_null_pointer_rejection_concept() {
-    let ptr: *const f32 = std::ptr::null();
-    assert!(ptr.is_null());
-}
-
-#[test]
-fn test_f14_b02_concurrent_read_safety_check() {
-    let weights = vec![1.0f32; 100];
-    let ref1 = &weights;
-    let ref2 = &weights;
-    assert_eq!(ref1.len(), ref2.len());
-}
-
-#[test]
-fn test_f14_b03_repeated_forward_passes_without_mutation() {
-    let x = vec![1.0, 2.0];
-    let w = vec![1.0, 0.0, 0.0, 1.0];
-    let mut out = vec![0.0; 2];
-    for _ in 0..1000 {
-        matmul_vec(&x, &w, &mut out, 2, 2);
-    }
-    assert_eq!(out, vec![1.0, 2.0]);
-}
-
-#[test]
-fn test_f14_b04_c_abi_int_size_matches_standard() {
-    assert_eq!(std::mem::size_of::<std::os::raw::c_int>(), 4);
-}
-
-#[test]
-fn test_f14_b05_float_eps_boundary_positive() {
-    let eps = 1e-5f32;
-    assert!(eps > 0.0);
-}
-
-// ============================================================================
 // Feature F15: Neutral Benchmark Driver Boundaries
 // ============================================================================
 
@@ -730,13 +653,6 @@ fn test_f15_b02_max_concurrency_level_64() {
 fn test_f15_b03_thermal_cool_down_duration_seconds() {
     let cool_down_sec = 30;
     assert!(cool_down_sec >= 30);
-}
-
-#[test]
-fn test_f15_b04_http_port_separation_contract() {
-    let max_port = 8000;
-    let internal_runtime_port = 18006;
-    assert_ne!(max_port, internal_runtime_port);
 }
 
 #[test]

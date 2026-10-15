@@ -26,13 +26,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "aien-abi-conformance"
+version = "0.1.0"
+
+[[package]]
+name = "aien-abi-core"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "serde",
+]
+
+[[package]]
 name = "aien-inference-abi"
 version = "0.1.0"
 dependencies = [
+ "aien-abi-core",
  "aien-kv-cache",
+ "aien-omega-bf16",
+ "aien-omega-dattn",
+ "aien-omega-dgraph",
+ "aien-omega-fp8",
+ "aien-omega-gpu",
+ "aien-omega-moe",
+ "aien-omega-pf",
+ "aien-omega-router",
  "aien-platform",
  "async-trait",
- "libloading",
  "parking_lot",
  "rayon",
  "reqwest",
@@ -52,6 +72,63 @@ dependencies = [
  "libc",
  "parking_lot",
  "serde",
+]
+
+[[package]]
+name = "aien-omega-bf16"
+version = "0.1.0"
+dependencies = [
+ "aien-omega-gpu",
+]
+
+[[package]]
+name = "aien-omega-dattn"
+version = "0.1.0"
+dependencies = [
+ "aien-omega-gpu",
+]
+
+[[package]]
+name = "aien-omega-dgraph"
+version = "0.1.0"
+dependencies = [
+ "aien-omega-gpu",
+]
+
+[[package]]
+name = "aien-omega-fp8"
+version = "0.1.0"
+dependencies = [
+ "aien-omega-gpu",
+]
+
+[[package]]
+name = "aien-omega-gpu"
+version = "0.1.0"
+dependencies = [
+ "aien-abi-conformance",
+]
+
+[[package]]
+name = "aien-omega-moe"
+version = "0.1.0"
+dependencies = [
+ "aien-omega-gpu",
+]
+
+[[package]]
+name = "aien-omega-pf"
+version = "0.1.0"
+dependencies = [
+ "aien-omega-dattn",
+ "aien-omega-gpu",
+]
+
+[[package]]
+name = "aien-omega-router"
+version = "0.1.0"
+dependencies = [
+ "aien-omega-gpu",
 ]
 
 [[package]]
@@ -811,16 +888,6 @@ name = "libc"
 version = "0.2.189"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3eaf3ede3fee6db1a4c2ee091bf8a8b4dccdc6d17f656fb07896ee72867612f2"
-
-[[package]]
-name = "libloading"
-version = "0.8.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d7c4b02199fee7c5d21a5ae7d8cfa79a6ef5bb2fc834d6e9058e89c825efdc55"
-dependencies = [
- "cfg-if",
- "windows-link",
-]
 
 [[package]]
 name = "linux-raw-sys"
