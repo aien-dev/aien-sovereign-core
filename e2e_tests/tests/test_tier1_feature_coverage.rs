@@ -732,85 +732,6 @@ fn test_f12_05_reference_cpu_attention_scale_factor() {
 }
 
 // ============================================================================
-// Feature F13: Mojo GB10 C-ABI Kernels (M5 Specification Contract)
-// ============================================================================
-
-#[test]
-fn test_f13_01_mojo_directory_structure_contract() {
-    let rel_path = "crates/aien-inference-abi/mojo";
-    assert!(rel_path.contains("mojo"));
-}
-
-#[test]
-fn test_f13_02_mojo_c_abi_export_symbols_contract() {
-    let symbols = [
-        "aien_rmsnorm_bf16",
-        "aien_rope_bf16",
-        "aien_gemv_bf16",
-        "aien_swiglu_bf16",
-        "aien_gqa_bf16",
-    ];
-    assert_eq!(symbols.len(), 5);
-}
-
-#[test]
-fn test_f13_03_mojo_compilation_cache_contract() {
-    let cache_env = "MODULAR_CACHE_DIR=/tmp/modular_cache";
-    assert!(cache_env.contains("MODULAR_CACHE_DIR"));
-}
-
-#[test]
-fn test_f13_04_unified_memory_pointer_alignment_requirement() {
-    assert_eq!(std::mem::align_of::<f32>(), 4);
-    assert_eq!(std::mem::align_of::<u16>(), 2);
-}
-
-#[test]
-fn test_f13_05_shared_library_name_contract() {
-    let lib_name = "libaien_kernels.so";
-    assert!(lib_name.starts_with("lib"));
-    assert!(lib_name.ends_with(".so"));
-}
-
-// ============================================================================
-// Feature F14: MojoGb10Backend Implementation
-// ============================================================================
-
-#[test]
-fn test_f14_01_backend_handles_missing_library_gracefully() {
-    let non_existent = Path::new("/non/existent/libaien_kernels.so");
-    assert!(!non_existent.exists());
-}
-
-#[test]
-fn test_f14_02_backend_structure_thread_safety() {
-    fn assert_send_sync<T: Send + Sync>() {}
-    assert_send_sync::<LoadedCheckpoint>();
-}
-
-#[test]
-fn test_f14_03_zero_copy_raw_bf16_pointer_passing() {
-    let bf16_data = vec![0x80u8, 0x3Fu8, 0x00u8, 0x40u8];
-    let ptr = bf16_data.as_ptr();
-    assert!(!ptr.is_null());
-}
-
-#[test]
-fn test_f14_04_backend_persists_buffers_across_steps() {
-    let mut kv_cache = Vec::<Vec<f32>>::new();
-    kv_cache.push(vec![1.0; 64]);
-    kv_cache.push(vec![2.0; 64]);
-    assert_eq!(kv_cache.len(), 2);
-}
-
-#[test]
-fn test_f14_05_backend_vocabulary_dimension_matches_32000() {
-    let vocab_size = 32000usize;
-    let hidden_dim = 2048usize;
-    assert_eq!(vocab_size * hidden_dim, 65_536_000);
-}
-
-// ============================================================================
 // Feature F15: Neutral Benchmark Driver (M6 Specification Contract)
 // ============================================================================
 
@@ -818,19 +739,6 @@ fn test_f14_05_backend_vocabulary_dimension_matches_32000() {
 fn test_f15_01_benchmark_driver_workspace_contract() {
     let crate_path = "benchmarks/crates/bench_apples_to_apples";
     assert!(crate_path.contains("bench_apples_to_apples"));
-}
-
-#[test]
-fn test_f15_02_benchmark_sequential_execution_order() {
-    let engines = ["aien", "max"];
-    assert_eq!(engines[0], "aien");
-    assert_eq!(engines[1], "max");
-}
-
-#[test]
-fn test_f15_03_modular_max_mandatory_flag() {
-    let mandatory_flag = "--no-device-graph-capture";
-    assert_eq!(mandatory_flag, "--no-device-graph-capture");
 }
 
 #[test]

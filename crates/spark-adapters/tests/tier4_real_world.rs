@@ -27,25 +27,25 @@ fn test_t4_01_verify_keys_cli_audit() {
     assert!(stdout.contains("STATUS"));
     assert!(stdout.contains("RESIDENT"));
     assert!(stdout.contains("atlas-lightning-omni"));
-    assert!(stdout.contains("local_max"));
+    assert!(stdout.contains("local_seat"));
     assert!(!stdout.contains('\u{2014}'));
     assert!(!stdout.contains('\u{2013}'));
 }
 
 #[tokio::test]
-async fn test_t4_02_resident_max_live_inference_roundtrip() {
+async fn test_t4_02_resident_seat_live_inference_roundtrip() {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(5))
         .build()
-        .expect("build local MAX client");
-    if std::env::var_os("AIEN_REQUIRE_LIVE_MAX").is_none()
+        .expect("build local seat client");
+    if std::env::var_os("AIEN_REQUIRE_LIVE_SEAT").is_none()
         && client
             .get("http://127.0.0.1:18006/v1/models")
             .send()
             .await
             .is_err()
     {
-        eprintln!("Local MAX service is offline; set AIEN_REQUIRE_LIVE_MAX=1 to require it");
+        eprintln!("Local model seat is offline; set AIEN_REQUIRE_LIVE_SEAT=1 to require it");
         return;
     }
     let payload = serde_json::json!({
@@ -63,14 +63,11 @@ async fn test_t4_02_resident_max_live_inference_roundtrip() {
         .send()
         .await;
 
-    assert!(
-        res.is_ok(),
-        "Live MAX inference server on 18006 must be reachable"
-    );
+    assert!(res.is_ok(), "Live model seat on 18006 must be reachable");
     let response = res.unwrap();
-    assert_eq!(response.status(), 200, "MAX server must return HTTP 200");
+    assert_eq!(response.status(), 200, "model seat must return HTTP 200");
 
-    let val: serde_json::Value = response.json().await.expect("parse MAX response");
+    let val: serde_json::Value = response.json().await.expect("parse seat response");
     let content = val
         .pointer("/choices/0/message/content")
         .and_then(|v| v.as_str())
@@ -81,14 +78,14 @@ async fn test_t4_02_resident_max_live_inference_roundtrip() {
         .unwrap_or("");
     assert!(
         !content.trim().is_empty() || !reasoning.trim().is_empty(),
-        "MAX must return completion content or reasoning tokens"
+        "seat must return completion content or reasoning tokens"
     );
 
     let total_tokens = val
         .pointer("/usage/total_tokens")
         .and_then(|v| v.as_u64())
         .unwrap_or(0);
-    assert!(total_tokens > 0, "MAX must report positive token usage");
+    assert!(total_tokens > 0, "seat must report positive token usage");
 }
 
 #[test]

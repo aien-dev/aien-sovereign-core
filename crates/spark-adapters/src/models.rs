@@ -14,7 +14,9 @@ pub enum ProviderType {
     Mistral,
     ChatGPTWeb,
     ClaudeWeb,
-    LocalMax,
+    /// Local OpenAI-compatible model seat on port 18006. Accepts the old `local_max` id.
+    #[serde(alias = "local_max")]
+    LocalSeat,
     EmbeddedNative,
 }
 
@@ -32,7 +34,7 @@ impl ProviderType {
             ProviderType::Mistral => "mistral",
             ProviderType::ChatGPTWeb => "chatgpt_web",
             ProviderType::ClaudeWeb => "claude_web",
-            ProviderType::LocalMax => "local_max",
+            ProviderType::LocalSeat => "local_seat",
             ProviderType::EmbeddedNative => "embedded_native",
         }
     }
@@ -50,7 +52,7 @@ impl ProviderType {
             ProviderType::Mistral => "Mistral AI",
             ProviderType::ChatGPTWeb => "ChatGPT Plus (Web Session)",
             ProviderType::ClaudeWeb => "Claude Pro (Web Session)",
-            ProviderType::LocalMax => "Modular MAX (GB10 Native)",
+            ProviderType::LocalSeat => "Local Model Seat (GB10, port 18006)",
             ProviderType::EmbeddedNative => "Embedded Native (In-Process GB10/CPU)",
         }
     }
@@ -70,7 +72,7 @@ impl ProviderType {
             ProviderType::Mistral => "https://api.mistral.ai/v1/chat/completions",
             ProviderType::ChatGPTWeb => "https://chatgpt.com/backend-api/conversation",
             ProviderType::ClaudeWeb => "https://claude.ai/api/organizations/chat_conversations",
-            ProviderType::LocalMax => "http://127.0.0.1:18006/v1/chat/completions",
+            ProviderType::LocalSeat => "http://127.0.0.1:18006/v1/chat/completions",
             ProviderType::EmbeddedNative => "in-process://native-transformer",
         }
     }
@@ -88,7 +90,7 @@ impl ProviderType {
             ProviderType::Mistral => Some("MISTRAL_API_KEY"),
             ProviderType::ChatGPTWeb => Some("CHATGPT_SESSION_TOKEN"),
             ProviderType::ClaudeWeb => Some("CLAUDE_SESSION_KEY"),
-            ProviderType::LocalMax => None,
+            ProviderType::LocalSeat => None,
             ProviderType::EmbeddedNative => None,
         }
     }
@@ -106,7 +108,7 @@ impl ProviderType {
             ProviderType::Mistral => &["MISTRAL_API_KEY"],
             ProviderType::ChatGPTWeb => &["CHATGPT_SESSION_TOKEN", "OPENAI_WEB_TOKEN"],
             ProviderType::ClaudeWeb => &["CLAUDE_SESSION_KEY", "CLAUDE_WEB_SESSION_KEY"],
-            ProviderType::LocalMax => &[],
+            ProviderType::LocalSeat => &[],
             ProviderType::EmbeddedNative => &[],
         }
     }

@@ -961,11 +961,11 @@ fn run_verify_keys() {
     );
     println!("{}", "-".repeat(84));
 
-    let max_port = is_port_open(18006);
-    let max_status = if max_port { "PORT_OPEN" } else { "OFFLINE" };
+    let seat_port = is_port_open(18006);
+    let seat_status = if seat_port { "PORT_OPEN" } else { "OFFLINE" };
     println!(
         "{:<28} {:<24} {:<15} {:<20}",
-        "Modular MAX Engine", "http://127.0.0.1:18006", max_status, "LOCAL_SILICON"
+        "Local Model Seat", "http://127.0.0.1:18006", seat_status, "LOCAL_SILICON"
     );
 
     let cortex_port = is_port_open(18080);

@@ -277,7 +277,7 @@ fn spec_context_len(spec: &spark_adapters::models::AdapterSpec) -> usize {
 fn test_t1_f18_resident_model_endpoint_resolution() {
     let router = AdapterRouter::new();
     let (prov, endpoint, model, key) = router.resolve_route("atlas-lightning-omni");
-    assert_eq!(prov, ProviderType::LocalMax);
+    assert_eq!(prov, ProviderType::LocalSeat);
     assert_eq!(endpoint, "http://127.0.0.1:18006/v1/chat/completions");
     assert_eq!(model, "atlas-lightning-omni");
     assert!(key.is_none());

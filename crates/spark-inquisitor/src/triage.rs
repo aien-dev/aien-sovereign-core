@@ -159,7 +159,7 @@ Thank you for proposing this enhancement in **#{issue_number}** ("{title}").
 All prospective additions must satisfy our project standards:
 1. **Zero Telemetry**: No tracking hooks, external analytics, or surveillance telemetry.
 2. **Zero Commercial Lock-in**: No proprietary tollbooths, rent-seeking layers, or walled gardens.
-3. **Pure Native Discipline**: Implementations must adhere to compiled native Rust/Mojo architecture without unnecessary interpreter layers.
+3. **Pure Native Discipline**: Implementations must adhere to compiled native Rust architecture without unnecessary interpreter layers.
 4. **Human Sovereignty**: Technology must defend and empower ordinary users and local infrastructure.
 
 Maintainers will review the architectural fit and discuss implementation pathways.

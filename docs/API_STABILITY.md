@@ -71,15 +71,12 @@ Tier 2 interfaces cover internal systems engines that are functional, tested, an
 Tier 3 interfaces represent private implementation details, dynamic shared library bridges, or emerging hardware adapters.
 
 **Covered Interfaces:**
-1. **Dynamic C-ABI Bridge (`crates/spark-max-cabi`)**:
-   - Dynamic shared library exports (`libspark_max.so`).
-   - C-ABI function pointers: `spark_max_session_create`, `spark_max_forward_dispatch`, `spark_max_session_destroy`.
-2. **Direct Hardware Bindings**:
+1. **Direct Hardware Bindings**:
    - Low-level ModelOpt quantization loaders and custom NVFP4 kernel bindings.
 
 **Guarantee:**
 - Zero stability guarantees.
-- Signatures and symbol names may change across patch releases to align with upstream Modular MAX, Mojo compiler releases, or CUDA driver updates.
+- Signatures and symbol names may change across patch releases to align with Omega kernel or GPU driver updates.
 - External code should never link directly to Tier 3 FFI symbols; rely instead on Tier 1 `AienInferenceBackend`.
 
 ---
@@ -98,7 +95,7 @@ When an interface in Tier 1 or Tier 2 must be replaced:
 
 | Operating System | Target Triple | Tier 1 Support | Tier 2 Support | Tier 3 Support (GPU) |
 | :--- | :--- | :--- | :--- | :--- |
-| **Linux (NVIDIA DGX Spark)** | `aarch64-unknown-linux-gnu` | Verified | Verified | Active (Mojo/MAX C-ABI) |
+| **Linux (NVIDIA DGX Spark)** | `aarch64-unknown-linux-gnu` | Verified | Verified | Active (Omega native kernels) |
 | **Linux (Generic x86_64)** | `x86_64-unknown-linux-gnu` | Verified | Verified | Fallback (CPU Kernel) |
 | **Linux (Generic aarch64)** | `aarch64-unknown-linux-gnu` | Verified | Verified | Fallback (CPU Kernel) |
 | **macOS (Apple Silicon)** | `aarch64-apple-darwin` | Verified | Verified | Fallback (CPU Kernel) |

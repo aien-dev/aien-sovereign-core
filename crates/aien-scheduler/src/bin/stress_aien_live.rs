@@ -117,7 +117,6 @@ async fn main() {
     println!("--- Initial Service Memory Baselines ---");
     let cortex_rss = get_process_rss_mb("cortex-rs").unwrap_or(0.0);
     let encoder_rss = get_process_rss_mb("cortex-encoder-rs").unwrap_or(0.0);
-    let max_rss = get_process_rss_mb("max").unwrap_or(0.0);
     let aegis_rss = get_process_rss_mb("aegis").unwrap_or(0.0);
 
     println!("  cortex-rs Resident Set Size:        {:.2} MB", cortex_rss);
@@ -125,7 +124,6 @@ async fn main() {
         "  cortex-encoder-rs Resident Set Size: {:.2} MB",
         encoder_rss
     );
-    println!("  max engine Resident Set Size:        {:.2} MB", max_rss);
     println!("  aegis daemon Resident Set Size:   {:.2} MB\n", aegis_rss);
 
     // 1. Cortex-rs Vector Memory Call Stress
@@ -134,14 +132,13 @@ async fn main() {
     // 2. Cortex Transformer Encoder Batch & Pressure
     stress_cortex_encoder(&client).await;
 
-    // 3. MAX LLM Inference Speed, Latency & Stream Pressure
-    stress_max_inference(&client).await;
+    // 3. Model seat LLM Inference Speed, Latency & Stream Pressure
+    stress_seat_inference(&client).await;
 
     // 4. Memory Pressure & Post-Stress Recovery Audit
     println!("\n--- Post-Stress Memory & Recovery Audit ---");
     let post_cortex = get_process_rss_mb("cortex-rs").unwrap_or(0.0);
     let post_encoder = get_process_rss_mb("cortex-encoder-rs").unwrap_or(0.0);
-    let post_max = get_process_rss_mb("max").unwrap_or(0.0);
 
     println!(
         "  cortex-rs RSS:        {:.2} MB -> {:.2} MB (Delta: {:+.2} MB)",
@@ -154,12 +151,6 @@ async fn main() {
         encoder_rss,
         post_encoder,
         post_encoder - encoder_rss
-    );
-    println!(
-        "  max engine RSS:       {:.2} MB -> {:.2} MB (Delta: {:+.2} MB)",
-        max_rss,
-        post_max,
-        post_max - max_rss
     );
 
     println!("\n================================================================================");
@@ -302,8 +293,8 @@ async fn stress_cortex_encoder(client: &Client) {
     println!("  Status: PASSED (Deterministic ONNX INT8 embedding pipeline)\n");
 }
 
-async fn stress_max_inference(client: &Client) {
-    println!("--- 3. MAX LLM Inference Streaming & Latency Pressure ---");
+async fn stress_seat_inference(client: &Client) {
+    println!("--- 3. Model Seat LLM Inference Streaming & Latency Pressure ---");
     let model = "unsloth/Llama-3.2-1B-Instruct";
     let endpoint = "http://127.0.0.1:18082/v1/chat/completions";
 

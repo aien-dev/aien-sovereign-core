@@ -128,7 +128,7 @@ fn scan_dir_for_skills(dir: &Path, skills: &mut Vec<Skill>, seen_names: &mut Has
                         });
                     }
                 } else {
-                    // Check one level deeper (e.g. modular-skills/benchmark-model)
+                    // Check one level deeper (e.g. vendor-skills/benchmark-model)
                     if let Ok(sub_entries) = fs::read_dir(&path) {
                         for sub_entry in sub_entries.flatten() {
                             let sub_path = sub_entry.path();

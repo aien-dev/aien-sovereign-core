@@ -162,7 +162,6 @@ impl HardwareProfile {
 pub enum UpstreamEngine {
     Candle,
     LlamaCpp,
-    ModularMax,
     Vllm,
 }
 
@@ -171,7 +170,6 @@ impl UpstreamEngine {
         &[
             UpstreamEngine::Candle,
             UpstreamEngine::LlamaCpp,
-            UpstreamEngine::ModularMax,
             UpstreamEngine::Vllm,
         ]
     }
@@ -180,7 +178,6 @@ impl UpstreamEngine {
         match self {
             UpstreamEngine::Candle => "huggingface/candle",
             UpstreamEngine::LlamaCpp => "ggml-org/llama.cpp",
-            UpstreamEngine::ModularMax => "modularml/max",
             UpstreamEngine::Vllm => "vllm-project/vllm",
         }
     }
@@ -189,7 +186,6 @@ impl UpstreamEngine {
         match self {
             UpstreamEngine::Candle => "Rust",
             UpstreamEngine::LlamaCpp => "C/C++",
-            UpstreamEngine::ModularMax => "Mojo",
             UpstreamEngine::Vllm => "Python/CUDA",
         }
     }
@@ -202,9 +198,6 @@ impl UpstreamEngine {
             UpstreamEngine::LlamaCpp => {
                 "High-efficiency LLM inference engine in pure C/C++ for consumer CPUs/GPUs"
             }
-            UpstreamEngine::ModularMax => {
-                "Next-generation MAX Engine with compiled native Mojo kernel acceleration"
-            }
             UpstreamEngine::Vllm => {
                 "High-throughput memory-paged serving engine for production scale"
             }
@@ -216,7 +209,6 @@ impl UpstreamEngine {
         match clean.as_str() {
             "candle" | "huggingface/candle" => Some(UpstreamEngine::Candle),
             "llama.cpp" | "llamacpp" | "ggml-org/llama.cpp" => Some(UpstreamEngine::LlamaCpp),
-            "modular" | "max" | "modularml/max" => Some(UpstreamEngine::ModularMax),
             "vllm" | "vllm-project/vllm" => Some(UpstreamEngine::Vllm),
             _ => None,
         }
@@ -445,7 +437,6 @@ impl BenchmarkTelemetry {
         };
 
         let engine_mult = match engine {
-            UpstreamEngine::ModularMax => 1.08,
             UpstreamEngine::Candle => 1.04,
             UpstreamEngine::LlamaCpp => 1.02,
             UpstreamEngine::Vllm => 1.00,
@@ -819,7 +810,6 @@ pub fn build_adapter_spec(
     let engine_slug = match engine {
         UpstreamEngine::Candle => "candle",
         UpstreamEngine::LlamaCpp => "llama-cpp",
-        UpstreamEngine::ModularMax => "max",
         UpstreamEngine::Vllm => "vllm",
     };
     let cat_slug = match category {
@@ -878,10 +868,6 @@ void ggml_fused_consumer_dequant(const struct ggml_tensor * src, struct ggml_ten
     // Vectorized dequantization on consumer CPU/GPU
 }"#
         .to_string(),
-        UpstreamEngine::ModularMax => r#"# Modular MAX native Mojo kernel
-fn fused_consumer_kernel[simd_width: Int](in_tensor: Tensor) -> Tensor:
-    return in_tensor"#
-            .to_string(),
         UpstreamEngine::Vllm => r#"# vLLM high-throughput consumer memory manager
 class ConsumerPagedCacheManager:
     def __init__(self, block_size: int = 16):
@@ -978,36 +964,6 @@ impl PagedKvCache {
 }"#.to_string(),
         },
         AdapterSpec {
-            id: "modular-max-llama3-2-sliding-window".to_string(),
-            model: ConsumerModel::Llama3_2_3B,
-            engine: UpstreamEngine::ModularMax,
-            category: AdapterCategory::SlidingWindowAttentionKernel,
-            title: "Modular MAX Mojo Sliding-Window Attention for Llama-3.2-3B".to_string(),
-            branch_name: "aien/max-llama3-2-sliding-window".to_string(),
-            author: "AIEN <aien@aienos.com>".to_string(),
-            commit_message: "perf(max): implement mojo sliding window attention kernel for llama-3.2".to_string(),
-            pr_title: "perf(max): sliding-window attention kernel in mojo for llama-3.2 consumer devices".to_string(),
-            summary: "Native Mojo compiled kernel maintaining fixed ring buffer attention for 8GB consumer hardware.".to_string(),
-            code_sample: r#"fn sliding_window_attention[window_size: Int](q: Tensor, k: Tensor, v: Tensor) -> Tensor:
-    # Mojo ring-buffer attention calculation
-    return attention_output"#.to_string(),
-        },
-        AdapterSpec {
-            id: "modular-max-gemma2-sliding-window".to_string(),
-            model: ConsumerModel::Gemma2_2B,
-            engine: UpstreamEngine::ModularMax,
-            category: AdapterCategory::SlidingWindowAttentionKernel,
-            title: "Modular MAX Mojo Sliding-Window Attention for Gemma-2-2B".to_string(),
-            branch_name: "aien/max-gemma2-sliding-window".to_string(),
-            author: "AIEN <aien@aienos.com>".to_string(),
-            commit_message: "perf(max): add compiled mojo sliding-window attention for gemma-2".to_string(),
-            pr_title: "perf(max): add compiled mojo sliding-window kernel for gemma-2-2b".to_string(),
-            summary: "Enables Gemma-2-2B alternating sliding-window attention in Modular MAX without materializing full attention masks.".to_string(),
-            code_sample: r#"fn gemma2_sliding_window_kernel(inout ctx: ExecutionContext):
-    # Compiled SIMD sliding window in Mojo
-    pass"#.to_string(),
-        },
-        AdapterSpec {
             id: "candle-deepseek-r1-distill-fast-rope".to_string(),
             model: ConsumerModel::DeepSeekR1Distill1_5B,
             engine: UpstreamEngine::Candle,
@@ -1022,21 +978,6 @@ impl PagedKvCache {
     // Vectorized rotary position embeddings
     Ok(tensor.clone())
 }"#.to_string(),
-        },
-        AdapterSpec {
-            id: "modular-max-deepseek-r1-distill-8b-cache".to_string(),
-            model: ConsumerModel::DeepSeekR1Distill8B,
-            engine: UpstreamEngine::ModularMax,
-            category: AdapterCategory::FastPagedKvCache,
-            title: "Modular MAX Unified Memory Cache for DeepSeek-R1-Distill-Llama-8B".to_string(),
-            branch_name: "aien/max-deepseek-r1-8b-unified-cache".to_string(),
-            author: "AIEN <aien@aienos.com>".to_string(),
-            commit_message: "perf(max): implement unified memory kv-cache for deepseek-r1-distill-8b".to_string(),
-            pr_title: "perf(max): unified memory kv-cache management for deepseek-r1-distill-8b".to_string(),
-            summary: "Enables 8B reasoning model inference on 16GB developer laptops using zero-copy unified memory allocations.".to_string(),
-            code_sample: r#"fn deepseek_unified_cache_alloc(shape: Shape) -> UnifiedBuffer:
-    # Zero-copy unified memory mapping
-    return alloc_unified(shape)"#.to_string(),
         },
         AdapterSpec {
             id: "candle-llama3-2-1b-paged-kv".to_string(),
@@ -1118,7 +1059,7 @@ mod tests {
 
     #[test]
     fn test_upstream_engines() {
-        assert_eq!(UpstreamEngine::all().len(), 4);
+        assert_eq!(UpstreamEngine::all().len(), 3);
         for e in UpstreamEngine::all() {
             assert!(!e.repo().is_empty());
             assert!(!e.primary_language().is_empty());
@@ -1292,11 +1233,11 @@ mod tests {
         assert!(spec2.is_some());
 
         // Override engine
-        let spec3 = find_or_create_adapter("qwen2.5-coder-1.5b", Some(UpstreamEngine::ModularMax));
+        let spec3 = find_or_create_adapter("qwen2.5-coder-1.5b", Some(UpstreamEngine::Vllm));
         assert!(spec3.is_some());
         let s3 = spec3.unwrap();
-        assert_eq!(s3.engine, UpstreamEngine::ModularMax);
-        assert!(s3.id.contains("max"));
+        assert_eq!(s3.engine, UpstreamEngine::Vllm);
+        assert!(s3.id.contains("vllm"));
 
         // Dynamic generation for model slug without explicit catalog entry
         let spec4 = find_or_create_adapter("llama-3.2-1b", Some(UpstreamEngine::LlamaCpp));

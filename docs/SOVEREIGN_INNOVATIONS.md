@@ -2,7 +2,7 @@
 
 ### Monorepo Blueprint of Compiled Native Crates, Invariant Gates, and Local Hardware Acceleration
 
-`aien-sovereign-core` is the foundational monorepo of the Sovereign AI Commons. Engineered in pure native compiled Rust and Mojo 1.1, it provides the operating system substrate for autonomous agents, local GPU inference, and global open stewardship on NVIDIA DGX Spark workstations and Grace Blackwell GB10 hardware.
+`aien-sovereign-core` is the foundational monorepo of the Sovereign AI Commons. Engineered in pure native compiled Rust with Omega GPU kernels, it provides the operating system substrate for autonomous agents, local GPU inference, and global open stewardship on NVIDIA DGX Spark workstations and Grace Blackwell GB10 hardware.
 
 ---
 
@@ -29,7 +29,6 @@ The workspace comprises native compiled crates, each dedicated to an isolated sy
 - **`crates/aien-cli`**: Sovereign command-line interface and system orchestrator.
 
 ### Hardware Acceleration and Model Serving
-- **`crates/spark-max-cabi` & `crates/spark-max-rs`**: Direct C-ABI foreign function bridge to Modular MAX, enabling low-latency model inference on Grace Blackwell GB10 without Python runtime dependencies.
 - **`crates/spark-adapters`**: Consumer model adapter pipeline enabling quantization, weight formatting, and hardware adaptation.
 - **`crates/spark-harvester`**: High-throughput reasoning trace extractor and dataset distillation engine.
 - **`crates/spark-mail-rs`**: Sovereign peer-to-peer messaging and notification subsystem.
@@ -43,7 +42,7 @@ Every crate and workflow within `aien-sovereign-core` adheres to four architectu
 1. **Zero Telemetry and Anti-Surveillance**:
    All crates are prohibited from calling external telemetry, surveillance, or analytics endpoints. Network activity is restricted strictly to user-configured endpoints and peer relays.
 2. **Pure Compiled Native Systems**:
-   All daemons, memory engines, gateways, and CLI tools must compile to native machine binaries (Rust and Mojo). Interpreted runtimes are banned from core services.
+   All daemons, memory engines, gateways, and CLI tools must compile to native machine binaries. Interpreted runtimes are banned from core services.
 3. **Hardware Secret Security (Zero Plaintext Disk Secrets)**:
    Credentials, API keys, and signing tokens never touch disk in plaintext. All secrets resolve dynamically in memory via the `SecretProvider` abstraction (hardware TPM vault `atlas-vault` on DGX Spark, or memory providers on commodity platforms) with automated stream redaction (`[REDACTED_BY_ATLAS_VAULT]`).
 4. **Sovereign Voice and Anti-Slop**:
@@ -56,7 +55,7 @@ Every crate and workflow within `aien-sovereign-core` adheres to four architectu
 Verified on NVIDIA Grace Blackwell GB10 (NVIDIA DGX Spark, Linux aarch64):
 - **Core Binary Build Time**: < 1.0s release compilation for `spark-inquisitor`.
 - **Memory Consumption**: Core background daemons operate under 25 MB resident memory each.
-- **Inference Concurrency**: Sustained local generation hitting 94% to 96% GPU utilization at 20.7 tokens per second on local Modular MAX endpoints.
+- **Inference Concurrency**: Sustained local generation hitting 94% to 96% GPU utilization at 20.7 tokens per second on local Modular MAX endpoints (2026-09 measurement; Modular MAX was removed on 2026-10-15).
 
 ---
 

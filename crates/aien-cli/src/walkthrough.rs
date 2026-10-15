@@ -134,7 +134,7 @@ pub fn render_walkthrough_tui() -> String {
         "[ JSpace Judge: 18082 ]".bold().yellow(),
         "[ Cortex Memory: 18080 ]".bold().magenta()
     ));
-    out.push_str("│   (Nemotron-3.5 30B BF16)        (Llama-3.2 1B CPU MAX)      (Postgres socket 15433) │\n");
+    out.push_str("│   (Nemotron-3.5 30B BF16)        (Llama-3.2 1B CPU)          (Postgres socket 15433) │\n");
     out.push_str(
         "│                                                                              │\n",
     );
@@ -281,7 +281,7 @@ graph TD
         CLI --> Stream["SSE Streaming Client"]
     end
 
-    subgraph Service Seats ["Modular MAX & Resident Services"]
+    subgraph Service Seats ["Resident Services"]
         Stream -->|Port 18006| Nemotron["Nemotron-3.5-Lightning-30B-BF16 (Primary Seat)"]
         Nesting -->|Port 18082| Judge["JSpace Truth Judge (Llama-3.2-1B CPU)"]
         Nesting -->|Port 18080| Cortex["Spark Cortex Memory (Postgres Socket 15433)"]
@@ -346,7 +346,7 @@ graph TD
 | Subsystem | Port / Path | State | Specifications |
 | :--- | :--- | :--- | :--- |
 | **GB10 GPU** | Hardware | {} | {} |
-| **Model Seat** | `127.0.0.1:18006` | Online | Nemotron-3.5-Lightning-30B-A3B BF16 (Modular MAX) |
+| **Model Seat** | `127.0.0.1:18006` | Online | Nemotron-3.5-Lightning-30B-A3B BF16 |
 | **JSpace Judge** | `127.0.0.1:18082` | Online | Llama-3.2-1B-Instruct on CPU |
 | **Cortex Memory**| `127.0.0.1:18080` | Online | Postgres Socket 15433 |
 | **Dream Engine** | `127.0.0.1:18085` | Online | Idle watcher & Hive Pulse Daemon |

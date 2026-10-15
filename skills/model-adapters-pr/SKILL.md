@@ -1,11 +1,11 @@
 ---
 name: model-adapters-pr
-description: Autonomous open-source model adapter and pull request pipeline for AIEN. Democratizes sovereign compute on consumer hardware by contributing high-efficiency native Rust and Mojo kernels to upstream engines (Candle, llama.cpp, Modular MAX, vLLM).
+description: Autonomous open-source model adapter and pull request pipeline for AIEN. Democratizes sovereign compute on consumer hardware by contributing high-efficiency native Rust kernels to upstream engines (Candle, llama.cpp, vLLM).
 ---
 
 # Autonomous Model Adapter & Pull Request Pipeline
 
-Use this skill whenever AIEN identifies, tests, packages, or submits open-source model adapters and performance PRs to upstream repositories on GitHub (such as `huggingface/candle`, `ggml-org/llama.cpp`, `modularml/max`, and `vllm-project/vllm`).
+Use this skill whenever AIEN identifies, tests, packages, or submits open-source model adapters and performance PRs to upstream repositories on GitHub (such as `huggingface/candle`, `ggml-org/llama.cpp`, and `vllm-project/vllm`).
 
 ## 1. Strategic Intent & Sovereign Mission
 
@@ -18,7 +18,7 @@ Use this skill whenever AIEN identifies, tests, packages, or submits open-source
    - `Gemma-2-2B` & `Gemma-2-9B`
    - `DeepSeek-R1-Distill-Qwen-1.5B`, `7B` & `DeepSeek-R1-Distill-Llama-8B`
 3. **High-Efficiency Output**:
-   Focus on native compiled systems (Rust and Mojo kernels) providing:
+   Focus on native compiled systems (Rust kernels) providing:
    - Block-paged KV-cache memory layouts preventing allocation spikes on low-RAM devices.
    - Circular buffer sliding-window attention layouts.
    - Fused INT4/FP8 dequantization GEMM kernels.
@@ -144,13 +144,6 @@ impl PagedKvCache {
         Ok(())
     }
 }
-```
-
-### Mojo Sliding-Window Attention for Modular MAX
-```mojo
-fn sliding_window_attention[window_size: Int](q: Tensor, k: Tensor, v: Tensor) -> Tensor:
-    # Compiled SIMD circular buffer attention for memory-constrained consumer devices
-    return attention_output
 ```
 
 ### vLLM Paged Memory Manager

@@ -14,9 +14,9 @@ use rayon::prelude::*;
 
 use crate::moe_plan::MoeBatchPlan;
 use crate::qwen3_moe::{
-    bf16_to_f32, f32_to_bf16, fp8_table, load_qwen3_fp8_moe_layer, reference_moe_forward,
-    reference_router_logits, shard_path, Qwen3MoeError, Qwen3MoeKernels, Qwen3MoeLayer, Shard,
-    FP8_BLOCK, QWEN3_A3B_HIDDEN, QWEN3_A3B_LAYERS,
+    bf16_to_f32, fp8_table, load_qwen3_fp8_moe_layer, reference_moe_forward,
+    reference_router_logits, shard_path, Qwen3MoeError, Qwen3MoeLayer, Shard, FP8_BLOCK,
+    QWEN3_A3B_HIDDEN, QWEN3_A3B_LAYERS,
 };
 use crate::tensor::{apply_rope, rmsnorm, sample_argmax, scaled_dot_product_attention_single};
 
@@ -306,34 +306,13 @@ pub(crate) fn rmsnorm_per_head(
     }
 }
 
-/// Runs one token through all 48 layers. Returns the final hidden state.
+/// Runs one token through all 48 layers on the CPU (bit-exact reference: attention, norms,
+/// RoPE and the routed experts). Returns the final hidden state.
 pub fn forward_token(
     weights: &Qwen3CoderWeights,
     token_id: u32,
     pos: usize,
     state: &mut Qwen3CoderState,
-) -> Vec<f32> {
-    forward_token_with_moe(weights, token_id, pos, state, &mut MoeBackend::Cpu)
-}
-
-/// Where the MoE sublayer runs. Cpu is the bit-exact reference; Device uses
-/// the proven `libaien_qwen3_moe.so` forward for the same layer.
-pub enum MoeBackend<'a> {
-    Cpu,
-    /// CPU reference with the device ABI's precision: MoE input and output
-    /// rounded to BF16. Separates BF16 activation rounding from kernel error.
-    CpuBf16Io,
-    Device(&'a Qwen3MoeKernels),
-}
-
-/// Full 48-layer forward with a selectable MoE backend. Attention, norms,
-/// RoPE, and sampling stay on CPU in Phase B1; only the experts move.
-pub fn forward_token_with_moe(
-    weights: &Qwen3CoderWeights,
-    token_id: u32,
-    pos: usize,
-    state: &mut Qwen3CoderState,
-    moe_backend: &mut MoeBackend,
 ) -> Vec<f32> {
     let h = QWEN3_CODER_HIDDEN;
     let qd = QWEN3_CODER_Q_DIM;
@@ -395,31 +374,9 @@ pub fn forward_token_with_moe(
         let mut post = vec![0.0f32; h];
         rmsnorm(&x, &attn.post_norm, eps, &mut post);
 
-        let moe_out = match moe_backend {
-            MoeBackend::Cpu => {
-                let router = reference_router_logits(moe, &post, 1);
-                let plan =
-                    MoeBatchPlan::qwen3_coder_a3b(&router, 1).expect("routing plan must build");
-                reference_moe_forward(moe, &post, &plan)
-            }
-            MoeBackend::CpuBf16Io => {
-                let post_r: Vec<f32> = post.iter().map(|&v| bf16_to_f32(f32_to_bf16(v))).collect();
-                let router = reference_router_logits(moe, &post_r, 1);
-                let plan =
-                    MoeBatchPlan::qwen3_coder_a3b(&router, 1).expect("routing plan must build");
-                reference_moe_forward(moe, &post_r, &plan)
-                    .into_iter()
-                    .map(|v| bf16_to_f32(f32_to_bf16(v)))
-                    .collect()
-            }
-            MoeBackend::Device(kernels) => {
-                let post_bf16: Vec<u16> = post.iter().map(|&v| f32_to_bf16(v)).collect();
-                kernels
-                    .forward(moe, &post_bf16, 1)
-                    .expect("device MoE forward must succeed")
-                    .output
-            }
-        };
+        let router = reference_router_logits(moe, &post, 1);
+        let plan = MoeBatchPlan::qwen3_coder_a3b(&router, 1).expect("routing plan must build");
+        let moe_out = reference_moe_forward(moe, &post, &plan);
         for i in 0..h {
             x[i] += moe_out[i];
         }

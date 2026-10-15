@@ -12,7 +12,7 @@ The AIEN Sovereign Core inference architecture executes real-model weights on NV
 |  | - Pure Rust tokenizers    |       | - Strict safetensors header parser      |  |
 |  | - TinyLlama chat template |       | - Shape, dtype, range loud validation   |  |
 |  | - Special token pinning   |       | - 201 TinyLlama tensor catalog          |  |
-|  | - UTF-8 encode / decode   |       | - Dual FP32 (oracle) & BF16 (Mojo)      |  |
+|  | - UTF-8 encode / decode   |       | - Dual FP32 (oracle) & BF16 (GPU)       |  |
 |  +-------------+-------------+       +--------------------+--------------------+  |
 |                |                                          |                       |
 |                v                                          v                       |
@@ -26,10 +26,10 @@ The AIEN Sovereign Core inference architecture executes real-model weights on NV
 |                |                                               |                  |
 |                v                                               v                  |
 |  +---------------------------+               +---------------------------------+  |
-|  |    ReferenceCpuBackend    |               |         MojoGb10Backend         |  |
+|  |    ReferenceCpuBackend    |               |        OmegaGb10Backend         |  |
 |  | - Pure Rust FP32 math     |               | - Unified memory zero-copy      |  |
-|  | - rotate_half RoPE        |               | - libloading C-ABI interface    |  |
-|  | - [out_dim, in_dim] GEMV  |               | - Compiled libaien_kernels.so   |  |
+|  | - rotate_half RoPE        |               | - Omega native kernels, no CUDA |  |
+|  | - [out_dim, in_dim] GEMV  |               | - AIEN-owned GPU driver path    |  |
 |  | - Correctness oracle      |               | - GB10 sm_121a hardware speed   |  |
 |  +---------------------------+               +---------------------------------+  |
 +-----------------------------------------------------------------------------------+
@@ -52,9 +52,9 @@ Every feature identified during survey is mapped directly to a milestone.
 | F10 | Multi-Stage Parity Test | 5-stage test asserting tokenizer, shape, activations, logits, decode | M4 | R4, Survey 2 |
 | F11 | Decoupled TensorBackend Trait | Narrow abstraction for RMSNorm, RoPE, GQA, SwiGLU, matmul, logits | M5 | R5, Survey 3 |
 | F12 | ReferenceCpuBackend | Complete FP32 reference implementation satisfying TensorBackend | M5 | R5, Survey 3 |
-| F13 | Mojo GB10 C-ABI Kernels | Compiled libaien_kernels.so with persistent unified memory buffers | M5 | R5, Survey 3 |
-| F14 | MojoGb10Backend Implementation | Rust bindings to libaien_kernels.so passing full parity suite | M5 | R5, Survey 3 |
-| F15 | Neutral Benchmark Driver | Standalone driver comparing AIEN and MAX on DGX Spark | M6 | R6, Survey 3 |
+| F13 | Mojo GB10 C-ABI Kernels | Removed 2026-10-15 with Modular MAX and Mojo; GPU path is OmegaGb10Backend | M5 | R5, Survey 3 |
+| F14 | MojoGb10Backend Implementation | Removed 2026-10-15 with Modular MAX and Mojo | M5 | R5, Survey 3 |
+| F15 | Neutral Benchmark Driver | Standalone AIEN benchmark driver on DGX Spark (the MAX engine was removed 2026-10-15; outside yardsticks live in aien-yardsticks) | M6 | R6, Survey 3 |
 | F16 | Concurrency Sweeps & Telemetry | C=1..64 sweeps, TTFT, ITL, throughput, RSS, power, energy metrics | M6 | R6, Survey 3 |
 | F17 | Hardware & Secrets Compliance | User drakestapleton on Spark, zero disk secrets (TPM atlas-vault) | M7 | R7, Survey 3 |
 | F18 | PR Lifecycle & Cortex Receipt | Branch feat/real-model-execution-tinyllama, squash merge, Cortex write | M7 | R7, Survey 3 |
@@ -66,8 +66,8 @@ Every feature identified during survey is mapped directly to a milestone.
 | M2 | Pure Rust Tokenizer and Chat Template | Integrate tokenizers crate in aien-inference-abi, implement TinyLlama chat template, special token pinning, encode/decode | none | DONE |
 | M3 | Reference Oracle Fixture Generation | Author scripts/generate_tinyllama_oracle.py on Spark, generate tinyllama_oracle.safetensors, export JSON manifest with SHA-256 | none | DONE |
 | M4 | Algorithmic Alignment and Parity Test Harness | Align RoPE split-half and matmul layout in tensor.rs, implement crates/aien-inference-abi/tests/tinyllama_parity.rs passing 5 stages | M1, M2, M3 | DONE |
-| M5 | Decoupled TensorBackend and Mojo GB10 Acceleration | Define TensorBackend trait, implement ReferenceCpuBackend and MojoGb10Backend (libaien_kernels.so) on Spark GB10 | M4 | DONE |
-| M6 | Neutral Apples-to-Apples Benchmark Driver | Build benchmarks/crates/bench_apples_to_apples, run AIEN and MAX on DGX Spark across C=1..64, record telemetry | M5 | DONE |
+| M5 | Decoupled TensorBackend and Mojo GB10 Acceleration | Define TensorBackend trait, implement ReferenceCpuBackend and MojoGb10Backend (libaien_kernels.so) on Spark GB10 | M4 | DONE (Mojo backend removed 2026-10-15) |
+| M6 | Neutral Apples-to-Apples Benchmark Driver | Build benchmarks/crates/bench_apples_to_apples, run AIEN and MAX on DGX Spark across C=1..64, record telemetry | M5 | DONE (MAX engine removed 2026-10-15) |
 | M7 | Invariant Verification, Autonomous PR Lifecycle, and Cortex Receipt | Verify zero disk secrets, sovereign voice, execute PR squash merge, commit receipt to Cortex memory | M6 | DONE |
 
 ## Interface Contracts
@@ -122,15 +122,6 @@ pub trait TensorBackend: Send + Sync {
 }
 ```
 
-### libaien_kernels.so C-ABI Signatures
-```c
-void aien_rmsnorm_bf16(const uint16_t* x, const uint16_t* weight, uint16_t* out, int size, float eps);
-void aien_rope_bf16(uint16_t* q, uint16_t* k, int pos, int head_dim, int num_q_heads, int num_kv_heads, float theta);
-void aien_gemv_bf16(const uint16_t* x, const uint16_t* weight, uint16_t* out, int out_dim, int in_dim);
-void aien_swiglu_bf16(const uint16_t* gate, const uint16_t* up, uint16_t* out, int size);
-void aien_gqa_bf16(const uint16_t* q, const uint16_t* k_cache, const uint16_t* v_cache, uint16_t* out, int seq_len, int num_q_heads, int num_kv_heads, int head_dim);
-```
-
 ### Numerical Parity Tolerances (tinyllama_parity.rs)
 ```rust
 pub const ABSOLUTE_TOLERANCE: f32 = 1e-4;
@@ -148,12 +139,9 @@ crates/aien-inference-abi/
 │   ├── tokenizer.rs                        (owns: M2 pure Rust tokenizers and chat templates)
 │   ├── tensor.rs                           (owns: M4 rotate_half RoPE and row-major matmul)
 │   ├── backend.rs                          (owns: M5 TensorBackend trait and ReferenceCpuBackend)
-│   ├── mojo_backend.rs                     (owns: M5 MojoGb10Backend and libloading bindings)
+│   ├── omega_backend.rs                    (owns: OmegaGb10Backend, the GB10 GPU path)
 │   ├── transformer_backend.rs              (owns: M4 decode position index, M5 backend dispatch)
 │   └── weights.rs                          (owns: legacy compatibility delegating to checkpoint.rs)
-├── mojo/
-│   ├── lib.mojo                            (owns: M5 Mojo kernels and C-ABI export symbols)
-│   └── build.sh                            (owns: M5 Mojo compilation with MODULAR_CACHE_DIR)
 ├── tests/
 │   ├── tinyllama_parity.rs                 (owns: M4 5-stage numerical parity test harness)
 │   └── fixtures/                           (owns: M3 compact oracle and tokenizer fixtures)
@@ -165,13 +153,14 @@ benchmarks/
     └── bench_apples_to_apples/
         ├── Cargo.toml                      (owns: M6 benchmark crate dependencies)
         └── src/
-            └── main.rs                     (owns: M6 AIEN and MAX driver and telemetry)
+            └── main.rs                     (owns: M6 AIEN driver and telemetry)
 ```
 
 ## Execution Constraints
 - Strict Spark-Only Execution: All test runs, compilations, model evaluations, and benchmarks must execute strictly on the NVIDIA DGX Spark workstation (`ssh drakestapleton@spark`). Zero test execution or heavy compilation is permitted on the local MacBook host.
 
 ## Acceptance Criteria Cross-Check
+The M5 Mojo and M6 MAX items below are the record of what shipped then; that code was removed on 2026-10-15.
 - [x] load_safetensors_checkpoint rejects missing keys with MissingTensor and shape mismatches with ShapeMismatch (M1).
 - [x] cargo test -p aien-inference-abi --test tinyllama_parity passes all 5 parity stages (M4).
 - [x] Multi-step greedy generation produces identical token IDs and recognizable English text (M4).

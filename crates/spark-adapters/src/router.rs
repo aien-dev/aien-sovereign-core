@@ -28,8 +28,8 @@ impl AdapterRouter {
             AdapterSpec {
                 id: "atlas-lightning-omni".to_string(),
                 name: "Atlas Nemotron-3.5 30B (Resident)".to_string(),
-                provider: ProviderType::LocalMax,
-                endpoint: ProviderType::LocalMax.default_endpoint().to_string(),
+                provider: ProviderType::LocalSeat,
+                endpoint: ProviderType::LocalSeat.default_endpoint().to_string(),
                 model_id: "atlas-lightning-omni".to_string(),
                 context_length: 32768,
                 is_available: true,
@@ -277,10 +277,10 @@ impl AdapterRouter {
             );
         }
 
-        // Default fallback to local MAX seat
+        // Default fallback to the local model seat
         (
-            ProviderType::LocalMax,
-            ProviderType::LocalMax.default_endpoint().to_string(),
+            ProviderType::LocalSeat,
+            ProviderType::LocalSeat.default_endpoint().to_string(),
             "atlas-lightning-omni".to_string(),
             None,
         )

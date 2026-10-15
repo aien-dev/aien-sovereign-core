@@ -52,7 +52,7 @@ pub async fn handle_slash_command(cmd: &str) -> bool {
             println!(
                 "  /skill [list|preview|search|full|optimize] CPU-filtered skill access
   /context7 resolve <library> [query] | /context7 query <library_id> <query>
-  context7-sync             Refresh Rust, Mojo, MAX, Tokio, Axum, and Serde docs into Cortex
+  context7-sync             Refresh Rust, Tokio, Axum, and Serde docs into Cortex
   /sandbox [init|status|test|promote|clean] Isolated Git worktree sandbox
   /browser [test|mentor|screenshot|eval] Headless Chrome CDP mirror (Rust, aien-browser-mirror)
   /subagents [list|view|run] Recursive contextual subagents hierarchy
@@ -501,7 +501,7 @@ pub async fn run_doctor() {
     match client.get("http://127.0.0.1:18082/v1/models").send().await {
         Ok(r) if r.status().is_success() => println!(
             "{}",
-            "✓ JSpace Truth Judge (Port 18082): Online (Llama-3.2-1B on Modular MAX CPU)".green()
+            "✓ JSpace Truth Judge (Port 18082): Online (Llama-3.2-1B on CPU)".green()
         ),
         _ => println!("{}", "⚠ JSpace Truth Judge (Port 18082): Offline".yellow()),
     }
@@ -2089,11 +2089,7 @@ pub async fn handle_status_command() {
         .unwrap_or_default();
 
     let checks = [
-        (
-            "Modular MAX Model Seat",
-            "http://127.0.0.1:18006/health",
-            18006,
-        ),
+        ("Model Seat", "http://127.0.0.1:18006/health", 18006),
         (
             "Cortex Memory Store",
             "http://127.0.0.1:18080/health",

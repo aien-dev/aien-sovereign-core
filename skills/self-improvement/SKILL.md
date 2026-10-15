@@ -59,7 +59,7 @@ aien --sandbox clean
 
 ## 2. Microsoft SkillOpt Self-Evolution Loop
 
-To optimize a sovereign skill against a held-out benchmark split using the local Modular MAX model seat on port 18006:
+To optimize a sovereign skill against a held-out benchmark split using the local model seat on port 18006:
 
 ```bash
 bash ~/atlas-skillopt-stage.sh
@@ -67,11 +67,11 @@ bash ~/atlas-skillopt-stage.sh
 
 ### Key Operational Invariants
 1. Endpoint and Model:
-   The local Modular MAX server on port 18006 registers as atlas-lightning-omni. Both OPTIMIZER_DEPLOYMENT and TARGET_DEPLOYMENT must be set to atlas-lightning-omni.
+   The local model seat on port 18006 registers as atlas-lightning-omni. Both OPTIMIZER_DEPLOYMENT and TARGET_DEPLOYMENT must be set to atlas-lightning-omni.
 2. Split Size Alignment:
    When running mini-batch iterations, pass --limit N matching train.train_size=N to satisfy dataloader size assertions.
 3. Worker Throttling:
-   Set env.workers to 2 and env.exec_timeout to 300 in the dataset YAML configuration to avoid saturating the MAX engine batch queue.
+   Set env.workers to 2 and env.exec_timeout to 300 in the dataset YAML configuration to avoid saturating the model seat batch queue.
 4. Output Artifacts:
    Produces best_skill.md and automatically deploys the winning patch to ~/skills/atlas-skillopt/SKILL.md.
 

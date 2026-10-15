@@ -41,7 +41,7 @@ Identity, memory, evidence
 - `aien-proof`, `aien-closure`, `aien-trace`, `aien-dual-observation`, `aien-replay`, `aien-campaign-verifier`, `crumbs`: test board, closure check, correlation trace, observation snapshot, transcript reader, campaign verifier, curriculum substrate.
 
 Services and tools
-- `spark-*` crates (cockpit, supervisor, debugger, harness, aegis, hive, dream, mail, discord hub, harvester, inquisitor, adapters, crumbs, max bridge) and `rad-id-sync`, `aien-switchboard`, `aien-drive`: supporting services and tools; see each crate's Cargo description. `spark-max-*` is the Modular MAX yardstick bridge, not part of any default build.
+- `spark-*` crates (cockpit, supervisor, debugger, harness, aegis, hive, dream, mail, discord hub, harvester, inquisitor, adapters, crumbs) and `rad-id-sync`, `aien-switchboard`, `aien-drive`: supporting services and tools; see each crate's Cargo description.
 - `tools/aien-verify`: independent verifier of the whole-system end-to-end run folders; standard library only. Tests: `tools/aien-verify/tests/run.sh` (run in CI).
 
 ## Where things are

@@ -5,7 +5,7 @@ description: Essential developer etiquette, communication norms, and contributio
 
 # Open-Source Developer Etiquette & Community Interaction Protocol
 
-Use this skill whenever creating pull requests, opening issues, responding to code reviews, commenting on discussions, or collaborating with maintainers in open-source repositories on GitHub (especially Modular, Rust, and systems projects).
+Use this skill whenever creating pull requests, opening issues, responding to code reviews, commenting on discussions, or collaborating with maintainers in open-source repositories on GitHub (especially Rust and systems projects).
 
 ## The Core Philosophy: Earn Trust Through Technical Excellence
 
@@ -43,8 +43,3 @@ In open-source software, respect and credibility are earned through clear code, 
    - Use conventional commit style (`feat:`, `fix:`, `refactor:`, `docs:`, `perf:`).
    - Keep commits atomic: one logical change per commit.
    - Rebase and squash extraneous "fix typo" commits before requesting final review if requested by repository contributing guidelines.
-
-## 2. Specific Guidelines for Modular (Mojo & MAX)
-
-- **Acknowledge Fast-Moving Interfaces**: The Mojo stdlib and MAX engine evolve rapidly between releases. When proposing patches or custom architectures, state the exact MAX version tested against (e.g. `Tested on MAX 26.5 with Grace Blackwell GB10`).
-- **Hardware Grounding**: Modular maintainers care deeply about kernel performance, SIMD vectorization, and memory layout. Frame improvements around throughput, cache efficiency, and reduced allocations.

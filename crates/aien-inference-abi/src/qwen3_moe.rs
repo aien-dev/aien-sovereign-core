@@ -2,7 +2,7 @@
 //!
 //! Three pieces share one tensor contract:
 //! - sharded FP8 checkpoint ingest into a [`ModelCapsule`] (one layer, no FP32 copy),
-//! - the C ABI binding to `libaien_qwen3_moe.so` (Mojo, built by `mojo/qwen3_moe/build.sh`),
+//! - the batch routing plan contract shared with the Omega GPU path,
 //! - an FP32 CPU oracle that dequantizes only the experts a token selected.
 //!
 //! Capsule tensors, all row-major:
@@ -17,14 +17,13 @@ use std::os::unix::fs::FileExt;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
-use libloading::{Library, Symbol};
 use rayon::prelude::*;
 
 use crate::capsule::{
     capsule_digest, row_major_strides, source_digest, CapsuleTensor, ModelCapsule,
     QuantizationDescriptor, TensorLayout, WeightDType,
 };
-use crate::moe_plan::{MoeBatchPlan, MoePlanError, QWEN3_CODER_A3B_EXPERTS, QWEN3_CODER_A3B_TOP_K};
+use crate::moe_plan::{MoeBatchPlan, MoePlanError, QWEN3_CODER_A3B_EXPERTS};
 
 pub const QWEN3_A3B_HIDDEN: usize = 2048;
 pub const QWEN3_A3B_INTERMEDIATE: usize = 768;
@@ -32,7 +31,6 @@ pub const QWEN3_A3B_LAYERS: usize = 48;
 const BLOCK: usize = 128;
 pub(crate) const FP8_BLOCK: usize = BLOCK;
 const EXPERTS: usize = QWEN3_CODER_A3B_EXPERTS;
-const TOP_K: usize = QWEN3_CODER_A3B_TOP_K;
 /// Largest safetensors JSON header accepted; real Qwen shards use about 2 MB.
 const MAX_HEADER_BYTES: u64 = 256 << 20;
 
@@ -47,9 +45,6 @@ pub enum Qwen3MoeError {
     Io(String),
     Index(String),
     Contract(String),
-    Library(String),
-    /// Nonzero status from the Mojo library: 1 invalid shape, 2 non-finite router logits, 3 device error.
-    Kernel(i32),
     Plan(MoePlanError),
 }
 
@@ -59,10 +54,6 @@ impl fmt::Display for Qwen3MoeError {
             Self::Io(detail) => write!(f, "checkpoint I/O: {detail}"),
             Self::Index(detail) => write!(f, "checkpoint index: {detail}"),
             Self::Contract(detail) => write!(f, "tensor contract: {detail}"),
-            Self::Library(detail) => write!(f, "Qwen3 MoE kernel library: {detail}"),
-            Self::Kernel(1) => write!(f, "Qwen3 MoE kernel rejected the shape"),
-            Self::Kernel(2) => write!(f, "Qwen3 MoE router saw non-finite logits"),
-            Self::Kernel(code) => write!(f, "Qwen3 MoE kernel device error (status {code})"),
             Self::Plan(error) => write!(f, "routing plan: {error}"),
         }
     }
@@ -717,328 +708,6 @@ pub fn parity_stats(actual: &[f32], expected: &[f32]) -> ParityStats {
         max_abs_expected,
         non_finite,
     }
-}
-
-// ---------------------------------------------------------------------------
-// Mojo library binding.
-// ---------------------------------------------------------------------------
-
-type ForwardFn = unsafe extern "C" fn(
-    i32,
-    i32,
-    i32,
-    *const u16,
-    *const u16,
-    *const u8,
-    *const u16,
-    *const u8,
-    *const u16,
-    *mut u16,
-    *mut f32,
-    *mut i32,
-    *mut f32,
-    *mut u32,
-    *mut u32,
-) -> i32;
-type BenchmarkFn = unsafe extern "C" fn(
-    i32,
-    i32,
-    i32,
-    *const u16,
-    *const u16,
-    *const u8,
-    *const u16,
-    *const u8,
-    *const u16,
-    i32,
-    i32,
-    *mut u64,
-) -> i32;
-type RouteFn =
-    unsafe extern "C" fn(i32, *const f32, *mut i32, *mut f32, *mut u32, *mut u32, *mut u32) -> i32;
-type GemmFn = unsafe extern "C" fn(
-    i32,
-    i32,
-    i32,
-    i32,
-    i32,
-    *const u8,
-    *const f32,
-    *const u8,
-    *const u16,
-    *const u32,
-    *const i32,
-    *mut f32,
-) -> i32;
-
-/// Device outputs of one layer call. Routing metadata is returned for parity checks.
-#[derive(Debug, Clone)]
-pub struct Qwen3MoeDeviceOutput {
-    pub output: Vec<f32>,
-    pub logits: Vec<f32>,
-    pub expert_ids: Vec<i32>,
-    pub weights: Vec<f32>,
-    pub offsets: Vec<u32>,
-    pub order: Vec<u32>,
-}
-
-/// Device routing of caller-supplied logits.
-#[derive(Debug, Clone)]
-pub struct Qwen3DeviceRouting {
-    pub expert_ids: Vec<i32>,
-    pub weights: Vec<f32>,
-    pub offsets: Vec<u32>,
-    pub order: Vec<u32>,
-    pub restore: Vec<u32>,
-}
-
-pub struct Qwen3MoeKernels {
-    _lib: Library,
-    forward: ForwardFn,
-    benchmark: BenchmarkFn,
-    route: RouteFn,
-    gemm: GemmFn,
-    pub path: PathBuf,
-}
-
-fn status(code: i32) -> Result<(), Qwen3MoeError> {
-    if code == 0 {
-        Ok(())
-    } else {
-        Err(Qwen3MoeError::Kernel(code))
-    }
-}
-
-fn dim(value: usize, what: &str) -> Result<i32, Qwen3MoeError> {
-    i32::try_from(value).map_err(|_| Qwen3MoeError::Contract(format!("{what} {value} exceeds i32")))
-}
-
-impl Qwen3MoeKernels {
-    /// `AIEN_QWEN3_MOE_LIB`, else the crate's `mojo/qwen3_moe/libaien_qwen3_moe.so`.
-    pub fn default_path() -> PathBuf {
-        std::env::var_os("AIEN_QWEN3_MOE_LIB")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| {
-                Path::new(env!("CARGO_MANIFEST_DIR")).join("mojo/qwen3_moe/libaien_qwen3_moe.so")
-            })
-    }
-
-    pub fn load(path: &Path) -> Result<Self, Qwen3MoeError> {
-        let err = |e: libloading::Error| Qwen3MoeError::Library(format!("{}: {e}", path.display()));
-        // SAFETY: the library is built from mojo/qwen3_moe and exports these C signatures.
-        unsafe {
-            let lib = Library::new(path).map_err(err)?;
-            let forward = *lib
-                .get::<ForwardFn>(b"aien_qwen3_moe_forward\0")
-                .map_err(err)?;
-            let benchmark = *lib
-                .get::<BenchmarkFn>(b"aien_qwen3_moe_benchmark\0")
-                .map_err(err)?;
-            let route = *lib
-                .get::<RouteFn>(b"aien_qwen3_route_top8\0")
-                .map_err(err)?;
-            let gemm: Symbol<GemmFn> = lib.get(b"aien_qwen3_grouped_fp8_gemm\0").map_err(err)?;
-            let gemm = *gemm;
-            Ok(Self {
-                _lib: lib,
-                forward,
-                benchmark,
-                route,
-                gemm,
-                path: path.to_path_buf(),
-            })
-        }
-    }
-
-    /// Runs the full layer on `tokens` BF16 input rows ([tokens, H] raw bits).
-    pub fn forward(
-        &self,
-        layer: &Qwen3MoeLayer,
-        x_bf16: &[u16],
-        tokens: usize,
-    ) -> Result<Qwen3MoeDeviceOutput, Qwen3MoeError> {
-        let h = layer.hidden;
-        if tokens == 0 || x_bf16.len() != tokens * h {
-            return Err(Qwen3MoeError::Contract(format!(
-                "input must be [{tokens}, {h}]"
-            )));
-        }
-        let mut output = vec![0u16; tokens * h];
-        let mut logits = vec![0.0f32; tokens * EXPERTS];
-        let mut expert_ids = vec![0i32; tokens * TOP_K];
-        let mut weights = vec![0.0f32; tokens * TOP_K];
-        let mut offsets = vec![0u32; EXPERTS + 1];
-        let mut order = vec![0u32; tokens * TOP_K];
-        // SAFETY: every buffer is sized for the shape passed alongside it.
-        status(unsafe {
-            (self.forward)(
-                dim(tokens, "tokens")?,
-                dim(h, "hidden")?,
-                dim(layer.intermediate, "intermediate")?,
-                x_bf16.as_ptr(),
-                layer.router_bf16().as_ptr(),
-                layer.gate_up_fp8().as_ptr(),
-                layer.gate_up_scale_inv_bf16().as_ptr(),
-                layer.down_fp8().as_ptr(),
-                layer.down_scale_inv_bf16().as_ptr(),
-                output.as_mut_ptr(),
-                logits.as_mut_ptr(),
-                expert_ids.as_mut_ptr(),
-                weights.as_mut_ptr(),
-                offsets.as_mut_ptr(),
-                order.as_mut_ptr(),
-            )
-        })?;
-        Ok(Qwen3MoeDeviceOutput {
-            output: output.into_iter().map(bf16_to_f32).collect(),
-            logits,
-            expert_ids,
-            weights,
-            offsets,
-            order,
-        })
-    }
-
-    /// Per-sample wall time in nanoseconds for `repeats` resident-weight layer calls.
-    pub fn benchmark(
-        &self,
-        layer: &Qwen3MoeLayer,
-        x_bf16: &[u16],
-        tokens: usize,
-        warmup: usize,
-        repeats: usize,
-    ) -> Result<Vec<u64>, Qwen3MoeError> {
-        if tokens == 0 || x_bf16.len() != tokens * layer.hidden || repeats == 0 {
-            return Err(Qwen3MoeError::Contract("benchmark shape".to_string()));
-        }
-        let mut samples = vec![0u64; repeats];
-        // SAFETY: as in `forward`; `samples` holds `repeats` entries.
-        status(unsafe {
-            (self.benchmark)(
-                dim(tokens, "tokens")?,
-                dim(layer.hidden, "hidden")?,
-                dim(layer.intermediate, "intermediate")?,
-                x_bf16.as_ptr(),
-                layer.router_bf16().as_ptr(),
-                layer.gate_up_fp8().as_ptr(),
-                layer.gate_up_scale_inv_bf16().as_ptr(),
-                layer.down_fp8().as_ptr(),
-                layer.down_scale_inv_bf16().as_ptr(),
-                dim(warmup, "warmup")?,
-                dim(repeats, "repeats")?,
-                samples.as_mut_ptr(),
-            )
-        })?;
-        Ok(samples)
-    }
-
-    /// Routes caller-supplied logits [tokens, 128] with the device router and grouping.
-    pub fn route(
-        &self,
-        logits: &[f32],
-        tokens: usize,
-    ) -> Result<Qwen3DeviceRouting, Qwen3MoeError> {
-        if tokens == 0 || logits.len() != tokens * EXPERTS {
-            return Err(Qwen3MoeError::Contract(format!(
-                "logits must be [{tokens}, {EXPERTS}]"
-            )));
-        }
-        let n = tokens * TOP_K;
-        let mut routing = Qwen3DeviceRouting {
-            expert_ids: vec![0; n],
-            weights: vec![0.0; n],
-            offsets: vec![0; EXPERTS + 1],
-            order: vec![0; n],
-            restore: vec![0; n],
-        };
-        // SAFETY: buffers sized for `tokens`.
-        status(unsafe {
-            (self.route)(
-                dim(tokens, "tokens")?,
-                logits.as_ptr(),
-                routing.expert_ids.as_mut_ptr(),
-                routing.weights.as_mut_ptr(),
-                routing.offsets.as_mut_ptr(),
-                routing.order.as_mut_ptr(),
-                routing.restore.as_mut_ptr(),
-            )
-        })?;
-        Ok(routing)
-    }
-
-    /// Standalone grouped FP8 GEMM. Weights [experts, out, in], offsets [groups + 1].
-    #[allow(clippy::too_many_arguments)]
-    pub fn grouped_fp8_gemm(
-        &self,
-        rows: usize,
-        experts: usize,
-        out_channels: usize,
-        in_channels: usize,
-        activations: &[u8],
-        activation_scales: &[f32],
-        weights: &[u8],
-        weight_scales_bf16: &[u16],
-        offsets: &[u32],
-        expert_ids: &[i32],
-    ) -> Result<Vec<f32>, Qwen3MoeError> {
-        let groups = expert_ids.len();
-        if activations.len() != rows * in_channels
-            || activation_scales.len() != rows * (in_channels / BLOCK)
-            || weights.len() != experts * out_channels * in_channels
-            || weight_scales_bf16.len() != experts * (out_channels / BLOCK) * (in_channels / BLOCK)
-            || offsets.len() != groups + 1
-        {
-            return Err(Qwen3MoeError::Contract(
-                "grouped FP8 GEMM buffer sizes".to_string(),
-            ));
-        }
-        let mut result = vec![0.0f32; rows * out_channels];
-        // SAFETY: sizes validated above; the library validates offsets and expert IDs.
-        status(unsafe {
-            (self.gemm)(
-                dim(rows, "rows")?,
-                dim(groups, "groups")?,
-                dim(experts, "experts")?,
-                dim(out_channels, "out_channels")?,
-                dim(in_channels, "in_channels")?,
-                activations.as_ptr(),
-                activation_scales.as_ptr(),
-                weights.as_ptr(),
-                weight_scales_bf16.as_ptr(),
-                offsets.as_ptr(),
-                expert_ids.as_ptr(),
-                result.as_mut_ptr(),
-            )
-        })?;
-        Ok(result)
-    }
-}
-
-/// Deterministic N(0, sigma) inputs rounded to BF16: (bits, exact f32 values).
-pub fn seeded_bf16_input(
-    seed: u64,
-    tokens: usize,
-    hidden: usize,
-    sigma: f32,
-) -> (Vec<u16>, Vec<f32>) {
-    let mut state = seed;
-    let mut next = move || {
-        // splitmix64
-        state = state.wrapping_add(0x9e37_79b9_7f4a_7c15);
-        let mut z = state;
-        z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
-        z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
-        ((z ^ (z >> 31)) >> 11) as f64 / (1u64 << 53) as f64
-    };
-    let bits: Vec<u16> = (0..tokens * hidden)
-        .map(|_| {
-            let (u1, u2) = (next().max(1e-12), next());
-            let normal = (-2.0 * u1.ln()).sqrt() * (2.0 * std::f64::consts::PI * u2).cos();
-            f32_to_bf16(normal as f32 * sigma)
-        })
-        .collect();
-    let values = bits.iter().map(|&b| bf16_to_f32(b)).collect();
-    (bits, values)
 }
 
 #[cfg(test)]

@@ -14,7 +14,7 @@ git commit -s -m "feat(subsystem): descriptive commit message"
 
 ## Licensing of Contributions
 
-- All software code, including dynamic FFI bridges (`spark-max-cabi`, `spark-max-rs`, `aien-inference-abi`), is contributed under the [GNU Affero General Public License v3.0 or later](LICENSE) (`AGPL-3.0-or-later`).
+- All software code, including the inference ABI (`aien-inference-abi`), is contributed under the [GNU Affero General Public License v3.0 or later](LICENSE) (`AGPL-3.0-or-later`).
 - Architectural specifications and documentation are contributed under `AGPL-3.0-or-later`.
 - Benchmark datasets and telemetry logs are dedicated to the public domain under [CC0-1.0](LICENSES/CC0-1.0.txt).
 - Model weights and curated training datasets follow classifications in [ARTIFACT_LICENSING.md](ARTIFACT_LICENSING.md).

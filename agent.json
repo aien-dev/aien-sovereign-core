@@ -2,7 +2,7 @@
   "$schema": "https://aien.org/schemas/agent-v1.json",
   "name": "aien-sovereign-core",
   "version": "0.1.0",
-  "description": "High-performance native agent runtime, ultra-low-latency Axum web gateway, and custom Modular MAX model architectures for NVIDIA DGX Spark GB10",
+  "description": "High-performance native agent runtime, ultra-low-latency Axum web gateway, and the AIEN native inference runtime for NVIDIA DGX Spark GB10",
   "repository": "https://github.com/aien-dev/aien-sovereign-core",
   "license": "Sovereign-Defense-Covenant-1.0.0",
   "architecture": [
@@ -10,9 +10,7 @@
     "aarch64-grace-blackwell"
   ],
   "runtime": {
-    "rust": "1.85+",
-    "mojo": "26.7+",
-    "max": "26.7+"
+    "rust": "1.85+"
   },
   "commands": {
     "build": "cargo build --release",

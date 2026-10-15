@@ -12,8 +12,8 @@ The suite provides 140 deterministic test cases across 4 tiers covering all acce
 |------|----------|------------|-------------|
 | Tier 1 | Feature Coverage | 65 | 5 tests per feature across 13 core features (vault resolution, prompt sanitizer, cortex auth, resident bounds, crawler flags, cli workbench, key verification, axum routes, cortex storage, dataset emission, verification gates, test harness, git parity) |
 | Tier 2 | Boundary and Corner Cases | 65 | Negative, boundary, and stress tests (empty inputs, missing secrets, invalid CLI flags, malformed JSON, delimiter parsing, sycophancy detection, unslop penalties, zero/negative DPO deltas, duplicate rejection) |
-| Tier 3 | Cross-Feature Combinations | 5 | Multi-subsystem interactions: Sanitizer + Router + MAX dispatch, Verifier + Consensus + Cortex gate, Crawler + Curriculum + SFT/DPO dataset emission, Vault token + Cortex HTTP dispatch, Verifier unslop + rustc + SFT emission |
-| Tier 4 | Real-World Scenarios | 5 | Live execution on DGX Spark: spark-distill verify-keys catalog audit, live Modular MAX inference roundtrip on port 18006, systems curriculum batch generation, live Cortex daemon handshake on port 18080, end-to-end SFT/DPO filesystem dataset emission |
+| Tier 3 | Cross-Feature Combinations | 5 | Multi-subsystem interactions: Sanitizer + Router + local seat dispatch, Verifier + Consensus + Cortex gate, Crawler + Curriculum + SFT/DPO dataset emission, Vault token + Cortex HTTP dispatch, Verifier unslop + rustc + SFT emission |
+| Tier 4 | Real-World Scenarios | 5 | Live execution on DGX Spark: spark-distill verify-keys catalog audit, live model seat inference roundtrip on port 18006, systems curriculum batch generation, live Cortex daemon handshake on port 18080, end-to-end SFT/DPO filesystem dataset emission |
 | **Total** | **All Tiers** | **140** | **Complete opaque-box distillation workshop verification** |
 
 ## 3. Baseline Execution Results on NVIDIA DGX Spark

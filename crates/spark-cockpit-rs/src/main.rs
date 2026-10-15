@@ -30,7 +30,7 @@ use std::time::{Duration, Instant};
 use tokio::process::Command;
 use tower_http::services::ServeDir;
 
-const MAX_SEAT_URL: &str = "http://127.0.0.1:18006";
+const SEAT_URL: &str = "http://127.0.0.1:18006";
 const CORTEX_URL: &str = "http://127.0.0.1:18080";
 const CONDUIT_URL: &str = "http://127.0.0.1:6167";
 const WORKSHOP_HTML: &str = include_str!("../static/workshop.html");
@@ -588,11 +588,11 @@ struct ModelSwapPayload {
 }
 
 async fn handle_get_models(State(state): State<AppState>) -> Json<Value> {
-    // 1. Query local MAX seat models
+    // 1. Query local model seat models
     let mut active_models = Vec::new();
     if let Ok(resp) = state
         .client
-        .get(format!("{}/v1/models", MAX_SEAT_URL))
+        .get(format!("{}/v1/models", SEAT_URL))
         .send()
         .await
         && let Ok(val) = resp.json::<Value>().await
@@ -603,7 +603,7 @@ async fn handle_get_models(State(state): State<AppState>) -> Json<Value> {
                 active_models.push(json!({
                     "id": id,
                     "active": true,
-                    "backend": "Modular MAX (GB10 Native)",
+                    "backend": "Local model seat (GB10)",
                     "status": "ONLINE"
                 }));
             }
@@ -614,17 +614,17 @@ async fn handle_get_models(State(state): State<AppState>) -> Json<Value> {
         active_models.push(json!({
             "id": "atlas-lightning-omni",
             "active": true,
-            "backend": "Modular MAX (Port 18006)",
+            "backend": "Local model seat (port 18006)",
             "status": "ONLINE"
         }));
     }
 
     // 2. Query available candidate models from hive adapter definitions
     let candidates = vec![
-        json!({ "id": "nvidia/Nemotron-3.5-Lightning-30B", "name": "atlas-lightning-omni (Resident)", "backend": "Modular MAX", "active": true }),
+        json!({ "id": "nvidia/Nemotron-3.5-Lightning-30B", "name": "atlas-lightning-omni (Resident)", "backend": "Local model seat", "active": true }),
         json!({ "id": "Qwen/Qwen2.5-Coder-7B-Instruct", "name": "Qwen 2.5 Coder 7B", "backend": "vLLM AWQ", "active": false }),
-        json!({ "id": "deepseek-ai/DeepSeek-R1-Distill-Qwen-7B", "name": "DeepSeek R1 Distill 7B", "backend": "Modular MAX", "active": false }),
-        json!({ "id": "meta-llama/Llama-3.2-3B-Instruct", "name": "Llama 3.2 3B", "backend": "Candle / MAX", "active": false }),
+        json!({ "id": "deepseek-ai/DeepSeek-R1-Distill-Qwen-7B", "name": "DeepSeek R1 Distill 7B", "backend": "Local model seat", "active": false }),
+        json!({ "id": "meta-llama/Llama-3.2-3B-Instruct", "name": "Llama 3.2 3B", "backend": "Candle", "active": false }),
     ];
 
     Json(json!({
@@ -1512,7 +1512,7 @@ fn get_services_snapshot() -> Vec<ServiceStatusInfo> {
     let defs: Vec<ServiceDef> = vec![
         (
             "max-server",
-            "Modular MAX Engine (outside yardstick, observe/stop only)",
+            "Modular MAX (removed 2026-10-15; observe/stop only, never launched)",
             Some(18006),
             Box::new(|p: &ProcessInfo| {
                 p.cmdline.contains("max serve") && p.cmdline.contains("18006")
@@ -1686,10 +1686,9 @@ async fn handle_services_action(
             }
         }
         "max" | "max-server" => {
-            // Modular MAX is an outside comparison tool, not part of AIEN's trusted
-            // execution path (issue #369; aien-yardsticks HISTORICAL-PYTHON.md). The
-            // cockpit observes a running instance and can stop it, but never launches
-            // it: the old launcher loaded the historical yardstick Python adapter.
+            // Modular MAX was removed from AIEN on 2026-10-15 (issue #369 first refused
+            // its launcher, which loaded historical yardstick Python). The cockpit can
+            // observe and stop a stray instance, but never launches it.
             if action == "start" || action == "restart" {
                 return Err((
                     StatusCode::CONFLICT,
@@ -1697,9 +1696,8 @@ async fn handle_services_action(
                         "status": "error",
                         "service": "max-server",
                         "action": action,
-                        "error": "max-server is an outside comparison tool (Modular MAX); \
-                                  the cockpit does not launch it. Start it by hand outside \
-                                  AIEN if a yardstick comparison is wanted."
+                        "error": "max-server (Modular MAX) was removed from AIEN on 2026-10-15; \
+                                  the cockpit does not launch it."
                     })),
                 ));
             }
@@ -1952,7 +1950,7 @@ async fn handle_pulse(State(state): State<AppState>) -> Json<Value> {
 
     let model_ok = state
         .client
-        .get(format!("{}/health", MAX_SEAT_URL))
+        .get(format!("{}/health", SEAT_URL))
         .timeout(Duration::from_millis(500))
         .send()
         .await
@@ -2453,7 +2451,7 @@ async fn handle_chat_stream(
     let patterns = state.redactor_patterns.clone();
     let upstream_resp = match state
         .client
-        .post(format!("{}/v1/chat/completions", MAX_SEAT_URL))
+        .post(format!("{}/v1/chat/completions", SEAT_URL))
         .json(&payload)
         .send()
         .await
@@ -2462,7 +2460,7 @@ async fn handle_chat_stream(
         Err(e) => {
             return (
                 StatusCode::BAD_GATEWAY,
-                Json(json!({"error": format!("MAX model seat error: {}", e)})),
+                Json(json!({"error": format!("Model seat error: {}", e)})),
             )
                 .into_response();
         }
@@ -2978,10 +2976,10 @@ async fn handle_get_operator() -> Json<Value> {
             "sign_commits": true
         },
         "engine": {
-            "mode": "max",
+            "mode": "seat",
             "api_base_url": "http://127.0.0.1:18006/v1",
             "model_id": "nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16",
-            "max_port": 18006,
+            "seat_port": 18006,
             "context_window": 32768,
             "temperature": 0.7
         }
@@ -3076,7 +3074,7 @@ async fn handle_engine_status(State(state): State<AppState>) -> Json<Value> {
     let start = Instant::now();
     let health_res = state
         .client
-        .get(format!("{}/health", MAX_SEAT_URL))
+        .get(format!("{}/health", SEAT_URL))
         .timeout(Duration::from_millis(500))
         .send()
         .await;
@@ -3087,7 +3085,7 @@ async fn handle_engine_status(State(state): State<AppState>) -> Json<Value> {
     Json(json!({
         "status": if is_online { "online" } else { "offline" },
         "latency_ms": latency_ms,
-        "active_engine": "MAX Native Engine",
+        "active_engine": "Local model seat",
         "active_model": "nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16",
         "device": "Grace Blackwell GB10 (Dual GPU)",
         "port": 18006,
@@ -3636,7 +3634,7 @@ mod tests {
         let status_str = status["status"].as_str().unwrap();
         assert!(status_str == "online" || status_str == "offline");
         assert!(status["latency_ms"].as_u64().is_some());
-        assert_eq!(status["active_engine"], "MAX Native Engine");
+        assert_eq!(status["active_engine"], "Local model seat");
         assert_eq!(
             status["active_model"],
             "nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16"
@@ -3788,8 +3786,8 @@ mod tests {
         assert!(err["error"].as_str().unwrap().contains("Invalid action"));
     }
 
-    /// Issue #369: the cockpit must never launch the outside Modular MAX server,
-    /// whose launcher depended on historical yardstick Python. Start and restart
+    /// Issue #369: the cockpit must never launch the Modular MAX server (removed from
+    /// AIEN on 2026-10-15; its launcher depended on historical yardstick Python). Start and restart
     /// are refused loudly instead of spawning anything.
     #[tokio::test]
     async fn test_cockpit_services_action_max_server_never_launched() {

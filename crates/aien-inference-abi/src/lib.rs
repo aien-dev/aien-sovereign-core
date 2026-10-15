@@ -12,7 +12,6 @@ pub mod checkpoint;
 pub mod gb10_serving;
 pub mod model_dir;
 pub mod moe_plan;
-pub mod mojo_backend;
 pub mod native_ops;
 pub mod omega_backend;
 pub mod qwen3_coder;
@@ -21,7 +20,6 @@ pub mod qwen3_moe;
 pub mod qwen3_moe_omega;
 pub mod qwen3_moe_omega_dattn;
 pub mod qwen3_moe_omega_prefill;
-pub mod qwen3_serve;
 pub mod resident;
 pub mod strict;
 pub mod tensor;
@@ -46,7 +44,6 @@ pub use capsule::*;
 pub use checkpoint::*;
 pub use model_dir::{load_model_config, model_config_from_hf_json, model_id_for_dir};
 pub use moe_plan::*;
-pub use mojo_backend::*;
 pub use omega_backend::{
     gb10_qwen3_enabled, gb10_qwen3_enabled_from, gb10_qwen3_enabled_from_os,
     omega_backend_selected, omega_model_refusal, omega_model_refusal_with,
@@ -56,7 +53,6 @@ pub use omega_backend::{
 };
 pub use qwen3_coder::*;
 pub use qwen3_moe::*;
-pub use qwen3_serve::*;
 pub use resident::*;
 pub use tensor::*;
 pub use tensor_abi::*;
@@ -112,74 +108,6 @@ impl AienInferenceBackend for MockInferenceBackend {
         }
 
         let elapsed = t0.elapsed().as_micros() as u64 + self.simulated_step_latency_us;
-        let metrics = StepMetrics {
-            prefill_tokens_processed: prefill_tokens,
-            decode_tokens_emitted: batch.decode_requests.len() + batch.prefill_requests.len(),
-            step_latency_us: elapsed,
-            active_kv_blocks: batch.block_tables.values().map(|v| v.len()).sum(),
-        };
-
-        Ok((outputs, metrics))
-    }
-}
-
-/// Live Modular MAX Engine inference backend interfacing over high-speed local HTTP/2
-pub struct MaxServingBackend {
-    pub endpoint_url: String,
-    pub model_name: String,
-    pub client: reqwest::Client,
-    pub config: ModelConfig,
-}
-
-impl MaxServingBackend {
-    pub fn new(endpoint_url: String, model_name: String) -> Self {
-        Self {
-            endpoint_url,
-            model_name,
-            client: reqwest::Client::builder()
-                .tcp_nodelay(true)
-                .pool_max_idle_per_host(32)
-                .build()
-                .unwrap_or_default(),
-            config: ModelConfig::default(),
-        }
-    }
-}
-
-#[async_trait]
-impl AienInferenceBackend for MaxServingBackend {
-    async fn load_model(&mut self, config: &ModelConfig) -> Result<(), String> {
-        self.config = config.clone();
-        Ok(())
-    }
-
-    async fn execute_step(
-        &mut self,
-        batch: &ScheduledBatch,
-    ) -> Result<(Vec<DecodeOutput>, StepMetrics), String> {
-        let t0 = std::time::Instant::now();
-        let mut outputs = Vec::new();
-        let mut prefill_tokens = 0;
-
-        for req in &batch.prefill_requests {
-            prefill_tokens += req.prompt_tokens.len();
-            // Synthetic token sample for batch step simulation or HTTP call
-            outputs.push(DecodeOutput::Token {
-                request_id: req.request_id,
-                token_id: 151643 + (batch.step_id % 100) as u32,
-                logprob: Some(-0.03),
-            });
-        }
-
-        for &req_id in &batch.decode_requests {
-            outputs.push(DecodeOutput::Token {
-                request_id: req_id,
-                token_id: 151643 + (batch.step_id % 100) as u32,
-                logprob: Some(-0.01),
-            });
-        }
-
-        let elapsed = t0.elapsed().as_micros() as u64;
         let metrics = StepMetrics {
             prefill_tokens_processed: prefill_tokens,
             decode_tokens_emitted: batch.decode_requests.len() + batch.prefill_requests.len(),
@@ -540,70 +468,6 @@ impl AienInferenceBackend for BlackwellInferenceBackend {
     }
 }
 
-/// Mojo GB10 Hardware Acceleration backend.
-/// Executes in-process binding to compiled libaien_kernels.so shared library
-/// with persistent unified memory buffer management.
-pub struct MojoInferenceBackend {
-    pub inner: EmbeddedInferenceBackend,
-}
-
-impl MojoInferenceBackend {
-    pub fn new(weights: TransformerWeights, tokenizer: Option<TinyLlamaTokenizer>) -> Self {
-        let tensor_backend = std::sync::Arc::new(MojoGb10Backend::new());
-        let backend = NativeTransformerBackend::with_backend(weights, tensor_backend);
-        Self {
-            inner: EmbeddedInferenceBackend::new(backend, tokenizer),
-        }
-    }
-
-    pub fn with_reference_weights(config: &ModelConfig) -> Self {
-        let tensor_backend = std::sync::Arc::new(MojoGb10Backend::new());
-        let mut backend = NativeTransformerBackend::with_reference_weights(config);
-        backend.tensor_backend = tensor_backend;
-        Self {
-            inner: EmbeddedInferenceBackend::new(backend, None),
-        }
-    }
-
-    pub fn load_checkpoint<P: AsRef<std::path::Path>>(
-        checkpoint_path: P,
-        tokenizer_path: Option<P>,
-        config: &ModelConfig,
-    ) -> Result<Self, String> {
-        let tensor_backend = std::sync::Arc::new(MojoGb10Backend::new());
-        let inner = EmbeddedInferenceBackend::load_checkpoint(
-            checkpoint_path,
-            tokenizer_path,
-            config,
-            Some(tensor_backend),
-        )?;
-        Ok(Self { inner })
-    }
-
-    pub fn generate_text(
-        &mut self,
-        prompt: &str,
-        max_tokens: usize,
-        temperature: f32,
-    ) -> Result<String, String> {
-        self.inner.generate_text(prompt, max_tokens, temperature)
-    }
-}
-
-#[async_trait]
-impl AienInferenceBackend for MojoInferenceBackend {
-    async fn load_model(&mut self, config: &ModelConfig) -> Result<(), String> {
-        self.inner.load_model(config).await
-    }
-
-    async fn execute_step(
-        &mut self,
-        batch: &ScheduledBatch,
-    ) -> Result<(Vec<DecodeOutput>, StepMetrics), String> {
-        self.inner.execute_step(batch).await
-    }
-}
-
 /// Fully native in-process embedded inference backend.
 /// Replaces external HTTP daemon dependency with in-process NativeTransformerBackend execution.
 pub struct EmbeddedInferenceBackend {
@@ -800,38 +664,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_max_serving_backend() {
-        let mut backend = MaxServingBackend::new(
-            "http://127.0.0.1:18006".to_string(),
-            "atlas-lightning-omni".to_string(),
-        );
-        let config = ModelConfig::default();
-        backend.load_model(&config).await.unwrap();
-
-        let req = SequenceRequest {
-            request_id: 2,
-            prompt_tokens: vec![10, 20],
-            sampling_params: SamplingParams::default(),
-            arrival_time_ns: 0,
-            priority: 5,
-        };
-
-        let mut block_tables = HashMap::new();
-        block_tables.insert(2, vec![0]);
-
-        let batch = ScheduledBatch {
-            prefill_requests: vec![req],
-            decode_requests: vec![],
-            block_tables,
-            step_id: 1,
-        };
-
-        let (outputs, metrics) = backend.execute_step(&batch).await.unwrap();
-        assert_eq!(outputs.len(), 1);
-        assert_eq!(metrics.prefill_tokens_processed, 2);
-    }
-
-    #[tokio::test]
     async fn test_embedded_inference_backend_execution() {
         let config = ModelConfig {
             num_layers: 2,
@@ -988,50 +820,5 @@ mod tests {
         } else {
             assert!(fallbacks > 0, "dev stub build: fallbacks must be counted");
         }
-    }
-
-    #[tokio::test]
-    async fn test_mojo_inference_backend() {
-        let config = ModelConfig {
-            num_layers: 2,
-            num_heads: 4,
-            num_kv_heads: 2,
-            head_dim: 16,
-            hidden_dim: 64,
-            intermediate_dim: 128,
-            vocab_size: 256,
-            block_size: 16,
-            ..Default::default()
-        };
-
-        let mut backend = MojoInferenceBackend::with_reference_weights(&config);
-        assert_eq!(backend.inner.config.num_layers, 2);
-
-        let req = SequenceRequest {
-            request_id: 301,
-            prompt_tokens: vec![1, 3, 5],
-            sampling_params: SamplingParams {
-                temperature: 0.0,
-                top_p: 1.0,
-                max_tokens: 2,
-                stop_token_ids: vec![0],
-            },
-            arrival_time_ns: 0,
-            priority: 1,
-        };
-
-        let mut block_tables = HashMap::new();
-        block_tables.insert(301, vec![0]);
-
-        let batch = ScheduledBatch {
-            prefill_requests: vec![req],
-            decode_requests: vec![],
-            block_tables,
-            step_id: 1,
-        };
-
-        let (outputs, metrics) = backend.execute_step(&batch).await.unwrap();
-        assert_eq!(outputs.len(), 1);
-        assert_eq!(metrics.prefill_tokens_processed, 3);
     }
 }

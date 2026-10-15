@@ -1,8 +1,8 @@
 //! Tier 3: Cross-Feature Interactions Test Suite.
-//! Tests pairwise integration and cross-module contracts across all 18 feature pairs (P1 to P18).
+//! Tests pairwise integration and cross-module contracts across the remaining feature pairs (P1 to P18; P11 and P13 to P15 were removed with Mojo).
 
 use aien_inference_abi::checkpoint::{
-    encode_fp32_to_bf16, parse_safetensors_with_catalog, CheckpointError, LoadedCheckpoint,
+    encode_fp32_to_bf16, parse_safetensors_with_catalog, CheckpointError,
 };
 use aien_inference_abi::tensor::{apply_rope, matmul_vec, rmsnorm, sample_argmax};
 use aien_inference_abi::tokenizer::TinyLlamaTokenizer;
@@ -160,21 +160,6 @@ fn test_pair_p10_aligned_math_and_reference_cpu_backend() {
 }
 
 #[test]
-fn test_pair_p11_dual_storage_and_mojo_c_abi_compatibility() {
-    // P11 (F3 + F13): Raw BF16 buffers passed directly to C-ABI pointers
-    let raw = encode_fp32_to_bf16(&[1.0, 2.0]);
-    let checkpoint = LoadedCheckpoint::from_bf16_tensors(vec![(
-        "weight".to_string(),
-        vec![2],
-        raw,
-    )]);
-    let bf16_slice = checkpoint.tensor_bytes("weight").unwrap();
-    let ptr = bf16_slice.as_ptr();
-    assert!(!ptr.is_null());
-    assert_eq!(bf16_slice.len(), 4);
-}
-
-#[test]
 fn test_pair_p12_tensor_backend_trait_and_cpu_implementation() {
     // P12 (F11 + F12): Reference CPU backend forward pass operations
     let x = vec![1.0, 2.0];
@@ -182,31 +167,6 @@ fn test_pair_p12_tensor_backend_trait_and_cpu_implementation() {
     let mut out = vec![0.0; 2];
     matmul_vec(&x, &w, &mut out, 2, 2);
     assert_eq!(out, vec![2.0, 4.0]);
-}
-
-#[test]
-fn test_pair_p13_tensor_backend_trait_and_mojo_backend_contract() {
-    // P13 (F11 + F14): Unified abstraction for accelerated compute
-    let vocab_size = 32000usize;
-    let hidden_dim = 2048usize;
-    let weight_size = vocab_size * hidden_dim;
-    assert_eq!(weight_size, 65_536_000);
-}
-
-#[test]
-fn test_pair_p14_mojo_kernels_and_unified_memory_execution() {
-    // P14 (F13 + F14): Device memory pointers accessible without per-token copies
-    let unified_buffer = vec![0u16; 2048];
-    assert_eq!(unified_buffer.len(), 2048);
-}
-
-#[test]
-fn test_pair_p15_parity_harness_and_accelerated_backend() {
-    // P15 (F10 + F14): Backend output evaluated against identical tolerances
-    let cpu_logits = vec![1.0f32, 2.0, 3.0];
-    let mojo_logits = vec![1.00002f32, 2.00004, 3.00001];
-    assert!(max_absolute_error(&cpu_logits, &mojo_logits) <= 1e-4);
-    assert!(cosine_similarity(&cpu_logits, &mojo_logits) > 0.9999);
 }
 
 #[test]

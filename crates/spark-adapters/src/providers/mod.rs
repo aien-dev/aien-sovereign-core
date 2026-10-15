@@ -33,7 +33,7 @@ pub async fn call_provider_unary(
         | ProviderType::Together
         | ProviderType::Mistral
         | ProviderType::Ollama
-        | ProviderType::LocalMax => {
+        | ProviderType::LocalSeat => {
             call_openai_unary(client, endpoint, model, api_key, messages, temperature).await
         }
         ProviderType::ChatGPTWeb | ProviderType::ClaudeWeb => {

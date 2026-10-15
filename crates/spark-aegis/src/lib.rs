@@ -1,10 +1,10 @@
 // spark-aegis: Sovereign Defensive Boundary and Containment Engine
-// Pure Native Rust Systems Architecture with Mojo SIMD Acceleration
+// Pure Native Rust Systems Architecture
 
 pub mod audit;
+pub mod byte_scan;
 pub mod containment;
 pub mod doctrine;
-pub mod mojo_bridge;
 pub mod pr_triage;
 pub mod scanner;
 
