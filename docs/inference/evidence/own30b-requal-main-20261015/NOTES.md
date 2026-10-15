@@ -42,3 +42,5 @@ The two lines for omega 62833658 (librx_compose.a e598074e..., libomega_gpu.a 6a
   and round trip are unchanged, and they now also run on the resident chip pool.
 - kv_persist tests linked on the chip after the fix: 4/4 ok (`kv-persist-linked-after-fix.log`).
 - `--chip` run 2 (`chip-r2/`): PASS, scope host+chip. It ran on the working tree, which is this branch plus the test fix.
+- All three evidence.json files say `sovereign_core_dirty: true`: host and chip run 1 ran with the lock lines not yet committed,
+  and chip run 2 also had the test fix uncommitted. Both are committed unchanged in this PR.
