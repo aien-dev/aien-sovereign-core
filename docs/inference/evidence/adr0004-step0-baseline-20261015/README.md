@@ -36,7 +36,9 @@ tokens).** Runs 1 and 2 of each are kept as corroboration and as the record of w
 Every `*.start` and `*.end` records load average, MemAvailable, compute apps, GPU state, listeners and the
 line count of the :18091 server log. In every run the only other GPU process was the idle exp445 30B server
 on :18091 (36424 MiB); its log stayed at 899 lines from the first start to the last end, so it served no
-request during any run. GPU 0 %, P8 before each run. No :18097 or other model server.
+request during any run. Before each check-full run: GPU 0 %, P8. The door runs started right after a chip run
+(`door.start` 1 %, P0; `door-2.start` 0 %, P0). Other listeners: cortex :18080, spark-mail :18092, spark-cockpit
+:18095 (none is a model server); no :18097.
 
 ## G30-tokens and G30-speed (`check-full-3/`, frozen)
 `run.json` pass true; `SUMMARY parity=PASS tokens=PASS`; parity PASS on layers 0, 23, 47; 10 of 10
@@ -45,23 +47,26 @@ controls CAUGHT; prefill chunk 64 vs 1 PASS; gemm-mutants-off PASS. Tokens IDENT
 every earlier receipt). The chip token lists of all three runs hash to the same value as the
 `own30b-idle-speed-20261015` check-full (sha256 of `jq -c '[.prompts[] | .chip]'`: `bb1a0401...b22b63f`).
 
-| decode tok/s | p1 | p2 | p3 | p4 | load average at start |
+| decode tok/s | p1 | p2 | p3 | p4 | 1-minute load average, start to end |
 |---|---|---|---|---|---|
-| run 1 (`check-full/`) | 37.5 | 32.6 | 36.9 | 34.7 | 8.93, climbed to 18.06 |
-| run 2 (`check-full-2/`) | 39.0 | 36.1 | 37.6 | 34.0 | 2.58 |
-| **run 3 (`check-full-3/`), frozen baseline** | **39.1** | **36.1** | **37.5** | **36.6** | 2.08 |
-| ADR reference, `own30b-idle-speed-20261015` | 38.8 | 36.1 | 37.2 | 36.6 | 0.55 |
+| run 1 (`check-full/`) | 37.5 | 32.6 | 36.9 | 34.7 | 8.93 to 18.06 |
+| run 2 (`check-full-2/`) | 39.0 | 36.1 | 37.6 | 34.0 | 2.58 to 3.51 |
+| **run 3 (`check-full-3/`), frozen baseline** | **39.1** | **36.1** | **37.5** | **36.6** | 2.08 to 11.63 |
+| ADR reference, `own30b-idle-speed-20261015` | 38.8 | 36.1 | 37.2 | 36.6 | 0.55 at start |
 
 Run 1 shared the CPU with other agents' compiles (several rustc at 100 %); its per-step expert and attention
 times rose (p2 experts 16.3 ms against 14.5). Run 2 was clean on p1 to p3 but p4 took 11.2 ms attention per
 step against 10.1 to 10.4 in run 3 and the ADR receipt. Run 3 matches the ADR's numbers to within 0.3 tok/s.
 G30-speed floors from run 3 (97 percent): p1 37.927 (calc:ca6917a169f4), p2 35.017 (calc:db0cafe07493),
 p3 36.375 (calc:0cc180e77663), p4 35.502 (calc:d0e63d84b0e7). Each is at or above the ADR's
-"at least" floors 37.6 / 35.0 / 36.1 / 35.5.
+"at least" floors 37.6 / 35.0 / 36.1 / 35.5. Like the ADR's, they are taken from the one-decimal values
+the tool prints (the same convention a later step's printed numbers are compared with); `run.json` holds
+the unrounded rates. Run 3's load rose to 11.63 by its end, so its p4 figure was measured with other
+work starting; it still equals the ADR reference.
 
 ## G30-door (`door-2/`, frozen)
 Reply content sha256 (byte-exact, `jq -j '.choices[0].message.content'`), identical in all 3 passes of
-`door-2/` and all 3 passes of `door/` (12 replies per prompt, 4 server processes):
+`door-2/` and all 3 passes of `door/` (6 replies per prompt, 24 in all, from 4 server processes):
 
 | prompt | prompt tokens | reply tokens, finish | content sha256 | reply_logprob |
 |---|---|---|---|---|
@@ -71,7 +76,8 @@ Reply content sha256 (byte-exact, `jq -j '.choices[0].message.content'`), identi
 | p4-long | 657 | 64, length | 8e1d40eaf6d97fc40ba53e3be573094443484be2976788187c63b9ad88031d9e | -10.717370043619697 |
 
 Door decode tok/s (server log lines, `door-2/session-*.server.log`), passes 1 / 2 / 3:
-p1 34.81 / 35.37 / 35.83; p2 35.00 / 35.35 / 35.53; p3 34.39 / 35.16 / 35.22; p4 34.10 / 34.73 / 34.88.
+p1 35.37 / 35.83 / 34.81; p2 35.35 / 35.53 / 35.00; p3 35.16 / 35.22 / 34.39; p4 34.73 / 34.88 / 34.10
+(passes 1 and 2 in `session-a`, pass 3 in `session-b`).
 Run 1 (`door/`): 33.33 to 35.71. Every figure is above the G30-door speed floor 32.95, which the ADR sets
 from the `own30b-idle-speed-20261015` door receipt (33.97 / 33.99), not from this folder.
 
@@ -89,3 +95,12 @@ from the `own30b-idle-speed-20261015` door receipt (33.97 / 33.99), not from thi
   it changes no setting).
 - Machine load could not be held low: other agents' work does not stop for the quiet flag once started.
   Later steps should take their G30-speed receipts at a comparable load (each `*.start` records it).
+- Environment: the `*.start` files do not list environment variables. The runner was started from a fresh
+  tool shell, separate from the build shell that sourced `target/pins/env.sh`; such a shell carries no
+  AIEN_* or OWN30B_* variable (checked after the runs, not recorded during them: INFERRED for the runs).
+  `door-window.sh` additionally unsets AIEN_OMEGA_SPIN_US and OWN30B_DECODE_GRAPH for the server.
+- Reuse by a later step: the scripts are kept exactly as run. `step0-runs.sh` hard-codes this folder's name
+  in its "tracked changes" filter (the count also includes untracked files) and "main 559f0f1e" in the
+  quietlock reasons; change both, and record `env | grep -E '^(AIEN|OWN30B)_'` in each `*.start`.
+- Receipts were taken on 559f0f1e; the PR was later rebased onto main e3b36d5, which adds only
+  spark-supervisor changes (no inference code).
