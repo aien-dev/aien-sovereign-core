@@ -13,9 +13,15 @@
 //! ```text
 //! <root>/
 //!   STORE_ID
+//!   LOCK
 //!   objects/00/ .. objects/ff/
 //!   tmp/
 //! ```
+//!
+//! `LOCK` carries an exclusive advisory lock (`flock`) for the store's
+//! lifetime: one process per store folder (sc#521). A second opener is
+//! refused before recovery, which would otherwise unlink the first process's
+//! in-flight temps and keep a second, drifting index of the same folder.
 //!
 //! All 256 shard directories and `tmp/` are created at [`HostFsStore::open`]
 //! with a parent-directory `fsync`; the hot path never creates a directory.
@@ -548,6 +554,9 @@ struct Shared {
 pub struct HostFsStore {
     shared: Arc<Shared>,
     worker: Mutex<Option<JoinHandle<()>>>,
+    /// The open `LOCK` file whose `flock` makes this process the folder's
+    /// only opener; released when the store drops (after the worker joined).
+    _folder_lock: File,
 }
 
 static STORE_ID_COUNTER: AtomicU64 = AtomicU64::new(1);
@@ -700,6 +709,36 @@ fn create_private_file(path: &Path) -> std::io::Result<File> {
         f.set_permissions(std::fs::Permissions::from_mode(PRIVATE_FILE_MODE))?;
     }
     Ok(f)
+}
+
+/// The lock file in the store root (sc#521).
+const LOCK_FILE: &str = "LOCK";
+
+/// Takes the folder's exclusive advisory lock: `root/LOCK` opened privately
+/// (no symlink followed, ours, 0600) and `flock(LOCK_EX | LOCK_NB)` on it.
+/// The lock belongs to the returned open file and ends when it closes. A
+/// folder held by another opener (another process, or a second store in
+/// this one: `flock` is per open file description) is refused with
+/// `TaskRejected` and a message that names the folder; any other failure is
+/// reported like every other store I/O error.
+fn take_folder_lock(root: &Path) -> Result<File, PlatformError> {
+    use std::os::unix::io::AsRawFd;
+    let path = root.join(LOCK_FILE);
+    let f = create_private_file(&path).map_err(|e| io_to_error(&e, "open LOCK"))?;
+    // SAFETY: `f` is an open descriptor this function owns; flock takes no
+    // memory and only sets the description's advisory lock.
+    let rc = unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+    if rc == 0 {
+        return Ok(f);
+    }
+    let e = std::io::Error::last_os_error();
+    if e.raw_os_error() == Some(libc::EWOULDBLOCK) {
+        return Err(PlatformError::TaskRejected(format!(
+            "store folder {} is open in another process (LOCK held); one process per store folder",
+            root.display()
+        )));
+    }
+    Err(io_to_error(&e, "flock LOCK"))
 }
 
 /// `create_private_file` plus the bytes (fault injection, temps).
@@ -3014,6 +3053,13 @@ impl HostFsStore {
             }
         }
 
+        // One process per store folder (sc#521), taken before recovery: the
+        // walk below unlinks every temp it finds, so a second opener would
+        // fail the first process's in-flight parks at their rename and keep
+        // its own drifting index and quota of the same folder.
+        let folder_lock = take_folder_lock(root)?;
+        stats.io_ops += 1;
+
         let alloc_unit = std::fs::metadata(&objects_dir)
             .map(|m| m.blksize())
             .unwrap_or(4096)
@@ -3145,6 +3191,7 @@ impl HostFsStore {
         Ok(Self {
             shared,
             worker: Mutex::new(handle),
+            _folder_lock: folder_lock,
         })
     }
 

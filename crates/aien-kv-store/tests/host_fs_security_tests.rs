@@ -295,3 +295,45 @@ fn a_permissive_umask_does_not_widen_the_store() {
 fn a_narrow_umask_does_not_lock_the_store_out_of_itself() {
     run_under_umask(0o277);
 }
+
+// ---- one process per store folder (sc#521) --------------------------------
+
+/// `root/LOCK` is private like every other store file.
+#[test]
+fn the_lock_file_is_private_and_lives_in_the_root() {
+    let fx = Fx::new();
+    let _s = fx.open_with(|_| {});
+    let lock = fx.root().join("LOCK");
+    assert!(std::fs::symlink_metadata(&lock).unwrap().is_file());
+    assert_private(&lock);
+}
+
+/// A second opener of the same folder is refused with a message that names
+/// the folder, the first store keeps working, and the folder opens again
+/// once the first store is dropped. `flock` locks belong to the open file
+/// description, so a second `open` in this process is refused exactly as a
+/// second process would be.
+#[test]
+fn a_second_opener_of_the_same_folder_is_refused_until_the_first_closes() {
+    let fx = Fx::new();
+    let first = fx.open_with(|_| {});
+    assert_eq!(first.capacity().state, StoreState::Open);
+
+    let second = HostFsStore::open(fx.config());
+    match &second {
+        Err(PlatformError::TaskRejected(why)) => {
+            assert!(why.contains("another process"), "{why}");
+            assert!(why.contains(&fx.root().display().to_string()), "{why}");
+        }
+        Ok(_) => panic!("second opener must be refused, but it opened"),
+        Err(e) => panic!("second opener must be refused with TaskRejected, got {e:?}"),
+    }
+    // The refusal touched nothing the first store relies on.
+    assert_eq!(first.capacity().state, StoreState::Open);
+    assert!(fx.root().join("STORE_ID").is_file());
+
+    drop(second);
+    drop(first);
+    let again = fx.open_with(|_| {});
+    assert_eq!(again.capacity().state, StoreState::Open);
+}
