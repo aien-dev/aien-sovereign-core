@@ -162,8 +162,10 @@ impl<O: ItemOracle> OmegeseConstraint<O> {
     }
 
     /// True once the reply is complete: only the stop token is left to force (the controller
-    /// consumes it without showing it back), it was emitted, or (no fence) the last rule allowed
-    /// it, which it does only where the program may end.
+    /// consumes it without showing it back) or it was emitted. Without a fence the stop token is
+    /// usually one choice among others at eof, and a consumed stop looks the same to the
+    /// constraint as a cut by length after another token; there completion is
+    /// `FinishReason::Stop`, and this is true only when the stop was forced.
     pub fn finished(&self) -> bool {
         let stop = self.framing.stop_token;
         match &self.phase {
@@ -172,7 +174,6 @@ impl<O: ItemOracle> OmegeseConstraint<O> {
             Phase::Body if self.framing.mask_body && self.framing.open_fence.is_none() => {
                 match &self.last {
                     Some(StepRule::Force(t)) => *t == stop,
-                    Some(StepRule::Allow(set)) => set.binary_search(&stop).is_ok(),
                     _ => false,
                 }
             }

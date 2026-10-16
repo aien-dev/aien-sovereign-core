@@ -125,7 +125,12 @@ fn every_allowed_token_keeps_the_target_reachable() {
                 target.to_string()
             };
             assert_eq!(String::from_utf8(reply).unwrap(), want, "{fence} {header}");
-            assert!(k.finished());
+            // Without a fence, after `end\n` the stop token is one choice among others (more blank
+            // space may follow): the constraint cannot tell a consumed stop from a cut by length
+            // after another token, so it claims the reply finished only when the stop was forced
+            // (after a bare `end` nothing else may follow).
+            let forced_stop = !target.ends_with('\n');
+            assert_eq!(k.finished(), fence || forced_stop, "{fence} {header}");
         }
     }
     assert!(total > 100, "{total} tokens checked");

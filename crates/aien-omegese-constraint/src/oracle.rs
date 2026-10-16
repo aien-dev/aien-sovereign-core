@@ -197,9 +197,23 @@ impl ItemOracle for SubprocessOracle {
                     ));
                 }
             };
-            let status = child
-                .wait()
-                .map_err(|e| format!("wait for the oracle: {e}"))?;
+            // Stdout closed; the process should be gone or going. Wait out the rest of the deadline.
+            let status = loop {
+                match child.try_wait() {
+                    Ok(Some(st)) => break st,
+                    Ok(None) if t.elapsed() < timeout => {
+                        std::thread::sleep(Duration::from_micros(100))
+                    }
+                    Ok(None) => {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        return Err(format!(
+                            "the oracle closed its answer but did not exit within {timeout:?}; killed it"
+                        ));
+                    }
+                    Err(e) => return Err(format!("wait for the oracle: {e}")),
+                }
+            };
             let wrote = w
                 .join()
                 .map_err(|_| "oracle writer thread panicked".to_string())?;

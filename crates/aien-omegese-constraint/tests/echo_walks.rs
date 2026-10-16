@@ -160,7 +160,9 @@ fn the_unfenced_arm_ends_on_the_stop_token() {
                 program,
                 "the reply is the program"
             );
-            assert!(k.finished());
+            // Completion here is `FinishReason::Stop` (asserted above): the stop was allowed among
+            // blank tokens, not forced, so `finished()` cannot know it was taken.
+            assert!(!k.finished());
         }
     }
 }
