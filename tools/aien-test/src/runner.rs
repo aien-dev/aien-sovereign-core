@@ -61,9 +61,9 @@ pub struct Options {
     /// the sandbox as the only environment pair.
     pub cargo_target_dir: Option<PathBuf>,
     /// Where the per-target-dir lock files live (`resources::target_lock_path`).
-    /// A cargo gate (`Manifest::uses_cargo`) holds its target dir's lock for
-    /// its whole run when `cargo_target_dir` is set, so two gates never build
-    /// in one target dir at once. The worker sets `<state>/locks/target`.
+    /// Every gate that runs holds the lock of its target dir (`cargo_target_dir`
+    /// or the worktree's `target/`) for its whole run, so two gates never
+    /// build in one target dir at once. The worker sets `<state>/locks/target`.
     pub target_lock_dir: PathBuf,
     /// `--release`: qualification mode. No cache reuse and the tree must be
     /// clean even with `--allow-dirty`.
@@ -666,19 +666,29 @@ fn execute_gate(job: &Job<'_>, permit: Option<Permit<'_>>) -> Result<Outcome, Ru
         }
     }
 
-    // A cargo gate holds its target dir for the whole run (build and run),
-    // so no other gate builds in it or relinks a binary this one is
-    // executing (sc fix/521). Taken after the pool slot and before the GPU
-    // locks: the fixed order in `resources`. Waited for, never refused: the
-    // holder is another gate or the worker's priming, both finite.
-    let target_lock: Option<resources::TargetLock> = match &opts.cargo_target_dir {
-        Some(dir) if m.uses_cargo() && verdict::pre_run(m, &facts).is_none() => {
-            let path = resources::target_lock_path(&opts.target_lock_dir, dir);
-            Some(resources::lock_target_dir(&path).map_err(|e| {
-                RunError::Fatal(format!("cannot lock target dir {}: {e}", path.display()))
-            })?)
-        }
-        _ => None,
+    // A gate that will run holds its target dir for the whole run (build and
+    // run), so no other gate builds in it or relinks a binary this one is
+    // executing (sc fix/521). Every gate, not only those whose manifest
+    // names cargo inputs: SC-INQUISITOR builds with cargo and lists no
+    // Cargo.toml, and the runner cannot see inside a script. The dir is the
+    // `CARGO_TARGET_DIR` the gate is given, or else the worktree's own
+    // `target/`, which cargo uses by default. Taken after the pool slot and
+    // before the GPU locks: the fixed order in `resources`. Waited for,
+    // never refused: the holder is another gate or the worker's priming.
+    // A gb10 gate is never killed on timeout (ADR 0028 Decision 6), so one
+    // that hangs holds the target dir until it exits; the receipt's
+    // `timeout_exceeded` is the only sign.
+    let target_lock: Option<resources::TargetLock> = if verdict::pre_run(m, &facts).is_none() {
+        let dir = opts
+            .cargo_target_dir
+            .clone()
+            .unwrap_or_else(|| resolve(root).join("target"));
+        let path = resources::target_lock_path(&opts.target_lock_dir, &dir);
+        Some(resources::lock_target_dir(&path).map_err(|e| {
+            RunError::Fatal(format!("cannot lock target dir {}: {e}", path.display()))
+        })?)
+    } else {
+        None
     };
 
     // A gb10 gate takes the GPU locks only when nothing else already stops it.
@@ -1714,8 +1724,7 @@ mod tests {
         gfx_with(gates, "", &[])
     }
 
-    /// `inputs` block that marks a gate as a cargo gate (it builds in the
-    /// target dir): the rule `Manifest::uses_cargo` looks for.
+    /// `inputs` block of a gate that declares it builds in the target dir.
     const CARGO_INPUTS: &str = "inputs:\n  - Cargo.lock\n";
 
     /// `gfx` with `extra` appended to every manifest and `files` added to
@@ -1878,16 +1887,59 @@ mod tests {
         assert_eq!(c.exit_code(), 3);
     }
 
+    /// `log` holds `start-X, end-X` pairs with no interleaving.
+    fn assert_serial(log: &[String], what: &str) {
+        assert_eq!(log.len() % 2, 0, "{what}: {log:?}");
+        for pair in log.chunks(2) {
+            let id = pair[0].strip_prefix("start-").unwrap_or("?");
+            assert_eq!(pair[1], format!("end-{id}"), "{what} overlapped: {log:?}");
+        }
+    }
+
+    /// Without a `CARGO_TARGET_DIR` the gates of one run still share the
+    /// worktree's own `target/`, so they are serialised on that path.
     #[test]
-    fn independent_gates_run_at_the_same_time_when_the_pool_allows() {
+    fn gates_without_a_target_dir_serialise_on_the_worktree_target() {
         let fx = gfx(&[
-            ("G-A", "", "host", rendezvous("a", "b")),
-            ("G-B", "", "host", rendezvous("b", "a")),
+            ("G-A", "", "host", slow("G-A")),
+            ("G-B", "", "host", slow("G-B")),
         ]);
-        let c = fx.campaign(&fx.opts());
+        let mut opts = fx.opts();
+        opts.target_lock_dir = fx.scratch.path().join("locks");
+        let c = fx.campaign(&opts);
         assert_eq!(c.exit_code(), 0);
-        assert!(fx.scratch.path().join("saw-a").exists(), "A never saw B");
-        assert!(fx.scratch.path().join("saw-b").exists(), "B never saw A");
+        let log = fx.log();
+        assert_eq!(log.len(), 4, "{log:?}");
+        assert_serial(&log, "gates sharing the worktree target");
+        let lock = crate::resources::target_lock_path(
+            &opts.target_lock_dir,
+            &resolve(fx.repo.path()).join("target"),
+        );
+        assert!(lock.exists(), "lock {} never taken", lock.display());
+    }
+
+    /// A gate may call cargo without naming `Cargo.toml` among its inputs
+    /// (SC-INQUISITOR builds spark-inquisitor that way), so the rule is not
+    /// "cargo gates": every gate given a `CARGO_TARGET_DIR` holds it.
+    #[test]
+    fn every_gate_given_a_target_dir_is_serialised() {
+        let cargo_user = |id: &str| {
+            format!(
+                "#!/bin/sh\necho start-{id} >> \"@S@/log\"\n\"${{CARGO:-cargo}}\" --version >/dev/null\nsleep 0.2\necho end-{id} >> \"@S@/log\"\n"
+            )
+        };
+        let fx = gfx(&[
+            ("G-A", "", "host", cargo_user("G-A")),
+            ("G-B", "", "host", cargo_user("G-B")),
+        ]);
+        let mut opts = fx.opts();
+        opts.cargo_target_dir = Some(fx.scratch.path().join("target"));
+        opts.target_lock_dir = fx.scratch.path().join("locks");
+        let c = fx.campaign(&opts);
+        assert_eq!(c.exit_code(), 0);
+        let log = fx.log();
+        assert_eq!(log.len(), 4, "{log:?}");
+        assert_serial(&log, "undeclared cargo users");
     }
 
     /// Two cargo gates of one head share `CARGO_TARGET_DIR`. Run at the same
@@ -1935,19 +1987,30 @@ mod tests {
         );
     }
 
-    /// The lock is per target dir and only for gates that build in it: gates
-    /// without cargo inputs stay parallel even when a target dir is set.
+    /// The lock is per target dir: gates given different target dirs still
+    /// run at the same time.
     #[test]
-    fn non_cargo_gates_stay_parallel_when_a_target_dir_is_set() {
+    fn gates_with_different_target_dirs_run_at_the_same_time() {
         let fx = gfx(&[
             ("G-A", "", "host", rendezvous("a", "b")),
             ("G-B", "", "host", rendezvous("b", "a")),
         ]);
         let mut opts = fx.opts();
-        opts.cargo_target_dir = Some(fx.scratch.path().join("target"));
         opts.target_lock_dir = fx.scratch.path().join("locks");
-        let c = fx.campaign(&opts);
-        assert_eq!(c.exit_code(), 0);
+        let g = fx.graph();
+        let (a, b) = (g.index_of("G-A").unwrap(), g.index_of("G-B").unwrap());
+        thread::scope(|s| {
+            for (i, dir) in [(a, "ta"), (b, "tb")] {
+                let mut o = Options {
+                    cargo_target_dir: Some(fx.scratch.path().join(dir)),
+                    ..fx.opts()
+                };
+                o.target_lock_dir = opts.target_lock_dir.clone();
+                let sel: BTreeSet<usize> = [i].into_iter().collect();
+                let (g, root) = (&g, fx.repo.path());
+                s.spawn(move || run_graph(root, g, &sel, &o).unwrap());
+            }
+        });
         assert!(fx.scratch.path().join("saw-a").exists(), "A never saw B");
         assert!(fx.scratch.path().join("saw-b").exists(), "B never saw A");
     }
