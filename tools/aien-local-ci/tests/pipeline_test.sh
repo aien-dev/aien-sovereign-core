@@ -184,7 +184,7 @@ jq '.extra = 2' "$AIEN_STATE/bundles/demo/$A/bundle.json" > "$T/a" && mv "$T/a" 
 bash "$PIPE" round > "$T/out6" 2>&1
 check "new digest for the same head: rerun once more" [ "$(posts 11)" = 2 ]
 check "round with no labeled PR merges nothing" bash -c "! grep -q '^gh pr merge' '$FAKE_LOG'"
-check "journal: unlabeled PR refused" [ "$(jl ".action==\"merge\" and .pr==\"1\" and (.reason|test(\"label\"))")" -ge 1 ]
+check "journal: unlabeled PR skipped silently" [ "$(jl ".action==\"merge\" and .pr==\"1\"")" = 0 ]
 
 echo "== merge"
 CTX1="Workspace Verification & Invariant Audit" CTX2="AIEN Verification (Spark)"
@@ -211,8 +211,8 @@ refused() { [ "$(jl ".action==\"merge\" and .pr==\"$1\" and .result==\"refused\"
 check "all green: merged with --match-head-commit on the canonical slug" grep -qx "gh pr merge 41 -R $S --merge --match-head-commit $M1" "$FAKE_LOG"
 check "exactly one merge call" [ "$(grep -c '^gh pr merge' "$FAKE_LOG")" = 1 ]
 check "never --admin" bash -c "! grep -q -- '--admin' '$FAKE_LOG'"
-check "label missing: refused" refused 42 "label ready-to-merge missing"
-check "label not exact (ready-to-merge-later): refused" refused 49 "label ready-to-merge missing"
+check "label missing: skipped, no journal line" [ "$(jl ".action==\"merge\" and .pr==\"42\"")" = 0 ]
+check "label not exact (ready-to-merge-later): skipped, no journal line" [ "$(jl ".action==\"merge\" and .pr==\"49\"")" = 0 ]
 check "draft: refused" refused 43 "draft"
 check "digest mismatch: refused" refused 44 "digest mismatch"
 check "required context missing: refused" refused 45 "AIEN Verification \\\\(Spark\\\\).* missing"

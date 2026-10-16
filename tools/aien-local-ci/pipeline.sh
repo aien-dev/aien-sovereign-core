@@ -328,9 +328,8 @@ do_merge() {
       if [[ ! $base =~ ^[A-Za-z0-9._/-]+$ || $base == *..* ]]; then
         journal action=merge repo="$repo" pr="$num" sha="$sha" result=refused reason="bad base ref"; continue
       fi
-      if [[ $labeled != true ]]; then
-        journal action=merge repo="$repo" pr="$num" sha="$sha" result=refused reason="label $MERGE_LABEL missing"; continue
-      fi
+      # Unlabeled pull requests are not the pipeline's to merge: skipped without a journal line (every round).
+      [[ $labeled == true ]] || continue
       if [[ $draft != false ]]; then
         journal action=merge repo="$repo" pr="$num" sha="$sha" result=refused reason="draft"; continue
       fi
