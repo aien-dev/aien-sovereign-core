@@ -1,0 +1,47 @@
+
+Verified reference code from earlier tasks, most relevant first.
+
+Record 1.
+
+entry twin_pick
+params u8
+ret u8
+
+Twin record used for the tie-break test: returns its argument doubled.
+
+```
+fn twin_pick x uchar to uchar
+ret add x x
+end
+```
+
+Record 2.
+
+entry twin_pick
+params u8
+ret u8
+
+Twin record used for the tie-break test: returns its argument doubled.
+
+```
+fn twin_pick x uchar to uchar
+ret add x x
+end
+```
+
+Record 3.
+
+entry clamp_sub
+params u32 u32
+ret u32
+
+Returns a - b when a >= b, else 0; never traps.
+
+```
+fn clamp_sub a uint b uint to uint
+if ge a b
+ret sub a b
+end
+ret 0
+end
+```

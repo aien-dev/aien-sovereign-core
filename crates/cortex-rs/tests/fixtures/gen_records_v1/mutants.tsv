@@ -1,0 +1,43 @@
+name	base	sed
+ok_abs	abstraction/abs-0054ea1b5f8a9efb.rec	-
+ok_raw	raw/raw-clamp_sub.rec	-
+header_v2	abstraction/abs-0054ea1b5f8a9efb.rec	1s/^gen-record 1$/gen-record 2/
+kind_bad	abstraction/abs-0054ea1b5f8a9efb.rec	s/^kind abstraction$/kind abs/
+id_abs_short	abstraction/abs-0054ea1b5f8a9efb.rec	s/^id abs-0054ea1b5f8a9efb$/id abs-0054/
+id_raw_upper	raw/raw-clamp_sub.rec	s/^id raw-clamp_sub$/id raw-Clamp_sub/
+split_probe_abs	abstraction/abs-0054ea1b5f8a9efb.rec	s/^split corpus$/split probe/
+split_bad	raw/raw-clamp_sub.rec	s/^split corpus$/split heldout/
+family_descending	abstraction/abs-0054ea1b5f8a9efb.rec	s/^family \([^ ]*\) \([^ ]*\)$/family \2 \1/
+family_raw_two	raw/raw-clamp_sub.rec	s/^family .*/& gs1-ffffffffffffffff/
+family_upper	abstraction/abs-0054ea1b5f8a9efb.rec	s/^family gs1-1d8f/family gs1-1D8F/
+entry_mismatch	abstraction/abs-0054ea1b5f8a9efb.rec	s/^entry ndigits$/entry ndigit/
+params_mismatch	abstraction/abs-0054ea1b5f8a9efb.rec	s/^params u64$/params u32/
+ret_mismatch	abstraction/abs-0054ea1b5f8a9efb.rec	s/^ret u8$/ret u16/
+sig_reserved_param	abstraction/abs-0054ea1b5f8a9efb.rec	s/^signature fn ndigits n ulong/signature fn ndigits end ulong/
+sig_no_to	abstraction/abs-0054ea1b5f8a9efb.rec	s/^signature fn ndigits n ulong to uchar$/signature fn ndigits n ulong uchar/
+sig_bad_type	abstraction/abs-0054ea1b5f8a9efb.rec	s/^signature fn ndigits n ulong to/signature fn ndigits n ulongx to/
+sig_void_abs	abstraction/abs-0054ea1b5f8a9efb.rec	s/^ret u8$/ret void/;s/^signature fn ndigits n ulong to uchar$/signature fn ndigits n ulong to void/
+receipt_upper	abstraction/abs-0054ea1b5f8a9efb.rec	s/^receipt d0df/receipt D0DF/
+validity_revoked	abstraction/abs-0054ea1b5f8a9efb.rec	s/^validity verified$/validity revoked/
+ancestry_same_digest	abstraction/abs-0054ea1b5f8a9efb.rec	s/^ancestry fx_ndigits_b .*/ancestry fx_ndigits_b 447910b52089b719b1b5955d1b24b0976d2eaa6e8ca03f65bbdbe2f82de125a1/
+raw_ancestry_other	raw/raw-clamp_sub.rec	s/^ancestry clamp_sub /ancestry other_task /
+source_absolute	abstraction/abs-0054ea1b5f8a9efb.rec	s|^source tools|source /tools|
+source_dotdot	abstraction/abs-0054ea1b5f8a9efb.rec	s|^source tools/gen|source tools/../gen|
+pre_proved	abstraction/abs-0054ea1b5f8a9efb.rec	s/^pre STATED+TESTED/pre PROVED/
+example_extra_arg	abstraction/abs-0054ea1b5f8a9efb.rec	s/^example 1234 -> 4$/example 1234 5 -> 4/
+no_limit	abstraction/abs-0054ea1b5f8a9efb.rec	/^limit /d
+counter_trap_ok	abstraction/abs-0054ea1b5f8a9efb.rec	/^limit /a counter 0 -> TRAP 3
+counter_trap_15	abstraction/abs-0054ea1b5f8a9efb.rec	/^limit /a counter 0 -> TRAP 15
+counter_trap_wrap	abstraction/abs-0054ea1b5f8a9efb.rec	/^limit /a counter 0 -> TRAP 4294967299
+counter_trap_saturate	abstraction/abs-0054ea1b5f8a9efb.rec	/^limit /a counter 0 -> TRAP 99999999999999999999
+fingerprint_mismatch	abstraction/abs-0054ea1b5f8a9efb.rec	s/^fingerprint 0054/fingerprint 1054/
+differs_equals_fp	abstraction/abs-0054ea1b5f8a9efb.rec	s/^differs fx_ndigits_b .*/differs fx_ndigits_b 0054ea1b5f8a9efb0c9293cab97865497fc23e58bcfcfc83fb0b20ec4e362e2e/
+no_body_line	abstraction/abs-0054ea1b5f8a9efb.rec	/^body$/d
+body_no_end	abstraction/abs-0054ea1b5f8a9efb.rec	$d
+abs_two_fn	abstraction/abs-0054ea1b5f8a9efb.rec	/^k = uchar 1$/i fn other a uint to uint
+body_sig_mismatch	abstraction/abs-0054ea1b5f8a9efb.rec	s/^fn ndigits n ulong to uchar$/fn ndigits m ulong to uchar/
+two_spaces	abstraction/abs-0054ea1b5f8a9efb.rec	s/^desc Helper:/desc Helper:  x/
+trailing_space	abstraction/abs-0054ea1b5f8a9efb.rec	s/^desc \(.*\)$/desc \1 /
+receipt_missing	abstraction/abs-0054ea1b5f8a9efb.rec	s/^receipt .*/receipt 0000000000000000000000000000000000000000000000000000000000000000/
+receipt_of_other_record	raw/raw-clamp_sub.rec	s/^receipt .*/receipt d0df7994f1820c00a75717db8dbec6f0a479a22e97edc0f80d63e6db16bc26b9/
+header_key_injection	abstraction/abs-0054ea1b5f8a9efb.rec	/^validity verified$/a validity verified

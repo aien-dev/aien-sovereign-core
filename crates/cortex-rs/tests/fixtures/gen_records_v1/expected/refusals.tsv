@@ -1,0 +1,13 @@
+stale_digest	stale_digest
+wrong_pin	manifest_digest_mismatch
+manifest_bad_path	manifest_malformed
+record_missing	record_missing
+receipt_forged	invalid_record
+receipt_missing	invalid_record
+receipt_borrowed	invalid_record
+probe_abstraction	invalid_record
+duplicate_id	duplicate_id
+usage_k0	usage
+usage_target_over_cap	usage
+hidden_path	hidden_path
+prompt_tab	prompt_invalid

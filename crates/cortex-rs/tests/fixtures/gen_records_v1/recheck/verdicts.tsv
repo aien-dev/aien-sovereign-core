@@ -1,0 +1,50 @@
+abs_two_fn	REFUSED line 24: abstraction body is exactly one function starting at its first line
+ancestry_same_digest	REFUSED line 15: abstraction needs ancestry in >= 2 distinct corpus solutions (task ids and digests)
+ancestry_unsorted	REFUSED line 14: ancestry not strictly ascending by task id (or repeated)
+body_no_end	REFUSED line 30: body must end with 'end'
+body_sig_mismatch	REFUSED line 9: signature differs from the body's fn line
+body_text_injection	OK abs-0054ea1b5f8a9efb
+counter_trap_15	REFUSED line 20: counter result must be a decimal number or TRAP <1..14>
+counter_trap_ok	OK abs-0054ea1b5f8a9efb
+counter_trap_saturate	REFUSED line 20: counter result must be a decimal number or TRAP <1..14>
+counter_trap_wrap	OK abs-0054ea1b5f8a9efb
+cr_byte	REFUSED line 3: byte outside ASCII 0x20..0x7E (CR, tab or non-ASCII)
+desc_161	REFUSED line 10: desc must be 1..160 bytes
+differs_equals_fp	REFUSED line 22: helper fingerprint equals the whole corpus solution of fx_ndigits_b
+empty_line	REFUSED line 3: empty line
+entry_mismatch	REFUSED line 6: entry differs from the signature's function name
+example_extra_arg	REFUSED line 18: example has the wrong number of arguments for the signature
+family_descending	REFUSED line 5: expected 'family <gs1-16 hex>+' (strictly ascending)
+family_raw_two	REFUSED line 5: a raw record has exactly one family
+family_upper	REFUSED line 5: expected 'family <gs1-16 hex>+' (strictly ascending)
+fingerprint_mismatch	REFUSED line 20: id is not abs- + the first 16 hex of the fingerprint
+header_key_injection	REFUSED line 13: expected at least one 'ancestry' line
+header_v2	REFUSED line 1: line 1 must be 'gen-record 1'
+id_abs_short	REFUSED line 2: abstraction id must be abs-<16 hex>
+id_raw_upper	REFUSED line 2: raw id must be raw-<task_id>
+kind_bad	REFUSED line 3: expected 'kind raw' or 'kind abstraction'
+no_body_line	REFUSED line 23: expected 'body'
+no_final_lf	REFUSED line 0: file is empty or does not end with LF
+no_limit	REFUSED line 19: expected at least one 'limit <text>'
+non_ascii	REFUSED line 10: byte outside ASCII 0x20..0x7E (CR, tab or non-ASCII)
+ok_abs	OK abs-0054ea1b5f8a9efb
+ok_raw	OK raw-clamp_sub
+params_mismatch	REFUSED line 7: params differ from the signature's parameter types (requirement spelling)
+pre_proved	REFUSED line 16: pre must be tagged STATED+TESTED (v1 proves nothing; PROVED is reserved)
+raw_ancestry_other	REFUSED line 13: raw record ancestry must be its own task
+receipt_missing	REFUSED line 11: receipt file 0000000000000000000000000000000000000000000000000000000000000000 is missing
+receipt_of_other_record	REFUSED line 11: receipt is not this record's (header or record line)
+receipt_upper	REFUSED line 11: expected 'receipt <64 lowercase hex>'
+ret_mismatch	REFUSED line 8: ret differs from the signature's return type (requirement spelling)
+sig_bad_type	REFUSED line 9: parameter 'n' has no valid type
+sig_no_to	REFUSED line 9: parameter name 'uchar' is not an identifier (or is reserved)
+sig_reserved_param	REFUSED line 9: parameter name 'end' is not an identifier (or is reserved)
+sig_void_abs	REFUSED line 9: v1 abstraction helpers return a scalar
+source_absolute	REFUSED line 15: expected 'source <relative path> <64 hex>'
+source_dotdot	REFUSED line 15: expected 'source <relative path> <64 hex>'
+split_bad	REFUSED line 4: expected 'split corpus' or 'split probe'
+split_probe_abs	REFUSED line 4: an abstraction record is split corpus
+tab_byte	REFUSED line 10: byte outside ASCII 0x20..0x7E (CR, tab or non-ASCII)
+trailing_space	REFUSED line 10: line starts or ends with a space
+two_spaces	REFUSED line 10: two spaces in a row
+validity_revoked	REFUSED line 12: expected 'validity verified' or 'validity unverified'

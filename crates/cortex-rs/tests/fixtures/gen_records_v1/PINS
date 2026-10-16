@@ -1,0 +1,38 @@
+GEN-5 (aien-spark/aien-sovereign-core#556) fixture pins. Everything under corpus/, tasks/ and source_root/ is a
+verbatim copy from aien-spark/omega; VENDORED.sha256 was computed with `git show <commit>:<path> | sha256sum`
+on the omega side (not from these copies), and tests/gen_procedures.rs checks every copy against it. All 43
+vendored files are identical at a4878d69 (v2) and a26be577 (v3).
+
+omega gen/retrieval  a26be5771acd2ca731d98ab94de51d24b4ffe300  (genret-cli-v3, PR aien-spark/omega#485)
+  ee21d714d911cf1cc459cba00805cceb9354b02bf8d6974e4d96c5c5dd01a3ac  tools/gen/retrieval/CONTRACT.md
+  0f0ccb3b9f59878c26d2ca76f5b86929911d675001610e60cadef66490bfe5d8  tools/gen/retrieval/genret.c
+  df8aef39853eee93921963da1a202dba829481434c849290c801189bd42fc1f1  mk/gen-retrieval.mk
+  a6c07fa68c0660e26317a487be4da554d900323c654e9ad8c96d3aa4cc70dcff  tools/gen/retrieval/fixtures/make_fixtures.sh
+  corpus/      = tools/gen/retrieval/fixtures/corpus/        (record set, SET.sha256 6eb04a1a7c048dd4358331a1d5ca47274431771b0cbfc5191262f0ddee1476db)
+  tasks/<t>/   = tools/gen/retrieval/fixtures/tasks/<t>/{requirement,prompt}   (hidden/ NOT vendored)
+  source_root/ = tools/gen/retrieval/fixtures/SOURCE at its repository path (for `source` digest checks)
+omega gen/abstract   937b033c78d087f1a0c64f28a29f4bab69f0a18a  (record schema v1; GENRET_RECHECK_SHA256 at a26be577)
+  9be17b6bc6f97c7420ced722bb258c420944bd87461097163df0992112ae6b53  tools/gen/abstract/RECORD_SCHEMA.md
+  05cec285f7b7b2be68b1db1287661513e7e4715da44909065bdd0829daac02b6  tools/gen/abstract/recheck.c
+
+expected/, recheck/ and RECHECK_SHA256 were produced by the real tools built from those commits in a scratch
+directory outside this tree, with the flags of omega mk/gen-retrieval.mk at a26be577 (gcc 13.3.0, aarch64):
+
+  S=$(mktemp -d); mkdir -p $S/ret; cd ~/omega
+  git archive a26be577 tools/gen/retrieval src/sha256.c src/sha256.h mk/gen-retrieval.mk | tar -x -C $S/ret
+  git show 937b033c78d087f1a0c64f28a29f4bab69f0a18a:tools/gen/abstract/recheck.c > $S/recheck.c   (sha256 05cec285...02b6)
+  cd $S/ret; F="-std=gnu11 -Wall -Wextra -Werror -D_GNU_SOURCE -Isrc"
+  cc $F '-DGENRET_RECHECK_SOURCE_SHA256="05cec285f7b7b2be68b1db1287661513e7e4715da44909065bdd0829daac02b6"' -O2 -o $S/genret tools/gen/retrieval/genret.c src/sha256.c
+  cc $F -O2 -o $S/recheck $S/recheck.c src/sha256.c        (sha256 41679de1f1d3cb78d179c418c0df4de174f0556b7c701ebb5af602e602970518, build-dependent)
+  sh tools/gen/retrieval/test_genret.sh $S/genret $S/recheck $S/recheck.c      -> test_genret: 268 passed, 0 failed
+  sh <this dir>/make_expected.sh $S/genret $S/recheck $S/out
+  cp -R $S/out/expected $S/out/recheck $S/out/RECHECK_SHA256 $S/out/OUTPUTS.sha256 <this dir>/
+
+OUTPUTS.sha256 (sha256 of every file under expected/ and recheck/, written by make_expected.sh from the real
+genret and recheck output) has sha256
+  c0dcbb28a0bffaf662ba82ce5e9e0a4b9ec5151aa7cd47992bd3936342458067  OUTPUTS.sha256
+and the tests refuse any expected/ or recheck/ file, added, missing or changed, that it does not list.
+
+recheck_sha256 in every expected receipt is that build's recheck binary digest. Cortex runs no binary: its
+validator is the Rust port of that recheck.c (src/gen_procedures/record.rs), proved verdict-identical on every
+mutant in recheck/, and the caller passes the pinned binary digest as GenQuery::recheck_sha256.
