@@ -64,7 +64,7 @@ enum Phase {
 /// of word bytes only is legal when the current word followed by it is still the start of some
 /// item. A token with one run of separators (optional word bytes, separators, optional word
 /// bytes) is legal when its word bytes before the separators complete an item (or it starts with
-/// the separator and that separator's item is printed), each of its separators is offered by the
+/// a separator run whose canonical first separator is printed), each of its separators is offered by the
 /// answer for the text before it, and its word bytes after them start an item of the answer
 /// after them. Blank runs are read in [`canonical_seps`] form, so all the whitespace tokens share
 /// a few answers: one cached oracle call per distinct (word bytes, canonical separators) prefix
@@ -135,6 +135,16 @@ impl<O: ItemOracle> OmegeseConstraint<O> {
             stats: Stats::default(),
         };
         c.restart();
+        if c.framing.mask_body && !c.header_text.is_empty() {
+            // Refuse a header the oracle refuses now, before the fence and header are written.
+            let h = c.header_text.clone();
+            if let Answer::Refused(line) = c.query(&h)? {
+                return Err(format!(
+                    "the oracle refuses the header ({line}): {:?}",
+                    String::from_utf8_lossy(&h)
+                ));
+            }
+        }
         Ok(c)
     }
 
@@ -152,11 +162,20 @@ impl<O: ItemOracle> OmegeseConstraint<O> {
     }
 
     /// True once the reply is complete: only the stop token is left to force (the controller
-    /// consumes it without showing it back) or it was emitted.
+    /// consumes it without showing it back), it was emitted, or (no fence) the last rule allowed
+    /// it, which it does only where the program may end.
     pub fn finished(&self) -> bool {
+        let stop = self.framing.stop_token;
         match &self.phase {
             Phase::Done => true,
-            Phase::Closing(q) => q.len() == 1 && q[0] == self.framing.stop_token,
+            Phase::Closing(q) => q.len() == 1 && q[0] == stop,
+            Phase::Body if self.framing.mask_body && self.framing.open_fence.is_none() => {
+                match &self.last {
+                    Some(StepRule::Force(t)) => *t == stop,
+                    Some(StepRule::Allow(set)) => set.binary_search(&stop).is_ok(),
+                    _ => false,
+                }
+            }
             _ => false,
         }
     }
@@ -322,15 +341,17 @@ impl<O: ItemOracle> OmegeseConstraint<O> {
                 }
                 Shape::OneBoundary { a_end, sep_end } => {
                     let (a, b) = (&t[..a_end], &t[sep_end..]);
+                    // Canonical first: a blank run holding a newline reads as that newline, so a
+                    // token like ` \n` must find the newline offered, not the space.
+                    let seps = canonical_seps(&t[a_end..sep_end]);
                     let first_ok = if a.is_empty() {
-                        here.sep_offered(t[0])
+                        here.sep_offered(seps[0])
                     } else {
                         here.completes(a)
                     };
                     if !first_ok {
                         continue;
                     }
-                    let seps = canonical_seps(&t[a_end..sep_end]);
                     if a.is_empty() && seps.len() == 1 && b.is_empty() {
                         // The separator's own item: exact by section 6.1.
                         allowed.push(id);
@@ -379,7 +400,9 @@ impl<O: ItemOracle> OmegeseConstraint<O> {
                         }
                     }
                     if allowed.is_empty() {
-                        // No token both opens the closing fence and marks it: force the closing.
+                        // Eof is the only item and no token both starts the closing text and
+                        // marks it with a backtick: force the closing. (When some body token is
+                        // legal but no marking token fits, eof waits for a later step.)
                         let q = self.closing_queue(0)?;
                         let first = q[0];
                         self.phase = Phase::Closing(q);

@@ -8,13 +8,15 @@
 
 mod common;
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
 use aien_inference_abi::generation::{Constraint, StepRule};
+use aien_omegese_constraint::word::is_sep;
 use aien_omegese_constraint::{
-    Framing, OmegeseConstraint, Shape, Signature, SubprocessOracle, TokenTable,
+    Answer, Framing, ItemOracle, OmegeseConstraint, Shape, Signature, SubprocessOracle, TokenTable,
 };
 use common::*;
 
@@ -48,6 +50,8 @@ struct Tally {
     canonical_ok: u64,
     refused_multi: u64,
     refused_other: Vec<String>,
+    checked: u64,
+    unsound: Vec<String>,
     forced: u64,
     calls: u64,
     masked_out_multi: u64,
@@ -64,6 +68,7 @@ fn walk(table: &Arc<TokenTable>, bin: &Path, stop: u32, text: &str, header: bool
         stop_token: stop,
     };
     let oracle = SubprocessOracle::new(bin).unwrap();
+    let mut check = SubprocessOracle::new(bin).unwrap();
     let mut k = OmegeseConstraint::new(table.clone(), oracle, framing).unwrap();
     let mut gen: Vec<u32> = Vec::new();
     loop {
@@ -86,6 +91,32 @@ fn walk(table: &Arc<TokenTable>, bin: &Path, stop: u32, text: &str, header: bool
             }
             StepRule::Allow(set) => {
                 t.masked += 1;
+                // Soundness: every allowed token that ends in a separator (the blank and bracket
+                // tokens among them) and about 8 others spread over the set must leave a prefix
+                // the oracle does not refuse.
+                let mut keys = HashSet::new();
+                let spread = (set.len() / 8).max(1);
+                for (i, &id) in set.iter().enumerate() {
+                    let Some(x) = table.text(id) else { continue };
+                    if x.contains(&b'`')
+                        || !(x.last().is_some_and(|&b| is_sep(b)) || i % spread == 0)
+                    {
+                        continue;
+                    }
+                    let mut p = prog.to_vec();
+                    p.extend_from_slice(x);
+                    if !keys.insert(normalize(&p)) {
+                        continue;
+                    }
+                    t.checked += 1;
+                    if let Answer::Refused(r) = check.next(&p).unwrap() {
+                        t.unsound.push(format!(
+                            "{:?} after {:?}: {r}",
+                            String::from_utf8_lossy(x),
+                            String::from_utf8_lossy(prog)
+                        ));
+                    }
+                }
                 if rest.is_empty() {
                     let close = set
                         .iter()
@@ -195,6 +226,8 @@ fn qwen_vocab_writes_every_dev_program_through_the_real_oracle() {
             all.canonical_ok += t.canonical_ok;
             all.refused_multi += t.refused_multi;
             all.refused_other.extend(t.refused_other);
+            all.checked += t.checked;
+            all.unsound.extend(t.unsound);
             all.forced += t.forced;
             all.calls += t.calls;
             all.masked_out_multi += t.masked_out_multi;
@@ -223,6 +256,16 @@ fn qwen_vocab_writes_every_dev_program_through_the_real_oracle() {
         us(all.times[n / 2]),
         us(all.times[n * 95 / 100]),
         us(all.times[n - 1])
+    );
+    println!(
+        "SOUNDNESS {} allowed continuations checked against the oracle, {} refused",
+        all.checked,
+        all.unsound.len()
+    );
+    assert!(
+        all.unsound.is_empty(),
+        "allowed tokens the oracle refuses: {:#?}",
+        all.unsound
     );
     assert!(
         all.refused_other.is_empty(),

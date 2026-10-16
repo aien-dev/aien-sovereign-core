@@ -5,9 +5,10 @@
 //! exit 1 with exactly one line starting `REFUSED omegese: `. [`ItemOracle`] is that contract as
 //! a trait; [`SubprocessOracle`] runs the real binary once per query.
 
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 /// One line of `omegese next --machine`. Let U be the word still being written.
@@ -113,16 +114,23 @@ fn parse_item(line: &str) -> Result<Item, String> {
     Ok(item)
 }
 
+/// How long one query may take before the process is killed and the query fails.
+pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// The real oracle: `<bin> next --machine /dev/stdin`, the prefix on stdin, one process per query.
-/// The binary's path is configuration (built from omega `tools/omegese/omegese.c`).
+/// The binary's path is configuration (built from omega `tools/omegese/omegese.c`). A query
+/// that has not answered within the timeout is killed and fails, which the generation loop
+/// handles through its rollback.
 pub struct SubprocessOracle {
     bin: PathBuf,
+    timeout: Duration,
     calls: u64,
     elapsed: Duration,
 }
 
 impl SubprocessOracle {
-    /// Checks that `bin` is a file; the first query proves it runs.
+    /// Checks that `bin` is a file; the first query proves it runs. The timeout is
+    /// [`DEFAULT_TIMEOUT`].
     pub fn new(bin: impl Into<PathBuf>) -> Result<Self, String> {
         let bin = bin.into();
         if !bin.is_file() {
@@ -130,9 +138,16 @@ impl SubprocessOracle {
         }
         Ok(Self {
             bin,
+            timeout: DEFAULT_TIMEOUT,
             calls: 0,
             elapsed: Duration::ZERO,
         })
+    }
+
+    /// The same oracle with another per-query timeout.
+    pub fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = timeout;
+        self
     }
 
     /// Queries made so far.
@@ -146,6 +161,11 @@ impl SubprocessOracle {
     }
 }
 
+fn read_all(mut r: impl Read) -> std::io::Result<Vec<u8>> {
+    let mut v = Vec::new();
+    r.read_to_end(&mut v).map(|_| v)
+}
+
 impl ItemOracle for SubprocessOracle {
     fn next(&mut self, prefix: &[u8]) -> Result<Answer, String> {
         let t = Instant::now();
@@ -157,28 +177,53 @@ impl ItemOracle for SubprocessOracle {
             .spawn()
             .map_err(|e| format!("spawn {}: {e}", self.bin.display()))?;
         let mut stdin = child.stdin.take().ok_or("oracle stdin missing")?;
-        // A writer thread, so a prefix larger than the pipe buffer cannot deadlock against stdout.
-        let out = std::thread::scope(|s| {
+        let stdout = child.stdout.take().ok_or("oracle stdout missing")?;
+        let stderr = child.stderr.take().ok_or("oracle stderr missing")?;
+        let timeout = self.timeout;
+        // One thread per pipe, so a prefix larger than the pipe buffer cannot deadlock against
+        // stdout; stdout closing (the process ending) is what the deadline waits for.
+        let (stdout, stderr, wrote, status) = std::thread::scope(|s| {
             let w = s.spawn(move || stdin.write_all(prefix));
-            let out = child.wait_with_output();
+            let e = s.spawn(move || read_all(stderr));
+            let (tx, rx) = mpsc::channel();
+            s.spawn(move || tx.send(read_all(stdout)));
+            let out = match rx.recv_timeout(timeout) {
+                Ok(out) => out,
+                Err(_) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(format!(
+                        "the oracle gave no answer within {timeout:?}; killed it"
+                    ));
+                }
+            };
+            let status = child
+                .wait()
+                .map_err(|e| format!("wait for the oracle: {e}"))?;
             let wrote = w
                 .join()
                 .map_err(|_| "oracle writer thread panicked".to_string())?;
-            wrote.map_err(|e| format!("write the prefix to the oracle: {e}"))?;
-            out.map_err(|e| format!("wait for the oracle: {e}"))
+            let err = e
+                .join()
+                .map_err(|_| "oracle stderr thread panicked".to_string())?
+                .unwrap_or_default();
+            let out = out.map_err(|e| format!("read the oracle's answer: {e}"))?;
+            Ok((out, err, wrote, status))
         })?;
         self.calls += 1;
-        let stdout = String::from_utf8(out.stdout).map_err(|_| "oracle stdout is not UTF-8")?;
-        let r = match out.status.code() {
-            Some(0) => parse_machine(&stdout, true),
-            Some(1) => parse_machine(&stdout, false),
-            c => Err(format!(
-                "oracle exit {c:?}: {}",
-                String::from_utf8_lossy(&out.stderr).trim()
-            )),
-        };
         self.elapsed += t.elapsed();
-        r
+        // The exit status first: a process that quit early also breaks the pipe it was fed by,
+        // and its own message says why.
+        let code = status.code();
+        if !matches!(code, Some(0 | 1)) {
+            return Err(format!(
+                "oracle exit {code:?}: {}",
+                String::from_utf8_lossy(&stderr).trim()
+            ));
+        }
+        wrote.map_err(|e| format!("write the prefix to the oracle: {e}"))?;
+        let stdout = String::from_utf8(stdout).map_err(|_| "oracle stdout is not UTF-8")?;
+        parse_machine(&stdout, code == Some(0))
     }
 }
 
@@ -241,5 +286,47 @@ mod tests {
         assert!(parse_machine("number x 1\n", true).is_err());
         assert!(parse_machine("space \n", true).is_err());
         assert!(parse_machine("tab\n", true).is_err());
+    }
+
+    /// A stand-in binary: a shell script with `body`, in a fresh scratch folder.
+    fn script(name: &str, body: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("omegese-oracle-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join(name);
+        std::fs::write(&p, format!("#!/bin/sh\n{body}\n")).unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        p
+    }
+
+    #[test]
+    fn a_hung_oracle_is_killed_at_the_deadline() {
+        let bin = script("hang", "exec sleep 30");
+        let mut o = SubprocessOracle::new(bin)
+            .unwrap()
+            .with_timeout(Duration::from_millis(200));
+        let t = Instant::now();
+        let e = o.next(b"fn f").unwrap_err();
+        assert!(e.contains("no answer within"), "{e}");
+        assert!(t.elapsed() < Duration::from_secs(5), "{:?}", t.elapsed());
+    }
+
+    #[test]
+    fn an_early_exit_reports_its_own_message() {
+        // The process quits without reading a prefix larger than the pipe buffer: its message
+        // is the error, not the broken pipe.
+        let bin = script("quit", "echo prefix too long >&2; exit 2");
+        let mut o = SubprocessOracle::new(bin).unwrap();
+        let e = o.next(&vec![b'a'; 1 << 20]).unwrap_err();
+        assert!(
+            e.contains("exit Some(2)") && e.contains("prefix too long"),
+            "{e}"
+        );
+        let bin = script("ok", "cat >/dev/null; echo eof");
+        let mut o = SubprocessOracle::new(bin).unwrap();
+        assert_eq!(
+            o.next(&vec![b'a'; 1 << 20]).unwrap(),
+            Answer::Items(vec![Item::Eof])
+        );
     }
 }

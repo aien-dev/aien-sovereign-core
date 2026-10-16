@@ -18,6 +18,6 @@ pub mod table;
 pub mod word;
 
 pub use constraint::{Framing, OmegeseConstraint, Stats};
-pub use oracle::{parse_machine, Answer, Item, ItemOracle, SubprocessOracle};
+pub use oracle::{parse_machine, Answer, Item, ItemOracle, SubprocessOracle, DEFAULT_TIMEOUT};
 pub use signature::Signature;
 pub use table::{Shape, TokenTable};

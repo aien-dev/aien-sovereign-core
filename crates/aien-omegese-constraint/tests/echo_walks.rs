@@ -133,6 +133,38 @@ fn exact_walks_write_the_one_program() {
     assert!(multi_refused > 0, "` a ` is refused where ` a` is legal");
 }
 
+/// The masked arm with no fence: the header is forced, the body masked, and eof is the stop token
+/// itself, so the reply is the program and the run ends on stop.
+#[test]
+fn the_unfenced_arm_ends_on_the_stop_token() {
+    let table = Arc::new(synthetic_table());
+    for seed in 0..6 {
+        for params in [greedy(64), sampled(64, seed as u64 + 31)] {
+            let arm = Framing {
+                open_fence: None,
+                ..full()
+            };
+            let mut k = OmegeseConstraint::new(table.clone(), ExactText::new(TARGET), arm).unwrap();
+            let (toks, o) = run_sn(
+                &mut ctl(256, seed % 2 == 1),
+                &prompt(9, seed),
+                &params,
+                Some(&mut k),
+            )
+            .unwrap();
+            assert_eq!(o.finish, FinishReason::Stop, "seed {seed}");
+            let program = k.program().to_vec();
+            assert_eq!(normalize(&program), TARGET.as_bytes(), "seed {seed}");
+            assert_eq!(
+                table.decode(&toks).unwrap(),
+                program,
+                "the reply is the program"
+            );
+            assert!(k.finished());
+        }
+    }
+}
+
 /// The fake oracle answers REFUSED (or breaks its contract) from its `n`th call on.
 struct FailAt<O> {
     inner: O,
@@ -163,7 +195,8 @@ fn an_oracle_refusal_goes_through_the_rollback() {
     let table = Arc::new(synthetic_table());
     let p = prompt(10, 3);
     for broken in [false, true] {
-        for n in [1, 4] {
+        // Call 1 is the header check when the constraint is built; call 2 is the first step.
+        for n in [2, 5] {
             let mut c = ctl(256, true);
             let oracle = FailAt {
                 inner: ExactText::new(TARGET),

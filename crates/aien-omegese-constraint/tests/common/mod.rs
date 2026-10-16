@@ -14,7 +14,7 @@ pub const STOP: u32 = 63;
 
 /// 64 tokens for the 64-token `EchoChainModel`: every single byte Omegese uses (so a mask is
 /// never empty), the fence, and multi-item tokens with one boundary (` add`, `end\n`, `a b`,
-/// `)\n`) and with two (` a `, `(b)`).
+/// `)\n`, and ` \n`, a blank run that reads as its newline) and with two (` a `, `(b)`).
 pub fn synthetic_texts() -> Vec<Option<Vec<u8>>> {
     let mut t: Vec<Option<Vec<u8>>> = Vec::new();
     for c in b'a'..=b'z' {
@@ -25,7 +25,7 @@ pub fn synthetic_texts() -> Vec<Option<Vec<u8>>> {
     }
     for s in [
         "_", "-", "=", " ", "\n", "(", ")", "`", "```", "end", "ret", "uint", " uint", " add",
-        " a", " b", "\n\n", ")\n", " (", "end\n", "a b", " a ", "(b)", "if", " 1", "\n```", "fn",
+        " a", " b", "\n\n", ")\n", " (", "end\n", "a b", " a ", "(b)", "if", " \n", "\n```", "fn",
     ] {
         t.push(Some(s.as_bytes().to_vec()));
     }
