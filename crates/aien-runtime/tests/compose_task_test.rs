@@ -323,6 +323,27 @@ z
     );
 }
 
+/// Issue #546: the filename prefix is ASCII, but a model reply is UTF-8.
+/// Invalid prefixes at a multi-byte boundary must be refused, never panic.
+#[test]
+fn file_proposal_rejects_multibyte_first_line_without_panicking() {
+    for invalid in [
+        "filenameé",
+        "ééééé",
+        "🎯🎯🎯",
+        "abcdefg中",
+    ] {
+        let reply = format!("{invalid}\\nbody\\n");
+        let err = check_file_proposal(&reply).unwrap_err();
+        assert!(err.contains("no filename line"), "{invalid:?}: {err}");
+        assert!(parse_file_proposal(&reply).is_none());
+    }
+    // A mixed-case ASCII key remains valid after the boundary fix.
+    let proposal = check_file_proposal("FILENAME: safe.md\\nbody\\n").unwrap();
+    assert_eq!(proposal.path, "safe.md");
+    assert_eq!(proposal.content, "body\\n");
+}
+
 #[test]
 #[cfg_attr(not(compose_linked), ignore = "needs librx_compose.a: stub build")]
 fn retry_is_capped_and_recorded() {
