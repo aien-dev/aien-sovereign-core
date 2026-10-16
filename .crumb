@@ -100,8 +100,8 @@
           "purpose": ""
         },
         {
-          "digest": "9dd16095e5063f9ee1535d140f0b52f3e50fed6ce3ce6abfe9a5856f941218ca",
-          "last_commit": "4204406",
+          "digest": "02da31bc5e62df634962dded0755fa258e72011582658da2b12db450246d77ee",
+          "last_commit": "7d8c7b7",
           "name": "scripts",
           "purpose": ""
         },
@@ -118,15 +118,15 @@
           "purpose": "Local CI sandbox exec contract (C8), aien-run user/caches install, Forgejo trigger hook, health "
         }
       ],
-      "children_root": "sha256:48f037f2d729c2a2755272cd382e4c609531bd288fbb303d248c7a18325f9598",
-      "compiled_at": "2026-10-16T01:35:23Z",
+      "children_root": "sha256:262c05d9c8ff17d17bc0dcef128f78b79376793a6fbbfe7bbd4398464bc75824",
+      "compiled_at": "2026-10-16T02:07:09Z",
       "compiler": "crumb-compile/1",
-      "digest": "sha256:40208ab8d469e43e19dd7bfc8e31d8872facc6de05080c914e602f00fbfd27dc",
+      "digest": "sha256:7bd70572989c763292b0c71a4e67a4b9ff1c099e1c43fbca12315f4fc353d96b",
       "evidence_files": 1563,
-      "evidence_root": "sha256:ea8e5472187989c62214ab9e44b9ceb8d1278998643fd5d66a6226a011ddbb1a",
-      "files": 5657,
-      "generated_at_commit": "c565c99a3524fa77d35e583181e980ad13095e6f",
-      "source_tree": "sha256:4ed8bd9b59f5b458496ae40c4d9ebbe0c3e08169429bfda63309d299bf1a7c66"
+      "evidence_root": "sha256:3e00a48dabaf5a12ee5b4f66a417e0f4396eb8309ede44f3faa2624c1299b25b",
+      "files": 5841,
+      "generated_at_commit": "9081ea0c937472afdbc5e4e85d8eeae1803e2471",
+      "source_tree": "sha256:3e77f75f1b05570bebd1816e8266cfa7ad5e16412d91477af42bf37f24a91c17"
     }
   },
   "history": [],
