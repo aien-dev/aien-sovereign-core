@@ -20,8 +20,9 @@ use aien_runtime::approved_auth::{desk_key_path, AuthorizeBinding, DeskKey};
 use aien_runtime::control::{ControlCommand, ControlResponse, DeskProof};
 use aien_runtime::effects::MintRequest;
 use aien_runtime::provisional::{
-    classify_approved, classify_authorize, DeliverError, Delivered, FenceError, FenceKey,
-    PrepAdapter, PrepError, PrepOperation, DEFERRED_CAPACITY,
+    classify_approved, classify_authorize, deferred_journal_path, DeliverError, Delivered,
+    FenceError, FenceKey, PrepAdapter, PrepError, PrepOperation, DEFERRED_CAPACITY,
+    DEFERRED_MAX_BYTES,
 };
 use aien_runtime::{ComposeBridge, ComposeProposer};
 use serde_json::{json, Value};
@@ -30,8 +31,8 @@ use spark_harness::completion::CompletionSubmission;
 use spark_harness::execution::TaskState;
 use spark_harness::readiness::{InterfaceSubmission, OperationClass, ProofClaim, ReadinessLevel};
 use spark_harness::scheduler::{
-    Clock, CommitResult, CommitStage, Effects, Event, EventKind, Outcome, ProvisionalConfig,
-    ResourceLimits, ResourceRequest, SchedError,
+    Clock, CommitResult, Effects, Event, EventKind, Outcome, ProvisionalConfig, ResourceLimits,
+    ResourceRequest, SchedError,
 };
 use spark_harness::{HarnessEngine, WorkflowState};
 use std::collections::BTreeMap;
@@ -615,10 +616,7 @@ fn failed_producer_discards_the_dependent_result() {
         Err(PrepError::StaleGeneration { .. })
     ));
     assert!(matches!(
-        fence_err(
-            h.adapter
-                .fenced_for_tests("b", 1, CommitStage::Commit, |_| (), committed)
-        ),
+        fence_err(h.adapter.fenced_for_tests("b", 1, |_| (), committed)),
         FenceError::StaleGeneration { .. }
     ));
 }
@@ -762,13 +760,10 @@ fn invalid_receipts_are_refused_by_the_event_gate_and_the_fence() {
     std::fs::write(&file, text.replacen("spark-harness", "spark-harnesz", 1)).unwrap();
     let mut ran = false;
     assert!(matches!(
-        fence_err(h.adapter.fenced_for_tests(
-            "b",
-            1,
-            CommitStage::Commit,
-            |_| ran = true,
-            committed
-        )),
+        fence_err(
+            h.adapter
+                .fenced_for_tests("b", 1, |_| ran = true, committed)
+        ),
         FenceError::CompletionInvalid { .. }
     ));
     assert!(!ran);
@@ -787,19 +782,16 @@ fn invalid_receipts_are_refused_by_the_event_gate_and_the_fence() {
     )
     .unwrap();
     assert!(matches!(
-        fence_err(h.adapter.fenced_for_tests(
-            "b",
-            1,
-            CommitStage::Commit,
-            |_| ran = true,
-            committed
-        )),
+        fence_err(
+            h.adapter
+                .fenced_for_tests("b", 1, |_| ran = true, committed)
+        ),
         FenceError::Scheduler(SchedError::Proof { .. })
     ));
     assert!(!ran);
     std::fs::write(&fa, &oa).unwrap();
     h.adapter
-        .fenced_for_tests("b", 1, CommitStage::Commit, |_| ran = true, committed)
+        .fenced_for_tests("b", 1, |_| ran = true, committed)
         .unwrap();
     assert!(ran);
 }
@@ -839,7 +831,7 @@ fn early_fence_alone_commits_nothing_and_writes_nothing() {
         };
         assert!(matches!(
             fence_err(h.adapter.authorize("b", g, &c.bridge, &req, None, None)),
-            FenceError::NotCommitted {
+            FenceError::NotCommittable {
                 state: TaskState::Provisional,
                 ..
             }
@@ -904,13 +896,9 @@ fn unauthorized_effects_are_still_refused_by_the_canonical_path() {
     assert_eq!(h.state("b"), TaskState::Aborted);
     assert!(!h.ws().join(PATH).exists());
     // ComposeAuthorize through the fence, no desk proof and no compose
-    // commit: refused by the existing authorize rules. The authorize stage
-    // needs the commit stage committed, so that stage runs first.
+    // commit: refused by the existing authorize rules.
     h.register("d", &["a"]);
     h.finish("d");
-    h.adapter
-        .fenced_for_tests("d", 1, CommitStage::Commit, |_| (), committed)
-        .unwrap();
     let req = MintRequest {
         cx_promotion: 1,
         proposal_sha256: sha(b"never committed"),
@@ -1247,7 +1235,6 @@ fn the_commit_decision_freezes_the_inputs_without_holding_any_lock() {
     let fenced = h.adapter.fenced_for_tests(
         "b",
         1,
-        CommitStage::Commit,
         |_| {
             let during = adapter.state("b");
             // Each probe runs on its own thread and must finish while the
@@ -1303,7 +1290,7 @@ fn the_commit_decision_freezes_the_inputs_without_holding_any_lock() {
             let a4 = Arc::clone(&adapter);
             let (tx2, rx2) = mpsc::channel();
             std::thread::spawn(move || {
-                let r = a4.fenced_for_tests("b", 1, CommitStage::Commit, |_| (), committed);
+                let r = a4.fenced_for_tests("b", 1, |_| (), committed);
                 tx2.send(format!("{:?}", r.map(|_| "ran"))).unwrap();
             });
             let second = rx2
@@ -1338,10 +1325,7 @@ fn the_commit_decision_freezes_the_inputs_without_holding_any_lock() {
     assert_eq!(h.adapter.deferred_len(), 0);
     assert_eq!((h.state("b"), h.gen("b")), (TaskState::Committed, 1));
     assert!(matches!(
-        fence_err(
-            h.adapter
-                .fenced_for_tests("b", 1, CommitStage::Commit, |_| (), committed)
-        ),
+        fence_err(h.adapter.fenced_for_tests("b", 1, |_| (), committed)),
         FenceError::AlreadySubmitted { .. }
     ));
 }
@@ -1359,26 +1343,17 @@ fn a_panicking_commit_is_uncertain_and_never_runs_again() {
     assert_eq!(h.state("c"), TaskState::Provisional);
     let adapter = Arc::clone(&h.adapter);
     let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        adapter.fenced_for_tests(
-            "b",
-            1,
-            CommitStage::Commit,
-            |_| panic!("commit blew up"),
-            committed,
-        )
+        adapter.fenced_for_tests("b", 1, |_| panic!("commit blew up"), committed)
     }));
     assert!(r.is_err(), "the panic is resumed");
     assert_eq!(h.state("b"), TaskState::CommitUncertain);
     assert_eq!(h.state("c"), TaskState::Blocked, "consumers revoked");
     let mut ran = false;
     assert!(matches!(
-        fence_err(h.adapter.fenced_for_tests(
-            "b",
-            1,
-            CommitStage::Commit,
-            |_| ran = true,
-            committed
-        )),
+        fence_err(
+            h.adapter
+                .fenced_for_tests("b", 1, |_| ran = true, committed)
+        ),
         FenceError::AlreadySubmitted { .. }
     ));
     assert!(!ran);
@@ -1395,10 +1370,7 @@ fn a_failed_commit_aborts_the_task_and_a_new_generation_may_commit() {
     let failed = |_: &()| CommitResult::Failed {
         reason: "refused before any write".into(),
     };
-    let out = h
-        .adapter
-        .fenced_for_tests("b", 1, CommitStage::Commit, |_| (), failed)
-        .unwrap();
+    let out = h.adapter.fenced_for_tests("b", 1, |_| (), failed).unwrap();
     assert!(matches!(out.result, CommitResult::Failed { .. }));
     assert_eq!(h.state("b"), TaskState::Aborted);
     h.ok(EventKind::Retry {
@@ -1409,7 +1381,7 @@ fn a_failed_commit_aborts_the_task_and_a_new_generation_may_commit() {
     h.finish("b");
     let out = h
         .adapter
-        .fenced_for_tests("b", 2, CommitStage::Commit, |_| (), committed)
+        .fenced_for_tests("b", 2, |_| (), committed)
         .unwrap();
     assert!(out.record_error.is_none());
     assert_eq!(h.state("b"), TaskState::Committed);
@@ -1579,23 +1551,22 @@ async fn the_daemon_fences_bound_requests_and_runs_unbound_ones_unchanged() {
     let bound = c.approval("req-bound");
     let free = c.approval("req-free");
     let commit_key = FenceKey::Approval(bound.approval_id.clone());
-    let early_grant = FenceKey::Proposal(sha(b"bound grant"));
+    let grant_key = FenceKey::Proposal(sha(b"bound grant"));
     h.adapter.bind_approval(commit_key.clone(), "b", 1).unwrap();
-    h.adapter
-        .bind_approval(early_grant.clone(), "b", 1)
-        .unwrap();
+    h.adapter.bind_approval(grant_key.clone(), "b", 1).unwrap();
     assert!(h
         .adapter
         .binding(&FenceKey::Approval(free.approval_id.clone()))
         .is_none());
 
-    // Bound, while B is provisional: the fence refuses and nothing runs.
+    // Bound, while B is provisional: the fence refuses both kinds and
+    // nothing runs.
     let compose_dir = c.bridge.dir().to_path_buf();
     let before = (tree(&h.ws()), tree(&compose_dir));
     let r = send(approved(&bound)).await;
     assert!(fence_refused(&r, "NotCommittable"), "{r:?}");
     let r = send(authorize(&sha(b"bound grant"))).await;
-    assert!(fence_refused(&r, "NotCommitted"), "{r:?}");
+    assert!(fence_refused(&r, "NotCommittable"), "{r:?}");
     assert_eq!(
         (tree(&h.ws()), tree(&compose_dir)),
         before,
@@ -1623,13 +1594,11 @@ async fn the_daemon_fences_bound_requests_and_runs_unbound_ones_unchanged() {
         "unbound runs touch no task"
     );
 
-    // Once A and B are final the grant is still refused: its stage needs
-    // the commit stage committed first.
+    // Once A and B are final the bound approval passes the fence and the
+    // canonical path decides: the World commit and its own grant, in one
+    // fenced call.
     h.finish("a");
     h.finish("b");
-    let r = send(authorize(&sha(b"bound grant"))).await;
-    assert!(fence_refused(&r, "NotCommitted"), "{r:?}");
-    // The bound approval passes the fence and the canonical path decides.
     let r = send(approved(&bound)).await;
     assert!(canonical_approved(&r), "{r:?}");
     let report = match &r {
@@ -1641,26 +1610,28 @@ async fn the_daemon_fences_bound_requests_and_runs_unbound_ones_unchanged() {
         ControlResponse::ComposeApprovedRefused(_) if !aien_omega_compose::LINKED => None,
         other => panic!("unexpected answer: {other:?}"),
     };
+    // Either way B ended, so M2 dropped both of its bindings.
+    assert!(h.adapter.binding(&commit_key).is_none());
+    assert!(h.adapter.binding(&grant_key).is_none());
+    assert_eq!(h.adapter.inspect(|s| s.approvals_len()), 0);
     let Some(report) = report else {
         assert_eq!(h.state("b"), TaskState::Aborted);
-        // A failed commit keeps the binding (fail closed): a second bound
-        // request is refused and never runs, and so is the grant.
-        assert!(h.adapter.binding(&commit_key).is_some());
+        // Unbound now: a retry is the original call, refused the same way,
+        // and touches no task.
         let r = send(approved(&bound)).await;
-        assert!(fence_refused(&r, "AlreadySubmitted"), "{r:?}");
-        let r = send(authorize(&sha(b"bound grant"))).await;
-        assert!(fence_refused(&r, "NotCommitted"), "{r:?}");
+        assert!(
+            matches!(&r, ControlResponse::ComposeApprovedRefused(_)),
+            "{r:?}"
+        );
+        assert_eq!(h.state("b"), TaskState::Aborted);
         let _ = client.send_command(ControlCommand::Shutdown).await;
         let _ = tokio::time::timeout(Duration::from_secs(5), server).await;
         return;
     };
     assert_eq!(h.state("b"), TaskState::Committed);
-    let committed_stage = |h: &H| h.adapter.inspect(|s| s.task("b").unwrap().committed_stage);
-    assert_eq!(committed_stage(&h), Some(CommitStage::Commit));
-    // The commit stage committed, so its binding is dropped: an exact retry
-    // goes to the canonical path, whose replay ledger answers it without a
-    // second run.
-    assert!(h.adapter.binding(&commit_key).is_none());
+    assert!(report.approved_grant.is_some(), "{report:?}");
+    // An exact retry goes to the canonical path, whose replay ledger
+    // answers it without a second run.
     let r = send(approved(&bound)).await;
     match &r {
         ControlResponse::ComposeApprovedResult(rep) => {
@@ -1669,12 +1640,20 @@ async fn the_daemon_fences_bound_requests_and_runs_unbound_ones_unchanged() {
         }
         other => panic!("want ALREADY_COMMITTED, got {other:?}"),
     }
-    // The grant against that commit: bound to the authorize stage, it
-    // passes the fence (re-verified) and the canonical mint decides.
+    // No later grant stage exists for this flow. M2 refuses to bind one to
+    // the ended task, and the canonical mint refuses a desk-signed grant
+    // against the approved commit: the approved path writes no
+    // `compose_commit` record (compose/bridge.rs `run_task_inner`), which
+    // `ComposeAuthorize` requires (effects.rs).
     let digest = report.compose_proposal_sha256.clone();
     let cx = report.grant_links[0];
-    let grant_key = FenceKey::Proposal(digest.clone());
-    h.adapter.bind_approval(grant_key.clone(), "b", 1).unwrap();
+    let late = h
+        .adapter
+        .bind_approval(FenceKey::Proposal(digest.clone()), "b", 1);
+    assert!(
+        matches!(late, Err(SchedError::WrongState { .. })),
+        "{late:?}"
+    );
     let key = DeskKey::load(&desk_key_path(c.bridge.dir())).unwrap();
     let nonce = format!("m3-grant-{cx}");
     let mac = key.sign_authorize(&AuthorizeBinding {
@@ -1688,57 +1667,180 @@ async fn the_daemon_fences_bound_requests_and_runs_unbound_ones_unchanged() {
         nonce: nonce.clone(),
         desk_key_id: key.id().into(),
     });
-    let grant = ControlCommand::ComposeAuthorize {
+    let r = send(ControlCommand::ComposeAuthorize {
         cx_promotion: cx,
-        proposal_sha256: digest.clone(),
+        proposal_sha256: digest,
         workspace: c.ws.clone(),
         approver: "drake".into(),
         constraints: vec![],
         desk_proof: Some(DeskProof { nonce, mac }),
         objective_id: None,
-    };
-    // The approved path already wrote its own grant inside the commit
-    // (approved.rs `approved_grant`), and it writes no `compose_commit`
-    // record, which `ComposeAuthorize` requires (effects.rs, only a proposal
-    // committed by `aien compose propose`). So the grant passes the fence
-    // and the canonical mint refuses it before any write.
-    assert!(report.approved_grant.is_some(), "{report:?}");
-    let r = send(grant.clone()).await;
+    })
+    .await;
     match &r {
         ControlResponse::Error(e) => {
             assert!(e.starts_with("EFFECT_REFUSED NotAuthorized"), "{e}")
         }
         other => panic!("want the canonical NotAuthorized refusal, got {other:?}"),
     }
-    // Refused before any write: the commit stands, the grant stage is not
-    // committed, and the bindings stay (fail closed).
     assert_eq!(h.state("b"), TaskState::Committed);
-    assert_eq!(committed_stage(&h), Some(CommitStage::Commit));
-    assert!(h.adapter.binding(&grant_key).is_some());
-    let r = send(grant).await;
-    assert!(fence_refused(&r, "AlreadySubmitted"), "{r:?}");
-    // In process, both stages of this generation are spent.
+    // In process the generation is spent.
     assert!(matches!(
         fence_err(h.adapter.submit_approved("b", 1, &c.hook, &bound, &c.ws)),
-        FenceError::AlreadySubmitted {
-            stage: CommitStage::Commit,
-            ..
-        }
+        FenceError::AlreadySubmitted { .. }
     ));
-    let req = MintRequest {
-        cx_promotion: cx,
-        proposal_sha256: digest,
-        workspace: c.ws.clone(),
-        approver: "drake".into(),
-        constraints: vec![],
+
+    let _ = client.send_command(ControlCommand::Shutdown).await;
+    let _ = tokio::time::timeout(Duration::from_secs(5), server).await;
+}
+
+// The model proposal of the `RunComposeTask` flow, as in
+// provenance_link_test.rs.
+const RUN_GOAL: &str = "write the note";
+const RUN_PROPOSAL: &str = "filename: NOTES.md\nkeep every change inside the workspace\n";
+const RUN_CONTENT: &str = "keep every change inside the workspace\n";
+
+fn model_proposer() -> ComposeProposer {
+    Arc::new(|_: &str, _: Duration| {
+        Ok(aien_runtime::compose::Generation {
+            text: RUN_PROPOSAL.to_string(),
+            tokens: 3,
+            finish_reason: Some("eos".into()),
+            token_ids: Some(vec![11, 12, 13]),
+            prompt_tokens: Some(5),
+            prompt_ids_sha256: Some(aien_runtime::compose::token_ids_sha256(&[1, 2, 3, 4, 5])),
+            decoding: Some(aien_inference_abi::DecodeObservation {
+                greedy_tokens: 3,
+                ..Default::default()
+            }),
+            ops: Some(aien_inference_abi::OpEvidence {
+                backend: "reference-cpu".into(),
+                native_fallbacks: 0,
+                reference_runs: 0,
+                report: "OP_REPORT native=[] reference=[] native_fallbacks=[] reference_runs=[]"
+                    .into(),
+                gpu_executions: None,
+            }),
+        })
+    })
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_bound_grant_after_an_unfenced_compose_run_mints_through_the_fence() {
+    let _home = home_guard::home_slot();
+    let mut h = H::new(cfg(true, 4));
+    let home = h.tmp.path().join("compose");
+    DeskKey::create(&desk_key_path(&home)).unwrap();
+    let bridge = Arc::new(ComposeBridge::new(
+        home.clone(),
+        model_proposer(),
+        "test:m3-model",
+    ));
+    let ws = std::fs::canonicalize(h.ws()).unwrap().display().to_string();
+    let socket = h.tmp.path().join("g.sock");
+    let (client, server) = daemon(&socket, bridge.clone(), h.adapter.clone()).await;
+    let send = |cmd: ControlCommand| {
+        let client = &client;
+        async move { client.send_command(cmd).await.unwrap() }
     };
-    assert!(matches!(
-        fence_err(h.adapter.authorize("b", 1, &c.bridge, &req, None, None)),
-        FenceError::AlreadySubmitted {
-            stage: CommitStage::Authorize,
-            ..
+    h.register("a", &[]);
+    h.register("b", &["a"]);
+    h.publish("a", 1);
+    let digest = sha(RUN_PROPOSAL.as_bytes());
+    let key = FenceKey::Proposal(digest.clone());
+    h.adapter.bind_approval(key.clone(), "b", 1).unwrap();
+
+    // The model run has no binding kind: it runs unfenced, whatever B's
+    // state, and records the compose commit the grant needs.
+    let r = send(ControlCommand::RunComposeTask {
+        context: None,
+        goal: RUN_GOAL.into(),
+        workspace: ws.clone(),
+    })
+    .await;
+    let cx = match &r {
+        ControlResponse::ComposeTaskResult(rep) if aien_omega_compose::LINKED => {
+            let v = serde_json::to_value(&**rep).unwrap();
+            assert_eq!(v["committed"], true, "{v}");
+            assert!(v["compose_commit"].as_u64().is_some(), "{v}");
+            v["cx_promotion"].as_u64().unwrap()
         }
-    ));
+        ControlResponse::Error(e) if !aien_omega_compose::LINKED => {
+            assert!(e.ends_with("is not linked (stub build)"), "{e}");
+            1
+        }
+        other => panic!("unexpected run answer: {other:?}"),
+    };
+    assert_eq!(h.state("b"), TaskState::Provisional);
+    let desk = DeskKey::load(&desk_key_path(&home)).unwrap();
+    let grant = |nonce: &str| {
+        let mac = desk.sign_authorize(&AuthorizeBinding {
+            cx_promotion: cx,
+            proposal_sha256: digest.clone(),
+            path: PATH.into(),
+            content_sha256: sha(RUN_CONTENT.as_bytes()),
+            workspace: ws.clone(),
+            approver: "drake".into(),
+            constraints: vec![],
+            nonce: nonce.into(),
+            desk_key_id: desk.id().into(),
+        });
+        ControlCommand::ComposeAuthorize {
+            cx_promotion: cx,
+            proposal_sha256: digest.clone(),
+            workspace: ws.clone(),
+            approver: "drake".into(),
+            constraints: vec![],
+            desk_proof: Some(DeskProof {
+                nonce: nonce.into(),
+                mac,
+            }),
+            objective_id: None,
+        }
+    };
+
+    // Bound, while B is provisional: the grant is the fenced call and is
+    // refused; nothing is written.
+    let before = (tree(Path::new(&ws)), tree(&home));
+    let r = send(grant("m3-run-early")).await;
+    assert!(fence_refused(&r, "NotCommittable"), "{r:?}");
+    assert_eq!(
+        (tree(Path::new(&ws)), tree(&home)),
+        before,
+        "a fenced grant wrote nothing"
+    );
+
+    // Final: the grant passes the fence and the canonical mint decides.
+    h.finish("a");
+    h.finish("b");
+    let r = send(grant("m3-run-final")).await;
+    if aien_omega_compose::LINKED {
+        match &r {
+            ControlResponse::ComposeNoted(_) => {}
+            other => panic!("want the grant minted, got {other:?}"),
+        }
+        assert_eq!(h.state("b"), TaskState::Committed);
+    } else {
+        match &r {
+            ControlResponse::Error(e) => assert!(
+                e.starts_with("compose home ") && e.ends_with("is not linked (stub build)"),
+                "{e}"
+            ),
+            other => panic!("the stub authorize must refuse: {other:?}"),
+        }
+        // Not an `EFFECT_REFUSED`: classified uncertain (fail closed).
+        assert_eq!(h.state("b"), TaskState::CommitUncertain);
+    }
+    // B ended: the binding is dropped and the retry is the original call.
+    assert!(h.adapter.binding(&key).is_none());
+    let r = send(grant("m3-run-final")).await;
+    match &r {
+        ControlResponse::Error(e) if aien_omega_compose::LINKED => {
+            assert!(e.starts_with("EFFECT_REFUSED "), "{e}")
+        }
+        ControlResponse::Error(e) => assert!(e.ends_with("is not linked (stub build)"), "{e}"),
+        other => panic!("a second grant must be refused: {other:?}"),
+    }
 
     let _ = client.send_command(ControlCommand::Shutdown).await;
     let _ = tokio::time::timeout(Duration::from_secs(5), server).await;
@@ -1792,144 +1894,7 @@ async fn a_binding_survives_a_daemon_restart_and_the_request_stays_fenced() {
 }
 
 #[test]
-fn the_grant_is_a_second_fenced_stage_after_the_commit() {
-    let mut h = H::journaled(cfg(true, 4));
-    h.register("a", &[]);
-    h.register("b", &["a"]);
-    h.publish("a", 1);
-    h.finish("a");
-    h.finish("b");
-    let mut ran = false;
-    // The grant before the commit: refused, nothing runs.
-    assert!(matches!(
-        fence_err(h.adapter.fenced_for_tests(
-            "b",
-            1,
-            CommitStage::Authorize,
-            |_| ran = true,
-            committed
-        )),
-        FenceError::NotCommitted {
-            state: TaskState::Committable,
-            ..
-        }
-    ));
-    assert!(!ran);
-    let out = h
-        .adapter
-        .fenced_for_tests("b", 1, CommitStage::Commit, |_| (), committed)
-        .unwrap();
-    assert!(out.record_error.is_none());
-    let stage = |h: &H| h.adapter.inspect(|s| s.task("b").unwrap().committed_stage);
-    assert_eq!(
-        (h.state("b"), stage(&h)),
-        (TaskState::Committed, Some(CommitStage::Commit))
-    );
-    // The grant: re-verified (the proof names the final producer) and run.
-    let out = h
-        .adapter
-        .fenced_for_tests(
-            "b",
-            1,
-            CommitStage::Authorize,
-            |p| {
-                ran = true;
-                p.producers.len()
-            },
-            committed,
-        )
-        .unwrap();
-    assert!(ran);
-    assert_eq!(out.outcome, 1);
-    assert_eq!(out.proof.producers[0].level, ReadinessLevel::FinalVerified);
-    assert_eq!(
-        (h.state("b"), stage(&h)),
-        (TaskState::Committed, Some(CommitStage::Authorize))
-    );
-    // Each stage runs once per generation.
-    for s in [CommitStage::Commit, CommitStage::Authorize] {
-        match fence_err(h.adapter.fenced_for_tests("b", 1, s, |_| (), committed)) {
-            FenceError::AlreadySubmitted { stage, .. } => assert_eq!(stage, s),
-            other => panic!("want AlreadySubmitted, got {other}"),
-        }
-    }
-    // A new process has no in-memory record; the journaled stages refuse
-    // both calls before they run.
-    let revoked = h.restart(cfg(true, 4));
-    assert!(revoked.is_empty(), "{revoked:?}");
-    let mut ran = false;
-    assert!(matches!(
-        fence_err(h.adapter.fenced_for_tests(
-            "b",
-            1,
-            CommitStage::Authorize,
-            |_| ran = true,
-            committed
-        )),
-        FenceError::NotCommitted {
-            state: TaskState::Committed,
-            ..
-        }
-    ));
-    assert!(matches!(
-        fence_err(h.adapter.fenced_for_tests(
-            "b",
-            1,
-            CommitStage::Commit,
-            |_| ran = true,
-            committed
-        )),
-        FenceError::NotCommittable {
-            state: TaskState::Committed,
-            ..
-        }
-    ));
-    assert!(!ran);
-}
-
-#[test]
-fn a_grant_whose_producer_stopped_verifying_is_refused() {
-    let mut h = H::new(cfg(true, 4));
-    h.register("a", &[]);
-    h.register("b", &["a"]);
-    h.publish("a", 1);
-    h.finish("a");
-    h.finish("b");
-    h.adapter
-        .fenced_for_tests("b", 1, CommitStage::Commit, |_| (), committed)
-        .unwrap();
-    let ra = h
-        .adapter
-        .inspect(|s| s.task("a").unwrap().completion.clone().unwrap().receipt_id);
-    let file = h
-        .engine
-        .completion_store
-        .join(aien_proof::evidence::RECEIPT_DIR)
-        .join(format!("{ra}.json"));
-    let original = std::fs::read(&file).unwrap();
-    let text = String::from_utf8(original.clone()).unwrap();
-    std::fs::write(&file, text.replacen("spark-harness", "spark-harnesz", 1)).unwrap();
-    let mut ran = false;
-    assert!(matches!(
-        fence_err(h.adapter.fenced_for_tests(
-            "b",
-            1,
-            CommitStage::Authorize,
-            |_| ran = true,
-            committed
-        )),
-        FenceError::Scheduler(SchedError::Proof { .. })
-    ));
-    assert!(!ran);
-    std::fs::write(&file, &original).unwrap();
-    h.adapter
-        .fenced_for_tests("b", 1, CommitStage::Authorize, |_| ran = true, committed)
-        .unwrap();
-    assert!(ran);
-}
-
-#[test]
-fn a_restart_during_the_grant_is_uncertain_and_never_runs_it_again() {
+fn a_restart_during_a_commit_is_uncertain_and_never_runs_it_again() {
     let mut h = H::journaled(cfg(true, 4));
     h.register("a", &[]);
     h.register("b", &["a"]);
@@ -1939,56 +1904,43 @@ fn a_restart_during_the_grant_is_uncertain_and_never_runs_it_again() {
     h.finish("a");
     h.finish("b");
     assert_eq!(h.state("c"), TaskState::Provisional);
-    h.adapter
-        .fenced_for_tests("b", 1, CommitStage::Commit, |_| (), committed)
-        .unwrap();
     let journal = h.tmp.path().join("journal.jsonl");
-    let copy = h.tmp.path().join("journal-mid-grant.jsonl");
+    let copy = h.tmp.path().join("journal-mid-commit.jsonl");
     let store = h.engine.completion_store.clone();
     let ticks = Arc::clone(&h.ticks);
-    // The daemon dies while the grant runs: its journal at that moment is
+    // The daemon dies while the commit runs: its journal at that moment is
     // opened by a new process.
     let out = h
         .adapter
         .fenced_for_tests(
             "b",
             1,
-            CommitStage::Authorize,
             |_| {
                 std::fs::copy(&journal, &copy).unwrap();
                 // The audit's own revocations: settling the interrupted
-                // grant is not one of them (its consumers are revoked by
+                // commit is not one of them (its consumers are revoked by
                 // the settled outcome itself, checked below).
                 let (a, _audit) =
                     PrepAdapter::open(cfg(true, 4), &store, &copy, clock(&ticks)).unwrap();
                 let mut ran = false;
-                let grant = a
-                    .fenced_for_tests("b", 1, CommitStage::Authorize, |_| ran = true, committed)
-                    .err();
-                let commit = a
-                    .fenced_for_tests("b", 1, CommitStage::Commit, |_| ran = true, committed)
-                    .err();
-                (a.state("b"), a.generation("c"), grant, commit, ran)
+                let again = a.fenced_for_tests("b", 1, |_| ran = true, committed).err();
+                (a.state("b"), a.generation("c"), again, ran)
             },
             committed,
         )
         .unwrap();
-    let (state, gen_c, grant, commit, ran) = out.outcome;
+    let (state, gen_c, again, ran) = out.outcome;
     assert_eq!(state, Some(TaskState::CommitUncertain));
     assert_eq!(gen_c, Some(2), "the consumer was revoked");
     assert!(
         matches!(
-            grant,
-            Some(FenceError::NotCommitted {
+            again,
+            Some(FenceError::NotCommittable {
                 state: TaskState::CommitUncertain,
                 ..
             })
         ),
-        "{grant:?}"
-    );
-    assert!(
-        matches!(commit, Some(FenceError::NotCommittable { .. })),
-        "{commit:?}"
+        "{again:?}"
     );
     assert!(!ran, "the restarted process ran nothing");
     // The process that did not die records its outcome as usual.
@@ -2020,7 +1972,6 @@ fn a_revoke_during_a_commit_is_applied_after_the_outcome() {
         .fenced_for_tests(
             "b",
             1,
-            CommitStage::Commit,
             |_| {
                 let first = adapter.deliver(revoke("revoke-a", "withdrawn"));
                 let again = adapter.deliver(revoke("revoke-a", "withdrawn"));
@@ -2089,7 +2040,6 @@ fn an_event_held_by_another_running_commit_stays_queued() {
         .fenced_for_tests(
             "y",
             1,
-            CommitStage::Commit,
             |_| {
                 // Held back by y's commit.
                 let held = adapter.deliver(Event {
@@ -2103,7 +2053,7 @@ fn an_event_held_by_another_running_commit_stays_queued() {
                 // b's whole commit runs and ends while y still commits: its
                 // drain must keep the event y still refuses.
                 let b = adapter
-                    .fenced_for_tests("b", 1, CommitStage::Commit, |_| (), committed)
+                    .fenced_for_tests("b", 1, |_| (), committed)
                     .map(|f| f.redelivered.len());
                 (held, b, adapter.deferred_len(), adapter.generation("x"))
             },
@@ -2142,7 +2092,6 @@ fn the_deferred_queue_is_bounded_and_fails_closed() {
         .fenced_for_tests(
             "b",
             1,
-            CommitStage::Commit,
             |_| {
                 let mut answers = Vec::new();
                 for i in 0..=DEFERRED_CAPACITY {
@@ -2202,7 +2151,6 @@ fn the_fence_events_are_refused_by_deliver() {
             EventKind::BeginCommit {
                 task: "b".into(),
                 generation: 1,
-                stage: CommitStage::Commit,
                 completion: claim,
                 producers: BTreeMap::new(),
             },
@@ -2212,7 +2160,6 @@ fn the_fence_events_are_refused_by_deliver() {
             EventKind::CommitOutcome {
                 task: "b".into(),
                 generation: 1,
-                stage: CommitStage::Commit,
                 outcome: committed(&()),
             },
         ),
@@ -2220,7 +2167,6 @@ fn the_fence_events_are_refused_by_deliver() {
             "bind_approval",
             EventKind::BindApproval {
                 key: "approval:x".into(),
-                stage: CommitStage::Commit,
                 task: "b".into(),
                 generation: 1,
             },
@@ -2286,7 +2232,7 @@ fn begin_commit_holds_the_store_writers_out() {
     })));
     let a2 = Arc::clone(&h.adapter);
     let fence = std::thread::spawn(move || {
-        a2.fenced_for_tests("b", 1, CommitStage::Commit, |_| (), committed)
+        a2.fenced_for_tests("b", 1, |_| (), committed)
             .map(|f| f.result)
             .map_err(|e| e.to_string())
     });
@@ -2309,4 +2255,267 @@ fn begin_commit_holds_the_store_writers_out() {
         .unwrap();
     assert_eq!(fence.join().unwrap().unwrap(), committed(&()));
     h.adapter.set_begin_hook(None);
+}
+
+// ---------- the journaled deferred queue ----------
+
+fn revoke_a(id: &str) -> Event {
+    Event {
+        id: id.into(),
+        kind: EventKind::Revoke {
+            task: "a".into(),
+            generation: 1,
+            reason: "withdrawn".into(),
+        },
+    }
+}
+
+#[test]
+fn a_revoke_deferred_by_a_commit_that_crashed_is_applied_on_open() {
+    let mut h = H::journaled(cfg(true, 4));
+    h.register("a", &[]);
+    h.register("b", &["a"]);
+    h.register("d", &["a"]);
+    h.publish("a", 1);
+    h.finish("a");
+    h.finish("b");
+    assert_eq!(h.state("d"), TaskState::Provisional);
+    let journal = h.tmp.path().join("journal.jsonl");
+    let sidecar = deferred_journal_path(&journal);
+    let copy = h.tmp.path().join("journal-crash.jsonl");
+    let bare = h.tmp.path().join("journal-crash-no-sidecar.jsonl");
+    let store = h.engine.completion_store.clone();
+    let ticks = Arc::clone(&h.ticks);
+    let adapter = Arc::clone(&h.adapter);
+    let out = h
+        .adapter
+        .fenced_for_tests(
+            "b",
+            1,
+            |_| {
+                let deferred = adapter.deliver(revoke_a("revoke-a"));
+                // The daemon dies here, before the drain: the journal and
+                // its sidecar as they are now.
+                std::fs::copy(&journal, &copy).unwrap();
+                std::fs::copy(&sidecar, deferred_journal_path(&copy)).unwrap();
+                std::fs::copy(&journal, &bare).unwrap();
+                let (a, _audit) =
+                    PrepAdapter::open(cfg(true, 4), &store, &copy, clock(&ticks)).unwrap();
+                let replayed = a.take_replayed_deferred();
+                let again = a.take_replayed_deferred().len();
+                let reopened = (
+                    a.state("b"),
+                    a.generation("d"),
+                    a.deferred_len(),
+                    std::fs::read_to_string(deferred_journal_path(&copy)).unwrap(),
+                );
+                // Negative control: the same crash without the sidecar
+                // loses the revoke.
+                let (n, _audit) =
+                    PrepAdapter::open(cfg(true, 4), &store, &bare, clock(&ticks)).unwrap();
+                let control = (n.generation("d"), n.take_replayed_deferred().len());
+                (deferred, replayed, again, reopened, control)
+            },
+            committed,
+        )
+        .unwrap();
+    let (deferred, replayed, again, reopened, control) = out.outcome;
+    assert!(
+        matches!(deferred, Ok(Delivered::Deferred { ref committing, .. }) if committing == "b"),
+        "{deferred:?}"
+    );
+    // Reopened: the interrupted commit settled first, then the revoke.
+    assert_eq!(replayed.len(), 1);
+    assert_eq!(replayed[0].id, "revoke-a");
+    match &replayed[0].result {
+        Ok(Outcome::Applied(fx)) => assert!(fx.revoked.contains(&"d".to_string()), "{fx:?}"),
+        other => panic!("want the revoke applied, got {other:?}"),
+    }
+    assert_eq!(again, 0, "taken once");
+    assert_eq!(
+        reopened,
+        (Some(TaskState::CommitUncertain), Some(2), 0, String::new())
+    );
+    assert_eq!(control, (Some(1), 0));
+    // The process that did not die drained it as usual and emptied the
+    // sidecar.
+    assert_eq!(out.redelivered.len(), 1);
+    assert!(out.deferred_error.is_none());
+    assert_eq!(h.gen("d"), 2);
+    assert_eq!(std::fs::read_to_string(&sidecar).unwrap(), "");
+    // A second open of the drained journal replays nothing.
+    drop(adapter);
+    let n = h.restart(cfg(true, 4));
+    assert!(n.is_empty(), "{n:?}");
+    assert!(h.adapter.take_replayed_deferred().is_empty());
+    assert_eq!(h.gen("d"), 2);
+}
+
+#[test]
+fn a_bad_deferred_sidecar_fails_the_open() {
+    let h = H::journaled(cfg(true, 4));
+    let copy = h.tmp.path().join("journal-copy.jsonl");
+    std::fs::copy(h.tmp.path().join("journal.jsonl"), &copy).unwrap();
+    let side = deferred_journal_path(&copy);
+    let store = h.engine.completion_store.clone();
+    let ticks = Arc::clone(&h.ticks);
+    let open = || PrepAdapter::open(cfg(true, 4), &store, &copy, clock(&ticks));
+    let lines = |events: Vec<Event>| -> String {
+        events
+            .iter()
+            .map(|e| serde_json::to_string(e).unwrap() + "\n")
+            .collect()
+    };
+    let revokes =
+        |n: usize| -> Vec<Event> { (0..n).map(|i| revoke_a(&format!("revoke-{i}"))).collect() };
+    let bind = Event {
+        id: "bind-x".into(),
+        kind: EventKind::BindApproval {
+            key: "approval:x".into(),
+            task: "a".into(),
+            generation: 1,
+        },
+    };
+    let reason = "r".repeat(DEFERRED_MAX_BYTES as usize / DEFERRED_CAPACITY + 1);
+    let large: Vec<Event> = (0..DEFERRED_CAPACITY)
+        .map(|i| Event {
+            id: format!("large-{i}"),
+            kind: EventKind::Revoke {
+                task: "a".into(),
+                generation: 1,
+                reason: reason.clone(),
+            },
+        })
+        .collect();
+    for (what, text) in [
+        ("not json", "not json\n".to_string()),
+        ("over the cap", lines(revokes(DEFERRED_CAPACITY + 1))),
+        ("fence-only", lines(vec![bind])),
+        // Well-formed and under the event cap, but over the byte cap.
+        ("too large", lines(large)),
+    ] {
+        std::fs::write(&side, text).unwrap();
+        match open() {
+            Err(SchedError::Journal(e)) => assert!(e.contains("deferred"), "{what}: {e}"),
+            Err(e) => panic!("{what}: want a journal error, got {e}"),
+            Ok(_) => panic!("{what}: the open must fail"),
+        }
+    }
+    // Control: exactly the cap opens and every event is delivered (refused
+    // here, as no task is registered, and reported).
+    std::fs::write(&side, lines(revokes(DEFERRED_CAPACITY))).unwrap();
+    let (a, _) = open().unwrap();
+    let replayed = a.take_replayed_deferred();
+    assert_eq!(replayed.len(), DEFERRED_CAPACITY);
+    assert!(replayed
+        .iter()
+        .all(|r| matches!(r.result, Err(SchedError::UnknownTask(_)))));
+    assert_eq!(std::fs::read_to_string(&side).unwrap(), "");
+}
+
+#[test]
+fn a_deferred_event_that_cannot_be_journaled_is_refused() {
+    let mut h = H::journaled(cfg(true, 4));
+    h.register("a", &[]);
+    h.register("b", &["a"]);
+    h.publish("a", 1);
+    h.finish("a");
+    h.finish("b");
+    let side = deferred_journal_path(&h.tmp.path().join("journal.jsonl"));
+    // A non-empty directory where the sidecar goes: the rename fails.
+    std::fs::create_dir_all(side.join("block")).unwrap();
+    let adapter = Arc::clone(&h.adapter);
+    let out = h
+        .adapter
+        .fenced_for_tests(
+            "b",
+            1,
+            |_| {
+                (
+                    adapter.deliver(revoke_a("revoke-a")),
+                    adapter.deferred_len(),
+                )
+            },
+            committed,
+        )
+        .unwrap();
+    let (r, queued) = out.outcome;
+    assert!(matches!(r, Err(DeliverError::DeferredJournal(_))), "{r:?}");
+    assert_eq!(queued, 0, "nothing was queued");
+    assert!(out.redelivered.is_empty());
+    assert_eq!(h.gen("a"), 1, "and nothing applied");
+    // Control: with the sidecar writable the same event applies.
+    std::fs::remove_dir_all(&side).unwrap();
+    assert!(matches!(
+        h.adapter.deliver(revoke_a("revoke-a")),
+        Ok(Delivered::Applied(_))
+    ));
+    assert_eq!(h.gen("a"), 2);
+}
+
+#[test]
+fn a_failed_sidecar_rewrite_after_the_drain_is_reported() {
+    let mut h = H::journaled(cfg(true, 4));
+    h.register("a", &[]);
+    h.register("b", &["a"]);
+    h.register("d", &["a"]);
+    h.publish("a", 1);
+    h.finish("a");
+    h.finish("b");
+    let side = deferred_journal_path(&h.tmp.path().join("journal.jsonl"));
+    let adapter = Arc::clone(&h.adapter);
+    let out = h
+        .adapter
+        .fenced_for_tests(
+            "b",
+            1,
+            |_| {
+                let r = adapter.deliver(revoke_a("revoke-a"));
+                // The sidecar becomes unwritable before the drain.
+                std::fs::remove_file(&side).unwrap();
+                std::fs::create_dir_all(side.join("block")).unwrap();
+                r
+            },
+            committed,
+        )
+        .unwrap();
+    assert!(matches!(out.outcome, Ok(Delivered::Deferred { .. })));
+    // The revoke still applied; the failed rewrite is reported.
+    assert_eq!(out.redelivered.len(), 1);
+    assert!(matches!(out.redelivered[0].result, Ok(Outcome::Applied(_))));
+    assert_eq!(h.gen("d"), 2);
+    let e = out.deferred_error.expect("the rewrite failure is reported");
+    assert!(e.contains("deferred"), "{e}");
+}
+
+#[test]
+fn an_open_whose_sidecar_cannot_be_rewritten_fails() {
+    let h = H::journaled(cfg(true, 4));
+    let dir = h.tmp.path().join("ro");
+    std::fs::create_dir_all(&dir).unwrap();
+    let copy = dir.join("j.jsonl");
+    std::fs::copy(h.tmp.path().join("journal.jsonl"), &copy).unwrap();
+    let side = deferred_journal_path(&copy);
+    std::fs::write(
+        &side,
+        serde_json::to_string(&revoke_a("revoke-a")).unwrap() + "\n",
+    )
+    .unwrap();
+    let store = h.engine.completion_store.clone();
+    let ticks = Arc::clone(&h.ticks);
+    let open = || PrepAdapter::open(cfg(true, 4), &store, &copy, clock(&ticks));
+    // A directory where the rewrite's temp file goes: the journal opens and
+    // locks as usual, only the sidecar rewrite fails.
+    let blocker = dir.join(format!(".j.deferred.jsonl.tmp-{}", std::process::id()));
+    std::fs::create_dir_all(blocker.join("x")).unwrap();
+    match open() {
+        Err(SchedError::Journal(e)) => assert!(e.contains("j.deferred.jsonl"), "{e}"),
+        Err(e) => panic!("want the sidecar rewrite error, got {e}"),
+        Ok(_) => panic!("the open must fail when the sidecar cannot be rewritten"),
+    }
+    // Control: without the blocker, the same open succeeds and replays the
+    // event.
+    std::fs::remove_dir_all(&blocker).unwrap();
+    let (a, _) = open().unwrap();
+    assert_eq!(a.take_replayed_deferred().len(), 1);
 }

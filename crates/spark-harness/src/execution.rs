@@ -8,7 +8,6 @@
 //!   any of the first four --cancel / failure / lease expiry--> Aborted --retry--> Blocked
 //!
 //!   Committable --begin commit--> Committing --outcome--> Committed | CommitUncertain | Aborted
-//!   Committed --begin authorize--> Committing --outcome--> Committed | CommitUncertain
 //! ```
 //!
 //! `Committable` means "every dependency is final-verified for its current
@@ -21,11 +20,7 @@
 //! every event that would revoke, cancel, fail or re-generate it (directly
 //! or through an upstream producer) is refused. A `Committing` task found
 //! after a restart has no recorded outcome and becomes `CommitUncertain`;
-//! it is never run again. A commit has two stages, the commit itself and
-//! then the authorization grant against it; the authorize stage is the only
-//! way out of `Committed`, once per generation (a refused grant returns to
-//! `Committed`). `CommitUncertain` is terminal, and no upstream change
-//! reaches a `Committed` task.
+//! it is never run again. `Committed` and `CommitUncertain` are terminal.
 //!
 //! Revocation returns a task to `Blocked` rather than `Aborted`. The task did
 //! nothing wrong: an upstream producer failed, changed its interface or
@@ -132,7 +127,7 @@ pub fn check_transition(from: TaskState, to: TaskState) -> Result<(), IllegalTra
                 Aborted
             )
             | (Aborted, Blocked)
-            | (Committable | Committed, Committing)
+            | (Committable, Committing)
             | (Committing, Committed | CommitUncertain | Aborted)
     );
     if ok {
@@ -162,7 +157,7 @@ mod tests {
             (Committing, Committable),
             (Committed, Blocked),
             (Committed, Aborted),
-            (Committed, Committable),
+            (Committed, Committing),
             (CommitUncertain, Blocked),
             (CommitUncertain, Aborted),
             (CommitUncertain, Committing),
@@ -179,7 +174,6 @@ mod tests {
             (Committing, Committed),
             (Committing, CommitUncertain),
             (Committing, Aborted),
-            (Committed, Committing),
         ] {
             assert!(check_transition(from, to).is_ok(), "{from:?} -> {to:?}");
         }

@@ -8,10 +8,16 @@
 //! [`PrepAdapter::bind_approval`] bound it to a task generation; every other
 //! request runs the original call unchanged. A binding is a journaled M2
 //! `BindApproval` event, so it survives a daemon restart (the replayed
-//! scheduler still fences the request). M2 drops it when its stage commits
-//! (the canonical durable guards answer any retry from then on) and keeps it
-//! after any other outcome, so the request stays fenced and is refused. The
-//! table is bounded (`MAX_APPROVAL_BINDINGS`); a new key past it is refused.
+//! scheduler still fences the request). M2 drops every binding of a task
+//! when the task ends (`Committed`, `CommitUncertain` or `Aborted`, including
+//! an abort cascaded from a cancelled ancestor), so ended tasks never hold
+//! table slots, and refuses a binding to an ended task. A request whose
+//! binding was dropped is unbound again: the daemon runs it as the original
+//! call and the canonical durable guards decide (see Duplicates below); to
+//! fence it at a retried generation, bind it again. A binding at a superseded
+//! generation of a live task is kept, so its request is refused
+//! (`StaleGeneration`) until it is bound again. The table is bounded
+//! (`MAX_APPROVAL_BINDINGS`); a new key past it is refused.
 //!
 //! Two halves:
 //!
@@ -39,19 +45,19 @@
 //!    AEGIS verify, the replay ledger, the effect ledger and the World commit
 //!    stay inside the unchanged calls and still decide.
 //!
-//!    One task generation has two fenced stages, in the canonical order: the
-//!    commit (`submit_approved`, M2 stage `commit`, from `Committable`) and
-//!    then the authorization grant against that commit (`authorize`, M2
-//!    stage `authorize`, only from `Committed` after the commit stage
-//!    committed, with the same producer re-verification and own
-//!    `verify_final`). The approved path writes its own grant inside the
-//!    commit stage and no `compose_commit` record, so a `ComposeAuthorize`
-//!    after it passes the fence and is refused by the canonical mint
-//!    (`NotAuthorized`); the grant stage mints only against a commit the
-//!    canonical rules accept. Each stage runs at most once per generation in this
-//!    process. A grant refused before any write (`EFFECT_REFUSED`) returns
-//!    the task to `Committed`; M2 then lets the grant stage begin again, which
-//!    this process refuses (`AlreadySubmitted`) until a restart.
+//!    One task generation has one fenced call. Each bound flow has exactly
+//!    one durable step this daemon takes for it, so that step is the fence:
+//!    - `ComposeApprovedProposal` (`submit_approved`): the proposer hook
+//!      runs the World commit and writes its own grant in the same call
+//!      (approved.rs `submit`, `write_approved_grant`); it writes no
+//!      `compose_commit` record (compose/bridge.rs `run_task_inner` writes
+//!      one only when `approved_text` is None), so no later
+//!      `ComposeAuthorize` can mint against it.
+//!    - `RunComposeTask` then `ComposeAuthorize`: the run is a model call
+//!      this adapter does not fence (see Duplicates); its compose-commit
+//!      record is what `ComposeAuthorize` mints against (effects.rs). The
+//!      grant (`authorize`) is the fenced call, from `Committable`.
+//!    Both start from `Committable` with the same checks.
 //!
 //! No check-to-commit window, and no lock held across the call. The fence
 //! checks run in one critical section that holds (a) the adapter mutex, the
@@ -84,13 +90,26 @@
 //! right after the commit outcome is recorded, under the same mutex, before
 //! any other event or fence. What each redelivery did is returned in
 //! [`Fenced::redelivered`]; an event still refused by another running commit
-//! stays queued. The queue is in memory: a restart drops it (the commit is
-//! then `CommitUncertain` and the caller delivers again).
+//! stays queued. With a journaled scheduler ([`PrepAdapter::open`]) the queue
+//! is journaled too, in a sidecar next to the M2 journal
+//! ([`deferred_journal_path`]): rewritten atomically (temp file, fsync,
+//! rename, directory fsync) before `Deferred` is returned and after every
+//! drain. A queue that cannot be written refuses the event
+//! ([`DeliverError::DeferredJournal`]); a failed rewrite after a drain is
+//! reported ([`Fenced::deferred_error`]) and the next rewrite replaces it. On
+//! open, after the M2 audit settled every interrupted commit, the journaled
+//! events are delivered again in order, so a revoke or cancel deferred by a
+//! commit that never recorded its outcome still lands after it
+//! ([`PrepAdapter::take_replayed_deferred`] returns what each did). An event
+//! that was already applied before the crash is a duplicate, or a stale
+//! generation once its task moved on (spark-harness `scheduler/dedup.rs`).
+//! A sidecar that does not parse, holds more than [`DEFERRED_CAPACITY`]
+//! events or holds a fence-only event fails the open.
 //!
-//! Duplicates: a second fenced call for the same (task, generation, stage)
-//! is refused before the existing call runs ([`FenceError::AlreadySubmitted`]
-//! in this process; M2 also refuses a second `BeginCommit` of a stage that
-//! already began, across restarts too because it is journaled).
+//! Duplicates: a second fenced call for the same (task, generation) is
+//! refused before the existing call runs ([`FenceError::AlreadySubmitted`]
+//! in this process; M2 also refuses a second `BeginCommit` once the task
+//! left `Committable`, across restarts too because it is journaled).
 //! Across restarts the existing durable guards
 //! decide: the approved replay ledger (`approved_replay::claim`) refuses a
 //! claimed approval for ever and answers an exact retry with
@@ -116,8 +135,8 @@
 //!
 //! Not in scope: aien-trace is not used (observation is optional); no new
 //! receipt type; AEGIS, World, KV and inference scheduling are unchanged.
-//! spark-harness gains only the M2 `Committing` state, its two commit stages
-//! and the `BeginCommit`, `CommitOutcome` and `BindApproval` events.
+//! spark-harness gains only the M2 `Committing` state and the
+//! `BeginCommit`, `CommitOutcome` and `BindApproval` events.
 
 use crate::approved::{ApprovedComposeReport, ApprovedProposal, ApprovedRefusal, ProposerHook};
 use crate::compose::ComposeBridge;
@@ -133,8 +152,8 @@ use spark_harness::readiness::{
     verify_final, ArtifactReadiness, OperationClass, ReadinessLevel, INTERFACE_DIR,
 };
 use spark_harness::scheduler::{
-    Clock, CommitResult, CommitStage, Event, EventKind, Outcome, PermitPool, ProvisionalConfig,
-    SchedError, Scheduler,
+    Clock, CommitResult, Event, EventKind, Outcome, PermitPool, ProvisionalConfig, SchedError,
+    Scheduler,
 };
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
@@ -258,10 +277,23 @@ pub struct Fenced<T> {
     pub record_error: Option<SchedError>,
     /// Deferred events delivered again right after the outcome.
     pub redelivered: Vec<Redelivered>,
+    /// Set when rewriting the deferred sidecar after the drain failed. The
+    /// sidecar then still lists events M2 already handled; replaying them
+    /// on open is a duplicate or a stale generation, and the next rewrite
+    /// replaces it.
+    pub deferred_error: Option<String>,
 }
 
 /// Most events [`PrepAdapter::deliver`] holds back while commits run.
 pub const DEFERRED_CAPACITY: usize = 64;
+
+/// Largest deferred sidecar [`PrepAdapter::open`] reads, in bytes.
+pub const DEFERRED_MAX_BYTES: u64 = 4 * 1024 * 1024;
+
+/// The deferred-event sidecar of the M2 journal `journal`.
+pub fn deferred_journal_path(journal: &Path) -> PathBuf {
+    journal.with_extension("deferred.jsonl")
+}
 
 /// What [`PrepAdapter::deliver`] did with an event.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -286,6 +318,9 @@ pub enum DeliverError {
         committing: String,
         capacity: usize,
     },
+    /// The deferred sidecar could not be written: the event was not queued
+    /// and not applied; deliver it again later.
+    DeferredJournal(String),
 }
 
 impl fmt::Display for DeliverError {
@@ -302,6 +337,10 @@ impl fmt::Display for DeliverError {
             } => write!(
                 f,
                 "DELIVER_REFUSED DeferredFull: task '{committing}' is committing and {capacity} events already wait; nothing was queued"
+            ),
+            DeliverError::DeferredJournal(e) => write!(
+                f,
+                "DELIVER_REFUSED DeferredJournal: the deferred queue could not be journaled ({e}); nothing was queued"
             ),
         }
     }
@@ -373,12 +412,6 @@ pub enum FenceError {
         task: String,
         state: TaskState,
     },
-    /// The authorize stage needs the commit stage of the same generation
-    /// committed (M2 `Committed`, grant not yet committed).
-    NotCommitted {
-        task: String,
-        state: TaskState,
-    },
     /// The task has no accepted M1 completion for its current generation.
     NoCompletion(String),
     /// The task's own M1 completion receipt no longer verifies.
@@ -386,12 +419,10 @@ pub enum FenceError {
         task: String,
         error: String,
     },
-    /// This process already ran this stage's fenced call for this task
-    /// generation.
+    /// This process already ran the fenced call for this task generation.
     AlreadySubmitted {
         task: String,
         generation: u64,
-        stage: CommitStage,
     },
     StoreLock(String),
 }
@@ -413,25 +444,15 @@ impl fmt::Display for FenceError {
                 "FENCE_REFUSED NotCommittable: task '{task}' is {}",
                 state.as_str()
             ),
-            FenceError::NotCommitted { task, state } => write!(
-                f,
-                "FENCE_REFUSED NotCommitted: task '{task}' is {}; the grant needs its commit stage committed first",
-                state.as_str()
-            ),
             FenceError::NoCompletion(t) => {
                 write!(f, "FENCE_REFUSED NoCompletion: task '{t}' has no accepted M1 completion")
             }
             FenceError::CompletionInvalid { task, error } => {
                 write!(f, "FENCE_REFUSED CompletionInvalid: task '{task}': {error}")
             }
-            FenceError::AlreadySubmitted {
-                task,
-                generation,
-                stage,
-            } => write!(
+            FenceError::AlreadySubmitted { task, generation } => write!(
                 f,
-                "FENCE_REFUSED AlreadySubmitted: task '{task}' generation {generation} already ran its fenced {} call",
-                stage.as_str()
+                "FENCE_REFUSED AlreadySubmitted: task '{task}' generation {generation} already ran its fenced call"
             ),
             FenceError::StoreLock(e) => write!(f, "FENCE_REFUSED StoreLock: {e}"),
         }
@@ -447,9 +468,13 @@ struct Inner {
     sched: Scheduler,
     prepared: BTreeMap<String, PreparationResult>,
     in_flight: BTreeSet<String>,
-    submitted: BTreeSet<(String, u64, CommitStage)>,
+    submitted: BTreeSet<(String, u64)>,
     /// Events M2 refused with `CommitInProgress`, oldest first.
     deferred: VecDeque<Event>,
+    /// Where `deferred` is journaled (journaled schedulers only).
+    deferred_path: Option<PathBuf>,
+    /// What replaying the journaled deferred events on open did.
+    replayed: Vec<Redelivered>,
 }
 
 impl Inner {
@@ -472,7 +497,9 @@ impl Inner {
 
     /// Deliver every deferred event again, oldest first. One still refused
     /// by a running commit stays queued; every other result is returned.
-    fn redeliver(&mut self) -> Vec<Redelivered> {
+    /// The sidecar is rewritten when anything left the queue; the error, if
+    /// that failed, is returned too.
+    fn redeliver(&mut self) -> (Vec<Redelivered>, Option<String>) {
         let mut out = Vec::new();
         let mut keep = VecDeque::new();
         while let Some(ev) = self.deferred.pop_front() {
@@ -483,7 +510,96 @@ impl Inner {
         }
         self.deferred = keep;
         self.prune();
-        out
+        let error = if out.is_empty() {
+            None
+        } else {
+            self.persist_deferred().err()
+        };
+        (out, error)
+    }
+
+    /// Rewrite the sidecar from `deferred` (no-op without a journal).
+    fn persist_deferred(&self) -> Result<(), String> {
+        let Some(path) = &self.deferred_path else {
+            return Ok(());
+        };
+        let mut buf = String::new();
+        for ev in &self.deferred {
+            buf.push_str(&serde_json::to_string(ev).map_err(|e| e.to_string())?);
+            buf.push('\n');
+        }
+        write_atomic(path, buf.as_bytes()).map_err(|e| format!("{}: {e}", path.display()))
+    }
+}
+
+/// Temp file in the same directory, fsync, rename over `path`, fsync the
+/// directory. The temp file is removed on failure.
+fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let dir = path.parent().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "sidecar has no parent dir",
+        )
+    })?;
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let tmp = dir.join(format!(".{name}.tmp-{}", std::process::id()));
+    let result = (|| -> std::io::Result<()> {
+        let mut f = std::fs::File::create(&tmp)?;
+        f.write_all(bytes)?;
+        f.sync_all()?;
+        std::fs::rename(&tmp, path)?;
+        std::fs::File::open(dir)?.sync_all()
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    result
+}
+
+/// Read the deferred sidecar: absent is empty; anything that does not
+/// parse, is too large, holds too many events or holds a fence-only event
+/// is an error.
+fn read_deferred(path: &Path) -> Result<VecDeque<Event>, SchedError> {
+    let bad = |what: String| SchedError::Journal(format!("{}: {what}", path.display()));
+    let len = match std::fs::metadata(path) {
+        Ok(m) => m.len(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(VecDeque::new()),
+        Err(e) => return Err(bad(e.to_string())),
+    };
+    if len > DEFERRED_MAX_BYTES {
+        return Err(bad(format!(
+            "{len} bytes, more than the {DEFERRED_MAX_BYTES} a deferred queue may hold"
+        )));
+    }
+    let text = std::fs::read_to_string(path).map_err(|e| bad(e.to_string()))?;
+    let mut out = VecDeque::new();
+    for (n, line) in text.lines().enumerate() {
+        if out.len() == DEFERRED_CAPACITY {
+            return Err(bad(format!(
+                "more than {DEFERRED_CAPACITY} deferred events"
+            )));
+        }
+        let ev: Event =
+            serde_json::from_str(line).map_err(|e| bad(format!("line {}: {e}", n + 1)))?;
+        if fence_only(&ev.kind).is_some() {
+            return Err(bad(format!("line {}: a fence-only event", n + 1)));
+        }
+        out.push_back(ev);
+    }
+    Ok(out)
+}
+
+/// The fence's own event kinds, which only the fence delivers.
+fn fence_only(kind: &EventKind) -> Option<&'static str> {
+    match kind {
+        EventKind::BeginCommit { .. } => Some("begin_commit"),
+        EventKind::CommitOutcome { .. } => Some("commit_outcome"),
+        EventKind::BindApproval { .. } => Some("bind_approval"),
+        _ => None,
     }
 }
 
@@ -500,7 +616,7 @@ pub struct PrepAdapter {
 }
 
 impl PrepAdapter {
-    fn with_scheduler(sched: Scheduler, store: &Path) -> Self {
+    fn with_scheduler(sched: Scheduler, store: &Path, deferred_path: Option<PathBuf>) -> Self {
         PrepAdapter {
             inner: Mutex::new(Inner {
                 sched,
@@ -508,6 +624,8 @@ impl PrepAdapter {
                 in_flight: BTreeSet::new(),
                 submitted: BTreeSet::new(),
                 deferred: VecDeque::new(),
+                deferred_path,
+                replayed: Vec::new(),
             }),
             store: store.to_path_buf(),
             #[cfg(feature = "test-support")]
@@ -523,21 +641,47 @@ impl PrepAdapter {
         Ok(Self::with_scheduler(
             Scheduler::new(cfg, store, clock)?,
             store,
+            None,
         ))
     }
 
     /// Journaled scheduler: create or replay `journal`, then run the M2
-    /// audit before anything can use it. Returns the tasks the audit revoked.
-    /// No preparation result survives: they are never journaled.
+    /// audit before anything can use it (it settles every interrupted
+    /// commit as `CommitUncertain`), then deliver the journaled deferred
+    /// events again ([`PrepAdapter::take_replayed_deferred`]). Returns the
+    /// tasks the audit revoked. No preparation result survives: they are
+    /// never journaled.
     pub fn open(
         cfg: ProvisionalConfig,
         store: &Path,
         journal: &Path,
         clock: Clock,
     ) -> Result<(Self, Vec<String>), SchedError> {
+        let path = deferred_journal_path(journal);
+        let deferred = read_deferred(&path)?;
         let (unaudited, _report) = Scheduler::open(cfg, store, journal, clock)?;
         let (sched, revoked) = unaudited.audit()?;
-        Ok((Self::with_scheduler(sched, store), revoked))
+        let adapter = Self::with_scheduler(sched, store, Some(path));
+        {
+            let mut g = adapter.inner.lock();
+            g.deferred = deferred;
+            // No commit is running after the audit, so every event is
+            // delivered and the sidecar is rewritten (empty). If that
+            // rewrite fails the open fails: the next open replays the same
+            // events, which M2 then answers as duplicates.
+            let (replayed, error) = g.redeliver();
+            if let Some(e) = error {
+                return Err(SchedError::Journal(e));
+            }
+            g.replayed = replayed;
+        }
+        Ok((adapter, revoked))
+    }
+
+    /// What delivering the journaled deferred events on open did, oldest
+    /// first. Taken once; later calls return nothing.
+    pub fn take_replayed_deferred(&self) -> Vec<Redelivered> {
+        std::mem::take(&mut self.inner.lock().replayed)
     }
 
     /// The runtime enable flag: M2 `ProvisionalConfig::enabled` (default
@@ -551,13 +695,8 @@ impl PrepAdapter {
     /// queued and delivered again after that commit's outcome (see the
     /// module docs). The fence's own event kinds are refused here.
     pub fn deliver(&self, event: Event) -> Result<Delivered, DeliverError> {
-        match &event.kind {
-            EventKind::BeginCommit { .. } => return Err(DeliverError::FenceOnly("begin_commit")),
-            EventKind::CommitOutcome { .. } => {
-                return Err(DeliverError::FenceOnly("commit_outcome"))
-            }
-            EventKind::BindApproval { .. } => return Err(DeliverError::FenceOnly("bind_approval")),
-            _ => {}
+        if let Some(kind) = fence_only(&event.kind) {
+            return Err(DeliverError::FenceOnly(kind));
         }
         let mut g = self.inner.lock();
         let r = g.sched.deliver(event.clone());
@@ -584,6 +723,12 @@ impl PrepAdapter {
                     });
                 }
                 g.deferred.push_back(event);
+                // Journaled before `Deferred` is returned, so a crash
+                // before the drain still delivers it on the next open.
+                if let Err(e) = g.persist_deferred() {
+                    g.deferred.pop_back();
+                    return Err(DeliverError::DeferredJournal(e));
+                }
                 Ok(Delivered::Deferred {
                     committing,
                     queued: g.deferred.len(),
@@ -724,11 +869,10 @@ impl PrepAdapter {
         &self,
         task: &str,
         generation: u64,
-        stage: CommitStage,
         commit: impl FnOnce(&FenceProof) -> T,
         classify: impl FnOnce(&T) -> CommitResult,
     ) -> Result<Fenced<T>, FenceError> {
-        let proof = self.begin_commit(task, generation, stage)?;
+        let proof = self.begin_commit(task, generation)?;
         let ran = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| commit(&proof)));
         let result = match &ran {
             Ok(v) => classify(v),
@@ -736,7 +880,8 @@ impl PrepAdapter {
                 reason: "the fenced call panicked".to_string(),
             },
         };
-        let (recorded, redelivered) = self.record_outcome(task, generation, stage, result.clone());
+        let (recorded, redelivered, deferred_error) =
+            self.record_outcome(task, generation, result.clone());
         match ran {
             Ok(outcome) => Ok(Fenced {
                 proof,
@@ -744,6 +889,7 @@ impl PrepAdapter {
                 result,
                 record_error: recorded.err(),
                 redelivered,
+                deferred_error,
             }),
             Err(panic) => std::panic::resume_unwind(panic),
         }
@@ -751,19 +897,13 @@ impl PrepAdapter {
 
     /// Check and transition, atomically: the fence checks and the journaled
     /// `BeginCommit` under the adapter mutex and both store locks.
-    fn begin_commit(
-        &self,
-        task: &str,
-        generation: u64,
-        stage: CommitStage,
-    ) -> Result<FenceProof, FenceError> {
+    fn begin_commit(&self, task: &str, generation: u64) -> Result<FenceProof, FenceError> {
         let mut g = self.inner.lock();
         let _store = self.store_locks()?;
-        let key = (task.to_string(), generation, stage);
+        let key = (task.to_string(), generation);
         let submitted = || FenceError::AlreadySubmitted {
             task: task.to_string(),
             generation,
-            stage,
         };
         if g.submitted.contains(&key) {
             return Err(submitted());
@@ -778,23 +918,11 @@ impl PrepAdapter {
             .sched
             .task(task)
             .ok_or_else(|| FenceError::Scheduler(SchedError::UnknownTask(task.to_string())))?;
-        match stage {
-            CommitStage::Commit if entry.state != TaskState::Committable => {
-                return Err(FenceError::NotCommittable {
-                    task: task.to_string(),
-                    state: entry.state,
-                })
-            }
-            CommitStage::Authorize
-                if entry.state != TaskState::Committed
-                    || entry.committed_stage != Some(CommitStage::Commit) =>
-            {
-                return Err(FenceError::NotCommitted {
-                    task: task.to_string(),
-                    state: entry.state,
-                })
-            }
-            _ => {}
+        if entry.state != TaskState::Committable {
+            return Err(FenceError::NotCommittable {
+                task: task.to_string(),
+                state: entry.state,
+            });
         }
         let claim = entry
             .completion
@@ -808,11 +936,7 @@ impl PrepAdapter {
                 c.ok_or_else(|| FenceError::NoCompletion(p.clone()))?,
             );
         }
-        let producers = match stage {
-            CommitStage::Commit => g.sched.may_finalize(task),
-            CommitStage::Authorize => g.sched.may_authorize(task),
-        }
-        .map_err(FenceError::Scheduler)?;
+        let producers = g.sched.may_finalize(task).map_err(FenceError::Scheduler)?;
         let own = verify_final(&self.store, task, generation, &claim).map_err(|e| {
             FenceError::CompletionInvalid {
                 task: task.to_string(),
@@ -824,16 +948,15 @@ impl PrepAdapter {
             hook(task);
         }
         let begin = Event {
-            id: event_id(&format!("begin-{}", stage.as_str()), task, generation),
+            id: event_id("begin", task, generation),
             kind: EventKind::BeginCommit {
                 task: task.to_string(),
                 generation,
-                stage,
                 completion: claim,
                 producers: inputs,
             },
         };
-        // M2 re-runs the stage's producer checks and `verify_final` here
+        // M2 re-runs `may_finalize` and `verify_final` here
         // (still under both locks), checks the inputs equal its state,
         // refuses a second commit in the same chain, and journals the
         // transition.
@@ -842,7 +965,7 @@ impl PrepAdapter {
             Outcome::Duplicate => return Err(submitted()),
         }
         // Spent before the call: a call that fails or panics is not retried
-        // at this generation and stage (fail closed).
+        // at this generation (fail closed).
         g.submitted.insert(key);
         g.prune();
         Ok(FenceProof {
@@ -856,32 +979,31 @@ impl PrepAdapter {
     /// Journal the commit outcome, then deliver the deferred events again,
     /// under one lock. If journaling fails the task stays `Committing`
     /// (frozen, never re-run) until a restart settles it as
-    /// `CommitUncertain`, and the deferred events refused by it stay queued.
+    /// `CommitUncertain`, and the deferred events refused by it stay queued
+    /// (in the sidecar too, so that open delivers them after the settle).
     fn record_outcome(
         &self,
         task: &str,
         generation: u64,
-        stage: CommitStage,
         outcome: CommitResult,
-    ) -> (Result<(), SchedError>, Vec<Redelivered>) {
+    ) -> (Result<(), SchedError>, Vec<Redelivered>, Option<String>) {
         let mut g = self.inner.lock();
         let r = g.sched.deliver(Event {
-            id: event_id(&format!("outcome-{}", stage.as_str()), task, generation),
+            id: event_id("outcome", task, generation),
             kind: EventKind::CommitOutcome {
                 task: task.to_string(),
                 generation,
-                stage,
                 outcome,
             },
         });
         g.prune();
-        let redelivered = g.redeliver();
-        (r.map(|_| ()), redelivered)
+        let (redelivered, deferred_error) = g.redeliver();
+        (r.map(|_| ()), redelivered, deferred_error)
     }
 
-    /// Fenced `ComposeApprovedProposal` (the commit stage): the existing
-    /// proposer hook (verify, desk MAC, replay claim, compose run with AEGIS
-    /// verify and World commit, grant) runs unchanged once the fence passes.
+    /// Fenced `ComposeApprovedProposal`: the existing proposer hook (verify,
+    /// desk MAC, replay claim, compose run with AEGIS verify and World
+    /// commit, grant) runs unchanged once the fence passes.
     pub fn submit_approved(
         &self,
         task: &str,
@@ -893,16 +1015,15 @@ impl PrepAdapter {
         self.fenced(
             task,
             generation,
-            CommitStage::Commit,
             |_| hook.submit(proposal, workspace),
             classify_approved,
         )
     }
 
-    /// Fenced `ComposeAuthorize` (the authorize stage, after the commit
-    /// stage of the same generation committed): the existing grant minting
-    /// (desk MAC, commit record match, confinement, nonce and grant replay
-    /// rules) runs unchanged once the fence passes.
+    /// Fenced `ComposeAuthorize`, the grant against a compose commit an
+    /// unfenced `RunComposeTask` recorded: the existing grant minting (desk
+    /// MAC, compose-commit record match, confinement, nonce and grant
+    /// replay rules) runs unchanged once the fence passes.
     pub fn authorize(
         &self,
         task: &str,
@@ -915,7 +1036,6 @@ impl PrepAdapter {
         self.fenced(
             task,
             generation,
-            CommitStage::Authorize,
             |_| crate::effects::authorize_with_objective(bridge, req, desk_proof, objective_id),
             classify_authorize,
         )
@@ -925,9 +1045,9 @@ impl PrepAdapter {
     /// pass, as a journaled M2 `BindApproval`, so the binding survives a
     /// restart. Only bound requests are fenced; the daemon runs every other
     /// request exactly as before. A later binding for the same key replaces
-    /// the earlier one. M2 refuses a stale generation, a stage that already
-    /// committed and a new key past `MAX_APPROVAL_BINDINGS`; it drops the
-    /// binding when its stage commits.
+    /// the earlier one. M2 refuses a stale generation, a task that already
+    /// ended and a new key past `MAX_APPROVAL_BINDINGS`; it drops the
+    /// binding when the task ends.
     pub fn bind_approval(
         &self,
         key: FenceKey,
@@ -943,7 +1063,6 @@ impl PrepAdapter {
             id,
             kind: EventKind::BindApproval {
                 key: encoded,
-                stage: key.stage(),
                 task: task.to_string(),
                 generation,
             },
@@ -957,7 +1076,7 @@ impl PrepAdapter {
     pub fn binding(&self, key: &FenceKey) -> Option<(String, u64)> {
         let g = self.inner.lock();
         let b = g.sched.approval(&key.encoded())?;
-        (b.stage == key.stage()).then(|| (b.task.clone(), b.generation))
+        Some((b.task.clone(), b.generation))
     }
 
     /// Daemon entry for `ComposeApprovedProposal`. None when the approval is
@@ -1008,11 +1127,10 @@ impl PrepAdapter {
         &self,
         task: &str,
         generation: u64,
-        stage: CommitStage,
         commit: impl FnOnce(&FenceProof) -> T,
         classify: impl FnOnce(&T) -> CommitResult,
     ) -> Result<Fenced<T>, FenceError> {
-        self.fenced(task, generation, stage, commit, classify)
+        self.fenced(task, generation, commit, classify)
     }
 
     /// Test seam: called inside `begin_commit` after every check and before
@@ -1027,11 +1145,9 @@ impl PrepAdapter {
 /// Which control request a binding fences.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum FenceKey {
-    /// `ComposeApprovedProposal` (the commit stage), by
-    /// `ApprovedProposal::approval_id`.
+    /// `ComposeApprovedProposal`, by `ApprovedProposal::approval_id`.
     Approval(String),
-    /// `ComposeAuthorize` (the authorize stage), by
-    /// `MintRequest::proposal_sha256`.
+    /// `ComposeAuthorize`, by `MintRequest::proposal_sha256`.
     Proposal(String),
 }
 
@@ -1041,14 +1157,6 @@ impl FenceKey {
         match self {
             FenceKey::Approval(id) => format!("approval:{id}"),
             FenceKey::Proposal(sha) => format!("proposal:{sha}"),
-        }
-    }
-
-    /// The commit stage this request runs.
-    pub fn stage(&self) -> CommitStage {
-        match self {
-            FenceKey::Approval(_) => CommitStage::Commit,
-            FenceKey::Proposal(_) => CommitStage::Authorize,
         }
     }
 }
