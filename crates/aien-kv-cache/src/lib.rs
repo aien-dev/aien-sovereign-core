@@ -1,5 +1,11 @@
 //! Native Paged KV-Cache Manager with physical unified-memory tensors,
 //! reference-counted copy-on-write branching, and prefix caching.
+//!
+//! Who owns each KV buffer, who may write it when, what makes a write visible
+//! to the GPU, and which bounds, cancellation, reuse and restart rules exist
+//! (with the platform each claim was tested on): see `OWNERSHIP.md` next to
+//! this crate's `Cargo.toml`. The design authority is sovereign-core
+//! `docs/adr/0003-persistent-kv-identity-storage-contract-and-ownership.md`.
 
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
@@ -827,6 +833,15 @@ pub struct KvMetrics {
     pub used_blocks: usize,
 }
 
+/// The block allocator, block tables, refcounts and prefix cache, plus the
+/// physical pool the K/V bytes live in.
+///
+/// It has no lock of its own: every caller shares one manager as
+/// [`SharedKvManager`] and takes its write guard for any change. Every new
+/// block is zeroed before use, a block shared by a fork is copied before an
+/// append writes into it, and a block returns to the free list only when its
+/// refcount reaches zero. Ownership, platforms and evidence: `OWNERSHIP.md`
+/// in this crate.
 pub struct AienKvManager<B: aien_platform::UnifiedBuffer = DefaultUnifiedBuffer> {
     total_blocks: usize,
     block_size: usize,
@@ -1419,6 +1434,16 @@ impl<B: aien_platform::UnifiedBuffer> AienKvManager<B> {
         Ok(block_id)
     }
 
+    /// Reserves the next token position of `seq_id` and returns its
+    /// `(block, slot)`, the only slot a caller may then write with
+    /// `write_explicit_token_kv`.
+    ///
+    /// When the tail block is shared with another table and still has room,
+    /// this is the copy-on-write point: a new block is allocated, the shared
+    /// tail is copied into it on the host, and the old block's refcount drops,
+    /// so the returned slot is always in a block this sequence owns alone. A
+    /// full tail gets a fresh zeroed block instead. Refused, nothing changed,
+    /// when the sequence is unknown or the pool has no free block.
     pub fn append_token_with_slot(&mut self, seq_id: u64) -> Result<(BlockId, usize), String> {
         let table = self
             .sequence_tables
@@ -1485,6 +1510,15 @@ impl<B: aien_platform::UnifiedBuffer> AienKvManager<B> {
         }
     }
 
+    /// `append_token_with_slot` with the copy-on-write copy issued through
+    /// `device` instead of the host. The returned `Fence` is not waited on
+    /// here; the caller must wait on it before reading the new block.
+    ///
+    /// On Linux the `MemoryDevice` copy is a CPU `ptr::copy` and its
+    /// `synchronize` is a no-op (`aien-platform-linux` `device.rs`), so this is
+    /// not a DMA path today. No production code calls it; the qualification
+    /// test `kv_lifecycle_qualification.rs` does. A failed copy gives the new
+    /// block back.
     pub fn append_token_with_slot_device<M: MemoryDevice>(
         &mut self,
         device: &M,
@@ -1807,6 +1841,14 @@ impl<B: aien_platform::UnifiedBuffer> AienKvManager<B> {
         self.sequence_tables.get(&seq_id).map(|t| t.total_tokens)
     }
 
+    /// Writes one token's K and V for one layer at `token_pos` of `seq_id`'s
+    /// table into the pool. A bf16 pool rounds each value to bf16
+    /// (round-to-nearest-even) on write.
+    ///
+    /// Caller contract: this does not check whether the block is shared or
+    /// its refcount, so a write into a shared block changes every table that
+    /// holds it. Write only positions of a table nobody shares, or the slot
+    /// `append_token_with_slot` just returned.
     pub fn write_token_kv(
         &mut self,
         seq_id: u64,
@@ -1840,6 +1882,12 @@ impl<B: aien_platform::UnifiedBuffer> AienKvManager<B> {
         }
     }
 
+    /// Writes one token's K and V for one layer into `block_id` at
+    /// `token_in_block`, the slot a caller got from `append_token_with_slot`.
+    /// A bf16 pool rounds each value to bf16 (round-to-nearest-even) on write.
+    ///
+    /// Caller contract: like `write_token_kv`, this does not check sharing or
+    /// refcount; the append that produced the slot is what makes it private.
     pub fn write_explicit_token_kv(
         &mut self,
         block_id: BlockId,
