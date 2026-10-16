@@ -89,19 +89,19 @@
         },
         {
           "digest": "25fd9f8afbea19702750f8ddba2ef4aeafc5bc4515aa695340a5af6931989c03",
-          "last_commit": "fa73e77",
+          "last_commit": "f970fe5",
           "name": "crates/aien-scheduler/src/bin",
           "purpose": ""
         },
         {
           "digest": "a0a981f6168d15e43a6b036c3aa82d44547aadfc3b6c62139a5a3afab0644514",
-          "last_commit": "f8eea42",
+          "last_commit": "f970fe5",
           "name": "crates/spark-cockpit-rs",
           "purpose": ""
         },
         {
-          "digest": "6c20f6675861122b82e38c009d38a96e2290dbf10a0918c4111c4bf050409d51",
-          "last_commit": "4204406",
+          "digest": "ffba69b0ab96a21ca6d897fe95e7d7dfd857c4c24f43bd7d29b0a49f72009aee",
+          "last_commit": "f970fe5",
           "name": "scripts",
           "purpose": ""
         },
@@ -118,15 +118,15 @@
           "purpose": "Local CI sandbox exec contract (C8), aien-run user/caches install, Forgejo trigger hook, health "
         }
       ],
-      "children_root": "sha256:bb4ffb83ecc80356ddd3152e9323a7b623bd001212624a66e4dde1adedf8bfb4",
-      "compiled_at": "2026-10-16T02:07:53Z",
+      "children_root": "sha256:b08ef4882aba56b6570ef96421ba20f84c3813017e96919759608c7694e1a806",
+      "compiled_at": "2026-10-16T02:10:03Z",
       "compiler": "crumb-compile/1",
-      "digest": "sha256:7d8354d279211598a387408eed7262813d8be3c364ee9811ecda1d209e1bb897",
+      "digest": "sha256:7231bb0fb5b9adb4de79f7f2d748055a36f311343337be7045dd1258a9d9fce5",
       "evidence_files": 1556,
       "evidence_root": "sha256:b640e43d11486c07cf52f4f26ce01f0fbc38185dea3041c4108d3ed4773bc9da",
-      "files": 5648,
-      "generated_at_commit": "ec315b98096027bb22a8a8e6f36b9a9214d01ba9",
-      "source_tree": "sha256:9217098ed8639b1ebe67cb3b33b831de00a189767c79f184321573c533cf4418"
+      "files": 5831,
+      "generated_at_commit": "f76a2c3f88566879785a595e2a6cc1031998ee0f",
+      "source_tree": "sha256:de4c1324d59e0fa900d35ec2c068e0c3ccc2feab7c12215b6a427fa2094eda58"
     }
   },
   "history": [],
