@@ -344,6 +344,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "aien-omegese-constraint"
+version = "0.1.0"
+dependencies = [
+ "aien-inference-abi",
+ "tokenizers",
+]
+
+[[package]]
 name = "aien-platform"
 version = "0.1.0"
 dependencies = [

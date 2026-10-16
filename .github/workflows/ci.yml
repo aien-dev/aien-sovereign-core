@@ -167,3 +167,37 @@ jobs:
 
       - name: Run the linked composition tests (scripts/test-linked-compose.sh)
         run: bash scripts/test-linked-compose.sh "$GITHUB_WORKSPACE/omega" "$GITHUB_WORKSPACE/physics" "$GITHUB_WORKSPACE/aienos"
+
+  omegese-constraint:
+    # The Omegese guardrail (crates/aien-omegese-constraint) against the real oracle. Its real-oracle
+    # tests are #[ignore] in the verify job (no omegese binary there). This job builds `omegese`
+    # (one C file, CPU only) from omega at crates/aien-omegese-constraint/omegese.lock and runs them.
+    name: Omegese guardrail against the real oracle
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Source
+        uses: actions/checkout@v4
+
+      - name: Install pinned Rust toolchain (rust-toolchain.toml)
+        run: |
+          rustup toolchain install "$(sed -n 's/^channel *= *"\(.*\)"/\1/p' rust-toolchain.toml)" --profile minimal
+          rustc --version
+
+      - name: Read pin (crates/aien-omegese-constraint/omegese.lock)
+        id: pin
+        run: echo "omega=$(tr -d '[:space:]' < crates/aien-omegese-constraint/omegese.lock)" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout omega at the pin
+        uses: actions/checkout@v4
+        with:
+          repository: aien-spark/omega
+          ref: ${{ steps.pin.outputs.omega }}
+          path: omega
+
+      - name: Build omegese (the flags of omega's mk/omegese.mk)
+        run: cc -std=gnu11 -Wall -Wextra -Werror -D_GNU_SOURCE -O2 -o "$RUNNER_TEMP/omegese" omega/tools/omegese/omegese.c
+
+      - name: Real-oracle walks on the host fake
+        env:
+          OMEGESE_BIN: ${{ runner.temp }}/omegese
+        run: cargo test -p aien-omegese-constraint --test echo_walks -- --ignored --test-threads=1 --nocapture
