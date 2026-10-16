@@ -315,7 +315,10 @@ pub fn check_file_proposal(text: &str) -> Result<FileProposal, String> {
         .ok_or("empty reply")?;
     let first = bare(lines[at]);
     const KEY: &str = "filename:";
-    if !first.get(..KEY.len()).is_some_and(|prefix| prefix.eq_ignore_ascii_case(KEY)) {
+    if !first
+        .get(..KEY.len())
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case(KEY))
+    {
         return Err("no filename line: the first line must be 'filename: <relative path>'".into());
     }
     // sc#402: `./report.md` is `report.md`; the strict check then runs as before.
