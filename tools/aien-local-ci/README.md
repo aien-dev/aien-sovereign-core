@@ -19,7 +19,7 @@ AIENOS.
 | `pipeline.sh` | ADR 0033 phase 3: publish verified bundles to aien-receipts, rerun the GitHub thin gate, merge `ready-to-merge` PRs behind guards |
 | `tests/pipeline_test.sh` | offline proofs of `pipeline.sh` with fake `gh`, fake `aien-test` and throwaway git repositories (56 checks) |
 | `train.sh` | the merge train: batches `ready-to-merge` PRs every measured T, verifies stacked prefixes on the Spark, names the culprit, lands the tested stack by merging its train PR (not installed; review first) |
-| `tests/train_test.sh` | offline proofs of `train.sh` with fake `gh`, worker, quietlock and crumb tool, the real `pipeline.sh` for publishing (56 checks) |
+| `tests/train_test.sh` | offline proofs of `train.sh` with fake `gh`, worker, quietlock and crumb tool, the real `pipeline.sh` for publishing (70 checks) |
 
 ## C8 exec contract
 
