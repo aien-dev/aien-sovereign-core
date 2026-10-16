@@ -1,0 +1,890 @@
+//! Byte-exact reimplementation of omega's file-backed GEN retrieval provider, contract
+//! `genret-cli-v3` (tools/gen/retrieval/CONTRACT.md sha256 ee21d714...a3ac, genret.c at gen/retrieval
+//! a26be577). Given the same record set and query it produces the same `selected.tsv`,
+//! `excluded.tsv`, `suffix.txt`, `query.txt`, `receipt.txt` and `SHA256SUMS` bytes. Every rule is
+//! integer arithmetic or byte comparison; nothing here reads a clock, the environment or the network.
+//!
+//! The record bytes reach this module through a loader (the Cortex store in `store.rs`); the
+//! validation that genret delegates to `recheck` is done in-process by [`super::record::validate`].
+//! Record text is only ever copied into the suffix as inert bytes inside a fenced block: the fields
+//! that steer eligibility (`id kind split family validity`) are read from the record header only, and
+//! the header ends at the first `body` line.
+
+use std::collections::BTreeMap;
+
+use super::record::{self, ReceiptSource};
+use super::sha256_hex;
+
+pub const CONTRACT: &str = "genret-cli-v3";
+/// sha256 of the recheck.c whose rules [`super::record::validate`] implements (omega gen/abstract
+/// 937b033c, the `GENRET_RECHECK_SHA256` pin of mk/gen-retrieval.mk at a26be577). Written to every
+/// receipt as `recheck_source_sha256`, exactly as genret compiles it in.
+pub const RECHECK_SOURCE_SHA256: &str =
+    "05cec285f7b7b2be68b1db1287661513e7e4715da44909065bdd0829daac02b6";
+/// The heading before the first record block, the same for both kinds (CONTRACT.md 6, 66 bytes).
+pub const HEADING: &str = "\nVerified reference code from earlier tasks, most relevant first.\n";
+const MAX_RECORD: usize = 65536;
+const MAX_RECORDS: usize = 65536;
+const MAX_TASKFILE: usize = 4096;
+const MAX_EXCL: usize = 256;
+
+/// Record kind: arm C (`raw`) or arm D (`abstraction`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Kind {
+    Raw,
+    Abstraction,
+}
+
+impl Kind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Kind::Raw => "raw",
+            Kind::Abstraction => "abstraction",
+        }
+    }
+}
+
+/// Selection mode (CONTRACT.md section 6).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mode {
+    Normal,
+    Irrelevant,
+    Empty,
+    LengthMatched { target_bytes: u32 },
+}
+
+impl Mode {
+    fn as_str(self) -> &'static str {
+        match self {
+            Mode::Normal => "normal",
+            Mode::Irrelevant => "irrelevant",
+            Mode::Empty => "empty",
+            Mode::LengthMatched { .. } => "length-matched",
+        }
+    }
+}
+
+/// One query: the public requirement and prompt bytes plus the genret options.
+#[derive(Debug, Clone)]
+pub struct GenQuery<'a> {
+    pub requirement: &'a [u8],
+    pub prompt: &'a [u8],
+    pub kind: Kind,
+    pub k: u32,
+    pub cap_bytes: u32,
+    pub mode: Mode,
+    pub exclude_families: Vec<String>,
+    /// genret `--recheck-sha256`: the sha256 of the reference recheck binary (built from
+    /// [`RECHECK_SOURCE_SHA256`]) whose verdicts the in-process validator reproduces. Cortex runs no
+    /// binary; the value is checked for form and echoed to `receipt.txt` as `recheck_sha256`, so the
+    /// receipt names the validator the caller pinned (CONTRACT.md 2 and 8).
+    pub recheck_sha256: &'a str,
+}
+
+/// A fatal condition (genret exit 2). `reason` is the CONTRACT.md section 7 word, or one of the
+/// Cortex-side words `store_unreadable` / `space_invalid`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GenRetError {
+    pub reason: &'static str,
+    pub detail: String,
+}
+
+impl GenRetError {
+    pub(crate) fn new(reason: &'static str, detail: impl Into<String>) -> Self {
+        Self {
+            reason,
+            detail: detail.into(),
+        }
+    }
+}
+
+impl std::fmt::Display for GenRetError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "genret: FATAL {} {}", self.reason, self.detail)
+    }
+}
+
+impl std::error::Error for GenRetError {}
+
+/// A selected record (one `selected.tsv` row).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Selected {
+    pub rank: usize,
+    pub id: String,
+    pub digest: String,
+    pub score: u64,
+    pub bytes: usize,
+    pub pad: bool,
+}
+
+/// A record that was not selected (one `excluded.tsv` row). `score` is None when not indexed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Excluded {
+    pub id: String,
+    pub digest: String,
+    pub score: Option<u64>,
+    pub reason: String,
+}
+
+/// genret's outputs, byte for byte, plus parsed rows.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GenRetOutput {
+    pub selected_tsv: Vec<u8>,
+    pub excluded_tsv: Vec<u8>,
+    pub suffix: Vec<u8>,
+    pub query_txt: Vec<u8>,
+    pub receipt_txt: Vec<u8>,
+    pub sha256sums: Vec<u8>,
+    pub selected: Vec<Selected>,
+    pub excluded: Vec<Excluded>,
+    /// Records excluded because Cortex holds a revocation for them. genret has no revocations, so
+    /// when this is non-zero the output is NOT comparable with the file provider on the same set.
+    pub revoked: usize,
+}
+
+impl GenRetOutput {
+    /// The six files genret writes into `--out`, in its order.
+    pub fn files(&self) -> [(&'static str, &[u8]); 6] {
+        [
+            ("selected.tsv", &self.selected_tsv),
+            ("excluded.tsv", &self.excluded_tsv),
+            ("suffix.txt", &self.suffix),
+            ("query.txt", &self.query_txt),
+            ("receipt.txt", &self.receipt_txt),
+            ("SHA256SUMS", &self.sha256sums),
+        ]
+    }
+
+    /// True when the output can be compared byte for byte with genret on the same record set.
+    pub fn parity_comparable(&self) -> bool {
+        self.revoked == 0
+    }
+}
+
+/// One record as the loader returns it.
+pub(crate) struct Loaded<'a> {
+    pub bytes: Vec<u8>,
+    pub receipts: Box<dyn ReceiptSource + 'a>,
+    pub revoked: bool,
+}
+
+/// One manifest line.
+pub(crate) struct ManifestLine {
+    pub digest: String,
+    pub path: String,
+}
+
+fn c_name(c: u8) -> bool {
+    c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'_' || c == b'-'
+}
+fn c_word(c: u8) -> bool {
+    c.is_ascii_lowercase() || c.is_ascii_digit()
+}
+pub(crate) fn is_hex64(s: &str) -> bool {
+    s.len() == 64
+        && s.bytes()
+            .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c))
+}
+/// `--exclude-family` / record family token: [a-z0-9_-]{1,64}
+pub(crate) fn family_token_ok(s: &str) -> bool {
+    (1..=64).contains(&s.len()) && s.bytes().all(c_name)
+}
+
+/// Parses and checks a MANIFEST exactly as genret does (digest first, then the line rules).
+pub(crate) fn parse_manifest(man: &[u8], pin: &str) -> Result<Vec<ManifestLine>, GenRetError> {
+    let mdig = sha256_hex(man);
+    if mdig != pin {
+        return Err(GenRetError::new(
+            "manifest_digest_mismatch",
+            format!("MANIFEST has sha256 {}, pinned {}", mdig, pin),
+        ));
+    }
+    if man.is_empty() || man[man.len() - 1] != b'\n' {
+        return Err(GenRetError::new(
+            "manifest_malformed",
+            "empty or no final newline",
+        ));
+    }
+    let nr = man.iter().filter(|&&c| c == b'\n').count();
+    if nr > MAX_RECORDS {
+        return Err(GenRetError::new(
+            "manifest_malformed",
+            format!("more than {} lines", MAX_RECORDS),
+        ));
+    }
+    let mut out: Vec<ManifestLine> = Vec::with_capacity(nr);
+    for (li, line) in man[..man.len() - 1].split(|&c| c == b'\n').enumerate() {
+        let n = line.len();
+        let bad_head = n < 67
+            || !line[..64]
+                .iter()
+                .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(c))
+            || line[64] != b' '
+            || line[65] != b' ';
+        if bad_head {
+            return Err(GenRetError::new(
+                "manifest_malformed",
+                format!("line {} is not '<sha256>  <path>'", li + 1),
+            ));
+        }
+        if line.contains(&0) {
+            return Err(GenRetError::new(
+                "manifest_malformed",
+                format!("line {} holds NUL", li + 1),
+            ));
+        }
+        let path = &line[66..];
+        if path[0] == b'/' || path.len() > 4096 {
+            return Err(GenRetError::new(
+                "manifest_malformed",
+                format!("line {}: bad path", li + 1),
+            ));
+        }
+        for comp in path.split(|&c| c == b'/') {
+            if comp.is_empty() || comp == b"." || comp == b".." {
+                return Err(GenRetError::new(
+                    "manifest_malformed",
+                    format!("line {}: bad path component", li + 1),
+                ));
+            }
+            if !comp
+                .iter()
+                .all(|&c| c_name(c) || c.is_ascii_uppercase() || c == b'.')
+            {
+                return Err(GenRetError::new(
+                    "manifest_malformed",
+                    format!("line {}: bad path byte", li + 1),
+                ));
+            }
+        }
+        // checked above: hex + ASCII path bytes only
+        let path = String::from_utf8_lossy(path).into_owned();
+        if out.iter().any(|m| m.path == path) {
+            return Err(GenRetError::new(
+                "manifest_malformed",
+                format!("duplicate path {}", path),
+            ));
+        }
+        out.push(ManifestLine {
+            digest: String::from_utf8_lossy(&line[..64]).into_owned(),
+            path,
+        });
+    }
+    Ok(out)
+}
+
+fn lowered(b: &[u8]) -> Vec<u8> {
+    b.iter().map(u8::to_ascii_lowercase).collect()
+}
+
+/// CONTRACT.md 4: maximal runs of [a-z0-9] in the lowered bytes.
+fn tokenize(low: &[u8], out: &mut Vec<Vec<u8>>) {
+    for t in low.split(|&c| !c_word(c)) {
+        if !t.is_empty() {
+            out.push(t.to_vec());
+        }
+    }
+}
+
+/// CONTRACT.md 6, fixed-point log2 in units of 2^-16.
+pub(crate) fn log2q16(a: u64, mut b: u64) -> u64 {
+    let mut k = 0u64;
+    while a >= 2 * b {
+        b *= 2;
+        k += 1;
+    }
+    let mut y = (a << 30) / b;
+    let mut r = k << 16;
+    for i in (0..16).rev() {
+        y = (y * y) >> 30;
+        if y >= 1u64 << 31 {
+            y >>= 1;
+            r += 1u64 << i;
+        }
+    }
+    r
+}
+
+/// The record fields genret reads, taken from a record that already passed [`record::validate`].
+struct Rec {
+    digest: String,
+    id: String,
+    kind: String,
+    split: String,
+    families: Vec<String>,
+    validity: String,
+    entry: String,
+    params: String,
+    ret: String,
+    desc: String,
+    body: Vec<u8>,
+    revoked: bool,
+    reason: String,
+    indexed: bool,
+    selected: bool,
+    pad: bool,
+    tf: BTreeMap<Vec<u8>, u32>,
+    dl: u64,
+    score: u64,
+}
+
+pub(crate) fn header_fields(bytes: &[u8]) -> Result<(BTreeMap<String, String>, Vec<u8>), String> {
+    let mut fields = BTreeMap::new();
+    let mut pos = 0;
+    loop {
+        let nl = match bytes[pos..].iter().position(|&c| c == b'\n') {
+            Some(p) => pos + p,
+            None => return Err("no 'body' line".into()),
+        };
+        let line = std::str::from_utf8(&bytes[pos..nl]).map_err(|_| "header not ASCII")?;
+        pos = nl + 1;
+        if line == "body" {
+            break;
+        }
+        let (k, v) = line.split_once(' ').unwrap_or((line, ""));
+        if matches!(
+            k,
+            "id" | "kind" | "split" | "family" | "validity" | "entry" | "params" | "ret" | "desc"
+        ) && fields.insert(k.to_string(), v.to_string()).is_some()
+        {
+            return Err(format!("key {} repeated", k));
+        }
+    }
+    Ok((fields, bytes[pos..].to_vec()))
+}
+
+/// One heading for both kinds: C and D suffixes differ only in record content (v3).
+fn render_head(b: &mut Vec<u8>) {
+    b.extend_from_slice(HEADING.as_bytes());
+}
+
+fn render_block(b: &mut Vec<u8>, i: usize, r: &Rec) {
+    b.extend_from_slice(format!("\nRecord {}.\n\nentry ", i).as_bytes());
+    b.extend_from_slice(r.entry.as_bytes());
+    b.extend_from_slice(b"\nparams");
+    if !r.params.is_empty() {
+        b.push(b' ');
+        b.extend_from_slice(r.params.as_bytes());
+    }
+    b.extend_from_slice(b"\nret ");
+    b.extend_from_slice(r.ret.as_bytes());
+    b.extend_from_slice(b"\n\n");
+    b.extend_from_slice(r.desc.as_bytes());
+    b.extend_from_slice(b"\n\n```\n");
+    b.extend_from_slice(&r.body);
+    b.extend_from_slice(b"```\n");
+}
+
+fn block_len(i: usize, r: &Rec) -> usize {
+    let mut b = Vec::new();
+    render_block(&mut b, i, r);
+    b.len()
+}
+
+pub(crate) fn contains3(h: &[u8]) -> bool {
+    h.windows(3).any(|w| w == b"```")
+}
+
+/// Checks the query options and task bytes exactly as genret does, and returns the sorted distinct
+/// query terms.
+pub(crate) fn check_query(q: &GenQuery<'_>, pin: &str) -> Result<Vec<Vec<u8>>, GenRetError> {
+    let usage = |why: &str| Err(GenRetError::new("usage", why.to_string()));
+    if !(1..=64).contains(&q.k) || !(1..=1_048_576).contains(&q.cap_bytes) {
+        return usage("number out of range");
+    }
+    if q.exclude_families.len() > MAX_EXCL {
+        return usage("too many --exclude-family");
+    }
+    if q.exclude_families.iter().any(|f| !family_token_ok(f)) {
+        return usage("--exclude-family must match [a-z0-9_-]{1,64}");
+    }
+    if !is_hex64(pin) {
+        return usage("--manifest-sha256 must be 64 lowercase hex");
+    }
+    if !is_hex64(q.recheck_sha256) {
+        return usage("--recheck-sha256 must be 64 lowercase hex");
+    }
+    if let Mode::LengthMatched { target_bytes } = q.mode {
+        if !(1..=1_048_576).contains(&target_bytes) {
+            return usage("number out of range");
+        }
+        if target_bytes > q.cap_bytes {
+            return usage("--target-bytes must not exceed --cap-bytes");
+        }
+    }
+    let (req, pr) = (q.requirement, q.prompt);
+    if req.len() > MAX_TASKFILE || req.contains(&0) {
+        return Err(GenRetError::new(
+            "requirement_invalid",
+            format!("requirement: over {} bytes or holds NUL", MAX_TASKFILE),
+        ));
+    }
+    if pr.is_empty() || pr.len() > MAX_TASKFILE {
+        return Err(GenRetError::new(
+            "prompt_invalid",
+            format!("prompt: must be 1..{} bytes", MAX_TASKFILE),
+        ));
+    }
+    if pr
+        .iter()
+        .any(|&c| c != b'\n' && !(0x20..=0x7e).contains(&c))
+    {
+        return Err(GenRetError::new(
+            "prompt_invalid",
+            "prompt: byte outside \\n and 0x20..0x7E",
+        ));
+    }
+    let reql = lowered(req);
+    let mut terms: Vec<Vec<u8>> = Vec::new();
+    let qk: [&[u8]; 3] = [b"entry", b"params", b"ret"];
+    let mut seen = [0u32; 3];
+    let mut i = 0;
+    while i < req.len() {
+        let e = req[i..]
+            .iter()
+            .position(|&c| c == b'\n')
+            .map(|p| i + p)
+            .unwrap_or(req.len());
+        for (j, k) in qk.iter().enumerate() {
+            let kl = k.len();
+            if e - i >= kl && &req[i..i + kl] == *k && (e - i == kl || req[i + kl] == b' ') {
+                seen[j] += 1;
+                let vs = i + kl + usize::from(e - i > kl);
+                tokenize(&reql[vs..e], &mut terms);
+            }
+        }
+        i = e + 1;
+    }
+    for (j, k) in qk.iter().enumerate() {
+        if seen[j] != 1 {
+            return Err(GenRetError::new(
+                "requirement_invalid",
+                format!(
+                    "requirement: needs exactly one '{}' line",
+                    String::from_utf8_lossy(k)
+                ),
+            ));
+        }
+    }
+    tokenize(&lowered(pr), &mut terms);
+    terms.sort();
+    terms.dedup();
+    Ok(terms)
+}
+
+/// Receipts read from a record set's `receipts/` directory (what genret passes to recheck).
+pub(crate) struct DirReceipts(pub std::path::PathBuf);
+impl ReceiptSource for DirReceipts {
+    fn receipt(&self, id: &str) -> Option<Vec<u8>> {
+        std::fs::read(self.0.join(id)).ok()
+    }
+}
+
+/// genret over a record set on disk (`--corpus <MANIFEST>`), with the in-process validator in place of
+/// the recheck binary. Read-only: it writes nothing and returns the six outputs. This is the
+/// file-backed reference the Cortex store is compared with, including on refused record sets.
+pub fn query_record_files(
+    manifest: &std::path::Path,
+    pin: &str,
+    q: &GenQuery<'_>,
+) -> Result<GenRetOutput, GenRetError> {
+    check_query(q, pin)?;
+    let man = std::fs::read(manifest).map_err(|e| {
+        GenRetError::new(
+            "manifest_unreadable",
+            format!("{}: {}", manifest.display(), e),
+        )
+    })?;
+    let dir = manifest
+        .parent()
+        .map(std::path::Path::to_path_buf)
+        .unwrap_or_default();
+    run_query(&man, pin, q, |m| {
+        let bytes = std::fs::read(dir.join(&m.path))
+            .map_err(|_| GenRetError::new("record_missing", m.path.clone()))?;
+        Ok(Loaded {
+            bytes,
+            receipts: Box::new(DirReceipts(dir.join("receipts"))),
+            revoked: false,
+        })
+    })
+}
+
+/// Runs one genret query over a record set. `manifest` is the MANIFEST bytes, `pin` the frozen
+/// record-set digest, `load(path)` returns the record stored for a manifest path.
+pub(crate) fn run_query<'a>(
+    manifest: &[u8],
+    pin: &str,
+    q: &GenQuery<'_>,
+    mut load: impl FnMut(&ManifestLine) -> Result<Loaded<'a>, GenRetError>,
+) -> Result<GenRetOutput, GenRetError> {
+    let terms = check_query(q, pin)?;
+    let lines = parse_manifest(manifest, pin)?;
+
+    // records: integrity is fatal (missing, oversize, stale digest), then the recheck rules
+    let mut loaded = Vec::with_capacity(lines.len());
+    for m in &lines {
+        let l = load(m)?;
+        if l.bytes.len() > MAX_RECORD {
+            return Err(GenRetError::new(
+                "invalid_record",
+                format!("{}: over {} bytes", m.path, MAX_RECORD),
+            ));
+        }
+        let d = sha256_hex(&l.bytes);
+        if d != m.digest {
+            return Err(GenRetError::new(
+                "stale_digest",
+                format!("{} has sha256 {}, manifest says {}", m.path, d, m.digest),
+            ));
+        }
+        loaded.push(l);
+    }
+    let mut recs: Vec<Rec> = Vec::with_capacity(lines.len());
+    for (m, l) in lines.iter().zip(&loaded) {
+        let meta = record::validate(&l.bytes, None, Some(l.receipts.as_ref())).map_err(|r| {
+            GenRetError::new("invalid_record", format!("recheck: {}: {}", m.path, r))
+        })?;
+        let (f, body) = header_fields(&l.bytes)
+            .map_err(|e| GenRetError::new("invalid_record", format!("{}: {}", m.path, e)))?;
+        let get = |k: &str| f.get(k).cloned().unwrap_or_default();
+        if get("id") != meta.id {
+            return Err(GenRetError::new(
+                "invalid_record",
+                format!("{}: id differs between parsers", m.path),
+            ));
+        }
+        recs.push(Rec {
+            digest: m.digest.clone(),
+            id: meta.id,
+            kind: meta.kind,
+            split: meta.split,
+            families: meta.families,
+            validity: meta.validity,
+            entry: get("entry"),
+            params: get("params"),
+            ret: get("ret"),
+            desc: get("desc"),
+            body,
+            revoked: l.revoked,
+            reason: String::new(),
+            indexed: false,
+            selected: false,
+            pad: false,
+            tf: BTreeMap::new(),
+            dl: 0,
+            score: 0,
+        });
+    }
+    drop(loaded);
+    let mut byid: Vec<usize> = (0..recs.len()).collect();
+    byid.sort_by(|&a, &b| recs[a].id.as_bytes().cmp(recs[b].id.as_bytes()));
+    for w in byid.windows(2) {
+        if recs[w[0]].id == recs[w[1]].id {
+            return Err(GenRetError::new("duplicate_id", recs[w[1]].id.clone()));
+        }
+    }
+
+    // eligibility (CONTRACT.md 5); `revoked` is the one Cortex-side addition, after validity
+    let kind = q.kind.as_str();
+    let mut n_idx: u64 = 0;
+    let mut total_t: u64 = 0;
+    let mut revoked = 0usize;
+    for r in recs.iter_mut() {
+        if r.kind != kind {
+            r.reason = format!("kind:{}", r.kind);
+        } else if r.split != "corpus" {
+            r.reason = format!("split:{}", r.split);
+        } else if r.validity != "verified" {
+            r.reason = format!("validity:{}", r.validity);
+        } else if r.revoked {
+            r.reason = "revoked".into();
+            revoked += 1;
+        }
+        if r.reason.is_empty() && !q.exclude_families.is_empty() {
+            'fam: for fam in &r.families {
+                for x in &q.exclude_families {
+                    if fam == x {
+                        r.reason = format!("family_excluded:{}", x);
+                        break 'fam;
+                    }
+                }
+            }
+        }
+        if r.reason.is_empty() && (contains3(&r.body) || contains3(r.desc.as_bytes())) {
+            r.reason = "poisoned:fence".into();
+        }
+        if !r.reason.is_empty() {
+            continue;
+        }
+        r.indexed = true;
+        n_idx += 1;
+        let mut toks = Vec::new();
+        for v in [&r.entry, &r.params, &r.ret, &r.desc] {
+            tokenize(&lowered(v.as_bytes()), &mut toks);
+        }
+        tokenize(&lowered(&r.body), &mut toks);
+        r.dl = toks.len() as u64;
+        total_t += r.dl;
+        for t in toks {
+            *r.tf.entry(t).or_insert(0) += 1;
+        }
+    }
+
+    // scoring (CONTRACT.md 6)
+    for t in &terms {
+        let df = recs
+            .iter()
+            .filter(|r| r.indexed && r.tf.contains_key(t))
+            .count() as u64;
+        if df == 0 {
+            continue;
+        }
+        let idf = log2q16(2 * n_idx + 2, 2 * df + 1);
+        for r in recs.iter_mut().filter(|r| r.indexed) {
+            let tf = match r.tf.get(t) {
+                Some(&c) => c as u128,
+                None => continue,
+            };
+            let (tt, dl, n) = (total_t as u128, r.dl as u128, n_idx as u128);
+            let num = idf as u128 * tf * 44 * tt;
+            let den = 20 * tt * tf + 6 * tt + 18 * dl * n;
+            r.score += (num / den) as u64;
+        }
+    }
+
+    // ranking and selection
+    let mut ord: Vec<usize> = (0..recs.len()).filter(|&i| recs[i].indexed).collect();
+    let irr = q.mode == Mode::Irrelevant;
+    ord.sort_by(|&a, &b| {
+        let (x, y) = (&recs[a], &recs[b]);
+        let s = if irr {
+            x.score.cmp(&y.score)
+        } else {
+            y.score.cmp(&x.score)
+        };
+        s.then_with(|| x.id.as_bytes().cmp(y.id.as_bytes()))
+    });
+    let hlen = HEADING.len();
+    let mut sel: Vec<usize> = Vec::new();
+    let mut total = 0usize;
+    let mut unpadded = 0usize;
+    let mut npad = 0usize;
+    let mut pad_reason = "-";
+    let (k, cap) = (q.k as usize, q.cap_bytes as usize);
+    if q.mode == Mode::Empty {
+        for &i in &ord {
+            recs[i].reason = "ablation_empty".into();
+        }
+    } else {
+        let mut stop: Option<&'static str> = None;
+        for &i in &ord {
+            if !irr && recs[i].score == 0 {
+                recs[i].reason = "no_match".into();
+                continue;
+            }
+            if stop.is_none() {
+                if sel.len() == k {
+                    stop = Some("beyond_k");
+                } else {
+                    let add =
+                        block_len(sel.len() + 1, &recs[i]) + if sel.is_empty() { hlen } else { 0 };
+                    if total + add > cap {
+                        stop = Some("cap_bytes");
+                    } else {
+                        total += add;
+                        recs[i].selected = true;
+                        sel.push(i);
+                        continue;
+                    }
+                }
+            }
+            recs[i].reason = stop.unwrap_or_default().to_string();
+        }
+        // length-matched (v3): leave a selection at or over the target alone (c_not_shorter); else
+        // append whole records from the rest of the ranking, skipping any that would pass the cap,
+        // until the target is reached (reached) or candidates run out (exhausted)
+        unpadded = total;
+        if let Mode::LengthMatched { target_bytes } = q.mode {
+            let target = target_bytes as usize;
+            if total >= target {
+                pad_reason = "c_not_shorter";
+            } else {
+                pad_reason = "exhausted";
+                for &i in &ord {
+                    if total >= target {
+                        break;
+                    }
+                    if recs[i].reason != "beyond_k" && recs[i].reason != "cap_bytes" {
+                        continue;
+                    }
+                    let add =
+                        block_len(sel.len() + 1, &recs[i]) + if sel.is_empty() { hlen } else { 0 };
+                    if total + add > cap {
+                        continue;
+                    }
+                    total += add;
+                    recs[i].selected = true;
+                    recs[i].pad = true;
+                    recs[i].reason.clear();
+                    sel.push(i);
+                    npad += 1;
+                }
+                if total >= target {
+                    pad_reason = "reached";
+                }
+            }
+        }
+    }
+
+    // outputs (CONTRACT.md 8)
+    let mut bs = b"rank\tid\tdigest\tscore\tbytes\trole\n".to_vec();
+    let mut bx = Vec::new();
+    let mut selected = Vec::new();
+    if !sel.is_empty() {
+        render_head(&mut bx);
+    }
+    for (n, &i) in sel.iter().enumerate() {
+        let r = &recs[i];
+        let before = bx.len();
+        render_block(&mut bx, n + 1, r);
+        let role = if r.pad { "pad" } else { "top" };
+        bs.extend_from_slice(
+            format!(
+                "{}\t{}\t{}\t{}\t{}\t{}\n",
+                n + 1,
+                r.id,
+                r.digest,
+                r.score,
+                bx.len() - before,
+                role
+            )
+            .as_bytes(),
+        );
+        selected.push(Selected {
+            rank: n + 1,
+            id: r.id.clone(),
+            digest: r.digest.clone(),
+            score: r.score,
+            bytes: bx.len() - before,
+            pad: r.pad,
+        });
+    }
+    if bx.len() != total {
+        return Err(GenRetError::new(
+            "internal",
+            format!("suffix length {} != accounted {}", bx.len(), total),
+        ));
+    }
+    let mut be = b"id\tdigest\tscore\treason\n".to_vec();
+    let mut excluded = Vec::new();
+    for &i in &byid {
+        let r = &recs[i];
+        if r.selected {
+            continue;
+        }
+        let score = if r.indexed { Some(r.score) } else { None };
+        let sc = score.map(|s| s.to_string()).unwrap_or_else(|| "-".into());
+        be.extend_from_slice(format!("{}\t{}\t{}\t{}\n", r.id, r.digest, sc, r.reason).as_bytes());
+        excluded.push(Excluded {
+            id: r.id.clone(),
+            digest: r.digest.clone(),
+            score,
+            reason: r.reason.clone(),
+        });
+    }
+    let mut bq = Vec::new();
+    for t in &terms {
+        bq.extend_from_slice(t);
+        bq.push(b'\n');
+    }
+    let lm = match q.mode {
+        Mode::LengthMatched { target_bytes } => Some(target_bytes as i64),
+        _ => None,
+    };
+    let (pad, unp, gap, target) = match lm {
+        Some(t) => (
+            if npad > 0 {
+                npad.to_string()
+            } else {
+                "none".to_string()
+            },
+            unpadded.to_string(),
+            (bx.len() as i64 - t).to_string(),
+            t.to_string(),
+        ),
+        None => ("-".into(), "-".into(), "-".into(), "-".into()),
+    };
+    let excl = if q.exclude_families.is_empty() {
+        "-".to_string()
+    } else {
+        q.exclude_families.join(",")
+    };
+    // CONTRACT.md 8, the 25 keys in order
+    let receipt = format!(
+        "contract={}\nmode={}\nkind={}\nk={}\ncap_bytes={}\ntarget_bytes={}\nexclude_family={}\n\
+         manifest_sha256={}\nrecheck_sha256={}\nrecheck_source_sha256={}\n\
+         requirement_sha256={}\nprompt_sha256={}\nquery_sha256={}\n\
+         records={}\nindexed={}\ntotal_tokens={}\nselected={}\n\
+         pad={}\npad_reason={}\nunpadded_bytes={}\nsuffix_bytes={}\nlength_gap={}\n\
+         suffix_sha256={}\nselected_sha256={}\nexcluded_sha256={}\n",
+        CONTRACT,
+        q.mode.as_str(),
+        kind,
+        q.k,
+        q.cap_bytes,
+        target,
+        excl,
+        pin,
+        q.recheck_sha256,
+        RECHECK_SOURCE_SHA256,
+        sha256_hex(q.requirement),
+        sha256_hex(q.prompt),
+        sha256_hex(&bq),
+        recs.len(),
+        n_idx,
+        total_t,
+        sel.len(),
+        pad,
+        pad_reason,
+        unp,
+        bx.len(),
+        gap,
+        sha256_hex(&bx),
+        sha256_hex(&bs),
+        sha256_hex(&be),
+    )
+    .into_bytes();
+    let mut out = GenRetOutput {
+        selected_tsv: bs,
+        excluded_tsv: be,
+        suffix: bx,
+        query_txt: bq,
+        receipt_txt: receipt,
+        sha256sums: Vec::new(),
+        selected,
+        excluded,
+        revoked,
+    };
+    let mut sums = Vec::new();
+    for (name, b) in out.files().iter().take(5) {
+        sums.extend_from_slice(format!("{}  {}\n", sha256_hex(b), name).as_bytes());
+    }
+    out.sha256sums = sums;
+    Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::log2q16;
+
+    #[test]
+    fn log2q16_matches_known_points() {
+        assert_eq!(log2q16(2, 1), 1 << 16);
+        assert_eq!(log2q16(8, 1), 3 << 16);
+        assert_eq!(log2q16(5, 5), 0);
+        // log2(3) = 1.58496..., in units of 2^-16 = 103872.6...
+        let v = log2q16(3, 1);
+        assert!((103_870..=103_874).contains(&v), "{}", v);
+    }
+}

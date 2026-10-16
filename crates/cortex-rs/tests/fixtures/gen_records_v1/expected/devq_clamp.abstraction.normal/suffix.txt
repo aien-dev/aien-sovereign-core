@@ -1,0 +1,57 @@
+
+Verified reference code from earlier tasks, most relevant first.
+
+Record 1.
+
+entry sat_sub
+params u32 u32
+ret u32
+
+Helper: saturating subtraction, a - b clamped at 0.
+
+```
+fn sat_sub a uint b uint to uint
+if ge a b
+ret sub a b
+end
+ret 0
+end
+```
+
+Record 2.
+
+entry range_sum
+params u32 u32
+ret u64
+
+Helper: sum of lo..hi inclusive with a bounded while loop; 0 when lo > hi.
+
+```
+fn range_sum lo uint hi uint to ulong
+s = ulong 0
+i = lo
+while le i hi bound 100000
+s = add s ulong i
+i = add i 1
+end
+ret s
+end
+```
+
+Record 3.
+
+entry dot
+params view i64 3 view i64 3
+ret i64
+
+Helper: dot product of two 3-element long views.
+
+```
+fn dot u view long 3 w view long 3 to long
+s = long 0
+for i uint 3
+s = add s mul get u i get w i
+end
+ret s
+end
+```

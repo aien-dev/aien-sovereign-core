@@ -1,0 +1,58 @@
+
+Verified reference code from earlier tasks, most relevant first.
+
+Record 1.
+
+entry ndigits
+params u64
+ret u8
+
+Helper: number of decimal digits of n (at least 1), a bounded divide-by-10 loop.
+
+```
+fn ndigits n ulong to uchar
+k = uchar 1
+while ge n 10 bound 20
+n = div n 10
+k = add k 1
+end
+ret k
+end
+```
+
+Record 2.
+
+entry range_sum
+params u32 u32
+ret u64
+
+Helper: sum of lo..hi inclusive with a bounded while loop; 0 when lo > hi.
+
+```
+fn range_sum lo uint hi uint to ulong
+s = ulong 0
+i = lo
+while le i hi bound 100000
+s = add s ulong i
+i = add i 1
+end
+ret s
+end
+```
+
+Record 3.
+
+entry sat_sub
+params u32 u32
+ret u32
+
+Helper: saturating subtraction, a - b clamped at 0.
+
+```
+fn sat_sub a uint b uint to uint
+if ge a b
+ret sub a b
+end
+ret 0
+end
+```

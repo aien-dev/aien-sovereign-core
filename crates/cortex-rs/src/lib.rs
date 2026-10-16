@@ -7,6 +7,7 @@ pub mod compiler;
 pub mod db;
 pub mod embeddings;
 pub mod evidence;
+pub mod gen_procedures;
 pub mod handlers;
 pub mod models;
 pub mod promotion;
