@@ -170,3 +170,36 @@ jobs:
 
       - name: Run the linked composition tests (scripts/test-linked-compose.sh)
         run: bash scripts/test-linked-compose.sh "$GITHUB_WORKSPACE/omega" "$GITHUB_WORKSPACE/physics" "$GITHUB_WORKSPACE/aienos"
+
+  headstart-feature-on:
+    # Headstart M6 (sovereign-core #538). The verify job builds aien-runtime with its default
+    # features, so the provisional-prep tests (Headstart M3, #537) never compile there. This job
+    # runs them with the feature on, runs the M1/M2 harness tests, and checks that the default
+    # build pulls in neither spark-harness nor aien-proof. Not a required check: making it
+    # required is a branch-protection decision for the repository owner.
+    name: Headstart feature-on tests (provisional-prep)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Source
+        uses: actions/checkout@v4
+
+      - name: Install Stable Rust Toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Feature-off invariant (default aien-runtime links no spark-harness or aien-proof)
+        run: |
+          tree="$(cargo tree -e normal -p aien-runtime --prefix none)"
+          if printf '%s\n' "$tree" | grep -E '^(spark-harness|aien-proof) '; then
+            echo "default aien-runtime build depends on the Headstart crates above"
+            exit 1
+          fi
+          echo "default aien-runtime build: no spark-harness, no aien-proof"
+
+      - name: Headstart M3 adapter tests (aien-runtime, provisional-prep on)
+        run: cargo test -p aien-runtime --features provisional-prep --test provisional_prep_test -- --test-threads=1
+
+      - name: Headstart M1/M2 harness and scheduler tests (spark-harness)
+        run: cargo test -p spark-harness
+
+      - name: Headstart M6 A/B driver self-check (STUB build, overhead and correctness only)
+        run: cargo test -p aien-runtime --features provisional-prep --test headstart_ab -- --ignored headstart_ab_smoke --test-threads=1
