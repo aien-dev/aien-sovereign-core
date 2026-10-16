@@ -1013,9 +1013,26 @@ async fn restore_retry_window_prefills_without_lookup_after_two_failures() {
 /// directory sync failed after the rename is served but counted indeterminate.
 #[tokio::test]
 async fn indeterminate_park_publication_is_counted() {
-    let mut r = rig();
+    // The worker starts paused so both park jobs are accepted before either
+    // runs. The faulted first job turns the store Degraded, and a Degraded
+    // store refuses new store submits, so with a live worker the second
+    // submit raced the first job's terminal: whenever the worker thread won,
+    // the second park was refused and park_jobs_total stayed 1 (sc#545,
+    // sc#562). Nothing is timed here: the test waits on the accepted count,
+    // then on the terminal completions the worker reports.
+    let mut r = rig_with(0, true);
     r.fake.script(JobScript::fault(Fault::RenameOkDirsyncFail));
-    park_turn(&mut r, &prompt14(), 3).await;
+    let seq = r.spine.submit_request(request(&prompt14(), 3));
+    step(&mut r).await;
+    paint(&r, seq);
+    step_until(&mut r, "turn finished", |r| finished(r, seq)).await;
+    assert_eq!(
+        status(&r).stats.park_jobs_total,
+        2,
+        "both park jobs accepted while the worker is paused"
+    );
+    r.worker.resume_dispatch();
+    step_until(&mut r, "parks terminal", |r| status(r).parking_jobs == 0).await;
     let s = status(&r).stats;
     assert_eq!(s.park_jobs_total, 2);
     assert_eq!(s.park_indeterminate_total, 1, "{s:?}");
