@@ -5,6 +5,7 @@
 # <out dir>/expected and <out dir>/recheck over the vendored ones after reviewing the diff.
 #   expected/<case>/  genret's six output files for each row of cases.tsv (genret-cli-v3)
 #   expected/refusals.tsv  genret's fatal reason for each refused input (corpus mutations, bad options)
+#   OUTPUTS.sha256         sha256 of every file under expected/ and recheck/ (its own digest goes in PINS)
 #   RECHECK_SHA256  sha256 of <recheck>, passed as --recheck-sha256 (and by the tests as recheck_sha256)
 #   recheck/<name>.rec and recheck/verdicts.tsv: each mutant of mutants.tsv and recheck's verdict on it
 #     ("OK <id>" or "REFUSED line <n>: <reason>", the file name removed)
@@ -98,3 +99,7 @@ fresh() { rm -rf "$OUT/work/$1"; cp -R "$REC" "$OUT/work/$1"; printf '%s' "$OUT/
   printf 'tab\there\n' > "$OUT/work/prompt_tab"; PR="$OUT/work/prompt_tab" refuse prompt_tab "$REC" "$PIN"
 } > "$OUT/expected/refusals.tsv"
 rm -rf "$OUT/work"
+# ---- pin every produced output: OUTPUTS.sha256 (sha256sum format, C-sorted paths) ----
+# tests/gen_procedures.rs checks every expected/ and recheck/ file against it and the file set exactly, and
+# PINS records the digest of OUTPUTS.sha256 itself, so the outputs cannot be silently regenerated from Rust.
+(cd "$OUT" && find expected recheck -type f | LC_ALL=C sort | while IFS= read -r p; do sha256sum "$p"; done > OUTPUTS.sha256)

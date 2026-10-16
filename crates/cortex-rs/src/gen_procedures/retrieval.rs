@@ -4,6 +4,14 @@
 //! `excluded.tsv`, `suffix.txt`, `query.txt`, `receipt.txt` and `SHA256SUMS` bytes. Every rule is
 //! integer arithmetic or byte comparison; nothing here reads a clock, the environment or the network.
 //!
+//! INTEROP ONLY. This is not the GEN experiment provider and its output must not be passed off as
+//! genret output. The validator that runs is the in-process Rust port of recheck.c
+//! ([`super::record::validate`]); the recheck binary genret executes, and genret's check of that
+//! binary's sha256 against its trust pin, are absent. The caller cannot name any validator digest
+//! but [`PINNED_RECHECK_SHA256`], and every receipt starts with
+//! `provider=cortex-interop` and says `recheck_source_sha256=unverified`. Apart from those marker
+//! lines (and the receipt digests that cover them) the six outputs equal genret's byte for byte.
+//!
 //! The record bytes reach this module through a loader (the Cortex store in `store.rs`); the
 //! validation that genret delegates to `recheck` is done in-process by [`super::record::validate`].
 //! Record text is only ever copied into the suffix as inert bytes inside a fenced block: the fields
@@ -21,6 +29,17 @@ pub const CONTRACT: &str = "genret-cli-v3";
 /// receipt as `recheck_source_sha256`, exactly as genret compiles it in.
 pub const RECHECK_SOURCE_SHA256: &str =
     "05cec285f7b7b2be68b1db1287661513e7e4715da44909065bdd0829daac02b6";
+/// The one `recheck_sha256` this adapter accepts: the reference recheck binary built from
+/// [`RECHECK_SOURCE_SHA256`] with the mk/gen-retrieval.mk flags (gcc 13.3.0, aarch64; see the fixture
+/// PINS), on which the Rust validator was proved verdict-identical. Any other value is refused
+/// (`recheck_unpinned`).
+pub const PINNED_RECHECK_SHA256: &str =
+    "41679de1f1d3cb78d179c418c0df4de174f0556b7c701ebb5af602e602970518";
+/// First receipt line of every output: this is Cortex interop output, never a genret receipt.
+pub const PROVIDER_MARKER: &str = "provider=cortex-interop";
+/// What the receipt says for `recheck_source_sha256`: no binary built from the pinned source ran
+/// (as omega's `genret_anyrecheck` test build says).
+pub const RECHECK_SOURCE_CLAIM: &str = "unverified";
 /// The heading before the first record block, the same for both kinds (CONTRACT.md 6, 66 bytes).
 pub const HEADING: &str = "\nVerified reference code from earlier tasks, most relevant first.\n";
 const MAX_RECORD: usize = 65536;
@@ -64,20 +83,114 @@ impl Mode {
     }
 }
 
-/// One query: the public requirement and prompt bytes plus the genret options.
+/// Which task file is being read; it picks genret's refusal word.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TaskRole {
+    Requirement,
+    Prompt,
+}
+
+impl TaskRole {
+    fn reason(self) -> &'static str {
+        match self {
+            TaskRole::Requirement => "requirement_invalid",
+            TaskRole::Prompt => "prompt_invalid",
+        }
+    }
+}
+
+/// A public task file that passed the `hidden` path check. The only way to build one is
+/// [`read_public_task_file`], so every query input has been through it (the check is not opt-in).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PublicTaskFile {
+    bytes: Vec<u8>,
+}
+
+impl PublicTaskFile {
+    pub fn bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+}
+
+// open(2) flags for the task reader: never block on a FIFO before the regular-file check, never
+// acquire a controlling terminal. Values of the generic Linux ABI (asm-generic/fcntl.h, also x86).
+#[cfg(all(
+    target_os = "linux",
+    any(
+        target_arch = "x86_64",
+        target_arch = "x86",
+        target_arch = "aarch64",
+        target_arch = "arm",
+        target_arch = "riscv64"
+    )
+))]
+const TASK_OPEN_FLAGS: i32 = 0o4000 /* O_NONBLOCK */ | 0o400 /* O_NOCTTY */;
+
+/// Reads a requirement or prompt like genret v3 (CONTRACT.md 3): open once; resolve the path of THAT
+/// open file through /proc/self/fd and refuse it if any component is exactly `hidden`
+/// (`hidden_path`); refuse anything but a regular file; read at most 4096 + 1 bytes from the same
+/// descriptor (the query refuses the extra byte). A symlink swapped in after the check changes
+/// nothing. As in genret, a hard link to a hidden file placed outside `hidden/` is not detectable.
+#[cfg(all(
+    target_os = "linux",
+    any(
+        target_arch = "x86_64",
+        target_arch = "x86",
+        target_arch = "aarch64",
+        target_arch = "arm",
+        target_arch = "riscv64"
+    )
+))]
+pub fn read_public_task_file(
+    path: &std::path::Path,
+    role: TaskRole,
+) -> Result<PublicTaskFile, GenRetError> {
+    use std::io::Read;
+    use std::os::unix::fs::OpenOptionsExt;
+    use std::os::unix::io::AsRawFd;
+    let why = role.reason();
+    let f = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(TASK_OPEN_FLAGS)
+        .open(path)
+        .map_err(|e| GenRetError::new(why, format!("cannot read {}: {}", path.display(), e)))?;
+    let rp = std::fs::read_link(format!("/proc/self/fd/{}", f.as_raw_fd()))
+        .map_err(|e| GenRetError::new(why, format!("cannot resolve {}: {}", path.display(), e)))?;
+    if rp.components().any(|c| c.as_os_str() == "hidden") {
+        return Err(GenRetError::new(
+            "hidden_path",
+            format!("{} is under a 'hidden' directory", path.display()),
+        ));
+    }
+    let md = f
+        .metadata()
+        .map_err(|e| GenRetError::new(why, format!("cannot stat {}: {}", path.display(), e)))?;
+    if !md.is_file() {
+        return Err(GenRetError::new(
+            why,
+            format!("{} is not a regular file", path.display()),
+        ));
+    }
+    let mut bytes = Vec::with_capacity(MAX_TASKFILE + 1);
+    f.take(MAX_TASKFILE as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| GenRetError::new(why, format!("cannot read {}: {}", path.display(), e)))?;
+    Ok(PublicTaskFile { bytes })
+}
+
+/// One query: the public requirement and prompt plus the genret options.
 #[derive(Debug, Clone)]
 pub struct GenQuery<'a> {
-    pub requirement: &'a [u8],
-    pub prompt: &'a [u8],
+    pub requirement: &'a PublicTaskFile,
+    pub prompt: &'a PublicTaskFile,
     pub kind: Kind,
     pub k: u32,
     pub cap_bytes: u32,
     pub mode: Mode,
     pub exclude_families: Vec<String>,
-    /// genret `--recheck-sha256`: the sha256 of the reference recheck binary (built from
-    /// [`RECHECK_SOURCE_SHA256`]) whose verdicts the in-process validator reproduces. Cortex runs no
-    /// binary; the value is checked for form and echoed to `receipt.txt` as `recheck_sha256`, so the
-    /// receipt names the validator the caller pinned (CONTRACT.md 2 and 8).
+    /// genret `--recheck-sha256`. Cortex runs no recheck binary, so the only value accepted is
+    /// [`PINNED_RECHECK_SHA256`], the reference build whose verdicts the in-process port of recheck.c
+    /// was proved to reproduce; anything else is refused with `recheck_unpinned`.
     pub recheck_sha256: &'a str,
 }
 
@@ -213,6 +326,7 @@ pub(crate) fn parse_manifest(man: &[u8], pin: &str) -> Result<Vec<ManifestLine>,
         ));
     }
     let mut out: Vec<ManifestLine> = Vec::with_capacity(nr);
+    let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     for (li, line) in man[..man.len() - 1].split(|&c| c == b'\n').enumerate() {
         let n = line.len();
         let bad_head = n < 67
@@ -259,7 +373,7 @@ pub(crate) fn parse_manifest(man: &[u8], pin: &str) -> Result<Vec<ManifestLine>,
         }
         // checked above: hex + ASCII path bytes only
         let path = String::from_utf8_lossy(path).into_owned();
-        if out.iter().any(|m| m.path == path) {
+        if !seen.insert(path.clone()) {
             return Err(GenRetError::new(
                 "manifest_malformed",
                 format!("duplicate path {}", path),
@@ -381,6 +495,48 @@ fn block_len(i: usize, r: &Rec) -> usize {
     b.len()
 }
 
+/// The fields the eligibility chain reads from one record.
+pub(crate) struct Eligibility<'a> {
+    /// `Some(kind)` = the query's `--kind`; `None` = no kind filter (the audit).
+    pub kind: Option<&'a str>,
+    pub rec_kind: &'a str,
+    pub split: &'a str,
+    pub validity: &'a str,
+    pub revoked: bool,
+    pub families: &'a [String],
+    pub exclude: &'a [String],
+    pub body: &'a [u8],
+    pub desc: &'a [u8],
+}
+
+/// CONTRACT.md 5, in order, with Cortex's `revoked` after validity: the first failing reason, or
+/// None when the record is indexed. The one chain both the query and the audit use.
+pub(crate) fn ineligible(e: &Eligibility<'_>) -> Option<String> {
+    if let Some(k) = e.kind {
+        if e.rec_kind != k {
+            return Some(format!("kind:{}", e.rec_kind));
+        }
+    }
+    if e.split != "corpus" {
+        return Some(format!("split:{}", e.split));
+    }
+    if e.validity != "verified" {
+        return Some(format!("validity:{}", e.validity));
+    }
+    if e.revoked {
+        return Some("revoked".into());
+    }
+    for fam in e.families {
+        if let Some(x) = e.exclude.iter().find(|x| *x == fam) {
+            return Some(format!("family_excluded:{}", x));
+        }
+    }
+    if contains3(e.body) || contains3(e.desc) {
+        return Some("poisoned:fence".into());
+    }
+    None
+}
+
 pub(crate) fn contains3(h: &[u8]) -> bool {
     h.windows(3).any(|w| w == b"```")
 }
@@ -404,6 +560,15 @@ pub(crate) fn check_query(q: &GenQuery<'_>, pin: &str) -> Result<Vec<Vec<u8>>, G
     if !is_hex64(q.recheck_sha256) {
         return usage("--recheck-sha256 must be 64 lowercase hex");
     }
+    if q.recheck_sha256 != PINNED_RECHECK_SHA256 {
+        return Err(GenRetError::new(
+            "recheck_unpinned",
+            format!(
+                "recheck_sha256 {} is not the pinned reference {}",
+                q.recheck_sha256, PINNED_RECHECK_SHA256
+            ),
+        ));
+    }
     if let Mode::LengthMatched { target_bytes } = q.mode {
         if !(1..=1_048_576).contains(&target_bytes) {
             return usage("number out of range");
@@ -412,7 +577,7 @@ pub(crate) fn check_query(q: &GenQuery<'_>, pin: &str) -> Result<Vec<Vec<u8>>, G
             return usage("--target-bytes must not exceed --cap-bytes");
         }
     }
-    let (req, pr) = (q.requirement, q.prompt);
+    let (req, pr) = (q.requirement.bytes(), q.prompt.bytes());
     if req.len() > MAX_TASKFILE || req.contains(&0) {
         return Err(GenRetError::new(
             "requirement_invalid",
@@ -591,29 +756,21 @@ pub(crate) fn run_query<'a>(
     let mut total_t: u64 = 0;
     let mut revoked = 0usize;
     for r in recs.iter_mut() {
-        if r.kind != kind {
-            r.reason = format!("kind:{}", r.kind);
-        } else if r.split != "corpus" {
-            r.reason = format!("split:{}", r.split);
-        } else if r.validity != "verified" {
-            r.reason = format!("validity:{}", r.validity);
-        } else if r.revoked {
-            r.reason = "revoked".into();
+        if r.kind == kind && r.split == "corpus" && r.validity == "verified" && r.revoked {
             revoked += 1;
         }
-        if r.reason.is_empty() && !q.exclude_families.is_empty() {
-            'fam: for fam in &r.families {
-                for x in &q.exclude_families {
-                    if fam == x {
-                        r.reason = format!("family_excluded:{}", x);
-                        break 'fam;
-                    }
-                }
-            }
-        }
-        if r.reason.is_empty() && (contains3(&r.body) || contains3(r.desc.as_bytes())) {
-            r.reason = "poisoned:fence".into();
-        }
+        r.reason = ineligible(&Eligibility {
+            kind: Some(kind),
+            rec_kind: &r.kind,
+            split: &r.split,
+            validity: &r.validity,
+            revoked: r.revoked,
+            families: &r.families,
+            exclude: &q.exclude_families,
+            body: &r.body,
+            desc: r.desc.as_bytes(),
+        })
+        .unwrap_or_default();
         if !r.reason.is_empty() {
             continue;
         }
@@ -820,14 +977,19 @@ pub(crate) fn run_query<'a>(
     } else {
         q.exclude_families.join(",")
     };
-    // CONTRACT.md 8, the 25 keys in order
+    // CONTRACT.md 8, the 25 keys in order, behind three interop marker lines (provider,
+    // genret_parity, cortex_revoked) and with recheck_source_sha256=unverified: this receipt can never
+    // pass as a genret receipt. genret_parity=no when a Cortex revocation changed the outcome.
     let receipt = format!(
-        "contract={}\nmode={}\nkind={}\nk={}\ncap_bytes={}\ntarget_bytes={}\nexclude_family={}\n\
+        "{}\ngenret_parity={}\ncortex_revoked={}\ncontract={}\nmode={}\nkind={}\nk={}\ncap_bytes={}\ntarget_bytes={}\nexclude_family={}\n\
          manifest_sha256={}\nrecheck_sha256={}\nrecheck_source_sha256={}\n\
          requirement_sha256={}\nprompt_sha256={}\nquery_sha256={}\n\
          records={}\nindexed={}\ntotal_tokens={}\nselected={}\n\
          pad={}\npad_reason={}\nunpadded_bytes={}\nsuffix_bytes={}\nlength_gap={}\n\
          suffix_sha256={}\nselected_sha256={}\nexcluded_sha256={}\n",
+        PROVIDER_MARKER,
+        if revoked == 0 { "yes" } else { "no" },
+        revoked,
         CONTRACT,
         q.mode.as_str(),
         kind,
@@ -837,9 +999,9 @@ pub(crate) fn run_query<'a>(
         excl,
         pin,
         q.recheck_sha256,
-        RECHECK_SOURCE_SHA256,
-        sha256_hex(q.requirement),
-        sha256_hex(q.prompt),
+        RECHECK_SOURCE_CLAIM,
+        sha256_hex(q.requirement.bytes()),
+        sha256_hex(q.prompt.bytes()),
         sha256_hex(&bq),
         recs.len(),
         n_idx,

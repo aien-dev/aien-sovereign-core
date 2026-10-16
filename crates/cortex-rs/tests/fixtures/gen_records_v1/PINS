@@ -26,7 +26,12 @@ directory outside this tree, with the flags of omega mk/gen-retrieval.mk at a26b
   cc $F -O2 -o $S/recheck $S/recheck.c src/sha256.c        (sha256 41679de1f1d3cb78d179c418c0df4de174f0556b7c701ebb5af602e602970518, build-dependent)
   sh tools/gen/retrieval/test_genret.sh $S/genret $S/recheck $S/recheck.c      -> test_genret: 268 passed, 0 failed
   sh <this dir>/make_expected.sh $S/genret $S/recheck $S/out
-  cp -R $S/out/expected $S/out/recheck $S/out/RECHECK_SHA256 <this dir>/
+  cp -R $S/out/expected $S/out/recheck $S/out/RECHECK_SHA256 $S/out/OUTPUTS.sha256 <this dir>/
+
+OUTPUTS.sha256 (sha256 of every file under expected/ and recheck/, written by make_expected.sh from the real
+genret and recheck output) has sha256
+  c0dcbb28a0bffaf662ba82ce5e9e0a4b9ec5151aa7cd47992bd3936342458067  OUTPUTS.sha256
+and the tests refuse any expected/ or recheck/ file, added, missing or changed, that it does not list.
 
 recheck_sha256 in every expected receipt is that build's recheck binary digest. Cortex runs no binary: its
 validator is the Rust port of that recheck.c (src/gen_procedures/record.rs), proved verdict-identical on every

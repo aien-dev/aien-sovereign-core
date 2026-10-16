@@ -456,29 +456,6 @@ pub fn revoke_record(
     Ok(())
 }
 
-/// Reads a public task file (requirement or prompt) for a query, refusing any path whose resolved
-/// absolute form has a component named `hidden` (CONTRACT.md section 3, `hidden_path`).
-pub fn read_public_task_file(path: &Path) -> Result<Vec<u8>, GenRetError> {
-    let rp = std::fs::canonicalize(path).map_err(|e| {
-        GenRetError::new(
-            "requirement_invalid",
-            format!("cannot resolve {}: {}", path.display(), e),
-        )
-    })?;
-    if rp.components().any(|c| c.as_os_str() == "hidden") {
-        return Err(GenRetError::new(
-            "hidden_path",
-            format!("{} is under a 'hidden' directory", path.display()),
-        ));
-    }
-    std::fs::read(&rp).map_err(|e| {
-        GenRetError::new(
-            "requirement_invalid",
-            format!("cannot read {}: {}", path.display(), e),
-        )
-    })
-}
-
 /// One record of an audited set.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AuditRow {
@@ -543,6 +520,7 @@ impl ReadOnlyStore {
     }
 
     /// The underlying read-only connection (exposed so tests can prove writes are refused).
+    #[doc(hidden)]
     pub fn connection(&self) -> &Connection {
         &self.conn
     }
@@ -683,8 +661,28 @@ impl ReadOnlyStore {
         })
     }
 
-    /// The retrieval adapter: genret-cli-v3 over the record set pinned by `set_sha256` in `space`.
-    /// Fails closed (same reasons as genret) when the stored set no longer matches its pin.
+    /// Runs `f` inside one read transaction, so every row it reads comes from the same database
+    /// snapshot (a concurrent `revoke_record` lands either wholly before or wholly after).
+    fn snapshot<T>(&self, f: impl FnOnce() -> Result<T, GenRetError>) -> Result<T, GenRetError> {
+        self.conn.execute_batch("BEGIN DEFERRED").map_err(ro_err)?;
+        let r = f();
+        let end = self
+            .conn
+            .execute_batch(if r.is_ok() { "COMMIT" } else { "ROLLBACK" });
+        match (r, end) {
+            (Ok(v), Ok(())) => Ok(v),
+            (Ok(_), Err(e)) => Err(ro_err(e)),
+            (Err(e), _) => Err(e),
+        }
+    }
+
+    /// The INTEROP-ONLY retrieval adapter: genret-cli-v3 over the record set pinned by `set_sha256`
+    /// in `space`, read from one database snapshot. Fails closed (same reasons as genret) when the
+    /// stored set no longer matches its pin.
+    ///
+    /// This is not the GEN experiment provider. Its receipt starts with `provider=cortex-interop`,
+    /// says `recheck_source_sha256=unverified` and carries `genret_parity=no` once a Cortex
+    /// revocation changed the outcome; the output must not be passed off as verified provider output.
     pub fn query(
         &self,
         space: &str,
@@ -693,21 +691,24 @@ impl ReadOnlyStore {
     ) -> Result<GenRetOutput, GenRetError> {
         // genret checks the query before it opens the corpus; so does the adapter
         retrieval::check_query(q, set_sha256)?;
-        let man = self.manifest(space, set_sha256)?;
-        retrieval::run_query(&man, set_sha256, q, |m| {
-            let r = self.record(space, set_sha256, m)?;
-            Ok(Loaded {
-                bytes: r.bytes,
-                receipts: Box::new(StoredReceipt {
-                    id: r.receipt_id,
-                    bytes: r.receipt,
-                    backed: r.receipt_evidence,
-                }),
-                revoked: r.revoked,
+        self.snapshot(|| {
+            let man = self.manifest(space, set_sha256)?;
+            retrieval::run_query(&man, set_sha256, q, |m| {
+                let r = self.record(space, set_sha256, m)?;
+                Ok(Loaded {
+                    bytes: r.bytes,
+                    receipts: Box::new(StoredReceipt {
+                        id: r.receipt_id,
+                        bytes: r.receipt,
+                        backed: r.receipt_evidence,
+                    }),
+                    revoked: r.revoked,
+                })
             })
         })
     }
 
+    /// Every record of the set, re-verified against the pin, from one database snapshot.
     fn verified_set(
         &self,
         space: &str,
@@ -719,33 +720,37 @@ impl ReadOnlyStore {
                 "set digest must be 64 lowercase hex",
             ));
         }
-        let man = self.manifest(space, pin)?;
-        let lines = retrieval::parse_manifest(&man, pin)?;
-        let mut out = Vec::with_capacity(lines.len());
-        for m in lines {
-            let r = self.record(space, pin, &m)?;
-            let d = sha256_hex(&r.bytes);
-            if d != m.digest {
-                return Err(GenRetError::new(
-                    "stale_digest",
-                    format!("{} has sha256 {}, manifest says {}", m.path, d, m.digest),
-                ));
+        self.snapshot(|| {
+            let man = self.manifest(space, pin)?;
+            let lines = retrieval::parse_manifest(&man, pin)?;
+            let mut out = Vec::with_capacity(lines.len());
+            for m in lines {
+                let r = self.record(space, pin, &m)?;
+                let d = sha256_hex(&r.bytes);
+                if d != m.digest {
+                    return Err(GenRetError::new(
+                        "stale_digest",
+                        format!("{} has sha256 {}, manifest says {}", m.path, d, m.digest),
+                    ));
+                }
+                let rs = StoredReceipt {
+                    id: r.receipt_id.clone(),
+                    bytes: r.receipt.clone(),
+                    backed: r.receipt_evidence,
+                };
+                let meta = record::validate(&r.bytes, None, Some(&rs)).map_err(|e| {
+                    GenRetError::new("invalid_record", format!("recheck: {}: {}", m.path, e))
+                })?;
+                out.push((m, r, meta));
             }
-            let rs = StoredReceipt {
-                id: r.receipt_id.clone(),
-                bytes: r.receipt.clone(),
-                backed: r.receipt_evidence,
-            };
-            let meta = record::validate(&r.bytes, None, Some(&rs)).map_err(|e| {
-                GenRetError::new("invalid_record", format!("recheck: {}: {}", m.path, e))
-            })?;
-            out.push((m, r, meta));
-        }
-        Ok((man, out))
+            Ok((man, out))
+        })
     }
 
     /// Writes the record set back out as `records/` files (MANIFEST, SET.sha256, every record, its
     /// receipt) into `out_dir`, which must not exist. Every byte is checked against the pin first.
+    /// On a write failure the partial `out_dir` is removed; if that removal fails too, the error
+    /// says so.
     pub fn export(
         &self,
         space: &str,
@@ -783,15 +788,25 @@ impl ReadOnlyStore {
                 set_sha256: set_sha256.to_string(),
                 files,
             }),
-            Err(e) => {
-                let _ = std::fs::remove_dir_all(out_dir);
+            Err(mut e) => {
+                if let Err(re) = std::fs::remove_dir_all(out_dir) {
+                    if out_dir.symlink_metadata().is_ok() {
+                        e.detail = format!(
+                            "{}; partial {} left behind: {}",
+                            e.detail,
+                            out_dir.display(),
+                            re
+                        );
+                    }
+                }
                 Err(e)
             }
         }
     }
 
     /// Re-verifies every record of the set and reports, per record, whether it is eligible for the
-    /// verified filter and, if not, why. Fails closed like [`ReadOnlyStore::query`].
+    /// verified filter and, if not, why (the query's own eligibility chain, without the kind and
+    /// family filters). Fails closed like [`ReadOnlyStore::query`].
     pub fn audit(&self, space: &str, set_sha256: &str) -> Result<Vec<AuditRow>, GenRetError> {
         let (_, recs) = self.verified_set(space, set_sha256)?;
         let mut out = Vec::with_capacity(recs.len());
@@ -799,16 +814,19 @@ impl ReadOnlyStore {
             let (f, body) = retrieval::header_fields(&r.bytes)
                 .map_err(|e| GenRetError::new("invalid_record", format!("{}: {}", m.path, e)))?;
             let desc = f.get("desc").map(String::as_str).unwrap_or("");
-            let verified_filter = if meta.split != "corpus" {
-                Err(format!("split:{}", meta.split))
-            } else if meta.validity != "verified" {
-                Err(format!("validity:{}", meta.validity))
-            } else if r.revoked {
-                Err("revoked".to_string())
-            } else if retrieval::contains3(&body) || retrieval::contains3(desc.as_bytes()) {
-                Err("poisoned:fence".to_string())
-            } else {
-                Ok(())
+            let verified_filter = match retrieval::ineligible(&retrieval::Eligibility {
+                kind: None,
+                rec_kind: &meta.kind,
+                split: &meta.split,
+                validity: &meta.validity,
+                revoked: r.revoked,
+                families: &meta.families,
+                exclude: &[],
+                body: &body,
+                desc: desc.as_bytes(),
+            }) {
+                Some(why) => Err(why),
+                None => Ok(()),
             };
             out.push(AuditRow {
                 path: m.path,

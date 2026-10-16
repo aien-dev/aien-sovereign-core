@@ -2,7 +2,9 @@
 //!
 //! * the vendored omega fixtures match their pinned sha256 (tests/fixtures/gen_records_v1/PINS);
 //! * the Rust validator gives recheck's exact verdict on every vendored schema mutant;
-//! * import + read-only retrieval reproduces genret-cli-v2 byte for byte on every vendored case;
+//! * import + read-only retrieval reproduces genret-cli-v3 byte for byte on every vendored case, apart
+//!   from the INTEROP marker lines, which are asserted exactly; the genret outputs are pinned by
+//!   OUTPUTS.sha256, whose own digest is in PINS;
 //! * export round-trips to the byte-identical record set;
 //! * the read-only store cannot write, and imported rows cannot be promoted;
 //! * negative cases: missing, forged and borrowed receipts, revocation, cross-space and cross-split
@@ -18,8 +20,10 @@ use std::sync::Arc;
 use cortex_rs::db::Database;
 use cortex_rs::gen_procedures::{
     import_record_set, query_record_files, read_public_task_file, revoke_record, sha256_hex,
-    validate, GenQuery, ImportRequest, Kind, Mode, ReadOnlyStore, ReceiptSource, CONTRACT_SHA256,
-    HEADING, RECORD_SCHEMA_SHA256, STATE_IMPORTED, STATE_REVOKED,
+    validate, GenQuery, GenRetOutput, ImportRequest, Kind, Mode, PublicTaskFile, ReadOnlyStore,
+    ReceiptSource, TaskRole, CONTRACT_SHA256, HEADING, PINNED_RECHECK_SHA256, PROVIDER_MARKER,
+    RECHECK_SOURCE_CLAIM, RECHECK_SOURCE_SHA256, RECORD_SCHEMA_SHA256, STATE_IMPORTED,
+    STATE_REVOKED,
 };
 use cortex_rs::models::PromoteCandidateInput;
 use cortex_rs::promotion::PromotionEngine;
@@ -243,15 +247,103 @@ fn cases() -> Vec<Case> {
 }
 
 struct Task {
-    requirement: Vec<u8>,
-    prompt: Vec<u8>,
+    requirement: PublicTaskFile,
+    prompt: PublicTaskFile,
 }
 fn task(name: &str) -> Task {
     let d = fixture().join("tasks").join(name);
     Task {
-        requirement: read_public_task_file(&d.join("requirement")).unwrap(),
-        prompt: read_public_task_file(&d.join("prompt")).unwrap(),
+        requirement: read_public_task_file(&d.join("requirement"), TaskRole::Requirement).unwrap(),
+        prompt: read_public_task_file(&d.join("prompt"), TaskRole::Prompt).unwrap(),
     }
+}
+/// A prompt file holding `bytes`, read back through the task reader.
+fn prompt_file(dir: &Path, name: &str, bytes: &[u8]) -> PublicTaskFile {
+    std::fs::write(dir.join(name), bytes).unwrap();
+    read_public_task_file(&dir.join(name), TaskRole::Prompt).unwrap()
+}
+
+/// The receipt lines only the Cortex interop adapter writes (or writes differently from genret).
+fn is_marker(line: &str) -> bool {
+    line == PROVIDER_MARKER
+        || line.starts_with("genret_parity=")
+        || line.starts_with("cortex_revoked=")
+        || line.starts_with("recheck_source_sha256=")
+}
+fn without_markers(receipt: &[u8]) -> String {
+    let s = std::str::from_utf8(receipt).unwrap();
+    s.split_inclusive('\n')
+        .filter(|l| !is_marker(l.trim_end_matches('\n')))
+        .collect()
+}
+
+/// Asserts `out` equals genret's outputs in `expected/<case>` everywhere except the INTEROP marker
+/// lines, and asserts those exactly: the provider marker first, the parity flag, the revocation
+/// count, and `recheck_source_sha256=unverified` where genret wrote its compiled-in source pin.
+/// With revocations only the markers and the receipt digest line are checked (no parity is claimed).
+fn assert_interop_parity(out: &GenRetOutput, case: &str, revoked: u32) {
+    let dir = fixture().join("expected").join(case);
+    let want = |f: &str| std::fs::read(dir.join(f)).unwrap();
+    if revoked == 0 {
+        for (f, bytes) in out.files() {
+            if f != "receipt.txt" && f != "SHA256SUMS" {
+                assert!(
+                    bytes == want(f).as_slice(),
+                    "case {} file {} differs from genret",
+                    case,
+                    f
+                );
+            }
+        }
+    }
+    let got = std::str::from_utf8(&out.receipt_txt).unwrap();
+    let markers: Vec<&str> = got.lines().filter(|l| is_marker(l)).collect();
+    let parity = if revoked == 0 { "yes" } else { "no" };
+    // literal on purpose: renaming a library constant must not silently move the markers
+    let exact = [
+        "provider=cortex-interop".to_string(),
+        format!("genret_parity={}", parity),
+        format!("cortex_revoked={}", revoked),
+        "recheck_source_sha256=unverified".to_string(),
+    ];
+    assert_eq!(
+        (PROVIDER_MARKER, RECHECK_SOURCE_CLAIM),
+        ("provider=cortex-interop", "unverified")
+    );
+    assert_eq!(markers, exact, "case {} marker lines", case);
+    assert!(
+        got.starts_with(&format!(
+            "{}\n{}\n{}\ncontract=",
+            exact[0], exact[1], exact[2]
+        )),
+        "case {}: receipt must open with the interop markers",
+        case
+    );
+    let w = want("receipt.txt");
+    assert!(std::str::from_utf8(&w).unwrap().contains(&format!(
+        "\nrecheck_source_sha256={}\n",
+        RECHECK_SOURCE_SHA256
+    )));
+    if revoked == 0 {
+        assert_eq!(
+            without_markers(&out.receipt_txt),
+            without_markers(&w),
+            "case {} receipt",
+            case
+        );
+    }
+    // SHA256SUMS: the four non-receipt lines are genret's; the receipt line is this receipt's digest
+    let gs = std::str::from_utf8(&out.sha256sums).unwrap();
+    let ws = String::from_utf8(want("SHA256SUMS")).unwrap();
+    let (g4, glast) = gs.trim_end().rsplit_once('\n').unwrap();
+    let (w4, _) = ws.trim_end().rsplit_once('\n').unwrap();
+    if revoked == 0 {
+        assert_eq!(g4, w4, "case {} SHA256SUMS", case);
+    }
+    assert_eq!(
+        glast,
+        format!("{}  receipt.txt", sha256_hex(&out.receipt_txt))
+    );
 }
 fn query<'a>(t: &'a Task, kind: Kind, k: u32) -> GenQuery<'a> {
     GenQuery {
@@ -324,6 +416,7 @@ fn rows_in_space(db: &Path, space: &str) -> i64 {
 
 #[test]
 fn vendored_fixtures_match_omega_pins() {
+    assert_eq!(rsha(), PINNED_RECHECK_SHA256);
     let list = std::fs::read_to_string(fixture().join("VENDORED.sha256")).unwrap();
     let mut n = 0;
     for line in list.lines() {
@@ -391,16 +484,38 @@ fn retrieval_is_byte_identical_to_genret_on_every_case() {
         };
         let out = store.query(SPACE, &p, &q).unwrap();
         assert!(out.parity_comparable());
-        for (f, bytes) in out.files() {
-            let want = std::fs::read(fixture().join("expected").join(&c.name).join(f)).unwrap();
-            assert!(
-                bytes == want.as_slice(),
-                "case {} file {} differs from genret",
-                c.name,
-                f
-            );
+        assert_interop_parity(&out, &c.name, 0);
+    }
+}
+
+#[test]
+fn genret_outputs_are_pinned_by_committed_manifest() {
+    // OUTPUTS.sha256 lists every file under expected/ and recheck/; its own digest is in PINS, so a
+    // regenerated (for example Rust-written) expected output cannot slip in unnoticed
+    let list = std::fs::read(fixture().join("OUTPUTS.sha256")).unwrap();
+    let pins = std::fs::read_to_string(fixture().join("PINS")).unwrap();
+    assert!(
+        pins.contains(&format!("  {}  OUTPUTS.sha256\n", sha256_hex(&list))),
+        "OUTPUTS.sha256 digest is not the one recorded in PINS"
+    );
+    let mut listed = std::collections::BTreeSet::new();
+    for line in std::str::from_utf8(&list).unwrap().lines() {
+        let (want, path) = line.split_once("  ").unwrap();
+        let got = sha256_hex(&std::fs::read(fixture().join(path)).unwrap());
+        assert_eq!(got, want, "{} differs from OUTPUTS.sha256", path);
+        assert!(listed.insert(path.to_string()), "{} listed twice", path);
+    }
+    let mut present = std::collections::BTreeSet::new();
+    for top in ["expected", "recheck"] {
+        for rel in tree(&fixture().join(top)).into_keys() {
+            present.insert(format!("{}/{}", top, rel));
         }
     }
+    assert_eq!(
+        present, listed,
+        "expected/ and recheck/ hold files OUTPUTS.sha256 does not list"
+    );
+    assert_eq!(listed.len(), 226);
 }
 
 #[test]
@@ -1065,6 +1180,16 @@ fn revoked_records_are_excluded() {
     let tk = task("devq_clamp");
     let out = s.query(SPACE, &p, &query(&tk, Kind::Raw, 64)).unwrap();
     assert!(!out.parity_comparable());
+    // after a revocation the receipt says so and claims no genret parity
+    assert!(out.receipt_txt.starts_with(
+        format!(
+            "{}\ngenret_parity=no\ncortex_revoked=1\ncontract=",
+            PROVIDER_MARKER
+        )
+        .as_bytes()
+    ));
+    let k3 = s.query(SPACE, &p, &query(&tk, Kind::Raw, 3)).unwrap();
+    assert_interop_parity(&k3, "devq_clamp.raw.normal", 1);
     assert!(out.selected.iter().all(|x| x.id != "raw-clamp_sub"));
     let ex = out
         .excluded
@@ -1177,27 +1302,72 @@ fn query_usage_and_hidden_paths_are_refused() {
         s.query(SPACE, &"0".repeat(64), &q).unwrap_err().reason,
         "manifest_digest_mismatch"
     );
-    // the task reader refuses anything under a directory named hidden
-    let h = t.path().join("hidden");
-    std::fs::create_dir_all(&h).unwrap();
-    std::fs::write(h.join("requirement"), &tk.requirement).unwrap();
+    // only the compiled-in recheck pin is accepted, whatever well-formed digest the caller names
+    let other = "1".repeat(64);
+    q.recheck_sha256 = &other;
     assert_eq!(
-        read_public_task_file(&h.join("requirement"))
+        s.query(SPACE, &p, &q).unwrap_err().reason,
+        "recheck_unpinned"
+    );
+    assert_eq!(
+        query_record_files(&corpus().join("MANIFEST"), &p, &q)
             .unwrap_err()
             .reason,
+        "recheck_unpinned"
+    );
+    q.recheck_sha256 = "not-hex";
+    assert_eq!(s.query(SPACE, &p, &q).unwrap_err().reason, "usage");
+    q.recheck_sha256 = rsha();
+    // the task reader refuses anything under a directory named hidden (always, not opt-in)
+    let h = t.path().join("hidden");
+    std::fs::create_dir_all(&h).unwrap();
+    std::fs::write(h.join("requirement"), tk.requirement.bytes()).unwrap();
+    let rd = |p: &Path| read_public_task_file(p, TaskRole::Requirement);
+    assert_eq!(
+        rd(&h.join("requirement")).unwrap_err().reason,
         "hidden_path"
     );
-    #[cfg(unix)]
-    {
-        let link = t.path().join("innocent");
-        std::os::unix::fs::symlink(&h, &link).unwrap();
-        assert_eq!(
-            read_public_task_file(&link.join("requirement"))
-                .unwrap_err()
-                .reason,
-            "hidden_path"
-        );
-    }
+    let link = t.path().join("innocent");
+    std::os::unix::fs::symlink(&h, &link).unwrap();
+    assert_eq!(
+        rd(&link.join("requirement")).unwrap_err().reason,
+        "hidden_path"
+    );
+}
+
+#[test]
+fn task_reader_refuses_non_regular_and_oversized_files() {
+    let t = Tmp::new("taskfile");
+    let p = import_fixture(&t, SPACE);
+    let s = ReadOnlyStore::open(&t.db()).unwrap();
+    let rd = |p: &Path, r| read_public_task_file(p, r).map(|_| ()).unwrap_err().reason;
+    // a directory, a character device and a FIFO with no writer: refused without blocking
+    assert_eq!(rd(t.path(), TaskRole::Requirement), "requirement_invalid");
+    assert_eq!(
+        rd(Path::new("/dev/zero"), TaskRole::Prompt),
+        "prompt_invalid"
+    );
+    let fifo = t.path().join("fifo");
+    let st = std::process::Command::new("mkfifo")
+        .arg(&fifo)
+        .status()
+        .unwrap();
+    assert!(st.success());
+    assert_eq!(rd(&fifo, TaskRole::Prompt), "prompt_invalid");
+    assert_eq!(
+        rd(&t.path().join("absent"), TaskRole::Requirement),
+        "requirement_invalid"
+    );
+    // over 4096 bytes: the reader stops at 4097 and the query refuses it
+    let big = prompt_file(t.path(), "big", &vec![b'a'; 1 << 20]);
+    assert_eq!(big.bytes().len(), 4097);
+    let tk = task("devq_clamp");
+    let mut q = query(&tk, Kind::Raw, 3);
+    q.prompt = &big;
+    assert_eq!(s.query(SPACE, &p, &q).unwrap_err().reason, "prompt_invalid");
+    let at_cap = prompt_file(t.path(), "cap", &vec![b'a'; 4096]);
+    q.prompt = &at_cap;
+    s.query(SPACE, &p, &q).unwrap();
 }
 
 // ---------------------------------------------------------------- refusal parity
@@ -1244,6 +1414,7 @@ fn refusals_match_genret() {
                 let m = format!("{}  ../x.rec\n{}", &first[..64], rest);
                 std::fs::write(d.join("MANIFEST"), &m).unwrap();
                 set = sha256_hex(m.as_bytes());
+                std::fs::write(d.join("SET.sha256"), format!("{}\n", set)).unwrap();
             }
             "record_missing" => std::fs::remove_file(d.join("raw/raw-dot3.rec")).unwrap(),
             "receipt_forged" => {
@@ -1293,16 +1464,16 @@ fn refusals_match_genret() {
             "hidden_path" => {
                 let h = w.path().join("hidden");
                 std::fs::create_dir_all(&h).unwrap();
-                std::fs::write(h.join("requirement"), &tk.requirement).unwrap();
-                let e = read_public_task_file(&h.join("requirement")).unwrap_err();
+                std::fs::write(h.join("requirement"), tk.requirement.bytes()).unwrap();
+                let e = read_public_task_file(&h.join("requirement"), TaskRole::Requirement)
+                    .unwrap_err();
                 assert_eq!(e.reason, want, "{}", name);
                 n += 1;
                 continue;
             }
             "prompt_tab" => {
                 corpus_case = false;
-                std::fs::write(w.path().join("prompt_tab"), b"tab\there\n").unwrap();
-                pr_buf = read_public_task_file(&w.path().join("prompt_tab")).unwrap();
+                pr_buf = prompt_file(w.path(), "prompt_tab", b"tab\there\n");
                 q.prompt = &pr_buf;
             }
             other => panic!("refusals.tsv names an unknown case {}", other),
@@ -1321,7 +1492,19 @@ fn refusals_match_genret() {
                 "{}: refused import wrote rows",
                 name
             );
-            assert!(!e.reason.is_empty());
+            // import checks the whole set up front, so a few cases surface under its own word
+            let import_reason = match name {
+                "stale_digest" => "stale_digest",
+                "wrong_pin" => "set_digest_mismatch",
+                "manifest_bad_path" => "manifest_malformed",
+                "record_missing" => "record_missing",
+                "receipt_forged" | "receipt_missing" | "receipt_borrowed" | "probe_abstraction" => {
+                    "record_refused"
+                }
+                "duplicate_id" => "duplicate_id",
+                other => panic!("no import reason for {}", other),
+            };
+            assert_eq!(e.reason, import_reason, "{}: import ({})", name, e.detail);
             if name == "wrong_pin" {
                 assert_eq!(store.query(SPACE, &set, &q).unwrap_err().reason, want);
             }
