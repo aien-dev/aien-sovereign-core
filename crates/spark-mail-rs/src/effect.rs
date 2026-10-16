@@ -624,36 +624,23 @@ fn confirm_aegis(url: &str, to: &str, subject: &str) -> Result<(), Error> {
     });
     let body = serde_json::to_vec(&payload)
         .map_err(|_| Error::other("could not encode AEGIS probe request"))?;
-    let response = std::thread::scope(|scope| {
-        let handle = scope.spawn(move || {
-            let runtime = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .map_err(|error| Error::other(error.to_string()))?;
-            runtime.block_on(async move {
-                reqwest::Client::builder()
-                    .timeout(std::time::Duration::from_secs(5))
-                    .build()
-                    .map_err(|error| Error::other(error.to_string()))?
-                    .post(&endpoint)
-                    .header("content-type", "application/json")
-                    .body(body)
-                    .send()
-                    .await
-                    .map_err(|error| Error::other(format!("AEGIS probe call failed: {error}")))
-            })
-        });
-        handle
-            .join()
-            .map_err(|_| Error::other("AEGIS probe thread failed"))?
-    })?;
-    if !response.status().is_success() {
+    // send_blocking_status runs the request on its own thread and runtime, so it is
+    // safe to call from inside the mail server's tokio runtime. Any transport
+    // error (including an https URL, which this client refuses) fails closed.
+    // Only the status decides, as before: the body is never read, so a slow or
+    // truncated denial body still maps to PermissionDenied.
+    let status = aien_localhttp::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+        .post(&endpoint)
+        .header("content-type", "application/json")
+        .body(body)
+        .send_blocking_status()
+        .map_err(|error| Error::other(format!("AEGIS probe call failed: {error}")))?;
+    if !status.is_success() {
         return Err(Error::new(
             ErrorKind::PermissionDenied,
-            format!(
-                "AEGIS probe denied gandi_send with HTTP {}",
-                response.status()
-            ),
+            format!("AEGIS probe denied gandi_send with HTTP {}", status),
         ));
     }
     Ok(())
@@ -662,6 +649,40 @@ fn confirm_aegis(url: &str, to: &str, subject: &str) -> Result<(), Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Serves one connection: reads the request, writes `head`, then holds the
+    /// socket open without the promised body.
+    fn serve_head_then_stall(head: &'static [u8]) -> String {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/", listener.local_addr().unwrap());
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 4096];
+            let _ = stream.read(&mut buf);
+            stream.write_all(head).unwrap();
+            std::thread::sleep(std::time::Duration::from_secs(10));
+        });
+        url
+    }
+
+    #[test]
+    fn aegis_denial_with_a_stalled_body_is_still_permission_denied() {
+        let url =
+            serve_head_then_stall(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 100\r\n\r\npartial");
+        let started = std::time::Instant::now();
+        let error = confirm_aegis(&url, "person@example.com", "hello").unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::PermissionDenied, "{error}");
+        assert!(started.elapsed() < std::time::Duration::from_secs(4));
+    }
+
+    #[test]
+    fn aegis_allow_with_a_stalled_body_is_allowed() {
+        let url = serve_head_then_stall(b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\n{\"ok\"");
+        let started = std::time::Instant::now();
+        confirm_aegis(&url, "person@example.com", "hello").unwrap();
+        assert!(started.elapsed() < std::time::Duration::from_secs(4));
+    }
 
     #[test]
     fn deny_switch_blocks_before_any_network() {
@@ -858,5 +879,95 @@ mod tests {
         if let Err(error) = first {
             assert!(error.to_string().contains("probe policy"));
         }
+    }
+
+    /// A one-shot AEGIS stand-in on its own OS thread (std::net), so it keeps
+    /// answering while the caller blocks, including inside a current-thread
+    /// tokio runtime.
+    fn fake_aegis(reply: &'static str) -> (String, std::thread::JoinHandle<String>) {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let handle = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut raw = Vec::new();
+            let mut byte = [0u8; 1];
+            while !raw.ends_with(b"\r\n\r\n") && stream.read(&mut byte).unwrap_or(0) == 1 {
+                raw.push(byte[0]);
+            }
+            let head = String::from_utf8_lossy(&raw).to_string();
+            let length = head
+                .lines()
+                .find_map(|l| l.strip_prefix("Content-Length: "))
+                .and_then(|v| v.trim().parse::<usize>().ok())
+                .unwrap_or(0);
+            let mut body = vec![0u8; length];
+            stream.read_exact(&mut body).unwrap();
+            raw.extend_from_slice(&body);
+            stream.write_all(reply.as_bytes()).unwrap();
+            String::from_utf8_lossy(&raw).into_owned()
+        });
+        (base, handle)
+    }
+
+    const AEGIS_OK: &str = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}";
+    const AEGIS_DENY: &str = "HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n";
+
+    #[test]
+    fn confirm_aegis_posts_the_same_probe_and_allows_on_2xx() {
+        let (base, server) = fake_aegis(AEGIS_OK);
+        confirm_aegis(&format!("{base}/"), "person@example.com", "hello").unwrap();
+        let request = server.join().unwrap();
+        assert!(
+            request.starts_with("POST /v1/probe HTTP/1.1\r\n"),
+            "{request}"
+        );
+        assert!(
+            request.contains("\r\ncontent-type: application/json\r\n"),
+            "{request}"
+        );
+        let body: serde_json::Value =
+            serde_json::from_str(request.split("\r\n\r\n").nth(1).unwrap()).unwrap();
+        assert_eq!(
+            body,
+            serde_json::json!({
+                "state": {"action": "gandi_send", "to": "person@example.com", "subject": "hello"},
+                "probes": {"probes": []}
+            })
+        );
+    }
+
+    #[test]
+    fn confirm_aegis_non_2xx_is_permission_denied() {
+        let (base, _server) = fake_aegis(AEGIS_DENY);
+        let error = confirm_aegis(&base, "p@example.com", "s").unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::PermissionDenied);
+        assert_eq!(
+            error.to_string(),
+            "AEGIS probe denied gandi_send with HTTP 403 Forbidden"
+        );
+    }
+
+    #[test]
+    fn confirm_aegis_fails_closed_when_unreachable_or_https() {
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let error = confirm_aegis(&format!("http://127.0.0.1:{port}"), "p", "s").unwrap_err();
+        assert!(
+            error.to_string().starts_with("AEGIS probe call failed: "),
+            "{error}"
+        );
+
+        let error = confirm_aegis("https://127.0.0.1:1", "p", "s").unwrap_err();
+        assert!(error.to_string().contains("https is refused"), "{error}");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn confirm_aegis_works_inside_a_current_thread_runtime() {
+        let (base, _server) = fake_aegis(AEGIS_OK);
+        confirm_aegis(&base, "p@example.com", "s").unwrap();
     }
 }

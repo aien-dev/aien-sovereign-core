@@ -228,7 +228,7 @@ pub fn apply_probe_report(
 }
 
 /// Runs one probe with no lock held. The HTTP request is bounded by the client timeout.
-pub async fn probe_one(client: reqwest::Client, ticket: ProbeTicket) -> ProbeReport {
+pub async fn probe_one(client: aien_localhttp::Client, ticket: ProbeTicket) -> ProbeReport {
     let stats = get_process_stats(ticket.pid);
     let outcome = if !stats.is_alive {
         ProbeOutcome::ProcessGone
@@ -304,18 +304,23 @@ impl Supervisor {
     }
 
     /// Runs until `shutdown` completes, then kills and reaps every child.
-    pub async fn run_until<F>(&self, shutdown: F) -> Result<(), reqwest::Error>
+    ///
+    /// Refuses to start, before spawning anything, when a `health_url` is not a
+    /// plain `http://` URL (an `https://` URL fails with
+    /// [`aien_localhttp::Error::HttpsRefused`]).
+    pub async fn run_until<F>(&self, shutdown: F) -> Result<(), aien_localhttp::Error>
     where
         F: Future<Output = ()>,
     {
+        self.config.validate_health_urls()?;
         info!(
             "Starting SparkOS Sovereign Supervisor with {} service(s)...",
             self.config.services.len()
         );
-        let client = reqwest::Client::builder()
+        let client = aien_localhttp::Client::builder()
             .timeout(self.options.probe_timeout)
             .connect_timeout(self.options.probe_timeout)
-            .build()?;
+            .build();
 
         let (shutdown_tx, _) = broadcast::channel::<()>(1);
         let kick = Arc::new(Notify::new());

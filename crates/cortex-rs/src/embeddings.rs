@@ -1,4 +1,4 @@
-use reqwest::Client;
+use aien_localhttp::Client;
 use serde_json::json;
 use std::time::Duration;
 
@@ -45,6 +45,14 @@ pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
 #[allow(dead_code)]
 pub fn cosine_distance(a: &[f32], b: &[f32]) -> f32 {
     1.0 - cosine_similarity(a, b)
+}
+
+/// Checks that `encoder_url` is a plain `http://` URL the encoder client can
+/// call. An `https://` URL is refused: the client never speaks TLS.
+pub fn validate_encoder_url(encoder_url: &str) -> Result<(), String> {
+    aien_localhttp::Url::parse(&format!("{}/embed", encoder_url.trim_end_matches("/")))
+        .map(|_| ())
+        .map_err(|e| format!("--encoder-url {encoder_url:?} is not usable: {e}"))
 }
 
 pub async fn fetch_embedding(
@@ -150,5 +158,115 @@ mod tests {
         let zeros = vec![0.0f32, 0.0, 0.0];
         assert_eq!(cosine_similarity(&zeros, &zeros), 0.0);
         assert_eq!(cosine_distance(&zeros, &zeros), 1.0);
+    }
+
+    use aien_localhttp::test_server::{closed_port, response, serve_once, serve_silent};
+
+    fn embedding_body(dims: usize) -> String {
+        let values = vec!["0.5"; dims].join(",");
+        format!("{{\"embedding\":[{values}]}}")
+    }
+
+    #[tokio::test]
+    async fn fetch_embedding_posts_the_same_request_and_reads_768_dims() {
+        let (base, server) =
+            serve_once(response("200 OK", "application/json", &embedding_body(768))).await;
+        // A trailing slash is trimmed before /embed, as before.
+        let emb = fetch_embedding(&Client::new(), "hello", &format!("{base}/"))
+            .await
+            .unwrap();
+        assert_eq!(emb.len(), EMBEDDING_DIMENSIONS);
+        assert_eq!(emb[0], 0.5);
+        let request = server.await.unwrap();
+        assert!(request.starts_with("POST /embed HTTP/1.1\r\n"), "{request}");
+        assert!(request.contains("\r\nContent-Type: application/json\r\n"));
+        let body: serde_json::Value =
+            serde_json::from_str(request.split("\r\n\r\n").nth(1).unwrap()).unwrap();
+        assert_eq!(
+            body,
+            json!({
+                "text": "hello",
+                "modelId": "BAAI/bge-base-en-v1.5",
+                "modelRevision": "cortex-bge-base-en-v1.5-768-v1",
+                "priority": "recall"
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn fetch_embedding_error_status_keeps_the_old_message() {
+        let (base, _server) =
+            serve_once(response("503 Service Unavailable", "text/plain", "busy")).await;
+        let error = fetch_embedding(&Client::new(), "x", &base)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error,
+            "Encoder returned error HTTP 503 Service Unavailable: busy"
+        );
+    }
+
+    #[tokio::test]
+    async fn fetch_embedding_rejects_wrong_dimensions_and_bad_json() {
+        let (base, _server) =
+            serve_once(response("200 OK", "application/json", &embedding_body(3))).await;
+        let error = fetch_embedding(&Client::new(), "x", &base)
+            .await
+            .unwrap_err();
+        assert_eq!(error, "Expected 768 dimensions, got 3");
+
+        let (base, _server) = serve_once(response("200 OK", "application/json", "nope")).await;
+        let error = fetch_embedding(&Client::new(), "x", &base)
+            .await
+            .unwrap_err();
+        assert!(
+            error.starts_with("Failed to parse embedding response JSON"),
+            "{error}"
+        );
+
+        let (base, _server) =
+            serve_once(response("200 OK", "application/json", "{\"other\":1}")).await;
+        let error = fetch_embedding(&Client::new(), "x", &base)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error,
+            "Invalid embedding payload structure from encoder service"
+        );
+    }
+
+    #[tokio::test]
+    async fn fetch_embedding_reports_refused_and_timed_out_encoders() {
+        let base = closed_port().await;
+        let error = fetch_embedding(&Client::new(), "x", &base)
+            .await
+            .unwrap_err();
+        assert!(
+            error.starts_with(&format!("Failed to connect to embedding encoder on {base}")),
+            "{error}"
+        );
+
+        // The 1500 ms per-request timeout still bounds a silent encoder.
+        let (base, _server) = serve_silent().await;
+        let started = std::time::Instant::now();
+        let error = fetch_embedding(&Client::new(), "x", &base)
+            .await
+            .unwrap_err();
+        assert!(error.contains("timed out"), "{error}");
+        assert!(started.elapsed() < Duration::from_secs(5));
+    }
+
+    #[tokio::test]
+    async fn https_encoder_is_refused_at_validation_and_at_call_time() {
+        assert!(validate_encoder_url("http://127.0.0.1:18081").is_ok());
+        assert!(validate_encoder_url("http://127.0.0.1:18081/").is_ok());
+        let error = validate_encoder_url("https://encoder.example").unwrap_err();
+        assert!(error.contains("https is refused"), "{error}");
+        assert!(validate_encoder_url("127.0.0.1:18081").is_err());
+
+        let error = fetch_embedding(&Client::new(), "x", "https://127.0.0.1:1")
+            .await
+            .unwrap_err();
+        assert!(error.contains("https is refused"), "{error}");
     }
 }
