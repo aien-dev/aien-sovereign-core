@@ -14,7 +14,7 @@ spark-crumbs = { git = "https://github.com/aien-dev/spark-crumbs", rev = "9355a9
 chrono = { version = "0.4", features = ["serde"] }
 crumb-spec = { git = "https://github.com/aien-dev/crumb-spec", rev = "24194d1b7917ef19244aae6bcaff510686b75fef" }
 clap = { version = "4.5", features = ["derive"] }
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+aien-localhttp = { path = "../aien-localhttp" }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 regex = "1.10"
@@ -28,3 +28,6 @@ path = "src/main.rs"
 [lib]
 name = "spark_dream"
 path = "src/lib.rs"
+
+[dev-dependencies]
+aien-localhttp = { path = "../aien-localhttp", features = ["test-server"] }

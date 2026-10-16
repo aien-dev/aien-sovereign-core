@@ -88,20 +88,20 @@
           "purpose": ""
         },
         {
-          "digest": "993b935d7caf400fb82e46e89f0f5c931899405c9326c49cba08467d4ea058b7",
-          "last_commit": "fa73e77",
+          "digest": "25fd9f8afbea19702750f8ddba2ef4aeafc5bc4515aa695340a5af6931989c03",
+          "last_commit": "f970fe5",
           "name": "crates/aien-scheduler/src/bin",
           "purpose": ""
         },
         {
-          "digest": "2f2bd85a4508ff9674e9b4febc619ed153b84d4f61084981912e3c376b6de703",
-          "last_commit": "f8eea42",
+          "digest": "a0a981f6168d15e43a6b036c3aa82d44547aadfc3b6c62139a5a3afab0644514",
+          "last_commit": "f970fe5",
           "name": "crates/spark-cockpit-rs",
           "purpose": ""
         },
         {
-          "digest": "02da31bc5e62df634962dded0755fa258e72011582658da2b12db450246d77ee",
-          "last_commit": "7d8c7b7",
+          "digest": "fc22e66c57e3412020bdca94e9526a505e115e8bb875da9838f8d88444419049",
+          "last_commit": "b54c2ef",
           "name": "scripts",
           "purpose": ""
         },
@@ -113,20 +113,20 @@
         },
         {
           "digest": "b95ea9baa15ce7ddc69a3ef4dc25cdcccba52ec1f5fd99e19f0f24af9181a306",
-          "last_commit": "db85750",
+          "last_commit": "076585a",
           "name": "tools/aien-local-ci",
           "purpose": "Local CI sandbox exec contract (C8), aien-run user/caches install, Forgejo trigger hook, health "
         }
       ],
-      "children_root": "sha256:48864a83c6625412e8ce997413a1900d5c529a17418a9aee29b72c747692f93e",
-      "compiled_at": "2026-10-16T05:31:46Z",
+      "children_root": "sha256:4b10a205086960792deafa79cafe35deca76c6df9fb9afcb252b117600350a3f",
+      "compiled_at": "2026-10-16T07:11:13Z",
       "compiler": "crumb-compile/1",
-      "digest": "sha256:cf73425a1671f6b26235ff1dba4c3746c0db6e207c465c70b6210f09bdfb547f",
+      "digest": "sha256:824ed842da823d76e7b62f41353fbe0bb82477a20b07f7bf3b3fe3ff83650618",
       "evidence_files": 1561,
       "evidence_root": "sha256:a315b980314448faf057152edf0a20aa28310d8ab4277d22762100ff444e3fa1",
-      "files": 5836,
-      "generated_at_commit": "db857500b1867559a663d4aa1c78b8200655d6b5",
-      "source_tree": "sha256:1e9e696931da6fa167080807a7950ccfabab545372a6dec28dd46dddb494ee79"
+      "files": 5845,
+      "generated_at_commit": "aa669fdbf4ad14b4cd6e2b332545d640b450cd8b",
+      "source_tree": "sha256:5d2f86b75145a8b4b6e17b768b97b54ed7d35a0029fee73c9abb49225367efef"
     }
   },
   "history": [],

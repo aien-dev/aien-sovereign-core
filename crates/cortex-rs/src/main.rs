@@ -5,13 +5,13 @@ fn default_db_path() -> PathBuf {
     PathBuf::from(home).join(".config/cortex/cortex.db")
 }
 
+use aien_localhttp::Client;
 use axum::{
     middleware,
     routing::{get, post},
     Router,
 };
 use clap::Parser;
-use reqwest::Client;
 use std::fs;
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -60,6 +60,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         return bench::run_benchmark(args.bench_records);
     }
 
+    // The encoder client speaks plain http only (aien-localhttp). Refuse an
+    // unusable --encoder-url at startup instead of degrading every write and
+    // recall to lexical-only with a warning per request.
+    cortex_rs::embeddings::validate_encoder_url(&args.encoder_url)?;
+
     tracing_subscriber::registry()
         .with(
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
@@ -100,7 +105,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let state = Arc::new(AppState {
         db: database,
-        http_client: Client::builder().build()?,
+        http_client: Client::new(),
         encoder_url: args.encoder_url,
         worker_limit: Arc::new(Semaphore::new(2)),
     });

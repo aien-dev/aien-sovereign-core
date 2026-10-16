@@ -1,5 +1,5 @@
+use aien_localhttp::Client;
 use chrono::{DateTime, Utc};
-use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::fs;
@@ -227,10 +227,7 @@ impl DreamEngine {
         let park_dir = home.join("atlas-prime-workspace/park");
         let cortex_token_path = home.join(".config/cortex/token");
 
-        let client = Client::builder()
-            .timeout(Duration::from_secs(10))
-            .build()
-            .unwrap_or_default();
+        let client = Client::builder().timeout(Duration::from_secs(10)).build();
 
         Self {
             base_dir,
@@ -658,5 +655,80 @@ Valid body content that must not be discarded."#;
         server_handle.abort();
         std::env::remove_var("CORTEX_TOKEN");
         let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    use aien_localhttp::test_server::{closed_port, response, serve_once};
+
+    /// Never reads the operator's real token file: tests must not put a real
+    /// token on the wire or into a failure message.
+    fn engine_at(cortex_url: String) -> DreamEngine {
+        let mut engine = DreamEngine::new(std::env::temp_dir()).with_cortex_url(cortex_url);
+        engine.cortex_token_path = PathBuf::from("/nonexistent/spark-dream-test-token");
+        engine
+    }
+
+    #[tokio::test]
+    async fn commit_to_cortex_sends_the_same_request_and_returns_the_receipt() {
+        let (base, server) = serve_once(response(
+            "200 OK",
+            "application/json",
+            "{\"recorded\":true}",
+        ))
+        .await;
+        let got = engine_at(base)
+            .commit_to_cortex("discovery", "Fact", "body", &json!({"k": 1}))
+            .await
+            .unwrap();
+        assert_eq!(got, json!({"recorded": true}));
+        let request = server.await.unwrap();
+        assert!(
+            request.starts_with("POST /api/cortex/write HTTP/1.1\r\n"),
+            "{request}"
+        );
+        // The token is empty here, or "mock_token" when the cycle test runs at the
+        // same time. Header values are sent trimmed, as HTTP field values are
+        // defined without surrounding whitespace, so an empty token is "Bearer".
+        assert!(request.contains("\r\nAuthorization: Bearer"), "{request}");
+        // Content-Type is set once: the explicit header wins over json().
+        assert_eq!(request.matches("Content-Type: application/json").count(), 1);
+        let body: Value = serde_json::from_str(request.split("\r\n\r\n").nth(1).unwrap()).unwrap();
+        assert_eq!(body["kind"], "entity");
+        assert_eq!(body["value"]["canonicalName"], "Fact");
+        assert_eq!(body["value"]["entityType"], "discovery");
+        assert_eq!(body["value"]["space"], "atlas-memory");
+        assert_eq!(body["value"]["metadata"], json!({"k": 1}));
+    }
+
+    #[tokio::test]
+    async fn commit_to_cortex_non_json_success_falls_back_to_ok() {
+        let (base, _server) = serve_once(response("201 Created", "text/plain", "done")).await;
+        let got = engine_at(base)
+            .commit_to_cortex("t", "n", "c", &json!({}))
+            .await
+            .unwrap();
+        assert_eq!(got, json!({"status": "ok"}));
+    }
+
+    #[tokio::test]
+    async fn commit_to_cortex_reports_error_status_refused_port_and_https() {
+        let (base, _server) =
+            serve_once(response("500 Internal Server Error", "text/plain", "x")).await;
+        let err = engine_at(base)
+            .commit_to_cortex("t", "n", "c", &json!({}))
+            .await
+            .unwrap_err();
+        assert_eq!(err, "Cortex returned status 500 Internal Server Error");
+
+        let err = engine_at(closed_port().await)
+            .commit_to_cortex("t", "n", "c", &json!({}))
+            .await
+            .unwrap_err();
+        assert!(err.starts_with("Cortex request failed: "), "{err}");
+
+        let err = engine_at("https://127.0.0.1:1".to_string())
+            .commit_to_cortex("t", "n", "c", &json!({}))
+            .await
+            .unwrap_err();
+        assert!(err.contains("https is refused"), "{err}");
     }
 }
