@@ -92,6 +92,7 @@ fn last_logits(w: &TransformerWeights, ids: &[u32]) -> Vec<f32> {
     let mut state = SequenceState {
         tokens: Vec::new(),
         layers: vec![Default::default(); w.config.num_layers],
+        kv_dtype: Default::default(),
     };
     let mut last = Vec::new();
     for (pos, id) in ids.iter().enumerate() {

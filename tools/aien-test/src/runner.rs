@@ -27,7 +27,7 @@ use crate::graph::Graph;
 use crate::manifest::{self, Manifest};
 use crate::process::{self, RunSpec};
 use crate::resources::{
-    acquire_gpu, lock, GpuConfig, GpuGuard, Hardware, Permit, Pool, PoolSizes, Pools,
+    self, acquire_gpu, lock, GpuConfig, GpuGuard, Hardware, Permit, Pool, PoolSizes, Pools,
 };
 use crate::sandbox::{self, Sandbox};
 use crate::verdict::{self, campaign_verdict, derive, parse_observations, DepFact, Facts, Verdict};
@@ -60,6 +60,11 @@ pub struct Options {
     /// `CARGO_TARGET_DIR` as the runner itself was given it; passed through
     /// the sandbox as the only environment pair.
     pub cargo_target_dir: Option<PathBuf>,
+    /// Where the per-target-dir lock files live (`resources::target_lock_path`).
+    /// Every gate that runs holds the lock of its target dir (`cargo_target_dir`
+    /// or the worktree's `target/`) for its whole run, so two gates never
+    /// build in one target dir at once. The worker sets `<state>/locks/target`.
+    pub target_lock_dir: PathBuf,
     /// `--release`: qualification mode. No cache reuse and the tree must be
     /// clean even with `--allow-dirty`.
     pub release: bool,
@@ -83,6 +88,7 @@ impl Options {
             gpu: GpuConfig::detect(),
             sandbox: Sandbox::None,
             cargo_target_dir: None,
+            target_lock_dir: PathBuf::from(crate::resources::DEFAULT_TARGET_LOCK_DIR),
             release: false,
             pins: json!([]),
         }
@@ -660,6 +666,31 @@ fn execute_gate(job: &Job<'_>, permit: Option<Permit<'_>>) -> Result<Outcome, Ru
         }
     }
 
+    // A gate that will run holds its target dir for the whole run (build and
+    // run), so no other gate builds in it or relinks a binary this one is
+    // executing (sc fix/521). Every gate, not only those whose manifest
+    // names cargo inputs: SC-INQUISITOR builds with cargo and lists no
+    // Cargo.toml, and the runner cannot see inside a script. The dir is the
+    // `CARGO_TARGET_DIR` the gate is given, or else the worktree's own
+    // `target/`, which cargo uses by default. Taken after the pool slot and
+    // before the GPU locks: the fixed order in `resources`. Waited for,
+    // never refused: the holder is another gate or the worker's priming.
+    // A gb10 gate is never killed on timeout (ADR 0028 Decision 6), so one
+    // that hangs holds the target dir until it exits; the receipt's
+    // `timeout_exceeded` is the only sign.
+    let target_lock: Option<resources::TargetLock> = if verdict::pre_run(m, &facts).is_none() {
+        let dir = opts
+            .cargo_target_dir
+            .clone()
+            .unwrap_or_else(|| resolve(root).join("target"));
+        let path = resources::target_lock_path(&opts.target_lock_dir, &dir);
+        Some(resources::lock_target_dir(&path).map_err(|e| {
+            RunError::Fatal(format!("cannot lock target dir {}: {e}", path.display()))
+        })?)
+    } else {
+        None
+    };
+
     // A gb10 gate takes the GPU locks only when nothing else already stops it.
     // A refusal (quiet flag, est_load, a held lock) becomes the gate's reason.
     let gpu: Option<GpuGuard> = if m.pool() == "gb10" && verdict::pre_run(m, &facts).is_none() {
@@ -717,6 +748,7 @@ fn execute_gate(job: &Job<'_>, permit: Option<Permit<'_>>) -> Result<Outcome, Ru
         }
         // The job is over: close the lock descriptors at once.
         drop(gpu);
+        drop(target_lock);
         after = porcelain(root).map_err(RunError::Fatal)?;
         let head_after = head(root).unwrap_or_default();
         facts.tree_changed_after = after != before;
@@ -1689,6 +1721,15 @@ mod tests {
     /// A repository with one gate (tests/<id>.gate) and script
     /// (tools/<id>.sh) per entry; `@S@` in a script is the scratch directory.
     fn gfx(gates: &[GateSpec]) -> Gfx {
+        gfx_with(gates, "", &[])
+    }
+
+    /// `inputs` block of a gate that declares it builds in the target dir.
+    const CARGO_INPUTS: &str = "inputs:\n  - Cargo.lock\n";
+
+    /// `gfx` with `extra` appended to every manifest and `files` added to
+    /// the repository (a `Cargo.lock` for the cargo gates).
+    fn gfx_with(gates: &[GateSpec], extra: &str, more: &[(&str, &str)]) -> Gfx {
         let scratch = TempDir::new("gscratch");
         let s = scratch.path().to_str().unwrap().to_string();
         let mut files: Vec<(String, String, bool)> = Vec::new();
@@ -1696,9 +1737,12 @@ mod tests {
             files.push((format!("tools/{id}.sh"), script.replace("@S@", &s), true));
             files.push((
                 format!("tests/{id}.gate"),
-                graph_gate_text(id, deps, requires),
+                format!("{}{extra}", graph_gate_text(id, deps, requires)),
                 false,
             ));
+        }
+        for (p, c) in more {
+            files.push((p.to_string(), c.to_string(), false));
         }
         let refs: Vec<(&str, &str, bool)> = files
             .iter()
@@ -1843,14 +1887,130 @@ mod tests {
         assert_eq!(c.exit_code(), 3);
     }
 
+    /// `log` holds `start-X, end-X` pairs with no interleaving.
+    fn assert_serial(log: &[String], what: &str) {
+        assert_eq!(log.len() % 2, 0, "{what}: {log:?}");
+        for pair in log.chunks(2) {
+            let id = pair[0].strip_prefix("start-").unwrap_or("?");
+            assert_eq!(pair[1], format!("end-{id}"), "{what} overlapped: {log:?}");
+        }
+    }
+
+    /// Without a `CARGO_TARGET_DIR` the gates of one run still share the
+    /// worktree's own `target/`, so they are serialised on that path.
     #[test]
-    fn independent_gates_run_at_the_same_time_when_the_pool_allows() {
+    fn gates_without_a_target_dir_serialise_on_the_worktree_target() {
+        let fx = gfx(&[
+            ("G-A", "", "host", slow("G-A")),
+            ("G-B", "", "host", slow("G-B")),
+        ]);
+        let mut opts = fx.opts();
+        opts.target_lock_dir = fx.scratch.path().join("locks");
+        let c = fx.campaign(&opts);
+        assert_eq!(c.exit_code(), 0);
+        let log = fx.log();
+        assert_eq!(log.len(), 4, "{log:?}");
+        assert_serial(&log, "gates sharing the worktree target");
+        let lock = crate::resources::target_lock_path(
+            &opts.target_lock_dir,
+            &resolve(fx.repo.path()).join("target"),
+        );
+        assert!(lock.exists(), "lock {} never taken", lock.display());
+    }
+
+    /// A gate may call cargo without naming `Cargo.toml` among its inputs
+    /// (SC-INQUISITOR builds spark-inquisitor that way), so the rule is not
+    /// "cargo gates": every gate given a `CARGO_TARGET_DIR` holds it.
+    #[test]
+    fn every_gate_given_a_target_dir_is_serialised() {
+        let cargo_user = |id: &str| {
+            format!(
+                "#!/bin/sh\necho start-{id} >> \"@S@/log\"\n\"${{CARGO:-cargo}}\" --version >/dev/null\nsleep 0.2\necho end-{id} >> \"@S@/log\"\n"
+            )
+        };
+        let fx = gfx(&[
+            ("G-A", "", "host", cargo_user("G-A")),
+            ("G-B", "", "host", cargo_user("G-B")),
+        ]);
+        let mut opts = fx.opts();
+        opts.cargo_target_dir = Some(fx.scratch.path().join("target"));
+        opts.target_lock_dir = fx.scratch.path().join("locks");
+        let c = fx.campaign(&opts);
+        assert_eq!(c.exit_code(), 0);
+        let log = fx.log();
+        assert_eq!(log.len(), 4, "{log:?}");
+        assert_serial(&log, "undeclared cargo users");
+    }
+
+    /// Two cargo gates of one head share `CARGO_TARGET_DIR`. Run at the same
+    /// time, one relinks a test binary the other is executing (sc fix/521:
+    /// SC-AGENT-PREFLIGHT relinked `aien_inference_abi-*` under SC-TEST, which
+    /// then failed with `current_exe: NotFound`). The runner must hold the
+    /// target dir for one cargo gate at a time, whatever the pool allows.
+    #[test]
+    fn cargo_gates_sharing_a_target_dir_never_overlap() {
+        let fx = gfx_with(
+            &[
+                ("C-A", "", "host", slow("C-A")),
+                ("C-B", "", "host", slow("C-B")),
+            ],
+            CARGO_INPUTS,
+            &[("Cargo.lock", "# lock\n")],
+        );
+        let mut opts = fx.opts();
+        opts.cargo_target_dir = Some(fx.scratch.path().join("target"));
+        opts.target_lock_dir = fx.scratch.path().join("locks");
+        let c = fx.campaign(&opts);
+        assert_eq!(c.exit_code(), 0);
+        let log = fx.log();
+        assert_eq!(log.len(), 4, "{log:?}");
+        let first = log[0].trim_start_matches("start-").to_string();
+        let second = if first == "C-A" { "C-B" } else { "C-A" };
+        assert_eq!(
+            log,
+            vec![
+                format!("start-{first}"),
+                format!("end-{first}"),
+                format!("start-{second}"),
+                format!("end-{second}"),
+            ],
+            "the two cargo gates overlapped in one target dir"
+        );
+        let lock = crate::resources::target_lock_path(
+            &opts.target_lock_dir,
+            &fx.scratch.path().join("target"),
+        );
+        assert!(
+            lock.exists(),
+            "the lock file {} was never taken",
+            lock.display()
+        );
+    }
+
+    /// The lock is per target dir: gates given different target dirs still
+    /// run at the same time.
+    #[test]
+    fn gates_with_different_target_dirs_run_at_the_same_time() {
         let fx = gfx(&[
             ("G-A", "", "host", rendezvous("a", "b")),
             ("G-B", "", "host", rendezvous("b", "a")),
         ]);
-        let c = fx.campaign(&fx.opts());
-        assert_eq!(c.exit_code(), 0);
+        let mut opts = fx.opts();
+        opts.target_lock_dir = fx.scratch.path().join("locks");
+        let g = fx.graph();
+        let (a, b) = (g.index_of("G-A").unwrap(), g.index_of("G-B").unwrap());
+        thread::scope(|s| {
+            for (i, dir) in [(a, "ta"), (b, "tb")] {
+                let mut o = Options {
+                    cargo_target_dir: Some(fx.scratch.path().join(dir)),
+                    ..fx.opts()
+                };
+                o.target_lock_dir = opts.target_lock_dir.clone();
+                let sel: BTreeSet<usize> = [i].into_iter().collect();
+                let (g, root) = (&g, fx.repo.path());
+                s.spawn(move || run_graph(root, g, &sel, &o).unwrap());
+            }
+        });
         assert!(fx.scratch.path().join("saw-a").exists(), "A never saw B");
         assert!(fx.scratch.path().join("saw-b").exists(), "B never saw A");
     }

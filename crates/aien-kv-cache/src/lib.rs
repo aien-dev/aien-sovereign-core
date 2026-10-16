@@ -55,6 +55,36 @@ pub enum KvDType {
     Fp32,
 }
 
+impl Default for KvDType {
+    /// Full precision: no rounding anywhere (the pre-sc#464 behaviour).
+    fn default() -> Self {
+        KvDType::Fp32
+    }
+}
+
+/// Rounds `values` in place to what a pool of `dtype` would store, so a K/V vector
+/// has the same bits whether a reader takes it from the dense per-sequence cache or
+/// gathers it back from the pool (PREFILL-E2E-2: a prompt prefilled in chunks must
+/// be bit-identical to the same prompt prefilled in one shot). Called once, where
+/// the vector is produced; `write_token_kv` applies the same rounding on the pool
+/// side, so the pool write is a no-op re-rounding. `Fp32` leaves the values alone.
+/// Element types this crate cannot store on the host path are a loud error, as in
+/// `write_token_kv`.
+pub fn round_to_dtype_in_place(dtype: KvDType, values: &mut [f32]) {
+    match dtype {
+        KvDType::Fp32 => {}
+        KvDType::Bf16 => {
+            for x in values.iter_mut() {
+                *x = bf16_bits_to_f32(f32_to_bf16_bits(*x));
+            }
+        }
+        other => panic!(
+            "Unsupported KvDType for round_to_dtype_in_place: {:?}",
+            other
+        ),
+    }
+}
+
 impl KvDType {
     pub fn bytes_per_element(&self) -> f32 {
         match self {

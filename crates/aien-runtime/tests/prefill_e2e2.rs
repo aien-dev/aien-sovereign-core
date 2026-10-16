@@ -75,7 +75,7 @@ use aien_inference_abi::{
     TensorBackend, TinyLlamaTokenizer, TransformerWeights,
 };
 use aien_kv_cache::SharedKvManager;
-use aien_runtime::shared_kv::{build_shared_kv_runtime, SharedKvSizing};
+use aien_runtime::shared_kv::{build_shared_kv_runtime, SharedKvSizing, SHARED_KV_DTYPE};
 use aien_scheduler::SchedulerConfig;
 use parking_lot::Mutex;
 use sha2::{Digest, Sha256};
@@ -1141,6 +1141,9 @@ async fn run_stages(env: &Env<'_>, ev: &mut Evidence) -> Result<(), String> {
     // 217-token control is the witness control.
     let t_control = Instant::now();
     let mut control = NativeTransformerBackend::new(env.weights.clone());
+    // The control is dense (no pool) but is the reference for a pool of
+    // SHARED_KV_DTYPE, so it rounds K/V at birth exactly as the paged backend does.
+    control.kv_dtype = SHARED_KV_DTYPE;
     if control.kv_manager.is_some() {
         return Err("control must be unpaged".to_string());
     }

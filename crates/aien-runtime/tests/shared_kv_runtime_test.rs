@@ -36,9 +36,12 @@ use aien_scheduler::SchedulerConfig;
 
 const TOL: f32 = 1e-6;
 
-/// The unpaged backend keeps f32 K/V; the spine pool stores `SHARED_KV_DTYPE`. The pool value
-/// must equal the unpaged value rounded to the pool dtype, exactly (bf16 round-to-nearest-even),
-/// so a pool that stored something other than the rounded f32 still fails this check.
+/// The spine pool stores `SHARED_KV_DTYPE`, and since the birth-rounding fix (KV_ARITH_EPOCH 2)
+/// every backend rounds K/V to its storage dtype the moment they are produced, so attention sees
+/// the same bits the pool keeps. The control below therefore runs with `kv_dtype = SHARED_KV_DTYPE`
+/// and must match the pool value exactly (bf16 round-to-nearest-even); `pool_rounded` is then the
+/// identity on the control value and only guards against a pool that stored something other than
+/// the rounded f32.
 fn pool_rounded(x: f32) -> f32 {
     match SHARED_KV_DTYPE {
         KvDType::Bf16 => bf16_bits_to_f32(f32_to_bf16_bits(x)),
@@ -160,7 +163,10 @@ async fn shared_kv_root_prefill_lands_in_spine_pool_and_matches_unpaged_backend(
     assert!(!spine.swarm_manager.is_root_prefill_pending(swarm_id));
 
     // Control: an unpaged backend (no KV manager) with the same weights.
+    // Same storage dtype as the pool: both sides round at birth, so the hidden states that feed
+    // later layers agree bit for bit (an f32 control diverges from layer 1 on, see #589).
     let mut control = NativeTransformerBackend::new_reference(weights);
+    control.kv_dtype = SHARED_KV_DTYPE;
     let control_id = 9_000_001u64;
     control
         .prefill_sequence(control_id, &prompt)

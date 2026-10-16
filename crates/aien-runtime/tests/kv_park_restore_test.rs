@@ -1011,13 +1011,27 @@ async fn restore_retry_window_prefills_without_lookup_after_two_failures() {
 
 /// ADR 2.4 / METRICS `kv_park_indeterminate_total`: a publication whose
 /// directory sync failed after the rename is served but counted indeterminate.
+///
+/// Dispatch stays paused until both park jobs are submitted. The faulted first
+/// job puts the fake store into `Degraded`, and a store in that state refuses
+/// new submissions (`DeviceUnavailable`); with a running worker the second
+/// submission raced that terminal and lost about one time in six (one job
+/// counted, two failures), so the race is removed rather than tolerated.
 #[tokio::test]
 async fn indeterminate_park_publication_is_counted() {
-    let mut r = rig();
+    let mut r = rig_with(0, true);
     r.fake.script(JobScript::fault(Fault::RenameOkDirsyncFail));
-    park_turn(&mut r, &prompt14(), 3).await;
+    let seq = r.spine.submit_request(request(&prompt14(), 3));
+    step(&mut r).await;
+    paint(&r, seq);
+    step_until(&mut r, "turn finished with both parks submitted", |r| {
+        finished(r, seq) && status(r).parking_jobs == 2
+    })
+    .await;
+    r.worker.resume_dispatch();
+    step_until(&mut r, "parks terminal", |r| status(r).parking_jobs == 0).await;
     let s = status(&r).stats;
-    assert_eq!(s.park_jobs_total, 2);
+    assert_eq!(s.park_jobs_total, 2, "{s:?}");
     assert_eq!(s.park_indeterminate_total, 1, "{s:?}");
     // The object is published and served, its durability unknown (the fake
     // reports it on a failed terminal and the store goes Degraded).

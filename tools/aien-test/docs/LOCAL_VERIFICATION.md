@@ -118,6 +118,22 @@ rule (`Config.allow_unsandboxed`, default false). Under `--sandbox user` the
 worker passes `CARGO_TARGET_DIR=/var/lib/aien-run/target/<repo>/main` for a
 head already on the base line and `.../pr` for any other head (A2).
 
+The gates of one head share that target dir, so the runner holds it for one
+gate at a time: every gate that runs takes an exclusive `flock` on
+`<state>/locks/target/<sanitised target dir>.lock` (the `CARGO_TARGET_DIR` it
+is given, or else the worktree's own `target/`) for its whole run, build and
+execution, and releases it when its process has exited. Every gate, not only
+those whose manifest names cargo inputs: SC-INQUISITOR builds with cargo and
+lists no `Cargo.toml`, and the runner cannot see inside a script. The lock is
+the worker's, never the gate's. Without it two gates built in one target dir
+at once and one relinked a test binary the other was executing (sc fix/521:
+SC-AGENT-PREFLIGHT under SC-TEST, `current_exe: NotFound`, a false FAIL).
+Gates given different target dirs still run at the same time. The fixed lock
+order of one gate is: pool slot, target-dir lock, `/tmp/aien-gb10.lock`,
+aien-proof `slots/gpu.lock`; the worker's target priming takes only the
+target-dir lock. Known limit: a gb10 gate is never killed on timeout, so a
+hung one holds the target dir until it exits on its own.
+
 Under `--sandbox user` every checkout is made with INFRA's worktree tool
 (`--wt-tool`, default `<clones>/aien-sovereign-core/tools/aien-local-ci/wt.sh`;
 without it the worker refuses to run). `wt.sh sync` refreshes the bare mirror

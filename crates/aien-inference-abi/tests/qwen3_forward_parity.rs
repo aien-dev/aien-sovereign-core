@@ -109,6 +109,7 @@ fn qwen3_tiny_token_by_token_logits_match_transformers() {
     let mut state = SequenceState {
         tokens: Vec::new(),
         layers: vec![Default::default(); weights.config.num_layers],
+        kv_dtype: Default::default(),
     };
     let mut last = Vec::new();
     for (pos, id) in r.ids.iter().enumerate() {

@@ -9,7 +9,8 @@ use crate::{
     DecodeOutput, FinishReason, ModelConfig, SamplingParams, ScheduledBatch, StepMetrics,
 };
 use aien_kv_cache::{
-    create_shared_kv_manager_with_pool, AienKvManager, KvDType, KvPoolConfig, SharedKvManager,
+    create_shared_kv_manager_with_pool, round_to_dtype_in_place, AienKvManager, KvDType,
+    KvPoolConfig, SharedKvManager,
 };
 use async_trait::async_trait;
 use std::collections::HashMap;
@@ -163,6 +164,10 @@ pub struct NativeTransformerBackend {
     pub sequences: HashMap<u64, SequenceState>,
     pub tensor_backend: Arc<dyn TensorBackend>,
     pub kv_manager: Option<SharedKvManager>,
+    /// Element type K/V are rounded to at birth when no physical pool is attached
+    /// (a pool's own dtype wins; see `storage_dtype`). `Fp32` = no rounding. A dense
+    /// control backend sets this to the pool dtype it is the reference for.
+    pub kv_dtype: KvDType,
     /// Per-request sampling params used by decode (PREFILL-E2E C6). Recorded
     /// from the prefill request (`execute_step`) and from the fork hook
     /// (`fork_sequence_with_sampling`; a plain `fork_sequence` child inherits
@@ -214,6 +219,7 @@ impl NativeTransformerBackend {
             tensor_backend: Arc::new(ReferenceCpuBackend::new()),
             kv_manager: None,
             pending_prefill_token: HashMap::new(),
+            kv_dtype: KvDType::Fp32,
         }
     }
 
@@ -230,6 +236,7 @@ impl NativeTransformerBackend {
             tensor_backend,
             kv_manager: None,
             pending_prefill_token: HashMap::new(),
+            kv_dtype: KvDType::Fp32,
         }
     }
 
@@ -278,6 +285,7 @@ impl NativeTransformerBackend {
             tensor_backend: Arc::new(ReferenceCpuBackend::new()),
             kv_manager: Some(kv_mgr),
             pending_prefill_token: HashMap::new(),
+            kv_dtype: KvDType::Fp32,
         })
     }
 
@@ -305,6 +313,7 @@ impl NativeTransformerBackend {
             tensor_backend,
             kv_manager: Some(kv_mgr),
             pending_prefill_token: HashMap::new(),
+            kv_dtype: KvDType::Fp32,
         })
     }
 
@@ -322,6 +331,7 @@ impl NativeTransformerBackend {
             tensor_backend,
             kv_manager: Some(kv_manager),
             pending_prefill_token: HashMap::new(),
+            kv_dtype: KvDType::Fp32,
         }
     }
 
@@ -346,12 +356,14 @@ impl NativeTransformerBackend {
         }
 
         let num_layers = self.weights.config.num_layers;
+        let kv_dtype = self.storage_dtype();
         let seq = self
             .sequences
             .entry(seq_id)
             .or_insert_with(|| SequenceState {
                 tokens: Vec::new(),
                 layers: vec![LayerKvCache::default(); num_layers],
+                kv_dtype,
             });
 
         let last_hidden = Self::prefill_prompt_layer_by_layer_paged(
@@ -379,12 +391,14 @@ impl NativeTransformerBackend {
         }
 
         let num_layers = self.weights.config.num_layers;
+        let kv_dtype = self.storage_dtype();
         let seq = self
             .sequences
             .entry(handle.0)
             .or_insert_with(|| SequenceState {
                 tokens: Vec::new(),
                 layers: vec![LayerKvCache::default(); num_layers],
+                kv_dtype,
             });
 
         Self::prefill_prompt_layer_by_layer_paged(
@@ -432,6 +446,7 @@ impl NativeTransformerBackend {
             SequenceState {
                 tokens: parent_seq.tokens.clone(),
                 layers: Vec::new(),
+                kv_dtype: parent_seq.kv_dtype,
             }
         } else {
             parent_seq.clone()
@@ -1083,6 +1098,17 @@ impl NativeTransformerBackend {
         )
     }
 
+    /// Element type every new sequence's K/V are rounded to the moment they are
+    /// produced: the attached pool's dtype (what `write_token_kv` stores), else
+    /// `kv_dtype`. One rounding point keeps dense cache, pool and attention on the
+    /// same bits (PREFILL-E2E-2).
+    pub fn storage_dtype(&self) -> KvDType {
+        self.kv_manager
+            .as_ref()
+            .and_then(|m| m.read().tensor_pool().map(|p| p.config().dtype))
+            .unwrap_or(self.kv_dtype)
+    }
+
     /// Forward pass executing one token forward pass through the transformer with optional paged COW KV.
     ///
     /// Panics when the paged KV pool cannot supply the block this token needs
@@ -1207,6 +1233,10 @@ impl NativeTransformerBackend {
                 num_kv_heads,
                 &rope,
             );
+            // Round once, at birth: pool write, dense cache and attention all see
+            // the same bits (PREFILL-E2E-2).
+            round_to_dtype_in_place(seq_state.kv_dtype, &mut k);
+            round_to_dtype_in_place(seq_state.kv_dtype, &mut v);
 
             if let (Some((block_id, slot)), Some(mgr)) = (block_slot, kv_manager) {
                 {
@@ -1382,6 +1412,7 @@ impl NativeTransformerBackend {
         // token t sits at absolute position `offset + t`: that position drives RoPE,
         // the paged block/slot, and the causal attention length.
         let offset = seq_state.tokens.len();
+        let kv_dtype = seq_state.kv_dtype;
         if n == 1 && offset == 0 {
             // The token is recorded only after the forward pass succeeded, so a
             // loud KV failure leaves `seq_state` untouched.
@@ -1573,10 +1604,14 @@ impl NativeTransformerBackend {
             for t in 0..n {
                 let q_t = &mut q_batch[t * q_dim..(t + 1) * q_dim];
                 let k_t = &mut k_batch[t * kv_dim..(t + 1) * kv_dim];
-                let v_t = &v_batch[t * kv_dim..(t + 1) * kv_dim];
+                let v_t = &mut v_batch[t * kv_dim..(t + 1) * kv_dim];
 
                 let pos = offset + t;
                 backend.apply_rope(q_t, k_t, pos, head_dim, num_heads, num_kv_heads, &rope);
+                // Round once, at birth, so this chunk's in-flight K/V and the earlier
+                // chunks gathered back from the pool carry the same bits (PREFILL-E2E-2).
+                round_to_dtype_in_place(kv_dtype, k_t);
+                round_to_dtype_in_place(kv_dtype, v_t);
 
                 if let (Some((block_id, slot)), Some(mgr)) = (paged_slots[t], kv_manager) {
                     // Slots exist only when a physical pool is attached, so this
@@ -1927,8 +1962,14 @@ impl NativeTransformerBackend {
                 );
             }
 
-            // c. RoPE across all D sequences at their respective positions
-            for (i, &(_seq_id, _tok, pos)) in valid_reqs.iter().enumerate() {
+            // c. RoPE across all D sequences at their respective positions, then
+            //    round K/V once at birth (PREFILL-E2E-2).
+            for (i, &(seq_id, _tok, pos)) in valid_reqs.iter().enumerate() {
+                let kv_dtype = self
+                    .sequences
+                    .get(&seq_id)
+                    .map(|s| s.kv_dtype)
+                    .unwrap_or_else(|| self.storage_dtype());
                 layer_w.apply_qk_norm_on(
                     self.tensor_backend.as_ref(),
                     &mut q_batch[i * q_dim..(i + 1) * q_dim],
@@ -1945,6 +1986,8 @@ impl NativeTransformerBackend {
                     num_kv_heads,
                     &rope,
                 );
+                round_to_dtype_in_place(kv_dtype, &mut k_batch[i * kv_dim..(i + 1) * kv_dim]);
+                round_to_dtype_in_place(kv_dtype, &mut v_batch[i * kv_dim..(i + 1) * kv_dim]);
             }
 
             // d. Write K & V into KV cache
@@ -2291,12 +2334,14 @@ impl AienInferenceBackend for NativeTransformerBackend {
         if let Some(&pending) = self.pending_prefill_token.get(&parent_id) {
             parent_tokens.push(pending);
         }
+        let kv_dtype = self.storage_dtype();
         self.sequences.insert(
             child_id,
             SequenceState {
                 tokens: parent_tokens,
                 // Paged mode: K/V lives in the shared pool, never in per-sequence layers.
                 layers: Vec::new(),
+                kv_dtype,
             },
         );
         // PREFILL-E2E C6: a plain fork inherits the parent's sampling params
@@ -2407,12 +2452,14 @@ impl AienInferenceBackend for NativeTransformerBackend {
                 "restore_sequence {seq_id} refused: sequence already has backend state"
             ));
         }
+        let kv_dtype = self.storage_dtype();
         self.sequences.insert(
             seq_id,
             SequenceState {
                 tokens: tokens.to_vec(),
                 // Paged mode: K/V lives in the shared pool, never in per-sequence layers.
                 layers: Vec::new(),
+                kv_dtype,
             },
         );
         Ok(())
@@ -2477,12 +2524,14 @@ impl AienInferenceBackend for NativeTransformerBackend {
                 }
             }
 
+            let kv_dtype = self.storage_dtype();
             let seq = self
                 .sequences
                 .entry(req.request_id)
                 .or_insert_with(|| SequenceState {
                     tokens: Vec::new(),
                     layers: vec![LayerKvCache::default(); num_layers],
+                    kv_dtype,
                 });
 
             let last_hidden = Self::prefill_prompt_layer_by_layer_paged(
@@ -2593,6 +2642,7 @@ mod tests {
         let mut seq_state = SequenceState {
             tokens: vec![1],
             layers: vec![LayerKvCache::default(); config.num_layers],
+            kv_dtype: KvDType::Fp32,
         };
 
         let hidden = backend.forward_token(1, 0, &mut seq_state);
