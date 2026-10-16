@@ -240,12 +240,17 @@ fn framing_for(status: StatusCode, headers: &[(String, String)]) -> Result<Frami
     if code == 204 || code == 304 {
         return Ok(Framing::Done);
     }
+    // Presence decides, not content: an empty Transfer-Encoding still counts,
+    // so it cannot hide behind a Content-Length (refused as ambiguous) or pass
+    // as length framing (refused as an unsupported coding).
+    let has_coding = headers
+        .iter()
+        .any(|(n, _)| n.eq_ignore_ascii_case("transfer-encoding"));
     let codings: Vec<String> = header_values(headers, "transfer-encoding")
-        .filter(|v| !v.is_empty())
         .map(str::to_ascii_lowercase)
         .collect();
     let lengths: Vec<&str> = header_values(headers, "content-length").collect();
-    if !codings.is_empty() {
+    if has_coding {
         if !lengths.is_empty() {
             return Err(Error::MalformedResponse(
                 "both Transfer-Encoding and Content-Length".to_string(),

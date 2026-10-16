@@ -1,4 +1,5 @@
 use crate::response::{self, BlockingResponse, Deadline, Response};
+use crate::status::StatusCode;
 use crate::{Error, Url};
 use serde::Serialize;
 use std::fmt;
@@ -265,27 +266,48 @@ impl RequestBuilder {
     /// its own current-thread runtime, so it is safe to call from inside or
     /// outside a tokio runtime. Reads the whole body under the body cap.
     pub fn send_blocking(self) -> Result<BlockingResponse, Error> {
-        let worker = std::thread::Builder::new()
-            .name("aien-localhttp-blocking".to_string())
-            .spawn(move || {
-                let runtime = tokio::runtime::Builder::new_current_thread()
-                    .enable_io()
-                    .enable_time()
-                    .build()
-                    .map_err(|e| Error::Blocking(format!("runtime: {e}")))?;
-                runtime.block_on(async move {
-                    let response = self.send().await?;
-                    let status = response.status();
-                    let headers = response.headers().to_vec();
-                    let body = response.bytes().await?;
-                    Ok(BlockingResponse::new(status, headers, body))
-                })
-            })
-            .map_err(|e| Error::Blocking(format!("thread spawn: {e}")))?;
-        worker
-            .join()
-            .map_err(|_| Error::Blocking("request thread panicked".to_string()))?
+        run_blocking(async move {
+            let response = self.send().await?;
+            let status = response.status();
+            let headers = response.headers().to_vec();
+            let body = response.bytes().await?;
+            Ok(BlockingResponse::new(status, headers, body))
+        })
     }
+
+    /// Blocking form that returns once the status line and headers are read.
+    /// The body is dropped unread, so a slow, stalled or truncated body cannot
+    /// turn a decided status into a transport error.
+    pub fn send_blocking_status(self) -> Result<StatusCode, Error> {
+        run_blocking(async move { Ok(self.send().await?.status()) })
+    }
+}
+
+/// Runs `request` on its own thread and current-thread runtime. The runtime is
+/// shut down in the background, so blocking work still pending when the
+/// request finishes or times out (a stalled name lookup) cannot hold the
+/// caller past the request deadline.
+fn run_blocking<T, F>(request: F) -> Result<T, Error>
+where
+    T: Send + 'static,
+    F: std::future::Future<Output = Result<T, Error>> + Send + 'static,
+{
+    let worker = std::thread::Builder::new()
+        .name("aien-localhttp-blocking".to_string())
+        .spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_io()
+                .enable_time()
+                .build()
+                .map_err(|e| Error::Blocking(format!("runtime: {e}")))?;
+            let result = runtime.block_on(request);
+            runtime.shutdown_background();
+            result
+        })
+        .map_err(|e| Error::Blocking(format!("thread spawn: {e}")))?;
+    worker
+        .join()
+        .map_err(|_| Error::Blocking("request thread panicked".to_string()))?
 }
 
 fn contains_header(headers: &[(String, String)], lower: &str) -> bool {

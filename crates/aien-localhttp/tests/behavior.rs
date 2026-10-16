@@ -641,3 +641,62 @@ fn send_blocking_refuses_https_and_reports_timeouts() {
         .unwrap_err();
     assert!(matches!(error, Error::Timeout(_)), "{error:?}");
 }
+
+// ------------------------------------------------- review round 1 regressions
+
+#[tokio::test]
+async fn empty_transfer_encoding_with_content_length_is_refused() {
+    let (base, _server) =
+        respond(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: \r\nContent-Length: 3\r\n\r\nabc").await;
+    let error = Client::new().get(&base).send().await.unwrap_err();
+    assert!(
+        matches!(&error, Error::MalformedResponse(m) if m.contains("both")),
+        "{error:?}"
+    );
+}
+
+#[tokio::test]
+async fn empty_transfer_encoding_alone_is_refused() {
+    let (base, _server) = respond(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: \r\n\r\nabc").await;
+    let error = Client::new().get(&base).send().await.unwrap_err();
+    assert!(
+        matches!(&error, Error::MalformedResponse(m) if m.contains("unsupported")),
+        "{error:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn blocking_status_returns_before_a_stalled_body() {
+    let (base, _server) =
+        respond_then_stall(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 100\r\n\r\npartial").await;
+    let started = Instant::now();
+    let status = tokio::task::spawn_blocking(move || {
+        Client::builder()
+            .timeout(Duration::from_secs(5))
+            .build()
+            .get(&base)
+            .send_blocking_status()
+    })
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(status.as_u16(), 403);
+    assert!(started.elapsed() < Duration::from_secs(2));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn blocking_full_read_of_a_stalled_body_times_out() {
+    let (base, _server) =
+        respond_then_stall(b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\npartial").await;
+    let error = tokio::task::spawn_blocking(move || {
+        Client::builder()
+            .timeout(Duration::from_millis(250))
+            .build()
+            .get(&base)
+            .send_blocking()
+    })
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert!(matches!(error, Error::Timeout(_)), "{error:?}");
+}

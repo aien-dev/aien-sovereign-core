@@ -624,24 +624,23 @@ fn confirm_aegis(url: &str, to: &str, subject: &str) -> Result<(), Error> {
     });
     let body = serde_json::to_vec(&payload)
         .map_err(|_| Error::other("could not encode AEGIS probe request"))?;
-    // send_blocking runs the request on its own thread and runtime, so this is
+    // send_blocking_status runs the request on its own thread and runtime, so it is
     // safe to call from inside the mail server's tokio runtime. Any transport
     // error (including an https URL, which this client refuses) fails closed.
-    let response = aien_localhttp::Client::builder()
+    // Only the status decides, as before: the body is never read, so a slow or
+    // truncated denial body still maps to PermissionDenied.
+    let status = aien_localhttp::Client::builder()
         .timeout(std::time::Duration::from_secs(5))
         .build()
         .post(&endpoint)
         .header("content-type", "application/json")
         .body(body)
-        .send_blocking()
+        .send_blocking_status()
         .map_err(|error| Error::other(format!("AEGIS probe call failed: {error}")))?;
-    if !response.status().is_success() {
+    if !status.is_success() {
         return Err(Error::new(
             ErrorKind::PermissionDenied,
-            format!(
-                "AEGIS probe denied gandi_send with HTTP {}",
-                response.status()
-            ),
+            format!("AEGIS probe denied gandi_send with HTTP {}", status),
         ));
     }
     Ok(())
@@ -650,6 +649,40 @@ fn confirm_aegis(url: &str, to: &str, subject: &str) -> Result<(), Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Serves one connection: reads the request, writes `head`, then holds the
+    /// socket open without the promised body.
+    fn serve_head_then_stall(head: &'static [u8]) -> String {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/", listener.local_addr().unwrap());
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 4096];
+            let _ = stream.read(&mut buf);
+            stream.write_all(head).unwrap();
+            std::thread::sleep(std::time::Duration::from_secs(10));
+        });
+        url
+    }
+
+    #[test]
+    fn aegis_denial_with_a_stalled_body_is_still_permission_denied() {
+        let url =
+            serve_head_then_stall(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 100\r\n\r\npartial");
+        let started = std::time::Instant::now();
+        let error = confirm_aegis(&url, "person@example.com", "hello").unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::PermissionDenied, "{error}");
+        assert!(started.elapsed() < std::time::Duration::from_secs(4));
+    }
+
+    #[test]
+    fn aegis_allow_with_a_stalled_body_is_allowed() {
+        let url = serve_head_then_stall(b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\n{\"ok\"");
+        let started = std::time::Instant::now();
+        confirm_aegis(&url, "person@example.com", "hello").unwrap();
+        assert!(started.elapsed() < std::time::Duration::from_secs(4));
+    }
 
     #[test]
     fn deny_switch_blocks_before_any_network() {

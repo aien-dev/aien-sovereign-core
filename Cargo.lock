@@ -4191,7 +4191,6 @@ dependencies = [
 name = "spark-harvester"
 version = "0.1.0"
 dependencies = [
- "aien-localhttp",
  "aien-protocol-types",
  "aien-provenance",
  "bitflags 2.13.2",
@@ -4200,6 +4199,7 @@ dependencies = [
  "hex",
  "p256",
  "regex",
+ "reqwest 0.12.28",
  "serde",
  "serde_json",
  "sha2 0.10.9",
