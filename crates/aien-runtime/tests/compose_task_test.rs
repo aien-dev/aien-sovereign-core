@@ -327,12 +327,7 @@ z
 /// Invalid prefixes at a multi-byte boundary must be refused, never panic.
 #[test]
 fn file_proposal_rejects_multibyte_first_line_without_panicking() {
-    for invalid in [
-        "filenameé",
-        "ééééé",
-        "🎯🎯🎯",
-        "abcdefg中",
-    ] {
+    for invalid in ["filenameé", "ééééé", "🎯🎯🎯", "abcdefg中"] {
         let reply = format!("{invalid}\nbody\n");
         let err = check_file_proposal(&reply).unwrap_err();
         assert!(err.contains("no filename line"), "{invalid:?}: {err}");
