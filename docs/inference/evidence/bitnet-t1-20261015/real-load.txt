@@ -3,7 +3,7 @@ BITNET-LOAD tensor qkv      [3840][2560] bytes_each=2457606 count=30
 BITNET-LOAD tensor o        [2560][2560] bytes_each=1638402 count=30
 BITNET-LOAD tensor gate_up  [13824][2560] bytes_each=8847364 count=30
 BITNET-LOAD tensor down     [2560][6912] bytes_each=4423682 count=30
-BITNET-LOAD layout=omega-trit2-rm16-hfrows-v1 resident_bytes=849387060 uploads=121 host_bytes=658432000 embed_bytes=656670720 transient_bytes=443391120 rss_before=4206592 peak_rss=1001340928 peak_over_start=997134336 seconds=3.47
+BITNET-LOAD layout=omega-trit2-rm16-hfrows-v1 resident_bytes=849387060 uploads=121 host_bytes=658432000 embed_bytes=656670720 transient_bytes=328375440 rss_before=5304320 peak_rss=991965184 peak_over_start=986660864 seconds=3.64
 BITNET-SCALES layer 0 q,k,v,o,gate,up,down = 1.21875,1.8046875,2.296875,0.9609375,1.5546875,1.828125,2.15625
 BITNET-SCALES layer 1 q,k,v,o,gate,up,down = 0.8359375,1.34375,2.25,1.609375,0.80859375,0.74609375,1.265625
 BITNET-SCALES layer 2 q,k,v,o,gate,up,down = 0.9921875,1.4921875,2.703125,1.9375,1.125,1.0234375,1.703125
@@ -34,4 +34,4 @@ BITNET-SCALES layer 26 q,k,v,o,gate,up,down = 1.6015625,2.4375,3.234375,2,2.4687
 BITNET-SCALES layer 27 q,k,v,o,gate,up,down = 1.5546875,2.546875,3.6875,2.234375,2.515625,2.40625,2.765625
 BITNET-SCALES layer 28 q,k,v,o,gate,up,down = 1.3671875,2.0625,3.015625,1.84375,2.671875,2.515625,2.625
 BITNET-SCALES layer 29 q,k,v,o,gate,up,down = 1.125,1.6484375,1.78125,0.95703125,2.828125,2.609375,2.28125
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 246 filtered out; finished in 16.32s
+test result: real_bitnet_streaming_load_host_only ok

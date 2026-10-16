@@ -237,6 +237,8 @@ pub enum TernMutant {
     SwapKvScales,
     /// Stores every word with the plus and minus planes exchanged (every trit negated).
     PlaneSwap,
+    /// Stores the word table with one byte changed (one e4m3 code moved by one step).
+    FlipTableByte,
 }
 
 /// What the recording uploader keeps.
@@ -250,6 +252,9 @@ pub enum Keep {
     /// An f32 image of every matrix (trit times scale) and of the table: the full host copy a
     /// naive reference would hold. The RSS gate's control.
     F32Image,
+    /// An f32 image of layer 0's matrix of one kind only: the stray host copy of a single
+    /// matrix the tightened RSS bound must still catch.
+    F32CopyOf(TernTensor),
 }
 
 /// One upload as the recording fake saw it.
@@ -336,9 +341,20 @@ impl TernUploader for RecordingTernUploader {
         segments: &[TernSegment],
     ) -> Result<Arc<dyn TernMatrix>, String> {
         check_ternary_upload(n, k, words, segments)?;
-        let (mut w, mut segs) = (words.to_vec(), segments.to_vec());
+        // The words are copied only when something keeps them, so a record-only load holds
+        // nothing beyond the loader's own buffers.
+        let copy = match self.keep {
+            Keep::Nothing => false,
+            Keep::F32CopyOf(kind) => kind == what && layer == 0,
+            Keep::Packed | Keep::F32Image => true,
+        };
+        let (mut w, mut segs) = (
+            if copy { words.to_vec() } else { Vec::new() },
+            segments.to_vec(),
+        );
         let wpr = k / TRITS_PER_WORD;
         match (self.mutant, what) {
+            _ if !copy => {}
             (Some(TernMutant::SwapKvRows { q_rows, kv_rows }), TernTensor::Qkv) => {
                 let (lo, hi) = w.split_at_mut((q_rows + kv_rows) * wpr);
                 lo[q_rows * wpr..].swap_with_slice(&mut hi[..kv_rows * wpr]);
@@ -363,6 +379,10 @@ impl TernUploader for RecordingTernUploader {
                 None,
             ),
             Keep::F32Image => (None, Some(dequant(&w, k, &segs))),
+            Keep::F32CopyOf(kind) if kind == what && layer == 0 => {
+                (None, Some(dequant(&w, k, &segs)))
+            }
+            Keep::F32CopyOf(_) => (None, None),
         };
         self.records.lock().unwrap().push(TernRecord {
             layer: Some(layer),
@@ -393,15 +413,20 @@ impl TernUploader for RecordingTernUploader {
         scales: &[u16],
     ) -> Result<Arc<dyn DenseGemv>, String> {
         check_table_upload(n, k, w, scales)?;
+        // Copied only when kept, so a record-only load holds no second table.
+        let stored = || {
+            let mut s = w.to_vec();
+            if self.mutant == Some(TernMutant::FlipTableByte) {
+                // Byte 1 one code step away; bit 1 instead where bit 0 would make the NaN code.
+                let b = s[1] ^ 1;
+                s[1] = if b & 0x7f == 0x7f { s[1] ^ 2 } else { b };
+            }
+            s
+        };
         let (table, f32_image) = match self.keep {
-            Keep::Nothing => (None, None),
+            Keep::Nothing | Keep::F32CopyOf(_) => (None, None),
             Keep::Packed => (
-                Some(Arc::new(HostFp8Gemv::new(
-                    n,
-                    k,
-                    w.to_vec(),
-                    scales.to_vec(),
-                )?)),
+                Some(Arc::new(HostFp8Gemv::new(n, k, stored(), scales.to_vec())?)),
                 None,
             ),
             Keep::F32Image => {
@@ -575,4 +600,57 @@ pub fn check_upload_bytes(
         }
     }
     Ok(())
+}
+
+/// The host half of the byte test: each layer's four norms and the final norm must be the
+/// checkpoint's (read again from `source`), each in its own slot, so an input/post norm swap is
+/// named.
+pub fn check_host_norms(
+    c: &BitNetConfig,
+    source: &mut dyn TensorSource,
+    w: &BitNetOmegaWeights,
+) -> Result<(), String> {
+    let mut check = |name: String, len: usize, got: &[f32]| {
+        let mut bytes = vec![0u8; 2 * len];
+        source.read_into(&name, "BF16", &[len], &mut bytes)?;
+        let want: Vec<f32> = bytes
+            .chunks_exact(2)
+            .map(|b| bf16_to_f32(u16::from_le_bytes([b[0], b[1]])))
+            .collect();
+        if got != want.as_slice() {
+            return Err(format!("host norm {name} is not the checkpoint's"));
+        }
+        Ok::<(), String>(())
+    };
+    if w.layers.len() != c.layers {
+        return Err(format!(
+            "{} layers held, expected {}",
+            w.layers.len(),
+            c.layers
+        ));
+    }
+    for (l, layer) in w.layers.iter().enumerate() {
+        let p = format!("model.layers.{l}");
+        check(
+            format!("{p}.input_layernorm.weight"),
+            c.hidden,
+            &layer.input_norm,
+        )?;
+        check(
+            format!("{p}.self_attn.attn_sub_norm.weight"),
+            c.q_dim(),
+            &layer.attn_sub_norm,
+        )?;
+        check(
+            format!("{p}.post_attention_layernorm.weight"),
+            c.hidden,
+            &layer.post_norm,
+        )?;
+        check(
+            format!("{p}.mlp.ffn_sub_norm.weight"),
+            c.intermediate,
+            &layer.ffn_sub_norm,
+        )?;
+    }
+    check("model.norm.weight".into(), c.hidden, &w.final_norm)
 }

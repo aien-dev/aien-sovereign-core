@@ -75,10 +75,12 @@ fn load_tiny(up: &RecordingTernUploader) -> Result<(BitNetOmegaWeights, BitNetLo
     load_bitnet_omega_from(&c, &mut memory_source(&c), up, &mut |_| {})
 }
 
-fn byte_test(up: &RecordingTernUploader) -> Result<(), String> {
+/// The full byte test: every upload against the checkpoint, then the norms the host keeps.
+fn byte_test(up: &RecordingTernUploader, w: &BitNetOmegaWeights) -> Result<(), String> {
     let c = tiny_config();
     let recs = up.records.lock().unwrap();
-    check_upload_bytes(&c, &mut memory_source(&c), &recs)
+    check_upload_bytes(&c, &mut memory_source(&c), &recs)?;
+    check_host_norms(&c, &mut memory_source(&c), w)
 }
 
 fn scratch(name: &str) -> std::path::PathBuf {
@@ -570,7 +572,7 @@ fn tiny_load_shapes_byte_counts_and_order() {
 fn byte_test_passes_and_stacks_trits_and_scales_q_k_v_and_gate_up() {
     let up = RecordingTernUploader::keeping();
     let (w, report) = load_tiny(&up).unwrap();
-    byte_test(&up).unwrap();
+    byte_test(&up, &w).unwrap();
     // One scale per projection, in stacking order, each its own value.
     let segs = w.layers[0].qkv.segments();
     let parts: Vec<_> = segs.iter().map(|s| (s.part, s.rows)).collect();
@@ -596,25 +598,106 @@ fn byte_test_passes_and_stacks_trits_and_scales_q_k_v_and_gate_up() {
 #[test]
 fn negative_control_kv_row_swap_fails_the_byte_test() {
     let up = RecordingTernUploader::swapping_kv_rows(&tiny_config());
-    load_tiny(&up).unwrap();
-    let e = byte_test(&up).unwrap_err();
+    let (w, _) = load_tiny(&up).unwrap();
+    let e = byte_test(&up, &w).unwrap_err();
     assert!(e.contains("qkv") && e.contains("stored row 256"), "{e}");
 }
 
 #[test]
 fn negative_control_plane_swap_fails_the_byte_test() {
     let up = RecordingTernUploader::with(TernMutant::PlaneSwap);
-    load_tiny(&up).unwrap();
-    let e = byte_test(&up).unwrap_err();
+    let (w, _) = load_tiny(&up).unwrap();
+    let e = byte_test(&up, &w).unwrap_err();
     assert!(e.contains("stored row 0"), "{e}");
 }
 
 #[test]
 fn negative_control_kv_scale_swap_fails_the_byte_test() {
     let up = RecordingTernUploader::with(TernMutant::SwapKvScales);
-    load_tiny(&up).unwrap();
-    let e = byte_test(&up).unwrap_err();
+    let (w, _) = load_tiny(&up).unwrap();
+    let e = byte_test(&up, &w).unwrap_err();
     assert!(e.contains("segment K") && e.contains("scale"), "{e}");
+}
+
+#[test]
+fn negative_control_word_table_byte_flip_fails_the_byte_test() {
+    let up = RecordingTernUploader::with(TernMutant::FlipTableByte);
+    let (w, _) = load_tiny(&up).unwrap();
+    let e = byte_test(&up, &w).unwrap_err();
+    assert!(e.contains("table"), "{e}");
+}
+
+#[test]
+fn negative_control_input_post_norm_swap_fails_the_byte_test() {
+    let up = RecordingTernUploader::keeping();
+    let (mut w, _) = load_tiny(&up).unwrap();
+    byte_test(&up, &w).unwrap();
+    let l = &mut w.layers[1];
+    std::mem::swap(&mut l.input_norm, &mut l.post_norm);
+    let e = byte_test(&up, &w).unwrap_err();
+    assert!(e.contains("model.layers.1.input_layernorm.weight"), "{e}");
+}
+
+#[test]
+fn malformed_or_empty_eos_lists_are_refused_by_name() {
+    let gen = |eos: serde_json::Value| {
+        let mut g: serde_json::Value = serde_json::from_str(BITNET_2B4T_GENERATION).unwrap();
+        g["eos_token_id"] = eos;
+        BitNetConfig::from_json(BITNET_2B4T_CONFIG, Some(&g.to_string()))
+    };
+    assert_refused(
+        gen(serde_json::json!(["128001"])),
+        &["generation_config.json eos_token_id", "128001"],
+    );
+    assert_refused(
+        gen(serde_json::json!("eot")),
+        &["generation_config.json eos_token_id"],
+    );
+    assert_refused(gen(serde_json::json!([])), &["eos_token_id", "empty"]);
+    assert_refused(
+        variant(|o| {
+            o.insert("eos_token_id".into(), serde_json::json!(-1));
+        }),
+        &["eos_token_id", "-1"],
+    );
+    assert_eq!(
+        gen(serde_json::json!(128009)).unwrap().eos_token_ids,
+        [128009]
+    );
+}
+
+#[test]
+fn unexpected_or_missing_tensors_are_refused_by_name() {
+    let c = tiny_config();
+    assert_eq!(real_config().tensor_names().len(), 332);
+    let base = tensors(&c);
+    for (label, edit, needle) in [
+        ("bias", 0, "model.layers.0.self_attn.q_proj.bias"),
+        ("scale", 1, "model.layers.1.mlp.down_proj.weight_scale"),
+        (
+            "missing",
+            2,
+            "model.layers.1.self_attn.attn_sub_norm.weight",
+        ),
+    ] {
+        let dir = scratch(&format!("names-{label}"));
+        let mut all = base.clone();
+        match edit {
+            0 | 1 => {
+                let last = all[all.len() - 1].clone();
+                all.push((needle.to_string(), last.1, last.2, last.3));
+            }
+            _ => all.retain(|t| t.0 != needle),
+        }
+        write_checkpoint_of(&dir, &c, all).unwrap();
+        let e = load_bitnet_omega(&dir, &RecordingTernUploader::record_only(), &mut |_| {})
+            .unwrap_err();
+        assert!(
+            e.contains("checkpoint tensors refused") && e.contains(needle),
+            "{label}: {e}"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 }
 
 #[test]
@@ -716,10 +799,10 @@ impl TensorSource for PatternSource {
     }
 }
 
-/// One layer at the 2B-4T widths with a 16k vocabulary (embedding 84 MB).
+/// Three layers at the 2B-4T widths with a 16k vocabulary (embedding 84 MB).
 fn rss_config() -> BitNetConfig {
     let mut c = real_config();
-    c.layers = 1;
+    c.layers = 3;
     c.vocab = 16384;
     (c.bos_token_id, c.eos_token_ids) = (1, vec![2]);
     c
@@ -729,7 +812,7 @@ const RSS_CHILD_ENV: &str = "AIEN_BITNET_RSS_CHILD";
 const RSS_CHILD_TEST: &str = "bitnet_omega::tests::rss_probe_child";
 
 /// The child side of [`measured_peak_growth_in_child`]; does nothing unless
-/// `AIEN_BITNET_RSS_CHILD=<streaming|f32image>` is set, then prints `BITNET-RSS-GROWTH <bytes>`.
+/// `AIEN_BITNET_RSS_CHILD=<streaming|f32image|f32qkv>` is set, then prints `BITNET-RSS-GROWTH <bytes>`.
 #[test]
 #[ignore = "child process of the measured peak RSS gate; started by it"]
 fn rss_probe_child() {
@@ -739,6 +822,10 @@ fn rss_probe_child() {
     let up = match case.as_str() {
         "streaming" => RecordingTernUploader::record_only(),
         "f32image" => RecordingTernUploader::keeping_f32_image(),
+        "f32qkv" => RecordingTernUploader {
+            keep: Keep::F32CopyOf(TernTensor::Qkv),
+            ..Default::default()
+        },
         other => panic!("unknown case {other}"),
     };
     if std::fs::write("/proc/self/clear_refs", "5").is_err() {
@@ -780,14 +867,16 @@ fn measured_peak_growth_in_child(case: &str) -> Option<u64> {
     (value != "skipped").then(|| value.parse().unwrap())
 }
 
-/// The memory gate measured: one full-width layer must raise peak RSS by at most the embedding
-/// plus the loader's buffers plus 64 MB. Control: the same load through an uploader that keeps
-/// an f32 image of every matrix and of the table (what a naive host reference would hold) must
-/// break the same bound, so the gate cannot pass vacuously.
+/// The memory gate measured: three full-width layers must raise peak RSS by at most the
+/// embedding plus the larger loader phase ([`bitnet_loader_transient_bytes`]) plus 24 MB, so a
+/// per-layer leak or one stray f32 copy of a matrix shows. Controls, each must break the same
+/// bound: an uploader that keeps an f32 image of every matrix and of the table (what a naive
+/// host reference would hold), and one that keeps an f32 copy of layer 0's qkv only (39 MB).
 #[test]
 fn measured_peak_rss_is_the_embedding_plus_the_buffers() {
     let c = rss_config();
-    let bound = (c.embed_host_bytes() + bitnet_loader_transient_bytes(&c) + (64 << 20)) as u64;
+    // Slack 24 MB: below the 39 MB of one stray f32 copy of qkv, the second-smallest matrix.
+    let bound = (c.embed_host_bytes() + bitnet_loader_transient_bytes(&c) + (24 << 20)) as u64;
     let Some(streaming) = measured_peak_growth_in_child("streaming") else {
         assert!(
             std::env::var_os("CI").is_none(),
@@ -801,12 +890,14 @@ fn measured_peak_rss_is_the_embedding_plus_the_buffers() {
         streaming <= bound,
         "streaming load grew peak RSS by {streaming}, bound {bound}"
     );
-    let image = measured_peak_growth_in_child("f32image").unwrap();
-    println!("BITNET-RSS f32-image control growth {image} bound {bound}");
-    assert!(
-        image > bound,
-        "control: an f32 image grew peak RSS by only {image}, bound {bound}"
-    );
+    for case in ["f32image", "f32qkv"] {
+        let grown = measured_peak_growth_in_child(case).unwrap();
+        println!("BITNET-RSS {case} control growth {grown} bound {bound}");
+        assert!(
+            grown > bound,
+            "control {case}: grew peak RSS by only {grown}, bound {bound}"
+        );
+    }
 }
 
 // -------------------------------------------------------------------------------------------
@@ -853,6 +944,11 @@ fn real_bitnet_streaming_load_host_only() {
     let sha = sha256_file(&dir.join("model.safetensors")).unwrap();
     assert_eq!(sha, BITNET_2B4T_SAFETENSORS_SHA256, "not the pinned master");
     println!("BITNET-LOAD safetensors_sha256={sha}");
+    assert_eq!(
+        checkpoint_tensor_names(&dir).unwrap().len(),
+        332,
+        "spec 1.1: 332 tensors"
+    );
     let rss_before = crate::qwen3_moe_omega::current_rss_bytes().unwrap();
     let up = RecordingTernUploader::record_only();
     let (w, report) = load_bitnet_omega(&dir, &up, &mut |_| {}).unwrap();
@@ -891,7 +987,7 @@ fn real_bitnet_streaming_load_host_only() {
     assert_eq!(report.uploads, 4 * 30 + 1);
     assert!(
         (peak - rss_before) as usize
-            <= c.embed_host_bytes() + bitnet_loader_transient_bytes(c) + (256 << 20),
+            <= c.embed_host_bytes() + bitnet_loader_transient_bytes(c) + (64 << 20),
         "peak RSS grew {} bytes",
         peak - rss_before
     );
@@ -1022,5 +1118,19 @@ fn real_gguf_trit_agreement() {
         "BITNET-GGUF block={block} total_agree={best} of {all} disagree={}",
         all - best
     );
-    assert!(best > 0);
+    // What NOTES.md states from this run: at least 97 % agree overall (measured 97.2514 %,
+    // calc:736bea70), the I2_S block is 128, and Q and K agree in checkpoint row order, not in
+    // the interleaved-RoPE order (the gguf keeps the Hugging Face rows).
+    assert_eq!(block, 128);
+    assert!(
+        best * 100 >= all * 97,
+        "agreement {best} of {all} is under 97 %"
+    );
+    for part in ["q", "k"] {
+        let (plain, permuted, _) = totals[part];
+        assert!(
+            plain > permuted,
+            "{part}: plain {plain} not above interleaved {permuted}"
+        );
+    }
 }

@@ -15,4 +15,4 @@ BITNET-GGUF q: plain=190426393 rope_interleaved=76787543 of 196608000
 BITNET-GGUF up: plain=519395094 rope_interleaved=519395094 of 530841600
 BITNET-GGUF v: plain=46241684 rope_interleaved=46241684 of 49152000
 BITNET-GGUF block=128 total_agree=2026762053 of 2084044800 disagree=57282747
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 246 filtered out; finished in 27.59s
+test result: real_gguf_trit_agreement ok

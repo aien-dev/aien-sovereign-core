@@ -9,9 +9,12 @@
 //! - [`BitNetConfig`]: the shape from `config.json`, refused by name unless it is the BitNet
 //!   family this engine implements: `model_type` bitnet, `hidden_act` relu2, tied embeddings,
 //!   `torch_dtype` bfloat16, `quantization_config` exactly {bitnet, autobitlinear, online}.
-//! - [`absmean_ternarise`]: the online quantisation rule of the bf16 master (spec 2.1,
-//!   `REF/convert_checkpoint.py:23-27`, `HF/integrations/bitnet.py:212`), computed the way
-//!   PyTorch computes it on bf16 tensors: every intermediate rounded to bf16. One scale per
+//! - [`absmean_ternarise`]: the quantisation rule of the bf16 master as Microsoft's reference
+//!   converter computes it (spec 2.1, `REF/convert_checkpoint.py:23-27`, read only): every
+//!   intermediate a bf16 tensor, so every step rounded to bf16. The 21 scales the spec lists from
+//!   the reference int2 checkpoint equal ours (real-checkpoint test). Hugging Face's online mode
+//!   differs: `WeightQuant.forward` casts to f32 first (`HF/integrations/bitnet.py:211`), so a
+//!   weight near the half-scale boundary can ternarise differently there. One scale per
 //!   projection (q, k, v, o, gate, up, down: 7 per layer), never per fused matrix.
 //! - [`pack_trits`]: omega's 2-bit trit code (`omega/src/algebra/oma_trit.h`: bit0 plus plane,
 //!   bit1 minus plane, 0b11 invalid), 16 trits per little-endian u32, row major
@@ -330,14 +333,23 @@ impl BitNetConfig {
             .and_then(|v| v.as_u64())
             .and_then(|v| u32::try_from(v).ok())
             .ok_or_else(|| refused("bos_token_id missing"))?;
-        let mut eos_token_ids = get("eos_token_id")
-            .and_then(eos_ids)
-            .ok_or_else(|| refused("eos_token_id missing"))?;
+        let mut eos_token_ids = match get("eos_token_id") {
+            None => return Err(refused("eos_token_id missing")),
+            Some(v) => eos_ids(v).ok_or_else(|| {
+                refused(format!(
+                    "eos_token_id {v} is not a token id or a list of them"
+                ))
+            })?,
+        };
         if let Some(g) = generation_json {
             let g: serde_json::Value =
                 serde_json::from_str(g).map_err(|e| format!("generation_config.json: {e}"))?;
-            if let Some(ids) = g.get("eos_token_id").and_then(eos_ids) {
-                eos_token_ids = ids;
+            if let Some(v) = g.get("eos_token_id") {
+                eos_token_ids = eos_ids(v).ok_or_else(|| {
+                    refused(format!(
+                        "generation_config.json eos_token_id {v} is not a token id or a list of them"
+                    ))
+                })?;
             }
         }
         let cfg = Self {
@@ -391,6 +403,11 @@ impl BitNetConfig {
                     "{what} {k} is not a multiple of {TRITS_PER_WORD} (trits per packed word)"
                 )));
             }
+        }
+        if self.eos_token_ids.is_empty() {
+            return Err(refused(
+                "eos_token_id is an empty list: generation could never stop",
+            ));
         }
         if self.bos_token_id as usize >= self.vocab
             || self.eos_token_ids.iter().any(|&e| e as usize >= self.vocab)
@@ -463,6 +480,42 @@ impl BitNetConfig {
         2 * self.vocab * self.hidden
     }
 
+    /// Every tensor name the checkpoint must hold, and no other (332 for 2B-4T: the embedding,
+    /// 11 per layer, the final norm; no `lm_head`, no bias, no stored scale).
+    pub fn tensor_names(&self) -> Vec<String> {
+        let mut names = vec!["model.embed_tokens.weight".to_string()];
+        for l in 0..self.layers {
+            let p = format!("model.layers.{l}");
+            names.push(format!("{p}.input_layernorm.weight"));
+            names.push(format!("{p}.self_attn.attn_sub_norm.weight"));
+            names.push(format!("{p}.post_attention_layernorm.weight"));
+            names.push(format!("{p}.mlp.ffn_sub_norm.weight"));
+            for what in TernTensor::ALL {
+                names.extend(self.parts(what).into_iter().map(|(p, _)| p.tensor_name(l)));
+            }
+        }
+        names.push("model.norm.weight".into());
+        names
+    }
+
+    /// Refuses a checkpoint whose tensor names are not exactly [`Self::tensor_names`], naming
+    /// the first few unexpected and missing ones.
+    pub fn check_tensor_names(&self, present: &[String]) -> Result<(), String> {
+        let names = self.tensor_names();
+        let want: std::collections::BTreeSet<&str> = names.iter().map(String::as_str).collect();
+        let have: std::collections::BTreeSet<&str> = present.iter().map(String::as_str).collect();
+        let extra: Vec<&str> = have.difference(&want).take(5).copied().collect();
+        let missing: Vec<&str> = want.difference(&have).take(5).copied().collect();
+        if extra.is_empty() && missing.is_empty() {
+            return Ok(());
+        }
+        Err(format!(
+            "checkpoint tensors refused: {} present, {} expected; unexpected {extra:?}; missing {missing:?}",
+            have.len(),
+            want.len()
+        ))
+    }
+
     /// Largest stacked matrix, in elements.
     pub fn max_matrix_elems(&self) -> usize {
         TernTensor::ALL
@@ -489,12 +542,13 @@ impl From<&BitNetConfig> for KvGeometry {
     }
 }
 
-/// Host bytes the loader holds beyond the model's own: the bf16 read buffer, the trit buffer
-/// and the packed-word buffer (each sized for the largest stacked matrix), the e4m3 table and
-/// its scales.
+/// Host bytes the loader holds beyond the model's own, at its peak: the larger of the two
+/// phases, which never overlap. Phase 1 holds the bf16 read buffer, the trit buffer and the
+/// packed-word buffer (each sized for the largest stacked matrix); they are dropped before
+/// phase 2 builds the e4m3 table and its scales.
 pub fn bitnet_loader_transient_bytes(c: &BitNetConfig) -> usize {
     let m = c.max_matrix_elems();
-    2 * m + m + m / 4 + c.table_bytes()
+    (2 * m + m + m / 4).max(c.table_bytes())
 }
 
 // ---------------------------------------------------------------------------
@@ -909,6 +963,43 @@ impl TensorSource for SafetensorsFile {
     }
 }
 
+/// The tensor names a checkpoint directory holds: the `weight_map` of
+/// `model.safetensors.index.json` when present, else the header of `model.safetensors`.
+pub fn checkpoint_tensor_names(dir: &Path) -> Result<Vec<String>, String> {
+    use std::io::Read;
+    let header: serde_json::Value = if dir.join("model.safetensors.index.json").exists() {
+        let p = dir.join("model.safetensors.index.json");
+        let text = std::fs::read_to_string(&p).map_err(|e| format!("{}: {e}", p.display()))?;
+        let index: serde_json::Value =
+            serde_json::from_str(&text).map_err(|e| format!("{}: {e}", p.display()))?;
+        index
+            .get("weight_map")
+            .cloned()
+            .ok_or_else(|| format!("{}: no weight_map", p.display()))?
+    } else {
+        let p = dir.join("model.safetensors");
+        let io = |e: std::io::Error| format!("{}: {e}", p.display());
+        let mut f = std::fs::File::open(&p).map_err(io)?;
+        let mut len = [0u8; 8];
+        f.read_exact(&mut len).map_err(io)?;
+        let len = u64::from_le_bytes(len);
+        if len > 100 << 20 {
+            return Err(format!("{}: header of {len} bytes refused", p.display()));
+        }
+        let mut text = vec![0u8; len as usize];
+        f.read_exact(&mut text).map_err(io)?;
+        serde_json::from_slice(&text).map_err(|e| format!("{}: header: {e}", p.display()))?
+    };
+    let map = header
+        .as_object()
+        .ok_or("safetensors header is not an object")?;
+    Ok(map
+        .keys()
+        .filter(|k| k.as_str() != "__metadata__")
+        .cloned()
+        .collect())
+}
+
 /// The checkpoint's tensors: the shard index when there is one, else `model.safetensors`.
 pub fn open_checkpoint(dir: &Path) -> Result<Box<dyn TensorSource>, String> {
     if dir.join("model.safetensors.index.json").exists() {
@@ -1115,6 +1206,7 @@ pub fn load_bitnet_omega(
     progress: &mut dyn FnMut(&str),
 ) -> Result<(BitNetOmegaWeights, BitNetLoadReport), String> {
     let config = BitNetConfig::from_checkpoint(dir)?;
+    config.check_tensor_names(&checkpoint_tensor_names(dir)?)?;
     let mut source = open_checkpoint(dir)?;
     load_bitnet_omega_from(&config, source.as_mut(), uploader, progress)
 }
