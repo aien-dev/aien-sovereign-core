@@ -1550,7 +1550,11 @@ fn worker_operator_run_of_a_config_change_is_ready_and_posts_success() {
     assert!(!new_statuses.contains("state=success"), "{new_statuses}");
     let journal = fs::read_to_string(w.state.journal()).unwrap();
     assert!(
-        journal.lines().last().unwrap().contains("\"verify\":\"BLOCKED\""),
+        journal
+            .lines()
+            .last()
+            .unwrap()
+            .contains("\"verify\":\"BLOCKED\""),
         "{journal}"
     );
 }
