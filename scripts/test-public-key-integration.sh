@@ -64,14 +64,19 @@ FP="$(sed -n 's/^fingerprint: //p' "$PUB/ceremony-record.txt")"
 [[ "$FP" == "$(awk '{ print $2" "$3 }' "$T/docs/release/allowed_signers" | grep -v '^#' | ssh-keygen -lf - | awk '{ print $2 }' | head -1)" ]] || fail "record fingerprint is not the pinned key's fingerprint"
 if bash "$T/scripts/check-release-trust-config.sh" --root "$T" > "$W/o.log" 2>&1; then fail "rehearsal tree passed the strict check"; fi
 pass "(e) record fingerprint $FP equals the pinned line; strict mode refuses the rehearsal tree"
-mutant() { # name, then commands run in a fresh copy of the pinned tree; the checker must refuse
+mutant() { # name, then commands run in a fresh copy of the pinned tree; the copy must differ; the checker must refuse
     local name="$1" M="$W/m-$1"; shift
     rm -rf "$M"; cp -r "$T" "$M"; ( cd "$M"; "$@" ) || fail "mutant $name could not be built"
+    # A mutant that leaves the tree byte-identical is accepted by the checker for the right reason and would report
+    # a false failure (sc#568). A no-op mutant is a bug in this test, so refuse to run it at all.
+    if diff -rq -x .git "$T" "$M" > /dev/null; then fail "mutant $name is a no-op: the mutated tree is identical to the pinned tree"; fi
     if bash "$M/scripts/check-release-trust-config.sh" --root "$M" --allow-rehearsal > "$W/o.log" 2>&1; then fail "mutant refused? no: $name passed the checker"; fi
     pass "mutant refused: $name ($(sed -n 's/.*REFUSED: //p' "$W/o.log" | cut -c1-70))"
 }
 OTHERLINE="aien-release $(cut -d' ' -f1,2 "$W/other.pub")"
-mutant wrong-fingerprint-in-record sed -i 's/^fingerprint: SHA256:./fingerprint: SHA256:X/' docs/release/ceremony-record.txt
+# The fingerprint is random per run, so replacing its first character with a fixed one was a no-op about 1 in 64
+# runs (sc#568). Swap it to X unless it already is X, then to Y: the value always changes.
+mutant wrong-fingerprint-in-record sed -i -E 's/^(fingerprint: SHA256:)X/\1Y/; t; s/^(fingerprint: SHA256:)./\1X/' docs/release/ceremony-record.txt
 mutant other-key-in-allowed_signers sed -i "s|^aien-release ssh-ed25519 .*|$OTHERLINE|" docs/release/allowed_signers
 mutant installer-pin-differs sed -i "s|^AIEN_RELEASE_SIGNER=.*|AIEN_RELEASE_SIGNER='$OTHERLINE'|" install.sh
 mutant installer-pin-empty sed -i "s|^AIEN_RELEASE_SIGNER=.*|AIEN_RELEASE_SIGNER=''|" install.sh
