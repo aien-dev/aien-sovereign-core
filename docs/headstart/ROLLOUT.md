@@ -124,17 +124,19 @@ change installs an adapter. Today none of the timing items is met.
 - [ ] At least 10% repeatable wall-time improvement on one representative
       workflow: held LINKED A/B samples (`scripts/bench/headstart-m6-ab.sh`),
       with the A/A spread smaller than the A/B difference.
+      **NOT MET** on 2026-10-16 (section 7).
 - [ ] The daemon wiring change itself reviewed, with this page updated.
 
 ## 7. Measured, hypothesis, untested
 
-- **Measured:** nothing yet that answers the 10% gate. Smoke runs of the A/B
-  driver prove it works; they are single unheld runs labelled SMOKE and are
-  not results.
+- **Measured (gate NOT MET):** held LINKED samples on the Spark, 2026-10-16
+  (`benchmarks/data/headstart/m6-2026-10-16/RESULTS.md`, n=5 per arm). The
+  on arm is 1.06% slower on chain and 1.90% slower on parallel, inside the
+  A/A spread (1.31% and 2.70%). No measurable gain; the feature stays off.
+  Smoke runs are single unheld runs labelled SMOKE and are not results.
 - **Hypothesis:** on the chain shape the preparable share of a sample is
   small next to the producer work and the World commit (the per-sample
-  `ceiling_estimate` field, prep or producer time over wall time). If that holds in
-  held samples, a 10% wall-time gain is unlikely on this workload, and the
+  `ceiling_estimate` field, prep or producer time over wall time). The held samples agree (estimate at most about 2% to 6%): the
   gate needs a workload where read-only preparation is a larger share.
 - **Platforms:** results from the CI runner (`CI-RUNNER`, x86_64, hosted
   Ubuntu) are correctness only; timing comes from held samples on the Spark
