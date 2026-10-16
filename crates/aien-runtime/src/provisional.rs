@@ -8,16 +8,17 @@
 //! [`PrepAdapter::bind_approval`] bound it to a task generation; every other
 //! request runs the original call unchanged. A binding is a journaled M2
 //! `BindApproval` event, so it survives a daemon restart (the replayed
-//! scheduler still fences the request). M2 drops every binding of a task
-//! when the task ends (`Committed`, `CommitUncertain` or `Aborted`, including
-//! an abort cascaded from a cancelled ancestor), so ended tasks never hold
-//! table slots, and refuses a binding to an ended task. A request whose
-//! binding was dropped is unbound again: the daemon runs it as the original
-//! call and the canonical durable guards decide (see Duplicates below); to
-//! fence it at a retried generation, bind it again. A binding at a superseded
-//! generation of a live task is kept, so its request is refused
-//! (`StaleGeneration`) until it is bound again. The table is bounded
-//! (`MAX_APPROVAL_BINDINGS`); a new key past it is refused.
+//! scheduler still fences the request). M2 drops the bindings of a task only
+//! when its commit ended (`Committed` or `CommitUncertain`) and refuses a
+//! binding to such a task; the request is then unbound again, the daemon
+//! runs it as the original call and the canonical durable guards decide (see
+//! Duplicates below). An `Aborted` task (cancelled, failed, lease expired, a
+//! failed commit, or an abort cascaded from an ancestor) keeps its bindings,
+//! so its bound requests are refused (`NotCommittable`); after a retry they
+//! name a superseded generation and are refused (`StaleGeneration`) until
+//! they are bound again. A bound request never falls back to the unfenced
+//! call while its task may still commit. Each task holds at most
+//! `MAX_APPROVAL_BINDINGS_PER_TASK` keys; a new key past that is refused.
 //!
 //! Two halves:
 //!
@@ -89,22 +90,34 @@
 //! [`DeliverError::DeferredFull`] and queues nothing) and delivered again
 //! right after the commit outcome is recorded, under the same mutex, before
 //! any other event or fence. What each redelivery did is returned in
-//! [`Fenced::redelivered`]; an event still refused by another running commit
-//! stays queued. With a journaled scheduler ([`PrepAdapter::open`]) the queue
-//! is journaled too, in a sidecar next to the M2 journal
-//! ([`deferred_journal_path`]): rewritten atomically (temp file, fsync,
-//! rename, directory fsync) before `Deferred` is returned and after every
-//! drain. A queue that cannot be written refuses the event
-//! ([`DeliverError::DeferredJournal`]); a failed rewrite after a drain is
-//! reported ([`Fenced::deferred_error`]) and the next rewrite replaces it. On
-//! open, after the M2 audit settled every interrupted commit, the journaled
-//! events are delivered again in order, so a revoke or cancel deferred by a
-//! commit that never recorded its outcome still lands after it
-//! ([`PrepAdapter::take_replayed_deferred`] returns what each did). An event
-//! that was already applied before the crash is a duplicate, or a stale
-//! generation once its task moved on (spark-harness `scheduler/dedup.rs`).
-//! A sidecar that does not parse, holds more than [`DEFERRED_CAPACITY`]
-//! events or holds a fence-only event fails the open.
+//! [`Fenced::redelivered`]. Only an event M2 applied (or answered as a
+//! duplicate) leaves the queue: one still refused by another running commit,
+//! and one M2 refuses for any other reason (a stale generation, a wrong
+//! state, a journal write failure), stays queued and journaled, so a revoke
+//! or cancel is never dropped without a decision. It is delivered again
+//! after every later outcome and on every open, and it holds a queue slot
+//! until the caller removes it ([`PrepAdapter::discard_deferred`]); a full
+//! queue refuses new deferrals (fail closed). With a journaled scheduler
+//! ([`PrepAdapter::open`]) the queue is journaled in a sidecar next to the M2
+//! journal ([`deferred_journal_path`]): rewritten atomically (temp file,
+//! fsync, rename, directory fsync) before `Deferred` is returned and after
+//! every drain or discard that changed it. A queue that cannot be written
+//! refuses the event ([`DeliverError::DeferredJournal`]); a failed rewrite
+//! after a drain is reported ([`Fenced::deferred_error`]) and the next
+//! rewrite replaces it. On open, after the M2 audit settled every
+//! interrupted commit, the journaled events are delivered again in order, so
+//! a revoke or cancel deferred by a commit that never recorded its outcome
+//! still lands after it ([`PrepAdapter::take_replayed_deferred`] returns
+//! what each did). An event that was already applied before the crash is a
+//! duplicate, or a stale generation once its task moved on (spark-harness
+//! `scheduler/dedup.rs`); the second stays queued until discarded. A sidecar
+//! that does not parse, holds more than [`DEFERRED_CAPACITY`] events or
+//! holds a fence-only event fails the open. One adapter owns a journal and
+//! its sidecar: open resolves the journal path to its canonical form, takes
+//! the M2 journal lock (`<journal>.lock`, held for the adapter's life; a
+//! second open of the same journal is refused) and only then reads the
+//! sidecar, whose name extends the journal's full file name, so distinct
+//! journals never share one.
 //!
 //! Duplicates: a second fenced call for the same (task, generation) is
 //! refused before the existing call runs ([`FenceError::AlreadySubmitted`]
@@ -278,9 +291,9 @@ pub struct Fenced<T> {
     /// Deferred events delivered again right after the outcome.
     pub redelivered: Vec<Redelivered>,
     /// Set when rewriting the deferred sidecar after the drain failed. The
-    /// sidecar then still lists events M2 already handled; replaying them
-    /// on open is a duplicate or a stale generation, and the next rewrite
-    /// replaces it.
+    /// sidecar then still lists events M2 already applied; replaying them
+    /// on open is a duplicate, or a stale generation that stays queued
+    /// until discarded. The next rewrite replaces it.
     pub deferred_error: Option<String>,
 }
 
@@ -290,9 +303,17 @@ pub const DEFERRED_CAPACITY: usize = 64;
 /// Largest deferred sidecar [`PrepAdapter::open`] reads, in bytes.
 pub const DEFERRED_MAX_BYTES: u64 = 4 * 1024 * 1024;
 
-/// The deferred-event sidecar of the M2 journal `journal`.
+/// Suffix of the deferred-event sidecar, appended to the journal's full
+/// file name. A journal whose name ends with it is refused by
+/// [`PrepAdapter::open`], so no journal is another journal's sidecar.
+pub const DEFERRED_SUFFIX: &str = ".deferred";
+
+/// The deferred-event sidecar of the M2 journal `journal`:
+/// `<journal>.deferred`. Distinct journal paths give distinct sidecars.
 pub fn deferred_journal_path(journal: &Path) -> PathBuf {
-    journal.with_extension("deferred.jsonl")
+    let mut name = journal.as_os_str().to_os_string();
+    name.push(DEFERRED_SUFFIX);
+    PathBuf::from(name)
 }
 
 /// What [`PrepAdapter::deliver`] did with an event.
@@ -495,22 +516,35 @@ impl Inner {
         });
     }
 
-    /// Deliver every deferred event again, oldest first. One still refused
-    /// by a running commit stays queued; every other result is returned.
+    /// Deliver every deferred event again, oldest first. Only an event M2
+    /// applied or answered as a duplicate leaves the queue; one still
+    /// refused by a running commit stays queued silently, and one refused
+    /// for any other reason stays queued and is returned with its refusal.
     /// The sidecar is rewritten when anything left the queue; the error, if
     /// that failed, is returned too.
     fn redeliver(&mut self) -> (Vec<Redelivered>, Option<String>) {
         let mut out = Vec::new();
         let mut keep = VecDeque::new();
+        let before = self.deferred.len();
         while let Some(ev) = self.deferred.pop_front() {
             match self.sched.deliver(ev.clone()) {
                 Err(SchedError::CommitInProgress { .. }) => keep.push_back(ev),
-                result => out.push(Redelivered { id: ev.id, result }),
+                Ok(o) => out.push(Redelivered {
+                    id: ev.id,
+                    result: Ok(o),
+                }),
+                Err(e) => {
+                    out.push(Redelivered {
+                        id: ev.id.clone(),
+                        result: Err(e),
+                    });
+                    keep.push_back(ev);
+                }
             }
         }
         self.deferred = keep;
         self.prune();
-        let error = if out.is_empty() {
+        let error = if self.deferred.len() == before {
             None
         } else {
             self.persist_deferred().err()
@@ -593,6 +627,38 @@ fn read_deferred(path: &Path) -> Result<VecDeque<Event>, SchedError> {
     Ok(out)
 }
 
+/// `journal` with its directory (created if missing) and, when it exists,
+/// the file itself resolved to canonical form, so every path to one journal
+/// names the same lock file and sidecar. A name ending with
+/// [`DEFERRED_SUFFIX`] is refused.
+fn canonical_journal(journal: &Path) -> Result<PathBuf, SchedError> {
+    let bad = |what: String| SchedError::Journal(format!("{}: {what}", journal.display()));
+    let name = journal
+        .file_name()
+        .ok_or_else(|| bad("a journal path needs a file name".to_string()))?;
+    let dir = journal
+        .parent()
+        .filter(|d| !d.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    std::fs::create_dir_all(dir).map_err(|e| bad(e.to_string()))?;
+    let dir = std::fs::canonicalize(dir).map_err(|e| bad(e.to_string()))?;
+    let path = match std::fs::canonicalize(dir.join(name)) {
+        Ok(p) => p,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => dir.join(name),
+        Err(e) => return Err(bad(e.to_string())),
+    };
+    if path
+        .as_os_str()
+        .to_string_lossy()
+        .ends_with(DEFERRED_SUFFIX)
+    {
+        return Err(bad(format!(
+            "a journal name may not end with {DEFERRED_SUFFIX}, the deferred sidecar suffix"
+        )));
+    }
+    Ok(path)
+}
+
 /// The fence's own event kinds, which only the fence delivers.
 fn fence_only(kind: &EventKind) -> Option<&'static str> {
     match kind {
@@ -657,18 +723,23 @@ impl PrepAdapter {
         journal: &Path,
         clock: Clock,
     ) -> Result<(Self, Vec<String>), SchedError> {
-        let path = deferred_journal_path(journal);
+        let journal = canonical_journal(journal)?;
+        let (unaudited, _report) = Scheduler::open(cfg, store, &journal, clock)?;
+        // The M2 journal lock is held from here on, for the adapter's life:
+        // no other adapter reads or writes this sidecar.
+        let path = deferred_journal_path(&journal);
         let deferred = read_deferred(&path)?;
-        let (unaudited, _report) = Scheduler::open(cfg, store, journal, clock)?;
         let (sched, revoked) = unaudited.audit()?;
         let adapter = Self::with_scheduler(sched, store, Some(path));
         {
             let mut g = adapter.inner.lock();
             g.deferred = deferred;
             // No commit is running after the audit, so every event is
-            // delivered and the sidecar is rewritten (empty). If that
-            // rewrite fails the open fails: the next open replays the same
-            // events, which M2 then answers as duplicates.
+            // delivered; the refused ones stay queued, and the sidecar is
+            // rewritten if anything left. If that rewrite fails the open
+            // fails: the next open replays the same events. M2 answers the
+            // ones already applied as duplicates, or, once their generation
+            // moved on, refuses them as stale; refused ones stay queued.
             let (replayed, error) = g.redeliver();
             if let Some(e) = error {
                 return Err(SchedError::Journal(e));
@@ -738,9 +809,32 @@ impl PrepAdapter {
         }
     }
 
-    /// How many refused events wait for a commit outcome.
+    /// How many deferred events are queued: waiting for a commit outcome,
+    /// or refused on redelivery and kept until discarded.
     pub fn deferred_len(&self) -> usize {
         self.inner.lock().deferred.len()
+    }
+
+    /// The queued deferred events, oldest first.
+    pub fn deferred_events(&self) -> Vec<Event> {
+        self.inner.lock().deferred.iter().cloned().collect()
+    }
+
+    /// Remove the queued deferred event `id` (the caller's decision about
+    /// an event M2 keeps refusing) and rewrite the sidecar. `Ok(None)` when
+    /// no such event is queued. If the rewrite fails the event stays queued
+    /// and the error is returned.
+    pub fn discard_deferred(&self, id: &str) -> Result<Option<Event>, DeliverError> {
+        let mut g = self.inner.lock();
+        let Some(i) = g.deferred.iter().position(|e| e.id == id) else {
+            return Ok(None);
+        };
+        let ev = g.deferred.remove(i).expect("position is in range");
+        if let Err(e) = g.persist_deferred() {
+            g.deferred.insert(i, ev);
+            return Err(DeliverError::DeferredJournal(e));
+        }
+        Ok(Some(ev))
     }
 
     /// Read-only access to the scheduler (state, generations, invariants,
@@ -1045,9 +1139,10 @@ impl PrepAdapter {
     /// pass, as a journaled M2 `BindApproval`, so the binding survives a
     /// restart. Only bound requests are fenced; the daemon runs every other
     /// request exactly as before. A later binding for the same key replaces
-    /// the earlier one. M2 refuses a stale generation, a task that already
-    /// ended and a new key past `MAX_APPROVAL_BINDINGS`; it drops the
-    /// binding when the task ends.
+    /// the earlier one. M2 refuses a stale generation, a task whose commit
+    /// ended and a new key past the task's `MAX_APPROVAL_BINDINGS_PER_TASK`;
+    /// it drops the binding only when the task's commit ends (an aborted or
+    /// retried task keeps it, see the module docs).
     pub fn bind_approval(
         &self,
         key: FenceKey,

@@ -119,11 +119,14 @@ pub enum EventKind {
     /// Bind an external request `key` (opaque to M2, at most
     /// [`MAX_APPROVAL_KEY_LEN`] bytes) to the commit fence of `task` at
     /// `generation`. A later bind of the same key replaces it. Refused for
-    /// a task that already ended (`Committed`, `CommitUncertain`,
-    /// `Aborted`). Every binding of a task is dropped when the task reaches
-    /// one of those states, so ended tasks never hold table slots. At most
-    /// [`MAX_APPROVAL_BINDINGS`] keys are held; a new key beyond that is
-    /// refused.
+    /// a task whose commit ended (`Committed`, `CommitUncertain`). Every
+    /// binding of a task is dropped when the task reaches one of those
+    /// states, and only then: an `Aborted` task keeps its bindings, and so
+    /// does a retried or revoked one (the binding then names a superseded
+    /// generation), so the request stays fenced until it is bound again.
+    /// Each task holds at most [`MAX_APPROVAL_BINDINGS_PER_TASK`] keys; a
+    /// new key beyond that is refused, so one task cannot take another
+    /// task's slots and the table is bounded by the number of tasks.
     BindApproval {
         key: String,
         task: String,
@@ -131,8 +134,8 @@ pub enum EventKind {
     },
 }
 
-/// Most request keys [`EventKind::BindApproval`] holds at once.
-pub const MAX_APPROVAL_BINDINGS: usize = 1024;
+/// Most request keys [`EventKind::BindApproval`] holds for one task.
+pub const MAX_APPROVAL_BINDINGS_PER_TASK: usize = 64;
 /// Longest request key [`EventKind::BindApproval`] accepts, in bytes.
 pub const MAX_APPROVAL_KEY_LEN: usize = 512;
 
@@ -143,13 +146,11 @@ pub struct ApprovalBinding {
     pub generation: u64,
 }
 
-/// A task in one of these states has ended its commit attempt for its
-/// generation; it holds no request binding.
+/// A task in one of these states has run its commit, for good: it holds no
+/// request binding. `Aborted` is not one of them: a cancelled, failed or
+/// expired task may be retried, and its bound requests must stay fenced.
 fn binding_ended(state: TaskState) -> bool {
-    matches!(
-        state,
-        TaskState::Committed | TaskState::CommitUncertain | TaskState::Aborted
-    )
+    matches!(state, TaskState::Committed | TaskState::CommitUncertain)
 }
 
 /// How a commit ended.
@@ -917,11 +918,12 @@ impl Core {
                     |s| !binding_ended(s),
                     "bind a request to a task that already ended",
                 )?;
-                if !self.approvals.contains_key(key)
-                    && self.approvals.len() >= MAX_APPROVAL_BINDINGS
-                {
+                let rebind = self.approvals.get(key).is_some_and(|b| b.task == *task);
+                let held = self.approvals.values().filter(|b| b.task == *task).count();
+                if !rebind && held >= MAX_APPROVAL_BINDINGS_PER_TASK {
                     return Err(SchedError::BindingsFull {
-                        capacity: MAX_APPROVAL_BINDINGS,
+                        task: task.clone(),
+                        capacity: MAX_APPROVAL_BINDINGS_PER_TASK,
                     });
                 }
                 self.approvals.insert(
@@ -934,10 +936,10 @@ impl Core {
             }
         }
         self.pump(cfg, at, &mut fx)?;
-        // Every binding of a task that ended (committed, uncertain or
-        // aborted, by this event or by a cascade from it) is dropped, so
-        // ended tasks never hold table slots. Deterministic, so a replay
-        // rebuilds the same table.
+        // Every binding of a task whose commit ended (committed or
+        // uncertain, by this event or by a cascade from it) is dropped.
+        // Aborted tasks keep theirs (see `binding_ended`). Deterministic, so
+        // a replay rebuilds the same table.
         let tasks = &self.tasks;
         self.approvals
             .retain(|_, b| tasks.get(&b.task).is_some_and(|t| !binding_ended(t.state)));

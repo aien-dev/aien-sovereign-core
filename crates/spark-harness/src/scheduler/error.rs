@@ -76,8 +76,10 @@ pub enum SchedError {
         task: String,
         committing: String,
     },
-    /// A new request key would exceed the bound-request table.
+    /// A new request key would exceed the task's share of the
+    /// bound-request table.
     BindingsFull {
+        task: String,
         capacity: usize,
     },
 }
@@ -148,9 +150,9 @@ impl fmt::Display for SchedError {
                 f,
                 "task '{committing}' is committing; '{task}' cannot change it until its outcome is recorded"
             ),
-            SchedError::BindingsFull { capacity } => write!(
+            SchedError::BindingsFull { task, capacity } => write!(
                 f,
-                "the bound-request table holds its maximum of {capacity} keys; no new key is bound"
+                "task '{task}' holds its maximum of {capacity} bound request keys; no new key is bound"
             ),
         }
     }

@@ -1610,24 +1610,26 @@ async fn the_daemon_fences_bound_requests_and_runs_unbound_ones_unchanged() {
         ControlResponse::ComposeApprovedRefused(_) if !aien_omega_compose::LINKED => None,
         other => panic!("unexpected answer: {other:?}"),
     };
-    // Either way B ended, so M2 dropped both of its bindings.
-    assert!(h.adapter.binding(&commit_key).is_none());
-    assert!(h.adapter.binding(&grant_key).is_none());
-    assert_eq!(h.adapter.inspect(|s| s.approvals_len()), 0);
     let Some(report) = report else {
+        // The refusal is classified `Failed`: B is aborted and keeps both
+        // bindings, so a resend is fenced and never reaches the canonical
+        // path unfenced.
         assert_eq!(h.state("b"), TaskState::Aborted);
-        // Unbound now: a retry is the original call, refused the same way,
-        // and touches no task.
+        assert_eq!(h.adapter.binding(&commit_key), Some(("b".into(), 1)));
+        assert_eq!(h.adapter.binding(&grant_key), Some(("b".into(), 1)));
         let r = send(approved(&bound)).await;
-        assert!(
-            matches!(&r, ControlResponse::ComposeApprovedRefused(_)),
-            "{r:?}"
-        );
+        assert!(fence_refused(&r, "AlreadySubmitted"), "{r:?}");
+        let r = send(authorize(&sha(b"bound grant"))).await;
+        assert!(fence_refused(&r, "AlreadySubmitted"), "{r:?}");
         assert_eq!(h.state("b"), TaskState::Aborted);
         let _ = client.send_command(ControlCommand::Shutdown).await;
         let _ = tokio::time::timeout(Duration::from_secs(5), server).await;
         return;
     };
+    // B committed, so M2 dropped both of its bindings.
+    assert!(h.adapter.binding(&commit_key).is_none());
+    assert!(h.adapter.binding(&grant_key).is_none());
+    assert_eq!(h.adapter.inspect(|s| s.approvals_len()), 0);
     assert_eq!(h.state("b"), TaskState::Committed);
     assert!(report.approved_grant.is_some(), "{report:?}");
     // An exact retry goes to the canonical path, whose replay ledger
@@ -1689,6 +1691,121 @@ async fn the_daemon_fences_bound_requests_and_runs_unbound_ones_unchanged() {
         fence_err(h.adapter.submit_approved("b", 1, &c.hook, &bound, &c.ws)),
         FenceError::AlreadySubmitted { .. }
     ));
+
+    let _ = client.send_command(ControlCommand::Shutdown).await;
+    let _ = tokio::time::timeout(Duration::from_secs(5), server).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_aborted_task_keeps_its_bound_requests_fenced_until_retried_and_bound_again() {
+    let _home = home_guard::home_slot();
+    let mut h = H::new(cfg(true, 4));
+    let c = Compose::new(&h);
+    let socket = h.tmp.path().join("d.sock");
+    let (client, server) = daemon(&socket, c.bridge.clone(), h.adapter.clone()).await;
+    let send = |cmd: ControlCommand| {
+        let client = &client;
+        async move { client.send_command(cmd).await.unwrap() }
+    };
+    let authorize = |digest: &str| ControlCommand::ComposeAuthorize {
+        cx_promotion: 1,
+        proposal_sha256: digest.into(),
+        workspace: c.ws.clone(),
+        approver: "drake".into(),
+        constraints: vec![],
+        desk_proof: None,
+        objective_id: None,
+    };
+    // The canonical call's own refusal (no desk MAC, or the stub), never a
+    // fence error: what an unfenced run answers.
+    let canonical = |r: &ControlResponse| matches!(r, ControlResponse::Error(e) if !e.starts_with("FENCE_REFUSED"));
+    let r = send(authorize(&sha(b"never bound"))).await;
+    assert!(canonical(&r), "control, unbound: {r:?}");
+
+    // (a) Cancel, producer failure and lease expiry: the binding stays and
+    // the request is refused.
+    type Abort = fn(&mut H, &str);
+    let aborts: [(&str, Abort); 3] = [
+        ("cancel", |h, t| {
+            let generation = h.gen(t);
+            h.ok(EventKind::Cancel {
+                task: t.into(),
+                generation,
+            });
+        }),
+        ("producer failed", |h, t| {
+            let generation = h.gen(t);
+            h.ok(EventKind::ProducerFailed {
+                task: t.into(),
+                generation,
+                reason: "test".into(),
+            });
+        }),
+        ("lease expired", |h, t| {
+            // The producer finishes first, so only b's provisional lease
+            // runs out (a running producer's expiry would revoke b instead).
+            h.finish(&t.replacen('b', "a", 1));
+            h.ticks.fetch_add(2_000_000, Ordering::SeqCst);
+            h.ok(EventKind::Tick);
+        }),
+    ];
+    for (i, (how, abort)) in aborts.into_iter().enumerate() {
+        let (a, b) = (format!("a{i}"), format!("b{i}"));
+        h.register(&a, &[]);
+        h.register(&b, &[a.as_str()]);
+        h.publish(&a, 1);
+        assert_eq!(h.state(&b), TaskState::Provisional, "{how}");
+        let digest = sha(how.as_bytes());
+        h.adapter
+            .bind_approval(FenceKey::Proposal(digest.clone()), &b, 1)
+            .unwrap();
+        abort(&mut h, &b);
+        assert_eq!(h.state(&b), TaskState::Aborted, "{how}");
+        let r = send(authorize(&digest)).await;
+        assert!(fence_refused(&r, "NotCommittable"), "{how}: {r:?}");
+    }
+
+    // (b) A committable task is cancelled, retried and committable again:
+    // the old binding refuses until the request is bound at the new
+    // generation, and then the request runs through the fence.
+    h.register("p", &[]);
+    h.register("q", &["p"]);
+    h.publish("p", 1);
+    h.finish("p");
+    h.finish("q");
+    let digest = sha(b"retried grant");
+    let key = FenceKey::Proposal(digest.clone());
+    h.adapter.bind_approval(key.clone(), "q", 1).unwrap();
+    h.ok(EventKind::Cancel {
+        task: "q".into(),
+        generation: 1,
+    });
+    let r = send(authorize(&digest)).await;
+    assert!(fence_refused(&r, "NotCommittable"), "{r:?}");
+    h.ok(EventKind::Retry {
+        task: "q".into(),
+        generation: 1,
+    });
+    h.finish("q");
+    assert_eq!(h.gen("q"), 2);
+    let r = send(authorize(&digest)).await;
+    assert!(fence_refused(&r, "StaleGeneration"), "{r:?}");
+    assert_eq!(h.state("q"), TaskState::Committable);
+    h.adapter.bind_approval(key.clone(), "q", 2).unwrap();
+    let r = send(authorize(&digest)).await;
+    assert!(canonical(&r), "bound again, it runs fenced: {r:?}");
+    if aien_omega_compose::LINKED {
+        // The canonical refusal (no desk MAC) is a failed commit: q is
+        // aborted, keeps the binding, and a resend stays fenced.
+        assert_eq!(h.state("q"), TaskState::Aborted);
+        assert_eq!(h.adapter.binding(&key), Some(("q".into(), 2)));
+        let r = send(authorize(&digest)).await;
+        assert!(fence_refused(&r, "AlreadySubmitted"), "{r:?}");
+    } else {
+        // The stub answer is not an EFFECT_REFUSED: uncertain, terminal.
+        assert_eq!(h.state("q"), TaskState::CommitUncertain);
+        assert!(h.adapter.binding(&key).is_none());
+    }
 
     let _ = client.send_command(ControlCommand::Shutdown).await;
     let _ = tokio::time::timeout(Duration::from_secs(5), server).await;
@@ -2130,7 +2247,12 @@ fn the_deferred_queue_is_bounded_and_fails_closed() {
         .collect();
     assert_eq!(ids, want);
     assert!(matches!(out.redelivered[0].result, Ok(Outcome::Applied(_))));
-    assert_eq!(h.adapter.deferred_len(), 0);
+    // The first revoke moved a to generation 2, so the rest are refused as
+    // stale. Refused redeliveries are kept (never dropped) until discarded.
+    assert!(out.redelivered[1..]
+        .iter()
+        .all(|r| matches!(r.result, Err(SchedError::StaleGeneration { .. }))));
+    assert_eq!(h.adapter.deferred_len(), DEFERRED_CAPACITY - 1);
     assert_eq!(h.state("b"), TaskState::Committed);
 }
 
@@ -2401,15 +2523,25 @@ fn a_bad_deferred_sidecar_fails_the_open() {
             Ok(_) => panic!("{what}: the open must fail"),
         }
     }
-    // Control: exactly the cap opens and every event is delivered (refused
-    // here, as no task is registered, and reported).
-    std::fs::write(&side, lines(revokes(DEFERRED_CAPACITY))).unwrap();
+    // Control: exactly the cap opens and every event is delivered. Each is
+    // refused here (no task is registered), reported, and kept queued and
+    // journaled until it is discarded.
+    let full = lines(revokes(DEFERRED_CAPACITY));
+    std::fs::write(&side, &full).unwrap();
     let (a, _) = open().unwrap();
     let replayed = a.take_replayed_deferred();
     assert_eq!(replayed.len(), DEFERRED_CAPACITY);
     assert!(replayed
         .iter()
         .all(|r| matches!(r.result, Err(SchedError::UnknownTask(_)))));
+    assert_eq!(a.deferred_len(), DEFERRED_CAPACITY);
+    assert_eq!(std::fs::read_to_string(&side).unwrap(), full);
+    for i in 0..DEFERRED_CAPACITY {
+        let id = format!("revoke-{i}");
+        let ev = a.discard_deferred(&id).unwrap().expect("queued");
+        assert_eq!(ev.id, id);
+    }
+    assert_eq!(a.deferred_len(), 0);
     assert_eq!(std::fs::read_to_string(&side).unwrap(), "");
 }
 
@@ -2490,7 +2622,10 @@ fn a_failed_sidecar_rewrite_after_the_drain_is_reported() {
 
 #[test]
 fn an_open_whose_sidecar_cannot_be_rewritten_fails() {
-    let h = H::journaled(cfg(true, 4));
+    let mut h = H::journaled(cfg(true, 4));
+    // a is registered, so the deferred revoke applies on open and the
+    // sidecar must be rewritten without it.
+    h.register("a", &[]);
     let dir = h.tmp.path().join("ro");
     std::fs::create_dir_all(&dir).unwrap();
     let copy = dir.join("j.jsonl");
@@ -2506,16 +2641,201 @@ fn an_open_whose_sidecar_cannot_be_rewritten_fails() {
     let open = || PrepAdapter::open(cfg(true, 4), &store, &copy, clock(&ticks));
     // A directory where the rewrite's temp file goes: the journal opens and
     // locks as usual, only the sidecar rewrite fails.
-    let blocker = dir.join(format!(".j.deferred.jsonl.tmp-{}", std::process::id()));
+    let blocker = dir.join(format!(".j.jsonl.deferred.tmp-{}", std::process::id()));
     std::fs::create_dir_all(blocker.join("x")).unwrap();
     match open() {
-        Err(SchedError::Journal(e)) => assert!(e.contains("j.deferred.jsonl"), "{e}"),
+        Err(SchedError::Journal(e)) => assert!(e.contains("j.jsonl.deferred"), "{e}"),
         Err(e) => panic!("want the sidecar rewrite error, got {e}"),
         Ok(_) => panic!("the open must fail when the sidecar cannot be rewritten"),
     }
-    // Control: without the blocker, the same open succeeds and replays the
-    // event.
+    // Control: without the blocker, the same open succeeds. The failed
+    // open had journaled the revoke before its rewrite failed, so a is at
+    // generation 2 once, and the redelivered copy is refused as stale and
+    // kept (never dropped) until it is discarded.
     std::fs::remove_dir_all(&blocker).unwrap();
     let (a, _) = open().unwrap();
-    assert_eq!(a.take_replayed_deferred().len(), 1);
+    assert_eq!(a.generation("a"), Some(2));
+    let replayed = a.take_replayed_deferred();
+    assert_eq!(replayed.len(), 1);
+    assert!(
+        matches!(replayed[0].result, Err(SchedError::StaleGeneration { .. })),
+        "{:?}",
+        replayed[0].result
+    );
+    assert_eq!(a.deferred_len(), 1);
+    assert!(a.discard_deferred("revoke-a").unwrap().is_some());
+    assert_eq!(std::fs::read_to_string(&side).unwrap(), "");
+}
+
+#[test]
+fn a_refused_redelivery_stays_queued_until_discarded() {
+    let mut h = H::journaled(cfg(true, 4));
+    h.register("a", &[]);
+    h.register("b", &["a"]);
+    h.publish("a", 1);
+    h.finish("a");
+    h.finish("b");
+    let side = deferred_journal_path(&h.tmp.path().join("journal.jsonl"));
+    // A cancel of b while b commits is refused with CommitInProgress and
+    // deferred.
+    let cancel_b = Event {
+        id: "cancel-b".into(),
+        kind: EventKind::Cancel {
+            task: "b".into(),
+            generation: 1,
+        },
+    };
+    let line = serde_json::to_string(&cancel_b).unwrap() + "\n";
+    let adapter = Arc::clone(&h.adapter);
+    let ev = cancel_b.clone();
+    let out = h
+        .adapter
+        .fenced_for_tests("b", 1, |_| adapter.deliver(ev), committed)
+        .unwrap();
+    assert!(
+        matches!(out.outcome, Ok(Delivered::Deferred { ref committing, .. }) if committing == "b"),
+        "{:?}",
+        out.outcome
+    );
+    // Redelivered after the commit: b is committed, so the cancel is
+    // refused (a committed task cannot abort). It is reported and kept, in memory and in the sidecar.
+    assert_eq!(h.state("b"), TaskState::Committed);
+    assert_eq!(out.redelivered.len(), 1);
+    assert!(
+        matches!(out.redelivered[0].result, Err(SchedError::Transition(_))),
+        "{:?}",
+        out.redelivered[0].result
+    );
+    assert!(out.deferred_error.is_none());
+    let queued: Vec<String> = h
+        .adapter
+        .deferred_events()
+        .into_iter()
+        .map(|e| e.id)
+        .collect();
+    assert_eq!(queued, vec!["cancel-b".to_string()]);
+    assert_eq!(std::fs::read_to_string(&side).unwrap(), line);
+    // A restart replays it again: refused again, still kept.
+    drop(adapter);
+    h.restart(cfg(true, 4));
+    let replayed = h.adapter.take_replayed_deferred();
+    assert_eq!(replayed.len(), 1);
+    assert_eq!(replayed[0].id, "cancel-b");
+    assert!(
+        matches!(replayed[0].result, Err(SchedError::Transition(_))),
+        "{:?}",
+        replayed[0].result
+    );
+    assert_eq!(h.adapter.deferred_len(), 1);
+    assert_eq!(std::fs::read_to_string(&side).unwrap(), line);
+    // Only an explicit discard removes it, and the removal is journaled.
+    assert!(h.adapter.discard_deferred("unknown").unwrap().is_none());
+    assert_eq!(h.adapter.deferred_len(), 1);
+    let gone = h.adapter.discard_deferred("cancel-b").unwrap();
+    assert_eq!(gone.map(|e| e.id), Some("cancel-b".to_string()));
+    assert_eq!(h.adapter.deferred_len(), 0);
+    assert_eq!(std::fs::read_to_string(&side).unwrap(), "");
+    assert!(h.adapter.discard_deferred("cancel-b").unwrap().is_none());
+    h.restart(cfg(true, 4));
+    assert!(h.adapter.take_replayed_deferred().is_empty());
+}
+
+#[test]
+fn a_discard_that_cannot_be_journaled_keeps_the_event() {
+    let h = H::journaled(cfg(true, 4));
+    let copy = h.tmp.path().join("journal-copy.jsonl");
+    std::fs::copy(h.tmp.path().join("journal.jsonl"), &copy).unwrap();
+    let side = deferred_journal_path(&copy);
+    let line = serde_json::to_string(&revoke_a("revoke-a")).unwrap() + "\n";
+    std::fs::write(&side, &line).unwrap();
+    let store = h.engine.completion_store.clone();
+    let (a, _) = PrepAdapter::open(cfg(true, 4), &store, &copy, clock(&h.ticks)).unwrap();
+    // No task a: refused and kept.
+    assert_eq!(a.deferred_len(), 1);
+    std::fs::remove_file(&side).unwrap();
+    std::fs::create_dir_all(side.join("block")).unwrap();
+    assert!(matches!(
+        a.discard_deferred("revoke-a"),
+        Err(DeliverError::DeferredJournal(_))
+    ));
+    assert_eq!(a.deferred_len(), 1, "the failed discard keeps the event");
+    // Control: writable again, the discard succeeds.
+    std::fs::remove_dir_all(&side).unwrap();
+    assert!(a.discard_deferred("revoke-a").unwrap().is_some());
+    assert_eq!(a.deferred_len(), 0);
+    assert_eq!(std::fs::read_to_string(&side).unwrap(), "");
+}
+
+#[test]
+fn a_second_adapter_on_the_same_journal_is_refused() {
+    let mut h = H::journaled(cfg(true, 4));
+    h.register("a", &[]);
+    let journal = h.tmp.path().join("journal.jsonl");
+    let side = deferred_journal_path(&journal);
+    let line = serde_json::to_string(&revoke_a("revoke-x")).unwrap() + "\n";
+    std::fs::write(&side, &line).unwrap();
+    let store = h.engine.completion_store.clone();
+    let ticks = Arc::clone(&h.ticks);
+    let open = |p: &Path| PrepAdapter::open(cfg(true, 4), &store, p, clock(&ticks));
+    let held = |what: &str, r: Result<(PrepAdapter, Vec<String>), SchedError>| match r {
+        Err(SchedError::Journal(e)) => {
+            assert!(e.contains("held by another process"), "{what}: {e}")
+        }
+        Err(e) => panic!("{what}: want the journal lock error, got {e}"),
+        Ok(_) => panic!("{what}: a second adapter on one journal must be refused"),
+    };
+    // The same path, a symlink to the file, a path through a symlinked
+    // directory and a path with a `..` step all name the one journal.
+    let link = h.tmp.path().join("link.jsonl");
+    std::os::unix::fs::symlink(&journal, &link).unwrap();
+    let dir_link = h.tmp.path().join("dirlink");
+    std::os::unix::fs::symlink(h.tmp.path(), &dir_link).unwrap();
+    std::fs::create_dir_all(h.tmp.path().join("sub")).unwrap();
+    held("same path", open(&journal));
+    held("file symlink", open(&link));
+    held("dir symlink", open(&dir_link.join("journal.jsonl")));
+    held("dot-dot", open(&h.tmp.path().join("sub/../journal.jsonl")));
+    // None of the refused opens read or rewrote the first adapter's
+    // sidecar, and the first adapter still works.
+    assert_eq!(std::fs::read_to_string(&side).unwrap(), line);
+    assert_eq!(h.gen("a"), 1);
+    // Negative control: a different journal in the same directory opens,
+    // with its own sidecar.
+    let other = h.tmp.path().join("journal.log");
+    assert_ne!(deferred_journal_path(&other), side);
+    let (o, _) = open(&other).unwrap();
+    assert_eq!(o.deferred_len(), 0);
+    drop(o);
+    // Once the first adapter is gone the symlinked path opens the journal,
+    // and that adapter alone delivers the sidecar it now owns.
+    drop(h.adapter);
+    let (b, _) = open(&link).unwrap();
+    let replayed = b.take_replayed_deferred();
+    assert_eq!(replayed.len(), 1);
+    assert_eq!(replayed[0].id, "revoke-x");
+    assert!(matches!(replayed[0].result, Ok(Outcome::Applied(_))));
+    assert_eq!(b.generation("a"), Some(2));
+    assert_eq!(std::fs::read_to_string(&side).unwrap(), "");
+}
+
+#[test]
+fn a_journal_named_like_a_sidecar_is_refused() {
+    let h = H::journaled(cfg(true, 4));
+    let tmp = &h.tmp;
+    let store = h.engine.completion_store.clone();
+    let ticks = Arc::clone(&h.ticks);
+    let bad = tmp.path().join("x.deferred");
+    match PrepAdapter::open(cfg(true, 4), &store, &bad, clock(&ticks)) {
+        Err(SchedError::Journal(e)) => assert!(e.contains(".deferred"), "{e}"),
+        Err(e) => panic!("want a journal error, got {e}"),
+        Ok(_) => panic!("a journal ending in .deferred must be refused"),
+    }
+    assert!(!bad.exists(), "nothing was created");
+    // Negative control: the same directory, a plain name.
+    let good = tmp.path().join("x.jsonl");
+    assert!(PrepAdapter::open(cfg(true, 4), &store, &good, clock(&ticks)).is_ok());
+    assert_eq!(
+        deferred_journal_path(&good),
+        tmp.path().join("x.jsonl.deferred")
+    );
 }

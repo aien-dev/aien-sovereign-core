@@ -69,7 +69,7 @@ mod unit_tests;
 
 pub use self::core::{
     ApprovalBinding, Binding, BindingLevel, CommitInputs, CommitResult, Effects, Event, EventKind,
-    JournalEntry, Revocation, TaskEntry, MAX_APPROVAL_BINDINGS, MAX_APPROVAL_KEY_LEN,
+    JournalEntry, Revocation, TaskEntry, MAX_APPROVAL_BINDINGS_PER_TASK, MAX_APPROVAL_KEY_LEN,
 };
 pub use self::error::SchedError;
 pub use self::permits::{PermitPool, ResourceLimits, ResourceRequest};
