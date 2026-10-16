@@ -1,6 +1,6 @@
 warning: aien-omega-gpu@0.1.0: aien-omega-gpu: no AIEN_OMEGA_DIR or AIEN_OMEGA_GPU_LIB, building the CPU stub
    Compiling aien-omegese-constraint v0.1.0 (/home/drakestapleton/workspace/g2-omegese-constraint/crates/aien-omegese-constraint)
-    Finished `release` profile [optimized] target(s) in 18.48s
+    Finished `release` profile [optimized] target(s) in 17.91s
      Running tests/qwen_vocab.rs (target/release/deps/qwen_vocab-2fefa41431f6730e)
 
 running 1 test
@@ -54,9 +54,9 @@ omegese-byte tokens: no boundary 34823, one boundary 45553, two or more boundari
 /home/drakestapleton/workspace/g2-omega-main/tools/exp445/arms/examples/tri_kind/program.omegese header=false: masked 97 canonical-ok 96 two-boundary-refused 0 other-refused 0 forced 4 oracle-calls 674
 /home/drakestapleton/workspace/g2-omega-main/tools/exp445/arms/examples/tri_kind/program.omegese header=true: masked 85 canonical-ok 84 two-boundary-refused 0 other-refused 0 forced 16 oracle-calls 627
 TOTAL masked 2279 canonical-ok 2232 two-boundary-refused 0 other-refused 0 forced 404 oracle-calls 15086 (6.62 per masked step); two-boundary tokens masked out (token x step) 72655
-STEP LATENCY (oracle calls + vocabulary scan) over 2279 masked steps: mean 14049 us, median 13779 us, p95 21085 us, max 28372 us
+STEP LATENCY (oracle calls + vocabulary scan) over 2279 masked steps: mean 13692 us, median 13359 us, p95 20606 us, max 26537 us
 SOUNDNESS 22134 allowed continuations checked against the oracle, 0 refused
 ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 51.45s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 51.14s
 

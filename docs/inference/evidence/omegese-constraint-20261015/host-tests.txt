@@ -1,27 +1,27 @@
 warning: aien-omega-gpu@0.1.0: aien-omega-gpu: no AIEN_OMEGA_DIR or AIEN_OMEGA_GPU_LIB, building the CPU stub
    Compiling aien-omegese-constraint v0.1.0 (/home/drakestapleton/workspace/g2-omegese-constraint/crates/aien-omegese-constraint)
-    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.33s
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.11s
      Running unittests src/lib.rs (target/debug/deps/aien_omegese_constraint-8160e7c2b7bf0f23)
 
 running 16 tests
-test table::tests::shapes ... ok
-test constraint::tests::blank_runs_shrink_to_one_byte ... ok
-test word::tests::number_values_are_canonical ... ok
-test word::tests::number_prefixes_at_the_64_bit_edges ... ok
-test oracle::tests::refusals_and_contract_breaks ... ok
-test signature::tests::header_lines_round_trip ... ok
-test word::tests::a_new_name_stops_at_63_characters ... ok
 test oracle::tests::numbers_span_u64_and_i64 ... ok
-test oracle::tests::the_section_6_2_example_parses ... ok
+test constraint::tests::blank_runs_shrink_to_one_byte ... ok
+test signature::tests::header_lines_round_trip ... ok
 test signature::tests::requirement_lines_make_the_header ... ok
-test word::tests::words_names_and_separators ... ok
+test oracle::tests::the_section_6_2_example_parses ... ok
 test table::tests::greedy_encoding_round_trips ... ok
+test oracle::tests::refusals_and_contract_breaks ... ok
+test table::tests::shapes ... ok
+test word::tests::a_new_name_stops_at_63_characters ... ok
+test word::tests::number_prefixes_at_the_64_bit_edges ... ok
+test word::tests::words_names_and_separators ... ok
 test table::tests::the_byte_alphabet_is_a_bijection ... ok
+test word::tests::number_values_are_canonical ... ok
 test oracle::tests::an_early_exit_reports_its_own_message ... ok
 test oracle::tests::a_hung_oracle_is_killed_at_the_deadline ... ok
 test word::tests::number_prefixes_match_brute_force ... ok
 
-test result: ok. 16 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.46s
+test result: ok. 16 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.43s
 
      Running tests/echo_walks.rs (target/debug/deps/echo_walks-fc75283c9bfd6772)
 
