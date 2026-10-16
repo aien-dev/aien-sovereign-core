@@ -1,5 +1,7 @@
 # TEST_READY: Sovereign Distillation Workshop Test Suite
 
+**Record, not current release status (2026-10-16).** This report describes a run on 2026-09-20 and is kept as a record. It is not part of the release path. Its Tier 4 "model seat on port 18006" roundtrip used the Modular MAX serving endpoint of that time; MAX was removed from the project on 2026-10-15 (#529), and the inference path now being qualified runs on AIEN's own Omega kernels (see `README.md`). The tier test files now live in `crates/spark-adapters/tests/`, not in a top-level `tests/` folder.
+
 ## 1. Status: Ready for Milestone Verification
 
 The end-to-end test harness for the Sovereign Distillation Workshop is complete, verified, and operational on NVIDIA DGX Spark (`spark`).

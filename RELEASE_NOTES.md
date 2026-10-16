@@ -2,6 +2,8 @@
 
 **Status (Drake decision, 2026-10-08): v0.1.0 and v0.1.1 are internal test releases, not public releases.** v0.1.0 carries only `SHA256SUMS.txt` (no signature). v0.1.1 is signed with the old release-signing key (checked 2026-10-08: `ssh-keygen -Y verify` against `docs/release/allowed_signers` gives a good `aien-release` signature), which is not the dedicated offline key a public release requires. See `docs/release/RELEASE_SIGNING.md`.
 
+**What changed after these releases (2026-10-16).** This file describes v0.1.0 and v0.1.1 as they shipped and is kept as a record. Modular MAX and Mojo were removed from the project on 2026-10-15 (#529), following the 2026-10-02 decision to leave MAX and use no CUDA: there is no MAX C-ABI bridge and no `spark-max-rs` or `spark-max-cabi` crate in the tree. The inference path now being qualified runs on AIEN's own Omega kernels (see `README.md`). `cortex-encoder-rs` still uses ONNX Runtime; it is the embedding and reranking helper for Cortex, not the inference path. The performance figures below date from before 23 September 2026 and are withdrawn until regenerated with a reproducible command and an evidence bundle (https://github.com/aien-dev/benchmarks).
+
 Initial internal test release of the AIEN Sovereign Native Systems Architecture, establishing a pure compiled runtime for autonomous AI systems across dedicated silicon.
 
 ---
@@ -33,7 +35,7 @@ The runtime includes dynamic silicon probing via `ExecutionSurface::detect()`:
 
 - **NVIDIA DGX Spark (Reference Station)**:
   - Architecture: Grace Blackwell (GB10, aarch64, 121 GB LPDDR5X unified memory).
-  - Acceleration: Hardware NVFP4 tensor cores, zero-copy physical KV pools, Modular MAX C-ABI bridge.
+  - Acceleration: Hardware NVFP4 tensor cores, zero-copy physical KV pools, Modular MAX C-ABI bridge (removed 2026-10-15).
 - **Apple Silicon (macOS)**:
   - Architecture: Apple M-Series (M1 / M2 / M3 / M4, aarch64, unified memory).
   - Acceleration: POSIX mmap page-locked KV pools, SIMD auto-vectorized loops, deterministic CPU fallback kernels.
@@ -43,7 +45,7 @@ The runtime includes dynamic silicon probing via `ExecutionSurface::detect()`:
 
 ---
 
-## Empirical Performance Highlights
+## Empirical Performance Highlights (withdrawn: pre-standard figures)
 
 - **Control-Plane Memory Footprint**: 4.79 MB to 10.67 MB RSS across core daemons (a 99.6% reduction compared to Python agent frameworks).
 - **KV Block Allocation Throughput**: 1.44 million blocks/second (690 ns per allocation).
@@ -56,8 +58,7 @@ The runtime includes dynamic silicon probing via `ExecutionSurface::detect()`:
 
 ## Upstream Attribution & Governance
 
-- Pure Mojo LLaMA execution kernels are authored by Audrey (`a730/MojoLlama`).
-- Neural graph execution utilizes Modular MAX.
+- At v0.1.x, pure Mojo LLaMA execution kernels authored by Audrey (`a730/MojoLlama`) were used, and neural graph execution used Modular MAX. Both were removed on 2026-10-15.
 - Licence history: v0.1.0 (tag 2026-09-20) carried the Sovereign Resource Commons License 1.0 (SRCL-1.0): `git show v0.1.0:LICENSE` and its own notes say so. v0.1.1 (tag 2026-10-03) carried Apache-2.0 (`git show v0.1.1:LICENSE`). The Apache wording in this file dates from 2026-09-23 (commit 3419488). The project was relicensed to AGPL-3.0-or-later on 2026-10-04 (commit f571b94, #197); releases cut after that are AGPL-3.0-or-later (`LICENSE`, `NOTICE`, `ARTIFACT_LICENSING.md`). Archives already published keep the terms they carried. Third-party model licences are separate: see `THIRD_PARTY.md`.
 - Detailed provenance documentation resides in `docs/PROVENANCE.md`.
 
