@@ -84,5 +84,7 @@ grep -q 'clone --quiet https://github.com/aien-dev/aien-sovereign-core.git' "$WO
 ! grep -q "aien-protocols" "$WORK/git.calls" || fail "installer must not clone aien-protocols (it is a pinned git dependency in Cargo.lock)"
 [[ -z "$(ls -A "$WORK/tmp")" ]] || fail "installer left its temporary checkout behind"
 [[ -z "$(ls -A "$WORK/cwd")" ]] || fail "installer wrote into the caller's working directory"
+grep -q "aien compose desk-key --create 1" "$WORK/install.log" || fail "quickstart must list the desk-key step before aien start (sc#414)"
+! grep -q "aien harness" "$WORK/install.log" || fail "quickstart must not offer aien harness, which is not shipped (sc#414)"
 
 echo "PASS: piped installer bootstraps a checkout and installs the CLI from an arbitrary cwd"
