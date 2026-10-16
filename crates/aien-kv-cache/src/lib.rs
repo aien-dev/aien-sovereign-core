@@ -78,7 +78,10 @@ pub fn round_to_dtype_in_place(dtype: KvDType, values: &mut [f32]) {
                 *x = bf16_bits_to_f32(f32_to_bf16_bits(*x));
             }
         }
-        other => panic!("Unsupported KvDType for round_to_dtype_in_place: {:?}", other),
+        other => panic!(
+            "Unsupported KvDType for round_to_dtype_in_place: {:?}",
+            other
+        ),
     }
 }
 

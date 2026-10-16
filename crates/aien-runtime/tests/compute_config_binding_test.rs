@@ -298,8 +298,8 @@ fn conversion_refuses_values_that_do_not_fit_the_wire_width() {
 // --- arith_epoch_pinned_bytes ------------------------------------------------
 
 /// The epoch the pin below was taken at, and the SHA-256 of the K/V bytes.
-const PINNED_EPOCH: u32 = 1;
-const PINNED_KV_SHA256: &str = "9b29d964da18f2fb47584bdf7b42932996bfc05d53e6071c7af89a9ce5a80fa2";
+const PINNED_EPOCH: u32 = 2;
+const PINNED_KV_SHA256: &str = "48340604c2513464fde46789d95b2473e87fdb057201822ff207b5e1acf4872c";
 
 fn pin_model() -> ModelConfig {
     ModelConfig {

@@ -39,7 +39,7 @@ pub mod weights;
 /// bump orphans every stored chunk instead of serving K/V computed the old way.
 /// Guarded by `arith_epoch_pinned_bytes` in `aien-runtime`: a numeric change fails
 /// that test until this constant is bumped and the pin refreshed.
-pub const KV_ARITH_EPOCH: u32 = 1;
+pub const KV_ARITH_EPOCH: u32 = 2;
 
 pub use aien_abi_core::*;
 pub use aien_kv_cache::*;
