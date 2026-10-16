@@ -1535,4 +1535,22 @@ fn worker_operator_run_of_a_config_change_is_ready_and_posts_success() {
         j.lines().last().unwrap().contains("\"verify\":\"READY\""),
         "{j}"
     );
+
+    // Permission must never be inherited from an earlier authorized run
+    // of this exact head. A later non-operator run must publish a refusal.
+    let prior_statuses = l;
+    cfg.operator = false;
+    let s = worker::run_once(&cfg, REPO, &head).expect("worker (operator revoked)");
+    assert!(!s.ready, "operator authorization leaked into a later run");
+    let statuses = fs::read_to_string(&log).unwrap();
+    let new_statuses = statuses
+        .strip_prefix(&prior_statuses)
+        .expect("the worker must append to the existing status log");
+    assert!(new_statuses.contains("state=error"), "{new_statuses}");
+    assert!(!new_statuses.contains("state=success"), "{new_statuses}");
+    let journal = fs::read_to_string(w.state.journal()).unwrap();
+    assert!(
+        journal.lines().last().unwrap().contains("\"verify\":\"BLOCKED\""),
+        "{journal}"
+    );
 }
