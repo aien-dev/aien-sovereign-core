@@ -57,6 +57,7 @@ members = [
     "crates/aien-serve-http",
     "crates/aien-kv-bench",
     "crates/aien-omegese-constraint",
+    "crates/aien-localhttp",
 ]
 
 [workspace.package]
