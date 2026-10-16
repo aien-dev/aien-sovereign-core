@@ -826,6 +826,22 @@ pub trait TernMatrix: Send + Sync + std::fmt::Debug {
     fn k(&self) -> usize;
     fn segments(&self) -> &[TernSegment];
     fn gemv_i8(&self, x: &[i8], acc: &mut [i32]) -> Result<(), String>;
+
+    /// The same product for `t` tokens: `x` is `[t][k]`, `acc` is `[t][n]`.
+    fn gemm_i8(&self, x: &[i8], t: usize, acc: &mut [i32]) -> Result<(), String> {
+        let (n, k) = (self.n(), self.k());
+        if x.len() != t * k || acc.len() != t * n {
+            return Err(format!(
+                "ternary gemm [{n}][{k}] for {t} tokens given x {} acc {}",
+                x.len(),
+                acc.len()
+            ));
+        }
+        for (xr, ar) in x.chunks_exact(k).zip(acc.chunks_exact_mut(n)) {
+            self.gemv_i8(xr, ar)?;
+        }
+        Ok(())
+    }
 }
 
 /// Makes packed ternary matrices and the e4m3 word table resident. The real one (omega's KT1
