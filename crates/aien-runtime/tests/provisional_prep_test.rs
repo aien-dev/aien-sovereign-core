@@ -1030,6 +1030,133 @@ fn restart_with_a_provisional_task_drops_the_result_and_prepares_again() {
     assert_eq!(h.state("b"), TaskState::Blocked);
 }
 
+/// M6 (#538 task 1): a task's own M1 receipt that is malformed (not a
+/// receipt at all) or deleted after M2 accepted it is refused at the final
+/// fence, and the effect never runs. The tampered case is covered by
+/// `invalid_receipts_are_refused_by_the_event_gate_and_the_fence`.
+#[test]
+fn a_malformed_or_missing_own_receipt_is_refused_at_the_fence() {
+    let mut h = H::new(cfg(true, 4));
+    h.register("a", &[]);
+    h.register("b", &["a"]);
+    h.publish("a", 1);
+    h.finish("a");
+    h.finish("b");
+    let rid = h
+        .adapter
+        .inspect(|s| s.task("b").unwrap().completion.clone().unwrap().receipt_id);
+    let file = h
+        .engine
+        .completion_store
+        .join(aien_proof::evidence::RECEIPT_DIR)
+        .join(format!("{rid}.json"));
+    let original = std::fs::read(&file).unwrap();
+    let mut ran = false;
+    for (case, bytes) in [
+        ("truncated", Some(original[..original.len() / 2].to_vec())),
+        ("not json", Some(b"\x00\xffnot a receipt".to_vec())),
+        ("empty", Some(Vec::new())),
+        ("deleted", None),
+    ] {
+        match bytes {
+            Some(b) => std::fs::write(&file, b).unwrap(),
+            None => std::fs::remove_file(&file).unwrap(),
+        }
+        let e = fence_err(
+            h.adapter
+                .fenced_for_tests("b", 1, |_| ran = true, committed),
+        );
+        assert!(
+            matches!(e, FenceError::CompletionInvalid { .. }),
+            "{case}: {e:?}"
+        );
+        assert!(!ran, "{case}: the effect ran");
+        assert_eq!(h.state("b"), TaskState::Committable, "{case}");
+    }
+    std::fs::write(&file, &original).unwrap();
+    h.adapter
+        .fenced_for_tests("b", 1, |_| ran = true, committed)
+        .unwrap();
+    assert!(ran);
+    assert_eq!(h.state("b"), TaskState::Committed);
+}
+
+/// M6 (#538 task 1): a restart while a task is unfinished never treats it as
+/// committed. Provisional or work-done tasks replay short of `Committable`
+/// and the fence refuses them (`NotCommittable`). A finalized task whose M1
+/// completion was minted but never delivered to M2 replays without a
+/// completion (M2 reaches `Committable` at `Finalize`, see
+/// spark_harness::scheduler), so the fence refuses it (`NoCompletion`).
+/// Nothing runs until the real completion is delivered after the restart.
+#[test]
+fn a_restart_with_an_unfinished_task_is_never_treated_as_committed() {
+    let c = cfg(true, 4);
+    let mut h = H::journaled(c.clone());
+    h.register("a", &[]);
+    h.register("b", &["a"]);
+    h.register("d", &["a"]);
+    h.publish("a", 1);
+    // b: provisional work done while its producer is not final.
+    h.work_done("b");
+    // d: provisional, nothing done.
+    let mut ran = false;
+    let not_final = |s: TaskState| {
+        !matches!(
+            s,
+            TaskState::Committable | TaskState::Committing | TaskState::Committed
+        )
+    };
+    let refused = |h: &H, t: &str, ran: &mut bool| {
+        let e = fence_err(
+            h.adapter
+                .fenced_for_tests(t, h.gen(t), |_| *ran = true, committed),
+        );
+        assert!(matches!(e, FenceError::NotCommittable { .. }), "{t}: {e:?}");
+    };
+    h.restart(c.clone());
+    for t in ["b", "d"] {
+        assert!(not_final(h.state(t)), "{t}: {:?}", h.state(t));
+        refused(&h, t, &mut ran);
+    }
+    // a becomes final; b finalizes and its completion is minted in M1, but the
+    // daemon goes down before CompletionVerified reaches M2.
+    h.finish("a");
+    h.finalize("b");
+    let minted = h.mint_completion("b");
+    h.restart(c.clone());
+    assert_eq!(h.state("b"), TaskState::Committable);
+    assert!(
+        h.adapter
+            .inspect(|s| s.task("b").unwrap().completion.clone())
+            .is_none(),
+        "a receipt M2 never accepted is not a completion"
+    );
+    let e = fence_err(
+        h.adapter
+            .fenced_for_tests("b", h.gen("b"), |_| ran = true, committed),
+    );
+    assert!(
+        matches!(e, FenceError::NoCompletion(ref t) if t == "b"),
+        "{e:?}"
+    );
+    assert!(!ran, "an unfinished task ran its effect");
+    assert_eq!(h.state("b"), TaskState::Committable);
+    // Only the real completion, delivered after the restart, makes it final.
+    let generation = h.gen("b");
+    h.ok(EventKind::CompletionVerified {
+        task: "b".into(),
+        generation,
+        claim: minted,
+    });
+    assert_eq!(h.state("b"), TaskState::Committable);
+    h.adapter
+        .fenced_for_tests("b", generation, |_| ran = true, committed)
+        .unwrap();
+    assert!(ran);
+    assert_eq!(h.state("b"), TaskState::Committed);
+    assert!(not_final(h.state("d")));
+}
+
 #[test]
 fn revocation_during_preparation_discards_the_result() {
     let mut h = H::new(cfg(true, 4));
