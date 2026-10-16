@@ -16,6 +16,8 @@ AIENOS.
 | `health.sh` | one-screen health (Forgejo, user, exec, crumb, home layout, caches, worktrees, scopes, disk, GPU lock, quiet flag) |
 | `gc.sh` | worktree age + target-dir quota cleanup, dry run by default |
 | `tests/run.sh` | proofs of the contract on this host (33 checks with two wt.sh worktrees present) |
+| `pipeline.sh` | ADR 0033 phase 3: publish verified bundles to aien-receipts, rerun the GitHub thin gate, merge `ready-to-merge` PRs behind guards |
+| `tests/pipeline_test.sh` | offline proofs of `pipeline.sh` with fake `gh`, fake `aien-test` and throwaway git repositories (56 checks) |
 
 ## C8 exec contract
 
@@ -154,6 +156,40 @@ Accepted risks (recorded, not changed by this lane):
   need them.
 * A run's HOME is read-only: a gate that writes to `$HOME` fails; write to `/tmp` (private for host|qemu) instead.
 * Worktree root dirs inherit setgid from the mirror layout (`drwxrwsr-t`); harmless.
+
+## Publish, rerun, merge (pipeline.sh, ADR 0033 phase 3)
+
+```
+tools/aien-local-ci/pipeline.sh publish|rerun|merge|round [--repos a,b]     # round = publish, rerun, merge
+bash tools/aien-local-ci/tests/pipeline_test.sh                           # offline proofs, a few seconds
+```
+
+It never reads `~/.aien/verify.key` and never signs: it only moves bundles the worker already signed and asks
+GitHub to act. One instance at a time (`flock` on `$STATE/pipeline.lock`; a second one exits 0 at once). Every action
+and refusal is one JSON line in `$STATE/pipeline.jsonl`. Exit 0 when the round ran (refusals included), 2 on a usage
+or configuration error. Overrides: `AIEN_STATE`, `AIEN_CLONES`, `AIEN_RECEIPTS`, `AIEN_RECEIPTS_BRANCH`,
+`AIEN_TEST_BIN`, `AIEN_GH_OWNER` (default `aien-dev`), `AIEN_REPOS`, `GH`, `GIT`. GitHub calls use the canonical slug
+(`gh api repos/aien-dev/<repo> --jq .full_name`, so `aienos` becomes `aien-spark/aienos`).
+
+* **publish**: for each `$STATE/bundles/<repo>/<sha>/bundle.json` of a repository whose trusted clone has a key in
+  `origin/main:.aien/verify.pub` (several keys allowed, one per line, `#` comments, same rule as aien-test): skip when
+  `plan.blocked` is not null; run `verify-bundle` with `--repo github.com/aien-dev/<repo> --commit <sha>` taken from
+  the path, once per key; publish when any key gives 0 PASS or 1 FAIL, never 2 NOT_RUN or 3 REJECTED. Publishing
+  copies the bytes to `<receipts>/<repo>/<sha>/bundle.json` when absent or when its sha256 differs (replacement by
+  digest), one commit per round listing every sha, then `pull --rebase` and push, 3 attempts, never forced. A failed
+  push drops only that round's own commit (`reset --hard origin/main` in the pipeline's receipts clone, which must be
+  clean and on its branch before the round starts, otherwise the round refuses); the next round recomputes it.
+* **rerun**: for each open PR whose head has a published bundle, once per (repo, sha, digest) recorded in
+  `$STATE/pipeline-reruns`: the latest `AIEN Verification` run for that head is rerun when it is completed and its
+  latest attempt started (`run_started_at`, else `created_at`) before the publication (push time in
+  `$STATE/pipeline-published`, else the receipts commit time). A queued or running run waits for a later round.
+* **merge**: only open PRs labeled exactly `ready-to-merge`, not draft, mergeable state not `dirty`, head unchanged
+  since listing. All guards required: the local bundle for the head exists; its sha256 equals the published copy at
+  receipts `origin/main`; `verify-bundle` exits 0 with a key from `origin/<base>:.aien/verify.pub` and `--require`
+  from `origin/<base>:.aien/always` (as the thin gate does); the base branch has required status checks and every one
+  is present on the head with only `success` (check runs and commit statuses); no `AIEN Verification` run for the head
+  is queued or in progress. Then `gh pr merge N -R <slug> --merge --match-head-commit <sha>`. Never `--admin`. A base
+  branch without required status checks (or whose protection cannot be read) is refused, not merged.
 
 ## Operate
 
