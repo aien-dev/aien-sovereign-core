@@ -175,6 +175,8 @@ jobs:
     # The Omegese guardrail (crates/aien-omegese-constraint) against the real oracle. Its real-oracle
     # tests are #[ignore] in the verify job (no omegese binary there). This job builds `omegese`
     # (one C file, CPU only) from omega at crates/aien-omegese-constraint/omegese.lock and runs them.
+    # A pin of its own, separate from the root omega.lock (the release candidate's omega commit,
+    # checked by scripts/check-release-candidate.sh): this one follows the Omegese grammar only.
     name: Omegese guardrail against the real oracle
     runs-on: ubuntu-latest
     steps:
