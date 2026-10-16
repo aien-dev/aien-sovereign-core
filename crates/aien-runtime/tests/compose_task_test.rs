@@ -333,15 +333,15 @@ fn file_proposal_rejects_multibyte_first_line_without_panicking() {
         "🎯🎯🎯",
         "abcdefg中",
     ] {
-        let reply = format!("{invalid}\\nbody\\n");
+        let reply = format!("{invalid}\nbody\n");
         let err = check_file_proposal(&reply).unwrap_err();
         assert!(err.contains("no filename line"), "{invalid:?}: {err}");
         assert!(parse_file_proposal(&reply).is_none());
     }
     // A mixed-case ASCII key remains valid after the boundary fix.
-    let proposal = check_file_proposal("FILENAME: safe.md\\nbody\\n").unwrap();
+    let proposal = check_file_proposal("FILENAME: safe.md\nbody\n").unwrap();
     assert_eq!(proposal.path, "safe.md");
-    assert_eq!(proposal.content, "body\\n");
+    assert_eq!(proposal.content, "body\n");
 }
 
 #[test]
