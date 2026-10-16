@@ -18,8 +18,8 @@ AIENOS.
 | `tests/run.sh` | proofs of the contract on this host (33 checks with two wt.sh worktrees present) |
 | `pipeline.sh` | ADR 0033 phase 3: publish verified bundles to aien-receipts, rerun the GitHub thin gate, merge `ready-to-merge` PRs behind guards |
 | `tests/pipeline_test.sh` | offline proofs of `pipeline.sh` with fake `gh`, fake `aien-test` and throwaway git repositories (56 checks) |
-| `train.sh` | the merge train: batches `ready-to-merge` PRs every measured T, verifies stacked prefixes on the Spark, names the culprit, fast-forwards main to the exact tested sha (not installed; review first) |
-| `tests/train_test.sh` | offline proofs of `train.sh` with fake `gh`, worker, quietlock and crumb tool, the real `pipeline.sh` for publishing (50 checks) |
+| `train.sh` | the merge train: batches `ready-to-merge` PRs every measured T, verifies stacked prefixes on the Spark, names the culprit, lands the tested stack by merging its train PR (not installed; review first) |
+| `tests/train_test.sh` | offline proofs of `train.sh` with fake `gh`, worker, quietlock and crumb tool, the real `pipeline.sh` for publishing (56 checks) |
 
 ## C8 exec contract
 
@@ -205,8 +205,8 @@ bash tools/aien-local-ci/tests/train_test.sh                       # offline pro
 Idea: the gates have a known duration T, so instead of one PR per worker run, every T the train takes every open PR
 labeled exactly `ready-to-merge` (base main, not draft, oldest number first) and tests them as **stacked prefixes**:
 stack k = `origin/main` + PR1..PRk merged in order (merge commits, the same shape `gh pr merge --merge` leaves) plus
-one crumb recompile commit made with the repository's pinned crumb tool (`crumb.lock` in the tree, else the
-sovereign-core CI pin `94fffbcf`, built from the aien-architecture source into `$STATE/train-crumb/<pin>/`). That
+one crumb recompile commit made with the repository's pinned crumb tool (see guard 5 for how the pin is found; built
+from the aien-architecture source into `$STATE/train-crumb/<pin>/`). That
 recompile commit is part of the tested sha. Stack 0 is main itself.
 
 Capacity (measured, not assumed): the worker serves heads one at a time (`run_loop` in `tools/aien-test/src/worker.rs`);
@@ -226,23 +226,24 @@ Guards (every one journaled in `$STATE/train.jsonl`, `action: train`):
    receipts `origin/main` before any push to main; `pipeline.sh publish` takes the pipeline lock with `flock -n` and
    exits 0 silently when busy, so the train waits for the lock first and refuses with "lock busy" instead of mistaking
    silence for publication.
-2. **Branch protection**: the stack sha is pushed as branch `train/<repo>` with one open train PR (title "train: <repo>
-   stack (do not merge by hand)") so the hosted required check runs on that exact sha (Sovereign CI triggers only on
-   `push: main` and `pull_request`); the merge waits until every required context of main is `success` on the sha,
-   re-checked under the lock. The merge itself is `git push origin <sha>:refs/heads/main`, a plain fast-forward,
-   never forced, never a re-merge. **Finding 2026-10-16**: main's protection has "require a pull request before
-   merging" (`required_pull_request_reviews` present, `enforce_admins` true), which makes GitHub refuse every direct
-   push to main, fast-forward included, for every token. The train journals a `warning` when it sees that and the
-   push then fails `refused` (nothing changes). Loosening protection is not an option; the design change is the
-   pipeline owner's call (see the PR).
+2. **Branch protection untouched, no direct push to main** (pipeline owner's decision, 2026-10-16): the stack sha is
+   pushed as branch `train/<repo>` with one train PR whose head is the EXACT tested sha, so the hosted required check
+   runs on it (Sovereign CI triggers only on `push: main` and `pull_request`). The merge waits until every required
+   context of main is `success` on that sha, re-checked under the lock. It then runs
+   `gh pr merge <train PR> --merge --match-head-commit <tested sha>` (a merge commit), and only if, under the lock:
+   the PR is open, into main, with head == tested sha; `origin/main` still equals the base the stack was built on
+   (otherwise the cycle is journaled `aborted` and the next cycle restacks); the base is an ancestor of the tested sha.
+   Main being an ancestor of the head, the merge commit adds no content: merged tree == tested tree, the same binding
+   `pipeline.sh merge` uses (the receipt binds the PR head). After landing, the train re-reads main and journals
+   `failed` loudly if the tree differs (main moved in the last instant). The stacked PRs show as merged because
+   their heads are in main.
 3. **BLOCKED_OPERATOR**: a PR touching `.aien/`, `tests/gates/`, `.github/workflows/`, `.forgejo/` or
    `tools/aien-test/` (any changed or renamed path, from `pulls/N/files`) never enters a stack; label kept.
 4. **Freshness at merge time**: under the lock, every PR of the prefix must still be open, labeled, not draft, head
    unchanged since stacking; the first stale one ends the prefix before it and the train falls back to the longest
    tested passing prefix inside it (re-tested when bisection skipped it). `origin/main` must equal the stacking base.
-5. **Crumb recompile** in the tested sha with the pinned tool, then `verify` with the same tool.
-6. **One merger per repository**: `flock` on `$STATE/pipeline.lock`, the file `pipeline.sh merge` uses (`-w
-   AIEN_LOCK_WAIT`, default 900 s).
+5. **Crumb recompile** in the tested sha with the pinned tool, then `verify` with the same tool. The pin is the target repository's own: `crumb.lock` where it has one, else the `pinned crumb tool` ref of its own `.github/workflows/aien-verification.yml`; neither (or a malformed one) fails closed, no default pin. The recompile may only change `.crumb` files, and a stack whose recompile would change a `.crumb` inside `.aien/`, `tests/gates/`, `.github/workflows/`, `.forgejo/` or `tools/aien-test/` is skipped (journaled `refused`), so the train never writes into the trust surface.
+6. **One merger per repository**: `flock` on `$STATE/pipeline.lock`, the file `pipeline.sh merge` uses (`-w AIEN_LOCK_WAIT`, default 900 s); and one train cycle per repository: a non-blocking `flock` on `$STATE/train.<repo>.lock` (a second loop skips, journaled `skipped`, instead of force-pushing the same `train/<repo>`). The train also refuses to start without a git committer identity (user.name and user.email), because every merge it makes needs one.
 7. **Spark etiquette**: `quietlock check` must pass before every worker run (`AIEN_QUIET_WAIT`, default 2 h, then
    refuse); the worker is `aien-local-ci once <repo> <sha>`, never a chip run of the train's own.
 8. No Python; pure bash, git, jq, gh, cc for the pinned crumb tool.

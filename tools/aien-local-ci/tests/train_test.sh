@@ -32,15 +32,32 @@ L=ready-to-merge
 cat > "$T/bin/gh" <<'EOF'
 #!/usr/bin/env bash
 echo "gh $*" >> "$FAKE_LOG"
+if [[ $1 == pr && $2 == merge ]]; then
+  shift 2; num=$1; match=""
+  while [[ $# -gt 0 ]]; do case $1 in --match-head-commit) match=$2; shift 2 ;; -R|--subject) shift 2 ;; *) shift ;; esac; done
+  [[ $num == 900 ]] || exit 1
+  [[ -z ${FAKE_PUT_FAIL:-} ]] || { echo "HTTP 409 Head branch was modified" >&2; exit 1; }
+  head=$(git --git-dir="$ORIGIN" rev-parse -q --verify refs/heads/train/demo) || { echo "HTTP 404" >&2; exit 1; }
+  [[ $match == "$head" ]] || { echo "head branch was modified" >&2; exit 1; }
+  m=$(git --git-dir="$ORIGIN" rev-parse main)
+  c=$(git --git-dir="$ORIGIN" commit-tree "$head^{tree}" -p "$m" -p "$head" -m "Merge pull request #900")
+  git --git-dir="$ORIGIN" update-ref refs/heads/main "$c"
+  exit 0
+fi
 [[ $1 == api ]] || exit 9
 shift
-method=GET expr="" path=""
+method=GET expr="" path="" sha=""
 while [[ $# -gt 0 ]]; do
-  case $1 in -X) method=$2; shift 2 ;; --jq) expr=$2; shift 2 ;; -f|-F) shift 2 ;; --paginate) shift ;; *) path=$1; shift ;; esac
+  case $1 in -X) method=$2; shift 2 ;; --jq) expr=$2; shift 2 ;; -f|-F) case $2 in sha=*) sha=${2#sha=} ;; esac; shift 2 ;; --paginate) shift ;; *) path=$1; shift ;; esac
 done
 if [[ $method != GET ]]; then
   if [[ $method == POST && $path == */pulls ]]; then echo '{"number":900}' | { [[ -n $expr ]] && jq -r "$expr" || cat; }; fi
   exit 0
+fi
+if [[ $path == */pulls/900 ]]; then
+  h=${FAKE_TRAIN_HEAD:-$(git --git-dir="$ORIGIN" rev-parse -q --verify refs/heads/train/demo || echo none)}
+  j="{\"number\":900,\"state\":\"open\",\"base\":{\"ref\":\"main\"},\"head\":{\"sha\":\"$h\"}}"
+  if [[ -n $expr ]]; then jq -r "$expr" <<< "$j"; else echo "$j"; fi; exit 0
 fi
 f=$FAKE_GH/$(printf '%s' "$path" | tr -c 'A-Za-z0-9._-' '_').json
 if [[ ! -f $f ]]; then
@@ -97,18 +114,20 @@ cat > "$T/bin/crumb" <<'EOF'
 echo "crumb $*" >> "$FAKE_LOG"
 want="crumb-fake files=$(git ls-files | grep -v -E '(^|/)\.crumb$' | sort | sha256sum | cut -c1-16)"
 case $1 in
-  compile) printf '%s\n' "$want" > .crumb ;;
+  compile) printf '%s\n' "$want" > .crumb
+    [[ -z ${FAKE_CRUMB_TRUST:-} ]] || { mkdir -p .aien; echo x > .aien/.crumb; }
+    [[ -z ${FAKE_CRUMB_JUNK:-} ]] || echo junk > stray.txt ;;
   verify) [[ -f .crumb && $(cat .crumb) == "$want" ]] ;;
   *) exit 9 ;;
 esac
 EOF
 cat > "$T/bin/git" <<'EOF'
 #!/usr/bin/env bash
-# logs pushes (with the directory) so the order of receipts publication and the main fast-forward can be checked;
-# races one commit onto main right before the train's push when $T_RACE names a seed clone
+# logs pushes (with the directory) so the order of receipts publication and the merge of the train PR can be checked;
+# races one commit onto main right before the train pushes its train/<repo> branch when $T_RACE names a seed clone
 if [[ " $* " == *" push "* ]]; then
   echo "push $*" >> "$FAKE_LOG"
-  if [[ -n ${T_RACE:-} && " $* " == *":refs/heads/main "* && ! -e $T_RACE/.raced ]]; then
+  if [[ -n ${T_RACE:-} && " $* " == *":refs/heads/train/"* && ! -e $T_RACE/.raced ]]; then
     touch "$T_RACE/.raced"
     /usr/bin/git -C "$T_RACE" pull -q --rebase origin main && echo raced >> "$T_RACE/RACED" && /usr/bin/git -C "$T_RACE" add -A \
       && /usr/bin/git -C "$T_RACE" commit -q -m raced && /usr/bin/git -C "$T_RACE" push -q origin main
@@ -222,18 +241,19 @@ check "stack 3 FAIL, stack 1 PASS, stack 2 FAIL" [ "$(jq -r 'select(.result=="ve
 check "culprit: PR 12 commented with the receipt link of stack 2" grep -q "issues/12/comments -f body=Merge train: stack 2 .*tested sha $S2) FAILED.*stack 1 ($S1) passed.*aien-receipts/blob/main/demo/$S2/bundle.json" "$FAKE_LOG"
 check "culprit: label removed, PR not closed" bash -c "grep -q '^gh api -X DELETE repos/$S/issues/12/labels/ready-to-merge' '$FAKE_LOG' && ! grep -q 'pulls/12 -f state' '$FAKE_LOG'"
 check "journal: culprit line" [ "$(jl '.result=="culprit" and .pr=="12" and .stack=="2"')" = 1 ]
-check "main fast-forwarded to the exact tested stack 1 sha" [ "$(origin_main)" = "$S1" ]
-check "tested sha ends with the crumb recompile commit" [ "$(/usr/bin/git --git-dir="$ORIGIN" log -1 --format=%s main)" = "train: crumb recompile (crumb tool override:$T/bin/crumb)" ]
-check "below it, the merge of PR 11" [ "$(/usr/bin/git --git-dir="$ORIGIN" log -1 --format=%s 'main^')" = "Merge pull request #11: PR 11" ]
+check "main landed by a merge commit whose second parent is the exact tested stack 1 sha" [ "$(/usr/bin/git --git-dir="$ORIGIN" rev-parse main^2)" = "$S1" ]
+check "merged tree equals the tested tree" [ "$(/usr/bin/git --git-dir="$ORIGIN" rev-parse "main^{tree}")" = "$(/usr/bin/git --git-dir="$ORIGIN" rev-parse "$S1^{tree}")" ]
+check "tested sha ends with the crumb recompile commit" [ "$(/usr/bin/git --git-dir="$ORIGIN" log -1 --format=%s main^2)" = "train: crumb recompile (crumb tool override:$T/bin/crumb)" ]
+check "below it, the merge of PR 11" [ "$(/usr/bin/git --git-dir="$ORIGIN" log -1 --format=%s main^2^)" = "Merge pull request #11: PR 11" ]
 check "stack 1 contains PR 11 and nothing else" bash -c "origin_has main a.txt && ! origin_has main BAD && ! origin_has main c.txt && ! origin_has main .github/workflows/x.yml"
 /usr/bin/git clone -q "$ORIGIN" "$T/chk" 2>/dev/null && check "crumbs in the merged sha verify with the pinned tool" bash -c "cd '$T/chk' && '$T/bin/crumb' verify ."
 rm -rf "$T/chk"
 check "stack 1 bundle published to receipts (digest of the local bundle)" [ "$(/usr/bin/git --git-dir="$T/receipts.git" show "main:demo/$S1/bundle.json" | sha256sum | cut -d' ' -f1)" = "$(sha256sum "$AIEN_STATE/bundles/demo/$S1/bundle.json" | cut -d' ' -f1)" ]
 check "stack 2 FAIL bundle published too (the receipt the culprit comment links)" remote_has "$S2"
-rpush=$(grep -n "^push -C $AIEN_RECEIPTS " "$FAKE_LOG" | head -1 | cut -d: -f1); mpush=$(grep -n "^push .*:refs/heads/main" "$FAKE_LOG" | head -1 | cut -d: -f1)
-check "receipts were pushed before main was fast-forwarded" [ -n "$rpush" ] && [ -n "$mpush" ] && [ "$rpush" -lt "$mpush" ]
-check "fast-forward is a plain push, never forced" bash -c "grep -q '^push -C .* -q origin $S1:refs/heads/main\$' '$FAKE_LOG' && ! grep -q 'push.*-f.*refs/heads/main' '$FAKE_LOG'"
-check "train pull request opened for the hosted check, then closed" bash -c "grep -q 'gh api -X POST repos/$S/pulls -f title=train: demo stack' '$FAKE_LOG' && grep -q 'gh api -X PATCH repos/$S/pulls/900 -f state=closed' '$FAKE_LOG'"
+rpush=$(grep -n "^push -C $AIEN_RECEIPTS " "$FAKE_LOG" | head -1 | cut -d: -f1); mpush=$(grep -n "^gh pr merge 900 -R $S" "$FAKE_LOG" | head -1 | cut -d: -f1)
+check "receipts were pushed before the train PR was merged" [ -n "$rpush" ] && [ -n "$mpush" ] && [ "$rpush" -lt "$mpush" ]
+check "no push to main at all; the merge call pins the tested head (--match-head-commit)" bash -c "! grep -q '^push .*refs/heads/main' '$FAKE_LOG' && grep -q \"^gh pr merge 900 -R $S --merge --match-head-commit $S1 \" '$FAKE_LOG'"
+check "train pull request opened for the hosted check and merged by the train" bash -c "grep -q 'gh api -X POST repos/$S/pulls -f title=train: demo stack' '$FAKE_LOG'"
 check "train branch removed after the merge" bash -c "! /usr/bin/git --git-dir='$ORIGIN' rev-parse -q --verify refs/heads/train/demo >/dev/null"
 check "journal: merged line names the PRs and the published digest" [ "$(jl '.result=="merged" and .prs=="11" and .stack=="1" and (.digest|length)==64')" = 1 ]
 check "quiet flag was checked before every worker run" [ "$(grep -c '^quietlock check' "$FAKE_LOG")" -ge 3 ]
@@ -277,16 +297,91 @@ bash "$TRAIN" cycle > "$T/c5" 2>&1
 check "quiet flag held: no worker run, refusal journaled" bash -c "! grep -q '^once ' '$FAKE_LOG' && [ \"$(jl '.result=="refused" and (.reason|test("quiet flag held"))')\" = 1 ]"
 rm -f "$T_QUIET"
 
-echo "== cycle 6: protection requires a pull request; main moves under the train"
+echo "== cycle 6: main moves after the stack was built: abort, no merge, next cycle restacks"
 : > "$FAKE_LOG"
 (cd "$SEED" && /usr/bin/git checkout -q main && /usr/bin/git rm -q MAINBAD && /usr/bin/git commit -q -m fixmain && /usr/bin/git push -q origin main)
-ghset "repos/$S/branches/main/protection" '{"required_pull_request_reviews":{"required_approving_review_count":0},"enforce_admins":{"enabled":true}}'
-before=$(origin_main)
 T_RACE=$SEED bash "$TRAIN" cycle > "$T/c6" 2>&1
-check "warning journaled: protection requires a pull request, fast-forward will be refused" [ "$(jl '.result=="warning" and (.reason|test("requires a pull request"))')" = 1 ]
-check "main moved first: the push was refused (non fast-forward), never forced" bash -c "[ \"$(jl '.result=="failed" and (.reason|test("fast-forward push refused"))')\" = 1 ] && ! grep -q 'push.*-f.*refs/heads/main' '$FAKE_LOG'"
+check "main moved: cycle aborted, restack named" [ "$(jl '.result=="aborted" and (.reason|test("main moved.*restacks"))')" = 1 ]
+check "aborted cycle never called the merge API and never pushed to main" bash -c "! grep -q '^gh pr merge 900' '$FAKE_LOG' && ! grep -q '^push .*refs/heads/main' '$FAKE_LOG'"
 check "main is the racer's commit, untouched by the train" bash -c "origin_has main RACED && ! origin_has main i.txt"
-check "the failed stack's bundle was still published (receipt binding before any push)" bash -c "s=\$(jq -r 'select(.result==\"failed\") | .sha' '$AIEN_STATE/train.jsonl' | tail -n 1); remote_has \"\$s\""
+check "the aborted stack's bundle was still published (receipt binding before any merge)" bash -c "s=\$(jq -r 'select(.result==\"aborted\") | .sha' '$AIEN_STATE/train.jsonl' | tail -n 1); remote_has \"\$s\""
+: > "$FAKE_LOG"
+bash "$TRAIN" cycle > "$T/c6b" 2>&1
+check "next cycle restacked on the new main and landed PR 20 by merge commit" bash -c "[ \"$(jl '.result=="merged" and .prs=="20"')\" = 1 ] && origin_has main i.txt && origin_has main RACED && grep -q '^gh pr merge 900' '$FAKE_LOG'"
+check "restacked merge: second parent is the new tested sha, trees equal" bash -c "g=/usr/bin/git; o='$ORIGIN'; [ \"\$(\$g --git-dir=\$o rev-parse 'main^{tree}')\" = \"\$(\$g --git-dir=\$o rev-parse 'main^2^{tree}')\" ] && [ \"\$(\$g --git-dir=\$o rev-parse main^1)\" != \"\$(\$g --git-dir=\$o rev-parse main^2)\" ]"
+
+echo "== cycle 7: train PR head is not the tested sha: refuse"
+: > "$FAKE_LOG"
+(cd "$SEED" && /usr/bin/git checkout -q main && /usr/bin/git pull -q origin main)
+PR[21]=$(pr 21 j.txt j)
+pulls "21:${PR[21]}:false:$L:j.txt"
+before=$(origin_main)
+FAKE_TRAIN_HEAD=$(printf '%040x' 777) bash "$TRAIN" cycle > "$T/c7" 2>&1
+check "head differs from tested sha: refused, merge API never called, main untouched" bash -c "[ \"$(jl '.result=="refused" and (.reason|test("not the tested sha"))')\" = 1 ] && ! grep -q '^gh pr merge 900' '$FAKE_LOG' && [ \"$(origin_main)\" = '$before' ]"
+: > "$FAKE_LOG"
+bash "$TRAIN" cycle > "$T/c7b" 2>&1
+check "same queue with a matching head lands" bash -c "[ \"$(jl '.result=="merged" and .prs=="21"')\" = 1 ] && origin_has main j.txt"
+: > "$FAKE_LOG"
+(cd "$SEED" && /usr/bin/git checkout -q main && /usr/bin/git pull -q origin main)
+PR[22]=$(pr 22 k.txt k)
+pulls "22:${PR[22]}:false:$L:k.txt"
+before=$(origin_main)
+FAKE_PUT_FAIL=1 bash "$TRAIN" cycle > "$T/c7c" 2>&1
+check "GitHub refusing the merge (moved head via sha=) is journaled failed, main untouched" bash -c "[ \"$(jl '.result=="failed" and (.reason|test("merge of train pull request refused"))')\" = 1 ] && [ \"$(origin_main)\" = '$before' ]"
+
+echo "== listing is paginated"
+check "open-PR listing uses --paginate" grep -q 'pulls?state=open&per_page=100 --paginate' "$FAKE_LOG"
+
+echo "== committer identity is checked at startup"
+rc=0; env -u GIT_COMMITTER_NAME -u GIT_COMMITTER_EMAIL -u GIT_AUTHOR_NAME -u GIT_AUTHOR_EMAIL -u EMAIL bash "$TRAIN" cycle --dry-run > "$T/id.out" 2> "$T/id.err" || rc=$?
+check "no git identity: exit 2 with a plain message, no cycle started" bash -c "[ $rc = 2 ] && grep -q 'no committer identity' '$T/id.err' && [ ! -s '$T/id.out' ]"
+
+echo "== one train per repository"
+: > "$FAKE_LOG"
+exec 6>>"$AIEN_STATE/train.demo.lock"; flock 6
+bash "$TRAIN" cycle > "$T/lock.out" 2>&1
+flock -u 6; exec 6>&-
+check "second cycle on the same repository skips: journaled, no worker, no push, no GitHub write" bash -c "[ \"$(jl '.result=="skipped" and (.reason|test("another train cycle"))')\" = 1 ] && ! grep -qE '^(once|push) |^gh (api -X|pr merge)' '$FAKE_LOG'"
+
+echo "== crumb recompile never writes into a trust-surface directory"
+: > "$FAKE_LOG"
+before=$(origin_main)
+FAKE_CRUMB_TRUST=1 bash "$TRAIN" cycle > "$T/trust.out" 2>&1
+check "recompile touching .aien/.crumb: stack skipped, journaled, no worker, main untouched" bash -c "[ \"$(jl '.result=="refused" and (.reason|test("trust-surface directory"))')\" = 1 ] && ! grep -q '^once ' '$FAKE_LOG' && [ \"$(origin_main)\" = '$before' ]"
+FAKE_CRUMB_JUNK=1 bash "$TRAIN" cycle > "$T/junk.out" 2>&1
+check "compile changing a non-.crumb file: stack skipped" [ "$(jl '.result=="refused" and (.reason|test("something other than .crumb"))')" -ge 1 ]
+
+echo "== crumb pin comes from the target repository, fail closed"
+cat > "$T/crumb-min.c" <<'EOC'
+#include <stdio.h>
+#include <string.h>
+int main(int c, char **v) {
+  char b[16] = {0};
+  FILE *f;
+  if (c < 2) return 9;
+  if (!strcmp(v[1], "compile")) { f = fopen(".crumb", "w"); if (!f) return 1; fputs("c-tool\n", f); fclose(f); return 0; }
+  if (!strcmp(v[1], "verify")) { f = fopen(".crumb", "r"); if (!f) return 1; if (!fgets(b, 16, f)) return 1; fclose(f); return strcmp(b, "c-tool\n") ? 1 : 0; }
+  return 9;
+}
+EOC
+/usr/bin/git init -q -b main "$T/archseed"
+mkdir -p "$T/archseed/tools/crumb"; cp "$T/crumb-min.c" "$T/archseed/tools/crumb/crumb.c"
+(cd "$T/archseed" && /usr/bin/git add -A && /usr/bin/git commit -q -m A && echo "/* b */" >> tools/crumb/crumb.c && /usr/bin/git commit -q -am B)
+PIN_A=$(/usr/bin/git -C "$T/archseed" rev-parse HEAD~1); PIN_B=$(/usr/bin/git -C "$T/archseed" rev-parse HEAD)
+/usr/bin/git clone -q --bare "$T/archseed" "$T/arch.git"
+(cd "$SEED" && /usr/bin/git checkout -q main && /usr/bin/git pull -q origin main && mkdir -p .github/workflows \
+  && printf 'steps:\n  - name: Checkout the pinned crumb tool source (aien-architecture @ %s)\n    uses: actions/checkout@v4\n    with:\n      repository: x/aien-architecture\n      ref: %s\n' "$PIN_A" "$PIN_A" > .github/workflows/aien-verification.yml \
+  && /usr/bin/git add -A && /usr/bin/git commit -q -m workflow && /usr/bin/git push -q origin main)
+nopin() { env -u AIEN_CRUMB_TOOL AIEN_ARCH_URL="$T/arch.git" bash "$TRAIN" cycle --dry-run 2>&1; }
+check "pin read from the repository's own aien-verification.yml" grep -q "crumb tool $PIN_A)" <<< "$(nopin)"
+(cd "$SEED" && printf '%s\n' "$PIN_B" > crumb.lock && /usr/bin/git add -A && /usr/bin/git commit -q -m lock && /usr/bin/git push -q origin main)
+check "crumb.lock wins where it exists" grep -q "crumb tool $PIN_B)" <<< "$(nopin)"
+(cd "$SEED" && printf 'nothex\n' > crumb.lock && /usr/bin/git commit -q -am badlock && /usr/bin/git push -q origin main)
+check "malformed crumb.lock fails closed" grep -q "crumb.lock does not hold a 40-hex commit" <<< "$(nopin)"
+(cd "$SEED" && /usr/bin/git rm -q crumb.lock .github/workflows/aien-verification.yml && /usr/bin/git commit -q -m nopin && /usr/bin/git push -q origin main)
+out=$(nopin)
+check "neither crumb.lock nor workflow: fail closed, no default pin" bash -c "grep -q 'no crumb pin' <<< \"\$1\" && ! grep -q 'dry-run' <<< \"\$1\"" _ "$out"
+check "train.sh carries no default pin of any repository" bash -c "! grep -q '94fffbcf' '$TRAIN'"
 
 echo "== secrets and protection"
 check "train.sh never names the signing key file" bash -c "! grep -q 'verify\\.key' '$TRAIN'"

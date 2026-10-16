@@ -12,8 +12,8 @@
 #      .github/workflows/, .forgejo/, tools/aien-test/), head not equal to refs/pull/N/head, merge conflict with the
 #      stack so far, queue longer than AIEN_MAX_STACK.
 #   2. stack k = origin/main + PR1..PRk merged in order (merge commits, as `gh pr merge --merge` makes them), then one
-#      crumb recompile commit made with the repository's pinned crumb tool (crumb.lock in the tree, else the
-#      sovereign-core CI pin). Stack 0 is main itself, untouched.
+#      crumb recompile commit made with the repository's pinned crumb tool (crumb.lock in its tree, else the
+#      "pinned crumb tool" ref of its own aien-verification.yml, else fail closed). Stack 0 is main itself, untouched.
 #   3. The worker (aien-local-ci once) verifies stack shas one at a time (the worker serves heads sequentially; the
 #      gate pools are per head): first stack N; on FAIL a bisection finds the longest passing prefix p and the first
 #      failing prefix p+1, whose last pull request is the culprit: a comment with the receipt link, label removed, not
@@ -21,11 +21,13 @@
 #   4. Merge of stack p (p >= 1): its bundle is published to aien-receipts (pipeline.sh publish, checked by digest at
 #      origin), the required checks of main are green on that exact sha (the stack is pushed as branch train/<repo>
 #      with one open train pull request so the hosted check runs), then under the pipeline lock: every PR in the prefix
-#      still open, labeled, not draft, head unchanged; origin/main unchanged since stacking; then main is
-#      fast-forwarded to the tested sha (`git push`, never forced, never re-merged). If a PR went stale the prefix ends
+#      still open, labeled, not draft, head unchanged; origin/main still the stack base (else the cycle aborts and
+#      the next one restacks); the train PR head must equal the tested sha; then the train PR is merged with a merge
+#      commit (`--match-head-commit`), so the merged tree equals the tested tree and is checked after landing. No direct push
+#      to main. If a PR went stale the prefix ends
 #      before it and the longest tested passing prefix inside it is taken (re-tested when it was never run).
 #
-# It never reads the signing key, never signs, never changes branch protection, never closes a pull request.
+# It never reads the signing key, never signs, never changes branch protection, never pushes to main, never closes a stacked pull request.
 # Every action and refusal is one JSON line in $STATE/train.jsonl. Exit 0 when the cycle ran (refusals included),
 # 2 on usage or configuration error. Spark etiquette: `quietlock check` must pass before every worker run.
 set -euo pipefail
@@ -45,7 +47,6 @@ LOCAL_CI=${AIEN_LOCAL_CI:-$HOME/.local/bin/aien-local-ci}
 QUIETLOCK=${QUIETLOCK:-quietlock}
 TRAIN=${AIEN_TRAIN_CLONES:-$STATE/train-clones}
 ARCH_URL=${AIEN_ARCH_URL:-https://github.com/aien-spark/aien-architecture}
-CRUMB_PIN_DEFAULT=${AIEN_CRUMB_PIN:-94fffbcf88492c5a1c54211b5126c8a6c370a98d}   # .github/workflows/aien-verification.yml
 CRUMB_TOOL=${AIEN_CRUMB_TOOL:-}            # set: use this crumb binary for every repository (tests); unset: build the pin
 MAX_STACK=${AIEN_MAX_STACK:-20}
 CRUMB_PIN=unresolved CRUMB_BIN=""              # set by crumb_tool for the stack being built
@@ -79,6 +80,11 @@ for r in "${repo_list[@]}"; do
 done
 command -v jq >/dev/null || die "jq not found"
 command -v "$GIT" >/dev/null || die "git ($GIT) not found"
+if [[ $cmd != cadence ]]; then
+  # every merge the train makes needs a committer; without one git fails and it would be misread as a merge conflict
+  "$GIT" -c user.useConfigOnly=true var GIT_COMMITTER_IDENT >/dev/null 2>&1 \
+    || die "git has no committer identity: set user.name and user.email (the train makes merge commits and would misreport every merge as a conflict)"
+fi
 mkdir -p "$STATE"
 JOURNAL=$STATE/train.jsonl
 if [[ $cmd != cadence ]]; then
@@ -201,11 +207,26 @@ checks_state() {
 }
 
 # ---------------------------------------------------------------- crumb tool for the stack (pinned per repository)
+# crumb_pin_of_tree: sets TREE_PIN to the pinned crumb tool commit of the tree at HEAD of $TC. crumb.lock where the repository has one,
+# else the "pinned crumb tool source" ref of its own .github/workflows/aien-verification.yml. Neither: fail closed.
+crumb_pin_of_tree() {
+  local pin wf
+  if "$GIT" -C "$TC" cat-file -e HEAD:crumb.lock 2>/dev/null; then
+    pin=$("$GIT" -C "$TC" show HEAD:crumb.lock | tr -d " \t\r\n")
+    [[ $pin =~ ^[0-9a-f]{40}$ ]] || { RECOMPILE_NOTE="crumb.lock does not hold a 40-hex commit"; return 1; }
+    TREE_PIN=$pin; return 0
+  fi
+  wf=$("$GIT" -C "$TC" show HEAD:.github/workflows/aien-verification.yml 2>/dev/null) || { RECOMPILE_NOTE="no crumb pin: no crumb.lock and no .github/workflows/aien-verification.yml"; return 1; }
+  pin=$(awk 'f>0{f--} /pinned crumb tool/{f=8} f>0 && $1=="ref:" && $2 ~ /^[0-9a-f]{40}$/ {print $2; exit}' <<< "$wf")
+  [[ -n $pin ]] || { RECOMPILE_NOTE="no crumb pin: no pinned crumb tool ref in aien-verification.yml"; return 1; }
+  TREE_PIN=$pin
+}
+
 crumb_tool() { # sets CRUMB_BIN (the crumb binary for the tree at HEAD of $TC) and CRUMB_PIN
   local pin built src
   if [[ -n $CRUMB_TOOL ]]; then CRUMB_PIN="override:$CRUMB_TOOL"; CRUMB_BIN=$CRUMB_TOOL; return 0; fi
-  pin=$("$GIT" -C "$TC" show HEAD:crumb.lock 2>/dev/null | tr -d ' \t\r\n' || true)
-  [[ $pin =~ ^[0-9a-f]{40}$ ]] || pin=$CRUMB_PIN_DEFAULT
+  crumb_pin_of_tree || { CRUMB_PIN=none; return 1; }
+  pin=$TREE_PIN
   CRUMB_PIN=$pin
   built=$STATE/train-crumb/$pin/crumb
   if [[ ! -x $built ]]; then
@@ -242,9 +263,19 @@ merge_pr() { # i: merge queue entry i onto HEAD of $TC; 1 on conflict (aborted)
 }
 recompile() { # crumb recompile commit on HEAD of $TC with the pinned tool, then verify with the same tool
   local changed
-  crumb_tool || { RECOMPILE_NOTE="cannot build the pinned crumb tool"; return 1; }
+  RECOMPILE_NOTE=""
+  crumb_tool || { RECOMPILE_NOTE=${RECOMPILE_NOTE:-cannot build the pinned crumb tool}; return 1; }
   (cd "$TC" && "$CRUMB_BIN" compile .) >/dev/null 2>&1 || { RECOMPILE_NOTE="crumb compile failed (tool $CRUMB_PIN)"; return 1; }
   changed=$("$GIT" -C "$TC" ls-files -m -o --exclude-standard | grep -E '(^|/)\.crumb$' || true)
+  local other path pfx
+  other=$("$GIT" -C "$TC" status --porcelain | grep -vE '\.crumb$' || true)
+  [[ -z $other ]] || { RECOMPILE_NOTE="crumb compile changed something other than .crumb files: $(head -n 1 <<< "$other")"; return 1; }
+  while IFS= read -r path; do
+    [[ -n $path ]] || continue
+    for pfx in "${BLOCKED_OPERATOR_PREFIXES[@]}"; do
+      [[ $path == "$pfx"* ]] && { RECOMPILE_NOTE="crumb recompile would change $path inside a trust-surface directory ($pfx); stack skipped"; return 1; }
+    done
+  done <<< "$changed"
   if [[ -n $changed ]]; then
     printf '%s\n' "$changed" | "$GIT" -C "$TC" add --pathspec-from-file=-
     "$GIT" -C "$TC" commit -q -m "train: crumb recompile (crumb tool $CRUMB_PIN)"
@@ -266,7 +297,7 @@ build_stack() { # k -> sets BUILT to the sha of stack k (0 = main), builds and c
 admit() {
   local repo=$1 s=$2 prs num sha base draft labeled title files p hit fetched i
   QN=() QS=() QT=() STACK=() RESULT=(); N=0
-  prs=$("$GH" api "repos/$s/pulls?state=open&per_page=100" --jq \
+  prs=$("$GH" api "repos/$s/pulls?state=open&per_page=100" --paginate --jq \
     ".[] | [.number, .head.sha, .base.ref, .draft, ([.labels[].name] | index(\"$MERGE_LABEL\") != null), (.title | gsub(\"[\\t\\n\\r]\"; \" \"))] | @tsv" \
     | sort -n) || { journal repo="$repo" result=refused reason="cannot list pull requests"; return 1; }
   reset_to "$MAIN" || return 1
@@ -361,11 +392,11 @@ blame() { # REPO SLUG k: PR k is the culprit (stack k failed, stack k-1 passed)
     journal repo="$repo" pr="$num" sha="${QS[$k]}" stack="$k" tested="$sha" result=failed reason="culprit comment or label removal failed"
   fi
 }
-ensure_train_pr() { # REPO SLUG SHA: one open PR from train/<repo> to main so the hosted required check runs on SHA
+ensure_train_pr() { # REPO SLUG SHA: one open PR from train/<repo> to main; its head is the tested SHA, it runs the hosted check and is what gets merged
   local repo=$1 s=$2 sha=$3 num body
   num=$("$GH" api "repos/$s/pulls?state=open&head=${s%%/*}:train/$repo&per_page=5" --jq '.[0].number // empty' 2>/dev/null || true)
   if [[ -z $num ]]; then
-    body="Merge train stack for \`$repo\` (tools/aien-local-ci/train.sh). This pull request exists so the required hosted check runs on the exact tested stack sha; main is fast-forwarded to that sha by the train, never merged through this pull request. Do not merge it by hand."
+    body="Merge train stack for \`$repo\` (tools/aien-local-ci/train.sh). Its head is the exact tested stack sha. The train merges it with a merge commit only while main is still the stack base, so the merged tree equals the tested tree. Do not merge it by hand."
     num=$("$GH" api -X POST "repos/$s/pulls" -f title="train: $repo stack (do not merge by hand)" -f head="train/$repo" -f base=main -f body="$body" --jq .number 2>/dev/null) || return 1
   fi
   TRAIN_PR=$num
@@ -408,9 +439,9 @@ fresh() {
   done
   echo 0
 }
-# merge_stack REPO SLUG p: publish, hosted checks, lock, freshness, main unchanged, fast-forward. 0 merged.
+# merge_stack REPO SLUG p: publish, hosted checks, lock, freshness, main unchanged, merge the train PR. 0 merged.
 merge_stack() {
-  local repo=$1 s=$2 p=$3 sha stale i rc now prot reviews err
+  local repo=$1 s=$2 p=$3 sha stale i rc now
   while [[ $p -ge 1 ]]; do
     build_stack "$p" || { journal repo="$repo" stack="$p" result=refused reason="cannot build stack $p: ${RECOMPILE_NOTE:-unknown}"; return 1; }
     sha=$BUILT
@@ -446,24 +477,40 @@ merge_stack() {
     "$GIT" -C "$TC" fetch -q origin main 2>/dev/null || true
     now=$("$GIT" -C "$TC" rev-parse --verify -q origin/main || echo "")
     if [[ $now != "$MAIN" ]]; then
-      flock -u 9; exec 9>&-; journal repo="$repo" stack="$p" sha="$sha" result=refused reason="main moved to $now since stacking"; return 1
+      flock -u 9; exec 9>&-; journal repo="$repo" stack="$p" sha="$sha" result=aborted reason="main moved to $now since the stack was built on $MAIN; cycle aborted, the next cycle restacks"; return 1
     fi
     if ! checks_state "$s" "$sha"; then
       flock -u 9; exec 9>&-; journal repo="$repo" stack="$p" sha="$sha" result=refused reason="$CHECK_NOTE (re-checked under lock)"; return 1
     fi
-    prot=$("$GH" api "repos/$s/branches/main/protection" 2>/dev/null || echo '{}')
-    reviews=$(jq -r '.required_pull_request_reviews != null' <<< "$prot" 2>/dev/null || echo unknown)
-    if [[ $reviews == true ]]; then
-      journal repo="$repo" stack="$p" sha="$sha" result=warning reason="main protection requires a pull request: GitHub refuses direct pushes, the fast-forward below will fail; design change needed (never loosen protection)"
+    # Landing (pipeline owner, 2026-10-16): the train PR, whose head must be the EXACT tested sha, is merged with a
+    # merge commit, and only while main is still the base the stack was built on. Then the merged tree is the tested
+    # tree (main is an ancestor of the head, so a merge commit adds no content). No direct push to main, no protection
+    # change; the stacked PRs show as merged because their heads are in main. `--match-head-commit` makes GitHub refuse the merge when
+    # the head moved after we looked.
+    local tinfo tstate tbase thead resp landed
+    if ! tinfo=$("$GH" api "repos/$s/pulls/$TRAIN_PR" --jq '[.state, .base.ref, .head.sha] | @tsv' 2>/dev/null); then
+      flock -u 9; exec 9>&-; journal repo="$repo" stack="$p" sha="$sha" result=refused reason="cannot read train pull request #$TRAIN_PR"; return 1
     fi
-    err=$("$GIT" -C "$TC" push -q origin "$sha:refs/heads/main" 2>&1 >/dev/null) && rc=0 || rc=$?
+    IFS=$'\t' read -r tstate tbase thead <<< "$tinfo"
+    if [[ $tstate != open || $tbase != main || $thead != "$sha" ]]; then
+      flock -u 9; exec 9>&-
+      journal repo="$repo" stack="$p" sha="$sha" result=refused reason="train pull request #$TRAIN_PR is $tstate into $tbase with head ${thead:-none}, not the tested sha; not merged"; return 1
+    fi
+    if ! "$GIT" -C "$TC" merge-base --is-ancestor "$MAIN" "$sha" 2>/dev/null; then
+      flock -u 9; exec 9>&-; journal repo="$repo" stack="$p" sha="$sha" result=refused reason="tested sha does not contain the base main $MAIN; not merged"; return 1
+    fi
+    resp=$("$GH" pr merge "$TRAIN_PR" -R "$s" --merge --match-head-commit "$sha" \
+      --subject "Merge train stack for $repo (PRs ${QN[1]}..${QN[$p]}) at tested sha $sha" 2>&1) && rc=0 || rc=$?
     flock -u 9; exec 9>&-
     if [[ $rc != 0 ]]; then
-      journal repo="$repo" stack="$p" sha="$sha" result=failed reason="fast-forward push refused: $(tr '\n' ' ' <<< "$err" | cut -c1-300)"; return 1
+      journal repo="$repo" stack="$p" sha="$sha" result=failed reason="merge of train pull request refused: $(tr '\n' ' ' <<< "$resp" | cut -c1-300)"; return 1
+    fi
+    landed=$("$GIT" -C "$TC" fetch -q origin main 2>/dev/null && "$GIT" -C "$TC" rev-parse origin/main || echo "")
+    if [[ -z $landed || $("$GIT" -C "$TC" rev-parse "$landed^{tree}") != "$("$GIT" -C "$TC" rev-parse "$sha^{tree}")" ]]; then
+      journal repo="$repo" stack="$p" sha="$sha" landed="$landed" result=failed reason="merged tree differs from the tested tree (main moved in the last instant); stop and look at main"; return 1
     fi
     local nums="" ; for ((i = 1; i <= p; i++)); do nums+="${nums:+,}${QN[$i]}"; done
-    journal repo="$repo" stack="$p" sha="$sha" digest="$PUB_DIGEST" prs="$nums" result=merged reason="main fast-forwarded to the tested stack sha"
-    [[ -n ${TRAIN_PR:-} ]] && "$GH" api -X PATCH "repos/$s/pulls/$TRAIN_PR" -f state=closed >/dev/null 2>&1 || true
+    journal repo="$repo" stack="$p" sha="$sha" landed="$landed" digest="$PUB_DIGEST" prs="$nums" result=merged reason="train pull request merged with a merge commit; merged tree equals tested tree"
     "$GIT" -C "$TC" push -q origin --delete "train/$repo" >/dev/null 2>&1 || true
     return 0
   done
@@ -471,7 +518,17 @@ merge_stack() {
 }
 
 # ---------------------------------------------------------------- one cycle
+# One train per repository: a second loop would force-push the same train/<repo> branch. Lock fd 8, never waited for.
 cycle_repo() {
+  local lockf=$STATE/train.$1.lock
+  exec 8>>"$lockf"
+  if ! flock -n 8; then
+    exec 8>&-; journal repo="$1" result=skipped reason="another train cycle holds $lockf"; return 0
+  fi
+  cycle_repo_locked "$1"
+  exec 8>&-
+}
+cycle_repo_locked() {
   local repo=$1 s rc lo hi mid p sha k
   [[ -d $CLONES/$repo ]] || { say "$repo: no trusted clone, skipped"; return 0; }
   if ! s=$(slug "$repo"); then journal repo="$repo" result=refused reason="cannot resolve GitHub slug"; return 0; fi
@@ -485,7 +542,7 @@ cycle_repo() {
     for ((k = 1; k <= N; k++)); do say "  $k. #${QN[$k]} ${QS[$k]} ${QT[$k]}"; done
     crumb_tool || true
     say "  stack $N = $sha (top: $("$GIT" -C "$TC" log -1 --format=%s "$sha"), crumb tool $CRUMB_PIN)"
-    say "  would: push train/$repo, quietlock check, aien-local-ci once $repo $sha, bisect on FAIL, publish, fast-forward main"
+    say "  would: push train/$repo, quietlock check, aien-local-ci once $repo $sha, bisect on FAIL, publish, merge the train PR (head = tested sha) while main is unchanged"
     journal repo="$repo" stack="$N" sha="$sha" result=dry-run reason="plan printed, nothing pushed"
     return 0
   fi
