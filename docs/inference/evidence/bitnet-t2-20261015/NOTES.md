@@ -5,8 +5,8 @@ amendment (perplexity gate). Code: `crates/aien-inference-abi/src/bitnet_forward
 (`HostBitNetForward`), `src/bitnet_tokenizer.rs` (our own byte-level BPE), binary
 `src/bin/own_tern_check.rs`. No chip run; no other engine or tokenizer was run.
 
-Run: `own_tern_check golden ~/models/BitNet-b1.58-2B-4T-bf16 passage-faraday-candle-lecture1.txt
-~/workspace/bitnet-t2-golden-20261015` (4 min 37 s wall, peak RSS 5.8 GB, `run.log`; run twice, dumps, losses and ids bit-identical).
+Run: `own_tern_check golden ~/models/BitNet-b1.58-2B-4T-bf16 passage-faraday-candle-lecture1.json
+~/workspace/bitnet-t2-golden-20261015` (4 min 1 s wall, peak RSS 5.8 GB, `run.log`; run three times, dumps, losses and ids bit-identical).
 Layout id `omega-trit2-rm16-hfrows-v1`; model and tokenizer sha256 pinned and checked.
 
 ## Passage
@@ -15,6 +15,9 @@ Faraday, "The Chemical History of a Candle", Lecture I (Project Gutenberg #14474
 paragraphs reflowed, footnote markers and underscores removed. sha256
 `4b59948c0c829f7d47c8e8302ebb9400e0de86db67695d5fe4d017137f00343a`, committed (538b7730) before
 any perplexity was measured. 2,654 tokens after BOS; it round-trips through our tokenizer.
+The exact text is the `text` field of `passage-faraday-candle-lecture1.json` (it keeps Faraday's own
+dashes, which the repository's dash audit refuses in plain text files; JSON is audited as data).
+The binary checks the text against the recorded sha256 before use.
 
 ## Gates
 
@@ -26,7 +29,7 @@ any perplexity was measured. 2,654 tokens after BOS; it round-trips through our 
 | skipped sub-norms raise it by at least 10 % | +12.34408089 (calc:bfe40a3e): 3,967,901.8 | `passage-nll-skip-sub-norms.f64` |
 | q and v scales swapped raise it by at least 10 % | +0.350252295 (calc:9a6a4db6): 24.530553 | `passage-nll-swap-q-v-scales.f64` |
 | five own prompts, greedy 32 tokens, coherent | all five read as fluent, on-topic English (`golden.json`, `run.log`) | |
-| decode speed | 64.719 ms per token median over 310 steps: 0.0768 of 237.2 GB/s / 1,178,568,100 B (16-bit table, calc:f15f961e); 0.0554 of the 8-bit-table figure 850,230,180 B (calc:b75f2a07). Both are against the model's minimum bytes per token; this host code actually streams 3,397,386,240 B per token (one byte per trit and the f32 table, calc:02eb83dc) | `golden.json` |
+| decode speed | 54.818 ms per token median over 310 steps: 0.0906 of 237.2 GB/s / 1,178,568,100 B (16-bit table, calc:27682bb9); 0.0654 of the 8-bit-table figure 850,230,180 B (calc:e1f43359). Both are against the model's minimum bytes per token; this host code actually streams 3,397,386,240 B per token (one byte per trit and the f32 table, calc:02eb83dc) | `golden.json` |
 
 Each control's loss rise is above 0.1 nats, so its perplexity ratio is above
 e^0.1 >= 1 + 0.1 + 0.1^2/2 = 1.105 (calc:f864e259). The perplexity bound is the Taylor sum of

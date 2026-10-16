@@ -1,6 +1,6 @@
 //! OWN-TERN check, stage T2: the sealed golden of our CPU reference for BitNet b1.58 2B-4T.
 //!
-//!   own_tern_check golden <checkpoint-dir> <passage.txt> <out-dir>
+//!   own_tern_check golden <checkpoint-dir> <passage.txt|passage.json> <out-dir>
 //!
 //! Host only (no chip). Loads the bf16 master with our loader into i8 trit matrices, then:
 //! - teacher-forced loss and perplexity over the whole passage (BOS first), for the reference and
@@ -71,7 +71,10 @@ fn main() {
             Path::new(&args[3]),
             Path::new(&args[4]),
         ),
-        _ => Err("usage: own_tern_check golden <checkpoint-dir> <passage.txt> <out-dir>".into()),
+        _ => Err(
+            "usage: own_tern_check golden <checkpoint-dir> <passage.txt|passage.json> <out-dir>"
+                .into(),
+        ),
     };
     if let Err(e) = r {
         eprintln!("own_tern_check: {e}");
@@ -107,8 +110,7 @@ fn golden(ckpt: &Path, passage_path: &Path, out: &Path) -> Result<(), String> {
         }
     }
     let tok = BitNetTokenizer::from_file(&ckpt.join("tokenizer.json"))?;
-    let passage = std::fs::read_to_string(passage_path)
-        .map_err(|e| format!("{}: {e}", passage_path.display()))?;
+    let passage = read_passage(passage_path)?;
     let passage_sha = sha_hex(passage.as_bytes());
     let ids = tok.encode(&passage, true);
     if ids.len() - 1 < MIN_PASSAGE_TOKENS {
@@ -255,4 +257,26 @@ fn golden(ckpt: &Path, passage_path: &Path, out: &Path) -> Result<(), String> {
     std::fs::write(&path, text + "\n").map_err(|e| format!("{}: {e}", path.display()))?;
     eprintln!("wrote {}", path.display());
     Ok(())
+}
+
+/// The passage text: a plain file, or the `text` field of a JSON file whose `text_sha256` must
+/// match (the evidence keeps the passage as JSON data, dashes and all).
+fn read_passage(path: &Path) -> Result<String, String> {
+    let raw = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    if path.extension().and_then(|e| e.to_str()) != Some("json") {
+        return Ok(raw);
+    }
+    let j: Value = serde_json::from_str(&raw).map_err(|e| format!("{}: {e}", path.display()))?;
+    let text = j["text"]
+        .as_str()
+        .ok_or_else(|| format!("{}: no text field", path.display()))?;
+    let sha = sha_hex(text.as_bytes());
+    if j["text_sha256"] != sha.as_str() {
+        return Err(format!(
+            "{}: text sha256 {sha} is not the recorded {}",
+            path.display(),
+            j["text_sha256"]
+        ));
+    }
+    Ok(text.to_string())
 }
