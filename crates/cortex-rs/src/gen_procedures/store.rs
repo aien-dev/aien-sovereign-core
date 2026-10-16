@@ -681,7 +681,7 @@ impl ReadOnlyStore {
     /// stored set no longer matches its pin.
     ///
     /// This is not the GEN experiment provider. Its receipt starts with `provider=cortex-interop`,
-    /// says `recheck_source_sha256=unverified` and carries `genret_parity=no` once a Cortex
+    /// is tagged `contract=cortex-interop-v1`, says `recheck_source_sha256=unverified` and carries `genret_parity=no` once a Cortex
     /// revocation changed the outcome; the output must not be passed off as verified provider output.
     pub fn query(
         &self,

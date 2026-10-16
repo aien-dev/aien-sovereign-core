@@ -14,7 +14,7 @@
 //!   offers the INTEROP-ONLY retrieval adapter [`ReadOnlyStore::query`], which reproduces the
 //!   file-backed provider `genret-cli-v3` byte for byte except for the interop marker lines of the
 //!   receipt (`provider=cortex-interop`, `genret_parity`, `cortex_revoked`,
-//!   `recheck_source_sha256=unverified`; see [`retrieval`]). It is not the experiment provider. [`ReadOnlyStore::export`] (byte-identical record set
+//!   `contract=cortex-interop-v1`, `recheck_source_sha256=unverified`; see [`retrieval`]). It is not the experiment provider. [`ReadOnlyStore::export`] (byte-identical record set
 //!   round trip) and [`ReadOnlyStore::audit`].
 //! * [`revoke_record`] marks one imported record revoked (it is then excluded with reason `revoked`).
 //!
@@ -28,8 +28,8 @@ pub mod store;
 pub use record::{validate, NoReceipts, ReceiptSource, RecordMeta, Refusal};
 pub use retrieval::{
     query_record_files, read_public_task_file, Excluded, GenQuery, GenRetError, GenRetOutput, Kind,
-    Mode, PublicTaskFile, Selected, TaskRole, CONTRACT, HEADING, PINNED_RECHECK_SHA256,
-    PROVIDER_MARKER, RECHECK_SOURCE_CLAIM, RECHECK_SOURCE_SHA256,
+    Mode, PublicTaskFile, Selected, TaskRole, CONTRACT, HEADING, INTEROP_CONTRACT,
+    PINNED_RECHECK_SHA256, PROVIDER_MARKER, RECHECK_SOURCE_CLAIM, RECHECK_SOURCE_SHA256,
 };
 pub use store::{
     import_record_set, revoke_record, AuditRow, ExportReport, GenImportError, ImportReport,

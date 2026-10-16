@@ -9,7 +9,8 @@
 //! ([`super::record::validate`]); the recheck binary genret executes, and genret's check of that
 //! binary's sha256 against its trust pin, are absent. The caller cannot name any validator digest
 //! but [`PINNED_RECHECK_SHA256`], and every receipt starts with
-//! `provider=cortex-interop` and says `recheck_source_sha256=unverified`. Apart from those marker
+//! `provider=cortex-interop`, is tagged `contract=cortex-interop-v1` (not `genret-cli-v3`) and says
+//! `recheck_source_sha256=unverified`. Apart from those marker
 //! lines (and the receipt digests that cover them) the six outputs equal genret's byte for byte.
 //!
 //! The record bytes reach this module through a loader (the Cortex store in `store.rs`); the
@@ -23,7 +24,10 @@ use std::collections::BTreeMap;
 use super::record::{self, ReceiptSource};
 use super::sha256_hex;
 
+/// The genret contract this module reproduces (the rules, not the receipt tag).
 pub const CONTRACT: &str = "genret-cli-v3";
+/// The `contract=` value of every interop receipt: never genret's own tag.
+pub const INTEROP_CONTRACT: &str = "cortex-interop-v1";
 /// sha256 of the recheck.c whose rules [`super::record::validate`] implements (omega gen/abstract
 /// 937b033c, the `GENRET_RECHECK_SHA256` pin of mk/gen-retrieval.mk at a26be577). Written to every
 /// receipt as `recheck_source_sha256`, exactly as genret compiles it in.
@@ -178,6 +182,31 @@ pub fn read_public_task_file(
     Ok(PublicTaskFile { bytes })
 }
 
+/// Other targets: the reader needs Linux's /proc/self/fd path check and the generic-ABI open(2)
+/// flags above, so it refuses with the role's reason instead of failing the build.
+#[cfg(not(all(
+    target_os = "linux",
+    any(
+        target_arch = "x86_64",
+        target_arch = "x86",
+        target_arch = "aarch64",
+        target_arch = "arm",
+        target_arch = "riscv64"
+    )
+)))]
+pub fn read_public_task_file(
+    path: &std::path::Path,
+    role: TaskRole,
+) -> Result<PublicTaskFile, GenRetError> {
+    Err(GenRetError::new(
+        role.reason(),
+        format!(
+            "cannot read {}: the task-file reader is supported on Linux only",
+            path.display()
+        ),
+    ))
+}
+
 /// One query: the public requirement and prompt plus the genret options.
 #[derive(Debug, Clone)]
 pub struct GenQuery<'a> {
@@ -219,40 +248,79 @@ impl std::fmt::Display for GenRetError {
 
 impl std::error::Error for GenRetError {}
 
-/// A selected record (one `selected.tsv` row).
+/// A selected record (one `selected.tsv` row). Built only inside `gen_procedures`; read-only outside.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Selected {
-    pub rank: usize,
-    pub id: String,
-    pub digest: String,
-    pub score: u64,
-    pub bytes: usize,
-    pub pad: bool,
+    pub(super) rank: usize,
+    pub(super) id: String,
+    pub(super) digest: String,
+    pub(super) score: u64,
+    pub(super) bytes: usize,
+    pub(super) pad: bool,
+}
+
+impl Selected {
+    pub fn rank(&self) -> usize {
+        self.rank
+    }
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+    pub fn digest(&self) -> &str {
+        &self.digest
+    }
+    pub fn score(&self) -> u64 {
+        self.score
+    }
+    pub fn bytes(&self) -> usize {
+        self.bytes
+    }
+    pub fn pad(&self) -> bool {
+        self.pad
+    }
 }
 
 /// A record that was not selected (one `excluded.tsv` row). `score` is None when not indexed.
+/// Built only inside `gen_procedures`; read-only outside.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Excluded {
-    pub id: String,
-    pub digest: String,
-    pub score: Option<u64>,
-    pub reason: String,
+    pub(super) id: String,
+    pub(super) digest: String,
+    pub(super) score: Option<u64>,
+    pub(super) reason: String,
 }
 
-/// genret's outputs, byte for byte, plus parsed rows.
+impl Excluded {
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+    pub fn digest(&self) -> &str {
+        &self.digest
+    }
+    pub fn score(&self) -> Option<u64> {
+        self.score
+    }
+    pub fn reason(&self) -> &str {
+        &self.reason
+    }
+}
+
+/// The interop outputs, plus parsed rows. Fields are private and the value is built only inside
+/// `gen_procedures`, so a caller cannot strip the INTEROP marker lines and rebuild a receipt that
+/// passes as genret's; everything is exposed through read accessors.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GenRetOutput {
-    pub selected_tsv: Vec<u8>,
-    pub excluded_tsv: Vec<u8>,
-    pub suffix: Vec<u8>,
-    pub query_txt: Vec<u8>,
-    pub receipt_txt: Vec<u8>,
-    pub sha256sums: Vec<u8>,
-    pub selected: Vec<Selected>,
-    pub excluded: Vec<Excluded>,
+    selected_tsv: Vec<u8>,
+    excluded_tsv: Vec<u8>,
+    suffix: Vec<u8>,
+    query_txt: Vec<u8>,
+    receipt_txt: Vec<u8>,
+    sha256sums: Vec<u8>,
+    selected: Vec<Selected>,
+    excluded: Vec<Excluded>,
     /// Records excluded because Cortex holds a revocation for them. genret has no revocations, so
     /// when this is non-zero the output is NOT comparable with the file provider on the same set.
-    pub revoked: usize,
+    revoked: usize,
 }
 
 impl GenRetOutput {
@@ -266,6 +334,34 @@ impl GenRetOutput {
             ("receipt.txt", &self.receipt_txt),
             ("SHA256SUMS", &self.sha256sums),
         ]
+    }
+    pub fn selected_tsv(&self) -> &[u8] {
+        &self.selected_tsv
+    }
+    pub fn excluded_tsv(&self) -> &[u8] {
+        &self.excluded_tsv
+    }
+    pub fn suffix(&self) -> &[u8] {
+        &self.suffix
+    }
+    pub fn query_txt(&self) -> &[u8] {
+        &self.query_txt
+    }
+    pub fn receipt_txt(&self) -> &[u8] {
+        &self.receipt_txt
+    }
+    pub fn sha256sums(&self) -> &[u8] {
+        &self.sha256sums
+    }
+    pub fn selected(&self) -> &[Selected] {
+        &self.selected
+    }
+    pub fn excluded(&self) -> &[Excluded] {
+        &self.excluded
+    }
+    /// How many records a Cortex revocation excluded.
+    pub fn revoked(&self) -> usize {
+        self.revoked
     }
 
     /// True when the output can be compared byte for byte with genret on the same record set.
@@ -978,7 +1074,7 @@ pub(crate) fn run_query<'a>(
         q.exclude_families.join(",")
     };
     // CONTRACT.md 8, the 25 keys in order, behind three interop marker lines (provider,
-    // genret_parity, cortex_revoked) and with recheck_source_sha256=unverified: this receipt can never
+    // genret_parity, cortex_revoked), tagged contract=cortex-interop-v1 and with recheck_source_sha256=unverified: this receipt can never
     // pass as a genret receipt. genret_parity=no when a Cortex revocation changed the outcome.
     let receipt = format!(
         "{}\ngenret_parity={}\ncortex_revoked={}\ncontract={}\nmode={}\nkind={}\nk={}\ncap_bytes={}\ntarget_bytes={}\nexclude_family={}\n\
@@ -990,7 +1086,7 @@ pub(crate) fn run_query<'a>(
         PROVIDER_MARKER,
         if revoked == 0 { "yes" } else { "no" },
         revoked,
-        CONTRACT,
+        INTEROP_CONTRACT,
         q.mode.as_str(),
         kind,
         q.k,

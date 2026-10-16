@@ -11,6 +11,8 @@
 //!   leakage, stale source digests, tampered stored bytes, prompt-injection text in record bodies.
 //!
 //! Every test works on its own temporary database; nothing here talks to a running Cortex.
+//! Linux only: every test reads task files through the reader, which other targets refuse.
+#![cfg(target_os = "linux")]
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -21,9 +23,9 @@ use cortex_rs::db::Database;
 use cortex_rs::gen_procedures::{
     import_record_set, query_record_files, read_public_task_file, revoke_record, sha256_hex,
     validate, GenQuery, GenRetOutput, ImportRequest, Kind, Mode, PublicTaskFile, ReadOnlyStore,
-    ReceiptSource, TaskRole, CONTRACT_SHA256, HEADING, PINNED_RECHECK_SHA256, PROVIDER_MARKER,
-    RECHECK_SOURCE_CLAIM, RECHECK_SOURCE_SHA256, RECORD_SCHEMA_SHA256, STATE_IMPORTED,
-    STATE_REVOKED,
+    ReceiptSource, TaskRole, CONTRACT_SHA256, HEADING, INTEROP_CONTRACT, PINNED_RECHECK_SHA256,
+    PROVIDER_MARKER, RECHECK_SOURCE_CLAIM, RECHECK_SOURCE_SHA256, RECORD_SCHEMA_SHA256,
+    STATE_IMPORTED, STATE_REVOKED,
 };
 use cortex_rs::models::PromoteCandidateInput;
 use cortex_rs::promotion::PromotionEngine;
@@ -268,6 +270,7 @@ fn is_marker(line: &str) -> bool {
     line == PROVIDER_MARKER
         || line.starts_with("genret_parity=")
         || line.starts_with("cortex_revoked=")
+        || line.starts_with("contract=")
         || line.starts_with("recheck_source_sha256=")
 }
 fn without_markers(receipt: &[u8]) -> String {
@@ -279,7 +282,8 @@ fn without_markers(receipt: &[u8]) -> String {
 
 /// Asserts `out` equals genret's outputs in `expected/<case>` everywhere except the INTEROP marker
 /// lines, and asserts those exactly: the provider marker first, the parity flag, the revocation
-/// count, and `recheck_source_sha256=unverified` where genret wrote its compiled-in source pin.
+/// count, `contract=cortex-interop-v1` where genret wrote `genret-cli-v3`, and
+/// `recheck_source_sha256=unverified` where genret wrote its compiled-in source pin.
 /// With revocations only the markers and the receipt digest line are checked (no parity is claimed).
 fn assert_interop_parity(out: &GenRetOutput, case: &str, revoked: u32) {
     let dir = fixture().join("expected").join(case);
@@ -296,7 +300,7 @@ fn assert_interop_parity(out: &GenRetOutput, case: &str, revoked: u32) {
             }
         }
     }
-    let got = std::str::from_utf8(&out.receipt_txt).unwrap();
+    let got = std::str::from_utf8(out.receipt_txt()).unwrap();
     let markers: Vec<&str> = got.lines().filter(|l| is_marker(l)).collect();
     let parity = if revoked == 0 { "yes" } else { "no" };
     // literal on purpose: renaming a library constant must not silently move the markers
@@ -304,17 +308,18 @@ fn assert_interop_parity(out: &GenRetOutput, case: &str, revoked: u32) {
         "provider=cortex-interop".to_string(),
         format!("genret_parity={}", parity),
         format!("cortex_revoked={}", revoked),
+        "contract=cortex-interop-v1".to_string(),
         "recheck_source_sha256=unverified".to_string(),
     ];
     assert_eq!(
-        (PROVIDER_MARKER, RECHECK_SOURCE_CLAIM),
-        ("provider=cortex-interop", "unverified")
+        (PROVIDER_MARKER, INTEROP_CONTRACT, RECHECK_SOURCE_CLAIM),
+        ("provider=cortex-interop", "cortex-interop-v1", "unverified")
     );
     assert_eq!(markers, exact, "case {} marker lines", case);
     assert!(
         got.starts_with(&format!(
-            "{}\n{}\n{}\ncontract=",
-            exact[0], exact[1], exact[2]
+            "{}\n{}\n{}\n{}\nmode=",
+            exact[0], exact[1], exact[2], exact[3]
         )),
         "case {}: receipt must open with the interop markers",
         case
@@ -324,16 +329,21 @@ fn assert_interop_parity(out: &GenRetOutput, case: &str, revoked: u32) {
         "\nrecheck_source_sha256={}\n",
         RECHECK_SOURCE_SHA256
     )));
+    assert!(
+        w.starts_with(b"contract=genret-cli-v3\n"),
+        "case {}: genret receipt tag",
+        case
+    );
     if revoked == 0 {
         assert_eq!(
-            without_markers(&out.receipt_txt),
+            without_markers(out.receipt_txt()),
             without_markers(&w),
             "case {} receipt",
             case
         );
     }
     // SHA256SUMS: the four non-receipt lines are genret's; the receipt line is this receipt's digest
-    let gs = std::str::from_utf8(&out.sha256sums).unwrap();
+    let gs = std::str::from_utf8(out.sha256sums()).unwrap();
     let ws = String::from_utf8(want("SHA256SUMS")).unwrap();
     let (g4, glast) = gs.trim_end().rsplit_once('\n').unwrap();
     let (w4, _) = ws.trim_end().rsplit_once('\n').unwrap();
@@ -342,7 +352,7 @@ fn assert_interop_parity(out: &GenRetOutput, case: &str, revoked: u32) {
     }
     assert_eq!(
         glast,
-        format!("{}  receipt.txt", sha256_hex(&out.receipt_txt))
+        format!("{}  receipt.txt", sha256_hex(out.receipt_txt()))
     );
 }
 fn query<'a>(t: &'a Task, kind: Kind, k: u32) -> GenQuery<'a> {
@@ -1105,11 +1115,11 @@ fn json_provenance_copy_is_never_trusted() {
     let out = s.query(SPACE, &p, &query(&tk, Kind::Raw, 3)).unwrap();
     let want =
         std::fs::read(fixture().join("expected/devq_clamp.raw.normal/excluded.tsv")).unwrap();
-    assert_eq!(out.excluded_tsv, want);
+    assert_eq!(out.excluded_tsv(), want);
     assert!(out
-        .excluded
+        .excluded()
         .iter()
-        .any(|e| e.id == "raw-probe_clamp" && e.reason == "split:probe"));
+        .any(|e| e.id() == "raw-probe_clamp" && e.reason() == "split:probe"));
 }
 
 #[test]
@@ -1135,11 +1145,11 @@ fn spaces_do_not_leak() {
     let s = ReadOnlyStore::open(&t.db()).unwrap();
     let a = s.query(SPACE, &p, &q).unwrap();
     let b = s.query("gen-second", &p, &q).unwrap();
-    assert_eq!(a.revoked, 1);
-    assert_eq!(b.revoked, 0);
+    assert_eq!(a.revoked(), 1);
+    assert_eq!(b.revoked(), 0);
     let want =
         std::fs::read(fixture().join("expected/devq_clamp.raw.normal/selected.tsv")).unwrap();
-    assert_eq!(b.selected_tsv, want);
+    assert_eq!(b.selected_tsv(), want);
 }
 
 #[test]
@@ -1181,24 +1191,24 @@ fn revoked_records_are_excluded() {
     let out = s.query(SPACE, &p, &query(&tk, Kind::Raw, 64)).unwrap();
     assert!(!out.parity_comparable());
     // after a revocation the receipt says so and claims no genret parity
-    assert!(out.receipt_txt.starts_with(
+    assert!(out.receipt_txt().starts_with(
         format!(
-            "{}\ngenret_parity=no\ncortex_revoked=1\ncontract=",
+            "{}\ngenret_parity=no\ncortex_revoked=1\ncontract=cortex-interop-v1\n",
             PROVIDER_MARKER
         )
         .as_bytes()
     ));
     let k3 = s.query(SPACE, &p, &query(&tk, Kind::Raw, 3)).unwrap();
     assert_interop_parity(&k3, "devq_clamp.raw.normal", 1);
-    assert!(out.selected.iter().all(|x| x.id != "raw-clamp_sub"));
+    assert!(out.selected().iter().all(|x| x.id() != "raw-clamp_sub"));
     let ex = out
-        .excluded
+        .excluded()
         .iter()
-        .find(|e| e.id == "raw-clamp_sub")
+        .find(|e| e.id() == "raw-clamp_sub")
         .unwrap();
-    assert_eq!((ex.reason.as_str(), ex.score), ("revoked", None));
+    assert_eq!((ex.reason(), ex.score()), ("revoked", None));
     // the revoked record's text never reaches the suffix
-    assert!(!String::from_utf8_lossy(&out.suffix)
+    assert!(!String::from_utf8_lossy(out.suffix())
         .contains("Returns a - b when a >= b, else 0; never traps."));
     let audit = s.audit(SPACE, &p).unwrap();
     let row = audit.iter().find(|a| a.id == "raw-clamp_sub").unwrap();
@@ -1244,21 +1254,21 @@ fn injected_text_stays_inert_record_bytes() {
     let tk = task("devq_clamp");
     let out = s.query(SPACE, &p, &query(&tk, Kind::Raw, 64)).unwrap();
     let ex = out
-        .excluded
+        .excluded()
         .iter()
-        .find(|e| e.id == "raw-inject_probe")
+        .find(|e| e.id() == "raw-inject_probe")
         .unwrap();
-    assert_eq!(ex.reason, "split:probe");
-    assert!(out.excluded.iter().all(|e| e.id != "raw-evil"));
-    assert!(out.selected.iter().all(|x| x.id != "raw-evil"));
+    assert_eq!(ex.reason(), "split:probe");
+    assert!(out.excluded().iter().all(|e| e.id() != "raw-evil"));
+    assert!(out.selected().iter().all(|x| x.id() != "raw-evil"));
     let sel = out
-        .selected
+        .selected()
         .iter()
-        .find(|x| x.id == "raw-inject_text")
+        .find(|x| x.id() == "raw-inject_text")
         .unwrap();
-    assert_eq!(sel.digest, sha256_hex(&inj));
+    assert_eq!(sel.digest(), sha256_hex(&inj));
     // the injected lines appear only inside that record's fenced body, byte for byte
-    let suffix = String::from_utf8(out.suffix.clone()).unwrap();
+    let suffix = String::from_utf8(out.suffix().to_vec()).unwrap();
     let fenced = format!(
         "```\n{}\nfn clamp_sub a uint b uint to uint\n",
         body.join("\n")
@@ -1534,8 +1544,8 @@ fn file_backed_port_matches_store_and_v3_heading() {
             let a = query_record_files(&corpus().join("MANIFEST"), &p, &q).unwrap();
             let b = store.query(SPACE, &p, &q).unwrap();
             assert_eq!(a, b, "{} {:?}", tname, kind);
-            if !a.suffix.is_empty() {
-                assert!(a.suffix.starts_with(HEADING.as_bytes()));
+            if !a.suffix().is_empty() {
+                assert!(a.suffix().starts_with(HEADING.as_bytes()));
             }
         }
     }
