@@ -83,7 +83,7 @@
         },
         {
           "digest": "f5571bcc0bb95b44dd8bf8f0b47ded3bcb1e1ee76c81b4ff5edb87ac237d66d8",
-          "last_commit": "0cc952c",
+          "last_commit": "f8eea42",
           "name": "crates/aien-cli",
           "purpose": ""
         },
@@ -95,13 +95,13 @@
         },
         {
           "digest": "2f2bd85a4508ff9674e9b4febc619ed153b84d4f61084981912e3c376b6de703",
-          "last_commit": "e10a8b5",
+          "last_commit": "f8eea42",
           "name": "crates/spark-cockpit-rs",
           "purpose": ""
         },
         {
-          "digest": "9dd16095e5063f9ee1535d140f0b52f3e50fed6ce3ce6abfe9a5856f941218ca",
-          "last_commit": "fde8fb2",
+          "digest": "02da31bc5e62df634962dded0755fa258e72011582658da2b12db450246d77ee",
+          "last_commit": "4204406",
           "name": "scripts",
           "purpose": ""
         },
@@ -118,15 +118,15 @@
           "purpose": "Local CI sandbox exec contract (C8), aien-run user/caches install, Forgejo trigger hook, health "
         }
       ],
-      "children_root": "sha256:48f037f2d729c2a2755272cd382e4c609531bd288fbb303d248c7a18325f9598",
-      "compiled_at": "2026-10-16T01:28:11Z",
+      "children_root": "sha256:262c05d9c8ff17d17bc0dcef128f78b79376793a6fbbfe7bbd4398464bc75824",
+      "compiled_at": "2026-10-16T02:09:13Z",
       "compiler": "crumb-compile/1",
-      "digest": "sha256:cd49cc7ffda55128c9216a15236634a40b650ceea4ad705d4d5da7912239b0c3",
+      "digest": "sha256:ec09d2aad97a2e0a7e0ef90a12ac0c6dcf55404b66b868c9bbb999da0b9e09d4",
       "evidence_files": 1556,
       "evidence_root": "sha256:b640e43d11486c07cf52f4f26ce01f0fbc38185dea3041c4108d3ed4773bc9da",
-      "files": 5642,
-      "generated_at_commit": "a236c68fa87f8dc5b4b802ea5c0e9273b4a907e8",
-      "source_tree": "sha256:69f2256fd1a764729304fce7228a52427af291b5b239c184318ca57553c50479"
+      "files": 5825,
+      "generated_at_commit": "31134587b8a2b9a974a7b641b6a12c3cd4dc7d1d",
+      "source_tree": "sha256:886878c77bddf6fe4ef1409f468b7db60182eaf36b559c91fe839d56bac7b17f"
     }
   },
   "history": [],
