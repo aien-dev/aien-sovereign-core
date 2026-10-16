@@ -88,6 +88,7 @@ cat > "$T/bin/aien-local-ci" <<'EOF'
 #!/usr/bin/env bash
 # fake worker: once REPO SHA -> bundle; FAIL when BAD or MAINBAD is in the tree; nothing when the sha is not at origin
 echo "once $2 $3" >> "$FAKE_LOG"
+[ -e "/proc/$$/fd/8" ] && echo "worker-fd8 open" >> "$FAKE_LOG" || echo "worker-fd8 closed" >> "$FAKE_LOG"
 [[ $1 == once ]] || exit 9
 repo=$2 sha=$3
 git --git-dir="$ORIGIN" cat-file -e "$sha^{commit}" 2>/dev/null || { echo "fake worker: $sha not at origin"; exit 1; }
@@ -382,6 +383,25 @@ check "malformed crumb.lock fails closed" grep -q "crumb.lock does not hold a 40
 out=$(nopin)
 check "neither crumb.lock nor workflow: fail closed, no default pin" bash -c "grep -q 'no crumb pin' <<< \"\$1\" && ! grep -q 'dry-run' <<< \"\$1\"" _ "$out"
 check "train.sh carries no default pin of any repository" bash -c "! grep -q '94fffbcf' '$TRAIN'"
+
+echo "== a PR cannot choose the crumb tool"
+(cd "$SEED" && /usr/bin/git checkout -q main && /usr/bin/git pull -q origin main && mkdir -p .github/workflows \
+  && printf 'steps:\n  - name: Checkout the pinned crumb tool source (aien-architecture @ %s)\n    with:\n      ref: %s\n' "$PIN_A" "$PIN_A" > .github/workflows/aien-verification.yml \
+  && /usr/bin/git add -A && /usr/bin/git commit -q -m basepin && /usr/bin/git push -q origin main)
+PR[23]=$(pr 23 crumb.lock "$PIN_B")
+PR[24]=$(pr 24 m.txt m)
+pulls "23:${PR[23]}:false:$L:crumb.lock" "24:${PR[24]}:false:$L:m.txt"
+: > "$FAKE_LOG"; before=$(origin_main)
+out=$(env -u AIEN_CRUMB_TOOL AIEN_ARCH_URL="$T/arch.git" bash "$TRAIN" cycle --dry-run 2>&1)
+check "PR changing crumb.lock is BLOCKED_OPERATOR and left out of the stack" bash -c "[ \"$(jl '.pr=="23" and .result=="excluded" and (.reason|test("BLOCKED_OPERATOR: touches crumb.lock"))')\" = 1 ] && [ \"$(jl '.pr=="23" and .result=="queued"')\" = 0 ]"
+check "the stack is built with the base pin (A), not the PR's pin (B)" bash -c "grep -q 'crumb tool $PIN_A)' <<< \"\$1\" && ! grep -q 'crumb tool $PIN_B' <<< \"\$1\"" _ "$out"
+check "pin is read from the base ref, never from the stack" bash -c "grep -q 'show \"\\\$MAIN:crumb.lock\"' '$TRAIN' && grep -q 'show \"\\\$MAIN:.github/workflows/aien-verification.yml\"' '$TRAIN' && ! grep -q 'HEAD:crumb.lock' '$TRAIN'"
+
+echo "== the per-repository lock is not inherited by children"
+: > "$FAKE_LOG"
+pulls "24:${PR[24]}:false:$L:m.txt"
+bash "$TRAIN" cycle > "$T/fd.out" 2>&1
+check "the worker ran with fd 8 closed" bash -c "grep -q '^worker-fd8 closed' '$FAKE_LOG' && ! grep -q '^worker-fd8 open' '$FAKE_LOG'"
 
 echo "== secrets and protection"
 check "train.sh never names the signing key file" bash -c "! grep -q 'verify\\.key' '$TRAIN'"

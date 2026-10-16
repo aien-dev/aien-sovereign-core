@@ -56,7 +56,7 @@ QUIET_WAIT=${AIEN_QUIET_WAIT:-7200}        # seconds to wait for the quiet flag 
 POLL=${AIEN_TRAIN_POLL:-30}                # seconds between polls (quiet flag, hosted checks)
 RETRY_SLEEP=${AIEN_RETRY_SLEEP:-5}
 MERGE_LABEL="ready-to-merge"
-BLOCKED_OPERATOR_PREFIXES=(".aien/" "tests/gates/" ".github/workflows/" ".forgejo/" "tools/aien-test/")
+BLOCKED_OPERATOR_PREFIXES=("crumb.lock" ".aien/" "tests/gates/" ".github/workflows/" ".forgejo/" "tools/aien-test/")
 
 usage() { echo "usage: train.sh cadence|cycle|loop [--repos a,b] [--dry-run] [--every SECS]" >&2; exit 2; }
 die() { echo "train.sh: $*" >&2; exit 2; }
@@ -207,16 +207,16 @@ checks_state() {
 }
 
 # ---------------------------------------------------------------- crumb tool for the stack (pinned per repository)
-# crumb_pin_of_tree: sets TREE_PIN to the pinned crumb tool commit of the tree at HEAD of $TC. crumb.lock where the repository has one,
+# crumb_pin_of_tree: sets TREE_PIN to the pinned crumb tool commit as the BASE ($MAIN) has it, never the stack's: a PR must not choose the tool the Spark builds and runs. crumb.lock where the repository has one,
 # else the "pinned crumb tool source" ref of its own .github/workflows/aien-verification.yml. Neither: fail closed.
 crumb_pin_of_tree() {
   local pin wf
-  if "$GIT" -C "$TC" cat-file -e HEAD:crumb.lock 2>/dev/null; then
-    pin=$("$GIT" -C "$TC" show HEAD:crumb.lock | tr -d " \t\r\n")
+  if "$GIT" -C "$TC" cat-file -e "$MAIN:crumb.lock" 2>/dev/null; then
+    pin=$("$GIT" -C "$TC" show "$MAIN:crumb.lock" | tr -d " \t\r\n")
     [[ $pin =~ ^[0-9a-f]{40}$ ]] || { RECOMPILE_NOTE="crumb.lock does not hold a 40-hex commit"; return 1; }
     TREE_PIN=$pin; return 0
   fi
-  wf=$("$GIT" -C "$TC" show HEAD:.github/workflows/aien-verification.yml 2>/dev/null) || { RECOMPILE_NOTE="no crumb pin: no crumb.lock and no .github/workflows/aien-verification.yml"; return 1; }
+  wf=$("$GIT" -C "$TC" show "$MAIN:.github/workflows/aien-verification.yml" 2>/dev/null) || { RECOMPILE_NOTE="no crumb pin: no crumb.lock and no .github/workflows/aien-verification.yml"; return 1; }
   pin=$(awk 'f>0{f--} /pinned crumb tool/{f=8} f>0 && $1=="ref:" && $2 ~ /^[0-9a-f]{40}$/ {print $2; exit}' <<< "$wf")
   [[ -n $pin ]] || { RECOMPILE_NOTE="no crumb pin: no pinned crumb tool ref in aien-verification.yml"; return 1; }
   TREE_PIN=$pin
@@ -265,7 +265,7 @@ recompile() { # crumb recompile commit on HEAD of $TC with the pinned tool, then
   local changed
   RECOMPILE_NOTE=""
   crumb_tool || { RECOMPILE_NOTE=${RECOMPILE_NOTE:-cannot build the pinned crumb tool}; return 1; }
-  (cd "$TC" && "$CRUMB_BIN" compile .) >/dev/null 2>&1 || { RECOMPILE_NOTE="crumb compile failed (tool $CRUMB_PIN)"; return 1; }
+  (cd "$TC" && "$CRUMB_BIN" compile . 8>&-) >/dev/null 2>&1 || { RECOMPILE_NOTE="crumb compile failed (tool $CRUMB_PIN)"; return 1; }
   changed=$("$GIT" -C "$TC" ls-files -m -o --exclude-standard | grep -E '(^|/)\.crumb$' || true)
   local other path pfx
   other=$("$GIT" -C "$TC" status --porcelain | grep -vE '\.crumb$' || true)
@@ -280,7 +280,7 @@ recompile() { # crumb recompile commit on HEAD of $TC with the pinned tool, then
     printf '%s\n' "$changed" | "$GIT" -C "$TC" add --pathspec-from-file=-
     "$GIT" -C "$TC" commit -q -m "train: crumb recompile (crumb tool $CRUMB_PIN)"
   fi
-  (cd "$TC" && "$CRUMB_BIN" verify .) >/dev/null 2>&1 || { RECOMPILE_NOTE="crumb verify failed after compile (tool $CRUMB_PIN)"; return 1; }
+  (cd "$TC" && "$CRUMB_BIN" verify . 8>&-) >/dev/null 2>&1 || { RECOMPILE_NOTE="crumb verify failed after compile (tool $CRUMB_PIN)"; return 1; }
 }
 build_stack() { # k -> sets BUILT to the sha of stack k (0 = main), builds and caches it in STACK[k]
   local k=$1 i
@@ -352,7 +352,7 @@ run_stack() { # REPO k SHA -> sets RESULT[sha] to PASS|FAIL|<name>; 0 when PASS 
     RESULT[$sha]=QUIET; journal repo="$repo" stack="$k" sha="$sha" result=refused reason="quiet flag held for ${QUIET_WAIT}s"; return 1
   fi
   journal repo="$repo" stack="$k" sha="$sha" result=running reason="worker once"
-  "$LOCAL_CI" once "$repo" "$sha" > "$STATE/train-logs/$repo.$sha.log" 2>&1 || true
+  "$LOCAL_CI" once "$repo" "$sha" 8>&- > "$STATE/train-logs/$repo.$sha.log" 2>&1 || true
   lfile=$STATE/bundles/$repo/$sha/bundle.json
   if [[ ! -f $lfile ]]; then
     RESULT[$sha]=NO_BUNDLE; journal repo="$repo" stack="$k" sha="$sha" result=refused reason="worker left no bundle"; return 1
@@ -379,7 +379,7 @@ test_stack() {
 blame() { # REPO SLUG k: PR k is the culprit (stack k failed, stack k-1 passed)
   local repo=$1 s=$2 k=$3 num=${QN[$3]} sha=${STACK[$3]} prev body url pdig
   build_stack $((k - 1)); prev=$BUILT
-  bash "$PIPELINE" publish --repos "$repo" >/dev/null 2>&1 || true
+  bash "$PIPELINE" publish --repos "$repo" 8>&- 9>&- >/dev/null 2>&1 || true
   "$GIT" -C "$RECEIPTS" fetch -q origin 2>/dev/null || true
   pdig=$(published "$repo" "$sha")
   url=$(receipt_url "$repo" "$sha")
@@ -414,7 +414,7 @@ publish_stack() { # REPO SHA -> 0 when the local bundle's digest is at receipts 
   local repo=$1 sha=$2 ldig pdig attempt
   ldig=$(digest "$STATE/bundles/$repo/$sha/bundle.json")
   for attempt in 1 2 3; do
-    bash "$PIPELINE" publish --repos "$repo" >/dev/null 2>&1 || true
+    bash "$PIPELINE" publish --repos "$repo" 8>&- 9>&- >/dev/null 2>&1 || true
     "$GIT" -C "$RECEIPTS" fetch -q origin 2>/dev/null || true
     pdig=$(published "$repo" "$sha")
     [[ $pdig == "$ldig" ]] && { PUB_DIGEST=$ldig; return 0; }
@@ -499,7 +499,7 @@ merge_stack() {
     if ! "$GIT" -C "$TC" merge-base --is-ancestor "$MAIN" "$sha" 2>/dev/null; then
       flock -u 9; exec 9>&-; journal repo="$repo" stack="$p" sha="$sha" result=refused reason="tested sha does not contain the base main $MAIN; not merged"; return 1
     fi
-    resp=$("$GH" pr merge "$TRAIN_PR" -R "$s" --merge --match-head-commit "$sha" \
+    resp=$("$GH" pr merge "$TRAIN_PR" -R "$s" 8>&- 9>&- --merge --match-head-commit "$sha" \
       --subject "Merge train stack for $repo (PRs ${QN[1]}..${QN[$p]}) at tested sha $sha" 2>&1) && rc=0 || rc=$?
     flock -u 9; exec 9>&-
     if [[ $rc != 0 ]]; then
