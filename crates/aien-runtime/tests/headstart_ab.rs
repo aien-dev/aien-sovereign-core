@@ -733,6 +733,9 @@ impl Run<'_> {
     fn commit(&self, task: &str, generation: u64) {
         let ws = self.ws.display().to_string();
         loop {
+            // Read before submitting: a commit that ends between the refusal and
+            // this read would otherwise leave the retry waiting on an unrelated change.
+            let seen = self.q.lock().unwrap().changes;
             let t = Instant::now();
             let r: Result<(FenceProof, CommitResult, Option<Value>), FenceError> =
                 match &self.compose {
@@ -781,7 +784,6 @@ impl Run<'_> {
                 }
                 Err(FenceError::Scheduler(SchedError::CommitInProgress { .. })) => {
                     self.m.lock().unwrap().commit_waits += 1;
-                    let seen = self.q.lock().unwrap().changes;
                     let waited = self.wait_until(self.deadline, || {
                         (self.q.lock().unwrap().changes != seen).then_some(())
                     });
@@ -962,7 +964,7 @@ fn run_sample(arm: Arm, shape: Shape, threads: usize) -> Value {
         "prep_ms": prep_ms,
         "producer_ms": producer_ms,
         "commit_ms": commit_ms,
-        "ceiling": prep_ms.min(producer_ms) / wall_ms,
+        "ceiling_estimate": prep_ms.min(producer_ms) / wall_ms,
         "cpu_user_ms": u1 - u0,
         "cpu_sys_ms": s1 - s0,
         "max_rss_kb_process": rss,

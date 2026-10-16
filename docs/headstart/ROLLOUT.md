@@ -110,7 +110,9 @@ change installs an adapter. Today none of the timing items is met.
       no task committed twice, every commit record final-verified) over the
       held samples.
 - [ ] Zero unhandled state divergence: `check_invariants` after every sample,
-      and equal final states and commit counts between the off and on arms.
+      and equal final states and commit counts between the off and on arms
+      (compared by the smoke run only; the held-sample script does not
+      compare arms).
 - [ ] Exact baseline behavior with the flag off: section 2.
 - [ ] No new OOM or deadlock: every sample reports `deadlock: false` and
       `max_rss_kb_process`; compare arms.
@@ -131,7 +133,7 @@ change installs an adapter. Today none of the timing items is met.
   not results.
 - **Hypothesis:** on the chain shape the preparable share of a sample is
   small next to the producer work and the World commit (the per-sample
-  `ceiling` field, prep or producer time over wall time). If that holds in
+  `ceiling_estimate` field, prep or producer time over wall time). If that holds in
   held samples, a 10% wall-time gain is unlikely on this workload, and the
   gate needs a workload where read-only preparation is a larger share.
 - **Platforms:** results from the CI runner (`CI-RUNNER`, x86_64, hosted

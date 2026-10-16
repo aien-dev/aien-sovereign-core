@@ -50,6 +50,8 @@ MINUTES=${HS_M6_HOLD_MINUTES:-5}
 REASON=${HS_M6_REASON:-headstart M6 A/B timing sample (#538)}
 PLATFORM=${HS_M6_PLATFORM:-unlabelled}
 QL=${HS_M6_QUIETLOCK_BIN:-quietlock}
+# Team rule: per-sample holds of at most 5 minutes.
+case "$MINUTES" in [1-5]) ;; *) echo "headstart-m6-ab: HS_M6_HOLD_MINUTES must be 1 to 5 (team rule)" >&2; exit 2 ;; esac
 export CARGO_TARGET_DIR=${HS_M6_TARGET_DIR:-$ROOT/target/hs-m6-$BUILD}
 command -v "$QL" >/dev/null 2>&1 || die "quietlock not found ($QL)"
 for s in $SHAPES; do
@@ -116,8 +118,9 @@ FAILED=0
 WANT=$( [ "$BUILD" = linked ] && echo LINKED || echo STUB )
 # One held sample: env for the test, one process, appended to samples.jsonl.
 held_sample() {
-  local i=$1 shape=$2 arm=$3 tag=$4 log rc
+  local i=$1 shape=$2 arm=$3 tag=$4 log rc before after line
   log="$OUT/logs/s$(printf %03d "$i")-$shape-$tag-$arm.log"
+  before=$(wc -l 2>/dev/null <"$OUT/samples.jsonl" || echo 0)
   while :; do
     until "$QL" check >/dev/null 2>&1; do sleep 20; done
     set +e
@@ -127,13 +130,23 @@ held_sample() {
       "$BIN" --ignored --exact headstart_ab_sample --nocapture --test-threads=1 >"$log" 2>&1
     rc=$?
     set -e
-    [ "$rc" -eq 75 ] || break
+    # 75 counts as a refusal only with quietlock's own line (as lanes.sh checks).
+    [ "$rc" -eq 75 ] && tail -n 1 "$log" | grep -q "^quietlock: QUIETLOCK_REFUSED " || break
     echo "headstart-m6-ab: quiet flag taken by someone else, waiting" >&2
   done
-  # The test binary reports its own build; a linked run must never contain a
-  # STUB line (a cached stub build would otherwise pass unnoticed).
-  if [ "$rc" -eq 0 ] && ! tail -1 "$OUT/samples.jsonl" | grep -q "\"build\":\"$WANT\""; then
-    rc=3
+  # Exactly one new line, and it must be this sample (index, shape, arm,
+  # tag) from the expected build: a linked run must never contain a STUB
+  # line (a cached stub build would otherwise pass unnoticed).
+  if [ "$rc" -eq 0 ]; then
+    after=$(wc -l 2>/dev/null <"$OUT/samples.jsonl" || echo 0)
+    line=$(tail -n 1 "$OUT/samples.jsonl" 2>/dev/null || true)
+    if [ "$after" -ne $((before + 1)) ]; then
+      rc=3
+    else
+      for kv in "\"build\":\"$WANT\"" "\"sample\":$i" "\"shape\":\"$shape\"" "\"arm\":\"$arm\"" "\"tag\":\"$tag\""; do
+        printf "%s\n" "$line" | grep -qE "$kv([,}])" || rc=3
+      done
+    fi
   fi
   if [ "$rc" -ne 0 ]; then
     FAILED=$((FAILED + 1))
@@ -165,7 +178,7 @@ field() { grep -o "\"$1\":[^,}]*" | head -1 | sed "s/^\"$1\"://; s/\"//g"; }
       n=$(printf '%s\n' "$vals" | grep -c . || true)
       [ "$n" -gt 0 ] || continue
       med=$(printf '%s\n' "$vals" | awk -v n="$n" 'NR == int((n + 1) / 2) { a = $1 } NR == int(n / 2) + 1 { b = $1 } END { printf "%.3f", (a + b) / 2 }')
-      echo "$shape $tag n=$n median_wall_ms=$med"
+      echo "$shape $tag n=$n median_wall_ms=$med$( [ "$shape" = failure ] && echo " (not a timing comparison: the on arm waits on purpose)")"
     done
   done
 } >"$OUT/summary.txt"
