@@ -136,9 +136,11 @@ their deltas.
 
 ## M5 result (patched-20261015-4c83e38): REJECTED, Headstart stays disabled
 
-**Verdict: REJECTED** (decision by Drake via the orchestrator, 2026-10-16).
-The promotion gate needs zero unexplained crashes; Headstart ON crashes the
-compiler on every incremental edit, so the gate fails whatever the speed.
+**Verdict: REJECTED.** The promotion gate fails on the crash below.
+Further timing was stopped by Drake's decision (via the orchestrator,
+2026-10-16), so speed cells beyond the clean held samples are NOT_MEASURED.
+The gate needs zero unexplained crashes; Headstart ON crashes the compiler
+on every incremental edit, so it fails whatever the speed.
 No "Optional local invocation" section is added. Default builds are
 unchanged: nothing in this repository enables `-Zheadstart` or
 `-Zearly-metadata`.
@@ -189,11 +191,11 @@ same exit codes, same normalized diagnostics, same results for the 115
 tests of `spark-harness` and `aien-proof` in both arms, and the
 `-Zearly-metadata-verify` cold build exited 0.
 
-**Cold timings (observed, clean final samples only).** Same patched
-toolchain, OFF vs ON, default `-j` (20), per-sample quiet-flag hold, arms
-alternating. The rerun was stopped by decision during round 3, so each arm
-has 2 or 3 clean samples, below the 5 the brief asked for: read these as
-indicative.
+**Cold timings (observed, INDICATIVE: n=2 to 3 clean held samples per
+arm, under the planned 5).** Same patched toolchain, OFF vs ON, default
+`-j` (20), per-sample quiet-flag hold, arms alternating. The rerun was
+stopped by Drake's decision during round 3; the remaining rounds are
+NOT_MEASURED.
 
 | workload | OFF median (n) | ON median (n) | saving | max RSS | CPU (user+sys) |
 |---|---|---|---|---|---|
