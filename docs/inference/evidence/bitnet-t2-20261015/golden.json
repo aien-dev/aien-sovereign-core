@@ -2,9 +2,9 @@
   "arithmetic": "f32; exact int32 ternary products; per-token int8 activation absmax, round half to even; RMSNorm square sums in f64; half-split RoPE, f64 angles; tied bf16 table widened to f32",
   "bos": "every prompt and the passage start with BOS 128000 at position 0",
   "decode": {
-    "median_ms_per_token": 51.966013,
+    "median_ms_per_token": 64.719023,
     "note": "host reference: one-token forward plus the full-vocabulary logits, i8 trits and f32 table",
-    "steps": 320
+    "steps": 310
   },
   "greedy": {
     "new_tokens_max": 32,
@@ -16,7 +16,7 @@
   "layout_id": "omega-trit2-rm16-hfrows-v1",
   "load": {
     "resident_bytes": 849387060,
-    "seconds": 3.708805523
+    "seconds": 4.356366911
   },
   "model_sha256": "529637ff6dab1f5890767356928693f69ffe61d3b6040a43de9306b37bfd5ae1",
   "passage": {
@@ -32,7 +32,7 @@
       "nll_sha256": "81b3d92bc509b1d387abe9088202da4a10f5cf7b4de1ca580669bcf82bff76ba",
       "perplexity": "17.282027873",
       "predicted_tokens": 2654,
-      "seconds": 44.831626709,
+      "seconds": 56.298290348,
       "sum_nll_nats": "7.56301651055500224e3"
     },
     "skip-sub-norms": {
@@ -41,7 +41,7 @@
       "nll_sha256": "a50e22a05c515aa3fddf58819bd63d5f3b92d48e2c6d3e5380af11bc5079ec0c",
       "perplexity": "3967901.813190344",
       "predicted_tokens": 2654,
-      "seconds": 55.866683395,
+      "seconds": 56.515464546,
       "sum_nll_nats": "4.03242071984254799e4"
     },
     "sub-norm-after-o": {
@@ -50,7 +50,7 @@
       "nll_sha256": "8ff78ffaef82a0f0a3bd81009439221c5ebf5a7c63a03311c68a3667feaf6b6b",
       "perplexity": "5695.391991770",
       "predicted_tokens": 2654,
-      "seconds": 45.003658563,
+      "seconds": 54.718371043,
       "sum_nll_nats": "2.29502333174150372e4"
     },
     "swap-q-v-scales": {
@@ -59,7 +59,7 @@
       "nll_sha256": "26348ee95d969e0cf88c262358acfa164f732c460cbd273f228d30a1a4b30f2c",
       "perplexity": "24.530553083",
       "predicted_tokens": 2654,
-      "seconds": 46.504439839,
+      "seconds": 54.977745946,
       "sum_nll_nats": "8.49258610145009698e3"
     }
   },
@@ -1694,5 +1694,5 @@
   ],
   "stage": "bitnet-t2-host-reference",
   "tokenizer_sha256": "e134af98b985517b4f068e3755ae90d4e9cd2d45d328325dc503f1c6b2d06cc7",
-  "total_seconds": 236.483160192
+  "total_seconds": 276.839388343
 }

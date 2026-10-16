@@ -294,6 +294,46 @@ impl KvCache {
             v: vec![Vec::new(); c.layers],
         }
     }
+
+    /// Drops every position from `len` on.
+    pub fn truncate(&mut self, len: usize, kv_dim: usize) {
+        for x in self.k.iter_mut().chain(self.v.iter_mut()) {
+            x.truncate(len * kv_dim);
+        }
+        self.len = self.len.min(len);
+    }
+}
+
+/// Causal GQA attention for `t` query rows at positions `pos0 ..` over the cached keys (roped)
+/// and values `[pos0 + t][kv_dim]`: query head `h` reads kv head `h / (q_heads / kv_heads)`,
+/// scores scaled by `head_dim^-0.5`, softmax over positions `0..=pos0 + i`. Returns `[t][q_dim]`.
+pub fn attend(c: &BitNetConfig, q: &[f32], kc: &[f32], vc: &[f32], pos0: usize) -> Vec<f32> {
+    let (qd, kvd, hd) = (c.q_dim(), c.kv_dim(), c.head_dim);
+    let group = c.q_heads / c.kv_heads;
+    let scale = (hd as f32).powf(-0.5);
+    let t = q.len() / qd;
+    let mut att = vec![0f32; t * qd];
+    att.par_chunks_mut(hd).enumerate().for_each(|(idx, o)| {
+        let (i, head) = (idx / c.q_heads, idx % c.q_heads);
+        let kvh = head / group;
+        let p = pos0 + i;
+        let qv = &q[i * qd + head * hd..i * qd + (head + 1) * hd];
+        let scores: Vec<f32> = (0..=p)
+            .map(|j| dot_f32(qv, &kc[j * kvd + kvh * hd..j * kvd + (kvh + 1) * hd]) * scale)
+            .collect();
+        let m = scores.iter().fold(f32::NEG_INFINITY, |a, &b| a.max(b));
+        let e: Vec<f32> = scores.iter().map(|&s| (s - m).exp()).collect();
+        let sum: f64 = e.iter().map(|&v| v as f64).sum();
+        let inv = (1.0 / sum) as f32;
+        for (j, &ej) in e.iter().enumerate() {
+            let wgt = ej * inv;
+            let vv = &vc[j * kvd + kvh * hd..j * kvd + (kvh + 1) * hd];
+            for (od, &vd) in o.iter_mut().zip(vv) {
+                *od += wgt * vd;
+            }
+        }
+    });
+    att
 }
 
 /// The reference model over loaded weights.
@@ -366,8 +406,24 @@ impl<'a> HostBitNetForward<'a> {
 
     /// Runs `tokens` (positions `cache.len ..`) through every layer, appending to `cache`.
     /// Returns the final-norm hidden rows `[t][hidden]`; `taps` receives the residual stream
-    /// after each listed layer, `[t][hidden]`.
+    /// after each listed layer, `[t][hidden]`. On an error the cache is rolled back to where it
+    /// was, so it stays usable.
     pub fn forward(
+        &self,
+        tokens: &[u32],
+        cache: &mut KvCache,
+        tap_layers: &[usize],
+        taps: &mut Vec<(usize, Vec<f32>)>,
+    ) -> Result<Vec<f32>, String> {
+        let len = cache.len;
+        let r = self.forward_inner(tokens, cache, tap_layers, taps);
+        if r.is_err() {
+            cache.truncate(len, self.config().kv_dim());
+        }
+        r
+    }
+
+    fn forward_inner(
         &self,
         tokens: &[u32],
         cache: &mut KvCache,
@@ -395,8 +451,6 @@ impl<'a> HostBitNetForward<'a> {
         let tables: Vec<Vec<(f32, f32)>> = (0..t)
             .map(|i| rope_table(pos0 + i, hd, f64::from(c.rope_theta)))
             .collect();
-        let group = c.q_heads / c.kv_heads;
-        let scale = (hd as f32).powf(-0.5);
 
         for (li, layer) in self.w.layers.iter().enumerate() {
             // Attention.
@@ -417,28 +471,7 @@ impl<'a> HostBitNetForward<'a> {
                 cache.k[li].extend_from_slice(&k);
                 cache.v[li].extend_from_slice(&row[qd + kvd..]);
             }
-            let (kc, vc) = (&cache.k[li], &cache.v[li]);
-            let mut att = vec![0f32; t * qd];
-            att.par_chunks_mut(hd).enumerate().for_each(|(idx, o)| {
-                let (i, head) = (idx / c.q_heads, idx % c.q_heads);
-                let kvh = head / group;
-                let p = pos0 + i;
-                let qv = &q[i * qd + head * hd..i * qd + (head + 1) * hd];
-                let scores: Vec<f32> = (0..=p)
-                    .map(|j| dot_f32(qv, &kc[j * kvd + kvh * hd..j * kvd + (kvh + 1) * hd]) * scale)
-                    .collect();
-                let m = scores.iter().fold(f32::NEG_INFINITY, |a, &b| a.max(b));
-                let e: Vec<f32> = scores.iter().map(|&s| (s - m).exp()).collect();
-                let sum: f64 = e.iter().map(|&v| v as f64).sum();
-                let inv = (1.0 / sum) as f32;
-                for (j, &ej) in e.iter().enumerate() {
-                    let wgt = ej * inv;
-                    let vv = &vc[j * kvd + kvh * hd..j * kvd + (kvh + 1) * hd];
-                    for (od, &vd) in o.iter_mut().zip(vv) {
-                        *od += wgt * vd;
-                    }
-                }
-            });
+            let att = attend(c, &q, &cache.k[li], &cache.v[li], pos0);
             let o = match self.variant {
                 Variant::SubNormAfterO => {
                     let y = self.bit_linear(layer.o.as_ref(), &att, t)?;
@@ -488,6 +521,9 @@ impl<'a> HostBitNetForward<'a> {
         let c = self.config();
         let (h, vocab) = (c.hidden, c.vocab);
         let t = normed.len() / h;
+        if t == 0 {
+            return Vec::new();
+        }
         const ROWS: usize = 64;
         let blocks: Vec<Vec<f32>> = self
             .embed

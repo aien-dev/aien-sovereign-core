@@ -355,9 +355,10 @@ impl BitNetTokenizer {
                 || t["lstrip"] != false
                 || t["rstrip"] != false
                 || t["single_word"] != false
+                || !content.starts_with("<|")
             {
                 return Err(format!(
-                    "added token {id} {content:?}: only plain special tokens are implemented"
+                    "added token {id} {content:?}: only plain special tokens starting with <| are implemented"
                 ));
             }
             if id_bytes.len() <= id as usize {
@@ -549,6 +550,27 @@ mod tests {
         assert_eq!(pieces("\tword"), ["\tword"]);
         assert_eq!(pieces("über 3½"), ["über", " ", "3½"]);
         assert_eq!(pieces("a\r\n \r\nb"), ["a", "\r\n \r\n", "b"]);
+        assert_eq!(
+            pieces("it'ſ \u{3000}x;  über-naïve 12345 ٣٤٥ 🙂🙂\u{200d} end  "),
+            [
+                "it",
+                "'ſ",
+                " ",
+                "\u{3000}x",
+                ";",
+                " ",
+                " über",
+                "-naïve",
+                " ",
+                "123",
+                "45",
+                " ",
+                "٣٤٥",
+                " 🙂🙂\u{200d}",
+                " end",
+                "  "
+            ]
+        );
     }
 
     #[test]

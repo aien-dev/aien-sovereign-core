@@ -176,3 +176,111 @@ fn nll_is_log_softmax_of_the_tied_logits() {
     assert!(f.nll(&fin, targets).is_err());
     assert_eq!(argmax(&[1.0, 3.0, 3.0, 2.0]), 1);
 }
+
+#[test]
+fn attention_equals_a_naive_masked_loop() {
+    // tiny_config: 4 query heads over 2 kv heads of 64, so heads 0,1 read kv 0 and 2,3 read kv 1.
+    let c = tiny_config();
+    let (qd, kvd, hd) = (c.q_dim(), c.kv_dim(), c.head_dim);
+    let (pos0, t) = (3, 4);
+    let q: Vec<f32> = (0..t * qd).map(|i| prand(11, i) * 4.0 - 2.0).collect();
+    let k: Vec<f32> = (0..(pos0 + t) * kvd)
+        .map(|i| prand(12, i) * 4.0 - 2.0)
+        .collect();
+    let v: Vec<f32> = (0..(pos0 + t) * kvd)
+        .map(|i| prand(13, i) * 4.0 - 2.0)
+        .collect();
+    let got = attend(&c, &q, &k, &v, pos0);
+    for i in 0..t {
+        for head in 0..c.q_heads {
+            let kvh = [0, 0, 1, 1][head];
+            let mut w = vec![0f64; pos0 + t];
+            for (j, wj) in w.iter_mut().enumerate() {
+                if j > pos0 + i {
+                    *wj = f64::NEG_INFINITY; // causal mask
+                    continue;
+                }
+                let s: f64 = (0..hd)
+                    .map(|d| q[i * qd + head * hd + d] as f64 * k[j * kvd + kvh * hd + d] as f64)
+                    .sum();
+                *wj = s / 8.0; // sqrt(64)
+            }
+            let m = w.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+            let z: f64 = w.iter().map(|&x| (x - m).exp()).sum();
+            for d in 0..hd {
+                let want: f64 = (0..pos0 + t)
+                    .map(|j| (w[j] - m).exp() / z * v[j * kvd + kvh * hd + d] as f64)
+                    .sum();
+                let g = got[i * qd + head * hd + d] as f64;
+                assert!(
+                    (g - want).abs() < 1e-5,
+                    "token {i} head {head} dim {d}: {g} vs {want}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn bit_linear_scales_each_segment_by_its_own_scale() {
+    let w = tiny();
+    let f = HostBitNetForward::new(&w);
+    let m = w.layers[0].qkv.as_ref();
+    let (n, k) = (m.n(), m.k());
+    let x: Vec<f32> = (0..2 * k).map(|i| prand(21, i) * 2.0 - 1.0).collect();
+    let y = f.bit_linear(m, &x, 2).unwrap();
+    let mut row_scale = Vec::new();
+    for s in m.segments() {
+        row_scale.extend(std::iter::repeat_n(bf16_to_f32(s.scale_bf16), s.rows));
+    }
+    let scales: Vec<f32> = m
+        .segments()
+        .iter()
+        .map(|s| bf16_to_f32(s.scale_bf16))
+        .collect();
+    assert!(
+        scales.windows(2).any(|p| p[0] != p[1]),
+        "tiny q/k/v scales all equal"
+    );
+    for i in 0..2 {
+        let mut q = vec![0i8; k];
+        let s_a = quant_act(&x[i * k..(i + 1) * k], &mut q);
+        let mut acc = vec![0i32; n];
+        m.gemv_i8(&q, &mut acc).unwrap();
+        for r in 0..n {
+            assert_eq!(
+                y[i * n + r],
+                acc[r] as f32 / s_a * row_scale[r],
+                "token {i} row {r}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_failed_forward_leaves_the_cache_where_it_was() {
+    let w = tiny();
+    let f = HostBitNetForward::new(&w);
+    let mut cache = KvCache::new(&w.config);
+    f.forward(&tokens()[..4], &mut cache, &[], &mut Vec::new())
+        .unwrap();
+    cache.truncate(3, w.config.kv_dim());
+    let before = cache.clone();
+    // Token 999 is outside the 256-token vocabulary.
+    assert!(f
+        .forward(&[5, 999], &mut cache, &[], &mut Vec::new())
+        .is_err());
+    assert_eq!(
+        (cache.len, &cache.k, &cache.v),
+        (before.len, &before.k, &before.v)
+    );
+    let mut whole = KvCache::new(&w.config);
+    let all = f
+        .forward(&tokens()[..4], &mut whole, &[], &mut Vec::new())
+        .unwrap();
+    let last = f
+        .forward(&tokens()[3..4], &mut cache, &[], &mut Vec::new())
+        .unwrap();
+    assert_eq!(all[3 * w.config.hidden..], last[..]);
+    assert!(f.logits(&[]).is_empty());
+}

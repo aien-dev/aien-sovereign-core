@@ -216,7 +216,7 @@ fn golden(ckpt: &Path, passage_path: &Path, out: &Path) -> Result<(), String> {
             let mut gen = Vec::new();
             while gen.len() < NEW_TOKENS {
                 gen.push(next);
-                if eos.contains(&next) {
+                if eos.contains(&next) || gen.len() == NEW_TOKENS {
                     break;
                 }
                 let t0 = Instant::now();
