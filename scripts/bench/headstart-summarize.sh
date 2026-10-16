@@ -96,11 +96,32 @@ cmd_samples() {
     # M5 (#536): OFF vs ON per scenario, present only when such arms exist,
     # so summaries of runs without them stay byte-identical.
     | ([ $all[] | select(.final == true and (.arm == "OFF" or .arm == "ON")) ]) as $abf
-    | if ($abf | length) == 0 then . else . + {ab: (
+    # Times, RSS and CPU come from clean samples only (final, exit 0, not
+    # contaminated); an arm without one is NOT_MEASURED, never a number.
+    | if ($abf | length) == 0 then . else . + {ab_rules: {
+          counted: "final attempt, exit status 0 and contaminated == false; contaminated finals are excluded and counted, failures are listed and never timed",
+          status: "measured when both arms have a clean sample; else FAILED when a final sample failed, else NOT_MEASURED (no clean final sample: contaminated host)"},
+        aa_noise_clean: (
+          [ $okf[] | select(.aa_pair != null and .contaminated == false) ] | group_by(.aa_pair)
+          | map(
+              (map(select(.arm == "A") | .wall_s) | median) as $a
+              | (map(select(.arm == "B") | .wall_s) | median) as $b
+              | {
+                  scenario: .[0].aa_pair,
+                  n_a: (map(select(.arm == "A")) | length),
+                  n_b: (map(select(.arm == "B")) | length),
+                  median_a_s: ($a | if . == null then null else r3 end),
+                  median_b_s: ($b | if . == null then null else r3 end),
+                  delta_pct: (if $a == null or $b == null or $a == 0 then null
+                              else (($b - $a) / $a * 100) | r3 end)
+                }
+            )
+        ),
+        ab: (
         $abf | group_by(.scenario) | map(
           . as $g
-          | (map(select(.arm == "OFF" and .ok == true))) as $off
-          | (map(select(.arm == "ON" and .ok == true))) as $on
+          | (map(select(.arm == "OFF" and .ok == true and .contaminated == false))) as $off
+          | (map(select(.arm == "ON" and .ok == true and .contaminated == false))) as $on
           | ($off | map(.wall_s) | median) as $mo
           | ($on | map(.wall_s) | median) as $mn
           | ($off | map(.time_v.max_rss_kb) | nn_median) as $ro
@@ -113,7 +134,13 @@ cmd_samples() {
               failed_off: (map(select(.arm == "OFF" and .ok == false)) | length),
               failed_on: (map(select(.arm == "ON" and .ok == false)) | length),
               failures: (map(select(.ok == false)) | map({sample_id, arm, exit_status})),
-              contaminated_counted: (($off + $on) | map(select(.contaminated == true)) | length),
+              contaminated_excluded_off: (map(select(.arm == "OFF" and .ok == true and .contaminated == true)) | length),
+              contaminated_excluded_on: (map(select(.arm == "ON" and .ok == true and .contaminated == true)) | length),
+              status: (if ($off | length) > 0 and ($on | length) > 0 then "measured"
+                       elif any(.[]; .ok == false) then "FAILED"
+                       else "NOT_MEASURED" end),
+              ice_reports_on: (map(select(.arm == "ON" and has("ice_reports")) | .ice_reports)
+                               | if length == 0 then null else add end),
               wall_s_off: ($off | map(.wall_s) | stats),
               wall_s_on: ($on | map(.wall_s) | stats),
               delta_s: (if $mo == null or $mn == null then null else ($mn - $mo) | r3 end),
