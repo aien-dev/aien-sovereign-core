@@ -6,6 +6,7 @@ use crate::tensor::{
     scaled_dot_product_attention_single, swiglu,
 };
 use crate::ModelConfig;
+use aien_kv_cache::KvDType;
 use serde_json::Value;
 
 #[derive(Debug, Clone, Default)]
@@ -20,6 +21,10 @@ pub struct LayerKvCache {
 pub struct SequenceState {
     pub tokens: Vec<u32>,
     pub layers: Vec<LayerKvCache>,
+    /// Element type K/V are rounded to the moment they are produced, before any
+    /// reader (dense cache, pool write, attention) sees them. The pool's dtype when
+    /// a physical pool is attached, else the backend's `kv_dtype` (default `Fp32`).
+    pub kv_dtype: KvDType,
 }
 
 #[derive(Debug, Clone)]
@@ -442,6 +447,7 @@ impl TransformerWeights {
         let mut seq_state = SequenceState {
             tokens: Vec::with_capacity(n),
             layers: vec![LayerKvCache::default(); self.config.num_layers],
+            kv_dtype: KvDType::Fp32,
         };
 
         for (pos, &token_id) in tokens.iter().enumerate() {
@@ -626,6 +632,7 @@ impl TransformerWeights {
         let mut seq_state = SequenceState {
             tokens: Vec::with_capacity(prompt_tokens.len() + num_steps),
             layers: vec![LayerKvCache::default(); self.config.num_layers],
+            kv_dtype: KvDType::Fp32,
         };
 
         let mut last_hidden = Vec::new();
