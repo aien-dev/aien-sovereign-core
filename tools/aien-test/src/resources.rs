@@ -9,12 +9,16 @@
 //! Deadlock rule: whenever more than one resource is taken, they are taken in
 //! one fixed order. Pools are ordered by `Pool`'s derived `Ord` (gb10, then
 //! qemu, then host). The full order for one gate is: (1) the in-process pool
-//! slot, (2) the target-dir lock (`lock_target_dir`, cargo gates only, when
-//! a `CARGO_TARGET_DIR` is set), (3) `/tmp/aien-gb10.lock`, (4) aien-proof's
-//! `slots/gpu.lock` when the aien-proof board directory exists. A holder of
-//! (2) already has its slot and never waits for one, so a gate blocked on
-//! (2) with a slot in hand cannot close a cycle; the worker's target priming
-//! takes (2) alone and never (3) or (4).
+//! slot, (2) the target-dir lock (`lock_target_dir`, every gate that runs,
+//! on its `CARGO_TARGET_DIR` or else the worktree's `target/`), (3)
+//! `/tmp/aien-gb10.lock`, (4) aien-proof's `slots/gpu.lock` when the
+//! aien-proof board directory exists. A holder of (2) already has its slot
+//! and never waits for one, so a gate blocked on (2) with a slot in hand
+//! cannot close a cycle; the worker's target priming takes (2) alone and
+//! never (3) or (4). Known limit: a gb10 gate is never killed on timeout,
+//! so a hung one holds (2) and (3) until it exits on its own; every other
+//! gate of that target dir waits behind it (the receipt says
+//! `timeout_exceeded`).
 //!
 //! GPU job protocol (CR-028, CR-029, CR-033, CR-052, CR-053): refuse at once
 //! (never wait, never steal) if the quiet flag file exists or an `est_load`
