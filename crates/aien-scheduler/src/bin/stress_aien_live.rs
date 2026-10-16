@@ -1,5 +1,4 @@
-use futures_util::StreamExt;
-use reqwest::Client;
+use aien_localhttp::Client;
 use serde_json::json;
 use std::fs;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -107,11 +106,9 @@ async fn main() {
     println!("     Target Substrate: NVIDIA DGX Spark (Unified Memory Architecture)");
     println!("================================================================================\n");
 
-    let client = Client::builder()
-        .timeout(Duration::from_secs(60))
-        .pool_max_idle_per_host(100)
-        .build()
-        .expect("Failed to create HTTP client");
+    // One connection per request (no pool): latencies include the local
+    // TCP connect, which the old pooled client mostly hid.
+    let client = Client::builder().timeout(Duration::from_secs(60)).build();
 
     // Print initial baseline memory of AIEN services
     println!("--- Initial Service Memory Baselines ---");
@@ -335,31 +332,28 @@ async fn stress_seat_inference(client: &Client) {
                     .send()
                     .await;
 
-                if let Ok(response) = res {
-                    let mut stream = response.bytes_stream();
+                if let Ok(mut response) = res {
                     let mut first_token = true;
-                    let mut last_chunk_time = Instant::now();
+                    let mut last_event_time = Instant::now();
                     let mut tokens_received = 0;
 
-                    while let Some(chunk) = stream.next().await {
-                        if let Ok(bytes) = chunk {
-                            let now = Instant::now();
-                            if first_token {
-                                let ttft = req_t0.elapsed().as_secs_f64() * 1000.0;
-                                ttft_list.lock().push(ttft);
-                                first_token = false;
-                            } else {
-                                let itl = now.duration_since(last_chunk_time).as_secs_f64() * 1000.0;
-                                itl_list.lock().push(itl);
-                            }
-                            last_chunk_time = now;
-                            let text = String::from_utf8_lossy(&bytes);
-                            for line in text.lines() {
-                                if line.starts_with("data: {") {
-                                    tokens_received += 1;
-                                }
-                            }
+                    // TTFT and ITL are timed per SSE data event as it is read,
+                    // so an event split across TCP reads is counted once.
+                    while let Ok(Some(line)) = response.next_line().await {
+                        if !line.starts_with("data: {") {
+                            continue;
                         }
+                        let now = Instant::now();
+                        if first_token {
+                            let ttft = req_t0.elapsed().as_secs_f64() * 1000.0;
+                            ttft_list.lock().push(ttft);
+                            first_token = false;
+                        } else {
+                            let itl = now.duration_since(last_event_time).as_secs_f64() * 1000.0;
+                            itl_list.lock().push(itl);
+                        }
+                        last_event_time = now;
+                        tokens_received += 1;
                     }
                     let e2e = req_t0.elapsed().as_secs_f64() * 1000.0;
                     e2e_list.lock().push(e2e);

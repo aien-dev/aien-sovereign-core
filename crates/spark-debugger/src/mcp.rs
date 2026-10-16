@@ -1,4 +1,4 @@
-use reqwest::Client;
+use aien_localhttp::Client;
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tracing::info;

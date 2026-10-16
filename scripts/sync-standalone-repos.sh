@@ -29,9 +29,12 @@ MONOREPO_GIT_URL="https://github.com/aien-spark/aien-sovereign-core"
 # appended deps. Keep this list explicit: appending a dep changes what the
 # mirror builds, so each entry must be a reviewed decision.
 #   spark-harness: aien-proof and blake3 back the verified completion gate (#533).
+#   cortex-rs, spark-supervisor, spark-dream, spark-debugger: aien-localhttp
+#   replaces reqwest for their local http calls (#553).
 manifest_append_deps() {
   case "$1" in
     spark-harness) echo "aien-proof blake3" ;;
+    cortex-rs | spark-supervisor | spark-dream | spark-debugger) echo "aien-localhttp" ;;
     *) echo "" ;;
   esac
 }

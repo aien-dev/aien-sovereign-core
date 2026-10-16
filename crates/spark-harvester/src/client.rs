@@ -1,13 +1,15 @@
+use aien_localhttp::Client;
 use aien_provenance::{GrantPermissions, SourceGrant};
-use reqwest::Client;
 use serde_json::{json, Value};
 use std::process::Command;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum ClientError {
+    /// Transport, framing, size or decode failure. The client speaks plain
+    /// http to local endpoints only; an https endpoint is refused here.
     #[error("Network request failed: {0}")]
-    Reqwest(#[from] reqwest::Error),
+    Http(#[from] aien_localhttp::Error),
     #[error("Vault key resolution failed for {0}: {1}")]
     VaultKey(String, String),
     #[error("API returned error: {0}")]
@@ -31,8 +33,7 @@ impl HarvesterClient {
         Self {
             http: Client::builder()
                 .timeout(std::time::Duration::from_secs(60))
-                .build()
-                .unwrap(),
+                .build(),
         }
     }
 
@@ -129,5 +130,90 @@ impl HarvesterClient {
 
         self.query_openai_compat(endpoint_url, api_key, model, prompt)
             .await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use aien_localhttp::test_server::{response, serve_once};
+
+    #[tokio::test]
+    async fn query_openai_compat_sends_the_same_request_and_reads_content() {
+        let (base, server) = serve_once(response(
+            "200 OK",
+            "application/json",
+            r#"{"choices":[{"message":{"content":"answer"}}]}"#,
+        ))
+        .await;
+        let got = HarvesterClient::new()
+            .query_openai_compat(&format!("{base}/v1/chat/completions"), "key", "m", "q")
+            .await
+            .unwrap();
+        assert_eq!(got, "answer");
+        let request = server.await.unwrap();
+        assert!(
+            request.starts_with("POST /v1/chat/completions HTTP/1.1\r\n"),
+            "{request}"
+        );
+        assert!(request.contains("\r\nAuthorization: Bearer key\r\n"));
+        assert_eq!(request.matches("Content-Type: application/json").count(), 1);
+        let body: Value = serde_json::from_str(request.split("\r\n\r\n").nth(1).unwrap()).unwrap();
+        assert_eq!(
+            body,
+            json!({
+                "model": "m",
+                "messages": [{"role": "user", "content": "q"}],
+                "temperature": 0.6
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn query_openai_compat_missing_content_is_empty_string() {
+        let (base, _server) = serve_once(response("200 OK", "application/json", "{}")).await;
+        let got = HarvesterClient::new()
+            .query_openai_compat(&base, "k", "m", "q")
+            .await
+            .unwrap();
+        assert_eq!(got, "");
+    }
+
+    #[tokio::test]
+    async fn query_openai_compat_reports_status_bad_json_and_https() {
+        let (base, _server) =
+            serve_once(response("429 Too Many Requests", "text/plain", "slow down")).await;
+        let err = HarvesterClient::new()
+            .query_openai_compat(&base, "k", "m", "q")
+            .await
+            .unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "API returned error: 429 Too Many Requests: slow down"
+        );
+
+        let (base, _server) = serve_once(response("200 OK", "application/json", "nope")).await;
+        let err = HarvesterClient::new()
+            .query_openai_compat(&base, "k", "m", "q")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ClientError::Http(_)), "{err:?}");
+
+        let err = HarvesterClient::new()
+            .query_openai_compat(
+                "https://api.example.test/v1/chat/completions",
+                "k",
+                "m",
+                "q",
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                ClientError::Http(aien_localhttp::Error::HttpsRefused { .. })
+            ),
+            "{err:?}"
+        );
     }
 }

@@ -1,4 +1,4 @@
-use reqwest::Client;
+use aien_localhttp::Client;
 use rusqlite::params;
 use serde_json::json;
 use tracing::{error, info};
@@ -23,6 +23,23 @@ fn debugger_hive_db_path() -> std::path::PathBuf {
     home.join(".config/cortex/hive.db")
 }
 
+/// POSTs the bug report to `{cortex_url}/api/cortex/write`. Only a transport
+/// failure is an error; the response status is not checked (unchanged).
+async fn post_bug_report(
+    client: &Client,
+    cortex_url: &str,
+    token: &str,
+    payload: &serde_json::Value,
+) -> Result<(), aien_localhttp::Error> {
+    client
+        .post(format!("{}/api/cortex/write", cortex_url))
+        .header("Authorization", format!("Bearer {}", token.trim()))
+        .json(payload)
+        .send()
+        .await
+        .map(|_| ())
+}
+
 pub async fn report_incident(client: &Client, report: &SystemAuditReport, failure_summary: &str) {
     info!("[DebuggerReporter] Reporting incident: {}", failure_summary);
 
@@ -36,14 +53,7 @@ pub async fn report_incident(client: &Client, report: &SystemAuditReport, failur
         Report Details: {:?}", failure_summary, report)
         });
 
-        let write_url = format!("{}/api/cortex/write", CORTEX_URL);
-        if let Err(e) = client
-            .post(&write_url)
-            .header("Authorization", format!("Bearer {}", token.trim()))
-            .json(&payload)
-            .send()
-            .await
-        {
+        if let Err(e) = post_bug_report(client, CORTEX_URL, &token, &payload).await {
             error!(
                 "[DebuggerReporter] Failed to commit bug report to Cortex: {}",
                 e
@@ -77,5 +87,60 @@ pub async fn report_incident(client: &Client, report: &SystemAuditReport, failur
                 info!("[DebuggerReporter] Emitted alert comb to Honeycomb Wall.");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use aien_localhttp::test_server::{closed_port, response, serve_once};
+
+    #[test]
+    fn cortex_url_is_plain_http() {
+        assert!(aien_localhttp::Url::parse(CORTEX_URL).is_ok());
+    }
+
+    #[tokio::test]
+    async fn post_bug_report_sends_the_same_request() {
+        let (base, server) = serve_once(response("200 OK", "application/json", "{}")).await;
+        let payload = json!({"space": "atlas-memory", "entityType": "bug_report"});
+        post_bug_report(&Client::new(), &base, "  tok\n", &payload)
+            .await
+            .unwrap();
+        let request = server.await.unwrap();
+        assert!(
+            request.starts_with("POST /api/cortex/write HTTP/1.1\r\n"),
+            "{request}"
+        );
+        assert!(
+            request.contains("\r\nAuthorization: Bearer tok\r\n"),
+            "{request}"
+        );
+        assert!(request.contains("\r\nContent-Type: application/json\r\n"));
+        let body: serde_json::Value =
+            serde_json::from_str(request.split("\r\n\r\n").nth(1).unwrap()).unwrap();
+        assert_eq!(body, payload);
+    }
+
+    #[tokio::test]
+    async fn post_bug_report_ignores_status_but_reports_transport_failures() {
+        let (base, _server) =
+            serve_once(response("500 Internal Server Error", "text/plain", "")).await;
+        assert!(post_bug_report(&Client::new(), &base, "t", &json!({}))
+            .await
+            .is_ok());
+
+        let err = post_bug_report(&Client::new(), &closed_port().await, "t", &json!({}))
+            .await
+            .unwrap_err();
+        assert!(err.is_connect(), "{err:?}");
+
+        let err = post_bug_report(&Client::new(), "https://127.0.0.1:1", "t", &json!({}))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, aien_localhttp::Error::HttpsRefused { .. }),
+            "{err:?}"
+        );
     }
 }
