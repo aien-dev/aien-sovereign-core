@@ -1,0 +1,55 @@
+=== mutant M1-multi-allowed at 45ef8f8: perl -0pi -e 's/(\s+)multi \+= 1;/$1multi += 1;$1allowed.push(id);/'
++                        allowed.push(id);
+thread 'exact_walks_write_the_one_program' (2011824) panicked at crates/aien-omegese-constraint/tests/echo_walks.rs:109:85:
+called `Result::unwrap()` on an `Err` value: "the oracle refused the program so far (REFUSED omegese: line 1: not the target); program: \"fn f a uint b uint to uint\\n a \""
+thread 'real_oracle_walks_write_programs_emit_accepts' (2027536) panicked at crates/aien-omegese-constraint/tests/echo_walks.rs:406:33:
+walk 1: the oracle refused the program so far (REFUSED omegese: line 2: ( ... ) must hold exactly one value; 'a' is extra); program: "fn f a uint b uint to uint\nsn uint add b (81046 a "
+test result: FAILED. 4 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.72s
+error: test failed, to rerun pass `-p aien-omegese-constraint --test echo_walks`
+=== mutant M2-separators-unchecked at 45ef8f8: perl -0pi -e 's/if !\(a\.is_empty\(\) && i == 0\) \{/if false {/'
+-                        if !(a.is_empty() && i == 0) {
++                        if false {
+thread 'an_oracle_refusal_goes_through_the_rollback' (2031814) panicked at crates/aien-omegese-constraint/tests/echo_walks.rs:187:13:
+the oracle refused the program so far (REFUSED omegese: line 1: not the target); program: "fn f a uint b uint to uint\n ("
+thread 'exact_walks_write_the_one_program' (2031858) panicked at crates/aien-omegese-constraint/tests/echo_walks.rs:109:85:
+called `Result::unwrap()` on an `Err` value: "the oracle refused the program so far (REFUSED omegese: line 1: not the target); program: \"fn f a uint b uint to uint\\nret add a  (\""
+thread 'real_oracle_walks_write_programs_emit_accepts' (2047200) panicked at crates/aien-omegese-constraint/tests/echo_walks.rs:406:33:
+walk 1: the oracle refused the program so far (REFUSED omegese: line 5: ( ... ) must hold exactly one value; '(' is extra); program: "fn f a uint b uint to uint\ntn uint a\n\n\nzcdv2 add (9 ("
+test result: FAILED. 3 passed; 3 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.71s
+error: test failed, to rerun pass `-p aien-omegese-constraint --test echo_walks`
+=== mutant M3-after-part-unchecked at 45ef8f8: perl -0pi -e 's/if b\.is_empty\(\)\n(\s+)\|\| self/if true\n$1|| self/'
+-                    if b.is_empty()
++                    if true
+thread 'an_oracle_refusal_goes_through_the_rollback' (2047802) panicked at crates/aien-omegese-constraint/tests/echo_walks.rs:187:13:
+the oracle refused the program so far (REFUSED omegese: line 1: not the target); program: "fn f a uint b uint to uint\n add"
+thread 'exact_walks_write_the_one_program' (2047804) panicked at crates/aien-omegese-constraint/tests/echo_walks.rs:109:85:
+called `Result::unwrap()` on an `Err` value: "the oracle refused the program so far (REFUSED omegese: line 1: not the target); program: \"fn f a uint b uint to uint\\n a\""
+thread 'real_oracle_walks_write_programs_emit_accepts' (2061924) panicked at crates/aien-omegese-constraint/tests/echo_walks.rs:406:33:
+walk 1: the oracle refused the program so far (REFUSED omegese: line 2: no text after this prefix makes a program emit accepts (add has 3 values after it; it takes 2)); program: "fn f a uint b uint to uint\nro add b a a"
+test result: FAILED. 3 passed; 3 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.68s
+error: test failed, to rerun pass `-p aien-omegese-constraint --test echo_walks`
+=== mutant M4-switch-off-masks-everything at 45ef8f8: perl -0pi -e 's/Phase::Body if !self\.framing\.mask_body => StepRule::Any,/Phase::Body if !self.framing.mask_body => StepRule::Allow((0..self.table.len() as u32).filter(|\&i| i != self.framing.stop_token).collect()),/'
+-            Phase::Body if !self.framing.mask_body => StepRule::Any,
++            Phase::Body if !self.framing.mask_body => StepRule::Allow((0..self.table.len() as u32).filter(|&i| i != self.framing.stop_token).collect()),
+thread 'every_switch_off_is_byte_identical_to_no_constraint' (2063049) panicked at crates/aien-omegese-constraint/tests/echo_walks.rs:247:13:
+assertion `left == right` failed
+  left: (0, 10, 0)
+ right: (0, 10, 10)
+thread 'the_fence_only_arm_forces_the_fence_and_nothing_else' (2123960) panicked at crates/aien-omegese-constraint/tests/echo_walks.rs:293:13:
+assertion `left == right` failed: the rest is the free run
+  left: [18, 26, 26, 40, 4, 32, 34, 37, 61, 24]
+ right: [63, 12, 1, 36, 45, 63, 62, 3, 25, 49]
+test result: FAILED. 4 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 39.55s
+error: test failed, to rerun pass `-p aien-omegese-constraint --test echo_walks`
+=== mutant M5-refusal-means-anything at 45ef8f8: perl -0pi -e 's/Answer::Refused\(line\) => \{\n\s+return Err\(format!\(\n\s+"the oracle refused the program so far \(\{line\}\); program: \{:\?\}",\n\s+String::from_utf8_lossy\(&program\)\n\s+\)\)\n\s+\}/Answer::Refused(_line) => return Ok(StepRule::Any)/'
+-            Answer::Refused(line) => {
+-                return Err(format!(
+-                    "the oracle refused the program so far ({line}); program: {:?}",
+-                    String::from_utf8_lossy(&program)
+-                ))
+-            }
++            Answer::Refused(_line) => return Ok(StepRule::Any)
+thread 'an_oracle_refusal_goes_through_the_rollback' (2124412) panicked at crates/aien-omegese-constraint/tests/echo_walks.rs:186:23:
+the refusal is an error: GenerateOutcome { emitted_tokens: 18, finish: Stop, prefill_ms: 1, decode_ms: 8, prompt_tokens: 10, reused_prompt_tokens: 0, decode_timing: StepTiming { total_ns: 0, attention_ns: 0, experts_ns: 0, lm_head_ns: 0, host_ns: 0, chip_ns: 0, launches: 18, route_ns: 0, moe_host_ns
+test result: FAILED. 5 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 38.28s
+error: test failed, to rerun pass `-p aien-omegese-constraint --test echo_walks`

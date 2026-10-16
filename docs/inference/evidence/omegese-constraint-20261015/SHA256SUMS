@@ -1,0 +1,5 @@
+81913d5745618fff31d98d3ef316632a1160092abbaecc32caf706d26dc876cd  ./host-tests.txt
+a161ebd6878febd6a3b1fdf8e8bfb34973acce0fa00a5e3acec791a436226727  ./mutants-red.txt
+240f8afe845e3edb3b0edc30e52d24b0c5d232de5d17f05c8a7d4581f36e3f51  ./qwen-vocab-debug.txt
+5b1f658da1d02c7ecffedb64eb10fd86b33722118f677bba2c38efef19374691  ./qwen-vocab-release.txt
+24ae42579c1ff4b2d571d238a52037b504c48b03eeb4b107e49a1d64b208b98c  ./real-oracle-walks.txt

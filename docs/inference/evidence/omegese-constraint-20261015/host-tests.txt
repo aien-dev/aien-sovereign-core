@@ -1,0 +1,79 @@
+quietlock: QUIETLOCK_REFUSED Spark quiet flag HELD (holder='ipw-interplane-py-removal quietlock interplane_Rust_build_test' pid=1787260 job=1787261 jobgroup=1787261 alive=yes expected_end=2026-10-16T01:48:17Z) at /home/drakestapleton/workspace/.spark-quiet. Builds and tests wait until it is released. The holder runs its commands under 'quietlock hold'.
+quietlock: QUIETLOCK_REFUSED Spark quiet flag HELD (holder='ipw-interplane-py-removal quietlock interplane_Rust_build_test' pid=1787260 job=1787261 jobgroup=1787261 alive=yes expected_end=2026-10-16T01:48:17Z) at /home/drakestapleton/workspace/.spark-quiet. Builds and tests wait until it is released. The holder runs its commands under 'quietlock hold'.
+quietlock: QUIETLOCK_REFUSED Spark quiet flag HELD (holder='ipw-interplane-py-removal quietlock interplane_Rust_build_test' pid=1787260 job=1787261 jobgroup=1787261 alive=yes expected_end=2026-10-16T01:48:17Z) at /home/drakestapleton/workspace/.spark-quiet. Builds and tests wait until it is released. The holder runs its commands under 'quietlock hold'.
+quietlock: QUIETLOCK_REFUSED Spark quiet flag HELD (holder='ipw-interplane-py-removal quietlock interplane_Rust_build_test' pid=1787260 job=1787261 jobgroup=1787261 alive=yes expected_end=2026-10-16T01:48:17Z) at /home/drakestapleton/workspace/.spark-quiet. Builds and tests wait until it is released. The holder runs its commands under 'quietlock hold'.
+quietlock: QUIETLOCK_REFUSED Spark quiet flag HELD (holder='ipw-interplane-py-removal quietlock interplane_Rust_build_test' pid=1787260 job=1787261 jobgroup=1787261 alive=yes expected_end=2026-10-16T01:48:17Z) at /home/drakestapleton/workspace/.spark-quiet. Builds and tests wait until it is released. The holder runs its commands under 'quietlock hold'.
+quietlock: QUIETLOCK_REFUSED Spark quiet flag HELD (holder='ipw-interplane-py-removal quietlock interplane_Rust_build_test' pid=1787260 job=1787261 jobgroup=1787261 alive=yes expected_end=2026-10-16T01:48:17Z) at /home/drakestapleton/workspace/.spark-quiet. Builds and tests wait until it is released. The holder runs its commands under 'quietlock hold'.
+quietlock: QUIETLOCK_REFUSED Spark quiet flag HELD (holder='ipw-interplane-py-removal quietlock interplane_Rust_build_test' pid=1787260 job=1787261 jobgroup=1787261 alive=yes expected_end=2026-10-16T01:48:17Z) at /home/drakestapleton/workspace/.spark-quiet. Builds and tests wait until it is released. The holder runs its commands under 'quietlock hold'.
+quietlock: QUIETLOCK_REFUSED Spark quiet flag HELD (holder='ipw-interplane-py-removal quietlock interplane_Rust_build_test' pid=1787260 job=1787261 jobgroup=1787261 alive=yes expected_end=2026-10-16T01:48:17Z) at /home/drakestapleton/workspace/.spark-quiet. Builds and tests wait until it is released. The holder runs its commands under 'quietlock hold'.
+quietlock: QUIETLOCK_REFUSED Spark quiet flag HELD (holder='ipw-interplane-py-removal quietlock interplane_Rust_build_test' pid=1787260 job=1787261 jobgroup=1787261 alive=yes expected_end=2026-10-16T01:48:17Z) at /home/drakestapleton/workspace/.spark-quiet. Builds and tests wait until it is released. The holder runs its commands under 'quietlock hold'.
+quietlock: QUIETLOCK_REFUSED Spark quiet flag HELD (holder='ipw-interplane-py-removal quietlock interplane_Rust_build_test' pid=1787260 job=1787261 jobgroup=1787261 alive=yes expected_end=2026-10-16T01:48:17Z) at /home/drakestapleton/workspace/.spark-quiet. Builds and tests wait until it is released. The holder runs its commands under 'quietlock hold'.
+quietlock: QUIETLOCK_REFUSED Spark quiet flag HELD (holder='ipw-interplane-py-removal quietlock interplane_Rust_build_test' pid=1787260 job=1787261 jobgroup=1787261 alive=yes expected_end=2026-10-16T01:48:17Z) at /home/drakestapleton/workspace/.spark-quiet. Builds and tests wait until it is released. The holder runs its commands under 'quietlock hold'.
+quietlock: QUIETLOCK_REFUSED Spark quiet flag HELD (holder='ipw-interplane-py-removal quietlock interplane_Rust_build_test' pid=1787260 job=1787261 jobgroup=1787261 alive=yes expected_end=2026-10-16T01:48:17Z) at /home/drakestapleton/workspace/.spark-quiet. Builds and tests wait until it is released. The holder runs its commands under 'quietlock hold'.
+quietlock: QUIETLOCK_REFUSED Spark quiet flag HELD (holder='ipw-interplane-py-removal quietlock interplane_Rust_build_test' pid=1787260 job=1787261 jobgroup=1787261 alive=yes expected_end=2026-10-16T01:48:17Z) at /home/drakestapleton/workspace/.spark-quiet. Builds and tests wait until it is released. The holder runs its commands under 'quietlock hold'.
+quietlock: QUIETLOCK_REFUSED Spark quiet flag HELD (holder='ipw-interplane-py-removal quietlock interplane_Rust_build_test' pid=1787260 job=1787261 jobgroup=1787261 alive=yes expected_end=2026-10-16T01:48:17Z) at /home/drakestapleton/workspace/.spark-quiet. Builds and tests wait until it is released. The holder runs its commands under 'quietlock hold'.
+quietlock: QUIETLOCK_REFUSED Spark quiet flag HELD (holder='ipw-interplane-py-removal quietlock interplane_Rust_build_test' pid=1787260 job=1787261 jobgroup=1787261 alive=yes expected_end=2026-10-16T01:48:17Z) at /home/drakestapleton/workspace/.spark-quiet. Builds and tests wait until it is released. The holder runs its commands under 'quietlock hold'.
+quietlock: QUIETLOCK_REFUSED Spark quiet flag HELD (holder='ipw-interplane-py-removal quietlock interplane_Rust_build_test' pid=1787260 job=1787261 jobgroup=1787261 alive=yes expected_end=2026-10-16T01:48:17Z) at /home/drakestapleton/workspace/.spark-quiet. Builds and tests wait until it is released. The holder runs its commands under 'quietlock hold'.
+quietlock: QUIETLOCK_REFUSED Spark quiet flag HELD (holder='ipw-interplane-py-removal quietlock interplane_Rust_build_test' pid=1787260 job=1787261 jobgroup=1787261 alive=yes expected_end=2026-10-16T01:48:17Z) at /home/drakestapleton/workspace/.spark-quiet. Builds and tests wait until it is released. The holder runs its commands under 'quietlock hold'.
+quietlock: QUIETLOCK_REFUSED Spark quiet flag HELD (holder='ipw-interplane-py-removal quietlock interplane_Rust_build_test' pid=1787260 job=1787261 jobgroup=1787261 alive=yes expected_end=2026-10-16T01:48:17Z) at /home/drakestapleton/workspace/.spark-quiet. Builds and tests wait until it is released. The holder runs its commands under 'quietlock hold'.
+quietlock: QUIETLOCK_REFUSED Spark quiet flag HELD (holder='ipw-interplane-py-removal quietlock interplane_Rust_build_test' pid=1787260 job=1787261 jobgroup=1787261 alive=yes expected_end=2026-10-16T01:48:17Z) at /home/drakestapleton/workspace/.spark-quiet. Builds and tests wait until it is released. The holder runs its commands under 'quietlock hold'.
+quietlock: QUIETLOCK_REFUSED Spark quiet flag HELD (holder='ipw-interplane-py-removal quietlock interplane_Rust_build_test' pid=1787260 job=1787261 jobgroup=1787261 alive=yes expected_end=2026-10-16T01:48:17Z) at /home/drakestapleton/workspace/.spark-quiet. Builds and tests wait until it is released. The holder runs its commands under 'quietlock hold'.
+quietlock: QUIETLOCK_REFUSED Spark quiet flag HELD (holder='ipw-interplane-py-removal quietlock interplane_Rust_build_test' pid=1787260 job=1787261 jobgroup=1787261 alive=yes expected_end=2026-10-16T01:48:17Z) at /home/drakestapleton/workspace/.spark-quiet. Builds and tests wait until it is released. The holder runs its commands under 'quietlock hold'.
+quietlock: QUIETLOCK_REFUSED Spark quiet flag HELD (holder='ipw-interplane-py-removal quietlock interplane_Rust_build_test' pid=1787260 job=1787261 jobgroup=1787261 alive=yes expected_end=2026-10-16T01:48:17Z) at /home/drakestapleton/workspace/.spark-quiet. Builds and tests wait until it is released. The holder runs its commands under 'quietlock hold'.
+quietlock: QUIETLOCK_REFUSED Spark quiet flag HELD (holder='ipw-interplane-py-removal quietlock interplane_Rust_build_test' pid=1787260 job=1787261 jobgroup=1787261 alive=yes expected_end=2026-10-16T01:48:17Z) at /home/drakestapleton/workspace/.spark-quiet. Builds and tests wait until it is released. The holder runs its commands under 'quietlock hold'.
+quietlock: QUIETLOCK_REFUSED Spark quiet flag HELD (holder='ipw-interplane-py-removal quietlock interplane_Rust_build_test' pid=1787260 job=1787261 jobgroup=1787261 alive=yes expected_end=2026-10-16T01:48:17Z) at /home/drakestapleton/workspace/.spark-quiet. Builds and tests wait until it is released. The holder runs its commands under 'quietlock hold'.
+quietlock: QUIETLOCK_REFUSED Spark quiet flag HELD (holder='ipw-interplane-py-removal quietlock interplane_Rust_build_test' pid=1787260 job=1787261 jobgroup=1787261 alive=yes expected_end=2026-10-16T01:48:17Z) at /home/drakestapleton/workspace/.spark-quiet. Builds and tests wait until it is released. The holder runs its commands under 'quietlock hold'.
+quietlock: QUIETLOCK_REFUSED Spark quiet flag HELD (holder='ipw-interplane-py-removal quietlock interplane_Rust_build_test' pid=1787260 job=1787261 jobgroup=1787261 alive=yes expected_end=2026-10-16T01:48:17Z) at /home/drakestapleton/workspace/.spark-quiet. Builds and tests wait until it is released. The holder runs its commands under 'quietlock hold'.
+quietlock: QUIETLOCK_REFUSED Spark quiet flag HELD (holder='ipw-interplane-py-removal quietlock interplane_Rust_build_test' pid=1787260 job=1787261 jobgroup=1787261 alive=yes expected_end=2026-10-16T01:48:17Z) at /home/drakestapleton/workspace/.spark-quiet. Builds and tests wait until it is released. The holder runs its commands under 'quietlock hold'.
+quietlock: QUIETLOCK_REFUSED Spark quiet flag HELD (holder='ipw-interplane-py-removal quietlock interplane_Rust_build_test' pid=1787260 job=1787261 jobgroup=1787261 alive=yes expected_end=2026-10-16T01:48:17Z) at /home/drakestapleton/workspace/.spark-quiet. Builds and tests wait until it is released. The holder runs its commands under 'quietlock hold'.
+quietlock: QUIETLOCK_REFUSED Spark quiet flag HELD (holder='ipw-interplane-py-removal quietlock interplane_Rust_build_test' pid=1787260 job=1787261 jobgroup=1787261 alive=yes expected_end=2026-10-16T01:48:17Z) at /home/drakestapleton/workspace/.spark-quiet. Builds and tests wait until it is released. The holder runs its commands under 'quietlock hold'.
+quietlock: QUIETLOCK_REFUSED Spark quiet flag HELD (holder='ipw-interplane-py-removal quietlock interplane_Rust_build_test' pid=1787260 job=1787261 jobgroup=1787261 alive=yes expected_end=2026-10-16T01:48:17Z) at /home/drakestapleton/workspace/.spark-quiet. Builds and tests wait until it is released. The holder runs its commands under 'quietlock hold'.
+quietlock: QUIETLOCK_REFUSED Spark quiet flag HELD (holder='ipw-interplane-py-removal quietlock interplane_Rust_build_test' pid=1787260 job=1787261 jobgroup=1787261 alive=yes expected_end=2026-10-16T01:48:17Z) at /home/drakestapleton/workspace/.spark-quiet. Builds and tests wait until it is released. The holder runs its commands under 'quietlock hold'.
+warning: aien-omega-gpu@0.1.0: aien-omega-gpu: no AIEN_OMEGA_DIR or AIEN_OMEGA_GPU_LIB, building the CPU stub
+   Compiling aien-omegese-constraint v0.1.0 (/home/drakestapleton/workspace/g2-omegese-constraint/crates/aien-omegese-constraint)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.45s
+     Running unittests src/lib.rs (target/debug/deps/aien_omegese_constraint-8160e7c2b7bf0f23)
+
+running 14 tests
+test word::tests::number_prefixes_at_the_64_bit_edges ... ok
+test table::tests::shapes ... ok
+test word::tests::number_values_are_canonical ... ok
+test constraint::tests::blank_runs_shrink_to_one_byte ... ok
+test oracle::tests::refusals_and_contract_breaks ... ok
+test signature::tests::header_lines_round_trip ... ok
+test oracle::tests::numbers_span_u64_and_i64 ... ok
+test word::tests::a_new_name_stops_at_63_characters ... ok
+test signature::tests::requirement_lines_make_the_header ... ok
+test oracle::tests::the_section_6_2_example_parses ... ok
+test word::tests::words_names_and_separators ... ok
+test table::tests::greedy_encoding_round_trips ... ok
+test table::tests::the_byte_alphabet_is_a_bijection ... ok
+test word::tests::number_prefixes_match_brute_force ... ok
+
+test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.46s
+
+     Running tests/echo_walks.rs (target/debug/deps/echo_walks-fc75283c9bfd6772)
+
+running 6 tests
+test real_oracle_blank_runs_are_interchangeable ... ignored, needs OMEGESE_BIN (the omegese binary built from omega main)
+test real_oracle_walks_write_programs_emit_accepts ... ignored, needs OMEGESE_BIN (the omegese binary built from omega main)
+test the_fence_only_arm_forces_the_fence_and_nothing_else ... ok
+test every_switch_off_is_byte_identical_to_no_constraint ... ok
+test an_oracle_refusal_goes_through_the_rollback ... ok
+test exact_walks_write_the_one_program ... ok
+
+test result: ok. 4 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 0.48s
+
+     Running tests/qwen_vocab.rs (target/debug/deps/qwen_vocab-20f5027443064287)
+
+running 1 test
+test qwen_vocab_writes_every_dev_program_through_the_real_oracle ... ignored, needs OMEGESE_BIN, QWEN_TOKENIZER and OMEGESE_DEV_DIRS
+
+test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests aien_omegese_constraint
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
