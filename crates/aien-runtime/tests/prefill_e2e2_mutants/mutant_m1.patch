@@ -1,9 +1,9 @@
 diff --git a/crates/aien-inference-abi/src/transformer_backend.rs b/crates/aien-inference-abi/src/transformer_backend.rs
-index 0ea923d..68a0920 100644
+index cdcfc49..dea36bb 100644
 --- a/crates/aien-inference-abi/src/transformer_backend.rs
 +++ b/crates/aien-inference-abi/src/transformer_backend.rs
-@@ -1675,10 +1675,15 @@ impl AienInferenceBackend for NativeTransformerBackend {
-                     layers: vec![LayerKvCache::default(); num_layers],
+@@ -2534,10 +2534,15 @@ impl AienInferenceBackend for NativeTransformerBackend {
+                     kv_dtype,
                  });
  
 +            // MUTANT m1 (PE2E2-A): replay the whole earlier context with every prefill request

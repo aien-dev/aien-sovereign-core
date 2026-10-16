@@ -1,9 +1,9 @@
 diff --git a/crates/aien-kv-cache/src/lib.rs b/crates/aien-kv-cache/src/lib.rs
-index cd73fc7..2d35217 100644
+index 87df391..b357c5d 100644
 --- a/crates/aien-kv-cache/src/lib.rs
 +++ b/crates/aien-kv-cache/src/lib.rs
-@@ -1193,6 +1193,8 @@ impl<B: aien_platform::UnifiedBuffer> AienKvManager<B> {
-                 let new_blk = self.allocate_block()?;
+@@ -1473,6 +1473,8 @@ impl<B: aien_platform::UnifiedBuffer> AienKvManager<B> {
+                 self.cow_faults += 1;
                  if let Some(pool) = &mut self.tensor_pool {
                      pool.copy_block(last_blk_id, new_blk);
 +                    // MUTANT m3 (PE2E2-A): copy-on-write wipes the old shared tail block after the copy
