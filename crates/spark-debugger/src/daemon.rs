@@ -1,4 +1,4 @@
-use reqwest::Client;
+use aien_localhttp::Client;
 use std::time::Duration;
 use tokio::time::sleep;
 use tracing::{info, warn};

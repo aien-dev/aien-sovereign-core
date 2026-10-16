@@ -1,10 +1,10 @@
+use aien_localhttp::Client;
 use axum::{
     extract::{Path as AxumPath, Query, State},
     http::StatusCode,
     response::{IntoResponse, Response},
     Json,
 };
-use reqwest::Client;
 use serde_json::json;
 use std::sync::Arc;
 use std::time::{Duration, Instant};

@@ -29,9 +29,24 @@ MONOREPO_GIT_URL="https://github.com/aien-spark/aien-sovereign-core"
 # appended deps. Keep this list explicit: appending a dep changes what the
 # mirror builds, so each entry must be a reviewed decision.
 #   spark-harness: aien-proof and blake3 back the verified completion gate (#533).
+#   cortex-rs, spark-supervisor, spark-dream, spark-debugger: aien-localhttp
+#   replaces reqwest for their local http calls (#553).
 manifest_append_deps() {
   case "$1" in
     spark-harness) echo "aien-proof blake3" ;;
+    cortex-rs | spark-supervisor | spark-dream | spark-debugger) echo "aien-localhttp" ;;
+    *) echo "" ;;
+  esac
+}
+
+# Source [dev-dependencies] that sync_manifest may rewrite or APPEND in a
+# mirror manifest, per repo. Same rule as manifest_append_deps: explicit,
+# reviewed entries only.
+#   cortex-rs, spark-dream, spark-debugger: their #[cfg(test)] code uses
+#   aien_localhttp::test_server, which needs the `test-server` feature (#553).
+manifest_append_dev_deps() {
+  case "$1" in
+    cortex-rs | spark-dream | spark-debugger) echo "aien-localhttp" ;;
     *) echo "" ;;
   esac
 }
@@ -245,6 +260,47 @@ sync_manifest() {
     }
   ' "$src_manifest" "$tmp" > "$tmp_deps"
   mv "$tmp_deps" "$tmp"
+
+  # [dev-dependencies]: only keys named by manifest_append_dev_deps are touched.
+  # Each is rewritten from its source line (path to the pinned git dep) and
+  # replaces or is appended to the mirror's entry; mirrors with no list entry
+  # stay byte-identical.
+  local append_dev_deps
+  append_dev_deps=$(manifest_append_dev_deps "$repo_name")
+  if [[ -n "$append_dev_deps" ]]; then
+    tmp_deps=$(mktemp)
+    awk -v url="$MONOREPO_GIT_URL" -v rev="$mono_rev" -v allow="$append_dev_deps" '
+      function key_of(line,   k) { k = line; sub(/[[:space:]]*=.*/, "", k); gsub(/^[[:space:]]+/, "", k); return k }
+      function is_dev(line) { return line ~ /^[[:space:]]*\[dev-dependencies\][[:space:]]*$/ }
+      function emit_missing(   i) { for (i = 1; i <= n; i++) if (!(keys[i] in seen)) print lines[i]; emitted = 1 }
+      BEGIN { na = split(allow, al, " "); for (i = 1; i <= na; i++) allowed[al[i]] = 1 }
+      FNR == NR {
+        if ($0 ~ /^[[:space:]]*\[/) { in_src = is_dev($0); next }
+        if (in_src && $0 ~ /^[[:space:]]*[A-Za-z0-9_-]+[[:space:]]*=/ && key_of($0) in allowed) {
+          line = $0
+          gsub(/path[[:space:]]*=[[:space:]]*"\.\.\/[^"]*"/, "git = \"" url "\", rev = \"" rev "\"", line)
+          n++; keys[n] = key_of(line); lines[n] = line; src_line[keys[n]] = line
+        }
+        next
+      }
+      /^[[:space:]]*\[/ {
+        if (in_dst && !emitted) emit_missing()
+        in_dst = is_dev($0)
+        if (in_dst) has_dst = 1
+        print; next
+      }
+      in_dst && /^[[:space:]]*[A-Za-z0-9_-]+[[:space:]]*=/ {
+        k = key_of($0)
+        if (k in src_line) { seen[k] = 1; print src_line[k]; next }
+      }
+      { print }
+      END {
+        if (in_dst && !emitted) emit_missing()
+        else if (!has_dst && n > 0) { print ""; print "[dev-dependencies]"; emit_missing() }
+      }
+    ' "$src_manifest" "$tmp" > "$tmp_deps"
+    mv "$tmp_deps" "$tmp"
+  fi
 
   if cmp -s "$tmp" "$dest_manifest"; then
     rm -f "$tmp"

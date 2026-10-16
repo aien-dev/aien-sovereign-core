@@ -1,4 +1,4 @@
-use reqwest::Client;
+use aien_localhttp::Client;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::time::Duration;
@@ -37,17 +37,23 @@ pub struct SystemAuditReport {
     pub overall_healthy: bool,
 }
 
-pub async fn audit_services(client: &Client) -> Vec<ServiceAuditResult> {
-    let endpoints = [
-        ("Cortex Memory", "http://127.0.0.1:18080/health"),
-        ("Sovereign Cockpit", "http://127.0.0.1:18095/api/pulse"),
-        ("Cortex ONNX Encoder", "http://127.0.0.1:18081/health"),
-        ("Local Model Seat", "http://127.0.0.1:18006/v1/models"),
-        ("Matrix Conduit", "http://127.0.0.1:6167"),
-    ];
+const SERVICE_ENDPOINTS: [(&str, &str); 5] = [
+    ("Cortex Memory", "http://127.0.0.1:18080/health"),
+    ("Sovereign Cockpit", "http://127.0.0.1:18095/api/pulse"),
+    ("Cortex ONNX Encoder", "http://127.0.0.1:18081/health"),
+    ("Local Model Seat", "http://127.0.0.1:18006/v1/models"),
+    ("Matrix Conduit", "http://127.0.0.1:6167"),
+];
 
+pub async fn audit_services(client: &Client) -> Vec<ServiceAuditResult> {
+    audit_endpoints(client, &SERVICE_ENDPOINTS).await
+}
+
+/// Probes each endpoint once (1500 ms each). Reachable means any answer
+/// below 500; a connect error, timeout or malformed reply is unreachable.
+async fn audit_endpoints(client: &Client, endpoints: &[(&str, &str)]) -> Vec<ServiceAuditResult> {
     let mut results = Vec::new();
-    for (name, ep) in endpoints {
+    for &(name, ep) in endpoints {
         let start = std::time::Instant::now();
         match client
             .get(ep)
@@ -164,5 +170,72 @@ pub async fn run_full_audit(client: &Client, workspace_dir: &str) -> SystemAudit
         invariants,
         build,
         overall_healthy,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use aien_localhttp::test_server::{closed_port, response, serve, serve_silent};
+
+    #[test]
+    fn service_endpoints_are_plain_http() {
+        for (name, ep) in SERVICE_ENDPOINTS {
+            assert!(aien_localhttp::Url::parse(ep).is_ok(), "{name} {ep}");
+        }
+    }
+
+    #[tokio::test]
+    async fn audit_endpoints_keeps_the_reachability_rule() {
+        let (base, server) = serve(vec![
+            response("200 OK", "text/plain", "ok"),
+            response("404 Not Found", "text/plain", ""),
+            response("503 Service Unavailable", "text/plain", ""),
+        ])
+        .await;
+        let ok = format!("{base}/health");
+        let missing = format!("{base}/v1/models");
+        let down = format!("{base}/api/pulse");
+        let refused = closed_port().await;
+        let results = audit_endpoints(
+            &Client::new(),
+            &[
+                ("ok", &ok),
+                ("missing", &missing),
+                ("down", &down),
+                ("refused", &refused),
+                ("tls", "https://127.0.0.1:1/health"),
+            ],
+        )
+        .await;
+        let summary: Vec<(bool, Option<u16>)> = results
+            .iter()
+            .map(|r| (r.reachable, r.status_code))
+            .collect();
+        assert_eq!(
+            summary,
+            vec![
+                (true, Some(200)),
+                (true, Some(404)),
+                (false, Some(503)),
+                (false, None),
+                (false, None),
+            ]
+        );
+        assert_eq!(results[0].endpoint, ok);
+        let requests = server.await.unwrap();
+        assert!(requests[0].starts_with("GET /health HTTP/1.1\r\n"));
+        assert!(requests[1].starts_with("GET /v1/models HTTP/1.1\r\n"));
+    }
+
+    #[tokio::test]
+    async fn audit_endpoints_bounds_a_silent_service_at_1500_ms() {
+        let (base, _server) = serve_silent().await;
+        let started = std::time::Instant::now();
+        let results = audit_endpoints(&Client::new(), &[("silent", &base)]).await;
+        assert!(!results[0].reachable);
+        assert_eq!(results[0].status_code, None);
+        assert!(started.elapsed() < Duration::from_secs(4));
+        assert!(results[0].latency_ms >= 1400, "{}", results[0].latency_ms);
     }
 }

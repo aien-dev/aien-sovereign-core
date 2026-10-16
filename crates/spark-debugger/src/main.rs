@@ -1,5 +1,5 @@
+use aien_localhttp::Client;
 use clap::{Parser, Subcommand};
-use reqwest::Client;
 use std::time::Duration;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
@@ -52,11 +52,8 @@ fn default_debugger_workspace() -> String {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
 
-    let client = Client::builder()
-        .tcp_nodelay(true)
-        .timeout(Duration::from_secs(5))
-        .build()
-        .unwrap_or_default();
+    // aien-localhttp always sets TCP_NODELAY, so the old tcp_nodelay(true) is kept.
+    let client = Client::builder().timeout(Duration::from_secs(5)).build();
 
     if cli.mcp || matches!(cli.command, Some(Commands::Mcp)) {
         // Run MCP server over stdio without standard logging interfering with stdout

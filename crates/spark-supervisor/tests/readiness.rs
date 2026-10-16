@@ -349,7 +349,7 @@ async fn probe_of_unreaped_zombie_is_process_gone() {
         generation: 1,
         health_url: None,
     };
-    let report = probe_one(reqwest::Client::new(), ticket).await;
+    let report = probe_one(aien_localhttp::Client::new(), ticket).await;
     assert_eq!(report.outcome, ProbeOutcome::ProcessGone);
     child.wait().unwrap();
 }
@@ -409,4 +409,63 @@ async fn crashed_child_is_restarted_with_new_generation() {
     run.wait_for("flaky", |s| s.generation >= 3).await;
     assert!(run.state("flaky").await.restart_count >= 2);
     run.shutdown().await;
+}
+
+#[tokio::test]
+async fn https_health_url_refuses_to_start_before_spawning_or_connecting() {
+    // An operator-configured https health_url is a loud config error: run_until
+    // returns HttpsRefused before any child is spawned or any socket is opened.
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let url = format!("https://{addr}/health");
+    let config = SupervisorConfig {
+        services: [("tls".to_string(), service(&["30"], "always", Some(&url)))]
+            .into_iter()
+            .collect(),
+    };
+    let sup = Supervisor::with_options(config, fast_options());
+    let err = tokio::time::timeout(WAIT, sup.run_until(std::future::pending()))
+        .await
+        .expect("run_until must fail at once, not run")
+        .unwrap_err();
+    assert!(
+        matches!(err, aien_localhttp::Error::HttpsRefused { .. }),
+        "{err:?}"
+    );
+    assert!(
+        err.to_string().contains("service \"tls\" health_url"),
+        "{err}"
+    );
+    let st = sup.snapshot().await["tls"].clone();
+    assert_eq!(st.state, ServiceState::Stopped);
+    assert!(st.pid.is_none());
+    assert!(
+        tokio::time::timeout(Duration::from_millis(200), listener.accept())
+            .await
+            .is_err(),
+        "no connection may be made to an https health_url"
+    );
+}
+
+#[tokio::test]
+async fn probe_one_with_https_url_is_http_error_without_connecting() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let ticket = ProbeTicket {
+        name: "svc".into(),
+        pid: std::process::id(),
+        generation: 1,
+        health_url: Some(format!("https://{addr}/health")),
+    };
+    let report = probe_one(aien_localhttp::Client::new(), ticket).await;
+    match report.outcome {
+        ProbeOutcome::HttpError(msg) => assert!(msg.contains("https is refused"), "{msg}"),
+        other => panic!("expected HttpError, got {other:?}"),
+    }
+    assert!(
+        tokio::time::timeout(Duration::from_millis(200), listener.accept())
+            .await
+            .is_err(),
+        "probe_one must not connect to an https health_url"
+    );
 }
