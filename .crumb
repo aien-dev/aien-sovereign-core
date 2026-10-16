@@ -83,7 +83,7 @@
         },
         {
           "digest": "f5571bcc0bb95b44dd8bf8f0b47ded3bcb1e1ee76c81b4ff5edb87ac237d66d8",
-          "last_commit": "0cc952c",
+          "last_commit": "f8eea42",
           "name": "crates/aien-cli",
           "purpose": ""
         },
@@ -95,13 +95,13 @@
         },
         {
           "digest": "2f2bd85a4508ff9674e9b4febc619ed153b84d4f61084981912e3c376b6de703",
-          "last_commit": "e10a8b5",
+          "last_commit": "f8eea42",
           "name": "crates/spark-cockpit-rs",
           "purpose": ""
         },
         {
-          "digest": "9dd16095e5063f9ee1535d140f0b52f3e50fed6ce3ce6abfe9a5856f941218ca",
-          "last_commit": "fde8fb2",
+          "digest": "02da31bc5e62df634962dded0755fa258e72011582658da2b12db450246d77ee",
+          "last_commit": "4204406",
           "name": "scripts",
           "purpose": ""
         },
@@ -118,15 +118,15 @@
           "purpose": "Local CI sandbox exec contract (C8), aien-run user/caches install, Forgejo trigger hook, health "
         }
       ],
-      "children_root": "sha256:48f037f2d729c2a2755272cd382e4c609531bd288fbb303d248c7a18325f9598",
-      "compiled_at": "2026-10-16T01:36:28Z",
+      "children_root": "sha256:262c05d9c8ff17d17bc0dcef128f78b79376793a6fbbfe7bbd4398464bc75824",
+      "compiled_at": "2026-10-16T02:06:21Z",
       "compiler": "crumb-compile/1",
-      "digest": "sha256:79c79345cf8db8dcbc2f9e29832c9a88824f804354d42a4eb4557068a258d6bd",
+      "digest": "sha256:c37f5c8ab1dedf1908111fad60d01b5e8c930d96cb09ff3e6ce65eea8d744eda",
       "evidence_files": 1561,
       "evidence_root": "sha256:a315b980314448faf057152edf0a20aa28310d8ab4277d22762100ff444e3fa1",
-      "files": 5648,
-      "generated_at_commit": "e36095628c9269cf8b21a132bd29549255d05262",
-      "source_tree": "sha256:5da215d07a54715f69e6cf21135a9a793f32b854028aaa4159e36d935fe7f6f0"
+      "files": 5831,
+      "generated_at_commit": "68870a2239f2c8651385fd4d03729a20286cc954",
+      "source_tree": "sha256:c6598a6db9d3d69df88928f999fc64868fbb77068677c23fe27dc9959ad89bc9"
     }
   },
   "history": [],
