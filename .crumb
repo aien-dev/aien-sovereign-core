@@ -94,8 +94,8 @@
           "purpose": ""
         },
         {
-          "digest": "dd11ae9a698f7fcad7d1df386926426ea051d4131ee738da2ac81eb6a57b9473",
-          "last_commit": "afbbd804",
+          "digest": "667b17d9e0f286799d709ad5353ec26622ef7fc8d8685ca5a79ff0cd4275d108",
+          "last_commit": "0b1dc98a",
           "name": "crates/spark-cockpit-rs",
           "purpose": ""
         },
@@ -118,15 +118,15 @@
           "purpose": "Local CI sandbox exec contract (C8), aien-run user/caches install, Forgejo trigger hook, health "
         }
       ],
-      "children_root": "sha256:f7997106a01cb235b1bef087b4e9918269ddda20f8eaab5b851f32ef6d37d1b8",
-      "compiled_at": "2026-10-17T05:52:09Z",
+      "children_root": "sha256:582eb7a7a8e8ee28ab86e3bc6fa277ee1478f4e59ef5a7dbd8161662ae598e98",
+      "compiled_at": "2026-10-17T11:27:40Z",
       "compiler": "crumb-compile/1",
-      "digest": "sha256:512eaa78cc291a8e18f11f7f9e748635f036f183f414fb8b5d82df007656e72f",
+      "digest": "sha256:2dd5745d2d953627d404cd07a4bbb4a512785901c3bc64428721645c38a440b4",
       "evidence_files": 1578,
       "evidence_root": "sha256:135e27a1a0704c4a8371cd2c1eb555f2b5beec61c212949b029a5457418a7160",
-      "files": 5890,
-      "generated_at_commit": "79efa3cd273b99f8d489061833825e3e5f1c798c",
-      "source_tree": "sha256:a6d0df2f1e8880df826ead2b43cb4aa9d8cc3c83d5f5e944af2d00121631ae03"
+      "files": 5897,
+      "generated_at_commit": "0b1dc98acee10f197394e5290fdda469366ac6df",
+      "source_tree": "sha256:02b1b1710c8bc84b6a37f8455d0ed9648762108310c8a63ad54c701599e7195a"
     }
   },
   "history": [],
