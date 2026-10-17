@@ -192,7 +192,7 @@ for point in mid-copy after-copy before-swap; do
     IPID=$!
     for _ in $(seq 1 100); do grep -q "paused at $point" "$WORK/log-int" 2>/dev/null && break; sleep 0.1; done
     grep -q "paused at $point" "$WORK/log-int" || fail "installer never reached $point"
-    pkill -9 -P "$IPID" 2>/dev/null || true; kill -9 "$IPID"; wait "$IPID" 2>/dev/null || true
+    pkill -9 -P "$IPID" 2>/dev/null || true; kill -9 "$IPID" 2>/dev/null || true; wait "$IPID" 2>/dev/null || true
     [[ "$(live "$WORK/cfg-good")" == "$OLD" ]] || fail "killed at $point changed the live release"
     out="$("$WORK/bin-good/aien")"; [[ "$out" == "aien-b" || "$out" == "aien-c" ]] || fail "live install does not run after kill at $point ($out)"
 done
@@ -208,7 +208,7 @@ env AIEN_TEST_PAUSE_AT=after-swap AIEN_RELEASE_TAG=v0.0.0-test AIEN_RELEASE_BASE
 IPID=$!
 for _ in $(seq 1 100); do grep -q "paused at after-swap" "$WORK/log-int" 2>/dev/null && break; sleep 0.1; done
 grep -q "paused at after-swap" "$WORK/log-int" || fail "installer never reached after-swap"
-pkill -9 -P "$IPID" 2>/dev/null || true; kill -9 "$IPID"; wait "$IPID" 2>/dev/null || true
+pkill -9 -P "$IPID" 2>/dev/null || true; kill -9 "$IPID" 2>/dev/null || true; wait "$IPID" 2>/dev/null || true
 [[ "$(live "$WORK/cfg-good")" == "$ID_NEW" ]] || fail "after-swap: the rename did not take effect"
 [[ "$("$WORK/bin-good/aien")" == "aien-e" ]] || fail "after-swap: the live release does not run"
 grep -q "^current = \"$OLD\"" "$WORK/cfg-good/installed.toml" || fail "after-swap: record unexpectedly updated before the kill"
